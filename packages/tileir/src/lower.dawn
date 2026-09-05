@@ -48,7 +48,7 @@
 use std/list
 use std/map
 use std/str
-use dev.{RedId, IdF, AssumePred}
+use dev.{RedId, IdF, AssumePred, Hints}
 use prog.{TileOp, TileProg, Global, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
@@ -153,8 +153,8 @@ pub type Instr =
   | Broadcast(dst: Int, src: Ref, from: Ty, to: Ty)
   | IotaTile(dst: Int, ty: Ty)
   | Offset(dst: Int, ptrs: Ref, offs: Ref, ptr_ty: Ty, off_ty: Ty)
-  | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, mask: Option[Ref], pad: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
-  | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
+  | LoadPtr(dst: Int, tok_out: Int, ptrs: Ref, mask: Option[Ref], pad: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty, hints: Hints)
+  | StorePtr(tok_out: Int, ptrs: Ref, value: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty, hints: Hints)
   | AtomicRMWPtr(dst: Int, tok_out: Int, ptrs: Ref, mode: String, arg: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
   | AtomicCASPtr(dst: Int, tok_out: Int, ptrs: Ref, cmp: Ref, val: Ref, mask: Option[Ref], tok_in: Ref, ptr_ty: Ty, mask_ty: Ty, val_ty: Ty)
   | FloatUn(dst: Int, op: String, ty: Ty, src: Ref)
@@ -204,6 +204,7 @@ pub type Kernel = {
   params: List[String],
   globals: List[Global],
   body: List[Instr],
+  hints: Hints,
 } derive Show
 
 ## The scalar `tile<i32>`.
@@ -449,7 +450,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let l4 = emit(l3, BlockIds(x, y, z))
     bind(l4, dst, Val(if axis == 0 { x } else if axis == 1 { y } else { z }), i32_scalar())
   }
-  Load(dst, tok_out, param, dtype, base, shape, strides, mask, pad, tok_in) -> {
+  Load(dst, tok_out, param, dtype, base, shape, strides, mask, pad, tok_in, hints) -> {
     let tin = ref_of(l0, tok_in, "load token")
     let m = opt_ref(l0, mask, "load mask")
     let pd = opt_ref(l0, pad, "load padding value")
@@ -457,15 +458,15 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let val_ty = num_tile(shape, dtype)
     let (l2, v) = define(l1, dst, val_ty)
     let (l3, t) = define(l2, tok_out, Token)
-    emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+    emit(l3, LoadPtr(v, t, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty, hints))
   }
-  Store(tok_out, param, dtype, base, shape, strides, value, mask, tok_in) -> {
+  Store(tok_out, param, dtype, base, shape, strides, value, mask, tok_in, hints) -> {
     let tin = ref_of(l0, tok_in, "store token")
     let v = ref_of(l0, value, "store value")
     let m = opt_ref(l0, mask, "store mask")
     let (l1, pt) = pointers(l0, param, dtype, base, shape, strides)
     let (l2, t) = define(l1, tok_out, Token)
-    emit(l2, StorePtr(t, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
+    emit(l2, StorePtr(t, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype), hints))
   }
   Gather(dst, tok_out, param, dtype, index, shape, mask, pad, tok_in) -> {
     let tin = ref_of(l0, tok_in, "gather token")
@@ -475,7 +476,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let val_ty = num_tile(shape, dtype)
     let (l2, v) = define(l1, dst, val_ty)
     let (l3, tk) = define(l2, tok_out, Token)
-    emit(l3, LoadPtr(v, tk, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+    emit(l3, LoadPtr(v, tk, pt, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty, []))
   }
   Scatter(tok_out, param, dtype, index, shape, value, mask, tok_in) -> {
     let tin = ref_of(l0, tok_in, "scatter token")
@@ -483,7 +484,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let m = opt_ref(l0, mask, "scatter mask")
     let (l1, pt) = index_pointers(l0, param, dtype, index, shape)
     let (l2, tk) = define(l1, tok_out, Token)
-    emit(l2, StorePtr(tk, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype)))
+    emit(l2, StorePtr(tk, pt, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), num_tile(shape, dtype), []))
   }
   AtomicRMW(dst, tok_out, param, dtype, mode, index, shape, value, mask, tok_in) -> {
     let tin = ref_of(l0, tok_in, "atomic token")
@@ -721,7 +722,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let val_ty = num_tile(shape, dtype)
     let (l1, v) = define(l0, dst, val_ty)
     let (l2, tv) = define(l1, tok_out, Token)
-    emit(l2, LoadPtr(v, tv, ps, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+    emit(l2, LoadPtr(v, tv, ps, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty, []))
   }
   Assert(shape, cond, message) -> {
     let c = ref_of(l0, cond, "assert condition")
@@ -746,7 +747,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let v = ref_of(l0, value, "store value")
     let val_ty = num_tile(shape, dtype)
     let (l1, tv) = define(l0, tok_out, Token)
-    emit(l1, StorePtr(tv, ps, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
+    emit(l1, StorePtr(tv, ps, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty, []))
   }
   GetGlobal(dst, sym, dtype, shape) -> {
     # `get_global` answers a rank-0 pointer tile (its result is a
@@ -966,7 +967,7 @@ pub fn lower(prog: TileProg) -> Kernel = {
   for op in prog.ops {
     l = lower_op(l, op)
   }
-  Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret] }
+  Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }
 }
 
 ## The values an instruction defines, in definition order.
@@ -981,8 +982,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   Broadcast(dst, _src, _from, _to) -> [dst]
   IotaTile(dst, _ty) -> [dst]
   Offset(dst, _ptrs, _offs, _ptr_ty, _off_ty) -> [dst]
-  LoadPtr(dst, tok_out, _ptrs, _mask, _pad, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
-  StorePtr(tok_out, _ptrs, _value, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [tok_out]
+  LoadPtr(dst, tok_out, _ptrs, _mask, _pad, _tok_in, _ptr_ty, _mask_ty, _val_ty, _hints) -> [dst, tok_out]
+  StorePtr(tok_out, _ptrs, _value, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty, _hints) -> [tok_out]
   AtomicRMWPtr(dst, tok_out, _ptrs, _mode, _arg, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
   AtomicCASPtr(dst, tok_out, _ptrs, _cmp, _val, _mask, _tok_in, _ptr_ty, _mask_ty, _val_ty) -> [dst, tok_out]
   FloatUn(dst, _op, _ty, _src) -> [dst]
@@ -1047,6 +1048,7 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 # shared, the token chain is carried, and a dangling handle is refused.
 
 fn two_loads_one_param() -> TileProg = TileProg {
+  hints: [],
   name: "twice",
   params: ["f64"],
   globals: [],
@@ -1055,10 +1057,10 @@ fn two_loads_one_param() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 0, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 0, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
@@ -1090,13 +1092,14 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 # through the same tile: no `base`, no strides, one index tile serving two
 # memory operations.
 fn gather_then_scatter() -> TileProg = TileProg {
+  hints: [],
   name: "indexed",
   params: ["i32", "f64", "f64"],
   globals: [],
   ops: [
     MakeToken(0),
     IdxConst(1, 0),
-    Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0),
+    Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0, []),
     Gather(4, 5, 1, "f64", 2, [8], None, None, 3),
     Scatter(6, 2, "f64", 2, [8], 4, None, 5)
   ]
@@ -1111,7 +1114,7 @@ test "a gather offsets the parameter by the index tile itself: no iota, no strid
   # what "data dependent" means here
   assert len(list.filter(k.body, is_iota)) == 1
   assert len(list.filter(k.body, is_offset)) == 3
-  assert k.body[9] == LoadPtr(9, 10, Val(8), None, None, Val(0), Tile([8], PtrTo("i32")), i1_tile([8]), i32_8)
+  assert k.body[9] == LoadPtr(9, 10, Val(8), None, None, Val(0), Tile([8], PtrTo("i32")), i1_tile([8]), i32_8, [])
   assert k.body[12] == Offset(13, Val(12), Val(9), p64_8, i32_8)
 }
 
@@ -1144,10 +1147,10 @@ test "the token chain is the program's: make_token feeds the first load, each me
   let f64_128 = Tile([128], Num("f64"))
   let p64_128 = Tile([128], PtrTo("f64"))
   assert k.body[0] == MakeTok(0)
-  assert k.body[11] == LoadPtr(13, 14, Val(12), None, None, Val(0), p64_128, i1_tile([128]), f64_128)
-  assert k.body[12] == LoadPtr(15, 16, Val(12), None, None, Val(14), p64_128, i1_tile([128]), f64_128)
+  assert k.body[11] == LoadPtr(13, 14, Val(12), None, None, Val(0), p64_128, i1_tile([128]), f64_128, [])
+  assert k.body[12] == LoadPtr(15, 16, Val(12), None, None, Val(14), p64_128, i1_tile([128]), f64_128, [])
   assert k.body[13] == FloatBin(17, "addf", f64_128, Val(13), Val(15))
-  assert k.body[14] == StorePtr(18, Val(12), Val(17), None, Val(16), p64_128, i1_tile([128]), f64_128)
+  assert k.body[14] == StorePtr(18, Val(12), Val(17), None, Val(16), p64_128, i1_tile([128]), f64_128, [])
 }
 
 test "the ladder reads the entry parameter as an argument, not as a value" {
@@ -1157,11 +1160,12 @@ test "the ladder reads the entry parameter as an argument, not as a value" {
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
+    hints: [],
     name: "axes",
     params: ["f64"],
     globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
-      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
   }
   let k = lower(p)
   assert k.body[1] == BlockIds(1, 2, 3)
@@ -1174,6 +1178,7 @@ test "lowering the same program twice gives the same table" {
 
 # The sum kernel as prog.dawn's test records it: four chunks of 128.
 fn sum_prog() -> TileProg = TileProg {
+  hints: [],
   name: "sum",
   params: ["f64", "f64"],
   globals: [],
@@ -1184,26 +1189,27 @@ fn sum_prog() -> TileProg = TileProg {
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
     For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
 # The loop knife T5 added, in the table's own vocabulary: a `Loop` with no
 # bounds whose body ends in the exit `if` and a `continue`.
 fn spin_prog() -> TileProg = TileProg {
+  hints: [],
   name: "spin",
   params: ["f64", "f64"],
   globals: [],
@@ -1212,14 +1218,14 @@ fn spin_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Loop([4, 5], [6, 7], [8, 9], [
       ConstI(10, "i1", [], 1),
       BinaryF(11, "addf", "f64", [8], 6, 6),
       If([], 10, [Break([6, 7])], [Yield([])]),
       Continue([11, 7])
     ]),
-    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9, [])
   ]
 }
 
@@ -1278,7 +1284,7 @@ test "a loop lowers to one For whose results, block arguments and body are numbe
       assert carried == [23, 24]
       assert defines_inside(body)[0] == 25
       # the body's load reads its pointers at the induction variable and the carried token
-      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), None, None, Val(24), Tile([128], PtrTo("f64")), i1_tile([128]), f64_128)
+      assert body[len(body) - 3] == LoadPtr(34, 35, Val(33), None, None, Val(24), Tile([128], PtrTo("f64")), i1_tile([128]), f64_128, [])
       assert body[len(body) - 2] == FloatBin(36, "addf", f64_128, Val(23), Val(34))
       assert body[len(body) - 1] == Cont([Val(36), Val(35)], [f64_128, Token])
     }
@@ -1294,7 +1300,7 @@ test "after a loop the store consumes the loop's results, not values from inside
   let p64_128 = Tile([128], PtrTo("f64"))
   let store = k.body[len(k.body) - 2]
   match store {
-    StorePtr(_tok_out, _ptrs, value, _mask, tok_in, _ptr_ty, _mask_ty, _val_ty) -> { assert (value, tok_in) == (Val(20), Val(21)) }
+    StorePtr(_tok_out, _ptrs, value, _mask, tok_in, _ptr_ty, _mask_ty, _val_ty, _hints) -> { assert (value, tok_in) == (Val(20), Val(21)) }
     _ -> { assert false }
   }
   assert k.body[len(k.body) - 1] == Ret
@@ -1306,6 +1312,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 # The reduction kernel prog.dawn records: a block-wide sum, spread back to
 # one lane and stored at element 0.
 fn total_prog() -> TileProg = TileProg {
+  hints: [],
   name: "total",
   params: ["f64", "f64"],
   globals: [],
@@ -1314,13 +1321,13 @@ fn total_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
       BinaryF(8, "addf", "f64", [], 6, 7),
       Yield([8])
     ]),
     Spread(10, "f64", [1], 9),
-    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5, [])
   ]
 }
 
@@ -1364,6 +1371,7 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  hints: [],
   name: "branch",
   params: ["f64", "f64"],
   globals: [],
@@ -1372,12 +1380,12 @@ fn branch_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     IdxConst(6, 0),
     CmpI(7, "eq", [], 1, 6),
     If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
       [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
-    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5, [])
   ]
 }
 
@@ -1411,7 +1419,7 @@ test "an if lowers to one IfElse whose two branches are numbered after its resul
 test "a value one branch of an if defined is refused by name in the other and after it" {
   # the store takes the then branch's addf (8) instead of the if's result (10)
   let bad = TileProg { ..branch_prog(),
-    ops: list.take(branch_prog().ops, 8) ++ [Store(11, 1, "f64", 3, [8], [1], 8, None, 5)] }
+    ops: list.take(branch_prog().ops, 8) ++ [Store(11, 1, "f64", 3, [8], [1], 8, None, 5, [])] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "which a loop body defined and which is not visible after the loop") }
@@ -1421,7 +1429,7 @@ test "a value one branch of an if defined is refused by name in the other and af
 test "a value a loop body defined is refused by name after the loop" {
   # the store's token is the body's load token (17) instead of the loop's token result (20)
   let bad = TileProg { ..sum_prog(),
-    ops: list.take(sum_prog().ops, 11) ++ [Store(23, 1, "f64", 1, [128], [1], 19, None, 17)] }
+    ops: list.take(sum_prog().ops, 11) ++ [Store(23, 1, "f64", 1, [128], [1], 19, None, 17, [])] }
   match catch_panic(() => lower(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "`store token` refers to handle 17, which a loop body defined and which is not visible after the loop") }

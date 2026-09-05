@@ -58,7 +58,7 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, Ret}
 
@@ -162,9 +162,11 @@ const OP_PRINT_TKO: Int = 0x55
 # the optional attributes of the operation in declaration order first
 # (`memory_scope`, `optimization_hints`), then its optional operands
 # (`mask`, `paddingValue`, `token` on a load; `mask`, `token` on a store).
+const LOAD_FLAG_HINTS: Int = 2
 const LOAD_FLAG_MASK: Int = 4
 const LOAD_FLAG_PAD: Int = 8
 const LOAD_FLAG_TOKEN: Int = 16
+const STORE_FLAG_HINTS: Int = 2
 const STORE_FLAG_MASK: Int = 4
 const STORE_FLAG_TOKEN: Int = 8
 
@@ -309,6 +311,34 @@ const ATTR_FLOAT: Int = 2
 const ATTR_DIV_BY: Int = 8
 const ATTR_SAME_ELEMENTS: Int = 9
 const ATTR_BOUNDED: Int = 12
+
+# Knife T15's two tags. `Dictionary` (10) is the general one and
+# `OptimizationHints` (11) wraps exactly one of them, which is why the two
+# land in the same knife: nothing here can write an 11 without writing a 10
+# inside it.
+#
+# WHERE THE 11 APPEARS IS NOT WHERE ITS DICTIONARY APPEARS, and the two
+# places this writer puts hints are on opposite sides of that line:
+#
+#   on the ENTRY   `writeFunctionTableSection` calls
+#                  `writeSelfContainedAttribute`, so the 11 IS written, and
+#                  the DictionaryAttr under it is then written with
+#                  `isSelfContained=false` -- no 10 for the outer
+#                  dictionary
+#   on a LOAD or STORE
+#                  the generated op writer calls `writeOpAttribute`, whose
+#                  `std::is_base_of_v<Attribute, T>` branch sets
+#                  `isSelfContained` to `IsInterface<T>::value`, and
+#                  `OptimizationHintsAttr` is a concrete AttrDef and not an
+#                  interface (unlike `assume`'s predicate above). So NO 11
+#                  is written at all: the flag bit is what announces the
+#                  attribute, and the bytes start at the outer count
+#
+# In both places the per-architecture dictionaries are VALUES of the outer
+# dictionary, and a dictionary value is written self-contained, so each of
+# them does carry its 10.
+const ATTR_DICTIONARY: Int = 10
+const ATTR_OPTIMIZATION_HINTS: Int = 11
 
 # `permute`'s `permutation` is a DENSE array and is NOT written the way that
 # `identities` array is. The two shapes were measured against the writer
@@ -686,6 +716,11 @@ const SEC_GLOBAL: Int = 6
 const PAD_BYTE: Int = 0xCB
 const FLAG_KERNEL: Int = 0x02
 
+# Bit 2 of the same byte: this entry carries `optimization_hints`, and the
+# attribute follows the location index (FunctionFlags in BytecodeEnums.h).
+# Bit 0 is `VisibilityPrivate`, which this writer never sets.
+const FLAG_HAS_HINTS: Int = 0x04
+
 # The tag of a scalar number type by its Tile IR name.
 fn num_tag(name: String) -> Int = match name {
   "i1" -> 0
@@ -1000,6 +1035,52 @@ fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals)
 
 fn number_all(w: W, ids: List[Int]) -> W = list.fold(ids, w, number)
 
+# The body of an `optimization_hints` dictionary: the outer count, then per
+# architecture its String section index, the Dictionary tag and that
+# architecture's own count, then per hint its key index and the value as a
+# self-contained IntegerAttr (tag, the index of the type `i64`, the number).
+#
+# The value's type index is the reason a hint costs a TYPE table entry as
+# well as two string ones: `parseOpAttribute` for an IntegerAttr with no
+# expected type reads a type index and refuses anything that is not an
+# IntegerType. `i64` is what MLIR's own parser gives `{latency = 4}`, so
+# this writes the same bytes the C++ writer would for the same text.
+#
+# Nothing here checks the keys or the ranges, and that is measured rather
+# than assumed: `OptimizationHintsAttr::verifyParamWithContext` returns
+# early unless `-Wunsupported-hints` is on, which it is not by default.
+# What the reader does refuse is the SHAPE, and that is what the layer-1
+# mutants in scripts/tile-golden/run.sh hold.
+fn put_hints(w0: W, out0: bytes.Buf, hints: Hints) -> (W, bytes.Buf) = {
+  var w = w0
+  var out = put_varint(out0, len(hints))
+  for entry in hints {
+    let (arch, under) = entry
+    let (w1, ai) = str_of(w, arch)
+    w = w1
+    out = put_varint(put_varint(put_varint(out, ai), ATTR_DICTIONARY), len(under))
+    for h in under {
+      let (key, value) = h
+      let (w2, ki) = str_of(w, key)
+      let (w3, ti) = num_ty(w2, "i64")
+      w = w3
+      out = put_varint(put_varint(put_varint(put_varint(out, ki), ATTR_INTEGER), ti), value)
+    }
+  }
+  (w, out)
+}
+
+# `put_hints` into the body under construction, for the two memory
+# operations. Writes NOTHING when there are no hints, which is what keeps
+# every kernel before knife T15 byte for byte as it was: the flag bit is
+# clear and the reader never looks.
+fn emit_hints(w0: W, hints: Hints) -> W = if len(hints) == 0 { w0 } else {
+  let (w1, b) = put_hints(w0, w0.body, hints)
+  W { ..w1, body: b }
+}
+
+fn hints_flag(hints: Hints, bit: Int) -> Int = if len(hints) == 0 { 0 } else { bit }
+
 # opcode, then one result type index.
 # One element of a reduction's `identities` array, self-contained: its tag,
 # the index of its ELEMENT type (`f64`, not `tile<128xf64>`) and its
@@ -1063,22 +1144,31 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   Broadcast(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BROADCAST, to), src)
   IotaTile(_dst, t) -> emit_op(w0, OP_IOTA, t)
   Offset(_dst, ptrs, offs, ptr_ty, _off_ty) -> emit_ref(emit_ref(emit_op(w0, OP_OFFSET, ptr_ty), ptrs), offs)
-  LoadPtr(_dst, _tok_out, ptrs, mask, pad, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
-    # results: the tile, the token; flags: which of the optional operands
-    # follow; memory_ordering_semantics weak; operands: source, then the
-    # mask, the padding value and the token, each present exactly when its
-    # flag bit is set.
+  LoadPtr(_dst, _tok_out, ptrs, mask, pad, tok_in, _ptr_ty, _mask_ty, val_ty, hints) -> {
+    # results: the tile, the token; flags: which of the optional attributes
+    # and operands follow; memory_ordering_semantics weak; then
+    # `optimization_hints` when its bit is set; then operands: source, then
+    # the mask, the padding value and the token, each present exactly when
+    # its flag bit is set.
+    #
+    # The attribute goes BEFORE the operands and after the required inline
+    # enum, because the generated writer serializes the flags word, then
+    # every attribute in declaration order, then the operands
+    # (`generateAttributeSerialization`); `memory_scope` is the other
+    # optional attribute and this writer never sets its bit.
     let w1 = emit_op(w0, OP_LOAD_PTR_TKO, val_ty)
     let (w2, tok) = ty(w1, Token)
     let flags = LOAD_FLAG_TOKEN | opt_flag(mask, LOAD_FLAG_MASK) | opt_flag(pad, LOAD_FLAG_PAD)
-    let w3 = emit(emit(emit(w2, tok), flags), ORDER_WEAK)
+      | hints_flag(hints, LOAD_FLAG_HINTS)
+    let w3 = emit_hints(emit(emit(emit(w2, tok), flags), ORDER_WEAK), hints)
     emit_ref(emit_opt_ref(emit_opt_ref(emit_ref(w3, ptrs), mask), pad), tok_in)
   }
-  StorePtr(_tok_out, ptrs, value, mask, tok_in, _ptr_ty, _mask_ty, _val_ty) -> {
-    # result: the token; flags: the mask when there is one, the token;
-    # weak; operands: destination, value, mask, token.
-    let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK)
-    let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK)
+  StorePtr(_tok_out, ptrs, value, mask, tok_in, _ptr_ty, _mask_ty, _val_ty, hints) -> {
+    # result: the token; flags: the hints when there are any, the mask when
+    # there is one, the token; weak; the hints; operands: destination,
+    # value, mask, token.
+    let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK) | hints_flag(hints, STORE_FLAG_HINTS)
+    let w1 = emit_hints(emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK), hints)
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)
   }
   AtomicRMWPtr(_dst, _tok_out, ptrs, mode, arg, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
@@ -1496,14 +1586,32 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
     w = instr(w, i)
   }
   let body = bytes.freeze(w.body)
-  let func = bytes.freeze(bytes.put_bytes(
-    put_varint(put_varint(bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), FLAG_KERNEL), 0), bytes.len(body)),
-    body))
   # After the body, so that the strings, types and constants the globals
   # name take the indices left over; the records only hold indices, and the
   # three tables below are written from the finished writer.
   let (w4, globals) = global_section(w, k.globals)
   w = w4
+  # One function: its name index, its signature index, the entry flag byte,
+  # the location index (0, the unknown location), then `optimization_hints`
+  # when the flag says so, then the body's length and the body. The hints
+  # intern LAST, after the globals, for the same reason the globals intern
+  # after the body: an index nobody else needs is the cheapest one to give
+  # away.
+  #
+  # An entry with no hints writes NO attribute and clears the bit; the C++
+  # writer sets the bit for an EMPTY dictionary as well
+  # (`optimization_hints=<>` is a present attribute with no entries), and
+  # this surface has no way to ask for that, so the two agree on every
+  # program it can express.
+  let flag = FLAG_KERNEL | (if len(k.hints) == 0 { 0 } else { FLAG_HAS_HINTS })
+  let fhead = bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), flag)
+  let (w5, fhead1) = if len(k.hints) == 0 {
+    (w, put_varint(fhead, 0))
+  } else {
+    put_hints(w, put_varint(put_varint(fhead, 0), ATTR_OPTIMIZATION_HINTS), k.hints)
+  }
+  w = w5
+  let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, bytes.len(body)), body))
 
   let h = put_le(bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR), 0, 2)
   let s0 = if len(k.globals) == 0 { h } else { section(h, SEC_GLOBAL, globals, 1) }
@@ -1601,6 +1709,7 @@ test "a tile type names its element type first, so the element's index is lower"
 }
 
 fn vadd() -> TileProg = TileProg {
+  hints: [],
   name: "vadd",
   params: ["f64", "f64", "f64"],
   globals: [],
@@ -1609,10 +1718,10 @@ fn vadd() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 2, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 2, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
@@ -1638,6 +1747,7 @@ test "encoding the same program twice gives the same bytes" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
+  hints: [],
   name: "sum",
   params: ["f64", "f64"],
   globals: [],
@@ -1648,20 +1758,20 @@ fn sum_prog() -> TileProg = TileProg {
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
     For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
@@ -1709,6 +1819,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 }
 
 fn spin_prog() -> TileProg = TileProg {
+  hints: [],
   name: "spin",
   params: ["f64", "f64"],
   globals: [],
@@ -1717,14 +1828,14 @@ fn spin_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Loop([4, 5], [6, 7], [8, 9], [
       ConstI(10, "i1", [], 1),
       BinaryF(11, "addf", "f64", [8], 6, 6),
       If([], 10, [Break([6, 7])], [Yield([])]),
       Continue([11, 7])
     ]),
-    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9, [])
   ]
 }
 
@@ -1794,6 +1905,7 @@ test "a reduction identity is a self-contained attribute: its tag, the index of 
 }
 
 fn total_prog() -> TileProg = TileProg {
+  hints: [],
   name: "total",
   params: ["f64", "f64"],
   globals: [],
@@ -1802,13 +1914,13 @@ fn total_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
       BinaryF(8, "addf", "f64", [], 6, 7),
       Yield([8])
     ]),
     Spread(10, "f64", [1], 9),
-    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5, [])
   ]
 }
 
@@ -1837,6 +1949,7 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  hints: [],
   name: "branch",
   params: ["f64", "f64"],
   globals: [],
@@ -1845,12 +1958,12 @@ fn branch_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     IdxConst(6, 0),
     CmpI(7, "eq", [], 1, 6),
     If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
       [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
-    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5, [])
   ]
 }
 
@@ -2042,6 +2155,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 # ANSWER and not a type error), and the pointer surface.
 
 fn shapes_prog() -> TileProg = TileProg {
+  hints: [],
   name: "shapes",
   params: ["f64", "f64"],
   globals: [],
@@ -2049,19 +2163,20 @@ fn shapes_prog() -> TileProg = TileProg {
     MakeToken(0),
     BlockId(1, 0),
     NumBlocks(2, 0),
-    Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0),
+    Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0, []),
     Permute(5, "f64", [4, 4, 8], [1, 0, 2], 3),
     IdxConst(6, 1),
     IdxConst(7, 0),
     Extract(8, "f64", [4, 4, 8], [2, 4, 8], 3, [6, 7, 7]),
     Extract(9, "f64", [4, 4, 8], [2, 4, 8], 3, [7, 7, 7]),
     Cat(10, "f64", 0, [2, 4, 8], [2, 4, 8], 8, 9),
-    Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 5, None, 4),
-    Store(12, 1, "f64", 2, [4, 4, 8], [32, 8, 1], 10, None, 11)
+    Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 5, None, 4, []),
+    Store(12, 1, "f64", 2, [4, 4, 8], [32, 8, 1], 10, None, 11, [])
   ]
 }
 
 fn ptrs_prog() -> TileProg = TileProg {
+  hints: [],
   name: "ptrs",
   params: ["f64", "i32"],
   globals: [],
@@ -2078,11 +2193,12 @@ fn ptrs_prog() -> TileProg = TileProg {
     LoadAt(9, 10, "f64", [8], 8, None, None, 0),
     PtrCast(11, "f64", "i32", [8], 4),
     LoadAt(12, 13, "i32", [8], 11, None, None, 10),
-    Store(14, 1, "i32", 1, [8], [1], 12, None, 13)
+    Store(14, 1, "i32", 1, [8], [1], 12, None, 13, [])
   ]
 }
 
 fn fork_prog() -> TileProg = TileProg {
+  hints: [],
   name: "fork",
   params: ["f64", "f64"],
   globals: [],
@@ -2090,10 +2206,10 @@ fn fork_prog() -> TileProg = TileProg {
     MakeToken(0),
     BlockId(1, 0),
     ConstF(2, "f64", [8], 1.0),
-    Store(3, 1, "f64", 1, [8], [1], 2, None, 0),
-    Store(4, 1, "f64", 1, [8], [1], 2, None, 0),
+    Store(3, 1, "f64", 1, [8], [1], 2, None, 0, []),
+    Store(4, 1, "f64", 1, [8], [1], 2, None, 0, []),
     JoinToks(5, [3, 4]),
-    Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5)
+    Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5, [])
   ]
 }
 
@@ -2228,6 +2344,7 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
 }
 
 fn globals_prog() -> TileProg = TileProg {
+  hints: [],
   name: "g",
   params: ["f64"],
   globals: [

@@ -16,7 +16,7 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, Ret}
 
@@ -63,6 +63,25 @@ fn opt_operand(r: Option[Ref]) -> String = match r {
 fn opt_ty(r: Option[Ref], t: Ty) -> String = match r {
   Some(_x) -> ", ${ty(t)}"
   None -> ""
+}
+
+# `optimization_hints=<sm_86 = {latency = 4}, default = {..}>`, as
+# `OptimizationHintsAttr::print` spells it: one entry per architecture,
+# each a brace-wrapped dictionary of key and value, comma separated with a
+# space around every `=`. Empty hints print nothing at all, which is what
+# the dialect's own parser does with `optimization_hints=<>` on the way
+# back in and what leaves every kernel before knife T15 untouched.
+fn hint_dict(hints: List[(String, Int)]) -> String =
+  commas(list.map(hints, h => {
+    let (key, value) = h
+    "${key} = ${value}"
+  }))
+
+fn hints_attr(hints: Hints) -> String = if len(hints) == 0 { "" } else {
+  " optimization_hints=<" ++ commas(list.map(hints, a => {
+    let (arch, under) = a
+    "${arch} = {${hint_dict(under)}}"
+  })) ++ ">"
 }
 
 # The predicate, as `custom<ComparisonPredicate>` prints it. A `u` prefix
@@ -264,13 +283,13 @@ fn line(i: Instr) -> String = match i {
   IotaTile(dst, t) -> "${v(dst)} = iota : ${ty(t)}"
   Offset(dst, ptrs, offs, ptr_ty, off_ty) ->
     "${v(dst)} = offset ${name(ptrs)}, ${name(offs)} : ${ty(ptr_ty)}, ${ty(off_ty)} -> ${ty(ptr_ty)}"
-  LoadPtr(dst, tok_out, ptrs, mask, pad, tok_in, ptr_ty, mask_ty, val_ty) ->
+  LoadPtr(dst, tok_out, ptrs, mask, pad, tok_in, ptr_ty, mask_ty, val_ty, hints) ->
     "${v(dst)}, ${v(tok_out)} = load_ptr_tko weak ${name(ptrs)}${opt_operand(mask)}${opt_operand(pad)}"
-    ++ " token=${name(tok_in)} : ${ty(ptr_ty)}${opt_ty(mask, mask_ty)}${opt_ty(pad, val_ty)}"
+    ++ " token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}${opt_ty(mask, mask_ty)}${opt_ty(pad, val_ty)}"
     ++ " -> ${ty(val_ty)}, token"
-  StorePtr(tok_out, ptrs, value, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
+  StorePtr(tok_out, ptrs, value, mask, tok_in, ptr_ty, mask_ty, val_ty, hints) ->
     "${v(tok_out)} = store_ptr_tko weak ${name(ptrs)}, ${name(value)}${opt_operand(mask)}"
-    ++ " token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
+    ++ " token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token"
   AtomicRMWPtr(dst, tok_out, ptrs, mode, arg, mask, tok_in, ptr_ty, mask_ty, val_ty) ->
     "${v(dst)}, ${v(tok_out)} = atomic_rmw_tko ${rmw_memory(mode)} ${name(ptrs)}, ${rmw_spelling(mode)}, ${name(arg)}"
     ++ "${opt_operand(mask)} token=${name(tok_in)}"
@@ -418,7 +437,7 @@ pub fn render_kernel(k: Kernel) -> String = {
   }
   let head = commas(args)
   join(["cuda_tile.module @m {"] ++ list.map(k.globals, global_line)
-      ++ ["  entry @${k.name}(${head}) {"] ++ block("    ", k.body) ++ ["  }", "}"])
+      ++ ["  entry @${k.name}(${head})${hints_attr(k.hints)} {"] ++ block("    ", k.body) ++ ["  }", "}"])
 }
 
 ## `prog` lowered and rendered.
@@ -432,6 +451,7 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 # program's, and the value names are the table's numbers.
 
 fn two_loads_one_param() -> TileProg = TileProg {
+  hints: [],
   name: "twice",
   params: ["f64"],
   globals: [],
@@ -440,10 +460,10 @@ fn two_loads_one_param() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 0, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 0, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 0, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
@@ -468,13 +488,14 @@ test "the token chain in the text is the program's: make_token feeds the first l
 
 test "an atomic spells its ordering, its scope and (for the rmw) its mode, and answers a value and a token" {
   let p = TileProg {
+    hints: [],
     name: "atomics",
     params: ["i32", "i32"],
     globals: [],
     ops: [
       MakeToken(0),
       IdxConst(1, 0),
-      Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0),
+      Load(2, 3, 0, "i32", 1, [8], [1], None, None, 0, []),
       ConstI(4, "i32", [8], 1),
       CmpI(5, "lt", [8], 2, 4),
       AtomicRMW(6, 7, 0, "i32", "add", 2, [8], 4, Some(5), 3),
@@ -497,7 +518,7 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { name: "k", params: ["f32", "f64"], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { hints: [], name: "k", params: ["f32", "f64"], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
@@ -505,11 +526,12 @@ test "the entry signature lists every parameter as a scalar pointer tile of its 
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
+    hints: [],
     name: "axes",
     params: ["f64"],
     globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
-      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0)]
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
   }
   let text = render(p)
   assert str.contains(text, "%1, %2, %3 = get_tile_block_id : tile<i32>\n")
@@ -527,6 +549,7 @@ test "rendering the same program twice gives the same text" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
+  hints: [],
   name: "sum",
   params: ["f64", "f64"],
   globals: [],
@@ -537,20 +560,20 @@ fn sum_prog() -> TileProg = TileProg {
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
     For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
@@ -566,6 +589,7 @@ test "a loop is its header with the carried values, a body two columns in, and a
 }
 
 fn spin_prog() -> TileProg = TileProg {
+  hints: [],
   name: "spin",
   params: ["f64", "f64"],
   globals: [],
@@ -574,14 +598,14 @@ fn spin_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Loop([4, 5], [6, 7], [8, 9], [
       ConstI(10, "i1", [], 1),
       BinaryF(11, "addf", "f64", [8], 6, 6),
       If([], 10, [Break([6, 7])], [Yield([])]),
       Continue([11, 7])
     ]),
-    Store(12, 1, "f64", 3, [8], [1], 8, None, 9)
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9, [])
   ]
 }
 
@@ -597,6 +621,7 @@ test "a loop is its header with the carried values, an if that breaks, and the c
 }
 
 fn total_prog() -> TileProg = TileProg {
+  hints: [],
   name: "total",
   params: ["f64", "f64"],
   globals: [],
@@ -605,13 +630,13 @@ fn total_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
       BinaryF(8, "addf", "f64", [], 6, 7),
       Yield([8])
     ]),
     Spread(10, "f64", [1], 9),
-    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5, [])
   ]
 }
 
@@ -627,6 +652,7 @@ test "a reduction is its header with the dimension, the identities and the regio
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  hints: [],
   name: "branch",
   params: ["f64", "f64"],
   globals: [],
@@ -635,12 +661,12 @@ fn branch_prog() -> TileProg = TileProg {
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     IdxConst(6, 0),
     CmpI(7, "eq", [], 1, 6),
     If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
       [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
-    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5, [])
   ]
 }
 
@@ -660,6 +686,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   # such field at all before bytecode 13.3; exp2 and rsqrt take
   # flush_to_zero, which is never set here
   let p = TileProg {
+    hints: [],
     name: "m",
     params: ["f64"],
     globals: [],
@@ -668,7 +695,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
       BlockId(1, 0),
       IdxConst(2, 8),
       IdxMul(3, 1, 2),
-      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
       UnaryF(6, "exp", "f64", [8], 4),
       UnaryF(7, "exp2", "f64", [8], 4),
       UnaryF(8, "sqrt", "f64", [8], 4),
@@ -693,6 +720,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
 test "assert, assume and print_tko spell the dialect's own assembly, predicate prefix dropped and format string escaped" {
   let none: Option[Int] = None
   let p = TileProg {
+    hints: [],
     name: "dbg",
     params: ["i32", "i32"],
     globals: [],
@@ -701,7 +729,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
       BlockId(1, 0),
       IdxConst(2, 8),
       IdxMul(3, 1, 2),
-      Load(4, 5, 0, "i32", 3, [8], [1], None, None, 0),
+      Load(4, 5, 0, "i32", 3, [8], [1], None, None, 0, []),
       CmpI(6, "lt", [8], 4, 4),
       Assert([8], 6, "a lane\nwent \"wrong\""),
       Assume(7, DivBy(32, none, none), "i32", [8], 4),
@@ -751,6 +779,7 @@ test "index arithmetic spells as scalar i32 constant, addi and muli" {
 
 test "the shape operations spell the dialect's own assembly: brackets on extract, `dim =` on cat, a bare list on permute" {
   let p = TileProg {
+    hints: [],
     name: "shapes",
     params: ["f64", "f64"],
     globals: [],
@@ -758,14 +787,14 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
       MakeToken(0),
       BlockId(1, 0),
       NumBlocks(2, 0),
-      Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0),
+      Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0, []),
       Permute(5, "f64", [4, 4, 8], [1, 0, 2], 3),
       IdxConst(6, 1),
       IdxConst(7, 0),
       Extract(8, "f64", [4, 4, 8], [2, 4, 8], 3, [6, 7, 7]),
       Extract(9, "f64", [4, 4, 8], [2, 4, 8], 3, [7, 7, 7]),
       Cat(10, "f64", 0, [2, 4, 8], [2, 4, 8], 8, 9),
-      Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 10, None, 4)
+      Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 10, None, 4, [])
     ]
   }
   let text = render(p)
@@ -781,6 +810,7 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
 
 test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {
   let p = TileProg {
+    hints: [],
     name: "ptrs",
     params: ["f64", "i32"],
     globals: [],
@@ -797,7 +827,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
       LoadAt(9, 10, "f64", [8], 8, None, None, 0),
       PtrCast(11, "f64", "i32", [8], 4),
       LoadAt(12, 13, "i32", [8], 11, None, None, 10),
-      Store(14, 1, "i32", 1, [8], [1], 12, None, 13)
+      Store(14, 1, "i32", 1, [8], [1], 12, None, 13, [])
     ]
   }
   let text = render(p)
@@ -813,6 +843,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
 
 test "a fork issues two stores from one token and joins them before the load that follows" {
   let p = TileProg {
+    hints: [],
     name: "fork",
     params: ["f64", "f64"],
     globals: [],
@@ -820,10 +851,10 @@ test "a fork issues two stores from one token and joins them before the load tha
       MakeToken(0),
       BlockId(1, 0),
       ConstF(2, "f64", [8], 1.0),
-      Store(3, 1, "f64", 1, [8], [1], 2, None, 0),
-      Store(4, 1, "f64", 1, [8], [1], 2, None, 0),
+      Store(3, 1, "f64", 1, [8], [1], 2, None, 0, []),
+      Store(4, 1, "f64", 1, [8], [1], 2, None, 0, []),
       JoinToks(5, [3, 4]),
-      Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5)
+      Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5, [])
     ]
   }
   let text = render(p)
@@ -835,6 +866,7 @@ test "a fork issues two stores from one token and joins them before the load tha
 }
 
 fn globals_prog() -> TileProg = TileProg {
+  hints: [],
   name: "g",
   params: ["f64"],
   globals: [

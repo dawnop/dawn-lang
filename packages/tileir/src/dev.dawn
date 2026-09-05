@@ -110,6 +110,61 @@ pub type AssumePred =
   | Bounded(lb: Option[Int], ub: Option[Int])
 derive Show
 
+## One optimization hint: the dialect's own spelling of the key, and the
+## integer under it. `OptimizationHintsAttr` (AttrDefs.td) names five keys
+## and every one this backend can carry takes an integer, so a hint is a
+## pair and not a sum type: `allow_tma` is the one boolean, and it belongs
+## to the two view operations that ruling 2 defers.
+##
+## Which key is legal is decided by the OPERATION, not by this type
+## (`OptimizationHintsAttr::verifyWithOp`): an entry takes
+## `num_cta_in_cga`, `num_worker_warps_per_cta` and `occupancy`, a load or
+## a store takes `latency`. Knife T15's four constructors below are the
+## legal ones, and nothing here refuses the others -- see `Hints`.
+pub alias Hint = (String, Int)
+
+## The `optimization_hints` of one entry or one memory operation: the
+## dialect's NESTED dictionary, one entry per architecture. The outer key
+## is an `sm_xx` name (or `default`, the fallback the dialect reads when
+## the compilation target has no entry of its own) and the value is that
+## architecture's hints.
+##
+## NOTHING CHECKS THESE, and that is the point of them. The dialect says a
+## hint is a suggestion: `tileiras` computes the same answer with them and
+## without them, and its verifier for the keys and the ranges is behind
+## `-Wunsupported-hints`, off by default, so an unknown architecture, an
+## unknown key and an out-of-range value are all accepted in silence
+## (measured, knife T15; docs/tile-backend-design.md 6.10). What is NOT
+## silent is the SHAPE: every value of the outer dictionary must be a
+## dictionary, keys may not repeat, and the counts on the wire must match
+## what follows them. That is the whole of what layer 1 can say here, and
+## the ledger's exemption for this family says so.
+pub alias Hints = List[(String, List[Hint])]
+
+## The hints of one architecture, for the list `Hints` is. `arch` is an
+## `sm_xx` name or `default`.
+pub fn for_arch(arch: String, hints: List[Hint]) -> (String, List[Hint]) = (arch, hints)
+
+## `num_cta_in_cga`: how many CTAs to put in a CGA. An ENTRY hint. The
+## dialect wants a power of two no greater than 16, and 1 on sm_80 to
+## sm_89, which is every architecture this machine has.
+pub fn hint_num_cta_in_cga(n: Int) -> Hint = ("num_cta_in_cga", n)
+
+## `num_worker_warps_per_cta`: how many worker warps to give a CTA. An
+## ENTRY hint. The dialect wants a power of two no greater than 32 and
+## clamps anything but 4 or 8 into that range.
+pub fn hint_num_worker_warps_per_cta(n: Int) -> Hint = ("num_worker_warps_per_cta", n)
+
+## `occupancy`: how many blocks to aim to keep resident. An ENTRY hint,
+## and the one key AttrDefs.td's table leaves out while
+## `verifyWithOp` accepts it. The dialect wants 1 to 32.
+pub fn hint_occupancy(n: Int) -> Hint = ("occupancy", n)
+
+## `latency`: the latency to assume for a memory operation. A LOAD or
+## STORE hint, and the only key either of them takes (`allow_tma` is the
+## view operations'). The dialect wants 1 to 10.
+pub fn hint_latency(n: Int) -> Hint = ("latency", n)
+
 ## The one-bit tile format: what a comparison answers and what a mask is. A
 ## tile element format, not a buffer format. Its i32 neighbour is std/gpu's
 ## `I32`, which is both (knife 10).
@@ -395,9 +450,9 @@ pub opaque type Ptrs[D] = Int
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
-    mask: Option[Int], pad: Option[Int]) -> Int
+    mask: Option[Int], pad: Option[Int], hints: Hints) -> Int
   fn t_store(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
-    v: Int, mask: Option[Int]) -> Unit
+    v: Int, mask: Option[Int], hints: Hints) -> Unit
   fn t_gather(param: Int, dtype: String, index: Int, shape: List[Int],
     mask: Option[Int], pad: Option[Int]) -> Int
   fn t_scatter(param: Int, dtype: String, index: Int, shape: List[Int],
@@ -588,7 +643,7 @@ pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1]
 pub fn load_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int]) -> Tile[D] !Dev = {
   let i: Int = base
   let none: Option[Int] = None
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, none, none)
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, none, none, [])
   h
 }
 
@@ -600,7 +655,7 @@ pub fn load_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides:
   let i: Int = base
   let hm: Int = mask
   let hp: Int = pad
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, Some(hm), Some(hp))
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, Some(hm), Some(hp), [])
   h
 }
 
@@ -620,7 +675,7 @@ pub fn store_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[
   let i: Int = base
   let hv: Int = v
   let none: Option[Int] = None
-  t_store(position(p), param_dtype(p), i, shape, strides, hv, none)
+  t_store(position(p), param_dtype(p), i, shape, strides, hv, none, [])
 }
 
 ## `store_strided`, writing only the lanes `mask` selects: a lane whose mask
@@ -630,7 +685,7 @@ pub fn store_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides
   let i: Int = base
   let hm: Int = mask
   let hv: Int = v
-  t_store(position(p), param_dtype(p), i, shape, strides, hv, Some(hm))
+  t_store(position(p), param_dtype(p), i, shape, strides, hv, Some(hm), [])
 }
 
 ## `store_strided` over a contiguous tile.
@@ -640,6 +695,30 @@ pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D]) -> Unit !D
 ## `store_masked` over a contiguous tile.
 pub fn store_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], v: Tile[D]) -> Unit !Dev =
   store_strided_masked(p, base, shape, row_major(shape), mask, v)
+
+## `load` carrying `optimization_hints`, the dialect's optional attribute
+## on `load_ptr_tko` (knife T15). The only key a load takes is `latency`.
+##
+## The tile it answers is the one `load` answers: a hint does not change
+## an answer, so this reads as "the same load, said differently". What it
+## does change is the bytes -- the flag bit for the attribute and the
+## nested dictionary after it -- which is where every judgement about it
+## lives.
+pub fn load_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints) -> Tile[D] !Dev = {
+  let i: Int = base
+  let none: Option[Int] = None
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, row_major(shape), none, none, hints)
+  h
+}
+
+## `store` carrying `optimization_hints`, on `store_ptr_tko`. Its one key
+## is `latency`, as a load's is.
+pub fn store_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints, v: Tile[D]) -> Unit !Dev = {
+  let i: Int = base
+  let hv: Int = v
+  let none: Option[Int] = None
+  t_store(position(p), param_dtype(p), i, shape, row_major(shape), hv, none, hints)
+}
 
 ## The tile of `p`'s format and `shape` whose lane `[i, j, ..]` is element
 ## `index[i, j, ..]` of `p`: a load whose element offsets come from a tile
@@ -2347,12 +2426,12 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad) => {
+    t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad, _hints) => {
       let h = next
       next = next + 1
       h
     }
-    t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+    t_store(_param, _dtype, _base, _shape, _strides, _v, _mask, _hints) => ()
     t_gather(_param, _dtype, _index, _shape, _mask, _pad) => {
       let h = next
       next = next + 1
@@ -2659,12 +2738,12 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["block_id ${axis}"]
       0
     }
-    t_load(param, dtype, base, shape, strides, mask, pad) => {
-      log = log ++ ["load ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${opt(mask)} ${opt(pad)}"]
+    t_load(param, dtype, base, shape, strides, mask, pad, hints) => {
+      log = log ++ ["load ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${opt(mask)} ${opt(pad)} ${show(hints)}"]
       1
     }
-    t_store(param, dtype, base, shape, strides, v, mask) => {
-      log = log ++ ["store ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${v} ${opt(mask)}"]
+    t_store(param, dtype, base, shape, strides, v, mask, hints) => {
+      log = log ++ ["store ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${v} ${opt(mask)} ${show(hints)}"]
     }
     t_gather(param, dtype, index, shape, mask, pad) => {
       log = log ++ ["gather ${param} ${dtype} ${index} ${show(shape)} ${opt(mask)} ${opt(pad)}"]
@@ -2861,7 +2940,7 @@ test "load hands the handler the parameter's own format, not a fixed one" {
     let _r = dtype_passed_to_load()
     ()
   })
-  assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None"]
+  assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None []"]
 }
 
 fn indexed_surface() -> Unit !Dev = {
@@ -2878,7 +2957,7 @@ fn indexed_surface() -> Unit !Dev = {
 
 test "gather and scatter hand the handler the index tile and the parameter's own format, with no strides at all" {
   assert logged(indexed_surface) == [
-    "load 0 i32 12 [8] [1] None None",
+    "load 0 i32 12 [8] [1] None None []",
     "consti i32 [8] 8",
     "cmpi lt [8] 1 3",
     "constf f64 [8] 0.0",
@@ -2903,7 +2982,7 @@ fn atomic_surface() -> Unit !Dev = {
 
 test "the atomics hand the handler the mode, the index tile and the parameter's own format" {
   assert logged(atomic_surface) == [
-    "load 0 i32 12 [8] [1] None None",
+    "load 0 i32 12 [8] [1] None None []",
     "consti i32 [8] 8",
     "cmpi lt [8] 1 3",
     "consti i32 [8] 1",
@@ -2949,8 +3028,8 @@ test "the typed surface spells every operation name the handler sees" {
     "consti i32 [8] 5",
     "cmpi lt [8] 5 3",
     "constf f64 [8] 0.0",
-    "load 0 f64 14 [8] [1] Some(10) Some(2)",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] Some(10) Some(2) []",
+    "load 0 f64 14 [8] [1] None None []",
     "binaryf addf f64 [8] 1 1",
     "binaryf subf f64 [8] 7 1",
     "binaryf mulf f64 [8] 7 1",
@@ -2962,7 +3041,7 @@ test "the typed surface spells every operation name the handler sees" {
     "fma f64 [8] 6 1 1",
     "cmpf lt f64 [8] 8 1",
     "select f64 [8] 9 8 1",
-    "store 0 f64 14 [8] [1] 11 Some(10)"
+    "store 0 f64 14 [8] [1] 11 Some(10) []"
   ]
 }
 
@@ -3007,7 +3086,7 @@ test "a reduction hands the handler the width, the identity and the operand, and
   # result; the body's addf is over those two.
   assert logged(one_reduction) == [
     "block_id 0",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] None None []",
     "reduce_begin 0 [8] [IdF(\"f64\", 0.0)] [1]",
     "binaryf addf f64 [] 20 21",
     "reduce_end [7]",
@@ -3026,7 +3105,7 @@ fn one_branch() -> Unit !Dev = {
 test "an if hands the handler its condition, then each branch's yield in turn" {
   assert logged(one_branch) == [
     "block_id 0",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] None None []",
     "cmpi eq [] 0 12",
     "if_begin 10",
     "binaryf addf f64 [8] 1 1",
@@ -3139,8 +3218,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
     with handle Dev {
       var log: List[String] = []
       t_block_id(_axis) => 0
-      t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad) => 1
-      t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+      t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad, _hints) => 1
+      t_store(_param, _dtype, _base, _shape, _strides, _v, _mask, _hints) => ()
       t_gather(_param, _dtype, _index, _shape, _mask, _pad) => 1
       t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
       t_atomic_rmw(_param, _dtype, _mode, _index, _shape, _v, _mask) => 1

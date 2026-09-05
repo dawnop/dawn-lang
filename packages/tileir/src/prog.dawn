@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset}
+use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -91,8 +91,8 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameE
 pub type TileOp =
   | MakeToken(dst: Int)
   | BlockId(dst: Int, axis: Int)
-  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
-  | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int)
+  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int, hints: Hints)
+  | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int, hints: Hints)
   | Gather(dst: Int, tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
   | Scatter(tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
   | AtomicRMW(dst: Int, tok_out: Int, param: Int, dtype: String, mode: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
@@ -178,13 +178,20 @@ pub type Global = {
 
 ## A kernel as recorded: its entry name, the dtype name of each parameter in
 ## order (every parameter is a pointer to that format), the globals its
-## module declares in declaration order, and its operations in issue order,
-## `MakeToken(0)` first.
+## module declares in declaration order, its operations in issue order
+## (`MakeToken(0)` first), and the `optimization_hints` of the entry itself.
+##
+## `hints` is empty for every kernel but the ones knife T15 records with
+## `trace_kernel_hinted`. It sits on the program rather than on an
+## operation because that is where the dialect puts it: `optimization_hints`
+## is an argument of `entry`, written in the function TABLE and not in the
+## body (BytecodeWriter.cpp's `writeFunctionTableSection`).
 pub type TileProg = {
   name: String,
   params: List[String],
   globals: List[Global],
   ops: List[TileOp],
+  hints: Hints,
 } derive Show
 
 fn refuse(name: String, what: String) -> Never =
@@ -494,7 +501,7 @@ fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 ## A `t_loop_begin` deeper than MAX_LOOP_DEPTH, a `t_loop_end` with no open
 ## loop or with the wrong number of values, or a body that ends with a loop
 ## still open, is refused.
-pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg = {
+pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, body: fn() -> Unit !Dev) -> TileProg = {
   let (globals, ops) = {
     with handle Dev {
       var next: Int = 1
@@ -509,7 +516,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [BlockId(d, axis)]
         d
       }
-      t_load(param, dtype, base, shape, strides, mask, pad) => {
+      t_load(param, dtype, base, shape, strides, mask, pad, hints) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "load")
@@ -518,11 +525,11 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok)]
+        ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok, hints)]
         tok = t
         d
       }
-      t_store(param, dtype, base, shape, strides, v, mask) => {
+      t_store(param, dtype, base, shape, strides, v, mask, hints) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "store")
@@ -530,7 +537,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         check_strides(name, shape, strides)
         let t = next
         next = mint(name, next, 1)
-        ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok)]
+        ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok, hints)]
         tok = t
         ()
       }
@@ -1165,8 +1172,13 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
     (globals, ops)
   }
-  TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops }
+  TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }
 }
+
+## `trace_kernel` with no `optimization_hints` on the entry, which is every
+## kernel but knife T15's.
+pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg =
+  trace_kernel_hinted(name, params, [], body)
 
 ## The handles an operation defines in the region it sits in, in definition
 ## order: what a consumer that renumbers (the lowering) or checks
@@ -1175,8 +1187,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
 pub fn defined(op: TileOp) -> List[Int] = match op {
   MakeToken(dst) -> [dst]
   BlockId(dst, _axis) -> [dst]
-  Load(dst, tok_out, _param, _dtype, _base, _shape, _strides, _mask, _pad, _tok_in) -> [dst, tok_out]
-  Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in) -> [tok_out]
+  Load(dst, tok_out, _param, _dtype, _base, _shape, _strides, _mask, _pad, _tok_in, _hints) -> [dst, tok_out]
+  Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in, _hints) -> [tok_out]
   Gather(dst, tok_out, _param, _dtype, _index, _shape, _mask, _pad, _tok_in) -> [dst, tok_out]
   Scatter(tok_out, _param, _dtype, _index, _shape, _value, _mask, _tok_in) -> [tok_out]
   AtomicRMW(dst, tok_out, _param, _dtype, _mode, _index, _shape, _value, _mask, _tok_in) -> [dst, tok_out]
@@ -1270,10 +1282,10 @@ test "vadd records seven operations behind the entry token, with the token chain
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 2, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 2, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
@@ -1295,9 +1307,9 @@ test "an f32 kernel records f32 loads, stores and sums" {
     BlockId(1, 0),
     IdxConst(2, 64),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f32", 3, [64], [1], None, None, 0),
+    Load(4, 5, 0, "f32", 3, [64], [1], None, None, 0, []),
     BinaryF(6, "addf", "f32", [64], 4, 4),
-    Store(7, 1, "f32", 3, [64], [1], 6, None, 5)
+    Store(7, 1, "f32", 3, [64], [1], 6, None, 5, [])
   ]
 }
 
@@ -1334,7 +1346,7 @@ test "a loop records as one For holding the body's operations, with the token ca
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
@@ -1344,13 +1356,13 @@ test "a loop records as one For holding the body's operations, with the token ca
     For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
@@ -1386,7 +1398,7 @@ test "a loop carrying two tiles answers two results in order, the token behind t
     _ -> { assert false }
   }
   # the store after the loop consumes the loop's token result
-  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, [8], [1], 22, None, 21)
+  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, [8], [1], 22, None, 21, [])
 }
 
 fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
@@ -1553,7 +1565,7 @@ test "assert records outside the token chain, assume defines one handle, and pri
   # the print takes the first store's token and the second store takes the
   # print's, so the chain is a line through all three
   let stores = list.filter(prog.ops, op => match op {
-    Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti) -> true
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti, _hints) -> true
     _ -> false
   })
   let prints = list.filter(prog.ops, op => match op {
@@ -1562,7 +1574,7 @@ test "assert records outside the token chain, assume defines one handle, and pri
   })
   assert len(stores) == 2 && len(prints) == 1
   let first_tok = match stores[0] {
-    Store(tok_out, _p, _d, _b, _s, _st, _v, _m, _ti) -> tok_out
+    Store(tok_out, _p, _d, _b, _s, _st, _v, _m, _ti, _hints) -> tok_out
     _ -> 0 - 1
   }
   let print_in = match prints[0] {
@@ -1574,7 +1586,7 @@ test "assert records outside the token chain, assume defines one handle, and pri
     _ -> 0 - 1
   }
   let second_in = match stores[1] {
-    Store(_t, _p, _d, _b, _s, _st, _v, _m, tok_in) -> tok_in
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, tok_in, _hints) -> tok_in
     _ -> 0 - 1
   }
   assert print_in == first_tok
@@ -1699,7 +1711,7 @@ test "a reduction records as one Reduce holding its region, with the accumulator
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, [8], [1], None, None, 0),
+    Load(2, 3, 0, "f64", 1, [8], [1], None, None, 0, []),
     # region arguments 4 and 5, the body's addf 6, the result 7 (minted
     # when the region closes, as a loop's results are)
     Reduce([7], 0, [8], [IdF("f64", 0.0)], [2], [4, 5], [
@@ -1707,7 +1719,7 @@ test "a reduction records as one Reduce holding its region, with the accumulator
       Yield([6])
     ]),
     Spread(8, "f64", [1], 7),
-    Store(9, 1, "f64", 1, [1], [1], 8, None, 3)
+    Store(9, 1, "f64", 1, [1], [1], 8, None, 3, [])
   ]
   assert trace_total() == trace_total()
   # the reading order the lowering renumbers into: the result, then the
@@ -1898,7 +1910,7 @@ test "a store through a pointer tile sits in the token chain where a store throu
   let toks = list.fold(p.ops, none, (acc, o) => match o {
     LoadAt(_d, tok_out, _dt, _sh, _ps, _m, _pd, tok_in) -> acc ++ [(tok_in, tok_out)]
     StoreAt(tok_out, _dt, _sh, _ps, _v, _m, tok_in) -> acc ++ [(tok_in, tok_out)]
-    Store(tok_out, _pm, _dt, _b, _sh, _st, _v, _m, tok_in) -> acc ++ [(tok_in, tok_out)]
+    Store(tok_out, _pm, _dt, _b, _sh, _st, _v, _m, tok_in, _hints) -> acc ++ [(tok_in, tok_out)]
     _ -> acc
   })
   assert len(toks) == 3
