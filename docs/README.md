@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 99 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 100 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -61,6 +61,7 @@
 | [jvm-base-plan.md](jvm-base-plan.md) | current | **A 线**：收缩 JVM 后端的可信底座——V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A 刀表。**已 done**：K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4/K-A6 与 K-A7 期 1/2/3 全部落地，K-A2 取消，`dawn/tool` 已退出 jar 与可信底座（`b66f1d7`）；K-A8.1/K-A8.2 把帧 oracle 装回来并升到 major 52（§5.10、§5.11），K-A8.3 把 52 买回来的接口静态方法登成语料与门禁（§5.12）——K-A 刀表至此全部结清。 |
 | [std-pruning-design.md](std-pruning-design.md) | current | 按程序裁剪 std：一次可达性走图，两个后端的 emit 边界上按模块 + 按函数裁；根是用户模块与发射器直呼的十个 `std/pvec` 名字，`--stdlib` 与无 target 两条全留；顺手把字典副本的归属从「先遇到的」改成确定性的最小 owner（issue #69）。check 与 lowering 一字未动，所以 Core golden 不动。 |
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
+| [control-freight-design.md](control-freight-design.md) | current | #71：控制运行时与效果证据跟随已有的函数可达性遍历，未使用的声明不增加类文件。 |
 | [slab-residency-design.md](slab-residency-design.md) | **current** | #10 的 measurement-first 调研与落地：把 lexer 小活集的 RSS 拆成 eager 64 KiB layout、空 current、每类 empty cache、rounding 与 `madvise` 五份；以 lexer/compiler/持久红黑树矩阵裁定 fresh slab 按 32 KiB 增量 materialize，保留 hot path、empty cache 与退役策略。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
