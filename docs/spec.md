@@ -170,8 +170,9 @@ println("got $n items, first = ${list.get(0)}")
 
 `dawn fmt <文件>...` 就地格式化；`dawn fmt --check <文件>...` 只报告未格式化的文件
 （有则退出码 1，供 CI）。实现是**基于 token 流的重排器**：逐 token 按原样重印
-（字符串与插值按源码区间原样保留，一字不改），只改动 token 间的空白——行内间距、
-2 空格缩进、折叠连续空行（保留作者的物理换行）。故格式化**保 token、保注释、幂等**，
+（字符串与插值按源码区间原样保留，一字不改），调整 token 间的空白——行内间距、
+2 空格缩进、折叠连续空行（保留作者的物理换行）。唯一的 token 规范化是省略单行
+和类型声明的首个可选 `|`（§2.3）；其余 token 与注释均保留，格式化**幂等**，
 且只需词法成功（不需能解析），语法错误的文件也能格式化。
 
 **词法成功是前置条件，不成立就拒绝**：词法失败的字符不产生 token，而重印的只有 token，
@@ -280,6 +281,8 @@ fn() -> (fn() -> Int !io) !io    # 两层都是 !io
 
 ### 2.3 和类型（ADT）
 
+首个 `|` 可以省略；格式约定是单行声明不写首竖线，多行声明在每个构造器行首写竖线。
+
 ```dawn
 type Shape =
   | Circle(r: Float)
@@ -293,7 +296,7 @@ type Shape =
   上下文）；仅由字段无法确定的类型参数（如 `Ok` 的错误类型 `E`）需上下文补足，
   否则报「无法推导类型参数」。无载荷构造器（`Point`）本身是值不是函数；记录构造用
   花括号语法，不参与此规则。
-- 泛型：`type Tree[T] = | Leaf | Node(left: Tree[T], value: T, right: Tree[T])`
+- 泛型：`type Tree[T] = Leaf | Node(left: Tree[T], value: T, right: Tree[T])`
 
 ### 2.4 记录（record）
 
@@ -1255,7 +1258,7 @@ column([
 两种分隔符可以在同一个字面量里混用，尾随的逗号或换行照旧允许，空字面量 `[]` 与
 跨行的 `[\n]` 都还是零个元素。这是**纯语法加法**：`[1, 2, 3]`、多行带逗号、尾逗号
 这些既有写法的解析结果一字未变。`dawn fmt` 也不在两者之间改写，作者选的分隔符保留
-（它只调整行内空白与缩进，不动作者断的行）。
+（对列表只调整行内空白与缩进，不动作者断的行）。
 
 **省的只是换行处的逗号**。同一行上的两个元素仍然要逗号：`[a b]` 是语法错误，
 诊断仍是「expected `]`, found `b`」，位置不变。
@@ -3206,7 +3209,7 @@ match/if 分支的尾位置、块的末表达式）。
 use geo/shape.{Shape, area}
 use java "java.nio.file.Files"
 
-pub type Color = | Red | Green | Blue derive Show
+pub type Color = Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # 透明别名（§2.6）
 pub opaque type UserId = Int     # 模块外看不穿（§2.7）
