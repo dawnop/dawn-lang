@@ -32,8 +32,10 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   addi, subi, muli, shli, shri, consti,
   addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
   sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
-  d_for_unsigned, atomic_rmw }
-use tileir/prog.{TileProg, trace_kernel}
+  d_for_unsigned, atomic_rmw,
+  Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy, hint_latency,
+  load_hinted, store_hinted }
+use tileir/prog.{TileProg, trace_kernel, trace_kernel_hinted}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
 
@@ -4182,6 +4184,47 @@ fn global_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 fn zeros_tile(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
 
+# ---- knife T15: `optimization_hints` (attribute tags 11 and 10) ----
+#
+# Both kernels are `vadd`'s body, and that is the point: a hint is a
+# suggestion the dialect promises not to compute with, so the only corpus
+# that can say anything about one is a corpus whose answer is already
+# known. What changes is the BYTES -- an entry flag bit and an attribute in
+# the function table for the first, two flag bits and two nested
+# dictionaries in the body for the second.
+#
+# The values are the dialect's own legal ones for this machine
+# (AttrDefs.td and `OptimizationHintsAttr`'s validators): `num_cta_in_cga`
+# must be 1 on sm_80 through sm_89, `num_worker_warps_per_cta` is 4 or 8,
+# `occupancy` is 1 to 32 and `latency` is 1 to 10. Nothing enforces any of
+# that here: the validators live behind `-Wunsupported-hints`, which is off
+# by default, so these numbers are chosen to be right rather than checked
+# to be (docs/tile-backend-design.md 6.10).
+
+# `vadd` with hints on the ENTRY: one architecture-specific entry for this
+# machine's sm_86 and one `default`, the fallback the dialect reads when the
+# compilation target has no entry of its own.
+fn hint_entry_hints() -> Hints = [
+  for_arch("default", [hint_occupancy(4)]),
+  for_arch("sm_86", [hint_num_cta_in_cga(1), hint_num_worker_warps_per_cta(8), hint_occupancy(2)])]
+
+fn hint_entry(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), 128)
+  let ta = load(a, blk, [128])
+  let tb = load(b, blk, [128])
+  store(out, blk, [128], addf(F64, [128], ta, tb))
+}
+
+# `vadd` with hints on a LOAD and on the STORE. The second load carries
+# none, so one kernel holds both states of the flag bit: `latency` is the
+# one key `load_ptr_tko` and `store_ptr_tko` accept.
+fn hint_memory(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), 128)
+  let ta = load_hinted(a, blk, [128], [for_arch("sm_86", [hint_latency(4)])])
+  let tb = load(b, blk, [128])
+  store_hinted(out, blk, [128], [for_arch("sm_86", [hint_latency(7)])], addf(F64, [128], ta, tb))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4590,6 +4633,11 @@ fn trace(name: String) -> TileProg = match name {
       () => global_ctl(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
   "global_scratch" ->
     trace_kernel("global_scratch", ["f64", "f64"], () => global_scratch(param(F64, 0), param(F64, 1)))
+  "hint_entry" ->
+    trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
+      () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "hint_memory" ->
+    trace_kernel("hint_memory", ["f64", "f64", "f64"], () => hint_memory(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 

@@ -347,7 +347,8 @@ kernels=(
   attr_overflow attr_memsem attr_addf attr_ucmp
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded
-  global_table global_ctl global_scratch)
+  global_table global_ctl global_scratch
+  hint_entry hint_memory)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -422,6 +423,10 @@ mutants=(
   global-record-alignment-dropped
   global-visibility-written-at-13-2
   get-global-symbol-not-written
+  hint-dictionary-count-wrong
+  hint-tag-as-dictionary
+  hint-flag-bit-misplaced
+  hint-entry-flag-dropped
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1492,6 +1497,80 @@ if run_item get-global-symbol-not-written; then
     w2'
   writer_mutant_checks get-global-symbol-not-written global_table same-size \
     "failed to read string for FlatSymbolRefAttr"
+fi
+
+# 40. The inner dictionary of a hint says it holds one more entry than it
+#     does. A count is a varint the reader takes on trust, and 1 and 2 are
+#     one byte each, so the file is the same length; what follows the last
+#     real entry is the load's first operand, and the reader takes it for
+#     the String section index of another key.
+#
+#     This is the whole of what layer 1 can say about this family, and the
+#     reason it is: the CONTENT of a hint is not checked at all.
+#     `OptimizationHintsAttr::verifyParamWithContext` returns early unless
+#     `-Wunsupported-hints` is on, which it is not by default, so an
+#     unknown key, an unknown architecture and an out-of-range value are
+#     each accepted in silence (measured, knife T15: `occupancy_qqq`,
+#     `sm_86a` and `latency = 904` all assemble, exit 0 and print nothing).
+#     Only the SHAPE is load-bearing, and these four mutants are its four
+#     seams.
+if run_item hint-dictionary-count-wrong; then
+  mutant_project hint-dictionary-count-wrong bytecode.dawn \
+    'ATTR_DICTIONARY), len(under))' \
+    'ATTR_DICTIONARY), len(under) + 1)'
+  writer_mutant_checks hint-dictionary-count-wrong hint_memory same-size \
+    "failed to read key for DictionaryAttr element 1"
+fi
+
+# 41. The entry's `optimization_hints` announced with the Dictionary tag
+#     instead of its own. Tag 10 and tag 11 are one byte each, and the
+#     bytes that follow are the same bytes either way -- an
+#     OptimizationHintsAttr IS a DictionaryAttr with a tag in front of it
+#     -- so the reader parses the whole attribute without complaint and
+#     then refuses what it has: the function table wants an
+#     OptimizationHintsAttr and holds a DictionaryAttr. This is the mutant
+#     that makes tag 11 a claim rather than a spelling.
+if run_item hint-tag-as-dictionary; then
+  mutant_project hint-tag-as-dictionary bytecode.dawn \
+    'const ATTR_OPTIMIZATION_HINTS: Int = 11' \
+    'const ATTR_OPTIMIZATION_HINTS: Int = 10'
+  writer_mutant_checks hint-tag-as-dictionary hint_entry same-size \
+    "invalid optimization hints attribute for function 'hint_entry'"
+fi
+
+# 42. The load's hints flagged on bit 0 instead of bit 1, which is
+#     `memory_scope`'s bit. Nothing in the stream labels an optional
+#     field: the bits are assigned by version and then by declaration
+#     order (`getVersionOrderedBitAssignments`), attributes before
+#     operands, so `memory_scope` is bit 0 and `optimization_hints` bit 1.
+#     One bit for the other is the same length and the reader loses the
+#     stream: it takes the outer dictionary's count for a memory scope
+#     enum and every operand after it is one place out of step.
+if run_item hint-flag-bit-misplaced; then
+  mutant_project hint-flag-bit-misplaced bytecode.dawn \
+    'const LOAD_FLAG_HINTS: Int = 2' \
+    'const LOAD_FLAG_HINTS: Int = 1'
+  writer_mutant_checks hint-flag-bit-misplaced hint_memory same-size \
+    "operand index 91 out of bounds (size=19) for operand 1"
+fi
+
+# 43. The entry's hint bit cleared while the attribute is still written.
+#     The function table's flag byte is what says whether an attribute
+#     follows the location index, and it is the ONE place in this writer
+#     where a bit and a payload have to agree outside an operation. With
+#     the bit clear the reader takes the attribute's first byte for the
+#     body's length and the body starts eleven bytes early.
+#
+#     The twin of this one -- the bit set and nothing written -- is not
+#     expressible here: the flag and the payload are computed from the same
+#     `len(k.hints)`, which is what a reader of that function should be able
+#     to see, and this mutant is what says the two are joined on purpose.
+if run_item hint-entry-flag-dropped; then
+  mutant_project hint-entry-flag-dropped bytecode.dawn \
+    'const FLAG_HAS_HINTS: Int = 0x04' \
+    'const FLAG_HAS_HINTS: Int = 0x00'
+  writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
+    "operand index 10 out of bounds (size=4) for operand 0"
 fi
 
 _item_tick ""
