@@ -220,6 +220,7 @@ def gather():
         "scripts/tile-gpu-diff/scan_diff.dawn",
         "scripts/tile-gpu-diff/atom_diff.dawn",
         "scripts/tile-gpu-diff/erf_diff.dawn",
+        "scripts/tile-gpu-diff/trig_diff.dawn",
         "scripts/tile-gpu-diff/seq_diff.dawn",
     ]:
         files[path] = read(ROOT / path)
@@ -277,8 +278,8 @@ def self_test():
                       "| std/gpu.matmul_bt_ref |"),
          "3 kernel(s) and 1 reference(s)"),
         ("a header count that is not the number of rows",
-         good.replace("# 85 of the 97 reachable problems", "# 73 of the 97 reachable problems"),
-         "the header says 73 of the 97 reachable problems and 85 rows are listed"),
+         good.replace("# 86 of the 97 reachable problems", "# 73 of the 97 reachable problems"),
+         "the header says 73 of the 97 reachable problems and 86 rows are listed"),
         ("an empty table", "# nothing\n", "lists no problems at all"),
     ]
     bad = 0

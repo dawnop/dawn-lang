@@ -50,7 +50,7 @@
 # are `weak`, unmasked, with the token operand present (flags bit 4 on a load,
 # bit 3 on a store); `addf` is `rounding<nearest_even>` (0) with no
 # flush-to-zero (flags 0); the integer operations carry `overflow` none (0).
-# A tile is rank 0 or 1. Nothing here is versioned by anything but the header:
+# Nothing here is versioned by anything but the header:
 # the bytecode this writes is the same at 13.1, 13.2 and 13.3, and only
 # the number in the header says which; `tileiras` 13.3.36 accepted all three.
 use std/bytes
@@ -59,8 +59,8 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -82,25 +82,32 @@ const OP_ADDI: Int = 0x03
 const OP_ANDI: Int = 0x04
 const OP_BITCAST: Int = 0x09
 const OP_BROADCAST: Int = 0x0B
+const OP_CAT: Int = 0x0C
 const OP_CEIL: Int = 0x0D
 const OP_CMPF: Int = 0x0E
 const OP_CMPI: Int = 0x0F
 const OP_CONSTANT: Int = 0x10
 const OP_CONTINUE: Int = 0x11
+const OP_COS: Int = 0x12
+const OP_COSH: Int = 0x13
 const OP_DIVF: Int = 0x14
 const OP_DIVI: Int = 0x15
 const OP_EXP: Int = 0x17
 const OP_EXP2: Int = 0x18
 const OP_EXTI: Int = 0x25
+const OP_EXTRACT: Int = 0x26
 const OP_FLOOR: Int = 0x27
 const OP_FTOF: Int = 0x2A
 const OP_FTOI: Int = 0x2B
 const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
+const OP_GET_NUM_TILE_BLOCKS: Int = 0x2E
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
 const OP_IF: Int = 0x32
+const OP_INT_TO_PTR: Int = 0x33
 const OP_IOTA: Int = 0x3A
 const OP_ITOF: Int = 0x3B
+const OP_JOIN_TOKENS: Int = 0x3C
 const OP_LOAD_PTR_TKO: Int = 0x3D
 const OP_LOG: Int = 0x3F
 const OP_LOG2: Int = 0x40
@@ -118,8 +125,12 @@ const OP_NEGF: Int = 0x4F
 const OP_NEGI: Int = 0x50
 const OP_OFFSET: Int = 0x51
 const OP_ORI: Int = 0x52
+const OP_PERMUTE: Int = 0x53
 const OP_POW: Int = 0x54
+const OP_PTR_TO_INT: Int = 0x56
+const OP_PTR_TO_PTR: Int = 0x57
 const OP_REDUCE: Int = 0x58
+const OP_REMF: Int = 0x59
 const OP_REMI: Int = 0x5A
 const OP_RESHAPE: Int = 0x5B
 const OP_RETURN: Int = 0x5C
@@ -128,14 +139,18 @@ const OP_SCAN: Int = 0x5E
 const OP_SELECT: Int = 0x5F
 const OP_SHLI: Int = 0x60
 const OP_SHRI: Int = 0x61
+const OP_SIN: Int = 0x62
+const OP_SINH: Int = 0x63
 const OP_SQRT: Int = 0x64
 const OP_STORE_PTR_TKO: Int = 0x65
 const OP_SUBF: Int = 0x67
 const OP_SUBI: Int = 0x68
+const OP_TAN: Int = 0x69
 const OP_TANH: Int = 0x6A
 const OP_TRUNCI: Int = 0x6B
 const OP_XORI: Int = 0x6C
 const OP_YIELD: Int = 0x6D
+const OP_ATAN2: Int = 0x6E
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -199,6 +214,25 @@ const ROUND_FULL: Int = 5
 # its tag and the index of its element type before its payload.
 const ATTR_INTEGER: Int = 1
 const ATTR_FLOAT: Int = 2
+
+# `permute`'s `permutation` is a DENSE array and is NOT written the way that
+# `identities` array is. The two shapes were measured against the writer
+# rather than guessed from each other (knife T2), because "a list of small
+# integers" reads the same in both:
+#
+#   ArrayAttr        count[varint] then one SELF-CONTAINED element each
+#                    (tag, element type index, payload) -- what
+#                    `identity_attr` writes
+#   DenseI32ArrayAttr  count[varint] then each element as FOUR raw
+#                    little-endian bytes, no tag and no type index
+#
+# The path is BytecodeWriter.cpp's `writeOpAttribute`: a `DenseI32ArrayAttr`
+# getter answers `ArrayRef<int32_t>`, which lands in the `writeLEVarSize`
+# branch (size as a varint, then `writeLE` per element), while an
+# `mlir::ArrayAttr` lands in `writeSingleAttribute`'s ArrayAttr case. The
+# reader agrees: `readLEVarSize` into a `SmallVector<int32_t>`.
+fn emit_i32_array(w: W, xs: List[Int]) -> W =
+  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }
 
 # The `rmw_mode` values (AttrDefs.td's AtomicRMWMode, an i32 enum). The
 # order is the enum's own and not alphabetical: `add` is 3 and `addf` 4,
@@ -365,6 +399,13 @@ fn float_op(op: String) -> Int = match op {
   "tanh" -> OP_TANH
   "floor" -> OP_FLOOR
   "ceil" -> OP_CEIL
+  "sin" -> OP_SIN
+  "cos" -> OP_COS
+  "tan" -> OP_TAN
+  "sinh" -> OP_SINH
+  "cosh" -> OP_COSH
+  "atan2" -> OP_ATAN2
+  "remf" -> OP_REMF
   _ -> panic("tileir: `${op}` is not a float operation")
 }
 
@@ -379,7 +420,17 @@ fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "
 # `rounding_mode` that is REQUIRED at 13.2 and so is not a flag either.
 # Every measurement behind this table is scripts/tile-golden's layer 1: each
 # wrong shape was handed to `tileiras` and refused.
-fn float_op_has_flags(op: String) -> Bool = not (op == "pow" || one_of_op(op, ["exp", "log", "log2", "floor", "ceil", "tanh", "negf", "absf"]))
+#
+# Knife T1's seven are all on this list and for one reason: their Ops.td
+# records declare a `source` (or an `lhs` and an `rhs`) and NOTHING else,
+# no `OptionalAttr` and no optional operand, so
+# getVersionOrderedBitAssignments returns an empty map and
+# generateFlagsFieldSerialization writes nothing at all. A flags 0 written
+# anyway is invisible at layer 0 and layer 1 reads it as the next operand
+# index, which is the layer-1 mutant trig-extra-flags.
+fn float_op_has_flags(op: String) -> Bool =
+  not (op == "pow" || one_of_op(op, ["exp", "log", "log2", "floor", "ceil", "tanh", "negf", "absf",
+    "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))
 
 # The rounding mode a unary operation writes after its flags, or `None`.
 fn unary_rounding(op: String) -> Option[Int] =
@@ -748,6 +799,16 @@ fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
   emit(emit(w1, opcode), ti)
 }
 
+# opcode, a RESULT COUNT of one, then the result type index. tblgen's
+# `Operator::isVariadic()` is true when any argument OR result is variadic,
+# and `generateSimpleResultSerialization` writes the count under it, so an
+# operation with one fixed result and a variadic OPERAND list writes the 1
+# all the same. `extract` and `join_tokens` are the two of those here.
+fn emit_op_counted(w: W, opcode: Int, result: Ty) -> W = {
+  let (w1, ti) = ty(w, result)
+  emit(emit(emit(w1, opcode), 1), ti)
+}
+
 fn encode_instr(w0: W, i: Instr) -> W = match i {
   MakeTok(_dst) -> emit_op(w0, OP_MAKE_TOKEN, Token)
   BlockIds(_x, _y, _z) -> {
@@ -968,6 +1029,50 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   YieldVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_YIELD), 0), len(values)), emit_ref)
   Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
+  ExtractTile(_dst, src, _from, to, indices) -> {
+    # A RESULT COUNT first. tblgen's `Operator::isVariadic()` is true when
+    # ANY argument or result is variadic, and `generateSimpleResultSerialization`
+    # writes the result count under it -- so an operation with one fixed
+    # result and a variadic OPERAND list still writes the 1. Measured:
+    # without it `tileiras` answers `error at offset 98: failed to get
+    # result type 10 for ExtractOp`, having taken the type index for the
+    # count. `join_tokens` is the same shape and was the same measurement.
+    #
+    # Then NO attributes -- the slice numbers are OPERANDS (rank-0 i32
+    # tiles) -- and the operand count, which counts the source as well, so
+    # it is one more than there are indices.
+    let w1 = emit(emit_op_counted(w0, OP_EXTRACT, to), 1 + len(indices))
+    list.fold(indices, emit_ref(w1, src), emit_ref)
+  }
+  CatTile(_dst, dim, lhs, rhs, _lhs_ty, _rhs_ty, to) -> {
+    # `dim` is an `I64Attr`, so it is a plain inline varint: the generated
+    # reader is given the width by tablegen and does not read a type index,
+    # and the value is unsigned (`parseScalarAttributeInline`). Two required
+    # operands and no variadic one, so no operand count either.
+    emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), lhs), rhs)
+  }
+  PermuteTile(_dst, src, perm, _from, to) -> {
+    let w1 = emit_i32_array(emit_op(w0, OP_PERMUTE, to), perm)
+    emit_ref(w1, src)
+  }
+  JoinTokens(_dst, toks) -> {
+    # the result count (1: see `extract` above -- the variadic operands are
+    # what make this operation write one), the token result type, then the
+    # operand count and the tokens. The verifier wants two or more.
+    let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks))
+    list.fold(toks, w1, emit_ref)
+  }
+  BlockCounts(_x, _y, _z) -> {
+    # `get_num_tile_blocks` has exactly `get_tile_block_id`'s shape: three
+    # rank-0 i32 results, no operands, no attributes and no flags. The
+    # OPCODE is the whole difference, which is what the mutant
+    # num-tile-blocks-as-block-id measures on the device.
+    let (w1, ti) = ty(w0, Tile([], Num("i32")))
+    emit(emit(emit(emit(w1, OP_GET_NUM_TILE_BLOCKS), ti), ti), ti)
+  }
+  PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)
+  IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)
+  PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_PTR, to), src)
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
 
@@ -1363,6 +1468,23 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert (float_op("exp"), float_op("exp2"), float_op("log"), float_op("log2")) == (0x17, 0x18, 0x3F, 0x40)
   assert (float_op("sqrt"), float_op("rsqrt"), float_op("tanh"), float_op("pow")) == (0x64, 0x5D, 0x6A, 0x54)
   assert (float_op("floor"), float_op("ceil")) == (0x27, 0x0D)
+  # knife T1's seven, read off BytecodeOpcodes.td at the same commit. None
+  # of them has an optional field, so none writes a flags varint and none
+  # writes a rounding mode.
+  assert (float_op("sin"), float_op("cos"), float_op("tan")) == (0x62, 0x12, 0x69)
+  assert (float_op("sinh"), float_op("cosh")) == (0x63, 0x13)
+  assert (float_op("atan2"), float_op("remf")) == (0x6E, 0x59)
+  assert not float_op_has_flags("sin")
+  assert not float_op_has_flags("cos")
+  assert not float_op_has_flags("tan")
+  assert not float_op_has_flags("sinh")
+  assert not float_op_has_flags("cosh")
+  assert not float_op_has_flags("atan2")
+  assert not float_op_has_flags("remf")
+  assert unary_rounding("sin") == None
+  assert unary_rounding("cos") == None
+  assert not float_op_rounds("atan2")
+  assert not float_op_rounds("remf")
 }
 
 test "the integer and conversion opcodes are the frozen table's, and each writes its attributes inline" {
@@ -1485,4 +1607,143 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
   assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d02" ++ "0000"
   assert bytes.at(b, bytes.len(b) - 1) == 0
   assert str.ends_with(hex(b), hex(bytes.utf8("sum")) ++ "00")
+}
+
+# Knife T2's two programs: the shape operations over a rank-3 tile whose
+# first two dimensions are equal (so that a wrong permutation is a wrong
+# ANSWER and not a type error), and the pointer surface.
+
+fn shapes_prog() -> TileProg = TileProg {
+  name: "shapes",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    NumBlocks(2, 0),
+    Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0),
+    Permute(5, "f64", [4, 4, 8], [1, 0, 2], 3),
+    IdxConst(6, 1),
+    IdxConst(7, 0),
+    Extract(8, "f64", [4, 4, 8], [2, 4, 8], 3, [6, 7, 7]),
+    Extract(9, "f64", [4, 4, 8], [2, 4, 8], 3, [7, 7, 7]),
+    Cat(10, "f64", 0, [2, 4, 8], [2, 4, 8], 8, 9),
+    Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 5, None, 4),
+    Store(12, 1, "f64", 2, [4, 4, 8], [32, 8, 1], 10, None, 11)
+  ]
+}
+
+fn ptrs_prog() -> TileProg = TileProg {
+  name: "ptrs",
+  params: ["f64", "i32"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    MakePtrs(2, 0, "f64", [8]),
+    Lanes(3, 1, [8], [1]),
+    PtrAdd(4, "f64", [8], 2, 3),
+    PtrInt(5, "f64", [8], 4),
+    ConstI(6, "i64", [8], 24),
+    BinaryI(7, "addi", "i64", [8], 5, 6),
+    IntPtr(8, "f64", [8], 7),
+    LoadAt(9, 10, "f64", [8], 8, None, None, 0),
+    PtrCast(11, "f64", "i32", [8], 4),
+    LoadAt(12, 13, "i32", [8], 11, None, None, 10),
+    Store(14, 1, "i32", 1, [8], [1], 12, None, 13)
+  ]
+}
+
+fn fork_prog() -> TileProg = TileProg {
+  name: "fork",
+  params: ["f64", "f64"],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    ConstF(2, "f64", [8], 1.0),
+    Store(3, 1, "f64", 1, [8], [1], 2, None, 0),
+    Store(4, 1, "f64", 1, [8], [1], 2, None, 0),
+    JoinToks(5, [3, 4]),
+    Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5)
+  ]
+}
+
+test "a dense i32 array is a count and four raw bytes an element, where an ArrayAttr is a count and self-contained elements" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # BytecodeWriter.cpp writeLEVarSize: the size as a varint, then writeLE
+  # per element. No tag, no element type index, and NOT a varint per
+  # element -- which is the whole difference from `identity_attr` above.
+  assert hex(bytes.freeze(emit_i32_array(w0, [1, 0, 2]).body)) == "03" ++ "01000000" ++ "00000000" ++ "02000000"
+  assert hex(bytes.freeze(emit_i32_array(w0, []).body)) == "00"
+  assert hex(bytes.freeze(emit_i32_array(w0, [300]).body)) == "01" ++ "2c010000"
+}
+
+test "the shape operations are the frozen table's opcodes, with the permutation dense and extract's slice indices as operands" {
+  let k = lower(shapes_prog())
+  let (_w, whole) = body_of(k)
+  # permute: opcode 0x53, the result type index, then the dense array, then
+  # the source. The source is the load's value; the result type is a fresh
+  # index, so only the opcode and the array are pinned by position here.
+  assert str.contains(whole, hex(varint(OP_PERMUTE)))
+  assert str.contains(whole, "03" ++ "01000000" ++ "00000000" ++ "02000000")
+  # extract: opcode 0x26 and an operand COUNT of four (the source and three
+  # slice indices), because `indices` is variadic.
+  assert str.contains(whole, hex(varint(OP_EXTRACT)))
+  # cat: opcode 0x0C then `dim` as a bare varint, no count in front of it
+  assert str.contains(whole, hex(varint(OP_CAT)))
+  # get_num_tile_blocks: the opcode and its three i32 result type indices,
+  # which is get_tile_block_id's shape under another number. The token is
+  # this program's first type, then i32 and tile<i32>, so the index is 2.
+  assert str.contains(whole, hex(bytes.freeze(put_varint(put_varint(put_varint(put_varint(bytes.buf(), OP_GET_NUM_TILE_BLOCKS), 2), 2), 2))))
+  assert OP_EXTRACT == 0x26 && OP_CAT == 0x0C && OP_PERMUTE == 0x53 && OP_GET_NUM_TILE_BLOCKS == 0x2E
+}
+
+test "extract writes its operand count, cat its dim inline, and neither writes a flags word" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let ex = encode_instr(w0, ExtractTile(9, Val(0), Tile([4, 4, 8], Num("f64")), Tile([2, 4, 8], Num("f64")), [Val(1), Val(2), Val(3)]))
+  # opcode, result COUNT 1, result type index (f64 is registered first,
+  # the tile second), operand count 4, then %0 %1 %2 %3
+  assert hex(bytes.freeze(ex.body)) == "26" ++ "01" ++ "01" ++ "04" ++ "00" ++ "01" ++ "02" ++ "03"
+  let ct = encode_instr(w0, CatTile(9, 1, Val(0), Val(1), Tile([2, 4], Num("f64")), Tile([2, 4], Num("f64")), Tile([2, 8], Num("f64"))))
+  # opcode, result type index, dim 1, then the two operands: no operand
+  # count (neither operand is variadic or optional) and no flags word
+  assert hex(bytes.freeze(ct.body)) == "0c" ++ "01" ++ "01" ++ "00" ++ "01"
+  let pm = encode_instr(w0, PermuteTile(9, Val(0), [1, 0, 2], Tile([4, 4, 8], Num("f64")), Tile([4, 4, 8], Num("f64"))))
+  assert hex(bytes.freeze(pm.body)) == "53" ++ "01" ++ "03" ++ "01000000" ++ "00000000" ++ "02000000" ++ "00"
+  let jt = encode_instr(w0, JoinTokens(9, [Val(0), Val(1), Val(2)]))
+  assert hex(bytes.freeze(jt.body)) == "3c" ++ "01" ++ "00" ++ "03" ++ "00" ++ "01" ++ "02"
+  # get_num_tile_blocks is get_tile_block_id's shape: three rank-0 i32
+  # results, no operands, no attributes, no flags
+  let nb = encode_instr(w0, BlockCounts(9, 10, 11))
+  assert hex(bytes.freeze(nb.body)) == "2e" ++ "01" ++ "01" ++ "01"
+}
+
+test "the three pointer conversions are the frozen table's opcodes, each a result type and one operand" {
+  let k = lower(ptrs_prog())
+  let (_w, whole) = body_of(k)
+  assert str.contains(whole, hex(varint(OP_PTR_TO_INT)))
+  assert str.contains(whole, hex(varint(OP_INT_TO_PTR)))
+  assert str.contains(whole, hex(varint(OP_PTR_TO_PTR)))
+  assert OP_PTR_TO_INT == 0x56 && OP_INT_TO_PTR == 0x33 && OP_PTR_TO_PTR == 0x57
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1)]), nvals: 2 }
+  let pi = encode_instr(w0, PtrToIntTile(9, Val(0), Tile([8], PtrTo("f64")), Tile([8], Num("i64"))))
+  assert hex(bytes.freeze(pi.body)) == "56" ++ "01" ++ "00"
+  # i64 is registered before the tile that names it: tag 4, then the tile
+  # tag 13, that element index, the rank and the one dimension
+  assert list.map(pi.types.items, hex) == ["04", "0d" ++ "00" ++ "01" ++ "0800000000000000"]
+  let ip = encode_instr(w0, IntToPtrTile(9, Val(0), Tile([8], Num("i64")), Tile([8], PtrTo("f64"))))
+  assert hex(bytes.freeze(ip.body)) == "33" ++ "02" ++ "00"
+  let pp = encode_instr(w0, PtrToPtrTile(9, Val(0), Tile([8], PtrTo("f64")), Tile([8], PtrTo("i32"))))
+  assert hex(bytes.freeze(pp.body)) == "57" ++ "02" ++ "00"
+}
+
+test "an i64 constant lays down eight bytes, low byte first" {
+  assert hex(int_payload("i64", 8, 24)) == "1800000000000000"
+  assert hex(int_payload("i64", 1, 0 - 1)) == str.repeat("ff", 8)
+  assert num_tag("i64") == 4
+}
+
+test "join_tokens takes the tokens of two stores and the load after it takes the join" {
+  let k = lower(fork_prog())
+  let (_w, whole) = body_of(k)
+  assert str.contains(whole, hex(varint(OP_JOIN_TOKENS)))
+  assert OP_JOIN_TOKENS == 0x3C
 }

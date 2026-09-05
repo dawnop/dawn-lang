@@ -1,0 +1,484 @@
+# Layer 2 for the shape, grid, token and pointer kernels (knife T2), the
+# thirteenth of these programs: one `!Gpu` program runs each of the five
+# kernels scripts/tile-golden pins under `with_gpu_real` against the
+# machine's GPU and under `with_gpu_fake` against hand-written host
+# references, and prints what each device answered.
+#
+#   shape_diff <shape_ops.cubin> <grid_stride.cubin> <token_join.cubin>
+#              <ptr_roundtrip.cubin> <ptr_recast.cubin>
+#
+# This family is the first here whose subject is the OPCODE TABLE rather
+# than a problem. Knives 3 to 21 were solving leetgpu; from knife T2 on the
+# question is which of Tile IR's hundred public opcodes this backend
+# implements and how far each of them is covered
+# (docs/tile-backend-design.md 2.4, and the ledger in
+# scripts/tileir-features/features.txt). The eight here are `extract`,
+# `cat`, `permute`, `join_tokens`, `get_num_tile_blocks`, `int_to_ptr`,
+# `ptr_to_int` and `ptr_to_ptr`.
+#
+# What is new here and nowhere else:
+#
+#   * the answer is a PERMUTATION and not a number. Every earlier program
+#     compares values a kernel computed; `shape_ops`'s corpus is
+#     `0, 1, .., 127`, so a lane's value IS the source index it came from
+#     and what the comparison holds is where each element went. Nothing is
+#     rounded and nothing is folded, so the exact tier here is not a claim
+#     about arithmetic at all.
+#   * a grid SMALLER than the work. `grid_stride` runs on three blocks over
+#     twelve tiles and steps by `get_num_tile_blocks`; every kernel before
+#     it had one block per tile, so the grid's extent was a number no
+#     kernel needed to read.
+#   * a token graph that is not a LINE. `token_join` issues two independent
+#     chains of stores from one token and reads back through the join, so
+#     the load is ordered after both and against neither of them.
+#   * ADDRESSES as values. `ptr_roundtrip` takes a pointer tile apart into
+#     i64, offsets it in bytes and puts it back; `ptr_recast` reads an i32
+#     buffer through pointers to f32. Both are addressing the strided
+#     ladder cannot express, and `ptr_recast`'s host reference decodes the
+#     binary32 pattern by arithmetic, so it is a second opinion about the
+#     FORMAT and not only about the address.
+#
+# Every case is EXACT tier, and the arguments are shorter than any earlier
+# family's: `shape_ops` and `ptr_roundtrip` only move elements, `ptr_recast`
+# only reinterprets them (and binary32 widens into binary64 exactly), and
+# `grid_stride` and `token_join` double, triple and add a value to itself,
+# all of which are exact in binary64 on a corpus of quarters.
+#
+# What the corpora have to carry, and why:
+#
+#   * DISTINCT values in `shape_ops`, one per lane of a block. A corpus
+#     with repeats would forgive a permutation that mapped two lanes onto
+#     one, which is exactly what permute-identity does to a tile whose
+#     first two dimensions are equal.
+#   * a grid that does not divide the work in `grid_stride`: three blocks
+#     over twelve tiles. With one block per tile the loop would run once
+#     and `get_num_tile_blocks` would never be multiplied by anything but
+#     zero, and num-tile-blocks-as-block-id would be invisible.
+#   * a scratch buffer in `token_join` whose sentinel is a value no lane of
+#     the answer holds, so a load that was not ordered after both stores
+#     shows as that sentinel rather than as a plausible number.
+#   * binary32 patterns in `ptr_recast` that are never a NaN or an
+#     infinity (the exponent field is never all ones) and that DO include
+#     subnormals and both signs: the decode has three branches and a corpus
+#     of ordinary normals would exercise one.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i32, shape_ops_ref, grid_stride_ref,
+  token_join_ref, ptr_roundtrip_ref, ptr_recast_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const SHP_BLOCKS: Int = 4
+pub const SHP_IN: Int = 128
+pub const SHP_OUT: Int = 192
+
+pub const GS_TILE: Int = 128
+pub const GS_GRID: Int = 3
+pub const GS_ROUNDS: Int = 4
+pub const GS_TILES: Int = 12
+
+pub const TJ_BLOCKS: Int = 4
+pub const TJ_CHUNK: Int = 128
+
+pub const PR_BLOCKS: Int = 4
+pub const PR_TILE: Int = 128
+pub const PR_DELTA: Int = 3
+
+pub const PC_BLOCKS: Int = 4
+pub const PC_TILE: Int = 128
+
+## The tail every output buffer carries past its answer: lanes no kernel
+## here should write, so an operation that ran wide is visible.
+pub const TAIL: Int = 8
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, as wide_diff's is
+# (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int,
+  acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a `gx`
+## by `gy` by `gz` grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. `reads` are the argument positions to
+## download afterwards.
+##
+## The raw `gpu` operations rather than the typed `alloc` / `upload` /
+## `download`, for wide_diff's reason: a case's buffers do not share a
+## format and `Tensor[D]` is one format per handle.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+    }
+  }
+
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one kernel: `identical:exact` (bit for bit),
+## `differ:result`, or `blocked:<kind>@<stage>`. There is no tolerance
+## branch: nothing here rounds and nothing here folds.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+# `0, 1, .., n-1`: a lane's value IS its index, so a misplaced element says
+# where it came from and the transcript reads as a permutation. `shape_ops`
+# takes these, and it is the corpus that makes extract-indices-reversed,
+# cat-operands-swapped and permute-identity visible.
+fn indices(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i))
+
+# `n` quarters from `base`: distinct, exact in binary64, and exact after a
+# doubling or a tripling, which is all `grid_stride` and `token_join` do.
+fn quarters(n: Int, base: Float) -> List[Float] = list.map(range(0, n), i => base + to_float(i) / 4.0)
+
+# `n` binary32 bit patterns, as the values an i32 buffer holds. The
+# exponent field is forced below 255, so no pattern is a NaN or an
+# infinity; 0 is left in range, so subnormals and both zeroes occur.
+fn f32_patterns(n: Int, a: Int, b: Int) -> List[Float] = list.map(range(0, n), i => {
+  let h = (i * a + b) & 0xFFFFFFFF
+  let biased = (h >>> 23) & 0xFF
+  let capped = if biased == 0xFF { 0xFE } else { biased }
+  to_float(wrap_i32(((h >>> 31) << 31) | (capped << 23) | (h & 0x7FFFFF)))
+})
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String =
+  ["shape_ops", "grid_stride", "token_join", "ptr_roundtrip", "ptr_recast"][i]
+
+## The kernels of the tolerance tier: NONE. See the header.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it. No kernel here is a
+## leetgpu problem, so the list it contributes is empty either way.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each kernel was recorded for, as (gx, gy, gz). `grid_stride` is
+## the one whose grid is SMALLER than its work, which is the whole point of
+## it.
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let name = case_name(i)
+  if name == "shape_ops" {
+    (SHP_BLOCKS, 1, 1)
+  } else if name == "grid_stride" {
+    (GS_GRID, 1, 1)
+  } else if name == "token_join" {
+    (TJ_BLOCKS, 1, 1)
+  } else if name == "ptr_roundtrip" {
+    (PR_BLOCKS, 1, 1)
+  } else {
+    (PC_BLOCKS, 1, 1)
+  }
+}
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "shape_ops" {
+    [("f64", indices(SHP_BLOCKS * SHP_IN)), ("f64", sentinel_buffer(SHP_BLOCKS * SHP_OUT + TAIL))]
+  } else if name == "grid_stride" {
+    [("f64", quarters(GS_TILES * GS_TILE, 1.0)), ("f64", sentinel_buffer(GS_TILES * GS_TILE + TAIL))]
+  } else if name == "token_join" {
+    [("f64", quarters(TJ_BLOCKS * TJ_CHUNK, 0.0 - 40.0)),
+      ("f64", sentinel_buffer(TJ_BLOCKS * TJ_CHUNK)),
+      ("f64", sentinel_buffer(TJ_BLOCKS * TJ_CHUNK + TAIL))]
+  } else if name == "ptr_roundtrip" {
+    # the input carries PR_DELTA elements past the last block's chunk,
+    # because the kernel reads that far ahead by construction
+    [("f64", quarters(PR_BLOCKS * PR_TILE + PR_DELTA, 0.5)),
+      ("f64", sentinel_buffer(PR_BLOCKS * PR_TILE + TAIL))]
+  } else {
+    [("i32", f32_patterns(PC_BLOCKS * PC_TILE, 2654435761, 1013904223)),
+      ("f64", sentinel_buffer(PC_BLOCKS * PC_TILE + TAIL))]
+  }
+}
+
+## The argument positions to download after the launch. `token_join`'s
+## scratch buffer is NOT read back: what it holds is the kernel's business,
+## and the claim is about what the load after the join saw.
+fn case_reads(i: Int) -> List[Int] =
+  if case_name(i) == "token_join" { [2] } else { [1] }
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "shape_ops" {
+    map.from([("shape_ops", (2, last_out((dts, ins) => shape_ops_ref(SHP_BLOCKS, dts, ins))))])
+  } else if name == "grid_stride" {
+    map.from([("grid_stride", (2, last_out((dts, ins) => grid_stride_ref(GS_TILES, dts, ins))))])
+  } else if name == "token_join" {
+    map.from([("token_join", (3, last_out((dts, ins) => token_join_ref(TJ_BLOCKS, dts, ins))))])
+  } else if name == "ptr_roundtrip" {
+    map.from([("ptr_roundtrip",
+      (2, last_out((dts, ins) => ptr_roundtrip_ref(PR_BLOCKS, PR_DELTA, dts, ins))))])
+  } else {
+    map.from([("ptr_recast", (2, last_out((dts, ins) => ptr_recast_ref(PC_BLOCKS, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where a write that ran wide shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("shape_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## What one case's buffers are, as a line: the formats in argument order and
+## which positions are read back.
+fn shape_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  "bufs=${formats} reads=${to_string(case_reads(i))}"
+}
+
+## How many DISTINCT values the first buffer holds, and how many of its
+## lanes are negative. `shape_ops` needs every lane distinct or a
+## permutation mutant could hide in a repeat; the count is printed rather
+## than asserted, so a corpus that quietly lost that property is visible in
+## the transcript.
+fn corpus_shape(v: List[Float]) -> String = {
+  let distinct = len(list.filter(range(0, len(v)), i =>
+      not list.any(range(0, i), j => to_string(v[j]) == to_string(v[i]))))
+  let neg = len(list.filter(range(0, len(v)), i => v[i] < 0.0))
+  "distinct=${distinct}/${len(v)} negative=${neg}/${len(v)}"
+}
+
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let argv = args()
+  let count = 5
+  if len(argv) != count {
+    io.eprintln("usage: shape_diff <shape_ops.cubin> <grid_stride.cubin> <token_join.cubin>"
+        ++ " <ptr_roundtrip.cubin> <ptr_recast.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let reads = case_reads(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
+    let v = verdict(fake, real)
+    let (first_dt, first_data) = bufs[0]
+    io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
+    io.println("  input ${first_dt} ${corpus_shape(list.take(first_data, 128))}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
