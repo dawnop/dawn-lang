@@ -605,6 +605,18 @@ dtypes=(dtype_i16 dtype_i64 dtype_tf32)
 # something other than the tag it names.
 dtype_red=(dtype_tf32)
 dtype_green=(dtype_i16 dtype_i64)
+# The attribute kernels of knife T4, in the order attr_diff takes them. Its
+# subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
+# no opcode at all, and every one of these eight computes the same thing
+# twice or more under different values of one attribute, so the difference
+# between the segments is the measurement (docs 6.8). Which kernel carries
+# which value is what the six mutants below are held to: the directed
+# roundings are attr_round's, the two NaN questions are attr_nan's, the
+# flush is attr_ftz's, the approximate root is attr_approx's and the loop
+# bound comparison is attr_ucmp's. attr_overflow, attr_memsem and attr_addf
+# carry values no corpus here can see, and their mutants are in
+# scripts/tile-golden/run.sh, where a refusal is the verdict.
+attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_addf attr_ucmp)
 
 # The loop kernels of knife T5, in the order loop_diff takes them. Three of
 # them hold a `loop` and a `break`; `loop_bound` computes `loop_count`'s
@@ -666,7 +678,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -700,6 +712,8 @@ dtype_cubins=()
 for k in "${dtypes[@]}"; do dtype_cubins+=("$work/$k.cubin"); done
 loop_cubins=()
 for k in "${loops[@]}"; do loop_cubins+=("$work/$k.cubin"); done
+attr_cubins=()
+for k in "${attrs[@]}"; do attr_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1025,6 +1039,49 @@ case "$shape_verdict" in
   *) cat "$work/shape.err" >&2; fail "shape_diff printed no verdict (exit $rc)" ;;
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | head -n 1)"
+
+# ---- native, the attribute kernels (knife T4)
+build_native "$root/std" "$work/attr.bin" "$here/attr_diff.dawn"
+rc=0
+device "$work/attr.bin" "${attr_cubins[@]}" > "$work/attr.out" 2> "$work/attr.err" || rc=$?
+cat "$work/attr.out"
+attr_verdict="$(verdict_of "$work/attr.out")"
+case "$attr_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#attrs[@]} attribute kernels agree with the fake device" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $attr_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $attr_verdict" ;;
+  fail) cat "$work/attr.err" >&2; fail "the device answered and disagreed with the fake device on a knife T4 kernel (see the transcript above)" ;;
+  *) cat "$work/attr.err" >&2; fail "attr_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/attr.out" | head -n 1)"
+
+# Each of these counts is a pair of segments that the attribute has to move
+# APART on the device. A zero would mean the value reached the assembler and
+# did nothing, and the reference would still have agreed, because the
+# reference is written from the dialect and not from the device. That is the
+# whole reason the counts are held here and not only inside the program: the
+# six package mutants below each drive exactly one of them to zero or change
+# the kernel's answer, and without the pin half of them would stay green.
+if [ "$attr_verdict" = pass ]; then
+  attr_probe_line="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
+  for claim in attr_round:add attr_round:mul attr_round:div attr_nan:ordering attr_nan:maxf \
+    attr_nan:minf attr_ftz:add attr_ftz:mul attr_approx:lanes; do
+    field="${claim#*:}"
+    kernel="${claim%%:*}"
+    value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | head -n 1)"
+    [ -n "$value" ] ||
+      { printf '%s\n' "$attr_probe_line" >&2; fail "the attribute probe line has no $claim count"; }
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      { printf '%s\n' "$attr_probe_line" >&2; fail "$claim is $value: the attribute moved no lane, so nothing here is evidence about it"; }
+  done
+  # The loop bound comparison is not a lane count but two numbers, and both
+  # of them are the claim: a signed comparison of this range runs the loop
+  # no times and an unsigned one runs it thirty-two times.
+  grep -q 'attr_ucmp:signed=0.0 attr_ucmp:unsigned=32.0' "$work/attr.out" ||
+    { cat "$work/attr.out" >&2; fail "attr_ucmp did not answer 0 signed and 32 unsigned"; }
+  echo "PASS  corpus: every attribute moved its own pair of segments ($attr_probe_line)"
+fi
 
 # ---- native, the multi-launch sequences (knife 16)
 #
@@ -1406,11 +1463,13 @@ tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
 tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
+tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
 trig_probe="$(sed -n 's/^probe per-op //p' "$work/trig.out" | tail -n 1)"
+attr_probe="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
 loop_probe="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
@@ -3137,6 +3196,133 @@ dtype_writer_mutant() { # name, old, new
 dtype_writer_mutant tf32-tag-as-f32 \
   '  "tf32" -> 8' \
   '  "tf32" -> 7'
+# ---- knife T4's six package mutants
+#
+# Every one of them rewrites HOW ONE ATTRIBUTE VALUE IS WRITTEN and nothing
+# else, which is what the attribute ledger
+# (scripts/tileir-features/attrs.txt) counts as layer-3 evidence for that
+# value. All six are accepted by `tileiras` -- every value they write
+# instead is a legal one -- so layer 1 sees nothing and the device is the
+# only judge.
+#
+# Five of them move a kernel's ANSWER and go red the ordinary way. The
+# sixth, sqrt-approx-as-nearest-even, cannot: the approximate root and the
+# correctly rounded one are both inside the tolerance the tier compares
+# with, so the verdict stays `close:tolerance` whichever the device
+# computed. What it drives to zero is the probe count above, and the pin on
+# that count is what makes it red. That is the reason the count is a pin and
+# not a print.
+attr_pkg_mutant() { # name, module, old, new, red-kernel-or-probe...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local pkg="$work/pkg-$name" before after k rc mverdict differ probe_line
+  local want=$#
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+  mutant_kernels "$name" "$pkg" "${attrs[@]}"
+  local cubins=()
+  for k in "${attrs[@]}"; do cubins+=("$work/$name-$k.cubin"); done
+  rc=0
+  device "$work/attr.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$attr_verdict" != pass ]; then
+    [ "$mverdict" = "$attr_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $attr_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $attr_verdict, before any launch reaches the device"
+    return 0
+  fi
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  probe_line="$(sed -n 's/^probe attrs //p' "$work/m-$name.out" | tail -n 1)"
+  for k in "$@"; do
+    case "$k" in
+      probe:*)
+        # the claim is a probe count that must have fallen to zero
+        printf '%s\n' "$probe_line" | tr ' ' '\n' | grep -qxF "${k#probe:}" ||
+          { printf '%s\n' "$probe_line" >&2; fail "$name: expected the probe to say ${k#probe:}"; }
+        ;;
+      *)
+        awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+          "$work/m-$name.out" ||
+          { cat "$work/m-$name.out" >&2; fail "$name: $k carries the mutated attribute and should differ"; }
+        ;;
+    esac
+  done
+  local reds=0
+  for k in "$@"; do case "$k" in probe:*) ;; *) reds=$((reds + 1)) ;; esac; done
+  [ "$differ" = "$reds" ] ||
+    { cat "$work/m-$name.out" >&2; fail "$name: expected exactly $reds kernel(s) to say differ:result, got $differ"; }
+  if [ "$reds" -gt 0 ]; then
+    [ "$mverdict" = fail ] && [ "$rc" = 1 ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name mutant stayed green: expected verdict fail (exit 1), got $mverdict (exit $rc)"; }
+  fi
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $want claim(s) hold and no other kernel moved)"
+}
+
+# 29. directed-rounding-as-nearest-even: the writer rounds to nearest even
+#     where the kernel asked for negative or positive infinity. Every
+#     rounding mode is a legal byte in that position, so the assembler has
+#     nothing to object to; attr_round's six segments collapse into three
+#     pairs of equals and the answer moves on every lane whose exact result
+#     is off the binary32 grid.
+attr_pkg_mutant directed-rounding-as-nearest-even bytecode.dawn \
+  '  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEGATIVE_INF)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_POSITIVE_INF)' \
+  '  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEAREST_EVEN)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_NEAREST_EVEN)' \
+  attr_round probe:attr_round:add=0
+
+# 30. ftz-bit-dropped: the writer clears `flush_to_zero`'s flag bit. A unit
+#     attribute is nothing BUT that bit -- no payload is written for it --
+#     so this is the whole of the attribute, the file is the same length,
+#     and attr_ftz's subnormal sums and products stop being flushed.
+attr_pkg_mutant ftz-bit-dropped bytecode.dawn \
+  '  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ' \
+  '  "addf_ftz" | "mulf_ftz" -> 0' \
+  attr_ftz probe:attr_ftz:add=0
+
+# 31. propagate-nan-bit-dropped: the same for `propagate_nan`. Without it
+#     `maxf` answers the non-NaN operand where the kernel asked for a NaN,
+#     which is IEEE 754-2019's maximumNumber where it asked for maximum.
+attr_pkg_mutant propagate-nan-bit-dropped bytecode.dawn \
+  '  "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN' \
+  '  "maxf_nan" | "minf_nan" -> 0' \
+  attr_nan probe:attr_nan:maxf=0
+
+# 32. cmpf-always-ordered: the writer gives every float comparison the
+#     `ordered` comparison ordering. The two orderings agree on every pair
+#     of numbers, so this is invisible on any corpus without a NaN in it;
+#     attr_nan has NaNs on one side of 128 lanes, and its six unordered
+#     predicates answer false there instead of true.
+attr_pkg_mutant cmpf-always-ordered bytecode.dawn \
+  '  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_UNORDERED } else { CMP_ORDERED }' \
+  '  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_ORDERED } else { CMP_ORDERED }' \
+  attr_nan probe:attr_nan:ordering=0
+
+# 33. for-unsigned-bit-dropped: the writer clears the loop's `unsignedCmp`
+#     bit, so both of attr_ucmp's loops compare their bound as a signed
+#     i32 and neither runs. The answer is a lane COUNT rather than a
+#     rounding: 32 becomes 0.
+attr_pkg_mutant for-unsigned-bit-dropped bytecode.dawn \
+  'if for_has_flags() { emit(w2, if unsigned { FOR_FLAG_UNSIGNED } else { 0 }) } else { w2 }' \
+  'if for_has_flags() { emit(w2, 0) } else { w2 }' \
+  attr_ucmp
+
+# 34. sqrt-approx-as-nearest-even: the writer asks for the correctly
+#     rounded square root where the kernel asked for the approximate one.
+#     This is the mutant the VERDICT cannot catch: both roots are inside
+#     the tolerance tier's distance of the host reference, so attr_approx
+#     still says close:tolerance. What it does catch is the probe, whose
+#     two segments become the same number on all 512 lanes.
+attr_pkg_mutant sqrt-approx-as-nearest-even bytecode.dawn \
+  '  } else if op == "sqrt_approx" {
+    Some(ROUND_APPROX)' \
+  '  } else if op == "sqrt_approx" {
+    Some(ROUND_NEAREST_EVEN)' \
+  probe:attr_approx:lanes=0 probe:attr_approx:distance=0.0
 
 # ---- knife T5's mutant: which side of the condition breaks
 #
@@ -3241,6 +3427,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
+  scripts/tile-gpu-diff/attr_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -3249,7 +3436,7 @@ commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
-summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
+summary="$summary attrs=$attr_probe seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

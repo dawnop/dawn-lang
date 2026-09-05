@@ -331,28 +331,47 @@ fn segment_distance(v: List[Float], segs: Int, ja: Int, jb: Int) -> Float =
     if s > acc { s } else { acc }
   })
 
-## The probe line for one kernel: what the segments say about each other.
-## run.sh pins every count on it above zero.
-fn probe_line(name: String, o: Option[List[Float]]) -> String = match o {
+## What one kernel's segments say about each other, one `field=value` per
+## claim. Every field is named after the attribute it is evidence about,
+## and run.sh pins the counts above zero: a zero would say the value
+## reached the assembler and did nothing, and the host reference would
+## still have agreed, because it is written from the dialect and not from
+## the device.
+fn probe_fields(name: String, v: List[Float]) -> List[String] =
+  if name == "attr_round" {
+    ["add=${differing(v, ROUND_SEGS, 0, 1)}", "mul=${differing(v, ROUND_SEGS, 2, 3)}",
+      "div=${differing(v, ROUND_SEGS, 4, 5)}"]
+  } else if name == "attr_nan" {
+    let ordering = list.fold(range(0, 6), 0, (acc, j) => acc + differing(v, NAN_SEGS, j, j + 6))
+    ["ordering=${ordering}", "maxf=${differing(v, NAN_SEGS, 12, 13)}",
+      "minf=${differing(v, NAN_SEGS, 14, 15)}"]
+  } else if name == "attr_ftz" {
+    ["add=${differing(v, FTZ_SEGS, 0, 1)}", "mul=${differing(v, FTZ_SEGS, 2, 3)}"]
+  } else if name == "attr_approx" {
+    ["lanes=${differing(v, APPROX_SEGS, 0, 1)}",
+      "distance=${segment_distance(v, APPROX_SEGS, 0, 1)}"]
+  } else if name == "attr_ucmp" {
+    ["signed=${v[at(UCMP_SEGS, 0, 0, 0)]}", "unsigned=${v[at(UCMP_SEGS, 0, 1, 0)]}"]
+  } else {
+    []
+  }
+
+## The fields as one line, each carrying `prefix` before it. The aggregate
+## line at the end of the run prefixes every field with its kernel, so a
+## reader (and run.sh) can name one claim without counting positions.
+fn probe_line(prefix: String, name: String, o: Option[List[Float]]) -> String = match o {
   None -> "-"
-  Some(v) ->
-    if name == "attr_round" {
-      "add=${differing(v, ROUND_SEGS, 0, 1)} mul=${differing(v, ROUND_SEGS, 2, 3)}"
-        ++ " div=${differing(v, ROUND_SEGS, 4, 5)}"
-    } else if name == "attr_nan" {
-      let ordering = list.fold(range(0, 6), 0, (acc, j) => acc + differing(v, NAN_SEGS, j, j + 6))
-      "ordering=${ordering} maxf=${differing(v, NAN_SEGS, 12, 13)}"
-        ++ " minf=${differing(v, NAN_SEGS, 14, 15)}"
-    } else if name == "attr_ftz" {
-      "add=${differing(v, FTZ_SEGS, 0, 1)} mul=${differing(v, FTZ_SEGS, 2, 3)}"
-    } else if name == "attr_approx" {
-      "lanes=${differing(v, APPROX_SEGS, 0, 1)}"
-        ++ " distance=${segment_distance(v, APPROX_SEGS, 0, 1)}"
-    } else if name == "attr_ucmp" {
-      "signed=${v[at(UCMP_SEGS, 0, 0, 0)]} unsigned=${v[at(UCMP_SEGS, 0, 1, 0)]}"
-    } else {
+  Some(v) -> {
+    let fields = probe_fields(name, v)
+    if len(fields) == 0 {
       "-"
+    } else {
+      list.fold(fields, "", (acc, f) => {
+        let sep = if acc == "" { "" } else { " " }
+        acc ++ sep ++ prefix ++ f
+      })
     }
+  }
 }
 
 # ---- the corpora ----
@@ -622,10 +641,11 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
     io.println("  miss  ${miss_line(tier, real, fake)}")
-    let p = if stopped(real) == "" { probe_line(name, real.result) } else { "-" }
+    let p = if stopped(real) == "" { probe_line("", name, real.result) } else { "-" }
     if p != "-" {
       io.println("  probe ${p}")
-      probes = probes ++ (if probes == "" { "" } else { " " }) ++ name ++ ":" ++ p
+      probes = probes ++ (if probes == "" { "" } else { " " })
+        ++ probe_line(name ++ ":", name, real.result)
     } else {
       ()
     }
