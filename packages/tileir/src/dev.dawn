@@ -432,9 +432,13 @@ pub opaque type Ptrs[D] = Int
 ##
 ## `t_store_ptrs` is `t_load_ptrs`'s other direction, and `t_global` /
 ## `t_get_global` are the static globals (knife T7).
-## `t_global(sym, dtype, values, align)` DECLARES one: it adds a record to
-## the module beside the entry rather than an instruction to the body, so
-## it answers nothing and may not be issued inside a region.
+## `t_global(sym, dtype, values, align, is_private, constant)` DECLARES one:
+## it adds a record to the module beside the entry rather than an instruction
+## to the body, so it answers nothing and may not be issued inside a region.
+## `is_private` and `constant` are the two fields the Global section's record
+## grew at bytecode 13.3 (knife T8); they are booleans here and the writer
+## turns the first into a SymbolVisibility enum value, the way every other
+## enum in this package lives in bytecode.dawn and not on this surface.
 ## `t_get_global(sym, dtype, shape)` answers a tile of `shape` every lane
 ## of which holds the global's own address, the same reshape and broadcast
 ## `t_ptrs` performs on a parameter; from there the pointer surface above
@@ -508,7 +512,7 @@ pub effect Dev {
   fn t_assume(pred: AssumePred, dtype: String, shape: List[Int], src: Int) -> Int
   fn t_print(fmt: String, dtype: String, shape: List[Int], args: List[Int]) -> Unit
   fn t_store_ptrs(dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int]) -> Unit
-  fn t_global(sym: String, dtype: String, values: List[Float], align: Int) -> Unit
+  fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
   fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
 }
 
@@ -2287,18 +2291,39 @@ pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: 
 ## reduction is refused. Declare each global once, before the
 ## `get_global` that names it.
 ##
-## The visibility and the `constant` flag the dialect also gives `global`
-## are not here: both are bytecode 13.3 and this writer pins 13.2
-## (prog.dawn's `Global` says where that was measured).
+## Public and writable, which are the dialect's own defaults;
+## `d_global_private` and `d_global_const` are the other two values of the
+## two fields the record grew at 13.3.
 pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, 0)
+  t_global(sym, dtype_name(d), values, 0, false, false)
 
 ## `d_global` with an explicit alignment in bytes. The dialect's default is
 ## 0 and the Global section's record has carried the number since 13.1, so
 ## this is the one field of that record a corpus can give two different
 ## values in one module.
 pub fn d_global_aligned[D: Dtype](sym: String, d: D, values: List[Float], align: Int) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, align)
+  t_global(sym, dtype_name(d), values, align, false, false)
+
+## `d_global` with `private` symbol visibility: the symbol is not part of the
+## module's interface, so a host that has the module cannot look it up.
+##
+## Nothing in this tree can tell the difference from the outside, and the
+## reason is named rather than glossed: the judgement would be
+## `cuModuleGetGlobal` answering for a public symbol and refusing a private
+## one, and the `Gpu` effect in std/gpu.dawn has no such operation. So what
+## this buys is the byte and layer 1 (`tileiras` accepts it), and
+## scripts/tileir-features/attrs.txt carries the exemption
+## `no-module-symbol-ffi` on the row.
+pub fn d_global_private[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0, true, false)
+
+## `d_global` with the `constant` flag: the global is read-only, which is a
+## promise to the compiler and not a guard. The dialect does not say a store
+## through a pointer got from a constant global is diagnosed, so this tree
+## does not store through one; the same `no-module-symbol-ffi` exemption
+## applies, for the same reason.
+pub fn d_global_const[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0, false, true)
 
 ## The tile of `shape` every lane of which holds the address of the global
 ## named `sym`: `get_global` answers a rank-0 `tile<ptr<D>>`, and this is
@@ -2656,7 +2681,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
     }
     t_print(_fmt, _dtype, _shape, _args) => ()
     t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
-    t_global(_sym, _dtype, _values, _align) => ()
+    t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
     t_get_global(_sym, _dtype, _shape) => {
       let h = next
       next = next + 1
@@ -2923,8 +2948,8 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_store_ptrs(dtype, shape, ptrs, value, mask) => {
       log = log ++ ["store_ptrs ${dtype} ${show(shape)} ${ptrs} ${value} ${opt(mask)}"]
     }
-    t_global(sym, dtype, values, align) => {
-      log = log ++ ["global ${sym} ${dtype} ${show(values)} ${align}"]
+    t_global(sym, dtype, values, align, is_private, constant) => {
+      log = log ++ ["global ${sym} ${dtype} ${show(values)} ${align} ${show(is_private)} ${show(constant)}"]
     }
     t_get_global(sym, dtype, shape) => {
       log = log ++ ["get_global ${sym} ${dtype} ${show(shape)}"]
@@ -3286,7 +3311,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_assume(_pred, _dtype, _shape, _src) => 76
       t_print(_fmt, _dtype, _shape, _args) => ()
       t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
-      t_global(_sym, _dtype, _values, _align) => ()
+      t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
       t_get_global(_sym, _dtype, _shape) => 77
     }
     let _r = loop_seen()

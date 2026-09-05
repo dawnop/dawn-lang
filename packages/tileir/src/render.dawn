@@ -406,21 +406,29 @@ fn block(indent: String, body: List[Instr]) -> List[String] = {
 
 fn join(lines: List[String]) -> String = list.fold(lines, "", (acc, l) => acc ++ l ++ "\n")
 
-# One `global` declaration, the way GlobalOp's assembly format spells it:
-# the visibility keyword is omitted (the printer omits `public`, which is
-# the default and the only one bytecode 13.2 can carry), `alignment = n`
-# only when it is not the dialect's default 0, then the name, then the
-# initializer and its type. The element values are spelled the way
-# `ConstFloat` spells a splat, which is this renderer's own spelling and
-# not MLIR's printer's (`1.5` where it would print `1.500000e+00`);
-# `tileiras` reads bytecode and never this text, so the text's job is to be
-# read by a person.
+# One `global` declaration, in the order GlobalOp's assembly format puts the
+# pieces: the visibility keyword, then `constant`, then the name, then
+# `alignment = n`, then the initializer and its type.
+#
+# `public` prints as NOTHING and `private` prints as a keyword, which is the
+# dialect's own printer and not a choice here (CudaTile.cpp's
+# printSymbolVisibility omits the default in as many words). Both of those
+# words, and `constant`, became writable at bytecode 13.3, which knife T8
+# pinned; before it the record had no field to put them in.
+#
+# `alignment = n` appears only when it is not the dialect's default 0. The
+# element values are spelled the way `ConstFloat` spells a splat, which is
+# this renderer's own spelling and not MLIR's printer's (`1.5` where it would
+# print `1.500000e+00`); `tileiras` reads bytecode and never this text, so
+# the text's job is to be read by a person.
 fn global_line(g: Global) -> String = {
   let t = Tile([len(g.values)], Num(g.dtype))
+  let vis = if g.is_private { "private " } else { "" }
+  let ro = if g.constant { "constant " } else { "" }
   let align = if g.align == 0 { "" } else { "alignment = ${g.align} " }
   let vals = list.fold(range(0, len(g.values)), "", (acc, k) =>
       if acc == "" { "${g.values[k]}" } else { acc ++ ", ${g.values[k]}" })
-  "  global @${g.sym} ${align}<${g.dtype}: [${vals}]> : ${ty(t)}"
+  "  global ${vis}${ro}@${g.sym} ${align}<${g.dtype}: [${vals}]> : ${ty(t)}"
 }
 
 ## `k` as one `cuda_tile.module @m` holding its globals and one
@@ -870,20 +878,27 @@ fn globals_prog() -> TileProg = TileProg {
   name: "g",
   params: ["f64"],
   globals: [
-    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.5], align: 0 },
-    Global { sym: "pad", dtype: "i32", values: [7.0], align: 128 }
+    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.5], align: 0, is_private: false, constant: false },
+    Global { sym: "pad", dtype: "i32", values: [7.0], align: 128, is_private: false, constant: false },
+    Global { sym: "hid", dtype: "f64", values: [3.0], align: 0, is_private: true, constant: false },
+    Global { sym: "ro", dtype: "f64", values: [4.0], align: 0, is_private: false, constant: true },
+    Global { sym: "both", dtype: "f64", values: [5.0], align: 64, is_private: true, constant: true }
   ],
   ops: [MakeToken(0), GetGlobal(1, "tbl", "f64", [8])]
 }
 
 test "a global prints above the entry, its alignment only when it is not the dialect's default, and get_global names the symbol" {
   let text = render(globals_prog())
-  # the visibility keyword is absent: the dialect's printer omits `public`,
-  # which is the default and the only one bytecode 13.2 can carry
+  # the visibility keyword is absent on a public global: the dialect's own
+  # printer omits the default (CudaTile.cpp's printSymbolVisibility)
   assert str.contains(text, "cuda_tile.module @m {\n  global @tbl <f64: [1.0, 2.5]> : tile<2xf64>\n")
   assert str.contains(text, "  global @pad alignment = 128 <i32: [7.0]> : tile<1xi32>\n")
   assert not str.contains(text, "public")
-  assert not str.contains(text, "constant @")
+  # knife T8: the two words the record grew room for at 13.3, in the order
+  # the assembly format puts them, and both before the symbol
+  assert str.contains(text, "  global private @hid <f64: [3.0]> : tile<1xf64>\n")
+  assert str.contains(text, "  global constant @ro <f64: [4.0]> : tile<1xf64>\n")
+  assert str.contains(text, "  global private constant @both alignment = 64 <f64: [5.0]> : tile<1xf64>\n")
   # get_global answers a rank-0 pointer tile; the reshape and broadcast
   # after it are the same two the parameter ladder emits
   assert str.contains(text, "%1 = get_global @tbl : tile<ptr<f64>>\n")

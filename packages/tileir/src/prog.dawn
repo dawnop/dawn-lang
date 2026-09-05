@@ -164,16 +164,25 @@ pub const MAX_HANDLES: Int = 65536
 ## body, which is why `global` 0x31 is `structural` in
 ## scripts/tileir-features/features.txt the way `entry` and `module` are.
 ##
-## `symbol_visibility` and `constant` are NOT here: both entered the Global
-## section's record at bytecode 13.3 (Ops.td versions those two arguments
-## "13.3", and BytecodeWriter.cpp's writeGlobalSection writes four varints
-## per global below that version and six at or above it), and this writer
-## pins 13.2. Knife T8 is the version wall and owns them.
+## `is_private` and `constant` are the two fields the Global section's record
+## grew at bytecode 13.3 (Ops.td versions GlobalOp's `symbol_visibility` and
+## `constant` arguments "13.3", and BytecodeWriter.cpp's writeGlobalSection
+## writes four varints per global below that version and six at or above it).
+## Knife T8 moved the pin to 13.3 and so this record carries them:
+## `is_private` becomes the SymbolVisibility enum value the writer holds
+## (bytecode.dawn's VIS_PUBLIC and VIS_PRIVATE) and `constant` says the
+## global is read-only.
+## Neither changes what a kernel computes here, and neither can be checked
+## from the host without `cuModuleGetGlobal`, which the `Gpu` effect does not
+## have; scripts/tileir-features/attrs.txt records that as the exemption
+## `no-module-symbol-ffi`.
 pub type Global = {
   sym: String,
   dtype: String,
   values: List[Float],
   align: Int,
+  is_private: Bool,
+  constant: Bool,
 } derive Show
 
 ## A kernel as recorded: its entry name, the dtype name of each parameter in
@@ -1078,7 +1087,7 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         tok = t
         ()
       }
-      t_global(sym, dtype, values, align) => {
+      t_global(sym, dtype, values, align, is_private, constant) => {
         # A global belongs to the module, not to a region of the entry, and
         # the Global section has no place to say otherwise.
         if len(frames) != 0 {
@@ -1105,7 +1114,7 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         } else {
           ()
         }
-        globals = globals ++ [Global { sym: sym, dtype: dtype, values: values, align: align }]
+        globals = globals ++ [Global { sym: sym, dtype: dtype, values: values, align: align, is_private: is_private, constant: constant }]
         ()
       }
       t_get_global(sym, dtype, shape) => {
@@ -1880,8 +1889,8 @@ fn two_globals() -> TileProg = trace_kernel("globals", ["f64"], () => {
 test "a global is recorded beside the entry and not in it, and get_global names it by symbol" {
   let p = two_globals()
   assert len(p.globals) == 2
-  assert p.globals[0] == Global { sym: "a", dtype: "f64", values: [1.0, 2.0, 4.0], align: 0 }
-  assert p.globals[1] == Global { sym: "b", dtype: "f64", values: [8.0, 16.0, 32.0], align: 256 }
+  assert p.globals[0] == Global { sym: "a", dtype: "f64", values: [1.0, 2.0, 4.0], align: 0, is_private: false, constant: false }
+  assert p.globals[1] == Global { sym: "b", dtype: "f64", values: [8.0, 16.0, 32.0], align: 256, is_private: false, constant: false }
   # the declarations issue no operation: the ops are make_token, get_global,
   # the ladder for the offset, the load through the pointers and the store
   assert list.any(p.ops, o => match o {
