@@ -140,6 +140,28 @@
 #                      own verdict is still `pass`, and the only thing that
 #                      moves is the line on standard output. It is the one
 #                      mutant here that no buffer comparison can see
+#     global-initializer-reversed
+#                      the Global section carries a global's initializer
+#                      back to front -> same length, same type, and
+#                      `tileiras` has nothing to object to, because a table
+#                      is a table. Only the device says global_table
+#                      answers the mirror of what the host declared;
+#                      global_scratch's all-zero global is unmoved and
+#                      global_ctl has no global at all
+#     get-global-wrong-symbol
+#                      every `get_global` names the module's FIRST global
+#                      whatever it was asked for -> the bytes are the same
+#                      length, `tileiras` accepts it (naming a declared
+#                      symbol twice is legal), and only the device says
+#                      global_table's second segment is its first
+#     module-reloaded-per-launch
+#                      the real handler stops keeping the module it loaded
+#                      and loads the cubin again for every launch -> NO
+#                      BYTE MOVES, because nothing in a Tile IR file says
+#                      how long a module lives, and global_scratch's second
+#                      launch starts from the initializer again. It is the
+#                      second mutant here that the bytes cannot see
+#                      (grid-y-ignored is the first)
 #     mma-acc-not-carried
 #                      the GEMM's K loop starts from a fresh zero tile each
 #                      iteration instead of carrying its accumulator ->
@@ -665,6 +687,16 @@ dbg_green=(assume_divby assume_same assume_bounded)
 # it poisons the context, `print_tile` because the bytes it puts on standard
 # output are the judgement and nothing else may be mixed into them.
 dbg_alone=(assert_fail print_tile)
+# The static-global kernels of knife T7, in the order global_diff takes
+# them. `global_table` reads two globals and `global_scratch` writes one;
+# `global_ctl` computes global_table's answer out of two BUFFERS instead,
+# so it holds neither opcode and is this family's KERNEL-LEVEL CONTROL as
+# well as a second opinion on the tables. `global_scratch` is also the one
+# kernel in this directory launched more than once WITHOUT being a step of
+# a sequence: the two launches are the same kernel on the same module, and
+# that is the only shape in which a static allocation's lifetime is
+# visible from outside the device.
+globals_=(global_table global_ctl global_scratch)
 
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
@@ -716,7 +748,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" \
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" \
   "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -755,6 +787,8 @@ attr_cubins=()
 for k in "${attrs[@]}"; do attr_cubins+=("$work/$k.cubin"); done
 dbg_cubins=()
 for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
+global_cubins=()
+for k in "${globals_[@]}"; do global_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1176,6 +1210,49 @@ case "$attr_verdict" in
   *) cat "$work/attr.err" >&2; fail "attr_diff printed no verdict (exit $rc)" ;;
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/attr.out" | head -n 1)"
+
+# ---- native, the static-global kernels (knife T7)
+build_native "$root/std" "$work/global.bin" "$here/global_diff.dawn"
+rc=0
+device "$work/global.bin" "${global_cubins[@]}" > "$work/global.out" 2> "$work/global.err" || rc=$?
+cat "$work/global.out"
+global_verdict="$(verdict_of "$work/global.out")"
+case "$global_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#globals_[@]} static-global kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $global_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $global_verdict" ;;
+  fail) cat "$work/global.err" >&2; fail "the device answered and disagreed with the fake device on a knife T7 kernel (see the transcript above)" ;;
+  *) cat "$work/global.err" >&2; fail "global_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/global.out" | head -n 1)"
+
+# The static-global corpus, held field by field. Each of these is what
+# makes one of the three mutants below a measurement rather than a
+# sentence: two tables that agreed everywhere would hide a `get_global`
+# that named the wrong symbol; a table that read the same backwards would
+# hide an initializer written in reverse; a table whose lanes were all its
+# first would hide one written as a one-element splat; and an input with a
+# zero lane is a lane whose second launch answers what its first did,
+# where the persistence claim has nothing to say.
+global_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/global.out")"
+[ -n "$global_shape" ] || fail "global_diff printed no index line"
+for field in distinct asymmetric growing; do
+  value="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the global index line names no $field: $global_shape"
+  [ "$value" = "128" ] ||
+    fail "the global corpus has $field=$value of 128 lanes, so that claim is not fully tested: $global_shape"
+done
+# 127 and not 128: lane 0 IS its own first element, so an initializer
+# written as a one-element splat agrees with the truth there whatever the
+# table is, and 127 is the most this count can be.
+nonsplat="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^nonsplat=//p')"
+[ "$nonsplat" = "127" ] ||
+  fail "the global corpus has nonsplat=$nonsplat of the 127 lanes it could have: $global_shape"
+launches="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^scratch_launches=//p')"
+[ "${launches:-0}" -ge 2 ] ||
+  fail "global_scratch is launched ${launches:-0} time(s), so nothing observes the global's lifetime: $global_shape"
+echo "PASS  corpus: the two tables differ on every lane, neither is a mirror or a splat, every input lane is non-zero, and global_scratch is launched $launches times ($global_shape)"
 
 # Each of these counts is a pair of segments that the attribute has to move
 # APART on the device. A zero would mean the value reached the assembler and
@@ -3721,6 +3798,130 @@ else
   echo "SKIP  mutant: assert-condition-inverted and print-format-wrong are not verifiable on this driver: the clean runs are $dbg_verdict / $dbg_fail_verdict / $dbg_print_verdict"
 fi
 
+# ---- knife T7's mutants: the two the writer owns and the one the handler does
+#
+# The two package mutants below are the layer-3 evidence for `global` and
+# `get_global`: each changes HOW THAT OPCODE IS WRITTEN (the initializer
+# the Global section carries, the symbol the instruction names) and
+# nothing else, `tileiras` accepts the result because a different table
+# and a different symbol are both legal Tile IR, and only the device says
+# the answer moved. `global_ctl` holds neither opcode, so its bytes and
+# its verdict must not move under either.
+#
+# `global_scratch` is the second control and a different kind: its one
+# global is initialized to zeros and its module declares one symbol, so an
+# initializer written backwards and a `get_global` that always names the
+# first global BOTH leave its bytes exactly as they were. That is not luck,
+# it is what a corpus of one all-zero global means, and it is why the
+# green set below is two kernels and not one.
+global_pkg_mutant() { # name, module, old, new, red-kernel
+  local name="$1" module="$2" old="$3" new="$4" red="$5"
+  local pkg="$work/pkg-$name" before after k rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${globals_[@]}"
+  if cmp -s "$golden/$red.tilebc" "$work/$name-$red.tilebc"; then
+    fail "$name: $red should move at layer 0 and its bytecode is unchanged"
+  fi
+  for k in "${globals_[@]}"; do
+    if [ "$k" != "$red" ]; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  [ "$(wc -c < "$golden/$red.tilebc")" = "$(wc -c < "$work/$name-$red.tilebc")" ] ||
+    fail "$name: $red.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  echo "      $name: $red.tilebc differs from its golden at the same length, the other $(( ${#globals_[@]} - 1 )) do not, and tileiras still accepts every one"
+
+  for k in "${globals_[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$global_verdict" != pass ]; then
+    rc=0
+    device "$work/global.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$global_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $global_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/global.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly $red saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk -v want="$red" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+    "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $red is the kernel that should differ"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $red differs and the other $(( ${#globals_[@]} - 1 )) do not)"
+}
+
+# 35. global-initializer-reversed: the Global section carries the
+#     initializer's elements back to front. Same length, same type, same
+#     alignment, and `tileiras` has nothing to object to -- a table is a
+#     table. Only the device says global_table answers the mirror of what
+#     the host declared. The corpus's `asymmetric=128` is what makes this
+#     visible on every lane, and global_scratch's all-zero global is what
+#     makes it invisible there.
+global_pkg_mutant global-initializer-reversed bytecode.dawn \
+  '  bytes.freeze(list.fold(values, bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))' \
+  '  bytes.freeze(list.fold(list.map(range(0, len(values)), k => values[len(values) - 1 - k]), bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))' \
+  global_table
+
+# 36. get-global-wrong-symbol: every `get_global` names the module's FIRST
+#     global whatever it was asked for. The bytes stay the same length (a
+#     symbol is one string index and both strings are interned either way,
+#     because the Global section names them too) and `tileiras` accepts it,
+#     because naming a declared symbol twice is a legal program. Only the
+#     device says global_table's second segment is its first. The corpus's
+#     `distinct=128` is what makes that visible; global_scratch declares one
+#     global, so for it the mutant is the identity.
+global_pkg_mutant get-global-wrong-symbol prog.dawn \
+  '        ops = ops ++ [GetGlobal(d, sym, dtype, shape)]' \
+  '        ops = ops ++ [GetGlobal(d, seen[0].sym, dtype, shape)]' \
+  global_table
+
+# 37. module-reloaded-per-launch: the real handler stops keeping the module
+#     it loaded and loads the cubin again for every launch. This is a
+#     HANDLER mutant and moves no bytes at all: the layers below cannot see
+#     it, because nothing in a Tile IR file says how long a module lives.
+#     What it takes away is the dialect's own sentence about `global` --
+#     "the lifetime of the allocation is the same as the lifetime of the
+#     module" -- so global_scratch's second launch starts from the
+#     initializer again and answers its input instead of twice its input.
+#     global_table and global_ctl read no mutable state and are untouched,
+#     which is what separates "the mutant broke the lifetime" from "the
+#     mutant broke the handler".
+std_reload="$(mutant_std module-reloaded-per-launch \
+  '              let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
+                Some(m) -> Ok(m)
+                None -> gpu_load_module_host(cubin)
+              }' \
+  '              let loaded: Result[Int, ForeignError] = gpu_load_module_host(cubin)')"
+if [ "$global_verdict" = pass ]; then
+  build_native "$std_reload" "$work/m-module-reloaded-per-launch.bin" "$here/global_diff.dawn"
+  rc=0
+  device "$work/m-module-reloaded-per-launch.bin" "${global_cubins[@]}" \
+    > "$work/m-module-reloaded-per-launch.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-module-reloaded-per-launch.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-module-reloaded-per-launch.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-module-reloaded-per-launch.out" >&2
+    fail "module-reloaded-per-launch stayed green: expected fail (exit 1) with exactly global_scratch saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == "global_scratch" {seen=1} END {exit !seen}' \
+    "$work/m-module-reloaded-per-launch.out" ||
+    { cat "$work/m-module-reloaded-per-launch.out" >&2; fail "module-reloaded-per-launch: global_scratch is the kernel that should differ"; }
+  echo "PASS  mutant: module-reloaded-per-launch (no byte moves; on the device global_scratch loses the first launch's sum and the other two do not)"
+else
+  echo "SKIP  mutant: module-reloaded-per-launch not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -3738,6 +3939,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
+  scripts/tile-gpu-diff/global_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
