@@ -3579,6 +3579,7 @@ loop_pkg_mutant loop-break-condition-inverted prog.dawn \
 # the three stores after it are untouched and the download still agrees bit
 # for bit. Only the byte judgement moves, which is the demonstration that
 # the byte judgement carries something no buffer comparison has.
+
 # One copy of scripts/tile-golden/kernels.dawn with one anchor rewritten,
 # as a project the kernels below are re-encoded from. Two kernels come out
 # of this one mutation, which is why building it and using it are two
