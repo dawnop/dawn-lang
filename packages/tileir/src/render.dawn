@@ -17,8 +17,8 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
-use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, Ret}
+use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -227,6 +227,18 @@ fn line(i: Instr) -> String = match i {
     if len(tys) == 0 { "if ${name(cond)} {" } else { "${results(res)}if ${name(cond)} -> (${commas(list.map(tys, ty))}) {" }
   YieldVals(values, tys) ->
     if len(values) == 0 { "yield" } else { "yield ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
+  ExtractTile(dst, src, from, to, indices) ->
+    "${v(dst)} = extract ${name(src)}[${commas(list.map(indices, name))}] : ${ty(from)} -> ${ty(to)}"
+  CatTile(dst, dim, lhs, rhs, lhs_ty, rhs_ty, to) ->
+    "${v(dst)} = cat ${name(lhs)}, ${name(rhs)} dim = ${dim} : ${ty(lhs_ty)}, ${ty(rhs_ty)} -> ${ty(to)}"
+  PermuteTile(dst, src, perm, from, to) ->
+    "${v(dst)} = permute ${name(src)} [${commas(list.map(perm, d => "${d}"))}]"
+    ++ " : ${ty(from)} -> ${ty(to)}"
+  BlockCounts(x, y, z) -> "${v(x)}, ${v(y)}, ${v(z)} = get_num_tile_blocks : tile<i32>"
+  JoinTokens(dst, toks) -> "${v(dst)} = join_tokens ${commas(list.map(toks, name))} : token"
+  PtrToIntTile(dst, src, from, to) -> "${v(dst)} = ptr_to_int ${name(src)} : ${ty(from)} -> ${ty(to)}"
+  IntToPtrTile(dst, src, from, to) -> "${v(dst)} = int_to_ptr ${name(src)} : ${ty(from)} -> ${ty(to)}"
+  PtrToPtrTile(dst, src, from, to) -> "${v(dst)} = ptr_to_ptr ${name(src)} : ${ty(from)} -> ${ty(to)}"
   Ret -> "return"
 }
 
@@ -514,4 +526,86 @@ test "index arithmetic spells as scalar i32 constant, addi and muli" {
   let text = render(sum_prog())
   assert str.contains(text, "\n    %4 = constant <i32: 4> : tile<i32>\n    %5 = muli %1, %4 : tile<i32>\n")
   assert str.contains(text, "\n    %18 = addi %5, %17 : tile<i32>\n    %19 = addi %5, %4 : tile<i32>\n")
+}
+
+test "the shape operations spell the dialect's own assembly: brackets on extract, `dim =` on cat, a bare list on permute" {
+  let p = TileProg {
+    name: "shapes",
+    params: ["f64", "f64"],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      NumBlocks(2, 0),
+      Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0),
+      Permute(5, "f64", [4, 4, 8], [1, 0, 2], 3),
+      IdxConst(6, 1),
+      IdxConst(7, 0),
+      Extract(8, "f64", [4, 4, 8], [2, 4, 8], 3, [6, 7, 7]),
+      Extract(9, "f64", [4, 4, 8], [2, 4, 8], 3, [7, 7, 7]),
+      Cat(10, "f64", 0, [2, 4, 8], [2, 4, 8], 8, 9),
+      Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 10, None, 4)
+    ]
+  }
+  let text = render(p)
+  # a permutation whose two swapped dimensions are equal keeps the shape,
+  # which is what lets a wrong permutation be a wrong ANSWER here
+  assert str.contains(text, " = permute %28 [1, 0, 2] : tile<4x4x8xf64> -> tile<4x4x8xf64>\n")
+  assert str.contains(text, " = extract %28[%31, %32, %32] : tile<4x4x8xf64> -> tile<2x4x8xf64>\n")
+  assert str.contains(text, " dim = 0 : tile<2x4x8xf64>, tile<2x4x8xf64> -> tile<4x4x8xf64>\n")
+  assert str.contains(text, "%4, %5, %6 = get_num_tile_blocks : tile<i32>\n")
+  assert count(text, "get_num_tile_blocks") == 1
+  assert count(text, "get_tile_block_id") == 1
+}
+
+test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {
+  let p = TileProg {
+    name: "ptrs",
+    params: ["f64", "i32"],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      MakePtrs(2, 0, "f64", [8]),
+      Lanes(3, 1, [8], [1]),
+      PtrAdd(4, "f64", [8], 2, 3),
+      PtrInt(5, "f64", [8], 4),
+      ConstI(6, "i64", [8], 24),
+      BinaryI(7, "addi", "i64", [8], 5, 6),
+      IntPtr(8, "f64", [8], 7),
+      LoadAt(9, 10, "f64", [8], 8, None, None, 0),
+      PtrCast(11, "f64", "i32", [8], 4),
+      LoadAt(12, 13, "i32", [8], 11, None, None, 10),
+      Store(14, 1, "i32", 1, [8], [1], 12, None, 13)
+    ]
+  }
+  let text = render(p)
+  assert str.contains(text, " = ptr_to_int %10 : tile<8xptr<f64>> -> tile<8xi64>\n")
+  assert str.contains(text, " = int_to_ptr %13 : tile<8xi64> -> tile<8xptr<f64>>\n")
+  assert str.contains(text, " = ptr_to_ptr %10 : tile<8xptr<f64>> -> tile<8xptr<i32>>\n")
+  assert str.contains(text, " = addi %11, %12 : tile<8xi64>\n")
+  # the body's own pointer tile is the reshape-and-broadcast the strided
+  # ladder opens with, and the offset is the one instruction it ends with
+  assert count(text, " = offset ") == 2
+  assert count(text, "load_ptr_tko weak ") == 2
+}
+
+test "a fork issues two stores from one token and joins them before the load that follows" {
+  let p = TileProg {
+    name: "fork",
+    params: ["f64", "f64"],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      ConstF(2, "f64", [8], 1.0),
+      Store(3, 1, "f64", 1, [8], [1], 2, None, 0),
+      Store(4, 1, "f64", 1, [8], [1], 2, None, 0),
+      JoinToks(5, [3, 4]),
+      Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5)
+    ]
+  }
+  let text = render(p)
+  # both stores take %0, the entry token; the join takes both their tokens
+  # and the load takes the join
+  assert count(text, "token=%0 ") == 2
+  assert str.contains(text, " = join_tokens %12, %13 : token\n")
+  assert str.contains(text, "token=%14 :")
 }
