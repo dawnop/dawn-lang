@@ -52,7 +52,14 @@
 #             until a value they computed says stop, one stops before its
 #             first step, and the fourth computes the first one's answer
 #             with a `for` over a host constant and is the family's
-#             kernel-level control) and seq_diff.dawn the eleven multi-launch
+#             kernel-level control) and assert_diff.dawn the six debugging
+#             kernels of knife T6 in THREE processes (the three `assume`
+#             predicates and the assertion that holds in one; the assertion
+#             that FIRES alone, because a fired assertion poisons the
+#             context for the whole process; and `print_tko` alone, because
+#             the bytes it puts on standard output are the judgement --
+#             that program writes its own transcript to standard ERROR so
+#             that standard output belongs to the device) and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -117,6 +124,22 @@
 #                      one-dimensional grid), while on the device the four
 #                      kernels with a second grid axis leave the sentinel
 #                      where the blocks nobody launched should have written
+#     assert-condition-inverted
+#                      the kernel source's one assertion condition is
+#                      inverted, and `assert_guard` is instantiated at two
+#                      limits the corpus is entirely under and entirely
+#                      over -> the launch that held now fails and the
+#                      launch that failed now holds. BOTH directions are in
+#                      the red set: a gate that only knew how to notice a
+#                      failing launch would be satisfied by a kernel that
+#                      always fires. The three `assume` kernels do not go
+#                      through the anchor and must not move
+#     print-format-wrong
+#                      the package hands `print_tko` its operands
+#                      backwards -> the buffer is untouched, the program's
+#                      own verdict is still `pass`, and the only thing that
+#                      moves is the line on standard output. It is the one
+#                      mutant here that no buffer comparison can see
 #     mma-acc-not-carried
 #                      the GEMM's K loop starts from a fresh zero tile each
 #                      iteration instead of carrying its accumulator ->
@@ -628,6 +651,21 @@ loops=(loop_count loop_bound loop_until loop_none)
 loop_red=(loop_count loop_until loop_none)
 loop_green=(loop_bound)
 
+# The debugging kernels of knife T6, in the order assert_diff's DEFAULT case
+# takes them. `assert_pass` is last for a reason that is not tidiness: a
+# fired assertion poisons the CUDA context for the rest of the process, so a
+# mutant that makes it fire would take every kernel after it down too. The
+# three `assume` kernels hold neither of the two mutable opcodes and are
+# this family's KERNEL-LEVEL CONTROL.
+dbg=(assume_divby assume_same assume_bounded assert_pass)
+dbg_red=(assert_pass)
+dbg_green=(assume_divby assume_same assume_bounded)
+
+# The two that cannot share a process with anything: `assert_fail` because
+# it poisons the context, `print_tile` because the bytes it puts on standard
+# output are the judgement and nothing else may be mixed into them.
+dbg_alone=(assert_fail print_tile)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -678,7 +716,8 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" \
+  "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -714,6 +753,8 @@ loop_cubins=()
 for k in "${loops[@]}"; do loop_cubins+=("$work/$k.cubin"); done
 attr_cubins=()
 for k in "${attrs[@]}"; do attr_cubins+=("$work/$k.cubin"); done
+dbg_cubins=()
+for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1003,6 +1044,86 @@ case "$loop_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/loop.out" | head -n 1)"
 
+# ---- native, the debugging kernels (knife T6)
+#
+# THREE RUNS OF ONE PROGRAM, AND THE TRANSCRIPT IS ON STANDARD ERROR. This
+# family is the only one here whose kernels write to the process's standard
+# output: the driver flushes `assert`'s message and `print_tko`'s formatted
+# line there when the context is synchronised. So assert_diff.dawn prints
+# its whole transcript, verdict line included, on standard ERROR, and what
+# arrives on standard output is exactly what the device put there -- which
+# is what makes "this launch should print these bytes" a judgement a machine
+# can make.
+#
+# The three runs are three PROCESSES because a fired assertion is sticky:
+# measured here, `cuCtxSynchronize` answers CUDA_ERROR_LAUNCH_FAILED and
+# every call after it in the same process answers the same thing. A kernel
+# that is expected to fail therefore cannot share a process with one whose
+# answer is to be compared.
+build_native "$root/std" "$work/assert.bin" "$here/assert_diff.dawn"
+rc=0
+device "$work/assert.bin" "${dbg_cubins[@]}" > "$work/assert.stdout" 2> "$work/assert.out" || rc=$?
+cat "$work/assert.out"
+[ ! -s "$work/assert.stdout" ] ||
+  { cat "$work/assert.stdout" >&2; fail "the default case put bytes on standard output: none of ${dbg[*]} prints"; }
+dbg_verdict="$(verdict_of "$work/assert.out")"
+case "$dbg_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#dbg[@]} debugging kernels agree with the fake device bit for bit, and none of them printed" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $dbg_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $dbg_verdict" ;;
+  fail) fail "the device answered and disagreed with the fake device on a knife T6 kernel (see the transcript above)" ;;
+  *) fail "assert_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/assert.out" | head -n 1)"
+
+# The FAIL case: one kernel in a process of its own, whose judgement is that
+# the host is told. Two halves, and neither is a comparison: the driver's
+# error, and the message this repository wrote into the bytecode's String
+# section coming back out once per failing lane with that lane's index.
+rc=0
+device "$work/assert.bin" --case fail "$work/assert_fail.cubin" \
+  > "$work/assert-fail.stdout" 2> "$work/assert-fail.out" || rc=$?
+cat "$work/assert-fail.out"
+dbg_fail_verdict="$(verdict_of "$work/assert-fail.out")"
+case "$dbg_fail_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        assert_message_lines=$(grep -c 'tile-golden: a lane reached the limit' "$work/assert-fail.stdout" || true)
+        [ "$assert_message_lines" = 128 ] ||
+          { head -3 "$work/assert-fail.stdout" >&2; fail "assert_fail printed the message on $assert_message_lines lane(s), not 128"; }
+        for pos in 0 127; do
+          grep -q "position: \[$pos\]: tile-golden: a lane reached the limit" "$work/assert-fail.stdout" ||
+            fail "assert_fail's output names no lane $pos: the message carries the index of the lane that failed"
+        done
+        echo "PASS  native: assert_fail's launch failed the way it was meant to, and the message came back on all 128 lanes with their indices" ;;
+  blocked:*) echo "BLOCKED  native: the driver stopped assert_fail somewhere else: $dbg_fail_verdict" ;;
+  fail) cat "$work/assert-fail.stdout" >&2; fail "assert_fail's assertion did not fire: the launch was expected to fail and did not" ;;
+  *) fail "assert_diff --case fail printed no verdict (exit $rc)" ;;
+esac
+
+# The PRINT case: one kernel in a process of its own, and the only judgement
+# in this directory whose subject is the bytes a launch put on standard
+# output. The expected bytes are computed by the HOST references from the
+# corpus (assert_diff prints them as hex on standard error), not copied from
+# what the device did.
+rc=0
+device "$work/assert.bin" --case print "$work/print_tile.cubin" \
+  > "$work/print.stdout" 2> "$work/print.out" || rc=$?
+cat "$work/print.out"
+dbg_print_verdict="$(verdict_of "$work/print.out")"
+print_want_hex="$(sed -n 's/^print-expect-hex //p' "$work/print.out" | tail -n 1)"
+print_got_hex="$(od -An -tx1 "$work/print.stdout" | tr -d ' \n')"
+case "$dbg_print_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        [ -n "$print_want_hex" ] || fail "assert_diff --case print printed no expected bytes"
+        [ "$print_got_hex" = "$print_want_hex" ] ||
+          fail "print_tile put $print_got_hex on standard output and the host reference wanted $print_want_hex"
+        echo "PASS  native: print_tile's line on standard output is the host reference's byte for byte ($print_want_hex)" ;;
+  blocked:*) echo "BLOCKED  native: the driver refused before print_tile could be compared: $dbg_print_verdict" ;;
+  fail) fail "the device answered and disagreed with the fake device on print_tile (see the transcript above)" ;;
+  *) fail "assert_diff --case print printed no verdict (exit $rc)" ;;
+esac
+
 # The same two kernels on the CONTROL corpus, where no lane is negative and
 # the odd symmetry's `select` never chooses its negated arm. The clean run
 # must pass there as well -- it is the same kernel -- and what matters is
@@ -1168,6 +1289,27 @@ over="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^loop_none_over_th
 [ "$over" = 0 ] ||
   fail "loop_none's corpus has $over lane(s) over its threshold, so it is not the zero-iteration case: $loop_shape"
 echo "PASS  corpus: the loop corpus decides its own trip count, saturates and stays under loop_none's threshold ($loop_shape)"
+
+# The knife T6 corpus, held field by field. Three of these five hold a count
+# DOWN to zero, which is the opposite of every other corpus check here and
+# is what an `assume` needs: a lane that breaks the predicate does not make
+# the answer wrong, it makes the program undefined (Ops.td's AssumeOp), so
+# there would be nothing to compare. The other two are the two SIDES of the
+# assertion's condition: every lane under assert_pass's limit and no lane
+# under assert_fail's, which is what makes the inverted mutant flip both
+# kernels cleanly instead of half-firing either.
+dbg_shape="$(awk '/^index /{sub(/^index /, ""); print; exit}' "$work/assert.out")"
+[ -n "$dbg_shape" ] || fail "assert_diff printed no index line"
+for field in divby_off_grid same_broken_group bounded_out_of_range under_fail_limit; do
+  value="$(printf '%s\n' "$dbg_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the knife T6 index line names no $field: $dbg_shape"
+  [ "$value" = 0 ] ||
+    fail "the knife T6 corpus has $field=$value: an assume whose predicate is false is undefined, not wrong ($dbg_shape)"
+done
+under_pass="$(printf '%s\n' "$dbg_shape" | tr ' ' '\n' | sed -n 's/^under_pass_limit=//p')"
+[ "$under_pass" = 128 ] ||
+  fail "only $under_pass of 128 lanes are under assert_pass's limit, so its assertion is not the all-true side: $dbg_shape"
+echo "PASS  corpus: every knife T6 predicate is true of its corpus, and the two assertion limits are its two sides ($dbg_shape)"
 
 # Abramowitz-Stegun 7.1.26 is an approximation, so the corpus is what says
 # WHERE it was checked. Three counts, all of them held above zero: the
@@ -1464,6 +1606,7 @@ tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
 tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
+tiers="$tiers dbg:$(sed -n 's/^tiers //p' "$work/assert.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
@@ -3411,6 +3554,161 @@ loop_pkg_mutant loop-break-condition-inverted prog.dawn \
   '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
   '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])'
 
+# ---- knife T6's two mutants: which side of the assertion fires, and which
+# bytes the print puts on standard output
+#
+# The first is a KERNEL-SOURCE mutant, because what it has to invert is the
+# CONDITION and the condition is written in scripts/tile-golden/kernels.dawn,
+# not in the package. `assert_guard` is one function instantiated at two
+# limits: 1000, which every lane of the corpus is under, and 0, which no
+# lane is under. So `v < limit` is all-true at one and all-false at the
+# other, and turning it into `v >= limit` swaps the two kernels' fates
+# exactly:
+#
+#   assert_pass  held before, fires after  -> the launch must now fail
+#   assert_fail  fired before, holds after -> the launch must now succeed
+#
+# BOTH DIRECTIONS ARE IN THE RED SET, which is the thing this mutant is for:
+# a gate that only knew how to notice a failing launch would be satisfied by
+# a kernel that always fires, and one that only knew how to notice a
+# succeeding launch would be satisfied by a kernel that never does.
+#
+# The second is a PACKAGE mutant and its whole point is that the BUFFER
+# stays right. `d_print`'s operands are reversed, so `print_tile` prints
+# `sum=128 max=8256` where the host reference says `sum=8256 max=128`, while
+# the three stores after it are untouched and the download still agrees bit
+# for bit. Only the byte judgement moves, which is the demonstration that
+# the byte judgement carries something no buffer comparison has.
+# One copy of scripts/tile-golden/kernels.dawn with one anchor rewritten,
+# as a project the kernels below are re-encoded from. Two kernels come out
+# of this one mutation, which is why building it and using it are two
+# functions rather than one.
+dbg_kernel_mutant() { # name, old, new
+  local name="$1" src="$work/kernels-$1.dawn" before after
+  cp "$golden/kernels.dawn" "$src"
+  before=$(digest "$src")
+  python3 "$here/mutate.py" "$src" "$name" "$2" "$3"
+  after=$(digest "$src")
+  echo "      $name: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+  mkdir -p "$work/proj-$name/src"
+  cp "$src" "$work/proj-$name/src/main.dawn"
+  cat > "$work/proj-$name/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+}
+
+# One kernel re-encoded from that project: its bytes must MOVE and tileiras
+# must still take them, or the mutant is not a different program.
+dbg_kernel_moved() { # name, kernel
+  local name="$1" k="$2"
+  "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name-$k.tilebc" > "$work/proj-$name.$k.log" 2>&1 ||
+    { cat "$work/proj-$name.$k.log" >&2; fail "$name: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+    fail "$name mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/$name-$k.tilebc" "$work/$name-$k.cubin"
+  echo "      $name: $k.tilebc differs from the golden and tileiras still accepts it"
+}
+
+# The kernels the mutant must NOT move: it is anchored in `assert_guard`,
+# which only the two assertion kernels call.
+dbg_kernel_control() { # name, kernels...
+  local name="$1" k
+  shift
+  for k in "$@"; do
+    "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name-$k.tilebc" > "$work/proj-$name.$k.log" 2>&1 ||
+      { cat "$work/proj-$name.$k.log" >&2; fail "$name: $k did not encode"; }
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k does not go through the mutated anchor, so its bytecode must not move"
+  done
+  echo "      $name: $* are untouched at layer 0"
+}
+
+if [ "$dbg_verdict" = pass ] && [ "$dbg_fail_verdict" = pass ] && [ "$dbg_print_verdict" = pass ]; then
+  dbg_kernel_mutant assert-condition-inverted \
+    '  d_assert(shape, lt_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")' \
+    '  d_assert(shape, ge_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")'
+  dbg_kernel_moved assert-condition-inverted assert_pass
+  dbg_kernel_moved assert-condition-inverted assert_fail
+  dbg_kernel_control assert-condition-inverted "${dbg_green[@]}" print_tile
+
+  # direction one: the assertion that held now fires, so the default case
+  # is blocked at the sync of its LAST kernel and the three that come
+  # before it still agree
+  mut_cubins=()
+  for k in "${dbg[@]}"; do
+    if [ "$k" = assert_pass ]; then
+      mut_cubins+=("$work/assert-condition-inverted-assert_pass.cubin")
+    else
+      mut_cubins+=("$work/$k.cubin")
+    fi
+  done
+  rc=0
+  device "$work/assert.bin" "${mut_cubins[@]}" > "$work/m-assert-inverted.stdout" 2> "$work/m-assert-inverted.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-assert-inverted.out")"
+  [ "$mverdict" = "blocked:cuda.CUDA_ERROR_LAUNCH_FAILED@sync" ] ||
+    { cat "$work/m-assert-inverted.out" >&2; fail "assert-condition-inverted stayed green: assert_pass's assertion should now fire, got $mverdict"; }
+  identical=$(grep -c '^  verdict identical:exact$' "$work/m-assert-inverted.out" || true)
+  [ "$identical" = "${#dbg_green[@]}" ] ||
+    { cat "$work/m-assert-inverted.out" >&2; fail "assert-condition-inverted: ${dbg_green[*]} should be untouched, $identical of ${#dbg_green[@]} agreed"; }
+  grep -q 'tile-golden: a lane reached the limit' "$work/m-assert-inverted.stdout" ||
+    fail "assert-condition-inverted: assert_pass fired without printing its message"
+
+  # direction two: the assertion that fired now holds, so the fail case has
+  # nothing to report and says so
+  rc=0
+  device "$work/assert.bin" --case fail "$work/assert-condition-inverted-assert_fail.cubin" \
+    > "$work/m-assert-inverted-fail.stdout" 2> "$work/m-assert-inverted-fail.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-assert-inverted-fail.out")"
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ]; then
+    cat "$work/m-assert-inverted-fail.out" >&2
+    fail "assert-condition-inverted stayed green: assert_fail's assertion should no longer fire, got $mverdict (exit $rc)"
+  fi
+  grep -q '^  verdict assert-did-not-fire$' "$work/m-assert-inverted-fail.out" ||
+    { cat "$work/m-assert-inverted-fail.out" >&2; fail "assert-condition-inverted: the fail case went red for something other than the assertion holding"; }
+  [ ! -s "$work/m-assert-inverted-fail.stdout" ] ||
+    fail "assert-condition-inverted: assert_fail's assertion held, so nothing should have reached standard output"
+  echo "PASS  mutant: assert-condition-inverted (layer 1 accepts both; on the device ${dbg_red[*]} now fails and assert_fail now succeeds, ${dbg_green[*]} untouched)"
+
+  # print-format-wrong: the package's `d_print` hands the operands over
+  # backwards. The stores are untouched, so the buffer still agrees bit for
+  # bit and the program's own verdict is still `pass`; the only thing that
+  # moves is the line on standard output.
+  pkg="$work/pkg-print-format-wrong"
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/dev.dawn")
+  python3 "$here/mutate.py" "$pkg/src/dev.dawn" print-format-wrong \
+    '  t_print(fmt, dtype_name(d), none, hs)' \
+    '  t_print(fmt, dtype_name(d), none, list.reverse(hs))'
+  after=$(digest "$pkg/src/dev.dawn")
+  echo "      print-format-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
+  mutant_kernels print-format-wrong "$pkg" print_tile "${dbg[@]}"
+  cmp -s "$golden/print_tile.tilebc" "$work/print-format-wrong-print_tile.tilebc" &&
+    fail "print-format-wrong mutant stayed green: print_tile.tilebc is unchanged"
+  for k in "${dbg[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/print-format-wrong-$k.tilebc" ||
+      fail "print-format-wrong: $k does not print, so its bytecode must not move"
+  done
+  echo "      print-format-wrong: print_tile.tilebc differs, ${dbg[*]} do not, and tileiras accepts every one"
+  rc=0
+  device "$work/assert.bin" --case print "$work/print-format-wrong-print_tile.cubin" \
+    > "$work/m-print.stdout" 2> "$work/m-print.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-print.out")"
+  [ "$mverdict" = pass ] ||
+    { cat "$work/m-print.out" >&2; fail "print-format-wrong: the BUFFER should be untouched, and the program's verdict with it, got $mverdict"; }
+  m_want_hex="$(sed -n 's/^print-expect-hex //p' "$work/m-print.out" | tail -n 1)"
+  m_got_hex="$(od -An -tx1 "$work/m-print.stdout" | tr -d ' \n')"
+  [ "$m_got_hex" != "$m_want_hex" ] ||
+    { cat "$work/m-print.stdout" >&2; fail "print-format-wrong stayed green: the printed bytes still match the reference"; }
+  echo "PASS  mutant: print-format-wrong (the buffer still agrees bit for bit and the program still says pass; the printed bytes are $m_got_hex against $m_want_hex)"
+else
+  echo "SKIP  mutant: assert-condition-inverted and print-format-wrong are not verifiable on this driver: the clean runs are $dbg_verdict / $dbg_fail_verdict / $dbg_print_verdict"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -3427,7 +3725,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
-  scripts/tile-gpu-diff/attr_diff.dawn \
+  scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
