@@ -45,6 +45,7 @@
 
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
+| [gate-map-dependencies-design.md](gate-map-dependencies-design.md) | current | 从示例 manifest 的本地依赖闭包推导包到示例门禁的归属，并以增删依赖和传递依赖负控固定。 |
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
