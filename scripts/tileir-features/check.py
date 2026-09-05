@@ -51,6 +51,13 @@ LANDED_KNIVES = {"T0", "T1"}
 GAPS = set(range(0x19, 0x25)) | set(range(0x34, 0x3A))
 EXPECTED_CODES = {c for c in range(0x00, 0x76) if c not in GAPS}
 
+# The coverage knives that have LANDED. A T name is the coverage series
+# (docs/tile-backend-design.md 2.4) and not a promise; what says "not yet" is
+# the status column, and the two are held together here: a row that is still
+# `unimplemented` must name a knife nobody has run, and an `implemented` row
+# must name one somebody has. Add a knife's name the day it lands.
+LANDED_KNIVES = {"T0", "T2"}
+
 # The version deltas, so that a row cannot quietly claim 13.1 for an opcode
 # that needs a newer assembler. Everything not named here entered at 13.1.
 SINCE_13_2 = {"atan2"}
@@ -149,6 +156,9 @@ def check(table_text, bytecode_text, files, ledger_text):
             elif ops[name] != value:
                 problems.append(
                     f"line {n}: {name} is {code} here and 0x{ops[name]:02X} in bytecode.dawn")
+            if planned:
+                problems.append(
+                    f"line {n}: {name} is implemented, so knife {knife!r} cannot be a planned one")
         else:
             if name in ops:
                 problems.append(
@@ -302,6 +312,10 @@ def self_test():
          good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6  | 0 | -",
                       f"{absent:24s} | 0x06 | 13.1 | implemented   | 3   | 2 | golden:vadd"),
          "whose .mlir does not contain the op"),
+        ("an implemented row whose knife has not landed",
+         good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
+                      "tanh                     | 0x6A | 13.1 | implemented   | T9 "),
+         "cannot be a planned one"),
         ("an unimplemented row whose knife is not a planned one",
          good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6 ",
                       f"{absent:24s} | 0x06 | 13.1 | unimplemented | 3  "),
