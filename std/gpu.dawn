@@ -3261,6 +3261,128 @@ pub fn llama_out_ref(s: Int, d: Int, hd: Int, dtypes: List[String],
   })
 }
 
+# ---- the shape, grid, token and pointer kernels (knife T2) ----
+#
+# These five have no leetgpu problem behind them. They exist for the eight
+# Tile IR opcodes of that knife, and each is written so that the OPCODE
+# rather than the arithmetic decides the answer: the numbers are copies and
+# doublings, and what a wrong `permute`, a wrong pair of `extract` indices,
+# a wrong `cat` order, a `get_tile_block_id` where `get_num_tile_blocks`
+# belongs or a load that is not ordered after both stores gets wrong is
+# WHICH lane holds which value.
+
+## The three shape operations over one block of 128 f64, read two ways:
+## `ins` is `[x, old out]`. Block `b` reads `x[b * 128 ..]` and fills 192
+## lanes: the first 64 are the 16 by 8 tile with its two row halves
+## exchanged and only its first four columns kept (`extract` twice, then
+## `cat` the other way round), and the next 128 are the 4 by 4 by 8 tile
+## with its first two axes swapped (`permute [1, 0, 2]`).
+pub fn shape_ops_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx => {
+    let b = idx / 192
+    let k = idx % 192
+    if b >= blocks {
+      kept(old, idx)
+    } else if k < 64 {
+      # cat(extract[1, 0], extract[0, 0]) along dimension 0: row `i` of the
+      # answer is row `(i + 8) % 16` of the source, columns 0 to 3
+      let i = k / 4
+      round_to(dt, x[b * 128 + ((i + 8) % 16) * 8 + k % 4])
+    } else {
+      # permute [1, 0, 2]: answer[a, c, e] is source[c, a, e]
+      let m = k - 64
+      round_to(dt, x[b * 128 + (m / 8) % 4 * 32 + m / 32 * 8 + m % 8])
+    }
+  })
+}
+
+## `2 * x` over `tiles` tiles of 128 lanes: `ins` is `[x, old out]`.
+##
+## The reference does not model the grid at all, and that IS the claim. The
+## kernel covers the tiles with a grid-stride loop over a grid smaller than
+## the work, so a loop that visited every tile exactly once answers this and
+## one that missed a tile (leaving the sentinel) or repeated one instead of
+## another does not.
+pub fn grid_stride_ref(tiles: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i => if i < tiles * 128 { round_to(dt, 2.0 * x[i]) } else { kept(old, i) })
+}
+
+## The low half of each 128-lane chunk doubled and the high half tripled,
+## written into a scratch buffer by two INDEPENDENT chains of stores and
+## read back through the token that joins them: `ins` is
+## `[x, scratch, old out]`.
+##
+## The scratch buffer's own contents never appear here, which is the
+## judgement: it is handed a sentinel no lane of the answer holds, so a
+## load that was not ordered after both stores would show.
+pub fn token_join_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), i =>
+      if i < blocks * 128 {
+        if i % 128 < 64 { round_to(dt, 2.0 * x[i]) } else { round_to(dt, 3.0 * x[i]) }
+      } else {
+        kept(old, i)
+      })
+}
+
+## `x[i + delta]` over `blocks` tiles of 128 lanes, the address having gone
+## through i64 and back: `ins` is `[x, old out]`. The input buffer carries
+## `delta` elements past the last block's chunk, which is why the answer is
+## an ordinary shifted copy and not a masked one.
+pub fn ptr_roundtrip_ref(blocks: Int, delta: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < blocks * 128 { round_to(dt, x[i + delta]) } else { kept(old, i) })
+}
+
+## The binary32 value whose bit pattern is the i32 lane: `ins` is
+## `[patterns, old out]`. The kernel reads the same four bytes through a
+## pointer of another element format; this reads them by taking the pattern
+## apart, which is a second opinion about the FORMAT and not only about the
+## address.
+pub fn ptr_recast_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let bits = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), i =>
+      if i < blocks * 128 { round_to(dt, f32_of_bits(as_i32(bits, i))) } else { kept(old, i) })
+}
+
+# The binary32 value of a 32-bit pattern, by exact arithmetic. There is no
+# bits-to-float primitive in Dawn; this is the decoding half of the encoding
+# std/narrow's `bf16_bits` does, and it is exact in binary64 (24 significand
+# bits into 53, and every binary32 exponent well inside binary64's range),
+# so the widening the device's `ftof` performs is exact as well and the
+# comparison stays bit for bit.
+#
+# A pattern whose exponent field is all ones is refused rather than answered:
+# the corpus that reaches this has none, and a NaN would compare equal to
+# nothing anyway.
+fn f32_of_bits(pattern: Int) -> Float = {
+  let bits = pattern & 0xFFFFFFFF
+  let exponent = (bits >>> 23) & 0xFF
+  let fraction = bits & 0x7FFFFF
+  let magnitude = if exponent == 0xFF {
+    panic("gpu: the binary32 pattern ${bits} is a NaN or an infinity")
+  } else if exponent == 0 {
+    to_float(fraction) * pow2(0 - 149)
+  } else {
+    (1.0 + to_float(fraction) * pow2(0 - 23)) * pow2(exponent - 127)
+  }
+  if (bits >>> 31) == 1 { 0.0 - magnitude } else { magnitude }
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -4539,6 +4661,38 @@ test "the atomic references answer what a reader can check by hand" {
   assert cas_swap_ref(3, i4, [[1.0, 5.0, 6.0, 8.0], [1.0, 2.0, 0.0 - 1.0, 0.0],
     [10.0, 20.0, 30.0, 0.0], [7.0, 7.0, 7.0, 7.0]])
     == [(0, [10.0, 5.0, 6.0, 8.0]), (3, [1.0, 5.0, 7.0, 7.0])]
+}
+
+test "the shape, grid, token and pointer references answer what a reader can check by hand" {
+  let f2 = ["f64", "f64"]
+  let f3 = ["f64", "f64", "f64"]
+  # one block of 128 lanes numbered 0 .. 127, so a lane's VALUE is the
+  # source index it came from and every claim below is read off directly
+  let iota128 = list.map(range(0, 128), i => to_float(i))
+  let shaped = shape_ops_ref(1, f2, [iota128, list.map(range(0, 200), _i => 0.0 - 1.0)])
+  # the cat half: row 0 of the answer is row 8 of the source, columns 0..3
+  assert list.take(shaped, 4) == [64.0, 65.0, 66.0, 67.0]
+  # row 8 of the answer is row 0 of the source
+  assert list.take(list.drop(shaped, 32), 4) == [0.0, 1.0, 2.0, 3.0]
+  # the permute half: answer[a, c, e] is source[c, a, e], so answer[0, 1, 0]
+  # (lane 64 + 8) is source[1, 0, 0], which is lane 32
+  assert shaped[64] == 0.0 && shaped[64 + 8] == 32.0 && shaped[64 + 32] == 8.0
+  # past the block's 192 lanes the buffer keeps what it held
+  assert shaped[192] == 0.0 - 1.0
+  assert grid_stride_ref(1, f2, [iota128, list.map(range(0, 130), _i => 0.0 - 1.0)])[127] == 254.0
+  assert grid_stride_ref(1, f2, [iota128, list.map(range(0, 130), _i => 0.0 - 1.0)])[128] == 0.0 - 1.0
+  # the low half doubles and the high half triples; the scratch buffer's own
+  # contents are not in the answer at all
+  let joined = token_join_ref(1, f3, [iota128, list.map(range(0, 128), _i => 5.0),
+    list.map(range(0, 128), _i => 0.0 - 1.0)])
+  assert joined[63] == 126.0 && joined[64] == 192.0
+  # the address round trip is a shifted copy, and the input is longer by the shift
+  assert ptr_roundtrip_ref(1, 3, f2, [list.map(range(0, 131), i => to_float(i)),
+    list.map(range(0, 128), _i => 0.0 - 1.0)])[0] == 3.0
+  # 0x3F800000 is 1.0, 0xC0000000 is -2.0, 0x00000001 the smallest subnormal
+  assert ptr_recast_ref(1, ["i32", "f64"], [list.map(range(0, 128), i =>
+      to_float(wrap_i32([0x3F800000, 0xC0000000, 1, 0x7F7FFFFF][i % 4]))), list.map(range(0, 128), _i => 0.0)])
+    == list.map(range(0, 128), i => [1.0, 0.0 - 2.0, 1.401298464324817e-45, 3.4028234663852886e38][i % 4])
 }
 
 test "the strided references answer what a reader can check by hand" {
