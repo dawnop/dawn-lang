@@ -15,12 +15,12 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_mask
   atomic_add_masked, atomic_cas_masked, ge_i,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
-  d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
+  d_for, d_for2, d_for3, d_loop, d_loop2, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
   i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
-  d_reduce_i, s_addi, s_maxi,
+  d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
@@ -3643,6 +3643,153 @@ fn ptr_recast(x: Param[I32], out: Param[F64]) -> Unit !Dev = {
   store(out, base, [128], float_to_float(F32, F64, [128], load_ptrs(F32, [128], reals)))
 }
 
+# ---- knife T5: the loop whose trip count the data decides ----
+#
+# `loop` and `break` are the one region shape the tree was missing: `for`
+# counts iterations that the host or the grid fixes, and this one runs
+# until a value the kernel computed says stop. All four kernels below are
+# one block wide, because what is under test is the iteration and not the
+# grid.
+#
+# THE SHAPE THE PACKAGE EMITS, measured against the dialect rather than
+# guessed (tile-backend-design 6.7):
+#
+#   loop iter_values(%v = %init, %tk = %tok) : ... {
+#     <body>
+#     if %done { break %v, %tk2 : ... } else { yield }
+#     continue %next, %tk2 : ...
+#   }
+#
+# `break` may sit inside an `if` nested in the loop (Ops.td gives it
+# `ParentOneOf<["IfOp", "LoopOp"]>`), which is what lets the exit be a C
+# style condition rather than a two-part `loop_until`.
+
+## How wide one loop tile is, and how many lanes each corpus fills.
+const LOOP_TILE: Int = 128
+
+## How many iterations `loop_bound`'s `for` runs. It has to be at least the
+## longest Collatz chain the corpus holds (118, for 27), or the two kernels
+## would not answer the same thing.
+const COLLATZ_ROUNDS: Int = 128
+
+## The residual `loop_until` stops at, and the value its iteration starts
+## from. Newton on `x^2 = a` from 1.0 halves the error every step once it
+## is close, so the corpus below settles well inside the bound.
+const NEWTON_START: Float = 1.0
+
+## The residual the square root stops under. 1e-12 is far above the level
+## the iteration settles at for this corpus (the fixed point's residual is
+## about `2 * x * ulp(x)`, which is 4e-14 at the corpus's largest root), so
+## the loop terminates rather than oscillating under the bound.
+const NEWTON_EPS: Float = 1.0e-12
+
+## `loop_none`'s threshold and step. The corpus is under the threshold, so
+## the loop stops before its first step; the step is far over it, so one
+## iteration is enough to stop even when the condition is read backwards.
+const LOOP_NONE_THRESHOLD: Float = 1.0
+const LOOP_NONE_STEP: Float = 1000.0
+
+# One Collatz step per lane, saturating at 1: a lane that has reached 1
+# stays there, which is what makes "every lane is 1" a condition that
+# stays true once it is true. Answers the next value and the next count.
+fn collatz_step(v: Tile[I32], steps: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
+  let shape = [LOOP_TILE]
+  let one = i_const(shape, 1)
+  let two = i_const(shape, 2)
+  let three = i_const(shape, 3)
+  let zero = i_const(shape, 0)
+  let running = lt_i(shape, one, v)
+  let even = eq_i(shape, rem_i(shape, v, two), zero)
+  let moved = select(I32, shape, even, div_i(shape, v, two),
+    add_i(shape, mul_i(shape, v, three), one))
+  (select(I32, shape, running, moved, v), add_i(shape, steps, select(I32, shape, running, one, zero)))
+}
+
+# The number of Collatz steps each lane needs to reach 1, and the number of
+# iterations the loop took, as two tiles of the output buffer. The loop
+# carries the values and the counts and stops when the largest value left
+# is 1; the round count is the largest step count, because every lane that
+# is still moving adds one on every iteration.
+#
+# The trip count is DATA: 128 lanes of 1 to 128 need 118 iterations, and
+# no host constant in this kernel says so.
+fn loop_count(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let (_left, steps) = d_loop2(v0, i_const(shape, 0), (v, s) => {
+    let biggest = d_reduce_i(shape, v, 1, (acc, e) => s_maxi(acc, e))
+    let done = s_le_i(biggest, s_consti(1))
+    let (nv, ns) = collatz_step(v, s)
+    (done, nv, ns)
+  })
+  let rounds = d_reduce_i(shape, steps, 0, (acc, e) => s_maxi(acc, e))
+  store(out, blk, shape, steps)
+  store(out, tile_at(idx_const(1), LOOP_TILE), shape, spread(I32, shape, rounds))
+}
+
+# The same answer with no `loop` in it: a `for` over a host constant number
+# of rounds, saturating the same way. It is the kernel-level control of
+# both loop mutants (its bytecode holds neither opcode, so a writer that
+# spells them wrongly cannot move it) and, because it answers the same
+# counts, a second opinion on `loop_count` at the same time.
+fn loop_bound(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let (_left, steps) = d_for2(idx_const(0), idx_const(COLLATZ_ROUNDS), idx_const(1),
+    v0, i_const(shape, 0), (_k, v, s) => collatz_step(v, s))
+  store(out, blk, shape, steps)
+}
+
+# Newton's iteration for a square root, run until the largest residual in
+# the tile is under `eps`: the second data-dependent trip count, and the
+# one whose carried value is a float. Every step is
+# `x <- 0.5 * (x + a / x)`, three correctly rounded operations in an order
+# the host reference repeats, so the answer is exact tier; the round count
+# is carried alongside and lands in the second tile of the output.
+fn loop_until(a: Param[F64], out: Param[F64], eps: Float) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let av = load(a, blk, shape)
+  let half = f_const(F64, shape, 0.5)
+  let one = f_const(F64, shape, 1.0)
+  let (x, rounds) = d_loop2(f_const(F64, shape, NEWTON_START), f_const(F64, shape, 0.0), (v, r) => {
+    let residual = abs(F64, shape, sub(F64, shape, mul(F64, shape, v, v), av))
+    let worst = d_reduce(F64, shape, residual, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    let done = s_gt(F64, s_const(F64, eps), worst)
+    let nv = mul(F64, shape, half, addf(F64, shape, v, div(F64, shape, av, v)))
+    (done, nv, addf(F64, shape, r, one))
+  })
+  store(out, blk, shape, x)
+  store(out, tile_at(idx_const(1), LOOP_TILE), shape, rounds)
+}
+
+# A loop that stops on its FIRST test, before its body has changed
+# anything: the corpus is under the threshold, so the condition is true on
+# entry and the answer is what went in. It is the zero-iteration case, the
+# one a `for` cannot express without a bound of zero, and the one that says
+# `break` is reached from inside the `if` rather than at the end of the
+# body.
+#
+# The step is deliberately large enough to take the tile OVER the threshold
+# in one iteration. That is what keeps the break-condition mutant a
+# terminating program on this kernel: reading the condition backwards makes
+# it run exactly one iteration and stop, rather than never stopping, and a
+# mutant that hangs the device is not a verdict (the same sentence
+# `grid_stride` is written under).
+fn loop_none(x: Param[F64], out: Param[F64], threshold: Float, step: Float) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let v = d_loop(v0, v => {
+    let worst = d_reduce(F64, shape, v, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    let done = s_gt(F64, s_const(F64, threshold), worst)
+    (done, addf(F64, shape, v, f_const(F64, shape, step)))
+  })
+  store(out, blk, shape, v)
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4003,6 +4150,15 @@ fn trace(name: String) -> TileProg = match name {
   "dtype_e8m0" ->
     trace_kernel("dtype_e8m0", ["f8E8M0FNU", "f64", "f64"],
       () => dtype_e8m0(param(F8E8M0FNU, 0), param(F64, 1), param(F64, 2)))
+  "loop_count" ->
+    trace_kernel("loop_count", ["i32", "i32"], () => loop_count(param(I32, 0), param(I32, 1)))
+  "loop_bound" ->
+    trace_kernel("loop_bound", ["i32", "i32"], () => loop_bound(param(I32, 0), param(I32, 1)))
+  "loop_until" ->
+    trace_kernel("loop_until", ["f64", "f64"], () => loop_until(param(F64, 0), param(F64, 1), NEWTON_EPS))
+  "loop_none" ->
+    trace_kernel("loop_none", ["f64", "f64"],
+      () => loop_none(param(F64, 0), param(F64, 1), LOOP_NONE_THRESHOLD, LOOP_NONE_STEP))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -4038,6 +4194,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
-      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast>"
+      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast"
+      ++ "|loop_count|loop_bound|loop_until|loop_none>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

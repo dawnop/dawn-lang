@@ -3735,6 +3735,129 @@ pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List
       })
 }
 
+# ---- references for the loop kernels (knife T5) ----
+#
+# These four are the host halves of the `loop` and `break` kernels, and
+# they are written INDEPENDENTLY of the recording: the kernels drive a
+# device region and these drive an ordinary Dawn loop, and what makes the
+# comparison worth anything is that neither is the other's transcript.
+#
+# The trip count is the point. Two of them iterate until a value they
+# computed says stop, and neither the kernel nor the reference is told how
+# many iterations that is; a third stops before its first step. So the
+# round count each answers is a measurement, and the diff compares it
+# alongside the values.
+
+## The Collatz successor of `v`, saturating at 1: a lane that has reached 1
+## stays there, and the step is counted only while the lane is still
+## moving. The device computes both branches and selects, and wraps at
+## 32 bits; this does the same, so `3 * v + 1` past 2^31 wraps here too.
+pub fn collatz_step_ref(v: Int, steps: Int) -> (Int, Int) = {
+  let running = 1 < v
+  let moved = if v % 2 == 0 { v / 2 } else { wrap_i32(wrap_i32(3 * v) + 1) }
+  (if running { wrap_i32(moved) } else { v }, if running { steps + 1 } else { steps })
+}
+
+# The number of Collatz steps `v` needs to reach 1, up to `fuel` of them.
+# `fuel` is the number of iterations the kernel is allowed (a host constant
+# for `loop_bound`, and for `loop_count` the number this reference is
+# willing to believe): a lane whose chain is longer than that is counted
+# short HERE and not on the device, so the diff reddens rather than
+# agreeing quietly.
+fn collatz_steps(v: Int, steps: Int, fuel: Int) -> Int =
+  if fuel <= 0 || v <= 1 {
+    steps
+  } else {
+    let (nv, ns) = collatz_step_ref(v, steps)
+    collatz_steps(nv, ns, fuel - 1)
+  }
+
+## The step count of every one of the first `n` lanes of `ins[0]`, and the
+## number of iterations the loop ran repeated across the next `n`: the
+## reference for `loop_count` and, without the second segment, for
+## `loop_bound`.
+##
+## The round count is the LARGEST step count, and that is an argument
+## rather than a definition: every lane that is still moving adds one on
+## every iteration and the loop stops on the first iteration where none is,
+## so the number of iterations that changed anything is the longest chain.
+## The kernel computes it with a second reduction over the counts and this
+## computes it with a fold; both are the maximum, and the device is where
+## the two are held together.
+pub fn loop_count_ref(n: Int, fuel: Int, segs: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  let steps = list.map(range(0, n), i => collatz_steps(as_i32(x, i), 0, fuel))
+  let rounds = list.fold(steps, 0, (acc, s) => if s > acc { s } else { acc })
+  segments(ins[1], n, segs, (seg, i) => round_to(dt, to_float(if seg == 0 { steps[i] } else { rounds })))
+}
+
+# One Newton round over the whole tile: `x <- 0.5 * (x + a / x)`, lane by
+# lane, in the kernel's order (a division, a sum, a product).
+fn newton_round(a: List[Float], x: List[Float]) -> List[Float] =
+  list.map(range(0, len(x)), i => 0.5 * (x[i] + a[i] / x[i]))
+
+# The largest residual `|x * x - a|` in the tile: what the kernel's
+# reduction answers. `maxf` is associative, commutative and idempotent, so
+# the device's fold order cannot change it and this left fold is the same
+# number.
+fn newton_worst(a: List[Float], x: List[Float]) -> Float =
+  list.fold(range(0, len(x)), 0.0, (acc, i) => {
+    let d = x[i] * x[i] - a[i]
+    let m = if d < 0.0 { 0.0 - d } else { d }
+    if m > acc { m } else { acc }
+  })
+
+# Newton until the largest residual is under `eps`, or `fuel` rounds,
+# whichever comes first, answering the tile and the number of rounds.
+fn newton_run(a: List[Float], x: List[Float], rounds: Int, eps: Float, fuel: Int) -> (List[Float], Int) =
+  if fuel <= 0 || newton_worst(a, x) < eps {
+    (x, rounds)
+  } else {
+    newton_run(a, newton_round(a, x), rounds + 1, eps, fuel - 1)
+  }
+
+## The square root of each of the first `n` lanes of `ins[0]` by Newton's
+## iteration from 1.0, and the number of rounds it took repeated across the
+## next `n`: the reference for `loop_until`.
+##
+## EXACT TIER BY ALGEBRA. Every operation in the iteration is one IEEE 754
+## requires to be correctly rounded, the lanes are independent, and the
+## order is the same on both sides, so the tiles agree bit for bit. What
+## the round count adds is that the two sides also agree on WHEN to stop,
+## and that is the part only a data-dependent loop can be wrong about: the
+## residual falls by five orders of magnitude between the last iteration
+## and the one before it for the corpus this is used with, so the two sides
+## cannot disagree about the comparison by a rounding.
+pub fn loop_until_ref(n: Int, eps: Float, fuel: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = list.map(range(0, n), i => ins[0][i])
+  let dt = dtypes[1]
+  let (x, rounds) = newton_run(a, list.map(range(0, n), _i => 1.0), 0, eps, fuel)
+  segments(ins[1], n, 2, (seg, i) => round_to(dt, if seg == 0 { x[i] } else { to_float(rounds) }))
+}
+
+## The first `n` lanes of `ins[0]`, unchanged, when every one of them is
+## under `threshold`, and `step` added to each otherwise: the reference for
+## `loop_none`, whose loop stops before its body has changed anything.
+##
+## It is written as the general loop rather than as "the input" so that it
+## is a reference and not a restatement of the corpus: hand it a tile over
+## the threshold and it iterates, exactly as the kernel does.
+pub fn loop_none_ref(n: Int, threshold: Float, step: Float, fuel: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x0 = list.map(range(0, n), i => ins[0][i])
+  let dt = dtypes[1]
+  let x = raise_until(x0, threshold, step, fuel)
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, x[i]))
+}
+
+fn raise_until(x: List[Float], threshold: Float, step: Float, fuel: Int) -> List[Float] =
+  if fuel <= 0 || list.fold(x, 0.0, (acc, v) => if v > acc { v } else { acc }) < threshold {
+    x
+  } else {
+    raise_until(list.map(x, v => v + step), threshold, step, fuel - 1)
+  }
+
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
 ## A host reference as the fake device runs it: the same two arguments, and

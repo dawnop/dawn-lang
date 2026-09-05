@@ -18,7 +18,7 @@ use std/list
 use std/str
 use dev.{RedId, IdF, IdI}
 use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -206,6 +206,12 @@ fn line(i: Instr) -> String = match i {
     }
     "${results(res)}for ${v(iv)} in (${name(lower)} to ${name(upper)}, step ${name(step)}) : tile<i32>${iters} {"
   }
+  WhileLoop(res, tys, inits, carried, _body) -> {
+    let pairs = list.map(range(0, len(inits)), k => "${v(carried[k])} = ${name(inits[k])}")
+    "${results(res)}loop iter_values(${commas(pairs)}) : ${commas(list.map(tys, ty))} -> (${commas(list.map(tys, ty))}) {"
+  }
+  BreakVals(values, tys) ->
+    if len(values) == 0 { "break" } else { "break ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   Cont(values, tys) ->
     if len(values) == 0 { "continue" } else { "continue ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   ReduceTile(res, tys, dim, identities, operands, operand_tys, args, _body) -> {
@@ -247,6 +253,8 @@ fn line(i: Instr) -> String = match i {
 # regions and the brace between them says which is which.
 fn lines(indent: String, i: Instr) -> List[String] = match i {
   ForLoop(_res, _tys, _iv, _lower, _upper, _step, _inits, _carried, body) ->
+    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+  WhileLoop(_res, _tys, _inits, _carried, body) ->
     [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
   ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, body) ->
     [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]

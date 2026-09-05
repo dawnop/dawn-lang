@@ -60,7 +60,7 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI}
 use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -81,6 +81,7 @@ const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
 const OP_ANDI: Int = 0x04
 const OP_BITCAST: Int = 0x09
+const OP_BREAK: Int = 0x0A
 const OP_BROADCAST: Int = 0x0B
 const OP_CAT: Int = 0x0C
 const OP_CEIL: Int = 0x0D
@@ -111,6 +112,7 @@ const OP_JOIN_TOKENS: Int = 0x3C
 const OP_LOAD_PTR_TKO: Int = 0x3D
 const OP_LOG: Int = 0x3F
 const OP_LOG2: Int = 0x40
+const OP_LOOP: Int = 0x41
 const OP_MAKE_TOKEN: Int = 0x44
 const OP_MAXF: Int = 0x45
 const OP_MAXI: Int = 0x46
@@ -1047,6 +1049,32 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w3 = emit(emit_ref(w2, cond), 2)
     region(region(w3, on_true), on_false)
   }
+  WhileLoop(_results, tys, inits, carried, body) -> {
+    # `loop` has no induction variable, no bounds and NO FLAGS: it carries
+    # no optional attribute and no optional operand, so tblgen writes no
+    # flags varint for it (`getVersionOrderedBitAssignments` is empty and
+    # `generateFlagsFieldSerialization` returns before writing one). That is
+    # the one place its layout differs from `for`'s beyond the missing
+    # operands: results, their types, the operand count and the initial
+    # values, one region of one block whose arguments are the carried
+    # values, then the body.
+    let wl0 = emit(emit(w0, OP_LOOP), len(tys))
+    let wl1 = list.fold(tys, wl0, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let wl2 = list.fold(inits, emit(wl1, len(inits)), emit_ref)
+    let wl3 = emit(emit(emit(wl2, 1), 1), len(carried))
+    let w_block = list.fold(tys, wl3, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w_args = number_all(w_block, carried)
+    let w_body = list.fold(body, emit(w_args, len(body)), instr)
+    # the block is over: its indices roll back, the loop's results take them
+    roll_back(w_block, w_body)
+  }
+  BreakVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_BREAK), 0), len(values)), emit_ref)
   YieldVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_YIELD), 0), len(values)), emit_ref)
   Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
   ExtractTile(_dst, src, _from, to, indices) -> {

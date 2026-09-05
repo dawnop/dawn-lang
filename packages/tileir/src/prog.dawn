@@ -37,6 +37,18 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 ## `iv`, `carried` and everything `body` defines are visible inside the
 ## region only; `results` are the loop's values after it.
 ##
+## `Loop` is the other iterating region (knife T5): the same carried
+## values as a `For` and no induction variable or bounds, because its trip
+## count is not known when it opens. Its body ends in
+## `If([], cond, [Break(values)], [Yield([])])` followed by
+## `Continue(values)`: `break` hands the loop its final values and
+## `continue` hands the next iteration its values, and the `if` between
+## them is the only place a `Break` appears. What `Break` carries is what
+## ENTERED the iteration (the `carried` handles and the token as it stands
+## when the body ends), and what `Continue` carries is what the body
+## computed. `Break`'s values, `Continue`'s values, `inits`, `carried` and
+## `results` are all the same length, and all five end in a token.
+##
 ## `Extract`, `Cat` and `Permute` are knife T2's shape operations, and
 ## `NumBlocks` the grid's extent (`BlockId`'s companion). `JoinToks` merges
 ## two or more tokens into one, and it is the one operation here that makes
@@ -89,6 +101,8 @@ pub type TileOp =
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
   | IdxMul(dst: Int, lhs: Int, rhs: Int)
   | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | Loop(inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | Break(values: List[Int])
   | Continue(values: List[Int])
   | Spread(dst: Int, dtype: String, shape: List[Int], src: Int)
   | Reduce(results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
@@ -285,6 +299,7 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
 # them in a row and a reduction carries what a loop does not.
 type Frame =
   | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int])
+  | WhileFrame(outer: List[TileOp], inits: List[Int], carried: List[Int])
   | ReduceFrame(outer: List[TileOp], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ScanFrame(outer: List[TileOp], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ThenFrame(outer: List[TileOp], cond: Int)
@@ -297,6 +312,7 @@ type Frame =
 # frame but the loop's.
 fn is_pure_region(f: Frame) -> Bool = match f {
   LoopFrame(_outer, _iv, _lower, _upper, _step, _inits, _carried) -> false
+  WhileFrame(_outer, _inits, _carried) -> false
   _ -> true
 }
 
@@ -589,6 +605,50 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
             but_last(results)
           }
           _ -> refuse(name, "loop_end closes a region that is not a loop")
+        }
+      }
+      t_while_begin(inits) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order") } else { () }
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_loop unrolls forever")
+        } else {
+          ()
+        }
+        # the token rides along as the last carried value, as `for`'s does
+        let all = inits ++ [tok]
+        let base = next
+        next = mint(name, next, len(all))
+        let carried = list.map(range(0, len(all)), k => base + k)
+        frames = frames ++ [WhileFrame(ops, all, carried)]
+        ops = []
+        tok = last(carried)
+        but_last(carried)
+      }
+      t_while_end(cond, outs) => {
+        if len(frames) == 0 { refuse(name, "while_end with no loop open") } else { () }
+        match frames[len(frames) - 1] {
+          WhileFrame(saved, inits, carried) -> {
+            let want = len(inits) - 1
+            if len(outs) != want {
+              refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
+            } else {
+              ()
+            }
+            let (outer, inner) = (saved, ops)
+            let base = next
+            next = mint(name, next, len(inits))
+            let results = list.map(range(0, len(inits)), k => base + k)
+            # the exit: break with what entered this iteration (the token as
+            # it stands now), or fall through to the continue below
+            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])
+            let body = inner ++ [exit, Continue(outs ++ [tok])]
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [Loop(inits, carried, results, body)]
+            tok = last(results)
+            but_last(results)
+          }
+          _ -> refuse(name, "while_end closes a region that is not a loop")
         }
       }
       t_spread(dtype, shape, src) => {
@@ -888,6 +948,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   IdxAdd(dst, _lhs, _rhs) -> [dst]
   IdxMul(dst, _lhs, _rhs) -> [dst]
   For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
+  Loop(_inits, _carried, results, _body) -> results
+  Break(_values) -> []
   Continue(_values) -> []
   Spread(dst, _dtype, _shape, _src) -> [dst]
   Reduce(results, _dim, _shape, _identities, _operands, _args, _body) -> results
@@ -909,13 +971,16 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its
 ## results, then its induction variable, its carried handles and what its
-## body defines; for a `Reduce`, its results, its region arguments and its
+## body defines; for a `Loop`, the same without the induction variable;
+## for a `Reduce`, its results, its region arguments and its
 ## body; for an `If`, its results and then each branch in turn.
 pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
   let none: List[Int] = []
   list.fold(ops, none, (acc, op) => match op {
     For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
       acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
+    Loop(_inits, carried, results, body) ->
+      acc ++ results ++ carried ++ defined_inside(body)
     Reduce(results, _dim, _shape, _identities, _operands, args, body) ->
       acc ++ results ++ args ++ defined_inside(body)
     Scan(results, _dim, _reverse, _shape, _identities, _operands, args, body) ->

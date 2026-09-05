@@ -227,6 +227,22 @@ pub opaque type Ptrs[D] = Int
 ## ordering token through the loop on its own; a body never sees it. Only
 ## the `d_for` family calls the pair; a body calls those.
 ##
+## `t_while_begin` / `t_while_end` bracket the OTHER loop region, the one
+## whose trip count is not known when it opens (knife T5).
+## `t_while_begin(inits)` opens a `loop` with `inits` as the loop-carried
+## values entering it and answers one handle per carried value as the body
+## sees them; `t_while_end(cond, outs)` closes it with the rank-0 `i1`
+## handle `cond` -- true when this iteration is the last -- and `outs`, the
+## values the NEXT iteration receives, and answers one handle per carried
+## value as they stand after the loop. What the loop answers when it stops
+## is the values that ENTERED the iteration that stopped it, not `outs`:
+## the handler writes `if cond { break <entering> } else { yield }` before
+## the `continue`, so a body reads "run me while `cond` is false, and give
+## me back the value I was called with". The memory ordering token rides
+## through as the last carried value, exactly as `for`'s does, and it is
+## carried by BOTH terminators (a `break` yields the loop's final values,
+## and the token is one of them). Only the `d_loop` family calls the pair.
+##
 ## A `shape` is a list of tile dimensions, each a power of two, EXCEPT that
 ## `[]` is the rank-0 tile (`tile<f64>`): the shape a reduction answers and
 ## an `if` branches on. The typed surface spells rank 0 as `Scalar[D]` and
@@ -351,6 +367,8 @@ pub effect Dev {
   fn t_idx_mul(a: Int, b: Int) -> Int
   fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
   fn t_loop_end(outs: List[Int]) -> List[Int]
+  fn t_while_begin(inits: List[Int]) -> List[Int]
+  fn t_while_end(cond: Int, outs: List[Int]) -> List[Int]
   fn t_spread(dtype: String, shape: List[Int], src: Int) -> Int
   fn t_reduce_begin(dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int]) -> List[Int]
   fn t_reduce_end(yields: List[Int]) -> List[Int]
@@ -1431,6 +1449,73 @@ pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile
   (oa, ob, oc, oe)
 }
 
+# A `loop` carrying `carried`: `body` runs ONCE, on the host, with the
+# carried handles as the loop sees them, and answers the exit condition (a
+# rank-0 `i1` handle) and the handles the next iteration receives; what it
+# issues in between falls inside the loop's region. The answer is the
+# carried handles after the loop, which are the ones that ENTERED the
+# iteration whose condition was true. Private for `loop_handles`'s reason:
+# handles are opaque outside this module.
+fn while_handles(carried: List[Int],
+  body: fn(List[Int]) -> (Int, List[Int]) !Dev) -> List[Int] !Dev = {
+  let inside = t_while_begin(carried)
+  let (cond, outs) = body(inside)
+  t_while_end(cond, outs)
+}
+
+## The loop whose trip count the DATA decides, carrying one tile: `init`
+## enters, `body` runs ONCE, on the host, with the carried tile as the loop
+## sees it, and answers a rank-0 mask -- true when the loop is to stop here
+## -- and the tile the next iteration receives. The answer is the tile that
+## entered the iteration where the mask was true, so the loop reads "while
+## the mask is false, replace the tile"; what `body` computed on the
+## iteration that stopped it is discarded.
+##
+## This is `d_for`'s sibling and the only other region that iterates. The
+## difference is where the trip count comes from: `d_for`'s bounds are
+## index handles the host or the grid supplies, and this one's exit is a
+## value the kernel computes from the tiles it is carrying. A body that
+## never answers a true mask never terminates on the device, exactly as a
+## `while (true)` would; nothing here bounds it.
+##
+## Do not store inside one unless the store is meant to happen on the
+## discarded iteration too: `body` runs to the end every time, including
+## the last.
+pub fn d_loop[D](init: Tile[D],
+  body: fn(Tile[D]) -> (Scalar[I1], Tile[D]) !Dev) -> Tile[D] !Dev = {
+  let h: Int = init
+  let outs = while_handles([h], inside => {
+    let t: Tile[D] = inside[0]
+    let (done, nxt) = body(t)
+    let c: Int = done
+    let r: Int = nxt
+    (c, [r])
+  })
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## `d_loop` carrying two tiles, of formats `A` and `B`, in order: what a
+## loop that counts its own iterations needs (the value being refined and
+## the counter travel through one loop together).
+pub fn d_loop2[A, B](a: Tile[A], b: Tile[B],
+  body: fn(Tile[A], Tile[B]) -> (Scalar[I1], Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let outs = while_handles([ha, hb], inside => {
+    let ta: Tile[A] = inside[0]
+    let tb: Tile[B] = inside[1]
+    let (done, ra, rb) = body(ta, tb)
+    let c: Int = done
+    let xa: Int = ra
+    let xb: Int = rb
+    (c, [xa, xb])
+  })
+  let oa: Tile[A] = outs[0]
+  let ob: Tile[B] = outs[1]
+  (oa, ob)
+}
+
 # ---- rank-0 tiles ----
 #
 # The rank-0 tile is width 0 at the operation layer (dev.dawn's `Dev` doc
@@ -1543,6 +1628,26 @@ pub fn s_addi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int
 ## reason: `maxi` is associative, commutative AND idempotent over the
 ## integers, with no wrap-around to speak of.
 pub fn s_maxi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("maxi", a, b)
+
+## A rank-0 i32 constant tile: `s_const`'s integer twin, and what a loop's
+## exit condition compares a reduction's answer against.
+pub fn s_consti(value: Int) -> Scalar[I32] !Dev = {
+  let h: Scalar[I32] = t_consti("i32", rank0(), value)
+  h
+}
+
+# The comparison of two rank-0 i32 tiles, as a rank-0 mask. Signed, as
+# every integer comparison in this package is.
+fn s_compare_int(pred: String, a: Scalar[I32], b: Scalar[I32]) -> Scalar[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I1] = t_cmpi(pred, rank0(), x, y)
+  h
+}
+
+## `a <= b` over two rank-0 i32 tiles, as the rank-0 mask a `d_loop` exits
+## on. Signed.
+pub fn s_le_i(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I1] !Dev = s_compare_int("le", a, b)
 
 # The comparison of two index tiles, as a rank-0 mask.
 fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
@@ -2052,6 +2157,16 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + len(outs)
       list.map(range(0, len(outs)), k => base + k)
     }
+    t_while_begin(inits) => {
+      let base = next
+      next = next + len(inits)
+      list.map(range(0, len(inits)), k => base + k)
+    }
+    t_while_end(_cond, outs) => {
+      let base = next
+      next = next + len(outs)
+      list.map(range(0, len(outs)), k => base + k)
+    }
     t_spread(_dtype, _shape, _src) => {
       let h = next
       next = next + 1
@@ -2304,6 +2419,8 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_idx_mul(_a, _b) => 14
     t_loop_begin(_lower, _upper, _step, inits) => (15, inits)
     t_loop_end(outs) => outs
+    t_while_begin(inits) => inits
+    t_while_end(_cond, outs) => outs
     t_spread(dtype, shape, src) => {
       log = log ++ ["spread ${dtype} ${show(shape)} ${src}"]
       16
@@ -2707,6 +2824,14 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_loop_end(outs) => {
         log = log ++ ["loop_end ${show(outs)}"]
         [40]
+      }
+      t_while_begin(inits) => {
+        log = log ++ ["while_begin ${show(inits)}"]
+        [32]
+      }
+      t_while_end(cond, outs) => {
+        log = log ++ ["while_end ${cond} ${show(outs)}"]
+        [41]
       }
       t_spread(_dtype, _shape, _src) => 16
       t_reduce_begin(_dim, _shape, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)

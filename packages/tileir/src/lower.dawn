@@ -118,6 +118,13 @@ derive Show
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
 ## `upper`, `step` and `inits` are operands from outside. `body` ends in
 ## `Cont(values, tys)`, the values handed to the next iteration.
+##
+## `WhileLoop` is the other loop (knife T5): `ForLoop` without an induction
+## variable or bounds, because it runs until a `break`. Its `body` ends in
+## an `IfElse` with no results whose then-branch is a single `BreakVals`
+## and whose else-branch is an empty `YieldVals`, followed by the `Cont`.
+## `BreakVals` carries the loop's FINAL values and `Cont` the next
+## iteration's; both lists are as long as `tys`.
 pub type Instr =
   | MakeTok(dst: Int)
   | BlockIds(x: Int, y: Int, z: Int)
@@ -145,6 +152,8 @@ pub type Instr =
   | Cast(dst: Int, op: String, from: Ty, to: Ty, src: Ref)
   | SelectTile(dst: Int, cond_ty: Ty, ty: Ty, cond: Ref, lhs: Ref, rhs: Ref)
   | ForLoop(results: List[Int], tys: List[Ty], iv: Int, lower: Ref, upper: Ref, step: Ref, inits: List[Ref], carried: List[Int], body: List[Instr])
+  | WhileLoop(results: List[Int], tys: List[Ty], inits: List[Ref], carried: List[Int], body: List[Instr])
+  | BreakVals(values: List[Ref], tys: List[Ty])
   | Cont(values: List[Ref], tys: List[Ty])
   | ReduceTile(results: List[Int], tys: List[Ty], dim: Int, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
   | ScanTile(results: List[Int], tys: List[Ty], dim: Int, reverse: Bool, identities: List[RedId], operands: List[Ref], operand_tys: List[Ty], args: List[Int], body: List[Instr])
@@ -607,6 +616,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     emit(l3, Broadcast(d, Val(r), ones, num_tile(shape, dtype)))
   }
   For(iv, lower, upper, step, inits, carried, results, body) -> lower_for(l0, iv, lower, upper, step, inits, carried, results, body)
+  Loop(inits, carried, results, body) -> lower_loop(l0, inits, carried, results, body)
   Reduce(results, dim, shape, identities, operands, args, body) -> lower_reduce(l0, results, dim, shape, identities, operands, args, body)
   Scan(results, dim, reverse, shape, identities, operands, args, body) -> lower_scan(l0, results, dim, reverse, shape, identities, operands, args, body)
   If(results, cond, on_true, on_false) -> lower_if(l0, results, cond, on_true, on_false)
@@ -695,6 +705,11 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let tys = list.map(values, h => ty_of(l0, h))
     emit(l0, Cont(refs, tys))
   }
+  Break(values) -> {
+    let refs = list.map(values, h => ref_of(l0, h, "break value"))
+    let tys = list.map(values, h => ty_of(l0, h))
+    emit(l0, BreakVals(refs, tys))
+  }
 }
 
 # Lower a loop. The operands are resolved in the enclosing scope; the
@@ -733,6 +748,39 @@ fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int]
   emit(l4, ForLoop(res, tys, ivn, lo, up, st, init_refs, args, inner.body))
 }
 
+# Lower a `loop`. `lower_for` without the induction variable and the three
+# bounds: the results are numbered first (the order the text reads in), then
+# the carried values as the body's block arguments, then the body. The body
+# must end in a `continue` of the right length, exactly as a `for`'s does;
+# what makes it a `loop` is the `if ... break` the handler put in front of
+# that, and this function does not look for it -- the terminator is the
+# `continue` either way, and a body with no break is a legal (endless) loop
+# the dialect accepts.
+fn lower_loop(l0: L, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp]) -> L = {
+  if len(carried) != len(inits) || len(results) != len(inits) {
+    panic("tileir: a loop carrying ${len(inits)} value(s) names ${len(carried)} inside and ${len(results)} after")
+  } else {
+    ()
+  }
+  let init_refs = list.map(inits, h => ref_of(l0, h, "loop initial value"))
+  let tys = list.map(inits, h => ty_of(l0, h))
+  let (l1, res) = define_all(l0, results, tys)
+  let (l2, args) = define_all(l1, carried, tys)
+  let inner0 = L { ..l2, body: [] }
+  let inner = list.fold(body, inner0, lower_op)
+  match inner.body[len(inner.body) - 1] {
+    Cont(values, _tys) ->
+      if len(values) != len(inits) {
+        panic("tileir: a loop carrying ${len(inits)} value(s) continues with ${len(values)}")
+      } else {
+        ()
+      }
+    _ -> panic("tileir: a loop body ends in something other than continue")
+  }
+  let l3 = close_scope(l1, inner)
+  emit(l3, WhileLoop(res, tys, init_refs, args, inner.body))
+}
+
 # The handles a finished region defined, closed: what `lower_for` does on
 # the way out, shared with the two regions below. `before` is the state the
 # region opened from, `inner` the state it ended in.
@@ -746,7 +794,12 @@ fn close_scope(before: L, inner: L) -> L = {
 # not end in one.
 fn yielded(body: List[Instr], what: String) -> List[Ty] = match body[len(body) - 1] {
   YieldVals(_values, tys) -> tys
-  _ -> panic("tileir: ${what} does not end in yield")
+  # A branch that BREAKS yields nothing to its `if`: it hands its values to
+  # the enclosing loop and the `if` itself defines no result. That is the
+  # shape the handler builds a loop's exit out of (knife T5), and it is the
+  # only way an `if` region ends in anything but a yield.
+  BreakVals(_values, _tys) -> []
+  _ -> panic("tileir: ${what} does not end in yield or break")
 }
 
 # Lower a reduction. The operands and their types are the enclosing scope's;
@@ -880,6 +933,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   Cast(dst, _op, _from, _to, _src) -> [dst]
   SelectTile(dst, _cond_ty, _ty, _cond, _lhs, _rhs) -> [dst]
   ForLoop(results, _tys, _iv, _lower, _upper, _step, _inits, _carried, _body) -> results
+  WhileLoop(results, _tys, _inits, _carried, _body) -> results
+  BreakVals(_values, _tys) -> []
   Cont(_values, _tys) -> []
   ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, _args, _body) -> results
   ScanTile(results, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, _body) -> results
@@ -904,6 +959,8 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
   list.fold(body, none, (acc, i) => match i {
     ForLoop(results, _tys, iv, _lower, _upper, _step, _inits, carried, inner) ->
       acc ++ results ++ [iv] ++ carried ++ defines_inside(inner)
+    WhileLoop(results, _tys, _inits, carried, inner) ->
+      acc ++ results ++ carried ++ defines_inside(inner)
     ReduceTile(results, _tys, _dim, _identities, _operands, _operand_tys, args, inner) ->
       acc ++ results ++ args ++ defines_inside(inner)
     ScanTile(results, _tys, _dim, _reverse, _identities, _operands, _operand_tys, args, inner) ->
