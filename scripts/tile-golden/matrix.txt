@@ -33,15 +33,27 @@
 # while the load was high, since the load fell during the run). On a quiet
 # machine every kernel is within 0.6s of every other.
 #
-# Knife T2 took two more on 151 items, and they say the same thing again:
+# Knife T2 took three more, and they say the same thing again. The first two
+# were on 151 items (before knife T1 landed) and the third on the 154 the
+# matrix holds today:
 #
 #   round 1, another agent building (load 7 to 26): 131 kernels 4.98 to
 #     27.10s (mean 8.40), 20 mutants 15.44 to 24.53s (mean 18.36), 1484s
 #   round 2, same tree, quieter (load ~5.5): 131 kernels 4.23 to 5.66s
 #     (mean 4.85), 20 mutants 15.36 to 19.42s (mean 17.42), 1000s
+#   round 3, rebased onto T1, machine IDLE (load 0.18 to 4.09): 133 kernels
+#     4.30 to 5.54s (mean 4.64), 21 mutants 13.11 to 21.77s (mean 16.82),
+#     984s
 #
-# The kernels' spread went from 5.4x to 1.3x between the two rounds and the
-# mutants' barely moved. Nothing here is a per-kernel property.
+# The kernels' spread went from 5.4x to 1.3x between the first two rounds and
+# the mutants' barely moved. Nothing here is a per-kernel property.
+#
+# What round 3 DOES say, and it is the one thing these rounds have found that
+# is not load: a mutant costs more than knife 21 read. 16.82s against 13.65,
+# and a mutant is a native rebuild of the package, so it is the item whose
+# cost grows as the package does. gates.yml's four budget lines are restated
+# from round 3's shard sums, 244.1 / 249.0 / 233.4 / 243.4s against 242.5 if
+# it divided perfectly.
 #
 # So knife 20's dearest-first deal was reading load noise. It is left as it
 # is, because reordering it would be reading the same noise the other way,
@@ -50,10 +62,12 @@
 # landed 4 / 3 / 4 / 4 with 141 items) and 126 mod 4. Measured round-2 shard
 # sums: 193.1 / 179.3 / 185.0 / 189.0s against 186.6 if it divided perfectly.
 #
-# Knife T1 appends two kernels and one mutant, and the arithmetic comes out
+# Knife T1 appended two kernels and one mutant, and the arithmetic came out
 # EVEN for the first time: 144 items is 128 kernels and 16 mutants, 128 is
-# 32 a shard and 16 is 4 a shard, so every shard now carries the same work
-# and any spread between the four is the machine's rather than the deal's.
+# 32 a shard and 16 is 4 a shard. Knife T2's five and five end that: 154
+# items is 133 kernels and 21 mutants, and 21 mod 4 is 1, so shard 2 carries
+# six mutants and the other three carry five. That one extra mutant is 16.8s
+# and it is the whole of why shard 2 is the heaviest.
 #
 # Reordering these lines moves items between shards. That is harmless and the
 # split is checked either way, but say so in the commit, and REMEASURE rather
