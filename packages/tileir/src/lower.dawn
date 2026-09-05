@@ -48,8 +48,8 @@
 use std/list
 use std/map
 use std/str
-use dev.{RedId, IdF}
-use prog.{TileOp, TileProg, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use dev.{RedId, IdF, AssumePred}
+use prog.{TileOp, TileProg, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -113,6 +113,14 @@ derive Show
 ## which is why each carries both its operand type and its result type and
 ## nothing else.
 ##
+## `AssertTile`, `AssumeTile` and `PrintTile` are knife T6's three.
+## `AssertTile` defines nothing and takes the rank-1 or rank-0 `i1` tile
+## its `cond_ty` names. `AssumeTile` defines a value of the SAME type as
+## its operand, which is what `AllTypesMatch<["value", "result"]>` in the
+## dialect means, so one `ty` covers both. `PrintTile` defines a token and
+## takes one: it is in the memory ordering chain, and its `args` share one
+## type because the typed surface only builds them that way.
+##
 ## `ForLoop` is the loop: `results` are the values it defines after itself,
 ## typed `tys` (one per carried value); `iv` (a scalar i32) and `carried`
 ## (typed `tys` again) are the block arguments its `body` sees; `lower`,
@@ -170,6 +178,9 @@ pub type Instr =
   | PtrToIntTile(dst: Int, src: Ref, from: Ty, to: Ty)
   | IntToPtrTile(dst: Int, src: Ref, from: Ty, to: Ty)
   | PtrToPtrTile(dst: Int, src: Ref, from: Ty, to: Ty)
+  | AssertTile(cond: Ref, cond_ty: Ty, message: String)
+  | AssumeTile(dst: Int, src: Ref, pred: AssumePred, ty: Ty)
+  | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
   | Ret
 derive Show
 
@@ -699,6 +710,22 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l2, tv) = define(l1, tok_out, Token)
     emit(l2, LoadPtr(v, tv, ps, m, pd, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty))
   }
+  Assert(shape, cond, message) -> {
+    let c = ref_of(l0, cond, "assert condition")
+    emit(l0, AssertTile(c, i1_tile(shape), message))
+  }
+  Assume(dst, pred, dtype, shape, src) -> {
+    let s = ref_of(l0, src, "assume operand")
+    let out = num_tile(shape, dtype)
+    let (l1, v) = define(l0, dst, out)
+    emit(l1, AssumeTile(v, s, pred, out))
+  }
+  Print(tok_out, fmt, dtype, shape, args, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "print token")
+    let refs = list.map(args, h => ref_of(l0, h, "print operand"))
+    let (l1, tv) = define(l0, tok_out, Token)
+    emit(l1, PrintTile(tv, fmt, refs, num_tile(shape, dtype), tin))
+  }
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
     let tys = list.map(values, h => ty_of(l0, h))
@@ -953,6 +980,9 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   PtrToIntTile(dst, _src, _from, _to) -> [dst]
   IntToPtrTile(dst, _src, _from, _to) -> [dst]
   PtrToPtrTile(dst, _src, _from, _to) -> [dst]
+  AssertTile(_cond, _cond_ty, _message) -> []
+  AssumeTile(dst, _src, _pred, _ty) -> [dst]
+  PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
   Ret -> []
 }
 

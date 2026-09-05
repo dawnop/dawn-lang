@@ -58,9 +58,9 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use dev.{RedId, IdF, IdI}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
 use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
@@ -153,6 +153,9 @@ const OP_TRUNCI: Int = 0x6B
 const OP_XORI: Int = 0x6C
 const OP_YIELD: Int = 0x6D
 const OP_ATAN2: Int = 0x6E
+const OP_ASSERT: Int = 0x05
+const OP_ASSUME: Int = 0x06
+const OP_PRINT_TKO: Int = 0x55
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -276,11 +279,35 @@ const OVERFLOW_NONE: Int = 0
 # both measured), and its default, which is why the text prints nothing.
 const ROUND_FULL: Int = 5
 
+# `print_tko`'s one optional field is its `token` OPERAND, which arrived in
+# 13.2; there is no optional attribute, so the token takes bit 0. The flags
+# varint itself is written only from 13.2 on
+# (`generateFlagsFieldSerialization`'s version check fires because the
+# operation is 13.1 and its first optional field is not), and this writer
+# targets 13.2, so it is always written here.
+const PRINT_FLAG_TOKEN: Int = 1
+
 # Attribute tags (BytecodeAttrOpcodes.td, frozen). A reduction's identities
 # are an ArrayAttr, whose elements are written SELF-CONTAINED: each carries
 # its tag and the index of its element type before its payload.
 const ATTR_INTEGER: Int = 1
 const ATTR_FLOAT: Int = 2
+
+# Knife T6's three predicate tags. They are written SELF-CONTAINED for a
+# reason worth writing down, because it is the rule that decides whether a
+# tag byte appears at all: `writeOpAttribute`'s `std::is_base_of_v<Attribute,
+# T>` branch sets `isSelfContained` to `mlir::detail::IsInterface<T>::value`,
+# and `assume`'s `predicate` is declared as the INTERFACE
+# CudaTile_AssumePredicateAttrInterface, so the getter's type is an
+# interface and the tag is written. A required attribute whose ODS type is
+# concrete gets no tag: `assert`'s `message` and `print_tko`'s `str` are
+# `StrAttr`, whose getter answers a `StringRef`, which lands in
+# `writeOpAttribute`'s own StringRef branch and writes the String section
+# INDEX and nothing else. So tag 5 (String) is never emitted by this writer,
+# and the mutant assert-message-tagged is what holds that claim.
+const ATTR_DIV_BY: Int = 8
+const ATTR_SAME_ELEMENTS: Int = 9
+const ATTR_BOUNDED: Int = 12
 
 # `permute`'s `permutation` is a DENSE array and is NOT written the way that
 # `identities` array is. The two shapes were measured against the writer
@@ -300,6 +327,56 @@ const ATTR_FLOAT: Int = 2
 # reader agrees: `readLEVarSize` into a `SmallVector<int32_t>`.
 fn emit_i32_array(w: W, xs: List[Int]) -> W =
   W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }
+
+# `same_elements`'s values are a `DenseI64ArrayAttr`, which is the same
+# `writeLEVarSize` shape one element WIDER: the count as a varint, then each
+# element as eight raw little-endian bytes. The reader is `readLEVarSize`
+# into a `SmallVector<int64_t>` and it takes the count on trust, so a width
+# written wrongly is read as the wrong number of elements rather than as a
+# wrong value (the mutant assume-same-elements-payload-four-bytes).
+fn emit_i64_array(w: W, xs: List[Int]) -> W =
+  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }
+
+# One RAW byte, not a varint. `div_by` and `bounded` write their
+# presence flags with `writer.writeByte` and the reader takes them with
+# `reader.readLE(uint8_t)`, so the two agree on a fixed byte and not on a
+# varint that happens to be one byte wide for every value under 128.
+fn emit_byte(w: W, x: Int) -> W = W { ..w, body: bytes.put(w.body, x) }
+
+# An optional signed payload: zigzag, as `writeSignedVarInt` writes it.
+fn emit_opt_signed(w: W, x: Option[Int]) -> W = match x {
+  Some(v) -> W { ..w, body: put_varint_u64(w.body, zigzag(v)) }
+  None -> w
+}
+
+fn opt_bit(x: Option[Int], bit: Int) -> Int = match x {
+  Some(_v) -> bit
+  None -> 0
+}
+
+# One `assume` predicate, self-contained: its tag and then its payload.
+#
+#   div_by         divisor[varint] flags[byte: 1 every, 2 along]
+#                  every[zigzag varint]? along[zigzag varint]?
+#   same_elements  the DenseI64ArrayAttr above, and nothing else
+#   bounded        flags[byte: 1 lb, 2 ub] lb[zigzag varint]? ub[zigzag varint]?
+#
+# The two flag bytes are the SAME two bits in the same order, and the
+# payloads that follow are in declaration order, so writing `bounded`'s the
+# other way round is a legal file that says the bounds the other way round
+# (the mutant assume-bounded-bounds-swapped, which the verifier catches
+# because a lower bound above an upper one is refused).
+fn assume_attr(w0: W, p: AssumePred) -> W = match p {
+  DivBy(divisor, every, along) -> {
+    let w1 = emit_byte(emit(emit(w0, ATTR_DIV_BY), divisor), opt_bit(every, 1) | opt_bit(along, 2))
+    emit_opt_signed(emit_opt_signed(w1, every), along)
+  }
+  SameElements(groups) -> emit_i64_array(emit(w0, ATTR_SAME_ELEMENTS), groups)
+  Bounded(lb, ub) -> {
+    let w1 = emit_byte(emit(w0, ATTR_BOUNDED), opt_bit(lb, 1) | opt_bit(ub, 2))
+    emit_opt_signed(emit_opt_signed(w1, lb), ub)
+  }
+}
 
 # The `rmw_mode` values (AttrDefs.td's AtomicRMWMode, an i32 enum). The
 # order is the enum's own and not alphabetical: `add` is 3 and `addf` 4,
@@ -1260,6 +1337,30 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)
   IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)
   PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_PTR, to), src)
+  AssertTile(cond, _cond_ty, message) -> {
+    # no results, so no result count and no result type; no optional field,
+    # so no flags; the message as a String section INDEX with no tag (the
+    # ATTR_ constants above say why); one required operand, so no count.
+    let (w1, si) = str_of(w0, message)
+    emit_ref(emit(emit(w1, OP_ASSERT), si), cond)
+  }
+  AssumeTile(_dst, src, pred, t) -> {
+    # one result whose type is the operand's, the predicate self-contained,
+    # then the operand. Nothing is variadic, so no counts anywhere.
+    emit_ref(assume_attr(emit_op(w0, OP_ASSUME, t), pred), src)
+  }
+  PrintTile(_tok_out, fmt, args, _arg_ty, tok_in) -> {
+    # the result COUNT (1, because `args` is variadic and tblgen writes the
+    # count for an operation with any variadic argument or result), the
+    # token result type, the flags (the token operand is always carried
+    # here), the format string's index, then the args with THEIR count and
+    # the token without one: `AttrSizedOperandSegments` makes each operand
+    # group its own `writeOperands` call, and only the variadic group
+    # encodes a size.
+    let w1 = emit(emit_op_counted(w0, OP_PRINT_TKO, Token), PRINT_FLAG_TOKEN)
+    let (w2, si) = str_of(w1, fmt)
+    emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)
+  }
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
 
@@ -1912,6 +2013,54 @@ test "a dense i32 array is a count and four raw bytes an element, where an Array
   assert hex(bytes.freeze(emit_i32_array(w0, []).body)) == "00"
   assert hex(bytes.freeze(emit_i32_array(w0, [300]).body)) == "01" ++ "2c010000"
 }
+
+test "the three predicate attributes are a tag and then their own payload, and the two flag bytes are raw bytes" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let none: Option[Int] = None
+  # div_by: tag 8, the divisor as a varint, then the presence byte. With
+  # neither `every` nor `along` the byte is 0 and nothing follows it.
+  assert hex(bytes.freeze(assume_attr(w0, DivBy(32, none, none)).body)) == "08" ++ "20" ++ "00"
+  # with both, the byte is 3 and the two payloads are ZIGZAG varints, in
+  # declaration order.
+  assert hex(bytes.freeze(assume_attr(w0, DivBy(32, Some(4), Some(1))).body)) == "08" ++ "20" ++ "03" ++ "08" ++ "02"
+  # same_elements: tag 9 and a DenseI64ArrayAttr, which is the count and
+  # then EIGHT raw little-endian bytes an element, not four.
+  assert hex(bytes.freeze(assume_attr(w0, SameElements([2, 4])).body))
+    == "09" ++ "02" ++ "0200000000000000" ++ "0400000000000000"
+  # bounded: tag 12 (0x0C), the presence byte, then the bounds present, low
+  # one first. A negative bound is where zigzag shows: -3 is 5.
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(Some(0 - 3), Some(7))).body)) == "0c" ++ "03" ++ "05" ++ "0e"
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(none, Some(7))).body)) == "0c" ++ "02" ++ "0e"
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(none, none)).body)) == "0c" ++ "00"
+}
+
+test "assert writes its message as a bare string index, assume its predicate self-contained, and print_tko a result count and a flags word" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2)]), nvals: 3 }
+  # assert: the opcode, the message's String section index (0, the first
+  # string interned) and the condition. NO attribute tag in front of the
+  # index: `message` is a StrAttr, so the ODS getter answers a StringRef
+  # and `writeOpAttribute` writes the index alone. NO result count and no
+  # result type either, because the operation has no results and nothing
+  # about it is variadic.
+  let a = encode_instr(w0, AssertTile(Val(1), Tile([128], Num("i1")), "boom"))
+  assert hex(bytes.freeze(a.body)) == "05" ++ "00" ++ "01"
+  assert len(a.strs.items) == 1
+  # assume: the opcode, the result type index, the predicate with its tag,
+  # then the operand. The index is 1 and not 0 because a tile type
+  # registers its ELEMENT type first (`i32` takes 0), which is the same
+  # dependent-first order every tile here is written in.
+  let s = encode_instr(w0, AssumeTile(9, Val(2), DivBy(32, none_int(), none_int()), Tile([128], Num("i32"))))
+  assert hex(bytes.freeze(s.body)) == "06" ++ "01" ++ "08" ++ "20" ++ "00" ++ "02"
+  # print_tko: the opcode, a result COUNT of one (its `args` are variadic),
+  # the token result type index, the flags word (bit 0: the token operand
+  # is carried), the format string's index, then the args with their own
+  # count and the token WITHOUT one.
+  let pr = encode_instr(w0, PrintTile(9, "%d %d", [Val(1), Val(2)], Tile([], Num("i32")), Val(0)))
+  assert hex(bytes.freeze(pr.body)) == "55" ++ "01" ++ "00" ++ "01" ++ "00" ++ "02" ++ "01" ++ "02" ++ "00"
+  assert OP_ASSERT == 0x05 && OP_ASSUME == 0x06 && OP_PRINT_TKO == 0x55
+}
+
+fn none_int() -> Option[Int] = None
 
 test "the shape operations are the frozen table's opcodes, with the permutation dense and extract's slice indices as operands" {
   let k = lower(shapes_prog())

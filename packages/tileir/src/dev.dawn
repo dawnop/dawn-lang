@@ -77,6 +77,39 @@ pub type RedId =
   | IdI(dtype: String, value: Int)
 derive Show
 
+## What an `assume` attaches to a value: one of the dialect's three
+## predicate attributes (knife T6). Each is a separate bytecode attribute
+## tag, and the payloads are three different shapes, which is why this is a
+## sum type rather than three fields.
+##
+##   `DivBy`         every element of the tile is a multiple of `divisor`,
+##                   which must be a positive power of two. With `every` and
+##                   `along` given, only the FIRST element of each group of
+##                   `every` along dimension `along` is claimed to be a
+##                   multiple, and the rest of the group is claimed to
+##                   increase by one from it (by the pointee's width, for a
+##                   tile of pointers). The two are used together or not at
+##                   all, and neither may be given for a rank-0 tile.
+##   `SameElements`  one value per dimension: dividing dimension `k` into
+##                   groups of `groups[k]`, every group holds one repeated
+##                   value. `1` everywhere is true of any tile.
+##   `Bounded`       every element, read as a SIGNED integer, is at least
+##                   `lb` and at most `ub`; either bound may be absent, and
+##                   both are inclusive.
+##
+## NOTHING CHECKS THESE. The dialect says so in as many words (Ops.td's
+## AssumeOp: "assume does not check the correctness of the predicate.
+## Incorrect predicates may inject incorrect static information and cause
+## miscompilation"), so a false predicate is undefined behaviour and not a
+## wrong answer. That is why the coverage ledger carries a named layer-3
+## exemption for `assume` and this comment is where the reason lives:
+## a mutant that made a predicate false would be measuring nothing.
+pub type AssumePred =
+  | DivBy(divisor: Int, every: Option[Int], along: Option[Int])
+  | SameElements(groups: List[Int])
+  | Bounded(lb: Option[Int], ub: Option[Int])
+derive Show
+
 ## The one-bit tile format: what a comparison answers and what a mask is. A
 ## tile element format, not a buffer format. Its i32 neighbour is std/gpu's
 ## `I32`, which is both (knife 10).
@@ -333,10 +366,20 @@ pub opaque type Ptrs[D] = Int
 ## `t_load` -- and they are the only way to say "the same bytes read as
 ## another format", which is what `t_ptr_to_ptr` is for.
 ##
+## `t_assert` / `t_assume` / `t_print` are knife T6's three, and no two of
+## them are the same kind of thing. `t_assert` issues an operation with no
+## result that can STOP the launch: the host is told when a lane's
+## condition is false. `t_assume` issues one whose result is its operand,
+## carrying a claim the compiler may use and nobody checks. `t_print` is in
+## the token chain (`print_tko` takes the current token and answers the
+## next), and what it does is not visible in any buffer: it writes to the
+## process's standard output when the context is synchronised.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
-## order at all.
+## order at all. `t_print` is refused there for the same reason, and
+## `t_assert` and `t_assume` are not: neither is ordered against memory.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
@@ -394,6 +437,9 @@ pub effect Dev {
   fn t_int_to_ptr(dtype: String, shape: List[Int], ints: Int) -> Int
   fn t_ptr_to_ptr(from: String, to: String, shape: List[Int], ptrs: Int) -> Int
   fn t_load_ptrs(dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int]) -> Int
+  fn t_assert(shape: List[Int], cond: Int, message: String) -> Unit
+  fn t_assume(pred: AssumePred, dtype: String, shape: List[Int], src: Int) -> Int
+  fn t_print(fmt: String, dtype: String, shape: List[Int], args: List[Int]) -> Unit
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -2153,6 +2199,77 @@ pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = consti(I64, s
 pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev =
   addi(I64, shape, a, b)
 
+## Stop the kernel with `message` when any lane of `cond` is false (knife
+## T6). Every zero lane prints the message and its index, and the host is
+## told that an assertion fired; the dialect leaves the tile block free to
+## keep running, so what a failing kernel wrote before the assert is not
+## defined away.
+##
+## The failure reaches the HOST, not this program: a launch whose assertion
+## fired makes the CUDA context report an error, and that error is sticky --
+## every later launch in the same process fails too. That is why
+## scripts/tile-gpu-diff runs the failing corpus in a process of its own,
+## and it is the reason "this launch should fail" is a judgement shape and
+## not just another comparison.
+pub fn d_assert(shape: List[Int], cond: Tile[I1], message: String) -> Unit !Dev = {
+  let c: Int = cond
+  t_assert(shape, c, message)
+}
+
+## `t` with `pred` attached: the same value, and a claim about it the
+## compiler may use. The claim is NOT checked, here or on the device, so a
+## false one is undefined behaviour (`AssumePred` says where the dialect
+## says so).
+pub fn d_assume[D: Dtype](d: D, shape: List[Int], pred: AssumePred, t: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = t
+  let r: Tile[D] = t_assume(pred, dtype_name(d), shape, x)
+  r
+}
+
+## `t`, assumed to hold multiples of `divisor` in every lane.
+pub fn assume_div_by[D: Dtype](d: D, shape: List[Int], divisor: Int, t: Tile[D]) -> Tile[D] !Dev = {
+  let none: Option[Int] = None
+  d_assume(d, shape, DivBy(divisor, none, none), t)
+}
+
+## `t`, assumed to repeat one value in every group of `groups[k]` along
+## dimension `k`.
+pub fn assume_same_elements[D: Dtype](d: D, shape: List[Int], groups: List[Int], t: Tile[D]) -> Tile[D] !Dev =
+  d_assume(d, shape, SameElements(groups), t)
+
+## `t`, assumed to hold values between `lb` and `ub` inclusive, read
+## signed. Either bound may be `None`.
+pub fn assume_in_range[D: Dtype](d: D, shape: List[Int], lb: Option[Int], ub: Option[Int], t: Tile[D]) -> Tile[D] !Dev =
+  d_assume(d, shape, Bounded(lb, ub), t)
+
+## Print `fmt` with `args` interleaved, C printf style: one format
+## expression (a `%` and its conversion) per argument, and the dialect
+## refuses a count that disagrees (PrintTkoOp's verifier counts them the
+## way `format_args` in prog.dawn does).
+##
+## RANK-0 ARGUMENTS ONLY, and that is a decision about what can be JUDGED
+## rather than a limit of the operation. The dialect takes a tile of any
+## shape and says in as many words that prints "are not guaranteed to be
+## atomic" and that simultaneous ones "may be interleaved", so the bytes a
+## wide tile puts on standard output are not a value a test can compare.
+## One rank-0 tile printed by one tile block is one line, and
+## scripts/tile-gpu-diff compares it byte for byte. The effect operation
+## underneath carries a shape, so nothing here has to change if a later
+## knife finds a judgement for the wide case.
+##
+## TOKEN ORDERED, which is what the `_tko` in the opcode's name means: this
+## takes the ordering token as it stands and answers the next one, so a
+## print sits in the same chain as the loads and stores around it. Without
+## that the compiler is free to move it (Ops.td says so).
+pub fn d_print[D: Dtype](d: D, fmt: String, args: List[Scalar[D]]) -> Unit !Dev = {
+  let hs = list.map(args, a => {
+    let h: Int = a
+    h
+  })
+  let none: List[Int] = []
+  t_print(fmt, dtype_name(d), none, hs)
+}
+
 # ---- tests ----
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
@@ -2390,6 +2507,13 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_assert(_shape, _cond, _message) => ()
+    t_assume(_pred, _dtype, _shape, _src) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_print(_fmt, _dtype, _shape, _args) => ()
   }
   body()
 }
@@ -2635,6 +2759,18 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_load_ptrs(dtype, shape, ptrs, mask, pad) => {
       log = log ++ ["load_ptrs ${dtype} ${show(shape)} ${ptrs} ${opt(mask)} ${opt(pad)}"]
       75
+    }
+    t_assert(shape, cond, message) => {
+      log = log ++ ["assert ${show(shape)} ${cond} ${message}"]
+      ()
+    }
+    t_assume(pred, dtype, shape, src) => {
+      log = log ++ ["assume ${show(pred)} ${dtype} ${show(shape)} ${src}"]
+      76
+    }
+    t_print(fmt, dtype, shape, args) => {
+      log = log ++ ["print ${fmt} ${dtype} ${show(shape)} ${show(args)}"]
+      ()
     }
   }
   body()
@@ -2988,6 +3124,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_int_to_ptr(_dtype, _shape, _ints) => 73
       t_ptr_to_ptr(_from, _to, _shape, _ptrs) => 74
       t_load_ptrs(_dtype, _shape, _ptrs, _mask, _pad) => 75
+      t_assert(_shape, _cond, _message) => ()
+      t_assume(_pred, _dtype, _shape, _src) => 76
+      t_print(_fmt, _dtype, _shape, _args) => ()
     }
     let _r = loop_seen()
     log

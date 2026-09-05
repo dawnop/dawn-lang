@@ -21,6 +21,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
   d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
+  d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
@@ -4012,6 +4013,100 @@ fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
   store(out, idx_add(obase, idx_const(ATTR_TILE)), s, unsigned)
 }
 
+# ---- knife T6: assert, assume and print_tko
+#
+# The three debugging operations of the frozen table, and the two judgement
+# shapes they need. Every kernel here is one 128-wide tile over one block:
+# what is under test is the operation, not the grid.
+
+## How wide one knife T6 tile is.
+const DBG_TILE: Int = 128
+
+## The two limits `assert_guard` is instantiated at. The corpus is 1 to 128,
+## so `PASS` is above every lane and `FAIL` is below every lane -- the
+## condition `v < limit` is ALL TRUE at one and ALL FALSE at the other. That
+## is what makes assert-condition-inverted a two-way mutant: negated, the
+## passing kernel fails and the failing one passes, and neither ends up
+## half-firing.
+const ASSERT_PASS_LIMIT: Int = 1000
+const ASSERT_FAIL_LIMIT: Int = 0
+
+## What `assume_divby`'s lanes are multiples of, and what the kernel then
+## divides by: the predicate has to be TRUE of the corpus or the program is
+## undefined rather than wrong (dev.dawn's AssumePred says why).
+const ASSUME_DIVISOR: Int = 32
+
+## The group `assume_same`'s lanes repeat in, and the two bounds
+## `assume_bounded` claims. Both are true of the corpus
+## scripts/tile-gpu-diff hands them.
+const ASSUME_GROUP: Int = 4
+const ASSUME_LOW: Int = 0
+const ASSUME_HIGH: Int = 100000
+
+# One assertion over the loaded tile, and the tile plus one stored. `limit`
+# is what makes the condition all-true or all-false; nothing else differs
+# between assert_pass and assert_fail, which is the point: one anchor
+# inverts both.
+fn assert_guard(x: Param[I32], out: Param[I32], limit: Int) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = load(x, blk, shape)
+  d_assert(shape, lt_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")
+  store(out, blk, shape, add_i(shape, v, i_const(shape, 1)))
+}
+
+# The assertion that holds: every lane is under the limit, so the launch is
+# an ordinary one and the answer is the tile plus one.
+fn assert_pass(x: Param[I32], out: Param[I32]) -> Unit !Dev = assert_guard(x, out, ASSERT_PASS_LIMIT)
+
+# The assertion that fires: no lane is under the limit. The kernel still
+# stores (the dialect lets the tile block keep running), and the HOST is
+# told, which is the whole of what this kernel is for.
+fn assert_fail(x: Param[I32], out: Param[I32]) -> Unit !Dev = assert_guard(x, out, ASSERT_FAIL_LIMIT)
+
+# A print of two rank-0 tiles the kernel reduced for itself, and the same
+# two numbers stored, so that the bytes on standard output and the bytes in
+# the buffer are two readings of one answer.
+fn print_tile(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = load(x, blk, shape)
+  let total = d_reduce_i(shape, v, 0, (acc, e) => s_addi(acc, e))
+  let biggest = d_reduce_i(shape, v, 0, (acc, e) => s_maxi(acc, e))
+  d_print(I32, "print_tile sum=%d max=%d\n", [total, biggest])
+  store(out, blk, shape, v)
+  store(out, tile_at(idx_const(1), DBG_TILE), shape, spread(I32, shape, total))
+  store(out, tile_at(idx_const(2), DBG_TILE), shape, spread(I32, shape, biggest))
+}
+
+# `div_by`: every lane is a multiple of the divisor, and the kernel divides
+# by it. The predicate is true of the corpus, so the answer is defined and
+# the device is being asked whether an assumption changes it (it must not).
+fn assume_divby(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = assume_div_by(I32, shape, ASSUME_DIVISOR, load(x, blk, shape))
+  store(out, blk, shape, div_i(shape, v, i_const(shape, ASSUME_DIVISOR)))
+}
+
+# `same_elements`: the lanes repeat in groups, and the kernel multiplies.
+fn assume_same(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = assume_same_elements(I32, shape, [ASSUME_GROUP], load(x, blk, shape))
+  store(out, blk, shape, mul_i(shape, v, i_const(shape, 3)))
+}
+
+# `bounded`: the lanes are inside the range, and the kernel adds a constant.
+fn assume_bounded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let lo: Option[Int] = Some(ASSUME_LOW)
+  let hi: Option[Int] = Some(ASSUME_HIGH)
+  let v = assume_in_range(I32, shape, lo, hi, load(x, blk, shape))
+  store(out, blk, shape, add_i(shape, v, i_const(shape, 5)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4401,6 +4496,18 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("attr_addf", ["f64", "f64"], () => attr_addf(param(F64, 0), param(F64, 1)))
   "attr_ucmp" ->
     trace_kernel("attr_ucmp", ["i32"], () => attr_ucmp(param(I32, 0)))
+  "assert_pass" ->
+    trace_kernel("assert_pass", ["i32", "i32"], () => assert_pass(param(I32, 0), param(I32, 1)))
+  "assert_fail" ->
+    trace_kernel("assert_fail", ["i32", "i32"], () => assert_fail(param(I32, 0), param(I32, 1)))
+  "print_tile" ->
+    trace_kernel("print_tile", ["i32", "i32"], () => print_tile(param(I32, 0), param(I32, 1)))
+  "assume_divby" ->
+    trace_kernel("assume_divby", ["i32", "i32"], () => assume_divby(param(I32, 0), param(I32, 1)))
+  "assume_same" ->
+    trace_kernel("assume_same", ["i32", "i32"], () => assume_same(param(I32, 0), param(I32, 1)))
+  "assume_bounded" ->
+    trace_kernel("assume_bounded", ["i32", "i32"], () => assume_bounded(param(I32, 0), param(I32, 1)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -4438,6 +4545,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
       ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast"
       ++ "|loop_count|loop_bound|loop_until|loop_none"
-      ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp>"
+      ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
+      ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

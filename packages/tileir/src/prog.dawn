@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const}
+use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -62,6 +62,14 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 ## computed, and the three conversions are the dialect's `ptr_to_int`,
 ## `int_to_ptr` and `ptr_to_ptr`. `LoadAt` is `Load` through such a tile,
 ## and it sits in the token chain exactly as `Load` does.
+##
+## `Assert`, `Assume` and `Print` are knife T6's three. `Assert` defines
+## nothing and is not in the token chain: it is the one operation here that
+## can make a launch fail. `Assume` defines a value equal to its operand and
+## carries a predicate attribute nothing checks. `Print` IS in the token
+## chain (`print_tko`), so it carries `tok_in` and defines `tok_out` the way
+## a store does, and its `args` are all of one format and shape, which is
+## what the typed surface allows.
 ##
 ## `Spread` widens a rank-0 tile to `n` lanes. `Reduce` and `If` are the two
 ## other regions. A `Scan` is a `Reduce` that keeps every dimension and
@@ -120,6 +128,9 @@ pub type TileOp =
   | IntPtr(dst: Int, dtype: String, shape: List[Int], ints: Int)
   | PtrCast(dst: Int, from: String, to: String, shape: List[Int], ptrs: Int)
   | LoadAt(dst: Int, tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int], tok_in: Int)
+  | Assert(shape: List[Int], cond: Int, message: String)
+  | Assume(dst: Int, pred: AssumePred, dtype: String, shape: List[Int], src: Int)
+  | Print(tok_out: Int, fmt: String, dtype: String, shape: List[Int], args: List[Int], tok_in: Int)
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -306,6 +317,82 @@ fn check_perm(name: String, shape: List[Int], perm: List[Int]) -> Unit =
       Some(k) -> refuse(name, "the permutation ${show(perm)} does not mention dimension ${k}")
       None -> ()
     }
+  }
+
+# An `assume` predicate against the tile it is attached to. Every clause
+# here is one of AssumeOp's own verifier's (Attributes.cpp), refused a step
+# earlier so that the message names the kernel: a divisor that is not a
+# positive power of two, an `every` without its `along`, a `same_elements`
+# whose length is not the rank, and bounds the wrong way round.
+fn check_assume(name: String, pred: AssumePred, shape: List[Int]) -> Unit = match pred {
+  DivBy(divisor, every, along) -> {
+    if divisor <= 0 || (divisor & (divisor - 1)) != 0 {
+      refuse(name, "assume div_by wants a positive power of two, got ${divisor}")
+    } else {
+      ()
+    }
+    match (every, along) {
+      (None, None) -> ()
+      (Some(e), Some(a)) ->
+        if len(shape) == 0 {
+          refuse(name, "assume div_by: `every`/`along` cannot be used on a rank-0 tile")
+        } else if a < 0 || a >= len(shape) {
+          refuse(name, "assume div_by along dimension ${a} of a ${len(shape)}-dimensional tile")
+        } else if e < 0 || e > shape[a] {
+          refuse(name, "assume div_by every ${e} along a dimension of ${shape[a]}")
+        } else {
+          ()
+        }
+      _ -> refuse(name, "assume div_by takes `every` and `along` together or neither")
+    }
+  }
+  SameElements(groups) ->
+    if len(groups) != len(shape) {
+      refuse(name, "assume same_elements carries one value per dimension, got ${len(groups)} for rank ${len(shape)}")
+    } else {
+      match list.find(range(0, len(groups)), k => groups[k] < 0 || groups[k] > shape[k]) {
+        Some(k) -> refuse(name, "assume same_elements value ${k} is ${groups[k]}, outside 0 to ${shape[k]}")
+        None -> ()
+      }
+    }
+  Bounded(lb, ub) -> match (lb, ub) {
+    (Some(l), Some(u)) ->
+      if l > u { refuse(name, "assume bounded wants a lower bound at most the upper one, got ${l} and ${u}") } else { () }
+    _ -> ()
+  }
+}
+
+# How many format expressions `fmt` holds, by PrintTkoOp's own rule
+# (CudaTile.cpp's `extractFormatExpression`): a `%` runs to the first
+# conversion character, `%%` is an escaped percent and takes no operand, and
+# a `%` that reaches the end of the string with no conversion character is
+# malformed.
+fn format_args(name: String, fmt: String) -> Int = count_formats(name, fmt, str.chars(fmt), 0, 0)
+
+fn count_formats(name: String, fmt: String, cs: List[String], i: Int, seen: Int) -> Int =
+  if i >= len(cs) {
+    seen
+  } else if cs[i] != "%" {
+    count_formats(name, fmt, cs, i + 1, seen)
+  } else {
+    match conversion_end(cs, i + 1) {
+      None -> refuse(name, "print format `${fmt}` ends in an unterminated format expression")
+      Some(j) ->
+        if cs[j] == "%" {
+          count_formats(name, fmt, cs, j + 1, seen)
+        } else {
+          count_formats(name, fmt, cs, j + 1, seen + 1)
+        }
+    }
+  }
+
+fn conversion_end(cs: List[String], i: Int) -> Option[Int] =
+  if i >= len(cs) {
+    None
+  } else if one_of(["d", "i", "u", "o", "x", "X", "e", "E", "f", "F", "g", "G", "a", "A", "c", "s", "S", "p", "n", "%"], cs[i]) {
+    Some(i)
+  } else {
+    conversion_end(cs, i + 1)
   }
 
 # A memory operation names a declared parameter and reads it as the format it
@@ -900,6 +987,40 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         tok = tv
         d
       }
+      t_assert(shape, cond, message) => {
+        check_shape(name, shape)
+        ops = ops ++ [Assert(shape, cond, message)]
+        ()
+      }
+      t_assume(pred, dtype, shape, src) => {
+        check_shape(name, shape)
+        check_int_dtype(name, dtype)
+        check_assume(name, pred, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Assume(d, pred, dtype, shape, src)]
+        d
+      }
+      t_print(fmt, dtype, shape, args) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a print inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        let wanted = format_args(name, fmt)
+        if wanted != len(args) {
+          refuse(name, "print format `${fmt}` has ${wanted} format expression(s) and ${len(args)} operand(s)")
+        } else {
+          ()
+        }
+        let tv = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Print(tv, fmt, dtype, shape, args, tok)]
+        tok = tv
+        ()
+      }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
@@ -1001,6 +1122,9 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   IntPtr(dst, _dtype, _shape, _ints) -> [dst]
   PtrCast(dst, _from, _to, _shape, _ptrs) -> [dst]
   LoadAt(dst, tok_out, _dtype, _shape, _ptrs, _mask, _pad, _tok_in) -> [dst, tok_out]
+  Assert(_shape, _cond, _message) -> []
+  Assume(dst, _pred, _dtype, _shape, _src) -> [dst]
+  Print(tok_out, _fmt, _dtype, _shape, _args, _tok_in) -> [tok_out]
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its
@@ -1301,6 +1425,126 @@ test "an atomic mode outside the dialect's enumeration is refused when the kerne
   match outcome {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "`sub` is not an atomic read-modify-write mode") }
+  }
+}
+
+test "assert records outside the token chain, assume defines one handle, and print sits in the chain between two stores" {
+  let prog = trace_kernel("dbg", ["i32", "i32"], () => {
+    let x = param(I32, 0)
+    let out = param(I32, 1)
+    let v = load(x, idx_const(0), [8])
+    d_assert([8], lt_i([8], v, i_const([8], 9)), "too big")
+    let a = assume_div_by(I32, [8], 32, v)
+    store(out, idx_const(0), [8], a)
+    d_print(I32, "n=%d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+    store(out, idx_const(1), [8], a)
+  })
+  # the assert is between the load and the assume, defines nothing, and
+  # carries no token
+  let asserts = list.filter(prog.ops, op => match op {
+    Assert(_shape, _cond, _message) -> true
+    _ -> false
+  })
+  assert len(asserts) == 1
+  assert match asserts[0] {
+    Assert(shape, _cond, message) -> shape == [8] && message == "too big"
+    _ -> false
+  }
+  assert defined(asserts[0]) == []
+  # the print takes the first store's token and the second store takes the
+  # print's, so the chain is a line through all three
+  let stores = list.filter(prog.ops, op => match op {
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti) -> true
+    _ -> false
+  })
+  let prints = list.filter(prog.ops, op => match op {
+    Print(_t, _f, _d, _s, _a, _ti) -> true
+    _ -> false
+  })
+  assert len(stores) == 2 && len(prints) == 1
+  let first_tok = match stores[0] {
+    Store(tok_out, _p, _d, _b, _s, _st, _v, _m, _ti) -> tok_out
+    _ -> 0 - 1
+  }
+  let print_in = match prints[0] {
+    Print(_t, _f, _d, _s, _a, tok_in) -> tok_in
+    _ -> 0 - 1
+  }
+  let print_out = match prints[0] {
+    Print(tok_out, _f, _d, _s, _a, _ti) -> tok_out
+    _ -> 0 - 1
+  }
+  let second_in = match stores[1] {
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, tok_in) -> tok_in
+    _ -> 0 - 1
+  }
+  assert print_in == first_tok
+  assert second_in == print_out
+}
+
+test "a print whose format expressions do not count its operands, and an assume the dialect's own verifier would refuse, are refused when the kernel is recorded" {
+  let bad_count = catch_panic(() => trace_kernel("bad_print", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    d_print(I32, "%d and %d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+  }))
+  match bad_count {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "has 2 format expression(s) and 1 operand(s)") }
+  }
+  # `%%` is an escaped percent and takes no operand: the same string with
+  # one real conversion is accepted, which is what makes the count a rule
+  # and not a count of `%` characters
+  let escaped = catch_panic(() => trace_kernel("ok_print", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    d_print(I32, "100%% of %d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+  }))
+  assert match escaped {
+    Ok(_) -> true
+    Err(_e) -> false
+  }
+  let bad_divisor = catch_panic(() => trace_kernel("bad_assume", ["i32"], () => {
+    let x = param(I32, 0)
+    let _a = assume_div_by(I32, [8], 24, load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_divisor {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume div_by wants a positive power of two, got 24") }
+  }
+  let bad_rank = catch_panic(() => trace_kernel("bad_same", ["i32"], () => {
+    let x = param(I32, 0)
+    let _a = assume_same_elements(I32, [8], [2, 2], load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_rank {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume same_elements carries one value per dimension") }
+  }
+  let bad_bounds = catch_panic(() => trace_kernel("bad_bounded", ["i32"], () => {
+    let x = param(I32, 0)
+    let hi: Option[Int] = Some(0)
+    let lo: Option[Int] = Some(7)
+    let _a = assume_in_range(I32, [8], lo, hi, load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_bounds {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume bounded wants a lower bound at most the upper one") }
+  }
+  let inside = catch_panic(() => trace_kernel("bad_print_region", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    let _r = d_reduce_i([8], v, 0, (acc, e) => {
+      d_print(I32, "%d", [acc])
+      s_addi(acc, e)
+    })
+    ()
+  }))
+  match inside {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a print inside a reduce, scan or if region has no memory order") }
   }
 }
 

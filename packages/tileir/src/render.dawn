@@ -16,9 +16,9 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use dev.{RedId, IdF, IdI}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded}
 use prog.{TileProg, TileOp, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -149,6 +149,42 @@ fn un_rounding(op: String) -> String = match op {
 fn identity(id: RedId) -> String = match id {
   IdF(dtype, value) -> "${value} : ${dtype}"
   IdI(dtype, value) -> "${value} : ${dtype}"
+}
+
+# A string as the assembly spells it, between quotes: the three characters
+# MLIR's own printer escapes, and nothing else. The bytecode writes the
+# string's own bytes, so this is the text's half of one value and not a
+# second spelling of it.
+fn quoted(s: String) -> String =
+  "\"" ++ list.fold(str.chars(s), "", (acc, c) => acc ++ escape_char(c)) ++ "\""
+
+fn escape_char(c: String) -> String =
+  if c == "\"" {
+    "\\\""
+  } else if c == "\\" {
+    "\\\\"
+  } else if c == "\n" {
+    "\\n"
+  } else {
+    c
+  }
+
+# One `assume` predicate, as `custom<AssumePredicate>` prints it: the
+# attribute's own syntax with the `#cuda_tile.` prefix dropped
+# (CudaTile.cpp's printAssumePredicate does exactly that). A `bounded` bound
+# that is absent prints `?`.
+fn assume_predicate(p: AssumePred) -> String = match p {
+  DivBy(divisor, every, along) -> match (every, along) {
+    (Some(e), Some(a)) -> "div_by<${divisor}, every ${e} along ${a}>"
+    _ -> "div_by<${divisor}>"
+  }
+  SameElements(groups) -> "same_elements<[${commas(list.map(groups, g => "${g}"))}]>"
+  Bounded(lb, ub) -> "bounded<${bound(lb)}, ${bound(ub)}>"
+}
+
+fn bound(b: Option[Int]) -> String = match b {
+  Some(x) -> "${x}"
+  None -> "?"
 }
 
 # An integer constant as the TILE holds it, not as the kernel spelled it: a
@@ -317,6 +353,11 @@ fn line(i: Instr) -> String = match i {
   PtrToIntTile(dst, src, from, to) -> "${v(dst)} = ptr_to_int ${name(src)} : ${ty(from)} -> ${ty(to)}"
   IntToPtrTile(dst, src, from, to) -> "${v(dst)} = int_to_ptr ${name(src)} : ${ty(from)} -> ${ty(to)}"
   PtrToPtrTile(dst, src, from, to) -> "${v(dst)} = ptr_to_ptr ${name(src)} : ${ty(from)} -> ${ty(to)}"
+  AssertTile(cond, cond_ty, message) -> "assert ${name(cond)}, ${quoted(message)} : ${ty(cond_ty)}"
+  AssumeTile(dst, src, pred, t) -> "${v(dst)} = assume ${assume_predicate(pred)}, ${name(src)} : ${ty(t)}"
+  PrintTile(tok_out, fmt, args, arg_ty, tok_in) ->
+    "${v(tok_out)} = print_tko ${quoted(fmt)}, ${commas(list.map(args, name))}"
+    ++ " token=${name(tok_in)} : ${commas(list.map(args, _a => ty(arg_ty)))} -> token"
   Ret -> "return"
 }
 
@@ -618,6 +659,46 @@ test "the transcendentals spell the modifiers they carry and no others" {
   assert str.contains(text, "\n    %20 = floor %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %21 = ceil %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %22 = pow %13, %13 : tile<8xf64>\n")
+}
+
+test "assert, assume and print_tko spell the dialect's own assembly, predicate prefix dropped and format string escaped" {
+  let none: Option[Int] = None
+  let p = TileProg {
+    name: "dbg",
+    params: ["i32", "i32"],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      IdxConst(2, 8),
+      IdxMul(3, 1, 2),
+      Load(4, 5, 0, "i32", 3, [8], [1], None, None, 0),
+      CmpI(6, "lt", [8], 4, 4),
+      Assert([8], 6, "a lane\nwent \"wrong\""),
+      Assume(7, DivBy(32, none, none), "i32", [8], 4),
+      Assume(8, DivBy(32, Some(4), Some(0)), "i32", [8], 4),
+      Assume(9, SameElements([2]), "i32", [8], 4),
+      Assume(10, Bounded(Some(0), none), "i32", [8], 4),
+      Assume(11, Bounded(none, Some(7)), "i32", [8], 4),
+      Spread(12, "i32", [8], 4),
+      Print(13, "sum=%d and %% more\n", "i32", [], [12], 5)
+    ]
+  }
+  let text = render(p)
+  # `assert` has no result and prints its condition, the message and the
+  # condition's type.
+  assert str.contains(text, ", \"a lane\\nwent \\\"wrong\\\"\" : tile<8xi1>\n")
+  assert str.contains(text, "\n    assert %")
+  # `custom<AssumePredicate>` prints the attribute without its
+  # `#cuda_tile.` prefix (CudaTile.cpp), and an absent bound is `?`.
+  assert str.contains(text, " = assume div_by<32>, %13 : tile<8xi32>\n")
+  assert str.contains(text, " = assume div_by<32, every 4 along 0>, %13 : tile<8xi32>\n")
+  assert str.contains(text, " = assume same_elements<[2]>, %13 : tile<8xi32>\n")
+  assert str.contains(text, " = assume bounded<0, ?>, %13 : tile<8xi32>\n")
+  assert str.contains(text, " = assume bounded<?, 7>, %13 : tile<8xi32>\n")
+  # `print_tko` prints its format, its operands, the token it takes and the
+  # token it answers. `%%` is an escaped percent and takes no operand, so
+  # one operand is right for this string.
+  assert str.contains(text, " = print_tko \"sum=%d and %% more\\n\", %22 token=%14 : tile<i32> -> token\n")
 }
 
 test "an i32 constant prints what the tile holds, not what the kernel spelled" {
