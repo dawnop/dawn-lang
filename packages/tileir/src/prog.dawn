@@ -37,6 +37,20 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 ## `iv`, `carried` and everything `body` defines are visible inside the
 ## region only; `results` are the loop's values after it.
 ##
+## `Extract`, `Cat` and `Permute` are knife T2's shape operations, and
+## `NumBlocks` the grid's extent (`BlockId`'s companion). `JoinToks` merges
+## two or more tokens into one, and it is the one operation here that makes
+## the token chain a GRAPH: every other memory operation takes the token
+## before it and answers the next, so the record's order is a line.
+##
+## `MakePtrs`, `PtrAdd`, `PtrInt`, `IntPtr`, `PtrCast` and `LoadAt` are the
+## pointer surface. A `Load` builds its own address ladder in the lowering
+## and never names it; these six name it: `MakePtrs` is the parameter
+## spread over a tile, `PtrAdd` an `offset` by an i32 tile the body
+## computed, and the three conversions are the dialect's `ptr_to_int`,
+## `int_to_ptr` and `ptr_to_ptr`. `LoadAt` is `Load` through such a tile,
+## and it sits in the token chain exactly as `Load` does.
+##
 ## `Spread` widens a rank-0 tile to `n` lanes. `Reduce` and `If` are the two
 ## other regions. A `Scan` is a `Reduce` that keeps every dimension and
 ## carries one attribute more (`reverse`): its results have the shape of
@@ -81,6 +95,17 @@ pub type TileOp =
   | Scan(results: List[Int], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
   | If(results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp])
   | Yield(values: List[Int])
+  | Extract(dst: Int, dtype: String, from: List[Int], to: List[Int], src: Int, indices: List[Int])
+  | Cat(dst: Int, dtype: String, dim: Int, lhs_shape: List[Int], rhs_shape: List[Int], lhs: Int, rhs: Int)
+  | Permute(dst: Int, dtype: String, shape: List[Int], perm: List[Int], src: Int)
+  | NumBlocks(dst: Int, axis: Int)
+  | JoinToks(dst: Int, toks: List[Int])
+  | MakePtrs(dst: Int, param: Int, dtype: String, shape: List[Int])
+  | PtrAdd(dst: Int, dtype: String, shape: List[Int], ptrs: Int, offs: Int)
+  | PtrInt(dst: Int, dtype: String, shape: List[Int], ptrs: Int)
+  | IntPtr(dst: Int, dtype: String, shape: List[Int], ints: Int)
+  | PtrCast(dst: Int, from: String, to: String, shape: List[Int], ptrs: Int)
+  | LoadAt(dst: Int, tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int], tok_in: Int)
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -192,10 +217,53 @@ fn check_rmw_mode(name: String, mode: String) -> Unit =
   }
 
 fn check_int_dtype(name: String, dtype: String) -> Unit =
-  if one_of(["i32", "i8", "i1"], dtype) {
+  if one_of(["i32", "i8", "i1", "i64"], dtype) {
     ()
   } else {
     refuse(name, "`${dtype}` is not an integer tile format")
+  }
+
+# `extract` answers a subtile whose shape DIVIDES the source's in every
+# dimension, and its indices are the slice numbers, one per dimension: both
+# come from ExtractOp's verifier, and both are cheaper to refuse here than
+# to read out of `tileiras`.
+fn check_extract(name: String, from: List[Int], to: List[Int], indices: Int) -> Unit =
+  if len(from) != len(to) {
+    refuse(name, "extract answers a tile of ${len(to)} dimension(s) from one of ${len(from)}")
+  } else if indices != len(from) {
+    refuse(name, "extract of a ${len(from)}-dimensional tile takes that many slice indices, got ${indices}")
+  } else {
+    match list.find(range(0, len(from)), k => to[k] < 1 || from[k] % to[k] != 0) {
+      Some(k) -> refuse(name, "extract dimension ${k}: ${to[k]} does not divide ${from[k]} evenly")
+      None -> ()
+    }
+  }
+
+# `cat` joins two tiles of one rank that agree everywhere but at `dim`.
+fn check_cat(name: String, dim: Int, lhs: List[Int], rhs: List[Int]) -> Unit =
+  if len(lhs) != len(rhs) {
+    refuse(name, "cat joins tiles of one rank, got ${len(lhs)} and ${len(rhs)}")
+  } else if dim < 0 || dim >= len(lhs) {
+    refuse(name, "cat along dimension ${dim} of a ${len(lhs)}-dimensional tile")
+  } else {
+    match list.find(range(0, len(lhs)), k => k != dim && lhs[k] != rhs[k]) {
+      Some(k) -> refuse(name, "cat: the operands differ at dimension ${k}, ${lhs[k]} and ${rhs[k]}")
+      None -> ()
+    }
+  }
+
+# `permute` wants a rank of at least two (PermuteOp's verifier says so) and
+# a `perm` that is a permutation of the dimensions.
+fn check_perm(name: String, shape: List[Int], perm: List[Int]) -> Unit =
+  if len(shape) < 2 {
+    refuse(name, "permute wants a tile of rank two or more, got ${len(shape)}")
+  } else if len(perm) != len(shape) {
+    refuse(name, "a permutation of a ${len(shape)}-dimensional tile has that many entries, got ${len(perm)}")
+  } else {
+    match list.find(range(0, len(perm)), k => not list.any(range(0, len(perm)), j => perm[j] == k)) {
+      Some(k) -> refuse(name, "the permutation ${show(perm)} does not mention dimension ${k}")
+      None -> ()
+    }
   }
 
 # A memory operation names a declared parameter and reads it as the format it
@@ -635,6 +703,109 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
           _ -> refuse(name, "scan_end closes a region that is not a scan")
         }
       }
+      t_extract(dtype, from, to, src, indices) => {
+        check_shape(name, from)
+        check_shape(name, to)
+        check_extract(name, from, to, len(indices))
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Extract(d, dtype, from, to, src, indices)]
+        d
+      }
+      t_cat(dtype, dim, lhs_shape, rhs_shape, lhs, rhs) => {
+        check_shape(name, lhs_shape)
+        check_shape(name, rhs_shape)
+        check_cat(name, dim, lhs_shape, rhs_shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Cat(d, dtype, dim, lhs_shape, rhs_shape, lhs, rhs)]
+        d
+      }
+      t_permute(dtype, shape, perm, src) => {
+        check_shape(name, shape)
+        check_perm(name, shape, perm)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Permute(d, dtype, shape, perm, src)]
+        d
+      }
+      t_num_blocks(axis) => {
+        if axis < 0 || axis > 2 { refuse(name, "num_blocks axis is 0, 1 or 2, got ${axis}") } else { () }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [NumBlocks(d, axis)]
+        d
+      }
+      t_tok_get() => tok
+      t_tok_set(t) => {
+        tok = t
+        ()
+      }
+      t_tok_join(toks) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a token join inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        if len(toks) < 2 { refuse(name, "join_tokens wants two or more tokens, got ${len(toks)}") } else { () }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [JoinToks(d, toks)]
+        tok = d
+        d
+      }
+      t_ptrs(param, dtype, shape) => {
+        check_param(name, params, param, dtype, "pointer tile")
+        check_shape(name, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [MakePtrs(d, param, dtype, shape)]
+        d
+      }
+      t_ptr_offset(dtype, shape, ptrs, offs) => {
+        check_shape(name, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [PtrAdd(d, dtype, shape, ptrs, offs)]
+        d
+      }
+      t_ptr_to_int(dtype, shape, ptrs) => {
+        check_shape(name, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [PtrInt(d, dtype, shape, ptrs)]
+        d
+      }
+      t_int_to_ptr(dtype, shape, ints) => {
+        check_shape(name, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [IntPtr(d, dtype, shape, ints)]
+        d
+      }
+      t_ptr_to_ptr(from, to, shape, ptrs) => {
+        check_shape(name, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [PtrCast(d, from, to, shape, ptrs)]
+        d
+      }
+      t_load_ptrs(dtype, shape, ptrs, mask, pad) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a load inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        let d = next
+        let tv = next + 1
+        next = mint(name, next, 2)
+        ops = ops ++ [LoadAt(d, tv, dtype, shape, ptrs, mask, pad, tok)]
+        tok = tv
+        d
+      }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
@@ -723,6 +894,17 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Scan(results, _dim, _reverse, _shape, _identities, _operands, _args, _body) -> results
   If(results, _cond, _on_true, _on_false) -> results
   Yield(_values) -> []
+  Extract(dst, _dtype, _from, _to, _src, _indices) -> [dst]
+  Cat(dst, _dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) -> [dst]
+  Permute(dst, _dtype, _shape, _perm, _src) -> [dst]
+  NumBlocks(dst, _axis) -> [dst]
+  JoinToks(dst, _toks) -> [dst]
+  MakePtrs(dst, _param, _dtype, _shape) -> [dst]
+  PtrAdd(dst, _dtype, _shape, _ptrs, _offs) -> [dst]
+  PtrInt(dst, _dtype, _shape, _ptrs) -> [dst]
+  IntPtr(dst, _dtype, _shape, _ints) -> [dst]
+  PtrCast(dst, _from, _to, _shape, _ptrs) -> [dst]
+  LoadAt(dst, tok_out, _dtype, _shape, _ptrs, _mask, _pad, _tok_in) -> [dst, tok_out]
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its

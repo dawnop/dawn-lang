@@ -87,6 +87,30 @@ impl Dtype[I1] {
   fn dtype_bytes(d: I1) -> Int = 1
 }
 
+## The 64-bit integer tile format: what `ptr_to_int` answers and what
+## `int_to_ptr` reads back. A tile element format and not a buffer format,
+## as `I1` is: nothing here allocates an i64 buffer, and the only values of
+## this type a kernel builds are addresses and the constants it offsets them
+## by. The dialect's other scalar formats that this backend has no client
+## for are knife T3's.
+pub type I64 = | I64
+
+impl Dtype[I64] {
+  fn dtype_name(d: I64) -> String = "i64"
+  fn dtype_bytes(d: I64) -> Int = 8
+}
+
+## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
+## the element format the pointers point AT, so a `Ptrs[F64]` where a
+## `Ptrs[I32]` is wanted is a type error.
+##
+## Every `load` and `store` of the strided surface builds one of these
+## inside the lowering and never shows it. This type is what the three
+## pointer conversions of knife T2 convert, and it exists because they have
+## nothing else to convert: `ptr_to_int`, `int_to_ptr` and `ptr_to_ptr` say
+## nothing about tiles of numbers.
+pub opaque type Ptrs[D] = Int
+
 ## The device, as operations a recording handler answers. Names carry a `t_`
 ## prefix for the reason std/gpu's carry `gpu_`: `use tileir/dev.{Dev}` brings
 ## every operation into the importing module's namespace (spec 6.5).
@@ -258,6 +282,42 @@ impl Dtype[I1] {
 ## `t_if_else`; the then-region's yields have to reach the record somewhere,
 ## and this is the only operation of the bracket that can carry them.
 ##
+## `t_extract` / `t_cat` / `t_permute` are the shape operations (knife T2).
+## `t_extract(dtype, from, to, src, indices)` answers the subtile of `src`
+## whose SLICE number along dimension `k` is `indices[k]`: `to` must divide
+## `from` evenly, there is one index per dimension, and the indices are
+## slice numbers rather than element offsets (the dialect's own wording).
+## `t_cat(dtype, dim, lhs_shape, rhs_shape, lhs, rhs)` joins two tiles that
+## agree in every dimension but `dim`. `t_permute(dtype, shape, perm, src)`
+## reorders the dimensions: dimension `k` of the answer is dimension
+## `perm[k]` of the source, and the source's rank is at least two.
+##
+## `t_num_blocks(axis)` answers the extent of the grid along `axis`, which
+## is `t_block_id`'s companion: `t_block_id` is where this block is and this
+## is how many there are. A grid-stride loop needs both.
+##
+## `t_tok_get` / `t_tok_set` / `t_tok_join` are the handler's memory
+## ordering cell, exposed. `t_tok_get` answers the token every memory
+## operation issued here would take; `t_tok_set` puts one back, so that two
+## chains can start from the same place; `t_tok_join` merges two or more of
+## them into one and makes it the current token. They are the only
+## operations here through which a body sees the token at all, and the
+## typed surface has one client for them, `d_fork2`. Everything else keeps
+## the chain a line.
+##
+## `t_ptrs` / `t_ptr_offset` / `t_ptr_to_int` / `t_int_to_ptr` /
+## `t_ptr_to_ptr` / `t_load_ptrs` are the pointer surface. `t_ptrs(param,
+## dtype, shape)` answers a tile of `shape` every lane of which is the
+## parameter's own address (the reshape and broadcast every ladder opens
+## with); `t_ptr_offset` advances such a tile by an i32 tile of ELEMENT
+## offsets, the elements being the pointee's; the three conversions are the
+## dialect's own, address-preserving and pure type changes; and
+## `t_load_ptrs` reads through a pointer tile the body built, sitting in the
+## token chain exactly as `t_load` does. Between them they are the second
+## way to address memory here, the first being the `base` and `strides` of
+## `t_load` -- and they are the only way to say "the same bytes read as
+## another format", which is what `t_ptr_to_ptr` is for.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
@@ -304,6 +364,19 @@ pub effect Dev {
   fn t_if_begin(cond: Int) -> Unit
   fn t_if_else(yields: List[Int]) -> Unit
   fn t_if_end(yields: List[Int]) -> List[Int]
+  fn t_extract(dtype: String, from: List[Int], to: List[Int], src: Int, indices: List[Int]) -> Int
+  fn t_cat(dtype: String, dim: Int, lhs_shape: List[Int], rhs_shape: List[Int], lhs: Int, rhs: Int) -> Int
+  fn t_permute(dtype: String, shape: List[Int], perm: List[Int], src: Int) -> Int
+  fn t_num_blocks(axis: Int) -> Int
+  fn t_tok_get() -> Int
+  fn t_tok_set(tok: Int) -> Unit
+  fn t_tok_join(toks: List[Int]) -> Int
+  fn t_ptrs(param: Int, dtype: String, shape: List[Int]) -> Int
+  fn t_ptr_offset(dtype: String, shape: List[Int], ptrs: Int, offs: Int) -> Int
+  fn t_ptr_to_int(dtype: String, shape: List[Int], ptrs: Int) -> Int
+  fn t_int_to_ptr(dtype: String, shape: List[Int], ints: Int) -> Int
+  fn t_ptr_to_ptr(from: String, to: String, shape: List[Int], ptrs: Int) -> Int
+  fn t_load_ptrs(dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int]) -> Int
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -363,8 +436,11 @@ pub fn row_major(shape: List[Int]) -> List[Int] = {
 ## `r` by `c` array transposed. A permutation is a rearrangement of the
 ## strides and nothing else: no operation is issued, no element moves, and
 ## the tile a load answers is already in the order the permuted view has.
-## This is why there is no `permute` instruction here (the dialect's own
-## opcode 0x53 has no client): a transpose is a layout, not a shuffle.
+## This is not the dialect's `permute` (opcode 0x53), which knife T2 added
+## as `permute_tile` below: a transpose of an array being READ is a layout
+## and issues nothing, where a transpose of a tile already in registers is
+## an instruction. Both are here because both are real; which one a kernel
+## wants is decided by where the elements are.
 ##
 ## Why the layout is two lists rather than one `Layout` record: `shape` is
 ## also what every arithmetic operation takes (`addf(F64, shape, ..)`), so a
@@ -1642,6 +1718,156 @@ pub fn d_if[D](cond: Scalar[I1], on_true: fn() -> Tile[D] !Dev, on_false: fn() -
   out
 }
 
+# ---- shapes, the grid's extent, token joins and pointers (knife T2) ----
+
+# An index handle as the effect carries it. `Idx` is transparent here, but
+# a `list.map` over `List[Idx]` wants a function and this is it.
+fn idx_handle(i: Idx) -> Int = {
+  let h: Int = i
+  h
+}
+
+## The subtile of `t` whose slice number along dimension `k` is
+## `indices[k]`. `to` must divide `from` evenly in every dimension, and
+## there are `from[k] / to[k]` slices along dimension `k`; the indices are
+## SLICE numbers and not element offsets, which is the dialect's own
+## wording and the one thing about `extract` that is easy to read backwards.
+## An index outside its range is undefined behaviour, not an error.
+pub fn extract[D: Dtype](d: D, from: List[Int], to: List[Int], t: Tile[D], indices: List[Idx]) -> Tile[D] !Dev = {
+  let x: Int = t
+  let r: Tile[D] = t_extract(dtype_name(d), from, to, x, list.map(indices, idx_handle))
+  r
+}
+
+## `a` and `b` joined along dimension `dim`: the two agree in every other
+## dimension, and the answer's `dim` is the sum of theirs.
+pub fn cat[D: Dtype](d: D, dim: Int, lhs: List[Int], rhs: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let r: Tile[D] = t_cat(dtype_name(d), dim, lhs, rhs, x, y)
+  r
+}
+
+## `t` with its dimensions reordered: dimension `k` of the answer is
+## dimension `perm[k]` of `t`, so `permute_tile(F64, [4, 4, 8], [1, 0, 2], t)`
+## exchanges the first two axes. `perm` is a permutation of
+## `0 .. len(shape) - 1` and `t` has rank two or more.
+##
+## NOT `permute` above, which takes strides and answers strides: that one is
+## a LAYOUT for a load to read an array through, and no instruction comes of
+## it. This one is the dialect's own `permute` (opcode 0x53) and moves the
+## elements of a tile that is already in registers. Before knife T2 the
+## layout was the only thing here that could be called a transpose, and the
+## comment on `permute` said the opcode had no client; it has one now, and
+## the two remain different operations at different times.
+pub fn permute_tile[D: Dtype](d: D, shape: List[Int], perm: List[Int], t: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = t
+  let r: Tile[D] = t_permute(dtype_name(d), shape, perm, x)
+  r
+}
+
+## The number of tile blocks along `axis` (0, 1 or 2): the extent of the
+## grid this kernel was launched on, which is `block_id`'s companion. A grid
+## smaller than the work is covered by stepping through it, and this is the
+## step.
+pub fn num_blocks(axis: Int) -> Idx !Dev = {
+  let h: Idx = t_num_blocks(axis)
+  h
+}
+
+## `a` and `b` issued as two INDEPENDENT chains of memory operations, joined
+## afterwards: both start from the ordering token as it stands here, and
+## everything after this call is ordered after both. Neither is ordered
+## against the other, so the two must not touch the same element.
+##
+## This is the only client of `t_tok_get` / `t_tok_set` / `t_tok_join`, and
+## the only thing in this package that makes the token graph a graph. A
+## body that just issues its stores in order gets the line it already had.
+pub fn d_fork2(a: fn() -> Unit !Dev, b: fn() -> Unit !Dev) -> Unit !Dev = {
+  let start = t_tok_get()
+  a()
+  let after_a = t_tok_get()
+  t_tok_set(start)
+  b()
+  let after_b = t_tok_get()
+  let _joined = t_tok_join([after_a, after_b])
+  ()
+}
+
+## The tile of `shape` every lane of which holds `p`'s own address: the
+## reshape and broadcast every address ladder opens with, as a value a body
+## can name. `ptr_offset` is what moves it.
+pub fn ptrs[D](p: Param[D], shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_ptrs(position(p), param_dtype(p), shape)
+  r
+}
+
+## `ps` advanced by `offs`, in ELEMENTS of the pointee format: lane `i` of
+## the answer is lane `i` of `ps` plus `offs[i]` elements. The same
+## `offset` instruction a strided load builds, with the body's own tile
+## where its ladder would be.
+pub fn ptr_offset[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D], offs: Tile[I32]) -> Ptrs[D] !Dev = {
+  let x: Int = ps
+  let o: Int = offs
+  let r: Ptrs[D] = t_ptr_offset(dtype_name(d), shape, x, o)
+  r
+}
+
+## `ps` as a tile of i64 addresses. The values are to be read UNSIGNED; the
+## inverse is `int_to_ptr`.
+pub fn ptr_to_int[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[I64] !Dev = {
+  let x: Int = ps
+  let r: Tile[I64] = t_ptr_to_int(dtype_name(d), shape, x)
+  r
+}
+
+## A tile of i64 addresses as pointers to `d`. The inverse of `ptr_to_int`,
+## and the point of the pair is that an address can be COMPUTED: a kernel
+## that wants a byte offset no `offset` can express takes the address apart
+## here and puts it back.
+pub fn int_to_ptr[D: Dtype](d: D, shape: List[Int], v: Tile[I64]) -> Ptrs[D] !Dev = {
+  let x: Int = v
+  let r: Ptrs[D] = t_int_to_ptr(dtype_name(d), shape, x)
+  r
+}
+
+## `ps` reinterpreted as pointers to `to_d`: the same addresses, another
+## element format. Nothing is converted and nothing is read; what changes is
+## what a later `ptr_offset` counts in and what a later `load_ptrs` reads.
+## The dialect keeps this apart from `int_to_ptr` and `ptr_to_int` so that a
+## compiler can still follow pointer provenance across it.
+pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: Ptrs[A]) -> Ptrs[B] !Dev = {
+  let x: Int = ps
+  let r: Ptrs[B] = t_ptr_to_ptr(dtype_name(from_d), dtype_name(to_d), shape, x)
+  r
+}
+
+## The tile the pointers in `ps` point at, unmasked. In the token chain
+## where `load` is, and ordered against every other memory operation the
+## same way.
+pub fn load_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[D] !Dev = {
+  let x: Int = ps
+  let none: Option[Int] = None
+  let r: Tile[D] = t_load_ptrs(dtype_name(d), shape, x, none, none)
+  r
+}
+
+## The i64 tile of `shape` every lane of which holds `value`. What an
+## address is offset by, in bytes.
+pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = {
+  let h: Tile[I64] = t_consti("i64", shape, value)
+  h
+}
+
+## The element-wise i64 sum `a + b`. The one arithmetic operation this
+## surface has over i64, because address arithmetic is the one client.
+pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Tile[I64] = t_binaryi("addi", "i64", shape, x, y)
+  h
+}
+
 # ---- tests ----
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
@@ -1811,6 +2037,63 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       let base = next
       next = next + len(yields)
       list.map(range(0, len(yields)), k => base + k)
+    }
+    t_extract(_dtype, _from, _to, _src, _indices) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_permute(_dtype, _shape, _perm, _src) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_num_blocks(_axis) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_tok_get() => 0
+    t_tok_set(_tok) => ()
+    t_tok_join(_toks) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_ptrs(_param, _dtype, _shape) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_ptr_offset(_dtype, _shape, _ptrs, _offs) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_ptr_to_int(_dtype, _shape, _ptrs) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_int_to_ptr(_dtype, _shape, _ints) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_ptr_to_ptr(_from, _to, _shape, _ptrs) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_load_ptrs(_dtype, _shape, _ptrs, _mask, _pad) => {
+      let h = next
+      next = next + 1
+      h
     }
   }
   body()
@@ -2004,6 +2287,57 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_if_end(yields) => {
       log = log ++ ["if_end ${show(yields)}"]
       list.map(range(0, len(yields)), k => 40 + k)
+    }
+    t_extract(dtype, from, to, src, indices) => {
+      log = log ++ ["extract ${dtype} ${show(from)} ${show(to)} ${src} ${show(indices)}"]
+      50
+    }
+    t_cat(dtype, dim, lhs_shape, rhs_shape, lhs, rhs) => {
+      log = log ++ ["cat ${dtype} ${dim} ${show(lhs_shape)} ${show(rhs_shape)} ${lhs} ${rhs}"]
+      51
+    }
+    t_permute(dtype, shape, perm, src) => {
+      log = log ++ ["permute ${dtype} ${show(shape)} ${show(perm)} ${src}"]
+      52
+    }
+    t_num_blocks(axis) => {
+      log = log ++ ["num_blocks ${axis}"]
+      53
+    }
+    t_tok_get() => {
+      log = log ++ ["tok_get"]
+      60
+    }
+    t_tok_set(tok) => {
+      log = log ++ ["tok_set ${tok}"]
+    }
+    t_tok_join(toks) => {
+      log = log ++ ["tok_join ${show(toks)}"]
+      61
+    }
+    t_ptrs(param, dtype, shape) => {
+      log = log ++ ["ptrs ${param} ${dtype} ${show(shape)}"]
+      70
+    }
+    t_ptr_offset(dtype, shape, ptrs, offs) => {
+      log = log ++ ["ptr_offset ${dtype} ${show(shape)} ${ptrs} ${offs}"]
+      71
+    }
+    t_ptr_to_int(dtype, shape, ptrs) => {
+      log = log ++ ["ptr_to_int ${dtype} ${show(shape)} ${ptrs}"]
+      72
+    }
+    t_int_to_ptr(dtype, shape, ints) => {
+      log = log ++ ["int_to_ptr ${dtype} ${show(shape)} ${ints}"]
+      73
+    }
+    t_ptr_to_ptr(from, to, shape, ptrs) => {
+      log = log ++ ["ptr_to_ptr ${from} ${to} ${show(shape)} ${ptrs}"]
+      74
+    }
+    t_load_ptrs(dtype, shape, ptrs, mask, pad) => {
+      log = log ++ ["load_ptrs ${dtype} ${show(shape)} ${ptrs} ${opt(mask)} ${opt(pad)}"]
+      75
     }
   }
   body()
@@ -2336,6 +2670,19 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_if_begin(_cond) => ()
       t_if_else(_yields) => ()
       t_if_end(yields) => list.map(range(0, len(yields)), k => 40 + k)
+      t_extract(_dtype, _from, _to, _src, _indices) => 50
+      t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => 51
+      t_permute(_dtype, _shape, _perm, _src) => 52
+      t_num_blocks(_axis) => 53
+      t_tok_get() => 60
+      t_tok_set(_tok) => ()
+      t_tok_join(_toks) => 61
+      t_ptrs(_param, _dtype, _shape) => 70
+      t_ptr_offset(_dtype, _shape, _ptrs, _offs) => 71
+      t_ptr_to_int(_dtype, _shape, _ptrs) => 72
+      t_int_to_ptr(_dtype, _shape, _ints) => 73
+      t_ptr_to_ptr(_from, _to, _shape, _ptrs) => 74
+      t_load_ptrs(_dtype, _shape, _ptrs, _mask, _pad) => 75
     }
     let _r = loop_seen()
     log
