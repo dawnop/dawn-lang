@@ -1592,7 +1592,7 @@ jobs:
   #
   # tileiras is an offline assembler: no GPU, no driver, it links libc, libm
   # and libpthread only and reads libnvvm.so.4 and execs ptxas from two
-  # sibling wheels. install-tileiras.sh downloads the three wheels
+  # sibling wheels. install-tileiras.sh caches the three wheels
   # scripts/tile-golden/toolchain.txt pins by exact version and refuses any
   # whose sha256 differs, the same rule as the wasi-sdk step above (a
   # checksum from the same place as the file is not a check); the pin and
@@ -1709,11 +1709,20 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
       - name: the pinned tileiras
         run: |
-          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tileiras wheel cache refuses altered pins and bytes
+        run: python3 scripts/tile-golden/install-contract.py
 
       - name: tile IR goldens and tileiras (126 kernels and fifteen mutants, both backends; shard 1)
         env:
@@ -1754,9 +1763,15 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
       - name: the pinned tileiras
         run: |
-          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
@@ -1790,9 +1805,15 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
       - name: the pinned tileiras
         run: |
-          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
@@ -1825,9 +1846,15 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
       - name: the pinned tileiras
         run: |
-          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras")"
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
