@@ -1759,20 +1759,45 @@ jobs:
     # doubled: 631 / 620 / 622 / 633 / 644s. Every one of knife T2's four
     # lines was under-claimed by that same 31s.
     #
-    # 644s leaves 16s against the pole, so the next knife that adds an item
-    # to shard 5 splits again; six shards of this same matrix would be
-    # 209 / 216 / 218 / 200 / 205 / 208s of wall clock and 558 to 575s of
-    # planning value. What the tightness does NOT mean is that CI is close:
-    # the four-shard observations were 427 / 414 / 385 / 371s against
-    # 628 / 638 / 607 / 627s of budget, about 0.66 of it, so five shards
-    # should observe near 330 to 360s.
+    # 644s left 16s against the pole, so the next knife to add an item to
+    # shard 5 had to split again, and knife T5 is that knife.
     #
-    # The fifth shard buys BUDGET HEADROOM and not wall clock, which is what
-      # every split here has bought since knife 16: a run of this workflow now
+    # N=5 -> N=6 on 2026-09-05 (knife T5), the POLE again and the third
+    # split in a row for that reason. Six more items (four kernels and two
+    # mutants; 171 in all: 143 kernels and 28 mutants) and one unsharded
+    # ITEM_TIMES run on this tree (load 4.1 rising to 7.5, 1278s wall,
+    # 1261s of items) give 143 kernels 4.54 to 6.02s (mean 5.12) and 28
+    # mutants 15.49 to 20.37s (mean 18.88). The mutants have grown again --
+    # 16.15s at T3, 18.88s here -- which is the third reading of the one
+    # thing these measurements have found that is not load: a mutant is a
+    # native rebuild of the package, so its cost tracks the package's size
+    # while a kernel's does not.
+    #
+    # Dealing those 171 items into FIVE is 261.8 / 241.5 / 244.3 / 255.7 /
+    # 257.8s, whose planning values are 726 / 685 / 691 / 713 / 718s: all
+    # five over the 660s pole, exactly as the four-way deal was at T3. Six
+    # is 219.7 / 215.7 / 218.9 / 199.0 / 197.9 / 209.9s, and it is the
+    # fewest that fits. The six lines below are item sum + 31s + 70s,
+    # doubled, and all six are restated because N changed and a line
+    # computed for another N is void by definition (knife 16 set that rule).
+    #
+    # The 31s is carried from knife T3's measurement rather than remeasured:
+    # this run's own gap between the wall clock and the item sum is 16.5s,
+    # so 31s is the conservative of the two and a budget is a ceiling.
+    #
+    # 641s leaves 19s against the pole, so the next knife to add an item to
+    # shard 1 splits again; seven shards of this same matrix are 551 to 575s
+    # of planning value. What the tightness does NOT mean is that CI is
+    # close: the four-shard observations were 427 / 414 / 385 / 371s against
+    # 628 / 638 / 607 / 627s of budget, about 0.66 of it, so six shards
+    # should observe near 260 to 290s.
+    #
+    # The sixth shard buys BUDGET HEADROOM and not wall clock, which is what
+    # every split here has bought since knife 16: a run of this workflow now
     # holds 42 jobs against an account ceiling of 20, so the 42nd queues
     # behind the first wave, and tile has never been the run's long pole.
-    # budget: 3x 631s planning value (315s local, doubled)
-    timeout-minutes: 32
+    # budget: 3x 641s planning value (321s local, doubled)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1819,9 +1844,11 @@ jobs:
     # 249.0 + 70 = 319.0, doubled is 638s, the heaviest of the four and the
     # one 22s from the pole: this shard carries six of the 21 mutants where
     # the others carry five, and a mutant is 3.6 times a kernel. Worst CI
-    # observation 414s (2026-09-05 audit, see tile-golden-1).
-    # budget: 3x 620s planning value (310s local, doubled)
-    timeout-minutes: 31
+    # observation 414s (2026-09-05 audit, see tile-golden-1). Knife T5's
+    # six-way deal reads 215.7s of items here, + 31 + 70 = 316.7, doubled
+    # is 633s.
+    # budget: 3x 633s planning value (317s local, doubled)
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
 
@@ -1861,8 +1888,9 @@ jobs:
     # idle machine, + 70 = 303.4, doubled is 607s. It is the LIGHTEST of the
     # four now, which is the answer to the question the paragraph above
     # leaves open. Worst CI observation 385s (2026-09-05 audit, see
-    # tile-golden-1).
-    # budget: 3x 622s planning value (311s local, doubled)
+    # tile-golden-1). Knife T5's six-way deal reads 218.9s of items here,
+    # + 31 + 70 = 319.9, doubled is 640s.
+    # budget: 3x 640s planning value (320s local, doubled)
     timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
@@ -1901,9 +1929,13 @@ jobs:
     # doubled is 535s, which was one second past the old ceiling and so did
     # move it. Knife T2 measured this shard at 243.4s on an idle machine,
     # + 70 = 313.4, doubled is 627s. Worst CI observation 371s (2026-09-05
-    # audit, see tile-golden-1).
-    # budget: 3x 633s planning value (316s local, doubled)
-    timeout-minutes: 32
+    # audit, see tile-golden-1). Knife T5's six-way deal reads 199.0s of
+    # items here, + 31 + 70 = 300.0, doubled is 600s. That is BELOW the 633s
+    # this line carried, and it is restated downwards all the same, because
+    # N changed: a line computed for a five-way deal says nothing about a
+    # six-way one.
+    # budget: 3x 600s planning value (300s local, doubled)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -1942,9 +1974,12 @@ jobs:
     # 251.9 + 70 = 321.9, doubled is 644s. It is the heaviest of the five
     # because 26 mod 5 is 1 and this shard takes the extra mutant, which is
     # 16.2s; no CI observation exists yet, and the first real run of it
-    # replaces this planning value.
-    # budget: 3x 644s planning value (322s local, doubled)
-    timeout-minutes: 33
+    # replaces this planning value. Knife T5 re-deals the matrix six ways
+    # and reads 197.9s of items here, + 31 + 70 = 298.9, doubled is 598s:
+    # the lightest of the six, and restated downwards for the reason
+    # tile-golden-4 gives.
+    # budget: 3x 598s planning value (299s local, doubled)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -1978,9 +2013,12 @@ jobs:
     # the third split in a row for that reason. Knife T3 left shard 5 at a
     # 644s planning value with 16s of room, and this knife adds six items
     # (four kernels and two mutants; 171 in all). Same matrix, same
-    # tileiras, same arithmetic as tile-golden-1's note.
-    # budget: 3x 582s planning value (291s local, doubled)
-    timeout-minutes: 30
+    # tileiras, same arithmetic as tile-golden-1's note. 209.9s of items
+    # from that knife's unsharded ITEM_TIMES run, + 31 + 70 = 310.9,
+    # doubled is 622s; no CI observation exists yet, and the first real run
+    # of it replaces this planning value.
+    # budget: 3x 622s planning value (311s local, doubled)
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
 
