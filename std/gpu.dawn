@@ -740,6 +740,280 @@ pub fn ref_erf(x: Float) -> Float =
     if x < 0.0 { 0.0 - m } else { m }
   }
 
+# ---- the trigonometric second opinions (knife T1) ----
+#
+# Seven host references for the seven operations knife T1 adds. Every one
+# is written the way `ref_exp` and `ref_erf` are: an argument reduction and
+# a series a reader can check against a handbook, and NOT the device's own
+# algorithm. That is the whole point of them. The device runs libdevice
+# polynomials; if these ran the same polynomials, `trig_sweep` would be
+# comparing an approximation with itself and the difference it reports
+# would be zero for the wrong reason.
+#
+# `ref_remf` is the exception and says so in its own comment: the remainder
+# is exactly representable, so it has an exact algorithm rather than a
+# series, and the number it answers is the answer and not an opinion.
+
+## Pi to the nearest Float, and pi over two split into a high part whose
+## low 21 bits are zero and a remainder. The split is Cody and Waite's:
+## `k * PIO2_HI` is exact for every `|k|` this file meets, so the reduced
+## argument `(x - k * PIO2_HI) - k * PIO2_LO` keeps its leading bits where
+## a single-word `x - k * (pi / 2)` would have lost them to cancellation.
+pub const PI: Float = 3.141592653589793
+const PIO2_HI: Float = 1.5707963267341256
+const PIO2_LO: Float = 6.077100506506192e-11
+
+## The sine of `r` by its Taylor series, for `|r| <= pi / 4`. Nineteen
+## terms is far past the last bit of a Float there: the first dropped term
+## is below `r^21 / 21!`, which is 1e-24 at `r = pi / 4`.
+fn sin_small(r: Float) -> Float = {
+  let q = 0.0 - r * r
+  var term = r
+  var sum = r
+  var n = 1
+  while n <= 9 {
+    term = term * q / (to_float(2 * n) * to_float(2 * n + 1))
+    sum = sum + term
+    n = n + 1
+  }
+  sum
+}
+
+## The cosine of `r` by its Taylor series, for `|r| <= pi / 4`.
+fn cos_small(r: Float) -> Float = {
+  let q = 0.0 - r * r
+  var term = 1.0
+  var sum = 1.0
+  var n = 1
+  while n <= 9 {
+    term = term * q / (to_float(2 * n - 1) * to_float(2 * n))
+    sum = sum + term
+    n = n + 1
+  }
+  sum
+}
+
+## The quadrant of `x` and the reduced argument in it: `k` is the nearest
+## integer to `x / (pi / 2)` and `r` is `x - k * pi / 2`, with `|r|` at
+## most `pi / 4`. The subtraction is in two steps, which is what the split
+## constant above is for.
+fn reduce_quadrant(x: Float) -> (Int, Float) = {
+  let q = x / (PIO2_HI + PIO2_LO)
+  let k = if q < 0.0 { 0 - to_int(0.5 - q) } else { to_int(q + 0.5) }
+  let kf = to_float(k)
+  (k, (x - kf * PIO2_HI) - kf * PIO2_LO)
+}
+
+## `k` modulo four, for a `k` of either sign.
+fn quadrant(k: Int) -> Int = {
+  let m = k % 4
+  if m < 0 { m + 4 } else { m }
+}
+
+## The sine of `x`. Range reduction to a quadrant and a remainder in
+## `[-pi/4, pi/4]`, then the Taylor series of that quadrant's function.
+## This is the SECOND OPINION for the device's `sin`, which is a libdevice
+## approximation; the two are compared against each other and neither is
+## the definition of the other.
+pub fn ref_sin(x: Float) -> Float =
+  if x != x || x - x != 0.0 {
+    0.0 / 0.0
+  } else {
+    let (k, r) = reduce_quadrant(x)
+    match quadrant(k) {
+      0 -> sin_small(r)
+      1 -> cos_small(r)
+      2 -> 0.0 - sin_small(r)
+      _ -> 0.0 - cos_small(r)
+    }
+  }
+
+## The cosine of `x`, by the same reduction one quadrant along.
+pub fn ref_cos(x: Float) -> Float =
+  if x != x || x - x != 0.0 {
+    0.0 / 0.0
+  } else {
+    let (k, r) = reduce_quadrant(x)
+    match quadrant(k) {
+      0 -> cos_small(r)
+      1 -> 0.0 - sin_small(r)
+      2 -> 0.0 - cos_small(r)
+      _ -> sin_small(r)
+    }
+  }
+
+## The tangent of `x`, as the quotient of the two above. Near a pole the
+## denominator is small and the answer is large, and the relative part of
+## the tolerance tier is what carries the comparison there; a corpus is not
+## allowed to sit ON a pole, where both sides answer different infinities.
+pub fn ref_tan(x: Float) -> Float = ref_sin(x) / ref_cos(x)
+
+## The hyperbolic sine of `x`. Small arguments go through the series, for
+## `ref_tanh`'s reason: `(e - 1/e) / 2` loses every significant digit of a
+## small answer to the subtraction. Past that it is the definition, with
+## `1/e` underflowing to zero on its own where `e` is enormous.
+pub fn ref_sinh(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let m = if ax < 0.5 {
+      # sum x^(2n+1) / (2n+1)!, every term of the same sign
+      let q = ax * ax
+      var term = ax
+      var sum = ax
+      var n = 1
+      while n <= 12 {
+        term = term * q / (to_float(2 * n) * to_float(2 * n + 1))
+        sum = sum + term
+        n = n + 1
+      }
+      sum
+    } else {
+      let e = ref_exp(ax)
+      (e - 1.0 / e) * 0.5
+    }
+    if x < 0.0 { 0.0 - m } else { m }
+  }
+
+## The hyperbolic cosine of `x`. No cancellation anywhere: both halves of
+## `(e + 1/e) / 2` are positive, so the definition is accurate over the
+## whole range and there is no small-argument branch.
+pub fn ref_cosh(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let e = ref_exp(ax)
+    (e + 1.0 / e) * 0.5
+  }
+
+## The square root of three, to the nearest Float: the tangent of pi / 3,
+## and the pivot of the reduction below.
+const SQRT3: Float = 1.7320508075688772
+
+## The arc tangent of `t` for `|t| <= 2 - sqrt(3)`, by its Taylor series.
+## `t^2` is at most 0.0718 there, so the twenty-fifth term is below 1e-28.
+fn atan_small(t: Float) -> Float = {
+  let q = 0.0 - t * t
+  var term = t
+  var sum = t
+  var n = 1
+  while n <= 25 {
+    term = term * q
+    sum = sum + term / to_float(2 * n + 1)
+    n = n + 1
+  }
+  sum
+}
+
+## The arc tangent of `t`, in `[-pi/2, pi/2]`. Two reductions bring the
+## argument inside `2 - sqrt(3)`: `atan(t) = pi/2 - atan(1/t)` for `|t| > 1`
+## and `atan(t) = pi/6 + atan((t sqrt3 - 1) / (t + sqrt3))` for what is left
+## above the pivot.
+pub fn ref_atan(t: Float) -> Float =
+  if t != t {
+    t
+  } else {
+    let s = if t < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let a = if t < 0.0 { 0.0 - t } else { t }
+    let m = if a > 1.0e300 {
+      PI * 0.5
+    } else if a > 1.0 {
+      PI * 0.5 - atan_reduced(1.0 / a)
+    } else {
+      atan_reduced(a)
+    }
+    s * m
+  }
+
+## The arc tangent of a non-negative `a` at most 1, past the second
+## reduction.
+fn atan_reduced(a: Float) -> Float =
+  if a > 0.2679491924311227 {
+    PI / 6.0 + atan_small((a * SQRT3 - 1.0) / (a + SQRT3))
+  } else {
+    atan_small(a)
+  }
+
+## The `atan2` of `a` over `b`, with the quadrant taken from the signs of
+## both. THE NUMERATOR IS FIRST, which is the order
+## `packages/tileir/src/dev.atan2` takes and the order the dialect's own
+## sentence gives ("the arc tangent of the ratio of first and second input
+## arguments x / y"); it is C's `atan2(y, x)` with the names swapped.
+##
+## The axes are the special cases and they are where a corpus earns its
+## keep: `b < 0` moves the answer by a whole `pi` and a reference that
+## forgot it would agree with the device on the right half plane and
+## nowhere else. Signed zeros are not distinguished here: `0.0` is read as
+## `+0.0`, so `atan2(0, -1)` is `pi` and not `-pi`, and the corpus in
+## scripts/tile-gpu-diff carries no negative zero.
+pub fn ref_atan2(a: Float, b: Float) -> Float =
+  if a != a || b != b {
+    0.0 / 0.0
+  } else if b == 0.0 {
+    if a > 0.0 {
+      PI * 0.5
+    } else if a < 0.0 {
+      0.0 - PI * 0.5
+    } else {
+      0.0
+    }
+  } else if b > 0.0 {
+    ref_atan(a / b)
+  } else if a >= 0.0 {
+    ref_atan(a / b) + PI
+  } else {
+    ref_atan(a / b) - PI
+  }
+
+## The floating-point remainder of `a` by `b` under TRUNCATED division:
+## `a - trunc(a / b) * b`, which takes the sign of the dividend. This is
+## C's `fmod` and not C's `remainder`, and the dialect's `remf` is stated
+## as the first (Ops.td, RemFOp); which one the DEVICE runs is measured in
+## scripts/tile-gpu-diff and not assumed here.
+##
+## Unlike its neighbours above this one is EXACT, and it is exact by
+## construction rather than by accuracy: the remainder of two
+## representable numbers is representable, and shifting the divisor by
+## powers of two and subtracting where it fits computes it with no rounding
+## at all. So a disagreement with the device is a disagreement about the
+## OPERATION and never about the last bit.
+pub fn ref_remf(a: Float, b: Float) -> Float = {
+  let na = a != a
+  let nb = b != b
+  if na || nb || b == 0.0 || a - a != 0.0 {
+    0.0 / 0.0
+  } else if b - b != 0.0 {
+    a
+  } else {
+    let x = if a < 0.0 { 0.0 - a } else { a }
+    let y = if b < 0.0 { 0.0 - b } else { b }
+    let m = if x < y {
+      x
+    } else {
+      # lift the divisor to the highest power of two at or below the
+      # dividend, then walk it back down subtracting where it fits; every
+      # subtraction is between two multiples of the same ulp and so is
+      # exact
+      var d = y
+      var n = 0
+      while d <= x * 0.5 {
+        d = d * 2.0
+        n = n + 1
+      }
+      var r = x
+      while n >= 0 {
+        if r >= d { r = r - d } else { () }
+        d = d * 0.5
+        n = n - 1
+      }
+      r
+    }
+    if a < 0.0 { 0.0 - m } else { m }
+  }
+}
+
 # ---- references for the reduction and transcendental kernels (knife 7b) ----
 #
 # Every one of these covers a vector of `n` elements in ONE tile block whose
@@ -2158,6 +2432,78 @@ pub fn swiglu_half_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> 
       })
 }
 
+# ---- references for the trigonometric kernels (knife T1) ----
+
+## `sin cos tan sinh cosh atan2 remf` over `n` lanes each, laid down in
+## that order in ONE output buffer: segment `j` holds function `j` at
+## offset `j * n`. The kernel writes seven masked stores at seven base
+## offsets, so every lane of every function is compared and nothing is
+## summed; a sum would let two wrong functions cancel, which is what the
+## older `mathops` accepts and this one does not.
+##
+## `ins` is `[x, y, z, old out]`: `x` is the argument of the five unary
+## ones and the numerator of the `atan2`, `y` is that `atan2`'s
+## denominator (and carries the zeros the axes need), and `z` is the
+## remainder's divisor (and carries no zero, because a remainder by zero is
+## a NaN and a NaN is never within a tolerance of anything).
+pub fn trig_sweep_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let z = ins[2]
+  let old = ins[3]
+  let dt = dtypes[3]
+  list.map(range(0, len(old)), k =>
+      if k < 7 * n {
+        let i = k % n
+        round_to(dt, match k / n {
+          0 -> ref_sin(x[i])
+          1 -> ref_cos(x[i])
+          2 -> ref_tan(x[i])
+          3 -> ref_sinh(x[i])
+          4 -> ref_cosh(x[i])
+          5 -> ref_atan2(x[i], y[i])
+          _ -> ref_remf(x[i], z[i])
+        })
+      } else {
+        kept(old, k)
+      })
+}
+
+## `Q * cos + rotate_half(Q) * sin` over an `m` by `d` buffer: leetgpu 61
+## (Rotary Positional Embedding). `rotate_half` swaps the two halves of a
+## row and negates what lands first, so the answer at column `j` below
+## `d / 2` is `q[j] * cos[j] - q[j + d/2] * sin[j]` and at `j` above it is
+## `q[j - d/2] * sin[j] + q[j] * cos[j]`.
+##
+## THIS READS `cos` AND `sin` AT THE FULL COLUMN `j`, and the kernel reads
+## them at `j mod (d / 2)`. Both are right because the problem guarantees
+## the two tables are HALF-SPLIT (column `j` and column `j + d/2` hold the
+## same value), and the difference is the point: the kernel takes the
+## shortcut the guarantee allows and the reference does not, so a corpus
+## whose tables were not half-split would separate them. The corpus in
+## scripts/tile-gpu-diff builds them half-split, which is what the problem
+## hands a solver.
+##
+## `ins` is `[q, cos, sin, old out]`.
+pub fn rope61_ref(m: Int, d: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let cs = ins[1]
+  let sn = ins[2]
+  let old = ins[3]
+  let dt = dtypes[3]
+  let half = d / 2
+  list.map(range(0, len(old)), k =>
+      if k < m * d {
+        let j = k % d
+        let base = k - j
+        let rot = if j < half { 0.0 - q[base + j + half] } else { q[base + j - half] }
+        round_to(dt, q[k] * cs[k] + rot * sn[k])
+      } else {
+        kept(old, k)
+      })
+}
+
 ## `Y = X * S` where one element of `S` scales a `ts` by `ts` block of an
 ## `m` by `n` matrix: leetgpu 64 (Weight Dequantization). `S` is
 ## `ceil(m / ts)` by `ceil(n / ts)`, which is the problem's
@@ -3311,6 +3657,149 @@ test "ref_erf answers values a reader can check by hand, and is odd" {
   }
   # and the small-argument slope is 2 / sqrt(pi)
   assert close(ref_erf(1.0e-6) / 1.0e-6, TWO_OVER_SQRT_PI, 1.0e-11)
+}
+
+test "the trigonometric references answer values a reader can check by hand" {
+  assert ref_sin(0.0) == 0.0
+  assert ref_cos(0.0) == 1.0
+  assert close(ref_sin(PI / 6.0), 0.5, 1.0e-15)
+  assert close(ref_cos(PI / 3.0), 0.5, 1.0e-15)
+  assert close(ref_sin(PI / 2.0), 1.0, 1.0e-15)
+  assert close(ref_tan(PI / 4.0), 1.0, 1.0e-15)
+  # the reduction has to survive many quadrants, which is the whole reason
+  # the constant above is split in two
+  assert close(ref_sin(10.0 * PI + PI / 6.0), 0.5, 1.0e-14)
+  assert close(ref_cos(0.0 - 20.0), ref_cos(20.0), 1.0e-15)
+  assert close(ref_sin(0.0 - 20.0), 0.0 - ref_sin(20.0), 1.0e-15)
+  # Pythagoras on a spread of arguments, including large ones
+  for k in range(0, 60) {
+    let x = to_float(k - 30) * 0.97
+    let c = ref_cos(x)
+    let n = ref_sin(x)
+    assert close(c * c + n * n, 1.0, 1.0e-14)
+    assert close(ref_tan(x) * c, n, 1.0e-13)
+  }
+  assert close(ref_sinh(1.0), 1.1752011936438014, 1.0e-14)
+  assert close(ref_cosh(1.0), 1.5430806348152437, 1.0e-14)
+  assert ref_sinh(0.0) == 0.0
+  assert ref_cosh(0.0) == 1.0
+  # the hyperbolic Pythagoras, over arguments small enough that
+  # `cosh^2 - sinh^2` is not itself the cancellation being measured: at
+  # `x = 3` both squares are around 100 and the difference keeps thirteen
+  # digits, at `x = 11` they are around 1e9 and it keeps five
+  for k in range(0, 60) {
+    let x = to_float(k - 30) * 0.1
+    let c = ref_cosh(x)
+    let n = ref_sinh(x)
+    assert close(c * c - n * n, 1.0, 1.0e-13)
+  }
+  # the odd and even symmetries over the whole range the sweep uses, where
+  # the identity above no longer says anything
+  for k in range(0, 60) {
+    let x = to_float(k - 30) * 0.37
+    assert ref_sinh(0.0 - x) == 0.0 - ref_sinh(x)
+    assert ref_cosh(0.0 - x) == ref_cosh(x)
+  }
+  assert close(ref_sinh(1.0e-8) / 1.0e-8, 1.0, 1.0e-14)
+}
+
+test "the trigonometric kernel references answer what a reader can check by hand" {
+  # two lanes, seven segments, and four sentinels the kernel never writes
+  let out = trig_sweep_ref(2, ["f64", "f64", "f64", "f64"],
+    [[0.0, PI / 6.0], [1.0, 0.0], [3.0, 0.4],
+      list.map(range(0, 18), _i => 0.0 - 1.0)])
+  assert len(out) == 18
+  assert out[0] == 0.0
+  assert close(out[1], 0.5, 1.0e-15)
+  assert out[2] == 1.0
+  assert close(out[3], 0.8660254037844387, 1.0e-15)
+  assert out[4] == 0.0
+  assert close(out[5], 0.5773502691896257, 1.0e-15)
+  assert out[6] == 0.0
+  assert close(out[7], 0.5478534738880397, 1.0e-14)
+  assert out[8] == 1.0
+  assert close(out[9], 1.1402383210764286, 1.0e-14)
+  # atan2(0, 1) is on the axis; atan2(pi/6, 0) is a quarter turn
+  assert out[10] == 0.0
+  assert close(out[11], PI / 2.0, 1.0e-15)
+  # the remainder keeps the dividend where it is smaller than the divisor
+  assert out[12] == 0.0
+  assert close(out[13], ref_remf(PI / 6.0, 0.4), 0.0)
+  # and the four lanes past the seven segments are the buffer's own
+  for i in range(14, 18) {
+    assert out[i] == 0.0 - 1.0
+  }
+}
+
+test "the rope reference rotates the two halves of a row and keeps the tail" {
+  # one row of four: q = [1, 2, 3, 4], cos and sin half-split
+  let out = rope61_ref(1, 4, ["f64", "f64", "f64", "f64"],
+    [[1.0, 2.0, 3.0, 4.0], [0.5, 0.25, 0.5, 0.25], [2.0, 4.0, 2.0, 4.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]])
+  # rotate_half([1,2,3,4]) = [-3,-4,1,2]
+  assert out == [1.0 * 0.5 - 3.0 * 2.0, 2.0 * 0.25 - 4.0 * 4.0,
+    3.0 * 0.5 + 1.0 * 2.0, 4.0 * 0.25 + 2.0 * 4.0, 0.0 - 1.0]
+  # the leetgpu statement's own example: cos all one is the identity, and
+  # sin all one is the rotation
+  let ident = rope61_ref(1, 4, ["f64", "f64", "f64", "f64"],
+    [[1.0, 2.0, 3.0, 4.0], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0]])
+  assert ident == [1.0, 2.0, 3.0, 4.0]
+  let turned = rope61_ref(1, 4, ["f64", "f64", "f64", "f64"],
+    [[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0],
+      [0.0, 0.0, 0.0, 0.0]])
+  assert turned == [0.0 - 1.0, 0.0 - 1.0, 1.0, 1.0]
+}
+
+test "ref_atan2 puts the answer in the quadrant the two signs name" {
+  assert ref_atan2(0.0, 1.0) == 0.0
+  assert close(ref_atan2(1.0, 1.0), PI / 4.0, 1.0e-15)
+  assert close(ref_atan2(1.0, 0.0), PI / 2.0, 1.0e-15)
+  assert close(ref_atan2(1.0, 0.0 - 1.0), 3.0 * PI / 4.0, 1.0e-15)
+  assert close(ref_atan2(0.0, 0.0 - 1.0), PI, 1.0e-15)
+  assert close(ref_atan2(0.0 - 1.0, 0.0 - 1.0), 0.0 - 3.0 * PI / 4.0, 1.0e-15)
+  assert close(ref_atan2(0.0 - 1.0, 0.0), 0.0 - PI / 2.0, 1.0e-15)
+  assert close(ref_atan2(0.0 - 1.0, 1.0), 0.0 - PI / 4.0, 1.0e-15)
+  assert ref_atan2(0.0, 0.0) == 0.0
+  # the tangent of the answer is the ratio, on the half plane where the
+  # answer is inside `[-pi/2, pi/2]` and the identity holds
+  for k in range(0, 40) {
+    let a = to_float(k - 20) * 0.43
+    assert close(ref_tan(ref_atan2(a, 2.0)), a / 2.0, 1.0e-13)
+    # and the left half plane is the right one a whole pi away
+    let l = ref_atan2(a, 0.0 - 2.0)
+    let want = if a >= 0.0 { PI - ref_atan2(a, 2.0) } else { 0.0 - PI - ref_atan2(a, 2.0) }
+    assert close(l, want, 1.0e-14)
+  }
+}
+
+test "ref_remf is truncated division and is exact" {
+  # the sign of the DIVIDEND, which is what tells `fmod` from `remainder`
+  assert ref_remf(5.5, 2.0) == 1.5
+  assert ref_remf(0.0 - 5.5, 2.0) == 0.0 - 1.5
+  assert ref_remf(5.5, 0.0 - 2.0) == 1.5
+  assert ref_remf(0.0 - 5.5, 0.0 - 2.0) == 0.0 - 1.5
+  # IEEE `remainder(5.5, 2.0)` is -0.5, so this pair is the whole
+  # difference between the two operations
+  assert ref_remf(5.5, 2.0) != 0.0 - 0.5
+  # a dividend smaller than the divisor is itself
+  assert ref_remf(0.25, 4.0) == 0.25
+  assert ref_remf(0.0 - 0.25, 4.0) == 0.0 - 0.25
+  assert ref_remf(0.0, 3.0) == 0.0
+  # a zero divisor is NaN, and so is an infinite dividend
+  assert ref_remf(1.0, 0.0) != ref_remf(1.0, 0.0)
+  assert ref_remf(1.0 / 0.0, 2.0) != ref_remf(1.0 / 0.0, 2.0)
+  assert ref_remf(2.0, 1.0 / 0.0) == 2.0
+  # exact, not close: `a - trunc(a / b) * b` reproduces the dividend
+  for k in range(0, 80) {
+    let a = to_float(k - 40) * 0.37
+    let b = to_float(k % 7 + 1) * 0.5
+    let r = ref_remf(a, b)
+    let q = (a - r) / b
+    assert q == to_float(to_int(q))
+    assert (if r < 0.0 { 0.0 - r } else { r }) < b
+    assert a - q * b == r
+  }
 }
 
 test "Abramowitz-Stegun 7.1.26 is inside 1.5e-7 of ref_erf everywhere the kernels look" {
