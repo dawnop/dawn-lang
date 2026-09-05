@@ -2337,7 +2337,7 @@ gath_kernel_check scatter-unpermuted scatter_perm
 #     that turns a rank into a sort. The scatter here carries NO mask, which
 #     is the half of the surface scatter-unpermuted does not reach.
 gath_kernel_mutant rank-scatter-in-lane-order sort_rank \
-  '  scatter(out, float_to_int(F64, s1, rank), s1, load(x, zero, s1))' \
+  '  scatter(out, float_to_int(F64, I32, s1, rank), s1, load(x, zero, s1))' \
   '  store(out, zero, s1, load(x, zero, s1))'
 gath_kernel_check rank-scatter-in-lane-order sort_rank
 
