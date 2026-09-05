@@ -112,6 +112,69 @@ pub fn round_fp16(x: Float) -> Float = round_binary(x, 11, -14, 15)
 ## `x` rounded to binary32.
 pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
 
+## `x` rounded to TensorFloat-32: binary32's exponent range with eleven
+## significand bits instead of twenty-four. It is a rounding and not a
+## storage format in this module's sense -- `tf32_bits` puts it in a 32-bit
+## word with thirteen zero bits at the bottom, which is where the hardware
+## keeps it.
+pub fn round_tf32(x: Float) -> Float = round_binary(x, 11, -126, 127)
+
+## `x` rounded to f8E5M2: three significand bits, exponents -14..15. An
+## ordinary IEEE binary format at eight bits, infinities and all, so
+## `round_binary` is the whole of it.
+pub fn round_f8e5m2(x: Float) -> Float = round_binary(x, 3, -14, 15)
+
+## `x` rounded to f8E4M3FN: four significand bits, exponents -6..8.
+##
+## FN is the whole of what this function adds to `round_binary`. The format
+## has no infinity: the all-ones exponent field is a normal exponent, and
+## only the single encoding with an all-ones significand under it is taken,
+## as NaN. So the largest finite value is 1.75 * 2^8 = 448 rather than the
+## 1.875 * 2^8 = 480 an IEEE format of these widths would have, and there is
+## nothing above it to overflow to except NaN.
+##
+## THE OVERFLOW ANSWER IS A CHOICE THIS TREE COULD NOT MEASURE. The dialect
+## gives `ftof` no saturation attribute, so the reading here is IEEE's rule
+## with the infinity replaced by the only encoding that is left: a magnitude
+## above the midpoint 464 answers NaN, and 464 itself ties DOWN to 448
+## because 448's significand is the even one. A device would settle it, and
+## no device this tree can reach accepts the type (docs/tile-backend-design.md
+## 6.6 records the refusal).
+pub fn round_f8e4m3fn(x: Float) -> Float = {
+  let v = round_binary(x, 4, -6, 8)
+  if v != v || magnitude(v) <= 448.0 { v } else { 0.0 / 0.0 }
+}
+
+## `x` rounded to f8E8M0FNU: the exponent alone.
+##
+## The value set is the 255 powers 2^-127 .. 2^127 and NaN, and that is all
+## of it: no sign bit, no significand, no zero, no infinity. So this is not
+## a `round_binary` at some width, it is a different function, and its
+## rounding mode is different too -- `ftof` accepts only `zero` and
+## `positive_inf` for this target (Ops.td's FToFOp), never the
+## `nearest_even` every other conversion here takes. This is the `zero` one,
+## which is what packages/tileir writes: the answer is the largest power of
+## two at or below `x`.
+##
+## Everything outside the value set answers NaN: zero, every negative
+## number, the infinities and NaN itself. A positive number below 2^-127 has
+## no representable value below it, and this clamps it UP to 2^-127 rather
+## than answering NaN, which is the second unmeasurable choice of this pair
+## (`round_f8e4m3fn` records the first).
+pub fn round_f8e8m0(x: Float) -> Float =
+  if x != x || x <= 0.0 || x == 1.0 / 0.0 {
+    0.0 / 0.0
+  } else {
+    let e = exponent(x)
+    if e > 127 {
+      0.0 / 0.0
+    } else if e < -127 {
+      pow2(-127)
+    } else {
+      pow2(e)
+    }
+  }
+
 # ---- construction ----
 
 ## The bfloat16 nearest to `x`.
@@ -455,6 +518,185 @@ pub fn bf16_of_bits(bits: Int) -> Float = {
   if neg { -a } else { a }
 }
 
+## The 32-bit pattern of the binary32 value `x`: the sign bit, eight
+## exponent bits biased by 127, twenty-three significand bits. The bfloat16
+## function's shape at binary32's widths and the same contract: `x` is a
+## value of the format, as `round_f32` leaves it, and a Float off the grid
+## answers the pattern with the extra bits dropped rather than the nearest
+## binary32.
+##
+## This is the codec the module's header said would arrive "when something
+## needs it". `tf32_bits` is what needs it: TensorFloat-32 lives in a
+## binary32 word.
+pub fn f32_bits(x: Float) -> Int =
+  if x != x {
+    0x7FC00000
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 0x80000000 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a == 1.0 / 0.0 {
+      sign | 0x7F800000
+    } else {
+      let e = exponent(a)
+      if e < -126 {
+        # below the normal range: no hidden bit, the significand counts
+        # quanta of 2^-149
+        sign | to_int(a / pow2(-149))
+      } else if e > 127 {
+        sign | 0x7F800000
+      } else {
+        sign | ((e + 127) << 23) | to_int((a / pow2(e) - 1.0) * pow2(23))
+      }
+    }
+  }
+
+## The binary32 value whose 32-bit pattern is the low 32 bits of `bits`,
+## exactly, as a Float (every binary32 value is one).
+pub fn f32_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFFFFFFFF
+  let neg = (b & 0x80000000) != 0
+  let e = (b >>> 23) & 0xFF
+  let m = b & 0x7FFFFF
+  let a = if e == 0xFF {
+    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
+  } else if e == 0 {
+    to_float(m) * pow2(-149)
+  } else {
+    (1.0 + to_float(m) / pow2(23)) * pow2(e - 127)
+  }
+  if neg { -a } else { a }
+}
+
+## The 32-bit pattern of the TensorFloat-32 value `x`: a binary32 word whose
+## bottom THIRTEEN bits are zero. tf32 is nineteen bits of information (a
+## sign, binary32's eight exponent bits and ten significand bits) and the
+## hardware keeps it in a 32-bit slot, so a tf32 buffer is a buffer of
+## 32-bit words and this is how one is laid out. `x` is a value of the
+## format, as `round_tf32` leaves it.
+pub fn tf32_bits(x: Float) -> Int = f32_bits(x) & 0xFFFFE000
+
+## The TensorFloat-32 value whose 32-bit pattern is the low 32 bits of
+## `bits`. The bottom thirteen bits are not part of the format and are
+## ignored, so this is total on every word and `tf32_of_bits(tf32_bits(v))`
+## is `v` for every value of the format.
+pub fn tf32_of_bits(bits: Int) -> Float = f32_of_bits(bits & 0xFFFFE000)
+
+## The octet of the f8E5M2 value `x`: the sign bit, five exponent bits
+## biased by 15, two significand bits. The binary16 function's shape at
+## eight bits; the subnormal arm counts quanta of 2^-16 and the canonical
+## quiet NaN is `0x7E`.
+pub fn f8e5m2_bits(x: Float) -> Int =
+  if x != x {
+    0x7E
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 0x80 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a == 1.0 / 0.0 {
+      sign | 0x7C
+    } else {
+      let e = exponent(a)
+      if e < -14 {
+        sign | to_int(a / pow2(-16))
+      } else if e > 15 {
+        sign | 0x7C
+      } else {
+        sign | ((e + 15) << 2) | to_int((a / pow2(e) - 1.0) * 4.0)
+      }
+    }
+  }
+
+## The f8E5M2 value whose octet is the low eight bits of `bits`, exactly.
+pub fn f8e5m2_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFF
+  let neg = (b & 0x80) != 0
+  let e = (b >>> 2) & 0x1F
+  let m = b & 0x3
+  let a = if e == 0x1F {
+    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
+  } else if e == 0 {
+    to_float(m) * pow2(-16)
+  } else {
+    (1.0 + to_float(m) / 4.0) * pow2(e - 15)
+  }
+  if neg { -a } else { a }
+}
+
+## The octet of the f8E4M3FN value `x`: the sign bit, four exponent bits
+## biased by 7, three significand bits. The subnormal arm counts quanta of
+## 2^-9.
+##
+## THE ALL-ONES EXPONENT IS A NORMAL EXPONENT here, which is the whole
+## difference from `f8e5m2_bits`: `0x7F` and `0xFF` are the format's only
+## two NaN encodings and everything below them is finite, so `0x7E` is 448
+## and not an infinity. A value beyond the range answers the canonical NaN
+## `0x7F`, because there is no infinity to answer with.
+pub fn f8e4m3fn_bits(x: Float) -> Int =
+  if x != x {
+    0x7F
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 0x80 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a > 448.0 {
+      0x7F
+    } else {
+      let e = exponent(a)
+      if e < -6 {
+        sign | to_int(a / pow2(-9))
+      } else {
+        sign | ((e + 7) << 3) | to_int((a / pow2(e) - 1.0) * 8.0)
+      }
+    }
+  }
+
+## The f8E4M3FN value whose octet is the low eight bits of `bits`, exactly.
+## `0x7F` and `0xFF` are NaN and every other octet is a finite value.
+pub fn f8e4m3fn_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFF
+  let neg = (b & 0x80) != 0
+  let e = (b >>> 3) & 0xF
+  let m = b & 0x7
+  if e == 0xF && m == 0x7 {
+    0.0 / 0.0
+  } else {
+    let a = if e == 0 {
+      to_float(m) * pow2(-9)
+    } else {
+      (1.0 + to_float(m) / 8.0) * pow2(e - 7)
+    }
+    if neg { -a } else { a }
+  }
+}
+
+## The octet of the f8E8M0FNU value `x`: the biased exponent alone, `e + 127`
+## for `x = 2^e`, and `0xFF` for NaN. There is no sign bit and no
+## significand, so an octet is a value and the codec is a shift.
+## `x` is a value of the format, as `round_f8e8m0` leaves it; anything else
+## answers NaN rather than the nearest power of two.
+pub fn f8e8m0_bits(x: Float) -> Int =
+  if x != x || x <= 0.0 || x == 1.0 / 0.0 {
+    0xFF
+  } else {
+    let e = exponent(x)
+    if e < -127 || e > 127 || x != pow2(e) { 0xFF } else { e + 127 }
+  }
+
+## The f8E8M0FNU value whose octet is the low eight bits of `bits`: `2^(b -
+## 127)`, and NaN for `0xFF`. Every one of the other 255 octets is a
+## distinct positive power of two, so this format has no zero.
+pub fn f8e8m0_of_bits(bits: Int) -> Float = {
+  let b = bits & 0xFF
+  if b == 0xFF { 0.0 / 0.0 } else { pow2(b - 127) }
+}
+
 # ---- tests ----
 #
 # Representative cases only. The exact-oracle corpus that pins every path of
@@ -650,4 +892,210 @@ test "the bf16 codec spells the special values and the named boundaries" {
   assert bf16_bits(1.0e300) == 0x7F80
   # bits above the sixteenth are ignored
   assert bf16_of_bits(0x13F80) == 1.0
+}
+
+# ---- the formats knife T3 added ----
+#
+# Four roundings and five codecs, tested at the four places a rounding can
+# be wrong: a tie, the subnormal grid, the largest finite value and NaN.
+# The exhaustive checks are the two eight-bit ones, which are cheap enough
+# to run over every octet and are the only ones here where "every pattern"
+# is a small number.
+
+test "the tf32 rounding is binary32's exponents with eleven significand bits" {
+  # 1 + 2^-11 is the midpoint between 1 and 1 + 2^-10; the even one wins
+  assert round_tf32(1.0 + 1.0 / 2048.0) == 1.0
+  assert round_tf32(1.0 + 3.0 / 2048.0) == 1.0 + 1.0 / 512.0
+  # just off the midpoint, both ways
+  assert round_tf32(1.0 + 3.0 / 4096.0) == 1.0 + 1.0 / 1024.0
+  assert round_tf32(1.0 + 1.0 / 4096.0) == 1.0
+  # binary32 keeps the whole of a value tf32 cuts: the two differ on
+  # anything with more than eleven significand bits
+  assert round_f32(1.0 + 1.0 / 4096.0) == 1.0 + 1.0 / 4096.0
+  # the exponent range is binary32's, so the largest finite value has
+  # binary32's exponent and tf32's significand
+  let max_tf32 = (2.0 - pow2(-10)) * pow2(127)
+  assert round_tf32(max_tf32) == max_tf32
+  assert round_f32(max_tf32) == max_tf32
+  # the midpoint above it carries out of the top exponent, so it is the
+  # infinity, exactly as binary16's 65520 is
+  assert round_tf32((2.0 - pow2(-11)) * pow2(127)) == 1.0 / 0.0
+  assert round_tf32(-3.5e38) == 0.0 - 1.0 / 0.0
+  # the subnormal grid is 2^(-126 - 10) = 2^-136
+  assert round_tf32(pow2(-136)) == pow2(-136)
+  assert round_tf32(pow2(-138)) == 0.0
+}
+
+test "the tf32 codec is a binary32 word with thirteen zero bits" {
+  assert tf32_bits(1.0) == 0x3F800000
+  assert tf32_bits(-1.5) == 0xBFC00000
+  assert tf32_bits(0.0) == 0
+  assert tf32_bits(1.0 / 0.0) == 0x7F800000
+  assert tf32_bits(0.0 / 0.0) == 0x7FC00000
+  # the low thirteen bits are not part of the format, in both directions
+  assert tf32_bits(round_tf32(1.0 + 1.0 / 1024.0)) == 0x3F802000
+  assert tf32_of_bits(0x3F802000 | 0x1FFF) == 1.0 + 1.0 / 1024.0
+  # every value of the format round-trips, and it is on round_tf32's grid
+  var bad = 0
+  var b = 0
+  while b < 512 {
+    let word = (b << 23) | ((b % 1024) << 13)
+    let v = tf32_of_bits(word)
+    if v != v {
+      ()
+    } else if tf32_bits(v) != (word & 0xFFFFE000) || round_tf32(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+}
+
+test "every f8E5M2 octet round-trips through its value, and the value is on round_f8e5m2's grid" {
+  var bad = 0
+  var nans = 0
+  var b = 0
+  while b < 256 {
+    let v = f8e5m2_of_bits(b)
+    if v != v {
+      nans = nans + 1
+      if f8e5m2_bits(v) != 0x7E { bad = bad + 1 } else { () }
+    } else if f8e5m2_bits(v) != b || round_f8e5m2(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+  # exponent all ones, significand nonzero, either sign: 3 + 3
+  assert nans == 6
+}
+
+test "the f8E5M2 rounding and codec spell the named boundaries" {
+  let inf = 1.0 / 0.0
+  assert f8e5m2_bits(1.0) == 0x3C
+  assert f8e5m2_bits(-1.5) == 0xBE
+  assert f8e5m2_bits(inf) == 0x7C
+  assert f8e5m2_of_bits(0x7C) == inf
+  # the largest finite value is 1.75 * 2^15, and the midpoint above it
+  # carries out of the top exponent
+  assert round_f8e5m2(57344.0) == 57344.0
+  assert round_f8e5m2(61439.0) == 57344.0
+  assert round_f8e5m2(61440.0) == inf
+  assert f8e5m2_of_bits(0x7B) == 57344.0
+  # ties to even at the last place: 1 + 2^-3 sits between 1 and 1 + 2^-2
+  assert round_f8e5m2(1.0 + 1.0 / 8.0) == 1.0
+  assert round_f8e5m2(1.0 + 3.0 / 8.0) == 1.0 + 1.0 / 2.0
+  # the subnormal quantum is 2^-16
+  assert f8e5m2_of_bits(0x01) == pow2(-16)
+  assert round_f8e5m2(pow2(-17)) == 0.0
+  assert round_f8e5m2(pow2(-16) * 1.5) == pow2(-16) * 2.0
+}
+
+test "every f8E4M3FN octet round-trips through its value, and the value is on round_f8e4m3fn's grid" {
+  var bad = 0
+  var nans = 0
+  var b = 0
+  while b < 256 {
+    let v = f8e4m3fn_of_bits(b)
+    if v != v {
+      nans = nans + 1
+      if f8e4m3fn_bits(v) != 0x7F { bad = bad + 1 } else { () }
+    } else if f8e4m3fn_bits(v) != b || round_f8e4m3fn(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+  # FN: the ONLY NaN encodings are 0x7F and 0xFF, and there is no infinity,
+  # where f8E5M2 has three NaNs a sign
+  assert nans == 2
+}
+
+test "f8E4M3FN has no infinity, so its overflow is NaN and its largest finite value is 448" {
+  assert f8e4m3fn_of_bits(0x7E) == 448.0
+  assert f8e4m3fn_bits(448.0) == 0x7E
+  assert round_f8e4m3fn(448.0) == 448.0
+  # 464 is the midpoint between 448 and the 480 an IEEE format of these
+  # widths would have; 448's significand is the even one, so it ties down
+  assert round_f8e4m3fn(464.0) == 448.0
+  let over = round_f8e4m3fn(465.0)
+  assert over != over
+  let big = round_f8e4m3fn(1.0e30)
+  assert big != big
+  let below = round_f8e4m3fn(-465.0)
+  assert below != below
+  # ties to even at the last place, and the subnormal quantum 2^-9
+  assert round_f8e4m3fn(1.0 + 1.0 / 16.0) == 1.0
+  assert round_f8e4m3fn(1.0 + 3.0 / 16.0) == 1.0 + 1.0 / 4.0
+  assert f8e4m3fn_of_bits(0x01) == pow2(-9)
+  assert round_f8e4m3fn(pow2(-10)) == 0.0
+  assert round_f8e4m3fn(pow2(-9) * 1.5) == pow2(-9) * 2.0
+}
+
+test "f8E8M0FNU is the exponent alone, rounded toward zero" {
+  let nan = round_f8e8m0(0.0)
+  assert nan != nan
+  let neg = round_f8e8m0(-1.0)
+  assert neg != neg
+  # rounding toward zero is the largest power of two at or below x: 1.99
+  # answers 1 and not 2, which is where this differs from every other
+  # rounding in this module
+  assert round_f8e8m0(1.99) == 1.0
+  assert round_f8e8m0(2.0) == 2.0
+  assert round_f8e8m0(0.75) == 0.5
+  # the ends: 2^127 is the largest, 2^-127 the smallest, and there is
+  # nothing below it to round down to, so a smaller value clamps up
+  assert round_f8e8m0(pow2(127)) == pow2(127)
+  let over = round_f8e8m0(pow2(128))
+  assert over != over
+  assert round_f8e8m0(pow2(-127)) == pow2(-127)
+  assert round_f8e8m0(pow2(-200)) == pow2(-127)
+  # every octet is a value and every value an octet; 0xFF alone is NaN
+  var bad = 0
+  var b = 0
+  while b < 256 {
+    let v = f8e8m0_of_bits(b)
+    if v != v {
+      if b != 0xFF { bad = bad + 1 } else { () }
+    } else if f8e8m0_bits(v) != b || round_f8e8m0(v) != v {
+      bad = bad + 1
+    } else {
+      ()
+    }
+    b = b + 1
+  }
+  assert bad == 0
+  assert f8e8m0_bits(1.0) == 127
+  assert f8e8m0_bits(0.0 / 0.0) == 0xFF
+  # a value off the grid is not a value of the format, and the codec says
+  # so rather than snapping it to a neighbour
+  assert f8e8m0_bits(1.5) == 0xFF
+}
+
+test "the binary32 codec spells the special values and the named boundaries" {
+  let inf = 1.0 / 0.0
+  assert f32_bits(1.0) == 0x3F800000
+  assert f32_bits(-1.5) == 0xBFC00000
+  assert f32_bits(0.0) == 0
+  assert f32_bits(0.0 * (0.0 - 1.0)) == 0x80000000
+  assert 1.0 / f32_of_bits(0x80000000) == -inf
+  assert f32_bits(inf) == 0x7F800000
+  assert f32_bits(-inf) == 0xFF800000
+  assert f32_bits(0.0 / 0.0) == 0x7FC00000
+  let nan = f32_of_bits(0x7F800001)
+  assert nan != nan
+  # the smallest subnormal (2^-149), the smallest normal, the largest finite
+  assert f32_of_bits(0x00000001) == pow2(-149)
+  assert f32_bits(pow2(-149)) == 0x00000001
+  assert f32_of_bits(0x00800000) == pow2(-126)
+  assert f32_of_bits(0x7F7FFFFF) == 3.4028234663852886e38
+  assert f32_bits(3.4028234663852886e38) == 0x7F7FFFFF
+  # off the grid the bits truncate, as bf16_bits and fp16_bits do
+  assert f32_bits(1.0 + pow2(-30)) == 0x3F800000
 }
