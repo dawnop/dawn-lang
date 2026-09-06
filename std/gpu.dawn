@@ -6503,3 +6503,30 @@ test "the sub-byte references answer what a reader can check by hand" {
   let outr = [0.0, 0.0, 0.0 - 1.0]
   assert pack_roundtrip_ref(1, ["i32", "i32"], [[a], outr]) == [a, a, 0.0 - 1.0]
 }
+
+test "the dynamic-dimension references answer what a reader can check by hand" {
+  # masked_double_ref doubles the lanes below the limit and leaves the rest
+  # alone, which is what the mask on a load and a store does when its bound
+  # is what get_tensor_shape answered.
+  let old = [0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0]
+  assert masked_double_ref(2, [1.0, 2.0, 3.0, 4.0], old) == [2.0, 4.0, 0.0 - 1.0, 0.0 - 1.0]
+  # a limit past the end of the buffer doubles every lane, and a limit of
+  # zero doubles none: the two ends of the same bound
+  assert masked_double_ref(9, [1.0, 2.0, 3.0, 4.0], old) == [2.0, 4.0, 6.0, 8.0]
+  assert masked_double_ref(0, [1.0, 2.0, 3.0, 4.0], old) == old
+
+  # view_grid_sum_ref folds a 3 by 2 tensor into 2 by 2 tiles, so the grid is
+  # 2 by 1 and the second tile runs one row off the end. Lane (p, q) of the
+  # answer is x[p][q] + x[2 + p][q], with the row that falls outside the
+  # tensor counting as the padding value, which is zero.
+  #
+  #   x = [[1, 2],     tile (0,0) = [[1, 2], [3, 4]]
+  #        [3, 4],     tile (1,0) = [[5, 6], [0, 0]]
+  #        [5, 6]]
+  let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+  let keep = [0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 7.0]
+  assert view_grid_sum_ref(3, 2, 2, x, keep) == [6.0, 8.0, 3.0, 4.0, 0.0 - 7.0]
+  # a tensor that fits the tile exactly has one tile and no padding at all
+  assert view_grid_sum_ref(2, 2, 2, [1.0, 2.0, 3.0, 4.0], keep)
+    == [1.0, 2.0, 3.0, 4.0, 0.0 - 7.0]
+}
