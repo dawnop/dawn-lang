@@ -2455,13 +2455,13 @@ kernel 的 13.2 字节与 13.3 字节各汇编一次（三个 fp8 kernel 照旧�
 其余 `sm_86`），**162 个 cubin 逐字节相同，一个都不差**。所以升版买到的是 13.3 才有的操作码
 （`pack` / `unpack` / `alloca` / `mmaf_scaled`，归 T9 与 T10）与 Global 记录的两个字段，
 付出的是零：既有 kernel 在设备上算的东西一个位都没动。`toolchain.txt` 里原来那句
-「13.2 is the lowest version Tile IR runs on Ampere and Ada」也随本刀改掉了——那句话把
-**架构的下限**说成了**字节码版本的性质**，架构下限是 r580 驱动与 `sm_86` 目标，由
+「13.2 is the lowest version Tile IR runs on Ampere and Ada」也随本刀改掉了。那句话把
+**架构的下限**说成了**字节码版本的性质**；架构下限是 r580 驱动与 `sm_86` 目标，由
 `driver` 与 `gpu-name` 两行各自承担。
 
 **五、`fast_acc` 到不了设备，这一格也是量的不是推的。** `mmaf` 的 flags varint 从 13.3 起
 存在，本仓写 0。把写入器那个字改成 1 之后，`.tilebc` 恰好动一个字节，而
-`tileiras --gpu-name sm_86` 出的 cubin **逐字节不变**——四个 `mmaf` kernel 都试过
+`tileiras --gpu-name sm_86` 出的 cubin **逐字节不变**，四个 `mmaf` kernel 都试过
 （`matmul` / `batched_matmul_f16` / `attn_scores` / `lora_hidden`），f16 那个与 f64 那些
 一样不变。一个到不了设备的位不可能让设备答出别的数，所以 `attrs.txt` 的 `unit.fast_acc`
 封在层 1，豁免叫 `fast-acc-not-in-the-cubin`，那是一句实测而不是一句「没写客户 kernel」。
