@@ -1,0 +1,188 @@
+# A value read in an earlier operand must survive a later rebinding. Heap
+# bytes and closures also require the snapshot to own its lifetime across
+# assignment, return and loop exits; merely copying a C pointer is not enough.
+use std/io
+use std/bytes
+
+type Pair = { left: Int, right: Int }
+
+fn decimal(a: Int, b: Int) -> Int = a * 10 + b
+fn first(a: List[Int], b: Int) -> List[Int] = a
+fn shifted(base: Int) -> fn(Int) -> Int = (x) => base + x
+
+fn scalar() -> Int = {
+  var value = 2
+  decimal(value, {
+    value = value + 1
+    1
+  })
+}
+
+fn binary() -> Int = {
+  var value = 2
+  value + {
+    value = 10
+    1
+  }
+}
+
+fn floating() -> Float = {
+  var value = 1.5
+  value + {
+    value = 10.0
+    0.25
+  }
+}
+
+fn boolean() -> Bool = {
+  var value = true
+  value == {
+    value = false
+    true
+  }
+}
+
+fn constructor() -> Int = {
+  var value = 2
+  let p = Pair { left: value, right: {
+    value = 9
+    1
+  } }
+  decimal(p.left, p.right)
+}
+
+fn tuple() -> Int = {
+  var value = 2
+  let (left, right) = (value, {
+    value = 9
+    1
+  })
+  decimal(left, right)
+}
+
+fn list_values() -> List[Int] = {
+  var value = 2
+  [value, {
+    value = 9
+    1
+  }]
+}
+
+fn owned_reference() -> List[Int] = {
+  var values = [1, 2]
+  first(values, {
+    values = [9]
+    0
+  })
+}
+
+fn borrowed_reference() -> Int = {
+  var data = bytes.utf8("AZ")
+  bytes.at(data, {
+    data = bytes.utf8("B")
+    0
+  })
+}
+
+fn projection() -> Int = {
+  var value = Pair { left: 2, right: 3 }
+  decimal(value.left, {
+    value = Pair { left: 9, right: 8 }
+    1
+  })
+}
+
+fn dynamic_target() -> Int = {
+  var f = shifted(10)
+  f({
+    f = shifted(20)
+    1
+  })
+}
+
+fn dynamic_return(stop: Bool) -> Int = {
+  var f = shifted(10)
+  f({
+    f = shifted(20)
+    if stop { return 7 }
+    1
+  })
+}
+
+fn dynamic_loop() -> Int = {
+  var f = shifted(10)
+  var total = 0
+  for n in [1, 2, 3, 0, 4] {
+    total = total + f({
+      f = shifted(20)
+      if n == 2 { continue }
+      if n == 0 { break }
+      n
+    })
+  }
+  total
+}
+
+fn branch(taken: Bool) -> Int = {
+  var value = 2
+  decimal(value, {
+    if taken { value = 9 }
+    1
+  })
+}
+
+fn returns(stop: Bool) -> Int = {
+  var data = bytes.utf8("AZ")
+  bytes.at(data, {
+    data = bytes.utf8("B")
+    if stop { return 7 }
+    0
+  })
+}
+
+fn loop_exits() -> Int = {
+  var data = bytes.utf8("A")
+  var total = 0
+  for n in [1, 2, 3, 0, 4] {
+    total = total + bytes.at(data, {
+      data = bytes.utf8("B")
+      if n == 2 { continue }
+      if n == 0 { break }
+      0
+    })
+  }
+  total
+}
+
+fn short_circuit() -> Int = {
+  var value = 2
+  let left = false && {
+    value = 9
+    true
+  }
+  let right = true || {
+    value = 8
+    false
+  }
+  if not left && right { value } else { 0 }
+}
+
+pub fn main() -> Unit !io = {
+  println("scalar:${scalar()}")
+  println("binary:${binary()}")
+  println("float:${floating()}")
+  println("bool:${boolean()}")
+  println("constructor:${constructor()}")
+  println("tuple:${tuple()}")
+  println("list:${list_values()}")
+  println("owned:${owned_reference()}")
+  println("borrowed:${borrowed_reference()}")
+  println("projection:${projection()}")
+  println("dynamic:${dynamic_target()}")
+  println("dynamic-return:${dynamic_return(false)},${dynamic_return(true)}")
+  println("dynamic-loop:${dynamic_loop()}")
+  println("branch:${branch(false)},${branch(true)}")
+  println("return:${returns(false)},${returns(true)}")
+  println("loop:${loop_exits()}")
+  println("short:${short_circuit()}")
+}
