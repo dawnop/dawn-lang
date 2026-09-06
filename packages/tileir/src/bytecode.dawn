@@ -540,6 +540,18 @@ fn scope_value(scope: String) -> Int = match scope {
   _ -> panic("tileir: `${scope}` is not a memory scope")
 }
 
+# The mode of a VIEW-BASED atomic reduction, which is `atomic_rmw_tko`'s
+# enum with one value taken out. `AtomicRedViewTkoOp::verify` refuses
+# `xchg` by name, and the reason is the operation's own shape rather than
+# an omission: a reduction that does not answer the old value has nothing
+# to exchange it for.
+fn red_mode_value(mode: String) -> Int =
+  if mode == "xchg" {
+    panic("tileir: an atomic_red_view_tko cannot use the `xchg` mode")
+  } else {
+    rmw_mode_value(mode)
+  }
+
 fn rmw_mode_value(mode: String) -> Int = match mode {
   "and" -> 0
   "or" -> 1
@@ -1842,7 +1854,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # count, the indices with one, the value, and the token.
     let (w1, tk) = ty(w0, Token)
     let w2 = emit(emit(emit(emit(w1, OP_ATOMIC_RED_VIEW_TKO), 1), tk), ATOMIC_RED_FLAG_TOKEN)
-    let w3 = emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), rmw_mode_value(mode))
+    let w3 = emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), red_mode_value(mode))
     let w4 = emit(emit_ref(w3, view), len(indices))
     emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)
   }

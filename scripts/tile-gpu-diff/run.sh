@@ -4813,6 +4813,128 @@ dyn_pkg_mutant shape-query-dim-reversed lower.dawn \
   view_tensor_shape view_index_space \
   --red view_tensor_shape view_tensor_shape view_index_space view_index_space
 
+# The knife T13 mutants, in the shape view_pkg_mutant has: one anchor in the
+# package, the bytecode of the kernels that carry it required to MOVE at the
+# same length (so `tileiras` is accepting a lie rather than refusing a
+# shape), and the device required to disagree on exactly the named kernels.
+#
+# `conv1d` is in `gsview_order` and not in `gsviews`, so its cubin is never
+# rebuilt: it is the family's kernel-level control on both halves, the
+# .tilebc half (a pointer ladder carries none of this) and the device half.
+gsview_pkg_mutant() { # name, module, old, new, moved..., --red, red...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local moved=() red=() seen_red=no a k rc=0 mverdict differ cubs=()
+  for a in "$@"; do
+    if [ "$a" = --red ]; then seen_red=yes; continue; fi
+    if [ "$seen_red" = yes ]; then red+=("$a"); else moved+=("$a"); fi
+  done
+  local pkg="$work/pkg-$name" before after
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${gsviews[@]}"
+  for k in "${gsviews[@]}"; do
+    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+        fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
+      [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+        fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+    else
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  echo "      $name: ${#moved[@]} of ${#gsviews[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
+
+  for k in "${gsview_order[@]}"; do
+    if printf '%s\n' "${gsviews[@]}" | grep -qxF "$k"; then
+      cubs+=("$work/$name-$k.cubin")
+    else
+      cubs+=("$work/$k.cubin")
+    fi
+  done
+  if [ "$gsview_verdict" != pass ]; then
+    rc=0
+    device "$work/gsview.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$gsview_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $gsview_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $gsview_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/gsview.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly ${red[*]} saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k is one of the kernels that should differ"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${red[*]} differ and the other $(( ${#gsview_order[@]} - ${#red[@]} )) do not)"
+}
+
+# 51. strided-traversal-as-one: every strided view's traversal strides are
+#     written as ONES. The type still verifies (a traversal of one is
+#     strictly positive) and the index space only GROWS, so every index a
+#     kernel names is still inside it and there is no undefined behaviour to
+#     read the answer through; what moves is where each index LANDS.
+#
+#     Two of the three kernels whose bytes move are GREEN, and that is the
+#     reading this mutant bought rather than assumed: a view whose only
+#     index is zero covers `[0, tile)` whatever the traversal is, and both
+#     `view_conv1d`'s weight view and `view_atomic`'s float view are read at
+#     index zero and nowhere else. `view_stride_pad` is the one that walks
+#     its grid, and it is the one that reds.
+gsview_pkg_mutant strided-traversal-as-one bytecode.dawn \
+  'let b1 = put_i32_array(put_i32_array(b0, tile_shape), traversal)' \
+  'let b1 = put_i32_array(put_i32_array(b0, tile_shape), list.map(traversal, _t => 1))' \
+  view_conv1d view_atomic view_stride_pad \
+  --red view_stride_pad
+
+# 52. view-padding-bitfield-cleared: bit 0 of the unified optional-parameter
+#     bitfield is written CLEAR on the two 13.3 view types while the padding
+#     value itself is still written at its own position. A type-table entry
+#     is addressed by its own offset, so the reader stops at the end of the
+#     parameters it knows about and never looks at the extra byte: the file
+#     is the same length, `tileiras` accepts it, and the views it builds
+#     have no padding at all. This is knife T11's padding-value-bit-cleared
+#     on the two types that have NO other spelling of the flag.
+#
+#     Only the two padded kernels move at all: every other view here has no
+#     padding value, so its bitfield is already zero.
+gsview_pkg_mutant view-padding-bitfield-cleared bytecode.dawn \
+  'Some(_c) -> put_varint(b, 1)' \
+  'Some(_c) -> put_varint(b, 0)' \
+  view_stride_pad view_gather_pad \
+  --red view_stride_pad view_gather_pad
+
+# 53. atomic-red-mode-rotated: the seven atomic modes `view_atomic` runs
+#     beside `add` and `addf` are rotated one place on within their own
+#     kind (`and` to `or` to `xor` to `and`, and `max` to `min` to `umax` to
+#     `umin` to `max`), and the two arithmetic ones are left where they are.
+#     Leaving those two alone is not tidiness: `addf` is the only mode a
+#     float tile takes and `add` the only integer one an f64 view would
+#     refuse, so rotating either would be a LAYER-1 refusal and a refused
+#     cubin never reaches the device. What is left is a rotation the
+#     assembler accepts and only the seven answers can tell apart.
+gsview_pkg_mutant atomic-red-mode-rotated bytecode.dawn \
+  '    rmw_mode_value(mode)' \
+  '    {
+      let v = rmw_mode_value(mode)
+      if v == 2 { 0 } else if v == 8 { 5 } else if v == 3 || v == 4 { v } else { v + 1 }
+    }' \
+  view_atomic \
+  --red view_atomic
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"

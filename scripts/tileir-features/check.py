@@ -58,7 +58,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
-                 "T12", "T15", "TG"}
+                 "T12", "T13", "T15", "TG"}
 
 
 class Ledger:
@@ -226,7 +226,9 @@ def tag_table(bytecode_text):
 # dialect's C++ name, as the view types do.
 CONSTRUCTOR_SPELLING = {"PTR": "ptr", "TILE": "tile", "FUNC": "FunctionType",
                         "TOKEN": "token", "TENSOR_VIEW": "TensorViewType",
-                        "PARTITION_VIEW": "PartitionViewType"}
+                        "PARTITION_VIEW": "PartitionViewType",
+                        "STRIDED_VIEW": "StridedViewType",
+                        "GATHER_SCATTER_VIEW": "GatherScatterViewType"}
 
 
 def op_table(bytecode_text):
@@ -786,17 +788,13 @@ def self_test():
 
 def feature_cases(good, bytecode, files, ledger):
     """The opcode ledger's verdicts, each on a table built to trip it."""
-    # An opcode no golden holds, for the layer-2 control below. It moved
-    # knife by knife while there were unimplemented rows to borrow: knife
-    # T5 took it off `break`, T6 off `assume`, T7 off `global`, T10 off
-    # `mmaf_scaled`. It names a DEFERRED row of the view family, and knife
-    # T11 took four of those nine: what is left for T12 and T13 is
-    # `get_tensor_shape`, `get_index_space_shape`,
-    # `make_gather_scatter_view`, `make_strided_view` and
-    # `atomic_red_view_tko`, and this is one of them. The two cases below
-    # spell its row out with `deferred      | -  `, which is what the
-    # column holds for a deferred one.
-    absent = "make_strided_view"
+    # KNIFE T13 CLOSED THE LAST DEFERRED ROW of this table, so several of
+    # the verdicts below are now tripped by rewriting an IMPLEMENTED or a
+    # STRUCTURAL row rather than by borrowing an unfinished one. The rules
+    # under test did not change; what changed is that the ledger no longer
+    # holds an example of a row that breaks them, which is the state a
+    # finished table is supposed to reach. The anchors that moved with T13
+    # are named in the comments below.
     plain = [
 
         ("a row with too few fields",
@@ -813,31 +811,40 @@ def feature_cases(good, bytecode, files, ledger):
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
+        # Moved by knife T13 off `atomic_red_view_tko`, which the writer now
+        # emits, onto a STRUCTURAL row: `entry` is a record of the Func
+        # section and has no OP_ constant at all, so calling it implemented
+        # is exactly the claim the writer cannot back.
         ("a row claiming an opcode the writer does not emit",
-         good.replace("atomic_red_view_tko      | 0x75 | 13.3 | deferred      | -   | 0 | -",
-                      "atomic_red_view_tko      | 0x75 | 13.3 | implemented   | 7b  | 2 | "
-                      "golden:mathops"),
-         "has no OP_ATOMIC_RED_VIEW_TKO"),
+         good.replace("entry                    | 0x16 | 13.1 | structural    | 3  ",
+                      "entry                    | 0x16 | 13.1 | implemented   | 3  "),
+         "has no OP_ENTRY"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
+        # Moved by knife T13 off the deferred `make_strided_view` onto an
+        # implemented row whose golden is a real one: `vadd.mlir` is a
+        # kernel a device runs and does not contain `remf`.
         ("a layer-2 claim for an op no golden contains",
-         good.replace(f"{absent:24s} | 0x74 | 13.3 | deferred      | -   | 0 | -",
-                      f"{absent:24s} | 0x74 | 13.3 | implemented   | 3   | 2 | golden:vadd"),
+         good.replace("remf                     | 0x59 | 13.1 | implemented   | T1  | 2 | "
+                      "golden:trig_sweep",
+                      "remf                     | 0x59 | 13.1 | implemented   | T1  | 2 | "
+                      "golden:vadd      "),
          "whose .mlir does not contain the op"),
-        # T13 is the view family's one REMAINING knife, and it is what a
-        # planned knife looks like now that T11 and T12 have landed. Move
-        # these three anchors on when T13 lands.
+        # T14 is the Debug and Producer section knife, which ruling 4 of the
+        # prestudy defers until a toolchain ships `tileirdisasm`. It is what
+        # a planned knife looks like now that T13 has landed, and it is
+        # where these anchors moved from T13.
         ("an implemented row whose knife has not landed",
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
-                      "tanh                     | 0x6A | 13.1 | implemented   | T13"),
+                      "tanh                     | 0x6A | 13.1 | implemented   | T14"),
          "cannot be a planned one"),
-        # On a DEFERRED row of the view family's remainder, which knife
-        # T13 owns: knife T11 took make_partition_view, so this anchor moved
-        # to make_strided_view. T13 will move it again.
+        # No row of this table is unimplemented or deferred any more, so
+        # this verdict is tripped by making an IMPLEMENTED row
+        # unimplemented under the knife that implemented it.
         ("an unimplemented row whose knife is not a planned one",
-         good.replace("make_strided_view        | 0x74 | 13.3 | deferred      | -  ",
-                      "make_strided_view        | 0x74 | 13.3 | unimplemented | 3  "),
+         good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
+                      "tanh                     | 0x6A | 13.1 | unimplemented | 7b "),
          "so its knife is a planned one"),
         ("a layer-3 claim with no mutant named",
          good.replace("| 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,"
@@ -850,31 +857,38 @@ def feature_cases(good, bytecode, files, ledger):
         ("a structural row with no writer",
          good.replace("golden:ols_beta,writer:encode_kernel", "golden:ols_beta                 ", 1),
          "is structural and names no writer"),
+        # The last `deferred` row went with knife T13, so this verdict is
+        # tripped by making one: a deferred row owes a named reason and this
+        # one gives `-`.
         ("a deferred row with no reason",
-         re.sub(r"^(\S+ +\| .* \| deferred .*\| )ruling 2$", r"\1-", good, count=1, flags=re.M),
+         good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b  | 2 |",
+                      "tanh                     | 0x6A | 13.1 | deferred      | -   | 0 |"),
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T13"),
-         "knife 'T13' cannot be a planned one"),
-        # No opcode row is `unimplemented` any more (knife T10 took the last
-        # two), so this verdict is tripped by making one out of a DEFERRED
-        # row of the view family's remainder, which knife T13 owns:
-        # the rule under test is the status-to-knife pairing, and a knife
-        # that has landed is wrong under either status.
+                      "sin                      | 0x62 | 13.1 | implemented   | T14"),
+         "knife 'T14' cannot be a planned one"),
+        # The same rule from the other side, and on a landed T knife rather
+        # than on a numbered one: the status-to-knife pairing is wrong under
+        # either status, and knife T13 moved this anchor off the deferred
+        # `make_gather_scatter_view` for the reason above.
         ("an unimplemented row under a knife that has landed",
-         good.replace("make_gather_scatter_view | 0x73 | 13.3 | deferred      | -  ",
-                      "make_gather_scatter_view | 0x73 | 13.3 | unimplemented | T6 "),
+         good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
+                      "tanh                     | 0x6A | 13.1 | unimplemented | T6 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
-    # The other input: an OP_ the writer grew and nobody wrote down.
+    # The other input: an OP_ the writer grew for a row that does not claim
+    # it. Knife T13 moved this off `atomic_red_view_tko`, which the writer
+    # now emits, onto the STRUCTURAL `entry`: the writer putting it in the
+    # instruction stream is exactly what a structural row says it does not
+    # do.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
                              "const OP_TANH: Int = 0x6A\n"
-                             "const OP_ATOMIC_RED_VIEW_TKO: Int = 0x75")
+                             "const OP_ENTRY: Int = 0x16")
     cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
-                  "is marked deferred but bytecode.dawn emits OP_ATOMIC_RED_VIEW_TKO"))
+                  "is marked structural but bytecode.dawn emits OP_ENTRY"))
     invented = bytecode.replace("const OP_TANH: Int = 0x6A",
                                 "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x76")
     cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
@@ -903,13 +917,12 @@ def type_cases(good, bytecode, files, ledger):
          good.replace("tf32               |  8 | 13.1 | implemented   | T3  | 3 |",
                       "tf32               |  8 | 13.1 | unimplemented | T12 | 0 |"),
          "bytecode.dawn writes its tag"),
-        # On StridedViewType, which knife T13 owns: knife T11 implemented
-        # TensorViewType and this anchor moved off it. T13 will move it
-        # again, and the only rows left to move it to are the ones no knife
-        # has cut yet.
+        # Every tag of the frozen table is implemented after knife T13, so
+        # there is no row left that the writer does not write. This trips
+        # the verdict by RENAMING one: the tag stays 8 and the name stops
+        # being one `num_tag` answers for.
         ("a row claiming a tag the writer does not write",
-         good.replace("StridedViewType    | 21 | 13.3 | deferred      | -   | 0 | -",
-                      "StridedViewType    | 21 | 13.3 | implemented   | T3  | 2 | golden:vadd"),
+         good.replace("tf32               |  8 |", "tf32x              |  8 |"),
          "writes no tag for it"),
         ("a version the deltas contradict",
          good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
@@ -938,32 +951,31 @@ def type_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
-                      "i16                |  2 | 13.1 | implemented   | T13"),
-         "knife 'T13' cannot be a planned one"),
-        # No `unimplemented` type row is left after knife T9, so this
-        # verdict is tripped on a `deferred` one instead: the rule is about
-        # the STATUS and the knife, and the two view tags T11 did not take
-        # belong to a planned knife either way.
+                      "i16                |  2 | 13.1 | implemented   | T14"),
+         "knife 'T14' cannot be a planned one"),
+        # No row of this table is unimplemented or deferred after knife
+        # T13, so this verdict and the one below it are tripped by making
+        # an implemented row into one: the rule is about the STATUS and the
+        # knife, and a knife that has landed is wrong under either.
         ("an unimplemented row under a knife that has landed",
-         good.replace("StridedViewType    | 21 | 13.3 | deferred      | -  ",
-                      "StridedViewType    | 21 | 13.3 | unimplemented | T3 "),
+         good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
+                      "i16                |  2 | 13.1 | unimplemented | T3 "),
          "so its knife is a planned one"),
         ("a deferred row with no reason",
-         good.replace("StridedViewType    | 21 | 13.3 | deferred      | -   | 0 | -"
-                      "                                                                    | "
-                      "ruling 2",
-                      "StridedViewType    | 21 | 13.3 | deferred      | -   | 0 | -"
-                      "                                                                    | -"),
+         good.replace("i16                |  2 | 13.1 | implemented   | T3  | 3 |",
+                      "i16                |  2 | 13.1 | deferred      | -   | 0 |"),
          "is deferred with no named reason"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
-    # Every scalar format is implemented after knife T9, so the tag the
-    # writer is made to grow here is a DEFERRED one: the verdict is about a
-    # row that does not claim what the writer emits, whatever its status.
-    grown = bytecode.replace('  "f8E8M0FNU" -> 18',
-                             '  "f8E8M0FNU" -> 18\n  "StridedViewType" -> 21')
-    cases.append(("a type tag the ledger does not call implemented", good, grown, ledger,
+    # The other direction of the same rule, and after knife T13 it is the
+    # LEDGER that has to be made wrong rather than the writer: every tag
+    # the writer writes is claimed, so what this hands the checker is a row
+    # that stops claiming one the writer still writes.
+    cases.append(("a type tag the ledger does not call implemented",
+                  good.replace("StridedViewType    | 21 | 13.3 | implemented   | T13 | 3 |",
+                               "StridedViewType    | 21 | 13.3 | deferred      | -   | 0 |"),
+                  bytecode, ledger,
                   "is marked deferred but bytecode.dawn writes its tag"))
     # and the other direction of the same input: a tag with no row at all
     invented = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "bogus" -> 5')
@@ -1037,17 +1049,18 @@ def attr_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
-                      "rounding.approx              | 4 | 13.1 | implemented   | T13"),
-         "knife 'T13' cannot be a planned one"),
+                      "rounding.approx              | 4 | 13.1 | implemented   | T14"),
+         "knife 'T14' cannot be a planned one"),
         # No row of this table is `unimplemented` any more (knife T10 took
         # the last one), so this case makes one out of a DEFERRED row: the
         # rule under test is the status-to-knife pairing, and a deferred
         # row carries the same `-` in the knife column that a landed knife
-        # would be wrong in. Knife T11 took the five padding values, so
-        # what is left deferred here is the eight atomic modes.
-        # Knife T11 implemented every padding value, so this anchor moved
-        # off padding.neg_inf onto one of the eight atomic modes no kernel
-        # asks for, which is the only DEFERRED family this table has left.
+        # would be wrong in. Knife T11 implemented every padding value, so
+        # this anchor moved off padding.neg_inf onto the atomic modes; knife
+        # T13 then took seven of those eight, and `rmw.xchg` is what is
+        # left. It is the LAST deferred row in the three ledgers, and the
+        # only one an atomic reduction cannot ask for: a reduction that
+        # answers nothing has nothing to exchange.
         ("an unimplemented row under a knife that has landed",
          good.replace("rmw.xchg                     | 9 | 13.1 | deferred      | -  ",
                       "rmw.xchg                     | 9 | 13.1 | unimplemented | T8 "),

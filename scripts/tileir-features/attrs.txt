@@ -58,9 +58,11 @@
 #               two ledgers read them. `deferred` here means exactly one
 #               thing since knife T11 took the five padding values:
 #               `no-client-kernel`, a value the writer's own table can
-#               already spell while no kernel asks for it (eight of the ten
-#               atomic modes are in that state, and calling them implemented
-#               would claim a coverage that does not exist)
+#               already spell while no kernel asks for it. Knife T13 took
+#               seven of the eight atomic modes that were in that state, so
+#               `rmw.xchg` is the last such row in the three ledgers, and it
+#               is the one no client kernel CAN ask for: a view-based
+#               reduction answers nothing, so it has nothing to exchange
 #   knife       the knife that wrote the value first, or the knife the
 #               prestudy plans it for; check.py's LANDED_KNIVES holds the
 #               two directions, as it does for the other two ledgers
@@ -173,9 +175,15 @@
 #       scripts/tile-golden's mmaf-flags-unwritten is that: drop the word
 #       and the assembler reads the first operand for it.
 #   no-client-kernel
-#       The writer's `rmw_mode_value` spells all ten atomic modes and only
-#       two of them have a kernel. The table is right and nothing exercises
-#       it, so the eight others are deferred rather than implemented.
+#       The writer's `rmw_mode_value` spells all ten atomic modes and, until
+#       knife T13, only two of them had a kernel. `view_atomic` runs nine of
+#       the ten at once, so what is left in this state is `rmw.xchg` alone,
+#       and it is left for a reason rather than for want of a kernel:
+#       `atomic_rmw_tko` could exchange and no kernel here needs it, while
+#       `atomic_red_view_tko` REFUSES the mode by name, because a reduction
+#       that does not answer the old value has nothing to exchange it for
+#       (AtomicRedViewTkoOp::verify). bytecode.dawn's `red_mode_value` is
+#       that refusal in this writer.
 #   ruling 2
 #       RETIRED, and no row carries it any more. It said the view family
 #       was suspended with its nine opcodes until knives T11 to T13 (docs
@@ -257,6 +265,29 @@
 #       else, and sym_diff says the same from the other end: the host
 #       writes `@frozen` and the next launch reads the write, so it is not
 #       read-only to the host either.
+#   bf16-atomic-needs-ada
+#       `rmw.addf` under `atomic_red_view_tko` over a BF16 tile is refused
+#       for this machine's GPU, and the refusal is the assembler's rather
+#       than anything missing here. Ops.td's prose says "bf16 is supported
+#       from Hopper (sm90) onward. On earlier architectures (e.g.
+#       Ampere/sm80), atomicRMW ADDF with bf16 is not supported", and it is
+#       the only sentence in the whole view family that names an
+#       architecture. Knife T13 measured it rather than quoting it, by
+#       assembling view_atomic's own bytes with its float view's element
+#       format changed to bf16:
+#
+#         sm_80 / sm_86 / sm_87  exit 5, `error: Incompatibility with
+#                                architecture 'sm_86': atomicRMW ADDF with
+#                                bf16 is not supported`
+#         sm_89 / sm_90 / sm_100 exit 0, cubin written
+#
+#       So the prose is one generation out: ADA takes it, not just Hopper.
+#       This machine is an RTX 3080 (sm_86) either way, so `view_atomic`'s
+#       float mode runs over f64 and the bf16 corner is not reachable here.
+#       It is NOT an exemption on any row of this table: `rmw.addf` reaches
+#       layer 3 over f64 (attr_addf, knife T4), and what is written down
+#       here is the corner that a wider machine would cover, not a gap in
+#       the ledger.
 #   hints-do-not-change-answers
 #       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
 #       names it beside `assume` for exactly this reason: the dialect
@@ -301,15 +332,15 @@ memsem.relaxed               | 1 | 13.1 | implemented   | 14  | 3 | const:ORDER_
 memsem.acquire               | 2 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQUIRE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
 memsem.release               | 3 | 13.1 | implemented   | T4  | 1 | const:ORDER_RELEASE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
 memsem.acq_rel               | 4 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQ_REL,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
-rmw.and                      | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
-rmw.or                       | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
-rmw.xor                      | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.and                      | 0 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
+rmw.or                       | 1 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
+rmw.xor                      | 2 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.add                      | 3 | 13.1 | implemented   | 14  | 3 | writer:rmw_mode_value,golden:histogram,device:histogram,mutant:atomic-as-plain-store                  | -
 rmw.addf                     | 4 | 13.1 | implemented   | T4  | 3 | writer:rmw_mode_value,golden:attr_addf,device:attr_addf,mutant:rmw-addf-as-add                        | -
-rmw.max                      | 5 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
-rmw.min                      | 6 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
-rmw.umax                     | 7 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
-rmw.umin                     | 8 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.max                      | 5 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
+rmw.min                      | 6 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
+rmw.umax                     | 7 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
+rmw.umin                     | 8 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.xchg                     | 9 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
 unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_FLAG_FTZ,golden:attr_ftz,device:attr_ftz,mutant:ftz-bit-dropped                           | -
 unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -

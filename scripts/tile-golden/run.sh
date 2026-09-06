@@ -509,6 +509,11 @@ mutants=(
   dynamic-dim-written-static
   tensor-shape-as-index-space-shape
   index-space-shape-as-tensor-shape
+  make-strided-view-as-partition-view
+  make-gather-view-as-strided-view
+  gather-sparse-dim-and-tensor-view-swapped
+  atomic-red-scope-and-mode-swapped
+  atomic-red-value-and-token-swapped
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2162,6 +2167,73 @@ if run_item index-space-shape-as-tensor-shape; then
     'emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)'
   writer_mutant_checks index-space-shape-as-tensor-shape view_index_space same-size \
     "'cuda_tile.get_tensor_shape' op operand #0 must be tensor view type, but got '!cuda_tile.partition_view<tile=(16x16), padding_value = zero, tensor_view<?x?xf64, strides=[?,?]>>'"
+fi
+
+# 61. `make_strided_view` is written with `make_partition_view`'s opcode.
+#     The two records are the same shape to the byte (a result type index
+#     and one operand: the whole of the view is in its TYPE), so the reader
+#     reads the record to its end and the refusal comes from the
+#     operation's own result constraint, which is `PartitionViewType`
+#     exactly and not the strided view the type table holds.
+if run_item make-strided-view-as-partition-view; then
+  mutant_project make-strided-view-as-partition-view bytecode.dawn \
+    'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)' \
+    'emit_ref(emit_op(w0, OP_MAKE_PARTITION_VIEW, t), src)'
+  writer_mutant_checks make-strided-view-as-partition-view view_conv1d same-size \
+    "'cuda_tile.make_partition_view' op result #0 must be Partition view type"
+fi
+
+# 62. `make_gather_scatter_view` written with `make_strided_view`'s opcode,
+#     which is the same swap one row further down the frozen table and a
+#     different refusal: the result type this one is handed is a gather
+#     view, and a strided view is what the operation wants.
+if run_item make-gather-view-as-strided-view; then
+  mutant_project make-gather-view-as-strided-view bytecode.dawn \
+    'emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)' \
+    'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)'
+  writer_mutant_checks make-gather-view-as-strided-view view_token_embed same-size \
+    "'cuda_tile.make_strided_view' op result #0 must be Strided view type"
+fi
+
+# 63. A gather view's `sparse_dim` and the index of its tensor view change
+#     places. Both are small varints, so the record is the same length and
+#     the reader reads it to the end; what it builds is a view whose tensor
+#     is type 0 and whose gather dimension is whatever the tensor view's
+#     index happened to be. This is the one rule that binds a gather view
+#     to its tensor, and it is what says the two fields are not
+#     interchangeable.
+if run_item gather-sparse-dim-and-tensor-view-swapped; then
+  mutant_project gather-sparse-dim-and-tensor-view-swapped bytecode.dawn \
+    'let b2 = put_varint(put_varint(b1, tvi), sparse_dim)' \
+    'let b2 = put_varint(put_varint(b1, sparse_dim), tvi)'
+  writer_mutant_checks gather-sparse-dim-and-tensor-view-swapped view_token_embed same-size \
+    "expected 'tensor_view' type"
+fi
+
+# 64. `atomic_red_view_tko`'s memory scope and its mode change places. Both
+#     are inline varints of a required attribute and the record is the same
+#     length, so what refuses it is the ENUM's own domain: a scope is 0, 1
+#     or 2 and the modes run to 8, so the first reduction whose mode is
+#     above two is a scope the dialect has no name for.
+if run_item atomic-red-scope-and-mode-swapped; then
+  mutant_project atomic-red-scope-and-mode-swapped bytecode.dawn \
+    'emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), red_mode_value(mode))' \
+    'emit(emit(emit(w2, ORDER_RELAXED), red_mode_value(mode)), scope_value(scope))'
+  writer_mutant_checks atomic-red-scope-and-mode-swapped view_atomic same-size \
+    "memory_scope"
+fi
+
+# 65. The value tile and the input token of an atomic reduction change
+#     places. Both are operand indices, so the record is the same length
+#     and the reader reads it to the end; what refuses it is that a token
+#     is not a tile of the view's element format, which is the whole of
+#     what the operand ORDER of this operation says.
+if run_item atomic-red-value-and-token-swapped; then
+  mutant_project atomic-red-value-and-token-swapped bytecode.dawn \
+    'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)' \
+    'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), tok_in), value)'
+  writer_mutant_checks atomic-red-value-and-token-swapped view_atomic same-size \
+    "'cuda_tile.atomic_red_view_tko'"
 fi
 
 _item_tick ""

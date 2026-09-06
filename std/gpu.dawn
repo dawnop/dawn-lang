@@ -6620,3 +6620,61 @@ test "the dynamic-dimension references answer what a reader can check by hand" {
   assert view_grid_sum_ref(2, 2, 2, [1.0, 2.0, 3.0, 4.0], keep)
     == [1.0, 2.0, 3.0, 4.0, 0.0 - 7.0]
 }
+
+test "the strided, gather and atomic-reduction references answer what a reader can check by hand" {
+  # strided_pad_ref over a tensor of five, a tile of two and a traversal of
+  # three: the grid is ceil(5 / 3) = 2, tile 0 covers elements 0 and 1, tile
+  # 1 covers 3 and 4, and element 2 is SKIPPED because the traversal is
+  # longer than the tile. Nothing here runs off the end, so no lane is the
+  # padding.
+  let keep = [0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0, 0.0 - 7.0]
+  let x = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert strided_pad_ref(5, 2, 3, 99.0, x, keep) == [1.0, 2.0, 4.0, 5.0, 0.0 - 7.0]
+  # a traversal of ONE overlaps instead: four tiles of two, each starting
+  # one element on, and the last runs one element past the tensor
+  let wide = list.map(range(0, 12), _k => 0.0 - 7.0)
+  assert strided_pad_ref(5, 2, 1, 99.0, x, wide)
+    == [1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 99.0, 0.0 - 7.0, 0.0 - 7.0]
+
+  # gather_pad_ref over a 3 by 2 tensor read into rows of three columns:
+  # the third column of every row is outside the tensor and takes the
+  # padding, and a row number may be named twice.
+  let table = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+  let ids = [2.0, 0.0, 2.0]
+  let old = list.map(range(0, 10), _k => 0.0 - 7.0)
+  assert gather_pad_ref(3, 2, 3, 99.0, ids, table, old)
+    == [5.0, 6.0, 99.0, 1.0, 2.0, 99.0, 5.0, 6.0, 99.0, 0.0 - 7.0]
+
+  # view_atomic_ref over four values, two bins, a tile of two and a bias of
+  # one. The block count is `n / tile + 1`, which is the grid the kernel is
+  # launched on, so there are THREE blocks and the last one is entirely past
+  # the end of the input: its counts are zero and its contribution is minus
+  # the bias, which is what puts a negative number in at all.
+  #
+  #   block 0 = [0, 1] -> counts [1, 1] -> contributions [ 0,  0]
+  #   block 1 = [1, 1] -> counts [0, 2] -> contributions [-1,  1]
+  #   block 2 = past the end          -> contributions [-1, -1]
+  let ins = [[0.0, 1.0, 1.0, 1.0]] ++ list.map(range(0, 9), _k => [0.0, 0.0])
+  let got = view_atomic_ref(4, 2, 2, 1, ["i32"], ins)
+  let at = (k: Int) => {
+    let (_pos, v) = got[k]
+    v
+  }
+  # add is the histogram of the four values, and addf the same count in
+  # binary64: neither takes the bias off
+  assert at(0) == [1.0, 3.0]
+  assert at(1) == [1.0, 3.0]
+  # and, or and xor over the three contributions of each bin
+  assert at(2) == [0.0, 0.0]
+  assert at(3) == [0.0 - 1.0, 0.0 - 1.0]
+  assert at(4) == [0.0, 0.0 - 2.0]
+  # max and min, read as SIGNED
+  assert at(5) == [0.0, 1.0]
+  assert at(6) == [0.0 - 1.0, 0.0 - 1.0]
+  # and the same two contributions read as UNSIGNED, where -1 is the
+  # largest of them rather than the smallest. That reversal is the whole of
+  # what tells `umax` from `max`, and it is why the corpus of view_atomic
+  # has to carry a negative contribution at all.
+  assert at(7) == [0.0 - 1.0, 0.0 - 1.0]
+  assert at(8) == [0.0, 0.0]
+}

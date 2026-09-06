@@ -96,28 +96,34 @@
 #   type tags   the scalar formats and the type constructors
 #               (BytecodeTypeOpcodes.td) are a separate table, and knives T3
 #               and T9 finished the scalar half of it. Knife T11 took two of
-#               the four view constructors; the two still missing are
-#               GatherScatterViewType and StridedViewType, which knife T13
-#               owns. The mutants `f64-tag-as-i64`, `bf16-tag-as-i16`,
-#               `i4-tag-as-i8` and `tensor-view-tag-as-ptr` are theirs, not
-#               any opcode's.
+#               the four view constructors and knife T13 the other two, so
+#               that table is finished as well. The mutants `f64-tag-as-i64`,
+#               `bf16-tag-as-i16`, `i4-tag-as-i8`, `tensor-view-tag-as-ptr`
+#               and `strided-traversal-as-one` are theirs, not any
+#               opcode's.
 #   attributes  the enum values and unit attributes (AttrDefs.td) are a
 #               third table, and knife T4 built it: attrs.txt beside this
 #               file, checked by the same check.py. T15 owns
 #               OptimizationHints, which is a dictionary rather than a
 #               domain of values and is in neither.
 #
-# RULING 2 IS REVOKED, and the `ruling 2` exemption is now a POINTER rather
-# than a suspension. The prestudy's second ruling
-# (docs/tile-backend-design.md 2.4) put the whole view family aside: nine
-# opcodes, four type tags and the five `PaddingValue` values, with knives
-# T11 to T13 suspended along with them. The user revoked it on 2026-09-06
-# and the three knives were opened. Knife T11 landed the STATIC half
+# RULING 2 IS RETIRED, and NO ROW CARRIES IT ANY MORE. The prestudy's
+# second ruling (docs/tile-backend-design.md 2.4) put the whole view family
+# aside: nine opcodes, four type tags and the five `PaddingValue` values,
+# with knives T11 to T13 suspended along with them. The user revoked it on
+# 2026-09-06 and the three knives were opened: T11 landed the static half
 # (`make_tensor_view`, `make_partition_view`, `load_view_tko`,
 # `store_view_tko`, TensorViewType, PartitionViewType and all five padding
-# values); what still carries the exemption is what T12 and T13 own, and
-# for those rows `ruling 2` reads "the view family, revoked and waiting for
-# its knife" and not "suspended indefinitely".
+# values), T12 the dynamic one (`get_tensor_shape`,
+# `get_index_space_shape`), and T13 the rest
+# (`make_gather_scatter_view`, `make_strided_view`, `atomic_red_view_tko`,
+# GatherScatterViewType, StridedViewType). All nine opcodes and all four
+# type tags are implemented and at layer 3.
+#
+# THIS TABLE HAS NO `deferred` AND NO `unimplemented` ROW LEFT: the hundred
+# rows are 97 `implemented` and 3 `structural`. That is what closed several
+# of check.py's self-test anchors onto implemented rows, which its comments
+# say where.
 #
 # `entry` 0x16, `module` 0x4B and `global` 0x31 are STRUCTURAL: the writer
 # never puts any of them in the instruction stream. `module` is the file and
@@ -225,6 +231,6 @@ pack                     | 0x6F | 13.3 | implemented   | T9  | 3 | golden:dtype_
 unpack                   | 0x70 | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,golden:pack_roundtrip,mutant:unpack-as-pack,mutant:pack-result-shape-unhalved                             | -
 alloca                   | 0x71 | 13.3 | implemented   | T10 | 3 | golden:alloca_scratch,golden:alloca_two,mutant:alloca-flags-unwritten,mutant:alloca-alignment-as-num-elem,mutant:alloca-aliased | -
 mmaf_scaled              | 0x72 | 13.3 | implemented   | T10 | 1 | mutant:mmaf-scaled-scale-operand-missing,mutant:mmaf-scaled-writes-a-flags-word                                            | architecture
-make_gather_scatter_view | 0x73 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
-make_strided_view        | 0x74 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
-atomic_red_view_tko      | 0x75 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+make_gather_scatter_view | 0x73 | 13.3 | implemented   | T13 | 3 | golden:view_token_embed,golden:view_gather_pad,mutant:make-gather-view-as-strided-view,mutant:gather-sparse-dim-and-tensor-view-swapped | -
+make_strided_view        | 0x74 | 13.3 | implemented   | T13 | 3 | golden:view_conv1d,golden:view_stride_pad,mutant:make-strided-view-as-partition-view,mutant:strided-traversal-as-one       | -
+atomic_red_view_tko      | 0x75 | 13.3 | implemented   | T13 | 3 | golden:view_atomic,mutant:atomic-red-scope-and-mode-swapped,mutant:atomic-red-value-and-token-swapped,mutant:atomic-red-mode-rotated | -
