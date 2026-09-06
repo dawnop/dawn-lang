@@ -50,6 +50,7 @@ use json/value.{Json, JNull, JBool, JInt, JStr, JArr, JObj}
 use json/parser.{parse}
 use json/render.{render}
 use std/map
+use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
 use tea_dom/node.{Node}
 use tea_dom/dsl.{el, div, span, text, input, on_value, on_key}
 
@@ -87,8 +88,14 @@ pub type State = {
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
-## an instruction rather than durable state: Enter sets it, the page reads it
-## out of the document, and the next message clears it.
+## an instruction rather than durable state: something asks for it, the page
+## reads it out of the document, and the next message clears it.
+##
+## Which "something" is a `Cmd` now. Enter used to write the field from inside
+## its own arm, which is what a command is when there is no channel for one:
+## an instruction dressed as a state change. Enter answers
+## `SendMsg(Chose(href))` instead, and `Chose` is the only arm that writes
+## `goto`. The model the turn ends with is the same one, byte for byte.
 pub type Model = {
   query: String,
   sel: Int,
@@ -96,10 +103,15 @@ pub type Model = {
   goto: String,
 }
 
-## What the two listeners mean.
+## What the two listeners mean, plus the one message no listener produces.
+##
+## `Chose` cannot arrive from the page: a message reaches this application
+## only through the `to_msg` of a listener `route.at` found in the tree, and no
+## listener names it. It arrives from Enter's command and nowhere else.
 pub type Msg =
   | Typed(text: String)
   | Pressed(key: String)
+  | Chose(href: String)
 derive Show
 
 ## Where the page is and what language it is in, asked for at the leaves.
@@ -409,10 +421,16 @@ fn blank() -> Model =
     goto: "",
   }
 
-pub fn update(state: State, m: Model, msg: Msg) -> Model =
+## One turn: the model the message leaves behind, and what the panel asks the
+## driver for next.
+pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
-    Typed(text) -> Model { ..m, query: text, sel: 0, goto: "" }
+    Typed(text) -> (Model { ..m, query: text, sel: 0, goto: "" }, NoCmd)
     Pressed(key) -> pressed(state, m, key)
+    # The whole of the navigation instruction, in one place. It overwrites
+    # `goto` rather than reading it, so the arm that commands it does not have
+    # to clear the field first.
+    Chose(href) -> (Model { ..m, goto: href }, NoCmd)
   }
 
 ## Closed is an empty tree, not a hidden one: the panel is a whole document
@@ -429,19 +447,22 @@ pub fn view(state: State, m: Model) -> Node[Msg] = {
 ## What a key means. Everything not named here means nothing, which is the
 ## half that keeps typing cheap: an ordinary character is an `input` event and
 ## a `keydown` this ignores, and ignoring it answers with no patches at all.
-fn pressed(state: State, m: Model, key: String) -> Model = {
+fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
   let s = scan(state.entries, m.query, m.sel)
   let last = len(s.hits) - 1
   if key == "ArrowDown" {
-    Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }
+    (Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }, NoCmd)
   } else if key == "ArrowUp" {
-    Model { ..m, sel: if m.sel > 0 { m.sel - 1 } else { 0 }, goto: "" }
+    (Model { ..m, sel: if m.sel > 0 { m.sel - 1 } else { 0 }, goto: "" }, NoCmd)
   } else if key == "Enter" {
-    Model { ..m, goto: s.chosen }
+    # Nothing about the model changes here. Where the selection points is a
+    # question `scan` has already answered, and what to do about it is the
+    # command.
+    (m, SendMsg(msg: Chose(href: s.chosen)))
   } else if key == "Escape" {
-    Model { ..m, open: false, query: "", sel: 0, goto: "" }
+    (Model { ..m, open: false, query: "", sel: 0, goto: "" }, NoCmd)
   } else {
-    m
+    (m, NoCmd)
   }
 }
 
@@ -535,6 +556,12 @@ pub fn decode(s: String) -> Model =
   }
 
 # ---- tests -----------------------------------------------------------------
+
+# One turn as the reactor commits it: `update`, then everything its command
+# asked for. `tea_dom/reactor.turn_with_state` folds with the same function,
+# so an assertion written on this is an assertion about what the page gets.
+fn turn(state: State, m: Model, msg: Msg) -> Model =
+  fold_msg(m, msg, (acc, x) => update(state, acc, x))
 
 fn probe_entry(group: String, title: String, note: String, href: String) -> Entry =
   Entry { group: group, title: title, detail: "fn $title()", note: note, href: href }
@@ -664,22 +691,22 @@ test "the page's root and language reach the leaves through the handler" {
 test "arrows move the selection and stop at both ends" {
   let state = probe_state()
   let m = Model { ..blank(), query: "str." }
-  assert update(state, m, Pressed(key: "ArrowUp")).sel == 0
-  let down = update(state, m, Pressed(key: "ArrowDown"))
+  assert turn(state, m, Pressed(key: "ArrowUp")).sel == 0
+  let down = turn(state, m, Pressed(key: "ArrowDown"))
   assert down.sel == 1
   # two hits, so the second is the last one
-  assert update(state, down, Pressed(key: "ArrowDown")).sel == 1
-  assert update(state, down, Pressed(key: "ArrowUp")).sel == 0
+  assert turn(state, down, Pressed(key: "ArrowDown")).sel == 1
+  assert turn(state, down, Pressed(key: "ArrowUp")).sel == 0
   # the selected row is the one that says so, and it is the only one
   assert selected_titles(view(state, down)) == ["str.split"]
   # a key nothing is bound to leaves the model alone, so the turn has no patches
-  assert update(state, down, Pressed(key: "x")) == down
+  assert turn(state, down, Pressed(key: "x")) == down
 }
 
 test "typing replaces the query and puts the selection back at the top" {
   let state = probe_state()
   let m = Model { ..blank(), query: "str.", sel: 1 }
-  let typed = update(state, m, Typed(text: "list"))
+  let typed = turn(state, m, Typed(text: "list"))
   assert typed.query == "list"
   assert typed.sel == 0
   assert typed.goto == ""
@@ -690,12 +717,12 @@ test "typing replaces the query and puts the selection back at the top" {
 test "enter marks a destination and escape renders nothing at all" {
   let state = probe_state()
   let m = Model { ..blank(), query: "str.", sel: 1 }
-  let go = update(state, m, Pressed(key: "Enter"))
+  let go = turn(state, m, Pressed(key: "Enter"))
   assert go.goto == "stdlib.html#std-str-split"
   assert str.contains(show_tree(view(state, go)), "data-goto")
   # the next message clears it, so one Enter is one navigation
-  assert update(state, go, Typed(text: "str.")).goto == ""
-  let shut = update(state, go, Pressed(key: "Escape"))
+  assert turn(state, go, Typed(text: "str.")).goto == ""
+  let shut = turn(state, go, Pressed(key: "Escape"))
   assert not shut.open
   assert shut.query == ""
   let closed: List[Node[Msg]] = []
@@ -747,12 +774,12 @@ test "an index row is five strings, in this order" {
 
 test "only the mutable model round-trips through its text" {
   let state = probe_state()
-  let m = update(state, blank(), Typed(text: "str."))
+  let m = turn(state, blank(), Typed(text: "str."))
   assert decode(encode(m)) == m
   assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\"}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
-  assert decode(encode(update(state, m, Pressed(key: "Escape")))).open == false
+  assert decode(encode(turn(state, m, Pressed(key: "Escape")))).open == false
   assert decode("not json at all") == blank()
   assert decode("[1,2]") == blank()
   # an object missing every field is the blank model, field by field
@@ -853,4 +880,23 @@ fn all_with_class(w: Node[Msg], cls: String) -> List[Node[Msg]] = {
     out = out ++ all_with_class(k, cls)
   }
   out
+}
+
+## Enter as a command rather than as a field write: the same model comes out,
+## and the two halves are now separable.
+test "enter commands the navigation instead of writing it" {
+  let state = probe_state()
+  let m = Model { ..blank(), query: "str.", sel: 1 }
+  # `update` alone moves nothing. Without the fold the panel would answer with
+  # no patches at all and the page would never see a destination.
+  let (kept, c) = update(state, m, Pressed(key: "Enter"))
+  assert kept == m
+  assert c == SendMsg(msg: Chose(href: "stdlib.html#std-str-split"))
+  # And the commanded message is the only thing that writes the field.
+  let (chosen, after) = update(state, m, Chose(href: "stdlib.html#std-str-split"))
+  assert chosen.goto == "stdlib.html#std-str-split"
+  let nothing: Cmd[Msg] = NoCmd
+  assert after == nothing
+  # The whole turn is what a driver commits, and it is what it always was.
+  assert turn(state, m, Pressed(key: "Enter")) == Model { ..m, goto: "stdlib.html#std-str-split" }
 }
