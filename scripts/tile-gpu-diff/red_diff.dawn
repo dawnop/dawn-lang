@@ -628,79 +628,79 @@ fn probe_reading(x: Float) -> String =
 # `io.exit` needs a handler above it now, and this program is the only
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
-    let argv = args()
-    let count = 14
-    if len(argv) != count {
-      io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
-          ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
-          ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin> <agent_step.cubin>")
-      io.exit(2)
+  let argv = args()
+  let count = 14
+  if len(argv) != count {
+    io.eprintln("usage: red_diff <reduce_sum.cubin> <softmax.cubin> <dot.cubin> <mse.cubin>"
+        ++ " <monte_carlo.cubin> <rms_norm.cubin> <silu.cubin> <sigmoid.cubin> <ppo_loss.cubin>"
+        ++ " <dpo_loss.cubin> <mathops.cubin> <foldif.cubin> <argmax.cubin> <agent_step.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let tier = case_tier(i)
+    let n = if name == "foldif" {
+      FOLD_TILE * FOLD_BLOCKS
+    } else if name == "agent_step" {
+      AG_N * 4
+    } else {
+      RED_N
     }
-    var cubins: Map[String, Bytes] = map.empty()
-    for i in range(0, count) {
-      cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
-    }
-    var all_agreed = true
-    var blocked = ""
-    var any_differ = false
-    var exact_count = 0
-    var tolerance_count = 0
-    for i in range(0, count) {
-      let name = case_name(i)
-      let tier = case_tier(i)
-      let n = if name == "foldif" {
-        FOLD_TILE * FOLD_BLOCKS
-      } else if name == "agent_step" {
-        AG_N * 4
+    let data = case_data(i)
+    let grid = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, grid, data))
+    let real = with_gpu_real(cubins, () => stages(name, grid, data))
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} n=${n} buffers=${len(data)} lanes=${len(data[0])} grid=${grid}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result, n)}")
+    io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
       } else {
-        RED_N
+        ()
       }
-      let data = case_data(i)
-      let grid = case_grid(i)
-      let refs = case_kernels(i)
-      let fake = with_gpu_fake(refs, () => stages(name, grid, data))
-      let real = with_gpu_real(cubins, () => stages(name, grid, data))
-      let v = verdict(tier, fake, real)
-      io.println("kernel ${name} tier=${tier} n=${n} buffers=${len(data)} lanes=${len(data[0])} grid=${grid}")
-      io.println("  fake  launch=${fake.launch} result=${shown(fake.result, n)}")
-      io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
-          ++ " sync=${real.sync} download=${real.download} result=${shown(real.result, n)}")
-      io.println("  miss  ${miss(fake, real)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})")
-      if real.note != "" { io.println("  note  ${real.note}") }
-      io.println("  verdict ${v}")
-      if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
-      if v == "close:tolerance" || v == "identical:tolerance" { tolerance_count = tolerance_count + 1 } else { () }
-      if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" { all_agreed = false } else { () }
-      if v == "differ:result" { any_differ = true } else { () }
-      if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
-        && v != "identical:tolerance" {
-          blocked = v
-        } else {
-          ()
-        }
-    }
-    # the order probe, on the reduce_sum cubin, recorded and not asserted
-    let probe_data = [probe_corpus(RED_TILE), sentinel_buffer(RED_TILE)]
-    let probe = with_gpu_real(cubins, () => stages("reduce_sum", 1, probe_data))
-    let answer = match probe.result {
-      Some(v) -> v[0]
-      None -> 0.0 / 0.0
-    }
-    if stopped(probe) == "" {
-      io.println("probe fold-order sum([2^53, 1, 1, -2^53]) = ${answer} (${probe_reading(answer)})")
-    } else {
-      io.println("probe fold-order blocked:${stopped(probe)}")
-    }
-    io.println("probe agents ${agents_shape()}")
-    io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
-    if all_agreed {
-      io.println("tile-gpu-diff: pass")
-    } else if any_differ {
-      io.println("tile-gpu-diff: fail")
-      io.exit(1)
-    } else {
-      io.println("tile-gpu-diff: ${blocked}")
-    }
+  }
+  # the order probe, on the reduce_sum cubin, recorded and not asserted
+  let probe_data = [probe_corpus(RED_TILE), sentinel_buffer(RED_TILE)]
+  let probe = with_gpu_real(cubins, () => stages("reduce_sum", 1, probe_data))
+  let answer = match probe.result {
+    Some(v) -> v[0]
+    None -> 0.0 / 0.0
+  }
+  if stopped(probe) == "" {
+    io.println("probe fold-order sum([2^53, 1, 1, -2^53]) = ${answer} (${probe_reading(answer)})")
+  } else {
+    io.println("probe fold-order blocked:${stopped(probe)}")
+  }
+  io.println("probe agents ${agents_shape()}")
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
 })
 
 # `io.exit` is typed Unit, so the branch that cannot continue still owes a

@@ -2233,7 +2233,8 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
 
     contributing_spans = inline_code_spans(files["CONTRIBUTING.md"])
     for literal, name in (
-        ("./bin/dawn fmt compiler-plan std site selfhost packages examples --check",
+        ("./bin/dawn fmt compiler-plan std site selfhost packages examples "
+         "scripts/tile-gpu-diff --check",
          "complete formatter scope"),
         ("docs/history/m<N>-progress.md", "milestone progress path"),
         ("docs/history/m<N>-retro.md", "milestone retro path"),
@@ -2694,7 +2695,8 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
                 "assets stayed green"], 0
 
     comment = dict(files)
-    command = "./bin/dawn fmt compiler-plan std site selfhost packages examples --check"
+    command = ("./bin/dawn fmt compiler-plan std site selfhost packages examples "
+               "scripts/tile-gpu-diff --check")
     comment["CONTRIBUTING.md"] = comment["CONTRIBUTING.md"].replace(
         command, "./bin/dawn fmt std site selfhost packages examples --check", 1)
     comment["CONTRIBUTING.md"] += f"\n<!-- `{command}` -->\n"
