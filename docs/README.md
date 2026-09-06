@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 102 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 103 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -82,6 +82,7 @@
 | [int-min-literal-design.md](int-min-literal-design.md) | current | SYN-08 的定稿：三进制共用无溢出 magnitude parser，仅直接一元负号消费精确 `2^63` marker；双后端与生成 C 契约固定 `INT64_MIN`。 |
 | [lsp-framing-design.md](lsp-framing-design.md) | current | TOOL-07 的定稿：共享层在 stdin read 前限制 8 KiB header/64 MiB body，严格解析重复 `Content-Length`，并把不可重同步的 framing failure 固定为一次错误后关读循环。 |
 | [source-plan-design.md](source-plan-design.md) | current | TOOL-10 的定稿及 2026-08-09 架构修订：独立无 Java 的 `compiler-plan/` 先形成唯一最终图，再从选中 `PkgR` 收 Java 坐标。 |
+| [tile-wheel-cache-design.md](tile-wheel-cache-design.md) | current | #70 的 tileiras wheel 缓存、固定版本与摘要校验、离线安装负控及热缓存 CI 预算观测。 |
 | [lsp-workspace-design.md](lsp-workspace-design.md) | current | TOOL-05/06 的已实现设计：canonical `(project, source_root)` workspace、captured `ProjectPlan`、共享 `Program`/诊断与 target-scoped `JsigLease`。 |
 | [playground-lsp-design.md](playground-lsp-design.md) | current | #11 的已落地设计：一个 browser buffer 对一个隔离 native LSP process；stdlib Python 窄 gateway、严格 wire/lifecycle/admission 与 fallback；v0.70 WSL2 100-run 开发证据已记录，生产 cgroup 仍须上线前复测。 |
 | [public-surface-design.md](public-surface-design.md) | current | SEM-07 的定稿设计：World/StdOnly/Module audience、opaque nominal args、exporter-side surface validator、精确诊断与 doc/LSP 消费边界。阶段一、二已落地（§十五 记实现现状、`EffectRef` 临时 fallback 与两条无见证者的分支），doc/LSP 过滤是阶段三。 |
