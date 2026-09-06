@@ -773,10 +773,12 @@ pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, Foreig
 ## the two symbol visibilities, and it is the reason this operation exists.
 ##
 ## The tensor SHARES the module's storage: `upload` writes what the next
-## launch reads and `download` reads what the last one wrote, and `free`
-## releases the handle without releasing the memory, which belongs to the
-## module. Two lookups of one symbol answer the SAME handle, so a program
-## cannot hold two aliases of one global and see them disagree.
+## launch reads and `download` reads what the last one wrote. Two lookups of
+## one symbol answer the SAME handle, so a program cannot hold two aliases
+## of one global and see them disagree, and `free` on that handle is
+## ACCEPTED AND DOES NOTHING: the memory belongs to the module and the
+## handle to the installation, so it is still the handle the next lookup
+## answers.
 ##
 ## `Err(kind: "gpu.bad_global_size")` when the global's byte size is not a
 ## whole number of elements of `d`.
@@ -4530,7 +4532,7 @@ pub fn global_syms_tables(n: Int) -> List[List[Float]] =
 ## EXACT TIER BY ALGEBRA: one `addf` per lane with `rounding<nearest_even>`,
 ## which is what a binary64 `+` is.
 pub fn global_syms_ref(n: Int, tables: List[List[Float]], dtypes: List[String],
-    ins: List[List[Float]]) -> List[Float] = {
+  ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let dt = dtypes[1]
   segments(ins[1], n, 3, (seg, i) => round_to(dt, tables[seg][i] + x[i]))
@@ -4679,12 +4681,13 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
 ## them, in declaration order. A kernel with no entry exports none, which is
 ## what `with_gpu_fake` installs.
 pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
-    globals: Map[String, List[(String, String, List[Float])]],
-    body: fn() -> T !Gpu) -> T = {
+  globals: Map[String, List[(String, String, List[Float])]],
+  body: fn() -> T !Gpu) -> T = {
   with handle Gpu {
     var next: Int = 1
     var store: Map[Int, (String, List[Float])] = map.empty()
     var syms: Map[String, Int] = map.empty()
+    var borrowed: Map[Int, Bool] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
       None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 or f8E8M0FNU, got ${dtype}"))
       Some(_w) -> {
@@ -4790,6 +4793,7 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
                 next = next + 1
                 store = map.insert(store, h, (dt, list.map(v, x => round_to(dt, x))))
                 syms = map.insert(syms, kernel ++ "/" ++ name, h)
+                borrowed = map.insert(borrowed, h, true)
                 Ok((h, len(v)))
               }
             }
@@ -4798,7 +4802,11 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
       }
     }
     gpu_free(handle) =>
-      if map.has(store, handle) {
+      if unwrap_or(map.get(borrowed, handle), false) {
+        # a module's global, as under the real handler: accepted, and the
+        # handle stays valid for the rest of the installation
+        Ok(())
+      } else if map.has(store, handle) {
         store = map.remove(store, handle)
         Ok(())
       } else {
@@ -4908,9 +4916,10 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## on a program that never launches loads it, and a launch afterwards reuses
 ## it) and asks the driver for the symbol: `cuModuleGetGlobal` answers a
 ## device address and a byte size, and the handle registered over them is a
-## borrowed one. `gpu_free` on it drops the handle and leaves the storage
-## alone, since the memory belongs to the module and goes when the context
-## does; every other operation treats it as any other buffer. A symbol the
+## borrowed one. `gpu_free` on it does nothing and leaves both the handle
+## and the storage alone, since the memory belongs to the module and goes
+## when the context does; every other operation treats it as any other
+## buffer. A symbol the
 ## module does not export is the driver's own `cuda.CUDA_ERROR_NOT_FOUND`,
 ## which is what a `private` global answers.
 ##
@@ -5043,18 +5052,18 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
       }
     }
     gpu_free(handle) => match map.get(bufs, handle) {
-      Some(b) -> {
-        let (p, _n, _dt) = b
-        bufs = map.remove(bufs, handle)
-        # a module's global is the module's memory: the handle goes and the
-        # storage stays, and `cuCtxDestroy` releases it with the module
+      Some(b) ->
+        # a module's global is the module's memory, and the handle over it
+        # is the installation's: this is accepted and does nothing, and the
+        # handle stays the one every lookup of that symbol answers.
+        # `cuCtxDestroy` releases the storage with the module
         if unwrap_or(map.get(borrowed, handle), false) {
-          borrowed = map.remove(borrowed, handle)
           Ok(())
         } else {
+          let (p, _n, _dt) = b
+          bufs = map.remove(bufs, handle)
           gpu_free_host(p)
         }
-      }
       None -> Err(no_such_buffer("real device", handle))
     }
     gpu_sync() => gpu_sync_host()
@@ -5687,6 +5696,95 @@ test "a freed buffer answers nothing, and two installations share nothing" {
   # handles start over: the second installation did not inherit the first's table
   let second = with_gpu_fake(reference_kernels(), use_after_free)
   assert second == first
+}
+
+# ---- knife TG: the module's globals, as the host sees them ----
+
+fn syms_kernels() -> Map[String, (Int, WideRefFn)] =
+  map.from([("k", (2, last_out((dts, ins) => global_syms_ref(4, global_syms_tables(4), dts, ins))))])
+
+fn syms_globals() -> Map[String, List[(String, String, List[Float])]] = {
+  let ts = global_syms_tables(4)
+  map.from([("k", [("shown", "f64", ts[0]), ("hidden", "f64", ts[1]), ("frozen", "f64", ts[2])])])
+}
+
+fn look(kernel: String, name: String) -> String !Gpu =
+  match module_global(F64, kernel, name) {
+    Ok(t) -> "ok:${size(t)}"
+    Err(e) -> e.kind
+  }
+
+fn global_lookups() -> List[String] !Gpu =
+  [
+    look("k", "shown"),
+    look("k", "frozen"),
+    # a name the module does not declare, and a kernel with no globals at all
+    look("k", "absent"),
+    look("other", "shown")
+  ]
+
+test "the fake device answers a lookup for the globals its module declares, and refuses the rest" {
+  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_lookups)
+    == ["ok:4", "ok:4", "gpu.no_module_symbol", "gpu.no_module_symbol"]
+  # `with_gpu_fake` is `with_gpu_fake_globals` over a device whose modules
+  # declare none, so every lookup under it is refused
+  assert with_gpu_fake(syms_kernels(), global_lookups)
+    == ["gpu.no_module_symbol", "gpu.no_module_symbol", "gpu.no_module_symbol", "gpu.no_module_symbol"]
+}
+
+fn global_is_storage() -> Result[(List[Float], List[Float], List[Float]), ForeignError] !Gpu = {
+  let a = module_global(F64, "k", "frozen")?
+  let before = download(a)?
+  # a SECOND lookup of the same symbol, and `free` on the first: the handle
+  # is the installation's and stays valid, and both names are one storage
+  let _ = free(a)
+  let b = module_global(F64, "k", "frozen")?
+  upload(b, [9.0, 8.0, 7.0, 6.0])?
+  let through_b = download(b)?
+  let through_a = download(a)?
+  Ok((before, through_b, through_a))
+}
+
+test "a module global is one storage under every lookup of its name, and free leaves it there" {
+  let want = global_syms_tables(4)[2]
+  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_is_storage)
+    == Ok((want, [9.0, 8.0, 7.0, 6.0], [9.0, 8.0, 7.0, 6.0]))
+}
+
+fn global_launch_reads_the_write() -> Result[List[Float], ForeignError] !Gpu = {
+  let g = module_global(F64, "k", "shown")?
+  upload(g, [100.0, 200.0, 300.0, 400.0])?
+  let x = alloc(F64, 4)?
+  let out = alloc(F64, 12)?
+  upload(x, [1.0, 1.0, 1.0, 1.0])?
+  launch("k", 1, [handle_of(x), handle_of(out)])?
+  sync()?
+  download(out)
+}
+
+test "the fake device's reference is handed the tables the caller installed it with" {
+  # The fake device does not read its own global store when it launches: the
+  # reference is the caller's, so what a launch answers is what the caller
+  # said the globals hold. This test is the shape scripts/tile-gpu-diff's
+  # sym_diff uses to ask a REAL device whether a host write reached it.
+  let ts = global_syms_tables(4)
+  let want = list.map(range(0, 12), k => ts[k / 4][k % 4] + 1.0)
+  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_launch_reads_the_write) == Ok(want)
+}
+
+fn global_as_bf16() -> String !Gpu = match module_global(BF16, "k", "shown") {
+  Ok(t) -> "ok:${size(t)}"
+  Err(e) -> e.kind
+}
+
+fn global_as_declared() -> String !Gpu = look("k", "shown")
+
+test "the fake device's globals are held to the format their declaration used" {
+  # bf16 where the declaration said f64: the fake device's store holds values
+  # and not bytes, so it cannot reinterpret one format's storage as another's
+  # and says so rather than answering something a real device would not.
+  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_as_bf16) == "gpu.bad_global_dtype"
+  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_as_declared) == "ok:4"
 }
 
 fn real_refusals() -> List[String] !Gpu = {

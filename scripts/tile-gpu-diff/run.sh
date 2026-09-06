@@ -173,6 +173,16 @@
 #                      launch starts from the initializer again. It is the
 #                      second mutant here that the bytes cannot see
 #                      (grid-y-ignored is the first)
+#     visibility-private-written-as-public
+#                      the writer stops asking whether a global is private
+#                      and writes `public` for every one -> the bytes move,
+#                      `tileiras` accepts them and the cubin's `@hidden`
+#                      becomes a GLOBAL binding (scripts/tile-golden holds
+#                      that half). On the device it is GREEN, and that is
+#                      the assertion: `cuModuleGetGlobal` answers a LOCAL
+#                      global exactly as it answers a GLOBAL one, which is
+#                      why knife TG's three attribute rows are exempt
+#                      rather than at layer 2
 #     mma-acc-not-carried
 #                      the GEMM's K loop starts from a fresh zero tile each
 #                      iteration instead of carrying its accumulator ->
@@ -1906,6 +1916,7 @@ tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
 tiers="$tiers hint:$(sed -n 's/^tiers //p' "$work/hint.out" | tail -n 1)"
 tiers="$tiers dbg:$(sed -n 's/^tiers //p' "$work/assert.out" | tail -n 1)"
 tiers="$tiers global:$(sed -n 's/^tiers //p' "$work/global.out" | tail -n 1)"
+tiers="$tiers syms:$(sed -n 's/^tiers //p' "$work/sym.out" | tail -n 1)"
 tiers="$tiers alloca:$(sed -n 's/^tiers //p' "$work/alloca.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
@@ -1916,6 +1927,7 @@ attr_probe="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
 hint_probe_line="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
 loop_probe="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1)"
+sym_probe="$(sed -n 's/^probe symbols //p' "$work/sym.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
   " per-op miss: $trig_probe; sequence launches: $seq_launch_probe; loop rounds: $loop_probe"
 
@@ -4285,6 +4297,56 @@ alloca_pkg_mutant alloca-aliased prog.dawn \
         }' \
   alloca_two
 
+# 45. visibility-private-written-as-public, on the device. The writer stops
+#     asking whether a global is private and writes `public` for every one;
+#     scripts/tile-golden holds the layer-1 half of this (the mutant's
+#     bytes are legal, `tileiras` accepts them, and the cubin's `@hidden`
+#     becomes a GLOBAL binding instead of a LOCAL one). What runs here is
+#     the OTHER half, and it is the reason knife TG's three rows are
+#     exempt rather than at layer 2: this mutant is GREEN on the device.
+#     The driver's `cuModuleGetGlobal` answers a LOCAL global exactly as it
+#     answers a GLOBAL one, so a cubin that differs in that binding answers
+#     the same address, the same size, the same bytes and the same launch.
+#
+#     A block that asserts a mutant stayed green is a block that has to say
+#     what it would take for that to be wrong, so it holds the three symbol
+#     lines verbatim as well as the verdict: if a driver ever starts hiding
+#     a LOCAL global, `sym absent` stops being the only missing one and
+#     this goes red.
+sym_public="$work/pkg-visibility-private-written-as-public"
+rm -rf "$sym_public"
+cp -r "$root/packages/tileir" "$sym_public"
+python3 "$here/mutate.py" "$sym_public/src/bytecode.dawn" visibility-private-written-as-public \
+  '  put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
+  '  put_varint(put_varint(b4, VIS_PUBLIC), if g.constant { 1 } else { 0 })'
+mutant_kernels visibility-private-written-as-public "$sym_public" "${syms_[@]}"
+cmp -s "$golden/global_syms.tilebc" "$work/visibility-private-written-as-public-global_syms.tilebc" &&
+  fail "visibility-private-written-as-public: global_syms.tilebc should move at layer 0 and it did not"
+[ "$(wc -c < "$golden/global_syms.tilebc")" = "$(wc -c < "$work/visibility-private-written-as-public-global_syms.tilebc")" ] ||
+  fail "visibility-private-written-as-public: global_syms.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+echo "      visibility-private-written-as-public: global_syms.tilebc differs from its golden at the same length and tileiras still accepts it"
+if [ "$sym_verdict" = pass ]; then
+  rc=0
+  device "$work/sym.bin" "$work/visibility-private-written-as-public-global_syms.cubin" \
+    > "$work/m-visibility-private-written-as-public.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-visibility-private-written-as-public.out")"
+  if [ "$mverdict" != pass ] || [ "$rc" != 0 ]; then
+    cat "$work/m-visibility-private-written-as-public.out" >&2
+    fail "visibility-private-written-as-public: this mutant is expected to stay GREEN on the device (the driver does not hide a LOCAL global), got $mverdict (exit $rc); if the driver's behaviour changed, attrs.txt's visibility-not-in-the-lookup exemption is out of date"
+  fi
+  for want in \
+    '  sym shown real=ok found elements=128' \
+    '  sym hidden real=ok found elements=128' \
+    '  sym frozen real=ok found elements=128' \
+    '  sym absent real=cuda.CUDA_ERROR_NOT_FOUND missing'; do
+    grep -qF "$want" "$work/m-visibility-private-written-as-public.out" ||
+      { cat "$work/m-visibility-private-written-as-public.out" >&2; fail "visibility-private-written-as-public: the mutant's transcript does not print '$want'"; }
+  done
+  echo "PASS  measurement: visibility-private-written-as-public (the cubin's @hidden binding moved and the device answered exactly what it answered before: symbol_visibility does not reach an answer on this driver)"
+else
+  echo "SKIP  measurement: visibility-private-written-as-public not verifiable on this driver: the clean run is $sym_verdict, before any launch reaches the device"
+fi
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -4302,7 +4364,8 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
-  scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/hint_diff.dawn \
+  scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
+  scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
@@ -4314,7 +4377,7 @@ line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
 summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
-summary="$summary alloca=$alloca_shape"
+summary="$summary alloca=$alloca_shape symbols=$sym_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
