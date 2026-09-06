@@ -1,6 +1,11 @@
 # A GPU program on a machine with no GPU: nine kernels, two sides, one
 # handler that is a table in host memory.
 #
+# The last line of the gallery is not a kernel at all: it is the host asking
+# the module what globals it declares (knife TG), which is the one `Gpu`
+# operation that names something inside a module rather than a buffer the
+# program allocated.
+#
 # The device side is nine ordinary Dawn functions whose only effect is
 # `!Dev`, each the smallest shape that shows one thing the dialect can do
 # and each named for the knife that added it (docs/tile-backend-design.md
@@ -27,6 +32,7 @@
 
 use std/gpu
 use std/gpu.{Gpu, F64, F32, I32, F8E4M3FN, WideRefFn, last_out, with_gpu_fake,
+  with_gpu_fake_globals,
   reference_kernels, alloc, upload, download, launch, free, sync, handle_of, vadd_ref,
   loop_count_ref, assert_pass_ref, global_table_ref, alloca_scratch_ref,
   shape_ops_ref, dtype_convert_ref }
@@ -419,6 +425,40 @@ fn shown(r: Result[List[Float], ForeignError]) -> String = match r {
   Err(e) -> "refused: ${e.kind}"
 }
 
+## Knife TG: the two globals `table` declares, as the HOST sees them. This
+## is the one operation of `Gpu` that names something inside a module rather
+## than a buffer the program allocated: `module_global` answers a tensor
+## over the global's own storage, so the host can read the table the module
+## was born with, write it, and have the next launch read the write. On a
+## real device it is the CUDA driver's `cuModuleGetGlobal`; here it is
+## `with_gpu_fake_globals`, whose second argument is what the module
+## declares.
+fn module_globals() -> Map[String, List[(String, String, List[Float])]] =
+  map.from([("table", [("tbl_a", "f64", table_a()), ("tbl_b", "f64", table_b())])])
+
+## What the host can name in `table`'s module: the first table read straight
+## out of it, and the refusal for a name it does not declare.
+fn symbols() -> Result[(List[Float], String), ForeignError] !Gpu = {
+  let a = gpu.module_global(F64, "table", "tbl_a")?
+  let held = download(a)?
+  let missing = match gpu.module_global(F64, "table", "no_such_table") {
+    Ok(_) -> "found"
+    Err(e) -> e.kind
+  }
+  Ok((held, missing))
+}
+
+fn symbols_answer() -> Result[(List[Float], String), ForeignError] =
+  with_gpu_fake_globals(devices(), module_globals(), symbols)
+
+fn symbols_line() -> String = match symbols_answer() {
+  Ok(p) -> {
+    let (held, missing) = p
+    "@tbl_a holds ${head(held, 4)}, an undeclared name says ${missing}"
+  }
+  Err(e) -> "refused: ${e.kind}"
+}
+
 ## One line per kernel, in knife order: what it is for, and what the fake
 ## device answered.
 fn gallery() -> List[(String, String)] = [
@@ -429,7 +469,8 @@ fn gallery() -> List[(String, String)] = [
   ("T6  guarded   assert and print_tko", shown(guarded_answer())),
   ("T7  table     two globals nobody uploaded", shown(table_answer())),
   ("T10 scratch   alloca, written and read back", shown(scratch_answer())),
-  ("T15 hinted    vadd with optimization_hints", shown(vadd_hinted_answer()))]
+  ("T15 hinted    vadd with optimization_hints", shown(vadd_hinted_answer())),
+  ("TG  symbols   a module global the host looks up", symbols_line())]
 
 fn vadd_line() -> String = match with_gpu_fake(reference_kernels(), () => run(left(), right())) {
   Ok(zs) -> "${zs}"
@@ -530,6 +571,13 @@ test "T5: the step counts are the Collatz chains, and the round count is the lon
 
 test "T6: an assertion that holds leaves an ordinary launch" {
   assert guarded_answer() == Ok([11.0, 21.0, 31.0, 41.0, 51.0, 61.0, 71.0, 81.0])
+}
+
+test "TG: the host reads a module global by name, and is refused a name the module has not got" {
+  # `@tbl_a` is the table the module was BORN with: nothing uploaded it, and
+  # what comes back is what `table_a` declares. The second half is the whole
+  # of what a symbol lookup can refuse.
+  assert symbols_answer() == Ok((table_a(), "gpu.no_module_symbol"))
 }
 
 test "T7: the answer is the two tables, plus ten" {
