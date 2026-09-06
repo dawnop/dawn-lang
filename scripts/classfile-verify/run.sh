@@ -83,10 +83,11 @@ esac
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/AccessCheck.java
+javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/AccessCheck.java \
+  scripts/classfile-verify/ControlFreightCheck.java
 
 # Every `java` below that loads emitted classes carries the export the runtime
-# carries. Since std declares a `ctl` effect, every emitted program links
+# carries. Programs reaching a `ctl` handler or operation link
 # dawn/rt/Ctl, CtlCont and CtlK (selfhost/src/jvm/rtclasses.dawn), and CtlCont
 # extends jdk.internal.vm.Continuation, which java.base does not export to the
 # unnamed module. A real run always has the export: `dawn run` puts this exact
@@ -351,6 +352,9 @@ corpus+=(examples/projects/calc.dawn examples/interop/interop.dawn)
 corpus+=(examples/effects/handlers.dawn examples/text/chars.dawn)
 corpus+=(examples/errors/barriers.dawn)
 corpus+=(scripts/classfile-verify/effect_poly_evidence.dawn)
+corpus+=(scripts/classfile-verify/control_unused.dawn scripts/spike-native/ctl_resume.dawn)
+corpus+=(scripts/classfile-verify/control_foreign.dawn scripts/classfile-verify/control_adt.dawn)
+corpus+=(scripts/classfile-verify/control_erased.dawn scripts/classfile-verify/control_trait.dawn)
 corpus+=("$generic_fn_value_fixture" "$java_tail_fixture")
 for t in "${corpus[@]}"; do
   out="$work/emit/${t//\//_}"
@@ -372,36 +376,82 @@ if [ "$fail" != 0 ]; then
 fi
 echo "OK: every emitted class links, and every reference it names resolves and is reachable"
 
-# Why every `java` above carries --add-exports, checked rather than remembered.
-# A `ctl` effect declared anywhere in std makes `program_has_ctl`
-# (selfhost/src/main.dawn) put dawn/rt/Ctl, CtlCont and CtlK
-# (selfhost/src/jvm/rtclasses.dawn) into every emitted program, and CtlCont extends jdk.internal.vm.Continuation,
-# which java.base exports to nobody. Both directions of that coupling are one
-# assertion: if std stops declaring one the flag above is guarding nothing, and
-# if the classes are emitted without it this gate dies on IllegalAccessError
-# before it reads a byte -- which is how it went red on 0e67fdda, the commit
-# that declared std's first `ctl` effect.
-ctl_declared=0
-if grep -q '^pub ctl effect ' std/*.dawn; then
-  ctl_declared=1
-fi
-for d in "$work"/emit/*; do
-  ctl_emitted=0
-  if [ -f "$d/dawn/rt/CtlCont.class" ]; then
-    ctl_emitted=1
-  fi
-  if [ "$ctl_emitted" != "$ctl_declared" ]; then
-    echo "FAIL: $(basename "$d") emitted CtlCont=$ctl_emitted, std declares ctl=$ctl_declared;" >&2
-    echo "      the --add-exports this gate runs under and the classes it covers disagree" >&2
+# The export above is needed by the corpora that reach the control runtime,
+# not by merely importing a declaration from std. Both directions are held
+# against emitted program references, independently of reach.Live's answer.
+java -cp "$work" ControlFreightCheck "$work"/emit/*
+quiet="$work/emit/examples_text_chars.dawn"
+unused="$work/emit/scripts_classfile-verify_control_unused.dawn"
+suspends="$work/emit/scripts_spike-native_ctl_resume.dawn"
+for name in 'std/io$ev$Exit' 'std/io$ev$Console'; do
+  if [ -f "$quiet/$name.class" ]; then
+    echo "CONTROL_EVIDENCE FAIL: chars retained unused $name" >&2
     exit 1
   fi
 done
-if [ "$ctl_declared" = 1 ]; then
-  echo "OK: std declares a ctl effect, so every corpus carries dawn/rt/CtlCont and the"
-  echo "    export above is the one a real run has"
-else
-  echo "OK: no ctl effect in std, and no corpus carries dawn/rt/CtlCont"
+if [ -f "$unused/"'control_unused$ev$Unused.class' ]; then
+  echo "CONTROL_EVIDENCE FAIL: an unused effect declaration retained its record" >&2
+  exit 1
 fi
+for name in Ctl CtlCont CtlK; do
+  test -f "$suspends/dawn/rt/$name.class"
+  test ! -f "$quiet/dawn/rt/$name.class"
+  test ! -f "$unused/dawn/rt/$name.class"
+  test -f "$work/emit/scripts_classfile-verify_control_foreign.dawn/dawn/rt/$name.class"
+  test -f "$work/emit/scripts_classfile-verify_control_adt.dawn/dawn/rt/$name.class"
+  test ! -f "$work/emit/scripts_classfile-verify_control_erased.dawn/dawn/rt/$name.class"
+done
+test -f "$work/emit/scripts_classfile-verify_control_trait.dawn/"'control_trait$ev$Ask.class'
+echo "CONTROL_EVIDENCE PASS: unused declarations add neither records nor runtime"
+
+# Artifact mutants reproduce both mistakes in the emitted directory: turning
+# pruning off, and removing the runtime a real suspension still calls. The
+# same named assertion must reject both, rather than trusting source spelling.
+extra_ctl="$work/control-extra"
+missing_ctl="$work/control-missing"
+cp -R "$quiet" "$extra_ctl"
+cp -R "$suspends" "$missing_ctl"
+for name in Ctl CtlCont CtlK; do
+  cp "$suspends/dawn/rt/$name.class" "$extra_ctl/dawn/rt/$name.class"
+  rm "$missing_ctl/dawn/rt/$name.class"
+done
+for mutant in "$extra_ctl" "$missing_ctl"; do
+  if java -cp "$work" ControlFreightCheck "$mutant" > "$mutant.log" 2>&1; then
+    echo "FAIL: CONTROL_FREIGHT accepted artifact mutant $mutant" >&2
+    exit 1
+  fi
+  grep -q '^CONTROL_FREIGHT FAIL:' "$mutant.log"
+done
+# Declaration descriptors have no obligatory CONSTANT_Class. Conversely an
+# arbitrary string containing the same bytes is not a dependency. Check both
+# against the oracle itself so neither a CP-only walk nor a UTF8 grep passes.
+signature_ctl="$work/control-signature"
+string_ctl="$work/control-string"
+mkdir -p "$signature_ctl" "$string_ctl"
+javac -cp "$suspends" -d "$signature_ctl" scripts/classfile-verify/ControlSignatureFixture.java
+javac -d "$string_ctl" scripts/classfile-verify/ControlStringFixture.java
+if java -cp "$work" ControlFreightCheck "$signature_ctl" > "$signature_ctl.log" 2>&1; then
+  echo "FAIL: CONTROL_FREIGHT ignored declaration-only runtime descriptors" >&2
+  exit 1
+fi
+grep -q '^CONTROL_FREIGHT FAIL:' "$signature_ctl.log"
+java -cp "$work" ControlFreightCheck "$string_ctl"
+mkdir -p "$signature_ctl/dawn/rt" "$string_ctl/dawn/rt"
+for name in Ctl CtlCont CtlK; do
+  cp "$suspends/dawn/rt/$name.class" "$signature_ctl/dawn/rt/$name.class"
+  cp "$suspends/dawn/rt/$name.class" "$string_ctl/dawn/rt/$name.class"
+done
+java -cp "$work" ControlFreightCheck "$signature_ctl"
+if java -cp "$work" ControlFreightCheck "$string_ctl" > "$string_ctl.log" 2>&1; then
+  echo "FAIL: CONTROL_FREIGHT treated an ordinary string as a runtime reference" >&2
+  exit 1
+fi
+grep -q '^CONTROL_FREIGHT FAIL:' "$string_ctl.log"
+./bin/dawn run scripts/spike-native/ctl_resume.dawn > "$work/control.out"
+cmp scripts/spike-native/ctl_resume.expect "$work/control.out"
+./bin/dawn run scripts/classfile-verify/control_foreign.dawn > "$work/control-foreign.out"
+test "$(cat "$work/control-foreign.out")" = ok
+echo "OK: both control freight mutants rejected; live suspensions still run"
 
 ./bin/dawn test "$java_tail_fixture"
 echo "OK: Java Unit-tail results are evaluated, discarded, and runnable"

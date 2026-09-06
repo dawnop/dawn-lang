@@ -1,10 +1,10 @@
 # Which functions can run, starting from the user's modules: which of the
 # Unicode-table intrinsics they touch, and -- since the per-program std
 # pruning knife -- which functions and dictionaries the backends still have to
-# emit.
+# emit, along with the control runtime and effect evidence they reference.
 #
-# The two answers come out of one walk on purpose. They are the same question
-# asked twice, and a second walk would be a second answer to drift from this
+# The answers come out of one walk on purpose. They are the same question
+# about live code, and a second walk would be a second answer to drift from this
 # one; `table_use` below is the Unicode half kept under its old name.
 #
 # Both backends used to carry the Unicode tables -- simple case mapping and
@@ -47,11 +47,16 @@ use ir/core.{
   CComptime, CReturn, CBreak, CContinue, CForeign, CDup,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
-  CSlotFn, CSlotDefault
+  CSlotFn, CSlotDefault, CParam, COwned, cex_ty, sam_ev_exprs
 }
-use check/types.{Ty, TyString, TyUnit}
+use check/types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError,
+  TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyOpaque, TyAssoc,
+  TyTuple, TyFn, ELabeled, EPure, eff_labels
+}
 use std/map
 use std/set
+use std/str
 
 ## The answer, one fact per gated intrinsic. Each backend folds these into its
 ## own tables: the JVM pairs `str_upper`/`str_lower` with the case payloads
@@ -127,6 +132,9 @@ type Rch = {
   seen_dicts: Set[String],
   seen_own_dicts: Set[String],
   live_dicts: Set[String],
+  adts: Set[Int],
+  java_classes: Set[String],
+  ctl: Bool,
   u: TableUse
 }
 
@@ -144,10 +152,16 @@ pub type Live = {
   dicts: Set[String],
   ## `<owner>\n<key>` for each module's own copy, for the JVM's dictionary
   ## classes, which are per module
-  own_dicts: Set[String]
+  own_dicts: Set[String],
+  ## ADTs named by live instructions or signatures, including effect records.
+  adts: Set[Int],
+  ## Foreign owners and descriptor types, normalized to internal class names.
+  java_classes: Set[String],
+  ## A live one-shot operation/handler needs the control driving loop.
+  ctl: Bool
 }
 
-## The three readers. There is no "everything live" value on purpose: the
+## The readers. There is no "everything live" value on purpose: the
 ## paths that prune nothing (`dawn test --stdlib`, the runtime-only jar built
 ## without a target) hand the emitters `None` instead, so "keep it all" is a
 ## missing answer rather than a full one that has to stay in agreement with
@@ -158,6 +172,10 @@ pub fn dict_live(l: Live, key: String) -> Bool = set.has(l.dicts, key)
 
 pub fn own_dict_live(l: Live, owner: String, key: String) -> Bool =
   set.has(l.own_dicts, own_dict_key(owner, key))
+
+pub fn adt_live(l: Live, aid: Int) -> Bool = set.has(l.adts, aid)
+
+pub fn java_class_live(l: Live, name: String) -> Bool = set.has(l.java_classes, name)
 
 fn own_dict_key(owner: String, key: String) -> String = owner ++ "\n" ++ key
 
@@ -349,9 +367,73 @@ fn mark(u: TableUse, name: String) -> TableUse =
     u
   }
 
+## Java reflection spells array classes as descriptors and ordinary classes
+## with dots. Keep one internal-name identity for either source of a reference.
+fn java_class_use(st: Rch, name: String) -> Rch = {
+  var at = 0
+  while at < str.len(name) && str.slice(name, at, at + 1) == "[" { at = at + 1 }
+  let element = if at > 0 && str.slice(name, at, at + 1) == "L" {
+    str.slice(name, at + 1, str.len(name) - 1)
+  } else { name }
+  let key = join(str.split(element, "."), "/")
+  Rch { ..st, java_classes: set.insert(st.java_classes, key),
+    ctl: st.ctl || key == "dawn/rt/Ctl" || key == "dawn/rt/CtlCont" || key == "dawn/rt/CtlK" }
+}
+
+## Signatures matter even without a construction: a function receiving an
+## effect's evidence names the record in its JVM descriptor. Function values
+## carry an erased pack, but their labelled rows keep the evidence classes
+## conservatively too; a label and its record share the same ADT id.
+fn type_use(st: Rch, ty: Ty) -> Rch = {
+  let s = type_adts(st, ty)
+  # Containers and function values erase their children in JVM descriptors.
+  # Their labels still keep evidence conservatively, but merely mentioning
+  # List[Ctl] or fn(Ctl) cannot add the continuation runtime to a program.
+  descriptor_use(s, ty)
+}
+
+fn descriptor_use(st: Rch, ty: Ty) -> Rch =
+  match ty {
+    TyJava(name, _) -> java_class_use(st, name)
+    TyOpaque(_, _, _, _, target) -> descriptor_use(st, target)
+    _ -> st
+  }
+
+fn type_adts(st: Rch, ty: Ty) -> Rch =
+  match ty {
+    TyAdt(aid, args) -> types_adts(Rch { ..st, adts: set.insert(st.adts, aid) }, args)
+    TyList(t) | TySet(t) | TyArray(t) -> type_adts(st, t)
+    TyMap(k, v) -> type_adts(type_adts(st, k), v)
+    TyTuple(ts) -> types_adts(st, ts)
+    TyOpaque(_, _, _, args, target) -> type_adts(types_adts(st, args), target)
+    TyAssoc(subject, _, _) -> type_adts(st, subject)
+    TyFn(ps, ret, eff) -> {
+      var s = type_adts(types_adts(st, ps), ret)
+      for label in eff_labels(eff) {
+        let (aid, _) = label
+        s = Rch { ..s, adts: set.insert(s.adts, aid) }
+      }
+      s
+    }
+    TyJava(_, _) | TyVar(_, _) | TyInt | TyFloat | TyBool | TyString | TyBytes |
+    TyUnit | TyNever | TyError -> st
+  }
+
+fn types_adts(st0: Rch, ts: List[Ty]) -> Rch = {
+  var st = st0
+  for t in ts { st = type_adts(st, t) }
+  st
+}
+
+fn types_use(st0: Rch, ts: List[Ty]) -> Rch = {
+  var st = st0
+  for t in ts { st = type_use(st, t) }
+  st
+}
+
 fn walk_stmt(st0: Rch, s: CStmt) -> Rch =
   match s {
-    CSLet(_, _, init) -> walk(st0, init)
+    CSLet(_, ty, init) -> walk(type_use(st0, ty), init)
     CSAssign(_, value) -> walk(st0, value)
     CSDiscard(e) -> walk(st0, e)
     CSLoop(_, body, step) -> {
@@ -378,6 +460,9 @@ fn walk_list(st0: Rch, es: List[CExpr]) -> Rch = {
 }
 
 fn walk(st0: Rch, e: CExpr) -> Rch =
+  walk_node(type_use(st0, cex_ty(e)), e)
+
+fn walk_node(st0: Rch, e: CExpr) -> Rch =
   match e {
     CInt(_) -> st0
     CFloat(_) -> st0
@@ -400,13 +485,14 @@ fn walk(st0: Rch, e: CExpr) -> Rch =
       walk_list(st, args)
     }
     CIntrinsic(name, args, _) -> {
-      let st = Rch { ..st0, u: mark(st0.u, name) }
+      let st = Rch { ..st0, u: mark(st0.u, name),
+        ctl: st0.ctl || name == "ctl_run" || name == "ctl_yield" }
       walk_list(st, args)
     }
-    CCtor(_, _, args, _) -> walk_list(st0, args)
-    CField(target, _, _, _, _) -> walk(st0, target)
-    CIsCtor(target, _, _) -> walk(st0, target)
-    CTagOf(target, _) -> walk(st0, target)
+    CCtor(aid, _, args, _) -> walk_list(type_use(st0, TyAdt(aid, [])), args)
+    CField(target, aid, _, _, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
+    CIsCtor(target, aid, _) -> walk(type_use(st0, TyAdt(aid, [])), target)
+    CTagOf(target, aid) -> walk(type_use(st0, TyAdt(aid, [])), target)
     CClosure(fn_name, owner, captures, _) ->
       walk_list(direct(st0, owner, fn_name), captures)
     CDictRef(key, _, _, _) -> dict_edge(st0, key)
@@ -414,7 +500,7 @@ fn walk(st0: Rch, e: CExpr) -> Rch =
     CDictArg(dict, _, _, _, _) -> walk(st0, dict)
     CTuple(elems, _) -> walk_list(st0, elems)
     CTupleGet(target, _, _) -> walk(st0, target)
-    CBox(inner, _) -> walk(st0, inner)
+    CBox(inner, ty) -> walk(type_use(st0, ty), inner)
     CUnbox(inner, _) -> walk(st0, inner)
     CBinary(_, left, right, _) -> walk(walk(st0, left), right)
     CUnary(_, operand, _) -> walk(st0, operand)
@@ -446,12 +532,20 @@ fn walk(st0: Rch, e: CExpr) -> Rch =
     CBreak(_) -> st0
     CContinue(_) -> st0
     CForeign(j, _) -> {
-      let st =
+      var st = types_use(st0, j.arg_tys)
+      for name in [j.call.fqcn, j.call.decl_cls, j.call.ret_cls] ++ j.call.param_cls {
+        st = java_class_use(st, name)
+      }
+      for conv in j.call.sam_convs {
+        let (_, iface, _, ps, ret) = conv
+        for name in [iface, ret] ++ ps { st = java_class_use(st, name) }
+      }
+      st =
         match j.target {
-          Some(t) -> walk(st0, t)
-          None -> st0
+          Some(t) -> walk(st, t)
+          None -> st
         }
-      walk_list(st, j.args)
+      walk_list(walk_list(st, j.args), sam_ev_exprs(j))
     }
     CDup(inner, _) -> walk(st0, inner)
   }
@@ -470,7 +564,10 @@ fn walk(st0: Rch, e: CExpr) -> Rch =
 pub fn live_set(
   mods: List[CModule],
   roots: List[String],
-  extra_roots: List[(String, String)]
+  extra_roots: List[(String, String)],
+  # Descriptors of structures an emitter always keeps, even when no live
+  # function mentions them (ordinary JVM ADTs and trait interfaces).
+  extra_types: List[Ty] = []
 ) -> Live = {
   let idx = build_idx(mods)
   var rootset: Set[String] = set.empty()
@@ -483,8 +580,12 @@ pub fn live_set(
     seen_dicts: set.empty(),
     seen_own_dicts: set.empty(),
     live_dicts: set.empty(),
+    adts: set.empty(),
+    java_classes: set.empty(),
+    ctl: false,
     u: no_tables()
   }
+  st = types_use(st, extra_types)
   var i = 0
   for f in idx.fns {
     if set.has(rootset, f.owner) {
@@ -502,6 +603,8 @@ pub fn live_set(
     let fi = st.work[qi]
     qi = qi + 1
     let f = st.idx.fns[fi]
+    st = type_use(st, f.ret)
+    for p in f.captures ++ f.params ++ f.dicts ++ f.evs { st = type_use(st, p.ty) }
     st = walk(Rch { ..st, cur: f.owner }, f.body)
   }
   var live: Set[String] = set.empty()
@@ -514,7 +617,10 @@ pub fn live_set(
     tables: st.u,
     fns: live,
     dicts: st.live_dicts,
-    own_dicts: st.seen_own_dicts
+    own_dicts: st.seen_own_dicts,
+    adts: st.adts,
+    java_classes: st.java_classes,
+    ctl: st.ctl
   }
 }
 
@@ -544,6 +650,49 @@ fn tmod(owner: String, fns: List[CFun]) -> CModule =
   CModule { owner: owner, fns: fns, dicts: [], next_sym: 0 }
 
 fn intr(name: String) -> CExpr = CIntrinsic(name, [CStr("x")], TyString)
+
+test "control runtime follows reachable operations rather than declarations" {
+  let app = tmod("app", [tfn("app", "main", CUnit)])
+  let ctl = tmod("std/unused", [tfn("std/unused", "run", intr("ctl_run"))])
+  assert not live_set([app, ctl], ["app"], []).ctl
+  assert live_set([app, ctl], ["app"], [("std/unused", "run")]).ctl
+  let raised = tmod("app", [tfn("app", "main", intr("ctl_yield"))])
+  assert live_set([raised], ["app"], []).ctl
+}
+
+test "evidence freight includes signatures, typed fields and function rows" {
+  let unused = tmod("std/unused", [
+    CFun { ..tfn("std/unused", "unused", CUnit), ret: TyAdt(90, []) }
+  ])
+  let f = CFun {
+    ..tfn("app", "main", CField(CLocal(1, TyVar("erased", 0)), 93, 0, 0, TyUnit)),
+    evs: [CParam { sym: 1, ty: TyAdt(91, []), mode: COwned }],
+    params: [CParam { sym: 2,
+      ty: TyFn([], TyUnit, ELabeled(EPure, [(92, "Ask")])), mode: COwned }]
+  }
+  let l = live_set([tmod("app", [f]), unused], ["app"], [])
+  assert adt_live(l, 91)
+  assert adt_live(l, 92)
+  assert adt_live(l, 93)
+  assert not adt_live(l, 90)
+  assert not l.ctl
+}
+
+test "control Java types follow descriptors rather than erased type arguments" {
+  let ctl = TyJava("dawn.rt.Ctl", "Ctl")
+  let erased = live_set([], [], [], [TyList(ctl), TyFn([ctl], TyUnit, EPure)])
+  assert not erased.ctl
+  assert not java_class_live(erased, "dawn/rt/Ctl")
+  let direct = live_set([], [], [], [ctl])
+  assert direct.ctl
+  assert java_class_live(direct, "dawn/rt/Ctl")
+  let array = live_set([], [], [], [TyJava("[[Ldawn.rt.CtlK;", "CtlK[][]")])
+  assert array.ctl
+  assert java_class_live(array, "dawn/rt/CtlK")
+  let iface = live_set([], [], [], [TyFn([], TyUnit, ELabeled(EPure, [(94, "Ask")]))])
+  assert adt_live(iface, 94)
+  assert not iface.ctl
+}
 
 test "a root's own intrinsic marks its table" {
   let u = table_use([tmod("app", [tfn("app", "main", intr("str_upper"))])], ["app"])
