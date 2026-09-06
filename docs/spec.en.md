@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ bcaabe01ebd29ef3 -->
+<!-- doc-check: translation-of docs/spec.md @ 08ea2b196b8b7e9c -->
 
 # Dawn Language Specification
 
@@ -1265,6 +1265,14 @@ The pipeline **introduces no node of its own**, and so:
   `r.callback(x)`.
 
 ### 4.5 Lambda
+
+A function value takes at most **8 explicit parameters**. Function types, lambdas,
+and named functions or constructors used as values are rejected during checking
+when they exceed this limit. Direct named calls and direct record construction
+are not subject to this function-value limit. Ordinary effect operations take at
+most 8 parameters; `ctl effect` operations take at most 7 because their handlers
+also receive a continuation. Operations are checked at their declarations.
+These limits are the same on the JVM and native backends.
 
 ```dawn
 let double = (x: Int) => x * 2

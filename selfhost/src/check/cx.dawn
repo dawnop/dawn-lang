@@ -15,7 +15,7 @@ use front/token.{Diag}
 use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
-  no_eparam_names,
+  no_eparam_names, fn_max_params,
   Audience, AWorld,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
@@ -439,6 +439,15 @@ pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx
     None -> cerr(cx, msg, lo, hi)
   }
 
+## Reject a function value at its written source boundary, not at runtime
+## interface loading. Named direct calls are deliberately not checked here.
+pub fn check_value_arity(cx: Cx, count: Int, lo: Int, hi: Int) -> Cx =
+  if count > fn_max_params() {
+    cerr_h(cx, "function values support at most " ++ to_string(fn_max_params()) ++
+        " parameters, but this value has " ++ to_string(count), lo, hi,
+      "group parameters in a record or use a direct named function call")
+  } else { cx }
+
 # ---- fresh ids ----
 
 pub fn fresh(cx: Cx) -> (Cx, Int) = (Cx { ..cx, next_id: cx.next_id + 1 }, cx.next_id)
@@ -710,7 +719,7 @@ fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
     }
     TFn(params, ret, effs, lo, hi) -> {
       let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
-      var cx2 = cx1
+      var cx2 = check_value_arity(cx1, len(params), lo, hi)
       var ps: List[Ty] = []
       for p in params {
         let (cx3, t) = resolve_type(cx2, p)

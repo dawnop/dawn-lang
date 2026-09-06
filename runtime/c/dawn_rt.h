@@ -735,6 +735,7 @@ dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data);
 dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes); /* Result[Bytes, _] */
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int64_t gy,
                                int64_t gz, const dawn_array *args);
+dawn_adt *dawn_gpu_module_global_host(int64_t module, dawn_str *name); /* Result[Array[Int], _] */
 dawn_adt *dawn_gpu_free_host(int64_t devptr);
 dawn_adt *dawn_gpu_sync_host(void);
 dawn_unit dawn_gpu_close_host(void); /* releases the context and the library; idempotent */

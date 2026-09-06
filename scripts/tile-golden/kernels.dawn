@@ -10,7 +10,7 @@ use std/io
 use std/list
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU,
-  I4, F4E2M1FN, global_table_a, global_table_b }
+  I4, F4E2M1FN, global_table_a, global_table_b, global_syms_c }
 use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
@@ -4256,12 +4256,11 @@ fn assume_bounded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 #                   writes either. It answers what global_table answers,
 #                   which is the point -- neither word changes what a
 #                   kernel computes, so what this kernel buys is layer 1,
-#                   the assembler accepting them. What it CANNOT buy is
-#                   named in scripts/tileir-features/attrs.txt: telling a
-#                   private symbol from a public one from the host needs
-#                   `cuModuleGetGlobal`, and the `Gpu` effect has no such
-#                   operation, so the family stops there and this kernel is
-#                   not in scripts/tile-gpu-diff.
+#                   the assembler accepting them. It stays in this family
+#                   and out of scripts/tile-gpu-diff, because the T7
+#                   mutants' arithmetic is written for three kernels here.
+#                   Knife TG's global_syms below carries the same two words
+#                   to the device.
 #
 # `@tbl_b` asks for a 256-byte alignment and `@tbl_a` takes the dialect's
 # default of 0, so the record's alignment varint carries two different
@@ -4308,6 +4307,34 @@ fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let tx = load(x, blk, s)
   store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
   store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
+}
+
+# ---- knife TG: the three globals as the HOST sees them ----
+#
+# One module, three globals, three output segments: `@shown` is public,
+# `@hidden` is private and `@frozen` is constant (and public, since the two
+# words are independent). The kernel reads all three and adds the input, so
+# the buffer comparison says the device read three distinct tables; what the
+# buffer cannot say is which of the three the HOST can look up, and that is
+# what scripts/tile-gpu-diff's symbol probe asks `cuModuleGetGlobal`.
+#
+# `global_flags` above holds the same two words for layer 1 and is left
+# alone: knife T8's measurements of the Global section's record are written
+# against its bytes.
+fn global_syms(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  d_global("shown", F64, global_table_a(GLOBAL_TILE))
+  d_global_private("hidden", F64, global_table_b(GLOBAL_TILE))
+  d_global_const("frozen", F64, global_syms_c(GLOBAL_TILE))
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let off = lanes(blk, s)
+  let ps = ptr_offset(F64, s, global_ptrs("shown", F64, s), off)
+  let ph = ptr_offset(F64, s, global_ptrs("hidden", F64, s), off)
+  let pf = ptr_offset(F64, s, global_ptrs("frozen", F64, s), off)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, ps), tx))
+  store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, ph), tx))
+  store(out, idx_add(blk, idx_const(2 * GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, pf), tx))
 }
 
 # One mutable global, read then written, and the sum written to the output
@@ -4888,6 +4915,8 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("global_scratch", ["f64", "f64"], () => global_scratch(param(F64, 0), param(F64, 1)))
   "global_flags" ->
     trace_kernel("global_flags", ["f64", "f64"], () => global_flags(param(F64, 0), param(F64, 1)))
+  "global_syms" ->
+    trace_kernel("global_syms", ["f64", "f64"], () => global_syms(param(F64, 0), param(F64, 1)))
   "alloca_scratch" ->
     trace_kernel("alloca_scratch", ["f64", "f64"],
       () => alloca_scratch(param(F64, 0), param(F64, 1)))
@@ -4944,6 +4973,6 @@ pub fn main() -> Unit !io = match args() {
       ++ "|loop_count|loop_bound|loop_until|loop_none"
       ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
       ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
-      ++ "|global_table|global_ctl|global_scratch>"
+      ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

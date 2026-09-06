@@ -42,7 +42,7 @@ use ir/core.{
   CMode, COwned, mode_owned,
   cex_ty, diverges
 }
-use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray,
+use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, TyFn, EPure,
   is_ref_ty, intr_owned_args }
 use std/list
 use std/map
@@ -763,7 +763,7 @@ fn owned_positions(
 ## operand hoisted for order's sake is passed on bare and not released here;
 ## the callee does that.
 fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
-  var any = false
+  var any = snapshot_row(es)
   var h = 0
   for e in es {
     if not list.contains(owned, h) && counted(st, e) && not borrows(st, e) { any = true }
@@ -793,7 +793,7 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
     # -- and naming it would write the let at the dictionary pseudo-type,
     # which is not a C type a value lives at (found by spike-native the
     # first time a borrowed row put a dictionary-taking call on this path;
-    # `consume_all`, the all-owned path, never names anything).
+    # the all-owned path also leaves these dictionary atoms inline).
     if not any || dictish(st2, e) {
       let (s2, e1) = rw(st2, e, own, a)
       st2 = s2
@@ -829,6 +829,23 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
   (strip_syms(st2, held), lets, outs, temps)
 }
 
+## A side-effect-free local read is not a stable value when a later operand
+## assigns that binding. Name the row before RC loses this distinction: a
+## borrowed reference needs a retained lifetime, not just a C pointer copy.
+## `fv_expr` conservatively includes assignment targets and loop pins; only
+## an actual assignment found by the complete Core walk can trigger a name.
+fn snapshot_row(es: List[CExpr]) -> Bool = {
+  if len(es) < 2 { return false }
+  var earlier: Set[Int] = set.empty()
+  for e in es {
+    for sym in set.to_list(earlier) {
+      if assigns_spread_expr(e, sym) { return true }
+    }
+    earlier = fv_expr(e, earlier)
+  }
+  false
+}
+
 ## Rewrite each operand in a consuming position: the value is handed over and
 ## the receiver keeps it.
 ##
@@ -841,8 +858,14 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
 ## use-after-free right to left. Keeping every operand's transfers away from
 ## every other operand's reads makes the list order-independent again, at the
 ## cost of a dup/drop pair only when one call mentions the same binding
-## twice.
-fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CExpr]) = {
+## twice. A later assignment is not made safe by a dup at call time: that
+## row first uses `intr_args` to bind value snapshots in written order.
+fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
+  if snapshot_row(es) {
+    var owned: List[Int] = []
+    for i in 0..len(es) { owned = owned ++ [i] }
+    return intr_args(st, es, owned, after)
+  }
   let n = len(es)
   var st1 = st
   var out: List[CExpr] = []
@@ -859,7 +882,7 @@ fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CExpr]) 
     out = out ++ [e1]
     i = i + 1
   }
-  (st1, out)
+  (st1, [], out, [])
 }
 
 ## Rewrite an if's two arms, started from the same scope state, back into
@@ -1368,9 +1391,25 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     # Dawn functions take their arguments owned (docs/perceus-design.md 5.1)
     # unless the mode table says a position is borrowed; the dictionaries a
     # call forwards are not counted and pass through. A callee that is a
-    # value is read at the moment of the call, after every argument has run:
-    # each side's after-set covers the other.
+    # value must stay alive until the call: each side's after-set covers the
+    # other, and a later rebinding forces an owned snapshot before arguments.
     CCall(callee, args, cty) -> {
+      # The function value is the first borrowed operand, not a name that
+      # may be reread after an argument replaces it. Put its snapshot in
+      # the same held set as argument snapshots so a later jump drops it.
+      match callee {
+        CDynamic(target) -> {
+          let row = [target] ++ args
+          if snapshot_row(row) {
+            var owned: List[Int] = []
+            for i in 1..len(row) { owned = owned ++ [i] }
+            let (st1, lets, row1, temps) = intr_args(st, row, owned, after)
+            return wrap(st1, lets,
+              CCall(CDynamic(row1[0]), list.drop(row1, 1), cty), cty, temps)
+          }
+        }
+        _ -> ()
+      }
       let (st1, lets, c1, temps) = rw_callee(st, callee, fv_list(args, after))
       let cbase = match callee {
         CDynamic(t) -> fv_expr(t, after)
@@ -1378,8 +1417,8 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
       }
       match owned_positions(st1.modes, callee, len(args)) {
         None -> {
-          let (st2, args1) = consume_all(st1, args, cbase)
-          wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
+          let (st2, lets2, args1, temps2) = consume_all(st1, args, cbase)
+          wrap(st2, lets ++ lets2, CCall(c1, args1, cty), cty, temps ++ temps2)
         }
         # A callee with borrowed positions is an intrinsic-shaped operand
         # list: the owned positions transfer or dup as ever, a borrowed
@@ -1401,23 +1440,23 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     }
 
     CCtor(adt, ci, args, cty) -> {
-      let (st1, args1) = consume_all(st, args, after)
-      (st1, CCtor(adt, ci, args1, cty))
+      let (st1, lets, args1, temps) = consume_all(st, args, after)
+      wrap(st1, lets, CCtor(adt, ci, args1, cty), cty, temps)
     }
 
     CTuple(elems, tty) -> {
-      let (st1, es1) = consume_all(st, elems, after)
-      (st1, CTuple(es1, tty))
+      let (st1, lets, es1, temps) = consume_all(st, elems, after)
+      wrap(st1, lets, CTuple(es1, tty), tty, temps)
     }
 
     CListLit(elems, lty) -> {
-      let (st1, es1) = consume_all(st, elems, after)
-      (st1, CListLit(es1, lty))
+      let (st1, lets, es1, temps) = consume_all(st, elems, after)
+      wrap(st1, lets, CListLit(es1, lty), lty, temps)
     }
 
     CClosure(fn_name, owner, caps, cty) -> {
-      let (st1, caps1) = consume_all(st, caps, after)
-      (st1, CClosure(fn_name, owner, caps1, cty))
+      let (st1, lets, caps1, temps) = consume_all(st, caps, after)
+      wrap(st1, lets, CClosure(fn_name, owner, caps1, cty), cty, temps)
     }
 
     CBinary(op, l, r, bty) ->
@@ -2226,6 +2265,75 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
 test "a scalar body needs no counting at all" {
   let m = rc_module(one_fn([], TyInt, CInt(1)), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
+}
+
+test "operand snapshots follow later nested assignments, not reads" {
+  let read = CLocal(1, TyInt)
+  let write = CBlock([CSAssign(1, CInt(9))], Some(CInt(1)), TyInt)
+  assert snapshot_row([read, write])
+  assert snapshot_row([read, CIf(CBool(true), write, Some(CInt(1)), TyInt)])
+  assert snapshot_row([read, CBlock([CSLoop(4, write, None)], Some(CInt(1)), TyInt)])
+  assert not snapshot_row([CInt(2), write])
+  assert not snapshot_row([CLocal(2, TyInt), write])
+  assert not snapshot_row([write, read])
+  assert not snapshot_row([read, CLocal(1, TyInt)])
+}
+
+test "a scalar argument is named before a later argument rewrites it" {
+  let p = CParam { sym: 1, ty: TyInt, mode: COwned }
+  let later = CBlock([CSAssign(1, CInt(9))], Some(CInt(1)), TyInt)
+  let body = CCall(CDirect("m", "g"), [CLocal(1, TyInt), later], TyInt)
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> match ss[0] {
+      CSLet(sym, TyInt, CLocal(1, TyInt)) -> { assert sym != 1 }
+      _ -> panic("expected the old scalar value named first")
+    },
+    _ -> panic("expected a snapshot block")
+  }
+  let plain = CCall(CDirect("m", "g"), [CLocal(1, TyInt), CInt(1)], TyInt)
+  let unchanged = rc_module(one_fn([p], TyInt, plain), owned_modes())
+  assert unchanged.fns[0].body == plain
+}
+
+test "borrowed and owned argument snapshots retain a reassigned reference" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let later = CBlock([CSAssign(1, CListLit([CInt(9)], lst))], Some(CInt(0)), TyInt)
+  let body = CCall(CDirect("m", "g"), [CLocal(1, lst), later], TyInt)
+  for mode in [COwned, CBorrowed] {
+    let modes = map.insert(owned_modes(), ("m", "g"), [mode, COwned])
+    let m = rc_module(one_fn([p], TyInt, body), modes)
+    assert len(rc_check(m, modes)) == 0
+    match m.fns[0].body {
+      CBlock(ss, _, _) -> match ss[0] {
+        CSLet(_, _, CDup(CLocal(1, _), _)) -> ()
+        _ -> panic("expected the earlier reference retained before replacement")
+      },
+      _ -> panic("expected a retained snapshot block")
+    }
+  }
+}
+
+test "a dynamic target snapshot remains owned across argument return" {
+  let fn_ty = TyFn([TyInt], TyInt, EPure)
+  let p = CParam { sym: 1, ty: fn_ty, mode: COwned }
+  let later = CBlock(
+    [CSAssign(1, CFnRef("m", "replacement", fn_ty))],
+    Some(CIf(CBool(true), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)),
+    TyInt
+  )
+  let body = CCall(CDynamic(CLocal(1, fn_ty)), [later], TyInt)
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> match ss[0] {
+      CSLet(_, _, CDup(CLocal(1, _), _)) -> ()
+      _ -> panic("expected the dynamic target retained before its arguments")
+    },
+    _ -> panic("expected a retained target block")
+  }
 }
 
 test "a reference parameter the body never touches is still released" {

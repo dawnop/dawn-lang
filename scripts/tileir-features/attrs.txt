@@ -1,7 +1,9 @@
 # The Tile IR ATTRIBUTE ledger: one row per value of every attribute domain
 # the dialect defines, and what this backend has done about it. Knife T4;
 # ruling 6 of the full coverage prestudy (2026-09-05), which is recorded in
-# docs/tile-backend-design.md 2.4, and the measurements in 6.8.
+# docs/tile-backend-design.md 2.4, and the measurements in 6.8. Knife TG
+# rewrote the three Global-record rows' evidence and their exemption after
+# asking a device what the host can name in a module (6.13).
 #
 # This is the THIRD ledger in this directory. features.txt says which of the
 # hundred public OPCODES this backend implements, types.txt which of the 23
@@ -178,34 +180,77 @@
 #       The view family, deferred with the nine view opcodes until knives
 #       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
 #       TYPES (Types.td), not of any operation this backend emits.
-#   no-module-symbol-ffi
-#       `visibility.public`, `visibility.private` and `unit.constant` are
-#       written and accepted, and the judgement they are short of needs one
-#       FFI operation this repository does not have: `cuModuleGetGlobal`.
-#       What each of them MEANS is a fact about a symbol as seen from the
-#       host -- a private symbol cannot be looked up in a loaded module, a
-#       constant one is read-only -- and every layer-2 judgement here is a
-#       comparison of one downloaded buffer, so none of them can ask it.
-#       The `Gpu` effect in std/gpu.dawn has no module-symbol operation and
-#       knife T8 did not add one (that is another ledger's account), so the
-#       three stop at layer 1 with the assembler's acceptance.
+#   visibility-not-in-the-lookup
+#       `visibility.public` and `visibility.private` reach the CUBIN and
+#       stop there, and knife TG measured both halves of that.
 #
-#       This exemption REPLACED `13.3-record-field`, which said something
-#       else and is now settled: until knife T8 these three had no byte to
-#       be written in at all. The SymbolVisibility enum is 13.1 (AttrDefs.td
-#       gives both cases that version, which is what the `since` column
-#       says) but the places a writer could put either value are 13.3:
-#       Ops.td versions GlobalOp's `symbol_visibility` and `constant`
-#       arguments "13.3", BytecodeWriter.cpp's writeGlobalSection writes
-#       four varints per global below 13.3 and six at or above it, and
-#       BytecodeReader.cpp's parseGlobalSection switches its
-#       `kMinGlobalInfoSize` from 4 to 6 on the same boundary. Knife T8
-#       moved the pin to 13.3, so the record now has six fields and the
-#       writer fills all of them. Both sides of that wall have been
-#       measured against `tileiras`: T7's global-visibility-written-at-13-2
-#       wrote six varints into a 13.2 file (retired by T8, since that is now
-#       the correct shape) and T8's global-visibility-omitted-at-13-3 writes
-#       four into a 13.3 one.
+#       They reach it: `tileiras` gives a `private` global a LOCAL ELF
+#       binding and a public one a GLOBAL binding, which
+#       scripts/tile-golden checks on `global_syms`'s cubin (@shown and
+#       @frozen GLOBAL, @hidden LOCAL, 1024 bytes each) and which
+#       `visibility-private-written-as-public` reddens by forcing the
+#       writer's enum to `public`. That is a judgement from outside this
+#       repository about the VALUE and not about the record's shape, which
+#       is why it replaced `global-visibility-omitted-at-13-3` on these two
+#       rows.
+#
+#       They stop there: the dialect says public is "accessible from host
+#       code" and private is "device-only access" (Ops.td's GlobalOp), and
+#       on this machine the driver does not agree. Knife TG asked in the
+#       two places the difference could have shown, and got the same answer
+#       twice.
+#
+#       THE SYMBOL LOOKUP. `cuModuleGetGlobal` answers ALL THREE of
+#       `global_syms`'s globals, at the right address and 1024 bytes each;
+#       the host reads back what each declaration gave them; the host
+#       WRITES all three; and the next launch computes with what the host
+#       wrote. Declaring a global `private constant`, the combination a
+#       compiler would have the most licence to fold, changes none of it.
+#       Only a name the module never declared is refused, with the driver's
+#       own `cuda.CUDA_ERROR_NOT_FOUND`.
+#       scripts/tile-gpu-diff/sym_diff.dawn is that measurement and runs on
+#       every pass.
+#
+#       THE LINK. Two cubins each declaring a public `@shared_g` should
+#       collide where two private ones would not, and that would have been
+#       a layer-2 judgement of the form `cuda.<CUresult>@link`. The
+#       question cannot be put on this driver: `cuLinkComplete` answers
+#       `CUDA_ERROR_NO_BINARY_FOR_GPU` with an empty error log for every
+#       cubin-only link, one input or two, from `tileiras` or from `ptxas`,
+#       with `CU_JIT_TARGET` set or not, while the same harness links a PTX
+#       input and loads the result. The classic `ptxas` cubin is the
+#       positive control that makes this a fact about cubins on this driver
+#       rather than about Tile IR or about visibility.
+#
+#       So no device answer depends on which of the two values was written,
+#       and the layer-2 bar is not reachable here for a reason that was
+#       measured rather than missed. There is deliberately NO mutant of the
+#       enum in scripts/tile-gpu-diff: one would be green by construction,
+#       and a green with no information is not evidence. The mutant this
+#       row names lives in scripts/tile-golden, where it has a red set.
+#
+#       This exemption REPLACED `no-module-symbol-ffi`, which said the
+#       judgement was one FFI operation away. Knife TG added the FFI
+#       (`std/gpu`'s `module_global` over `cuModuleGetGlobal_v2`) and the
+#       answer was not the one that sentence assumed. The FFI stays,
+#       because the measurement is worth having and because it is what
+#       keeps this exemption honest; the sentence is gone.
+#   constant-not-in-the-cubin
+#       `unit.constant` does not reach the machine at all, which is one
+#       step short of the two rows above and is measured the same way
+#       `fast_acc`'s was. With the writer's flag forced to 0,
+#       `global_syms.tilebc` moves by exactly one byte at the same length,
+#       `tileiras` accepts it, and the cubin it writes for sm_86 is BYTE
+#       FOR BYTE the one it wrote before: a `constant` global lands in
+#       `.nv.global.init` beside the mutable ones, with the same GLOBAL
+#       binding and the same size. scripts/tile-golden's
+#       `constant-flag-as-mutable` is that comparison as a gate rather than
+#       a note, so a later `tileiras` that starts placing it elsewhere goes
+#       red here instead of leaving this text quietly wrong. A bit that
+#       does not reach the machine cannot make the device answer anything
+#       else, and sym_diff says the same from the other end: the host
+#       writes `@frozen` and the next launch reads the write, so it is not
+#       read-only to the host either.
 #   hints-do-not-change-answers
 #       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
 #       names it beside `assume` for exactly this reason: the dialect
@@ -264,15 +309,15 @@ unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_
 unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
 unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
 unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
-unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,mutant:global-visibility-omitted-at-13-3                    | no-module-symbol-ffi
+unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,golden:global_syms,mutant:constant-flag-as-mutable          | constant-not-in-the-cubin
 unit.global                  | 1 | 13.3 | implemented   | T10 | 1 | const:ALLOCA_FLAG_GLOBAL,golden:alloca_two,mutant:alloca-flags-unwritten                              | global-bit-not-in-the-cubin
 padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-visibility.public            | 0 | 13.1 | implemented   | T8  | 1 | const:VIS_PUBLIC,golden:global_table,mutant:global-visibility-omitted-at-13-3                         | no-module-symbol-ffi
-visibility.private           | 1 | 13.1 | implemented   | T8  | 1 | const:VIS_PRIVATE,golden:global_flags,mutant:global-visibility-omitted-at-13-3                        | no-module-symbol-ffi
+visibility.public            | 0 | 13.1 | implemented   | T8  | 1 | const:VIS_PUBLIC,golden:global_table,golden:global_syms,mutant:visibility-private-written-as-public    | visibility-not-in-the-lookup
+visibility.private           | 1 | 13.1 | implemented   | T8  | 1 | const:VIS_PRIVATE,golden:global_flags,golden:global_syms,mutant:visibility-private-written-as-public   | visibility-not-in-the-lookup
 tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted
 tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
 tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic

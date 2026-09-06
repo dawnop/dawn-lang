@@ -1,0 +1,493 @@
+# Layer 2 for the Global record's two 13.3 words (knife TG), the
+# twenty-fourth of these programs: one `!Gpu` program runs the kernel
+# scripts/tile-golden pins under `with_gpu_real` against the machine's GPU
+# and under `with_gpu_fake` against hand-written host references, and asks
+# the HOST a question no buffer comparison can ask.
+#
+#   sym_diff <global_syms.cubin>
+#
+# WHAT THIS FAMILY MEASURED, and it is not what the knife expected.
+# `global_syms` declares three globals -- `@shown` public, `@hidden`
+# private, `@frozen` constant -- and reads all three, so the buffer
+# comparison says all three reached the device. The question the buffer
+# cannot ask is which of them the HOST can name, and the dialect's answer
+# would be `@shown` and `@frozen` but not `@hidden` ("public: accessible
+# from host code; private: device-only access", Ops.td's GlobalOp). On this
+# machine that is NOT what the driver does: `cuModuleGetGlobal` answers all
+# three, with the right address and the right size, the host reads back
+# what each declaration gave it, the host WRITES all three, and the next
+# launch reads what the host wrote -- for the private one and the constant
+# one as readily as for the public one. So the two words reach the cubin
+# (the private symbol is a LOCAL ELF binding, which scripts/tile-golden
+# holds) and neither reaches an answer. This program is the measurement
+# that says so, and it is why the three rows in
+# scripts/tileir-features/attrs.txt carry `visibility-not-in-the-lookup`
+# rather than the missing-FFI exemption they carried before.
+#
+# THE OTHER PLACE VISIBILITY COULD HAVE SHOWN is linking, and knife TG
+# measured that too, outside this program: two cubins each declaring a
+# public `@shared_g` should collide where two private ones would not. On
+# this driver the question cannot be put. `cuLinkComplete` answers
+# `CUDA_ERROR_NO_BINARY_FOR_GPU` with an empty error log for every
+# cubin-only link -- one input or two, from `tileiras` or from `ptxas`,
+# with `CU_JIT_TARGET` set or not -- while the same harness links a PTX
+# input and loads the result. So the refusal is about cubins on this
+# driver and not about visibility, and there is no link-side judgement to
+# be had here either (6.13).
+#
+# WHAT IT STILL PINS, and this is a device judgement of its own:
+#
+#   * A MODULE'S GLOBAL IS THE MODULE'S MEMORY, and the host reaches it by
+#     name. The symbol lookup answers 128 f64 elements per table, the read
+#     back is the declaration's own values bit for bit, and after the host
+#     writes three new tables the kernel computes with them. That is the
+#     whole of `global`'s host contract, measured rather than assumed, and
+#     no buffer comparison in this directory could ask any of it: every
+#     other byte on this device got there through a `cuMemcpyHtoD` to a
+#     buffer the program allocated.
+#
+#   * A NAME THE MODULE DOES NOT DECLARE IS REFUSED, and the refusal is the
+#     driver's own: `cuda.CUDA_ERROR_NOT_FOUND`. `run.sh` holds that string
+#     verbatim, the way it holds `cuda.CUDA_ERROR_LAUNCH_FAILED@sync` for a
+#     failed assertion.
+#
+# THE TIER IS EXACT. Every lane is one binary64 `addf` with
+# `rounding<nearest_even>` over values both sides hold exactly.
+#
+# WHAT THIS PROGRAM IS NOT. It is not a second opinion on the T7 family:
+# `global_diff` owns the initializer, the two symbols and the lifetime of a
+# static allocation, and its three kernels are untouched by anything here.
+# This one owns the two words the record grew at bytecode 13.3, and the
+# reason it is a family of its own is that its judgement is a SYMBOL LOOKUP
+# and not a buffer.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake_globals, with_gpu_real, WideRefFn, last_out,
+  global_syms_tables, global_syms_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds past its answer: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## The tolerance tier's numbers. Nothing here uses them (every comparison is
+## exact tier), and they are kept so that `verdict` reads the same as every
+## other program in this directory.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shape the kernel was recorded with. This must agree with
+## scripts/tile-golden/kernels.dawn's GLOBAL_TILE.
+pub const SYM_TILE: Int = 128
+
+## The kernel, and the module whose symbols are looked up.
+pub const KERNEL: String = "global_syms"
+
+## The module's three globals, in declaration order, and then a name it does
+## not declare. `hidden` is the one declared `private` and `frozen` the one
+## declared `constant`; `absent` is what makes the refusal a measurement
+## rather than a hole, since without it no lookup here would ever be refused.
+pub fn sym_names() -> List[String] = ["shown", "hidden", "frozen", "absent"]
+
+## How many of those the module declares: the first three.
+pub const DECLARED: Int = 3
+
+type Probe = {
+  kinds: List[String],
+  elements: List[Int],
+  reads: List[Option[List[Float]]],
+  writes: List[String],
+  after: Option[List[Float]],
+  stopped: String,
+  note: String
+}
+
+## Whether a lookup answered a handle. The two handlers refuse a symbol the
+## module does not declare with two DIFFERENT kinds -- the driver's own
+## `cuda.CUDA_ERROR_NOT_FOUND` and the fake device's `gpu.no_module_symbol`
+## -- because a device's refusals arrive as whatever it called them
+## (std/gpu). So the comparison is over this, and the kinds themselves are
+## printed for `run.sh` to hold verbatim.
+fn found(k: String) -> String = if k == "ok" { "found" } else { "missing" }
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## The input the kernel adds to each of its three globals. Every lane is a
+## small multiple of a power of two, so every sum here is exact in binary64
+## and the tier is exact by the values and not only by the operation.
+pub fn corpus_x(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.125 * to_float(i % 17 + 1) + 3.0)
+
+## What the host writes into the three globals between the two launches, in
+## declaration order. Each differs from the declaration's own table on EVERY
+## lane and from the other two on every lane, so a write that did not land,
+## a write that landed in the wrong symbol, and a launch that read a stale
+## copy all have nowhere to hide; and every lane is exact in binary64 for
+## the reason above.
+pub fn written_tables(n: Int) -> List[List[Float]] =
+  list.map(range(0, DECLARED), k =>
+      list.map(range(0, n), i => 1000.0 * to_float(k + 1) + to_float(i) * 0.5))
+
+## The buffers the kernel is handed, in argument order: the input and an
+## output that is longer than the three segments, so the sentinel in its
+## tail says whether a write went past the end.
+fn case_bufs(n: Int) -> List[(String, List[Float])] =
+  [("f64", corpus_x(n)), ("f64", sentinel_buffer(3 * n + 8))]
+
+## The lanes of the corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims above measurements
+## rather than sentences.
+fn shape_of() -> String = {
+  let n = SYM_TILE
+  let ts = global_syms_tables(n)
+  let ws = written_tables(n)
+  let idx = range(0, n)
+  # lanes where no two of the three declared tables agree: what tells three
+  # symbols apart, and what a `get_global` naming the wrong one would show
+  let distinct = list.filter(idx, i =>
+      ts[0][i] != ts[1][i] && ts[1][i] != ts[2][i] && ts[0][i] != ts[2][i])
+  # lanes where every one of the host's three writes differs from the
+  # declaration it replaces: what the second launch's segments read
+  let rewritten = list.filter(idx, i =>
+      list.all(range(0, DECLARED), k => ws[k][i] != ts[k][i]))
+  # lanes where no two of the written tables agree either: a write that went
+  # to the wrong symbol has to show
+  let apart = list.filter(idx, i =>
+      ws[0][i] != ws[1][i] && ws[1][i] != ws[2][i] && ws[0][i] != ws[2][i])
+  # lanes where a table is neither its own mirror nor its own first element:
+  # an initializer written backwards or as a splat has to show
+  let asym = list.filter(idx, i => list.any(range(0, DECLARED), k => ts[k][i] != ts[k][n - 1 - i]))
+  let nonsplat = list.filter(idx, i => list.any(range(0, DECLARED), k => ts[k][i] != ts[k][0]))
+  "lanes=${n} distinct=${len(distinct)} rewritten=${len(rewritten)} apart=${len(apart)}"
+    ++ " asymmetric=${len(asym)} nonsplat=${len(nonsplat)} declared=${DECLARED}"
+    ++ " probed=${len(sym_names())}"
+}
+
+# ---- the run ----
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## The kernel over `bufs` on a one-block grid, launched once, and the output
+## buffer read back. The first field is where it stopped, `""` meaning every
+## stage answered.
+fn run_kernel(bufs: List[(String, List[Float])]) -> (String, Option[List[Float]], String) !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> (e.kind ++ "@alloc", None, e.message)
+    Ok(hs) -> match upload_all(hs, bufs, 0) {
+      Err(e) -> {
+        release(hs)
+        (e.kind ++ "@upload", None, e.message)
+      }
+      Ok(_) -> match gpu.gpu_launch(KERNEL, 1, 1, 1, hs) {
+        Err(e) -> {
+          release(hs)
+          (e.kind ++ "@launch", None, e.message)
+        }
+        Ok(_) -> {
+          let s = gpu.gpu_sync()
+          let r = gpu.gpu_download(hs[len(hs) - 1])
+          release(hs)
+          match s {
+            Err(e) -> (e.kind ++ "@sync", None, e.message)
+            Ok(_) -> match r {
+              Err(e) -> (e.kind ++ "@download", None, e.message)
+              Ok(v) -> ("", Some(v), "")
+            }
+          }
+        }
+      }
+    }
+  }
+
+fn blank_probe() -> Probe =
+  Probe { kinds: [], elements: [], reads: [], writes: [], after: None, stopped: "", note: "" }
+
+## One lookup: the kind it answered, the element count it answered, and what
+## the global held if it answered a handle. The handle is FREED, which for a
+## module's global drops the handle and leaves the storage alone.
+fn look_up(name: String) -> (String, Int, Option[List[Float]]) !Gpu =
+  match gpu.module_global(gpu.F64, KERNEL, name) {
+    Err(e) -> (e.kind, 0, None)
+    Ok(t) -> {
+      let n = gpu.size(t)
+      let r = gpu.download(t)
+      let _ = gpu.free(t)
+      match r {
+        Ok(v) -> ("ok", n, Some(v))
+        Err(_e) -> ("ok", n, None)
+      }
+    }
+  }
+
+fn look_up_all(names: List[String], i: Int, p: Probe) -> Probe !Gpu =
+  if i >= len(names) {
+    p
+  } else {
+    let (k, n, v) = look_up(names[i])
+    look_up_all(names, i + 1, Probe { ..p, kinds: p.kinds ++ [k], elements: p.elements ++ [n],
+      reads: p.reads ++ [v] })
+  }
+
+## One write, through a second lookup of the same symbol: the handler
+## answers the handle it answered before, so this is the storage the read
+## above read and the storage the launch below reads.
+fn write_one(name: String, values: List[Float]) -> String !Gpu =
+  match gpu.module_global(gpu.F64, KERNEL, name) {
+    Err(e) -> e.kind
+    Ok(t) -> {
+      let w = gpu.upload(t, values)
+      let _ = gpu.free(t)
+      match w {
+        Ok(_) -> "ok"
+        Err(e) -> e.kind
+      }
+    }
+  }
+
+fn write_all(names: List[String], values: List[List[Float]], i: Int, p: Probe) -> Probe !Gpu =
+  if i >= DECLARED {
+    p
+  } else {
+    let k = write_one(names[i], values[i])
+    write_all(names, values, i + 1, Probe { ..p, writes: p.writes ++ [k] })
+  }
+
+## The whole symbol phase, in one installation: look every symbol up and
+## read it back, then write all three declared globals and launch the kernel
+## again. The second launch is what says whether the writes LANDED: its
+## three segments are the written tables plus the input, and the reference
+## the fake device is installed with is built on the same written tables.
+fn symbols(n: Int) -> Probe !Gpu = {
+  let p0 = look_up_all(sym_names(), 0, blank_probe())
+  let p1 = write_all(sym_names(), written_tables(n), 0, p0)
+  if list.any(p1.writes, w => w != "ok") {
+    Probe { ..p1, note: "a write to a module global was refused" }
+  } else {
+    let (stop, out, note) = run_kernel(case_bufs(n))
+    Probe { ..p1, after: out, stopped: stop, note: note }
+  }
+}
+
+# ---- the tier ----
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn miss_line(real: Option[List[Float]], fake: Option[List[Float]]) -> String =
+  match (real, fake) {
+    (Some(a), Some(b)) ->
+      if len(a) == len(b) {
+        "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+      } else {
+        "-"
+      }
+    _ -> "-"
+  }
+
+## The verdict for the plain kernel comparison, in the shape every other
+## program in this directory prints.
+fn verdict(fake: (String, Option[List[Float]], String), real: (String, Option[List[Float]], String)) -> String = {
+  let (rstop, rout, _rnote) = real
+  let (_fstop, fout, _fnote) = fake
+  if rstop != "" {
+    "blocked:" ++ rstop
+  } else if rendered(rout) == rendered(fout) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+## The verdict for the symbol phase. `symbols:agree` needs every lookup to
+## have agreed about being answerable, both sides to have answered the same
+## sizes and the same contents, every write to have been accepted on both,
+## and the launch after them to have answered the same buffer.
+fn sym_verdict(fake: Probe, real: Probe) -> String =
+  if real.stopped != "" {
+    "blocked:" ++ real.stopped
+  } else if list.map(real.kinds, found) != list.map(fake.kinds, found) {
+    "differ:visibility"
+  } else if real.elements != fake.elements {
+    "differ:size"
+  } else if list.map(real.reads, rendered) != list.map(fake.reads, rendered) {
+    "differ:contents"
+  } else if list.map(real.writes, found) != list.map(fake.writes, found) {
+    "differ:write"
+  } else if rendered(real.after) != rendered(fake.after) {
+    "differ:after"
+  } else {
+    "symbols:agree"
+  }
+
+# ---- the two devices ----
+
+## The reference the fake device answers `global_syms` with, over the tables
+## the three globals hold at the time of the launch.
+fn kernels_with(tables: List[List[Float]]) -> Map[String, (Int, WideRefFn)] = {
+  let n = SYM_TILE
+  map.from([(KERNEL, (2, last_out((dts, ins) => global_syms_ref(n, tables, dts, ins))))])
+}
+
+## The globals the fake device's module answers a lookup for. ALL THREE are
+## in it, `@hidden` included, because that is what this machine's driver
+## does: the fake device models the measurement and not the dialect's
+## sentence about what `private` ought to hide.
+fn fake_globals() -> Map[String, List[(String, String, List[Float])]] = {
+  let n = SYM_TILE
+  let ts = global_syms_tables(n)
+  map.from([(KERNEL, list.map(range(0, DECLARED), k => (sym_names()[k], "f64", ts[k])))])
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("sym_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: sym_diff <global_syms.cubin>")
+  io.exit(2)
+}
+
+fn sym_line(i: Int, real: Probe, fake: Probe) -> String = {
+  let name = sym_names()[i]
+  let rk = real.kinds[i]
+  let fk = fake.kinds[i]
+  "  sym ${name} real=${rk} ${found(rk)} elements=${real.elements[i]}"
+    ++ " | fake=${fk} ${found(fk)} elements=${fake.elements[i]}"
+}
+
+fn read_line(i: Int, real: Probe, fake: Probe) -> String =
+  "  read ${sym_names()[i]} real=${shown(real.reads[i])} fake=${shown(fake.reads[i])}"
+
+fn write_line(i: Int, real: Probe, fake: Probe) -> String =
+  "  write ${sym_names()[i]} real=${real.writes[i]} fake=${fake.writes[i]}"
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  if len(paths) != 1 { usage() } else { () }
+  let n = SYM_TILE
+  let cubins = map.from([(KERNEL, read_cubin(paths[0]))])
+
+  # 1. the kernel itself: three globals, three segments, the declarations'
+  #    own tables
+  let bufs = case_bufs(n)
+  let plain_fake = with_gpu_fake_globals(kernels_with(global_syms_tables(n)), fake_globals(),
+    () => run_kernel(bufs))
+  let plain_real = with_gpu_real(cubins, () => run_kernel(bufs))
+  let v = verdict(plain_fake, plain_real)
+  let (_fs, fout, _fnote) = plain_fake
+  let (rstop, rout, rnote) = plain_real
+  io.println("kernel ${KERNEL} tier=exact bufs=f64[${n}],f64[${3 * n + 8}] grid=(1, 1, 1) launches=1")
+  io.println("  index ${shape_of()}")
+  io.println("  fake  result=${shown(fout)}")
+  io.println("  real  stopped=${if rstop == "" { "-" } else { rstop }} result=${shown(rout)}")
+  io.println("  miss  ${miss_line(rout, fout)}")
+  if rnote != "" { io.println("  note  ${rnote}") } else { () }
+  io.println("  verdict ${v}")
+
+  # 2. the symbols: what the host can look up, read, write, and read back
+  #    through a launch
+  let sym_fake = with_gpu_fake_globals(kernels_with(written_tables(n)), fake_globals(),
+    () => symbols(n))
+  let sym_real = with_gpu_real(cubins, () => symbols(n))
+  let sv = sym_verdict(sym_fake, sym_real)
+  io.println("symbols ${KERNEL} declared=${DECLARED} probed=${len(sym_names())}")
+  for i in range(0, len(sym_names())) {
+    io.println(sym_line(i, sym_real, sym_fake))
+  }
+  for i in range(0, DECLARED) {
+    io.println(read_line(i, sym_real, sym_fake))
+  }
+  for i in range(0, DECLARED) {
+    io.println(write_line(i, sym_real, sym_fake))
+  }
+  io.println("  after real=${shown(sym_real.after)} fake=${shown(sym_fake.after)}")
+  io.println("  miss  ${miss_line(sym_real.after, sym_fake.after)}")
+  if sym_real.note != "" { io.println("  note  ${sym_real.note}") } else { () }
+  io.println("  verdict ${sv}")
+
+  # the ledger's record of what this driver answered, so that a driver or a
+  # tileiras that starts telling the two visibilities apart shows up as a
+  # changed line rather than only as a red run
+  let real_found = len(list.filter(range(0, len(sym_names())), i => sym_real.kinds[i] == "ok"))
+  let real_wrote = len(list.filter(range(0, DECLARED), i => sym_real.writes[i] == "ok"))
+  io.println("probe symbols found=${real_found}/${len(sym_names())} declared=${DECLARED}"
+      ++ " absent=${sym_real.kinds[len(sym_names()) - 1]} writes=${real_wrote}/${DECLARED}")
+  io.println("tiers exact=${if v == "identical:exact" { 1 } else { 0 }} tolerance=0")
+  if v == "identical:exact" && sv == "symbols:agree" {
+    io.println("tile-gpu-diff: pass")
+  } else if v == "differ:result" || sv == "differ:visibility" || sv == "differ:size"
+    || sv == "differ:contents" || sv == "differ:write" || sv == "differ:after" {
+      io.println("tile-gpu-diff: fail")
+      io.exit(1)
+    } else if v != "identical:exact" {
+      io.println("tile-gpu-diff: ${v}")
+    } else {
+      io.println("tile-gpu-diff: ${sv}")
+    }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
