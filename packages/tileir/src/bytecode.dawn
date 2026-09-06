@@ -71,7 +71,7 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -179,6 +179,15 @@ const OP_UNPACK: Int = 0x70
 const OP_ALLOCA: Int = 0x71
 const OP_MMAF_SCALED: Int = 0x72
 
+# The four opcodes of the view family knife T11 implements. The other five
+# of the family (`get_tensor_shape` 0x2F, `get_index_space_shape` 0x2D,
+# `make_gather_scatter_view` 0x73, `make_strided_view` 0x74,
+# `atomic_red_view_tko` 0x75) belong to knives T12 and T13.
+const OP_LOAD_VIEW_TKO: Int = 0x3E
+const OP_MAKE_PARTITION_VIEW: Int = 0x42
+const OP_MAKE_TENSOR_VIEW: Int = 0x43
+const OP_STORE_VIEW_TKO: Int = 0x66
+
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
 # (`memory_scope`, `optimization_hints`), then its optional operands
@@ -190,6 +199,16 @@ const LOAD_FLAG_TOKEN: Int = 16
 const STORE_FLAG_HINTS: Int = 2
 const STORE_FLAG_MASK: Int = 4
 const STORE_FLAG_TOKEN: Int = 8
+
+# The same rule on the two VIEW memory operations (knife T11). Both carry
+# `memory_scope` and `optimization_hints` as their optional attributes and
+# `token` as their one optional OPERAND, and neither has a mask or a
+# padding operand -- a view's out-of-bounds behaviour is in its TYPE, not
+# in an operand -- so the token bit lands two places lower than a pointer
+# load's.
+const VIEW_FLAG_SCOPE: Int = 1
+const VIEW_FLAG_HINTS: Int = 2
+const VIEW_FLAG_TOKEN: Int = 4
 
 # The atomics have NO optional attribute at all: their `memory_scope` is a
 # required argument where a load's is an `OptionalAttr` (Ops.td). So their
@@ -763,6 +782,8 @@ fn one_of_op(op: String, names: List[String]) -> Bool = list.any(names, n => n =
 # Type tags (BytecodeTypeOpcodes.td, frozen).
 const TAG_PTR: Int = 12
 const TAG_TILE: Int = 13
+const TAG_TENSOR_VIEW: Int = 14
+const TAG_PARTITION_VIEW: Int = 15
 const TAG_FUNC: Int = 16
 const TAG_TOKEN: Int = 17
 
@@ -919,16 +940,16 @@ fn int_payload(dtype: String, n: Int, value: Int) -> Bytes = match dtype {
 
 # The lanes of a tile type, for the i1 splat rule; a scalar tile is one lane.
 fn lanes_of(t: Ty) -> Int = match t {
-  Token -> panic("tileir: a token is not a tile")
   Tile(shape, _elem) -> list.fold(shape, 1, (acc, d) => acc * d)
+  _ -> panic("tileir: `${show(t)}` is not a tile")
 }
 
 fn elem_name(t: Ty) -> String = match t {
-  Token -> panic("tileir: a token has no element format")
   Tile(_shape, e) -> match e {
     Num(nm) -> nm
     PtrTo(nm) -> panic("tileir: a constant of pointers to ${nm} has no encoding")
   }
+  _ -> panic("tileir: `${show(t)}` has no element format")
 }
 
 # ---- primitives
@@ -1044,6 +1065,69 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
     let b0 = put_varint(put_varint(bytes.put(bytes.buf(), TAG_TILE), ei), len(shape))
     let b1 = list.fold(shape, b0, (b, d) => put_le(b, d, 8))
     ty_of(w1, bytes.freeze(b1))
+  }
+  # The tag, the element type's index, then the shape and the strides, each
+  # a `writeLEVarSize` of int64_t: the count as a varint and then EIGHT raw
+  # little-endian bytes an element. The same shape `tile` writes, one array
+  # more; nothing here is a varint per element and nothing is zigzagged.
+  # A dynamic dimension would be `ShapedType::kDynamic` (INT64_MIN, so
+  # `00 00 00 00 00 00 00 80`) with an operand to match, and knife T12 owns
+  # that; this writer emits static extents only.
+  TensorView(e, shape, strides) -> {
+    let (w1, ei) = elem_ty(w, e)
+    let b0 = put_varint(bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)
+    let b1 = list.fold(shape, put_varint(b0, len(shape)), (b, d) => put_le(b, d, 8))
+    let b2 = list.fold(strides, put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))
+    ty_of(w1, bytes.freeze(b2))
+  }
+  # The tag, the UNIFIED OPTIONAL-PARAMETER BITFIELD, then the four
+  # parameters in declaration order: `tile_shape` (a DenseI32ArrayAttr, so
+  # the count and FOUR raw little-endian bytes an element), the tensor
+  # view's type INDEX, `dim_map` (an int32_t array, the same encoding), and
+  # `padding_value` last.
+  #
+  # `padding_value` is the type's only optional parameter, so it is bit 0
+  # of the bitfield (BytecodeTypeCodeGen.cpp's `generateOptionalParamFlags`
+  # walks the parameters in declaration order and gives a bit only to the
+  # optional ones). The bitfield itself exists only from 13.3 on: the type
+  # entered at 13.1, so the generated writer guards the varint with
+  # `config.bytecodeVersion >= kUnifiedBitfieldVersion` and, below that,
+  # writes an INLINE PRESENCE BYTE at the parameter's own position instead.
+  # Both paths are here because the version is one constant away
+  # (`partition_view_has_bitfield`), and the mutant
+  # partition-view-padding-inline-flag-at-13-3 is the one written at the
+  # wrong version.
+  #
+  # `dim_map` is written in FULL even when it is the identity. The
+  # printer omits an identity map from the text and the parser fills it
+  # back in, but the wire has no such rule: the reader takes the count on
+  # trust.
+  PartitionView(tile_shape, e, shape, strides, dim_map, padding) -> {
+    let (w1, tvi) = ty(w, TensorView(e, shape, strides))
+    let b0 = bytes.put(bytes.buf(), TAG_PARTITION_VIEW)
+    let b1 = if partition_view_has_bitfield() {
+      put_varint(b0, match padding {
+        Some(_code) -> 1
+        None -> 0
+      })
+    } else {
+      b0
+    }
+    let b2 = list.fold(tile_shape, put_varint(b1, len(tile_shape)), (b, d) => put_le(b, d, 4))
+    let b3 = list.fold(dim_map, put_varint(put_varint(b2, tvi), len(dim_map)), (b, k) => put_le(b, k, 4))
+    let b4 = if partition_view_has_bitfield() {
+      b3
+    } else {
+      bytes.put(b3, match padding {
+        Some(_code) -> 1
+        None -> 0
+      })
+    }
+    let b5 = match padding {
+      Some(code) -> put_varint(b4, code)
+      None -> b4
+    }
+    ty_of(w1, bytes.freeze(b5))
   }
 }
 
@@ -1557,6 +1641,50 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, si) = str_of(w1, sym)
     emit(w2, si)
   }
+  MakeTensorView(_dst, base, _base_ty, t) -> {
+    # A RESULT COUNT first: `Operator::isVariadic()` is true because the
+    # two dynamic arrays are variadic OPERANDS, and the generated writer
+    # writes the count under it even though the operation has exactly one
+    # result (`extract` and `join_tokens` are the same shape).
+    #
+    # Then no flags word -- the operation has no optional attribute and no
+    # optional operand, so `generateFlagsFieldSerialization` returns before
+    # writing one -- and no attributes at all. Then the operands, which the
+    # AttrSizedOperandSegments path writes one GROUP at a time: the base
+    # with no count, then each variadic group with its own count. Both
+    # counts are ZERO here, and that is not padding: without them the
+    # reader takes the next instruction's opcode for a segment length.
+    let w1 = emit_ref(emit_op_counted(w0, OP_MAKE_TENSOR_VIEW, t), base)
+    emit(emit(w1, 0), 0)
+  }
+  MakePartitionView(_dst, src, _src_ty, t) ->
+    # Nothing variadic and nothing optional, so no result count, no flags
+    # word, and one bare operand index: the whole of the partitioning is
+    # in the RESULT TYPE.
+    emit_ref(emit_op(w0, OP_MAKE_PARTITION_VIEW, t), src)
+  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_ty, t, tok_in) -> {
+    # results: the count (2, written because `index` is variadic), the tile
+    # and the token; flags: the token bit, and neither `memory_scope` nor
+    # `optimization_hints`; then the required `memory_ordering_semantics`
+    # inline; then the operands: the view with no count, the indices with
+    # one, and the token because its bit is set.
+    let (w1, ti) = ty(w0, t)
+    let (w2, tk) = ty(w1, Token)
+    let w3 = emit(emit(emit(emit(emit(emit(w2, OP_LOAD_VIEW_TKO), 2), ti), tk),
+      VIEW_FLAG_TOKEN), ORDER_WEAK)
+    let w4 = emit(emit_ref(w3, view), len(indices))
+    emit_ref(list.fold(indices, w4, emit_ref), tok_in)
+  }
+  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_ty, tok_in) -> {
+    # The same, with one result and the tile operand FIRST: the dialect's
+    # argument order is `tile`, `view`, `index`, `token`, which is the
+    # reverse of how the assembly reads for the first two.
+    let (w1, tk) = ty(w0, Token)
+    let w2 = emit(emit(emit(emit(w1, OP_STORE_VIEW_TKO), 1), tk), VIEW_FLAG_TOKEN)
+    let w3 = emit(w2, ORDER_WEAK)
+    let w4 = emit(emit_ref(emit_ref(w3, value), view), len(indices))
+    emit_ref(list.fold(indices, w4, emit_ref), tok_in)
+  }
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
 
@@ -1600,6 +1728,17 @@ fn mmaf_has_flags() -> Bool = at_least(13, 3)
 # it; see the section's own comment for the layout and for what the two extra
 # ones mean.
 fn global_has_extended_fields() -> Bool = at_least(13, 3)
+
+# `PartitionViewType`'s optional `padding_value` is written as one bit of a
+# unified bitfield from 13.3 on and as an inline presence byte at the
+# parameter's own position below it. The type is 13.1 and the parameter is
+# 13.1 too, so the generated writer's guard is the plain
+# `config.bytecodeVersion >= kUnifiedBitfieldVersion`
+# (BytecodeTypeCodeGen.cpp's `generateOptionalParamFlags`, last branch) and
+# this is that comparison. The two forms differ in WHERE the presence lives
+# and not only in how it is spelled: at 13.3 the bitfield sits between the
+# tag and the first parameter, and below it there is no bitfield at all.
+fn partition_view_has_bitfield() -> Bool = at_least(13, 3)
 
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =

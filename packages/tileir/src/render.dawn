@@ -16,9 +16,9 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, padding_name}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -31,7 +31,24 @@ fn elem(e: Elem) -> String = match e {
 pub fn ty(t: Ty) -> String = match t {
   Token -> "token"
   Tile(shape, e) -> "tile<" ++ list.fold(shape, "", (acc, d) => acc ++ "${d}x") ++ elem(e) ++ ">"
+  TensorView(e, shape, strides) ->
+    "tensor_view<" ++ list.fold(shape, "", (acc, d) => acc ++ "${d}x") ++ elem(e)
+      ++ ", strides=[" ++ commas(list.map(strides, s => "${s}")) ++ "]>"
+  PartitionView(tile_shape, e, shape, strides, dim_map, padding) ->
+    "partition_view<tile=(" ++ crosses(tile_shape) ++ ")"
+      ++ match padding {
+        Some(code) -> ", padding_value = ${padding_name(code)}"
+        None -> ""
+      }
+      ++ ", " ++ ty(TensorView(e, shape, strides))
+      ++ ", dim_map=[" ++ commas(list.map(dim_map, k => "${k}")) ++ "]>"
 }
+
+# The `AxBxC` a partition view spells its tile with, which is the tile
+# type's separator without the element format after it.
+fn crosses(shape: List[Int]) -> String =
+  list.fold(range(0, len(shape)), "", (acc, k) =>
+      if acc == "" { "${shape[k]}" } else { acc ++ "x${shape[k]}" })
 
 fn name(r: Ref) -> String = match r {
   Arg(pos) -> "%arg${pos}"
@@ -49,8 +66,8 @@ fn results(ids: List[Int]) -> String = if len(ids) == 0 { "" } else { commas(lis
 # The element format a tile type holds, as a constant's `<f64: ..>` prefix
 # spells it.
 fn elem_of(t: Ty) -> String = match t {
-  Token -> panic("tileir: a token holds no element format")
   Tile(_shape, e) -> elem(e)
+  _ -> panic("tileir: `${show(t)}` holds no element format")
 }
 
 # `, %x` for an operand the assembly prints when it is there, "" for one it
@@ -393,7 +410,32 @@ fn line(i: Instr) -> String = match i {
   AllocaPtr(dst, num_elem, align, shared, t) ->
     "${v(dst)} = alloca num_elem = ${num_elem}, alignment = ${align}"
     ++ "${if shared { " global" } else { "" }} : ${ty(t)}"
+  MakeTensorView(dst, base, _base_ty, t) ->
+    "${v(dst)} = make_tensor_view ${name(base)}, shape = [${commas(view_shape(t))}]"
+    ++ ", strides = [${commas(view_strides(t))}] : ${ty(t)}"
+  MakePartitionView(dst, src, _src_ty, t) -> "${v(dst)} = make_partition_view ${name(src)} : ${ty(t)}"
+  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_ty, t, tok_in) ->
+    "${v(dst)}, ${v(tok_out)} = load_view_tko weak ${name(view)}[${commas(list.map(indices, name))}]"
+    ++ " token=${name(tok_in)} : ${ty(view_ty)}, ${ty(idx_ty)} -> ${ty(t)}, token"
+  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_ty, tok_in) ->
+    "${v(tok_out)} = store_view_tko weak ${name(value)}, ${name(view)}"
+    ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}"
+    ++ " : ${ty(val_ty)}, ${ty(view_ty)}, ${ty(idx_ty)} -> token"
   Ret -> "return"
+}
+
+# The shape and the strides a `make_tensor_view` states beside its result
+# type. They are the type's own numbers: the operation spells them a
+# second time because the dialect lets either be an OPERAND instead (knife
+# T12), and the static form is what this writer emits.
+fn view_shape(t: Ty) -> List[String] = match t {
+  TensorView(_e, shape, _strides) -> list.map(shape, d => "${d}")
+  _ -> panic("tileir: `${show(t)}` is not a tensor view and has no shape to print")
+}
+
+fn view_strides(t: Ty) -> List[String] = match t {
+  TensorView(_e, _shape, strides) -> list.map(strides, s => "${s}")
+  _ -> panic("tileir: `${show(t)}` is not a tensor view and has no strides to print")
 }
 
 # An instruction at `indent` columns: one line, or for a region its header,

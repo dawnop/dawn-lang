@@ -555,6 +555,82 @@ pub effect Dev {
   fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
   fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
   fn t_alloca(dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int]) -> Int
+  fn t_tensor_view(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int]) -> Int
+  fn t_partition_view(dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
+    padding: Option[Int]) -> Int
+  fn t_load_view(dtype: String, view: Int, indices: List[Int]) -> Int
+  fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
+}
+
+## The five values `PaddingValue` names (AttrDefs.td), as the codes the
+## bytecode writes. They are here rather than in bytecode.dawn because the
+## recording handler holds the one rule that is not about bytes: the four
+## SPECIAL values are only legal over a floating point element type
+## (`verifyPartitionViewLike`, Types.cpp), and `zero` is legal over any.
+pub const PAD_ZERO: Int = 0
+pub const PAD_NEG_ZERO: Int = 1
+pub const PAD_NAN: Int = 2
+pub const PAD_POS_INF: Int = 3
+pub const PAD_NEG_INF: Int = 4
+
+## The keyword the dialect spells a padding code with, for a diagnostic and
+## for the renderer.
+pub fn padding_name(code: Int) -> String =
+  if code == PAD_ZERO {
+    "zero"
+  } else if code == PAD_NEG_ZERO {
+    "neg_zero"
+  } else if code == PAD_NAN {
+    "nan"
+  } else if code == PAD_POS_INF {
+    "pos_inf"
+  } else if code == PAD_NEG_INF {
+    "neg_inf"
+  } else {
+    "padding_value_${code}"
+  }
+
+## Whether `name` is one of the dialect's floating point formats. What the
+## special padding values are confined to.
+pub fn is_float_dtype(name: String) -> Bool =
+  name == "f64" || name == "f32" || name == "tf32" || name == "f16" || name == "bf16"
+    || name == "f8E4M3FN" || name == "f8E5M2" || name == "f8E8M0FNU" || name == "f4E2M1FN"
+
+## A `tensor_view` value inside a kernel: a reference to a region of global
+## memory with a static extent and a static stride along each dimension.
+## `D` is a phantom, as `Tile[D]`'s is.
+pub opaque type TensorView[D] = Int
+
+## A `partition_view` value inside a kernel: a `tensor_view` cut into a grid
+## of equally sized tiles. `load_view` and `store_view` index the GRID, one
+## index a tile dimension, and the tile they move is `tile_shape` wide.
+pub opaque type PartitionView[D] = Int
+
+## Which value an out-of-bounds lane of a `load_view` reads. `NoPadding` is
+## the dialect's absent `padding_value`: out-of-bounds lanes then hold
+## unspecified values, which is why no kernel here uses it for a lane it
+## then stores.
+##
+## The four special values are only legal over a floating point element
+## format; `PadZero` is legal over any (Types.cpp's
+## `verifyPartitionViewLike`).
+pub type Padding =
+  | NoPadding
+  | PadZero
+  | PadNegZero
+  | PadNan
+  | PadPosInf
+  | PadNegInf
+derive Show
+
+## `p` as the code the bytecode carries, `None` for the absent parameter.
+pub fn padding_of(p: Padding) -> Option[Int] = match p {
+  NoPadding -> None
+  PadZero -> Some(PAD_ZERO)
+  PadNegZero -> Some(PAD_NEG_ZERO)
+  PadNan -> Some(PAD_NAN)
+  PadPosInf -> Some(PAD_POS_INF)
+  PadNegInf -> Some(PAD_NEG_INF)
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -2500,6 +2576,75 @@ pub fn alloca_shared_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List
   r
 }
 
+## The `tensor_view` over `p`'s buffer starting `base` ELEMENTS in, with
+## `shape` elements along each dimension and `strides` elements between two
+## neighbours along it (knife T11). This is the whole of the addressing: a
+## view says where a tensor is and how it is laid out, and nothing about
+## the tiles it will be read in.
+##
+## `base` is the same rank-0 index a strided `load` takes, and it becomes
+## an `offset` on the parameter's own pointer, so a view may start anywhere
+## in the buffer. Every stride is STRICTLY POSITIVE, which is where the two
+## addressing schemes part: `load_strided` reads a broadcast with a stride
+## of zero and `make_tensor_view` refuses one
+## (docs/tile-backend-design.md 6.13).
+pub fn tensor_view[D: Dtype](d: D, p: Param[D], base: Idx, shape: List[Int],
+  strides: List[Int]) -> TensorView[D] !Dev = {
+  let b: Int = base
+  let r: TensorView[D] = t_tensor_view(position(p), dtype_name(d), b, shape, strides)
+  r
+}
+
+## `tv` cut into a grid of `tile_shape` tiles. `dim_map[k]` says which
+## dimension of the tensor view tile dimension `k` runs along, so the
+## identity map is the plain partition and a permutation of it transposes
+## the tile; `padding` says what an out-of-bounds lane of a `load_view`
+## reads.
+##
+## The INDEX SPACE of the answer has one dimension per tile dimension, and
+## its extent along `k` is the tensor view's extent along `dim_map[k]`
+## divided by `tile_shape[k]`, rounded up: a tile may run past the end of
+## the tensor and a tile index may not. `d_view_grid` computes it.
+pub fn partition_view[D: Dtype](d: D, tv: TensorView[D], tile_shape: List[Int],
+  dim_map: List[Int], padding: Padding) -> PartitionView[D] !Dev = {
+  let v: Int = tv
+  let r: PartitionView[D] = t_partition_view(dtype_name(d), v, tile_shape, dim_map, padding_of(padding))
+  r
+}
+
+## The tile of `v`'s grid at `indices`, one index a tile dimension. In the
+## token chain where every other load is; lanes that fall outside the
+## underlying tensor read the view's padding value.
+pub fn load_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx]) -> Tile[D] !Dev = {
+  let x: Int = v
+  let r: Tile[D] = t_load_view(dtype_name(d), x, list.map(indices, i => {
+    let k: Int = i
+    k
+  }))
+  r
+}
+
+## `t` written into the tile of `v`'s grid at `indices`. In the token chain
+## where every other store is; lanes that fall outside the underlying
+## tensor are MASKED, which is the store's half of the same rule the
+## padding value is the load's half of.
+pub fn store_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx], t: Tile[D]) -> Unit !Dev = {
+  let x: Int = v
+  let y: Int = t
+  t_store_view(dtype_name(d), x, list.map(indices, i => {
+    let k: Int = i
+    k
+  }), y)
+}
+
+## The extent of a partition view's index space, as the grid a kernel over
+## it is launched on: `ceil(shape[dim_map[k]] / tile_shape[k])` along tile
+## dimension `k`. The host needs the same number, so this is the one place
+## it is computed.
+pub fn view_grid(shape: List[Int], tile_shape: List[Int], dim_map: List[Int]) -> List[Int] =
+  list.map(range(0, len(tile_shape)), k =>
+      (shape[dim_map[k]] + tile_shape[k] - 1) / tile_shape[k])
+
 ## The tile the pointers in `ps` point at, unmasked. In the token chain
 ## where `load` is, and ordered against every other memory operation the
 ## same way.
@@ -2866,6 +3011,22 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_tensor_view(_param, _dtype, _base, _shape, _strides) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_partition_view(_dtype, _view, _tile_shape, _dim_map, _padding) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_load_view(_dtype, _view, _indices) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_store_view(_dtype, _view, _indices, _value) => ()
   }
   body()
 }
@@ -3145,6 +3306,21 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_mmaf_scaled(dtype, scale, dims, a, b, c, sa, sb) => {
       log = log ++ ["mmaf_scaled ${dtype} ${scale} ${show(dims)} ${a} ${b} ${c} ${sa} ${sb}"]
       79
+    }
+    t_tensor_view(param, dtype, base, shape, strides) => {
+      log = log ++ ["tensor_view ${param} ${dtype} ${base} ${show(shape)} ${show(strides)}"]
+      80
+    }
+    t_partition_view(dtype, view, tile_shape, dim_map, padding) => {
+      log = log ++ ["partition_view ${dtype} ${view} ${show(tile_shape)} ${show(dim_map)} ${opt(padding)}"]
+      81
+    }
+    t_load_view(dtype, view, indices) => {
+      log = log ++ ["load_view ${dtype} ${view} ${show(indices)}"]
+      82
+    }
+    t_store_view(dtype, view, indices, value) => {
+      log = log ++ ["store_view ${dtype} ${view} ${show(indices)} ${value}"]
     }
   }
   body()
@@ -3507,6 +3683,10 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_get_global(_sym, _dtype, _shape) => 77
       t_alloca(_dtype, _num_elem, _align, _shared, _shape) => 78
       t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => 79
+      t_tensor_view(_param, _dtype, _base, _shape, _strides) => 80
+      t_partition_view(_dtype, _view, _tile_shape, _dim_map, _padding) => 81
+      t_load_view(_dtype, _view, _indices) => 82
+      t_store_view(_dtype, _view, _indices, _value) => ()
     }
     let _r = loop_seen()
     log

@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -58,12 +58,51 @@ pub type Elem =
   | PtrTo(name: String)
 derive Show
 
-## A Tile IR value type: the ordering token, or a tile of `elem` with the
-## given shape (`[]` is the scalar `tile<elem>`, `[n]` is `tile<n x elem>`).
+## A Tile IR value type: the ordering token, a tile of `elem` with the
+## given shape (`[]` is the scalar `tile<elem>`, `[n]` is `tile<n x elem>`),
+## or one of the two view types knife T11 added.
+##
+## `TensorView` is `!cuda_tile.tensor_view<shape x elem, strides=[..]>`: a
+## reference to a region of global memory, its extent along each dimension
+## and the number of ELEMENTS one step along that dimension costs. Only
+## static extents and strides are spelled here; the dialect also allows a
+## dimension to be dynamic (printed `?`, carried by an operand of
+## `make_tensor_view`) and knife T12 owns that.
+##
+## `PartitionView` is
+## `!cuda_tile.partition_view<tile=(..), tensor_view<..>, dim_map=[..]>`,
+## and it is FLAT rather than holding a `Ty`: its `elem`, `shape` and
+## `strides` are the tensor view's own, and `tensor_view_of` builds that
+## type back when the writer needs to intern it. A nested `Ty` would say
+## the same thing and make every match arm carry a case that cannot occur
+## (the dialect's parameter is a `TensorViewType` and nothing else).
+##
+## `padding_value` is the one OPTIONAL parameter either type has: `None` is
+## the dialect's absent padding (out-of-bounds loads yield unspecified
+## values) and `Some(k)` one of the five `PaddingValue` codes.
 pub type Ty =
   | Token
   | Tile(shape: List[Int], elem: Elem)
+  | TensorView(elem: Elem, shape: List[Int], strides: List[Int])
+  | PartitionView(tile_shape: List[Int], elem: Elem, shape: List[Int], strides: List[Int],
+      dim_map: List[Int], padding: Option[Int])
 derive Show
+
+## The `tensor_view` a partition view looks into, as its own type. The
+## writer interns it as a separate entry of the Type section, because the
+## partition view's record names it by index.
+pub fn tensor_view_of(t: Ty) -> Ty = match t {
+  PartitionView(_tile_shape, e, shape, strides, _dim_map, _padding) -> TensorView(e, shape, strides)
+  _ -> panic("tileir: `${show(t)}` is not a partition view and has no tensor view")
+}
+
+## The tile one `load_view_tko` from a partition view answers, and the one
+## a `store_view_tko` into it takes: `tile_shape` of the tensor view's
+## element format. PartitionViewType::getViewTileType is this function.
+pub fn view_tile_of(t: Ty) -> Ty = match t {
+  PartitionView(tile_shape, e, _shape, _strides, _dim_map, _padding) -> Tile(tile_shape, e)
+  _ -> panic("tileir: `${show(t)}` is not a partition view and has no tile type")
+}
 
 ## An operand: an entry parameter by position, or the value an earlier
 ## instruction defined, by its number.
@@ -205,6 +244,12 @@ pub type Instr =
   | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
   | GetGlobalPtr(dst: Int, sym: String, ty: Ty)
   | AllocaPtr(dst: Int, num_elem: Int, align: Int, shared: Bool, ty: Ty)
+  | MakeTensorView(dst: Int, base: Ref, base_ty: Ty, ty: Ty)
+  | MakePartitionView(dst: Int, src: Ref, src_ty: Ty, ty: Ty)
+  | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref], idx_ty: Ty,
+    ty: Ty, tok_in: Ref)
+  | StoreViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty, indices: List[Ref],
+    idx_ty: Ty, tok_in: Ref)
   | Ret
 derive Show
 
@@ -247,15 +292,47 @@ pub fn lanes_in(shape: List[Int]) -> Int = list.fold(shape, 1, (acc, d) => acc *
 ## The rank-0 tile of the same element format as `t`: what a reduction's
 ## region takes, whatever the operand's rank is.
 pub fn rank0_of(t: Ty) -> Ty = match t {
-  Token -> panic("tileir: a token has no rank-0 form")
   Tile(_shape, e) -> Tile([], e)
+  _ -> panic("tileir: `${show(t)}` has no rank-0 form")
 }
 
 # `t` with dimension `dim` dropped: the shape a reduction along `dim`
 # answers.
 fn without_dim(t: Ty, dim: Int) -> Ty = match t {
-  Token -> panic("tileir: a token has no dimensions")
   Tile(shape, e) -> Tile(list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k]), e)
+  _ -> panic("tileir: `${show(t)}` has no dimensions to drop")
+}
+
+# The view a `load_view` or a `store_view` names, its operand and its
+# indices, with the two checks both operations share: the handle really is
+# a partition view of `dtype`, and it is given one index per tile
+# dimension. The dialect says the second as
+# `expected N index operands (based on view type), got M`; saying it here
+# means a kernel that miscounts is refused before any text is rendered.
+fn view_operands(l0: L, dtype: String, view: Int, indices: List[Int],
+  what: String) -> (L, Ty, Ref, List[Ref]) = {
+  let src = ref_of(l0, view, "${what} view")
+  let vt = ty_of(l0, view)
+  match vt {
+    PartitionView(tile_shape, e, _shape, _strides, _dim_map, _padding) -> {
+      match e {
+        Num(nm) ->
+          if nm != dtype {
+            panic("tileir: the partition view holds ${nm} and ${what} reads it as ${dtype}")
+          } else {
+            ()
+          }
+        PtrTo(nm) -> panic("tileir: a partition view of pointers to ${nm} moves no tile")
+      }
+      if len(indices) != len(tile_shape) {
+        panic("tileir: expected ${len(tile_shape)} index operand(s) (based on view type), got ${len(indices)}")
+      } else {
+        ()
+      }
+      (l0, vt, src, list.map(indices, h => ref_of(l0, h, "${what} index")))
+    }
+    _ -> panic("tileir: ${what} names handle ${view}, which is not a partition view")
+  }
 }
 
 # `lhs` with dimension `dim` grown by `rhs`'s: the shape a `cat` answers.
@@ -812,6 +889,71 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l3, pn) = spread_rank0(l2, Val(g), Tile([], e), shape, e)
     bind(l3, dst, pn, Tile(shape, e))
   }
+  TensorViewOf(dst, param, dtype, base, shape, strides) -> {
+    # `make_tensor_view`'s base is a rank-0 `tile<ptr<D>>`, which is what
+    # an entry parameter already is. `base` is the same index a strided
+    # load takes, so the pointer it starts from is one `offset` on the
+    # parameter -- always emitted, including for a base of zero, so that
+    # the instruction stream has one shape whatever the view is.
+    let e = PtrTo(dtype)
+    let pt = Tile([], e)
+    let b = ref_of(l0, base, "tensor view base")
+    let (l1, o) = fresh(l0)
+    let l2 = emit(l1, Offset(o, Arg(param), b, pt, Tile([], Num("i32"))))
+    let tv = TensorView(Num(dtype), shape, strides)
+    let (l3, v) = define(l2, dst, tv)
+    emit(l3, MakeTensorView(v, Val(o), pt, tv))
+  }
+  PartitionViewOf(dst, dtype, view, tile_shape, dim_map, padding) -> {
+    # verifyPartitionViewLike's other half: the two ranks match and every
+    # target dimension is a dimension of the tensor view. Here rather than
+    # in the recording handler because it is the tensor view's TYPE that
+    # says so, and a handle's type is what this pass keeps.
+    let src = ref_of(l0, view, "partition view source")
+    let st = ty_of(l0, view)
+    match st {
+      TensorView(e, shape, strides) -> {
+        match e {
+          Num(nm) ->
+            if nm != dtype {
+              panic("tileir: the tensor view holds ${nm} and make_partition_view reads it as ${dtype}")
+            } else {
+              ()
+            }
+          PtrTo(nm) -> panic("tileir: a tensor view of pointers to ${nm} has no partition")
+        }
+        if len(tile_shape) != len(shape) {
+          panic("tileir: expected tensor_view rank and tile rank to match, got tensor_view of rank ${len(shape)} and tiles of rank ${len(tile_shape)}")
+        } else {
+          ()
+        }
+        match list.find(dim_map, k => k < 0 || k >= len(shape)) {
+          Some(k) -> panic("tileir: dim_map sends a tile dimension to tensor view dimension ${k}, which is outside 0 to ${len(shape) - 1}")
+          None -> ()
+        }
+        let pv = PartitionView(tile_shape, e, shape, strides, dim_map, padding)
+        let (l1, v) = define(l0, dst, pv)
+        emit(l1, MakePartitionView(v, src, st, pv))
+      }
+      _ -> panic("tileir: make_partition_view names handle ${view}, which is not a tensor view")
+    }
+  }
+  LoadView(dst, tok_out, dtype, view, indices, tok_in) -> {
+    let (l1, vt, src, idx) = view_operands(l0, dtype, view, indices, "load_view")
+    let tile = view_tile_of(vt)
+    let (l2, d) = define(l1, dst, tile)
+    let (l3, tv) = define(l2, tok_out, Token)
+    emit(l3, LoadViewTile(d, tv, src, vt, idx, Tile([], Num("i32")), tile,
+      ref_of(l0, tok_in, "load token")))
+  }
+  StoreView(tok_out, dtype, view, indices, value, tok_in) -> {
+    let (l1, vt, src, idx) = view_operands(l0, dtype, view, indices, "store_view")
+    let val = ref_of(l1, value, "store value")
+    let tile = view_tile_of(vt)
+    let (l2, tv) = define(l1, tok_out, Token)
+    emit(l2, StoreViewTile(tv, src, vt, val, tile, idx, Tile([], Num("i32")),
+      ref_of(l0, tok_in, "store token")))
+  }
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
     let tys = list.map(values, h => ty_of(l0, h))
@@ -1072,6 +1214,10 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
   GetGlobalPtr(dst, _sym, _ty) -> [dst]
   AllocaPtr(dst, _num_elem, _align, _shared, _ty) -> [dst]
+  MakeTensorView(dst, _base, _base_ty, _ty) -> [dst]
+  MakePartitionView(dst, _src, _src_ty, _ty) -> [dst]
+  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_ty, _ty, _tok_in) -> [dst, tok_out]
+  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_ty, _tok_in) -> [tok_out]
   Ret -> []
 }
 
