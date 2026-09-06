@@ -1,0 +1,466 @@
+# Layer 2 for the two static-global opcodes (knife T7), the eighteenth of
+# these programs: one `!Gpu` program runs each kernel scripts/tile-golden
+# pins under `with_gpu_real` against the machine's GPU and under
+# `with_gpu_fake` against hand-written host references, and prints what each
+# device answered.
+#
+#   global_diff <global_table.cubin> <global_ctl.cubin> <global_scratch.cubin>
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * A GLOBAL'S INITIALIZER REACHES DEVICE MEMORY. `global_table`'s module
+#     declares two globals and nothing uploads them: the bytes live in the
+#     Global section, the assembler puts them in the cubin and the CUDA
+#     module loader writes them at load time. Every buffer any kernel here
+#     read before this one arrived by `cuMemcpyHtoD`. The host reference
+#     answers with the same two tables (`std/gpu`'s `global_table_a` and
+#     `global_table_b`), so the comparison is exactly "did the declaration
+#     survive the trip".
+#
+#   * THE TWO SYMBOLS ARE TOLD APART. The two tables disagree on every
+#     lane (the `index` line counts it) and go to two segments of one
+#     output buffer, so a `get_global` that named the wrong one has
+#     somewhere to show. `run.sh`'s `get-global-wrong-symbol` is that
+#     mutant.
+#
+#   * A STATIC ALLOCATION OUTLIVES A LAUNCH. `global_scratch` is launched
+#     TWICE on one module. Its kernel adds its input to a mutable global
+#     and writes the sum to the global and to the output, so the second
+#     launch answers twice the input only if the global still held the
+#     first launch's sum. The host reference carries the same running total
+#     in the OUTPUT BUFFER, which is the one place the host can watch it,
+#     so the two agree only while the lifetime the dialect promises
+#     ("the lifetime of the allocation is the lifetime of the module")
+#     holds on this driver. `run.sh`'s `module-reloaded-per-launch` is the
+#     mutant that takes it away.
+#
+# THE TIER IS EXACT, all three. Every lane is one binary64 `addf` with
+# `rounding<nearest_even>` over values both sides hold exactly.
+#
+# THE CONTROL IS A KERNEL. `global_ctl` computes `global_table`'s answer
+# from two BUFFERS, so its bytecode holds neither `global` nor
+# `get_global`: no mutant of the globals may move its bytes or its verdict,
+# and it is what tells "the mutant broke the globals" from "the mutant
+# broke the tree". It is a second opinion on the tables at the same time,
+# since the two kernels must answer the same tile.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out,
+  global_table_a, global_table_b, global_table_ref, global_ctl_ref, global_scratch_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds past its answer: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## The tolerance tier's numbers. Nothing here uses them (every kernel is
+## exact tier), and they are kept so that `verdict` reads the same as every
+## other program in this directory.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shape the kernels were recorded with. This must agree with
+## scripts/tile-golden/kernels.dawn's GLOBAL_TILE.
+pub const GLOBAL_TILE: Int = 128
+
+## How many times `global_scratch` is launched on one module. Two is the
+## smallest number that can tell "the global kept its value" from "the
+## global was reset", and the reference below is written for exactly it.
+pub const SCRATCH_LAUNCHES: Int = 2
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+# The same kernel launched `n` times over the same buffers, stopping at the
+# first refusal. This is the one thing this family needs that the
+# single-launch families do not: the buffers are allocated once and the
+# module is loaded once, so the launches share both, which is what makes a
+# static global's lifetime observable at all.
+fn launch_times(kernel: String, gx: Int, hs: List[Int], n: Int) -> Result[Unit, ForeignError] !Gpu =
+  if n <= 0 {
+    Ok(())
+  } else {
+    match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+      Ok(_) -> launch_times(kernel, gx, hs, n - 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, launched `launches` times, one stage at a time,
+## stopping at the first refusal and saying which stage it was. The LAST
+## buffer is the output, and the one this reads back.
+fn stages(kernel: String, gx: Int, launches: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match launch_times(kernel, gx, hs, launches) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within: two NaNs
+## are not agreement, they are two failures.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+## The largest miss as the tolerance criterion measures it: 1.0 is exactly
+## the tolerance, 0.0 is bit-identical.
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+fn miss_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) -> "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+  None -> "-"
+}
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance`, `identical:tolerance` (a tolerance-tier kernel
+## that happened to agree bit for bit as well), `differ:result`, or
+## `blocked:..`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn zeros(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
+
+## The input `global_table` and `global_ctl` add to their tables, and the
+## one `global_scratch` accumulates. Every lane is NON-ZERO, which is what
+## makes the second launch's answer differ from the first's; each is a
+## small multiple of a power of two, so every sum here is exact in
+## binary64 and the tier is exact by the values and not only by the
+## operation.
+fn corpus_x(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.125 * to_float(i % 17 + 1) + 3.0)
+
+## `global_scratch`'s output buffer: zeros where the answer goes, so that
+## the reference's running total starts where the global's initializer
+## does, and the sentinel past it.
+fn scratch_out(n: Int) -> List[Float] = zeros(n) ++ sentinel_buffer(8)
+
+## The lanes of the corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims above measurements
+## rather than sentences.
+fn shape_of() -> String = {
+  let n = GLOBAL_TILE
+  let a = global_table_a(n)
+  let b = global_table_b(n)
+  let x = corpus_x(n)
+  let idx = range(0, n)
+  # lanes where the two tables disagree: what get-global-wrong-symbol needs
+  let distinct = list.filter(idx, i => a[i] != b[i])
+  # lanes where a table is not its own mirror: what an initializer written
+  # backwards needs
+  let asym = list.filter(idx, i => a[i] != a[n - 1 - i] || b[i] != b[n - 1 - i])
+  # lanes where a table is not its own first element: what an initializer
+  # written as a one-element splat needs
+  let nonsplat = list.filter(idx, i => a[i] != a[0] || b[i] != b[0])
+  # lanes where the second launch must answer something else than the
+  # first: what module-reloaded-per-launch needs
+  let growing = list.filter(idx, i => x[i] != 0.0)
+  "lanes=${n} distinct=${len(distinct)} asymmetric=${len(asym)} nonsplat=${len(nonsplat)}"
+    ++ " growing=${len(growing)} scratch_launches=${SCRATCH_LAUNCHES}"
+}
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["global_table", "global_ctl", "global_scratch"][i]
+
+## Every kernel here is exact tier, so the list is empty and `tier_of`
+## always answers `exact`. It is written out because
+## scripts/leetgpu-diff/check.py READS THIS LIST in every program in this
+## directory.
+pub fn tolerance_tier() -> List[String] = []
+
+fn tier_of(i: Int) -> String =
+  if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
+
+## Every kernel is one block wide: what is under test is the module's
+## storage, not the grid.
+fn case_grid(_i: Int) -> Int = 1
+
+## How many times each kernel is launched on its module.
+fn case_launches(i: Int) -> Int =
+  if case_name(i) == "global_scratch" { SCRATCH_LAUNCHES } else { 1 }
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let n = GLOBAL_TILE
+  let name = case_name(i)
+  if name == "global_table" {
+    [("f64", corpus_x(n)), ("f64", sentinel_buffer(2 * n + 8))]
+  } else if name == "global_ctl" {
+    [("f64", global_table_a(n)), ("f64", global_table_b(n)), ("f64", corpus_x(n)),
+      ("f64", sentinel_buffer(2 * n + 8))]
+  } else {
+    [("f64", corpus_x(n)), ("f64", scratch_out(n))]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let n = GLOBAL_TILE
+  let name = case_name(i)
+  if name == "global_table" {
+    map.from([("global_table", (2, last_out((dts, ins) => global_table_ref(n, dts, ins))))])
+  } else if name == "global_ctl" {
+    map.from([("global_ctl", (4, last_out((dts, ins) => global_ctl_ref(n, dts, ins))))])
+  } else {
+    map.from([("global_scratch", (2, last_out((dts, ins) => global_scratch_ref(n, dts, ins))))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("global_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: global_diff <global_table.cubin> <global_ctl.cubin> <global_scratch.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 3
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let n = case_launches(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, n, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, n, bufs))
+    let tier = tier_of(i)
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} bufs=${buffers_of(i)} grid=(${gx}, 1, 1) launches=${n}")
+    if name == "global_table" { io.println("  index ${shape_of()}") } else { () }
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  miss  ${miss_line(real, fake)}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" {
+      all_agreed = false
+    } else {
+      ()
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

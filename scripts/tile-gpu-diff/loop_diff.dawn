@@ -1,0 +1,498 @@
+# Layer 2 for the two loop opcodes (knife T5), the sixteenth of these
+# programs: one `!Gpu` program runs each kernel scripts/tile-golden pins
+# under `with_gpu_real` against the machine's GPU and under `with_gpu_fake`
+# against hand-written host references, and prints what each device
+# answered.
+#
+#   loop_diff <loop_count.cubin> <loop_bound.cubin> <loop_until.cubin> <loop_none.cubin>
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * `loop` STOPS WHERE THE DATA SAYS. Every iterating kernel before this
+#     one has a trip count the host or the grid fixed: `for`'s bounds are
+#     index handles the recording already knows. Here neither side is told
+#     how many iterations there are. `loop_count` runs 118 of them because
+#     97 has a Collatz chain that long, and the number reaches the
+#     transcript from the DEVICE (the kernel reduces its own step counts
+#     and stores the answer) and from the host reference independently.
+#   * `break` CARRIES THE LOOP'S FINAL VALUES, and they are the ones that
+#     ENTERED the iteration that stopped it, not what that iteration
+#     computed. Every kernel here computes its next value before testing,
+#     so a `break` that carried `continue`'s operands would be off by one
+#     iteration everywhere.
+#   * `break` IS REACHED FROM INSIDE AN `if`. The dialect allows it
+#     (Ops.td gives BreakOp `ParentOneOf<["IfOp", "LoopOp"]>`) and this is
+#     the shape the package emits; `loop_none` is the case that shows the
+#     exit is tested before the body's work is kept, because its condition
+#     is true on the first test and its answer is its input.
+#
+# THE TIER IS EXACT, all four. Two of them are integer arithmetic, and
+# `loop_until`'s Newton iteration is three correctly rounded operations per
+# lane in an order both sides fix, with independent lanes and a reduction
+# (`maxf`) that no fold order can move.
+#
+# THE CONTROL IS A KERNEL. `loop_bound` computes `loop_count`'s answer with
+# a `for` over a host constant instead, so its bytecode holds neither
+# opcode: no mutant of the two below may move its bytes or its verdict, and
+# it is what tells "the mutant broke the loop" from "the mutant broke the
+# tree". It is also a second opinion on the counts themselves, since the
+# two kernels agree on the device or the run is red.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out,
+  loop_count_ref, loop_until_ref, loop_none_ref }
+use std/list
+use std/map
+
+## The sentinel every output buffer holds before a launch: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote. The integer buffers take a whole number, because an i32 buffer
+## rounds what is uploaded to it and a sentinel that moved on upload would
+## not be one.
+pub const SENTINEL: Float = 0.0 - 12345.678
+pub const SENTINEL_I32: Float = 0.0 - 12345.0
+
+## The tolerance tier's numbers. Nothing here uses them (every kernel is
+## exact tier), and they are kept so that `verdict` reads the same as every
+## other program in this directory.
+pub const ATOL: Float = 1.0e-5
+pub const RTOL: Float = 1.0e-5
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const LOOP_TILE: Int = 128
+pub const COLLATZ_ROUNDS: Int = 128
+pub const NEWTON_EPS: Float = 1.0e-12
+
+## How many rounds the host references are allowed before they give up.
+## Neither reference may reach this: it is there so that a reference can
+## never be the thing that hangs, and a run that hit it would disagree with
+## the device and go red rather than spin.
+pub const REF_FUEL: Int = 4096
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+# ---- the tier ----
+
+## Whether `got` is within the tolerance tier's distance of `want`, by
+## leetgpu's own criterion. A NaN on either side is never within: two NaNs
+## are not agreement, they are two failures.
+pub fn within(got: Float, want: Float) -> Bool =
+  if got != got || want != want {
+    false
+  } else if got == want {
+    true
+  } else if got - got != 0.0 || want - want != 0.0 {
+    false
+  } else {
+    let d = if got > want { got - want } else { want - got }
+    let m = if want > 0.0 { want } else { 0.0 - want }
+    d <= ATOL + RTOL * m
+  }
+
+fn all_within(got: List[Float], want: List[Float]) -> Bool =
+  len(got) == len(want) && list.all(range(0, len(want)), i => within(got[i], want[i]))
+
+## The largest miss as the tolerance criterion measures it: 1.0 is exactly
+## the tolerance, 0.0 is bit-identical.
+fn scaled_miss(got: List[Float], want: List[Float]) -> Float =
+  list.fold(range(0, len(want)), 0.0, (acc, i) => {
+    let a = got[i]
+    let b = want[i]
+    let d = if a > b { a - b } else { b - a }
+    let m = if b > 0.0 { b } else { 0.0 - b }
+    let s = d / (ATOL + RTOL * m)
+    if s > acc { s } else { acc }
+  })
+
+fn pair(real: Trace, fake: Trace) -> Option[(List[Float], List[Float])] =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) -> if len(a) == len(b) { Some((a, b)) } else { None }
+    _ -> None
+  }
+
+fn miss_line(real: Trace, fake: Trace) -> String = match pair(real, fake) {
+  Some((a, b)) -> "${scaled_miss(a, b)} (1.0 is exactly the tolerance atol=${ATOL} rtol=${RTOL})"
+  None -> "-"
+}
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel under its tier: `identical:exact` (bit for
+## bit), `close:tolerance`, `identical:tolerance` (a tolerance-tier kernel
+## that happened to agree bit for bit as well), `differ:result`, or
+## `blocked:..`.
+fn verdict(tier: String, fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:" ++ tier
+  } else if tier == "exact" {
+    "differ:result"
+  } else {
+    match pair(real, fake) {
+      Some((a, b)) -> if all_within(a, b) { "close:tolerance" } else { "differ:result" }
+      None -> "differ:result"
+    }
+  }
+}
+
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn sentinel_i32_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL_I32)
+
+## `loop_count` and `loop_bound`'s input: the integers 1 to 128, one per
+## lane. 97 is in there and its Collatz chain is 118 steps, which is what
+## sets the trip count; 1 is in there and needs none, which is what makes
+## the saturation load bearing (a lane that kept going would take the
+## whole tile with it, because the exit condition is a maximum).
+fn collatz_values() -> List[Float] = list.map(range(0, LOOP_TILE), i => to_float(i + 1))
+
+## `loop_until`'s input: 0.25 to 95.5 in steps of 0.75, so that the roots
+## run from 0.5 to about 9.77 and no lane starts at its own answer. The
+## iteration starts at 1.0 for every lane, so the lanes converge at
+## different rates and the loop runs until the SLOWEST is done.
+fn newton_values() -> List[Float] = list.map(range(0, LOOP_TILE), i => 0.25 + to_float(i) * 0.75)
+
+## `loop_none`'s input: 128 values strictly between 0 and 1, all under the
+## kernel's threshold, so the loop stops on its first test and answers what
+## it was given.
+fn small_values() -> List[Float] = list.map(range(0, LOOP_TILE), i => to_float(i + 1) / 256.0)
+
+## The lanes of the corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims above measurements
+## rather than sentences: a corpus whose longest chain were one step would
+## not tell a data-dependent trip count from a constant one, and a corpus
+## with no lane already at 1 would leave the saturation untested.
+fn shape_of() -> String = {
+  let x = collatz_values()
+  let idx = range(0, LOOP_TILE)
+  let done_already = list.filter(idx, i => x[i] <= 1.0)
+  let odd = list.filter(idx, i => to_int(x[i]) % 2 == 1)
+  let longest = list.fold(idx, 0, (acc, i) => {
+    let s = chain_length(to_int(x[i]), 0)
+    if s > acc { s } else { acc }
+  })
+  let shortest_running = list.fold(idx, longest, (acc, i) => {
+    let s = chain_length(to_int(x[i]), 0)
+    if s > 0 && s < acc { s } else { acc }
+  })
+  let small = small_values()
+  let over = list.filter(idx, i => small[i] >= 1.0)
+  let roots = newton_values()
+  let already = list.filter(idx, i => roots[i] == 1.0)
+  "lanes=${LOOP_TILE} at_one=${len(done_already)} odd=${len(odd)} longest_chain=${longest}"
+    ++ " shortest_running=${shortest_running} loop_none_over_threshold=${len(over)}"
+    ++ " newton_at_start=${len(already)}"
+}
+
+# The Collatz chain length of `v`, written here rather than taken from
+# std/gpu so that the corpus's own description is not the reference's
+# transcript.
+fn chain_length(v: Int, seen: Int) -> Int =
+  if v <= 1 || seen > COLLATZ_ROUNDS {
+    seen
+  } else if v % 2 == 0 {
+    chain_length(v / 2, seen + 1)
+  } else {
+    chain_length(3 * v + 1, seen + 1)
+  }
+
+# ---- the cases ----
+
+## The kernels this program runs, in the order their cubins are given.
+fn case_name(i: Int) -> String = ["loop_count", "loop_bound", "loop_until", "loop_none"][i]
+
+## Every kernel here is exact tier, so the list is empty and `tier_of`
+## always answers `exact`. It is written out because
+## scripts/leetgpu-diff/check.py READS THIS LIST in every program in this
+## directory.
+pub fn tolerance_tier() -> List[String] = []
+
+fn tier_of(i: Int) -> String =
+  if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
+
+## Every kernel is one block wide: what is under test is the iteration, not
+## the grid.
+fn case_grid(_i: Int) -> Int = 1
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let name = case_name(i)
+  if name == "loop_count" {
+    [("i32", collatz_values()), ("i32", sentinel_i32_buffer(2 * LOOP_TILE + 8))]
+  } else if name == "loop_bound" {
+    [("i32", collatz_values()), ("i32", sentinel_i32_buffer(LOOP_TILE + 8))]
+  } else if name == "loop_until" {
+    [("f64", newton_values()), ("f64", sentinel_buffer(2 * LOOP_TILE + 8))]
+  } else {
+    [("f64", small_values()), ("f64", sentinel_buffer(LOOP_TILE + 8))]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let name = case_name(i)
+  if name == "loop_count" {
+    map.from([("loop_count", (2, last_out((dts, ins) =>
+      loop_count_ref(LOOP_TILE, REF_FUEL, 2, dts, ins))))])
+  } else if name == "loop_bound" {
+    map.from([("loop_bound", (2, last_out((dts, ins) =>
+      loop_count_ref(LOOP_TILE, COLLATZ_ROUNDS, 1, dts, ins))))])
+  } else if name == "loop_until" {
+    map.from([("loop_until", (2, last_out((dts, ins) =>
+      loop_until_ref(LOOP_TILE, NEWTON_EPS, REF_FUEL, dts, ins))))])
+  } else {
+    map.from([("loop_none", (2, last_out((dts, ins) =>
+      loop_none_ref(LOOP_TILE, 1.0, 1000.0, REF_FUEL, dts, ins))))])
+  }
+}
+
+## The number of iterations a kernel that reports one says it ran, read out
+## of the DEVICE's answer: `loop_count` and `loop_until` repeat it across
+## their second tile. This is the measurement the ledger carries, and it is
+## the one number in this directory that no host constant fixes.
+fn rounds_of(name: String, t: Trace) -> String = match t.result {
+  Some(v) ->
+    if name == "loop_count" || name == "loop_until" {
+      if len(v) > LOOP_TILE { to_string(v[LOOP_TILE]) } else { "-" }
+    } else {
+      "-"
+    }
+  None -> "-"
+}
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("loop_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: loop_diff <loop_count.cubin> <loop_bound.cubin> <loop_until.cubin> <loop_none.cubin>")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = 4
+  if len(paths) != count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, count) {
+    cubins = map.insert(cubins, case_name(i), read_cubin(paths[i]))
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var tolerance_count = 0
+  var rounds = "-"
+  for i in range(0, count) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let tier = tier_of(i)
+    let v = verdict(tier, fake, real)
+    io.println("kernel ${name} tier=${tier} bufs=${buffers_of(i)} grid=(${gx}, 1, 1)")
+    if name == "loop_count" { io.println("  index ${shape_of()}") } else { () }
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)} rounds=${rounds_of(name, fake)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}"
+        ++ " rounds=${rounds_of(name, real)}")
+    io.println("  miss  ${miss_line(real, fake)}")
+    if stopped(real) == "" && rounds_of(name, real) != "-" {
+      let sep = if rounds == "-" { "" } else { rounds ++ " " }
+      rounds = sep ++ name ++ "=" ++ rounds_of(name, real)
+    } else {
+      ()
+    }
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v == "close:tolerance" || v == "identical:tolerance" {
+      tolerance_count = tolerance_count + 1
+    } else {
+      ()
+    }
+    if v != "identical:exact" && v != "close:tolerance" && v != "identical:tolerance" {
+      all_agreed = false
+    } else {
+      ()
+    }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
+      && v != "identical:tolerance" {
+        blocked = v
+      } else {
+        ()
+      }
+  }
+  # The measurement, recorded and not asserted: how many iterations the
+  # device's loops ran. Nothing in the bytecode says these numbers; the
+  # corpus does, and a change to the corpus or to the exit condition moves
+  # them here rather than in a red run.
+  io.println("probe rounds ${rounds}")
+  io.println("tiers exact=${exact_count} tolerance=${tolerance_count}")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")

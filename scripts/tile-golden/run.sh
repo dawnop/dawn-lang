@@ -165,6 +165,28 @@
 #                            says `Only 'nearest_even' is supported`. The
 #                            two together are what makes ftof_rounding a
 #                            claim rather than a table
+#     loop-carried-not-rolled-back
+#                            the writer keeps counting after a `loop`'s
+#                            block instead of rolling the value index back
+#                            before numbering the loop's results ->
+#                            loop_count's text is untouched, its bytes are
+#                            the same length and differ, and tileiras
+#                            refuses them: the store after the loop names
+#                            an index past the last value. The `loop` twin
+#                            of for-results-not-rolled-back, and a SEPARATE
+#                            anchor rather than the same one: the two
+#                            regions are written by two arms, and a reader
+#                            who copied `for`'s arm without its last line
+#                            would pass that mutant and fail this one
+#     break-values-missing   the writer gives `break` an operand count of
+#                            zero and writes none -> loop_count's text is
+#                            untouched, the file is the same length (the
+#                            Func section lost two operand indices and the
+#                            padding after it took them back) and tileiras
+#                            refuses it by TYPE: a break's operands must
+#                            correspond to the parent loop's results. What
+#                            `break` carries IS the loop's answer, and this
+#                            is the layer at which that is checkable
 #     scan-result-drops-the-dim
 #                            the writer gives a `scan` the result types a
 #                            `reduce` would have, the scanned dimension
@@ -189,6 +211,35 @@
 #                            location", which is the negation of what an
 #                            atomic is for, and the dialect refuses to let a
 #                            kernel say both
+#     overflow-attr-not-written
+#                            the writer stops writing the `overflow`
+#                            attribute of the three assumptions knife T4
+#                            added, so the reader takes the first operand
+#                            index for the enum -> attr_overflow's text is
+#                            untouched, its Func section is three bytes
+#                            short, and tileiras answers `invalid integer
+#                            value for enum type: 18`. The three values
+#                            are assumptions the COMPILER may make and no
+#                            corpus can see them, so this is where they
+#                            are covered and the ledger says so
+#     atomic-memory-attrs-swapped
+#                            the writer swaps the memory ordering and the
+#                            memory scope of the three suffixed atomic
+#                            modes, which is the copy-paste error a table
+#                            of triples invites -> attr_memsem's text is
+#                            untouched (the renderer has its own table),
+#                            its bytes are the same length and differ, and
+#                            tileiras refuses them: 3 is not a memory
+#                            scope. The same anchor carries all six values
+#                            (three orderings, three scopes)
+#     rmw-addf-as-add        the writer gives the `addf` atomic mode the
+#                            integer `add`'s enum value -> attr_addf's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and tileiras refuses them:
+#                            `add` works only with i32 and i64. The two
+#                            modes are one enum and neighbours in it, so
+#                            this is the one byte between an integer sum
+#                            and a float one
 #     atomic-cas-writes-an-rmw-mode
 #                            the writer gives `atomic_cas_tko` a `mode`
 #                            byte, which is the copy of the read-modify-write
@@ -201,6 +252,89 @@
 #                            attribute and in the operand count, and this is
 #                            the half of that a byte golden would simply be
 #                            re-recorded over
+#     global-record-alignment-dropped
+#                            the Global section's record loses its fourth
+#                            varint (the alignment) -> global_table's text
+#                            is untouched, its bytes are the same length
+#                            and differ, and the reader refuses the section
+#                            before reading a record: two globals do not
+#                            fit in a payload that holds one
+#     global-visibility-omitted-at-13-3
+#                            the writer stops emitting the two fields the
+#                            record grew at 13.3, `symbol_visibility` and
+#                            `constant`, from a 13.3 file -> global_table's
+#                            text is untouched, its bytes are the same
+#                            length (the Func section's padding absorbs the
+#                            four the record loses) and differ, and the
+#                            reader runs off the end of the section.
+#                            This is knife T7's
+#                            global-visibility-written-at-13-2 mirrored:
+#                            that one wrote six varints into a 13.2 file and
+#                            became the correct shape when knife T8 moved
+#                            the pin, so T8 retired it and put this in its
+#                            place. Both are the same wall, from the two
+#                            sides
+#     exp-rounding-unwritten `exp` stops writing the `rounding_mode` that
+#                            became a required attribute at 13.3 -> sigmoid's
+#                            text is untouched, its Func section is one byte
+#                            shorter, and the reader takes the source
+#                            operand's index for the rounding mode
+#     mmaf-flags-unwritten   `mmaf` stops writing the flags varint that
+#                            exists from 13.3 on (its `fast_acc` bit) ->
+#                            matmul's text is untouched, its Func section is
+#                            one byte shorter, and the reader takes the first
+#                            operand for the flags word
+#     header-minor-still-2   the header says 13.2 while the body is written
+#                            in the 13.3 shapes -> global_table's text is
+#                            untouched, its bytes are the same length and
+#                            differ in ONE byte, the tenth. It is the only
+#                            mutant here that changes the reader's mind
+#                            about the whole file rather than about one
+#                            operation, and what it measures is that the
+#                            version in the header is load bearing
+#     get-global-symbol-not-written
+#                            `get_global` stops writing its symbol, which
+#                            is one varint (a FlatSymbolRefAttr is a string
+#                            table index and nothing else) -> global_table's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and the reader takes
+#                            `reshape`'s opcode for the string index
+#
+#     alloca-flags-unwritten
+#                            `alloca` stops writing its flags varint, which
+#                            exists at every version because its one
+#                            optional field is as old as the operation ->
+#                            alloca_scratch's text is untouched, its Func
+#                            section is one byte short (the FILE is the same
+#                            length, section padding absorbs it) and the
+#                            reader loses the stream from there
+#     alloca-alignment-as-num-elem
+#                            `alloca` writes its element count where its
+#                            alignment belongs. Both are bare inline
+#                            varints, so only the dialect's verifier can
+#                            tell them apart, and only because ALLOCA_ELEMS
+#                            is not a power of two -> alloca_scratch's text
+#                            is untouched, its Func section is one byte
+#                            longer, and tileiras names the alignment
+#     mmaf-scaled-scale-operand-missing
+#                            `mmaf_scaled` writes four operands instead of
+#                            five -> mmaf_scaled_e4m3's text is untouched,
+#                            its Func section is one byte short, and the
+#                            reader hands the operation the next
+#                            instruction's first varint as a scale tile.
+#                            Nothing is variadic here, so no count in the
+#                            stream repeats the arity
+#     mmaf-scaled-writes-a-flags-word
+#                            `mmaf_scaled` writes a flags varint it does
+#                            not have. It is the mirror of
+#                            mmaf-flags-unwritten and the sibling
+#                            comparison that makes the absence load
+#                            bearing: `mmaf` gained an optional field at
+#                            13.3 and writes the word, `mmaf_scaled` has
+#                            none at any version and does not ->
+#                            mmaf_scaled_e4m3's Func section is one byte
+#                            longer and every operand after the word is
+#                            read one place out of step
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
@@ -265,7 +399,16 @@ kernels=(
   trig_sweep rope shape_ops grid_stride
   token_join ptr_roundtrip ptr_recast
   dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
-  dtype_e5m2 dtype_e8m0)
+  dtype_e5m2 dtype_e8m0 dtype_i4 dtype_e2m1
+  pack_roundtrip
+  loop_count loop_bound loop_until loop_none
+  attr_round attr_nan attr_ftz attr_approx
+  attr_overflow attr_memsem attr_addf attr_ucmp
+  assert_pass assert_fail print_tile assume_divby
+  assume_same assume_bounded
+  global_table global_ctl global_scratch global_flags
+  hint_entry hint_memory
+  alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -327,6 +470,34 @@ mutants=(
   e4m3-tag-as-i8
   e8m0-rounding-as-nearest-even
   e8m0-tag-as-f8e5m2
+  loop-carried-not-rolled-back
+  break-values-missing
+  overflow-attr-not-written
+  atomic-memory-attrs-swapped
+  rmw-addf-as-add
+  assert-message-tagged
+  print-tko-token-unwritten
+  assume-divby-tag-as-same-elements
+  assume-same-elements-payload-four-bytes
+  assume-bounded-bounds-swapped
+  global-record-alignment-dropped
+  global-visibility-omitted-at-13-3
+  get-global-symbol-not-written
+  hint-dictionary-count-wrong
+  hint-tag-as-dictionary
+  hint-flag-bit-misplaced
+  hint-entry-flag-dropped
+  exp-rounding-unwritten
+  mmaf-flags-unwritten
+  header-minor-still-2
+  alloca-flags-unwritten
+  alloca-alignment-as-num-elem
+  mmaf-scaled-scale-operand-missing
+  mmaf-scaled-writes-a-flags-word
+  i4-tag-as-i8
+  e2m1-tag-as-i4
+  unpack-as-pack
+  pack-result-shape-unhalved
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -509,11 +680,11 @@ PY
 }
 
 # The --gpu-name a kernel is assembled for. toolchain.txt's `gpu-name` is
-# the machine's own (sm_86) and every kernel but three uses it.
+# the machine's own (sm_86) and every kernel but four uses it.
 #
-# The three are knife T3's fp8 kernels, and the number here is a
-# MEASUREMENT: tileiras 13.3.36 refuses all three fp8 types at sm_86 AND at
-# sm_89 with
+# The first four are knife T3's three fp8 kernels and knife T9's fp4 one,
+# and the number here is a MEASUREMENT: tileiras 13.3.36 refuses all three
+# fp8 types and f4E2M1FN at sm_86 AND at sm_89 with
 #
 #   error: Incompatibility with architecture 'sm_86': unsupported type
 #     'f8E4M3FN'
@@ -528,9 +699,19 @@ PY
 # exemption). Nothing about the BYTES differs: the .tilebc goldens are
 # recorded and compared exactly as every other kernel's are, and only the
 # assembler's target changes.
+#
+# The fourth is knife T10's mmaf_scaled_e4m3, and it is here for the same
+# reason one level up: `mmaf_scaled`'s two matrix operands are confined by
+# Ops.td to f8E4M3FN, f8E5M2 and f4E2M1FN, so there is no wide-operand form
+# to fall back on the way `mmaf` has. sm_86 and sm_89 refuse it for
+# f8E4M3FN and sm_90 refuses it for the f8E8M0FNU scale (measured 2026-09-06,
+# `error: Incompatibility with architecture 'sm_90': unsupported type
+# 'f8E8M0FNU'`), so the block-scaled family needs one architecture more than
+# fp8 itself. scripts/tileir-features/features.txt carries that row's
+# `architecture` exemption.
 kernel_arch() { # kernel
   case "$1" in
-    dtype_e4m3|dtype_e5m2|dtype_e8m0) echo sm_100 ;;
+    dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
     *) echo "$gpu_name" ;;
   esac
 }
@@ -648,10 +829,16 @@ mutant_run_bytecode() { # name, kernel
 # 1. The renderer drops the store's token operand. The kernel still traces
 #    and renders (exit 0), and vadd's text differs from its golden on both
 #    backends, in the store line and nowhere else.
+#
+#    The anchor moved once, at knife T15: `optimization_hints` is printed
+#    between the token and the colon, so the store line now carries a
+#    `${hints_attr(hints)}` the load line carries too. What keeps this
+#    anchor unique is the `, ${ty(val_ty)}` after the pointer type, which
+#    only a store has.
 if run_item drop-store-token; then
   mutant_project drop-store-token render.dawn \
-    ' token=${name(tok_in)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
-    ' : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
+    ' token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
+    '${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
   mutant_run drop-store-token vadd
   for backend in jvm native; do
     out="$work/m-drop-store-token.vadd.$backend"
@@ -671,8 +858,8 @@ fi
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
 if run_item load-dtype-f64; then
   mutant_project load-dtype-f64 dev.dawn \
-    't_load(position(p), param_dtype(p), i, shape, strides, none, none)' \
-    't_load(position(p), "f64", i, shape, strides, none, none)'
+    't_load(position(p), param_dtype(p), i, shape, strides, none, none, [])' \
+    't_load(position(p), "f64", i, shape, strides, none, none, [])'
   mutant_run load-dtype-f64 vadd_f32
   mutant_run load-dtype-f64 vadd
   refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
@@ -691,25 +878,44 @@ if run_item load-dtype-f64; then
   echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
 fi
 
-# The length varint of the Func section: byte 13, after the 12-byte header
-# and the section id. One byte while the section is under 128 bytes, which
-# the two kernels' are; a bigger kernel would need the varint decoded.
+# The length varint of the Func section: it starts at byte 13, after the
+# 12-byte header and the section id, and it is LEB128. One byte while the
+# section is under 128 bytes, which the first kernels to use this were;
+# knife T4's attr_overflow is 200 bytes of function, so the varint is
+# decoded properly rather than read as one byte.
 func_len() { # tilebc
-  od -An -tu1 -j 13 -N 1 "$1" | tr -d ' \n'
+  python3 - "$1" <<'PY'
+import sys
+
+data = open(sys.argv[1], "rb").read()
+value = 0
+shift = 0
+i = 13
+while True:
+    byte = data[i]
+    value |= (byte & 0x7F) << shift
+    if byte < 0x80:
+        break
+    shift += 7
+    i += 1
+print(value)
+PY
 }
 
 # A writer mutant: the text of <kernel> is untouched on both backends (the
 # renderer was not edited), the bytes differ from <kernel>.tilebc on both
 # and agree with each other, and tileiras refuses them with the given
 # fragment in its output. <shape> says how the mutant's file relates to the
-# golden's: `same-size` (a value changed in place), `func-one-short` (the
-# function section lost one byte), `func-one-long` (it gained one; the file
-# itself need not change size either way, the next section's alignment
-# padding absorbs it) or `file-shorter` (the whole file lost bytes, which is
-# what a constant BLOB written too narrow does: its section shrinks and no
-# padding puts it back).
+# golden's: `same-size` (the file is the same length: a value changed in
+# place, or a Func section that lost bytes the padding after it took back),
+# `func-<n>-short` / `func-<n>-long` (the function section lost or gained
+# exactly n bytes; the file itself need not change by the same amount
+# either way, the next section's alignment padding absorbs part of it) or
+# `file-shorter` (the whole file lost bytes, which is what a constant BLOB
+# written too narrow does: its section shrinks and no padding puts it
+# back).
 writer_mutant_checks() { # name, kernel, shape, fragment
-  local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func
+  local name="$1" k="$2" shape="$3" fragment="$4" backend out golden_size mutant_size golden_func delta want
   mutant_run "$name" "$k"
   mutant_run_bytecode "$name" "$k"
   golden_size=$(wc -c < "$here/$k.tilebc")
@@ -728,12 +934,22 @@ writer_mutant_checks() { # name, kernel, shape, fragment
       same-size)
         [ "$mutant_size" = "$golden_size" ] ||
           fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected the same size" ;;
-      func-one-short)
-        [ "$(func_len "$out")" = "$((golden_func - 1))" ] ||
-          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte fewer" ;;
-      func-one-long)
-        [ "$(func_len "$out")" = "$((golden_func + 1))" ] ||
-          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected one byte more" ;;
+      func-*-short | func-*-long)
+        delta="${shape#func-}"
+        delta="${delta%-short}"
+        delta="${delta%-long}"
+        case "$delta" in
+          one) delta=1 ;;
+          two) delta=2 ;;
+          three) delta=3 ;;
+          *) fail "writer_mutant_checks: unknown byte count $delta in shape $shape" ;;
+        esac
+        case "$shape" in
+          *-short) want=$((golden_func - delta)) ;;
+          *) want=$((golden_func + delta)) ;;
+        esac
+        [ "$(func_len "$out")" = "$want" ] ||
+          fail "$name: the golden's Func section is $golden_func bytes and the mutant's is $(func_len "$out") on $backend; expected $want" ;;
       file-shorter)
         [ "$mutant_size" -lt "$golden_size" ] ||
           fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected a shorter file" ;;
@@ -864,8 +1080,8 @@ fi
 #    and nowhere else, on both backends.
 if run_item addf-no-rounding; then
   mutant_project addf-no-rounding render.dawn \
-    'fn rounding(op: String) -> String = if rounds(op) { " rounding<nearest_even>" } else { "" }' \
-    'fn rounding(op: String) -> String = if rounds(op) { "" } else { "" }'
+    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> " rounding<nearest_even>"' \
+    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> ""'
   mutant_run addf-no-rounding vadd_bf16
   for backend in jvm native; do
     out="$work/m-addf-no-rounding.vadd_bf16.$backend"
@@ -955,8 +1171,8 @@ fi
 #     every ordering but that one.
 if run_item atomic-rmw-claims-weak-ordering; then
   mutant_project atomic-rmw-claims-weak-ordering bytecode.dawn \
-    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))' \
-    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_WEAK), SCOPE_DEVICE), rmw_mode_value(mode))'
+    '  _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)' \
+    '  _ -> (mode, ORDER_WEAK, SCOPE_DEVICE)'
   writer_mutant_checks atomic-rmw-claims-weak-ordering histogram same-size \
     "'cuda_tile.atomic_rmw_tko' op memory ordering semantics must be one of: relaxed, acquire, release, acq_rel"
 fi
@@ -1160,6 +1376,515 @@ if run_item e8m0-tag-as-f8e5m2; then
 '
   writer_mutant_checks e8m0-tag-as-f8e5m2 dtype_e8m0 same-size \
     "'cuda_tile.ftof' op invalid rounding mode specified. Only 'nearest_even' is supported"
+fi
+
+# 27. The `loop` region's own rollback. `for`'s is a mutant of the shared
+#     `roll_back` function (for-results-not-rolled-back, above); this one
+#     is the CALL in the loop arm, because the two regions are written by
+#     two arms of the same match and only one of them is `for`'s.
+if run_item loop-carried-not-rolled-back; then
+  mutant_project loop-carried-not-rolled-back bytecode.dawn \
+    '    roll_back(w_block, w_body)' \
+    '    w_body'
+  writer_mutant_checks loop-carried-not-rolled-back loop_count same-size \
+    "operand index 37 out of bounds (size=19) for operand 0"
+fi
+
+# 28. `break` with no operands. The loop's results are the values the break
+#     hands back, so dropping them is not a stream error but a TYPE error,
+#     and the verifier prints both sides. The file does not shrink: the two
+#     operand indices come out of the Func section and the alignment
+#     padding after it takes the same two bytes back.
+if run_item break-values-missing; then
+  mutant_project break-values-missing bytecode.dawn \
+    '  BreakVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_BREAK), 0), len(values)), emit_ref)' \
+    '  BreakVals(_values, _tys) -> emit(emit(emit(w0, OP_BREAK), 0), 0)'
+  writer_mutant_checks break-values-missing loop_count same-size \
+    "'cuda_tile.break' op operand types must correspond to the parent loop result types"
+fi
+
+# 29. The writer stops writing the `overflow` attribute of the three
+#     assumptions. The three integer operations of attr_overflow then have
+#     nothing between their result type and their operands, so the reader
+#     takes the first operand index for the enum; the function section is
+#     three bytes short and the assembler names the attribute it could not
+#     parse.
+#
+#     This is where `nsw`, `nuw` and `nw` are covered, and it has to be:
+#     they are assumptions the compiler MAY use, not arithmetic, so a
+#     program that keeps its promise computes the same thing with them and
+#     without them and no corpus can tell them apart.
+#     scripts/tileir-features/attrs.txt records the three at layer 1 with
+#     that reason spelled out.
+if run_item overflow-attr-not-written; then
+  mutant_project overflow-attr-not-written bytecode.dawn \
+    '  "addi_nsw" -> [OVERFLOW_NSW]
+  "subi_nuw" -> [OVERFLOW_NUW]
+  "muli_nw" -> [OVERFLOW_NW]' \
+    '  "addi_nsw" -> []
+  "subi_nuw" -> []
+  "muli_nw" -> []'
+  writer_mutant_checks overflow-attr-not-written attr_overflow func-three-short \
+    "error at offset 72: invalid integer value for enum type: 18"
+fi
+
+# 30. The writer swaps the memory ordering and the memory scope of the
+#     three suffixed atomic modes. Both are required inline enums written
+#     in declaration order, so the swap is same-size and invisible at
+#     layer 0 (the renderer spells them from its own table); the assembler
+#     refuses it because 3 is not a memory scope.
+#
+#     One anchor carries six values -- `acquire`, `release`, `acq_rel`,
+#     `tl_blk`, `sys` and `device` -- and that is the whole of what any
+#     judgement here can be. An ordering constrains CONCURRENT accesses,
+#     the corpus that reaches the device gives every lane its own slot, and
+#     a judgement about the ordering itself would need two blocks racing
+#     and a comparison shape this repository does not have.
+if run_item atomic-memory-attrs-swapped; then
+  mutant_project atomic-memory-attrs-swapped bytecode.dawn \
+    '  "add_acquire_tl_blk" -> ("add", ORDER_ACQUIRE, SCOPE_TL_BLK)
+  "add_release_sys" -> ("add", ORDER_RELEASE, SCOPE_SYS)
+  "add_acq_rel_device" -> ("add", ORDER_ACQ_REL, SCOPE_DEVICE)' \
+    '  "add_acquire_tl_blk" -> ("add", SCOPE_TL_BLK, ORDER_ACQUIRE)
+  "add_release_sys" -> ("add", SCOPE_SYS, ORDER_RELEASE)
+  "add_acq_rel_device" -> ("add", SCOPE_DEVICE, ORDER_ACQ_REL)'
+  writer_mutant_checks atomic-memory-attrs-swapped attr_memsem same-size \
+    "error at offset 109: invalid integer value for enum type: 3"
+fi
+
+# 31. The writer gives the float atomic mode the integer one's enum value.
+#     `add` is 3 and `addf` is 4, neighbours in one enum over both, so this
+#     is one byte and the same length; the dialect refuses it because the
+#     buffer is f64 and `add` is defined for i32 and i64 only.
+#
+#     The device could not have caught this one: `add` on an f64 pointer
+#     tile is not a wrong answer, it is a program the assembler will not
+#     build.
+if run_item rmw-addf-as-add; then
+  mutant_project rmw-addf-as-add bytecode.dawn \
+    '  "addf" -> 4' \
+    '  "addf" -> 3'
+  writer_mutant_checks rmw-addf-as-add attr_addf same-size \
+    "'cuda_tile.atomic_rmw_tko' op 'add' works only with integers i32 and i64"
+fi
+
+# 32. `assert`'s message written SELF-CONTAINED, which is the shape every
+#     other attribute in this writer has and the one this one must not.
+#     `message` is a `StrAttr`, so the ODS getter answers a `StringRef` and
+#     `writeOpAttribute` takes its own StringRef branch: the String section
+#     index and no tag. Writing tag 5 in front of it is one byte more in
+#     the Func section, and the reader takes the 5 for the index itself.
+#     This is the mutant that makes "tag 5 is never emitted here" a claim
+#     rather than an omission.
+if run_item assert-message-tagged; then
+  mutant_project assert-message-tagged bytecode.dawn \
+    '    emit_ref(emit(emit(w1, OP_ASSERT), si), cond)' \
+    '    emit_ref(emit(emit(emit(w1, OP_ASSERT), 5), si), cond)'
+  writer_mutant_checks assert-message-tagged assert_pass func-one-long \
+    "failed to parse attribute 'message'"
+fi
+
+# 33. `print_tko`'s token operand flagged and not written, which is
+#     store-token-unwritten's twin one operand group over: the flags word
+#     says the token is carried, the args are written with their own count,
+#     and then nothing follows. The reader takes the next byte of the
+#     stream for the token's value index.
+if run_item print-tko-token-unwritten; then
+  mutant_project print-tko-token-unwritten bytecode.dawn \
+    '    emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)' \
+    '    list.fold(args, emit(emit(w2, si), len(args)), emit_ref)'
+  writer_mutant_checks print-tko-token-unwritten print_tile func-one-short \
+    "operand index 91 out of bounds (size=19) for token segment, element 0"
+fi
+
+# 34. `div_by`'s tag given to `same_elements`. One byte for one, so the file
+#     is the same length, and the reader gets as far as parsing the payload
+#     the OTHER attribute would have: it takes the divisor (32) for an
+#     element count and runs off the end of the section. This is the first
+#     of three that make the three predicate tags load-bearing.
+if run_item assume-divby-tag-as-same-elements; then
+  mutant_project assume-divby-tag-as-same-elements bytecode.dawn \
+    'const ATTR_DIV_BY: Int = 8' \
+    'const ATTR_DIV_BY: Int = 9'
+  writer_mutant_checks assume-divby-tag-as-same-elements assume_divby same-size \
+    "failed to read DenseI64ArrayAttr for SameElementsAttr"
+fi
+
+# 35. `same_elements`'s values laid down four bytes wide instead of eight.
+#     A `DenseI64ArrayAttr` is the same `writeLEVarSize` shape as
+#     `permute`'s `DenseI32ArrayAttr` one element WIDER, and nothing but
+#     the width says so: the count is written the same way and the reader
+#     takes it on trust. The Func section loses four bytes and the
+#     alignment padding after it takes them back, so the FILE is the same
+#     length; what the reader then reads for the operand is four bytes of
+#     the next instruction.
+if run_item assume-same-elements-payload-four-bytes; then
+  mutant_project assume-same-elements-payload-four-bytes bytecode.dawn \
+    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }' \
+    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }'
+  writer_mutant_checks assume-same-elements-payload-four-bytes assume_same same-size \
+    "operand index 78 out of bounds (size=17) for operand 0"
+fi
+
+# 36. `bounded`'s two bounds written the other way round. The presence byte
+#     is unchanged (both bounds are there), so this is a legal file that
+#     says a different predicate -- and the one the dialect refuses,
+#     because a lower bound above an upper one is not a predicate anything
+#     satisfies. It is the ORDER that this pins: the two payloads follow
+#     the flag byte in declaration order and nothing in the stream labels
+#     them.
+if run_item assume-bounded-bounds-swapped; then
+  mutant_project assume-bounded-bounds-swapped bytecode.dawn \
+    '    emit_opt_signed(emit_opt_signed(w1, lb), ub)' \
+    '    emit_opt_signed(emit_opt_signed(w1, ub), lb)'
+  writer_mutant_checks assume-bounded-bounds-swapped assume_bounded same-size \
+    "'cuda_tile.bounded' expects lower bound to be less than or equal to upper bound"
+fi
+
+# 37. The Global section's record loses its alignment field. The record is
+#     six varints at 13.3 (name, type, constant, alignment, visibility,
+#     constant flag) and this writes five, so the reader takes the SECOND
+#     global's name index from the first record's leftover and reads the
+#     rest of the section off by one field. The byte count in the message
+#     moved when knife T8 grew the record: it was 6 at 13.2 and is 10 now.
+#     `global_table` declares two globals for this reason: with one global
+#     the three varints would be followed by nothing and the trailing byte
+#     the reader never looks at would hide the mutant.
+if run_item global-record-alignment-dropped; then
+  mutant_project global-record-alignment-dropped bytecode.dawn \
+    '    let b4 = put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align)' \
+    '    let b4 = put_varint(put_varint(put_varint(b, si), ti), ci)'
+  writer_mutant_checks global-record-alignment-dropped global_table same-size \
+    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 10 bytes"
+fi
+
+# 38. The writer stops emitting the two fields the Global section grew at
+#     13.3 (`symbol_visibility` and `constant`) from a 13.3 file. This is
+#     the version wall from the inside, and it is knife T7's
+#     `global-visibility-written-at-13-2` mirrored: the reader's
+#     kMinGlobalInfoSize is 4 below 13.3 and 6 at or above it, so at 13.3
+#     four varints are not a shorter record the reader tolerates, they are
+#     four varints short of what it will read. T7 wrote the pair into a 13.2
+#     file and got NULL TYPE out of the second record; knife T8 moved the
+#     pin to 13.3, which made that spelling the CORRECT one, so the mutant
+#     it retires comes back as its own mirror.
+#
+#     `global_table` declares two globals here for the same reason it does
+#     above: the shortfall has to land inside a record the reader still
+#     wants to parse.
+if run_item global-visibility-omitted-at-13-3; then
+  mutant_project global-visibility-omitted-at-13-3 bytecode.dawn \
+    '      put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
+    '      b4'
+  writer_mutant_checks global-visibility-omitted-at-13-3 global_table same-size \
+    "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes"
+fi
+
+# 39. `get_global` stops writing its symbol. A FlatSymbolRefAttr is one
+#     varint, the string table index, and without it the reader takes the
+#     next byte of the instruction stream for the symbol: 91, which is
+#     `reshape`'s opcode 0x5B, and the string table has three entries.
+if run_item get-global-symbol-not-written; then
+  mutant_project get-global-symbol-not-written bytecode.dawn \
+    '    let (w2, si) = str_of(w1, sym)
+    emit(w2, si)' \
+    '    let (w2, _si) = str_of(w1, sym)
+    w2'
+  writer_mutant_checks get-global-symbol-not-written global_table same-size \
+    "failed to read string for FlatSymbolRefAttr"
+fi
+
+# 40. The inner dictionary of a hint says it holds one more entry than it
+#     does. A count is a varint the reader takes on trust, and 1 and 2 are
+#     one byte each, so the file is the same length; what follows the last
+#     real entry is the load's first operand, and the reader takes it for
+#     the String section index of another key.
+#
+#     This is the whole of what layer 1 can say about this family, and the
+#     reason it is: the CONTENT of a hint is not checked at all.
+#     `OptimizationHintsAttr::verifyParamWithContext` returns early unless
+#     `-Wunsupported-hints` is on, which it is not by default, so an
+#     unknown key, an unknown architecture and an out-of-range value are
+#     each accepted in silence (measured, knife T15: `occupancy_qqq`,
+#     `sm_86a` and `latency = 904` all assemble, exit 0 and print nothing).
+#     Only the SHAPE is load-bearing, and these four mutants are its four
+#     seams.
+if run_item hint-dictionary-count-wrong; then
+  mutant_project hint-dictionary-count-wrong bytecode.dawn \
+    'ATTR_DICTIONARY), len(under))' \
+    'ATTR_DICTIONARY), len(under) + 1)'
+  writer_mutant_checks hint-dictionary-count-wrong hint_memory same-size \
+    "failed to read key for DictionaryAttr element 1"
+fi
+
+# 41. The entry's `optimization_hints` announced with the Dictionary tag
+#     instead of its own. Tag 10 and tag 11 are one byte each, and the
+#     bytes that follow are the same bytes either way -- an
+#     OptimizationHintsAttr IS a DictionaryAttr with a tag in front of it
+#     -- so the reader parses the whole attribute without complaint and
+#     then refuses what it has: the function table wants an
+#     OptimizationHintsAttr and holds a DictionaryAttr. This is the mutant
+#     that makes tag 11 a claim rather than a spelling.
+if run_item hint-tag-as-dictionary; then
+  mutant_project hint-tag-as-dictionary bytecode.dawn \
+    'const ATTR_OPTIMIZATION_HINTS: Int = 11' \
+    'const ATTR_OPTIMIZATION_HINTS: Int = 10'
+  writer_mutant_checks hint-tag-as-dictionary hint_entry same-size \
+    "invalid optimization hints attribute for function 'hint_entry'"
+fi
+
+# 42. The load's hints flagged on bit 0 instead of bit 1, which is
+#     `memory_scope`'s bit. Nothing in the stream labels an optional
+#     field: the bits are assigned by version and then by declaration
+#     order (`getVersionOrderedBitAssignments`), attributes before
+#     operands, so `memory_scope` is bit 0 and `optimization_hints` bit 1.
+#     One bit for the other is the same length and the reader loses the
+#     stream: it takes the outer dictionary's count for a memory scope
+#     enum and every operand after it is one place out of step.
+if run_item hint-flag-bit-misplaced; then
+  mutant_project hint-flag-bit-misplaced bytecode.dawn \
+    'const LOAD_FLAG_HINTS: Int = 2' \
+    'const LOAD_FLAG_HINTS: Int = 1'
+  writer_mutant_checks hint-flag-bit-misplaced hint_memory same-size \
+    "operand index 91 out of bounds (size=19) for operand 1"
+fi
+
+# 43. The entry's hint bit cleared while the attribute is still written.
+#     The function table's flag byte is what says whether an attribute
+#     follows the location index, and it is the ONE place in this writer
+#     where a bit and a payload have to agree outside an operation. With
+#     the bit clear the reader takes the attribute's first byte for the
+#     body's length and the body starts eleven bytes early.
+#
+#     The twin of this one -- the bit set and nothing written -- is not
+#     expressible here: the flag and the payload are computed from the same
+#     `len(k.hints)`, which is what a reader of that function should be able
+#     to see, and this mutant is what says the two are joined on purpose.
+if run_item hint-entry-flag-dropped; then
+  mutant_project hint-entry-flag-dropped bytecode.dawn \
+    'const FLAG_HAS_HINTS: Int = 0x04' \
+    'const FLAG_HAS_HINTS: Int = 0x00'
+  writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
+    "operand index 10 out of bounds (size=4) for operand 0"
+fi
+
+# 44. `exp` stops writing the `rounding_mode` it must carry from 13.3 on.
+#     The attribute is a DefaultValuedAttr and therefore REQUIRED rather
+#     than optional, so BytecodeGen.cpp writes it inline behind a version
+#     check and writes no flag for it; a reader at 13.3 expects the byte and,
+#     not finding it, takes the source operand's index for the mode. This is
+#     one of the four shapes knife T8 moved, and it is the one that would
+#     have been invisible without layer 1: `exp` renders the same text at
+#     both versions, because `full` is the default the printer omits.
+if run_item exp-rounding-unwritten; then
+  mutant_project exp-rounding-unwritten bytecode.dawn \
+    '  } else if op == "exp" && exp_has_rounding() {
+    Some(ROUND_FULL)' \
+    '  } else if op == "exp" && false {
+    Some(ROUND_FULL)'
+  writer_mutant_checks exp-rounding-unwritten sigmoid func-one-short \
+    "failed to parse attribute 'rounding_mode'"
+fi
+
+# 45. `mmaf` stops writing the flags varint that exists from 13.3 on. Its
+#     `fast_acc` is the operation's ONLY optional field and it arrived at
+#     13.3 while `mmaf` itself is 13.1, so getVersionOrderedBitAssignments
+#     answers a minimum version later than the operation's and
+#     generateFlagsFieldSerialization guards the word with it. Without the
+#     word the reader takes the first operand for the flags and then runs
+#     one operand short. `mmai`, which has no optional field at any version,
+#     writes no such word and is untouched.
+if run_item mmaf-flags-unwritten; then
+  mutant_project mmaf-flags-unwritten bytecode.dawn \
+    '    let w2 = if mmaf_has_flags() { emit(w1, MMAF_FLAG_FAST_ACC_UNSET) } else { w1 }' \
+    '    let w2 = w1'
+  writer_mutant_checks mmaf-flags-unwritten matmul func-one-short \
+    "block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator"
+fi
+
+# 46. The header says 13.2 while the body is written in the 13.3 shapes.
+#     Every other mutant in this file changes one operation; this one
+#     changes what the reader believes about the whole file, and it is the
+#     only way to ask whether the version byte is load bearing at all. A
+#     reader that ignored it would accept the file, because the bytes after
+#     the header are a well formed 13.3 program.
+#
+#     The anchor is the header expression and not BYTECODE_MINOR itself: the
+#     constant also drives `exp_has_rounding`, `mmaf_has_flags` and
+#     `global_has_extended_fields`, so lowering it would produce an honest
+#     13.2 file rather than the disagreement this is about.
+if run_item header-minor-still-2; then
+  mutant_project header-minor-still-2 bytecode.dawn \
+    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR)' \
+    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 2)'
+  writer_mutant_checks header-minor-still-2 global_table same-size \
+    "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
+fi
+
+# 47. `alloca` stops writing its flags varint. Its `global` unit attribute
+#     is the operation's only optional field and it arrived WITH the
+#     operation at 13.3, so generateFlagsFieldSerialization writes the word
+#     unconditionally: there is no version at which a reader would tolerate
+#     its absence. Without it the reader takes `num_elem` for the flags,
+#     `alignment` for `num_elem`, and the next instruction's opcode for the
+#     alignment, and the stream is lost from there. The Func section is one
+#     byte short while the FILE is the same length, which is the shape
+#     knife T8 wrote down: section padding absorbs a byte, so the file size
+#     is not this family's judgement.
+if run_item alloca-flags-unwritten; then
+  mutant_project alloca-flags-unwritten bytecode.dawn \
+    '    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })' \
+    '    let w1 = emit_op(w0, OP_ALLOCA, t)'
+  writer_mutant_checks alloca-flags-unwritten alloca_scratch func-one-short \
+    "failed to get result type 0 for BitcastOp"
+fi
+
+# 48. `alloca` writes its element count where its alignment belongs. Both
+#     are `I64Attr` and both are written as bare inline varints, so nothing
+#     about the stream's SHAPE says which is which; what says so is the
+#     dialect's own verifier, and only because ALLOCA_ELEMS is 192 and not
+#     a power of two. That number is chosen in kernels.dawn for exactly
+#     this, and the note there says so: with a power-of-two count the
+#     mutant would be a legal program that allocates eight elements and
+#     runs off the end of them, and undefined behaviour is not a judgement.
+#     192 is a two-byte varint and 8 is one, so the Func section is one
+#     byte LONGER here while the file is again the same length.
+if run_item alloca-alignment-as-num-elem; then
+  mutant_project alloca-alignment-as-num-elem bytecode.dawn \
+    '    emit(emit(w1, num_elem), align)' \
+    '    emit(emit(w1, num_elem), num_elem)'
+  writer_mutant_checks alloca-alignment-as-num-elem alloca_scratch func-one-long \
+    "'cuda_tile.alloca' op 'alignment' must be power of two"
+fi
+
+# 49. `mmaf_scaled` stops writing its last operand. It takes five where
+#     `mmaf` takes three, and the two extra ones are the scales; without
+#     the last the reader takes the NEXT instruction's first varint for it
+#     and hands the operation a tile of the wrong element type, which the
+#     verifier names. Nothing is variadic here, so no count would have
+#     caught it: the arity is the operation's identity and nothing in the
+#     stream repeats it.
+if run_item mmaf-scaled-scale-operand-missing; then
+  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)' \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale)'
+  writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short \
+    "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
+fi
+
+# 50. `mmaf_scaled` writes a flags varint. This is the sibling comparison
+#     that makes its ABSENCE load bearing, and it is the mirror of
+#     mmaf-flags-unwritten one block up: `mmaf` gained an optional
+#     `fast_acc` at 13.3 and therefore writes the word, while
+#     `mmaf_scaled` has no optional field and no attribute at any version,
+#     so getVersionOrderedBitAssignments answers an empty table and the
+#     word does not exist. A writer that copied `mmaf`'s arm wholesale
+#     would put one there, and the reader would take it for the first
+#     operand and run one place out of step for the rest of the body.
+#     Same file length, Func one byte longer, and the same kind of
+#     evidence as trig-extra-flags.
+if run_item mmaf-scaled-writes-a-flags-word; then
+  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn \
+    '    let w1 = emit_op(w0, OP_MMAF_SCALED, t)' \
+    '    let w1 = emit(emit_op(w0, OP_MMAF_SCALED, t), 0)'
+  writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long \
+    "operand index 91 out of bounds (size=77) for operand 2"
+fi
+
+# 51. The writer's type table gives `i4` the `i8` tag, which is the only
+#     other tag a nibble could plausibly take: both are "small integer" and
+#     the ledger's two rows are neighbours in the frozen table. The tile
+#     types collapse (tile<256xi4> becomes tile<256xi8>, and one type
+#     section entry goes with it, so the FILE is four bytes shorter), and
+#     the reader refuses the first `unpack`: its source and its result are
+#     both eight bits wide, and `bitcast` is the operation for that.
+if run_item i4-tag-as-i8; then
+  mutant_project i4-tag-as-i8 bytecode.dawn \
+    '  "i4" -> 22' \
+    '  "i4" -> 1'
+  writer_mutant_checks i4-tag-as-i8 dtype_i4 file-shorter \
+    "'cuda_tile.unpack' op expects source and result to have different element type widths"
+fi
+
+# 52. The writer's type table gives `f4E2M1FN` the `i4` tag: the other
+#     four-bit format, so the widths agree and only the KIND differs. Same
+#     length, and the reader refuses the `ftof`, which wants a float tile.
+#     This is the fp4 twin of e4m3-tag-as-i8 and it says the same thing:
+#     the tag is load bearing even where no device this tree can reach will
+#     take the type. dtype_e2m1 is assembled for sm_100 (kernel_arch), so
+#     this mutant is too.
+if run_item e2m1-tag-as-i4; then
+  mutant_project e2m1-tag-as-i4 bytecode.dawn \
+    '  "f4E2M1FN" -> 19' \
+    '  "f4E2M1FN" -> 22'
+  writer_mutant_checks e2m1-tag-as-i4 dtype_e2m1 same-size \
+    "'cuda_tile.ftof' op operand #0 must be tile of"
+fi
+
+# 53. The writer gives `unpack` the `pack` opcode. The two are neighbours
+#     in the frozen table (0x70 and 0x6F) and inverse operations, so this
+#     is the one keystroke between them; the text is untouched (the
+#     renderer spells the name it was handed), the file is the same length,
+#     and the reader refuses it by TYPE: a `pack` answers an i8 tile and
+#     this one answers nibbles.
+if run_item unpack-as-pack; then
+  mutant_project unpack-as-pack bytecode.dawn \
+    'const OP_UNPACK: Int = 0x70' \
+    'const OP_UNPACK: Int = 0x6F'
+  writer_mutant_checks unpack-as-pack pack_roundtrip same-size \
+    "'cuda_tile.pack' op result #0 must be tile of i8 values, but got '!cuda_tile.tile<256xi4>'"
+fi
+
+# 54. The result of a `pack` or an `unpack` keeps the operand's lane count
+#     instead of scaling it by the ratio of the two widths. This is the
+#     ONE mutant in this file whose text moves as well as its bytes, and
+#     that is a property of the operation rather than a choice: the shape
+#     is the result TYPE, and the renderer prints the type it was handed.
+#     So both halves are checked here -- exactly the pack and unpack lines
+#     move, and tileiras names the bytes it cannot take -- and the second
+#     half is the one a re-recorded golden could not wash away.
+#
+#     The anchor is in prog.dawn because that is where a recorded `Repack`
+#     gets its second shape; lower.dawn and the writer only carry it.
+if run_item pack-result-shape-unhalved; then
+  mutant_project pack-result-shape-unhalved prog.dawn \
+    '  [bits / dtype_bits(to)]' \
+    '  [lanes_of(shape)]'
+  mutant_run pack-result-shape-unhalved dtype_i4
+  mutant_run_bytecode pack-result-shape-unhalved dtype_i4
+  for backend in jvm native; do
+    out="$work/m-pack-result-shape-unhalved.dtype_i4.$backend"
+    [ "$(cat "$out.rc")" = 0 ] ||
+      { cat "$out.err" >&2; fail "pack-result-shape-unhalved: dtype_i4 did not render on $backend"; }
+    cmp -s "$here/dtype_i4.mlir" "$out" &&
+      fail "pack-result-shape-unhalved mutant stayed green on $backend: dtype_i4.mlir still matches"
+    moved=$(diff "$here/dtype_i4.mlir" "$out" | grep -c '^[<>]' || true)
+    [ "$moved" = 28 ] ||
+      { diff "$here/dtype_i4.mlir" "$out" >&2 || true; fail "pack-result-shape-unhalved: expected the fourteen pack and unpack lines to move on $backend, got $moved changed line(s)"; }
+    diff "$here/dtype_i4.mlir" "$out" | grep '^[<>]' | grep -vqE '= (un)?pack ' &&
+      { diff "$here/dtype_i4.mlir" "$out" >&2 || true; fail "pack-result-shape-unhalved: a line that is not a pack or an unpack moved on $backend"; }
+    out="$work/m-pack-result-shape-unhalved.dtype_i4.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] ||
+      { cat "$work/m-pack-result-shape-unhalved.dtype_i4.$backend.out.err" >&2; fail "pack-result-shape-unhalved: dtype_i4 did not encode on $backend"; }
+    cmp -s "$here/dtype_i4.tilebc" "$out" &&
+      fail "pack-result-shape-unhalved mutant stayed green on $backend: dtype_i4.tilebc still matches"
+  done
+  cmp -s "$work/m-pack-result-shape-unhalved.dtype_i4.jvm.tilebc" \
+    "$work/m-pack-result-shape-unhalved.dtype_i4.native.tilebc" ||
+    fail "pack-result-shape-unhalved: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    fragment="'cuda_tile.pack' op expects source and result to have the same size in bytes"
+    if assemble "$work/m-pack-result-shape-unhalved.dtype_i4.jvm.tilebc" \
+      "$work/m-pack-result-shape-unhalved.cubin" "$(kernel_arch dtype_i4)"; then
+      fail "pack-result-shape-unhalved mutant stayed green: tileiras accepted the mutant's bytecode"
+    fi
+    grep -Fq "$fragment" "$work/m-pack-result-shape-unhalved.cubin.log" ||
+      { cat "$work/m-pack-result-shape-unhalved.cubin.log" >&2; fail "pack-result-shape-unhalved: tileiras refused the bytecode for something other than: $fragment"; }
+    echo "PASS  mutant: pack-result-shape-unhalved (dtype_i4.mlir red in the pack and unpack lines and nowhere else, on both backends; tileiras: $fragment)"
+  else
+    echo "PASS  mutant: pack-result-shape-unhalved (dtype_i4.mlir red in the pack and unpack lines and nowhere else, on both backends)"
+    echo "SKIP  mutant: pack-result-shape-unhalved not handed to tileiras (--without-tileiras)"
+  fi
 fi
 
 _item_tick ""

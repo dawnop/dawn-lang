@@ -34,6 +34,13 @@
 # `--std` points a compile at the edited copy, as scripts/atomic-write-contract
 # does for std/io; the anchor each mutant rewrites must match exactly once, so
 # a refactor that moves it fails here instead of silently un-mutating.
+#
+# `no-subnormal-clamp`'s anchor carries the two comment lines above the
+# statement it rewrites, and that is not decoration: knife T4 added a
+# DIRECTED rounding function next to `round_binary`, and the two decompose
+# the same way, so the statement alone stopped matching once (2 matches) and
+# this script said so rather than un-mutating. The comment is what keeps it
+# pointing at `round_binary` and not at its neighbour.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -161,8 +168,12 @@ mutant ties-away "bf16 round ties" \
 #    exponent, so a tiny value keeps all p bits instead of landing on the
 #    grid.
 mutant no-subnormal-clamp "bf16 round subnormal" \
-  'let qe = (if e < emin { emin } else { e }) - p + 1' \
-  'let qe = e - p + 1'
+  '      # the quantum: one unit in the last place at this exponent, clamped
+      # to the subnormal grid below emin
+      let qe = (if e < emin { emin } else { e }) - p + 1' \
+  '      # the quantum: one unit in the last place at this exponent, clamped
+      # to the subnormal grid below emin
+      let qe = e - p + 1'
 
 # 3. The overflow threshold one binade too high: a value that should round
 #    to infinity rounds to 2^128 instead.

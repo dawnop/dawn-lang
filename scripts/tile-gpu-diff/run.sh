@@ -47,7 +47,30 @@
 #             of knife T3 that a device this tree can reach will run (i16,
 #             i64 and tf32; the three fp8 formats stop at layer 1, because
 #             tileiras refuses them at sm_86 and at sm_89 and this machine
-#             is sm_86) and seq_diff.dawn the eleven multi-launch
+#             is sm_86) and loop_diff.dawn the four kernels of knife T5
+#             (the first whose TRIP COUNT is data: two of them iterate
+#             until a value they computed says stop, one stops before its
+#             first step, and the fourth computes the first one's answer
+#             with a `for` over a host constant and is the family's
+#             kernel-level control) and assert_diff.dawn the six debugging
+#             kernels of knife T6 in THREE processes (the three `assume`
+#             predicates and the assertion that holds in one; the assertion
+#             that FIRES alone, because a fired assertion poisons the
+#             context for the whole process; and `print_tko` alone, because
+#             the bytes it puts on standard output are the judgement --
+#             that program writes its own transcript to standard ERROR so
+#             that standard output belongs to the device) and hint_diff.dawn
+#             the two `optimization_hints` kernels of knife T15 with `vadd`
+#             beside them as the family's kernel-level control (the first
+#             family whose judgement is an equality between KERNELS: a hint
+#             does not change what a kernel computes, so the question is
+#             whether the hinted kernels answer the unhinted one's bytes)
+#             and alloca_diff.dawn the two automatic-allocation kernels of
+#             knife T10 with a kernel-level control beside them (the other
+#             opcode that knife adds, `mmaf_scaled`, takes only fp8 and fp4
+#             operands and is refused below sm_100, so no program here can
+#             launch it)
+#             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
 #             rather than a kernel: one allocation, one upload, up to sixteen
@@ -62,6 +85,19 @@
 #             a driver's loader answers INVALID_IMAGE or crashes depending on
 #             the heap layout) or `fail` (the device answered and the numbers
 #             differ, or the memory round trip did).
+#
+#   Every device program above and below runs under `device`, which is
+#   `timeout` and nothing else. Knife T5 is why: a `loop` whose exit
+#   condition never holds does not fail, it runs forever, and a kernel that
+#   runs forever holds the GPU until something kills the process (the
+#   driver's watchdog does not fire on a headless device). No corpus here
+#   can reach that -- every loop mutant below is built so that reading the
+#   condition backwards makes the loop stop SOONER, and run.sh's comments
+#   say so kernel by kernel -- but "no corpus can" is an argument and this
+#   is a machine. A program killed at DEVICE_TIMEOUT seconds (300 by
+#   default) is reported as `launch:timeout` and stops the run; it is never
+#   a verdict a mutant can be satisfied by.
+#
 #   mutant    one rule removed from a copy of std/gpu.dawn's real handler,
 #             the program rebuilt against that copy, and the verdict
 #             required to move. Knife 16's four are the exception and are
@@ -99,6 +135,44 @@
 #                      one-dimensional grid), while on the device the four
 #                      kernels with a second grid axis leave the sentinel
 #                      where the blocks nobody launched should have written
+#     assert-condition-inverted
+#                      the kernel source's one assertion condition is
+#                      inverted, and `assert_guard` is instantiated at two
+#                      limits the corpus is entirely under and entirely
+#                      over -> the launch that held now fails and the
+#                      launch that failed now holds. BOTH directions are in
+#                      the red set: a gate that only knew how to notice a
+#                      failing launch would be satisfied by a kernel that
+#                      always fires. The three `assume` kernels do not go
+#                      through the anchor and must not move
+#     print-format-wrong
+#                      the package hands `print_tko` its operands
+#                      backwards -> the buffer is untouched, the program's
+#                      own verdict is still `pass`, and the only thing that
+#                      moves is the line on standard output. It is the one
+#                      mutant here that no buffer comparison can see
+#     global-initializer-reversed
+#                      the Global section carries a global's initializer
+#                      back to front -> same length, same type, and
+#                      `tileiras` has nothing to object to, because a table
+#                      is a table. Only the device says global_table
+#                      answers the mirror of what the host declared;
+#                      global_scratch's all-zero global is unmoved and
+#                      global_ctl has no global at all
+#     get-global-wrong-symbol
+#                      every `get_global` names the module's FIRST global
+#                      whatever it was asked for -> the bytes are the same
+#                      length, `tileiras` accepts it (naming a declared
+#                      symbol twice is legal), and only the device says
+#                      global_table's second segment is its first
+#     module-reloaded-per-launch
+#                      the real handler stops keeping the module it loaded
+#                      and loads the cubin again for every launch -> NO
+#                      BYTE MOVES, because nothing in a Tile IR file says
+#                      how long a module lives, and global_scratch's second
+#                      launch starts from the initializer again. It is the
+#                      second mutant here that the bytes cannot see
+#                      (grid-y-ignored is the first)
 #     mma-acc-not-carried
 #                      the GEMM's K loop starts from a fresh zero tile each
 #                      iteration instead of carrying its accumulator ->
@@ -286,6 +360,22 @@
 #                      that corpus too and must still RED, which is what
 #                      separates "the corpus caught it" from "anything
 #                      would have"
+#     loop-break-condition-inverted
+#                      the recording handler puts the loop's `break` in the
+#                      `if`'s ELSE branch and the empty `yield` in its
+#                      THEN, so the loop stops on the negation of the
+#                      condition its body computed -> layer 0 moves (the
+#                      .mlir shows the two branches exchanged) and
+#                      `tileiras` accepts it, because a loop that stops
+#                      somewhere else is a legal loop. Only the device says
+#                      the three kernels with a `loop` answer something
+#                      else. It is the one mutant here that could HANG a
+#                      device, and it does not: each of the three is built
+#                      so that the negated condition is true within one
+#                      iteration (loop_count and loop_until stop on their
+#                      first test, loop_none on its second, because its
+#                      single step takes the tile over the threshold), and
+#                      loop_bound, which has no loop, is the control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -564,13 +654,99 @@ shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast)
 # --gpu-name sm_86 and at sm_89, so no cubin of them can be loaded on this
 # machine's RTX 3080. They stop at layer 1 with a named exemption in
 # scripts/tileir-features/types.txt.
-dtypes=(dtype_i16 dtype_i64 dtype_tf32)
+#
+# Knife T9 put two more in the same family, and they are the sub-byte end
+# of it: `dtype_i4` is the format narrower than a byte and `pack_roundtrip`
+# is the pair of operations that reach it. Neither has a buffer of its own
+# format -- there is no `ptr<i4>` in the dialect at all -- so both take
+# ordinary i32 words and the kernel packs and unpacks them. The knife's
+# other kernel, dtype_e2m1, is absent for exactly the reason the fp8 ones
+# are: `tileiras` refuses the TYPE `f4E2M1FN` at sm_86 and sm_89.
+dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 
-# The tf32 mutant below names one of the three; the other two are its
+# The tf32 mutant below names one of the five; the others are its
 # kernel-level control, and a tag mutant that moved them would be changing
 # something other than the tag it names.
 dtype_red=(dtype_tf32)
-dtype_green=(dtype_i16 dtype_i64)
+dtype_green=(dtype_i16 dtype_i64 dtype_i4 pack_roundtrip)
+
+# The same two lists for knife T9's writer mutant, which names another
+# format: `exti-i4-zero-extends` rewrites the signedness of the widening,
+# and dtype_i4 is the only kernel here that widens anything. The
+# dtype_writer_mutant function reads dtype_red and dtype_green, so the
+# caller assigns them from these before it runs.
+i4_red=(dtype_i4)
+i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
+# The attribute kernels of knife T4, in the order attr_diff takes them. Its
+# subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
+# no opcode at all, and every one of these eight computes the same thing
+# twice or more under different values of one attribute, so the difference
+# between the segments is the measurement (docs 6.8). Which kernel carries
+# which value is what the six mutants below are held to: the directed
+# roundings are attr_round's, the two NaN questions are attr_nan's, the
+# flush is attr_ftz's, the approximate root is attr_approx's and the loop
+# bound comparison is attr_ucmp's. attr_overflow, attr_memsem and attr_addf
+# carry values no corpus here can see, and their mutants are in
+# scripts/tile-golden/run.sh, where a refusal is the verdict.
+attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_addf attr_ucmp)
+
+# The loop kernels of knife T5, in the order loop_diff takes them. Three of
+# them hold a `loop` and a `break`; `loop_bound` computes `loop_count`'s
+# answer with a `for` over a host constant instead, so it holds neither
+# opcode and is this family's KERNEL-LEVEL CONTROL. It is also a second
+# opinion on the counts: the two kernels answer the same tile or the run is
+# red.
+loops=(loop_count loop_bound loop_until loop_none)
+loop_red=(loop_count loop_until loop_none)
+loop_green=(loop_bound)
+
+# The debugging kernels of knife T6, in the order assert_diff's DEFAULT case
+# takes them. `assert_pass` is last for a reason that is not tidiness: a
+# fired assertion poisons the CUDA context for the rest of the process, so a
+# mutant that makes it fire would take every kernel after it down too. The
+# three `assume` kernels hold neither of the two mutable opcodes and are
+# this family's KERNEL-LEVEL CONTROL.
+dbg=(assume_divby assume_same assume_bounded assert_pass)
+dbg_red=(assert_pass)
+dbg_green=(assume_divby assume_same assume_bounded)
+
+# The two that cannot share a process with anything: `assert_fail` because
+# it poisons the context, `print_tile` because the bytes it puts on standard
+# output are the judgement and nothing else may be mixed into them.
+dbg_alone=(assert_fail print_tile)
+# The static-global kernels of knife T7, in the order global_diff takes
+# them. `global_table` reads two globals and `global_scratch` writes one;
+# `global_ctl` computes global_table's answer out of two BUFFERS instead,
+# so it holds neither opcode and is this family's KERNEL-LEVEL CONTROL as
+# well as a second opinion on the tables. `global_scratch` is also the one
+# kernel in this directory launched more than once WITHOUT being a step of
+# a sequence: the two launches are the same kernel on the same module, and
+# that is the only shape in which a static allocation's lifetime is
+# visible from outside the device.
+globals_=(global_table global_ctl global_scratch)
+
+# The automatic-allocation kernels of knife T10, in the order alloca_diff
+# takes them. `alloca_scratch` writes a fresh allocation and reads it back
+# in the same launch; `alloca_two` makes two of them in one block and
+# answers a value that is 0 on every lane if they are the same address;
+# `alloca_ctl` computes alloca_scratch's answer with no allocation in it at
+# all, so it holds none of the opcode and is this family's KERNEL-LEVEL
+# CONTROL. `mmaf_scaled_e4m3`, the other opcode of the same knife, is NOT
+# here and cannot be: every operand type it takes is fp8 or fp4, which
+# `tileiras` refuses below sm_100, so it is assembled for sm_100 in
+# scripts/tile-golden and this machine's RTX 3080 never sees it.
+allocas=(alloca_scratch alloca_two alloca_ctl)
+
+# The `optimization_hints` kernels of knife T15, in the order hint_diff
+# takes them. `vadd` is the family's KERNEL-LEVEL CONTROL and is what makes
+# the family a judgement at all: a hint does not change what a kernel
+# computes, so the question this family asks the device is not "is the
+# answer right" but "is it the same answer the kernel with no hints gives",
+# and that needs the unhinted kernel in the same process on the same corpus.
+# vadd's cubin is assembled already; naming it here is what puts it on
+# hint_diff's command line.
+hints=(hint_entry hint_memory)
+hint_order=("${hints[@]}" vadd)
 
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
@@ -622,7 +798,8 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${allocas[@]}" \
+  "${hints[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -654,6 +831,18 @@ for k in "${shaped[@]}"; do shape_cubins+=("$work/$k.cubin"); done
 
 dtype_cubins=()
 for k in "${dtypes[@]}"; do dtype_cubins+=("$work/$k.cubin"); done
+loop_cubins=()
+for k in "${loops[@]}"; do loop_cubins+=("$work/$k.cubin"); done
+attr_cubins=()
+for k in "${attrs[@]}"; do attr_cubins+=("$work/$k.cubin"); done
+hint_cubins=()
+for k in "${hint_order[@]}"; do hint_cubins+=("$work/$k.cubin"); done
+dbg_cubins=()
+for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
+global_cubins=()
+for k in "${globals_[@]}"; do global_cubins+=("$work/$k.cubin"); done
+alloca_cubins=()
+for k in "${allocas[@]}"; do alloca_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -682,6 +871,35 @@ verdict_of() { # transcript
   sed -n 's/^tile-gpu-diff: //p' "$1" | tail -n 1
 }
 
+# How long one device program may run before it is killed. Nothing here
+# should come near it: the longest of these programs is seconds of GPU work
+# and a few seconds of host reference. It is a bound on the ONE failure mode
+# a Tile IR `loop` introduced (knife T5): a kernel whose exit condition
+# never holds does not answer wrongly, it does not answer, and it keeps the
+# device until the process dies. Killing the process is what releases the
+# context; waiting on CUDA does not.
+device_timeout="${DEVICE_TIMEOUT:-300}"
+
+# The original stderr, so that a timeout can say so on the terminal even
+# though every call below has its output redirected into the transcript.
+exec 9>&2
+
+# Run one device program under that bound. On a timeout the transcript gets
+# a `launch:timeout` verdict line -- so a caller that reads the verdict sees
+# a named refusal rather than an empty file -- and the whole run stops:
+# there is no situation in which a program that would not stop is the
+# answer a mutant wanted.
+device() { # program, args...
+  local rc=0
+  timeout -k 5 "$device_timeout" "$@" || rc=$?
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    echo "tile-gpu-diff: launch:timeout"
+    echo "FAIL: $1 ran past ${device_timeout}s and was killed; the device was not asked again" >&9
+    exit 1
+  fi
+  return "$rc"
+}
+
 # ---- jvm
 rc=0
 "$root/bin/dawn" run "$here/vadd_diff.dawn" -- "${cubins[@]}" > "$work/jvm.out" 2> "$work/jvm.err" || rc=$?
@@ -693,7 +911,7 @@ echo "PASS  jvm: the real handler refuses every operation with gpu.unsupported_b
 # ---- native, clean std
 build_native "$root/std" "$work/clean.bin"
 rc=0
-"$work/clean.bin" "${cubins[@]}" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
+device "$work/clean.bin" "${cubins[@]}" > "$work/clean.out" 2> "$work/clean.err" || rc=$?
 cat "$work/clean.out"
 verdict="$(verdict_of "$work/clean.out")"
 case "$verdict" in
@@ -709,7 +927,7 @@ note="$(sed -n 's/^  note  //p' "$work/clean.out" | head -n 1)"
 # ---- native, the boundary kernels (knife 7a)
 build_native "$root/std" "$work/masked.bin" "$here/mask_diff.dawn"
 rc=0
-"$work/masked.bin" "${masked_cubins[@]}" > "$work/masked.out" 2> "$work/masked.err" || rc=$?
+device "$work/masked.bin" "${masked_cubins[@]}" > "$work/masked.out" 2> "$work/masked.err" || rc=$?
 cat "$work/masked.out"
 masked_verdict="$(verdict_of "$work/masked.out")"
 case "$masked_verdict" in
@@ -725,7 +943,7 @@ esac
 # ---- native, the reduction and transcendental kernels (knife 7b)
 build_native "$root/std" "$work/reduced.bin" "$here/red_diff.dawn"
 rc=0
-"$work/reduced.bin" "${reduced_cubins[@]}" > "$work/reduced.out" 2> "$work/reduced.err" || rc=$?
+device "$work/reduced.bin" "${reduced_cubins[@]}" > "$work/reduced.out" 2> "$work/reduced.err" || rc=$?
 cat "$work/reduced.out"
 reduced_verdict="$(verdict_of "$work/reduced.out")"
 case "$reduced_verdict" in
@@ -741,7 +959,7 @@ esac
 # ---- native, the two-dimensional kernels (knife 8)
 build_native "$root/std" "$work/twod.bin" "$here/mm_diff.dawn"
 rc=0
-"$work/twod.bin" "${twod_cubins[@]}" > "$work/twod.out" 2> "$work/twod.err" || rc=$?
+device "$work/twod.bin" "${twod_cubins[@]}" > "$work/twod.out" 2> "$work/twod.err" || rc=$?
 cat "$work/twod.out"
 twod_verdict="$(verdict_of "$work/twod.out")"
 case "$twod_verdict" in
@@ -757,7 +975,7 @@ esac
 # ---- native, the strided kernels (knife 9)
 build_native "$root/std" "$work/strided.bin" "$here/stride_diff.dawn"
 rc=0
-"$work/strided.bin" "${strided_cubins[@]}" > "$work/strided.out" 2> "$work/strided.err" || rc=$?
+device "$work/strided.bin" "${strided_cubins[@]}" > "$work/strided.out" 2> "$work/strided.err" || rc=$?
 cat "$work/strided.out"
 strided_verdict="$(verdict_of "$work/strided.out")"
 case "$strided_verdict" in
@@ -773,7 +991,7 @@ esac
 # ---- native, the integer kernels (knife 10)
 build_native "$root/std" "$work/ints.bin" "$here/int_diff.dawn"
 rc=0
-"$work/ints.bin" "${int_cubins[@]}" > "$work/ints.out" 2> "$work/ints.err" || rc=$?
+device "$work/ints.bin" "${int_cubins[@]}" > "$work/ints.out" 2> "$work/ints.err" || rc=$?
 cat "$work/ints.out"
 int_verdict="$(verdict_of "$work/ints.out")"
 case "$int_verdict" in
@@ -789,7 +1007,7 @@ esac
 # ---- native, the wide kernels (knife 11)
 build_native "$root/std" "$work/wide.bin" "$here/wide_diff.dawn"
 rc=0
-"$work/wide.bin" "${wide_cubins[@]}" > "$work/wide.out" 2> "$work/wide.err" || rc=$?
+device "$work/wide.bin" "${wide_cubins[@]}" > "$work/wide.out" 2> "$work/wide.err" || rc=$?
 cat "$work/wide.out"
 wide_verdict="$(verdict_of "$work/wide.out")"
 case "$wide_verdict" in
@@ -805,7 +1023,7 @@ esac
 # ---- native, the gather and scatter kernels (knife 12)
 build_native "$root/std" "$work/gath.bin" "$here/gath_diff.dawn"
 rc=0
-"$work/gath.bin" "${gath_cubins[@]}" > "$work/gath.out" 2> "$work/gath.err" || rc=$?
+device "$work/gath.bin" "${gath_cubins[@]}" > "$work/gath.out" 2> "$work/gath.err" || rc=$?
 cat "$work/gath.out"
 gath_verdict="$(verdict_of "$work/gath.out")"
 case "$gath_verdict" in
@@ -821,7 +1039,7 @@ esac
 # ---- native, the scan kernels (knife 13)
 build_native "$root/std" "$work/scan.bin" "$here/scan_diff.dawn"
 rc=0
-"$work/scan.bin" "${scan_cubins[@]}" > "$work/scan.out" 2> "$work/scan.err" || rc=$?
+device "$work/scan.bin" "${scan_cubins[@]}" > "$work/scan.out" 2> "$work/scan.err" || rc=$?
 cat "$work/scan.out"
 scan_verdict="$(verdict_of "$work/scan.out")"
 case "$scan_verdict" in
@@ -837,7 +1055,7 @@ esac
 # ---- native, the atomic kernels (knife 14)
 build_native "$root/std" "$work/atom.bin" "$here/atom_diff.dawn"
 rc=0
-"$work/atom.bin" "${atom_cubins[@]}" > "$work/atom.out" 2> "$work/atom.err" || rc=$?
+device "$work/atom.bin" "${atom_cubins[@]}" > "$work/atom.out" 2> "$work/atom.err" || rc=$?
 cat "$work/atom.out"
 atom_verdict="$(verdict_of "$work/atom.out")"
 case "$atom_verdict" in
@@ -853,7 +1071,7 @@ esac
 # ---- native, the error function kernels (knife 15)
 build_native "$root/std" "$work/erf.bin" "$here/erf_diff.dawn"
 rc=0
-"$work/erf.bin" "${erf_cubins[@]}" > "$work/erf.out" 2> "$work/erf.err" || rc=$?
+device "$work/erf.bin" "${erf_cubins[@]}" > "$work/erf.out" 2> "$work/erf.err" || rc=$?
 cat "$work/erf.out"
 erf_verdict="$(verdict_of "$work/erf.out")"
 case "$erf_verdict" in
@@ -869,7 +1087,7 @@ esac
 # ---- native, the trigonometric kernels (knife T1)
 build_native "$root/std" "$work/trig.bin" "$here/trig_diff.dawn"
 rc=0
-"$work/trig.bin" "${trig_cubins[@]}" > "$work/trig.out" 2> "$work/trig.err" || rc=$?
+device "$work/trig.bin" "${trig_cubins[@]}" > "$work/trig.out" 2> "$work/trig.err" || rc=$?
 cat "$work/trig.out"
 trig_verdict="$(verdict_of "$work/trig.out")"
 case "$trig_verdict" in
@@ -885,7 +1103,7 @@ esac
 # ---- native, the element format kernels (knife T3)
 build_native "$root/std" "$work/dtype.bin" "$here/dtype_diff.dawn"
 rc=0
-"$work/dtype.bin" "${dtype_cubins[@]}" > "$work/dtype.out" 2> "$work/dtype.err" || rc=$?
+device "$work/dtype.bin" "${dtype_cubins[@]}" > "$work/dtype.out" 2> "$work/dtype.err" || rc=$?
 cat "$work/dtype.out"
 dtype_verdict="$(verdict_of "$work/dtype.out")"
 case "$dtype_verdict" in
@@ -898,13 +1116,109 @@ case "$dtype_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | head -n 1)"
 
+# ---- native, the loop kernels (knife T5)
+build_native "$root/std" "$work/loop.bin" "$here/loop_diff.dawn"
+rc=0
+device "$work/loop.bin" "${loop_cubins[@]}" > "$work/loop.out" 2> "$work/loop.err" || rc=$?
+cat "$work/loop.out"
+loop_verdict="$(verdict_of "$work/loop.out")"
+case "$loop_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#loops[@]} loop kernels agree with the fake device bit for bit, trip counts included" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $loop_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $loop_verdict" ;;
+  fail) cat "$work/loop.err" >&2; fail "the device answered and disagreed with the fake device on a loop kernel (see the transcript above)" ;;
+  *) cat "$work/loop.err" >&2; fail "loop_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/loop.out" | head -n 1)"
+
+# ---- native, the debugging kernels (knife T6)
+#
+# THREE RUNS OF ONE PROGRAM, AND THE TRANSCRIPT IS ON STANDARD ERROR. This
+# family is the only one here whose kernels write to the process's standard
+# output: the driver flushes `assert`'s message and `print_tko`'s formatted
+# line there when the context is synchronised. So assert_diff.dawn prints
+# its whole transcript, verdict line included, on standard ERROR, and what
+# arrives on standard output is exactly what the device put there -- which
+# is what makes "this launch should print these bytes" a judgement a machine
+# can make.
+#
+# The three runs are three PROCESSES because a fired assertion is sticky:
+# measured here, `cuCtxSynchronize` answers CUDA_ERROR_LAUNCH_FAILED and
+# every call after it in the same process answers the same thing. A kernel
+# that is expected to fail therefore cannot share a process with one whose
+# answer is to be compared.
+build_native "$root/std" "$work/assert.bin" "$here/assert_diff.dawn"
+rc=0
+device "$work/assert.bin" "${dbg_cubins[@]}" > "$work/assert.stdout" 2> "$work/assert.out" || rc=$?
+cat "$work/assert.out"
+[ ! -s "$work/assert.stdout" ] ||
+  { cat "$work/assert.stdout" >&2; fail "the default case put bytes on standard output: none of ${dbg[*]} prints"; }
+dbg_verdict="$(verdict_of "$work/assert.out")"
+case "$dbg_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#dbg[@]} debugging kernels agree with the fake device bit for bit, and none of them printed" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $dbg_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $dbg_verdict" ;;
+  fail) fail "the device answered and disagreed with the fake device on a knife T6 kernel (see the transcript above)" ;;
+  *) fail "assert_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/assert.out" | head -n 1)"
+
+# The FAIL case: one kernel in a process of its own, whose judgement is that
+# the host is told. Two halves, and neither is a comparison: the driver's
+# error, and the message this repository wrote into the bytecode's String
+# section coming back out once per failing lane with that lane's index.
+rc=0
+device "$work/assert.bin" --case fail "$work/assert_fail.cubin" \
+  > "$work/assert-fail.stdout" 2> "$work/assert-fail.out" || rc=$?
+cat "$work/assert-fail.out"
+dbg_fail_verdict="$(verdict_of "$work/assert-fail.out")"
+case "$dbg_fail_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        assert_message_lines=$(grep -c 'tile-golden: a lane reached the limit' "$work/assert-fail.stdout" || true)
+        [ "$assert_message_lines" = 128 ] ||
+          { head -3 "$work/assert-fail.stdout" >&2; fail "assert_fail printed the message on $assert_message_lines lane(s), not 128"; }
+        for pos in 0 127; do
+          grep -q "position: \[$pos\]: tile-golden: a lane reached the limit" "$work/assert-fail.stdout" ||
+            fail "assert_fail's output names no lane $pos: the message carries the index of the lane that failed"
+        done
+        echo "PASS  native: assert_fail's launch failed the way it was meant to, and the message came back on all 128 lanes with their indices" ;;
+  blocked:*) echo "BLOCKED  native: the driver stopped assert_fail somewhere else: $dbg_fail_verdict" ;;
+  fail) cat "$work/assert-fail.stdout" >&2; fail "assert_fail's assertion did not fire: the launch was expected to fail and did not" ;;
+  *) fail "assert_diff --case fail printed no verdict (exit $rc)" ;;
+esac
+
+# The PRINT case: one kernel in a process of its own, and the only judgement
+# in this directory whose subject is the bytes a launch put on standard
+# output. The expected bytes are computed by the HOST references from the
+# corpus (assert_diff prints them as hex on standard error), not copied from
+# what the device did.
+rc=0
+device "$work/assert.bin" --case print "$work/print_tile.cubin" \
+  > "$work/print.stdout" 2> "$work/print.out" || rc=$?
+cat "$work/print.out"
+dbg_print_verdict="$(verdict_of "$work/print.out")"
+print_want_hex="$(sed -n 's/^print-expect-hex //p' "$work/print.out" | tail -n 1)"
+print_got_hex="$(od -An -tx1 "$work/print.stdout" | tr -d ' \n')"
+case "$dbg_print_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        [ -n "$print_want_hex" ] || fail "assert_diff --case print printed no expected bytes"
+        [ "$print_got_hex" = "$print_want_hex" ] ||
+          fail "print_tile put $print_got_hex on standard output and the host reference wanted $print_want_hex"
+        echo "PASS  native: print_tile's line on standard output is the host reference's byte for byte ($print_want_hex)" ;;
+  blocked:*) echo "BLOCKED  native: the driver refused before print_tile could be compared: $dbg_print_verdict" ;;
+  fail) fail "the device answered and disagreed with the fake device on print_tile (see the transcript above)" ;;
+  *) fail "assert_diff --case print printed no verdict (exit $rc)" ;;
+esac
+
 # The same two kernels on the CONTROL corpus, where no lane is negative and
 # the odd symmetry's `select` never chooses its negated arm. The clean run
 # must pass there as well -- it is the same kernel -- and what matters is
 # the negative count on the index lines, which the erf-sign-not-flipped
 # mutant needs to be zero here and nonzero above.
 rc=0
-"$work/erf.bin" --corpus positive "${erf_cubins[@]}" > "$work/erf-positive.out" 2> "$work/erf-positive.err" || rc=$?
+device "$work/erf.bin" --corpus positive "${erf_cubins[@]}" > "$work/erf-positive.out" 2> "$work/erf-positive.err" || rc=$?
 erf_positive_verdict="$(verdict_of "$work/erf-positive.out")"
 [ "$erf_positive_verdict" = "$erf_verdict" ] ||
   { cat "$work/erf-positive.out" >&2; fail "the control corpus answers $erf_positive_verdict where the main one answers $erf_verdict"; }
@@ -914,7 +1228,7 @@ erf_positive_verdict="$(verdict_of "$work/erf-positive.out")"
 # the number that matters is the collision count on the line below, which
 # the atomic-as-plain-store mutant needs to be zero here and nonzero above.
 rc=0
-"$work/atom.bin" --corpus unique "${atom_cubins[@]}" > "$work/atom-unique.out" 2> "$work/atom-unique.err" || rc=$?
+device "$work/atom.bin" --corpus unique "${atom_cubins[@]}" > "$work/atom-unique.out" 2> "$work/atom-unique.err" || rc=$?
 atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 [ "$atom_unique_verdict" = "$atom_verdict" ] ||
   { cat "$work/atom-unique.out" >&2; fail "the control corpus answers $atom_unique_verdict where the main one answers $atom_verdict"; }
@@ -922,7 +1236,7 @@ atom_unique_verdict="$(verdict_of "$work/atom-unique.out")"
 # ---- native, the shape, grid, token and pointer kernels (knife T2)
 build_native "$root/std" "$work/shape.bin" "$here/shape_diff.dawn"
 rc=0
-"$work/shape.bin" "${shape_cubins[@]}" > "$work/shape.out" 2> "$work/shape.err" || rc=$?
+device "$work/shape.bin" "${shape_cubins[@]}" > "$work/shape.out" 2> "$work/shape.err" || rc=$?
 cat "$work/shape.out"
 shape_verdict="$(verdict_of "$work/shape.out")"
 case "$shape_verdict" in
@@ -935,6 +1249,183 @@ case "$shape_verdict" in
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | head -n 1)"
 
+# ---- native, the attribute kernels (knife T4)
+build_native "$root/std" "$work/attr.bin" "$here/attr_diff.dawn"
+rc=0
+device "$work/attr.bin" "${attr_cubins[@]}" > "$work/attr.out" 2> "$work/attr.err" || rc=$?
+cat "$work/attr.out"
+attr_verdict="$(verdict_of "$work/attr.out")"
+case "$attr_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#attrs[@]} attribute kernels agree with the fake device" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $attr_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $attr_verdict" ;;
+  fail) cat "$work/attr.err" >&2; fail "the device answered and disagreed with the fake device on a knife T4 kernel (see the transcript above)" ;;
+  *) cat "$work/attr.err" >&2; fail "attr_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/attr.out" | head -n 1)"
+
+# ---- native, the static-global kernels (knife T7)
+build_native "$root/std" "$work/global.bin" "$here/global_diff.dawn"
+rc=0
+device "$work/global.bin" "${global_cubins[@]}" > "$work/global.out" 2> "$work/global.err" || rc=$?
+cat "$work/global.out"
+global_verdict="$(verdict_of "$work/global.out")"
+case "$global_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#globals_[@]} static-global kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $global_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $global_verdict" ;;
+  fail) cat "$work/global.err" >&2; fail "the device answered and disagreed with the fake device on a knife T7 kernel (see the transcript above)" ;;
+  *) cat "$work/global.err" >&2; fail "global_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/global.out" | head -n 1)"
+
+# The static-global corpus, held field by field. Each of these is what
+# makes one of the three mutants below a measurement rather than a
+# sentence: two tables that agreed everywhere would hide a `get_global`
+# that named the wrong symbol; a table that read the same backwards would
+# hide an initializer written in reverse; a table whose lanes were all its
+# first would hide one written as a one-element splat; and an input with a
+# zero lane is a lane whose second launch answers what its first did,
+# where the persistence claim has nothing to say.
+global_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/global.out")"
+[ -n "$global_shape" ] || fail "global_diff printed no index line"
+for field in distinct asymmetric growing; do
+  value="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the global index line names no $field: $global_shape"
+  [ "$value" = "128" ] ||
+    fail "the global corpus has $field=$value of 128 lanes, so that claim is not fully tested: $global_shape"
+done
+# 127 and not 128: lane 0 IS its own first element, so an initializer
+# written as a one-element splat agrees with the truth there whatever the
+# table is, and 127 is the most this count can be.
+nonsplat="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^nonsplat=//p')"
+[ "$nonsplat" = "127" ] ||
+  fail "the global corpus has nonsplat=$nonsplat of the 127 lanes it could have: $global_shape"
+launches="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^scratch_launches=//p')"
+[ "${launches:-0}" -ge 2 ] ||
+  fail "global_scratch is launched ${launches:-0} time(s), so nothing observes the global's lifetime: $global_shape"
+echo "PASS  corpus: the two tables differ on every lane, neither is a mirror or a splat, every input lane is non-zero, and global_scratch is launched $launches times ($global_shape)"
+
+# ---- native, the automatic-allocation kernels (knife T10)
+build_native "$root/std" "$work/alloca.bin" "$here/alloca_diff.dawn"
+rc=0
+device "$work/alloca.bin" "${alloca_cubins[@]}" > "$work/alloca.out" 2> "$work/alloca.err" || rc=$?
+cat "$work/alloca.out"
+alloca_verdict="$(verdict_of "$work/alloca.out")"
+case "$alloca_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#allocas[@]} automatic-allocation kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $alloca_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $alloca_verdict" ;;
+  fail) cat "$work/alloca.err" >&2; fail "the device answered and disagreed with the fake device on a knife T10 kernel (see the transcript above)" ;;
+  *) cat "$work/alloca.err" >&2; fail "alloca_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/alloca.out" | head -n 1)"
+
+# The allocation corpus, held field by field. `live` is the lanes where
+# `3 * x` differs from `x`, so a scratch that read back zeros has somewhere
+# to show; `unaliased` is the lanes where `2 * x + 1` is not 0, which is
+# what alloca-aliased needs; `apart` is the lanes where the two allocations
+# hold different values, without which overwriting one with the other would
+# be invisible whatever the addresses were.
+alloca_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/alloca.out")"
+[ -n "$alloca_shape" ] || fail "alloca_diff printed no index line"
+for field in live unaliased apart; do
+  value="$(printf '%s
+' "$alloca_shape" | tr ' ' '
+' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the alloca index line names no $field: $alloca_shape"
+  [ "$value" = "128" ] ||
+    fail "the alloca corpus has $field=$value of 128 lanes, so that claim is not fully tested: $alloca_shape"
+done
+echo "PASS  corpus: every lane makes the scratch visible, tells two allocations apart, and holds two different values ($alloca_shape)"
+
+# ---- native, the optimization hint kernels (knife T15)
+#
+# The verdict is the usual one (every kernel agrees with its reference),
+# and the family's own claim is the `agree` count below it: a hint is a
+# suggestion, so what a device can be asked about one is whether the
+# hinted kernels answer the bytes the UNHINTED kernel answers, and that is
+# a comparison between three cubins in one process rather than three
+# comparisons against a reference.
+build_native "$root/std" "$work/hint.bin" "$here/hint_diff.dawn"
+rc=0
+device "$work/hint.bin" "${hint_cubins[@]}" > "$work/hint.out" 2> "$work/hint.err" || rc=$?
+cat "$work/hint.out"
+hint_verdict="$(verdict_of "$work/hint.out")"
+case "$hint_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#hints[@]} hint kernels and their control agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $hint_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $hint_verdict" ;;
+  fail) cat "$work/hint.err" >&2; fail "the device answered and disagreed with the fake device on a knife T15 kernel (see the transcript above)" ;;
+  *) cat "$work/hint.err" >&2; fail "hint_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/hint.out" | head -n 1)"
+
+# The claim, held here and not only inside the program: all three kernels
+# answered the control's bytes, and the corpus really did carry hints. A
+# writer that dropped the attribute would keep the first count at 3 of 3
+# and is caught in scripts/tile-golden instead; a corpus that carried no
+# hint would keep it at 3 of 3 too, and nothing but these counts would say
+# so.
+if [ "$hint_verdict" = pass ]; then
+  hint_probe="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
+  hint_agree="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n 's/^agree=//p' | head -n 1)"
+  [ "$hint_agree" = "3/3" ] ||
+    { printf '%s\n' "$hint_probe" >&2; fail "the hinted kernels and the control did not answer the same bytes: agree=$hint_agree"; }
+  for claim in entry_archs entry_keys memory_hinted memory_plain; do
+    value="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n "s/^${claim}=//p" | head -n 1)"
+    [ -n "$value" ] ||
+      { printf '%s\n' "$hint_probe" >&2; fail "the hint probe line has no $claim count"; }
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      { printf '%s\n' "$hint_probe" >&2; fail "$claim is $value: the corpus carries no hint there, so nothing here is evidence about it"; }
+  done
+  echo "PASS  probe: hint_entry and hint_memory answered vadd's bytes ($hint_probe)"
+else
+  echo "SKIP  probe: the hint counts are not verifiable on this driver ($hint_verdict)"
+fi
+
+# Each of these counts is a pair of segments that the attribute has to move
+# APART on the device. A zero would mean the value reached the assembler and
+# did nothing, and the reference would still have agreed, because the
+# reference is written from the dialect and not from the device. That is the
+# whole reason the counts are held here and not only inside the program: the
+# six package mutants below each drive exactly one of them to zero or change
+# the kernel's answer, and without the pin half of them would stay green.
+if [ "$attr_verdict" = pass ]; then
+  attr_probe_line="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
+  for claim in attr_round:add attr_round:mul attr_round:div attr_nan:ordering attr_nan:maxf \
+    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes; do
+    field="${claim#*:}"
+    kernel="${claim%%:*}"
+    value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | head -n 1)"
+    [ -n "$value" ] ||
+      { printf '%s\n' "$attr_probe_line" >&2; fail "the attribute probe line has no $claim count"; }
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      { printf '%s\n' "$attr_probe_line" >&2; fail "$claim is $value: the attribute moved no lane, so nothing here is evidence about it"; }
+  done
+  # The CORPUS half of attr_ftz's third lane shape, held where the probe
+  # cannot: the probe says the device moved those lanes, this says the
+  # corpus still has lanes for it to move. Two failures that would read
+  # the same on one pin (the shape gone, or the device no longer flushing
+  # operands) read differently on two.
+  ftz_shape="$(awk '$1 == "kernel" && $2 == "attr_ftz" {f=1} f && /^  index /{print; exit}' "$work/attr.out")"
+  normal_sum="$(printf '%s\n' "$ftz_shape" | tr ' ' '\n' | sed -n 's/^normal_sum_from_subnormal=//p')"
+  [ -n "$normal_sum" ] && [ "$normal_sum" -gt 0 ] 2> /dev/null ||
+    { printf '%s\n' "$ftz_shape" >&2; fail "attr_ftz's corpus has no lane whose sum is normal and whose operand is subnormal, so only the result flush is being tested"; }
+  echo "PASS  corpus: attr_ftz has a lane shape only the operand flush can move ($ftz_shape)"
+
+  # The loop bound comparison is not a lane count but two numbers, and both
+  # of them are the claim: a signed comparison of this range runs the loop
+  # no times and an unsigned one runs it thirty-two times.
+  grep -q 'attr_ucmp:signed=0.0 attr_ucmp:unsigned=32.0' "$work/attr.out" ||
+    { cat "$work/attr.out" >&2; fail "attr_ucmp did not answer 0 signed and 32 unsigned"; }
+  echo "PASS  corpus: every attribute moved its own pair of segments ($attr_probe_line)"
+fi
+
 # ---- native, the multi-launch sequences (knife 16)
 #
 # One program, six sequences, and a verdict per sequence rather than per
@@ -946,7 +1437,7 @@ esac
 # program prints.
 build_native "$root/std" "$work/seq.bin" "$here/seq_diff.dawn"
 rc=0
-"$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
+device "$work/seq.bin" "${seq_cubins[@]}" > "$work/seq.out" 2> "$work/seq.err" || rc=$?
 cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
@@ -996,6 +1487,51 @@ case "$scatter_repeats" in
   *in_range_repeated=0) echo "PASS  corpus: scatter_perm's destinations are a permutation ($scatter_repeats)" ;;
   *) fail "scatter_perm's corpus is not a permutation, so its verdict means nothing: $scatter_repeats" ;;
 esac
+
+# The loop corpus, held field by field. Every one of these is what makes a
+# claim above a measurement: a corpus whose longest chain were one step
+# would not tell a data-dependent trip count from a constant one; a corpus
+# with no lane already at 1 would leave the saturation untested, and the
+# exit condition is a maximum, so an unsaturated lane would run the tile
+# forever; a corpus with no odd lane would never take the `3n + 1` branch;
+# and `loop_none`'s corpus has to be UNDER its threshold or the kernel is
+# not the zero-iteration case at all.
+loop_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/loop.out")"
+[ -n "$loop_shape" ] || fail "loop_diff printed no index line"
+for field in at_one odd; do
+  value="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the loop index line names no $field: $loop_shape"
+  [ "$value" != 0 ] ||
+    fail "the loop corpus has $field=0, so that claim is not being tested: $loop_shape"
+done
+longest="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^longest_chain=//p')"
+[ "${longest:-0}" -gt 1 ] ||
+  fail "the loop corpus's longest chain is ${longest:-none}, so its trip count is not data: $loop_shape"
+over="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^loop_none_over_threshold=//p')"
+[ "$over" = 0 ] ||
+  fail "loop_none's corpus has $over lane(s) over its threshold, so it is not the zero-iteration case: $loop_shape"
+echo "PASS  corpus: the loop corpus decides its own trip count, saturates and stays under loop_none's threshold ($loop_shape)"
+
+# The knife T6 corpus, held field by field. Three of these five hold a count
+# DOWN to zero, which is the opposite of every other corpus check here and
+# is what an `assume` needs: a lane that breaks the predicate does not make
+# the answer wrong, it makes the program undefined (Ops.td's AssumeOp), so
+# there would be nothing to compare. The other two are the two SIDES of the
+# assertion's condition: every lane under assert_pass's limit and no lane
+# under assert_fail's, which is what makes the inverted mutant flip both
+# kernels cleanly instead of half-firing either.
+dbg_shape="$(awk '/^index /{sub(/^index /, ""); print; exit}' "$work/assert.out")"
+[ -n "$dbg_shape" ] || fail "assert_diff printed no index line"
+for field in divby_off_grid same_broken_group bounded_out_of_range under_fail_limit; do
+  value="$(printf '%s\n' "$dbg_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the knife T6 index line names no $field: $dbg_shape"
+  [ "$value" = 0 ] ||
+    fail "the knife T6 corpus has $field=$value: an assume whose predicate is false is undefined, not wrong ($dbg_shape)"
+done
+under_pass="$(printf '%s\n' "$dbg_shape" | tr ' ' '\n' | sed -n 's/^under_pass_limit=//p')"
+[ "$under_pass" = 128 ] ||
+  fail "only $under_pass of 128 lanes are under assert_pass's limit, so its assertion is not the all-true side: $dbg_shape"
+echo "PASS  corpus: every knife T6 predicate is true of its corpus, and the two assertion limits are its two sides ($dbg_shape)"
 
 # Abramowitz-Stegun 7.1.26 is an approximation, so the corpus is what says
 # WHERE it was checked. Three counts, all of them held above zero: the
@@ -1064,12 +1600,19 @@ echo "PASS  corpus: trig_sweep covers every lane class the seven operations need
 #         A corpus on the tf32 grid would let a truncating conversion pass
 #         for a rounding one, and one without ties would not see
 #         ties-to-even at all.
-for kernel in dtype_i16 dtype_i64 dtype_tf32; do
+#   i4    negative, add_wrapped, mul_wrapped, shift_differs, nibble_values
+#         `negative` and `shift_differs` are the same lanes counted twice
+#         over, and they are what makes the SIGN of the widening visible:
+#         with none of them the two shift segments would be one segment
+#         written twice. `nibble_values` must be all sixteen, so no
+#         encoding of the format is missing from the corpus.
+for kernel in dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip; do
   dtype_shape="$(awk -v want="$kernel" '/^kernel /{cur=$2} cur == want && /^  index /{sub(/^  index /, ""); print; exit}' "$work/dtype.out")"
   [ -n "$dtype_shape" ] || fail "dtype_diff printed no index line for $kernel"
   case "$kernel" in
     dtype_i16) fields="negative add_wrapped mul_wrapped shift_wrapped extremes" ;;
     dtype_i64) fields="negative beyond_i32 products_beyond_i32 products_inside_2p52" ;;
+    dtype_i4|pack_roundtrip) fields="negative add_wrapped mul_wrapped shift_differs nibble_values" ;;
     *) fields="off_grid near_ties subnormal infinite rounded_on_upload" ;;
   esac
   for field in $fields; do
@@ -1290,14 +1833,23 @@ tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
 tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
 tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
+tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
+tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
+tiers="$tiers hint:$(sed -n 's/^tiers //p' "$work/hint.out" | tail -n 1)"
+tiers="$tiers dbg:$(sed -n 's/^tiers //p' "$work/assert.out" | tail -n 1)"
+tiers="$tiers global:$(sed -n 's/^tiers //p' "$work/global.out" | tail -n 1)"
+tiers="$tiers alloca:$(sed -n 's/^tiers //p' "$work/alloca.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
 trig_probe="$(sed -n 's/^probe per-op //p' "$work/trig.out" | tail -n 1)"
+attr_probe="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
+hint_probe_line="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
 seq_launch_probe="$(sed -n 's/^probe launches //p' "$work/seq.out" | tail -n 1)"
+loop_probe="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
-  " per-op miss: $trig_probe; sequence launches: $seq_launch_probe"
+  " per-op miss: $trig_probe; sequence launches: $seq_launch_probe; loop rounds: $loop_probe"
 
 # The ledger records one verdict for the tree: both programs pass, or the
 # first thing that stopped one of them.
@@ -1413,7 +1965,7 @@ std_gz="$(mutant_std grid-zero \
   '                  gpu_launch_host(m, kernel, 0, gy, gz, device_pointers(table, args))')"
 build_native "$std_gz" "$work/m-grid-zero.bin"
 rc=0
-"$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
+device "$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-grid-zero.out")"
 if [ "$verdict" = pass ]; then
   [ "$mverdict" != pass ] ||
@@ -1464,7 +2016,7 @@ for k in "${masked[@]}"; do
 done
 echo "      mask-all-true: the six .tilebc files differ from the goldens and tileiras still accepts them"
 rc=0
-"$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
+device "$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-mask-all-true.out")"
 if [ "$masked_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-mask-all-true.out" || true)
@@ -1556,7 +2108,7 @@ echo "      reduce-identity-wrong: 9 of ${#reduced[@]} .tilebc files differ from
 id_cubins=()
 for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin"); done
 rc=0
-"$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
+device "$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
 identity_red=(softmax dot mse rms_norm ppo_loss dpo_loss)
 identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax agent_step)
@@ -1619,7 +2171,7 @@ for k in "${reduced[@]}"; do
   if [ "$k" = softmax ]; then nomax_cubins+=("$work/softmax-nomax.cubin"); else nomax_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/reduced.bin" "${nomax_cubins[@]}" > "$work/m-softmax-no-max.out" 2>&1 || rc=$?
+device "$work/reduced.bin" "${nomax_cubins[@]}" > "$work/m-softmax-no-max.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-softmax-no-max.out")"
 if [ "$reduced_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-softmax-no-max.out" || true)
@@ -1664,7 +2216,7 @@ echo "      grid-y-ignored: runtime/c/dawn_rt.c md5 $before -> $after"
   -I "$mutant_rt" -o "$work/m-grid-y.bin" "$work/twod.bin.c" "$work/m-grid-y.o" -lm ||
   fail "grid-y-ignored: mm_diff does not link against the mutated runtime"
 rc=0
-"$work/m-grid-y.bin" "${twod_cubins[@]}" > "$work/m-grid-y.out" 2>&1 || rc=$?
+device "$work/m-grid-y.bin" "${twod_cubins[@]}" > "$work/m-grid-y.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-grid-y.out")"
 # the four kernels whose grid has a second axis, and the three that do not
 gridy_red=(matmul batched_matmul transpose group_norm)
@@ -1727,7 +2279,7 @@ for k in "${twod[@]}"; do
   if [ "$k" = matmul ]; then noacc_cubins+=("$work/matmul-noacc.cubin"); else noacc_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/twod.bin" "${noacc_cubins[@]}" > "$work/m-mma-noacc.out" 2>&1 || rc=$?
+device "$work/twod.bin" "${noacc_cubins[@]}" > "$work/m-mma-noacc.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-mma-noacc.out")"
 if [ "$twod_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-mma-noacc.out" || true)
@@ -1786,7 +2338,7 @@ for k in "${strided[@]}"; do
   if [ "$k" = transpose_tail ]; then swap_cubins+=("$work/tt-swapped.cubin"); else swap_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${swap_cubins[@]}" > "$work/m-stride-swapped.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-stride-swapped.out")"
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-stride-swapped.out" || true)
@@ -1860,7 +2412,7 @@ echo "      ladder-strides-reversed: 7 of ${#strided[@]} .tilebc files differ fr
 rev_cubins=()
 for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubin"); done
 rc=0
-"$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
 ladder_red=(depthwise_conv1d)
 if [ "$strided_verdict" = pass ]; then
@@ -1925,7 +2477,7 @@ for k in "${strided[@]}"; do
   if [ "$k" = gaussian_blur ]; then short_cubins+=("$work/blur-short.cubin"); else short_cubins+=("$work/$k.cubin"); fi
 done
 rc=0
-"$work/strided.bin" "${short_cubins[@]}" > "$work/m-halo-short.out" 2>&1 || rc=$?
+device "$work/strided.bin" "${short_cubins[@]}" > "$work/m-halo-short.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-halo-short.out")"
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-halo-short.out" || true)
@@ -1984,7 +2536,7 @@ echo "      shri-always-logical: ${#shri_red[@]} of ${#integers[@]} .tilebc file
 shri_cubins=()
 for k in "${integers[@]}"; do shri_cubins+=("$work/shri-always-logical-$k.cubin"); done
 rc=0
-"$work/ints.bin" "${shri_cubins[@]}" > "$work/m-shri-logical.out" 2>&1 || rc=$?
+device "$work/ints.bin" "${shri_cubins[@]}" > "$work/m-shri-logical.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-shri-logical.out")"
 if [ "$int_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-shri-logical.out" || true)
@@ -2047,7 +2599,7 @@ echo "      exti-sign-extends: ${#exti_red[@]} of ${#integers[@]} .tilebc files 
 exti_cubins=()
 for k in "${integers[@]}"; do exti_cubins+=("$work/exti-sign-extends-$k.cubin"); done
 rc=0
-"$work/ints.bin" "${exti_cubins[@]}" > "$work/m-exti-signed.out" 2>&1 || rc=$?
+device "$work/ints.bin" "${exti_cubins[@]}" > "$work/m-exti-signed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-exti-signed.out")"
 if [ "$int_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-exti-signed.out" || true)
@@ -2094,7 +2646,7 @@ std_iw="$(mutant_std inplace-writes-copy \
   '                    store = map.insert(store, 0 - 1 - pos, (dt, list.map(v, x => round_to(dt, x))))')"
 build_native "$std_iw" "$work/m-inplace-writes-copy.bin" "$here/wide_diff.dawn"
 rc=0
-"$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
+device "$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-inplace.out")"
 if [ "$wide_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-inplace.out" || true)
@@ -2240,7 +2792,7 @@ echo "      gather-mask-dropped: ${#gather_red[@]} of ${#gathered[@]} .tilebc fi
 gm_cubins=()
 for k in "${gathered[@]}"; do gm_cubins+=("$work/gather-mask-dropped-$k.cubin"); done
 rc=0
-"$work/gath.bin" "${gm_cubins[@]}" > "$work/m-gather-mask.out" 2>&1 || rc=$?
+device "$work/gath.bin" "${gm_cubins[@]}" > "$work/m-gather-mask.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-gather-mask.out")"
 if [ "$gath_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-gather-mask.out" || true)
@@ -2301,7 +2853,7 @@ gath_kernel_check() { # name, kernel
   for one in "${gathered[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/gath.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/gath.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$gath_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2378,7 +2930,7 @@ scan_kernel_check() { # name, kernel
   for one in "${scanned[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/scan.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/scan.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$scan_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2430,7 +2982,7 @@ echo "      scan-reverse-ignored: ${#reverse_red[@]} of ${#scanned[@]} .tilebc f
 rev_cubins=()
 for k in "${scanned[@]}"; do rev_cubins+=("$work/scan-reverse-ignored-$k.cubin"); done
 rc=0
-"$work/scan.bin" "${rev_cubins[@]}" > "$work/m-scan-reverse.out" 2>&1 || rc=$?
+device "$work/scan.bin" "${rev_cubins[@]}" > "$work/m-scan-reverse.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-scan-reverse.out")"
 if [ "$scan_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-scan-reverse.out" || true)
@@ -2508,7 +3060,7 @@ echo "      atomic-as-plain-store: ${#atom_red[@]} of ${#atomic[@]} .tilebc file
 atom_mut_cubins=()
 for k in "${atomic[@]}"; do atom_mut_cubins+=("$work/atomic-as-plain-store-$k.cubin"); done
 rc=0
-"$work/atom.bin" "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store.out" 2>&1 || rc=$?
+device "$work/atom.bin" "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-atomic-as-plain-store.out")"
 if [ "$atom_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-atomic-as-plain-store.out" || true)
@@ -2529,7 +3081,7 @@ if [ "$atom_verdict" = pass ]; then
   # green. This is what says the mutant is caught by the collisions and
   # not by anything else the kernel does.
   rc=0
-  "$work/atom.bin" --corpus unique "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store-unique.out" 2>&1 || rc=$?
+  device "$work/atom.bin" --corpus unique "${atom_mut_cubins[@]}" > "$work/m-atomic-as-plain-store-unique.out" 2>&1 || rc=$?
   cverdict="$(verdict_of "$work/m-atomic-as-plain-store-unique.out")"
   if [ "$cverdict" != pass ] || [ "$rc" != 0 ]; then
     cat "$work/m-atomic-as-plain-store-unique.out" >&2
@@ -2576,7 +3128,7 @@ atom_kernel_check() { # name, kernel
   for one in "${atomic[@]}"; do
     if [ "$one" = "$k" ]; then cubs+=("$work/$name.cubin"); else cubs+=("$work/$one.cubin"); fi
   done
-  "$work/atom.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/atom.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$atom_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2647,7 +3199,7 @@ erf_pkg_mutant() { # name, old, new, want_main, want_positive
   for k in "${erfs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$erf_verdict" != pass ]; then
     rc=0
-    "$work/erf.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/erf.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$erf_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $erf_verdict but the mutant is $mverdict"; }
@@ -2674,9 +3226,9 @@ erf_mutant_corpus() { # name, corpus, want, cubins...
   shift 3
   local out="$work/m-$name-$corpus.out" rc=0 mverdict differ
   if [ "$corpus" = positive ]; then
-    "$work/erf.bin" --corpus positive "$@" > "$out" 2>&1 || rc=$?
+    device "$work/erf.bin" --corpus positive "$@" > "$out" 2>&1 || rc=$?
   else
-    "$work/erf.bin" "$@" > "$out" 2>&1 || rc=$?
+    device "$work/erf.bin" "$@" > "$out" 2>&1 || rc=$?
   fi
   mverdict="$(verdict_of "$out")"
   differ=$(grep -c '^  verdict differ:result$' "$out" || true)
@@ -2788,7 +3340,7 @@ trig_writer_mutant() { # name, old, new
   for k in "${trigs[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$trig_verdict" != pass ]; then
     rc=0
-    "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$trig_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $trig_verdict but the mutant is $mverdict"; }
@@ -2796,7 +3348,7 @@ trig_writer_mutant() { # name, old, new
     return 0
   fi
   rc=0
-  "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/trig.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#trig_red[@]}" ]; then
@@ -2872,7 +3424,7 @@ shape_pkg_mutant() { # name, module, old, new, red-kernels...
   local cubins=()
   for k in "${shaped[@]}"; do cubins+=("$work/$name-$k.cubin"); done
   rc=0
-  "$work/shape.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/shape.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   if [ "$shape_verdict" = pass ]; then
     differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
@@ -2975,7 +3527,7 @@ dtype_writer_mutant() { # name, old, new
   for k in "${dtypes[@]}"; do cubs+=("$work/$name-$k.cubin"); done
   if [ "$dtype_verdict" != pass ]; then
     rc=0
-    "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    device "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
     mverdict="$(verdict_of "$work/m-$name.out")"
     [ "$mverdict" = "$dtype_verdict" ] ||
       { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $dtype_verdict but the mutant is $mverdict"; }
@@ -2983,7 +3535,7 @@ dtype_writer_mutant() { # name, old, new
     return 0
   fi
   rc=0
-  "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  device "$work/dtype.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
   mverdict="$(verdict_of "$work/m-$name.out")"
   differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#dtype_red[@]}" ]; then
@@ -2994,14 +3546,17 @@ dtype_writer_mutant() { # name, old, new
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k names another format and should be untouched"; }
   done
-  # The FIRST difference is the measurement, and it is not where a reader
-  # would guess. Segment 0 reads the tf32 BUFFER and widens it, and a tf32
-  # word read as an f32 word is the same number, so that segment does not
-  # move at all; what moves is segment 1, where an f64 goes into the format
-  # and back and twenty-four significand bits survive where eleven should.
+  # WHICH SEGMENT MOVED is the measurement, and for both callers it is
+  # segment 1 rather than segment 0. For tf32: segment 0 reads the BUFFER
+  # and widens it, and a tf32 word read as an f32 word is the same number,
+  # so it does not move at all; segment 1 is where an f64 goes into the
+  # format and back and twenty-four significand bits survive where eleven
+  # should. For i4: segment 0 is a nibble-wise SUM, which agrees modulo 16
+  # whichever widening produced its operands, and segment 1 is the
+  # arithmetic shift, which does not.
   grep -q '^  first seg 1 ' "$work/m-$name.out" ||
-    { cat "$work/m-$name.out" >&2; fail "$name: expected the first difference in segment 1 (the conversion), not in segment 0 (the buffer)"; }
-  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs in its conversion segment and ${dtype_green[*]} does not)"
+    { cat "$work/m-$name.out" >&2; fail "$name: expected the first difference in segment 1, not in segment 0"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs from segment 1 on and ${dtype_green[*]} does not)"
 }
 
 # 27. tf32-tag-as-f32: the writer's type table gives tf32 the f32 tag. Four
@@ -3021,6 +3576,647 @@ dtype_writer_mutant tf32-tag-as-f32 \
   '  "tf32" -> 8' \
   '  "tf32" -> 7'
 
+# 28. exti-i4-zero-extends: the writer stops writing the SIGNED widening
+#     the `extis` name asks for and writes the unsigned one, which is the
+#     other value of the same one-byte attribute. Knife T9's format has no
+#     arithmetic of its own, so every kernel over it widens first, and this
+#     is the byte that says which value a nibble has.
+#
+#     Nothing below layer 2 can see it. The renderer prints ` signed` from
+#     its own table, so dtype_i4.mlir does not move; `tileiras` takes both
+#     values, because both are legal for an `exti`; and the file is the
+#     same length, because one enum byte replaces another. On the device
+#     the two shift segments become one segment written twice, and the
+#     corpus has 2048 of its 4096 lanes with the top bit set.
+#
+#     pack_roundtrip is the kernel-level control: it converts nothing at
+#     all, so it holds no `exti` and must not move.
+dtype_red=("${i4_red[@]}")
+dtype_green=("${i4_green[@]}")
+dtype_writer_mutant exti-i4-zero-extends \
+  '  "extis" -> [SIGNED]' \
+  '  "extis" -> [UNSIGNED]'
+
+# 29. pack-halves-swapped: the HOST's reading of which nibble is lane k
+#     exchanges the two halves of every byte. Types.td says the even lane
+#     is in bits 3..0 and the odd one in bits 7..4, and this is the only
+#     place in the tree where that sentence is written down as code; the
+#     device's `unpack` is the second opinion on it.
+#
+#     THE SWAP IS CONSISTENT, which is what makes this mutant sharp: one
+#     function says where lane k sits and both directions read it, so the
+#     mutant relabels the lanes rather than corrupting them. Every segment
+#     that applies ONE function to every lane therefore still agrees with
+#     the device -- a uniform function composed with a relabelling and its
+#     inverse is the same function -- and the only thing that moves is
+#     dtype_i4's segment 4, which takes a's nibble on even lanes and b's
+#     on odd ones. That segment exists for this mutant.
+#
+#     pack_roundtrip is the kernel-level control for the same reason and
+#     names no lane at all.
+std_nib="$(mutant_std pack-halves-swapped \
+  'fn nibble_shift(k: Int) -> Int = 4 * k' \
+  'fn nibble_shift(k: Int) -> Int = 4 * (k ^ 1)')"
+build_native "$std_nib" "$work/m-pack-halves.bin" "$here/dtype_diff.dawn"
+rc=0
+device "$work/m-pack-halves.bin" "${dtype_cubins[@]}" > "$work/m-pack-halves.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-pack-halves.out")"
+if [ "$dtype_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-pack-halves.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-pack-halves.out" >&2
+    fail "pack-halves-swapped mutant stayed green: expected verdict fail (exit 1) with dtype_i4 alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "dtype_i4" {bad=1} END {exit bad}' \
+    "$work/m-pack-halves.out" ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: a kernel other than dtype_i4 moved, and only dtype_i4 names a lane"; }
+  awk '/^kernel dtype_i4 /{f=1} f && /^  first /{sub(/^  first /, ""); print; exit}' \
+    "$work/m-pack-halves.out" | grep -q '^seg 4 ' ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: expected the first difference in segment 4, the one that names a lane index; the relabelling is consistent, so no uniform segment may move"; }
+  echo "PASS  mutant: pack-halves-swapped (dtype_i4's segment 4 alone reds; the four uniform segments and pack_roundtrip are blind to a consistent relabelling)"
+else
+  [ "$mverdict" = "$dtype_verdict" ] ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: the clean run is $dtype_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: pack-halves-swapped not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
+fi
+# ---- knife T4's six package mutants
+#
+# Every one of them rewrites HOW ONE ATTRIBUTE VALUE IS WRITTEN and nothing
+# else, which is what the attribute ledger
+# (scripts/tileir-features/attrs.txt) counts as layer-3 evidence for that
+# value. All six are accepted by `tileiras` -- every value they write
+# instead is a legal one -- so layer 1 sees nothing and the device is the
+# only judge.
+#
+# Five of them move a kernel's ANSWER and go red the ordinary way. The
+# sixth, sqrt-approx-as-nearest-even, cannot: the approximate root and the
+# correctly rounded one are both inside the tolerance the tier compares
+# with, so the verdict stays `close:tolerance` whichever the device
+# computed. What it drives to zero is the probe count above, and the pin on
+# that count is what makes it red. That is the reason the count is a pin and
+# not a print.
+attr_pkg_mutant() { # name, module, old, new, red-kernel-or-probe...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local pkg="$work/pkg-$name" before after k rc mverdict differ probe_line
+  local want=$#
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+  mutant_kernels "$name" "$pkg" "${attrs[@]}"
+  local cubins=()
+  for k in "${attrs[@]}"; do cubins+=("$work/$name-$k.cubin"); done
+  rc=0
+  device "$work/attr.bin" "${cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$attr_verdict" != pass ]; then
+    [ "$mverdict" = "$attr_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $attr_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $attr_verdict, before any launch reaches the device"
+    return 0
+  fi
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  probe_line="$(sed -n 's/^probe attrs //p' "$work/m-$name.out" | tail -n 1)"
+  for k in "$@"; do
+    case "$k" in
+      probe:*)
+        # the claim is a probe count that must have fallen to zero
+        printf '%s\n' "$probe_line" | tr ' ' '\n' | grep -qxF "${k#probe:}" ||
+          { printf '%s\n' "$probe_line" >&2; fail "$name: expected the probe to say ${k#probe:}"; }
+        ;;
+      *)
+        awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+          "$work/m-$name.out" ||
+          { cat "$work/m-$name.out" >&2; fail "$name: $k carries the mutated attribute and should differ"; }
+        ;;
+    esac
+  done
+  local reds=0
+  for k in "$@"; do case "$k" in probe:*) ;; *) reds=$((reds + 1)) ;; esac; done
+  [ "$differ" = "$reds" ] ||
+    { cat "$work/m-$name.out" >&2; fail "$name: expected exactly $reds kernel(s) to say differ:result, got $differ"; }
+  if [ "$reds" -gt 0 ]; then
+    [ "$mverdict" = fail ] && [ "$rc" = 1 ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name mutant stayed green: expected verdict fail (exit 1), got $mverdict (exit $rc)"; }
+  fi
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $want claim(s) hold and no other kernel moved)"
+}
+
+# 29. directed-rounding-as-nearest-even: the writer rounds to nearest even
+#     where the kernel asked for negative or positive infinity. Every
+#     rounding mode is a legal byte in that position, so the assembler has
+#     nothing to object to; attr_round's six segments collapse into three
+#     pairs of equals and the answer moves on every lane whose exact result
+#     is off the binary32 grid.
+attr_pkg_mutant directed-rounding-as-nearest-even bytecode.dawn \
+  '  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEGATIVE_INF)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_POSITIVE_INF)' \
+  '  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEAREST_EVEN)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_NEAREST_EVEN)' \
+  attr_round probe:attr_round:add=0
+
+# 30. ftz-bit-dropped: the writer clears `flush_to_zero`'s flag bit. A unit
+#     attribute is nothing BUT that bit -- no payload is written for it --
+#     so this is the whole of the attribute, the file is the same length,
+#     and attr_ftz's subnormal sums and products stop being flushed.
+attr_pkg_mutant ftz-bit-dropped bytecode.dawn \
+  '  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ' \
+  '  "addf_ftz" | "mulf_ftz" -> 0' \
+  attr_ftz probe:attr_ftz:add=0
+
+# 31. propagate-nan-bit-dropped: the same for `propagate_nan`. Without it
+#     `maxf` answers the non-NaN operand where the kernel asked for a NaN,
+#     which is IEEE 754-2019's maximumNumber where it asked for maximum.
+attr_pkg_mutant propagate-nan-bit-dropped bytecode.dawn \
+  '  "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN' \
+  '  "maxf_nan" | "minf_nan" -> 0' \
+  attr_nan probe:attr_nan:maxf=0
+
+# 32. cmpf-always-ordered: the writer gives every float comparison the
+#     `ordered` comparison ordering. The two orderings agree on every pair
+#     of numbers, so this is invisible on any corpus without a NaN in it;
+#     attr_nan has NaNs on one side of 128 lanes, and its six unordered
+#     predicates answer false there instead of true.
+attr_pkg_mutant cmpf-always-ordered bytecode.dawn \
+  '  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_UNORDERED } else { CMP_ORDERED }' \
+  '  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_ORDERED } else { CMP_ORDERED }' \
+  attr_nan probe:attr_nan:ordering=0
+
+# 33. for-unsigned-bit-dropped: the writer clears the loop's `unsignedCmp`
+#     bit, so both of attr_ucmp's loops compare their bound as a signed
+#     i32 and neither runs. The answer is a lane COUNT rather than a
+#     rounding: 32 becomes 0.
+attr_pkg_mutant for-unsigned-bit-dropped bytecode.dawn \
+  'if for_has_flags() { emit(w2, if unsigned { FOR_FLAG_UNSIGNED } else { 0 }) } else { w2 }' \
+  'if for_has_flags() { emit(w2, 0) } else { w2 }' \
+  attr_ucmp
+
+# 34. sqrt-approx-as-nearest-even: the writer asks for the correctly
+#     rounded square root where the kernel asked for the approximate one.
+#     This is the mutant the VERDICT cannot catch: both roots are inside
+#     the tolerance tier's distance of the host reference, so attr_approx
+#     still says close:tolerance. What it does catch is the probe, whose
+#     two segments become the same number on all 512 lanes.
+attr_pkg_mutant sqrt-approx-as-nearest-even bytecode.dawn \
+  '  } else if op == "sqrt_approx" {
+    Some(ROUND_APPROX)' \
+  '  } else if op == "sqrt_approx" {
+    Some(ROUND_NEAREST_EVEN)' \
+  probe:attr_approx:lanes=0 probe:attr_approx:distance=0.0
+
+# ---- knife T5's mutant: which side of the condition breaks
+#
+# It lives in the RECORDING HANDLER (packages/tileir/src/prog.dawn), which
+# is where the loop's exit is built: the handler writes
+# `if cond { break <entering> } else { yield }` in front of the `continue`,
+# and the mutant exchanges the two branches. Layer 0 moves (the .mlir shows
+# them the other way round) and `tileiras` accepts it, because a loop that
+# stops on the other condition is a perfectly well formed loop. Only the
+# device can say the answer is wrong.
+#
+# WHY IT TERMINATES, kernel by kernel, which is the thing that had to be
+# designed rather than checked afterwards. Negated, the loop stops on the
+# first iteration whose condition is FALSE.
+#
+#   loop_count  its condition ("every lane is 1") is false on entry, so the
+#               mutant breaks on the first test and answers zero steps
+#   loop_until  its condition ("the largest residual is under eps") is
+#               false on entry, same
+#   loop_none   its condition is TRUE on entry -- that is the whole point
+#               of the kernel -- so the mutant does not break there. It
+#               takes one step, and the step is 1000 against a threshold of
+#               1, so the condition is false on the second test and it
+#               stops there. A smaller step would have made this mutant a
+#               kernel that never returns, and the corpus is what rules
+#               that out
+#
+# `loop_bound` has no `loop`, so its bytes and its verdict are untouched:
+# it is the control that separates "the mutant broke the loop" from "the
+# mutant broke the tree".
+loop_pkg_mutant() { # name, module, old, new
+  local name="$1" module="$2" old="$3" new="$4"
+  local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${loops[@]}"
+  for k in "${loop_red[@]}"; do
+    if cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc"; then :; else moved=$((moved + 1)); fi
+  done
+  [ "$moved" = "${#loop_red[@]}" ] ||
+    fail "$name: the ${#loop_red[@]} kernels with a loop should move at layer 0, got $moved"
+  for k in "${loop_green[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k has no loop, so its bytecode must not move"
+  done
+  # the same length, which is what says this is a different program and not
+  # a malformed one: two regions exchanged, byte for byte
+  for k in "${loop_red[@]}"; do
+    [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+      fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  done
+  echo "      $name: ${#loop_red[@]} of ${#loops[@]} .tilebc files differ from the goldens at the same length (${loop_green[*]} does not) and tileiras still accepts every one"
+
+  for k in "${loops[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$loop_verdict" != pass ]; then
+    rc=0
+    device "$work/loop.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$loop_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $loop_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $loop_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/loop.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#loop_red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with ${#loop_red[@]} kernel(s) saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${loop_green[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k has no loop and should be untouched"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${loop_red[*]} differs and ${loop_green[*]} does not)"
+}
+
+# 28. loop-break-condition-inverted.
+loop_pkg_mutant loop-break-condition-inverted prog.dawn \
+  '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
+  '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])'
+
+# ---- knife T6's two mutants: which side of the assertion fires, and which
+# bytes the print puts on standard output
+#
+# The first is a KERNEL-SOURCE mutant, because what it has to invert is the
+# CONDITION and the condition is written in scripts/tile-golden/kernels.dawn,
+# not in the package. `assert_guard` is one function instantiated at two
+# limits: 1000, which every lane of the corpus is under, and 0, which no
+# lane is under. So `v < limit` is all-true at one and all-false at the
+# other, and turning it into `v >= limit` swaps the two kernels' fates
+# exactly:
+#
+#   assert_pass  held before, fires after  -> the launch must now fail
+#   assert_fail  fired before, holds after -> the launch must now succeed
+#
+# BOTH DIRECTIONS ARE IN THE RED SET, which is the thing this mutant is for:
+# a gate that only knew how to notice a failing launch would be satisfied by
+# a kernel that always fires, and one that only knew how to notice a
+# succeeding launch would be satisfied by a kernel that never does.
+#
+# The second is a PACKAGE mutant and its whole point is that the BUFFER
+# stays right. `d_print`'s operands are reversed, so `print_tile` prints
+# `sum=128 max=8256` where the host reference says `sum=8256 max=128`, while
+# the three stores after it are untouched and the download still agrees bit
+# for bit. Only the byte judgement moves, which is the demonstration that
+# the byte judgement carries something no buffer comparison has.
+
+# One copy of scripts/tile-golden/kernels.dawn with one anchor rewritten,
+# as a project the kernels below are re-encoded from. Two kernels come out
+# of this one mutation, which is why building it and using it are two
+# functions rather than one.
+dbg_kernel_mutant() { # name, old, new
+  local name="$1" src="$work/kernels-$1.dawn" before after
+  cp "$golden/kernels.dawn" "$src"
+  before=$(digest "$src")
+  python3 "$here/mutate.py" "$src" "$name" "$2" "$3"
+  after=$(digest "$src")
+  echo "      $name: scripts/tile-golden/kernels.dawn md5 $before -> $after"
+  mkdir -p "$work/proj-$name/src"
+  cp "$src" "$work/proj-$name/src/main.dawn"
+  cat > "$work/proj-$name/dawn.toml" <<TOML
+schema = 1
+name = "tile_golden"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+}
+
+# One kernel re-encoded from that project: its bytes must MOVE and tileiras
+# must still take them, or the mutant is not a different program.
+dbg_kernel_moved() { # name, kernel
+  local name="$1" k="$2"
+  "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name-$k.tilebc" > "$work/proj-$name.$k.log" 2>&1 ||
+    { cat "$work/proj-$name.$k.log" >&2; fail "$name: $k did not encode"; }
+  cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+    fail "$name mutant stayed green: $k.tilebc is unchanged"
+  assemble_golden "$k" "$work/$name-$k.tilebc" "$work/$name-$k.cubin"
+  echo "      $name: $k.tilebc differs from the golden and tileiras still accepts it"
+}
+
+# The kernels the mutant must NOT move: it is anchored in `assert_guard`,
+# which only the two assertion kernels call.
+dbg_kernel_control() { # name, kernels...
+  local name="$1" k
+  shift
+  for k in "$@"; do
+    "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name-$k.tilebc" > "$work/proj-$name.$k.log" 2>&1 ||
+      { cat "$work/proj-$name.$k.log" >&2; fail "$name: $k did not encode"; }
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+      fail "$name: $k does not go through the mutated anchor, so its bytecode must not move"
+  done
+  echo "      $name: $* are untouched at layer 0"
+}
+
+if [ "$dbg_verdict" = pass ] && [ "$dbg_fail_verdict" = pass ] && [ "$dbg_print_verdict" = pass ]; then
+  dbg_kernel_mutant assert-condition-inverted \
+    '  d_assert(shape, lt_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")' \
+    '  d_assert(shape, ge_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")'
+  dbg_kernel_moved assert-condition-inverted assert_pass
+  dbg_kernel_moved assert-condition-inverted assert_fail
+  dbg_kernel_control assert-condition-inverted "${dbg_green[@]}" print_tile
+
+  # direction one: the assertion that held now fires, so the default case
+  # is blocked at the sync of its LAST kernel and the three that come
+  # before it still agree
+  mut_cubins=()
+  for k in "${dbg[@]}"; do
+    if [ "$k" = assert_pass ]; then
+      mut_cubins+=("$work/assert-condition-inverted-assert_pass.cubin")
+    else
+      mut_cubins+=("$work/$k.cubin")
+    fi
+  done
+  rc=0
+  device "$work/assert.bin" "${mut_cubins[@]}" > "$work/m-assert-inverted.stdout" 2> "$work/m-assert-inverted.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-assert-inverted.out")"
+  [ "$mverdict" = "blocked:cuda.CUDA_ERROR_LAUNCH_FAILED@sync" ] ||
+    { cat "$work/m-assert-inverted.out" >&2; fail "assert-condition-inverted stayed green: assert_pass's assertion should now fire, got $mverdict"; }
+  identical=$(grep -c '^  verdict identical:exact$' "$work/m-assert-inverted.out" || true)
+  [ "$identical" = "${#dbg_green[@]}" ] ||
+    { cat "$work/m-assert-inverted.out" >&2; fail "assert-condition-inverted: ${dbg_green[*]} should be untouched, $identical of ${#dbg_green[@]} agreed"; }
+  grep -q 'tile-golden: a lane reached the limit' "$work/m-assert-inverted.stdout" ||
+    fail "assert-condition-inverted: assert_pass fired without printing its message"
+
+  # direction two: the assertion that fired now holds, so the fail case has
+  # nothing to report and says so
+  rc=0
+  device "$work/assert.bin" --case fail "$work/assert-condition-inverted-assert_fail.cubin" \
+    > "$work/m-assert-inverted-fail.stdout" 2> "$work/m-assert-inverted-fail.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-assert-inverted-fail.out")"
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ]; then
+    cat "$work/m-assert-inverted-fail.out" >&2
+    fail "assert-condition-inverted stayed green: assert_fail's assertion should no longer fire, got $mverdict (exit $rc)"
+  fi
+  grep -q '^  verdict assert-did-not-fire$' "$work/m-assert-inverted-fail.out" ||
+    { cat "$work/m-assert-inverted-fail.out" >&2; fail "assert-condition-inverted: the fail case went red for something other than the assertion holding"; }
+  [ ! -s "$work/m-assert-inverted-fail.stdout" ] ||
+    fail "assert-condition-inverted: assert_fail's assertion held, so nothing should have reached standard output"
+  echo "PASS  mutant: assert-condition-inverted (layer 1 accepts both; on the device ${dbg_red[*]} now fails and assert_fail now succeeds, ${dbg_green[*]} untouched)"
+
+  # print-format-wrong: the package's `d_print` hands the operands over
+  # backwards. The stores are untouched, so the buffer still agrees bit for
+  # bit and the program's own verdict is still `pass`; the only thing that
+  # moves is the line on standard output.
+  pkg="$work/pkg-print-format-wrong"
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/dev.dawn")
+  python3 "$here/mutate.py" "$pkg/src/dev.dawn" print-format-wrong \
+    '  t_print(fmt, dtype_name(d), none, hs)' \
+    '  t_print(fmt, dtype_name(d), none, list.reverse(hs))'
+  after=$(digest "$pkg/src/dev.dawn")
+  echo "      print-format-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
+  mutant_kernels print-format-wrong "$pkg" print_tile "${dbg[@]}"
+  cmp -s "$golden/print_tile.tilebc" "$work/print-format-wrong-print_tile.tilebc" &&
+    fail "print-format-wrong mutant stayed green: print_tile.tilebc is unchanged"
+  for k in "${dbg[@]}"; do
+    cmp -s "$golden/$k.tilebc" "$work/print-format-wrong-$k.tilebc" ||
+      fail "print-format-wrong: $k does not print, so its bytecode must not move"
+  done
+  echo "      print-format-wrong: print_tile.tilebc differs, ${dbg[*]} do not, and tileiras accepts every one"
+  rc=0
+  device "$work/assert.bin" --case print "$work/print-format-wrong-print_tile.cubin" \
+    > "$work/m-print.stdout" 2> "$work/m-print.out" || rc=$?
+  mverdict="$(verdict_of "$work/m-print.out")"
+  [ "$mverdict" = pass ] ||
+    { cat "$work/m-print.out" >&2; fail "print-format-wrong: the BUFFER should be untouched, and the program's verdict with it, got $mverdict"; }
+  m_want_hex="$(sed -n 's/^print-expect-hex //p' "$work/m-print.out" | tail -n 1)"
+  m_got_hex="$(od -An -tx1 "$work/m-print.stdout" | tr -d ' \n')"
+  [ "$m_got_hex" != "$m_want_hex" ] ||
+    { cat "$work/m-print.stdout" >&2; fail "print-format-wrong stayed green: the printed bytes still match the reference"; }
+  echo "PASS  mutant: print-format-wrong (the buffer still agrees bit for bit and the program still says pass; the printed bytes are $m_got_hex against $m_want_hex)"
+else
+  echo "SKIP  mutant: assert-condition-inverted and print-format-wrong are not verifiable on this driver: the clean runs are $dbg_verdict / $dbg_fail_verdict / $dbg_print_verdict"
+fi
+
+# ---- knife T7's mutants: the two the writer owns and the one the handler does
+#
+# The two package mutants below are the layer-3 evidence for `global` and
+# `get_global`: each changes HOW THAT OPCODE IS WRITTEN (the initializer
+# the Global section carries, the symbol the instruction names) and
+# nothing else, `tileiras` accepts the result because a different table
+# and a different symbol are both legal Tile IR, and only the device says
+# the answer moved. `global_ctl` holds neither opcode, so its bytes and
+# its verdict must not move under either.
+#
+# `global_scratch` is the second control and a different kind: its one
+# global is initialized to zeros and its module declares one symbol, so an
+# initializer written backwards and a `get_global` that always names the
+# first global BOTH leave its bytes exactly as they were. That is not luck,
+# it is what a corpus of one all-zero global means, and it is why the
+# green set below is two kernels and not one.
+global_pkg_mutant() { # name, module, old, new, red-kernel
+  local name="$1" module="$2" old="$3" new="$4" red="$5"
+  local pkg="$work/pkg-$name" before after k rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${globals_[@]}"
+  if cmp -s "$golden/$red.tilebc" "$work/$name-$red.tilebc"; then
+    fail "$name: $red should move at layer 0 and its bytecode is unchanged"
+  fi
+  for k in "${globals_[@]}"; do
+    if [ "$k" != "$red" ]; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  [ "$(wc -c < "$golden/$red.tilebc")" = "$(wc -c < "$work/$name-$red.tilebc")" ] ||
+    fail "$name: $red.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  echo "      $name: $red.tilebc differs from its golden at the same length, the other $(( ${#globals_[@]} - 1 )) do not, and tileiras still accepts every one"
+
+  for k in "${globals_[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$global_verdict" != pass ]; then
+    rc=0
+    device "$work/global.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$global_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $global_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/global.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly $red saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk -v want="$red" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+    "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $red is the kernel that should differ"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $red differs and the other $(( ${#globals_[@]} - 1 )) do not)"
+}
+
+# 35. global-initializer-reversed: the Global section carries the
+#     initializer's elements back to front. Same length, same type, same
+#     alignment, and `tileiras` has nothing to object to -- a table is a
+#     table. Only the device says global_table answers the mirror of what
+#     the host declared. The corpus's `asymmetric=128` is what makes this
+#     visible on every lane, and global_scratch's all-zero global is what
+#     makes it invisible there.
+global_pkg_mutant global-initializer-reversed bytecode.dawn \
+  '  bytes.freeze(list.fold(values, bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))' \
+  '  bytes.freeze(list.fold(list.map(range(0, len(values)), k => values[len(values) - 1 - k]), bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))' \
+  global_table
+
+# 36. get-global-wrong-symbol: every `get_global` names the module's FIRST
+#     global whatever it was asked for. The bytes stay the same length (a
+#     symbol is one string index and both strings are interned either way,
+#     because the Global section names them too) and `tileiras` accepts it,
+#     because naming a declared symbol twice is a legal program. Only the
+#     device says global_table's second segment is its first. The corpus's
+#     `distinct=128` is what makes that visible; global_scratch declares one
+#     global, so for it the mutant is the identity.
+global_pkg_mutant get-global-wrong-symbol prog.dawn \
+  '        ops = ops ++ [GetGlobal(d, sym, dtype, shape)]' \
+  '        ops = ops ++ [GetGlobal(d, seen[0].sym, dtype, shape)]' \
+  global_table
+
+# 37. module-reloaded-per-launch: the real handler stops keeping the module
+#     it loaded and loads the cubin again for every launch. This is a
+#     HANDLER mutant and moves no bytes at all: the layers below cannot see
+#     it, because nothing in a Tile IR file says how long a module lives.
+#     What it takes away is the dialect's own sentence about `global` --
+#     "the lifetime of the allocation is the same as the lifetime of the
+#     module" -- so global_scratch's second launch starts from the
+#     initializer again and answers its input instead of twice its input.
+#     global_table and global_ctl read no mutable state and are untouched,
+#     which is what separates "the mutant broke the lifetime" from "the
+#     mutant broke the handler".
+std_reload="$(mutant_std module-reloaded-per-launch \
+  '              let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
+                Some(m) -> Ok(m)
+                None -> gpu_load_module_host(cubin)
+              }' \
+  '              let loaded: Result[Int, ForeignError] = gpu_load_module_host(cubin)')"
+if [ "$global_verdict" = pass ]; then
+  build_native "$std_reload" "$work/m-module-reloaded-per-launch.bin" "$here/global_diff.dawn"
+  rc=0
+  device "$work/m-module-reloaded-per-launch.bin" "${global_cubins[@]}" \
+    > "$work/m-module-reloaded-per-launch.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-module-reloaded-per-launch.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-module-reloaded-per-launch.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-module-reloaded-per-launch.out" >&2
+    fail "module-reloaded-per-launch stayed green: expected fail (exit 1) with exactly global_scratch saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == "global_scratch" {seen=1} END {exit !seen}' \
+    "$work/m-module-reloaded-per-launch.out" ||
+    { cat "$work/m-module-reloaded-per-launch.out" >&2; fail "module-reloaded-per-launch: global_scratch is the kernel that should differ"; }
+  echo "PASS  mutant: module-reloaded-per-launch (no byte moves; on the device global_scratch loses the first launch's sum and the other two do not)"
+else
+  echo "SKIP  mutant: module-reloaded-per-launch not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
+fi
+
+# 38. alloca-aliased: the recording handler hands every `alloca` after the
+#     first the FIRST one's address, which is what a compiler that treated
+#     the operation as pure and common-subexpressioned it would do. The
+#     bytes move (alloca_two's second `offset` names the first allocation's
+#     broadcast) and `tileiras` accepts them, because two pointers into one
+#     allocation is a legal program; only the device says alloca_two's
+#     answer is 0 on every lane instead of `2 * x + 1`, because the second
+#     store overwrote the first. alloca_scratch makes ONE allocation and
+#     alloca_ctl makes none, so for both the mutant is the identity, and
+#     that is what separates "the mutant took the allocations apart" from
+#     "the mutant broke the tree".
+#
+#     THE FILE LENGTH DOES NOT MOVE, which is worth naming: the dead second
+#     allocation is still emitted, and what changes is one operand index.
+alloca_pkg_mutant() { # name, module, old, new, red-kernel
+  local name="$1" module="$2" old="$3" new="$4" red="$5"
+  local pkg="$work/pkg-$name" before after k rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${allocas[@]}"
+  if cmp -s "$golden/$red.tilebc" "$work/$name-$red.tilebc"; then
+    fail "$name: $red should move at layer 0 and its bytecode is unchanged"
+  fi
+  for k in "${allocas[@]}"; do
+    if [ "$k" != "$red" ]; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  [ "$(wc -c < "$golden/$red.tilebc")" = "$(wc -c < "$work/$name-$red.tilebc")" ] ||
+    fail "$name: $red.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  echo "      $name: $red.tilebc differs from its golden at the same length, the other $(( ${#allocas[@]} - 1 )) do not, and tileiras still accepts every one"
+
+  for k in "${allocas[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$alloca_verdict" != pass ]; then
+    rc=0
+    device "$work/alloca.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$alloca_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $alloca_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $alloca_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/alloca.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly $red saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk -v want="$red" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+    "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $red is the kernel that should differ"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $red differs and the other $(( ${#allocas[@]} - 1 )) do not)"
+}
+
+alloca_pkg_mutant alloca-aliased prog.dawn \
+  '        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
+        d' \
+  '        let d = next
+        next = mint(name, next, 1)
+        let earlier = list.filter(ops, o => match o {
+          Alloca(_e, _dt, _ne, _al, _sh, _s) -> true
+          _ -> false
+        })
+        ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
+        if len(earlier) == 0 {
+          d
+        } else {
+          match earlier[0] {
+            Alloca(e, _dt, _ne, _al, _sh, _s) -> e
+            _ -> d
+          }
+        }' \
+  alloca_two
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -3036,7 +4232,10 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/gath_diff.dawn scripts/tile-gpu-diff/scan_diff.dawn \
   scripts/tile-gpu-diff/atom_diff.dawn scripts/tile-gpu-diff/erf_diff.dawn \
   scripts/tile-gpu-diff/trig_diff.dawn scripts/tile-gpu-diff/shape_diff.dawn \
-  scripts/tile-gpu-diff/dtype_diff.dawn \
+  scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
+  scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
+  scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/hint_diff.dawn \
+  scripts/tile-gpu-diff/alloca_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -3045,7 +4244,9 @@ commit="$(git rev-parse --short=12 HEAD)"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
-summary="$summary seq-launches=$seq_launch_probe"
+summary="$summary attrs=$attr_probe hints=$hint_probe_line"
+summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
+summary="$summary alloca=$alloca_shape"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

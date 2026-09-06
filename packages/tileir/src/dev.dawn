@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64, I4}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -76,6 +76,94 @@ pub type RedId =
   | IdF(dtype: String, value: Float)
   | IdI(dtype: String, value: Int)
 derive Show
+
+## What an `assume` attaches to a value: one of the dialect's three
+## predicate attributes (knife T6). Each is a separate bytecode attribute
+## tag, and the payloads are three different shapes, which is why this is a
+## sum type rather than three fields.
+##
+##   `DivBy`         every element of the tile is a multiple of `divisor`,
+##                   which must be a positive power of two. With `every` and
+##                   `along` given, only the FIRST element of each group of
+##                   `every` along dimension `along` is claimed to be a
+##                   multiple, and the rest of the group is claimed to
+##                   increase by one from it (by the pointee's width, for a
+##                   tile of pointers). The two are used together or not at
+##                   all, and neither may be given for a rank-0 tile.
+##   `SameElements`  one value per dimension: dividing dimension `k` into
+##                   groups of `groups[k]`, every group holds one repeated
+##                   value. `1` everywhere is true of any tile.
+##   `Bounded`       every element, read as a SIGNED integer, is at least
+##                   `lb` and at most `ub`; either bound may be absent, and
+##                   both are inclusive.
+##
+## NOTHING CHECKS THESE. The dialect says so in as many words (Ops.td's
+## AssumeOp: "assume does not check the correctness of the predicate.
+## Incorrect predicates may inject incorrect static information and cause
+## miscompilation"), so a false predicate is undefined behaviour and not a
+## wrong answer. That is why the coverage ledger carries a named layer-3
+## exemption for `assume` and this comment is where the reason lives:
+## a mutant that made a predicate false would be measuring nothing.
+pub type AssumePred =
+  | DivBy(divisor: Int, every: Option[Int], along: Option[Int])
+  | SameElements(groups: List[Int])
+  | Bounded(lb: Option[Int], ub: Option[Int])
+derive Show
+
+## One optimization hint: the dialect's own spelling of the key, and the
+## integer under it. `OptimizationHintsAttr` (AttrDefs.td) names five keys
+## and every one this backend can carry takes an integer, so a hint is a
+## pair and not a sum type: `allow_tma` is the one boolean, and it belongs
+## to the two view operations that ruling 2 defers.
+##
+## Which key is legal is decided by the OPERATION, not by this type
+## (`OptimizationHintsAttr::verifyWithOp`): an entry takes
+## `num_cta_in_cga`, `num_worker_warps_per_cta` and `occupancy`, a load or
+## a store takes `latency`. Knife T15's four constructors below are the
+## legal ones, and nothing here refuses the others -- see `Hints`.
+pub alias Hint = (String, Int)
+
+## The `optimization_hints` of one entry or one memory operation: the
+## dialect's NESTED dictionary, one entry per architecture. The outer key
+## is an `sm_xx` name (or `default`, the fallback the dialect reads when
+## the compilation target has no entry of its own) and the value is that
+## architecture's hints.
+##
+## NOTHING CHECKS THESE, and that is the point of them. The dialect says a
+## hint is a suggestion: `tileiras` computes the same answer with them and
+## without them, and its verifier for the keys and the ranges is behind
+## `-Wunsupported-hints`, off by default, so an unknown architecture, an
+## unknown key and an out-of-range value are all accepted in silence
+## (measured, knife T15; docs/tile-backend-design.md 6.10). What is NOT
+## silent is the SHAPE: every value of the outer dictionary must be a
+## dictionary, keys may not repeat, and the counts on the wire must match
+## what follows them. That is the whole of what layer 1 can say here, and
+## the ledger's exemption for this family says so.
+pub alias Hints = List[(String, List[Hint])]
+
+## The hints of one architecture, for the list `Hints` is. `arch` is an
+## `sm_xx` name or `default`.
+pub fn for_arch(arch: String, hints: List[Hint]) -> (String, List[Hint]) = (arch, hints)
+
+## `num_cta_in_cga`: how many CTAs to put in a CGA. An ENTRY hint. The
+## dialect wants a power of two no greater than 16, and 1 on sm_80 to
+## sm_89, which is every architecture this machine has.
+pub fn hint_num_cta_in_cga(n: Int) -> Hint = ("num_cta_in_cga", n)
+
+## `num_worker_warps_per_cta`: how many worker warps to give a CTA. An
+## ENTRY hint. The dialect wants a power of two no greater than 32 and
+## clamps anything but 4 or 8 into that range.
+pub fn hint_num_worker_warps_per_cta(n: Int) -> Hint = ("num_worker_warps_per_cta", n)
+
+## `occupancy`: how many blocks to aim to keep resident. An ENTRY hint,
+## and the one key AttrDefs.td's table leaves out while
+## `verifyWithOp` accepts it. The dialect wants 1 to 32.
+pub fn hint_occupancy(n: Int) -> Hint = ("occupancy", n)
+
+## `latency`: the latency to assume for a memory operation. A LOAD or
+## STORE hint, and the only key either of them takes (`allow_tma` is the
+## view operations'). The dialect wants 1 to 10.
+pub fn hint_latency(n: Int) -> Hint = ("latency", n)
 
 ## The one-bit tile format: what a comparison answers and what a mask is. A
 ## tile element format, not a buffer format. Its i32 neighbour is std/gpu's
@@ -210,22 +298,53 @@ pub opaque type Ptrs[D] = Int
 ## so an `i1` mask widens to 0 or 1 rather than to 0 or -1), `trunci` (a
 ## wider integer tile to a narrower one, which for `i32` to `i1` is the low
 ## bit) and `bitcast` (the same bits read as another format of the same
-## width, `i32` and `f32` here).
+## width, `i32` and `f32` here). `extis` is `exti` under the OTHER
+## signedness, spelled as a second name for the reason `shri` and `shru`
+## are: one dialect opcode, two names, and the attribute is the whole
+## difference.
+##
+## `t_repack(op, from, to, shape, a)` is the other two conversions, `pack`
+## and `unpack`, and what separates them from the six above is that the two
+## tiles have different SHAPES. Both reinterpret a rank-1 tile as the byte
+## array it occupies, so `shape` is the SOURCE's and the answer's lane count
+## is scaled by the ratio of the two element widths; `pack` answers an `i8`
+## tile and `unpack` takes one. They are the only way to reach a sub-byte
+## format (`i4`, `f4E2M1FN`), which no pointer type can hold.
 ##
 ## `t_idx_const` / `t_idx_add` / `t_idx_mul` answer scalar i32 handles: a
 ## host constant, and the sum and product of two index handles.
 ##
 ## `t_loop_begin` / `t_loop_end` bracket a region (tile-backend-design 5.2).
-## `t_loop_begin(lower, upper, step, inits)` opens a `for` over the index
+## `t_loop_begin(lower, upper, step, unsigned, inits)` opens a `for` over the index
 ## handles `[lower, upper)` by `step`, with `inits` as the loop-carried
 ## values entering it, and answers the induction variable's handle and one
 ## handle per carried value as the body sees them; the operations issued
 ## until the matching `t_loop_end` fall inside the region. `t_loop_end(outs)`
 ## closes it with `outs` as the values the body hands to the next iteration
 ## (one per carried value, in order) and answers one handle per carried
-## value as they stand after the loop. The handler carries the memory
-## ordering token through the loop on its own; a body never sees it. Only
+## value as they stand after the loop. `unsigned` is the loop's
+## `unsignedCmp` attribute: false compares the induction variable against
+## the bound as a SIGNED i32 and true as an unsigned one, which is a
+## different loop whenever the range straddles 2^31. The handler carries
+## the memory ordering token through the loop on its own; a body never
+## sees it. Only
 ## the `d_for` family calls the pair; a body calls those.
+##
+## `t_while_begin` / `t_while_end` bracket the OTHER loop region, the one
+## whose trip count is not known when it opens (knife T5).
+## `t_while_begin(inits)` opens a `loop` with `inits` as the loop-carried
+## values entering it and answers one handle per carried value as the body
+## sees them; `t_while_end(cond, outs)` closes it with the rank-0 `i1`
+## handle `cond` -- true when this iteration is the last -- and `outs`, the
+## values the NEXT iteration receives, and answers one handle per carried
+## value as they stand after the loop. What the loop answers when it stops
+## is the values that ENTERED the iteration that stopped it, not `outs`:
+## the handler writes `if cond { break <entering> } else { yield }` before
+## the `continue`, so a body reads "run me while `cond` is false, and give
+## me back the value I was called with". The memory ordering token rides
+## through as the last carried value, exactly as `for`'s does, and it is
+## carried by BOTH terminators (a `break` yields the loop's final values,
+## and the token is one of them). Only the `d_loop` family calls the pair.
 ##
 ## A `shape` is a list of tile dimensions, each a power of two, EXCEPT that
 ## `[]` is the rank-0 tile (`tile<f64>`): the shape a reduction answers and
@@ -313,16 +432,68 @@ pub opaque type Ptrs[D] = Int
 ## `t_load` -- and they are the only way to say "the same bytes read as
 ## another format", which is what `t_ptr_to_ptr` is for.
 ##
+## `t_assert` / `t_assume` / `t_print` are knife T6's three, and no two of
+## them are the same kind of thing. `t_assert` issues an operation with no
+## result that can STOP the launch: the host is told when a lane's
+## condition is false. `t_assume` issues one whose result is its operand,
+## carrying a claim the compiler may use and nobody checks. `t_print` is in
+## the token chain (`print_tko` takes the current token and answers the
+## next), and what it does is not visible in any buffer: it writes to the
+## process's standard output when the context is synchronised.
+##
+## `t_store_ptrs` is `t_load_ptrs`'s other direction, and `t_global` /
+## `t_get_global` are the static globals (knife T7).
+## `t_global(sym, dtype, values, align, is_private, constant)` DECLARES one:
+## it adds a record to the module beside the entry rather than an instruction
+## to the body, so it answers nothing and may not be issued inside a region.
+## `is_private` and `constant` are the two fields the Global section's record
+## grew at bytecode 13.3 (knife T8); they are booleans here and the writer
+## turns the first into a SymbolVisibility enum value, the way every other
+## enum in this package lives in bytecode.dawn and not on this surface.
+## `t_get_global(sym, dtype, shape)` answers a tile of `shape` every lane
+## of which holds the global's own address, the same reshape and broadcast
+## `t_ptrs` performs on a parameter; from there the pointer surface above
+## reads and writes it. A `t_get_global` naming a symbol no `t_global`
+## declared, or declaring the same symbol twice, is refused when the kernel
+## is recorded.
+##
+## `t_mmaf_scaled` is the block-scaled matrix multiply (knife T10). It is
+## `t_mmaf` with two more operands and three formats instead of one: the
+## two matrices are `dtype`, the two scale tiles are `scale`, and the
+## accumulator and the result are f32, which is the only output type the
+## dialect allows. `dims` is `[m, k, n, block]`, where `block` is the scale
+## vector size V: a scale tile is `[m, k / block]` on the left and
+## `[k / block, n]` on the right, and one of its elements scales a run of
+## `block` elements along K.
+##
+## The four numbers travel as ONE LIST rather than as four parameters
+## because a Dawn function value takes at most eight parameters (the
+## compiler emits `dawn/rt/Fn0` to `Fn9` and the evidence pack is one of
+## the nine), and an effect operation is a function value. Eleven
+## parameters compile and then fail at run time with
+## `NoClassDefFoundError: dawn/rt/Fn12`; this shape has eight.
+##
+## `t_alloca(dtype, num_elem, align, shared, shape)` is the automatic
+## allocation (knife T10). It answers a tile of `shape` every lane of which
+## holds the SAME address, the way `t_get_global` does, because `alloca`
+## answers a rank-0 `tile<ptr<D>>` too. `num_elem` elements of `dtype` are
+## reserved, aligned to `align` bytes, and the allocation lives as long as
+## the block the operation is in: it is scratch within one launch and
+## nothing reads it afterwards. `shared` is the dialect's `global` unit
+## attribute, which says the address may be handed to other tile threads;
+## without it the address is private to this one.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
-## order at all.
+## order at all. `t_print` is refused there for the same reason, and
+## `t_assert` and `t_assume` are not: neither is ordered against memory.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
-    mask: Option[Int], pad: Option[Int]) -> Int
+    mask: Option[Int], pad: Option[Int], hints: Hints) -> Int
   fn t_store(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
-    v: Int, mask: Option[Int]) -> Unit
+    v: Int, mask: Option[Int], hints: Hints) -> Unit
   fn t_gather(param: Int, dtype: String, index: Int, shape: List[Int],
     mask: Option[Int], pad: Option[Int]) -> Int
   fn t_scatter(param: Int, dtype: String, index: Int, shape: List[Int],
@@ -339,18 +510,23 @@ pub effect Dev {
   fn t_binaryf(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_fma(dtype: String, shape: List[Int], a: Int, b: Int, c: Int) -> Int
   fn t_mmaf(dtype: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
+  fn t_mmaf_scaled(dtype: String, scale: String, dims: List[Int],
+    a: Int, b: Int, c: Int, sa: Int, sb: Int) -> Int
   fn t_mmai(m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
   fn t_cmpf(pred: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_cmpi(pred: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_unaryi(op: String, dtype: String, shape: List[Int], a: Int) -> Int
   fn t_binaryi(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_convert(op: String, from: String, to: String, shape: List[Int], a: Int) -> Int
+  fn t_repack(op: String, from: String, to: String, shape: List[Int], a: Int) -> Int
   fn t_select(dtype: String, shape: List[Int], cond: Int, a: Int, b: Int) -> Int
   fn t_idx_const(value: Int) -> Int
   fn t_idx_add(a: Int, b: Int) -> Int
   fn t_idx_mul(a: Int, b: Int) -> Int
-  fn t_loop_begin(lower: Int, upper: Int, step: Int, inits: List[Int]) -> (Int, List[Int])
+  fn t_loop_begin(lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int]) -> (Int, List[Int])
   fn t_loop_end(outs: List[Int]) -> List[Int]
+  fn t_while_begin(inits: List[Int]) -> List[Int]
+  fn t_while_end(cond: Int, outs: List[Int]) -> List[Int]
   fn t_spread(dtype: String, shape: List[Int], src: Int) -> Int
   fn t_reduce_begin(dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int]) -> List[Int]
   fn t_reduce_end(yields: List[Int]) -> List[Int]
@@ -372,6 +548,13 @@ pub effect Dev {
   fn t_int_to_ptr(dtype: String, shape: List[Int], ints: Int) -> Int
   fn t_ptr_to_ptr(from: String, to: String, shape: List[Int], ptrs: Int) -> Int
   fn t_load_ptrs(dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int]) -> Int
+  fn t_assert(shape: List[Int], cond: Int, message: String) -> Unit
+  fn t_assume(pred: AssumePred, dtype: String, shape: List[Int], src: Int) -> Int
+  fn t_print(fmt: String, dtype: String, shape: List[Int], args: List[Int]) -> Unit
+  fn t_store_ptrs(dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int]) -> Unit
+  fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
+  fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
+  fn t_alloca(dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int]) -> Int
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -505,7 +688,7 @@ pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1]
 pub fn load_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int]) -> Tile[D] !Dev = {
   let i: Int = base
   let none: Option[Int] = None
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, none, none)
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, none, none, [])
   h
 }
 
@@ -517,7 +700,7 @@ pub fn load_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides:
   let i: Int = base
   let hm: Int = mask
   let hp: Int = pad
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, Some(hm), Some(hp))
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, Some(hm), Some(hp), [])
   h
 }
 
@@ -537,7 +720,7 @@ pub fn store_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[
   let i: Int = base
   let hv: Int = v
   let none: Option[Int] = None
-  t_store(position(p), param_dtype(p), i, shape, strides, hv, none)
+  t_store(position(p), param_dtype(p), i, shape, strides, hv, none, [])
 }
 
 ## `store_strided`, writing only the lanes `mask` selects: a lane whose mask
@@ -547,7 +730,7 @@ pub fn store_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides
   let i: Int = base
   let hm: Int = mask
   let hv: Int = v
-  t_store(position(p), param_dtype(p), i, shape, strides, hv, Some(hm))
+  t_store(position(p), param_dtype(p), i, shape, strides, hv, Some(hm), [])
 }
 
 ## `store_strided` over a contiguous tile.
@@ -557,6 +740,30 @@ pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D]) -> Unit !D
 ## `store_masked` over a contiguous tile.
 pub fn store_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], v: Tile[D]) -> Unit !Dev =
   store_strided_masked(p, base, shape, row_major(shape), mask, v)
+
+## `load` carrying `optimization_hints`, the dialect's optional attribute
+## on `load_ptr_tko` (knife T15). The only key a load takes is `latency`.
+##
+## The tile it answers is the one `load` answers: a hint does not change
+## an answer, so this reads as "the same load, said differently". What it
+## does change is the bytes -- the flag bit for the attribute and the
+## nested dictionary after it -- which is where every judgement about it
+## lives.
+pub fn load_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints) -> Tile[D] !Dev = {
+  let i: Int = base
+  let none: Option[Int] = None
+  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, row_major(shape), none, none, hints)
+  h
+}
+
+## `store` carrying `optimization_hints`, on `store_ptr_tko`. Its one key
+## is `latency`, as a load's is.
+pub fn store_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints, v: Tile[D]) -> Unit !Dev = {
+  let i: Int = base
+  let hv: Int = v
+  let none: Option[Int] = None
+  t_store(position(p), param_dtype(p), i, shape, row_major(shape), hv, none, hints)
+}
 
 ## The tile of `p`'s format and `shape` whose lane `[i, j, ..]` is element
 ## `index[i, j, ..]` of `p`: a load whose element offsets come from a tile
@@ -732,6 +939,75 @@ pub fn maxf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D]
 
 ## The element-wise smaller of `a` and `b`.
 pub fn minf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "minf", shape, a, b)
+
+# ---- the same operations under another attribute (knife T4) ----
+#
+# Tile IR's arithmetic carries attributes, and until knife T4 this module
+# named only one value of each: `rounding<nearest_even>`, `overflow<none>`,
+# `ordered`, `relaxed device`, and no unit attribute set anywhere. The
+# functions below are the same operations under the other values. They are
+# separate names rather than a mode argument for the reason `shr_i` and
+# `shr_u` are: the attribute is part of what the operation IS, a caller
+# picks one at the point of use, and a name can be grepped for.
+#
+# Which values each operation accepts is not uniform and is not guessable:
+# `approx` and `flush_to_zero` are refused on anything but an f32 tile
+# (SharedVerifiers.h's `verifyApprox` and `verifyFtz`), `approx` is not a
+# mode addf takes at all, and the two directed modes are accepted at every
+# float width. docs/tile-backend-design.md 6.8 records what the device
+# then does with them.
+
+## The element-wise sum rounded TOWARDS NEGATIVE INFINITY: the largest
+## value of the format that is not above the exact sum.
+pub fn addf_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_neg_inf", shape, a, b)
+
+## The element-wise sum rounded TOWARDS POSITIVE INFINITY.
+pub fn addf_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_pos_inf", shape, a, b)
+
+## The element-wise product rounded towards negative infinity.
+pub fn mul_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_neg_inf", shape, a, b)
+
+## The element-wise product rounded towards positive infinity.
+pub fn mul_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_pos_inf", shape, a, b)
+
+## The element-wise quotient rounded towards negative infinity.
+pub fn div_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "divf_neg_inf", shape, a, b)
+
+## The element-wise quotient rounded towards positive infinity.
+pub fn div_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "divf_pos_inf", shape, a, b)
+
+## The element-wise sum with `flush_to_zero`: a subnormal operand or a
+## subnormal result becomes the zero of its sign. f32 ONLY, and refused by
+## the assembler at any other width.
+pub fn addf_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "addf_ftz", shape, a, b)
+
+## The element-wise product with `flush_to_zero`. f32 only.
+pub fn mul_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "mulf_ftz", shape, a, b)
+
+## The element-wise larger with `propagate_nan`: a NaN operand answers a
+## canonical NaN rather than the other operand, which is what `maxf`
+## without the attribute answers.
+pub fn maxf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "maxf_nan", shape, a, b)
+
+## The element-wise smaller with `propagate_nan`.
+pub fn minf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
+  binary(d, "minf_nan", shape, a, b)
+
+## The element-wise square root under the APPROXIMATE rounding mode: the
+## architecture's fast reciprocal-square-root path rather than the
+## correctly rounded root. f32 only. A tolerance-tier operation by
+## construction, and the tolerance is the hardware's, not a series'.
+pub fn sqrt_approx[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev =
+  unary(d, "sqrt_approx", shape, a)
 
 ## The element-wise negation `-a`: a sign flip, exact for every value.
 pub fn neg[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unary(d, "negf", shape, a)
@@ -937,6 +1213,30 @@ pub fn mmaf[D: Dtype](d: D, m: Int, k: Int, n: Int, a: Tile[D], b: Tile[D], c: T
   h
 }
 
+## The BLOCK-SCALED floating-point matrix multiply-accumulate (knife T10):
+## `mmaf` for the low-precision formats that carry a separate exponent per
+## run of K. `a` is a `d` tile of `[m, k]`, `b` a `d` tile of `[k, n]`, `c`
+## and the answer f32 tiles of `[m, n]`, and `sa` and `sb` are `s` tiles of
+## `[m, k / block]` and `[k / block, n]`: each scale element multiplies a
+## run of `block` elements along K in the matrix beside it.
+##
+## The dialect allows two combinations and nothing else (Ops.td's table):
+## `f8E4M3FN`, `f8E5M2` or `f4E2M1FN` operands with `f8E8M0FNU` scales, and
+## `f4E2M1FN` operands with `f8E4M3FN` scales. The result is f32 in both.
+## There is no combination with a wide operand format, which is why this
+## operation cannot be assembled for this machine's sm_86 at all: every
+## operand type it takes is one `tileiras` refuses below sm_100.
+pub fn mmaf_scaled[D: Dtype, S: Dtype](d: D, s: S, m: Int, k: Int, n: Int, block: Int,
+  a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: Tile[S]) -> Tile[F32] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let z: Int = c
+  let p: Int = sa
+  let q: Int = sb
+  let h: Tile[F32] = t_mmaf_scaled(dtype_name(d), dtype_name(s), [m, k, n, block], x, y, z, p, q)
+  h
+}
+
 ## The INTEGER matrix multiply-accumulate `a * b + c` (knife 11): `a` is an
 ## `i8` tile of `[m, k]`, `b` an `i8` tile of `[k, n]`, and `c` and the
 ## answer are `i32` tiles of `[m, n]`. Both operands are read SIGNED (the
@@ -1023,6 +1323,30 @@ pub fn le[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] 
 pub fn gt[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "gt", shape, a, b)
 
 pub fn ge[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ge", shape, a, b)
+
+# The same six predicates UNORDERED (knife T4). `cmpf` carries a
+# `comparison_ordering` beside its predicate: `ordered` answers false
+# whenever either operand is a NaN, `unordered` answers true. The two
+# agree on every pair of numbers, so these six are the six above on any
+# corpus without a NaN in it, and something else entirely on one with.
+
+## `a == b` or either operand a NaN.
+pub fn eq_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ueq", shape, a, b)
+
+## `a != b` or either operand a NaN.
+pub fn ne_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "une", shape, a, b)
+
+## `a < b` or either operand a NaN.
+pub fn lt_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ult", shape, a, b)
+
+## `a <= b` or either operand a NaN.
+pub fn le_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ule", shape, a, b)
+
+## `a > b` or either operand a NaN.
+pub fn gt_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "ugt", shape, a, b)
+
+## `a >= b` or either operand a NaN.
+pub fn ge_u[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = compare(d, "uge", shape, a, b)
 
 ## The same six over two i32 tiles of `shape`, signed.
 pub fn eq_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = compare_int("eq", shape, a, b)
@@ -1127,6 +1451,24 @@ pub fn neg_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("negi
 ## The element-wise absolute value `|a|`, wrapping (so `|-2^31|` is
 ## `-2^31`).
 pub fn abs_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("absi", shape, a)
+
+# The three integer OVERFLOW assumptions (knife T4). `overflow<none>` is
+# what every integer operation above carries: the compiler assumes nothing
+# and the device wraps. These three tell it to assume the operation does
+# not wrap, as a signed operation (`nsw`), as an unsigned one (`nuw`) or
+# as either (`nw`). They are assumptions and not arithmetic: a program
+# that wraps under one of them is undefined, so a caller uses them only
+# where it can prove the range, and no corpus can distinguish them from
+# `none` on a program that keeps its promise.
+
+## `a + b` under `overflow<no_signed_wrap>`.
+pub fn add_i_nsw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("addi_nsw", shape, a, b)
+
+## `a - b` under `overflow<no_unsigned_wrap>`.
+pub fn sub_i_nuw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("subi_nuw", shape, a, b)
+
+## `a * b` under `overflow<no_wrap>`.
+pub fn mul_i_nw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("muli_nw", shape, a, b)
 
 # ---- integer arithmetic at a named width (knife T3) ----
 #
@@ -1282,6 +1624,67 @@ pub fn trunc_u8(shape: List[Int], a: Tile[I32]) -> Tile[I8] !Dev = {
   h
 }
 
+## The i32 tile holding each lane of the `i4` tile `a` widened with its
+## SIGN, so a nibble reads as a value in [-8, 7]. The dialect has no
+## arithmetic at four bits at all (Types.td leaves `i4` out of
+## `CudaTile_IntTileType`), so this is how a kernel computes over one:
+## widen, compute at 32 bits, `trunc_i4` back.
+##
+## `ext_u4` is the same widening the other way and answers [0, 15]. Which
+## of the two a kernel takes is a device answer on every nibble whose top
+## bit is set, and scripts/tile-gpu-diff's exti-i4-zero-extends is that
+## sentence as a mutant.
+pub fn ext_i4(shape: List[Int], a: Tile[I4]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("extis", "i4", "i32", shape, x)
+  h
+}
+
+## The i32 tile holding each lane of the `i4` tile `a` widened with zeros,
+## so a nibble reads as a value in [0, 15].
+pub fn ext_u4(shape: List[Int], a: Tile[I4]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("exti", "i4", "i32", shape, x)
+  h
+}
+
+## The `i4` tile holding the LOW NIBBLE of each lane of the i32 tile `a`: a
+## `trunci`, which keeps the bits and drops the rest. The wrap at four bits,
+## and std/gpu's `wrap_i4` is the host reading of the same nibble.
+pub fn trunc_i4(shape: List[Int], a: Tile[I32]) -> Tile[I4] !Dev = {
+  let x: Int = a
+  let h: Tile[I4] = t_convert("trunci", "i32", "i4", shape, x)
+  h
+}
+
+# ---- the byte view knife T9 needs ----
+
+## The rank-1 `i8` tile holding the BYTES of the rank-1 tile `a`, whose
+## format is `from_d` and whose shape is `shape`: the dialect's `pack`. No
+## bit moves; the tile is reinterpreted as the byte array it occupies, so
+## the answer has `lanes * bits(from_d) / 8` lanes.
+##
+## Both tiles must be RANK 1 (PackOp's verifier says so, to leave no
+## ambiguity about which lane is which byte) and `from_d` may not itself be
+## an 8-bit format (`bitcast` is that one). A sub-byte format packs two
+## lanes to a byte, the EVEN lane in the low nibble; Types.td writes that
+## order out and `std/gpu.i4_lo` is the host reading of it.
+pub fn pack_bytes[A: Dtype](from_d: A, shape: List[Int], a: Tile[A]) -> Tile[I8] !Dev = {
+  let x: Int = a
+  let h: Tile[I8] = t_repack("pack", dtype_name(from_d), "i8", shape, x)
+  h
+}
+
+## The rank-1 tile of format `to_d` the rank-1 `i8` tile `a` of `shape`
+## bytes holds: the dialect's `unpack`, and `pack_bytes`'s inverse. The
+## answer has `lanes * 8 / bits(to_d)` lanes, so unpacking a byte tile into
+## a sub-byte format DOUBLES the lane count.
+pub fn unpack_bytes[B: Dtype](to_d: B, shape: List[Int], a: Tile[I8]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_repack("unpack", "i8", dtype_name(to_d), shape, x)
+  h
+}
+
 ## The mask of the lanes at `base` that fall inside a buffer of `limit`
 ## elements: `lanes(base, shape) < limit`. The boundary of every kernel over a
 ## vector whose length is not a multiple of the tile width, and the reason
@@ -1330,12 +1733,12 @@ pub fn idx_mul(a: Idx, b: Idx) -> Idx !Dev = {
 # it issues in between falls inside the loop's region. The answer is the
 # carried handles after the loop. Private: handles are opaque outside this
 # module, so a body can only reach this through the typed `d_for` / `d_for2`.
-fn loop_handles(lower: Idx, upper: Idx, step: Idx, carried: List[Int],
+fn loop_handles(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, carried: List[Int],
   body: fn(Idx, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
   let lo: Int = lower
   let up: Int = upper
   let st: Int = step
-  let (iv, inside) = t_loop_begin(lo, up, st, carried)
+  let (iv, inside) = t_loop_begin(lo, up, st, unsigned, carried)
   let i: Idx = iv
   t_loop_end(body(i, inside))
 }
@@ -1354,7 +1757,26 @@ fn loop_handles(lower: Idx, upper: Idx, step: Idx, carried: List[Int],
 pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
   body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
   let h: Int = init
-  let outs = loop_handles(lower, upper, step, [h], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [h], (i, inside) => {
+    let t: Tile[D] = inside[0]
+    let r: Int = body(i, t)
+    [r]
+  })
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## `d_for` with the loop's `unsignedCmp` attribute set: the induction
+## variable is compared against the upper bound as an UNSIGNED 32-bit
+## integer, so a range whose bounds straddle 2^31 runs forward instead of
+## not running at all. Its own kernel is scripts/tile-golden's attr_ucmp,
+## and the difference between the two is a lane count and not a rounding,
+## which is why this attribute is the one unit attribute of knife T4 with
+## an unmistakable device answer.
+pub fn d_for_unsigned[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
+  body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
+  let h: Int = init
+  let outs = loop_handles(lower, upper, step, true, [h], (i, inside) => {
     let t: Tile[D] = inside[0]
     let r: Int = body(i, t)
     [r]
@@ -1368,7 +1790,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
   let ha: Int = a
   let hb: Int = b
-  let outs = loop_handles(lower, upper, step, [ha, hb], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let (ra, rb) = body(i, ta, tb)
@@ -1389,7 +1811,7 @@ pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B]
   let ha: Int = a
   let hb: Int = b
   let hc: Int = c
-  let outs = loop_handles(lower, upper, step, [ha, hb, hc], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -1412,7 +1834,7 @@ pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile
   let hb: Int = b
   let hc: Int = c
   let he: Int = e
-  let outs = loop_handles(lower, upper, step, [ha, hb, hc, he], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc, he], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -1429,6 +1851,73 @@ pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile
   let oc: Tile[C] = outs[2]
   let oe: Tile[E] = outs[3]
   (oa, ob, oc, oe)
+}
+
+# A `loop` carrying `carried`: `body` runs ONCE, on the host, with the
+# carried handles as the loop sees them, and answers the exit condition (a
+# rank-0 `i1` handle) and the handles the next iteration receives; what it
+# issues in between falls inside the loop's region. The answer is the
+# carried handles after the loop, which are the ones that ENTERED the
+# iteration whose condition was true. Private for `loop_handles`'s reason:
+# handles are opaque outside this module.
+fn while_handles(carried: List[Int],
+  body: fn(List[Int]) -> (Int, List[Int]) !Dev) -> List[Int] !Dev = {
+  let inside = t_while_begin(carried)
+  let (cond, outs) = body(inside)
+  t_while_end(cond, outs)
+}
+
+## The loop whose trip count the DATA decides, carrying one tile: `init`
+## enters, `body` runs ONCE, on the host, with the carried tile as the loop
+## sees it, and answers a rank-0 mask -- true when the loop is to stop here
+## -- and the tile the next iteration receives. The answer is the tile that
+## entered the iteration where the mask was true, so the loop reads "while
+## the mask is false, replace the tile"; what `body` computed on the
+## iteration that stopped it is discarded.
+##
+## This is `d_for`'s sibling and the only other region that iterates. The
+## difference is where the trip count comes from: `d_for`'s bounds are
+## index handles the host or the grid supplies, and this one's exit is a
+## value the kernel computes from the tiles it is carrying. A body that
+## never answers a true mask never terminates on the device, exactly as a
+## `while (true)` would; nothing here bounds it.
+##
+## Do not store inside one unless the store is meant to happen on the
+## discarded iteration too: `body` runs to the end every time, including
+## the last.
+pub fn d_loop[D](init: Tile[D],
+  body: fn(Tile[D]) -> (Scalar[I1], Tile[D]) !Dev) -> Tile[D] !Dev = {
+  let h: Int = init
+  let outs = while_handles([h], inside => {
+    let t: Tile[D] = inside[0]
+    let (done, nxt) = body(t)
+    let c: Int = done
+    let r: Int = nxt
+    (c, [r])
+  })
+  let out: Tile[D] = outs[0]
+  out
+}
+
+## `d_loop` carrying two tiles, of formats `A` and `B`, in order: what a
+## loop that counts its own iterations needs (the value being refined and
+## the counter travel through one loop together).
+pub fn d_loop2[A, B](a: Tile[A], b: Tile[B],
+  body: fn(Tile[A], Tile[B]) -> (Scalar[I1], Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
+  let ha: Int = a
+  let hb: Int = b
+  let outs = while_handles([ha, hb], inside => {
+    let ta: Tile[A] = inside[0]
+    let tb: Tile[B] = inside[1]
+    let (done, ra, rb) = body(ta, tb)
+    let c: Int = done
+    let xa: Int = ra
+    let xb: Int = rb
+    (c, [xa, xb])
+  })
+  let oa: Tile[A] = outs[0]
+  let ob: Tile[B] = outs[1]
+  (oa, ob)
 }
 
 # ---- rank-0 tiles ----
@@ -1543,6 +2032,26 @@ pub fn s_addi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int
 ## reason: `maxi` is associative, commutative AND idempotent over the
 ## integers, with no wrap-around to speak of.
 pub fn s_maxi(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I32] !Dev = s_binary_int("maxi", a, b)
+
+## A rank-0 i32 constant tile: `s_const`'s integer twin, and what a loop's
+## exit condition compares a reduction's answer against.
+pub fn s_consti(value: Int) -> Scalar[I32] !Dev = {
+  let h: Scalar[I32] = t_consti("i32", rank0(), value)
+  h
+}
+
+# The comparison of two rank-0 i32 tiles, as a rank-0 mask. Signed, as
+# every integer comparison in this package is.
+fn s_compare_int(pred: String, a: Scalar[I32], b: Scalar[I32]) -> Scalar[I1] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let h: Scalar[I1] = t_cmpi(pred, rank0(), x, y)
+  h
+}
+
+## `a <= b` over two rank-0 i32 tiles, as the rank-0 mask a `d_loop` exits
+## on. Signed.
+pub fn s_le_i(a: Scalar[I32], b: Scalar[I32]) -> Scalar[I1] !Dev = s_compare_int("le", a, b)
 
 # The comparison of two index tiles, as a rank-0 mask.
 fn idx_compare(pred: String, a: Idx, b: Idx) -> Scalar[I1] !Dev = {
@@ -1895,6 +2404,93 @@ pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: 
   r
 }
 
+## Declare a statically allocated global named `sym` holding `values`, one
+## element of `d` each, aligned to `align` bytes (`0` is the dialect's
+## default and the only value this tree writes). The allocation lives as
+## long as the loaded module does and is initialized at module load time,
+## so what one launch writes the next launch of the same module reads;
+## `scripts/tile-gpu-diff/global_diff.dawn` is the measurement of that
+## sentence.
+##
+## This is a MODULE-LEVEL declaration and not an instruction: it answers
+## nothing, and issuing it inside a `d_for`, a `d_loop`, a `d_if` or a
+## reduction is refused. Declare each global once, before the
+## `get_global` that names it.
+##
+## Public and writable, which are the dialect's own defaults;
+## `d_global_private` and `d_global_const` are the other two values of the
+## two fields the record grew at 13.3.
+pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0, false, false)
+
+## `d_global` with an explicit alignment in bytes. The dialect's default is
+## 0 and the Global section's record has carried the number since 13.1, so
+## this is the one field of that record a corpus can give two different
+## values in one module.
+pub fn d_global_aligned[D: Dtype](sym: String, d: D, values: List[Float], align: Int) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, align, false, false)
+
+## `d_global` with `private` symbol visibility: the symbol is not part of the
+## module's interface, so a host that has the module cannot look it up.
+##
+## Nothing in this tree can tell the difference from the outside, and the
+## reason is named rather than glossed: the judgement would be
+## `cuModuleGetGlobal` answering for a public symbol and refusing a private
+## one, and the `Gpu` effect in std/gpu.dawn has no such operation. So what
+## this buys is the byte and layer 1 (`tileiras` accepts it), and
+## scripts/tileir-features/attrs.txt carries the exemption
+## `no-module-symbol-ffi` on the row.
+pub fn d_global_private[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0, true, false)
+
+## `d_global` with the `constant` flag: the global is read-only, which is a
+## promise to the compiler and not a guard. The dialect does not say a store
+## through a pointer got from a constant global is diagnosed, so this tree
+## does not store through one; the same `no-module-symbol-ffi` exemption
+## applies, for the same reason.
+pub fn d_global_const[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, 0, false, true)
+
+## The tile of `shape` every lane of which holds the address of the global
+## named `sym`: `get_global` answers a rank-0 `tile<ptr<D>>`, and this is
+## the same reshape and broadcast `ptrs` performs on a parameter. The
+## element at position `x` of the global is `ptr_offset`'s `x` from here,
+## which is what the dialect means by "the initial values are stored in
+## memory in linear order".
+pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_get_global(sym, dtype_name(d), shape)
+  r
+}
+
+## The tile of `shape` every lane of which holds the address of a fresh
+## automatic allocation of `num_elem` elements of `d`, aligned to `align`
+## bytes (knife T10). `alloca` answers a rank-0 `tile<ptr<D>>`, so this is
+## the same reshape and broadcast `global_ptrs` performs, and `ptr_offset`
+## walks the elements from here.
+##
+## The allocation is SCRATCH: the dialect limits its lifetime to the block
+## the operation is in, so what one launch writes is not there for the
+## next, and each `alloca` in a block answers a region of its own. The
+## address is private to this tile thread; `alloca_shared_ptrs` is the
+## other value of the dialect's `global` unit attribute.
+##
+## `align` must be a non-zero power of two and at least the natural size of
+## `d`, which the dialect's verifier requires and the recording handler
+## refuses ahead of it.
+pub fn alloca_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, false, shape)
+  r
+}
+
+## `alloca_ptrs` with the dialect's `global` attribute set: the address may
+## be read and written by other tile threads as well as this one. The
+## lifetime is the same and so is everything else; what changes is one bit
+## of the operation's flags word.
+pub fn alloca_shared_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, true, shape)
+  r
+}
+
 ## The tile the pointers in `ps` point at, unmasked. In the token chain
 ## where `load` is, and ordered against every other memory operation the
 ## same way.
@@ -1905,6 +2501,16 @@ pub fn load_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D]) -> Tile[D] !Dev 
   r
 }
 
+## Write `v` through the pointers in `ps`, unmasked: `load_ptrs`'s other
+## direction, and the same `store_ptr_tko` a `store` through a parameter
+## emits. In the token chain where `store` is.
+pub fn store_ptrs[D: Dtype](d: D, shape: List[Int], ps: Ptrs[D], v: Tile[D]) -> Unit !Dev = {
+  let x: Int = ps
+  let y: Int = v
+  let none: Option[Int] = None
+  t_store_ptrs(dtype_name(d), shape, x, y, none)
+}
+
 ## The i64 tile of `shape` every lane of which holds `value`. What an
 ## address is offset by, in bytes; the i64 spelling of `consti`.
 pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = consti(I64, shape, value)
@@ -1913,6 +2519,77 @@ pub fn i64_const(shape: List[Int], value: Int) -> Tile[I64] !Dev = consti(I64, s
 ## `addi(I64, ..)` is the same instruction and the same bytes.
 pub fn add_i64(shape: List[Int], a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev =
   addi(I64, shape, a, b)
+
+## Stop the kernel with `message` when any lane of `cond` is false (knife
+## T6). Every zero lane prints the message and its index, and the host is
+## told that an assertion fired; the dialect leaves the tile block free to
+## keep running, so what a failing kernel wrote before the assert is not
+## defined away.
+##
+## The failure reaches the HOST, not this program: a launch whose assertion
+## fired makes the CUDA context report an error, and that error is sticky --
+## every later launch in the same process fails too. That is why
+## scripts/tile-gpu-diff runs the failing corpus in a process of its own,
+## and it is the reason "this launch should fail" is a judgement shape and
+## not just another comparison.
+pub fn d_assert(shape: List[Int], cond: Tile[I1], message: String) -> Unit !Dev = {
+  let c: Int = cond
+  t_assert(shape, c, message)
+}
+
+## `t` with `pred` attached: the same value, and a claim about it the
+## compiler may use. The claim is NOT checked, here or on the device, so a
+## false one is undefined behaviour (`AssumePred` says where the dialect
+## says so).
+pub fn d_assume[D: Dtype](d: D, shape: List[Int], pred: AssumePred, t: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = t
+  let r: Tile[D] = t_assume(pred, dtype_name(d), shape, x)
+  r
+}
+
+## `t`, assumed to hold multiples of `divisor` in every lane.
+pub fn assume_div_by[D: Dtype](d: D, shape: List[Int], divisor: Int, t: Tile[D]) -> Tile[D] !Dev = {
+  let none: Option[Int] = None
+  d_assume(d, shape, DivBy(divisor, none, none), t)
+}
+
+## `t`, assumed to repeat one value in every group of `groups[k]` along
+## dimension `k`.
+pub fn assume_same_elements[D: Dtype](d: D, shape: List[Int], groups: List[Int], t: Tile[D]) -> Tile[D] !Dev =
+  d_assume(d, shape, SameElements(groups), t)
+
+## `t`, assumed to hold values between `lb` and `ub` inclusive, read
+## signed. Either bound may be `None`.
+pub fn assume_in_range[D: Dtype](d: D, shape: List[Int], lb: Option[Int], ub: Option[Int], t: Tile[D]) -> Tile[D] !Dev =
+  d_assume(d, shape, Bounded(lb, ub), t)
+
+## Print `fmt` with `args` interleaved, C printf style: one format
+## expression (a `%` and its conversion) per argument, and the dialect
+## refuses a count that disagrees (PrintTkoOp's verifier counts them the
+## way `format_args` in prog.dawn does).
+##
+## RANK-0 ARGUMENTS ONLY, and that is a decision about what can be JUDGED
+## rather than a limit of the operation. The dialect takes a tile of any
+## shape and says in as many words that prints "are not guaranteed to be
+## atomic" and that simultaneous ones "may be interleaved", so the bytes a
+## wide tile puts on standard output are not a value a test can compare.
+## One rank-0 tile printed by one tile block is one line, and
+## scripts/tile-gpu-diff compares it byte for byte. The effect operation
+## underneath carries a shape, so nothing here has to change if a later
+## knife finds a judgement for the wide case.
+##
+## TOKEN ORDERED, which is what the `_tko` in the opcode's name means: this
+## takes the ordering token as it stands and answers the next one, so a
+## print sits in the same chain as the loads and stores around it. Without
+## that the compiler is free to move it (Ops.td says so).
+pub fn d_print[D: Dtype](d: D, fmt: String, args: List[Scalar[D]]) -> Unit !Dev = {
+  let hs = list.map(args, a => {
+    let h: Int = a
+    h
+  })
+  let none: List[Int] = []
+  t_print(fmt, dtype_name(d), none, hs)
+}
 
 # ---- tests ----
 #
@@ -1929,12 +2606,12 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad) => {
+    t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad, _hints) => {
       let h = next
       next = next + 1
       h
     }
-    t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+    t_store(_param, _dtype, _base, _shape, _strides, _v, _mask, _hints) => ()
     t_gather(_param, _dtype, _index, _shape, _mask, _pad) => {
       let h = next
       next = next + 1
@@ -2021,6 +2698,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_repack(_op, _from, _to, _shape, _a) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_select(_dtype, _shape, _cond, _a, _b) => {
       let h = next
       next = next + 1
@@ -2041,13 +2723,23 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_loop_begin(_lower, _upper, _step, inits) => {
+    t_loop_begin(_lower, _upper, _step, _unsigned, inits) => {
       let iv = next
       let base = next + 1
       next = next + 1 + len(inits)
       (iv, list.map(range(0, len(inits)), k => base + k))
     }
     t_loop_end(outs) => {
+      let base = next
+      next = next + len(outs)
+      list.map(range(0, len(outs)), k => base + k)
+    }
+    t_while_begin(inits) => {
+      let base = next
+      next = next + len(inits)
+      list.map(range(0, len(inits)), k => base + k)
+    }
+    t_while_end(_cond, outs) => {
       let base = next
       next = next + len(outs)
       list.map(range(0, len(outs)), k => base + k)
@@ -2141,6 +2833,30 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_assert(_shape, _cond, _message) => ()
+    t_assume(_pred, _dtype, _shape, _src) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_print(_fmt, _dtype, _shape, _args) => ()
+    t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
+    t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
+    t_get_global(_sym, _dtype, _shape) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_alloca(_dtype, _num_elem, _align, _shared, _shape) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => {
+      let h = next
+      next = next + 1
+      h
+    }
   }
   body()
 }
@@ -2217,12 +2933,12 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["block_id ${axis}"]
       0
     }
-    t_load(param, dtype, base, shape, strides, mask, pad) => {
-      log = log ++ ["load ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${opt(mask)} ${opt(pad)}"]
+    t_load(param, dtype, base, shape, strides, mask, pad, hints) => {
+      log = log ++ ["load ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${opt(mask)} ${opt(pad)} ${show(hints)}"]
       1
     }
-    t_store(param, dtype, base, shape, strides, v, mask) => {
-      log = log ++ ["store ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${v} ${opt(mask)}"]
+    t_store(param, dtype, base, shape, strides, v, mask, hints) => {
+      log = log ++ ["store ${param} ${dtype} ${base} ${show(shape)} ${show(strides)} ${v} ${opt(mask)} ${show(hints)}"]
     }
     t_gather(param, dtype, index, shape, mask, pad) => {
       log = log ++ ["gather ${param} ${dtype} ${index} ${show(shape)} ${opt(mask)} ${opt(pad)}"]
@@ -2295,6 +3011,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["convert ${op} ${from} ${to} ${show(shape)} ${a}"]
       20
     }
+    t_repack(op, from, to, shape, a) => {
+      log = log ++ ["repack ${op} ${from} ${to} ${show(shape)} ${a}"]
+      21
+    }
     t_select(dtype, shape, cond, a, b) => {
       log = log ++ ["select ${dtype} ${show(shape)} ${cond} ${a} ${b}"]
       11
@@ -2302,8 +3022,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_idx_const(_value) => 12
     t_idx_add(_a, _b) => 13
     t_idx_mul(_a, _b) => 14
-    t_loop_begin(_lower, _upper, _step, inits) => (15, inits)
+    t_loop_begin(_lower, _upper, _step, _unsigned, inits) => (15, inits)
     t_loop_end(outs) => outs
+    t_while_begin(inits) => inits
+    t_while_end(_cond, outs) => outs
     t_spread(dtype, shape, src) => {
       log = log ++ ["spread ${dtype} ${show(shape)} ${src}"]
       16
@@ -2385,6 +3107,36 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["load_ptrs ${dtype} ${show(shape)} ${ptrs} ${opt(mask)} ${opt(pad)}"]
       75
     }
+    t_assert(shape, cond, message) => {
+      log = log ++ ["assert ${show(shape)} ${cond} ${message}"]
+      ()
+    }
+    t_assume(pred, dtype, shape, src) => {
+      log = log ++ ["assume ${show(pred)} ${dtype} ${show(shape)} ${src}"]
+      76
+    }
+    t_print(fmt, dtype, shape, args) => {
+      log = log ++ ["print ${fmt} ${dtype} ${show(shape)} ${show(args)}"]
+      ()
+    }
+    t_store_ptrs(dtype, shape, ptrs, value, mask) => {
+      log = log ++ ["store_ptrs ${dtype} ${show(shape)} ${ptrs} ${value} ${opt(mask)}"]
+    }
+    t_global(sym, dtype, values, align, is_private, constant) => {
+      log = log ++ ["global ${sym} ${dtype} ${show(values)} ${align} ${show(is_private)} ${show(constant)}"]
+    }
+    t_get_global(sym, dtype, shape) => {
+      log = log ++ ["get_global ${sym} ${dtype} ${show(shape)}"]
+      77
+    }
+    t_alloca(dtype, num_elem, align, shared, shape) => {
+      log = log ++ ["alloca ${dtype} ${num_elem} ${align} ${show(shared)} ${show(shape)}"]
+      78
+    }
+    t_mmaf_scaled(dtype, scale, dims, a, b, c, sa, sb) => {
+      log = log ++ ["mmaf_scaled ${dtype} ${scale} ${show(dims)} ${a} ${b} ${c} ${sa} ${sb}"]
+      79
+    }
   }
   body()
   log
@@ -2395,7 +3147,7 @@ test "load hands the handler the parameter's own format, not a fixed one" {
     let _r = dtype_passed_to_load()
     ()
   })
-  assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None"]
+  assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None []"]
 }
 
 fn indexed_surface() -> Unit !Dev = {
@@ -2412,7 +3164,7 @@ fn indexed_surface() -> Unit !Dev = {
 
 test "gather and scatter hand the handler the index tile and the parameter's own format, with no strides at all" {
   assert logged(indexed_surface) == [
-    "load 0 i32 12 [8] [1] None None",
+    "load 0 i32 12 [8] [1] None None []",
     "consti i32 [8] 8",
     "cmpi lt [8] 1 3",
     "constf f64 [8] 0.0",
@@ -2437,7 +3189,7 @@ fn atomic_surface() -> Unit !Dev = {
 
 test "the atomics hand the handler the mode, the index tile and the parameter's own format" {
   assert logged(atomic_surface) == [
-    "load 0 i32 12 [8] [1] None None",
+    "load 0 i32 12 [8] [1] None None []",
     "consti i32 [8] 8",
     "cmpi lt [8] 1 3",
     "consti i32 [8] 1",
@@ -2483,8 +3235,8 @@ test "the typed surface spells every operation name the handler sees" {
     "consti i32 [8] 5",
     "cmpi lt [8] 5 3",
     "constf f64 [8] 0.0",
-    "load 0 f64 14 [8] [1] Some(10) Some(2)",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] Some(10) Some(2) []",
+    "load 0 f64 14 [8] [1] None None []",
     "binaryf addf f64 [8] 1 1",
     "binaryf subf f64 [8] 7 1",
     "binaryf mulf f64 [8] 7 1",
@@ -2496,7 +3248,7 @@ test "the typed surface spells every operation name the handler sees" {
     "fma f64 [8] 6 1 1",
     "cmpf lt f64 [8] 8 1",
     "select f64 [8] 9 8 1",
-    "store 0 f64 14 [8] [1] 11 Some(10)"
+    "store 0 f64 14 [8] [1] 11 Some(10) []"
   ]
 }
 
@@ -2541,7 +3293,7 @@ test "a reduction hands the handler the width, the identity and the operand, and
   # result; the body's addf is over those two.
   assert logged(one_reduction) == [
     "block_id 0",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] None None []",
     "reduce_begin 0 [8] [IdF(\"f64\", 0.0)] [1]",
     "binaryf addf f64 [] 20 21",
     "reduce_end [7]",
@@ -2560,7 +3312,7 @@ fn one_branch() -> Unit !Dev = {
 test "an if hands the handler its condition, then each branch's yield in turn" {
   assert logged(one_branch) == [
     "block_id 0",
-    "load 0 f64 14 [8] [1] None None",
+    "load 0 f64 14 [8] [1] None None []",
     "cmpi eq [] 0 12",
     "if_begin 10",
     "binaryf addf f64 [8] 1 1",
@@ -2673,8 +3425,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
     with handle Dev {
       var log: List[String] = []
       t_block_id(_axis) => 0
-      t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad) => 1
-      t_store(_param, _dtype, _base, _shape, _strides, _v, _mask) => ()
+      t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad, _hints) => 1
+      t_store(_param, _dtype, _base, _shape, _strides, _v, _mask, _hints) => ()
       t_gather(_param, _dtype, _index, _shape, _mask, _pad) => 1
       t_scatter(_param, _dtype, _index, _shape, _v, _mask) => ()
       t_atomic_rmw(_param, _dtype, _mode, _index, _shape, _v, _mask) => 1
@@ -2696,17 +3448,26 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_unaryi(_op, _dtype, _shape, _a) => 11
       t_binaryi(_op, _dtype, _shape, _a, _b) => 12
       t_convert(_op, _from, _to, _shape, _a) => 13
+      t_repack(_op, _from, _to, _shape, _a) => 14
       t_select(_dtype, _shape, _cond, _a, _b) => 10
       t_idx_const(value) => value + 10
       t_idx_add(_a, _b) => 4
       t_idx_mul(_a, _b) => 5
-      t_loop_begin(lower, upper, step, inits) => {
+      t_loop_begin(lower, upper, step, _unsigned, inits) => {
         log = log ++ ["loop_begin ${lower} ${upper} ${step} ${show(inits)}"]
         (30, [31])
       }
       t_loop_end(outs) => {
         log = log ++ ["loop_end ${show(outs)}"]
         [40]
+      }
+      t_while_begin(inits) => {
+        log = log ++ ["while_begin ${show(inits)}"]
+        [32]
+      }
+      t_while_end(cond, outs) => {
+        log = log ++ ["while_end ${cond} ${show(outs)}"]
+        [41]
       }
       t_spread(_dtype, _shape, _src) => 16
       t_reduce_begin(_dim, _shape, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)
@@ -2729,6 +3490,14 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_int_to_ptr(_dtype, _shape, _ints) => 73
       t_ptr_to_ptr(_from, _to, _shape, _ptrs) => 74
       t_load_ptrs(_dtype, _shape, _ptrs, _mask, _pad) => 75
+      t_assert(_shape, _cond, _message) => ()
+      t_assume(_pred, _dtype, _shape, _src) => 76
+      t_print(_fmt, _dtype, _shape, _args) => ()
+      t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
+      t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
+      t_get_global(_sym, _dtype, _shape) => 77
+      t_alloca(_dtype, _num_elem, _align, _shared, _shape) => 78
+      t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => 79
     }
     let _r = loop_seen()
     log
