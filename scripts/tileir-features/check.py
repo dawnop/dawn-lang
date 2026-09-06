@@ -57,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15", "TG"}
 
 
 class Ledger:
@@ -1003,7 +1003,7 @@ def attr_cases(good, bytecode, files, ledger):
          good.replace("device:mathops", "device:vadd_f32"),
          "names device kernel vadd_f32, which no scripts/tile-gpu-diff program launches"),
         ("a landed knife's row that stops below the bar with no reason",
-         good.replace("| no-module-symbol-ffi", "| -                   "),
+         good.replace("| visibility-not-in-the-lookup", "| -                           "),
          "stops at layer 1 and names no reason"),
         ("a row below the bar that names a device kernel",
          good.replace("const:SCOPE_SYS,golden:attr_memsem,mutant:atomic-memory-attrs-swapped",
