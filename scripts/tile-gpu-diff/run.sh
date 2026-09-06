@@ -3547,14 +3547,17 @@ dtype_writer_mutant() { # name, old, new
     awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {bad=1} END {exit bad}' \
       "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k names another format and should be untouched"; }
   done
-  # The FIRST difference is the measurement, and it is not where a reader
-  # would guess. Segment 0 reads the tf32 BUFFER and widens it, and a tf32
-  # word read as an f32 word is the same number, so that segment does not
-  # move at all; what moves is segment 1, where an f64 goes into the format
-  # and back and twenty-four significand bits survive where eleven should.
+  # WHICH SEGMENT MOVED is the measurement, and for both callers it is
+  # segment 1 rather than segment 0. For tf32: segment 0 reads the BUFFER
+  # and widens it, and a tf32 word read as an f32 word is the same number,
+  # so it does not move at all; segment 1 is where an f64 goes into the
+  # format and back and twenty-four significand bits survive where eleven
+  # should. For i4: segment 0 is a nibble-wise SUM, which agrees modulo 16
+  # whichever widening produced its operands, and segment 1 is the
+  # arithmetic shift, which does not.
   grep -q '^  first seg 1 ' "$work/m-$name.out" ||
-    { cat "$work/m-$name.out" >&2; fail "$name: expected the first difference in segment 1 (the conversion), not in segment 0 (the buffer)"; }
-  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs in its conversion segment and ${dtype_green[*]} does not)"
+    { cat "$work/m-$name.out" >&2; fail "$name: expected the first difference in segment 1, not in segment 0"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs from segment 1 on and ${dtype_green[*]} does not)"
 }
 
 # 27. tf32-tag-as-f32: the writer's type table gives tf32 the f32 tag. Four
@@ -3573,6 +3576,70 @@ dtype_writer_mutant() { # name, old, new
 dtype_writer_mutant tf32-tag-as-f32 \
   '  "tf32" -> 8' \
   '  "tf32" -> 7'
+
+# 28. exti-i4-zero-extends: the writer stops writing the SIGNED widening
+#     the `extis` name asks for and writes the unsigned one, which is the
+#     other value of the same one-byte attribute. Knife T9's format has no
+#     arithmetic of its own, so every kernel over it widens first, and this
+#     is the byte that says which value a nibble has.
+#
+#     Nothing below layer 2 can see it. The renderer prints ` signed` from
+#     its own table, so dtype_i4.mlir does not move; `tileiras` takes both
+#     values, because both are legal for an `exti`; and the file is the
+#     same length, because one enum byte replaces another. On the device
+#     the two shift segments become one segment written twice, and the
+#     corpus has 2048 of its 4096 lanes with the top bit set.
+#
+#     pack_roundtrip is the kernel-level control: it converts nothing at
+#     all, so it holds no `exti` and must not move.
+dtype_red=("${i4_red[@]}")
+dtype_green=("${i4_green[@]}")
+dtype_writer_mutant exti-i4-zero-extends \
+  '  "extis" -> [SIGNED]' \
+  '  "extis" -> [UNSIGNED]'
+
+# 29. pack-halves-swapped: the HOST's reading of which nibble is lane k
+#     exchanges the two halves of every byte. Types.td says the even lane
+#     is in bits 3..0 and the odd one in bits 7..4, and this is the only
+#     place in the tree where that sentence is written down as code; the
+#     device's `unpack` is the second opinion on it.
+#
+#     THE SWAP IS CONSISTENT, which is what makes this mutant sharp: one
+#     function says where lane k sits and both directions read it, so the
+#     mutant relabels the lanes rather than corrupting them. Every segment
+#     that applies ONE function to every lane therefore still agrees with
+#     the device -- a uniform function composed with a relabelling and its
+#     inverse is the same function -- and the only thing that moves is
+#     dtype_i4's segment 4, which takes a's nibble on even lanes and b's
+#     on odd ones. That segment exists for this mutant.
+#
+#     pack_roundtrip is the kernel-level control for the same reason and
+#     names no lane at all.
+std_nib="$(mutant_std pack-halves-swapped \
+  'fn nibble_shift(k: Int) -> Int = 4 * k' \
+  'fn nibble_shift(k: Int) -> Int = 4 * (k ^ 1)')"
+build_native "$std_nib" "$work/m-pack-halves.bin" "$here/dtype_diff.dawn"
+rc=0
+device "$work/m-pack-halves.bin" "${dtype_cubins[@]}" > "$work/m-pack-halves.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-pack-halves.out")"
+if [ "$dtype_verdict" = pass ]; then
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-pack-halves.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-pack-halves.out" >&2
+    fail "pack-halves-swapped mutant stayed green: expected verdict fail (exit 1) with dtype_i4 alone saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur != "dtype_i4" {bad=1} END {exit bad}' \
+    "$work/m-pack-halves.out" ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: a kernel other than dtype_i4 moved, and only dtype_i4 names a lane"; }
+  awk '/^kernel dtype_i4 /{f=1} f && /^  first /{sub(/^  first /, ""); print; exit}' \
+    "$work/m-pack-halves.out" | grep -q '^seg 4 ' ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: expected the first difference in segment 4, the one that names a lane index; the relabelling is consistent, so no uniform segment may move"; }
+  echo "PASS  mutant: pack-halves-swapped (dtype_i4's segment 4 alone reds; the four uniform segments and pack_roundtrip are blind to a consistent relabelling)"
+else
+  [ "$mverdict" = "$dtype_verdict" ] ||
+    { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: the clean run is $dtype_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: pack-halves-swapped not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
+fi
 # ---- knife T4's six package mutants
 #
 # Every one of them rewrites HOW ONE ATTRIBUTE VALUE IS WRITTEN and nothing

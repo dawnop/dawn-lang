@@ -395,14 +395,22 @@ pub fn wrap_i4(n: Int) -> Int = {
 # pack-halves-swapped is the mutant that exchanges the two halves of every
 # byte, and the device disagrees with it.
 
+# Where lane `k` sits in its word. ONE function, read by both directions
+# below, so that the layout is a single sentence and a reader who changes
+# it changes both. scripts/tile-gpu-diff's pack-halves-swapped is that
+# reader: swapping the two halves here relabels the lanes CONSISTENTLY, so
+# every operation that treats all lanes alike still agrees with the device
+# and only one that names a lane index does not.
+fn nibble_shift(k: Int) -> Int = 4 * k
+
 ## The `k`th 4-bit lane of the 32-bit word `w`, counted from the low end:
 ## `k` in [0, 8), the answer in [0, 15].
-pub fn nibble_at(w: Int, k: Int) -> Int = (w >>> (4 * k)) & 0xF
+pub fn nibble_at(w: Int, k: Int) -> Int = (w >>> nibble_shift(k)) & 0xF
 
 ## `w` with its `k`th 4-bit lane set to the low nibble of `v`; the lane is
 ## assumed clear, so this is the inverse of `nibble_at` when a word is
 ## built up from zero.
-pub fn nibble_into(w: Int, k: Int, v: Int) -> Int = w | ((v & 0xF) << (4 * k))
+pub fn nibble_into(w: Int, k: Int, v: Int) -> Int = w | ((v & 0xF) << nibble_shift(k))
 
 ## The 32-bit word whose eight lanes are `f(0)` to `f(7)`, as a Float an
 ## i32 buffer holds.
