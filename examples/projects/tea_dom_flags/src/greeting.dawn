@@ -17,6 +17,7 @@ use json/value.{Json, JStr, JInt, JObj}
 use json/render.{render}
 use json/parser.{parse}
 use tea_core/app.{App, update, view}
+use tea_core/cmd.{Cmd, NoCmd, fold_msg}
 use tea_dom/node.{Node}
 use tea_dom/dsl.{button, div, el, text}
 
@@ -67,9 +68,10 @@ impl App[Model] {
   type Msg = Msg
   type View = Node[Msg]
 
-  fn update(m: Model, msg: Msg) -> Model =
+  # `NoCmd`: a greeting has nothing to ask the driver for.
+  fn update(m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     match msg {
-      Hello -> Model { name: m.name, hellos: m.hellos + 1 }
+      Hello -> (Model { name: m.name, hellos: m.hellos + 1 }, NoCmd)
     }
 
   fn view(m: Model) -> Node[Msg] = {
@@ -108,8 +110,11 @@ test "flags decide the model, and every way of not having them is the default" {
   assert init(Some("{\"name\":7}")) == init(none)
 }
 
+# One turn as a driver commits it: `update` plus whatever it commanded.
+fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, (a, x) => update(a, x))
+
 test "the name is in the model text, so later turns need no second flags line" {
-  let m = update(init(Some("{\"name\":\"dawn\"}")), Hello)
+  let m = turn(init(Some("{\"name\":\"dawn\"}")), Hello)
   assert m == Model { name: "dawn", hellos: 1 }
   assert decode(encode(m)) == m
   assert decode("not json at all") == init(None)

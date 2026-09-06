@@ -19,6 +19,7 @@
 # scripts/wasm-dom-contract points at the wasm failure runtime.
 
 use tea_core/app.{App, update, view}
+use tea_core/cmd.{Cmd, NoCmd, fold_msg}
 use tea_core/diff.{Patch, Replace, AppendKids, TruncateKids, diff}
 use tea_dom/node.{Node, Text, Elem}
 use tea_dom/dsl.{button, div, el, text}
@@ -41,11 +42,13 @@ impl App[Counter] {
   type Msg = Msg
   type View = Node[Msg]
 
-  fn update(m: Counter, msg: Msg) -> Counter =
+  # Every arm answers `NoCmd`: a counter has nothing to ask the driver for
+  # beyond the model it just returned.
+  fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
     match msg {
-      Inc -> Counter { n: m.n + 1 }
-      Dec -> Counter { n: m.n - 1 }
-      Reset -> init()
+      Inc -> (Counter { n: m.n + 1 }, NoCmd)
+      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      Reset -> (init(), NoCmd)
       # Deliberate, and the only unhandled failure in this tree. `tea_dom`'s
       # `serve` catches it at the boundary and answers with an error reply;
       # on wasm that landing is the A1 shadow stack.
@@ -127,14 +130,26 @@ pub fn decode(s: String) -> Counter =
     None -> init()
   }
 
+# One turn as a driver commits it: `update` plus whatever its command asked
+# for. The assertions below are written on this rather than on the pair,
+# because the pair's first half is not what the page ends up holding.
+fn turn(m: Counter, msg: Msg) -> Counter = fold_msg(m, msg, (a, x) => update(a, x))
+
 test "update folds messages and the model round-trips through its text" {
-  let m = update(update(init(), Inc), Inc)
+  let m = turn(turn(init(), Inc), Inc)
   assert m == Counter { n: 2 }
-  assert update(m, Dec) == Counter { n: 1 }
-  assert update(m, Reset) == init()
+  assert turn(m, Dec) == Counter { n: 1 }
+  assert turn(m, Reset) == init()
   assert decode(encode(m)) == m
   assert decode(encode(Counter { n: -17 })) == Counter { n: -17 }
   assert decode("not a number") == init()
+}
+
+test "this application commands nothing, so a turn is exactly its update" {
+  let (m, c) = update(init(), Inc)
+  assert m == Counter { n: 1 }
+  let nothing: Cmd[Msg] = NoCmd
+  assert c == nothing
 }
 
 test "the view is a value, so a frame is one assertion" {

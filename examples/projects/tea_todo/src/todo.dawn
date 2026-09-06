@@ -7,6 +7,7 @@ use std/list
 use std/str
 use tea_term/route
 use tea_core/app.{App, update, view}
+use tea_core/cmd.{Cmd, NoCmd, fold_msg}
 use tea_term/widget.{Widget, Text, Styled, Row, Column, Button, Bold, Dim}
 use tea_term/dsl.{text, bold, dim, button, row, column}
 
@@ -90,38 +91,41 @@ fn note_only(m: Model, note: String) -> Model = Model { ..m, note: note }
 impl App[Model] {
   type Msg = Msg
   type View = Widget[Msg]
-  fn update(m: Model, msg: Msg) -> Model =
+  # Every arm answers `NoCmd`: this application decides everything from the
+  # message and the model it already has.
+  fn update(m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     match msg {
-      Add(title) -> Model {
+      Add(title) -> (Model {
         ..m,
         todos: m.todos ++ [Todo { id: m.next_id, title: title, done: false }],
         next_id: m.next_id + 1,
         note: "added #" ++ to_string(m.next_id),
-      }
+      }, NoCmd)
       Toggle(id) ->
         if has_id(m, id) {
-          Model {
+          (Model {
             ..m,
             todos: list.map(m.todos, t =>
                 if t.id == id { Todo { ..t, done: not t.done } } else { t }),
             note: "",
-          }
+          }, NoCmd)
         } else {
-          note_only(m, "no todo #" ++ to_string(id))
+          (note_only(m, "no todo #" ++ to_string(id)), NoCmd)
         }
       Del(id) ->
         if has_id(m, id) {
-          Model {
+          (Model {
             ..m,
             todos: list.filter(m.todos, t => t.id != id),
             note: "deleted #" ++ to_string(id),
-          }
+          }, NoCmd)
         } else {
-          note_only(m, "no todo #" ++ to_string(id))
+          (note_only(m, "no todo #" ++ to_string(id)), NoCmd)
         }
-      Quit -> Model { ..m, note: "bye", quit: true }
+      Quit -> (Model { ..m, note: "bye", quit: true }, NoCmd)
       Bad(input) ->
-        note_only(m, if input == "" { "type a command" } else { "unknown command: " ++ input })
+        (note_only(m, if input == "" { "type a command" } else { "unknown command: " ++ input }),
+          NoCmd)
     }
 
   # The view writes in the DSL spelling (tea/dsl) since #310; the snapshot
@@ -162,34 +166,45 @@ fn item_row(t: Todo) -> Widget[Msg] =
     if t.done { dim(text(t.title)) } else { text(t.title) },
   ])
 
+# One turn as the driver commits it: `update` plus everything its command
+# asked for. `tea_term/runtime` folds the same way.
+fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, (a, x) => update(a, x))
+
+test "this application commands nothing, so a turn is exactly its update" {
+  let (m, c) = update(initial(), Add(title: "one"))
+  assert len(m.todos) == 1
+  let nothing: Cmd[Msg] = NoCmd
+  assert c == nothing
+}
+
 test "add assigns increasing ids and never recycles them" {
-  let m = update(update(initial(), Add(title: "one")), Add(title: "two"))
+  let m = turn(turn(initial(), Add(title: "one")), Add(title: "two"))
   assert list.map(m.todos, t => t.id) == [1, 2]
-  let m2 = update(update(m, Del(id: 2)), Add(title: "three"))
+  let m2 = turn(turn(m, Del(id: 2)), Add(title: "three"))
   assert list.map(m2.todos, t => t.id) == [1, 3]
 }
 
 test "toggle flips exactly the named todo, twice is identity" {
-  let m = update(update(initial(), Add(title: "a")), Add(title: "b"))
-  let once = update(m, Toggle(id: 2))
+  let m = turn(turn(initial(), Add(title: "a")), Add(title: "b"))
+  let once = turn(m, Toggle(id: 2))
   assert list.map(once.todos, t => t.done) == [false, true]
-  let twice = update(once, Toggle(id: 2))
+  let twice = turn(once, Toggle(id: 2))
   assert list.map(twice.todos, t => t.done) == [false, false]
 }
 
 test "missing ids and bad input become notes, not changes" {
-  let m = update(initial(), Add(title: "a"))
-  let miss = update(m, Toggle(id: 9))
+  let m = turn(initial(), Add(title: "a"))
+  let miss = turn(m, Toggle(id: 9))
   assert miss.todos == m.todos
   assert miss.note == "no todo #9"
-  let bad = update(m, Bad(input: "frobnicate"))
+  let bad = turn(m, Bad(input: "frobnicate"))
   assert bad.todos == m.todos
   assert bad.note == "unknown command: frobnicate"
   assert not bad.quit
 }
 
 test "quit is a message and a model flag, not a driver special case" {
-  let m = update(initial(), Quit)
+  let m = turn(initial(), Quit)
   assert m.quit
   assert m.note == "bye"
 }
@@ -205,7 +220,7 @@ test "parse_line is total over junk" {
 }
 
 test "press routes through the current view's buttons" {
-  let m = update(update(initial(), Add(title: "a")), Add(title: "b"))
+  let m = turn(turn(initial(), Add(title: "a")), Add(title: "b"))
   assert parse_cmd(m, "press 1") == Toggle(id: 1)
   assert parse_cmd(m, "press 2") == Toggle(id: 2)
   assert parse_cmd(m, "press 9") == Bad(input: "press 9")
@@ -215,12 +230,12 @@ test "press routes through the current view's buttons" {
 }
 
 test "press numbers rows, not ids: after a deletion they diverge" {
-  let m = update(update(update(initial(), Add(title: "a")), Add(title: "b")), Del(id: 1))
+  let m = turn(turn(turn(initial(), Add(title: "a")), Add(title: "b")), Del(id: 1))
   assert parse_cmd(m, "press 1") == Toggle(id: 2)
 }
 
 test "view snapshot: the tree is data and compares with ==" {
-  let m = update(update(update(initial(), Add(title: "buy milk")), Add(title: "ship tea")), Toggle(id: 1))
+  let m = turn(turn(turn(initial(), Add(title: "buy milk")), Add(title: "ship tea")), Toggle(id: 1))
   let want: Widget[Msg] = Column(kids: [
     Styled(style: Bold, child: Text(s: "todo (1/2 done)")),
     Row(kids: [

@@ -42,6 +42,7 @@
 use std/list
 use std/str
 use tea_core/app.{App, update, view}
+use tea_core/cmd.{Cmd, NoCmd, fold_msg}
 use tea_core/diff.{Patch, RemoveKid, diff}
 use tea_core/tree.{key}
 use tea_dom/node.{Node, Text, Elem, On, deliver}
@@ -105,51 +106,55 @@ impl App[Model] {
   type Msg = Msg
   type View = Node[Msg]
 
-  fn update(m: Model, msg: Msg) -> Model =
+  # Every arm answers `NoCmd`. A todo list decides everything it needs from
+  # the message and the model it already has, so there is nothing left for it
+  # to ask the driver for; an arm that wanted a second message would say so
+  # here instead of calling `update` from inside itself.
+  fn update(m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     match msg {
-      SetDraft(t) -> Model { ..m, draft: t }
-      SetEdit(t) -> Model { ..m, edit: t }
+      SetDraft(t) -> (Model { ..m, draft: t }, NoCmd)
+      SetEdit(t) -> (Model { ..m, edit: t }, NoCmd)
       Add ->
         if str.trim(m.draft) == "" {
-          m
+          (m, NoCmd)
         } else {
-          Model {
+          (Model {
             ..m,
             todos: m.todos ++ [Todo { id: m.next_id, title: str.trim(m.draft), done: false }],
             next_id: m.next_id + 1,
             draft: "",
-          }
+          }, NoCmd)
         }
       Toggle(id) ->
-        Model {
+        (Model {
           ..m,
           todos: list.map(m.todos, t => if t.id == id { Todo { ..t, done: not t.done } } else { t }),
-        }
+        }, NoCmd)
       Drop(id) ->
-        Model {
+        (Model {
           ..m,
           todos: list.filter(m.todos, t => t.id != id),
           editing: if m.editing == Some(id) { None } else { m.editing },
           edit: if m.editing == Some(id) { "" } else { m.edit },
-        }
-      Only(f) -> Model { ..m, filter: f }
-      Edit(id) -> Model { ..m, editing: Some(id), edit: title_of(m.todos, id) }
+        }, NoCmd)
+      Only(f) -> (Model { ..m, filter: f }, NoCmd)
+      Edit(id) -> (Model { ..m, editing: Some(id), edit: title_of(m.todos, id) }, NoCmd)
       Save ->
         match m.editing {
           Some(id) ->
             if str.trim(m.edit) == "" {
-              Model { ..m, editing: None, edit: "" }
+              (Model { ..m, editing: None, edit: "" }, NoCmd)
             } else {
-              Model {
+              (Model {
                 ..m,
                 todos: retitle(m.todos, id, str.trim(m.edit)),
                 editing: None,
                 edit: "",
-              }
+              }, NoCmd)
             }
-          None -> m
+          None -> (m, NoCmd)
         }
-      Cancel -> Model { ..m, editing: None, edit: "" }
+      Cancel -> (Model { ..m, editing: None, edit: "" }, NoCmd)
       # Deliberate, and the only unhandled failure in this tree: `tea_dom`'s
       # `serve` catches it at the boundary, the host keeps its model, and the
       # next message is answered normally. The counter carries the same
@@ -252,13 +257,26 @@ fn summary(m: Model) -> String = {
 
 # ---- tests ---------------------------------------------------------------
 
+# One turn as a driver commits it: `update` plus everything its command asked
+# for. Written once here so the assertions below read as turns rather than as
+# halves of a pair, and so a command added later is folded by the same code
+# the reactor runs.
+fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, (a, x) => update(a, x))
+
+test "this application commands nothing, so a turn is exactly its update" {
+  let (m, c) = update(init(), SetDraft(text: "buy milk"))
+  assert m.draft == "buy milk"
+  let nothing: Cmd[Msg] = NoCmd
+  assert c == nothing
+}
+
 fn seeded(n: Int) -> Model = seed_go(init(), 1, n)
 
 fn seed_go(m: Model, i: Int, n: Int) -> Model =
   if i > n {
     m
   } else {
-    seed_go(update(update(m, SetDraft(text: "task" ++ to_string(i))), Add), i + 1, n)
+    seed_go(turn(turn(m, SetDraft(text: "task" ++ to_string(i))), Add), i + 1, n)
   }
 
 test "a payload lands in the field the listener that heard it names" {
@@ -278,7 +296,7 @@ test "a payload lands in the field the listener that heard it names" {
   assert deliver(on_click(Add), "buy milk") == Add
   assert deliver(on_click(Toggle(id: 3)), "buy milk") == Toggle(id: 3)
   # And the field it lands in is the field `update` then writes.
-  let composing = update(init(), deliver(on_value("input", SetDraft), "buy milk"))
+  let composing = turn(init(), deliver(on_value("input", SetDraft), "buy milk"))
   assert composing.draft == "buy milk"
   assert composing.edit == ""
 }
@@ -291,7 +309,7 @@ test "each of the two fields in the view is wired to its own message" {
     None -> { assert false }
     Some(l) -> { assert deliver(l, "buy milk") == SetDraft(text: "buy milk") }
   }
-  let open = update(seeded(2), Edit(id: 2))
+  let open = turn(seeded(2), Edit(id: 2))
   match listener_of(first_kid(row(open, Todo { id: 2, title: "task2", done: false }))) {
     None -> { assert false }
     Some(l) -> { assert deliver(l, "task2!") == SetEdit(text: "task2!") }
@@ -311,54 +329,54 @@ fn listener_of(n: Option[Node[Msg]]) -> Option[On[Msg]] =
 test "typing is one message whatever the length of what was typed" {
   # The thing the key palette could not do. A title of any length, a paste, an
   # IME commit: one `input` event, one message, one turn.
-  let m = update(init(), SetDraft(text: "buy milk and eggs"))
+  let m = turn(init(), SetDraft(text: "buy milk and eggs"))
   assert m.draft == "buy milk and eggs"
   # A field the user emptied is an empty draft rather than an unchanged one:
   # the payload is the field's value, not a keystroke to append.
-  assert update(m, SetDraft(text: "")).draft == ""
+  assert turn(m, SetDraft(text: "")).draft == ""
 }
 
 test "add commits the draft and clears it" {
-  let m = update(update(init(), SetDraft(text: "buy milk")), Add)
+  let m = turn(turn(init(), SetDraft(text: "buy milk")), Add)
   assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
   assert m.draft == ""
   assert m.next_id == 2
   # An empty draft is not a todo.
-  assert update(m, Add) == m
+  assert turn(m, Add) == m
 }
 
 test "toggle, drop and filter are the plain list operations" {
   let m = seeded(3)
   assert len(m.todos) == 3
-  let t = update(m, Toggle(id: 2))
+  let t = turn(m, Toggle(id: 2))
   assert t.todos[1].done
   assert len(visible(Model { ..t, filter: Active })) == 2
   assert len(visible(Model { ..t, filter: Done })) == 1
-  let d = update(t, Drop(id: 2))
+  let d = turn(t, Drop(id: 2))
   assert len(d.todos) == 2
   assert d.todos[1].id == 3
 }
 
 test "an edit is a second field, and the two never feed each other" {
-  let m = update(seeded(3), Edit(id: 2))
+  let m = turn(seeded(3), Edit(id: 2))
   assert m.editing == Some(2)
   assert m.edit == "task2"
-  let typing = update(m, SetEdit(text: "task2!"))
+  let typing = turn(m, SetEdit(text: "task2!"))
   assert typing.edit == "task2!"
   # The composer's draft is untouched while a row is open, which is the
   # assertion the routing mutant in scripts/wasm-dom-contract breaks.
   assert typing.draft == ""
-  let saved = update(typing, Save)
+  let saved = turn(typing, Save)
   assert saved.todos[1].title == "task2!"
   assert saved.editing == None
   assert saved.edit == ""
   # Cancel keeps the old title.
-  assert update(typing, Cancel).todos[1].title == "task2"
+  assert turn(typing, Cancel).todos[1].title == "task2"
 }
 
 test "dropping the row being edited closes the editor" {
-  let m = update(seeded(3), Edit(id: 2))
-  let d = update(m, Drop(id: 2))
+  let m = turn(seeded(3), Edit(id: 2))
+  let d = turn(m, Drop(id: 2))
   assert d.editing == None
   assert d.edit == ""
 }
@@ -375,7 +393,7 @@ test "the view is a value, so a frame is one assertion" {
       assert len(kids) == 5
     }
   }
-  match view(update(seeded(1), Edit(id: 1))) {
+  match view(turn(seeded(1), Edit(id: 1))) {
     Text(_) -> { assert false }
     Elem(_, props, ..) -> { assert props == [("class", "todo editing")] }
   }
@@ -386,9 +404,9 @@ test "both fields are controlled, so the document renders the model" {
   # the field would be the browser's and nothing could clear it -- `Add`
   # clears the draft, and this is what makes that reach the screen.
   let field: Node[Msg] = input(class: "field", value: "buy milk", on: [on_value("input", SetDraft)])
-  assert first_kid(compose_row(update(init(), SetDraft(text: "buy milk")))) == Some(field)
+  assert first_kid(compose_row(turn(init(), SetDraft(text: "buy milk")))) == Some(field)
   let editor: Node[Msg] = input(class: "draft", value: "task2", on: [on_value("input", SetEdit)])
-  let open = update(seeded(2), Edit(id: 2))
+  let open = turn(seeded(2), Edit(id: 2))
   assert first_kid(row(open, Todo { id: 2, title: "task2", done: false })) == Some(editor)
 }
 
@@ -417,8 +435,8 @@ test "each row is named by the id the user means" {
 ## `Replace` is what a browser cannot hide and a transcript cannot see: the
 ## document after it is right either way.
 test "deleting a row above the open one leaves the open one alone" {
-  let open = update(seeded(3), Edit(id: 3))
-  let after = update(open, Drop(id: 1))
+  let open = turn(seeded(3), Edit(id: 3))
+  let after = turn(open, Drop(id: 1))
   let ps = diff(view(open), view(after))
   # the list's own edit, and nothing under it
   assert filter(ps, p => p.path == [3]) == [Patch { path: [3], op: RemoveKid(at: 0) }]
