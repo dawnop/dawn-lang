@@ -1,0 +1,287 @@
+# A loop jump must carry the same operand-stack prefix as the loop's entry.
+# Spill eager operands before evaluating a sibling that can leave their
+# expression. This is JVM preparation, not shared lowering: C has no operand
+# stack, and changing its Core here would also change RC ownership decisions.
+# Each recursive result carries free loop targets, so a loop consumes only
+# its own jumps and ordinary operand trees retain their original bytecode.
+
+use std/set
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, TyNever, TyError, TyVar}
+use ir/core.{
+  CExpr, CStmt, CJava, cex_ty, diverges,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
+  CReturn, CBreak, CContinue, CForeign, CDup, CDictRef, CDictApply, CDictArg,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CAnd, COr, CAdd
+}
+
+type Prepared = { expr: CExpr, jumps: Set[Int], next: Int }
+
+fn union(a: Set[Int], b: Set[Int]) -> Set[Int] = {
+  var out = a
+  for id in set.to_list(b) { out = set.insert(out, id) }
+  out
+}
+
+fn result(e: CExpr, next: Int) -> Prepared =
+  Prepared { expr: e, jumps: set.empty(), next: next }
+
+## Core deliberately gives CBox no source type (cex_ty returns TyError).
+## Its JVM result is nevertheless a real erased reference, not bottom.
+fn value_ty(e: CExpr) -> Ty =
+  match e {
+    CBox(_, _) -> TyVar("operand", 0)
+    _ -> cex_ty(e)
+  }
+
+fn no_value(e: CExpr) -> Bool =
+  match e {
+    CBox(v, _) | CDup(v, _) -> no_value(v)
+    CUnbox(v, ty) -> ty == TyNever || ty == TyError || no_value(v)
+    _ -> cex_ty(e) == TyNever || cex_ty(e) == TyError || diverges(e)
+  }
+
+fn many(es: List[CExpr], next: Int) -> (List[CExpr], Set[Int], Int) = {
+  var out: List[CExpr] = []
+  var jumps: Set[Int] = set.empty()
+  var n = next
+  for e in es {
+    let p = visit(e, n)
+    out = out ++ [p.expr]
+    jumps = union(jumps, p.jumps)
+    n = p.next
+  }
+  (out, jumps, n)
+}
+
+## Read every operand, including locals: a later operand may mutate a local
+## whose earlier value the original stack would have snapshotted already.
+## Unit is a real JVM reference; Never/Error have no value to bind.
+fn eager(es: List[CExpr], next: Int, ty: Ty, build: fn(List[CExpr]) -> CExpr) -> Prepared = {
+  let (args, jumps, n0) = many(es, next)
+  if set.is_empty(jumps) {
+    return Prepared { expr: build(args), jumps: jumps, next: n0 }
+  }
+  var n = n0
+  var lets: List[CStmt] = []
+  var vals: List[CExpr] = []
+  for a in args {
+    let t = value_ty(a)
+    if no_value(a) {
+      return Prepared { expr: CBlock(lets, Some(a), ty), jumps: jumps, next: n }
+    }
+    lets = lets ++ [CSLet(n, t, a)]
+    vals = vals ++ [CLocal(n, t)]
+    n = n + 1
+  }
+  Prepared { expr: CBlock(lets, Some(build(vals)), ty), jumps: jumps, next: n }
+}
+
+fn optional(e: Option[CExpr], next: Int) -> (Option[CExpr], Set[Int], Int) =
+  match e {
+    None -> (None, set.empty(), next)
+    Some(v) -> {
+      let p = visit(v, next)
+      (Some(p.expr), p.jumps, p.next)
+    }
+  }
+
+fn statement(s: CStmt, next: Int) -> (CStmt, Set[Int], Int) =
+  match s {
+    CSLet(id, ty, e) -> {
+      let p = visit(e, next)
+      (CSLet(id, ty, p.expr), p.jumps, p.next)
+    }
+    CSAssign(id, e) -> {
+      let p = visit(e, next)
+      (CSAssign(id, p.expr), p.jumps, p.next)
+    }
+    CSDiscard(e) -> {
+      let p = visit(e, next)
+      (CSDiscard(p.expr), p.jumps, p.next)
+    }
+    CSIf(c, t, f) -> {
+      let p = visit(CIf(c, t, f, TyUnit), next)
+      match p.expr {
+        CIf(c2, t2, f2, _) -> (CSIf(c2, t2, f2), p.jumps, p.next)
+        _ -> panic("operand: statement if changed shape")
+      }
+    }
+    CSLoop(id, body, step) -> {
+      let b = visit(body, next)
+      let (s2, js, n) = optional(step, b.next)
+      (CSLoop(id, b.expr, s2), set.remove(union(b.jumps, js), id), n)
+    }
+    CSDrop(_) -> (s, set.empty(), next)
+  }
+
+fn foreign(j: CJava, next: Int) -> (CJava, Set[Int], Int) = {
+  let (target, tj, n0) = optional(j.target, next)
+  let (args, aj, n1) = many(j.args, n0)
+  var evs: List[(Int, CExpr)] = []
+  var jumps = union(tj, aj)
+  var n = n1
+  for ev in j.sam_evs {
+    let (i, e) = ev
+    let p = visit(e, n)
+    evs = evs ++ [(i, p.expr)]
+    jumps = union(jumps, p.jumps)
+    n = p.next
+  }
+  # Keep Java adaptation (including bridge allocation and evidence snapshots)
+  # at its original position relative to later argument effects. The emitter
+  # spills AFTER each conversion, in the Java representation.
+  (CJava { ..j, target: target, args: args, sam_evs: evs }, jumps, n)
+}
+
+fn visit(e: CExpr, next: Int) -> Prepared =
+  match e {
+    CInt(_) | CFloat(_) | CBool(_) | CStr(_) | CUnit | CLocal(_, _) |
+    CFnRef(_, _, _) | CDictRef(_, _, _, _) | CConstRef(_, _, _) | CComptime(_, _, _) ->
+      result(e, next)
+    CBreak(id) | CContinue(id) ->
+      Prepared { expr: e, jumps: set.insert(set.empty(), id), next: next }
+    CReturn(v) -> {
+      let (v2, jumps, n) = optional(v, next)
+      Prepared { expr: CReturn(v2), jumps: jumps, next: n }
+    }
+    CBlock(stmts, tail, ty) -> {
+      var out: List[CStmt] = []
+      var jumps: Set[Int] = set.empty()
+      var n = next
+      for s in stmts {
+        let (s2, sj, n2) = statement(s, n)
+        out = out ++ [s2]
+        jumps = union(jumps, sj)
+        n = n2
+      }
+      let (t2, tj, n2) = optional(tail, n)
+      Prepared { expr: CBlock(out, t2, ty), jumps: union(jumps, tj), next: n2 }
+    }
+    CIf(c, t, f, ty) -> {
+      let cp = visit(c, next)
+      let tp = visit(t, cp.next)
+      let (f2, fj, n) = optional(f, tp.next)
+      Prepared { expr: CIf(cp.expr, tp.expr, f2, ty),
+        jumps: union(union(cp.jumps, tp.jumps), fj), next: n }
+    }
+    CBinary(op, l, r, ty) ->
+      if op == CAnd || op == COr {
+        let lp = visit(l, next)
+        let rp = visit(r, lp.next)
+        Prepared { expr: CBinary(op, lp.expr, rp.expr, ty),
+          jumps: union(lp.jumps, rp.jumps), next: rp.next }
+      } else {
+        eager([l, r], next, ty, xs => CBinary(op, xs[0], xs[1], ty))
+      }
+    CCall(callee, args, ty) ->
+      match callee {
+        CDynamic(t) -> eager([t] ++ args, next, ty, xs => {
+          CCall(CDynamic(xs[0]), list_tail(xs), ty)
+        })
+        CMethod(d, tid, name, idx, nev) -> eager([d] ++ args, next, ty, xs => {
+          CCall(CMethod(xs[0], tid, name, idx, nev), list_tail(xs), ty)
+        })
+        CDirect(_, _) | CImpl(_, _, _, _) | CDefault(_, _, _) ->
+          eager(args, next, ty, xs => CCall(callee, xs, ty))
+      }
+    CIntrinsic(name, args, ty) -> eager(args, next, ty, xs => CIntrinsic(name, xs, ty))
+    CCtor(adt, ci, args, ty) -> eager(args, next, ty, xs => CCtor(adt, ci, xs, ty))
+    CClosure(name, owner, args, ty) -> eager(args, next, ty, xs => CClosure(name, owner, xs, ty))
+    CDictApply(key, args, ty) -> eager(args, next, ty, xs => CDictApply(key, xs, ty))
+    CTuple(args, ty) -> eager(args, next, ty, xs => CTuple(xs, ty))
+    CListLit(args, ty) -> eager(args, next, ty, xs => CListLit(xs, ty))
+    CUnary(op, v, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CUnary(op, p.expr, ty) }
+    }
+    CBox(v, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CBox(p.expr, ty) }
+    }
+    CUnbox(v, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CUnbox(p.expr, ty) }
+    }
+    CField(v, aid, ci, idx, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CField(p.expr, aid, ci, idx, ty) }
+    }
+    CIsCtor(v, aid, ci) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CIsCtor(p.expr, aid, ci) }
+    }
+    CTagOf(v, aid) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CTagOf(p.expr, aid) }
+    }
+    CTupleGet(v, idx, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CTupleGet(p.expr, idx, ty) }
+    }
+    CDictArg(v, owner, key, idx, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CDictArg(p.expr, owner, key, idx, ty) }
+    }
+    CDup(v, ty) -> {
+      let p = visit(v, next)
+      Prepared { ..p, expr: CDup(p.expr, ty) }
+    }
+    CForeign(j, ty) -> {
+      let (j2, jumps, n) = foreign(j, next)
+      Prepared { expr: CForeign(j2, ty), jumps: jumps, next: n }
+    }
+  }
+
+fn list_tail(es: List[CExpr]) -> List[CExpr] = {
+  var out: List[CExpr] = []
+  for i in 1..len(es) { out = out ++ [es[i]] }
+  out
+}
+
+## `next` is LMod.next_sym, after production and test lowering alike. Each
+## method may reuse the range: JVM locals and their binders are method-local.
+pub fn prepare(e: CExpr, next: Int) -> CExpr = visit(e, next).expr
+
+## Foreign emission cannot move conversions into Core; ask the same walk
+## which loop targets its operand evaluation can leave, without emitting it.
+pub fn foreign_jumps(j: CJava) -> Bool = {
+  let (_, jumps, _) = foreign(j, 0)
+  not set.is_empty(jumps)
+}
+
+test "eager operands snapshot locals and respect JVM value widths" {
+  let rhs = CIf(CBool(true), CContinue(7), Some(CInt(4)), TyInt)
+  let p = prepare(CBinary(CAdd, CLocal(3, TyInt), rhs, TyInt), 10)
+  match p {
+    CBlock([CSLet(a, TyInt, CLocal(3, TyInt)), CSLet(b, TyInt, _)],
+      Some(CBinary(CAdd, CLocal(a2, TyInt), CLocal(b2, TyInt), TyInt)), TyInt) -> {
+      assert a == 10 && b == 11 && a2 == a && b2 == b
+    }
+    _ -> panic("operand values were not captured in evaluation order")
+  }
+  let bottom = prepare(CTuple([CUnit, CBreak(7)], TyUnit), 10)
+  match bottom {
+    CBlock([CSLet(10, TyUnit, CUnit)], Some(CBreak(7)), TyUnit) -> ()
+    _ -> panic("a bottom operand must not acquire a local")
+  }
+  match prepare(CIntrinsic("list_push", [CUnit, CBox(rhs, TyInt)], TyUnit), 10) {
+    CBlock([_, CSLet(_, TyVar(_, _), CBox(_, TyInt))], Some(CIntrinsic(_, _, _)), _) -> ()
+    _ -> panic("boxed values have an erased JVM slot, not Core's sentinel type")
+  }
+}
+
+test "loop targets are consumed only by their own loop and short circuit stays lazy" {
+  let local = CBlock([CSLoop(7, CBreak(7), None)], Some(CInt(2)), TyInt)
+  let same = CBinary(CAdd, CInt(1), local, TyInt)
+  assert prepare(same, 20) == same
+  let outer = CBlock([CSLoop(8, CBreak(7), None)], Some(CInt(2)), TyInt)
+  match prepare(CBinary(CAdd, CInt(1), outer, TyInt), 20) {
+    CBlock(_, _, _) -> ()
+    _ -> panic("an inner loop swallowed the outer loop's jump")
+  }
+  let lazy = CBinary(CAnd, CBool(false), CBreak(7), TyBool)
+  assert prepare(lazy, 20) == lazy
+}

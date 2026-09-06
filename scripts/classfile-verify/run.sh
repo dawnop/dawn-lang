@@ -316,6 +316,8 @@ run_corpus_checks() {
 fail=0
 java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 generic_fn_value_fixture=scripts/classfile-verify/generic_fn_value.dawn
+loop_operand_fixture=scripts/spike-native/loop_operand.dawn
+loop_operand_java_fixture=scripts/classfile-verify/loop_operand_java.dawn
 # examples/interop/interop.dawn is here for check 1, and it is the only corpus entry
 # that exercises it in this direction: `Path.of` and `List.of` are static
 # methods declared on JDK *interfaces*, so the call sites emit `invokestatic`
@@ -356,6 +358,7 @@ corpus+=(scripts/classfile-verify/control_unused.dawn scripts/spike-native/ctl_r
 corpus+=(scripts/classfile-verify/control_foreign.dawn scripts/classfile-verify/control_adt.dawn)
 corpus+=(scripts/classfile-verify/control_erased.dawn scripts/classfile-verify/control_trait.dawn)
 corpus+=("$generic_fn_value_fixture" "$java_tail_fixture")
+corpus+=("$loop_operand_fixture" "$loop_operand_java_fixture")
 for t in "${corpus[@]}"; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
@@ -461,6 +464,85 @@ echo "OK: Java Unit-tail results are evaluated, discarded, and runnable"
 # above is not the whole of what this fixture claims.
 ./bin/dawn test "$generic_fn_value_fixture"
 echo "OK: a generic function value crosses erasure with the right answers"
+
+./bin/dawn run "$loop_operand_fixture" > "$work/loop-operand.out"
+diff -u scripts/spike-native/loop_operand.expect "$work/loop-operand.out"
+./bin/dawn test "$loop_operand_java_fixture"
+echo "OK: loop operands preserve pending values, conversions and evaluation order"
+
+# The previous emitter must fail on the same programs, and specifically at
+# ASM frame merging: an unrelated checker/build error is not this regression.
+build_operand_mutant() {
+  local operand_started
+  operand_started=$(date +%s)
+  build_never_mutant "$1"
+  echo "TIME: $1 compiler build $(( $(date +%s) - operand_started ))s"
+}
+new_never_mutant unspilled-loop-operands
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'operands.prepare(cf.body, gx.next_sym)' 'cf.body'
+build_operand_mutant unspilled-loop-operands
+
+expect_operand_frame_failure() {
+  local fixture="$1"
+  local output="$never_mutant/$(basename "$fixture").out"
+  if java -Xss512m -jar "$never_mutant/compiler.jar" __emit \
+      --std "$root/std" "$fixture" -o "$never_mutant/emit" > "$output" 2>&1; then
+    never_die "LOOP_OPERAND_STACK: the unspilled emitter accepted $fixture"
+  fi
+  if ! grep -q 'java.lang.ArrayIndexOutOfBoundsException' "$output" || \
+      ! grep -q 'org.objectweb.asm.Frame.merge' "$output"; then
+    cat "$output" >&2
+    never_die "LOOP_OPERAND_STACK: $fixture failed for a different reason"
+  fi
+}
+expect_operand_frame_failure "$loop_operand_fixture"
+
+# The Java path is a separate obligation: keep Core preparation enabled so
+# the pure-call snapshot test cannot be what turns this mutant red.
+new_never_mutant unspilled-java-operands
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'if operands.foreign_jumps(jc) {' 'if false {'
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'let spill = operands.foreign_jumps(jc)' 'let spill = false'
+build_operand_mutant unspilled-java-operands
+expect_operand_frame_failure "$loop_operand_java_fixture"
+echo "OK: LOOP_OPERAND_STACK mutant reproduces the original ASM frame failure"
+
+# NEW is an observable class-initialization boundary, not only a stack value.
+# Keep the uninitialized receiver in a local across real continue/break paths,
+# and ask both the verifier and an independent Java initializer about it.
+javac --release 21 -d "$work/operand-probe" scripts/classfile-verify/InitOrder.java
+jar cf "$work/operand-probe.jar" -C "$work/operand-probe" .
+init_fixture=scripts/classfile-verify/constructor_init.dawn
+java -Xss512m "${add_exports[@]}" -cp "$root/build/dawn-selfhost.jar:$work/operand-probe.jar" main \
+  __emit --std "$root/std" "$init_fixture" -o "$work/init-classes" > /dev/null
+java "${add_exports[@]}" -cp "$work:$root/build/dawn-selfhost.jar:$work/operand-probe.jar" \
+  Verify "$work/init-classes"
+./bin/dawn run --cp "$work/operand-probe.jar" "$init_fixture" -- control > "$work/init-control.out"
+diff -u scripts/classfile-verify/constructor_init_control.expect "$work/init-control.out"
+./bin/dawn run --cp "$work/operand-probe.jar" "$init_fixture" > "$work/init-jumps.out"
+diff -u scripts/classfile-verify/constructor_init.expect "$work/init-jumps.out"
+
+new_never_mutant late-java-constructor-init
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'g.mv.visitTypeInsn(OP_NEW, owner)
+    let (g0, receiver) = spill_java_value(g, "Ljava/lang/Object;")' \
+  'g.mv.visitInsn(OP_ACONST_NULL)
+    let (g0, receiver) = spill_java_value(g, "Ljava/lang/Object;")'
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'reload_java_values(g1, [receiver])' 'g1.mv.visitTypeInsn(OP_NEW, owner)'
+build_operand_mutant late-java-constructor-init
+java -Xss512m -jar "$never_mutant/compiler.jar" run --cp "$work/operand-probe.jar" \
+  "$init_fixture" > "$work/init-mutant.out"
+if diff -q scripts/classfile-verify/constructor_init.expect "$work/init-mutant.out" > /dev/null; then
+  never_die "JAVA_NEW_ORDER: the delayed NEW mutant preserved initialization order"
+fi
+if [ "$(head -n 1 "$work/init-mutant.out")" != 'argument -1' ]; then
+  cat "$work/init-mutant.out" >&2
+  never_die "JAVA_NEW_ORDER: the mutant failed for a different reason"
+fi
+echo "OK: JAVA_NEW_ORDER preserves initialization before escaping argument effects"
 
 # The second mutant, and the one selftest.sh cannot be. Its fixtures live in
 # pkgA/pkgB, names the toolchain jar does not carry, so they would have stayed
