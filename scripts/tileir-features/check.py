@@ -825,16 +825,16 @@ def feature_cases(good, bytecode, files, ledger):
          good.replace(f"{absent:24s} | 0x74 | 13.3 | deferred      | -   | 0 | -",
                       f"{absent:24s} | 0x74 | 13.3 | implemented   | 3   | 2 | golden:vadd"),
          "whose .mlir does not contain the op"),
-        # T12 and T13 are the view family's two REMAINING knives, and they
-        # are what a planned knife looks like now that T11 has landed. Move
-        # these three anchors on when T12 lands.
+        # T13 is the view family's one REMAINING knife, and it is what a
+        # planned knife looks like now that T11 and T12 have landed. Move
+        # these three anchors on when T13 lands.
         ("an implemented row whose knife has not landed",
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
-                      "tanh                     | 0x6A | 13.1 | implemented   | T12"),
+                      "tanh                     | 0x6A | 13.1 | implemented   | T13"),
          "cannot be a planned one"),
-        # On a DEFERRED row of the view family's remainder, which knives
-        # T12 and T13 own: knife T11 took make_partition_view, so this
-        # anchor moved to make_strided_view. T13 will move it again.
+        # On a DEFERRED row of the view family's remainder, which knife
+        # T13 owns: knife T11 took make_partition_view, so this anchor moved
+        # to make_strided_view. T13 will move it again.
         ("an unimplemented row whose knife is not a planned one",
          good.replace("make_strided_view        | 0x74 | 13.3 | deferred      | -  ",
                       "make_strided_view        | 0x74 | 13.3 | unimplemented | 3  "),
@@ -855,11 +855,11 @@ def feature_cases(good, bytecode, files, ledger):
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T12"),
-         "knife 'T12' cannot be a planned one"),
+                      "sin                      | 0x62 | 13.1 | implemented   | T13"),
+         "knife 'T13' cannot be a planned one"),
         # No opcode row is `unimplemented` any more (knife T10 took the last
         # two), so this verdict is tripped by making one out of a DEFERRED
-        # row of the view family's remainder, which knives T12 and T13 own:
+        # row of the view family's remainder, which knife T13 owns:
         # the rule under test is the status-to-knife pairing, and a knife
         # that has landed is wrong under either status.
         ("an unimplemented row under a knife that has landed",
@@ -938,8 +938,8 @@ def type_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
-                      "i16                |  2 | 13.1 | implemented   | T12"),
-         "knife 'T12' cannot be a planned one"),
+                      "i16                |  2 | 13.1 | implemented   | T13"),
+         "knife 'T13' cannot be a planned one"),
         # No `unimplemented` type row is left after knife T9, so this
         # verdict is tripped on a `deferred` one instead: the rule is about
         # the STATUS and the knife, and the two view tags T11 did not take
@@ -1037,8 +1037,8 @@ def attr_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
-                      "rounding.approx              | 4 | 13.1 | implemented   | T12"),
-         "knife 'T12' cannot be a planned one"),
+                      "rounding.approx              | 4 | 13.1 | implemented   | T13"),
+         "knife 'T13' cannot be a planned one"),
         # No row of this table is `unimplemented` any more (knife T10 took
         # the last one), so this case makes one out of a DEFERRED row: the
         # rule under test is the status-to-knife pairing, and a deferred
