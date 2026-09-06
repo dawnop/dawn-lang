@@ -1603,6 +1603,96 @@ pub fn view_padding_ref(n: Int, out_n: Int, pad: Float, x: List[Float],
         kept(old, idx)
       })
 
+## The tile a STRIDED view reads at grid index `b`, laid end to end:
+## element `b * tile + j` of the answer is element `b * trav + j` of `x`
+## where that is inside the tensor, and `pad` where it is not.
+## scripts/tile-gpu-diff's view_stride_pad (knife T13).
+##
+## The traversal is what makes this different from a partition view's
+## reference: the grid steps `trav` elements and the tile covers `tile` of
+## them, so with `trav` the larger the reader SKIPS and with `trav` the
+## smaller it reads each element more than once. The output has one tile per
+## grid index, and the index space rounds up, which is why the last tile can
+## run past the end of the tensor and the padding value is visible at all.
+pub fn strided_pad_ref(n: Int, tile: Int, trav: Int, pad: Float, x: List[Float],
+  old: List[Float]) -> List[Float] = {
+  let grid = (n + trav - 1) / trav
+  list.map(range(0, len(old)), k =>
+      if k >= grid * tile {
+        kept(old, k)
+      } else {
+        let src = (k / tile) * trav + k % tile
+        if src < n { x[src] } else { pad }
+      })
+}
+
+## The tile a GATHER/SCATTER view reads: row `r` of the answer is row
+## `ids[r]` of a `rows` by `cols` row-major tensor, widened to `gcols`
+## columns with `pad` in the columns past the end of the tensor.
+## scripts/tile-gpu-diff's view_gather_pad (knife T13).
+##
+## The row numbers come from the kernel at run time and the columns do not:
+## that asymmetry IS the gather view, and the padding here is on the column
+## side because a row the tensor does not have is a different question from
+## a column it does not have.
+pub fn gather_pad_ref(rows: Int, cols: Int, gcols: Int, pad: Float, ids: List[Float],
+  x: List[Float], old: List[Float]) -> List[Float] =
+  list.map(range(0, len(old)), k =>
+      if k >= rows * gcols {
+        kept(old, k)
+      } else {
+        let c = k % gcols
+        if c < cols { x[to_int(ids[k / gcols]) * cols + c] } else { pad }
+      })
+
+## The nine reductions `atomic_red_view_tko` can make, each over the SAME
+## per-block contribution: scripts/tile-gpu-diff's view_atomic (knife T13).
+## `ins` is `[x, and the nine output buffers as the launch found them]` and
+## the answer rewrites positions 1 to 9.
+##
+## The contribution of block `b` to bin `j` is how many of its `tile` lanes
+## hold the value `j`, counting only lanes below `n`. Summed over the blocks
+## that is exactly `histogram_ref`, which is why the `add` output can share
+## that reference; the other eight fold the same counts LESS `bias`, and the
+## bias is what puts negative numbers in so that `umax` and `umin` are not
+## `max` and `min` spelled twice.
+##
+## Every fold here is exact whatever order the blocks arrive in, which is
+## the whole point of an atomic reduction: the eight integer modes are
+## associative and commutative over i32, and the ninth adds small integers
+## in binary64.
+pub fn view_atomic_ref(n: Int, bins: Int, tile: Int, bias: Int, _dtypes: List[String],
+  ins: List[List[Float]]) -> List[(Int, List[Float])] = {
+  let x = ins[0]
+  let blocks = n / tile + 1
+  let counts = list.map(range(0, blocks), b =>
+      list.map(range(0, bins), j =>
+          len(list.filter(range(0, tile), t =>
+              b * tile + t < n && to_int(x[b * tile + t]) == j))))
+  let fold = (start: Int, f: fn(Int, Int) -> Int) =>
+      list.map(range(0, bins), j =>
+          list.fold(range(0, blocks), start, (acc, b) => f(acc, counts[b][j] - bias)))
+  let out = (pos: Int, vs: List[Int]) =>
+      (pos, list.map(range(0, len(ins[pos])), k =>
+          if k < bins { to_float(wrap_i32(vs[k])) } else { kept(ins[pos], k) }))
+  let sums = list.map(range(0, bins), j =>
+      list.fold(range(0, blocks), 0, (acc, b) => acc + counts[b][j]))
+  [out(1, sums),
+    (2, list.map(range(0, len(ins[2])), k =>
+        if k < bins { to_float(sums[k]) } else { kept(ins[2], k) })),
+    out(3, fold(0 - 1, (a, b) => a & b)),
+    out(4, fold(0, (a, b) => a | b)),
+    out(5, fold(0, (a, b) => (a | b) & (0 - 1 - (a & b)))),
+    out(6, fold(0 - 2147483648, (a, b) => if a > b { a } else { b })),
+    out(7, fold(2147483647, (a, b) => if a < b { a } else { b })),
+    out(8, fold(0, (a, b) => if unsigned32(a) > unsigned32(b) { a } else { b })),
+    out(9, fold(0 - 1, (a, b) => if unsigned32(a) < unsigned32(b) { a } else { b }))]
+}
+
+# The value of a 32-bit pattern read as UNSIGNED, which is what `umax` and
+# `umin` compare and what `max` and `min` do not.
+fn unsigned32(n: Int) -> Int = n & 0xFFFFFFFF
+
 ## The first `limit` lanes of `x` doubled, with every lane from `limit` on
 ## kept from `old`: scripts/tile-gpu-diff's view_tensor_shape (knife T12).
 ##

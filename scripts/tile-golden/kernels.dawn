@@ -39,6 +39,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   load_hinted, store_hinted,
   tensor_view, partition_view, load_view, store_view, view_grid,
   tensor_view_dyn, tensor_dim, index_space_dim, idx_of, idx_as_scalar, Dim, Fixed, Dyn,
+  strided_view, gather_scatter_view, load_gather, store_gather, atomic_red_view, strided_grid,
+  GatherIdx, At, Rows, d_reduce_dim_i,
   NoPadding, PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
 use tileir/prog.{TileProg, trace_kernel, trace_kernel_hinted}
 use tileir/render.{render}
@@ -4785,6 +4787,193 @@ fn view_index_space(dims: Param[I32], x: Param[F64], out: Param[F64],
   store(shape_out, one, [1], spread(I32, [1], idx_as_scalar(gj)))
 }
 
+# ---- knife T13: the rest of the view family ----
+#
+# Knife T11 built the grid view (a tensor cut into equal tiles, indexed by
+# tile) and knife T12 the dynamic half of it. What is left of the family is
+# the two views that are NOT a plain grid and the reduction that writes into
+# one:
+#
+#   view_conv1d      a STRIDED view whose traversal is ONE: the tiles
+#                    overlap, so index i is the window `x[i .. i + K)` and
+#                    the convolution is a dot product per index rather than
+#                    K taps at K bases. It shares `conv1d_ref` with the
+#                    pointer-ladder `conv1d`, on a corpus of its own (see
+#                    below)
+#   view_token_embed a GATHER/SCATTER view: its index at `sparse_dim` is a
+#                    1D tile of ROW NUMBERS the kernel read out of a buffer,
+#                    so one load collects eight rows chosen while it runs.
+#                    It shares `token_embed_ref` with the pointer-ladder
+#                    `token_embed`
+#   view_atomic      `atomic_red_view_tko` in all NINE of its modes: eight
+#                    tile blocks reduce their own histogram into ONE tile of
+#                    a grid view, and the answer does not depend on the
+#                    order they arrive in. Its `add` output is exactly
+#                    `histogram_ref`'s
+#   view_stride_pad  a strided view whose traversal is LONGER than its tile,
+#                    so the grid skips, and whose last tile runs off the end
+#                    of the tensor, so its `padding_value` is visible
+#   view_gather_pad  the same for a gather view, padded on the COLUMN side:
+#                    its tile is wider than the tensor's rows
+#
+# The last two are the first evidence of the UNIFIED OPTIONAL-PARAMETER
+# BITFIELD as a rule rather than as a version branch. A partition view
+# writes the bitfield only because this writer targets 13.3; these two types
+# entered AT 13.3 and have no other spelling, so the varint is
+# unconditional. Both run f32 elements over i32 BUFFERS, as `view_padding`
+# does, because what the host has to read back is the bit pattern the
+# padding left and not a number a comparison could round.
+#
+# `view_conv1d`'s corpus is not `conv1d`'s, and that is deliberate: the
+# ladder version folds its taps in the reference's own order, and this one
+# issues a `reduce` whose order the dialect does not specify. Eighths make
+# every partial sum exact, so the two orders answer the same bits; tenths
+# would not.
+
+const VS_N: Int = 260
+const VS_K: Int = 4
+
+fn vs_out() -> Int = VS_N - VS_K + 1
+
+fn view_conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let tile = [VS_K]
+  let zero = idx_const(0)
+  let i = block_id(0)
+  # the sliding window: traversal ONE against a tile of four, so index i
+  # covers `x[i .. i + 4)` and the windows overlap three ways. A partition
+  # view cannot say this at all.
+  let src = strided_view(F64, tensor_view(F64, x, zero, [VS_N], [1]), tile, [1], [0], NoPadding)
+  # the weights, as a strided view whose traversal IS its tile: the
+  # dialect's own first example says that is a partition view, and it is
+  # here so that the two spellings sit side by side in one kernel
+  let wv = strided_view(F64, tensor_view(F64, w, zero, [VS_K], [1]), tile, [VS_K], [0], NoPadding)
+  let prod = mul(F64, tile, load_view(F64, src, [i]), load_view(F64, wv, [zero]))
+  store(out, tile_at(i, 1), [1],
+    spread(F64, [1], d_reduce(F64, tile, prod, 0.0, (acc, e) => s_addf(F64, acc, e))))
+}
+
+const VG_ROWS: Int = 64
+const VG_DIM: Int = 16
+const VG_TILE: Int = 8
+const VG_N: Int = 104
+
+fn view_token_embed(ids: Param[I32], table: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let tile = [VG_TILE, VG_DIM]
+  let zero = idx_const(0)
+  let b = block_id(0)
+  # the row numbers this block collects. It is an ordinary tile of i32 read
+  # through the pointer ladder, and it becomes the gather view's index at
+  # `sparse_dim`; every other index is a tile index as it is on any view.
+  let rows = load(ids, tile_at(b, VG_TILE), [VG_TILE])
+  let src = gather_scatter_view(F64,
+    tensor_view(F64, table, zero, [VG_ROWS, VG_DIM], [VG_DIM, 1]), tile, 0, NoPadding)
+  let dst = partition_view(F64, tensor_view(F64, out, zero, [VG_N, VG_DIM], [VG_DIM, 1]),
+    tile, [0, 1], NoPadding)
+  store_view(F64, dst, [b, zero], load_gather(F64, src, [Rows(rows), At(zero)]))
+}
+
+const VA_BINS: Int = 16
+const VA_TILE: Int = 64
+const VA_N: Int = 500
+const VA_BIAS: Int = 3
+
+fn va_blocks() -> Int = VA_N / VA_TILE + 1
+
+# This block's own histogram, as a tile of VA_BINS counts. The values are
+# read as a RECTANGLE: stride zero along the bin axis repeats one row of
+# memory down every bin, `coord` names the bin each row stands for, and the
+# reduction along the lane axis counts the matches. The lanes past the end
+# of the input are masked and padded with a value no bin is.
+fn va_local(x: Param[I32], b: Idx) -> Tile[I32] !Dev = {
+  let s2 = [VA_BINS, VA_TILE]
+  let blk = tile_at(b, VA_TILE)
+  let live = axis_mask(blk, s2, 1, VA_N)
+  let vals = load_strided_masked(x, blk, s2, axis_strides(2, 1, 1), live, i_const(s2, 0 - 1))
+  let hit = mask_to_int(s2, eq_i(s2, vals, coord(idx_const(0), s2, 0, 1)))
+  d_reduce_dim_i(s2, 1, hit, 0, (acc, e) => s_addi(acc, e))
+}
+
+fn va_reduce(p: Param[I32], mode: String, t: Tile[I32]) -> Unit !Dev = {
+  let bins = [VA_BINS]
+  let zero = idx_const(0)
+  let v = partition_view(I32, tensor_view(I32, p, zero, bins, [1]), bins, [0], NoPadding)
+  atomic_red_view(I32, v, [zero], mode, "device", t)
+}
+
+fn view_atomic(x: Param[I32], o_add: Param[I32], o_addf: Param[F64], o_and: Param[I32],
+  o_or: Param[I32], o_xor: Param[I32], o_max: Param[I32], o_min: Param[I32],
+  o_umax: Param[I32], o_umin: Param[I32]) -> Unit !Dev = {
+  let bins = [VA_BINS]
+  let zero = idx_const(0)
+  let local = va_local(x, block_id(0))
+  # the biased counts, which is what the eight integer modes fold. The bias
+  # is what puts NEGATIVE numbers in: without it `umax` and `umin` would
+  # answer what `max` and `min` do and four of the nine modes would be four
+  # spellings of two.
+  let biased = sub_i(bins, local, i_const(bins, VA_BIAS))
+  va_reduce(o_add, "add", local)
+  va_reduce(o_and, "and", biased)
+  va_reduce(o_or, "or", biased)
+  va_reduce(o_xor, "xor", biased)
+  va_reduce(o_max, "max", biased)
+  va_reduce(o_min, "min", biased)
+  va_reduce(o_umax, "umax", biased)
+  va_reduce(o_umin, "umin", biased)
+  # the float mode, and the one reduction here that writes into a STRIDED
+  # view rather than a partition one: `atomic_red_view_tko` takes either,
+  # and refuses only a gather/scatter view
+  let fv = strided_view(F64, tensor_view(F64, o_addf, zero, bins, [1]), bins, [VA_BINS], [0],
+    NoPadding)
+  atomic_red_view(F64, fv, [zero], "addf", "device", int_to_float(I32, F64, bins, local))
+}
+
+const VE_N: Int = 90
+const VE_TILE: Int = 4
+const VE_TRAV: Int = 8
+
+fn ve_grid() -> Int = (VE_N + VE_TRAV - 1) / VE_TRAV
+
+fn ve_out() -> Int = ve_grid() * VE_TILE
+
+fn view_stride_pad(x: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let tile = [VE_TILE]
+  let zero = idx_const(0)
+  let b = block_id(0)
+  # traversal EIGHT against a tile of four: the grid skips half the tensor,
+  # and its last index covers elements 88 to 91 of a tensor 90 long, so two
+  # lanes read the padding value. The index space rounds up, which is what
+  # puts that last tile in it at all.
+  let src = strided_view(F32, tensor_view(F32, x, zero, [VE_N], [1]), tile, [VE_TRAV], [0],
+    PadNan)
+  let dst = partition_view(F32, tensor_view(F32, out, zero, [ve_out()], [1]), tile, [0],
+    NoPadding)
+  store_view(F32, dst, [b], load_view(F32, src, [b]))
+}
+
+const VF_ROWS: Int = 16
+const VF_COLS: Int = 6
+const VF_TILE: Int = 4
+const VF_GCOLS: Int = 8
+
+fn vf_grid() -> Int = VF_ROWS / VF_TILE
+
+fn view_gather_pad(ids: Param[I32], x: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let tile = [VF_TILE, VF_GCOLS]
+  let zero = idx_const(0)
+  let b = block_id(0)
+  let rows = load(ids, tile_at(b, VF_TILE), [VF_TILE])
+  # the tile is EIGHT columns wide over a tensor six columns wide, so two
+  # columns of every gathered row are outside the tensor and read
+  # `pos_inf`. The rows themselves are all inside it: a row number the
+  # tensor does not have is a different question, and not one this kernel
+  # asks.
+  let src = gather_scatter_view(F32,
+    tensor_view(F32, x, zero, [VF_ROWS, VF_COLS], [VF_COLS, 1]), tile, 0, PadPosInf)
+  let dst = partition_view(F32, tensor_view(F32, out, zero, [VF_ROWS, VF_GCOLS], [VF_GCOLS, 1]),
+    tile, [0, 1], NoPadding)
+  store_view(F32, dst, [b, zero], load_gather(F32, src, [Rows(rows), At(zero)]))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -5238,6 +5427,24 @@ fn trace(name: String) -> TileProg = match name {
   "view_tensor_shape" ->
     trace_kernel("view_tensor_shape", ["i32", "f64", "f64", "i32"],
       () => view_tensor_shape(param(I32, 0), param(F64, 1), param(F64, 2), param(I32, 3)))
+  "view_conv1d" ->
+    trace_kernel("view_conv1d", ["f64", "f64", "f64"],
+      () => view_conv1d(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "view_token_embed" ->
+    trace_kernel("view_token_embed", ["i32", "f64", "f64"],
+      () => view_token_embed(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "view_atomic" ->
+    trace_kernel("view_atomic",
+      ["i32", "i32", "f64", "i32", "i32", "i32", "i32", "i32", "i32", "i32"],
+      () => view_atomic(param(I32, 0), param(I32, 1), param(F64, 2), param(I32, 3),
+        param(I32, 4), param(I32, 5), param(I32, 6), param(I32, 7), param(I32, 8),
+        param(I32, 9)))
+  "view_stride_pad" ->
+    trace_kernel("view_stride_pad", ["f32", "f32"],
+      () => view_stride_pad(param(F32, 0), param(F32, 1)))
+  "view_gather_pad" ->
+    trace_kernel("view_gather_pad", ["i32", "f32", "f32"],
+      () => view_gather_pad(param(I32, 0), param(F32, 1), param(F32, 2)))
   "view_index_space" ->
     trace_kernel("view_index_space", ["i32", "f64", "f64", "i32"],
       () => view_index_space(param(I32, 0), param(F64, 1), param(F64, 2), param(I32, 3)))
@@ -5273,6 +5480,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
+      ++ "|view_conv1d|view_token_embed|view_atomic|view_stride_pad|view_gather_pad"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
       ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"

@@ -2311,6 +2311,24 @@ pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
   out
 }
 
+## `d_reduce_dim` with an INTEGER identity, which is `d_reduce_i` with a
+## dimension: the reduction of the i32 tile `t` of `shape` along `dim`,
+## answering a tile of `shape` with that dimension dropped. A count folded
+## along one axis of a rectangle is what needs it, and integer addition
+## modulo 2^32 is exactly associative and commutative, so the fold order
+## the dialect leaves open cannot show.
+pub fn d_reduce_dim_i(shape: List[Int], dim: Int, t: Tile[I32], identity: Int,
+  body: fn(Scalar[I32], Scalar[I32]) -> Scalar[I32] !Dev) -> Tile[I32] !Dev = {
+  let h: Int = t
+  let args = t_reduce_begin(dim, shape, [IdI("i32", identity)], [h])
+  let acc: Scalar[I32] = args[0]
+  let e: Scalar[I32] = args[1]
+  let r: Int = body(acc, e)
+  let outs = t_reduce_end([r])
+  let out: Tile[I32] = outs[0]
+  out
+}
+
 ## `d_reduce` over TWO tiles at once, a float tile and the i32 index tile
 ## beside it: the shape argmax and argmin have, where the winning value and
 ## the lane it came from must travel together through one fold. `body` takes
