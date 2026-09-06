@@ -57,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T10", "T15"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15"}
 
 
 class Ledger:
@@ -823,7 +823,7 @@ def feature_cases(good, bytecode, files, ledger):
          "whose .mlir does not contain the op"),
         ("an implemented row whose knife has not landed",
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
-                      "tanh                     | 0x6A | 13.1 | implemented   | T9 "),
+                      "tanh                     | 0x6A | 13.1 | implemented   | T11"),
          "cannot be a planned one"),
         ("an unimplemented row whose knife is not a planned one",
          good.replace("make_partition_view      | 0x42 | 13.1 | deferred      | -  ",
@@ -845,11 +845,11 @@ def feature_cases(good, bytecode, files, ledger):
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T9 "),
-         "knife 'T9' cannot be a planned one"),
+                      "sin                      | 0x62 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
         ("an unimplemented row under a knife that has landed",
-         good.replace("unpack                   | 0x70 | 13.3 | unimplemented | T9 ",
-                      "unpack                   | 0x70 | 13.3 | unimplemented | T6 "),
+         good.replace("alloca                   | 0x71 | 13.3 | unimplemented | T10",
+                      "alloca                   | 0x71 | 13.3 | unimplemented | T6 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
@@ -875,9 +875,9 @@ def type_cases(good, bytecode, files, ledger):
     plain = [
 
         ("a row with too few fields",
-         good + "\nnope | 23 | 13.1 | unimplemented | T9 | 0\n", "fields, not 8"),
+         good + "\nnope | 23 | 13.1 | unimplemented | T11 | 0\n", "fields, not 8"),
         ("the same type twice",
-         good + "\ni16 | 2 | 13.1 | unimplemented | T9 | 0 | - | -\n", "is already listed"),
+         good + "\ni16 | 2 | 13.1 | unimplemented | T11 | 0 | - | -\n", "is already listed"),
         ("a ledger with one row missing",
          "\n".join(ln for ln in good.splitlines() if not ln.startswith("tf32 ")) + "\n",
          "type tag 8 of the frozen table has no row"),
@@ -886,11 +886,11 @@ def type_cases(good, bytecode, files, ledger):
          "i16 is tag 6 here and 2 in bytecode.dawn"),
         ("a tag the writer writes and the ledger calls unimplemented",
          good.replace("tf32               |  8 | 13.1 | implemented   | T3  | 3 |",
-                      "tf32               |  8 | 13.1 | unimplemented | T9  | 0 |"),
+                      "tf32               |  8 | 13.1 | unimplemented | T11 | 0 |"),
          "bytecode.dawn writes its tag"),
         ("a row claiming a tag the writer does not write",
-         good.replace("i4                 | 22 | 13.3 | unimplemented | T9  | 0 | -",
-                      "i4                 | 22 | 13.3 | implemented   | T3  | 2 | golden:vadd"),
+         good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -",
+                      "TensorViewType     | 14 | 13.1 | implemented   | T3  | 2 | golden:vadd"),
          "writes no tag for it"),
         ("a version the deltas contradict",
          good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
@@ -919,11 +919,15 @@ def type_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
-                      "i16                |  2 | 13.1 | implemented   | T9 "),
-         "knife 'T9' cannot be a planned one"),
+                      "i16                |  2 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
+        # No `unimplemented` type row is left after knife T9, so this
+        # verdict is tripped on a `deferred` one instead: the rule is about
+        # the STATUS and the knife, and the view family's knife is a
+        # planned one either way.
         ("an unimplemented row under a knife that has landed",
-         good.replace("i4                 | 22 | 13.3 | unimplemented | T9 ",
-                      "i4                 | 22 | 13.3 | unimplemented | T3 "),
+         good.replace("TensorViewType     | 14 | 13.1 | deferred      | -  ",
+                      "TensorViewType     | 14 | 13.1 | unimplemented | T3 "),
          "so its knife is a planned one"),
         ("a deferred row with no reason",
          good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
@@ -935,9 +939,13 @@ def type_cases(good, bytecode, files, ledger):
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
-    grown = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "i4" -> 22')
+    # Every scalar format is implemented after knife T9, so the tag the
+    # writer is made to grow here is a DEFERRED one: the verdict is about a
+    # row that does not claim what the writer emits, whatever its status.
+    grown = bytecode.replace('  "f8E8M0FNU" -> 18',
+                             '  "f8E8M0FNU" -> 18\n  "TensorViewType" -> 14')
     cases.append(("a type tag the ledger does not call implemented", good, grown, ledger,
-                  "is marked unimplemented but bytecode.dawn writes its tag"))
+                  "is marked deferred but bytecode.dawn writes its tag"))
     # and the other direction of the same input: a tag with no row at all
     invented = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "bogus" -> 5')
     cases.append(("a type tag the ledger has no row for", good, invented, ledger,
@@ -953,12 +961,12 @@ def attr_cases(good, bytecode, files, ledger):
     """The attribute ledger's verdicts, each on a table built to trip it."""
     plain = [
         ("a row with too few fields",
-         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T9 | 0\n", "fields, not 8"),
+         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T11 | 0\n", "fields, not 8"),
         ("the same value twice",
-         good + "\nrounding.approx | 4 | 13.1 | unimplemented | T9 | 0 | - | -\n",
+         good + "\nrounding.approx | 4 | 13.1 | unimplemented | T11 | 0 | - | -\n",
          "is already listed"),
         ("a value AttrDefs.td does not define",
-         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T9 | 0 | - | -\n",
+         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T11 | 0 | - | -\n",
          "is not a value of any attribute domain"),
         ("a code that disagrees with AttrDefs.td",
          good.replace("rounding.approx              | 4 |", "rounding.approx              | 5 |"),
@@ -1010,8 +1018,8 @@ def attr_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
-                      "rounding.approx              | 4 | 13.1 | implemented   | T9 "),
-         "knife 'T9' cannot be a planned one"),
+                      "rounding.approx              | 4 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
         # No row of this table is `unimplemented` any more (knife T10 took
         # the last one), so this case makes one out of a DEFERRED row: the
         # rule under test is the status-to-knife pairing, and a deferred
