@@ -155,6 +155,40 @@ pub type F8E5M2 = F8E5M2
 ## never `nearest_even`; this tree writes `zero`.
 pub type F8E8M0FNU = F8E8M0FNU
 
+# ---- the sub-byte formats knife T9 added ----
+#
+# The last two of the frozen table's fifteen scalar types, and the only two
+# narrower than a byte. Neither is a BUFFER format: `element_bytes` refuses
+# both names, so `gpu_alloc` refuses them and no `Tensor` of one exists.
+# That is the dialect's own shape rather than a limitation of this release.
+# Types.td leaves `i4` out of `CudaTile_AnyInt`, so `ptr<i4>` does not
+# parse, and it leaves both out of every arithmetic operation: an `i4` tile
+# can only be `pack`ed, `unpack`ed, `exti`ed and `trunci`ed, and an
+# `f4E2M1FN` tile can only be those plus `ftof`. A kernel over either one
+# therefore reads BYTES, unpacks them, widens, computes, narrows and packs
+# back, which is what scripts/tile-golden's dtype_i4 and dtype_e2m1 do.
+
+## The 4-bit signed integer format: two elements to the byte, the low
+## nibble first (Types.td spells the order out for a tensor view of it, and
+## `pack` / `unpack` lay a tile down the same way). A two's-complement
+## value in [-8, 7].
+##
+## `dtype_bytes` answers 1 for it, which is the ONE place in this trait
+## where the number is not the element's own width: it is the byte two of
+## them share. `element_bits` is the width, and it is what `pack` and
+## `unpack` compute their shapes from.
+pub type I4 = I4
+
+## The OCP MX fp4 format: one sign bit, two exponent bits, one significand
+## bit, two elements to the byte. No infinity and no NaN at all, which is
+## what FN means here and is stronger than `f8E4M3FN`'s FN (that one keeps
+## two NaN encodings). Sixteen encodings and sixteen values: +/-0, +/-0.5,
+## +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6.
+##
+## `narrow.round_f4e2m1` is the host reading of a conversion into it and
+## records which of its answers are choices rather than measurements.
+pub type F4E2M1FN = F4E2M1FN
+
 ## What a device needs to know about an element format. The marker value is
 ## the first argument so the methods can be called by name (spec §3.5: a type
 ## parameter that appears in no argument position cannot be inferred).
@@ -228,6 +262,16 @@ impl Dtype[F8E8M0FNU] {
   fn dtype_bytes(d: F8E8M0FNU) -> Int = 1
 }
 
+impl Dtype[I4] {
+  fn dtype_name(d: I4) -> String = "i4"
+  fn dtype_bytes(d: I4) -> Int = 1
+}
+
+impl Dtype[F4E2M1FN] {
+  fn dtype_name(d: F4E2M1FN) -> String = "f4E2M1FN"
+  fn dtype_bytes(d: F4E2M1FN) -> Int = 1
+}
+
 ## The bytes one element of the named format occupies in a device buffer, or
 ## `None` for a format this release's handlers do not move: `f64` (8),
 ## `i32` (4), `bf16` and `f16` (2), `i8` and `u8` (1). Both handlers consult
@@ -247,6 +291,26 @@ pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
   "f8E5M2" -> Some(1)
   "f8E8M0FNU" -> Some(1)
   _ -> None
+}
+
+## The BITS one element of the named format occupies, or `None` for a name
+## this release does not know. Every format `element_bytes` accepts answers
+## eight times what it answers; the two that answer here and not there are
+## the sub-byte ones, `i4` and `f4E2M1FN`, which are tile formats and never
+## buffer formats.
+##
+## The two functions are therefore not one function twice. `element_bytes`
+## says what `gpu_alloc` will hand out and `element_bits` says how wide a
+## lane is, and `pack` / `unpack` are the operations that need the second
+## one: they scale a rank-1 tile's lane count by the ratio of two widths,
+## and half a byte is a ratio the first function cannot express.
+pub fn element_bits(dtype: String) -> Option[Int] = match dtype {
+  "i4" -> Some(4)
+  "f4E2M1FN" -> Some(4)
+  _ -> match element_bytes(dtype) {
+    Some(n) -> Some(8 * n)
+    None -> None
+  }
 }
 
 ## `x` as a buffer of the named format holds it: rounded to bfloat16 for
@@ -305,6 +369,60 @@ pub fn wrap_i8(n: Int) -> Int = {
 ## same octet `wrap_i8` answers, read the other way: `wrap_u8(-56)` is 200
 ## and `wrap_i8(200)` is -56.
 pub fn wrap_u8(n: Int) -> Int = n & 0xFF
+
+## `n` as a two's-complement 4-bit SIGNED integer: the low nibble read as a
+## value in [-8, 7]. `wrap_i32`'s shape at half an octet, and what the
+## device's `trunc_i4` leaves behind.
+pub fn wrap_i4(n: Int) -> Int = {
+  let low = n & 0xF
+  if low >= 0x8 { low - 0x10 } else { low }
+}
+
+# ---- the nibble layout of a sub-byte buffer ----
+#
+# There is no buffer of `i4` or of `f4E2M1FN` (element_bytes refuses both),
+# so a corpus for either format ships its lanes inside ordinary 32-bit
+# words and the kernel `pack`s the words into bytes and `unpack`s the bytes
+# into nibbles. The three functions below are the host's reading of that
+# layout, and between them they are the whole of what "which nibble is lane
+# k" means on this side.
+#
+# THE ORDER IS THE DIALECT'S. Types.td writes it out for a tensor view of a
+# 4-bit format: element `i` (i even) is in bits 3..0 of its byte and element
+# `i + 1` in bits 7..4. A 32-bit word reaches the device little end first,
+# so its eight lanes are simply its eight 4-bit fields counted up from the
+# bottom, and `nibble_shift` is that sentence. scripts/tile-gpu-diff's
+# pack-halves-swapped exchanges the two halves of every byte there, and the
+# device disagrees with it wherever a lane index is named.
+
+# Where lane `k` sits in its word. ONE function, read by both directions
+# below, so that the layout is a single sentence and a reader who changes
+# it changes both. scripts/tile-gpu-diff's pack-halves-swapped is that
+# reader: swapping the two halves here relabels the lanes CONSISTENTLY, so
+# every operation that treats all lanes alike still agrees with the device
+# and only one that names a lane index does not.
+fn nibble_shift(k: Int) -> Int = 4 * k
+
+## The `k`th 4-bit lane of the 32-bit word `w`, counted from the low end:
+## `k` in [0, 8), the answer in [0, 15].
+pub fn nibble_at(w: Int, k: Int) -> Int = (w >>> nibble_shift(k)) & 0xF
+
+## `w` with its `k`th 4-bit lane set to the low nibble of `v`; the lane is
+## assumed clear, so this is the inverse of `nibble_at` when a word is
+## built up from zero.
+pub fn nibble_into(w: Int, k: Int, v: Int) -> Int = w | ((v & 0xF) << nibble_shift(k))
+
+## The 32-bit word whose eight lanes are `f(0)` to `f(7)`, as a Float an
+## i32 buffer holds.
+pub fn nibble_word(f: fn(Int) -> Int) -> Float = {
+  var w = 0
+  var k = 0
+  while k < 8 {
+    w = nibble_into(w, k, f(k))
+    k = k + 1
+  }
+  to_float(wrap_i32(w))
+}
 
 # ---- the bf16 wire format ----
 
@@ -3611,6 +3729,322 @@ fn f32_of_bits(pattern: Int) -> Float = {
   }
 }
 
+# ---- the attribute kernels (knife T4) ----
+#
+# Eight references for eight kernels that compute nothing anyone wants and
+# ask one question each: what does the device do with an attribute value
+# this backend had never written? Every one of them is a SEGMENTED buffer,
+# the same operation under two or more attribute values, so what the
+# comparison holds is the difference between the values and not only the
+# arithmetic.
+#
+# The f32 kernels take f64 buffers and narrow inside (scripts/tile-golden's
+# kernels.dawn says why), so these references narrow too: `narrow.round_f32`
+# on the way in, the operation, and the widening back is exact.
+
+## The number a `flush_to_zero` operation sees or answers in place of `x`:
+## a subnormal binary32 becomes the zero of its sign, everything else is
+## itself. The smallest normal binary32 is 2^-126.
+pub fn f32_flush(x: Float) -> Float = {
+  let tiny = 1.1754943508222875e-38
+  if x != x || x == 0.0 {
+    x
+  } else if x < 0.0 && x > 0.0 - tiny {
+    0.0 - 0.0
+  } else if x > 0.0 && x < tiny {
+    0.0
+  } else {
+    x
+  }
+}
+
+## Six directed roundings of one pair of binary32 operands: the sum, the
+## product and the quotient, each towards negative and towards positive
+## infinity, in `blocks` blocks of 128 lanes and six segments each. `ins`
+## is `[x, y, old out]`.
+##
+## The sum and the product of two binary32 values are EXACT in binary64
+## (48 significand bits at worst, and both exponents well inside the
+## range), so the two rounding modes are applied to the exact result and
+## the answer is the format's own. The quotient is not exact, and the
+## corpus is what makes it safe: the divisors are small odd integers
+## scaled by powers of two, so the exact quotient is never within 2^-53 of
+## a binary32 grid point and rounding the binary64 quotient in the named
+## direction lands where rounding the exact one would. attr_diff prints
+## the corpus's divisors so that a change to it is visible.
+pub fn attr_round_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let width = 6 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let seg = k / 128
+      let i = b * 128 + k % 128
+      let a = narrow.round_f32(x[i])
+      let c = narrow.round_f32(y[i])
+      let mode = if seg % 2 == 0 { "negative_inf" } else { "positive_inf" }
+      let exact = if seg < 2 { a + c } else if seg < 4 { a * c } else { a / c }
+      round_to(dt, narrow.round_f32_toward(exact, mode))
+    }
+  })
+}
+
+## The two comparison orderings and the two NaN policies over one pair of
+## f64 tiles, in `blocks` blocks of 128 lanes and sixteen segments each:
+## the six predicates ordered, the same six unordered, then `maxf` and
+## `minf` with and without `propagate_nan`. `ins` is `[x, y, old out]`.
+##
+## What the dialect says, and what this therefore says: an ORDERED
+## comparison answers false whenever either operand is a NaN, an UNORDERED
+## one answers true; `maxf` without `propagate_nan` is IEEE 754-2019's
+## maximumNumber (the non-NaN operand, and a canonical NaN only when both
+## are), with it maximum (a canonical NaN if either is).
+pub fn attr_nan_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let width = 16 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let seg = k / 128
+      let i = b * 128 + k % 128
+      let a = x[i]
+      let c = y[i]
+      round_to(dt, attr_nan_lane(seg, a, c))
+    }
+  })
+}
+
+# One lane of attr_nan: which segment it is decides which question is
+# being asked of the pair.
+fn attr_nan_lane(seg: Int, a: Float, c: Float) -> Float = {
+  let unordered = a != a || c != c
+  if seg < 12 {
+    let pred = seg % 6
+    let plain = if pred == 0 {
+      a == c
+    } else if pred == 1 {
+      a != c && not unordered
+    } else if pred == 2 {
+      a < c
+    } else if pred == 3 {
+      a <= c
+    } else if pred == 4 {
+      a > c
+    } else {
+      a >= c
+    }
+    let answer = if unordered { seg >= 6 } else { plain }
+    if answer { 1.0 } else { 0.0 }
+  } else {
+    let both = a != a && c != c
+    let nan = 0.0 / 0.0
+    if seg == 12 {
+      if both { nan } else if a != a { c } else if c != c { a } else { max_number(a, c) }
+    } else if seg == 13 {
+      if unordered { nan } else { max_number(a, c) }
+    } else if seg == 14 {
+      if both { nan } else if a != a { c } else if c != c { a } else { min_number(a, c) }
+    } else {
+      if unordered { nan } else { min_number(a, c) }
+    }
+  }
+}
+
+# The greater of two numbers, with +0.0 counted greater than -0.0 (the
+# dialect says so in as many words, and `>` on Float does not).
+fn max_number(a: Float, c: Float) -> Float =
+  if a == 0.0 && c == 0.0 {
+    if 1.0 / a > 0.0 { a } else { c }
+  } else if a > c {
+    a
+  } else {
+    c
+  }
+
+fn min_number(a: Float, c: Float) -> Float =
+  if a == 0.0 && c == 0.0 {
+    if 1.0 / a < 0.0 { a } else { c }
+  } else if a < c {
+    a
+  } else {
+    c
+  }
+
+## The sum and the product of one pair of binary32 operands with and
+## without `flush_to_zero`, in `blocks` blocks of 128 lanes and four
+## segments each. `ins` is `[x, y, old out]`.
+##
+## The attribute flushes SUBNORMAL INPUTS as well as subnormal results,
+## which is what the dialect's own wording says ("flushes subnormal inputs
+## and results to sign-preserving zero") and what this reference therefore
+## does: flush both operands, do the operation, flush the answer.
+pub fn attr_ftz_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let width = 4 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let seg = k / 128
+      let i = b * 128 + k % 128
+      let a = narrow.round_f32(x[i])
+      let c = narrow.round_f32(y[i])
+      let ftz = seg % 2 == 1
+      let pa = if ftz { f32_flush(a) } else { a }
+      let pc = if ftz { f32_flush(c) } else { c }
+      let r = narrow.round_f32(if seg < 2 { pa + pc } else { pa * pc })
+      round_to(dt, if ftz { f32_flush(r) } else { r })
+    }
+  })
+}
+
+## The square root of one binary32 tile, twice: `rounding<nearest_even>`
+## and `rounding<approx>`, in `blocks` blocks of 128 lanes and two
+## segments. `ins` is `[x, old out]`.
+##
+## Both segments answer the same thing here, which is the whole of what
+## this reference can say: the approximate root is the ARCHITECTURE's
+## approximation and no host expression is its definition. This is a
+## tolerance-tier kernel, and what says the attribute reached the device
+## is the DISTANCE between the two segments, which attr_diff measures and
+## run.sh pins above zero.
+pub fn attr_approx_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let width = 2 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let i = b * 128 + k % 128
+      round_to(dt, narrow.round_f32(ref_sqrt(narrow.round_f32(x[i]))))
+    }
+  })
+}
+
+## The sum, the difference and the product of two i32 tiles under the
+## three overflow assumptions, in `blocks` blocks of 128 lanes and three
+## segments each. `ins` is `[x, y, old out]`.
+##
+## `wrap_i32` is applied as it is everywhere else here, and on this corpus
+## it never has anything to do: an operation that wrapped under
+## `no_signed_wrap` would be undefined and the reference would be
+## answering a question the dialect refuses to answer.
+pub fn attr_overflow_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  let width = 3 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let seg = k / 128
+      let i = b * 128 + k % 128
+      let a = as_i32(x, i)
+      let c = as_i32(y, i)
+      let r = if seg == 0 { a + c } else if seg == 1 { a - c } else { a * c }
+      round_to(dt, to_float(wrap_i32(r)))
+    }
+  })
+}
+
+## Three atomic integer additions under three memory orderings and scopes,
+## each into its own 128 slots of a buffer the kernel also reads back:
+## `ins` is `[x, old out]` and the answer is the new contents of the
+## second. `blocks` blocks own 384 slots each, so no two lanes anywhere
+## name one slot.
+##
+## That is the point and the limit: an ordering constrains CONCURRENT
+## accesses, this corpus has none, and so what the device can say here is
+## that the atomic ran and added. attrs.txt records the five values at
+## layer 1 with that reason.
+pub fn attr_memsem_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let width = 3 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let i = b * 128 + k % 128
+      round_to(dt, to_float(wrap_i32(as_i32(old, idx) + as_i32(x, i))))
+    }
+  })
+}
+
+## The float atomic read-modify-write: every one of `blocks` blocks adds
+## its own chunk of `x` into the SAME 128 slots. `ins` is `[x, old out]`.
+##
+## The lanes collide across blocks, so the order they arrive in is not
+## defined; the corpus is small integers, whose sum is exact in binary64
+## under any order, so the tier is exact by algebra rather than by luck.
+pub fn attr_addf_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx =>
+      if idx >= 128 {
+        kept(old, idx)
+      } else {
+        round_to(dt, list.fold(range(0, blocks), old[idx], (acc, b) => acc + x[b * 128 + idx]))
+      })
+}
+
+## The iteration counts of two loops over one range that straddles 2^31,
+## one comparing its bound as a signed i32 and one as an unsigned one:
+## `ins` is `[old out]` and each of `blocks` blocks fills 256 slots, the
+## first 128 with the signed count and the next 128 with the unsigned one.
+##
+## `lo` and `hi` are the bounds the kernel was recorded with. Read as
+## signed, `hi` is negative and below `lo`, so the loop does not run at
+## all; read as unsigned it is `hi - lo` above it. This is the one unit
+## attribute of knife T4 whose effect on the device is an integer rather
+## than a rounding.
+pub fn attr_ucmp_ref(blocks: Int, lo: Int, hi: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let old = ins[0]
+  let dt = dtypes[0]
+  let signed = if wrap_i32(hi) > wrap_i32(lo) { wrap_i32(hi) - wrap_i32(lo) } else { 0 }
+  let unsigned = (hi & 0xFFFFFFFF) - (lo & 0xFFFFFFFF)
+  list.map(range(0, len(old)), idx => {
+    let b = idx / 256
+    if b >= blocks {
+      kept(old, idx)
+    } else if idx % 256 < 128 {
+      round_to(dt, to_float(signed))
+    } else {
+      round_to(dt, to_float(unsigned))
+    }
+  })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -3708,6 +4142,57 @@ pub fn dtype_i64_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> L
   })
 }
 
+## The five segments of `dtype_i4`: the nibble-wise sum, the sign-extended
+## nibble shifted right by one, the zero-extended one shifted right by one,
+## the nibble-wise product, and a's nibble on even lanes with b's on odd
+## ones. `ins` is `[a, b, out]`, and every buffer is `i32`: there is no
+## buffer of `i4` at all, so a word carries eight lanes and this reference
+## reads them the way `unpack` does (`nibble_at`).
+##
+## SEGMENTS 1 AND 2 ARE THE SAME SHIFT under the two widenings, and they
+## differ on exactly the lanes whose top bit is set. Nothing else here can
+## see the difference: + - * agree modulo 16 whichever widening produced
+## the operands, which is why the kernel carries a shift at all.
+pub fn dtype_i4_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  let xb = ins[1]
+  segments(ins[2], n, 5, (seg, i) => {
+    let wa = wrap_i32(to_int(xa[i]))
+    let wb = wrap_i32(to_int(xb[i]))
+    nibble_word(k => {
+      let ua = nibble_at(wa, k)
+      let ub = nibble_at(wb, k)
+      let sa = wrap_i4(ua)
+      let sb = wrap_i4(ub)
+      if seg == 0 {
+        sa + sb
+      } else if seg == 1 {
+        sa >> 1
+      } else if seg == 2 {
+        ua >>> 1
+      } else if seg == 3 {
+        sa * sb
+      } else if k % 2 == 1 {
+        ub
+      } else {
+        ua
+      }
+    })
+  })
+}
+
+## The two segments of `pack_roundtrip`: the bytes that went in, twice.
+## `ins` is `[a, out]` and both buffers are `i32`.
+##
+## This reference names no nibble and no half word, which is what makes it
+## the CONTROL for pack-halves-swapped: a round trip through a format is
+## blind to the order the lanes were laid down in, because it lays them
+## back the same way. The kernel is the identity and so is this.
+pub fn pack_roundtrip_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  segments(ins[1], n, 2, (_seg, i) => xa[i])
+}
+
 ## The two segments of `dtype_tf32`, `dtype_e4m3`, `dtype_e5m2` and
 ## `dtype_e8m0`: the buffer of the format widened to f64, and an f64 taken
 ## into the format and back. `ins` is `[x, y, out]` and `dtype` names the
@@ -3733,6 +4218,303 @@ pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List
       } else {
         round_to(dtype, y[i])
       })
+}
+
+# ---- references for the loop kernels (knife T5) ----
+#
+# These four are the host halves of the `loop` and `break` kernels, and
+# they are written INDEPENDENTLY of the recording: the kernels drive a
+# device region and these drive an ordinary Dawn loop, and what makes the
+# comparison worth anything is that neither is the other's transcript.
+#
+# The trip count is the point. Two of them iterate until a value they
+# computed says stop, and neither the kernel nor the reference is told how
+# many iterations that is; a third stops before its first step. So the
+# round count each answers is a measurement, and the diff compares it
+# alongside the values.
+
+## The Collatz successor of `v`, saturating at 1: a lane that has reached 1
+## stays there, and the step is counted only while the lane is still
+## moving. The device computes both branches and selects, and wraps at
+## 32 bits; this does the same, so `3 * v + 1` past 2^31 wraps here too.
+pub fn collatz_step_ref(v: Int, steps: Int) -> (Int, Int) = {
+  let running = 1 < v
+  let moved = if v % 2 == 0 { v / 2 } else { wrap_i32(wrap_i32(3 * v) + 1) }
+  (if running { wrap_i32(moved) } else { v }, if running { steps + 1 } else { steps })
+}
+
+# The number of Collatz steps `v` needs to reach 1, up to `fuel` of them.
+# `fuel` is the number of iterations the kernel is allowed (a host constant
+# for `loop_bound`, and for `loop_count` the number this reference is
+# willing to believe): a lane whose chain is longer than that is counted
+# short HERE and not on the device, so the diff reddens rather than
+# agreeing quietly.
+fn collatz_steps(v: Int, steps: Int, fuel: Int) -> Int =
+  if fuel <= 0 || v <= 1 {
+    steps
+  } else {
+    let (nv, ns) = collatz_step_ref(v, steps)
+    collatz_steps(nv, ns, fuel - 1)
+  }
+
+## The step count of every one of the first `n` lanes of `ins[0]`, and the
+## number of iterations the loop ran repeated across the next `n`: the
+## reference for `loop_count` and, without the second segment, for
+## `loop_bound`.
+##
+## The round count is the LARGEST step count, and that is an argument
+## rather than a definition: every lane that is still moving adds one on
+## every iteration and the loop stops on the first iteration where none is,
+## so the number of iterations that changed anything is the longest chain.
+## The kernel computes it with a second reduction over the counts and this
+## computes it with a fold; both are the maximum, and the device is where
+## the two are held together.
+pub fn loop_count_ref(n: Int, fuel: Int, segs: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  let steps = list.map(range(0, n), i => collatz_steps(as_i32(x, i), 0, fuel))
+  let rounds = list.fold(steps, 0, (acc, s) => if s > acc { s } else { acc })
+  segments(ins[1], n, segs, (seg, i) => round_to(dt, to_float(if seg == 0 { steps[i] } else { rounds })))
+}
+
+# One Newton round over the whole tile: `x <- 0.5 * (x + a / x)`, lane by
+# lane, in the kernel's order (a division, a sum, a product).
+fn newton_round(a: List[Float], x: List[Float]) -> List[Float] =
+  list.map(range(0, len(x)), i => 0.5 * (x[i] + a[i] / x[i]))
+
+# The largest residual `|x * x - a|` in the tile: what the kernel's
+# reduction answers. `maxf` is associative, commutative and idempotent, so
+# the device's fold order cannot change it and this left fold is the same
+# number.
+fn newton_worst(a: List[Float], x: List[Float]) -> Float =
+  list.fold(range(0, len(x)), 0.0, (acc, i) => {
+    let d = x[i] * x[i] - a[i]
+    let m = if d < 0.0 { 0.0 - d } else { d }
+    if m > acc { m } else { acc }
+  })
+
+# Newton until the largest residual is under `eps`, or `fuel` rounds,
+# whichever comes first, answering the tile and the number of rounds.
+fn newton_run(a: List[Float], x: List[Float], rounds: Int, eps: Float, fuel: Int) -> (List[Float], Int) =
+  if fuel <= 0 || newton_worst(a, x) < eps {
+    (x, rounds)
+  } else {
+    newton_run(a, newton_round(a, x), rounds + 1, eps, fuel - 1)
+  }
+
+## The square root of each of the first `n` lanes of `ins[0]` by Newton's
+## iteration from 1.0, and the number of rounds it took repeated across the
+## next `n`: the reference for `loop_until`.
+##
+## EXACT TIER BY ALGEBRA. Every operation in the iteration is one IEEE 754
+## requires to be correctly rounded, the lanes are independent, and the
+## order is the same on both sides, so the tiles agree bit for bit. What
+## the round count adds is that the two sides also agree on WHEN to stop,
+## and that is the part only a data-dependent loop can be wrong about: the
+## residual falls by five orders of magnitude between the last iteration
+## and the one before it for the corpus this is used with, so the two sides
+## cannot disagree about the comparison by a rounding.
+pub fn loop_until_ref(n: Int, eps: Float, fuel: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = list.map(range(0, n), i => ins[0][i])
+  let dt = dtypes[1]
+  let (x, rounds) = newton_run(a, list.map(range(0, n), _i => 1.0), 0, eps, fuel)
+  segments(ins[1], n, 2, (seg, i) => round_to(dt, if seg == 0 { x[i] } else { to_float(rounds) }))
+}
+
+## The first `n` lanes of `ins[0]`, unchanged, when every one of them is
+## under `threshold`, and `step` added to each otherwise: the reference for
+## `loop_none`, whose loop stops before its body has changed anything.
+##
+## It is written as the general loop rather than as "the input" so that it
+## is a reference and not a restatement of the corpus: hand it a tile over
+## the threshold and it iterates, exactly as the kernel does.
+##
+## The step moves the tile AWAY from the exit, so a tile that starts over
+## the threshold never reaches it and `fuel` is what stops this function.
+## That asymmetry is the kernel's and it is deliberate: it is what makes
+## the `loop-break-condition-inverted` mutant stop after one iteration
+## rather than never (scripts/tile-gpu-diff/run.sh says so at the mutant).
+pub fn loop_none_ref(n: Int, threshold: Float, step: Float, fuel: Int,
+  dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x0 = list.map(range(0, n), i => ins[0][i])
+  let dt = dtypes[1]
+  let x = raise_until(x0, threshold, step, fuel)
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, x[i]))
+}
+
+fn raise_until(x: List[Float], threshold: Float, step: Float, fuel: Int) -> List[Float] =
+  if fuel <= 0 || list.fold(x, 0.0, (acc, v) => if v > acc { v } else { acc }) < threshold {
+    x
+  } else {
+    raise_until(list.map(x, v => v + step), threshold, step, fuel - 1)
+  }
+
+## Knife T6's references. All four are one line of arithmetic each, and
+## that is the point: what these kernels are FOR is an operation that does
+## not change the answer (`assume`), one that stops the launch
+## (`assert`) or one that writes to the process's standard output
+## (`print_tko`), so the buffer they leave behind has to be something a
+## host can restate without effort. Anything harder would move the
+## comparison off the operation under test.
+##
+## `assert_pass`: the first `n` lanes plus one. The kernel's assertion holds
+## on every lane of the corpus it is run with, so this is what a launch that
+## does not fire answers. There is no reference for `assert_fail`: a launch
+## that fires has no answer to compare, and its verdict is the error the
+## host is given.
+pub fn assert_pass_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(as_i32(ins[0], i) + 1)))
+
+## `assume_divby`: the first `n` lanes divided by `divisor`. The kernel
+## assumes every lane is a multiple of it, and the corpus makes that true,
+## so the quotient is exact on both sides and the assumption is a claim
+## about code generation and not about the answer.
+pub fn assume_divby_ref(n: Int, divisor: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(as_i32(ins[0], i) / divisor)))
+
+## `assume_same`: the first `n` lanes times three.
+pub fn assume_same_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(wrap_i32(as_i32(ins[0], i) * 3))))
+
+## `assume_bounded`: the first `n` lanes plus five.
+pub fn assume_bounded_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] =
+  segments(ins[1], n, 1, (_seg, i) => round_to(dtypes[1], to_float(wrap_i32(as_i32(ins[0], i) + 5))))
+
+## `print_tile`: three segments of `n` lanes -- the input unchanged, then
+## the sum and the maximum of the first `n` lanes repeated across the other
+## two. The same two numbers the kernel PRINTS, which is what lets the bytes
+## on standard output and the bytes in the buffer be two readings of one
+## answer.
+pub fn print_tile_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let total = print_tile_sum(x, n)
+  let biggest = print_tile_max(x, n)
+  segments(ins[1], n, 3, (seg, i) =>
+      round_to(dtypes[1], to_float(if seg == 0 { as_i32(x, i) } else if seg == 1 { total } else { biggest })))
+}
+
+## The sum of the first `n` lanes, modulo 2^32 as an i32 `addi` folds it.
+## Public because scripts/tile-gpu-diff computes the line `print_tile`
+## prints from it, and that line is a judgement of its own.
+pub fn print_tile_sum(x: List[Float], n: Int) -> Int =
+  list.fold(range(0, n), 0, (acc, i) => wrap_i32(acc + as_i32(x, i)))
+
+## The largest of the first `n` lanes, as a signed i32 `maxi` folds it.
+pub fn print_tile_max(x: List[Float], n: Int) -> Int =
+  list.fold(range(0, n), 0, (acc, i) => {
+    let v = as_i32(x, i)
+    if v > acc { v } else { acc }
+  })
+# ---- knife T7: the module's static globals ----
+
+## The two tables `global_table`'s module declares as static globals, and
+## the values the host says they hold. They are here rather than in the
+## kernel source because BOTH sides need them: the kernel bakes them into
+## the Global section's initializer and the reference below answers with
+## them, and the whole judgement is that the device reads back what the
+## host declared.
+##
+## Neither table is a palindrome and neither is a splat, which is what the
+## two writer mutants need: an initializer written backwards and one
+## written as a one-element splat are both legal Tile IR, and only a
+## corpus that can tell them from the truth says so.
+pub fn global_table_a(n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(i) * 0.5 + 1.0)
+
+pub fn global_table_b(n: Int) -> List[Float] =
+  list.map(range(0, n), i => 0.0 - to_float(i * i) - 0.25)
+
+## `global_table`: two segments of `n` lanes, each the corresponding table
+## plus the input, and the rest of the output buffer left alone. `ins` is
+## `[x, out]`.
+##
+## EXACT TIER BY ALGEBRA: one `addf` per lane with `rounding<nearest_even>`,
+## which is what a binary64 `+` is.
+pub fn global_table_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let a = global_table_a(n)
+  let b = global_table_b(n)
+  let dt = dtypes[1]
+  segments(ins[1], n, 2, (seg, i) => round_to(dt, (if seg == 0 { a[i] } else { b[i] }) + x[i]))
+}
+
+## `global_ctl`: the same two segments computed from two BUFFERS instead of
+## two globals. `ins` is `[a, b, x, out]`. The kernel it answers for holds
+## neither `global` nor `get_global`, so it is the T7 family's kernel-level
+## control and a second opinion on the tables at the same time.
+pub fn global_ctl_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let x = ins[2]
+  let dt = dtypes[3]
+  segments(ins[3], n, 2, (seg, i) => round_to(dt, (if seg == 0 { a[i] } else { b[i] }) + x[i]))
+}
+
+## `global_scratch`: the output buffer plus the input, lane by lane. `ins`
+## is `[x, out]`.
+##
+## THIS ONE IS NOT THE KERNEL'S ALGORITHM, and that is the point. The
+## kernel adds its input to a mutable GLOBAL and writes the sum to both;
+## the reference adds it to the OUTPUT BUFFER, which is where the host can
+## see the same running total. The two agree only while the global keeps
+## its value from one launch to the next, so a sequence of launches of the
+## same module is a judgement about the lifetime of a static allocation and
+## not about arithmetic. The global's initializer is zeros and so is the
+## output buffer's first `n` lanes, which is what starts the two totals
+## together.
+pub fn global_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let out = ins[1]
+  let dt = dtypes[1]
+  segments(out, n, 1, (_seg, i) => round_to(dt, out[i] + x[i]))
+}
+
+# ---- knife T10: `alloca` ----
+
+## `alloca_scratch`: three times the input, lane by lane. `ins` is
+## `[x, out]`.
+##
+## THE ALGEBRA IS THE JUDGEMENT HERE, and not the arithmetic. The kernel
+## writes `x + x` into a fresh automatic allocation, reads it back through
+## the same pointers in the same launch and adds the input to what it read;
+## this answers `(x + x) + x` directly. The two agree only while the
+## allocation is memory that keeps what was put in it, so a scratch that
+## read back zeros would answer `x` and a store that never landed would
+## leave the sentinel.
+##
+## EXACT TIER BY THE VALUES: every lane of the corpus is a small multiple
+## of a power of two, so both sums are exact in binary64 and the
+## `rounding<nearest_even>` the kernel carries has nothing to round.
+pub fn alloca_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, round_to(dt, x[i] + x[i]) + x[i]))
+}
+
+## `alloca_two`: `2 * x + 1`, lane by lane, which is `x - (-x - 1)`. `ins`
+## is `[x, out]`.
+##
+## THIS ONE IS A DISTINCTNESS CLAIM. The kernel makes two allocations in
+## one block, stores `x` into the first and `-x - 1` into the second, and
+## answers the difference. Two allocations at the same address would answer
+## 0 for every lane, because the second store would have overwritten the
+## first; the corpus keeps every lane away from -0.5, the one input where
+## `2 * x + 1` is 0 in its own right.
+pub fn alloca_two_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) =>
+      round_to(dt, x[i] - round_to(dt, (0.0 - x[i]) - 1.0)))
+}
+
+## `alloca_ctl`: `alloca_scratch`'s answer with no allocation in it. `ins`
+## is `[x, out]`. The kernel it answers for holds no `alloca` at all, so it
+## is this family's kernel-level control: no mutant of the allocation may
+## move its bytes or its verdict.
+pub fn alloca_ctl_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, round_to(dt, x[i] + x[i]) + x[i]))
 }
 
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
@@ -5084,6 +5866,73 @@ test "the shape, grid, token and pointer references answer what a reader can che
     == list.map(range(0, 128), i => [1.0, 0.0 - 2.0, 1.401298464324817e-45, 3.4028234663852886e38][i % 4])
 }
 
+test "the attribute references answer what a reader can check by hand" {
+  let f2 = ["f64", "f64"]
+  let f3 = ["f64", "f64", "f64"]
+  let i3 = ["i32", "i32", "i32"]
+  let zeros = (n: Int) => list.map(range(0, n), _i => 0.0)
+  # 1 + 2^-25 is off the binary32 grid: the last place at 1 is 2^-23 and
+  # 2^-25 is a quarter of it, so down is 1 and up is 1 + 2^-23
+  let a = list.map(range(0, 128), _i => 1.0)
+  let d = list.map(range(0, 128), _i => 1.0 / 33554432.0)
+  let rounded = attr_round_ref(1, f3, [a, d, zeros(6 * 128 + 4)])
+  assert rounded[0] == 1.0
+  assert rounded[128] == 1.0 + 1.0 / 8388608.0
+  # the product of the two is exact, so the two directions agree on it
+  assert rounded[2 * 128] == 1.0 / 33554432.0 && rounded[3 * 128] == 1.0 / 33554432.0
+  # 1 / 2^-25 is 2^25, exact as well
+  assert rounded[4 * 128] == 33554432.0 && rounded[5 * 128] == 33554432.0
+  # past the block's segments the buffer keeps what it held
+  assert rounded[6 * 128] == 0.0
+  # a NaN against a number: ordered answers false for every predicate,
+  # unordered true for every one; maxf keeps the number and maxf
+  # propagate_nan does not
+  let nan = 0.0 / 0.0
+  let nans = list.map(range(0, 128), _i => nan)
+  let ones = list.map(range(0, 128), _i => 1.0)
+  let cmp = attr_nan_ref(1, f3, [nans, ones, zeros(16 * 128 + 4)])
+  assert list.all(range(0, 6), s => cmp[s * 128] == 0.0)
+  assert list.all(range(6, 12), s => cmp[s * 128] == 1.0)
+  assert cmp[12 * 128] == 1.0
+  assert cmp[13 * 128] != cmp[13 * 128]
+  assert cmp[14 * 128] == 1.0
+  assert cmp[15 * 128] != cmp[15 * 128]
+  # two numbers: the ordering attribute changes nothing at all
+  let two = list.map(range(0, 128), _i => 2.0)
+  let plain = attr_nan_ref(1, f3, [ones, two, zeros(16 * 128 + 4)])
+  assert list.all(range(0, 6), s => plain[s * 128] == plain[(s + 6) * 128])
+  assert plain[12 * 128] == 2.0 && plain[14 * 128] == 1.0
+  # flush_to_zero: the smallest binary32 subnormal times one is itself
+  # without the attribute and zero with it
+  let sub = list.map(range(0, 128), _i => 1.401298464324817e-45)
+  let ftz = attr_ftz_ref(1, f3, [sub, ones, zeros(4 * 128 + 4)])
+  assert ftz[0] == 1.0 && ftz[128] == 1.0
+  assert ftz[2 * 128] == 1.401298464324817e-45 && ftz[3 * 128] == 0.0
+  assert f32_flush(1.401298464324817e-45) == 0.0
+  assert f32_flush(1.1754943508222875e-38) == 1.1754943508222875e-38
+  # the approximate root's reference is the correctly rounded one: both
+  # segments the same, which is why this kernel is tolerance tier
+  let four = list.map(range(0, 128), _i => 4.0)
+  let roots = attr_approx_ref(1, f2, [four, zeros(2 * 128 + 4)])
+  assert roots[0] == 2.0 && roots[128] == 2.0
+  # the three overflow assumptions are the three operations
+  let ten = list.map(range(0, 128), _i => 10.0)
+  let three = list.map(range(0, 128), _i => 3.0)
+  let ovf = attr_overflow_ref(1, i3, [ten, three, zeros(3 * 128 + 4)])
+  assert ovf[0] == 13.0 && ovf[128] == 7.0 && ovf[2 * 128] == 30.0
+  # every atomic slot takes its own lane's value once, whatever the
+  # ordering the segment carries
+  let mem = attr_memsem_ref(1, ["i32", "i32"], [ten, list.map(range(0, 3 * 128 + 4), _i => 1.0)])
+  assert mem[0] == 11.0 && mem[128] == 11.0 && mem[2 * 128] == 11.0 && mem[3 * 128] == 1.0
+  # four blocks add four chunks into the same 128 slots
+  let chunks = list.map(range(0, 4 * 128), i => to_float(i / 128 + 1))
+  let added = attr_addf_ref(4, f2, [chunks, list.map(range(0, 128 + 4), _i => 100.0)])
+  assert added[0] == 110.0 && added[127] == 110.0 && added[128] == 100.0
+  # the signed loop does not run and the unsigned one runs the difference
+  let counts = attr_ucmp_ref(1, 0x7FFFFFF0, 0x80000010, ["i32"], [zeros(2 * 128 + 4)])
+  assert counts[0] == 0.0 && counts[128] == 32.0 && counts[2 * 128] == 0.0
+}
+
 test "the strided references answer what a reader can check by hand" {
   let f3 = ["f64", "f64", "f64"]
   let f2 = ["f64", "f64"]
@@ -5110,6 +5959,65 @@ test "the strided references answer what a reader can check by hand" {
   # and what falls outside contributes zero
   assert gaussian_blur_ref(2, 2, 3, f3, [[1.0, 2.0, 3.0, 4.0],
     [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]) == [3.0, 3.0, 7.0, 7.0]
+}
+
+test "the debugging references answer what a reader can check by hand, and the printed pair is the stored pair" {
+  let i2 = ["i32", "i32"]
+  let x = [3.0, 7.0, 5.0]
+  let out4 = [0.0, 0.0, 0.0, 0.0 - 1.0]
+  assert assert_pass_ref(3, i2, [x, out4]) == [4.0, 8.0, 6.0, 0.0 - 1.0]
+  assert assume_divby_ref(3, 32, i2, [[64.0, 96.0, 0.0], out4]) == [2.0, 3.0, 0.0, 0.0 - 1.0]
+  assert assume_same_ref(3, i2, [x, out4]) == [9.0, 21.0, 15.0, 0.0 - 1.0]
+  assert assume_bounded_ref(3, i2, [x, out4]) == [8.0, 12.0, 10.0, 0.0 - 1.0]
+  # the sum and the maximum are the two numbers the kernel prints, and they
+  # are the second and third segments of what it stores: the byte judgement
+  # and the buffer judgement read one answer
+  assert print_tile_sum(x, 3) == 15
+  assert print_tile_max(x, 3) == 7
+  let out10 = list.map(range(0, 10), _i => 0.0 - 1.0)
+  let tiles = print_tile_ref(3, i2, [x, out10])
+  assert list.take(tiles, 3) == x
+  assert list.slice(tiles, 3, 6) == [15.0, 15.0, 15.0]
+  assert list.slice(tiles, 6, 9) == [7.0, 7.0, 7.0]
+  assert list.drop(tiles, 9) == [0.0 - 1.0]
+  # the fold is i32 arithmetic, so the sum wraps where the device's `addi`
+  # does rather than growing into a wider host integer
+  assert print_tile_sum([2147483647.0, 1.0], 2) == 0 - 2147483648
+}
+
+test "the loop references answer what a reader can check by hand, trip counts included" {
+  let i2 = ["i32", "i32"]
+  # 6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1 is eight steps, 4 -> 2 -> 1
+  # is two, and 1 is already there. The round count is the largest of them,
+  # which is what the kernel's second reduction answers.
+  let out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  let counts = loop_count_ref(3, 64, 2, i2, [[6.0, 4.0, 1.0], out])
+  assert list.take(counts, 3) == [8.0, 2.0, 0.0]
+  assert list.slice(counts, 3, 6) == [8.0, 8.0, 8.0]
+  assert list.drop(counts, 6) == [0.0 - 1.0]
+  # `loop_bound`'s reference is the same one with one segment
+  assert loop_count_ref(3, 64, 1, i2, [[6.0, 4.0, 1.0], [0.0, 0.0, 0.0]]) == [8.0, 2.0, 0.0]
+  # fuel is not decoration: cut it to three rounds and the long lane is
+  # counted short, which is the reference disagreeing rather than agreeing
+  assert list.take(loop_count_ref(3, 3, 1, i2, [[6.0, 4.0, 1.0], [0.0, 0.0, 0.0]]), 1) == [3.0]
+
+  # Newton from 1.0 on 4 and 9: both settle exactly (4 is a power of two
+  # and 3.0 is the exact root of 9), and the loop runs until the SLOWEST
+  # lane is under the bound, so both lanes report the same round count
+  let f2 = ["f64", "f64"]
+  let roots = loop_until_ref(2, 1.0e-12, 64, f2, [[4.0, 9.0], [0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]])
+  assert list.take(roots, 2) == [2.0, 3.0]
+  assert roots[2] == roots[3]
+  assert roots[2] > 0.0
+  assert list.drop(roots, 4) == [0.0 - 1.0]
+
+  # `loop_none`: every lane under the threshold, so the loop stops before
+  # its first step and the answer is the input
+  assert loop_none_ref(2, 1.0, 1000.0, 64, f2, [[0.25, 0.5], [0.0, 0.0]]) == [0.25, 0.5]
+  # and it really is the loop and not a copy: under a threshold the lanes
+  # already exceed, the step runs and only `fuel` stops it, because this
+  # step moves away from the exit rather than towards it
+  assert loop_none_ref(2, 0.1, 1000.0, 2, f2, [[0.25, 0.5], [0.0, 0.0]]) == [2000.25, 2000.5]
 }
 
 test "the element format references answer what a reader can check by hand" {
@@ -5153,4 +6061,61 @@ test "the element format references answer what a reader can check by hand" {
   let e5 = dtype_convert_ref(1, "f8E5M2", ["f8E5M2", "f64", "f64"], [[1.0], [1.1], outc])
   assert e4[1] == 1.125
   assert e5[1] == 1.0
+}
+
+test "the sub-byte layout is eight lanes to a word, low nibble first" {
+  assert element_bits("i4") == Some(4)
+  assert element_bits("f4E2M1FN") == Some(4)
+  assert element_bits("i32") == Some(32)
+  assert element_bits("f32") == None
+  assert element_bytes("i4") == None
+
+  assert wrap_i4(0) == 0
+  assert wrap_i4(7) == 7
+  assert wrap_i4(8) == 0 - 8
+  assert wrap_i4(15) == 0 - 1
+  assert wrap_i4(0 - 1) == 0 - 1
+  assert wrap_i4(16) == 0
+
+  # 0x76543210: lane k holds k
+  assert nibble_at(0x76543210, 0) == 0
+  assert nibble_at(0x76543210, 7) == 7
+  # a negative word is a 32-bit pattern, and its top lane is its top nibble
+  assert nibble_at(wrap_i32(0xFEDCBA98), 7) == 0xF
+  assert nibble_at(wrap_i32(0xFEDCBA98), 0) == 0x8
+  assert nibble_word(k => k) == to_float(0x76543210)
+  assert nibble_word(k => 0xF) == to_float(0 - 1)
+}
+
+test "the sub-byte references answer what a reader can check by hand" {
+  let i3 = ["i32", "i32", "i32"]
+  # one word of eight lanes, five segments, one word of tail
+  let out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  # a = 0x76543210 (lanes 0..7), b = 0x11111111 (every lane 1)
+  let a = to_float(0x76543210)
+  let b = to_float(0x11111111)
+  let got = dtype_i4_ref(1, i3, [[a], [b], out])
+  # the sum wraps at four bits: lane 7 is 7 + 1 = 8, which is -8
+  assert got[0] == to_float(wrap_i32(0x87654321))
+  # the SIGNED nibble shifted right by one: lanes 0..7 are 0,0,1,1,2,2,3,3
+  assert got[1] == to_float(0x33221100)
+  # and the UNSIGNED one is the same here, because no lane of a has its top
+  # bit set; the two segments part company on b's mirror below
+  assert got[2] == to_float(0x33221100)
+  # the product with 1 is the lane itself
+  assert got[3] == a
+  # b on the odd lanes, a on the even ones
+  assert got[4] == to_float(0x16141210)
+  assert got[5] == 0.0 - 1.0
+
+  # the same word read as signed nibbles: 0xFEDCBA98 has its top bit set on
+  # every lane, so the two shifts differ on every lane
+  let neg = to_float(wrap_i32(0xFEDCBA98))
+  let got2 = dtype_i4_ref(1, i3, [[neg], [b], out])
+  assert got2[1] == to_float(wrap_i32(0xFFEEDDCC))
+  assert got2[2] == to_float(0x77665544)
+
+  # the round trip names no lane at all
+  let outr = [0.0, 0.0, 0.0 - 1.0]
+  assert pack_roundtrip_ref(1, ["i32", "i32"], [[a], outr]) == [a, a, 0.0 - 1.0]
 }

@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select}
+use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -37,19 +37,53 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 ## `iv`, `carried` and everything `body` defines are visible inside the
 ## region only; `results` are the loop's values after it.
 ##
+## `Loop` is the other iterating region (knife T5): the same carried
+## values as a `For` and no induction variable or bounds, because its trip
+## count is not known when it opens. Its body ends in
+## `If([], cond, [Break(values)], [Yield([])])` followed by
+## `Continue(values)`: `break` hands the loop its final values and
+## `continue` hands the next iteration its values, and the `if` between
+## them is the only place a `Break` appears. What `Break` carries is what
+## ENTERED the iteration (the `carried` handles and the token as it stands
+## when the body ends), and what `Continue` carries is what the body
+## computed. `Break`'s values, `Continue`'s values, `inits`, `carried` and
+## `results` are all the same length, and all five end in a token.
+##
 ## `Extract`, `Cat` and `Permute` are knife T2's shape operations, and
 ## `NumBlocks` the grid's extent (`BlockId`'s companion). `JoinToks` merges
 ## two or more tokens into one, and it is the one operation here that makes
 ## the token chain a GRAPH: every other memory operation takes the token
 ## before it and answers the next, so the record's order is a line.
 ##
-## `MakePtrs`, `PtrAdd`, `PtrInt`, `IntPtr`, `PtrCast` and `LoadAt` are the
-## pointer surface. A `Load` builds its own address ladder in the lowering
-## and never names it; these six name it: `MakePtrs` is the parameter
-## spread over a tile, `PtrAdd` an `offset` by an i32 tile the body
-## computed, and the three conversions are the dialect's `ptr_to_int`,
-## `int_to_ptr` and `ptr_to_ptr`. `LoadAt` is `Load` through such a tile,
-## and it sits in the token chain exactly as `Load` does.
+## `MakePtrs`, `PtrAdd`, `PtrInt`, `IntPtr`, `PtrCast`, `LoadAt` and
+## `StoreAt` are the pointer surface. A `Load` builds its own address
+## ladder in the lowering and never names it; these seven name it:
+## `MakePtrs` is the parameter spread over a tile, `PtrAdd` an `offset` by
+## an i32 tile the body computed, and the three conversions are the
+## dialect's `ptr_to_int`, `int_to_ptr` and `ptr_to_ptr`. `LoadAt` and
+## `StoreAt` are `Load` and `Store` through such a tile, and both sit in
+## the token chain exactly as `Load` and `Store` do.
+##
+## `GetGlobal` is the other producer of a pointer tile (knife T7): the
+## address of a module-level `Global`, spread over `shape` the way
+## `MakePtrs` spreads a parameter's. What it names is a `Global` of the
+## same `TileProg` and not an operation, which is why it carries a symbol
+## and not a handle.
+##
+## `Alloca` is the third producer of a pointer tile (knife T10): a fresh
+## automatic allocation of `num_elem` elements of `dtype`, aligned to
+## `align` bytes and spread over `shape` the same way. Unlike `GetGlobal`
+## it names nothing: each occurrence is its own allocation, and the
+## dialect limits the lifetime to the block the operation sits in.
+## `shared` is the `global` unit attribute.
+##
+## `Assert`, `Assume` and `Print` are knife T6's three. `Assert` defines
+## nothing and is not in the token chain: it is the one operation here that
+## can make a launch fail. `Assume` defines a value equal to its operand and
+## carries a predicate attribute nothing checks. `Print` IS in the token
+## chain (`print_tko`), so it carries `tok_in` and defines `tok_out` the way
+## a store does, and its `args` are all of one format and shape, which is
+## what the typed surface allows.
 ##
 ## `Spread` widens a rank-0 tile to `n` lanes. `Reduce` and `If` are the two
 ## other regions. A `Scan` is a `Reduce` that keeps every dimension and
@@ -64,8 +98,8 @@ use dev.{Dev, Tile, Scalar, I1, Param, RedId, IdF, IdI, param, block_id, tile_at
 pub type TileOp =
   | MakeToken(dst: Int)
   | BlockId(dst: Int, axis: Int)
-  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
-  | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int)
+  | Load(dst: Int, tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int, hints: Hints)
+  | Store(tok_out: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int], value: Int, mask: Option[Int], tok_in: Int, hints: Hints)
   | Gather(dst: Int, tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], mask: Option[Int], pad: Option[Int], tok_in: Int)
   | Scatter(tok_out: Int, param: Int, dtype: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
   | AtomicRMW(dst: Int, tok_out: Int, param: Int, dtype: String, mode: String, index: Int, shape: List[Int], value: Int, mask: Option[Int], tok_in: Int)
@@ -78,17 +112,22 @@ pub type TileOp =
   | BinaryF(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Fma(dst: Int, dtype: String, shape: List[Int], lhs: Int, rhs: Int, acc: Int)
   | MmaF(dst: Int, dtype: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
+  | MmaFScaled(dst: Int, dtype: String, scale: String, m: Int, k: Int, n: Int, block: Int,
+    lhs: Int, rhs: Int, acc: Int, lhs_scale: Int, rhs_scale: Int)
   | MmaI(dst: Int, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
   | CmpF(dst: Int, pred: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | CmpI(dst: Int, pred: String, shape: List[Int], lhs: Int, rhs: Int)
   | UnaryI(dst: Int, op: String, dtype: String, shape: List[Int], src: Int)
   | BinaryI(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Convert(dst: Int, op: String, from: String, to: String, shape: List[Int], src: Int)
+  | Repack(dst: Int, op: String, from: String, to: String, from_shape: List[Int], to_shape: List[Int], src: Int)
   | Select(dst: Int, dtype: String, shape: List[Int], cond: Int, lhs: Int, rhs: Int)
   | IdxConst(dst: Int, value: Int)
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
   | IdxMul(dst: Int, lhs: Int, rhs: Int)
-  | For(iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | For(iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | Loop(inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
+  | Break(values: List[Int])
   | Continue(values: List[Int])
   | Spread(dst: Int, dtype: String, shape: List[Int], src: Int)
   | Reduce(results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
@@ -106,6 +145,12 @@ pub type TileOp =
   | IntPtr(dst: Int, dtype: String, shape: List[Int], ints: Int)
   | PtrCast(dst: Int, from: String, to: String, shape: List[Int], ptrs: Int)
   | LoadAt(dst: Int, tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, mask: Option[Int], pad: Option[Int], tok_in: Int)
+  | Assert(shape: List[Int], cond: Int, message: String)
+  | Assume(dst: Int, pred: AssumePred, dtype: String, shape: List[Int], src: Int)
+  | Print(tok_out: Int, fmt: String, dtype: String, shape: List[Int], args: List[Int], tok_in: Int)
+  | StoreAt(tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int], tok_in: Int)
+  | GetGlobal(dst: Int, sym: String, dtype: String, shape: List[Int])
+  | Alloca(dst: Int, dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int])
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -118,13 +163,55 @@ pub const MAX_LOOP_DEPTH: Int = 16
 ## stops that.
 pub const MAX_HANDLES: Int = 65536
 
+## One statically allocated global of the module (knife T7): its symbol
+## name, the element format, the values it is initialized with (one per
+## element, so the tile type is `tile<len(values) x dtype>` and its rank is
+## 1, which GlobalOp's verifier requires) and the alignment in bytes, `0`
+## for the dialect's default.
+##
+## A global is NOT part of the entry: it sits beside it in the module, and
+## its lifetime is the module's. What the bytecode carries is a record in
+## the Global section (id 6) rather than an instruction in the function
+## body, which is why `global` 0x31 is `structural` in
+## scripts/tileir-features/features.txt the way `entry` and `module` are.
+##
+## `is_private` and `constant` are the two fields the Global section's record
+## grew at bytecode 13.3 (Ops.td versions GlobalOp's `symbol_visibility` and
+## `constant` arguments "13.3", and BytecodeWriter.cpp's writeGlobalSection
+## writes four varints per global below that version and six at or above it).
+## Knife T8 moved the pin to 13.3 and so this record carries them:
+## `is_private` becomes the SymbolVisibility enum value the writer holds
+## (bytecode.dawn's VIS_PUBLIC and VIS_PRIVATE) and `constant` says the
+## global is read-only.
+## Neither changes what a kernel computes here, and neither can be checked
+## from the host without `cuModuleGetGlobal`, which the `Gpu` effect does not
+## have; scripts/tileir-features/attrs.txt records that as the exemption
+## `no-module-symbol-ffi`.
+pub type Global = {
+  sym: String,
+  dtype: String,
+  values: List[Float],
+  align: Int,
+  is_private: Bool,
+  constant: Bool,
+} derive Show
+
 ## A kernel as recorded: its entry name, the dtype name of each parameter in
-## order (every parameter is a pointer to that format), and its operations in
-## issue order, `MakeToken(0)` first.
+## order (every parameter is a pointer to that format), the globals its
+## module declares in declaration order, its operations in issue order
+## (`MakeToken(0)` first), and the `optimization_hints` of the entry itself.
+##
+## `hints` is empty for every kernel but the ones knife T15 records with
+## `trace_kernel_hinted`. It sits on the program rather than on an
+## operation because that is where the dialect puts it: `optimization_hints`
+## is an argument of `entry`, written in the function TABLE and not in the
+## body (BytecodeWriter.cpp's `writeFunctionTableSection`).
 pub type TileProg = {
   name: String,
   params: List[String],
+  globals: List[Global],
   ops: List[TileOp],
+  hints: Hints,
 } derive Show
 
 fn refuse(name: String, what: String) -> Never =
@@ -149,6 +236,14 @@ fn check_strides(name: String, shape: List[Int], strides: List[Int]) -> Unit =
     ()
   }
 
+# The suffixed names knife T4 added are the same operations under another
+# ATTRIBUTE value, spelled the way `shru` already was: one dialect opcode,
+# two names, and the attribute is the whole difference. bytecode.dawn's
+# `float_op` / `int_op` / `predicate_value` map them back to the opcode
+# and `float_rounding` / `float_flags` / `int_attrs` / `cmp_ordering` say
+# what the suffix asked for. `cmpi` has no ordering attribute, so
+# `check_int_pred` below keeps the six unprefixed ones.
+#
 # The operation names and predicates the typed surface spells. An effect
 # operation cannot be generic (spec 6.5), so `t_binaryf` and its neighbours
 # take the name as a string; this is where a name that is not one of them is
@@ -158,24 +253,38 @@ fn one_of(names: List[String], op: String) -> Bool = list.any(names, n => n == o
 
 fn check_unary(name: String, op: String) -> Unit =
   if one_of(["negf", "absf", "exp", "exp2", "log", "log2", "sqrt", "rsqrt", "tanh", "floor", "ceil",
-    "sin", "cos", "tan", "sinh", "cosh"], op) {
+    "sin", "cos", "tan", "sinh", "cosh", "sqrt_approx"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a unary float operation")
   }
 
 fn check_binary(name: String, op: String) -> Unit =
-  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow", "atan2", "remf"], op) {
+  if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow", "atan2", "remf",
+    "addf_neg_inf", "addf_pos_inf", "addf_ftz", "mulf_neg_inf", "mulf_pos_inf", "mulf_ftz",
+    "divf_neg_inf", "divf_pos_inf", "maxf_nan", "minf_nan"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary float operation")
   }
 
 fn check_pred(name: String, pred: String) -> Unit =
-  if one_of(["eq", "ne", "lt", "le", "gt", "ge"], pred) {
+  if one_of(["eq", "ne", "lt", "le", "gt", "ge", "ueq", "une", "ult", "ule", "ugt", "uge"], pred) {
     ()
   } else {
     refuse(name, "`${pred}` is not a comparison predicate")
+  }
+
+# `cmpi` has no `comparison_ordering`: integers are totally ordered and
+# there is no NaN, so the six unordered names have no meaning there and
+# are refused rather than quietly taken for the ordered ones (they would
+# encode to the same predicate byte, and nothing below layer 2 would say
+# the kernel had asked for something the operation cannot do).
+fn check_int_pred(name: String, pred: String) -> Unit =
+  if one_of(["eq", "ne", "lt", "le", "gt", "ge"], pred) {
+    ()
+  } else {
+    refuse(name, "`${pred}` is not an integer comparison predicate")
   }
 
 # The integer operation names the typed surface spells. `shri` and `shru`
@@ -190,18 +299,88 @@ fn check_unary_int(name: String, op: String) -> Unit =
 
 fn check_binary_int(name: String, op: String) -> Unit =
   if one_of(["addi", "subi", "muli", "divi", "remi", "maxi", "mini", "mulhii",
-    "andi", "ori", "xori", "shli", "shri", "shru"], op) {
+    "andi", "ori", "xori", "shli", "shri", "shru", "addi_nsw", "subi_nuw", "muli_nw"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary integer operation")
   }
 
 fn check_convert(name: String, op: String) -> Unit =
-  if one_of(["itof", "ftoi", "ftof", "exti", "trunci", "bitcast"], op) {
+  if one_of(["itof", "ftoi", "ftof", "exti", "extis", "trunci", "bitcast"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a conversion")
   }
+
+# The BITS one lane of a tile element format occupies. Two of the fifteen
+# formats are sub-byte (`i4` and `f4E2M1FN`, both 13.3) and they are the
+# reason this is in bits rather than in bytes: `pack` and `unpack` are the
+# only operations whose shapes are computed from a width, and they are the
+# only ones a half-byte format reaches. `tf32` is 32 bits in a 32-bit slot
+# with thirteen of them unused, which is what PackOp's own verifier says
+# (`isa<FloatTF32Type>` -> 32) and not a rounding of it.
+fn dtype_bits(name: String) -> Int = match name {
+  "i1" -> 1
+  "i4" -> 4
+  "f4E2M1FN" -> 4
+  "i8" -> 8
+  "f8E4M3FN" -> 8
+  "f8E5M2" -> 8
+  "f8E8M0FNU" -> 8
+  "i16" -> 16
+  "f16" -> 16
+  "bf16" -> 16
+  "i32" -> 32
+  "f32" -> 32
+  "tf32" -> 32
+  "i64" -> 64
+  "f64" -> 64
+  _ -> panic("tileir: `${name}` has no element width")
+}
+
+# The shape `pack` or `unpack` answers, from the shape it is given. Both
+# operations reinterpret a rank-1 tile's BYTES as another element format,
+# so the lane count scales by the ratio of the two widths and nothing else
+# moves. This is the halving a `pack` of `i4` performs and the doubling its
+# `unpack` undoes; scripts/tile-golden's pack-result-shape-unhalved is the
+# mutant that removes it.
+fn repack_shape(name: String, from: String, to: String, shape: List[Int]) -> List[Int] = {
+  let bits = lanes_of(shape) * dtype_bits(from)
+  if bits % dtype_bits(to) != 0 {
+    refuse(name, "a tile of ${lanes_of(shape)} ${from} lane(s) is not a whole number of ${to} lane(s)")
+  } else {
+    ()
+  }
+  [bits / dtype_bits(to)]
+}
+
+fn lanes_of(shape: List[Int]) -> Int = list.fold(shape, 1, (acc, d) => acc * d)
+
+# `pack` and `unpack` are the two the dialect gives no attribute and a
+# SHAPE CHANGE, which is why they are not on `check_convert`'s list: every
+# name there answers a tile of the operand's shape. PackOp's and UnpackOp's
+# verifiers (one shared `verifyPackUnpackTypes`) say rank 1, different
+# element widths, both sides a whole number of bytes and the same number of
+# them; the i8 side is fixed by the operation and refused here rather than
+# by `tileiras`, because a caller who has the two backwards would otherwise
+# read a message about a type it never wrote.
+fn check_repack(name: String, op: String, from: String, to: String, shape: List[Int]) -> Unit = {
+  if len(shape) != 1 {
+    refuse(name, "`${op}` takes a rank-1 tile, got ${len(shape)} dimension(s)")
+  } else {
+    ()
+  }
+  let (wide, packed) = if op == "pack" { (from, to) } else { (to, from) }
+  if packed != "i8" {
+    refuse(name, "`${op}`'s byte side is an `i8` tile, got `${packed}`")
+  } else if wide == "i8" {
+    refuse(name, "`${op}` needs two different element widths; `bitcast` is the 8-bit one")
+  } else if lanes_of(shape) * dtype_bits(from) % 8 != 0 {
+    refuse(name, "`${op}` of ${lanes_of(shape)} ${from} lane(s) is not a whole number of bytes")
+  } else {
+    ()
+  }
+}
 
 # The read-modify-write modes the dialect defines, spelled as its own
 # assembly does. `add` is the integer sum and `addf` the float one: two
@@ -209,8 +388,14 @@ fn check_convert(name: String, op: String) -> Unit =
 # the caller has to say which. A mode outside this list is a caller's
 # misspelling and is refused when the kernel is recorded, the way an
 # operation name is.
+# The three names below the ten are one mode under another MEMORY ORDERING
+# and MEMORY SCOPE (knife T4): an `atomic_rmw_tko` carries three required
+# enum attributes and the writer wrote two of them as constants until then.
+# `weak` is the one ordering the two atomics refuse and is not a name here;
+# scripts/tile-golden's atomic-rmw-claims-weak-ordering is what says so.
 fn check_rmw_mode(name: String, mode: String) -> Unit =
-  if one_of(["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin", "xchg"], mode) {
+  if one_of(["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin", "xchg",
+    "add_acquire_tl_blk", "add_release_sys", "add_acq_rel_device"], mode) {
     ()
   } else {
     refuse(name, "`${mode}` is not an atomic read-modify-write mode")
@@ -266,6 +451,82 @@ fn check_perm(name: String, shape: List[Int], perm: List[Int]) -> Unit =
     }
   }
 
+# An `assume` predicate against the tile it is attached to. Every clause
+# here is one of AssumeOp's own verifier's (Attributes.cpp), refused a step
+# earlier so that the message names the kernel: a divisor that is not a
+# positive power of two, an `every` without its `along`, a `same_elements`
+# whose length is not the rank, and bounds the wrong way round.
+fn check_assume(name: String, pred: AssumePred, shape: List[Int]) -> Unit = match pred {
+  DivBy(divisor, every, along) -> {
+    if divisor <= 0 || (divisor & (divisor - 1)) != 0 {
+      refuse(name, "assume div_by wants a positive power of two, got ${divisor}")
+    } else {
+      ()
+    }
+    match (every, along) {
+      (None, None) -> ()
+      (Some(e), Some(a)) ->
+        if len(shape) == 0 {
+          refuse(name, "assume div_by: `every`/`along` cannot be used on a rank-0 tile")
+        } else if a < 0 || a >= len(shape) {
+          refuse(name, "assume div_by along dimension ${a} of a ${len(shape)}-dimensional tile")
+        } else if e < 0 || e > shape[a] {
+          refuse(name, "assume div_by every ${e} along a dimension of ${shape[a]}")
+        } else {
+          ()
+        }
+      _ -> refuse(name, "assume div_by takes `every` and `along` together or neither")
+    }
+  }
+  SameElements(groups) ->
+    if len(groups) != len(shape) {
+      refuse(name, "assume same_elements carries one value per dimension, got ${len(groups)} for rank ${len(shape)}")
+    } else {
+      match list.find(range(0, len(groups)), k => groups[k] < 0 || groups[k] > shape[k]) {
+        Some(k) -> refuse(name, "assume same_elements value ${k} is ${groups[k]}, outside 0 to ${shape[k]}")
+        None -> ()
+      }
+    }
+  Bounded(lb, ub) -> match (lb, ub) {
+    (Some(l), Some(u)) ->
+      if l > u { refuse(name, "assume bounded wants a lower bound at most the upper one, got ${l} and ${u}") } else { () }
+    _ -> ()
+  }
+}
+
+# How many format expressions `fmt` holds, by PrintTkoOp's own rule
+# (CudaTile.cpp's `extractFormatExpression`): a `%` runs to the first
+# conversion character, `%%` is an escaped percent and takes no operand, and
+# a `%` that reaches the end of the string with no conversion character is
+# malformed.
+fn format_args(name: String, fmt: String) -> Int = count_formats(name, fmt, str.chars(fmt), 0, 0)
+
+fn count_formats(name: String, fmt: String, cs: List[String], i: Int, seen: Int) -> Int =
+  if i >= len(cs) {
+    seen
+  } else if cs[i] != "%" {
+    count_formats(name, fmt, cs, i + 1, seen)
+  } else {
+    match conversion_end(cs, i + 1) {
+      None -> refuse(name, "print format `${fmt}` ends in an unterminated format expression")
+      Some(j) ->
+        if cs[j] == "%" {
+          count_formats(name, fmt, cs, j + 1, seen)
+        } else {
+          count_formats(name, fmt, cs, j + 1, seen + 1)
+        }
+    }
+  }
+
+fn conversion_end(cs: List[String], i: Int) -> Option[Int] =
+  if i >= len(cs) {
+    None
+  } else if one_of(["d", "i", "u", "o", "x", "X", "e", "E", "f", "F", "g", "G", "a", "A", "c", "s", "S", "p", "n", "%"], cs[i]) {
+    Some(i)
+  } else {
+    conversion_end(cs, i + 1)
+  }
+
 # A memory operation names a declared parameter and reads it as the format it
 # was declared with. Both are the body's `Param[D]` against the `params` list
 # the caller gave `trace_kernel`, and disagreement is a bug in the caller: the
@@ -284,7 +545,8 @@ fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb
 # around them. One variant per kind of region, because an `if` is two of
 # them in a row and a reduction carries what a loop does not.
 type Frame =
-  | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, inits: List[Int], carried: List[Int])
+  | LoopFrame(outer: List[TileOp], iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int], carried: List[Int])
+  | WhileFrame(outer: List[TileOp], inits: List[Int], carried: List[Int])
   | ReduceFrame(outer: List[TileOp], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ScanFrame(outer: List[TileOp], dim: Int, reverse: Bool, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int])
   | ThenFrame(outer: List[TileOp], cond: Int)
@@ -296,7 +558,8 @@ type Frame =
 # itself) inside one has no order to be in. This is what says so: every
 # frame but the loop's.
 fn is_pure_region(f: Frame) -> Bool = match f {
-  LoopFrame(_outer, _iv, _lower, _upper, _step, _inits, _carried) -> false
+  LoopFrame(_outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> false
+  WhileFrame(_outer, _inits, _carried) -> false
   _ -> true
 }
 
@@ -328,12 +591,13 @@ fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 ## A `t_loop_begin` deeper than MAX_LOOP_DEPTH, a `t_loop_end` with no open
 ## loop or with the wrong number of values, or a body that ends with a loop
 ## still open, is refused.
-pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg = {
-  let ops = {
+pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, body: fn() -> Unit !Dev) -> TileProg = {
+  let (globals, ops) = {
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
       var ops: List[TileOp] = []
+      var globals: List[Global] = []
       var frames: List[Frame] = []
       t_block_id(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
@@ -342,7 +606,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [BlockId(d, axis)]
         d
       }
-      t_load(param, dtype, base, shape, strides, mask, pad) => {
+      t_load(param, dtype, base, shape, strides, mask, pad, hints) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a load inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "load")
@@ -351,11 +615,11 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok)]
+        ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok, hints)]
         tok = t
         d
       }
-      t_store(param, dtype, base, shape, strides, v, mask) => {
+      t_store(param, dtype, base, shape, strides, v, mask, hints) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a store inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "store")
@@ -363,7 +627,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         check_strides(name, shape, strides)
         let t = next
         next = mint(name, next, 1)
-        ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok)]
+        ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok, hints)]
         tok = t
         ()
       }
@@ -475,6 +739,33 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [MmaF(d, dtype, m, k, n, a, b, c)]
         d
       }
+      t_mmaf_scaled(dtype, scale, dims, a, b, c, sa, sb) => {
+        # `dims` is [m, k, n, block]; it is one list because an effect
+        # operation is a function value and a function value takes at most
+        # eight parameters (dev.dawn says so on the declaration).
+        if len(dims) != 4 {
+          refuse(name, "mmaf_scaled takes [m, k, n, block], got ${show(dims)}")
+        } else {
+          ()
+        }
+        let m = dims[0]
+        let k = dims[1]
+        let n = dims[2]
+        let block = dims[3]
+        # the four shapes the dialect derives from these numbers, checked
+        # here for the reason every other shape in this file is: a tile
+        # dimension is a power of two, and `k / block` is one of them.
+        if block <= 0 || k % block != 0 {
+          refuse(name, "mmaf_scaled over K=${k} in blocks of ${block}, which does not divide it")
+        } else {
+          ()
+        }
+        check_shape(name, [m, k, n, k / block])
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [MmaFScaled(d, dtype, scale, m, k, n, block, a, b, c, sa, sb)]
+        d
+      }
       t_mmai(m, k, n, a, b, c) => {
         check_shape(name, [m, k, n])
         let d = next
@@ -492,7 +783,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       }
       t_cmpi(pred, shape, a, b) => {
         check_shape(name, shape)
-        check_pred(name, pred)
+        check_int_pred(name, pred)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [CmpI(d, pred, shape, a, b)]
@@ -524,6 +815,14 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [Convert(d, op, from, to, shape, a)]
         d
       }
+      t_repack(op, from, to, shape, a) => {
+        check_shape(name, shape)
+        check_repack(name, op, from, to, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Repack(d, op, from, to, shape, repack_shape(name, from, to, shape), a)]
+        d
+      }
       t_select(dtype, shape, cond, a, b) => {
         check_shape(name, shape)
         let d = next
@@ -549,7 +848,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         ops = ops ++ [IdxMul(d, a, b)]
         d
       }
-      t_loop_begin(lower, upper, step, inits) => {
+      t_loop_begin(lower, upper, step, unsigned, inits) => {
         let open = frames
         if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order") } else { () }
         if len(frames) >= MAX_LOOP_DEPTH {
@@ -563,7 +862,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         let base = next + 1
         next = mint(name, next, 1 + len(all))
         let carried = list.map(range(0, len(all)), k => base + k)
-        frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, all, carried)]
+        frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, unsigned, all, carried)]
         ops = []
         tok = last(carried)
         (iv, but_last(carried))
@@ -571,7 +870,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
       t_loop_end(outs) => {
         if len(frames) == 0 { refuse(name, "loop_end with no loop open") } else { () }
         match frames[len(frames) - 1] {
-          LoopFrame(saved, iv, lower, upper, step, inits, carried) -> {
+          LoopFrame(saved, iv, lower, upper, step, unsigned, inits, carried) -> {
             let want = len(inits) - 1
             if len(outs) != want {
               refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
@@ -584,11 +883,61 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
             let results = list.map(range(0, len(inits)), k => base + k)
             let body = inner ++ [Continue(outs ++ [tok])]
             frames = list.take(frames, len(frames) - 1)
-            ops = outer ++ [For(iv, lower, upper, step, inits, carried, results, body)]
+            ops = outer ++ [For(iv, lower, upper, step, unsigned, inits, carried, results, body)]
             tok = last(results)
             but_last(results)
           }
           _ -> refuse(name, "loop_end closes a region that is not a loop")
+        }
+      }
+      t_while_begin(inits) => {
+        let open = frames
+        if list.any(open, is_pure_region) { refuse(name, "a loop inside a reduce, scan or if region has no memory order") } else { () }
+        if len(frames) >= MAX_LOOP_DEPTH {
+          refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_loop unrolls forever")
+        } else {
+          ()
+        }
+        # the token rides along as the last carried value, as `for`'s does
+        let all = inits ++ [tok]
+        let base = next
+        next = mint(name, next, len(all))
+        let carried = list.map(range(0, len(all)), k => base + k)
+        frames = frames ++ [WhileFrame(ops, all, carried)]
+        ops = []
+        tok = last(carried)
+        but_last(carried)
+      }
+      t_while_end(cond, outs) => {
+        if len(frames) == 0 { refuse(name, "while_end with no loop open") } else { () }
+        match frames[len(frames) - 1] {
+          WhileFrame(saved, inits, carried) -> {
+            let want = len(inits) - 1
+            if len(outs) != want {
+              refuse(name, "a loop body carrying ${want} value(s) answered ${len(outs)}")
+            } else {
+              ()
+            }
+            # spelled as two bindings rather than one tuple, and the token
+            # through a name: `for`'s arm above is what two of run.sh's
+            # mutants anchor on, and an anchor that matched here as well
+            # would stop being unique
+            let inner = ops
+            let outer = saved
+            let base = next
+            next = mint(name, next, len(inits))
+            let results = list.map(range(0, len(inits)), k => base + k)
+            # the exit: break with what entered this iteration (the token as
+            # it stands now), or fall through to the continue below
+            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])
+            let body = inner ++ [exit, Continue(outs ++ [tok])]
+            frames = list.take(frames, len(frames) - 1)
+            ops = outer ++ [Loop(inits, carried, results, body)]
+            let after_loop = last(results)
+            tok = after_loop
+            but_last(results)
+          }
+          _ -> refuse(name, "while_end closes a region that is not a loop")
         }
       }
       t_spread(dtype, shape, src) => {
@@ -806,6 +1155,125 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
         tok = tv
         d
       }
+      t_assert(shape, cond, message) => {
+        check_shape(name, shape)
+        ops = ops ++ [Assert(shape, cond, message)]
+        ()
+      }
+      t_assume(pred, dtype, shape, src) => {
+        check_shape(name, shape)
+        check_int_dtype(name, dtype)
+        check_assume(name, pred, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Assume(d, pred, dtype, shape, src)]
+        d
+      }
+      t_print(fmt, dtype, shape, args) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a print inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        let wanted = format_args(name, fmt)
+        if wanted != len(args) {
+          refuse(name, "print format `${fmt}` has ${wanted} format expression(s) and ${len(args)} operand(s)")
+        } else {
+          ()
+        }
+        let tv = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Print(tv, fmt, dtype, shape, args, tok)]
+        tok = tv
+        ()
+      }
+      t_store_ptrs(dtype, shape, ptrs, value, mask) => {
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "a store inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        check_shape(name, shape)
+        let t = next
+        next = mint(name, next, 1)
+        ops = ops ++ [StoreAt(t, dtype, shape, ptrs, value, mask, tok)]
+        tok = t
+        ()
+      }
+      t_global(sym, dtype, values, align, is_private, constant) => {
+        # A global belongs to the module, not to a region of the entry, and
+        # the Global section has no place to say otherwise.
+        if len(frames) != 0 {
+          refuse(name, "the global `${sym}` is declared inside a region; a global belongs to the module")
+        } else {
+          ()
+        }
+        if sym == "" { refuse(name, "a global has a name") } else { () }
+        let seen = globals
+        if list.any(seen, g => g.sym == sym) {
+          refuse(name, "the global `${sym}` is declared twice")
+        } else {
+          ()
+        }
+        # GlobalOp's verifier requires rank 1, so the initializer decides
+        # the extent and an empty one has no type to give.
+        if len(values) == 0 {
+          refuse(name, "the global `${sym}` is initialized with no values; its type is tile<Nxdtype> and N comes from them")
+        } else {
+          ()
+        }
+        if align < 0 {
+          refuse(name, "the global `${sym}` asks for alignment ${align}")
+        } else {
+          ()
+        }
+        globals = globals ++ [Global { sym: sym, dtype: dtype, values: values, align: align, is_private: is_private, constant: constant }]
+        ()
+      }
+      t_get_global(sym, dtype, shape) => {
+        check_shape(name, shape)
+        let seen = globals
+        match list.find(seen, g => g.sym == sym) {
+          None -> refuse(name, "get_global names `${sym}`, which no global declares")
+          Some(g) ->
+            if g.dtype != dtype {
+              refuse(name, "the global `${sym}` holds ${g.dtype}, and get_global reads it as ${dtype}")
+            } else {
+              ()
+            }
+        }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [GetGlobal(d, sym, dtype, shape)]
+        d
+      }
+      t_alloca(dtype, num_elem, align, shared, shape) => {
+        check_shape(name, shape)
+        # AllocaOp's verifier: the alignment is a non-zero power of two, and
+        # it is at least the natural size of the element. The first half is
+        # checked here because it is arithmetic on one number; the second
+        # needs a width per format, which this package keeps in the writer's
+        # type table and not on this surface, so `tileiras` is left to say
+        # it (`'alignment' (4) must be at least the natural size (8 bytes)
+        # for element type f64`, measured).
+        if num_elem < 0 {
+          refuse(name, "alloca asks for ${num_elem} elements")
+        } else {
+          ()
+        }
+        if align <= 0 || (align & (align - 1)) != 0 {
+          refuse(name, "alloca asks for alignment ${align}, which is not a non-zero power of two")
+        } else {
+          ()
+        }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
+        d
+      }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
           refuse(name, "regions nest deeper than ${MAX_LOOP_DEPTH}")
@@ -851,10 +1319,15 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
     }
     body()
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
-    ops
+    (globals, ops)
   }
-  TileProg { name: name, params: params, ops: [MakeToken(0)] ++ ops }
+  TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }
 }
+
+## `trace_kernel` with no `optimization_hints` on the entry, which is every
+## kernel but knife T15's.
+pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg =
+  trace_kernel_hinted(name, params, [], body)
 
 ## The handles an operation defines in the region it sits in, in definition
 ## order: what a consumer that renumbers (the lowering) or checks
@@ -863,8 +1336,8 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev)
 pub fn defined(op: TileOp) -> List[Int] = match op {
   MakeToken(dst) -> [dst]
   BlockId(dst, _axis) -> [dst]
-  Load(dst, tok_out, _param, _dtype, _base, _shape, _strides, _mask, _pad, _tok_in) -> [dst, tok_out]
-  Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in) -> [tok_out]
+  Load(dst, tok_out, _param, _dtype, _base, _shape, _strides, _mask, _pad, _tok_in, _hints) -> [dst, tok_out]
+  Store(tok_out, _param, _dtype, _base, _shape, _strides, _value, _mask, _tok_in, _hints) -> [tok_out]
   Gather(dst, tok_out, _param, _dtype, _index, _shape, _mask, _pad, _tok_in) -> [dst, tok_out]
   Scatter(tok_out, _param, _dtype, _index, _shape, _value, _mask, _tok_in) -> [tok_out]
   AtomicRMW(dst, tok_out, _param, _dtype, _mode, _index, _shape, _value, _mask, _tok_in) -> [dst, tok_out]
@@ -877,17 +1350,21 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   BinaryF(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Fma(dst, _dtype, _shape, _lhs, _rhs, _acc) -> [dst]
   MmaF(dst, _dtype, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
+  MmaFScaled(dst, _dtype, _scale, _m, _k, _n, _block, _lhs, _rhs, _acc, _lhs_scale, _rhs_scale) -> [dst]
   MmaI(dst, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   CmpF(dst, _pred, _dtype, _shape, _lhs, _rhs) -> [dst]
   CmpI(dst, _pred, _shape, _lhs, _rhs) -> [dst]
   UnaryI(dst, _op, _dtype, _shape, _src) -> [dst]
   BinaryI(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Convert(dst, _op, _from, _to, _shape, _src) -> [dst]
+  Repack(dst, _op, _from, _to, _from_shape, _to_shape, _src) -> [dst]
   Select(dst, _dtype, _shape, _cond, _lhs, _rhs) -> [dst]
   IdxConst(dst, _value) -> [dst]
   IdxAdd(dst, _lhs, _rhs) -> [dst]
   IdxMul(dst, _lhs, _rhs) -> [dst]
-  For(_iv, _lower, _upper, _step, _inits, _carried, results, _body) -> results
+  For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, results, _body) -> results
+  Loop(_inits, _carried, results, _body) -> results
+  Break(_values) -> []
   Continue(_values) -> []
   Spread(dst, _dtype, _shape, _src) -> [dst]
   Reduce(results, _dim, _shape, _identities, _operands, _args, _body) -> results
@@ -905,17 +1382,26 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   IntPtr(dst, _dtype, _shape, _ints) -> [dst]
   PtrCast(dst, _from, _to, _shape, _ptrs) -> [dst]
   LoadAt(dst, tok_out, _dtype, _shape, _ptrs, _mask, _pad, _tok_in) -> [dst, tok_out]
+  Assert(_shape, _cond, _message) -> []
+  Assume(dst, _pred, _dtype, _shape, _src) -> [dst]
+  Print(tok_out, _fmt, _dtype, _shape, _args, _tok_in) -> [tok_out]
+  StoreAt(tok_out, _dtype, _shape, _ptrs, _value, _mask, _tok_in) -> [tok_out]
+  GetGlobal(dst, _sym, _dtype, _shape) -> [dst]
+  Alloca(dst, _dtype, _num_elem, _align, _shared, _shape) -> [dst]
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its
 ## results, then its induction variable, its carried handles and what its
-## body defines; for a `Reduce`, its results, its region arguments and its
+## body defines; for a `Loop`, the same without the induction variable;
+## for a `Reduce`, its results, its region arguments and its
 ## body; for an `If`, its results and then each branch in turn.
 pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
   let none: List[Int] = []
   list.fold(ops, none, (acc, op) => match op {
-    For(iv, _lower, _upper, _step, _inits, carried, results, body) ->
+    For(iv, _lower, _upper, _step, _unsigned, _inits, carried, results, body) ->
       acc ++ results ++ [iv] ++ carried ++ defined_inside(body)
+    Loop(_inits, carried, results, body) ->
+      acc ++ results ++ carried ++ defined_inside(body)
     Reduce(results, _dim, _shape, _identities, _operands, args, body) ->
       acc ++ results ++ args ++ defined_inside(body)
     Scan(results, _dim, _reverse, _shape, _identities, _operands, args, body) ->
@@ -948,10 +1434,10 @@ test "vadd records seven operations behind the entry token, with the token chain
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 2, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 2, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
@@ -973,9 +1459,9 @@ test "an f32 kernel records f32 loads, stores and sums" {
     BlockId(1, 0),
     IdxConst(2, 64),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f32", 3, [64], [1], None, None, 0),
+    Load(4, 5, 0, "f32", 3, [64], [1], None, None, 0, []),
     BinaryF(6, "addf", "f32", [64], 4, 4),
-    Store(7, 1, "f32", 3, [64], [1], 6, None, 5)
+    Store(7, 1, "f32", 3, [64], [1], 6, None, 5, [])
   ]
 }
 
@@ -1012,23 +1498,23 @@ test "a loop records as one For holding the body's operations, with the token ca
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
     # iv 11; carried: the tile 12 and the token 13 (entering as 6 and 7);
     # inside: the base 14 and 15, load 16 with token 17, addf 18;
     # results: tile 19, token 20
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
@@ -1053,8 +1539,9 @@ test "a loop carrying two tiles answers two results in order, the token behind t
   let p = trace_kernel("two", ["f64", "f64", "f64"], () => two_carried(param(F64, 0), param(F64, 1), param(F64, 2)))
   let loop = p.ops[len(p.ops) - 3]
   match loop {
-    For(iv, lower, upper, step, inits, carried, results, body) -> {
+    For(iv, lower, upper, step, unsigned, inits, carried, results, body) -> {
       assert (iv, lower, upper, step) == (9, 2, 3, 8)
+      assert not unsigned
       assert inits == [4, 6, 7]
       assert carried == [10, 11, 12]
       assert results == [19, 20, 21]
@@ -1063,7 +1550,7 @@ test "a loop carrying two tiles answers two results in order, the token behind t
     _ -> { assert false }
   }
   # the store after the loop consumes the loop's token result
-  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, [8], [1], 22, None, 21)
+  assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, [8], [1], 22, None, 21, [])
 }
 
 fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
@@ -1080,10 +1567,10 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 test "loops nest: the inner For sits in the outer body and the outer continue passes the inner result" {
   let p = trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
-    For(_iv, _lo, _up, _st, _inits, _carried, results, body) -> {
+    For(_iv, _lo, _up, _st, _unsigned, _inits, _carried, results, body) -> {
       assert len(body) == 2
       match body[0] {
-        For(_iv2, _lo2, _up2, _st2, _inits2, _carried2, results2, _body2) -> {
+        For(_iv2, _lo2, _up2, _st2, _unsigned2, _inits2, _carried2, results2, _body2) -> {
           assert body[1] == Continue(results2)
         }
         _ -> { assert false }
@@ -1093,6 +1580,48 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
     _ -> { assert false }
   }
   assert p == trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+}
+
+# A loop whose trip count is a value the body computes: knife T5's shape.
+# What it computes is beside the point (it doubles the tile until the
+# largest lane is not under one); what the test is about is the record.
+fn spin(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let v0 = load(x, b, [8])
+  let v = d_loop(v0, t => {
+    let m = d_reduce(F64, [8], t, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    (s_gt(F64, s_const(F64, 1.0), m), addf(F64, [8], t, t))
+  })
+  store(out, b, [8], v)
+}
+
+test "a loop records a Loop whose body ends in the exit if and a continue, and the break carries what entered" {
+  let p = trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
+  match p.ops[len(p.ops) - 2] {
+    Loop(inits, carried, results, body) -> {
+      # the token rides as the last carried value, as a `for`'s does
+      assert len(inits) == 2 && len(carried) == 2 && len(results) == 2
+      # the exit is an `if` with NO results: one branch breaks and the
+      # other yields nothing, so the operation defines nothing
+      match body[len(body) - 2] {
+        If(rs, _cond, on_true, on_false) -> {
+          assert rs == []
+          # what the break hands back is what ENTERED this iteration,
+          # token included: nothing in this body moves the token
+          assert on_true == [Break(carried)]
+          assert on_false == [Yield([])]
+        }
+        _ -> { assert false }
+      }
+      # and the continue hands the next iteration what the body computed
+      match body[len(body) - 1] {
+        Continue(values) -> { assert len(values) == 2 && values != carried }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  assert p == trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
 }
 
 # A gather through an index tile read out of one buffer, and a scatter of
@@ -1162,6 +1691,126 @@ test "an atomic mode outside the dialect's enumeration is refused when the kerne
   }
 }
 
+test "assert records outside the token chain, assume defines one handle, and print sits in the chain between two stores" {
+  let prog = trace_kernel("dbg", ["i32", "i32"], () => {
+    let x = param(I32, 0)
+    let out = param(I32, 1)
+    let v = load(x, idx_const(0), [8])
+    d_assert([8], lt_i([8], v, i_const([8], 9)), "too big")
+    let a = assume_div_by(I32, [8], 32, v)
+    store(out, idx_const(0), [8], a)
+    d_print(I32, "n=%d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+    store(out, idx_const(1), [8], a)
+  })
+  # the assert is between the load and the assume, defines nothing, and
+  # carries no token
+  let asserts = list.filter(prog.ops, op => match op {
+    Assert(_shape, _cond, _message) -> true
+    _ -> false
+  })
+  assert len(asserts) == 1
+  assert match asserts[0] {
+    Assert(shape, _cond, message) -> shape == [8] && message == "too big"
+    _ -> false
+  }
+  assert defined(asserts[0]) == []
+  # the print takes the first store's token and the second store takes the
+  # print's, so the chain is a line through all three
+  let stores = list.filter(prog.ops, op => match op {
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, _ti, _hints) -> true
+    _ -> false
+  })
+  let prints = list.filter(prog.ops, op => match op {
+    Print(_t, _f, _d, _s, _a, _ti) -> true
+    _ -> false
+  })
+  assert len(stores) == 2 && len(prints) == 1
+  let first_tok = match stores[0] {
+    Store(tok_out, _p, _d, _b, _s, _st, _v, _m, _ti, _hints) -> tok_out
+    _ -> 0 - 1
+  }
+  let print_in = match prints[0] {
+    Print(_t, _f, _d, _s, _a, tok_in) -> tok_in
+    _ -> 0 - 1
+  }
+  let print_out = match prints[0] {
+    Print(tok_out, _f, _d, _s, _a, _ti) -> tok_out
+    _ -> 0 - 1
+  }
+  let second_in = match stores[1] {
+    Store(_t, _p, _d, _b, _s, _st, _v, _m, tok_in, _hints) -> tok_in
+    _ -> 0 - 1
+  }
+  assert print_in == first_tok
+  assert second_in == print_out
+}
+
+test "a print whose format expressions do not count its operands, and an assume the dialect's own verifier would refuse, are refused when the kernel is recorded" {
+  let bad_count = catch_panic(() => trace_kernel("bad_print", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    d_print(I32, "%d and %d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+  }))
+  match bad_count {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "has 2 format expression(s) and 1 operand(s)") }
+  }
+  # `%%` is an escaped percent and takes no operand: the same string with
+  # one real conversion is accepted, which is what makes the count a rule
+  # and not a count of `%` characters
+  let escaped = catch_panic(() => trace_kernel("ok_print", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    d_print(I32, "100%% of %d", [d_reduce_i([8], v, 0, (acc, e) => s_addi(acc, e))])
+  }))
+  assert match escaped {
+    Ok(_) -> true
+    Err(_e) -> false
+  }
+  let bad_divisor = catch_panic(() => trace_kernel("bad_assume", ["i32"], () => {
+    let x = param(I32, 0)
+    let _a = assume_div_by(I32, [8], 24, load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_divisor {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume div_by wants a positive power of two, got 24") }
+  }
+  let bad_rank = catch_panic(() => trace_kernel("bad_same", ["i32"], () => {
+    let x = param(I32, 0)
+    let _a = assume_same_elements(I32, [8], [2, 2], load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_rank {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume same_elements carries one value per dimension") }
+  }
+  let bad_bounds = catch_panic(() => trace_kernel("bad_bounded", ["i32"], () => {
+    let x = param(I32, 0)
+    let hi: Option[Int] = Some(0)
+    let lo: Option[Int] = Some(7)
+    let _a = assume_in_range(I32, [8], lo, hi, load(x, idx_const(0), [8]))
+    ()
+  }))
+  match bad_bounds {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "assume bounded wants a lower bound at most the upper one") }
+  }
+  let inside = catch_panic(() => trace_kernel("bad_print_region", ["i32"], () => {
+    let x = param(I32, 0)
+    let v = load(x, idx_const(0), [8])
+    let _r = d_reduce_i([8], v, 0, (acc, e) => {
+      d_print(I32, "%d", [acc])
+      s_addi(acc, e)
+    })
+    ()
+  }))
+  match inside {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a print inside a reduce, scan or if region has no memory order") }
+  }
+}
+
 test "a gather inside a reduction region is refused: a pure region carries no memory order" {
   let outcome = catch_panic(() => trace_kernel("bad_gather", ["i32", "f64"], () => {
     let idx = param(I32, 0)
@@ -1214,7 +1863,7 @@ test "a reduction records as one Reduce holding its region, with the accumulator
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
-    Load(2, 3, 0, "f64", 1, [8], [1], None, None, 0),
+    Load(2, 3, 0, "f64", 1, [8], [1], None, None, 0, []),
     # region arguments 4 and 5, the body's addf 6, the result 7 (minted
     # when the region closes, as a loop's results are)
     Reduce([7], 0, [8], [IdF("f64", 0.0)], [2], [4, 5], [
@@ -1222,7 +1871,7 @@ test "a reduction records as one Reduce holding its region, with the accumulator
       Yield([6])
     ]),
     Spread(8, "f64", [1], 7),
-    Store(9, 1, "f64", 1, [1], [1], 8, None, 3)
+    Store(9, 1, "f64", 1, [1], [1], 8, None, 3, [])
   ]
   assert trace_total() == trace_total()
   # the reading order the lowering renumbers into: the result, then the
@@ -1343,13 +1992,13 @@ test "a region opened and closed wrongly is refused when the kernel is recorded,
 
 # Below the typed surface: the operations themselves, misused.
 fn wrong_arity() -> Unit !Dev = {
-  let (_iv, _inside) = t_loop_begin(0, 0, 0, [1])
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, false, [1])
   let _outs = t_loop_end([])
   ()
 }
 
 fn never_closed() -> Unit !Dev = {
-  let (_iv, _inside) = t_loop_begin(0, 0, 0, [])
+  let (_iv, _inside) = t_loop_begin(0, 0, 0, false, [])
   ()
 }
 
@@ -1367,4 +2016,109 @@ test "a loop body answering the wrong number of carried values, a loop never clo
   assert str.contains(refusal(wrong_arity), "a loop body carrying 1 value(s) answered 0")
   assert str.contains(refusal(never_closed), "the body ended with 1 region(s) still open")
   assert str.contains(refusal(never_opened), "loop_end with no loop open")
+}
+
+# ---- knife T7: the module's static globals
+
+fn two_globals() -> TileProg = trace_kernel("globals", ["f64"], () => {
+  let out = param(F64, 0)
+  d_global("a", F64, [1.0, 2.0, 4.0])
+  d_global_aligned("b", F64, [8.0, 16.0, 32.0], 256)
+  let base = idx_const(0)
+  let ps = ptr_offset(F64, [4], global_ptrs("b", F64, [4]), lanes(base, [4]))
+  store(out, base, [4], load_ptrs(F64, [4], ps))
+})
+
+test "a global is recorded beside the entry and not in it, and get_global names it by symbol" {
+  let p = two_globals()
+  assert len(p.globals) == 2
+  assert p.globals[0] == Global { sym: "a", dtype: "f64", values: [1.0, 2.0, 4.0], align: 0, is_private: false, constant: false }
+  assert p.globals[1] == Global { sym: "b", dtype: "f64", values: [8.0, 16.0, 32.0], align: 256, is_private: false, constant: false }
+  # the declarations issue no operation: the ops are make_token, get_global,
+  # the ladder for the offset, the load through the pointers and the store
+  assert list.any(p.ops, o => match o {
+    GetGlobal(_dst, sym, dtype, shape) -> sym == "b" && dtype == "f64" && shape == [4]
+    _ -> false
+  })
+  assert not list.any(p.ops, o => match o {
+    GetGlobal(_dst, sym, _dtype, _shape) -> sym == "a"
+    _ -> false
+  })
+}
+
+test "a store through a pointer tile sits in the token chain where a store through a parameter does" {
+  let p = trace_kernel("scratch", ["f64"], () => {
+    let out = param(F64, 0)
+    d_global("g", F64, [0.0, 0.0])
+    let base = idx_const(0)
+    let ps = ptr_offset(F64, [2], global_ptrs("g", F64, [2]), lanes(base, [2]))
+    let v = load_ptrs(F64, [2], ps)
+    store_ptrs(F64, [2], ps, v)
+    store(out, base, [2], v)
+  })
+  # the load answers a token, the store through the pointers takes it and
+  # answers the next, and the store through the parameter takes that one
+  let none: List[(Int, Int)] = []
+  let toks = list.fold(p.ops, none, (acc, o) => match o {
+    LoadAt(_d, tok_out, _dt, _sh, _ps, _m, _pd, tok_in) -> acc ++ [(tok_in, tok_out)]
+    StoreAt(tok_out, _dt, _sh, _ps, _v, _m, tok_in) -> acc ++ [(tok_in, tok_out)]
+    Store(tok_out, _pm, _dt, _b, _sh, _st, _v, _m, tok_in, _hints) -> acc ++ [(tok_in, tok_out)]
+    _ -> acc
+  })
+  assert len(toks) == 3
+  let (in0, out0) = toks[0]
+  let (in1, out1) = toks[1]
+  let (in2, _out2) = toks[2]
+  assert in0 == 0
+  assert in1 == out0
+  assert in2 == out1
+}
+
+test "a global declared twice, one declared inside a region, an empty one, and a get_global naming none are all refused" {
+  let twice = catch_panic(() => trace_kernel("twice", ["f64"], () => {
+    d_global("a", F64, [1.0])
+    d_global("a", F64, [2.0])
+  }))
+  match twice {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "the global `a` is declared twice") }
+  }
+  let inside = catch_panic(() => trace_kernel("inside", ["f64"], () => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let one = idx_const(1)
+    let _t = d_for(zero, one, one, load(x, zero, [8]), (_i, acc) => {
+      d_global("a", F64, [1.0])
+      acc
+    })
+    ()
+  }))
+  match inside {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "is declared inside a region; a global belongs to the module") }
+  }
+  let empty = catch_panic(() => trace_kernel("empty", ["f64"], () => {
+    d_global("a", F64, [])
+  }))
+  match empty {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "is initialized with no values") }
+  }
+  let unknown = catch_panic(() => trace_kernel("unknown", ["f64"], () => {
+    let _p = global_ptrs("nope", F64, [4])
+    ()
+  }))
+  match unknown {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "get_global names `nope`, which no global declares") }
+  }
+  let wrong = catch_panic(() => trace_kernel("wrong", ["f64"], () => {
+    d_global("a", F64, [1.0])
+    let _p = global_ptrs("a", I32, [4])
+    ()
+  }))
+  match wrong {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "the global `a` holds f64, and get_global reads it as i32") }
+  }
 }

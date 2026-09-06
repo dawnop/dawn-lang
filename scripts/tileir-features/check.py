@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""The Tile IR coverage ledgers' gate: every opcode and every type tag is
-accounted for.
+"""The Tile IR coverage ledgers' gate: every opcode, every type tag and
+every attribute value is accounted for.
 
-    scripts/tileir-features/check.py              # check both ledgers
+    scripts/tileir-features/check.py              # check all three ledgers
     scripts/tileir-features/check.py --self-test  # negative control
 
 `features.txt` says, for each of the 100 public opcodes of the frozen table,
 whether this backend implements it, which knife did it, and how far the
-evidence goes. `types.txt` says the same for each of the 23 type tags. Their
-own headers explain the columns and the three layers; this turns each row
-into things a machine can look up.
+evidence goes. `types.txt` says the same for each of the 23 type tags, and
+`attrs.txt` (knife T4) for each of the 44 values of the attribute domains.
+Their own headers explain the columns and the three layers; this turns each
+row into things a machine can look up.
 
-ONE PARSER, TWO TABLES. Both files have the same eight columns and the same
-rules about statuses, knives and layers (`parse_rows` and `common_checks`
-below); what differs is the expected set each is held to and what a piece of
-evidence looks like. Knife T4 is expected to add a third table, for the
-attribute values, and it should need neither of those two functions changed.
+ONE PARSER, THREE TABLES. All three files have the same eight columns and
+the same rules about statuses, knives and layers (`parse_rows` and
+`common_checks` below); what differs is the expected set each is held to and
+what a piece of evidence looks like. Knife T3 wrote that the third table
+should need neither of those two functions changed, and knife T4 confirmed
+it: `attrs.txt` is one more `Ledger` entry, one `check_attrs` and one
+`attr_cases`.
 
 The expected set is the OP_ table in packages/tileir/src/bytecode.dawn, held
 in both directions: an OP_ constant with no `implemented` row is red, and so
@@ -39,6 +42,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TABLE = ROOT / "scripts" / "tileir-features" / "features.txt"
 TYPES = ROOT / "scripts" / "tileir-features" / "types.txt"
+ATTRS = ROOT / "scripts" / "tileir-features" / "attrs.txt"
 BYTECODE = ROOT / "packages" / "tileir" / "src" / "bytecode.dawn"
 GOLDEN = ROOT / "scripts" / "tile-golden"
 DIFF = ROOT / "scripts" / "tile-gpu-diff"
@@ -53,7 +57,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # it). T0 built the ledger itself and added no opcode, so it names no row
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
-LANDED_KNIVES = {"T0", "T1", "T2", "T3"}
+LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T15"}
 
 
 class Ledger:
@@ -93,6 +97,46 @@ EXPECTED_TAGS = set(range(0, 23))
 # The type versions, read the same way the opcode ones are.
 TYPES_SINCE_13_2 = {"f8E8M0FNU"}
 TYPES_SINCE_13_3 = {"f4E2M1FN", "GatherScatterView", "StridedViewType", "i4"}
+
+
+# Every value of every attribute domain AttrDefs.td defines, as
+# `family.value -> (code, version)`. The six enums are read off their
+# `CudaTileI32EnumAttrCase` lists; the unit attributes are read off Ops.td,
+# and a UnitAttr's code is the flags BIT it sets rather than an enum value.
+# `ComparisonPredicate` and `Signedness` are left out for the reason
+# attrs.txt's header gives.
+EXPECTED_ATTRS = {}
+
+
+def _attr_family(family, version, values):
+    for value, code in values:
+        EXPECTED_ATTRS[f"{family}.{value}"] = (code, version)
+
+
+_attr_family("rounding", "13.1", [("nearest_even", 0), ("zero", 1), ("negative_inf", 2),
+                                  ("positive_inf", 3), ("approx", 4), ("full", 5),
+                                  ("nearest_int_to_zero", 6)])
+_attr_family("overflow", "13.1", [("none", 0), ("nsw", 1), ("nuw", 2), ("nw", 3)])
+_attr_family("ordering", "13.1", [("unordered", 0), ("ordered", 1)])
+_attr_family("scope", "13.1", [("tl_blk", 0), ("device", 1), ("sys", 2)])
+_attr_family("memsem", "13.1", [("weak", 0), ("relaxed", 1), ("acquire", 2), ("release", 3),
+                                ("acq_rel", 4)])
+_attr_family("rmw", "13.1", [("and", 0), ("or", 1), ("xor", 2), ("add", 3), ("addf", 4),
+                             ("max", 5), ("min", 6), ("umax", 7), ("umin", 8), ("xchg", 9)])
+_attr_family("unit", "13.1", [("flush_to_zero", 1), ("propagate_nan", 1)])
+_attr_family("unit", "13.2", [("unsignedCmp", 1)])
+_attr_family("unit", "13.3", [("fast_acc", 1), ("constant", 1), ("global", 1)])
+_attr_family("padding", "13.1", [("zero", 0), ("neg_zero", 1), ("nan", 2), ("pos_inf", 3),
+                                 ("neg_inf", 4)])
+_attr_family("visibility", "13.1", [("public", 0), ("private", 1)])
+# The bytecode ATTRIBUTE TAGS (BytecodeAttrOpcodes.td), which are a third
+# authority: AttrDefs.td says what an attribute MEANS and this says which byte
+# announces it where one is written self-contained. Knives T6 and T15 write
+# six of the twelve; `Integer` (1) and `Float` (2) are knife 3's reduction
+# identities and are not in ruling 6's list.
+_attr_family("tag", "13.1", [("String", 5), ("DivBy", 8), ("SameElements", 9),
+                             ("Dictionary", 10), ("OptimizationHints", 11),
+                             ("Bounded", 12)])
 
 
 def parse_rows(text):
@@ -531,6 +575,151 @@ def check_types(table_text, bytecode_text, files, ledger_text):
     return counts, layers, problems
 
 
+def const_table(bytecode_text):
+    """The writer's named integer constants: NAME -> value. This is what
+    binds attrs.txt to the writer, the way `op_table` binds features.txt
+    and `tag_table` binds types.txt."""
+    return {name: int(value, 0) for name, value in
+            re.findall(r"^const ([A-Z0-9_]+): Int = (0x[0-9A-Fa-f]+|\d+)", bytecode_text, re.M)}
+
+
+def check_attrs(table_text, bytecode_text, files, ledger_text):
+    """The attribute values the table lists, and what is wrong with it.
+
+    The same shape and the same inputs as the two above. What is its own:
+    the expected set is AttrDefs.td's enums rather than anything in the
+    writer, so the binding to the writer is per row (`const:` names a
+    constant whose VALUE must be the row's code); and `golden:` is not held
+    to the .mlir spelling the value, because most of these values are the
+    dialect's defaults and its printer leaves them out.
+    """
+    problems = []
+    consts = const_table(bytecode_text)
+    if not consts:
+        problems.append("packages/tileir/src/bytecode.dawn has no integer constants at all")
+
+    mutants = files.get("scripts/tile-golden/run.sh", "") + \
+        files.get("scripts/tile-gpu-diff/run.sh", "")
+    devices = "\n".join(v for k, v in files.items() if k.startswith("scripts/tile-gpu-diff/")
+                        and k.endswith(".dawn"))
+
+    rows_, problems_ = parse_rows(table_text)
+    problems += problems_
+    seen = {}
+    counts = {s: 0 for s in STATUSES}
+    layers = {}
+    for n, fields in rows_:
+        name, code, since, status, knife, layer, evidence, exemption = fields
+
+        shared, _planned, layer = common_checks(n, name, status, knife, layer, seen)
+        problems += shared
+        if layer is None:
+            continue
+        counts[status] += 1
+        layers[layer] = layers.get(layer, 0) + 1
+
+        if name not in EXPECTED_ATTRS:
+            problems.append(f"line {n}: {name} is not a value of any attribute domain "
+                            f"AttrDefs.td defines")
+            continue
+        want_code, want_since = EXPECTED_ATTRS[name]
+        if not re.fullmatch(r"\d+", code):
+            problems.append(f"line {n}: code {code!r} is not a decimal enum value or flag bit")
+            continue
+        if int(code) != want_code:
+            problems.append(f"line {n}: {name} is {want_code} in AttrDefs.td and {code} here")
+        if since != want_since:
+            problems.append(f"line {n}: {name} entered at {want_since}, not {since}")
+
+        if status in ("unimplemented", "deferred"):
+            if layer != 0:
+                problems.append(f"line {n}: {name} is {status}, so its layer is 0, not {layer}")
+            if evidence != "-":
+                problems.append(f"line {n}: {name} is {status} but names evidence {evidence!r}")
+        if status == "deferred" and exemption == "-":
+            problems.append(f"line {n}: {name} is deferred with no named reason")
+        if status != "implemented":
+            continue
+
+        if layer < 1:
+            problems.append(f"line {n}: {name} is implemented, so it is covered at layer 1 "
+                            f"at least")
+        if layer < 2 and exemption == "-":
+            problems.append(
+                f"line {n}: {name} stops at layer {layer} and names no reason. The bar is layer 2, "
+                f"so anything short of it is an exemption and not a gap")
+        if layer >= 2 and exemption != "-":
+            problems.append(
+                f"line {n}: {name} reaches layer {layer} and still claims the exemption "
+                f"{exemption!r}")
+
+        found, ev_problems = evidence_of(n, name, evidence,
+                                         ("const", "writer", "golden", "device", "mutant"))
+        problems += ev_problems
+        constants, writers, goldens, launched, named = (found["const"], found["writer"],
+                                                        found["golden"], found["device"],
+                                                        found["mutant"])
+
+        if not constants and not writers:
+            problems.append(
+                f"line {n}: {name} names neither a const: nor a writer:. Something in "
+                f"bytecode.dawn holds this value, and naming it is what keeps the ledger and the "
+                f"writer one thing")
+        for c in constants:
+            if c not in consts:
+                problems.append(f"line {n}: {name} names const {c}, which bytecode.dawn does not "
+                                f"define")
+            elif consts[c] != int(code):
+                problems.append(f"line {n}: {name} is {code} here and {c} is {consts[c]} in "
+                                f"bytecode.dawn")
+        for fn in writers:
+            if not re.search(r"^(pub )?fn %s\b" % re.escape(fn), bytecode_text, re.M):
+                problems.append(f"line {n}: {name} names writer {fn}, which bytecode.dawn does "
+                                f"not define")
+        for g in goldens:
+            if f"scripts/tile-golden/{g}.mlir" not in files:
+                problems.append(f"line {n}: {name} names golden {g}, which has no .mlir")
+
+        if layer >= 2 and not launched:
+            problems.append(
+                f"line {n}: {name} claims layer {layer} and names no device kernel. Layer 2 is a "
+                f"device answer that DEPENDS on the value, and a device only ran the kernels a "
+                f"tile-gpu-diff program launches")
+        if layer < 2 and launched:
+            problems.append(
+                f"line {n}: {name} stops at layer {layer} and yet names the device kernel "
+                f"{launched[0]}")
+        for d in launched:
+            if f'"{d}"' not in devices:
+                problems.append(
+                    f"line {n}: {name} names device kernel {d}, which no scripts/tile-gpu-diff "
+                    f"program launches")
+
+        if layer == 3 and not named:
+            problems.append(
+                f"line {n}: {name} claims layer 3 and names no mutant. Layer 3 IS the mutant")
+        for m in named:
+            if m not in mutants:
+                problems.append(
+                    f"line {n}: {name} names mutant {m}, which neither scripts/tile-golden/run.sh "
+                    f"nor scripts/tile-gpu-diff/run.sh defines")
+
+    for name in sorted(set(EXPECTED_ATTRS) - set(seen)):
+        problems.append(f"{name} is a value of an attribute domain and has no row")
+
+    entries = [ln.split("#", 1)[0].split() for ln in ledger_text.splitlines()
+               if ln.strip() and not ln.lstrip().startswith("#")]
+    if any(layer >= 2 for layer in layers if layers[layer]):
+        if not entries:
+            problems.append("scripts/tile-gpu-diff/ledger.txt has no entry: nothing has run on a "
+                            "device, so no row here may claim layer 2")
+        elif entries[-1][5:6] != ["pass"]:
+            problems.append(
+                "the last layer-2 run in scripts/tile-gpu-diff/ledger.txt did not pass: an "
+                "attribute value is covered at layer 2 only while a device has agreed")
+    return counts, layers, problems
+
+
 def spelled(mlir, name):
     """Whether a .mlir spells the type. Not a word boundary: a tile's
     element format is written against the extent (`tile<128xi16>`), so the
@@ -595,8 +784,15 @@ def self_test():
 
 def feature_cases(good, bytecode, files, ledger):
     """The opcode ledger's verdicts, each on a table built to trip it."""
-    # An opcode no golden holds, for the layer-2 control below.
-    absent = "assume"
+    # An opcode no golden holds, for the layer-2 control below. It moved
+    # knife by knife while there were unimplemented rows to borrow: knife
+    # T5 took it off `break`, T6 off `assume`, T7 off `global`, T10 off
+    # `mmaf_scaled`. It now names a DEFERRED row of the view family, which
+    # ruling 2 suspends until knives T11 to T13, so it has somewhere to
+    # stand that no knife is about to take away. The two cases below spell
+    # its row out with `deferred      | -  `, which is what the column
+    # holds for a deferred one.
+    absent = "make_strided_view"
     plain = [
 
         ("a row with too few fields",
@@ -614,24 +810,24 @@ def feature_cases(good, bytecode, files, ledger):
                       "tanh                     | 0x6A | 13.1 | unimplemented | T1 "),
          "bytecode.dawn emits OP_TANH"),
         ("a row claiming an opcode the writer does not emit",
-         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5  | 0 | -",
-                      "break                    | 0x0A | 13.1 | implemented   | 7b  | 2 | "
+         good.replace("atomic_red_view_tko      | 0x75 | 13.3 | deferred      | -   | 0 | -",
+                      "atomic_red_view_tko      | 0x75 | 13.3 | implemented   | 7b  | 2 | "
                       "golden:mathops"),
-         "has no OP_BREAK"),
+         "has no OP_ATOMIC_RED_VIEW_TKO"),
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
         ("a layer-2 claim for an op no golden contains",
-         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6  | 0 | -",
-                      f"{absent:24s} | 0x06 | 13.1 | implemented   | 3   | 2 | golden:vadd"),
+         good.replace(f"{absent:24s} | 0x74 | 13.3 | deferred      | -   | 0 | -",
+                      f"{absent:24s} | 0x74 | 13.3 | implemented   | 3   | 2 | golden:vadd"),
          "whose .mlir does not contain the op"),
         ("an implemented row whose knife has not landed",
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
-                      "tanh                     | 0x6A | 13.1 | implemented   | T9 "),
+                      "tanh                     | 0x6A | 13.1 | implemented   | T11"),
          "cannot be a planned one"),
         ("an unimplemented row whose knife is not a planned one",
-         good.replace(f"{absent:24s} | 0x06 | 13.1 | unimplemented | T6 ",
-                      f"{absent:24s} | 0x06 | 13.1 | unimplemented | 3  "),
+         good.replace("make_partition_view      | 0x42 | 13.1 | deferred      | -  ",
+                      "make_partition_view      | 0x42 | 13.1 | unimplemented | 3  "),
          "so its knife is a planned one"),
         ("a layer-3 claim with no mutant named",
          good.replace("| 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,"
@@ -649,22 +845,28 @@ def feature_cases(good, bytecode, files, ledger):
          "is deferred with no named reason"),
         ("an implemented row under a knife nobody has cut",
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
-                      "sin                      | 0x62 | 13.1 | implemented   | T5 "),
-         "knife 'T5' cannot be a planned one"),
+                      "sin                      | 0x62 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
+        # No opcode row is `unimplemented` any more (knife T10 took the last
+        # two), so this verdict is tripped by making one out of a DEFERRED
+        # row of the view family, which ruling 2 suspends until T11 to T13:
+        # the rule under test is the status-to-knife pairing, and a knife
+        # that has landed is wrong under either status.
         ("an unimplemented row under a knife that has landed",
-         good.replace("break                    | 0x0A | 13.1 | unimplemented | T5 ",
-                      "break                    | 0x0A | 13.1 | unimplemented | T1 "),
+         good.replace("make_gather_scatter_view | 0x73 | 13.3 | deferred      | -  ",
+                      "make_gather_scatter_view | 0x73 | 13.3 | unimplemented | T6 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
     # The other input: an OP_ the writer grew and nobody wrote down.
     grown = bytecode.replace("const OP_TANH: Int = 0x6A",
-                             "const OP_TANH: Int = 0x6A\nconst OP_BREAK: Int = 0x0A")
+                             "const OP_TANH: Int = 0x6A\n"
+                             "const OP_ATOMIC_RED_VIEW_TKO: Int = 0x75")
     cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
-                  "is marked unimplemented but bytecode.dawn emits OP_BREAK"))
+                  "is marked deferred but bytecode.dawn emits OP_ATOMIC_RED_VIEW_TKO"))
     invented = bytecode.replace("const OP_TANH: Int = 0x6A",
-                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x0A")
+                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x76")
     cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
                   "and the ledger has no row for it"))
     cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
@@ -678,9 +880,9 @@ def type_cases(good, bytecode, files, ledger):
     plain = [
 
         ("a row with too few fields",
-         good + "\nnope | 23 | 13.1 | unimplemented | T9 | 0\n", "fields, not 8"),
+         good + "\nnope | 23 | 13.1 | unimplemented | T11 | 0\n", "fields, not 8"),
         ("the same type twice",
-         good + "\ni16 | 2 | 13.1 | unimplemented | T9 | 0 | - | -\n", "is already listed"),
+         good + "\ni16 | 2 | 13.1 | unimplemented | T11 | 0 | - | -\n", "is already listed"),
         ("a ledger with one row missing",
          "\n".join(ln for ln in good.splitlines() if not ln.startswith("tf32 ")) + "\n",
          "type tag 8 of the frozen table has no row"),
@@ -689,11 +891,11 @@ def type_cases(good, bytecode, files, ledger):
          "i16 is tag 6 here and 2 in bytecode.dawn"),
         ("a tag the writer writes and the ledger calls unimplemented",
          good.replace("tf32               |  8 | 13.1 | implemented   | T3  | 3 |",
-                      "tf32               |  8 | 13.1 | unimplemented | T9  | 0 |"),
+                      "tf32               |  8 | 13.1 | unimplemented | T11 | 0 |"),
          "bytecode.dawn writes its tag"),
         ("a row claiming a tag the writer does not write",
-         good.replace("i4                 | 22 | 13.3 | unimplemented | T9  | 0 | -",
-                      "i4                 | 22 | 13.3 | implemented   | T3  | 2 | golden:vadd"),
+         good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -",
+                      "TensorViewType     | 14 | 13.1 | implemented   | T3  | 2 | golden:vadd"),
          "writes no tag for it"),
         ("a version the deltas contradict",
          good.replace("f8E8M0FNU          | 18 | 13.2", "f8E8M0FNU          | 18 | 13.1"),
@@ -722,11 +924,15 @@ def type_cases(good, bytecode, files, ledger):
          "reaches layer 2 and still claims the exemption"),
         ("an implemented row under a knife nobody has cut",
          good.replace("i16                |  2 | 13.1 | implemented   | T3 ",
-                      "i16                |  2 | 13.1 | implemented   | T9 "),
-         "knife 'T9' cannot be a planned one"),
+                      "i16                |  2 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
+        # No `unimplemented` type row is left after knife T9, so this
+        # verdict is tripped on a `deferred` one instead: the rule is about
+        # the STATUS and the knife, and the view family's knife is a
+        # planned one either way.
         ("an unimplemented row under a knife that has landed",
-         good.replace("i4                 | 22 | 13.3 | unimplemented | T9 ",
-                      "i4                 | 22 | 13.3 | unimplemented | T3 "),
+         good.replace("TensorViewType     | 14 | 13.1 | deferred      | -  ",
+                      "TensorViewType     | 14 | 13.1 | unimplemented | T3 "),
          "so its knife is a planned one"),
         ("a deferred row with no reason",
          good.replace("TensorViewType     | 14 | 13.1 | deferred      | -   | 0 | -"
@@ -738,9 +944,13 @@ def type_cases(good, bytecode, files, ledger):
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
     cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
-    grown = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "i4" -> 22')
+    # Every scalar format is implemented after knife T9, so the tag the
+    # writer is made to grow here is a DEFERRED one: the verdict is about a
+    # row that does not claim what the writer emits, whatever its status.
+    grown = bytecode.replace('  "f8E8M0FNU" -> 18',
+                             '  "f8E8M0FNU" -> 18\n  "TensorViewType" -> 14')
     cases.append(("a type tag the ledger does not call implemented", good, grown, ledger,
-                  "is marked unimplemented but bytecode.dawn writes its tag"))
+                  "is marked deferred but bytecode.dawn writes its tag"))
     # and the other direction of the same input: a tag with no row at all
     invented = bytecode.replace('  "f8E8M0FNU" -> 18', '  "f8E8M0FNU" -> 18\n  "bogus" -> 5')
     cases.append(("a type tag the ledger has no row for", good, invented, ledger,
@@ -752,9 +962,96 @@ def type_cases(good, bytecode, files, ledger):
 
 
 
+def attr_cases(good, bytecode, files, ledger):
+    """The attribute ledger's verdicts, each on a table built to trip it."""
+    plain = [
+        ("a row with too few fields",
+         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T11 | 0\n", "fields, not 8"),
+        ("the same value twice",
+         good + "\nrounding.approx | 4 | 13.1 | unimplemented | T11 | 0 | - | -\n",
+         "is already listed"),
+        ("a value AttrDefs.td does not define",
+         good + "\nrounding.nope | 9 | 13.1 | unimplemented | T11 | 0 | - | -\n",
+         "is not a value of any attribute domain"),
+        ("a code that disagrees with AttrDefs.td",
+         good.replace("rounding.approx              | 4 |", "rounding.approx              | 5 |"),
+         "rounding.approx is 4 in AttrDefs.td and 5 here"),
+        ("a ledger with one row missing",
+         "\n".join(ln for ln in good.splitlines() if not ln.startswith("scope.sys")) + "\n",
+         "scope.sys is a value of an attribute domain and has no row"),
+        ("a version the domain contradicts",
+         good.replace("unit.unsignedCmp             | 1 | 13.2",
+                      "unit.unsignedCmp             | 1 | 13.1"),
+         "unit.unsignedCmp entered at 13.2, not 13.1"),
+        ("a const the writer does not define",
+         good.replace("const:SCOPE_SYS", "const:SCOPE_UNIVERSE"),
+         "names const SCOPE_UNIVERSE"),
+        ("a const whose value is not the row's",
+         good.replace("scope.sys                    | 2 |", "scope.sys                    | 1 |"),
+         "SCOPE_SYS is 2 in bytecode.dawn"),
+        ("an implemented row with neither a const nor a writer",
+         good.replace("const:ROUND_APPROX,golden:attr_approx", "golden:attr_approx"),
+         "names neither a const: nor a writer:"),
+        ("a golden with no .mlir",
+         good.replace("golden:attr_approx", "golden:attr_nonesuch"),
+         "names golden attr_nonesuch, which has no .mlir"),
+        ("a layer-2 claim with no device kernel",
+         good.replace("const:CMP_ORDERED,golden:leaky_relu,device:leaky_relu",
+                      "const:CMP_ORDERED,golden:leaky_relu"),
+         "claims layer 2 and names no device kernel"),
+        ("a device kernel no program launches",
+         good.replace("device:mathops", "device:vadd_f32"),
+         "names device kernel vadd_f32, which no scripts/tile-gpu-diff program launches"),
+        ("a landed knife's row that stops below the bar with no reason",
+         good.replace("| no-module-symbol-ffi", "| -                   "),
+         "stops at layer 1 and names no reason"),
+        ("a row below the bar that names a device kernel",
+         good.replace("const:SCOPE_SYS,golden:attr_memsem,mutant:atomic-memory-attrs-swapped",
+                      "const:SCOPE_SYS,device:attr_memsem,mutant:atomic-memory-attrs-swapped"),
+         "stops at layer 1 and yet names the device kernel"),
+        ("a layer-3 claim with no mutant named",
+         good.replace(",mutant:cmpf-always-ordered", "                           "),
+         "claims layer 3 and names no mutant"),
+        ("a mutant nobody defines",
+         good.replace("mutant:ftz-bit-dropped", "mutant:ftz-bit-kept   "),
+         "names mutant ftz-bit-kept"),
+        ("a row below the bar with no reason for it",
+         good.replace("| assumption-not-arithmetic", "| -"),
+         "stops at layer 1 and names no reason"),
+        ("a row at the bar that still claims an exemption",
+         re.sub(r"^(scope\.device .*)\| -$", r"\1| no-race-in-corpus", good, count=1, flags=re.M),
+         "reaches layer 2 and still claims the exemption"),
+        ("an implemented row under a knife nobody has cut",
+         good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
+                      "rounding.approx              | 4 | 13.1 | implemented   | T11"),
+         "knife 'T11' cannot be a planned one"),
+        # No row of this table is `unimplemented` any more (knife T10 took
+        # the last one), so this case makes one out of a DEFERRED row: the
+        # rule under test is the status-to-knife pairing, and a deferred
+        # row carries the same `-` in the knife column that a landed knife
+        # would be wrong in.
+        ("an unimplemented row under a knife that has landed",
+         good.replace("padding.neg_inf              | 4 | 13.1 | deferred      | -  ",
+                      "padding.neg_inf              | 4 | 13.1 | unimplemented | T8 "),
+         "so its knife is a planned one"),
+        ("a deferred row with no reason",
+         good.replace("| no-client-kernel", "| -"),
+         "is deferred with no named reason"),
+        ("an empty ledger", "# nothing\n",
+         "is a value of an attribute domain and has no row"),
+    ]
+    cases = [(name, text, bytecode, ledger, want) for name, text, want in plain]
+    cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
+                  "# only a comment\n", "has no entry"))
+    cases.append(("the real ledger is clean (the positive control)", good, bytecode, ledger, None))
+    return cases
+
+
 TABLES = (
     Ledger("features", TABLE, "opcode", lambda *a: check(*a), lambda *a: feature_cases(*a)),
     Ledger("types", TYPES, "type tag", lambda *a: check_types(*a), lambda *a: type_cases(*a)),
+    Ledger("attrs", ATTRS, "attribute value", lambda *a: check_attrs(*a),
+           lambda *a: attr_cases(*a)),
 )
 
 

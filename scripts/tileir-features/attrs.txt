@@ -1,0 +1,281 @@
+# The Tile IR ATTRIBUTE ledger: one row per value of every attribute domain
+# the dialect defines, and what this backend has done about it. Knife T4;
+# ruling 6 of the full coverage prestudy (2026-09-05), which is recorded in
+# docs/tile-backend-design.md 2.4, and the measurements in 6.8.
+#
+# This is the THIRD ledger in this directory. features.txt says which of the
+# hundred public OPCODES this backend implements, types.txt which of the 23
+# TYPE TAGS, and this one which values of the attribute domains it writes.
+# They are three separate promises. An opcode can be implemented while the
+# enum it carries has six values nobody has ever written, which is exactly
+# the state knife T4 found and the reason this file exists. One check.py
+# reads all three: the parser, the status / knife / layer rules and the
+# evidence splitter are shared, and only the expected set and the evidence
+# kinds are this table's own.
+#
+# The authority for the name, the code and the version is
+# NVIDIA/cuda-tile@be0889cd:
+# include/cuda_tile/Dialect/CudaTile/IR/AttrDefs.td for the six enum
+# families and Ops.td for the unit attributes. A UnitAttr has no enum: it is
+# present or absent, and its presence is a BIT in the flags word, so its
+# `code` here is that bit and not an enum value.
+#
+# The `tag.*` family (knives T6 and T15) has a THIRD authority,
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeAttrOpcodes.td: the twelve
+# frozen ATTRIBUTE TAGS. AttrDefs.td says what an attribute means and that
+# file says which byte announces it where one is written self-contained, so
+# a `tag.*` row's `code` is the tag byte. Six of the twelve are here;
+# `Integer` (1) and `Float` (2) are knife 3's reduction identities, which
+# ruling 6's list leaves out for the reason it leaves out
+# `ComparisonPredicate`, and the rest belong to attributes this backend
+# does not write.
+#
+# WHAT IS NOT HERE. `ComparisonPredicate` (six values, all six written since
+# knife 7a) and `Signedness` (two, both since knife 10) are enums whose
+# value is chosen by the operation the caller asked for rather than by an
+# attribute the caller could have set otherwise; they are the operation's
+# name spelled twice and carry no coverage question, so ruling 6's list
+# leaves them out and so does this file. `OptimizationHints` is a dictionary
+# and not a domain of values, so knife T15 records it as its TAG and the tag
+# of the `Dictionary` it wraps, and nothing else: the hint KEYS
+# (`num_cta_in_cga`, `num_worker_warps_per_cta`, `occupancy`, `latency`,
+# `allow_tma`) are not a domain either. Their values are ranges rather than
+# an enum -- 1 to 32 for `occupancy`, 1 to 10 for `latency` -- so a row per
+# value is not a thing this table could hold, and a row per KEY would claim
+# a coverage no ledger here means: nothing checks a key (see
+# `hints-do-not-change-answers` below), so "implemented" and
+# "unimplemented" would name the same state.
+#
+# COLUMNS
+#
+#   feature     `<family>.<value>`, the dialect's own spelling of both
+#   code        the enum value, or for a unit attribute the flags BIT it
+#               sets in the operations that carry it
+#   since       the bytecode version the VALUE entered: 13.1, 13.2 or 13.3
+#   status      implemented | unimplemented | deferred, read as the other
+#               two ledgers read them. `deferred` covers two situations
+#               here and the exemption says which: `ruling 2` is the view
+#               family, and `no-client-kernel` is a value the writer's own
+#               table can already spell while no kernel asks for it (eight
+#               of the ten atomic modes are in that state, and calling them
+#               implemented would claim a coverage that does not exist)
+#   knife       the knife that wrote the value first, or the knife the
+#               prestudy plans it for; check.py's LANDED_KNIVES holds the
+#               two directions, as it does for the other two ledgers
+#   layer       the highest layer that covers it, 0 to 3
+#   evidence    const:<NAME>    the constant in packages/tileir/src/bytecode.dawn
+#                               that holds this value; its value is checked
+#                               against the `code` column, which is what
+#                               binds this file to the writer the way the
+#                               OP_ table binds features.txt
+#               writer:<fn>     the function in bytecode.dawn that writes
+#                               the value, where it is a literal in a table
+#                               rather than a named constant
+#               golden:<kernel> a scripts/tile-golden kernel that carries
+#                               the value. Unlike the type ledger's
+#                               `golden:`, this is NOT held to the .mlir
+#                               spelling it: most attribute values are the
+#                               dialect's defaults and its printer leaves
+#                               them out, so the text is silent about them
+#                               by design
+#               device:<kernel> a kernel a scripts/tile-gpu-diff program
+#                               launches, whose answer DEPENDS on the value
+#               mutant:<family> a mutant family that reddens on it
+#   exemption   a named reason, where the bar of layer 2 is impossible
+#               rather than merely absent, and `-` at or above the bar.
+#               check.py holds both directions, as it does for types.txt.
+#               An `unimplemented` row carries one only where the knife
+#               column was REASSIGNED and the reason is not the plan's:
+#               `13.3-record-field` is knife T7's three, handed to T8
+#
+# THE THREE LAYERS are docs/tile-backend-design.md 6.2, and layer 3 is read
+# here as features.txt reads it: a mutant counts for a value when its anchor
+# changes HOW THAT VALUE IS WRITTEN, not when it happens to go red on a
+# device. That reading matters more here than for the opcodes, because an
+# attribute value written wrong is usually still a legal program:
+# `overflow<none>` where `no_signed_wrap` belongs assembles, runs and
+# computes the same answer.
+#
+# A `device:` token is therefore a stronger claim than "the device ran this
+# kernel". It says the ANSWER depends on the value: `attr_memsem` runs on
+# the device and agrees, and none of its five ordering and scope values
+# names it, because every ordering computes the same sums on a corpus with
+# no race in it.
+#
+# THE NAMED EXEMPTIONS, in full:
+#
+#   assumption-not-arithmetic
+#       `nsw`, `nuw` and `nw` tell the compiler what it may assume, and a
+#       program that overflows under one of them is undefined. A corpus
+#       that keeps the promise computes the same thing with the attribute
+#       and without it; one that breaks it has no defined answer to compare
+#       against. Ruling 1 of the prestudy names these three.
+#       scripts/tile-golden's overflow-attr-not-written is the mutant, and
+#       it goes red at layer 1: the assembler cannot parse a stream with
+#       the attribute missing.
+#       Ruling 1 names `assume` in the same breath, so knife T6's three
+#       predicate tags (`div_by`, `same_elements`, `bounded`) are that same
+#       argument in another family: with a true predicate the device
+#       computes what it computed without it, and with a false one there is
+#       no defined answer to compare. Their layer-1 mutants are
+#       assume-divby-tag-as-same-elements,
+#       assume-same-elements-payload-four-bytes and
+#       assume-bounded-bounds-swapped.
+#   tag-not-emitted
+#       `String` (5) is the one tag this writer implements and never emits.
+#       `assert`'s `message` and `print_tko`'s `str` are both `StrAttr`, so
+#       the ODS getter answers a `StringRef` and `writeOpAttribute` takes
+#       its own StringRef branch: the String section INDEX and no tag. A tag
+#       byte only appears where an attribute is written self-contained, and
+#       no operation here puts a string there. scripts/tile-golden's
+#       assert-message-tagged is that sentence as a machine: write the 5 in
+#       and `tileiras` answers `failed to parse attribute 'message'`.
+#   no-race-in-corpus
+#       A memory ordering and a memory scope constrain CONCURRENT accesses.
+#       attr_memsem gives every lane its own slot and every block its own
+#       384, so nothing races and every ordering computes the same sums. A
+#       judgement about the ordering itself needs two blocks observing each
+#       other and a comparison shape this repository does not have (the
+#       exact tier compares one buffer after one launch). The mutant is
+#       scripts/tile-golden's atomic-memory-attrs-swapped, red at layer 1.
+#       `scope.device` is NOT exempt: leetgpu 13's histogram collides
+#       across tile blocks, so a narrower scope would be a wrong answer,
+#       and that is a device judgement.
+#   global-bit-not-in-the-cubin
+#       `alloca`'s `global` says the address may be handed to other tile
+#       threads; without it the address is private to the one that made it.
+#       A kernel that keeps its scratch to itself computes the same thing
+#       either way, so the question is whether the bit reaches the machine
+#       at all, and the answer is measured the way `fast_acc`'s was:
+#       alloca_two's second allocation carries the bit and its first does
+#       not, and setting BOTH moves exactly one byte of the `.tilebc`
+#       (offset 56, 0 to 1) while `tileiras --gpu-name sm_86` writes a cubin
+#       that is byte for byte the one it wrote before (measured, knife T10).
+#       A bit that does not reach the cubin cannot make the device answer
+#       anything else, so this is a measurement and not a missing kernel.
+#       scripts/tile-golden's alloca-flags-unwritten is the mutant, red at
+#       layer 1: it takes away the word the bit lives in.
+#   fast-acc-not-in-the-cubin
+#       `mmaf`'s `fast_acc` asks the hardware to accumulate at a lower
+#       precision than the accumulator's format. It is the reason `mmaf`
+#       writes a flags varint at all from 13.3 on, and knife T8 measured
+#       what setting the bit buys on this machine: with the writer's word
+#       changed from 0 to 1, ONE bytecode byte moves and the cubin
+#       `tileiras --gpu-name sm_86` produces is BYTE FOR BYTE the same, on
+#       all four `mmaf` kernels tried and on the f16 one as readily as on
+#       the f64 ones (`matmul`, `batched_matmul_f16`, `attn_scores`,
+#       `lora_hidden`). A device cannot answer differently for a bit that
+#       does not reach it, so there is no layer-2 judgement here to be had
+#       on this target rather than one nobody has written yet. What the
+#       row does own is the flags word the bit lives in, and
+#       scripts/tile-golden's mmaf-flags-unwritten is that: drop the word
+#       and the assembler reads the first operand for it.
+#   no-client-kernel
+#       The writer's `rmw_mode_value` spells all ten atomic modes and only
+#       two of them have a kernel. The table is right and nothing exercises
+#       it, so the eight others are deferred rather than implemented.
+#   ruling 2
+#       The view family, deferred with the nine view opcodes until knives
+#       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
+#       TYPES (Types.td), not of any operation this backend emits.
+#   no-module-symbol-ffi
+#       `visibility.public`, `visibility.private` and `unit.constant` are
+#       written and accepted, and the judgement they are short of needs one
+#       FFI operation this repository does not have: `cuModuleGetGlobal`.
+#       What each of them MEANS is a fact about a symbol as seen from the
+#       host -- a private symbol cannot be looked up in a loaded module, a
+#       constant one is read-only -- and every layer-2 judgement here is a
+#       comparison of one downloaded buffer, so none of them can ask it.
+#       The `Gpu` effect in std/gpu.dawn has no module-symbol operation and
+#       knife T8 did not add one (that is another ledger's account), so the
+#       three stop at layer 1 with the assembler's acceptance.
+#
+#       This exemption REPLACED `13.3-record-field`, which said something
+#       else and is now settled: until knife T8 these three had no byte to
+#       be written in at all. The SymbolVisibility enum is 13.1 (AttrDefs.td
+#       gives both cases that version, which is what the `since` column
+#       says) but the places a writer could put either value are 13.3:
+#       Ops.td versions GlobalOp's `symbol_visibility` and `constant`
+#       arguments "13.3", BytecodeWriter.cpp's writeGlobalSection writes
+#       four varints per global below 13.3 and six at or above it, and
+#       BytecodeReader.cpp's parseGlobalSection switches its
+#       `kMinGlobalInfoSize` from 4 to 6 on the same boundary. Knife T8
+#       moved the pin to 13.3, so the record now has six fields and the
+#       writer fills all of them. Both sides of that wall have been
+#       measured against `tileiras`: T7's global-visibility-written-at-13-2
+#       wrote six varints into a 13.2 file (retired by T8, since that is now
+#       the correct shape) and T8's global-visibility-omitted-at-13-3 writes
+#       four into a 13.3 one.
+#   hints-do-not-change-answers
+#       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
+#       names it beside `assume` for exactly this reason: the dialect
+#       promises that a hint does not change what a kernel computes, so no
+#       corpus could tell one value of one from another by looking at a
+#       buffer, and a `device:` token here would be a claim about the
+#       ANSWER that no hint can support. Knife T15's hint_diff asks the
+#       device the one question it can be asked -- do the hinted kernels
+#       answer the bytes the unhinted `vadd` answers -- and it answers
+#       yes, which is the promise kept rather than a dependence on a
+#       value.
+#
+#       Layer 1 reaches the SHAPE and stops there, and that is measured
+#       and not assumed. `OptimizationHintsAttr::verifyParamWithContext`
+#       returns early unless `-Wunsupported-hints` is on, and it is off by
+#       default: an unknown key (`occupancy_qqq`), an unknown architecture
+#       (`sm_86a`) and an out-of-range value (`latency = 904`) each
+#       assemble, exit 0 and print nothing. What IS refused is a count
+#       that disagrees with what follows it, a tag that is not the one the
+#       function table wants, and a flag bit in the wrong place, which is
+#       what scripts/tile-golden's four hint mutants hold.
+#
+# feature | code | since | status | knife | layer | evidence | exemption
+rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
+rounding.zero                | 1 | 13.1 | implemented   | 10  | 2 | const:ROUND_ZERO,golden:int_ops,device:int_ops                                                        | -
+rounding.negative_inf        | 2 | 13.1 | implemented   | T4  | 3 | const:ROUND_NEGATIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
+rounding.positive_inf        | 3 | 13.1 | implemented   | T4  | 3 | const:ROUND_POSITIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
+rounding.approx              | 4 | 13.1 | implemented   | T4  | 3 | const:ROUND_APPROX,golden:attr_approx,device:attr_approx,mutant:sqrt-approx-as-nearest-even           | -
+rounding.full                | 5 | 13.1 | implemented   | 7b  | 3 | const:ROUND_FULL,golden:mathops,golden:sigmoid,device:mathops,mutant:exp-rounding-unwritten           | -
+rounding.nearest_int_to_zero | 6 | 13.1 | implemented   | 10  | 3 | const:ROUND_INT_TO_ZERO,golden:int_ops,device:int_ops,mutant:ftoi-rounds-instead-of-truncates         | -
+overflow.none                | 0 | 13.1 | implemented   | 10  | 2 | const:OVERFLOW_NONE,golden:int_ops,device:int_ops                                                     | -
+overflow.nsw                 | 1 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NSW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
+overflow.nuw                 | 2 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NUW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
+overflow.nw                  | 3 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NW,golden:attr_overflow,mutant:overflow-attr-not-written                               | assumption-not-arithmetic
+ordering.unordered           | 0 | 13.1 | implemented   | T4  | 3 | const:CMP_UNORDERED,golden:attr_nan,device:attr_nan,mutant:cmpf-always-ordered                        | -
+ordering.ordered             | 1 | 13.1 | implemented   | 7a  | 2 | const:CMP_ORDERED,golden:leaky_relu,device:leaky_relu                                                 | -
+scope.tl_blk                 | 0 | 13.1 | implemented   | T4  | 1 | const:SCOPE_TL_BLK,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                              | no-race-in-corpus
+scope.device                 | 1 | 13.1 | implemented   | 14  | 2 | const:SCOPE_DEVICE,golden:histogram,device:histogram                                                  | -
+scope.sys                    | 2 | 13.1 | implemented   | T4  | 1 | const:SCOPE_SYS,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                                 | no-race-in-corpus
+memsem.weak                  | 0 | 13.1 | implemented   | 3   | 3 | const:ORDER_WEAK,golden:vadd,device:vadd,mutant:atomic-rmw-claims-weak-ordering                       | -
+memsem.relaxed               | 1 | 13.1 | implemented   | 14  | 3 | const:ORDER_RELAXED,golden:histogram,device:histogram,mutant:atomic-rmw-claims-weak-ordering          | -
+memsem.acquire               | 2 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQUIRE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+memsem.release               | 3 | 13.1 | implemented   | T4  | 1 | const:ORDER_RELEASE,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+memsem.acq_rel               | 4 | 13.1 | implemented   | T4  | 1 | const:ORDER_ACQ_REL,golden:attr_memsem,mutant:atomic-memory-attrs-swapped                             | no-race-in-corpus
+rmw.and                      | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.or                       | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.xor                      | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.add                      | 3 | 13.1 | implemented   | 14  | 3 | writer:rmw_mode_value,golden:histogram,device:histogram,mutant:atomic-as-plain-store                  | -
+rmw.addf                     | 4 | 13.1 | implemented   | T4  | 3 | writer:rmw_mode_value,golden:attr_addf,device:attr_addf,mutant:rmw-addf-as-add                        | -
+rmw.max                      | 5 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.min                      | 6 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.umax                     | 7 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.umin                     | 8 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.xchg                     | 9 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_FLAG_FTZ,golden:attr_ftz,device:attr_ftz,mutant:ftz-bit-dropped                           | -
+unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
+unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
+unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
+unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,mutant:global-visibility-omitted-at-13-3                    | no-module-symbol-ffi
+unit.global                  | 1 | 13.3 | implemented   | T10 | 1 | const:ALLOCA_FLAG_GLOBAL,golden:alloca_two,mutant:alloca-flags-unwritten                              | global-bit-not-in-the-cubin
+padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+visibility.public            | 0 | 13.1 | implemented   | T8  | 1 | const:VIS_PUBLIC,golden:global_table,mutant:global-visibility-omitted-at-13-3                         | no-module-symbol-ffi
+visibility.private           | 1 | 13.1 | implemented   | T8  | 1 | const:VIS_PRIVATE,golden:global_flags,mutant:global-visibility-omitted-at-13-3                        | no-module-symbol-ffi
+tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted
+tag.DivBy                    |  8 | 13.1 | implemented   | T6  | 1 | const:ATTR_DIV_BY,golden:assume_divby,mutant:assume-divby-tag-as-same-elements                        | assumption-not-arithmetic
+tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_SAME_ELEMENTS,golden:assume_same,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes | assumption-not-arithmetic
+tag.Bounded                  | 12 | 13.1 | implemented   | T6  | 1 | const:ATTR_BOUNDED,golden:assume_bounded,mutant:assume-bounded-bounds-swapped                         | assumption-not-arithmetic
+tag.Dictionary               | 10 | 13.1 | implemented   | T15 | 1 | const:ATTR_DICTIONARY,golden:hint_entry,golden:hint_memory,mutant:hint-dictionary-count-wrong         | hints-do-not-change-answers
+tag.OptimizationHints        | 11 | 13.1 | implemented   | T15 | 1 | const:ATTR_OPTIMIZATION_HINTS,golden:hint_entry,mutant:hint-tag-as-dictionary,mutant:hint-entry-flag-dropped,mutant:hint-flag-bit-misplaced | hints-do-not-change-answers
