@@ -1705,9 +1705,9 @@ CI 上仍只有亚秒的 `--check`。`dawn test packages/tileir` 多两个测试
 四小时后 rebase 之后的这一轮又回到 4.90 s。**这件事是这一节一贯那句话的又一个实例**：本机的
 绝对秒数是这里最吵的一个输入，真正撑着预算行的是单项均值那一列。
 
-`tile-gpu-diff/run.sh` 这一刀往 `dtype` 族里加两个 kernel（`dtype_i4` / `pack_roundtrip`）
-与两条变异体（`exti-i4-zero-extends` 重编包、`pack-halves-swapped` 重建 std），读数见 §6.4 的
-台账行。`dawn test packages/tileir` 多一个测试（117 → **118**），`dawn test --stdlib` 多四个
+`tile-gpu-diff/run.sh` 在最终树上 **667.2 s**（刀 T10 记的是 723 s，那是它自己那一代的语料）。
+这一刀往 `dtype` 族里加两个 kernel（`dtype_i4` / `pack_roundtrip`）与两条变异体
+（`exti-i4-zero-extends` 重编包、`pack-halves-swapped` 重建 std），台账行见 §6.4。`dawn test packages/tileir` 多一个测试（117 → **118**），`dawn test --stdlib` 多四个
 （166 → **170**）：**本刀碰了 `std/narrow.dawn` 与 `std/gpu.dawn`**，`scripts/gen-stdsrc.py`
 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录。
 
