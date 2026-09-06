@@ -419,7 +419,7 @@ Core 邻接文件上。**所以：选择性 CPS 约等于一到一点五次 hand
    `(M, Cmd[M.Msg])`，`packages/tea-core/src/cmd.dawn` 是通道本身：`NoCmd` / `SendMsg` /
    `BatchCmd` 三个构造，加一个同轮有界 fold（`fold_msg`，上限 `CMD_FOLD_LIMIT`，两条腿共用）。
    于是「除了 DOM 监听器之外没有任何东西能产生一条 Msg」不再成立：一条 `SendMsg` 就是再喂一次
-   `update`。但它只解决了**同步**那一半——`Cmd` 目前没有 io 臂，因为 io 臂的答案要在回复写出去
+   `update`。但它只解决了**同步**那一半。`Cmd` 目前没有 io 臂，因为 io 臂的答案要在回复写出去
    之后才到，那需要一个 wire op（本节第 2、3 条仍然挡着它）。第二步 = io 臂 + 回灌 op，两者一起。
 2. **tea-dom 在 `event` 上拒绝提交状态替换。** `packages/tea-dom/src/reactor.dawn:183` 只有 `Init`
    臂返回 `Some(kept)`，`:179,188,194-195,200,203` 一律 `None`，由 `:454-470` 的测试钉住。
