@@ -1580,6 +1580,29 @@ pub fn batched_matmul_ref(batch: Int, m: Int, k: Int, n: Int, dtypes: List[Strin
   })
 }
 
+## What a `partition_view` load answers when the tile runs past the end of
+## the tensor and the store that follows is into a view wide enough to
+## keep it: the first `n` lanes are the input's, the lanes from there to
+## `out_n` are the view's padding value, and anything past `out_n` is what
+## the output buffer already held. Knife T11's oracle for the
+## `PaddingValue` enum.
+##
+## `x` and `old` are BIT PATTERNS and not numbers: scripts/tile-gpu-diff's
+## view_padding runs an f32 kernel over i32 buffers, so what the host
+## compares is the exact pattern each padding value put on the device,
+## which is the only way `zero` and `neg_zero` are two answers rather than
+## one. `pad` is that pattern for this output.
+pub fn view_padding_ref(n: Int, out_n: Int, pad: Float, x: List[Float],
+  old: List[Float]) -> List[Float] =
+  list.map(range(0, len(old)), idx =>
+      if idx < n {
+        x[idx]
+      } else if idx < out_n {
+        pad
+      } else {
+        kept(old, idx)
+      })
+
 ## The transpose of a `rows` by `cols` row-major matrix, as a `cols` by
 ## `rows` one. No leetgpu problem: this is the oracle for a store whose
 ## strides are not row-major.
