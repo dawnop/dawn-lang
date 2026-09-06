@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 9272b3d761e851b0 -->
+<!-- doc-check: translation-of docs/spec.md @ bcaabe01ebd29ef3 -->
 
 # Dawn Language Specification
 
@@ -200,10 +200,11 @@ newline left standing afterwards is the separator, so continuation wins and sepa
 `dawn fmt <file>...` formats in place; `dawn fmt --check <file>...` only reports files that are not
 formatted (exit code 1 if there are any, for CI). The implementation is a **reprinter over the
 token stream**: it reprints token by token as-is (strings and interpolations are kept exactly as
-their source ranges, not a character changed) and only alters the whitespace between tokens —
+their source ranges, not a character changed) and adjusts the whitespace between tokens —
 intra-line spacing, 2-space indentation, collapsing consecutive blank lines (the author's physical
-line breaks are kept). Formatting therefore **preserves tokens, preserves comments, and is
-idempotent**, and it only needs the lexer to succeed (not the parser), so a file with syntax errors
+line breaks are kept). The sole token normalization omits the optional first `|` of a single-line
+sum type declaration (§2.3); all other tokens and comments are preserved. Formatting is
+**idempotent**, and it only needs the lexer to succeed (not the parser), so a file with syntax errors
 can still be formatted.
 
 **A successful lex is a precondition, and failing it is a refusal**: a character the lexer rejects
@@ -338,6 +339,9 @@ semantics that matter:
 
 ### 2.3 Sum types (ADT)
 
+The first `|` is optional; the formatting convention omits it on a single-line declaration
+and puts a bar before each constructor line in a multi-line declaration.
+
 ```dawn
 type Shape =
   | Circle(r: Float)
@@ -354,7 +358,7 @@ type Shape =
   supplied by the context, otherwise the compiler reports "cannot infer type parameter". A
   constructor with no payload (`Point`) is itself a value, not a function; record construction uses
   the brace syntax and does not take part in this rule.
-- Generics: `type Tree[T] = | Leaf | Node(left: Tree[T], value: T, right: Tree[T])`
+- Generics: `type Tree[T] = Leaf | Node(left: Tree[T], value: T, right: Tree[T])`
 
 ### 2.4 Records
 
@@ -1548,7 +1552,7 @@ The two separators may be mixed within one literal, a trailing comma or newline 
 and both `[]` and a `[\n]` spanning lines are still zero elements. This is a **pure syntactic
 addition**: `[1, 2, 3]`, a multi-line literal with commas, and a trailing comma all parse to
 exactly what they parsed to before. `dawn fmt` does not rewrite either spelling into the other
-either; the author's choice of separator is kept, since the formatter only adjusts spacing within
+either; the author's choice of separator is kept, since for lists the formatter only adjusts spacing within
 a line and indentation, never the line breaks the author wrote.
 
 **What is dropped is only the comma at a line break.** Two elements on one line still need one:
@@ -4009,7 +4013,7 @@ branch, the last expression of a block).
 use geo/shape.{Shape, area}
 use java "java.nio.file.Files"
 
-pub type Color = | Red | Green | Blue derive Show
+pub type Color = Red | Green | Blue derive Show
 type Point = { x: Float, y: Float }
 alias Distance = Float           # transparent alias (§2.6)
 pub opaque type UserId = Int     # opaque outside this module (§2.7)

@@ -1,10 +1,11 @@
 # The Dawn formatter, in Dawn — a faithful port of dawn.fmt.Formatter
 # (compiler/src/main/kotlin/dawn/fmt/Formatter.kt). A token-stream reformatter:
-# re-lex the source (collecting comments), reprint every token verbatim from
-# its source span, and change only the whitespace between tokens — intra-line
+# re-lex the source (collecting comments), reprint tokens verbatim from
+# their source spans, and normalize the whitespace between tokens — intra-line
 # spacing, 2-space indentation, blank-line collapsing. The author's physical
-# line breaks are preserved, so formatting is token-preserving and idempotent,
-# and only needs a successful lex.
+# line breaks are preserved. The one token normalization drops the optional
+# first sum-type bar on a single physical line; all other tokens survive.
+# Formatting is idempotent and only needs a successful lex.
 #
 # "Only needs a successful lex" is a precondition, not a shrug: a character the
 # lexer does not recognize produces a diagnostic and *no token*, and a token is
@@ -26,7 +27,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT,
+  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -40,13 +41,73 @@ use front/token.{
 pub fn format(source: String) -> Result[String, List[Diag]] = {
   let (cps, raw, comments, diags) = lexer.lex_with_comments_cps(source)
   if len(diags) > 0 { return Err(diags) }
+  let bars = single_line_type_bars(cps, raw)
   var code: List[Token] = []
   for t in raw {
-    if t.kind != NEWLINE && t.kind != EOF { code = code ++ [t] }
+    if t.kind != NEWLINE && t.kind != EOF && not set.has(bars, t.lo) { code = code ++ [t] }
   }
   let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
   Ok(reflow(cps, stream, unary_minus(raw), postfix_bang(raw), block_arrow(cps, raw)))
+}
+
+## Only a type declaration's optional first bar is redundant. Keep this a
+## lexical recognition, not a parser precondition: incomplete editor buffers
+## still format. Source spans settle physical lines because the lexer elides
+## newlines after `=`/`|` and inside brackets. A constructor or derive on the
+## next logical line also makes the declaration multiline.
+fn single_line_type_bars(cps: List[Char], raw: List[Token]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  var i = 0
+  var depth = 0
+  while i < len(raw) {
+    let k = raw[i].kind
+    let opaque = i > 0 && raw[i - 1].kind == IDENT && raw[i - 1].text == "opaque"
+    if k == TYPE && depth == 0 && not opaque {
+      match single_line_type_bar(cps, raw, i) {
+        Some(lo) -> { out = set.insert(out, lo) }
+        None -> ()
+      }
+    }
+    if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
+    if k == RPAREN || k == RBRACKET || k == RBRACE { depth = depth - 1 }
+    i = i + 1
+  }
+  out
+}
+
+fn single_line_type_bar(cps: List[Char], raw: List[Token], start: Int) -> Option[Int] = {
+  var i = start + 1
+  if i >= len(raw) || raw[i].kind != TYPEIDENT { return None }
+  i = i + 1
+  if i < len(raw) && raw[i].kind == LBRACKET {
+    var depth = 1
+    i = i + 1
+    while i < len(raw) && depth > 0 {
+      if raw[i].kind == LBRACKET { depth = depth + 1 }
+      if raw[i].kind == RBRACKET { depth = depth - 1 }
+      i = i + 1
+    }
+    if depth != 0 { return None }
+  }
+  if i + 2 >= len(raw) || raw[i].kind != EQ || raw[i + 1].kind != PIPE ||
+    raw[i + 2].kind != TYPEIDENT { return None }
+  let bar = raw[i + 1].lo
+  i = i + 2
+  var depth = 0
+  while i < len(raw) && raw[i].kind != EOF && raw[i].kind != NEWLINE {
+    let k = raw[i].kind
+    if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
+    if k == RPAREN || k == RBRACKET || k == RBRACE { depth = depth - 1 }
+    i = i + 1
+  }
+  if depth != 0 { return None }
+  var next = i
+  while next < len(raw) && raw[next].kind == NEWLINE { next = next + 1 }
+  if next < len(raw) && (raw[next].kind == PIPE ||
+      (raw[next].kind == IDENT && raw[next].text == "derive")) { return None }
+  let (_, lines) = count_to(cps, raw[start].lo, raw[i - 1].hi)
+  if lines == 0 { Some(bar) } else { None }
 }
 
 ## The two token channels interleaved by span start. Both arrive ascending by
@@ -525,6 +586,62 @@ test "formatting is idempotent and fixes indentation" {
   let once = fmt_of(src)
   assert once == "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ -> 2\n  }\n"
   assert fmt_of(once) == once
+}
+
+test "single-line sum types omit only their optional first bar" {
+  let src = "pub type Flag = | On | Off # keep | in comments\n" ++
+    "type Tree[T] = | Leaf | Node(value: T, next: Tree[T])\n" ++
+    "type Choice = | Left(value: Int) | Right derive Show\n"
+  let want = "pub type Flag = On | Off # keep | in comments\n" ++
+    "type Tree[T] = Leaf | Node(value: T, next: Tree[T])\n" ++
+    "type Choice = Left(value: Int) | Right derive Show\n"
+  assert fmt_of(src) == want
+  assert fmt_of(want) == want
+  assert fmt_of("type Flag = On | Off\n") == "type Flag = On | Off\n"
+}
+
+test "multiline sum types retain their first bar and physical layout" {
+  for src in [
+    "type Flag =\n  | On\n  | Off\n",
+    "type Flag = | On\n  | Off\n",
+    "type Flag = |\nOn\n",
+    "type Tree[T] = | Node(\n  value: T,\n  next: Tree[T]\n)\n",
+    "type Flag = | On\n# next constructor\n  | Off\n",
+    "type Flag = | On\nderive Show\n",
+    "type Tree[\n  T\n] = | Leaf | Node(value: T)\n",
+  ] {
+    let once = fmt_of(src)
+    assert once == src
+    assert fmt_of(once) == once
+  }
+  let other = "fn f(x: Int) -> Int !(Ask | Tell) = x\n" ++
+    "let text = \"type Flag = | On\"\n"
+  assert fmt_of(other) == other
+}
+
+test "single-line type boundaries do not consume the next declaration" {
+  let src = "type First = | One\r\n" ++
+    "type Second = | Two # trailing comment\r\n" ++
+    "fn f() -> Int = {\r\n  1\r\n}\r\n" ++
+    "type Last = | End"
+  let want = "type First = One\n" ++
+    "type Second = Two # trailing comment\n" ++
+    "fn f() -> Int = {\n  1\n}\n" ++
+    "type Last = End\n"
+  assert fmt_of(src) == want
+  assert fmt_of(want) == want
+  assert fmt_of("type Item[T: Trait[Other[T]]] = | Item(value: T)\n") ==
+    "type Item[T: Trait[Other[T]]] = Item(value: T)\n"
+  for unchanged in [
+    "type Flag = # comment\n  | On\n",
+    "type Flag = | On # comment\n  | Off\n",
+    "type Flag = | On\n# comment\nderive Show\n",
+    "opaque type Flag = | On\n",
+    "trait Item[T] {\n  type Value = | On\n}\n",
+    "type Incomplete = |\n",
+  ] {
+    assert fmt_of(unchanged) == unchanged
+  }
 }
 
 test "a pattern continuation keeps its leading pipe" {
