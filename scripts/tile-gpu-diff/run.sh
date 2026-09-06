@@ -85,6 +85,13 @@
 #             spelling of one of them runs in the same process so that the
 #             two can be compared to each other rather than each to a
 #             reference)
+#             and gsview_diff.dawn the five kernels of the view family's
+#             REMAINDER (knife T13) with `conv1d` beside them as the
+#             family's kernel-level control: a strided view whose traversal
+#             need not be its tile, a gather/scatter view whose index at
+#             `sparse_dim` is a tile of row numbers, and
+#             `atomic_red_view_tko` in all nine of its modes, which is the
+#             first memory operation here that answers nothing at all
 #             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
@@ -814,6 +821,20 @@ view_order=("${views[@]}" transpose_tail)
 dyns=(view_dyn_transpose view_tensor_shape view_index_space)
 dyn_order=("${dyns[@]}" view_transpose)
 
+# The rest of the view family (knife T13), in the order gsview_diff takes
+# them: the two views a grid view cannot spell (a strided one, whose
+# traversal need not be its tile, and a gather/scatter one, whose index at
+# `sparse_dim` is a tile of row numbers) and the reduction that writes into
+# a view and answers nothing. `conv1d` is the family's KERNEL-LEVEL CONTROL
+# and is what makes `view_conv1d` a judgement about ADDRESSING: it is the
+# same convolution through a pointer ladder, held to the same
+# `conv1d_ref`, with none of the three new opcodes in it. Its cubin is
+# assembled already (it is one of the strided kernels); naming it here is
+# what puts it on gsview_diff's command line, exactly as `vadd` is named in
+# hint_order.
+gsviews=(view_conv1d view_token_embed view_atomic view_stride_pad view_gather_pad)
+gsview_order=("${gsviews[@]}" conv1d)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -865,7 +886,8 @@ assemble_golden() { # kernel, tilebc, cubin
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
+  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
+  "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -915,6 +937,8 @@ view_cubins=()
 for k in "${view_order[@]}"; do view_cubins+=("$work/$k.cubin"); done
 dyn_cubins=()
 for k in "${dyn_order[@]}"; do dyn_cubins+=("$work/$k.cubin"); done
+gsview_cubins=()
+for k in "${gsview_order[@]}"; do gsview_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1585,6 +1609,72 @@ if [ "$dyn_verdict" = pass ]; then
   echo "PASS  corpus: every transpose lane is distinct, both bounds decide something, $shapes shapes from three cubins, and the dynamic transpose wrote the static one's bytes ($dyn_shape_line $dyn_probe)"
 else
   echo "SKIP  corpus: the dynamic counts are not verifiable on this driver ($dyn_verdict)"
+fi
+
+# ---- native, the rest of the view family (knife T13)
+#
+# The verdict is the usual one. What is unusual about this family is that
+# three of its five kernels are held to references a POINTER-LADDER kernel
+# elsewhere in this directory answers to (`conv1d_ref` in stride_diff,
+# `token_embed_ref` in gath_diff, and `histogram_ref` inside
+# `view_atomic_ref`), and that the ladder convolution rides along in the
+# same process as the control.
+build_native "$root/std" "$work/gsview.bin" "$here/gsview_diff.dawn"
+rc=0
+device "$work/gsview.bin" "${gsview_cubins[@]}" > "$work/gsview.out" 2> "$work/gsview.err" || rc=$?
+cat "$work/gsview.out"
+gsview_verdict="$(verdict_of "$work/gsview.out")"
+case "$gsview_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#gsviews[@]} kernels of the view family's remainder and their ladder control agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $gsview_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $gsview_verdict" ;;
+  fail) cat "$work/gsview.err" >&2; fail "the device answered and disagreed with the fake device on a knife T13 kernel (see the transcript above)" ;;
+  *) cat "$work/gsview.err" >&2; fail "gsview_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gsview.out" | head -n 1)"
+
+# The corpora, held field by field. Each field is what makes one of the
+# mutants below a measurement rather than a sentence.
+#
+#   overlap    elements of view_conv1d's tensor that more than one window
+#              reads. Zero would mean the traversal was the tile and a
+#              partition view would have done
+#   skipped    elements view_stride_pad's grid never reaches, because its
+#              traversal is longer than its tile. Zero says the same thing
+#              from the other side
+#   padded     lanes of view_stride_pad's output that hold the padding
+#              value, and `gpadded` the same for view_gather_pad, where the
+#              padding is on the COLUMN side. Zero would mean the tile
+#              never left the tensor
+#   repeats    row numbers a gather corpus names more than once, in the
+#              embedding corpus and in the padded one. Zero would leave "a
+#              gather may read one row twice" unsaid
+#   cross      bins of view_atomic's histogram hit from more than one tile
+#              block. Zero would make every one of the nine modes a fold
+#              over one contribution
+#   negative   contributions that are below zero once the bias is taken
+#              off. Zero would make `umax` and `umin` answer what `max` and
+#              `min` do
+gsview_shape_line="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/gsview.out")"
+[ -n "$gsview_shape_line" ] || fail "gsview_diff printed no index line"
+if [ "$gsview_verdict" = pass ]; then
+  for field in overlap skipped padded gpadded repeats grepeats cross negative; do
+    value="$(printf '%s\n' "$gsview_shape_line" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+    [ -n "$value" ] || fail "the gsview index line names no $field: $gsview_shape_line"
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      fail "$field is $value, so what it stands for is not tested at all: $gsview_shape_line"
+  done
+  modes="$(printf '%s\n' "$gsview_shape_line" | tr ' ' '\n' | sed -n 's/^modes=//p')"
+  [ "$modes" = 9 ] ||
+    fail "view_atomic runs $modes atomic modes and the operation takes nine: $gsview_shape_line"
+  gsview_probe="$(sed -n 's/^probe gsview //p' "$work/gsview.out" | tail -n 1)"
+  hist="$(printf '%s\n' "$gsview_probe" | tr ' ' '\n' | sed -n 's/^histogram=//p' | head -n 1)"
+  [ "$hist" = same ] ||
+    { printf '%s\n' "$gsview_probe" >&2; fail "view_atomic's add output is not the histogram reference's answer: histogram=$hist"; }
+  echo "PASS  corpus: the windows overlap, the grid skips, both padded kernels leave the tensor, the gathers repeat a row, the bins collide across blocks, the contributions go negative, and the nine modes are nine ($gsview_shape_line $gsview_probe)"
+else
+  echo "SKIP  corpus: the gsview counts are not verifiable on this driver ($gsview_verdict)"
 fi
 
 # ---- native, the optimization hint kernels (knife T15)
@@ -4743,7 +4833,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
-  scripts/tile-gpu-diff/dyn_diff.dawn \
+  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -4756,6 +4846,7 @@ summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line"
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
+summary="$summary gsview=$gsview_shape_line $gsview_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
