@@ -69,7 +69,8 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
+  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
@@ -209,6 +210,16 @@ const STORE_FLAG_TOKEN: Int = 8
 const VIEW_FLAG_SCOPE: Int = 1
 const VIEW_FLAG_HINTS: Int = 2
 const VIEW_FLAG_TOKEN: Int = 4
+
+# The five values of `PaddingValue` (AttrDefs.td), the enum a partition
+# view's optional parameter carries. dev.dawn's `Padding` is the surface
+# spelling and these are the numbers, the way every other enum in this
+# package lives here and not on that surface.
+const PAD_ZERO: Int = 0
+const PAD_NEG_ZERO: Int = 1
+const PAD_NAN: Int = 2
+const PAD_POS_INF: Int = 3
+const PAD_NEG_INF: Int = 4
 
 # The atomics have NO optional attribute at all: their `memory_scope` is a
 # required argument where a load's is an `OptionalAttr` (Ops.td). So their
@@ -1104,27 +1115,18 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
   # trust.
   PartitionView(tile_shape, e, shape, strides, dim_map, padding) -> {
     let (w1, tvi) = ty(w, TensorView(e, shape, strides))
-    let b0 = bytes.put(bytes.buf(), TAG_PARTITION_VIEW)
-    let b1 = if partition_view_has_bitfield() {
-      put_varint(b0, match padding {
-        Some(_code) -> 1
-        None -> 0
-      })
-    } else {
-      b0
+    let code = padding_code(padding)
+    let present = match code {
+      Some(_c) -> 1
+      None -> 0
     }
+    let b0 = bytes.put(bytes.buf(), TAG_PARTITION_VIEW)
+    let b1 = if partition_view_has_bitfield() { put_varint(b0, present) } else { b0 }
     let b2 = list.fold(tile_shape, put_varint(b1, len(tile_shape)), (b, d) => put_le(b, d, 4))
     let b3 = list.fold(dim_map, put_varint(put_varint(b2, tvi), len(dim_map)), (b, k) => put_le(b, k, 4))
-    let b4 = if partition_view_has_bitfield() {
-      b3
-    } else {
-      bytes.put(b3, match padding {
-        Some(_code) -> 1
-        None -> 0
-      })
-    }
-    let b5 = match padding {
-      Some(code) -> put_varint(b4, code)
+    let b4 = if partition_view_has_bitfield() { b3 } else { bytes.put(b3, present) }
+    let b5 = match code {
+      Some(c) -> put_varint(b4, c)
       None -> b4
     }
     ty_of(w1, bytes.freeze(b5))
@@ -1739,6 +1741,19 @@ fn global_has_extended_fields() -> Bool = at_least(13, 3)
 # and not only in how it is spelled: at 13.3 the bitfield sits between the
 # tag and the first parameter, and below it there is no bitfield at all.
 fn partition_view_has_bitfield() -> Bool = at_least(13, 3)
+
+# The number `padding_value` carries on the wire, `None` for the absent
+# parameter. `zero` is the value the dialect allows over every element
+# format; the other four are floating point only, which prog.dawn's
+# recording handler refuses ahead of the assembler.
+fn padding_code(p: Padding) -> Option[Int] = match p {
+  NoPadding -> None
+  PadZero -> Some(PAD_ZERO)
+  PadNegZero -> Some(PAD_NEG_ZERO)
+  PadNan -> Some(PAD_NAN)
+  PadPosInf -> Some(PAD_POS_INF)
+  PadNegInf -> Some(PAD_NEG_INF)
+}
 
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =

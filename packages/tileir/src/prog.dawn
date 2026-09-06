@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, PAD_ZERO, PAD_NEG_INF, padding_name, is_float_dtype}
+use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, Padding, padding_name, padding_is_special, is_float_dtype}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -153,7 +153,7 @@ pub type TileOp =
   | Alloca(dst: Int, dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int])
   | TensorViewOf(dst: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int])
   | PartitionViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
-    padding: Option[Int])
+    padding: Padding)
   | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int)
   | StoreView(tok_out: Int, dtype: String, view: Int, indices: List[Int], value: Int, tok_in: Int)
 derive Show
@@ -1327,16 +1327,10 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
           Some(k) -> refuse(name, "dim_map maps tensor view dimension ${dim_map[k]} at least twice: ${show(dim_map)}")
           None -> ()
         }
-        match padding {
-          None -> ()
-          Some(code) ->
-            if code < PAD_ZERO || code > PAD_NEG_INF {
-              refuse(name, "padding value ${code} is not one of the five the dialect names")
-            } else if code != PAD_ZERO && not is_float_dtype(dtype) {
-              refuse(name, "padding value `${padding_name(code)}` is only allowed on a floating point element type, got ${dtype}")
-            } else {
-              ()
-            }
+        if padding_is_special(padding) && not is_float_dtype(dtype) {
+          refuse(name, "padding value `${padding_name(padding)}` is only allowed on a floating point element type, got ${dtype}")
+        } else {
+          ()
         }
         let d = next
         next = mint(name, next, 1)

@@ -55,12 +55,12 @@
 #               sets in the operations that carry it
 #   since       the bytecode version the VALUE entered: 13.1, 13.2 or 13.3
 #   status      implemented | unimplemented | deferred, read as the other
-#               two ledgers read them. `deferred` covers two situations
-#               here and the exemption says which: `ruling 2` is the view
-#               family, and `no-client-kernel` is a value the writer's own
-#               table can already spell while no kernel asks for it (eight
-#               of the ten atomic modes are in that state, and calling them
-#               implemented would claim a coverage that does not exist)
+#               two ledgers read them. `deferred` here means exactly one
+#               thing since knife T11 took the five padding values:
+#               `no-client-kernel`, a value the writer's own table can
+#               already spell while no kernel asks for it (eight of the ten
+#               atomic modes are in that state, and calling them implemented
+#               would claim a coverage that does not exist)
 #   knife       the knife that wrote the value first, or the knife the
 #               prestudy plans it for; check.py's LANDED_KNIVES holds the
 #               two directions, as it does for the other two ledgers
@@ -177,9 +177,15 @@
 #       two of them have a kernel. The table is right and nothing exercises
 #       it, so the eight others are deferred rather than implemented.
 #   ruling 2
-#       The view family, deferred with the nine view opcodes until knives
-#       T11 to T13 (docs 2.4). `PaddingValue` is a parameter of the view
-#       TYPES (Types.td), not of any operation this backend emits.
+#       RETIRED, and no row carries it any more. It said the view family
+#       was suspended with its nine opcodes until knives T11 to T13 (docs
+#       2.4); the user revoked that ruling on 2026-09-06 and knife T11 took
+#       all five `PaddingValue` values in one go, because the enum is a
+#       parameter of PartitionViewType and a partition view carries at most
+#       one of them, so a kernel with five partition views spells five of
+#       the five. It is written down here rather than deleted because the
+#       two other ledgers still carry the token on the rows knives T12 and
+#       T13 own.
 #   visibility-not-in-the-lookup
 #       `visibility.public` and `visibility.private` reach the CUBIN and
 #       stop there, and knife TG measured both halves of that.
@@ -311,11 +317,11 @@ unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FL
 unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
 unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,golden:global_syms,mutant:constant-flag-as-mutable          | constant-not-in-the-cubin
 unit.global                  | 1 | 13.3 | implemented   | T10 | 1 | const:ALLOCA_FLAG_GLOBAL,golden:alloca_two,mutant:alloca-flags-unwritten                              | global-bit-not-in-the-cubin
-padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-padding.pos_inf              | 3 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
-padding.neg_inf              | 4 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
+padding.zero                 | 0 | 13.1 | implemented   | T11 | 3 | const:PAD_ZERO,golden:view_pad_i32,device:view_pad_i32,mutant:padding-value-bit-cleared               | -
+padding.neg_zero             | 1 | 13.1 | implemented   | T11 | 3 | const:PAD_NEG_ZERO,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one             | -
+padding.nan                  | 2 | 13.1 | implemented   | T11 | 3 | const:PAD_NAN,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one                  | -
+padding.pos_inf              | 3 | 13.1 | implemented   | T11 | 3 | const:PAD_POS_INF,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one              | -
+padding.neg_inf              | 4 | 13.1 | implemented   | T11 | 3 | const:PAD_NEG_INF,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one              | -
 visibility.public            | 0 | 13.1 | implemented   | T8  | 1 | const:VIS_PUBLIC,golden:global_table,golden:global_syms,mutant:visibility-private-written-as-public    | visibility-not-in-the-lookup
 visibility.private           | 1 | 13.1 | implemented   | T8  | 1 | const:VIS_PRIVATE,golden:global_flags,golden:global_syms,mutant:visibility-private-written-as-public   | visibility-not-in-the-lookup
 tag.String                   |  5 | 13.1 | implemented   | T6  | 1 | writer:str_of,golden:assert_pass,golden:print_tile,mutant:assert-message-tagged                       | tag-not-emitted

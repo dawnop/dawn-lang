@@ -4508,11 +4508,8 @@ view_pkg_mutant partition-dim-map-reversed bytecode.dawn \
 #     seen. That is not a weakness of the mutant, it is why `view_padding`
 #     exists.
 view_pkg_mutant padding-value-bit-cleared bytecode.dawn \
-  '      put_varint(b0, match padding {
-        Some(_code) -> 1
-        None -> 0
-      })' \
-  '      put_varint(b0, 0)' \
+  'let b1 = if partition_view_has_bitfield() { put_varint(b0, present) } else { b0 }' \
+  'let b1 = if partition_view_has_bitfield() { put_varint(b0, 0) } else { b0 }' \
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32 \
   --red view_padding view_pad_i32
 
@@ -4527,8 +4524,8 @@ view_pkg_mutant padding-value-bit-cleared bytecode.dawn \
 #     assembler accepts and only the bit patterns on the padded lanes can
 #     tell apart.
 view_pkg_mutant padding-enum-off-by-one bytecode.dawn \
-  'Some(code) -> put_varint(b4, code)' \
-  'Some(code) -> put_varint(b4, if code == 0 { 0 } else { code % 4 + 1 })' \
+  'Some(c) -> put_varint(b4, c)' \
+  'Some(c) -> put_varint(b4, if c == 0 { 0 } else { c % 4 + 1 })' \
   view_max_pool view_padding \
   --red view_padding
 

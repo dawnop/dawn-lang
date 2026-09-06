@@ -91,16 +91,29 @@
 #               and not written.
 #   type tags   the scalar formats and the type constructors
 #               (BytecodeTypeOpcodes.td) are a separate table, and knives T3
-#               and T9 finished it: every scalar format is implemented and
-#               the four constructors still missing are the view family's,
-#               deferred by ruling 2. The mutants `f64-tag-as-i64`,
-#               `bf16-tag-as-i16` and `i4-tag-as-i8` are theirs, not any
-#               opcode's.
+#               and T9 finished the scalar half of it. Knife T11 took two of
+#               the four view constructors; the two still missing are
+#               GatherScatterViewType and StridedViewType, which knife T13
+#               owns. The mutants `f64-tag-as-i64`, `bf16-tag-as-i16`,
+#               `i4-tag-as-i8` and `tensor-view-tag-as-ptr` are theirs, not
+#               any opcode's.
 #   attributes  the enum values and unit attributes (AttrDefs.td) are a
 #               third table, and knife T4 built it: attrs.txt beside this
 #               file, checked by the same check.py. T15 owns
 #               OptimizationHints, which is a dictionary rather than a
 #               domain of values and is in neither.
+#
+# RULING 2 IS REVOKED, and the `ruling 2` exemption is now a POINTER rather
+# than a suspension. The prestudy's second ruling
+# (docs/tile-backend-design.md 2.4) put the whole view family aside: nine
+# opcodes, four type tags and the five `PaddingValue` values, with knives
+# T11 to T13 suspended along with them. The user revoked it on 2026-09-06
+# and the three knives were opened. Knife T11 landed the STATIC half
+# (`make_tensor_view`, `make_partition_view`, `load_view_tko`,
+# `store_view_tko`, TensorViewType, PartitionViewType and all five padding
+# values); what still carries the exemption is what T12 and T13 own, and
+# for those rows `ruling 2` reads "the view family, revoked and waiting for
+# its knife" and not "suspended indefinitely".
 #
 # `entry` 0x16, `module` 0x4B and `global` 0x31 are STRUCTURAL: the writer
 # never puts any of them in the instruction stream. `module` is the file and
@@ -155,12 +168,12 @@ iota                     | 0x3A | 13.1 | implemented   | 3   | 2 | golden:ols_be
 itof                     | 0x3B | 13.1 | implemented   | 10  | 2 | golden:seg_scan,golden:int_ops                                                                                            | -
 join_tokens              | 0x3C | 13.1 | implemented   | T2  | 3 | golden:token_join,mutant:join-tokens-operand-count-wrong                                                                  | -
 load_ptr_tko             | 0x3D | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:load-dtype-f64,mutant:load-pad-flag-as-token,mutant:gather-mask-dropped              | -
-load_view_tko            | 0x3E | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+load_view_tko            | 0x3E | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:padding-value-bit-cleared                                                                    | -
 log                      | 0x3F | 13.1 | implemented   | 7b  | 2 | golden:mathops,golden:cce_row                                                                                             | -
 log2                     | 0x40 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
 loop                     | 0x41 | 13.1 | implemented   | T5  | 3 | golden:loop_count,golden:loop_until,golden:loop_none,mutant:loop-carried-not-rolled-back                                  | -
-make_partition_view      | 0x42 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
-make_tensor_view         | 0x43 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+make_partition_view      | 0x42 | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:partition-dim-map-reversed                                                                   | -
+make_tensor_view         | 0x43 | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:view-strides-swapped                                                                         | -
 make_token               | 0x44 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:make-token-as-iota                                                                   | -
 maxf                     | 0x45 | 13.1 | implemented   | 7a  | 2 | golden:relu,golden:clip                                                                                                   | -
 maxi                     | 0x46 | 13.1 | implemented   | 10  | 2 | golden:max_subarray,golden:int_ops                                                                                        | -
@@ -195,7 +208,7 @@ sin                      | 0x62 | 13.1 | implemented   | T1  | 3 | golden:trig_s
 sinh                     | 0x63 | 13.1 | implemented   | T1  | 2 | golden:trig_sweep                                                                                                         | -
 sqrt                     | 0x64 | 13.1 | implemented   | 7b  | 2 | golden:rms_norm,golden:grpo_adv                                                                                           | -
 store_ptr_tko            | 0x65 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:drop-store-token,mutant:store-token-unwritten                                        | -
-store_view_tko           | 0x66 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
+store_view_tko           | 0x66 | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:view-strides-swapped                                                                         | -
 subf                     | 0x67 | 13.1 | implemented   | 7a  | 2 | golden:attn_softmax,golden:f16_ops                                                                                        | -
 subi                     | 0x68 | 13.1 | implemented   | 10  | 2 | golden:invert,golden:compact                                                                                              | -
 tan                      | 0x69 | 13.1 | implemented   | T1  | 2 | golden:trig_sweep                                                                                                         | -

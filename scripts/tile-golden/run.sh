@@ -2109,8 +2109,8 @@ fi
 #     only place either side of the fence exercises it.
 if run_item padding-nan-on-integer-elements; then
   mutant_project padding-nan-on-integer-elements bytecode.dawn \
-    'Some(code) -> put_varint(b4, code)' \
-    'Some(_code) -> put_varint(b4, 2)'
+    '  PadZero -> Some(PAD_ZERO)' \
+    '  PadZero -> Some(PAD_NAN)'
   writer_mutant_checks padding-nan-on-integer-elements view_pad_i32 same-size \
     "padding_value nan can only be used with floating point element types, got 'i32'"
 fi

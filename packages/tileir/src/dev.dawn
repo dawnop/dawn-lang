@@ -557,38 +557,10 @@ pub effect Dev {
   fn t_alloca(dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int]) -> Int
   fn t_tensor_view(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int]) -> Int
   fn t_partition_view(dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
-    padding: Option[Int]) -> Int
+    padding: Padding) -> Int
   fn t_load_view(dtype: String, view: Int, indices: List[Int]) -> Int
   fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
 }
-
-## The five values `PaddingValue` names (AttrDefs.td), as the codes the
-## bytecode writes. They are here rather than in bytecode.dawn because the
-## recording handler holds the one rule that is not about bytes: the four
-## SPECIAL values are only legal over a floating point element type
-## (`verifyPartitionViewLike`, Types.cpp), and `zero` is legal over any.
-pub const PAD_ZERO: Int = 0
-pub const PAD_NEG_ZERO: Int = 1
-pub const PAD_NAN: Int = 2
-pub const PAD_POS_INF: Int = 3
-pub const PAD_NEG_INF: Int = 4
-
-## The keyword the dialect spells a padding code with, for a diagnostic and
-## for the renderer.
-pub fn padding_name(code: Int) -> String =
-  if code == PAD_ZERO {
-    "zero"
-  } else if code == PAD_NEG_ZERO {
-    "neg_zero"
-  } else if code == PAD_NAN {
-    "nan"
-  } else if code == PAD_POS_INF {
-    "pos_inf"
-  } else if code == PAD_NEG_INF {
-    "neg_inf"
-  } else {
-    "padding_value_${code}"
-  }
 
 ## Whether `name` is one of the dialect's floating point formats. What the
 ## special padding values are confined to.
@@ -623,14 +595,27 @@ pub type Padding =
   | PadNegInf
 derive Show
 
-## `p` as the code the bytecode carries, `None` for the absent parameter.
-pub fn padding_of(p: Padding) -> Option[Int] = match p {
-  NoPadding -> None
-  PadZero -> Some(PAD_ZERO)
-  PadNegZero -> Some(PAD_NEG_ZERO)
-  PadNan -> Some(PAD_NAN)
-  PadPosInf -> Some(PAD_POS_INF)
-  PadNegInf -> Some(PAD_NEG_INF)
+## The keyword the dialect spells a padding value with, for a diagnostic
+## and for the renderer. The NUMBER each one carries on the wire is not
+## here: it lives in bytecode.dawn with every other enum this package
+## writes, and this surface only ever names the value.
+pub fn padding_name(p: Padding) -> String = match p {
+  NoPadding -> "none"
+  PadZero -> "zero"
+  PadNegZero -> "neg_zero"
+  PadNan -> "nan"
+  PadPosInf -> "pos_inf"
+  PadNegInf -> "neg_inf"
+}
+
+## Whether `p` is one of the four SPECIAL padding values, which
+## `verifyPartitionViewLike` allows only over a floating point element
+## type. `zero` is legal over any format and the absent parameter is legal
+## everywhere.
+pub fn padding_is_special(p: Padding) -> Bool = match p {
+  NoPadding -> false
+  PadZero -> false
+  _ -> true
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -2608,7 +2593,7 @@ pub fn tensor_view[D: Dtype](d: D, p: Param[D], base: Idx, shape: List[Int],
 pub fn partition_view[D: Dtype](d: D, tv: TensorView[D], tile_shape: List[Int],
   dim_map: List[Int], padding: Padding) -> PartitionView[D] !Dev = {
   let v: Int = tv
-  let r: PartitionView[D] = t_partition_view(dtype_name(d), v, tile_shape, dim_map, padding_of(padding))
+  let r: PartitionView[D] = t_partition_view(dtype_name(d), v, tile_shape, dim_map, padding)
   r
 }
 
@@ -3312,7 +3297,7 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       80
     }
     t_partition_view(dtype, view, tile_shape, dim_map, padding) => {
-      log = log ++ ["partition_view ${dtype} ${view} ${show(tile_shape)} ${show(dim_map)} ${opt(padding)}"]
+      log = log ++ ["partition_view ${dtype} ${view} ${show(tile_shape)} ${show(dim_map)} ${padding_name(padding)}"]
       81
     }
     t_load_view(dtype, view, indices) => {
