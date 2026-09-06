@@ -84,6 +84,52 @@
 # is 214.4 / 208.9 / 210.2 / 215.3 / 220.9s, which is 569 / 558 / 560 / 571 /
 # 582s, and gates.yml carries N = 5 from this knife on.
 #
+# Knife T8 appends one kernel (global_flags) and three mutants, and swaps
+# global-visibility-written-at-13-2 for global-visibility-omitted-at-13-3 in
+# place. The matrix is 209 items, 163 kernels and 46 mutants. Its own
+# ITEM_TIMES round, 2026-09-06 on a quiet machine (load 0.4 to 2.3, 1561.8s
+# unsharded):
+#
+#   163 kernels 4.53 to 5.18s (mean 4.73), 46 mutants 14.65 to 17.14s
+#     (mean 16.86)
+#
+# a fourth confirmation of the same two findings, and the kernels are within
+# 0.65s of each other end to end. EIGHT SHARDS STILL FIT: 163 mod 8 and
+# 46 mod 8 deal 27 / 26 / 26 / 26 / 26 / 26 / 26 / 26 items whose sums are
+# 201.5 / 183.5 / 184.2 / 192.8 / 196.2 / 196.0 / 195.7 / 196.3s. The mutant
+# count moved from 43 to 46, so shard 1 gains a sixth mutant and shards 3 to
+# 5 keep theirs while 2 and 3 fall to five; shard 1 is the dear one now.
+# gates.yml's tile-golden-1 note has why the ninth shard was not needed even
+# though knife T15 predicted the next mutant would force it.
+#
+# Knife T10 appends four kernels (alloca_scratch, alloca_two, alloca_ctl and
+# mmaf_scaled_e4m3) and four mutants. The matrix is 217 items, 167 kernels
+# and 50 mutants. Its own ITEM_TIMES round, 2026-09-06 on a quiet machine
+# (load 3.7 to 4.9, 2076s unsharded, 2056.8s of items):
+#
+#   167 kernels 5.17 to 6.50s (mean 5.91), 50 mutants 18.10 to 23.10s
+#     (mean 21.38)
+#
+# BOTH MEANS ARE ABOVE EVERY READING SINCE KNIFE T3, which is the one thing
+# this round found that the four rounds above did not. Kernels have read
+# between 4.64 and 5.12 and mutants between 16.15 and 18.88 across knives T3
+# to T8; 5.91 and 21.38 are outside both ranges, the kernels by 15% over the
+# highest. The same tree read 6.89 and 20.45 earlier the same day with four
+# other gates running, so the quiet round is not a load artifact either.
+# What changed is not measurable from here; what is measurable is that these
+# are the WORSE numbers, and a budget is a ceiling.
+#
+# EIGHT SHARDS NO LONGER FIT, and neither do nine. Eight is 271.3 / 253.7 /
+# 251.2 / 254.8 / 252.1 / 253.2 / 254.6 / 266.0s of items, whose planning
+# values are 745 to 704s: not one under the 660s pole. Nine is 240.9 / 220.5
+# / 220.0 / 220.2 / 218.2 / 231.8 / 235.3 / 233.6 / 236.3s, whose planning
+# values put four shards over it. Ten is 204.7 / 206.3 / 205.4 / 209.8 /
+# 209.7 / 208.6 / 208.1 / 201.4 / 201.2 / 201.6s, all ten under, and
+# gates.yml carries N = 10 from this knife on. 167 mod 10 gives shards 1 to
+# 7 seventeen kernels and shards 8 to 10 sixteen; 50 mod 10 is zero, so
+# every shard carries exactly five mutants, which is why the ten lines land
+# within 18s of each other.
+#
 # Reordering these lines moves items between shards. That is harmless and the
 # split is checked either way, but say so in the commit, and REMEASURE rather
 # than shuffling by eye: knife 19 recorded four kernels as the dearest items
@@ -228,6 +274,37 @@ dtype_tf32
 dtype_e4m3
 dtype_e5m2
 dtype_e8m0
+dtype_i4
+dtype_e2m1
+pack_roundtrip
+loop_count
+loop_bound
+loop_until
+loop_none
+attr_round
+attr_nan
+attr_ftz
+attr_approx
+attr_overflow
+attr_memsem
+attr_addf
+attr_ucmp
+assert_pass
+assert_fail
+print_tile
+assume_divby
+assume_same
+assume_bounded
+global_table
+global_ctl
+global_scratch
+global_flags
+hint_entry
+hint_memory
+alloca_scratch
+alloca_two
+alloca_ctl
+mmaf_scaled_e4m3
 drop-store-token
 load-dtype-f64
 make-token-as-iota
@@ -254,3 +331,31 @@ i64-payload-four-bytes
 e4m3-tag-as-i8
 e8m0-rounding-as-nearest-even
 e8m0-tag-as-f8e5m2
+loop-carried-not-rolled-back
+break-values-missing
+overflow-attr-not-written
+atomic-memory-attrs-swapped
+rmw-addf-as-add
+assert-message-tagged
+print-tko-token-unwritten
+assume-divby-tag-as-same-elements
+assume-same-elements-payload-four-bytes
+assume-bounded-bounds-swapped
+global-record-alignment-dropped
+global-visibility-omitted-at-13-3
+get-global-symbol-not-written
+hint-dictionary-count-wrong
+hint-tag-as-dictionary
+hint-flag-bit-misplaced
+hint-entry-flag-dropped
+exp-rounding-unwritten
+mmaf-flags-unwritten
+header-minor-still-2
+alloca-flags-unwritten
+alloca-alignment-as-num-elem
+mmaf-scaled-scale-operand-missing
+mmaf-scaled-writes-a-flags-word
+i4-tag-as-i8
+e2m1-tag-as-i4
+unpack-as-pack
+pack-result-shape-unhalved

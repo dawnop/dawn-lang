@@ -50,24 +50,41 @@
 # are `weak`, unmasked, with the token operand present (flags bit 4 on a load,
 # bit 3 on a store); `addf` is `rounding<nearest_even>` (0) with no
 # flush-to-zero (flags 0); the integer operations carry `overflow` none (0).
-# Nothing here is versioned by anything but the header:
-# the bytecode this writes is the same at 13.1, 13.2 and 13.3, and only
-# the number in the header says which; `tileiras` 13.3.36 accepted all three.
+#
+# FOUR shapes here are versioned, and knife T8 measured every one of them out
+# of the writer rather than out of a note: the header's minor byte, `exp`'s
+# inline `rounding_mode` (`exp_has_rounding`), `mmaf`'s flags varint
+# (`mmaf_has_flags`) and the Global section's record
+# (`global_has_extended_fields`). Everything else this package emits is the
+# same byte for byte at 13.1, 13.2 and 13.3; `tileiras` 13.3.36 accepts all
+# three version numbers. Two more version branches exist in the C++ writer
+# and reach nothing here: the Producer section (13.3+, written only when the
+# module carries a `producer` attribute, and this writer sets none) and the
+# unified optional-parameter bitfield of TYPES (13.3+,
+# BytecodeTypeCodeGen.cpp's `kUnifiedBitfieldVersion`, which fires only for a
+# type with an `OptionalParameter` -- in Types.td exactly the three view
+# types, all deferred with the view family by ruling 2).
 use std/bytes
 use std/list
 use std/map
 use std/narrow
 use std/str
-use dev.{RedId, IdF, IdI}
-use prog.{TileProg, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, Ret}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
+use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
-## 13.2 is the lowest version Tile IR is supported on Ampere and Ada at; the
-## three numbers that must move together are this one, the `tileiras` pin in
-## scripts/tile-golden/toolchain.txt, and the driver in the ledger.
+## The three numbers that must move together are this one, the `tileiras` pin
+## in scripts/tile-golden/toolchain.txt, and the driver in the ledger.
+##
+## Knife T8 moved the minor from 2 to 3. 13.3 is what `tileiras` 13.3.36 calls
+## its current version; 13.1 is the lowest it supports and 13.2 is what this
+## tree pinned from knife 3 to knife T15. Ampere and Ada run all three: the
+## cubin `tileiras --gpu-name sm_86` produces from the 13.3 bytes is byte for
+## byte the cubin it produced from the 13.2 bytes, which is measured in
+## tile-backend-design 6.11 rather than assumed.
 pub const BYTECODE_MAJOR: Int = 13
-pub const BYTECODE_MINOR: Int = 2
+pub const BYTECODE_MINOR: Int = 3
 
 ## The version as `tileiras --list-versions` spells it.
 pub fn bytecode_version() -> String = "${BYTECODE_MAJOR}.${BYTECODE_MINOR}"
@@ -81,6 +98,7 @@ const OP_ADDF: Int = 0x02
 const OP_ADDI: Int = 0x03
 const OP_ANDI: Int = 0x04
 const OP_BITCAST: Int = 0x09
+const OP_BREAK: Int = 0x0A
 const OP_BROADCAST: Int = 0x0B
 const OP_CAT: Int = 0x0C
 const OP_CEIL: Int = 0x0D
@@ -101,6 +119,7 @@ const OP_FTOF: Int = 0x2A
 const OP_FTOI: Int = 0x2B
 const OP_FMA: Int = 0x28
 const OP_FOR: Int = 0x29
+const OP_GET_GLOBAL: Int = 0x2C
 const OP_GET_NUM_TILE_BLOCKS: Int = 0x2E
 const OP_GET_TILE_BLOCK_ID: Int = 0x30
 const OP_IF: Int = 0x32
@@ -111,6 +130,7 @@ const OP_JOIN_TOKENS: Int = 0x3C
 const OP_LOAD_PTR_TKO: Int = 0x3D
 const OP_LOG: Int = 0x3F
 const OP_LOG2: Int = 0x40
+const OP_LOOP: Int = 0x41
 const OP_MAKE_TOKEN: Int = 0x44
 const OP_MAXF: Int = 0x45
 const OP_MAXI: Int = 0x46
@@ -151,14 +171,23 @@ const OP_TRUNCI: Int = 0x6B
 const OP_XORI: Int = 0x6C
 const OP_YIELD: Int = 0x6D
 const OP_ATAN2: Int = 0x6E
+const OP_ASSERT: Int = 0x05
+const OP_ASSUME: Int = 0x06
+const OP_PRINT_TKO: Int = 0x55
+const OP_PACK: Int = 0x6F
+const OP_UNPACK: Int = 0x70
+const OP_ALLOCA: Int = 0x71
+const OP_MMAF_SCALED: Int = 0x72
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
 # (`memory_scope`, `optimization_hints`), then its optional operands
 # (`mask`, `paddingValue`, `token` on a load; `mask`, `token` on a store).
+const LOAD_FLAG_HINTS: Int = 2
 const LOAD_FLAG_MASK: Int = 4
 const LOAD_FLAG_PAD: Int = 8
 const LOAD_FLAG_TOKEN: Int = 16
+const STORE_FLAG_HINTS: Int = 2
 const STORE_FLAG_MASK: Int = 4
 const STORE_FLAG_TOKEN: Int = 8
 
@@ -168,6 +197,13 @@ const STORE_FLAG_TOKEN: Int = 8
 # the same two in the same order.
 const ATOMIC_FLAG_MASK: Int = 1
 const ATOMIC_FLAG_TOKEN: Int = 2
+
+# `alloca`'s one optional field is its `global` unit attribute, and it
+# arrived with the operation at 13.3, so the flags varint is written at
+# every version this writer targets (generateFlagsFieldSerialization only
+# guards the word when the FIRST optional field is younger than the
+# operation). Bit 0 is the only bit there is.
+const ALLOCA_FLAG_GLOBAL: Int = 1
 
 # `memory_ordering_semantics`: weak. `comparison_ordering`: ordered, so every
 # predicate answers 0 on a NaN operand. `signedness`: signed. `rounding_mode`:
@@ -191,6 +227,91 @@ const SIGNED: Int = 1
 const UNSIGNED: Int = 0
 const ROUND_NEAREST_EVEN: Int = 0
 
+# ---- knife T4: the rest of each attribute domain ----
+#
+# The values below are the ones no operation in this writer had asked for
+# before knife T4. Each is one row of scripts/tileir-features/attrs.txt,
+# and the enum values are AttrDefs.td's own (the same file the three
+# tables above were read from).
+
+# `memory_ordering_semantics`, the three the atomics accept beyond
+# `relaxed`. Which operation may say which is not the same list for all of
+# them: a load takes weak / relaxed / acquire, a store weak / relaxed /
+# release, and the two atomics relaxed / acquire / release / acq_rel
+# (Ops.td's `OnlyVariants`). Only the atomics are written here.
+const ORDER_ACQUIRE: Int = 2
+const ORDER_RELEASE: Int = 3
+const ORDER_ACQ_REL: Int = 4
+
+# `memory_scope`, the two beside `device`. Narrower than a device
+# (`tl_blk`, one tile block) and wider (`sys`, every device in the system).
+const SCOPE_TL_BLK: Int = 0
+const SCOPE_SYS: Int = 2
+
+# `comparison_ordering`: unordered, so every predicate answers 1 when
+# either operand is a NaN. `ordered` (1) is the other value and the one
+# every comparison before knife T4 carried.
+const CMP_UNORDERED: Int = 0
+
+# `rounding_mode`, the three directed modes and the approximate one.
+# `negative_inf` and `positive_inf` are IEEE 754's round-toward-minus and
+# round-toward-plus and are accepted by addf / subf / mulf / divf / fma /
+# sqrt; `approx` is the architecture's fast approximation and is accepted
+# by divf / sqrt / rsqrt / exp / tanh, and ONLY on an f32 tile
+# (`verifyApprox` in SharedVerifiers.h).
+const ROUND_NEGATIVE_INF: Int = 2
+const ROUND_POSITIVE_INF: Int = 3
+const ROUND_APPROX: Int = 4
+
+# `overflow`, the three assumptions beside `none`. They are what the
+# COMPILER may assume, not what the hardware does: a program that wraps
+# under one of them is undefined, so no corpus can tell them apart from
+# `none` by looking at an answer. That is why attrs.txt records them at
+# layer 1 with a named exemption rather than owing a device verdict.
+const OVERFLOW_NSW: Int = 1
+const OVERFLOW_NUW: Int = 2
+const OVERFLOW_NW: Int = 3
+
+# The flag bits of the unit attributes, which is the whole of what a unit
+# attribute is in the stream: `generateFlagsFieldSerialization` writes the
+# bit and `generateAttributeSerialization` skips the payload
+# (BytecodeGen.cpp says so in as many words: "UnitAttr presence is ONLY
+# encoded in the flags field"). The bit numbers are the version-ordered
+# assignment: within one version the optional ATTRIBUTES come first in
+# declaration order, then the optional operands.
+#
+#   addf / subf / mulf / divf   `flush_to_zero` is the only optional field
+#                               at all, so it is bit 0
+#   maxf / minf                 `propagate_nan` is declared before
+#                               `flush_to_zero`, so they are bits 0 and 1
+#   for                         `unsignedCmp` is the only one, bit 0; it
+#                               arrived in 13.2, which is why `for` writes
+#                               a flags varint at all (`for_has_flags`)
+const FLOAT_FLAG_FTZ: Int = 1
+const MINMAX_FLAG_PROPAGATE_NAN: Int = 1
+const MINMAX_FLAG_FTZ: Int = 2
+const FOR_FLAG_UNSIGNED: Int = 1
+
+# `mmaf`'s `fast_acc` is its ONLY optional field and it arrived in 13.3, so
+# it is bit 0 of the flags varint that exists from that version on. It asks
+# the hardware to accumulate at lower precision than the accumulator's
+# format; this writer never asks for it, so the varint it emits is
+# MMAF_FLAG_FAST_ACC_UNSET. The two constants are separate on purpose: the
+# BIT is what scripts/tileir-features/attrs.txt's `unit.fast_acc` row names
+# and is held to, and the WORD is what the writer emits, so a knife that
+# starts setting the bit changes the second and not the first.
+const MMAF_FLAG_FAST_ACC: Int = 1
+const MMAF_FLAG_FAST_ACC_UNSET: Int = 0
+
+# `symbol_visibility`: the two cases of AttrDefs.td's SymbolVisibility enum.
+# The ENUM is 13.1 and both values have always been spellable; what arrived
+# at 13.3 is the field in the Global section's record that a writer could put
+# either of them in (`global_has_extended_fields`), which is why
+# scripts/tileir-features/attrs.txt gives these two rows `since` 13.1 and
+# knife T8.
+const VIS_PUBLIC: Int = 0
+const VIS_PRIVATE: Int = 1
+
 # `rounding`: zero, integer division truncating toward zero. The dialect's
 # own default for `divi`, and `to_int`'s rounding on the host.
 const ROUND_ZERO: Int = 1
@@ -209,11 +330,63 @@ const OVERFLOW_NONE: Int = 0
 # both measured), and its default, which is why the text prints nothing.
 const ROUND_FULL: Int = 5
 
+# `print_tko`'s one optional field is its `token` OPERAND, which arrived in
+# 13.2; there is no optional attribute, so the token takes bit 0. The flags
+# varint itself is written only from 13.2 on
+# (`generateFlagsFieldSerialization`'s version check fires because the
+# operation is 13.1 and its first optional field is not), and this writer
+# targets 13.3, so it is always written here.
+const PRINT_FLAG_TOKEN: Int = 1
+
 # Attribute tags (BytecodeAttrOpcodes.td, frozen). A reduction's identities
 # are an ArrayAttr, whose elements are written SELF-CONTAINED: each carries
 # its tag and the index of its element type before its payload.
 const ATTR_INTEGER: Int = 1
 const ATTR_FLOAT: Int = 2
+
+# Knife T6's three predicate tags. They are written SELF-CONTAINED for a
+# reason worth writing down, because it is the rule that decides whether a
+# tag byte appears at all: `writeOpAttribute`'s `std::is_base_of_v<Attribute,
+# T>` branch sets `isSelfContained` to `mlir::detail::IsInterface<T>::value`,
+# and `assume`'s `predicate` is declared as the INTERFACE
+# CudaTile_AssumePredicateAttrInterface, so the getter's type is an
+# interface and the tag is written. A required attribute whose ODS type is
+# concrete gets no tag: `assert`'s `message` and `print_tko`'s `str` are
+# `StrAttr`, whose getter answers a `StringRef`, which lands in
+# `writeOpAttribute`'s own StringRef branch and writes the String section
+# INDEX and nothing else. So tag 5 (String) is never emitted by this writer,
+# and the mutant assert-message-tagged is what holds that claim.
+const ATTR_DIV_BY: Int = 8
+const ATTR_SAME_ELEMENTS: Int = 9
+const ATTR_BOUNDED: Int = 12
+
+# Knife T15's two tags. `Dictionary` (10) is the general one and
+# `OptimizationHints` (11) wraps exactly one of them, which is why the two
+# land in the same knife: nothing here can write an 11 without writing a 10
+# inside it.
+#
+# WHERE THE 11 APPEARS IS NOT WHERE ITS DICTIONARY APPEARS, and the two
+# places this writer puts hints are on opposite sides of that line:
+#
+#   on the ENTRY   `writeFunctionTableSection` calls
+#                  `writeSelfContainedAttribute`, so the 11 IS written, and
+#                  the DictionaryAttr under it is then written with
+#                  `isSelfContained=false` -- no 10 for the outer
+#                  dictionary
+#   on a LOAD or STORE
+#                  the generated op writer calls `writeOpAttribute`, whose
+#                  `std::is_base_of_v<Attribute, T>` branch sets
+#                  `isSelfContained` to `IsInterface<T>::value`, and
+#                  `OptimizationHintsAttr` is a concrete AttrDef and not an
+#                  interface (unlike `assume`'s predicate above). So NO 11
+#                  is written at all: the flag bit is what announces the
+#                  attribute, and the bytes start at the outer count
+#
+# In both places the per-architecture dictionaries are VALUES of the outer
+# dictionary, and a dictionary value is written self-contained, so each of
+# them does carry its 10.
+const ATTR_DICTIONARY: Int = 10
+const ATTR_OPTIMIZATION_HINTS: Int = 11
 
 # `permute`'s `permutation` is a DENSE array and is NOT written the way that
 # `identities` array is. The two shapes were measured against the writer
@@ -234,9 +407,77 @@ const ATTR_FLOAT: Int = 2
 fn emit_i32_array(w: W, xs: List[Int]) -> W =
   W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }
 
+# `same_elements`'s values are a `DenseI64ArrayAttr`, which is the same
+# `writeLEVarSize` shape one element WIDER: the count as a varint, then each
+# element as eight raw little-endian bytes. The reader is `readLEVarSize`
+# into a `SmallVector<int64_t>` and it takes the count on trust, so a width
+# written wrongly is read as the wrong number of elements rather than as a
+# wrong value (the mutant assume-same-elements-payload-four-bytes).
+fn emit_i64_array(w: W, xs: List[Int]) -> W =
+  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }
+
+# One RAW byte, not a varint. `div_by` and `bounded` write their
+# presence flags with `writer.writeByte` and the reader takes them with
+# `reader.readLE(uint8_t)`, so the two agree on a fixed byte and not on a
+# varint that happens to be one byte wide for every value under 128.
+fn emit_byte(w: W, x: Int) -> W = W { ..w, body: bytes.put(w.body, x) }
+
+# An optional signed payload: zigzag, as `writeSignedVarInt` writes it.
+fn emit_opt_signed(w: W, x: Option[Int]) -> W = match x {
+  Some(v) -> W { ..w, body: put_varint_u64(w.body, zigzag(v)) }
+  None -> w
+}
+
+fn opt_bit(x: Option[Int], bit: Int) -> Int = match x {
+  Some(_v) -> bit
+  None -> 0
+}
+
+# One `assume` predicate, self-contained: its tag and then its payload.
+#
+#   div_by         divisor[varint] flags[byte: 1 every, 2 along]
+#                  every[zigzag varint]? along[zigzag varint]?
+#   same_elements  the DenseI64ArrayAttr above, and nothing else
+#   bounded        flags[byte: 1 lb, 2 ub] lb[zigzag varint]? ub[zigzag varint]?
+#
+# The two flag bytes are the SAME two bits in the same order, and the
+# payloads that follow are in declaration order, so writing `bounded`'s the
+# other way round is a legal file that says the bounds the other way round
+# (the mutant assume-bounded-bounds-swapped, which the verifier catches
+# because a lower bound above an upper one is refused).
+fn assume_attr(w0: W, p: AssumePred) -> W = match p {
+  DivBy(divisor, every, along) -> {
+    let w1 = emit_byte(emit(emit(w0, ATTR_DIV_BY), divisor), opt_bit(every, 1) | opt_bit(along, 2))
+    emit_opt_signed(emit_opt_signed(w1, every), along)
+  }
+  SameElements(groups) -> emit_i64_array(emit(w0, ATTR_SAME_ELEMENTS), groups)
+  Bounded(lb, ub) -> {
+    let w1 = emit_byte(emit(w0, ATTR_BOUNDED), opt_bit(lb, 1) | opt_bit(ub, 2))
+    emit_opt_signed(emit_opt_signed(w1, lb), ub)
+  }
+}
+
 # The `rmw_mode` values (AttrDefs.td's AtomicRMWMode, an i32 enum). The
 # order is the enum's own and not alphabetical: `add` is 3 and `addf` 4,
 # with the three bitwise modes before them.
+# The memory ordering and scope a mode name asks for, with the base mode
+# it is a name of. An `atomic_rmw_tko` carries three required enum
+# attributes and this writer wrote two of them as constants until knife
+# T4; a name with a suffix moves those two, the way a rounding suffix
+# moves a float operation's.
+#
+# The unsuffixed names are `relaxed device`, which is what every atomic
+# before knife T4 wrote and what leetgpu 13's histogram needs (its
+# colliding lanes are in different tile blocks, so `tl_blk` would be too
+# narrow). `weak` is the one ordering the atomics refuse and is never
+# named here; the layer-1 mutant is what says so.
+fn rmw_attrs(mode: String) -> (String, Int, Int) = match mode {
+  "add_acquire_tl_blk" -> ("add", ORDER_ACQUIRE, SCOPE_TL_BLK)
+  "add_release_sys" -> ("add", ORDER_RELEASE, SCOPE_SYS)
+  "add_acq_rel_device" -> ("add", ORDER_ACQ_REL, SCOPE_DEVICE)
+  _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)
+}
+
 fn rmw_mode_value(mode: String) -> Int = match mode {
   "and" -> 0
   "or" -> 1
@@ -251,16 +492,27 @@ fn rmw_mode_value(mode: String) -> Int = match mode {
   _ -> panic("tileir: `${mode}` is not an atomic read-modify-write mode")
 }
 
-# The `comparison_predicate` values (AttrDefs.td, an i32 enum).
+# The `comparison_predicate` values (AttrDefs.td, an i32 enum). A `u`
+# prefix is the same predicate under the OTHER `comparison_ordering`, the
+# way `shru` is `shri` under the other signedness: `cmpf` carries the two
+# attributes side by side, so one name has to say both. `cmpi` has no
+# ordering attribute and its predicates are the six unprefixed ones.
 fn predicate_value(pred: String) -> Int = match pred {
-  "eq" -> 0
-  "ne" -> 1
-  "lt" -> 2
-  "le" -> 3
-  "gt" -> 4
-  "ge" -> 5
+  "eq" | "ueq" -> 0
+  "ne" | "une" -> 1
+  "lt" | "ult" -> 2
+  "le" | "ule" -> 3
+  "gt" | "ugt" -> 4
+  "ge" | "uge" -> 5
   _ -> panic("tileir: `${pred}` is not a comparison predicate")
 }
+
+# The `comparison_ordering` a float comparison writes after its predicate.
+# `ordered` answers 0 whenever either operand is a NaN; `unordered`
+# answers 1. The two agree on every pair of numbers, so only a corpus with
+# a NaN in it can tell them apart -- which is what the attr_nan kernel is.
+fn cmp_ordering(pred: String) -> Int =
+  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_UNORDERED } else { CMP_ORDERED }
 
 # ---- the integer family (knife 10) ----
 #
@@ -292,9 +544,9 @@ fn predicate_value(pred: String) -> Int = match pred {
 # The opcode of an integer operation. `shri` and `shru` are one opcode; the
 # signedness attribute below is what separates them.
 fn int_op(op: String) -> Int = match op {
-  "addi" -> OP_ADDI
-  "subi" -> OP_SUBI
-  "muli" -> OP_MULI
+  "addi" | "addi_nsw" -> OP_ADDI
+  "subi" | "subi_nuw" -> OP_SUBI
+  "muli" | "muli_nw" -> OP_MULI
   "divi" -> OP_DIVI
   "remi" -> OP_REMI
   "maxi" -> OP_MAXI
@@ -331,6 +583,12 @@ fn int_attrs(op: String) -> List[Int] = match op {
   "addi" -> [OVERFLOW_NONE]
   "subi" -> [OVERFLOW_NONE]
   "muli" -> [OVERFLOW_NONE]
+  # the three assumptions, one per operation, knife T4. They are the same
+  # attribute in the same position; only the value changes, which is what
+  # makes them invisible below layer 1
+  "addi_nsw" -> [OVERFLOW_NSW]
+  "subi_nuw" -> [OVERFLOW_NUW]
+  "muli_nw" -> [OVERFLOW_NW]
   "shli" -> [OVERFLOW_NONE]
   "negi" -> [OVERFLOW_NONE]
   "divi" -> [SIGNED, ROUND_ZERO]
@@ -348,8 +606,11 @@ fn cast_op(op: String) -> Int = match op {
   "ftoi" -> OP_FTOI
   "ftof" -> OP_FTOF
   "exti" -> OP_EXTI
+  "extis" -> OP_EXTI
   "trunci" -> OP_TRUNCI
   "bitcast" -> OP_BITCAST
+  "pack" -> OP_PACK
+  "unpack" -> OP_UNPACK
   _ -> panic("tileir: `${op}` is not a conversion")
 }
 
@@ -372,6 +633,7 @@ fn cast_attrs(op: String, to: String) -> List[Int] = match op {
   "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]
   "ftof" -> [ftof_rounding(to)]
   "exti" -> [UNSIGNED]
+  "extis" -> [SIGNED]
   "trunci" -> [OVERFLOW_NONE]
   _ -> []
 }
@@ -395,13 +657,20 @@ fn ftof_rounding(to: String) -> Int =
 # rounding mode. `maxf` and `minf` take `propagate_nan` and `flush_to_zero`
 # instead, both of which are unit attributes and so are flag bits with no
 # payload; `negf` and `absf` take nothing at all.
+# An operation NAME here is the opcode together with the attributes it
+# carries, not the mnemonic alone. `shri` and `shru` have been one opcode
+# under two signedness attributes since knife 10; knife T4 spends the same
+# coin on the rest of the attribute domains, so `addf_neg_inf` is `addf`
+# with `rounding<negative_inf>` and `maxf_nan` is `maxf` with
+# `propagate_nan`. The three tables below split a name into its opcode, its
+# flags word and its inline rounding mode, and render.dawn spells it.
 fn float_op(op: String) -> Int = match op {
-  "addf" -> OP_ADDF
+  "addf" | "addf_neg_inf" | "addf_pos_inf" | "addf_ftz" -> OP_ADDF
   "subf" -> OP_SUBF
-  "mulf" -> OP_MULF
-  "divf" -> OP_DIVF
-  "maxf" -> OP_MAXF
-  "minf" -> OP_MINF
+  "mulf" | "mulf_neg_inf" | "mulf_pos_inf" | "mulf_ftz" -> OP_MULF
+  "divf" | "divf_neg_inf" | "divf_pos_inf" -> OP_DIVF
+  "maxf" | "maxf_nan" -> OP_MAXF
+  "minf" | "minf_nan" -> OP_MINF
   "pow" -> OP_POW
   "negf" -> OP_NEGF
   "absf" -> OP_ABSF
@@ -409,7 +678,7 @@ fn float_op(op: String) -> Int = match op {
   "exp2" -> OP_EXP2
   "log" -> OP_LOG
   "log2" -> OP_LOG2
-  "sqrt" -> OP_SQRT
+  "sqrt" | "sqrt_approx" -> OP_SQRT
   "rsqrt" -> OP_RSQRT
   "tanh" -> OP_TANH
   "floor" -> OP_FLOOR
@@ -424,15 +693,39 @@ fn float_op(op: String) -> Int = match op {
   _ -> panic("tileir: `${op}` is not a float operation")
 }
 
-fn float_op_rounds(op: String) -> Bool = op == "addf" || op == "subf" || op == "mulf" || op == "divf"
+# The rounding mode a BINARY float operation writes inline after its flags,
+# or `None` where the operation has no such attribute. `nearest_even` is
+# the default and what every operation carried before knife T4; the two
+# directed modes are the dialect's `negative_inf` and `positive_inf`, and
+# `verifyIEEERoundingModes` (CudaTile.cpp) accepts them on an f64 tile as
+# readily as on an f32 one, unlike `approx`.
+fn float_rounding(op: String) -> Option[Int] = match op {
+  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> Some(ROUND_NEAREST_EVEN)
+  "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEGATIVE_INF)
+  "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_POSITIVE_INF)
+  _ -> None
+}
+
+# The flags word of a float operation: the unit attributes it sets, and
+# nothing else (no float operation here has an optional operand). The
+# operations with no optional field at all write no flags word, which is
+# `float_op_has_flags` below; this table says what goes in it when there
+# is one.
+fn float_flags(op: String) -> Int = match op {
+  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ
+  "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN
+  _ -> 0
+}
 
 # Whether an operation writes a flags varint: it does exactly when it has an
 # optional field the targeted bytecode version knows (BytecodeGen.cpp
 # generateFlagsFieldSerialization), and every optional field here is a
 # `UnitAttr` that is never set, so the varint is always 0. `pow` has none;
-# `exp` has none at 13.2 (its `rounding_mode` is 13.3 and a reader that met
-# one here would take the next byte for the operand); `tanh` has a
-# `rounding_mode` that is REQUIRED at 13.2 and so is not a flag either.
+# `exp` has none at ANY version (its `rounding_mode` is a DefaultValuedAttr
+# and therefore a required attribute written inline from 13.3 on, not an
+# optional one, so it never buys `exp` a flags word -- see
+# `exp_has_rounding`); `tanh` has a `rounding_mode` that is REQUIRED since
+# 13.1 and so is not a flag either.
 # Every measurement behind this table is scripts/tile-golden's layer 1: each
 # wrong shape was handed to `tileiras` and refused.
 #
@@ -448,10 +741,18 @@ fn float_op_has_flags(op: String) -> Bool =
     "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))
 
 # The rounding mode a unary operation writes after its flags, or `None`.
+# `exp` is the version-dependent one: its `rounding_mode` entered at 13.3
+# (`exp_has_rounding`), and `full` is both the dialect's default and the only
+# mode an f64 `exp` takes, so what the byte carries is the value the text
+# already means rather than a new choice.
 fn unary_rounding(op: String) -> Option[Int] =
   if op == "sqrt" {
     Some(ROUND_NEAREST_EVEN)
+  } else if op == "sqrt_approx" {
+    Some(ROUND_APPROX)
   } else if op == "tanh" {
+    Some(ROUND_FULL)
+  } else if op == "exp" && exp_has_rounding() {
     Some(ROUND_FULL)
   } else {
     None
@@ -470,9 +771,15 @@ const SEC_STRING: Int = 1
 const SEC_FUNC: Int = 2
 const SEC_CONSTANT: Int = 4
 const SEC_TYPE: Int = 5
+const SEC_GLOBAL: Int = 6
 
 const PAD_BYTE: Int = 0xCB
 const FLAG_KERNEL: Int = 0x02
+
+# Bit 2 of the same byte: this entry carries `optimization_hints`, and the
+# attribute follows the location index (FunctionFlags in BytecodeEnums.h).
+# Bit 0 is `VisibilityPrivate`, which this writer never sets.
+const FLAG_HAS_HINTS: Int = 0x04
 
 # The tag of a scalar number type by its Tile IR name.
 fn num_tag(name: String) -> Int = match name {
@@ -489,6 +796,8 @@ fn num_tag(name: String) -> Int = match name {
   "f8E4M3FN" -> 10
   "f8E5M2" -> 11
   "f8E8M0FNU" -> 18
+  "f4E2M1FN" -> 19
+  "i4" -> 22
   _ -> panic("tileir: `${name}` has no Tile IR type tag")
 }
 
@@ -788,6 +1097,52 @@ fn number(w: W, id: Int) -> W = W { ..w, index: map.insert(w.index, id, w.nvals)
 
 fn number_all(w: W, ids: List[Int]) -> W = list.fold(ids, w, number)
 
+# The body of an `optimization_hints` dictionary: the outer count, then per
+# architecture its String section index, the Dictionary tag and that
+# architecture's own count, then per hint its key index and the value as a
+# self-contained IntegerAttr (tag, the index of the type `i64`, the number).
+#
+# The value's type index is the reason a hint costs a TYPE table entry as
+# well as two string ones: `parseOpAttribute` for an IntegerAttr with no
+# expected type reads a type index and refuses anything that is not an
+# IntegerType. `i64` is what MLIR's own parser gives `{latency = 4}`, so
+# this writes the same bytes the C++ writer would for the same text.
+#
+# Nothing here checks the keys or the ranges, and that is measured rather
+# than assumed: `OptimizationHintsAttr::verifyParamWithContext` returns
+# early unless `-Wunsupported-hints` is on, which it is not by default.
+# What the reader does refuse is the SHAPE, and that is what the layer-1
+# mutants in scripts/tile-golden/run.sh hold.
+fn put_hints(w0: W, out0: bytes.Buf, hints: Hints) -> (W, bytes.Buf) = {
+  var w = w0
+  var out = put_varint(out0, len(hints))
+  for entry in hints {
+    let (arch, under) = entry
+    let (w1, ai) = str_of(w, arch)
+    w = w1
+    out = put_varint(put_varint(put_varint(out, ai), ATTR_DICTIONARY), len(under))
+    for h in under {
+      let (key, value) = h
+      let (w2, ki) = str_of(w, key)
+      let (w3, ti) = num_ty(w2, "i64")
+      w = w3
+      out = put_varint(put_varint(put_varint(put_varint(out, ki), ATTR_INTEGER), ti), value)
+    }
+  }
+  (w, out)
+}
+
+# `put_hints` into the body under construction, for the two memory
+# operations. Writes NOTHING when there are no hints, which is what keeps
+# every kernel before knife T15 byte for byte as it was: the flag bit is
+# clear and the reader never looks.
+fn emit_hints(w0: W, hints: Hints) -> W = if len(hints) == 0 { w0 } else {
+  let (w1, b) = put_hints(w0, w0.body, hints)
+  W { ..w1, body: b }
+}
+
+fn hints_flag(hints: Hints, bit: Int) -> Int = if len(hints) == 0 { 0 } else { bit }
+
 # opcode, then one result type index.
 # One element of a reduction's `identities` array, self-contained: its tag,
 # the index of its ELEMENT type (`f64`, not `tile<128xf64>`) and its
@@ -851,22 +1206,31 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   Broadcast(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BROADCAST, to), src)
   IotaTile(_dst, t) -> emit_op(w0, OP_IOTA, t)
   Offset(_dst, ptrs, offs, ptr_ty, _off_ty) -> emit_ref(emit_ref(emit_op(w0, OP_OFFSET, ptr_ty), ptrs), offs)
-  LoadPtr(_dst, _tok_out, ptrs, mask, pad, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
-    # results: the tile, the token; flags: which of the optional operands
-    # follow; memory_ordering_semantics weak; operands: source, then the
-    # mask, the padding value and the token, each present exactly when its
-    # flag bit is set.
+  LoadPtr(_dst, _tok_out, ptrs, mask, pad, tok_in, _ptr_ty, _mask_ty, val_ty, hints) -> {
+    # results: the tile, the token; flags: which of the optional attributes
+    # and operands follow; memory_ordering_semantics weak; then
+    # `optimization_hints` when its bit is set; then operands: source, then
+    # the mask, the padding value and the token, each present exactly when
+    # its flag bit is set.
+    #
+    # The attribute goes BEFORE the operands and after the required inline
+    # enum, because the generated writer serializes the flags word, then
+    # every attribute in declaration order, then the operands
+    # (`generateAttributeSerialization`); `memory_scope` is the other
+    # optional attribute and this writer never sets its bit.
     let w1 = emit_op(w0, OP_LOAD_PTR_TKO, val_ty)
     let (w2, tok) = ty(w1, Token)
     let flags = LOAD_FLAG_TOKEN | opt_flag(mask, LOAD_FLAG_MASK) | opt_flag(pad, LOAD_FLAG_PAD)
-    let w3 = emit(emit(emit(w2, tok), flags), ORDER_WEAK)
+      | hints_flag(hints, LOAD_FLAG_HINTS)
+    let w3 = emit_hints(emit(emit(emit(w2, tok), flags), ORDER_WEAK), hints)
     emit_ref(emit_opt_ref(emit_opt_ref(emit_ref(w3, ptrs), mask), pad), tok_in)
   }
-  StorePtr(_tok_out, ptrs, value, mask, tok_in, _ptr_ty, _mask_ty, _val_ty) -> {
-    # result: the token; flags: the mask when there is one, the token;
-    # weak; operands: destination, value, mask, token.
-    let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK)
-    let w1 = emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK)
+  StorePtr(_tok_out, ptrs, value, mask, tok_in, _ptr_ty, _mask_ty, _val_ty, hints) -> {
+    # result: the token; flags: the hints when there are any, the mask when
+    # there is one, the token; weak; the hints; operands: destination,
+    # value, mask, token.
+    let flags = STORE_FLAG_TOKEN | opt_flag(mask, STORE_FLAG_MASK) | hints_flag(hints, STORE_FLAG_HINTS)
+    let w1 = emit_hints(emit(emit(emit_op(w0, OP_STORE_PTR_TKO, Token), flags), ORDER_WEAK), hints)
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)
   }
   AtomicRMWPtr(_dst, _tok_out, ptrs, mode, arg, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
@@ -879,7 +1243,8 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w1 = emit_op(w0, OP_ATOMIC_RMW_TKO, val_ty)
     let (w2, tok) = ty(w1, Token)
     let flags = ATOMIC_FLAG_TOKEN | opt_flag(mask, ATOMIC_FLAG_MASK)
-    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value(mode))
+    let (base, order, scope) = rmw_attrs(mode)
+    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), order), scope), rmw_mode_value(base))
     emit_ref(emit_opt_ref(emit_ref(emit_ref(w3, ptrs), arg), mask), tok_in)
   }
   AtomicCASPtr(_dst, _tok_out, ptrs, cmp, val, mask, tok_in, _ptr_ty, _mask_ty, val_ty) -> {
@@ -898,7 +1263,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # flags where the operation has an optional field (never set here), then
     # the rounding mode where it has a required one
     let w1 = emit_op(w0, float_op(op), t)
-    let w2 = if float_op_has_flags(op) { emit(w1, 0) } else { w1 }
+    let w2 = if float_op_has_flags(op) { emit(w1, float_flags(op)) } else { w1 }
     let w3 = match unary_rounding(op) {
       Some(mode) -> emit(w2, mode)
       None -> w2
@@ -909,8 +1274,15 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # flags: neither flush_to_zero nor propagate_nan, both unit attributes
     # and so bits with no payload; then the rounding mode, on the four
     # operations that take one. `pow` has neither.
-    let w1 = if float_op_has_flags(op) { emit(emit_op(w0, float_op(op), t), 0) } else { emit_op(w0, float_op(op), t) }
-    let w2 = if float_op_rounds(op) { emit(w1, ROUND_NEAREST_EVEN) } else { w1 }
+    let w1 = if float_op_has_flags(op) {
+      emit(emit_op(w0, float_op(op), t), float_flags(op))
+    } else {
+      emit_op(w0, float_op(op), t)
+    }
+    let w2 = match float_rounding(op) {
+      Some(mode) -> emit(w1, mode)
+      None -> w1
+    }
     emit_ref(emit_ref(w2, lhs), rhs)
   }
   FloatFma(_dst, t, lhs, rhs, acc) -> {
@@ -928,16 +1300,33 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc)
   }
   FloatMma(_dst, t, _lhs_ty, _rhs_ty, lhs, rhs, acc) -> {
-    # the result type (which is the accumulator's), then the three
-    # operands. `fast_acc` is `mmaf`'s one optional field and it arrived in
-    # 13.3, so at 13.2 there is NO flags varint: a reader of this version
-    # would take the next byte for the first operand.
-    emit_ref(emit_ref(emit_ref(emit_op(w0, OP_MMAF, t), lhs), rhs), acc)
+    # the result type (which is the accumulator's), then the flags varint
+    # from 13.3 on, then the three operands. `fast_acc` is `mmaf`'s one
+    # optional field and it arrived in 13.3, so at 13.2 there was NO flags
+    # varint and a reader of that version took the next byte for the first
+    # operand; from 13.3 the varint is there and a reader that does not find
+    # it reads an operand index out of the accumulator's. Both directions are
+    # mutants (global-visibility-omitted-at-13-3's sibling
+    # mmaf-flags-unwritten, and knife T7's global-visibility-written-at-13-2
+    # for the other side of the same wall).
+    let w1 = emit_op(w0, OP_MMAF, t)
+    let w2 = if mmaf_has_flags() { emit(w1, MMAF_FLAG_FAST_ACC_UNSET) } else { w1 }
+    emit_ref(emit_ref(emit_ref(w2, lhs), rhs), acc)
+  }
+  FloatMmaScaled(_dst, t, _lhs_ty, _rhs_ty, _scale_ty, _rhs_scale_ty, lhs, rhs, acc, lhs_scale, rhs_scale) -> {
+    # the result type (which is the f32 accumulator's), then the five
+    # operands. `mmaf_scaled` has NO attribute and NO optional field at any
+    # version, so unlike its sibling `mmaf` it writes no flags varint --
+    # getVersionOrderedBitAssignments answers an empty table and
+    # generateFlagsFieldSerialization returns without emitting anything.
+    # Nothing is variadic either, so no count is written.
+    let w1 = emit_op(w0, OP_MMAF_SCALED, t)
+    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)
   }
   CmpFloat(_dst, pred, _t, res_ty, lhs, rhs) -> {
     # the result is the i1 tile; the predicate and the ordering are required
     # enum attributes, so they are read inline and there is no flags field.
-    let w1 = emit(emit(emit_op(w0, OP_CMPF, res_ty), predicate_value(pred)), CMP_ORDERED)
+    let w1 = emit(emit(emit_op(w0, OP_CMPF, res_ty), predicate_value(pred)), cmp_ordering(pred))
     emit_ref(emit_ref(w1, lhs), rhs)
   }
   CmpInt(_dst, pred, _t, res_ty, lhs, rhs) -> {
@@ -959,9 +1348,9 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
     emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
-  ForLoop(_results, tys, iv, lower, upper, step, inits, carried, body) -> {
-    # results: their count, then a type each; flags: `unsigned` absent
-    # (13.2 and later know the field); operands: their count, then the
+  ForLoop(_results, tys, iv, lower, upper, step, unsigned, inits, carried, body) -> {
+    # results: their count, then a type each; flags: `unsignedCmp`, the
+    # loop's one optional field (13.2 and later know it); operands: their count, then the
     # bounds, the step and the initial values; one region of one block
     # whose arguments are the induction variable (i32) and the carried
     # values, then the body's instructions.
@@ -970,7 +1359,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
       let (wt, ti) = ty(w, t)
       emit(wt, ti)
     })
-    let w3 = if for_has_flags() { emit(w2, 0) } else { w2 }
+    let w3 = if for_has_flags() { emit(w2, if unsigned { FOR_FLAG_UNSIGNED } else { 0 }) } else { w2 }
     let w4 = list.fold([lower, upper, step] ++ inits, emit(w3, 3 + len(inits)), emit_ref)
     let w5 = emit(emit(emit(w4, 1), 1), 1 + len(carried))
     let (w6, i32i) = ty(w5, Tile([], Num("i32")))
@@ -1047,6 +1436,32 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w3 = emit(emit_ref(w2, cond), 2)
     region(region(w3, on_true), on_false)
   }
+  WhileLoop(_results, tys, inits, carried, body) -> {
+    # `loop` has no induction variable, no bounds and NO FLAGS: it carries
+    # no optional attribute and no optional operand, so tblgen writes no
+    # flags varint for it (`getVersionOrderedBitAssignments` is empty and
+    # `generateFlagsFieldSerialization` returns before writing one). That is
+    # the one place its layout differs from `for`'s beyond the missing
+    # operands: results, their types, the operand count and the initial
+    # values, one region of one block whose arguments are the carried
+    # values, then the body.
+    let wl0 = emit(emit(w0, OP_LOOP), len(tys))
+    let wl1 = list.fold(tys, wl0, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let wl2 = list.fold(inits, emit(wl1, len(inits)), emit_ref)
+    let wl3 = emit(emit(emit(wl2, 1), 1), len(carried))
+    let w_block = list.fold(tys, wl3, (w, t) => {
+      let (wt, ti) = ty(w, t)
+      emit(wt, ti)
+    })
+    let w_args = number_all(w_block, carried)
+    let w_body = list.fold(body, emit(w_args, len(body)), instr)
+    # the block is over: its indices roll back, the loop's results take them
+    roll_back(w_block, w_body)
+  }
+  BreakVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_BREAK), 0), len(values)), emit_ref)
   YieldVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_YIELD), 0), len(values)), emit_ref)
   Cont(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_CONTINUE), 0), len(values)), emit_ref)
   ExtractTile(_dst, src, _from, to, indices) -> {
@@ -1093,6 +1508,55 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)
   IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)
   PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_PTR, to), src)
+  AssertTile(cond, _cond_ty, message) -> {
+    # no results, so no result count and no result type; no optional field,
+    # so no flags; the message as a String section INDEX with no tag (the
+    # ATTR_ constants above say why); one required operand, so no count.
+    let (w1, si) = str_of(w0, message)
+    emit_ref(emit(emit(w1, OP_ASSERT), si), cond)
+  }
+  AssumeTile(_dst, src, pred, t) -> {
+    # one result whose type is the operand's, the predicate self-contained,
+    # then the operand. Nothing is variadic, so no counts anywhere.
+    emit_ref(assume_attr(emit_op(w0, OP_ASSUME, t), pred), src)
+  }
+  PrintTile(_tok_out, fmt, args, _arg_ty, tok_in) -> {
+    # the result COUNT (1, because `args` is variadic and tblgen writes the
+    # count for an operation with any variadic argument or result), the
+    # token result type, the flags (the token operand is always carried
+    # here), the format string's index, then the args with THEIR count and
+    # the token without one: `AttrSizedOperandSegments` makes each operand
+    # group its own `writeOperands` call, and only the variadic group
+    # encodes a size.
+    let w1 = emit(emit_op_counted(w0, OP_PRINT_TKO, Token), PRINT_FLAG_TOKEN)
+    let (w2, si) = str_of(w1, fmt)
+    emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)
+  }
+  AllocaPtr(_dst, num_elem, align, shared, t) -> {
+    # opcode, result type, the flags varint, then the two REQUIRED
+    # attributes in declaration order: `num_elem` then `alignment`. Both
+    # are `I64Attr`, so writeOpAttribute takes its `std::is_integral_v`
+    # arm and writes a plain varint with no tag and no type index, the way
+    # `cat`'s `dim` is written. `global` is a UnitAttr and therefore lives
+    # only in the flags word; generateAttributeSerialization skips it.
+    # `alloca` has no operands at all, so nothing follows, and no count is
+    # written anywhere: neither an argument nor a result is variadic.
+    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })
+    emit(emit(w1, num_elem), align)
+  }
+  GetGlobalPtr(_dst, sym, t) -> {
+    # opcode, result type, then the symbol: a FlatSymbolRefAttr is a plain
+    # STRING TABLE INDEX in the stream. tblgen sends it through
+    # writeOpAttribute's StringRef arm (the ODS getter of a
+    # FlatSymbolRefAttr argument answers a StringRef), which writes
+    # `strMgr.getStringIndex(name)`, and the reader's FlatSymbolRefAttr arm
+    # reads it back with `readAndGetString`. No tag and no type index.
+    # `get_global` has no operands and neither a variadic operand nor a
+    # variadic result, so no count is written either.
+    let w1 = emit_op(w0, OP_GET_GLOBAL, t)
+    let (w2, si) = str_of(w1, sym)
+    emit(w2, si)
+  }
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
 
@@ -1106,7 +1570,40 @@ fn region(w0: W, body: List[Instr]) -> W = {
 
 # `for` gained its optional `unsigned` field in 13.2, so from that version on
 # the writer emits its flags varint and a 13.1 reader would not expect one.
-fn for_has_flags() -> Bool = BYTECODE_MAJOR > 13 || (BYTECODE_MAJOR == 13 && BYTECODE_MINOR >= 2)
+fn for_has_flags() -> Bool = at_least(13, 2)
+
+# The three version branches knife T8 added, all of them at the 13.3 boundary
+# and all of them read out of NVIDIA/cuda-tile@be0889cd rather than out of a
+# changelog. They are written the way `for_has_flags` is, as a predicate over
+# the version constants, so that moving the pin moves the bytes and nothing
+# has to be hand-edited a second time.
+#
+# `exp`'s `rounding_mode` is a DefaultValuedAttr (not an optional one), so it
+# is a REQUIRED attribute written inline, and BytecodeGen.cpp's
+# generateAttributeSerialization guards it with
+# `config.bytecodeVersion >= 13.3` and, below that version, refuses any value
+# but the default. So at 13.2 the byte is absent and at 13.3 it is present
+# and equal to `full`, which is the default the printer leaves out of the
+# text. Writing it at 13.2 makes the reader take it for the operand index,
+# which is what the older comment on `float_op_has_flags` recorded.
+fn exp_has_rounding() -> Bool = at_least(13, 3)
+
+# `mmaf`'s `fast_acc` is a UnitAttr that arrived in 13.3 while the operation
+# itself is 13.1. getVersionOrderedBitAssignments therefore answers a map
+# whose minimum version (13.3) is LATER than the operation's, so
+# generateFlagsFieldSerialization emits its `needsVersionCheck` form: the
+# flags varint exists from 13.3 on and not before. `fast_acc` is bit 0 of it,
+# and this writer never sets it (MMAF_FLAG_FAST_ACC says why).
+fn mmaf_has_flags() -> Bool = at_least(13, 3)
+
+# The Global section's record is four varints below 13.3 and six at or above
+# it; see the section's own comment for the layout and for what the two extra
+# ones mean.
+fn global_has_extended_fields() -> Bool = at_least(13, 3)
+
+# The pinned version is at least `major.minor`.
+fn at_least(major: Int, minor: Int) -> Bool =
+  BYTECODE_MAJOR > major || (BYTECODE_MAJOR == major && BYTECODE_MINOR >= minor)
 
 # Write one instruction, then give its results the next indices. A `ForLoop`
 # numbers its block arguments and body inside `encode_instr` and rolls them
@@ -1119,6 +1616,84 @@ fn section(out: bytes.Buf, id: Int, content: Bytes, align: Int) -> bytes.Buf = {
   let o1 = put_varint(bytes.put(out, if align > 1 { id | 0x80 } else { id }), bytes.len(content))
   let o2 = if align > 1 { pad_to(put_varint(o1, align), align) } else { o1 }
   bytes.put_bytes(o2, content)
+}
+
+# ---- the Global section (id 6, knife T7)
+#
+# The one section here that is not a table of offsets: a count and then one
+# fixed record per global, read in order. BytecodeWriter.cpp's
+# writeGlobalSection and BytecodeReader.cpp's parseGlobalSection are the two
+# halves, and the record is FOUR varints at bytecode 13.1 and 13.2 ---
+# the symbol's string index, the type index of the initializer's tile type,
+# the constant index of the initializer, and the alignment in bytes --- and
+# SIX from 13.3 on (`global_has_extended_fields`):
+#
+#   global-section =: numGlobals[varint] global-entry*
+#   global-entry   =: symbolNameIndex[varint] valueTypeIndex[varint]
+#                     constantValueIndex[varint] alignment[varint]
+#                     (symbolVisibility[varint] constant[varint])?
+#
+# The two that arrived at 13.3 are `symbol_visibility` (0 public, 1 private)
+# and `constant` (0 or 1), in that order, and the reader's
+# `kMinGlobalInfoSize` switches from 4 to 6 on the same boundary. Knife T8
+# moved this writer to 13.3, so it writes six.
+#
+# The boundary is sharp in BOTH directions, and each direction is a mutant:
+# two extra varints at 13.2 are not a longer record a reader skips, they are
+# where the NEXT global's record gets read from (knife T7's
+# `global-visibility-written-at-13-2`, retired by this knife because the
+# writer now targets the version that wants them), and two MISSING varints
+# at 13.3 are the same error mirrored
+# (`global-visibility-omitted-at-13-3`). That is why the corpus declares two
+# globals in one module: with a single global the difference falls at the end
+# of the section, where the reader never looks. The C++ writer says the 13.2
+# half from its own side, by name:
+# `global \`x\` uses non-public symbol visibility, which cannot be encoded
+# in bytecode version 13.2 (requires bytecode 13.3+)`.
+#
+# The section writes only varints and never aligns, so its header carries
+# no alignment flag (the reader skips alignment validation for this
+# section id on purpose). It goes FIRST in the file, before Func, which is
+# the order writeBytecode uses; the reader collects payloads by id and then
+# parses in its own order, so the position is a convention and not a
+# requirement.
+
+# The raw memory of one element of `dtype` holding `value`: what
+# `DenseElementsAttr::getFromRawBuffer` reads back. A global's initializer
+# is the whole buffer rather than the one-element splat every constant this
+# package emits so far, so the elements are concatenated here.
+fn global_elem(dtype: String, value: Float) -> Bytes = match dtype {
+  "f64" | "f32" | "bf16" | "f16" -> float_payload(dtype, value)
+  "i64" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 8))
+  "i32" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 4))
+  "i16" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 2))
+  "i8" -> bytes.freeze(put_le(bytes.buf(), to_int(value), 1))
+  _ -> panic("tileir: a global of format `${dtype}` has no encoding")
+}
+
+## The initializer blob of a global: every element's bytes in order, which
+## is the layout `get_global`'s pointer then walks (the dialect: "the
+## initial values are stored in memory in linear order").
+pub fn global_payload(dtype: String, values: List[Float]) -> Bytes =
+  bytes.freeze(list.fold(values, bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))
+
+# The Global section's content, and the writer with the strings, types and
+# constants the records name interned into it.
+fn global_section(w0: W, gs: List[Global]) -> (W, Bytes) = {
+  let (w1, b1) = list.fold(gs, (w0, put_varint(bytes.buf(), len(gs))), (acc, g) => {
+    let (w, b) = acc
+    let (wa, si) = str_of(w, g.sym)
+    let (wb, ti) = ty(wa, Tile([len(g.values)], Num(g.dtype)))
+    let (wc, ci) = const_of(wb, global_payload(g.dtype, g.values))
+    let b4 = put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align)
+    let b6 = if global_has_extended_fields() {
+      put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })
+    } else {
+      b4
+    }
+    (wc, b6)
+  })
+  (w1, bytes.freeze(b1))
 }
 
 # count, padding to the index width, one offset per item, the items.
@@ -1149,12 +1724,36 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
     w = instr(w, i)
   }
   let body = bytes.freeze(w.body)
-  let func = bytes.freeze(bytes.put_bytes(
-    put_varint(put_varint(bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), FLAG_KERNEL), 0), bytes.len(body)),
-    body))
+  # After the body, so that the strings, types and constants the globals
+  # name take the indices left over; the records only hold indices, and the
+  # three tables below are written from the finished writer.
+  let (w4, globals) = global_section(w, k.globals)
+  w = w4
+  # One function: its name index, its signature index, the entry flag byte,
+  # the location index (0, the unknown location), then `optimization_hints`
+  # when the flag says so, then the body's length and the body. The hints
+  # intern LAST, after the globals, for the same reason the globals intern
+  # after the body: an index nobody else needs is the cheapest one to give
+  # away.
+  #
+  # An entry with no hints writes NO attribute and clears the bit; the C++
+  # writer sets the bit for an EMPTY dictionary as well
+  # (`optimization_hints=<>` is a present attribute with no entries), and
+  # this surface has no way to ask for that, so the two agree on every
+  # program it can express.
+  let flag = FLAG_KERNEL | (if len(k.hints) == 0 { 0 } else { FLAG_HAS_HINTS })
+  let fhead = bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), flag)
+  let (w5, fhead1) = if len(k.hints) == 0 {
+    (w, put_varint(fhead, 0))
+  } else {
+    put_hints(w, put_varint(put_varint(fhead, 0), ATTR_OPTIMIZATION_HINTS), k.hints)
+  }
+  w = w5
+  let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, bytes.len(body)), body))
 
   let h = put_le(bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR), 0, 2)
-  let s1 = section(h, SEC_FUNC, func, 8)
+  let s0 = if len(k.globals) == 0 { h } else { section(h, SEC_GLOBAL, globals, 1) }
+  let s1 = section(s0, SEC_FUNC, func, 8)
   let s2 = if len(w.consts.items) == 0 { s1 } else { section(s1, SEC_CONSTANT, table_section(w.consts.items, 8), 8) }
   let s3 = section(s2, SEC_TYPE, table_section(w.types.items, 4), 4)
   let s4 = section(s3, SEC_STRING, table_section(w.strs.items, 4), 4)
@@ -1248,25 +1847,27 @@ test "a tile type names its element type first, so the element's index is lower"
 }
 
 fn vadd() -> TileProg = TileProg {
+  hints: [],
   name: "vadd",
   params: ["f64", "f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 128),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0),
-    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5),
+    Load(4, 5, 0, "f64", 3, [128], [1], None, None, 0, []),
+    Load(6, 7, 1, "f64", 3, [128], [1], None, None, 5, []),
     BinaryF(8, "addf", "f64", [128], 4, 6),
-    Store(9, 2, "f64", 3, [128], [1], 8, None, 7)
+    Store(9, 2, "f64", 3, [128], [1], 8, None, 7, [])
   ]
 }
 
 test "the file opens with the magic and the version constants, and closes with the end section" {
   let b = encode(vadd())
-  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d02" ++ "0000"
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d03" ++ "0000"
   assert bytes.at(b, bytes.len(b) - 1) == 0
-  assert bytecode_version() == "13.2"
+  assert bytecode_version() == "13.3"
 }
 
 test "the function entry is a kernel with an unknown location and the entry name is the one string" {
@@ -1284,8 +1885,10 @@ test "encoding the same program twice gives the same bytes" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
+  hints: [],
   name: "sum",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1293,20 +1896,20 @@ fn sum_prog() -> TileProg = TileProg {
     IdxMul(3, 1, 2),
     IdxConst(4, 128),
     IdxMul(5, 3, 4),
-    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0),
+    Load(6, 7, 0, "f64", 5, [128], [1], None, None, 0, []),
     IdxConst(8, 1),
     IdxAdd(9, 3, 8),
     IdxAdd(10, 3, 2),
-    For(11, 9, 10, 8, [6, 7], [12, 13], [19, 20], [
+    For(11, 9, 10, 8, false, [6, 7], [12, 13], [19, 20], [
       IdxConst(14, 128),
       IdxMul(15, 11, 14),
-      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13),
+      Load(16, 17, 0, "f64", 15, [128], [1], None, None, 13, []),
       BinaryF(18, "addf", "f64", [128], 12, 16),
       Continue([18, 17])
     ]),
     IdxConst(21, 128),
     IdxMul(22, 1, 21),
-    Store(23, 1, "f64", 22, [128], [1], 19, None, 20)
+    Store(23, 1, "f64", 22, [128], [1], 19, None, 20, [])
   ]
 }
 
@@ -1349,8 +1952,60 @@ test "a for is its opcode, result count and types, the flags, the operand count 
   assert str.contains(whole, hex(head))
   let tail = bytes.freeze(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(bytes.buf(), 0), 5), 20), 21), 19), 17), 18), 1), 1))
   assert str.contains(whole, hex(tail) ++ "03")
-  assert bytecode_version() == "13.2"
+  assert bytecode_version() == "13.3"
   assert for_has_flags()
+}
+
+fn spin_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "spin",
+  params: ["f64", "f64"],
+  globals: [],
+  ops: [
+    MakeToken(0),
+    BlockId(1, 0),
+    IdxConst(2, 8),
+    IdxMul(3, 1, 2),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
+    Loop([4, 5], [6, 7], [8, 9], [
+      ConstI(10, "i1", [], 1),
+      BinaryF(11, "addf", "f64", [8], 6, 6),
+      If([], 10, [Break([6, 7])], [Yield([])]),
+      Continue([11, 7])
+    ]),
+    Store(12, 1, "f64", 3, [8], [1], 8, None, 9, [])
+  ]
+}
+
+test "a loop writes no flags varint, and a break writes a result count of zero then its operands" {
+  let k = lower(spin_prog())
+  let (w, whole) = body_of(k)
+  # `for` carries an optional attribute (`unsignedCmp`, 13.2) and therefore
+  # a flags field; `loop` carries no optional attribute and no optional
+  # operand, so tblgen writes none. The bytes here say so: opcode, 2
+  # results, their two type indices, then the OPERAND COUNT (2) with no
+  # byte between, the two operands, 1 region, 1 block, 2 block arguments,
+  # the same two types.
+  # t9 is tile<8xf64> and t0 is token; %15 and %16 are the load's two
+  # results and %17 / %18 the block arguments, which the four body
+  # instructions follow.
+  let whole_loop = bytes.freeze(list.fold(
+    [OP_LOOP, 2, 9, 0, 2, 15, 16, 1, 1, 2, 9, 0, 4], bytes.buf(), put_varint))
+  assert str.contains(whole, hex(whole_loop))
+  # the break: opcode, a result count of 0 (`continue` and `return` write
+  # the same one), an operand count of 2, and the two block arguments by the
+  # indices they hold inside the region
+  assert str.contains(whole, hex(bytes.freeze(list.fold([OP_BREAK, 0, 2, 17, 18], bytes.buf(), put_varint))))
+  # the loop's results take the indices the block arguments had: the block
+  # rolled back
+  # the loop's two results are the lowering's %15 and %16, and they take
+  # the stream indices 17 and 18 the block arguments held: the block rolled
+  # back. The block arguments themselves (%17, %18) and what the body
+  # defined (%19, %20) have no index afterwards.
+  assert map.get(w.index, 15) == Some(17)
+  assert map.get(w.index, 16) == Some(18)
+  assert not map.has(w.index, 17)
+  assert not map.has(w.index, 19)
 }
 
 test "zigzag is the reader's signed varint, and a pattern with its top bit set still encodes" {
@@ -1387,21 +2042,47 @@ test "a reduction identity is a self-contained attribute: its tag, the index of 
   assert list.map(w3.types.items, hex) == ["03"]
 }
 
+test "a hint dictionary is a count, then per architecture a string index, the Dictionary tag and its own count, then per hint a string index and a self-contained i64" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let (w1, out1) = put_hints(w0, bytes.buf(), [("sm_86", [("latency", 4)])])
+  # one architecture, string 0; tag 10 because a dictionary VALUE is written
+  # self-contained; one hint, string 1; tag 1 with the index of `i64` and the
+  # value. The keys are String section INDICES and not inline bytes.
+  assert hex(bytes.freeze(out1)) == "01" ++ "00" ++ "0a" ++ "01" ++ "01" ++ "01" ++ "00" ++ "04"
+  assert list.map(w1.strs.items, hex) == [hex(bytes.utf8("sm_86")), hex(bytes.utf8("latency"))]
+  assert list.map(w1.types.items, hex) == ["04"]
+
+  # Two architectures and two hints under the second: the counts are the
+  # only thing that says where one ends, which is what
+  # scripts/tile-golden's hint-dictionary-count-wrong mutant rewrites.
+  let (_w2, out2) = put_hints(w0, bytes.buf(),
+    [("default", [("occupancy", 4)]), ("sm_86", [("num_cta_in_cga", 1), ("occupancy", 2)])])
+  assert hex(bytes.freeze(out2)) == "02"
+    ++ "00" ++ "0a" ++ "01" ++ "01" ++ "01" ++ "00" ++ "04"
+    ++ "02" ++ "0a" ++ "02" ++ "03" ++ "01" ++ "00" ++ "01" ++ "01" ++ "01" ++ "00" ++ "02"
+
+  # No hints is no bytes at all, which is why every kernel before knife T15
+  # is unchanged: the flag bit is clear and the reader never looks.
+  assert hex(bytes.freeze(emit_hints(w0, []).body)) == ""
+}
+
 fn total_prog() -> TileProg = TileProg {
+  hints: [],
   name: "total",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     Reduce([9], 0, [8], [IdF("f64", 0.0)], [4], [6, 7], [
       BinaryF(8, "addf", "f64", [], 6, 7),
       Yield([8])
     ]),
     Spread(10, "f64", [1], 9),
-    Store(11, 1, "f64", 3, [1], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [1], [1], 10, None, 5, [])
   ]
 }
 
@@ -1430,19 +2111,21 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  hints: [],
   name: "branch",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
     IdxConst(2, 8),
     IdxMul(3, 1, 2),
-    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0),
+    Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
     IdxConst(6, 0),
     CmpI(7, "eq", [], 1, 6),
     If([10], 7, [BinaryF(8, "addf", "f64", [8], 4, 4), Yield([8])],
       [BinaryF(9, "mulf", "f64", [8], 4, 4), Yield([9])]),
-    Store(11, 1, "f64", 3, [8], [1], 10, None, 5)
+    Store(11, 1, "f64", 3, [8], [1], 10, None, 5, [])
   ]
 }
 
@@ -1482,8 +2165,14 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert float_op_has_flags("maxf")
   assert unary_rounding("sqrt") == Some(ROUND_NEAREST_EVEN)
   assert unary_rounding("tanh") == Some(ROUND_FULL)
-  assert unary_rounding("exp") == None
   assert unary_rounding("rsqrt") == None
+  # knife T8: `exp` writes a rounding mode from 13.3 on and none below it,
+  # and it still writes no flags word at either version -- its
+  # `rounding_mode` is a DefaultValuedAttr, so it is required and inline
+  # rather than optional and a bit
+  assert exp_has_rounding()
+  assert unary_rounding("exp") == Some(ROUND_FULL)
+  assert not float_op_has_flags("exp")
   # the opcodes, from the frozen table
   assert (float_op("exp"), float_op("exp2"), float_op("log"), float_op("log2")) == (0x17, 0x18, 0x3F, 0x40)
   assert (float_op("sqrt"), float_op("rsqrt"), float_op("tanh"), float_op("pow")) == (0x64, 0x5D, 0x6A, 0x54)
@@ -1503,8 +2192,8 @@ test "a unary float operation writes flags only where it has an optional field, 
   assert not float_op_has_flags("remf")
   assert unary_rounding("sin") == None
   assert unary_rounding("cos") == None
-  assert not float_op_rounds("atan2")
-  assert not float_op_rounds("remf")
+  assert float_rounding("atan2") == None
+  assert float_rounding("remf") == None
 }
 
 test "the integer and conversion opcodes are the frozen table's, and each writes its attributes inline" {
@@ -1552,6 +2241,21 @@ test "the integer and conversion opcodes are the frozen table's, and each writes
   assert ROUND_ZERO != ROUND_INT_TO_ZERO
 }
 
+test "pack and unpack are conversions with no attribute, and the sub-byte tags are the frozen ones" {
+  # The two 13.3 operations, and the whole of their shape: an opcode, the
+  # result type, one operand. Nothing between them, which is why they
+  # travel on the same instruction as `bitcast` does.
+  assert (cast_op("pack"), cast_op("unpack")) == (0x6F, 0x70)
+  assert cast_attrs("pack", "i8") == []
+  assert cast_attrs("unpack", "i4") == []
+  # `exti` and `extis` are one opcode under two signedness attributes,
+  # which is what a sub-byte format needs: an i4 nibble reads as [-8, 7]
+  # or as [0, 15] and the device answers differently.
+  assert (cast_op("exti"), cast_op("extis")) == (0x25, 0x25)
+  assert (cast_attrs("exti", "i32"), cast_attrs("extis", "i32")) == ([UNSIGNED], [SIGNED])
+  assert (num_tag("f4E2M1FN"), num_tag("i4")) == (19, 22)
+}
+
 test "ftof and mmai are the frozen table's opcodes, with the attribute lists their Ops.td definitions declare" {
   # Both read off NVIDIA/cuda-tile at be0889cd, in the files named beside
   # them, and not from the coverage memo. `include/cuda_tile/Dialect/
@@ -1576,6 +2280,15 @@ test "ftof and mmai are the frozen table's opcodes, with the attribute lists the
   assert num_tag("i8") == 1
   assert num_tag("f16") == 5
   assert num_tag("i32") == 3
+  # MmaFOp is 0x49 and, unlike MmaIOp, it HAS an optional field: `fast_acc`,
+  # a UnitAttr that arrived at 13.3 while the operation is 13.1. So from
+  # 13.3 on it writes a flags varint and below it writes none (knife T8),
+  # while `mmai` writes none at any version. This writer never asks for
+  # fast accumulation, so the word it emits is zero.
+  assert OP_MMAF == 0x49
+  assert mmaf_has_flags()
+  assert MMAF_FLAG_FAST_ACC == 1
+  assert MMAF_FLAG_FAST_ACC_UNSET == 0
 }
 
 test "the atomics are the frozen table's opcodes, with the attribute values their Ops.td definitions declare" {
@@ -1624,7 +2337,7 @@ test "an f16 constant lays down the binary16 pattern, low byte first, and an i8 
 test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {
   let b = encode(sum_prog())
   assert b == encode(sum_prog())
-  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d02" ++ "0000"
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d03" ++ "0000"
   assert bytes.at(b, bytes.len(b) - 1) == 0
   assert str.ends_with(hex(b), hex(bytes.utf8("sum")) ++ "00")
 }
@@ -1634,27 +2347,31 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 # ANSWER and not a type error), and the pointer surface.
 
 fn shapes_prog() -> TileProg = TileProg {
+  hints: [],
   name: "shapes",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
     NumBlocks(2, 0),
-    Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0),
+    Load(3, 4, 0, "f64", 1, [4, 4, 8], [32, 8, 1], None, None, 0, []),
     Permute(5, "f64", [4, 4, 8], [1, 0, 2], 3),
     IdxConst(6, 1),
     IdxConst(7, 0),
     Extract(8, "f64", [4, 4, 8], [2, 4, 8], 3, [6, 7, 7]),
     Extract(9, "f64", [4, 4, 8], [2, 4, 8], 3, [7, 7, 7]),
     Cat(10, "f64", 0, [2, 4, 8], [2, 4, 8], 8, 9),
-    Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 5, None, 4),
-    Store(12, 1, "f64", 2, [4, 4, 8], [32, 8, 1], 10, None, 11)
+    Store(11, 1, "f64", 1, [4, 4, 8], [32, 8, 1], 5, None, 4, []),
+    Store(12, 1, "f64", 2, [4, 4, 8], [32, 8, 1], 10, None, 11, [])
   ]
 }
 
 fn ptrs_prog() -> TileProg = TileProg {
+  hints: [],
   name: "ptrs",
   params: ["f64", "i32"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
@@ -1668,21 +2385,23 @@ fn ptrs_prog() -> TileProg = TileProg {
     LoadAt(9, 10, "f64", [8], 8, None, None, 0),
     PtrCast(11, "f64", "i32", [8], 4),
     LoadAt(12, 13, "i32", [8], 11, None, None, 10),
-    Store(14, 1, "i32", 1, [8], [1], 12, None, 13)
+    Store(14, 1, "i32", 1, [8], [1], 12, None, 13, [])
   ]
 }
 
 fn fork_prog() -> TileProg = TileProg {
+  hints: [],
   name: "fork",
   params: ["f64", "f64"],
+  globals: [],
   ops: [
     MakeToken(0),
     BlockId(1, 0),
     ConstF(2, "f64", [8], 1.0),
-    Store(3, 1, "f64", 1, [8], [1], 2, None, 0),
-    Store(4, 1, "f64", 1, [8], [1], 2, None, 0),
+    Store(3, 1, "f64", 1, [8], [1], 2, None, 0, []),
+    Store(4, 1, "f64", 1, [8], [1], 2, None, 0, []),
     JoinToks(5, [3, 4]),
-    Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5)
+    Load(6, 7, 1, "f64", 1, [8], [1], None, None, 5, [])
   ]
 }
 
@@ -1695,6 +2414,54 @@ test "a dense i32 array is a count and four raw bytes an element, where an Array
   assert hex(bytes.freeze(emit_i32_array(w0, []).body)) == "00"
   assert hex(bytes.freeze(emit_i32_array(w0, [300]).body)) == "01" ++ "2c010000"
 }
+
+test "the three predicate attributes are a tag and then their own payload, and the two flag bytes are raw bytes" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let none: Option[Int] = None
+  # div_by: tag 8, the divisor as a varint, then the presence byte. With
+  # neither `every` nor `along` the byte is 0 and nothing follows it.
+  assert hex(bytes.freeze(assume_attr(w0, DivBy(32, none, none)).body)) == "08" ++ "20" ++ "00"
+  # with both, the byte is 3 and the two payloads are ZIGZAG varints, in
+  # declaration order.
+  assert hex(bytes.freeze(assume_attr(w0, DivBy(32, Some(4), Some(1))).body)) == "08" ++ "20" ++ "03" ++ "08" ++ "02"
+  # same_elements: tag 9 and a DenseI64ArrayAttr, which is the count and
+  # then EIGHT raw little-endian bytes an element, not four.
+  assert hex(bytes.freeze(assume_attr(w0, SameElements([2, 4])).body))
+    == "09" ++ "02" ++ "0200000000000000" ++ "0400000000000000"
+  # bounded: tag 12 (0x0C), the presence byte, then the bounds present, low
+  # one first. A negative bound is where zigzag shows: -3 is 5.
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(Some(0 - 3), Some(7))).body)) == "0c" ++ "03" ++ "05" ++ "0e"
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(none, Some(7))).body)) == "0c" ++ "02" ++ "0e"
+  assert hex(bytes.freeze(assume_attr(w0, Bounded(none, none)).body)) == "0c" ++ "00"
+}
+
+test "assert writes its message as a bare string index, assume its predicate self-contained, and print_tko a result count and a flags word" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2)]), nvals: 3 }
+  # assert: the opcode, the message's String section index (0, the first
+  # string interned) and the condition. NO attribute tag in front of the
+  # index: `message` is a StrAttr, so the ODS getter answers a StringRef
+  # and `writeOpAttribute` writes the index alone. NO result count and no
+  # result type either, because the operation has no results and nothing
+  # about it is variadic.
+  let a = encode_instr(w0, AssertTile(Val(1), Tile([128], Num("i1")), "boom"))
+  assert hex(bytes.freeze(a.body)) == "05" ++ "00" ++ "01"
+  assert len(a.strs.items) == 1
+  # assume: the opcode, the result type index, the predicate with its tag,
+  # then the operand. The index is 1 and not 0 because a tile type
+  # registers its ELEMENT type first (`i32` takes 0), which is the same
+  # dependent-first order every tile here is written in.
+  let s = encode_instr(w0, AssumeTile(9, Val(2), DivBy(32, none_int(), none_int()), Tile([128], Num("i32"))))
+  assert hex(bytes.freeze(s.body)) == "06" ++ "01" ++ "08" ++ "20" ++ "00" ++ "02"
+  # print_tko: the opcode, a result COUNT of one (its `args` are variadic),
+  # the token result type index, the flags word (bit 0: the token operand
+  # is carried), the format string's index, then the args with their own
+  # count and the token WITHOUT one.
+  let pr = encode_instr(w0, PrintTile(9, "%d %d", [Val(1), Val(2)], Tile([], Num("i32")), Val(0)))
+  assert hex(bytes.freeze(pr.body)) == "55" ++ "01" ++ "00" ++ "01" ++ "00" ++ "02" ++ "01" ++ "02" ++ "00"
+  assert OP_ASSERT == 0x05 && OP_ASSUME == 0x06 && OP_PRINT_TKO == 0x55
+}
+
+fn none_int() -> Option[Int] = None
 
 test "the shape operations are the frozen table's opcodes, with the permutation dense and extract's slice indices as operands" {
   let k = lower(shapes_prog())
@@ -1766,4 +2533,157 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
   let (_w, whole) = body_of(k)
   assert str.contains(whole, hex(varint(OP_JOIN_TOKENS)))
   assert OP_JOIN_TOKENS == 0x3C
+}
+
+fn globals_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "g",
+  params: ["f64"],
+  globals: [
+    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: false, constant: false },
+    Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: false }
+  ],
+  ops: [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
+}
+
+fn private_globals_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "g",
+  params: ["f64"],
+  globals: [
+    Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: true, constant: false },
+    Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: true }
+  ],
+  ops: [MakeToken(0), GetGlobal(1, "pad", "f64", [8])]
+}
+
+test "a global's initializer is the whole buffer and not the one-element splat every other constant here is" {
+  # 1.0 and 2.0 as binary64, low byte first, one after the other
+  assert hex(global_payload("f64", [1.0, 2.0])) == "000000000000f03f" ++ "0000000000000040"
+  assert hex(global_payload("i32", [1.0, 0.0 - 1.0])) == "01000000" ++ "ffffffff"
+}
+
+test "the Global section is a count and six varints a record at 13.3, unaligned, and it comes before Func" {
+  let h = hex(encode(globals_prog()))
+  # the header is twelve bytes: magic, major, minor and the two-byte tag
+  assert str.starts_with(h, "7f54696c65495200" ++ "0d03" ++ "0000")
+  # section id 6 with NO alignment bit (0x06 and not 0x86: this section
+  # writes only varints and never aligns), then its length, then the count
+  # of globals. Two records of SIX varints (knife T8: four below 13.3), one
+  # of which holds the 256 that takes two bytes, so the section is fourteen
+  # bytes long
+  assert global_has_extended_fields()
+  assert str.take(str.drop(h, 24), 6) == "06" ++ "0e" ++ "02"
+  # tbl: string 2, type 7, constant 0, alignment 0, visibility public (0),
+  # constant flag 0. pad: string 1 (the get_global in the body interned it
+  # first), type 8, constant 1, alignment 256 (8002 as a varint), then the
+  # same two zeroes
+  assert str.take(str.drop(h, 30), 26) ==
+    "02" ++ "07" ++ "00" ++ "00" ++ "00" ++ "00" ++
+    "01" ++ "08" ++ "01" ++ "8002" ++ "00" ++ "00"
+  # and the section that follows is Func, id 2 with the alignment bit
+  assert str.take(str.drop(h, 56), 2) == "82"
+}
+
+test "the two varints the record grew at 13.3 carry the visibility and the constant flag" {
+  # the same two globals, the first private and the second constant: the
+  # section is the same length and only the last two fields of each record
+  # move, which is what makes them a wall rather than a payload
+  let h = hex(encode(private_globals_prog()))
+  assert str.take(str.drop(h, 24), 6) == "06" ++ "0e" ++ "02"
+  assert str.take(str.drop(h, 30), 26) ==
+    "02" ++ "07" ++ "00" ++ "00" ++ "01" ++ "00" ++
+    "01" ++ "08" ++ "01" ++ "8002" ++ "00" ++ "01"
+  assert VIS_PUBLIC == 0
+  assert VIS_PRIVATE == 1
+}
+
+fn alloca_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "a",
+  params: ["f64"],
+  globals: [],
+  ops: [MakeToken(0), Alloca(1, "f64", 192, 8, false, [8]), Alloca(2, "f64", 192, 8, true, [8])]
+}
+
+test "alloca writes its opcode, its result type, a flags word and its two counts, and nothing else" {
+  let k = lower(alloca_prog())
+  let (w, whole) = body_of(k)
+  assert OP_ALLOCA == 0x71
+  assert ALLOCA_FLAG_GLOBAL == 1
+  # five varints: opcode, result type, flags, num_elem, alignment. The two
+  # I64Attrs are written INLINE and plainly -- writeOpAttribute's
+  # std::is_integral_v arm calls writeVarInt, so there is no tag, no type
+  # index and no zigzag, the way `cat`'s dim is written. `global` is a
+  # UnitAttr and lives only in the flags word. `alloca` has no operands at
+  # all and nothing about it is variadic, so no count is written anywhere.
+  let (_w1, ti) = ty(w, Tile([], PtrTo("f64")))
+  let head = hex(varint(OP_ALLOCA)) ++ hex(varint(ti))
+  assert str.contains(whole, head ++ hex(varint(0)) ++ hex(varint(192)) ++ hex(varint(8)))
+  # the second one is the same instruction with bit 0 set, which is the
+  # whole of the difference the `global` attribute makes to the stream
+  assert str.contains(whole,
+    head ++ hex(varint(ALLOCA_FLAG_GLOBAL)) ++ hex(varint(192)) ++ hex(varint(8)))
+  # and the result is the rank-0 pointer tile, not the tile the body asked
+  # for: the reshape and the broadcast after it are what widens it
+  assert str.contains(whole, hex(varint(OP_RESHAPE)))
+  assert str.contains(whole, hex(varint(OP_BROADCAST)))
+}
+
+fn mmaf_scaled_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "s",
+  params: ["f64"],
+  globals: [],
+  # the fp8 operands come from `ftof` and not from `constant`: this writer
+  # has no float payload for a one-byte format (float_payload), which is
+  # the same reason the fp8 kernels in scripts/tile-golden convert into the
+  # format rather than spelling a literal in it.
+  ops: [
+    ConstF(0, "f32", [4, 8], 1.0),
+    Convert(1, "ftof", "f32", "f8E4M3FN", [4, 8], 0),
+    ConstF(2, "f32", [8, 4], 1.0),
+    Convert(3, "ftof", "f32", "f8E4M3FN", [8, 4], 2),
+    ConstF(4, "f32", [4, 4], 0.0),
+    ConstF(5, "f32", [4, 2], 1.0),
+    Convert(6, "ftof", "f32", "f8E8M0FNU", [4, 2], 5),
+    ConstF(7, "f32", [2, 4], 1.0),
+    Convert(8, "ftof", "f32", "f8E8M0FNU", [2, 4], 7),
+    MmaFScaled(9, "f8E4M3FN", "f8E8M0FNU", 4, 8, 4, 4, 1, 3, 4, 6, 8)
+  ]
+}
+
+test "mmaf_scaled writes its opcode, its result type and five operands, and NO flags word" {
+  let k = lower(mmaf_scaled_prog())
+  let (w, whole) = body_of(k)
+  assert OP_MMAF_SCALED == 0x72
+  # This is the sibling comparison that makes the absence load bearing.
+  # `mmaf` gained an optional `fast_acc` at 13.3, so from that version it
+  # writes a flags varint; `mmaf_scaled` has no optional field and no
+  # attribute at any version, so getVersionOrderedBitAssignments answers an
+  # empty table and generateFlagsFieldSerialization emits nothing. The five
+  # operand indices therefore follow the result type directly.
+  assert mmaf_has_flags()
+  let (_w1, ti) = ty(w, Tile([4, 4], Num("f32")))
+  # the nine values took indices 1..9 (the entry has one parameter), so the
+  # operands are the converted lhs 2, the converted rhs 4, the accumulator
+  # 5 and the two converted scales 7 and 9
+  assert str.contains(whole, hex(varint(OP_MMAF_SCALED)) ++ hex(varint(ti))
+      ++ hex(varint(2)) ++ hex(varint(4)) ++ hex(varint(5)) ++ hex(varint(7)) ++ hex(varint(9)))
+}
+
+test "get_global writes its opcode, its result type and the symbol's string index, and nothing else" {
+  let k = lower(globals_prog())
+  let (w, whole) = body_of(k)
+  assert OP_GET_GLOBAL == 0x2C
+  # the instruction is three varints: no operand count (it has neither a
+  # variadic operand nor a variadic result), no flags (it has no optional
+  # field) and no attribute tag (a FlatSymbolRefAttr is a bare string index)
+  let (w1, ti) = ty(w, Tile([], PtrTo("f64")))
+  let (_w2, si) = str_of(w1, "pad")
+  assert str.contains(whole, hex(varint(OP_GET_GLOBAL)) ++ hex(varint(ti)) ++ hex(varint(si)))
+  # and the result really is the rank-0 pointer tile, not the tile the body
+  # asked for: the reshape and the broadcast after it are what widens it
+  assert str.contains(whole, hex(varint(OP_RESHAPE)))
+  assert str.contains(whole, hex(varint(OP_BROADCAST)))
 }
