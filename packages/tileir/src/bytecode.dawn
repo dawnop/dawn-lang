@@ -70,7 +70,7 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
-  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf , DYN_DIM}
+  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, tensor_view_of, MakeTensorView, MakePartitionView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
@@ -2774,6 +2774,52 @@ test "a tensor view is its tag, its element type index and two arrays of eight-b
     == "0e" ++ "00"
     ++ "02" ++ "0800000000000000" ++ "0400000000000000"
     ++ "02" ++ "0400000000000000" ++ "0100000000000000"
+}
+
+test "a dynamic dimension is kDynamic, which is INT64_MIN and not a shifted minus one" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # `?` is `ShapedType::kDynamic`, whose eight little-endian bytes are seven
+  # zeroes and 0x80. A minus one written through `put_le` would be `ff`
+  # eight times over, which the reader would take for the extent -1 and the
+  # verifier would refuse as a non-positive one; nothing about the file's
+  # LENGTH would say which of the two had been written.
+  let (w1, i) = ty(w0, TensorView(Num("f64"), [DYN_DIM, 4], [4, DYN_DIM]))
+  assert hex(w1.types.items[i])
+    == "0e" ++ "00"
+    ++ "02" ++ "0000000000000080" ++ "0400000000000000"
+    ++ "02" ++ "0400000000000000" ++ "0000000000000080"
+}
+
+test "make_tensor_view fills its two operand segments, shape group first" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
+    index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let tv = TensorView(Num("f64"), [DYN_DIM, DYN_DIM], [DYN_DIM, 1])
+  let idx = Tile([], Num("i32"))
+  # the opcode, the result count 1, the result type index, the base, then
+  # each variadic group with its OWN count: two dynamic extents and one
+  # dynamic stride, in the order the markers appear in the type.
+  let m = encode_instr(w0, MakeTensorView(9, Val(0), Tile([], PtrTo("f64")), tv,
+    [Val(1), Val(2)], [Val(3)], idx))
+  assert hex(bytes.freeze(m.body))
+    == "43" ++ "01" ++ "01" ++ "00" ++ "02" ++ "01" ++ "02" ++ "01" ++ "03"
+}
+
+test "the two shape queries write one result type index per dimension and one bare operand" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
+    index: map.from([(0, 0)]), nvals: 1 }
+  let tv = TensorView(Num("f64"), [DYN_DIM, 4], [4, 1])
+  let idx = Tile([], Num("i32"))
+  # `writeResultTypes` walks the result types and interns each, so a rank-2
+  # query writes the SAME index twice rather than once. The count before
+  # them is written because the results are variadic; there is no flags
+  # word (neither operation has an optional attribute or an optional
+  # operand) and no operand count (`src` is the only operand and nothing
+  # about it is variadic).
+  let g = encode_instr(w0, GetTensorShape([9, 10], Val(0), tv, idx))
+  assert hex(bytes.freeze(g.body)) == "2f" ++ "02" ++ "01" ++ "01" ++ "00"
+  let pv = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
+  let q = encode_instr(w0, GetIndexSpaceShape([9, 10], Val(0), pv, idx))
+  assert hex(bytes.freeze(q.body)) == "2d" ++ "02" ++ "01" ++ "01" ++ "00"
 }
 
 test "a partition view writes the 13.3 bitfield between its tag and its first parameter, and the padding value last" {

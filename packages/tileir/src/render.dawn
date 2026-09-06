@@ -994,3 +994,25 @@ test "a global prints above the entry, its alignment only when it is not the dia
   assert str.contains(text, "%2 = reshape %1 : tile<ptr<f64>> -> tile<1xptr<f64>>\n")
   assert str.contains(text, "%3 = broadcast %2 : tile<1xptr<f64>> -> tile<8xptr<f64>>\n")
 }
+
+test "a dynamic dimension prints `?` in the type and its operand's name in the operation" {
+  let tv = TensorView(Num("f64"), [DYN_DIM, 4], [DYN_DIM, DYN_DIM])
+  let idx = Tile([], Num("i32"))
+  # the type says `?` where an operand carries the value, and the operation
+  # spells the shape and the strides a second time with the operands put
+  # back in their places: MakeTensorViewOp::print's printMixedOperandList.
+  # The `tile<i32> -> ` before the result type appears only when there is
+  # at least one operand, which is why a static view never prints it.
+  assert ty(tv) == "tensor_view<?x4xf64, strides=[?, ?]>"
+  assert line(MakeTensorView(9, Arg(0), Tile([], PtrTo("f64")), tv,
+      [Val(1)], [Val(2), Val(3)], idx))
+    == "%9 = make_tensor_view %arg0, shape = [%1, 4], strides = [%2, %3]"
+    ++ " : tile<i32> -> tensor_view<?x4xf64, strides=[?, ?]>"
+  # both queries name every result they define, in dimension order
+  assert line(GetTensorShape([9, 10], Val(0), tv, idx))
+    == "%9, %10 = get_tensor_shape %0 : tensor_view<?x4xf64, strides=[?, ?]> -> tile<i32>"
+  let pv = PartitionView([2, 2], Num("f64"), [DYN_DIM, 4], [DYN_DIM, DYN_DIM], [0, 1], NoPadding)
+  assert line(GetIndexSpaceShape([9, 10], Val(0), pv, idx))
+    == "%9, %10 = get_index_space_shape %0 : partition_view<tile=(2x2),"
+    ++ " tensor_view<?x4xf64, strides=[?, ?]>, dim_map=[0, 1]> -> tile<i32>"
+}

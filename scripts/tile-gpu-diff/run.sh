@@ -793,6 +793,19 @@ hint_order=("${hints[@]}" vadd)
 views=(view_transpose view_max_pool view_conv2d view_padding view_pad_i32)
 view_order=("${views[@]}" transpose_tail)
 
+# The dynamic-dimension kernels of knife T12, in the order dyn_diff takes
+# them. Their tensors' extents and strides are OPERANDS rather than type
+# parameters, so each cubin is launched twice on two different shapes; that
+# is a property of dyn_diff's case list and not of this one.
+# `view_dyn_transpose` is `view_transpose` written that way, and
+# `view_transpose` is therefore the family's KERNEL-LEVEL CONTROL: two
+# cubins, one corpus, one process, and the `twin` count says whether they
+# wrote the same bytes. Its cubin is assembled with the T11 family above;
+# naming it here is what puts it on dyn_diff's command line, exactly as
+# `vadd` is named in hint_order.
+dyns=(view_dyn_transpose view_tensor_shape view_index_space)
+dyn_order=("${dyns[@]}" view_transpose)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -844,7 +857,7 @@ assemble_golden() { # kernel, tilebc, cubin
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
+  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -892,6 +905,8 @@ alloca_cubins=()
 for k in "${allocas[@]}"; do alloca_cubins+=("$work/$k.cubin"); done
 view_cubins=()
 for k in "${view_order[@]}"; do view_cubins+=("$work/$k.cubin"); done
+dyn_cubins=()
+for k in "${dyn_order[@]}"; do dyn_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1499,6 +1514,69 @@ if [ "$view_verdict" = pass ]; then
   echo "PASS  corpus: every transpose lane is distinct, the last tile runs 28 lanes off the tensor, and the five padding values are five patterns ($view_shape_line)"
 else
   echo "SKIP  corpus: the view counts are not verifiable on this driver ($view_verdict)"
+fi
+
+# ---- native, the dynamic-dimension kernels (knife T12)
+#
+# The verdict is the usual one, and two things about it are not: every
+# dynamic cubin is launched TWICE, on tensors of two different shapes, and
+# `view_transpose` rides along so that the dynamic spelling of one operator
+# and the static one can be compared to each other rather than each to a
+# reference.
+build_native "$root/std" "$work/dyn.bin" "$here/dyn_diff.dawn"
+rc=0
+device "$work/dyn.bin" "${dyn_cubins[@]}" > "$work/dyn.out" 2> "$work/dyn.err" || rc=$?
+cat "$work/dyn.out"
+dyn_verdict="$(verdict_of "$work/dyn.out")"
+case "$dyn_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#dyns[@]} dynamic-dimension kernels and their static control agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $dyn_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $dyn_verdict" ;;
+  fail) cat "$work/dyn.err" >&2; fail "the device answered and disagreed with the fake device on a knife T12 kernel (see the transcript above)" ;;
+  *) cat "$work/dyn.err" >&2; fail "dyn_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dyn.out" | head -n 1)"
+
+# The dynamic corpus, held field by field, and then the family's own claim.
+# Each field is what makes one of the mutants below a measurement rather
+# than a sentence.
+#
+#   distinct  every lane of the transpose corpus is its own value, so a
+#             store that mapped two lanes onto one cannot hide in a repeat
+#   masked    lanes view_tensor_shape's grid covers and its mask excludes.
+#             Zero would mean get_tensor_shape's answer never decided
+#             anything, because every lane the grid reached would have been
+#             written whatever it said
+#   padded    lanes of view_index_space's grid that fall outside the tensor.
+#             Zero would mean the grid fitted the tensor exactly and the
+#             loop bound could have been one tile short without showing
+#   shapes    how many DIFFERENT tensor shapes the seven cases run over.
+#             Two or more is the whole family: one cubin, more than one
+#             tensor. One would make every `?` a constant spelled the long
+#             way
+dyn_shape_line="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/dyn.out")"
+[ -n "$dyn_shape_line" ] || fail "dyn_diff printed no index line"
+if [ "$dyn_verdict" = pass ]; then
+  distinct="$(printf '%s\n' "$dyn_shape_line" | tr ' ' '\n' | sed -n 's/^distinct=//p')"
+  [ "$distinct" = "6000" ] ||
+    fail "the transpose corpus has $distinct of 6000 distinct lanes, so a reversed operand group could hide in a repeat: $dyn_shape_line"
+  for field in masked padded; do
+    value="$(printf '%s\n' "$dyn_shape_line" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+    [ -n "$value" ] || fail "the dyn index line names no $field: $dyn_shape_line"
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      fail "$field is $value: nothing outside the tensor, so the bound the device answered decided nothing here: $dyn_shape_line"
+  done
+  shapes="$(printf '%s\n' "$dyn_shape_line" | tr ' ' '\n' | sed -n 's/^shapes=//p')"
+  [ "$shapes" -ge 2 ] 2> /dev/null ||
+    fail "the dynamic kernels run over $shapes tensor shape(s): with one, every question mark is a constant spelled the long way: $dyn_shape_line"
+  dyn_probe="$(sed -n 's/^probe dyn //p' "$work/dyn.out" | tail -n 1)"
+  twin="$(printf '%s\n' "$dyn_probe" | tr ' ' '\n' | sed -n 's/^twin=//p' | head -n 1)"
+  [ "$twin" = same ] ||
+    { printf '%s\n' "$dyn_probe" >&2; fail "the dynamic transpose and the static one did not write the same bytes: twin=$twin"; }
+  echo "PASS  corpus: every transpose lane is distinct, both bounds decide something, $shapes shapes from three cubins, and the dynamic transpose wrote the static one's bytes ($dyn_shape_line $dyn_probe)"
+else
+  echo "SKIP  corpus: the dynamic counts are not verifiable on this driver ($dyn_verdict)"
 fi
 
 # ---- native, the optimization hint kernels (knife T15)
@@ -4549,6 +4627,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
+  scripts/tile-gpu-diff/dyn_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -4560,6 +4639,7 @@ summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per
 summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line"
+summary="$summary dyn=$dyn_shape_line $dyn_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

@@ -1,0 +1,542 @@
+# Layer 2 for dynamic tensor views and the two shape queries (knife T12),
+# the twenty-third of these programs: one `!Gpu` program runs the three
+# kernels scripts/tile-golden pins under `with_gpu_real` against the
+# machine's GPU and under `with_gpu_fake` against hand-written host
+# references, and prints what each device answered.
+#
+#   dyn_diff <view_dyn_transpose.cubin> <view_tensor_shape.cubin>
+#            <view_index_space.cubin> <view_transpose.cubin>
+#
+# The subject is a tensor whose SHAPE IS NOT IN THE PROGRAM. Knife T11's
+# views spell every extent and every stride in the type, so a cubin is
+# assembled for one tensor and no other; here the type says `?` and
+# `make_tensor_view` takes the number as an operand, which the kernel reads
+# out of a parameter buffer. What makes that a judgement rather than a
+# spelling is the shape of this corpus:
+#
+#   * EVERY DYNAMIC KERNEL IS LAUNCHED TWICE, on two tensors of different
+#     shapes, from ONE cubin. A static extent baked into the type could not
+#     answer both, and the second launch is the whole reason the first is
+#     evidence about anything
+#   * `view_dyn_transpose` is `view_transpose` with every extent and every
+#     stride turned into an operand. It shares the host reference
+#     (`transpose_ref`) and the corpus with the static kernel, and
+#     `view_transpose` itself runs here, last, as the family's KERNEL-LEVEL
+#     CONTROL: the `twin` count below is the two cubins' output buffers
+#     compared lane for lane in this one process. Two spellings of one
+#     operator answering the same bits is what the family claims
+#   * the two shape queries decide something the host can check. In
+#     `view_tensor_shape` what `get_tensor_shape` answered is the bound of
+#     the mask on a load and a store, so a wrong answer moves lanes; in
+#     `view_index_space` what `get_index_space_shape` answered is the bound
+#     of two loops, so ONE block walks the whole grid of tiles whatever the
+#     runtime shape is. Both also WRITE THE ANSWER OUT into an i32 buffer,
+#     so the operation's own result reaches the host and not only its
+#     consequences
+#
+# Every case is EXACT tier. Nothing here rounds; the transposes only move
+# elements, the mask only doubles them, and the grid sum folds a corpus
+# whose values are exact in binary64 in an order the reference repeats.
+#
+# What the corpora have to carry, and why:
+#
+#   * TWO SHAPES per kernel, neither a multiple of the tile. Not a multiple
+#     is what puts lanes outside the tensor, which is where a padding value
+#     and a masked-off store are visible at all; two of them is what tells a
+#     dynamic extent from a constant
+#   * DISTINCT values in both transpose corpora, one per element. A corpus
+#     with repeats would forgive a store that mapped two lanes onto one,
+#     which is what reversing an operand group does
+#   * a `1` in the dimension buffer rather than in the kernel. The innermost
+#     stride is dynamic too, so both operand groups of the transpose are two
+#     long; with one static stride the groups would be different lengths and
+#     the assembler would catch a reversed group before the device ever saw
+#     it
+#   * a sentinel past the end of every output buffer, and past the mask's
+#     limit in `view_tensor_shape`, so a store that ran wide is visible
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, transpose_ref,
+  masked_double_ref, view_grid_sum_ref }
+use std/list
+use std/map
+
+## The sentinel every f64 output buffer holds before a launch: a value no
+## kernel here computes, so a lane that still has it is a lane nothing
+## wrote.
+pub const SENTINEL: Float = 0.0 - 12345.678
+
+## The same for the i32 buffers the two shape queries write their answers
+## into. It is not a shape any of these tensors has.
+pub const SENTINEL_I32: Int = 0 - 12345
+
+## The tile every kernel here is written with. These must agree with
+## scripts/tile-golden/kernels.dawn.
+pub const VD_TILE: Int = 32
+pub const VD_LANES: Int = 32
+pub const VD_SUM_TILE: Int = 16
+
+## The shapes the static twin was recorded with, which is also the first
+## shape the dynamic one is launched over.
+pub const VT_ROWS: Int = 100
+pub const VT_COLS: Int = 60
+
+## The tail every output buffer carries past its answer: lanes no kernel
+## here should write, so an operation that ran wide is visible.
+pub const TAIL: Int = 8
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  results: Option[List[List[Float]]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, as wide_diff's is
+# (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn download_all(hs: List[Int], reads: List[Int], i: Int,
+  acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
+  if i >= len(reads) {
+    Ok(acc)
+  } else {
+    match gpu.gpu_download(hs[reads[i]]) {
+      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a `gx`
+## by `gy` by `gz` grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. `reads` are the argument positions to
+## download afterwards.
+##
+## The raw `gpu` operations rather than the typed `alloc` / `upload` /
+## `download`, for wide_diff's reason: a case's buffers do not share a
+## format and `Tensor[D]` is one format per handle.
+fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
+  reads: List[Int]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = download_all(hs, reads, 0, [])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                results: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn same_lanes(a: List[Float], b: List[Float]) -> Bool =
+  len(a) == len(b) && list.all(range(0, len(a)), i => to_string(a[i]) == to_string(b[i]))
+
+fn same_bits(got: Option[List[List[Float]]], want: Option[List[List[Float]]]) -> Bool = match (got, want) {
+  (Some(a), Some(b)) -> len(a) == len(b) && list.all(range(0, len(a)), i => same_lanes(a[i], b[i]))
+  _ -> false
+}
+
+fn miss_one(a: List[Float], b: List[Float]) -> String =
+  if len(a) != len(b) {
+    "lengths ${len(a)} and ${len(b)}"
+  } else {
+    let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+    if len(bad) == 0 {
+      "none"
+    } else {
+      "${len(bad)} of ${len(a)} lanes, first at ${bad[0]}: ${a[bad[0]]} vs ${b[bad[0]]}"
+    }
+  }
+
+fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads: List[Int]) -> String =
+  match (got, want) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "read back ${len(a)} buffer(s) and ${len(b)}"
+      } else {
+        list.fold(range(0, len(a)), "", (acc, i) => {
+          let sep = if acc == "" { "" } else { "; " }
+          acc ++ sep ++ "arg${reads[i]}: " ++ miss_one(a[i], b[i])
+        })
+      }
+    _ -> "-"
+  }
+
+## The verdict for one case: `identical:exact` (bit for bit),
+## `differ:result`, or `blocked:<kind>@<stage>`. There is no tolerance
+## branch: nothing here rounds and nothing here folds out of order.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if same_bits(real.results, fake.results) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+# ---- the corpora ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+fn sentinel_i32(n: Int) -> List[Float] = list.map(range(0, n), _i => to_float(SENTINEL_I32))
+
+# `n` values no two of which are equal: `k / 8` from zero up, which is
+# exact in binary64 and stays exact through a transpose and a sum of a
+# few dozen of them.
+fn distinct(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i) / 8.0)
+
+fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
+
+# ---- the cases ----
+#
+# A case is a KERNEL AND A SHAPE, not a kernel: the point of the family is
+# that one cubin serves more than one tensor, so each dynamic kernel is
+# here twice on two different shapes. `view_transpose` is last and is the
+# family's kernel-level control.
+
+fn case_count() -> Int = 7
+
+fn case_name(i: Int) -> String =
+  ["view_dyn_transpose", "view_dyn_transpose", "view_tensor_shape", "view_tensor_shape",
+    "view_index_space", "view_index_space", "view_transpose"][i]
+
+## The tensor this case is run over, as (rows, cols). The first row of each
+## pair is the shape the static twin was recorded with; the second is
+## another one entirely, and answering both from one cubin is the claim.
+fn case_shape(i: Int) -> (Int, Int) =
+  [(VT_ROWS, VT_COLS), (48, 36), (VT_ROWS, VT_COLS), (64, 40),
+    (36, 20), (18, 48), (VT_ROWS, VT_COLS)][i]
+
+## The kernels of the tolerance tier: NONE. See the header.
+##
+## scripts/leetgpu-diff/check.py READS THIS LIST and holds the `tier` column
+## of scripts/leetgpu-diff/problems.txt against it. No kernel here is a
+## leetgpu problem under its own name, so the list is empty either way.
+pub fn tolerance_tier() -> List[String] = []
+
+## The grid each case is launched on. For the two transposes it is the
+## partition view's index space; for `view_tensor_shape` it is as many
+## 32-lane blocks as the row needs; `view_index_space` is ONE block, which
+## is the point of asking the device how many tiles there are.
+fn case_grid(i: Int) -> (Int, Int, Int) = {
+  let (rows, cols) = case_shape(i)
+  let name = case_name(i)
+  if name == "view_tensor_shape" {
+    (blocks(cols, VD_LANES), 1, 1)
+  } else if name == "view_index_space" {
+    (1, 1, 1)
+  } else {
+    (blocks(rows, VD_TILE), blocks(cols, VD_TILE), 1)
+  }
+}
+
+## The dimension buffer every dynamic kernel reads its extents out of:
+## `[rows, cols, 1]`. The one is here rather than in the kernel so that the
+## innermost stride is an operand too.
+fn dims_of(i: Int) -> List[Float] = {
+  let (rows, cols) = case_shape(i)
+  [to_float(rows), to_float(cols), 1.0]
+}
+
+## The buffers each case is handed: a FORMAT and the initial contents, in
+## argument order.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let (rows, cols) = case_shape(i)
+  let name = case_name(i)
+  if name == "view_transpose" {
+    [("f64", distinct(rows * cols)), ("f64", sentinel_buffer(rows * cols))]
+  } else if name == "view_tensor_shape" {
+    [("i32", dims_of(i)), ("f64", distinct(rows * cols)),
+      ("f64", sentinel_buffer(blocks(cols, VD_LANES) * VD_LANES + TAIL)),
+      ("i32", sentinel_i32(2 + TAIL))]
+  } else if name == "view_index_space" {
+    [("i32", dims_of(i)), ("f64", distinct(rows * cols)),
+      ("f64", sentinel_buffer(VD_SUM_TILE * VD_SUM_TILE + TAIL)),
+      ("i32", sentinel_i32(2 + TAIL))]
+  } else {
+    [("i32", dims_of(i)), ("f64", distinct(rows * cols)),
+      ("f64", sentinel_buffer(rows * cols))]
+  }
+}
+
+## The argument positions to download after the launch.
+fn case_reads(i: Int) -> List[Int] = {
+  let name = case_name(i)
+  if name == "view_transpose" {
+    [1]
+  } else if name == "view_dyn_transpose" {
+    [2]
+  } else {
+    [2, 3]
+  }
+}
+
+## The two extents the shape queries should answer, as the i32 buffer the
+## kernel writes them into: the tensor's own for `get_tensor_shape`, the
+## grid's for `get_index_space_shape`.
+fn shape_out_ref(i: Int, old: List[Float]) -> List[Float] = {
+  let (rows, cols) = case_shape(i)
+  let want = if case_name(i) == "view_index_space" {
+    [to_float(blocks(rows, VD_SUM_TILE)), to_float(blocks(cols, VD_SUM_TILE))]
+  } else {
+    [to_float(rows), to_float(cols)]
+  }
+  list.map(range(0, len(old)), k => if k < 2 { want[k] } else { old[k] })
+}
+
+## The reference table the fake device answers with, for one case. The two
+## transposes name the SAME `transpose_ref` on the same corpus, which is
+## what makes their agreement a reading about addressing rather than about
+## a kernel.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
+  let (rows, cols) = case_shape(i)
+  let name = case_name(i)
+  if name == "view_transpose" {
+    map.from([(name, (2, last_out((dts, ins) => transpose_ref(rows, cols, dts, ins))))])
+  } else if name == "view_dyn_transpose" {
+    # the dimension buffer is argument 0, so the reference is handed the
+    # same two buffers the static twin's is
+    map.from([(name, (3, last_out((dts, ins) =>
+        transpose_ref(rows, cols, [dts[1], dts[2]], [ins[1], ins[2]]))))])
+  } else if name == "view_tensor_shape" {
+    map.from([(name, (4, (_dts, ins) =>
+        [(2, masked_double_ref(cols, ins[1], ins[2])), (3, shape_out_ref(i, ins[3]))]))])
+  } else {
+    map.from([(name, (4, (_dts, ins) =>
+        [(2, view_grid_sum_ref(rows, cols, VD_SUM_TILE, ins[1], ins[2])),
+          (3, shape_out_ref(i, ins[3]))]))])
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones. The
+## tail is where a write that ran wide shows.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[List[Float]]]) -> String = match o {
+  Some(vs) -> list.fold(range(0, len(vs)), "", (acc, i) => {
+    let sep = if acc == "" { "" } else { " | " }
+    acc ++ sep ++ digest(vs[i])
+  })
+  None -> "-"
+}
+
+## How many distinct values `v` holds, counted through a map rather than
+## pairwise: a transpose corpus is thousands of lanes and the pairwise count
+## would be millions of comparisons.
+fn uniques(v: List[Float]) -> Int = {
+  var seen: Map[String, Unit] = map.empty()
+  for x in v {
+    seen = map.insert(seen, to_string(x), ())
+  }
+  len(map.keys(seen))
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("dyn_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## What one case's buffers are, as a line: the formats in argument order and
+## which positions are read back.
+fn shape_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  let formats = list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+  let (rows, cols) = case_shape(i)
+  "tensor=${rows}x${cols} bufs=${formats} reads=${to_string(case_reads(i))}"
+}
+
+## The first result buffer of case `i`, or `None` if it did not get one.
+fn first_result(rs: List[Option[List[List[Float]]]], i: Int) -> Option[List[Float]] = match rs[i] {
+  Some(vs) -> if len(vs) == 0 { None } else { Some(vs[0]) }
+  None -> None
+}
+
+# `io.exit` needs a handler above it now, and this program is the only
+# frame with nothing above it. `Fs` stays where it was, installed per read.
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let argv = args()
+  let cubin_names = ["view_dyn_transpose", "view_tensor_shape", "view_index_space", "view_transpose"]
+  if len(argv) != len(cubin_names) {
+    io.eprintln("usage: dyn_diff <view_dyn_transpose.cubin> <view_tensor_shape.cubin>"
+        ++ " <view_index_space.cubin> <view_transpose.cubin>")
+    io.exit(2)
+  }
+  var cubins: Map[String, Bytes] = map.empty()
+  for i in range(0, len(cubin_names)) {
+    cubins = map.insert(cubins, cubin_names[i], read_cubin(argv[i]))
+  }
+  # The counts run.sh holds the corpus to, computed from the corpus itself
+  # rather than asserted here, so a corpus that quietly lost one of these
+  # properties is visible in the transcript as well.
+  #
+  #   distinct   every lane of the transpose corpus is its own value
+  #   masked     lanes view_tensor_shape's grid covers and its mask excludes,
+  #              which is where a wrong get_tensor_shape shows
+  #   padded     lanes of view_index_space's grid that fall outside the
+  #              tensor, which is where its padding value shows
+  #   shapes     distinct tensor shapes, counting all seven cases
+  let masked = blocks(VT_COLS, VD_LANES) * VD_LANES - VT_COLS
+  let (sr, sc) = case_shape(4)
+  let covered = blocks(sr, VD_SUM_TILE) * blocks(sc, VD_SUM_TILE) * VD_SUM_TILE * VD_SUM_TILE
+  let padded = covered - sr * sc
+  var seen_shapes: Map[String, Unit] = map.empty()
+  for i in range(0, case_count()) {
+    let (r, c) = case_shape(i)
+    seen_shapes = map.insert(seen_shapes, "${r}x${c}", ())
+  }
+  io.println("  index lanes=${VT_ROWS * VT_COLS} distinct=${uniques(distinct(VT_ROWS * VT_COLS))}"
+      ++ " masked=${masked} padded=${padded} shapes=${len(map.keys(seen_shapes))}")
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var results: List[Option[List[List[Float]]]] = []
+  for i in range(0, case_count()) {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let reads = case_reads(i)
+    let (gx, gy, gz) = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
+    let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
+    let v = verdict(fake, real)
+    results = results ++ [real.results]
+    io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
+    io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    if real.note != "" { io.println("  note  ${real.note}") }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" { exact_count = exact_count + 1 } else { () }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  # The family's own claim, and the one the references cannot make: the
+  # dynamic transpose and the static one, two cubins on one corpus in one
+  # process, wrote the same bytes. A reference agreeing with both would say
+  # only that the reference was written twice.
+  let twin = match (first_result(results, 0), first_result(results, 6)) {
+    (Some(a), Some(b)) -> if same_lanes(a, b) { "same" } else { "differ" }
+    _ -> "unknown"
+  }
+  io.println("probe dyn twin=${twin} launches=${case_count()}"
+      ++ " shapes=${len(map.keys(seen_shapes))} exact=${exact_count}")
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
