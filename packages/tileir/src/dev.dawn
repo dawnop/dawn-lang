@@ -446,6 +446,22 @@ pub opaque type Ptrs[D] = Int
 ## declared, or declaring the same symbol twice, is refused when the kernel
 ## is recorded.
 ##
+## `t_mmaf_scaled` is the block-scaled matrix multiply (knife T10). It is
+## `t_mmaf` with two more operands and three formats instead of one: the
+## two matrices are `dtype`, the two scale tiles are `scale`, and the
+## accumulator and the result are f32, which is the only output type the
+## dialect allows. `dims` is `[m, k, n, block]`, where `block` is the scale
+## vector size V: a scale tile is `[m, k / block]` on the left and
+## `[k / block, n]` on the right, and one of its elements scales a run of
+## `block` elements along K.
+##
+## The four numbers travel as ONE LIST rather than as four parameters
+## because a Dawn function value takes at most eight parameters (the
+## compiler emits `dawn/rt/Fn0` to `Fn9` and the evidence pack is one of
+## the nine), and an effect operation is a function value. Eleven
+## parameters compile and then fail at run time with
+## `NoClassDefFoundError: dawn/rt/Fn12`; this shape has eight.
+##
 ## `t_alloca(dtype, num_elem, align, shared, shape)` is the automatic
 ## allocation (knife T10). It answers a tile of `shape` every lane of which
 ## holds the SAME address, the way `t_get_global` does, because `alloca`
@@ -483,6 +499,8 @@ pub effect Dev {
   fn t_binaryf(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_fma(dtype: String, shape: List[Int], a: Int, b: Int, c: Int) -> Int
   fn t_mmaf(dtype: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
+  fn t_mmaf_scaled(dtype: String, scale: String, dims: List[Int],
+    a: Int, b: Int, c: Int, sa: Int, sb: Int) -> Int
   fn t_mmai(m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
   fn t_cmpf(pred: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_cmpi(pred: String, shape: List[Int], a: Int, b: Int) -> Int
@@ -1180,6 +1198,30 @@ pub fn mmaf[D: Dtype](d: D, m: Int, k: Int, n: Int, a: Tile[D], b: Tile[D], c: T
   let y: Int = b
   let z: Int = c
   let h: Tile[D] = t_mmaf(dtype_name(d), m, k, n, x, y, z)
+  h
+}
+
+## The BLOCK-SCALED floating-point matrix multiply-accumulate (knife T10):
+## `mmaf` for the low-precision formats that carry a separate exponent per
+## run of K. `a` is a `d` tile of `[m, k]`, `b` a `d` tile of `[k, n]`, `c`
+## and the answer f32 tiles of `[m, n]`, and `sa` and `sb` are `s` tiles of
+## `[m, k / block]` and `[k / block, n]`: each scale element multiplies a
+## run of `block` elements along K in the matrix beside it.
+##
+## The dialect allows two combinations and nothing else (Ops.td's table):
+## `f8E4M3FN`, `f8E5M2` or `f4E2M1FN` operands with `f8E8M0FNU` scales, and
+## `f4E2M1FN` operands with `f8E4M3FN` scales. The result is f32 in both.
+## There is no combination with a wide operand format, which is why this
+## operation cannot be assembled for this machine's sm_86 at all: every
+## operand type it takes is one `tileiras` refuses below sm_100.
+pub fn mmaf_scaled[D: Dtype, S: Dtype](d: D, s: S, m: Int, k: Int, n: Int, block: Int,
+  a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: Tile[S]) -> Tile[F32] !Dev = {
+  let x: Int = a
+  let y: Int = b
+  let z: Int = c
+  let p: Int = sa
+  let q: Int = sb
+  let h: Tile[F32] = t_mmaf_scaled(dtype_name(d), dtype_name(s), [m, k, n, block], x, y, z, p, q)
   h
 }
 
@@ -2732,6 +2774,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => {
+      let h = next
+      next = next + 1
+      h
+    }
   }
   body()
 }
@@ -3003,6 +3050,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_alloca(dtype, num_elem, align, shared, shape) => {
       log = log ++ ["alloca ${dtype} ${num_elem} ${align} ${show(shared)} ${show(shape)}"]
       78
+    }
+    t_mmaf_scaled(dtype, scale, dims, a, b, c, sa, sb) => {
+      log = log ++ ["mmaf_scaled ${dtype} ${scale} ${show(dims)} ${a} ${b} ${c} ${sa} ${sb}"]
+      79
     }
   }
   body()
@@ -3363,6 +3414,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
       t_get_global(_sym, _dtype, _shape) => 77
       t_alloca(_dtype, _num_elem, _align, _shared, _shape) => 78
+      t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => 79
     }
     let _r = loop_seen()
     log

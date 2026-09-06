@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints}
-use prog.{TileOp, TileProg, Global, Alloca, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -112,6 +112,13 @@ derive Show
 ## it, the same two the parameter ladder emits, so this instruction has one
 ## result and no operands.
 ##
+## `FloatMmaScaled` is `mmaf_scaled` (knife T10): `FloatMma` with two more
+## operands and three formats. The two matrices share `lhs_ty` /`rhs_ty`
+## element format, the two scale tiles share `scale_ty` / `rhs_scale_ty`'s,
+## and `ty` is the f32 accumulator and result, which is the only output
+## format the dialect allows. It carries no attribute and no optional
+## field, so unlike `mmaf` it writes no flags word.
+##
 ## `AllocaPtr` is `alloca` (knife T10) and has the same shape: one result,
 ## no operands, a rank-0 `tile<ptr<D>>`, spread by the same two
 ## instructions. What it carries instead of a symbol is the request --
@@ -168,6 +175,8 @@ pub type Instr =
   | FloatBin(dst: Int, op: String, ty: Ty, lhs: Ref, rhs: Ref)
   | FloatFma(dst: Int, ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | FloatMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
+  | FloatMmaScaled(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, scale_ty: Ty, rhs_scale_ty: Ty,
+    lhs: Ref, rhs: Ref, acc: Ref, lhs_scale: Ref, rhs_scale: Ref)
   | IntMma(dst: Int, ty: Ty, lhs_ty: Ty, rhs_ty: Ty, lhs: Ref, rhs: Ref, acc: Ref)
   | CmpFloat(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
   | CmpInt(dst: Int, pred: String, ty: Ty, res_ty: Ty, lhs: Ref, rhs: Ref)
@@ -565,6 +574,20 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let ty = num_tile([m, n], dtype)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatMma(d, ty, num_tile([m, k], dtype), num_tile([k, n], dtype), a, b, c))
+  }
+  MmaFScaled(dst, dtype, scale, m, k, n, block, lhs, rhs, acc, lhs_scale, rhs_scale) -> {
+    let a = ref_of(l0, lhs, "mmaf_scaled lhs")
+    let b = ref_of(l0, rhs, "mmaf_scaled rhs")
+    let c = ref_of(l0, acc, "mmaf_scaled accumulator")
+    let p = ref_of(l0, lhs_scale, "mmaf_scaled lhs scale")
+    let q = ref_of(l0, rhs_scale, "mmaf_scaled rhs scale")
+    # the accumulator and the result are f32 whatever the operands are:
+    # the dialect's MmaFScaledOp_ResultTileType has one member.
+    let sk = k / block
+    let ty = num_tile([m, n], "f32")
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatMmaScaled(d, ty, num_tile([m, k], dtype), num_tile([k, n], dtype),
+      num_tile([m, sk], scale), num_tile([sk, n], scale), a, b, c, p, q))
   }
   MmaI(dst, m, k, n, lhs, rhs, acc) -> {
     let a = ref_of(l0, lhs, "mmai lhs")
@@ -1009,6 +1032,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   FloatBin(dst, _op, _ty, _lhs, _rhs) -> [dst]
   FloatFma(dst, _ty, _lhs, _rhs, _acc) -> [dst]
   FloatMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
+  FloatMmaScaled(dst, _ty, _lhs_ty, _rhs_ty, _scale_ty, _rhs_scale_ty, _lhs, _rhs, _acc, _lhs_scale, _rhs_scale) -> [dst]
   IntMma(dst, _ty, _lhs_ty, _rhs_ty, _lhs, _rhs, _acc) -> [dst]
   CmpFloat(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]
   CmpInt(dst, _pred, _ty, _res_ty, _lhs, _rhs) -> [dst]

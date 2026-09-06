@@ -70,8 +70,8 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
-use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
+use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -175,6 +175,7 @@ const OP_ASSERT: Int = 0x05
 const OP_ASSUME: Int = 0x06
 const OP_PRINT_TKO: Int = 0x55
 const OP_ALLOCA: Int = 0x71
+const OP_MMAF_SCALED: Int = 0x72
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -1303,6 +1304,16 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w1 = emit_op(w0, OP_MMAF, t)
     let w2 = if mmaf_has_flags() { emit(w1, MMAF_FLAG_FAST_ACC_UNSET) } else { w1 }
     emit_ref(emit_ref(emit_ref(w2, lhs), rhs), acc)
+  }
+  FloatMmaScaled(_dst, t, _lhs_ty, _rhs_ty, _scale_ty, _rhs_scale_ty, lhs, rhs, acc, lhs_scale, rhs_scale) -> {
+    # the result type (which is the f32 accumulator's), then the five
+    # operands. `mmaf_scaled` has NO attribute and NO optional field at any
+    # version, so unlike its sibling `mmaf` it writes no flags varint --
+    # getVersionOrderedBitAssignments answers an empty table and
+    # generateFlagsFieldSerialization returns without emitting anything.
+    # Nothing is variadic either, so no count is written.
+    let w1 = emit_op(w0, OP_MMAF_SCALED, t)
+    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)
   }
   CmpFloat(_dst, pred, _t, res_ty, lhs, rhs) -> {
     # the result is the i1 tile; the predicate and the ordering are required
@@ -2562,6 +2573,80 @@ test "the two varints the record grew at 13.3 carry the visibility and the const
     "01" ++ "08" ++ "01" ++ "8002" ++ "00" ++ "01"
   assert VIS_PUBLIC == 0
   assert VIS_PRIVATE == 1
+}
+
+fn alloca_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "a",
+  params: ["f64"],
+  globals: [],
+  ops: [MakeToken(0), Alloca(1, "f64", 192, 8, false, [8]), Alloca(2, "f64", 192, 8, true, [8])]
+}
+
+test "alloca writes its opcode, its result type, a flags word and its two counts, and nothing else" {
+  let k = lower(alloca_prog())
+  let (w, whole) = body_of(k)
+  assert OP_ALLOCA == 0x71
+  assert ALLOCA_FLAG_GLOBAL == 1
+  # five varints: opcode, result type, flags, num_elem, alignment. The two
+  # I64Attrs are written INLINE and plainly -- writeOpAttribute's
+  # std::is_integral_v arm calls writeVarInt, so there is no tag, no type
+  # index and no zigzag, the way `cat`'s dim is written. `global` is a
+  # UnitAttr and lives only in the flags word. `alloca` has no operands at
+  # all and nothing about it is variadic, so no count is written anywhere.
+  let (_w1, ti) = ty(w, Tile([], PtrTo("f64")))
+  let head = hex(varint(OP_ALLOCA)) ++ hex(varint(ti))
+  assert str.contains(whole, head ++ hex(varint(0)) ++ hex(varint(192)) ++ hex(varint(8)))
+  # the second one is the same instruction with bit 0 set, which is the
+  # whole of the difference the `global` attribute makes to the stream
+  assert str.contains(whole,
+    head ++ hex(varint(ALLOCA_FLAG_GLOBAL)) ++ hex(varint(192)) ++ hex(varint(8)))
+  # and the result is the rank-0 pointer tile, not the tile the body asked
+  # for: the reshape and the broadcast after it are what widens it
+  assert str.contains(whole, hex(varint(OP_RESHAPE)))
+  assert str.contains(whole, hex(varint(OP_BROADCAST)))
+}
+
+fn mmaf_scaled_prog() -> TileProg = TileProg {
+  hints: [],
+  name: "s",
+  params: ["f64"],
+  globals: [],
+  # the fp8 operands come from `ftof` and not from `constant`: this writer
+  # has no float payload for a one-byte format (float_payload), which is
+  # the same reason the fp8 kernels in scripts/tile-golden convert into the
+  # format rather than spelling a literal in it.
+  ops: [
+    ConstF(0, "f32", [4, 8], 1.0),
+    Convert(1, "ftof", "f32", "f8E4M3FN", [4, 8], 0),
+    ConstF(2, "f32", [8, 4], 1.0),
+    Convert(3, "ftof", "f32", "f8E4M3FN", [8, 4], 2),
+    ConstF(4, "f32", [4, 4], 0.0),
+    ConstF(5, "f32", [4, 2], 1.0),
+    Convert(6, "ftof", "f32", "f8E8M0FNU", [4, 2], 5),
+    ConstF(7, "f32", [2, 4], 1.0),
+    Convert(8, "ftof", "f32", "f8E8M0FNU", [2, 4], 7),
+    MmaFScaled(9, "f8E4M3FN", "f8E8M0FNU", 4, 8, 4, 4, 1, 3, 4, 6, 8)
+  ]
+}
+
+test "mmaf_scaled writes its opcode, its result type and five operands, and NO flags word" {
+  let k = lower(mmaf_scaled_prog())
+  let (w, whole) = body_of(k)
+  assert OP_MMAF_SCALED == 0x72
+  # This is the sibling comparison that makes the absence load bearing.
+  # `mmaf` gained an optional `fast_acc` at 13.3, so from that version it
+  # writes a flags varint; `mmaf_scaled` has no optional field and no
+  # attribute at any version, so getVersionOrderedBitAssignments answers an
+  # empty table and generateFlagsFieldSerialization emits nothing. The five
+  # operand indices therefore follow the result type directly.
+  assert mmaf_has_flags()
+  let (_w1, ti) = ty(w, Tile([4, 4], Num("f32")))
+  # the nine values took indices 1..9 (the entry has one parameter), so the
+  # operands are the converted lhs 2, the converted rhs 4, the accumulator
+  # 5 and the two converted scales 7 and 9
+  assert str.contains(whole, hex(varint(OP_MMAF_SCALED)) ++ hex(varint(ti))
+      ++ hex(varint(2)) ++ hex(varint(4)) ++ hex(varint(5)) ++ hex(varint(7)) ++ hex(varint(9)))
 }
 
 test "get_global writes its opcode, its result type and the symbol's string index, and nothing else" {

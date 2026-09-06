@@ -18,7 +18,7 @@ use std/list
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -307,6 +307,10 @@ fn line(i: Instr) -> String = match i {
   FloatMma(dst, t, lhs_ty, rhs_ty, lhs, rhs, acc) ->
     "${v(dst)} = mmaf ${name(lhs)}, ${name(rhs)}, ${name(acc)}"
     ++ " : ${ty(lhs_ty)}, ${ty(rhs_ty)}, ${ty(t)}"
+  FloatMmaScaled(dst, t, lhs_ty, rhs_ty, scale_ty, rhs_scale_ty, lhs, rhs, acc, lhs_scale, rhs_scale) ->
+    "${v(dst)} = mmaf_scaled ${name(lhs)}, ${name(rhs)}, ${name(acc)}"
+    ++ ", ${name(lhs_scale)}, ${name(rhs_scale)}"
+    ++ " : ${ty(lhs_ty)}, ${ty(rhs_ty)}, ${ty(t)}, ${ty(scale_ty)}, ${ty(rhs_scale_ty)}"
   IntMma(dst, t, lhs_ty, rhs_ty, lhs, rhs, acc) ->
     "${v(dst)} = mmai ${name(lhs)}, ${name(rhs)}, ${name(acc)} signed signed"
     ++ " : ${ty(lhs_ty)}, ${ty(rhs_ty)}, ${ty(t)}"

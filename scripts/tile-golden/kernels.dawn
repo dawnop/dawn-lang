@@ -29,7 +29,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   extract, cat, permute_tile, num_blocks, d_fork2,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
   d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
-  alloca_ptrs, alloca_shared_ptrs,
+  alloca_ptrs, alloca_shared_ptrs, mmaf_scaled,
   addi, subi, muli, shli, shri, consti,
   addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
   sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
@@ -4316,6 +4316,41 @@ fn alloca_ctl(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store(out, blk, s, addf(F64, s, addf(F64, s, tx, tx), tx))
 }
 
+# ---- knife T10: `mmaf_scaled` (0x72) ----
+#
+# The block-scaled MMA. It reaches LAYER 1 AND NO FURTHER on this machine,
+# and the reason is the operation's own type table rather than anything
+# missing here: Ops.td confines its two matrix operands to `f8E4M3FN`,
+# `f8E5M2` and `f4E2M1FN`, and `tileiras` 13.3.36 refuses all three fp8
+# formats below sm_100 (measured by knife T3, and again by writing this
+# kernel out for sm_86). There is NO wide-operand form to fall back on:
+# unlike `mmaf`, which takes everything down to f64, this operation exists
+# only for the formats that carry a separate exponent per run of K. So the
+# kernel is assembled for sm_100 like the three dtype_* fp8 kernels
+# (run.sh's kernel_arch) and this machine's RTX 3080 never sees it.
+#
+# The scale shapes are what `block` means: one f8E8M0FNU element scales a
+# run of MMS_V elements along K, so the left scale is [M, K/V] and the
+# right one is [K/V, N]. The accumulator and the result are f32 whatever
+# the operands are, which is the whole of MmaFScaledOp_ResultTileType.
+const MMS_M: Int = 32
+const MMS_K: Int = 64
+const MMS_N: Int = 32
+const MMS_V: Int = 32
+
+fn mmaf_scaled_e4m3(a: Param[F8E4M3FN], b: Param[F8E4M3FN], sa: Param[F8E8M0FNU],
+  sb: Param[F8E8M0FNU], out: Param[F64]) -> Unit !Dev = {
+  let sk = MMS_K / MMS_V
+  let zero = idx_const(0)
+  let ta = load(a, zero, [MMS_M, MMS_K])
+  let tb = load(b, zero, [MMS_K, MMS_N])
+  let tsa = load(sa, zero, [MMS_M, sk])
+  let tsb = load(sb, zero, [sk, MMS_N])
+  let acc = f_const(F32, [MMS_M, MMS_N], 0.0)
+  let r = mmaf_scaled(F8E4M3FN, F8E8M0FNU, MMS_M, MMS_K, MMS_N, MMS_V, ta, tb, acc, tsa, tsb)
+  store(out, zero, [MMS_M, MMS_N], float_to_float(F32, F64, [MMS_M, MMS_N], r))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4733,6 +4768,10 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("alloca_two", ["f64", "f64"], () => alloca_two(param(F64, 0), param(F64, 1)))
   "alloca_ctl" ->
     trace_kernel("alloca_ctl", ["f64", "f64"], () => alloca_ctl(param(F64, 0), param(F64, 1)))
+  "mmaf_scaled_e4m3" ->
+    trace_kernel("mmaf_scaled_e4m3", ["f8E4M3FN", "f8E4M3FN", "f8E8M0FNU", "f8E8M0FNU", "f64"],
+      () => mmaf_scaled_e4m3(param(F8E4M3FN, 0), param(F8E4M3FN, 1), param(F8E8M0FNU, 2),
+        param(F8E8M0FNU, 3), param(F64, 4)))
   "hint_entry" ->
     trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
       () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))

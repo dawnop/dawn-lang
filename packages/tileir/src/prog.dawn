@@ -112,6 +112,8 @@ pub type TileOp =
   | BinaryF(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Fma(dst: Int, dtype: String, shape: List[Int], lhs: Int, rhs: Int, acc: Int)
   | MmaF(dst: Int, dtype: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
+  | MmaFScaled(dst: Int, dtype: String, scale: String, m: Int, k: Int, n: Int, block: Int,
+    lhs: Int, rhs: Int, acc: Int, lhs_scale: Int, rhs_scale: Int)
   | MmaI(dst: Int, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
   | CmpF(dst: Int, pred: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | CmpI(dst: Int, pred: String, shape: List[Int], lhs: Int, rhs: Int)
@@ -664,6 +666,33 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MmaF(d, dtype, m, k, n, a, b, c)]
+        d
+      }
+      t_mmaf_scaled(dtype, scale, dims, a, b, c, sa, sb) => {
+        # `dims` is [m, k, n, block]; it is one list because an effect
+        # operation is a function value and a function value takes at most
+        # eight parameters (dev.dawn says so on the declaration).
+        if len(dims) != 4 {
+          refuse(name, "mmaf_scaled takes [m, k, n, block], got ${show(dims)}")
+        } else {
+          ()
+        }
+        let m = dims[0]
+        let k = dims[1]
+        let n = dims[2]
+        let block = dims[3]
+        # the four shapes the dialect derives from these numbers, checked
+        # here for the reason every other shape in this file is: a tile
+        # dimension is a power of two, and `k / block` is one of them.
+        if block <= 0 || k % block != 0 {
+          refuse(name, "mmaf_scaled over K=${k} in blocks of ${block}, which does not divide it")
+        } else {
+          ()
+        }
+        check_shape(name, [m, k, n, k / block])
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [MmaFScaled(d, dtype, scale, m, k, n, block, a, b, c, sa, sb)]
         d
       }
       t_mmai(m, k, n, a, b, c) => {
@@ -1242,6 +1271,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   BinaryF(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Fma(dst, _dtype, _shape, _lhs, _rhs, _acc) -> [dst]
   MmaF(dst, _dtype, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
+  MmaFScaled(dst, _dtype, _scale, _m, _k, _n, _block, _lhs, _rhs, _acc, _lhs_scale, _rhs_scale) -> [dst]
   MmaI(dst, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   CmpF(dst, _pred, _dtype, _shape, _lhs, _rhs) -> [dst]
   CmpI(dst, _pred, _shape, _lhs, _rhs) -> [dst]

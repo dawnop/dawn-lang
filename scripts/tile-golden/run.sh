@@ -371,7 +371,7 @@ kernels=(
   assume_same assume_bounded
   global_table global_ctl global_scratch global_flags
   hint_entry hint_memory
-  alloca_scratch alloca_two alloca_ctl)
+  alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -656,7 +656,7 @@ PY
 # assembler's target changes.
 kernel_arch() { # kernel
   case "$1" in
-    dtype_e4m3|dtype_e5m2|dtype_e8m0) echo sm_100 ;;
+    dtype_e4m3|dtype_e5m2|dtype_e8m0|mmaf_scaled_e4m3) echo sm_100 ;;
     *) echo "$gpu_name" ;;
   esac
 }
