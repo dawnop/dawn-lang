@@ -675,9 +675,9 @@ PY
 }
 
 # The --gpu-name a kernel is assembled for. toolchain.txt's `gpu-name` is
-# the machine's own (sm_86) and every kernel but three uses it.
+# the machine's own (sm_86) and every kernel but four uses it.
 #
-# The three are knife T3's fp8 kernels, and the number here is a
+# The first three are knife T3's fp8 kernels, and the number here is a
 # MEASUREMENT: tileiras 13.3.36 refuses all three fp8 types at sm_86 AND at
 # sm_89 with
 #
@@ -694,6 +694,16 @@ PY
 # exemption). Nothing about the BYTES differs: the .tilebc goldens are
 # recorded and compared exactly as every other kernel's are, and only the
 # assembler's target changes.
+#
+# The fourth is knife T10's mmaf_scaled_e4m3, and it is here for the same
+# reason one level up: `mmaf_scaled`'s two matrix operands are confined by
+# Ops.td to f8E4M3FN, f8E5M2 and f4E2M1FN, so there is no wide-operand form
+# to fall back on the way `mmaf` has. sm_86 and sm_89 refuse it for
+# f8E4M3FN and sm_90 refuses it for the f8E8M0FNU scale (measured 2026-09-06,
+# `error: Incompatibility with architecture 'sm_90': unsupported type
+# 'f8E8M0FNU'`), so the block-scaled family needs one architecture more than
+# fp8 itself. scripts/tileir-features/features.txt carries that row's
+# `architecture` exemption.
 kernel_arch() { # kernel
   case "$1" in
     dtype_e4m3|dtype_e5m2|dtype_e8m0|mmaf_scaled_e4m3) echo sm_100 ;;
