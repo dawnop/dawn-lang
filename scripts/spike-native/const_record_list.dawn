@@ -1,0 +1,31 @@
+# A list that exists only inside a folded constant.
+#
+# Per-program std pruning (docs/std-pruning-design.md) keeps `std/pvec` for a
+# program a `List` can turn up in, and it decides that from the types the
+# reachability walk sees. A folded constant is the one place a list can be
+# without a type saying so: `CConstRef` names a `CValue` the emitter
+# materialises, the value here is a record whose field happens to be a list,
+# and the reference's own type is the record. The emitters build that field
+# exactly the way a literal is built -- `std/pvec.from_array` -- so the
+# function has to be there.
+#
+# The list is never read on purpose. Reading `B.xs` would put a `TyList` in
+# front of the walk and the ordinary criterion would carry the program;
+# printing only `B.n` leaves the constant as the sole witness. Judging it
+# wrong is `undefined reference to dawn_std_2pvec__from_1array` at link time,
+# which is this entry's `cc` check.
+use std/io
+
+pub type Box = { xs: List[Int], n: Int }
+
+pub type Tagged = { tag: String, ns: List[String] }
+
+const B: Box = Box { xs: [1, 2, 3], n: 7 }
+const T: Tagged = Tagged { tag: "p", ns: ["a", "b"] }
+
+pub fn main() -> Unit !io = {
+  println("n   = ${B.n}")
+  println("tag = ${T.tag}")
+  # read again: a constant is a value, not a one-shot
+  println("n   = ${B.n}")
+}
