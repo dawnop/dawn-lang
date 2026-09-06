@@ -406,7 +406,7 @@ kernels=(
   attr_overflow attr_memsem attr_addf attr_ucmp
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded
-  global_table global_ctl global_scratch global_flags
+  global_table global_ctl global_scratch global_flags global_syms
   hint_entry hint_memory
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3)
 cc_bin="${CC:-cc}"
