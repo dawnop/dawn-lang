@@ -57,7 +57,7 @@ use check/types.{
   Adts, AdtI, CtorI, FieldI, EffectI, Traits, TraitI, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
-  no_eparam_names,
+  no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
   SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots, arg_slots,
   is_numeric, is_errorish, ty_char, peel_opaque,
@@ -76,7 +76,7 @@ use check/exhaustive.{
 }
 use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
-  cx_new, test_cx,
+  cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
   resolve_type, resolve_return_type, is_const_serializable, const_refusal_hint, no_sig,
   TySpan
@@ -3775,6 +3775,9 @@ pub fn check_fn_value(
       "wrap it in a lambda: (" ++ ps2 ++ ") => " ++ name ++ "(" ++ ps2 ++ ")"),
       TyError, XError(lo, hi))
   }
+  if len(f.param_tys) > fn_max_params() {
+    return (check_value_arity(cx, len(f.param_tys), lo, hi), TyError, XError(lo, hi))
+  }
   # Counted off the type parameters rather than off `constraints` directly, so
   # "there are bounds" and "these are the bounds" are one walk: the eta
   # expansion below discharges exactly what this counts, and a second walk is
@@ -4017,6 +4020,9 @@ pub fn check_ctor_value(
 ) -> (Cx, Ty, TExpr) = {
   let a = adt_of(cx.adts, aid)
   let ci = a.ctors[cslot]
+  if len(ci.fields) > fn_max_params() {
+    return (check_value_arity(cx, len(ci.fields), lo, hi), TyError, XError(lo, hi))
+  }
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
   let ret = adt_self_ty(a)
@@ -5342,6 +5348,7 @@ fn check_lambda(
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
   var have_exp = false
+  if not arm { cx1 = check_value_arity(cx1, len(params), lo, hi) }
   var eps: List[Ty] = []
   var eret = TyUnit
   var eeff = EPure
