@@ -3445,7 +3445,7 @@ shape_pkg_mutant() { # name, module, old, new, red-kernels...
   fi
 }
 
-# 25. permute-identity: the writer sends the identity permutation instead of
+# 27. permute-identity: the writer sends the identity permutation instead of
 #     the kernel's own. `shape_ops` permutes a 4 by 4 by 8 tile by
 #     [1, 0, 2], whose first two dimensions are EQUAL, so the identity
 #     gives the same result TYPE and the assembler has nothing to object
@@ -3457,7 +3457,7 @@ shape_pkg_mutant permute-identity bytecode.dawn \
   'let w1 = emit_i32_array(emit_op(w0, OP_PERMUTE, to), list.map(range(0, len(perm)), k => k))' \
   shape_ops
 
-# 26. cat-operands-swapped: the writer concatenates the two operands the
+# 28. cat-operands-swapped: the writer concatenates the two operands the
 #     other way round. Both have the same type, so the result type is
 #     unchanged and layer 1 is happy; `shape_ops` puts the tile's lower
 #     half above its upper one, so swapping them puts it back and the
@@ -3467,7 +3467,7 @@ shape_pkg_mutant cat-operands-swapped bytecode.dawn \
   'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), rhs), lhs)' \
   shape_ops
 
-# 27. extract-indices-reversed: the writer emits `extract`'s slice indices
+# 29. extract-indices-reversed: the writer emits `extract`'s slice indices
 #     in the opposite order. Every index is a rank-0 i32 tile, so the types
 #     are the same and layer 1 accepts it; `shape_ops` extracts with
 #     [1, 0] from a tile that has two slices along BOTH dimensions, so [0, 1]
@@ -3479,7 +3479,7 @@ shape_pkg_mutant extract-indices-reversed bytecode.dawn \
   'list.fold(list.reverse(indices), emit_ref(w1, src), emit_ref)' \
   shape_ops
 
-# 28. num-tile-blocks-as-block-id: the writer emits `get_tile_block_id`
+# 30. num-tile-blocks-as-block-id: the writer emits `get_tile_block_id`
 #     where `get_num_tile_blocks` belongs. The two operations have exactly
 #     the same shape -- three rank-0 i32 results, no operands, no
 #     attributes -- so the file is the same length and every layer below
@@ -3559,7 +3559,7 @@ dtype_writer_mutant() { # name, old, new
   echo "PASS  mutant: $name (layer 1 accepts it; on the device ${dtype_red[*]} differs from segment 1 on and ${dtype_green[*]} does not)"
 }
 
-# 27. tf32-tag-as-f32: the writer's type table gives tf32 the f32 tag. Four
+# 31. tf32-tag-as-f32: the writer's type table gives tf32 the f32 tag. Four
 #     bytes for four, so the file is the same length; the renderer prints
 #     the format the lowering handed it, so dtype_tf32.mlir still says
 #     `tf32`; and every operation in the kernel is as legal over f32 as
@@ -3576,7 +3576,7 @@ dtype_writer_mutant tf32-tag-as-f32 \
   '  "tf32" -> 8' \
   '  "tf32" -> 7'
 
-# 28. exti-i4-zero-extends: the writer stops writing the SIGNED widening
+# 32. exti-i4-zero-extends: the writer stops writing the SIGNED widening
 #     the `extis` name asks for and writes the unsigned one, which is the
 #     other value of the same one-byte attribute. Knife T9's format has no
 #     arithmetic of its own, so every kernel over it widens first, and this
@@ -3597,7 +3597,7 @@ dtype_writer_mutant exti-i4-zero-extends \
   '  "extis" -> [SIGNED]' \
   '  "extis" -> [UNSIGNED]'
 
-# 29. pack-halves-swapped: the HOST's reading of which nibble is lane k
+# 33. pack-halves-swapped: the HOST's reading of which nibble is lane k
 #     exchanges the two halves of every byte. Types.td says the even lane
 #     is in bits 3..0 and the odd one in bits 7..4, and this is the only
 #     place in the tree where that sentence is written down as code; the
@@ -3705,7 +3705,7 @@ attr_pkg_mutant() { # name, module, old, new, red-kernel-or-probe...
   echo "PASS  mutant: $name (layer 1 accepts it; on the device $want claim(s) hold and no other kernel moved)"
 }
 
-# 29. directed-rounding-as-nearest-even: the writer rounds to nearest even
+# 34. directed-rounding-as-nearest-even: the writer rounds to nearest even
 #     where the kernel asked for negative or positive infinity. Every
 #     rounding mode is a legal byte in that position, so the assembler has
 #     nothing to object to; attr_round's six segments collapse into three
@@ -3718,7 +3718,7 @@ attr_pkg_mutant directed-rounding-as-nearest-even bytecode.dawn \
   "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_NEAREST_EVEN)' \
   attr_round probe:attr_round:add=0
 
-# 30. ftz-bit-dropped: the writer clears `flush_to_zero`'s flag bit. A unit
+# 35. ftz-bit-dropped: the writer clears `flush_to_zero`'s flag bit. A unit
 #     attribute is nothing BUT that bit -- no payload is written for it --
 #     so this is the whole of the attribute, the file is the same length,
 #     and attr_ftz's subnormal sums and products stop being flushed.
@@ -3727,7 +3727,7 @@ attr_pkg_mutant ftz-bit-dropped bytecode.dawn \
   '  "addf_ftz" | "mulf_ftz" -> 0' \
   attr_ftz probe:attr_ftz:add=0
 
-# 31. propagate-nan-bit-dropped: the same for `propagate_nan`. Without it
+# 36. propagate-nan-bit-dropped: the same for `propagate_nan`. Without it
 #     `maxf` answers the non-NaN operand where the kernel asked for a NaN,
 #     which is IEEE 754-2019's maximumNumber where it asked for maximum.
 attr_pkg_mutant propagate-nan-bit-dropped bytecode.dawn \
@@ -3735,7 +3735,7 @@ attr_pkg_mutant propagate-nan-bit-dropped bytecode.dawn \
   '  "maxf_nan" | "minf_nan" -> 0' \
   attr_nan probe:attr_nan:maxf=0
 
-# 32. cmpf-always-ordered: the writer gives every float comparison the
+# 37. cmpf-always-ordered: the writer gives every float comparison the
 #     `ordered` comparison ordering. The two orderings agree on every pair
 #     of numbers, so this is invisible on any corpus without a NaN in it;
 #     attr_nan has NaNs on one side of 128 lanes, and its six unordered
@@ -3745,7 +3745,7 @@ attr_pkg_mutant cmpf-always-ordered bytecode.dawn \
   '  if one_of_op(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) { CMP_ORDERED } else { CMP_ORDERED }' \
   attr_nan probe:attr_nan:ordering=0
 
-# 33. for-unsigned-bit-dropped: the writer clears the loop's `unsignedCmp`
+# 38. for-unsigned-bit-dropped: the writer clears the loop's `unsignedCmp`
 #     bit, so both of attr_ucmp's loops compare their bound as a signed
 #     i32 and neither runs. The answer is a lane COUNT rather than a
 #     rounding: 32 becomes 0.
@@ -3754,7 +3754,7 @@ attr_pkg_mutant for-unsigned-bit-dropped bytecode.dawn \
   'if for_has_flags() { emit(w2, 0) } else { w2 }' \
   attr_ucmp
 
-# 34. sqrt-approx-as-nearest-even: the writer asks for the correctly
+# 39. sqrt-approx-as-nearest-even: the writer asks for the correctly
 #     rounded square root where the kernel asked for the approximate one.
 #     This is the mutant the VERDICT cannot catch: both roots are inside
 #     the tolerance tier's distance of the host reference, so attr_approx
@@ -3849,7 +3849,7 @@ loop_pkg_mutant() { # name, module, old, new
   echo "PASS  mutant: $name (layer 1 accepts it; on the device ${loop_red[*]} differs and ${loop_green[*]} does not)"
 }
 
-# 28. loop-break-condition-inverted.
+# 40. loop-break-condition-inverted.
 loop_pkg_mutant loop-break-condition-inverted prog.dawn \
   '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
   '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])'
@@ -4073,7 +4073,7 @@ global_pkg_mutant() { # name, module, old, new, red-kernel
   echo "PASS  mutant: $name (layer 1 accepts it; on the device $red differs and the other $(( ${#globals_[@]} - 1 )) do not)"
 }
 
-# 35. global-initializer-reversed: the Global section carries the
+# 41. global-initializer-reversed: the Global section carries the
 #     initializer's elements back to front. Same length, same type, same
 #     alignment, and `tileiras` has nothing to object to -- a table is a
 #     table. Only the device says global_table answers the mirror of what
@@ -4085,7 +4085,7 @@ global_pkg_mutant global-initializer-reversed bytecode.dawn \
   '  bytes.freeze(list.fold(list.map(range(0, len(values)), k => values[len(values) - 1 - k]), bytes.buf(), (b, x) => bytes.put_bytes(b, global_elem(dtype, x))))' \
   global_table
 
-# 36. get-global-wrong-symbol: every `get_global` names the module's FIRST
+# 42. get-global-wrong-symbol: every `get_global` names the module's FIRST
 #     global whatever it was asked for. The bytes stay the same length (a
 #     symbol is one string index and both strings are interned either way,
 #     because the Global section names them too) and `tileiras` accepts it,
@@ -4098,7 +4098,7 @@ global_pkg_mutant get-global-wrong-symbol prog.dawn \
   '        ops = ops ++ [GetGlobal(d, seen[0].sym, dtype, shape)]' \
   global_table
 
-# 37. module-reloaded-per-launch: the real handler stops keeping the module
+# 43. module-reloaded-per-launch: the real handler stops keeping the module
 #     it loaded and loads the cubin again for every launch. This is a
 #     HANDLER mutant and moves no bytes at all: the layers below cannot see
 #     it, because nothing in a Tile IR file says how long a module lives.
@@ -4134,7 +4134,7 @@ else
   echo "SKIP  mutant: module-reloaded-per-launch not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
 fi
 
-# 38. alloca-aliased: the recording handler hands every `alloca` after the
+# 44. alloca-aliased: the recording handler hands every `alloca` after the
 #     first the FIRST one's address, which is what a compiler that treated
 #     the operation as pure and common-subexpressioned it would do. The
 #     bytes move (alloca_two's second `offset` names the first allocation's
