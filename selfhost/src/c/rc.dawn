@@ -774,9 +774,14 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
   var lets: List[CStmt] = []
   var outs: List[CExpr] = []
   var temps: List[Int] = []
+  var held: List[Int] = []
   var i = 0
   for e in es {
     var a = after
+    # Earlier hoisted values belong to this operand list until the call.
+    # A later operand's return must unwind them, while its ordinary sweeps
+    # must keep them alive for the call that still reads or consumes them.
+    for t in held { a = set.insert(a, t) }
     var j = 0
     while j < n {
       if j != i { a = fv_expr(es[j], a) }
@@ -811,11 +816,17 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
       outs = outs ++ [CLocal(t, ty)]
       # a hoisted literal's temporary is a binding like any other (its drop
       # is free); only what was never counted at all stays out
-      if (counted(s3, e) || lit_immortal(e)) && not own { temps = temps ++ [t] }
+      if counted(s3, e) || lit_immortal(e) {
+        st2 = bind(st2, t)
+        held = held ++ [t]
+        if not own { temps = temps ++ [t] }
+      }
     }
     i = i + 1
   }
-  (st2, lets, outs, temps)
+  # The enclosing operation now takes over: owned arguments transfer to it,
+  # and borrowed arguments have the existing wrapper's explicit drops.
+  (strip_syms(st2, held), lets, outs, temps)
 }
 
 ## Rewrite each operand in a consuming position: the value is handed over and
@@ -2729,6 +2740,25 @@ test "the contract assertion names a one-sided mode" {
   # the coherent stamp is silent, and so is the all-owned base
   assert len(mode_mismatch(bor, row)) == 0
   assert len(mode_mismatch(own, owned_modes())) == 0
+}
+
+test "a later operand return releases a hoisted assignment value" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  # The second list can return before the call reads its hoisted first
+  # operand. Its ordinary path also crosses a sweep that must keep it held.
+  let later = CBlock(
+    [CSDiscard(CInt(0))],
+    Some(CIf(CBool(true), CReturn(Some(CInt(7))), Some(CInt(2)), TyInt)),
+    TyInt
+  )
+  let value = CCall(CDirect("m", "g"), [CLocal(1, lst), CListLit([later], lst)], lst)
+  let body = CBlock([CSAssign(1, value)], Some(CInt(0)), TyInt)
+  for mode in [COwned, CBorrowed] {
+    let modes = map.insert(owned_modes(), ("m", "g"), [mode, CBorrowed])
+    let m = rc_module(one_fn([p], TyInt, body), modes)
+    assert len(rc_check(m, modes)) == 0
+  }
 }
 
 test "reassignment from the old value is a hand-over, not copy and drop" {
