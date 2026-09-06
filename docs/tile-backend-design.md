@@ -1792,8 +1792,7 @@ CI 上仍只有亚秒的 `--check`。`dawn test packages/tileir` 多两个测试
 
 **刀 T12 的实测：六个新项，十片装不下了，分第十一片。** 这一刀加三个 kernel 与三条变异体，
 矩阵 235 项长到 **241 项**（179 个 kernel、62 条变异体）。跑了两轮不分片的 `ITEM_TIMES`：
-rebase 之前那一轮全量 **2285 s**（38:05，机器上另有 agent，load 3.8 到 5.5），rebase 到最新
-`origin/main` 之后的最终树上那一轮全量 **2183 s**（36:23）。
+rebase 之前那一轮全量 **2285 s**（38:05，机器上另有 agent，load 3.8 到 5.5），rebase 到 `c7b481b6` 之后那一轮全量 **2183 s**（36:23，预算就是按它算的）；最后又 rebase 到 `ed11fcf4`（上游只动 tea 与 example，编译器与 std 一个字节没动）并重跑了一遍验证，全量 **2098 s**（34:58），179 个 golden 与 62 条变异体全绿。
 
 | 轮次 | kernel | 变异体 |
 |---|---|---|
@@ -1823,7 +1822,7 @@ value 是 **575 / 581 / 586 / 605 / 606 / 606 / 605 / 604 / 608 / 608 / 568 s**�
 账记在 `gates.yml` 的 `tile-golden-11` 注里，`.github/actions/dawn-toolchain/action.yml`
 的两个计数同批改成四十七与四十三。
 
-`tile-gpu-diff/run.sh` 在最终树上 **776.7 s**（12:57），比刀 T11 那一轮的 935.3 s 短，
+`tile-gpu-diff/run.sh` 在最终树上 **769.9 s**（12:50），比刀 T11 那一轮的 935.3 s 短，
 尽管本刀往里加了一个 native 构建（`dyn_diff.dawn`）、七个 case 的真机对拍与两条变异体：
 差额是机器负载，不是语料。
 
