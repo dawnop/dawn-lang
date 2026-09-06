@@ -847,9 +847,14 @@ def feature_cases(good, bytecode, files, ledger):
          good.replace("sin                      | 0x62 | 13.1 | implemented   | T1 ",
                       "sin                      | 0x62 | 13.1 | implemented   | T11"),
          "knife 'T11' cannot be a planned one"),
+        # No opcode row is `unimplemented` any more (knife T10 took the last
+        # two), so this verdict is tripped by making one out of a DEFERRED
+        # row of the view family, which ruling 2 suspends until T11 to T13:
+        # the rule under test is the status-to-knife pairing, and a knife
+        # that has landed is wrong under either status.
         ("an unimplemented row under a knife that has landed",
-         good.replace("alloca                   | 0x71 | 13.3 | unimplemented | T10",
-                      "alloca                   | 0x71 | 13.3 | unimplemented | T6 "),
+         good.replace("make_gather_scatter_view | 0x73 | 13.3 | deferred      | -  ",
+                      "make_gather_scatter_view | 0x73 | 13.3 | unimplemented | T6 "),
          "so its knife is a planned one"),
         ("an empty ledger", "# nothing\n", "of the frozen table has no row"),
     ]
