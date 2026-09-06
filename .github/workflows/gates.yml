@@ -1647,7 +1647,7 @@ jobs:
   # Jobs of their own because the wheels are 150 MB and nothing else
   # needs them, so a slow package index delays nothing but these. Nothing
   # `needs:` them. They are the round-robin shards of one matrix
-  # (scripts/tile-golden/matrix.txt: the 171 kernels, then the 56 mutants, in
+  # (scripts/tile-golden/matrix.txt: the 176 kernels, then the 59 mutants, in
   # run order; N is whatever the shard jobs below say, ten since knife T10). Sharding by kind was the plan written down at knife 7b and the
   # phase measurement retired it. That measurement was taken when the matrix
   # held 51 kernels, so its counts are that era's and not today's: locally the
@@ -2058,6 +2058,42 @@ jobs:
     # against an account ceiling of 20, so the 46th queues behind the first
     # wave, and tile has never been the run's long pole.
     #
+    # KNIFE T11 (2026-09-06, five kernels and three mutants; matrix 224 ->
+    # 232 items: 175 kernels and 57 mutants). N STAYS 10 and NINE of the ten
+    # lines are untouched; shard 1's moves from 611 to 613 because the model
+    # column says so, and its timeout of 31 already covers 3x 613.
+    #
+    # THE LOCAL ROUND IS UNUSABLE AND THAT IS THE READING, not a caveat.
+    # One unsharded ITEM_TIMES round on the final tree, 2503s wall (41:43),
+    # 232 items, exit 0, on a machine ANOTHER AGENT was building and
+    # launching on throughout (load 4.8 at the start, 17.8 at its peak,
+    # 5.9 at the end) reads 175 kernels 5.07 to 8.23s (mean 6.03) and 57
+    # mutants 18.68 to 42.65s (mean 25.07). Against knife T9's quiet round
+    # that is +23% a kernel and +41% a mutant, and it is the same episode
+    # T9 wrote up at length: the absolute local seconds are the noisiest
+    # input here.
+    #
+    # What makes it unusable rather than merely high is that NO SHARD COUNT
+    # FIXES IT. Ten shards of that round are 675 to 722s of planning value
+    # and ELEVEN are 628 to 683s -- every one over the 660s pole either
+    # way, because what is inflated is the per-item cost and not the
+    # division. A round that cannot be brought under the pole by splitting
+    # is not measuring the matrix.
+    #
+    # So the lines are built from the model column, which is what T9 said
+    # they have been built from since T4: knife T5's per-item means (5.088s
+    # a kernel, 19.0s a mutant) put the ten shards at 613 / 613 / 575 / 575
+    # / 575 / 603 / 603 / 603 / 603 / 603s. Nine of those are at or below
+    # the line the shard already carries and shard 1's is 2s above it, so
+    # shard 1 is restated and the other nine stand.
+    #
+    # THE INDEPENDENT EVIDENCE THAT TEN STILL FIT is CI's own observations,
+    # which no local load can touch: scripts/gate-observations.py over the
+    # 25 runs of 2026-09-04 to 09-06 reads the ten shards' worst as
+    # 440 / 458 / 498 / 445 / 445 / 427 / 416 / 429 / 391 / 371s. The
+    # trigger for an eleventh shard is a CI shard OBSERVED past 550s; the
+    # worst is 498s, and eight more items spread ten ways is about +15s.
+    #
     # KNIFE T9 (2026-09-06, three kernels and four mutants, rebased onto
     # T10; matrix 217 -> 224 items: 170 kernels and 54 mutants). N STAYS 10
     # AND NOT ONE OF THE TEN LINES MOVES, which is the first time that has
@@ -2110,6 +2146,48 @@ jobs:
     # their current ten-way cache timings still await CI. Full historical
     # warm jobs were 404/378/380/383s, not timings for today's item set.
     # docs/tile-wheel-cache-design.md records the exact jobs and scope.
+    #
+    # KNIFE T11 (2026-09-06, five kernels and three mutants on top of TG;
+    # matrix 227 -> 235 items: 176 kernels and 59 mutants). N STAYS 10 AND
+    # NOT ONE OF THE TEN LINES MOVES.
+    #
+    # THE LOCAL ROUND IS UNUSABLE AND THAT IS THE READING, not a caveat.
+    # One unsharded ITEM_TIMES round, 2503s wall (41:43), 232 items on the
+    # pre-rebase tree, exit 0, taken while another agent built and launched
+    # on the same machine throughout (load 4.8 at the start, 17.8 at its
+    # peak, 5.9 at the end) reads 175 kernels 5.07 to 8.23s (mean 6.03) and
+    # 57 mutants 18.68 to 42.65s (mean 25.07). A second round was started
+    # and stopped once its first 21 kernels answered the only question it
+    # existed to answer: 5.71 to 6.16s, mean 5.98s. So the reading
+    # reproduces, and it is the machine's speed that night rather than a
+    # spike, which is knife T9's episode a second time.
+    #
+    # What makes it unusable rather than merely high is that NO SHARD COUNT
+    # FIXES IT: ten shards of that round are 675 to 722s of planning value
+    # and ELEVEN are 628 to 683s, every one over the 660s pole either way.
+    # A round that splitting cannot bring under the pole is not measuring
+    # the matrix, it is measuring the machine.
+    #
+    # So this knife does NOT use knife TG's additive method (a line plus the
+    # new item's own reading), and the reason is arithmetic rather than
+    # taste: TG's lines already carry TG's own loaded round, and adding
+    # this knife's loaded readings on top would put shards 2 to 5 at 666 /
+    # 671 / 679 / 689s, four of them past the pole, on nothing but two
+    # nights of somebody else's compile jobs. What governs instead is the
+    # model column, which is what T9 says these lines have come from since
+    # T4, and it ALREADY ACCOUNTS FOR THE NEW ITEMS because it is computed
+    # from each shard's own composition. Knife T5's per-item means (5.088s
+    # a kernel, 19.0s a mutant) over the merged deal (shards 1 to 6 carry
+    # 18 kernels, 7 to 10 carry 17; shard 6 carries 5 mutants and the rest
+    # 6) give 613 / 613 / 613 / 613 / 613 / 575 / 603 / 603 / 603 / 603s.
+    # Every one of those is at or below the line the shard already carries
+    # after TG raised three of them, so all ten stand.
+    #
+    # THE INDEPENDENT EVIDENCE that ten still fit is the same audit TG ran
+    # and no local load can touch: the ten shards' worst CI observations
+    # are 498 / 458 / 445 / 445 / 440 / 429 / 427 / 416 / 391 / 371s, and
+    # the trigger for an eleventh shard is a shard OBSERVED past 550s.
+    # Eight more items spread ten ways is about +15s.
     #
     # KNIFE TG ADDS THREE ITEMS (one kernel and two mutant-shaped ones; 227
     # in all) and restates THREE lines, this one among them, on a DERIVED
@@ -2167,7 +2245,7 @@ jobs:
       - name: tileiras wheel cache refuses altered pins and bytes
         run: python3 scripts/tile-golden/install-contract.py
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/10
@@ -2229,7 +2307,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/10
@@ -2285,7 +2363,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 3/10
@@ -2342,7 +2420,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 4)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 4)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 4/10
@@ -2399,7 +2477,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 5)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 5)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 5/10
@@ -2453,7 +2531,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 6)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 6)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 6/10
@@ -2506,7 +2584,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 7)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 7/10
@@ -2561,7 +2639,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 8)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 8/10
@@ -2607,7 +2685,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 9)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 9)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 9/10
@@ -2653,7 +2731,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (171 kernels and fifty-six mutants, both backends; shard 10)
+      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 10)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 10/10
