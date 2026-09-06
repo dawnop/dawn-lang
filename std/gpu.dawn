@@ -781,7 +781,10 @@ pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, Foreig
 ## answers.
 ##
 ## `Err(kind: "gpu.bad_global_size")` when the global's byte size is not a
-## whole number of elements of `d`.
+## whole number of elements of `d`, and `Err(kind: "gpu.bad_global_dtype")`
+## when the same symbol was already looked up as another format: the handle
+## carries the format it was issued with, and reinterpreting one global's
+## storage two ways is not something either handler offers.
 pub fn module_global[D: Dtype](d: D, kernel: String, name: String) -> Result[Tensor[D], ForeignError] !Gpu =
   match gpu_module_global(kernel, name, dtype_name(d)) {
     Ok(p) -> {
@@ -5009,8 +5012,12 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
       match map.get(known, kernel ++ "/" ++ name) {
         Some(h) -> match map.get(bufs, h) {
           Some(b) -> {
-            let (_p, n, _dt) = b
-            Ok((h, n))
+            let (_p, n, dt) = b
+            if dt != dtype {
+              Err(bad_global_dtype("real device", kernel, name, dt, dtype))
+            } else {
+              Ok((h, n))
+            }
           }
           None -> Err(no_such_buffer("real device", h))
         }
