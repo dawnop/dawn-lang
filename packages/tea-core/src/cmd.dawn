@@ -1,0 +1,242 @@
+# Commands as data, the same discipline the widget tree and `Sub` already
+# follow: a `Cmd` holds what should happen next, never a callback that makes it
+# happen. `update` returns one alongside the new model, and the driver is the
+# only thing that acts on it.
+#
+# v2 step one has exactly one kind of command: another message. `SendMsg(msg)`
+# means "fold this message too, in this same turn", which is enough to express
+# the one shape applications were already hand-rolling before there was a
+# channel for it -- an instruction that a later message clears, smuggled
+# through the model because `update` had nowhere else to put it. `BatchCmd`
+# sequences several, and `NoCmd` is the identity that a turn with nothing to
+# say returns.
+#
+# What is deliberately absent: an io arm. A command that fetches, navigates or
+# writes needs the driver to answer *after* the turn, which is a reply the wire
+# has no op for and a re-entry `std/reactor`'s pure step callback forbids
+# (docs/oneshot-design.md §6.1). So the arms here are the ones a pure fold can
+# discharge, and everything else is step two.
+#
+# Why a synchronous fold rather than a queue the driver drains across turns.
+# A turn is a function of its inputs on this boundary and a transcript has to
+# replay identically on three backends; carrying commands between turns would
+# put a second piece of state next to the model, which is exactly what the
+# model text crossing the wire exists to avoid. So a command chain is finished
+# before the reply is written, and `CMD_FOLD_LIMIT` is what keeps "finished"
+# from meaning "never".
+
+use std/list
+
+## What a turn asks for besides a new model.
+##
+## `NoCmd` is nothing, `SendMsg` is one more message for this turn, and
+## `BatchCmd` is several commands in order. These are Elm's `Cmd.none`,
+## `Cmd.msg` and `Cmd.batch`; the names differ because `None` is already
+## `Option`'s and a constructor that shadows it in every importing module is
+## not worth the resemblance.
+pub type Cmd[M] =
+  | NoCmd
+  | SendMsg(msg: M)
+  | BatchCmd(cmds: List[Cmd[M]])
+derive Show
+
+## How many commanded messages one turn may fold before it is judged a loop.
+##
+## The bound is on the *total* messages a turn's commands add, not on how
+## deeply they nest: a batch that fans out is the same runaway as a message
+## that re-issues itself, and counting rounds would leave the first one
+## unbounded. Sixty-four is far past any hand-written chain (the one client
+## in tree issues a chain of length one) and far short of a wait a user would
+## sit through.
+pub const CMD_FOLD_LIMIT: Int = 64
+
+## The messages a command asks for, left to right, batches flattened.
+pub fn msgs[M](c: Cmd[M]) -> List[M] =
+  match c {
+    NoCmd -> []
+    SendMsg(m) -> [m]
+    BatchCmd(cs) -> {
+      let empty: List[M] = []
+      list.fold(cs, empty, (acc, inner) => acc ++ msgs(inner))
+    }
+  }
+
+## Fold one message into the model, then everything its commands asked for,
+## and answer the model the turn ends with.
+##
+## `step` is the application's `update`; a driver passes its own so that the
+## fold is written once for every vocabulary rather than once per driver.
+pub fn fold_msg[Mo, M](m: Mo, msg: M, step: fn(Mo, M) -> (Mo, Cmd[M]) !e) -> Mo !e =
+  drain(m, [msg], 0, 0, step)
+
+## `fold_msg` for messages that arrive together, such as the timers a poll
+## found due. The list is not itself commanded, so it does not count against
+## `CMD_FOLD_LIMIT`; what the turn commands does.
+pub fn fold_msgs[Mo, M](m: Mo, queue: List[M], step: fn(Mo, M) -> (Mo, Cmd[M]) !e) -> Mo !e =
+  drain(m, queue, 0, 0, step)
+
+# The queue is first in, first out, and it grows at the end: a command's
+# messages run after everything already waiting, which is what makes a batch's
+# order the order it was written in and keeps one message's chain from cutting
+# ahead of its siblings.
+#
+# `spent` counts only what commands added. Overrunning it is a panic and not a
+# truncation because both alternatives to panicking lie: a truncated fold
+# answers with a model no sequence of messages produces, and there is no field
+# on this wire (nor any on the terminal's) in which a turn could report that it
+# gave up. A panic lands at the driver's own barrier -- `tea_dom/reactor.serve`
+# catches it and answers `{"ok":false,"kind":"panic",...}` while the host keeps
+# the model it already had -- so a command loop is a visible failure of the
+# turn rather than a quietly wrong document.
+fn drain[Mo, M](
+  m: Mo,
+  q: List[M],
+  i: Int,
+  spent: Int,
+  step: fn(Mo, M) -> (Mo, Cmd[M]) !e,
+) -> Mo !e =
+  if i >= len(q) {
+    m
+  } else {
+    let (next, c) = step(m, q[i])
+    let more = msgs(c)
+    let now = spent + len(more)
+    if now > CMD_FOLD_LIMIT {
+      panic(
+        "tea_core/cmd: a turn's commands asked for more than "
+          ++ to_string(CMD_FOLD_LIMIT)
+          ++ " messages",
+      )
+    } else {
+      drain(next, q ++ more, i + 1, now, step)
+    }
+  }
+
+# ---- tests -------------------------------------------------------------
+#
+# A counter whose messages can command other messages, because the smallest
+# thing that pins a fold is an app where one message means two.
+
+type Probe = { n: Int, log: String }
+
+type ProbeMsg =
+  | Bump
+  | Twice
+  | Both
+  | Note(mark: String)
+  | Spin
+derive Show
+
+fn probe_step(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Bump -> (Probe { ..m, n: m.n + 1 }, NoCmd)
+    Twice -> (m, SendMsg(msg: Bump))
+    Both -> (m, BatchCmd(cmds: [SendMsg(msg: Note(mark: "a")), SendMsg(msg: Note(mark: "b"))]))
+    Note(mark) -> (Probe { ..m, log: m.log ++ mark }, NoCmd)
+    # A message that re-issues itself: the one shape the limit exists for.
+    Spin -> (Probe { ..m, n: m.n + 1 }, SendMsg(msg: Spin))
+  }
+
+fn blank() -> Probe = Probe { n: 0, log: "" }
+
+test "a command-free turn is one update and nothing else" {
+  assert fold_msg(blank(), Bump, probe_step) == Probe { n: 1, log: "" }
+  let none: Cmd[ProbeMsg] = NoCmd
+  assert msgs(none) == []
+}
+
+test "`SendMsg` is one more update in the same turn" {
+  # `Twice` changes no field itself, so a model that moved is the fold moving
+  # it: the commanded `Bump` ran and its result is what the turn answers.
+  assert fold_msg(blank(), Twice, probe_step) == Probe { n: 1, log: "" }
+}
+
+test "a batch runs in the order it was written" {
+  assert fold_msg(blank(), Both, probe_step) == Probe { n: 0, log: "ab" }
+  assert msgs(BatchCmd(cmds: [SendMsg(msg: Note(mark: "a")), SendMsg(msg: Note(mark: "b"))]))
+    == [Note(mark: "a"), Note(mark: "b")]
+}
+
+test "nested batches flatten left to right, and `NoCmd` is the identity" {
+  let inner: Cmd[ProbeMsg] = BatchCmd(cmds: [SendMsg(msg: Bump), NoCmd])
+  let outer: Cmd[ProbeMsg] = BatchCmd(cmds: [NoCmd, inner, SendMsg(msg: Note(mark: "z"))])
+  assert msgs(outer) == [Bump, Note(mark: "z")]
+  let empty: Cmd[ProbeMsg] = BatchCmd(cmds: [])
+  assert msgs(empty) == []
+}
+
+test "messages that arrive together are folded in order, uncounted" {
+  assert fold_msgs(blank(), [Note(mark: "x"), Bump, Note(mark: "y")], probe_step)
+    == Probe { n: 1, log: "xy" }
+  let nothing: List[ProbeMsg] = []
+  assert fold_msgs(blank(), nothing, probe_step) == blank()
+}
+
+test "a chain shorter than the limit runs to its end and the model is the last one" {
+  # The positive control for the bound: `CMD_FOLD_LIMIT` commanded messages is
+  # allowed, so the counter reaches one more than that (the uncommanded first
+  # `Spin` is not counted) and nothing panics.
+  let m = fold_msg(blank(), Spin, spin_capped)
+  assert m == Probe { n: CMD_FOLD_LIMIT + 1, log: "" }
+}
+
+# `Spin` stopped at the limit: the same runaway shape, cut off one message
+# short of the panic so that the fold's own accounting is what is asserted.
+fn spin_capped(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Spin ->
+      if m.n >= CMD_FOLD_LIMIT {
+        (Probe { ..m, n: m.n + 1 }, NoCmd)
+      } else {
+        (Probe { ..m, n: m.n + 1 }, SendMsg(msg: Spin))
+      }
+    _ -> probe_step(m, msg)
+  }
+
+test "a runaway chain panics rather than truncating" {
+  match catch_panic(() => fold_msg(blank(), Spin, probe_step)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.message
+        == "tea_core/cmd: a turn's commands asked for more than 64 messages"
+    }
+  }
+}
+
+test "the limit counts every commanded message, batch fan-out included" {
+  # One turn, one command, `CMD_FOLD_LIMIT + 1` messages in it: a bound on
+  # nesting depth would call this depth 1 and let it through.
+  match catch_panic(() => fold_msg(blank(), Bump, fan_out)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.message
+        == "tea_core/cmd: a turn's commands asked for more than 64 messages"
+    }
+  }
+  # And one message under the limit is allowed, which is what says the
+  # comparison is on the count and not on the shape.
+  assert fold_msg(blank(), Bump, fan_out_ok) == Probe { n: 1, log: "" }
+}
+
+fn notes(n: Int) -> List[Cmd[ProbeMsg]] = {
+  let empty: List[Cmd[ProbeMsg]] = []
+  notes_go(0, n, empty)
+}
+
+fn notes_go(i: Int, n: Int, acc: List[Cmd[ProbeMsg]]) -> List[Cmd[ProbeMsg]] =
+  if i >= n { acc } else { notes_go(i + 1, n, acc ++ [SendMsg(msg: Note(mark: ""))]) }
+
+# Both fan out on the first message only: what is under test is the count one
+# command contributes, and a step that fanned out on every message would be a
+# runaway rather than a wide batch.
+fn fan_out(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Bump -> (m, BatchCmd(cmds: notes(CMD_FOLD_LIMIT + 1)))
+    _ -> probe_step(m, msg)
+  }
+
+fn fan_out_ok(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Bump -> (Probe { ..m, n: m.n + 1 }, BatchCmd(cmds: notes(CMD_FOLD_LIMIT)))
+    _ -> probe_step(m, msg)
+  }
