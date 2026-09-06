@@ -1928,24 +1928,43 @@ jobs:
     # they are (knife 14's rule: a budget is a ceiling and restating one
     # downwards only means raising it again next time).
     #
-    # The split is 162 mod 8 and 43 mod 8: shards 1 and 2 carry 21 kernels
-    # and 5 mutants, shards 3 to 5 carry 20 and 6, and shards 6 to 8 carry
-    # 20 and 5. Three mutants is what makes shards 3 to 5 the dear ones.
+    # The split was 162 mod 8 and 43 mod 8 at knife T15: shards 1 and 2
+    # carried 21 kernels and 5 mutants, shards 3 to 5 carried 20 and 6, and
+    # shards 6 to 8 carried 20 and 5. Knife T8's four items (one kernel and
+    # three mutants; 209 in all) redeal it as 163 mod 8 and 46 mod 8: shard 1
+    # carries 21 kernels and SIX mutants, shard 2 carries 21 and 5, shard 3
+    # carries 21 and 5, and shards 4 to 8 carry 20 and 6. A mutant is 3.6
+    # kernels, so shard 1 is now the dear one and shards 2 and 3 the cheap
+    # ones.
     #
-    # 633s leaves 27s against the 660s pole, which is a kernel and a half
-    # and less than one mutant. So THE NEXT KNIFE THAT ADDS A MUTANT HAS TO
-    # SPLIT; this one does not, because 633 is under the pole and a ninth
-    # shard buys nothing but budget headroom (a run of this workflow would
-    # be 45 jobs against an account ceiling of 20). Nine shards of this
-    # same matrix are 537 to 575s.
+    # Knife T15 wrote here that THE NEXT KNIFE THAT ADDS A MUTANT HAS TO
+    # SPLIT, because 633s left only 27s against the 660s pole and a mutant
+    # is worth more than that. Knife T8 adds three mutants and the split did
+    # NOT become necessary, so that sentence is corrected rather than
+    # obeyed: it was a projection, and the rule it was reasoning toward is
+    # the one that decides, which is that a shard's planning value must stay
+    # under the pole. The three mutants land on shard 1 and on shards 4 to 8
+    # (46 mod 8 = 6), not all on the shard that was heaviest, and shards 3
+    # to 5 lose the extra mutant they had. The heaviest line is now 644s on
+    # shard 1, 16s under the pole.
     #
-    # CI is nowhere near: scripts/gate-observations.py over the 25 runs of
-    # 2026-09-04 to 09-05 reads 427 / 458 / 432 / 445 / 445 / 393 / 402 /
-    # 367s, a CI/local ratio of about 2.1, and these six items add about
-    # 8s of local work a shard, so the projection is about 475s at worst
-    # against the 550s observation trigger for a ninth shard.
-    # budget: 3x 606s planning value (217.0s local, doubled)
-    timeout-minutes: 31
+    # 16s is a quarter of what T15 had, so the next knife almost certainly
+    # does split, and this is what it costs: nine shards of THIS matrix are
+    # 541 to 572s, and a ninth shard buys nothing but that headroom (a run
+    # of this workflow would be 45 jobs against an account ceiling of 20).
+    #
+    # CI is nowhere near either trigger: scripts/gate-observations.py over
+    # the 25 runs of 2026-09-04 to 09-05 reads 427 / 458 / 432 / 445 / 445 /
+    # 396 / 403 / 377s, a CI/local ratio of about 2.1, and the worst is 92s
+    # under the 550s observation trigger for a ninth shard.
+    #
+    # Knife T8's own unsharded ITEM_TIMES run (209 items, 1561.8s, a quiet
+    # machine at load 0.4 to 2.3) reads 201.5s of items here, + 31 + 70 =
+    # 302.5, doubled is 605s; knife T5's per-item means (5.12s a kernel,
+    # 18.88s a mutant) put the same shard at 644s, and the line below is the
+    # larger of the two, as every line here has been since knife T4.
+    # budget: 3x 644s planning value (252.0s local, doubled)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1961,7 +1980,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/8
@@ -2010,7 +2029,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/8
@@ -2053,7 +2072,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 3/8
@@ -2097,7 +2116,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 4)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 4)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 4/8
@@ -2141,7 +2160,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 5)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 5)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 5/8
@@ -2163,10 +2182,12 @@ jobs:
     # (four kernels and two mutants; 171 in all). Same matrix, same
     # tileiras, same arithmetic as tile-golden-1's note. 209.9s of items
     # from that knife's unsharded ITEM_TIMES run, + 31 + 70 = 310.9,
-    # doubled is 622s; no CI observation exists yet, and the first real run
-    # of it replaces this planning value.
-    # budget: 3x 596s planning value (196.8s local, doubled)
-    timeout-minutes: 30
+    # doubled is 622s. Knife T8's redeal gives this shard 20 kernels and six
+    # mutants: 196.0s of items on its own unsharded run (+ 31 + 70, doubled,
+    # is 594s) and 215.7s on knife T5's per-item means (633s), and the line
+    # below is the larger of the two. Worst CI observation 396s (2026-09-05).
+    # budget: 3x 633s planning value (247.7s local, doubled)
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
 
@@ -2180,7 +2201,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 6)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 6)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 6/8
@@ -2200,11 +2221,13 @@ jobs:
     # arithmetic as tile-golden-1's note, and why seven rather than six is
     # there too: this shard carries five of the 31 mutants where the first
     # four carry four, and a mutant is 3.7 kernels. 201.9s of items by knife
-    # T5's per-item model, + 31 + 70 = 302.9, doubled is 606s. No CI
-    # observation exists yet, and the first real run of it replaces this
-    # planning value.
-    # budget: 3x 596s planning value (196.8s local, doubled)
-    timeout-minutes: 30
+    # T5's per-item model, + 31 + 70 = 302.9, doubled is 606s. Knife T8's
+    # redeal gives this shard 20 kernels and six mutants: 195.7s of items on
+    # its own unsharded run (593s) and 215.7s on knife T5's per-item means
+    # (633s), and the line below is the larger of the two. Worst CI
+    # observation 403s (2026-09-05).
+    # budget: 3x 633s planning value (247.7s local, doubled)
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
 
@@ -2218,7 +2241,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 7)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 7/8
@@ -2241,10 +2264,12 @@ jobs:
     # eleven items are what took it from 630 to 654. Measured here it is
     # 178.1s of items, + 31 + 70 = 279.1, doubled is 558s; T5's means put
     # the same shard at 585s, and the line below is the larger of the two.
-    # No CI observation exists yet, and the first real run of it replaces
-    # this planning value.
-    # budget: 3x 596s planning value (196.8s local, doubled)
-    timeout-minutes: 30
+    # Knife T8's redeal gives this shard 20 kernels and six mutants: 196.3s
+    # of items on its own unsharded run (595s) and 215.7s on knife T5's
+    # per-item means (633s), still the larger of the two. Worst CI
+    # observation 377s (2026-09-05).
+    # budget: 3x 633s planning value (247.7s local, doubled)
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
 
@@ -2258,7 +2283,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (162 kernels and forty-three mutants, both backends; shard 8)
+      - name: tile IR goldens and tileiras (163 kernels and forty-six mutants, both backends; shard 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 8/8
