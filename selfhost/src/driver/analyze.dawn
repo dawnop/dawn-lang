@@ -1178,6 +1178,30 @@ test "a two-module project analyzes end to end" {
   })
 }
 
+test "a qualified function value from an aliased package dependency checks" {
+  in_mem(() => {
+    let base = "/tmp/dawn-selfhost-analyze/qualified-fn"
+    mkdirs(base ++ "/pkg/cleaner/src")
+    mkdirs(base ++ "/app/src")
+    put(base ++ "/pkg/cleaner/dawn.toml", "schema = 1\nname = \"cleaner\"\n")
+    put(base ++ "/pkg/cleaner/src/tree.dawn",
+      "pub fn delete_tree(path: String) -> Unit !io = println(path)\n")
+    put(base ++ "/app/dawn.toml",
+      "schema = 1\nname = \"app\"\n[deps]\ncleanup = \"../pkg/cleaner\"\n")
+    put(base ++ "/app/src/main.dawn", "use cleanup/tree as pkgfetch\n" ++
+        "fn bracket(dir: String, close: fn(String) -> Unit !io) -> Unit !io = close(dir)\n" ++
+        "pub fn main() -> Unit !io = bracket(\"work\", pkgfetch.delete_tree)\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: " ++ std_load_error_text(e))
+    }
+    let prog = analyze_program(load_directory(base ++ "/app"), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 0
+    assert prog.modules[0].mod_path == "cleaner/tree"
+    assert prog.modules[0].class_name == "dawn\$pkg\$cleaner/tree"
+  })
+}
+
 test "the representation modules are closed to user code (audit RD-06)" {
   in_mem(() => {
     # The accept half is `load_std` itself: std/map is a `use std/hamt`-free

@@ -114,7 +114,7 @@ assess() { # compiler
   same or_rhs_message "$got" 1
 
   got=$("$c" __check "$cases/module_member.dawn" 2>&1 |
-    grep -cF 'has no exported value `starts_with`' || true)
+    grep -cF 'this function takes 2 argument(s), got 1' || true)
   same module_member "$got" 1
 
   # both spellings, the written one and the one the pipe writes for you

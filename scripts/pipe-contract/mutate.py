@@ -139,8 +139,8 @@ MUTATIONS = {
     ),
     # 10: a bare `m.f` on the right is a *value* the pipe applies, not a call
     # it builds. Routing it into a call would make `n |> str.starts_with` mean
-    # `str.starts_with(n)` and hide the fact that a module's functions are not
-    # bare function values.
+    # `str.starts_with(n)`: its diagnostic names the declaration instead of
+    # reporting the arity of the function value (#66).
     "route-qualified-name-into-call": (
         PARSER,
         OTHER_ARM,

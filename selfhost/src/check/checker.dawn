@@ -455,6 +455,18 @@ fn module_alias_receiver(cx: Cx, recv: Expr) -> Bool = {
   lookup(cx, alias_name) == None && map.has(cx.module_aliases, alias_name)
 }
 
+## Value position must use the same exported signature as a qualified call,
+## including its declaring owner and the bounds/effects checked by fn values.
+fn qual_fn(cx: Cx, target: Expr, name: String) -> Option[Sig] = {
+  if not module_alias_receiver(cx, target) { return None }
+  let alias_name = match target {
+    EVar(n, _, _) -> n
+    ECtor(n, _, _, _, _, _, _, _) -> n
+    _ -> return None
+  }
+  map.get(cx.module_fn_sigs, (alias_name, name))
+}
+
 # ---- tests ----
 
 test "scalar and container types resolve" {
@@ -3622,6 +3634,11 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
         None -> false
       }
     }
+    EFieldAcc(target, name, _, _, _, _) ->
+      match qual_fn(cx, target, name) {
+        Some(s) -> len(s.tparams) > 0
+        None -> false
+      }
     ECtor(cname, cargs, spread, has_parens, _, _, _, _) ->
       match map.get(cx.ctors_by_name, cname) {
         None -> false
@@ -4877,7 +4894,11 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
-    EFieldAcc(target, fname, flo, fhi, lo, hi) ->
+    EFieldAcc(target, fname, flo, fhi, lo, hi) -> {
+      match qual_fn(cx, target, fname) {
+        Some(s) -> return check_fn_value(cx, fname, s, expected, lo, hi)
+        None -> ()
+      }
       # `m.NAME` where `m` is a whole-module alias: a qualified constant
       # (LANG-06 step 3). Checked before the Java and value paths because a
       # module alias is not a value -- spec 10.3 forbids anything else of that
@@ -4929,6 +4950,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
               }
           }
       }
+    }
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
   }
 
@@ -6920,10 +6942,11 @@ fn check_local_fn(
 
 # ---- calls ----
 
-fn is_lambda_or_var(e: Expr) -> Bool =
+fn accepts_partial_expected(cx: Cx, e: Expr) -> Bool =
   match e {
     ELambda(_, _, _, _, _) -> true
     EVar(_, _, _) -> true
+    EFieldAcc(target, name, _, _, _, _) -> qual_fn(cx, target, name) != None
     _ -> false
   }
 
@@ -7280,7 +7303,7 @@ fn check_call(
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
         let exp2: Option[Ty] =
-          if is_concrete(cx1, substd) || is_lambda_or_var(a) { Some(substd) } else { None }
+          if is_concrete(cx1, substd) || accepts_partial_expected(cx1, a) { Some(substd) } else { None }
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
         cx1 = cxa
         at_i = Some(at)
@@ -12895,6 +12918,33 @@ test "a labelled closure does not escape through a let, a return or an assignmen
       "  let g: fn() -> Int !io = () => 1\n" ++
       "  g()\n}\n")
   assert len(cx4.diags) == 0
+}
+
+test "qualified exported functions are values with contextual generic inference" {
+  let (m, pd) = parser.parse_module("pub fn double(x: Int) -> Int = x * 2\n" ++
+      "pub fn identity[T](x: T) -> T = x\nfn hidden(x: Int) -> Int = x\n")
+  assert len(pd) == 0
+  let env0: Map[String, ModExports] = map.empty()
+  let (provider, _) = check_module(cx_new(Some("helper"), None), m, env0)
+  assert len(provider.diags) == 0
+  let env = map.from([("helper", exports_of(provider, m, "helper", "helper"))])
+  let (user, ud) = parser.parse_module("use helper as h\n" ++
+      "fn apply(f: fn(Int) -> Int, x: Int) -> Int = f(x)\n" ++
+      "fn apply_same[T](f: fn(T) -> T, x: T) -> T = f(x)\n" ++
+      "fn apply_generic[T, U](f: fn(T) -> U, x: T) -> U = f(x)\n" ++
+      "fn go() -> Int = apply(h.double, 4) + apply(h.identity, 3)\n" ++
+      "fn inferred() -> Int = { let n = apply_same(h.identity, 3)\n" ++
+      " let m = apply_generic(h.identity, 4)\n n + m }\n" ++
+      "fn stored() -> Int = { let f = h.double\n f(5) }\n")
+  assert len(ud) == 0
+  let (checked, _) = check_module(cx_new(Some("main"), None), user, env)
+  assert len(checked.diags) == 0
+  let (private_user, ppd) = parser.parse_module("use helper\n" ++
+      "fn go() -> fn(Int) -> Int = helper.hidden\n")
+  assert len(ppd) == 0
+  let (rejected, _) = check_module(cx_new(Some("private_user"), None), private_user, env)
+  assert len(rejected.diags) > 0
+  assert rejected.diags[0].msg == "module `helper` has no exported value `hidden`"
 }
 
 test "a declared effect crosses a module boundary with its operations" {
