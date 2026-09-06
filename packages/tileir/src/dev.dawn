@@ -446,6 +446,16 @@ pub opaque type Ptrs[D] = Int
 ## declared, or declaring the same symbol twice, is refused when the kernel
 ## is recorded.
 ##
+## `t_alloca(dtype, num_elem, align, shared, shape)` is the automatic
+## allocation (knife T10). It answers a tile of `shape` every lane of which
+## holds the SAME address, the way `t_get_global` does, because `alloca`
+## answers a rank-0 `tile<ptr<D>>` too. `num_elem` elements of `dtype` are
+## reserved, aligned to `align` bytes, and the allocation lives as long as
+## the block the operation is in: it is scratch within one launch and
+## nothing reads it afterwards. `shared` is the dialect's `global` unit
+## attribute, which says the address may be handed to other tile threads;
+## without it the address is private to this one.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
@@ -514,6 +524,7 @@ pub effect Dev {
   fn t_store_ptrs(dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int]) -> Unit
   fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
   fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
+  fn t_alloca(dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int]) -> Int
 }
 
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
@@ -2336,6 +2347,35 @@ pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !De
   r
 }
 
+## The tile of `shape` every lane of which holds the address of a fresh
+## automatic allocation of `num_elem` elements of `d`, aligned to `align`
+## bytes (knife T10). `alloca` answers a rank-0 `tile<ptr<D>>`, so this is
+## the same reshape and broadcast `global_ptrs` performs, and `ptr_offset`
+## walks the elements from here.
+##
+## The allocation is SCRATCH: the dialect limits its lifetime to the block
+## the operation is in, so what one launch writes is not there for the
+## next, and each `alloca` in a block answers a region of its own. The
+## address is private to this tile thread; `alloca_shared_ptrs` is the
+## other value of the dialect's `global` unit attribute.
+##
+## `align` must be a non-zero power of two and at least the natural size of
+## `d`, which the dialect's verifier requires and the recording handler
+## refuses ahead of it.
+pub fn alloca_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, false, shape)
+  r
+}
+
+## `alloca_ptrs` with the dialect's `global` attribute set: the address may
+## be read and written by other tile threads as well as this one. The
+## lifetime is the same and so is everything else; what changes is one bit
+## of the operation's flags word.
+pub fn alloca_shared_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, true, shape)
+  r
+}
+
 ## The tile the pointers in `ps` point at, unmasked. In the token chain
 ## where `load` is, and ordered against every other memory operation the
 ## same way.
@@ -2687,6 +2727,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_alloca(_dtype, _num_elem, _align, _shared, _shape) => {
+      let h = next
+      next = next + 1
+      h
+    }
   }
   body()
 }
@@ -2954,6 +2999,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_get_global(sym, dtype, shape) => {
       log = log ++ ["get_global ${sym} ${dtype} ${show(shape)}"]
       77
+    }
+    t_alloca(dtype, num_elem, align, shared, shape) => {
+      log = log ++ ["alloca ${dtype} ${num_elem} ${align} ${show(shared)} ${show(shape)}"]
+      78
     }
   }
   body()
@@ -3313,6 +3362,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
       t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
       t_get_global(_sym, _dtype, _shape) => 77
+      t_alloca(_dtype, _num_elem, _align, _shared, _shape) => 78
     }
     let _r = loop_seen()
     log

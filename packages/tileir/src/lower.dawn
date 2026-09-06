@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints}
-use prog.{TileOp, TileProg, Global, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
+use prog.{TileOp, TileProg, Global, Alloca, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -111,6 +111,13 @@ derive Show
 ## demands. The spread to a full tile is `Reshape` and `Broadcast` after
 ## it, the same two the parameter ladder emits, so this instruction has one
 ## result and no operands.
+##
+## `AllocaPtr` is `alloca` (knife T10) and has the same shape: one result,
+## no operands, a rank-0 `tile<ptr<D>>`, spread by the same two
+## instructions. What it carries instead of a symbol is the request --
+## `num_elem` elements and an alignment, both inline `I64Attr`s -- and
+## `shared`, the `global` unit attribute, which is a bit of the flags
+## word and not an attribute in the stream.
 ##
 ## `PtrToIntTile`, `IntToPtrTile` and `PtrToPtrTile` are the three pointer
 ## conversions: a pointer tile as i64, an i64 tile as pointers, and a
@@ -188,6 +195,7 @@ pub type Instr =
   | AssumeTile(dst: Int, src: Ref, pred: AssumePred, ty: Ty)
   | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
   | GetGlobalPtr(dst: Int, sym: String, ty: Ty)
+  | AllocaPtr(dst: Int, num_elem: Int, align: Int, shared: Bool, ty: Ty)
   | Ret
 derive Show
 
@@ -749,6 +757,17 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, tv) = define(l0, tok_out, Token)
     emit(l1, StorePtr(tv, ps, v, m, tin, Tile(shape, PtrTo(dtype)), i1_tile(shape), val_ty, []))
   }
+  Alloca(dst, dtype, num_elem, align, shared, shape) -> {
+    # `alloca` answers a rank-0 pointer tile, the same result shape
+    # `get_global` has, so the tile the body asked for is the same reshape
+    # and broadcast. Each occurrence is its own allocation: nothing names
+    # it, and two of them in one block are two regions of memory.
+    let e = PtrTo(dtype)
+    let (l1, g) = fresh(l0)
+    let l2 = emit(l1, AllocaPtr(g, num_elem, align, shared, Tile([], e)))
+    let (l3, pn) = spread_rank0(l2, Val(g), Tile([], e), shape, e)
+    bind(l3, dst, pn, Tile(shape, e))
+  }
   GetGlobal(dst, sym, dtype, shape) -> {
     # `get_global` answers a rank-0 pointer tile (its result is a
     # ScalarTileOf<PointerType>), so the tile a body asked for is the same
@@ -1017,6 +1036,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   AssumeTile(dst, _src, _pred, _ty) -> [dst]
   PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
   GetGlobalPtr(dst, _sym, _ty) -> [dst]
+  AllocaPtr(dst, _num_elem, _align, _shared, _ty) -> [dst]
   Ret -> []
 }
 

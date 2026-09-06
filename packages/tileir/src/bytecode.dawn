@@ -71,7 +71,7 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints}
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -174,6 +174,7 @@ const OP_ATAN2: Int = 0x6E
 const OP_ASSERT: Int = 0x05
 const OP_ASSUME: Int = 0x06
 const OP_PRINT_TKO: Int = 0x55
+const OP_ALLOCA: Int = 0x71
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -193,6 +194,13 @@ const STORE_FLAG_TOKEN: Int = 8
 # the same two in the same order.
 const ATOMIC_FLAG_MASK: Int = 1
 const ATOMIC_FLAG_TOKEN: Int = 2
+
+# `alloca`'s one optional field is its `global` unit attribute, and it
+# arrived with the operation at 13.3, so the flags varint is written at
+# every version this writer targets (generateFlagsFieldSerialization only
+# guards the word when the FIRST optional field is younger than the
+# operation). Bit 0 is the only bit there is.
+const ALLOCA_FLAG_GLOBAL: Int = 1
 
 # `memory_ordering_semantics`: weak. `comparison_ordering`: ordered, so every
 # predicate answers 0 on a NaN operand. `signedness`: signed. `rounding_mode`:
@@ -1504,6 +1512,18 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w1 = emit(emit_op_counted(w0, OP_PRINT_TKO, Token), PRINT_FLAG_TOKEN)
     let (w2, si) = str_of(w1, fmt)
     emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)
+  }
+  AllocaPtr(_dst, num_elem, align, shared, t) -> {
+    # opcode, result type, the flags varint, then the two REQUIRED
+    # attributes in declaration order: `num_elem` then `alignment`. Both
+    # are `I64Attr`, so writeOpAttribute takes its `std::is_integral_v`
+    # arm and writes a plain varint with no tag and no type index, the way
+    # `cat`'s `dim` is written. `global` is a UnitAttr and therefore lives
+    # only in the flags word; generateAttributeSerialization skips it.
+    # `alloca` has no operands at all, so nothing follows, and no count is
+    # written anywhere: neither an argument nor a result is variadic.
+    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })
+    emit(emit(w1, num_elem), align)
   }
   GetGlobalPtr(_dst, sym, t) -> {
     # opcode, result type, then the symbol: a FlatSymbolRefAttr is a plain

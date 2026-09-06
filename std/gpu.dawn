@@ -4300,6 +4300,54 @@ pub fn global_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) 
   segments(out, n, 1, (_seg, i) => round_to(dt, out[i] + x[i]))
 }
 
+# ---- knife T10: `alloca` ----
+
+## `alloca_scratch`: three times the input, lane by lane. `ins` is
+## `[x, out]`.
+##
+## THE ALGEBRA IS THE JUDGEMENT HERE, and not the arithmetic. The kernel
+## writes `x + x` into a fresh automatic allocation, reads it back through
+## the same pointers in the same launch and adds the input to what it read;
+## this answers `(x + x) + x` directly. The two agree only while the
+## allocation is memory that keeps what was put in it, so a scratch that
+## read back zeros would answer `x` and a store that never landed would
+## leave the sentinel.
+##
+## EXACT TIER BY THE VALUES: every lane of the corpus is a small multiple
+## of a power of two, so both sums are exact in binary64 and the
+## `rounding<nearest_even>` the kernel carries has nothing to round.
+pub fn alloca_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, round_to(dt, x[i] + x[i]) + x[i]))
+}
+
+## `alloca_two`: `2 * x + 1`, lane by lane, which is `x - (-x - 1)`. `ins`
+## is `[x, out]`.
+##
+## THIS ONE IS A DISTINCTNESS CLAIM. The kernel makes two allocations in
+## one block, stores `x` into the first and `-x - 1` into the second, and
+## answers the difference. Two allocations at the same address would answer
+## 0 for every lane, because the second store would have overwritten the
+## first; the corpus keeps every lane away from -0.5, the one input where
+## `2 * x + 1` is 0 in its own right.
+pub fn alloca_two_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) =>
+      round_to(dt, x[i] - round_to(dt, (0.0 - x[i]) - 1.0)))
+}
+
+## `alloca_ctl`: `alloca_scratch`'s answer with no allocation in it. `ins`
+## is `[x, out]`. The kernel it answers for holds no `alloca` at all, so it
+## is this family's kernel-level control: no mutant of the allocation may
+## move its bytes or its verdict.
+pub fn alloca_ctl_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let dt = dtypes[1]
+  segments(ins[1], n, 1, (_seg, i) => round_to(dt, round_to(dt, x[i] + x[i]) + x[i]))
+}
+
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
 ## A host reference as the fake device runs it: the same two arguments, and

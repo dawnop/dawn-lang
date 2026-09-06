@@ -29,6 +29,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   extract, cat, permute_tile, num_blocks, d_fork2,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
   d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
+  alloca_ptrs, alloca_shared_ptrs,
   addi, subi, muli, shli, shri, consti,
   addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
   sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
@@ -4250,6 +4251,71 @@ fn hint_memory(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_hinted(out, blk, [128], [for_arch("sm_86", [hint_latency(7)])], addf(F64, [128], ta, tb))
 }
 
+# ---- knife T10: `alloca` (0x71) ----
+#
+# Automatic allocation: scratch that belongs to the block the operation is
+# in and to nothing else. Every other pointer in this file comes from a
+# parameter the host uploaded (`ptrs`) or from a global the module declared
+# (`get_global`); this is the third source and the only one no host can
+# see, so the corpus has to make the memory ANSWER rather than show it.
+#
+# ALLOCA_ELEMS is 192 and not 128 on purpose, and the reason is written
+# here because a reader would otherwise trim it. The kernels write 128
+# elements, so any count at or above that is enough memory; 192 is not a
+# POWER OF TWO, and `alloca`'s verifier requires the alignment to be one.
+# That is what makes the mutant which writes the count where the alignment
+# belongs a refusal with a name (`'alignment' must be power of two`) rather
+# than a legal program that quietly allocates eight elements and runs off
+# the end of them. Undefined behaviour is not a judgement (ruling 1).
+const ALLOCA_TILE: Int = 128
+const ALLOCA_ELEMS: Int = 192
+const ALLOCA_ALIGN: Int = 8
+
+# Write a tile into a fresh allocation and read it back in the same launch.
+# The token chain is what orders the two, and the answer is `3 * x`: the
+# scratch holds `2 * x` and the kernel adds the input to what it reads
+# back. A scratch that answered zeros, or an address the store never
+# reached, would answer `x`.
+fn alloca_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let off = lanes(idx_const(0), s)
+  let p = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let tx = load(x, blk, s)
+  store_ptrs(F64, s, p, addf(F64, s, tx, tx))
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, p), tx))
+}
+
+# Two allocations in one block, written apart and read crosswise: the
+# answer `x - (-x - 1)` is `2 * x + 1`, and two allocations at the SAME
+# address would answer 0 for every lane, because the second store would
+# have overwritten the first. The corpus keeps every lane away from -0.5,
+# which is the one input where `2 * x + 1` is 0 anyway.
+#
+# The second allocation carries the dialect's `global` unit attribute and
+# the first does not, so one kernel holds both states of the flag bit, the
+# way hint_memory holds both states of a load's hint bit.
+fn alloca_two(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let off = lanes(idx_const(0), s)
+  let pa = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let pb = ptr_offset(F64, s, alloca_shared_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let tx = load(x, blk, s)
+  store_ptrs(F64, s, pa, tx)
+  store_ptrs(F64, s, pb, sub(F64, s, neg(F64, s, tx), f_const(F64, s, 1.0)))
+  store(out, blk, s, sub(F64, s, load_ptrs(F64, s, pa), load_ptrs(F64, s, pb)))
+}
+
+# alloca_scratch's answer with no allocation in it: the control that tells
+# "the mutant broke alloca" from "the mutant broke the tree".
+fn alloca_ctl(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, addf(F64, s, tx, tx), tx))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4660,6 +4726,13 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("global_scratch", ["f64", "f64"], () => global_scratch(param(F64, 0), param(F64, 1)))
   "global_flags" ->
     trace_kernel("global_flags", ["f64", "f64"], () => global_flags(param(F64, 0), param(F64, 1)))
+  "alloca_scratch" ->
+    trace_kernel("alloca_scratch", ["f64", "f64"],
+      () => alloca_scratch(param(F64, 0), param(F64, 1)))
+  "alloca_two" ->
+    trace_kernel("alloca_two", ["f64", "f64"], () => alloca_two(param(F64, 0), param(F64, 1)))
+  "alloca_ctl" ->
+    trace_kernel("alloca_ctl", ["f64", "f64"], () => alloca_ctl(param(F64, 0), param(F64, 1)))
   "hint_entry" ->
     trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
       () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))

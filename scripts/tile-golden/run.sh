@@ -370,7 +370,8 @@ kernels=(
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded
   global_table global_ctl global_scratch global_flags
-  hint_entry hint_memory)
+  hint_entry hint_memory
+  alloca_scratch alloca_two alloca_ctl)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
