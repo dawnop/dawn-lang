@@ -2430,24 +2430,33 @@ pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
 pub fn d_global_aligned[D: Dtype](sym: String, d: D, values: List[Float], align: Int) -> Unit !Dev =
   t_global(sym, dtype_name(d), values, align, false, false)
 
-## `d_global` with `private` symbol visibility: the symbol is not part of the
-## module's interface, so a host that has the module cannot look it up.
+## `d_global` with `private` symbol visibility: the dialect says the symbol
+## is not part of the module's interface, so a host that has the module
+## cannot look it up.
 ##
-## Nothing in this tree can tell the difference from the outside, and the
-## reason is named rather than glossed: the judgement would be
-## `cuModuleGetGlobal` answering for a public symbol and refusing a private
-## one, and the `Gpu` effect in std/gpu.dawn has no such operation. So what
-## this buys is the byte and layer 1 (`tileiras` accepts it), and
-## scripts/tileir-features/attrs.txt carries the exemption
-## `no-module-symbol-ffi` on the row.
+## That last sentence is the dialect's and not this machine's, and knife TG
+## measured the difference. What the value DOES reach is the cubin:
+## `tileiras` gives a private global a LOCAL ELF binding and a public one a
+## GLOBAL binding, which scripts/tile-golden holds on `global_syms`. What it
+## does not reach is any answer: the CUDA driver's `cuModuleGetGlobal`
+## (std/gpu's `module_global`) answers a LOCAL global as readily as a GLOBAL
+## one, the host reads and writes both, and the next launch reads the write
+## (scripts/tile-gpu-diff/sym_diff.dawn). So this buys the byte, layer 1 and
+## a binding, and scripts/tileir-features/attrs.txt carries the exemption
+## `visibility-not-in-the-lookup` on the row.
 pub fn d_global_private[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
   t_global(sym, dtype_name(d), values, 0, true, false)
 
 ## `d_global` with the `constant` flag: the global is read-only, which is a
 ## promise to the compiler and not a guard. The dialect does not say a store
 ## through a pointer got from a constant global is diagnosed, so this tree
-## does not store through one; the same `no-module-symbol-ffi` exemption
-## applies, for the same reason.
+## does not store through one.
+##
+## This flag reaches one byte of the bytecode and nothing further: with the
+## writer's flag forced to 0 the sm_86 cubin `tileiras` writes is byte for
+## byte the same one (measured, knife TG; scripts/tile-golden's
+## `constant-flag-as-mutable` is the gate). The exemption on the row is
+## `constant-not-in-the-cubin`.
 pub fn d_global_const[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
   t_global(sym, dtype_name(d), values, 0, false, true)
 
