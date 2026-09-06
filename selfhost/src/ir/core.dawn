@@ -406,6 +406,29 @@ pub type CValue =
 ## than in either backend because lowering names dictionaries with it and
 ## both backends name impl methods with it: three producers, one definition,
 ## so they cannot drift into naming the same impl two different things.
+##
+## ## The `Adt<N>` in these names is not stable across programs
+##
+## The number is an ADT id, handed out by a counter that starts one past the
+## prelude (`driver/stdlib.first_minted_id`) and is then shared by every
+## declaration and every inference-time instantiation, in the order
+## `std/modules.txt` lists the modules and the checker walks them. Adding a
+## function to `check/types.dawn` shifts every id after it, so `structeq$Adt307`
+## becomes `structeq$Adt308` in modules that did not change.
+##
+## An id is therefore consistent within one compilation and means nothing
+## between two. It is not a contract: nothing outside a single run may read it,
+## no golden may compare it literally, and no artifact may be matched to another
+## build by it. `scripts/selfhost-core-diff.sh` settled this on 2026-07-26 --
+## one added function to `types.dawn` moved 6 of 52 modules and 5 of the 6 were
+## only this -- and it normalises the names away (`NORM`, `s/Adt[0-9]+/AdtN/g`)
+## rather than trying to make the counter stable, because splitting the counter
+## would rename every generated symbol in the language.
+##
+## The normalisation covers the *names* built here. A bare id also reaches Core
+## as an integer (an effect label's, for one), where no filter can tell it from
+## an ordinary constant, so a golden re-record after an unrelated edit is the
+## expected outcome rather than a signal.
 pub fn ty_key(t: Ty) -> String =
   match t {
     TyInt -> "Int"
@@ -503,6 +526,9 @@ pub fn fn_key(f: CFun) -> String = {
 ##
 ## `ty_key` stays lossy on purpose: widening it would rename every emitted
 ## impl method for no gain.
+##
+## The `Adt<N>` here is the same per-compilation id `ty_key` carries, with the
+## same standing: see the note there.
 pub fn ty_key_inst(t: Ty) -> String =
   match t {
     TyAdt(id, args) -> "Adt" ++ to_string(id) ++ args_key(args)
