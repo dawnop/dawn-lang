@@ -415,9 +415,12 @@ Core 邻接文件上。**所以：选择性 CPS 约等于一到一点五次 hand
 
 **三件挡路的都在包一层，不在运行时。**
 
-1. **没有 `Cmd` 通道，是裁决。** `packages/tea-core/src/app.dawn:14-22` 明写把 `Cmd` 推给 tea v2；
-   `packages/tea-core/src/sub.dawn:1-19` 写「v1 没有 Cmd 通道」。**今天除了 DOM 监听器在 `event`
-   轮里被 `route.at` 解析出来之外，没有任何东西能产生一条 Msg**（`packages/tea-dom/src/reactor.dawn:185-205`）。
+1. ~~**没有 `Cmd` 通道，是裁决。**~~ **已落地（tea v2 第一步）。** `update` 现在返回
+   `(M, Cmd[M.Msg])`，`packages/tea-core/src/cmd.dawn` 是通道本身：`NoCmd` / `SendMsg` /
+   `BatchCmd` 三个构造，加一个同轮有界 fold（`fold_msg`，上限 `CMD_FOLD_LIMIT`，两条腿共用）。
+   于是「除了 DOM 监听器之外没有任何东西能产生一条 Msg」不再成立：一条 `SendMsg` 就是再喂一次
+   `update`。但它只解决了**同步**那一半——`Cmd` 目前没有 io 臂，因为 io 臂的答案要在回复写出去
+   之后才到，那需要一个 wire op（本节第 2、3 条仍然挡着它）。第二步 = io 臂 + 回灌 op，两者一起。
 2. **tea-dom 在 `event` 上拒绝提交状态替换。** `packages/tea-dom/src/reactor.dawn:183` 只有 `Init`
    臂返回 `Some(kept)`，`:179,188,194-195,200,203` 一律 `None`，由 `:454-470` 的测试钉住。
    `std/reactor.serve` 自己没有这条限制（`std/reactor.dawn:83-86` 提交任何 `Some`），
@@ -561,6 +564,11 @@ native 永久帧税，换回 §6.2 那条断言。裁「不做」是完全成立
 它和 `Cmd` 本身一起立项，还是分两个项目、`Cmd` 先落地再把续延接上去。
 
 > **裁决（用户 2026-08-31）：分两步。** `Cmd` 先按普通消息独立落地，续延后接。
+>
+> **第一步已落地（2026-09-07）。** `packages/tea-core/src/cmd.dawn`：三个构造、同轮有界 fold、
+> wire 与 JS reactor 零改动，首客户是 `tea_dom_search` 的 Enter（原来在 `update` 臂里直接写
+> `goto` 字段，那正是「没有通道时手写的同步 Cmd」）。第二步是 io 臂加把答案喂回 `update` 的
+> wire op，与本节 §6.1 第 2、3 条一起做。
 
 ## 10. 勘察产出索引
 
