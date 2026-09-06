@@ -3086,6 +3086,98 @@ extent 和 stride 都**严格为正**，而卷积核的权重读法恰恰是「�
 变异体是它两边唯一的看护。
 
 
+### 6.15 动态维、两条形状查询，与「一个 cubin 两个张量」（刀 T12 实测）
+
+刀 T11 把 view 族的静态一半落地：张量在哪、多大、怎么排，全写在**类型**里。刀 T12 落的是
+另一半。方言允许一维的 extent（或 stride）不进类型：它印成 `?`，`make_tensor_view` 用一个
+**操作数**把值带进来。于是一个 cubin 不再对应一个张量，而是对应一个**秩**。两条形状查询
+`get_tensor_shape` 0x2F 与 `get_index_space_shape` 0x2D 是 kernel 把那些数读回来的办法。
+
+**一、`?` 在线上是 `ShapedType::kDynamic`，也就是 INT64_MIN。**
+
+`tensor_view` 的记录一个字节也没多：shape 与 strides 仍是「计数一个 varint，每个元素八个原始
+小端字节」，动态那一维只是把那八个字节写成 `00 00 00 00 00 00 00 80`。这条值得单独记一句，
+因为**最容易写错的不是形状而是数**：Dawn 的 `Int` 里没有 INT64_MIN 的字面量（`0 - 9223372036854775808`
+的正半边先溢出），而顺手把 -1 移八次得到的是 `ff` 八遍，读者会把它当 extent −1，验证器再以
+「维度必须严格为正」拒掉——**长度一模一样，报文却在另一件事上**。所以 `put_dim` 把那个位模式
+直接拼出来，包内测试逐字节钉住它。
+
+**二、操作数在指令里是两个变长组，形状组在前。**
+
+```
+make_tensor_view =: 43 numResults(1) resultType base
+                    nShape[varint] shapeOperand*
+                    nStrides[varint] strideOperand*
+```
+
+刀 T11 写的那两个 `0` 现在填上了。`MakeTensorViewOp::verify` 要求每个组的长度**恰好等于**类型里
+对应位置的 `?` 个数，所以记录 handler 在这里多了两条判词（数不上就拒），而「每个操作数都是
+rank-0 的整数 tile、且彼此同类型」那条要类型，落在 lowering 里：本仓的 `Idx` 就是 `tile<i32>`，
+于是那条检查是一次相等而不是一遍扫描。
+
+**三、两条查询的记录形状相同，而它们吃的类型不同。**
+
+```
+get_tensor_shape      =: 2F numResults(rank) resultType*rank src
+get_index_space_shape =: 2D numResults(rank) resultType*rank src
+```
+
+`writeResultTypes` 是**逐结果**写类型下标的，所以一个秩为 2 的查询把同一个下标写**两遍**而不是
+一遍。结果计数写是因为结果是 variadic（`generateSimpleResultSerialization`），flags 一个字节都不写
+（两条操作都没有可选属性、没有可选操作数），操作数计数也不写（`src` 是唯一操作数且不 variadic）。
+
+两条的区别全在**吃什么**上，而这正是它们互换时的层 1 判词：`get_tensor_shape` 的参数类型是
+`CudaTile_TensorViewType`，`get_index_space_shape` 的是 `CudaTile_TileView`（partition / strided /
+gather 三个，**不含 tensor view**）。所以把 0x2F 写成 0x2D 会被拒、反过来也会被拒，两条报文各不
+相同，逐条记在下面第七节。
+
+答什么也不同：`get_tensor_shape` 答张量自己的 extent，`get_index_space_shape` 答**格子的个数**，
+也就是 `ceil(shape[dim_map[k]] / tile_shape[k])`，秩是 tile 的秩（`PartitionViewType::getViewIndexRank`
+读的是 `getTileShape().size()`）。两者在本仓的秩相等，是因为 `verifyPartitionViewLike` 要求它们相等，
+不是因为它们是一回事。
+
+**四、一条查询发的是整条指令，绑的是其中一个结果。** 这与 `get_tile_block_id` 是同一条规矩：
+`block_id(0)` 与 `block_id(1)` 各发一条三结果的指令，各绑一个。形状查询照抄，所以
+`view_index_space` 的文本里有两条一模一样的 `get_index_space_shape`。这不是冗余的手滑，是本仓
+对多结果操作的既有写法，`assume` 之外每一处都这样。
+
+**五、「动态」这件事的判词不是字节，是同一个 cubin 跑两个张量。**
+
+`dyn_diff` 的用例单位因此不是 kernel 而是 **(kernel, 形状)**：三个动态 kernel 各跑两个形状，
+`view_transpose` 第七个跑一次，一共七个用例、五种张量形状。一个把 extent 烘进类型的写法答不出
+其中的第二个，而这句话正是层 2 要买的读数。2026-09-06 在本机 RTX 3080 上七个用例全部
+`identical:exact`。
+
+其中最值钱的一格是 `twin=same`：`view_dyn_transpose` 与 `view_transpose` 是**同一个算子的两种
+拼法**，共用 `transpose_ref` 与同一份语料，而 `dyn_diff` 在同一个进程里把两个 cubin 的输出缓冲区
+逐 lane 比了一遍。两份都对参考实现绿只说明参考实现被写对了两次；两个 cubin 互相逐位相同才是
+这一族的判词，与刀 T15 的 `agree=3/3` 是同一种形状。
+
+**六、语料里那个 `1` 是设计出来的。** 维度缓冲区是 `[rows, cols, 1]`，第三项从不被 kernel 写成常量，
+于是**最内层的 stride 也是操作数**，两个变长组因此都是二长。这不是凑数：如果一个 kernel 有两个
+动态 extent 和一个动态 stride，两个组长度不等，「把两个组对调」的变异体就会先被 `tileiras` 以
+「dynamic shape operands 数目不符」拒掉——那是层 1 的报文，而它要量的是设备。同一个道理让
+`masked` 与 `padded` 两个计数被钉在零以上：前者是 `view_tensor_shape` 的 grid 盖到、mask 排除掉的
+lane 数（4），后者是 `view_index_space` 的格子落在张量外的 lane 数（816）。任一为零，那条被查询
+决定的边界就什么也没决定。
+
+**七、变异体的红集也是量出来的。**
+
+| 变异体 | 层 | 红 | 绿（控制） |
+|--------|----|----|-----------|
+| `dynamic-dim-written-static` | 1 | `view_dyn_transpose`（`tileiras` 拒） | 静态 view 的五个 kernel 一个字节不动 |
+| `tensor-shape-as-index-space-shape` | 1 | `view_tensor_shape`（`tileiras` 拒） | 同上 |
+| `index-space-shape-as-tensor-shape` | 1 | `view_index_space`（`tileiras` 拒） | 同上 |
+| `dynamic-shape-and-stride-operands-swapped` | 2 | 三个动态 kernel 的全部六个用例 | `view_transpose`（没有操作数可换） |
+| `shape-query-dim-reversed` | 2 | `view_tensor_shape` 与 `view_index_space` 的四个用例 | **`view_dyn_transpose`**（不问任何查询，字节一动不动）与 `view_transpose` |
+
+`shape-query-dim-reversed` 的锚点在 `lower.dawn` 而不在写入器里，这是本台账第三处写下来的判断
+（前两处是 `grid-y-ignored` 与 `erf-sign-not-flipped`，都记在 `features.txt` 的头注里）：它换的是
+**kernel 读这条操作的哪一个结果**，也就是「第 k 个结果是第 k 维」这句话本身，而那是这条操作码的
+语义合同而不是别的什么。`view_dyn_transpose` 在这一行是绿的，并且是**字节级**的绿：它一条查询也
+不发，所以变异体连它的 `.tilebc` 都碰不到。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`

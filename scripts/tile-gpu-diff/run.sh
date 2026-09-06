@@ -77,6 +77,14 @@
 #             ones written through `tensor_view` and `partition_view` and
 #             are held to the same host references, so the judgement is
 #             that two ways of computing an address answer the same bits)
+#             and dyn_diff.dawn the three dynamic-dimension kernels of
+#             knife T12 with `view_transpose` beside them (the first family
+#             whose unit of comparison is a KERNEL AND A SHAPE: the tensors
+#             these read have no extent in the program, so each cubin is
+#             launched twice on two different tensors, and the static
+#             spelling of one of them runs in the same process so that the
+#             two can be compared to each other rather than each to a
+#             reference)
 #             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
@@ -4549,8 +4557,8 @@ view_pkg_mutant() { # name, module, old, new, moved..., --red, red...
 #     a one-element list is the identity, so their bytecode does not move
 #     at all.
 view_pkg_mutant view-strides-swapped bytecode.dawn \
-  'let b2 = list.fold(strides, put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))' \
-  'let b2 = list.fold(list.reverse(strides), put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))' \
+  'let b2 = list.fold(strides, put_varint(b1, len(strides)), put_dim)' \
+  'let b2 = list.fold(list.reverse(strides), put_varint(b1, len(strides)), put_dim)' \
   view_transpose view_max_pool view_conv2d \
   --red view_transpose view_max_pool view_conv2d
 
@@ -4606,6 +4614,114 @@ view_pkg_mutant padding-enum-off-by-one bytecode.dawn \
   'Some(c) -> put_varint(b4, if c == 0 { 0 } else { c % 4 + 1 })' \
   view_max_pool view_padding \
   --red view_padding
+
+# The knife T12 mutants, in the shape view_pkg_mutant has: one anchor in the
+# package, the bytecode of the kernels that carry it required to MOVE at the
+# same length (so `tileiras` is accepting a lie rather than refusing a
+# shape), and the device required to disagree on exactly the named kernels.
+#
+# `view_transpose` is in `dyn_order` and not in `dyns`, so its cubin is
+# never rebuilt: it is the family's kernel-level control on both halves,
+# the .tilebc half (a static view carries none of this) and the device half.
+dyn_pkg_mutant() { # name, module, old, new, moved..., --red, red...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local moved=() red=() seen_red=no a k rc=0 mverdict differ cubs=()
+  for a in "$@"; do
+    if [ "$a" = --red ]; then seen_red=yes; continue; fi
+    if [ "$seen_red" = yes ]; then red+=("$a"); else moved+=("$a"); fi
+  done
+  local pkg="$work/pkg-$name" before after
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${dyns[@]}"
+  for k in "${dyns[@]}"; do
+    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+        fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
+      [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+        fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+    else
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  echo "      $name: ${#moved[@]} of ${#dyns[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
+
+  for k in "${dyn_order[@]}"; do
+    if printf '%s\n' "${dyns[@]}" | grep -qxF "$k"; then
+      cubs+=("$work/$name-$k.cubin")
+    else
+      cubs+=("$work/$k.cubin")
+    fi
+  done
+  if [ "$dyn_verdict" != pass ]; then
+    rc=0
+    device "$work/dyn.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$dyn_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $dyn_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $dyn_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/dyn.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly ${red[*]} saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k is one of the cases that should differ"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${red[*]} differ and the other $(( DYN_CASES - ${#red[@]} )) do not)"
+}
+
+# How many CASES dyn_diff runs. It is not the number of kernels: every
+# dynamic cubin is launched twice, on two different tensors, and a mutant's
+# red set is counted in cases.
+DYN_CASES=7
+
+# 49. dynamic-shape-and-stride-operands-swapped: `make_tensor_view` writes
+#     its two variadic operand groups the other way round, so the values
+#     meant for the extents fill the strides and the other way about. Both
+#     groups are TWO long in every kernel here (which is why the dimension
+#     buffer carries a 1 the kernels do not spell as a constant), so the
+#     counts still agree with the type's question marks, the file is the
+#     same length, and `tileiras` accepts it.
+#
+#     Every dynamic kernel goes red and the static `view_transpose` does
+#     not, which is the whole shape of this family: the operand is what the
+#     device uses, and a kernel with no operands cannot notice.
+dyn_pkg_mutant dynamic-shape-and-stride-operands-swapped bytecode.dawn \
+  'emit_group(emit_group(w1, dyn_shape), dyn_strides)' \
+  'emit_group(emit_group(w1, dyn_strides), dyn_shape)' \
+  view_dyn_transpose view_tensor_shape view_index_space \
+  --red view_dyn_transpose view_dyn_transpose view_tensor_shape view_tensor_shape \
+  view_index_space view_index_space
+
+# 50. shape-query-dim-reversed: the lowering binds a shape query's handle to
+#     the result for dimension `rank - 1 - dim` instead of `dim`. Both
+#     queries answer one result per dimension and the whole operation is
+#     issued whichever one a kernel asked for, so what this changes is which
+#     result the kernel READS: the claim that result k is dimension k, and
+#     nothing else.
+#
+#     `view_dyn_transpose` asks neither query, so its bytecode must not move
+#     at all; that is the mutant's control inside the family, and
+#     `view_transpose` is its control outside it.
+dyn_pkg_mutant shape-query-dim-reversed lower.dawn \
+  'bind(l3, dst, Val(ds[dim]), res)' \
+  'bind(l3, dst, Val(ds[rank - 1 - dim]), res)' \
+  view_tensor_shape view_index_space \
+  --red view_tensor_shape view_tensor_shape view_index_space view_index_space
 
 # ---- ledger
 if [ "$append" = no ]; then

@@ -1647,7 +1647,7 @@ jobs:
   # Jobs of their own because the wheels are 150 MB and nothing else
   # needs them, so a slow package index delays nothing but these. Nothing
   # `needs:` them. They are the round-robin shards of one matrix
-  # (scripts/tile-golden/matrix.txt: the 176 kernels, then the 59 mutants, in
+  # (scripts/tile-golden/matrix.txt: the 179 kernels, then the 62 mutants, in
   # run order; N is whatever the shard jobs below say, ten since knife T10). Sharding by kind was the plan written down at knife 7b and the
   # phase measurement retired it. That measurement was taken when the matrix
   # held 51 kernels, so its counts are that era's and not today's: locally the
@@ -2228,7 +2228,37 @@ jobs:
     # eleventh shard. The projection after this knife is +36s of CI on
     # shards 1 and 2 and +10s on shard 5, so the worst stays about 498s.
     # N stays 10.
-    # budget: 3x 650s planning value (255.3s local, doubled)
+    #
+    # KNIFE T12 (2026-09-07, three kernels and three mutants on top of T11;
+    # matrix 235 -> 241 items: 179 kernels and 62 mutants). N STAYS 10 AND
+    # FOUR LINES MOVE.
+    #
+    # The local machine was again carrying another agent throughout (load
+    # 5.3 to 7.6), so this knife does what T11 did and governs by the MODEL
+    # rather than by its own round: knife T5's per-item means (5.088s a
+    # kernel, 19.0s a mutant) over the new deal. Three more kernels change
+    # the deal itself and not only its size: 179 mod 10 gives shards 1 to 9
+    # eighteen kernels and shard 10 seventeen, and the mutants now start at
+    # index 179 rather than 176, so shards 1 and 10 carry seven of them and
+    # the other eight carry six. That is 651 / 613 x 8 / 641s of planning
+    # value.
+    #
+    # Four of the ten standing lines are below their own composition after
+    # that redeal and are restated here: shard 1 (650 -> 651), shard 8
+    # (605 -> 613), shard 9 (604 -> 613) and shard 10 (605 -> 641, which is
+    # the one whose timeout moves, 31 -> 33 minutes). The other six stand,
+    # because a budget is a ceiling and restating one downwards only buys
+    # the next knife a second edit. Every one of the ten is under the 660s
+    # pole, which is why N stays 10 on the planning half of the rule.
+    #
+    # THE INDEPENDENT EVIDENCE is the same audit, run on 2026-09-07 over the
+    # 25 runs of 09-05 to 09-06: the ten shards' worst CI observations are
+    # 498 / 471 / 458 / 452 / 445 / 442 / 442 / 431 / 429 / 427s, none of
+    # them flagged by check-gate-budgets.py --observed. Six more items over
+    # ten shards is about +13s of local and +27s of CI where a mutant
+    # lands, so the worst stays about 498s, 52s under the 550s OBSERVATION
+    # that would trigger an eleventh shard.
+    # budget: 3x 651s planning value (255.6s local, doubled)
     timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
@@ -2254,7 +2284,7 @@ jobs:
       - name: tileiras wheel cache refuses altered pins and bytes
         run: python3 scripts/tile-golden/install-contract.py
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 1)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 1)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 1/10
@@ -2316,7 +2346,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 2)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 2/10
@@ -2372,7 +2402,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 3)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 3/10
@@ -2429,7 +2459,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 4)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 4)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 4/10
@@ -2486,7 +2516,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 5)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 5)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 5/10
@@ -2540,7 +2570,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 6)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 6)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 6/10
@@ -2593,7 +2623,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 7)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 7/10
@@ -2627,7 +2657,7 @@ jobs:
     # is 201.4s of items, + 31 + 70 = 232.4, doubled is 605s; knife T5's per-item
     # means put it at 555s, and the line below is the larger of the two.
     # tile-golden-1's note has why ten rather than nine.
-    # budget: 3x 605s planning value (232.4s local, doubled)
+    # budget: 3x 613s planning value (236.6s local, doubled)
     timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
@@ -2648,7 +2678,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 8)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 8/10
@@ -2673,7 +2703,7 @@ jobs:
     # knife T5's per-item means put it at 555s, and the line below is the
     # larger of the two, as every line here has been since knife T4. No CI
     # observation yet: the shard is new.
-    # budget: 3x 604s planning value (232.2s local, doubled)
+    # budget: 3x 613s planning value (236.6s local, doubled)
     timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
@@ -2694,7 +2724,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 9)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 9)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 9/10
@@ -2719,8 +2749,8 @@ jobs:
     # knife T5's per-item means put it at 555s, and the line below is the
     # larger of the two, as every line here has been since knife T4. No CI
     # observation yet: the shard is new.
-    # budget: 3x 605s planning value (232.6s local, doubled)
-    timeout-minutes: 31
+    # budget: 3x 641s planning value (250.5s local, doubled)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
 
@@ -2740,7 +2770,7 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (176 kernels and fifty-nine mutants, both backends; shard 10)
+      - name: tile IR goldens and tileiras (179 kernels and sixty-two mutants, both backends; shard 10)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 10/10

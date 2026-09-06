@@ -505,6 +505,9 @@ mutants=(
   tensor-view-tag-as-ptr
   partition-view-padding-inline-flag-at-13-3
   padding-nan-on-integer-elements
+  dynamic-dim-written-static
+  tensor-shape-as-index-space-shape
+  index-space-shape-as-tensor-shape
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2114,6 +2117,50 @@ if run_item padding-nan-on-integer-elements; then
     '  PadZero -> Some(PAD_NAN)'
   writer_mutant_checks padding-nan-on-integer-elements view_pad_i32 same-size \
     "padding_value nan can only be used with floating point element types, got 'i32'"
+fi
+
+# 58. A dynamic dimension is written as a STATIC extent. The type record is
+#     the same length either way (every extent is eight raw bytes), so
+#     nothing about the file's shape says which was meant; what says it is
+#     the instruction, which still carries an operand for a question mark
+#     the type no longer has. `MakeTensorViewOp::verify` counts the two and
+#     refuses.
+#
+#     This is also the mutant that pins the VALUE: `ShapedType::kDynamic`
+#     is INT64_MIN, and the two ways of getting it wrong (a static extent,
+#     or a shifted minus one) are both the same length as the right answer.
+if run_item dynamic-dim-written-static; then
+  mutant_project dynamic-dim-written-static bytecode.dawn \
+    'if d == DYN_DIM { bytes.put(put_le(b, 0, 7), 0x80) } else { put_le(b, d, 8) }' \
+    'if d == DYN_DIM { put_le(b, 4096, 8) } else { put_le(b, d, 8) }'
+  writer_mutant_checks dynamic-dim-written-static view_dyn_transpose same-size \
+    "'cuda_tile.make_tensor_view' op expected 0 dynamic shape operands, got 2"
+fi
+
+# 59. `get_tensor_shape` is written with `get_index_space_shape`'s opcode.
+#     The two records are the same shape to the byte (a result count, one
+#     type index per result, one operand), so the reader gets all the way
+#     to the operation's own type constraint -- and there the two part
+#     company: `get_index_space_shape` takes a TileView, which is a
+#     partition, strided or gather view and NOT a tensor view.
+if run_item tensor-shape-as-index-space-shape; then
+  mutant_project tensor-shape-as-index-space-shape bytecode.dawn \
+    'emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)' \
+    'emit_shape_query(w0, OP_GET_INDEX_SPACE_SHAPE, len(dsts), res_ty, src)'
+  writer_mutant_checks tensor-shape-as-index-space-shape view_tensor_shape same-size \
+    "'cuda_tile.get_index_space_shape' op operand #0 must be TileView instance, but got '!cuda_tile.tensor_view<?x?xf64, strides=[?,?]>'"
+fi
+
+# 60. The same swap the other way, which is a different refusal and not the
+#     same one read backwards: `get_tensor_shape`'s parameter is
+#     `TensorViewType` exactly, and what it is handed here is a partition
+#     view.
+if run_item index-space-shape-as-tensor-shape; then
+  mutant_project index-space-shape-as-tensor-shape bytecode.dawn \
+    'emit_shape_query(w0, OP_GET_INDEX_SPACE_SHAPE, len(dsts), res_ty, src)' \
+    'emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)'
+  writer_mutant_checks index-space-shape-as-tensor-shape view_index_space same-size \
+    "'cuda_tile.get_tensor_shape' op operand #0 must be tensor view type, but got '!cuda_tile.partition_view<tile=(16x16), padding_value = zero, tensor_view<?x?xf64, strides=[?,?]>>'"
 fi
 
 _item_tick ""

@@ -1289,6 +1289,13 @@ fn emit_op_counted(w: W, opcode: Int, result: Ty) -> W = {
   emit(emit(emit(w1, opcode), 1), ti)
 }
 
+# One variadic operand GROUP: its count, then its operands. An operation
+# carrying AttrSizedOperandSegments writes one of these per variadic group
+# in declaration order, and `make_tensor_view` has two of them (the dynamic
+# extents, then the dynamic strides). Written as a function of the group so
+# that the ORDER of the two is one expression and a mutant can exchange it.
+fn emit_group(w: W, rs: List[Ref]) -> W = list.fold(rs, emit(w, len(rs)), emit_ref)
+
 # opcode, the result count, that many copies of the result type's index,
 # then the source operand: the shape of both knife T12 queries.
 fn emit_shape_query(w: W, opcode: Int, rank: Int, res: Ty, src: Ref) -> W = {
@@ -1686,8 +1693,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # A dynamic one fills them, one operand per `?` in the type, shape
     # group first (knife T12).
     let w1 = emit_ref(emit_op_counted(w0, OP_MAKE_TENSOR_VIEW, t), base)
-    let w2 = list.fold(dyn_shape, emit(w1, len(dyn_shape)), emit_ref)
-    list.fold(dyn_strides, emit(w2, len(dyn_strides)), emit_ref)
+    emit_group(emit_group(w1, dyn_shape), dyn_strides)
   }
   # The two shape queries: the opcode, the RESULT COUNT (they are variadic
   # in their results, so `generateSimpleResultSerialization` writes it),

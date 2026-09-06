@@ -58,7 +58,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
-                 "T15", "TG"}
+                 "T12", "T15", "TG"}
 
 
 class Ledger:
