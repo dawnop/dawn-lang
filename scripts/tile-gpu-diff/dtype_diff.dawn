@@ -5,6 +5,7 @@
 # answered.
 #
 #   dtype_diff <dtype_i16.cubin> <dtype_i64.cubin> <dtype_tf32.cubin>
+#             <dtype_i4.cubin> <pack_roundtrip.cubin>
 #
 # THREE OF THE KNIFE'S SIX FORMATS ARE HERE. The other three are the fp8
 # ones, and they are absent for a reason that is a measurement rather than a
@@ -36,6 +37,31 @@
 #     the same exponent range as binary32; the corpus carries the ties on
 #     both sides, the subnormals, the largest finite value and the overflow
 #     above it.
+#   * WHETHER A NIBBLE IS HALF A BYTE, AND WHICH HALF. `i4` is knife T9's
+#     format and there is no buffer of it at all, so the corpus ships its
+#     lanes in i32 words and the kernel `pack`s them into bytes and
+#     `unpack`s the bytes into nibbles. Which nibble is lane k is a device
+#     answer: the host reading is std/gpu's `nibble_at` and the mutant
+#     pack-halves-swapped exchanges the two halves of every byte.
+#   * WHETHER A NIBBLE HAS A SIGN. `i4` has no arithmetic of its own, so a
+#     kernel widens to i32 first, and + - * agree modulo 16 whichever
+#     widening was used. An arithmetic shift does not, which is why
+#     dtype_i4's segments 1 and 2 are the same shift under the two
+#     widenings; the mutant exti-i4-zero-extends collapses them.
+#   * WHETHER `pack` AND `unpack` ARE INVERSE. pack_roundtrip goes through
+#     `i4` and through `i16` and answers the bytes it was given, at two
+#     width ratios and in both directions. It is also the CONTROL for
+#     pack-halves-swapped: a round trip lays the lanes back the way it
+#     picked them up, so it is blind to the order and must stay green.
+#
+# fp4 IS NOT HERE, and that is a measurement rather than a choice, the same
+# one the three fp8 formats made: `tileiras` 13.3.36 refuses the TYPE
+# `f4E2M1FN` at sm_86 and sm_89 (`Incompatibility with architecture
+# 'sm_86': unsupported type 'f4E2M1FN'`) and takes it from sm_100. It is
+# the type and not the arithmetic, so even a round trip that converts
+# nothing cannot be loaded here. dtype_e2m1 therefore stops at layer 1,
+# scripts/tile-golden assembles it for sm_100 so that layer is real, and
+# the exemption is named in scripts/tileir-features/types.txt.
 #
 # THE TIER IS EXACT for all three, and by ALGEBRA rather than by corpus:
 # integer arithmetic modulo a power of two is exact and associative, and a
@@ -49,7 +75,8 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, dtype_i16_ref, dtype_i64_ref,
-  dtype_convert_ref, wrap_i16 }
+  dtype_convert_ref, dtype_i4_ref, pack_roundtrip_ref, wrap_i16, wrap_i4, wrap_i32, nibble_at,
+  nibble_word }
 use std/list
 use std/map
 use std/narrow
@@ -61,9 +88,12 @@ use std/narrow
 pub const SENTINEL: Float = 0.0 - 12345.0
 
 ## The shapes the kernels were recorded with. These must agree with
-## scripts/tile-golden/kernels.dawn.
+## scripts/tile-golden/kernels.dawn. The sub-byte kernels have the same
+## segment length and a narrower tile: a block carries 32 words, which is
+## 128 bytes, which is 256 nibbles.
 pub const DT_N: Int = 512
 pub const DT_TILE: Int = 128
+pub const I4_TILE: Int = 32
 
 ## The lanes past the answer in every output buffer: a write past the end
 ## leaves the sentinel behind and is seen.
@@ -303,6 +333,34 @@ fn tf32_y() -> List[Float] = {
       })
 }
 
+## The i4 corpus, in i32 words: eight lanes to a word, and the sweep is
+## over the LANES rather than the words. `a`'s lane runs through all
+## sixteen nibble values and `b`'s runs through them at another stride, so
+## every pair of nibble values occurs; four words are pinned so that the
+## all-zero word, the all-ones word (every lane -1) and the two words the
+## std tests name are in the corpus as well.
+fn i4_a() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        0.0
+      } else if i == 1 {
+        to_float(wrap_i32(0xFFFFFFFF))
+      } else if i == 2 {
+        to_float(0x76543210)
+      } else if i == 3 {
+        to_float(wrap_i32(0xFEDCBA98))
+      } else {
+        nibble_word(k => (8 * i + k) % 16)
+      })
+
+fn i4_b() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        to_float(wrap_i32(0xFFFFFFFF))
+      } else {
+        nibble_word(k => (3 * i + 5 * k + 7) % 16)
+      })
+
 fn pow2(k: Int) -> Float = {
   var q = 1.0
   var i = k
@@ -346,6 +404,26 @@ fn shape_of(name: String) -> String =
     let in_reach = list.filter(idx, i => magnitude(a[i] * b[i]) < 4503599627370496.0)
     "lanes=${DT_N} negative=${len(neg)} beyond_i32=${len(wide)} products_beyond_i32=${len(wide_prod)}"
       ++ " products_inside_2p52=${len(in_reach)}"
+  } else if name == "dtype_i4" || name == "pack_roundtrip" {
+    let a = i4_a()
+    let b = i4_b()
+    let lanes = range(0, 8 * DT_N)
+    let na = (i: Int) => nibble_at(wrap_i32(to_int(a[i / 8])), i % 8)
+    let nb = (i: Int) => nibble_at(wrap_i32(to_int(b[i / 8])), i % 8)
+    let negative = list.filter(lanes, i => na(i) >= 8)
+    let add_wrap = list.filter(lanes, i => {
+      let s = wrap_i4(na(i)) + wrap_i4(nb(i))
+      s != wrap_i4(s)
+    })
+    let mul_wrap = list.filter(lanes, i => {
+      let s = wrap_i4(na(i)) * wrap_i4(nb(i))
+      s != wrap_i4(s)
+    })
+    let shift_differs = list.filter(lanes, i => (wrap_i4(na(i)) >> 1) & 0xF != na(i) >>> 1)
+    let values = list.filter(range(0, 16), v => len(list.filter(lanes, i => na(i) == v)) > 0)
+    "lanes=${8 * DT_N} negative=${len(negative)} add_wrapped=${len(add_wrap)}"
+      ++ " mul_wrapped=${len(mul_wrap)} shift_differs=${len(shift_differs)}"
+      ++ " nibble_values=${len(values)}"
   } else {
     let x = tf32_x()
     let y = tf32_y()
@@ -368,12 +446,16 @@ fn shape_of(name: String) -> String =
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
-fn case_name(i: Int) -> String = ["dtype_i16", "dtype_i64", "dtype_tf32"][i]
+fn case_name(i: Int) -> String =
+  ["dtype_i16", "dtype_i64", "dtype_tf32", "dtype_i4", "pack_roundtrip"][i]
 
 ## The number of output segments each kernel writes.
-fn case_segments(i: Int) -> Int = [5, 5, 2][i]
+fn case_segments(i: Int) -> Int = [5, 5, 2, 5, 2][i]
 
-fn case_grid(_i: Int) -> Int = DT_N / DT_TILE
+## The blocks each kernel is launched with: its segment length divided by
+## its tile width, which is not the same width for all of them.
+fn case_grid(i: Int) -> Int =
+  if i >= 3 { DT_N / I4_TILE } else { DT_N / DT_TILE }
 
 ## The buffers each kernel is handed: a FORMAT and the initial contents, in
 ## argument order. Every output buffer is LONGER than the answer, so the
@@ -384,6 +466,10 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
     [("i16", i16_a()), ("i16", i16_b()), ("i16", out)]
   } else if case_name(i) == "dtype_i64" {
     [("i64", i64_a()), ("i64", i64_b()), ("i64", out)]
+  } else if case_name(i) == "dtype_i4" {
+    [("i32", i4_a()), ("i32", i4_b()), ("i32", out)]
+  } else if case_name(i) == "pack_roundtrip" {
+    [("i32", i4_a()), ("i32", out)]
   } else {
     [("tf32", tf32_x()), ("f64", tf32_y()), ("f64", out)]
   }
@@ -395,6 +481,10 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
     map.from([("dtype_i16", (3, last_out((dts, ins) => dtype_i16_ref(DT_N, dts, ins))))])
   } else if case_name(i) == "dtype_i64" {
     map.from([("dtype_i64", (3, last_out((dts, ins) => dtype_i64_ref(DT_N, dts, ins))))])
+  } else if case_name(i) == "dtype_i4" {
+    map.from([("dtype_i4", (3, last_out((dts, ins) => dtype_i4_ref(DT_N, dts, ins))))])
+  } else if case_name(i) == "pack_roundtrip" {
+    map.from([("pack_roundtrip", (2, last_out((dts, ins) => pack_roundtrip_ref(DT_N, dts, ins))))])
   } else {
     map.from([("dtype_tf32", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "tf32", dts, ins))))])
   }
@@ -431,13 +521,14 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 }
 
 fn usage() -> Unit !Exit !io = {
-  io.eprintln("usage: dtype_diff <dtype_i16.cubin> <dtype_i64.cubin> <dtype_tf32.cubin>")
+  io.eprintln("usage: dtype_diff <dtype_i16.cubin> <dtype_i64.cubin> <dtype_tf32.cubin>"
+      ++ " <dtype_i4.cubin> <pack_roundtrip.cubin>")
   io.exit(2)
 }
 
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let paths = args()
-  let count = 3
+  let count = 5
   if len(paths) != count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
   for i in range(0, count) {

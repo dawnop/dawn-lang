@@ -654,13 +654,30 @@ shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast)
 # --gpu-name sm_86 and at sm_89, so no cubin of them can be loaded on this
 # machine's RTX 3080. They stop at layer 1 with a named exemption in
 # scripts/tileir-features/types.txt.
-dtypes=(dtype_i16 dtype_i64 dtype_tf32)
+#
+# Knife T9 put two more in the same family, and they are the sub-byte end
+# of it: `dtype_i4` is the format narrower than a byte and `pack_roundtrip`
+# is the pair of operations that reach it. Neither has a buffer of its own
+# format -- there is no `ptr<i4>` in the dialect at all -- so both take
+# ordinary i32 words and the kernel packs and unpacks them. The knife's
+# other kernel, dtype_e2m1, is absent for exactly the reason the fp8 ones
+# are: `tileiras` refuses the TYPE `f4E2M1FN` at sm_86 and sm_89.
+dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 
-# The tf32 mutant below names one of the three; the other two are its
+# The tf32 mutant below names one of the five; the others are its
 # kernel-level control, and a tag mutant that moved them would be changing
 # something other than the tag it names.
 dtype_red=(dtype_tf32)
-dtype_green=(dtype_i16 dtype_i64)
+dtype_green=(dtype_i16 dtype_i64 dtype_i4 pack_roundtrip)
+
+# The two sub-byte mutants and what each is held to. pack-halves-swapped
+# rewrites the HOST's reading of which nibble is lane k, so only the kernel
+# that names a lane can see it: pack_roundtrip lays the lanes back the way
+# it picked them up and is blind to the order, which makes it the control
+# rather than a second witness. exti-i4-zero-extends rewrites the WRITER's
+# signedness for the widening, and only dtype_i4 widens anything.
+i4_red=(dtype_i4)
+i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
 # subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
 # no opcode at all, and every one of these eight computes the same thing
@@ -1584,12 +1601,19 @@ echo "PASS  corpus: trig_sweep covers every lane class the seven operations need
 #         A corpus on the tf32 grid would let a truncating conversion pass
 #         for a rounding one, and one without ties would not see
 #         ties-to-even at all.
-for kernel in dtype_i16 dtype_i64 dtype_tf32; do
+#   i4    negative, add_wrapped, mul_wrapped, shift_differs, nibble_values
+#         `negative` and `shift_differs` are the same lanes counted twice
+#         over, and they are what makes the SIGN of the widening visible:
+#         with none of them the two shift segments would be one segment
+#         written twice. `nibble_values` must be all sixteen, so no
+#         encoding of the format is missing from the corpus.
+for kernel in dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip; do
   dtype_shape="$(awk -v want="$kernel" '/^kernel /{cur=$2} cur == want && /^  index /{sub(/^  index /, ""); print; exit}' "$work/dtype.out")"
   [ -n "$dtype_shape" ] || fail "dtype_diff printed no index line for $kernel"
   case "$kernel" in
     dtype_i16) fields="negative add_wrapped mul_wrapped shift_wrapped extremes" ;;
     dtype_i64) fields="negative beyond_i32 products_beyond_i32 products_inside_2p52" ;;
+    dtype_i4|pack_roundtrip) fields="negative add_wrapped mul_wrapped shift_differs nibble_values" ;;
     *) fields="off_grid near_ties subnormal infinite rounded_on_upload" ;;
   esac
   for field in $fields; do

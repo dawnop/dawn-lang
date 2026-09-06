@@ -399,7 +399,8 @@ kernels=(
   trig_sweep rope shape_ops grid_stride
   token_join ptr_roundtrip ptr_recast
   dtype_i16 dtype_i64 dtype_tf32 dtype_e4m3
-  dtype_e5m2 dtype_e8m0
+  dtype_e5m2 dtype_e8m0 dtype_i4 dtype_e2m1
+  pack_roundtrip
   loop_count loop_bound loop_until loop_none
   attr_round attr_nan attr_ftz attr_approx
   attr_overflow attr_memsem attr_addf attr_ucmp
@@ -677,9 +678,9 @@ PY
 # The --gpu-name a kernel is assembled for. toolchain.txt's `gpu-name` is
 # the machine's own (sm_86) and every kernel but four uses it.
 #
-# The first three are knife T3's fp8 kernels, and the number here is a
-# MEASUREMENT: tileiras 13.3.36 refuses all three fp8 types at sm_86 AND at
-# sm_89 with
+# The first four are knife T3's three fp8 kernels and knife T9's fp4 one,
+# and the number here is a MEASUREMENT: tileiras 13.3.36 refuses all three
+# fp8 types and f4E2M1FN at sm_86 AND at sm_89 with
 #
 #   error: Incompatibility with architecture 'sm_86': unsupported type
 #     'f8E4M3FN'
@@ -706,7 +707,7 @@ PY
 # `architecture` exemption.
 kernel_arch() { # kernel
   case "$1" in
-    dtype_e4m3|dtype_e5m2|dtype_e8m0|mmaf_scaled_e4m3) echo sm_100 ;;
+    dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
     *) echo "$gpu_name" ;;
   esac
 }
