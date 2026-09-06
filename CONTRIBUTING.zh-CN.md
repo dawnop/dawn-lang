@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ 00e3a30c8a0e2189 -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ 559f0add1c7404bc -->
 
 # 怎么在这个仓库里做事
 
@@ -8,7 +8,7 @@
 
 提交格式、跑测试、代码风格那些，通用模板里都有，而且 CI 会管
 （`./bin/dawn test selfhost`、`./bin/dawn test compiler-plan`、
-`./bin/dawn fmt compiler-plan std site selfhost packages examples --check`、金样差分）——
+`./bin/dawn fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check`、金样差分）——
 文档写不写它们都一样。真正没被机器管住、又值得写下来的，是下面这套流程。它不是理论，
 是 `docs/` 里八篇设计文档跑出来的。
 

@@ -7,10 +7,10 @@ This file covers one thing: **how a feature travels from an idea to code**.
 Commit format, running the tests, code style: a generic template already has all
 of that, and CI holds it anyway (`./bin/dawn test selfhost`,
 `./bin/dawn test compiler-plan`,
-`./bin/dawn fmt compiler-plan std site selfhost packages examples --check`, the
-golden differentials), so writing it down changes nothing. What follows is the
-part no machine holds and that is still worth writing down. It is not theory. It
-is what eight design documents under `docs/` actually did.
+`./bin/dawn fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check`,
+the golden differentials), so writing it down changes nothing. What follows is
+the part no machine holds and that is still worth writing down. It is not
+theory. It is what eight design documents under `docs/` actually did.
 
 ## 1. Before writing code, write `docs/<feature>-design.md`
 
