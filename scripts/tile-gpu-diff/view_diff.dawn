@@ -435,6 +435,17 @@ fn shown(o: Option[List[List[Float]]]) -> String = match o {
   None -> "-"
 }
 
+## How many distinct values `v` holds, counted through a map rather than
+## pairwise: `view_transpose`'s corpus is 6000 lanes and the pairwise count
+## `corpus_shape` does would be 18 million comparisons.
+fn uniques(v: List[Float]) -> Int = {
+  var seen: Map[String, Unit] = map.empty()
+  for x in v {
+    seen = map.insert(seen, to_string(x), ())
+  }
+  len(map.keys(seen))
+}
+
 fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
   Ok(b) -> b
   Err(e) -> {
@@ -482,6 +493,12 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   for i in range(0, count) {
     cubins = map.insert(cubins, case_name(i), read_cubin(argv[i]))
   }
+  # The three counts run.sh holds the corpus to. They are computed from
+  # the corpus itself rather than asserted here, so a corpus that quietly
+  # lost one of these properties is visible in the transcript as well.
+  io.println("  index lanes=${VT_ROWS * VT_COLS} distinct=${uniques(distinct(VT_ROWS * VT_COLS))}"
+      ++ " padded=${blocks(VP_N, VP_TILE) * VP_TILE - VP_N}"
+      ++ " distinct_pads=${uniques(list.map(range(0, 5), pad_bits))}")
   var all_agreed = true
   var blocked = ""
   var any_differ = false

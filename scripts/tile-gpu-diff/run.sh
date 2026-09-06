@@ -70,6 +70,13 @@
 #             opcode that knife adds, `mmaf_scaled`, takes only fp8 and fp4
 #             operands and is refused below sm_100, so no program here can
 #             launch it)
+#             and view_diff.dawn the five view kernels of knife T11 with
+#             `transpose_tail` beside them as the family's kernel-level
+#             control (the first family whose subject is a second way to
+#             ADDRESS memory: three of its kernels are knife 9's strided
+#             ones written through `tensor_view` and `partition_view` and
+#             are held to the same host references, so the judgement is
+#             that two ways of computing an address answer the same bits)
 #             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
@@ -772,6 +779,20 @@ allocas=(alloca_scratch alloca_two alloca_ctl)
 hints=(hint_entry hint_memory)
 hint_order=("${hints[@]}" vadd)
 
+# The view kernels of knife T11, in the order view_diff takes them.
+# `view_transpose`, `view_max_pool` and `view_conv2d` are the strided
+# kernels of knife 9 written through views and share their host references
+# with the ladder versions stride_diff runs; `view_padding` and
+# `view_pad_i32` are about the `PaddingValue` enum. `transpose_tail` is the
+# family's KERNEL-LEVEL CONTROL and is what makes the first three a
+# judgement about ADDRESSING rather than about a kernel: it is
+# view_transpose's ladder twin, on the same corpus, with none of the four
+# view opcodes in it. Its cubin is assembled already (it is one of the
+# strided kernels); naming it here is what puts it on view_diff's command
+# line, exactly as `vadd` is named in hint_order.
+views=(view_transpose view_max_pool view_conv2d view_padding view_pad_i32)
+view_order=("${views[@]}" transpose_tail)
+
 # The multi-launch kernels of knives 16 and 17, in the order seq_diff takes
 # them on the command line. These are not eighteen independent kernels the
 # way every list above is: they are the STEPS of eleven sequences, and what
@@ -823,7 +844,7 @@ assemble_golden() { # kernel, tilebc, cubin
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
+  "${hints[@]}" "${views[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -869,6 +890,8 @@ sym_cubins=()
 for k in "${syms_[@]}"; do sym_cubins+=("$work/$k.cubin"); done
 alloca_cubins=()
 for k in "${allocas[@]}"; do alloca_cubins+=("$work/$k.cubin"); done
+view_cubins=()
+for k in "${view_order[@]}"; do view_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1424,6 +1447,59 @@ for field in live unaliased apart; do
     fail "the alloca corpus has $field=$value of 128 lanes, so that claim is not fully tested: $alloca_shape"
 done
 echo "PASS  corpus: every lane makes the scratch visible, tells two allocations apart, and holds two different values ($alloca_shape)"
+
+# ---- native, the view kernels (knife T11)
+#
+# The verdict is the usual one, and its content is unusual: three of the
+# five kernels are held to the SAME host references the pointer-ladder
+# kernels above are held to. Two ways of computing an address answering the
+# same bits is the whole of what this family claims, and `transpose_tail`
+# rides along in the same process as the ladder half of that sentence.
+build_native "$root/std" "$work/view.bin" "$here/view_diff.dawn"
+rc=0
+device "$work/view.bin" "${view_cubins[@]}" > "$work/view.out" 2> "$work/view.err" || rc=$?
+cat "$work/view.out"
+view_verdict="$(verdict_of "$work/view.out")"
+case "$view_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#views[@]} view kernels and their ladder control agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $view_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $view_verdict" ;;
+  fail) cat "$work/view.err" >&2; fail "the device answered and disagreed with the fake device on a knife T11 kernel (see the transcript above)" ;;
+  *) cat "$work/view.err" >&2; fail "view_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/view.out" | head -n 1)"
+
+# The view corpus, held field by field. Each of these is what makes one of
+# the four mutants below a measurement rather than a sentence.
+#
+#   distinct    every lane of view_transpose's input is its own value. A
+#               corpus with a repeat would forgive a store whose dim_map
+#               was reversed, because two lanes that swapped would agree
+#   padded      how many lanes of view_padding's output are past the end of
+#               the tensor, so the padding value is what is there. Zero
+#               would mean the tile never ran off the tensor and the whole
+#               `PaddingValue` half of this family measured nothing
+#   distinct_pads  how many of the five padding values put a DIFFERENT bit
+#               pattern on those lanes. Five: without it,
+#               padding-enum-off-by-one could rotate the enum and leave
+#               every output where it was
+view_shape_line="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/view.out")"
+[ -n "$view_shape_line" ] || fail "view_diff printed no index line"
+if [ "$view_verdict" = pass ]; then
+  distinct="$(printf '%s\n' "$view_shape_line" | tr ' ' '\n' | sed -n 's/^distinct=//p')"
+  [ "$distinct" = "6000" ] ||
+    fail "view_transpose's corpus has $distinct of 6000 distinct lanes, so a reversed dim_map could hide in a repeat: $view_shape_line"
+  padded="$(printf '%s\n' "$view_shape_line" | tr ' ' '\n' | sed -n 's/^padded=//p')"
+  [ "$padded" = "28" ] ||
+    fail "view_padding's last tile runs $padded lanes past the tensor, so the padding value is not fully measured: $view_shape_line"
+  distinct_pads="$(printf '%s\n' "$view_shape_line" | tr ' ' '\n' | sed -n 's/^distinct_pads=//p')"
+  [ "$distinct_pads" = "5" ] ||
+    fail "the five padding values put $distinct_pads distinct bit patterns on the device, so the enum is not fully told apart: $view_shape_line"
+  echo "PASS  corpus: every transpose lane is distinct, the last tile runs 28 lanes off the tensor, and the five padding values are five patterns ($view_shape_line)"
+else
+  echo "SKIP  corpus: the view counts are not verifiable on this driver ($view_verdict)"
+fi
 
 # ---- native, the optimization hint kernels (knife T15)
 #
@@ -4302,6 +4378,160 @@ alloca_pkg_mutant alloca-aliased prog.dawn \
         }' \
   alloca_two
 
+# 45 to 48. The view family's four device mutants (knife T11). All four are
+#     one anchor in the TYPE WRITER, all four are accepted by `tileiras`,
+#     and all four are the same shape: a partition view that says something
+#     slightly different about where its tiles are or what an out-of-bounds
+#     lane reads. The bytes are the same length in every case, so what is
+#     being caught is a lie the assembler believes and the device does not.
+#
+#     Each names two sets. `moved` is the kernels whose bytecode this
+#     anchor touches at all, and the rest are held BYTE FOR BYTE to their
+#     goldens: a mutant that moved a kernel it has nothing to do with is
+#     not measuring what it says. `red` is the kernels whose answer the
+#     device changes, and it is a subset of `moved` -- the difference
+#     between the two is where the anchor reached the file and the device
+#     could not tell.
+#
+#     `transpose_tail` is in none of them: it is view_transpose's
+#     pointer-ladder twin, it holds no view type at all, and its cubin is
+#     never re-encoded here. A mutant that reddened it would have broken
+#     the tree.
+view_pkg_mutant() { # name, module, old, new, moved..., --red, red...
+  local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local moved=() red=() seen_red=no a k rc=0 mverdict differ cubs=()
+  for a in "$@"; do
+    if [ "$a" = --red ]; then seen_red=yes; continue; fi
+    if [ "$seen_red" = yes ]; then red+=("$a"); else moved+=("$a"); fi
+  done
+  local pkg="$work/pkg-$name" before after
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${views[@]}"
+  for k in "${views[@]}"; do
+    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+        fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
+      [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
+        fail "$name: $k.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+    else
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  echo "      $name: ${#moved[@]} of ${#views[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
+
+  for k in "${view_order[@]}"; do
+    if printf '%s\n' "${views[@]}" | grep -qxF "$k"; then
+      cubs+=("$work/$name-$k.cubin")
+    else
+      cubs+=("$work/$k.cubin")
+    fi
+  done
+  if [ "$view_verdict" != pass ]; then
+    rc=0
+    device "$work/view.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$view_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $view_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $view_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/view.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly ${red[*]} saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for k in "${red[@]}"; do
+    awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $k is one of the kernels that should differ"; }
+  done
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device ${red[*]} differ and the other $(( ${#view_order[@]} - ${#red[@]} )) do not)"
+}
+
+# 45. view-strides-swapped: a `tensor_view` writes its strides in the
+#     REVERSE order. Nothing about the type's shape moves, so the tensor
+#     still has the same extent and the same rank, and every index is still
+#     in the index space; what moves is where each index LANDS. This is the
+#     view family's answer to knife 9's stride-row-major-swapped, and it
+#     needs the same corpus property: a rectangular extent, because a
+#     square tensor read with its two strides exchanged is its own
+#     transpose and the relabelling cancels.
+#
+#     The two rank-1 kernels are its control inside the family: reversing
+#     a one-element list is the identity, so their bytecode does not move
+#     at all.
+view_pkg_mutant view-strides-swapped bytecode.dawn \
+  'let b2 = list.fold(strides, put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))' \
+  'let b2 = list.fold(list.reverse(strides), put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))' \
+  view_transpose view_max_pool view_conv2d \
+  --red view_transpose view_max_pool view_conv2d
+
+# 46. partition-dim-map-reversed: the `dim_map` is written in the reverse
+#     order, so tile dimension k runs along the tensor dimension tile
+#     dimension `rank-1-k` should. The type still verifies (a reversed
+#     permutation is a permutation) and `tileiras` still accepts it.
+#
+#     `view_conv2d` is in `moved` and NOT in `red`, and that is the reading
+#     this mutant bought rather than assumed: its index space is 3 by 3, so
+#     reversing every dim_map in the kernel relabels the two block ids
+#     consistently on the way in and on the way out and the answer is the
+#     same. `view_max_pool`'s index space is 2 by 1 and `view_transpose`'s
+#     is 4 by 2, and neither relabelling cancels.
+view_pkg_mutant partition-dim-map-reversed bytecode.dawn \
+  'let b3 = list.fold(dim_map, put_varint(put_varint(b2, tvi), len(dim_map)), (b, k) => put_le(b, k, 4))' \
+  'let b3 = list.fold(list.reverse(dim_map), put_varint(put_varint(b2, tvi), len(dim_map)), (b, k) => put_le(b, k, 4))' \
+  view_transpose view_max_pool view_conv2d \
+  --red view_transpose view_max_pool
+
+# 47. padding-value-bit-cleared: bit 0 of the unified optional-parameter
+#     bitfield is written CLEAR while the padding value itself is still
+#     written after `dim_map`. A type-table entry is addressed by its own
+#     offset, so the reader stops at the end of the parameters it knows
+#     about and the extra byte is never looked at: the file is the same
+#     length, `tileiras` accepts it, and the partition view it builds has
+#     no padding at all. What an out-of-bounds lane then reads is
+#     unspecified, and the device was measured to leave whatever was in the
+#     register (0 on the first output and 7 on the rest, 2026-09-06).
+#
+#     The three geometry kernels are green: their padded lanes are masked
+#     away by the store, so a padding value they never write out cannot be
+#     seen. That is not a weakness of the mutant, it is why `view_padding`
+#     exists.
+view_pkg_mutant padding-value-bit-cleared bytecode.dawn \
+  '      put_varint(b0, match padding {
+        Some(_code) -> 1
+        None -> 0
+      })' \
+  '      put_varint(b0, 0)' \
+  view_transpose view_max_pool view_conv2d view_padding view_pad_i32 \
+  --red view_padding view_pad_i32
+
+# 48. padding-enum-off-by-one: the four SPECIAL padding values are rotated
+#     one place on (`neg_zero` to `nan` to `pos_inf` to `neg_inf` to
+#     `neg_zero`) and `zero` is left where it is. Leaving `zero` alone is
+#     not tidiness: rotating it to `neg_zero` would make `view_pad_i32` a
+#     LAYER-1 refusal (a special value over an integer element type), which
+#     the golden mutant padding-nan-on-integer-elements already holds, and
+#     a refused cubin never reaches the device. So `view_pad_i32` is this
+#     mutant's control instead, and what is left is a rotation the
+#     assembler accepts and only the bit patterns on the padded lanes can
+#     tell apart.
+view_pkg_mutant padding-enum-off-by-one bytecode.dawn \
+  'Some(code) -> put_varint(b4, code)' \
+  'Some(code) -> put_varint(b4, if code == 0 { 0 } else { code % 4 + 1 })' \
+  view_max_pool view_padding \
+  --red view_padding
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -4321,7 +4551,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
-  scripts/tile-gpu-diff/alloca_diff.dawn \
+  scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -4332,7 +4562,7 @@ line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
 summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
-summary="$summary alloca=$alloca_shape symbols=$sym_probe"
+summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

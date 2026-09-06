@@ -408,7 +408,8 @@ kernels=(
   assume_same assume_bounded
   global_table global_ctl global_scratch global_flags global_syms
   hint_entry hint_memory
-  alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3)
+  alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
+  view_transpose view_max_pool view_conv2d view_padding view_pad_i32)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -500,6 +501,9 @@ mutants=(
   e2m1-tag-as-i4
   unpack-as-pack
   pack-result-shape-unhalved
+  tensor-view-tag-as-ptr
+  partition-view-padding-inline-flag-at-13-3
+  padding-nan-on-integer-elements
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2051,6 +2055,64 @@ if run_item pack-result-shape-unhalved; then
     echo "PASS  mutant: pack-result-shape-unhalved (dtype_i4.mlir red in the pack and unpack lines and nowhere else, on both backends)"
     echo "SKIP  mutant: pack-result-shape-unhalved not handed to tileiras (--without-tileiras)"
   fi
+fi
+
+# 55. The writer gives a `tensor_view` the POINTER tag. Both are type-table
+#     entries with a varint after the tag, so the file is the same length
+#     and the reader gets as far as the type the partition view names --
+#     which is `ptr<f64>` and not a tensor view, and the partition view's
+#     second parameter is typed `TensorViewType` and nothing else. This is
+#     the view family's tag mutant, the shape of every `<x>-tag-as-<y>`
+#     above.
+if run_item tensor-view-tag-as-ptr; then
+  mutant_project tensor-view-tag-as-ptr bytecode.dawn \
+    'bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)' \
+    'bytes.put(bytes.buf(), TAG_PTR), ei)'
+  writer_mutant_checks tensor-view-tag-as-ptr view_transpose same-size \
+    "expected ::mlir::cuda_tile::TensorViewType but got '!cuda_tile.ptr<f64>'"
+fi
+
+# 56. The writer keeps writing the PRE-13.3 form of an optional type
+#     parameter into a 13.3 file. `PartitionViewType`'s `padding_value` is
+#     the first optional TYPE parameter this tree has ever written, and the
+#     two forms are not "a byte in another place": at 13.3 a varint bitfield
+#     sits between the tag and the first parameter and the presence byte is
+#     gone, below it there is no bitfield and each optional parameter
+#     carries its own inline `writeByte(present)`. So the mutant's file is
+#     the SAME LENGTH and every parameter after the tag is read one field
+#     out of step -- the reader takes the tile shape's count from what is
+#     now the tile shape's first element.
+#
+#     This is knife T8's version wall seen from a THIRD place: the Global
+#     section's two 13.3 fields are the operation side of it and this is
+#     the type side. It is also the reason bytecode.dawn writes both forms
+#     rather than only the one it needs: without the pre-13.3 arm there
+#     would be nothing here to get wrong.
+if run_item partition-view-padding-inline-flag-at-13-3; then
+  mutant_project partition-view-padding-inline-flag-at-13-3 bytecode.dawn \
+    'fn partition_view_has_bitfield() -> Bool = at_least(13, 3)' \
+    'fn partition_view_has_bitfield() -> Bool = at_least(13, 4)'
+  writer_mutant_checks partition-view-padding-inline-flag-at-13-3 view_transpose same-size \
+    "failed to read tile_shape data"
+fi
+
+# 57. Every partition view's padding becomes `nan`. The four SPECIAL
+#     padding values (`neg_zero`, `nan`, `pos_inf`, `neg_inf`) are the one
+#     rule the enum carries beyond its five numbers: `verifyPartitionViewLike`
+#     allows them over a floating point element type and refuses them over
+#     any other, and `zero` is allowed over both. `view_pad_i32` is the
+#     kernel that holds the refusal, and it is in this corpus for that
+#     reason as much as for reading an integer format through a view.
+#
+#     The rule has no test of its own in the dialect's own suite (grep for
+#     the diagnostic in cuda-tile's test/ finds nothing), so this is the
+#     only place either side of the fence exercises it.
+if run_item padding-nan-on-integer-elements; then
+  mutant_project padding-nan-on-integer-elements bytecode.dawn \
+    'Some(code) -> put_varint(b4, code)' \
+    'Some(_code) -> put_varint(b4, 2)'
+  writer_mutant_checks padding-nan-on-integer-elements view_pad_i32 same-size \
+    "padding_value nan can only be used with floating point element types, got 'i32'"
 fi
 
 _item_tick ""
