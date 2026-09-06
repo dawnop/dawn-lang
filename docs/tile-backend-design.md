@@ -124,11 +124,20 @@ launch」，逐条对下来三句都要改：
    层 3 的**逐条具名豁免**，理由写进台账：`assume`（方言自己说错谓词是 UB）、
    `OptimizationHints`（提示不改答案）、Debug 与 Producer 段、`nsw` / `nuw` / `nw`
    （它们是编译器的假设不是运算）。
-2. **view 族暂排除**：`make_tensor_view` / `get_tensor_shape` / `load_view_tko` /
-   `store_view_tko` / `make_partition_view` / `get_index_space_shape` /
-   `make_gather_scatter_view` / `make_strided_view` / `atomic_red_view_tko` 九条操作码、
-   四个类型标签与 `PaddingValue` 五值枚举，连同 T11 到 T13 三刀一起挂起。它是与指针梯子
-   并列的第二套取址方式，是全清单里最大的一块，等 T1 到 T10 做完再回头裁。
+2. **view 族暂排除**（**2026-09-06 被用户撤销**，见本条末）：`make_tensor_view` /
+   `get_tensor_shape` / `load_view_tko` / `store_view_tko` / `make_partition_view` /
+   `get_index_space_shape` / `make_gather_scatter_view` / `make_strided_view` /
+   `atomic_red_view_tko` 九条操作码、四个类型标签与 `PaddingValue` 五值枚举，连同 T11 到
+   T13 三刀一起挂起。它是与指针梯子并列的第二套取址方式，是全清单里最大的一块，等 T1 到
+   T10 做完再回头裁。
+
+   **裁决作废，原文留在上面是为了脉络。** T1 到 T10、T15、TE 收官之后，用户在 2026-09-06
+   撤销了这一条并立项 T11 到 T13。这条裁决当时的理由（「等做完再回头裁」）本身就是一张
+   期票，回头裁的结果是做：view 族是清单里最大的一块，而 T1 到 T10 已经把「一条操作码怎么
+   落到三层」这件事跑熟了。T11 落的是**静态**那一半（四条操作码、两个类型标签、五个
+   `PaddingValue`，见 §6.14），动态维与两条形状查询归 T12，`StridedView` /
+   `GatherScatterView` / `atomic_red_view_tko` 归 T13。三张台账上还写着 `ruling 2` 的行，
+   读作「已撤销、等它的刀」，不再读作「无限期挂起」。
 3. **`assert` 与 `print_tko` 的两种新判词形状要建**（「这次 launch 应当失败」与「这次
    launch 应当打印这些字节」），放在 T6 那一刀内部完成，不提前立项。
 4. **Debug 段挂起**，等 CUDA 13.4 的 wheel 带上 `tileirdisasm` 能做文本对拍再做。今天
@@ -2531,10 +2540,13 @@ major / minor / tag 三个字节，写入器里**全部**的版本相关处就�
 - **类型的统一位域**：`BytecodeTypeCodeGen.cpp` 有第三个 13.3 边界，
   `kUnifiedBitfieldVersion`，带 `OptionalParameter` 的**类型**从 13.3 起改写一个统一的位域
   varint。这一处预研与 T7 都没有提到，本刀是第一次记它。它对本仓为空的理由是可查的：
-  `Types.td` 里带 `OptionalParameter` 的类型恰好只有三个，`TensorView`、
-  `GatherScatterView` 与 `StridedView`，全是 view 族，按裁决 2 与 T11 到 T13 一起挂起；
-  `ptr` / `tile` / `token` / `func` 一个可选参数都没有。**这条要记下来，因为 view 族一旦解禁
-  它就不再是空的**，那时字节形状会跟着版本变，而不是只跟着类型变。
+  `Types.td` 里带 `OptionalParameter` 的类型恰好只有三个，`PartitionViewType`、
+  `StridedViewType` 与 `GatherScatterViewType`（**不是 `TensorViewType`**：它的三个参数
+  `elementType` / `shape` / `strides` 一个可选的都没有，这句 T8 写错了，T11 改正），全是
+  view 族，按裁决 2 与 T11 到 T13 一起挂起；`ptr` / `tile` / `token` / `func` 一个可选参数
+  都没有。**这条要记下来，因为 view 族一旦解禁它就不再是空的**，那时字节形状会跟着版本变，
+  而不是只跟着类型变。（**它已经不空了**：裁决 2 于 2026-09-06 被撤销，刀 T11 落地了
+  `PartitionViewType` 的 `padding_value`，两条路都写在 `bytecode.dawn` 里，见 §6.14。）
 
 于是真正会动的是四处：文件头第 10 字节、`exp` 的内联 `rounding_mode`、`mmaf` 的 flags varint、
 Global 段记录的两个 varint。写入器把这四处写成四个谓词（`for_has_flags` 的形状，共用一个
@@ -2889,6 +2901,138 @@ FFI」。本刀把那条 FFI 加了，然后量出这三行**到不了层 2**，
 自己编出来的差异上红。假设备是模型不是仿真器，它模的是量到的行为。它比真设备窄的一处是具名的：
 它的存储是值不是字节，所以只答声明时用的那个格式，别的格式回 `gpu.bad_global_dtype`。
 
+### 6.14 view 族的字节形状、`padding_value` 的位模式，与 sm_86 收不收（刀 T11 实测）
+
+刀 T11 落地的是**第二套取址方式**：`make_tensor_view` 0x43 说一个张量在哪、按什么步长排；
+`make_partition_view` 0x42 把它切成一格一格等大的 tile；`load_view_tko` 0x3E 与
+`store_view_tko` 0x66 按**格子的下标**搬一个 tile。此前每个 kernel 都靠 `iota` / `muli` /
+`addi` / `offset` 现搭一条指针梯子，现在剩下的只有「一维一个下标」，而 block id 本来就是。
+
+**一、`tensor_view` 的记录是标签、元素类型下标，然后两个定宽数组。**
+
+```
+tensor_view =: tag(14)[varint] elementTypeIndex[varint]
+               rank[varint] shape[int64 LE]*rank
+               rank[varint] strides[int64 LE]*rank
+```
+
+`shape` 与 `strides` 都走 `writeLEVarSize(ArrayRef<int64_t>)`：计数一个 varint，然后**每个
+元素八个原始小端字节**。不是 per-element varint，也不是 zigzag。`tile` 的形状用的是同一个
+形状，本刀只是多了一个数组。动态维（方言印成 `?`）在线上是
+`ShapedType::kDynamic` 也就是 INT64_MIN，字节 `00 00 00 00 00 00 00 80`，并且要在
+`make_tensor_view` 上配一个操作数；本写入器只发静态维，动态那半归刀 T12。
+
+**二、`partition_view` 的记录里有本仓第一个「类型的可选参数」，而它有两条路。**
+
+```
+partition_view(13.3) =: tag(15)[varint] optionalFlags[varint]
+                        n[varint] tile_shape[int32 LE]*n
+                        tensorViewTypeIndex[varint]
+                        n[varint] dim_map[int32 LE]*n
+                        [padding_value[varint]]
+partition_view(13.2) =: tag(15)[varint]
+                        n[varint] tile_shape[int32 LE]*n
+                        tensorViewTypeIndex[varint]
+                        n[varint] dim_map[int32 LE]*n
+                        present[byte] [padding_value[varint]]
+```
+
+`tile_shape` 是 `DenseI32ArrayAttr`、`dim_map` 是 `ArrayRef<int32_t>`，两者在线上完全同形：
+计数一个 varint，然后每个元素**四个**原始小端字节。`tensor_view` 是一个类型表下标。
+
+差别全在 `padding_value` 上，而它是 `Types.td` 里 `PartitionViewType` 唯一的
+`OptionalParameter`，所以它是位域的 **bit 0**。两条路不是「同一个字节换个地方」：13.3 起
+位域 varint 挤在**标签和第一个参数之间**，参数位上一个字节都不写；13.2 及以下**根本没有
+位域**，每个可选参数在自己的位置上带一个 `writeByte(present)`。`BytecodeTypeCodeGen.cpp`
+的 `generateOptionalParamFlags` 最后一个分支就是这条判断（类型是 13.1、参数也是 13.1，
+所以既不需要参数版本检查、类型本身又不是 13.3 之后进的，落到裸的
+`config.bytecodeVersion >= kUnifiedBitfieldVersion`）。本仓钉 13.3，走位域；两条都写在
+`bytecode.dawn` 里，`partition_view_has_bitfield()` 是那个比较，而变异体
+`partition-view-padding-inline-flag-at-13-3` 就是「在 13.3 的文件里写 13.2 的形状」。它
+**同长**，`tileiras` 拒得干脆：`error at offset 18: failed to read tile_shape data`,
+因为读者把本该是位域的那个字节当成了 tile_shape 的计数。
+
+**`dim_map` 在线上永远写全，哪怕它是恒等映射。** 方言的打印器在文本里省略恒等映射、解析器
+再补回来，线上没有这条规矩：读者把计数当真。
+
+**三、四条操作的记录，与「结果计数写不写」的那条规矩。**
+
+```
+make_tensor_view    =: 43 numResults(1) resultType base nShape[0] nStrides[0]
+make_partition_view =: 42 resultType source
+load_view_tko       =: 3E numResults(2) tileType tokenType flags ordering
+                         view nIndex index* [token]
+store_view_tko      =: 66 numResults(1) tokenType flags ordering
+                         tile view nIndex index* [token]
+```
+
+`Operator::isVariadic()` 只要**任一**操作数或结果是 variadic 就为真，而
+`generateSimpleResultSerialization` 在它为真时写结果计数。所以 `make_tensor_view` 明明只有
+一个结果也要写那个 1（两个动态数组是 variadic 操作数），`make_partition_view` 什么都不
+variadic 所以不写。这与 `extract` / `join_tokens` 是同一条规矩，T2 已经量过一次。
+
+`make_tensor_view` 的两个 `0` 也不是填充：它带 `AttrSizedOperandSegments`，每个 variadic
+组自带计数，静态形状就是两个空组。少写它们，读者会拿下一条指令的操作码当段长。
+
+两条内存操作的 flags 位是 bit0 `memory_scope`、bit1 `optimization_hints`、bit2 `token`，
+比指针载入低两位（后者还有 `mask` 与 `paddingValue` 两个可选操作数）。**view 没有 mask 也没有
+pad 操作数**：越界读什么写在**类型**里，越界写由方言直接屏蔽。这是本族最省的一处，也是三个
+kernel 能把 mask 与 pad tile 一起删掉的原因。
+
+**四、sm_86 收 view 族，没有架构豁免。** 这件事没有任何文档门槛可查：`cuda-tile` 整棵树里
+`sm_86` 这个串一次都没出现，Ops.td / Types.td / 校验器 / 写入器 / 测试全都不按架构收放
+view 族，唯一的门是**字节码版本**（四条操作与两个类型都是 13.1）。所以只能发出去看。发了：
+五个 kernel 在 `--gpu-name sm_86` 上全部一次通过，cubin 8448 到 13312 字节，`FUNC GLOBAL`
+齐全。fp8 / fp4 那种 `Incompatibility with architecture` 在这里一次也没出现。
+
+**五、五个 `PaddingValue` 在设备上的位模式，是量出来的。** 判词不能停在「它是个 NaN」：
+`nan` 的载荷标准没有规定。所以 `view_padding` 是一个 **f32 kernel 跑在 i32 缓冲区上**
+（`ptr_recast` 的老办法反过来用），宿主读回来的是位模式本身。2026-09-06 在本机 RTX 3080 上
+实测，五个值各占一个输出缓冲区的第 100 到 127 lane：
+
+| 值 | 枚举 | binary32 位模式 | 有符号 i32 |
+|----|------|-----------------|------------|
+| `zero` | 0 | `0x00000000` | 0 |
+| `neg_zero` | 1 | `0x80000000` | -2147483648 |
+| `nan` | 2 | `0x7FC00000` | 2143289344 |
+| `pos_inf` | 3 | `0x7F800000` | 2139095040 |
+| `neg_inf` | 4 | `0xFF800000` | -8388608 |
+
+四个是 IEEE 754 binary32 的定义，`nan` 那一行不是：`0x7FC00000` 是载荷为零的 quiet NaN，
+这是这台机器答的。`std/gpu.dawn` 的 `pad_bits` 把五个都钉成常量，别的设备答别的 NaN 就红在
+那一行。
+
+**六、一件做不到的事：步长为零的读没有 view 写法。** `TensorViewType::verify` 要求每一维的
+extent 和 stride 都**严格为正**，而卷积核的权重读法恰恰是「每个 lane 读同一个 `w[t]`」，也就
+是两轴步长都是 0。`view_conv2d` 因此是一个**混着的** kernel：九个 tap 走 view，权重那一读留
+在指针梯子上。这不是偷懒，是方言的边界：view 是给**张量**用的，广播不是张量。
+
+**七、四条设备级变异体各自的红集，也是量出来的而不是推的。**
+
+| 变异体 | 红 | 绿（控制） |
+|--------|----|-----------|
+| `view-strides-swapped` | view_transpose / view_max_pool / view_conv2d | 两个一维 kernel（反转单元素列表是恒等）、transpose_tail |
+| `partition-dim-map-reversed` | view_transpose / view_max_pool | **view_conv2d**、两个一维 kernel、transpose_tail |
+| `padding-value-bit-cleared` | view_padding / view_pad_i32 | 三个几何 kernel、transpose_tail |
+| `padding-enum-off-by-one` | view_padding | view_pad_i32、三个几何 kernel、transpose_tail |
+
+`view_conv2d` 在第二行是**绿**的，而这正是变异体买来的读数而不是假设：它的下标空间是 3 乘 3，
+把 kernel 里每一个 `dim_map` 都反转等于把两个 block id 一起换名，进去换一次出来再换一次，答案
+不动。`view_max_pool` 的下标空间是 2 乘 1、`view_transpose` 的是 4 乘 2，换名都不抵消。这与
+刀 9 的 `stride-row-major-swapped` 是同一条道理的第二次实例（刀 18 在 `conv3d` 上量到过它的
+另一面）。
+
+三个几何 kernel 在第三行也是绿的：它们越界的 lane 在 store 那一侧被同样地屏蔽掉了，一个从来
+不落盘的 padding 值当然看不见。这不是变异体弱，这正是 `view_padding` 存在的理由。
+
+**八、`padding-enum-off-by-one` 为什么绕开 `zero`。** 直觉的写法是 `(code + 1) % 5`，实测它
+在 `view_pad_i32` 上被 `tileiras` **拒掉**（`zero` 变成 `neg_zero`，而特殊值只许配浮点元素
+格式），而被拒的 cubin 根本到不了设备。所以那条旋转只在四个特殊值之间转，`zero` 留在原地：
+「特殊值配整数」那句话由层 1 的 `padding-nan-on-integer-elements` 单独钉，报文是
+`padding_value nan can only be used with floating point element types, got 'i32'`。**这条
+校验在方言自己的测试树里一个用例都没有**（`grep` 那句报文，`test/` 里零命中），所以本仓这条
+变异体是它两边唯一的看护。
+
 
 ## 7. 刀序
 
@@ -2933,7 +3077,7 @@ FFI」。本刀把那条 FFI 加了，然后量出这三行**到不了层 2**，
 | **T4 属性域的其余取值**（已落地，覆盖刀里第二把零新操作码的） | 「Tile IR 的六个属性枚举与三个单位属性里，本仓从没写过的取值全部写得出、`tileiras` 收得下，而且每一个在本机 3080 上都问过一遍：定向舍入答的是不是格式自己的答案、`flush_to_zero` 到底冲不冲输入、`unordered` 与 `propagate_nan` 是不是方言散文说的那样、无符号循环边界比较跑几次」（今天写不出：写入器把 `rounding<nearest_even>`、`overflow<none>`、`ordered`、`relaxed device` 与「没有一个单位属性置位」写成了常量，别的取值一个都发不出去） | **零新 opcode**。`bytecode.dawn`：十四个新常量（三种舍入、三种溢出、`unordered`、三个内存序、两个内存范围、三个标志位），`float_op` / `int_op` / `predicate_value` 收下带后缀的名字，`float_op_rounds` 换成 `float_rounding`，新增 `float_flags` / `cmp_ordering` / `rmw_attrs`，`ForLoop` 的 flags 由 `unsigned` 决定。`render.dawn`：`float_spelling` / `float_units` / `int_overflow` / `cmp_ordering` / `rmw_memory` / `rmw_spelling` 六张拼写表。`prog.dawn` / `lower.dawn`：`For` 与 `ForLoop` 多一个 `unsigned` 字段，四张名字白名单加长，`cmpi` 的谓词与 `cmpf` 的分开（整数没有 `comparison_ordering`）。`dev.dawn`：十九个公开函数（`addf_down` / `addf_up` / `mul_down` / `mul_up` / `div_down` / `div_up` / `addf_ftz` / `mul_ftz` / `maxf_nan` / `minf_nan` / `sqrt_approx` / 六个 `*_u` 比较 / `add_i_nsw` / `sub_i_nuw` / `mul_i_nw` / `d_for_unsigned`）。`std/narrow`：`round_binary_toward` 与 `round_f32_toward`（三种定向舍入，溢出这一格与 `round_binary` 不同：往符号那侧是无穷、另一侧是最大有限值），一个内联测试。`std/gpu`：`f32_flush` 与八个参考实现，一个测试。kernel 八个（`attr_round` / `attr_nan` / `attr_ftz` / `attr_approx` / `attr_overflow` / `attr_memsem` / `attr_addf` / `attr_ucmp`），新族 `scripts/tile-gpu-diff/attr_diff.dawn`。第四本账 `scripts/tileir-features/attrs.txt`（44 行）与 `check.py` 的第三张表 | 层 0/1 八个新 golden，`FUNC GLOBAL` 八个，`tileiras` 一次通过；层 2 本机 3080 八个 kernel 全绿（**逐位 7、容差 1**）。台账 `attrs.txt` 实现 26 / 挂起 13 / 未实现 5，层 3 有 13 条、层 2 有 5 条、层 1 有 8 条（八条全是具名豁免）。逐条实测见 §6.8：`add=512 mul=445 div=494`（定向舍入分开的车道）、`ordering=768 maxf=128 minf=128`、`add=256 mul=256`（FTZ，**预研说没有判词，实测有**）、`lanes=81 distance=1.1914e-7`（approx 与正确舍入差一个 f32 ulp）、`signed=0 unsigned=32` | **九条，分成两半**：层 1 三条在 `scripts/tile-golden/run.sh`（`overflow-attr-not-written` / `atomic-memory-attrs-swapped` / `rmw-addf-as-add`，各钉一句 `tileiras` 报文），层 2 六条在 `scripts/tile-gpu-diff/run.sh`（`directed-rounding-as-nearest-even` / `ftz-bit-dropped` / `propagate-nan-bit-dropped` / `cmpf-always-ordered` / `for-unsigned-bit-dropped` / `sqrt-approx-as-nearest-even`，红集逐条按名字钉死，每条只红它自己那一个 kernel）。分法与刀 T2 不同：这里不是「值还是类型」，而是**这个取值改了之后还是不是一个合法程序**。溢出与内存序改了之后仍然合法、设备答同一个数，所以它们只能在层 1 红（把属性整个不写、把序与范围对调）；舍入、NaN、FTZ、`unsignedCmp` 改了之后设备答另一个数。`sqrt-approx-as-nearest-even` 是唯一一条**判词抓不到**的：verdict 照样是 `close:tolerance`，红的是 `probe` 那个计数掉到零，而 `run.sh` 把它钉在零以上。另有两条既有变异体的锚点被这一刀改坏、当场报「anchor is not unique（0 matches）」并搬了家（`addf-no-rounding` 与 `atomic-rmw-claims-weak-ordering`） | 1.5（实报 1.5；`dawn test packages/tileir` 101 全绿、`dawn test --stdlib` 165 全绿、`dawn test selfhost` 全绿；`tile-golden` 不分片整跑 182 项 1265 s（安静机器），六片装不下（按刀 T5 的单项均值第二片规划值 685 s，越过 660 s 的 pole；按本刀这轮安静读数六片是 618 / 644 / 612 / 610 / 617 / 611 s，还进得来，**两个模型第一次给出相反答案**，按「预算是上限」取差的那个），**分成第七片**，七条预算行 578 / 578 / 578 / 578 / 606 / 606 / 606 s，`timeout-minutes` 29 / 29 / 29 / 29 / 31 / 31 / 31，pole 未动，见 §6.5） |
 | **T6 `assert` `assume` `print_tko`**（已落地，两种新判词形状） | 「一次 launch 可以**按设计失败**，而宿主收到的是设备写进字节码 String 段的那句话；一次 launch 可以**按设计打印**，而它放在标准输出上的字节与宿主参考算出来的逐字节相同；一个不改答案的假设，设备照样给同一个答案」（今天写不出：这棵树上的每一条判词都是「缓冲区里的数与参考的数一样」，没有一条能说「这次不该成功」，也没有一条看得见缓冲区以外的字节） | **三条新 opcode**（全 13.1）：`assert` 0x05 / `assume` 0x06 / `print_tko` 0x55，与它们用到的四个属性标签 `String`(5) / `DivBy`(8) / `SameElements`(9) / `Bounded`(12)。包：`dev` 加 `AssumePred` 一种和类型与 `t_assert` / `t_assume` / `t_print` 三个效果操作，公开面 `d_assert` / `d_assume` / `assume_div_by` / `assume_same_elements` / `assume_in_range` / `d_print`（只收 rank-0 参数，理由见 §6.7 第 7 条），`prog` 加 `Assert` / `Assume` / `Print` 三种 `TileOp`、`check_assume` 与 `format_args`（把 PrintTkoOp 的 verifier 抄到记录时），`lower` 加 `AssertTile` / `AssumeTile` / `PrintTile`，`render` 加三行与一个字符串转义器，`bytecode` 加三条编码与 `assume_attr` / `emit_i64_array` / `emit_byte` / `emit_opt_signed`。kernel 六个：`assert_pass` 与 `assert_fail`（同一个 `assert_guard` 的两个极限，语料全在其下 / 全在其上）、`print_tile`、`assume_divby` / `assume_same` / `assume_bounded`（三个谓词各一个，也是本族的 kernel 级控制）。宿主：`std/gpu` 五个参考实现与两个公开的折叠（`print_tile_sum` / `print_tile_max`，判词要用它们算期望字节）。新族 `scripts/tile-gpu-diff/assert_diff.dawn`，**三个进程**：默认档、`--case fail`、`--case print` | 层 0/1 六个新 golden，`FUNC GLOBAL` 六个，`tileiras` 一次通过；层 2 本机 3080 默认档四个 kernel 全 `identical:exact`（逐位 4、容差 0），`assert_fail` 的 launch 按预期在 `cuCtxSynchronize` 上答 `CUDA_ERROR_LAUNCH_FAILED`（719）并在标准输出上留下 128 行带 lane 下标的消息，`print_tile` 的标准输出与宿主参考逐字节相同（`7072696e745f74696c652073756d3d38323536206d61783d3132380a`，即 `print_tile sum=8256 max=128`）。台账三行从 `unimplemented` 改成 `implemented`（实现 80 → **83**、未实现 9 → **6**；层 3 从 29 条到 **31 条**，`assert` 与 `print_tko` 到层 3，`assume` 按裁决 1 停在层 2 并具名豁免）。刀 3…T5 的既有 golden 一字节没动 | 层 1 **五条**，每条钉一句 `tileiras` 的原话：`assert-message-tagged`（补一个标签 5 → `failed to parse attribute 'message'`，这条钉的是「标签根本不写」）、`print-tko-token-unwritten`（flags 说带 token、操作数不写 → `operand index 91 out of bounds (size=19) for token segment, element 0`）、以及三个谓词各一条载荷变异体（`assume-divby-tag-as-same-elements` / `assume-same-elements-payload-four-bytes` / `assume-bounded-bounds-swapped`），**三条都被拒，没有一条是层 1 盲的**。层 2 **两条**：`assert-condition-inverted`（kernel 源变异体，`assert_guard` 的 `lt_i` 换 `ge_i`）→ **两个方向都在红集里**，本来通过的 `assert_pass` 现在失败、本来失败的 `assert_fail` 现在通过，三个 `assume` kernel 与 `print_tile` 层 0 一字节不动；`print-format-wrong`（包把 `d_print` 的操作数反过来交）→ **缓冲区一个字节没变、程序自己的判词仍是 `pass`**，动的只有标准输出那一行，这是本目录里唯一一条任何缓冲区比对都看不见的变异体。**另有一件不加 kernel 也不加变异体的**：刀 T4 的 `attr_ftz` 语料两种车道的结果都是次正规，冲结果一项就能解释全部差异（实测：只去掉宿主参考的两处**操作数**冲零，八个 attribute kernel 全绿），本刀给它补第三种车道（`2^-126 + k·2^-149`，和是正规数），新 probe 字段 `attr_ftz:normal_sum` 由 run.sh 钉在零以上，见 §6.8 | 1（实报 1；`dawn test packages/tileir` 106 个测试全绿（本刀加五个）、`dawn test --stdlib` 166 全绿（加一个）、`dawn test selfhost` 595 全绿；rebase 到 T4 之后矩阵 193 项，`tile-golden` 不分片 **1388.4 s**，七片装不下（按刀 T5 的单项均值最重那片 654 s，离 660 s 的 pole 只剩 6 s，而推到那儿的正是本刀这十一个项），**分成第八片**，八条预算行 596 / 558 / 558 / 558 / 558 / 585 / 585 / 585 s，`timeout-minutes` 30 / 28 / 28 / 28 / 28 / 30 / 30 / 30，pole 未动；第一片真跑 196.4 s；`tile-gpu-diff/run.sh` 本机 **708.7 s**，见 §6.5） |
 | **T7 静态全局**（已落地，覆盖刀里第一把加**段**的） | 「一个 kernel 读得到模块自己声明的一张表，那张表没有人上传过；而一个可写的静态全局在同一个模块的两次 launch 之间保住了值，本机 3080 与一份独立写的宿主参考逐位对得上」（今天写不出：这棵树上每一个字节都是 `cuMemcpyHtoD` 送进去的，`Tensor` 是唯一的设备存储，而 launch 之间设备上留下什么，从来没有被问过） | **两条新 opcode**（都是 13.1）：`get_global` 0x2C 与 `global` 0x31，加 **Global 段（id 6）**。`global` 不进指令流，写入器把模块的 GlobalOp 单独收集成一段（`writeGlobalSection`），所以台账给它 `structural`。包：`dev` 加 `t_global` / `t_get_global` / `t_store_ptrs` 三个效果操作与 `d_global` / `d_global_aligned` / `global_ptrs` / `store_ptrs` 四个公开函数（`store_ptrs` 是 T2 的 `load_ptrs` 欠的另一半，零新 opcode），`prog` 加 `Global` 记录、`TileProg.globals` 与 `GetGlobal` / `StoreAt` 两种 `TileOp`，`lower` 加 `GetGlobalPtr` 一条 `Instr`（结果是 rank-0 的 `tile<ptr<T>>`，展开走 `MakePtrs` 用的同一对 reshape + broadcast），`render` 加模块级的 `global` 行，`bytecode` 加 `OP_GET_GLOBAL` / `SEC_GLOBAL` / `global_payload` / `global_section`。kernel 三个：`global_table`（两个全局、两段输出，`@tbl_b` 另带 256 字节对齐）、`global_scratch`（一个可写全局，两次 launch）、`global_ctl`（同一个答案从两个缓冲区算，两条 opcode 都不含，是本族的 kernel 级控制）。宿主：`std/gpu` 五个新函数（两张表加三个参考实现）。新族 `scripts/tile-gpu-diff/global_diff.dawn`，它的 `stages` 多一个 `launches` 参数 | 层 0/1 三个新 golden，`FUNC GLOBAL` 三个，`tileiras` 一次通过；层 2 本机 3080 三个 kernel 全 `identical:exact`（逐位 3、容差 0），`global_scratch` 两次 launch 后输出是输入的两倍。台账 `features.txt` 两行：`get_global` 从 `unimplemented` 改成 `implemented`、`global` 改成 `structural`（实现 80 → **81**、结构性 2 → **3**、未实现 9 → **7**；层 3 从 29 条到 **31 条**，两条都到层 3）；`attrs.txt` 三行（`visibility.public` / `visibility.private` / `unit.constant`）的 knife 列从 T7 改判给 **T8**，具名豁免 `13.3-record-field`。刀 3…T4 的既有 golden 一字节没动 | 层 1 三条，全在 `global_table` 上（它声明两个全局，所以一条记录写错会把下一条读歪，这是语料的设计而不是巧合）：`global-record-alignment-dropped`（记录少写第四个 varint，`tileiras` 答 `number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 6 bytes`）、`global-visibility-written-at-13-2`（把 13.3 才有的两个字段写进 13.2 的文件，答 `expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`；这条就是版本墙的实测）、`get-global-symbol-not-written`（`get_global` 不写它的字符串下标，答 `failed to read string for FlatSymbolRefAttr`，读到的下标 91 是 `reshape` 的 opcode）。层 2 三条：`global-initializer-reversed` 与 `get-global-wrong-symbol` 是包变异体，`tileiras` 都收下（一张表就是一张表，一个已声明的符号被点两次也是合法程序），只有设备说 `global_table` 答错，`global_ctl` 与 `global_scratch` 的字节和判词都不动；`module-reloaded-per-launch` 是 handler 变异体，**一个字节都不动**（字节码里没有一句话说模块活多久），只有 `global_scratch` 红。另有一条给验收者的自轴负控，**不用改包也不用改 golden**：把 `std/gpu.dawn` 的 `global_table_b` 那一行的 `0.0 - to_float(i * i) - 0.25` 改成 `+ 0.25`，别重录 golden，直接跑 `tile-gpu-diff`。`global_table` 的 cubin 里烧的还是旧表、宿主参考已经是新表，所以它红；`global_ctl` 把同一个函数**上传**进缓冲区、参考也用它，两边一起动，所以它绿；`global_scratch` 不碰这张表，也绿。红一个绿两个（**实测**，判词 `differ:result` / `identical:exact` / `identical:exact`），正是「设备读到的是声明进段里的字节，不是宿主此刻的想法」 | 1（实报 1；rebase 到 T6 之后 `dawn test packages/tileir` 113 个测试全绿（本刀加七个）、`dawn test --stdlib` 全绿、`dawn test selfhost` 全绿；`tile-golden/run.sh` 不分片 **1502 s**（199 项，160 kernel + 39 变异体），**八片不用加第九片**、八条预算行重述，最差一片距 660 s 的 pole 还剩 64 s；`tile-gpu-diff/run.sh` 本机 723 s，见 §6.5 与 §6.9） |
-| **T8 版本墙 13.2 到 13.3**（已落地，覆盖刀里第四把零新操作码的，也是 T 序里唯一单独跑的一把） | 「本仓写的字节码是 13.3 的，而挪这一格**恰好**改了哪些字节、**没有**改哪些，是量出来的：162 个 kernel 的段长增量与从 `.mlir` 数出来的预测逐字相等，把写入器改回 13.2 能逐字节复现 T7 那一代的全部 golden，而 13.2 与 13.3 的 sm_86 cubin 162 个逐字节相同」（今天写不出：钉的是 13.2，13.3 才有的操作码一条也编不出来，而「升版要动哪些字节」只存在于预研的一句话里） | **零新 opcode**。`bytecode.dawn`：`BYTECODE_MINOR` 2 → 3，四个版本谓词（`exp_has_rounding` / `mmaf_has_flags` / `global_has_extended_fields`，与既有 `for_has_flags` 共用新的 `at_least`），`MMAF_FLAG_FAST_ACC` / `MMAF_FLAG_FAST_ACC_UNSET` / `VIS_PUBLIC` / `VIS_PRIVATE` 四个常量，`unary_rounding` 给 `exp` 加一臂，`FloatMma` 加 flags varint，`global_section` 的记录从四个 varint 长到六个。`prog.dawn`：`Global` 多 `is_private` / `constant` 两个字段。`dev.dawn`：`t_global` 多两个形参，公开面加 `d_global_private` / `d_global_const`。`render.dawn`：`global_line` 印 `private` 与 `constant`（`public` 按方言的打印器省略）。`toolchain.txt` 的 `bytecode` 行改 13.3 并改写它那句关于 Ampere / Ada 的注解。kernel 一个：`global_flags`（一个 private 全局加一个 constant 全局）。台账 `attrs.txt` 四行 `unit.fast_acc` / `unit.constant` / `visibility.public` / `visibility.private` 从 `unimplemented` 改成 `implemented`（实现 32 → **36**、层 1 从 14 条到 **18 条**），`rounding.full` 因 `exp` 现在内联写它而从层 2 升到层 3；豁免 `13.3-record-field` 换成 `no-module-symbol-ffi` 与 `fast-acc-not-in-the-cubin`，`check.py` 的 `LANDED_KNIVES` 加 `T8` | **全部 162 个 `.tilebc` golden 重录，`.mlir` 一个字节没动**（四处会变的形状没有一处出现在文本里）；`global_flags` 是第 163 个，`tileiras` 在 sm_86 上一次通过。三条独立测量见 §6.11：**账**（162 个 kernel 的 Func 段涨「`exp` 条数加 `mmaf` 条数」、Global 段涨「全局条数乘二」，总计 56 与 6 字节，与预测逐字相等，无一例外；109 个 kernel 只有第 10 个字节变了；159 个文件总长不变、3 个正好长 8 字节，那是对齐整整多了一步）、**复现**（写入器改回 13.2 之后 162 个 golden 与 `origin/main` 逐字节相同）与 **cubin**（13.2 与 13.3 的 162 个 cubin 逐字节相同，所以版本墙不改设备答案）。清单本身也是重新枚举的：`Ops.td` 每一条 13.3 参数加 `BytecodeWriter.cpp` 两处手写分支加 `BytecodeTypeCodeGen.cpp` 的类型统一位域，**六处里四处会动、两处对本仓恰好是空的**（Producer 段没有 `producer` 属性可写；统一位域只对带 `OptionalParameter` 的三个 view 类型生效，**T11 到 T13 解禁后它就不空了**，这条本刀第一次记） | 层 1 **四条**，三条是新写的、一条是把 T7 的翻过来：`exp-rounding-unwritten`（13.3 上 `exp` 不写 `rounding_mode` → `invalid integer value for enum type: 21` 加 `failed to parse attribute 'rounding_mode'`，21 是紧跟着的操作数下标）、`mmaf-flags-unwritten`（不写 flags varint → `block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator.`）、`global-visibility-omitted-at-13-3`（13.3 上只写四个 varint → `number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes.`；T7 的 `global-visibility-written-at-13-2` 在 13.3 上成了合法写法，被本刀退役换成它）、`header-minor-still-2`（头写 13.2、正文写 13.3 形状 → `expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`，**与 T7 那条一模一样的报文**，因为读者正是拿头里的版本选 `kMinGlobalInfoSize`：所以「头的版本号约束读者」是量出来的而不是假定的）。T7 的 `global-record-alignment-dropped` 留着但**报文换了数字**（剩余载荷 6 字节变 10 字节），这是「判词是报文原文不是退出码」的又一个实例。层 2 **零条**：`fast_acc` 写 1 只动一个字节而 cubin 逐字节不变（四个 `mmaf` kernel 都试过，f16 的与 f64 的一样），一个到不了设备的位不可能让设备答出别的数，具名豁免 `fast-acc-not-in-the-cubin`；可见性与 `constant` 要 `cuModuleGetGlobal` 才有层 2 判词，本刀不扩 handler 面，具名豁免 `no-module-symbol-ffi`。另有一条给验收者的自轴负控：把 `std/gpu.dawn` 的 `global_table_b` 那一行的 `0.0 - to_float(i * i) - 0.25` 改成 `+ 0.25`，**别重录 golden**，`tile-golden` 上 `global_table` 与本刀新加的 `global_flags` 一起红（后者的 `@frozen` 取自同一个函数），而且红在**层 0 的文本 golden** 上而不是字节上，因为全局的初始值是印在 `.mlir` 里的；`global_ctl` 不声明全局，绿。`tile-gpu-diff` 上只有 `global_table` 红（`global_flags` 不在那份语料里）。实测三条判词：`FAIL: global_table: JVM text differs from global_table.mlir` / `FAIL: global_flags: JVM text differs from global_flags.mlir` / `global_ctl` 两条 golden 全 PASS | 1（实报 1；`dawn test packages/tileir` **115** 全绿（本刀加一个测试、给既有一个加了 `mmaf` 那几条断言），`dawn test --stdlib` 未动（**本刀一个 std 文件也没碰**，`gen-stdsrc` 跑完树是干净的）；矩阵 **209 项**，`tile-golden` 不分片 **1561.8 s**、209 项全跑退出 0，**八片仍装得下**（最重那片 644 s，距 660 s 的 pole 剩 16 s），四条预算行上调四条不动 644 / 606 / 633 / 633 / 633 / 633 / 633 / 633 s，`timeout-minutes` 33 / 31 / 32 / 32 / 32 / 32 / 32 / 32，pole 未动；**T15 写下的「下一把加变异体的刀必须分第九片」被推翻并原地改写**，理由是重分牌，见 §6.5） |
+| **T8 版本墙 13.2 到 13.3**（已落地，覆盖刀里第四把零新操作码的，也是 T 序里唯一单独跑的一把） | 「本仓写的字节码是 13.3 的，而挪这一格**恰好**改了哪些字节、**没有**改哪些，是量出来的：162 个 kernel 的段长增量与从 `.mlir` 数出来的预测逐字相等，把写入器改回 13.2 能逐字节复现 T7 那一代的全部 golden，而 13.2 与 13.3 的 sm_86 cubin 162 个逐字节相同」（今天写不出：钉的是 13.2，13.3 才有的操作码一条也编不出来，而「升版要动哪些字节」只存在于预研的一句话里） | **零新 opcode**。`bytecode.dawn`：`BYTECODE_MINOR` 2 → 3，四个版本谓词（`exp_has_rounding` / `mmaf_has_flags` / `global_has_extended_fields`，与既有 `for_has_flags` 共用新的 `at_least`），`MMAF_FLAG_FAST_ACC` / `MMAF_FLAG_FAST_ACC_UNSET` / `VIS_PUBLIC` / `VIS_PRIVATE` 四个常量，`unary_rounding` 给 `exp` 加一臂，`FloatMma` 加 flags varint，`global_section` 的记录从四个 varint 长到六个。`prog.dawn`：`Global` 多 `is_private` / `constant` 两个字段。`dev.dawn`：`t_global` 多两个形参，公开面加 `d_global_private` / `d_global_const`。`render.dawn`：`global_line` 印 `private` 与 `constant`（`public` 按方言的打印器省略）。`toolchain.txt` 的 `bytecode` 行改 13.3 并改写它那句关于 Ampere / Ada 的注解。kernel 一个：`global_flags`（一个 private 全局加一个 constant 全局）。台账 `attrs.txt` 四行 `unit.fast_acc` / `unit.constant` / `visibility.public` / `visibility.private` 从 `unimplemented` 改成 `implemented`（实现 32 → **36**、层 1 从 14 条到 **18 条**），`rounding.full` 因 `exp` 现在内联写它而从层 2 升到层 3；豁免 `13.3-record-field` 换成 `no-module-symbol-ffi` 与 `fast-acc-not-in-the-cubin`，`check.py` 的 `LANDED_KNIVES` 加 `T8` | **全部 162 个 `.tilebc` golden 重录，`.mlir` 一个字节没动**（四处会变的形状没有一处出现在文本里）；`global_flags` 是第 163 个，`tileiras` 在 sm_86 上一次通过。三条独立测量见 §6.11：**账**（162 个 kernel 的 Func 段涨「`exp` 条数加 `mmaf` 条数」、Global 段涨「全局条数乘二」，总计 56 与 6 字节，与预测逐字相等，无一例外；109 个 kernel 只有第 10 个字节变了；159 个文件总长不变、3 个正好长 8 字节，那是对齐整整多了一步）、**复现**（写入器改回 13.2 之后 162 个 golden 与 `origin/main` 逐字节相同）与 **cubin**（13.2 与 13.3 的 162 个 cubin 逐字节相同，所以版本墙不改设备答案）。清单本身也是重新枚举的：`Ops.td` 每一条 13.3 参数加 `BytecodeWriter.cpp` 两处手写分支加 `BytecodeTypeCodeGen.cpp` 的类型统一位域，**六处里四处会动、两处对本仓恰好是空的**（Producer 段没有 `producer` 属性可写；统一位域只对带 `OptionalParameter` 的三个 view 类型生效，**T11 到 T13 解禁后它就不空了**，这条本刀第一次记；那三个是 `PartitionViewType` / `StridedViewType` / `GatherScatterViewType`，本行原写成 `TensorView` / `GatherScatterView` / `StridedView`，`TensorViewType` 零可选参数，刀 T11 改正） | 层 1 **四条**，三条是新写的、一条是把 T7 的翻过来：`exp-rounding-unwritten`（13.3 上 `exp` 不写 `rounding_mode` → `invalid integer value for enum type: 21` 加 `failed to parse attribute 'rounding_mode'`，21 是紧跟着的操作数下标）、`mmaf-flags-unwritten`（不写 flags varint → `block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator.`）、`global-visibility-omitted-at-13-3`（13.3 上只写四个 varint → `number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes.`；T7 的 `global-visibility-written-at-13-2` 在 13.3 上成了合法写法，被本刀退役换成它）、`header-minor-still-2`（头写 13.2、正文写 13.3 形状 → `expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'`，**与 T7 那条一模一样的报文**，因为读者正是拿头里的版本选 `kMinGlobalInfoSize`：所以「头的版本号约束读者」是量出来的而不是假定的）。T7 的 `global-record-alignment-dropped` 留着但**报文换了数字**（剩余载荷 6 字节变 10 字节），这是「判词是报文原文不是退出码」的又一个实例。层 2 **零条**：`fast_acc` 写 1 只动一个字节而 cubin 逐字节不变（四个 `mmaf` kernel 都试过，f16 的与 f64 的一样），一个到不了设备的位不可能让设备答出别的数，具名豁免 `fast-acc-not-in-the-cubin`；可见性与 `constant` 要 `cuModuleGetGlobal` 才有层 2 判词，本刀不扩 handler 面，具名豁免 `no-module-symbol-ffi`。另有一条给验收者的自轴负控：把 `std/gpu.dawn` 的 `global_table_b` 那一行的 `0.0 - to_float(i * i) - 0.25` 改成 `+ 0.25`，**别重录 golden**，`tile-golden` 上 `global_table` 与本刀新加的 `global_flags` 一起红（后者的 `@frozen` 取自同一个函数），而且红在**层 0 的文本 golden** 上而不是字节上，因为全局的初始值是印在 `.mlir` 里的；`global_ctl` 不声明全局，绿。`tile-gpu-diff` 上只有 `global_table` 红（`global_flags` 不在那份语料里）。实测三条判词：`FAIL: global_table: JVM text differs from global_table.mlir` / `FAIL: global_flags: JVM text differs from global_flags.mlir` / `global_ctl` 两条 golden 全 PASS | 1（实报 1；`dawn test packages/tileir` **115** 全绿（本刀加一个测试、给既有一个加了 `mmaf` 那几条断言），`dawn test --stdlib` 未动（**本刀一个 std 文件也没碰**，`gen-stdsrc` 跑完树是干净的）；矩阵 **209 项**，`tile-golden` 不分片 **1561.8 s**、209 项全跑退出 0，**八片仍装得下**（最重那片 644 s，距 660 s 的 pole 剩 16 s），四条预算行上调四条不动 644 / 606 / 633 / 633 / 633 / 633 / 633 / 633 s，`timeout-minutes` 33 / 31 / 32 / 32 / 32 / 32 / 32 / 32，pole 未动；**T15 写下的「下一把加变异体的刀必须分第九片」被推翻并原地改写**，理由是重分牌，见 §6.5） |
 | **T15 `OptimizationHints`（属性标签 11 加 Dictionary 10）**（已落地，覆盖刀里第三把零新操作码的） | 「entry 与 load / store 都写得出方言的 `optimization_hints`，`tileiras` 收得下，而它到底是**建议**还是别的什么，是量出来的：本机 3080 上带 hint 的 kernel 与不带的那个逐字节答同一批数，而 cubin 的字节在 entry 上确实动了」（今天写不出：写入器一个 hint 也发不出去，`encode` 那一段写着「不写 entry 的 optimization_hints」，而 load / store 的 hint 位永远是 0） | **零新 opcode**。`dev.dawn`：`Hint` / `Hints` 两个别名、`for_arch` 与四个键构造子（`hint_num_cta_in_cga` / `hint_num_worker_warps_per_cta` / `hint_occupancy` / `hint_latency`）、`load_hinted` / `store_hinted`，`t_load` / `t_store` 各多一个 `hints` 形参。`prog.dawn`：`TileProg` 多一个 `hints` 字段，`trace_kernel` 拆成它与 `trace_kernel_hinted`，`Load` / `Store` 两个 `TileOp` 各多一个 `hints`。`lower.dawn`：`Kernel` 与 `LoadPtr` / `StorePtr` 同样多一个。`render.dawn`：`hints_attr` 一个拼写器（entry 与两个内存操作共用）。`bytecode.dawn`：`ATTR_DICTIONARY`(10) / `ATTR_OPTIMIZATION_HINTS`(11) / `FLAG_HAS_HINTS`(0x04) / `LOAD_FLAG_HINTS`(2) / `STORE_FLAG_HINTS`(2) 五个常量与 `put_hints` / `emit_hints` / `hints_flag`。kernel 两个（`hint_entry` / `hint_memory`，两个都是 vadd 的体），新族 `scripts/tile-gpu-diff/hint_diff.dawn`（**第一个把 `vadd` 当 kernel 级控制拉进自己进程的族**）。台账 `attrs.txt` 加 `tag.Dictionary` 与 `tag.OptimizationHints` 两行 | 层 0/1 两个新 golden，`FUNC GLOBAL` 两个，`tileiras` 一次通过；层 2 本机 3080 三个 kernel 全 `identical:exact`，`agree=3/3`（两个带 hint 的与不带的 `vadd` 逐字节同一批数）。台账 48 行长到 **50 行**，实现 30 → **32**、层 1 从 12 条到 **14 条**（层 2 与层 3 一条不动），两行都是具名豁免 `hints-do-not-change-answers`。刀 3…T6 的既有 golden 一字节没动。逐条实测见 §6.10：entry 带标签 11 而指令不带（判据是 ODS 类型是接口还是具体类型）、键是 String 段下标、hint 位是 load flags 的第 1 位、`default` 是真 fallback 且被 `sm_xx` 盖住、`sm_100` 的 hint 在 sm_86 上等于没写 | 层 1 **四条**，各钉一句 `tileiras` 的原话：`hint-dictionary-count-wrong`（内层计数 +1 → `failed to read key for DictionaryAttr element 1`）、`hint-tag-as-dictionary`（11 写成 10 → `invalid optimization hints attribute for function 'hint_entry'`）、`hint-flag-bit-misplaced`（hint 位写成 `memory_scope` 的第 0 位 → `operand index 91 out of bounds (size=19) for operand 1`）、`hint-entry-flag-dropped`（0x04 不置而属性照写 → `operand index 10 out of bounds (size=4) for operand 0`）。层 2 **零条，而且是按定义零条**：hint 不改答案，台账具名豁免。计划里的 `hint-key-unknown` **做不成**，这是本刀最该记的一条负结果：未知的键、未知的架构、越界的值，`tileiras` 三条全部**退出 0 且不打印**（`-Wunsupported-hints` 默认关），所以层 1 对 hint 的**内容**是盲的，只对**形状**不盲 | 1（实报 1；`dawn test packages/tileir` **114** 全绿（本刀加一个），`dawn test --stdlib` 未动（**本刀一个 std 文件也没碰**，`gen-stdsrc` 跑完树是干净的）；rebase 到刀 T7 之后矩阵 **205 项**，`tile-golden` 不分片 **1545.8 s**，**八片仍装得下**（按刀 T5 单项均值最重那片 633 s，距 660 s 的 pole 剩 27 s），六条预算行上调两条不动 606 / 606 / 633 / 633 / 633 / 596 / 596 / 596 s，`timeout-minutes` 31 / 31 / 32 / 32 / 32 / 30 / 30 / 30，pole 未动；见 §6.5） |
 | **T9 亚字节 `i4` 与 `f4E2M1FN`，加 `pack` 0x6F 与 `unpack` 0x70**（已落地，覆盖刀里把标量类型表填满的那一把） | 「本机 3080 上跑得动一个四位整数的 kernel：字节 `unpack` 成半字节、widen、算、`trunc` 回四位、`pack` 回字节，每一条 lane 与一份独立写的宿主参考逐位相同；而**哪半个字节是第 k 条 lane**、**widen 带不带符号**，两条都是设备答出来的而不是抄来的」（今天写不出：写入器一个 `pack` 也发不出去，`num_tag` 十三个格式里没有这两个，而 `i4` 有没有指针类型、`f4E2M1FN` 在 sm_86 上收不收，只存在于预研的一句猜测里） | **两条新 opcode**（都是 13.3，字节码版本刀 T8 已经挪好，本刀不碰）。`bytecode.dawn`：`OP_PACK` / `OP_UNPACK` 两个常量，`cast_op` / `cast_attrs` 各加两臂（**零属性**），`num_tag` 加 `f4E2M1FN` 19 与 `i4` 22，另加 `extis`（`exti` 的 SIGNED 双生名，照 `shri` / `shru` 的老办法）。`prog.dawn`：`Repack` 一种 `TileOp`、`dtype_bits` 位宽表、`repack_shape` 与 `check_repack`（把 `verifyPackUnpackTypes` 的四条搬到记录时拒绝）。`lower.dawn`：`Repack` 降低成**既有的 `Cast` 指令**，`render.dawn` 与写入器因此**一个新臂也没加**，只多一个 `cast_spelling`（`extis` 印成 `exti`）。`dev.dawn`：效果操作 `t_repack`，公开面 `pack_bytes` / `unpack_bytes` / `ext_i4` / `ext_u4` / `trunc_i4`。`std/narrow`：`round_f4e2m1` / `f4e2m1_bits` / `f4e2m1_of_bits`。`std/gpu`：`I4` / `F4E2M1FN` 两个标记与 `Dtype` impl、`element_bits`、`wrap_i4`、`nibble_shift` / `nibble_at` / `nibble_into` / `nibble_word`（半字节布局的唯一一份说法）、`dtype_i4_ref` 与 `pack_roundtrip_ref`。kernel 三个：`dtype_i4`（五段）、`dtype_e2m1`（两段，sm_100）、`pack_roundtrip`（两段，i4 与 i16 两个方向）。语料并进最贴近的族 `dtype_diff`（三个 kernel 长到五个）。台账 `features.txt` 两行 `pack` / `unpack` 从 `unimplemented` 改成 `implemented`（与刀 T10 的两行合起来，实现 84 → **88**、**未实现归零**：100 条公开操作码里剩下的九条全是 view 族的 `deferred`；层 3 从 33 条到 **36 条**），`types.txt` 两行同样（实现 17 → **19**，**未实现同样归零**：十五种标量格式至此全部实现），`check.py` 的 `LANDED_KNIVES` 加 `T9`，而它最后一条 `unimplemented` 的自测锚点因为 T10 把最后两行也实现了，搬到 view 族的 `deferred` 行上（照 T10 自己那三条的做法） | 层 0/1 三个新 golden，`FUNC GLOBAL` 三个，`tileiras` 一次通过（`dtype_e2m1` 按 `--gpu-name sm_100`）；层 2 本机 3080 上 `dtype_i4` 与 `pack_roundtrip` 都是 `identical:exact`（逐位 5、容差 0），语料 4096 条半字节里 2048 条最高位为 1、十六种编码全覆盖、892 条加法回绕、2455 条乘法回绕。逐条实测见 §6.12，其中五条只有跑一遍才知道 | 层 1 **四条**：`i4-tag-as-i8`（i4 标签写成 i8 的 → 文件短四字节，`'cuda_tile.unpack' op expects source and result to have different element type widths`）、`e2m1-tag-as-i4`（fp4 标签写成 i4 的，同宽不同类 → `'cuda_tile.ftof' op operand #0 must be tile of ... values, but got '!cuda_tile.tile<128xi4>'`）、`unpack-as-pack`（0x70 写成 0x6F → `'cuda_tile.pack' op result #0 must be tile of i8 values, but got '!cuda_tile.tile<256xi4>'`）、`pack-result-shape-unhalved`（结果 lane 数不按位宽比例缩放 → `'cuda_tile.pack' op expects source and result to have the same size in bytes, but got source tile size 128 bytes and result tile size 32 bytes`；**这是本目录唯一一条文本与字节一起动的变异体**，因为 lane 数就是结果类型，两半都被检查）。层 2 **两条**：`exti-i4-zero-extends`（写入器把 `extis` 的 SIGNED 写成 UNSIGNED → 文本不动、`tileiras` 收下、文件同长，设备上 `dtype_i4` 从第 1 段起红，另外四个 kernel 全绿）、`pack-halves-swapped`（宿主的 `nibble_shift` 换半字节，**一致的重命名** → 四个逐 lane 相同的段全都仍然与设备相符，只有依赖 lane 下标的第 4 段红，`pack_roundtrip` 作为族内控制全绿）。另有一条给验收者的自轴负控：把 `std/gpu.dawn` 的 `dtype_i4_ref` 里 `} else if seg == 2 {` 那一臂的 `ua >>> 1` 改成 `sa >> 1`，**别重录 golden、别碰包**，直接跑 `tile-gpu-diff`：`dtype_i4` 红在第 2 段（它把两种 widen 的答案变成同一个），`pack_roundtrip` 与另外三个 dtype kernel 全绿。实测判词一个 `differ:result` 四个 `identical:exact`，红的那一句是 `first seg 2 lane 1: device 2.004318071E9 host -1.0` | 1（实报 1；rebase 到刀 T10 之后 `dawn test packages/tileir` **118** 全绿（本刀加一个），`dawn test --stdlib` **170** 全绿（本刀加四个）；**本刀碰了 `std/narrow.dawn` 与 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录；矩阵 **224 项**（rebase 到 T10 的 217 项之上），`tile-golden` 不分片 **1812.4 s** 全跑退出 0，**十片仍装得下、十条预算行一条也没动**（最紧的 622 s，距 660 s 的 pole 剩 38 s）；rebase 之前的那一轮机器慢了四成半而 rebase 之后又回到常速，两轮都记在 §6.5） |
 | **T10 13.3 其余：`alloca` 与 `mmaf_scaled`**（已落地，T 序里 view 族之外的最后一把新操作码刀） | 「一个 kernel 分配得到一块只属于自己的暂存，往里写、在同一次 launch 里读回来，本机 3080 与一份独立写的宿主参考逐位相同；同一个块里的两次分配是两块内存，而这句话有一条会红的变异体；而块缩放的矩阵乘写得出来、`tileiras` 收得下，它到底要哪一代硬件是量出来的而不是猜的」（今天写不出：这棵树上每一个指针要么来自宿主上传的缓冲区、要么来自模块声明的全局，没有一条指令能凭空要一块内存；`mmaf_scaled` 则一个字节也发不出去） | `bytecode.dawn`：`OP_ALLOCA`(0x71) / `OP_MMAF_SCALED`(0x72) / `ALLOCA_FLAG_GLOBAL` 三个常量与两条编码臂。`lower.dawn`：`AllocaPtr` 与 `FloatMmaScaled` 两条指令、两条降低臂（`alloca` 复用 `get_global` 的 `spread_rank0`）。`prog.dawn`：`Alloca` 与 `MmaFScaled` 两个 `TileOp`，记录 handler 拒绝非二的幂对齐、负元素数与除不尽 K 的块大小。`dev.dawn`：`t_alloca` / `t_mmaf_scaled` 两个效果操作与公开面 `alloca_ptrs` / `alloca_shared_ptrs` / `mmaf_scaled`。`render.dawn`：两条渲染臂。`std/gpu.dawn`：三个参考实现（**本刀唯一碰 std 的地方**）。kernel 四个（`alloca_scratch` / `alloca_two` / `alloca_ctl` / `mmaf_scaled_e4m3`），新族 `scripts/tile-gpu-diff/alloca_diff.dawn`。台账：`features.txt` 两行改 `implemented`（实现 84 → **86**），`attrs.txt` 的 `unit.global` 一行改 `implemented`（实现 36 → **37**），`check.py` 的 `LANDED_KNIVES` 加 `T10`，四条自测锚点从这三行搬到 view 族的 `deferred` 行上 | 层 0/1 四个新 golden，`tileiras` 一次通过：`alloca` 的三个在 **sm_86**（这是本刀的第一个反预期，前研以为它像 fp8 一样要新硬件），`mmaf_scaled_e4m3` 只在 **sm_100**。层 2 本机 3080 三个 kernel 全 `identical:exact`，语料的 `live=128 unaliased=128 apart=128` 三个计数被 `run.sh` 各自钉在 128。十条实测见 §6.12，其中四条值得单记：**`alloca` 的 flags 字无条件存在**（它的唯一可选字段和它同岁，所以没有 `alloca_has_flags()` 这样的谓词，而 `mmaf_has_flags()` 是有的）；**`global` 位到不了 cubin**（两次分配都设上只动 `.tilebc` 一个字节，sm_86 的 cubin 逐字节不变，与 T8 给 `fast_acc` 写的同族）；**sm_90 收 f8E4M3FN 而不收 f8E8M0FNU**，所以块缩放的门槛比 fp8 本身还高一代；**V 不是属性**，`Ops.td` 里没有这个参数，`V = K / scale_K` 是两个形状的商 | 层 1 **四条**：`alloca-flags-unwritten`（不写 flags → `failed to get result type 0 for BitcastOp`）、`alloca-alignment-as-num-elem`（把元素数写进对齐槽 → `'cuda_tile.alloca' op 'alignment' must be power of two`，这一句成立要 `ALLOCA_ELEMS` 不是二的幂，所以它定成 192 而不是 128，语料是为判词设计的）、`mmaf-scaled-scale-operand-missing`（少写第五个操作数 → `operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values`）、`mmaf-scaled-writes-a-flags-word`（多写一个 flags 字 → `operand index 91 out of bounds (size=77) for operand 2`；它与 T8 的 `mmaf-flags-unwritten` 是同一堵墙的两侧，一个必须写、一个必须不写）。层 2 **一条**：`alloca-aliased`（记录 handler 把第一次之后的每一次 `alloca` 都答成第一次的句柄 → `alloca_two` 每条 lane 答 0，`alloca_scratch` 与 `alloca_ctl` 一字不动）。**按大小做的变异体一条也没有**，理由写在 §6.12 第六条：越界是未定义行为，绿红都不是证据。另有一条给验收者的自轴负控：把 `std/gpu.dawn` 的 `alloca_two_ref` 那一行的 `x[i] - round_to(...)` 改成 `x[i] + round_to(...)`，**别重录 golden**，`tile-gpu-diff` 上只有 `alloca_two` 红（`differ:result`），`alloca_scratch` 与 `alloca_ctl` 绿；`tile-golden` 全绿，因为参考实现不进任何 golden | 1（实报 1；`dawn test packages/tileir` **117** 全绿（本刀加两个），`dawn test --stdlib` **166** 未动（三个参考实现、零个新测试），但**本刀碰了 `std/gpu.dawn`**，所以 `scripts/gen-stdsrc.py` 与 Core golden 都重跑了：归一化哈希动了三个模块（`std.gpu`、`embed.stdsrc`、`compiler_plan.exitmem`，最后一个是 ADT id 位移），`prev-diff` 与 `run-diff` 全绿且十个 emit label 自 v0.76.0 起已声明；矩阵 **217 项**，`tile-golden` 不分片 **2076 s**（217 项全跑，退出 0），**八片九片都装不下、分到第十片**（最重那片 622 s，距 660 s 的 pole 剩 38 s），十条预算行全部重述 611 / 615 / 613 / 622 / 621 / 619 / 618 / 605 / 604 / 605 s，`timeout-minutes` 31 / 31 / 31 / 32 / 32 / 31 / 31 / 31 / 31 / 31，pole 未动；逼出这一步的是**本机变慢**而不是这一刀的内容，见 §6.5） |
