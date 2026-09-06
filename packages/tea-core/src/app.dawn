@@ -11,15 +11,22 @@
 # as pure as before, `==` still tests a turn, and nothing crosses a boundary
 # that did not cross it before -- a row of `!()` is an empty evidence pack.
 # What the member buys is that an app which does need io binds its own row
-# (`effect E = !io`) without forcing it on every other app, which is what a
-# `Cmd` for tea v2 is going to want.
+# (`effect E = !io`) without forcing it on every other app, which is what an io
+# `Cmd` is going to want.
+#
+# The `Cmd` channel itself is here now: `update` answers `(M, Cmd[M.Msg])` and
+# `tea_core/cmd` folds what the command asked for into the same turn. Its arms
+# are the ones a pure fold can discharge, so an io command -- one whose answer
+# arrives after the reply has been written -- is still missing, and so is the
+# wire op a driver would need to feed that answer back in. Those two are step
+# two, together (docs/oneshot-design.md §6.1 and its verdict ⑥).
 #
 # `packages/tea-dom`'s reactor is deliberately not part of this. It takes
 # `update` as an ordinary function parameter rather than through the trait, its
 # `turn` is pure so that tests can assert with `==`, and its failure barrier is
 # pinned `!io` by the language. Reconciling those three with a row the app
 # decides is a design judgement, not a signature edit, and it is deferred to
-# tea v2 along with `Cmd` itself.
+# tea v2's io commands along with the wire op they need.
 #
 # `type View` is bare, and it has to be: an associated type cannot declare
 # bounds ("`type View` is the whole declaration; the impl chooses the type"), so
@@ -42,13 +49,16 @@
 # short of bounds or equality constraints on associated types, neither of which
 # exists.
 
-## An application: `update` folds one message into the model, `view` describes
-## the whole screen for a model. Both pure, so both are testable with `==`.
+use cmd.{Cmd, NoCmd, SendMsg, BatchCmd, fold_msg}
+
+## An application: `update` folds one message into the model and says what
+## else the turn asks for, `view` describes the whole screen for a model. Both
+## pure, so both are testable with `==`.
 pub trait App[M] {
   type Msg
   type View
   effect E = !()
-  fn update(m: M, msg: M.Msg) -> M !M.E
+  fn update(m: M, msg: M.Msg) -> (M, Cmd[M.Msg]) !M.E
   fn view(m: M) -> M.View
 }
 
@@ -62,23 +72,40 @@ type Counter = { n: Int }
 type CounterMsg =
   | Inc
   | Dec
+  | Twice
 derive Show
 
 impl App[Counter] {
   type Msg = CounterMsg
   type View = String
-  fn update(m: Counter, msg: CounterMsg) -> Counter =
+  fn update(m: Counter, msg: CounterMsg) -> (Counter, Cmd[CounterMsg]) =
     match msg {
-      Inc -> Counter { n: m.n + 1 }
-      Dec -> Counter { n: m.n - 1 }
+      Inc -> (Counter { n: m.n + 1 }, NoCmd)
+      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      # Two steps in one message, said as a command rather than by calling
+      # `update` from inside itself: the fold is what runs the second one.
+      Twice -> (m, BatchCmd(cmds: [SendMsg(msg: Inc), SendMsg(msg: Inc)]))
     }
   fn view(m: Counter) -> String = "n=" ++ to_string(m.n)
 }
 
+# What a driver does with a turn, written once for the assertions below.
+fn turn(m: Counter, msg: CounterMsg) -> Counter = fold_msg(m, msg, (a, x) => update(a, x))
+
 test "update folds messages, view snapshots as a value" {
-  let m = update(update(Counter { n: 0 }, Inc), Inc)
+  let m = turn(turn(Counter { n: 0 }, Inc), Inc)
   assert m == Counter { n: 2 }
-  assert view(update(m, Dec)) == "n=1"
+  assert view(turn(m, Dec)) == "n=1"
+}
+
+test "a turn is the update and every message its command asked for" {
+  # `Twice` moves no field itself; the model that comes back is the fold's.
+  assert turn(Counter { n: 0 }, Twice) == Counter { n: 2 }
+  # And the raw pair still says what was commanded, which is what a driver
+  # other than this one reads.
+  let (kept, c) = update(Counter { n: 0 }, Twice)
+  assert kept == Counter { n: 0 }
+  assert c == BatchCmd(cmds: [SendMsg(msg: Inc), SendMsg(msg: Inc)])
 }
 
 test "the view type is whatever the impl says, core never assumes a tree" {

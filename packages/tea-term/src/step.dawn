@@ -18,13 +18,18 @@
 use tea_core/tree.{Tree}
 use tea_core/diff.{Patch, Replace, diff, apply}
 use tea_core/app.{App, update, view}
+use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
 use widget.{Widget, Text}
 use render.{render}
 
-## Apply the message, render the new view. A driver prints the frame and reads
-## the next message; a test asserts on it.
+## Apply the message and everything its command asked for, then render the new
+## view. A driver prints the frame and reads the next message; a test asserts
+## on it.
+##
+## The fold is `tea_core/cmd`'s, so this driver and the DOM one discharge a
+## command the same way and neither owns a copy of the rule.
 pub fn step[A: App](m: A, msg: A.Msg, vw: fn(A) -> Widget[A.Msg]) -> (A, String) !A.E = {
-  let next = update(m, msg)
+  let next = fold_msg(m, msg, (acc, x) => update(acc, x))
   (next, render(vw(next)))
 }
 
@@ -37,7 +42,7 @@ pub fn diff_step[A: App, W: Tree + Eq](
   msg: A.Msg,
   vw: fn(A) -> W,
 ) -> (A, List[Patch[W]]) !A.E = {
-  let next = update(m, msg)
+  let next = fold_msg(m, msg, (acc, x) => update(acc, x))
   (next, diff(vw(m), vw(next)))
 }
 
@@ -47,15 +52,17 @@ type Counter = { n: Int }
 type CounterMsg =
   | Inc
   | Dec
+  | Undo
 derive Show
 
 impl App[Counter] {
   type Msg = CounterMsg
   type View = Widget[CounterMsg]
-  fn update(m: Counter, msg: CounterMsg) -> Counter =
+  fn update(m: Counter, msg: CounterMsg) -> (Counter, Cmd[CounterMsg]) =
     match msg {
-      Inc -> Counter { n: m.n + 1 }
-      Dec -> Counter { n: m.n - 1 }
+      Inc -> (Counter { n: m.n + 1 }, NoCmd)
+      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      Undo -> (m, SendMsg(msg: Dec))
     }
   fn view(m: Counter) -> Widget[CounterMsg] = Text(s: "n=" ++ to_string(m.n))
 }
@@ -66,10 +73,25 @@ test "step returns the new model and the rendered frame" {
   assert frame == "n=42"
 }
 
+test "a step discharges the message's command before it paints" {
+  # `Undo` moves nothing itself and commands a `Dec`; the frame is rendered
+  # from the model the whole turn ends with, not from the update's own answer.
+  let (m, frame) = step(Counter { n: 42 }, Undo, c => view(c))
+  assert m == Counter { n: 41 }
+  assert frame == "n=41"
+  let (next, ps) = diff_step(Counter { n: 42 }, Undo, c => view(c))
+  assert next == Counter { n: 41 }
+  let want: List[Patch[Widget[CounterMsg]]] =
+    [Patch { path: [], op: Replace(w: Text(s: "n=41")) }]
+  assert ps == want
+}
+
 test "the impl of App is two lines more than before the split" {
-  let m = update(update(Counter { n: 0 }, Inc), Inc)
+  let (once, _) = update(Counter { n: 0 }, Inc)
+  let (m, _) = update(once, Inc)
   assert m == Counter { n: 2 }
-  assert view(update(m, Dec)) == Text(s: "n=1")
+  let (back, _) = update(m, Dec)
+  assert view(back) == Text(s: "n=1")
 }
 
 test "a driver reaches the reconciler by pinning the tree as its own parameter" {

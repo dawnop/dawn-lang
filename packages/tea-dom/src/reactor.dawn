@@ -1,8 +1,9 @@
 # One turn of the Elm loop for a host that is not in this process.
 #
 # `turn` is pure and is the whole of the boundary's behaviour: a request line
-# in, a reply line out, and in between exactly `view`, `route.at`, `update`,
-# `view` again and `diff`. `serve` is the only `!io` in this package, the same
+# in, a reply line out, and in between exactly `view`, `route.at`, `update`
+# (and whatever its command asked for, folded by `tea_core/cmd`), `view` again
+# and `diff`. `serve` is the only `!io` in this package, the same
 # split `tea_term` has, and it does two things `turn` cannot: it reads and
 # writes the lines, and it stands between a failing application and the host.
 #
@@ -39,6 +40,7 @@
 use std/io
 use std/reactor as session
 use std/str
+use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
 use tea_core/diff.{Patch, Replace, diff}
 use node.{Node, Text, Elem, On, NoData, Value, Key, deliver}
 use route
@@ -62,8 +64,10 @@ use wire.{Request, Init, Event, Bad, decode_request, enc_node, reply_ok, reply_e
 ##            listener is looked up in `view(decode(model))` -- the tree the
 ##            host is holding, since the host's document is that tree by
 ##            construction -- the string is handed to that listener's `to_msg`,
-##            `update` folds the result in, and the reply is the new model plus
-##            `diff(old, new)`.
+##            `update` folds the result in, `tea_core/cmd.fold_msg` folds
+##            whatever the command asked for after it, and the reply is the
+##            new model plus `diff(old, new)`. One reply per request either
+##            way: a command adds updates, never lines.
 ##
 ## `M: Eq` and nothing else. The `Fill` bound this used to carry is gone with
 ## the trait: a listener holds the function, so there is nothing for an
@@ -90,7 +94,7 @@ pub fn turn[Mo, M](
   init: Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(Mo, M) -> Mo,
+  update: fn(Mo, M) -> (Mo, Cmd[M]),
   view: fn(Mo) -> Node[M],
 ) -> String = turn_with_flags(line, _flags => init, encode, decode, update, view)
 
@@ -122,7 +126,7 @@ pub fn turn_with_flags[Mo, M](
   init: fn(Option[String]) -> Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(Mo, M) -> Mo,
+  update: fn(Mo, M) -> (Mo, Cmd[M]),
   view: fn(Mo) -> Node[M],
 ) -> String =
   match decode_request(line) {
@@ -145,7 +149,7 @@ pub fn turn_with_flags[Mo, M](
           match settle(listener, payload) {
             Err(why) -> reply_err("bad-request", why)
             Ok(msg) -> {
-              let m1 = update(m0, msg)
+              let m1 = fold_msg(m0, msg, update)
               reply_ok(encode(m1), diff(old, view(m1)))
             }
           }
@@ -172,7 +176,7 @@ pub fn turn_with_state[S, Mo, M](
   init: fn(Option[String]) -> (S, Mo),
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(S, Mo, M) -> Mo,
+  update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
 ) -> (Option[S], String) =
   match decode_request(line) {
@@ -199,7 +203,7 @@ pub fn turn_with_state[S, Mo, M](
               match settle(listener, payload) {
                 Err(why) -> (None, reply_err("bad-request", why))
                 Ok(msg) -> {
-                  let m1 = update(kept, m0, msg)
+                  let m1 = fold_msg(m0, msg, (acc, x) => update(kept, acc, x))
                   (None, reply_ok(encode(m1), diff(old, view(kept, m1))))
                 }
               }
@@ -252,7 +256,7 @@ pub fn serve[Mo, M](
   init: Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(Mo, M) -> Mo,
+  update: fn(Mo, M) -> (Mo, Cmd[M]),
   view: fn(Mo) -> Node[M],
 ) -> Unit !io =
   match io.read_line() {
@@ -289,7 +293,7 @@ pub fn serve_with_flags[Mo, M](
   init: fn(Option[String]) -> Mo,
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(Mo, M) -> Mo,
+  update: fn(Mo, M) -> (Mo, Cmd[M]),
   view: fn(Mo) -> Node[M],
 ) -> Unit !io =
   match io.read_line() {
@@ -317,7 +321,7 @@ pub fn serve_with_state[S, Mo, M](
   init: fn(Option[String]) -> (S, Mo),
   encode: fn(Mo) -> String,
   decode: fn(String) -> Mo,
-  update: fn(S, Mo, M) -> Mo,
+  update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
 ) -> Unit !io =
   session.serve((state: Option[S], line: String) => {
@@ -345,6 +349,9 @@ type Msg =
   | Inc
   | Dec
   | Set(text: String)
+  # Commands one `Inc` and moves nothing itself, which is what lets a test
+  # tell the fold's answer apart from `update`'s own.
+  | Twice
 derive Show
 
 fn enc(m: Counter) -> String = to_string(m.n)
@@ -355,15 +362,16 @@ fn dec(s: String) -> Counter =
     None -> Counter { n: 0 }
   }
 
-fn upd(m: Counter, msg: Msg) -> Counter =
+fn upd(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
   match msg {
-    Inc -> Counter { n: m.n + 1 }
-    Dec -> Counter { n: m.n - 1 }
+    Inc -> (Counter { n: m.n + 1 }, NoCmd)
+    Dec -> (Counter { n: m.n - 1 }, NoCmd)
     Set(text) ->
       match parse_int(text) {
-        Some(n) -> Counter { n: n }
-        None -> m
+        Some(n) -> (Counter { n: n }, NoCmd)
+        None -> (m, NoCmd)
       }
+    Twice -> (m, SendMsg(msg: Inc))
   }
 
 fn vw(m: Counter) -> Node[Msg] =
@@ -427,11 +435,12 @@ fn split_state(flags: Option[String]) -> (Kept, Counter) =
     _ -> (Kept { label: "plain", by: 1 }, Counter { n: 0 })
   }
 
-fn state_upd(state: Kept, m: Counter, msg: Msg) -> Counter =
+fn state_upd(state: Kept, m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
   match msg {
-    Inc -> Counter { n: m.n + state.by }
-    Dec -> Counter { n: m.n - state.by }
+    Inc -> (Counter { n: m.n + state.by }, NoCmd)
+    Dec -> (Counter { n: m.n - state.by }, NoCmd)
     Set(text) -> upd(m, Set(text: text))
+    Twice -> (m, SendMsg(msg: Inc))
   }
 
 fn state_vw(state: Kept, m: Counter) -> Node[Msg] =
@@ -620,3 +629,46 @@ test "a payload that does not match what the listener asked for is refused" {
   # A refused turn carries no model and no patches, so the page is untouched.
   assert not str.contains(extra, "\"patches\"")
 }
+
+test "a command is folded into the same turn, and the reply is still one line" {
+  # The listener at [2] means `Inc`; this line asks for `Twice` by routing to
+  # a tree whose button was swapped for it, so the assertion is written on the
+  # turn rather than on the wire: `Twice` moves nothing and commands one
+  # `Inc`, so a reply of 42 is the fold's answer and 41 would be `update`'s.
+  let out = turn("{\"op\":\"event\",\"model\":\"41\",\"path\":[2],\"event\":\"click\"}",
+    Counter { n: 0 }, enc, dec, upd, vw_twice)
+  assert out ==
+    "{\"ok\":true,\"model\":\"42\",\"patches\":" ++
+    "[{\"path\":[1,0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"42\"}}]}"
+  # The patches are computed against the model the fold ended with, so the
+  # document the host applies is the one the whole turn produced.
+  assert not str.contains(out, "\"s\":\"41\"")
+}
+
+# `vw` with the `+` button commanding rather than incrementing. Same shape, so
+# the addresses in the line above are the ones every other test uses.
+fn vw_twice(m: Counter) -> Node[Msg] =
+  Elem(tag: "div", props: [], on: [], kids: [
+    Elem(
+      tag: "button",
+      props: [],
+      on: [On { event: "click", payload: NoData, to_msg: _p => Dec }],
+      kids: [Text(s: "-")],
+      key: None,
+    ),
+    Elem(tag: "span", props: [], on: [], kids: [Text(s: to_string(m.n))], key: None),
+    Elem(
+      tag: "button",
+      props: [],
+      on: [On { event: "click", payload: NoData, to_msg: _p => Twice }],
+      kids: [Text(s: "+")],
+      key: None,
+    ),
+    Elem(
+      tag: "input",
+      props: [],
+      on: [On { event: "input", payload: Value, to_msg: Set }],
+      kids: [],
+      key: None,
+    ),
+  ], key: None)

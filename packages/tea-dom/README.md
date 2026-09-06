@@ -217,6 +217,13 @@ has the full argument; the three properties worth repeating:
   `rekid(donor, kids(target))` and reads nothing of the donor but its own
   data, so shipping the subtree would make an attribute change at the root
   cost the whole document. The locality `diff` buys is kept across the wire.
+- **A command adds updates, not lines.** `update` answers
+  `(Mo, Cmd[M])`, and `tea_core/cmd.fold_msg` discharges the command inside
+  the same turn: a `SendMsg` is one more `update` before the reply is written,
+  and the patches are computed against the model the whole fold ended with.
+  The wire is untouched by this, which is why the recorded transcripts are
+  untouched by it too. An io command, whose answer would arrive after the
+  reply, needs an op this protocol does not have and is not here yet.
 
 ## Flags
 

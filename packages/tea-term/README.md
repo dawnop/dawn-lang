@@ -8,13 +8,14 @@ depends on.
 
 ```dawn
 use tea_core/app.{App}
+use tea_core/cmd.{Cmd}
 use tea_term/step.{step}
 use tea_term/widget.{Widget, Text, Row, Button}
 
 impl App[Counter] {
   type Msg = CounterMsg
   type View = Widget[CounterMsg]
-  fn update(m: Counter, msg: CounterMsg) -> Counter = ...
+  fn update(m: Counter, msg: CounterMsg) -> (Counter, Cmd[CounterMsg]) = ...
   fn view(m: Counter) -> Widget[CounterMsg] = ...
 }
 ```
@@ -46,9 +47,10 @@ driver loop. An app hands `run` its pure hooks (which tree to paint, parse a
 line into a message, declare ticks, say when to stop) and owns nothing else.
 The view arrives as a hook rather than through the trait because a generic
 function cannot do anything with an `A.View`; see tea-core's README.
-Still line-mode interaction and still no `Cmd`; when a real app needs
-commands, the associated-effect work is where they grow, with this trait as
-the consumer justifying it.
+Commands are folded rather than performed: `step` and the driver's line and
+tick paths all go through `tea_core/cmd.fold_msg`, so a `SendMsg` is one more
+`update` before the next paint and the loop's io surface is unchanged. An io
+command would change that, and it is not here yet.
 
 ## Subscriptions
 

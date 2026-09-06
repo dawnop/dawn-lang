@@ -105,7 +105,30 @@ because a method's effect variable is the *caller's* to instantiate and this
 row is the impl's. The member defaults to `!()`, so an impl that says nothing
 gets a turn that is still a pure function and `==` still tests one; an app
 that needs more binds its own row (`effect E = !io`), and the member is here
-so that an app which grows a `Cmd` does not make every other app pay for it.
+so that an app which grows an io command does not make every other app pay for
+it.
+
+## Commands
+
+`update` answers `(M, Cmd[M.Msg])`. A `Cmd` is data, like a tree and like a
+`Sub`: `NoCmd` asks for nothing, `SendMsg(msg)` asks for one more message in
+this same turn, and `BatchCmd(cmds)` asks for several in order. They are Elm's
+`Cmd.none`, `Cmd.msg` and `Cmd.batch` under names that do not shadow
+`Option`'s `None`.
+
+`cmd.fold_msg(m, msg, update)` is the driver's half, written once here and
+called by both drivers: it folds the message, then everything the commands ask
+for, and answers the model the turn ends with. The queue is first in, first
+out, so a batch runs in the order it was written. `CMD_FOLD_LIMIT` bounds the
+total number of commanded messages one turn may add, counting a batch's
+fan-out and not only a chain's depth; overrunning it panics rather than
+truncating, because a truncated fold answers with a model no sequence of
+messages produced and there is no field on either driver's boundary in which
+it could say so.
+
+There is no io arm yet. A command whose answer arrives after the reply is
+written needs a wire op the boundary does not have and a re-entry
+`std/reactor`'s pure step callback forbids; that is step two.
 
 ## Subscriptions
 
