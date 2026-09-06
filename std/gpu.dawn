@@ -293,6 +293,26 @@ pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
   _ -> None
 }
 
+## The BITS one element of the named format occupies, or `None` for a name
+## this release does not know. Every format `element_bytes` accepts answers
+## eight times what it answers; the two that answer here and not there are
+## the sub-byte ones, `i4` and `f4E2M1FN`, which are tile formats and never
+## buffer formats.
+##
+## The two functions are therefore not one function twice. `element_bytes`
+## says what `gpu_alloc` will hand out and `element_bits` says how wide a
+## lane is, and `pack` / `unpack` are the operations that need the second
+## one: they scale a rank-1 tile's lane count by the ratio of two widths,
+## and half a byte is a ratio the first function cannot express.
+pub fn element_bits(dtype: String) -> Option[Int] = match dtype {
+  "i4" -> Some(4)
+  "f4E2M1FN" -> Some(4)
+  _ -> match element_bytes(dtype) {
+    Some(n) -> Some(8 * n)
+    None -> None
+  }
+}
+
 ## `x` as a buffer of the named format holds it: rounded to bfloat16 for
 ## `bf16`, to binary32 for `f32`, truncated toward zero and wrapped into the
 ## 32-bit range for `i32`, unchanged for `f64`. What a store into such a
@@ -349,6 +369,52 @@ pub fn wrap_i8(n: Int) -> Int = {
 ## same octet `wrap_i8` answers, read the other way: `wrap_u8(-56)` is 200
 ## and `wrap_i8(200)` is -56.
 pub fn wrap_u8(n: Int) -> Int = n & 0xFF
+
+## `n` as a two's-complement 4-bit SIGNED integer: the low nibble read as a
+## value in [-8, 7]. `wrap_i32`'s shape at half an octet, and what the
+## device's `trunc_i4` leaves behind.
+pub fn wrap_i4(n: Int) -> Int = {
+  let low = n & 0xF
+  if low >= 0x8 { low - 0x10 } else { low }
+}
+
+# ---- the nibble layout of a sub-byte buffer ----
+#
+# There is no buffer of `i4` or of `f4E2M1FN` (element_bytes refuses both),
+# so a corpus for either format ships its lanes inside ordinary 32-bit
+# words and the kernel `pack`s the words into bytes and `unpack`s the bytes
+# into nibbles. These two functions are the host's reading of that layout,
+# and between them they are the whole of what "which nibble is lane k" means
+# on this side.
+#
+# THE ORDER IS THE DIALECT'S. Types.td writes it out for a tensor view of a
+# 4-bit format: element `i` (i even) is in bits 3..0 of its byte and element
+# `i + 1` in bits 7..4. A 32-bit word reaches the device little end first,
+# so its eight lanes are simply its eight 4-bit fields counted up from the
+# bottom, and `nibble_at` is that sentence. scripts/tile-gpu-diff's
+# pack-halves-swapped is the mutant that exchanges the two halves of every
+# byte, and the device disagrees with it.
+
+## The `k`th 4-bit lane of the 32-bit word `w`, counted from the low end:
+## `k` in [0, 8), the answer in [0, 15].
+pub fn nibble_at(w: Int, k: Int) -> Int = (w >>> (4 * k)) & 0xF
+
+## `w` with its `k`th 4-bit lane set to the low nibble of `v`; the lane is
+## assumed clear, so this is the inverse of `nibble_at` when a word is
+## built up from zero.
+pub fn nibble_into(w: Int, k: Int, v: Int) -> Int = w | ((v & 0xF) << (4 * k))
+
+## The 32-bit word whose eight lanes are `f(0)` to `f(7)`, as a Float an
+## i32 buffer holds.
+pub fn nibble_word(f: fn(Int) -> Int) -> Float = {
+  var w = 0
+  var k = 0
+  while k < 8 {
+    w = nibble_into(w, k, f(k))
+    k = k + 1
+  }
+  to_float(wrap_i32(w))
+}
 
 # ---- the bf16 wire format ----
 
@@ -4068,6 +4134,57 @@ pub fn dtype_i64_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> L
   })
 }
 
+## The five segments of `dtype_i4`: the nibble-wise sum, the sign-extended
+## nibble shifted right by one, the zero-extended one shifted right by one,
+## the nibble-wise product, and a's nibble on even lanes with b's on odd
+## ones. `ins` is `[a, b, out]`, and every buffer is `i32`: there is no
+## buffer of `i4` at all, so a word carries eight lanes and this reference
+## reads them the way `unpack` does (`nibble_at`).
+##
+## SEGMENTS 1 AND 2 ARE THE SAME SHIFT under the two widenings, and they
+## differ on exactly the lanes whose top bit is set. Nothing else here can
+## see the difference: + - * agree modulo 16 whichever widening produced
+## the operands, which is why the kernel carries a shift at all.
+pub fn dtype_i4_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  let xb = ins[1]
+  segments(ins[2], n, 5, (seg, i) => {
+    let wa = wrap_i32(to_int(xa[i]))
+    let wb = wrap_i32(to_int(xb[i]))
+    nibble_word(k => {
+      let ua = nibble_at(wa, k)
+      let ub = nibble_at(wb, k)
+      let sa = wrap_i4(ua)
+      let sb = wrap_i4(ub)
+      if seg == 0 {
+        sa + sb
+      } else if seg == 1 {
+        sa >> 1
+      } else if seg == 2 {
+        ua >>> 1
+      } else if seg == 3 {
+        sa * sb
+      } else if k % 2 == 1 {
+        ub
+      } else {
+        ua
+      }
+    })
+  })
+}
+
+## The two segments of `pack_roundtrip`: the bytes that went in, twice.
+## `ins` is `[a, out]` and both buffers are `i32`.
+##
+## This reference names no nibble and no half word, which is what makes it
+## the CONTROL for pack-halves-swapped: a round trip through a format is
+## blind to the order the lanes were laid down in, because it lays them
+## back the same way. The kernel is the identity and so is this.
+pub fn pack_roundtrip_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let xa = ins[0]
+  segments(ins[1], n, 2, (_seg, i) => xa[i])
+}
+
 ## The two segments of `dtype_tf32`, `dtype_e4m3`, `dtype_e5m2` and
 ## `dtype_e8m0`: the buffer of the format widened to f64, and an f64 taken
 ## into the format and back. `ins` is `[x, y, out]` and `dtype` names the
@@ -5936,4 +6053,61 @@ test "the element format references answer what a reader can check by hand" {
   let e5 = dtype_convert_ref(1, "f8E5M2", ["f8E5M2", "f64", "f64"], [[1.0], [1.1], outc])
   assert e4[1] == 1.125
   assert e5[1] == 1.0
+}
+
+test "the sub-byte layout is eight lanes to a word, low nibble first" {
+  assert element_bits("i4") == Some(4)
+  assert element_bits("f4E2M1FN") == Some(4)
+  assert element_bits("i32") == Some(32)
+  assert element_bits("f32") == None
+  assert element_bytes("i4") == None
+
+  assert wrap_i4(0) == 0
+  assert wrap_i4(7) == 7
+  assert wrap_i4(8) == 0 - 8
+  assert wrap_i4(15) == 0 - 1
+  assert wrap_i4(0 - 1) == 0 - 1
+  assert wrap_i4(16) == 0
+
+  # 0x76543210: lane k holds k
+  assert nibble_at(0x76543210, 0) == 0
+  assert nibble_at(0x76543210, 7) == 7
+  # a negative word is a 32-bit pattern, and its top lane is its top nibble
+  assert nibble_at(wrap_i32(0xFEDCBA98), 7) == 0xF
+  assert nibble_at(wrap_i32(0xFEDCBA98), 0) == 0x8
+  assert nibble_word(k => k) == to_float(0x76543210)
+  assert nibble_word(k => 0xF) == to_float(0 - 1)
+}
+
+test "the sub-byte references answer what a reader can check by hand" {
+  let i3 = ["i32", "i32", "i32"]
+  # one word of eight lanes, five segments, one word of tail
+  let out = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
+  # a = 0x76543210 (lanes 0..7), b = 0x11111111 (every lane 1)
+  let a = to_float(0x76543210)
+  let b = to_float(0x11111111)
+  let got = dtype_i4_ref(1, i3, [[a], [b], out])
+  # the sum wraps at four bits: lane 7 is 7 + 1 = 8, which is -8
+  assert got[0] == to_float(wrap_i32(0x87654321))
+  # the SIGNED nibble shifted right by one: lanes 0..7 are 0,0,1,1,2,2,3,3
+  assert got[1] == to_float(0x33221100)
+  # and the UNSIGNED one is the same here, because no lane of a has its top
+  # bit set; the two segments part company on b's mirror below
+  assert got[2] == to_float(0x33221100)
+  # the product with 1 is the lane itself
+  assert got[3] == a
+  # b on the odd lanes, a on the even ones
+  assert got[4] == to_float(0x16141210)
+  assert got[5] == 0.0 - 1.0
+
+  # the same word read as signed nibbles: 0xFEDCBA98 has its top bit set on
+  # every lane, so the two shifts differ on every lane
+  let neg = to_float(wrap_i32(0xFEDCBA98))
+  let got2 = dtype_i4_ref(1, i3, [[neg], [b], out])
+  assert got2[1] == to_float(wrap_i32(0xFFEEDDCC))
+  assert got2[2] == to_float(0x77665544)
+
+  # the round trip names no lane at all
+  let outr = [0.0, 0.0, 0.0 - 1.0]
+  assert pack_roundtrip_ref(1, ["i32", "i32"], [[a], outr]) == [a, a, 0.0 - 1.0]
 }
