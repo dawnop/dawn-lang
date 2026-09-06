@@ -483,6 +483,8 @@ mutants=(
   global-record-alignment-dropped
   global-visibility-omitted-at-13-3
   get-global-symbol-not-written
+  visibility-private-written-as-public
+  constant-flag-as-mutable
   hint-dictionary-count-wrong
   hint-tag-as-dictionary
   hint-flag-bit-misplaced
@@ -679,6 +681,55 @@ raise SystemExit(1)
 PY
 }
 
+# One OBJECT symbol of the cubin, as `<binding> <size>`, or nothing when the
+# name is not in the table. Binding is the ELF number: 0 LOCAL, 1 GLOBAL.
+# This is what the dialect's `symbol_visibility` reaches -- `tileiras` gives
+# a `private` global a LOCAL binding and a public one a GLOBAL one -- and it
+# is the strongest thing this repository can say about that attribute, since
+# the driver looks both up all the same (measured, knife TG; see
+# docs/tile-backend-design.md 6.13).
+object_sym() { # cubin, name
+  python3 - "$1" "$2" <<'PY'
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+want = sys.argv[2].encode()
+shoff = struct.unpack_from("<Q", data, 0x28)[0]
+shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+for _name, kind, _flags, _addr, off, size, link, _info, _align, entsize in sections:
+    if kind != 2:  # SHT_SYMTAB
+        continue
+    strtab_off = sections[link][4]
+    for j in range(size // entsize):
+        st_name, st_info, _other, _shndx, _value, st_size = struct.unpack_from("<IBBHQQ", data, off + j * entsize)
+        end = data.index(b"\0", strtab_off + st_name)
+        if data[strtab_off + st_name:end] == want and st_info & 0xF == 1:  # STT_OBJECT
+            print(f"{st_info >> 4} {st_size}")
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+# `global_syms`'s three globals, as the cubin's symbol table has them. This
+# is knife TG's layer-1 judgement about `visibility.public` and
+# `visibility.private`: `tileiras` understood the two values differently and
+# said so in the ELF it wrote. The sizes are 128 f64 lanes each, which is
+# the same claim `cuModuleGetGlobal` makes on the device
+# (scripts/tile-gpu-diff/sym_diff.dawn).
+check_global_syms_symbols() { # cubin
+  local cubin="$1" got want name bind size
+  for want in "shown 1 1024" "hidden 0 1024" "frozen 1 1024"; do
+    name="${want%% *}"
+    bind="$(printf '%s' "$want" | cut -d' ' -f2)"
+    size="$(printf '%s' "$want" | cut -d' ' -f3)"
+    got="$(object_sym "$cubin" "$name" 2>/dev/null || true)"
+    [ "$got" = "$bind $size" ] ||
+      fail "global_syms: the cubin's @$name is '${got:-absent}' and should be binding $bind of $size bytes"
+  done
+}
+
 # The --gpu-name a kernel is assembled for. toolchain.txt's `gpu-name` is
 # the machine's own (sm_86) and every kernel but four uses it.
 #
@@ -784,6 +835,10 @@ for k in "${kernels[@]}"; do
     fi
     has_global_func "$work/$k.cubin" "$k" || fail "$k: the cubin has no GLOBAL FUNC named $k"
     echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $arch)"
+    if [ "$k" = global_syms ]; then
+      check_global_syms_symbols "$work/$k.cubin"
+      echo "PASS  symbols: global_syms's cubin has @shown and @frozen GLOBAL and @hidden LOCAL, 1024 bytes each"
+    fi
   else
     echo "SKIP  assemble: $k.tilebc not handed to tileiras (--without-tileiras)"
   fi
@@ -1592,6 +1647,117 @@ if run_item get-global-symbol-not-written; then
     w2'
   writer_mutant_checks get-global-symbol-not-written global_table same-size \
     "failed to read string for FlatSymbolRefAttr"
+fi
+
+# 39a. The writer stops asking whether a global is private and writes
+#      `public` for every one. This is the ONLY mutant in this directory
+#      that `tileiras` accepts, and that is the point: it is a legal
+#      program, one varint different and the same length, so the layers
+#      that read our own bytes cannot call it wrong. What refuses it is the
+#      ELF `tileiras` writes: with the enum forced to `public`, `@hidden`
+#      is a GLOBAL binding instead of a LOCAL one, and that is the one
+#      place in this repository where the two values of
+#      `symbol_visibility` are told apart by something outside it.
+#
+#      Knife TG measured what happens further down and it is nothing: the
+#      driver's `cuModuleGetGlobal` answers a LOCAL global as readily as a
+#      GLOBAL one, so this mutant is GREEN on the device
+#      (scripts/tile-gpu-diff runs it and holds it green). Layer 1 is
+#      therefore the ceiling for these two values, and the exemption in
+#      scripts/tileir-features/attrs.txt says so by name.
+if run_item visibility-private-written-as-public; then
+  mutant_project visibility-private-written-as-public bytecode.dawn \
+    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
+    'put_varint(put_varint(b4, VIS_PUBLIC), if g.constant { 1 } else { 0 })'
+  mutant_run visibility-private-written-as-public global_syms
+  mutant_run_bytecode visibility-private-written-as-public global_syms
+  for backend in jvm native; do
+    out="$work/m-visibility-private-written-as-public.global_syms.$backend"
+    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/global_syms.mlir" "$out"; then
+      cat "$out.err" >&2
+      fail "visibility-private-written-as-public: the renderer was not edited, so global_syms.mlir should still match on $backend"
+    fi
+    out="$work/m-visibility-private-written-as-public.global_syms.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] ||
+      { cat "$work/m-visibility-private-written-as-public.global_syms.$backend.out.err" >&2; fail "visibility-private-written-as-public: global_syms did not encode on $backend"; }
+    cmp -s "$here/global_syms.tilebc" "$out" &&
+      fail "visibility-private-written-as-public mutant stayed green on $backend: global_syms.tilebc still matches"
+    [ "$(wc -c < "$out")" = "$(wc -c < "$here/global_syms.tilebc")" ] ||
+      fail "visibility-private-written-as-public: the mutant's bytecode changed length on $backend, and one enum value is one varint"
+  done
+  cmp -s "$work/m-visibility-private-written-as-public.global_syms.jvm.tilebc" \
+    "$work/m-visibility-private-written-as-public.global_syms.native.tilebc" ||
+    fail "visibility-private-written-as-public: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    assemble "$work/m-visibility-private-written-as-public.global_syms.jvm.tilebc" \
+      "$work/m-visibility-private-written-as-public.cubin" "$(kernel_arch global_syms)" ||
+      { cat "$work/m-visibility-private-written-as-public.cubin.log" >&2; fail "visibility-private-written-as-public: tileiras should ACCEPT this mutant, since writing public where private belongs is a legal program"; }
+    got="$(object_sym "$work/m-visibility-private-written-as-public.cubin" hidden 2>/dev/null || true)"
+    [ "$got" = "1 1024" ] ||
+      fail "visibility-private-written-as-public mutant stayed green: the cubin's @hidden is '${got:-absent}' and should have become binding 1 of 1024 bytes"
+    for want in "shown 1 1024" "frozen 1 1024"; do
+      name="${want%% *}"
+      got="$(object_sym "$work/m-visibility-private-written-as-public.cubin" "$name" 2>/dev/null || true)"
+      [ "$got" = "1 1024" ] ||
+        fail "visibility-private-written-as-public: @$name was public already and should not move, got '${got:-absent}'"
+    done
+    echo "PASS  mutant: visibility-private-written-as-public (global_syms.mlir untouched, global_syms.tilebc red on both backends at the same length; tileiras accepts it and gives @hidden a GLOBAL binding, the two public globals unmoved)"
+  else
+    echo "PASS  mutant: visibility-private-written-as-public (global_syms.tilebc red on both backends at the same length)"
+    echo "SKIP  mutant: visibility-private-written-as-public not handed to tileiras (--without-tileiras)"
+  fi
+fi
+
+# 39b. The writer stops asking whether a global is `constant` and writes 0
+#      for every one. Like the mutant above this is a legal program that
+#      `tileiras` accepts, and unlike it NOTHING further down moves: the
+#      cubin is byte for byte the one the unmutated writer's bytes produce.
+#      That is this block's assertion, and it is written as a gate rather
+#      than left in the design document because it is the whole of
+#      `unit.constant`'s exemption: a bit that does not reach the machine
+#      cannot make the device answer anything else (the same argument, and
+#      the same shape of measurement, as knife T8's `fast_acc`). If a later
+#      `tileiras` starts placing a constant global somewhere else, this
+#      block goes red and the exemption gets revisited instead of quietly
+#      staying wrong.
+if run_item constant-flag-as-mutable; then
+  mutant_project constant-flag-as-mutable bytecode.dawn \
+    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
+    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), 0)'
+  mutant_run constant-flag-as-mutable global_syms
+  mutant_run_bytecode constant-flag-as-mutable global_syms
+  for backend in jvm native; do
+    out="$work/m-constant-flag-as-mutable.global_syms.$backend"
+    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/global_syms.mlir" "$out"; then
+      cat "$out.err" >&2
+      fail "constant-flag-as-mutable: the renderer was not edited, so global_syms.mlir should still match on $backend"
+    fi
+    out="$work/m-constant-flag-as-mutable.global_syms.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] ||
+      { cat "$work/m-constant-flag-as-mutable.global_syms.$backend.out.err" >&2; fail "constant-flag-as-mutable: global_syms did not encode on $backend"; }
+    cmp -s "$here/global_syms.tilebc" "$out" &&
+      fail "constant-flag-as-mutable is not mutating anything on $backend: global_syms.tilebc still matches"
+    [ "$(wc -c < "$out")" = "$(wc -c < "$here/global_syms.tilebc")" ] ||
+      fail "constant-flag-as-mutable: the mutant's bytecode changed length on $backend, and a unit attribute is one varint"
+  done
+  cmp -s "$work/m-constant-flag-as-mutable.global_syms.jvm.tilebc" \
+    "$work/m-constant-flag-as-mutable.global_syms.native.tilebc" ||
+    fail "constant-flag-as-mutable: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    assemble "$work/m-constant-flag-as-mutable.global_syms.jvm.tilebc" \
+      "$work/m-constant-flag-as-mutable.cubin" "$(kernel_arch global_syms)" ||
+      { cat "$work/m-constant-flag-as-mutable.cubin.log" >&2; fail "constant-flag-as-mutable: tileiras should ACCEPT this mutant, since a mutable global is a legal program"; }
+    # the golden's own cubin, assembled here rather than reused: the kernel
+    # loop above does not run under `--only`, and the comparison is the
+    # whole point of this block
+    assemble "$here/global_syms.tilebc" "$work/clean-global_syms.cubin" "$(kernel_arch global_syms)" ||
+      { cat "$work/clean-global_syms.cubin.log" >&2; fail "constant-flag-as-mutable: tileiras refused the unmutated global_syms.tilebc"; }
+    cmp -s "$work/clean-global_syms.cubin" "$work/m-constant-flag-as-mutable.cubin" ||
+      fail "constant-flag-as-mutable: the cubin MOVED, so the constant bit reaches this target after all and attrs.txt's constant-not-in-the-cubin exemption is out of date"
+    echo "PASS  measurement: constant-flag-as-mutable (global_syms.tilebc red on both backends at the same length, and the sm_86 cubin is byte for byte the same: the constant bit does not reach the machine)"
+  else
+    echo "SKIP  measurement: constant-flag-as-mutable not handed to tileiras (--without-tileiras)"
+  fi
 fi
 
 # 40. The inner dictionary of a hint says it holds one more entry than it

@@ -4511,29 +4511,29 @@ pub fn global_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) 
 pub fn global_syms_c(n: Int) -> List[Float] =
   list.map(range(0, n), i => to_float(i) * 0.25 - 40.0)
 
+## The three tables `global_syms`'s module declares, in declaration order:
+## `@shown` public, `@hidden` private, `@frozen` constant.
+pub fn global_syms_tables(n: Int) -> List[List[Float]] =
+  [global_table_a(n), global_table_b(n), global_syms_c(n)]
+
 ## `global_syms`: three segments of `n` lanes, each one of the module's
 ## three globals plus the input, and the rest of the output buffer left
 ## alone. `ins` is `[x, out]`.
 ##
-## `frozen` is what the `constant` global holds AT THE TIME OF THE LAUNCH,
-## which is a parameter rather than `global_syms_c(n)` because the host can
-## write a module's global between launches: whether a `constant` one
-## accepts such a write, and whether the next launch reads it, is a question
-## about the device, and a reference that baked the initializer in could not
-## ask it.
+## `tables` is what the three globals hold AT THE TIME OF THE LAUNCH, which
+## is a parameter rather than `global_syms_tables(n)` because the host can
+## write a module's global between launches: whether a `private` or a
+## `constant` global accepts such a write, and whether the next launch reads
+## it, is a question about the device, and a reference that baked the
+## initializers in could not ask it.
 ##
 ## EXACT TIER BY ALGEBRA: one `addf` per lane with `rounding<nearest_even>`,
 ## which is what a binary64 `+` is.
-pub fn global_syms_ref(n: Int, frozen: List[Float], dtypes: List[String],
+pub fn global_syms_ref(n: Int, tables: List[List[Float]], dtypes: List[String],
     ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
-  let a = global_table_a(n)
-  let b = global_table_b(n)
   let dt = dtypes[1]
-  segments(ins[1], n, 3, (seg, i) => {
-    let g = if seg == 0 { a[i] } else if seg == 1 { b[i] } else { frozen[i] }
-    round_to(dt, g + x[i])
-  })
+  segments(ins[1], n, 3, (seg, i) => round_to(dt, tables[seg][i] + x[i]))
 }
 
 # ---- knife T10: `alloca` ----

@@ -725,6 +725,15 @@ dbg_alone=(assert_fail print_tile)
 # visible from outside the device.
 globals_=(global_table global_ctl global_scratch)
 
+# The knife TG kernel, in a family of its own. `global_syms` declares three
+# globals and reads all three, and the reason it is not in `globals_` above
+# is that its judgement is a SYMBOL LOOKUP rather than a buffer: sym_diff
+# asks the host what it can name in the module, read, write and launch
+# against. Keeping it out also keeps the T7 mutants' arithmetic ("exactly
+# one of these kernels may differ") the arithmetic those mutants were
+# measured with.
+syms_=(global_syms)
+
 # The automatic-allocation kernels of knife T10, in the order alloca_diff
 # takes them. `alloca_scratch` writes a fresh allocation and reads it back
 # in the same launch; `alloca_two` makes two of them in one block and
@@ -798,7 +807,7 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${allocas[@]}" \
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
   "${hints[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -841,6 +850,8 @@ dbg_cubins=()
 for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
 global_cubins=()
 for k in "${globals_[@]}"; do global_cubins+=("$work/$k.cubin"); done
+sym_cubins=()
+for k in "${syms_[@]}"; do sym_cubins+=("$work/$k.cubin"); done
 alloca_cubins=()
 for k in "${allocas[@]}"; do alloca_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
@@ -1307,6 +1318,63 @@ launches="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^scratch_lau
 [ "${launches:-0}" -ge 2 ] ||
   fail "global_scratch is launched ${launches:-0} time(s), so nothing observes the global's lifetime: $global_shape"
 echo "PASS  corpus: the two tables differ on every lane, neither is a mirror or a splat, every input lane is non-zero, and global_scratch is launched $launches times ($global_shape)"
+
+# ---- native, the module's globals as the host sees them (knife TG)
+build_native "$root/std" "$work/sym.bin" "$here/sym_diff.dawn"
+rc=0
+device "$work/sym.bin" "${sym_cubins[@]}" > "$work/sym.out" 2> "$work/sym.err" || rc=$?
+cat "$work/sym.out"
+sym_verdict="$(verdict_of "$work/sym.out")"
+case "$sym_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the module's three globals agree with the fake device bit for bit, before and after the host wrote all three" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $sym_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $sym_verdict" ;;
+  fail) cat "$work/sym.err" >&2; fail "the device answered and disagreed with the fake device on the knife TG kernel or its symbols (see the transcript above)" ;;
+  *) cat "$work/sym.err" >&2; fail "sym_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/sym.out" | head -n 1)"
+
+# The symbol corpus, held field by field, for the same reason the T7 one is:
+# three tables that agreed anywhere would forgive a lookup that answered the
+# wrong symbol, and three WRITTEN tables that agreed anywhere would forgive
+# a write that landed in the wrong one.
+sym_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/sym.out")"
+[ -n "$sym_shape" ] || fail "sym_diff printed no index line"
+for field in distinct rewritten apart asymmetric; do
+  value="$(printf '%s\n' "$sym_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the symbol index line names no $field: $sym_shape"
+  [ "$value" = "128" ] ||
+    fail "the symbol corpus has $field=$value of 128 lanes, so that claim is not fully tested: $sym_shape"
+done
+sym_nonsplat="$(printf '%s\n' "$sym_shape" | tr ' ' '\n' | sed -n 's/^nonsplat=//p')"
+[ "$sym_nonsplat" = "127" ] ||
+  fail "the symbol corpus has nonsplat=$sym_nonsplat of the 127 lanes it could have: $sym_shape"
+echo "PASS  corpus: the three declared tables differ from each other on every lane, the three written ones do too and differ from what they replace, and none is a mirror or a splat ($sym_shape)"
+
+# WHAT THE DRIVER ANSWERED, held verbatim. The three declared symbols are
+# all found -- the private one included, which is the measurement this knife
+# turned on its head -- and a name the module does not declare is the
+# driver's own CUresult. Reading the transcript rather than trusting the
+# program's own verdict is the rule knife T6 set for `cuda.` kinds.
+if [ "$sym_verdict" = pass ]; then
+  for want in \
+    '  sym shown real=ok found elements=128' \
+    '  sym hidden real=ok found elements=128' \
+    '  sym frozen real=ok found elements=128'; do
+    grep -qF "$want" "$work/sym.out" ||
+      { cat "$work/sym.out" >&2; fail "sym_diff did not print '$want'; the driver's answer for a declared global changed"; }
+  done
+  grep -qF '  sym absent real=cuda.CUDA_ERROR_NOT_FOUND missing' "$work/sym.out" ||
+    { cat "$work/sym.out" >&2; fail "a name the module does not declare should answer cuda.CUDA_ERROR_NOT_FOUND"; }
+  for want in '  write shown real=ok' '  write hidden real=ok' '  write frozen real=ok'; do
+    grep -qF "$want" "$work/sym.out" ||
+      { cat "$work/sym.out" >&2; fail "sym_diff did not print '$want'; a host write to a module global was refused"; }
+  done
+  echo "PASS  symbols: cuModuleGetGlobal answers all three declared globals at 128 f64 elements, private and constant included, refuses an undeclared name with cuda.CUDA_ERROR_NOT_FOUND, and accepts a host write to every one"
+else
+  echo "SKIP  symbols: the driver answered $sym_verdict, so its verdicts on the symbol lookups are not verifiable here"
+fi
 
 # ---- native, the automatic-allocation kernels (knife T10)
 build_native "$root/std" "$work/alloca.bin" "$here/alloca_diff.dawn"
