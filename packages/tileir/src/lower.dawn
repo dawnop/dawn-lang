@@ -49,7 +49,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -638,6 +638,17 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let ty = num_tile(shape, to)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, Cast(d, op, num_tile(shape, from), ty, a))
+  }
+  # `pack` and `unpack` are conversions in every respect the writer cares
+  # about -- one operand, the result type, no attributes -- and differ from
+  # the six above only in that the two tiles have different SHAPES, which a
+  # `Ty` already carries. So they lower to the same `Cast` instruction and
+  # the renderer and the writer need no arm of their own.
+  Repack(dst, op, from, to, from_shape, to_shape, src) -> {
+    let a = ref_of(l0, src, "${op} operand")
+    let ty = num_tile(to_shape, to)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, Cast(d, op, num_tile(from_shape, from), ty, a))
   }
   Select(dst, dtype, shape, cond, lhs, rhs) -> {
     let c = ref_of(l0, cond, "select condition")

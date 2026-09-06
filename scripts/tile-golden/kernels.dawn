@@ -10,7 +10,7 @@ use std/io
 use std/list
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU,
-  global_table_a, global_table_b }
+  I4, F4E2M1FN, global_table_a, global_table_b }
 use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
@@ -22,6 +22,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
+  pack_bytes, unpack_bytes, ext_i4, ext_u4, trunc_i4, arange,
   d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
   d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
@@ -2092,6 +2093,123 @@ fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[F64], out: Param[F64]) -> Unit !Dev 
   let exponent = float_to_float(F32, F8E8M0FNU, s, narrowed)
   store(out, seg(1), s,
     float_to_float(F32, F64, s, float_to_float(F8E8M0FNU, F32, s, exponent)))
+}
+
+# ---- the sub-byte formats (knife T9) ----
+#
+# `i4` and `f4E2M1FN` are the two element formats narrower than a byte, and
+# `pack` / `unpack` are the two operations that reach them: nothing else in
+# the dialect does. There is no `ptr<i4>` (Types.td leaves `i4` out of
+# `CudaTile_AnyInt`, so the pointer type will not parse), so a buffer of
+# either format does not exist and a kernel over one has to bring the bytes
+# in itself. That is why every parameter below is an ordinary buffer and the
+# first thing each kernel does is `pack` it into an `i8` tile.
+#
+# `pack` and `unpack` move no bits. `pack` reads a rank-1 tile as the byte
+# array it occupies and `unpack` reads a rank-1 byte tile as a tile of
+# another format, so the pair is the identity on every bit pattern and the
+# lane count scales by the ratio of the widths. Two elements of a sub-byte
+# format share a byte, the EVEN one in the low nibble (Types.td spells the
+# order out).
+const I4_N: Int = 128
+const I4_TILE: Int = 32
+const I4_BYTES: Int = 128
+const I4_LANES: Int = 256
+const I4_HALVES: Int = 64
+
+# The i4 kernel: five segments, each 32 i32 lanes wide, each one nibble
+# operation packed back into the words it came from.
+#
+# THE SIGNEDNESS OF THE WIDENING IS SEGMENTS 1 AND 2, and they are the same
+# expression under the two readings. `i4` has no arithmetic of its own (it
+# is in none of the dialect's integer tile constraints), so a kernel widens,
+# computes at 32 bits and truncates back; and + - * are blind to which
+# widening was used, because they agree modulo 16. An arithmetic SHIFT is
+# not: -1 >> 1 is -1 and 15 >> 1 is 7, and they are different nibbles. So
+# segment 1 shifts the sign-extended nibble and segment 2 the zero-extended
+# one, and they differ on exactly the lanes whose top bit is set.
+#
+# SEGMENT 4 IS THE NIBBLE ORDER, and it is here because nothing else in this
+# kernel can see it. Every other segment applies ONE function to every lane,
+# and a reader who had the two nibbles of a byte the wrong way round would
+# read lane k as lane k^1, compute the same thing and write it back to k^1:
+# the word that comes out is the same word. So the order is only visible
+# where the operation depends on the lane INDEX, and this segment takes a's
+# nibble on even lanes and b's on odd ones.
+fn dtype_i4(a: Param[I32], b: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let w = [I4_TILE]
+  let bytes = [I4_BYTES]
+  let s = [I4_LANES]
+  let blk = tile_at(block_id(0), I4_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * I4_N))
+  let na = unpack_bytes(I4, bytes, pack_bytes(I32, w, load(a, blk, w)))
+  let nb = unpack_bytes(I4, bytes, pack_bytes(I32, w, load(b, blk, w)))
+  let sa = ext_i4(s, na)
+  let sb = ext_i4(s, nb)
+  let ua = ext_u4(s, na)
+  let odd = int_to_mask(s, arange(I4_LANES))
+  let words = (v: Tile[I32]) => unpack_bytes(I32, bytes, pack_bytes(I4, s, trunc_i4(s, v)))
+  store(out, seg(0), w, words(add_i(s, sa, sb)))
+  store(out, seg(1), w, words(shr_i(s, sa, i_const(s, 1))))
+  store(out, seg(2), w, words(shr_i(s, ua, i_const(s, 1))))
+  store(out, seg(3), w, words(mul_i(s, sa, sb)))
+  store(out, seg(4), w, words(select(I32, s, odd, sb, sa)))
+}
+
+# The fp4 kernel: two segments, the storage form and the conversion, the
+# shape knife T3 gave the four narrow float formats.
+#
+# Segment 0 is the BIT PATTERN read: an i32 buffer of packed nibbles becomes
+# an `f4E2M1FN` tile and is widened to f64, so what it asks is which value
+# each of the sixteen encodings is. Segment 1 is the conversion: an f64
+# taken into the format and back, so what it asks is where the rounding
+# boundaries are, what 6.0 saturates from and what happens above it.
+const E2M1_N: Int = 512
+const E2M1_TILE: Int = 128
+const E2M1_BYTES: Int = 64
+const E2M1_WORDS: Int = 16
+
+fn dtype_e2m1(x: Param[I32], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [E2M1_TILE]
+  let bytes = [E2M1_BYTES]
+  let words = [E2M1_WORDS]
+  let b = block_id(0)
+  let bx = tile_at(b, E2M1_WORDS)
+  let by = tile_at(b, E2M1_TILE)
+  let seg = (j: Int) => idx_add(by, idx_const(j * E2M1_N))
+  let nibbles = unpack_bytes(F4E2M1FN, bytes, pack_bytes(I32, words, load(x, bx, words)))
+  store(out, seg(0), s, float_to_float(F4E2M1FN, F64, s, nibbles))
+  store(out, seg(1), s,
+    float_to_float(F4E2M1FN, F64, s, float_to_float(F64, F4E2M1FN, s, load(y, by, s))))
+}
+
+# The round trip: `unpack` then `pack`, twice, once through each sub-byte
+# format, and the answer is the bytes that went in.
+#
+# This is the kernel that says the PAIR is an identity rather than that
+# either one is right, and it says it at two widths: segment 0 through the
+# sub-byte format, where the lane count doubles, and segment 1 through
+# `i16`, where it halves. The dialect's own examples of `pack` are an f16
+# tile and an f4E2M1FN one, and those are the two directions.
+#
+# THIS KERNEL DOES NOT GO THROUGH f4E2M1FN, and that is a measurement.
+# `tileiras` 13.3.36 refuses the TYPE at sm_86 and sm_89 (`Incompatibility
+# with architecture 'sm_86': unsupported type 'f4E2M1FN'`), not merely fp4
+# arithmetic, so even a round trip that converts nothing cannot be loaded on
+# this machine. fp4 therefore stops at layer 1 here exactly as the three fp8
+# formats do, and dtype_e2m1 is where it is spelled.
+fn pack_roundtrip(a: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let w = [I4_TILE]
+  let bytes = [I4_BYTES]
+  let s = [I4_LANES]
+  let halves = [I4_HALVES]
+  let blk = tile_at(block_id(0), I4_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * I4_N))
+  let packed = pack_bytes(I32, w, load(a, blk, w))
+  store(out, seg(0), w,
+    unpack_bytes(I32, bytes, pack_bytes(I4, s, unpack_bytes(I4, bytes, packed))))
+  store(out, seg(1), w,
+    unpack_bytes(I32, bytes, pack_bytes(I16, halves, unpack_bytes(I16, bytes, packed))))
 }
 
 # ---- the multi-launch kernels (knife 16) ----
@@ -4711,6 +4829,15 @@ fn trace(name: String) -> TileProg = match name {
   "dtype_e8m0" ->
     trace_kernel("dtype_e8m0", ["f8E8M0FNU", "f64", "f64"],
       () => dtype_e8m0(param(F8E8M0FNU, 0), param(F64, 1), param(F64, 2)))
+  "dtype_i4" ->
+    trace_kernel("dtype_i4", ["i32", "i32", "i32"],
+      () => dtype_i4(param(I32, 0), param(I32, 1), param(I32, 2)))
+  "dtype_e2m1" ->
+    trace_kernel("dtype_e2m1", ["i32", "f64", "f64"],
+      () => dtype_e2m1(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "pack_roundtrip" ->
+    trace_kernel("pack_roundtrip", ["i32", "i32"],
+      () => pack_roundtrip(param(I32, 0), param(I32, 1)))
   "loop_count" ->
     trace_kernel("loop_count", ["i32", "i32"], () => loop_count(param(I32, 0), param(I32, 1)))
   "loop_bound" ->
@@ -4808,6 +4935,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
       ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
+      ++ "|dtype_i4|dtype_e2m1|pack_roundtrip"
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"

@@ -120,6 +120,7 @@ pub type TileOp =
   | UnaryI(dst: Int, op: String, dtype: String, shape: List[Int], src: Int)
   | BinaryI(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Convert(dst: Int, op: String, from: String, to: String, shape: List[Int], src: Int)
+  | Repack(dst: Int, op: String, from: String, to: String, from_shape: List[Int], to_shape: List[Int], src: Int)
   | Select(dst: Int, dtype: String, shape: List[Int], cond: Int, lhs: Int, rhs: Int)
   | IdxConst(dst: Int, value: Int)
   | IdxAdd(dst: Int, lhs: Int, rhs: Int)
@@ -305,11 +306,81 @@ fn check_binary_int(name: String, op: String) -> Unit =
   }
 
 fn check_convert(name: String, op: String) -> Unit =
-  if one_of(["itof", "ftoi", "ftof", "exti", "trunci", "bitcast"], op) {
+  if one_of(["itof", "ftoi", "ftof", "exti", "extis", "trunci", "bitcast"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a conversion")
   }
+
+# The BITS one lane of a tile element format occupies. Two of the fifteen
+# formats are sub-byte (`i4` and `f4E2M1FN`, both 13.3) and they are the
+# reason this is in bits rather than in bytes: `pack` and `unpack` are the
+# only operations whose shapes are computed from a width, and they are the
+# only ones a half-byte format reaches. `tf32` is 32 bits in a 32-bit slot
+# with thirteen of them unused, which is what PackOp's own verifier says
+# (`isa<FloatTF32Type>` -> 32) and not a rounding of it.
+pub fn dtype_bits(name: String) -> Int = match name {
+  "i1" -> 1
+  "i4" -> 4
+  "f4E2M1FN" -> 4
+  "i8" -> 8
+  "f8E4M3FN" -> 8
+  "f8E5M2" -> 8
+  "f8E8M0FNU" -> 8
+  "i16" -> 16
+  "f16" -> 16
+  "bf16" -> 16
+  "i32" -> 32
+  "f32" -> 32
+  "tf32" -> 32
+  "i64" -> 64
+  "f64" -> 64
+  _ -> panic("tileir: `${name}` has no element width")
+}
+
+# The shape `pack` or `unpack` answers, from the shape it is given. Both
+# operations reinterpret a rank-1 tile's BYTES as another element format,
+# so the lane count scales by the ratio of the two widths and nothing else
+# moves. This is the halving a `pack` of `i4` performs and the doubling its
+# `unpack` undoes; scripts/tile-golden's pack-result-shape-unhalved is the
+# mutant that removes it.
+fn repack_shape(name: String, from: String, to: String, shape: List[Int]) -> List[Int] = {
+  let bits = lanes_of(shape) * dtype_bits(from)
+  if bits % dtype_bits(to) != 0 {
+    refuse(name, "a tile of ${lanes_of(shape)} ${from} lane(s) is not a whole number of ${to} lane(s)")
+  } else {
+    ()
+  }
+  [bits / dtype_bits(to)]
+}
+
+fn lanes_of(shape: List[Int]) -> Int = list.fold(shape, 1, (acc, d) => acc * d)
+
+# `pack` and `unpack` are the two the dialect gives no attribute and a
+# SHAPE CHANGE, which is why they are not on `check_convert`'s list: every
+# name there answers a tile of the operand's shape. PackOp's and UnpackOp's
+# verifiers (one shared `verifyPackUnpackTypes`) say rank 1, different
+# element widths, both sides a whole number of bytes and the same number of
+# them; the i8 side is fixed by the operation and refused here rather than
+# by `tileiras`, because a caller who has the two backwards would otherwise
+# read a message about a type it never wrote.
+fn check_repack(name: String, op: String, from: String, to: String, shape: List[Int]) -> Unit = {
+  if len(shape) != 1 {
+    refuse(name, "`${op}` takes a rank-1 tile, got ${len(shape)} dimension(s)")
+  } else {
+    ()
+  }
+  let (wide, packed) = if op == "pack" { (from, to) } else { (to, from) }
+  if packed != "i8" {
+    refuse(name, "`${op}`'s byte side is an `i8` tile, got `${packed}`")
+  } else if wide == "i8" {
+    refuse(name, "`${op}` needs two different element widths; `bitcast` is the 8-bit one")
+  } else if lanes_of(shape) * dtype_bits(from) % 8 != 0 {
+    refuse(name, "`${op}` of ${lanes_of(shape)} ${from} lane(s) is not a whole number of bytes")
+  } else {
+    ()
+  }
+}
 
 # The read-modify-write modes the dialect defines, spelled as its own
 # assembly does. `add` is the integer sum and `addf` the float one: two
@@ -742,6 +813,14 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Convert(d, op, from, to, shape, a)]
+        d
+      }
+      t_repack(op, from, to, shape, a) => {
+        check_shape(name, shape)
+        check_repack(name, op, from, to, shape)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Repack(d, op, from, to, shape, repack_shape(name, from, to, shape), a)]
         d
       }
       t_select(dtype, shape, cond, a, b) => {
@@ -1278,6 +1357,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   UnaryI(dst, _op, _dtype, _shape, _src) -> [dst]
   BinaryI(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Convert(dst, _op, _from, _to, _shape, _src) -> [dst]
+  Repack(dst, _op, _from, _to, _from_shape, _to_shape, _src) -> [dst]
   Select(dst, _dtype, _shape, _cond, _lhs, _rhs) -> [dst]
   IdxConst(dst, _value) -> [dst]
   IdxAdd(dst, _lhs, _rhs) -> [dst]

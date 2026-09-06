@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, I32, I8, I64, I4}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -507,6 +507,7 @@ pub effect Dev {
   fn t_unaryi(op: String, dtype: String, shape: List[Int], a: Int) -> Int
   fn t_binaryi(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_convert(op: String, from: String, to: String, shape: List[Int], a: Int) -> Int
+  fn t_repack(op: String, from: String, to: String, shape: List[Int], a: Int) -> Int
   fn t_select(dtype: String, shape: List[Int], cond: Int, a: Int, b: Int) -> Int
   fn t_idx_const(value: Int) -> Int
   fn t_idx_add(a: Int, b: Int) -> Int
@@ -1612,6 +1613,67 @@ pub fn trunc_u8(shape: List[Int], a: Tile[I32]) -> Tile[I8] !Dev = {
   h
 }
 
+## The i32 tile holding each lane of the `i4` tile `a` widened with its
+## SIGN, so a nibble reads as a value in [-8, 7]. The dialect has no
+## arithmetic at four bits at all (Types.td leaves `i4` out of
+## `CudaTile_IntTileType`), so this is how a kernel computes over one:
+## widen, compute at 32 bits, `trunc_i4` back.
+##
+## `ext_u4` is the same widening the other way and answers [0, 15]. Which
+## of the two a kernel takes is a device answer on every nibble whose top
+## bit is set, and scripts/tile-gpu-diff's exti-i4-zero-extends is that
+## sentence as a mutant.
+pub fn ext_i4(shape: List[Int], a: Tile[I4]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("extis", "i4", "i32", shape, x)
+  h
+}
+
+## The i32 tile holding each lane of the `i4` tile `a` widened with zeros,
+## so a nibble reads as a value in [0, 15].
+pub fn ext_u4(shape: List[Int], a: Tile[I4]) -> Tile[I32] !Dev = {
+  let x: Int = a
+  let h: Tile[I32] = t_convert("exti", "i4", "i32", shape, x)
+  h
+}
+
+## The `i4` tile holding the LOW NIBBLE of each lane of the i32 tile `a`: a
+## `trunci`, which keeps the bits and drops the rest. The wrap at four bits,
+## and std/gpu's `wrap_i4` is the host reading of the same nibble.
+pub fn trunc_i4(shape: List[Int], a: Tile[I32]) -> Tile[I4] !Dev = {
+  let x: Int = a
+  let h: Tile[I4] = t_convert("trunci", "i32", "i4", shape, x)
+  h
+}
+
+# ---- the byte view knife T9 needs ----
+
+## The rank-1 `i8` tile holding the BYTES of the rank-1 tile `a`, whose
+## format is `from_d` and whose shape is `shape`: the dialect's `pack`. No
+## bit moves; the tile is reinterpreted as the byte array it occupies, so
+## the answer has `lanes * bits(from_d) / 8` lanes.
+##
+## Both tiles must be RANK 1 (PackOp's verifier says so, to leave no
+## ambiguity about which lane is which byte) and `from_d` may not itself be
+## an 8-bit format (`bitcast` is that one). A sub-byte format packs two
+## lanes to a byte, the EVEN lane in the low nibble; Types.td writes that
+## order out and `std/gpu.i4_lo` is the host reading of it.
+pub fn pack_bytes[A: Dtype](from_d: A, shape: List[Int], a: Tile[A]) -> Tile[I8] !Dev = {
+  let x: Int = a
+  let h: Tile[I8] = t_repack("pack", dtype_name(from_d), "i8", shape, x)
+  h
+}
+
+## The rank-1 tile of format `to_d` the rank-1 `i8` tile `a` of `shape`
+## bytes holds: the dialect's `unpack`, and `pack_bytes`'s inverse. The
+## answer has `lanes * 8 / bits(to_d)` lanes, so unpacking a byte tile into
+## a sub-byte format DOUBLES the lane count.
+pub fn unpack_bytes[B: Dtype](to_d: B, shape: List[Int], a: Tile[I8]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_repack("unpack", "i8", dtype_name(to_d), shape, x)
+  h
+}
+
 ## The mask of the lanes at `base` that fall inside a buffer of `limit`
 ## elements: `lanes(base, shape) < limit`. The boundary of every kernel over a
 ## vector whose length is not a multiple of the tile width, and the reason
@@ -2625,6 +2687,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_repack(_op, _from, _to, _shape, _a) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_select(_dtype, _shape, _cond, _a, _b) => {
       let h = next
       next = next + 1
@@ -2932,6 +2999,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_convert(op, from, to, shape, a) => {
       log = log ++ ["convert ${op} ${from} ${to} ${show(shape)} ${a}"]
       20
+    }
+    t_repack(op, from, to, shape, a) => {
+      log = log ++ ["repack ${op} ${from} ${to} ${show(shape)} ${a}"]
+      21
     }
     t_select(dtype, shape, cond, a, b) => {
       log = log ++ ["select ${dtype} ${show(shape)} ${cond} ${a} ${b}"]
@@ -3366,6 +3437,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_unaryi(_op, _dtype, _shape, _a) => 11
       t_binaryi(_op, _dtype, _shape, _a, _b) => 12
       t_convert(_op, _from, _to, _shape, _a) => 13
+      t_repack(_op, _from, _to, _shape, _a) => 14
       t_select(_dtype, _shape, _cond, _a, _b) => 10
       t_idx_const(value) => value + 10
       t_idx_add(_a, _b) => 4

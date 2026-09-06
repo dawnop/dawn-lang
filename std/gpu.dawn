@@ -155,6 +155,40 @@ pub type F8E5M2 = | F8E5M2
 ## never `nearest_even`; this tree writes `zero`.
 pub type F8E8M0FNU = | F8E8M0FNU
 
+# ---- the sub-byte formats knife T9 added ----
+#
+# The last two of the frozen table's fifteen scalar types, and the only two
+# narrower than a byte. Neither is a BUFFER format: `element_bytes` refuses
+# both names, so `gpu_alloc` refuses them and no `Tensor` of one exists.
+# That is the dialect's own shape rather than a limitation of this release.
+# Types.td leaves `i4` out of `CudaTile_AnyInt`, so `ptr<i4>` does not
+# parse, and it leaves both out of every arithmetic operation: an `i4` tile
+# can only be `pack`ed, `unpack`ed, `exti`ed and `trunci`ed, and an
+# `f4E2M1FN` tile can only be those plus `ftof`. A kernel over either one
+# therefore reads BYTES, unpacks them, widens, computes, narrows and packs
+# back, which is what scripts/tile-golden's dtype_i4 and dtype_e2m1 do.
+
+## The 4-bit signed integer format: two elements to the byte, the low
+## nibble first (Types.td spells the order out for a tensor view of it, and
+## `pack` / `unpack` lay a tile down the same way). A two's-complement
+## value in [-8, 7].
+##
+## `dtype_bytes` answers 1 for it, which is the ONE place in this trait
+## where the number is not the element's own width: it is the byte two of
+## them share. `element_bits` is the width, and it is what `pack` and
+## `unpack` compute their shapes from.
+pub type I4 = | I4
+
+## The OCP MX fp4 format: one sign bit, two exponent bits, one significand
+## bit, two elements to the byte. No infinity and no NaN at all, which is
+## what FN means here and is stronger than `f8E4M3FN`'s FN (that one keeps
+## two NaN encodings). Sixteen encodings and sixteen values: +/-0, +/-0.5,
+## +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6.
+##
+## `narrow.round_f4e2m1` is the host reading of a conversion into it and
+## records which of its answers are choices rather than measurements.
+pub type F4E2M1FN = | F4E2M1FN
+
 ## What a device needs to know about an element format. The marker value is
 ## the first argument so the methods can be called by name (spec §3.5: a type
 ## parameter that appears in no argument position cannot be inferred).
@@ -226,6 +260,16 @@ impl Dtype[F8E5M2] {
 impl Dtype[F8E8M0FNU] {
   fn dtype_name(d: F8E8M0FNU) -> String = "f8E8M0FNU"
   fn dtype_bytes(d: F8E8M0FNU) -> Int = 1
+}
+
+impl Dtype[I4] {
+  fn dtype_name(d: I4) -> String = "i4"
+  fn dtype_bytes(d: I4) -> Int = 1
+}
+
+impl Dtype[F4E2M1FN] {
+  fn dtype_name(d: F4E2M1FN) -> String = "f4E2M1FN"
+  fn dtype_bytes(d: F4E2M1FN) -> Int = 1
 }
 
 ## The bytes one element of the named format occupies in a device buffer, or

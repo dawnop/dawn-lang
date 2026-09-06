@@ -268,8 +268,16 @@ fn cast_attrs(op: String, to: String) -> String = match op {
   "ftoi" -> " signed rounding<nearest_int_to_zero>"
   "ftof" -> if to == "f8E8M0FNU" { " rounding<zero>" } else { " rounding<nearest_even>" }
   "exti" -> " unsigned"
+  "extis" -> " signed"
   _ -> ""
 }
+
+# The dialect's spelling of a conversion. `exti` and `extis` are one
+# opcode under two signedness attributes and are two names here for the
+# reason `shri` and `shru` are: the surface that spells one has to say
+# which, and the difference is a device answer on every operand whose top
+# bit is set.
+fn cast_spelling(op: String) -> String = if op == "extis" { "exti" } else { op }
 
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
@@ -324,7 +332,7 @@ fn line(i: Instr) -> String = match i {
     "${v(dst)} = ${int_spelling(op)} ${name(lhs)}, ${name(rhs)}${int_signedness(op)}${int_overflow(op)}"
     ++ " : ${ty(t)}"
   Cast(dst, op, from, to, src) ->
-    "${v(dst)} = ${op} ${name(src)}${cast_attrs(op, elem_of(to))} : ${ty(from)} -> ${ty(to)}"
+    "${v(dst)} = ${cast_spelling(op)} ${name(src)}${cast_attrs(op, elem_of(to))} : ${ty(from)} -> ${ty(to)}"
   SelectTile(dst, cond_ty, t, cond, lhs, rhs) ->
     "${v(dst)} = select ${name(cond)}, ${name(lhs)}, ${name(rhs)} : ${ty(cond_ty)}, ${ty(t)}"
   ForLoop(res, tys, iv, lower, upper, step, unsigned, inits, carried, _body) -> {
