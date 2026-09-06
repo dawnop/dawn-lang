@@ -1727,8 +1727,11 @@ fi
 #     knife T8 wrote down: section padding absorbs a byte, so the file size
 #     is not this family's judgement.
 if run_item alloca-flags-unwritten; then
-  mutant_project alloca-flags-unwritten bytecode.dawn     '    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })'     '    let w1 = emit_op(w0, OP_ALLOCA, t)'
-  writer_mutant_checks alloca-flags-unwritten alloca_scratch func-one-short     "failed to get result type 0 for BitcastOp"
+  mutant_project alloca-flags-unwritten bytecode.dawn \
+    '    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })' \
+    '    let w1 = emit_op(w0, OP_ALLOCA, t)'
+  writer_mutant_checks alloca-flags-unwritten alloca_scratch func-one-short \
+    "failed to get result type 0 for BitcastOp"
 fi
 
 # 48. `alloca` writes its element count where its alignment belongs. Both
@@ -1742,8 +1745,11 @@ fi
 #     192 is a two-byte varint and 8 is one, so the Func section is one
 #     byte LONGER here while the file is again the same length.
 if run_item alloca-alignment-as-num-elem; then
-  mutant_project alloca-alignment-as-num-elem bytecode.dawn     '    emit(emit(w1, num_elem), align)'     '    emit(emit(w1, num_elem), num_elem)'
-  writer_mutant_checks alloca-alignment-as-num-elem alloca_scratch func-one-long     "'cuda_tile.alloca' op 'alignment' must be power of two"
+  mutant_project alloca-alignment-as-num-elem bytecode.dawn \
+    '    emit(emit(w1, num_elem), align)' \
+    '    emit(emit(w1, num_elem), num_elem)'
+  writer_mutant_checks alloca-alignment-as-num-elem alloca_scratch func-one-long \
+    "'cuda_tile.alloca' op 'alignment' must be power of two"
 fi
 
 # 49. `mmaf_scaled` stops writing its last operand. It takes five where
@@ -1754,8 +1760,11 @@ fi
 #     caught it: the arity is the operation's identity and nothing in the
 #     stream repeats it.
 if run_item mmaf-scaled-scale-operand-missing; then
-  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn     '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)'     '    emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale)'
-  writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short     "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
+  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)' \
+    '    emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale)'
+  writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short \
+    "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
 fi
 
 # 50. `mmaf_scaled` writes a flags varint. This is the sibling comparison
@@ -1770,8 +1779,11 @@ fi
 #     Same file length, Func one byte longer, and the same kind of
 #     evidence as trig-extra-flags.
 if run_item mmaf-scaled-writes-a-flags-word; then
-  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn     '    let w1 = emit_op(w0, OP_MMAF_SCALED, t)'     '    let w1 = emit(emit_op(w0, OP_MMAF_SCALED, t), 0)'
-  writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long     "operand index 91 out of bounds (size=77) for operand 2"
+  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn \
+    '    let w1 = emit_op(w0, OP_MMAF_SCALED, t)' \
+    '    let w1 = emit(emit_op(w0, OP_MMAF_SCALED, t), 0)'
+  writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long \
+    "operand index 91 out of bounds (size=77) for operand 2"
 fi
 
 _item_tick ""
