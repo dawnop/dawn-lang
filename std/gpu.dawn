@@ -689,13 +689,17 @@ pub fn size[D](t: Tensor[D]) -> Int = {
 ## format; `gpu_upload` and `gpu_download` move a whole buffer; `gpu_launch`
 ## runs the kernel of that name over a `gx` by `gy` by `gz` grid of tile
 ## blocks with the given buffers as its arguments; `gpu_sync` waits for
-## every launch so far.
+## every launch so far. `gpu_module_global` looks one MODULE-LEVEL SYMBOL up
+## in the module that defines `kernel` and answers a handle over its storage
+## together with the number of elements of `dtype` it holds; a symbol the
+## module does not export answers the device's own refusal.
 ## Handles are opaque integers a program never invents.
 pub effect Gpu {
   fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
   fn gpu_upload(handle: Int, data: List[Float]) -> Result[Unit, ForeignError]
   fn gpu_download(handle: Int) -> Result[List[Float], ForeignError]
   fn gpu_launch(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Result[Unit, ForeignError]
+  fn gpu_module_global(kernel: String, name: String, dtype: String) -> Result[(Int, Int), ForeignError]
   fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
   fn gpu_sync() -> Result[Unit, ForeignError]
 }
@@ -757,6 +761,34 @@ pub fn launch3(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Re
 ## that only reads `block_id(0)` sees the grid it always did.
 pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
   launch3(kernel, grid, 1, 1, args)
+
+## The module-level global named `name`, in the module that defines
+## `kernel`, as a tensor of format `d` over the global's own storage.
+##
+## A global a kernel declared `private` is not part of its module's
+## interface, and a device answers this with its own refusal rather than a
+## handle (`cuda.CUDA_ERROR_NOT_FOUND` from the CUDA driver, whose
+## `cuModuleGetGlobal` is the operation underneath; `gpu.no_module_symbol`
+## from the fake device). That is the whole observable difference between
+## the two symbol visibilities, and it is the reason this operation exists.
+##
+## The tensor SHARES the module's storage: `upload` writes what the next
+## launch reads and `download` reads what the last one wrote, and `free`
+## releases the handle without releasing the memory, which belongs to the
+## module. Two lookups of one symbol answer the SAME handle, so a program
+## cannot hold two aliases of one global and see them disagree.
+##
+## `Err(kind: "gpu.bad_global_size")` when the global's byte size is not a
+## whole number of elements of `d`.
+pub fn module_global[D: Dtype](d: D, kernel: String, name: String) -> Result[Tensor[D], ForeignError] !Gpu =
+  match gpu_module_global(kernel, name, dtype_name(d)) {
+    Ok(p) -> {
+      let (h, n) = p
+      let t: Tensor[D] = (h, n)
+      Ok(t)
+    }
+    Err(e) -> Err(e)
+  }
 
 ## Wait until every launch so far has finished. A launch returning is not the
 ## kernel having run; a download after `sync` sees the kernel's writes.
@@ -4469,6 +4501,41 @@ pub fn global_scratch_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) 
   segments(out, n, 1, (_seg, i) => round_to(dt, out[i] + x[i]))
 }
 
+# ---- knife TG: the module's globals as the host sees them ----
+
+## The third table `global_syms`'s module declares, the one its `constant`
+## global holds. `global_table_a` and `global_table_b` are the other two.
+## Like them it is neither a palindrome nor a splat, and it disagrees with
+## both of them on every lane, so the three segments of one output buffer
+## tell three symbols apart.
+pub fn global_syms_c(n: Int) -> List[Float] =
+  list.map(range(0, n), i => to_float(i) * 0.25 - 40.0)
+
+## `global_syms`: three segments of `n` lanes, each one of the module's
+## three globals plus the input, and the rest of the output buffer left
+## alone. `ins` is `[x, out]`.
+##
+## `frozen` is what the `constant` global holds AT THE TIME OF THE LAUNCH,
+## which is a parameter rather than `global_syms_c(n)` because the host can
+## write a module's global between launches: whether a `constant` one
+## accepts such a write, and whether the next launch reads it, is a question
+## about the device, and a reference that baked the initializer in could not
+## ask it.
+##
+## EXACT TIER BY ALGEBRA: one `addf` per lane with `rounding<nearest_even>`,
+## which is what a binary64 `+` is.
+pub fn global_syms_ref(n: Int, frozen: List[Float], dtypes: List[String],
+    ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let a = global_table_a(n)
+  let b = global_table_b(n)
+  let dt = dtypes[1]
+  segments(ins[1], n, 3, (seg, i) => {
+    let g = if seg == 0 { a[i] } else if seg == 1 { b[i] } else { frozen[i] }
+    round_to(dt, g + x[i])
+  })
+}
+
 # ---- knife T10: `alloca` ----
 
 ## `alloca_scratch`: three times the input, lane by lane. `ins` is
@@ -4555,6 +4622,17 @@ fn bad_write_back(who: String, kernel: String, pos: Int, count: Int) -> ForeignE
   refuse("gpu.bad_write_back",
     "${who}: `${kernel}` writes back to argument ${pos}, and it was launched with ${count} buffer(s)")
 
+fn no_module_symbol(who: String, kernel: String, name: String) -> ForeignError =
+  refuse("gpu.no_module_symbol", "${who}: `${kernel}`'s module exports no global named `${name}`")
+
+fn bad_global_dtype(who: String, kernel: String, name: String, declared: String, asked: String) -> ForeignError =
+  refuse("gpu.bad_global_dtype",
+    "${who}: `${kernel}`'s global `${name}` was declared ${declared} and was asked for as ${asked}")
+
+fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width: Int) -> ForeignError =
+  refuse("gpu.bad_global_size",
+    "${who}: the global `${name}` is ${nbytes} byte(s), which is not a whole number of ${dtype} elements of ${width}")
+
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and a `List[Float]`
 ## holding values of that format, and the formats are `element_bytes`'s
@@ -4572,6 +4650,19 @@ fn bad_write_back(who: String, kernel: String, pos: Int, count: Int) -> ForeignE
 ## check is `upload`'s, above the operation, and is the same code under
 ## every handler.
 ##
+## `gpu_module_global` answers from `globals`, and a name that is not in
+## that kernel's list is `gpu.no_module_symbol`: a fake device's list holds
+## the globals a module EXPORTS, which is the same set a driver's symbol
+## lookup can see, so a `private` global is left out of it exactly as it is
+## left out of a cubin's exported symbols. The handle it answers is an
+## ordinary buffer of this store holding the global's declared contents, so
+## `upload` and `download` reach it the way they reach any other; the
+## element FORMAT it is asked for must be the one the declaration used
+## (`gpu.bad_global_dtype` otherwise), because this store holds values and
+## not bytes and cannot reinterpret one format's storage as another's. A
+## real device can, and this is a place where the model is narrower than
+## the thing modelled.
+##
 ## Pure. Two installations share nothing.
 #
 # No `|> list.map(...)` anywhere in this module's non-test code: the pipe
@@ -4579,10 +4670,21 @@ fn bad_write_back(who: String, kernel: String, pos: Int, count: Int) -> ForeignE
 # into a qualified call, and std has to keep compiling under it so that the
 # mutant reddens the assertions it owns and nothing else (measured: one such
 # pipe here turned every pipe-contract assertion red).
-pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T = {
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T =
+  with_gpu_fake_globals(kernels, map.empty(), body)
+
+## `with_gpu_fake` over a device whose modules also declare STATIC GLOBALS.
+## `globals` maps a kernel name to the globals its module exports, each a
+## symbol name, an element format and the contents its declaration gives
+## them, in declaration order. A kernel with no entry exports none, which is
+## what `with_gpu_fake` installs.
+pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
+    globals: Map[String, List[(String, String, List[Float])]],
+    body: fn() -> T !Gpu) -> T = {
   with handle Gpu {
     var next: Int = 1
     var store: Map[Int, (String, List[Float])] = map.empty()
+    var syms: Map[String, Int] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
       None -> Err(refuse("gpu.unsupported_dtype", "fake device: buffers are f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 or f8E8M0FNU, got ${dtype}"))
       Some(_w) -> {
@@ -4656,6 +4758,44 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
         }
       }
       None -> Err(no_kernel("fake device", kernel))
+    }
+    gpu_module_global(kernel, name, dtype) => {
+      # a handler's state cell cannot be captured by a lambda: read it first
+      let known = syms
+      match map.get(known, kernel ++ "/" ++ name) {
+        Some(h) -> match map.get(store, h) {
+          Some(b) -> {
+            let (dt, v) = b
+            if dt != dtype {
+              Err(bad_global_dtype("fake device", kernel, name, dt, dtype))
+            } else {
+              Ok((h, len(v)))
+            }
+          }
+          None -> Err(no_such_buffer("fake device", h))
+        }
+        None -> {
+          let declared = unwrap_or(map.get(globals, kernel), [])
+          match list.find(declared, g => {
+            let (sym, _dt, _v) = g
+            sym == name
+          }) {
+            None -> Err(no_module_symbol("fake device", kernel, name))
+            Some(g) -> {
+              let (_sym, dt, v) = g
+              if dt != dtype {
+                Err(bad_global_dtype("fake device", kernel, name, dt, dtype))
+              } else {
+                let h = next
+                next = next + 1
+                store = map.insert(store, h, (dt, list.map(v, x => round_to(dt, x))))
+                syms = map.insert(syms, kernel ++ "/" ++ name, h)
+                Ok((h, len(v)))
+              }
+            }
+          }
+        }
+      }
     }
     gpu_free(handle) =>
       if map.has(store, handle) {
@@ -4764,6 +4904,16 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## (1, 1, 1) and no shared memory, which is how a Tile IR kernel is
 ## launched.
 ##
+## `gpu_module_global` loads that kernel's module the same way (so a lookup
+## on a program that never launches loads it, and a launch afterwards reuses
+## it) and asks the driver for the symbol: `cuModuleGetGlobal` answers a
+## device address and a byte size, and the handle registered over them is a
+## borrowed one. `gpu_free` on it drops the handle and leaves the storage
+## alone, since the memory belongs to the module and goes when the context
+## does; every other operation treats it as any other buffer. A symbol the
+## module does not export is the driver's own `cuda.CUDA_ERROR_NOT_FOUND`,
+## which is what a `private` global answers.
+##
 ## The seam is below the error surface: everything the driver refuses
 ## arrives as the `ForeignError` the runtime built from the CUresult, with
 ## kind `cuda.<CUresult name>` (`gpu.no_driver` when there is no libcuda to
@@ -4776,6 +4926,8 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
     var next: Int = 1
     var bufs: Map[Int, (Int, Int, String)] = map.empty()
     var mods: Map[String, Int] = map.empty()
+    var syms: Map[String, Int] = map.empty()
+    var borrowed: Map[Int, Bool] = map.empty()
     gpu_alloc(dtype, len) => match element_bytes(dtype) {
       None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 and f8E8M0FNU, got ${dtype}"))
       Some(w) -> match gpu_alloc_host(len * w) {
@@ -4842,11 +4994,66 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
         }
       None -> Err(no_kernel("real device", kernel))
     }
+    gpu_module_global(kernel, name, dtype) => {
+      # a handler's state cell cannot be captured by a lambda: read it first
+      let known = syms
+      match map.get(known, kernel ++ "/" ++ name) {
+        Some(h) -> match map.get(bufs, h) {
+          Some(b) -> {
+            let (_p, n, _dt) = b
+            Ok((h, n))
+          }
+          None -> Err(no_such_buffer("real device", h))
+        }
+        None -> match element_bytes(dtype) {
+          None -> Err(refuse("gpu.unsupported_dtype", "real device: this release moves f64, i64, i32, tf32, bf16, f16, i16, i8, u8, f8E4M3FN, f8E5M2 and f8E8M0FNU, got ${dtype}"))
+          Some(w) -> match map.get(kernels, kernel) {
+            None -> Err(no_kernel("real device", kernel))
+            Some(cubin) -> {
+              let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
+                Some(m) -> Ok(m)
+                None -> gpu_load_module_host(cubin)
+              }
+              match loaded {
+                Err(e) -> Err(e)
+                Ok(m) -> {
+                  mods = map.insert(mods, kernel, m)
+                  match gpu_module_global_host(m, name) {
+                    Err(e) -> Err(e)
+                    Ok(found) -> {
+                      let p = array_get(found, 0)
+                      let nbytes = array_get(found, 1)
+                      if w <= 0 || nbytes % w != 0 {
+                        Err(bad_global_size("real device", name, nbytes, dtype, w))
+                      } else {
+                        let h = next
+                        next = next + 1
+                        bufs = map.insert(bufs, h, (p, nbytes / w, dtype))
+                        borrowed = map.insert(borrowed, h, true)
+                        syms = map.insert(syms, kernel ++ "/" ++ name, h)
+                        Ok((h, nbytes / w))
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     gpu_free(handle) => match map.get(bufs, handle) {
       Some(b) -> {
         let (p, _n, _dt) = b
         bufs = map.remove(bufs, handle)
-        gpu_free_host(p)
+        # a module's global is the module's memory: the handle goes and the
+        # storage stays, and `cuCtxDestroy` releases it with the module
+        if unwrap_or(map.get(borrowed, handle), false) {
+          borrowed = map.remove(borrowed, handle)
+          Ok(())
+        } else {
+          gpu_free_host(p)
+        }
       }
       None -> Err(no_such_buffer("real device", handle))
     }
@@ -5235,6 +5442,7 @@ test "upload of a vector of the wrong length is refused above the effect" {
       gpu_upload(_handle, _data) => Ok(())
       gpu_download(_handle) => Ok([])
       gpu_launch(_kernel, _gx, _gy, _gz, _args) => Ok(())
+      gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
       gpu_free(_handle) => Ok(())
       gpu_sync() => Ok(())
     }

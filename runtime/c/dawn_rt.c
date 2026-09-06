@@ -4608,6 +4608,7 @@ static struct {
   dawn_cu_result (*memcpy_dtoh)(void *, dawn_cu_deviceptr, size_t);
   dawn_cu_result (*module_load_data)(dawn_cu_module *, const void *);
   dawn_cu_result (*module_get_function)(dawn_cu_function *, dawn_cu_module, const char *);
+  dawn_cu_result (*module_get_global)(dawn_cu_deviceptr *, size_t *, dawn_cu_module, const char *);
   dawn_cu_result (*launch_kernel)(dawn_cu_function, unsigned int, unsigned int, unsigned int,
                                   unsigned int, unsigned int, unsigned int, unsigned int,
                                   void *, void **, void **);
@@ -4683,6 +4684,7 @@ static dawn_adt *dawn_gpu_open(void) {
   DAWN_GPU_SYM(memcpy_dtoh, "cuMemcpyDtoH_v2");
   DAWN_GPU_SYM(module_load_data, "cuModuleLoadData");
   DAWN_GPU_SYM(module_get_function, "cuModuleGetFunction");
+  DAWN_GPU_SYM(module_get_global, "cuModuleGetGlobal_v2");
   DAWN_GPU_SYM(launch_kernel, "cuLaunchKernel");
   dawn_cu_result r = dawn_gpu.init(0);
   if (r != 0) { dawn_adt *e = dawn_gpu_cu_error("cuInit", r); dawn_gpu_reset(); return e; }
@@ -4827,6 +4829,35 @@ dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int
   return dawn_ok(dawn_box_unit(DAWN_UNIT));
 }
 
+/* One module-level symbol, as the driver sees it: cuModuleGetGlobal_v2
+ * answers the device address and the byte size of a global the module
+ * DECLARED PUBLIC, and CUDA_ERROR_NOT_FOUND for a name it does not export
+ * (a `private` global is a local ELF binding and is not exported). The two
+ * numbers cross back as an Array[Int] of exactly two elements, address
+ * first: the array is the shape both backends can name, and a tuple across
+ * this boundary is not. The size is a size_t out-parameter, which is why
+ * the symbol is the _v2 one -- the unversioned cuModuleGetGlobal takes an
+ * unsigned int there and libcuda maps the plain name to it. */
+dawn_adt *dawn_gpu_module_global_host(int64_t module, dawn_str *name) {
+  dawn_adt *e = dawn_gpu_open();
+  if (e != NULL) return e;
+  if (dawn_has_nul(name)) {
+    return dawn_gpu_refuse("gpu.bad_symbol_name", "gpu_module_global_host: symbol name contains NUL");
+  }
+  char *sym = (char *)dawn_alloc((size_t)name->len + 1);
+  if (name->len > 0) memcpy(sym, name->p, (size_t)name->len);
+  sym[name->len] = '\0';
+  dawn_cu_deviceptr p = 0;
+  size_t nbytes = 0;
+  dawn_cu_result r = dawn_gpu.module_get_global(&p, &nbytes, (dawn_cu_module)(intptr_t)module, sym);
+  free(sym);
+  if (r != 0) return dawn_gpu_cu_error("cuModuleGetGlobal_v2", r);
+  dawn_array *a = dawn_array_new();
+  a = dawn_array_push_own(a, dawn_box_int((int64_t)p));
+  a = dawn_array_push_own(a, dawn_box_int((int64_t)nbytes));
+  return dawn_ok(a);
+}
+
 dawn_adt *dawn_gpu_free_host(int64_t devptr) {
   dawn_adt *e = dawn_gpu_open();
   if (e != NULL) return e;
@@ -4898,6 +4929,11 @@ dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int
   (void)gz;
   (void)args;
   return dawn_gpu_refuse_wasi("gpu_launch_host");
+}
+dawn_adt *dawn_gpu_module_global_host(int64_t module, dawn_str *name) {
+  (void)module;
+  (void)name;
+  return dawn_gpu_refuse_wasi("gpu_module_global_host");
 }
 dawn_adt *dawn_gpu_free_host(int64_t devptr) {
   (void)devptr;

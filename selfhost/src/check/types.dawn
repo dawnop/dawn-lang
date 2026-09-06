@@ -3210,6 +3210,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # stay std's. `gpu_launch_host` runs `kernel` from `module` over a
     # `gx` by `gy` by `gz` grid of tile blocks with `args` as its
     # device-pointer parameters in order.
+    # `gpu_module_global_host` answers the device address and the byte size
+    # of one module-level global, as a two-element `Array[Int]`; a name the
+    # module does not export is the driver's own `CUDA_ERROR_NOT_FOUND`.
     # `gpu_close_host` releases the context and the library the first
     # operation opened; std calls it when the handler's body has returned.
     eff1(
@@ -3240,6 +3243,11 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(
       bsig("gpu_launch_host", [TyInt, TyString, TyInt, TyInt, TyInt, TyArray(TyInt)],
         ["module", "kernel", "gx", "gy", "gz", "args"], result_ty(TyUnit, foreign_error_ty())),
+      EIo
+    ),
+    eff1(
+      bsig("gpu_module_global_host", [TyInt, TyString], ["module", "name"],
+        result_ty(TyArray(TyInt), foreign_error_ty())),
       EIo
     ),
     eff1(bsig("gpu_free_host", [TyInt], ["devptr"], result_ty(TyUnit, foreign_error_ty())), EIo),
@@ -3428,7 +3436,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # The GPU primitives: one runtime module, every one std-only. std/gpu is the
   # only caller, and the handler above them is where a device pointer becomes
   # a handle a program cannot forge.
-  for op in ["load_module", "alloc", "upload", "download", "upload_bytes", "download_bytes", "launch", "free", "sync", "close"] {
+  for op in ["load_module", "alloc", "upload", "download", "upload_bytes", "download_bytes", "launch", "module_global", "free", "sync", "close"] {
     rt_of = map.insert(rt_of, "gpu_" ++ op ++ "_host", RtGpu)
     internal = set.insert(internal, "gpu_" ++ op ++ "_host")
   }
