@@ -153,6 +153,12 @@ pub type TileOp =
   | Alloca(dst: Int, dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int])
   | TensorViewOf(dst: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
     dyn_shape: List[Int], dyn_strides: List[Int])
+  | StridedViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int],
+    traversal: List[Int], dim_map: List[Int], padding: Padding)
+  | GatherViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], sparse_dim: Int,
+    padding: Padding)
+  | AtomicRedViewOf(tok_out: Int, dtype: String, view: Int, indices: List[Int], mode: String,
+    scope: String, value: Int, tok_in: Int)
   | PartitionViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding)
   | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int)
@@ -237,6 +243,44 @@ fn check_shape(name: String, shape: List[Int]) -> Unit =
   }
 
 # A tile and the layout it is read with have one stride per dimension.
+# The nine modes an `atomic_red_view_tko` takes. `xchg` is the tenth and is
+# refused by name: a reduction that answers nothing has nothing to exchange
+# (AtomicRedViewTkoOp::verify).
+fn red_modes() -> List[String] =
+  ["and", "or", "xor", "add", "addf", "max", "min", "umax", "umin"]
+
+# The rules `verifyPartitionViewLike` states about a view's own record: a
+# tile of at least one dimension, every dimension a power of two, one
+# `dim_map` entry a tile dimension, no tensor dimension mapped twice, and a
+# special padding value only over a floating point element format. The half
+# that needs the TENSOR VIEW's type is in the lowering, which is where a
+# handle's type is known.
+fn check_view_record(name: String, dtype: String, tile_shape: List[Int], dim_map: List[Int],
+  padding: Padding, what: String) -> Unit = {
+  if len(tile_shape) == 0 {
+    refuse(name, "a ${what}'s tile shape has no dimensions")
+  } else {
+    ()
+  }
+  check_shape(name, tile_shape)
+  if len(dim_map) != len(tile_shape) {
+    refuse(name, "a dim_map maps all ${len(tile_shape)} tile dimension(s), got ${len(dim_map)} mapping(s)")
+  } else {
+    ()
+  }
+  let seen_map = dim_map
+  match list.find(range(0, len(dim_map)), k =>
+      list.any(range(0, k), j => seen_map[j] == seen_map[k])) {
+    Some(k) -> refuse(name, "dim_map maps tensor view dimension ${dim_map[k]} at least twice: ${show(dim_map)}")
+    None -> ()
+  }
+  if padding_is_special(padding) && not is_float_dtype(dtype) {
+    refuse(name, "padding value `${padding_name(padding)}` is only allowed on a floating point element type, got ${dtype}")
+  } else {
+    ()
+  }
+}
+
 fn check_strides(name: String, shape: List[Int], strides: List[Int]) -> Unit =
   if len(shape) != len(strides) {
     refuse(name, "a tile of ${len(shape)} dimension(s) is laid out by ${len(strides)} stride(s)")
@@ -1333,32 +1377,78 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         # The half that needs the tensor view (the ranks matching, and a
         # target dimension being in range) is in the lowering, which is
         # where a handle's type is known.
-        if len(tile_shape) == 0 {
-          refuse(name, "a partition view's tile shape has no dimensions")
+        check_view_record(name, dtype, tile_shape, dim_map, padding, "partition view")
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [PartitionViewOf(d, dtype, view, tile_shape, dim_map, padding)]
+        d
+      }
+      t_strided_view(dtype, view, tile_shape, traversal, dim_map, padding) => {
+        # StridedViewType::verify, the half that reads this record alone:
+        # verifyPartitionViewLike's own rules and then the two the traversal
+        # brings, which are that it is one number a tile dimension and that
+        # every one of them is strictly positive. A traversal of zero would
+        # make every index name the same tile.
+        check_view_record(name, dtype, tile_shape, dim_map, padding, "strided view")
+        if len(traversal) != len(tile_shape) {
+          refuse(name, "expected ${len(tile_shape)} traversal stride(s), got ${len(traversal)}")
         } else {
           ()
         }
-        check_shape(name, tile_shape)
-        if len(dim_map) != len(tile_shape) {
-          refuse(name, "a dim_map maps all ${len(tile_shape)} tile dimension(s), got ${len(dim_map)} mapping(s)")
-        } else {
-          ()
-        }
-        let seen_map = dim_map
-        match list.find(range(0, len(dim_map)), k =>
-            list.any(range(0, k), j => seen_map[j] == seen_map[k])) {
-          Some(k) -> refuse(name, "dim_map maps tensor view dimension ${dim_map[k]} at least twice: ${show(dim_map)}")
+        match list.find(traversal, t => t < 1) {
+          Some(t) -> refuse(name, "traversal strides must be strictly positive but got ${t} in ${show(traversal)}")
           None -> ()
         }
-        if padding_is_special(padding) && not is_float_dtype(dtype) {
-          refuse(name, "padding value `${padding_name(padding)}` is only allowed on a floating point element type, got ${dtype}")
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [StridedViewOf(d, dtype, view, tile_shape, traversal, dim_map, padding)]
+        d
+      }
+      t_gather_view(dtype, view, tile_shape, sparse_dim, padding) => {
+        # GatherScatterViewType::verify, the half that reads this record
+        # alone. There is no `dim_map` here, so `check_view_record` is
+        # handed the identity: the rules it shares with the other two views
+        # are the tile's, and the map is not one of them.
+        check_view_record(name, dtype, tile_shape, range(0, len(tile_shape)), padding,
+          "gather/scatter view")
+        if sparse_dim < 0 || sparse_dim >= len(tile_shape) {
+          refuse(name, "a gather/scatter view of rank ${len(tile_shape)} gathers along dimension ${sparse_dim}, which is not one of 0 to ${len(tile_shape) - 1}")
         } else {
           ()
         }
         let d = next
         next = mint(name, next, 1)
-        ops = ops ++ [PartitionViewOf(d, dtype, view, tile_shape, dim_map, padding)]
+        ops = ops ++ [GatherViewOf(d, dtype, view, tile_shape, sparse_dim, padding)]
         d
+      }
+      t_atomic_red_view(dtype, view, indices, mode, scope, value) => {
+        # The two enum domains the operation NARROWS (Ops.td's
+        # OnlyVariants): nine of the ten atomic modes, and two of the three
+        # memory scopes. Its ordering is narrowed to one value and is
+        # therefore not a parameter here at all. A reduction is a memory
+        # operation, so the region rule every load and store has is here
+        # too.
+        let open = frames
+        if list.any(open, is_pure_region) {
+          refuse(name, "an atomic reduction inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        if not list.any(red_modes(), m => m == mode) {
+          refuse(name, "`${mode}` is not one of the modes an atomic_red_view_tko takes (${show(red_modes())})")
+        } else {
+          ()
+        }
+        if scope != "tl_blk" && scope != "device" {
+          refuse(name, "memory scope `${scope}` is not supported for view-based atomic reductions; use `tl_blk` or `device`")
+        } else {
+          ()
+        }
+        let tv = next
+        next = mint(name, next, 1)
+        ops = ops ++ [AtomicRedViewOf(tv, dtype, view, indices, mode, scope, value, tok)]
+        tok = tv
+        ()
       }
       t_load_view(dtype, view, indices) => {
         let open = frames
@@ -1529,6 +1619,9 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Alloca(dst, _dtype, _num_elem, _align, _shared, _shape) -> [dst]
   TensorViewOf(dst, _param, _dtype, _base, _shape, _strides, _dyn_shape, _dyn_strides) -> [dst]
   PartitionViewOf(dst, _dtype, _view, _tile_shape, _dim_map, _padding) -> [dst]
+  StridedViewOf(dst, _dtype, _view, _tile_shape, _traversal, _dim_map, _padding) -> [dst]
+  GatherViewOf(dst, _dtype, _view, _tile_shape, _sparse_dim, _padding) -> [dst]
+  AtomicRedViewOf(tok_out, _dtype, _view, _indices, _mode, _scope, _value, _tok_in) -> [tok_out]
   LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in) -> [dst, tok_out]
   StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in) -> [tok_out]
   TensorShapeOf(dst, _view, _dim) -> [dst]

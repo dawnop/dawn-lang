@@ -72,7 +72,7 @@ use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, tensor_view_of, MakeTensorView, MakePartitionView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -180,13 +180,20 @@ const OP_UNPACK: Int = 0x70
 const OP_ALLOCA: Int = 0x71
 const OP_MMAF_SCALED: Int = 0x72
 
-# The six opcodes of the view family knives T11 and T12 implement. The
-# other three (`make_gather_scatter_view` 0x73, `make_strided_view` 0x74,
-# `atomic_red_view_tko` 0x75) belong to knife T13.
+# The six opcodes of the view family knives T11 and T12 implement.
 const OP_LOAD_VIEW_TKO: Int = 0x3E
 const OP_MAKE_PARTITION_VIEW: Int = 0x42
 const OP_MAKE_TENSOR_VIEW: Int = 0x43
 const OP_STORE_VIEW_TKO: Int = 0x66
+
+# The three knife T13 implements, which is the rest of the family. The two
+# constructors have `make_partition_view`'s record exactly (a result type
+# and one operand: the whole of the view is in its TYPE); the reduction has
+# `store_view_tko`'s shape with three inline attributes and a value operand,
+# and it answers a token and nothing else.
+const OP_MAKE_GATHER_SCATTER_VIEW: Int = 0x73
+const OP_MAKE_STRIDED_VIEW: Int = 0x74
+const OP_ATOMIC_RED_VIEW_TKO: Int = 0x75
 
 # The two shape queries (knife T12). `get_tensor_shape` asks a
 # `tensor_view` for its tensor's extents; `get_index_space_shape` asks any
@@ -217,6 +224,12 @@ const STORE_FLAG_TOKEN: Int = 8
 const VIEW_FLAG_SCOPE: Int = 1
 const VIEW_FLAG_HINTS: Int = 2
 const VIEW_FLAG_TOKEN: Int = 4
+
+# `atomic_red_view_tko` has neither: its `memory_scope` is a REQUIRED
+# argument (the atomics' rule, not the loads') and it carries no
+# `optimization_hints` at all, so its one optional field is the token
+# operand and that lands on bit 0.
+const ATOMIC_RED_FLAG_TOKEN: Int = 1
 
 # The five values of `PaddingValue` (AttrDefs.td), the enum a partition
 # view's optional parameter carries. dev.dawn's `Padding` is the surface
@@ -515,6 +528,18 @@ fn rmw_attrs(mode: String) -> (String, Int, Int) = match mode {
   _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)
 }
 
+# The `memory_scope` a view-based atomic reduction was given by name. It is
+# a REQUIRED argument of that operation rather than an optional attribute,
+# so it is always written and there is no flag bit for it; the operation
+# narrows the domain to two of the three values and the recording handler
+# is what refuses the third.
+fn scope_value(scope: String) -> Int = match scope {
+  "tl_blk" -> SCOPE_TL_BLK
+  "device" -> SCOPE_DEVICE
+  "sys" -> SCOPE_SYS
+  _ -> panic("tileir: `${scope}` is not a memory scope")
+}
+
 fn rmw_mode_value(mode: String) -> Int = match mode {
   "and" -> 0
   "or" -> 1
@@ -804,6 +829,8 @@ const TAG_TENSOR_VIEW: Int = 14
 const TAG_PARTITION_VIEW: Int = 15
 const TAG_FUNC: Int = 16
 const TAG_TOKEN: Int = 17
+const TAG_GATHER_SCATTER_VIEW: Int = 20
+const TAG_STRIDED_VIEW: Int = 21
 
 # Section ids (BytecodeEnums.h).
 const SEC_STRING: Int = 1
@@ -1150,7 +1177,66 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
     }
     ty_of(w1, bytes.freeze(b5))
   }
+  # The tag, the unified bitfield, then FIVE parameters in declaration
+  # order: `tile_shape`, `traversal_strides` (a second DenseI32ArrayAttr and
+  # therefore the same shape on the wire), the tensor view's type index,
+  # `dim_map`, and `padding_value` last.
+  #
+  # There is NO 13.2 path here, and that is the one thing this type says
+  # that `partition_view` cannot. tblgen writes the bitfield under
+  # `config.bytecodeVersion >= kUnifiedBitfieldVersion` only for a type that
+  # entered BEFORE 13.3; `StridedViewType` entered AT 13.3, so
+  # `generateOptionalParamFlags` takes its unconditional branch and the
+  # varint is always there. A reader that did not expect it has no 13.2
+  # spelling of this type to fall back on, because there is none.
+  StridedView(tile_shape, traversal, e, shape, strides, dim_map, padding) -> {
+    let (w1, tvi) = ty(w, tensor_view_of(t))
+    let code = padding_code(padding)
+    let b0 = view_bitfield(bytes.put(bytes.buf(), TAG_STRIDED_VIEW), code)
+    let b1 = put_i32_array(put_i32_array(b0, tile_shape), traversal)
+    let b2 = put_i32_array(put_varint(b1, tvi), dim_map)
+    ty_of(w1, bytes.freeze(put_padding(b2, code)))
+  }
+  # The same shape with two parameters fewer and one more: no
+  # `traversal_strides` and no `dim_map`, and a `sparse_dim` after the
+  # tensor view. It is a `uint32_t` rather than an array or an attribute, so
+  # tblgen's scalar template writes it as a PLAIN VARINT with no count and
+  # no tag (`serializeUInt32ScalarTemplate`).
+  GatherScatterView(tile_shape, e, shape, strides, sparse_dim, padding) -> {
+    let (w1, tvi) = ty(w, tensor_view_of(t))
+    let code = padding_code(padding)
+    let b0 = view_bitfield(bytes.put(bytes.buf(), TAG_GATHER_SCATTER_VIEW), code)
+    let b1 = put_i32_array(b0, tile_shape)
+    let b2 = put_varint(put_varint(b1, tvi), sparse_dim)
+    ty_of(w1, bytes.freeze(put_padding(b2, code)))
+  }
 }
+
+# The unified optional-parameter bitfield of knife T13's two types: one
+# varint between the tag and the first parameter, with a bit per OPTIONAL
+# parameter in declaration order. Both types have exactly one
+# (`padding_value`), so the varint is 1 when it is there and 0 when it is
+# not, and the payload still goes at the parameter's own position.
+fn view_bitfield(b: bytes.Buf, code: Option[Int]) -> bytes.Buf = match code {
+  Some(_c) -> put_varint(b, 1)
+  None -> put_varint(b, 0)
+}
+
+# `padding_value` at its own position, or nothing. The bitfield above says
+# which, and the two must agree: the reader stops at the end of the
+# parameters it knows about, so a payload nobody was told about is simply
+# never looked at.
+fn put_padding(b: bytes.Buf, code: Option[Int]) -> bytes.Buf = match code {
+  Some(c) -> put_varint(b, c)
+  None -> b
+}
+
+# A `DenseI32ArrayAttr` or an `ArrayRef<int32_t>` on the wire: the count as
+# a varint, then FOUR raw little-endian bytes an element. `writeLEVarSize`
+# is one function for both, which is why `tile_shape`, `traversal_strides`
+# and `dim_map` are one shape here too.
+fn put_i32_array(b: bytes.Buf, xs: List[Int]) -> bytes.Buf =
+  list.fold(xs, put_varint(b, len(xs)), (v, x) => put_le(v, x, 4))
 
 fn func_ty(w: W, ins: List[Int], outs: List[Int]) -> (W, Int) = {
   let b0 = put_varint(bytes.put(bytes.buf(), TAG_FUNC), len(ins))
@@ -1712,7 +1798,16 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # word, and one bare operand index: the whole of the partitioning is
     # in the RESULT TYPE.
     emit_ref(emit_op(w0, OP_MAKE_PARTITION_VIEW, t), src)
-  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_ty, t, tok_in) -> {
+  # The two knife T13 constructors have that record exactly: their
+  # `Ops.td` entries declare one `tensor_view` operand and one result and
+  # nothing else, so the traversal, the dim map, the sparse dimension and
+  # the padding are all in the result type and none of them is in the
+  # instruction stream.
+  MakeStridedView(_dst, src, _src_ty, t) ->
+    emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)
+  MakeGatherScatterView(_dst, src, _src_ty, t) ->
+    emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)
+  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_tys, t, tok_in) -> {
     # results: the count (2, written because `index` is variadic), the tile
     # and the token; flags: the token bit, and neither `memory_scope` nor
     # `optimization_hints`; then the required `memory_ordering_semantics`
@@ -1725,7 +1820,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w4 = emit(emit_ref(w3, view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
-  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_ty, tok_in) -> {
+  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in) -> {
     # The same, with one result and the tile operand FIRST: the dialect's
     # argument order is `tile`, `view`, `index`, `token`, which is the
     # reverse of how the assembly reads for the first two.
@@ -1734,6 +1829,22 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let w3 = emit(w2, ORDER_WEAK)
     let w4 = emit(emit_ref(emit_ref(w3, value), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
+  }
+  AtomicRedViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, mode, scope,
+    tok_in) -> {
+    # ONE result (the token) and a count for it: `index` is variadic, so
+    # `Operator::isVariadic()` is true and the count is written even though
+    # the operation has exactly one result. Then the flags, whose only bit
+    # is the token operand. Then the three REQUIRED attributes inline, in
+    # declaration order: `memory_ordering_semantics` (which the operation
+    # narrows to `relaxed`), `memory_scope`, `mode`. Then the operands in
+    # declaration order with the attributes taken out: the view with no
+    # count, the indices with one, the value, and the token.
+    let (w1, tk) = ty(w0, Token)
+    let w2 = emit(emit(emit(emit(w1, OP_ATOMIC_RED_VIEW_TKO), 1), tk), ATOMIC_RED_FLAG_TOKEN)
+    let w3 = emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), rmw_mode_value(mode))
+    let w4 = emit(emit_ref(w3, view), len(indices))
+    emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)
   }
   Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)
 }
@@ -2876,6 +2987,108 @@ test "make_tensor_view writes a result count and an empty count for each variadi
   assert hex(bytes.freeze(q.body)) == "42" ++ "02" ++ "00"
 }
 
+# ---- knife T13: the rest of the view family
+
+test "a strided view writes the unified bitfield with no version check, and its traversal after its tile" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # tag 21, the bitfield (bit 0 is `padding_value`, the type's one optional
+  # parameter), then the five parameters in declaration order: the tile
+  # shape, the TRAVERSAL STRIDES (a second DenseI32ArrayAttr, so the same
+  # four bytes an element), the tensor view's type index, the dim map, and
+  # the padding code. `nan` is 2.
+  let (w1, i) = ty(w0, StridedView([2, 2], [1, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadNan))
+  assert hex(w1.types.items[i])
+    == "15" ++ "01"
+    ++ "02" ++ "02000000" ++ "02000000"
+    ++ "02" ++ "01000000" ++ "02000000"
+    ++ "01"
+    ++ "02" ++ "00000000" ++ "01000000"
+    ++ "02"
+  # With no padding the bitfield word is zero and the parameter's own
+  # position carries nothing. Unlike a partition view there is no 13.2
+  # spelling to fall back on: this type entered AT 13.3, so tblgen writes
+  # the bitfield with no version check at all.
+  let (w2, j) = ty(w1, StridedView([2, 2], [2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], NoPadding))
+  assert hex(w2.types.items[j])
+    == "15" ++ "00"
+    ++ "02" ++ "02000000" ++ "02000000"
+    ++ "02" ++ "02000000" ++ "02000000"
+    ++ "01"
+    ++ "02" ++ "00000000" ++ "01000000"
+  assert TAG_STRIDED_VIEW == 21
+}
+
+test "a gather/scatter view has no dim_map and writes sparse_dim as a plain varint" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # tag 20, the bitfield, the tile shape, the tensor view's type index, then
+  # `sparse_dim`. It is a `uint32_t` parameter and not an array or an
+  # attribute, so tblgen's scalar template writes ONE varint with no count
+  # and no tag in front of it.
+  let (w1, i) = ty(w0, GatherScatterView([8, 16], Num("f64"), [64, 16], [16, 1], 0, NoPadding))
+  assert hex(w1.types.items[i])
+    == "14" ++ "00"
+    ++ "02" ++ "08000000" ++ "10000000"
+    ++ "01"
+    ++ "00"
+  # and with a padding value the bitfield is 1 and the code comes AFTER
+  # sparse_dim, because `padding_value` is the last parameter declared.
+  let (w2, j) = ty(w1, GatherScatterView([8, 16], Num("f64"), [64, 16], [16, 1], 1, PadNan))
+  assert hex(w2.types.items[j])
+    == "14" ++ "01"
+    ++ "02" ++ "08000000" ++ "10000000"
+    ++ "01"
+    ++ "01"
+    ++ "02"
+  assert TAG_GATHER_SCATTER_VIEW == 20
+}
+
+test "the two view constructors of knife T13 have make_partition_view's record exactly" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
+    index: map.from([(0, 0)]), nvals: 1 }
+  let tv = TensorView(Num("f64"), [8, 4], [4, 1])
+  # f64, then the tensor view, then the view itself: the third type, so the
+  # result type index is 2. No result count (nothing is variadic), no flags
+  # word (nothing is optional) and one bare operand.
+  let sv = StridedView([2, 2], [1, 2], Num("f64"), [8, 4], [4, 1], [0, 1], NoPadding)
+  let a = encode_instr(w0, MakeStridedView(9, Val(0), tv, sv))
+  assert hex(bytes.freeze(a.body)) == "74" ++ "02" ++ "00"
+  let gv = GatherScatterView([2, 2], Num("f64"), [8, 4], [4, 1], 0, NoPadding)
+  let b = encode_instr(w0, MakeGatherScatterView(9, Val(0), tv, gv))
+  assert hex(bytes.freeze(b.body)) == "73" ++ "02" ++ "00"
+  assert OP_MAKE_STRIDED_VIEW == 0x74 && OP_MAKE_GATHER_SCATTER_VIEW == 0x73
+}
+
+test "atomic_red_view_tko writes one result count, three inline attributes and the value after the indices" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(),
+    index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let tile = Tile([2, 2], Num("f64"))
+  let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], NoPadding)
+  let idx = Tile([], Num("i32"))
+  # the opcode, the result COUNT 1 (`index` is variadic, so the generated
+  # writer writes it even for one result), the token's type index, the flags
+  # (bit 0, the token operand: this operation has no optional ATTRIBUTE at
+  # all, so its scope is not a flag the way a load's is), then `relaxed`,
+  # `device` and the mode `addf` inline, then the view, the index count, the
+  # two indices, the value and the token.
+  let r = encode_instr(w0, AtomicRedViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
+    [idx, idx], "addf", "device", Val(3)))
+  assert hex(bytes.freeze(r.body))
+    == "75" ++ "01" ++ "00" ++ "01"
+    ++ "01" ++ "01" ++ "04"
+    ++ "00" ++ "02" ++ "01" ++ "02" ++ "04" ++ "03"
+  assert ATOMIC_RED_FLAG_TOKEN == 1
+  assert (scope_value("tl_blk"), scope_value("device")) == (0, 1)
+  # the block-scoped spelling moves exactly one byte, which is the whole of
+  # what the scope is on the wire
+  let b = encode_instr(w0, AtomicRedViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
+    [idx, idx], "addf", "tl_blk", Val(3)))
+  assert hex(bytes.freeze(b.body))
+    == "75" ++ "01" ++ "00" ++ "01"
+    ++ "01" ++ "00" ++ "04"
+    ++ "00" ++ "02" ++ "01" ++ "02" ++ "04" ++ "03"
+  assert OP_ATOMIC_RED_VIEW_TKO == 0x75
+}
+
 test "load_view_tko is two results and one index count, and store_view_tko puts the tile before the view" {
   let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
   let tile = Tile([2, 2], Num("f64"))
@@ -2887,7 +3100,7 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # and no padding operand: a view says what an out-of-bounds lane reads in
   # its TYPE.
   let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
-    Tile([], Num("i32")), tile, Val(3)))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3)))
   assert hex(bytes.freeze(ld.body))
     == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   assert VIEW_FLAG_TOKEN == 4
@@ -2895,7 +3108,7 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # the dialect's `arguments` order, which is the reverse of how the
   # assembly reads the two.
   let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
-    Tile([], Num("i32")), Val(3)))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3)))
   assert hex(bytes.freeze(st.body))
     == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
 }

@@ -501,6 +501,16 @@ pub opaque type Ptrs[D] = Int
 ## tensor into, so its rank is the tile's rank and its extent along `k` is
 ## `ceil(shape[dim_map[k]] / tile_shape[k])`.
 ##
+## `t_strided_view` and `t_gather_view` are the other two views (knife
+## T13). A strided view is a partition view whose TRAVERSAL is parametric:
+## index `k` advances `traversal[k]` elements rather than `tile_shape[k]`,
+## so consecutive tiles may overlap or skip. A gather/scatter view has no
+## `dim_map`: its index at `sparse_dim` is a 1D tile of ROW NUMBERS rather
+## than a tile index, and `t_load_view` takes that handle in that position.
+## `t_atomic_red_view` reduces a whole tile into one tile of a partition or
+## a strided view's grid and answers nothing, so it is a `Unit` operation
+## that still moves the token chain on.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
@@ -577,6 +587,12 @@ pub effect Dev {
     dyn_shape: List[Int], dyn_strides: List[Int]) -> Int
   fn t_partition_view(dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding) -> Int
+  fn t_strided_view(dtype: String, view: Int, tile_shape: List[Int], traversal: List[Int],
+    dim_map: List[Int], padding: Padding) -> Int
+  fn t_gather_view(dtype: String, view: Int, tile_shape: List[Int], sparse_dim: Int,
+    padding: Padding) -> Int
+  fn t_atomic_red_view(dtype: String, view: Int, indices: List[Int], mode: String, scope: String,
+    value: Int) -> Unit
   fn t_load_view(dtype: String, view: Int, indices: List[Int]) -> Int
   fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
   fn t_tensor_shape(view: Int, dim: Int) -> Int
@@ -594,10 +610,32 @@ pub fn is_float_dtype(name: String) -> Bool =
 ## `D` is a phantom, as `Tile[D]`'s is.
 pub opaque type TensorView[D] = Int
 
-## A `partition_view` value inside a kernel: a `tensor_view` cut into a grid
-## of equally sized tiles. `load_view` and `store_view` index the GRID, one
-## index a tile dimension, and the tile they move is `tile_shape` wide.
-pub opaque type PartitionView[D] = Int
+## A GRID view value inside a kernel: a `tensor_view` cut into a grid of
+## equally sized tiles, which is a `partition_view` when the grid steps by
+## the tile and a `strided_view` when it steps by something else.
+## `load_view` and `store_view` index the GRID, one index a tile dimension,
+## and the tile they move is `tile_shape` wide. Knife T11 called this type
+## `PartitionView[D]`; knife T13 renamed it when `strided_view` became the
+## second constructor answering it, because the two are ONE surface: they
+## differ in what the type says and in nothing a kernel does with the
+## handle.
+pub opaque type GridView[D] = Int
+
+## A `gather_scatter_view` value inside a kernel (knife T13). It is a grid
+## view in every dimension but `sparse_dim`, where the index is a 1D tile of
+## ROW NUMBERS rather than one tile index: a load collects those rows and
+## stacks them into the tile. It is a type of its own rather than a
+## `GridView[D]` because its indices are a different shape, which is what
+## `GatherIdx` spells, and because `atomic_red_view_tko` refuses it.
+pub opaque type GatherScatterView[D] = Int
+
+## One index of a gather/scatter load or store: `At` is the tile index every
+## other view takes at every dimension, and `Rows` is the 1D tile the sparse
+## dimension takes. Its length must be the tile's own extent there, which
+## the lowering holds it to.
+pub type GatherIdx =
+  | At(i: Idx)
+  | Rows(t: Tile[I32])
 
 ## The extent (or the stride) of a tensor view dimension that is not known
 ## until the kernel runs: the dialect prints it `?` and carries its value in
@@ -673,6 +711,14 @@ pub fn padding_name(p: Padding) -> String = match p {
 pub fn padding_is_special(p: Padding) -> Bool = match p {
   NoPadding -> false
   PadZero -> false
+  _ -> true
+}
+
+## Whether the view carries a `padding_value` at all. An
+## `atomic_red_view_tko` refuses one (AtomicRedViewTkoOp::verify) and a
+## load past the end of the tensor reads it.
+pub fn padding_present(p: Padding) -> Bool = match p {
+  NoPadding -> false
   _ -> true
 }
 
@@ -2679,7 +2725,7 @@ pub fn tensor_dim[D](tv: TensorView[D], dim: Int) -> Idx !Dev = {
 ## `ceil(shape[dim_map[dim]] / tile_shape[dim])` computed where the tensor's
 ## extent is known, which for a dynamic tensor is only on the device.
 ## `view_grid` is the same number computed on the host from a static shape.
-pub fn index_space_dim[D](v: PartitionView[D], dim: Int) -> Idx !Dev = {
+pub fn index_space_dim[D](v: GridView[D], dim: Int) -> Idx !Dev = {
   let x: Int = v
   let h: Idx = t_index_space_shape(x, dim)
   h
@@ -2720,16 +2766,50 @@ pub fn idx_as_scalar(i: Idx) -> Scalar[I32] = {
 ## divided by `tile_shape[k]`, rounded up: a tile may run past the end of
 ## the tensor and a tile index may not. `d_view_grid` computes it.
 pub fn partition_view[D: Dtype](d: D, tv: TensorView[D], tile_shape: List[Int],
-  dim_map: List[Int], padding: Padding) -> PartitionView[D] !Dev = {
+  dim_map: List[Int], padding: Padding) -> GridView[D] !Dev = {
   let v: Int = tv
-  let r: PartitionView[D] = t_partition_view(dtype_name(d), v, tile_shape, dim_map, padding)
+  let r: GridView[D] = t_partition_view(dtype_name(d), v, tile_shape, dim_map, padding)
+  r
+}
+
+## `tv` cut into a grid of `tile_shape` tiles that ADVANCES by `traversal`
+## (knife T13): index `k` of the grid covers `traversal[k]` elements along
+## the tensor dimension `dim_map[k]` and reads `tile_shape[k]` of them, so
+## the tiles overlap when the traversal is the shorter and skip when it is
+## the longer. `traversal == tile_shape` is `partition_view` written the
+## long way, and the dialect's own documentation says so.
+##
+## Every traversal stride is STRICTLY POSITIVE and the tile dimensions are
+## powers of two, which is `StridedViewType::verify` and is what the
+## recording handler holds. The index space along `k` is
+## `ceil(shape[dim_map[k]] / traversal[k])`: `strided_grid` computes it, and
+## partial tiles at the far end are IN it (the dialect includes them).
+pub fn strided_view[D: Dtype](d: D, tv: TensorView[D], tile_shape: List[Int],
+  traversal: List[Int], dim_map: List[Int], padding: Padding) -> GridView[D] !Dev = {
+  let v: Int = tv
+  let r: GridView[D] = t_strided_view(dtype_name(d), v, tile_shape, traversal, dim_map, padding)
+  r
+}
+
+## `tv` read a row at a time along `sparse_dim` (knife T13). The index at
+## that dimension is a 1D tile of row numbers rather than a tile index, so
+## one load collects `tile_shape[sparse_dim]` rows chosen while the kernel
+## runs and stacks them into the tile; every other dimension is a grid view's
+## tile index.
+##
+## There is no `dim_map`: what the dialect holds against the tensor view
+## instead is that `sparse_dim` is one of its dimensions.
+pub fn gather_scatter_view[D: Dtype](d: D, tv: TensorView[D], tile_shape: List[Int],
+  sparse_dim: Int, padding: Padding) -> GatherScatterView[D] !Dev = {
+  let v: Int = tv
+  let r: GatherScatterView[D] = t_gather_view(dtype_name(d), v, tile_shape, sparse_dim, padding)
   r
 }
 
 ## The tile of `v`'s grid at `indices`, one index a tile dimension. In the
 ## token chain where every other load is; lanes that fall outside the
 ## underlying tensor read the view's padding value.
-pub fn load_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx]) -> Tile[D] !Dev = {
+pub fn load_view[D: Dtype](d: D, v: GridView[D], indices: List[Idx]) -> Tile[D] !Dev = {
   let x: Int = v
   let r: Tile[D] = t_load_view(dtype_name(d), x, list.map(indices, i => {
     let k: Int = i
@@ -2742,13 +2822,67 @@ pub fn load_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx]) -> Til
 ## where every other store is; lanes that fall outside the underlying
 ## tensor are MASKED, which is the store's half of the same rule the
 ## padding value is the load's half of.
-pub fn store_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx], t: Tile[D]) -> Unit !Dev = {
+pub fn store_view[D: Dtype](d: D, v: GridView[D], indices: List[Idx], t: Tile[D]) -> Unit !Dev = {
   let x: Int = v
   let y: Int = t
   t_store_view(dtype_name(d), x, list.map(indices, i => {
     let k: Int = i
     k
   }), y)
+}
+
+## The handle behind one `GatherIdx`, whichever kind it is. Both are `Int`
+## under the opaque types, and which one is legal WHERE is the view's own
+## rule, held in the lowering against the type.
+fn gather_handle(g: GatherIdx) -> Int = match g {
+  At(i) -> {
+    let h: Int = i
+    h
+  }
+  Rows(t) -> {
+    let h: Int = t
+    h
+  }
+}
+
+## The tile `v` gathers at `indices`: the rows named by the `Rows` entry at
+## `sparse_dim`, each cut to the tile at the `At` indices of the other
+## dimensions. In the token chain where every other load is.
+pub fn load_gather[D: Dtype](d: D, v: GatherScatterView[D], indices: List[GatherIdx]) -> Tile[D] !Dev = {
+  let x: Int = v
+  let r: Tile[D] = t_load_view(dtype_name(d), x, list.map(indices, gather_handle))
+  r
+}
+
+## `t` scattered back the way `load_gather` collects: row `k` of the tile
+## goes to the row the `Rows` entry names at `k`. In the token chain where
+## every other store is.
+pub fn store_gather[D: Dtype](d: D, v: GatherScatterView[D], indices: List[GatherIdx],
+  t: Tile[D]) -> Unit !Dev = {
+  let x: Int = v
+  let y: Int = t
+  t_store_view(dtype_name(d), x, list.map(indices, gather_handle), y)
+}
+
+## `t` reduced into the tile of `v`'s grid at `indices`, one element at a
+## time and ATOMICALLY: `atomic_red_view_tko` (knife T13). Unlike
+## `atomic_rmw`, it answers nothing at all, so two tile blocks may reduce
+## into one tile of the grid and the result does not depend on the order
+## they arrive in.
+##
+## `mode` is one of the nine the operation takes (`and`, `or`, `xor`, `add`,
+## `addf`, `max`, `min`, `umax`, `umin`; `xchg` is refused because a
+## reduction that returns nothing cannot exchange). `scope` is `tl_blk` or
+## `device`; the ordering is always `relaxed`, which is the only one the
+## dialect allows here. A view carrying a `padding_value` is refused.
+pub fn atomic_red_view[D: Dtype](d: D, v: GridView[D], indices: List[Idx], mode: String,
+  scope: String, t: Tile[D]) -> Unit !Dev = {
+  let x: Int = v
+  let y: Int = t
+  t_atomic_red_view(dtype_name(d), x, list.map(indices, i => {
+    let k: Int = i
+    k
+  }), mode, scope, y)
 }
 
 ## The extent of a partition view's index space, as the grid a kernel over
@@ -2758,6 +2892,14 @@ pub fn store_view[D: Dtype](d: D, v: PartitionView[D], indices: List[Idx], t: Ti
 pub fn view_grid(shape: List[Int], tile_shape: List[Int], dim_map: List[Int]) -> List[Int] =
   list.map(range(0, len(tile_shape)), k =>
       (shape[dim_map[k]] + tile_shape[k] - 1) / tile_shape[k])
+
+## The same for a STRIDED view, where the grid steps by the traversal and
+## not by the tile: `ceil(shape[dim_map[k]] / traversal[k])`. Partial tiles
+## at the far end of the tensor are in the index space, which is why this
+## rounds up exactly as `view_grid` does.
+pub fn strided_grid(shape: List[Int], traversal: List[Int], dim_map: List[Int]) -> List[Int] =
+  list.map(range(0, len(traversal)), k =>
+      (shape[dim_map[k]] + traversal[k] - 1) / traversal[k])
 
 ## The tile the pointers in `ps` point at, unmasked. In the token chain
 ## where `load` is, and ordered against every other memory operation the
@@ -3135,6 +3277,17 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_strided_view(_dtype, _view, _tile_shape, _traversal, _dim_map, _padding) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_gather_view(_dtype, _view, _tile_shape, _sparse_dim, _padding) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_atomic_red_view(_dtype, _view, _indices, _mode, _scope, _value) => ()
     t_load_view(_dtype, _view, _indices) => {
       let h = next
       next = next + 1
@@ -3439,6 +3592,19 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_partition_view(dtype, view, tile_shape, dim_map, padding) => {
       log = log ++ ["partition_view ${dtype} ${view} ${show(tile_shape)} ${show(dim_map)} ${padding_name(padding)}"]
       81
+    }
+    t_strided_view(dtype, view, tile_shape, traversal, dim_map, padding) => {
+      log = log ++ ["strided_view ${dtype} ${view} ${show(tile_shape)} ${show(traversal)}"
+          ++ " ${show(dim_map)} ${padding_name(padding)}"]
+      85
+    }
+    t_gather_view(dtype, view, tile_shape, sparse_dim, padding) => {
+      log = log ++ ["gather_view ${dtype} ${view} ${show(tile_shape)} ${sparse_dim}"
+          ++ " ${padding_name(padding)}"]
+      86
+    }
+    t_atomic_red_view(dtype, view, indices, mode, scope, value) => {
+      log = log ++ ["atomic_red_view ${dtype} ${view} ${show(indices)} ${mode} ${scope} ${value}"]
     }
     t_load_view(dtype, view, indices) => {
       log = log ++ ["load_view ${dtype} ${view} ${show(indices)}"]
@@ -3818,6 +3984,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => 79
       t_tensor_view(_param, _dtype, _base, _shape, _strides, _dyn_shape, _dyn_strides) => 80
       t_partition_view(_dtype, _view, _tile_shape, _dim_map, _padding) => 81
+      t_strided_view(_dtype, _view, _tile_shape, _traversal, _dim_map, _padding) => 85
+      t_gather_view(_dtype, _view, _tile_shape, _sparse_dim, _padding) => 86
+      t_atomic_red_view(_dtype, _view, _indices, _mode, _scope, _value) => ()
       t_load_view(_dtype, _view, _indices) => 82
       t_store_view(_dtype, _view, _indices, _value) => ()
       t_tensor_shape(_view, _dim) => 83

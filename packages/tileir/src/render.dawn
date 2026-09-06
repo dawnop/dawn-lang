@@ -16,9 +16,9 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, NoPadding, padding_name, DYN_DIM}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -36,13 +36,47 @@ pub fn ty(t: Ty) -> String = match t {
     ++ ", strides=[" ++ commas(list.map(strides, extent)) ++ "]>"
   PartitionView(tile_shape, e, shape, strides, dim_map, padding) ->
     "partition_view<tile=(" ++ crosses(tile_shape) ++ ")"
-    ++ match padding {
-      NoPadding -> ""
-      _ -> ", padding_value = ${padding_name(padding)}"
-    }
+    ++ pad_clause(padding)
     ++ ", " ++ ty(TensorView(e, shape, strides))
     ++ ", dim_map=[" ++ commas(list.map(dim_map, k => "${k}")) ++ "]>"
+  # `StridedViewType::print`'s order: the tile, the traversal strides, the
+  # padding value if there is one, the tensor view, the dim map.
+  StridedView(tile_shape, traversal, e, shape, strides, dim_map, padding) ->
+    "strided_view<tile=(" ++ crosses(tile_shape) ++ ")"
+    ++ ", traversal_strides=[" ++ commas(list.map(traversal, k => "${k}")) ++ "]"
+    ++ pad_clause(padding)
+    ++ ", " ++ ty(TensorView(e, shape, strides))
+    ++ ", dim_map=[" ++ commas(list.map(dim_map, k => "${k}")) ++ "]>"
+  # `GatherScatterViewType::print`'s: the tile, the padding value if there
+  # is one, the tensor view, and `sparse_dim` LAST rather than a dim map.
+  GatherScatterView(tile_shape, e, shape, strides, sparse_dim, padding) ->
+    "gather_scatter_view<tile=(" ++ crosses(tile_shape) ++ ")"
+    ++ pad_clause(padding)
+    ++ ", " ++ ty(TensorView(e, shape, strides))
+    ++ ", sparse_dim=${sparse_dim}>"
 }
+
+# The `padding_value` clause of a view type, which the printer leaves out
+# entirely when the parameter is absent. All three views spell it the same
+# way and in the same place: right after the tile.
+fn pad_clause(padding: Padding) -> String = match padding {
+  NoPadding -> ""
+  _ -> ", padding_value = ${padding_name(padding)}"
+}
+
+# The index types a view operation prints after its view type: ONE when
+# every index has the same type, and all of them when they do not. That is
+# `printIndexTypes`'s own rule, and a gather/scatter view is the only thing
+# here that takes the second branch (its sparse dimension's index is a 1D
+# tile and the others are rank-0).
+fn index_types(tys: List[Ty]) -> String =
+  if len(tys) == 0 {
+    ""
+  } else if list.all(range(0, len(tys)), k => ty(tys[k]) == ty(tys[0])) {
+    ", " ++ ty(tys[0])
+  } else {
+    list.fold(tys, "", (acc, t) => acc ++ ", " ++ ty(t))
+  }
 
 # One extent or stride of a tensor view as the type spells it: the number,
 # or `?` for a dimension `make_tensor_view` carries in an operand (knife
@@ -427,13 +461,24 @@ fn line(i: Instr) -> String = match i {
     "${commas(list.map(dsts, v))} = get_index_space_shape ${name(src)} : ${ty(src_ty)}"
     ++ " -> ${ty(res_ty)}"
   MakePartitionView(dst, src, _src_ty, t) -> "${v(dst)} = make_partition_view ${name(src)} : ${ty(t)}"
-  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_ty, t, tok_in) ->
+  MakeStridedView(dst, src, _src_ty, t) -> "${v(dst)} = make_strided_view ${name(src)} : ${ty(t)}"
+  MakeGatherScatterView(dst, src, _src_ty, t) ->
+    "${v(dst)} = make_gather_scatter_view ${name(src)} : ${ty(t)}"
+  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_tys, t, tok_in) ->
     "${v(dst)}, ${v(tok_out)} = load_view_tko weak ${name(view)}[${commas(list.map(indices, name))}]"
-    ++ " token=${name(tok_in)} : ${ty(view_ty)}, ${ty(idx_ty)} -> ${ty(t)}, token"
-  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_ty, tok_in) ->
+    ++ " token=${name(tok_in)} : ${ty(view_ty)}${index_types(idx_tys)} -> ${ty(t)}, token"
+  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, tok_in) ->
     "${v(tok_out)} = store_view_tko weak ${name(value)}, ${name(view)}"
     ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}"
-    ++ " : ${ty(val_ty)}, ${ty(view_ty)}, ${ty(idx_ty)} -> token"
+    ++ " : ${ty(val_ty)}, ${ty(view_ty)}${index_types(idx_tys)} -> token"
+  # The value type comes FIRST here, as it does on a store: the dialect's
+  # printer puts it there so that its own parser can find the end of the
+  # optional index types by looking for the arrow.
+  AtomicRedViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, mode, scope,
+    tok_in) ->
+    "${v(tok_out)} = atomic_red_view_tko relaxed ${scope} ${name(view)}"
+    ++ "[${commas(list.map(indices, name))}], ${mode}, ${name(value)} token=${name(tok_in)}"
+    ++ " : ${ty(val_ty)}, ${ty(view_ty)}${index_types(idx_tys)} -> token"
   Ret -> "return"
 }
 
@@ -1015,4 +1060,48 @@ test "a dynamic dimension prints `?` in the type and its operand's name in the o
   assert line(GetIndexSpaceShape([9, 10], Val(0), pv, idx))
     == "%9, %10 = get_index_space_shape %0 : partition_view<tile=(2x2),"
     ++ " tensor_view<?x4xf64, strides=[?, ?]>, dim_map=[0, 1]> -> tile<i32>"
+}
+
+test "a strided view spells its traversal, a gather/scatter view its sparse dimension, and a gather load its two index types" {
+  let sv = StridedView([4, 2], [4, 3], Num("f32"), [64, 16], [16, 1], [1, 0], PadNan)
+  assert ty(sv) == "strided_view<tile=(4x2), traversal_strides=[4, 3],"
+    ++ " padding_value = nan, tensor_view<64x16xf32, strides=[16, 1]>, dim_map=[1, 0]>"
+  let gv = GatherScatterView([8, 16], Num("f64"), [64, 16], [16, 1], 0, NoPadding)
+  assert ty(gv) == "gather_scatter_view<tile=(8x16),"
+    ++ " tensor_view<64x16xf64, strides=[16, 1]>, sparse_dim=0>"
+  # both constructors read the way make_partition_view does: the whole of
+  # the view is in the result type and the operation names one operand
+  assert line(MakeStridedView(9, Val(0), TensorView(Num("f32"), [64, 16], [16, 1]), sv))
+    == "%9 = make_strided_view %0 : " ++ ty(sv)
+  assert line(MakeGatherScatterView(9, Val(0), TensorView(Num("f64"), [64, 16], [16, 1]), gv))
+    == "%9 = make_gather_scatter_view %0 : " ++ ty(gv)
+  # a gather load prints EVERY index type, because they are not all the
+  # same; printIndexTypes prints one for the splat case, which is what
+  # every other view operation in this tree takes
+  let rows = Tile([8], Num("i32"))
+  let idx = Tile([], Num("i32"))
+  let tile = Tile([8, 16], Num("f64"))
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3)))
+    == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3 : " ++ ty(gv)
+    ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3)))
+    == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 : tile<8x16xf64>, " ++ ty(gv)
+    ++ ", tile<8xi32>, tile<i32> -> token"
+}
+
+test "an atomic reduction prints its ordering, its scope, its mode and its value, and answers a token" {
+  let pv = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], NoPadding)
+  let idx = Tile([], Num("i32"))
+  let tile = Tile([2, 2], Num("f64"))
+  # `relaxed` is the only ordering the operation takes, so it is spelled
+  # and not chosen; the scope is `tl_blk` or `device` and is a required
+  # argument here rather than the optional attribute a load's is
+  assert line(AtomicRedViewTile(9, Val(0), pv, Val(4), tile, [Val(1), Val(2)], [idx, idx],
+    "addf", "device", Val(3)))
+    == "%9 = atomic_red_view_tko relaxed device %0[%1, %2], addf, %4 token=%3"
+    ++ " : tile<2x2xf64>, " ++ ty(pv) ++ ", tile<i32> -> token"
+  assert line(AtomicRedViewTile(9, Val(0), pv, Val(4), tile, [Val(1), Val(2)], [idx, idx],
+    "umin", "tl_blk", Val(3)))
+    == "%9 = atomic_red_view_tko relaxed tl_blk %0[%1, %2], umin, %4 token=%3"
+    ++ " : tile<2x2xf64>, " ++ ty(pv) ++ ", tile<i32> -> token"
 }

@@ -48,7 +48,7 @@
 use std/list
 use std/map
 use std/str
-use dev.{RedId, IdF, AssumePred, Hints, Padding}
+use dev.{RedId, IdF, AssumePred, Hints, Padding, padding_present}
 use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
@@ -79,8 +79,16 @@ derive Show
 ## the same thing and make every match arm carry a case that cannot occur
 ## (the dialect's parameter is a `TensorViewType` and nothing else).
 ##
-## `padding` is the one OPTIONAL parameter either type has: `NoPadding` is
-## the dialect's absent `padding_value`, and out-of-bounds loads then read
+## `StridedView` and `GatherScatterView` are knife T13's two, and both are
+## flat for the same reason. A strided view is a partition view whose
+## TRAVERSAL is parametric: index `k` covers `traversal[k]` elements rather
+## than `tile_shape[k]`, so consecutive tiles may overlap or skip. A
+## gather/scatter view has no `dim_map` and a `sparse_dim` instead: the index
+## at that dimension is a 1D tile of ROW NUMBERS rather than a tile index, so
+## one load collects rows chosen at run time.
+##
+## `padding` is the one OPTIONAL parameter any of the three has: `NoPadding`
+## is the dialect's absent `padding_value`, and out-of-bounds loads then read
 ## unspecified values.
 pub type Ty =
   | Token
@@ -88,22 +96,53 @@ pub type Ty =
   | TensorView(elem: Elem, shape: List[Int], strides: List[Int])
   | PartitionView(tile_shape: List[Int], elem: Elem, shape: List[Int], strides: List[Int],
     dim_map: List[Int], padding: Padding)
+  | StridedView(tile_shape: List[Int], traversal: List[Int], elem: Elem, shape: List[Int],
+    strides: List[Int], dim_map: List[Int], padding: Padding)
+  | GatherScatterView(tile_shape: List[Int], elem: Elem, shape: List[Int], strides: List[Int],
+    sparse_dim: Int, padding: Padding)
 derive Show
 
-## The `tensor_view` a partition view looks into, as its own type. The
-## writer interns it as a separate entry of the Type section, because the
-## partition view's record names it by index.
+## The `tensor_view` one of the three views looks into, as its own type.
+## The writer interns it as a separate entry of the Type section, because
+## the view's own record names it by index.
 pub fn tensor_view_of(t: Ty) -> Ty = match t {
   PartitionView(_tile_shape, e, shape, strides, _dim_map, _padding) -> TensorView(e, shape, strides)
-  _ -> panic("tileir: `${show(t)}` is not a partition view and has no tensor view")
+  StridedView(_tile_shape, _traversal, e, shape, strides, _dim_map, _padding) ->
+    TensorView(e, shape, strides)
+  GatherScatterView(_tile_shape, e, shape, strides, _sparse_dim, _padding) ->
+    TensorView(e, shape, strides)
+  _ -> panic("tileir: `${show(t)}` is not a view and has no tensor view")
 }
 
-## The tile one `load_view_tko` from a partition view answers, and the one
-## a `store_view_tko` into it takes: `tile_shape` of the tensor view's
-## element format. PartitionViewType::getViewTileType is this function.
+## The tile one `load_view_tko` from a view answers, and the one a
+## `store_view_tko` into it takes: `tile_shape` of the tensor view's element
+## format. `getViewTileType` is this function, and all three views spell it
+## the same way.
 pub fn view_tile_of(t: Ty) -> Ty = match t {
   PartitionView(tile_shape, e, _shape, _strides, _dim_map, _padding) -> Tile(tile_shape, e)
-  _ -> panic("tileir: `${show(t)}` is not a partition view and has no tile type")
+  StridedView(tile_shape, _traversal, e, _shape, _strides, _dim_map, _padding) -> Tile(tile_shape, e)
+  GatherScatterView(tile_shape, e, _shape, _strides, _sparse_dim, _padding) -> Tile(tile_shape, e)
+  _ -> panic("tileir: `${show(t)}` is not a view and has no tile type")
+}
+
+## The tile shape of one of the three views, which is also the rank of its
+## index space (`getViewIndexRank` reads `getTileShape().size()` in all
+## three).
+pub fn view_tile_shape(t: Ty) -> List[Int] = match view_tile_of(t) {
+  Tile(shape, _e) -> shape
+  _ -> panic("tileir: `${show(t)}` has no view tile shape")
+}
+
+## The type each index operand of a view has, in order. Every view but a
+## gather/scatter one takes a rank-0 i32 tile everywhere; that one takes a
+## 1D i32 tile of the tile's own length at `sparse_dim`, because the index
+## there is a list of ROW NUMBERS rather than one tile index
+## (GatherScatterViewType::verifyIndices).
+pub fn view_index_tys(t: Ty) -> List[Ty] = match t {
+  GatherScatterView(tile_shape, _e, _shape, _strides, sparse_dim, _padding) ->
+    list.map(range(0, len(tile_shape)), k =>
+        if k == sparse_dim { i32_tile([tile_shape[k]]) } else { i32_scalar() })
+  _ -> list.map(view_tile_shape(t), _d => i32_scalar())
 }
 
 ## An operand: an entry parameter by position, or the value an earlier
@@ -249,12 +288,16 @@ pub type Instr =
   | MakeTensorView(dst: Int, base: Ref, base_ty: Ty, ty: Ty, dyn_shape: List[Ref],
     dyn_strides: List[Ref], dyn_ty: Ty)
   | MakePartitionView(dst: Int, src: Ref, src_ty: Ty, ty: Ty)
+  | MakeStridedView(dst: Int, src: Ref, src_ty: Ty, ty: Ty)
+  | MakeGatherScatterView(dst: Int, src: Ref, src_ty: Ty, ty: Ty)
   | GetTensorShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | GetIndexSpaceShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
-  | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref], idx_ty: Ty,
-    ty: Ty, tok_in: Ref)
+  | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref],
+    idx_tys: List[Ty], ty: Ty, tok_in: Ref)
   | StoreViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty, indices: List[Ref],
-    idx_ty: Ty, tok_in: Ref)
+    idx_tys: List[Ty], tok_in: Ref)
+  | AtomicRedViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty,
+    indices: List[Ref], idx_tys: List[Ty], mode: String, scope: String, tok_in: Ref)
   | Ret
 derive Show
 
@@ -308,12 +351,15 @@ fn without_dim(t: Ty, dim: Int) -> Ty = match t {
   _ -> panic("tileir: `${show(t)}` has no dimensions to drop")
 }
 
-# Whether `t` is the rank-0 i32 tile every index in this tree is: an `Idx`,
-# a `Scalar[I32]` and a rank-0 `Tile[I32]` all lower to it, and
-# `make_tensor_view`'s dynamic operands must every one be it.
-fn is_idx_ty(t: Ty) -> Bool = match t {
-  Tile(shape, e) ->
-    if len(shape) != 0 {
+# Whether `t` is the i32 tile of `shape`. `[]` is the rank-0 index every
+# view but a gather/scatter one takes and every dynamic operand of a
+# `make_tensor_view` is; `[n]` is the 1D tile of row numbers a gather takes
+# at its sparse dimension.
+fn is_i32_tile_of(t: Ty, shape: List[Int]) -> Bool = match t {
+  Tile(sh, e) ->
+    if len(sh) != len(shape) {
+      false
+    } else if list.any(range(0, len(sh)), k => sh[k] != shape[k]) {
       false
     } else {
       match e {
@@ -323,6 +369,11 @@ fn is_idx_ty(t: Ty) -> Bool = match t {
     }
   _ -> false
 }
+
+# Whether `t` is the rank-0 i32 tile every index in this tree is: an `Idx`,
+# a `Scalar[I32]` and a rank-0 `Tile[I32]` all lower to it, and
+# `make_tensor_view`'s dynamic operands must every one be it.
+fn is_idx_ty(t: Ty) -> Bool = is_i32_tile_of(t, [])
 
 # One of the two shape queries (knife T12). The dialect's operation answers
 # one result per dimension of the thing asked, so the whole of it is issued
@@ -353,35 +404,95 @@ fn shape_query(l0: L, dst: Int, src: Ref, src_ty: Ty, dim: Int, rank: Int,
   bind(l3, dst, Val(ds[dim]), res)
 }
 
-# The view a `load_view` or a `store_view` names, its operand and its
-# indices, with the two checks both operations share: the handle really is
-# a partition view of `dtype`, and it is given one index per tile
-# dimension. The dialect says the second as
+# The view a `load_view`, a `store_view` or an `atomic_red_view` names, its
+# operand, its indices and their types, with the three checks all of them
+# share: the handle really is a view of `dtype`, it is given one index per
+# tile dimension, and each index has the type that view wants THERE. The
+# dialect says the second as
 # `expected N index operands (based on view type), got M`; saying it here
 # means a kernel that miscounts is refused before any text is rendered.
+#
+# The third check is one line rather than a case per view because
+# `view_index_tys` is where the difference lives: every view but a
+# gather/scatter one wants a rank-0 i32 tile at every position, and that one
+# wants the 1D tile of row numbers at `sparse_dim`.
 fn view_operands(l0: L, dtype: String, view: Int, indices: List[Int],
-  what: String) -> (L, Ty, Ref, List[Ref]) = {
+  what: String) -> (L, Ty, Ref, List[Ref], List[Ty]) = {
   let src = ref_of(l0, view, "${what} view")
   let vt = ty_of(l0, view)
-  match vt {
-    PartitionView(tile_shape, e, _shape, _strides, _dim_map, _padding) -> {
+  let tile = match vt {
+    PartitionView(_ts, _e, _sh, _st, _dm, _p) -> view_tile_of(vt)
+    StridedView(_ts, _tr, _e, _sh, _st, _dm, _p) -> view_tile_of(vt)
+    GatherScatterView(_ts, _e, _sh, _st, _sd, _p) -> view_tile_of(vt)
+    _ -> panic("tileir: ${what} names handle ${view}, which is not a view")
+  }
+  match tile {
+    Tile(tile_shape, e) -> {
       match e {
         Num(nm) ->
           if nm != dtype {
-            panic("tileir: the partition view holds ${nm} and ${what} reads it as ${dtype}")
+            panic("tileir: the view holds ${nm} and ${what} reads it as ${dtype}")
           } else {
             ()
           }
-        PtrTo(nm) -> panic("tileir: a partition view of pointers to ${nm} moves no tile")
+        PtrTo(nm) -> panic("tileir: a view of pointers to ${nm} moves no tile")
       }
       if len(indices) != len(tile_shape) {
         panic("tileir: expected ${len(tile_shape)} index operand(s) (based on view type), got ${len(indices)}")
       } else {
         ()
       }
-      (l0, vt, src, list.map(indices, h => ref_of(l0, h, "${what} index")))
+      let want = view_index_tys(vt)
+      match list.find(range(0, len(indices)), k => not same_index_ty(ty_of(l0, indices[k]), want[k])) {
+        Some(k) ->
+          panic("tileir: ${what} index ${k} is `${show(ty_of(l0, indices[k]))}` and this view wants `${show(want[k])}` there")
+        None -> ()
+      }
+      (l0, vt, src, list.map(indices, h => ref_of(l0, h, "${what} index")), want)
     }
-    _ -> panic("tileir: ${what} names handle ${view}, which is not a partition view")
+    _ -> panic("tileir: ${what} names handle ${view}, which is not a view")
+  }
+}
+
+# Whether an index operand's type is the one the view wants there.
+fn same_index_ty(got: Ty, want: Ty) -> Bool = match want {
+  Tile(shape, _e) -> is_i32_tile_of(got, shape)
+  _ -> false
+}
+
+# Whether a view carries a `padding_value`. An `atomic_red_view_tko`
+# refuses one (AtomicRedViewTkoOp::verify); a load reads it out of bounds.
+fn view_padding_of(t: Ty) -> Bool = match t {
+  PartitionView(_ts, _e, _sh, _st, _dm, p) -> padding_present(p)
+  StridedView(_ts, _tr, _e, _sh, _st, _dm, p) -> padding_present(p)
+  GatherScatterView(_ts, _e, _sh, _st, _sd, p) -> padding_present(p)
+  _ -> false
+}
+
+# The rules a `make_*_view` can only check once the TENSOR VIEW's type is
+# known: it holds `dtype`, its rank is the tile's, and every `dim_map`
+# entry is one of its dimensions. The three constructors share it so that
+# one wording answers for all of them; a gather/scatter view has no
+# `dim_map` and passes an empty one.
+fn view_source_checks(e: Elem, dtype: String, shape: List[Int], tile_shape: List[Int],
+  dim_map: List[Int], what: String) -> Unit = {
+  match e {
+    Num(nm) ->
+      if nm != dtype {
+        panic("tileir: the tensor view holds ${nm} and ${what} reads it as ${dtype}")
+      } else {
+        ()
+      }
+    PtrTo(nm) -> panic("tileir: a tensor view of pointers to ${nm} has no ${what}")
+  }
+  if len(tile_shape) != len(shape) {
+    panic("tileir: expected tensor_view rank and tile rank to match, got tensor_view of rank ${len(shape)} and tiles of rank ${len(tile_shape)}")
+  } else {
+    ()
+  }
+  match list.find(dim_map, k => k < 0 || k >= len(shape)) {
+    Some(k) -> panic("tileir: dim_map sends a tile dimension to tensor view dimension ${k}, which is outside 0 to ${len(shape) - 1}")
+    None -> ()
   }
 }
 
@@ -991,10 +1102,13 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let src = ref_of(l0, view, "get_index_space_shape source")
     let vt = ty_of(l0, view)
     match vt {
-      PartitionView(tile_shape, _e, _shape, _strides, _dim_map, _padding) -> {
+      PartitionView(tile_shape, _e, _shape, _strides, _dim_map, _padding) ->
         shape_query(l0, dst, src, vt, dim, len(tile_shape), true)
-      }
-      _ -> panic("tileir: get_index_space_shape names handle ${view}, which is not a partition view")
+      StridedView(tile_shape, _tr, _e, _shape, _strides, _dim_map, _padding) ->
+        shape_query(l0, dst, src, vt, dim, len(tile_shape), true)
+      GatherScatterView(tile_shape, _e, _shape, _strides, _sparse_dim, _padding) ->
+        shape_query(l0, dst, src, vt, dim, len(tile_shape), true)
+      _ -> panic("tileir: get_index_space_shape names handle ${view}, which is not a TileView")
     }
   }
   PartitionViewOf(dst, dtype, view, tile_shape, dim_map, padding) -> {
@@ -1006,24 +1120,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let st = ty_of(l0, view)
     match st {
       TensorView(e, shape, strides) -> {
-        match e {
-          Num(nm) ->
-            if nm != dtype {
-              panic("tileir: the tensor view holds ${nm} and make_partition_view reads it as ${dtype}")
-            } else {
-              ()
-            }
-          PtrTo(nm) -> panic("tileir: a tensor view of pointers to ${nm} has no partition")
-        }
-        if len(tile_shape) != len(shape) {
-          panic("tileir: expected tensor_view rank and tile rank to match, got tensor_view of rank ${len(shape)} and tiles of rank ${len(tile_shape)}")
-        } else {
-          ()
-        }
-        match list.find(dim_map, k => k < 0 || k >= len(shape)) {
-          Some(k) -> panic("tileir: dim_map sends a tile dimension to tensor view dimension ${k}, which is outside 0 to ${len(shape) - 1}")
-          None -> ()
-        }
+        view_source_checks(e, dtype, shape, tile_shape, dim_map, "make_partition_view")
         let pv = PartitionView(tile_shape, e, shape, strides, dim_map, padding)
         let (l1, v) = define(l0, dst, pv)
         emit(l1, MakePartitionView(v, src, st, pv))
@@ -1031,21 +1128,80 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
       _ -> panic("tileir: make_partition_view names handle ${view}, which is not a tensor view")
     }
   }
+  StridedViewOf(dst, dtype, view, tile_shape, traversal, dim_map, padding) -> {
+    # `StridedViewType::verify` is `verifyPartitionViewLike` plus the two
+    # rules about the traversal, and the half that needs the TENSOR VIEW is
+    # here for make_partition_view's reason.
+    let src = ref_of(l0, view, "strided view source")
+    let st = ty_of(l0, view)
+    match st {
+      TensorView(e, shape, strides) -> {
+        view_source_checks(e, dtype, shape, tile_shape, dim_map, "make_strided_view")
+        let sv = StridedView(tile_shape, traversal, e, shape, strides, dim_map, padding)
+        let (l1, v) = define(l0, dst, sv)
+        emit(l1, MakeStridedView(v, src, st, sv))
+      }
+      _ -> panic("tileir: make_strided_view names handle ${view}, which is not a tensor view")
+    }
+  }
+  GatherViewOf(dst, dtype, view, tile_shape, sparse_dim, padding) -> {
+    # `GatherScatterViewType::verify` has no `dim_map`: what it holds
+    # against the tensor view instead is that `sparse_dim` is one of its
+    # dimensions.
+    let src = ref_of(l0, view, "gather/scatter view source")
+    let st = ty_of(l0, view)
+    match st {
+      TensorView(e, shape, strides) -> {
+        view_source_checks(e, dtype, shape, tile_shape, [], "make_gather_scatter_view")
+        if sparse_dim >= len(shape) {
+          panic("tileir: gather dimension is outside of tensor view dimensions, expected strictly less than ${len(shape)}, got ${sparse_dim}")
+        } else {
+          ()
+        }
+        let gv = GatherScatterView(tile_shape, e, shape, strides, sparse_dim, padding)
+        let (l1, v) = define(l0, dst, gv)
+        emit(l1, MakeGatherScatterView(v, src, st, gv))
+      }
+      _ -> panic("tileir: make_gather_scatter_view names handle ${view}, which is not a tensor view")
+    }
+  }
   LoadView(dst, tok_out, dtype, view, indices, tok_in) -> {
-    let (l1, vt, src, idx) = view_operands(l0, dtype, view, indices, "load_view")
+    let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "load_view")
     let tile = view_tile_of(vt)
     let (l2, d) = define(l1, dst, tile)
     let (l3, tv) = define(l2, tok_out, Token)
-    emit(l3, LoadViewTile(d, tv, src, vt, idx, Tile([], Num("i32")), tile,
+    emit(l3, LoadViewTile(d, tv, src, vt, idx, idx_tys, tile,
       ref_of(l0, tok_in, "load token")))
   }
   StoreView(tok_out, dtype, view, indices, value, tok_in) -> {
-    let (l1, vt, src, idx) = view_operands(l0, dtype, view, indices, "store_view")
+    let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "store_view")
     let val = ref_of(l1, value, "store value")
     let tile = view_tile_of(vt)
     let (l2, tv) = define(l1, tok_out, Token)
-    emit(l2, StoreViewTile(tv, src, vt, val, tile, idx, Tile([], Num("i32")),
+    emit(l2, StoreViewTile(tv, src, vt, val, tile, idx, idx_tys,
       ref_of(l0, tok_in, "store token")))
+  }
+  AtomicRedViewOf(tok_out, dtype, view, indices, mode, scope, value, tok_in) -> {
+    # `AtomicRedViewTkoOp::verify`: the view is a TileView and not a
+    # gather/scatter one, it carries no `padding_value`, and its tile shape
+    # and element format are the value's. The index rules are
+    # view_operands'.
+    let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "atomic_red_view")
+    match vt {
+      GatherScatterView(_ts, _e, _sh, _st, _sd, _p) ->
+        panic("tileir: gather_scatter_view is not supported; use partition_view instead")
+      _ -> ()
+    }
+    if view_padding_of(vt) {
+      panic("tileir: views with padding_value are not supported for atomic reductions")
+    } else {
+      ()
+    }
+    let tile = view_tile_of(vt)
+    let val = ref_of(l1, value, "atomic_red_view value")
+    let (l2, tv) = define(l1, tok_out, Token)
+    emit(l2, AtomicRedViewTile(tv, src, vt, val, tile, idx, idx_tys, mode, scope,
+      ref_of(l0, tok_in, "atomic_red_view token")))
   }
   Yield(values) -> {
     let refs = list.map(values, h => ref_of(l0, h, "yield value"))
@@ -1309,10 +1465,14 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   AllocaPtr(dst, _num_elem, _align, _shared, _ty) -> [dst]
   MakeTensorView(dst, _base, _base_ty, _ty, _dyn_shape, _dyn_strides, _dyn_ty) -> [dst]
   MakePartitionView(dst, _src, _src_ty, _ty) -> [dst]
+  MakeStridedView(dst, _src, _src_ty, _ty) -> [dst]
+  MakeGatherScatterView(dst, _src, _src_ty, _ty) -> [dst]
   GetTensorShape(dsts, _src, _src_ty, _res_ty) -> dsts
   GetIndexSpaceShape(dsts, _src, _src_ty, _res_ty) -> dsts
-  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_ty, _ty, _tok_in) -> [dst, tok_out]
-  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_ty, _tok_in) -> [tok_out]
+  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_tys, _ty, _tok_in) -> [dst, tok_out]
+  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _tok_in) -> [tok_out]
+  AtomicRedViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _mode, _scope,
+    _tok_in) -> [tok_out]
   Ret -> []
 }
 
