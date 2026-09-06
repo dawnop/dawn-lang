@@ -141,6 +141,20 @@
 #       `scope.device` is NOT exempt: leetgpu 13's histogram collides
 #       across tile blocks, so a narrower scope would be a wrong answer,
 #       and that is a device judgement.
+#   global-bit-not-in-the-cubin
+#       `alloca`'s `global` says the address may be handed to other tile
+#       threads; without it the address is private to the one that made it.
+#       A kernel that keeps its scratch to itself computes the same thing
+#       either way, so the question is whether the bit reaches the machine
+#       at all, and the answer is measured the way `fast_acc`'s was:
+#       alloca_two's second allocation carries the bit and its first does
+#       not, and setting BOTH moves exactly one byte of the `.tilebc`
+#       (offset 56, 0 to 1) while `tileiras --gpu-name sm_86` writes a cubin
+#       that is byte for byte the one it wrote before (measured, knife T10).
+#       A bit that does not reach the cubin cannot make the device answer
+#       anything else, so this is a measurement and not a missing kernel.
+#       scripts/tile-golden's alloca-flags-unwritten is the mutant, red at
+#       layer 1: it takes away the word the bit lives in.
 #   fast-acc-not-in-the-cubin
 #       `mmaf`'s `fast_acc` asks the hardware to accumulate at a lower
 #       precision than the accumulator's format. It is the reason `mmaf`
@@ -251,7 +265,7 @@ unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX
 unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
 unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
 unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,mutant:global-visibility-omitted-at-13-3                    | no-module-symbol-ffi
-unit.global                  | 1 | 13.3 | unimplemented | T10 | 0 | -                                                                                                     | -
+unit.global                  | 1 | 13.3 | implemented   | T10 | 1 | const:ALLOCA_FLAG_GLOBAL,golden:alloca_two,mutant:alloca-flags-unwritten                              | global-bit-not-in-the-cubin
 padding.zero                 | 0 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.neg_zero             | 1 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2
 padding.nan                  | 2 | 13.1 | deferred      | -   | 0 | -                                                                                                     | ruling 2

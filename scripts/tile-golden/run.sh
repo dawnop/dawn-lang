@@ -300,6 +300,42 @@
 #                            length and differ, and the reader takes
 #                            `reshape`'s opcode for the string index
 #
+#     alloca-flags-unwritten
+#                            `alloca` stops writing its flags varint, which
+#                            exists at every version because its one
+#                            optional field is as old as the operation ->
+#                            alloca_scratch's text is untouched, its Func
+#                            section is one byte short (the FILE is the same
+#                            length, section padding absorbs it) and the
+#                            reader loses the stream from there
+#     alloca-alignment-as-num-elem
+#                            `alloca` writes its element count where its
+#                            alignment belongs. Both are bare inline
+#                            varints, so only the dialect's verifier can
+#                            tell them apart, and only because ALLOCA_ELEMS
+#                            is not a power of two -> alloca_scratch's text
+#                            is untouched, its Func section is one byte
+#                            longer, and tileiras names the alignment
+#     mmaf-scaled-scale-operand-missing
+#                            `mmaf_scaled` writes four operands instead of
+#                            five -> mmaf_scaled_e4m3's text is untouched,
+#                            its Func section is one byte short, and the
+#                            reader hands the operation the next
+#                            instruction's first varint as a scale tile.
+#                            Nothing is variadic here, so no count in the
+#                            stream repeats the arity
+#     mmaf-scaled-writes-a-flags-word
+#                            `mmaf_scaled` writes a flags varint it does
+#                            not have. It is the mirror of
+#                            mmaf-flags-unwritten and the sibling
+#                            comparison that makes the absence load
+#                            bearing: `mmaf` gained an optional field at
+#                            13.3 and writes the word, `mmaf_scaled` has
+#                            none at any version and does not ->
+#                            mmaf_scaled_e4m3's Func section is one byte
+#                            longer and every operand after the word is
+#                            read one place out of step
+#
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
 # 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
@@ -453,6 +489,10 @@ mutants=(
   exp-rounding-unwritten
   mmaf-flags-unwritten
   header-minor-still-2
+  alloca-flags-unwritten
+  alloca-alignment-as-num-elem
+  mmaf-scaled-scale-operand-missing
+  mmaf-scaled-writes-a-flags-word
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1664,6 +1704,64 @@ if run_item header-minor-still-2; then
     'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 2)'
   writer_mutant_checks header-minor-still-2 global_table same-size \
     "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
+fi
+
+# 47. `alloca` stops writing its flags varint. Its `global` unit attribute
+#     is the operation's only optional field and it arrived WITH the
+#     operation at 13.3, so generateFlagsFieldSerialization writes the word
+#     unconditionally: there is no version at which a reader would tolerate
+#     its absence. Without it the reader takes `num_elem` for the flags,
+#     `alignment` for `num_elem`, and the next instruction's opcode for the
+#     alignment, and the stream is lost from there. The Func section is one
+#     byte short while the FILE is the same length, which is the shape
+#     knife T8 wrote down: section padding absorbs a byte, so the file size
+#     is not this family's judgement.
+if run_item alloca-flags-unwritten; then
+  mutant_project alloca-flags-unwritten bytecode.dawn     '    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })'     '    let w1 = emit_op(w0, OP_ALLOCA, t)'
+  writer_mutant_checks alloca-flags-unwritten alloca_scratch func-one-short     "failed to get result type 0 for BitcastOp"
+fi
+
+# 48. `alloca` writes its element count where its alignment belongs. Both
+#     are `I64Attr` and both are written as bare inline varints, so nothing
+#     about the stream's SHAPE says which is which; what says so is the
+#     dialect's own verifier, and only because ALLOCA_ELEMS is 192 and not
+#     a power of two. That number is chosen in kernels.dawn for exactly
+#     this, and the note there says so: with a power-of-two count the
+#     mutant would be a legal program that allocates eight elements and
+#     runs off the end of them, and undefined behaviour is not a judgement.
+#     192 is a two-byte varint and 8 is one, so the Func section is one
+#     byte LONGER here while the file is again the same length.
+if run_item alloca-alignment-as-num-elem; then
+  mutant_project alloca-alignment-as-num-elem bytecode.dawn     '    emit(emit(w1, num_elem), align)'     '    emit(emit(w1, num_elem), num_elem)'
+  writer_mutant_checks alloca-alignment-as-num-elem alloca_scratch func-one-long     "'cuda_tile.alloca' op 'alignment' must be power of two"
+fi
+
+# 49. `mmaf_scaled` stops writing its last operand. It takes five where
+#     `mmaf` takes three, and the two extra ones are the scales; without
+#     the last the reader takes the NEXT instruction's first varint for it
+#     and hands the operation a tile of the wrong element type, which the
+#     verifier names. Nothing is variadic here, so no count would have
+#     caught it: the arity is the operation's identity and nothing in the
+#     stream repeats it.
+if run_item mmaf-scaled-scale-operand-missing; then
+  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn     '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)'     '    emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale)'
+  writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short     "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
+fi
+
+# 50. `mmaf_scaled` writes a flags varint. This is the sibling comparison
+#     that makes its ABSENCE load bearing, and it is the mirror of
+#     mmaf-flags-unwritten one block up: `mmaf` gained an optional
+#     `fast_acc` at 13.3 and therefore writes the word, while
+#     `mmaf_scaled` has no optional field and no attribute at any version,
+#     so getVersionOrderedBitAssignments answers an empty table and the
+#     word does not exist. A writer that copied `mmaf`'s arm wholesale
+#     would put one there, and the reader would take it for the first
+#     operand and run one place out of step for the rest of the body.
+#     Same file length, Func one byte longer, and the same kind of
+#     evidence as trig-extra-flags.
+if run_item mmaf-scaled-writes-a-flags-word; then
+  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn     '    let w1 = emit_op(w0, OP_MMAF_SCALED, t)'     '    let w1 = emit(emit_op(w0, OP_MMAF_SCALED, t), 0)'
+  writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long     "operand index 91 out of bounds (size=77) for operand 2"
 fi
 
 _item_tick ""

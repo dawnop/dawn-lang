@@ -65,6 +65,11 @@
 #             family whose judgement is an equality between KERNELS: a hint
 #             does not change what a kernel computes, so the question is
 #             whether the hinted kernels answer the unhinted one's bytes)
+#             and alloca_diff.dawn the two automatic-allocation kernels of
+#             knife T10 with a kernel-level control beside them (the other
+#             opcode that knife adds, `mmaf_scaled`, takes only fp8 and fp4
+#             operands and is refused below sm_100, so no program here can
+#             launch it)
 #             and seq_diff.dawn the eleven multi-launch
 #             problems of knives 16 and 17 (the first whose unit of
 #             comparison is a SEQUENCE of launches over shared device buffers
@@ -704,6 +709,18 @@ dbg_alone=(assert_fail print_tile)
 # visible from outside the device.
 globals_=(global_table global_ctl global_scratch)
 
+# The automatic-allocation kernels of knife T10, in the order alloca_diff
+# takes them. `alloca_scratch` writes a fresh allocation and reads it back
+# in the same launch; `alloca_two` makes two of them in one block and
+# answers a value that is 0 on every lane if they are the same address;
+# `alloca_ctl` computes alloca_scratch's answer with no allocation in it at
+# all, so it holds none of the opcode and is this family's KERNEL-LEVEL
+# CONTROL. `mmaf_scaled_e4m3`, the other opcode of the same knife, is NOT
+# here and cannot be: every operand type it takes is fp8 or fp4, which
+# `tileiras` refuses below sm_100, so it is assembled for sm_100 in
+# scripts/tile-golden and this machine's RTX 3080 never sees it.
+allocas=(alloca_scratch alloca_two alloca_ctl)
+
 # The `optimization_hints` kernels of knife T15, in the order hint_diff
 # takes them. `vadd` is the family's KERNEL-LEVEL CONTROL and is what makes
 # the family a judgement at all: a hint does not change what a kernel
@@ -765,8 +782,8 @@ assemble_golden() { # kernel, tilebc, cubin
 
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
-  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${hints[@]}" \
-  "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
+  "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${allocas[@]}" \
+  "${hints[@]}" "${dbg[@]}" "${dbg_alone[@]}" "${sequenced[@]}"; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -808,6 +825,8 @@ dbg_cubins=()
 for k in "${dbg[@]}"; do dbg_cubins+=("$work/$k.cubin"); done
 global_cubins=()
 for k in "${globals_[@]}"; do global_cubins+=("$work/$k.cubin"); done
+alloca_cubins=()
+for k in "${allocas[@]}"; do alloca_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -1272,6 +1291,40 @@ launches="$(printf '%s\n' "$global_shape" | tr ' ' '\n' | sed -n 's/^scratch_lau
 [ "${launches:-0}" -ge 2 ] ||
   fail "global_scratch is launched ${launches:-0} time(s), so nothing observes the global's lifetime: $global_shape"
 echo "PASS  corpus: the two tables differ on every lane, neither is a mirror or a splat, every input lane is non-zero, and global_scratch is launched $launches times ($global_shape)"
+
+# ---- native, the automatic-allocation kernels (knife T10)
+build_native "$root/std" "$work/alloca.bin" "$here/alloca_diff.dawn"
+rc=0
+device "$work/alloca.bin" "${alloca_cubins[@]}" > "$work/alloca.out" 2> "$work/alloca.err" || rc=$?
+cat "$work/alloca.out"
+alloca_verdict="$(verdict_of "$work/alloca.out")"
+case "$alloca_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#allocas[@]} automatic-allocation kernels agree with the fake device bit for bit" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $alloca_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $alloca_verdict" ;;
+  fail) cat "$work/alloca.err" >&2; fail "the device answered and disagreed with the fake device on a knife T10 kernel (see the transcript above)" ;;
+  *) cat "$work/alloca.err" >&2; fail "alloca_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/alloca.out" | head -n 1)"
+
+# The allocation corpus, held field by field. `live` is the lanes where
+# `3 * x` differs from `x`, so a scratch that read back zeros has somewhere
+# to show; `unaliased` is the lanes where `2 * x + 1` is not 0, which is
+# what alloca-aliased needs; `apart` is the lanes where the two allocations
+# hold different values, without which overwriting one with the other would
+# be invisible whatever the addresses were.
+alloca_shape="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/alloca.out")"
+[ -n "$alloca_shape" ] || fail "alloca_diff printed no index line"
+for field in live unaliased apart; do
+  value="$(printf '%s
+' "$alloca_shape" | tr ' ' '
+' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the alloca index line names no $field: $alloca_shape"
+  [ "$value" = "128" ] ||
+    fail "the alloca corpus has $field=$value of 128 lanes, so that claim is not fully tested: $alloca_shape"
+done
+echo "PASS  corpus: every lane makes the scratch visible, tells two allocations apart, and holds two different values ($alloca_shape)"
 
 # ---- native, the optimization hint kernels (knife T15)
 #
@@ -3990,6 +4043,89 @@ else
   echo "SKIP  mutant: module-reloaded-per-launch not verifiable on this driver: the clean run is $global_verdict, before any launch reaches the device"
 fi
 
+# 38. alloca-aliased: the recording handler hands every `alloca` after the
+#     first the FIRST one's address, which is what a compiler that treated
+#     the operation as pure and common-subexpressioned it would do. The
+#     bytes move (alloca_two's second `offset` names the first allocation's
+#     broadcast) and `tileiras` accepts them, because two pointers into one
+#     allocation is a legal program; only the device says alloca_two's
+#     answer is 0 on every lane instead of `2 * x + 1`, because the second
+#     store overwrote the first. alloca_scratch makes ONE allocation and
+#     alloca_ctl makes none, so for both the mutant is the identity, and
+#     that is what separates "the mutant took the allocations apart" from
+#     "the mutant broke the tree".
+#
+#     THE FILE LENGTH DOES NOT MOVE, which is worth naming: the dead second
+#     allocation is still emitted, and what changes is one operand index.
+alloca_pkg_mutant() { # name, module, old, new, red-kernel
+  local name="$1" module="$2" old="$3" new="$4" red="$5"
+  local pkg="$work/pkg-$name" before after k rc=0 mverdict differ cubs=()
+  rm -rf "$pkg"
+  cp -r "$root/packages/tileir" "$pkg"
+  before=$(digest "$pkg/src/$module")
+  python3 "$here/mutate.py" "$pkg/src/$module" "$name" "$old" "$new"
+  after=$(digest "$pkg/src/$module")
+  echo "      $name: packages/tileir/src/$module md5 $before -> $after"
+
+  mutant_kernels "$name" "$pkg" "${allocas[@]}"
+  if cmp -s "$golden/$red.tilebc" "$work/$name-$red.tilebc"; then
+    fail "$name: $red should move at layer 0 and its bytecode is unchanged"
+  fi
+  for k in "${allocas[@]}"; do
+    if [ "$k" != "$red" ]; then
+      cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" ||
+        fail "$name: $k does not carry what this mutant changes, so its bytecode must not move"
+    fi
+  done
+  [ "$(wc -c < "$golden/$red.tilebc")" = "$(wc -c < "$work/$name-$red.tilebc")" ] ||
+    fail "$name: $red.tilebc changed length, so tileiras is refusing a shape rather than accepting a lie"
+  echo "      $name: $red.tilebc differs from its golden at the same length, the other $(( ${#allocas[@]} - 1 )) do not, and tileiras still accepts every one"
+
+  for k in "${allocas[@]}"; do cubs+=("$work/$name-$k.cubin"); done
+  if [ "$alloca_verdict" != pass ]; then
+    rc=0
+    device "$work/alloca.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+    mverdict="$(verdict_of "$work/m-$name.out")"
+    [ "$mverdict" = "$alloca_verdict" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $alloca_verdict but the mutant is $mverdict"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $alloca_verdict, before any launch reaches the device"
+    return 0
+  fi
+  rc=0
+  device "$work/alloca.bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != 1 ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly $red saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  awk -v want="$red" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+    "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $red is the kernel that should differ"; }
+  echo "PASS  mutant: $name (layer 1 accepts it; on the device $red differs and the other $(( ${#allocas[@]} - 1 )) do not)"
+}
+
+alloca_pkg_mutant alloca-aliased prog.dawn \
+  '        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
+        d' \
+  '        let d = next
+        next = mint(name, next, 1)
+        let earlier = list.filter(ops, o => match o {
+          Alloca(_e, _dt, _ne, _al, _sh, _s) -> true
+          _ -> false
+        })
+        ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
+        if len(earlier) == 0 {
+          d
+        } else {
+          match earlier[0] {
+            Alloca(e, _dt, _ne, _al, _sh, _s) -> e
+            _ -> d
+          }
+        }' \
+  alloca_two
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -4008,6 +4144,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/dtype_diff.dawn scripts/tile-gpu-diff/loop_diff.dawn \
   scripts/tile-gpu-diff/attr_diff.dawn scripts/tile-gpu-diff/assert_diff.dawn \
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/hint_diff.dawn \
+  scripts/tile-gpu-diff/alloca_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
@@ -4018,6 +4155,7 @@ line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
 summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
+summary="$summary alloca=$alloca_shape"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
