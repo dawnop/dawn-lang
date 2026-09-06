@@ -2180,7 +2180,7 @@ if run_item make-strided-view-as-partition-view; then
     'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)' \
     'emit_ref(emit_op(w0, OP_MAKE_PARTITION_VIEW, t), src)'
   writer_mutant_checks make-strided-view-as-partition-view view_conv1d same-size \
-    "'cuda_tile.make_partition_view' op result #0 must be Partition view type"
+    "'cuda_tile.make_partition_view' op result #0 must be partition view type"
 fi
 
 # 62. `make_gather_scatter_view` written with `make_strided_view`'s opcode,
@@ -2192,7 +2192,7 @@ if run_item make-gather-view-as-strided-view; then
     'emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)' \
     'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)'
   writer_mutant_checks make-gather-view-as-strided-view view_token_embed same-size \
-    "'cuda_tile.make_strided_view' op result #0 must be Strided view type"
+    "'cuda_tile.make_strided_view' op result #0 must be strided view type"
 fi
 
 # 63. A gather view's `sparse_dim` and the index of its tensor view change
@@ -2207,7 +2207,7 @@ if run_item gather-sparse-dim-and-tensor-view-swapped; then
     'let b2 = put_varint(put_varint(b1, tvi), sparse_dim)' \
     'let b2 = put_varint(put_varint(b1, sparse_dim), tvi)'
   writer_mutant_checks gather-sparse-dim-and-tensor-view-swapped view_token_embed same-size \
-    "expected 'tensor_view' type"
+    "expected ::mlir::cuda_tile::TensorViewType but got 'i32'"
 fi
 
 # 64. `atomic_red_view_tko`'s memory scope and its mode change places. Both
@@ -2220,7 +2220,7 @@ if run_item atomic-red-scope-and-mode-swapped; then
     'emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), red_mode_value(mode))' \
     'emit(emit(emit(w2, ORDER_RELAXED), red_mode_value(mode)), scope_value(scope))'
   writer_mutant_checks atomic-red-scope-and-mode-swapped view_atomic same-size \
-    "memory_scope"
+    "invalid integer value for enum type: 3"
 fi
 
 # 65. The value tile and the input token of an atomic reduction change
@@ -2233,7 +2233,7 @@ if run_item atomic-red-value-and-token-swapped; then
     'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)' \
     'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), tok_in), value)'
   writer_mutant_checks atomic-red-value-and-token-swapped view_atomic same-size \
-    "'cuda_tile.atomic_red_view_tko'"
+    "'cuda_tile.atomic_red_view_tko' op operand #2 must be Tile type, but got '!cuda_tile.token'"
 fi
 
 _item_tick ""
