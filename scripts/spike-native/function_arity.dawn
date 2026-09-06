@@ -1,0 +1,46 @@
+# Exercise both sides of the portable function-value boundary: the widest
+# closures and handlers still execute, while wider direct calls need no Fn.
+use std/io
+
+fn eight(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) -> Int =
+  a + b + c + d + e + f + g + h
+
+fn nine(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int) -> Int =
+  a + b + c + d + e + f + g + h + i
+
+type Eight = | Eight(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int)
+type Nine = { a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int }
+
+effect Wide {
+  fn op(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) -> Int
+}
+
+ctl effect Control {
+  fn suspend(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int) -> Int
+}
+
+fn ordinary() -> Int = {
+  with handle Wide { op(a, b, c, d, e, f, g, h) => eight(a, b, c, d, e, f, g, h) }
+  op(1, 2, 3, 4, 5, 6, 7, 8)
+}
+
+fn control() -> Int = {
+  with handle Control { suspend(a, b, c, d, e, f, g) resume k => k(a + b + c + d + e + f + g) }
+  suspend(1, 2, 3, 4, 5, 6, 7) + 1
+}
+
+pub fn main() -> Unit !io = {
+  let named = eight
+  println("named:${named(1, 2, 3, 4, 5, 6, 7, 8)}")
+  let offset = 10
+  let closure = (a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int) =>
+    offset + a + b + c + d + e + f + g + h
+  println("closure:${closure(1, 2, 3, 4, 5, 6, 7, 8)}")
+  let ctor: fn(Int, Int, Int, Int, Int, Int, Int, Int) -> Eight = Eight
+  let Eight(_, _, _, _, _, _, _, last) = ctor(1, 2, 3, 4, 5, 6, 7, 8)
+  println("constructor:$last")
+  println("direct:${nine(1, 2, 3, 4, 5, 6, 7, 8, 9)}")
+  println("record:${Nine { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9 }.i}")
+  println("ordinary:${ordinary()}")
+  println("control:${control()}")
+}

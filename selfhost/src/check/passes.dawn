@@ -37,7 +37,7 @@ use check/types.{
   sig_render, subst, assoc_effect_advice,
   reduce_via_bindings, ty_named, builtin_type_at, builtin_type_name_reserved,
   hard_reserved_builtin_type_name, peel_opaque,
-  prelude_impls, prelude_trait_ids,
+  prelude_impls, prelude_trait_ids, fn_max_params, ctl_max_op_params,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, Head, head_of, impl_at,
   has_impl_at, insert_impl, type_args_of, sub_goals
@@ -1179,6 +1179,12 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         continue
       }
       seen = set.insert(seen, op.name)
+      let limit = if d.is_ctl { ctl_max_op_params() } else { fn_max_params() }
+      if len(op.params) > limit {
+        cx1 = cerr_h(cx1, "effect operation `" ++ op.name ++ "` supports at most " ++
+            to_string(limit) ++ " parameters, but declares " ++ to_string(len(op.params)),
+          op.nlo, op.nhi, "group parameters in a record; control handlers also take a continuation")
+      }
       cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
       var ptys: List[Ty] = []
       for p in op.params {
