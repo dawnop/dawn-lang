@@ -49,9 +49,19 @@
 #      reference, through scripts/tile-gpu-diff
 #   3  a mutant that has to go red
 #
-# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3: every
-# implemented opcode here reaches it, so no implemented row carries a layer-2
-# exemption today. Layer 3 is recorded where it exists and is not owed. The
+# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3. ONE
+# implemented row is below it, and it carries a named exemption:
+# `mmaf_scaled` stops at layer 1 under `architecture`, which is the name
+# types.txt already uses for the three fp8 formats. The reason is the
+# operation's own type table rather than anything missing here: Ops.td
+# confines its two matrix operands to f8E4M3FN, f8E5M2 and f4E2M1FN, and
+# `tileiras` 13.3.36 refuses fp8 below sm_100 (sm_90 takes f8E4M3FN and
+# refuses the f8E8M0FNU scale, measured by knife T10). There is no wide
+# operand form to fall back on the way `mmaf` has, so the kernel is
+# assembled for sm_100 and this machine's RTX 3080 never sees it. A row at
+# layer 1 may not name a golden, because a `golden:` here is read as a
+# device claim; the mutants are its evidence. Layer 3 is recorded where it
+# exists and is not owed. The
 # rule for reading it, which is stricter than "a mutant reddens on a kernel
 # that contains the op": a mutant counts for an opcode when its anchor
 # changes how THAT opcode is written or what it computes (its opcode byte, an
