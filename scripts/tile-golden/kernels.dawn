@@ -7,26 +7,37 @@
 # (bytes to the file) or `kernels --bytecode-version` (the header's version,
 # which run.sh holds against toolchain.txt).
 use std/io
+use std/list
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU}
-use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
+use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU,
+  I4, F4E2M1FN, global_table_a, global_table_b }
+use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
   gather, gather_masked, scatter, scatter_masked, axis_strides,
   atomic_add_masked, atomic_cas_masked, ge_i,
   mmaf, addf, sub, mul, div,
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
-  d_for, d_for3, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
+  d_for, d_for2, d_for3, d_loop, d_loop2, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
   i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
-  d_reduce_i, s_addi, s_maxi,
+  pack_bytes, unpack_bytes, ext_i4, ext_u4, trunc_i4, arange,
+  d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
+  d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2,
-  ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, i64_const, add_i64,
-  addi, subi, muli, shli, shri, consti }
-use tileir/prog.{TileProg, trace_kernel}
+  ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
+  d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
+  alloca_ptrs, alloca_shared_ptrs, mmaf_scaled,
+  addi, subi, muli, shli, shri, consti,
+  addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
+  sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
+  d_for_unsigned, atomic_rmw,
+  Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy, hint_latency,
+  load_hinted, store_hinted }
+use tileir/prog.{TileProg, trace_kernel, trace_kernel_hinted}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
 
@@ -2084,6 +2095,123 @@ fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[F64], out: Param[F64]) -> Unit !Dev 
     float_to_float(F32, F64, s, float_to_float(F8E8M0FNU, F32, s, exponent)))
 }
 
+# ---- the sub-byte formats (knife T9) ----
+#
+# `i4` and `f4E2M1FN` are the two element formats narrower than a byte, and
+# `pack` / `unpack` are the two operations that reach them: nothing else in
+# the dialect does. There is no `ptr<i4>` (Types.td leaves `i4` out of
+# `CudaTile_AnyInt`, so the pointer type will not parse), so a buffer of
+# either format does not exist and a kernel over one has to bring the bytes
+# in itself. That is why every parameter below is an ordinary buffer and the
+# first thing each kernel does is `pack` it into an `i8` tile.
+#
+# `pack` and `unpack` move no bits. `pack` reads a rank-1 tile as the byte
+# array it occupies and `unpack` reads a rank-1 byte tile as a tile of
+# another format, so the pair is the identity on every bit pattern and the
+# lane count scales by the ratio of the widths. Two elements of a sub-byte
+# format share a byte, the EVEN one in the low nibble (Types.td spells the
+# order out).
+const I4_N: Int = 512
+const I4_TILE: Int = 32
+const I4_BYTES: Int = 128
+const I4_LANES: Int = 256
+const I4_HALVES: Int = 64
+
+# The i4 kernel: five segments, each 32 i32 lanes wide, each one nibble
+# operation packed back into the words it came from.
+#
+# THE SIGNEDNESS OF THE WIDENING IS SEGMENTS 1 AND 2, and they are the same
+# expression under the two readings. `i4` has no arithmetic of its own (it
+# is in none of the dialect's integer tile constraints), so a kernel widens,
+# computes at 32 bits and truncates back; and + - * are blind to which
+# widening was used, because they agree modulo 16. An arithmetic SHIFT is
+# not: -1 >> 1 is -1 and 15 >> 1 is 7, and they are different nibbles. So
+# segment 1 shifts the sign-extended nibble and segment 2 the zero-extended
+# one, and they differ on exactly the lanes whose top bit is set.
+#
+# SEGMENT 4 IS THE NIBBLE ORDER, and it is here because nothing else in this
+# kernel can see it. Every other segment applies ONE function to every lane,
+# and a reader who had the two nibbles of a byte the wrong way round would
+# read lane k as lane k^1, compute the same thing and write it back to k^1:
+# the word that comes out is the same word. So the order is only visible
+# where the operation depends on the lane INDEX, and this segment takes a's
+# nibble on even lanes and b's on odd ones.
+fn dtype_i4(a: Param[I32], b: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let w = [I4_TILE]
+  let bytes = [I4_BYTES]
+  let s = [I4_LANES]
+  let blk = tile_at(block_id(0), I4_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * I4_N))
+  let na = unpack_bytes(I4, bytes, pack_bytes(I32, w, load(a, blk, w)))
+  let nb = unpack_bytes(I4, bytes, pack_bytes(I32, w, load(b, blk, w)))
+  let sa = ext_i4(s, na)
+  let sb = ext_i4(s, nb)
+  let ua = ext_u4(s, na)
+  let odd = int_to_mask(s, arange(I4_LANES))
+  let words = (v: Tile[I32]) => unpack_bytes(I32, bytes, pack_bytes(I4, s, trunc_i4(s, v)))
+  store(out, seg(0), w, words(add_i(s, sa, sb)))
+  store(out, seg(1), w, words(shr_i(s, sa, i_const(s, 1))))
+  store(out, seg(2), w, words(shr_i(s, ua, i_const(s, 1))))
+  store(out, seg(3), w, words(mul_i(s, sa, sb)))
+  store(out, seg(4), w, words(select(I32, s, odd, sb, sa)))
+}
+
+# The fp4 kernel: two segments, the storage form and the conversion, the
+# shape knife T3 gave the four narrow float formats.
+#
+# Segment 0 is the BIT PATTERN read: an i32 buffer of packed nibbles becomes
+# an `f4E2M1FN` tile and is widened to f64, so what it asks is which value
+# each of the sixteen encodings is. Segment 1 is the conversion: an f64
+# taken into the format and back, so what it asks is where the rounding
+# boundaries are, what 6.0 saturates from and what happens above it.
+const E2M1_N: Int = 512
+const E2M1_TILE: Int = 128
+const E2M1_BYTES: Int = 64
+const E2M1_WORDS: Int = 16
+
+fn dtype_e2m1(x: Param[I32], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [E2M1_TILE]
+  let bytes = [E2M1_BYTES]
+  let words = [E2M1_WORDS]
+  let b = block_id(0)
+  let bx = tile_at(b, E2M1_WORDS)
+  let by = tile_at(b, E2M1_TILE)
+  let seg = (j: Int) => idx_add(by, idx_const(j * E2M1_N))
+  let nibbles = unpack_bytes(F4E2M1FN, bytes, pack_bytes(I32, words, load(x, bx, words)))
+  store(out, seg(0), s, float_to_float(F4E2M1FN, F64, s, nibbles))
+  store(out, seg(1), s,
+    float_to_float(F4E2M1FN, F64, s, float_to_float(F64, F4E2M1FN, s, load(y, by, s))))
+}
+
+# The round trip: `unpack` then `pack`, twice, once in each direction, and
+# the answer is the bytes that went in.
+#
+# This is the kernel that says the PAIR is an identity rather than that
+# either one is right, and it says it at two widths: segment 0 through the
+# sub-byte format, where the lane count doubles, and segment 1 through
+# `i16`, where it halves. The dialect's own examples of `pack` are an f16
+# tile and an f4E2M1FN one, and those are the two directions.
+#
+# THIS KERNEL DOES NOT GO THROUGH f4E2M1FN, and that is a measurement.
+# `tileiras` 13.3.36 refuses the TYPE at sm_86 and sm_89 (`Incompatibility
+# with architecture 'sm_86': unsupported type 'f4E2M1FN'`), not merely fp4
+# arithmetic, so even a round trip that converts nothing cannot be loaded on
+# this machine. fp4 therefore stops at layer 1 here exactly as the three fp8
+# formats do, and dtype_e2m1 is where it is spelled.
+fn pack_roundtrip(a: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let w = [I4_TILE]
+  let bytes = [I4_BYTES]
+  let s = [I4_LANES]
+  let halves = [I4_HALVES]
+  let blk = tile_at(block_id(0), I4_TILE)
+  let seg = (j: Int) => idx_add(blk, idx_const(j * I4_N))
+  let packed = pack_bytes(I32, w, load(a, blk, w))
+  store(out, seg(0), w,
+    unpack_bytes(I32, bytes, pack_bytes(I4, s, unpack_bytes(I4, bytes, packed))))
+  store(out, seg(1), w,
+    unpack_bytes(I32, bytes, pack_bytes(I16, halves, unpack_bytes(I16, bytes, packed))))
+}
+
 # ---- the multi-launch kernels (knife 16) ----
 #
 # Each of these is one STEP of a host-side sequence, not a whole problem.
@@ -3643,6 +3771,704 @@ fn ptr_recast(x: Param[I32], out: Param[F64]) -> Unit !Dev = {
   store(out, base, [128], float_to_float(F32, F64, [128], load_ptrs(F32, [128], reals)))
 }
 
+# ---- knife T5: the loop whose trip count the data decides ----
+#
+# `loop` and `break` are the one region shape the tree was missing: `for`
+# counts iterations that the host or the grid fixes, and this one runs
+# until a value the kernel computed says stop. All four kernels below are
+# one block wide, because what is under test is the iteration and not the
+# grid.
+#
+# THE SHAPE THE PACKAGE EMITS, measured against the dialect rather than
+# guessed (tile-backend-design 6.7):
+#
+#   loop iter_values(%v = %init, %tk = %tok) : ... {
+#     <body>
+#     if %done { break %v, %tk2 : ... } else { yield }
+#     continue %next, %tk2 : ...
+#   }
+#
+# `break` may sit inside an `if` nested in the loop (Ops.td gives it
+# `ParentOneOf<["IfOp", "LoopOp"]>`), which is what lets the exit be a C
+# style condition rather than a two-part `loop_until`.
+
+## How wide one loop tile is, and how many lanes each corpus fills.
+const LOOP_TILE: Int = 128
+
+## How many iterations `loop_bound`'s `for` runs. It has to be at least the
+## longest Collatz chain the corpus holds (118, for 27), or the two kernels
+## would not answer the same thing.
+const COLLATZ_ROUNDS: Int = 128
+
+## The residual `loop_until` stops at, and the value its iteration starts
+## from. Newton on `x^2 = a` from 1.0 halves the error every step once it
+## is close, so the corpus below settles well inside the bound.
+const NEWTON_START: Float = 1.0
+
+## The residual the square root stops under. 1e-12 is far above the level
+## the iteration settles at for this corpus (the fixed point's residual is
+## about `2 * x * ulp(x)`, which is 4e-14 at the corpus's largest root), so
+## the loop terminates rather than oscillating under the bound.
+const NEWTON_EPS: Float = 1.0e-12
+
+## `loop_none`'s threshold and step. The corpus is under the threshold, so
+## the loop stops before its first step; the step is far over it, so one
+## iteration is enough to stop even when the condition is read backwards.
+const LOOP_NONE_THRESHOLD: Float = 1.0
+const LOOP_NONE_STEP: Float = 1000.0
+
+# One Collatz step per lane, saturating at 1: a lane that has reached 1
+# stays there, which is what makes "every lane is 1" a condition that
+# stays true once it is true. Answers the next value and the next count.
+fn collatz_step(v: Tile[I32], steps: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
+  let shape = [LOOP_TILE]
+  let one = i_const(shape, 1)
+  let two = i_const(shape, 2)
+  let three = i_const(shape, 3)
+  let zero = i_const(shape, 0)
+  let running = lt_i(shape, one, v)
+  let even = eq_i(shape, rem_i(shape, v, two), zero)
+  let moved = select(I32, shape, even, div_i(shape, v, two),
+    add_i(shape, mul_i(shape, v, three), one))
+  (select(I32, shape, running, moved, v), add_i(shape, steps, select(I32, shape, running, one, zero)))
+}
+
+# The number of Collatz steps each lane needs to reach 1, and the number of
+# iterations the loop took, as two tiles of the output buffer. The loop
+# carries the values and the counts and stops when the largest value left
+# is 1; the round count is the largest step count, because every lane that
+# is still moving adds one on every iteration.
+#
+# The trip count is DATA: 128 lanes of 1 to 128 need 118 iterations, and
+# no host constant in this kernel says so.
+fn loop_count(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let (_left, steps) = d_loop2(v0, i_const(shape, 0), (v, s) => {
+    let biggest = d_reduce_i(shape, v, 1, (acc, e) => s_maxi(acc, e))
+    let done = s_le_i(biggest, s_consti(1))
+    let (nv, ns) = collatz_step(v, s)
+    (done, nv, ns)
+  })
+  let rounds = d_reduce_i(shape, steps, 0, (acc, e) => s_maxi(acc, e))
+  store(out, blk, shape, steps)
+  store(out, tile_at(idx_const(1), LOOP_TILE), shape, spread(I32, shape, rounds))
+}
+
+# The same answer with no `loop` in it: a `for` over a host constant number
+# of rounds, saturating the same way. It is the kernel-level control of
+# both loop mutants (its bytecode holds neither opcode, so a writer that
+# spells them wrongly cannot move it) and, because it answers the same
+# counts, a second opinion on `loop_count` at the same time.
+fn loop_bound(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let (_left, steps) = d_for2(idx_const(0), idx_const(COLLATZ_ROUNDS), idx_const(1),
+    v0, i_const(shape, 0), (_k, v, s) => collatz_step(v, s))
+  store(out, blk, shape, steps)
+}
+
+# Newton's iteration for a square root, run until the largest residual in
+# the tile is under `eps`: the second data-dependent trip count, and the
+# one whose carried value is a float. Every step is
+# `x <- 0.5 * (x + a / x)`, three correctly rounded operations in an order
+# the host reference repeats, so the answer is exact tier; the round count
+# is carried alongside and lands in the second tile of the output.
+fn loop_until(a: Param[F64], out: Param[F64], eps: Float) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let av = load(a, blk, shape)
+  let half = f_const(F64, shape, 0.5)
+  let one = f_const(F64, shape, 1.0)
+  let (x, rounds) = d_loop2(f_const(F64, shape, NEWTON_START), f_const(F64, shape, 0.0), (v, r) => {
+    let residual = abs(F64, shape, sub(F64, shape, mul(F64, shape, v, v), av))
+    let worst = d_reduce(F64, shape, residual, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    let done = s_gt(F64, s_const(F64, eps), worst)
+    let nv = mul(F64, shape, half, addf(F64, shape, v, div(F64, shape, av, v)))
+    (done, nv, addf(F64, shape, r, one))
+  })
+  store(out, blk, shape, x)
+  store(out, tile_at(idx_const(1), LOOP_TILE), shape, rounds)
+}
+
+# A loop that stops on its FIRST test, before its body has changed
+# anything: the corpus is under the threshold, so the condition is true on
+# entry and the answer is what went in. It is the zero-iteration case, the
+# one a `for` cannot express without a bound of zero, and the one that says
+# `break` is reached from inside the `if` rather than at the end of the
+# body.
+#
+# The step is deliberately large enough to take the tile OVER the threshold
+# in one iteration. That is what keeps the break-condition mutant a
+# terminating program on this kernel: reading the condition backwards makes
+# it run exactly one iteration and stop, rather than never stopping, and a
+# mutant that hangs the device is not a verdict (the same sentence
+# `grid_stride` is written under).
+fn loop_none(x: Param[F64], out: Param[F64], threshold: Float, step: Float) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let blk = tile_at(idx_const(0), LOOP_TILE)
+  let v0 = load(x, blk, shape)
+  let v = d_loop(v0, v => {
+    let worst = d_reduce(F64, shape, v, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    let done = s_gt(F64, s_const(F64, threshold), worst)
+    (done, addf(F64, shape, v, f_const(F64, shape, step)))
+  })
+  store(out, blk, shape, v)
+}
+
+# ---- knife T4: the rest of each attribute domain ----
+#
+# These eight kernels have no leetgpu problem behind them and compute
+# nothing anyone wants. Each one asks ONE question about an attribute
+# value the writer had never written: what does the device do with it?
+# docs/tile-backend-design.md 6.8 records the answers, and
+# scripts/tileir-features/attrs.txt is the ledger they fill in.
+#
+# The recurring shape is SEGMENTS: one input tile, the same operation
+# under two or more attribute values, and each answer in its own stretch
+# of the output buffer. That is deliberate. A kernel that computed one
+# thing under one attribute could only be compared against a reference
+# that already believed what the attribute means; a kernel that computes
+# it under both puts the difference in one buffer, where a mutant that
+# collapses the two is a lane count and not an argument.
+#
+# The f32 kernels take f64 BUFFERS and convert on the way in and out:
+# `flush_to_zero` and `approx` are refused by the assembler on anything
+# but an f32 tile (SharedVerifiers.h's verifyFtz and verifyApprox), and
+# std/gpu's real device has no f32 buffer format at all
+# (`element_bytes`). Binary64 holds every binary32 value exactly, the
+# subnormals attr_ftz is about included, so the narrowing on the way in is
+# exact on these corpora and the widening on the way out is exact for
+# every f32.
+
+# The shape every attr_ kernel uses: four blocks of 128 lanes.
+const ATTR_TILE: Int = 128
+
+# How many ATTR_TILE segments each of them writes per block.
+const ATTR_ROUND_SEGS: Int = 6
+const ATTR_NAN_SEGS: Int = 16
+const ATTR_FTZ_SEGS: Int = 4
+const ATTR_APPROX_SEGS: Int = 2
+const ATTR_OVERFLOW_SEGS: Int = 3
+const ATTR_MEMSEM_SEGS: Int = 3
+
+# Six ways of rounding the same two operands: the sum, the product and the
+# quotient, each towards negative and towards positive infinity. The
+# operands are f32 values carried in an f64 buffer and the arithmetic is
+# f32, so a host reference can do the sum and the product EXACTLY in
+# binary64 and round the exact answer itself.
+#
+# The two directions differ on every lane whose exact result is off the
+# f32 grid and agree on every lane whose result is on it, which is what
+# makes the corpus half of the judgement: attr_diff counts the lanes where
+# a pair differs and run.sh pins that count above zero.
+fn attr_round(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_ROUND_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  let c = float_to_float(F64, F32, s, load(y, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, addf_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, addf_up(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_up(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(4 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, div_down(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(5 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, div_up(F32, s, a, c)))
+}
+
+# The two comparison orderings and the two NaN policies, on a corpus with
+# NaNs in it. Sixteen segments: the six predicates ordered, the same six
+# unordered, then `maxf` and `minf` with and without `propagate_nan`.
+#
+# The comparison answers are stored as 0.0 and 1.0 rather than as a mask,
+# because a device buffer of i1 is not a thing this backend allocates and
+# because a reader wants to see WHICH lane disagreed. Everything here is
+# f64: `propagate_nan` is not one of the f32-only modifiers, and the
+# comparison attribute is a property of `cmpf` at every width.
+fn attr_nan(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_NAN_SEGS * ATTR_TILE)
+  let a = load(x, base, s)
+  let c = load(y, base, s)
+  store(out, obase, s, as_float(s, eq(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, as_float(s, ne(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, as_float(s, lt(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s, as_float(s, le(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(4 * ATTR_TILE)), s, as_float(s, gt(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(5 * ATTR_TILE)), s, as_float(s, ge(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(6 * ATTR_TILE)), s, as_float(s, eq_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(7 * ATTR_TILE)), s, as_float(s, ne_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(8 * ATTR_TILE)), s, as_float(s, lt_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(9 * ATTR_TILE)), s, as_float(s, le_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(10 * ATTR_TILE)), s, as_float(s, gt_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(11 * ATTR_TILE)), s, as_float(s, ge_u(F64, s, a, c)))
+  store(out, idx_add(obase, idx_const(12 * ATTR_TILE)), s, maxf(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(13 * ATTR_TILE)), s, maxf_nan(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(14 * ATTR_TILE)), s, minf(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(15 * ATTR_TILE)), s, minf_nan(F64, s, a, c))
+}
+
+# A mask as 1.0 and 0.0, which is how attr_nan stores a comparison.
+fn as_float(s: List[Int], m: Tile[I1]) -> Tile[F64] !Dev = int_to_float(I32, F64, s, mask_to_int(s, m))
+
+# `flush_to_zero` on the sum and the product, against the same two
+# operations without it. The corpus is f32 subnormals and pairs whose
+# exact f32 result is subnormal, so the attribute has something to flush;
+# on ordinary operands the four segments would be two pairs of equals and
+# the kernel would say nothing.
+fn attr_ftz(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_FTZ_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  let c = float_to_float(F64, F32, s, load(y, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, addf(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, addf_ftz(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul(F32, s, a, c)))
+  store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
+    float_to_float(F32, F64, s, mul_ftz(F32, s, a, c)))
+}
+
+# The approximate square root beside the correctly rounded one. Both
+# segments are the root of the same lanes, so what the pair says is how
+# far `rounding<approx>` is from `rounding<nearest_even>` on this device,
+# and attr_diff prints that distance rather than asserting a bound on it.
+# The tier is tolerance for the same reason every transcendental kernel is
+# (docs 6.6): the device's approximation is not the host's.
+fn attr_approx(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_APPROX_SEGS * ATTR_TILE)
+  let a = float_to_float(F64, F32, s, load(x, base, s))
+  store(out, obase, s, float_to_float(F32, F64, s, sqrt(F32, s, a)))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
+    float_to_float(F32, F64, s, sqrt_approx(F32, s, a)))
+}
+
+# The three integer overflow assumptions, one per segment. The corpus does
+# NOT overflow: a program that wraps under `no_signed_wrap` is undefined,
+# so a kernel that asked what happens then would be asking a question with
+# no answer. What this kernel is for is that the assumption reaches the
+# assembler and the device still computes the sum, the difference and the
+# product a reader expects, which is a smoke test and is recorded as one
+# (attrs.txt exempts the three from layer 2 by name).
+fn attr_overflow(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_OVERFLOW_SEGS * ATTR_TILE)
+  let a = load(x, base, s)
+  let c = load(y, base, s)
+  store(out, obase, s, add_i_nsw(s, a, c))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, sub_i_nuw(s, a, c))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, mul_i_nw(s, a, c))
+}
+
+# The three memory orderings and the two scopes an atomic can carry beside
+# `relaxed device`, one segment each: `acquire tl_blk`, `release sys` and
+# `acq_rel device`. Each lane owns its own slot, so there is no race and
+# the answer does not depend on the ordering at all -- which is the point.
+# An ordering is a constraint on CONCURRENT accesses, and this corpus has
+# none, so what a device could tell a reader here is only that the atomic
+# still ran. attrs.txt records the five values at layer 1 with that reason
+# written out; a judgement about the ordering itself needs two blocks
+# racing and a judgement shape this repository does not have.
+fn attr_memsem(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_MEMSEM_SEGS * ATTR_TILE)
+  let v = load(x, base, s)
+  let slot = lanes(obase, s)
+  let _a = atomic_rmw(out, "add_acquire_tl_blk", slot, s, v)
+  let _b = atomic_rmw(out, "add_release_sys", add_i(s, slot, i_const(s, ATTR_TILE)), s, v)
+  let _c = atomic_rmw(out, "add_acq_rel_device", add_i(s, slot, i_const(s, 2 * ATTR_TILE)), s, v)
+  ()
+}
+
+# The float read-modify-write mode. Every block adds its own chunk of the
+# input into the SAME 128 slots, so four additions land on each slot and
+# the lanes collide across blocks the way leetgpu 13's histogram does --
+# and the values are small integers, exact in binary32 under any order, so
+# the tier is exact by algebra and not by luck (the same argument knife
+# 14 wrote down for the integer histogram).
+fn attr_addf(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let _old = atomic_rmw(out, "addf", lanes(idx_const(0), s), s, load(x, base, s))
+  ()
+}
+
+# The loop bound comparison, signed and unsigned, over a range that
+# straddles 2^31: from 0x7FFFFFF0 to 0x80000010 by one. Read as signed the
+# upper bound is negative and the loop does not run; read as unsigned it
+# is sixteen above the lower bound and the loop runs sixteen times. The
+# kernel counts its own iterations into the two halves of the output, so
+# the attribute's effect is an integer a reader can check by hand and not
+# a rounding.
+const ATTR_UCMP_LO: Int = 0x7FFFFFF0
+const ATTR_UCMP_HI: Int = 0x80000010
+
+fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let obase = tile_at(b, 2 * ATTR_TILE)
+  let zero = i_const(s, 0)
+  let signed = d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
+    (_i, acc) => add_i(s, acc, i_const(s, 1)))
+  let unsigned = d_for_unsigned(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
+    (_i, acc) => add_i(s, acc, i_const(s, 1)))
+  store(out, obase, s, signed)
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, unsigned)
+}
+
+# ---- knife T6: assert, assume and print_tko
+#
+# The three debugging operations of the frozen table, and the two judgement
+# shapes they need. Every kernel here is one 128-wide tile over one block:
+# what is under test is the operation, not the grid.
+
+## How wide one knife T6 tile is.
+const DBG_TILE: Int = 128
+
+## The two limits `assert_guard` is instantiated at. The corpus is 1 to 128,
+## so `PASS` is above every lane and `FAIL` is below every lane -- the
+## condition `v < limit` is ALL TRUE at one and ALL FALSE at the other. That
+## is what makes assert-condition-inverted a two-way mutant: negated, the
+## passing kernel fails and the failing one passes, and neither ends up
+## half-firing.
+const ASSERT_PASS_LIMIT: Int = 1000
+const ASSERT_FAIL_LIMIT: Int = 0
+
+## What `assume_divby`'s lanes are multiples of, and what the kernel then
+## divides by: the predicate has to be TRUE of the corpus or the program is
+## undefined rather than wrong (dev.dawn's AssumePred says why).
+const ASSUME_DIVISOR: Int = 32
+
+## The group `assume_same`'s lanes repeat in, and the two bounds
+## `assume_bounded` claims. Both are true of the corpus
+## scripts/tile-gpu-diff hands them.
+const ASSUME_GROUP: Int = 4
+const ASSUME_LOW: Int = 0
+const ASSUME_HIGH: Int = 100000
+
+# One assertion over the loaded tile, and the tile plus one stored. `limit`
+# is what makes the condition all-true or all-false; nothing else differs
+# between assert_pass and assert_fail, which is the point: one anchor
+# inverts both.
+fn assert_guard(x: Param[I32], out: Param[I32], limit: Int) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = load(x, blk, shape)
+  d_assert(shape, lt_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")
+  store(out, blk, shape, add_i(shape, v, i_const(shape, 1)))
+}
+
+# The assertion that holds: every lane is under the limit, so the launch is
+# an ordinary one and the answer is the tile plus one.
+fn assert_pass(x: Param[I32], out: Param[I32]) -> Unit !Dev = assert_guard(x, out, ASSERT_PASS_LIMIT)
+
+# The assertion that fires: no lane is under the limit. The kernel still
+# stores (the dialect lets the tile block keep running), and the HOST is
+# told, which is the whole of what this kernel is for.
+fn assert_fail(x: Param[I32], out: Param[I32]) -> Unit !Dev = assert_guard(x, out, ASSERT_FAIL_LIMIT)
+
+# A print of two rank-0 tiles the kernel reduced for itself, and the same
+# two numbers stored, so that the bytes on standard output and the bytes in
+# the buffer are two readings of one answer.
+fn print_tile(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = load(x, blk, shape)
+  let total = d_reduce_i(shape, v, 0, (acc, e) => s_addi(acc, e))
+  let biggest = d_reduce_i(shape, v, 0, (acc, e) => s_maxi(acc, e))
+  d_print(I32, "print_tile sum=%d max=%d\n", [total, biggest])
+  store(out, blk, shape, v)
+  store(out, tile_at(idx_const(1), DBG_TILE), shape, spread(I32, shape, total))
+  store(out, tile_at(idx_const(2), DBG_TILE), shape, spread(I32, shape, biggest))
+}
+
+# `div_by`: every lane is a multiple of the divisor, and the kernel divides
+# by it. The predicate is true of the corpus, so the answer is defined and
+# the device is being asked whether an assumption changes it (it must not).
+fn assume_divby(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = assume_div_by(I32, shape, ASSUME_DIVISOR, load(x, blk, shape))
+  store(out, blk, shape, div_i(shape, v, i_const(shape, ASSUME_DIVISOR)))
+}
+
+# `same_elements`: the lanes repeat in groups, and the kernel multiplies.
+fn assume_same(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let v = assume_same_elements(I32, shape, [ASSUME_GROUP], load(x, blk, shape))
+  store(out, blk, shape, mul_i(shape, v, i_const(shape, 3)))
+}
+
+# `bounded`: the lanes are inside the range, and the kernel adds a constant.
+fn assume_bounded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [DBG_TILE]
+  let blk = tile_at(block_id(0), DBG_TILE)
+  let lo: Option[Int] = Some(ASSUME_LOW)
+  let hi: Option[Int] = Some(ASSUME_HIGH)
+  let v = assume_in_range(I32, shape, lo, hi, load(x, blk, shape))
+  store(out, blk, shape, add_i(shape, v, i_const(shape, 5)))
+}
+# ---- knife T7: the module's static globals ----
+#
+# `global` allocates a one-dimensional buffer in the module and initializes
+# it at MODULE LOAD time; `get_global` answers a pointer to its first
+# element. The three kernels below are the three questions a device can be
+# asked about that:
+#
+#   global_table    does the device read back the bytes the host declared?
+#                   Two globals, two output segments, so a mutant that
+#                   swaps the two symbols or writes one initializer wrong
+#                   has somewhere to show.
+#   global_scratch  does a global keep its value from one launch to the
+#                   next? It is mutable, and the sequence that answers this
+#                   is two launches of the SAME module (std/gpu's real
+#                   handler loads a module once per kernel name and keeps
+#                   it, which is exactly the lifetime the dialect promises).
+#   global_ctl      the same answer as global_table out of two buffers, so
+#                   it holds neither opcode: the family's kernel-level
+#                   control, and a second opinion on the tables.
+#   global_flags    global_table's two segments again, out of a `private`
+#                   global and a `constant` one. Knife T8: those two words
+#                   are the fields the Global section's record grew at
+#                   bytecode 13.3, and this is the only kernel here that
+#                   writes either. It answers what global_table answers,
+#                   which is the point -- neither word changes what a
+#                   kernel computes, so what this kernel buys is layer 1,
+#                   the assembler accepting them. What it CANNOT buy is
+#                   named in scripts/tileir-features/attrs.txt: telling a
+#                   private symbol from a public one from the host needs
+#                   `cuModuleGetGlobal`, and the `Gpu` effect has no such
+#                   operation, so the family stops there and this kernel is
+#                   not in scripts/tile-gpu-diff.
+#
+# `@tbl_b` asks for a 256-byte alignment and `@tbl_a` takes the dialect's
+# default of 0, so the record's alignment varint carries two different
+# values in one module rather than always the same one.
+
+const GLOBAL_TILE: Int = 128
+const GLOBAL_ALIGN: Int = 256
+
+fn global_table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  d_global("tbl_a", F64, global_table_a(GLOBAL_TILE))
+  d_global_aligned("tbl_b", F64, global_table_b(GLOBAL_TILE), GLOBAL_ALIGN)
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let off = lanes(blk, s)
+  let pa = ptr_offset(F64, s, global_ptrs("tbl_a", F64, s), off)
+  let pb = ptr_offset(F64, s, global_ptrs("tbl_b", F64, s), off)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
+  store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
+}
+
+# The same two segments from two buffers. No `global`, no `get_global`, and
+# the same answer.
+fn global_ctl(a: Param[F64], b: Param[F64], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, load(a, blk, s), tx))
+  store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load(b, blk, s), tx))
+}
+
+# The same two segments as global_table, out of globals that carry the two
+# words the record grew room for at 13.3: `@hidden` is private and `@frozen`
+# is constant. It reads them and never stores through either, which the
+# second one requires and the dialect does not enforce.
+fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  d_global_private("hidden", F64, global_table_a(GLOBAL_TILE))
+  d_global_const("frozen", F64, global_table_b(GLOBAL_TILE))
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let off = lanes(blk, s)
+  let pa = ptr_offset(F64, s, global_ptrs("hidden", F64, s), off)
+  let pb = ptr_offset(F64, s, global_ptrs("frozen", F64, s), off)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
+  store(out, idx_add(blk, idx_const(GLOBAL_TILE)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
+}
+
+# One mutable global, read then written, and the sum written to the output
+# as well. Launched twice on one module the output is twice the input,
+# because the global carried the first launch's sum into the second; on a
+# device that reloaded the module between launches it would be the input
+# both times.
+fn global_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [GLOBAL_TILE]
+  d_global("scratch", F64, zeros_tile(GLOBAL_TILE))
+  let blk = tile_at(block_id(0), GLOBAL_TILE)
+  let g = ptr_offset(F64, s, global_ptrs("scratch", F64, s), lanes(blk, s))
+  let prev = load_ptrs(F64, s, g)
+  let next = addf(F64, s, prev, load(x, blk, s))
+  store_ptrs(F64, s, g, next)
+  store(out, blk, s, next)
+}
+
+fn zeros_tile(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
+
+# ---- knife T15: `optimization_hints` (attribute tags 11 and 10) ----
+#
+# Both kernels are `vadd`'s body, and that is the point: a hint is a
+# suggestion the dialect promises not to compute with, so the only corpus
+# that can say anything about one is a corpus whose answer is already
+# known. What changes is the BYTES -- an entry flag bit and an attribute in
+# the function table for the first, two flag bits and two nested
+# dictionaries in the body for the second.
+#
+# The values are the dialect's own legal ones for this machine
+# (AttrDefs.td and `OptimizationHintsAttr`'s validators): `num_cta_in_cga`
+# must be 1 on sm_80 through sm_89, `num_worker_warps_per_cta` is 4 or 8,
+# `occupancy` is 1 to 32 and `latency` is 1 to 10. Nothing enforces any of
+# that here: the validators live behind `-Wunsupported-hints`, which is off
+# by default, so these numbers are chosen to be right rather than checked
+# to be (docs/tile-backend-design.md 6.10).
+
+# `vadd` with hints on the ENTRY: one architecture-specific entry for this
+# machine's sm_86 and one `default`, the fallback the dialect reads when the
+# compilation target has no entry of its own.
+fn hint_entry_hints() -> Hints = [
+  for_arch("default", [hint_occupancy(4)]),
+  for_arch("sm_86", [hint_num_cta_in_cga(1), hint_num_worker_warps_per_cta(8), hint_occupancy(2)])]
+
+fn hint_entry(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), 128)
+  let ta = load(a, blk, [128])
+  let tb = load(b, blk, [128])
+  store(out, blk, [128], addf(F64, [128], ta, tb))
+}
+
+# `vadd` with hints on a LOAD and on the STORE. The second load carries
+# none, so one kernel holds both states of the flag bit: `latency` is the
+# one key `load_ptr_tko` and `store_ptr_tko` accept.
+fn hint_memory(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), 128)
+  let ta = load_hinted(a, blk, [128], [for_arch("sm_86", [hint_latency(4)])])
+  let tb = load(b, blk, [128])
+  store_hinted(out, blk, [128], [for_arch("sm_86", [hint_latency(7)])], addf(F64, [128], ta, tb))
+}
+
+# ---- knife T10: `alloca` (0x71) ----
+#
+# Automatic allocation: scratch that belongs to the block the operation is
+# in and to nothing else. Every other pointer in this file comes from a
+# parameter the host uploaded (`ptrs`) or from a global the module declared
+# (`get_global`); this is the third source and the only one no host can
+# see, so the corpus has to make the memory ANSWER rather than show it.
+#
+# ALLOCA_ELEMS is 192 and not 128 on purpose, and the reason is written
+# here because a reader would otherwise trim it. The kernels write 128
+# elements, so any count at or above that is enough memory; 192 is not a
+# POWER OF TWO, and `alloca`'s verifier requires the alignment to be one.
+# That is what makes the mutant which writes the count where the alignment
+# belongs a refusal with a name (`'alignment' must be power of two`) rather
+# than a legal program that quietly allocates eight elements and runs off
+# the end of them. Undefined behaviour is not a judgement (ruling 1).
+const ALLOCA_TILE: Int = 128
+const ALLOCA_ELEMS: Int = 192
+const ALLOCA_ALIGN: Int = 8
+
+# Write a tile into a fresh allocation and read it back in the same launch.
+# The token chain is what orders the two, and the answer is `3 * x`: the
+# scratch holds `2 * x` and the kernel adds the input to what it reads
+# back. A scratch that answered zeros, or an address the store never
+# reached, would answer `x`.
+fn alloca_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let off = lanes(idx_const(0), s)
+  let p = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let tx = load(x, blk, s)
+  store_ptrs(F64, s, p, addf(F64, s, tx, tx))
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, p), tx))
+}
+
+# Two allocations in one block, written apart and read crosswise: the
+# answer `x - (-x - 1)` is `2 * x + 1`, and two allocations at the SAME
+# address would answer 0 for every lane, because the second store would
+# have overwritten the first. The corpus keeps every lane away from -0.5,
+# which is the one input where `2 * x + 1` is 0 anyway.
+#
+# The second allocation carries the dialect's `global` unit attribute and
+# the first does not, so one kernel holds both states of the flag bit, the
+# way hint_memory holds both states of a load's hint bit.
+fn alloca_two(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let off = lanes(idx_const(0), s)
+  let pa = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let pb = ptr_offset(F64, s, alloca_shared_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let tx = load(x, blk, s)
+  store_ptrs(F64, s, pa, tx)
+  store_ptrs(F64, s, pb, sub(F64, s, neg(F64, s, tx), f_const(F64, s, 1.0)))
+  store(out, blk, s, sub(F64, s, load_ptrs(F64, s, pa), load_ptrs(F64, s, pb)))
+}
+
+# alloca_scratch's answer with no allocation in it: the control that tells
+# "the mutant broke alloca" from "the mutant broke the tree".
+fn alloca_ctl(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ALLOCA_TILE]
+  let blk = tile_at(block_id(0), ALLOCA_TILE)
+  let tx = load(x, blk, s)
+  store(out, blk, s, addf(F64, s, addf(F64, s, tx, tx), tx))
+}
+
+# ---- knife T10: `mmaf_scaled` (0x72) ----
+#
+# The block-scaled MMA. It reaches LAYER 1 AND NO FURTHER on this machine,
+# and the reason is the operation's own type table rather than anything
+# missing here: Ops.td confines its two matrix operands to `f8E4M3FN`,
+# `f8E5M2` and `f4E2M1FN`, and `tileiras` 13.3.36 refuses all three fp8
+# formats below sm_100 (measured by knife T3, and again by writing this
+# kernel out for sm_86). There is NO wide-operand form to fall back on:
+# unlike `mmaf`, which takes everything down to f64, this operation exists
+# only for the formats that carry a separate exponent per run of K. So the
+# kernel is assembled for sm_100 like the three dtype_* fp8 kernels
+# (run.sh's kernel_arch) and this machine's RTX 3080 never sees it.
+#
+# The scale shapes are what `block` means: one f8E8M0FNU element scales a
+# run of MMS_V elements along K, so the left scale is [M, K/V] and the
+# right one is [K/V, N]. The accumulator and the result are f32 whatever
+# the operands are, which is the whole of MmaFScaledOp_ResultTileType.
+const MMS_M: Int = 32
+const MMS_K: Int = 64
+const MMS_N: Int = 32
+const MMS_V: Int = 32
+
+fn mmaf_scaled_e4m3(a: Param[F8E4M3FN], b: Param[F8E4M3FN], sa: Param[F8E8M0FNU],
+  sb: Param[F8E8M0FNU], out: Param[F64]) -> Unit !Dev = {
+  let sk = MMS_K / MMS_V
+  let zero = idx_const(0)
+  let ta = load(a, zero, [MMS_M, MMS_K])
+  let tb = load(b, zero, [MMS_K, MMS_N])
+  let tsa = load(sa, zero, [MMS_M, sk])
+  let tsb = load(sb, zero, [sk, MMS_N])
+  let acc = f_const(F32, [MMS_M, MMS_N], 0.0)
+  let r = mmaf_scaled(F8E4M3FN, F8E8M0FNU, MMS_M, MMS_K, MMS_N, MMS_V, ta, tb, acc, tsa, tsb)
+  store(out, zero, [MMS_M, MMS_N], float_to_float(F32, F64, [MMS_M, MMS_N], r))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -4003,6 +4829,81 @@ fn trace(name: String) -> TileProg = match name {
   "dtype_e8m0" ->
     trace_kernel("dtype_e8m0", ["f8E8M0FNU", "f64", "f64"],
       () => dtype_e8m0(param(F8E8M0FNU, 0), param(F64, 1), param(F64, 2)))
+  "dtype_i4" ->
+    trace_kernel("dtype_i4", ["i32", "i32", "i32"],
+      () => dtype_i4(param(I32, 0), param(I32, 1), param(I32, 2)))
+  "dtype_e2m1" ->
+    trace_kernel("dtype_e2m1", ["i32", "f64", "f64"],
+      () => dtype_e2m1(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "pack_roundtrip" ->
+    trace_kernel("pack_roundtrip", ["i32", "i32"],
+      () => pack_roundtrip(param(I32, 0), param(I32, 1)))
+  "loop_count" ->
+    trace_kernel("loop_count", ["i32", "i32"], () => loop_count(param(I32, 0), param(I32, 1)))
+  "loop_bound" ->
+    trace_kernel("loop_bound", ["i32", "i32"], () => loop_bound(param(I32, 0), param(I32, 1)))
+  "loop_until" ->
+    trace_kernel("loop_until", ["f64", "f64"], () => loop_until(param(F64, 0), param(F64, 1), NEWTON_EPS))
+  "loop_none" ->
+    trace_kernel("loop_none", ["f64", "f64"],
+      () => loop_none(param(F64, 0), param(F64, 1), LOOP_NONE_THRESHOLD, LOOP_NONE_STEP))
+  "attr_round" ->
+    trace_kernel("attr_round", ["f64", "f64", "f64"],
+      () => attr_round(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_nan" ->
+    trace_kernel("attr_nan", ["f64", "f64", "f64"],
+      () => attr_nan(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_ftz" ->
+    trace_kernel("attr_ftz", ["f64", "f64", "f64"],
+      () => attr_ftz(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "attr_approx" ->
+    trace_kernel("attr_approx", ["f64", "f64"], () => attr_approx(param(F64, 0), param(F64, 1)))
+  "attr_overflow" ->
+    trace_kernel("attr_overflow", ["i32", "i32", "i32"],
+      () => attr_overflow(param(I32, 0), param(I32, 1), param(I32, 2)))
+  "attr_memsem" ->
+    trace_kernel("attr_memsem", ["i32", "i32"], () => attr_memsem(param(I32, 0), param(I32, 1)))
+  "attr_addf" ->
+    trace_kernel("attr_addf", ["f64", "f64"], () => attr_addf(param(F64, 0), param(F64, 1)))
+  "attr_ucmp" ->
+    trace_kernel("attr_ucmp", ["i32"], () => attr_ucmp(param(I32, 0)))
+  "assert_pass" ->
+    trace_kernel("assert_pass", ["i32", "i32"], () => assert_pass(param(I32, 0), param(I32, 1)))
+  "assert_fail" ->
+    trace_kernel("assert_fail", ["i32", "i32"], () => assert_fail(param(I32, 0), param(I32, 1)))
+  "print_tile" ->
+    trace_kernel("print_tile", ["i32", "i32"], () => print_tile(param(I32, 0), param(I32, 1)))
+  "assume_divby" ->
+    trace_kernel("assume_divby", ["i32", "i32"], () => assume_divby(param(I32, 0), param(I32, 1)))
+  "assume_same" ->
+    trace_kernel("assume_same", ["i32", "i32"], () => assume_same(param(I32, 0), param(I32, 1)))
+  "assume_bounded" ->
+    trace_kernel("assume_bounded", ["i32", "i32"], () => assume_bounded(param(I32, 0), param(I32, 1)))
+  "global_table" ->
+    trace_kernel("global_table", ["f64", "f64"], () => global_table(param(F64, 0), param(F64, 1)))
+  "global_ctl" ->
+    trace_kernel("global_ctl", ["f64", "f64", "f64", "f64"],
+      () => global_ctl(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+  "global_scratch" ->
+    trace_kernel("global_scratch", ["f64", "f64"], () => global_scratch(param(F64, 0), param(F64, 1)))
+  "global_flags" ->
+    trace_kernel("global_flags", ["f64", "f64"], () => global_flags(param(F64, 0), param(F64, 1)))
+  "alloca_scratch" ->
+    trace_kernel("alloca_scratch", ["f64", "f64"],
+      () => alloca_scratch(param(F64, 0), param(F64, 1)))
+  "alloca_two" ->
+    trace_kernel("alloca_two", ["f64", "f64"], () => alloca_two(param(F64, 0), param(F64, 1)))
+  "alloca_ctl" ->
+    trace_kernel("alloca_ctl", ["f64", "f64"], () => alloca_ctl(param(F64, 0), param(F64, 1)))
+  "mmaf_scaled_e4m3" ->
+    trace_kernel("mmaf_scaled_e4m3", ["f8E4M3FN", "f8E4M3FN", "f8E8M0FNU", "f8E8M0FNU", "f64"],
+      () => mmaf_scaled_e4m3(param(F8E4M3FN, 0), param(F8E4M3FN, 1), param(F8E8M0FNU, 2),
+        param(F8E8M0FNU, 3), param(F64, 4)))
+  "hint_entry" ->
+    trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
+      () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "hint_memory" ->
+    trace_kernel("hint_memory", ["f64", "f64", "f64"], () => hint_memory(param(F64, 0), param(F64, 1), param(F64, 2)))
   _ -> panic("tile-golden: no kernel named `${name}`")
 }
 
@@ -4034,10 +4935,15 @@ pub fn main() -> Unit !io = match args() {
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
       ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
+      ++ "|dtype_i4|dtype_e2m1|pack_roundtrip"
       ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
-      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast>"
+      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast"
+      ++ "|loop_count|loop_bound|loop_until|loop_none"
+      ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
+      ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
+      ++ "|global_table|global_ctl|global_scratch>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }
