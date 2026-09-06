@@ -72,7 +72,7 @@ use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, tensor_view_of, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -1114,7 +1114,7 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
   # back in, but the wire has no such rule: the reader takes the count on
   # trust.
   PartitionView(tile_shape, e, shape, strides, dim_map, padding) -> {
-    let (w1, tvi) = ty(w, TensorView(e, shape, strides))
+    let (w1, tvi) = ty(w, tensor_view_of(t))
     let code = padding_code(padding)
     let present = match code {
       Some(_c) -> 1
@@ -2715,6 +2715,93 @@ test "a global's initializer is the whole buffer and not the one-element splat e
   # 1.0 and 2.0 as binary64, low byte first, one after the other
   assert hex(global_payload("f64", [1.0, 2.0])) == "000000000000f03f" ++ "0000000000000040"
   assert hex(global_payload("i32", [1.0, 0.0 - 1.0])) == "01000000" ++ "ffffffff"
+}
+
+# ---- knife T11: the view family's byte shapes
+
+test "a tensor view is its tag, its element type index and two arrays of eight-byte dimensions" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  # The element type is registered first, as every dependent type is, so it
+  # takes index 0 and the view takes 1. Then `writeLEVarSize` twice: the
+  # count as a varint and EIGHT raw little-endian bytes an element. Not a
+  # varint per element and not zigzag; `emit_i32_array`'s test above is the
+  # four-byte half of the same rule.
+  let (w1, i) = ty(w0, TensorView(Num("f64"), [8, 4], [4, 1]))
+  assert i == 1
+  assert hex(w1.types.items[1])
+    == "0e" ++ "00"
+    ++ "02" ++ "0800000000000000" ++ "0400000000000000"
+    ++ "02" ++ "0400000000000000" ++ "0100000000000000"
+}
+
+test "a partition view writes the 13.3 bitfield between its tag and its first parameter, and the padding value last" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let tv = TensorView(Num("f64"), [8, 4], [4, 1])
+  # tag 15, the optional-parameter bitfield (bit 0 is `padding_value`, the
+  # type's only optional parameter), the tile shape as a DenseI32ArrayAttr
+  # (four bytes an element), the tensor view's TYPE INDEX, the dim_map as an
+  # int32 array, then the padding code. `nan` is 2.
+  let (w1, i) = ty(w0, PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadNan))
+  assert hex(w1.types.items[i])
+    == "0f" ++ "01"
+    ++ "02" ++ "02000000" ++ "02000000"
+    ++ "01"
+    ++ "02" ++ "00000000" ++ "01000000"
+    ++ "02"
+  # With no padding the bitfield word is written as ZERO and the parameter's
+  # own position carries nothing at all. At 13.2 there would be no bitfield
+  # and a presence byte here instead, which is what
+  # partition-view-padding-inline-flag-at-13-3 writes.
+  let (w2, j) = ty(w1, PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [1, 0], NoPadding))
+  assert hex(w2.types.items[j])
+    == "0f" ++ "00"
+    ++ "02" ++ "02000000" ++ "02000000"
+    ++ "01"
+    ++ "02" ++ "01000000" ++ "00000000"
+  assert partition_view_has_bitfield()
+}
+
+test "make_tensor_view writes a result count and an empty count for each variadic segment" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  let tv = TensorView(Num("f64"), [8, 4], [4, 1])
+  # The opcode, the result count 1 (`Operator::isVariadic()` is true because
+  # the two dynamic arrays are variadic OPERANDS, and the generated writer
+  # writes the count under it), the result type index, the base, and then a
+  # count of zero for each of the two variadic segments. Those two zeroes
+  # are not padding: without them the reader takes the next instruction's
+  # opcode for a segment length.
+  let m = encode_instr(w0, MakeTensorView(9, Val(0), Tile([], PtrTo("f64")), tv))
+  assert hex(bytes.freeze(m.body)) == "43" ++ "01" ++ "01" ++ "00" ++ "00" ++ "00"
+  # make_partition_view has nothing variadic and nothing optional, so it
+  # writes no count and no flags word at all: the whole of the partitioning
+  # is in the result type.
+  let pv = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
+  let q = encode_instr(w0, MakePartitionView(9, Val(0), tv, pv))
+  assert hex(bytes.freeze(q.body)) == "42" ++ "02" ++ "00"
+}
+
+test "load_view_tko is two results and one index count, and store_view_tko puts the tile before the view" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let tile = Tile([2, 2], Num("f64"))
+  let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
+  # opcode, 2 results, the tile type index, the token type index, the flags
+  # (bit 2, the token; bit 0 is `memory_scope` and bit 1 is
+  # `optimization_hints`, and this writer sets neither), the weak ordering,
+  # the view, the index COUNT, the two indices, the token. There is no mask
+  # and no padding operand: a view says what an out-of-bounds lane reads in
+  # its TYPE.
+  let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
+    Tile([], Num("i32")), tile, Val(3)))
+  assert hex(bytes.freeze(ld.body))
+    == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+  assert VIEW_FLAG_TOKEN == 4
+  # the same shape with one result, and the TILE before the view: that is
+  # the dialect's `arguments` order, which is the reverse of how the
+  # assembly reads the two.
+  let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
+    Tile([], Num("i32")), Val(3)))
+  assert hex(bytes.freeze(st.body))
+    == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
 }
 
 test "the Global section is a count and six varints a record at 13.3, unaligned, and it comes before Func" {
