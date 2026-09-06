@@ -1,44 +1,61 @@
-# A GPU program on a machine with no GPU: one kernel, two sides, two handlers.
+# A GPU program on a machine with no GPU: nine kernels, two sides, one
+# handler that is a table in host memory.
 #
-# The device side is `vadd`. It is an ordinary Dawn function whose only effect
-# is `!Dev`, and running it does not compute anything: `packages/tileir`'s
-# recording handler writes down the operations it raises, and the record
-# renders as Tile IR text or encodes as the bytecode `tileiras` assembles into
-# a cubin.
+# The device side is nine ordinary Dawn functions whose only effect is
+# `!Dev`, each the smallest shape that shows one thing the dialect can do
+# and each named for the knife that added it (docs/tile-backend-design.md
+# 7). Running one computes nothing: `packages/tileir`'s recording handler
+# writes down the operations it raises, and the record renders as Tile IR
+# text or encodes as the bytecode `tileiras` assembles into a cubin.
 #
-# The host side is `run` -- allocate, upload, launch, download, free -- whose
-# only effect is `!Gpu`. `std/gpu`'s `with_gpu_real` answers those operations
-# from the CUDA driver. `with_gpu_fake` answers them from a table in host
-# memory, computing each launch with a reference implementation, and it is
-# pure: this program and its tests need no device, no driver and no `!io`.
+# The host side is `run_kernel` -- allocate, upload, launch, download, free
+# -- whose only effect is `!Gpu`. `std/gpu`'s `with_gpu_real` answers those
+# operations from the CUDA driver; `with_gpu_fake` answers them from a table
+# in host memory and is pure, so this program and its tests need no device,
+# no driver and no `!io`.
 #
-# The Tile IR this prints is the same text `scripts/tile-golden` pins for
-# this kernel, on purpose: the gate holds the renderer and the gallery shows
-# what it emits, and a change to either moves both together.
-#
-# What the fake device is worth is that it is not a stub. It issues and
-# retires handles, refuses a format it cannot hold, refuses a kernel it does
-# not know and a launch of the wrong arity, and rounds what it stores to the
-# buffer's format -- so the code that survives it is the code that runs.
+# The fake device never runs a kernel body. It looks the launch's name up in
+# a map and calls the host reference registered under it, so every answer
+# below is `std/gpu`'s reference and not this kernel's transcript: each test
+# holds a reference against numbers written down by hand, and it is the
+# device that holds the reference against the kernel. It is not a stub
+# either. It issues and retires handles, refuses a format it cannot hold, a
+# kernel it does not know and a launch of the wrong arity, and rounds what
+# it stores to the buffer's format.
 #
 # Run: dawn run examples/projects/gpu_fake
 
 use std/gpu
-use std/gpu.{Gpu, F64, with_gpu_fake, reference_kernels, alloc, upload, download, launch, free, sync, handle_of}
+use std/gpu.{Gpu, F64, F32, I32, F8E4M3FN, WideRefFn, last_out, with_gpu_fake,
+  reference_kernels, alloc, upload, download, launch, free, sync, handle_of, vadd_ref,
+  loop_count_ref, assert_pass_ref, global_table_ref, alloca_scratch_ref,
+  shape_ops_ref, dtype_convert_ref }
 use std/io
+use std/list
 use std/map
+use std/narrow
 use std/str
-use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, addf}
+use tileir/dev.{Dev, Param, Tile, I1, param, block_id, tile_at, load, store, addf,
+  load_hinted, store_hinted, for_arch, hint_latency,
+  d_loop2, d_reduce_i, s_addi, s_maxi, s_consti, s_le_i, spread,
+  i_const, add_i, mul_i, div_i, rem_i, lt_i, eq_i, select, idx_const, idx_add,
+  d_assert, d_print, d_global, d_global_aligned, global_ptrs, lanes,
+  ptr_offset, load_ptrs, store_ptrs, alloca_ptrs,
+  float_to_float, addf_down, addf_up, extract, cat, permute_tile }
 use tileir/prog.{trace_kernel}
 use tileir/render.{render}
 
+## The tile the two wide kernels cover, and the tile the others do. Eight
+## lanes is what lets a whole answer sit in a test as numbers a reader can
+## check; the shapes are otherwise the ones `scripts/tile-golden` pins.
 const WIDTH: Int = 128
+const N: Int = 8
 
 # ---- the device side ----
 
-## One 128-wide tile per block: two loads, one add, one store. `!Dev` and
-## nothing else -- there is no host memory here, and no way to look at a
-## number.
+## Knife 1, the first milestone: one 128-wide tile per block, two loads, one
+## add, one store. `!Dev` and nothing else, so there is no host memory here
+## and no way to look at a number.
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
   let ta = load(a, blk, [WIDTH])
@@ -46,19 +63,205 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store(out, blk, [WIDTH], addf(F64, [WIDTH], ta, tb))
 }
 
-## The kernel's Tile IR. `trace_kernel` installs the recording handler, calls
-## the body once, and answers the record; `render` turns it into the text a
-## reader (and a golden) can hold. `params` is the entry signature, and a
-## `param` in the body that disagrees with it is refused here rather than by
-## the assembler.
+## Knife T15: `vadd` with `optimization_hints` on the first load and on the
+## store. A hint is advice about latency, so by definition it cannot change
+## what the kernel computes; the second load carries none, which puts both
+## states of the flag bit in one kernel.
+fn vadd_hinted(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), WIDTH)
+  let ta = load_hinted(a, blk, [WIDTH], [for_arch("sm_86", [hint_latency(4)])])
+  let tb = load(b, blk, [WIDTH])
+  store_hinted(out, blk, [WIDTH], [for_arch("sm_86", [hint_latency(7)])],
+    addf(F64, [WIDTH], ta, tb))
+}
+
+# One Collatz step per lane, saturating at 1: a lane that has reached 1 stays
+# there, which is what makes "every lane is 1" a condition that stays true.
+fn collatz_step(v: Tile[I32], s: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
+  let shape = [N]
+  let one = i_const(shape, 1)
+  let zero = i_const(shape, 0)
+  let two = i_const(shape, 2)
+  let running = lt_i(shape, one, v)
+  let even = eq_i(shape, rem_i(shape, v, two), zero)
+  let moved = select(I32, shape, even, div_i(shape, v, two),
+    add_i(shape, mul_i(shape, v, i_const(shape, 3)), one))
+  (select(I32, shape, running, moved, v),
+    add_i(shape, s, select(I32, shape, running, one, zero)))
+}
+
+## Knife T5: `loop` and `break`, the one region shape whose exit the region
+## itself decides. The loop carries the values and their step counts and
+## stops when the largest value left is 1, so the trip count is DATA: no
+## constant here says how many iterations there are, and the number reaches
+## the host because the kernel reduces it and stores it.
+fn collatz(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [N]
+  let blk = tile_at(idx_const(0), N)
+  let (_left, steps) = d_loop2(load(x, blk, shape), i_const(shape, 0), (v, s) => {
+    let biggest = d_reduce_i(shape, v, 1, (acc, e) => s_maxi(acc, e))
+    let (nv, ns) = collatz_step(v, s)
+    (s_le_i(biggest, s_consti(1)), nv, ns)
+  })
+  store(out, blk, shape, steps)
+  store(out, tile_at(idx_const(1), N), shape,
+    spread(I32, shape, d_reduce_i(shape, steps, 0, (acc, e) => s_maxi(acc, e))))
+}
+
+## Knife T6: an assertion and a print. A launch that fires an `assert` is
+## told to the host as a failed synchronisation, and the corpus keeps every
+## lane under the limit so this one does not fire; `print_tko` writes to the
+## PROCESS's standard output on a real device. Neither is visible from here,
+## the fake device never running this body, and both are in the rendered
+## text, which is the layer an example can hold.
+fn guarded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [N]
+  let blk = tile_at(block_id(0), N)
+  let v = load(x, blk, shape)
+  d_assert(shape, lt_i(shape, v, i_const(shape, 1000)),
+    "gpu_fake: a lane reached the limit")
+  d_print(I32, "guarded sum=%d\n", [d_reduce_i(shape, v, 0, (acc, e) => s_addi(acc, e))])
+  store(out, blk, shape, add_i(shape, v, i_const(shape, 1)))
+}
+
+## The two tables `table` declares, written out here rather than taken from
+## `std/gpu.global_table_a`, which is what the host reference reads: if the
+## two ever part company the answers stop matching, so the duplication is a
+## second opinion and not a copy.
+fn table_a() -> List[Float] = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+
+fn table_b() -> List[Float] = [-0.25, -1.25, -4.25, -9.25, -16.25, -25.25, -36.25, -49.25]
+
+## Knife T7: static globals, the first data in a module that no host
+## uploaded. The tables live in the bytecode's Global section and
+## `get_global` answers a pointer to each; `@tbl_b` asks for a 256-byte
+## alignment and `@tbl_a` takes the dialect's default, so one module carries
+## two different values in that field.
+fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [N]
+  d_global("tbl_a", F64, table_a())
+  d_global_aligned("tbl_b", F64, table_b(), 256)
+  let blk = tile_at(block_id(0), N)
+  let off = lanes(blk, s)
+  let tx = load(x, blk, s)
+  let pa = ptr_offset(F64, s, global_ptrs("tbl_a", F64, s), off)
+  let pb = ptr_offset(F64, s, global_ptrs("tbl_b", F64, s), off)
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
+  store(out, idx_add(blk, idx_const(N)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
+}
+
+## Knives T3 and T9: the narrow element formats. Segment 0 reads a buffer OF
+## f8E4M3FN and widens it, segment 1 takes an f64 and goes there and back;
+## the storage form and the conversion answer the same numbers, both landing
+## on the same eight-bit grid. The subword formats T9 added (`i4`,
+## `f4E2M1FN`) have no buffer format at all, so they are not here.
+fn narrowed(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [N]
+  let blk = tile_at(block_id(0), N)
+  store(out, blk, s, float_to_float(F8E4M3FN, F64, s, load(x, blk, s)))
+  store(out, idx_add(blk, idx_const(N)), s,
+    float_to_float(F8E4M3FN, F64, s, float_to_float(F64, F8E4M3FN, s, load(y, blk, s))))
+}
+
+## Knife T4: the attribute domains, of which a directed rounding is the one
+## whose effect a reader can see. The same two binary32 operands are added
+## twice, towards each infinity, so the two segments BRACKET the exact sum:
+## a lane on the f32 grid gets one number twice, and a lane off it gets the
+## two neighbours it falls between.
+fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [N]
+  let blk = tile_at(block_id(0), N)
+  let a = float_to_float(F64, F32, s, load(x, blk, s))
+  let b = float_to_float(F64, F32, s, load(y, blk, s))
+  store(out, blk, s, float_to_float(F32, F64, s, addf_down(F32, s, a, b)))
+  store(out, idx_add(blk, idx_const(N)), s,
+    float_to_float(F32, F64, s, addf_up(F32, s, a, b)))
+}
+
+## Knife T10: `alloca`, memory that belongs to the block and to nothing else.
+## Every other pointer here comes from a parameter the host uploaded or a
+## global the module declared; this is the third source and the only one no
+## host can see, so the corpus has to make the memory ANSWER rather than
+## show it. The kernel writes `x + x` into the scratch, reads it back in the
+## same launch and adds the input, so the answer is `3 * x` and a scratch
+## that read back zeros would answer `x`. The count is not a power of two
+## and the alignment is: the dialect's rule, and why they cannot be swapped.
+fn scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [N]
+  let blk = tile_at(block_id(0), N)
+  let p = ptr_offset(F64, s, alloca_ptrs(F64, 12, 8, s), lanes(idx_const(0), s))
+  let tx = load(x, blk, s)
+  store_ptrs(F64, s, p, addf(F64, s, tx, tx))
+  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, p), tx))
+}
+
+## Knife T2: the three shape operations, on one block of 128 f64 read twice.
+## As a 16 by 8 tile, `extract` takes two quarters and `cat` puts them back
+## the other way round; as a 4 by 4 by 8 one, `permute` transposes the first
+## two axes. Both source dimensions have two slices and the rank-3 tile's
+## first two dimensions are equal, so every wrong spelling here is still
+## well typed: a wrong ANSWER rather than a refusal.
+fn shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let obase = tile_at(b, 192)
+  let t2 = load(x, base, [16, 8])
+  let lower = extract(F64, [16, 8], [8, 4], t2, [idx_const(1), idx_const(0)])
+  let upper = extract(F64, [16, 8], [8, 4], t2, [idx_const(0), idx_const(0)])
+  store(out, obase, [16, 4], cat(F64, 0, [8, 4], [8, 4], lower, upper))
+  let t3 = load(x, base, [4, 4, 8])
+  store(out, idx_add(obase, idx_const(64)), [4, 4, 8],
+    permute_tile(F64, [4, 4, 8], [1, 0, 2], t3))
+}
+
+# ---- the records ----
+#
+# `trace_kernel` installs the recording handler, calls the body once and
+# answers the record; `render` turns it into the text a reader (and a golden)
+# can hold. The list is the entry signature, and a `param` in the body that
+# disagrees with it is refused here rather than by the assembler.
+
 fn vadd_text() -> String =
   render(trace_kernel("vadd", ["f64", "f64", "f64"],
     () => vadd(param(F64, 0), param(F64, 1), param(F64, 2))))
 
+fn vadd_hinted_text() -> String =
+  render(trace_kernel("vadd_hinted", ["f64", "f64", "f64"],
+    () => vadd_hinted(param(F64, 0), param(F64, 1), param(F64, 2))))
+
+fn collatz_text() -> String =
+  render(trace_kernel("collatz", ["i32", "i32"], () => collatz(param(I32, 0), param(I32, 1))))
+
+fn guarded_text() -> String =
+  render(trace_kernel("guarded", ["i32", "i32"], () => guarded(param(I32, 0), param(I32, 1))))
+
+fn table_text() -> String =
+  render(trace_kernel("table", ["f64", "f64"], () => table(param(F64, 0), param(F64, 1))))
+
+fn narrowed_text() -> String =
+  render(trace_kernel("narrowed", ["f8E4M3FN", "f64", "f64"],
+    () => narrowed(param(F8E4M3FN, 0), param(F64, 1), param(F64, 2))))
+
+fn interval_text() -> String =
+  render(trace_kernel("interval", ["f64", "f64", "f64"],
+    () => interval(param(F64, 0), param(F64, 1), param(F64, 2))))
+
+fn scratch_text() -> String =
+  render(trace_kernel("scratch", ["f64", "f64"], () => scratch(param(F64, 0), param(F64, 1))))
+
+fn shapes_text() -> String =
+  render(trace_kernel("shapes", ["f64", "f64"], () => shapes(param(F64, 0), param(F64, 1))))
+
 # ---- the host side ----
 
-## Three buffers, one launch, one answer back. Which device this is, is the
-## handler's business; `run` names only `!Gpu`.
+## A buffer the host is about to make: its element format and what goes into
+## it. The LAST one a launch is given is the one a reference writes back to,
+## so every list below ends with the output buffer's initial contents.
+alias Buf = (String, List[Float])
+
+## Three buffers, one launch, one answer back, with `Tensor[F64]` carrying
+## the format in its type. Which device this is, is the handler's business;
+## `run` names only `!Gpu`.
 fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let n = len(xs)
   let a = alloc(F64, n)?
@@ -76,24 +279,173 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
 }
 
 ## One block per tile. The fake device does not consult the grid -- a
-## reference implementation computes the whole vector at once -- so this is
-## the number the real device would need, kept honest by the kernel's width.
+## reference computes the whole vector at once -- so this is the number the
+## real device would need, kept honest by the kernel's width.
 fn blocks(n: Int) -> Int = (n + WIDTH - 1) / WIDTH
 
-fn on_fake(xs: List[Float], ys: List[Float]) -> String =
-  match with_gpu_fake(reference_kernels(), () => run(xs, ys)) {
-    Ok(zs) -> "${zs}"
-    Err(e) -> "refused: ${e.kind}"
+# Allocate and fill one buffer per pair, in order. Recursion rather than a
+# `for` with `?` in it (dawn-lang issue #68), and over the raw operations
+# rather than over `Tensor[D]`, because one launch here takes buffers of two
+# formats and a list cannot hold two types.
+fn alloc_upload(bufs: List[Buf], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    let h = gpu.gpu_alloc(dt, len(data))?
+    gpu.gpu_upload(h, data)?
+    alloc_upload(bufs, i + 1, acc ++ [h])
   }
+
+## One kernel over `bufs` on a `grid` by 1 by 1 grid: allocate, upload,
+## launch, wait, read the LAST buffer back, release. A refusal is the answer,
+## and the handles issued before it are left to the handler, which here is
+## pure and takes them with it.
+fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], ForeignError] !Gpu = {
+  let hs = alloc_upload(bufs, 0, [])?
+  launch(name, grid, hs)?
+  sync()?
+  let got = gpu.gpu_download(hs[len(hs) - 1])?
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+  Ok(got)
+}
+
+## The `addf_down` / `addf_up` pair on the host. The sum of two binary32
+## values is EXACT in binary64, so this rounds the exact sum in the named
+## direction and `std/narrow`'s rounder is the whole of the arithmetic. It
+## is the one reference `std/gpu` does not already carry.
+fn interval_ref(_dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  list.map(range(0, len(ins[2])), k => {
+    let i = k % N
+    let exact = narrow.round_f32(x[i]) + narrow.round_f32(y[i])
+    narrow.round_f32_toward(exact, if k < N { "negative_inf" } else { "positive_inf" })
+  })
+}
+
+## How many rounds `loop_count_ref` may take before it gives up. The corpus
+## needs sixteen, so this never stops it; it is there so that a reference can
+## never be the thing that hangs.
+const REF_FUEL: Int = 4096
+
+## The kernels the fake device knows: the three `std/gpu` registers for
+## every caller, plus one per kernel above. An entry is the number of
+## buffers the launch takes and the reference that answers it; every
+## reference but `interval_ref` is `std/gpu`'s, with the lengths these
+## kernels were written for fixed here.
+fn devices() -> Map[String, (Int, WideRefFn)] =
+  list.fold([("vadd_hinted", (3, last_out(vadd_ref))),
+    ("collatz", (2, last_out((d, i) => loop_count_ref(N, REF_FUEL, 2, d, i)))),
+    ("guarded", (2, last_out((d, i) => assert_pass_ref(N, d, i)))),
+    ("table", (2, last_out((d, i) => global_table_ref(N, d, i)))),
+    ("narrowed", (3, last_out((d, i) => dtype_convert_ref(N, "f8E4M3FN", d, i)))),
+    ("interval", (3, last_out(interval_ref))),
+    ("scratch", (2, last_out((d, i) => alloca_scratch_ref(N, d, i)))),
+    ("shapes", (2, last_out((d, i) => shape_ops_ref(1, d, i))))],
+    reference_kernels(), (m, e) => {
+      let (name, entry) = e
+      map.insert(m, name, entry)
+    })
+
+## `run_kernel` on the fake device: pure, so a test may call it and so may
+## `main`.
+fn on_fake(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], ForeignError] =
+  with_gpu_fake(devices(), () => run_kernel(name, grid, bufs))
+
+# ---- the corpora, and what each kernel answers ----
+
+fn zeros(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
 
 fn left() -> List[Float] = [1.0, 2.0, 3.0, 4.0]
 
 fn right() -> List[Float] = [10.0, 20.0, 30.0, 40.0]
 
+fn vadd_hinted_answer() -> Result[List[Float], ForeignError] =
+  on_fake("vadd_hinted", 1, [("f64", left()), ("f64", right()), ("f64", zeros(4))])
+
+## The chains of 1 to 8 are 0, 1, 7, 2, 5, 8, 16 and 3 steps long, which is a
+## fact about the numbers and not about this program.
+fn collatz_answer() -> Result[List[Float], ForeignError] =
+  on_fake("collatz", 1, [("i32", [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+    ("i32", zeros(2 * N))])
+
+fn guarded_answer() -> Result[List[Float], ForeignError] =
+  on_fake("guarded", 1, [("i32", [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]),
+    ("i32", zeros(N))])
+
+fn table_answer() -> Result[List[Float], ForeignError] =
+  on_fake("table", 1, [("f64", list.map(range(0, N), _i => 10.0)), ("f64", zeros(2 * N))])
+
+## Values `f8E4M3FN` does not hold exactly, next to values it does: the grid
+## is 1 + k/8 scaled by a power of two, so 1.1 lands on 1.125 and 0.3 on
+## 0.3125, while 240 and 448 (the format's largest finite value) are exact.
+fn narrow_corpus() -> List[Float] = [1.1, 0.3, 2.0, 6.0, -1.1, 240.0, 448.0, 0.0]
+
+fn narrowed_answer() -> Result[List[Float], ForeignError] =
+  on_fake("narrowed", 1, [("f8E4M3FN", narrow_corpus()), ("f64", narrow_corpus()),
+    ("f64", zeros(2 * N))])
+
+## One binary32 ulp at 1.0. The first three lanes below add less than this
+## to 1.0, so their sums fall strictly between two f32 values and the two
+## directions have to differ there; the rest are on the grid.
+const F32_ULP_AT_ONE: Float = 1.1920928955078125e-7
+
+fn interval_answer() -> Result[List[Float], ForeignError] =
+  on_fake("interval", 1, [("f64", list.map(range(0, N), _i => 1.0)),
+    ("f64", [9.31322574615478515625e-10, 2.98023223876953125e-8, 5.9604644775390625e-8,
+      1.1920928955078125e-7, 1.0, 0.5, 0.25, 0.0]),
+    ("f64", zeros(2 * N))])
+
+fn scratch_answer() -> Result[List[Float], ForeignError] =
+  on_fake("scratch", 1, [("f64", [1.0, 2.0, 3.0, 4.0, 0.5, -1.0, 8.0, 0.0]),
+    ("f64", zeros(N))])
+
+## The input is its own index, so a permutation's answer names where each
+## lane came from.
+fn shapes_answer() -> Result[List[Float], ForeignError] =
+  on_fake("shapes", 1, [("f64", list.map(range(0, 128), i => to_float(i))),
+    ("f64", zeros(192))])
+
+# ---- the gallery ----
+
+fn head(xs: List[Float], n: Int) -> List[Float] =
+  list.map(range(0, if n < len(xs) { n } else { len(xs) }), i => xs[i])
+
+fn shown(r: Result[List[Float], ForeignError]) -> String = match r {
+  Ok(xs) -> "${len(xs)} lanes, first four ${head(xs, 4)}"
+  Err(e) -> "refused: ${e.kind}"
+}
+
+## One line per kernel, in knife order: what it is for, and what the fake
+## device answered.
+fn gallery() -> List[(String, String)] = [
+  ("T2  shapes    extract, cat, permute", shown(shapes_answer())),
+  ("T3  narrowed  f8E4M3FN storage and conversion", shown(narrowed_answer())),
+  ("T4  interval  addf towards each infinity", shown(interval_answer())),
+  ("T5  collatz   a loop the data stops", shown(collatz_answer())),
+  ("T6  guarded   assert and print_tko", shown(guarded_answer())),
+  ("T7  table     two globals nobody uploaded", shown(table_answer())),
+  ("T10 scratch   alloca, written and read back", shown(scratch_answer())),
+  ("T15 hinted    vadd with optimization_hints", shown(vadd_hinted_answer()))]
+
+fn vadd_line() -> String = match with_gpu_fake(reference_kernels(), () => run(left(), right())) {
+  Ok(zs) -> "${zs}"
+  Err(e) -> "refused: ${e.kind}"
+}
+
 pub fn main() -> Unit !io = {
   io.print(vadd_text())
-  io.println("vadd on the fake device: ${on_fake(left(), right())}")
+  io.println("vadd on the fake device: ${vadd_line()}")
+  for row in gallery() {
+    let (label, line) = row
+    io.println("${label}: ${line}")
+  }
 }
+
+# ---- the records are a function of the bodies ----
 
 test "the record is a function of the body, not of the run" {
   let once = trace_kernel("vadd", ["f64", "f64", "f64"],
@@ -110,16 +462,141 @@ test "the kernel renders as one Tile IR entry" {
   assert str.contains(text, "tile<128xf64>")
 }
 
+test "T15: the hints are on the first load and the store, and nowhere else" {
+  let text = vadd_hinted_text()
+  assert str.contains(text, "load_ptr_tko weak %12 token=%0 optimization_hints=<sm_86 = {latency = 4}>")
+  assert str.contains(text, "store_ptr_tko weak %23, %20 token=%19 optimization_hints=<sm_86 = {latency = 7}>")
+  assert str.contains(text, "load_ptr_tko weak %17 token=%14 : tile<128xptr<f64>>")
+}
+
+test "T5: the loop carries two tiles and leaves through a break" {
+  let text = collatz_text()
+  assert str.contains(text, "loop iter_values(%17 = %11, %18 = %13, %19 = %12)")
+  assert str.contains(text, "break %17, %18, %19 : tile<8xi32>, tile<8xi32>, token")
+}
+
+test "T6: the assertion and the print spell the dialect's own assembly" {
+  let text = guarded_text()
+  assert str.contains(text, "assert %16, \"gpu_fake: a lane reached the limit\" : tile<8xi1>")
+  assert str.contains(text, "print_tko \"guarded sum=%d\\n\", %17 token=%14 : tile<i32> -> token")
+}
+
+test "T7: the globals print above the entry, the alignment only on the second" {
+  let text = table_text()
+  assert str.contains(text, "global @tbl_a <f64: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]> : tile<8xf64>")
+  assert str.contains(text, "global @tbl_b alignment = 256 <f64: [-0.25,")
+  assert str.contains(text, "get_global @tbl_a : tile<ptr<f64>>")
+}
+
+test "T3: the conversion names both formats and the rounding it carries" {
+  let text = narrowed_text()
+  assert str.contains(text, "ftof %13 rounding<nearest_even> : tile<8xf8E4M3FN> -> tile<8xf64>")
+  assert str.contains(text, "ftof %25 rounding<nearest_even> : tile<8xf64> -> tile<8xf8E4M3FN>")
+}
+
+test "T4: one pair of operands, two rounding directions" {
+  let text = interval_text()
+  assert str.contains(text, "addf %15, %21 rounding<negative_inf> : tile<8xf32>")
+  assert str.contains(text, "addf %15, %21 rounding<positive_inf> : tile<8xf32>")
+}
+
+test "T10: the allocation carries its element count and its alignment" {
+  assert str.contains(scratch_text(), "alloca num_elem = 12, alignment = 8 : tile<ptr<f64>>")
+}
+
+test "T2: the three shape operations spell their shapes" {
+  let text = shapes_text()
+  assert str.contains(text, "extract %23[%25, %26] : tile<16x8xf64> -> tile<8x4xf64>")
+  assert str.contains(text, "cat %27, %30 dim = 0 : tile<8x4xf64>, tile<8x4xf64> -> tile<16x4xf64>")
+  assert str.contains(text, "permute %69 [1, 0, 2] : tile<4x4x8xf64> -> tile<4x4x8xf64>")
+}
+
+# ---- what the fake device answers ----
+
 test "the same program on the fake device adds the vectors" {
   assert with_gpu_fake(reference_kernels(), () => run(left(), right())) ==
     Ok([11.0, 22.0, 33.0, 44.0])
 }
 
+test "T15: a hint does not change the answer" {
+  assert vadd_hinted_answer() == Ok([11.0, 22.0, 33.0, 44.0])
+}
+
+test "T5: the step counts are the Collatz chains, and the round count is the longest" {
+  assert collatz_answer() ==
+    Ok([0.0, 1.0, 7.0, 2.0, 5.0, 8.0, 16.0, 3.0,
+      16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0])
+}
+
+test "T6: an assertion that holds leaves an ordinary launch" {
+  assert guarded_answer() == Ok([11.0, 21.0, 31.0, 41.0, 51.0, 61.0, 71.0, 81.0])
+}
+
+test "T7: the answer is the two tables, plus ten" {
+  assert table_answer() ==
+    Ok([11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5,
+      9.75, 8.75, 5.75, 0.75, -6.25, -15.25, -26.25, -39.25])
+}
+
+test "T3: both segments land on the eight-bit grid, and on the same points" {
+  let rounded = [1.125, 0.3125, 2.0, 6.0, -1.125, 240.0, 448.0, 0.0]
+  assert narrowed_answer() == Ok(rounded ++ rounded)
+}
+
+test "T4: the two directions bracket the exact sum, and differ only off the grid" {
+  let down = [1.0, 1.0, 1.0, 1.0 + F32_ULP_AT_ONE, 2.0, 1.5, 1.25, 1.0]
+  let up = [1.0 + F32_ULP_AT_ONE, 1.0 + F32_ULP_AT_ONE, 1.0 + F32_ULP_AT_ONE,
+    1.0 + F32_ULP_AT_ONE, 2.0, 1.5, 1.25, 1.0]
+  assert interval_answer() == Ok(down ++ up)
+  for i in range(0, N) {
+    assert down[i] <= up[i]
+  }
+}
+
+test "T10: the scratch answers what was put in it, so the answer is three times the input" {
+  assert scratch_answer() == Ok([3.0, 6.0, 9.0, 12.0, 1.5, -3.0, 24.0, 0.0])
+}
+
+## The probes are hand-computed from what the operations MEAN, the input
+## being its own index: `cat(extract[1, 0], extract[0, 0])` makes row `i` of
+## the first 64 lanes row `(i + 8) % 16` of the source cut to four columns,
+## and `permute [1, 0, 2]` makes lane `[a, c, e]` of the next 128 lane
+## `[c, a, e]`. The sum is the bulk check: a permutation moves numbers
+## without inventing them, so 0 through 127 still sum to 8128.
+test "T2: the shapes are permuted, not invented" {
+  match shapes_answer() {
+    Err(_) -> { assert false }
+    Ok(got) -> {
+      assert len(got) == 192
+      assert got[0] == 64.0
+      assert got[4] == 72.0
+      assert got[63] == 59.0
+      assert got[72] == 32.0
+      assert list.fold(range(64, 192), 0.0, (acc, i) => acc + got[i]) == 8128.0
+    }
+  }
+}
+
+# ---- what the device refuses ----
+
 test "a kernel the device does not have is refused, and nothing is computed" {
-  let missing = with_gpu_fake(map.empty(), () => run(left(), right()))
-  match missing {
+  match with_gpu_fake(map.empty(), () => run(left(), right())) {
     Ok(_) -> { assert false }
     Err(e) -> { assert e.kind == "gpu.no_kernel" }
+  }
+}
+
+test "a launch with the wrong number of buffers is refused before anything runs" {
+  match on_fake("collatz", 1, [("i32", zeros(N)), ("i32", zeros(N)), ("i32", zeros(2 * N))]) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "gpu.bad_arity" }
+  }
+}
+
+test "a format the device cannot hold is refused at the allocation" {
+  match on_fake("scratch", 1, [("i4", zeros(N)), ("f64", zeros(N))]) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "gpu.unsupported_dtype" }
   }
 }
 

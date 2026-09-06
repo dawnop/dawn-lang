@@ -49,9 +49,19 @@
 #      reference, through scripts/tile-gpu-diff
 #   3  a mutant that has to go red
 #
-# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3: every
-# implemented opcode here reaches it, so no implemented row carries a layer-2
-# exemption today. Layer 3 is recorded where it exists and is not owed. The
+# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3. ONE
+# implemented row is below it, and it carries a named exemption:
+# `mmaf_scaled` stops at layer 1 under `architecture`, which is the name
+# types.txt already uses for the three fp8 formats. The reason is the
+# operation's own type table rather than anything missing here: Ops.td
+# confines its two matrix operands to f8E4M3FN, f8E5M2 and f4E2M1FN, and
+# `tileiras` 13.3.36 refuses fp8 below sm_100 (sm_90 takes f8E4M3FN and
+# refuses the f8E8M0FNU scale, measured by knife T10). There is no wide
+# operand form to fall back on the way `mmaf` has, so the kernel is
+# assembled for sm_100 and this machine's RTX 3080 never sees it. A row at
+# layer 1 may not name a golden, because a `golden:` here is read as a
+# device claim; the mutants are its evidence. Layer 3 is recorded where it
+# exists and is not owed. The
 # rule for reading it, which is stricter than "a mutant reddens on a kernel
 # that contains the op": a mutant counts for an opcode when its anchor
 # changes how THAT opcode is written or what it computes (its opcode byte, an
@@ -69,24 +79,36 @@
 #
 #   sections    Debug (id 3), Global (id 6) and Producer (id 7, 13.3) are
 #               bytecode SECTIONS. `global` 0x31 and `get_global` 0x2C have
-#               rows because they are opcodes in the text dialect, but what
-#               knife T7 has to build is the Global section; the Debug
-#               section is deferred by ruling 4 until a toolchain ships
-#               `tileirdisasm`, and the Producer section is optional and not
-#               written.
+#               rows because they are opcodes in the text dialect, and what
+#               knife T7 built is the Global section: `get_global` is an
+#               instruction of the entry and is `implemented`, `global` is
+#               a record of the module and is `structural`, for the same
+#               reason `entry` and `module` are (the writer never puts it
+#               in the instruction stream; BytecodeWriter.cpp collects the
+#               module's GlobalOps into writeGlobalSection instead). The
+#               Debug section is deferred by ruling 4 until a toolchain
+#               ships `tileirdisasm`, and the Producer section is optional
+#               and not written.
 #   type tags   the scalar formats and the type constructors
-#               (BytecodeTypeOpcodes.td) are a separate table. Eight scalar
-#               formats and four constructors are missing; knives T3 and T9
-#               own them. The mutants `f64-tag-as-i64` and `bf16-tag-as-i16`
-#               are theirs, not any opcode's.
+#               (BytecodeTypeOpcodes.td) are a separate table, and knives T3
+#               and T9 finished it: every scalar format is implemented and
+#               the four constructors still missing are the view family's,
+#               deferred by ruling 2. The mutants `f64-tag-as-i64`,
+#               `bf16-tag-as-i16` and `i4-tag-as-i8` are theirs, not any
+#               opcode's.
 #   attributes  the enum values and unit attributes (AttrDefs.td) are a
-#               third table. Knife T4 owns it, and T15 owns
-#               OptimizationHints.
+#               third table, and knife T4 built it: attrs.txt beside this
+#               file, checked by the same check.py. T15 owns
+#               OptimizationHints, which is a dictionary rather than a
+#               domain of values and is in neither.
 #
-# `entry` 0x16 and `module` 0x4B are STRUCTURAL: the writer never puts either
-# in the instruction stream. `module` is the file and `entry` is a record in
-# the Func section, both emitted by bytecode.encode_kernel, which is what
-# their evidence names. They are covered by every kernel here.
+# `entry` 0x16, `module` 0x4B and `global` 0x31 are STRUCTURAL: the writer
+# never puts any of them in the instruction stream. `module` is the file and
+# `entry` is a record in the Func section, both emitted by
+# bytecode.encode_kernel; `global` is a record in the Global section,
+# emitted by bytecode.global_section. That is what their evidence names.
+# The first two are covered by every kernel here; `global` by the two that
+# declare one.
 #
 # name | code | since | status | knife | layer | evidence | exemption
 absf                     | 0x00 | 13.1 | implemented   | 7a  | 2 | golden:erf_sweep,golden:elemops                                                                                           | -
@@ -94,12 +116,12 @@ absi                     | 0x01 | 13.1 | implemented   | 10  | 2 | golden:int_op
 addf                     | 0x02 | 13.1 | implemented   | 3   | 3 | golden:prefix_sum,golden:vadd,mutant:addf-no-rounding                                                                     | -
 addi                     | 0x03 | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
 andi                     | 0x04 | 13.1 | implemented   | 10  | 2 | golden:scatter_perm,golden:histogram                                                                                      | -
-assert                   | 0x05 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
-assume                   | 0x06 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
+assert                   | 0x05 | 13.1 | implemented   | T6  | 3 | golden:assert_pass,golden:assert_fail,mutant:assert-message-tagged,mutant:assert-condition-inverted                       | -
+assume                   | 0x06 | 13.1 | implemented   | T6  | 2 | golden:assume_divby,golden:assume_same,golden:assume_bounded,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes,mutant:assume-bounded-bounds-swapped | ruling 1: a false predicate is undefined behaviour, so nothing it could compute is wrong
 atomic_cas_tko           | 0x07 | 13.1 | implemented   | 14  | 3 | golden:cas_swap,mutant:atomic-cas-writes-an-rmw-mode,mutant:cas-compare-ignored                                           | -
 atomic_rmw_tko           | 0x08 | 13.1 | implemented   | 14  | 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,mutant:atomic-as-plain-store                                      | -
 bitcast                  | 0x09 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
-break                    | 0x0A | 13.1 | unimplemented | T5  | 0 | -                                                                                                                         | -
+break                    | 0x0A | 13.1 | implemented   | T5  | 3 | golden:loop_count,golden:loop_none,mutant:break-values-missing,mutant:loop-break-condition-inverted                       | -
 broadcast                | 0x0B | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
 cat                      | 0x0C | 13.1 | implemented   | T2  | 3 | golden:shape_ops,mutant:cat-operands-swapped,mutant:cat-dim-swapped                                                       | -
 ceil                     | 0x0D | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
@@ -121,12 +143,12 @@ fma                      | 0x28 | 13.1 | implemented   | 7a  | 2 | golden:linrec
 for                      | 0x29 | 13.1 | implemented   | 5   | 3 | golden:foldif,golden:lora_hidden,mutant:for-results-not-rolled-back,mutant:loop-token-not-carried,mutant:region-stack-pop | -
 ftof                     | 0x2A | 13.1 | implemented   | 11  | 2 | golden:dot_f16                                                                                                            | -
 ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates                                                   | -
-get_global               | 0x2C | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+get_global               | 0x2C | 13.1 | implemented   | T7  | 3 | golden:global_table,mutant:get-global-symbol-not-written,mutant:get-global-wrong-symbol                                   | -
 get_index_space_shape    | 0x2D | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 get_num_tile_blocks      | 0x2E | 13.1 | implemented   | T2  | 3 | golden:grid_stride,mutant:num-tile-blocks-as-block-id                                                                     | -
 get_tensor_shape         | 0x2F | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 get_tile_block_id        | 0x30 | 13.1 | implemented   | 3   | 3 | golden:invert,golden:copy,mutant:grid-y-ignored                                                                           | -
-global                   | 0x31 | 13.1 | unimplemented | T7  | 0 | -                                                                                                                         | -
+global                   | 0x31 | 13.1 | structural    | T7  | 3 | golden:global_table,writer:global_section,mutant:global-record-alignment-dropped,mutant:global-initializer-reversed       | -
 if                       | 0x32 | 13.1 | implemented   | 7b  | 2 | golden:foldif                                                                                                             | -
 int_to_ptr               | 0x33 | 13.1 | implemented   | T2  | 3 | golden:ptr_roundtrip,mutant:int-to-ptr-as-ptr-to-int                                                                      | -
 iota                     | 0x3A | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
@@ -136,7 +158,7 @@ load_ptr_tko             | 0x3D | 13.1 | implemented   | 3   | 3 | golden:ols_be
 load_view_tko            | 0x3E | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 log                      | 0x3F | 13.1 | implemented   | 7b  | 2 | golden:mathops,golden:cce_row                                                                                             | -
 log2                     | 0x40 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
-loop                     | 0x41 | 13.1 | unimplemented | T5  | 0 | -                                                                                                                         | -
+loop                     | 0x41 | 13.1 | implemented   | T5  | 3 | golden:loop_count,golden:loop_until,golden:loop_none,mutant:loop-carried-not-rolled-back                                  | -
 make_partition_view      | 0x42 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 make_tensor_view         | 0x43 | 13.1 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 make_token               | 0x44 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:make-token-as-iota                                                                   | -
@@ -156,7 +178,7 @@ offset                   | 0x51 | 13.1 | implemented   | 3   | 2 | golden:ols_be
 ori                      | 0x52 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
 permute                  | 0x53 | 13.1 | implemented   | T2  | 3 | golden:shape_ops,mutant:permute-identity                                                                                  | -
 pow                      | 0x54 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
-print_tko                | 0x55 | 13.1 | unimplemented | T6  | 0 | -                                                                                                                         | -
+print_tko                | 0x55 | 13.1 | implemented   | T6  | 3 | golden:print_tile,mutant:print-tko-token-unwritten,mutant:print-format-wrong                                              | -
 ptr_to_int               | 0x56 | 13.1 | implemented   | T2  | 3 | golden:ptr_roundtrip,mutant:ptr-to-int-as-int-to-ptr                                                                      | -
 ptr_to_ptr               | 0x57 | 13.1 | implemented   | T2  | 3 | golden:ptr_recast,mutant:ptr-to-ptr-as-bitcast                                                                            | -
 reduce                   | 0x58 | 13.1 | implemented   | 7b  | 3 | golden:cce_mean,golden:attn_softmax,mutant:reduce-identity-wrong                                                          | -
@@ -182,10 +204,10 @@ trunci                   | 0x6B | 13.1 | implemented   | 10  | 2 | golden:invert
 xori                     | 0x6C | 13.1 | implemented   | 10  | 2 | golden:rainbow,golden:int_ops                                                                                             | -
 yield                    | 0x6D | 13.1 | implemented   | 7b  | 2 | golden:prefix_sum,golden:cce_mean                                                                                         | -
 atan2                    | 0x6E | 13.2 | implemented   | T1  | 3 | golden:trig_sweep,mutant:atan2-operands-swapped                                                                           | -
-pack                     | 0x6F | 13.3 | unimplemented | T9  | 0 | -                                                                                                                         | -
-unpack                   | 0x70 | 13.3 | unimplemented | T9  | 0 | -                                                                                                                         | -
-alloca                   | 0x71 | 13.3 | unimplemented | T10 | 0 | -                                                                                                                         | -
-mmaf_scaled              | 0x72 | 13.3 | unimplemented | T10 | 0 | -                                                                                                                         | -
+pack                     | 0x6F | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,golden:pack_roundtrip,mutant:pack-result-shape-unhalved                                                   | -
+unpack                   | 0x70 | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,golden:pack_roundtrip,mutant:unpack-as-pack,mutant:pack-result-shape-unhalved                             | -
+alloca                   | 0x71 | 13.3 | implemented   | T10 | 3 | golden:alloca_scratch,golden:alloca_two,mutant:alloca-flags-unwritten,mutant:alloca-alignment-as-num-elem,mutant:alloca-aliased | -
+mmaf_scaled              | 0x72 | 13.3 | implemented   | T10 | 1 | mutant:mmaf-scaled-scale-operand-missing,mutant:mmaf-scaled-writes-a-flags-word                                            | architecture
 make_gather_scatter_view | 0x73 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 make_strided_view        | 0x74 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
 atomic_red_view_tko      | 0x75 | 13.3 | deferred      | -   | 0 | -                                                                                                                         | ruling 2
