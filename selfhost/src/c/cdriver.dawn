@@ -470,16 +470,20 @@ fn build_units(
 ##
 ## The emitter's own ten `std/pvec` spellings seed the walk beside the user's
 ## modules: a list literal and `++` become calls Core never wrote down, so
-## nothing in the graph reaches `from_array` or `concat`.
+## nothing in the graph reaches `from_array` or `concat`. They seed it only
+## for a program that can have a List in it -- reach decides that, once, so
+## that both backends prune the same set.
 fn live(units: List[EmitMod], prog: Program, std_tests: Bool) -> Option[Live] = {
   if std_tests { return None }
   var reach_mods: List[CModule] = []
   for u2 in units { reach_mods = reach_mods ++ [u2.m] }
   var reach_roots: List[String] = []
   for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
-  var extra: List[(String, String)] = []
-  for n in emitc.emitter_named_pvec_fns() { extra = extra ++ [("std/pvec", n)] }
-  Some(reach.live_set(reach_mods, reach_roots, extra))
+  var list_roots: List[(String, String)] = []
+  for n in emitc.emitter_named_pvec_fns() {
+    list_roots = list_roots ++ [("std/pvec", n)]
+  }
+  Some(reach.live_set(reach_mods, reach_roots, list_roots))
 }
 
 fn tables(live: Option[Live]) -> TableUse =

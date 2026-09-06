@@ -32,6 +32,10 @@
 #   * a trait default matches by (owner, name) without its trait id, so two
 #     traits sharing a method name both count.
 #
+#   * a program that can put a `List` in front of an emitter keeps `std/pvec`,
+#     because a list literal, `++` and the list primitives are calls the
+#     emitters spell rather than calls Core wrote down (`mentions_list`).
+#
 # Overshoot costs bytes, never correctness. Undershoot is loud, not silent:
 # the JVM resolves constant-pool entries lazily, so a pruned method is a
 # NoSuchMethodError at the call that should not exist; the C runtime treats a
@@ -135,6 +139,7 @@ type Rch = {
   adts: Set[Int],
   java_classes: Set[String],
   ctl: Bool,
+  lists: Bool,
   u: TableUse
 }
 
@@ -158,7 +163,10 @@ pub type Live = {
   ## Foreign owners and descriptor types, normalized to internal class names.
   java_classes: Set[String],
   ## A live one-shot operation/handler needs the control driving loop.
-  ctl: Bool
+  ctl: Bool,
+  ## A live `List` anywhere means the emitters can spell a `std/pvec` call.
+  ## Both backends read this one answer rather than each deciding again.
+  lists: Bool
 }
 
 ## The readers. There is no "everything live" value on purpose: the
@@ -367,6 +375,70 @@ fn mark(u: TableUse, name: String) -> TableUse =
     u
   }
 
+## The criterion behind the ten `std/pvec` roots: can a `std/pvec` call turn
+## up in what this program emits?
+##
+## Every such call is spelled by an emitter, not by Core -- a list literal,
+## `++` on two lists, the seven list primitives, and the six host-boundary
+## intrinsics that cross a list through `Array` (`join`, `code_points`,
+## `from_code_points`, `io_list_names`, `io_run`, `args`). None of them is a
+## `CDirect`, so the call graph cannot reach them and something else has to
+## say whether they are coming.
+##
+## A type says it. Every one of those sites either takes or hands back a
+## vector, so the Core node that produces it carries a `TyList` in its own
+## type or in the type of one of its arguments -- and the walk reads the type
+## of every expression, every signature and every emitted descriptor already.
+## Judging by type rather than by the node shape is deliberate: the node
+## shapes are the emitters' business and change with them, while "this
+## program has a List in it" is a fact about the program.
+##
+## `TyAdt` does not recurse into the constructor's fields on purpose. A field
+## of type `List[T]` is a descriptor, not a call: materialising one takes a
+## literal or a primitive inside some live body, and reading one back hands
+## out a `TyList` at the read. What a record hides is only a problem for
+## folded constants, whose payload is not in Core at all -- see
+## `folded_may_hold_list`.
+##
+## Undershoot here is a link error on C and a NoSuchMethodError on the JVM,
+## so every arm that cannot prove "no List" answers true.
+fn mentions_list(ty: Ty) -> Bool =
+  match ty {
+    TyList(_) -> true
+    TySet(t) | TyArray(t) -> mentions_list(t)
+    TyMap(k, v) -> mentions_list(k) || mentions_list(v)
+    TyTuple(ts) -> any_mentions_list(ts)
+    TyOpaque(_, _, _, args, target) -> any_mentions_list(args) || mentions_list(target)
+    TyAssoc(subject, _, _) -> mentions_list(subject)
+    TyFn(ps, ret, _) -> any_mentions_list(ps) || mentions_list(ret)
+    TyAdt(_, args) -> any_mentions_list(args)
+    TyJava(_, _) | TyVar(_, _) | TyInt | TyFloat | TyBool | TyString | TyBytes |
+    TyUnit | TyNever | TyError -> false
+  }
+
+fn any_mentions_list(ts: List[Ty]) -> Bool = {
+  for t in ts {
+    if mentions_list(t) { return true }
+  }
+  false
+}
+
+## The one place a list can hide from `mentions_list`: a folded constant.
+##
+## `CConstRef` and `CComptime` name a `CValue` the emitters materialise, and a
+## `VList` in there is emitted exactly the way a literal is -- as
+## `std/pvec.from_array`. The value is not in Core, so the walk cannot look at
+## it; `const P: Point = Point { xs: [1] }` has a `TyAdt` at the reference and
+## a list underneath. A scalar type cannot hold one. Everything else is
+## assumed to, which costs the programs that fold a non-scalar constant and
+## nothing else.
+fn folded_may_hold_list(ty: Ty) -> Bool =
+  match ty {
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyUnit | TyNever | TyError -> false
+    TyOpaque(_, _, _, _, target) -> folded_may_hold_list(target)
+    _ -> true
+  }
+
 ## Java reflection spells array classes as descriptors and ordinary classes
 ## with dots. Keep one internal-name identity for either source of a reference.
 fn java_class_use(st: Rch, name: String) -> Rch = {
@@ -384,7 +456,8 @@ fn java_class_use(st: Rch, name: String) -> Rch = {
 ## effect's evidence names the record in its JVM descriptor. Function values
 ## carry an erased pack, but their labelled rows keep the evidence classes
 ## conservatively too; a label and its record share the same ADT id.
-fn type_use(st: Rch, ty: Ty) -> Rch = {
+fn type_use(st0: Rch, ty: Ty) -> Rch = {
+  let st = if mentions_list(ty) { Rch { ..st0, lists: true } } else { st0 }
   let s = type_adts(st, ty)
   # Containers and function values erase their children in JVM descriptors.
   # Their labels still keep evidence conservatively, but merely mentioning
@@ -430,6 +503,9 @@ fn types_use(st0: Rch, ts: List[Ty]) -> Rch = {
   for t in ts { st = type_use(st, t) }
   st
 }
+
+fn folded_use(st: Rch, ty: Ty) -> Rch =
+  if folded_may_hold_list(ty) { Rch { ..st, lists: true } } else { st }
 
 fn walk_stmt(st0: Rch, s: CStmt) -> Rch =
   match s {
@@ -519,11 +595,14 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
         None -> st
       }
     }
+    # the type carries the answer for the emitters' pvec seam: `walk` ran
+    # `type_use` on this node's `TyList` before getting here
     CListLit(elems, _) -> walk_list(st0, elems)
     # comptime results are constant-serializable: no function values can hide
-    # in them, so there is nothing to follow
-    CConstRef(_, _, _) -> st0
-    CComptime(_, _, _) -> st0
+    # in them, so there is nothing to follow. A *list* can, though, and it is
+    # emitted as a `std/pvec.from_array` call -- see `folded_may_hold_list`.
+    CConstRef(_, _, ty) -> folded_use(st0, ty)
+    CComptime(_, _, ty) -> folded_use(st0, ty)
     CReturn(v) ->
       match v {
         Some(e2) -> walk(st0, e2)
@@ -554,17 +633,23 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
 ## they own seeds the walk, and everything else -- std above all -- counts
 ## only if a chain of calls from those seeds reaches it.
 ##
-## `extra_roots` is the seam the walk cannot see from Core: a call an emitter
+## `list_roots` is the seam the walk cannot see from Core: a call an emitter
 ## spells directly. Both backends do it for the same ten `std/pvec` functions
 ## -- a list literal, `++`, the list primitives and the Array host boundary
 ## are emitted as calls rather than lowered into CDirect -- and
 ## `emitc.emitter_named_pvec_fns` is the one list of them, held to the
 ## emitter's actual spellings by a test beside it. Passing them in rather than
 ## naming std here keeps this module ignorant of which functions std has.
+##
+## They are roots only for a program that has a List in it (`mentions_list`).
+## They used to be unconditional, which made every program carry `std/pvec`'s
+## closure: 711 of a hello world's 1,205 lines of C for a program with no
+## collection in it. The condition is decided here, once, so that both
+## backends prune the same set rather than each answering the question again.
 pub fn live_set(
   mods: List[CModule],
   roots: List[String],
-  extra_roots: List[(String, String)],
+  list_roots: List[(String, String)],
   # Descriptors of structures an emitter always keeps, even when no live
   # function mentions them (ordinary JVM ADTs and trait interfaces).
   extra_types: List[Ty] = []
@@ -583,6 +668,7 @@ pub fn live_set(
     adts: set.empty(),
     java_classes: set.empty(),
     ctl: false,
+    lists: false,
     u: no_tables()
   }
   st = types_use(st, extra_types)
@@ -593,19 +679,31 @@ pub fn live_set(
     }
     i = i + 1
   }
-  for pr in extra_roots {
-    let (owner, name) = pr
-    st = direct(st, owner, name)
-  }
-  # the queue only grows; `seen` guards each position against re-entry
+  # The queue only grows; `seen` guards each position against re-entry.
+  #
+  # The list roots join it the moment the walk first sees a List, which can be
+  # any time -- `extra_types` above, a root's signature, or a body reached
+  # thirty edges in. Seeding them mid-walk rather than up front is the whole
+  # difference from an unconditional root: everything they reach is queued
+  # behind them and the fixed point is the same one either way.
+  var list_rooted = false
   var qi = 0
-  while qi < len(st.work) {
-    let fi = st.work[qi]
-    qi = qi + 1
-    let f = st.idx.fns[fi]
-    st = type_use(st, f.ret)
-    for p in f.captures ++ f.params ++ f.dicts ++ f.evs { st = type_use(st, p.ty) }
-    st = walk(Rch { ..st, cur: f.owner }, f.body)
+  while qi < len(st.work) || (st.lists && not list_rooted) {
+    if st.lists && not list_rooted {
+      list_rooted = true
+      for pr in list_roots {
+        let (owner, name) = pr
+        st = direct(st, owner, name)
+      }
+    }
+    if qi < len(st.work) {
+      let fi = st.work[qi]
+      qi = qi + 1
+      let f = st.idx.fns[fi]
+      st = type_use(st, f.ret)
+      for p in f.captures ++ f.params ++ f.dicts ++ f.evs { st = type_use(st, p.ty) }
+      st = walk(Rch { ..st, cur: f.owner }, f.body)
+    }
   }
   var live: Set[String] = set.empty()
   var li = 0
@@ -620,7 +718,8 @@ pub fn live_set(
     own_dicts: st.seen_own_dicts,
     adts: st.adts,
     java_classes: st.java_classes,
-    ctl: st.ctl
+    ctl: st.ctl,
+    lists: st.lists
   }
 }
 
@@ -655,7 +754,10 @@ test "control runtime follows reachable operations rather than declarations" {
   let app = tmod("app", [tfn("app", "main", CUnit)])
   let ctl = tmod("std/unused", [tfn("std/unused", "run", intr("ctl_run"))])
   assert not live_set([app, ctl], ["app"], []).ctl
-  assert live_set([app, ctl], ["app"], [("std/unused", "run")]).ctl
+  # an emitter-spelled root drags the control runtime in like a called
+  # function does; it is a root at all because this program has a list in it
+  let listy = tmod("app", [tfn("app", "main", CListLit([], TyList(TyInt)))])
+  assert live_set([listy, ctl], ["app"], [("std/unused", "run")]).ctl
   let raised = tmod("app", [tfn("app", "main", intr("ctl_yield"))])
   assert live_set([raised], ["app"], []).ctl
 }
@@ -775,20 +877,82 @@ test "the walk hands back the functions it reached, not only the tables" {
   assert not set.has(l.fns, fn_key(std_str.fns[1]))
 }
 
-test "a root the emitter spells directly is a root" {
+test "a root the emitter spells directly is a root when a List can reach it" {
   # the ten std/pvec names a list literal and `++` become are written by the
   # emitters, not by Core, so nothing in the call graph reaches them
-  let app = tmod("app", [tfn("app", "main", CUnit)])
   let pvec = tmod("std/pvec", [
     tfn("std/pvec", "from_array", CUnit),
     tfn("std/pvec", "sort_by", CUnit)
   ])
-  let without = live_set([app, pvec], ["app"], [])
+  let listy = tmod("app", [tfn("app", "main", CListLit([], TyList(TyInt)))])
+  let without = live_set([listy, pvec], ["app"], [])
   assert not set.has(without.fns, fn_key(pvec.fns[0]))
-  let with_root = live_set([app, pvec], ["app"], [("std/pvec", "from_array")])
+  let with_root = live_set([listy, pvec], ["app"], [("std/pvec", "from_array")])
   assert set.has(with_root.fns, fn_key(pvec.fns[0]))
-  # and only the one named: an extra root is a name, not a module
+  # and only the one named: a list root is a name, not a module
   assert not set.has(with_root.fns, fn_key(pvec.fns[1]))
+}
+
+test "the emitter's pvec roots ride only when the program has a List" {
+  let pvec = tmod("std/pvec", [
+    tfn("std/pvec", "from_array", CUnit),
+    tfn("std/pvec", "sort_by", CUnit)
+  ])
+  let roots = [("std/pvec", "from_array"), ("std/pvec", "sort_by")]
+
+  # positive control: hello.dawn's shape -- arithmetic, control flow and
+  # strings, no collection anywhere. The roots stay off and pvec goes.
+  let hello = tmod("app", [tfn("app", "main", intr("str_upper"))])
+  let plain = live_set([hello, pvec], ["app"], roots)
+  assert not plain.lists
+  assert not set.has(plain.fns, fn_key(pvec.fns[0]))
+  assert not set.has(plain.fns, fn_key(pvec.fns[1]))
+
+  # negative control: the only List in the program is in the *type* of a std
+  # function the program calls. No literal, no primitive, and the roots still
+  # have to ride -- that return value is a vector the emitter will build.
+  let helper = CFun { ..tfn("std/thing", "of", CUnit), ret: TyList(TyInt) }
+  let caller = tmod("app", [
+    tfn("app", "main", CCall(CDirect("std/thing", "of"), [], TyUnit))
+  ])
+  let typed = live_set([caller, tmod("std/thing", [helper]), pvec], ["app"], roots)
+  assert typed.lists
+  assert set.has(typed.fns, fn_key(pvec.fns[0]))
+  assert set.has(typed.fns, fn_key(pvec.fns[1]))
+
+  # ...and an unreachable std function's List says nothing, which is the same
+  # rule the tables have followed since before pruning existed
+  let dead = tmod("std/thing", [CFun { ..tfn("std/thing", "dead", CUnit),
+    ret: TyList(TyInt) }])
+  assert not live_set([hello, dead, pvec], ["app"], roots).lists
+}
+
+test "the list criterion reads through containers but not through a record" {
+  assert mentions_list(TyList(TyInt))
+  assert mentions_list(TyMap(TyString, TyList(TyInt)))
+  assert mentions_list(TySet(TyList(TyInt)))
+  assert mentions_list(TyTuple([TyInt, TyList(TyInt)]))
+  assert mentions_list(TyFn([TyList(TyInt)], TyUnit, EPure))
+  assert mentions_list(TyAdt(1, [TyList(TyInt)]))
+  # a record's own fields are not read here on purpose: a `List[T]` field is a
+  # descriptor, and building one takes a literal or a primitive in some live
+  # body, which carries its own TyList
+  assert not mentions_list(TyAdt(1, []))
+  assert not mentions_list(TyString)
+}
+
+test "a folded constant is judged by its type, since its payload is not Core" {
+  # `const P: Point = Point { xs: [1] }` is emitted as std/pvec.from_array,
+  # and the CValue holding that list is nowhere in the walk. The type at the
+  # reference is all there is: a scalar cannot hide one, anything else can.
+  let pvec = tmod("std/pvec", [tfn("std/pvec", "from_array", CUnit)])
+  let roots = [("std/pvec", "from_array")]
+  let scalar = tmod("app", [tfn("app", "main", CConstRef("app", "N", TyInt))])
+  assert not live_set([scalar, pvec], ["app"], roots).lists
+  let record = tmod("app", [tfn("app", "main", CConstRef("app", "P", TyAdt(70, [])))])
+  assert live_set([record, pvec], ["app"], roots).lists
+  let block = tmod("app", [tfn("app", "main", CComptime(0, 1, TyTuple([TyInt])))])
+  assert live_set([block, pvec], ["app"], roots).lists
 }
 
 test "which module's copy of a dictionary is kept does not depend on load order" {

@@ -467,7 +467,8 @@ fn collect_program(
   #
   # The ten `std/pvec` names the emitters spell directly (a list literal, `++`,
   # the list primitives, the Array host boundary) are roots of their own: those
-  # calls are written by the emitter, so no chain in Core reaches them.
+  # calls are written by the emitter, so no chain in Core reaches them. They
+  # ride only for a program a List can turn up in, which reach decides.
   var live: Option[Live] = None
   if target != "" {
     var cmods: List[CModule] = []
@@ -477,8 +478,10 @@ fn collect_program(
       cmods = cmods ++ [lower.emitted_core(l)]
       reach_roots = reach_roots ++ [l.m.owner]
     }
-    var extra: List[(String, String)] = []
-    for n in emitc.emitter_named_pvec_fns() { extra = extra ++ [("std/pvec", n)] }
+    var list_roots: List[(String, String)] = []
+    for n in emitc.emitter_named_pvec_fns() {
+      list_roots = list_roots ++ [("std/pvec", n)]
+    }
     # Ordinary ADTs and trait interfaces are emitted even with no live
     # constructor/call. Their descriptors can name Java classes or evidence
     # records, so those types are roots of the same freight walk as bodies.
@@ -499,7 +502,7 @@ fn collect_program(
           TyFn([], TyUnit, sig_abi_eff(ms.sig))]
       }
     }
-    live = Some(reach.live_set(cmods, reach_roots, extra, extra_types))
+    live = Some(reach.live_set(cmods, reach_roots, list_roots, extra_types))
   }
   let tuse =
     match live {
