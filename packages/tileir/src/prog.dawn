@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, Padding, padding_name, padding_is_special, is_float_dtype}
+use dev.{Dev, Tile, Scalar, I1, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, d_assume, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, load_masked, store, store_masked, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, sub, mul, div, maxf, minf, neg, abs, fma, exp, sqrt, pow, f_const, i_const, bool_const, arange, lanes, tail_mask, lt, lt_i, select, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_for3, d_loop, d_reduce, d_reduce2, d_scan, d_if, spread, s_addf, s_maxf, s_gt, s_select, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -151,11 +151,14 @@ pub type TileOp =
   | StoreAt(tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int], tok_in: Int)
   | GetGlobal(dst: Int, sym: String, dtype: String, shape: List[Int])
   | Alloca(dst: Int, dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int])
-  | TensorViewOf(dst: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int])
+  | TensorViewOf(dst: Int, param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
+    dyn_shape: List[Int], dyn_strides: List[Int])
   | PartitionViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding)
   | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int)
   | StoreView(tok_out: Int, dtype: String, view: Int, indices: List[Int], value: Int, tok_in: Int)
+  | TensorShapeOf(dst: Int, view: Int, dim: Int)
+  | IndexSpaceShapeOf(dst: Int, view: Int, dim: Int)
 derive Show
 
 ## How deep loops may nest. A kernel body that recurses through `d_for`
@@ -1279,30 +1282,50 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
         d
       }
-      t_tensor_view(param, dtype, base, shape, strides) => {
+      t_tensor_view(param, dtype, base, shape, strides, dyn_shape, dyn_strides) => {
         # TensorViewType's verifier, the half that is arithmetic on this
         # record alone: shape and strides are the same rank and every
         # entry of both is strictly positive. A stride of ZERO is the one
         # a strided load may have and a tensor view may not, which is why
         # a broadcast read has no view spelling at all
         # (docs/tile-backend-design.md 6.14).
+        #
+        # `DYN_DIM` is the exception and the only one: a dimension whose
+        # extent (or stride) an operand carries is not a number this
+        # recorder can hold to anything, and the verifier does not either
+        # (`kDynamic` is exempt from both `any_of` checks). What IS held
+        # here is the count: `MakeTensorViewOp::verify` wants one operand
+        # per marker, and a mismatch is a lie about the operand segment
+        # that the reader would take as the next instruction's opcode.
         check_strides(name, shape, strides)
         if len(shape) == 0 {
           refuse(name, "a tensor view of rank 0 has no partition; the dialect allows it and nothing here can use one")
         } else {
           ()
         }
-        match list.find(shape, d => d < 1) {
-          Some(d) -> refuse(name, "a tensor view dimension is strictly positive, got ${d} in ${show(shape)}")
+        match list.find(shape, d => d < 1 && d != DYN_DIM) {
+          Some(d) -> refuse(name, "a tensor view dimension is strictly positive or dynamic, got ${d} in ${show(shape)}")
           None -> ()
         }
-        match list.find(strides, s => s < 1) {
-          Some(s) -> refuse(name, "a tensor view stride is strictly positive, got ${s} in ${show(strides)}")
+        match list.find(strides, s => s < 1 && s != DYN_DIM) {
+          Some(s) -> refuse(name, "a tensor view stride is strictly positive or dynamic, got ${s} in ${show(strides)}")
           None -> ()
+        }
+        let want_shape = len(list.filter(shape, d => d == DYN_DIM))
+        if len(dyn_shape) != want_shape {
+          refuse(name, "a tensor view with ${want_shape} dynamic dimension(s) takes ${want_shape} shape operand(s), got ${len(dyn_shape)}")
+        } else {
+          ()
+        }
+        let want_strides = len(list.filter(strides, s => s == DYN_DIM))
+        if len(dyn_strides) != want_strides {
+          refuse(name, "a tensor view with ${want_strides} dynamic stride(s) takes ${want_strides} stride operand(s), got ${len(dyn_strides)}")
+        } else {
+          ()
         }
         let d = next
         next = mint(name, next, 1)
-        ops = ops ++ [TensorViewOf(d, param, dtype, base, shape, strides)]
+        ops = ops ++ [TensorViewOf(d, param, dtype, base, shape, strides, dyn_shape, dyn_strides)]
         d
       }
       t_partition_view(dtype, view, tile_shape, dim_map, padding) => {
@@ -1363,6 +1386,32 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok)]
         tok = tv
         ()
+      }
+      t_tensor_shape(view, dim) => {
+        # Neither shape query is ordered against memory (both are
+        # `NoMemoryEffect`), so unlike a load or a store they are allowed
+        # inside a reduce, a scan or an `if`. `dim` is held against the
+        # view's rank in the lowering, which is where a handle's type is.
+        if dim < 0 {
+          refuse(name, "get_tensor_shape names dimension ${dim}, which is negative")
+        } else {
+          ()
+        }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [TensorShapeOf(d, view, dim)]
+        d
+      }
+      t_index_space_shape(view, dim) => {
+        if dim < 0 {
+          refuse(name, "get_index_space_shape names dimension ${dim}, which is negative")
+        } else {
+          ()
+        }
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [IndexSpaceShapeOf(d, view, dim)]
+        d
       }
       t_if_begin(cond) => {
         if len(frames) >= MAX_LOOP_DEPTH {
@@ -1478,10 +1527,12 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   StoreAt(tok_out, _dtype, _shape, _ptrs, _value, _mask, _tok_in) -> [tok_out]
   GetGlobal(dst, _sym, _dtype, _shape) -> [dst]
   Alloca(dst, _dtype, _num_elem, _align, _shared, _shape) -> [dst]
-  TensorViewOf(dst, _param, _dtype, _base, _shape, _strides) -> [dst]
+  TensorViewOf(dst, _param, _dtype, _base, _shape, _strides, _dyn_shape, _dyn_strides) -> [dst]
   PartitionViewOf(dst, _dtype, _view, _tile_shape, _dim_map, _padding) -> [dst]
   LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in) -> [dst, tok_out]
   StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in) -> [tok_out]
+  TensorShapeOf(dst, _view, _dim) -> [dst]
+  IndexSpaceShapeOf(dst, _view, _dim) -> [dst]
 }
 
 ## Every handle `ops` define, at any depth, in issue order: for a `For`, its

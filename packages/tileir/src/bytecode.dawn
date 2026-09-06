@@ -70,9 +70,9 @@ use std/map
 use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
-  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
+  PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf , DYN_DIM}
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, MmaI, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, tensor_view_of, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, tensor_view_of, MakeTensorView, MakePartitionView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -180,14 +180,21 @@ const OP_UNPACK: Int = 0x70
 const OP_ALLOCA: Int = 0x71
 const OP_MMAF_SCALED: Int = 0x72
 
-# The four opcodes of the view family knife T11 implements. The other five
-# of the family (`get_tensor_shape` 0x2F, `get_index_space_shape` 0x2D,
-# `make_gather_scatter_view` 0x73, `make_strided_view` 0x74,
-# `atomic_red_view_tko` 0x75) belong to knives T12 and T13.
+# The six opcodes of the view family knives T11 and T12 implement. The
+# other three (`make_gather_scatter_view` 0x73, `make_strided_view` 0x74,
+# `atomic_red_view_tko` 0x75) belong to knife T13.
 const OP_LOAD_VIEW_TKO: Int = 0x3E
 const OP_MAKE_PARTITION_VIEW: Int = 0x42
 const OP_MAKE_TENSOR_VIEW: Int = 0x43
 const OP_STORE_VIEW_TKO: Int = 0x66
+
+# The two shape queries (knife T12). `get_tensor_shape` asks a
+# `tensor_view` for its tensor's extents; `get_index_space_shape` asks any
+# TileView (a partition view here) for the extents of its grid of tiles.
+# Both answer one rank-0 integer tile per dimension, so both are variadic
+# in their results and both write a result count.
+const OP_GET_INDEX_SPACE_SHAPE: Int = 0x2D
+const OP_GET_TENSOR_SHAPE: Int = 0x2F
 
 # The flag bits of a memory operation, in the order the reader assigns them:
 # the optional attributes of the operation in declaration order first
@@ -1013,6 +1020,18 @@ pub fn put_varint(b: bytes.Buf, x: Int) -> bytes.Buf =
 fn put_le(b: bytes.Buf, x: Int, width: Int) -> bytes.Buf =
   if width == 0 { b } else { put_le(bytes.put(b, x & 0xFF), x >>> 8, width - 1) }
 
+# One extent or stride of a `tensor_view`, as the eight little-endian bytes
+# of an int64_t. A DYNAMIC dimension (`DYN_DIM` in this tree, `?` in the
+# assembly) is `ShapedType::kDynamic`, which is INT64_MIN and therefore
+# `00 00 00 00 00 00 00 80`; every other value is written as it stands.
+#
+# The pattern is spelled out rather than reached through `put_le` because
+# INT64_MIN has no literal in this language (`0 - 9223372036854775808`
+# overflows the positive half) and because a shifted -1 is `FF` eight times
+# over, which is a different number the reader would accept.
+fn put_dim(b: bytes.Buf, d: Int) -> bytes.Buf =
+  if d == DYN_DIM { bytes.put(put_le(b, 0, 7), 0x80) } else { put_le(b, d, 8) }
+
 fn pad_to(b: bytes.Buf, align: Int) -> bytes.Buf =
   if bytes.size(b) % align == 0 { b } else { pad_to(bytes.put(b, PAD_BYTE), align) }
 
@@ -1081,14 +1100,14 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
   # a `writeLEVarSize` of int64_t: the count as a varint and then EIGHT raw
   # little-endian bytes an element. The same shape `tile` writes, one array
   # more; nothing here is a varint per element and nothing is zigzagged.
-  # A dynamic dimension would be `ShapedType::kDynamic` (INT64_MIN, so
-  # `00 00 00 00 00 00 00 80`) with an operand to match, and knife T12 owns
-  # that; this writer emits static extents only.
+  # A DYNAMIC dimension is one of those elements too (knife T12): it is
+  # `ShapedType::kDynamic`, which `put_dim` writes, and it has an operand
+  # of `make_tensor_view` to match.
   TensorView(e, shape, strides) -> {
     let (w1, ei) = elem_ty(w, e)
     let b0 = put_varint(bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)
-    let b1 = list.fold(shape, put_varint(b0, len(shape)), (b, d) => put_le(b, d, 8))
-    let b2 = list.fold(strides, put_varint(b1, len(strides)), (b, s) => put_le(b, s, 8))
+    let b1 = list.fold(shape, put_varint(b0, len(shape)), put_dim)
+    let b2 = list.fold(strides, put_varint(b1, len(strides)), put_dim)
     ty_of(w1, bytes.freeze(b2))
   }
   # The tag, the UNIFIED OPTIONAL-PARAMETER BITFIELD, then the four
@@ -1268,6 +1287,14 @@ fn emit_op(w: W, opcode: Int, result: Ty) -> W = {
 fn emit_op_counted(w: W, opcode: Int, result: Ty) -> W = {
   let (w1, ti) = ty(w, result)
   emit(emit(emit(w1, opcode), 1), ti)
+}
+
+# opcode, the result count, that many copies of the result type's index,
+# then the source operand: the shape of both knife T12 queries.
+fn emit_shape_query(w: W, opcode: Int, rank: Int, res: Ty, src: Ref) -> W = {
+  let (w1, ti) = ty(w, res)
+  let w2 = emit(emit(w1, opcode), rank)
+  emit_ref(list.fold(range(0, rank), w2, (a, _k) => emit(a, ti)), src)
 }
 
 fn encode_instr(w0: W, i: Instr) -> W = match i {
@@ -1643,7 +1670,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, si) = str_of(w1, sym)
     emit(w2, si)
   }
-  MakeTensorView(_dst, base, _base_ty, t) -> {
+  MakeTensorView(_dst, base, _base_ty, t, dyn_shape, dyn_strides, _dyn_ty) -> {
     # A RESULT COUNT first: `Operator::isVariadic()` is true because the
     # two dynamic arrays are variadic OPERANDS, and the generated writer
     # writes the count under it even though the operation has exactly one
@@ -1653,12 +1680,27 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # optional operand, so `generateFlagsFieldSerialization` returns before
     # writing one -- and no attributes at all. Then the operands, which the
     # AttrSizedOperandSegments path writes one GROUP at a time: the base
-    # with no count, then each variadic group with its own count. Both
-    # counts are ZERO here, and that is not padding: without them the
-    # reader takes the next instruction's opcode for a segment length.
+    # with no count, then each variadic group with its own count. A static
+    # view makes both counts ZERO, and that is not padding: without them
+    # the reader takes the next instruction's opcode for a segment length.
+    # A dynamic one fills them, one operand per `?` in the type, shape
+    # group first (knife T12).
     let w1 = emit_ref(emit_op_counted(w0, OP_MAKE_TENSOR_VIEW, t), base)
-    emit(emit(w1, 0), 0)
+    let w2 = list.fold(dyn_shape, emit(w1, len(dyn_shape)), emit_ref)
+    list.fold(dyn_strides, emit(w2, len(dyn_strides)), emit_ref)
   }
+  # The two shape queries: the opcode, the RESULT COUNT (they are variadic
+  # in their results, so `generateSimpleResultSerialization` writes it),
+  # then ONE TYPE INDEX PER RESULT -- `writeResultTypes` walks the result
+  # types and interns each, so a rank-3 query writes the same index three
+  # times rather than once. No flags (neither operation has an optional
+  # attribute or an optional operand), no attributes, and one bare operand
+  # index: `src` is the only operand and nothing about it is variadic, so
+  # `generateOperandSerialization` writes no count.
+  GetTensorShape(dsts, src, _src_ty, res_ty) ->
+    emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)
+  GetIndexSpaceShape(dsts, src, _src_ty, res_ty) ->
+    emit_shape_query(w0, OP_GET_INDEX_SPACE_SHAPE, len(dsts), res_ty, src)
   MakePartitionView(_dst, src, _src_ty, t) ->
     # Nothing variadic and nothing optional, so no result count, no flags
     # word, and one bare operand index: the whole of the partitioning is
@@ -2770,7 +2812,9 @@ test "make_tensor_view writes a result count and an empty count for each variadi
   # count of zero for each of the two variadic segments. Those two zeroes
   # are not padding: without them the reader takes the next instruction's
   # opcode for a segment length.
-  let m = encode_instr(w0, MakeTensorView(9, Val(0), Tile([], PtrTo("f64")), tv))
+  let none: List[Ref] = []
+  let idx = Tile([], Num("i32"))
+  let m = encode_instr(w0, MakeTensorView(9, Val(0), Tile([], PtrTo("f64")), tv, none, none, idx))
   assert hex(bytes.freeze(m.body)) == "43" ++ "01" ++ "01" ++ "00" ++ "00" ++ "00"
   # make_partition_view has nothing variadic and nothing optional, so it
   # writes no count and no flags word at all: the whole of the partitioning

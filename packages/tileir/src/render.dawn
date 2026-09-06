@@ -16,9 +16,9 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, NoPadding, padding_name}
+use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, NoPadding, padding_name, DYN_DIM}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, BinaryI, Fma, MmaF, CmpF, CmpI, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, MakeTensorView, MakePartitionView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -32,8 +32,8 @@ pub fn ty(t: Ty) -> String = match t {
   Token -> "token"
   Tile(shape, e) -> "tile<" ++ list.fold(shape, "", (acc, d) => acc ++ "${d}x") ++ elem(e) ++ ">"
   TensorView(e, shape, strides) ->
-    "tensor_view<" ++ list.fold(shape, "", (acc, d) => acc ++ "${d}x") ++ elem(e)
-    ++ ", strides=[" ++ commas(list.map(strides, s => "${s}")) ++ "]>"
+    "tensor_view<" ++ list.fold(shape, "", (acc, d) => acc ++ "${extent(d)}x") ++ elem(e)
+    ++ ", strides=[" ++ commas(list.map(strides, extent)) ++ "]>"
   PartitionView(tile_shape, e, shape, strides, dim_map, padding) ->
     "partition_view<tile=(" ++ crosses(tile_shape) ++ ")"
     ++ match padding {
@@ -43,6 +43,12 @@ pub fn ty(t: Ty) -> String = match t {
     ++ ", " ++ ty(TensorView(e, shape, strides))
     ++ ", dim_map=[" ++ commas(list.map(dim_map, k => "${k}")) ++ "]>"
 }
+
+# One extent or stride of a tensor view as the type spells it: the number,
+# or `?` for a dimension `make_tensor_view` carries in an operand (knife
+# T12). `printDimensionList` and the type's own printer both write the
+# question mark for `ShapedType::kDynamic`, which is what `DYN_DIM` marks.
+fn extent(d: Int) -> String = if d == DYN_DIM { "?" } else { "${d}" }
 
 # The `AxBxC` a partition view spells its tile with, which is the tile
 # type's separator without the element format after it.
@@ -410,9 +416,16 @@ fn line(i: Instr) -> String = match i {
   AllocaPtr(dst, num_elem, align, shared, t) ->
     "${v(dst)} = alloca num_elem = ${num_elem}, alignment = ${align}"
     ++ "${if shared { " global" } else { "" }} : ${ty(t)}"
-  MakeTensorView(dst, base, _base_ty, t) ->
-    "${v(dst)} = make_tensor_view ${name(base)}, shape = [${commas(view_shape(t))}]"
-    ++ ", strides = [${commas(view_strides(t))}] : ${ty(t)}"
+  MakeTensorView(dst, base, _base_ty, t, dyn_shape, dyn_strides, dyn_ty) ->
+    "${v(dst)} = make_tensor_view ${name(base)}, shape = [${commas(mixed(view_shape(t), dyn_shape))}]"
+    ++ ", strides = [${commas(mixed(view_strides(t), dyn_strides))}] : "
+    ++ (if len(dyn_shape) + len(dyn_strides) == 0 { "" } else { "${ty(dyn_ty)} -> " })
+    ++ ty(t)
+  GetTensorShape(dsts, src, src_ty, res_ty) ->
+    "${commas(list.map(dsts, v))} = get_tensor_shape ${name(src)} : ${ty(src_ty)} -> ${ty(res_ty)}"
+  GetIndexSpaceShape(dsts, src, src_ty, res_ty) ->
+    "${commas(list.map(dsts, v))} = get_index_space_shape ${name(src)} : ${ty(src_ty)}"
+    ++ " -> ${ty(res_ty)}"
   MakePartitionView(dst, src, _src_ty, t) -> "${v(dst)} = make_partition_view ${name(src)} : ${ty(t)}"
   LoadViewTile(dst, tok_out, view, view_ty, indices, idx_ty, t, tok_in) ->
     "${v(dst)}, ${v(tok_out)} = load_view_tko weak ${name(view)}[${commas(list.map(indices, name))}]"
@@ -425,17 +438,36 @@ fn line(i: Instr) -> String = match i {
 }
 
 # The shape and the strides a `make_tensor_view` states beside its result
-# type. They are the type's own numbers: the operation spells them a
-# second time because the dialect lets either be an OPERAND instead (knife
-# T12), and the static form is what this writer emits.
-fn view_shape(t: Ty) -> List[String] = match t {
-  TensorView(_e, shape, _strides) -> list.map(shape, d => "${d}")
+# type, as the type's own entries: a number, or `DYN_DIM` where an operand
+# carries the value. The operation spells them a second time because the
+# dialect lets either be an OPERAND instead, and `mixed` is what puts the
+# operands back in.
+fn view_shape(t: Ty) -> List[Int] = match t {
+  TensorView(_e, shape, _strides) -> shape
   _ -> panic("tileir: `${show(t)}` is not a tensor view and has no shape to print")
 }
 
-fn view_strides(t: Ty) -> List[String] = match t {
-  TensorView(_e, _shape, strides) -> list.map(strides, s => "${s}")
+fn view_strides(t: Ty) -> List[Int] = match t {
+  TensorView(_e, _shape, strides) -> strides
   _ -> panic("tileir: `${show(t)}` is not a tensor view and has no strides to print")
+}
+
+# `dims` with each `DYN_DIM` replaced by the name of the operand that
+# carries it, in order: `MakeTensorViewOp::print`'s `printMixedOperandList`.
+# The type prints `?` in the same positions, so the two lists read
+# together.
+fn mixed(dims: List[Int], dyn: List[Ref]) -> List[String] = {
+  var used = 0
+  var out: List[String] = []
+  for d in dims {
+    if d == DYN_DIM {
+      out = out ++ [name(dyn[used])]
+      used = used + 1
+    } else {
+      out = out ++ ["${d}"]
+    }
+  }
+  out
 }
 
 # An instruction at `indent` columns: one line, or for a region its header,

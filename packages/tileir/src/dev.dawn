@@ -483,6 +483,24 @@ pub opaque type Ptrs[D] = Int
 ## attribute, which says the address may be handed to other tile threads;
 ## without it the address is private to this one.
 ##
+## `t_tensor_view`'s `shape` and `strides` may each hold `DYN_DIM` where the
+## extent is not known until the kernel runs (knife T12). Those positions
+## print as `?` in the type and take an OPERAND instead: `dyn_shape` and
+## `dyn_strides` are the handles for them, in the order the markers appear,
+## and the recording handler refuses a count that does not match the
+## markers. Every one of them is a rank-0 i32 tile, which is what an `Idx`
+## already is.
+##
+## `t_tensor_shape(view, dim)` and `t_index_space_shape(view, dim)` are the
+## two SHAPE QUERIES (knife T12). Each answers the extent along one
+## dimension, and each is `t_block_id`'s shape: the dialect's operation has
+## one result per dimension and the lowering issues the whole of it, binding
+## the handle to the `dim`-th. `t_tensor_shape` asks the TENSOR (so its
+## dimensions are the tensor view's own and a `?` one is the point of it);
+## `t_index_space_shape` asks the GRID of tiles a partition view cuts the
+## tensor into, so its rank is the tile's rank and its extent along `k` is
+## `ceil(shape[dim_map[k]] / tile_shape[k])`.
+##
 ## A load or a store inside a reduction or an `if` is REFUSED: the dialect
 ## requires a reduction's body to be pure, and neither region carries the
 ## memory ordering token, so a memory operation inside one would have no
@@ -555,11 +573,14 @@ pub effect Dev {
   fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
   fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
   fn t_alloca(dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int]) -> Int
-  fn t_tensor_view(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int]) -> Int
+  fn t_tensor_view(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
+    dyn_shape: List[Int], dyn_strides: List[Int]) -> Int
   fn t_partition_view(dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding) -> Int
   fn t_load_view(dtype: String, view: Int, indices: List[Int]) -> Int
   fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
+  fn t_tensor_shape(view: Int, dim: Int) -> Int
+  fn t_index_space_shape(view: Int, dim: Int) -> Int
 }
 
 ## Whether `name` is one of the dialect's floating point formats. What the
@@ -577,6 +598,43 @@ pub opaque type TensorView[D] = Int
 ## of equally sized tiles. `load_view` and `store_view` index the GRID, one
 ## index a tile dimension, and the tile they move is `tile_shape` wide.
 pub opaque type PartitionView[D] = Int
+
+## The extent (or the stride) of a tensor view dimension that is not known
+## until the kernel runs: the dialect prints it `?` and carries its value in
+## an OPERAND of `make_tensor_view` (knife T12). It is a MARKER and not a
+## number: what goes on the wire is `ShapedType::kDynamic`, and that lives
+## in bytecode.dawn with every other value this package writes. Any
+## non-positive marker would do, because a static extent and a static stride
+## are both strictly positive; this one is minus one so that a shape printed
+## in a diagnostic reads as one.
+pub const DYN_DIM: Int = 0 - 1
+
+## One dimension of a `tensor_view_dyn`: a constant extent or stride, or a
+## value the kernel computed. `Fixed` is what `tensor_view` takes for every
+## dimension, so the two spellings say the same thing when nothing is
+## dynamic; `Dyn` is the `?` one.
+pub type Dim =
+  | Fixed(n: Int)
+  | Dyn(v: Idx)
+
+## The extent of a `Dim` as the type states it: the constant, or `DYN_DIM`
+## for the ones an operand carries.
+pub fn dim_extent(d: Dim) -> Int = match d {
+  Fixed(n) -> n
+  Dyn(_v) -> DYN_DIM
+}
+
+## The handles of the dynamic entries of `ds`, in order. What
+## `make_tensor_view` takes as its `dynamicShape` or `dynamicStrides` group,
+## and its length is how many `DYN_DIM` markers `dim_extent` produced.
+pub fn dim_operands(ds: List[Dim]) -> List[Int] =
+  list.fold(ds, [], (acc, d) => match d {
+    Fixed(_n) -> acc
+    Dyn(v) -> {
+      let h: Int = v
+      acc ++ [h]
+    }
+  })
 
 ## Which value an out-of-bounds lane of a `load_view` reads. `NoPadding` is
 ## the dialect's absent `padding_value`: out-of-bounds lanes then hold
@@ -2576,7 +2634,69 @@ pub fn alloca_shared_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List
 pub fn tensor_view[D: Dtype](d: D, p: Param[D], base: Idx, shape: List[Int],
   strides: List[Int]) -> TensorView[D] !Dev = {
   let b: Int = base
-  let r: TensorView[D] = t_tensor_view(position(p), dtype_name(d), b, shape, strides)
+  let none: List[Int] = []
+  let r: TensorView[D] = t_tensor_view(position(p), dtype_name(d), b, shape, strides, none, none)
+  r
+}
+
+## `tensor_view` with dimensions the kernel computes (knife T12). A `Fixed`
+## entry is an extent (or a stride) the TYPE states; a `Dyn` entry prints
+## `?` there and hands `make_tensor_view` the value as an operand, so one
+## cubin serves every tensor of that rank rather than one shape.
+##
+## Everything else is `tensor_view`'s: the base is an element offset on the
+## parameter's own pointer, and a dynamic extent or stride is held to the
+## same rule a static one is (strictly positive), except that the device
+## rather than the recorder is what holds it.
+pub fn tensor_view_dyn[D: Dtype](d: D, p: Param[D], base: Idx, shape: List[Dim],
+  strides: List[Dim]) -> TensorView[D] !Dev = {
+  let b: Int = base
+  let r: TensorView[D] = t_tensor_view(position(p), dtype_name(d), b,
+    list.map(shape, dim_extent), list.map(strides, dim_extent),
+    dim_operands(shape), dim_operands(strides))
+  r
+}
+
+## The extent of `tv`'s tensor along dimension `dim`, asked of the DEVICE:
+## `get_tensor_shape` (knife T12). The dialect's operation answers every
+## dimension at once, the way `get_tile_block_id` answers every axis, and
+## this names one of them; the lowering issues the whole operation and binds
+## this handle to the `dim`-th result.
+##
+## For a static dimension the answer is the number already in the type, and
+## for a `?` one it is the operand `make_tensor_view` was handed. That is
+## what makes it worth asking: a kernel over a dynamic tensor has no other
+## way to know where the tensor ends.
+pub fn tensor_dim[D](tv: TensorView[D], dim: Int) -> Idx !Dev = {
+  let v: Int = tv
+  let h: Idx = t_tensor_shape(v, dim)
+  h
+}
+
+## The extent of `v`'s INDEX SPACE along tile dimension `dim`, asked of the
+## device: `get_index_space_shape` (knife T12). The index space is the grid
+## of tiles the partition view cuts its tensor into, so this is
+## `ceil(shape[dim_map[dim]] / tile_shape[dim])` computed where the tensor's
+## extent is known, which for a dynamic tensor is only on the device.
+## `view_grid` is the same number computed on the host from a static shape.
+pub fn index_space_dim[D](v: PartitionView[D], dim: Int) -> Idx !Dev = {
+  let x: Int = v
+  let h: Idx = t_index_space_shape(x, dim)
+  h
+}
+
+## A rank-0 `Tile[I32]` under its other name. `Idx`, `Scalar[I32]` and a
+## rank-0 `Tile[I32]` are ONE lowered type (`tile<i32>`) with three surface
+## names, and this is the only place a kernel crosses between them.
+##
+## It is here for knife T12: a dynamic extent has to come from somewhere,
+## and the general somewhere is a buffer. The rank is not checkable here (a
+## handle carries no shape at this layer), so the lowering holds it instead:
+## every dynamic operand of a `make_tensor_view` must be a rank-0 i32 tile
+## and is refused by name if it is not.
+pub fn idx_of(t: Tile[I32]) -> Idx = {
+  let h: Int = t
+  let r: Idx = h
   r
 }
 
@@ -2996,7 +3116,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_tensor_view(_param, _dtype, _base, _shape, _strides) => {
+    t_tensor_view(_param, _dtype, _base, _shape, _strides, _dyn_shape, _dyn_strides) => {
       let h = next
       next = next + 1
       h
@@ -3012,6 +3132,16 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_store_view(_dtype, _view, _indices, _value) => ()
+    t_tensor_shape(_view, _dim) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_index_space_shape(_view, _dim) => {
+      let h = next
+      next = next + 1
+      h
+    }
   }
   body()
 }
@@ -3292,8 +3422,9 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["mmaf_scaled ${dtype} ${scale} ${show(dims)} ${a} ${b} ${c} ${sa} ${sb}"]
       79
     }
-    t_tensor_view(param, dtype, base, shape, strides) => {
-      log = log ++ ["tensor_view ${param} ${dtype} ${base} ${show(shape)} ${show(strides)}"]
+    t_tensor_view(param, dtype, base, shape, strides, dyn_shape, dyn_strides) => {
+      log = log ++ ["tensor_view ${param} ${dtype} ${base} ${show(shape)} ${show(strides)}"
+        ++ " ${show(dyn_shape)} ${show(dyn_strides)}"]
       80
     }
     t_partition_view(dtype, view, tile_shape, dim_map, padding) => {
@@ -3306,6 +3437,14 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     }
     t_store_view(dtype, view, indices, value) => {
       log = log ++ ["store_view ${dtype} ${view} ${show(indices)} ${value}"]
+    }
+    t_tensor_shape(view, dim) => {
+      log = log ++ ["tensor_shape ${view} ${dim}"]
+      83
+    }
+    t_index_space_shape(view, dim) => {
+      log = log ++ ["index_space_shape ${view} ${dim}"]
+      84
     }
   }
   body()
@@ -3668,10 +3807,12 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_get_global(_sym, _dtype, _shape) => 77
       t_alloca(_dtype, _num_elem, _align, _shared, _shape) => 78
       t_mmaf_scaled(_dtype, _scale, _dims, _a, _b, _c, _sa, _sb) => 79
-      t_tensor_view(_param, _dtype, _base, _shape, _strides) => 80
+      t_tensor_view(_param, _dtype, _base, _shape, _strides, _dyn_shape, _dyn_strides) => 80
       t_partition_view(_dtype, _view, _tile_shape, _dim_map, _padding) => 81
       t_load_view(_dtype, _view, _indices) => 82
       t_store_view(_dtype, _view, _indices, _value) => ()
+      t_tensor_shape(_view, _dim) => 83
+      t_index_space_shape(_view, _dim) => 84
     }
     let _r = loop_seen()
     log

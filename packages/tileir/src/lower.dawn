@@ -64,10 +64,12 @@ derive Show
 ##
 ## `TensorView` is `!cuda_tile.tensor_view<shape x elem, strides=[..]>`: a
 ## reference to a region of global memory, its extent along each dimension
-## and the number of ELEMENTS one step along that dimension costs. Only
-## static extents and strides are spelled here; the dialect also allows a
-## dimension to be dynamic (printed `?`, carried by an operand of
-## `make_tensor_view`) and knife T12 owns that.
+## and the number of ELEMENTS one step along that dimension costs. An entry
+## of either list may be `DYN_DIM`, which is the dialect's `?`: the extent
+## (or the stride) is not in the type at all and `MakeTensorView` carries it
+## in an operand instead (knife T12). The MARKER is what travels through
+## this module; the value the writer puts on the wire for it
+## (`ShapedType::kDynamic`) lives in bytecode.dawn.
 ##
 ## `PartitionView` is
 ## `!cuda_tile.partition_view<tile=(..), tensor_view<..>, dim_map=[..]>`,
@@ -244,8 +246,11 @@ pub type Instr =
   | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
   | GetGlobalPtr(dst: Int, sym: String, ty: Ty)
   | AllocaPtr(dst: Int, num_elem: Int, align: Int, shared: Bool, ty: Ty)
-  | MakeTensorView(dst: Int, base: Ref, base_ty: Ty, ty: Ty)
+  | MakeTensorView(dst: Int, base: Ref, base_ty: Ty, ty: Ty, dyn_shape: List[Ref],
+    dyn_strides: List[Ref], dyn_ty: Ty)
   | MakePartitionView(dst: Int, src: Ref, src_ty: Ty, ty: Ty)
+  | GetTensorShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
+  | GetIndexSpaceShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref], idx_ty: Ty,
     ty: Ty, tok_in: Ref)
   | StoreViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty, indices: List[Ref],
@@ -301,6 +306,51 @@ pub fn rank0_of(t: Ty) -> Ty = match t {
 fn without_dim(t: Ty, dim: Int) -> Ty = match t {
   Tile(shape, e) -> Tile(list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k]), e)
   _ -> panic("tileir: `${show(t)}` has no dimensions to drop")
+}
+
+# Whether `t` is the rank-0 i32 tile every index in this tree is: an `Idx`,
+# a `Scalar[I32]` and a rank-0 `Tile[I32]` all lower to it, and
+# `make_tensor_view`'s dynamic operands must every one be it.
+fn is_idx_ty(t: Ty) -> Bool = match t {
+  Tile(shape, e) ->
+    if len(shape) != 0 {
+      false
+    } else {
+      match e {
+        Num(nm) -> nm == "i32"
+        PtrTo(_nm) -> false
+      }
+    }
+  _ -> false
+}
+
+# One of the two shape queries (knife T12). The dialect's operation answers
+# one result per dimension of the thing asked, so the whole of it is issued
+# and `dst` is bound to the `dim`-th, which is how `BlockId` treats
+# `get_tile_block_id`'s three. `index_space` picks the operation: the index
+# space is the GRID of tiles a partition view cuts its tensor into, the
+# tensor shape is the tensor's own extent.
+fn shape_query(l0: L, dst: Int, src: Ref, src_ty: Ty, dim: Int, rank: Int,
+  index_space: Bool) -> L = {
+  let what = if index_space { "get_index_space_shape" } else { "get_tensor_shape" }
+  if dim >= rank {
+    panic("tileir: ${what} names dimension ${dim} of a rank-${rank} view, whose dimensions are 0 to ${rank - 1}")
+  } else {
+    ()
+  }
+  let none: List[Int] = []
+  let (l1, ds) = list.fold(range(0, rank), (l0, none), (acc, _k) => {
+    let (l, vs) = acc
+    let (l2, v) = fresh(l)
+    (l2, vs ++ [v])
+  })
+  let res = i32_scalar()
+  let l3 = emit(l1, if index_space {
+      GetIndexSpaceShape(ds, src, src_ty, res)
+    } else {
+      GetTensorShape(ds, src, src_ty, res)
+    })
+  bind(l3, dst, Val(ds[dim]), res)
 }
 
 # The view a `load_view` or a `store_view` names, its operand and its
@@ -889,7 +939,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l3, pn) = spread_rank0(l2, Val(g), Tile([], e), shape, e)
     bind(l3, dst, pn, Tile(shape, e))
   }
-  TensorViewOf(dst, param, dtype, base, shape, strides) -> {
+  TensorViewOf(dst, param, dtype, base, shape, strides, dyn_shape, dyn_strides) -> {
     # `make_tensor_view`'s base is a rank-0 `tile<ptr<D>>`, which is what
     # an entry parameter already is. `base` is the same index a strided
     # load takes, so the pointer it starts from is one `offset` on the
@@ -901,8 +951,51 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, o) = fresh(l0)
     let l2 = emit(l1, Offset(o, Arg(param), b, pt, Tile([], Num("i32"))))
     let tv = TensorView(Num(dtype), shape, strides)
+    # `MakeTensorViewOp::verify`'s last two rules, which need a TYPE and so
+    # are here rather than in the recorder: every dynamic operand is a
+    # rank-0 tile of an integer format, and all of them are the SAME type.
+    # This tree spells that one type (`Idx` is a rank-0 i32 tile), so the
+    # check is one equality rather than a pass over the group.
+    let dyn = dyn_shape ++ dyn_strides
+    let idx = Tile([], Num("i32"))
+    match list.find(dyn, h => not is_idx_ty(ty_of(l0, h))) {
+      Some(h) -> panic("tileir: a dynamic tensor view dimension is a rank-0 i32 tile, and handle ${h} is `${show(ty_of(l0, h))}`")
+      None -> ()
+    }
+    let sh = list.map(dyn_shape, h => ref_of(l0, h, "dynamic tensor view extent"))
+    let st = list.map(dyn_strides, h => ref_of(l0, h, "dynamic tensor view stride"))
     let (l3, v) = define(l2, dst, tv)
-    emit(l3, MakeTensorView(v, Val(o), pt, tv))
+    emit(l3, MakeTensorView(v, Val(o), pt, tv, sh, st, idx))
+  }
+  TensorShapeOf(dst, view, dim) -> {
+    # `get_tensor_shape` answers ONE result per tensor dimension, so the
+    # whole operation is issued and this handle is bound to the `dim`-th,
+    # exactly as `BlockId` binds one of `get_tile_block_id`'s three. The
+    # rank is the tensor view's own, which is why the check is here.
+    let src = ref_of(l0, view, "get_tensor_shape source")
+    let vt = ty_of(l0, view)
+    match vt {
+      TensorView(_e, shape, _strides) -> {
+        shape_query(l0, dst, src, vt, dim, len(shape), false)
+      }
+      _ -> panic("tileir: get_tensor_shape names handle ${view}, which is not a tensor view")
+    }
+  }
+  IndexSpaceShapeOf(dst, view, dim) -> {
+    # The index space of a partition view has one dimension per TILE
+    # dimension (`PartitionViewType::getViewIndexRank` is
+    # `getTileShape().size()`), not one per tensor dimension. The two ranks
+    # are equal here because `verifyPartitionViewLike` requires it, and the
+    # rank is still read off the tile shape because that is what the
+    # dialect reads it off.
+    let src = ref_of(l0, view, "get_index_space_shape source")
+    let vt = ty_of(l0, view)
+    match vt {
+      PartitionView(tile_shape, _e, _shape, _strides, _dim_map, _padding) -> {
+        shape_query(l0, dst, src, vt, dim, len(tile_shape), true)
+      }
+      _ -> panic("tileir: get_index_space_shape names handle ${view}, which is not a partition view")
+    }
   }
   PartitionViewOf(dst, dtype, view, tile_shape, dim_map, padding) -> {
     # verifyPartitionViewLike's other half: the two ranks match and every
@@ -1214,8 +1307,10 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
   GetGlobalPtr(dst, _sym, _ty) -> [dst]
   AllocaPtr(dst, _num_elem, _align, _shared, _ty) -> [dst]
-  MakeTensorView(dst, _base, _base_ty, _ty) -> [dst]
+  MakeTensorView(dst, _base, _base_ty, _ty, _dyn_shape, _dyn_strides, _dyn_ty) -> [dst]
   MakePartitionView(dst, _src, _src_ty, _ty) -> [dst]
+  GetTensorShape(dsts, _src, _src_ty, _res_ty) -> dsts
+  GetIndexSpaceShape(dsts, _src, _src_ty, _res_ty) -> dsts
   LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_ty, _ty, _tok_in) -> [dst, tok_out]
   StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_ty, _tok_in) -> [tok_out]
   Ret -> []
