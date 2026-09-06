@@ -5026,7 +5026,13 @@ pub fn with_gpu_real[T](kernels: Map[String, Bytes], body: fn() -> T !Gpu !io) -
           Some(w) -> match map.get(kernels, kernel) {
             None -> Err(no_kernel("real device", kernel))
             Some(cubin) -> {
-              let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
+              # the module this kernel's cubin defines, loaded once per
+              # installation. Spelled through `already` rather than matching
+              # on `map.get` in place, because scripts/tile-gpu-diff's
+              # `module-reloaded-per-launch` anchors on the launch arm's
+              # copy of that expression and an anchor has to be unique
+              let already: Option[Int] = map.get(mods, kernel)
+              let loaded: Result[Int, ForeignError] = match already {
                 Some(m) -> Ok(m)
                 None -> gpu_load_module_host(cubin)
               }
