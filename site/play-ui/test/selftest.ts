@@ -1,7 +1,7 @@
 import { dawn, dawnCompletions } from '../src/dawn-lang'
 import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
-import { ensureSyntaxTree } from '@codemirror/language'
+import { ensureSyntaxTree, matchBrackets } from '@codemirror/language'
 import { CompletionContext } from '@codemirror/autocomplete'
 import {
   DAWN_LSP_PROTOCOL,
@@ -23,6 +23,51 @@ function expect(name: string, got: unknown, want: unknown) {
   if (!ok) { fails++; console.log(`FAIL  ${name}: got ${JSON.stringify(got)} want ${JSON.stringify(want)}`) }
   else console.log(`  ok  ${name}`)
 }
+
+// Exercise the real stream syntax tree: completion's separate lexical scan
+// cannot detect a closing call parenthesis swallowed by a string token.
+function callBrackets(name: string, value: string) {
+  const prefix = 'pub fn main() -> Unit !io = {\n  let name = "Dawn"\n  let func = () => {\n    println('
+  const doc = prefix + value + ')\n  }\n  func()\n}'
+  const state = EditorState.create({ doc, extensions: [dawn()] })
+  ensureSyntaxTree(state, doc.length, 5000)
+  const left = prefix.length - 1, right = prefix.length + value.length
+  const forward = matchBrackets(state, left, 1)
+  const backward = matchBrackets(state, right + 1, -1)
+  expect(name + ' forward', [forward?.matched, forward?.end?.from], [true, right])
+  expect(name + ' backward', [backward?.matched, backward?.end?.from], [true, left])
+}
+callBrackets('plain control', '"hello Dawn"')
+callBrackets('issue 83', '"hello form $name"')
+callBrackets('multiple interpolations', '"$name / $name / ${name}"')
+callBrackets('nested expression', '"${if true { foo(1) } else { 2 }}"')
+callBrackets('nested string braces', '"${foo("}")}"')
+callBrackets('nested interpolation', '"${foo("${name}")}"')
+callBrackets('triple interpolation', '"""hello $name\n${foo(1)}\nend"""')
+callBrackets('raw control', '`raw $name ${)}\ntext`')
+callBrackets('escaped dollar and quote', '"\\$name \\" $name"')
+callBrackets('comment braces in interpolation', '"""${foo(\n# } not a delimiter\n1)}"""')
+const editDoc = 'println("$name")\nprintln("tail")'
+let editState = EditorState.create({ doc: editDoc, extensions: [dawn()] })
+ensureSyntaxTree(editState, editDoc.length, 5000)
+editState = editState.update({ changes: { from: 10, to: 14, insert: '{foo("}")}' } }).state
+ensureSyntaxTree(editState, editState.doc.length, 5000)
+const editedClose = editState.doc.line(1).to - 1
+expect('incremental interpolation edit',
+  [matchBrackets(editState, 7, 1)?.matched, matchBrackets(editState, 7, 1)?.end?.from],
+  [true, editedClose])
+const recoveryDoc = 'println("unfinished\nprintln("tail")'
+const recovery = EditorState.create({ doc: recoveryDoc, extensions: [dawn()] })
+ensureSyntaxTree(recovery, recoveryDoc.length, 5000)
+expect('ordinary string recovers at newline',
+  matchBrackets(recovery, recoveryDoc.lastIndexOf('('), 1)?.matched, true)
+const blankRecoveryDoc = 'println("unfinished\n\nprintln("tail")'
+const blankRecovery = EditorState.create({ doc: blankRecoveryDoc, extensions: [dawn()] })
+ensureSyntaxTree(blankRecovery, blankRecoveryDoc.length, 5000)
+expect('ordinary string recovers over blank line',
+  matchBrackets(blankRecovery, blankRecoveryDoc.lastIndexOf('('), 1)?.matched, true)
+callBrackets('nested character and raw braces', '"${foo(\'}\', `}`)}"')
+callBrackets('blank line in triple string', '"""$name\n\nend"""')
 
 // ---- diagnostics parser, fed real compiler output (strip_dir applied) ----
 const report = `error: main must be pub

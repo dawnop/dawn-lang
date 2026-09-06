@@ -29,9 +29,13 @@ const KEYWORDS = new Set([
 const defTag = Tag.define()
 const interpTag = Tag.define()
 
+type Context = { kind: 'string'; closer: '"' | '"""' | '`' } |
+  { kind: 'interp'; depth: number }
+
 interface State {
-  // depth/kind of a multi-line string we're inside: '"""' or '`', else null
-  block: '"""' | '`' | null
+  // Interpolation returns to its enclosing string, even across nested strings
+  // and expressions. Each cached line owns its copy of this stack.
+  contexts: Context[]
   // the previous significant token was `fn`, so the next identifier is a def name
   afterFn: boolean
 }
@@ -41,21 +45,6 @@ function isIdentStart(ch: string) {
 }
 function isIdentChar(ch: string) {
   return /[A-Za-z0-9_]/.test(ch)
-}
-
-// Consume one `$name` or `${...}` interpolation; the opening `$` is already next.
-function eatInterp(stream: any): boolean {
-  if (!stream.eat('$')) return false
-  if (stream.eat('{')) {
-    while (!stream.eol() && stream.peek() !== '}') stream.next()
-    stream.eat('}')
-    return true
-  }
-  if (isIdentStart(stream.peek() ?? '')) {
-    while (isIdentChar(stream.peek() ?? '')) stream.next()
-    return true
-  }
-  return true // a lone `$` — treat as consumed
 }
 
 // Scan the body of a string with the given closer, honoring escapes (except raw
@@ -77,16 +66,29 @@ function scanStringBody(stream: any, closer: string, raw: boolean): boolean {
 }
 
 const dawnMode = StreamLanguage.define<State>({
-  startState: () => ({ block: null, afterFn: false }),
+  startState: () => ({ contexts: [], afterFn: false }),
+  copyState: state => ({ contexts: state.contexts.map(frame => ({ ...frame })), afterFn: state.afterFn }),
+  blankLine(state) {
+    const top = state.contexts[state.contexts.length - 1]
+    if (top?.kind === 'string' && top.closer === '"') state.contexts.pop()
+  },
   token(stream, state) {
-    // continue a multi-line string
-    if (state.block) {
-      const raw = state.block === '`'
+    // An unfinished ordinary string stops at the line boundary. Do not pop
+    // an enclosing string while a multi-line interpolation is still code.
+    let context = state.contexts[state.contexts.length - 1]
+    if (stream.sol() && context?.kind === 'string' && context.closer === '"') {
+      state.contexts.pop()
+      context = state.contexts[state.contexts.length - 1]
+    }
+    if (context?.kind === 'string') {
+      const raw = context.closer === '`'
       if (!raw && stream.peek() === '$') {
-        eatInterp(stream)
+        stream.next()
+        if (stream.eat('{')) state.contexts.push({ kind: 'interp', depth: 1 })
+        else while (isIdentChar(stream.peek() ?? '')) stream.next()
         return 'interp'
       }
-      if (scanStringBody(stream, state.block, raw)) state.block = null
+      if (scanStringBody(stream, context.closer, raw)) state.contexts.pop()
       return 'string'
     }
 
@@ -95,6 +97,17 @@ const dawnMode = StreamLanguage.define<State>({
     state.afterFn = false
 
     const ch = stream.peek() as string
+
+    // Strings and comments below consume their braces themselves. Only code
+    // braces count toward the interpolation's return to its outer string.
+    if (context?.kind === 'interp') {
+      if (ch === '{') context.depth++
+      if (ch === '}' && --context.depth === 0) {
+        stream.next()
+        state.contexts.pop()
+        return 'interp'
+      }
+    }
 
     // comment
     if (ch === '#') {
@@ -105,22 +118,20 @@ const dawnMode = StreamLanguage.define<State>({
     // strings: triple, then single double-quote, then raw backtick
     if (stream.match('"""')) {
       if (!scanStringBody(stream, '"""', false)) {
-        if (stream.peek() === '$') return 'string' // interp handled next call
-        state.block = '"""'
+        state.contexts.push({ kind: 'string', closer: '"""' })
       }
       return 'string'
     }
     if (ch === '"') {
       stream.next()
       if (!scanStringBody(stream, '"', false)) {
-        // stopped at $ or EOL; single-quote strings don't span lines
-        if (stream.peek() === '$') return 'string'
+        state.contexts.push({ kind: 'string', closer: '"' })
       }
       return 'string'
     }
     if (ch === '`') {
       stream.next()
-      if (!scanStringBody(stream, '`', true)) state.block = '`'
+      if (!scanStringBody(stream, '`', true)) state.contexts.push({ kind: 'string', closer: '`' })
       return 'string'
     }
 
