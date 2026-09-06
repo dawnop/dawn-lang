@@ -196,19 +196,38 @@
 #
 #       They stop there: the dialect says public is "accessible from host
 #       code" and private is "device-only access" (Ops.td's GlobalOp), and
-#       on this machine the driver does not agree. `cuModuleGetGlobal`
-#       answers ALL THREE of `global_syms`'s globals, at the right address
-#       and 1024 bytes each; the host reads back what each declaration gave
-#       them; the host WRITES all three; and the next launch computes with
-#       what the host wrote. Declaring a global `private constant`, the
-#       combination a compiler would have the most licence to fold, changes
-#       none of it (measured, knife TG). So no device answer depends on
-#       which of the two values was written, and the layer-2 bar is not
-#       reachable here for a reason that was measured rather than missed.
-#       scripts/tile-gpu-diff/sym_diff.dawn is that measurement, and it
-#       runs `visibility-private-written-as-public` on the device as well
-#       and holds it GREEN: if a driver ever starts hiding a LOCAL global,
-#       that block goes red and this exemption gets revisited.
+#       on this machine the driver does not agree. Knife TG asked in the
+#       two places the difference could have shown, and got the same answer
+#       twice.
+#
+#       THE SYMBOL LOOKUP. `cuModuleGetGlobal` answers ALL THREE of
+#       `global_syms`'s globals, at the right address and 1024 bytes each;
+#       the host reads back what each declaration gave them; the host
+#       WRITES all three; and the next launch computes with what the host
+#       wrote. Declaring a global `private constant`, the combination a
+#       compiler would have the most licence to fold, changes none of it.
+#       Only a name the module never declared is refused, with the driver's
+#       own `cuda.CUDA_ERROR_NOT_FOUND`.
+#       scripts/tile-gpu-diff/sym_diff.dawn is that measurement and runs on
+#       every pass.
+#
+#       THE LINK. Two cubins each declaring a public `@shared_g` should
+#       collide where two private ones would not, and that would have been
+#       a layer-2 judgement of the form `cuda.<CUresult>@link`. The
+#       question cannot be put on this driver: `cuLinkComplete` answers
+#       `CUDA_ERROR_NO_BINARY_FOR_GPU` with an empty error log for every
+#       cubin-only link, one input or two, from `tileiras` or from `ptxas`,
+#       with `CU_JIT_TARGET` set or not, while the same harness links a PTX
+#       input and loads the result. The classic `ptxas` cubin is the
+#       positive control that makes this a fact about cubins on this driver
+#       rather than about Tile IR or about visibility.
+#
+#       So no device answer depends on which of the two values was written,
+#       and the layer-2 bar is not reachable here for a reason that was
+#       measured rather than missed. There is deliberately NO mutant of the
+#       enum in scripts/tile-gpu-diff: one would be green by construction,
+#       and a green with no information is not evidence. The mutant this
+#       row names lives in scripts/tile-golden, where it has a red set.
 #
 #       This exemption REPLACED `no-module-symbol-ffi`, which said the
 #       judgement was one FFI operation away. Knife TG added the FFI
