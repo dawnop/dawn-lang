@@ -2241,6 +2241,21 @@ test "the integer and conversion opcodes are the frozen table's, and each writes
   assert ROUND_ZERO != ROUND_INT_TO_ZERO
 }
 
+test "pack and unpack are conversions with no attribute, and the sub-byte tags are the frozen ones" {
+  # The two 13.3 operations, and the whole of their shape: an opcode, the
+  # result type, one operand. Nothing between them, which is why they
+  # travel on the same instruction as `bitcast` does.
+  assert (cast_op("pack"), cast_op("unpack")) == (0x6F, 0x70)
+  assert cast_attrs("pack", "i8") == []
+  assert cast_attrs("unpack", "i4") == []
+  # `exti` and `extis` are one opcode under two signedness attributes,
+  # which is what a sub-byte format needs: an i4 nibble reads as [-8, 7]
+  # or as [0, 15] and the device answers differently.
+  assert (cast_op("exti"), cast_op("extis")) == (0x25, 0x25)
+  assert (cast_attrs("exti", "i32"), cast_attrs("extis", "i32")) == ([UNSIGNED], [SIGNED])
+  assert (num_tag("f4E2M1FN"), num_tag("i4")) == (19, 22)
+}
+
 test "ftof and mmai are the frozen table's opcodes, with the attribute lists their Ops.td definitions declare" {
   # Both read off NVIDIA/cuda-tile at be0889cd, in the files named beside
   # them, and not from the coverage memo. `include/cuda_tile/Dialect/

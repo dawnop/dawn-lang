@@ -2549,6 +2549,87 @@ T7 的 `global-record-alignment-dropped` 还在，但它的**报文换了数字*
 操作，本刀也不为它扩 handler 面。`attrs.txt` 上三行的豁免因此从 `13.3-record-field`
 （「没有字节可写」，本刀已解决）换成 `no-module-symbol-ffi`（「没有 FFI 可问」，仍然欠着）。
 
+### 6.12 亚字节：`i4` 与 `f4E2M1FN` 的位布局，`pack` / `unpack` 的字节形状（刀 T9 实测）
+
+刀 T9 加两条操作码（`pack` 0x6F、`unpack` 0x70）与两个类型标签（`f4E2M1FN` 19、`i4` 22），
+四个都是 13.3 才有的。字节码版本刀 T8 已经挪到 13.3，所以这一刀不碰版本。八条结论，
+其中五条只有跑一遍才知道。
+
+**一、`i4` 不是一个数值类型，它是一个 tile 元素格式。** `Types.td` 的 `CudaTile_AnyInt`
+列的是 i1 / i8 / i16 / i32 / i64，**没有 i4**；`CudaTile_NumberType` 是 `AnyFloat` 加
+`AnyInt`，而 `ptr` 的 pointee 参数受 `CudaTile_NumberType` 约束。于是 **`ptr<i4>` 根本不成立**，
+一个 i4 的缓冲区在这个方言里不存在。i4 只出现在四处：`CudaTile_TileElementType`（所以
+`tile<Nxi4>` 成立）、`ExtIOp_IntegerType`、`TruncIOp_IntegerType`，以及 `pack` / `unpack`
+两个操作自己的 `!listconcat(..., [CudaTile_Int4])`。**它没有任何算术**：`addi` 一族要
+`CudaTile_IntTileType`，那张表也把 i4 排除在外。所以一个 i4 kernel 的形状是被方言定死的：
+读字节、`unpack`、`exti` widen、在 32 位上算、`trunci` 回四位、`pack`、写字节。
+`scripts/tile-golden/kernels.dawn` 的 `dtype_i4` 就是这七步。
+
+`f4E2M1FN` 不一样：它在 `CudaTile_AnyFloat` 里，所以 `ptr<f4E2M1FN>` 能解析，`ftof` 也收它
+（`CudaTile_FloatTileType` 列了它）。本仓仍然不给它开缓冲区通道，理由是宿主侧：
+`std/gpu.element_bytes` 说的是「一个缓冲区元素占几个字节」，而半个字节它答不出来。
+两个格式因此都走同一条路，语料把 lane 装在 i32 字里，kernel 自己 `pack` 成字节。
+
+**二、半字节的顺序是方言写死的，而写下它的地方是 tensor view 那一节。** `Types.td` 在
+`TensorViewType` 的注释里把 4 位格式的排布逐位画了出来：元素 `i`（i 为偶）在一个字节的
+bits 3..0，元素 `i + 1` 在 bits 7..4，并且举了 `[0.5, 1.5]` 的例子（0001 与 0011，
+低半字节先）。view 族按裁决 2 挂起，但**这条排布不是 view 的性质**，`unpack` 铺 tile 用的是
+同一条；本刀在 3080 上验过（`dtype_i4` 的段 4 按 lane 奇偶取 a 或 b 的半字节，与宿主
+`std/gpu.nibble_at` 逐位相同）。宿主那一侧只有一个函数说这件事（`nibble_shift`），
+两个方向都读它，变异体 `pack-halves-swapped` 改的就是它。
+
+**三、`pack` / `unpack` 的字节形状与 `bitcast` 一模一样，一个字节都不多。** 两条操作各有
+一个固定操作数、一个固定结果、**零个属性、零个可选字段**，所以 tblgen 的
+`getVersionOrderedBitAssignments` 答空表、`generateFlagsFieldSerialization` 什么都不写，
+`generateSimpleResultSerialization` 也只写结果类型下标而不写结果个数（它不是变长的，
+与刀 T2 记的 `extract` / `join_tokens` 相反）。流里是「opcode、结果类型下标、操作数下标」，
+和一条 `bitcast` 逐字段同形。本包因此**没有为它们新加渲染臂或写入臂**：它们降低成同一条
+`Cast` 指令，唯一的差别是两个 `Ty` 的形状不同，而形状本来就在 `Ty` 里。
+
+**四、结果的 lane 数是操作的一半而不是一个属性。** `verifyPackUnpackTypes`（两条共用一个
+模板）要求：两边都是 rank 1；两边的元素**位宽不同**（同宽用 `bitcast`）；两边都是整数个字节；
+两边的**总位数相等**。它算位宽时 `i1` 按 1 位、`tf32` 按 32 位、其余按
+`getIntOrFloatBitWidth`。于是 lane 数按两个宽度的比例缩放，这是一条算出来的形状而不是一个
+写在流里的数。变异体 `pack-result-shape-unhalved` 把这个比例去掉，`tileiras` 答
+`'cuda_tile.pack' op expects source and result to have the same size in bytes, but got source
+tile size 128 bytes and result tile size 32 bytes`。这也是本目录里**唯一一条文本与字节一起动**
+的变异体，而那是操作的性质不是选择：lane 数就是结果类型，渲染器印的是交给它的类型。
+
+**五、`i4` 在 sm_86 上就能跑，`f4E2M1FN` 不能，而且拒的是类型不是算术。** 实测
+`tileiras` 13.3.36：`dtype_i4` 与 `pack_roundtrip`（含 `pack` / `unpack` / `exti` / `trunci`
+over i4）在 sm_86、sm_89、sm_100 三个目标上全收；`dtype_e2m1` 与任何提到 `f4E2M1FN` 的
+kernel 在 sm_86 与 sm_89 上都答
+`error: Incompatibility with architecture 'sm_86': unsupported type 'f4E2M1FN'`，sm_100 才收。
+**刀单预备的那条退路不成立**：预研设想「把 f4 的位模式当整数搬，让 pack/unpack 至少在位模式上
+到层 2」，实测被拒的是**类型本身**，所以一个只 `unpack` 成 `f4E2M1FN` 再 `pack` 回去、
+一次转换都不做的 kernel 同样进不了 sm_86 的汇编器。于是 `pack_roundtrip` 的第二段改走
+`i16`（另一个方向的比例：字节数减半），fp4 那一段搬进 `dtype_e2m1`，按 `--gpu-name sm_100`
+离线装配到层 1，层 2 的豁免与三个 fp8 格式逐字相同。
+
+**六、i4 的层 2 判词只能是移位，不能是加减乘。** i4 没有自己的算术，所以 kernel 一定先 widen；
+而 `+ - *` 在模 16 意义下与 widen 的符号无关，零扩展和符号扩展给出的低四位一样。能分开两者的
+是**算术移位**：`-1 >> 1` 是 -1、`15 >>> 1` 是 7，落回半字节是 0xF 与 0x7。`dtype_i4` 的段 1
+与段 2 因此是同一条移位在两种 widen 下的两份答案，语料 4096 条 lane 里有 2048 条最高位为 1。
+写入器的 `exti` 一直只写 `UNSIGNED`，本刀按 `shri` / `shru` 的老办法加了第二个名字 `extis`
+（同一条 opcode、另一个 signedness 属性），层 2 变异体 `exti-i4-zero-extends` 改的就是那一个
+字节：文本不动（渲染器有自己的表）、`tileiras` 收下（两个取值都合法）、文件同长，只有设备看得见。
+
+**七、半字节顺序的判词必须依赖 lane 下标，否则一致的换名是看不见的。** 这一条是变异体逼出来的。
+宿主把「lane k 在字里的位置」收成一个函数之后，`pack-halves-swapped` 换的是一次**一致的重命名**：
+读和写都换，于是任何「对每条 lane 做同一件事」的段都仍然与设备相符（一个一元函数与一个置换
+及其逆的复合还是它自己）。`dtype_i4` 的段 4 是为这条变异体存在的：它按 lane 奇偶取 a 或 b 的
+半字节，是全族唯一一处运算依赖下标的地方，实测也正是唯一红的一段
+（`first seg 4 lane 0: device -2.52645136E8 host 2.52645135E8`）。`pack_roundtrip` 则是族内控制，
+它一次往返把 lane 放回原处，对顺序完全失明。
+
+**八、fp4 的两个答案是选择，而这台机器量不了。** `f4E2M1FN` 的 FN 比 `f8E4M3FN` 的强：那个格式
+没有无穷但留了两个 NaN 编码，这个格式**两样都没有**，十六个位模式全是有限数
+（±0、±0.5、±1、±1.5、±2、±3、±4、±6）。于是超出 6.0 与 NaN 进来时没有可答的编码，
+`std/narrow.round_f4e2m1` 的两条选择逐条写在源码里：溢出**饱和**到同号的 6.0（OCP MX 的转换
+是饱和的，而且没有无穷可溢出），NaN 答 +0.0（零是唯一不会被任何有限输入答出来的值，
+所以读回它的语料知道自己撞到了这条臂）。`round_f8e4m3fn` 与 `round_f8e8m0` 各留过一条同样
+性质的选择，三条都要等一台 sm_100 才能兑现。
+
 
 ### 6.12 `alloca` 与 `mmaf_scaled` 的实测（刀 T10）
 

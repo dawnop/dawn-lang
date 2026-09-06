@@ -670,12 +670,11 @@ dtypes=(dtype_i16 dtype_i64 dtype_tf32 dtype_i4 pack_roundtrip)
 dtype_red=(dtype_tf32)
 dtype_green=(dtype_i16 dtype_i64 dtype_i4 pack_roundtrip)
 
-# The two sub-byte mutants and what each is held to. pack-halves-swapped
-# rewrites the HOST's reading of which nibble is lane k, so only the kernel
-# that names a lane can see it: pack_roundtrip lays the lanes back the way
-# it picked them up and is blind to the order, which makes it the control
-# rather than a second witness. exti-i4-zero-extends rewrites the WRITER's
-# signedness for the widening, and only dtype_i4 widens anything.
+# The same two lists for knife T9's writer mutant, which names another
+# format: `exti-i4-zero-extends` rewrites the signedness of the widening,
+# and dtype_i4 is the only kernel here that widens anything. The
+# dtype_writer_mutant function reads dtype_red and dtype_green, so the
+# caller assigns them from these before it runs.
 i4_red=(dtype_i4)
 i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
