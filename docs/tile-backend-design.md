@@ -2995,6 +2995,10 @@ FFI」。本刀把那条 FFI 加了，然后量出这三行**到不了层 2**，
 
 ### 6.14 view 族的字节形状、`padding_value` 的位模式，与 sm_86 收不收（刀 T11 实测）
 
+> **view 族已清零。** 这一节是它的第一刀，§6.15 是第二刀（动态维与两条形状查询），§6.16
+> 是收官刀（步长视图、聚散视图与 `atomic_red_view_tko`）。九条操作码、四个类型标签与五个
+> `PaddingValue` 全部实现且全在层 3，三张台账上再没有一行 `ruling 2`。
+
 刀 T11 落地的是**第二套取址方式**：`make_tensor_view` 0x43 说一个张量在哪、按什么步长排；
 `make_partition_view` 0x42 把它切成一格一格等大的 tile；`load_view_tko` 0x3E 与
 `store_view_tko` 0x66 按**格子的下标**搬一个 tile。此前每个 kernel 都靠 `iota` / `muli` /
@@ -3218,6 +3222,125 @@ lane 数（4），后者是 `view_index_space` 的格子落在张量外的 lane 
 不发，所以变异体连它的 `.tilebc` 都碰不到。
 
 
+### 6.16 步长视图、聚散视图与 `atomic_red_view_tko`（刀 T13 实测，view 族清零）
+
+刀 T11 落的是**网格视图**：一个张量切成一格一格等大的 tile，一个下标一个 tile 维。刀 T12 落的是
+它的动态一半。刀 T13 落的是网格说不出来的那三样，view 族至此清零：九条操作码、四个类型标签、
+五个 `PaddingValue` 全部实现且全在层 3，`features.txt` 与 `types.txt` 上再没有一行
+`deferred` 或 `unimplemented`。
+
+**一、两个类型的记录，与「统一位域」第一次不是版本分支。**
+
+```
+strided_view(13.3) =: tag(21)[varint] optionalFlags[varint]
+                      n[varint] tile_shape[int32 LE]*n
+                      n[varint] traversal_strides[int32 LE]*n
+                      tensorViewTypeIndex[varint]
+                      n[varint] dim_map[int32 LE]*n
+                      [padding_value[varint]]
+
+gather_scatter_view(13.3) =: tag(20)[varint] optionalFlags[varint]
+                             n[varint] tile_shape[int32 LE]*n
+                             tensorViewTypeIndex[varint]
+                             sparse_dim[varint]
+                             [padding_value[varint]]
+```
+
+`traversal_strides` 是第二个 `DenseI32ArrayAttr`，和 `tile_shape` 逐字段同形；`sparse_dim` 是
+一个 `uint32_t`，走 tblgen 的标量模板，**线上就是一个裸 varint**，没有计数也没有标签。
+
+值钱的一句在位域上。刀 T11 记过 `partition_view` 的位域有两条路（13.3 位域、13.2 参数位上一个
+present 字节），而那是因为它**在 13.1 就有了**：`generateOptionalParamFlags` 对一个早于 13.3
+的类型要包一层 `config.bytecodeVersion >= kUnifiedBitfieldVersion`。这两个类型**是 13.3 才有的**，
+`isUnifiedBitfieldVersion(type.sinceVersion)` 为真，于是生成的写入器落到那个**没有任何版本检查**
+的分支：位域 varint 无条件写。所以本仓这两个类型只有一种拼法，而 `partition_view` 有两种，
+这是同一条规则的两面。
+
+**二、`atomic_red_view_tko` 的记录，与「答不出东西的内存操作」。**
+
+```
+atomic_red_view_tko =: 75 numResults(1) tokenType flags
+                       ordering scope mode
+                       view nIndex index* value [token]
+```
+
+结果计数写，是因为 `index` 是 variadic（`Operator::isVariadic()` 任一即真，`make_tensor_view`
+是同一条规矩）。flags 只有一位，而且是 **bit 0**：这条操作的 `memory_scope` 是**必填实参**而不是
+`OptionalAttr`（原子族的规矩，不是 load 的），`optimization_hints` 它根本没有，所以唯一的可选字段
+是那个 token 操作数，位次比 `load_view_tko` 的低两位。三个必填属性按声明顺序内联在操作数之前，
+操作数则按声明顺序去掉属性：view（无计数）、下标（有计数）、value、token。
+
+它是这棵树上第一个**什么都不答的内存操作**：`atomic_rmw_tko` 答旧值和 token，这条只答 token。
+这正是八个 tile block 能往同一格里归约而互相之间没有顺序的原因。
+
+方言把两个枚举域**收窄**了，这是本仓第一次遇到 `OnlyVariants`：内存序只收 `relaxed`（写入器因此
+把它写死），内存范围只收 `tl_blk` 与 `device`，模式收九种、`xchg` 被点名拒绝
+（`AtomicRedViewTkoOp::verify`）。`bytecode.dawn` 的 `red_mode_value` 就是最后那一条：一个不答
+旧值的归约没有东西可以拿去交换。
+
+**三、聚散视图是这棵树上第一个「下标不同型」的操作。**
+
+`GatherScatterViewType::verifyIndices` 要求 `sparse_dim` 那一位的下标是**一维 tile**，长度等于
+tile 在那一维的宽度，其余各位仍是 rank-0 的标量。于是 `printIndexTypes` 的 splat 分支第一次
+不成立，`load_view_tko` 的那一行印出**两个**下标类型而不是一个：
+
+```
+%22, %23 = load_view_tko weak %18[%14, %1] token=%15
+  : gather_scatter_view<tile=(4x8), padding_value = pos_inf,
+      tensor_view<16x6xf32, strides=[6, 1]>, sparse_dim=0>,
+    tile<4xi32>, tile<i32> -> tile<4x8xf32>, token
+```
+
+`lower.dawn` 的 `view_index_tys` 是这条规则唯一的落点，`Instr` 的 `idx_ty: Ty` 因此改成
+`idx_tys: List[Ty]`（一个视图的下标不再共用一个类型）。**方言的语义要靠设备来问**：一维那位是
+张量的**行号**而不是 tile 下标，其余各位仍是 tile 下标。`cuda-tile` 树里
+`gather_scatter_view` 只有两个用例（都在 `invalid.mlir` 里，都是拒绝用例），一个正例都没有，
+所以这条读法是 `view_token_embed` 在本机 3080 上**量出来**的：它按这条读法与
+`token_embed_ref`（指针梯子版 `token_embed` 在 gath_diff 里用的同一份参考）逐位一致。
+
+**四、`sm_86` 收这三样，没有架构豁免，但 bf16 的 ADDF 是另一回事。**
+
+五个新 kernel 在 `--gpu-name sm_86` 上**一次通过**，cubin 8448 到 12960 字节，`FUNC GLOBAL`
+齐全。唯一一处有架构门的是 `atomic_red_view_tko` 的 `addf` 配 **bf16**：`Ops.td` 的散文写着
+「bf16 is supported from Hopper (sm90) onward. On earlier architectures (e.g. Ampere/sm80),
+atomicRMW ADDF with bf16 is not supported.」。这是 view 族里唯一一句提到架构的话，而且它在
+**散文里**而不在校验器里。本机是 Ampere（RTX 3080，sm_86），所以 `view_atomic` 的 `addf`
+用的是 f64；bf16 那一格是**具名豁免**，理由与三个 fp8 格式那条同类，写在 `attrs.txt` 的头注里。
+
+**五、五个 kernel、六个用例，全部 `identical:exact`，三份参考是别处的。**
+
+2026-09-07 在本机 RTX 3080 上：
+
+| 用例 | 参考 | 它证明什么 |
+|------|------|-----------|
+| `view_conv1d` | `conv1d_ref`（stride_diff 的指针梯子版同一份） | 一个下标是一个**窗口**：traversal 1、tile 4，窗口三重叠 |
+| `view_token_embed` | `token_embed_ref`（gath_diff 同一份） | 一次 load 收集运行期决定的八行 |
+| `view_atomic` | `view_atomic_ref`，其中 `add` 那一格与 `histogram_ref` 对账 | 九种模式一次跑完，八个 block 往一格里归约 |
+| `view_stride_pad` | `strided_pad_ref` | traversal 8、tile 4：网格**跳着走**，最后一格出界读 padding |
+| `view_gather_pad` | `gather_pad_ref` | 聚散视图的 padding 在**列**那一侧：tile 八列宽、张量六列 |
+| `conv1d` | `conv1d_ref` | 本族的 kernel 级控制：同一个卷积走指针梯子，三条新操作码一条也没有 |
+
+语料的六个计数（`run.sh` 逐项钉在零以上）：`overlap=258`（`view_conv1d` 里被不止一个窗口读到的
+元素）、`skipped=44`（`view_stride_pad` 的网格永远走不到的元素）、`padded=2` 与 `gpadded=32`
+（两个 padded kernel 各自出界的 lane）、`repeats=43` 与 `grepeats=5`（被点名不止一次的行号）、
+`cross=16`（被不止一个 block 命中的 bin）、`negative=2`（减掉 bias 之后为负的贡献）。
+最后一个是 `umax` / `umin` 与 `max` / `min` 分家的全部理由：没有负数它们是同一个答案的两种拼法。
+
+**`view_conv1d` 的语料是八分之一而不是十分之一，这一条是设计出来的。** 指针梯子版按参考实现
+自己的顺序折四个 tap，这一版发的是一条 `reduce`，方言不规定它的折叠树。八分之一让每一个部分和
+都精确，于是两种顺序答同一批位；十分之一不会。
+
+**六、变异体的红集也是量出来的。**
+
+<<MUTANTS>>
+
+**七、一件顺手清掉的账：九种原子模式。**
+
+`attrs.txt` 的 `rmw.*` 十行里，此前只有 `add` 与 `addf` 有客户，另外八行挂着 `no-client-kernel`。
+`view_atomic` 一口气跑九种，于是七行从 `deferred` 到 `implemented` 且到层 3（`atomic-red-mode-rotated`
+是它们共同的变异体）。剩下的一行是 `rmw.xchg`，而它留在那儿的理由变了：不是没有客户，是
+**这条操作码不收它**。它是三张台账里最后一行 `deferred`。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -3271,6 +3394,7 @@ lane 数（4），后者是 `view_index_space` 的格子落在张量外的 lane 
 
 | **T11 view 族的静态一半**（已落地，裁决 2 撤销后的第一刀） | 「一个 kernel 不搭指针梯子也取得到全局内存：张量在哪、按什么步长排、切成多大的 tile 全写在**类型**里，而它算出来的答案与指针梯子版**共用同一份宿主参考**、在本机 3080 上逐位相同；越界的 lane 读什么是类型上的一个枚举，它在设备上留下的五种位模式是量出来的而不是查表抄的」（今天写不出：这棵树上每一个地址都是 `iota` / `muli` / `addi` / `offset` 现搭的一条梯子，view 族按裁决 2 一个字节也发不出去，`PaddingValue` 五行在台账上全是 `deferred`） | `bytecode.dawn`：`OP_MAKE_TENSOR_VIEW`(0x43) / `OP_MAKE_PARTITION_VIEW`(0x42) / `OP_LOAD_VIEW_TKO`(0x3E) / `OP_STORE_VIEW_TKO`(0x66) 四个操作码常量，`TAG_TENSOR_VIEW`(14) / `TAG_PARTITION_VIEW`(15) 两个类型标签，`PAD_ZERO` 到 `PAD_NEG_INF` 五个枚举值，`VIEW_FLAG_SCOPE / HINTS / TOKEN` 三个位，`partition_view_has_bitfield()` 与 `padding_code()`，`ty` 两条新臂（含 13.3 位域与 13.2 内联标志两条路）与 `encode_instr` 四条新臂。`lower.dawn`：`Ty` 长出 `TensorView` 与 `PartitionView` 两个构造子（后者是**扁的**，把 tensor view 的三个字段抄进来而不是嵌一个 `Ty`），`Instr` 四条，`view_operands` 把两条内存操作共用的两个检查（句柄真是 partition view、下标个数等于 tile 维数）放在一处。`prog.dawn`：`TileOp` 四条与记录 handler 四臂（形状与步长严格为正、tile 维是 2 的幂、`dim_map` 是排列、特殊 padding 只配浮点）。`dev.dawn`：`Padding` 六值 ADT（数值留在 `bytecode.dawn`，与本包其余枚举同规矩）、`TensorView[D]` / `PartitionView[D]` 两个 opaque、四个效果操作、五个公开函数与 `view_grid`。`render.dawn`：两个类型的文本形状与四条指令行。`std/gpu.dawn`：`view_padding_ref`。kernel 五个：`view_transpose` / `view_max_pool` / `view_conv2d`（刀 9 的 strided kernel 改用 view 写，与指针梯子版共用 `transpose_ref` / `max_pool_ref` / `conv2d_ref`）、`view_padding`（五个 padding 值一个 kernel，f32 元素跑在 i32 缓冲区上）、`view_pad_i32`。新族 `scripts/tile-gpu-diff/view_diff.dawn`（六个 case，最后一个是指针梯子的 `transpose_tail`，本族的 kernel 级控制）。台账三张全动：`features.txt` 四行、`types.txt` 两行、`attrs.txt` 五行从 `deferred` 改成 `implemented` 且全到层 3（操作码实现 88 → **92**、类型 19 → **21**、属性 37 → **42**），`check.py` 的 `LANDED_KNIVES` 加 `T11` 并把落在这些行上的九处自测锚点搬到 T12 / T13 的行上，`types.txt` 把 `GatherScatterView` 改成权威的 `GatherScatterViewType` | 层 1：五个新 golden 在 `--gpu-name sm_86` 上**一次通过**（cubin 8448 到 13312 字节，`FUNC GLOBAL` 齐全），**没有架构豁免**。层 2：`view_diff` 六个 case 在本机 3080 上全部 `identical:exact`，其中三个与指针梯子版共用同一份宿主参考。三张台账 `check.py` 与 `--self-test` 全绿 | 层 1 三条、层 2 四条，每条都有具名红集（表在 §6.14 七）：`tensor-view-tag-as-ptr`（tensor view 写成 ptr 标签 → `expected ::mlir::cuda_tile::TensorViewType but got '!cuda_tile.ptr<f64>'`）、`partition-view-padding-inline-flag-at-13-3`（13.3 的文件里写 13.2 的可选参数形状，**同长** → `failed to read tile_shape data`）、`padding-nan-on-integer-elements`（`zero` 变 `nan` 落在 i32 元素上 → `padding_value nan can only be used with floating point element types, got 'i32'`；**这条校验在方言自己的测试树里一个用例都没有**）；`view-strides-swapped`（tensor view 的步长反写 → 三个几何 kernel 红，两个一维的与 `transpose_tail` 绿）、`partition-dim-map-reversed`（`dim_map` 反写 → `view_transpose` 与 `view_max_pool` 红，**`view_conv2d` 绿**，因为它的下标空间是 3 乘 3、换名两头抵消，这是量出来的读数）、`padding-value-bit-cleared`（位域 bit 0 清零、payload 仍写在后面，类型表按自己的偏移寻址所以那个字节没人看 → partition view 没有 padding，`view_padding` 与 `view_pad_i32` 红）、`padding-enum-off-by-one`（四个特殊值转一格、`zero` 留在原地 → `view_padding` 红，`view_pad_i32` 是它的控制；为什么绕开 `zero` 见 §6.14 八）。另有一条给验收者的自轴负控：把 `std/gpu.dawn` 的 `pad_bits` 里 `0x7FC00000` 改成 `0x7F800000`，**别重录 golden**，`tile-gpu-diff` 上只有 `view_padding` 红（第三个输出缓冲区的第 100 到 127 lane），其余五个 case 全绿 | 1（实报 1；`dawn test packages/tileir` **122** 全绿（本刀加四个测试，全是手算出来的字节串）；rebase 到刀 TG 之后矩阵 227 项长到 **235 项**（176 kernel、59 变异体），`tile-golden` 在最终树上不分片 **3246 s**（54:06，235 项全跑退出 0），**十片仍装得下、十条预算行一条也没动**（理由与本机那一轮为什么不能用见 §6.5）；`tile-gpu-diff/run.sh` 见 §6.4 的台账行。**本刀碰了 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录） |
 | **T12 view 族的动态一半，加两条形状查询**（已落地，view 族第二刀） | 「一个 kernel 处理的张量**多大**不写在程序里：extent 与 stride 是 `make_tensor_view` 的操作数，kernel 从缓冲区里读它们，两条形状查询再把设备算出的数答回来当掩码边界和循环边界用；判词是**同一个 cubin 在两个不同形状的张量上都对**，而它与静态拼法在同一份语料上逐位相同」（今天写不出：T11 的每一个 extent 都烘在类型里，一个 cubin 对应一个张量；`get_tensor_shape` 与 `get_index_space_shape` 两行台账是 `deferred / ruling 2`，一个字节也发不出去） | `bytecode.dawn`：`OP_GET_TENSOR_SHAPE`(0x2F) / `OP_GET_INDEX_SPACE_SHAPE`(0x2D) 两个操作码，`put_dim`（`ShapedType::kDynamic` 的八个字节，位模式直接拼而不是移位得来）、`emit_group`（一个变长操作数组的计数加操作数）与 `emit_shape_query`，`ty` 的 tensor view 臂改走 `put_dim`，`encode_instr` 两条新臂加 `MakeTensorView` 那条填上两个组。`lower.dawn`：`Instr` 两条新构造子、`MakeTensorView` 多三个字段，`is_idx_ty` 与 `shape_query`（发整条指令、绑第 `dim` 个结果，与 `BlockId` 同形），`TensorViewOf` 加「每个动态操作数都是 rank-0 i32 tile」的检查。`prog.dawn`：`TileOp` 两条、handler 两臂，`TensorViewOf` 多两个字段，动态维放行非正 extent 但把「操作数个数等于问号个数」钉死。`dev.dawn`：`DYN_DIM` 标记与 `Dim` 三件套、`t_tensor_view` 多两个形参、`t_tensor_shape` / `t_index_space_shape` 两个效果操作，公开面 `tensor_view_dyn` / `tensor_dim` / `index_space_dim` / `idx_of` / `idx_as_scalar`。`render.dawn`：`extent` 印 `?`、`mixed` 把操作数名字填回 shape 与 strides、两条查询的指令行。`std/gpu.dawn`：`masked_double_ref` 与 `view_grid_sum_ref`。kernel 三个：`view_dyn_transpose`（`view_transpose` 的动态拼法，共用 `transpose_ref` 与同一份语料）、`view_tensor_shape`（查询答的数当掩码边界，并把答案写进 i32 缓冲区）、`view_index_space`（查询答的数当两重循环边界，一个 block 走完整张网格）。新族 `scripts/tile-gpu-diff/dyn_diff.dawn`，它的用例单位是 **(kernel, 张量形状)**：七个用例、五种形状，最后一个是静态的 `view_transpose`。台账两张动：`features.txt` 两行从 `deferred` 改成 `implemented` 且到层 3（操作码实现 92 → **94**、层 3 从 40 到 **42**），`make_tensor_view` 与 `types.txt` 的 `TensorViewType` 各补一条证据，`check.py` 的 `LANDED_KNIVES` 加 `T12`，头注多写下第三处判断（三处自测锚点落在 `make_strided_view` / `StridedViewType` / `rmw.xchg` 上，本刀一处也没碰） | 层 1：三个新 golden 在 `--gpu-name sm_86` 上**一次通过**（cubin 8736 / 11536 / 15776 字节），没有架构豁免。层 2：`dyn_diff` 七个用例在本机 3080 上全部 `identical:exact`，`twin=same`（动态与静态两个 cubin 在同一进程里逐 lane 相同）。四张台账 `check.py` 与 `--self-test` 全绿 | 层 1 三条、层 2 两条，红集在 §6.15 七：`dynamic-dim-written-static`（`?` 写成静态常量，**同长** → `'cuda_tile.make_tensor_view' op expected 0 dynamic shape operands, got 2`）、`tensor-shape-as-index-space-shape`（0x2F 写成 0x2D，两条记录同形所以读者读得完，**同长** → `'cuda_tile.get_index_space_shape' op operand #0 must be TileView instance, but got '!cuda_tile.tensor_view<?x?xf64, strides=[?,?]>'`）、`index-space-shape-as-tensor-shape`（反过来，**不是**同一条报文倒过来读 → `'cuda_tile.get_tensor_shape' op operand #0 must be tensor view type, but got '!cuda_tile.partition_view<...>'`）；`dynamic-shape-and-stride-operands-swapped`（两个变长组对调，两组都是二长所以计数仍对得上 → 三个动态 kernel 的六个用例全红，静态 `view_transpose` 绿）、`shape-query-dim-reversed`（锚点在 `lower.dawn`：绑第 `rank-1-dim` 个结果而不是第 `dim` 个 → `view_tensor_shape` 与 `view_index_space` 的四个用例红，**`view_dyn_transpose` 连 `.tilebc` 都不动**，它一条查询也不发）。另有两条给验收者的自轴负控。设备那一侧：把 `scripts/tile-gpu-diff/dyn_diff.dawn:370` 的 `[to_float(blocks(rows, VD_SUM_TILE)), to_float(blocks(cols, VD_SUM_TILE))]` 改成 `[to_float(rows), to_float(cols)]`（宿主改成期待张量的 extent 而不是网格的），**什么都不用重录**，`tile-gpu-diff` 上只有 `view_index_space` 的两个用例红（第四个缓冲区的前两个 lane），其余五个绿。golden 那一侧：把 `scripts/tile-golden/kernels.dawn:4720` 的 `idx_const(2)` 改成 `idx_const(1)`，**别重录 golden**，三个动态 kernel 的文本与字节 golden 全红（`unit` 读到 `cols` 那一格），而 `view_transpose` 等静态 kernel 一个字节不动 | 1（实报 1；`dawn test packages/tileir` **126** 全绿、`dawn test --stdlib` **175** 全绿（本刀加四个包测试与一个 std 测试）；矩阵 235 项长到 **241 项**（179 kernel、62 变异体），`tile-golden` 在最终树上不分片 **2183 s**（36:23，241 项全跑退出 0；rebase 之前那一轮是 2285 s）；**十片装不下了，分第十一片**：最终树那一轮十片的 planning value 是 666 / 627 / 635 / 634 / 628 / 628 / 628 / 625 / 628 / 651s，第一片越过 660s 的 pole 而 `check-gate-budgets.py` 当场拒绝，十一片是 575 到 608s；十条旧行按这一轮重述、第十一条新写，`action.yml` 的两个计数同批改，见 §6.5 与 gates.yml 的 `tile-golden-11` 注；`tile-gpu-diff/run.sh` 见 §6.4 的台账行。**本刀碰了 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录） |
+| **T13 view 族的收官刀**（已落地，view 族第三刀，本族清零） | 「一个 kernel 取址的方式不再只有『等大的格子』：**步长视图**的遍历步长与 tile 宽度是两个数，所以一个下标可以是一个**重叠的窗口**（卷积）或者一个**跳着走的格子**（下采样）；**聚散视图**在一个维度上收的是**运行期读出来的行号**而不是格子下标，所以一次 load 收集哪几行由数据决定；而 `atomic_red_view_tko` 把**一整块 tile** 原子地归约进视图的一格并且**什么都不答**，于是八个 tile block 往同一格里写而彼此之间没有顺序。三者的答案分别与指针梯子版的 `conv1d`、`token_embed` 与 `histogram` **共用同一份宿主参考**」（今天写不出：`make_strided_view` / `make_gather_scatter_view` / `atomic_red_view_tko` 三行台账是 `deferred / ruling 2`，`StridedViewType` / `GatherScatterViewType` 两行同样，一个字节也发不出去；八个原子模式在 `attrs.txt` 上挂着 `no-client-kernel`） | `bytecode.dawn`：`OP_MAKE_GATHER_SCATTER_VIEW`(0x73) / `OP_MAKE_STRIDED_VIEW`(0x74) / `OP_ATOMIC_RED_VIEW_TKO`(0x75) 三个操作码，`TAG_GATHER_SCATTER_VIEW`(20) / `TAG_STRIDED_VIEW`(21) 两个标签，`ATOMIC_RED_FLAG_TOKEN`、`view_bitfield`（13.3 原生类型的**无条件**位域）/ `put_padding` / `put_i32_array` 三个共用写法、`scope_value` 与 `red_mode_value`（`xchg` 点名拒绝），`ty` 两条新臂与 `encode_instr` 三条新臂。`lower.dawn`：`Ty` 长出 `StridedView` 与 `GatherScatterView`（同样是**扁的**），`view_tile_shape` / `view_index_tys` / `view_padding_of` / `view_source_checks` 四个共用函数，`Instr` 三条新构造子且 `LoadViewTile` / `StoreViewTile` 的 `idx_ty: Ty` 改成 `idx_tys: List[Ty]`（聚散视图的下标不同型），`view_operands` 多一条「每个下标是这个视图在那一位要的类型」。`prog.dawn`：`TileOp` 三条与记录 handler 三臂，`check_view_record` 把三个视图共有的记录级规则收成一处。`dev.dawn`：`PartitionView[D]` 更名 `GridView[D]`（`partition_view` 与 `strided_view` 两个构造子答同一个句柄，它们在 kernel 里做的事一模一样）、新 opaque `GatherScatterView[D]`、`GatherIdx` 两值 ADT、`padding_present`、三个新效果操作与 `strided_view` / `gather_scatter_view` / `load_gather` / `store_gather` / `atomic_red_view` / `strided_grid` 六个公开函数，外加 `d_reduce_dim_i`。`render.dawn`：两个类型的文本形状、三条指令行、`pad_clause` 与 `index_types`（`printIndexTypes` 的 splat 规则，聚散视图是树上第一个不走 splat 的）。`std/gpu.dawn`：`strided_pad_ref` / `gather_pad_ref` / `view_atomic_ref`。kernel 五个：`view_conv1d`（重叠窗口，共用 `conv1d_ref`）、`view_token_embed`（共用 `token_embed_ref`）、`view_atomic`（九种模式一个 kernel，`add` 那一格与 `histogram_ref` 对账）、`view_stride_pad` 与 `view_gather_pad`（f32 元素跑在 i32 缓冲区上，宿主比位模式）。新族 `scripts/tile-gpu-diff/gsview_diff.dawn`（六个 case，最后一个是指针梯子的 `conv1d`）。台账三张全动：`features.txt` 三行、`types.txt` 两行、`attrs.txt` 七行从 `deferred` 改成 `implemented` 且全到层 3（操作码实现 94 → **97**，`deferred` 与 `unimplemented` 双双归零；类型 21 → **23** 全实现；属性 42 → **49**，只剩 `rmw.xchg` 一行 `deferred`），`check.py` 的 `LANDED_KNIVES` 加 `T13`、`CONSTRUCTOR_SPELLING` 加两个标签，并把落在这些行上的**九处**自测锚点搬到已实现行或 T14 上（逐处列在报告与代码注释里） | 层 1：五个新 golden 在 `--gpu-name sm_86` 上**一次通过**（cubin 8448 到 12960 字节，`FUNC GLOBAL` 齐全），**没有架构豁免**；唯一有架构门的是 `addf` 配 bf16，逐档量出 sm_80/86/87 拒、sm_89/90/100 收（方言散文说「Hopper 起」，实测早一代，见 §6.16 四）。层 2：`gsview_diff` 六个 case 在本机 3080 上全部 `identical:exact`，其中三份宿主参考是别处那三个指针梯子 kernel 用的同一份，`histogram=same` 是第四份对账。三张台账 `check.py` 与 `--self-test` 全绿 | 层 1 五条、层 2 三条，每条都有具名红集（表在 §6.16 六）：`make-strided-view-as-partition-view` / `make-gather-view-as-strided-view`（操作码互换，**同长** → 结果类型不对）、`gather-sparse-dim-and-tensor-view-swapped`（`sparse_dim` 与张量视图下标对调，**同长** → `expected 'tensor_view' type`）、`atomic-red-scope-and-mode-swapped`（范围与模式对调 → 模式值 3 以上落在只有三个取值的范围域上）、`atomic-red-value-and-token-swapped`（值与 token 对调 → token 不是 tile）；`strided-traversal-as-one`（所有遍历步长写成 1，下标空间只会变大所以没有未定义行为 → **只有 `view_stride_pad` 红**，`view_conv1d` 与 `view_atomic` 字节动而答案不动，因为它们那两个视图只在下标 0 上读）、`view-padding-bitfield-cleared`（13.3 位域 bit 0 清零 → 两个 padded kernel 红）、`atomic-red-mode-rotated`（七种模式各转一格、`add` 与 `addf` 留在原地 → `view_atomic` 红）。另有一条给验收者的自轴负控 | 1（实报 1；`dawn test packages/tileir` **132** 全绿、`dawn test --stdlib` **176** 全绿（本刀加六个包测试与一个 std 测试）；矩阵 241 项长到 **251 项**（184 kernel、67 变异体），`tile-golden` 在最终树上不分片见 §6.5；**十一片仍装得下**；`tile-gpu-diff/run.sh` 见 §6.4 的台账行。**本刀碰了 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录） |
 
 ## 8. 风险
 
