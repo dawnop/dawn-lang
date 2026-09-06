@@ -1781,10 +1781,10 @@ CI 上仍只有亚秒的 `--check`。`dawn test packages/tileir` 多两个测试
 440 / 458 / 498 / 445 / 445 / 427 / 416 / 429 / 391 / 371 s。分第十一片的触发条件是
 **某一片在 CI 上被观测到超过 550 s**，最差的一片是 498 s，而八个新项摊到十片上约 +15 s。
 
-`tile-gpu-diff/run.sh` 在最终树上 **1008.2 s**（16:48，load 2.1 到 8.0；rebase 之前这一刀
-自己那一轮是 776.4 s，刀 T9 记的是 667.2 s，中间隔着刀 TG 的 `sym_diff` 一族）。多出来的
-那一段是本刀往这份语料里加的一个 native 构建（`view_diff.dawn`）、六个 case 的真机对拍与
-四条变异体各自的一次重编包加五次汇编加一次对拍。
+`tile-gpu-diff/run.sh` 在最终树上 **935.3 s**（15:35，load 6.9 到 7.8；同一棵语料上一轮读到
+1008.2 s，刀 T9 那一代记的是 667.2 s，中间隔着刀 TG 的 `sym_diff` 一族）。多出来的那一段是
+本刀往这份语料里加的一个 native 构建（`view_diff.dawn`）、六个 case 的真机对拍与四条变异体
+各自的一次重编包加五次汇编加一次对拍。
 
 `dawn test packages/tileir` 从 118 涨到 **122**（本刀加四个测试，断言的字节串全是手算的）。
 **本刀碰了 `std/gpu.dawn`**（多一个参考实现 `view_padding_ref`），`scripts/gen-stdsrc.py`
