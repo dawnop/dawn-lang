@@ -409,7 +409,8 @@ kernels=(
   global_table global_ctl global_scratch global_flags global_syms
   hint_entry hint_memory
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
-  view_transpose view_max_pool view_conv2d view_padding view_pad_i32)
+  view_transpose view_max_pool view_conv2d view_padding view_pad_i32
+  view_dyn_transpose view_tensor_shape view_index_space)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

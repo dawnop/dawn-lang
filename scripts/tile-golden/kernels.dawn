@@ -38,6 +38,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy, hint_latency,
   load_hinted, store_hinted,
   tensor_view, partition_view, load_view, store_view, view_grid,
+  tensor_view_dyn, tensor_dim, index_space_dim, idx_of, idx_as_scalar, Dim, Fixed, Dyn,
   NoPadding, PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
 use tileir/prog.{TileProg, trace_kernel, trace_kernel_hinted}
 use tileir/render.{render}
@@ -4665,6 +4666,125 @@ fn view_pad_i32(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   store_view(I32, dst, at, load_view(I32, src, at))
 }
 
+# ---- knife T12: dynamic dimensions and the two shape queries ----
+#
+# The view family's other half. A `tensor_view`'s extent along a dimension
+# need not be in the type: the dialect prints `?` there and
+# `make_tensor_view` carries the value in an OPERAND, so one cubin serves
+# every tensor of that rank rather than one shape. The two shape queries
+# are the kernel's way of reading those numbers back:
+# `get_tensor_shape` answers the tensor's own extents, and
+# `get_index_space_shape` answers the extents of the GRID of tiles a
+# partition view cuts it into, which for a dynamic tensor is a number no
+# host can compute from the type.
+#
+# All three read their dimensions out of an i32 parameter buffer rather
+# than from a constant, which is the whole point: a constant would be a
+# static extent spelled the long way, and the host would not be able to
+# launch the SAME cubin over two different tensors.
+#
+#   view_dyn_transpose  view_transpose written with every extent and every
+#                       stride dynamic. Same shapes, same corpus, same host
+#                       reference (`transpose_ref`), so the judgement is
+#                       that the static and the dynamic spelling of one
+#                       operator answer the same bits
+#   view_tensor_shape   `get_tensor_shape` decides a MASK bound: the tile
+#                       is read and written masked by `lane < n`, where `n`
+#                       is what the device answered, and `n` is also
+#                       written out so the host reads the operation's
+#                       answer directly
+#   view_index_space    `get_index_space_shape` decides two LOOP bounds:
+#                       ONE block walks the whole grid of tiles, whatever
+#                       the runtime shape is, and sums them. Its two
+#                       extents are written out too
+#
+# The dimension buffer is [rows, cols, 1] in every one of them. The third
+# entry is a one that the kernel does not spell as a constant, so the
+# INNERMOST stride is dynamic as well; without it a kernel would have one
+# dynamic stride and one static, the two operand groups would be different
+# lengths, and the mutant that reverses a group could not be told from the
+# mutant that miscounts one.
+
+const VD_ROWS: Int = 100
+const VD_COLS: Int = 60
+const VD_TILE: Int = 32
+const VD_N: Int = 100
+const VD_LANES: Int = 32
+const VD_SUM_TILE: Int = 16
+const VD_SUM_H: Int = 36
+const VD_SUM_W: Int = 20
+
+fn dyn_dims(dims: Param[I32]) -> (Idx, Idx, Idx) !Dev = {
+  let rows = idx_of(load(dims, idx_const(0), []))
+  let cols = idx_of(load(dims, idx_const(1), []))
+  let unit = idx_of(load(dims, idx_const(2), []))
+  (rows, cols, unit)
+}
+
+fn view_dyn_transpose(dims: Param[I32], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let tile = [VD_TILE, VD_TILE]
+  let dm = [0, 1]
+  let zero = idx_const(0)
+  let (rows, cols, unit) = dyn_dims(dims)
+  let src = partition_view(F64,
+    tensor_view_dyn(F64, x, zero, [Dyn(rows), Dyn(cols)], [Dyn(cols), Dyn(unit)]), tile, dm, PadZero)
+  # the out view is the same tensor with its two strides exchanged, which
+  # is the whole of the transpose, exactly as in view_transpose. Here both
+  # of them are operands.
+  let dst = partition_view(F64,
+    tensor_view_dyn(F64, out, zero, [Dyn(rows), Dyn(cols)], [Dyn(unit), Dyn(rows)]), tile, dm, NoPadding)
+  let at = [block_id(0), block_id(1)]
+  store_view(F64, dst, at, load_view(F64, src, at))
+}
+
+fn view_tensor_shape(dims: Param[I32], x: Param[F64], out: Param[F64],
+  shape_out: Param[I32]) -> Unit !Dev = {
+  let lane = [VD_LANES]
+  let zero = idx_const(0)
+  let one = idx_const(1)
+  let (rows, cols, unit) = dyn_dims(dims)
+  let tv = tensor_view_dyn(F64, x, zero, [Dyn(rows), Dyn(cols)], [Dyn(cols), Dyn(unit)])
+  # the queries, and the only place this kernel learns how far the tensor
+  # goes. It is asked for BOTH extents so that a query answering the wrong
+  # dimension is a different program and not the same one.
+  let r = tensor_dim(tv, 0)
+  let c = tensor_dim(tv, 1)
+  # the bytes move through the pointer ladder, not through the view: what
+  # the view is here for is to be asked. The mask bound is the SECOND
+  # extent, so one row of the tensor is doubled and everything past it
+  # keeps whatever the host put there.
+  let base = tile_at(block_id(0), VD_LANES)
+  let live = lt_i(lane, lanes(base, lane), spread(I32, lane, idx_as_scalar(c)))
+  let v = load_masked(x, base, lane, live, f_const(F64, lane, 0.0))
+  store_masked(out, base, lane, live, addf(F64, lane, v, v))
+  # and the answers themselves, so the host reads what the device said
+  # rather than only what the mask did with it
+  store(shape_out, zero, [1], spread(I32, [1], idx_as_scalar(r)))
+  store(shape_out, one, [1], spread(I32, [1], idx_as_scalar(c)))
+}
+
+fn view_index_space(dims: Param[I32], x: Param[F64], out: Param[F64],
+  shape_out: Param[I32]) -> Unit !Dev = {
+  let tile = [VD_SUM_TILE, VD_SUM_TILE]
+  let dm = [0, 1]
+  let zero = idx_const(0)
+  let one = idx_const(1)
+  let (rows, cols, unit) = dyn_dims(dims)
+  let pv = partition_view(F64,
+    tensor_view_dyn(F64, x, zero, [Dyn(rows), Dyn(cols)], [Dyn(cols), Dyn(unit)]), tile, dm, PadZero)
+  # the grid of tiles, as the device counts it. This launch is ONE block:
+  # the loop bounds are the query's answers, so the same cubin walks a
+  # tensor of any shape without the host telling it how many tiles there
+  # are.
+  let gi = index_space_dim(pv, 0)
+  let gj = index_space_dim(pv, 1)
+  let acc = d_for(zero, gi, one, f_const(F64, tile, 0.0), (i, outer) =>
+      d_for(zero, gj, one, outer, (j, inner) => addf(F64, tile, inner, load_view(F64, pv, [i, j]))))
+  store(out, zero, tile, acc)
+  store(shape_out, zero, [1], spread(I32, [1], idx_as_scalar(gi)))
+  store(shape_out, one, [1], spread(I32, [1], idx_as_scalar(gj)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -5112,6 +5232,15 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("view_padding", ["f32", "f32", "f32", "f32", "f32", "f32"],
       () => view_padding(param(F32, 0), param(F32, 1), param(F32, 2), param(F32, 3),
         param(F32, 4), param(F32, 5)))
+  "view_dyn_transpose" ->
+    trace_kernel("view_dyn_transpose", ["i32", "f64", "f64"],
+      () => view_dyn_transpose(param(I32, 0), param(F64, 1), param(F64, 2)))
+  "view_tensor_shape" ->
+    trace_kernel("view_tensor_shape", ["i32", "f64", "f64", "i32"],
+      () => view_tensor_shape(param(I32, 0), param(F64, 1), param(F64, 2), param(I32, 3)))
+  "view_index_space" ->
+    trace_kernel("view_index_space", ["i32", "f64", "f64", "i32"],
+      () => view_index_space(param(I32, 0), param(F64, 1), param(F64, 2), param(I32, 3)))
   "view_pad_i32" ->
     trace_kernel("view_pad_i32", ["i32", "i32"], () => view_pad_i32(param(I32, 0), param(I32, 1)))
   "hint_memory" ->

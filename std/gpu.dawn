@@ -1603,6 +1603,48 @@ pub fn view_padding_ref(n: Int, out_n: Int, pad: Float, x: List[Float],
         kept(old, idx)
       })
 
+## The first `limit` lanes of `x` doubled, with every lane from `limit` on
+## kept from `old`: scripts/tile-gpu-diff's view_tensor_shape (knife T12).
+##
+## `limit` is not a number the kernel was recorded with. It is what
+## `get_tensor_shape` answered on the device for a tensor whose extents are
+## `?`, and the kernel uses it as the bound of the mask on both its load and
+## its store, so a wrong answer shows up as lanes that were doubled and
+## should not have been, or the other way about.
+pub fn masked_double_ref(limit: Int, x: List[Float], old: List[Float]) -> List[Float] =
+  list.map(range(0, len(old)), idx =>
+      if idx < limit { x[idx] + x[idx] } else { kept(old, idx) })
+
+## One `tile` by `tile` tile holding the sum of EVERY tile of a `rows` by
+## `cols` row-major tensor: lane (p, q) is the sum over the grid of the
+## element at row `i * tile + p` and column `j * tile + q`, counting zero
+## where that falls outside the tensor. scripts/tile-gpu-diff's
+## view_index_space (knife T12).
+##
+## The grid is `ceil(rows / tile)` by `ceil(cols / tile)`, which is exactly
+## what `get_index_space_shape` answers on the device and what the kernel
+## uses as its two loop bounds. The zero outside the tensor is the partition
+## view's `padding_value`, so this reference is the padding rule and the
+## index space rule at once.
+pub fn view_grid_sum_ref(rows: Int, cols: Int, tile: Int, x: List[Float],
+  old: List[Float]) -> List[Float] = {
+  let gi = (rows + tile - 1) / tile
+  let gj = (cols + tile - 1) / tile
+  list.map(range(0, len(old)), k =>
+      if k >= tile * tile {
+        kept(old, k)
+      } else {
+        let p = k / tile
+        let q = k % tile
+        list.fold(range(0, gi), 0.0, (acc, i) =>
+            list.fold(range(0, gj), acc, (inner, j) => {
+              let r = i * tile + p
+              let c = j * tile + q
+              if r < rows && c < cols { inner + x[r * cols + c] } else { inner }
+            }))
+      })
+}
+
 ## The transpose of a `rows` by `cols` row-major matrix, as a `cols` by
 ## `rows` one. No leetgpu problem: this is the oracle for a store whose
 ## strides are not row-major.
