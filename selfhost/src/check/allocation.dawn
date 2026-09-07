@@ -1,0 +1,390 @@
+# Checker integers are allocations, not identities. Join explicit declaration
+# provenance and binder slots across revisions before constructing the domain
+# maps consumed by relocation. An equal integer alone never grants a mapping.
+use std/map
+use std/list
+use check/identity
+use check/identity.{DeclKey, ModuleKey, Named, ImplHead, EffectDecl, FunctionDecl, TypeDecl, TraitDecl, MethodDecl, module_key}
+use check/cx.{Cx}
+use check/relocate
+use check/relocate.{Ids}
+use check/types.{Sig, ImplI, Ty, Eff, TyVar, EffVar, TyUnit, EPure, ELabeled}
+use front/ast.{Module, DType, DImpl, module_impls}
+
+pub type Domain = NominalId | TraitId | TypeParameter | EffectParameter | LocalSymbol
+pub type Slot = HeaderSlot(index: Int) | BodySlot(index: Int) | LabelEvidence(effect_key: DeclKey)
+pub type Binding = { declaration: DeclKey, domain: Domain, slot: Slot }
+pub type Entry = { binding: Binding, id: Int }
+type Data = { bindings: Map[Binding, Int] }
+pub opaque type Table = Data
+
+## Repeated observations of the same binding are harmless. Conflicting owners
+## are not: accepting one of them would silently map a reference to its rival.
+pub fn table(entries: List[Entry]) -> Option[Table] = {
+  var bindings: Map[Binding, Int] = map.empty()
+  var owners: Map[(Domain, Int), Binding] = map.empty()
+  for e in entries {
+    match e.binding.slot {
+      HeaderSlot(index) -> if index < 0 { return None }
+      BodySlot(index) -> if index < 0 { return None }
+      LabelEvidence(_) -> if e.binding.domain != LocalSymbol { return None }
+    }
+    match map.get(bindings, e.binding) {
+      Some(id) -> if id != e.id { return None }
+      None -> ()
+    }
+    match map.get(owners, (e.binding.domain, e.id)) {
+      Some(binding) -> if binding != e.binding { return None }
+      None -> ()
+    }
+    bindings = map.insert(bindings, e.binding, e.id)
+    owners = map.insert(owners, (e.binding.domain, e.id), e.binding)
+  }
+  Some(Data { bindings: bindings })
+}
+
+pub fn entry(declaration: DeclKey, domain: Domain, slot: Int, id: Int) -> Entry =
+  Entry { binding: Binding { declaration: declaration, domain: domain, slot: HeaderSlot(slot) }, id: id }
+
+pub fn temporary(declaration: DeclKey, domain: Domain, offset: Int, id: Int) -> Entry =
+  Entry { binding: Binding { declaration: declaration, domain: domain, slot: BodySlot(offset) }, id: id }
+
+## The label identifies the role; the function owns its local parameter.
+## Two functions handling the same effect must not claim the same binding.
+pub fn label_parameter(function: DeclKey, effect_key: DeclKey, id: Int) -> Entry =
+  Entry { binding: Binding { declaration: function, domain: LocalSymbol, slot: LabelEvidence(effect_key) }, id: id }
+
+## A removed/renamed declaration contributes no mapping. Consumers must ask
+## for every reference they use, so an unrelated removal need not lose all
+## other products in the module.
+pub fn between(old: Table, next: Table) -> Option[Ids] = {
+  let a: Data = old
+  let b: Data = next
+  var nominals: Map[Int, Int] = map.empty()
+  var traits: Map[Int, Int] = map.empty()
+  var types: Map[Int, Int] = map.empty()
+  var effects: Map[Int, Int] = map.empty()
+  var locals: Map[Int, Int] = map.empty()
+  for (binding, id) in map.entries(a.bindings) {
+    match map.get(b.bindings, binding) {
+      None -> ()
+      Some(target) -> match binding.domain {
+        NominalId -> { nominals = map.insert(nominals, id, target) }
+        TraitId -> { traits = map.insert(traits, id, target) }
+        TypeParameter -> { types = map.insert(types, id, target) }
+        EffectParameter -> { effects = map.insert(effects, id, target) }
+        LocalSymbol -> { locals = map.insert(locals, id, target) }
+      }
+    }
+  }
+  relocate.new(nominals, traits, types, effects, locals)
+}
+
+## These are declaration binders, never instantiations of a signature. Their
+## lexical order is stable under binder renaming; semantic changes still need
+## signature/dependency validation before a cache entry can be admitted.
+pub fn signature_binders(owner: DeclKey, sig: Sig) -> Option[List[Entry]] = {
+  binders(owner, sig.tparams, sig.eparams)
+}
+
+pub type BodyPlan = { ids: Ids, next_id: Int, old_allocations: Table, next_allocations: Table }
+
+## Reserve the recorded allocation interval without running the target body.
+## Header/dependency admission is a caller obligation. Defaults need their own
+## products because their allocations precede function entry; do not pretend
+## that one entry permutation describes those independent checks as well.
+pub fn body_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
+  start: Int, count: Int, target: Int, old_sig: Sig, next_sig: Sig,
+  evidence: List[Int]) -> Option[BodyPlan] = {
+  for present in old_sig.param_defaults { if present { return None } }
+  for present in next_sig.param_defaults { if present { return None } }
+  body_segment_plan(old_headers, next_headers, owner, start, count, target, old_sig, next_sig, evidence)
+}
+
+## Plan one already-separated checker boundary. Any preceding defaults must
+## have been checked or replayed, with their allocation tables passed here.
+## The signature may still describe defaults; this interval does not execute
+## them. Return the extended tables so later products can reference their IDs.
+pub fn body_segment_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
+  start: Int, count: Int, target: Int, old_sig: Sig, next_sig: Sig,
+  evidence: List[Int]) -> Option[BodyPlan] = {
+  if start < 0 || count < 0 || target < 0 || start + count < start || target + count < target { return None }
+  let header_ids = between(old_headers, next_headers)?
+  if relocate.signature(header_ids, old_sig) != Some(next_sig) { return None }
+  let order = relocate.evidence_permutation(header_ids, old_sig)?
+  if len(evidence) != len(order) { return None }
+  var moved_evidence: Map[Int, Int] = map.empty()
+  var index = 0
+  for old_index in order {
+    let id = evidence[old_index]
+    if id < start || id >= start + count || evidence[old_index] != evidence[0] + old_index { return None }
+    moved_evidence = map.insert(moved_evidence, id, target + evidence[0] - start + index)
+    index = index + 1
+  }
+  let a: Data = old_headers
+  let b: Data = next_headers
+  var old_entries: List[Entry] = []
+  var next_entries: List[Entry] = []
+  for (binding, id) in map.entries(a.bindings) { old_entries = old_entries ++ [Entry { binding: binding, id: id }] }
+  for (binding, id) in map.entries(b.bindings) { next_entries = next_entries ++ [Entry { binding: binding, id: id }] }
+  var offset = 0
+  while offset < count {
+    for domain in [TypeParameter, EffectParameter, LocalSymbol] {
+      let moved = if domain == LocalSymbol { map.get(moved_evidence, start + offset).unwrap_or(target + offset) }
+      else { target + offset }
+      old_entries = old_entries ++ [temporary(owner, domain, offset, start + offset)]
+      next_entries = next_entries ++ [temporary(owner, domain, offset, moved)]
+    }
+    offset = offset + 1
+  }
+  let old_allocations = table(old_entries)?
+  let next_allocations = table(next_entries)?
+  Some(BodyPlan { ids: between(old_allocations, next_allocations)?, next_id: target + count,
+    old_allocations: old_allocations, next_allocations: next_allocations })
+}
+
+fn binders(owner: DeclKey, type_params: List[Ty], effect_params: List[Eff]) -> Option[List[Entry]] = {
+  var out: List[Entry] = []
+  var slot = 0
+  for t in type_params {
+    match t {
+      TyVar(_, id) -> { out = out ++ [entry(owner, TypeParameter, slot, id)] }
+      _ -> return None
+    }
+    slot = slot + 1
+  }
+  slot = 0
+  for e in effect_params {
+    match e {
+      EffVar(_, id) -> { out = out ++ [entry(owner, EffectParameter, slot, id)] }
+      _ -> return None
+    }
+    slot = slot + 1
+  }
+  Some(out)
+}
+
+## The declaration index excludes ambiguous local effects before their
+## checker IDs are read. Imported effects require their exporting provenance
+## and are not invented from this module's display spelling.
+pub fn local_effects(scope: ModuleKey, syntax: Module, effects: Map[String, Int]) -> Option[List[Entry]] = {
+  var out: List[Entry] = []
+  for declaration in identity.declarations(scope, syntax) {
+    match declaration.key.path {
+      [Named(EffectDecl, name)] -> {
+        out = out ++ [entry(declaration.key, NominalId, 0, map.get(effects, name)?)]
+      }
+      _ -> ()
+    }
+  }
+  Some(out)
+}
+
+## Read completed local headers, not imported names or partially resolved
+## shells. Opaque aliases own nominal IDs; transparent aliases only own their
+## binders. Trait subjects belong to their trait, not separately to each method.
+pub fn local_headers(scope: ModuleKey, syntax: Module, cx: Cx) -> Option[List[Entry]] = {
+  if cx.owner_class != Some(scope.emission_owner) || cx.src_path != Some(scope.source) { return None }
+  var out: List[Entry] = []
+  for declaration in identity.declarations(scope, syntax) {
+    let key = declaration.key
+    match key.path {
+      [Named(TypeDecl, name)] -> {
+        let d = match syntax.decls[declaration.declaration] { DType(t) -> t, _ -> return None }
+        match d.alias_target {
+          Some(_) -> {
+            let alias_info = map.get(cx.aliases, name)?
+            if alias_info.owner != scope.emission_owner || alias_info.is_opaque != d.is_opaque { return None }
+            if len(alias_info.tparams) != len(d.tparams) || len(alias_info.eparams) != len(d.eparams) { return None }
+            if alias_info.is_opaque { out = out ++ [entry(key, NominalId, 0, alias_info.id)] }
+            out = out ++ binders(key, alias_info.tparams, alias_info.eparams)?
+          }
+          None -> {
+            let id = map.get(cx.adts_by_name, name)?
+            let adt = map.get(cx.adts, id)?
+            if adt.owner != cx.owner_class || adt.name != name || adt.id != id { return None }
+            if len(adt.tparams) != len(d.tparams) || len(adt.bound_eparams) != len(d.eparams) { return None }
+            out = out ++ [entry(key, NominalId, 0, id)] ++ binders(key, adt.tparams, adt.bound_eparams)?
+          }
+        }
+      }
+      [Named(TraitDecl, name)] -> {
+        let id = map.get(cx.traits_by_name, name)?
+        let tr = map.get(cx.traits, id)?
+        if tr.owner != cx.owner_class || tr.name != name || tr.id != id { return None }
+        out = out ++ [entry(key, TraitId, 0, id)] ++ binders(key, [tr.tvar], [])?
+      }
+      [Named(TraitDecl, name), Named(MethodDecl, method)] -> {
+        let tr = map.get(cx.traits, map.get(cx.traits_by_name, name)?)?
+        if tr.owner != cx.owner_class { return None }
+        var signature: Option[Sig] = None
+        for (method_name, info) in tr.methods {
+          if method_name == method { signature = Some(info.sig) }
+        }
+        let sig = signature?
+        if sig.tparams != [tr.tvar] { return None }
+        out = out ++ binders(key, [], sig.eparams)?
+      }
+      [Named(FunctionDecl, name)] -> {
+        let sig = map.get(cx.fns, name)?
+        if sig.owner != cx.owner_class || sig.name != name || sig.is_builtin || sig.trait_id != None || sig.op_of != None { return None }
+        out = out ++ signature_binders(key, sig)?
+      }
+      [Named(EffectDecl, name)] -> {
+        let id = map.get(cx.effects, name)?
+        let info = map.get(cx.effect_infos, id)?
+        if info.owner != cx.owner_class || info.name != name || info.id != id { return None }
+        out = out ++ [entry(key, NominalId, 0, id)]
+      }
+      _ -> ()
+    }
+  }
+  Some(out)
+}
+
+## Method signatures are the actual pass_register_impls result, not signatures
+## reconstructed from trait declarations. Source ranges locate records only
+## inside this revision; the emitted entries join revisions by declaration key.
+pub fn local_impl_headers(scope: ModuleKey, syntax: Module, cx: Cx,
+  signatures: List[List[Option[Sig]]]) -> Option[List[Entry]] = {
+  if cx.owner_class != Some(scope.emission_owner) || cx.src_path != Some(scope.source) { return None }
+  let impls = module_impls(syntax)
+  if len(signatures) != len(impls) { return None }
+  let declarations = identity.declarations(scope, syntax)
+  var out: List[Entry] = []
+  for declaration in declarations {
+    match declaration.key.path {
+      [ImplHead(_, _)] -> {
+        let (trait_name, lo, hi) = match syntax.decls[declaration.declaration] {
+          DImpl(_, name, _, _, _, _, _, _, start, end) -> (name, start, end)
+          _ -> return None
+        }
+        var found: Option[ImplI] = None
+        for info in cx.local_impls {
+          if not info.derived && info.owner == cx.owner_class && info.src_path == cx.src_path && info.lo == lo && info.hi == hi {
+            if found != None { return None }
+            found = Some(info)
+          }
+        }
+        let info = found?
+        if map.get(cx.traits_by_name, trait_name) != Some(info.trait_id) { return None }
+        var index = 0
+        for d in impls {
+          if d.lo == lo && d.hi == hi {
+            if len(d.tparams) != len(info.tparams) || len(d.methods) != len(signatures[index]) { return None }
+            out = out ++ binders(declaration.key, info.tparams, [])?
+            var member = 0
+            for method in d.methods {
+              let key = DeclKey { ..declaration.key, path: declaration.key.path ++ [Named(MethodDecl, method.name)] }
+              var unique = false
+              for candidate in declarations {
+                if candidate.key == key { unique = true }
+              }
+              if unique {
+                let sig = signatures[index][member]?
+                if sig.name != method.name || sig.owner != cx.owner_class || sig.tparams != info.tparams || sig.is_builtin ||
+                  sig.trait_id != None || sig.op_of != None {
+                    return None
+                  }
+                out = out ++ binders(key, [], sig.eparams)?
+              }
+              member = member + 1
+            }
+          }
+          index = index + 1
+        }
+      }
+      _ -> ()
+    }
+  }
+  Some(out)
+}
+
+fn fixture_key(name: String) -> DeclKey =
+  DeclKey { scope: module_key("world", "pkg/m", "pkg/m", "m.dawn"), path: [Named(FunctionDecl, name)] }
+
+test "allocation matches provenance and domains rather than equal integers" {
+  let a = fixture_key("a")
+  let b = fixture_key("b")
+  let old = table([entry(a, NominalId, 0, 1), entry(b, NominalId, 0, 2), entry(a, TraitId, 0, 1)]).expect("old")
+  let next = table([entry(a, NominalId, 0, 2), entry(b, NominalId, 0, 1), entry(a, TraitId, 0, 3)]).expect("next")
+  let ids = between(old, next).expect("mapping")
+  assert relocate.nominal(ids, 1) == Some(2) && relocate.nominal(ids, 2) == Some(1)
+  assert relocate.trait_id(ids, 1) == Some(3)
+  assert relocate.local_id(ids, 1) == None
+  let changed = DeclKey { ..a, scope: ModuleKey { ..a.scope, world: "other" } }
+  let foreign = table([entry(changed, NominalId, 0, 1)]).expect("foreign")
+  assert relocate.nominal(between(old, foreign).expect("no matches"), 1) == None
+  let renamed = table([entry(fixture_key("renamed"), NominalId, 0, 1)]).expect("rename")
+  assert relocate.nominal(between(old, renamed).expect("no rename match"), 1) == None
+}
+
+test "allocation rejects competing owners and inconsistent binding observations" {
+  let a = entry(fixture_key("a"), TypeParameter, 0, 5)
+  let b = entry(fixture_key("b"), TypeParameter, 0, 5)
+  assert table([a, b]) == None
+  assert table([a, Entry { ..a, id: 6 }]) == None
+  assert table([Entry { ..a, binding: Binding { ..a.binding, slot: HeaderSlot(-1) } }]) == None
+  assert table([a, a]) != None
+}
+
+test "allocation separates header binders body temporaries and function evidence owners" {
+  let a = fixture_key("a")
+  let b = fixture_key("b")
+  let effect_key = DeclKey { ..a, path: [Named(EffectDecl, "Ask")] }
+  let old = table([entry(a, TypeParameter, 0, 10), temporary(a, TypeParameter, 0, 20),
+    label_parameter(a, effect_key, 30), label_parameter(b, effect_key, 40)]).expect("distinct binding sites")
+  let next = table([entry(a, TypeParameter, 0, 11), temporary(a, TypeParameter, 0, 21),
+    label_parameter(a, effect_key, 31), label_parameter(b, effect_key, 41)]).expect("next sites")
+  let ids = between(old, next).expect("site mapping")
+  assert relocate.type_var(ids, 10) == Some(11) && relocate.type_var(ids, 20) == Some(21)
+  assert relocate.local_id(ids, 30) == Some(31) && relocate.local_id(ids, 40) == Some(41)
+}
+
+test "allocation signature binders keep lexical slots across renamed variables" {
+  let key = fixture_key("generic")
+  let sig = Sig { name: "generic", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: EPure, is_builtin: false, tparams: [TyVar("T", 10), TyVar("U", 11)], constraints: [],
+    eparams: [EffVar("e", 20)], owner: None, trait_id: None, op_of: None, inferring: false }
+  let renamed = Sig { ..sig, tparams: [TyVar("X", 30), TyVar("Y", 31)], eparams: [EffVar("f", 40)] }
+  let old = table(signature_binders(key, sig).expect("old signature binders")).expect("old table")
+  let next = table(signature_binders(key, renamed).expect("new signature binders")).expect("next table")
+  let ids = between(old, next).expect("binder mapping")
+  assert relocate.type_var(ids, 10) == Some(30) && relocate.type_var(ids, 11) == Some(31)
+  assert relocate.effect_var(ids, 20) == Some(40)
+  assert signature_binders(key, Sig { ..sig, tparams: [TyUnit] }) == None
+  assert signature_binders(key, Sig { ..sig, eparams: [EPure] }) == None
+}
+
+test "allocation body plans reserve ghost IDs and permute evidence by role" {
+  let owner = fixture_key("body")
+  let a = fixture_key("A")
+  let b = fixture_key("B")
+  let old = table([entry(a, NominalId, 0, 1), entry(b, NominalId, 0, 2)]).expect("old headers")
+  let next = table([entry(a, NominalId, 0, 2), entry(b, NominalId, 0, 1)]).expect("next headers")
+  let sig = Sig { name: "body", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: ELabeled(EPure, [(1, "A"), (2, "B")]), is_builtin: false, tparams: [], constraints: [],
+    eparams: [], owner: None, trait_id: None, op_of: None, inferring: false }
+  let moved = relocate.signature(between(old, next).expect("header IDs"), sig).expect("new signature")
+  let plan = body_plan(old, next, owner, 20, 5, 40, sig, moved, [21, 22]).expect("body plan")
+  assert plan.next_id == 45
+  assert relocate.local_id(plan.ids, 20) == Some(40)
+  assert relocate.local_id(plan.ids, 21) == Some(42) && relocate.local_id(plan.ids, 22) == Some(41)
+  assert relocate.local_id(plan.ids, 24) == Some(44)
+  assert relocate.type_var(plan.ids, 21) == Some(41) && relocate.effect_var(plan.ids, 24) == Some(44)
+  assert relocate.nominal(plan.ids, 20) == None && relocate.trait_id(plan.ids, 20) == None
+  let pure = Sig { ..sig, eff: EPure }
+  let following = body_plan(plan.old_allocations, plan.next_allocations, fixture_key("following"),
+    25, 1, 45, pure, pure, []).expect("following interval")
+  assert relocate.local_id(following.ids, 21) == Some(42)
+  assert relocate.local_id(following.ids, 25) == Some(45) && following.next_id == 46
+  assert body_plan(plan.old_allocations, plan.next_allocations, fixture_key("following"),
+    25, 1, 44, pure, pure, []) == None
+  assert body_plan(old, next, owner, 20, 5, 40, sig, moved, [21, 23]) == None
+  assert body_plan(old, next, owner, 20, 5, 40, sig, moved, [19, 20]) == None
+  assert body_plan(old, next, owner, 20, 5, 40, sig, moved, []) == None
+  assert body_plan(old, next, owner, 20, -1, 40, sig, moved, [21, 22]) == None
+  assert body_plan(old, next, owner, 20, 5, -1, sig, moved, [21, 22]) == None
+  assert body_plan(old, next, owner, 20, 5, 40, sig, sig, [21, 22]) == None
+  assert body_plan(old, next, owner, 20, 5, 40, Sig { ..sig, param_defaults: [true] }, moved, [21, 22]) == None
+}

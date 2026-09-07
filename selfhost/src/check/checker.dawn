@@ -2448,7 +2448,8 @@ test "field access follows record shape with substitution" {
     derives_show: false,
     derives_ord: false,
     owner: None,
-    audience: AWorld
+    audience: AWorld,
+    bound_eparams: []
   }
   cx = Cx {
     ..cx1,
@@ -10967,7 +10968,7 @@ fn verify_effects(
 ## lets a call site hand its own witnesses straight over: both sides read the
 ## row in `tparams x bounds_of` order, and a filtered row would renumber it.
 ## `eparams` stays empty because a default is refused any effect.
-fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
+pub fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
   Sig {
     name: fname ++ "\$default\$" ++ to_string(k),
     param_tys: [],
@@ -11014,6 +11015,35 @@ fn no_tdefault() -> Option[TDefault] = None
 ## a default like any other; `enter_fn` mints the dictionary symbols and they
 ## are carried out here, because the synthesized function has to bind the very
 ## symbols its body was checked against.
+pub fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefault) !io = {
+  let p = d.params[k]
+  let de = p.default.expect("parameter default boundary requires a default expression")
+  let pty = s.param_tys[k]
+  let dsig = default_sig(s, d.name, k, pty)
+  var cxd = enter_fn(cx, dsig, p.lo, p.hi)
+  let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
+  cxd = cxe
+  if not assignable(cxd, dt, pty) {
+    cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
+        " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
+  }
+  # The row must not depend on whether the call site omits the argument.
+  for used in cxd.frame.used_effects {
+    if not eff_subsumes(EPure, used) {
+      let (wlo, whi, wname) = match map.get(cxd.frame.eff_witness, used) {
+        Some(w) -> w
+        None -> (e_lo(de), e_hi(de), "?")
+      }
+      cxd = cerr_h(cxd, "a parameter default must be pure, but it calls `" ++ wname ++
+          "` (!" ++ eff_show(used) ++ ")", wlo, whi,
+        "the default runs at every call that omits the argument; " ++
+          "take the argument explicitly, or drop the effect")
+    }
+  }
+  let dsyms = dict_sym_list(cxd, dsig)
+  (pop_scope(cxd), TDefault { body: dx, dict_syms: dsyms })
+}
+
 fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]]) !io = {
   var cx1 = cx
   var out: List[Option[TDefault]] = []
@@ -11021,33 +11051,10 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]
   for p in d.params {
     match p.default {
       None -> { out = out ++ [no_tdefault()] }
-      Some(de) -> {
-        let pty = s.param_tys[k]
-        let dsig = default_sig(s, d.name, k, pty)
-        var cxd = enter_fn(cx1, dsig, p.lo, p.hi)
-        let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
-        cxd = cxe
-        if not assignable(cxd, dt, pty) {
-          cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
-              " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
-        }
-        # the row would otherwise depend on whether the call site omits the
-        # argument -- one signature, two effect rows (#207 §4.3)
-        for used in cxd.frame.used_effects {
-          if not eff_subsumes(EPure, used) {
-            let (wlo, whi, wname) = match map.get(cxd.frame.eff_witness, used) {
-              Some(w) -> w
-              None -> (e_lo(de), e_hi(de), "?")
-            }
-            cxd = cerr_h(cxd, "a parameter default must be pure, but it calls `" ++ wname ++
-                "` (!" ++ eff_show(used) ++ ")", wlo, whi,
-              "the default runs at every call that omits the argument; " ++
-                "take the argument explicitly, or drop the effect")
-          }
-        }
-        let dsyms = dict_sym_list(cxd, dsig)
-        cx1 = pop_scope(cxd)
-        out = out ++ [Some(TDefault { body: dx, dict_syms: dsyms })]
+      Some(_) -> {
+        let (next, value) = check_param_default(cx1, d, s, k)
+        cx1 = next
+        out = out ++ [Some(value)]
       }
     }
     k = k + 1
@@ -11058,7 +11065,14 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]
 ## Check one annotated function body against its signature (the Kotlin checkFn).
 pub fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
-  var cx1 = enter_fn(cx0, s, d.nlo, d.nhi)
+  check_fn_body(cx0, d, s, dtxs)
+}
+
+## Defaults have already been checked in declaration order. Keeping this
+## boundary separate lets incremental scheduling capture each default's state
+## without checking it again when only the main expression needs execution.
+pub fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, TFun) !io = {
+  var cx1 = enter_fn(cx, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -11098,7 +11112,13 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
 ## is then enforced as usual). The Kotlin checkFnInferred.
 pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig) -> (Cx, Sig, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
-  var cx1 = enter_fn(cx0, s, d.nlo, d.nhi)
+  check_fn_inferred_body(cx0, d, s, dtxs)
+}
+
+## The inferred counterpart of check_fn_body also publishes the sealed
+## signature. Replaying defaults must not bypass this module-visible write.
+pub fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, Sig, TFun) !io = {
+  var cx1 = enter_fn(cx, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -11959,6 +11979,28 @@ test "check_module: a type declaration refuses the effect names it did not bind"
 }
 
 # ---- effect handlers (docs/effects-design.md) ----
+
+test "ADT headers retain allocated effect binders including unused parameters" {
+  let (syntax, parse_diags) = parser.parse_module(
+    "type First[!e] = { f: fn(Int) -> Int !e }\n" ++
+      "type Second[!e] = { f: fn(Int) -> Int !e }\n" ++
+      "type Unused[!e] = { value: Int }\n")
+  assert len(parse_diags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (checked, _) = check_module(test_cx(), syntax, env)
+  assert len(checked.diags) == 0
+  let first = map.get(checked.adts, map.get(checked.adts_by_name, "First").expect("First ID")).expect("First")
+  let second = map.get(checked.adts, map.get(checked.adts_by_name, "Second").expect("Second ID")).expect("Second")
+  let unused = map.get(checked.adts, map.get(checked.adts_by_name, "Unused").expect("Unused ID")).expect("Unused")
+  assert len(first.bound_eparams) == 1 && len(second.bound_eparams) == 1 && len(unused.bound_eparams) == 1
+  let first_id = match first.bound_eparams[0] { EffVar("e", id) -> id, _ -> -1 }
+  let second_id = match second.bound_eparams[0] { EffVar("e", id) -> id, _ -> -1 }
+  let unused_id = match unused.bound_eparams[0] { EffVar("e", id) -> id, _ -> -1 }
+  assert first_id >= 0 && second_id > first_id && unused_id > second_id
+  assert first.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, first.bound_eparams[0])
+  assert second.ctors[0].fields[0].ty == TyFn([TyInt], TyInt, second.bound_eparams[0])
+  assert unused.ctors[0].fields[0].ty == TyInt
+}
 
 fn eff_src(body: String) -> String = "effect Ask {\n  fn ask() -> Int\n}\n${body}"
 
