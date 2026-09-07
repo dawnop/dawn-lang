@@ -3,6 +3,7 @@
 # unresolved provenance fails closed instead of keeping an old integer.
 # Pack layout reconstruction is a separate operation from ordinary recursion.
 use std/map
+use check/cx.{Cx, cx_new}
 use check/relocate
 use check/relocate.{Ids}
 use check/types.{Sig, Sym, EV_PACK_ID, evidence_role_key, EvidenceRole,
@@ -18,6 +19,40 @@ use check/tast.{
   XIf, XMatch, XBlock, XError,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd
+}
+
+## Calls carry the declaring owner, not the alias used to reach it. Reading
+## only the local spelling loses qualified imports and can pick a shadowing
+## function with an unrelated signature. Conflicting observations fail closed.
+pub fn callee_signature(cx: Cx, owner: Option[String], name: String, builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
+  if builtin {
+    if owner != None || tr != None { return None }
+    return map.get(cx.bins, name)
+  }
+  match tr {
+    Some(id) -> {
+      let info = map.get(cx.traits, id)?
+      for (method, value) in info.methods {
+        if method == name && value.sig.owner == owner { return Some(value.sig) }
+      }
+      return None
+    }
+    None -> ()
+  }
+  var candidates: List[Sig] = []
+  for (_, sig) in map.entries(cx.fns) { candidates = candidates ++ [sig] }
+  for (_, sig) in map.entries(cx.std_fns) { candidates = candidates ++ [sig] }
+  for (_, sig) in map.entries(cx.module_fn_sigs) { candidates = candidates ++ [sig] }
+  var found: Option[Sig] = None
+  for sig in candidates {
+    if sig.owner == owner && sig.name == name && not sig.is_builtin && sig.trait_id == None {
+      match found {
+        Some(previous) -> if previous != sig { return None }
+        None -> { found = Some(sig) }
+      }
+    }
+  }
+  found
 }
 
 ## The source projection contains explicit old/new code-point boundaries,
@@ -410,6 +445,19 @@ fn fixture_signature() -> Sig =
   Sig { name: "f", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
     eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
     owner: None, trait_id: None, op_of: None, inferring: false }
+
+test "tree callee lookup preserves declaring owners across module aliases" {
+  let local = Sig { ..fixture_signature(), owner: Some("consumer") }
+  let imported = Sig { ..fixture_signature(), owner: Some("library"), ret: TyInt }
+  let cx = Cx { ..cx_new(Some("consumer"), None), fns: map.from([("f", local)]),
+    module_fn_sigs: map.from([(("dep", "f"), imported), (("other_alias", "f"), imported)]) }
+  assert callee_signature(cx, Some("library"), "f", false, None) == Some(imported)
+  assert callee_signature(cx, Some("consumer"), "f", false, None) == Some(local)
+  assert callee_signature(cx, None, "f", false, None) == None
+  let conflict = Cx { ..cx, module_fn_sigs: map.insert(cx.module_fn_sigs, ("conflict", "f"), Sig { ..imported, ret: TyUnit }) }
+  assert callee_signature(conflict, Some("library"), "f", false, None) == None
+  assert callee_signature(cx, Some("library"), "f", true, None) == None
+}
 
 fn fixture_view() -> View = {
   let empty: Map[Int, Int] = map.empty()

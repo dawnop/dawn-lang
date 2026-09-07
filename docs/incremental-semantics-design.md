@@ -130,6 +130,16 @@ check_fn_inferred_body，保持签名封定与fns写入原序；默认值重放�
 不能通过取消守卫来假装一个连续区间足以表达所有独立入口。
 上述四类默认参数案例已同时重放主body，并与独立冷函数、模块及完整Cx比较；
 新版本主body的检查只作为对照，不提供目标分配ID。
+跨模块来源沿声明模块台账传递，consumer只新增自己的声明，不能从导入别名重造key。
+先通过真实exports_of/导入pass的两模块重排案例验证：合并provider与consumer台账时
+仍执行同域ID/owner冲突检查，provider内部顺序变化由provider的稳定key解释。
+此合并本身不验证导出面或依赖有效性；生产AnalysisCarry/模块调度的接线另行完成。
+首个真实案例使用选择性导入Ask/Tell，完整body/Cx重放与冷检查一致，并拒绝consumer
+自造provider身份。当前效果语法不接受!dep.Ask，限定模块名的类型/函数案例另行补齐。
+限定函数调用的callee查找必须读取旧header的owner+原函数名，而非只查consumer短名。
+relocate_tree.callee_signature将覆盖本地/std/模块导入签名表，重复相同记录允许，
+同身份不同签名拒绝；trait/builtin保持独立分支。该线性查找是正确性边界，
+查询依赖跟踪与索引成本仍需P4/P7接线和实测，不能称为最终查询引擎。
 不能将同一效果在不同函数中的局部参数合并。真实Ask/Tell重排案例已用生产台账
 替代[-1024,next_id)稠密header映射，并扩大到完整Cx对照。对照发现symbol值虽然
 都已正确迁移，旧顺序插入仍改变Map的可观察顺序；投影后按目标分配ID恢复插入顺序。
@@ -238,6 +248,16 @@ handler标识常量随原全局取号一起从29321移到29374，已逐字对照
 comptime环境。执行计数证明少做工作，不能只看耗时；总是cold的变异体也必须被抓到。
 新增不变量配成功编译且命中 owning assertion 的负控，不把timeout/build failure算红。
 私有测试observer不改变LSP协议。golden需要重录时先核对差异，不靠重录宣称等价。
+
+### 模块header生产边界（P3接线中）
+
+将check_module既有header前缀抽为check_module_headers，具名ModuleHeaders保存同一次
+检查的语法、Cx、函数签名、impl方法签名及const类型；check_module_bodies消费该产物，
+原check_module仍按原顺序委托两段。来源台账读取这一边界的真实impl签名，不从最终
+TFun或trait模板重建。语法放在产物里，避免调用者给签名索引配上另一个Module。
+现阶段这是同revision阶段产品，不是可直接跨revision复用的cache；完整Cx仍是header
+快照，依赖有效性及紧凑具名重定位产品仍须后续实现。测试改读生产边界，不再复制源码
+前缀生成第二套header流程；冷行为还需重构前后对拍，不能只比较两个新入口。
 
 ## 七、不做的
 

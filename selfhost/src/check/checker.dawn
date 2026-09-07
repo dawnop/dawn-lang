@@ -11303,7 +11303,20 @@ fn no_tfun() -> Option[TFun] = None
 ## passes 0–4 register declarations, pass 5 checks bodies — inferred functions
 ## first in call-dependency order, then consts, annotated fns, impl methods,
 ## trait defaults, tests.
-pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io = {
+pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io =
+  check_module_bodies(check_module_headers(cx, m, env))
+
+## A same-revision stage product. Syntax and positional signature tables travel
+## together; this is not permission to reuse headers in a different environment.
+pub type ModuleHeaders = {
+  syntax: Module,
+  cx: Cx,
+  sigs: List[Sig],
+  impl_sigs: List[List[Option[Sig]]],
+  const_tys: List[Option[Ty]]
+}
+
+pub fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
   var cx1 = seed_prelude(cx)
   # the header passes below record where each written type reference sat, so
   # the public surface validator can blame the innermost token the author
@@ -11341,6 +11354,15 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   cx1 = pass_export_surface(cx1, m)
   let no_spans: Map[(Int, Int), TySpan] = map.empty()
   cx1 = Cx { ..cx1, record_ty_spans: false, ty_spans: no_spans }
+  ModuleHeaders { syntax: m, cx: cx1, sigs: sigs, impl_sigs: impl_sigs, const_tys: const_tys }
+}
+
+pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {
+  let m = headers.syntax
+  var cx1 = headers.cx
+  let sigs = headers.sigs
+  let impl_sigs = headers.impl_sigs
+  let const_tys = headers.const_tys
   # 5. inferred functions first, in call-dependency order — every callee's
   # signature is final before any caller is checked; a cycle must annotate
   let fnds = module_fns(m)
@@ -11722,7 +11744,21 @@ test "check_module: a whole module checks end to end" {
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
+  let headers = check_module_headers(test_cx(), m, env)
+  assert headers.syntax == m
+  assert len(headers.cx.diags) == 0
+  assert len(headers.sigs) == 3
+  assert headers.sigs[1].inferring
+  assert map.get(headers.cx.fns, "twice").expect("header twice").inferring
+  assert headers.const_tys == [Some(TyInt)]
+  assert headers.impl_sigs == []
+  let (staged, staged_tm) = check_module_bodies(headers)
   let (cx1, tm) = check_module(test_cx(), m, env)
+  assert staged_tm == tm
+  assert staged.next_id == cx1.next_id
+  assert staged.fns == cx1.fns
+  assert staged.diags == cx1.diags
+  assert headers.cx.next_id < staged.next_id
   assert len(cx1.diags) == 0
   # the inferred signature sealed to Int, pure
   let tw = map.get(cx1.fns, "twice").expect("twice")

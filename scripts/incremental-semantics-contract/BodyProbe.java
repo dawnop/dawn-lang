@@ -119,6 +119,18 @@ public final class BodyProbe {
                     throw new AssertionError("default state: body differs from cold module (" + i + ")");
             }
             System.out.println("default-state\t4\tindependent defaults and generic dictionaries replay before explicit and inferred bodies");
+            Object imports = probe.getMethod("import_samples").invoke(null);
+            if ((Long) stateCount.invoke(null, imports) != 2) throw new AssertionError("Unexpected import trial count");
+            for (long i = 0; i < 2; i++) {
+                Object imported = stateAt.invoke(null, imports, i);
+                Class<?> it = imported.getClass();
+                if (!SemanticSnapshot.same(it.getField("replayed").get(imported), it.getField("cold").get(imported)))
+                    throw new AssertionError("import state: replayed Cx differs from cold body boundary");
+                if (!SemanticSnapshot.same(it.getField("relocated").get(imported), it.getField("cold_body").get(imported))
+                        || !SemanticSnapshot.same(it.getField("cold_body").get(imported), it.getField("module_body").get(imported)))
+                    throw new AssertionError("import state: body differs from cold module");
+            }
+            System.out.println("import-state\t2\tprovider provenance survives selective and qualified imports");
         }
     }
 }

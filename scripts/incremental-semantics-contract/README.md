@@ -45,6 +45,7 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 
 后续函数级演进的私有决策门见[第3期函数体原型](body-probe.md)：
 固定header下验证稳定函数key、真实前置编辑、TFun和完整body边界Cx重放；
+header来自生产check_module_headers的ModuleHeaders，不再按源码锚点复制header前缀。
 它不是已上线的函数缓存，也不代替下列生产前缀门禁。
 
 `relocate.py` 验证生产 `check/relocate` 基础层：Ty/Eff、Sig/Sym 和 witness 的引用域
@@ -76,18 +77,26 @@ opaque/透明alias、trait及方法、效果和函数签名binder，同时反转
 另覆盖泛型默认闭包调用trait方法、携带字典引用：普通/泛型与显式/推断共四例。
 尚未覆盖默认诊断和全部复杂表达式，也未接入生产缓存调度。
 已不再生成稠密header identity表。固定header的其他案例暂仍用稠密夹具映射。
-`allocation.py`有九个编译负控，守身份/ID冲突、目标版本选择、负槽与引用域，
+`allocation.py`有十个编译负控，守身份/ID冲突、目标版本选择、负槽与引用域，
 以及body evidence置换、未观察临时ID、分配终点和前序台账保留；CI运行该脚本，
 native门禁另显式执行allocation模块测试，因为它尚不在nmain生产调用图中。
+另有两个真实两模块导出/导入案例：provider交换效果或类型声明顺序，consumer分别
+选择性导入效果、通过模块别名访问类型和泛型函数，合并原声明模块与consumer台账后
+重放完整body/Cx。断言consumer不生成导入声明的本地身份，丢合并内容的编译负控由
+allocation owning测试守住。所有typed案例统一使用生产callee_signature入口，以声明
+owner和原函数名查找签名，别名不替代声明身份。该案例不覆盖限定效果
+拼写（当前语法不接受!dep.Ask），生产AnalysisCarry接线仍未完成。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
-构造分支的六个成功编译负控。源码token相等不证明AST相等，尤其不能忽略换行的语义。
+构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个
+owning断言负控，以及ModuleHeaders推断状态/const类型保留的两个负控（共11个）。
+源码token相等不证明AST相等，尤其不能忽略换行的语义。
 `identity.py` 验证生产声明候选身份及八个成功编译负控：重复父声明及子路径、
 类型/关联效果的绑定槽归一、默认参数歧义、模块world隔离。具名owning断言必须失败，
 编译或链接失败不算负控。typed模式现在通过适配器调用生产声明索引；legacy模式
 保留原型身份实现及原来的八个负控。候选key不证明依赖环境或body有效。
 
-native-selfhost-tests 分别执行tree的47项、source的35项及identity的39项依赖闭包（包含重叠依赖），
+native-selfhost-tests 分别执行tree、source及identity的owning依赖闭包（包含重叠依赖），
 因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
 
 `state-product.py` 验证状态产品提取/装配及跨坐标投影的15个成功编译负控，

@@ -6,9 +6,9 @@ use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
 use compiler/check/tast.{TFun, TDefault}
-use compiler/check/types.{Sig, Sym, trait_of, eff_labels, sig_abi_eff, EV_PACK_ID}
+use compiler/check/types.{Sig, Sym, eff_labels, sig_abi_eff, EV_PACK_ID}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module}
+use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, exports_of}
 use compiler/check/relocate
 use compiler/check/relocate_tree
 use compiler/check/relocate_tree.{View}
@@ -19,20 +19,6 @@ use compiler/check/allocation.{NominalId, LocalSymbol, TypeParameter, EffectPara
 use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ParameterDefault, EffectDecl, module_key}
 use compiler/front/parser
 use compiler/front/ast.{module_fns, module_tests}
-
-fn callee(cx: Cx, name: String, builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
-  if builtin { return map.get(cx.bins, name) }
-  match tr {
-    Some(id) -> {
-      let info = trait_of(cx.traits, id)
-      for (method, value) in info.methods {
-        if method == name { return Some(value.sig) }
-      }
-      None
-    }
-    None -> lookup_fn_sig(cx, name)
-  }
-}
 
 pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) -> TFun = {
   var stable: Map[Int, Int] = map.empty()
@@ -51,7 +37,7 @@ pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) 
   }
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
   let v = View { ids: ids, positions: positions, ends: positions, assertion: (src, lo, hi) => Some(src), symbols: after.syms,
-    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("typed projection failed: " ++ f.name)
 }
 
@@ -70,7 +56,7 @@ pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int,
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
   let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("source-aware typed projection failed: " ++ f.name)
 }
 
@@ -89,7 +75,7 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
   let ids = relocate.new(stable, stable, stable, stable, stable).expect("state relocation tables")
   let view = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("state capture: " ++ body.name)
   let projected = body_product.project(view, saved, current.next_id).expect("state projection: " ++ body.name)
   body_product.assemble(current, projected).expect("state assembly: " ++ body.name)
@@ -98,6 +84,70 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
 pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
 
 pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
+
+pub fn import_samples() -> List[StateTrial] !io = [import_sample(false), import_sample(true)]
+
+fn import_sample(qualified: Bool) -> StateTrial !io = {
+  let ask = if qualified { "pub type First = { value: Int }\n" } else { "pub effect Ask { fn ask() -> Int }\n" }
+  let tell = if qualified { "pub type Second = { value: Int }\n" } else { "pub effect Tell { fn tell() -> Int }\n" }
+  let tail = if qualified { "pub fn identity[T](x: T) -> T = x\n" } else { "" }
+  let (old_library, old_pd) = parser.parse_module(ask ++ tell ++ tail)
+  let (new_library, new_pd) = parser.parse_module(tell ++ ask ++ tail)
+  let base = cx_new(Some("library"), Some("library.dawn"))
+  let (provider, _) = check_module(base, old_library, map.empty())
+  let (new_provider, _) = check_module(base, new_library, map.empty())
+  if len(old_pd) != 0 || len(new_pd) != 0 || len(provider.diags) != 0 || len(new_provider.diags) != 0 {
+    panic("import provider fixture failed")
+  }
+  let old_env = map.from([("library", exports_of(provider, old_library, "library", "library"))])
+  let new_env = map.from([("library", exports_of(new_provider, new_library, "library", "library"))])
+  let text = if qualified { "use library as dep\npub fn both(x: dep.First) -> dep.First = dep.identity(x)\n" }
+    else { "use library.{Ask, Tell}\npub fn both() -> Int !Ask !Tell = ask() + tell()\n" }
+  let (syntax, pd) = parser.parse_module(text)
+  if len(pd) != 0 { panic("import consumer parse failed: " ++ join(map(pd, d => d.msg), "; ")) }
+  let consumer = cx_new(Some("consumer"), Some("consumer.dawn"))
+  let old_base = Cx { ..consumer, next_id: provider.next_id }
+  let new_base = Cx { ..consumer, next_id: new_provider.next_id }
+  let (before, sigs) = headers_for_body_probe(old_base, syntax, old_env)
+  let (next, nsigs) = headers_for_body_probe(new_base, syntax, new_env)
+  if len(before.diags) != 0 || len(next.diags) != 0 { panic("import consumer headers failed") }
+  let library_scope = module_key("import-world", "library", "library", "library.dawn")
+  let scope = module_key("import-world", "consumer", "consumer", "consumer.dawn")
+  let old_library_table = allocation.table(allocation.local_headers(library_scope, old_library, provider).expect("old provider provenance")).expect("old provider table")
+  let new_library_table = allocation.table(allocation.local_headers(library_scope, new_library, new_provider).expect("new provider provenance")).expect("new provider table")
+  let old_local = allocation.table(allocation.local_headers(scope, syntax, before).expect("old consumer provenance")).expect("old consumer table")
+  let new_local = allocation.table(allocation.local_headers(scope, syntax, next).expect("new consumer provenance")).expect("new consumer table")
+  let intrinsic = DeclKey { scope: module_key("import-world", "compiler", "compiler", "intrinsics"), path: [Named(FunctionDecl, "evidence_pack")] }
+  let reserved = allocation.table([allocation.entry(intrinsic, NominalId, 0, EV_PACK_ID), allocation.entry(intrinsic, TypeParameter, 0, 0)]).expect("intrinsics")
+  let old_table = allocation.combine([old_library_table, old_local, reserved]).expect("old program provenance")
+  let new_table = allocation.combine([new_library_table, new_local, reserved]).expect("new program provenance")
+  let old_ask = if qualified { map.get(provider.adts_by_name, "First").expect("old exported type") }
+    else { map.get(provider.effects, "Ask").expect("old exported effect") }
+  let new_ask = if qualified { map.get(new_provider.adts_by_name, "First").expect("new exported type") }
+    else { map.get(new_provider.effects, "Ask").expect("new exported effect") }
+  if old_ask == new_ask || relocate.nominal(allocation.between(old_table, new_table).expect("program IDs"), old_ask) != Some(new_ask) {
+    panic("provider effect identity did not move")
+  }
+  if relocate.nominal(allocation.between(old_local, new_local).expect("consumer IDs"), old_ask) != None {
+    panic("consumer invented imported provenance")
+  }
+  let decl = module_fns(syntax)[0]
+  let (after, body) = check_fn(before, decl, sigs[0])
+  let owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
+  let plan = allocation.body_plan(old_table, new_table, owner, before.next_id, after.next_id - before.next_id,
+    next.next_id, body.sig, nsigs[0], body.ev_syms).expect("import body plan")
+  let source = source_projection.between(text, text, decl.lo, decl.hi, decl.lo, decl.hi).expect("import source")
+  let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+    assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+  let saved = body_product.capture(before, after, body).expect("import body capture")
+  let projected = body_product.project(view, saved, next.next_id).expect("import body projection")
+  let replayed = body_product.assemble(next, projected).expect("import body assembly")
+  let (cold, cold_body) = check_fn(next, decl, nsigs[0])
+  let (_, whole) = check_module(new_base, syntax, new_env)
+  if len(after.diags) != 0 || len(cold.diags) != 0 { panic("import consumer body failed") }
+  StateTrial { replayed: replayed, cold: cold, relocated: projected.function, cold_body: cold_body, module_body: whole.fns[0] }
+}
 
 pub fn default_samples() -> List[StateTrial] !io = [default_sample(false, false), default_sample(true, false),
   default_sample(false, true), default_sample(true, true)]
@@ -135,7 +185,7 @@ fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
       new_cx.next_id, sig, new_sig, []).expect("default allocation")
     let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-      callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
     let saved = body_product.capture(old_cx, after, fn_value).expect("default capture")
     let projected = body_product.project(view, saved, new_cx.next_id).expect("default projection")
     new_cx = body_product.assemble(new_cx, projected).expect("default assembly")
@@ -155,7 +205,7 @@ fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
     old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, old_body.sig, mapped_sig, old_body.ev_syms).expect("main allocation")
   let main_view = View { ids: main_plan.ids, positions: source.starts, ends: source.ends, symbols: old_after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let main_saved = body_product.capture(old_cx, old_after, old_body).expect("main capture")
   let main_projected = body_product.project(main_view, main_saved, new_cx.next_id).expect("main projection")
   let replayed = body_product.assemble(new_cx, main_projected).expect("main assembly")
@@ -363,7 +413,7 @@ pub fn header_sample() -> HeaderTrial !io = {
   let source = source_projection.between(old_text, new_text, decl.lo, decl.hi, ndecl.lo, ndecl.hi).expect("header source view")
   let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let product = body_product.capture(before, after, saved).expect("header body capture")
   let projected = body_product.project(v, product, next.next_id).expect("header body projection")
   HeaderTrial { relocated: projected.function, cold: cold,

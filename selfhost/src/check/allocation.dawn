@@ -46,6 +46,17 @@ pub fn table(entries: List[Entry]) -> Option[Table] = {
 pub fn entry(declaration: DeclKey, domain: Domain, slot: Int, id: Int) -> Entry =
   Entry { binding: Binding { declaration: declaration, domain: domain, slot: HeaderSlot(slot) }, id: id }
 
+## Imports retain their declaring module's provenance. Combine those tables
+## rather than manufacturing owners from names in the importing scope.
+pub fn combine(tables: List[Table]) -> Option[Table] = {
+  var entries: List[Entry] = []
+  for t in tables {
+    let data: Data = t
+    for (binding, id) in map.entries(data.bindings) { entries = entries ++ [Entry { binding: binding, id: id }] }
+  }
+  table(entries)
+}
+
 pub fn temporary(declaration: DeclKey, domain: Domain, offset: Int, id: Int) -> Entry =
   Entry { binding: Binding { declaration: declaration, domain: domain, slot: BodySlot(offset) }, id: id }
 
@@ -326,6 +337,19 @@ test "allocation rejects competing owners and inconsistent binding observations"
   assert table([a, Entry { ..a, id: 6 }]) == None
   assert table([Entry { ..a, binding: Binding { ..a.binding, slot: HeaderSlot(-1) } }]) == None
   assert table([a, a]) != None
+}
+
+test "allocation combines original module owners without alias identities" {
+  let a = fixture_key("provider")
+  let b = DeclKey { ..a, scope: ModuleKey { ..a.scope, logical_module: "consumer", emission_owner: "consumer", source: "consumer.dawn" } }
+  let provider = table([entry(a, NominalId, 0, 1)]).expect("provider")
+  let consumer = table([entry(b, NominalId, 0, 2)]).expect("consumer")
+  let merged = combine([provider, consumer]).expect("combined")
+  let ids = between(merged, merged).expect("combined IDs")
+  assert relocate.nominal(ids, 1) == Some(1) && relocate.nominal(ids, 2) == Some(2)
+  assert combine([provider, provider]) == Some(provider)
+  let collision = table([entry(b, NominalId, 0, 1)]).expect("separate table")
+  assert combine([provider, collision]) == None
 }
 
 test "allocation separates header binders body temporaries and function evidence owners" {
