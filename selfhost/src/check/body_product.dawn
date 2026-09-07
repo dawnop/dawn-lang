@@ -196,7 +196,11 @@ pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = 
     if moved < allocation_start || moved >= limit { return None }
     id = id + 1
   }
-  let symbols = projected_changes(p.symbols, id => relocate.local_id(v.ids, id), s => projected_symbol(v, s))?
+  let moved_symbols = projected_changes(p.symbols, id => relocate.local_id(v.ids, id), s => projected_symbol(v, s))?
+  # Fresh symbols enter Cx.syms in allocation order. Evidence ABI permutation
+  # can reverse their mapped IDs; replaying the old insertion order would
+  # preserve values but change the observable target map order.
+  let symbols = sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))
   let signatures = projected_changes(p.signatures, name => Some(name), s => relocate.signature(v.ids, s))?
   let aliases = projected_changes(p.aliases, name => Some(name), t => relocate.ty(v.ids, t))?
   let bounds = projected_changes(p.bounds, id => relocate.type_var(v.ids, id), bs => projected_bounds(v, bs))?
@@ -270,6 +274,25 @@ test "body product rejects unowned writes and diagnostic prefix replacement" {
   assert capture(before, Cx { ..before, diags: [Diag { ..d, msg: "changed" }] }, f) == None
   assert capture(before, Cx { ..before, next_id: before.next_id - 1 }, f) == None
   assert capture(before, Cx { ..before, frame: Frame { ..before.frame, loop_stack: [0] } }, f) == None
+}
+
+test "body product restores symbol insertion order after a binding permutation" {
+  let before = Cx { ..cx_new(None, None), next_id: 10 }
+  let f = fixture_function(before)
+  let x = Sym { name: "x", ty: TyInt, mutable: false, dlo: 0, dhi: 1,
+    dict_of: None, ev_of: None, cell_of: None }
+  let y = Sym { ..x, name: "y" }
+  let after = Cx { ..before, next_id: 12, syms: map.from([(10, x), (11, y)]) }
+  let p = capture(before, after, f).expect("capture permutation")
+  let none: Map[Int, Int] = map.empty()
+  let ids = relocate.new(none, none, none, none, map.from([(10, 41), (11, 40)])).expect("swapped IDs")
+  let view = View { ids: ids, positions: map.from([(0, 0)]), ends: map.from([(1, 1)]),
+    assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => Some(f.sig) }
+  let projected = project(view, p, 40).expect("project permutation")
+  let result = assemble(Cx { ..before, next_id: 40 }, projected).expect("assemble permutation")
+  assert map.keys(result.syms) == [40, 41]
+  assert map.get(result.syms, 40) == Some(y) && map.get(result.syms, 41) == Some(x)
 }
 
 test "body product projects every state reference and the whole allocation interval" {

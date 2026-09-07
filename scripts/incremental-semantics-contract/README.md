@@ -70,10 +70,11 @@ test block状态的完整冷模块对照，丢封定签名写入、保留错误i
 native-selfhost-tests 分别执行tree的47项、source的35项及identity的39项依赖闭包（包含重叠依赖），
 因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
 
-`state-product.py` 验证状态产品提取/装配及跨坐标投影的14个成功编译负控，
+`state-product.py` 验证状态产品提取/装配及跨坐标投影的15个成功编译负控，
 覆盖签名/alias/约束写入、frame替换、诊断、环境守卫、分配起点及未进入syms的
-分配ID、类型/效果域和handler cell。另有Cx字段分类审计及新增未分类字段的拒绝负控。
-该入口在incremental-projection执行；native脚本另跑body_product的57项owning依赖
+分配ID、类型/效果域、handler cell及非单调ID映射后的symbol插入顺序。
+另有Cx字段分类审计及新增未分类字段的拒绝负控。
+该入口在incremental-projection执行；native脚本另跑body_product的58项owning依赖
 闭包（与其他目标重叠，不相加当独立测试数）。
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
