@@ -59,7 +59,12 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控。源码token相等不证明AST相等，尤其不能忽略换行的语义。
-native-selfhost-tests 分别执行tree的47项及source的35项依赖闭包（包含重叠依赖），
+`identity.py` 验证生产声明候选身份及八个成功编译负控：重复父声明及子路径、
+类型/关联效果的绑定槽归一、默认参数歧义、模块world隔离。具名owning断言必须失败，
+编译或链接失败不算负控。typed模式现在通过适配器调用生产声明索引；legacy模式
+保留原型身份实现及原来的八个负控。候选key不证明依赖环境或body有效。
+
+native-selfhost-tests 分别执行tree的47项、source的35项及identity的39项依赖闭包（包含重叠依赖），
 因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、

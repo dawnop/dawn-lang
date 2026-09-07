@@ -79,7 +79,9 @@ Sig保留参数/binder的声明顺序，Sym的字典元数据按(trait,typevar)�
 `EvidenceRole`（label、variable、associated 的类型参数/trait/成员），
 由 checker 在读取构造点写入，lower 仍消费原 key，保持运行时契约。
 重定位按完整角色投影 ABI 顺序；不能用 key 去重或通过源码位置猜来源。
-该元数据迁移尚待完整冷暖、双后端和 Core 验收，不代表函数缓存上线。
+该元数据与树/源码投影已随#111验收合并（`0ec2d6b8`）：630项JVM测试、
+native主图与新增模块闭包、Core及B==C通过，PR的51项检查全绿。
+这证明该批基础设施的回归门禁通过，不代表全语言冷暖等价或函数缓存上线。
 
 完整树投影原型位于 `check/relocate_tree`：显式位置边界表、旧符号表和旧callee
 签名视图共同驱动所有 TExpr/TStmt/TPat 分支及 TFun/default/TModule 投影。
@@ -101,6 +103,14 @@ NEWLINE忽略仅服务位置投影，调用方仍须独立确认AST/依赖一致
 迁移的所有来源字段均已覆盖。源码投影目前持有完整两版文本，内存预算仍需后续收口。
 
 ## 五、七期与报告
+
+声明候选身份位于`check/identity`，采用调用方提供的已解析模块来源加声明路径：顶层函数/type/trait/effect/const/test
+按类别与名字区分，方法/构造器/default以及trait/impl的关联类型和效果成员从其父
+声明派生；impl以trait拼写和去位置的subject结构为候选头，泛型绑定按声明槽归一，
+包括函数效果行和类型效果实参中的`T.E`投影（保留成员名与槽，模块限定名不折叠）。
+重复父声明会连带拒绝全部子身份，
+位置与数字分配ID不入key。此key只回答候选配对，不证明header/解析环境/函数体
+等价；alias解析和coherence仍由语义依赖检查负责，不能据语法key直接命中缓存。
 
 | 期 | 交付 | 状态 |
 |---|---|---|

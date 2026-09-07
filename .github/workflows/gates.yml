@@ -1069,11 +1069,12 @@ jobs:
 
   incremental-projection:
     runs-on: ubuntu-latest
-    # Local complete runs on 2026-09-08: typed tree and seven mutants 36.10s;
-    # source/checker-origin and six mutants 25.50s. Double rounded values and
-    # add the existing 38s checkout/toolchain allowance: 2*(37+26)+38=164s.
-    # budget: 3x 164s planning value
-    timeout-minutes: 9
+    # Run 34157181061 took 134s before declaration identity was added.
+    # Local complete runs on 2026-09-08: typed tree 39.06s, source/origin
+    # 25.50s, identity plus eight mutants 36.38s. Double rounded values and
+    # retain the 38s checkout/toolchain allowance: 2*(40+26+37)+38=244s.
+    # budget: 3x 244s planning value
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1083,6 +1084,7 @@ jobs:
         run: |
           python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
           python3 scripts/incremental-semantics-contract/projection.py
+          python3 scripts/incremental-semantics-contract/identity.py
 
   incremental-prefix:
     runs-on: ubuntu-latest
@@ -3298,7 +3300,9 @@ jobs:
     # there is one.
     # The tree/source mappers are not reachable from nmain yet. Their separate
     # targets took 7.91s and 3.40s locally on 2026-09-08; add 2*(8+4)s.
-    # budget: 3x 404s planning value (see the note above)
+    # Run 34157181061 took 296s with those two targets. Keep the conservative
+    # 404s base and add 2*7s for identity's 6.13s local run on 2026-09-08.
+    # budget: 3x 418s planning value (see the note above)
     timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4

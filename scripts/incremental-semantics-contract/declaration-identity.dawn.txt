@@ -1,0 +1,17 @@
+# Preserve the private probe interface while delegating candidate admission
+# to the production declaration index. This does not establish cache validity.
+use compiler/front/ast.{FnDecl, Module, DFn}
+use compiler/check/identity as keys
+use compiler/check/identity.{Named, FunctionDecl}
+
+pub type ModuleKey = { world: String, logical_module: String, emission_owner: String, source: String }
+pub type FunctionKey = { scope: ModuleKey, name: String }
+
+pub fn function_key(scope: ModuleKey, declarations: List[FnDecl], name: String) -> Option[FunctionKey] = {
+  let owner = keys.module_key(scope.world, scope.logical_module, scope.emission_owner, scope.source)
+  let m = Module { decls: map(declarations, f => DFn(f)) }
+  for e in keys.declarations(owner, m) {
+    if e.key.path == [Named(FunctionDecl, name)] { return Some(FunctionKey { scope: scope, name: name }) }
+  }
+  None
+}
