@@ -1,0 +1,26 @@
+# Pin each signed width independently; an int-only guard cannot protect byte/short.
+use java "fixture.SamValues"
+
+fn ensure(ok: Bool) -> Unit = if not ok { panic("SAM narrow value mismatch") }
+
+fn checked(f: fn() -> Int !io, expected: String) -> Unit !io =
+  match catch_panic(f) {
+    Err(e) -> ensure(e.message == expected)
+    Ok(_) -> panic("out-of-range SAM return was accepted")
+  }
+
+pub fn main() -> Unit !io = {
+  for n in [-128, 0, 127] { ensure(SamValues.byteValue(() => n) == n) }
+  for n in [-32768, 0, 32767] { ensure(SamValues.shortValue(() => n) == n) }
+  for n in [-2147483648, 0, 2147483647] { ensure(SamValues.intValue(() => n) == n) }
+  for n in [-129, 128, -9223372036854775808, 9223372036854775807] {
+    checked(() => SamValues.byteValue(() => n), "Dawn callback returned an Int outside Java byte range")
+  }
+  for n in [-32769, 32768, -9223372036854775808, 9223372036854775807] {
+    checked(() => SamValues.shortValue(() => n), "Dawn callback returned an Int outside Java short range")
+  }
+  for n in [-2147483649, 2147483648, -9223372036854775808, 9223372036854775807] {
+    checked(() => SamValues.intValue(() => n), "Dawn callback returned an Int outside Java int range")
+  }
+  println("SAM_NARROW_OK")
+}

@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` 下现有 109 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 110 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并标出文档生命周期。**篇数与「每篇都在索引里」这两件事都由
@@ -29,6 +29,8 @@
 | [grammar.ebnf](grammar.ebnf) | historical | 机器可读语法，**已落后于 parser**（2026-08-04 复核仍成立：缺 `use … as`、要求所有函数写 `-> type`、用未定义的 `UPPER_IDENT`、`. IDENT` 不覆盖 `Class.FIELD`）。以 spec.md 与 `selfhost/src/front/parser.dawn` 为准；可执行的那份期望是 `scripts/grammar-corpus/`（CI 门禁），文法的分叉现在以一个失败用例出现。SYN-02/SYN-03 已从**另一头**关掉——本文件写对了，是实现补上了它，逐条见文件头部。 |
 
 ## 当前全仓审查（v2）
+
+SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
