@@ -27,6 +27,7 @@ def main():
         ("body-endpoint", "next_id: target + count", "next_id: target + count - 1"),
         ("body-carry", "old_allocations: old_allocations, next_allocations: next_allocations",
          "old_allocations: old_headers, next_allocations: next_headers"),
+        ("module-combine", "  table(entries)\n}", "  table([])\n}"),
     ]
     with tempfile.TemporaryDirectory(prefix="dawn-allocation-") as temp:
         root = Path(temp)

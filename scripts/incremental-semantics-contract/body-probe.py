@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Survey body state in an isolated compiler, preserving production header order.
 
-The extracted header prefix is private test instrumentation, not a replacement
-checker. Failing anchors stop the experiment instead of silently probing a
-different phase order. No production source or emission contract is modified.
+Private adapters read the production ModuleHeaders stage product, not a second
+copy of the header passes. No production source or emission contract is modified.
 """
 import argparse
 import hashlib
@@ -103,13 +102,8 @@ def main():
     (output / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
     checker = output / "selfhost/src/check/checker.dawn"
     source = checker.read_text()
-    start = "pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io = {\n"
-    end = "  # 5. inferred functions first, in call-dependency order"
-    if source.count(start) != 1 or source.count(end) != 1:
-        raise RuntimeError("Header probe anchors drifted")
-    prefix = source.split(start, 1)[1].split(end, 1)[0]
     checker.write_text(source + "\npub fn headers_with_impls_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig], List[List[Option[Sig]]]) !io = {\n"
-                       + prefix + "  (cx1, sigs, impl_sigs)\n}\n"
+                       + "  let headers = check_module_headers(cx, m, env)\n  (headers.cx, headers.sigs, headers.impl_sigs)\n}\n"
                        + "\npub fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
                        + "  let (next, sigs, _) = headers_with_impls_for_body_probe(cx, m, env)\n  (next, sigs)\n}\n")
     fixture = output / "scripts/body-probe"
@@ -130,6 +124,7 @@ def main():
         probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
         probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
         probe += "pub fn default_samples() -> List[typed_projection.StateTrial] !io = typed_projection.default_samples()\n"
+        probe += "pub fn import_samples() -> List[typed_projection.StateTrial] !io = typed_projection.import_samples()\n"
         probe += "pub fn state_count(xs: List[typed_projection.StateTrial]) -> Int = len(xs)\n"
         probe += "pub fn state_at(xs: List[typed_projection.StateTrial], i: Int) -> typed_projection.StateTrial = xs[i]\n"
         old = "relocation.relocate(body, Move {\n        start: before.next_id, limit: after.next_id, delta: 1000, span: 0 })"

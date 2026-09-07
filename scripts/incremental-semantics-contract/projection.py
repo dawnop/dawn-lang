@@ -21,6 +21,15 @@ def owning(output, module, title):
 def main():
     started = time.monotonic()
     jobs = [
+        ("checker", "check_module: a whole module checks end to end", [
+            ("header-inference-state", "cx: cx1, sigs: sigs, impl_sigs: impl_sigs", "cx: cx1, sigs: map(sigs, s => Sig { ..s, inferring: false }), impl_sigs: impl_sigs"),
+            ("header-const-types", "impl_sigs: impl_sigs, const_tys: const_tys }", "impl_sigs: impl_sigs, const_tys: [] }"),
+        ]),
+        ("relocate_tree", "tree callee lookup preserves declaring owners across module aliases", [
+            ("callee-owner", "sig.owner == owner && sig.name == name", "sig.name == name"),
+            ("callee-module-alias", "for (_, sig) in map.entries(cx.module_fn_sigs) { candidates = candidates ++ [sig] }", ""),
+            ("callee-conflict", "Some(previous) -> if previous != sig { return None }", "Some(previous) -> ()"),
+        ]),
         ("source_projection", "source projection ", [
             ("same-boundary-table", "ends: ends, old_text:", "ends: starts, old_text:"),
             ("changed-token", "a.kind != b.kind || str.slice(old_text, a.lo, a.hi) != str.slice(new_text, b.lo, b.hi)", "false"),
@@ -58,7 +67,7 @@ def main():
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
                 print("OK: projection " + module + " " + name, flush=True)
             target.write_text(original)
-    print(f"OK: source/evidence projection and six compiling mutants, {time.monotonic() - started:.2f}s")
+    print(f"OK: source/evidence/callee/header projection and eleven compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":
