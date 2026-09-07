@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 08ea2b196b8b7e9c -->
+<!-- doc-check: translation-of docs/spec.md @ 9ac06c6fd0cc6911 -->
 
 # Dawn Language Specification
 
@@ -3014,9 +3014,10 @@ fn spawn_hello(msg: String) -> Unit !io = {
   This is complementary to wrapping return values in `Option` (§9.2): null in return
   position is normal and therefore goes into the type, null in a callback parameter is
   pathological and therefore fails fast.
-- **Narrowing return values**: when the SAM method wants an `int` and the Dawn function
-  returns `Int`, a **checked narrowing** is done — out of range panics, it is not
-  silently truncated; when it wants a `float`, `Float` is narrowed by the IEEE rules
+- **Narrowing return values**: when the SAM method wants a `byte`, `short` or `int` and
+  the Dawn function returns `Int`, a **checked narrowing** is done — values outside
+  the target signed 8-, 16- or 32-bit range panic, they are not silently truncated;
+  when it wants a `float`, `Float` is narrowed by the IEEE rules
   (precision may be lost, which is floating-point semantics, not overflow).
 - A Dawn function that panics inside a callback is handed to the Java caller as
   `dawn.rt.PanicError` (a subclass of `Error`), neither caught nor wrapped.
