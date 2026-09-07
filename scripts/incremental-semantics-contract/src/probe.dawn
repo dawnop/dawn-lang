@@ -1,0 +1,46 @@
+# Exercise the oracle at the checker boundary, not just through hand-written
+# hook calls. This suite is outside selfhost to keep test-only imports from
+# adding a Java dependency to the shared driver's native closure.
+
+use std/map
+use compiler/front/parser
+use compiler/check/cx.{Cx, ModExports, cx_new}
+use compiler/check/checker.{check_module, exports_of}
+use compiler/jvm/jreflect.{jsig_real, query_probe}
+
+test "pure modules read no Java hook even when the oracle is enabled" {
+  let (m, pd) = parser.parse_module("pub fn answer() -> Int = 42\n")
+  assert len(pd) == 0
+  let probe = query_probe(jsig_real())
+  let cx = Cx { ..cx_new(Some("pure"), None), jsig: probe.jsig }
+  let env: Map[String, ModExports] = map.empty()
+  let (checked, _) = check_module(cx, m, env)
+  assert len(checked.diags) == 0
+  assert probe.queries() == 0
+}
+
+test "an imported Java value still records queries without a use java declaration" {
+  let (m, pd) = parser.parse_module(
+    "use java \"java.util.ArrayList\"\npub fn items() -> ArrayList !io = ArrayList.new()\n")
+  assert len(pd) == 0
+  let producer_probe = query_probe(jsig_real())
+  let producer = Cx { ..cx_new(Some("producer"), None), jsig: producer_probe.jsig }
+  let env: Map[String, ModExports] = map.empty()
+  let (checked, _) = check_module(producer, m, env)
+  assert len(checked.diags) == 0
+  assert producer_probe.queries() > 0
+  let exports = exports_of(checked, m, "producer", "producer")
+  let (consumer, cpd) = parser.parse_module(
+    "use producer\npub fn count() -> Int !io = producer.items().size()\n")
+  assert len(cpd) == 0
+  let consumer_probe = query_probe(jsig_real())
+  let cx = Cx {
+    ..cx_new(Some("consumer"), None),
+    jsig: consumer_probe.jsig,
+    next_id: checked.next_id
+  }
+  let (result, _) = check_module(cx, consumer, map.insert(env, "producer", exports))
+  for d in result.diags { println(d.msg) }
+  assert len(result.diags) == 0
+  assert consumer_probe.queries() > 0
+}

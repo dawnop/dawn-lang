@@ -62,6 +62,58 @@ pub type JsigLease = {
   close: fn() -> Unit !io
 }
 
+## A host-owned query counter. The checker cannot allocate shared mutable
+## state: native hosts can provide a refusing probe, while JVM hosts own the
+## counter beside their reflection implementation. Read it at the end of an
+## analysis step; later tooling reads must not change that saved scalar.
+pub type JsigProbe = { jsig: Jsig, queries: fn() -> Int !io }
+
+## Observe every external query, including failed lookups, before forwarding
+## it. Reading the fixed `on` gate is not an external query. No reflection or
+## mutable host object crosses this boundary; the caller supplies the effect.
+pub fn observe_queries(js: Jsig, note: fn() -> Unit !io) -> Jsig =
+  Jsig {
+    on: js.on,
+    find_class: name => {
+      note()
+      js.find_class(name)
+    },
+    class_info: name => {
+      note()
+      js.class_info(name)
+    },
+    methods_of: name => {
+      note()
+      js.methods_of(name)
+    },
+    ctors_of: name => {
+      note()
+      js.ctors_of(name)
+    },
+    static_fields_of: name => {
+      note()
+      js.static_fields_of(name)
+    },
+    is_assignable: (sup, sub) => {
+      note()
+      js.is_assignable(sup, sub)
+    },
+    sam_of: name => {
+      note()
+      js.sam_of(name)
+    },
+    component_of: name => {
+      note()
+      js.component_of(name)
+    }
+  }
+
+## Only a refusing host may claim zero queries without observing them.
+pub fn refused_probe(js: Jsig) -> JsigProbe = {
+  if js.on { panic("jsig: an enabled oracle needs a host query probe") }
+  JsigProbe { jsig: js, queries: () => 0 }
+}
+
 # The stubs behind the refusal: reaching one means a Java type got past the
 # gate, which is a checker bug, not a user error.
 fn no_find_class(fqcn: String) -> Option[JClass] !io =
@@ -107,3 +159,32 @@ pub fn jsig_refused() -> Jsig =
 ## resource protocol for native execution.
 pub fn jsig_refused_lease() -> JsigLease =
   JsigLease { jsig: jsig_refused(), close: () => () }
+
+test "query observation precedes every hook including a failing query" {
+  let js = observe_queries(jsig_refused(), () => panic("query-observed"))
+  assert not js.on
+  let calls: List[fn() -> Unit !io] = [
+    () => { let _ = js.find_class("Missing") },
+    () => { let _ = js.class_info("Missing") },
+    () => { let _ = js.methods_of("Missing") },
+    () => { let _ = js.ctors_of("Missing") },
+    () => { let _ = js.static_fields_of("Missing") },
+    () => { let _ = js.is_assignable("Super", "Sub") },
+    () => { let _ = js.sam_of("Missing") },
+    () => { let _ = js.component_of("Missing") }
+  ]
+  for call in calls {
+    match catch_panic(call) {
+      Err(e) -> { assert e.message == "query-observed" }
+      Ok(_) -> { assert false }
+    }
+  }
+}
+
+test "a refused probe cannot claim an enabled oracle is query free" {
+  let js = Jsig { ..jsig_refused(), on: true }
+  match catch_panic(() => refused_probe(js)) {
+    Err(e) -> { assert e.message == "jsig: an enabled oracle needs a host query probe" }
+    Ok(_) -> { assert false }
+  }
+}

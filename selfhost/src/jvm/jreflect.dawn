@@ -14,7 +14,7 @@
 use std/str
 use std/list
 use std/set
-use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, JsigLease}
+use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, JsigLease, JsigProbe, observe_queries, jsig_refused, refused_probe}
 use java "java.io.File"
 use java "java.lang.Object"
 use java "java.lang.Class"
@@ -28,6 +28,7 @@ use java "java.lang.reflect.Modifier"
 use java "java.util.Objects"
 use java "java.lang.invoke.MethodHandles"
 use java "java.lang.invoke.MethodHandle"
+use java "java.util.concurrent.atomic.AtomicLong"
 
 type TargetLoader = { base: ClassLoader, closeable: URLClassLoader }
 
@@ -253,6 +254,14 @@ fn lease_with(loader: TargetLoader, asm_bridge: Bool) -> JsigLease =
 pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
   let loader = loader_for(jars)
   lease_with(loader, target_has_asm(loader.base))
+}
+
+## Keep observation state at the JVM boundary, not in the shared checker.
+## Each probe starts afresh and does not own or extend the underlying lease.
+pub fn query_probe(js: Jsig) -> JsigProbe !io = {
+  let count = AtomicLong.new(0)
+  let observed = observe_queries(js, () => { let _ = count.incrementAndGet() })
+  JsigProbe { jsig: observed, queries: () => count.get() }
 }
 
 ## Resolve a `use java` name (spec §9.1): the fqcn as written, then trailing
@@ -504,6 +513,68 @@ fn component_of_with(loader: ClassLoader, fqcn: String) -> Option[String] !io =
 pub fn component_of(fqcn: String) -> Option[String] !io = component_of_with(sys_loader(), fqcn)
 
 # ---- tests ----
+
+test "query probes preserve the gate and keep independent counters" {
+  let a = query_probe(jsig_real())
+  let b = query_probe(jsig_real())
+  assert a.jsig.on
+  assert a.queries() == 0
+  assert b.queries() == 0
+  let find = a.jsig.find_class
+  assert find("no.such.IncrementalProbeClass") == None
+  assert a.queries() == 1
+  assert b.queries() == 0
+  let refused = refused_probe(jsig_refused())
+  assert not refused.jsig.on
+  assert refused.queries() == 0
+  let off = query_probe(jsig_refused())
+  assert not off.jsig.on
+  assert off.queries() == 0
+}
+
+test "query probes count all eight hooks without changing their answers" {
+  let base = jsig_real()
+  let p = query_probe(base)
+  let js = p.jsig
+  let find = js.find_class
+  let info = js.class_info
+  let methods = js.methods_of
+  let ctors = js.ctors_of
+  let fields = js.static_fields_of
+  let assignable = js.is_assignable
+  let sam = js.sam_of
+  let component = js.component_of
+  let base_methods = base.methods_of
+  let base_ctors = base.ctors_of
+  let base_fields = base.static_fields_of
+  match find("java.lang.String") {
+    Some(c) -> { assert c.fqcn == "java.lang.String" }
+    None -> { assert false }
+  }
+  assert p.queries() == 1
+  assert info("java.lang.String").simple == "String"
+  assert p.queries() == 2
+  assert len(methods("java.lang.String")) == len(base_methods("java.lang.String"))
+  assert p.queries() == 3
+  assert len(ctors("java.lang.String")) == len(base_ctors("java.lang.String"))
+  assert p.queries() == 4
+  assert len(fields("java.lang.Integer")) == len(base_fields("java.lang.Integer"))
+  assert p.queries() == 5
+  assert assignable("java.lang.Object", "java.lang.String")
+  assert not assignable("java.lang.String", "java.lang.Object")
+  assert p.queries() == 7
+  match sam("java.lang.Runnable") {
+    Some(m) -> { assert m.name == "run" }
+    None -> { assert false }
+  }
+  assert p.queries() == 8
+  assert component("[I") == Some("int")
+  assert p.queries() == 9
+  let saved = p.queries()
+  assert find("no.such.IncrementalProbeClass") == None
+  assert saved == 9
+  assert p.queries() == 10
+}
 
 test "classes resolve, including nested ones via the dollar walk" {
   assert class_info("java.lang.StringBuilder").simple == "StringBuilder"
