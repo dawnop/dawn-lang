@@ -1,6 +1,7 @@
 # 增量语义契约夹具
 
-生产入口仍是冷分析；这些命令不证明已经实现缓存。
+多文件 LSP 已启用保守前缀缓存；CLI 与 standalone 仍走冷分析。
+下列冷路径命令本身不证明缓存命中，命中由前缀/工作区执行计数门禁另行验证。
 
 - `python3 scripts/incremental-semantics-contract/probe.py`：八个 Java hook 与
   refusing guard 的九个可编译负控。
@@ -52,6 +53,14 @@ owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区
 立即跟 barrier 强制 flush，所以 sync 不包括空闲 debounce。随后单独测
 hover/definition/completion，并保存原始回复和 RSS。示例参数：
 `--entry <path> --edit <path> --needle <reference> --output <new-dir> -- <server-command>`。
+
+单大模块错误恢复使用 `standalone-large.dawn.txt`（500个简单函数及一个入口，
+合成语料，不冒充真实大型应用）。在上述参数后加
+`--uri untitled:incremental-large --error-round 5`，entry/edit 指向同一份文件，
+needle 为 `value_499(1)`。11轮中的第5轮注入类型错误，第6轮恢复；每轮必须发布
+当前文档版本，错误必须落在注入声明的位置，恢复后全部诊断必须清空。
+错误轮不混入正常编辑中位数；原始 diagnostics 与 query 回复一同保存，用于旧冷路径
+对拍。`lsp-bench.py --self-test` 验证诊断判定器及六个负控，并在 CI 执行。
 
 `lsp-observe.py --output <new-dir>` 构建私有服务器，在 stderr 记录最终模块顺序和
 实际复用/执行计数，不改变生产协议；`--cold` 只在私有副本里强制每轮先逐出 Session。
