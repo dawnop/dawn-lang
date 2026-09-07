@@ -123,7 +123,7 @@ pub fn render_doc_play(
   map_url: fn(String) -> String,
   play: Option[Play],
 ) -> Doc = {
-  var html = ""
+  var chunks: List[String] = []
   var toc: List[TocEntry] = []
   var title = ""
   var h2 = 0
@@ -136,32 +136,32 @@ pub fn render_doc_play(
           if title == "" {
             title = inline_text(items)
           }
-          html = html ++ heading_html(1, "", items, map_url) ++ "\n"
+          chunks = chunks ++ [heading_html(1, "", items, map_url) ++ "\n"]
         } else if lvl == 2 {
           h2 = h2 + 1
           h3 = 0
           h4 = 0
           let id = "s$h2"
           toc = toc ++ [TocEntry { level: 2, id: id, text: inline_text(items) }]
-          html = html ++ heading_html(2, id, items, map_url) ++ "\n"
+          chunks = chunks ++ [heading_html(2, id, items, map_url) ++ "\n"]
         } else if lvl == 3 {
           h3 = h3 + 1
           h4 = 0
           let id = "s$h2-$h3"
           toc = toc ++ [TocEntry { level: 3, id: id, text: inline_text(items) }]
-          html = html ++ heading_html(3, id, items, map_url) ++ "\n"
+          chunks = chunks ++ [heading_html(3, id, items, map_url) ++ "\n"]
         } else {
           h4 = h4 + 1
           let id = "s$h2-$h3-$h4"
-          html = html ++ heading_html(4, id, items, map_url) ++ "\n"
+          chunks = chunks ++ [heading_html(4, id, items, map_url) ++ "\n"]
         }
       }
       _ -> {
-        html = html ++ block_html(b, map_url, play) ++ "\n"
+        chunks = chunks ++ [block_html(b, map_url, play) ++ "\n"]
       }
     }
   }
-  Doc { html: html, toc: toc, title: title }
+  Doc { html: join(chunks, ""), toc: toc, title: title }
 }
 
 fn keep_url(u: String) -> String = u

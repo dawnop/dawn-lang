@@ -474,26 +474,30 @@ fn slot_of(t: Ty) -> String =
 
 # ---- literals ----
 
+## The pieces are gathered and joined once rather than appended to a growing
+## string: a literal is as long as the program made it -- the embedded std
+## source arrives here in one piece -- and `acc = acc ++ piece` recopies the
+## whole prefix per code point.
 fn c_escape(s: String) -> String = {
-  var out = ""
+  var parts: List[String] = []
   for cp in code_points(s) {
     if cp == '"' {
-      out = out ++ "\\\""
+      parts = parts ++ ["\\\""]
     } else if cp == '\\' {
-      out = out ++ "\\\\"
+      parts = parts ++ ["\\\\"]
     } else if cp == '\n' {
-      out = out ++ "\\n"
+      parts = parts ++ ["\\n"]
     } else if cp == '\r' {
-      out = out ++ "\\r"
+      parts = parts ++ ["\\r"]
     } else if cp == '\t' {
-      out = out ++ "\\t"
+      parts = parts ++ ["\\t"]
     } else if cp < ' ' {
-      out = out ++ "\\" ++ oct3(char.code(cp))
+      parts = parts ++ ["\\" ++ oct3(char.code(cp))]
     } else {
-      out = out ++ from_code_points([cp])
+      parts = parts ++ [from_code_points([cp])]
     }
   }
-  out
+  join(parts, "")
 }
 
 fn oct3(n: Int) -> String =

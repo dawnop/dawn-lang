@@ -240,30 +240,30 @@ fn sub(id: String, title: String) -> String =
 # ---- the three generated sections ----
 
 fn prelude_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
-  var html = ""
+  var html: List[String] = []
   var toc: List[TocEntry] = []
   for g in jarr(jget(root, "groups")) {
     let name = field(g, "name")
     let gid = "g-$name"
     toc = toc ++ [TocEntry { level: 3, id: gid, text: name }]
-    html = html ++ sub(gid, name)
+    html = html ++ [sub(gid, name)]
     for f in jarr(jget(g, "fns")) {
-      html = html ++ fn_entry(docs, "", "p", f) ++ "\n"
+      html = html ++ [fn_entry(docs, "", "p", f) ++ "\n"]
     }
   }
-  (html, toc)
+  (join(html, ""), toc)
 }
 
 fn traits_html(docs: List[String], root: Json) -> String = {
-  var html = ""
+  var html: List[String] = []
   for t in jarr(jget(root, "traits")) {
-    html = html ++ trait_entry(docs, "prelude", t) ++ "\n"
+    html = html ++ [trait_entry(docs, "prelude", t) ++ "\n"]
   }
-  html
+  join(html, "")
 }
 
 fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocEntry]) = {
-  var html = ""
+  var html: List[String] = []
   var toc: List[TocEntry] = []
   for m in jarr(jget(root, "modules")) {
     let path = field(m, "path")
@@ -271,24 +271,24 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
     # the call-site alias is the file's own name: `use std/str` binds `str`
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
     toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
-    html = html ++ sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(c, m)
+    html = html ++ [sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(c, m)]
     for t in jarr(jget(m, "types")) {
-      html = html ++ type_entry(docs, slug(path), t) ++ "\n"
+      html = html ++ [type_entry(docs, slug(path), t) ++ "\n"]
     }
     for t in jarr(jget(m, "traits")) {
-      html = html ++ trait_entry(docs, slug(path), t) ++ "\n"
+      html = html ++ [trait_entry(docs, slug(path), t) ++ "\n"]
     }
     for c in jarr(jget(m, "consts")) {
-      html = html ++ const_entry(docs, qual, slug(path), c) ++ "\n"
+      html = html ++ [const_entry(docs, qual, slug(path), c) ++ "\n"]
     }
     for e in jarr(jget(m, "effects")) {
-      html = html ++ effect_entry(docs, slug(path), e) ++ "\n"
+      html = html ++ [effect_entry(docs, slug(path), e) ++ "\n"]
     }
     for f in jarr(jget(m, "fns")) {
-      html = html ++ fn_entry(docs, qual, slug(path), f) ++ "\n"
+      html = html ++ [fn_entry(docs, qual, slug(path), f) ++ "\n"]
     }
   }
-  (html, toc)
+  (join(html, ""), toc)
 }
 
 # ---- the same entries, as an index ----

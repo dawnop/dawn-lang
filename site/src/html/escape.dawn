@@ -1,5 +1,9 @@
 # HTML escaping shared by the whole generator. Splices around the rare
 # special characters instead of appending per code point.
+#
+# The spliced pieces are collected and joined once rather than concatenated
+# into a growing string: a code-heavy paragraph has hundreds of them, and
+# `acc = acc ++ piece` recopies the whole prefix on every one.
 
 use std/str
 use md/text.{cp_at}
@@ -11,20 +15,18 @@ fn entity(c: Char) -> String =
 pub fn escape_html(s: String) -> String = {
   let cs = code_points(s)
   let n = len(cs)
-  var out = ""
+  var parts: List[String] = []
   var start = 0
-  var any = false
   var i = 0
   while i < n {
     let c = cp_at(cs, i)
     if c == '&' || c == '<' || c == '>' {
-      out = out ++ str.slice(s, start, i) ++ entity(c)
+      parts = parts ++ [str.slice(s, start, i) ++ entity(c)]
       start = i + 1
-      any = true
     }
     i = i + 1
   }
-  if any { out ++ str.slice(s, start, n) } else { s }
+  if len(parts) == 0 { s } else { join(parts ++ [str.slice(s, start, n)], "") }
 }
 
 test "escapes only what html needs" {

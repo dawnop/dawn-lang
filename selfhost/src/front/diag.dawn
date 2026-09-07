@@ -81,16 +81,16 @@ pub fn count_line(n: Int) -> String =
 pub fn render_manifest(path: String, text: String, ds: List[Diag]) -> String = {
   let v = view_of(text)
   let starts = line_starts_of(text)
-  var out = ""
-  for d in ds { out = out ++ render_at(path, v, starts, d) }
-  out ++ count_line(len(ds)) ++ "\n"
+  var out: List[String] = []
+  for d in ds { out = out ++ [render_at(path, v, starts, d)] }
+  join(out ++ [count_line(len(ds)) ++ "\n"], "")
 }
 
 ## Render (path, diagnostic) pairs in order, reading and decoding each file's
 ## text once (the render arithmetic needs the source; diags carry only the path).
 pub fn render_all(diags: List[(String, Diag)]) -> String !Fs = {
   var srcs: Map[String, (SourceView, List[Int])] = map.empty()
-  var out = ""
+  var out: List[String] = []
   for pr in diags {
     let (path, d) = pr
     let src = match map.get(srcs, path) {
@@ -106,9 +106,9 @@ pub fn render_all(diags: List[(String, Diag)]) -> String !Fs = {
       }
     }
     let (v, starts) = src
-    out = out ++ render_at(path, v, starts, d)
+    out = out ++ [render_at(path, v, starts, d)]
   }
-  out
+  join(out, "")
 }
 
 test "renders the arrow, source line, caret and hint" {

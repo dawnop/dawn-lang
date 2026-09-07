@@ -117,7 +117,7 @@ fn string_end(cs: List[Char], from: Int) -> Int = {
 
 ## A string token [from, to) rendered with $name / ${expr} marked as class i.
 fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
-  var out = ""
+  var parts: List[String] = []
   var start = from
   var i = from
   while i < to {
@@ -126,7 +126,7 @@ fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
       i = i + 2
     } else if c == '$' && is_ident_start(cp_at(cs, i + 1)) {
       let e = ident_end(cs, i + 1)
-      out = out ++ span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e))
+      parts = parts ++ [span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e))]
       start = e
       i = e
     } else if c == '$' && cp_at(cs, i + 1) == '{' {
@@ -135,7 +135,7 @@ fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
         e = e + 1
       }
       let e2 = if e < to { e + 1 } else { e }
-      out = out ++ span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e2))
+      parts = parts ++ [span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e2))]
       start = e2
       i = e2
     } else {
@@ -143,17 +143,16 @@ fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
     }
   }
   if start < to {
-    out ++ span("s", seg(cs, start, to))
-  } else {
-    out
+    parts = parts ++ [span("s", seg(cs, start, to))]
   }
+  join(parts, "")
 }
 
 ## Highlight one Dawn code block as HTML (no surrounding <pre><code>).
 pub fn highlight_dawn(code: String) -> String = {
   let cs = code_points(code)
   let n = len(cs)
-  var out = ""
+  var parts: List[String] = []
   var start = 0
   var prev_word = ""
   var i = 0
@@ -161,12 +160,12 @@ pub fn highlight_dawn(code: String) -> String = {
     let c = cp_at(cs, i)
     if c == '#' {
       let e = line_end(cs, i)
-      out = out ++ escape_html(seg(cs, start, i)) ++ span("c", seg(cs, i, e))
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("c", seg(cs, i, e))]
       start = e
       i = e
     } else if c == '"' {
       let e = string_end(cs, i)
-      out = out ++ escape_html(seg(cs, start, i)) ++ string_html(cs, i, e)
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ string_html(cs, i, e)]
       start = e
       i = e
     } else if c == '`' {
@@ -176,17 +175,17 @@ pub fn highlight_dawn(code: String) -> String = {
         e = e + 1
       }
       let e2 = if e < n { e + 1 } else { e }
-      out = out ++ escape_html(seg(cs, start, i)) ++ span("s", seg(cs, i, e2))
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("s", seg(cs, i, e2))]
       start = e2
       i = e2
     } else if c == '\'' {
       let e = char_end(cs, i)
-      out = out ++ escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))]
       start = e
       i = e
     } else if is_digit(c) {
       let e = number_end(cs, i)
-      out = out ++ escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))]
       start = e
       i = e
     } else if is_ident_start(c) {
@@ -208,14 +207,14 @@ pub fn highlight_dawn(code: String) -> String = {
       if cls == "" {
         i = e
       } else {
-        out = out ++ escape_html(seg(cs, start, i)) ++ span(cls, w)
+        parts = parts ++ [escape_html(seg(cs, start, i)) ++ span(cls, w)]
         start = e
         i = e
       }
       prev_word = w
     } else if c == '!' && (is_ident_start(cp_at(cs, i + 1)) || cp_at(cs, i + 1) == '(') {
       let e = if cp_at(cs, i + 1) == '(' { i + 1 } else { ident_end(cs, i + 1) }
-      out = out ++ escape_html(seg(cs, start, i)) ++ span("k", seg(cs, i, e))
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("k", seg(cs, i, e))]
       start = e
       i = e
     } else {
@@ -223,10 +222,9 @@ pub fn highlight_dawn(code: String) -> String = {
     }
   }
   if start < n {
-    out ++ escape_html(seg(cs, start, n))
-  } else {
-    out
+    parts = parts ++ [escape_html(seg(cs, start, n))]
   }
+  join(parts, "")
 }
 
 test "keywords, types, defs, numbers" {
