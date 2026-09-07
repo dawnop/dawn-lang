@@ -1,0 +1,117 @@
+# Hold the exact cold transition before allowing any result to be reused.
+# The trace is test-owned host state; production analysis has no observer.
+
+use std/map
+use std/io
+use compiler/front/parser
+use compiler/driver/analyze.{
+  LoadedModule, LoadResult, LocDiag, Program, AnalysisStage,
+  AnalyzeModule, AnalyzeCheck, AnalyzeComptime,
+  analyze_program, analyze_observed, analyze_module_step, initial_carry
+}
+use compiler/driver/stdlib.{StdCtx, load_std, std_load_error_text}
+use compiler/driver/checkdump
+use compiler/check/jsig.{jsig_refused}
+use compiler/ir/interp.{ct_default, ct_fuel}
+use std/io.{Fs, Env}
+use java "java.util.ArrayList"
+
+fn std_context() -> StdCtx !Fs !Env !io =
+  match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic(std_load_error_text(e))
+  }
+
+fn source(name: String, text: String) -> LoadedModule = {
+  let (m, pdiags) = parser.parse_module(text)
+  LoadedModule {
+    mod_path: name, class_name: name, path: name ++ ".dawn",
+    text: text, m: m, pdiags: pdiags, pkg: None
+  }
+}
+
+fn stage_name(stage: AnalysisStage) -> String =
+  match stage {
+    AnalyzeModule -> "module"
+    AnalyzeCheck -> "check"
+    AnalyzeComptime -> "comptime"
+  }
+
+test "cold observation is nested and leaves the program unchanged" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_context()
+    let m = source("answer", "pub fn answer() -> Int = 42\n")
+    let loaded = LoadResult { modules: [m], diags: [] }
+    let events = ArrayList.new()
+    let observed = analyze_observed(loaded, std, ct_default(), jsig_refused(),
+      Some((name, stage, entering) => {
+        let _ = events.add(name ++ ":" ++ stage_name(stage) ++ ":" ++ to_string(entering))
+      }))
+    let cold = analyze_program(loaded, std, ct_default(), jsig_refused())
+    assert checkdump.render(observed) == checkdump.render(cold)
+    assert observed.modules[0].tm == cold.modules[0].tm
+    assert observed.modules[0].cx.adts == cold.modules[0].cx.adts
+    assert len(observed.diags) == 0
+    assert events.toString().expect("trace") ==
+      "[answer:module:true, answer:check:true, answer:check:false, answer:comptime:true, answer:comptime:false, answer:module:false]"
+    let step = analyze_module_step(m, initial_carry(std), std, ct_default(), jsig_refused(), None)
+    assert step.check_runs == 1
+    assert step.comptime_runs == 1
+    assert step.after.next_id == cold.modules[0].cx.next_id
+    assert map.has(step.after.exports, "answer")
+  }))
+}
+
+test "failed cold steps retain exports and only run the reachable phases" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_context()
+    let parse_error = source("parse_error", "pub fn broken(\n")
+    assert len(parse_error.pdiags) > 0
+    let events = ArrayList.new()
+    let parsed = analyze_module_step(parse_error, initial_carry(std), std, ct_default(), jsig_refused(),
+      Some((name, stage, entering) => {
+        let _ = events.add(stage_name(stage) ++ ":" ++ to_string(entering))
+      }))
+    assert parsed.check_runs == 0
+    assert parsed.comptime_runs == 0
+    assert len(parsed.diags) == len(parse_error.pdiags)
+    assert map.has(parsed.after.exports, "parse_error")
+    assert parsed.after.next_id == std.next_id
+    assert events.toString().expect("trace") == "[module:true, module:false]"
+
+    let type_error = source("type_error", "pub fn broken() -> Int = false\n")
+    let typed = analyze_module_step(type_error, parsed.after, std, ct_default(), jsig_refused(), None)
+    assert typed.check_runs == 1
+    assert typed.comptime_runs == 0
+    assert len(typed.diags) > 0
+    assert map.has(typed.after.exports, "type_error")
+    assert map.has(typed.after.exports, "parse_error")
+    assert typed.after.next_id == typed.checked.cx.next_id
+
+    let exhausted = source("exhausted", "pub const N: Int = 40 + 2\n")
+    let evaluated = analyze_module_step(exhausted, typed.after, std, ct_fuel(0), jsig_refused(), None)
+    assert evaluated.check_runs == 1
+    assert evaluated.comptime_runs == 1
+    assert len(evaluated.checked.cx.diags) == 0
+    assert len(evaluated.checked.ct.diags) > 0
+    assert map.has(evaluated.after.exports, "exhausted")
+  }))
+}
+
+test "cold program diagnostics start with the current loader result" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_context()
+    let bad = source("bad", "pub fn broken() -> Int = false\n")
+    let (_, diagnostics) = parser.parse_module("pub fn (\n")
+    assert len(diagnostics) > 0
+    let loader = LocDiag { path: "loader", d: diagnostics[0] }
+    let loaded = LoadResult { modules: [bad], diags: [loader] }
+    let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+    let step = analyze_module_step(bad, initial_carry(std), std, ct_default(), jsig_refused(), None)
+    assert len(prog.diags) == len(step.diags) + 1
+    assert prog.diags[0].path == "loader"
+    assert prog.diags[1].path == "bad.dawn"
+    let assembled = Program { modules: [step.checked], diags: [loader] ++ step.diags }
+    assert checkdump.render(prog) == checkdump.render(assembled)
+  }))
+}

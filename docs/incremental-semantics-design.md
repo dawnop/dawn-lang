@@ -10,8 +10,11 @@ debounce 和一致 Program；缺的是跨编辑的语义复用。`driver/analyze
 逐模块推进 exports、全局 impls 和 next_id，因此文本不变并不意味着模块结果可复用。
 Playground 使用非 file URI，属于 standalone；模块前缀复用不能加速每次都变的单模块。
 
-尚未运行本项目基准。必须测 load/parse/check/comptime/query 各阶段、真实编辑的首差
-位置和保留内存，再决定启用范围；不写未经实测的加速倍数。
+已运行 hello_mod/selfhost 的探索性冷路径基准；可复现入口是
+`scripts/incremental-semantics-contract/bench.py`，原始轮次、源码指纹、环境和进程 RSS
+分别归档，cold/observed 交替顺序。parse replay 不冒充 loader 内部分段，进程 RSS
+不冒充缓存保留内存。仍需真实编辑首差、query 延迟及保留内存测量，再决定启用范围；
+不写未经实测的加速倍数。
 
 ## 二、首个交付：保守模块前缀
 
@@ -72,7 +75,14 @@ Java可变对象。共享模块两个测试守八个hook的观察顺序与refusi
 计数独立、零查询gate、返回值与参数方向；项目夹具证明经import的Java对象仍触发查询。
 `scripts/incremental-semantics-contract/probe.py` 先核验全部锚点，然后实际编译九个
 变异体，每个必须命中owning测试，构建错误不算证据；workflow已接线。第一期仍缺
-冷路径分阶段观测、对照语料和性能基线，不能据此宣称第一期完成。
+真实编辑/query/保留内存基线，不能据此宣称第一期完成。
+
+第二刀抽取 `AnalysisCarry/ModuleStep`，`analyze_program` 仍走无 observer 的
+cold fold；阶段事件只由显式 `analyze_observed` 请求。私有夹具注入冻结的旧循环，
+以相同捕获输入对照完整 Program/Cx，不只比较公开签名。独立 javac 比较器避开测试
+程序的泛型 Eq 字典构造器问题，不改变生产发射。六个成功编译的变异体覆盖输入 ID、
+impl carry、诊断顺序、check/comptime 跳过和 std baseline；编译/反射错误不算负控。
+原始实现与独立循环的13组结果对拍、六个负控及350项夹具测试已在本地通过。
 
 首刀本地618个selfhost测试、集成套件214个测试、九个可编译负控和完整文档门通过。
 native侧484个selfhost测试通过，自举B==C固定点和独立calc发射冒烟通过；重录后Core门通过。
