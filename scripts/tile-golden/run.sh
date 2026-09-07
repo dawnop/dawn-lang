@@ -411,7 +411,7 @@ kernels=(
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
-  view_conv1d view_token_embed view_atomic view_stride_pad view_gather_pad)
+  view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -774,9 +774,19 @@ check_global_syms_symbols() { # cubin
 # 'f8E8M0FNU'`), so the block-scaled family needs one architecture more than
 # fp8 itself. scripts/tileir-features/features.txt carries that row's
 # `architecture` exemption.
+#
+# The fifth is knife TA's view_atomic_bf16, and it is the only one here whose
+# floor is neither this machine's nor sm_100. `atomic_red_view_tko`'s `addf`
+# over a BF16 tile is refused below sm_89 and taken from sm_89 on (knife T13
+# measured the whole ladder, and scripts/tileir-features/attrs.txt's
+# `bf16-atomic-needs-ada` note has it), so this one is assembled for sm_89.
+# It is the lowest architecture that accepts it, which is what a floor
+# should be: assembling it for sm_100 would hide the two generations in
+# between.
 kernel_arch() { # kernel
   case "$1" in
     dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
+    view_atomic_bf16) echo sm_89 ;;
     *) echo "$gpu_name" ;;
   esac
 }

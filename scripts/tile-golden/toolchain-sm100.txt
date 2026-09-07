@@ -1,0 +1,43 @@
+# The B200 of the GPU cluster: the machine of scripts/tile-gpu-diff/ledger-sm100.txt.
+#
+# THIS FILE IS NOT toolchain.txt AND DOES NOT REPLACE IT. toolchain.txt is
+# this repository's own machine (an RTX 3080, sm_86) and the only toolchain
+# CI reads: `scripts/tile-gpu-diff/run.sh --check`, the gate, refuses to be
+# pointed anywhere else. This file exists so that a SECOND machine can keep
+# a ledger of its own, which is what knife TA needed and what
+# docs/tile-backend-design.md 6.17 explains:
+#
+#   ./scripts/tile-gpu-diff/run.sh --toolchain scripts/tile-golden/toolchain-sm100.txt
+#
+# appends to ledger-sm100.txt, and the name of that ledger follows from the
+# name of this file.
+#
+# WHAT IS HERE AND WHAT IS NOT. A toolchain file for another machine carries
+# the two lines that ARE the machine (`gpu-name` and `driver`) and repeats
+# the two that are the toolchain (`bytecode` and `tileiras`), which run.sh
+# holds against toolchain.txt's in both cases. It carries NO `wheel` line:
+# the wheels are pinned in toolchain.txt, install-tileiras.sh reads that
+# file and no other, and a second copy of a sha256 is a second thing to
+# drift. run.sh refuses a wheel line here for that reason.
+#
+#   bytecode   toolchain.txt's, repeated. See its header for what the
+#              number means and what knife T8 measured about moving it.
+#   tileiras   toolchain.txt's, repeated. The same binary runs on the
+#              cluster: knife TA carried tileiras, ptxas and libnvvm.so.4
+#              across by hand (the containers have no outbound network) and
+#              the three sha256 sums on the far side are this machine's.
+#   gpu-name   sm_100. Held against `nvidia-smi --query-gpu=compute_cap`,
+#              which reports 10.0 on this card: `sm_` plus that number with
+#              the dot removed is this line, and a run whose card disagrees
+#              is refused before a kernel is assembled. That check is what
+#              makes a second toolchain file safe to have around, because
+#              the way a second file goes wrong is being pointed at the
+#              wrong machine.
+#   driver     580.159.04, as nvidia-smi reports it on the B200. It is a
+#              different number from the H200's 580.95.05 and from this
+#              repository's 616.56, and all three are above the r580 floor
+#              Tile IR needs.
+bytecode 13.3
+tileiras 13.3.36
+gpu-name sm_100
+driver 580.159.04

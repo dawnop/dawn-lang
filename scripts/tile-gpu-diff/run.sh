@@ -6,6 +6,19 @@
 #   ./scripts/tile-gpu-diff/run.sh            # run, and append a ledger line
 #   ./scripts/tile-gpu-diff/run.sh --dry      # run, append nothing
 #   ./scripts/tile-gpu-diff/run.sh --check    # the CI gate: no GPU, no tileiras
+#   ./scripts/tile-gpu-diff/run.sh --toolchain scripts/tile-golden/toolchain-sm100.txt
+#
+# ONE LEDGER PER MACHINE, and `--toolchain` is how a second machine gets one
+# (knife TA, docs 6.17). The default is scripts/tile-golden/toolchain.txt and
+# scripts/tile-gpu-diff/ledger.txt, which are this machine's RTX 3080 and the
+# only pair `--check` and therefore CI reads. `--toolchain <file>` names
+# another toolchain file in scripts/tile-golden and appends to the ledger
+# whose name follows from it (`toolchain-sm100.txt` -> `ledger-sm100.txt`);
+# the file carries that machine's driver and gpu-name, and everything else
+# about the run is the same script. The GPU cluster's two ledgers are
+# recorded that way and no gate reads them: what they buy is the layer-2
+# rows the fp8, fp4 and block-scaled kernels could never reach on an Ampere
+# card, and they buy it as a record in the tree rather than as a claim.
 #
 # The run:
 #
@@ -420,14 +433,16 @@
 #                      SKIP, not PASS, on a driver whose clean run is
 #                      blocked before the launch, because there the mutant
 #                      and the clean run are indistinguishable.
-#   ledger    one line appended to ledger.txt:
+#   ledger    one line appended to the ledger the toolchain file names:
 #               <commit> <date> <driver> <tileiras> <gpu-name> <result> [# note]
 #             commit is HEAD (12 hex; refused when the tile paths have
 #             uncommitted changes, since the line would name a tree that was
 #             not run), driver is nvidia-smi's, and result is the verdict.
-#             Refused unless toolchain.txt's `driver` line already says the
-#             driver nvidia-smi reports: the three numbers move together
-#             (6.3), and the ledger commit adds a line and nothing else.
+#             Refused unless the toolchain file's `driver` line already says
+#             the driver nvidia-smi reports and its `gpu-name` line already
+#             says what nvidia-smi's compute_cap makes of the card: the
+#             three numbers move together (6.3), and the ledger commit adds
+#             a line and nothing else.
 #
 # --check, the gate the `tile` job runs on every push (docs 6.4):
 #
@@ -451,8 +466,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-gpu-diff"
 golden="$root/scripts/tile-golden"
-ledger="$here/ledger.txt"
-toolchain="$golden/toolchain.txt"
+default_ledger="$here/ledger.txt"
+default_toolchain="$golden/toolchain.txt"
+ledger="$default_ledger"
+toolchain="$default_toolchain"
 cc_bin="${CC:-cc}"
 
 fail() {
@@ -460,16 +477,49 @@ fail() {
   exit 1
 }
 
+usage() {
+  echo "usage: run.sh [--dry | --check] [--toolchain <scripts/tile-golden/toolchain*.txt>]" >&2
+  exit 2
+}
+
 mode=run
 append=yes
+chosen=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) mode=check ;;
     --dry) append=no ;;
-    *) echo "usage: run.sh [--dry | --check]" >&2; exit 2 ;;
+    --toolchain) shift; [ $# -gt 0 ] || usage; chosen="$1" ;;
+    --toolchain=*) chosen="${1#--toolchain=}" ;;
+    *) usage ;;
   esac
   shift
 done
+
+# The toolchain file names the ledger, and the two names are held together
+# here rather than passed separately: a run that read one machine's driver
+# and wrote another machine's ledger would be a lie no reader could catch.
+if [ -n "$chosen" ]; then
+  if [ "$mode" = check ]; then
+    fail "--check reads scripts/tile-golden/toolchain.txt and scripts/tile-gpu-diff/ledger.txt only: it is the CI gate, and CI has one machine"
+  fi
+  if [ -f "$chosen" ]; then
+    toolchain="$(cd "$(dirname "$chosen")" && pwd)/$(basename "$chosen")"
+  elif [ -f "$root/$chosen" ]; then
+    toolchain="$(cd "$(dirname "$root/$chosen")" && pwd)/$(basename "$chosen")"
+  else
+    fail "no such toolchain file: $chosen"
+  fi
+  [ "$(dirname "$toolchain")" = "$golden" ] ||
+    fail "a toolchain file lives in scripts/tile-golden, and $chosen does not"
+  case "$(basename "$toolchain")" in
+    toolchain.txt) ledger="$default_ledger" ;;
+    toolchain-*.txt) ledger="$here/ledger-${toolchain##*/toolchain-}" ;;
+    *) fail "a toolchain file is named toolchain.txt or toolchain-<machine>.txt, and $chosen is neither" ;;
+  esac
+  [ -f "$ledger" ] ||
+    fail "$(basename "$toolchain") names the ledger $(basename "$ledger"), which does not exist. Create it with its header first: a ledger is a file somebody wrote down, not one a script invents"
+fi
 
 # ---------------------------------------------------------------- --check
 
@@ -483,8 +533,12 @@ import subprocess
 import sys
 
 ledger, toolchain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+# Every ledger is excluded and not only this gate's own: the cluster's
+# ledger-sm100.txt and ledger-sm90.txt are records of other machines, and a
+# line appended to one of them is not a change to what this machine ran.
 TILE_PATHS = ["packages/tileir", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
-              "scripts/tile-gpu-diff", ":(exclude)scripts/tile-gpu-diff/ledger.txt"]
+              "scripts/tile-gpu-diff", ":(exclude)scripts/tile-gpu-diff/ledger.txt",
+              ":(exclude)scripts/tile-gpu-diff/ledger-*.txt"]
 BEGIN, END = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="
 problems = []
 
@@ -578,7 +632,51 @@ toolchain_value() { # key
 want_tileiras="$(toolchain_value tileiras)"
 gpu_name="$(toolchain_value gpu-name)"
 pinned_driver="$(toolchain_value driver)"
-if [ -z "$want_tileiras" ] || [ -z "$gpu_name" ]; then fail "toolchain.txt must name tileiras and gpu-name"; fi
+if [ -z "$want_tileiras" ] || [ -z "$gpu_name" ]; then
+  fail "$(basename "$toolchain") must name tileiras and gpu-name"
+fi
+
+# A second toolchain file carries what its MACHINE is (gpu-name, driver) and
+# repeats what the toolchain IS (bytecode, tileiras). The repetition is
+# held here rather than trusted: the wheels are pinned in toolchain.txt
+# alone, install-tileiras.sh reads that file and no other, so a cluster file
+# whose tileiras line had drifted would name a version nothing installs.
+if [ "$toolchain" != "$default_toolchain" ]; then
+  for key in bytecode tileiras; do
+    mine="$(awk -v k="$key" '$1 == k { print $2; exit }' "$toolchain")"
+    theirs="$(awk -v k="$key" '$1 == k { print $2; exit }' "$default_toolchain")"
+    [ "$mine" = "$theirs" ] ||
+      fail "$(basename "$toolchain") says $key $mine and toolchain.txt says $theirs: a machine chooses its card, not its toolchain"
+  done
+  [ -z "$(awk '$1 == "wheel" { print }' "$toolchain")" ] ||
+    fail "$(basename "$toolchain") carries a wheel line: the wheels are pinned in toolchain.txt, which is the only file install-tileiras.sh reads"
+fi
+
+# The gpu-name is still COPIED from the toolchain file and never guessed --
+# it is what the goldens are assembled for, and a machine does not get to
+# choose it. What is new (knife TA) is that the copy is now held against the
+# card: nvidia-smi's compute_cap is the architecture the driver will load a
+# cubin for, and `sm_` plus that number with the dot removed is the name
+# tileiras spells it with. On one machine the two could not disagree without
+# somebody noticing; with a toolchain file per machine they can, and the way
+# they would is a `--toolchain` pointed at the wrong file. That is a run
+# whose cubins are for another card and whose ledger line would name this
+# one, so it is refused here, before a single kernel is assembled.
+#
+# THE MAPPING IS NOT A GUESS EITHER, and its edge is why this check earns
+# its place: compute_cap 10.3 is sm_103, a real target tileiras knows and a
+# different one from sm_100. A check that compared only the major number
+# would take a Blackwell variant for the card the goldens were built for.
+device_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 |
+  tr -d ' ' || true)"
+if [ -n "$device_cap" ]; then
+  device_gpu_name="sm_$(printf '%s' "$device_cap" | tr -d '.')"
+  [ "$device_gpu_name" = "$gpu_name" ] ||
+    fail "$(basename "$toolchain") says gpu-name $gpu_name and nvidia-smi reports compute_cap $device_cap, which is $device_gpu_name: this is another machine's toolchain file"
+  echo "      gpu-name: $gpu_name ($(basename "$toolchain")); nvidia-smi compute_cap $device_cap"
+else
+  echo "      gpu-name: $gpu_name ($(basename "$toolchain")); nvidia-smi has no compute_cap to hold it against"
+fi
 
 tileiras="${TILEIRAS:-}"
 if [ -z "$tileiras" ]; then
@@ -714,6 +812,38 @@ dtype_green=(dtype_i16 dtype_i64 dtype_i4 pack_roundtrip)
 # caller assigns them from these before it runs.
 i4_red=(dtype_i4)
 i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
+
+# The architecture-gated kernels of knife TA, in the order arch_diff takes
+# them, and the LOWEST --gpu-name tileiras 13.3.36 accepts each one at.
+#
+# The floors are measured, one --gpu-name at a time, and the measurement
+# corrected what knives T3, T9 and T10 had written down. They tried sm_86,
+# sm_89 and sm_100 and recorded "sm_86 and sm_89 refuse, sm_100 accepts" for
+# all of fp8; the step between was never tried, and it is where two of these
+# five change their answer:
+#
+#   dtype_e4m3         sm_86 rc=5, sm_89 rc=5, sm_90 OK,    sm_100 OK
+#   dtype_e5m2         sm_86 rc=5, sm_89 rc=5, sm_90 OK,    sm_100 OK
+#   dtype_e8m0         sm_86 rc=5, sm_89 rc=5, sm_90 rc=5,  sm_100 OK
+#   dtype_e2m1         sm_86 rc=5, sm_89 rc=5, sm_90 rc=5,  sm_100 OK
+#   mmaf_scaled_e4m3   sm_86 rc=5, sm_89 rc=5, sm_90 rc=5,  sm_100 OK
+#
+# each refusal being `error: Incompatibility with architecture '<arch>':
+# unsupported type '<format>'`. mmaf_scaled_e4m3 is refused at sm_90 for
+# f8E8M0FNU and not for f8E4M3FN, which is knife T10's reading confirmed:
+# the block-scaled product's wall is its SCALE format.
+#
+# So fp8 is not one wall but two, and the H200 ledger is what says so: it
+# runs three of these six and skips three.
+#
+# The sixth kernel is not an element format at all. view_atomic_bf16 is
+# knife T13's bf16 corner: `atomic_red_view_tko`'s `addf` over a BF16 tile
+# is refused at sm_80, sm_86 and sm_87 and taken from sm_89 on (`error:
+# Incompatibility with architecture 'sm_86': atomicRMW ADDF with bf16 is not
+# supported`), which T13 measured and could not follow with a device.
+# sm_89 is its floor and the lowest in this list.
+arch_kernels=(dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16)
+arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89)
 # The attribute kernels of knife T4, in the order attr_diff takes them. Its
 # subject is the ATTRIBUTE DOMAINS and not the opcode table: the knife adds
 # no opcode at all, and every one of these eight computes the same thing
@@ -883,11 +1013,41 @@ assemble_golden() { # kernel, tilebc, cubin
     fail "tileiras wrote no ELF cubin for $1"
 }
 
+# Which of knife TA's kernels THIS ledger's card can be asked at all. The
+# comparison is on the number alone, which is what `sm_` names are: 86 < 89
+# < 90 < 100, and a card at or above a kernel's floor assembles it.
+#
+# A SKIP IS NOT A PASS, and the split is here rather than inside arch_diff
+# for that reason. A kernel below the floor has no cubin: `tileiras` refuses
+# to write one, so there is nothing to launch and nothing a program could
+# compare. run.sh therefore assembles only the runnable ones, hands
+# arch_diff those, and writes the rest into the ledger line by name, so that
+# a reader of ledger.txt can see that the sm_86 machine answered nothing
+# here rather than that it agreed.
+arch_level() { # sm_NNN
+  printf '%s' "${1#sm_}"
+}
+arch_ran=()
+arch_skipped=()
+for i in "${!arch_kernels[@]}"; do
+  if [ "$(arch_level "$gpu_name")" -ge "$(arch_level "${arch_floors[$i]}")" ]; then
+    arch_ran+=("${arch_kernels[$i]}")
+  else
+    arch_skipped+=("${arch_kernels[$i]}")
+  fi
+done
+arch_ran_list="$(IFS=,; printf '%s' "${arch_ran[*]-}")"
+arch_skipped_list="$(IFS=,; printf '%s' "${arch_skipped[*]-}")"
+[ -n "$arch_ran_list" ] || arch_ran_list="-"
+[ -n "$arch_skipped_list" ] || arch_skipped_list="-"
+arch_probe="ran=$arch_ran_list skipped=$arch_skipped_list@$gpu_name"
+echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kernels are at or above $gpu_name ($arch_probe)"
+
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
   "${hints[@]}" "${views[@]}" "${dyns[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
-  "${sequenced[@]}"; do
+  "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
@@ -1211,6 +1371,69 @@ case "$dtype_verdict" in
   *) cat "$work/dtype.err" >&2; fail "dtype_diff printed no verdict (exit $rc)" ;;
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | head -n 1)"
+
+# ---- native, the architecture-gated kernels (knife TA)
+#
+# The one family whose SIZE depends on the machine. On a ledger below every
+# floor there is nothing to build and nothing to run, and the line printed
+# here says so by name; on the sm_100 ledger all five run and the four rows
+# of scripts/tileir-features/types.txt and the one row of features.txt that
+# carried an `architecture` exemption from knife T3 are answered by a
+# device.
+arch_verdict=skipped
+if [ "${#arch_ran[@]}" -eq 0 ]; then
+  echo "SKIP  native: no architecture-gated kernel is at or above $gpu_name, so none was assembled or launched ($arch_probe)"
+else
+  arch_args=()
+  for k in "${arch_ran[@]}"; do arch_args+=("$k" "$work/$k.cubin"); done
+  build_native "$root/std" "$work/arch.bin" "$here/arch_diff.dawn"
+  rc=0
+  device "$work/arch.bin" "${arch_args[@]}" > "$work/arch.out" 2> "$work/arch.err" || rc=$?
+  cat "$work/arch.out"
+  arch_verdict="$(verdict_of "$work/arch.out")"
+  case "$arch_verdict" in
+    pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+          echo "PASS  native: the ${#arch_ran[@]} architecture-gated kernels this card is high enough for agree with the fake device bit for bit" ;;
+    blocked:*) [ "$rc" = 0 ] || fail "verdict $arch_verdict with exit $rc"
+          echo "BLOCKED  native: the driver refused before a result could be compared: $arch_verdict" ;;
+    fail) cat "$work/arch.err" >&2; fail "the device answered and disagreed with the fake device on an architecture-gated kernel (see the transcript above)" ;;
+    *) cat "$work/arch.err" >&2; fail "arch_diff printed no verdict (exit $rc)" ;;
+  esac
+  [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/arch.out" | head -n 1)"
+
+  # The kernels arch_diff itself says it compared and agreed on. It is read
+  # back from the transcript rather than assumed from arch_ran, because the
+  # ledger line is what scripts/tileir-features/check.py holds a `device@`
+  # evidence token to: a row may cite a kernel only while a run of this
+  # program answered for it, and "run.sh meant to launch it" is not that.
+  arch_ran_list="$(sed -n 's/^ran //p' "$work/arch.out" | tail -n 1)"
+  [ -n "$arch_ran_list" ] || fail "arch_diff printed no ran line"
+  arch_probe="ran=$arch_ran_list skipped=$arch_skipped_list@$gpu_name"
+
+  # The corpus claims, held above zero the way the dtype family's are. A
+  # conversion corpus already on the format's grid would let a truncating
+  # `ftof` pass for a rounding one; a scale corpus whose two blocks agreed
+  # would let a device that broadcast one scale over the whole of K pass for
+  # one that honours the block size; and a matrix whose partial sums left
+  # 2^24 would make the fold order visible and the exact tier a lie.
+  for kernel in "${arch_ran[@]}"; do
+    arch_shape="$(awk -v want="$kernel" '/^kernel /{cur=$2} cur == want && /^  index /{sub(/^  index /, ""); print; exit}' "$work/arch.out")"
+    [ -n "$arch_shape" ] || fail "arch_diff printed no index line for $kernel"
+    case "$kernel" in
+      dtype_e2m1) fields="encodings off_grid saturating" ;;
+      mmaf_scaled_e4m3) fields="scale_blocks rows_with_split_scale cols_with_split_scale bound_inside_2p24" ;;
+      view_atomic_bf16) fields="bins_hit blocks max_count exact_in_bf16" ;;
+      *) fields="off_grid rounded_on_upload host_nan beyond_max" ;;
+    esac
+    for field in $fields; do
+      value="$(printf '%s\n' "$arch_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+      [ -n "$value" ] || fail "$kernel's index line names no $field: $arch_shape"
+      [ "$value" -gt 0 ] 2> /dev/null ||
+        fail "$kernel has $field=0, so that claim is not being tested: $arch_shape"
+    done
+    echo "PASS  corpus: $kernel covers every lane class its format needs ($arch_shape)"
+  done
+fi
 
 # ---- native, the loop kernels (knife T5)
 build_native "$root/std" "$work/loop.bin" "$here/loop_diff.dawn"
@@ -2167,6 +2390,9 @@ tiers="$tiers atom:$(sed -n 's/^tiers //p' "$work/atom.out" | tail -n 1)"
 tiers="$tiers erf:$(sed -n 's/^tiers //p' "$work/erf.out" | tail -n 1)"
 tiers="$tiers trig:$(sed -n 's/^tiers //p' "$work/trig.out" | tail -n 1)"
 tiers="$tiers dtype:$(sed -n 's/^tiers //p' "$work/dtype.out" | tail -n 1)"
+if [ "${#arch_ran[@]}" -gt 0 ]; then
+  tiers="$tiers arch:$(sed -n 's/^tiers //p' "$work/arch.out" | tail -n 1)"
+fi
 tiers="$tiers shape:$(sed -n 's/^tiers //p' "$work/shape.out" | tail -n 1)"
 tiers="$tiers loop:$(sed -n 's/^tiers //p' "$work/loop.out" | tail -n 1)"
 tiers="$tiers attr:$(sed -n 's/^tiers //p' "$work/attr.out" | tail -n 1)"
@@ -4956,7 +5182,7 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn \
-  scripts/tile-gpu-diff/seq_diff.dawn \
+  scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/mutate.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
@@ -4969,6 +5195,7 @@ summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line"
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
+summary="$summary arch=$arch_probe"
 if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"

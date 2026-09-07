@@ -4927,6 +4927,38 @@ fn view_atomic(x: Param[I32], o_add: Param[I32], o_addf: Param[F64], o_and: Para
   atomic_red_view(F64, fv, [zero], "addf", "device", int_to_float(I32, F64, bins, local))
 }
 
+# `view_atomic`'s float mode over BF16 (knife TA), and the one kernel in
+# this file whose reason for existing is an ARCHITECTURE and not an
+# operation. It is `view_atomic`'s last reduction and nothing else: the same
+# local histogram, the same strided view, the same `addf`, with the view's
+# element format changed.
+#
+# Ops.td's prose is the whole subject: "bf16 is supported from Hopper (sm90)
+# onward. On earlier architectures (e.g. Ampere/sm80), atomicRMW ADDF with
+# bf16 is not supported." It is the only sentence in the view family that
+# names an architecture, it lives in prose rather than in a verifier, and
+# knife T13 measured it instead of quoting it -- sm_80, sm_86 and sm_87
+# refuse, sm_89, sm_90 and sm_100 accept, so the prose is one generation
+# out. What T13 could not do is ask a device, because this repository's card
+# is sm_86. Knife TA does: this kernel goes into scripts/tile-gpu-diff's
+# arch family, is assembled for sm_89 (the floor, measured) and runs on the
+# cluster's two cards.
+#
+# THE COUNTS STAY WHOLE NUMBERS UNDER 256, which is what keeps the answer
+# free of the fold order. Eight tile blocks reduce into sixteen bins with
+# nothing ordering them, and bf16 carries eight significand bits: whole
+# numbers up to 256 are exact in it and their sums are associative, so the
+# bins can be added in any order and the answer is the same. VA_N is 500
+# over VA_BINS 16, so no bin comes near it.
+fn view_atomic_bf16(x: Param[I32], o_addf: Param[BF16]) -> Unit !Dev = {
+  let bins = [VA_BINS]
+  let zero = idx_const(0)
+  let local = va_local(x, block_id(0))
+  let fv = strided_view(BF16, tensor_view(BF16, o_addf, zero, bins, [1]), bins, [VA_BINS], [0],
+    NoPadding)
+  atomic_red_view(BF16, fv, [zero], "addf", "device", int_to_float(I32, BF16, bins, local))
+}
+
 const VE_N: Int = 90
 const VE_TILE: Int = 4
 const VE_TRAV: Int = 8
@@ -5439,6 +5471,9 @@ fn trace(name: String) -> TileProg = match name {
       () => view_atomic(param(I32, 0), param(I32, 1), param(F64, 2), param(I32, 3),
         param(I32, 4), param(I32, 5), param(I32, 6), param(I32, 7), param(I32, 8),
         param(I32, 9)))
+  "view_atomic_bf16" ->
+    trace_kernel("view_atomic_bf16", ["i32", "bf16"],
+      () => view_atomic_bf16(param(I32, 0), param(BF16, 1)))
   "view_stride_pad" ->
     trace_kernel("view_stride_pad", ["f32", "f32"],
       () => view_stride_pad(param(F32, 0), param(F32, 1)))
@@ -5480,7 +5515,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|count_eq|subarray_sum|rainbow|int_ops"
       ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
       ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
-      ++ "|view_conv1d|view_token_embed|view_atomic|view_stride_pad|view_gather_pad"
+      ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
       ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
       ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
       ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"

@@ -1662,6 +1662,33 @@ pub fn gather_pad_ref(rows: Int, cols: Int, gcols: Int, pad: Float, ids: List[Fl
 ## the whole point of an atomic reduction: the eight integer modes are
 ## associative and commutative over i32, and the ninth adds small integers
 ## in binary64.
+## The bin counts `view_atomic_bf16` reduces into a BF16 view (knife TA).
+## `ins` is `[x, out]` and the answer rewrites the second buffer's first
+## `bins` lanes, leaving the rest of it alone.
+##
+## This is `view_atomic_ref`'s `add` output and nothing else, at another
+## element format. The kernel exists because `atomic_red_view_tko`'s `addf`
+## over BF16 is the one thing in the view family that Ops.td gates on an
+## architecture, so what is being asked is whether a card above that gate
+## answers the same counts a card below it cannot be asked for at all.
+##
+## NO ROUNDING APPEARS HERE, and that is a property of the corpus rather
+## than of bf16. Eight tile blocks reduce into each bin in no particular
+## order, so an inexact sum would depend on the order they arrived in; bf16
+## carries eight significand bits, whole numbers up to 256 are exact in it,
+## and scripts/tile-gpu-diff/arch_diff.dawn holds the largest bin count
+## below that.
+pub fn view_atomic_bf16_ref(n: Int, bins: Int, tile: Int, _dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let blocks = n / tile + 1
+  let sums = list.map(range(0, bins), j =>
+      list.fold(range(0, blocks), 0, (acc, b) =>
+          acc + len(list.filter(range(0, tile), t =>
+              b * tile + t < n && to_int(x[b * tile + t]) == j))))
+  list.map(range(0, len(ins[1])), k => if k < bins { to_float(sums[k]) } else { ins[1][k] })
+}
+
 pub fn view_atomic_ref(n: Int, bins: Int, tile: Int, bias: Int, _dtypes: List[String],
   ins: List[List[Float]]) -> List[(Int, List[Float])] = {
   let x = ins[0]

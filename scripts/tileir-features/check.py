@@ -58,7 +58,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
-                 "T12", "T13", "T15", "TG"}
+                 "T12", "T13", "T15", "TA", "TG"}
 
 
 class Ledger:
@@ -190,18 +190,89 @@ def common_checks(n, name, status, knife, layer, seen):
 
 
 def evidence_of(n, name, evidence, kinds):
-    """The evidence tokens by kind, and a complaint for a kind this table
-    does not have."""
+    """The evidence tokens by kind, the ones that name a ledger, and a
+    complaint for a kind this table does not have.
+
+    `device@<ledger>:<kernel>` is knife TA's addition and the only evidence
+    kind that names WHERE the answer is written down. Plain `device:<kernel>`
+    means scripts/tile-gpu-diff/ledger.txt, this repository's own machine,
+    which is the only ledger the CI gate reads; `device@sm100:<kernel>` means
+    ledger-sm100.txt, a machine the gate never sees. The two are the same
+    kind of claim and they count the same for a row's layer, so the token
+    goes into `found["device"]` either way; what the second one owes on top
+    is that the ledger it names says `pass` and lists that kernel as one it
+    ran, which `ledger_evidence_problems` below asks.
+    """
     problems = []
     found = {k: [] for k in kinds}
+    ledgered = []
     for token in [t for t in evidence.split(",") if t]:
         kind, _, rest = token.partition(":")
+        base, at, tag = kind.partition("@")
+        if at and base == "device" and "device" in found and rest and tag:
+            found["device"].append(rest)
+            ledgered.append((tag, rest, token))
+            continue
         if kind in found and rest:
             found[kind].append(rest)
         else:
             problems.append(f"line {n}: {name} names evidence {token!r}, which is not "
                             + " or ".join(k + ":" for k in kinds))
-    return found, problems
+    return found, ledgered, problems
+
+
+def ledger_ran(text):
+    """The kernels the last line of a named ledger says it RAN and agreed
+    on, and that line's result.
+
+    The note carries `arch=ran=<kernels> skipped=<kernels>@<gpu-name>`,
+    which scripts/tile-gpu-diff/run.sh writes from what arch_diff itself
+    printed rather than from what the script meant to launch. A kernel in
+    `skipped=` bought nothing: its cubin was never assembled, because
+    `tileiras` refuses the type below that card's architecture.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    if not lines:
+        return None, set()
+    head, _, note = lines[-1].partition("#")
+    fields = head.split()
+    if len(fields) != 6:
+        return None, set()
+    ran = set()
+    m = re.search(r"\barch=ran=(\S+)", note)
+    if m and m.group(1) != "-":
+        ran = {k for k in m.group(1).split(",") if k}
+    return fields[5], ran
+
+
+def ledger_evidence_problems(n, name, ledgered, files):
+    """What is wrong with a row's `device@<ledger>:<kernel>` tokens.
+
+    This is the one place in this file that reads an ANSWER rather than a
+    source file. Everywhere else the checker holds a table to the tree; here
+    it holds a table to a record of what a machine did, because that is the
+    only thing a layer-2 claim about an architecture this repository has no
+    card for can rest on.
+    """
+    problems = []
+    for tag, kernel, token in ledgered:
+        path = f"scripts/tile-gpu-diff/ledger-{tag}.txt"
+        if path not in files:
+            problems.append(f"line {n}: {name} names evidence {token!r} and there is no {path}")
+            continue
+        result, ran = ledger_ran(files[path])
+        if result is None:
+            problems.append(f"line {n}: {name} names evidence {token!r} and the last line of "
+                            f"{path} does not parse")
+        elif result != "pass":
+            problems.append(f"line {n}: {name} names evidence {token!r} and the last run in "
+                            f"{path} recorded {result!r}, not `pass`")
+        elif kernel not in ran:
+            problems.append(f"line {n}: {name} names evidence {token!r} and the last line of "
+                            f"{path} does not list {kernel} among the kernels it ran "
+                            f"({', '.join(sorted(ran)) or 'none'}). A skipped kernel is not a "
+                            f"device answer")
+    return problems
 
 
 def tag_table(bytecode_text):
@@ -351,10 +422,22 @@ def check(table_text, bytecode_text, files, ledger_text):
         goldens = [t.split(":", 1)[1] for t in tokens if t.startswith("golden:")]
         named = [t.split(":", 1)[1] for t in tokens if t.startswith("mutant:")]
         writers = [t.split(":", 1)[1] for t in tokens if t.startswith("writer:")]
+        # `device@<ledger>:<kernel>` (knife TA) is the one evidence kind this
+        # table did not have before, and it is here for one row:
+        # `mmaf_scaled` runs on no card this repository owns, so its
+        # `golden:` says a program launches it and this says a machine
+        # answered. types.txt's header explains the split between the two.
+        ledgered = []
         for t in tokens:
+            kind, _, rest = t.partition(":")
+            base, at, tag = kind.partition("@")
+            if at and base == "device" and rest and tag:
+                ledgered.append((tag, rest, t))
+                continue
             if not t.startswith(("golden:", "mutant:", "writer:")):
                 problems.append(f"line {n}: {name} names evidence {t!r}, which is not "
-                                f"golden:, mutant: or writer:")
+                                f"golden:, mutant:, writer: or device@<ledger>:")
+        problems += ledger_evidence_problems(n, name, ledgered, files)
 
         if layer >= 2 and not goldens:
             problems.append(
@@ -509,9 +592,10 @@ def check_types(table_text, bytecode_text, files, ledger_text):
                 f"line {n}: {name} reaches layer {layer} and still claims the exemption "
                 f"{exemption!r}")
 
-        found, ev_problems = evidence_of(n, name, evidence,
-                                         ("golden", "device", "mutant", "writer"))
+        found, ledgered, ev_problems = evidence_of(n, name, evidence,
+                                                   ("golden", "device", "mutant", "writer"))
         problems += ev_problems
+        problems += ledger_evidence_problems(n, name, ledgered, files)
         goldens, launched, named, writers = (found["golden"], found["device"],
                                              found["mutant"], found["writer"])
 
@@ -657,9 +741,11 @@ def check_attrs(table_text, bytecode_text, files, ledger_text):
                 f"line {n}: {name} reaches layer {layer} and still claims the exemption "
                 f"{exemption!r}")
 
-        found, ev_problems = evidence_of(n, name, evidence,
-                                         ("const", "writer", "golden", "device", "mutant"))
+        found, ledgered, ev_problems = evidence_of(n, name, evidence,
+                                                   ("const", "writer", "golden", "device",
+                                                    "mutant"))
         problems += ev_problems
+        problems += ledger_evidence_problems(n, name, ledgered, files)
         constants, writers, goldens, launched, named = (found["const"], found["writer"],
                                                         found["golden"], found["device"],
                                                         found["mutant"])
@@ -739,6 +825,13 @@ def gather():
         files[f"scripts/tile-gpu-diff/{program.name}"] = program.read_text()
     files["scripts/tile-golden/run.sh"] = read(GOLDEN / "run.sh")
     files["scripts/tile-gpu-diff/run.sh"] = read(DIFF / "run.sh")
+    # The NAMED ledgers (knife TA): one per machine that is not this
+    # repository's own. They arrive through `files` and not through the
+    # `ledger_text` argument, which is ledger.txt and only ledger.txt,
+    # because a row cites one of them BY NAME and the checker has to be able
+    # to answer "there is no such ledger".
+    for named in sorted(DIFF.glob("ledger-*.txt")):
+        files[f"scripts/tile-gpu-diff/{named.name}"] = named.read_text()
     return files
 
 

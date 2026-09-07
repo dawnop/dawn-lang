@@ -1,0 +1,783 @@
+# Layer 2 for the kernels this machine's GPU cannot run (knife TA), the
+# twenty-fifth of these programs: one `!Gpu` program runs each kernel
+# scripts/tile-golden pins under `with_gpu_real` against a GPU whose
+# architecture is high enough for it, and under `with_gpu_fake` against
+# hand-written host references.
+#
+#   arch_diff <kernel> <cubin> [<kernel> <cubin> ...]
+#
+# THE ARGUMENTS ARE PAIRS and not a fixed list, which is the one thing this
+# family's command line does that the other twenty-four do not. Their
+# kernels either all run on a machine or none of them do, so a positional
+# list says everything; here the runnable set is a function of the machine,
+# and on the H200 ledger it is two of the five. run.sh passes the pairs it
+# could assemble and names the rest in the ledger line.
+#
+# EVERY OTHER FAMILY HERE RUNS EVERYWHERE THIS SCRIPT RUNS. This one does
+# not, and that is its whole reason for existing: `tileiras` refuses these
+# element formats below a floor that no card in this repository's own
+# machine reaches, so their rows in scripts/tileir-features/types.txt and
+# features.txt carried an `architecture` exemption from knife T3 until a GPU
+# cluster made them reachable. run.sh runs this family only on a ledger
+# whose gpu-name is at or above each kernel's floor and names the skipped
+# ones in the ledger line otherwise, because a SKIP is not a pass and the
+# record has to be able to tell them apart.
+#
+# THE FLOORS ARE MEASURED, one `tileiras --gpu-name` at a time, and knife TA
+# had to correct the earlier reading to write them down:
+#
+#   `addf` over bf16      refused at sm_80, sm_86 and sm_87, accepted from
+#                         sm_89 (knife T13's measurement, and the lowest
+#                         floor here)
+#   f8E4M3FN, f8E5M2      refused at sm_86 and sm_89, ACCEPTED AT sm_90
+#   f8E8M0FNU, f4E2M1FN   refused at sm_86, sm_89 and sm_90, accepted at sm_100
+#   mmaf_scaled           sm_100, and by the scale rather than the operands:
+#                         at sm_90 it is the f8E8M0FNU scale that is refused
+#
+# So the fp8 floor is not one floor. Knives T3 and T9 recorded "sm_86 and
+# sm_89 refuse, sm_100 accepts" and never tried the step between; the H200
+# ledger runs three of these six and skips three, which is the shape that
+# says the two halves of fp8 are two different walls.
+#
+# WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
+#
+#   * WHAT AN fp8 BIT PATTERN IS WORTH. Four exponent bits and three
+#     significand ones for f8E4M3FN, five and two for f8E5M2; the storage
+#     segment of each kernel reads a buffer of the format and widens it, so
+#     what it asks is the layout, and the conversion segment asks where the
+#     rounding boundaries are.
+#   * WHERE f8E4M3FN's TOP END IS. The format has no infinity: the all-ones
+#     exponent is a normal one and only the all-ones significand under it is
+#     NaN, so the largest finite value is 448 and there is nothing above it
+#     to overflow to. std/narrow's `round_f8e4m3fn` says in its own doc
+#     comment that the overflow answer was A CHOICE IT COULD NOT MEASURE.
+#     The corpus below puts 464 (the midpoint, which ties down to 448), 480
+#     and an infinity on named lanes, so this run is that measurement.
+#   * WHETHER f8E8M0FNU IS AN EXPONENT AND NOTHING ELSE. No sign, no
+#     significand, no zero, no infinity: 255 powers of two and NaN. Its
+#     `ftof` takes only `zero` or `positive_inf` rounding, never the
+#     `nearest_even` every other conversion here writes, so the answer for
+#     an ordinary number is the largest power of two at or below it. The
+#     corpus carries the negatives and the zero that have no value in the
+#     format at all, which std/narrow answers NaN for and which no device
+#     had ever been asked.
+#   * WHICH OF SIXTEEN VALUES A NIBBLE IS. f4E2M1FN has no buffer
+#     (`element_bytes` refuses it), so dtype_e2m1 ships its lanes as i32
+#     words and `pack` / `unpack` reach the nibbles. Segment 0 is therefore
+#     the ENCODING -- which of the sixteen finite values each pattern names
+#     -- and segment 1 is the rounding, whose saturation at 6 is the other
+#     unmeasured choice std/narrow records.
+#   * WHETHER AN ATOMIC ADD CAN BE bf16. `atomic_red_view_tko`'s `addf` over
+#     a BF16 tile is the one thing in the whole view family that Ops.td
+#     gates on an architecture, and it gates it IN PROSE rather than in a
+#     verifier. Knife T13 measured the gate (sm_80, sm_86 and sm_87 refuse,
+#     sm_89 and up accept, so the prose's "from Hopper" is a generation
+#     late) and could go no further, because this repository's card is on
+#     the wrong side of it. Eight tile blocks reduce into sixteen bins in no
+#     order at all, and what a device answers for that is what this asks.
+#   * WHETHER A SCALE SCALES A BLOCK. `mmaf_scaled` broadcasts one scale
+#     element over a run of V elements along K, and V is not an operand and
+#     not an attribute: it is the ratio of two shapes. A device that
+#     broadcast the scale over the whole of K, or applied it per element,
+#     would answer a different matrix, and the corpus below makes the two
+#     scale blocks differ so that it does.
+#
+# THE TIER IS EXACT for all five, and by construction rather than by luck.
+# The four conversion kernels have no reduction in them at all. The matrix
+# product does, and its fold order over K is not specified anywhere, so the
+# corpus keeps every operand a small whole number and every scale a power of
+# two between 2^-2 and 2^3: every product and every partial sum is a whole
+# number far inside 2^24, where f32 addition is exact and therefore
+# associative, and the fold order cannot be read off the answer.
+use std/io
+use std/io.{Exit, with_fs_real}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, dtype_convert_ref,
+  dtype_e2m1_ref, mmaf_scaled_ref, view_atomic_bf16_ref, wrap_i32, nibble_word }
+use std/list
+use std/map
+use std/narrow
+
+## The sentinel every output buffer holds before a launch: a value no kernel
+## here computes, so a lane that still has it is a lane nothing wrote.
+pub const SENTINEL: Float = 0.0 - 12345.0
+
+## The shapes the kernels were recorded with. These must agree with
+## scripts/tile-golden/kernels.dawn: DT_N and DT_TILE are the four
+## conversion kernels' segment length and tile width (the fp4 one has the
+## same two and a narrower input, sixteen i32 words to a block), and the
+## four MMS_ constants are the block-scaled product's.
+pub const DT_N: Int = 512
+pub const DT_TILE: Int = 128
+pub const E2M1_WORDS: Int = 16
+pub const MMS_M: Int = 32
+pub const MMS_K: Int = 64
+pub const MMS_N: Int = 32
+pub const MMS_V: Int = 32
+pub const VA_BINS: Int = 16
+pub const VA_TILE: Int = 64
+pub const VA_N: Int = 500
+
+## The lanes past the answer in every output buffer: a write past the end
+## leaves the sentinel behind and is seen.
+const TAIL: Int = 8
+
+## The number of differing lanes the transcript prints. One is enough to
+## know that a run is red and not enough to know WHY when the disagreement
+## is a handful of named corner lanes, which is what half of this corpus is.
+const SHOWN_DIFFERENCES: Int = 12
+
+type Trace = {
+  alloc: String,
+  upload: String,
+  launch: String,
+  sync: String,
+  download: String,
+  result: Option[List[Float]],
+  note: String
+}
+
+fn kind[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> "ok"
+  Err(e) -> e.kind
+}
+
+fn message[T](r: Result[T, ForeignError]) -> String = match r {
+  Ok(_) -> ""
+  Err(e) -> e.message
+}
+
+fn blank() -> Trace =
+  Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
+
+# Allocate and fill one buffer per (format, contents) pair, in order.
+# Written as recursion rather than a `for` with `?` in it, for the reason
+# gath_diff gives (dawn-lang issue #68).
+fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
+  if i >= len(bufs) {
+    Ok(acc)
+  } else {
+    let (dt, data) = bufs[i]
+    match gpu.gpu_alloc(dt, len(data)) {
+      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
+      Err(e) -> Err(e)
+    }
+  }
+
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
+  if i >= len(hs) {
+    Ok(())
+  } else {
+    let (_dt, data) = bufs[i]
+    match gpu.gpu_upload(hs[i], data) {
+      Ok(_) -> upload_all(hs, bufs, i + 1)
+      Err(e) -> Err(e)
+    }
+  }
+
+fn release(hs: List[Int]) -> Unit !Gpu = {
+  for h in hs {
+    let _ = gpu.gpu_free(h)
+  }
+}
+
+## One kernel over `bufs` (each a format and its initial contents) on a
+## `gx` by 1 by 1 grid, one stage at a time, stopping at the first refusal
+## and saying which stage it was. The LAST buffer is the output, and the
+## one this reads back.
+fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !Gpu =
+  match alloc_all(bufs, 0, []) {
+    Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
+    Ok(hs) -> {
+      let t0 = Trace { ..blank(), alloc: "ok" }
+      match upload_all(hs, bufs, 0) {
+        Err(e) -> {
+          release(hs)
+          Trace { ..t0, upload: e.kind, note: e.message }
+        }
+        Ok(_) -> {
+          let t1 = Trace { ..t0, upload: "ok" }
+          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+            Err(e) -> {
+              release(hs)
+              Trace { ..t1, launch: e.kind, note: e.message }
+            }
+            Ok(_) -> {
+              let s = gpu.gpu_sync()
+              let r = gpu.gpu_download(hs[len(hs) - 1])
+              release(hs)
+              let value = match r {
+                Ok(v) -> Some(v)
+                Err(_) -> None
+              }
+              Trace {
+                ..t1,
+                launch: "ok",
+                sync: kind(s),
+                download: kind(r),
+                result: value,
+                note: message(s) ++ message(r)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+## Where the real device stopped, as `<kind>@<stage>`, or "" if it did not.
+fn stopped(t: Trace) -> String =
+  if t.alloc != "ok" {
+    t.alloc ++ "@alloc"
+  } else if t.upload != "ok" {
+    t.upload ++ "@upload"
+  } else if t.launch != "ok" {
+    t.launch ++ "@launch"
+  } else if t.sync != "ok" {
+    t.sync ++ "@sync"
+  } else if t.download != "ok" {
+    t.download ++ "@download"
+  } else {
+    ""
+  }
+
+fn rendered(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> to_string(v)
+  None -> "-"
+}
+
+## The verdict for one kernel. Every kernel here is EXACT tier, so there is
+## no tolerance arm: the two renderings are equal or they are not.
+fn verdict(fake: Trace, real: Trace) -> String = {
+  let stop = stopped(real)
+  if stop != "" {
+    "blocked:" ++ stop
+  } else if rendered(real.result) == rendered(fake.result) {
+    "identical:exact"
+  } else {
+    "differ:result"
+  }
+}
+
+## EVERY differing lane, up to `SHOWN_DIFFERENCES` of them, as segment and
+## lane with both answers. The other families here print the FIRST
+## difference and no more, and that is the right amount when a corpus is a
+## sweep. This one is half named corner lanes -- an overflow midpoint, an
+## infinity, a negative into a format with no sign -- and std/narrow's own
+## comments say two of its answers were choices nobody could measure. One
+## line per corner turns one run of this program into the whole
+## measurement instead of the first disagreement in it.
+fn differences(real: Trace, fake: Trace, n: Int) -> String =
+  match (real.result, fake.result) {
+    (Some(a), Some(b)) ->
+      if len(a) != len(b) {
+        "lengths ${len(a)} and ${len(b)}"
+      } else {
+        let bad = list.filter(range(0, len(a)), i => to_string(a[i]) != to_string(b[i]))
+        if len(bad) == 0 {
+          "-"
+        } else {
+          let shown = list.take(bad, SHOWN_DIFFERENCES)
+          let more = if len(bad) > SHOWN_DIFFERENCES {
+            " (+${len(bad) - SHOWN_DIFFERENCES} more)"
+          } else {
+            ""
+          }
+          list.fold(shown, "${len(bad)} lanes:", (acc, i) =>
+              acc ++ " [seg ${i / n} lane ${i % n} device ${a[i]} host ${b[i]}]") ++ more
+        }
+      }
+    _ -> "-"
+  }
+
+fn pow2(k: Int) -> Float = {
+  var q = 1.0
+  var i = k
+  while i > 0 {
+    q = q * 2.0
+    i = i - 1
+  }
+  while i < 0 {
+    q = q * 0.5
+    i = i + 1
+  }
+  q
+}
+
+fn magnitude(v: Float) -> Float = if v < 0.0 { 0.0 - v } else { v }
+
+# ---- the corpus ----
+
+fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
+
+## The f8E4M3FN storage corpus: the format's own boundaries on the first
+## lanes and an ordinary sweep after them. `upload` rounds every lane into
+## the format, so segment 0 answers the buffer rather than these values; the
+## pinned lanes are here so that the buffer holds a zero, a negative zero,
+## the smallest subnormal, the largest finite value and its negation.
+fn e4m3_x() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        0.0
+      } else if i == 1 {
+        0.0 - 0.0
+      } else if i == 2 {
+        pow2(0 - 9)
+      } else if i == 3 {
+        pow2(0 - 6)
+      } else if i == 4 {
+        448.0
+      } else if i == 5 {
+        0.0 - 448.0
+      } else {
+        to_float(i - 256) * 0.0123456789
+      })
+
+## The f64 the second segment converts into f8E4M3FN and back. The first
+## eight lanes are the whole of what the format's top end can be asked, and
+## the answers std/narrow gives them are the two it says it could not
+## measure: 464 is the midpoint above 448 and ties DOWN to it because 448's
+## significand is even, and anything above answers NaN because the format
+## has nothing else left.
+fn e4m3_y() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        1.0 + pow2(0 - 4)
+      } else if i == 1 {
+        1.0 + 3.0 * pow2(0 - 4)
+      } else if i == 2 {
+        448.0
+      } else if i == 3 {
+        464.0
+      } else if i == 4 {
+        480.0
+      } else if i == 5 {
+        0.0 - 480.0
+      } else if i == 6 {
+        1.0 / 0.0
+      } else if i == 7 {
+        0.0 / 0.0
+      } else if i == 8 {
+        pow2(0 - 11)
+      } else {
+        to_float(i - 256) * 0.1 + 1.0 / 3.0
+      })
+
+## The f8E5M2 storage corpus: five exponent bits and two significand ones,
+## so this format DOES have an infinity and its largest finite value is
+## 57344. The pinned lanes are the same five questions as f8E4M3FN's, asked
+## of the other split of the byte.
+fn e5m2_x() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        0.0
+      } else if i == 1 {
+        0.0 - 0.0
+      } else if i == 2 {
+        pow2(0 - 16)
+      } else if i == 3 {
+        pow2(0 - 14)
+      } else if i == 4 {
+        57344.0
+      } else if i == 5 {
+        0.0 - 57344.0
+      } else {
+        to_float(i - 256) * 0.0123456789
+      })
+
+## The f64 the f8E5M2 conversion segment rounds. This format DOES have an
+## infinity, so its top end is an ordinary IEEE overflow rather than the
+## choice f8E4M3FN's is: 61440 is the midpoint above the largest finite
+## value and ties to even, which here is the infinity.
+fn e5m2_y() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        1.0 + pow2(0 - 3)
+      } else if i == 1 {
+        1.0 + 3.0 * pow2(0 - 3)
+      } else if i == 2 {
+        57344.0
+      } else if i == 3 {
+        1.0e30
+      } else if i == 4 {
+        0.0 - 1.0e30
+      } else if i == 5 {
+        1.0 / 0.0
+      } else if i == 6 {
+        0.0 / 0.0
+      } else if i == 7 {
+        pow2(0 - 18)
+      } else if i == 8 {
+        pow2(0 - 17)
+      } else {
+        to_float(i - 256) * 0.1 + 1.0 / 3.0
+      })
+
+## The f8E8M0FNU storage corpus: the format is the exponent alone, so every
+## lane a buffer of it can hold is a power of two and `upload` rounds each
+## of these DOWN to one. The pinned lanes are the two ends of the range.
+fn e8m0_x() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        pow2(0 - 127)
+      } else if i == 1 {
+        pow2(127)
+      } else if i == 2 {
+        1.0
+      } else {
+        to_float(i) * 0.75
+      })
+
+## The f64 the second segment takes into f8E8M0FNU and back, THROUGH
+## BINARY32 because the kernel does. The first lanes are the values the
+## format has no encoding for at all -- zero, a negative, an infinity and a
+## NaN -- which std/narrow answers NaN for and which nothing had ever
+## asked a device.
+fn e8m0_y() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        1.0
+      } else if i == 1 {
+        1.99
+      } else if i == 2 {
+        pow2(127)
+      } else if i == 3 {
+        pow2(0 - 127)
+      } else if i == 4 {
+        0.0
+      } else if i == 5 {
+        0.0 - 1.0
+      } else if i == 6 {
+        1.0 / 0.0
+      } else if i == 7 {
+        0.0 / 0.0
+      } else if i == 8 {
+        pow2(0 - 140)
+      } else if i == 9 {
+        pow2(140)
+      } else {
+        to_float(i) * 0.5 + 0.25
+      })
+
+## The fp4 storage corpus, in i32 words: eight nibbles to a word, and the
+## sweep is over the NIBBLES. Word 0 puts nibbles 0 to 7 on lanes 0 to 7 and
+## word 1 puts 8 to 15, so the first two words are the sixteen encodings in
+## order and every later word walks them at another stride.
+fn e2m1_x() -> List[Float] =
+  list.map(range(0, DT_N / 8), i =>
+      if i == 0 {
+        nibble_word(k => k)
+      } else if i == 1 {
+        nibble_word(k => k + 8)
+      } else {
+        nibble_word(k => (5 * i + 3 * k + 1) % 16)
+      })
+
+## The f64 the fp4 conversion segment rounds. The format holds sixteen
+## values and nothing else, so the pinned lanes are its two unmeasured
+## answers: a magnitude above 6 saturates rather than overflowing, and a NaN
+## goes to +0 because there is no NaN encoding to go to.
+fn e2m1_y() -> List[Float] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        1.25
+      } else if i == 1 {
+        1.75
+      } else if i == 2 {
+        5.0
+      } else if i == 3 {
+        6.5
+      } else if i == 4 {
+        1.0e30
+      } else if i == 5 {
+        0.0 - 1.0e30
+      } else if i == 6 {
+        0.25
+      } else if i == 7 {
+        0.75
+      } else {
+        to_float(i % 29) * 0.25 - 3.5
+      })
+
+## The block-scaled product's four inputs. The operands are small whole
+## numbers and the scales are powers of two, which is what keeps the tier
+## exact: every product is a whole number, every partial sum is far inside
+## 2^24, and the fold order over K cannot be read off the answer.
+##
+## THE TWO SCALE BLOCKS DIFFER, and that is the point rather than the
+## corpus being varied. K is 64 and V is 32, so each row of `sa` is two
+## numbers and each column of `sb` is two: a device that broadcast one
+## scale over the whole of K, or applied a scale per element, answers a
+## different matrix, and one that ignored the scales entirely answers the
+## unscaled product.
+fn mms_a() -> List[Float] =
+  list.map(range(0, MMS_M * MMS_K), t => to_float((t % 7) - 3))
+
+fn mms_b() -> List[Float] =
+  list.map(range(0, MMS_K * MMS_N), t => to_float((t % 5) - 2))
+
+fn mms_sa() -> List[Float] =
+  list.map(range(0, MMS_M * (MMS_K / MMS_V)), t => pow2(t % 4 - 2))
+
+fn mms_sb() -> List[Float] =
+  list.map(range(0, (MMS_K / MMS_V) * MMS_N), t => pow2((t + 1) % 4 - 1))
+
+## The bf16 atomic reduction's input: VA_N lanes, each naming one of the
+## VA_BINS bins. The stride is coprime with the bin count so that every bin
+## is hit, and no bin comes near 256, which is where whole numbers stop
+## being exact in bf16 and the order eight blocks arrive in would start to
+## show.
+fn va_x() -> List[Float] = list.map(range(0, VA_N), i => to_float((i * 7 + 3) % VA_BINS))
+
+## The blocks `view_atomic_bf16` is launched with: the same expression
+## scripts/tile-golden/kernels.dawn's `va_blocks` is, and the last one is
+## the partial block the kernel masks.
+fn va_blocks() -> Int = VA_N / VA_TILE + 1
+
+# ---- the cases ----
+
+## Every kernel this program knows, in the order the corpus functions below
+## are written. A command line names a subset of these and gives each one a
+## cubin.
+pub fn case_name(i: Int) -> String =
+  ["dtype_e4m3", "dtype_e5m2", "dtype_e8m0", "dtype_e2m1", "mmaf_scaled_e4m3",
+    "view_atomic_bf16"][i]
+
+pub const CASES: Int = 6
+
+## The index of the kernel called `name`, or -1 for a name this program does
+## not know.
+fn case_index(name: String) -> Int =
+  match list.find(range(0, CASES), i => case_name(i) == name) {
+    Some(i) -> i
+    None -> 0 - 1
+  }
+
+## The number of output segments each kernel writes.
+fn case_segments(i: Int) -> Int = if i >= 4 { 1 } else { 2 }
+
+## The lanes in one segment of each kernel's output.
+fn case_lanes(i: Int) -> Int =
+  if i == 4 {
+    MMS_M * MMS_N
+  } else if i == 5 {
+    VA_BINS
+  } else {
+    DT_N
+  }
+
+## The blocks each kernel is launched with. The block-scaled product names
+## no block id at all and runs on one.
+fn case_grid(i: Int) -> Int =
+  if i == 4 {
+    1
+  } else if i == 5 {
+    va_blocks()
+  } else {
+    DT_N / DT_TILE
+  }
+
+## The buffers each kernel is handed: a FORMAT and the initial contents, in
+## argument order. Every output buffer is LONGER than the answer, so the
+## sentinel in its tail says whether a write went past the end.
+fn case_bufs(i: Int) -> List[(String, List[Float])] = {
+  let out = sentinel_buffer(case_segments(i) * case_lanes(i) + TAIL)
+  if i == 0 {
+    [("f8E4M3FN", e4m3_x()), ("f64", e4m3_y()), ("f64", out)]
+  } else if i == 1 {
+    [("f8E5M2", e5m2_x()), ("f64", e5m2_y()), ("f64", out)]
+  } else if i == 2 {
+    [("f8E8M0FNU", e8m0_x()), ("f64", e8m0_y()), ("f64", out)]
+  } else if i == 3 {
+    [("i32", e2m1_x()), ("f64", e2m1_y()), ("f64", out)]
+  } else if i == 4 {
+    [("f8E4M3FN", mms_a()), ("f8E4M3FN", mms_b()), ("f8E8M0FNU", mms_sa()),
+      ("f8E8M0FNU", mms_sb()), ("f64", out)]
+  } else {
+    [("i32", va_x()), ("bf16", out)]
+  }
+}
+
+## The reference table the fake device answers with, for one case.
+fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
+  if i == 0 {
+    map.from([("dtype_e4m3", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E4M3FN", dts, ins))))])
+  } else if i == 1 {
+    map.from([("dtype_e5m2", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E5M2", dts, ins))))])
+  } else if i == 2 {
+    map.from([("dtype_e8m0", (3, last_out((dts, ins) => dtype_convert_ref(DT_N, "f8E8M0FNU", dts, ins))))])
+  } else if i == 3 {
+    map.from([("dtype_e2m1", (3, last_out((dts, ins) => dtype_e2m1_ref(DT_N, dts, ins))))])
+  } else if i == 4 {
+    map.from([("mmaf_scaled_e4m3",
+      (5, last_out((dts, ins) => mmaf_scaled_ref(MMS_M, MMS_K, MMS_N, MMS_V, dts, ins))))])
+  } else {
+    map.from([("view_atomic_bf16",
+      (2, last_out((dts, ins) => view_atomic_bf16_ref(VA_N, VA_BINS, VA_TILE, dts, ins))))])
+  }
+
+## The lanes of each corpus that matter, counted. run.sh holds every one of
+## these above zero, which is what makes the claims in the header
+## measurements rather than intentions: a conversion corpus already on the
+## format's grid would let a truncating `ftof` pass for a rounding one, and
+## a scale corpus whose two blocks agreed would let a device that ignored
+## the block size pass for one that honours it.
+fn shape_of(i: Int) -> String = {
+  let idx = range(0, DT_N)
+  if i == 5 {
+    let x = va_x()
+    let counts = list.map(range(0, VA_BINS), j =>
+        len(list.filter(range(0, VA_N), t => to_int(x[t]) == j)))
+    let hit = list.filter(counts, c => c > 0)
+    let biggest = list.fold(counts, 0, (acc, c) => if c > acc { c } else { acc })
+    "bins_hit=${len(hit)} blocks=${va_blocks()} max_count=${biggest}"
+      ++ " exact_in_bf16=${if biggest < 256 { 1 } else { 0 }}"
+  } else if i == 4 {
+    let sa = mms_sa()
+    let sb = mms_sb()
+    let rows = range(0, MMS_M)
+    let sk = MMS_K / MMS_V
+    let split_a = list.filter(rows, r =>
+        len(list.filter(range(1, sk), q => sa[r * sk + q] != sa[r * sk])) > 0)
+    let split_b = list.filter(range(0, MMS_N), c =>
+        len(list.filter(range(1, sk), q => sb[q * MMS_N + c] != sb[c])) > 0)
+    let a = mms_a()
+    let b = mms_b()
+    let bound = list.fold(range(0, MMS_M * MMS_N), 0.0, (acc, t) => {
+      let r = t / MMS_N
+      let c = t % MMS_N
+      let s = list.fold(range(0, MMS_K), 0.0, (q, k) =>
+          q + magnitude(a[r * MMS_K + k] * b[k * MMS_N + c]) * 8.0)
+      if s > acc { s } else { acc }
+    })
+    "scale_blocks=${sk} rows_with_split_scale=${len(split_a)}"
+      ++ " cols_with_split_scale=${len(split_b)} bound_inside_2p24=${if bound < 16777216.0 { 1 } else { 0 }}"
+  } else if i == 3 {
+    let x = e2m1_x()
+    let y = e2m1_y()
+    let lanes = range(0, DT_N)
+    let seen = list.filter(range(0, 16), v =>
+        len(list.filter(lanes, j =>
+            narrow.f4e2m1_bits(narrow.f4e2m1_of_bits(gpu.nibble_at(wrap_i32(to_int(x[j / 8])), j % 8))) == v)) > 0)
+    let off = list.filter(lanes, j => narrow.round_f4e2m1(y[j]) != y[j])
+    let saturated = list.filter(lanes, j => magnitude(y[j]) > 6.0)
+    "encodings=${len(seen)} off_grid=${len(off)} saturating=${len(saturated)}"
+  } else {
+    let dtype = ["f8E4M3FN", "f8E5M2", "f8E8M0FNU"][i]
+    let x = [e4m3_x(), e5m2_x(), e8m0_x()][i]
+    let y = [e4m3_y(), e5m2_y(), e8m0_y()][i]
+    let biggest = [448.0, 57344.0, pow2(127)][i]
+    let off = list.filter(idx, j => gpu.round_to(dtype, y[j]) != y[j])
+    let stored_off = list.filter(idx, j => gpu.round_to(dtype, x[j]) != x[j])
+    let nan = list.filter(idx, j => {
+      let v = gpu.round_to(dtype, y[j])
+      v != v
+    })
+    let beyond = list.filter(idx, j => magnitude(y[j]) > biggest)
+    "off_grid=${len(off)} rounded_on_upload=${len(stored_off)} host_nan=${len(nan)}"
+      ++ " beyond_max=${len(beyond)}"
+  }
+}
+
+## A vector as a line: its length, its first lanes and its last ones.
+fn digest(v: List[Float]) -> String =
+  if len(v) <= 8 {
+    to_string(v)
+  } else {
+    "len=${len(v)} head=${to_string(list.take(v, 3))} tail=${to_string(list.drop(v, len(v) - 3))}"
+  }
+
+fn shown(o: Option[List[Float]]) -> String = match o {
+  Some(v) -> digest(v)
+  None -> "-"
+}
+
+fn buffers_of(i: Int) -> String = {
+  let bufs = case_bufs(i)
+  list.fold(bufs, "", (acc, b) => {
+    let (dt, data) = b
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ dt ++ "[" ++ to_string(len(data)) ++ "]"
+  })
+}
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("arch_diff: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+fn usage() -> Unit !Exit !io = {
+  io.eprintln("usage: arch_diff <kernel> <cubin> [<kernel> <cubin> ...], where <kernel> is one of"
+      ++ " dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3 view_atomic_bf16")
+  io.exit(2)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let paths = args()
+  let count = len(paths) / 2
+  if count == 0 || len(paths) != 2 * count { usage() } else { () }
+  var cubins: Map[String, Bytes] = map.empty()
+  var order: List[Int] = []
+  for j in range(0, count) {
+    let name = paths[2 * j]
+    let i = case_index(name)
+    if i < 0 {
+      io.eprintln("arch_diff: no such kernel: ${name}")
+      io.exit(2)
+    } else {
+      ()
+    }
+    cubins = map.insert(cubins, name, read_cubin(paths[2 * j + 1]))
+    order = order ++ [i]
+  }
+  var all_agreed = true
+  var blocked = ""
+  var any_differ = false
+  var exact_count = 0
+  var ran = ""
+  for i in order {
+    let name = case_name(i)
+    let bufs = case_bufs(i)
+    let gx = case_grid(i)
+    let refs = case_kernels(i)
+    let fake = with_gpu_fake(refs, () => stages(name, gx, bufs))
+    let real = with_gpu_real(cubins, () => stages(name, gx, bufs))
+    let v = verdict(fake, real)
+    io.println("kernel ${name} tier=exact bufs=${buffers_of(i)} grid=(${gx}, 1, 1)"
+        ++ " segments=${case_segments(i)}")
+    io.println("  index ${shape_of(i)}")
+    io.println("  fake  launch=${fake.launch} result=${shown(fake.result)}")
+    io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
+        ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}")
+    io.println("  diffs ${differences(real, fake, case_lanes(i))}")
+    if real.note != "" { io.println("  note  ${real.note}") } else { () }
+    io.println("  verdict ${v}")
+    if v == "identical:exact" {
+      exact_count = exact_count + 1
+      ran = if ran == "" { name } else { ran ++ "," ++ name }
+    } else {
+      ()
+    }
+    if v != "identical:exact" { all_agreed = false } else { () }
+    if v == "differ:result" { any_differ = true } else { () }
+    if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
+  }
+  io.println("ran ${if ran == "" { "-" } else { ran }}")
+  io.println("tiers exact=${exact_count} tolerance=0")
+  if all_agreed {
+    io.println("tile-gpu-diff: pass")
+  } else if any_differ {
+    io.println("tile-gpu-diff: fail")
+    io.exit(1)
+  } else {
+    io.println("tile-gpu-diff: ${blocked}")
+  }
+})
+
+# `io.exit` is typed Unit, so the branch that cannot continue still owes a
+# Bytes; this is never reached.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
