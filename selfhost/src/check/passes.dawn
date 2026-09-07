@@ -807,7 +807,8 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       derives_show: derives_show,
       derives_ord: derives_ord,
       owner: cx1.owner_class,
-      audience: decl_audience(cx1.owner_class, d.is_pub)
+      audience: decl_audience(cx1.owner_class, d.is_pub),
+      bound_eparams: []
     }
     cx1 = Cx {
       ..cx1,
@@ -859,10 +860,12 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
     # table would carry names out of the declaration that wrote them, because
     # `resolve_eff_at` mints into whatever table is current.
     var ev: Map[String, Eff] = map.empty()
+    var bound_eparams: List[Eff] = []
     for en in d.eparams {
       let (cxe, v) = fresh_effvar(cx1, en)
       cx1 = cxe
       ev = map.insert(ev, en, v)
+      bound_eparams = bound_eparams ++ [v]
     }
     cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: ev }
     # pass_type_shells hands out slots 0, 1, 2, .. to the accepted constructors
@@ -916,7 +919,7 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
       ..cx1,
       current_tparams: saved_tp,
       current_eff_vars: saved_ev,
-      adts: map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors: new_ctors })
+      adts: map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors: new_ctors, bound_eparams: bound_eparams })
     }
     di = di + 1
   }
@@ -1267,7 +1270,8 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       derives_show: false,
       derives_ord: false,
       owner: cx1.owner_class,
-      audience: ev_audience
+      audience: ev_audience,
+      bound_eparams: []
     }
     cx1 = Cx {
       ..cx1,

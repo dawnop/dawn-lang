@@ -55,10 +55,30 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 的私有对照：23个真实函数、22次非均匀源码编辑及一次真实effect声明重排，七个树投影编译
 负控必须命中独立Java比较器的完整TFun断言。另有两个推断函数/调用者状态和一个
 test block状态的完整冷模块对照，丢封定签名写入、保留错误in_test的两个编译负控
-必须分别命中对应的完整Cx断言（typed-all共九个负控）。typed模式还比较23个body状态产品的
+必须分别命中对应的完整Cx断言。header重排进一步比较完整Cx，并增加丢symbol目标
+插入排序的负控。另有三个impl入口负控，移除owner、类型参数和签名角色守卫，
+必须命中具名的运行时拒绝断言；默认参数另有丢符号写入的完整Cx负控。
+另有丢默认值字典符号的编译负控，必须命中泛型默认值的具名字典断言。
+编译或链接失败不算通过（typed-all共十五个负控）。typed模式还比较23个body状态产品的
 原坐标装配；22次源码编辑的body边界Cx现在由生产`body_product`提取、投影和装配，
-不再调用旧私有观察写集replay。分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
+不再调用旧私有观察写集replay。固定header案例的分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
 不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
+
+header重排案例使用`allocation.local_headers`台账连接生产声明索引的局部ADT、
+opaque/透明alias、trait及方法、效果和函数签名binder，同时反转成对声明，
+直接核对各域ID与方法签名映射，并拒绝来源路径不符的header。另连接
+`local_impl_headers`读取生产header pass的泛型impl方法签名，核对顺序交换后的完整签名，
+并拒绝缺失、错序和metadata不匹配的签名表；再连接
+显式intrinsic保留身份。`body_plan`预留旧产物完整取号区间，按完整ABI角色置换
+顶层evidence，不从冷body读取目标ID；默认参数仍拒绝，独立产物接线待完成。
+默认参数正例另通过check_param_default分别捕获两个Int默认值，使用纯默认签名
+预留各自区间并重放，累积台账再供主body产物投影与重放，两类签名均与完整冷Cx/TFun及模块函数比较；
+另覆盖泛型默认闭包调用trait方法、携带字典引用：普通/泛型与显式/推断共四例。
+尚未覆盖默认诊断和全部复杂表达式，也未接入生产缓存调度。
+已不再生成稠密header identity表。固定header的其他案例暂仍用稠密夹具映射。
+`allocation.py`有九个编译负控，守身份/ID冲突、目标版本选择、负槽与引用域，
+以及body evidence置换、未观察临时ID、分配终点和前序台账保留；CI运行该脚本，
+native门禁另显式执行allocation模块测试，因为它尚不在nmain生产调用图中。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控。源码token相等不证明AST相等，尤其不能忽略换行的语义。

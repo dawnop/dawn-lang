@@ -5,15 +5,18 @@ use std/map
 use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
-use compiler/check/tast.{TFun}
-use compiler/check/types.{Sig, Sym, trait_of, eff_labels, sig_abi_eff}
+use compiler/check/tast.{TFun, TDefault}
+use compiler/check/types.{Sig, Sym, trait_of, eff_labels, sig_abi_eff, EV_PACK_ID}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, check_fn, check_fn_inferred, check_test, check_module}
+use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module}
 use compiler/check/relocate
 use compiler/check/relocate_tree
 use compiler/check/relocate_tree.{View}
 use compiler/check/source_projection
 use compiler/check/body_product
+use compiler/check/allocation
+use compiler/check/allocation.{NominalId, LocalSymbol, TypeParameter, EffectParameter}
+use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ParameterDefault, EffectDecl, module_key}
 use compiler/front/parser
 use compiler/front/ast.{module_fns, module_tests}
 
@@ -92,9 +95,79 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
   body_product.assemble(current, projected).expect("state assembly: " ++ body.name)
 }
 
-pub type HeaderTrial = { relocated: TFun, cold: TFun }
+pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
 
 pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
+
+pub fn default_samples() -> List[StateTrial] !io = [default_sample(false, false), default_sample(true, false),
+  default_sample(false, true), default_sample(true, true)]
+
+fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
+  let prefix = if generic { "trait Marker[T] { fn mark(x: T) -> Int }\nfn sample[T: Marker]" } else { "fn sample" }
+  let params = if generic { "(x: fn(T) -> Int = (t) => mark(t), y: Int = { let w = 2\n w })" }
+    else { "(x: Int = { let v = 1\n v }, y: Int = { let w = 2\n w })" }
+  let text = prefix ++ params ++ (if inferred { " = " } else { " -> Int = " }) ++
+    (if generic { "y\n" } else { "x + y\n" })
+  let (syntax, diags) = parser.parse_module(text)
+  if len(diags) != 0 { panic("default boundary parse failed") }
+  let base = cx_new(Some("defaults"), Some("defaults.dawn"))
+  let new_base = Cx { ..base, next_id: base.next_id + 10 }
+  let (before, sigs) = headers_for_body_probe(base, syntax, map.empty())
+  let (next, nsigs) = headers_for_body_probe(new_base, syntax, map.empty())
+  let decl = module_fns(syntax)[0]
+  let scope = module_key("defaults-world", "defaults", "defaults", "defaults.dawn")
+  var old_table = allocation.table(allocation.local_headers(scope, syntax, before).expect("old default headers")).expect("old table")
+  var new_table = allocation.table(allocation.local_headers(scope, syntax, next).expect("new default headers")).expect("new table")
+  let source = source_projection.between(text, text, decl.lo, decl.hi, decl.lo, decl.hi).expect("default source")
+  var old_cx = before
+  var new_cx = next
+  var old_defaults: List[Option[TDefault]] = []
+  var k = 0
+  for p in decl.params {
+    let (after, value) = check_param_default(old_cx, decl, sigs[0], k)
+    if len(value.dict_syms) != (if generic { 1 } else { 0 }) { panic("default dictionary fixture missing its bound") }
+    let sig = default_sig(sigs[0], decl.name, k, sigs[0].param_tys[k])
+    let new_sig = default_sig(nsigs[0], decl.name, k, nsigs[0].param_tys[k])
+    let fn_value = TFun { name: sig.name, sig: sig, param_syms: [], dict_syms: value.dict_syms,
+      defaults: [], ev_syms: [], body: value.body, is_test: false, impl_of: None, default_of: None }
+    let key = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name), Named(ParameterDefault, p.name)] }
+    let plan = allocation.body_plan(old_table, new_table, key, old_cx.next_id, after.next_id - old_cx.next_id,
+      new_cx.next_id, sig, new_sig, []).expect("default allocation")
+    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+      assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+      callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+    let saved = body_product.capture(old_cx, after, fn_value).expect("default capture")
+    let projected = body_product.project(view, saved, new_cx.next_id).expect("default projection")
+    new_cx = body_product.assemble(new_cx, projected).expect("default assembly")
+    old_defaults = old_defaults ++ [Some(value)]
+    old_table = plan.old_allocations
+    new_table = plan.next_allocations
+    old_cx = after
+    k = k + 1
+  }
+  let (old_after, old_body) = if inferred {
+    let (cx, _, value) = check_fn_inferred_body(old_cx, decl, sigs[0], old_defaults)
+    (cx, value)
+  } else { check_fn_body(old_cx, decl, sigs[0], old_defaults) }
+  let mapped_sig = relocate.signature(allocation.between(old_table, new_table).expect("preceding allocations"), old_body.sig).expect("main signature")
+  let owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
+  let main_plan = allocation.body_segment_plan(old_table, new_table, owner,
+    old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, old_body.sig, mapped_sig, old_body.ev_syms).expect("main allocation")
+  let main_view = View { ids: main_plan.ids, positions: source.starts, ends: source.ends, symbols: old_after.syms,
+    assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+  let main_saved = body_product.capture(old_cx, old_after, old_body).expect("main capture")
+  let main_projected = body_product.project(main_view, main_saved, new_cx.next_id).expect("main projection")
+  let replayed = body_product.assemble(new_cx, main_projected).expect("main assembly")
+  let body = main_projected.function
+  let (cold, cold_body) = if inferred {
+    let (cx, _, value) = check_fn_inferred(next, decl, nsigs[0])
+    (cx, value)
+  } else { check_fn(next, decl, nsigs[0]) }
+  let (_, whole) = check_module(new_base, syntax, map.empty())
+  if len(replayed.diags) != 0 || len(cold.diags) != 0 { panic("default boundary check failed") }
+  StateTrial { replayed: replayed, cold: cold, relocated: body, cold_body: cold_body, module_body: whole.fns[0] }
+}
 
 ## The source order here is deliberately dependency order. This checks state
 ## products, not a replacement scheduler: the module oracle still uses the
@@ -178,15 +251,23 @@ pub fn test_samples() -> List[StateTrial] !io = {
 pub fn header_sample() -> HeaderTrial !io = {
   let ask = "pub effect Ask { fn ask() -> Int }\n"
   let tell = "pub effect Tell { fn tell() -> Int }\n"
+  let first_type = "type First[T, !e] = { f: fn(T) -> T !e }\n"
+  let second_type = "type Second[T, !e] = { value: T }\n"
+  let first_alias = "opaque type Wrapped[T, !e] = fn(T) -> T !e\n"
+  let second_alias = "alias Callback[T, !e] = fn(T) -> T !e\n"
+  let first_trait = "trait Forward[T] { fn forward(x: T, f: fn() -> Int !e) -> Int !e }\n"
+  let second_trait = "trait Repeat[T] { fn repeat(x: T, f: fn() -> Int !e) -> Int !e }\n"
+  let first_impl = "impl[T] Forward[List[T]] { fn forward(x: List[T], f: fn() -> Int !e) -> Int !e = f() }\n"
+  let second_impl = "impl[T] Repeat[List[T]] { fn repeat(x: List[T], f: fn() -> Int !e) -> Int !e = f() }\n"
   let tail = "pub fn thru[!e](g: fn() -> Int !e) -> Int !e = g()\n" ++
     "pub fn both() -> Int !Ask !Tell = thru(() => ask() + tell())\n"
-  let old_text = ask ++ tell ++ tail
-  let new_text = tell ++ ask ++ tail
+  let old_text = first_type ++ second_type ++ first_alias ++ second_alias ++ first_trait ++ second_trait ++ first_impl ++ second_impl ++ ask ++ tell ++ tail
+  let new_text = second_type ++ first_type ++ second_alias ++ first_alias ++ second_trait ++ first_trait ++ second_impl ++ first_impl ++ tell ++ ask ++ tail
   let (old_ast, opd) = parser.parse_module(old_text)
   let (new_ast, npd) = parser.parse_module(new_text)
   if len(opd) != 0 || len(npd) != 0 { panic("header fixture parse failed") }
-  let (before, sigs) = headers_for_body_probe(cx_new(Some("header"), Some("header.dawn")), old_ast, map.empty())
-  let (next, nsigs) = headers_for_body_probe(cx_new(Some("header"), Some("header.dawn")), new_ast, map.empty())
+  let (before, sigs, impl_sigs) = headers_with_impls_for_body_probe(cx_new(Some("header"), Some("header.dawn")), old_ast, map.empty())
+  let (next, nsigs, new_impl_sigs) = headers_with_impls_for_body_probe(cx_new(Some("header"), Some("header.dawn")), new_ast, map.empty())
   if len(before.diags) != 0 || len(next.diags) != 0 || before.next_id != next.next_id { panic("header fixture invalid") }
   let decl = module_fns(old_ast)[1]
   let ndecl = module_fns(new_ast)[1]
@@ -198,32 +279,93 @@ pub fn header_sample() -> HeaderTrial !io = {
   let new_ask = map.get(next.effects, "Ask").expect("new Ask")
   let new_tell = map.get(next.effects, "Tell").expect("new Tell")
   if old_ask != new_tell || old_tell != new_ask || old_ask == old_tell { panic("effect order did not reverse") }
-  var stable: Map[Int, Int] = map.empty()
-  var id = -1024
-  while id < after.next_id { stable = map.insert(stable, id, id)
-    id = id + 1
+  let scope = module_key("header-world", "header", "header", "header.dawn")
+  var old_entries = allocation.local_headers(scope, old_ast, before).expect("old header provenance")
+  var new_entries = allocation.local_headers(scope, new_ast, next).expect("new header provenance")
+  old_entries = old_entries ++ allocation.local_impl_headers(scope, old_ast, before, impl_sigs).expect("old impl provenance")
+  new_entries = new_entries ++ allocation.local_impl_headers(scope, new_ast, next, new_impl_sigs).expect("new impl provenance")
+  if allocation.local_headers(ModuleKey { ..scope, source: "foreign.dawn" }, old_ast, before) != None {
+    panic("foreign source accepted for local headers")
   }
-  let nominals = map.insert(map.insert(stable, old_ask, new_ask), old_tell, new_tell)
-  var locals = stable
-  let old_labels = eff_labels(sig_abi_eff(saved.sig))
-  let new_labels = eff_labels(sig_abi_eff(nsigs[1]))
-  if len(saved.ev_syms) != 2 || len(new_labels) != 2 { panic("expected two evidence slots") }
-  var i = 0
-  for (old_id, name) in old_labels {
-    var j = 0
-    for (new_id, new_name) in new_labels {
-      if name == new_name {
-        if map.get(nominals, old_id) != Some(new_id) { panic("header role mismatch") }
-        locals = map.insert(locals, saved.ev_syms[i], next.next_id + j)
-      }
-      j = j + 1
+  if allocation.local_impl_headers(scope, old_ast, before, []) != None {
+    panic("missing impl signature table accepted")
+  }
+  if allocation.local_impl_headers(scope, old_ast, before, [impl_sigs[1], impl_sigs[0]]) != None {
+    panic("reordered impl signature table accepted")
+  }
+  if allocation.local_impl_headers(scope, old_ast, Cx { ..before, local_impls: [] }, impl_sigs) != None {
+    panic("missing impl provenance accepted")
+  }
+  let original_impl_sig = impl_sigs[0][0].expect("impl signature guard fixture")
+  for invalid in [Sig { ..original_impl_sig, owner: Some("foreign") },
+    Sig { ..original_impl_sig, tparams: [] }, Sig { ..original_impl_sig, is_builtin: true },
+    Sig { ..original_impl_sig, trait_id: Some(999) }, Sig { ..original_impl_sig, op_of: Some((999, 0)) }] {
+    if allocation.local_impl_headers(scope, old_ast, before, [[Some(invalid)], impl_sigs[1]]) != None {
+      panic("invalid impl method metadata accepted")
     }
-    i = i + 1
   }
-  let ids = relocate.new(nominals, stable, stable, stable, locals).expect("header relocation IDs")
+  let intrinsic = DeclKey { scope: module_key("header-world", "compiler", "compiler", "intrinsics"),
+    path: [Named(FunctionDecl, "evidence_pack")] }
+  let reserved = [allocation.entry(intrinsic, NominalId, 0, EV_PACK_ID), allocation.entry(intrinsic, TypeParameter, 0, 0)]
+  old_entries = old_entries ++ reserved
+  new_entries = new_entries ++ reserved
+  let body_owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
+  let plan = allocation.body_plan(allocation.table(old_entries).expect("old header table"),
+    allocation.table(new_entries).expect("new header table"), body_owner,
+    before.next_id, after.next_id - before.next_id, next.next_id, saved.sig, nsigs[1], saved.ev_syms).expect("body allocation plan")
+  let ids = plan.ids
+  if plan.next_id != checked.next_id { panic("body allocation endpoint differs from cold") }
+  if relocate.nominal(ids, old_ask) != Some(new_ask) || relocate.nominal(ids, old_tell) != Some(new_tell) {
+    panic("header role mismatch")
+  }
+  for name in ["First", "Second"] {
+    let old_id = map.get(before.adts_by_name, name).expect("old ADT ID")
+    let new_id = map.get(next.adts_by_name, name).expect("new ADT ID")
+    let old_adt = map.get(before.adts, old_id).expect("old ADT")
+    let new_adt = map.get(next.adts, new_id).expect("new ADT")
+    if old_id == new_id || relocate.nominal(ids, old_id) != Some(new_id) ||
+      relocate.ty(ids, old_adt.tparams[0]) != Some(new_adt.tparams[0]) ||
+      relocate.effect_row(ids, old_adt.bound_eparams[0]) != Some(new_adt.bound_eparams[0]) {
+      panic("ADT header provenance mismatch")
+    }
+  }
+  for name in ["Wrapped", "Callback"] {
+    let old_alias = map.get(before.aliases, name).expect("old alias")
+    let new_alias = map.get(next.aliases, name).expect("new alias")
+    if relocate.ty(ids, old_alias.tparams[0]) != Some(new_alias.tparams[0]) ||
+      relocate.effect_row(ids, old_alias.eparams[0]) != Some(new_alias.eparams[0]) {
+      panic("alias binder provenance mismatch")
+    }
+    if old_alias.is_opaque && relocate.nominal(ids, old_alias.id) != Some(new_alias.id) {
+      panic("opaque alias provenance mismatch")
+    }
+  }
+  for name in ["Forward", "Repeat"] {
+    let old_id = map.get(before.traits_by_name, name).expect("old trait ID")
+    let new_id = map.get(next.traits_by_name, name).expect("new trait ID")
+    let old_trait = map.get(before.traits, old_id).expect("old trait")
+    let new_trait = map.get(next.traits, new_id).expect("new trait")
+    let (_, old_method) = old_trait.methods[0]
+    let (_, new_method) = new_trait.methods[0]
+    if old_id == new_id || relocate.trait_id(ids, old_id) != Some(new_id) ||
+      relocate.ty(ids, old_trait.tvar) != Some(new_trait.tvar) ||
+      relocate.signature(ids, old_method.sig) != Some(new_method.sig) {
+      panic("trait header provenance mismatch")
+    }
+  }
+  var impl_index = 0
+  while impl_index < len(impl_sigs) {
+    let old_sig = impl_sigs[impl_index][0].expect("old impl method")
+    let new_sig = new_impl_sigs[1 - impl_index][0].expect("new impl method")
+    if relocate.signature(ids, old_sig) != Some(new_sig) { panic("impl method provenance mismatch") }
+    impl_index = impl_index + 1
+  }
   let source = source_projection.between(old_text, new_text, decl.lo, decl.hi, ndecl.lo, ndecl.hi).expect("header source view")
   let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
-  HeaderTrial { relocated: relocate_tree.function(v, saved).expect("header tree relocation"), cold: cold }
+  let product = body_product.capture(before, after, saved).expect("header body capture")
+  let projected = body_product.project(v, product, next.next_id).expect("header body projection")
+  HeaderTrial { relocated: projected.function, cold: cold,
+    replayed_state: body_product.assemble(next, projected).expect("header body assembly"), cold_state: checked }
 }

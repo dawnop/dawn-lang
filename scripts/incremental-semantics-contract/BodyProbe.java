@@ -71,6 +71,16 @@ public final class BodyProbe {
             Class<?> h = header.getClass();
             if (!SemanticSnapshot.same(h.getField("relocated").get(header), h.getField("cold").get(header)))
                 throw new AssertionError("reordered header: relocated body differs from cold check");
+            if (!SemanticSnapshot.same(h.getField("replayed_state").get(header), h.getField("cold_state").get(header))) {
+                Object replayed = h.getField("replayed_state").get(header);
+                Object checked = h.getField("cold_state").get(header);
+                var fields = new ArrayList<String>();
+                for (var field : replayed.getClass().getFields()) {
+                    if (Modifier.isStatic(field.getModifiers()) || field.getName().equals("jsig")) continue;
+                    if (!SemanticSnapshot.same(field.get(replayed), field.get(checked))) fields.add(field.getName());
+                }
+                throw new AssertionError("reordered header: replayed Cx differs from cold body boundary: " + fields);
+            }
             System.out.println("reordered-header\t1\treversed effect declarations and evidence slots agree with cold");
             Object inferred = probe.getMethod("inferred_samples").invoke(null);
             var stateCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("state_count")).findFirst().orElseThrow();
@@ -97,6 +107,18 @@ public final class BodyProbe {
                     || !SemanticSnapshot.same(tt.getField("cold_body").get(test), tt.getField("module_body").get(test)))
                 throw new AssertionError("test state: body differs from cold module");
             System.out.println("test-state\t1\tassertion source and test frame agree with cold module products");
+            Object defaults = probe.getMethod("default_samples").invoke(null);
+            if ((Long) stateCount.invoke(null, defaults) != 4) throw new AssertionError("Unexpected default trial count");
+            for (long i = 0; i < 4; i++) {
+                Object def = stateAt.invoke(null, defaults, i);
+                Class<?> dt = def.getClass();
+                if (!SemanticSnapshot.same(dt.getField("replayed").get(def), dt.getField("cold").get(def)))
+                    throw new AssertionError("default state: replayed Cx differs from cold body boundary (" + i + ")");
+                if (!SemanticSnapshot.same(dt.getField("relocated").get(def), dt.getField("cold_body").get(def))
+                        || !SemanticSnapshot.same(dt.getField("cold_body").get(def), dt.getField("module_body").get(def)))
+                    throw new AssertionError("default state: body differs from cold module (" + i + ")");
+            }
+            System.out.println("default-state\t4\tindependent defaults and generic dictionaries replay before explicit and inferred bodies");
         }
     }
 }

@@ -23,9 +23,10 @@ def main():
     parser.add_argument("--java-home", required=True, type=Path)
     parser.add_argument("--typed", action="store_true", help="compare the production typed-tree mapper against the cold bodies")
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
-                      "inferred-write", "test-state"]
+                      "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
+                      "impl-owner", "impl-parameters", "impl-roles"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its nine compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its fifteen compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -72,9 +73,18 @@ def main():
         shutil.copytree(ROOT / directory, output / directory,
                         ignore=shutil.ignore_patterns("build", ".dawn"))
     if args.typed_mutant:
-        target = output / "selfhost/src/check" / ("body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state") else "relocate_tree.dawn")
+        target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant == "default-dictionary" else
+                    "allocation.dawn" if args.typed_mutant.startswith("impl-") else
+                    "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "default-dictionary": ("TDefault { body: dx, dict_syms: dsyms }", "TDefault { body: dx, dict_syms: [] }"),
+            "default-write": ("syms: apply_changes(current.syms, product.symbols)",
+                              'syms: if product.function.name == "sample\\$default\\$0" { current.syms } else { apply_changes(current.syms, product.symbols) }'),
+            "impl-owner": ("sig.name != method.name || sig.owner != cx.owner_class", "sig.name != method.name || false"),
+            "impl-parameters": ("sig.tparams != info.tparams", "false"),
+            "impl-roles": ("sig.is_builtin ||\n                  sig.trait_id != None || sig.op_of != None", "sig.is_builtin"),
+            "symbol-order": ("sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
             "inferred-write": ("fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),
             "test-state": ("in_test: product.in_test", "in_test: if product.function.is_test { true } else { product.in_test }"),
             "local": ("Some(XLocal(relocate.local_id(v.ids, id)?,", "Some(XLocal(id,"),
@@ -98,8 +108,10 @@ def main():
     if source.count(start) != 1 or source.count(end) != 1:
         raise RuntimeError("Header probe anchors drifted")
     prefix = source.split(start, 1)[1].split(end, 1)[0]
-    checker.write_text(source + "\npub fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
-                       + prefix + "  (cx1, sigs)\n}\n")
+    checker.write_text(source + "\npub fn headers_with_impls_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig], List[List[Option[Sig]]]) !io = {\n"
+                       + prefix + "  (cx1, sigs, impl_sigs)\n}\n"
+                       + "\npub fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
+                       + "  let (next, sigs, _) = headers_with_impls_for_body_probe(cx, m, env)\n  (next, sigs)\n}\n")
     fixture = output / "scripts/body-probe"
     (fixture / "src").mkdir(parents=True)
     (fixture / "dawn.toml").write_text((HERE / "dawn.toml").read_text())
@@ -117,6 +129,7 @@ def main():
         probe += "\npub fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
         probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
         probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
+        probe += "pub fn default_samples() -> List[typed_projection.StateTrial] !io = typed_projection.default_samples()\n"
         probe += "pub fn state_count(xs: List[typed_projection.StateTrial]) -> Int = len(xs)\n"
         probe += "pub fn state_at(xs: List[typed_projection.StateTrial], i: Int) -> typed_projection.StateTrial = xs[i]\n"
         old = "relocation.relocate(body, Move {\n        start: before.next_id, limit: after.next_id, delta: 1000, span: 0 })"
@@ -179,7 +192,21 @@ def main():
                             text=True, capture_output=True)
     (output / "run.log").write_text(result.stdout + result.stderr)
     if args.typed_mutant:
+        if args.typed_mutant == "default-dictionary":
+            if (result.returncode == 0 or "dawn.rt.PanicError: default dictionary fixture missing its bound" not in result.stderr
+                    or "NoSuchMethodError" in result.stderr):
+                raise RuntimeError("Default dictionary mutation did not reach its owning assertion: " + result.stderr)
+            print("OK: compiling default-dictionary mutant rejected")
+            return
+        if args.typed_mutant.startswith("impl-"):
+            if (result.returncode == 0 or "dawn.rt.PanicError: invalid impl method metadata accepted" not in result.stderr
+                    or "NoSuchMethodError" in result.stderr):
+                raise RuntimeError("Impl mutation did not reach its owning guard: " + result.stderr)
+            print("OK: compiling impl-header mutant rejected: " + args.typed_mutant)
+            return
         expected_comparison = ({"inferred-write": "inferred state: replayed Cx differs from cold body boundary",
+                                "default-write": "default state: replayed Cx differs from cold body boundary",
+                                "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)
                                or ("reordered header: relocated body differs from cold check"
                                if args.typed_mutant in ("pack-order", "evidence-origin")
@@ -207,6 +234,7 @@ def main():
         "identity_sha256": hashlib.sha256(identity.encode()).hexdigest(),
         "typed_projection": args.typed,
         "body_product_sha256": hashlib.sha256((output / "selfhost/src/check/body_product.dawn").read_bytes()).hexdigest() if args.typed else None,
+        "allocation_sha256": hashlib.sha256((output / "selfhost/src/check/allocation.dawn").read_bytes()).hexdigest() if args.typed else None,
         "typed_tree_sha256": hashlib.sha256((output / "selfhost/src/check/relocate_tree.dawn").read_bytes()).hexdigest() if args.typed else None,
         "typed_view_sha256": hashlib.sha256((fixture / "src/typed_projection.dawn").read_bytes()).hexdigest() if args.typed else None,
         "note": "Typed mode: 23 fixed-header bodies with production state capture/assembly, 22 nonuniform source edit replays through production product projection, one reversed effect-header tree case, two inferred body/caller states and one test block state; fixture-only ID/callee views are not production cache validity. Legacy mode: 11 fixed-header bodies and ten uniform-source replays.",
