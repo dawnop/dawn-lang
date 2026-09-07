@@ -39,9 +39,8 @@
 #                        for anything at all, noise included.
 #   golden/selfhost.norm.sha
 #                        the same, with the compiler's own noise filtered out
-#                        (see NORM below). This is the one that means "not one
-#                        instruction differs", so it is the one to trust when a
-#                        refactor claims to have moved code without changing it.
+#                        (see NORM below). Equality preserves string contents
+#                        and generated-name identity relationships.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -52,53 +51,16 @@ mode=check
 
 # ## The noise filter -- one definition, both readers
 #
-# `selfhost.sha` is exact. `selfhost.norm.sha` is the same hashes over content
-# with everything below erased, and it is the one that carries the claim "not
-# one instruction differs". Anything added here is a claim that a difference in
-# it cannot change what runs, so the list is short and each entry is argued.
-# The `*.core` diff below runs the same program over its changed lines, so the
-# filter and the verdict it licenses cannot drift apart.
-#
-#   Adt[0-9]+   The id embedded in a generated symbol name (structeq$Adt307,
-#               and its cmp/show siblings). Type inference allocates from the
-#               same counter ADT declarations do, so adding a function to
-#               types.dawn shifts every id after it. Measured 2026-07-26: one
-#               added function to types.dawn moves 6 of 52 modules and 5 of the
-#               6 are that. Splitting the counter would rename every generated
-#               symbol in the language -- a far larger Emit-Change than the
-#               noise it removes, so the answer is to name the noise rather
-#               than to stop making it.
-#
-#   at F.dawn:N `e!` lowers to `panic(<message>)` and the checker builds that
-#               message with the site baked in: "unwrapped None[ from f()] at
-#               <path>:<line>" (checker.dawn unwrap_msg). A *string constant*,
-#               so it is Core, so every line below an `e!` moves both hashes.
-#               Added 2026-08-04 (#143), on this measurement: two comment lines
-#               added to selfhost/src/main.dawn, nothing else --
-#
-#                 582c582
-#                 <   str "unwrapped None at selfhost/src/main.dawn:164"
-#                 ---
-#                 >   str "unwrapped None at selfhost/src/main.dawn:166"
-#
-#               -- and both hashes moved. The danger is not the noise, it is
-#               the habit: pure code movement is exactly when this golden is
-#               the identity proof, and a reviewer trained to skim past line
-#               numbers will skim past the one real instruction in with them.
-#               The line goes; the *path* stays, because a site moving between
-#               files is real. `?` does not do this (EPropagate carries no
-#               message) and `assert` bakes the source text but not the line,
-#               so this is the only shape -- confirmed by grepping every
-#               selfhost dump for a `<file>:<line>` literal: 3 hits, all this
-#               one. The pattern is anchored on " at " rather than on ".dawn:"
-#               alone so that a `.dawn:12` occurring inside embedded source
-#               text (stdsrc/rtsrc carry whole std files as constants) is
-#               still compared exactly.
-#
-# Both are noise the *compiler chooses to make*. Neither is a reason to stop
-# checking; a filter here is cheaper than the alternative, which is renaming
-# every generated symbol / dropping the panic site from the message.
-NORM='s/Adt[0-9]+/AdtN/g; s/ at ([^" ]*\.dawn):[0-9]+/ at \1:L/g'
+# `selfhost.sha` is exact. `selfhost.norm.sha` filters only generated-name IDs.
+# Type inference and ADT declarations share a counter, so unrelated additions
+# can renumber generated names such as structeq$Adt307. Normalize whole modules
+# in both readers, retaining the relationship between definitions and uses.
+# Whole-line substitution erased user strings, and erasing every ID to AdtN
+# also erased distinctions between generated entities. Strings now stay exact,
+# including panic sites; generated-name IDs are consistently alpha-renamed.
+# Trait IDs stay exact until Core carries their stable identities.
+NORM="$ROOT/scripts/core-normalize.py"
+python3 scripts/core-normalize.py --self-test
 
 # Programs chosen for coverage, not size: calc has closures, `?` and list
 # work; traits has dictionaries with both slot kinds and a derived Ord; eqhash
@@ -173,12 +135,10 @@ if ! grep -q ', 0 failed' "$OUT/self.log"; then
   exit 1
 fi
 ( cd "$OUT/self" && sha256sum ./*.core | sort -k2 ) > "$OUT/selfhost.sha"
-# The same hashes over content with the two known noise sources erased -- see
-# NORM below. A module whose exact hash moved but whose normalised hash did not
-# carries no instruction difference.
+# The same hashes with generated-name IDs normalized, but all strings exact.
 norm_sha() {
   ( cd "$1" && for f in ./*.core; do
-      printf '%s  %s\n' "$(sed -E "$NORM" "$f" | sha256sum | cut -d' ' -f1)" "$f"
+      printf '%s  %s\n' "$(python3 "$NORM" < "$f" | sha256sum | cut -d' ' -f1)" "$f"
     done | sort -k2 )
 }
 norm_sha "$OUT/self" > "$OUT/selfhost.norm.sha"
@@ -200,20 +160,10 @@ fi
 
 fail=0
 if ! diff -ru "$golden" "$OUT/flat" -x 'selfhost*.sha' > "$OUT/d.txt"; then
-  # every changed line, through the same filter norm.sha uses: if the two sides
-  # then agree, nothing that runs moved.
-  #
-  # The diff marker comes off *per line*, inside the same sed. It used to come
-  # off the joined string with `${added#+}`, which strips one character from the
-  # front of the whole variable -- so lines 2..n kept their `+` and `-` and the
-  # two sides could never compare equal past the first. Every multi-line
-  # ids-only change was therefore reported as "Core IR changed", the reading
-  # that costs a re-record its explanation. (Both branches fail the gate; what
-  # was wrong is which of the two the reader was told.)
-  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E "s/^\+//; $NORM")
-  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E "s/^-//; $NORM")
-  if [ -n "$added" ] && [ "$added" = "$removed" ]; then
-    echo "Core IR changed, but only in ids and panic-site lines -- no instruction differs:"
+  # Whole modules are required: normalizing just changed lines can miss a
+  # changed reference to a definition on an unchanged line.
+  if python3 "$NORM" --equal "$golden" "$OUT/flat"; then
+    echo "Core IR changed, but only in generated ADT ids -- no other content differs:"
     grep -E '^[+-]' "$OUT/d.txt" | grep -Ev '^(\+\+\+|---)' | head -6
     echo "  (re-record with --record; see the note in this script)"
   else
@@ -246,7 +196,7 @@ if ! diff -u "$golden/selfhost.sha" "$OUT/selfhost.sha" > "$OUT/s.txt"; then
     for m in $changed; do echo "  $m"; done
   fi
   if [ -n "$drifted" ]; then
-    echo "Only ids and panic-site lines shifted in these -- no instruction changed:"
+    echo "Only generated ADT ids shifted in these -- no other content changed:"
     for m in $drifted; do echo "  $m"; done
   fi
   echo "  (rerun with --dump to see the content: bin/dawn __lower --dump <dir> selfhost)"

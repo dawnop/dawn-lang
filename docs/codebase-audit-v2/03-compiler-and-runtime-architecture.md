@@ -382,3 +382,15 @@
   构建，且 `--version` 输出单行 `dawn ...`；严格 matrix preflight 拒绝字段撒谎、重复、
   缺失和未知记录，并要求它只能把 `source_loop_target_is_retained` 变红。
 - **设计记录：** [native-loop-control-design.md](../native-loop-control-design.md)。
+
+### 2026-09-07 工具复核：Core 归一化的保守边界
+
+旧 NORM 把整行 Adt 数字与 panic 位置字符串一起抹去，用户字符串的真实差异也可能被
+分类成「只有噪声」。exact gate 仍会红，错的是解释与重录依据。修复方案：字符串视为
+不透明内容，只对生成名称中 `$Adt` 数字做逐模块、保留相等关系的 alpha 重命名；完整
+模块比较，不再只比较 diff 摘出的改动行。panic 消息没有来源标记，无法区分用户仿写，
+因此停止抹去其中行号。trait 数字也先保持精确，缺少稳定身份元数据时不扩大消噪。
+
+负控覆盖字符串、转义引号、嵌入源码、panic 消息、同一/不同 ID 的引用关系，以及未
+获得身份信息的 trait 和用户类型名。按惯例重录 normalized hashes；exact hashes 和
+Core 文本不得改变。本项不声称解决 trait 编号噪声，也不更改编译器输出。
