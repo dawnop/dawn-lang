@@ -333,6 +333,7 @@ pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
   "f8E4M3FN" -> narrow.round_f8e4m3fn(x)
   "f8E5M2" -> narrow.round_f8e5m2(x)
   "f8E8M0FNU" -> narrow.round_f8e8m0(x)
+  "f4E2M1FN" -> narrow.round_f4e2m1(x)
   "i32" -> to_float(wrap_i32(to_int(x)))
   "i16" -> to_float(wrap_i16(to_int(x)))
   "i64" -> to_float(to_int(x))
@@ -4412,6 +4413,79 @@ pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List
       })
 }
 
+## The two segments of `dtype_e2m1`: the packed nibbles of `ins[0]` read as
+## f4E2M1FN values and widened to f64, and an f64 taken into the format and
+## back. `ins` is `[x, y, out]`, `x` is an i32 buffer and `y` and `out` are
+## f64 ones.
+##
+## THIS IS NOT `dtype_convert_ref` WITH ANOTHER NAME, and segment 0 is the
+## reason. Every other narrow float format has a buffer of its own, so
+## `upload` rounds the corpus into the format and segment 0 is the buffer as
+## it stands. f4E2M1FN has none (`element_bytes` refuses it), so its kernel
+## brings the bits in as i32 words and `unpack`s them, and the reference has
+## to read the same words the same way: lane `i` is nibble `i % 8` of word
+## `i / 8`, low nibble first, and `narrow.f4e2m1_of_bits` says which of the
+## sixteen values that nibble is. What segment 0 asks is therefore the
+## ENCODING and not a rounding.
+##
+## Segment 1 is one rounding, as it is for f8E4M3FN and f8E5M2: `round_to`
+## dispatches to `narrow.round_f4e2m1`, and the widening back to f64 is
+## exact.
+pub fn dtype_e2m1_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let y = ins[1]
+  segments(ins[2], n, 2, (seg, i) =>
+      if seg == 0 {
+        narrow.f4e2m1_of_bits(nibble_at(wrap_i32(to_int(x[i / 8])), i % 8))
+      } else {
+        round_to("f4E2M1FN", y[i])
+      })
+}
+
+## The block-scaled matrix product `mmaf_scaled_e4m3` computes, as one
+## `m` by `n` tile widened to f64. `ins` is `[a, b, sa, sb, out]`: `a` is
+## `m` by `k` and `b` is `k` by `n` in the operand format, `sa` is
+## `m` by `k / v` and `sb` is `k / v` by `n` in the scale format, and every
+## buffer is laid out row-major.
+##
+## THE FORMULA IS Ops.td's, transcribed rather than guessed. `MmaFScaledOp`
+## writes it out:
+##
+##   result[i][j] = acc[i][j]
+##                + sum over k of (a[i][k] * sa[i][k / v])
+##                              * (b[k][j] * sb[k / v][j])
+##
+## so `v` is the BLOCK: one scale element covers a run of `v` consecutive
+## elements along k, and `k / v` is integer division. `v` is not an operand
+## and not an attribute -- Ops.td has no such parameter -- it is the ratio
+## of the two shapes, which is why it is an argument here and not something
+## this could read off the buffers.
+##
+## The accumulator is zero and is therefore not a parameter: the kernel
+## builds it with `f_const` and no host buffer carries it.
+##
+## THE FOLD ORDER IS NOT PINNED, and the corpus is what makes that harmless.
+## The device accumulates in f32 in an order the dialect does not specify,
+## so a reference that folded left would be one reading among many; the
+## corpus scripts/tile-gpu-diff/arch_diff.dawn ships keeps every product and
+## every partial sum a whole number well inside 2^24, where f32 addition is
+## exact and therefore associative. What is left for the device to be wrong
+## about is the scaling itself.
+pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, _dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let a = ins[0]
+  let b = ins[1]
+  let sa = ins[2]
+  let sb = ins[3]
+  let sk = k / v
+  segments(ins[4], m * n, 1, (_seg, idx) => {
+    let i = idx / n
+    let j = idx % n
+    list.fold(range(0, k), 0.0, (acc, kk) =>
+        acc + (a[i * k + kk] * sa[i * sk + kk / v]) * (b[kk * n + j] * sb[(kk / v) * n + j]))
+  })
+}
+
 # ---- references for the loop kernels (knife T5) ----
 #
 # These four are the host halves of the `loop` and `break` kernels, and
@@ -6535,6 +6609,36 @@ test "the element format references answer what a reader can check by hand" {
   let e5 = dtype_convert_ref(1, "f8E5M2", ["f8E5M2", "f64", "f64"], [[1.0], [1.1], outc])
   assert e4[1] == 1.125
   assert e5[1] == 1.0
+}
+
+test "the fp4 reference reads nibbles and the block-scaled one reads Ops.td" {
+  # dtype_e2m1_ref segment 0 is the ENCODING: one i32 word carries eight
+  # lanes, low nibble first, and the sixteen nibbles are sixteen values.
+  # 0x76543210 puts nibbles 0 to 7 on lanes 0 to 7, which is the whole
+  # positive half of the format in order.
+  let word = nibble_word(k => k)
+  let ys = [1.25, 5.0, 0.3, 0.0 - 1.75, 1.0e30, 0.0, 0.75, 2.5]
+  let oute = list.map(range(0, 17), i => if i == 16 { 0.0 - 1.0 } else { 0.0 })
+  let e2 = dtype_e2m1_ref(8, ["i32", "f64", "f64"], [[word], ys, oute])
+  assert list.take(e2, 8) == [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+  # segment 1 is one rounding: ties to even, saturation at 6, and the sign
+  # carried through
+  assert list.slice(e2, 8, 16) == [1.0, 4.0, 0.5, 0.0 - 2.0, 6.0, 0.0, 1.0, 2.0]
+  assert e2[16] == 0.0 - 1.0
+
+  # mmaf_scaled_ref: one scale element covers a run of `v` elements along k.
+  # 1x2 by 2x1 with v = 2 is a single block, so both scales are one number
+  # each: (2*2)*(4*0.5) + (3*2)*(5*0.5) = 8 + 15.
+  let outm = [0.0, 0.0 - 1.0]
+  let dm = ["f8E4M3FN", "f8E4M3FN", "f8E8M0FNU", "f8E8M0FNU", "f64"]
+  let one = mmaf_scaled_ref(1, 2, 1, 2, dm, [[2.0, 3.0], [4.0, 5.0], [2.0], [0.5], outm])
+  assert one == [23.0, 0.0 - 1.0]
+
+  # and with k = 4, v = 2 the two blocks take different scales, which is the
+  # only thing that tells `k / v` from `k` or from 0
+  let two = mmaf_scaled_ref(1, 4, 1, 2, dm,
+    [[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0], [2.0, 4.0], [1.0, 1.0], outm])
+  assert two == [12.0, 0.0 - 1.0]
 }
 
 test "the sub-byte layout is eight lanes to a word, low nibble first" {
