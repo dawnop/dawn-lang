@@ -56,4 +56,5 @@ echo "== selfhost tests, native backend =="
 
 # This foundation is not on the native driver's production graph yet. Test
 # its own closure explicitly instead of claiming nmain covers unused helpers.
-"$DAWNC" test selfhost/src/check/relocate.dawn
+"$DAWNC" test selfhost/src/check/relocate_tree.dawn
+"$DAWNC" test selfhost/src/check/source_projection.dawn

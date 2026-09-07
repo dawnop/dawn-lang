@@ -1,0 +1,102 @@
+# Source movement is not an integer shift: inserting whitespace between two
+# adjacent tokens splits one old boundary into a new end and a new start.
+# This maps unchanged token spellings, not semantic cache eligibility. The
+# caller must separately validate the parsed body and its dependencies.
+use std/map
+use std/str
+use front/lexer
+use front/token.{Token, NEWLINE, EOF}
+
+pub type Projection = {
+  starts: Map[Int, Int], ends: Map[Int, Int],
+  old_text: String, new_text: String,
+  old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int
+}
+
+fn tokens(text: String, lo: Int, hi: Int) -> Option[List[Token]] = {
+  if lo < 0 || hi < lo || hi > str.len(text) { return None }
+  let (all, diagnostics) = lexer.lex_at(str.slice(text, lo, hi), lo)
+  if len(diagnostics) != 0 { return None }
+  var out: List[Token] = []
+  for t in all {
+    if t.kind != NEWLINE && t.kind != EOF { out = out ++ [t] }
+  }
+  Some(out)
+}
+
+fn insert_checked(m: Map[Int, Int], old: Int, next: Int) -> Option[Map[Int, Int]] = {
+  match map.get(m, old) {
+    Some(prior) -> if prior != next { return None }
+    None -> ()
+  }
+  Some(map.insert(m, old, next))
+}
+
+## Match a single already-paired declaration/body range. Trivia may differ;
+## renamed tokens or changed literal spellings require a new semantic product.
+## Ignoring newline here must never be used as proof of identical parsed ASTs.
+pub fn between(old_text: String, new_text: String, old_lo: Int, old_hi: Int,
+  new_lo: Int, new_hi: Int) -> Option[Projection] = {
+  let old = tokens(old_text, old_lo, old_hi)?
+  let next = tokens(new_text, new_lo, new_hi)?
+  if len(old) != len(next) { return None }
+  var starts: Map[Int, Int] = map.empty()
+  var ends: Map[Int, Int] = map.empty()
+  var i = 0
+  while i < len(old) {
+    let a = old[i]
+    let b = next[i]
+    if a.kind != b.kind || str.slice(old_text, a.lo, a.hi) != str.slice(new_text, b.lo, b.hi) { return None }
+    let width = a.hi - a.lo
+    if width != b.hi - b.lo { return None }
+    var p = 0
+    while p < width {
+      starts = insert_checked(starts, a.lo + p, b.lo + p)?
+      ends = insert_checked(ends, a.lo + p + 1, b.lo + p + 1)?
+      p = p + 1
+    }
+    i = i + 1
+  }
+  starts = insert_checked(starts, old_lo, new_lo)?
+  ends = insert_checked(ends, old_hi, new_hi)?
+  Some(Projection { starts: starts, ends: ends, old_text: old_text, new_text: new_text,
+    old_lo: old_lo, old_hi: old_hi, new_lo: new_lo, new_hi: new_hi })
+}
+
+## Parser stores the exact condition substring ending at the assertion's hi.
+## Validate its old provenance before slicing the new source; do not preserve
+## a stale failure message when only whitespace inside the condition changed.
+pub fn assertion(p: Projection, src: Option[String], lo: Int, hi: Int) -> Option[Option[String]] =
+  match src {
+    None -> Some(None)
+    Some(text) -> {
+      let start = hi - str.len(text)
+      if lo < p.old_lo || hi > p.old_hi || start < lo || start > hi ||
+        str.slice(p.old_text, start, hi) != text { return None }
+      let nlo = map.get(p.starts, start)?
+      let nhi = map.get(p.ends, hi)?
+      if nlo < p.new_lo || nhi > p.new_hi || nhi < nlo { return None }
+      Some(Some(str.slice(p.new_text, nlo, nhi)))
+    }
+  }
+
+test "source projection separates adjacent token starts and ends" {
+  let p = between("x+1", "x + 1", 0, 3, 0, 5).expect("same tokens")
+  assert map.get(p.starts, 1) == Some(2)
+  assert map.get(p.ends, 1) == Some(1)
+  assert map.get(p.starts, 2) == Some(4)
+  assert map.get(p.ends, 2) == Some(3)
+  assert between("x+1", "y+1", 0, 3, 0, 3) == None
+  assert between("x+1", "x+2", 0, 3, 0, 3) == None
+  assert between("x", "x", -1, 1, 0, 1) == None
+}
+
+test "source projection updates assertion text with codepoint coordinates" {
+  let old = "assert x>0"
+  let next = "# 🌅\nassert x > 0"
+  let p = between(old, next, 0, str.len(old), 4, str.len(next)).expect("moved assertion")
+  assert assertion(p, Some("x>0"), 0, 10) == Some(Some("x > 0"))
+  assert assertion(p, Some("y>0"), 0, 10) == None
+  assert assertion(p, None, 0, 10) == Some(None)
+  assert map.get(p.starts, 7) == Some(11)
+}

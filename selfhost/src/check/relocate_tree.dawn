@@ -1,0 +1,487 @@
+# Typed products retain references in expressions, patterns, defaults and
+# secondary source spans. One exhaustive visitor owns these projections;
+# unresolved provenance fails closed instead of keeping an old integer.
+# Pack layout reconstruction is a separate operation from ordinary recursion.
+use std/map
+use check/relocate
+use check/relocate.{Ids}
+use check/types.{Sig, Sym, EV_PACK_ID, evidence_role_key, EvidenceRole,
+  LabelSlot, VariableSlot, AssociatedSlot, Eff, EPure, ELabeled, EffVar, EffAssoc,
+  eff_union, eff_labels, eff_vars, eff_assocs, ev_pack_ty, erased_ev_ty, TyInt, TyUnit }
+use check/tast.{
+  TExpr, TStmt, TPat, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TModule, TConst,
+  WitRef, TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
+  XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue,
+  XCallDyn, XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef,
+  XCtorValue, XField, XListLit, XTupleLit, XPropagate, XUnwrap, XIndex,
+  XReturn, XBreak, XContinue, XComptime, XUnsafePure, XBinary, XUnary,
+  XIf, XMatch, XBlock, XError,
+  TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd
+}
+
+## The source projection contains explicit old/new code-point boundaries,
+## including generated-node anchors. Callee lookup reads the old header view.
+## A missing boundary, symbol or declaration invalidates the saved product.
+pub type View = {
+  ids: Ids,
+  positions: Map[Int, Int],
+  ends: Map[Int, Int],
+  assertion: fn(Option[String], Int, Int) -> Option[Option[String]],
+  symbols: Map[Int, Sym],
+  callee: fn(Option[String], String, Bool, Option[Int]) -> Option[Sig]
+}
+
+fn position(v: View, old: Int) -> Option[Int] = map.get(v.positions, old)
+fn end_position(v: View, old: Int) -> Option[Int] = map.get(v.ends, old)
+
+fn local_name(v: View, id: Int, old: String) -> Option[String] = {
+  let saved = map.get(v.symbols, id)?
+  if saved.name != old { return None }
+  Some(relocate.sym(v.ids, saved)?.name)
+}
+
+fn local_ids(v: View, xs: List[Int]) -> Option[List[Int]] = {
+  var out: List[Int] = []
+  for x in xs { out = out ++ [relocate.local_id(v.ids, x)?] }
+  Some(out)
+}
+
+fn opt_local(v: View, x: Option[Int]) -> Option[Option[Int]] =
+  match x {
+    None -> Some(None)
+    Some(id) -> Some(Some(relocate.local_id(v.ids, id)?))
+  }
+
+fn opt_trait(v: View, x: Option[Int]) -> Option[Option[Int]] =
+  match x {
+    None -> Some(None)
+    Some(id) -> Some(Some(relocate.trait_id(v.ids, id)?))
+  }
+
+fn witnesses(v: View, xs: List[WitRef]) -> Option[List[WitRef]] = {
+  var out: List[WitRef] = []
+  for x in xs { out = out ++ [relocate.witness(v.ids, x)?] }
+  Some(out)
+}
+
+fn opt_witness(v: View, x: Option[WitRef]) -> Option[Option[WitRef]] =
+  match x {
+    None -> Some(None)
+    Some(w) -> Some(Some(relocate.witness(v.ids, w)?))
+  }
+
+fn expressions(v: View, xs: List[TExpr]) -> Option[List[TExpr]] = {
+  var out: List[TExpr] = []
+  for x in xs { out = out ++ [expression(v, x)?] }
+  Some(out)
+}
+
+fn opt_expr(v: View, x: Option[TExpr]) -> Option[Option[TExpr]] =
+  match x {
+    None -> Some(None)
+    Some(e) -> Some(Some(expression(v, e)?))
+  }
+
+fn evidence(v: View, s: Sig, xs: List[TExpr]) -> Option[List[TExpr]] = {
+  let order = relocate.evidence_permutation(v.ids, s)?
+  if len(order) != len(xs) { return None }
+  let moved = expressions(v, xs)?
+  var out: List[TExpr] = []
+  for i in order { out = out ++ [moved[i]] }
+  Some(out)
+}
+
+pub fn pattern(v: View, p: TPat) -> Option[TPat] =
+  match p {
+    TPWild -> Some(p)
+    TPLit(_) -> Some(p)
+    TPBind(id, name) -> Some(TPBind(relocate.local_id(v.ids, id)?, local_name(v, id, name)?))
+    TPOr(xs) -> Some(TPOr(patterns(v, xs)?))
+    TPTuple(xs) -> Some(TPTuple(patterns(v, xs)?))
+    TPList(pre, rest, id, post) ->
+      Some(TPList(patterns(v, pre)?, rest, opt_local(v, id)?, patterns(v, post)?))
+    TPCtor(adt, slot, fields) -> {
+      var moved: List[Option[TPat]] = []
+      for field in fields {
+        let next = match field {
+          None -> None
+          Some(pat) -> Some(pattern(v, pat)?)
+        }
+        moved = moved ++ [next]
+      }
+      Some(TPCtor(relocate.nominal(v.ids, adt)?, slot, moved))
+    }
+  }
+
+fn patterns(v: View, ps: List[TPat]) -> Option[List[TPat]] = {
+  var out: List[TPat] = []
+  for p in ps { out = out ++ [pattern(v, p)?] }
+  Some(out)
+}
+
+fn java_call(v: View, c: TJavaCall) -> Option[TJavaCall] = {
+  var sam_evs: List[(Int, TExpr)] = []
+  for (slot, e) in c.sam_evs { sam_evs = sam_evs ++ [(slot, expression(v, e)?)] }
+  Some(TJavaCall { ..c, target: opt_expr(v, c.target)?, args: expressions(v, c.args)?,
+    sam_evs: sam_evs, nlo: position(v, c.nlo)?, nhi: end_position(v, c.nhi)? })
+}
+
+type PackPart = { role: EvidenceRole, value: TExpr }
+
+fn pack_origin(v: View, x: TExpr) -> Option[EvidenceRole] =
+  match x {
+    XEvRead(key, origin, _, _, _) -> {
+      if key != evidence_role_key(origin) { return None }
+      Some(origin)
+    }
+    XLocal(id, _, _, _, _) -> relocate.symbol_evidence_role(v.ids, map.get(v.symbols, id)?)
+    _ -> None
+  }
+
+fn pack_parts(v: View, x: TExpr) -> Option[List[PackPart]] =
+  match x {
+    XUnit(_, _) -> Some([])
+    XCtor(adt, slot, args, slots, spread, _, _, _) -> {
+      if adt != EV_PACK_ID || slot != 0 || len(args) != 3 ||
+        slots != [Some(0), Some(1), Some(2)] || spread != None { return None }
+      let key = match args[0] { XInt(k, _, _) -> k
+        _ -> { return None }
+      }
+      let label = relocate.evidence_label(v.ids, key)?
+      let rest = pack_parts(v, args[2])?
+      Some(rest ++ [PackPart { role: relocate.evidence_slot(v.ids, LabelSlot(label))?, value: expression(v, args[1])? }])
+    }
+    XCallBuiltin(name, args, ws, evs, _, _, _) -> {
+      if name != "ev_append" || len(args) != 2 || len(ws) != 0 || len(evs) != 0 { return None }
+      Some(pack_parts(v, args[0])? ++ pack_parts(v, args[1])?)
+    }
+    _ -> {
+      let role = pack_origin(v, x)?
+      match role { LabelSlot(_) -> { return None }
+        _ -> ()
+      }
+      Some([PackPart { role: relocate.evidence_slot(v.ids, role)?, value: expression(v, x)? }])
+    }
+  }
+
+# Reuse effect normalization as the authoritative ordering of the three axes.
+# A pack has one value per full atom, even when erased associated keys collide.
+fn ordered_parts(parts: List[PackPart]) -> Option[List[PackPart]] = {
+  var rows: List[Eff] = []
+  for p in parts {
+    rows = rows ++ [match p.role {
+      LabelSlot(id) -> ELabeled(EPure, [(id, "")])
+      VariableSlot(id) -> EffVar("", id)
+      AssociatedSlot(tv, tr, name) -> EffAssoc("", tv, tr, name)
+    }]
+  }
+  let row = eff_union(rows)
+  var roles: List[EvidenceRole] = []
+  for (id, _) in eff_labels(row) { roles = roles ++ [LabelSlot(id)] }
+  for (id, _) in eff_vars(row) { roles = roles ++ [VariableSlot(id)] }
+  for (_, tv, tr, name) in eff_assocs(row) { roles = roles ++ [AssociatedSlot(tv, tr, name)] }
+  if len(roles) != len(parts) { return None }
+  var out: List[PackPart] = []
+  for role in roles {
+    var found: Option[PackPart] = None
+    for p in parts {
+      if p.role == role {
+        if found != None { return None }
+        found = Some(p)
+      }
+    }
+    out = out ++ [found?]
+  }
+  Some(out)
+}
+
+fn evidence_pack(v: View, x: TExpr, lo: Int, hi: Int) -> Option[TExpr] = {
+  if relocate.nominal(v.ids, EV_PACK_ID)? != EV_PACK_ID { return None }
+  let parts = ordered_parts(pack_parts(v, x)?)?
+  let nlo = position(v, lo)?
+  let nhi = end_position(v, hi)?
+  var ground: List[PackPart] = []
+  var envs: List[TExpr] = []
+  for p in parts {
+    match p.role {
+      LabelSlot(_) -> { ground = ground ++ [p] }
+      _ -> { envs = envs ++ [p.value] }
+    }
+  }
+  var tail: TExpr = XUnit(nlo, nhi)
+  if len(envs) > 0 {
+    tail = envs[len(envs) - 1]
+    var i = len(envs) - 1
+    while i > 0 {
+      i = i - 1
+      tail = XCallBuiltin("ev_append", [envs[i], tail], [], [], nlo, nhi, relocate.ty(v.ids, erased_ev_ty())?)
+    }
+  }
+  for p in ground {
+    tail = XCtor(EV_PACK_ID, 0, [XInt(evidence_role_key(p.role), nlo, nhi), p.value, tail],
+      [Some(0), Some(1), Some(2)], None, nlo, nhi, ev_pack_ty())
+  }
+  Some(tail)
+}
+
+pub fn expression(v: View, x: TExpr) -> Option[TExpr] =
+  match x {
+    XInt(n, lo, hi) -> Some(XInt(n, position(v, lo)?, end_position(v, hi)?))
+    XChar(n, lo, hi) -> Some(XChar(n, position(v, lo)?, end_position(v, hi)?))
+    XFloat(n, lo, hi) -> Some(XFloat(n, position(v, lo)?, end_position(v, hi)?))
+    XBool(n, lo, hi) -> Some(XBool(n, position(v, lo)?, end_position(v, hi)?))
+    XUnit(lo, hi) -> Some(XUnit(position(v, lo)?, end_position(v, hi)?))
+    XBreak(lo, hi) -> Some(XBreak(position(v, lo)?, end_position(v, hi)?))
+    XContinue(lo, hi) -> Some(XContinue(position(v, lo)?, end_position(v, hi)?))
+    XError(lo, hi) -> Some(XError(position(v, lo)?, end_position(v, hi)?))
+    XStr(parts, lo, hi) -> {
+      var moved: List[TStrPart] = []
+      for part in parts {
+        let next = match part {
+          TSPText(_) -> part
+          TSPInterp(e, w) -> TSPInterp(expression(v, e)?, opt_witness(v, w)?)
+        }
+        moved = moved ++ [next]
+      }
+      Some(XStr(moved, position(v, lo)?, end_position(v, hi)?))
+    }
+    XLocal(id, name, lo, hi, ty) -> Some(XLocal(relocate.local_id(v.ids, id)?,
+      local_name(v, id, name)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XEvRead(key, origin, lo, hi, ty) -> {
+      if key != evidence_role_key(origin) { return None }
+      let moved = relocate.evidence_slot(v.ids, origin)?
+      Some(XEvRead(relocate.evidence_key(v.ids, key)?, moved,
+        position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XFnValue(owner, name, builtin, ty, lo, hi) ->
+      Some(XFnValue(owner, name, builtin, relocate.ty(v.ids, ty)?, position(v, lo)?, end_position(v, hi)?))
+    XCallDyn(id, name, args, evs, lo, hi, ty) ->
+      Some(XCallDyn(relocate.local_id(v.ids, id)?, local_name(v, id, name)?, expressions(v, args)?,
+        expressions(v, evs)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XCallFn(owner, name, args, ws, evs, tr, lo, hi, ty) -> {
+      let sig = v.callee(owner, name, false, tr)?
+      Some(XCallFn(owner, name, expressions(v, args)?, witnesses(v, ws)?, evidence(v, sig, evs)?,
+        opt_trait(v, tr)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XCallBuiltin(name, args, ws, evs, lo, hi, ty) -> {
+      if name == "ev_append" { return evidence_pack(v, x, lo, hi) }
+      let sig = v.callee(None, name, true, None)?
+      var moved = expressions(v, args)?
+      if name == "ctl_run" || name == "ctl_yield" {
+        if len(args) == 0 { return None }
+        let prompt = match args[0] {
+          XInt(id, alo, ahi) -> XInt(relocate.local_id(v.ids, id)?, position(v, alo)?, end_position(v, ahi)?)
+          _ -> { return None }
+        }
+        var replaced: List[TExpr] = [prompt]
+        var i = 1
+        while i < len(moved) { replaced = replaced ++ [moved[i]]
+          i = i + 1
+        }
+        moved = replaced
+      }
+      Some(XCallBuiltin(name, moved, witnesses(v, ws)?, evidence(v, sig, evs)?,
+        position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XApply(target, args, evs, lo, hi, ty) -> Some(XApply(expression(v, target)?, expressions(v, args)?,
+      expressions(v, evs)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XJava(c, lo, hi, ty) -> Some(XJava(java_call(v, c)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XLambda(params, names, body, captures, lo, hi, ty) ->
+      Some(XLambda(local_ids(v, params)?, names, expression(v, body)?, local_ids(v, captures)?,
+        position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XCtor(adt, slot, written, slots, spread, lo, hi, ty) -> {
+      if adt == EV_PACK_ID { return evidence_pack(v, x, lo, hi) }
+      Some(XCtor(relocate.nominal(v.ids, adt)?, slot, expressions(v, written)?, slots, opt_expr(v, spread)?,
+        position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XConstRef(owner, name, lo, hi, ty) ->
+      Some(XConstRef(owner, name, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XCtorValue(adt, slot, lo, hi, ty) ->
+      Some(XCtorValue(relocate.nominal(v.ids, adt)?, slot, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XField(target, slot, lo, hi, ty) ->
+      Some(XField(expression(v, target)?, slot, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XListLit(elems, lo, hi, ty) -> {
+      var moved: List[TListElem] = []
+      for elem in elems {
+        let next = match elem {
+          TLEExpr(e) -> TLEExpr(expression(v, e)?)
+          TLESpread(e) -> TLESpread(expression(v, e)?)
+          TLEIf(arms) -> {
+            var mapped: List[TListIfArm] = []
+            for a in arms { mapped = mapped ++ [TListIfArm { cond: expression(v, a.cond)?, body: expression(v, a.body)? }] }
+            TLEIf(mapped)
+          }
+        }
+        moved = moved ++ [next]
+      }
+      Some(XListLit(moved, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XTupleLit(es, lo, hi, ty) -> Some(XTupleLit(expressions(v, es)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XPropagate(e, lo, hi, ty) -> Some(XPropagate(expression(v, e)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XUnwrap(e, msg, lo, hi, ty) -> Some(XUnwrap(expression(v, e)?, msg, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XIndex(a, b, w, lo, hi, ty) -> Some(XIndex(expression(v, a)?, expression(v, b)?, relocate.witness(v.ids, w)?,
+      position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XReturn(e, lo, hi) -> Some(XReturn(opt_expr(v, e)?, position(v, lo)?, end_position(v, hi)?))
+    XComptime(e, lo, hi, ty) -> Some(XComptime(expression(v, e)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XUnsafePure(e, lo, hi, ty) -> Some(XUnsafePure(expression(v, e)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XBinary(op, a, b, w, olo, ohi, lo, hi, ty) -> Some(XBinary(op, expression(v, a)?, expression(v, b)?,
+      opt_witness(v, w)?, position(v, olo)?, end_position(v, ohi)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XUnary(op, e, lo, hi, ty) -> Some(XUnary(op, expression(v, e)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XIf(c, t, e, lo, hi, ty) -> Some(XIf(expression(v, c)?, expression(v, t)?, opt_expr(v, e)?,
+      position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    XMatch(e, arms, lo, hi, ty) -> {
+      var moved: List[TArm] = []
+      for a in arms { moved = moved ++ [TArm { pat: pattern(v, a.pat)?, guard: opt_expr(v, a.guard)?, body: expression(v, a.body)? }] }
+      Some(XMatch(expression(v, e)?, moved, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+    XBlock(stmts, tail, lo, hi, ty) -> {
+      var moved: List[TStmt] = []
+      for s in stmts { moved = moved ++ [statement(v, s)?] }
+      Some(XBlock(moved, opt_expr(v, tail)?, position(v, lo)?, end_position(v, hi)?, relocate.ty(v.ids, ty)?))
+    }
+  }
+
+pub fn statement(v: View, s: TStmt) -> Option[TStmt] =
+  match s {
+    TSLet(id, name, init, lo, hi) -> {
+      let moved_name = match id { None -> name
+        Some(i) -> local_name(v, i, name)?
+      }
+      Some(TSLet(opt_local(v, id)?, moved_name, expression(v, init)?, position(v, lo)?, end_position(v, hi)?))
+    }
+    TSLetPat(p, init, lo, hi) -> Some(TSLetPat(pattern(v, p)?, expression(v, init)?, position(v, lo)?, end_position(v, hi)?))
+    TSLocalFn(id, name, params, names, body, captures, lo, hi) ->
+      Some(TSLocalFn(relocate.local_id(v.ids, id)?, local_name(v, id, name)?, local_ids(v, params)?, names,
+        expression(v, body)?, local_ids(v, captures)?, position(v, lo)?, end_position(v, hi)?))
+    TSAssign(id, name, value, lo, hi) -> Some(TSAssign(relocate.local_id(v.ids, id)?, local_name(v, id, name)?,
+      expression(v, value)?, position(v, lo)?, end_position(v, hi)?))
+    TSExpr(e, lo, hi) -> Some(TSExpr(expression(v, e)?, position(v, lo)?, end_position(v, hi)?))
+    TSAssert(e, src, lo, hi) -> Some(TSAssert(expression(v, e)?, v.assertion(src, lo, hi)?, position(v, lo)?, end_position(v, hi)?))
+    TSWhile(c, body, jumps, lo, hi) -> Some(TSWhile(expression(v, c)?, expression(v, body)?, jumps, position(v, lo)?, end_position(v, hi)?))
+    TSFor(p, ty, from, to, w, body, jumps, lo, hi) -> Some(TSFor(pattern(v, p)?, relocate.ty(v.ids, ty)?,
+      expression(v, from)?, opt_expr(v, to)?, opt_witness(v, w)?, expression(v, body)?, jumps, position(v, lo)?, end_position(v, hi)?))
+  }
+
+pub fn function(v: View, f: TFun) -> Option[TFun] = {
+  var defaults: List[Option[TDefault]] = []
+  for d in f.defaults {
+    let moved = match d {
+      None -> None
+      Some(value) -> Some(TDefault { body: expression(v, value.body)?, dict_syms: local_ids(v, value.dict_syms)? })
+    }
+    defaults = defaults ++ [moved]
+  }
+  let order = relocate.evidence_permutation(v.ids, f.sig)?
+  if len(order) != len(f.ev_syms) { return None }
+  var evs: List[Int] = []
+  for i in order { evs = evs ++ [relocate.local_id(v.ids, f.ev_syms[i])?] }
+  let impl_ref = match f.impl_of {
+    None -> None
+    Some((tr, ty)) -> Some((relocate.trait_id(v.ids, tr)?, relocate.ty(v.ids, ty)?))
+  }
+  Some(TFun { ..f, sig: relocate.signature(v.ids, f.sig)?, param_syms: local_ids(v, f.param_syms)?,
+    dict_syms: local_ids(v, f.dict_syms)?, defaults: defaults, ev_syms: evs, body: expression(v, f.body)?,
+    impl_of: impl_ref, default_of: opt_trait(v, f.default_of)? })
+}
+
+## This projects an already checked module, not its checker state or the
+## declaration scheduler. Callers still own validity and cold-ID allocation.
+pub fn module(v: View, m: TModule) -> Option[TModule] = {
+  var fns: List[TFun] = []
+  for f in m.fns { fns = fns ++ [function(v, f)?] }
+  var tests: List[TFun] = []
+  for f in m.tests { tests = tests ++ [function(v, f)?] }
+  var consts: List[TConst] = []
+  for c in m.consts {
+    consts = consts ++ [TConst { ..c, ty: relocate.ty(v.ids, c.ty)?, init: expression(v, c.init)?,
+      lo: position(v, c.lo)?, hi: end_position(v, c.hi)? }]
+  }
+  var syms: Map[Int, Sym] = map.empty()
+  for (id, s) in map.entries(m.syms) {
+    let moved = relocate.sym(v.ids, s)?
+    syms = map.insert(syms, relocate.local_id(v.ids, id)?,
+      Sym { ..moved, dlo: position(v, s.dlo)?, dhi: end_position(v, s.dhi)? })
+  }
+  Some(TModule { fns: fns, tests: tests, consts: consts, syms: syms })
+}
+
+fn fixture_signature() -> Sig =
+  Sig { name: "f", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
+    owner: None, trait_id: None, op_of: None, inferring: false }
+
+fn fixture_view() -> View = {
+  let empty: Map[Int, Int] = map.empty()
+  let swap = map.insert(map.insert(empty, 1, 20), 2, 10)
+  let ids = relocate.new(map.insert(swap, EV_PACK_ID, EV_PACK_ID), map.insert(empty, 3, 30),
+    map.insert(swap, 0, 0), swap, map.insert(map.insert(empty, 1, 91), 2, 92)).expect("valid fixture IDs")
+  let symbol = Sym { name: "x", ty: TyInt, mutable: false, dlo: 10, dhi: 11,
+    dict_of: None, ev_of: None, cell_of: None }
+  View { ids: ids, positions: map.insert(map.insert(empty, 10, 110), 11, 115),
+    ends: map.insert(map.insert(empty, 10, 110), 11, 115), assertion: (src, lo, hi) => Some(src),
+    symbols: map.insert(map.empty(), 1, symbol), callee: (owner, name, builtin, tr) => Some(fixture_signature()) }
+}
+
+test "tree relocation separates literals from prompts and preserves field slots" {
+  let v = fixture_view()
+  assert expression(v, XInt(1, 10, 11)) == Some(XInt(1, 110, 115))
+  let ctl = XCallBuiltin("ctl_run", [XInt(1, 10, 11)], [], [], 10, 11, TyUnit)
+  assert expression(v, ctl) == Some(XCallBuiltin("ctl_run", [XInt(91, 110, 115)], [], [], 110, 115, TyUnit))
+  let p = TPCtor(1, 1, [Some(TPBind(1, "x")), None])
+  assert pattern(v, p) == Some(TPCtor(20, 1, [Some(TPBind(91, "x")), None]))
+  let local = XLocal(1, "x", 10, 11, TyInt)
+  let binary = XBinary(BAdd, local, XInt(1, 10, 11), None, 10, 11, 10, 11, TyInt)
+  assert expression(v, binary) == Some(XBinary(BAdd, XLocal(91, "x", 110, 115, TyInt),
+    XInt(1, 110, 115), None, 110, 115, 110, 115, TyInt))
+  assert expression(v, XBinary(BAdd, local, local, None, 9, 11, 10, 11, TyInt)) == None
+  assert expression(v, XLocal(1, "wrong", 10, 11, TyInt)) == None
+  assert expression(v, XLocal(2, "absent", 10, 11, TyInt)) == None
+}
+
+test "tree relocation reconstructs ground packs and associated environment order" {
+  let v = fixture_view()
+  let a = XEvRead(11, AssociatedSlot(1, 3, "E"), 10, 11, erased_ev_ty())
+  let b = XEvRead(11, AssociatedSlot(2, 3, "E"), 10, 11, erased_ev_ty())
+  let env = XCallBuiltin("ev_append", [a, b], [], [], 10, 11, erased_ev_ty())
+  let inner = XCtor(EV_PACK_ID, 0, [XInt(3, 10, 11), XInt(101, 10, 11), env],
+    [Some(0), Some(1), Some(2)], None, 10, 11, ev_pack_ty())
+  let old = XCtor(EV_PACK_ID, 0, [XInt(6, 10, 11), XInt(102, 10, 11), inner],
+    [Some(0), Some(1), Some(2)], None, 10, 11, ev_pack_ty())
+  let next_env = XCallBuiltin("ev_append", [
+    XEvRead(92, AssociatedSlot(10, 30, "E"), 110, 115, erased_ev_ty()),
+    XEvRead(92, AssociatedSlot(20, 30, "E"), 110, 115, erased_ev_ty())], [], [], 110, 115, erased_ev_ty())
+  let next_inner = XCtor(EV_PACK_ID, 0, [XInt(30, 110, 115), XInt(102, 110, 115), next_env],
+    [Some(0), Some(1), Some(2)], None, 110, 115, ev_pack_ty())
+  let expected = XCtor(EV_PACK_ID, 0, [XInt(60, 110, 115), XInt(101, 110, 115), next_inner],
+    [Some(0), Some(1), Some(2)], None, 110, 115, ev_pack_ty())
+  assert expression(v, old) == Some(expected)
+  assert expression(v, XCallBuiltin("ev_append", [a, a], [], [], 10, 11, erased_ev_ty())) == None
+  assert expression(v, XEvRead(12, AssociatedSlot(1, 3, "E"), 10, 11, erased_ev_ty())) == None
+}
+
+test "tree relocation assembles defaults symbols and permuted call evidence" {
+  let base = fixture_view()
+  let sig = Sig { ..fixture_signature(), eparams: [EffVar("a", 1), EffVar("b", 2)] }
+  let v = View { ..base, callee: (owner, name, builtin, tr) => Some(sig) }
+  let body = XCallFn(None, "f", [], [], [XInt(101, 10, 11), XInt(102, 10, 11)], None, 10, 11, TyUnit)
+  let f = TFun { name: "f", sig: sig, param_syms: [], dict_syms: [1],
+    defaults: [Some(TDefault { body: XInt(5, 10, 11), dict_syms: [1] })], ev_syms: [1, 2],
+    body: body, is_test: false, impl_of: Some((3, TyInt)), default_of: Some(3) }
+  let m = TModule { fns: [f], tests: [TFun { ..f, is_test: true }],
+    consts: [TConst { name: "C", ty: TyInt, init: XInt(6, 10, 11), lo: 10, hi: 11 }], syms: v.symbols }
+  let moved = module(v, m).expect("complete typed module")
+  assert moved.fns[0].ev_syms == [92, 91]
+  assert moved.fns[0].dict_syms == [91]
+  assert moved.fns[0].impl_of == Some((30, TyInt))
+  assert moved.fns[0].default_of == Some(30)
+  assert moved.fns[0].defaults == [Some(TDefault { body: XInt(5, 110, 115), dict_syms: [91] })]
+  assert moved.fns[0].body == XCallFn(None, "f", [], [], [XInt(102, 110, 115), XInt(101, 110, 115)], None, 110, 115, TyUnit)
+  assert moved.tests[0].is_test
+  assert moved.consts[0].init == XInt(6, 110, 115)
+  let s = map.get(moved.syms, 91).expect("relocated symbol")
+  assert s.dlo == 110 && s.dhi == 115
+  assert not map.has(moved.syms, 1)
+  let unknown = View { ..v, callee: (owner, name, builtin, tr) => None }
+  assert function(unknown, f) == None
+}

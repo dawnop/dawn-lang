@@ -10,7 +10,8 @@ use check/types.{
   TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyOpaque, TyAssoc, TyTuple, TyFn,
   Eff, EPure, EIo, EffVar, EffAssoc, EUnion, ELabeled,
   eff_union, eff_with_labels, label_key, var_key, assoc_key, Sig, Sym,
-  ev_label_name, ev_assoc_name, ev_var_name
+  ev_label_name, ev_assoc_name, ev_var_name, sig_abi_eff, eff_labels, eff_vars, eff_assocs,
+  EvidenceRole, LabelSlot, VariableSlot, AssociatedSlot
 }
 use check/tast.{WitRef, WForward, WConcrete, WApply}
 
@@ -75,6 +76,39 @@ pub fn local_id(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
 }
 pub fn evidence_key(owner: Ids, key: Int) -> Option[Int] = { let ids: Data = owner
   map.get(ids.evidence, key)
+}
+
+pub fn evidence_label(owner: Ids, key: Int) -> Option[Int] = {
+  let ids: Data = owner
+  for old in map.keys(ids.nominals) {
+    if label_key(old) == key { return Some(old) }
+  }
+  None
+}
+
+## Recover provenance only from a compiler-owned evidence symbol's complete
+## spelling, checked against the explicit source-domain maps.
+pub fn symbol_evidence_role(owner: Ids, s: Sym) -> Option[EvidenceRole] = {
+  let ids: Data = owner
+  let key = s.ev_of?
+  let _ = evidence_name(owner, s.name, key)?
+  for old in map.keys(ids.nominals) {
+    if label_key(old) == key { return Some(LabelSlot(old)) }
+  }
+  for old in map.keys(ids.effect_vars) {
+    if var_key(old) == key { return Some(VariableSlot(old)) }
+  }
+  for tr in map.keys(ids.traits) {
+    if assoc_key(tr) == key {
+      for tv in map.keys(ids.type_vars) {
+        let prefix = ev_assoc_name(tv, tr, "")
+        if str.starts_with(s.name, prefix) && str.len(s.name) > str.len(prefix) {
+          return Some(AssociatedSlot(tv, tr, str.slice(s.name, str.len(prefix), str.len(s.name))))
+        }
+      }
+    }
+  }
+  None
 }
 
 # Evidence locals are compiler-owned names (ev_of is their provenance).
@@ -183,6 +217,68 @@ pub fn signature(ids: Ids, s: Sig) -> Option[Sig] = {
   Some(Sig { ..s, param_tys: types(ids, s.param_tys)?, ret: ty(ids, s.ret)?,
     eff: effect_row(ids, s.eff)?, tparams: types(ids, s.tparams)?, constraints: constraints,
     eparams: eparams, trait_id: trait_ref, op_of: operation })
+}
+
+# Encoded evidence keys are not slot identities: two associated projections
+# can share a trait key while having different subjects or member names.
+fn evidence_slots(s: Sig) -> List[EvidenceRole] = {
+  let abi = sig_abi_eff(s)
+  var out: List[EvidenceRole] = []
+  for (id, _) in eff_labels(abi) { out = out ++ [LabelSlot(id)] }
+  for (id, _) in eff_vars(abi) { out = out ++ [VariableSlot(id)] }
+  for (_, tv, tr, name) in eff_assocs(abi) { out = out ++ [AssociatedSlot(tv, tr, name)] }
+  out
+}
+
+pub fn evidence_slot(ids: Ids, slot: EvidenceRole) -> Option[EvidenceRole] =
+  match slot {
+    LabelSlot(id) -> Some(LabelSlot(nominal(ids, id)?))
+    VariableSlot(id) -> Some(VariableSlot(effect_var(ids, id)?))
+    AssociatedSlot(tv, tr, name) -> Some(AssociatedSlot(type_var(ids, tv)?, trait_id(ids, tr)?, name))
+  }
+
+## For each new ABI slot, return the corresponding old operand index.
+## Operands themselves must be relocated separately, without re-evaluation.
+## Include parameter-bound effect variables even for a pure function body.
+pub fn evidence_permutation(ids: Ids, s: Sig) -> Option[List[Int]] = {
+  let target = evidence_slots(signature(ids, s)?)
+  var source: List[EvidenceRole] = []
+  for slot in evidence_slots(s) { source = source ++ [evidence_slot(ids, slot)?] }
+  if len(source) != len(target) { return None }
+  var used: Set[Int] = set.empty()
+  var out: List[Int] = []
+  for slot in target {
+    var found: Option[Int] = None
+    var index = 0
+    for candidate in source {
+      if candidate == slot {
+        if found != None { return None }
+        found = Some(index)
+      }
+      index = index + 1
+    }
+    let old = found?
+    if set.has(used, old) { return None }
+    used = set.insert(used, old)
+    out = out ++ [old]
+  }
+  Some(out)
+}
+
+test "relocation projects full evidence roles into the new ABI order" {
+  let empty: Map[Int, Int] = map.empty()
+  let swap = map.insert(map.insert(empty, 1, 20), 2, 10)
+  let ids = new(swap, map.insert(empty, 3, 30), swap, swap, empty).expect("valid IDs")
+  let s = Sig { name: "f", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: eff_union([ELabeled(EPure, [(1, "A"), (2, "B")]),
+      EffAssoc("T", 1, 3, "E"), EffAssoc("U", 2, 3, "E"), EffAssoc("U", 2, 3, "F")]),
+    is_builtin: false, tparams: [], constraints: [], eparams: [EffVar("x", 1), EffVar("y", 2)],
+    owner: None, trait_id: None, op_of: None, inferring: false }
+  assert evidence_permutation(ids, s) == Some([1, 0, 3, 2, 5, 6, 4])
+  assert evidence_permutation(ids, Sig { ..s, eff: EPure }) == Some([1, 0])
+  assert evidence_permutation(ids, Sig { ..s, eff: EPure, eparams: [] }) == Some([])
+  let missing = new(empty, empty, empty, empty, empty).expect("empty mapping")
+  assert evidence_permutation(missing, s) == None
 }
 
 ## Source offsets are deliberately unchanged here: source-view projection is

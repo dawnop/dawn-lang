@@ -74,6 +74,32 @@ Sig保留参数/binder的声明顺序，Sym的字典元数据按(trait,typevar)�
 无法识别的生成名称拒绝复用。调用点evidence实参的顺序重排仍是后续TAST投影任务，
 不能以签名里的效果集合已重新排序为由宣称调用点也完成了迁移。
 
+第3期迁移中的补充约束：`XEvRead` 的编码 key 不能完整表示关联效果来源，
+相同 trait 的不同类型参数/成员可能具有相同 key。TAST 必须另存完整
+`EvidenceRole`（label、variable、associated 的类型参数/trait/成员），
+由 checker 在读取构造点写入，lower 仍消费原 key，保持运行时契约。
+重定位按完整角色投影 ABI 顺序；不能用 key 去重或通过源码位置猜来源。
+该元数据迁移尚待完整冷暖、双后端和 Core 验收，不代表函数缓存上线。
+
+完整树投影原型位于 `check/relocate_tree`：显式位置边界表、旧符号表和旧callee
+签名视图共同驱动所有 TExpr/TStmt/TPat 分支及 TFun/default/TModule 投影。
+内部 prompt 参数单独映射，用户整数和构造器/字段槽不动；效果包先提取完整来源，
+按新规范顺序重建 ground 链和非ground环境连接。人工树 owning 及固定header下
+23个真实函数、22次前置函数编辑及body内空白变化的冷对照通过；测试视图使用私有
+稠密ID域表和本地callee查询，并非生产声明分配器。另一个真实header案例交换
+Ask/Tell声明，从新header绑定顺序推导local映射后，隐式参数及效果包与冷产物一致；
+跳过pack排序/保留旧origin均命中该对照断言。正例及7个编译负控整套36.10s。
+尚缺全形状及type/trait/generic header变化的真实checker冷对照、source view的语义有效性接线、
+依赖有效性以及完整Cx/声明调度装配，不将人工模块投影等同于生产模块缓存。
+
+`check/source_projection` 对已经匹配的声明范围按相同token原始拼写生成起点/终点
+两张码点映射。`x+1`变成`x + 1`时旧位置1的新起点为2、新终点为1，不能合并成
+单张表。字符串token内部只有原始拼写相同时才映射，内部插值编辑仍保守失效。
+NEWLINE忽略仅服务位置投影，调用方仍须独立确认AST/依赖一致，不能以token比较
+替代语义有效性。assert源文本先校验旧substring，再按两端映射切新源码。
+非均匀编辑对照亦修正了私有replay新生成的symbol/diagnostic span；不代表完整Cx
+迁移的所有来源字段均已覆盖。源码投影目前持有完整两版文本，内存预算仍需后续收口。
+
 ## 五、七期与报告
 
 | 期 | 交付 | 状态 |

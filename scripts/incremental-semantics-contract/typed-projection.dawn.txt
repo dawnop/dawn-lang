@@ -1,0 +1,154 @@
+# A fixed-header oracle fixture for the production typed-tree visitor.
+# Dense identity maps intentionally over-approximate this private compiler's
+# ID range; this is not the eventual declaration provenance allocator.
+use std/map
+use std/list
+use compiler/check/cx.{Cx, cx_new}
+use compiler/check/tast.{TFun}
+use compiler/check/types.{Sig, Sym, trait_of, eff_labels, sig_abi_eff}
+use compiler/front/token.{Diag}
+use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, check_fn}
+use compiler/check/relocate
+use compiler/check/relocate_tree
+use compiler/check/relocate_tree.{View}
+use compiler/check/source_projection
+use compiler/front/parser
+use compiler/front/ast.{module_fns}
+
+fn callee(cx: Cx, name: String, builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
+  if builtin { return map.get(cx.bins, name) }
+  match tr {
+    Some(id) -> {
+      let info = trait_of(cx.traits, id)
+      for (method, value) in info.methods {
+        if method == name { return Some(value.sig) }
+      }
+      None
+    }
+    None -> lookup_fn_sig(cx, name)
+  }
+}
+
+pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) -> TFun = {
+  var stable: Map[Int, Int] = map.empty()
+  var locals: Map[Int, Int] = map.empty()
+  var id = -1024
+  while id < after.next_id {
+    stable = map.insert(stable, id, id)
+    locals = map.insert(locals, id, if id >= before.next_id { id + delta } else { id })
+    id = id + 1
+  }
+  var positions: Map[Int, Int] = map.empty()
+  var p = 0
+  while p <= length {
+    positions = map.insert(positions, p, p + span)
+    p = p + 1
+  }
+  let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
+  let v = View { ids: ids, positions: positions, ends: positions, assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+  relocate_tree.function(v, f).expect("typed projection failed: " ++ f.name)
+}
+
+pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int,
+  old_text: String, new_text: String, old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int) -> TFun = {
+  var stable: Map[Int, Int] = map.empty()
+  var locals: Map[Int, Int] = map.empty()
+  var id = -1024
+  while id < after.next_id {
+    stable = map.insert(stable, id, id)
+    locals = map.insert(locals, id, if id >= before.next_id { id + delta } else { id })
+    id = id + 1
+  }
+  let source = source_projection.between(old_text, new_text, old_lo, old_hi, new_lo, new_hi)
+    .expect("source projection: " ++ f.name)
+  let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
+  let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+    assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+  relocate_tree.function(v, f).expect("source-aware typed projection failed: " ++ f.name)
+}
+
+# The original private replay supplies its observed non-source state delta.
+# Correct its newly produced symbol/diagnostic spans with the same projection
+# used for the body, without touching earlier retained products.
+pub fn source_state(current: Cx, before: Cx, after: Cx, delta: Int,
+  old_text: String, new_text: String, old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int) -> Cx = {
+  let source = source_projection.between(old_text, new_text, old_lo, old_hi, new_lo, new_hi)
+    .expect("state source projection")
+  var syms = current.syms
+  for (id, s) in map.entries(after.syms) {
+    if id >= before.next_id && id < after.next_id {
+      let moved = map.get(syms, id + delta).expect("replayed symbol")
+      syms = map.insert(syms, id + delta, Sym { ..moved,
+        dlo: map.get(source.starts, s.dlo).expect("symbol start"),
+        dhi: map.get(source.ends, s.dhi).expect("symbol end") })
+    }
+  }
+  let added = list.drop(after.diags, len(before.diags))
+  var diags = list.take(current.diags, len(current.diags) - len(added))
+  for d in added {
+    diags = diags ++ [Diag { ..d,
+      lo: map.get(source.starts, d.lo).expect("diagnostic start"),
+      hi: map.get(source.ends, d.hi).expect("diagnostic end") }]
+  }
+  Cx { ..current, syms: syms, diags: diags }
+}
+
+pub type HeaderTrial = { relocated: TFun, cold: TFun }
+
+## Reverse real effect declarations, so label IDs and ABI slots reverse.
+## Target body-local slots are derived from the new header's binding order,
+## not read out of the cold body used as the comparison oracle.
+pub fn header_sample() -> HeaderTrial !io = {
+  let ask = "pub effect Ask { fn ask() -> Int }\n"
+  let tell = "pub effect Tell { fn tell() -> Int }\n"
+  let tail = "pub fn thru[!e](g: fn() -> Int !e) -> Int !e = g()\n" ++
+    "pub fn both() -> Int !Ask !Tell = thru(() => ask() + tell())\n"
+  let old_text = ask ++ tell ++ tail
+  let new_text = tell ++ ask ++ tail
+  let (old_ast, opd) = parser.parse_module(old_text)
+  let (new_ast, npd) = parser.parse_module(new_text)
+  if len(opd) != 0 || len(npd) != 0 { panic("header fixture parse failed") }
+  let (before, sigs) = headers_for_body_probe(cx_new(Some("header"), Some("header.dawn")), old_ast, map.empty())
+  let (next, nsigs) = headers_for_body_probe(cx_new(Some("header"), Some("header.dawn")), new_ast, map.empty())
+  if len(before.diags) != 0 || len(next.diags) != 0 || before.next_id != next.next_id { panic("header fixture invalid") }
+  let decl = module_fns(old_ast)[1]
+  let ndecl = module_fns(new_ast)[1]
+  let (after, saved) = check_fn(before, decl, sigs[1])
+  let (checked, cold) = check_fn(next, ndecl, nsigs[1])
+  if len(after.diags) != 0 || len(checked.diags) != 0 { panic("header body failed") }
+  let old_ask = map.get(before.effects, "Ask").expect("old Ask")
+  let old_tell = map.get(before.effects, "Tell").expect("old Tell")
+  let new_ask = map.get(next.effects, "Ask").expect("new Ask")
+  let new_tell = map.get(next.effects, "Tell").expect("new Tell")
+  if old_ask != new_tell || old_tell != new_ask || old_ask == old_tell { panic("effect order did not reverse") }
+  var stable: Map[Int, Int] = map.empty()
+  var id = -1024
+  while id < after.next_id { stable = map.insert(stable, id, id)
+    id = id + 1
+  }
+  let nominals = map.insert(map.insert(stable, old_ask, new_ask), old_tell, new_tell)
+  var locals = stable
+  let old_labels = eff_labels(sig_abi_eff(saved.sig))
+  let new_labels = eff_labels(sig_abi_eff(nsigs[1]))
+  if len(saved.ev_syms) != 2 || len(new_labels) != 2 { panic("expected two evidence slots") }
+  var i = 0
+  for (old_id, name) in old_labels {
+    var j = 0
+    for (new_id, new_name) in new_labels {
+      if name == new_name {
+        if map.get(nominals, old_id) != Some(new_id) { panic("header role mismatch") }
+        locals = map.insert(locals, saved.ev_syms[i], next.next_id + j)
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  let ids = relocate.new(nominals, stable, stable, stable, locals).expect("header relocation IDs")
+  let source = source_projection.between(old_text, new_text, decl.lo, decl.hi, ndecl.lo, ndecl.hi).expect("header source view")
+  let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+    assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+  HeaderTrial { relocated: relocate_tree.function(v, saved).expect("header tree relocation"), cold: cold }
+}

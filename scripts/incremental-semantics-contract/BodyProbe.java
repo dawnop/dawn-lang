@@ -14,7 +14,8 @@ public final class BodyProbe {
         var at = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("sample_at"))
                 .findFirst().orElseThrow();
         long length = (Long) count.invoke(null, samples);
-        if (length != 11) throw new AssertionError("Expected eleven body trials");
+        long expected = args.length == 0 ? 11 : Long.parseLong(args[0]);
+        if (length != expected) throw new AssertionError("Unexpected body trial count: " + length);
         for (long i = 0; i < length; i++) {
             Object trial = at.invoke(null, samples, i);
             Class<?> t = trial.getClass();
@@ -44,7 +45,7 @@ public final class BodyProbe {
         var editAt = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("edit_at"))
                 .findFirst().orElseThrow();
         long editedLength = (Long) editCount.invoke(null, edits);
-        if (editedLength != 10) throw new AssertionError("Expected ten reused body products");
+        if (editedLength != expected - 1) throw new AssertionError("Unexpected reused body count: " + editedLength);
         for (long i = 0; i < editedLength; i++) {
             Object edit = editAt.invoke(null, edits, i);
             Class<?> e = edit.getClass();
@@ -53,6 +54,13 @@ public final class BodyProbe {
             if (!SemanticSnapshot.same(e.getField("replayed_cx").get(edit), e.getField("cold_cx").get(edit)))
                 throw new AssertionError("edited source: replayed Cx differs from cold body boundary (" + i + ")");
         }
-        System.out.println("edited-source\t10\tstable keys, TFun and full body-boundary Cx agree with cold products");
+        System.out.println("edited-source\t" + editedLength + "\tstable keys, TFun and full body-boundary Cx agree with cold products");
+        if (expected == 23) {
+            Object header = probe.getMethod("header_sample").invoke(null);
+            Class<?> h = header.getClass();
+            if (!SemanticSnapshot.same(h.getField("relocated").get(header), h.getField("cold").get(header)))
+                throw new AssertionError("reordered header: relocated body differs from cold check");
+            System.out.println("reordered-header\t1\treversed effect declarations and evidence slots agree with cold");
+        }
     }
 }

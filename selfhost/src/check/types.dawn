@@ -288,6 +288,21 @@ pub fn var_key(vid: Int) -> Int = 3 * vid + 1
 
 pub fn assoc_key(tid: Int) -> Int = 3 * tid + 2
 
+## A semantic evidence origin, not its erased runtime lookup key. Associated
+## projections retain their subject and member so relocation can recover ABI
+## order even when multiple projections use the same runtime trait key.
+pub type EvidenceRole =
+  | LabelSlot(id: Int)
+  | VariableSlot(id: Int)
+  | AssociatedSlot(subject: Int, trait_ref: Int, member: String)
+
+pub fn evidence_role_key(role: EvidenceRole) -> Int =
+  match role {
+    LabelSlot(id) -> label_key(id)
+    VariableSlot(id) -> var_key(id)
+    AssociatedSlot(_, tr, _) -> assoc_key(tr)
+  }
+
 ## Compiler-owned evidence spellings share their encoding with relocation.
 ## Empty display/member names are also useful for matching a proven prefix.
 pub fn ev_label_name(id: Int, name: String) -> String = "ev\$${id}\$${name}"

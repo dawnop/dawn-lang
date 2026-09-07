@@ -49,6 +49,13 @@ def main():
         ("stale-evidence-spelling", "..s, name: name, ty:", "..s, name: s.name, ty:"),
         ("unknown-evidence-spelling", "if name != ev_var_name(old) { return None }",
          "if false { return None }"),
+        ("stale-evidence-operand-order", "let target = evidence_slots(signature(ids, s)?)",
+         "let target = evidence_slots(s)"),
+        ("missing-parameter-evidence", "let abi = sig_abi_eff(s)", "let abi = s.eff"),
+        ("lost-associated-subject", "out ++ [AssociatedSlot(tv, tr, name)]",
+         "out ++ [AssociatedSlot(0, tr, name)]"),
+        ("lost-associated-member", "out ++ [AssociatedSlot(tv, tr, name)]",
+         'out ++ [AssociatedSlot(tv, tr, "")]'),
     ]
     subjects = [("positive", original)] + [(name, edit(original, old, new)) for name, old, new in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-typed-relocation-") as temp:
