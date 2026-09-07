@@ -1,6 +1,6 @@
 # 增量语义引擎
 
-> 状态：**current** —— 2026-09-07 实施中的设计与进度，不是已完成能力或性能承诺。
+> 状态：**current** —— 2026-09-08 实施中的设计与进度，不是七期完成或性能承诺。
 > 用户授权按七期持续实施，第2、5、7期验收后分别产出报告。
 
 ## 一、问题与基线
@@ -13,7 +13,7 @@ Playground 使用非 file URI，属于 standalone；模块前缀复用不能加�
 已运行 hello_mod/selfhost 的探索性冷路径基准；可复现入口是
 `scripts/incremental-semantics-contract/bench.py`，原始轮次、源码指纹、环境和进程 RSS
 分别归档，cold/observed 交替顺序。parse replay 不冒充 loader 内部分段，进程 RSS
-不冒充缓存保留内存。仍需真实编辑首差、query 延迟及保留内存测量，再决定启用范围；
+不冒充缓存保留内存。真实编辑首差与 query 延迟已补测；保留内存留待第7期测量；
 不写未经实测的加速倍数。
 
 ## 二、首个交付：保守模块前缀
@@ -55,9 +55,9 @@ inferred body 参与 signature，comptime 读取 body/value，不能只跟踪导
 
 | 期 | 交付 | 状态 |
 |---|---|---|
-| 1 | 冷路径对照、阶段基线、Java 观测 | 进行中 |
-| 2 | workspace 前缀缓存、生命周期、基本逐出 | 缓存及workspace接线已实现，验收进行中；验收后报告 |
-| 3 | 稳定身份、具名产物及重定位 | 未开始 |
+| 1 | 冷路径对照、阶段基线、Java 观测 | 已验收；证据汇入第2期报告 |
+| 2 | workspace 前缀缓存、生命周期、基本逐出 | #107已合并；[验收报告](history/incremental-semantics-p2-report.md) |
+| 3 | 稳定身份、具名产物及重定位 | 原型调查，尚未实现 |
 | 4 | query runtime、依赖失效和 header 接线 | 未开始 |
 | 5 | 函数 body 增量、standalone/Playground | 未开始；验收后报告 |
 | 6 | comptime/Java/索引与工具消费者收口 | 未开始 |
@@ -70,12 +70,12 @@ inferred body 参与 signature，comptime 读取 body/value，不能只跟踪导
 ## 六、验收
 
 首刀已实现共享 `observe_queries` callback、host-owned `JsigProbe` 和 JVM
-`query_probe`；尚未接入生产分析，也未启用缓存。原型证明无需在共享checker里引入
+`query_probe`；首刀当时未启用缓存，后续 #107 已接入 Workspace。原型证明无需在共享checker里引入
 Java可变对象。共享模块两个测试守八个hook的观察顺序与refusing guard，JVM测试守
 计数独立、零查询gate、返回值与参数方向；项目夹具证明经import的Java对象仍触发查询。
 `scripts/incremental-semantics-contract/probe.py` 先核验全部锚点，然后实际编译九个
-变异体，每个必须命中owning测试，构建错误不算证据；workflow已接线。第一期仍缺
-真实编辑/query/保留内存基线，不能据此宣称第一期完成。
+变异体，每个必须命中owning测试，构建错误不算证据；workflow已接线。后续补齐了
+真实编辑/query 基线；第7期仍须实测 retained heap，不能用字符预算冒充堆上界。
 
 第二刀抽取 `AnalysisCarry/ModuleStep`，`analyze_program` 仍走无 observer 的
 cold fold；阶段事件只由显式 `analyze_observed` 请求。私有夹具注入冻结的旧循环，
