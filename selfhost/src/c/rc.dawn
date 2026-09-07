@@ -42,7 +42,7 @@ use ir/core.{
   CMode, COwned, mode_owned,
   cex_ty, diverges
 }
-use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, TyFn, EPure,
+use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, TyVar, TyFn, EPure,
   is_ref_ty, intr_owned_args }
 use std/list
 use std/map
@@ -1322,6 +1322,19 @@ fn schedule_record_update(st: RSt, stmts: List[CStmt], tail: Option[CExpr]) ->
 ## anything later still touches. Both only ever decide something at a
 ## borrow-producing node of counted type: everything else either produces its
 ## own reference already or is not counted at all.
+## These value trees cannot call user code, panic, or jump. Keep their
+## builder fast path; everything else gets an explicit owned builder scope.
+fn list_leaf(e: CExpr) -> Bool =
+  match e {
+    CInt(_) | CFloat(_) | CBool(_) | CStr(_) | CUnit | CLocal(_, _) -> true
+    CBox(inner, _) | CUnbox(inner, _) | CDup(inner, _) -> list_leaf(inner)
+    CCtor(_, _, es, _) | CTuple(es, _) | CListLit(es, _) | CClosure(_, _, es, _) -> {
+      for el in es { if not list_leaf(el) { return false } }
+      true
+    }
+    _ -> false
+  }
+
 fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
   let ty = cex_ty(e)
   match e {
@@ -1450,8 +1463,23 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     }
 
     CListLit(elems, lty) -> {
-      let (st1, lets, es1, temps) = consume_all(st, elems, after)
-      wrap(st1, lets, CListLit(es1, lty), lty, temps)
+      var leaves = true
+      for el in elems { if not list_leaf(el) { leaves = false } }
+      if leaves {
+        let (st1, lets, es1, temps) = consume_all(st, elems, after)
+        return wrap(st1, lets, CListLit(es1, lty), lty, temps)
+      }
+      # The builder must be visible before an element can leave its scope.
+      # An emitter-only Array cannot be released by RC on a jump or panic.
+      let (st1, buf) = fresh(st)
+      let aty = TyArray(TyVar("E", 0))
+      var steps: List[CStmt] = [CSLet(buf, aty, CIntrinsic("array_new", [], aty))]
+      for el in elems {
+        steps = steps ++ [CSAssign(buf,
+          CIntrinsic("array_push", [CLocal(buf, aty), el], aty))]
+      }
+      let done = CCall(CDirect("std/pvec", "from_array"), [CLocal(buf, aty)], lty)
+      rw(st1, CBlock(steps, Some(done), lty), consume, after)
     }
 
     CClosure(fn_name, owner, caps, cty) -> {
@@ -2265,6 +2293,22 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
 test "a scalar body needs no counting at all" {
   let m = rc_module(one_fn([], TyInt, CInt(1)), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
+}
+
+test "a list builder is an owned Core binding before its elements run" {
+  let ty = TyList(TyInt)
+  let call = CCall(CDirect("m", "element"), [], TyInt)
+  let m = rc_module(one_fn([], ty, CListLit([call], ty)), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> match ss[0] {
+      CSLet(_, TyArray(_), CIntrinsic("array_new", [], _)) -> ()
+      _ -> panic("list builder is not an owned Core binding")
+    },
+    _ -> panic("list builder is hidden from RC")
+  }
+  let literal = CListLit([CInt(1)], ty)
+  assert rc_module(one_fn([], ty, literal), owned_modes()).fns[0].body == literal
 }
 
 test "operand snapshots follow later nested assignments, not reads" {

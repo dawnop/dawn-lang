@@ -71,3 +71,27 @@ closure 的 erased `apply` 和 SAM bridge 在 verifier 看来返回 `Object`。�
 - 不修改 `io.exit`，也不把宿主的 `System.exit` ABI 变成语言 bottom 契约。
 - 不碰 SEM-04，也不顺带修改 Cursor 表示。
 - 不用 `Emit-Change(emit selfhost)` 声明。gate-map 已证明该 oracle 对 selfhost 源码改动不可见。
+
+## 七、2026-09-07：语句不落返的传播
+
+复核发现 `let y: Int = stop(); println(y)` 的检查通过，但 JVM 编译器报
+`symbol has no slot`；列表元素中的 stop/return 也可触发。`CSLet` 在初始化不落返时
+不分配 slot 是正确的，错误是 `gen_cstmt` 丢掉了这个结论，`CBlock` 继续发射后续读 y。
+
+修复使语句发射与表达式一样返回 `(Gen, falls)`。let、assign、discard、if 传播该位，
+block 在第一条不落返语句后停止，既不发射后续语句也不发射尾值。if 的条件不落返也须
+立即返回。循环仍保守认为可落返：body 不落返可能只是 break/continue，step 仍是
+continue 的目标，不能因此删掉 step 或循环后的路径。CSDrop 在 JVM 是可落返的空操作。
+
+回归覆盖直接初始化、列表首/非首元素、两支终止、嵌套块、赋值/discard/if、return、
+break/continue 和仍可落返的负控。双后端输出为独立手写期望；编译可通过的 block
+传播反转变异体必须使 owning regression 失败。Core 语义不变，只按惯例重录编译器
+自身的 Core 哈希；不得用未声明的 emit 差异掩盖已有语料的变化。
+
+本次不改变 Never 的可书写位置，不做通用 CFG/DCE，也不重构所有实参发射入口。
+
+实现后的 613 项 selfhost 测试及 14 个 compiling Never 变异体通过，新增变异体只使
+`NEVER_STATEMENT_FLOW` 失败。旧 release emit 差分通过；Core 文本语料不变，自身哈希
+变动已重录。native ASan 另发现列表元素跳出/抛错会泄漏内部数组（#94）：本项的
+双后端语料跑列表的未取分支（仍要求 JVM 编译其全部代码），classfile 探针另跑取分支；
+取分支的 native 内存验收由 #94 补齐，不加 known-red 豁免。

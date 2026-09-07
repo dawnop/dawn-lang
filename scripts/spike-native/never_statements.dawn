@@ -1,0 +1,115 @@
+# Statement fallthrough must reach the block, including its tail (#93).
+# Reading the initialized local afterwards distinguishes this from emitting
+# dead but valid bytecode. Live branches and loop steps are negative controls.
+fn stop() -> Never = panic("stop")
+
+fn direct() -> Int = {
+  let y: Int = stop()
+  y
+}
+
+fn first(take: Bool) -> Int = {
+  if not take { return 21 }
+  let y: List[Int] = [stop()]
+  len(y)
+}
+
+fn second(take: Bool) -> Int = {
+  if not take { return 22 }
+  let y: List[Int] = [1, stop()]
+  len(y)
+}
+
+fn branches(take: Bool) -> Int = {
+  let y: Int = if take { stop() } else { stop() }
+  y
+}
+
+fn nested() -> Int = {
+  let y: Int = {
+    let z: Int = stop()
+    z
+  }
+  y
+}
+
+fn assigned() -> Int = {
+  var y = 0
+  y = stop()
+  let z: Int = stop()
+  z + y
+}
+
+fn discarded() -> Int = {
+  stop()
+  let z: Int = stop()
+  z
+}
+
+fn statement_if(take: Bool) -> Int = {
+  if take { stop() } else { stop() }
+  let z: Int = stop()
+  z
+}
+
+fn condition() -> Int = {
+  if stop() { () } else { () }
+  let z: Int = stop()
+  z
+}
+
+fn returned(take: Bool) -> Int = {
+  if not take { return 7 }
+  let y: List[Int] = [{ return 7 }]
+  len(y)
+}
+
+fn live(take: Bool) -> Int = {
+  let y: Int = if take { stop() } else { 9 }
+  y + 1
+}
+
+fn loops() -> Int = {
+  var total = 0
+  for i in 0..4 {
+    if i == 1 { continue }
+    total = total + i
+  }
+  while true {
+    let x: Int = { break }
+    total = total + x
+  }
+  var n = 0
+  while n < 3 {
+    n = n + 1
+    let x: Int = { continue }
+    total = total + x
+  }
+  total + n
+}
+
+fn caught(f: fn() -> Int) -> String !io =
+  match catch_panic(f) {
+    Err(e) -> e.message
+    Ok(v) -> to_string(v)
+  }
+
+pub fn main() -> Unit !io = {
+  # #94 puts the native builder in RC's scope: both backends now take these
+  # exits under the sanitizer, including return from an unfinished literal.
+  let take_lists = true
+  println(caught(direct))
+  println(caught(() => first(take_lists)))
+  println(caught(() => second(take_lists)))
+  println(caught(() => branches(true)))
+  println(caught(() => branches(false)))
+  println(caught(nested))
+  println(caught(assigned))
+  println(caught(discarded))
+  println(caught(() => statement_if(true)))
+  println(caught(() => statement_if(false)))
+  println(caught(condition))
+  println(to_string(returned(take_lists)))
+  println(to_string(live(false)))
+  println(to_string(loops()))
+}

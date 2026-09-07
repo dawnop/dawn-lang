@@ -2375,7 +2375,8 @@ fn gen_cif(
 ) -> (Gen, Bool) !io = {
   let else_l = Label.new()
   let end = Label.new()
-  let (g1, _) = gen_cexpr(gx, g, cond, false)
+  let (g1, cond_falls) = gen_cexpr(gx, g, cond, false)
+  if not cond_falls { return (g1, false) }
   g1.mv.visitJumpInsn(OP_IFEQ, else_l)
   let (g2, then_falls) = gen_cexpr(gx, g1, thn, tail)
   if discard && then_falls { pop_value(g2.mv, cex_ty(thn)) }
@@ -2449,7 +2450,9 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CBlock(stmts, tl, ty) -> {
       var g1 = g
       for s in stmts {
-        g1 = gen_cstmt(gx, g1, s)
+        let (g2, stmt_falls) = gen_cstmt(gx, g1, s)
+        g1 = g2
+        if not stmt_falls { return (g1, false) }
       }
       match tl {
         Some(t) -> gen_cexpr(gx, g1, t, tail)
@@ -2811,33 +2814,33 @@ fn gen_cbinary(gx: GenCtx, g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (G
   (g1, true)
 }
 
-fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> Gen !io =
+## A statement owes the enclosing block its fallthrough, too. In particular
+## a non-returning initializer binds no local slot: emitting the next read
+## anyway is a compiler panic, not harmless unreachable bytecode (#93).
+fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> (Gen, Bool) !io =
   match s {
     CSLet(sym, ty, init) -> {
       let (g1, falls) = gen_cexpr(gx, g, init, false)
-      if not falls { return g1 }
+      if not falls { return (g1, false) }
       let (g2, slot) = alloc(g1, slots_of(ty))
       store_slot(g2.mv, ty, slot)
-      cbind(g2, sym, ty, slot)
+      (cbind(g2, sym, ty, slot), true)
     }
     CSAssign(sym, value) -> {
       let (g1, falls) = gen_cexpr(gx, g, value, false)
       if falls { store_var(g1, sym) }
-      g1
+      (g1, falls)
     }
     # the node that exists because a dropped value is not a dropped effect
     CSDiscard(e) -> {
       let (g1, falls) = gen_cexpr(gx, g, e, false)
       if falls { pop_value(g1.mv, cex_ty(e)) }
-      g1
+      (g1, falls)
     }
     # `discard` rather than a pop afterwards: each branch drops its own value,
     # so both reach the merge with the same empty stack and the else-less
     # case owes nothing.
-    CSIf(cond, thn, els) -> {
-      let (g1, _) = gen_cif(gx, g, cond, thn, els, TyUnit, false, true)
-      g1
-    }
+    CSIf(cond, thn, els) -> gen_cif(gx, g, cond, thn, els, TyUnit, false, true)
     CSLoop(id, body, step) -> {
       let top = Label.new()
       let cont = Label.new()
@@ -2862,10 +2865,12 @@ fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> Gen !io =
       }
       g1.mv.visitJumpInsn(OP_GOTO, top)
       g1.mv.visitLabel(brk)
-      Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }
+      # A non-falling body can reach either loop label via break/continue.
+      # Keep the step and conservatively allow the path after the break label.
+      (Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }, true)
     }
     # reference counting: Perceus emits these, the JVM has a collector
-    CSDrop(_) -> g
+    CSDrop(_) -> (g, true)
   }
 
 ## The list primitives, implemented by calling the Dawn vector in std/pvec.
