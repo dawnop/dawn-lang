@@ -1,0 +1,17 @@
+# Panic messages are observable values, not backend-specific stderr (#96).
+# Derive the divisor at runtime so constant folding cannot answer this test.
+fn caught(f: fn() -> Int) -> String !io =
+  match catch_panic(f) {
+    Err(e) -> e.message
+    Ok(v) -> to_string(v)
+  }
+
+pub fn main() -> Unit !io = {
+  let zero = len(args())
+  println(caught(() => 1 / zero))
+  println(caught(() => 1 % zero))
+  println(caught(() => -7 / (zero + 3)))
+  println(caught(() => -7 % (zero + 3)))
+  println(caught(() => -9223372036854775808 / (zero - 1)))
+  println(caught(() => -9223372036854775808 % (zero - 1)))
+}
