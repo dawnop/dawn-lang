@@ -947,6 +947,13 @@ def feature_cases(good, bytecode, files, ledger):
         ("a mutant nobody defines",
          good.replace("mutant:addf-no-rounding", "mutant:addf-no-rounder "),
          "names mutant addf-no-rounder"),
+        # KNIFE TA'S EVIDENCE KIND. This table has one `device@` token, on
+        # the one row whose layer 2 lives on another machine, and the way
+        # such a token goes wrong is naming a kernel that ledger's last run
+        # did not answer for.
+        ("a device answer for a kernel the named ledger never ran",
+         good.replace("device@sm100:mmaf_scaled_e4m3", "device@sm100:mmaf_scaled_f64"),
+         "does not list mmaf_scaled_f64 among the kernels it ran"),
         ("a structural row with no writer",
          good.replace("golden:ols_beta,writer:encode_kernel", "golden:ols_beta                 ", 1),
          "is structural and names no writer"),
@@ -1032,6 +1039,19 @@ def type_cases(good, bytecode, files, ledger):
         ("a mutant nobody defines",
          good.replace("mutant:tf32-tag-as-f32", "mutant:tf32-tag-as-f16"),
          "names mutant tf32-tag-as-f16"),
+        # KNIFE TA'S EVIDENCE KIND, in its two ways of being wrong. The
+        # first names a machine nobody keeps a ledger for; the second names
+        # a kernel that IS in a ledger, on a card too old to assemble it, so
+        # that run skipped it. The second is the one worth having: a
+        # `device@` token that only had to name an existing file would
+        # accept exactly the claim this table exists to refuse, because a
+        # skip is not an answer.
+        ("a device answer from a ledger nobody keeps",
+         good.replace("device@sm90:dtype_e4m3", "device@sm42:dtype_e4m3"),
+         "there is no scripts/tile-gpu-diff/ledger-sm42.txt"),
+        ("a device answer from a ledger that skipped that kernel",
+         good.replace("device@sm100:dtype_e8m0", "device@sm90:dtype_e8m0"),
+         "does not list dtype_e8m0 among the kernels it ran"),
         ("a row below the bar with no reason for it",
          good.replace("golden:vadd_f32                                                      | "
                       "no host channel",
@@ -1134,6 +1154,12 @@ def attr_cases(good, bytecode, files, ledger):
         ("a mutant nobody defines",
          good.replace("mutant:ftz-bit-dropped", "mutant:ftz-bit-kept   "),
          "names mutant ftz-bit-kept"),
+        # KNIFE TA'S EVIDENCE KIND. `rmw.addf` cites the sm_100 ledger for
+        # the bf16 corner Ops.td gates on an architecture, and the way that
+        # citation goes wrong is naming a kernel that ledger never ran.
+        ("a device answer from a named ledger for a kernel it never ran",
+         good.replace("device@sm100:view_atomic_bf16", "device@sm100:view_atomic_f64"),
+         "does not list view_atomic_f64 among the kernels it ran"),
         ("a row below the bar with no reason for it",
          good.replace("| assumption-not-arithmetic", "| -"),
          "stops at layer 1 and names no reason"),

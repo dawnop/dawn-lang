@@ -44,7 +44,16 @@
 #                                assembler took (layer 1)
 #               device:<kernel>  a kernel a scripts/tile-gpu-diff program
 #                                launches, so a device has answered for the
-#                                type (layer 2)
+#                                type (layer 2). The device is this
+#                                machine's, and the answer is in
+#                                scripts/tile-gpu-diff/ledger.txt
+#               device@<l>:<k>   the same claim about ANOTHER machine, whose
+#                                answer is in scripts/tile-gpu-diff/
+#                                ledger-<l>.txt (knife TA). check.py reads
+#                                that ledger's last line: it must record
+#                                `pass` and must list <k> in its `arch=ran=`
+#                                field, so a kernel the card was too old to
+#                                assemble cannot be cited as one it answered
 #               mutant:<family>  a mutant that reddens on how THIS TYPE is
 #                                written (layer 3)
 #               writer:<fn>      the function in bytecode.dawn that emits
@@ -70,20 +79,33 @@
 #                       so no buffer of it can be allocated and no device
 #                       can be handed one. f32 is the only case: it is a
 #                       tile type here, never a buffer type
-#   architecture        `tileiras` refuses the type for this machine's GPU.
-#                       The three fp8 formats and fp4: measured 2026-09-05
-#                       and 2026-09-06, they are refused at --gpu-name
-#                       sm_86 AND sm_89 (`error: Incompatibility with
-#                       architecture 'sm_86': unsupported type
-#                       'f8E4M3FN'`, and the same sentence for
-#                       'f4E2M1FN') and accepted at sm_100.
-#                       scripts/tile-golden assembles those four for
-#                       sm_100, so their layer 1 is real; this machine is
-#                       an RTX 3080 and their layer 2 is not reachable at
-#                       all. It is the TYPE that is refused and not its
-#                       arithmetic: a kernel that only moves fp4 bit
-#                       patterns through `pack` and `unpack`, converting
-#                       nothing, is refused just the same
+#   architecture        RETIRED by knife TA, and no row carries it any
+#                       more. It was the four narrow formats f8E4M3FN,
+#                       f8E5M2, f8E8M0FNU and f4E2M1FN: `tileiras` refuses
+#                       each of them for this machine's GPU (`error:
+#                       Incompatibility with architecture 'sm_86':
+#                       unsupported type 'f8E4M3FN'`, and the same sentence
+#                       for the others), so scripts/tile-golden assembles
+#                       those four for sm_100 and their layer 1 was real
+#                       while their layer 2 was not reachable on an RTX
+#                       3080 at all. Knife TA reached it on a GPU cluster
+#                       and the four rows cite the ledgers of the two cards
+#                       it used. The exemption is written down here rather
+#                       than deleted because four rows carried it from
+#                       knives T3 and T9 onward and the tables below still
+#                       have to be readable against those knives.
+#
+#                       WHAT RETIRING IT MEASURED, beyond the answers
+#                       themselves: the floor is not one floor. The earlier
+#                       knives tried sm_86, sm_89 and sm_100 and never the
+#                       step between, and sm_90 is where two of the four
+#                       change their answer -- it accepts f8E4M3FN and
+#                       f8E5M2 and refuses f8E8M0FNU and f4E2M1FN. So the
+#                       two eight-bit formats with a significand cite
+#                       ledger-sm90.txt, the one that is an exponent alone
+#                       and the four-bit one cite ledger-sm100.txt, and the
+#                       row that cites the lower card is making the
+#                       stronger claim
 #   ruling 2            RETIRED, and no row carries it any more. The
 #                       prestudy's second ruling
 #                       (docs/tile-backend-design.md 2.4) put the whole view
@@ -106,16 +128,16 @@ bf16               |  6 | 13.1 | implemented   | 1   | 3 | golden:vadd_bf16,devi
 f32                |  7 | 13.1 | implemented   | 2   | 1 | golden:vadd_f32                                                      | no host channel
 tf32               |  8 | 13.1 | implemented   | T3  | 3 | golden:dtype_tf32,device:dtype_tf32,mutant:tf32-tag-as-f32           | -
 f64                |  9 | 13.1 | implemented   | 2   | 3 | golden:vadd,device:vadd,mutant:f64-tag-as-i64                        | -
-f8E4M3FN           | 10 | 13.1 | implemented   | T3  | 1 | golden:dtype_e4m3,mutant:e4m3-tag-as-i8                              | architecture
-f8E5M2             | 11 | 13.1 | implemented   | T3  | 1 | golden:dtype_e5m2                                                    | architecture
+f8E4M3FN           | 10 | 13.1 | implemented   | T3  | 3 | golden:dtype_e4m3,device@sm90:dtype_e4m3,mutant:e4m3-tag-as-i8       | -
+f8E5M2             | 11 | 13.1 | implemented   | T3  | 2 | golden:dtype_e5m2,device@sm90:dtype_e5m2                             | -
 ptr                | 12 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:elem_ty                               | -
 tile               | 13 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:ty                                    | -
 TensorViewType     | 14 | 13.1 | implemented   | T11 | 3 | writer:ty,device:view_transpose,device:view_dyn_transpose,mutant:tensor-view-tag-as-ptr,mutant:view-strides-swapped,mutant:dynamic-dim-written-static | -
 PartitionViewType  | 15 | 13.1 | implemented   | T11 | 3 | writer:ty,device:view_transpose,mutant:partition-view-padding-inline-flag-at-13-3,mutant:partition-dim-map-reversed             | -
 FunctionType       | 16 | 13.1 | implemented   | 3   | 2 | device:vadd,writer:func_ty                                           | -
 token              | 17 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:ty                                    | -
-f8E8M0FNU          | 18 | 13.2 | implemented   | T3  | 1 | golden:dtype_e8m0,mutant:e8m0-rounding-as-nearest-even,mutant:e8m0-tag-as-f8e5m2 | architecture
-f4E2M1FN           | 19 | 13.3 | implemented   | T9  | 1 | golden:dtype_e2m1,mutant:e2m1-tag-as-i4                              | architecture
+f8E8M0FNU          | 18 | 13.2 | implemented   | T3  | 3 | golden:dtype_e8m0,device@sm100:dtype_e8m0,mutant:e8m0-rounding-as-nearest-even,mutant:e8m0-tag-as-f8e5m2 | -
+f4E2M1FN           | 19 | 13.3 | implemented   | T9  | 3 | golden:dtype_e2m1,device@sm100:dtype_e2m1,mutant:e2m1-tag-as-i4      | -
 GatherScatterViewType | 20 | 13.3 | implemented   | T13 | 3 | writer:ty,device:view_token_embed,device:view_gather_pad,mutant:gather-sparse-dim-and-tensor-view-swapped,mutant:view-padding-bitfield-cleared | -
 StridedViewType    | 21 | 13.3 | implemented   | T13 | 3 | writer:ty,device:view_conv1d,device:view_stride_pad,mutant:strided-traversal-as-one,mutant:view-padding-bitfield-cleared | -
 i4                 | 22 | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,device:dtype_i4,mutant:i4-tag-as-i8                  | -

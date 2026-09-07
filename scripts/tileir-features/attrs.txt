@@ -266,6 +266,9 @@
 #       writes `@frozen` and the next launch reads the write, so it is not
 #       read-only to the host either.
 #   bf16-atomic-needs-ada
+#       CASHED IN by knife TA, and the note is kept because the measurement
+#       under it is the reason the kernel exists.
+#
 #       `rmw.addf` under `atomic_red_view_tko` over a BF16 tile is refused
 #       for this machine's GPU, and the refusal is the assembler's rather
 #       than anything missing here. Ops.td's prose says "bf16 is supported
@@ -274,7 +277,9 @@
 #       the only sentence in the whole view family that names an
 #       architecture. Knife T13 measured it rather than quoting it, by
 #       assembling view_atomic's own bytes with its float view's element
-#       format changed to bf16:
+#       format changed to bf16, and knife TA measured it again on the kernel
+#       it turned that experiment into (scripts/tile-golden's
+#       view_atomic_bf16), with the same answers:
 #
 #         sm_80 / sm_86 / sm_87  exit 5, `error: Incompatibility with
 #                                architecture 'sm_86': atomicRMW ADDF with
@@ -283,11 +288,16 @@
 #
 #       So the prose is one generation out: ADA takes it, not just Hopper.
 #       This machine is an RTX 3080 (sm_86) either way, so `view_atomic`'s
-#       float mode runs over f64 and the bf16 corner is not reachable here.
-#       It is NOT an exemption on any row of this table: `rmw.addf` reaches
-#       layer 3 over f64 (attr_addf, knife T4), and what is written down
-#       here is the corner that a wider machine would cover, not a gap in
-#       the ledger.
+#       float mode runs over f64 and the bf16 corner is not reachable HERE.
+#       It never was an exemption on any row of this table -- `rmw.addf`
+#       reaches layer 3 over f64 (attr_addf, knife T4) -- and what was
+#       written down was the corner a wider machine would cover. Knife TA
+#       is that machine: view_atomic_bf16 runs in scripts/tile-gpu-diff's
+#       arch family on the cluster's H200 and B200, its answer is in
+#       ledger-sm90.txt and ledger-sm100.txt, and the `rmw.addf` row cites
+#       the second one. Eight tile blocks reduce into sixteen bins in no
+#       order and the counts come back the ones a host reference counted,
+#       which is the sentence the prose was standing in for.
 #   hints-do-not-change-answers
 #       `optimization_hints` is a SUGGESTION, and ruling 1 of the prestudy
 #       names it beside `assume` for exactly this reason: the dialect
@@ -336,7 +346,7 @@ rmw.and                      | 0 | 13.1 | implemented   | T13 | 3 | writer:red_m
 rmw.or                       | 1 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.xor                      | 2 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.add                      | 3 | 13.1 | implemented   | 14  | 3 | writer:rmw_mode_value,golden:histogram,device:histogram,mutant:atomic-as-plain-store                  | -
-rmw.addf                     | 4 | 13.1 | implemented   | T4  | 3 | writer:rmw_mode_value,golden:attr_addf,device:attr_addf,mutant:rmw-addf-as-add                        | -
+rmw.addf                     | 4 | 13.1 | implemented   | T4  | 3 | writer:rmw_mode_value,golden:attr_addf,device:attr_addf,device@sm100:view_atomic_bf16,mutant:rmw-addf-as-add | -
 rmw.max                      | 5 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.min                      | 6 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.umax                     | 7 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -

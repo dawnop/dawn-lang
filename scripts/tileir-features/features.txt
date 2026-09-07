@@ -49,19 +49,30 @@
 #      reference, through scripts/tile-gpu-diff
 #   3  a mutant that has to go red
 #
-# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3. ONE
-# implemented row is below it, and it carries a named exemption:
-# `mmaf_scaled` stops at layer 1 under `architecture`, which is the name
-# types.txt already uses for the three fp8 formats. The reason is the
-# operation's own type table rather than anything missing here: Ops.td
-# confines its two matrix operands to f8E4M3FN, f8E5M2 and f4E2M1FN, and
-# `tileiras` 13.3.36 refuses fp8 below sm_100 (sm_90 takes f8E4M3FN and
-# refuses the f8E8M0FNU scale, measured by knife T10). There is no wide
-# operand form to fall back on the way `mmaf` has, so the kernel is
-# assembled for sm_100 and this machine's RTX 3080 never sees it. A row at
-# layer 1 may not name a golden, because a `golden:` here is read as a
-# device claim; the mutants are its evidence. Layer 3 is recorded where it
-# exists and is not owed. The
+# Ruling 1 of the prestudy sets the BAR AT LAYER 2, not layer 3. EVERY
+# implemented row is at or above it, and the last one that was not is
+# `mmaf_scaled`: it stopped at layer 1 under `architecture` from knife T10
+# until knife TA, and what stood in the way was never anything missing here.
+# Ops.td confines the operation's two matrix operands to f8E4M3FN, f8E5M2
+# and f4E2M1FN, `tileiras` 13.3.36 refuses the f8E8M0FNU scale below sm_100,
+# there is no wide operand form to fall back on the way `mmaf` has, and this
+# repository's card is an RTX 3080. Knife TA ran the kernel on a B200 and
+# wrote the answer into scripts/tile-gpu-diff/ledger-sm100.txt, which is
+# what `device@sm100:mmaf_scaled_e4m3` on that row now cites.
+#
+# `device@<ledger>:<kernel>` IS THE EVIDENCE KIND THAT NAMES A MACHINE, and
+# this table has exactly one of them. Everywhere else layer 2 is carried by
+# `golden:`, which is read as a device claim because the local ledger's last
+# line covers every kernel a tile-gpu-diff program launches. That reading
+# stops working the moment a program's kernels depend on the card: arch_diff
+# launches what the machine is high enough for and skips the rest, so
+# "a program names this kernel" and "a device answered for it" part company.
+# The token closes the gap by pointing at the ledger line and the kernel
+# inside its `arch=ran=` list, and check.py goes and reads it.
+#
+# A row at layer 1 may not name a golden, because a `golden:` here is read
+# as a device claim; the mutants are its evidence. Layer 3 is recorded where
+# it exists and is not owed. The
 # rule for reading it, which is stricter than "a mutant reddens on a kernel
 # that contains the op": a mutant counts for an opcode when its anchor
 # changes how THAT opcode is written or what it computes (its opcode byte, an
@@ -230,7 +241,7 @@ atan2                    | 0x6E | 13.2 | implemented   | T1  | 3 | golden:trig_s
 pack                     | 0x6F | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,golden:pack_roundtrip,mutant:pack-result-shape-unhalved                                                   | -
 unpack                   | 0x70 | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,golden:pack_roundtrip,mutant:unpack-as-pack,mutant:pack-result-shape-unhalved                             | -
 alloca                   | 0x71 | 13.3 | implemented   | T10 | 3 | golden:alloca_scratch,golden:alloca_two,mutant:alloca-flags-unwritten,mutant:alloca-alignment-as-num-elem,mutant:alloca-aliased | -
-mmaf_scaled              | 0x72 | 13.3 | implemented   | T10 | 1 | mutant:mmaf-scaled-scale-operand-missing,mutant:mmaf-scaled-writes-a-flags-word                                            | architecture
+mmaf_scaled              | 0x72 | 13.3 | implemented   | T10 | 3 | golden:mmaf_scaled_e4m3,device@sm100:mmaf_scaled_e4m3,mutant:mmaf-scaled-scale-operand-missing,mutant:mmaf-scaled-writes-a-flags-word | -
 make_gather_scatter_view | 0x73 | 13.3 | implemented   | T13 | 3 | golden:view_token_embed,golden:view_gather_pad,mutant:make-gather-view-as-strided-view,mutant:gather-sparse-dim-and-tensor-view-swapped | -
 make_strided_view        | 0x74 | 13.3 | implemented   | T13 | 3 | golden:view_conv1d,golden:view_stride_pad,mutant:make-strided-view-as-partition-view,mutant:strided-traversal-as-one       | -
 atomic_red_view_tko      | 0x75 | 13.3 | implemented   | T13 | 3 | golden:view_atomic,mutant:atomic-red-scope-and-mode-swapped,mutant:atomic-red-value-and-token-swapped,mutant:atomic-red-mode-rotated | -

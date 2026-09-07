@@ -3375,6 +3375,118 @@ atomicRMW ADDF with bf16 is not supported.」。这是 view 族里唯一一句�
 是它们共同的变异体）。剩下的一行是 `rmw.xchg`，而它留在那儿的理由变了：不是没有客户，是
 **这条操作码不收它**。它是三张台账里最后一行 `deferred`。
 
+### 6.17 双台账：一台机器一份，`--toolchain` 选哪一份（刀 TA）
+
+**问题不是「跑得慢」，是「问不出来」。** 从刀 T3 起，四个窄浮点格式与 `mmaf_scaled`
+一直挂着 `architecture` 豁免，理由是同一句话：`tileiras` 拒绝为 sm_86 汇编它们，本仓的机器是
+一块 RTX 3080，所以它们的层 1 是真的、层 2 到不了。这不是缺谁写代码，是缺一块卡。刀 TA 借到了
+GPU 集群的两块（B200 sm_100 与 H200 sm_90），于是问题变成：一份台账怎么记两台机器。
+
+**裁决是加文件不是改文件。** `scripts/tile-golden/toolchain.txt` 与
+`scripts/tile-gpu-diff/ledger.txt` 一字未动，仍然是本机那块 3080，仍然是 CI 唯一读的一对。
+新增 `toolchain-sm100.txt` / `ledger-sm100.txt` 与 `toolchain-sm90.txt` / `ledger-sm90.txt`，
+`run.sh` 加一个 `--toolchain <file>`：
+
+```
+./scripts/tile-gpu-diff/run.sh --toolchain scripts/tile-golden/toolchain-sm100.txt
+```
+
+台账文件名由 toolchain 文件名推出来（`toolchain-sm100.txt` 对 `ledger-sm100.txt`），两者绑在一处
+而不是各传各的，因为一次「读了这台机器的驱动、写进那台机器的台账」的运行，读台账的人是看不出来的。
+`--check` 拒绝 `--toolchain`：它是 CI 门，CI 只有一台机器。**`gates.yml` 因此一行没改。**
+
+**第二份 toolchain 文件带什么、不带什么。** 带的是「这台机器是什么」（`gpu-name` 与 `driver`），
+重复的是「工具链是什么」（`bytecode` 与 `tileiras`，`run.sh` 逐行与 `toolchain.txt` 对账），
+**不带 `wheel` 行**：wheel 的 sha256 只钉在 `toolchain.txt` 里，`install-tileiras.sh` 也只读那一个
+文件，第二份校验和就是第二处会漂的地方，所以 `run.sh` 见到 `wheel` 行直接拒。
+
+**多一份文件就多一条「指错机器」的路，所以多了一道对账。** `gpu-name` 仍然是从 toolchain 文件
+抄的（golden 就是按它汇编的，机器无权改），新加的是把这份抄件按到卡上：`nvidia-smi
+--query-gpu=compute_cap` 报的是驱动会为哪一代装载 cubin，`sm_` 加上这个数去掉点，就是
+tileiras 的写法。一台机器上这两者不可能不一致到没人发现；一台机器一份 toolchain 文件之后可以，
+而它出错的方式恰恰就是 `--toolchain` 指错文件。所以这一条在汇编第一个 kernel 之前就拒。
+**判据取的是整个数而不是主版本号**：compute_cap 10.3 是 sm_103，一个 tileiras 认识的、与 sm_100
+不同的目标，只比主版本号会把一块 Blackwell 变种当成 golden 编译时用的那块卡。
+
+**arch 族：一个族的大小取决于机器。** `scripts/tile-gpu-diff/arch_diff.dawn` 是第二十五个对拍程序，
+也是唯一一个命令行收「名字与 cubin 成对」而不是定长列表的：别的族要么整族能跑要么整族不能跑，
+这一族能跑几个是卡说了算。低于门槛的 kernel 根本没有 cubin（`tileiras` 拒绝写），所以 `run.sh`
+只汇编跑得动的那几个，把其余的按名字写进台账行的 `arch=` 字段：
+
+```
+arch=ran=<kernel,...> skipped=<kernel,...>@<gpu-name>
+```
+
+**skip 不是绿**，这个字段存在就是为了让台账的读者分得清「这台机器答了、对上了」和「这台机器
+根本没被问」。`ran=` 里的名字是从 `arch_diff` 自己打印的 `ran` 行读回来的，不是从 `run.sh`
+打算启动的列表推出来的：`scripts/tileir-features/check.py` 的 `device@<台账>:<kernel>` 证据要按
+这份名单核对，而「脚本本打算启动它」不是一个设备答案。
+
+**架构门是逐档量出来的，而量出来的结果改了前面三把刀的记录。** 刀 T3、T9、T10 试的是 sm_86、
+sm_89 与 sm_100，得出「sm_86 与 sm_89 拒、sm_100 收」；中间那一档没人试过，而两个格式恰好在
+那里换答案：
+
+| kernel | sm_80 | sm_86 | sm_87 | sm_89 | sm_90 | sm_100 |
+|---|---|---|---|---|---|---|
+| `dtype_e4m3` | | 拒 | | 拒 | **收** | 收 |
+| `dtype_e5m2` | | 拒 | | 拒 | **收** | 收 |
+| `dtype_e8m0` | | 拒 | | 拒 | 拒 | 收 |
+| `dtype_e2m1` | | 拒 | | 拒 | 拒 | 收 |
+| `mmaf_scaled_e4m3` | | 拒 | | 拒 | 拒（**是 scale 那个格式**） | 收 |
+| `view_atomic_bf16` | 拒 | 拒 | 拒 | **收** | 收 | 收 |
+
+拒绝原文都是 `error: Incompatibility with architecture '<arch>': unsupported type '<format>'`，
+最后一行是 `atomicRMW ADDF with bf16 is not supported`。**所以 fp8 不是一堵墙是两堵**：带尾数的
+两个八位格式在 sm_90 就收，只有指数格式 f8E8M0FNU 与四位的 f4E2M1FN 要 sm_100，而
+`mmaf_scaled` 跟着它的 **scale** 格式走（刀 T10 已经量到 sm_90 拒 f8E8M0FNU，这一刀确认那就是
+整条操作的门槛）。`types.txt` 的四行因此引两份不同的台账：`f8E4M3FN` 与 `f8E5M2` 引
+`ledger-sm90.txt`，`f8E8M0FNU` 与 `f4E2M1FN` 引 `ledger-sm100.txt`，**引低那块卡的行是更强的判词**。
+
+**`view_atomic_bf16` 是这一刀唯一的新 kernel，它的存在理由是一个架构而不是一个操作。**
+它是 `view_atomic` 的最后一次归约单独拿出来，视图的元素格式从 f64 换成 bf16，别的一个字没改。
+`atomic_red_view_tko` 的 `addf` 配 bf16 是整个 view 族里唯一被 `Ops.td` 用散文（而不是校验器）
+按架构挡住的一格，刀 T13 把散文换成了实测（散文说 Hopper 起，实测 Ada 就收），但问不到设备，
+因为本仓的卡在门的另一边。刀 TA 把那次实验变成一个 golden kernel，按它的下限 sm_89 汇编，
+在两块集群卡上跑出答案。**语料让答案与到达顺序无关**：八个 tile block 往十六个格子里归约，
+bf16 有八位尾数，256 以内的整数在它里面是精确的因而可结合，而 500 个 lane 分十六格，最大一格
+远在 256 以下。
+
+**宿主参考新写两个。** `std/gpu.dtype_e2m1_ref` 不是 `dtype_convert_ref` 换个名字：别的窄格式都有
+自己的缓冲区，上传时就被舍进格式了，所以第 0 段就是缓冲区本身；f4E2M1FN 没有缓冲区
+（`element_bytes` 拒它），kernel 自己把 i32 字 `pack` 成字节再 `unpack` 成半字节，所以参考要按同一条
+读法读同一批字（lane `i` 是字 `i / 8` 的第 `i % 8` 个半字节，低位在前，`narrow.f4e2m1_of_bits` 说
+那是十六个值里的哪一个）。第 0 段问的因此是**编码**而不是舍入。`std/gpu.mmaf_scaled_ref` 是
+`Ops.td` 的 `MmaFScaledOp` 公式照抄：
+
+```
+result[i][j] = acc[i][j] + sum_k (lhs[i][k] * lhs_scale[i][k / v]) * (rhs[k][j] * rhs_scale[k / v][j])
+```
+
+`v` 是块大小，`Ops.td` 里**没有**这个参数，它是两个形状的商，所以它是这个函数的一个入参而不是
+能从缓冲区读出来的东西。K 上的折叠顺序方言没规定，语料因此把操作数全取成小整数、scale 全取成
+2 的幂，每个乘积与每个部分和都是远在 2^24 以内的整数，f32 加法在那里是精确的因而可结合，
+折叠顺序读不出来。
+
+**集群怎么跑（可复跑）。** 容器没有外网、`/data0` 不跨机共享，所以有三件一次性的事：
+
+1. **种子**。`.dawn/` 是自举种子，从主镜像同机拷过来（`cp -r /data0/ori.wang/dawn-lang/.dawn .`），
+   不要从本机推。
+2. **tileiras**。集群上没有，而整套 venv 有 538 MB。真正需要的只有三个文件
+   （`bin/tileiras`、`bin/ptxas`、`lib/libnvvm.so.4`，`ldd` 显示三者只连 libc / libm / libpthread），
+   打成 tar.gz 是 83 MB，推一次、在两台机器上各解到 `/data0/ori.wang/dawn-tileiras`，
+   用本机算的 sha256 逐个核对，再用 `tileiras --version` 核对 `toolchain.txt` 的钉版本。
+   之后 `TILEIRAS=/data0/ori.wang/dawn-tileiras/bin/tileiras`。
+3. **git**。`run.sh` 写台账行要 `git rev-parse HEAD` 与 `git status --porcelain`（那一行必须指着一棵
+   跑过的树），而同步过去的目录里没有 `.git`。做法是把本分支的 `--depth 1` 克隆的 `.git`
+   （6.5 MB）推上去、在远端 `cp` 成 `<remote_root>/.git`：远端于是真的是同一个 commit 的检出，
+   `run.sh` 的两条保证一条都没有放松。
+
+跑：`crun run -n 1 -e TILEIRAS=... -- ./scripts/tile-gpu-diff/run.sh --toolchain <file>`，一次约
+十几分钟。**两台机器要分两次跑**：`crun` 总是先推到主力机再跨机同步，所以一次新的 `crun run`
+会覆盖另一台正在跑的那份源码。跑完把远端 `ledger-sm*.txt` 的末行取回本仓提交，那一行的每一个
+字段都是脚本写的。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
