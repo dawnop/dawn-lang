@@ -1569,7 +1569,7 @@ int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
 
 int64_t dawn_idiv(int64_t a, int64_t b) {
   if (b == 0) {
-    dawn_panic(DAWN_LIT("/ by zero"));
+    dawn_panic(DAWN_LIT("Int division by zero"));
   }
   /* INT64_MIN / -1 overflows and is UB in C; the JVM defines it as
    * wrapping back to INT64_MIN. */
@@ -1579,7 +1579,7 @@ int64_t dawn_idiv(int64_t a, int64_t b) {
 
 int64_t dawn_imod(int64_t a, int64_t b) {
   if (b == 0) {
-    dawn_panic(DAWN_LIT("/ by zero"));
+    dawn_panic(DAWN_LIT("Int modulo by zero"));
   }
   if (a == INT64_MIN && b == -1) return 0;
   return a % b;
