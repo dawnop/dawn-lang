@@ -1,0 +1,120 @@
+# One immutable owner fixes the analysis world and retains only a safe prefix.
+# The caller commits its returned session together with the query Program.
+# No global cache or resource lease lives here; abandoning a session releases
+# its replay state, while the caller remains responsible for closing its lease.
+
+use std/io.{Env}
+use std/str
+use driver/analyze.{
+  LoadedModule, LoadResult, Program, CheckedMod, ModuleStep,
+  initial_carry, analyze_module_step
+}
+use driver/stdlib.{StdCtx, std_module_of}
+use check/cx.{Cx}
+use check/jsig.{Jsig, JsigProbe}
+use ir/interp.{CtOpts}
+
+type Entry = { raw: LoadedModule, std_identity: Option[String], step: ModuleStep }
+type State = {
+  std: StdCtx,
+  opts: CtOpts,
+  js: Jsig,
+  probe: fn(Jsig) -> JsigProbe !io,
+  prefix: List[Entry],
+  max_modules: Int,
+  max_text_units: Int
+}
+
+## Construct a new owner when std, options, captured plan or lease changes.
+## Keeping the representation private prevents grafting an old prefix into
+## a new world; the host must drop this owner before releasing its Java lease.
+pub opaque type Session = State
+
+pub type Stats = {
+  reused_modules: Int,
+  checked_modules: Int,
+  comptime_modules: Int,
+  retained_modules: Int,
+  retained_text_units: Int
+}
+
+pub type Update = { session: Session, program: Program, stats: Stats }
+
+pub fn new(
+  std: StdCtx, opts: CtOpts, js: Jsig, probe: fn(Jsig) -> JsigProbe !io,
+  max_modules: Int, max_text_units: Int
+) -> Session = {
+  if max_modules < 0 || max_text_units < 0 { panic("negative analysis cache limit") }
+  State {
+    std: std, opts: opts, js: js, probe: probe, prefix: [],
+    max_modules: max_modules, max_text_units: max_text_units
+  }
+}
+
+## Eviction drops replay state, not the caller's current query Program.
+pub fn evict(owner: Session) -> Session = {
+  let session: State = owner
+  State { ..session, prefix: [] }
+}
+
+fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = a == b
+
+pub fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io = {
+  let session: State = owner
+  let probe = session.probe(session.js)
+  var carry = initial_carry(session.std)
+  var diags = loaded.diags
+  var modules: List[CheckedMod] = []
+  var prefix: List[Entry] = []
+  var matching = len(loaded.diags) == 0 && not session.opts.ffi
+  var retaining = matching
+  var text_units = 0
+  var reused = 0
+  var checked = 0
+  var ct_runs = 0
+  var index = 0
+  for raw in loaded.modules {
+    # std identity depends on canonical paths, including the current Env.
+    # Recompute it even for a hit; raw text alone is never a cache key.
+    let identity = std_module_of(session.std, raw.path)
+    let hit = matching && index < len(session.prefix) &&
+      same_input(raw, session.prefix[index].raw) &&
+      identity == session.prefix[index].std_identity
+    let step = if hit {
+      reused = reused + 1
+      session.prefix[index].step
+    } else {
+      # Once the prefix differs, never reconnect to an old suffix.
+      matching = false
+      let queries_before = probe.queries()
+      let computed = analyze_module_step(raw, carry, session.std, session.opts, probe.jsig, None)
+      checked = checked + computed.check_runs
+      ct_runs = ct_runs + computed.comptime_runs
+      if len(computed.diags) != 0 || probe.queries() != queries_before { retaining = false }
+      # Tooling must use the original oracle, not keep or mutate this run's
+      # observation counter through a stored checker context.
+      let cx = Cx { ..computed.checked.cx, jsig: session.js }
+      ModuleStep { ..computed, checked: CheckedMod { ..computed.checked, cx: cx } }
+    }
+    carry = step.after
+    diags = diags ++ step.diags
+    modules = modules ++ [step.checked]
+    let units = str.len(raw.text)
+    if retaining && len(prefix) < session.max_modules &&
+      units <= session.max_text_units - text_units {
+        prefix = prefix ++ [Entry { raw: raw, std_identity: identity, step: step }]
+        text_units = text_units + units
+      } else {
+        retaining = false
+      }
+    index = index + 1
+  }
+  Update {
+    session: State { ..session, prefix: prefix },
+    program: Program { modules: modules, diags: diags },
+    stats: Stats {
+      reused_modules: reused, checked_modules: checked, comptime_modules: ct_runs,
+      retained_modules: len(prefix), retained_text_units: text_units
+    }
+  }
+}

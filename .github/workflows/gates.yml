@@ -1040,13 +1040,12 @@ jobs:
     # not move.
   incremental-semantics:
     runs-on: ubuntu-latest
-    # Planning value until the first CI observation: the complete probe,
-    # frozen-loop mutants and inline suite took 81.07s locally on 2026-09-08.
-    # Double the rounded 82s for runner variance, plus 38s toolchain/checkout
-    # overhead observed for contracts-1: 202s. Keep this separate as the
-    # incremental contract grows rather than consuming contracts-1's budget.
-    # budget: 3x 202s planning value
-    timeout-minutes: 11
+    # Planning update: the original complete suite took 81.07s locally and
+    # the three workspace-owner mutants took 83.97s on 2026-09-08.
+    # Double rounded 82+84s, plus 38s fixed overhead: 370s.
+    # Engine prefix mutants have their own independent owning job below.
+    # budget: 3x 370s planning value
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1056,7 +1055,23 @@ jobs:
         run: |
           python3 scripts/incremental-semantics-contract/probe.py
           python3 scripts/incremental-semantics-contract/cold.py
+          python3 scripts/incremental-semantics-contract/lsp-prefix.py
           ./bin/dawn test scripts/incremental-semantics-contract
+
+  incremental-prefix:
+    runs-on: ubuntu-latest
+    # Full warm/frozen-cold products plus twelve compiling engine mutants:
+    # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
+    # This is a complete engine contract, not a shard of a shared matrix.
+    # budget: 3x 524s planning value
+    timeout-minutes: 27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: incremental prefix equivalence and execution counts
+        run: python3 scripts/incremental-semantics-contract/prefix.py
 
   contracts-1:
     runs-on: ubuntu-latest

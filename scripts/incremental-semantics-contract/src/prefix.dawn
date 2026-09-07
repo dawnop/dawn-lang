@@ -1,0 +1,166 @@
+# Execution counts prove actual reuse; same-version cold comparison separately
+# guards output assembly. Full structural comparison lives in the private oracle.
+
+use std/io
+use compiler/driver/incremental
+use compiler/driver/analyze.{LoadedModule, LoadResult, LocDiag, analyze_program}
+use compiler/driver/stdlib.{load_std, std_load_error_text}
+use compiler/driver/checkdump
+use compiler/check/jsig.{jsig_refused, refused_probe}
+use compiler/ir/interp.{CtOpts, ct_default}
+use compiler/front/parser
+use compiler/jvm/jreflect.{jsig_real, query_probe}
+use compiler_plan/envmem
+
+fn source(name: String, text: String) -> LoadedModule = {
+  let (m, pdiags) = parser.parse_module(text)
+  LoadedModule {
+    mod_path: name, class_name: name, path: name ++ ".dawn",
+    text: text, m: m, pdiags: pdiags, pkg: None
+  }
+}
+
+test "prefix cache reuses only the unchanged initial sequence" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let a = source("a", "pub type Box = { n: Int }\n")
+    let b = source("b", "pub type Other = { n: Int }\n")
+    let c = source("c", "use a.{Box}\npub fn value() -> Box = Box { n: 1 }\n")
+    let d = source("d", "pub fn extra() -> Int = 4\n")
+    let loaded = LoadResult { modules: [a, b, c], diags: [] }
+    let fresh = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 10, 10000)
+    let first = incremental.analyze(fresh, loaded)
+    assert first.stats.reused_modules == 0
+    assert first.stats.checked_modules == 3
+    assert first.stats.retained_modules == 3
+    let warm = incremental.analyze(first.session, loaded)
+    assert warm.stats.reused_modules == 3
+    assert warm.stats.checked_modules == 0
+    assert warm.stats.comptime_modules == 0
+    let edited = source("c", "use a.{Box}\npub fn value() -> Box = Box { n: 2 }\n")
+    let edits = [
+      LoadResult { modules: [a, b, edited], diags: [] },
+      LoadResult { modules: [a, c], diags: [] },
+      LoadResult { modules: [b, a, c], diags: [] },
+      LoadResult { modules: [a, b, c, d], diags: [] },
+      LoadResult { modules: [], diags: [] }
+    ]
+    let expected_hits = [2, 1, 0, 3, 0]
+    var i = 0
+    for input in edits {
+      let result = incremental.analyze(warm.session, input)
+      let cold = analyze_program(input, std, ct_default(), jsig_refused())
+      assert result.stats.reused_modules == expected_hits[i]
+      assert result.stats.checked_modules == len(input.modules) - expected_hits[i]
+      assert checkdump.render(result.program) == checkdump.render(cold)
+      assert result.program.diags == cold.diags
+      i = i + 1
+    }
+    # Same raw text but a different loader-rewritten AST must invalidate.
+    let rewritten = LoadedModule { ..c, m: edited.m }
+    let rewrite = incremental.analyze(warm.session, LoadResult { modules: [a, b, rewritten], diags: [] })
+    assert rewrite.stats.reused_modules == 2
+    assert rewrite.stats.checked_modules == 1
+  }))
+}
+
+test "prefix cache errors and limits never retain a disconnected suffix" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let a = source("a", "pub fn answer() -> Int = 42\n")
+    let b = source("b", "pub fn other() -> Int = 1\n")
+    let loaded = LoadResult { modules: [a, b], diags: [] }
+    let fresh = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 10, 10000)
+    let warm = incremental.analyze(fresh, loaded)
+    let broken = source("broken", "pub fn (\n")
+    let loader = LocDiag { path: "loader", d: broken.pdiags[0] }
+    let failed = incremental.analyze(warm.session, LoadResult { modules: [a, b], diags: [loader] })
+    assert failed.stats.reused_modules == 0
+    assert failed.stats.retained_modules == 0
+    assert failed.program.diags[0] == loader
+    let bad = source("bad", "pub fn bad() -> Int = false\n")
+    let input = LoadResult { modules: [a, bad, b], diags: [] }
+    let recovered = incremental.analyze(warm.session, input)
+    assert recovered.stats.reused_modules == 1
+    assert recovered.stats.retained_modules == 1
+    let again = incremental.analyze(recovered.session, input)
+    assert again.stats.reused_modules == 1
+    assert again.stats.checked_modules == 2
+    assert again.program.diags == analyze_program(input, std, ct_default(), jsig_refused()).diags
+    let evicted = incremental.analyze(incremental.evict(warm.session), loaded)
+    assert evicted.stats.reused_modules == 0
+    assert evicted.stats.checked_modules == 2
+    let bounded = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 1, 10000)
+    let one = incremental.analyze(bounded, loaded)
+    assert one.stats.retained_modules == 1
+    assert incremental.analyze(one.session, loaded).stats.reused_modules == 1
+    let no_text = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 10, 0)
+    assert incremental.analyze(no_text, loaded).stats.retained_modules == 0
+    let opts = ct_default()
+    let ffi = incremental.new(std, CtOpts { ..opts, ffi: true }, jsig_refused(), refused_probe, 10, 10000)
+    assert incremental.analyze(ffi, loaded).stats.retained_modules == 0
+  }))
+}
+
+test "prefix cache stops at Java queries but still reuses pure code with Java enabled" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let pure = source("pure", "pub fn answer() -> Int = 42\n")
+    let producer = source("producer",
+      "use java \"java.util.ArrayList\"\npub fn items() -> ArrayList !io = ArrayList.new()\n")
+    let consumer = source("consumer",
+      "use producer\npub fn count() -> Int !io = producer.items().size()\n")
+    let loaded = LoadResult { modules: [pure, producer, consumer], diags: [] }
+    let js = jsig_real()
+    let fresh = incremental.new(std, ct_default(), js, query_probe, 10, 10000)
+    let first = incremental.analyze(fresh, loaded)
+    assert len(first.program.diags) == 0
+    assert first.stats.retained_modules == 1
+    let warm = incremental.analyze(first.session, loaded)
+    assert len(warm.program.diags) == 0
+    assert warm.stats.reused_modules == 1
+    assert warm.stats.checked_modules == 2
+    assert warm.stats.retained_modules == 1
+    assert checkdump.render(warm.program) == checkdump.render(analyze_program(loaded, std, ct_default(), js))
+  }))
+}
+
+test "prefix cache rechecks std identity and refuses negative budgets" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let raw = source("pretend", "pub fn answer() -> Int = 42\n")
+    let input = LoadResult { modules: [LoadedModule { ..raw, path: "std/list.dawn" }], diags: [] }
+    let owner = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 10, 10000)
+    let first = incremental.analyze(owner, input)
+    assert len(first.program.diags) == 0
+    assert first.stats.retained_modules == 1
+    assert first.program.modules[0].class_name == "std/list"
+    let (changed, _) = envmem.with_env_table("/different-cwd", [],
+      () => incremental.analyze(first.session, input))
+    assert changed.stats.reused_modules == 0
+    assert changed.stats.checked_modules == 1
+    assert changed.program.modules[0].class_name == "pretend"
+    for (modules, units) in [(-1, 10), (10, -1)] {
+      let result = catch_panic(() => {
+        let _ = incremental.new(std, ct_default(), jsig_refused(), refused_probe, modules, units)
+        ()
+      })
+      match result {
+        Err(_) -> ()
+        Ok(_) -> { assert false }
+      }
+    }
+  }))
+}
