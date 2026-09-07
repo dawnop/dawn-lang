@@ -54,7 +54,7 @@
 # Modes, for CI scheduling and nothing else (the 2026-08-20 job split):
 #
 #   run.sh                          # everything, the local default
-#   run.sh --never-mutants-only     # the 13 compiling Never mutants + probe
+#   run.sh --never-mutants-only     # the 14 compiling Never mutants + probes
 #   run.sh --without-never-mutants  # selftest, corpus verify, corpus mutant,
 #                                   # constant-pool scan
 #
@@ -169,6 +169,22 @@ expect_never_marker() {
 run_never_mutants() {
 
 python3 "$never_probe" "$root/build/dawn-selfhost.jar" "$work"
+
+python3 scripts/classfile-verify/statement_probe.py "$root/build/dawn-selfhost.jar" "$work"
+new_never_mutant omit-statement-fallthrough
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  '        if not stmt_falls { return (g1, false) }' \
+  '        if false { return (g1, false) }'
+build_never_mutant omit-statement-fallthrough
+if python3 scripts/classfile-verify/statement_probe.py "$never_mutant/compiler.jar" "$work" \
+    > "$never_mutant/probe.out" 2>&1; then
+  never_die "statement fallthrough mutant stayed green"
+fi
+if ! grep -qx 'ASSERT: NEVER_STATEMENT_FLOW' "$never_mutant/probe.out"; then
+  cat "$never_mutant/probe.out" >&2
+  never_die "statement fallthrough mutant missed its owning assertion"
+fi
+echo "PASS  statement fallthrough mutant compiles, then fails NEVER_STATEMENT_FLOW"
 
 new_never_mutant reject-wide-sam-bottom
 replace_never_once "$never_mutant/selfhost/src/check/checker.dawn" \
