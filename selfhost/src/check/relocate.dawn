@@ -1,0 +1,335 @@
+# Semantic references have domains: prelude ADT and trait integers overlap,
+# and evidence keys encode a domain rather than containing a plain ID.
+# Missing mappings fail closed so a caller can discard a memo and check cold.
+# This foundation does not enable body caching or alter the checker ID stream.
+use std/map
+use std/set
+use std/str
+use check/types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError,
+  TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyOpaque, TyAssoc, TyTuple, TyFn,
+  Eff, EPure, EIo, EffVar, EffAssoc, EUnion, ELabeled,
+  eff_union, eff_with_labels, label_key, var_key, assoc_key, Sig, Sym,
+  ev_label_name, ev_assoc_name, ev_var_name
+}
+use check/tast.{WitRef, WForward, WConcrete, WApply}
+
+type Data = {
+  nominals: Map[Int, Int], traits: Map[Int, Int], type_vars: Map[Int, Int],
+  effect_vars: Map[Int, Int], locals: Map[Int, Int], evidence: Map[Int, Int]
+}
+
+pub opaque type Ids = Data
+
+fn injective(ids: Map[Int, Int]) -> Bool = {
+  var seen: Set[Int] = set.empty()
+  for value in map.values(ids) {
+    if set.has(seen, value) { return false }
+    seen = set.insert(seen, value)
+  }
+  true
+}
+
+## Include explicit identity entries for unchanged references. An absent key
+## means unknown, not unchanged; mappings are validated once per relocation.
+pub fn new(
+  nominals: Map[Int, Int], traits: Map[Int, Int], type_vars: Map[Int, Int],
+  effect_vars: Map[Int, Int], locals: Map[Int, Int]
+) -> Option[Ids] = {
+  for ids in [nominals, traits, type_vars, effect_vars, locals] {
+    if not injective(ids) { return None }
+  }
+  var evidence: Map[Int, Int] = map.empty()
+  var target_keys: Set[Int] = set.empty()
+  let domains: List[(Map[Int, Int], fn(Int) -> Int)] = [
+    (nominals, label_key), (traits, assoc_key), (effect_vars, var_key)
+  ]
+  for (domain, encode) in domains {
+    for (old, next) in map.entries(domain) {
+      let source_key = encode(old)
+      let target_key = encode(next)
+      # Even malformed near-overflow ID tables must not merge evidence bands.
+      if map.has(evidence, source_key) || set.has(target_keys, target_key) { return None }
+      evidence = map.insert(evidence, source_key, target_key)
+      target_keys = set.insert(target_keys, target_key)
+    }
+  }
+  Some(Data { nominals: nominals, traits: traits, type_vars: type_vars, effect_vars: effect_vars,
+    locals: locals, evidence: evidence })
+}
+
+pub fn nominal(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.nominals, id)
+}
+pub fn trait_id(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.traits, id)
+}
+pub fn type_var(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.type_vars, id)
+}
+pub fn effect_var(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.effect_vars, id)
+}
+pub fn local_id(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.locals, id)
+}
+pub fn evidence_key(owner: Ids, key: Int) -> Option[Int] = { let ids: Data = owner
+  map.get(ids.evidence, key)
+}
+
+# Evidence locals are compiler-owned names (ev_of is their provenance).
+# Associated keys encode only the trait; their spelling also carries a tvar.
+# Never guess how to rewrite an unrecognized generated name.
+fn evidence_name(owner: Ids, name: String, key: Int) -> Option[String] = {
+  let ids: Data = owner
+  for (old, next) in map.entries(ids.nominals) {
+    if label_key(old) == key {
+      let prefix = ev_label_name(old, "")
+      if not str.starts_with(name, prefix) || str.len(name) == str.len(prefix) { return None }
+      return Some(ev_label_name(next, str.slice(name, str.len(prefix), str.len(name))))
+    }
+  }
+  for (old, next) in map.entries(ids.effect_vars) {
+    if var_key(old) == key {
+      if name != ev_var_name(old) { return None }
+      return Some(ev_var_name(next))
+    }
+  }
+  for (old, next) in map.entries(ids.traits) {
+    if assoc_key(old) == key {
+      for (tv, moved) in map.entries(ids.type_vars) {
+        let prefix = ev_assoc_name(tv, old, "")
+        if str.starts_with(name, prefix) && str.len(name) > str.len(prefix) {
+          return Some(ev_assoc_name(moved, next, str.slice(name, str.len(prefix), str.len(name))))
+        }
+      }
+      return None
+    }
+  }
+  None
+}
+
+pub fn effect_row(ids: Ids, e: Eff) -> Option[Eff] =
+  match e {
+    EPure -> Some(EPure)
+    EIo -> Some(EIo)
+    EffVar(name, id) -> Some(EffVar(name, effect_var(ids, id)?))
+    EffAssoc(subject, tv, tr, name) -> Some(EffAssoc(subject, type_var(ids, tv)?, trait_id(ids, tr)?, name))
+    EUnion(vars, assocs, io) -> {
+      var parts: List[Eff] = if io { [EIo] } else { [] }
+      for (id, name) in vars { parts = parts ++ [EffVar(name, effect_var(ids, id)?)] }
+      for (subject, tv, tr, name) in assocs {
+        parts = parts ++ [EffAssoc(subject, type_var(ids, tv)?, trait_id(ids, tr)?, name)]
+      }
+      Some(eff_union(parts))
+    }
+    ELabeled(base, labels) -> {
+      let moved = effect_row(ids, base)?
+      var out: List[(Int, String)] = []
+      for (id, name) in labels { out = out ++ [(nominal(ids, id)?, name)] }
+      Some(eff_with_labels(moved, out))
+    }
+  }
+
+fn types(ids: Ids, ts: List[Ty]) -> Option[List[Ty]] = {
+  var out: List[Ty] = []
+  for t in ts { out = out ++ [ty(ids, t)?] }
+  Some(out)
+}
+
+pub fn ty(ids: Ids, t: Ty) -> Option[Ty] =
+  match t {
+    TyInt -> Some(t)
+    TyFloat -> Some(t)
+    TyBool -> Some(t)
+    TyString -> Some(t)
+    TyBytes -> Some(t)
+    TyUnit -> Some(t)
+    TyNever -> Some(t)
+    TyError -> Some(t)
+    TyJava(_, _) -> Some(t)
+    TyVar(name, id) -> Some(TyVar(name, type_var(ids, id)?))
+    TyAdt(id, args) -> Some(TyAdt(nominal(ids, id)?, types(ids, args)?))
+    TyList(elem) -> Some(TyList(ty(ids, elem)?))
+    TyMap(key, value) -> Some(TyMap(ty(ids, key)?, ty(ids, value)?))
+    TySet(elem) -> Some(TySet(ty(ids, elem)?))
+    TyArray(elem) -> Some(TyArray(ty(ids, elem)?))
+    TyOpaque(id, name, owner, args, target) ->
+      Some(TyOpaque(nominal(ids, id)?, name, owner, types(ids, args)?, ty(ids, target)?))
+    TyAssoc(subject, tr, name) -> Some(TyAssoc(ty(ids, subject)?, trait_id(ids, tr)?, name))
+    TyTuple(elems) -> Some(TyTuple(types(ids, elems)?))
+    TyFn(params, ret, eff) -> Some(TyFn(types(ids, params)?, ty(ids, ret)?, effect_row(ids, eff)?))
+  }
+
+## Binder and parameter order is lexical, unlike the normalized effect row.
+## Remapping a signature does not by itself permute a call's evidence operands.
+pub fn signature(ids: Ids, s: Sig) -> Option[Sig] = {
+  var constraints: List[List[Int]] = []
+  for bs in s.constraints {
+    var moved: List[Int] = []
+    for tr in bs { moved = moved ++ [trait_id(ids, tr)?] }
+    constraints = constraints ++ [moved]
+  }
+  var eparams: List[Eff] = []
+  for e in s.eparams { eparams = eparams ++ [effect_row(ids, e)?] }
+  let trait_ref = match s.trait_id {
+    Some(tr) -> Some(trait_id(ids, tr)?)
+    None -> None
+  }
+  let operation = match s.op_of {
+    Some((effect_id, slot)) -> Some((nominal(ids, effect_id)?, slot))
+    None -> None
+  }
+  Some(Sig { ..s, param_tys: types(ids, s.param_tys)?, ret: ty(ids, s.ret)?,
+    eff: effect_row(ids, s.eff)?, tparams: types(ids, s.tparams)?, constraints: constraints,
+    eparams: eparams, trait_id: trait_ref, op_of: operation })
+}
+
+## Source offsets are deliberately unchanged here: source-view projection is
+## separate from identity relocation. A handler installation is a local ID,
+## whereas ev_of holds an encoded atom key and dict_of is (trait, typevar).
+pub fn sym(ids: Ids, s: Sym) -> Option[Sym] = {
+  let name = match s.ev_of {
+    Some(key) -> evidence_name(ids, s.name, key)?
+    None -> s.name
+  }
+  let dictionary = match s.dict_of {
+    Some((tr, tv)) -> Some((trait_id(ids, tr)?, type_var(ids, tv)?))
+    None -> None
+  }
+  let evidence = match s.ev_of {
+    Some(key) -> Some(evidence_key(ids, key)?)
+    None -> None
+  }
+  let cell = match s.cell_of {
+    Some((installation, value)) -> Some((local_id(ids, installation)?, ty(ids, value)?))
+    None -> None
+  }
+  Some(Sym { ..s, name: name, ty: ty(ids, s.ty)?, dict_of: dictionary, ev_of: evidence, cell_of: cell })
+}
+
+pub fn witness(ids: Ids, w: WitRef) -> Option[WitRef] =
+  match w {
+    WForward(id) -> Some(WForward(local_id(ids, id)?))
+    WConcrete(tr, subject) -> Some(WConcrete(trait_id(ids, tr)?, ty(ids, subject)?))
+    WApply(tr, subject, args) -> {
+      var moved: List[WitRef] = []
+      for a in args { moved = moved ++ [witness(ids, a)?] }
+      Some(WApply(trait_id(ids, tr)?, ty(ids, subject)?, moved))
+    }
+  }
+
+test "relocation preserves slots and separates signature and symbol metadata" {
+  let empty: Map[Int, Int] = map.empty()
+  let ids = new(map.insert(empty, 0, 50), map.insert(empty, 0, 60), map.insert(empty, 0, 70),
+    map.insert(empty, 0, 80), map.insert(empty, 0, 90)).expect("distinct reference domains")
+  let old = Sig { name: "f", param_tys: [TyVar("T", 0)], param_names: ["x"], param_defaults: [true],
+    ret: TyAdt(0, []), eff: EffVar("e", 0), is_builtin: false, tparams: [TyVar("T", 0)],
+    constraints: [[0]], eparams: [EffVar("e", 0)], owner: Some("owner"), trait_id: Some(0),
+    op_of: Some((0, 0)), inferring: false }
+  let expected = Sig { ..old, param_tys: [TyVar("T", 70)], ret: TyAdt(50, []), eff: EffVar("e", 80),
+    tparams: [TyVar("T", 70)], constraints: [[60]], eparams: [EffVar("e", 80)], trait_id: Some(60),
+    op_of: Some((50, 0)) }
+  assert signature(ids, old) == Some(expected)
+  assert signature(ids, Sig { ..old, trait_id: None, op_of: None, eparams: [] }) ==
+    Some(Sig { ..expected, trait_id: None, op_of: None, eparams: [] })
+  let saved = Sym { name: "ev\$v\$0", ty: TyAdt(0, []), mutable: false, dlo: 0, dhi: 1,
+    dict_of: Some((0, 0)), ev_of: Some(var_key(0)), cell_of: Some((0, TyVar("T", 0))) }
+  let moved = Sym { ..saved, name: "ev\$v\$80", ty: TyAdt(50, []), dict_of: Some((60, 70)), ev_of: Some(var_key(80)),
+    cell_of: Some((90, TyVar("T", 70))) }
+  assert sym(ids, saved) == Some(moved)
+  assert sym(ids, Sym { ..saved, dict_of: None, ev_of: None, cell_of: None }) ==
+    Some(Sym { ..moved, name: saved.name, dict_of: None, ev_of: None, cell_of: None })
+  assert sym(ids, Sym { ..saved, name: "ev\$0\$Ask", ev_of: Some(label_key(0)) }) ==
+    Some(Sym { ..moved, name: "ev\$50\$Ask", ev_of: Some(label_key(50)) })
+  assert sym(ids, Sym { ..saved, name: "ev\$a\$0\$0\$E", ev_of: Some(assoc_key(0)) }) ==
+    Some(Sym { ..moved, name: "ev\$a\$70\$60\$E", ev_of: Some(assoc_key(60)) })
+  assert sym(ids, Sym { ..saved, name: "unrecognized" }) == None
+  let w = WApply(0, TyVar("T", 0), [WConcrete(0, TyAdt(0, [])), WForward(0)])
+  assert witness(ids, w) == Some(WApply(60, TyVar("T", 70), [WConcrete(60, TyAdt(50, [])), WForward(90)]))
+  assert signature(ids, Sig { ..old, constraints: [[1]] }) == None
+  assert signature(ids, Sig { ..old, op_of: Some((1, 0)) }) == None
+  assert sym(ids, Sym { ..saved, dict_of: Some((1, 0)) }) == None
+  assert sym(ids, Sym { ..saved, dict_of: Some((0, 1)) }) == None
+  assert sym(ids, Sym { ..saved, ev_of: Some(var_key(1)) }) == None
+  assert sym(ids, Sym { ..saved, cell_of: Some((1, TyInt)) }) == None
+  assert witness(ids, WApply(0, TyInt, [WForward(1)])) == None
+}
+
+test "relocation distinguishes domains and refuses missing or aliased IDs" {
+  let empty: Map[Int, Int] = map.empty()
+  let a = map.insert(empty, 0, 50)
+  let b = map.insert(empty, 0, 60)
+  let c = map.insert(empty, 0, 70)
+  let d = map.insert(empty, 0, 80)
+  let e = map.insert(empty, 0, 90)
+  let ids = new(a, b, c, d, e).expect("injective IDs")
+  assert nominal(ids, 0) == Some(50)
+  assert trait_id(ids, 0) == Some(60)
+  assert type_var(ids, 0) == Some(70)
+  assert effect_var(ids, 0) == Some(80)
+  assert local_id(ids, 0) == Some(90)
+  assert evidence_key(ids, label_key(0)) == Some(label_key(50))
+  assert evidence_key(ids, var_key(0)) == Some(var_key(80))
+  assert evidence_key(ids, assoc_key(0)) == Some(assoc_key(60))
+  assert ty(ids, TyAdt(1, [])) == None
+  assert ty(ids, TyFn([], TyVar("T", 1), EPure)) == None
+  assert effect_row(ids, EffAssoc("T", 0, 1, "E")) == None
+  assert evidence_key(ids, var_key(1)) == None
+  assert new(map.insert(a, 1, 50), b, c, d, e) == None
+  assert new(a, b, map.insert(c, 1, 70), d, e) == None
+  assert new(a, b, c, d, map.insert(e, 1, 90)) == None
+  let negative = new(empty, empty, empty, map.insert(empty, -1, -2), empty).expect("negative variable")
+  assert evidence_key(negative, var_key(-1)) == Some(var_key(-2))
+  let zero = map.insert(empty, 0, 0)
+  let collision = map.insert(empty, 6148914691236517205, 1)
+  assert new(zero, empty, empty, collision, empty) == None
+  assert new(zero, empty, empty, map.insert(empty, 1, 6148914691236517205), empty) == None
+}
+
+test "relocation renormalizes effect rows after nonmonotone ID changes" {
+  let empty: Map[Int, Int] = map.empty()
+  let swapped = map.insert(map.insert(empty, 1, 20), 2, 10)
+  let ids = new(swapped, swapped, swapped, swapped, empty).expect("permutation")
+  let row = ELabeled(EUnion([(1, "a"), (2, "b")], [("T", 1, 2, "E"), ("U", 2, 1, "F")], true),
+    [(1, "Ask"), (2, "Tell")])
+  let expected = ELabeled(EUnion([(10, "b"), (20, "a")], [("U", 10, 20, "F"), ("T", 20, 10, "E")], true),
+    [(10, "Tell"), (20, "Ask")])
+  assert effect_row(ids, row) == Some(expected)
+  let original = TyOpaque(1, "Box", "owner", [TyVar("T", 2)],
+    TyFn([TyAdt(2, [TyVar("T", 1)])], TyAssoc(TyVar("T", 2), 1, "Item"), row))
+  let moved = TyOpaque(20, "Box", "owner", [TyVar("T", 10)],
+    TyFn([TyAdt(10, [TyVar("T", 20)])], TyAssoc(TyVar("T", 10), 20, "Item"), expected))
+  assert ty(ids, original) == Some(moved)
+}
+
+test "relocation traverses collection types and propagates missing references" {
+  let empty: Map[Int, Int] = map.empty()
+  let one = map.insert(empty, 1, 101)
+  let ids = new(one, one, one, one, one).expect("single reference")
+  let original = TyTuple([
+    TyList(TyVar("T", 1)), TyMap(TyVar("T", 1), TySet(TyAdt(1, []))),
+    TyArray(TyOpaque(1, "N", "owner", [], TyVar("T", 1)))
+  ])
+  let expected = TyTuple([
+    TyList(TyVar("T", 101)), TyMap(TyVar("T", 101), TySet(TyAdt(101, []))),
+    TyArray(TyOpaque(101, "N", "owner", [], TyVar("T", 101)))
+  ])
+  assert ty(ids, original) == Some(expected)
+  for t in [TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError,
+    TyJava("java.lang.String", "String")] {
+    assert ty(ids, t) == Some(t)
+  }
+  for t in [TyList(TyVar("U", 2)), TyMap(TyInt, TyVar("U", 2)), TySet(TyVar("U", 2)),
+    TyArray(TyVar("U", 2)), TyTuple([TyInt, TyVar("U", 2)]),
+    TyOpaque(1, "N", "owner", [], TyVar("U", 2)), TyAdt(1, [TyVar("U", 2)]),
+    TyFn([], TyInt, EffVar("e", 2))] {
+    assert ty(ids, t) == None
+  }
+  for e in [EffVar("e", 2), EffAssoc("T", 2, 1, "E"), EffAssoc("T", 1, 2, "E"),
+    EUnion([(1, "e"), (2, "f")], [], false), ELabeled(EPure, [(2, "Ask")])] {
+    assert effect_row(ids, e) == None
+  }
+  assert effect_row(ids, EPure) == Some(EPure)
+  assert effect_row(ids, EIo) == Some(EIo)
+}
