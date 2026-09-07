@@ -1,0 +1,129 @@
+# This private probe runs the real header sequence and annotated body checker.
+# Captured states reveal writes; shifted allocation is a feasibility probe,
+# not proof that an arbitrary semantic product is safely relocatable.
+use std/map
+use std/str
+use compiler/front/parser
+use compiler/front/ast.{module_fns}
+use compiler/check/cx.{Cx, cx_new}
+use compiler/check/checker.{headers_for_body_probe, check_fn, check_module}
+use compiler/check/tast.{TFun}
+use relocation
+use identity
+use relocation.{Move}
+use identity.{ModuleKey}
+
+pub type Trial = { name: String, before: Cx, after: Cx, body: TFun, shifted: Cx, shifted_body: TFun, module_body: TFun, relocated: TFun }
+pub fn sample_count(xs: List[Trial]) -> Int = len(xs)
+pub fn sample_at(xs: List[Trial], index: Int) -> Trial = xs[index]
+
+fn fixture_text() -> String =
+  "pub effect Ask { fn ask() -> Int }\n" ++
+    "pub fn scalar(x: Int) -> Int = { let y = x + 1\n y }\n" ++
+    "pub fn identity[T](x: T) -> T = x\n" ++
+    "pub fn closure(x: Int) -> Int = { let f = (y: Int) => x + y\n f(2) }\n" ++
+    "pub fn defaulted(x: Int = 7) -> Int = x\n" ++
+    "pub fn looped(x: Int) -> Int = { var y = 0\n while y < x { y = y + 1 }\n y }\n" ++
+    "pub fn bounded[T: Show](x: T) -> String = to_string(x)\n" ++
+    "pub fn effectful() -> Int !Ask = ask()\n" ++
+    "pub fn polymorphic[!e](f: fn() -> Int !e) -> Int !e = f()\n" ++
+    "pub fn local(x: Int) -> Int = { fn nested(y: Int) -> Int = y + 1\n nested(x) }\n" ++
+    "pub fn jumping(x: Int) -> Int = { while true { if x > 0 { break } else { continue } }\n x }\n" ++
+    "pub fn wrong() -> Int = false\n"
+
+pub fn samples() -> List[Trial] !io = {
+  let text = fixture_text()
+  let (m, diagnostics) = parser.parse_module(text)
+  if len(diagnostics) != 0 { panic("body probe parse failed") }
+  let (headers, signatures) = headers_for_body_probe(cx_new(Some("probe"), Some("probe.dawn")), m, map.empty())
+  if len(headers.diags) != 0 { panic("body probe headers failed") }
+  let (_, whole) = check_module(cx_new(Some("probe"), Some("probe.dawn")), m, map.empty())
+  var cx = headers
+  var trials: List[Trial] = []
+  var index = 0
+  for d in module_fns(m) {
+    let before = cx
+    let (after, body) = check_fn(before, d, signatures[index])
+    let (shifted, shifted_body) = check_fn(Cx { ..before, next_id: before.next_id + 1000 }, d, signatures[index])
+    let expected = if d.name == "wrong" { 1 } else { 0 }
+    if len(after.diags) - len(before.diags) != expected {
+      panic("unexpected diagnostics in body probe: " ++ d.name)
+    }
+    if after.diags != shifted.diags { panic("shifted body diagnostics differ") }
+    for key in map.keys(before.syms) {
+      if map.get(before.syms, key) != map.get(after.syms, key) {
+        panic("body changed an earlier symbol: " ++ d.name)
+      }
+    }
+    trials = trials ++ [Trial { name: d.name, before: before, after: after, body: body,
+      shifted: shifted, shifted_body: shifted_body, module_body: whole.fns[index],
+      relocated: relocation.relocate(body, Move {
+        start: before.next_id, limit: after.next_id, delta: 1000, span: 0 }) }]
+    cx = after
+    index = index + 1
+  }
+  trials
+}
+
+pub type EditTrial = { relocated: TFun, cold: TFun, id_delta: Int, span_delta: Int, replayed_cx: Cx, cold_cx: Cx }
+pub fn edit_count(xs: List[EditTrial]) -> Int = len(xs)
+pub fn edit_at(xs: List[EditTrial], index: Int) -> EditTrial = xs[index]
+
+pub fn edit_samples() -> List[EditTrial] !io = {
+  let old = samples()
+  let (old_ast, _) = parser.parse_module(fixture_text())
+  let old_decls = module_fns(old_ast)
+  let edited = "# 🌅 moved source\n" ++ str.replace(fixture_text(),
+    "let y = x + 1", "let extra = x + 1\n let y = extra")
+  let (new_ast, pd) = parser.parse_module(edited)
+  if len(pd) != 0 { panic("edited probe parse failed") }
+  let new_decls = module_fns(new_ast)
+  let scope = ModuleKey {
+    world: "probe-session", logical_module: "probe", emission_owner: "probe", source: "probe.dawn"
+  }
+  let named = identity.function_key(scope, old_decls, "identity")
+  if named != identity.function_key(scope, [old_decls[2], old_decls[1]], "identity") {
+    panic("declaration reorder changed function identity")
+  }
+  if identity.function_key(scope, [old_decls[1], old_decls[1]], "identity") != None {
+    panic("duplicate declarations received a reusable identity")
+  }
+  if identity.function_key(scope, old_decls, "renamed") != None {
+    panic("missing renamed declaration matched old identity")
+  }
+  if named == identity.function_key(ModuleKey { ..scope, world: "other-session" }, old_decls, "identity") {
+    panic("function identity escaped its world")
+  }
+  let (headers, signatures) = headers_for_body_probe(cx_new(Some("probe"), Some("probe.dawn")), new_ast, map.empty())
+  if len(headers.diags) != 0 { panic("edited probe headers failed") }
+  let (_, cold) = check_module(cx_new(Some("probe"), Some("probe.dawn")), new_ast, map.empty())
+  # Replay checks only the changed first body. The complete cold check above
+  # is the oracle, not part of this replay algorithm.
+  let (first, _) = check_fn(headers, new_decls[0], signatures[0])
+  var replayed_cx = first
+  var cold_cx = first
+  var out: List[EditTrial] = []
+  var index = 1
+  while index < len(old) {
+    let saved = old[index]
+    let old_key = identity.function_key(scope, old_decls, saved.name)
+    let new_key = identity.function_key(scope, new_decls, saved.name)
+    if old_key == None || old_key != new_key { panic("unchanged function lost its stable key") }
+    let id_delta = replayed_cx.next_id - saved.before.next_id
+    let span_delta = new_decls[index].lo - old_decls[index].lo
+    if id_delta != 1 || span_delta <= 0 { panic("edit did not exercise both ID and source movement") }
+    let movement = Move {
+      start: saved.before.next_id, limit: saved.after.next_id, delta: id_delta, span: span_delta
+    }
+    let moved = relocation.relocate(saved.body, movement)
+    replayed_cx = relocation.replay(replayed_cx, saved.before, saved.after, movement)
+    let (checked, _) = check_fn(cold_cx, new_decls[index], signatures[index])
+    cold_cx = checked
+    out = out ++ [EditTrial { relocated: moved, cold: cold.fns[index], id_delta: id_delta, span_delta: span_delta,
+      replayed_cx: replayed_cx, cold_cx: cold_cx }]
+    index = index + 1
+  }
+  out
+}
+
+pub fn main() -> Unit = ()

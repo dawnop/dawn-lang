@@ -43,6 +43,10 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 
 ## 前缀与工作区
 
+后续函数级演进的私有决策门见[第3期函数体原型](body-probe.md)：
+固定header下验证稳定函数key、真实前置编辑、TFun和完整body边界Cx重放；
+它不是已上线的函数缓存，也不代替下列生产前缀门禁。
+
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，

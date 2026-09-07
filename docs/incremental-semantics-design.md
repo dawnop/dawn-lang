@@ -51,13 +51,23 @@ query 记录真实语义读取，含 scope/候选集的失败查找、impl、ali
 inferred body 参与 signature，comptime 读取 body/value，不能只跟踪导出函数签名。
 语义结果与源码位置视图分别失效，避免空白改动后 definition/diagnostics 使用旧 span。
 
+第3期已完成固定 header 的私有小语料原型，见
+[函数体实验说明](../scripts/incremental-semantics-contract/body-probe.md)。
+在前置函数增加局部变量并插入非 BMP 注释后，复用侧仅检查改动函数，其余10个函数
+的 TFun 和逐 body 边界完整 Cx 经纯数据重放后与冷检查一致。源码位置只支持整个
+body 平移；函数 key 只覆盖唯一命名的顶层函数。八个可编译负控覆盖身份歧义、
+符号/捕获、主次 span、Cx符号、诊断和符号声明位置遗漏；完整实验本地35.66s。
+这是保留原取号方案的初步可行性证据，不是全语言迁移完成：nominal/type/effect
+引用、其他声明类别、非均匀位置映射、模块最终装配和双后端/Core仍须后续验证。
+默认参数合成仍由原 check_module 收尾，依赖读取/失效也未实现；不接生产缓存。
+
 ## 五、七期与报告
 
 | 期 | 交付 | 状态 |
 |---|---|---|
 | 1 | 冷路径对照、阶段基线、Java 观测 | 已验收；证据汇入第2期报告 |
 | 2 | workspace 前缀缓存、生命周期、基本逐出 | #107已合并；[验收报告](history/incremental-semantics-p2-report.md) |
-| 3 | 稳定身份、具名产物及重定位 | 原型调查，尚未实现 |
+| 3 | 稳定身份、具名产物及重定位 | 固定header私有原型通过，完整迁移未实现 |
 | 4 | query runtime、依赖失效和 header 接线 | 未开始 |
 | 5 | 函数 body 增量、standalone/Playground | 未开始；验收后报告 |
 | 6 | comptime/Java/索引与工具消费者收口 | 未开始 |
