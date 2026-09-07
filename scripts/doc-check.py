@@ -3229,6 +3229,12 @@ def audit_anchor_problems(detail_texts: dict[str, str],
         status = owner.get(audit_id)
         if status is None:
             continue
+        # An explicit current heading is not the historical prose below it.
+        # SEM-10's stale open state and inverted anchor used to cancel out.
+        if "（已修）" in entries[audit_id].splitlines()[0] and status != "fixed":
+            bad.append(f"{audit_id}: heading says fixed, registry says {status} "
+                       "[heading_matches_status]")
+            continue
         anchors = AUDIT_ANCHOR.findall(entries[audit_id])
         if len(anchors) > 1:
             bad.append(f"{audit_id}: carries {len(anchors)} audit-anchors; one "
@@ -3330,6 +3336,9 @@ def check_audit_anchors() -> tuple[list[str], int]:
 # reads one named file rather than the repository, so writing the code out in
 # the audit document does not answer the question the anchor asks.
 AUDIT_ANCHOR_MUTANTS = (
+    ("restore-sem10-stale-state-and-inverted-anchor", "heading_matches_status"),
+    ("invert-sem10-anchor", "fixed_took_effect"),
+    ("restore-sem10-rejection", "fixed_took_effect"),
     ("an-open-finding-whose-code-was-fixed", "open_still_true"),
     ("a-fixed-finding-whose-fix-is-gone", "fixed_took_effect"),
     ("an-open-finding-with-no-anchor", "anchor_required"),
@@ -3352,7 +3361,19 @@ def audit_anchor_mutant(name: str, details: dict[str, str],
     rel = "docs/codebase-audit-v2/02-types-effects-and-semantics.md"
     probe = "\n## SEM-99 — P2 — self-test probe\n\n" \
             "<!-- audit-anchor: absent std/cursor.dawn | dawn_selftest_probe -->\n"
-    if name == "an-open-finding-whose-code-was-fixed":
+    if name == "restore-sem10-stale-state-and-inverted-anchor":
+        states["fixed"].remove("SEM-10")
+        states["open"].add("SEM-10")
+        details[rel] = details[rel].replace(
+            "audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect",
+            "audit-anchor: absent selfhost/src/check/passes.dawn | trait methods cannot declare the effect")
+    elif name == "invert-sem10-anchor":
+        details[rel] = details[rel].replace(
+            "audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect",
+            "audit-anchor: absent selfhost/src/check/passes.dawn | trait methods cannot declare the effect")
+    elif name == "restore-sem10-rejection":
+        sources["selfhost/src/check/passes.dawn"] += "\ntrait methods cannot declare the effect\n"
+    elif name == "an-open-finding-whose-code-was-fixed":
         details[rel] += probe
         states["open"].add("SEM-99")
         sources["std/cursor.dawn"] += "\nfn dawn_selftest_probe() = 1\n"
