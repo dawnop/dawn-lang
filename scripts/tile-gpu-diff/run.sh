@@ -58,9 +58,16 @@
 #             none of them and is therefore that family's kernel-level
 #             control) and dtype_diff.dawn the three element format kernels
 #             of knife T3 that a device this tree can reach will run (i16,
-#             i64 and tf32; the three fp8 formats stop at layer 1, because
+#             i64 and tf32; the three fp8 formats are not here, because
 #             tileiras refuses them at sm_86 and at sm_89 and this machine
-#             is sm_86) and loop_diff.dawn the four kernels of knife T5
+#             is sm_86) and arch_diff.dawn the six kernels no cubin of which
+#             this machine can load AT ALL (knife TA: the fp8 and fp4
+#             conversions, the block-scaled matrix product and the bf16
+#             atomic reduction, each with a measured `--gpu-name` floor;
+#             this is the only family whose SIZE depends on the machine, and
+#             on a ledger below every floor it runs nothing and says in the
+#             ledger line which kernels it did not run) and loop_diff.dawn
+#             the four kernels of knife T5
 #             (the first whose TRIP COUNT is data: two of them iterate
 #             until a value they computed says stop, one stops before its
 #             first step, and the fourth computes the first one's answer
@@ -452,7 +459,9 @@
 #   end); no tile path changed between that commit and HEAD, where the tile
 #   paths are packages/tileir, std/gpu.dawn, std/narrow.dawn (the bf16
 #   reference the fake device rounds with), scripts/tile-golden,
-#   scripts/tile-gpu-diff minus the ledger itself, and the GPU section of
+#   scripts/tile-gpu-diff minus EVERY ledger in it (this gate's own and the
+#   cluster's ledger-sm*.txt alike: a line appended to another machine's
+#   record is not a change to what this machine ran), and the GPU section of
 #   runtime/c/dawn_rt.c (between its DAWN_RT_GPU_BEGIN / END markers; the
 #   rest of the runtime is not a tile path); and toolchain.txt's driver
 #   line is the ledger's. It proves that somebody ran this script on a
