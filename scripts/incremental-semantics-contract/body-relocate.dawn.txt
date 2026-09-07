@@ -1,0 +1,156 @@
+# Private first relocation experiment: only body symbols move, headers stay
+# fixed. Unknown typed shapes fail rather than silently retain old references.
+# This is not the final nominal/type/effect/source-view relocation protocol.
+use std/map
+use std/list
+use compiler/check/cx.{Cx, Frame}
+use compiler/check/types.{Sym}
+use compiler/front/token.{Diag}
+use compiler/check/tast.{
+  TFun, TDefault, TExpr, TStmt, WitRef, WForward, WConcrete, WApply,
+  XInt, XBool, XUnit, XLocal, XEvRead, XCallDyn, XCallBuiltin, XCallFn,
+  XApply, XLambda, XCtor, XField, XBinary, XIf, XBlock, XBreak, XContinue,
+  TSLet, TSLocalFn, TSAssign, TSExpr, TSWhile
+}
+
+pub type Move = { start: Int, limit: Int, delta: Int, span: Int }
+
+fn position(p: Int, m: Move) -> Int = p + m.span
+
+fn symbol(id: Int, m: Move) -> Int =
+  if id >= m.start && id < m.limit { id + m.delta } else { id }
+
+fn ids(xs: List[Int], m: Move) -> List[Int] =
+  map(xs, x => symbol(x, m))
+
+fn opt_id(x: Option[Int], m: Move) -> Option[Int] =
+  match x {
+    Some(id) -> Some(symbol(id, m))
+    None -> None
+  }
+
+fn witness(w: WitRef, m: Move) -> WitRef =
+  match w {
+    WForward(id) -> WForward(symbol(id, m))
+    WConcrete(_, _) -> w
+    WApply(t, ty, args) -> WApply(t, ty, map(args, a => witness(a, m)))
+  }
+
+fn exprs(xs: List[TExpr], m: Move) -> List[TExpr] =
+  map(xs, x => expr(x, m))
+
+fn opt_expr(x: Option[TExpr], m: Move) -> Option[TExpr] =
+  match x {
+    Some(e) -> Some(expr(e, m))
+    None -> None
+  }
+
+fn expr(x: TExpr, m: Move) -> TExpr =
+  match x {
+    XInt(v, lo, hi) -> XInt(v, position(lo, m), position(hi, m))
+    XBool(v, lo, hi) -> XBool(v, position(lo, m), position(hi, m))
+    XUnit(lo, hi) -> XUnit(position(lo, m), position(hi, m))
+    XBreak(lo, hi) -> XBreak(position(lo, m), position(hi, m))
+    XContinue(lo, hi) -> XContinue(position(lo, m), position(hi, m))
+    XEvRead(key, lo, hi, ty) -> XEvRead(key, position(lo, m), position(hi, m), ty)
+    XLocal(id, name, lo, hi, ty) -> XLocal(symbol(id, m), name, position(lo, m), position(hi, m), ty)
+    XCallDyn(id, name, args, evidence, lo, hi, ty) ->
+      XCallDyn(symbol(id, m), name, exprs(args, m),
+        exprs(evidence, m), position(lo, m), position(hi, m), ty)
+    XCallBuiltin(name, args, ws, evidence, lo, hi, ty) ->
+      XCallBuiltin(name, exprs(args, m), map(ws, w => witness(w, m)),
+        exprs(evidence, m), position(lo, m), position(hi, m), ty)
+    XCallFn(owner, name, args, ws, evidence, tr, lo, hi, ty) ->
+      XCallFn(owner, name, exprs(args, m), map(ws, w => witness(w, m)),
+        exprs(evidence, m), tr, position(lo, m), position(hi, m), ty)
+    XApply(target, args, evidence, lo, hi, ty) ->
+      XApply(expr(target, m), exprs(args, m),
+        exprs(evidence, m), position(lo, m), position(hi, m), ty)
+    XLambda(params, names, body, captures, lo, hi, ty) ->
+      XLambda(ids(params, m), names, expr(body, m),
+        ids(captures, m), position(lo, m), position(hi, m), ty)
+    XCtor(adt, ci, written, slots, spread, lo, hi, ty) ->
+      XCtor(adt, ci, exprs(written, m), slots, opt_expr(spread, m), position(lo, m), position(hi, m), ty)
+    XField(target, index, lo, hi, ty) -> XField(expr(target, m), index, position(lo, m), position(hi, m), ty)
+    XBinary(op, a, b, wit, olo, ohi, lo, hi, ty) -> {
+      let moved = match wit {
+        Some(w) -> Some(witness(w, m))
+        None -> None
+      }
+      XBinary(op, expr(a, m), expr(b, m), moved, position(olo, m), position(ohi, m), position(lo, m), position(hi, m), ty)
+    }
+    XIf(cond, thn, els, lo, hi, ty) ->
+      XIf(expr(cond, m), expr(thn, m), opt_expr(els, m), position(lo, m), position(hi, m), ty)
+    XBlock(stmts, tail, lo, hi, ty) ->
+      XBlock(map(stmts, s => stmt(s, m)), opt_expr(tail, m), position(lo, m), position(hi, m), ty)
+    _ -> panic("unsupported expression in symbol-only relocation prototype")
+  }
+
+fn stmt(s: TStmt, m: Move) -> TStmt =
+  match s {
+    TSLet(id, name, init, lo, hi) ->
+      TSLet(opt_id(id, m), name, expr(init, m), position(lo, m), position(hi, m))
+    TSLocalFn(id, name, params, names, body, captures, lo, hi) ->
+      TSLocalFn(symbol(id, m), name, ids(params, m), names,
+        expr(body, m), ids(captures, m), position(lo, m), position(hi, m))
+    TSAssign(id, name, value, lo, hi) ->
+      TSAssign(symbol(id, m), name, expr(value, m), position(lo, m), position(hi, m))
+    TSExpr(e, lo, hi) -> TSExpr(expr(e, m), position(lo, m), position(hi, m))
+    TSWhile(cond, body, jumps, lo, hi) ->
+      TSWhile(expr(cond, m), expr(body, m), jumps, position(lo, m), position(hi, m))
+    _ -> panic("unsupported statement in symbol-only relocation prototype")
+  }
+
+pub fn relocate(f: TFun, m: Move) -> TFun = {
+  let defaults = map(f.defaults, d => match d {
+    Some(value) -> Some(TDefault { body: expr(value.body, m),
+      dict_syms: ids(value.dict_syms, m) })
+    None -> None
+  })
+  TFun { ..f, param_syms: ids(f.param_syms, m),
+    dict_syms: ids(f.dict_syms, m), ev_syms: ids(f.ev_syms, m),
+    defaults: defaults, body: expr(f.body, m) }
+}
+
+# Replay the observed fixed-header body delta, keeping the new module's header
+# and earlier symbols. Full Cx comparison in the probe detects omitted writes;
+# this is intentionally not a claim that these are all language-wide writes.
+pub fn replay(cx: Cx, before: Cx, after: Cx, m: Move) -> Cx = {
+  var syms = cx.syms
+  for id in map.keys(after.syms) {
+    if id >= m.start && id < m.limit {
+      let s = map.get(after.syms, id).expect("saved symbol")
+      let cell = match s.cell_of {
+        Some((id, ty)) -> Some((symbol(id, m), ty))
+        None -> None
+      }
+      syms = map.insert(syms, symbol(id, m), Sym { ..s,
+        dlo: position(s.dlo, m), dhi: position(s.dhi, m), cell_of: cell })
+    }
+  }
+  let frame = after.frame
+  if len(frame.lambda_stack) != 0 || len(frame.loop_stack) != 0 {
+    panic("prototype cannot replay a body with an unfinished nested frame")
+  }
+  let scopes = map(frame.scopes, scope => {
+    var moved = scope
+    for name in map.keys(scope) { moved = map.insert(moved, name, symbol(map.get(scope, name).expect("scope symbol"), m)) }
+    moved
+  })
+  var dictionaries = frame.dict_syms
+  for key in map.keys(dictionaries) {
+    dictionaries = map.insert(dictionaries, key, symbol(map.get(dictionaries, key).expect("dictionary symbol"), m))
+  }
+  var evidence = frame.eff_witness
+  for key in map.keys(evidence) {
+    let (lo, hi, name) = map.get(evidence, key).expect("effect witness")
+    evidence = map.insert(evidence, key, (position(lo, m), position(hi, m), name))
+  }
+  let diagnostics = map(list.drop(after.diags, len(before.diags)), d =>
+    Diag { ..d, lo: position(d.lo, m), hi: position(d.hi, m) })
+  Cx { ..cx, syms: syms, next_id: after.next_id + m.delta,
+    frame: Frame { ..frame, scopes: scopes, dict_syms: dictionaries, eff_witness: evidence },
+    diags: cx.diags ++ diagnostics,
+    current_tparams: after.current_tparams, current_eff_vars: after.current_eff_vars,
+    current_tparam_bounds: after.current_tparam_bounds, loop_jumps: after.loop_jumps }
+}
