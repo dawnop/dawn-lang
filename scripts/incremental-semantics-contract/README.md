@@ -38,4 +38,22 @@ python3 scripts/incremental-semantics-contract/bench.py \
 中跑11轮，丢前3轮，cold/observed 交替先后顺序。保存逐轮 TSV、源码 SHA-256、
 JDK/OS/参数、构建日志、摘要和进程峰值 RSS；每轮必须无诊断且所有模块执行 check/comptime。
 parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启动、std 和整个进程，
-不是缓存保留内存。八个样本不足以声称稳定的加速倍数，也没有测量尚未实现的 warm 路径。
+不是缓存保留内存。八个样本不足以声称稳定的加速倍数；这个入口只测冷分析阶段。
+
+## 前缀与工作区
+
+`prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
+std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
+owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，
+同时由 JVM/native selfhost 套件运行。原有 `scripts/lsp-workspace-contract/run.sh`
+另行守18个协议案例和20个资源/工作区负控，不能只靠新计数测试替代它。
+
+`lsp-bench.py` 通过实际 didChange overlay 编辑目标文件，磁盘源不改；
+立即跟 barrier 强制 flush，所以 sync 不包括空闲 debounce。随后单独测
+hover/definition/completion，并保存原始回复和 RSS。示例参数：
+`--entry <path> --edit <path> --needle <reference> --output <new-dir> -- <server-command>`。
+
+`lsp-observe.py --output <new-dir>` 构建私有服务器，在 stderr 记录最终模块顺序和
+实际复用/执行计数，不改变生产协议；`--cold` 只在私有副本里强制每轮先逐出 Session。
+两个模式都可用同一源码、JDK和编辑序列对照，回复必须相同。强制cold仍可能保留本轮
+输出prefix，不能用这两者的RSS差直接估算缓存大小。baseline JSON明确记录样本与限制。

@@ -20,13 +20,15 @@ use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, error_text}
 use json/render.{render}
 use driver/analyze.{
   Program, ProjectPlan, LocDiag,
-  analyze_program, analyze_standalone, standalone_entry, project_plan,
+  analyze_standalone, standalone_entry, project_plan,
   project_module_path, load_entries_over, canon
 }
 use compiler_plan/source
+use driver/incremental
+use driver/fsmem
 use compiler_plan/envmem
 use ir/interp.{ct_default}
-use check/jsig.{JsigLease, jsig_refused_lease}
+use check/jsig.{Jsig, JsigLease, JsigProbe, jsig_refused_lease, refused_probe}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use lsp/lspq.{QCx, Target, find_target}
@@ -407,7 +409,8 @@ fn hex_digit(v: Int) -> Char =
 ## so the server can publish it as an ordinary project diagnostic.
 pub type LspLeaseHost = {
   standalone: fn() -> JsigLease !io,
-  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io,
+  probe: fn(Jsig) -> JsigProbe !io
 }
 
 type WorkspaceIdentity = {
@@ -452,6 +455,8 @@ type Workspace = {
   prog: Option[Program],
   entry_by_uri: Map[String, String],
   lease: JsigLease,
+  cache: incremental.Session,
+  analysis_stats: Option[incremental.Stats],
   diag_by_uri: Map[String, List[Json]]
 }
 
@@ -1342,16 +1347,21 @@ fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
       Workspace {
         ..ws0,
         prog: no_prog,
+        cache: incremental.evict(ws0.cache),
+        analysis_stats: None,
         entry_by_uri: no_entries,
         diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths)
       }
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
       let loaded = load_entries_over(ws0.plan, entries, overlay)
-      let prog = analyze_program(loaded, st.std, ct_default(), ws0.lease.jsig)
+      let update = incremental.analyze(ws0.cache, loaded)
+      let prog = update.program
       Workspace {
         ..ws0,
         prog: Some(prog),
+        cache: update.session,
+        analysis_stats: Some(update.stats),
         entry_by_uri: entry_by_uri,
         diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog)
       }
@@ -1389,6 +1399,8 @@ fn activate_workspace(
         prog: no_prog,
         entry_by_uri: no_entries,
         lease: lease,
+        cache: incremental.new(st.std, ct_default(), lease.jsig, st.host.probe, 128, 1048576),
+        analysis_stats: None,
         diag_by_uri: no_diags
       }
       match catch_panic(() => rebuild_workspace(st, candidate)) {
@@ -2004,7 +2016,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       standalone: Some(jsig_refused_lease()),
       host: LspLeaseHost {
         standalone: () => jsig_refused_lease(),
-        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+        probe: refused_probe
       },
       lifecycle: Running
     }
@@ -2097,10 +2110,75 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     standalone: Some(jsig_refused_lease()),
     host: LspLeaseHost {
       standalone: () => jsig_refused_lease(),
-      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+      probe: refused_probe
     },
     lifecycle: Running
   }
+}
+
+test "workspace commits prefix cache with its Program and drops it on conflict" {
+  let root = fsmem.MEM_BASE ++ "/prefix-project"
+  let path = root ++ "/src/main.dawn"
+  let uri = "file://" ++ path
+  let text = "use lib\npub fn answer() -> Int = lib.value() + 1\n"
+  var files = fsmem.mem_std(fsmem.MEM_BASE)
+  files = fsmem.mem_put(files, root ++ "/dawn.toml", "schema = 1\nname = \"prefix_project\"\n")
+  files = fsmem.mem_put(files, root ++ "/src/lib.dawn", "pub fn value() -> Int = 41\n")
+  files = fsmem.mem_put(files, path, text)
+  let _ = fsmem.with_fs_mem(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(fsmem.MEM_BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let plan = project_plan(source.SourceFile(path))
+        let identity = workspace_identity(plan)
+        let doc = Doc {
+          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
+          text: text, view: view_of(text), ls: line_starts_of(text),
+          analysis: WorkspaceMember(identity)
+        }
+        let base = def_probe_state(std)
+        let st = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let lease = jsig_refused_lease()
+        let empty = Workspace {
+          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
+          prog: None, entry_by_uri: map.empty(), lease: lease,
+          cache: incremental.new(std, ct_default(), lease.jsig, refused_probe, 128, 1048576),
+          analysis_stats: None, diag_by_uri: map.empty()
+        }
+        let first = rebuild_workspace(st, empty)
+        assert len(first.prog.expect("first Program").diags) == 0
+        assert first.analysis_stats.expect("first counts").checked_modules == 2
+        let warm = rebuild_workspace(st, first)
+        assert warm.analysis_stats.expect("warm counts").reused_modules == 2
+        assert warm.analysis_stats.expect("warm counts").checked_modules == 0
+        let changed = text ++ "# edit\n"
+        let edited = Doc { ..doc, text: changed, view: view_of(changed), ls: line_starts_of(changed), version: 2 }
+        let next = LspState { ..st, docs: map.insert(st.docs, uri, edited) }
+        let updated = rebuild_workspace(next, warm)
+        assert len(updated.prog.expect("updated Program").diags) == 0
+        assert updated.analysis_stats.expect("edited counts").reused_modules == 1
+        assert updated.analysis_stats.expect("edited counts").checked_modules == 1
+        assert map.get(updated.entry_by_uri, uri) == Some("main")
+        let duplicate_uri = "file://" ++ root ++ "/src/./main.dawn"
+        let duplicate = Doc { ..doc, uri: duplicate_uri }
+        let conflicted = LspState { ..next, docs: map.insert(next.docs, duplicate_uri, duplicate) }
+        let conflict = rebuild_workspace(conflicted,
+          Workspace { ..updated, path_by_uri: map.insert(updated.path_by_uri, duplicate_uri, path) })
+        match conflict.prog {
+          None -> ()
+          Some(_) -> { assert false }
+        }
+        assert conflict.analysis_stats == None
+        assert len(map.keys(conflict.entry_by_uri)) == 0
+        let restored = rebuild_workspace(next,
+          Workspace { ..conflict, path_by_uri: updated.path_by_uri })
+        assert len(restored.prog.expect("restored Program").diags) == 0
+        assert restored.analysis_stats.expect("restored counts").reused_modules == 0
+        assert restored.analysis_stats.expect("restored counts").checked_modules == 2
+      })))
 }
 
 ## A buffer that names a std function, deliberately written outside the

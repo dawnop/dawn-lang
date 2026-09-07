@@ -5,7 +5,7 @@
 
 ## 一、问题与基线
 
-调研基线为 `1ae9edf2`，实施基线已推进到 `3447a37b`。workspace 已复用 std、captured plan、Java lease，并有同步
+调研基线为 `1ae9edf2`，冷路径前置已合并到 `8c2312bc`。workspace 已复用 std、captured plan、Java lease，并有同步
 debounce 和一致 Program；缺的是跨编辑的语义复用。`driver/analyze.analyze_program`
 逐模块推进 exports、全局 impls 和 next_id，因此文本不变并不意味着模块结果可复用。
 Playground 使用非 file URI，属于 standalone；模块前缀复用不能加速每次都变的单模块。
@@ -56,7 +56,7 @@ inferred body 参与 signature，comptime 读取 body/value，不能只跟踪导
 | 期 | 交付 | 状态 |
 |---|---|---|
 | 1 | 冷路径对照、阶段基线、Java 观测 | 进行中 |
-| 2 | workspace 前缀缓存、生命周期、基本逐出 | 未开始；验收后报告 |
+| 2 | workspace 前缀缓存、生命周期、基本逐出 | 缓存及workspace接线已实现，验收进行中；验收后报告 |
 | 3 | 稳定身份、具名产物及重定位 | 未开始 |
 | 4 | query runtime、依赖失效和 header 接线 | 未开始 |
 | 5 | 函数 body 增量、standalone/Playground | 未开始；验收后报告 |
@@ -83,6 +83,25 @@ cold fold；阶段事件只由显式 `analyze_observed` 请求。私有夹具注
 程序的泛型 Eq 字典构造器问题，不改变生产发射。六个成功编译的变异体覆盖输入 ID、
 impl carry、诊断顺序、check/comptime 跳过和 std baseline；编译/反射错误不算负控。
 原始实现与独立循环的13组结果对拍、六个负控及350项夹具测试已在本地通过。
+
+后续实现使用 opaque `incremental.Session` 固定 world，防止旧 prefix 被拼接到新
+std/options/lease。Workspace 与 Program、entry map、diagnostics 同时提交新 Session；
+冲突快照逐出 replay，最后关闭文档沿既有路径移除整个 Workspace。JVM 提供真正的
+query_probe，native 提供 refused_probe。首版每个工作区最多保留128个模块和
+1,048,576个源码字符；这是逻辑留存预算，不是堆内存字节上界。只保留一代连续前缀，
+工具查询使用原 oracle，不保留本轮计数器。standalone 仍走旧入口。
+
+实测已证明少做工作，而不是仅凭耗时猜测命中：compiler-plan 的13模块编辑序列中，
+改最后一个 source 模块复用12、重查1；selfhost 的72模块 entry closure 中，
+改 main（位置71）复用26、重查46，Java查询阻断更长前缀；改 parser（位置3）
+只复用3、重查69。这里的72是LSP entry closure，不混称目录分析的74模块。
+
+同源码私有观测服务、GraalVM21.0.2、SerialGC、11轮丢前3轮的一组 compiler-plan
+对照：强制冷路径刷新中位119.19ms，前缀复用61.18ms。原始逐轮数据与限制在
+`scripts/incremental-semantics-contract/baselines/planner-20260908.json`；两边的全部
+hover/definition/completion回复一致。执行顺序为先cold进程后warm进程，样本少，
+不是通用加速倍数或SLA，RSS也不是缓存独占内存。较早与其他测试并行的hello_mod/selfhost
+延迟样本没有稳定提速结论，不能用于性能达标判断。
 
 首刀本地618个selfhost测试、集成套件214个测试、九个可编译负控和完整文档门通过。
 native侧484个selfhost测试通过，自举B==C固定点和独立calc发射冒烟通过；重录后Core门通过。
