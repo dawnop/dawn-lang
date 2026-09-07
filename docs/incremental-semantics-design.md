@@ -61,6 +61,19 @@ body 平移；函数 key 只覆盖唯一命名的顶层函数。八个可编译�
 引用、其他声明类别、非均匀位置映射、模块最终装配和双后端/Core仍须后续验证。
 默认参数合成仍由原 check_module 收尾，依赖读取/失效也未实现；不接生产缓存。
 
+完整迁移首先区分 nominal（含声明效果的 evidence ADT）、trait、type variable、
+effect variable 和本地分配（symbol、handler安装）五个引用域。同一个整数可在不同域表示不同身份；每域映射
+须单射，缺少引用映射返回失败以供冷回退，不能默认为旧 ID。类型递归遍历覆盖所有
+Ty/Eff 构造器，效果集合在映射后按目标 ID 重新规范化。编码 evidence key 由各域映射
+显式生成，不对负数 key 用除法猜测原域。此层暂不启用复用，只为后续 TAST/Cx 迁移提供基础。
+handler安装 ID 也来自 fresh，但不一定存在于 syms；不能只从符号表收集本地 ID。
+部分内部调用将 prompt/evidence key 编成 XInt 参数，后续 TAST 迁移必须按内部操作的
+参数语义处理，不能把它们当普通数字原样保留，也不能将用户数字字面量一起改写。
+Sig保留参数/binder的声明顺序，Sym的字典元数据按(trait,typevar)映射，handler安装按
+本地ID映射。evidence生成名称也含ID，checker与迁移共用types中的名称编码helper；
+无法识别的生成名称拒绝复用。调用点evidence实参的顺序重排仍是后续TAST投影任务，
+不能以签名里的效果集合已重新排序为由宣称调用点也完成了迁移。
+
 ## 五、七期与报告
 
 | 期 | 交付 | 状态 |

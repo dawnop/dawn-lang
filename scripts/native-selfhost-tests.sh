@@ -53,3 +53,7 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 # driver/stdlib's own tests do.
 echo "== selfhost tests, native backend =="
 "$DAWNC" test selfhost/src/nmain.dawn
+
+# This foundation is not on the native driver's production graph yet. Test
+# its own closure explicitly instead of claiming nmain covers unused helpers.
+"$DAWNC" test selfhost/src/check/relocate.dawn

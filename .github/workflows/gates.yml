@@ -1043,11 +1043,14 @@ jobs:
     # Planning update: the original complete suite took 81.07s locally and
     # the three workspace-owner mutants took 83.97s on 2026-09-08.
     # Double rounded 82+84s, plus 38s fixed overhead: 370s.
-    # The complete body identity/relocation prototype took 35.66s locally
-    # on 2026-09-08: add 2*36s, giving a 442s planning value.
+    # The complete body identity/relocation prototype took 35.66s locally,
+    # then 45.27s under concurrent validation on 2026-09-08. Add 2*46s:
+    # 462s before the typed mapper contract below.
+    # Typed relocation's complete 19-mutant run took 52.88s; its earlier
+    # 17-mutant run took 59.18s. Reserve 2*60s more: 582s total.
     # Engine prefix mutants have their own independent owning job below.
-    # budget: 3x 442s planning value
-    timeout-minutes: 23
+    # budget: 3x 582s planning value
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1060,6 +1063,7 @@ jobs:
           python3 scripts/incremental-semantics-contract/cold.py
           python3 scripts/incremental-semantics-contract/lsp-prefix.py
           python3 scripts/incremental-semantics-contract/body-probe.py --all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-body-probe"
+          python3 scripts/incremental-semantics-contract/relocate.py
           ./bin/dawn test scripts/incremental-semantics-contract
 
   incremental-prefix:
@@ -3274,8 +3278,10 @@ jobs:
     # and post steps its note measures. 380s rounds that up with room for a
     # runner that is slower than 2.08x; replace it with the observation once
     # there is one.
-    # budget: 3x 380s planning value (see the note above)
-    timeout-minutes: 19
+    # The mapper is not reachable from nmain yet: its separate inline target
+    # took 5.69s locally on 2026-09-08. Add 2*6s to the original 380s.
+    # budget: 3x 392s planning value (see the note above)
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

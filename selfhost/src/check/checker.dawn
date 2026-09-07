@@ -53,6 +53,7 @@ use check/types.{
   eff_carries,
   erased_ev_ty, erased_cell_ty,
   sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
+  ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, EffectI, Traits, TraitI, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
@@ -217,7 +218,7 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
 ## cannot shadow each other's evidence; `$` keeps it unspellable, so nothing a
 ## user writes can bind or read it.
 pub fn ev_local_name(cx: Cx, id: Int) -> String =
-  "ev\$" ++ to_string(id) ++ "\$" ++ effect_of(cx, id).name
+  ev_label_name(id, effect_of(cx, id).name)
 
 ## The name of the local that carries a projection's erased evidence -- rule
 ## 丙's one hidden parameter per written `!C.E`. Minted from the atom's whole
@@ -225,14 +226,14 @@ pub fn ev_local_name(cx: Cx, id: Int) -> String =
 ## on different traits or subjects cannot shadow each other; `$` keeps it
 ## unspellable like every evidence local.
 pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
-  "ev\$a\$" ++ to_string(vid) ++ "\$" ++ to_string(tid) ++ "\$" ++ name
+  ev_assoc_name(vid, tid, name)
 
 ## The name of the local that carries an effect *variable*'s erased evidence --
 ## rule 丁's one hidden parameter per `!e` written in the row. Minted from the
 ## variable's id, which `resolve_eff_at` hands out once per signature, so two
 ## signatures spelling their variable `e` do not share a name; `$` keeps it
 ## unspellable like every evidence local.
-pub fn ev_var_local_name(vid: Int) -> String = "ev\$v\$${to_string(vid)}"
+pub fn ev_var_local_name(vid: Int) -> String = ev_var_name(vid)
 
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
