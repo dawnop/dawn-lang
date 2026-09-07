@@ -1,0 +1,71 @@
+# Only compiled after the frozen loop is injected into a private driver.
+use std/io
+use compiler/front/parser
+use compiler/driver/analyze.{Program, LoadedModule, LoadResult, LocDiag, analyze_program, analyze_reference}
+use compiler/driver/stdlib.{load_std, std_load_error_text}
+use compiler/check/jsig.{jsig_refused}
+use compiler/ir/interp.{ct_default, ct_fuel}
+pub type Comparison = { old: Program, current: Program }
+
+fn input(name: String, text: String) -> LoadedModule = {
+  let (m, pd) = parser.parse_module(text)
+  LoadedModule {
+    mod_path: name, class_name: name, path: name ++ ".dawn",
+    text: text, m: m, pdiags: pd, pkg: None
+  }
+}
+
+pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
+
+pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
+
+pub fn samples() -> List[Comparison] !io = {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let lib = input("lib",
+      "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+        "pub type Box = { n: Int } derive Show\n" ++
+        "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n" ++
+        "pub fn describe[T: Sizey](x: T) -> Int = sizey(x)\n" ++
+        "pub const N: Int = 40 + 2\n")
+    let middle = input("middle", "pub type Other = { n: Int }\npub fn make() -> Other = Other { n: 7 }\n")
+    let consumer = input("consumer",
+      "use lib\nuse lib.{Box}\npub fn value() -> Int = lib.describe(Box { n: 3 })\n")
+    let bad = input("bad", "pub fn bad() -> Int = false\n")
+    let broken = input("broken", "pub fn (\n")
+    let loader = LocDiag { path: "loader", d: broken.pdiags[0] }
+    var results: List[Comparison] = []
+    let cases: List[LoadResult] = [
+      LoadResult { modules: [lib, middle, consumer], diags: [] },
+      LoadResult { modules: [bad, lib, consumer], diags: [loader] },
+      LoadResult { modules: [broken, lib, bad, consumer], diags: [] },
+      LoadResult { modules: [middle, lib, consumer], diags: [] },
+      LoadResult { modules: [lib], diags: [] },
+      LoadResult { modules: [], diags: [loader] }
+    ]
+    for loaded in cases {
+      for opts in [ct_default(), ct_fuel(0)] {
+        let old = analyze_reference(loaded, std, opts, jsig_refused())
+        let current = analyze_program(loaded, std, opts, jsig_refused())
+        results = results ++ [Comparison { old: old, current: current }]
+      }
+    }
+    let clean = analyze_reference(cases[0], std, ct_default(), jsig_refused())
+    if len(clean.diags) != 0 { panic("reference clean fixture has diagnostics") }
+    # std rechecking intentionally uses impls_before, not the final bundle.
+    let text = match io.read_file("std/list.dawn") {
+      Ok(t) -> t
+      Err(e) -> panic(e.message)
+    }
+    let list = LoadedModule { ..input("list", text), path: "std/list.dawn" }
+    let loaded = LoadResult { modules: [list], diags: [] }
+    let old = analyze_reference(loaded, std, ct_default(), jsig_refused())
+    let current = analyze_program(loaded, std, ct_default(), jsig_refused())
+    if len(old.diags) != 0 { panic("reference std fixture has diagnostics") }
+    results = results ++ [Comparison { old: old, current: current }]
+    results
+  }))
+}

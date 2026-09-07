@@ -1038,6 +1038,26 @@ jobs:
     # observation supersedes the 491s planning value; 3x is 1674s, so the
     # timeout is 28 minutes. It remains below the 660s run-pole, which does
     # not move.
+  incremental-semantics:
+    runs-on: ubuntu-latest
+    # Planning value until the first CI observation: the complete probe,
+    # frozen-loop mutants and inline suite took 81.07s locally on 2026-09-08.
+    # Double the rounded 82s for runner variance, plus 38s toolchain/checkout
+    # overhead observed for contracts-1: 202s. Keep this separate as the
+    # incremental contract grows rather than consuming contracts-1's budget.
+    # budget: 3x 202s planning value
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: incremental semantic observation and cold reference
+        run: |
+          python3 scripts/incremental-semantics-contract/probe.py
+          python3 scripts/incremental-semantics-contract/cold.py
+          ./bin/dawn test scripts/incremental-semantics-contract
+
   contracts-1:
     runs-on: ubuntu-latest
     # No CI observation of this half exists yet -- the job is new. The
@@ -1068,11 +1088,6 @@ jobs:
       # partition the script's no-flag run.
       - name: classfile verification
         run: ./scripts/classfile-verify/run.sh --without-never-mutants
-
-      - name: incremental semantic query observation
-        run: |
-          python3 scripts/incremental-semantics-contract/probe.py
-          ./bin/dawn test scripts/incremental-semantics-contract
 
       # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
       # used to be the last handwritten Java in the trusted base. Every other

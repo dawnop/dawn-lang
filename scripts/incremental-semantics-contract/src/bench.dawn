@@ -1,0 +1,99 @@
+# Emit raw per-round timings; aggregation and environment capture belong to
+# the runner. Loading includes source reads, parsing and graph construction.
+# The separate parse replay is labelled as such, never subtracted from load
+# to pretend it measures the loader's own parser interval.
+
+use std/io
+use compiler/driver/analyze.{
+  AnalysisObserver, AnalyzeModule, AnalyzeCheck, AnalyzeComptime,
+  project_plan, load_planned, analyze_observed, analyze_program
+}
+use compiler/driver/stdlib.{load_std, std_load_error_text}
+use compiler/front/parser
+use compiler/ir/interp.{ct_default}
+use compiler/jvm/jreflect.{jsig_for, query_probe}
+use compiler/pkg/maven
+use compiler_plan/source
+use java "java.lang.System"
+use java "java.util.concurrent.atomic.AtomicLong"
+
+type Timer = { start: AtomicLong, elapsed: AtomicLong, runs: AtomicLong }
+
+fn timer() -> Timer !io =
+  Timer { start: AtomicLong.new(0), elapsed: AtomicLong.new(0), runs: AtomicLong.new(0) }
+
+pub fn main() -> Unit !io =
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let argv = args()
+    let target = if len(argv) > 0 { argv[0] } else { "examples/projects/calc.dawn" }
+    println("meta\tjava\t" ++ System.getProperty("java.version").expect("java.version"))
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic(std_load_error_text(e))
+    }
+    let target_kind = if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+    let plan = project_plan(target_kind)
+    let jars = match maven.fetch_checked_report(plan.source.project, plan.source.java_coords) {
+      Ok(found) -> found
+      Err(e) -> panic(e.message)
+    }
+    with held <- bracket(jsig_for(jars), lease => lease.close())
+    let js = held.jsig
+    var round = 0
+    while round < 11 {
+      let load_start = System.nanoTime()
+      let loaded = load_planned(plan)
+      let load_ns = System.nanoTime() - load_start
+      let parse_start = System.nanoTime()
+      var parsed_decls = 0
+      for m in loaded.modules {
+        let (parsed, diagnostics) = parser.parse_module(m.text)
+        parsed_decls = parsed_decls + len(parsed.decls) + len(diagnostics)
+      }
+      let parse_replay_ns = System.nanoTime() - parse_start
+      let module_timer = timer()
+      let check_timer = timer()
+      let ct_timer = timer()
+      let observer: AnalysisObserver = (name, stage, entering) => {
+        let t = match stage {
+          AnalyzeModule -> module_timer
+          AnalyzeCheck -> check_timer
+          AnalyzeComptime -> ct_timer
+        }
+        if entering {
+          t.start.set(System.nanoTime())
+        } else {
+          let _ = t.elapsed.addAndGet(System.nanoTime() - t.start.get())
+          let _ = t.runs.incrementAndGet()
+        }
+      }
+      let probe = query_probe(js)
+      # Alternate the order to avoid always giving cold the second-run advantage.
+      let (observed_ns, cold_ns, observed_diags, cold_diags) = if round % 2 == 0 {
+        let start = System.nanoTime()
+        let observed = analyze_observed(loaded, std, ct_default(), probe.jsig, Some(observer))
+        let elapsed = System.nanoTime() - start
+        let cold_start = System.nanoTime()
+        let cold = analyze_program(loaded, std, ct_default(), js)
+        (elapsed, System.nanoTime() - cold_start, len(observed.diags), len(cold.diags))
+      } else {
+        let start = System.nanoTime()
+        let cold = analyze_program(loaded, std, ct_default(), js)
+        let elapsed = System.nanoTime() - start
+        let observed_start = System.nanoTime()
+        let observed = analyze_observed(loaded, std, ct_default(), probe.jsig, Some(observer))
+        (System.nanoTime() - observed_start, elapsed, len(observed.diags), len(cold.diags))
+      }
+      println(join([
+        "round", to_string(round), target,
+        to_string(len(loaded.modules)), to_string(parsed_decls),
+        to_string(load_ns), to_string(parse_replay_ns), to_string(observed_ns),
+        to_string(module_timer.elapsed.get()), to_string(check_timer.elapsed.get()),
+        to_string(ct_timer.elapsed.get()), to_string(cold_ns),
+        to_string(check_timer.runs.get()), to_string(ct_timer.runs.get()),
+        to_string(probe.queries()), to_string(observed_diags), to_string(cold_diags),
+        if round % 2 == 0 { "observed-first" } else { "cold-first" }
+      ], "\t"))
+      round = round + 1
+    }
+  })))
