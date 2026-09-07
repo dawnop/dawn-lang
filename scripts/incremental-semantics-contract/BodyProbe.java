@@ -22,6 +22,15 @@ public final class BodyProbe {
             String name = (String) t.getField("name").get(trial);
             Object before = t.getField("before").get(trial);
             Object after = t.getField("after").get(trial);
+            if (expected == 23 && !SemanticSnapshot.same(t.getField("assembled").get(trial), after)) {
+                Object assembled = t.getField("assembled").get(trial);
+                var differences = new ArrayList<String>();
+                for (var field : after.getClass().getFields()) {
+                    if (Modifier.isStatic(field.getModifiers()) || field.getName().equals("jsig")) continue;
+                    if (!SemanticSnapshot.same(field.get(assembled), field.get(after))) differences.add(field.getName());
+                }
+                throw new AssertionError(name + ": captured body product differs from complete cold state: " + differences);
+            }
             Object shifted = t.getField("shifted").get(trial);
             if (!SemanticSnapshot.same(t.getField("body").get(trial), t.getField("module_body").get(trial)))
                 throw new AssertionError(name + ": isolated header sequence differs from check_module");
@@ -39,6 +48,8 @@ public final class BodyProbe {
                 throw new AssertionError(name + ": allocation count depends on starting ID");
             System.out.println(name + "\t" + allocations + "\t" + String.join(",", changed));
         }
+        if (expected == 23)
+            System.out.println("captured-state\t" + length + "\tproduction body products assemble complete cold Cx");
         Object edits = probe.getMethod("edit_samples").invoke(null);
         var editCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("edit_count"))
                 .findFirst().orElseThrow();
@@ -61,6 +72,31 @@ public final class BodyProbe {
             if (!SemanticSnapshot.same(h.getField("relocated").get(header), h.getField("cold").get(header)))
                 throw new AssertionError("reordered header: relocated body differs from cold check");
             System.out.println("reordered-header\t1\treversed effect declarations and evidence slots agree with cold");
+            Object inferred = probe.getMethod("inferred_samples").invoke(null);
+            var stateCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("state_count")).findFirst().orElseThrow();
+            var stateAt = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("state_at")).findFirst().orElseThrow();
+            long inferredLength = (Long) stateCount.invoke(null, inferred);
+            if (inferredLength != 2) throw new AssertionError("Unexpected inferred state trial count");
+            for (long i = 0; i < inferredLength; i++) {
+                Object trial = stateAt.invoke(null, inferred, i);
+                Class<?> t = trial.getClass();
+                if (!SemanticSnapshot.same(t.getField("replayed").get(trial), t.getField("cold").get(trial)))
+                    throw new AssertionError("inferred state: replayed Cx differs from cold body boundary (" + i + ")");
+                if (!SemanticSnapshot.same(t.getField("relocated").get(trial), t.getField("cold_body").get(trial))
+                        || !SemanticSnapshot.same(t.getField("cold_body").get(trial), t.getField("module_body").get(trial)))
+                    throw new AssertionError("inferred state: body differs from cold module (" + i + ")");
+            }
+            System.out.println("inferred-state\t2\tsealed signatures and callers agree with cold module products");
+            Object tests = probe.getMethod("test_samples").invoke(null);
+            if ((Long) stateCount.invoke(null, tests) != 1) throw new AssertionError("Unexpected test state trial count");
+            Object test = stateAt.invoke(null, tests, 0L);
+            Class<?> tt = test.getClass();
+            if (!SemanticSnapshot.same(tt.getField("replayed").get(test), tt.getField("cold").get(test)))
+                throw new AssertionError("test state: replayed Cx differs from cold body boundary");
+            if (!SemanticSnapshot.same(tt.getField("relocated").get(test), tt.getField("cold_body").get(test))
+                    || !SemanticSnapshot.same(tt.getField("cold_body").get(test), tt.getField("module_body").get(test)))
+                throw new AssertionError("test state: body differs from cold module");
+            System.out.println("test-state\t1\tassertion source and test frame agree with cold module products");
         }
     }
 }

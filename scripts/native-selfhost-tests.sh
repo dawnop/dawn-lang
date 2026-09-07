@@ -59,3 +59,4 @@ echo "== selfhost tests, native backend =="
 "$DAWNC" test selfhost/src/check/relocate_tree.dawn
 "$DAWNC" test selfhost/src/check/source_projection.dawn
 "$DAWNC" test selfhost/src/check/identity.dawn
+"$DAWNC" test selfhost/src/check/body_product.dawn
