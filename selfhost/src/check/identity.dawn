@@ -1,0 +1,285 @@
+# Declaration keys describe provenance and lexical ownership, not validity.
+# A stable name can acquire a new signature or lookup environment; consumers
+# must validate those inputs separately before reusing a semantic product.
+# Repeated parent declarations poison their descendants as well as themselves.
+use std/map
+use std/list
+use std/str
+use front/parser
+use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
+  DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava }
+
+pub type ModuleKey = { world: String, logical_module: String, emission_owner: String, source: String }
+
+## The loader/session supplies resolved provenance; this layer never guesses
+## a package identity from a display path or a checker allocation number.
+pub fn module_key(world: String, logical_module: String, emission_owner: String, source: String) -> ModuleKey =
+  ModuleKey { world: world, logical_module: logical_module, emission_owner: emission_owner, source: source }
+pub type Kind =
+  | FunctionDecl
+  | TypeDecl
+  | TraitDecl
+  | EffectDecl
+  | ConstDecl
+  | TestDecl
+  | MethodDecl
+  | ConstructorDecl
+  | OperationDecl
+  | ParameterDefault
+  | AssociatedTypeDecl
+  | AssociatedEffectDecl
+
+pub type EffectShape =
+  | NamedEffect(name: String)
+  | ProjectedEffect(slot: Int, member: String)
+
+pub type TypeShape =
+  | BoundType(slot: Int)
+  | NamedType(name: String, args: List[TypeShape], effects: List[List[EffectShape]])
+  | QualifiedType(owner: String, name: String, args: List[TypeShape], effects: List[List[EffectShape]])
+  | AssociatedType(subject: TypeShape, member: String)
+  | TupleType(elems: List[TypeShape])
+  | FunctionType(params: List[TypeShape], ret: TypeShape, effects: List[EffectShape])
+
+pub type Part =
+  | Named(kind: Kind, name: String)
+  | ImplHead(trait_name: String, subject: TypeShape)
+
+pub type DeclKey = { scope: ModuleKey, path: List[Part] }
+## Indices locate the current syntax only. They do not participate in keys.
+pub type Entry = { key: DeclKey, declaration: Int, member: Option[Int] }
+
+fn effect_atom(name: String, binders: List[String]) -> EffectShape = {
+  let parts = str.split(name, ".")
+  if len(parts) == 2 {
+    var i = 0
+    for binder in binders {
+      if parts[0] == binder { return ProjectedEffect(i, parts[1]) }
+      i = i + 1
+    }
+  }
+  NamedEffect(name)
+}
+
+fn effect_atoms(names: List[String], binders: List[String]) -> List[EffectShape] =
+  map(names, name => effect_atom(name, binders))
+
+fn effects(es: List[EffArg], binders: List[String]) -> List[List[EffectShape]] =
+  map(es, e => effect_atoms(e.atoms, binders))
+
+fn shapes(ts: List[TypeRef], binders: List[String]) -> List[TypeShape] =
+  map(ts, t => type_shape(t, binders))
+
+fn bare(name: String, binders: List[String]) -> TypeShape = {
+  var i = 0
+  for b in binders {
+    if b == name { return BoundType(i) }
+    i = i + 1
+  }
+  NamedType(name, [], [])
+}
+
+pub fn type_shape(t: TypeRef, binders: List[String]) -> TypeShape =
+  match t {
+    TNamed(name, args, es, _, _) ->
+      if len(args) == 0 && len(es) == 0 { bare(name, binders) }
+      else { NamedType(name, shapes(args, binders), effects(es, binders)) }
+    TQual(owner, name, args, es, _, _) -> QualifiedType(owner, name, shapes(args, binders), effects(es, binders))
+    TAssoc(subject, name, _, _) -> AssociatedType(bare(subject, binders), name)
+    TTuple(es, _, _) -> TupleType(shapes(es, binders))
+    TFn(ps, ret, es, _, _) -> FunctionType(shapes(ps, binders), type_shape(ret, binders), effect_atoms(es, binders))
+  }
+
+fn entry(scope: ModuleKey, path: List[Part], declaration: Int, member: Option[Int]) -> Entry =
+  Entry { key: DeclKey { scope: scope, path: path }, declaration: declaration, member: member }
+
+## Imports are environment inputs rather than independently checked bodies.
+## Reordering an unambiguous declaration changes only its syntax locator.
+pub fn declarations(scope: ModuleKey, m: Module) -> List[Entry] = {
+  var all: List[Entry] = []
+  var i = 0
+  for d in m.decls {
+    match d {
+      DFn(f) -> {
+        let path = [Named(FunctionDecl, f.name)]
+        all = all ++ [entry(scope, path, i, None)]
+        var p = 0
+        for param in f.params {
+          var same = 0
+          for other in f.params { if other.name == param.name { same = same + 1 } }
+          if param.default != None && same == 1 {
+            all = all ++ [entry(scope, path ++ [Named(ParameterDefault, param.name)], i, Some(p))]
+          }
+          p = p + 1
+        }
+      }
+      DType(t) -> {
+        let path = [Named(TypeDecl, t.name)]
+        all = all ++ [entry(scope, path, i, None)]
+        var c = 0
+        for ctor in t.ctors {
+          all = all ++ [entry(scope, path ++ [Named(ConstructorDecl, ctor.name)], i, Some(c))]
+          c = c + 1
+        }
+      }
+      DTrait(name, _, _, _, methods, associated, effect_members, _, _, _, _, _) -> {
+        let path = [Named(TraitDecl, name)]
+        all = all ++ [entry(scope, path, i, None)]
+        var j = 0
+        for method in methods {
+          all = all ++ [entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j))]
+          j = j + 1
+        }
+        j = 0
+        for member in associated {
+          all = all ++ [entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j))]
+          j = j + 1
+        }
+        j = 0
+        for member in effect_members {
+          all = all ++ [entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j))]
+          j = j + 1
+        }
+      }
+      DEffect(e) -> {
+        let path = [Named(EffectDecl, e.name)]
+        all = all ++ [entry(scope, path, i, None)]
+        var j = 0
+        for op in e.ops {
+          all = all ++ [entry(scope, path ++ [Named(OperationDecl, op.name)], i, Some(j))]
+          j = j + 1
+        }
+      }
+      DConst(name, _, _, _, _, _, _, _) -> { all = all ++ [entry(scope, [Named(ConstDecl, name)], i, None)] }
+      DTest(name, _, _, _, _, _) -> { all = all ++ [entry(scope, [Named(TestDecl, name)], i, None)] }
+      DImpl(params, trait_name, _, _, subject, methods, associated, effect_members, _, _) -> {
+        let path = [ImplHead(trait_name, type_shape(subject, map(params, p => p.name)))]
+        all = all ++ [entry(scope, path, i, None)]
+        var j = 0
+        for method in methods {
+          all = all ++ [entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j))]
+          j = j + 1
+        }
+        j = 0
+        for member in associated {
+          all = all ++ [entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j))]
+          j = j + 1
+        }
+        j = 0
+        for member in effect_members {
+          all = all ++ [entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j))]
+          j = j + 1
+        }
+      }
+      DUseModule(_, _, _, _, _, _, _) -> ()
+      DUseJava(_, _, _, _, _) -> ()
+    }
+    i = i + 1
+  }
+  var counts: Map[List[Part], Int] = map.empty()
+  for e in all { counts = map.insert(counts, e.key.path, map.get(counts, e.key.path).unwrap_or(0) + 1) }
+  var out: List[Entry] = []
+  for e in all {
+    var unique = true
+    var depth = 1
+    while depth <= len(e.key.path) {
+      if map.get(counts, list.take(e.key.path, depth)) != Some(1) { unique = false }
+      depth = depth + 1
+    }
+    if unique { out = out ++ [e] }
+  }
+  out
+}
+
+test "identity removes positions and normalizes impl type binders" {
+  let a = TNamed("List", [TNamed("T", [], [], 5, 6)], [], 0, 7)
+  let b = TNamed("List", [TNamed("U", [], [], 50, 51)], [], 40, 60)
+  assert type_shape(a, ["T"]) == type_shape(b, ["U"])
+  assert type_shape(a, []) != type_shape(b, [])
+  assert type_shape(TQual("a", "X", [], [], 0, 1), []) != type_shape(TQual("b", "X", [], [], 0, 1), [])
+}
+
+fn fixture_scope() -> ModuleKey =
+  ModuleKey { world: "session", logical_module: "pkg/m", emission_owner: "pkg/m", source: "m.dawn" }
+
+fn fixture_entries(source: String) -> List[Entry] = {
+  let (m, ds) = parser.parse_module(source)
+  if len(ds) != 0 { panic("identity fixture parse failed: " ++ ds[0].msg) }
+  declarations(fixture_scope(), m)
+}
+
+fn named_key(es: List[Entry], path: List[Part]) -> Option[DeclKey] = {
+  for e in es { if e.key.path == path { return Some(e.key) } }
+  None
+}
+
+test "identity survives body edits and declaration reorder but not rename or world changes" {
+  let old = fixture_entries("fn f(x: Int = 1) -> Int = x\nfn g() -> Int = 2\n")
+  let next = fixture_entries("# moved\nfn g() -> Int = 3\nfn f(x: Int = 1) -> Int = { let y = x + 1\n y }\n")
+  let path = [Named(FunctionDecl, "f")]
+  assert named_key(old, path) == named_key(next, path)
+  assert named_key(old, path ++ [Named(ParameterDefault, "x")]) == named_key(next, path ++ [Named(ParameterDefault, "x")])
+  assert old[0].declaration == 0 && next[1].declaration == 1
+  assert named_key(next, [Named(FunctionDecl, "renamed")]) == None
+  let key = named_key(old, path).expect("unique function")
+  assert key != DeclKey { ..key, scope: ModuleKey { ..key.scope, world: "other" } }
+  assert key != DeclKey { ..key, scope: ModuleKey { ..key.scope, emission_owner: "other" } }
+  assert key != DeclKey { ..key, scope: ModuleKey { ..key.scope, source: "other.dawn" } }
+}
+
+test "identity rejects duplicate parents and alpha-renamed duplicate impl heads" {
+  assert fixture_entries("effect Ask { fn a() -> Int }\neffect Ask { fn b() -> Int }\n") == []
+  assert fixture_entries("fn f(x: Int = 1) -> Int = x\nfn f(y: Int = 2) -> Int = y\n") == []
+  assert fixture_entries("impl[T] P[List[T]] { fn a(x: List[T]) -> Int = 1 }\n" ++
+      "impl[U] P[List[U]] { fn b(x: List[U]) -> Int = 2 }\n") == []
+  let es = fixture_entries("fn f(x: Int = 1, x: Int) -> Int = x\n")
+  assert len(es) == 1
+  assert es[0].key.path == [Named(FunctionDecl, "f")]
+}
+
+test "identity keeps resolved module provenance and distinct member owners" {
+  let (m, ds) = parser.parse_module("effect A { fn op() -> Int }\neffect B { fn op() -> Int }\n")
+  assert len(ds) == 0
+  let scope = fixture_scope()
+  let old = declarations(scope, m)
+  assert len(old) == 4
+  assert old[1].key != old[3].key
+  assert old[1].key.scope == scope
+  for changed in [ModuleKey { ..scope, world: "other" }, ModuleKey { ..scope, logical_module: "other" },
+    ModuleKey { ..scope, emission_owner: "other" }, ModuleKey { ..scope, source: "other" }] {
+    let next = declarations(changed, m)
+    assert next[1].key.scope == changed
+    assert old[1].key != next[1].key
+  }
+}
+
+test "identity normalizes associated effect subjects without merging module spellings" {
+  let ret = TNamed("Int", [], [], 0, 3)
+  let a = TFn([], ret, ["T.E", "io"], 0, 10)
+  let b = TFn([], ret, ["U.E", "io"], 50, 70)
+  assert type_shape(a, ["T"]) == type_shape(b, ["U"])
+  assert type_shape(a, ["T"]) != type_shape(TFn([], ret, ["T.F", "io"], 0, 10), ["T"])
+  assert effect_atom("m.Ask", ["T"]) == NamedEffect("m.Ask")
+  assert effect_atom("T.E", ["X", "T"]) == ProjectedEffect(1, "E")
+  let arg = EffArg { atoms: ["T.E"], lo: 0, hi: 3 }
+  let renamed = EffArg { atoms: ["U.E"], lo: 100, hi: 103 }
+  assert type_shape(TNamed("Box", [], [arg], 0, 8), ["T"]) ==
+    type_shape(TNamed("Box", [], [renamed], 90, 110), ["U"])
+  assert type_shape(TQual("m", "Box", [], [arg], 0, 8), ["T"]) ==
+    type_shape(TQual("m", "Box", [], [renamed], 90, 110), ["U"])
+}
+
+test "identity indexes associated declarations and bindings under their own parents" {
+  let es = fixture_entries("trait P[T] { type Item\n effect E\n fn value(x: T) -> Int }\n" ++
+      "impl P[Int] { type Item = Int\n effect E = !()\n fn value(x: Int) -> Int = x }\n")
+  assert len(es) == 8
+  let trait_path = [Named(TraitDecl, "P")]
+  let impl_path = [ImplHead("P", NamedType("Int", [], []))]
+  assert named_key(es, trait_path ++ [Named(AssociatedTypeDecl, "Item")]) != None
+  assert named_key(es, trait_path ++ [Named(AssociatedEffectDecl, "E")]) != None
+  assert named_key(es, impl_path ++ [Named(AssociatedTypeDecl, "Item")]) != None
+  assert named_key(es, impl_path ++ [Named(AssociatedEffectDecl, "E")]) != None
+  let duplicated = fixture_entries("trait P[T] { type Item\n type Item\n effect E\n fn value(x: T) -> Int }\n")
+  assert named_key(duplicated, trait_path ++ [Named(AssociatedTypeDecl, "Item")]) == None
+  assert named_key(duplicated, trait_path ++ [Named(AssociatedEffectDecl, "E")]) != None
+}

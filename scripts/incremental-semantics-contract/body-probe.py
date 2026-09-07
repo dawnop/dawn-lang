@@ -126,7 +126,7 @@ def main():
         probe = probe.replace('if d.name == "wrong" { 1 }', 'if d.name == "wrong" || d.name == "asserted" { 1 }')
         (fixture / "src/typed_projection.dawn").write_text((HERE / "typed-projection.dawn.txt").read_text())
     (fixture / "src/bodyprobe.dawn").write_text(probe)
-    identity = (HERE / "body-identity.dawn.txt").read_text()
+    identity = (HERE / ("declaration-identity.dawn.txt" if args.typed else "body-identity.dawn.txt")).read_text()
     relocation = (HERE / "body-relocate.dawn.txt").read_text()
     mutations = {
         "skip-symbol": ("{ id + m.delta }", "{ id }"),
