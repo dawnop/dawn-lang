@@ -1,0 +1,343 @@
+# Bodies leave more than a typed tree: inferred signatures and lazy aliases
+# write module-visible tables, while type bounds accumulate across bodies.
+# Function entry resets dictionaries, so they belong to the final frame.
+# Save keyed changes, not two complete checker contexts. Admission of
+# dependencies and relocation are separate from capturing these writes.
+use std/map
+use std/list
+use check/cx.{Cx, Frame, cx_new}
+use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar}
+use check/tast.{TFun, XUnit}
+use front/token.{Diag}
+use check/relocate
+use check/relocate_tree
+use check/relocate_tree.{View}
+
+pub type Change[K, V] = { key: K, value: Option[V] }
+
+pub fn changes[K: Eq + Hash, V](before: Map[K, V], after: Map[K, V], same: fn(V, V) -> Bool) -> List[Change[K, V]] = {
+  var out: List[Change[K, V]] = []
+  for (key, value) in map.entries(after) {
+    let equal = match map.get(before, key) {
+      Some(old) -> same(old, value)
+      None -> false
+    }
+    if not equal { out = out ++ [Change { key: key, value: Some(value) }] }
+  }
+  for key in map.keys(before) {
+    let missing: Option[V] = None
+    if not map.has(after, key) { out = out ++ [Change { key: key, value: missing }] }
+  }
+  out
+}
+
+pub fn apply_changes[K: Eq + Hash, V](current: Map[K, V], writes: List[Change[K, V]]) -> Map[K, V] = {
+  var out = current
+  for w in writes {
+    out = match w.value {
+      Some(value) -> map.insert(out, w.key, value)
+      None -> map.remove(out, w.key)
+    }
+  }
+  out
+}
+
+## This is still in the producing revision's ID and source coordinate space.
+## Never install it in another revision before projecting every reference.
+pub type Product = {
+  function: TFun,
+  allocation_start: Int,
+  allocation_count: Int,
+  symbols: List[Change[Int, Sym]],
+  signatures: List[Change[String, Sig]],
+  aliases: List[Change[String, Ty]],
+  bounds: List[Change[Int, List[Int]]],
+  diagnostics: List[Diag],
+  frame: Frame,
+  tparams: Map[String, Ty],
+  effect_vars: Map[String, Eff],
+  loop_jumps: Set[Int],
+  in_test: Bool,
+  const_cutoff: Option[Set[String]],
+  take_cell: Option[Int]
+}
+
+# The Java oracle is a capability, not an equality-comparable value. Capture
+# and replay belong to one owner/lease; that invariant is held by the caller.
+# Every other Cx field not recorded above must remain unchanged. A body may
+# fill alias_resolved, but must not leave alias resolution in flight.
+fn environment_unchanged(a: Cx, b: Cx) -> Bool =
+  a.adts == b.adts && a.traits == b.traits && a.fn_origin == b.fn_origin &&
+  a.std_fns == b.std_fns && a.bins == b.bins && a.hidden_bins == b.hidden_bins &&
+  a.btypes == b.btypes && a.adts_by_name == b.adts_by_name && a.aliases == b.aliases &&
+  a.alias_resolving == b.alias_resolving && a.ctors_by_name == b.ctors_by_name &&
+  a.traits_by_name == b.traits_by_name && a.local_traits == b.local_traits &&
+  a.local_impls == b.local_impls && a.observable_impls == b.observable_impls &&
+  a.impl_table == b.impl_table && a.module_aliases == b.module_aliases &&
+  a.module_fn_sigs == b.module_fn_sigs && a.imported_names == b.imported_names &&
+  a.consts == b.consts && a.const_order == b.const_order && a.all_const_names == b.all_const_names &&
+  a.java_classes == b.java_classes && a.effects == b.effects && a.effect_infos == b.effect_infos &&
+  a.is_std_module == b.is_std_module && a.owner_class == b.owner_class &&
+  a.src_path == b.src_path && a.line_starts == b.line_starts && a.moved == b.moved &&
+  a.module_exports == b.module_exports && a.ty_spans == b.ty_spans && a.record_ty_spans == b.record_ty_spans
+
+## Top-level function/default/method bodies finish their nested frames. This
+## boundary is not an independently cached expression or suspended lambda.
+pub fn capture(before: Cx, after: Cx, function: TFun) -> Option[Product] = {
+  if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
+  if len(after.frame.lambda_stack) != 0 || len(after.frame.loop_stack) != 0 { return None }
+  if len(after.diags) < len(before.diags) || list.take(after.diags, len(before.diags)) != before.diags { return None }
+  Some(Product {
+    function: function, allocation_start: before.next_id, allocation_count: after.next_id - before.next_id,
+    symbols: changes(before.syms, after.syms, (a, b) => a == b), signatures: changes(before.fns, after.fns, (a, b) => a == b),
+    aliases: changes(before.alias_resolved, after.alias_resolved, (a, b) => a == b),
+    bounds: changes(before.current_tparam_bounds, after.current_tparam_bounds, (a, b) => a == b),
+    diagnostics: list.drop(after.diags, len(before.diags)),
+    frame: after.frame,
+    tparams: after.current_tparams, effect_vars: after.current_eff_vars,
+    loop_jumps: after.loop_jumps, in_test: after.in_test,
+    const_cutoff: after.const_cutoff, take_cell: after.take_cell
+  })
+}
+
+## Exact-coordinate assembly for a dependency-validated input. This API does
+## not validate reads and cannot be used as a cache-validity predicate.
+pub fn assemble(current: Cx, product: Product) -> Option[Cx] = {
+  if current.next_id != product.allocation_start { return None }
+  let limit = current.next_id + product.allocation_count
+  if product.allocation_count < 0 || limit < current.next_id { return None }
+  Some(Cx {
+    ..current, next_id: limit,
+    syms: apply_changes(current.syms, product.symbols),
+    fns: apply_changes(current.fns, product.signatures),
+    alias_resolved: apply_changes(current.alias_resolved, product.aliases),
+    current_tparam_bounds: apply_changes(current.current_tparam_bounds, product.bounds),
+    frame: product.frame,
+    diags: current.diags ++ product.diagnostics,
+    current_tparams: product.tparams, current_eff_vars: product.effect_vars,
+    loop_jumps: product.loop_jumps, in_test: product.in_test,
+    const_cutoff: product.const_cutoff, take_cell: product.take_cell
+  })
+}
+
+fn projected_changes[K, V, L, W](writes: List[Change[K, V]], key: fn(K) -> Option[L],
+  value: fn(V) -> Option[W]) -> Option[List[Change[L, W]]] = {
+  var out: List[Change[L, W]] = []
+  for w in writes {
+    let next = match w.value {
+      Some(v) -> Some(value(v)?)
+      None -> None
+    }
+    out = out ++ [Change { key: key(w.key)?, value: next }]
+  }
+  Some(out)
+}
+
+fn projected_symbol(v: View, s: Sym) -> Option[Sym] = {
+  let next = relocate.sym(v.ids, s)?
+  Some(Sym { ..next, dlo: map.get(v.positions, s.dlo)?, dhi: map.get(v.ends, s.dhi)? })
+}
+
+fn projected_bounds(v: View, bounds: List[Int]) -> Option[List[Int]] = {
+  var out: List[Int] = []
+  for tr in bounds { out = out ++ [relocate.trait_id(v.ids, tr)?] }
+  Some(out)
+}
+
+fn projected_frame(v: View, f: Frame) -> Option[Frame] = {
+  if len(f.lambda_stack) != 0 || len(f.loop_stack) != 0 { return None }
+  var scopes: List[Map[String, Int]] = []
+  for scope in f.scopes {
+    var next: Map[String, Int] = map.empty()
+    for (name, id) in map.entries(scope) {
+      let old = map.get(v.symbols, id)?
+      if old.name != name { return None }
+      let symbol = relocate.sym(v.ids, old)?
+      if map.has(next, symbol.name) { return None }
+      next = map.insert(next, symbol.name, relocate.local_id(v.ids, id)?)
+    }
+    scopes = scopes ++ [next]
+  }
+  var used: List[Eff] = []
+  for e in f.used_effects { used = used ++ [relocate.effect_row(v.ids, e)?] }
+  var witnesses: Map[Eff, (Int, Int, String)] = map.empty()
+  for (e, span) in map.entries(f.eff_witness) {
+    let moved = relocate.effect_row(v.ids, e)?
+    if map.has(witnesses, moved) { return None }
+    let (lo, hi, name) = span
+    witnesses = map.insert(witnesses, moved, (map.get(v.positions, lo)?, map.get(v.ends, hi)?, name))
+  }
+  let signature = match f.current_sig {
+    Some(s) -> Some(relocate.signature(v.ids, s)?)
+    None -> None
+  }
+  var dictionaries: Map[(Int, Int), Int] = map.empty()
+  for (key, id) in map.entries(f.dict_syms) {
+    let (tv, tr) = key
+    let next = (relocate.type_var(v.ids, tv)?, relocate.trait_id(v.ids, tr)?)
+    if map.has(dictionaries, next) { return None }
+    dictionaries = map.insert(dictionaries, next, relocate.local_id(v.ids, id)?)
+  }
+  Some(Frame { ..f, scopes: scopes, used_effects: used, eff_witness: witnesses,
+    current_sig: signature, dict_syms: dictionaries })
+}
+
+## Allocation is an interval even for fresh IDs which never enter syms, such
+## as handler installations. Require a complete bijection onto the target
+## interval, not just a mapping for the symbols the tree happens to mention.
+pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = {
+  if p.allocation_count < 0 { return None }
+  let old_limit = p.allocation_start + p.allocation_count
+  let limit = allocation_start + p.allocation_count
+  if old_limit < p.allocation_start || limit < allocation_start { return None }
+  var id = p.allocation_start
+  while id < old_limit {
+    let moved = relocate.local_id(v.ids, id)?
+    if moved < allocation_start || moved >= limit { return None }
+    id = id + 1
+  }
+  let moved_symbols = projected_changes(p.symbols, id => relocate.local_id(v.ids, id), s => projected_symbol(v, s))?
+  # Fresh symbols enter Cx.syms in allocation order. Evidence ABI permutation
+  # can reverse their mapped IDs; replaying the old insertion order would
+  # preserve values but change the observable target map order.
+  let symbols = sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))
+  let signatures = projected_changes(p.signatures, name => Some(name), s => relocate.signature(v.ids, s))?
+  let aliases = projected_changes(p.aliases, name => Some(name), t => relocate.ty(v.ids, t))?
+  let bounds = projected_changes(p.bounds, id => relocate.type_var(v.ids, id), bs => projected_bounds(v, bs))?
+  var diagnostics: List[Diag] = []
+  for d in p.diagnostics {
+    diagnostics = diagnostics ++ [Diag { ..d, lo: map.get(v.positions, d.lo)?, hi: map.get(v.ends, d.hi)? }]
+  }
+  var tparams: Map[String, Ty] = map.empty()
+  for (name, t) in map.entries(p.tparams) { tparams = map.insert(tparams, name, relocate.ty(v.ids, t)?) }
+  var effect_vars: Map[String, Eff] = map.empty()
+  for (name, e) in map.entries(p.effect_vars) { effect_vars = map.insert(effect_vars, name, relocate.effect_row(v.ids, e)?) }
+  let take_cell = match p.take_cell {
+    Some(cell) -> Some(relocate.local_id(v.ids, cell)?)
+    None -> None
+  }
+  Some(Product { ..p, function: relocate_tree.function(v, p.function)?, allocation_start: allocation_start,
+    symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
+    frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell })
+}
+
+test "body product keyed writes preserve unrelated preceding products" {
+  let before = map.from([("old", 1), ("removed", 2)])
+  let after = map.from([("old", 3), ("added", 4)])
+  let writes = changes(before, after, (a, b) => a == b)
+  assert apply_changes(before, writes) == after
+  assert apply_changes(map.insert(before, "preceding", 5), writes) == map.insert(after, "preceding", 5)
+  assert changes(before, before, (a, b) => a == b) == []
+}
+
+fn fixture_function(cx: Cx) -> TFun = {
+  let sig = Sig { name: "fixture", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
+    owner: cx.owner_class, trait_id: None, op_of: None, inferring: false }
+  TFun { name: "fixture", sig: sig, param_syms: [], dict_syms: [], ev_syms: [], defaults: [],
+    body: XUnit(0, 1), is_test: false, impl_of: None, default_of: None }
+}
+
+test "body product captures state writes without retaining old cumulative tables" {
+  let cx = cx_new(None, None)
+  let before = Cx { ..cx, current_tparam_bounds: map.from([(10, [20])]),
+    frame: Frame { ..cx.frame, dict_syms: map.from([((10, 20), 30)]) } }
+  let f = fixture_function(before)
+  let d = Diag { msg: "body", lo: 0, hi: 1, hint: "" }
+  let after = Cx { ..before, next_id: before.next_id + 2,
+    fns: map.insert(before.fns, "inferred", f.sig), alias_resolved: map.from([("Alias", TyInt)]),
+    current_tparam_bounds: map.insert(before.current_tparam_bounds, 11, [21]),
+    frame: Frame { ..before.frame, dict_syms: map.insert(before.frame.dict_syms, (11, 21), 31) },
+    diags: [d] }
+  let p = capture(before, after, f).expect("capture")
+  assert len(p.bounds) == 1
+  assert p.frame.dict_syms == after.frame.dict_syms
+  let input = Cx { ..before, current_tparam_bounds: map.insert(before.current_tparam_bounds, 12, [22]),
+    frame: Frame { ..before.frame, dict_syms: map.insert(before.frame.dict_syms, (12, 22), 32) } }
+  let result = assemble(input, p).expect("assemble")
+  assert result.next_id == after.next_id && result.diags == [d]
+  assert result.fns == after.fns && result.alias_resolved == after.alias_resolved
+  assert map.get(result.current_tparam_bounds, 12) == Some([22])
+  assert map.get(result.current_tparam_bounds, 11) == Some([21])
+  assert map.get(result.frame.dict_syms, (12, 22)) == None
+  assert map.get(result.frame.dict_syms, (11, 21)) == Some(31)
+  assert match assemble(Cx { ..input, next_id: input.next_id + 1 }, p) { None -> true, Some(_) -> false }
+}
+
+test "body product rejects unowned writes and diagnostic prefix replacement" {
+  let cx = cx_new(None, None)
+  let d = Diag { msg: "before", lo: 0, hi: 1, hint: "" }
+  let before = Cx { ..cx, diags: [d] }
+  let f = fixture_function(before)
+  assert capture(before, Cx { ..before, effects: map.from([("New", 42)]) }, f) == None
+  assert capture(before, Cx { ..before, diags: [] }, f) == None
+  assert capture(before, Cx { ..before, diags: [Diag { ..d, msg: "changed" }] }, f) == None
+  assert capture(before, Cx { ..before, next_id: before.next_id - 1 }, f) == None
+  assert capture(before, Cx { ..before, frame: Frame { ..before.frame, loop_stack: [0] } }, f) == None
+}
+
+test "body product restores symbol insertion order after a binding permutation" {
+  let before = Cx { ..cx_new(None, None), next_id: 10 }
+  let f = fixture_function(before)
+  let x = Sym { name: "x", ty: TyInt, mutable: false, dlo: 0, dhi: 1,
+    dict_of: None, ev_of: None, cell_of: None }
+  let y = Sym { ..x, name: "y" }
+  let after = Cx { ..before, next_id: 12, syms: map.from([(10, x), (11, y)]) }
+  let p = capture(before, after, f).expect("capture permutation")
+  let none: Map[Int, Int] = map.empty()
+  let ids = relocate.new(none, none, none, none, map.from([(10, 41), (11, 40)])).expect("swapped IDs")
+  let view = View { ids: ids, positions: map.from([(0, 0)]), ends: map.from([(1, 1)]),
+    assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => Some(f.sig) }
+  let projected = project(view, p, 40).expect("project permutation")
+  let result = assemble(Cx { ..before, next_id: 40 }, projected).expect("assemble permutation")
+  assert map.keys(result.syms) == [40, 41]
+  assert map.get(result.syms, 40) == Some(y) && map.get(result.syms, 41) == Some(x)
+}
+
+test "body product projects every state reference and the whole allocation interval" {
+  let before = Cx { ..cx_new(None, None), next_id: 10 }
+  let f = fixture_function(before)
+  let symbol = Sym { name: "x", ty: TyVar("T", 1), mutable: false, dlo: 0, dhi: 1,
+    dict_of: Some((2, 1)), ev_of: None, cell_of: Some((10, TyInt)) }
+  let after = Cx { ..before, next_id: 12, syms: map.from([(10, symbol)]),
+    fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
+    alias_resolved: map.from([("Alias", TyVar("T", 1))]),
+    current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
+    current_tparam_bounds: map.from([(1, [2])]), take_cell: Some(10),
+    diags: [Diag { msg: "body", lo: 0, hi: 1, hint: "" }],
+    frame: Frame { ..before.frame, scopes: [map.from([("x", 10)])],
+      current_sig: Some(Sig { ..f.sig, ret: TyVar("T", 1) }),
+      dict_syms: map.from([((1, 2), 10)]), used_effects: [EffVar("e", 3)],
+      eff_witness: map.from([(EffVar("e", 3), (0, 1, "callee"))]) } }
+  let p = capture(before, after, f).expect("capture projected fixture")
+  let none: Map[Int, Int] = map.empty()
+  let locals = map.from([(10, 40), (11, 41)])
+  let ids = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), locals).expect("projection ids")
+  let view = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+    assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => Some(f.sig) }
+  let q = project(view, p, 40).expect("project product")
+  let cx = assemble(Cx { ..before, next_id: 40 }, q).expect("assemble projected product")
+  assert cx.next_id == 42 && q.function.body == XUnit(100, 104)
+  let moved = map.get(cx.syms, 40).expect("projected symbol")
+  assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
+  assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
+  assert cx.take_cell == Some(40)
+  assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
+  assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
+  assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])
+  assert cx.alias_resolved == map.from([("Alias", TyVar("T", 11))])
+  assert cx.fns == map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 11) })])
+  assert len(cx.frame.scopes) == 1 && map.len(cx.frame.scopes[0]) == 1
+  assert map.get(cx.frame.scopes[0], "x") == Some(40)
+  assert cx.frame.dict_syms == map.from([((11, 22), 40)])
+  assert cx.frame.current_sig == Some(Sig { ..f.sig, ret: TyVar("T", 11) })
+  assert cx.frame.used_effects == [EffVar("e", 33)]
+  assert cx.frame.eff_witness == map.from([(EffVar("e", 33), (100, 104, "callee"))])
+  assert cx.diags == [Diag { msg: "body", lo: 100, hi: 104, hint: "" }]
+  assert project(View { ..view, ends: none }, p, 40) == None
+  let missing = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), map.from([(10, 40)])).expect("partial ids")
+  assert project(View { ..view, ids: missing }, p, 40) == None
+  assert project(view, p, 41) == None
+}

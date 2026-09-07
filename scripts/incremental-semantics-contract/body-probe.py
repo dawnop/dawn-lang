@@ -22,9 +22,10 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--java-home", required=True, type=Path)
     parser.add_argument("--typed", action="store_true", help="compare the production typed-tree mapper against the cold bodies")
-    typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin"]
+    typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
+                      "inferred-write", "test-state"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its seven compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its nine compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -71,9 +72,11 @@ def main():
         shutil.copytree(ROOT / directory, output / directory,
                         ignore=shutil.ignore_patterns("build", ".dawn"))
     if args.typed_mutant:
-        target = output / "selfhost/src/check/relocate_tree.dawn"
+        target = output / "selfhost/src/check" / ("body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "inferred-write": ("fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),
+            "test-state": ("in_test: product.in_test", "in_test: if product.function.is_test { true } else { product.in_test }"),
             "local": ("Some(XLocal(relocate.local_id(v.ids, id)?,", "Some(XLocal(id,"),
             "capture": ("names, expression(v, body)?, local_ids(v, captures)?,", "names, expression(v, body)?, captures,"),
             "dynamic": ("Some(XCallDyn(relocate.local_id(v.ids, id)?,", "Some(XCallDyn(id,"),
@@ -103,7 +106,19 @@ def main():
     probe = (HERE / "body-probe.dawn.txt").read_text()
     if args.typed:
         probe = probe.replace("use relocation\n", "use relocation\nuse typed_projection\n")
+        probe = probe.replace("use typed_projection\n", "use typed_projection\nuse compiler/check/body_product\n")
+        for old, new in [
+            ("pub type Trial = { name: String,", "pub type Trial = { assembled: Cx, name: String,"),
+            ("Trial { name: d.name,", 'Trial { assembled: body_product.assemble(before, body_product.capture(before, after, body).expect("body product capture: " ++ d.name)).expect("body product assembly"), name: d.name,'),
+        ]:
+            if probe.count(old) != 1:
+                raise RuntimeError("Body product capture anchor drifted")
+            probe = probe.replace(old, new)
         probe += "\npub fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
+        probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
+        probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
+        probe += "pub fn state_count(xs: List[typed_projection.StateTrial]) -> Int = len(xs)\n"
+        probe += "pub fn state_at(xs: List[typed_projection.StateTrial], i: Int) -> typed_projection.StateTrial = xs[i]\n"
         old = "relocation.relocate(body, Move {\n        start: before.next_id, limit: after.next_id, delta: 1000, span: 0 })"
         new = "typed_projection.body(body, before, after, 1000, 0, str.len(text))"
         if probe.count(old) != 1:
@@ -115,10 +130,10 @@ def main():
         probe = probe.replace(old, "typed_projection.body_in_source(saved.body, saved.before, saved.after, id_delta, fixture_text(), edited, old_decls[index].lo, old_decls[index].hi, new_decls[index].lo, new_decls[index].hi)")
         probe = probe.replace("let edited =", "let edited0 =")
         probe = probe.replace("  let (new_ast, pd)", '  let edited = str.replace(edited0, "x > 0", "x  >  0")\n  let (new_ast, pd)')
-        anchor = "    let (checked, _) = check_fn(cold_cx, new_decls[index], signatures[index])"
+        anchor = "    replayed_cx = relocation.replay(replayed_cx, saved.before, saved.after, movement)"
         if probe.count(anchor) != 1:
             raise RuntimeError("Source state replay anchor drifted")
-        probe = probe.replace(anchor, "    replayed_cx = typed_projection.source_state(replayed_cx, saved.before, saved.after, id_delta, fixture_text(), edited, old_decls[index].lo, old_decls[index].hi, new_decls[index].lo, new_decls[index].hi)\n" + anchor)
+        probe = probe.replace(anchor, "    replayed_cx = typed_projection.source_state(replayed_cx, saved.before, saved.after, saved.body, id_delta, fixture_text(), edited, old_decls[index].lo, old_decls[index].hi, new_decls[index].lo, new_decls[index].hi)")
         old = '"pub fn wrong() -> Int = false\\n"'
         if probe.count(old) != 1:
             raise RuntimeError("Typed corpus extension anchor drifted")
@@ -164,9 +179,11 @@ def main():
                             text=True, capture_output=True)
     (output / "run.log").write_text(result.stdout + result.stderr)
     if args.typed_mutant:
-        expected_comparison = ("reordered header: relocated body differs from cold check"
+        expected_comparison = ({"inferred-write": "inferred state: replayed Cx differs from cold body boundary",
+                                "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)
+                               or ("reordered header: relocated body differs from cold check"
                                if args.typed_mutant in ("pack-order", "evidence-origin")
-                               else "relocated body differs from shifted cold check")
+                               else "relocated body differs from shifted cold check"))
         if (result.returncode == 0 or "java.lang.AssertionError:" not in result.stderr
                 or expected_comparison not in result.stderr
                 or "NoSuchMethodError" in result.stderr):
@@ -189,9 +206,10 @@ def main():
         "relocation_sha256": hashlib.sha256(relocation.encode()).hexdigest(),
         "identity_sha256": hashlib.sha256(identity.encode()).hexdigest(),
         "typed_projection": args.typed,
+        "body_product_sha256": hashlib.sha256((output / "selfhost/src/check/body_product.dawn").read_bytes()).hexdigest() if args.typed else None,
         "typed_tree_sha256": hashlib.sha256((output / "selfhost/src/check/relocate_tree.dawn").read_bytes()).hexdigest() if args.typed else None,
         "typed_view_sha256": hashlib.sha256((fixture / "src/typed_projection.dawn").read_bytes()).hexdigest() if args.typed else None,
-        "note": "Typed mode: 23 fixed-header bodies, 22 nonuniform source edit replays, one reversed effect-header case; fixture-only ID/callee views are not production cache validity. Legacy mode: 11 fixed-header bodies and ten uniform-source replays.",
+        "note": "Typed mode: 23 fixed-header bodies with production state capture/assembly, 22 nonuniform source edit replays through production product projection, one reversed effect-header tree case, two inferred body/caller states and one test block state; fixture-only ID/callee views are not production cache validity. Legacy mode: 11 fixed-header bodies and ten uniform-source replays.",
     }, indent=2) + "\n")
     print(result.stdout, end="")
 

@@ -104,6 +104,28 @@ NEWLINE忽略仅服务位置投影，调用方仍须独立确认AST/依赖一致
 
 ## 五、七期与报告
 
+body状态产物先从真实检查前后提取：符号、推断签名、alias解析结果、累积类型参数
+约束用逐键变化表示，诊断保存追加后缀，不保留两份完整Cx。
+提取必须拒绝声明环境等未声明的写入及诊断前缀改写；Jsig是同owner能力，不能用Eq
+比较，owner/lease有效性仍由调用方保证。回放与依赖验证分离，取号、类型/效果/源码
+投影及整模块装配接入前不用于生产命中。`current_tparam_bounds`累积旧条目，
+不能用上一次body的整表覆盖新模块已经产生的条目。原先将frame.dict_syms也当作
+累积表的假设被effectful的完整状态对照推翻：`bind_dicts`在函数入口清空重建，
+因此字典表属于body完成后的frame，必须替换而不是合并前序函数的字典。
+
+`body_product.project`复用树投影视图迁移产物中的签名、别名、类型约束、符号、
+诊断、frame作用域/字典/效果见证和handler cell。所有fresh分配（包括不在syms中的
+安装ID）必须完整映射到目标分配区间；缺ID或源码边界即失败。固定header的22次
+非均匀编辑对照已用该生产提取/投影/装配替换旧私有Cx replay，仍与完整冷Cx一致。
+夹具仍提供稠密引用域/目标分配映射和旧callee查询，生产分配器、依赖失效和全形状
+状态写集尚未验收；不能把这项对照当作生产缓存已接通。
+
+补充真实推断函数及调用者两条状态重放，封定签名必须写回fns并供后续caller读取；
+TFun另与原check_module推断调度的产物比较。一个真实test block同时检查in_test
+复位、断言源文本和前序test增量取号。alias使用放在正常header路径：
+`pass_resolve_aliases`提前解析所有alias，不能清空缓存制造“正常body惰性解析”样本。
+Product仍记录alias_resolved变化作为显式写集，不声称正常body必然产生这种写入。
+
 声明候选身份位于`check/identity`，采用调用方提供的已解析模块来源加声明路径：顶层函数/type/trait/effect/const/test
 按类别与名字区分，方法/构造器/default以及trait/impl的关联类型和效果成员从其父
 声明派生；impl以trait拼写和去位置的subject结构为候选头，泛型绑定按声明槽归一，

@@ -52,9 +52,12 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 23个成功编译负控必须命中具名断言。
 
 `body-probe.py --typed --typed-all --java-home <JDK> --output <新目录>` 运行生产树投影
-的私有对照：23个真实函数、22次非均匀源码编辑及一次真实effect声明重排，七个编译
-负控必须命中独立Java比较器的完整TFun断言。源码编辑亦比较body边界Cx；该Cx仍由
-私有观察写集replay构造，不是完整生产query产品。目标符号映射来自header绑定顺序，
+的私有对照：23个真实函数、22次非均匀源码编辑及一次真实effect声明重排，七个树投影编译
+负控必须命中独立Java比较器的完整TFun断言。另有两个推断函数/调用者状态和一个
+test block状态的完整冷模块对照，丢封定签名写入、保留错误in_test的两个编译负控
+必须分别命中对应的完整Cx断言（typed-all共九个负控）。typed模式还比较23个body状态产品的
+原坐标装配；22次源码编辑的body边界Cx现在由生产`body_product`提取、投影和装配，
+不再调用旧私有观察写集replay。分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
 不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
@@ -66,6 +69,13 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 
 native-selfhost-tests 分别执行tree的47项、source的35项及identity的39项依赖闭包（包含重叠依赖），
 因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
+
+`state-product.py` 验证状态产品提取/装配及跨坐标投影的15个成功编译负控，
+覆盖签名/alias/约束写入、frame替换、诊断、环境守卫、分配起点及未进入syms的
+分配ID、类型/效果域、handler cell及非单调ID映射后的symbol插入顺序。
+另有Cx字段分类审计及新增未分类字段的拒绝负控。
+该入口在incremental-projection执行；native脚本另跑body_product的58项owning依赖
+闭包（与其他目标重叠，不相加当独立测试数）。
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

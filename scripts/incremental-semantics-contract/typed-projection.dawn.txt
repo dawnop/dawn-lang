@@ -3,17 +3,19 @@
 # ID range; this is not the eventual declaration provenance allocator.
 use std/map
 use std/list
+use std/str
 use compiler/check/cx.{Cx, cx_new}
 use compiler/check/tast.{TFun}
 use compiler/check/types.{Sig, Sym, trait_of, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, check_fn}
+use compiler/check/checker.{lookup_fn_sig, headers_for_body_probe, check_fn, check_fn_inferred, check_test, check_module}
 use compiler/check/relocate
 use compiler/check/relocate_tree
 use compiler/check/relocate_tree.{View}
 use compiler/check/source_projection
+use compiler/check/body_product
 use compiler/front/parser
-use compiler/front/ast.{module_fns}
+use compiler/front/ast.{module_fns, module_tests}
 
 fn callee(cx: Cx, name: String, builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
   if builtin { return map.get(cx.bins, name) }
@@ -69,33 +71,106 @@ pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int,
   relocate_tree.function(v, f).expect("source-aware typed projection failed: " ++ f.name)
 }
 
-# The original private replay supplies its observed non-source state delta.
-# Correct its newly produced symbol/diagnostic spans with the same projection
-# used for the body, without touching earlier retained products.
-pub fn source_state(current: Cx, before: Cx, after: Cx, delta: Int,
+# The fixture still supplies allocation/provenance tables, but the complete
+# write product and its source/ID projection now belong to production code.
+pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
   old_text: String, new_text: String, old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int) -> Cx = {
   let source = source_projection.between(old_text, new_text, old_lo, old_hi, new_lo, new_hi)
     .expect("state source projection")
-  var syms = current.syms
-  for (id, s) in map.entries(after.syms) {
-    if id >= before.next_id && id < after.next_id {
-      let moved = map.get(syms, id + delta).expect("replayed symbol")
-      syms = map.insert(syms, id + delta, Sym { ..moved,
-        dlo: map.get(source.starts, s.dlo).expect("symbol start"),
-        dhi: map.get(source.ends, s.dhi).expect("symbol end") })
-    }
+  var stable: Map[Int, Int] = map.empty()
+  var id = -1024
+  while id < after.next_id {
+    stable = map.insert(stable, id, if id >= before.next_id { id + delta } else { id })
+    id = id + 1
   }
-  let added = list.drop(after.diags, len(before.diags))
-  var diags = list.take(current.diags, len(current.diags) - len(added))
-  for d in added {
-    diags = diags ++ [Diag { ..d,
-      lo: map.get(source.starts, d.lo).expect("diagnostic start"),
-      hi: map.get(source.ends, d.hi).expect("diagnostic end") }]
-  }
-  Cx { ..current, syms: syms, diags: diags }
+  let ids = relocate.new(stable, stable, stable, stable, stable).expect("state relocation tables")
+  let view = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+    assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+    callee: (owner, name, builtin, tr) => callee(before, name, builtin, tr) }
+  let saved = body_product.capture(before, after, body).expect("state capture: " ++ body.name)
+  let projected = body_product.project(view, saved, current.next_id).expect("state projection: " ++ body.name)
+  body_product.assemble(current, projected).expect("state assembly: " ++ body.name)
 }
 
 pub type HeaderTrial = { relocated: TFun, cold: TFun }
+
+pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
+
+## The source order here is deliberately dependency order. This checks state
+## products, not a replacement scheduler: the module oracle still uses the
+## production inferred-function scheduling loop independently.
+pub fn inferred_samples() -> List[StateTrial] !io = {
+  let text = "alias Counter = Int\nfn lead(x: Int) = { let y = x + 1\n y }\n" ++
+    "fn inferred(x: Counter) = { let z = x + 2\n z }\n" ++
+    "fn caller(x: Int) = inferred(x)\n"
+  let edited = "# 🌅 inferred edit\n" ++ str.replace(text, "let y = x + 1", "let extra = x + 1\n let y = extra")
+  let (old_ast, old_diags) = parser.parse_module(text)
+  let (new_ast, new_diags) = parser.parse_module(edited)
+  if len(old_diags) != 0 || len(new_diags) != 0 { panic("inferred fixture parse") }
+  let initial = cx_new(Some("inferred_probe"), Some("inferred.dawn"))
+  let (old_header, old_sigs) = headers_for_body_probe(initial, old_ast, map.empty())
+  let (new_header, new_sigs) = headers_for_body_probe(initial, new_ast, map.empty())
+  let (whole_cx, whole) = check_module(initial, new_ast, map.empty())
+  if len(old_header.diags) != 0 || len(new_header.diags) != 0 || len(whole_cx.diags) != 0 {
+    panic("inferred fixture diagnostics")
+  }
+  let old_decls = module_fns(old_ast)
+  let new_decls = module_fns(new_ast)
+  var old = old_header
+  var cold = new_header
+  var replayed = new_header
+  var out: List[StateTrial] = []
+  var i = 0
+  while i < len(old_decls) {
+    if not old_sigs[i].inferring || not new_sigs[i].inferring { panic("fixture signature was not inferred") }
+    let before = old
+    let (after, sealed, body) = check_fn_inferred(before, old_decls[i], old_sigs[i])
+    let (checked, _, cold_body) = check_fn_inferred(cold, new_decls[i], new_sigs[i])
+    if sealed.inferring || map.get(after.fns, old_decls[i].name) != Some(sealed) { panic("inferred signature not sealed") }
+    if i == 0 { replayed = checked } else {
+      let delta = replayed.next_id - before.next_id
+      if delta != 1 { panic("inferred fixture did not move allocation") }
+      replayed = source_state(replayed, before, after, body, delta, text, edited,
+        old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi)
+      let moved = body_in_source(body, before, after, delta, text, edited,
+        old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi)
+      out = out ++ [StateTrial { replayed: replayed, cold: checked, relocated: moved,
+        cold_body: cold_body, module_body: whole.fns[i] }]
+    }
+    old = after
+    cold = checked
+    i = i + 1
+  }
+  out
+}
+
+pub fn test_samples() -> List[StateTrial] !io = {
+  let text = "test \"lead\" { let x = 1\n assert x == 1 }\n" ++
+    "test \"body\" { let y = 2\n assert y > 0 }\n"
+  let edited = "# 🌅 test edit\n" ++ str.replace(str.replace(text,
+    "let x = 1", "let extra = 1\n let x = extra"), "y > 0", "y  >  0")
+  let (old_ast, old_diags) = parser.parse_module(text)
+  let (new_ast, new_diags) = parser.parse_module(edited)
+  if len(old_diags) != 0 || len(new_diags) != 0 { panic("test fixture parse") }
+  let initial = cx_new(Some("test_probe"), Some("test.dawn"))
+  let (old_header, _) = headers_for_body_probe(initial, old_ast, map.empty())
+  let (new_header, _) = headers_for_body_probe(initial, new_ast, map.empty())
+  let (whole_cx, whole) = check_module(initial, new_ast, map.empty())
+  if len(whole_cx.diags) != 0 { panic("test fixture diagnostics") }
+  let old_tests = module_tests(old_ast)
+  let new_tests = module_tests(new_ast)
+  let (before, _) = check_test(old_header, old_tests[0].name, old_tests[0].body)
+  let (current, _) = check_test(new_header, new_tests[0].name, new_tests[0].body)
+  let d = old_tests[1]
+  let n = new_tests[1]
+  let (after, body) = check_test(before, d.name, d.body)
+  let (cold, cold_body) = check_test(current, n.name, n.body)
+  let delta = current.next_id - before.next_id
+  if delta != 1 { panic("test fixture did not move allocation") }
+  let replayed = source_state(current, before, after, body, delta, text, edited, d.lo, d.hi, n.lo, n.hi)
+  let moved = body_in_source(body, before, after, delta, text, edited, d.lo, d.hi, n.lo, n.hi)
+  [StateTrial { replayed: replayed, cold: cold, relocated: moved, cold_body: cold_body, module_body: whole.tests[1] }]
+}
 
 ## Reverse real effect declarations, so label IDs and ABI slots reverse.
 ## Target body-local slots are derived from the new header's binding order,
