@@ -233,7 +233,7 @@ def ledger_ran(text):
     """
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     if not lines:
-        return None, set()
+        return "", set()
     head, _, note = lines[-1].partition("#")
     fields = head.split()
     if len(fields) != 6:
@@ -261,7 +261,11 @@ def ledger_evidence_problems(n, name, ledgered, files):
             problems.append(f"line {n}: {name} names evidence {token!r} and there is no {path}")
             continue
         result, ran = ledger_ran(files[path])
-        if result is None:
+        if result == "":
+            problems.append(f"line {n}: {name} names evidence {token!r} and {path} has no entry. "
+                            f"Run scripts/tile-gpu-diff/run.sh --toolchain on that machine and "
+                            f"commit the line it appends")
+        elif result is None:
             problems.append(f"line {n}: {name} names evidence {token!r} and the last line of "
                             f"{path} does not parse")
         elif result != "pass":
