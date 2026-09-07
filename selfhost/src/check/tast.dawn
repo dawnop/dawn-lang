@@ -10,7 +10,7 @@
 # UTF-16).
 
 use check/types.{
-  Ty, Sig, Eff, Sym, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, ty_char
+  Ty, Sig, Eff, Sym, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, ty_char, EvidenceRole
 }
 use check/exhaustive.{LitV}
 
@@ -118,7 +118,9 @@ pub type TExpr =
 # pack and hands back `ev_get(pack, key)` for a label or the pack itself for a
 # non-ground atom (`types.ev_pack_adt`). The symbol that was resolved would
 # name neither.
-  | XEvRead(key: Int, lo: Int, hi: Int, ty: Ty)
+# The origin is retained for semantic relocation; lowering still uses the
+# erased key. A trait key alone loses the associated subject/member identity.
+  | XEvRead(key: Int, origin: EvidenceRole, lo: Int, hi: Int, ty: Ty)
 # a top-level fn / builtin used as a value (type already instantiated)
   | XFnValue(owner: Option[String], name: String, is_builtin: Bool, ty: Ty, lo: Int, hi: Int)
 # a call of a local function value (dynamic target). `evidence` is the one
@@ -375,7 +377,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XUnit(lo, _) -> lo
     XStr(_, lo, _) -> lo
     XLocal(_, _, lo, _, _) -> lo
-    XEvRead(_, lo, _, _) -> lo
+    XEvRead(_, _, lo, _, _) -> lo
     XFnValue(_, _, _, _, lo, _) -> lo
     XCallDyn(_, _, _, _, lo, _, _) -> lo
     XCallBuiltin(_, _, _, _, lo, _, _) -> lo
@@ -414,7 +416,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XUnit(_, hi) -> hi
     XStr(_, _, hi) -> hi
     XLocal(_, _, _, hi, _) -> hi
-    XEvRead(_, _, hi, _) -> hi
+    XEvRead(_, _, _, hi, _) -> hi
     XFnValue(_, _, _, _, _, hi) -> hi
     XCallDyn(_, _, _, _, _, hi, _) -> hi
     XCallBuiltin(_, _, _, _, _, hi, _) -> hi
@@ -454,7 +456,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XUnit(_, _) -> TyUnit
     XStr(_, _, _) -> TyString
     XLocal(_, _, _, _, ty) -> ty
-    XEvRead(_, _, _, ty) -> ty
+    XEvRead(_, _, _, _, ty) -> ty
     XFnValue(_, _, _, ty, _, _) -> ty
     XCallDyn(_, _, _, _, _, _, ty) -> ty
     XCallBuiltin(_, _, _, _, _, _, ty) -> ty

@@ -1044,13 +1044,14 @@ jobs:
     # the three workspace-owner mutants took 83.97s on 2026-09-08.
     # Double rounded 82+84s, plus 38s fixed overhead: 370s.
     # The complete body identity/relocation prototype took 35.66s locally,
-    # then 45.27s under concurrent validation on 2026-09-08. Add 2*46s:
-    # 462s before the typed mapper contract below.
-    # Typed relocation's complete 19-mutant run took 52.88s; its earlier
-    # 17-mutant run took 59.18s. Reserve 2*60s more: 582s total.
+    # then 45.27s and 47.64s under concurrent validation on 2026-09-08.
+    # Add 2*48s: 466s before the typed mapper contract below.
+    # Typed relocation's 23-mutant runs took 78.86s and 65.26s. Add 2*79s:
+    # 624s total. Full tree/source contracts have their own job below so this
+    # job stays within the agreed 660s run pole.
     # Engine prefix mutants have their own independent owning job below.
-    # budget: 3x 582s planning value
-    timeout-minutes: 30
+    # budget: 3x 624s planning value
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1065,6 +1066,23 @@ jobs:
           python3 scripts/incremental-semantics-contract/body-probe.py --all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-body-probe"
           python3 scripts/incremental-semantics-contract/relocate.py
           ./bin/dawn test scripts/incremental-semantics-contract
+
+  incremental-projection:
+    runs-on: ubuntu-latest
+    # Local complete runs on 2026-09-08: typed tree and seven mutants 36.10s;
+    # source/checker-origin and six mutants 25.50s. Double rounded values and
+    # add the existing 38s checkout/toolchain allowance: 2*(37+26)+38=164s.
+    # budget: 3x 164s planning value
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: typed product and source projection contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
+          python3 scripts/incremental-semantics-contract/projection.py
 
   incremental-prefix:
     runs-on: ubuntu-latest
@@ -3278,10 +3296,10 @@ jobs:
     # and post steps its note measures. 380s rounds that up with room for a
     # runner that is slower than 2.08x; replace it with the observation once
     # there is one.
-    # The mapper is not reachable from nmain yet: its separate inline target
-    # took 5.69s locally on 2026-09-08. Add 2*6s to the original 380s.
-    # budget: 3x 392s planning value (see the note above)
-    timeout-minutes: 20
+    # The tree/source mappers are not reachable from nmain yet. Their separate
+    # targets took 7.91s and 3.40s locally on 2026-09-08; add 2*(8+4)s.
+    # budget: 3x 404s planning value (see the note above)
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
 

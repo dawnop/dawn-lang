@@ -48,9 +48,19 @@ parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启�
 它不是已上线的函数缓存，也不代替下列生产前缀门禁。
 
 `relocate.py` 验证生产 `check/relocate` 基础层：Ty/Eff、Sig/Sym 和 witness 的引用域
-映射、缺失引用冷回退、效果重新规范化与 evidence 编码/生成名称。19个成功编译负控
-必须命中具名断言；源码位置投影和调用点 evidence 顺序仍不属于这一层。
-native-selfhost-tests 另行测试该文件的43项依赖闭包测试，因为它尚未被 nmain 导入。
+映射、缺失引用冷回退、效果重新规范化、evidence 编码/生成名称及完整角色的ABI顺序。
+23个成功编译负控必须命中具名断言。
+
+`body-probe.py --typed --typed-all --java-home <JDK> --output <新目录>` 运行生产树投影
+的私有对照：23个真实函数、22次非均匀源码编辑及一次真实effect声明重排，七个编译
+负控必须命中独立Java比较器的完整TFun断言。源码编辑亦比较body边界Cx；该Cx仍由
+私有观察写集replay构造，不是完整生产query产品。目标符号映射来自header绑定顺序，
+不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
+
+`projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
+构造分支的六个成功编译负控。源码token相等不证明AST相等，尤其不能忽略换行的语义。
+native-selfhost-tests 分别执行tree的47项及source的35项依赖闭包（包含重叠依赖），
+因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

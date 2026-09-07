@@ -53,6 +53,7 @@ use check/types.{
   eff_carries,
   erased_ev_ty, erased_cell_ty,
   sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key, atom_keys,
+  EvidenceRole, LabelSlot, VariableSlot, AssociatedSlot, evidence_role_key,
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, EffectI, Traits, TraitI, ImplI, Sym, Sig,
@@ -340,23 +341,24 @@ fn local_fn_missing_evidence(cx: Cx, name: String) -> Option[String] = {
 fn ev_expr(
   cx: Cx,
   name: String,
-  key: Int,
+  origin: EvidenceRole,
   ty: Ty,
   lo: Int,
   hi: Int
 ) -> (Cx, Option[TExpr]) = {
+  let key = evidence_role_key(origin)
   let crossed = ev_crossed(cx, name)
   let (cx1, found) = resolve_local(cx, name, lo, hi, false)
   match found {
     Some(sid) ->
       if crossed {
-        (cx1, Some(XEvRead(key, lo, hi, ty)))
+        (cx1, Some(XEvRead(key, origin, lo, hi, ty)))
       } else {
         (cx1, Some(XLocal(sid, name, lo, hi, ty)))
       }
     None ->
       if len(cx1.frame.lambda_stack) > 0 {
-        (cx1, Some(XEvRead(key, lo, hi, ty)))
+        (cx1, Some(XEvRead(key, origin, lo, hi, ty)))
       } else {
         (cx1, None)
       }
@@ -364,6 +366,41 @@ fn ev_expr(
 }
 
 # ---- type resolution ----
+
+test "evidence reads preserve distinct origins behind the same runtime key" {
+  let base = push_scope(test_cx())
+  let closure = LambdaCx { boundary: len(base.frame.scopes), expected_ret: None,
+    captures: [], sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None }
+  let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
+    AssociatedSlot(73, 74, "E"), AssociatedSlot(75, 74, "E"), AssociatedSlot(75, 74, "F")]
+  for origin in origins {
+    let key = evidence_role_key(origin)
+    let isolated = Cx { ..base, frame: Frame { ..base.frame, lambda_stack: [closure] } }
+    let (_, absent) = ev_expr(isolated, "missing_evidence", origin, erased_ev_ty(), 10, 11)
+    match absent {
+      Some(XEvRead(k, saved, lo, hi, _)) -> {
+        assert k == key
+        assert saved == origin
+        assert lo == 10 && hi == 11
+      }
+      _ -> { assert false }
+    }
+    let (declared, _) = declare_evidence(base, "outer_evidence", erased_ev_ty(), key, 0, 1)
+    let nested = Cx { ..declared, frame: Frame { ..declared.frame, lambda_stack: [closure] } }
+    let (_, crossed) = ev_expr(nested, "outer_evidence", origin, erased_ev_ty(), 20, 21)
+    match crossed {
+      Some(XEvRead(k, saved, lo, hi, _)) -> {
+        assert k == key
+        assert saved == origin
+        assert lo == 20 && hi == 21
+      }
+      _ -> { assert false }
+    }
+  }
+  assert evidence_role_key(origins[2]) == evidence_role_key(origins[3])
+  assert evidence_role_key(origins[3]) == evidence_role_key(origins[4])
+  assert origins[2] != origins[3] && origins[3] != origins[4]
+}
 
 ## `m.NAME` read as a qualified constant: Some((declaring module, its type))
 ## when `target` is a whole-module alias that exports a constant called
@@ -7893,7 +7930,7 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
     }
     if blocked { continue }
     let (cxa, found) =
-      ev_expr(cx1, ev_var_local_name(svid), var_key(svid), erased_ev_ty(), lo, hi)
+      ev_expr(cx1, ev_var_local_name(svid), VariableSlot(svid), erased_ev_ty(), lo, hi)
     cx1 = cxa
     match found {
       Some(tx) -> { envs = envs ++ [tx] }
@@ -7914,7 +7951,7 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
     }
     if blocked { continue }
     let (cxa, found) =
-      ev_expr(cx1, ev_assoc_local_name(av, at2, an), assoc_key(at2), erased_ev_ty(), lo, hi)
+      ev_expr(cx1, ev_assoc_local_name(av, at2, an), AssociatedSlot(av, at2, an), erased_ev_ty(), lo, hi)
     cx1 = cxa
     match found {
       Some(tx) -> { envs = envs ++ [tx] }
@@ -7948,7 +7985,7 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
         (cxr, tx)
       } else {
         let nm = ev_local_name(cx1, eid)
-        let (cxs, found) = ev_expr(cx1, nm, label_key(eid), TyAdt(eid, []), lo, hi)
+        let (cxs, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, []), lo, hi)
         (cxs, match found {
           Some(tx) -> tx
           None -> XUnit(lo, hi)
@@ -8008,7 +8045,7 @@ fn resolve_label_evidence(cx: Cx, eid: Int, lo: Int, hi: Int) -> (Cx, TExpr, Boo
       None -> ()
     }
   }
-  let (cxa, found) = ev_expr(cx1, nm, label_key(eid), TyAdt(eid, []), lo, hi)
+  let (cxa, found) = ev_expr(cx1, nm, LabelSlot(eid), TyAdt(eid, []), lo, hi)
   cx1 = cxa
   match found {
     Some(tx) -> (cx1, tx, true)
@@ -8088,7 +8125,7 @@ fn evidence_assoc_args(
     for r in eff_assocs(red) {
       let (s2, v2, t2, n2) = r
       let nm = ev_assoc_local_name(v2, t2, n2)
-      let (cxa, found) = ev_expr(cx1, nm, assoc_key(t2), erased_ev_ty(), lo, hi)
+      let (cxa, found) = ev_expr(cx1, nm, AssociatedSlot(v2, t2, n2), erased_ev_ty(), lo, hi)
       cx1 = cxa
       match found {
         Some(_) -> ()
