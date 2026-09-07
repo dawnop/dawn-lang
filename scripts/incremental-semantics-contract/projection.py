@@ -21,6 +21,14 @@ def owning(output, module, title):
 def main():
     started = time.monotonic()
     jobs = [
+        ("checker", "module body assembly preserves roles and synthesized default registration", [
+            ("assembly-role-order", "fns_out ++ synth ++ products.impl_methods ++ products.trait_defaults",
+             "fns_out ++ synth ++ products.trait_defaults ++ products.impl_methods"),
+            ("assembly-constants", "consts: products.constants, tests: products.tests", "consts: [], tests: products.tests"),
+            ("assembly-tests", "consts: products.constants, tests: products.tests", "consts: products.constants, tests: []"),
+            ("assembly-default-signature", "cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, ds.name, ds) }", "cx1 = cx1"),
+            ("assembly-default-dictionary", "dict_syms: dd.dict_syms,", "dict_syms: [],"),
+        ]),
         ("checker", "check_module: a whole module checks end to end", [
             ("header-inference-state", "cx: cx1, sigs: sigs, impl_sigs: impl_sigs", "cx: cx1, sigs: map(sigs, s => Sig { ..s, inferring: false }), impl_sigs: impl_sigs"),
             ("header-const-types", "impl_sigs: impl_sigs, const_tys: const_tys }", "impl_sigs: impl_sigs, const_tys: [] }"),
@@ -67,7 +75,7 @@ def main():
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
                 print("OK: projection " + module + " " + name, flush=True)
             target.write_text(original)
-    print(f"OK: source/evidence/callee/header projection and eleven compiling mutants, {time.monotonic() - started:.2f}s")
+    print(f"OK: source/evidence/callee/header/assembly projection and sixteen compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":
