@@ -27,7 +27,15 @@ def main():
         ("body-endpoint", "next_id: target + count", "next_id: target + count - 1"),
         ("body-carry", "old_allocations: old_allocations, next_allocations: next_allocations",
          "old_allocations: old_headers, next_allocations: next_headers"),
-        ("module-combine", "  table(entries)\n}", "  table([])\n}"),
+        ("module-combine", "  table(entries)\n}\n\n## Rebind", "  table([])\n}\n\n## Rebind"),
+        ("world-owner", "if declaration.scope.world != from", "if false"),
+        ("world-evidence", "if effect_key.scope.world != from", "if false"),
+        ("world-nested", "LabelEvidence(DeclKey { ..effect_key, scope: ModuleKey { ..effect_key.scope, world: world } })", "LabelEvidence(effect_key)"),
+        ("source-wildcard", 'None -> scope.source == ""', "None -> true"),
+        ("compiler-nominals", "entries = entries ++ [entry(key, NominalId, 0, adt.id)] ++ binders(key, adt.tparams, adt.bound_eparams)?",
+         "entries = entries ++ binders(key, adt.tparams, adt.bound_eparams)?"),
+        ("compiler-erasure", 'entries = entries ++ [entry(compiler_key(world, TypeDecl, "erased_runtime"), TypeParameter, 0, id)]',
+         "entries = entries"),
     ]
     with tempfile.TemporaryDirectory(prefix="dawn-allocation-") as temp:
         root = Path(temp)

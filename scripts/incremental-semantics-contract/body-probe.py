@@ -23,9 +23,9 @@ def main():
     parser.add_argument("--typed", action="store_true", help="compare the production typed-tree mapper against the cold bodies")
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
-                      "impl-owner", "impl-parameters", "impl-roles"]
+                      "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its fifteen compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its sixteen compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -74,9 +74,11 @@ def main():
     if args.typed_mutant:
         target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant == "default-dictionary" else
                     "allocation.dawn" if args.typed_mutant.startswith("impl-") else
-                    "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write") else "relocate_tree.dawn")
+                    "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "default-diagnostics": ("diags: current.diags ++ product.diagnostics",
+                                    'diags: if product.function.name == "sample\\$default\\$0" { current.diags } else { current.diags ++ product.diagnostics }'),
             "default-dictionary": ("TDefault { body: dx, dict_syms: dsyms }", "TDefault { body: dx, dict_syms: [] }"),
             "default-write": ("syms: apply_changes(current.syms, product.symbols)",
                               'syms: if product.function.name == "sample\\$default\\$0" { current.syms } else { apply_changes(current.syms, product.symbols) }'),
@@ -187,6 +189,12 @@ def main():
                             text=True, capture_output=True)
     (output / "run.log").write_text(result.stdout + result.stderr)
     if args.typed_mutant:
+        if args.typed_mutant == "default-diagnostics":
+            if (result.returncode == 0 or "dawn.rt.PanicError: default boundary check failed" not in result.stderr
+                    or "NoSuchMethodError" in result.stderr):
+                raise RuntimeError("Default diagnostics mutation did not reach its owning assertion: " + result.stderr)
+            print("OK: compiling default-diagnostics mutant rejected")
+            return
         if args.typed_mutant == "default-dictionary":
             if (result.returncode == 0 or "dawn.rt.PanicError: default dictionary fixture missing its bound" not in result.stderr
                     or "NoSuchMethodError" in result.stderr):

@@ -23,7 +23,10 @@ use check/passes.{
   pass_register_traits, pass_register_impls, pass_fn_signatures,
   pass_const_decls
 }
-use check/checker.{check_module, exports_of, check_fn, check_fn_inferred}
+use check/checker.{check_module, check_module_headers, check_module_bodies, exports_of, check_fn, check_fn_inferred}
+use check/allocation
+use check/relocate
+use check/identity.{module_key}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
@@ -713,8 +716,13 @@ pub type Program = { modules: List[CheckedMod], diags: List[LocDiag] }
 pub type AnalysisCarry = {
   exports: Map[String, ModExports],
   impls: Impls,
-  next_id: Int
+  next_id: Int,
+  provenance: Option[HeaderProvenance]
 }
+
+## These tables belong to the enclosing analysis owner. A world label is not
+## a process-global identity, and a missing table must never authorize reuse.
+pub type HeaderProvenance = { world: String, modules: Map[String, Option[allocation.Table]], intrinsics: Option[allocation.Table] }
 
 ## The enclosing module interval includes context construction and export
 ## assembly. Check and comptime intervals are nested inside it, never overlap,
@@ -732,7 +740,20 @@ pub type ModuleStep = {
 }
 
 pub fn initial_carry(std: StdCtx) -> AnalysisCarry =
-  AnalysisCarry { exports: std.exports, impls: std.impls, next_id: std.next_id }
+  AnalysisCarry { exports: std.exports, impls: std.impls, next_id: std.next_id, provenance: None }
+
+pub fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarry = {
+  var modules: Map[String, Option[allocation.Table]] = map.empty()
+  for name in map.keys(std.exports) {
+    let origin = match map.get(std.header_origins, name) {
+      Some(Some(table)) -> allocation.in_world(table, "std", world)
+      _ -> None
+    }
+    modules = map.insert(modules, name, origin)
+  }
+  AnalysisCarry { ..initial_carry(std), provenance: Some(HeaderProvenance { world: world, modules: modules,
+    intrinsics: allocation.compiler_headers(world) }) }
+}
 
 fn analysis_event(
   observer: Option[AnalysisObserver], name: String, stage: AnalysisStage, entering: Bool
@@ -858,9 +879,26 @@ pub fn analyze_module_step(
   var ct = empty_ctout()
   var check_runs = 0
   var comptime_runs = 0
+  var local_provenance: Option[allocation.Table] = None
   if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
-    let (cx1, tm1) = check_module(cx, mf.m, before.exports)
+    let (cx1, tm1) = match before.provenance {
+      None -> check_module(cx, mf.m, before.exports)
+      Some(origin) -> {
+        let headers = check_module_headers(cx, mf.m, before.exports)
+        if len(headers.cx.diags) == 0 {
+          let scope = module_key(origin.world, mf.mod_path, mf.class_name, mf.path)
+          match allocation.local_headers(scope, headers.syntax, headers.cx) {
+            Some(entries) -> match allocation.local_impl_headers(scope, headers.syntax, headers.cx, headers.impl_sigs) {
+              Some(methods) -> { local_provenance = allocation.table(entries ++ methods) }
+              None -> ()
+            }
+            None -> ()
+          }
+        }
+        check_module_bodies(headers)
+      }
+    }
     check_runs = 1
     analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
     cx = cx1
@@ -897,7 +935,12 @@ pub fn analyze_module_step(
     input: mf,
     checked: checked,
     diags: diags,
-    after: AnalysisCarry { exports: exports, impls: impls, next_id: cx.next_id },
+    after: AnalysisCarry { exports: exports, impls: impls, next_id: cx.next_id,
+      provenance: match before.provenance {
+        None -> None
+        Some(origin) -> Some(HeaderProvenance { ..origin,
+          modules: map.insert(origin.modules, mf.mod_path, local_provenance) })
+      } },
     check_runs: check_runs,
     comptime_runs: comptime_runs
   }
@@ -1750,6 +1793,64 @@ test "std identity is where the file came from, not what the module is called" {
     assert std_module_of(std, "${std_dir()}/cursor.dawn") == Some("std/cursor")
     let absent: Option[String] = None
     assert std_module_of(std, impostor) == absent
+  })
+}
+
+test "module provenance carry keeps exporting owners across header reorder" {
+  in_mem(() => {
+    let std = std_or_die()
+    let initial = initial_carry_with_provenance(std, "provenance-test")
+    assert initial_carry(std).provenance == None
+    let initial_origins = initial.provenance.expect("initial provenance")
+    assert map.len(initial_origins.modules) == map.len(std.exports)
+    var std_tables: List[allocation.Table] = []
+    for (_, origin) in map.entries(initial_origins.modules) {
+      assert origin != None
+      assert allocation.in_world(origin.expect("std origin"), "provenance-test", "other") != None
+      std_tables = std_tables ++ [origin.expect("std table")]
+    }
+    assert initial_origins.intrinsics != None
+    assert allocation.combine(std_tables ++ [initial_origins.intrinsics.expect("compiler origins")]) != None
+    var tables: List[allocation.Table] = []
+    var ids: List[Int] = []
+    let first = "pub type First = { value: Int }\n"
+    let second = "pub type Second = { value: Int }\n"
+    for text in [first ++ second, second ++ first] {
+      let (syntax, pd) = parser.parse_module(text)
+      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
+        text: text, m: syntax, pdiags: pd, pkg: None }
+      let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
+      let cold = analyze_module_step(input, initial_carry(std), std, ct_default(), jsig_refused(), None)
+      assert len(step.diags) == 0 && step.checked.tm == cold.checked.tm
+      assert step.after.next_id == cold.after.next_id
+      let origins = step.after.provenance.expect("provider provenance")
+      assert map.get(origins.modules, "library") != Some(None)
+      let table = map.get(origins.modules, "library").expect("provider record").expect("provider table")
+      let id = map.get(step.checked.cx.adts_by_name, "First").expect("provider ID")
+      tables = tables ++ [table]
+      ids = ids ++ [id]
+      let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = x\n"
+      let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
+      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
+        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None }
+      let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
+      assert len(consumed.diags) == 0
+      let carried = consumed.after.provenance.expect("consumer provenance")
+      assert carried.world == initial_origins.world
+      assert map.get(carried.modules, "library") == Some(Some(table))
+      let local = map.get(carried.modules, "consumer").expect("consumer record").expect("consumer table")
+      assert relocate.nominal(allocation.between(local, local).expect("consumer IDs"), id) == None
+    }
+    assert ids[0] != ids[1]
+    assert relocate.nominal(allocation.between(tables[0], tables[1]).expect("reordered IDs"), ids[0]) == Some(ids[1])
+    for text in ["fn broken(", "fn broken(x: Missing) -> Unit = ()\n"] {
+      let (syntax, pd) = parser.parse_module(text)
+      let input = LoadedModule { mod_path: "broken", class_name: "broken", path: "/provenance/broken.dawn",
+        text: text, m: syntax, pdiags: pd, pkg: None }
+      let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
+      assert len(step.diags) > 0
+      assert map.get(step.after.provenance.expect("failed module provenance").modules, "broken") == Some(None)
+    }
   })
 }
 

@@ -6,7 +6,7 @@ use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
 use compiler/check/tast.{TFun, TDefault}
-use compiler/check/types.{Sig, Sym, eff_labels, sig_abi_eff, EV_PACK_ID}
+use compiler/check/types.{Sig, Sym, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
 use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, exports_of}
 use compiler/check/relocate
@@ -117,8 +117,7 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   let new_library_table = allocation.table(allocation.local_headers(library_scope, new_library, new_provider).expect("new provider provenance")).expect("new provider table")
   let old_local = allocation.table(allocation.local_headers(scope, syntax, before).expect("old consumer provenance")).expect("old consumer table")
   let new_local = allocation.table(allocation.local_headers(scope, syntax, next).expect("new consumer provenance")).expect("new consumer table")
-  let intrinsic = DeclKey { scope: module_key("import-world", "compiler", "compiler", "intrinsics"), path: [Named(FunctionDecl, "evidence_pack")] }
-  let reserved = allocation.table([allocation.entry(intrinsic, NominalId, 0, EV_PACK_ID), allocation.entry(intrinsic, TypeParameter, 0, 0)]).expect("intrinsics")
+  let reserved = allocation.compiler_headers("import-world").expect("intrinsics")
   let old_table = allocation.combine([old_library_table, old_local, reserved]).expect("old program provenance")
   let new_table = allocation.combine([new_library_table, new_local, reserved]).expect("new program provenance")
   let old_ask = if qualified { map.get(provider.adts_by_name, "First").expect("old exported type") }
@@ -149,26 +148,32 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   StateTrial { replayed: replayed, cold: cold, relocated: projected.function, cold_body: cold_body, module_body: whole.fns[0] }
 }
 
-pub fn default_samples() -> List[StateTrial] !io = [default_sample(false, false), default_sample(true, false),
-  default_sample(false, true), default_sample(true, true)]
+pub fn default_samples() -> List[StateTrial] !io = [default_sample(false, false, false), default_sample(true, false, false),
+  default_sample(false, true, false), default_sample(true, true, false),
+  default_sample(false, false, true), default_sample(true, false, true)]
 
-fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
+fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> StateTrial !io = {
   let prefix = if generic { "trait Marker[T] { fn mark(x: T) -> Int }\nfn sample[T: Marker]" } else { "fn sample" }
   let params = if generic { "(x: fn(T) -> Int = (t) => mark(t), y: Int = { let w = 2\n w })" }
+    else if invalid { "(x: Int = true, y: Int = { let w = 2\n w })" }
     else { "(x: Int = { let v = 1\n v }, y: Int = { let w = 2\n w })" }
   let text = prefix ++ params ++ (if inferred { " = " } else { " -> Int = " }) ++
     (if generic { "y\n" } else { "x + y\n" })
   let (syntax, diags) = parser.parse_module(text)
+  let edited = "# 🌅 moved defaults\n" ++ text
+  let (new_syntax, new_diags) = parser.parse_module(edited)
+  if len(new_diags) != 0 { panic("edited default boundary parse failed") }
   if len(diags) != 0 { panic("default boundary parse failed") }
   let base = cx_new(Some("defaults"), Some("defaults.dawn"))
   let new_base = Cx { ..base, next_id: base.next_id + 10 }
   let (before, sigs) = headers_for_body_probe(base, syntax, map.empty())
-  let (next, nsigs) = headers_for_body_probe(new_base, syntax, map.empty())
+  let (next, nsigs) = headers_for_body_probe(new_base, new_syntax, map.empty())
   let decl = module_fns(syntax)[0]
+  let new_decl = module_fns(new_syntax)[0]
   let scope = module_key("defaults-world", "defaults", "defaults", "defaults.dawn")
   var old_table = allocation.table(allocation.local_headers(scope, syntax, before).expect("old default headers")).expect("old table")
-  var new_table = allocation.table(allocation.local_headers(scope, syntax, next).expect("new default headers")).expect("new table")
-  let source = source_projection.between(text, text, decl.lo, decl.hi, decl.lo, decl.hi).expect("default source")
+  var new_table = allocation.table(allocation.local_headers(scope, new_syntax, next).expect("new default headers")).expect("new table")
+  let source = source_projection.between(text, edited, decl.lo, decl.hi, new_decl.lo, new_decl.hi).expect("default source")
   var old_cx = before
   var new_cx = next
   var old_defaults: List[Option[TDefault]] = []
@@ -199,10 +204,9 @@ fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
     let (cx, _, value) = check_fn_inferred_body(old_cx, decl, sigs[0], old_defaults)
     (cx, value)
   } else { check_fn_body(old_cx, decl, sigs[0], old_defaults) }
-  let mapped_sig = relocate.signature(allocation.between(old_table, new_table).expect("preceding allocations"), old_body.sig).expect("main signature")
   let owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
   let main_plan = allocation.body_segment_plan(old_table, new_table, owner,
-    old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, old_body.sig, mapped_sig, old_body.ev_syms).expect("main allocation")
+    old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, sigs[0], nsigs[0], old_body.ev_syms).expect("main allocation")
   let main_view = View { ids: main_plan.ids, positions: source.starts, ends: source.ends, symbols: old_after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
@@ -211,11 +215,12 @@ fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
   let replayed = body_product.assemble(new_cx, main_projected).expect("main assembly")
   let body = main_projected.function
   let (cold, cold_body) = if inferred {
-    let (cx, _, value) = check_fn_inferred(next, decl, nsigs[0])
+    let (cx, _, value) = check_fn_inferred(next, new_decl, nsigs[0])
     (cx, value)
-  } else { check_fn(next, decl, nsigs[0]) }
-  let (_, whole) = check_module(new_base, syntax, map.empty())
-  if len(replayed.diags) != 0 || len(cold.diags) != 0 { panic("default boundary check failed") }
+  } else { check_fn(next, new_decl, nsigs[0]) }
+  let (_, whole) = check_module(new_base, new_syntax, map.empty())
+  let expected_diags = if invalid { 1 } else { 0 }
+  if len(replayed.diags) != expected_diags || len(cold.diags) != expected_diags { panic("default boundary check failed") }
   StateTrial { replayed: replayed, cold: cold, relocated: body, cold_body: cold_body, module_body: whole.fns[0] }
 }
 
@@ -225,7 +230,11 @@ fn default_sample(inferred: Bool, generic: Bool) -> StateTrial !io = {
 pub fn inferred_samples() -> List[StateTrial] !io = {
   let text = "alias Counter = Int\nfn lead(x: Int) = { let y = x + 1\n y }\n" ++
     "fn inferred(x: Counter) = { let z = x + 2\n z }\n" ++
-    "fn caller(x: Int) = inferred(x)\n"
+    "fn caller(x: Int) = inferred(x)\n" ++
+    "fn maker[T](x: T) = (y: T) => x\n" ++
+    "fn consumer(x: Int) = maker(x)\n" ++
+    "fn effect_maker[T, !e](x: T, f: fn(T) -> T !e) = (y: T) => f(x)\n" ++
+    "fn effect_consumer(x: Int) = effect_maker(x, (z: Int) => z)\n"
   let edited = "# 🌅 inferred edit\n" ++ str.replace(text, "let y = x + 1", "let extra = x + 1\n let y = extra")
   let (old_ast, old_diags) = parser.parse_module(text)
   let (new_ast, new_diags) = parser.parse_module(edited)
@@ -239,6 +248,12 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
   }
   let old_decls = module_fns(old_ast)
   let new_decls = module_fns(new_ast)
+  let scope = module_key("inferred-world", "inferred_probe", "inferred_probe", "inferred.dawn")
+  var old_table = allocation.table(allocation.local_headers(scope, old_ast, old_header).expect("old inferred headers")).expect("old inferred table")
+  var new_table = allocation.table(allocation.local_headers(scope, new_ast, new_header).expect("new inferred headers")).expect("new inferred table")
+  let reserved = allocation.compiler_headers("inferred-world").expect("inferred intrinsics")
+  old_table = allocation.combine([old_table, reserved]).expect("old inferred provenance")
+  new_table = allocation.combine([new_table, reserved]).expect("new inferred provenance")
   var old = old_header
   var cold = new_header
   var replayed = new_header
@@ -253,10 +268,20 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
     if i == 0 { replayed = checked } else {
       let delta = replayed.next_id - before.next_id
       if delta != 1 { panic("inferred fixture did not move allocation") }
-      replayed = source_state(replayed, before, after, body, delta, text, edited,
-        old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi)
-      let moved = body_in_source(body, before, after, delta, text, edited,
-        old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi)
+      let key = DeclKey { scope: scope, path: [Named(FunctionDecl, old_decls[i].name)] }
+      let plan = allocation.body_plan(old_table, new_table, key, before.next_id,
+        after.next_id - before.next_id, replayed.next_id, old_sigs[i], new_sigs[i], body.ev_syms).expect("inferred allocation")
+      let source = source_projection.between(text, edited,
+        old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi).expect("inferred source")
+      let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+        assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+        callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+      let saved = body_product.capture(before, after, body).expect("inferred capture")
+      let projected = body_product.project(view, saved, replayed.next_id).expect("inferred projection: " ++ body.name)
+      replayed = body_product.assemble(replayed, projected).expect("inferred assembly")
+      let moved = projected.function
+      old_table = plan.old_allocations
+      new_table = plan.next_allocations
       out = out ++ [StateTrial { replayed: replayed, cold: checked, relocated: moved,
         cold_body: cold_body, module_body: whole.fns[i] }]
     }
@@ -354,14 +379,11 @@ pub fn header_sample() -> HeaderTrial !io = {
       panic("invalid impl method metadata accepted")
     }
   }
-  let intrinsic = DeclKey { scope: module_key("header-world", "compiler", "compiler", "intrinsics"),
-    path: [Named(FunctionDecl, "evidence_pack")] }
-  let reserved = [allocation.entry(intrinsic, NominalId, 0, EV_PACK_ID), allocation.entry(intrinsic, TypeParameter, 0, 0)]
-  old_entries = old_entries ++ reserved
-  new_entries = new_entries ++ reserved
+  let reserved = allocation.compiler_headers("header-world").expect("header intrinsics")
+  let old_table = allocation.combine([allocation.table(old_entries).expect("old local table"), reserved]).expect("old header table")
+  let new_table = allocation.combine([allocation.table(new_entries).expect("new local table"), reserved]).expect("new header table")
   let body_owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
-  let plan = allocation.body_plan(allocation.table(old_entries).expect("old header table"),
-    allocation.table(new_entries).expect("new header table"), body_owner,
+  let plan = allocation.body_plan(old_table, new_table, body_owner,
     before.next_id, after.next_id - before.next_id, next.next_id, saved.sig, nsigs[1], saved.ev_syms).expect("body allocation plan")
   let ids = plan.ids
   if plan.next_id != checked.next_id { panic("body allocation endpoint differs from cold") }

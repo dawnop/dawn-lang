@@ -28,7 +28,9 @@ use check/types.{
 }
 use check/tast.{TFun, TModule}
 use check/cx.{ModExports, cx_new, Cx}
-use check/checker.{check_module, exports_of}
+use check/checker.{check_module, check_module_headers, check_module_bodies, exports_of}
+use check/allocation
+use check/identity.{module_key}
 use ir/interp.{eval_comptime, note_direct_fn, note_trait_fn, CtOut, ct_default}
 use ir/core.{VStr, VBool}
 use front/parser
@@ -105,7 +107,10 @@ pub type StdCtx = {
   # already holds them is a duplicate-impl error per impl: 15 of the 17 that
   # survived the identity fix, all of them saying a std module conflicts with
   # itself.
-  impls_before: Map[String, Impls]
+  impls_before: Map[String, Impls],
+  # Captured at registration time, before inferred bodies seal signatures.
+  # The local std world is rebound only when an analysis owner is constructed.
+  header_origins: Map[String, Option[allocation.Table]]
 }
 
 pub fn prelude_names() -> List[String] =
@@ -397,6 +402,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
   var nid = first_minted_id()
   var mods: List[(String, Cx, TModule, CtOut)] = []
   var srcs: List[(String, String, Module)] = []
+  var header_origins: Map[String, Option[allocation.Table]] = map.empty()
   var dir_modules: Map[String, String] = map.empty()
   var impls_before: Map[String, Impls] = map.empty()
   for n in names {
@@ -434,7 +440,20 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
       impl_table: impls
     }
     # no std_fns here: std cannot implicitly import itself
-    let (cx1, tm) = check_module(cx, m, exports)
+    let headers = check_module_headers(cx, m, exports)
+    var header_origin: Option[allocation.Table] = None
+    if len(headers.cx.diags) == 0 {
+      let scope = module_key("std", mod_path, mod_path, "")
+      match allocation.local_headers(scope, m, headers.cx) {
+        Some(entries) -> match allocation.local_impl_headers(scope, m, headers.cx, headers.impl_sigs) {
+          Some(methods) -> { header_origin = allocation.table(entries ++ methods) }
+          None -> ()
+        }
+        None -> ()
+      }
+    }
+    header_origins = map.insert(header_origins, mod_path, header_origin)
+    let (cx1, tm) = check_module_bodies(headers)
     if len(cx1.diags) > 0 {
       return Err(StdLoadError {
         origin: origin, declared: declared, why: StdModuleCheck(mod_path, cx1.diags[0].msg)
@@ -511,7 +530,8 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
       StdEmbedded -> None
     },
     dir_modules: dir_modules,
-    impls_before: impls_before
+    impls_before: impls_before,
+    header_origins: header_origins
   })
 }
 
