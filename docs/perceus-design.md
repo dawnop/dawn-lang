@@ -932,3 +932,26 @@ get-child-again N−1 mutant 则把 direct/record 分别精确打回 36.6%/35.3%
 - **R4 — 与 `array_push` 的水位线规则冲突。** `buf->high` 说「这个槽从没属于过任何
   版本」，rc 说「有几个人指着我」——两条独立的唯一性判据，刀 4 要把它们对齐而不是
   各说各话。缓解：刀 4 之前不动 `array_push`。
+
+## 10. 2026-09-07：列表临时 builder 必须进入 RC 账本（#94）
+
+`emitc` 在遍历列表元素前创建原生 Array，但该临时值不是 Core binding。元素中的
+panic/return/break/continue 可以离开构造现场，RC 看不见这份所有权，无法安放 drop；
+ASan 已在 #93 的新增回归中抓到数组头泄漏，普通输出对拍看不出来。
+
+本刀在 native RC 重写入口把 `CListLit` 展开成显式 Array binding、逐元素
+`array_push` 赋值及最后的 `std/pvec.from_array` 调用，再交回已有 `rw`。这样 builder
+和已求值元素走既有作用域、跳转和异常清理，不给 C emitter 新增另一套清理栈。转换
+只在 native RC 路径上发生，不改变 JVM Core、comptime 列表表示或 std 的公开接口。
+
+仅字面量/局部读取及其 box/unbox/dup、构造器、元组、列表与闭包捕获树组成的列表保留原快速路径：它们不能调用用户
+代码、panic 或跳转。其余形状保守展开，不尝试推断任意函数不会抛错。最初全展开的
+原型让 Core golden 增加数千行；叶子负控确保修复不把该膨胀带到普通列表常量。
+
+验证包含列表首/非首元素退出、先前引用元素、嵌套列表、两类循环跳转、return、panic，
+以及成功构造和元素求值顺序。全部走正式双后端/ASan 门，不新增 known-red。旧 emitter
+的隐式 builder 路径仍服务上述安全叶子与未经过 RC 的内部表示。
+
+614 项 selfhost 测试及自举固定点 B == C 通过；定向双后端/ASan 覆盖退出与正常
+求值。Core golden 按惯例重录：自身哈希以及 std.bytes/std.gpu 的 native RC 文本
+发生预期变化，其他文本语料不变。#93 的列表取分支现在也直接进入 native 验收。

@@ -265,7 +265,13 @@
 
 ## SEM-10 — P2 — trait/impl 与具名 effect 不能组合（已修）
 
-<!-- audit-anchor: absent selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
+<!-- audit-anchor: present selfhost/src/check/passes.dawn | trait methods cannot declare the effect -->
+
+> **台账订正（2026-09-07）：** 总纲漏迁移为 fixed，且删除旧拒绝诊断的 anchor 被反写成
+> absent，两错抵消使门禁保持绿。恢复「缺陷存在时诊断 present」的固定方向并同步总纲。
+> 门禁补充：条目标题明确写「已修」时，当前状态必须是 fixed；只读标题，不把下文历史
+> open 记录当作当前状态。负控重放两错同时恢复，必须单独命中标题/状态一致性断言；
+> 单改 anchor 和恢复源码诊断仍各自由原有树证据断言负责。不改变历史冻结层。
 
 > **后续处置（2026-08-20，RX-10-B 刀 5）：已修，关账。** 本条要的 ABI 裁决在
 > [`effect-params-design.md`](../effect-params-design.md) 决策 5（规则丙）作出并随刀 5 落地：

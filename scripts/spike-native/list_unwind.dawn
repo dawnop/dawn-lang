@@ -1,0 +1,54 @@
+# An unfinished builder owns earlier elements across every way of leaving
+# a later element. No output difference alone can detect the leak (#94).
+fn stop() -> Never = panic("stop")
+
+fn fail(n: Int) -> Int = {
+  let xs: List[String] = [to_string(n), stop()]
+  len(xs)
+}
+
+fn ret(n: Int) -> Int = {
+  let xs: List[String] = [to_string(n), { return 7 }]
+  len(xs)
+}
+
+fn jumps() -> Int = {
+  var total = 0
+  for n in 0..3 {
+    while true {
+      let xs: List[List[String]] = [[to_string(n)], { break }]
+      total = total + len(xs)
+    }
+    total = total + 1
+  }
+  for n in 0..3 {
+    let xs: List[List[String]] = [[to_string(n)], { continue }]
+    total = total + len(xs)
+  }
+  total
+}
+
+fn conditional(take: Bool, n: Int) -> Int = {
+  let xs: List[String] = [to_string(n), if take { stop() } else { "ok" }]
+  len(xs)
+}
+
+fn caught(f: fn() -> Int) -> String !io =
+  match catch_panic(f) {
+    Err(e) -> e.message
+    Ok(v) -> to_string(v)
+  }
+
+pub fn main() -> Unit !io = {
+  println(caught(() => fail(19)))
+  println(to_string(ret(23)))
+  println(to_string(jumps()))
+  println(caught(() => conditional(true, 29)))
+  println(to_string(conditional(false, 31)))
+  var n = 1
+  let xs = [n, {
+    n = 9
+    2
+  }, n]
+  println(to_string(xs))
+}

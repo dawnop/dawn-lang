@@ -103,10 +103,10 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（85）
+#### 当前 fixed（86）
 
 - 语法（18）：`SYN-01`–`SYN-16`、`SYN-18`、`SYN-19`。
-- 语义（13）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-11`–`SEM-18`。
+- 语义（14）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-10`–`SEM-18`。
 - 架构（6）：`ARC-03`–`ARC-06`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（18）：`LIB-01`–`LIB-15`、`LIB-17`–`LIB-19`。
@@ -118,18 +118,18 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（6）
+#### 当前 open（5）
 
 - 语法（1）：`SYN-17`。
-- 语义（2）：`SEM-09`、`SEM-10`。
+- 语义（1）：`SEM-09`。
 - 架构（3）：`ARC-07`、`ARC-09`、`ARC-10`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**85 fixed + 6 partial + 6 open + 2 retracted = 99**。逐专题矩阵：
-语法 **18/0/1/0**、语义 **13/1/2/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
+当前计数自检：**86 fixed + 6 partial + 5 open + 2 retracted = 99**。逐专题矩阵：
+语法 **18/0/1/0**、语义 **14/1/1/2**、架构 **6/4/3/0**、工具链 **17/0/0/0**、
 库 **18/1/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
