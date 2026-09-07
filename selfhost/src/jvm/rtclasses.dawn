@@ -41,9 +41,9 @@ use jvm/ops.{
 
 pub fn obj() -> String = "java/lang/Object"
 
-pub fn fn_iface(arity: Int) -> String = "dawn/rt/Fn" ++ to_string(arity)
+pub fn fn_iface(arity: Int) -> String = "dawn/rt/Fn${to_string(arity)}"
 
-pub fn tuple_class(arity: Int) -> String = "dawn/rt/Tuple" ++ to_string(arity)
+pub fn tuple_class(arity: Int) -> String = "dawn/rt/Tuple${to_string(arity)}"
 
 pub fn erased_apply_desc(arity: Int) -> String = {
   var ps = ""
@@ -481,7 +481,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
   var i = 0
   while i < n {
-    Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, "_${to_string(i)}", "Ljava/lang/Object;")
     i = i + 1
   }
   var ps = ""
@@ -495,7 +495,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   while i < n {
     init.visitVarInsn(OP_ALOAD, 0)
     init.visitVarInsn(OP_ALOAD, i + 1)
-    init.visitFieldInsn(OP_PUTFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    init.visitFieldInsn(OP_PUTFIELD, cls, "_${to_string(i)}", "Ljava/lang/Object;")
     i = i + 1
   }
   init.visitInsn(OP_RETURN)
@@ -516,9 +516,9 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   i = 0
   while i < n {
     eq.visitVarInsn(OP_ALOAD, 0)
-    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_${to_string(i)}", "Ljava/lang/Object;")
     eq.visitVarInsn(OP_ALOAD, 2)
-    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_${to_string(i)}", "Ljava/lang/Object;")
     eq.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
     eq.visitJumpInsn(OP_IFEQ, no)
     i = i + 1
@@ -538,7 +538,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
     hc.visitIntInsn(OP_BIPUSH, 31)
     hc.visitInsn(OP_IMUL)
     hc.visitVarInsn(OP_ALOAD, 0)
-    hc.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    hc.visitFieldInsn(OP_GETFIELD, cls, "_${to_string(i)}", "Ljava/lang/Object;")
     hc.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     hc.visitInsn(OP_IADD)
     i = i + 1
@@ -555,7 +555,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   while i < n {
     if i > 0 { append_const(ts, ", ") }
     ts.visitVarInsn(OP_ALOAD, 0)
-    ts.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    ts.visitFieldInsn(OP_GETFIELD, cls, "_${to_string(i)}", "Ljava/lang/Object;")
     ts.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
       "(Ljava/lang/Object;)Ljava/lang/String;", false)
     ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
@@ -612,14 +612,14 @@ pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
 ## test runner). An empty table would answer `java/lang/Object` to everything,
 ## which is the one answer that can be wrong.
 pub fn jdk_supers() -> List[String] = [
-  PANIC_CLASS ++ " java/lang/Error",
+  "${PANIC_CLASS} java/lang/Error",
   # `gen_bracket` tells the discard poison from a failure, so its handler
   # merges this class with `java/lang/Throwable`
-  CTL_DISCARD_CLASS ++ " java/lang/Error",
+  "${CTL_DISCARD_CLASS} java/lang/Error",
   "java/lang/Error java/lang/Throwable",
   "java/lang/Exception java/lang/Throwable",
   "java/lang/RuntimeException java/lang/Exception",
-  "java/lang/Throwable " ++ obj(),
+  "java/lang/Throwable ${obj()}",
 ]
 
 pub const BYTES_CLASS: String = "dawn/rt/Bytes"
@@ -1484,16 +1484,16 @@ pub fn gen_gpu_class(supers: List[String]) -> Bytes !io = {
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, GPU_CLASS, obj())
   let res = "LResult;"
   let arr = "L" ++ ARRAY_CLASS ++ ";"
-  gen_gpu_refusal(cw, "gpu_load_module_host", "([B)" ++ res)
-  gen_gpu_refusal(cw, "gpu_alloc_host", "(J)" ++ res)
+  gen_gpu_refusal(cw, "gpu_load_module_host", "([B)${res}")
+  gen_gpu_refusal(cw, "gpu_alloc_host", "(J)${res}")
   gen_gpu_refusal(cw, "gpu_upload_host", "(J" ++ arr ++ ")" ++ res)
-  gen_gpu_refusal(cw, "gpu_download_host", "(JJ)" ++ res)
-  gen_gpu_refusal(cw, "gpu_upload_bytes_host", "(J[B)" ++ res)
-  gen_gpu_refusal(cw, "gpu_download_bytes_host", "(JJ)" ++ res)
+  gen_gpu_refusal(cw, "gpu_download_host", "(JJ)${res}")
+  gen_gpu_refusal(cw, "gpu_upload_bytes_host", "(J[B)${res}")
+  gen_gpu_refusal(cw, "gpu_download_bytes_host", "(JJ)${res}")
   gen_gpu_refusal(cw, "gpu_launch_host", "(JLjava/lang/String;JJJ" ++ arr ++ ")" ++ res)
-  gen_gpu_refusal(cw, "gpu_module_global_host", "(JLjava/lang/String;)" ++ res)
-  gen_gpu_refusal(cw, "gpu_free_host", "(J)" ++ res)
-  gen_gpu_refusal(cw, "gpu_sync_host", "()" ++ res)
+  gen_gpu_refusal(cw, "gpu_module_global_host", "(JLjava/lang/String;)${res}")
+  gen_gpu_refusal(cw, "gpu_free_host", "(J)${res}")
+  gen_gpu_refusal(cw, "gpu_sync_host", "()${res}")
   let cv = open_static(cw, "gpu_close_host", "()L" ++ UNIT_CLASS ++ ";")
   return_unit(cv)
   close_mv(cv)
@@ -1511,7 +1511,7 @@ fn gen_gpu_refusal(cw: ClassWriter, name: String, desc: String) -> Unit !io = {
   m.visitTypeInsn(OP_NEW, FERR_CLASS)
   m.visitInsn(OP_DUP)
   m.visitLdcInsn("gpu.unsupported_backend")
-  m.visitLdcInsn(name ++ ": the GPU runtime is not available on the JVM backend")
+  m.visitLdcInsn("${name}: the GPU runtime is not available on the JVM backend")
   m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
   m.visitMethodInsn(OP_INVOKESPECIAL, FERR_CLASS, "<init>",
     "(Ljava/lang/String;Ljava/lang/String;LOption;)V", false)
@@ -2099,7 +2099,7 @@ pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
   close_mv(init)
 
   # array_new() -> the empty array
-  let nv = open_static(cw, "array_new", "()" ++ array_wrap_desc())
+  let nv = open_static(cw, "array_new", "()${array_wrap_desc()}")
   nv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
   nv.visitInsn(OP_DUP)
   nv.visitInsn(OP_ICONST_0)
@@ -2160,7 +2160,7 @@ fn gen_array_java(cw: ClassWriter) -> Unit !io = {
   # array_of_java(List) -> Array: push each element, so the result is an
   # ordinary array with an ordinary watermark
   let ov = open_static(cw, "array_of_java", "(L" ++ jlist ++ ";)" ++ array_wrap_desc())
-  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new", "()" ++ array_wrap_desc(),
+  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new", "()${array_wrap_desc()}",
     false)
   ov.visitVarInsn(OP_ASTORE, 1)
   ov.visitInsn(OP_ICONST_0)
@@ -3244,7 +3244,7 @@ fn return_unit(m: MethodVisitor) -> Unit !io = {
 ## The per-trait dictionary interface name: dawn/tr/<owner$…$>Name.
 pub fn owner_prefix(owner: Option[String]) -> String =
   match owner {
-    Some(o) -> join(str.split(o, "/"), "$") ++ "$"
+    Some(o) -> "${join(str.split(o, "/"), "$")}$"
     None -> ""
   }
 
@@ -3356,7 +3356,7 @@ pub fn gen_asm_class() -> Bytes !io = {
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, ASM_CLASS, obj())
 
   # plain(flags) = new ClassWriter(flags)
-  let p = open_static(cw, "plain", "(I)" ++ cwd)
+  let p = open_static(cw, "plain", "(I)${cwd}")
   p.visitTypeInsn(OP_NEW, cwc)
   p.visitInsn(OP_DUP)
   p.visitVarInsn(OP_ILOAD, 0)
@@ -3550,7 +3550,7 @@ pub fn gen_asm_writer_class() -> Bytes !io = {
   so.visitVarInsn(OP_ALOAD, 4)
   so.visitInsn(OP_ICONST_0)
   so.visitVarInsn(OP_ILOAD, 5)
-  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(II)" ++ s, false)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(II)${s}", false)
   so.visitVarInsn(OP_ALOAD, 1)
   so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "equals", "(Ljava/lang/Object;)Z", false)
   so.visitJumpInsn(OP_IFEQ, next)
@@ -3558,7 +3558,7 @@ pub fn gen_asm_writer_class() -> Bytes !io = {
   so.visitVarInsn(OP_ILOAD, 5)
   so.visitInsn(OP_ICONST_1)
   so.visitInsn(OP_IADD)
-  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(I)" ++ s, false)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(I)${s}", false)
   so.visitInsn(OP_ARETURN)
   so.visitLabel(next)
   so.visitVarInsn(OP_ILOAD, 3)
@@ -3969,7 +3969,7 @@ fn gen_ctl_drive(cw: ClassWriter) -> Unit !io = {
 ## Push `TOP.get()` as a `Ctl`.
 fn ctl_top_get(m: MethodVisitor) -> Unit !io = {
   m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "TOP", tl_desc())
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()${obj_desc()}", false)
   m.visitTypeInsn(OP_CHECKCAST, CTL_CLASS)
   ()
 }
@@ -3994,14 +3994,14 @@ fn gen_ctl_yield(cw: ClassWriter) -> Unit !io = {
   # `DISCARDING` field for why an unwind may not suspend.
   let not_discarding = Label.new()
   m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()${obj_desc()}", false)
   m.visitJumpInsn(OP_IFNULL, not_discarding)
   throw_panic(m, "dawn: a `ctl` operation was raised while a continuation " ++
       "was being discarded")
   m.visitLabel(not_discarding)
   m.visitVarInsn(OP_LLOAD, 0)
   m.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "lookup",
-    "(J)" ++ ctl_desc(), false)
+    "(J)${ctl_desc()}", false)
   m.visitVarInsn(OP_ASTORE, 5)
   m.visitVarInsn(OP_ALOAD, 5)
   m.visitVarInsn(OP_ALOAD, 2)
@@ -4059,7 +4059,7 @@ fn gen_ctl_yield(cw: ClassWriter) -> Unit !io = {
 ## projection, and was called back after its installation returned.
 fn gen_ctl_lookup(cw: ClassWriter) -> Unit !io = {
   let m = Asm.methodOn(cw, ACC_PRIVATE + ACC_STATIC, "lookup",
-    "(J)" ++ ctl_desc()).expect("mv")
+    "(J)${ctl_desc()}").expect("mv")
   m.visitCode()
   ctl_top_get(m)
   m.visitVarInsn(OP_ASTORE, 2)
@@ -4184,7 +4184,7 @@ fn gen_ctl_discard(cw: ClassWriter) -> Unit !io = {
   m.visitFieldInsn(OP_PUTFIELD, CTL_CLASS, "prev", ctl_desc())
   ctl_top_set_local(m, 0)
   m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()" ++ obj_desc(), false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, THREAD_LOCAL, "get", "()${obj_desc()}", false)
   m.visitVarInsn(OP_ASTORE, 1)
   m.visitFieldInsn(OP_GETSTATIC, CTL_CLASS, "DISCARDING", tl_desc())
   m.visitVarInsn(OP_ALOAD, 0)

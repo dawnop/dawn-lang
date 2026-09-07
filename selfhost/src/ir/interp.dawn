@@ -275,7 +275,7 @@ fn render_frame(frame: CtFrame) -> String =
 fn render_call_chain(failure: CtFailure) -> String = {
   if len(failure.frames) == 0 { return "" }
   var lines = ["comptime call chain (innermost first):"]
-  for frame in failure.frames { lines = lines ++ ["  at " ++ render_frame(frame)] }
+  for frame in failure.frames { lines = lines ++ ["  at ${render_frame(frame)}"] }
   if failure.truncated { lines = lines ++ ["  ... outer calls omitted"] }
   join(lines, "\n")
 }
@@ -293,7 +293,7 @@ fn failure_diag(failure0: CtFailure, lo: Int, hi: Int) -> Diag = {
     else if failure.hint == "" { chain }
     else { failure.hint ++ "\n\n" ++ chain }
   Diag {
-    msg: "comptime: " ++ failure.msg,
+    msg: "comptime: ${failure.msg}",
     lo: origin.lo,
     hi: origin.hi,
     hint: hint
@@ -513,7 +513,7 @@ fn subject_key(t: Ty) -> String =
     TyMap(_, _) -> "Map"
     TySet(_) -> "Set"
     TyArray(_) -> "Array"
-    TyTuple(es) -> "Tup" ++ to_string(len(es))
+    TyTuple(es) -> "Tup${to_string(len(es))}"
     _ -> ty_key(t)
   }
 
@@ -1104,7 +1104,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # a refusal would make that fold a diagnostic instead of an answer.
     Ok((st, env, ev_append_value(args[0], args[1])))
   } else if name == "panic" {
-    cerr(st, env, "panicked: " ++ as_str(args[0]))
+    cerr(st, env, "panicked: ${as_str(args[0])}")
   } else if name == "todo" {
     cerr(st, env, "panicked: not yet implemented")
   } else if name == "expect" {
@@ -1112,7 +1112,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     if adt_of(icx.adts, aid).ctors[ci].name == "Some" {
       Ok((st, env, fields[0]))
     } else {
-      cerr(st, env, "panicked: " ++ as_str(args[1]))
+      cerr(st, env, "panicked: ${as_str(args[1])}")
     }
   } else if name == "unwrap_or" {
     let (aid, ci, fields) = as_adt(args[0])
@@ -3041,7 +3041,7 @@ fn fake_find_class(fqcn: String) -> Option[JClass] !io =
 fn fake_class_info(fqcn: String) -> JClass !io =
   match fake_find_class(fqcn) {
     Some(j) -> j
-    None -> panic("fake jsig: unknown class " ++ fqcn)
+    None -> panic("fake jsig: unknown class ${fqcn}")
   }
 
 fn fake_methods_of(fqcn: String) -> List[JMethod] !io =

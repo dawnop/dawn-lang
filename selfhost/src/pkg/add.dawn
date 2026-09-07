@@ -37,7 +37,7 @@ fn render_plan_manifest(path: String, text: String, ds: List[diagnostic.Diag]) -
 
 ## The added package's manifest, validated with rendered diagnostics.
 fn read_pkg(dir: String) -> Result[ManifestV, String] !Fs = {
-  let path = dir ++ "/dawn.toml"
+  let path = "${dir}/dawn.toml"
   let text = match io.read_file(path) {
     Ok(t) -> t
     Err(_) -> return Err("no dawn.toml in " ++ dir ++ ": not a Dawn package")
@@ -90,12 +90,12 @@ fn edit_url(
   let key = as_name.unwrap_or(pm.name)
   # a path entry under the same as_name gives way
   var doc = remove(doc0, Some("deps"), key)
-  doc = set_string(doc, Some("deps." ++ key), "url", spec)
-  doc = set_string(doc, Some("deps." ++ key), "version", ver)
-  doc = set_string(doc, Some("deps." ++ key), "hash", hash)
+  doc = set_string(doc, Some("deps.${key}"), "url", spec)
+  doc = set_string(doc, Some("deps.${key}"), "version", ver)
+  doc = set_string(doc, Some("deps.${key}"), "hash", hash)
   match subdir {
-    Some(s) -> { doc = set_string(doc, Some("deps." ++ key), "subdir", s) }
-    None -> { doc = remove(doc, Some("deps." ++ key), "subdir") }
+    Some(s) -> { doc = set_string(doc, Some("deps.${key}"), "subdir", s) }
+    None -> { doc = remove(doc, Some("deps.${key}"), "subdir") }
   }
   Ok(Edit {
     doc: doc,
@@ -129,7 +129,7 @@ fn edit_path(
   }
   let key = as_name.unwrap_or(pm.name)
   # a url table under the same as_name gives way
-  var doc = remove_table(doc0, "deps." ++ key)
+  var doc = remove_table(doc0, "deps.${key}")
   doc = set_string(doc, Some("deps"), key, spec)
   Ok(Edit {
     doc: doc,
@@ -144,7 +144,7 @@ pub fn add_dependency(
   subdir: Option[String],
   as_name: Option[String]
 ) -> Result[String, String] !Fs !Proc !Env = {
-  let mf_path = project_dir ++ "/dawn.toml"
+  let mf_path = "${project_dir}/dawn.toml"
   let text = match io.read_file(mf_path) {
     Ok(t) -> t
     Err(_) ->
@@ -206,7 +206,7 @@ pub fn run_add(rest: List[String]) -> Result[String, String] !Fs !Proc !Env = {
   while i < len(rest) {
     let a = rest[i]
     if a == "--subdir" || a == "--as" || a == "--dir" {
-      if i + 1 >= len(rest) { return Err(a ++ " needs a value") }
+      if i + 1 >= len(rest) { return Err("${a} needs a value") }
       let v = rest[i + 1]
       if a == "--subdir" { subdir = Some(v) }
       if a == "--as" { as_name = Some(v) }

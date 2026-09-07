@@ -232,7 +232,7 @@ pub fn ev_assoc_local_name(vid: Int, tid: Int, name: String) -> String =
 ## variable's id, which `resolve_eff_at` hands out once per signature, so two
 ## signatures spelling their variable `e` do not share a name; `$` keeps it
 ## unspellable like every evidence local.
-pub fn ev_var_local_name(vid: Int) -> String = "ev\$v\$" ++ to_string(vid)
+pub fn ev_var_local_name(vid: Int) -> String = "ev\$v\$${to_string(vid)}"
 
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
@@ -398,7 +398,7 @@ fn resolves_to_value(cx: Cx, q: String) -> Bool =
 ## in the one position where a missing `use ... as q` is just as likely. The
 ## type and pattern positions have said "module alias" all along.
 fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx =
-  cerr_h(cx, "undefined variable or module alias: " ++ q, lo, hi,
+  cerr_h(cx, "undefined variable or module alias: ${q}", lo, hi,
     match moved_or_suggest(cx, q, local_names(cx) ++ fn_pool(cx)) {
       Some(h) -> h
       None -> "a qualified access needs a whole-module import in scope: `use <path> as " ++
@@ -1369,7 +1369,7 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
         ("functions cannot be compared", "compare the values they produce, not the functions")
       }
     TyUnit ->
-      ("`Unit` has no " ++ rel,
+      ("`Unit` has no ${rel}",
         "there is one Unit and it carries no information, so the answer would be a constant")
     TyFloat ->
       ("`Float` has no hash",
@@ -1520,7 +1520,7 @@ pub fn check_unary(
   match op {
     OpNot -> {
       if t != TyBool && not is_errorish(t) {
-        let cx1 = cerr(cx, "`not` expects Bool, got " ++ ty_show(cx.adts, t), olo, ohi)
+        let cx1 = cerr(cx, "`not` expects Bool, got ${ty_show(cx.adts, t)}", olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, TyBool, XUnary(UNot, operand, lo, hi, TyBool))
@@ -1528,7 +1528,7 @@ pub fn check_unary(
     }
     OpNeg -> {
       if not is_numeric(t) && not is_errorish(t) {
-        let cx1 = cerr(cx, "negation expects a number, got " ++ ty_show(cx.adts, t), olo, ohi)
+        let cx1 = cerr(cx, "negation expects a number, got ${ty_show(cx.adts, t)}", olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, t, XUnary(UNeg, operand, lo, hi, t))
@@ -1536,7 +1536,7 @@ pub fn check_unary(
     }
     OpBnot -> {
       if t != TyInt && not is_errorish(t) {
-        let cx1 = cerr(cx, "`~` expects Int, got " ++ ty_show(cx.adts, t), olo, ohi)
+        let cx1 = cerr(cx, "`~` expects Int, got ${ty_show(cx.adts, t)}", olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, TyInt, XUnary(UBnot, operand, lo, hi, TyInt))
@@ -1712,7 +1712,7 @@ pub fn check_binary_typed(
   match op {
     OpAdd | OpSub | OpMul | OpDiv | OpMod -> {
       if not is_numeric(lt) {
-        return (cerr(cx, "arithmetic expects numbers, left side is " ++ ty_show(cx.adts, lt),
+        return (cerr(cx, "arithmetic expects numbers, left side is ${ty_show(cx.adts, lt)}",
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if lt != rt {
@@ -1728,11 +1728,11 @@ pub fn check_binary_typed(
     }
     OpBand | OpBor | OpBxor | OpShl | OpShr | OpUshr -> {
       if lt != TyInt {
-        return (cerr(cx, "bitwise operators expect Int, left side is " ++ ty_show(cx.adts, lt),
+        return (cerr(cx, "bitwise operators expect Int, left side is ${ty_show(cx.adts, lt)}",
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyInt {
-        return (cerr(cx, "bitwise operators expect Int, right side is " ++ ty_show(cx.adts, rt),
+        return (cerr(cx, "bitwise operators expect Int, right side is ${ty_show(cx.adts, rt)}",
           rlo, rhi), TyError, node(no_wit(), TyError))
       }
       (cx, TyInt, node(no_wit(), TyInt))
@@ -1795,11 +1795,11 @@ pub fn check_binary_typed(
     }
     OpAnd | OpOr -> {
       if lt != TyBool {
-        return (cerr(cx, "logical operators expect Bool, left side is " ++ ty_show(cx.adts, lt),
+        return (cerr(cx, "logical operators expect Bool, left side is ${ty_show(cx.adts, lt)}",
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyBool {
-        return (cerr(cx, "logical operators expect Bool, right side is " ++ ty_show(cx.adts, rt),
+        return (cerr(cx, "logical operators expect Bool, right side is ${ty_show(cx.adts, rt)}",
           rlo, rhi), TyError, node(no_wit(), TyError))
       }
       (cx, TyBool, node(no_wit(), TyBool))
@@ -2212,11 +2212,11 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
             lo, hi), TyError, XError(lo, hi))
         }
       }
-      (cerr_h(cx, "`?` needs an Option or Result, got " ++ ty_show(cx.adts, ot), lo, hi,
+      (cerr_h(cx, "`?` needs an Option or Result, got ${ty_show(cx.adts, ot)}", lo, hi,
         "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
         TyError, XError(lo, hi))
     }
-    _ -> (cerr_h(cx, "`?` needs an Option or Result, got " ++ ty_show(cx.adts, ot), lo, hi,
+    _ -> (cerr_h(cx, "`?` needs an Option or Result, got ${ty_show(cx.adts, ot)}", lo, hi,
       "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
       TyError, XError(lo, hi))
   }
@@ -2293,10 +2293,10 @@ pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, 
         } else {
           "`!` unwraps an Option and panics on None; this value is not an Option"
         }
-        (cerr_h(cx, "`!` needs an Option, got " ++ ty_show(cx.adts, ot), lo, hi, hint),
+        (cerr_h(cx, "`!` needs an Option, got ${ty_show(cx.adts, ot)}", lo, hi, hint),
           TyError, XError(lo, hi))
       }
-    _ -> (cerr_h(cx, "`!` needs an Option, got " ++ ty_show(cx.adts, ot), lo, hi,
+    _ -> (cerr_h(cx, "`!` needs an Option, got ${ty_show(cx.adts, ot)}", lo, hi,
       "`!` unwraps an Option and panics on None; this value is not an Option"),
       TyError, XError(lo, hi))
   }
@@ -2337,7 +2337,7 @@ pub fn check_field_access_typed(
     _ -> false
   }
   if not is_record {
-    return (cerr_o(cx, "`.` field access needs a record value, got " ++ ty_show(cx.adts, tt),
+    return (cerr_o(cx, "`.` field access needs a record value, got ${ty_show(cx.adts, tt)}",
       flo, fhi, bad_hint), TyError, XError(lo, hi))
   }
   match tt {
@@ -2359,7 +2359,7 @@ pub fn check_field_access_typed(
         for f in ci.fields { fnames = fnames ++ [f.name] }
         let hint = match suggest.hint(fname, fnames) {
           Some(h) -> h
-          None -> "fields: " ++ join(fnames, ", ")
+          None -> "fields: ${join(fnames, ", ")}"
         }
         return (cerr_h(cx, "`" ++ a.name ++ "` has no field `" ++ fname ++ "`", flo, fhi, hint),
           TyError, XError(lo, hi))
@@ -2565,7 +2565,7 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
           let msg = match scrut {
             TyTuple(stys) -> "this pattern has " ++ to_string(len(elems)) ++
               " elements but the scrutinee is " ++ ty_show(cx1.adts, scrut)
-            _ -> "tuple pattern does not match scrutinee type " ++ ty_show(cx1.adts, scrut)
+            _ -> "tuple pattern does not match scrutinee type ${ty_show(cx1.adts, scrut)}"
           }
           let hint = match scrut {
             TyTuple(stys) -> "a tuple pattern must bind exactly " ++ to_string(len(stys)) ++
@@ -2856,7 +2856,7 @@ fn check_ctor_pattern(
   var cx1 = cx
   let key = match map.get(cx1.ctors_by_name, cname) {
     None -> {
-      cx1 = cerr_o(cx1, "undefined constructor in pattern: " ++ cname, nlo, nhi,
+      cx1 = cerr_o(cx1, "undefined constructor in pattern: ${cname}", nlo, nhi,
         suggest.hint(cname, map.keys(cx1.ctors_by_name)))
       # still check subpatterns so their bindings exist (as TyError)
       for a in pargs {
@@ -2966,7 +2966,7 @@ fn check_ctor_pattern_at(
         for f in ci.fields { fnames = fnames ++ [f.name] }
         let hint = match suggest.hint(an, fnames) {
           Some(h) -> h
-          None -> "constructor: " ++ ctor_render(cx1.adts, ci)
+          None -> "constructor: ${ctor_render(cx1.adts, ci)}"
         }
         cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
           a.nlo, a.nhi, hint)
@@ -3008,7 +3008,7 @@ fn check_ctor_pattern_at(
   }
   if len(pargs) > n {
     cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has " ++ to_string(n) ++ " field(s), the pattern names " ++
-        to_string(len(pargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+        to_string(len(pargs)), lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
   } else if not has_rest {
     var missing: List[String] = []
     var k = 0
@@ -3918,7 +3918,7 @@ fn eta_bounded_fn_value(
   var args: List[TExpr] = []
   var j = 0
   for pt in ips {
-    let pn = "eta\$" ++ to_string(j)
+    let pn = "eta\$${to_string(j)}"
     let (cxd, sid) = declare(cx1, pn, pt, false, lo, hi)
     cx1 = cxd
     psyms = psyms ++ [sid]
@@ -4030,7 +4030,7 @@ pub fn check_ctor_value(
   if len(eps) != len(params) {
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
         " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi,
-      "constructor: " ++ ctor_render(cx.adts, ci)), TyError, XError(lo, hi))
+      "constructor: ${ctor_render(cx.adts, ci)}"), TyError, XError(lo, hi))
   }
   if len(a.tparams) == 0 {
     let t0 = TyFn(params, ret, EPure)
@@ -4667,7 +4667,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       let (cx1, ct, cndx) = check_expr(cx, cond, no_expected())
       var cx2 = cx1
       if ct != TyBool && not is_errorish(ct) {
-        cx2 = cerr(cx2, "if condition must be Bool, got " ++ ty_show(cx2.adts, ct),
+        cx2 = cerr(cx2, "if condition must be Bool, got ${ty_show(cx2.adts, ct)}",
           e_lo(cond), e_hi(cond))
       }
       let (cx3, tt, thnx) = check_expr(cx2, thn, expected)
@@ -4811,7 +4811,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         return (cx3, TyError, XError(lo, hi))
       }
       let (cx2, w) = resolve_witness(cx1, INDEX_ID, tt, lo, hi,
-        "indexing a " ++ ty_show(cx1.adts, tt))
+        "indexing a ${ty_show(cx1.adts, tt)}")
       match w {
         None -> {
           let (cx3, _, _) = check_expr(cx2, index, no_expected())
@@ -4973,11 +4973,11 @@ fn unwrap_msg(cx: Cx, operand: Expr, lo: Int, hi: Int) -> String = {
       match recv {
         ECtor(rname, _, _, _, _, _, _, _) -> Some(rname ++ "." ++ mname ++ "()")
         EVar(rname, _, _) -> Some(rname ++ "." ++ mname ++ "()")
-        _ -> Some(mname ++ "()")
+        _ -> Some("${mname}()")
       }
     # a named call: `f(x)!`. A construction (`Some(x)!`) is also an EApply now,
     # and deliberately not named here -- the panic text stays what it was.
-    EApply(EVar(callee, _, _), _, _, _) -> Some(callee ++ "()")
+    EApply(EVar(callee, _, _), _, _, _) -> Some("${callee}()")
     _ -> None
   }
   match desc {
@@ -5217,7 +5217,7 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
       match lookup_fn_sig(cx1, name) {
         Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
         None ->
-          (cerr_o(cx1, "undefined variable: " ++ name, lo, hi,
+          (cerr_o(cx1, "undefined variable: ${name}", lo, hi,
             moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1))),
             TyError, XError(lo, hi))
       }
@@ -6220,7 +6220,7 @@ fn check_control_arm(
     cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
         " parameter(s) and a resume binder, but operation `" ++ a.name ++ "` declares " ++
         to_string(len(fptys)), a.nlo, a.nhi,
-      "the binder is the continuation, not a parameter: " ++ ty_show(cx1.adts, field_ty))
+      "the binder is the continuation, not a parameter: ${ty_show(cx1.adts, field_ty)}")
   }
   let k_ty = TyFn([fret], answer, cont_row(reff))
   let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
@@ -6281,7 +6281,7 @@ fn ctl_wrapper(
   var pargs: List[TExpr] = []
   var i = 0
   for pt in fptys {
-    let pn = "ctl\$arg\$" ++ to_string(i)
+    let pn = "ctl\$arg\$${to_string(i)}"
     let (cxa, sid) = declare(cx1, pn, pt, false, lo, hi)
     cx1 = cxa
     psyms = psyms ++ [sid]
@@ -6520,7 +6520,7 @@ fn check_apply(
         cx1 = cxa
       }
     }
-    return (cerr(cx1, "cannot call a value of type " ++ ty_show(cx1.adts, ft),
+    return (cerr(cx1, "cannot call a value of type ${ty_show(cx1.adts, ft)}",
       e_lo(target), e_hi(target)), TyError, XError(lo, hi))
   }
   if len(args) != len(fps) {
@@ -6531,7 +6531,7 @@ fn check_apply(
       }
     }
     cx1 = cerr_h(cx1, "this function takes " ++ to_string(len(fps)) ++ " argument(s), got " ++
-        to_string(len(args)), lo, hi, "type: " ++ ty_show(cx1.adts, ft))
+        to_string(len(args)), lo, hi, "type: ${ty_show(cx1.adts, ft)}")
     return (cx1, fret, XError(lo, hi))
   }
   var txs: List[TExpr] = []
@@ -6545,7 +6545,7 @@ fn check_apply(
         if not assignable(cx1, at, pt) {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
               ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
-            "type: " ++ ty_show(cx1.adts, ft))
+            "type: ${ty_show(cx1.adts, ft)}")
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -6557,7 +6557,7 @@ fn check_apply(
         if not assignable(cx1, at, fps[i]) {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, fps[i]) ++
               ", got " ++ ty_show(cx1.adts, at), e_lo(args[i]), e_hi(args[i]),
-            "type: " ++ ty_show(cx1.adts, ft))
+            "type: ${ty_show(cx1.adts, ft)}")
         }
         i = i + 1
       }
@@ -6684,7 +6684,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       cx1 = cxa
       match found {
         None -> {
-          cx1 = cerr_o(cx1, "undefined variable: " ++ name, nlo, nhi,
+          cx1 = cerr_o(cx1, "undefined variable: ${name}", nlo, nhi,
             moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1)))
           let (cxb, _, vx) = check_expr(cx1, value, no_expected())
           (cxb, TSExpr(vx, lo, hi))
@@ -6749,7 +6749,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
       cx1 = cxa
       if ct != TyBool && not is_errorish(ct) {
-        cx1 = cerr(cx1, "`assert` expects Bool, got " ++ ty_show(cx1.adts, ct), e_lo(cond), e_hi(cond))
+        cx1 = cerr(cx1, "`assert` expects Bool, got ${ty_show(cx1.adts, ct)}", e_lo(cond), e_hi(cond))
       }
       (cx1, TSAssert(cnx, src, lo, hi))
     }
@@ -6758,7 +6758,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
       cx1 = cxa
       if ct != TyBool && not is_errorish(ct) {
-        cx1 = cerr(cx1, "while condition must be Bool, got " ++ ty_show(cx1.adts, ct),
+        cx1 = cerr(cx1, "while condition must be Bool, got ${ty_show(cx1.adts, ct)}",
           e_lo(cond), e_hi(cond))
       }
       let d = len(cx1.frame.loop_stack)
@@ -7138,7 +7138,7 @@ fn check_call(
         let (cxa, _) = check_args_plain(cx1, args, pre0)
         return (cerr_h(cxa, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
             " argument(s), got " ++ to_string(len(args)), lo, hi,
-          "type: " ++ ty_show(cxa.adts, lt)), lret, XError(lo, hi))
+          "type: ${ty_show(cxa.adts, lt)}"), lret, XError(lo, hi))
       }
       var txs: List[TExpr] = []
       var i = 0
@@ -7149,7 +7149,7 @@ fn check_call(
         if not assignable(cx1, at, pt) {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
               ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
-            "type: " ++ ty_show(cx1.adts, lt))
+            "type: ${ty_show(cx1.adts, lt)}")
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -7172,7 +7172,7 @@ fn check_call(
     None -> {
       # still check the arguments so their subtrees get types/symbols
       let (cxa, _) = check_args_plain(cx1, args, pre0)
-      return (cerr_o(cxa, "undefined function: " ++ callee, clo, chi,
+      return (cerr_o(cxa, "undefined function: ${callee}", clo, chi,
         moved_or_suggest(cxa, callee, fn_pool(cxa))),
         TyError, XError(lo, hi))
     }
@@ -7188,7 +7188,7 @@ fn check_call(
   if not named_present && (len(args) > len(s.param_tys) || len(args) < min_arity) {
     let (cxa, _) = check_args_plain(cx1, args, pre0)
     let cxb = cerr_h(cxa, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
-      "signature: " ++ sig_render(cxa.adts, cxa.traits, s))
+      "signature: ${sig_render(cxa.adts, cxa.traits, s)}")
     # The declared return type survives a wrong argument count, so hand it back
     # and let the context judge the body on its own (see check_ctor_call). For a
     # generic signature it does not survive: inference is seeded from the
@@ -7242,7 +7242,7 @@ fn check_call(
       SlotNoField(an) -> {
         let h = match suggest.hint(an, s.param_names) {
           Some(hh) -> hh
-          None -> "signature: " ++ sig_render(cx1.adts, cx1.traits, s)
+          None -> "signature: ${sig_render(cx1.adts, cx1.traits, s)}"
         }
         cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
         args_broken = true
@@ -7342,7 +7342,7 @@ fn check_call(
         if not ok {
           let h = match why {
             Some(w) -> w
-            None -> "signature: " ++ sig_render(cx1.adts, cx1.traits, s)
+            None -> "signature: ${sig_render(cx1.adts, cx1.traits, s)}"
           }
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
               ty_show(cx1.adts, reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)) ++ ", got " ++
@@ -7361,7 +7361,7 @@ fn check_call(
   if named_present && not args_broken &&
     (len(args) > len(s.param_tys) || len(args) < min_arity) {
       let cxb = cerr_h(cx1, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
-        "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+        "signature: ${sig_render(cx1.adts, cx1.traits, s)}")
       let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
       return (cxb, rt, XError(lo, hi))
     }
@@ -7383,7 +7383,7 @@ fn check_call(
     if len(missing_req) > 0 {
       let cxb = cerr_h(cx1, "missing argument(s) for `" ++ callee ++ "`: " ++
           join(missing_req, ", "), lo, hi,
-        "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+        "signature: ${sig_render(cx1.adts, cx1.traits, s)}")
       let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
       return (cxb, rt, XError(lo, hi))
     }
@@ -7531,7 +7531,7 @@ fn check_call(
         match tx_slots[wi2] {
           Some(ax) -> {
             let t = tex_ty(ax)
-            let nm = "arg\$" ++ to_string(wi2)
+            let nm = "arg\$${to_string(wi2)}"
             let (cxd, sidw) = declare(cx1, nm, t, false, a0.lo, a0.hi)
             cx1 = cxd
             arg_lets = arg_lets ++ [TSLet(Some(sidw), nm, ax, a0.lo, a0.hi)]
@@ -8331,7 +8331,7 @@ fn check_ctor_call(
       } else {
         suggest.hint(cname, map.keys(cx1.ctors_by_name) ++ map.keys(cx1.consts))
       }
-      return (cerr_o(cx1, "undefined constructor: " ++ cname, cclo, cchi, hint),
+      return (cerr_o(cx1, "undefined constructor: ${cname}", cclo, cchi, hint),
         TyError, XError(lo, hi))
     }
     Some(_) -> ()
@@ -8363,7 +8363,7 @@ fn check_ctor_call(
   if spelling == CApply && ad.is_record {
     return (cerr_h(cx1,
       "record `" ++ ci.name ++ "` must be built with braces: " ++ ci.name ++ " { ... }",
-      lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci)), TyError, XError(lo, hi))
+      lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}"), TyError, XError(lo, hi))
   }
   if spelling == CBare && n > 0 {
     # a bare constructor with fields, in a function-typed position, is a function value
@@ -8376,7 +8376,7 @@ fn check_ctor_call(
       "constructor `" ++ ci.name ++ "` has " ++ to_string(n) ++
         " field(s) and cannot be used bare"
     }
-    return (cerr_h(cx1, msg, lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci)),
+    return (cerr_h(cx1, msg, lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}"),
       TyError, XError(lo, hi))
   }
   # a bare nullary constructor where a function is expected: a value, not a function
@@ -8446,7 +8446,7 @@ fn check_ctor_call(
         for f in ci.fields { fnames = fnames ++ [f.name] }
         let h = match suggest.hint(an, fnames) {
           Some(hh) -> hh
-          None -> "constructor: " ++ ctor_render(cx1.adts, ci)
+          None -> "constructor: ${ctor_render(cx1.adts, ci)}"
         }
         cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
         args_broken = true
@@ -8519,7 +8519,7 @@ fn check_ctor_call(
             cx1 = cerr_h(cx1, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
                 "` is " ++ ty_show(cx1.adts, subst(declared, m, em)) ++ ", got " ++
                 ty_show(cx1.adts, at), e_lo(a.e), e_hi(a.e),
-              "constructor: " ++ ctor_render(cx1.adts, ci))
+              "constructor: ${ctor_render(cx1.adts, ci)}")
           }
         }
       }
@@ -8559,10 +8559,10 @@ fn check_ctor_call(
     # separate mistake, not a cascade -- suppressing it only defers it a rebuild.
     if len(cargs) > n {
       cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
-          to_string(len(cargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+          to_string(len(cargs)), lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
     } else if len(missing) > 0 && not has_spread {
       cx1 = cerr_h(cx1, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
-        lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+        lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
       missing_reported = true
     }
   }
@@ -9179,7 +9179,7 @@ fn check_java_call(
   for t0 in ats {
     match t0 {
       Some(t) -> { shown = shown ++ [ty_show(cx1.adts, t)] }
-      None -> { shown = shown ++ ["fn/" ++ to_string(arities[si])] }
+      None -> { shown = shown ++ ["fn/${to_string(arities[si])}"] }
     }
     si = si + 1
   }
@@ -9211,16 +9211,16 @@ fn check_java_call(
     if len(best) == 0 {
       cx1 = check_deferred(cx1, args, ats)
       var descs: List[String] = []
-      for c in cands { descs = descs ++ ["  " ++ c.desc] }
+      for c in cands { descs = descs ++ ["  ${c.desc}"] }
       return (cerr_h(cx1, "no constructor of `" ++ cls.fqcn ++ "` matches (" ++ show_args ++ ")",
-        lo, hi, "candidates:\n" ++ join(descs, "\n")), TyError, XError(lo, hi))
+        lo, hi, "candidates:\n${join(descs, "\n")}"), TyError, XError(lo, hi))
     }
     if len(best) > 1 {
       cx1 = check_deferred(cx1, args, ats)
       var bdescs: List[String] = []
-      for c in best { bdescs = bdescs ++ ["  " ++ c.desc] }
+      for c in best { bdescs = bdescs ++ ["  ${c.desc}"] }
       return (cerr_h(cx1, "ambiguous constructor call on `" ++ cls.fqcn ++ "`", lo, hi,
-        "candidates:\n" ++ join(bdescs, "\n")), TyError, XError(lo, hi))
+        "candidates:\n${join(bdescs, "\n")}"), TyError, XError(lo, hi))
     }
     let c = best[0]
     let packs = bph == 0
@@ -9307,17 +9307,17 @@ fn check_java_call(
   if len(best) == 0 {
     cx1 = check_deferred(cx1, args, ats)
     var descs: List[String] = []
-    for m2 in same_name { descs = descs ++ ["  " ++ m2.desc] }
+    for m2 in same_name { descs = descs ++ ["  ${m2.desc}"] }
     return (cerr_h(cx1, "no overload of `" ++ cls.simple ++ "." ++ name ++ "` matches (" ++
-        show_args ++ ")", lo, hi, "candidates:\n" ++ join(descs, "\n")),
+        show_args ++ ")", lo, hi, "candidates:\n${join(descs, "\n")}"),
       TyError, XError(lo, hi))
   }
   if len(best) > 1 {
     cx1 = check_deferred(cx1, args, ats)
     var bdescs: List[String] = []
-    for m2 in best { bdescs = bdescs ++ ["  " ++ m2.desc] }
+    for m2 in best { bdescs = bdescs ++ ["  ${m2.desc}"] }
     return (cerr_h(cx1, "ambiguous call to `" ++ cls.simple ++ "." ++ name ++ "`", lo, hi,
-      "candidates:\n" ++ join(bdescs, "\n")), TyError, XError(lo, hi))
+      "candidates:\n${join(bdescs, "\n")}"), TyError, XError(lo, hi))
   }
   let m3 = best[0]
   let packs = bph == 0
@@ -9499,7 +9499,7 @@ fn check_module_call(
           }
           if in_all {
             return (cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ ex.mod_path ++ "`",
-              nlo, nhi, "add `pub` to its declaration in " ++ ex.mod_path),
+              nlo, nhi, "add `pub` to its declaration in ${ex.mod_path}"),
               TyError, XError(lo, hi))
           }
           # There used to be a branch here for `name` in the module's types or
@@ -9672,7 +9672,7 @@ fn check_method_call(
                 }
                 cx1 = cerr_h(cx1, "`" ++ name ++ "` takes " ++ to_string(len(fps)) ++
                     " argument(s), got " ++ to_string(len(args)), lo, hi,
-                  "field type: " ++ ty_show(cx1.adts, ftype))
+                  "field type: ${ty_show(cx1.adts, ftype)}")
                 return (cx1, fret, XError(lo, hi))
               }
               var txs: List[TExpr] = []
@@ -9684,7 +9684,7 @@ fn check_method_call(
                 if not assignable(cx1, at, pt) {
                   cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
                       ty_show(cx1.adts, pt) ++ ", got " ++ ty_show(cx1.adts, at),
-                    e_lo(a), e_hi(a), "field type: " ++ ty_show(cx1.adts, ftype))
+                    e_lo(a), e_hi(a), "field type: ${ty_show(cx1.adts, ftype)}")
                 }
                 txs = txs ++ [ax]
                 ai = ai + 1
@@ -9808,7 +9808,7 @@ fn check_match(
         let (cxa, gt, gx) = check_expr(cx1, g, no_expected())
         cx1 = cxa
         if gt != TyBool && not is_errorish(gt) {
-          cx1 = cerr(cx1, "guard must be Bool, got " ++ ty_show(cx1.adts, gt), e_lo(g), e_hi(g))
+          cx1 = cerr(cx1, "guard must be Bool, got ${ty_show(cx1.adts, gt)}", e_lo(g), e_hi(g))
         }
         tguard = Some(gx)
       }
@@ -9907,7 +9907,7 @@ fn check_match(
           } else {
             "add an unguarded catch-all arm (a binding or _)"
           }
-          cx1 = cerr_h(cx1, "non-exhaustive match, missing: " ++ missing, lo, hi, hint)
+          cx1 = cerr_h(cx1, "non-exhaustive match, missing: ${missing}", lo, hi, hint)
         }
       }
       Some(false) -> ()
@@ -10384,7 +10384,7 @@ fn tj_find_class(fqcn: String) -> Option[JClass] !io =
 fn tj_class_info(fqcn: String) -> JClass !io =
   match tj_find_class(fqcn) {
     Some(j) -> j
-    None -> panic("test jsig: unknown class " ++ fqcn)
+    None -> panic("test jsig: unknown class ${fqcn}")
   }
 
 fn tj_methods_of(fqcn: String) -> List[JMethod] !io =
@@ -11509,7 +11509,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
 ## The diagnostics of one source, in order.
 fn msgs_of(src: String) -> List[String] !io = {
   let (m, pdiags) = parser.parse_module(src)
-  if len(pdiags) > 0 { panic("the source does not parse: " ++ pdiags[0].msg) }
+  if len(pdiags) > 0 { panic("the source does not parse: ${pdiags[0].msg}") }
   let env: Map[String, ModExports] = map.empty()
   let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
   map(cx.diags, d => d.msg)
@@ -11543,8 +11543,8 @@ test "`[]` names the subject it could not index, whatever shape it is" {
   let grid = "type Grid = { w: Int }\n" ++
     "impl Index[Grid] {\n  type Idx = Int\n  type Item = Int\n" ++
     "  fn index(g: Grid, i: Int) -> Int = g.w + i\n}\n"
-  assert len(msgs_of(grid ++ "pub fn f(g: Grid) -> Int = g[1]\n")) == 0
-  assert msgs_of(grid ++ "pub fn f(g: Grid) -> Int = g[\"x\"]\n") ==
+  assert len(msgs_of("${grid}pub fn f(g: Grid) -> Int = g[1]\n")) == 0
+  assert msgs_of("${grid}pub fn f(g: Grid) -> Int = g[\"x\"]\n") ==
     ["this index must be `Int`, got `String`"]
 
   # an opaque subject falls through to its target's impl, so the requirer
@@ -11597,7 +11597,7 @@ test "an Eq impl must come with a Hash impl" {
   assert len(cx1.diags) == 1
   assert cx1.diags[0].msg == "`impl Eq[P]` needs a matching `impl Hash`"
   # the other way round reports symmetrically
-  let (m2, _) = parser.parse_module("type P = { x: Int }\n" ++ hash_impl)
+  let (m2, _) = parser.parse_module("type P = { x: Int }\n${hash_impl}")
   let (cx2, _) = check_module(seed_prelude(test_cx()), m2, env)
   assert cx2.diags[0].msg == "`impl Hash[P]` needs a matching `impl Eq`"
   # together they check
@@ -11742,7 +11742,7 @@ test "opaque type: where the conversion happens, and where it must not" {
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
   let (cx1, _) = check_module(cx_new(Some("ids2"), None), m, env)
-  if len(cx1.diags) > 0 { println("UNEXPECTED: " ++ cx1.diags[0].msg) }
+  if len(cx1.diags) > 0 { println("UNEXPECTED: ${cx1.diags[0].msg}") }
   assert len(cx1.diags) == 0
 }
 
@@ -11917,7 +11917,7 @@ test "check_module: a type declaration refuses the effect names it did not bind"
 
 # ---- effect handlers (docs/effects-design.md) ----
 
-fn eff_src(body: String) -> String = "effect Ask {\n  fn ask() -> Int\n}\n" ++ body
+fn eff_src(body: String) -> String = "effect Ask {\n  fn ask() -> Int\n}\n${body}"
 
 fn eff_check(body: String) -> Cx !io = {
   let (m, _) = parser.parse_module(eff_src(body))
@@ -11999,7 +11999,7 @@ fn fn_named(tm: TModule, name: String) -> TFun = {
   for f in tm.fns {
     if f.name == name { return f }
   }
-  panic("no function named " ++ name)
+  panic("no function named ${name}")
 }
 
 ## One pack node, unwrapped: (key, evidence payload, outer).
@@ -12047,7 +12047,7 @@ fn pack_check(body: String) -> (Cx, TModule) !io = {
   if len(pdiags) != 0 { panic("the fixture does not parse") }
   let env: Map[String, ModExports] = map.empty()
   let (cx1, tm) = check_module(test_cx(), m, env)
-  if len(cx1.diags) != 0 { panic("the fixture does not check: " ++ cx1.diags[0].msg) }
+  if len(cx1.diags) != 0 { panic("the fixture does not check: ${cx1.diags[0].msg}") }
   (cx1, tm)
 }
 
@@ -12254,7 +12254,7 @@ test "an arm raising its own effect reaches the outer handler" {
 test "a handler answers every operation its effect declares, and only those" {
   let two = "effect St {\n  fn get() -> Int\n  fn put(v: Int) -> Unit\n}\n"
   let env: Map[String, ModExports] = map.empty()
-  let missing = two ++ "fn f() -> Int = {\n  with handle St { get() => 1 }\n  2\n}\n"
+  let missing = "${two}fn f() -> Int = {\n  with handle St { get() => 1 }\n  2\n}\n"
   let (m1, p1) = parser.parse_module(missing)
   assert len(p1) == 0
   let (cx1, _) = check_module(test_cx(), m1, env)
@@ -12278,7 +12278,7 @@ test "a handler answers every operation its effect declares, and only those" {
 # ---- control arms (docs/oneshot-design.md §11) ----
 
 fn ctl_src(body: String) -> String =
-  "ctl effect Ask {\n  fn ask(n: Int) -> Int\n}\n" ++ body
+  "ctl effect Ask {\n  fn ask(n: Int) -> Int\n}\n${body}"
 
 fn ctl_check(body: String) -> Cx !io = {
   let (m, _) = parser.parse_module(ctl_src(body))
@@ -12647,7 +12647,7 @@ test "the two standing refusals: comptime and type declaration; trait rows carry
   let base = "effect Ask {\n  fn ask() -> Int\n}\n"
   # a trait method's row may write a label now (effect-params-design.md 刀 5):
   # the label is one hidden evidence parameter, on the slot as on a fn
-  let (m1, _) = parser.parse_module(base ++ "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
+  let (m1, _) = parser.parse_module("${base}trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
   let (cx1, _) = check_module(test_cx(), m1, env)
   assert len(cx1.diags) == 0
   # an impl method's labels are held to the trait's row by the conformance
@@ -12664,7 +12664,7 @@ test "the two standing refusals: comptime and type declaration; trait rows carry
   }
   assert saw_impl
   # comptime is pure in v1, handlers included
-  let (m3, _) = parser.parse_module(base ++ "const K: Int = comptime { ask() }\n")
+  let (m3, _) = parser.parse_module("${base}const K: Int = comptime { ask() }\n")
   let (cx3, _) = check_module(test_cx(), m3, env)
   var saw_ct = false
   for d in cx3.diags {
@@ -12675,12 +12675,12 @@ test "the two standing refusals: comptime and type declaration; trait rows carry
   # whoever calls `f` supplies the handler, which is what evidence does. The
   # parameter list is beside the point either way -- a label is not a variable
   # and never needed a binder.
-  let (m4, _) = parser.parse_module(base ++ "type Box[!e] = { f: fn() -> Int !Ask }\n")
+  let (m4, _) = parser.parse_module("${base}type Box[!e] = { f: fn() -> Int !Ask }\n")
   let (cx4, _) = check_module(test_cx(), m4, env)
   assert len(cx4.diags) == 0
   # ... and in a signature the label is accepted too. What it costs is that the
   # call through the value now owes the evidence, at the call, by name
-  let (m5, _) = parser.parse_module(base ++ "fn sink(f: fn() -> Int !Ask) -> Int = f()\n")
+  let (m5, _) = parser.parse_module("${base}fn sink(f: fn() -> Int !Ask) -> Int = f()\n")
   let (cx5, _) = check_module(test_cx(), m5, env)
   assert len(cx5.diags) == 1
   assert cx5.diags[0].msg ==
@@ -12689,7 +12689,7 @@ test "the two standing refusals: comptime and type declaration; trait rows carry
   # an effect variable in the same position is what the hint asks for, and it
   # is accepted: the ban is on the spelling that has no meaning, not on taking
   # a closure that raises
-  let (m6, _) = parser.parse_module(base ++ "fn sink(f: fn() -> Int !e) -> Int !e = f()\n")
+  let (m6, _) = parser.parse_module("${base}fn sink(f: fn() -> Int !e) -> Int !e = f()\n")
   let (cx6, _) = check_module(test_cx(), m6, env)
   assert len(cx6.diags) == 0
 }
@@ -12755,7 +12755,7 @@ test "a trait or impl method's row may carry effect variables" {
     "type P = { v: Int }\n"
   assert len(check(base5 ++
       "impl W[P] {\n  fn w(x: P) -> Int !Ask = x.v + ask()\n}\n").diags) == 0
-  let cdrop = check(base5 ++ "impl W[P] {\n  fn w(x: P) -> Int = x.v\n}\n")
+  let cdrop = check("${base5}impl W[P] {\n  fn w(x: P) -> Int = x.v\n}\n")
   assert len(cdrop.diags) == 1
   assert cdrop.diags[0].msg ==
     "`w` must write the effect(s) `Ask`: the trait's row (after this impl's bindings) carries them"
@@ -13487,7 +13487,7 @@ test "a capture refused inside a `with` region names the sugar, not a lambda" {
   assert cx1.diags[0].msg == "cannot assign to `n` from inside the closure `with` introduced"
   assert str.contains(cx1.diags[0].hint, "that closure's body")
   # and reading one
-  let bad_read = head ++ "fn go() -> Int = {\n  var n = 0\n  with x <- hold(1)\n  x + n\n}\n"
+  let bad_read = "${head}fn go() -> Int = {\n  var n = 0\n  with x <- hold(1)\n  x + n\n}\n"
   let (m2, pd2) = parser.parse_module(bad_read)
   assert len(pd2) == 0
   let (cx2, _) = check_module(test_cx(), m2, env)
@@ -13523,6 +13523,6 @@ test "`?` inside a `with` region propagates out of the function" {
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
   let (cx1, _) = check_module(test_cx(), m, env)
-  if len(cx1.diags) > 0 { println("UNEXPECTED: " ++ cx1.diags[0].msg) }
+  if len(cx1.diags) > 0 { println("UNEXPECTED: ${cx1.diags[0].msg}") }
   assert len(cx1.diags) == 0
 }

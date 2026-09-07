@@ -129,7 +129,7 @@ fn subcommand_help(cmd: String) -> String = {
       keeping = false
     }
   }
-  join(out, "\n") ++ "\n"
+  "${join(out, "\n")}\n"
 }
 
 fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
@@ -146,7 +146,7 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
 ## a file with the wrong suffix). Nothing compared the two drivers, so the
 ## divergence sat there; `scripts/native-cli-diff.sh` compares them now.
 fn cli_error(msg: String) -> Unit !Exit !Console !io = {
-  console_eprintln("error: " ++ msg)
+  console_eprintln("error: ${msg}")
   let _ = io.exit(2)
   ()
 }
@@ -344,10 +344,10 @@ fn load_or_die(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
 
 fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Console !io = {
   if not io.exists(target) {
-    cli_error("no such file or directory: " ++ target)
+    cli_error("no such file or directory: ${target}")
   }
   if not io.is_dir(target) && not str.ends_with(target, ".dawn") {
-    cli_error("source files must end in .dawn: " ++ target)
+    cli_error("source files must end in .dawn: ${target}")
   }
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
@@ -444,9 +444,9 @@ fn wasm_toolchain_hint() -> String =
 ## falls through to the old spelling and fails in the compile below, where the
 ## install hint is.
 fn wasm_triple(cc: String, work: String) -> String !Fs !Proc = {
-  let probe = work ++ "/crt1.path"
+  let probe = "${work}/crt1.path"
   let ask = [cc, "--target=wasm32-wasip1", "-print-file-name=crt1.o"]
-  let modern = match io.run(ask, probe, work ++ "/crt1.err") {
+  let modern = match io.run(ask, probe, "${work}/crt1.err") {
     Ok(0) -> {
       match io.read_file(probe) {
         Ok(t) -> io.exists(str.trim(t))
@@ -496,21 +496,21 @@ fn cc_build_with(
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
-      cli_error("cannot make a scratch directory: " ++ e.message)
+      cli_error("cannot make a scratch directory: ${e.message}")
       return ()
     }
   }
-  var wrote = io.write_file(work ++ "/main.c", ctext)
+  var wrote = io.write_file("${work}/main.c", ctext)
   for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
-      None -> panic("embedded runtime is missing " ++ f)
+      None -> panic("embedded runtime is missing ${f}")
     }
   }
   match wrote {
     Ok(_) -> ()
     Err(e) -> {
-      cli_error("cannot stage the C sources: " ++ e.message)
+      cli_error("cannot stage the C sources: ${e.message}")
       return ()
     }
   }
@@ -533,9 +533,9 @@ fn cc_build_with(
   # compile that names C++, which is the harder one to have.
   if wasm {
     let shim = [
-      cc, "--target=" ++ triple, "-x", "c++", "-std=c++14", "-O2",
+      cc, "--target=${triple}", "-x", "c++", "-std=c++14", "-O2",
       "-fno-rtti", "-fwasm-exceptions",
-      "-c", work ++ "/dawn_rt_wasi_eh.cc", "-o", work ++ "/dawn_rt_wasi_eh.o"
+      "-c", "${work}/dawn_rt_wasi_eh.cc", "-o", "${work}/dawn_rt_wasi_eh.o"
     ]
     match io.run(shim, "", "") {
       Ok(0) -> ()
@@ -551,8 +551,8 @@ fn cc_build_with(
       }
     }
     let tag = [
-      cc, "--target=" ++ triple, "-std=c11", "-O2",
-      "-c", work ++ "/dawn_rt_wasi_tag.c", "-o", work ++ "/dawn_rt_wasi_tag.o"
+      cc, "--target=${triple}", "-std=c11", "-O2",
+      "-c", "${work}/dawn_rt_wasi_tag.c", "-o", "${work}/dawn_rt_wasi_tag.o"
     ]
     match io.run(tag, "", "") {
       Ok(0) -> ()
@@ -579,18 +579,18 @@ fn cc_build_with(
   let model: List[String] = if reactor { ["-mexec-model=reactor"] } else { [] }
   let argv = if wasm {
     [
-      cc, "--target=" ++ triple, "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
+      cc, "--target=${triple}", "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
-      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c",
-      work ++ "/dawn_rt_wasi_eh.o", work ++ "/dawn_rt_wasi_tag.o", "-lm"
+      "-o", out, "${work}/main.c", "${work}/dawn_rt.c",
+      "${work}/dawn_rt_wasi_eh.o", "${work}/dawn_rt_wasi_tag.o", "-lm"
     ]
   } else {
     [
       cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
       "-I", work,
-      "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
+      "-o", out, "${work}/main.c", "${work}/dawn_rt.c", "-lm"
     ]
   }
   # cc is done with the staging directory the moment it succeeds, and nothing
@@ -619,10 +619,10 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   for target in targets {
     if not io.exists(target) {
-      return cli_error("no such file or directory: " ++ target)
+      return cli_error("no such file or directory: ${target}")
     }
     if not io.is_dir(target) && not str.ends_with(target, ".dawn") {
-      return cli_error("source files must end in .dawn: " ++ target)
+      return cli_error("source files must end in .dawn: ${target}")
     }
   }
   let std = load_or_die(std_dir)
@@ -666,7 +666,7 @@ fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   # `.wasm` by default: the artifact is not executable here, and every host
   # that runs one (node, wasmtime, a browser loader) keys on the suffix.
   let out = if out0 == "" {
-    if wasm { default_out(target) ++ ".wasm" } else { default_out(target) }
+    if wasm { "${default_out(target)}.wasm" } else { default_out(target) }
   } else {
     out0
   }
@@ -690,7 +690,7 @@ fn build_and_exec(
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
     Err(e) -> {
-      cli_error("cannot make a scratch directory: " ++ e.message)
+      cli_error("cannot make a scratch directory: ${e.message}")
       return ()
     }
   }
@@ -761,12 +761,12 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   if len(paths) == 0 { return cli_error("usage: dawn fmt [--check] <file.dawn | dir>...") }
   var files: List[String] = []
   for p in paths {
-    if not io.exists(p) { return cli_error("no such file or directory: " ++ p) }
+    if not io.exists(p) { return cli_error("no such file or directory: ${p}") }
     if io.is_dir(p) {
       files = files ++ sort(dawn_files_under(p))
     } else {
       if not str.ends_with(p, ".dawn") {
-        return cli_error("source files must end in .dawn: " ++ p)
+        return cli_error("source files must end in .dawn: ${p}")
       }
       files = files ++ [p]
     }
@@ -787,7 +787,7 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
                 unformatted = unformatted + 1
               } else {
                 match io.write_file(f, formatted) {
-                  Ok(_) -> console_println("formatted " ++ f)
+                  Ok(_) -> console_println("formatted ${f}")
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }
               }
@@ -850,7 +850,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     return
   }
   if not io.exists(target) {
-    return cli_error("no such file or directory: " ++ target)
+    return cli_error("no such file or directory: ${target}")
   }
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
@@ -911,7 +911,7 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     }
     if spec != "" {
       for pth in str.split(spec, ":") {
-        if pth != "" && not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
+        if pth != "" && not io.exists(pth) { cli_error("--cp entry not found: ${pth}") }
       }
     }
   }
@@ -942,8 +942,8 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     if len(tm.tests) > 0 { bearing = bearing + 1 }
   }
   if bearing == 0 {
-    return cli_error(if std_tests { std_dir ++ " has no test blocks" }
-    else { target ++ " has no test blocks" })
+    return cli_error(if std_tests { "${std_dir} has no test blocks" }
+    else { "${target} has no test blocks" })
   }
   var runner_tests: List[(String, Int, String)] = []
   for s in suite {
@@ -1060,7 +1060,7 @@ fn scrub(path: String) -> Unit !Fs = pkgfetch.delete_tree(path)
 fn scratch(prefix: String) -> String !Fs =
   match io.temp_dir("", prefix) {
     Ok(d) -> d
-    Err(e) -> panic("temp dir: " ++ e.message)
+    Err(e) -> panic("temp dir: ${e.message}")
   }
 
 # The environment both variables are set in, so that every assertion below
@@ -1119,10 +1119,10 @@ test "the wasm triple is the modern spelling when the sysroot has the file" {
     with d <- bracket(dir, scrub)
     # what a sysroot that has crt1.o answers with: an absolute path, and one
     # that is really there, because existence is what the driver reads
-    let crt = d ++ "/crt1.o"
+    let crt = "${d}/crt1.o"
     let _ = io.write_file(crt, "")
     let (triple, log) = procmem.with_proc_table(
-      [procmem.wrote(bytes.utf8(crt ++ "\n"))],
+      [procmem.wrote(bytes.utf8("${crt}\n"))],
       () => wasm_triple("fake-clang", d)
     )
     assert triple == "wasm32-wasip1"
@@ -1134,8 +1134,8 @@ test "the wasm triple is the modern spelling when the sysroot has the file" {
     assert argv[1] == "--target=wasm32-wasip1"
     assert argv[2] == "-print-file-name=crt1.o"
     # the answer is collected in the work directory, not read off a pipe
-    assert log[0].out_path == d ++ "/crt1.path"
-    assert log[0].err_path == d ++ "/crt1.err"
+    assert log[0].out_path == "${d}/crt1.path"
+    assert log[0].err_path == "${d}/crt1.err"
   })
 }
 
@@ -1184,7 +1184,7 @@ test "the native build is one command line, and this is every flag in it" {
   io.with_fs_real(() => {
     let dir = scratch("dawn-cc-native-")
     with d <- bracket(dir, scrub)
-    let out = d ++ "/prog"
+    let out = "${d}/prog"
     let (_, log) = procmem.with_proc_table(
       [procmem.exited(0)],
       () => {
@@ -1216,8 +1216,8 @@ test "the native build is one command line, and this is every flag in it" {
     let work = argv[8]
     assert argv[9] == "-o"
     assert argv[10] == out
-    assert argv[11] == work ++ "/main.c"
-    assert argv[12] == work ++ "/dawn_rt.c"
+    assert argv[11] == "${work}/main.c"
+    assert argv[12] == "${work}/dawn_rt.c"
     assert argv[13] == "-lm"
     # the include path is the staging directory itself: dawn_rt.h is beside
     # the C that includes it
@@ -1242,12 +1242,12 @@ test "the wasm build is four command lines, and these are every flag in them" {
   io.with_fs_real(() => {
     let dir = scratch("dawn-cc-wasm-")
     with d <- bracket(dir, scrub)
-    let crt = d ++ "/crt1.o"
+    let crt = "${d}/crt1.o"
     let _ = io.write_file(crt, "")
-    let out = d ++ "/prog.wasm"
+    let out = "${d}/prog.wasm"
     let (_, log) = procmem.with_proc_table(
       [
-        procmem.wrote(bytes.utf8(crt ++ "\n")),
+        procmem.wrote(bytes.utf8("${crt}\n")),
         procmem.exited(0),
         procmem.exited(0),
         procmem.exited(0)
@@ -1281,9 +1281,9 @@ test "the wasm build is four command lines, and these are every flag in them" {
     assert shim[6] == "-fno-rtti"
     assert shim[7] == "-fwasm-exceptions"
     assert shim[8] == "-c"
-    assert shim[9] == work ++ "/dawn_rt_wasi_eh.cc"
+    assert shim[9] == "${work}/dawn_rt_wasi_eh.cc"
     assert shim[10] == "-o"
-    assert shim[11] == work ++ "/dawn_rt_wasi_eh.o"
+    assert shim[11] == "${work}/dawn_rt_wasi_eh.o"
 
     # the tag is a third compile, in C and with no exception flag at all: a
     # unit that neither throws nor catches is where the definition can sit
@@ -1294,9 +1294,9 @@ test "the wasm build is four command lines, and these are every flag in them" {
     assert tag[2] == "-std=c11"
     assert tag[3] == "-O2"
     assert tag[4] == "-c"
-    assert tag[5] == work ++ "/dawn_rt_wasi_tag.c"
+    assert tag[5] == "${work}/dawn_rt_wasi_tag.c"
     assert tag[6] == "-o"
-    assert tag[7] == work ++ "/dawn_rt_wasi_tag.o"
+    assert tag[7] == "${work}/dawn_rt_wasi_tag.o"
     assert not str.contains(join(tag, " "), "-fwasm-exceptions")
     assert not str.contains(join(tag, " "), "-x")
 
@@ -1317,10 +1317,10 @@ test "the wasm build is four command lines, and these are every flag in them" {
     assert main[9] == work
     assert main[10] == "-o"
     assert main[11] == out
-    assert main[12] == work ++ "/main.c"
-    assert main[13] == work ++ "/dawn_rt.c"
-    assert main[14] == work ++ "/dawn_rt_wasi_eh.o"
-    assert main[15] == work ++ "/dawn_rt_wasi_tag.o"
+    assert main[12] == "${work}/main.c"
+    assert main[13] == "${work}/dawn_rt.c"
+    assert main[14] == "${work}/dawn_rt_wasi_eh.o"
+    assert main[15] == "${work}/dawn_rt_wasi_tag.o"
     assert main[16] == "-lm"
     assert not str.contains(join(main, " "), "-pthread")
     assert not str.contains(join(main, " "), "-fexceptions")
@@ -1340,12 +1340,12 @@ test "a reactor build is the same link plus one flag" {
   io.with_fs_real(() => {
     let dir = scratch("dawn-cc-reactor-")
     with d <- bracket(dir, scrub)
-    let crt = d ++ "/crt1.o"
+    let crt = "${d}/crt1.o"
     let _ = io.write_file(crt, "")
-    let out = d ++ "/prog.wasm"
+    let out = "${d}/prog.wasm"
     let (_, log) = procmem.with_proc_table(
       [
-        procmem.wrote(bytes.utf8(crt ++ "\n")),
+        procmem.wrote(bytes.utf8("${crt}\n")),
         procmem.exited(0),
         procmem.exited(0),
         procmem.exited(0)
@@ -1496,7 +1496,7 @@ test "`dawnc test` refuses a target it cannot compile from" {
   assert cli_read_hosted(() => cmd_test([NO_SUCH]))
     == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
   let dir = io.with_fs_real(() => scratch("dawn-cli-contract-"))
-  let plain = dir ++ "/plain.txt"
+  let plain = "${dir}/plain.txt"
   io.with_fs_real(() =>
       match io.write_file(plain, "hello\n") {
         Ok(_) -> ()

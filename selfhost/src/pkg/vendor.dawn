@@ -49,8 +49,8 @@ use java "java.lang.System"
 pub fn vendored_outers() -> List[String] = []
 
 fn matches(file: String, outer: String) -> Bool =
-  file == outer ++ ".class" ||
-  (str.starts_with(file, outer ++ "\$") && str.ends_with(file, ".class"))
+  file == "${outer}.class" ||
+  (str.starts_with(file, "${outer}\$") && str.ends_with(file, ".class"))
 
 # The releases the two jar walks below bracket with. Both walks panic on a
 # broken invariant partway through, which is exactly the way out that used to
@@ -109,12 +109,12 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !Fs !io = {
         Ok(b) -> b
         Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
       }
-      out2 = out2 ++ [("dawn/rt/" ++ str.strip_suffix(f, ".class").unwrap_or(f), bs)]
+      out2 = out2 ++ [("dawn/rt/${str.strip_suffix(f, ".class").unwrap_or(f)}", bs)]
     }
     return out2
   }
   if not str.starts_with(u, "jar:file:") {
-    panic("vendored runtime must come from a jar, got: " ++ u)
+    panic("vendored runtime must come from a jar, got: ${u}")
   }
   let bang = str.index_of(u, "!").expect("jar url separator")
   let jar_path = str.slice(u, str.len("jar:file:"), bang)
@@ -128,7 +128,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !Fs !io = {
     let got: Result[JarEntry, ForeignError] = cast(en.nextElement().expect("entry"))
     let e: JarEntry = match got {
       Ok(v) -> v
-      Err(x) -> panic("vendor.rt_class_family: not a JarEntry: " ++ x.message)
+      Err(x) -> panic("vendor.rt_class_family: not a JarEntry: ${x.message}")
     }
     let nm = e.getName().expect("entry name")
     if str.starts_with(nm, "dawn/rt/") &&
@@ -140,7 +140,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !Fs !io = {
   for nm in sort(names) {
     let e = match jf.getEntry(nm) {
       Some(je) -> je
-      None -> panic("jar entry vanished: " ++ nm)
+      None -> panic("jar entry vanished: ${nm}")
     }
     let bs = entry_bytes(jf.getInputStream(e).expect("entry stream"))
     out = out ++ [(str.strip_suffix(nm, ".class").unwrap_or(nm), bs)]
@@ -158,7 +158,7 @@ fn lookup_bytes(pairs: List[(String, Bytes)], nm: String) -> Bytes = {
     let (n, b) = p
     if n == nm { return b }
   }
-  panic("classpath_package: name vanished: " ++ nm)
+  panic("classpath_package: name vanished: ${nm}")
 }
 
 ## Class names (internal, no ".class") under `root`/`rel`, recursive.
@@ -196,10 +196,10 @@ fn jar_classes(jf: JarFile, prefix: String, seen: List[String]) -> List[(String,
     let got: Result[JarEntry, ForeignError] = cast(en.nextElement().expect("entry"))
     let je: JarEntry = match got {
       Ok(v) -> v
-      Err(x) -> panic("vendor.classpath_package: not a JarEntry: " ++ x.message)
+      Err(x) -> panic("vendor.classpath_package: not a JarEntry: ${x.message}")
     }
     let nm = je.getName().expect("entry name")
-    if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
+    if str.starts_with(nm, "${prefix}/") && str.ends_with(nm, ".class") {
       let cls = str.strip_suffix(nm, ".class").unwrap_or(nm)
       if not has_name(seen, cls) && not has_name(taken, cls) {
         taken = taken ++ [cls]
@@ -399,7 +399,7 @@ test "an empty package is not silently the same as any other" {
 test "every declared vendor package carries a usable decision" {
   for p in ["org/objectweb/asm", "coursierapi"] {
     match vendor_trust(p) {
-      None -> panic("undeclared vendor package in the repository's own build: " ++ p)
+      None -> panic("undeclared vendor package in the repository's own build: ${p}")
       Some(Exempt(why)) -> { assert str.len(why) > 0 }
       Some(Digest(sha)) -> {
         # 64 lowercase hex digits: a truncated or upper-cased paste would

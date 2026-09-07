@@ -149,7 +149,7 @@ fn line(st: CSt, text: String) -> CSt =
   CSt { ..st, out: st.out ++ [pad(st.ind) ++ text ++ "\n"] }
 
 fn fresh(st: CSt) -> (CSt, String) =
-  (CSt { ..st, tmp: st.tmp + 1 }, "t" ++ to_string(st.tmp))
+  (CSt { ..st, tmp: st.tmp + 1 }, "t${to_string(st.tmp)}")
 
 fn push(st: CSt) -> CSt = CSt { ..st, ind: st.ind + 1 }
 
@@ -207,7 +207,7 @@ fn mask_words(bits: List[Bool]) -> List[String] = {
 fn emit_mask_arg(st: CSt, tmp: String, bits: List[Bool]) -> (CSt, String, Bool) = {
   let words = mask_words(bits)
   if len(bits) > 64 {
-    let name = tmp ++ "_mask"
+    let name = "${tmp}_mask"
     (line(st, "static const uint64_t " ++ name ++ "[] = { " ++ join(words, ", ") ++ " };"),
       name, true)
   } else {
@@ -303,7 +303,7 @@ fn escape_part(s: String) -> String = {
 fn mangle(owner: String, name: String) -> String =
   "dawn_" ++ escape_part(owner) ++ "__" ++ escape_part(name)
 
-fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
+fn local_name(sym: Int) -> String = "v${to_string(sym)}"
 
 ## The C parameter name behind an owned-parameter shadow: the parameter
 ## arrives as `pN`, and the function's first statements move each one into
@@ -311,7 +311,7 @@ fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
 ## emitted against the slot either way. Distinct first letter, so it can
 ## collide with neither locals (`v`), temps (`t`) nor anything `mangle`
 ## mints (`dawn_`).
-fn param_name(sym: Int) -> String = "p" ++ to_string(sym)
+fn param_name(sym: Int) -> String = "p${to_string(sym)}"
 
 ## An owned slot, as a C lvalue. `dawn_own` cannot collide with a mangled
 ## symbol: everything `mangle` mints carries a `__`.
@@ -517,7 +517,7 @@ fn str_lit(s: String) -> String =
 ## immediately on the header if one does reach them.
 fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
   let (st1, t) = fresh(st)
-  let st2 = line(st1, str_static_def(t ++ "_lit", v))
+  let st2 = line(st1, str_static_def("${t}_lit", v))
   (st2, "(&" ++ t ++ "_lit)")
 }
 
@@ -700,7 +700,7 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
     Some(sym) -> return (st, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
     None -> ()
   }
-  let sym = "dawn_const_" ++ to_string(len(st.cdefs))
+  let sym = "dawn_const_${to_string(len(st.cdefs))}"
   var b = line(CSt { ..st, out: [], ind: 1 }, "static void* c = NULL;")
   b = push(line(b, "if (c == NULL) {"))
   let (b1, expr) = emit_const_value(b, v)
@@ -884,7 +884,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     # calls a constructor for the same reason.
     CDictApply(key, args, _) -> {
       var st1 = st
-      var parts = ["&" ++ dict_symbol(key), to_string(len(args))]
+      var parts = ["&${dict_symbol(key)}", to_string(len(args))]
       for a in args {
         let (st2, v) = emit_expr(st1, a, false)
         st1 = st2
@@ -906,7 +906,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
           if cv_scalar(v) {
             (st, const_literal(v, ty, "const `" ++ key ++ "`"))
           } else {
-            const_builder(st, "c:" ++ key, v, ty)
+            const_builder(st, "c:${key}", v, ty)
           },
         None -> panic("emitc: no comptime value for const `" ++ key ++ "`")
       }
@@ -1023,7 +1023,7 @@ fn cap_counted(st: CSt, c: CExpr) -> Bool =
 ## because it escapes to itself; a part it could collide with would have to be
 ## a third part, and only an adapter has one.
 fn adapter_name(owner: String, name: String) -> String =
-  mangle(owner, name) ++ "__clo"
+  "${mangle(owner, name)}__clo"
 
 ## A constructor's or tuple's allocation.
 ##
@@ -1084,7 +1084,7 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let (st1, lv) = emit_expr(st, l, false)
     let (st2, tmp) = fresh(st1)
     let st3 = line(st2, "bool " ++ tmp ++ " = " ++ lv ++ ";")
-    let guard = if op == CAnd { tmp } else { "!" ++ tmp }
+    let guard = if op == CAnd { tmp } else { "!${tmp}" }
     let st4 = push(line(st3, "if (" ++ guard ++ ") {"))
     let (st5, rv) = emit_expr(st4, r, false)
     let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
@@ -1406,7 +1406,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
 
 ## The one-part family of `mangle`'s grammar: no `__`, so it can be neither a
 ## function nor a closure adapter however the key is spelled.
-fn dict_symbol(key: String) -> String = "dawn_" ++ escape_part(key)
+fn dict_symbol(key: String) -> String = "dawn_${escape_part(key)}"
 
 fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
   mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject) ++ "$" ++ method)
@@ -1420,8 +1420,8 @@ fn slot_shape(d: CDictDef) -> String = {
   for slot in d.slots {
     parts = parts ++ [
       match slot {
-        CSlotFn(_, n) -> "fn:" ++ n
-        CSlotDefault(_, m) -> "default:" ++ m
+        CSlotFn(_, n) -> "fn:${n}"
+        CSlotDefault(_, m) -> "default:${m}"
       }
     ]
   }
@@ -1437,8 +1437,8 @@ fn dict_line(d: CDictDef) -> String = {
   for slot in d.slots {
     parts = parts ++ [
       match slot {
-        CSlotFn(owner, n) -> "(void*)" ++ mangle(owner, n)
-        CSlotDefault(owner, m) -> "(void*)" ++ default_symbol(owner, d.trait_id, m)
+        CSlotFn(owner, n) -> "(void*)${mangle(owner, n)}"
+        CSlotDefault(owner, m) -> "(void*)${default_symbol(owner, d.trait_id, m)}"
       }
     ]
   }
@@ -1454,7 +1454,7 @@ fn dict_line(d: CDictDef) -> String = {
 ## whole subject of docs/semantics-closure-design.md.
 fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
   match t {
-    TyInt -> prefix ++ "_int"
+    TyInt -> "${prefix}_int"
     # No TyFloat arm. It named `dawn_hash_float` and `dawn_cmp_float`, neither
     # of which the runtime has ever defined -- and it could say so for as long
     # as it did because nothing reaches it: `hash_scalars` dropped Float in
@@ -1462,11 +1462,11 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
     # had it (NaN is unordered). An arm naming a symbol that does not exist is
     # a link error waiting for the first caller; the gap below is the honest
     # answer, and it is the same one Cursor gets.
-    TyString -> prefix ++ "_str"
+    TyString -> "${prefix}_str"
     # Bool and Bytes have an Eq and a Hash but no order, so only one of the two
     # prefixes reaches them; the other falls through to the gap below
-    TyBool -> if prefix == "dawn_hash" { prefix ++ "_bool" } else { no_rt(what, t) }
-    TyBytes -> if prefix == "dawn_hash" { prefix ++ "_bytes" } else { no_rt(what, t) }
+    TyBool -> if prefix == "dawn_hash" { "${prefix}_bool" } else { no_rt(what, t) }
+    TyBytes -> if prefix == "dawn_hash" { "${prefix}_bytes" } else { no_rt(what, t) }
     # an opaque type is its target at run time, here as everywhere
     TyOpaque(_, _, _, _, tgt) -> scalar_rt(prefix, tgt, what)
     # Cursor has no native representation yet (bytes-design.md): an honest
@@ -1546,7 +1546,7 @@ fn rt_symbol(intrs: Map[String, Intr], name: String) -> Option[String] =
   match map.get(intrs, name) {
     Some(i) ->
       match i.rt {
-        Some(_) -> Some("dawn_" ++ name)
+        Some(_) -> Some("dawn_${name}")
         None -> None
       }
     None -> None
@@ -1597,7 +1597,7 @@ fn option_tag(ctor: String) -> Int = {
     }
     i = i + 1
   }
-  panic("emitc: Option has no constructor " ++ ctor)
+  panic("emitc: Option has no constructor ${ctor}")
 }
 
 ## The same question for `Result`, which `cast` builds by hand.
@@ -1610,7 +1610,7 @@ fn result_tag(ctor: String) -> Int = {
     }
     i = i + 1
   }
-  panic("emitc: Result has no constructor " ++ ctor)
+  panic("emitc: Result has no constructor ${ctor}")
 }
 
 ## The static type behind an operand that crosses erased.
@@ -1795,7 +1795,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
     st2 = line(st2, "if (" ++ tmp ++ "->tag != " ++ to_string(option_tag("Some")) ++
         ") dawn_panic(" ++ cargs[1] ++ ");")
-    (st2, dup_expr(unbox_expr(tmp ++ "->fields[0].p", ty), ty))
+    (st2, dup_expr(unbox_expr("${tmp}->fields[0].p", ty), ty))
   } else if name == "unwrap_or" {
     # Both arguments are evaluated, as they are on the JVM and as any other
     # call would: a ternary over the raw fallback expression would make this
@@ -1805,7 +1805,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     var st2 = line(stb, c_type(ty) ++ " " ++ fb ++ " = " ++ cargs[1] ++ ";")
     st2 = line(st2, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
     (st2, dup_expr("(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
-        unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
+        unbox_expr("${tmp}->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
   } else if name == "cast" {
     # The reclaim, with its failure as a value (the error model's step B). A
     # signature that promises a `Result` and an emitter that hands back a bare
@@ -1853,7 +1853,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
       # reads this function's arms by that spelling and would count a named
       # refusal as an implementation -- and then nothing would require the JVM
       # to have one.
-      None -> panic("emitc: intrinsic not implemented for native: " ++ name)
+      None -> panic("emitc: intrinsic not implemented for native: ${name}")
     }
   }
 }
@@ -1885,7 +1885,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
           # `let x = panic(...)` binds nothing; the slot still has to be
           # written because later statements name it, but it cannot hold a
           # value that was never produced
-          line(discard(st1b, v), slot_lv(idx) ++ " = NULL;")
+          line(discard(st1b, v), "${slot_lv(idx)} = NULL;")
         } else {
           line(st1b, slot_lv(idx) ++ " = " ++ v ++ ";")
         }
@@ -1924,7 +1924,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       let st3 = discard(st2, bv)
       # the step label is where CContinue lands, so `continue` runs the
       # increment -- the whole reason CSLoop carries a step
-      let st4 = line(st3, loop_step(id) ++ ": ;")
+      let st4 = line(st3, "${loop_step(id)}: ;")
       let st5 =
         match step {
           Some(sv) -> {
@@ -1934,7 +1934,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
           None -> st4
         }
       let st6 = line(pop(st5), "}")
-      line(st6, loop_end(id) ++ ": ;")
+      line(st6, "${loop_end(id)}: ;")
     }
     # `rc.dawn` only names a binding here when it tracks it, and everything
     # it tracks has a slot; a drop of a symbol without one is this pass and
@@ -1946,7 +1946,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       match map.get(st.slots, sym) {
         Some(idx) ->
           line(st, "dawn_drop(" ++ slot_lv(idx) ++ "); " ++ slot_lv(idx) ++ " = NULL;")
-        None -> panic("emitc: CSDrop of a symbol without an owned slot: v" ++ to_string(sym))
+        None -> panic("emitc: CSDrop of a symbol without an owned slot: v${to_string(sym)}")
       }
   }
 
@@ -1964,7 +1964,7 @@ fn fn_signature(f: CFun) -> String = {
   }
   # dictionaries are hidden trailing parameters, in bound order
   for d in f.dicts {
-    ps = ps ++ ["dawn_dict* " ++ local_name(d.sym)]
+    ps = ps ++ ["dawn_dict* ${local_name(d.sym)}"]
   }
   # effect evidence follows them: an ordinary counted record, so an ordinary
   # parameter of its own C type
@@ -1986,7 +1986,7 @@ fn fn_signature_def(f: CFun, shadowed: Set[Int]) -> String = {
     ps = ps ++ [c_type(p.ty) ++ " " ++ n]
   }
   for d in f.dicts {
-    ps = ps ++ ["dawn_dict* " ++ local_name(d.sym)]
+    ps = ps ++ ["dawn_dict* ${local_name(d.sym)}"]
   }
   for e in f.evs {
     let n = if set.has(shadowed, e.sym) { param_name(e.sym) } else { local_name(e.sym) }
@@ -2033,19 +2033,19 @@ fn is_lifted(f: CFun) -> Bool = str.starts_with(f.name, "lambda$")
 fn adapter_signature(f: CFun) -> String = {
   var ps: List[String] = ["dawn_clo* env"]
   for p in f.params {
-    ps = ps ++ ["void* " ++ local_name(p.sym)]
+    ps = ps ++ ["void* ${local_name(p.sym)}"]
   }
   # the evidence pack rides in a trailing slot of the same erased shape: a call
   # through a function value passes `types.fn_arity` arguments, and the adapter
   # is the one place both counts have to agree
   for e in f.evs {
-    ps = ps ++ ["void* " ++ local_name(e.sym)]
+    ps = ps ++ ["void* ${local_name(e.sym)}"]
   }
   "void* " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
 }
 
 fn emit_adapter(st: CSt, f: CFun) -> CSt = {
-  let st1 = push(line(st, adapter_signature(f) ++ " {"))
+  let st1 = push(line(st, "${adapter_signature(f)} {"))
   var args: List[String] = []
   var i = 0
   # The closure keeps its captures; the function it forwards to takes them
@@ -2125,7 +2125,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     } else {
       line(st2, "return " ++ v ++ ";")
     }
-  var head: List[String] = [fn_signature_def(f, shadowed) ++ " {\n"]
+  var head: List[String] = ["${fn_signature_def(f, shadowed)} {\n"]
   if st3.nslots > 0 {
     # one macro, two expansions (dawn_rt.h): natively the cleanup-carrying
     # array declaration this line used to spell out (slot 0 the count, the
@@ -2157,8 +2157,8 @@ fn hex_cp(n: Int) -> String = {
     s = str.slice(C_HEX, v % 16, v % 16 + 1) ++ s
     v = v / 16
   }
-  while str.len(s) < 4 { s = "0" ++ s }
-  "0x" ++ s
+  while str.len(s) < 4 { s = "0${s}" }
+  "0x${s}"
 }
 
 ## Simple (1:1) Unicode case mapping, as ranges sharing one offset. This is the
@@ -2226,7 +2226,7 @@ pub fn str_static_def(name: String, v: String) -> String =
 ## mirroring the JVM's `dawn$test$i`; this is where that name is written down,
 ## so the generated runner (`ctestrun.dawn`) and the emitter cannot drift
 ## apart.
-pub fn test_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
+pub fn test_name(idx: Int) -> String = "dawn\$test\$${to_string(idx)}"
 
 pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(idx))
 
@@ -2303,9 +2303,9 @@ fn emit_units(
   for u in units {
     for f in u.m.fns {
       if not f.is_test && fn_kept(live, f) {
-        st = line(st, fn_signature(f) ++ ";")
+        st = line(st, "${fn_signature(f)};")
         if is_lifted(f) {
-          st = line(st, adapter_signature(f) ++ ";")
+          st = line(st, "${adapter_signature(f)};")
         }
       }
     }
@@ -2586,10 +2586,10 @@ test "every scalar relation the emitter names is one the runtime defines" {
   # this from turning into a second hand-kept list.
   let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
   for t in hash_scalars() {
-    assert str.contains(header, scalar_rt("dawn_hash", t, "hash") ++ "(")
+    assert str.contains(header, "${scalar_rt("dawn_hash", t, "hash")}(")
   }
   for t in ord_scalars() {
-    assert str.contains(header, scalar_rt("dawn_cmp", t, "cmp") ++ "(")
+    assert str.contains(header, "${scalar_rt("dawn_cmp", t, "cmp")}(")
   }
   # and the other direction, which is the one that was broken: a type in
   # neither table must reach the gap rather than a name. Float had an arm here
@@ -2639,7 +2639,7 @@ test "the evidence-pack primitives the emitter calls are the ones the runtime ha
     bit = bit * 2
   }
   assert mask == 6
-  assert str.contains(header, "#define DAWN_EV_PACK_MASK " ++ to_string(mask))
+  assert str.contains(header, "#define DAWN_EV_PACK_MASK ${to_string(mask)}")
 
   # and the miss message is one text with three implementations. The C copy is
   # written as a single literal so that this search can see it.

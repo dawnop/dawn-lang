@@ -60,13 +60,13 @@ fn sym_name(n: Names, s: Int) -> String =
     Some(v) -> v
     # a symbol the collector did not reach: report it rather than inventing a
     # name, because it means the walk and the renderer disagree
-    None -> "v?" ++ to_string(s)
+    None -> "v?${to_string(s)}"
   }
 
 fn loop_name(n: Names, l: Int) -> String =
   match map.get(n.loops, l) {
     Some(v) -> v
-    None -> "L?" ++ to_string(l)
+    None -> "L?${to_string(l)}"
   }
 
 # ---- id collection (pre-order, first appearance wins) ----
@@ -163,13 +163,13 @@ fn names_of(f: CFun) -> Names = {
   var syms: Map[Int, String] = map.empty()
   var i = 0
   for s in a.syms {
-    syms = map.insert(syms, s, "v" ++ to_string(i))
+    syms = map.insert(syms, s, "v${to_string(i)}")
     i = i + 1
   }
   var loops: Map[Int, String] = map.empty()
   var j = 0
   for l in a.loops {
-    loops = map.insert(loops, l, "L" ++ to_string(j))
+    loops = map.insert(loops, l, "L${to_string(j)}")
     j = j + 1
   }
   Names { syms: syms, loops: loops }
@@ -231,7 +231,7 @@ fn callee_line(adts: Adts, c: CCallee) -> String =
     # nev prints only when nonzero, so every evidence-free dump is unchanged
     CMethod(_, tid, method, idx, nev) ->
       "method trait=" ++ to_string(tid) ++ " " ++ method ++ " slot=" ++ to_string(idx) ++
-      (if nev == 0 { "" } else { " nev=" ++ to_string(nev) })
+      (if nev == 0 { "" } else { " nev=${to_string(nev)}" })
     CImpl(owner, tid, subject, method) ->
       "impl " ++ owner ++ " trait=" ++ to_string(tid) ++ " subject=" ++
       ty_str(adts, subject) ++ " " ++ method
@@ -255,7 +255,7 @@ fn ty_str(adts: Adts, t: Ty) -> String =
     _ -> ty_show(adts, t)
   }
 
-fn ty(adts: Adts, t: Ty) -> String = " : " ++ ty_str(adts, t)
+fn ty(adts: Adts, t: Ty) -> String = " : ${ty_str(adts, t)}"
 
 ## An ADT and one of its constructors, by name.
 ##
@@ -271,9 +271,9 @@ fn ty(adts: Adts, t: Ty) -> String = " : " ++ ty_str(adts, t)
 ## stable within one program -- it is only the compiler-compiling-itself dump,
 ## where every edit is to the program being measured, that churns.
 fn ctor_at(adts: Adts, adt: Int, ci: Int) -> String = {
-  if adt == DICT_ADT_ID { return "<dict>/" ++ to_string(ci) }
+  if adt == DICT_ADT_ID { return "<dict>/${to_string(ci)}" }
   let a = adt_of(adts, adt)
-  let cn = if ci < len(a.ctors) { a.ctors[ci].name } else { "?" ++ to_string(ci) }
+  let cn = if ci < len(a.ctors) { a.ctors[ci].name } else { "?${to_string(ci)}" }
   a.name ++ "/" ++ cn
 }
 
@@ -283,7 +283,7 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     CFloat(v) -> ind(d) ++ "float " ++ to_string(v) ++ "\n"
     CBool(v) -> ind(d) ++ "bool " ++ to_string(v) ++ "\n"
     CStr(v) -> ind(d) ++ "str \"" ++ lexdump.esc(v) ++ "\"\n"
-    CUnit -> ind(d) ++ "unit\n"
+    CUnit -> "${ind(d)}unit\n"
     CLocal(s, t) -> ind(d) ++ "local " ++ sym_name(n, s) ++ ty(adts, t) ++ "\n"
     CFnRef(owner, name, t) ->
       ind(d) ++ "fnref " ++ owner ++ "." ++ name ++ ty(adts, t) ++ "\n"
@@ -456,7 +456,7 @@ fn slot(s: CDictSlot) -> String =
 fn dict(adts: Adts, dd: CDictDef) -> String = {
   var out = "dict " ++ dd.key ++ " trait=" ++ to_string(dd.trait_id) ++
     " subject=" ++ ty_str(adts, dd.subject) ++
-    (if dd.nargs > 0 { " nargs=" ++ to_string(dd.nargs) } else { "" }) ++ "\n"
+    (if dd.nargs > 0 { " nargs=${to_string(dd.nargs)}" } else { "" }) ++ "\n"
   for s in dd.slots { out = out ++ slot(s) }
   out
 }

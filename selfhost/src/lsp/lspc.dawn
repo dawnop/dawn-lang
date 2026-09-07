@@ -544,7 +544,7 @@ fn seg_items(it0: Items, prefix: List[String], paths: List[String], rank: String
         it = add(it, segs[d], 9, Some(mp), rank)
       } else {
         let dir = join(list.take(segs, d + 1), "/")
-        it = add(it, segs[d] ++ "/", 19, Some(dir ++ "/…"), rank)
+        it = add(it, "${segs[d]}/", 19, Some("${dir}/…"), rank)
       }
     }
   }
@@ -626,15 +626,15 @@ fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
     let (name, sig) = pr
     it = add(it, name, 3, Some(sig_render(adts, qc.entry.cx.traits, sig)), "0")
   }
-  for name in map.keys(ex.types_by_name) { it = add(it, name, 7, Some("type " ++ name), "0") }
-  for name in map.keys(ex.aliases) { it = add(it, name, 7, Some("alias " ++ name), "0") }
+  for name in map.keys(ex.types_by_name) { it = add(it, name, 7, Some("type ${name}"), "0") }
+  for name in map.keys(ex.aliases) { it = add(it, name, 7, Some("alias ${name}"), "0") }
   for name in map.keys(ex.ctors) { it = add(it, name, 20, Some("constructor"), "0") }
   for pr in map.entries(ex.consts) {
     let (name, ty) = pr
     it = add(it, name, 21, Some("const " ++ name ++ ": " ++ ty_show(adts, ty)), "0")
   }
-  for name in map.keys(ex.traits_by_name) { it = add(it, name, 8, Some("trait " ++ name), "0") }
-  for name in map.keys(ex.effects) { it = add(it, name, 23, Some("effect " ++ name), "0") }
+  for name in map.keys(ex.traits_by_name) { it = add(it, name, 8, Some("trait ${name}"), "0") }
+  for name in map.keys(ex.effects) { it = add(it, name, 23, Some("effect ${name}"), "0") }
   it.out
 }
 
@@ -646,7 +646,7 @@ fn declared_items(it0: Items, text: String) -> List[CItem] = {
   var it = it0
   let (m, _) = parser.parse_module(text)
   for d in module_fns(m) {
-    if d.is_pub { it = add(it, d.name, 3, Some("fn " ++ d.name), "0") }
+    if d.is_pub { it = add(it, d.name, 3, Some("fn ${d.name}"), "0") }
   }
   for d in module_types(m) {
     if d.is_pub {
@@ -655,17 +655,17 @@ fn declared_items(it0: Items, text: String) -> List[CItem] = {
         None -> "type "
       }
       it = add(it, d.name, 7, Some(kind ++ d.name), "0")
-      for c in d.ctors { it = add(it, c.name, 20, Some("constructor of " ++ d.name), "0") }
+      for c in d.ctors { it = add(it, c.name, 20, Some("constructor of ${d.name}"), "0") }
     }
   }
   for d in module_consts(m) {
-    if d.is_pub { it = add(it, d.name, 21, Some("const " ++ d.name), "0") }
+    if d.is_pub { it = add(it, d.name, 21, Some("const ${d.name}"), "0") }
   }
   for d in module_traits(m) {
-    if d.is_pub { it = add(it, d.name, 8, Some("trait " ++ d.name), "0") }
+    if d.is_pub { it = add(it, d.name, 8, Some("trait ${d.name}"), "0") }
   }
   for d in module_effects(m) {
-    if d.is_pub { it = add(it, d.name, 23, Some("effect " ++ d.name), "0") }
+    if d.is_pub { it = add(it, d.name, 23, Some("effect ${d.name}"), "0") }
   }
   it.out
 }
@@ -680,7 +680,7 @@ fn add_adt_completions(qc: QCx, it0: Items, include_types: Bool) -> Items = {
   for pr in map.entries(qc.entry.cx.adts_by_name) {
     let (_, aid) = pr
     let a = adt_of(qc.entry.cx.adts, aid)
-    if include_types { it = add(it, a.name, 7, Some("type " ++ a.name), "1") }
+    if include_types { it = add(it, a.name, 7, Some("type ${a.name}"), "1") }
     for c in a.ctors {
       let detail =
         if len(c.fields) == 0 {
@@ -760,7 +760,7 @@ fn add_source_constructor_completions(qc: QCx, text: String, it0: Items) -> Item
     seen_types = set.insert(seen_types, d.name)
     for c in d.ctors {
       if type_ok && source_constructor_name_available(qc, d.name, c.name, seen_ctors) {
-        it = add(it, c.name, 20, Some("constructor of " ++ d.name), "1")
+        it = add(it, c.name, 20, Some("constructor of ${d.name}"), "1")
       }
       seen_ctors = set.insert(seen_ctors, c.name)
     }
@@ -797,7 +797,7 @@ fn qualified_pattern_constructors(qc: QCx, module_alias: String) -> List[CItem] 
       Some(ex) -> {
         var it = Items { out: [], seen: set.empty() }
         for name in map.keys(ex.ctors) {
-          it = add(it, name, 20, Some("constructor from " ++ module_alias), "0")
+          it = add(it, name, 20, Some("constructor from ${module_alias}"), "0")
         }
         it.out
       }
@@ -945,7 +945,7 @@ pub fn completions_at(
 test "`use` lines are recognized, and everything after the keyword is the tail" {
   fn tail_of(s: String) -> String =
     match use_tail(code_points(s)) {
-      Some(t) -> "|" ++ from_code_points(t)
+      Some(t) -> "|${from_code_points(t)}"
       None -> "-"
     }
   assert tail_of("use ") == "|"

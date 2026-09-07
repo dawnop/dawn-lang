@@ -393,8 +393,8 @@ pub fn path_to_uri(path: String) -> String = {
     }
   }
   let body = from_code_points(out)
-  let rooted = if str.starts_with(body, "/") { body } else { "/" ++ body }
-  "file://" ++ rooted
+  let rooted = if str.starts_with(body, "/") { body } else { "/${body}" }
+  "file://${rooted}"
 }
 
 fn hex_digit(v: Int) -> Char =
@@ -974,7 +974,7 @@ test "Content-Length accepts exact wire bounds and ASCII spelling variants" {
   let exact = "X:" ++ str.repeat("a", HEADER_MAX_BYTES - 2 - str.len(suffix)) ++ suffix
   assert str.len(exact) == HEADER_MAX_BYTES
   assert parse_content_length(exact) == Some(0)
-  assert parse_content_length("X:a" ++ exact) == None
+  assert parse_content_length("X:a${exact}") == None
 
   assert parse_content_length("Content-Length: 0\r\n\r\n") == Some(0)
   assert parse_content_length("cOnTeNt-LeNgTh:\t 00042 \t\r\n\r\n") == Some(42)
@@ -1009,7 +1009,7 @@ test "header lines require a nonempty ASCII token name" {
     "X-Test: ignored\r\nContent-Length: 0\r\n\r\n"
   ) == Some(0)
   for line in ["NoColon", ": value", "Bad Name: value", "Bad(Name): value"] {
-    assert parse_content_length(line ++ "\r\nContent-Length: 0\r\n\r\n") == None
+    assert parse_content_length("${line}\r\nContent-Length: 0\r\n\r\n") == None
   }
 }
 
@@ -1032,7 +1032,7 @@ fn decode_body(body: Bytes) -> Frame =
   match bytes.decode_utf8_checked(body) {
     Ok(text) -> match parser.parse(text) {
       Ok(j) -> Message(j)
-      Err(e) -> Malformed(-32700, "Parse error: " ++ error_text(e))
+      Err(e) -> Malformed(-32700, "Parse error: ${error_text(e)}")
     }
     Err(_) -> Malformed(-32700, "Parse error: invalid UTF-8")
   }
@@ -1182,7 +1182,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)),
         ("error", jobj([
           ("code", JInt(-32601)),
-          ("message", JStr("Unsupported request method: " ++ method))
+          ("message", JStr("Unsupported request method: ${method}"))
         ]))]))
     }
   }
@@ -1395,7 +1395,7 @@ fn activate_workspace(
         Ok(workspace) -> Ready(workspace)
         Err(e) -> {
           close_lease(lease)
-          panic("lsp workspace rebuild failed before installation: " ++ e.message)
+          panic("lsp workspace rebuild failed before installation: ${e.message}")
         }
       }
     }
@@ -1816,7 +1816,7 @@ fn path_in_root(path: String, root: String) -> Bool =
   } else if root == "/" {
     str.starts_with(path, "/")
   } else {
-    str.starts_with(path, root ++ "/")
+    str.starts_with(path, "${root}/")
   }
 
 fn location_of(
@@ -1992,7 +1992,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     # count can see.
     let std = match load_std("std") {
       Ok(sc) -> sc
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let no_docs: Map[String, Doc] = map.empty()
     let no_ws: Map[String, WorkspaceSlot] = map.empty()
@@ -2011,10 +2011,10 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
       Ok(t) -> t
-      Err(e) -> panic("std/cursor.dawn: " ++ e.message)
+      Err(e) -> panic("std/cursor.dawn: ${e.message}")
     }
     let no_modules: Option[Map[String, String]] = None
-    let d = standalone_doc(st, "file://" ++ canon(path), Some(path), Some(canon(path)),
+    let d = standalone_doc(st, "file://${canon(path)}", Some(path), Some(canon(path)),
       text, 0, no_modules)
     match d.analysis {
       Standalone(prog, entry, _) -> {
@@ -2040,9 +2040,9 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     let _ = io.mkdirs("/tmp/dawn-selfhost-lsp-std")
     match io.write_file(elsewhere, text) {
       Ok(_) -> ()
-      Err(e) -> panic("test setup: " ++ e.message)
+      Err(e) -> panic("test setup: ${e.message}")
     }
-    let d2 = standalone_doc(st, "file://" ++ elsewhere, Some(elsewhere),
+    let d2 = standalone_doc(st, "file://${elsewhere}", Some(elsewhere),
       Some(canon(elsewhere)), text, 0, no_modules)
     match d2.analysis {
       Standalone(prog2, entry2, _) -> {
@@ -2122,7 +2122,7 @@ fn def_probe_text() -> String =
 fn def_probe_put(path: String, text: String) -> Unit !Fs =
   match io.write_file(path, text) {
     Ok(_) -> ()
-    Err(e) -> panic("test setup: " ++ e.message)
+    Err(e) -> panic("test setup: ${e.message}")
   }
 
 fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !Env !io = {
@@ -2141,7 +2141,7 @@ fn def_probe_doc(st: LspState, text: String) -> Doc !Fs !Env !io =
 fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> Target = {
   let off = match str.index_of(text, needle) {
     Some(i) -> i + skip
-    None -> panic("probe text has no " ++ needle)
+    None -> panic("probe text has no ${needle}")
   }
   match analysis_of(st, d) {
     Some(analysis) ->
@@ -2149,7 +2149,7 @@ fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -
         Some(qc) ->
           match find_target(qc, off) {
             Some(t) -> t
-            None -> panic("nothing under the cursor at " ++ needle)
+            None -> panic("nothing under the cursor at ${needle}")
           }
         None -> panic("the probe buffer has no QCx")
       }
@@ -2160,7 +2160,7 @@ fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -
 fn def_probe_span(t: Target, what: String) -> (Int, Int) =
   match t.def {
     Some(sp) -> sp
-    None -> panic("no definition offered for " ++ what)
+    None -> panic("no definition offered for ${what}")
   }
 
 test "a definition in std names std's file and points at the declaration" {
@@ -2174,7 +2174,7 @@ test "a definition in std names std's file and points at the declaration" {
     # request came from. A confidently wrong location, not a missing one.
     let std = match load_std("std") {
       Ok(sc) -> sc
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let st = def_probe_state(std)
     let text = def_probe_text()
@@ -2193,7 +2193,7 @@ test "a definition in std names std's file and points at the declaration" {
     let (lo, hi) = def_probe_span(t, "list.reverse")
     let src = match io.read_file(dp) {
       Ok(s) -> s
-      Err(e) -> panic("std/list.dawn: " ++ e.message)
+      Err(e) -> panic("std/list.dawn: ${e.message}")
     }
     assert str.slice(src, lo, hi) == "reverse"
 
@@ -2223,7 +2223,7 @@ test "an embedded std offers no definition instead of one in the wrong file" {
     # None is the entry document, and std is not it.
     let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
       Ok(sc) -> sc
-      Err(e) -> panic("embedded std: " ++ std_load_error_text(e))
+      Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
     }
     let absent: Option[String] = None
     assert emb.dir == absent
@@ -2263,11 +2263,11 @@ test "a definition of a std constant names std's file too" {
     # under test.
     let root = "/tmp/dawn-selfhost-lsp-def/conststd"
     let _ = io.mkdirs(root)
-    def_probe_put(root ++ "/modules.txt", "constprobe\n")
-    def_probe_put(root ++ "/constprobe.dawn", "pub const PROBE_LIMIT: Int = 7\n")
+    def_probe_put("${root}/modules.txt", "constprobe\n")
+    def_probe_put("${root}/constprobe.dawn", "pub const PROBE_LIMIT: Int = 7\n")
     let cstd = match load_std(root) {
       Ok(sc) -> sc
-      Err(e) -> panic("probe std: " ++ std_load_error_text(e))
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
     }
     let st = def_probe_state(cstd)
     let text = join([
@@ -2283,11 +2283,11 @@ test "a definition of a std constant names std's file too" {
       Some(p) -> p
       None -> panic("a std constant must name std's file")
     }
-    assert dp == canon(root ++ "/constprobe.dawn")
+    assert dp == canon("${root}/constprobe.dawn")
     let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
     let src = match io.read_file(dp) {
       Ok(s) -> s
-      Err(e) -> panic("probe std module: " ++ e.message)
+      Err(e) -> panic("probe std module: ${e.message}")
     }
     assert str.slice(src, lo, hi) == "PROBE_LIMIT"
   }))
@@ -2302,7 +2302,7 @@ test "a local definition still resolves against the requesting document" {
     # being edited resolve against the live text rather than whatever is on disk.
     let std = match load_std("std") {
       Ok(sc) -> sc
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let st = def_probe_state(std)
     let text = def_probe_text()
@@ -2368,7 +2368,7 @@ test "a handler state cell answers at every spelling of it" {
     # answer with is the erased cell, which names nothing the author wrote.
     let std = match load_std("std") {
       Ok(sc) -> sc
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let st = def_probe_state(std)
     let text = cell_probe_text()

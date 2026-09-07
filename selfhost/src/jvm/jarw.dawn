@@ -26,7 +26,7 @@ const ZIP_METHOD_STORED: Int = 0
 # the DOS fields directly, with no zone in the path.
 fn entry_time() -> LocalDateTime !io = LocalDateTime.of(2020, 1, 1, 0, 0, 0)!
 
-fn crlf() -> String = str.from_char('\r') ++ "\n"
+fn crlf() -> String = "${str.from_char('\r')}\n"
 
 fn dotted(cls: String) -> String = {
   var out = ""
@@ -120,7 +120,7 @@ fn class_path_lines(entries: List[String]) -> String = {
   var out = ""
   var line = ""
   var width = 0
-  for c in str.chars("Class-Path: " ++ join(entries, " ")) {
+  for c in str.chars("Class-Path: ${join(entries, " ")}") {
     let w = bytes.len(bytes.utf8(c))
     if width + w > 72 {
       out = out ++ line ++ crlf()
@@ -157,7 +157,7 @@ pub fn write_jar_cp(
   put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest_text(main_class, cp_entries)))
   for pair in classes {
     let (nm, bs) = pair
-    put(zos, nm ++ ".class", bs)
+    put(zos, "${nm}.class", bs)
   }
 }
 
@@ -209,7 +209,7 @@ fn unwrap_manifest(text: String) -> String = {
 test "class-path lines wrap under the 72-byte cap and stay joinable" {
   let none: List[String] = []
   assert class_path_lines(none) == ""
-  assert class_path_lines(["lib/a.jar"]) == "Class-Path: lib/a.jar" ++ crlf()
+  assert class_path_lines(["lib/a.jar"]) == "Class-Path: lib/a.jar${crlf()}"
   let entries = [
     "lib/a-very-long-artifact-name-1.0.0.jar", "lib/another-quite-long-name-2.3.4.jar",
     "lib/a-third-one-so-the-value-needs-three-physical-lines-4.5.6.jar"
@@ -218,7 +218,7 @@ test "class-path lines wrap under the 72-byte cap and stay joinable" {
   for line in str.split(str.strip_suffix(long, crlf()).unwrap_or(long), crlf()) {
     assert bytes.len(bytes.utf8(line)) <= 72
   }
-  assert unwrap_manifest(long) == "Class-Path: " ++ join(entries, " ")
+  assert unwrap_manifest(long) == "Class-Path: ${join(entries, " ")}"
 }
 
 test "the cap counts bytes, so a non-ASCII entry does not slip past it" {
@@ -230,7 +230,7 @@ test "the cap counts bytes, so a non-ASCII entry does not slip past it" {
     name = name ++ "\u{1F600}"
     i = i + 1
   }
-  let text = class_path_lines([name ++ ".jar"])
+  let text = class_path_lines(["${name}.jar"])
   for line in str.split(str.strip_suffix(text, crlf()).unwrap_or(text), crlf()) {
     assert bytes.len(bytes.utf8(line)) <= 72
   }

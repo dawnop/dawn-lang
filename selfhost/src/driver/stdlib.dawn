@@ -138,23 +138,23 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out = map.insert(out, "byte_slice", "use std/bytes, then bytes.slice(...)")
   out = map.insert(out, "byte_index_of", "use std/bytes, then bytes.index_of(...)")
   for op in ["empty", "from", "insert", "remove", "get", "has", "keys", "values", "entries"] {
-    out = map.insert(out, "map_" ++ op, "use std/map, then map." ++ op ++ "(...)")
+    out = map.insert(out, "map_${op}", "use std/map, then map." ++ op ++ "(...)")
   }
   for op in ["empty", "from", "insert", "remove", "has", "to_list"] {
-    out = map.insert(out, "set_" ++ op, "use std/set, then set." ++ op ++ "(...)")
+    out = map.insert(out, "set_${op}", "use std/set, then set." ++ op ++ "(...)")
   }
   # the two whose public name is not the primitive's: length is `len` on every
   # container now, so the flat spelling's hint has to say `len` (audit RD-06)
   out = map.insert(out, "map_size", "use std/map, then map.len(...)")
   out = map.insert(out, "set_size", "use std/set, then set.len(...)")
   for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
-    out = map.insert(out, "cursor_" ++ op, "use std/cursor, then cursor." ++ op ++ "(...)")
+    out = map.insert(out, "cursor_${op}", "use std/cursor, then cursor." ++ op ++ "(...)")
   }
   out = map.insert(out, "index_of_from", "use std/cursor, then cursor.find(...)")
   # the searches std/str took over from the intrinsic table: they were walks,
   # not representation, so there is one definition of each now (std/str)
   for op in ["trim", "contains", "starts_with", "ends_with", "index_of", "last_index_of"] {
-    out = map.insert(out, "str_" ++ op, "use std/str, then str." ++ op ++ "(...)")
+    out = map.insert(out, "str_${op}", "use std/str, then str." ++ op ++ "(...)")
   }
   # The intrinsics that became std-only on 2026-07-30 (RD-02). They were
   # always meant to be the backend contract rather than language surface, and
@@ -165,13 +165,13 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
     "exists", "mkdirs", "read_file", "write_file", "cwd", "getenv", "read_bytes",
     "write_bytes", "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink",
     "read_stdin", "stdin_ready", "run"] {
-    out = map.insert(out, "io_" ++ op, "use std/io, then io." ++ op ++ "(...)")
+    out = map.insert(out, "io_${op}", "use std/io, then io." ++ op ++ "(...)")
   }
   # the one io primitive std renamed: it answers entry names, and `list_dir`
   # is what the module calls that
   out = map.insert(out, "io_list_names", "use std/io, then io.list_dir(...)")
   for op in ["utf8", "len", "at", "slice", "decode_latin1"] {
-    out = map.insert(out, "bytes_" ++ op, "use std/bytes, then bytes." ++ op ++ "(...)")
+    out = map.insert(out, "bytes_${op}", "use std/bytes, then bytes." ++ op ++ "(...)")
   }
   # the lossy decoder's std name says what it does to malformed input (LIB-06);
   # the primitive keeps the plain name
@@ -185,7 +185,7 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out = map.insert(out, "bytes_from_array",
     "use std/bytes, then bytes.buf()/bytes.put(...)/bytes.freeze(...)")
   for op in ["lower", "upper"] {
-    out = map.insert(out, "str_" ++ op, "use std/str, then str.to_" ++ op ++ "(...)")
+    out = map.insert(out, "str_${op}", "use std/str, then str.to_" ++ op ++ "(...)")
   }
   # the only entry here that did not move anywhere: it was renamed in v0.31.0,
   # because the barrier catches a *fault* and stopped having anything to do
@@ -253,7 +253,7 @@ fn std_read(dir: String, name: String) -> Result[String, String] !Fs = {
 ## rather than an error, because a std that predates the stamp, and the
 ## one-module stds tests assemble, both land there.
 fn dir_declared_version(dir: String) -> Option[String] !Fs =
-  match io.read_file(dir ++ "/VERSION") {
+  match io.read_file("${dir}/VERSION") {
     Ok(t) -> Some(str.trim(t))
     Err(_) -> None
   }
@@ -351,7 +351,7 @@ pub fn std_load_error_text(e: StdLoadError) -> String !Env = {
         "  Use the " ++ VERSION ++ " std, or run the " ++ said ++ " toolchain."
       ], "\n")
     }
-    _ -> join([head ++ " does not load", "  " ++ why_text(e.why), advice(e)], "\n")
+    _ -> join(["${head} does not load", "  ${why_text(e.why)}", advice(e)], "\n")
   }
 }
 
@@ -400,9 +400,9 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
   var dir_modules: Map[String, String] = map.empty()
   var impls_before: Map[String, Impls] = map.empty()
   for n in names {
-    let mod_path = "std/" ++ n
+    let mod_path = "std/${n}"
     let file = dir ++ "/" ++ n ++ ".dawn"
-    let text = match std_read_from(dir, n ++ ".dawn") {
+    let text = match std_read_from(dir, "${n}.dawn") {
       Ok(pair) -> {
         let (t, from_dir) = pair
         # only the modules the directory itself answered for: a name the
@@ -412,7 +412,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
         t
       }
       Err(m) -> return Err(StdLoadError {
-        origin: origin, declared: declared, why: StdFileMissing(n ++ ".dawn", m)
+        origin: origin, declared: declared, why: StdFileMissing("${n}.dawn", m)
       })
     }
     let (m, pdiags) = parser.parse_module(text)
@@ -570,7 +570,7 @@ pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env =
 fn put(p: String, text: String) -> Unit !Fs =
   match io.write_file(p, text) {
     Ok(_) -> ()
-    Err(e) -> panic("test setup: " ++ e.message)
+    Err(e) -> panic("test setup: ${e.message}")
   }
 
 ## Run `body` with no host environment behind it, for the tests below whose
@@ -589,12 +589,12 @@ test "the embedded std matches std/ on disk" {
     # that forgot to regenerate fails here, in every `dawn test selfhost`
     let names = match read_index("std") {
       Ok(ns) -> ns
-      Err(e) -> panic("std index: " ++ e)
+      Err(e) -> panic("std index: ${e}")
     }
     var files = ["modules.txt"]
-    for n in names { files = files ++ [n ++ ".dawn"] }
+    for n in names { files = files ++ ["${n}.dawn"] }
     for f in files {
-      let disk = match io.read_file("std/" ++ f) {
+      let disk = match io.read_file("std/${f}") {
         Ok(t) -> t
         Err(e) -> panic("std/" ++ f ++ ": " ++ e.message)
       }
@@ -634,11 +634,11 @@ test "the loader's id counter opens past every prelude id" {
     # asks what the loader did with the prelude's ADT table.
     let root = "/tmp/dawn-selfhost-stdlib/idprobe"
     let _ = io.mkdirs(root)
-    put(root ++ "/modules.txt", "idprobe\n")
-    put(root ++ "/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
+    put("${root}/modules.txt", "idprobe\n")
+    put("${root}/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
     let probe = match load_std(root) {
       Ok(sc) -> sc
-      Err(e) -> panic("probe std: " ++ std_load_error_text(e))
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
     }
     # the prelude ADTs came through unreplaced
     assert adt_of(probe.adts, OPTION_ID).name == "Option"
@@ -660,7 +660,7 @@ test "production comptime body tables contain only direct std functions" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {
       Ok(s) -> s
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
 
     # The real bundle supplies many impl bodies (std/list alone supplies Iter,
@@ -715,7 +715,7 @@ test "the numeric parsers still have somewhere to land" {
     # it names the two ends instead of printing a mangled symbol.
     let std = match load_std("std") {
       Ok(s) -> s
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let own = match map.get(std.by_owner, "std/fmt") {
       Some(o) -> o
@@ -746,7 +746,7 @@ test "float rendering and parsing fold through std/fmt, not the host" {
     # them out from under the spec and this test is what would say so.
     let std = match load_std("std") {
       Ok(s) -> s
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let src = "const A: String = comptime { to_string(0.1) }\n" ++
       "const B: String = comptime { to_string(3.0e-7) }\n" ++
@@ -768,7 +768,7 @@ test "float rendering and parsing fold through std/fmt, not the host" {
     assert len(cx1.diags) == 0
     let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
       std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
-    if len(ct.diags) > 0 { println("FOLD DIAG: " ++ ct.diags[0].msg) }
+    if len(ct.diags) > 0 { println("FOLD DIAG: ${ct.diags[0].msg}") }
     assert len(ct.diags) == 0
     assert map.get(ct.consts, "A") == Some(VStr("0.1"))
     assert map.get(ct.consts, "B") == Some(VStr("3.0E-7"))
@@ -821,7 +821,7 @@ test "the bundled std loads, checks and evaluates" {
         assert set.has(std.std_names, "trim")
       }
       Err(e) -> {
-        println("STD LOAD FAILED: " ++ std_load_error_text(e))
+        println("STD LOAD FAILED: ${std_load_error_text(e)}")
         assert false
       }
     }
@@ -838,7 +838,7 @@ test "std/ stamps itself with this toolchain's version" {
     # toolchain that refuses its own std.
     let stamped = match io.read_file("std/VERSION") {
       Ok(t) -> str.trim(t)
-      Err(e) -> panic("std/VERSION: " ++ e.message)
+      Err(e) -> panic("std/VERSION: ${e.message}")
     }
     if stamped != VERSION {
       println("std/VERSION says " ++ stamped ++ " but version.dawn says " ++ VERSION)
@@ -856,9 +856,9 @@ test "a std directory from another release is refused by version, not by symptom
     # releases.
     let root = "/tmp/dawn-selfhost-stdlib/skew"
     let _ = io.mkdirs(root)
-    put(root ++ "/VERSION", "0.0.1-not-this-one\n")
-    put(root ++ "/modules.txt", "skew\n")
-    put(root ++ "/skew.dawn", "pub fn skew() -> Int = 1\n")
+    put("${root}/VERSION", "0.0.1-not-this-one\n")
+    put("${root}/modules.txt", "skew\n")
+    put("${root}/skew.dawn", "pub fn skew() -> Int = 1\n")
     match load_std(root) {
       Ok(_) -> {
         println("a std stamped 0.0.1-not-this-one loaded into a " ++ VERSION ++ " toolchain")
@@ -889,8 +889,8 @@ test "an unstamped std directory that will not load is not called a compiler bug
     # this binary earns "this is a bug in dawn".
     let root = "/tmp/dawn-selfhost-stdlib/unstamped"
     let _ = io.mkdirs(root)
-    put(root ++ "/modules.txt", "broken\n")
-    put(root ++ "/broken.dawn", "pub fn broken() -> Int = \"not an Int\"\n")
+    put("${root}/modules.txt", "broken\n")
+    put("${root}/broken.dawn", "pub fn broken() -> Int = \"not an Int\"\n")
     match load_std(root) {
       Ok(_) -> {
         println("a std whose only module does not check loaded anyway")
@@ -920,10 +920,10 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
     # directory must not be reported as a version mismatch.
     let root = "/tmp/dawn-selfhost-stdlib/absent"
     let _ = io.mkdirs(root)
-    match load_std(root ++ "/nothing-here") {
+    match load_std("${root}/nothing-here") {
       Ok(std) -> { assert map.has(std.exports, "std/str") }
       Err(e) -> {
-        println("embedded fallback failed: " ++ std_load_error_text(e))
+        println("embedded fallback failed: ${std_load_error_text(e)}")
         assert false
       }
     }
@@ -940,7 +940,7 @@ test "a std module's file is only known when a directory supplied it" {
     # to sit there.
     let std = match load_std("std") {
       Ok(s) -> s
-      Err(e) -> panic("std: " ++ std_load_error_text(e))
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
     let f = match std_file_of(std, "std/list") {
       Some(p) -> p
@@ -959,13 +959,13 @@ test "a std module's file is only known when a directory supplied it" {
     # and the embedded half: every module loaded, none of them has a file
     let root = "/tmp/dawn-selfhost-stdlib/absent"
     let _ = io.mkdirs(root)
-    match load_std(root ++ "/nothing-here") {
+    match load_std("${root}/nothing-here") {
       Ok(emb) -> {
         assert map.has(emb.exports, "std/list")
         assert std_file_of(emb, "std/list") == absent
         assert emb.dir == absent
       }
-      Err(e) -> panic("embedded fallback failed: " ++ std_load_error_text(e))
+      Err(e) -> panic("embedded fallback failed: ${std_load_error_text(e)}")
     }
   }))
 }

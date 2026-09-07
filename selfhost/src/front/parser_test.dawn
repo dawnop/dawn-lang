@@ -443,7 +443,7 @@ test "direct negative minimum magnitudes fold before postfix parsing" {
     "-0b1000000000000000000000000000000000000000000000000000000000000000",
     "(-9223372036854775808)"
   ] {
-    let (m, ds) = parse_module("const MIN: Int = " ++ literal)
+    let (m, ds) = parse_module("const MIN: Int = ${literal}")
     assert len(ds) == 0
     match m.decls[0] {
       DConst(_, _, _, EInt(v, _, _), _, _, _, _) -> {
@@ -565,7 +565,7 @@ fn elem_tag(e: ListElem) -> String =
   match e {
     LeExpr(_) -> "expr"
     LeSpread(_, _, _) -> "spread"
-    LeIf(arms, _, _) -> "if" ++ to_string(len(arms))
+    LeIf(arms, _, _) -> "if${to_string(len(arms))}"
   }
 
 ## One tag per element, so an assertion names the *forms* a literal parsed to
@@ -579,8 +579,8 @@ fn elem_tags(elems: List[ListElem]) -> List[String] = list.map(elems, elem_tag)
 test "a newline separates list elements the way a comma does" {
   let head = "fn f(xs: List[Int], c: Bool) -> List[Int] = "
   let shape = ["expr", "spread", "if1", "if2", "expr"]
-  let nl = head ++ "[\n  0\n  ..xs\n  if c { 1 }\n  if c { 2 } else if not c { 3 }\n  4\n]"
-  let commas = head ++ "[0, ..xs, if c { 1 }, if c { 2 } else if not c { 3 }, 4]"
+  let nl = "${head}[\n  0\n  ..xs\n  if c { 1 }\n  if c { 2 } else if not c { 3 }\n  4\n]"
+  let commas = "${head}[0, ..xs, if c { 1 }, if c { 2 } else if not c { 3 }, 4]"
   assert elem_tags(list_elems_of(nl)) == shape
   assert elem_tags(list_elems_of(commas)) == shape
   # a comma and a newline may separate elements of one literal, in either order
@@ -608,21 +608,21 @@ test "a newline separates list elements the way a comma does" {
 test "a list element ends where its continuation lines do" {
   let head = "fn f(a: Int, b: Bool, xs: List[Int]) -> Unit = "
   # an operator that may lead a continuation line still does: one element
-  assert len(list_elems_of(head ++ "[\n  a\n    |> g\n]")) == 1
-  assert len(list_elems_of(head ++ "[\n  xs\n    .len()\n]")) == 1
-  assert len(list_elems_of(head ++ "[\n  b\n    && b\n]")) == 1
-  assert len(list_elems_of(head ++ "[\n  a\n    == a\n]")) == 1
+  assert len(list_elems_of("${head}[\n  a\n    |> g\n]")) == 1
+  assert len(list_elems_of("${head}[\n  xs\n    .len()\n]")) == 1
+  assert len(list_elems_of("${head}[\n  b\n    && b\n]")) == 1
+  assert len(list_elems_of("${head}[\n  a\n    == a\n]")) == 1
   # `..` is not an expression operator, so it continues nothing: a line-leading
   # `..` opens a spread element rather than closing a range with the line above
-  assert elem_tags(list_elems_of(head ++ "[\n  a\n  ..xs\n]")) == ["expr", "spread"]
+  assert elem_tags(list_elems_of("${head}[\n  a\n  ..xs\n]")) == ["expr", "spread"]
   # on one line the same two tokens are still the refusal they always were:
   # `..` between two values inside a literal is neither of its meanings
   let (_, range_ds) = parse_module("fn f() -> List[Int] = [0..3]")
   assert range_ds[0].msg == "expected `]`, found `..`"
   # `+` and `-` may not lead a continuation line, so a line opening with one
   # opens an element: `-` is prefix there, and `+` has no prefix meaning
-  assert elem_tags(list_elems_of(head ++ "[\n  a\n  -1\n]")) == ["expr", "expr"]
-  let (_, plus_ds) = parse_module(head ++ "[\n  a\n  + a\n]")
+  assert elem_tags(list_elems_of("${head}[\n  a\n  -1\n]")) == ["expr", "expr"]
+  let (_, plus_ds) = parse_module("${head}[\n  a\n  + a\n]")
   assert len(plus_ds) == 1
   assert plus_ds[0].msg == "expected an expression, found `+`"
 }
@@ -1021,7 +1021,7 @@ test "type grouping disambiguates outer and inner function effects" {
 
 test "bare type constructors are parser-owned independent of spelling" {
   for ctor in ["Int", "Char", "Float", "Bool", "String", "Bytes", "Unit", "Red"] {
-    let (m, ds) = parse_module("type Wrapped = " ++ ctor)
+    let (m, ds) = parse_module("type Wrapped = ${ctor}")
     assert len(ds) == 0
     assert len(m.decls) == 1
     match m.decls[0] {
@@ -1112,7 +1112,7 @@ test "recovery stops at every top-level declaration head" {
     "opaque type Kept = List[Int]",
     "pub opaque type Kept = List[Int]"
   ] {
-    let (m, ds) = parse_module("x = 1\n" ++ next)
+    let (m, ds) = parse_module("x = 1\n${next}")
     assert len(ds) == 1
     assert len(m.decls) == 1
   }

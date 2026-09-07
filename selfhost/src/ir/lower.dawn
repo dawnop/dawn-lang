@@ -1247,10 +1247,10 @@ pub fn lowered_intrinsics() -> List[String] = {
   var out = ["parse_int", "parse_int_radix", "char_unchecked"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
-    out = out ++ ["map_" ++ op]
+    out = out ++ ["map_${op}"]
   }
   for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
-    out = out ++ ["set_" ++ op]
+    out = out ++ ["set_${op}"]
   }
   out
 }
@@ -1413,7 +1413,7 @@ fn sig_of(st: LSt, owner: String, name: String) -> Option[Sig] =
 fn impl_for(st: LSt, tid: Int, subject: Ty) -> ImplI =
   match impl_at(st.impls, tid, subject) {
     Some(i) -> i
-    None -> panic("lower: no impl for trait " ++ to_string(tid))
+    None -> panic("lower: no impl for trait ${to_string(tid)}")
   }
 
 fn provides(imp: ImplI, name: String) -> Bool = {
@@ -1762,7 +1762,7 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
   if tid == SHOW_ID { return show_at(st, args[0], subject) }
   if tid == INDEX_ID { return index_at(st, args[0], args[1], subject) }
-  panic("lower: no primitive relation for trait " ++ to_string(tid))
+  panic("lower: no primitive relation for trait ${to_string(tid)}")
 }
 
 ## What `prim_relation` actually takes and returns at one subject, as opposed
@@ -1789,7 +1789,7 @@ fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
   } else if tid == INDEX_ID {
     index_item_ty(subject)
   } else {
-    panic("lower: no primitive relation for trait " ++ to_string(tid))
+    panic("lower: no primitive relation for trait ${to_string(tid)}")
   }
 
 ## Wrap `prim_relation` in a top-level function with the trait method's own
@@ -2242,7 +2242,7 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
       let (st1, name) = struct_cmp_fn(st, t)
       return (st1, CCall(CDirect(st1.owner, name), [a, b], TyInt))
     }
-    panic("lower: no ordering for " ++ ty_key_inst(t))
+    panic("lower: no ordering for ${ty_key_inst(t)}")
   }
   match map.get(st.dict_env, dict_key(ORD_ID, t)) {
     Some(d) -> return cmp_through_dict(st, d, a, b, t)
@@ -2253,7 +2253,7 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
     let (st2, name) = struct_cmp_fn(st1, t)
     return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyInt))
   }
-  panic("lower: no ordering for " ++ ty_key_inst(t))
+  panic("lower: no ordering for ${ty_key_inst(t)}")
 }
 
 fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
@@ -2622,7 +2622,7 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   if not expandable(t) {
     return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
   }
-  panic("lower: no rendering for " ++ ty_key_inst(t))
+  panic("lower: no rendering for ${ty_key_inst(t)}")
 }
 
 fn show_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
@@ -2687,7 +2687,7 @@ fn ctor_show(st: LSt, x: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
   var idx = 0
   while idx < len(c.fields) {
     if idx > 0 { acc = cat(acc, CStr(", ")) }
-    if info.is_record { acc = cat(acc, CStr(c.fields[idx].name ++ ": ")) }
+    if info.is_record { acc = cat(acc, CStr("${c.fields[idx].name}: ")) }
     let ft = concrete_field_ty(st1, sc, aid, ci, idx)
     let (st2, s) = show_at(st1, read_field(st1, x, sc, aid, ci, idx), ft)
     st1 = st2
@@ -2873,7 +2873,7 @@ fn lower_trait_call(
   let idx = method_index(tr, name)
   let sg = trait_method_sig(tr, name)
   if len(ws) == 0 {
-    panic("lower: trait method call without a witness: " ++ name)
+    panic("lower: trait method call without a witness: ${name}")
   }
   # A prelude or structural witness has no body to call. It collapses to the
   # primitive, which is not an optimisation but the definition -- the same
@@ -2964,7 +2964,7 @@ fn lower_trait_call(
 # ---- lambda lifting ----
 
 fn fresh_lam(st: LSt) -> (LSt, String) =
-  (LSt { ..st, next_lam: st.next_lam + 1 }, "lambda$" ++ to_string(st.next_lam))
+  (LSt { ..st, next_lam: st.next_lam + 1 }, "lambda$${to_string(st.next_lam)}")
 
 fn params_of_fn_ty(t: Ty) -> List[Ty] =
   match t {
@@ -4140,7 +4140,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let (st1, c) = lower_expr(st, cond)
       let text = match src { Some(t) -> t, None -> "assertion failed" }
       (st1, [CSIf(CUnary(CNot, c, TyBool),
-        CIntrinsic("panic", [CStr("assertion failed: " ++ text)], TyNever), None)])
+        CIntrinsic("panic", [CStr("assertion failed: ${text}")], TyNever), None)])
     }
     TSWhile(cond, body, _, _, _) -> {
       let (st1, lid) = fresh_loop(st)
@@ -4372,7 +4372,7 @@ fn index_idx_ty(subject: Ty) -> Ty =
   match peel_opaque(subject) {
     TyList(_) -> TyInt
     TyMap(k, _) -> k
-    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+    _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
   }
 
 ## `C.Item` at the same subjects.
@@ -4380,7 +4380,7 @@ fn index_item_ty(subject: Ty) -> Ty =
   match peel_opaque(subject) {
     TyList(el) -> el
     TyMap(_, v) -> v
-    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+    _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
   }
 
 fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
@@ -4402,7 +4402,7 @@ fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
         [c, adapt_in(i, k, sg.param_tys[1])] ++ ds, sg.ret)
       (st1, adapt_out(call, sg.ret, v))
     }
-    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+    _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
   }
 
 # ---- functions and modules ----

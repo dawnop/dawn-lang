@@ -102,7 +102,7 @@ fn target_find_class_with(
 fn target_class_info_with(loader: ClassLoader, asm_bridge: Bool, fqcn: String) -> JClass !io =
   match target_find_class_with(loader, asm_bridge, fqcn) {
     Some(j) -> j
-    None -> panic("class vanished between target queries: " ++ fqcn)
+    None -> panic("class vanished between target queries: ${fqcn}")
   }
 
 fn target_methods_of_with(
@@ -220,12 +220,12 @@ fn loader_for(jars: List[String]) -> TargetLoader !io = {
   let closeable_claim: Result[URLClassLoader, ForeignError] = cast(raw)
   let closeable = match closeable_claim {
     Ok(loader) -> loader
-    Err(e) -> panic("jreflect.loader_for: not a URLClassLoader: " ++ e.message)
+    Err(e) -> panic("jreflect.loader_for: not a URLClassLoader: ${e.message}")
   }
   let base_claim: Result[ClassLoader, ForeignError] = cast(raw)
   let base = match base_claim {
     Ok(loader) -> loader
-    Err(e) -> panic("jreflect.loader_for: not a ClassLoader: " ++ e.message)
+    Err(e) -> panic("jreflect.loader_for: not a ClassLoader: ${e.message}")
   }
   TargetLoader { base: base, closeable: closeable }
 }
@@ -320,7 +320,7 @@ pub fn find_class(fqcn: String) -> Option[JClass] !io = find_class_with(sys_load
 fn class_info_with(loader: ClassLoader, fqcn: String) -> JClass !io =
   match find_class_with(loader, fqcn) {
     Some(j) -> j
-    None -> panic("class vanished between queries: " ++ fqcn)
+    None -> panic("class vanished between queries: ${fqcn}")
   }
 
 pub fn class_info(fqcn: String) -> JClass !io = class_info_with(sys_loader(), fqcn)
@@ -345,7 +345,7 @@ fn class_names(arr: Object) -> List[String] !io = {
     let got: Result[Class, ForeignError] = cast(Array.get(arr, i).expect("class array element"))
     let c: Class = match got {
       Ok(v) -> v
-      Err(e) -> panic("jreflect.class_names: not a Class: " ++ e.message)
+      Err(e) -> panic("jreflect.class_names: not a Class: ${e.message}")
     }
     out = out ++ [c.getName().expect("class name")]
     i = i + 1
@@ -379,7 +379,7 @@ fn methods_of_with(loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
     let got: Result[Method, ForeignError] = cast(Array.get(arr, i).expect("method array element"))
     let m: Method = match got {
       Ok(v) -> v
-      Err(e) -> panic("jreflect.methods_of: not a Method: " ++ e.message)
+      Err(e) -> panic("jreflect.methods_of: not a Method: ${e.message}")
     }
     if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(m)] }
     i = i + 1
@@ -400,7 +400,7 @@ fn ctors_of_with(loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
     let got: Result[Constructor, ForeignError] = cast(Array.get(arr, i).expect("ctor array element"))
     let k: Constructor = match got {
       Ok(v) -> v
-      Err(e) -> panic("jreflect.ctors_of: not a Constructor: " ++ e.message)
+      Err(e) -> panic("jreflect.ctors_of: not a Constructor: ${e.message}")
     }
     if not k.isSynthetic() {
       out = out ++ [JCtor {
@@ -428,7 +428,7 @@ fn static_fields_of_with(loader: ClassLoader, fqcn: String) -> List[JField] !io 
     let got: Result[Field, ForeignError] = cast(Array.get(arr, i).expect("field array element"))
     let f: Field = match got {
       Ok(v) -> v
-      Err(e) -> panic("jreflect.static_fields_of: not a Field: " ++ e.message)
+      Err(e) -> panic("jreflect.static_fields_of: not a Field: ${e.message}")
     }
     if Modifier.isStatic(f.getModifiers()) {
       out = out ++ [JField {
@@ -606,7 +606,7 @@ pub fn invoke_static(
 ) -> Result[Option[Object], String] !io = {
   let c = match find_class_raw(fqcn) {
     Some(cc) -> cc
-    None -> return Err("class not found: " ++ fqcn)
+    None -> return Err("class not found: ${fqcn}")
   }
   let arr = c.getMethods().expect("methods")
   let n = Array.getLength(arr)
@@ -616,7 +616,7 @@ pub fn invoke_static(
     let got: Result[Method, ForeignError] = cast(Array.get(arr, i).expect("method array element"))
     let m: Method = match got {
       Ok(v) -> v
-      Err(e) -> panic("jreflect.invoke_static: not a Method: " ++ e.message)
+      Err(e) -> panic("jreflect.invoke_static: not a Method: ${e.message}")
     }
     if len(found) == 0 && m.getName().expect("name") == name {
       let ps = class_names(Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null"))

@@ -439,23 +439,23 @@ pub fn ty_key(t: Ty) -> String =
     TyUnit -> "Unit"
     TyNever -> "Never"
     TyError -> "Error"
-    TyAdt(id, _) -> "Adt" ++ to_string(id)
+    TyAdt(id, _) -> "Adt${to_string(id)}"
     # the id alone is not enough: two instantiations of one opaque type share
     # it, and an impl at each has to get its own name
     TyOpaque(id, _, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
-    TyVar(_, id) -> "Var" ++ to_string(id)
+    TyVar(_, id) -> "Var${to_string(id)}"
     # never a key: reduction is eager and projections cannot be impl subjects,
     # so a projection reaching a symbol name is a compiler bug, not a program
     TyAssoc(_, _, _) -> panic("unreduced projection in ty_key")
-    TyList(e) -> "List_" ++ ty_key(e)
+    TyList(e) -> "List_${ty_key(e)}"
     TyMap(k, v) -> "Map_" ++ ty_key(k) ++ "_" ++ ty_key(v)
-    TySet(e) -> "Set_" ++ ty_key(e)
-    TyArray(e) -> "Array_" ++ ty_key(e)
-    TyTuple(es) -> "Tup" ++ to_string(len(es))
+    TySet(e) -> "Set_${ty_key(e)}"
+    TyArray(e) -> "Array_${ty_key(e)}"
+    TyTuple(es) -> "Tup${to_string(len(es))}"
     # the *runtime* arity, not the written one: a function value's evidence
     # pack is a parameter of the value, so the name a shape compiles to has to
     # count it. `types.fn_arity` is the one place it is derived.
-    TyFn(_, _, _) -> "Fn" ++ to_string(fn_arity(t))
+    TyFn(_, _, _) -> "Fn${to_string(fn_arity(t))}"
     TyJava(_, _) -> "Java"
   }
 
@@ -482,7 +482,7 @@ pub fn subject_key(t: Ty) -> String =
     # constructor, so the declared subject `Box[T]` and the instantiated
     # `Box[Int]` are one impl and have to spell one name. The target moves
     # under substitution, so it cannot be part of the spelling.
-    TyOpaque(id, _, _, _, _) -> "Op" ++ to_string(id)
+    TyOpaque(id, _, _, _, _) -> "Op${to_string(id)}"
     _ -> ty_key(t)
   }
 
@@ -508,7 +508,7 @@ pub fn fn_key(f: CFun) -> String = {
       }
       None ->
         match f.default_of {
-          Some(tid) -> "default$" ++ to_string(tid)
+          Some(tid) -> "default$${to_string(tid)}"
           None -> if f.is_test { "test" } else { "fn" }
         }
     }
@@ -533,10 +533,10 @@ pub fn ty_key_inst(t: Ty) -> String =
   match t {
     TyAdt(id, args) -> "Adt" ++ to_string(id) ++ args_key(args)
     TyTuple(es) -> "Tup" ++ to_string(len(es)) ++ args_key(es)
-    TyList(e) -> "List_" ++ ty_key_inst(e)
+    TyList(e) -> "List_${ty_key_inst(e)}"
     TyMap(k, v) -> "Map_" ++ ty_key_inst(k) ++ "_" ++ ty_key_inst(v)
-    TySet(e) -> "Set_" ++ ty_key_inst(e)
-    TyArray(e) -> "Array_" ++ ty_key_inst(e)
+    TySet(e) -> "Set_${ty_key_inst(e)}"
+    TyArray(e) -> "Array_${ty_key_inst(e)}"
     # the arguments go on the end rather than replacing the target, so that an
     # opaque type with none keeps the spelling `ty_key` already gave it
     # (`args_key([])` is empty) and nothing emitted today is renamed. They
@@ -665,5 +665,5 @@ test "a function type's identity key counts its evidence slot" {
   assert ty_key_inst(pure_fn) == "Fn2\$of\$Int_rBool"
   assert ty_key_inst(var_fn) == "Fn2\$of\$Int_rBool"
   # the count is `types.fn_arity`'s, not a second one kept here
-  assert ty_key(var_fn) == "Fn" ++ to_string(fn_arity(var_fn))
+  assert ty_key(var_fn) == "Fn${to_string(fn_arity(var_fn))}"
 }

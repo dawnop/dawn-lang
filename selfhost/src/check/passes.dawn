@@ -70,7 +70,7 @@ pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx 
   match map.get(cx.imported_names, name) {
     None -> cx
     Some(from) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
-        from ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+        from ++ "`", lo, hi, "drop the import or rename this ${kind}")
   }
 
 pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
@@ -204,7 +204,7 @@ fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) ->
         # an imported operation is registered in imported_names too, so the
         # check above answers this first; the arm keeps the rule whole
         OImport(pf) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
-            pf ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+            pf ++ "`", lo, hi, "drop the import or rename this ${kind}")
         # a declaration shadows a prelude trait method exactly as it shadows a
         # builtin or a std function: silently, and only in this module. The
         # trait itself is untouched -- operators and sugar reach an impl by
@@ -528,7 +528,7 @@ pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
     }
     match cx1.jsig.find_class(d.fqcn) {
       None -> {
-        cx1 = cerr_h(cx1, "Java class not found: " ++ d.fqcn, d.nlo, d.nhi,
+        cx1 = cerr_h(cx1, "Java class not found: ${d.fqcn}", d.nlo, d.nhi,
           "the JDK is always visible; declare third-party jars under [java-deps] in " ++
             "dawn.toml or use a classpath option supported by this command")
       }
@@ -986,7 +986,7 @@ test "duplicate constructors and prelude clashes are caught" {
     name: name,
     tparams: [],
     eparams: [],
-    ctors: [CtorDecl { name: "C" ++ name, fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
+    ctors: [CtorDecl { name: "C${name}", fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
     is_record: false,
     derives: [],
     alias_target: None,
@@ -1726,7 +1726,7 @@ pub fn pass_register_impls(
           Some(h) -> h
           None -> "declare `trait " ++ d.trait_name ++ "[T] { ... }` or import it first"
         }
-        cx1 = cerr_h(cx1, "unknown trait: " ++ d.trait_name, d.tlo, d.thi, hint)
+        cx1 = cerr_h(cx1, "unknown trait: ${d.trait_name}", d.tlo, d.thi, hint)
         impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
         continue
       }
@@ -1847,7 +1847,7 @@ pub fn pass_register_impls(
           if len(tr.assoc) == 0 {
             "the trait declares no associated types"
           } else {
-            "it declares: " ++ join(tr.assoc, ", ")
+            "it declares: ${join(tr.assoc, ", ")}"
           })
         continue
       }
@@ -1886,7 +1886,7 @@ pub fn pass_register_impls(
           if len(tr.eff_assoc) == 0 {
             "the trait declares no associated effects"
           } else {
-            "it declares: " ++ join(tr.eff_assoc, ", ")
+            "it declares: ${join(tr.eff_assoc, ", ")}"
           })
         continue
       }
@@ -2082,7 +2082,7 @@ pub fn pass_register_impls(
         # itself, and nothing else satisfies a variable -- an impl that is
         # unconditionally `!io` does more than "whatever the caller's closure
         # does", which is all the trait's row admits to.
-        let trait_side = if want_eff == EPure { "pure" } else { "!" ++ eff_show(want_eff) }
+        let trait_side = if want_eff == EPure { "pure" } else { "!${eff_show(want_eff)}" }
         cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show(eff) ++
             " but trait `" ++ tr.name ++ "` declares it " ++ trait_side, me.nlo, me.nhi,
           "drop !" ++ eff_show(eff) ++ " here, or declare the trait method !" ++ eff_show(eff) ++
@@ -2142,7 +2142,7 @@ pub fn pass_register_impls(
       }
       cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
           "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,
-        "provide: " ++ join(renders, "; "))
+        "provide: ${join(renders, "; ")}")
     }
     let info = ImplI {
       trait_id: tid,
@@ -2339,7 +2339,7 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
             Some(h) -> h
             None -> "declare `trait " ++ b.name ++ "[T] { ... }` or import it first"
           }
-          cx1 = cerr_h(cx1, "unknown trait: " ++ b.name, b.lo, b.hi, hint)
+          cx1 = cerr_h(cx1, "unknown trait: ${b.name}", b.lo, b.hi, hint)
         }
         Some(tid) -> {
           var have = false
@@ -2981,7 +2981,7 @@ fn surface_ty_leaks(cx: Cx, root: Audience, t: Ty, sp: TySpan, path: String) -> 
         path ++ " function return type")
       # a nested function type's effect row is surface too, and it is exactly
       # the row a general-purpose type walker forgets (design §五)
-      out ++ surface_eff_leaks(cx, root, eff, path ++ " function effect row", sp)
+      out ++ surface_eff_leaks(cx, root, eff, "${path} function effect row", sp)
     }
   }
 
@@ -3081,12 +3081,12 @@ fn surface_sig_leaks(
     Some(r) -> ty_span_of(cx, r)
     None -> fb
   }
-  out = out ++ surface_ty_leaks(cx, root, sig.ret, rsp, path ++ " return type")
+  out = out ++ surface_ty_leaks(cx, root, sig.ret, rsp, "${path} return type")
   # The effect row has no span of its own: the AST keeps a declared effect as a
   # bare string, so a leaking label falls back to the root's name token. Design
   # §八 asks for an `EffectRef { name, lo, hi }` and allows this stand-in until
   # one exists -- it is a temporary fallback, not the finished span rule.
-  out ++ surface_eff_leaks(cx, root, sig.eff, path ++ " effect row", fb)
+  out ++ surface_eff_leaks(cx, root, sig.eff, "${path} effect row", fb)
 }
 
 ## Report one root's leaks in walk order, one diagnostic per (token, identity).
@@ -3519,7 +3519,7 @@ fn inject_selective(
     }
     if known {
       return cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ from_path ++ "`",
-        lo, hi, "add `pub` to its declaration in " ++ from_path)
+        lo, hi, "add `pub` to its declaration in ${from_path}")
     }
     let pool = map.keys(exp.fns) ++ map.keys(exp.types_by_name) ++ map.keys(exp.consts) ++
       map.keys(exp.ctors) ++ map.keys(exp.traits_by_name) ++ map.keys(exp.effects)

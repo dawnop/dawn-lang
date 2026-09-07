@@ -21,9 +21,9 @@ use std/str
 use c/emitc.{str_static_def, test_symbol}
 
 ## `PASS  ` / `FAIL  ` -- two spaces, as `cmdTest` has printed since Kotlin.
-fn pass_line(label: String) -> String = "PASS  " ++ label
+fn pass_line(label: String) -> String = "PASS  ${label}"
 
-fn fail_line(label: String) -> String = "FAIL  " ++ label
+fn fail_line(label: String) -> String = "FAIL  ${label}"
 
 ## The static and helper definitions every generated runner shares. Written
 ## once per translation unit, ahead of the per-test material.
@@ -87,8 +87,8 @@ fn preamble() -> List[String] =
 fn one_test(i: Int, sym: String, label: String) -> List[String] = {
   let n = to_string(i)
   [
-    str_static_def("dawn_test_pass_" ++ n, pass_line(label)),
-    str_static_def("dawn_test_fail_" ++ n, fail_line(label)),
+    str_static_def("dawn_test_pass_${n}", pass_line(label)),
+    str_static_def("dawn_test_fail_${n}", fail_line(label)),
     "static void* dawn_test_thunk_" ++ n ++ "(dawn_clo* env) {",
     "  (void)env;",
     "  return (void*)dawn_box_unit(" ++ sym ++ "());",
@@ -116,7 +116,7 @@ pub fn runner(tests: List[(String, Int, String)]) -> String = {
   let total = to_string(len(tests))
   out = out ++
     [
-      str_static_def("dawn_test_all_passed", total ++ " test(s) passed"),
+      str_static_def("dawn_test_all_passed", "${total} test(s) passed"),
       str_static_def("dawn_test_some_failed", " of " ++ total ++ " test(s) failed"),
       "",
       "static void dawn_test_entry(void) {"

@@ -502,7 +502,7 @@ fn impl_static_name(trait_name: String, subject: String, m: String) -> String =
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
 
-fn test_method_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
+fn test_method_name(idx: Int) -> String = "dawn\$test\$${to_string(idx)}"
 
 ## impl-method descriptor for lambdas/bridges: concrete types, but a bottom
 ## return (Never) becomes Object, because the erased `apply` has to return
@@ -531,7 +531,7 @@ fn sam_class(owner: String, idx: Int) -> String =
 ## `Ty` to ask about.
 fn ev_desc() -> String = "L" ++ obj() ++ ";"
 
-fn capture_field(idx: Int) -> String = "c" ++ to_string(idx)
+fn capture_field(idx: Int) -> String = "c${to_string(idx)}"
 
 ## The load opcode and slot width for a JVM descriptor, for the one place
 ## that has descriptors rather than `Ty`s: a SAM adapter forwards Java types
@@ -666,7 +666,7 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io 
       let (g1, fname) = match map.get(g.const_by_key, key) {
         Some(f) -> (g, f)
         None -> {
-          let f = "dawn\$const\$" ++ to_string(len(g.const_fields))
+          let f = "dawn\$const\$${to_string(len(g.const_fields))}"
           (Gen {
             ..g,
             const_fields: g.const_fields ++ [ConstF { fname: f, v: v, ty: t }],
@@ -885,7 +885,7 @@ fn emit_sam_conversion(
   # bridge fills the slot out of the adapter's own field -- the creation-point
   # snapshot pushed here, spelled out at the read in `gen_sam_bridge`.
   let n = fn_arity(ft)
-  let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
+  let bridge = "dawn\$sam\$${to_string(g.sam_ctr)}"
   let g1 = Gen {
     ..g,
     sam_ctr: g.sam_ctr + 1,
@@ -1567,7 +1567,7 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
   # `main([Ljava/lang/String;)V` is the JVM's own ABI and stays void; Dawn's
   # `main` is a Unit function like any other and hands its value back.
   m.visitMethodInsn(OP_INVOKESTATIC, gx.class_name, "main",
-    "()" ++ desc_of(gx.adts, TyUnit), false)
+    "()${desc_of(gx.adts, TyUnit)}", false)
   m.visitInsn(OP_POP)
   m.visitLabel(try_end)
   m.visitInsn(OP_RETURN)
@@ -1635,7 +1635,7 @@ fn gen_test(
   lifts: List[CFun],
   idx: Int
 ) -> Gen !io =
-  gen_fn(gx, g, cw, cf, lifts, test_method_name(idx), "()" ++ desc_of(gx.adts, TyUnit))
+  gen_fn(gx, g, cw, cf, lifts, test_method_name(idx), "()${desc_of(gx.adts, TyUnit)}")
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
@@ -2119,7 +2119,7 @@ fn cloop_of(g: Gen, id: Int) -> (Label, Label) = {
     if lid == id { return (cont, brk) }
     i = i - 1
   }
-  panic("codegen: no enclosing loop " ++ to_string(id))
+  panic("codegen: no enclosing loop ${to_string(id)}")
 }
 
 fn gen_cargs(gx: GenCtx, g: Gen, args: List[CExpr]) -> Gen !io = {
@@ -2527,7 +2527,7 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
         Some(cv) -> cv
         None -> panic("codegen: no comptime value for const `" ++ key ++ "`")
       }
-      (gen_load_const(gx, g, v, ty, "c:" ++ key), true)
+      (gen_load_const(gx, g, v, ty, "c:${key}"), true)
     }
     CComptime(lo, hi, ty) -> {
       let v = match map.get(gx.blocks, (lo, hi)) {
@@ -2586,7 +2586,7 @@ fn gen_cctor(gx: GenCtx, g: Gen, adt: Int, ci: Int, args: List[CExpr]) -> (Gen, 
   let g1 = gen_cargs(gx, g, args)
   var desc = "("
   for f in c.fields { desc = desc ++ desc_of(gx.adts, f.ty) }
-  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "${desc})V", false)
   (g1, true)
 }
 
@@ -2668,7 +2668,7 @@ fn gen_ctuple(gx: GenCtx, g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
     desc = desc ++ obj_desc()
     i = i + 1
   }
-  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "${desc})V", false)
   (g1, true)
 }
 
@@ -2677,7 +2677,7 @@ fn gen_ctupleget(gx: GenCtx, g: Gen, target: CExpr, idx: Int, ty: Ty) -> (Gen, B
   if not falls { return (g1, false) }
   let cls = tuple_class(tuple_arity(cex_ty(target)))
   g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-  g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
+  g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_${to_string(idx)}", obj_desc())
   if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(gx, g1, ty) }
   (g1, true)
 }
@@ -2901,7 +2901,7 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
     match n {
       "len" -> Some(("count", "(" ++ vec ++ ")J"))
       "get" -> Some(("get", "(" ++ vec ++ "J)LOption;"))
-      "range" -> Some(("range", "(JJ)" ++ vec))
+      "range" -> Some(("range", "(JJ)${vec}"))
       # `sort_by` is std/pvec's own function, compiled by the ordinary rules:
       # its comparator is a `dawn/rt/Fn` of the function-value arity and it
       # takes rule 丁's evidence slot behind it. Both are read off the call
@@ -2959,14 +2959,14 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
   if name == "code_points" {
     let g1 = gen_cargs(gx, g, args)
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "code_points",
-      "(Ljava/lang/String;)" ++ jl, false)
+      "(Ljava/lang/String;)${jl}", false)
     of_host(g1.mv)
     return Some((g1, true))
   }
   if name == "io_list_names" {
     let g1 = gen_cargs(gx, g, args)
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_list_names",
-      "(Ljava/lang/String;)" ++ jl, false)
+      "(Ljava/lang/String;)${jl}", false)
     of_host(g1.mv)
     return Some((g1, true))
   }
@@ -3427,7 +3427,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
         g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
           "(" ++ ps ++ ")" ++ desc_of(gx.adts, sig.ret), false)
       }
-      None -> panic("codegen: Core intrinsic without a JVM mapping: " ++ name)
+      None -> panic("codegen: Core intrinsic without a JVM mapping: ${name}")
     }
   }
   (g1, true)
@@ -3436,7 +3436,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
 fn builtin_sig(gx: GenCtx, name: String) -> Sig =
   match map.get(gx.intrs, name) {
     Some(i) -> i.sig
-    None -> panic("codegen: no signature for intrinsic " ++ name)
+    None -> panic("codegen: no signature for intrinsic ${name}")
   }
 
 ## The JVM-only node (core.CJava). A `use java` site dispatches three ways --

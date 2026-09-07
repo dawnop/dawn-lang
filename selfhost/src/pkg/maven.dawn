@@ -56,7 +56,7 @@ pub fn fetch(coords: List[MCoord]) -> Result[List[String], String] !io = {
         let got: Result[File, ForeignError] = cast(files.get(i).expect("file"))
         let jar: File = match got {
           Ok(v) -> v
-          Err(x) -> panic("maven.fetch: not a File: " ++ x.message)
+          Err(x) -> panic("maven.fetch: not a File: ${x.message}")
         }
         out = out ++ [jar.getAbsolutePath().expect("path")]
         i = i + 1
@@ -71,9 +71,9 @@ pub fn fetch(coords: List[MCoord]) -> Result[List[String], String] !io = {
 ## coordinate and the urls tried).
 fn explain(detail: String, coords: List[MCoord], mirror: Option[String]) -> String = {
   let what = if len(coords) == 1 {
-    "dependency " ++ mcoord_show(coords[0])
+    "dependency ${mcoord_show(coords[0])}"
   } else {
-    to_string(len(coords)) ++ " dependencies"
+    "${to_string(len(coords))} dependencies"
   }
   let where_ = match mirror {
     Some(m) -> " from " ++ m ++ " (\$DAWN_MAVEN_MIRROR)"
@@ -113,7 +113,7 @@ fn explain(detail: String, coords: List[MCoord], mirror: Option[String]) -> Stri
 # you exactly what you are missing, which is not the same thing -- the very
 # overclaim PKG-04 was raised about, not to be repeated here.
 
-pub fn lock_path(dir: String) -> String = dir ++ "/dawn.lock"
+pub fn lock_path(dir: String) -> String = "${dir}/dawn.lock"
 
 pub type Lock = { coords: List[String], arts: List[(String, String)] }
 
@@ -233,10 +233,10 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
           }
           arts = arts ++ [(nm, str.take(rest, i))]
         }
-        None -> return Err("malformed artifact line: " ++ t)
+        None -> return Err("malformed artifact line: ${t}")
       }
     } else {
-      return Err("unrecognized line in dawn.lock: " ++ t)
+      return Err("unrecognized line in dawn.lock: ${t}")
     }
   }
   if not saw_schema {
@@ -318,7 +318,7 @@ pub fn fetch_checked_report(
 ) -> Result[List[String], FetchCheckedError] !Fs !io = {
   let jars = match fetch(coords) {
     Ok(found) -> found
-    Err(e) -> return Err(FetchCheckedError { path: project ++ "/dawn.toml", message: e })
+    Err(e) -> return Err(FetchCheckedError { path: "${project}/dawn.toml", message: e })
   }
   let path = lock_path(project)
   if not io.exists(path) { return Ok(jars) }
@@ -361,19 +361,19 @@ test "one jar file name, two artifacts: both survive, distinctly named" {
   io.with_fs_real(() => {
     let root = match io.temp_dir("", "dawn-artifacts-") {
       Ok(d) -> d
-      Err(e) -> panic("temp dir: " ++ e.message)
+      Err(e) -> panic("temp dir: ${e.message}")
     }
     with r <- bracket(root, rmtree)
     # `group.a:util:1.0` and `group.b:util:1.0` land in different cache
     # directories under one file name -- which is the whole hazard, since what
     # comes back from coursier is a list of paths and nothing else
-    let _ = io.mkdirs(r ++ "/a")
-    let _ = io.mkdirs(r ++ "/b")
-    let _ = io.mkdirs(r ++ "/c")
-    let _ = io.write_file(r ++ "/a/util-1.0.jar", "one")
-    let _ = io.write_file(r ++ "/b/util-1.0.jar", "two")
-    let _ = io.write_file(r ++ "/c/asm-9.jar", "asm")
-    let got = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+    let _ = io.mkdirs("${r}/a")
+    let _ = io.mkdirs("${r}/b")
+    let _ = io.mkdirs("${r}/c")
+    let _ = io.write_file("${r}/a/util-1.0.jar", "one")
+    let _ = io.write_file("${r}/b/util-1.0.jar", "two")
+    let _ = io.write_file("${r}/c/asm-9.jar", "asm")
+    let got = match artifacts(["${r}/a/util-1.0.jar", "${r}/b/util-1.0.jar", "${r}/c/asm-9.jar"]) {
       Ok(a) -> a
       Err(e) -> panic(e)
     }
@@ -388,7 +388,7 @@ test "one jar file name, two artifacts: both survive, distinctly named" {
     # ...and a lock built from that set can verify itself, which is the thing a
     # name-keyed lock could not do
     let l = match lock_of([MCoord { group: "g", artifact: "a", version: "1", aname: "a" }],
-      [r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+      ["${r}/a/util-1.0.jar", "${r}/b/util-1.0.jar", "${r}/c/asm-9.jar"]) {
       Ok(x) -> x
       Err(e) -> panic(e)
     }
@@ -400,7 +400,7 @@ test "one jar file name, two artifacts: both survive, distinctly named" {
       }
     }
     # the same bytes reached twice is one artifact, not a collision
-    let same = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/a/util-1.0.jar"]) {
+    let same = match artifacts(["${r}/a/util-1.0.jar", "${r}/a/util-1.0.jar"]) {
       Ok(a) -> a
       Err(e) -> panic(e)
     }

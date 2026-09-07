@@ -38,7 +38,7 @@ pub type MemFs = {
 }
 
 fn ferr(kind: String, what: String, path: String) -> ForeignError =
-  ForeignError { kind: "memfs." ++ kind, message: what ++ ": " ++ path, cause: None }
+  ForeignError { kind: "memfs.${kind}", message: what ++ ": " ++ path, cause: None }
 
 fn key(st: MemFs, p: String) -> String = fspath.absolute(p, st.base)
 
@@ -64,7 +64,7 @@ fn with_ancestors(dirs0: Map[String, Bool], p: String) -> Map[String, Bool] = {
   out
 }
 
-fn dir_prefix(k: String) -> String = if k == "/" { "/" } else { k ++ "/" }
+fn dir_prefix(k: String) -> String = if k == "/" { "/" } else { "${k}/" }
 
 fn is_dir_key(st: MemFs, k: String) -> Bool = {
   if map.has(st.dirs, k) { return true }
@@ -238,7 +238,7 @@ pub fn mem_files(st: MemFs) -> List[String] = sort(map.keys(st.files))
 ## default uses: a relative directory is resolved against the process's working
 ## directory, which is a host call per std file and a base the table does not
 ## share, while this one is a path the table already holds.
-pub fn mem_std_dir(base: String) -> String = base ++ "/std"
+pub fn mem_std_dir(base: String) -> String = "${base}/std"
 
 ## An empty tree rooted at `base` with the bundled std mounted at
 ## `mem_std_dir(base)`, so `load_std(mem_std_dir(base))` loads a real standard
@@ -253,7 +253,7 @@ pub fn mem_std(base: String) -> MemFs = {
     None -> panic("the embedded std carries no modules.txt")
   }
   var st = mem_put(mem_empty(base), "std/modules.txt", index)
-  st = mem_put(st, "std/VERSION", VERSION ++ "\n")
+  st = mem_put(st, "std/VERSION", "${VERSION}\n")
   for line in str.split(index, "\n") {
     let cut = match str.index_of(line, "#") {
       Some(i) -> str.take(line, i)
@@ -261,7 +261,7 @@ pub fn mem_std(base: String) -> MemFs = {
     }
     let n = str.trim(cut)
     if n != "" {
-      match stdsrc.source(n ++ ".dawn") {
+      match stdsrc.source("${n}.dawn") {
         Some(t) -> { st = mem_put(st, "std/" ++ n ++ ".dawn", t) }
         None -> panic("the embedded std is missing " ++ n ++ ".dawn")
       }
@@ -412,10 +412,10 @@ test "text and byte operations share one UTF-8 file" {
     assert io.read_bytes("seed") == Ok(bytes.utf8(text))
     assert ok(io.write_bytes("text", bytes.utf8(text)))
     assert io.read_file("text") == Ok(text)
-    assert ok(io.write_file("text", text ++ "!"))
-    assert io.read_bytes("text") == Ok(bytes.utf8(text ++ "!"))
+    assert ok(io.write_file("text", "${text}!"))
+    assert io.read_bytes("text") == Ok(bytes.utf8("${text}!"))
   })
-  assert mem_content(table, "text") == Some(text ++ "!")
+  assert mem_content(table, "text") == Some("${text}!")
 }
 
 test "the mounted std is the embedded std, and nothing else is there" {
@@ -423,14 +423,14 @@ test "the mounted std is the embedded std, and nothing else is there" {
     assert io.is_dir("std")
     # and the mount point `mem_std_dir` names is the one the text is at
     assert io.is_dir(mem_std_dir(MEM_BASE))
-    assert io.read_file("std/VERSION") == Ok(VERSION ++ "\n")
-    assert io.read_file(mem_std_dir(MEM_BASE) ++ "/VERSION") == Ok(VERSION ++ "\n")
+    assert io.read_file("std/VERSION") == Ok("${VERSION}\n")
+    assert io.read_file("${mem_std_dir(MEM_BASE)}/VERSION") == Ok("${VERSION}\n")
     assert io.read_file("std/io.dawn") == Ok(stdsrc.source("io.dawn").expect("embedded io"))
     # nothing above the mount point, and no host tree behind it
     assert not io.exists("/usr")
     assert not io.exists("std/nope.dawn")
   })
   for f in mem_files(table) {
-    assert str.starts_with(f, key(table, "std") ++ "/")
+    assert str.starts_with(f, "${key(table, "std")}/")
   }
 }

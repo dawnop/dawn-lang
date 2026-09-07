@@ -272,10 +272,10 @@ fn collect_program(
   if target != "" || std_tests {
     if target != "" {
       if not io.exists(target) {
-        cli_error("no such file or directory: " ++ target)
+        cli_error("no such file or directory: ${target}")
       }
       if io.exists(target) && not io.is_dir(target) && not str.ends_with(target, ".dawn") {
-        cli_error("source files must end in .dawn: " ++ target)
+        cli_error("source files must end in .dawn: ${target}")
       }
     }
     let std = match load_std(std_dir) {
@@ -294,7 +294,7 @@ fn collect_program(
     if target != "" {
       let loaded =
         if closure && io.is_dir(target) {
-          let entry_file = target ++ "/src/main.dawn"
+          let entry_file = "${target}/src/main.dawn"
           if not io.exists(entry_file) {
             cli_error("--closure needs an entry module (expected " ++ entry_file ++ ")")
           }
@@ -604,7 +604,7 @@ fn collect_program(
 ## fallback worth arguing about: with it missing the process is not on a JVM.
 fn host_java() -> String !io =
   match System.getProperty("java.home") {
-    Some(h) -> h ++ "/bin/java"
+    Some(h) -> "${h}/bin/java"
     None -> "java"
   }
 
@@ -683,7 +683,7 @@ fn own_xmx() -> String !io = {
   }
   if found != "" { return found }
   let rt = Runtime.getRuntime().expect("runtime")
-  "-Xmx" ++ to_string(rt.maxMemory())
+  "-Xmx${to_string(rt.maxMemory())}"
 }
 
 ## The toolchain's own help text. It began as the Kotlin cli/Main.kt USAGE
@@ -810,7 +810,7 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !Fs !Exit !Con
     if spec != "" {
       for pth in str.split(spec, path_sep()) {
         if pth != "" {
-          if not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
+          if not io.exists(pth) { cli_error("--cp entry not found: ${pth}") }
           jars = jars ++ [pth]
         }
       }
@@ -887,7 +887,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
     if cp_spec != "" {
       for pth in str.split(cp_spec, path_sep()) {
         if pth != "" {
-          if not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
+          if not io.exists(pth) { cli_error("--cp entry not found: ${pth}") }
           cpjars = cpjars ++ [pth]
         }
       }
@@ -961,7 +961,7 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
 ## Maven and lock setup is neither a usage mistake nor a source diagnostic.
 ## It fails the command at status 1 after any target lease has been released.
 fn fail_target_setup(msg: String) -> Unit !Exit !Console !io = {
-  console_eprintln("error: " ++ msg)
+  console_eprintln("error: ${msg}")
   let _ = io.exit(1)
   ()
 }
@@ -994,7 +994,7 @@ fn require_one_input(
 }
 
 fn cli_error(msg: String) -> Unit !Exit !Console !io = {
-  console_eprintln("error: " ++ msg)
+  console_eprintln("error: ${msg}")
   let _ = io.exit(2)
   ()
 }
@@ -1032,9 +1032,9 @@ fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
       let hash = str.replace(n, "d1-", "d1:")
       checked = checked + 1
       match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
-        Ok(_) -> console_println("ok   " ++ n)
+        Ok(_) -> console_println("ok   ${n}")
         Err(e) -> {
-          console_println("BAD  " ++ n)
+          console_println("BAD  ${n}")
           console_eprintln(e)
           bad = bad + 1
         }
@@ -1049,7 +1049,7 @@ fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
 ## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
 fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   let dir = if len(rest) > 0 { rest[0] } else { "." }
-  if not io.is_dir(dir) { return cli_error("not a directory: " ++ dir) }
+  if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
   match pkgfetch.tree_hash(dir) {
     Ok(h) -> console_println(h)
     Err(e) -> cli_error(e)
@@ -1063,10 +1063,10 @@ fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !
   let base = rest[1]
   let target = rest[2]
   if not io.exists(target) {
-    return cli_error("no such file or directory: " ++ target)
+    return cli_error("no such file or directory: ${target}")
   }
   if not io.is_dir(target) {
-    return cli_error("__source-inputs requires a project directory: " ++ target)
+    return cli_error("__source-inputs requires a project directory: ${target}")
   }
   let plan = source.source_plan(source.ProjectDirectory(target))
   let pdiags = planner_diags(plan.diags)
@@ -1074,7 +1074,7 @@ fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !
   match source.bootstrap_source_input_manifest(plan, base) {
     Ok(text) -> console_print(text)
     Err(e) -> {
-      console_eprintln("error: " ++ e)
+      console_eprintln("error: ${e}")
       let _ = io.exit(1)
       ()
     }
@@ -1192,8 +1192,8 @@ fn lsp_target_lease_fs(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !F
   }
   match catch_fault(() => jsig_for(jars)) {
     Ok(lease) -> Ok(lease)
-    Err(e) -> Err(lsp_lease_problem(plan.project ++ "/dawn.toml",
-      "cannot create the target Java classpath: " ++ e.message))
+    Err(e) -> Err(lsp_lease_problem("${plan.project}/dawn.toml",
+      "cannot create the target Java classpath: ${e.message}"))
   }
 }
 
@@ -1216,7 +1216,7 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("usage: dawn lock [--check] [<project-dir>]")
     }
   }
-  if not io.is_dir(target) { return cli_error("not a directory: " ++ target) }
+  if not io.is_dir(target) { return cli_error("not a directory: ${target}") }
   let plan = source.source_plan(source.ProjectDirectory(target))
   let pdiags = planner_diags(plan.diags)
   if len(pdiags) > 0 { fail_compile(pdiags) }
@@ -1247,7 +1247,7 @@ fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   if check_only {
     match io.read_file(path) {
-      Err(_) -> cli_error(path ++ " does not exist -- run `dawn lock`")
+      Err(_) -> cli_error("${path} does not exist -- run `dawn lock`")
       Ok(text) ->
         match maven.parse_lock(text) {
           Err(e) -> cli_error(path ++ ": " ++ e)
@@ -1370,7 +1370,7 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !Fs !Exit !Conso
   let dir =
     match io.temp_dir("", "selfhost-run") {
       Ok(d) -> d
-      Err(e) -> panic("cannot create a temporary directory: " ++ e.message)
+      Err(e) -> panic("cannot create a temporary directory: ${e.message}")
     }
   for pair in classes {
     let (nm, bs) = pair
@@ -1404,7 +1404,7 @@ fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (classes, entry, _) =
     collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
-    return cli_error(run.target ++ " has no pub fn main() -> Unit !io, nothing to run")
+    return cli_error("${run.target} has no pub fn main() -> Unit !io, nothing to run")
   }
   let dir = write_temp_classes(classes)
   let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, run.program_args, dir)
@@ -1446,8 +1446,8 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   )
   let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2, std_tests)
   if len(tests_info) == 0 {
-    return cli_error(if std_tests { std_dir ++ " has no test blocks" }
-    else { target ++ " has no test blocks" })
+    return cli_error(if std_tests { "${std_dir} has no test blocks" }
+    else { "${target} has no test blocks" })
   }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
@@ -1597,7 +1597,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !Fs !Env = 
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
   let found = vendored_names(jars)
-  let lib_dir = abs_parent(jar_path) ++ "/lib"
+  let lib_dir = "${abs_parent(jar_path)}/lib"
   let _ = io.mkdirs(lib_dir)
   for a in found {
     let (src, name) = a
@@ -1621,7 +1621,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !Fs !Env = 
         Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e.message)
       }
     }
-    entries = entries ++ ["lib/" ++ uri_path(name)]
+    entries = entries ++ ["lib/${uri_path(name)}"]
   }
   entries
 }
@@ -1678,16 +1678,16 @@ test "vendored file names are the hashed ones, hash or no hash" {
   io.with_fs_real(() => {
     let root = match io.temp_dir("", "dawn-vendored-names-") {
       Ok(d) -> d
-      Err(e) -> panic("temp dir: " ++ e.message)
+      Err(e) -> panic("temp dir: ${e.message}")
     }
     with r <- bracket(root, p => pkgfetch.delete_tree(p))
-    let a = r ++ "/a"
-    let b = r ++ "/b"
+    let a = "${r}/a"
+    let b = "${r}/b"
     let _ = io.mkdirs(a)
     let _ = io.mkdirs(b)
-    for pair in [(a ++ "/api-1.0.jar", "one"), (b ++ "/api-1.0.jar", "two"),
-      (a ++ "/util-2.0.jar", "three"), (a ++ "/dup-3.0.jar", "same"),
-      (b ++ "/dup-3.0.jar", "same")] {
+    for pair in [("${a}/api-1.0.jar", "one"), ("${b}/api-1.0.jar", "two"),
+      ("${a}/util-2.0.jar", "three"), ("${a}/dup-3.0.jar", "same"),
+      ("${b}/dup-3.0.jar", "same")] {
       let (path, text) = pair
       match io.write_file(path, text) {
         Ok(_) -> ()
@@ -1695,22 +1695,22 @@ test "vendored file names are the hashed ones, hash or no hash" {
       }
     }
     # distinct file names: no hash is read, and the answer is the file names
-    let plain = [a ++ "/api-1.0.jar", a ++ "/util-2.0.jar"]
+    let plain = ["${a}/api-1.0.jar", "${a}/util-2.0.jar"]
     assert vendored_names(plain) ==
-      [(a ++ "/api-1.0.jar", "api-1.0.jar"), (a ++ "/util-2.0.jar", "util-2.0.jar")]
+      [("${a}/api-1.0.jar", "api-1.0.jar"), ("${a}/util-2.0.jar", "util-2.0.jar")]
     assert vendored_names(plain) == hashed_names(plain)
     # one file name over two contents: every member of the group is qualified by
     # twelve hex digits of its content, so the answer does not depend on the order
     # Coursier returned them in
-    let clash = [a ++ "/api-1.0.jar", b ++ "/api-1.0.jar"]
+    let clash = ["${a}/api-1.0.jar", "${b}/api-1.0.jar"]
     assert vendored_names(clash) ==
-      [(a ++ "/api-1.0.jar", "7692c3ad3540-api-1.0.jar"),
-        (b ++ "/api-1.0.jar", "3fc4ccfe7458-api-1.0.jar")]
+      [("${a}/api-1.0.jar", "7692c3ad3540-api-1.0.jar"),
+        ("${b}/api-1.0.jar", "3fc4ccfe7458-api-1.0.jar")]
     assert vendored_names(clash) == hashed_names(clash)
     # the same bytes twice under one name is one artifact, not a collision, and
     # the second copy does not become a second lib/ entry
-    let dup = [a ++ "/dup-3.0.jar", b ++ "/dup-3.0.jar"]
-    assert vendored_names(dup) == [(a ++ "/dup-3.0.jar", "dup-3.0.jar")]
+    let dup = ["${a}/dup-3.0.jar", "${b}/dup-3.0.jar"]
+    assert vendored_names(dup) == [("${a}/dup-3.0.jar", "dup-3.0.jar")]
     assert vendored_names(dup) == hashed_names(dup)
     # no jars at all, and a path with no directory in it
     let none: List[String] = []
@@ -1736,13 +1736,13 @@ test "a class-path entry is a URI reference, not a path" {
 ## URI.relativize behavior).
 fn rel_entries(jars: List[String], jar_path: String) -> List[String] !Env = {
   var out: List[String] = []
-  let base = abs_parent(jar_path) ++ "/"
+  let base = "${abs_parent(jar_path)}/"
   for j in jars {
     let abs = fspath.absolute(j, io.cwd())
     if str.starts_with(abs, base) {
       out = out ++ [uri_path(str.drop(abs, str.len(base)))]
     } else {
-      out = out ++ ["file:" ++ uri_path(abs)]
+      out = out ++ ["file:${uri_path(abs)}"]
     }
   }
   out
@@ -1751,16 +1751,16 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !Env = {
 fn find_native_image() -> Option[String] !Env !io = {
   var candidates: List[String] = []
   match io.getenv("GRAALVM_HOME") {
-    Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
+    Some(h) -> { candidates = candidates ++ ["${h}/bin/native-image"] }
     None -> ()
   }
   match io.getenv("JAVA_HOME") {
-    Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
+    Some(h) -> { candidates = candidates ++ ["${h}/bin/native-image"] }
     None -> ()
   }
   match io.getenv("PATH") {
     Some(p) -> {
-      for dir in str.split(p, path_sep()) { candidates = candidates ++ [dir ++ "/native-image"] }
+      for dir in str.split(p, path_sep()) { candidates = candidates ++ ["${dir}/native-image"] }
     }
     None -> ()
   }
@@ -1810,7 +1810,7 @@ fn run_native_image(
   let outs = proc.getInputStream().expect("stream")
   let all = outs.readAllBytes().expect("output")
   for line in str.split(bytes.decode_utf8_lossy(all), "\n") {
-    if line != "" { console_println("  " ++ line) }
+    if line != "" { console_println("  ${line}") }
   }
   let code = proc.waitFor()
   # the jar and the temp directory `run_build` staged it in -- there is no
@@ -1868,16 +1868,16 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let jar_path = if native {
     match io.temp_dir("", "dawn-build-") {
       Ok(d) -> d ++ "/" ++ stem ++ ".jar"
-      Err(e) -> panic("cannot create a temp jar: " ++ e.message)
+      Err(e) -> panic("cannot create a temp jar: ${e.message}")
     }
   } else if out != "" {
     out
   } else {
-    stem ++ ".jar"
+    "${stem}.jar"
   }
   let (classes, entry, _) = collect_program(target, std_dir, opts, closure, false)
   if entry == "" {
-    return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
+    return cli_error("${target} has no pub fn main() -> Unit !io to use as an entry point")
   }
   # dedupe defensively: ZipOutputStream throws on a repeated entry name
   var seen: Set[String] = set.empty()
@@ -1970,12 +1970,12 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
   if len(paths) == 0 { return cli_error("usage: dawn fmt [--check] <file.dawn | dir>...") }
   var files: List[String] = []
   for p in paths {
-    if not io.exists(p) { return cli_error("no such file or directory: " ++ p) }
+    if not io.exists(p) { return cli_error("no such file or directory: ${p}") }
     if io.is_dir(p) {
       files = files ++ sort(dawn_files_under(p))
     } else {
       if not str.ends_with(p, ".dawn") {
-        return cli_error("source files must end in .dawn: " ++ p)
+        return cli_error("source files must end in .dawn: ${p}")
       }
       files = files ++ [p]
     }
@@ -1996,7 +1996,7 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
                 unformatted = unformatted + 1
               } else {
                 match io.write_file(f, formatted) {
-                  Ok(_) -> console_println("formatted " ++ f)
+                  Ok(_) -> console_println("formatted ${f}")
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }
               }
@@ -2056,7 +2056,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     return
   }
   if not io.exists(target) {
-    return cli_error("no such file or directory: " ++ target)
+    return cli_error("no such file or directory: ${target}")
   }
   let plan = match project_plan_for_load(source_target(target)) {
     Ok(found) -> found
@@ -2314,10 +2314,10 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   for t in targets {
     if not io.exists(t) {
-      return cli_error("no such file or directory: " ++ t)
+      return cli_error("no such file or directory: ${t}")
     }
     if not io.is_dir(t) && not str.ends_with(t, ".dawn") {
-      return cli_error("source files must end in .dawn: " ++ t)
+      return cli_error("source files must end in .dawn: ${t}")
     }
   }
   let std = check_std(std_dir)
@@ -2538,9 +2538,9 @@ test "`dawn fmt` refuses an argv with no path and one that names nothing" {
 fn plain_file_dir() -> String !Fs = {
   let dir = match io.temp_dir("", "dawn-cli-contract-") {
     Ok(d) -> d
-    Err(e) -> panic("temp dir: " ++ e.message)
+    Err(e) -> panic("temp dir: ${e.message}")
   }
-  match io.write_file(dir ++ "/plain.txt", "hello\n") {
+  match io.write_file("${dir}/plain.txt", "hello\n") {
     Ok(_) -> dir
     Err(e) -> panic("cannot write into " ++ dir ++ ": " ++ e.message)
   }
@@ -2564,7 +2564,7 @@ test "`dawn test` refuses a target it cannot compile from" {
   assert cli_read(() => run_test([NO_SUCH]))
     == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
   let dir = io.with_fs_real(() => plain_file_dir())
-  let plain = dir ++ "/plain.txt"
+  let plain = "${dir}/plain.txt"
   assert cli_read(() => run_test([plain]))
     == (Some(2), "error: source files must end in .dawn: " ++ plain ++ "\n", "")
   io.with_fs_real(() => pkgfetch.delete_tree(dir))
