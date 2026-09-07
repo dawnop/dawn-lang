@@ -6167,11 +6167,16 @@ test "the formats knife T3 added hold what memory of them holds, low byte first"
   assert unpack_f8e5m2(pack_f8e5m2([1.0 + 1.0 / 32.0])) == [1.0]
   assert unpack_f8e8m0(pack_f8e8m0([1.99])) == [1.0]
   assert bytes.len(pack_f8e4m3fn([1.0, 2.0, 3.0])) == 3
-  # what a value outside a format answers, in the two directions this pair
-  # of formats differs: e5m2 overflows to an infinity, e4m3 has none
-  assert unpack_f8e5m2(pack_f8e5m2([1.0e30])) == [1.0 / 0.0]
-  let over = unpack_f8e4m3fn(pack_f8e4m3fn([1.0e30]))
-  assert over[0] != over[0]
+  # what a value outside a format answers: BOTH SATURATE at the largest
+  # finite value, although only one of them has an infinity to overflow to.
+  # Knife TA measured it on a B200 rather than reasoning about it, and the
+  # earlier reading here (e5m2 to an infinity, e4m3 to NaN) was wrong on
+  # both counts; std/narrow's two round functions carry the measurement.
+  assert unpack_f8e5m2(pack_f8e5m2([1.0e30])) == [57344.0]
+  assert unpack_f8e4m3fn(pack_f8e4m3fn([1.0e30])) == [448.0]
+  # and f8E8M0FNU takes the magnitude and clamps, so nothing but a NaN
+  # answers one
+  assert unpack_f8e8m0(pack_f8e8m0([0.0 - 3.0])) == [2.0]
 }
 
 # 2^k, so the test above can name a value off the tf32 grid without a

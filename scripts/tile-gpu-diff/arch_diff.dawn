@@ -310,6 +310,8 @@ fn magnitude(v: Float) -> Float = if v < 0.0 { 0.0 - v } else { v }
 
 fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL)
 
+fn filled(n: Int, v: Float) -> List[Float] = list.map(range(0, n), _i => v)
+
 ## The f8E4M3FN storage corpus: the format's own boundaries on the first
 ## lanes and an ordinary sweep after them. `upload` rounds every lane into
 ## the format, so segment 0 answers the buffer rather than these values; the
@@ -455,6 +457,12 @@ fn e8m0_y() -> List[Float] =
         pow2(0 - 140)
       } else if i == 9 {
         pow2(140)
+      } else if i == 10 {
+        0.0 - 3.0
+      } else if i == 11 {
+        0.0 - 0.4
+      } else if i == 12 {
+        0.0 - 0.0
       } else {
         to_float(i) * 0.5 + 0.25
       })
@@ -520,7 +528,8 @@ fn mms_sa() -> List[Float] =
   list.map(range(0, MMS_M * (MMS_K / MMS_V)), t => pow2(t % 4 - 2))
 
 fn mms_sb() -> List[Float] =
-  list.map(range(0, (MMS_K / MMS_V) * MMS_N), t => pow2((t + 1) % 4 - 1))
+  list.map(range(0, (MMS_K / MMS_V) * MMS_N), t =>
+      pow2((2 * (t / MMS_N) + t % MMS_N) % 4 - 1))
 
 ## The bf16 atomic reduction's input: VA_N lanes, each naming one of the
 ## VA_BINS bins. The stride is coprime with the bin count so that every bin
@@ -594,7 +603,16 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
     [("f8E4M3FN", mms_a()), ("f8E4M3FN", mms_b()), ("f8E8M0FNU", mms_sa()),
       ("f8E8M0FNU", mms_sb()), ("f64", out)]
   } else {
-    [("i32", va_x()), ("bf16", out)]
+    # THE BINS START AT ZERO AND NOT AT THE SENTINEL, and this is the one
+    # buffer here that could not use it. An atomic reduction folds into what
+    # is already in the cell, so the sentinel would be an addend; in f64
+    # that is harmless (`gsview_diff`'s view_atomic starts every cell at its
+    # mode's identity for the same reason and the sums are exact anyway),
+    # but bf16 carries eight significand bits and -12345 + 31 rounds
+    # straight back to -12352. The first run of this family read the
+    # sentinel back from all sixteen bins and looked exactly like a device
+    # that had done nothing.
+    [("i32", va_x()), ("bf16", filled(VA_BINS, 0.0) ++ sentinel_buffer(TAIL))]
   }
 }
 

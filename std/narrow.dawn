@@ -169,10 +169,30 @@ pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
 ## keeps it.
 pub fn round_tf32(x: Float) -> Float = round_binary(x, 11, -126, 127)
 
-## `x` rounded to f8E5M2: three significand bits, exponents -14..15. An
-## ordinary IEEE binary format at eight bits, infinities and all, so
-## `round_binary` is the whole of it.
-pub fn round_f8e5m2(x: Float) -> Float = round_binary(x, 3, -14, 15)
+## `x` rounded to f8E5M2: three significand bits, exponents -14..15, and
+## SATURATING at the largest finite value.
+##
+## The format is an ordinary IEEE binary format at eight bits, infinities
+## and all, so `round_binary` is the arithmetic; what is not IEEE is the top
+## end. An IEEE conversion sends everything above the midpoint 61440 to
+## infinity, and this format has an infinity to send it to (`f8e5m2_bits`
+## and `f8e5m2_of_bits` keep the two 0x7C encodings, because a value ALREADY
+## in the format can be one). The device does not: knife TA converted
+## 1e30, -1e30 and an infinity on a B200 and got 57344, -57344 and 57344.
+##
+## So the codec and this function part company at exactly two inputs, and
+## the reason is that they answer different questions. `f8e5m2_of_bits` says
+## what an octet MEANS; this says what `ftof` DOES, and `ftof` saturates.
+## The two fp8 formats below say the same thing and f4E2M1FN says it too, so
+## saturation is this assembler's rule for the narrow floats and not a
+## property of any one of them.
+pub fn round_f8e5m2(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let v = round_binary(x, 3, -14, 15)
+    if magnitude(v) <= 57344.0 { v } else if v < 0.0 { -57344.0 } else { 57344.0 }
+  }
 
 ## `x` rounded to f8E4M3FN: four significand bits, exponents -6..8.
 ##
@@ -183,17 +203,25 @@ pub fn round_f8e5m2(x: Float) -> Float = round_binary(x, 3, -14, 15)
 ## 1.875 * 2^8 = 480 an IEEE format of these widths would have, and there is
 ## nothing above it to overflow to except NaN.
 ##
-## THE OVERFLOW ANSWER IS A CHOICE THIS TREE COULD NOT MEASURE. The dialect
-## gives `ftof` no saturation attribute, so the reading here is IEEE's rule
-## with the infinity replaced by the only encoding that is left: a magnitude
-## above the midpoint 464 answers NaN, and 464 itself ties DOWN to 448
-## because 448's significand is the even one. A device would settle it, and
-## no device this tree can reach accepts the type (docs/tile-backend-design.md
-## 6.6 records the refusal).
-pub fn round_f8e4m3fn(x: Float) -> Float = {
-  let v = round_binary(x, 4, -6, 8)
-  if v != v || magnitude(v) <= 448.0 { v } else { 0.0 / 0.0 }
-}
+## THE OVERFLOW ANSWER IS SATURATION, AND IT IS NOW MEASURED. The dialect
+## gives `ftof` no saturation attribute, so this function used to read IEEE's
+## rule with the infinity replaced by the only encoding left over: anything
+## above the midpoint 464 answered NaN. That was a guess, written down as
+## one, because no device this tree could reach accepted the type. Knife TA
+## reached one: on a B200 (sm_100) `ftof` answers 448 for 480, -448 for -480
+## and 448 for an infinity, and NaN only for NaN.
+##
+## 464 is unchanged and was never the question: it is the midpoint between
+## 448 and the 480 an IEEE format of these widths would have, and 448's
+## significand is the even one, so it ties DOWN under either reading. What
+## the measurement settled is everything above it.
+pub fn round_f8e4m3fn(x: Float) -> Float =
+  if x != x {
+    x
+  } else {
+    let v = round_binary(x, 4, -6, 8)
+    if magnitude(v) <= 448.0 { v } else if v < 0.0 { -448.0 } else { 448.0 }
+  }
 
 ## `x` rounded to f4E2M1FN: two significand bits, exponents 0..2, and
 ## SIXTEEN VALUES IN ALL: +/-0, +/-0.5, +/-1, +/-1.5, +/-2, +/-3, +/-4,
@@ -238,22 +266,41 @@ pub fn round_f4e2m1(x: Float) -> Float =
 ## which is what packages/tileir writes: the answer is the largest power of
 ## two at or below `x`.
 ##
-## Everything outside the value set answers NaN: zero, every negative
-## number, the infinities and NaN itself. A positive number below 2^-127 has
-## no representable value below it, and this clamps it UP to 2^-127 rather
-## than answering NaN, which is the second unmeasurable choice of this pair
-## (`round_f8e4m3fn` records the first).
+## NOTHING BUT NaN ANSWERS NaN, and that too is measured rather than
+## chosen. This function used to send zero, every negative number and the
+## infinities to NaN, on the reading that a format with no encoding for them
+## has nothing else to answer. Knife TA asked a B200: zero answers 2^-127,
+## -1 answers 1, an infinity answers 2^127, and 2^140 answers 2^127. So
+## `ftof` into this format takes the MAGNITUDE and then clamps into the
+## range, which is the same saturation the two fp8 formats above do, with
+## the sign dropped because there is no sign bit to keep it in.
+##
+## A positive number below 2^-127 has no representable value below it and
+## clamps UP to 2^-127; that arm was a guess too and the device agrees with
+## it (2^-140 answers 2^-127).
+##
+## `f8e8m0_bits` is NOT changed to match: it answers what an octet means,
+## and zero and the negatives are still not values of this format. The two
+## functions answer different questions, and `round_f8e5m2` records the same
+## split at the other end of the range.
 pub fn round_f8e8m0(x: Float) -> Float =
-  if x != x || x <= 0.0 || x == 1.0 / 0.0 {
-    0.0 / 0.0
+  if x != x {
+    x
   } else {
-    let e = exponent(x)
-    if e > 127 {
-      0.0 / 0.0
-    } else if e < -127 {
+    let a = magnitude(x)
+    if a == 0.0 {
       pow2(-127)
+    } else if a == 1.0 / 0.0 {
+      pow2(127)
     } else {
-      pow2(e)
+      let e = exponent(a)
+      if e > 127 {
+        pow2(127)
+      } else if e < -127 {
+        pow2(-127)
+      } else {
+        pow2(e)
+      }
     }
   }
 
@@ -1131,12 +1178,19 @@ test "the tf32 codec is a binary32 word with thirteen zero bits" {
 test "every f8E5M2 octet round-trips through its value, and the value is on round_f8e5m2's grid" {
   var bad = 0
   var nans = 0
+  var infinities = 0
   var b = 0
   while b < 256 {
     let v = f8e5m2_of_bits(b)
     if v != v {
       nans = nans + 1
       if f8e5m2_bits(v) != 0x7E { bad = bad + 1 } else { () }
+    } else if v - v != 0.0 {
+      # the two infinity octets: the codec keeps them (they are values of
+      # the format) and the conversion never answers one, so they are the
+      # only octets that are not fixed points of `round_f8e5m2`
+      infinities = infinities + 1
+      if f8e5m2_bits(v) != b { bad = bad + 1 } else { () }
     } else if f8e5m2_bits(v) != b || round_f8e5m2(v) != v {
       bad = bad + 1
     } else {
@@ -1147,6 +1201,8 @@ test "every f8E5M2 octet round-trips through its value, and the value is on roun
   assert bad == 0
   # exponent all ones, significand nonzero, either sign: 3 + 3
   assert nans == 6
+  # and the two whose significand is zero
+  assert infinities == 2
 }
 
 test "the f8E5M2 rounding and codec spell the named boundaries" {
@@ -1159,7 +1215,13 @@ test "the f8E5M2 rounding and codec spell the named boundaries" {
   # carries out of the top exponent
   assert round_f8e5m2(57344.0) == 57344.0
   assert round_f8e5m2(61439.0) == 57344.0
-  assert round_f8e5m2(61440.0) == inf
+  # and the conversion SATURATES rather than overflowing, although the
+  # format has an infinity and the codec above keeps it (knife TA measured
+  # it on a B200: 1e30, -1e30 and an infinity all answer +/-57344)
+  assert round_f8e5m2(61440.0) == 57344.0
+  assert round_f8e5m2(1.0e30) == 57344.0
+  assert round_f8e5m2(0.0 - 1.0e30) == 0.0 - 57344.0
+  assert round_f8e5m2(inf) == 57344.0
   assert f8e5m2_of_bits(0x7B) == 57344.0
   # ties to even at the last place: 1 + 2^-3 sits between 1 and 1 + 2^-2
   assert round_f8e5m2(1.0 + 1.0 / 8.0) == 1.0
@@ -1199,12 +1261,14 @@ test "f8E4M3FN has no infinity, so its overflow is NaN and its largest finite va
   # 464 is the midpoint between 448 and the 480 an IEEE format of these
   # widths would have; 448's significand is the even one, so it ties down
   assert round_f8e4m3fn(464.0) == 448.0
-  let over = round_f8e4m3fn(465.0)
-  assert over != over
-  let big = round_f8e4m3fn(1.0e30)
-  assert big != big
-  let below = round_f8e4m3fn(-465.0)
-  assert below != below
+  # above it the conversion SATURATES; knife TA measured 480, -480 and an
+  # infinity on a B200 and got 448, -448 and 448
+  assert round_f8e4m3fn(465.0) == 448.0
+  assert round_f8e4m3fn(1.0e30) == 448.0
+  assert round_f8e4m3fn(-465.0) == 0.0 - 448.0
+  assert round_f8e4m3fn(1.0 / 0.0) == 448.0
+  let nan = round_f8e4m3fn(0.0 / 0.0)
+  assert nan != nan
   # ties to even at the last place, and the subnormal quantum 2^-9
   assert round_f8e4m3fn(1.0 + 1.0 / 16.0) == 1.0
   assert round_f8e4m3fn(1.0 + 3.0 / 16.0) == 1.0 + 1.0 / 4.0
@@ -1214,10 +1278,14 @@ test "f8E4M3FN has no infinity, so its overflow is NaN and its largest finite va
 }
 
 test "f8E8M0FNU is the exponent alone, rounded toward zero" {
-  let nan = round_f8e8m0(0.0)
+  # the conversion takes the MAGNITUDE and clamps into the range; only NaN
+  # answers NaN (knife TA measured all four of these on a B200)
+  assert round_f8e8m0(0.0) == pow2(-127)
+  assert round_f8e8m0(-1.0) == 1.0
+  assert round_f8e8m0(-3.0) == 2.0
+  assert round_f8e8m0(1.0 / 0.0) == pow2(127)
+  let nan = round_f8e8m0(0.0 / 0.0)
   assert nan != nan
-  let neg = round_f8e8m0(-1.0)
-  assert neg != neg
   # rounding toward zero is the largest power of two at or below x: 1.99
   # answers 1 and not 2, which is where this differs from every other
   # rounding in this module
@@ -1227,8 +1295,7 @@ test "f8E8M0FNU is the exponent alone, rounded toward zero" {
   # the ends: 2^127 is the largest, 2^-127 the smallest, and there is
   # nothing below it to round down to, so a smaller value clamps up
   assert round_f8e8m0(pow2(127)) == pow2(127)
-  let over = round_f8e8m0(pow2(128))
-  assert over != over
+  assert round_f8e8m0(pow2(128)) == pow2(127)
   assert round_f8e8m0(pow2(-127)) == pow2(-127)
   assert round_f8e8m0(pow2(-200)) == pow2(-127)
   # every octet is a value and every value an octet; 0xFF alone is NaN
