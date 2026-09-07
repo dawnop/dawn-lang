@@ -428,6 +428,12 @@ fs 族一旦从 `io` 里提升成具名效果 `!Fs`,`io_read_file` 的行是 `!F
 
 ## 13. 结论
 
+2026-09-07 的契约复核（#96）发现 native 的 Int 除零/取模零共用 `/ by zero`，与
+规范及 JVM 的两条消息不一致。消息经 catch_panic 成为普通值，因此不是后端可自由
+选择的 stderr 文案。修复仅令 dawn_idiv/dawn_imod 使用 `Int division by zero` /
+`Int modulo by zero`，同步内嵌 runtime；双后端语料捕获并逐字比较消息，同时钉住
+非零运算及 Int.MIN/-1 的既有回绕。不改 catch_panic 效果行或其他异常文本。
+
 去 Java 和接 LLVM 是**同一套重构的两个视角**:立一层运行时 intrinsic 契约,把 `java.*` 全关进 JVM
 后端对它的实现里,std 写在契约之上。这样 selfhost 名副其实(无语言核心里的手写 Java),且 native
 后端只需实现同一份契约。**方向比进度重要:朝 intrinsic 契约去,别朝内联 java FFI 去。**

@@ -329,6 +329,8 @@ expect_never_marker return-from-wide-sam-adapter \
 
 run_corpus_checks() {
 
+python3 scripts/classfile-verify/sam_values_probe.py "$root/build/dawn-selfhost.jar" "$work" --mutants
+
 fail=0
 java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 generic_fn_value_fixture=scripts/classfile-verify/generic_fn_value.dawn

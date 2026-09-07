@@ -2440,8 +2440,9 @@ fn spawn_hello(msg: String) -> Unit !io = {
 - **参数的 null 边界**：回调的引用类型参数**不包 `Option`**，以 `T` 直达；桥接层逐参
   检查，Java 传入 null 立即 panic（消息指明回调边界）。与返回值包 `Option`（§9.2）
   互补：返回位置的 null 是常态故进类型，回调参数的 null 属病态故 fail-fast。
-- **返回值收窄**：SAM 方法要 `int` 而 Dawn 函数返回 `Int` 时做**检查性收窄**，超出
-  范围 panic，不静默截断；要 `float` 时按 IEEE 规则收窄 `Float`（可能损失精度，
+- **返回值收窄**：SAM 方法要 `byte`、`short` 或 `int` 而 Dawn 函数返回 `Int` 时做
+  **检查性收窄**，超出目标有符号 8、16 或 32 位范围 panic，不静默截断；
+  要 `float` 时按 IEEE 规则收窄 `Float`（可能损失精度，
   这是浮点语义而非溢出）。
 - Dawn 函数在回调中 panic，以 `dawn.rt.PanicError`（`Error` 的子类）传给 Java
   调用方，不捕获不包装。

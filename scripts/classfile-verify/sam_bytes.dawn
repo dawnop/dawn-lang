@@ -1,0 +1,21 @@
+# Bytes callbacks use the non-null callback boundary, not Java return Option.
+use java "fixture.SamValues"
+use std/bytes
+
+fn ensure(ok: Bool) -> Unit = if not ok { panic("SAM Bytes value mismatch") }
+
+pub fn main() -> Unit !io = {
+  let source: fn() -> Bytes = () => bytes.utf8("abc")
+  let sink: fn(Bytes) -> Int = (b) => bytes.len(b)
+  ensure(bytes.len(SamValues.bytesValue(source)!) == 3)
+  ensure(bytes.len(SamValues.bytesValue(() => bytes.utf8("de"))!) == 2)
+  ensure(SamValues.bytesSink(sink) == 3)
+  ensure(SamValues.bytesSink((b) => bytes.len(b)) == 3)
+  ensure(SamValues.objectBytes(source) == 3)
+  ensure(SamValues.absent() == None)
+  match catch_panic(() => SamValues.nullSink(sink)) {
+    Err(e) -> ensure(e.message == "Java passed null to parameter 1 of a Dawn callback (fixture.SamValues\$BytesSink)")
+    Ok(_) -> panic("null callback parameter was accepted")
+  }
+  println("SAM_BYTES_OK")
+}
