@@ -4,7 +4,7 @@
 # it is deliberately not a proof that all semantic dependencies were read.
 use std/list
 use front/ast.{TypeRef, TNamed}
-use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled}
+use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
@@ -32,6 +32,8 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | TraitAssociatedMembers(id: Int, kind: AssociatedKind, names: List[String])
   | DeclaredEffect(name: String, answer: Option[Eff])
   | ScopedEffectVariable(name: String, answer: Option[Eff])
+  | BuiltinTypeAnswer(name: String, answer: Option[BuiltinTypeI])
+  | StdModuleMode(is_std: Bool)
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -213,6 +215,17 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
             let moved_variable = match answer { None -> None, Some(row) -> Some(effect_value(row)?) }
             ScopedEffectVariable(name, moved_variable)
           }
+          BuiltinTypeAnswer(name, answer) -> {
+            let moved_builtin = match answer {
+              None -> None
+              Some(info) -> {
+                let build = match info.build { BtLeaf(ty) -> BtLeaf(type_value(ty)?), other -> other }
+                Some(BuiltinTypeI { ..info, build: build })
+              }
+            }
+            BuiltinTypeAnswer(name, moved_builtin)
+          }
+          StdModuleMode(is_std) -> StdModuleMode(is_std)
         }
         out = out ++ [moved]
       }
@@ -286,6 +299,20 @@ test "semantic reads project export references in distinct domains" {
   assert capture(prefix, combined) == Some(reads)
   assert observe(None, ExportPresence("h", true)) == None
   assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
+}
+
+test "semantic reads project builtin leaf types and preserve access metadata" {
+  let leaf = BuiltinTypeI { name: "Display", params: ["Z", "A"], access: BtStdOnly, build: BtLeaf(TyVar("T", 1)) }
+  let list_info = BuiltinTypeI { name: "List", params: ["T"], access: BtPublic, build: BtList }
+  let reads = Some([BuiltinTypeAnswer("Lookup", Some(leaf)), BuiltinTypeAnswer("List", Some(list_info)),
+    BuiltinTypeAnswer("Missing", None), StdModuleMode(false), StdModuleMode(true)])
+  let type_map: fn(Ty) -> Option[Ty] = ty => match ty { TyVar(name, id) -> Some(TyVar(name, id + 10)), _ -> None }
+  assert project(reads, s => None, type_map, id => None, e => None) == Some(Some([
+    BuiltinTypeAnswer("Lookup", Some(BuiltinTypeI { ..leaf, build: BtLeaf(TyVar("T", 11)) })),
+    BuiltinTypeAnswer("List", Some(list_info)), BuiltinTypeAnswer("Missing", None), StdModuleMode(false), StdModuleMode(true)]))
+  assert project(reads, s => None, t => None, id => Some(id), e => None) == None
+  let fixed = Some([BuiltinTypeAnswer("List", Some(list_info)), BuiltinTypeAnswer("Missing", None), StdModuleMode(false)])
+  assert project(fixed, s => None, t => None, id => None, e => None) == Some(fixed)
 }
 
 test "semantic reads project declared and scoped effect answers" {

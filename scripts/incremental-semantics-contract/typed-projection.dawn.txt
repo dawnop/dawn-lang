@@ -285,6 +285,22 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  for sample in [("fn go(x: Array[Int]) -> Unit = ()", false, 1),
+    ("fn go(x: Array[Int]) -> Unit = ()", true, 0),
+    ("fn go(x: Never) -> Unit = ()", false, 1),
+    ("trait Stop[T] { fn stop(x: T) -> Never }", false, 0),
+    ("type Array = { value: Int }\nfn go(x: Array) -> Array = x", false, 0),
+    ("fn go(x: List) -> Unit = ()", false, 1)] {
+    let (text, is_std, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("environment observation parse") }
+    let initial = Cx { ..cx_new(Some("environment_read_probe"), None), is_std_module: is_std }
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("environment observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 

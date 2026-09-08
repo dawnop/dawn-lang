@@ -601,6 +601,14 @@ fn scoped_type_parameter_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
   (observe_type_read(cx, semantic_reads.ScopedTypeParameter(name, answer)), answer)
 }
 
+fn builtin_type_read(cx: Cx, name: String) -> (Cx, Option[BuiltinTypeI]) = {
+  let answer = map.get(cx.btypes, name)
+  (observe_type_read(cx, semantic_reads.BuiltinTypeAnswer(name, answer)), answer)
+}
+
+fn std_module_mode_read(cx: Cx) -> (Cx, Bool) =
+  (observe_type_read(cx, semantic_reads.StdModuleMode(cx.is_std_module)), cx.is_std_module)
+
 fn parameter_bounds_read(cx: Cx, subject: Ty, id: Int) -> (Cx, Option[List[Int]]) = {
   let answer = map.get(cx.current_tparam_bounds, id)
   (observe_type_read(cx, semantic_reads.ParameterBounds(subject, answer)), answer)
@@ -1126,13 +1134,19 @@ fn resolve_named(
   var cx = initial
   # Return-only names are hard-reserved, so they win even if a rejected
   # declaration left a same-spelled type parameter in the recovery scope.
-  match map.get(cx.btypes, name) {
+  let (reserved_cx, reserved) = builtin_type_read(cx, name)
+  cx = reserved_cx
+  match reserved {
     Some(info) -> if builtin_type_hard_reserved(info) {
       if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
       }
-      if type_use == TypeReturn && builtin_type_visible_at_return(info, cx.is_std_module) {
-        return (record_span_at(cx, lo, hi, no_trefs()), builtin_type_apply(info, []))
+      if type_use == TypeReturn {
+        let (mode_cx, is_std) = std_module_mode_read(cx)
+        cx = mode_cx
+        if builtin_type_visible_at_return(info, is_std) {
+          return (record_span_at(cx, lo, hi, no_trefs()), builtin_type_apply(info, []))
+        }
       }
       return (cerr_h(cx, "`" ++ name ++ "` can only be written as a function return type",
         lo, hi, "write `fn(...) -> " ++ name ++
@@ -1141,7 +1155,9 @@ fn resolve_named(
     None -> ()
   }
   # type parameters shadow everything
-  match map.get(cx.current_tparams, name) {
+  let (parameter_cx, parameter) = scoped_type_parameter_read(cx, name)
+  cx = parameter_cx
+  match parameter {
     Some(v) -> {
       if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "type parameter `" ++ name ++ "` cannot take type arguments", lo, hi),
@@ -1202,28 +1218,34 @@ fn resolve_named(
     }
     None -> ()
   }
-  match map.get(cx.btypes, name) {
-    Some(info) -> if builtin_type_visible(info, cx.is_std_module) {
-      let (cxe, bad_earg) = check_eargs(cx, name, no_eparam_names(), eargs, lo, hi)
-      if bad_earg { return (cxe, TyError) }
-      let arity = len(info.params)
-      if len(targs) != arity {
-        if arity == 0 {
-          return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+  let (builtin_cx, builtin) = builtin_type_read(cx, name)
+  cx = builtin_cx
+  match builtin {
+    Some(info) -> {
+      let (mode_cx, is_std) = std_module_mode_read(cx)
+      cx = mode_cx
+      if builtin_type_visible(info, is_std) {
+        let (cxe, bad_earg) = check_eargs(cx, name, no_eparam_names(), eargs, lo, hi)
+        if bad_earg { return (cxe, TyError) }
+        let arity = len(info.params)
+        if len(targs) != arity {
+          if arity == 0 {
+            return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+          }
+          let count = if arity == 1 { "one" } else { "two" }
+          let plural = if arity == 1 { "" } else { "s" }
+          return (cerr(cx, name ++ " takes exactly " ++ count ++ " type argument" ++ plural ++
+              ": " ++ builtin_type_render(info), lo, hi), TyError)
         }
-        let count = if arity == 1 { "one" } else { "two" }
-        let plural = if arity == 1 { "" } else { "s" }
-        return (cerr(cx, name ++ " takes exactly " ++ count ++ " type argument" ++ plural ++
-            ": " ++ builtin_type_render(info), lo, hi), TyError)
+        var cx1 = cx
+        var args: List[Ty] = []
+        for arg in targs {
+          let (cx2, ty) = resolve_type(cx1, arg)
+          cx1 = cx2
+          args = args ++ [ty]
+        }
+        return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))
       }
-      var cx1 = cx
-      var args: List[Ty] = []
-      for arg in targs {
-        let (cx2, ty) = resolve_type(cx1, arg)
-        cx1 = cx2
-        args = args ++ [ty]
-      }
-      return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))
     }
     None -> ()
   }
