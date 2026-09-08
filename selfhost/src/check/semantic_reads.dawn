@@ -5,7 +5,7 @@
 use std/list
 use front/ast.{TypeRef, TNamed}
 use check/jsig.{JClass, JMethod, JCtor, JField}
-use check/types.{Sig, Ty, Eff, CtorI, FieldI, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
+use check/types.{Sig, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
@@ -57,6 +57,9 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | ConstructorNames(adt: Int, names: List[String])
   | DeclaredConstantName(name: String, present: Bool)
   | LocalValueCandidates(include_constants: Bool, names: List[String])
+  | DeclaredEffectInfo(id: Int, answer: EffectI)
+  | LocalEffectName(name: String, answer: Option[Int])
+  | EffectCandidates(names: List[String])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -183,6 +186,9 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
           ConstructorCount(adt, count) -> ConstructorCount(nominal(adt)?, count)
           ConstructorArity(adt, slot, arity) -> ConstructorArity(nominal(adt)?, slot, arity)
           ConstructorNames(adt, names) -> ConstructorNames(nominal(adt)?, names)
+          DeclaredEffectInfo(id, answer) -> DeclaredEffectInfo(nominal(id)?, EffectI { ..answer, id: nominal(answer.id)? })
+          LocalEffectName(name, answer) -> LocalEffectName(name, match answer { None -> None, Some(id) -> Some(nominal(id)?) })
+          EffectCandidates(names) -> EffectCandidates(names)
           DeclaredConstantName(name, present) -> DeclaredConstantName(name, present)
           LocalValueCandidates(include_constants, names) -> LocalValueCandidates(include_constants, names)
           ConstructorHeaderAnswer(adt, answer) -> {
@@ -375,6 +381,18 @@ test "semantic reads preserve plain Java metadata without compiler ID mapping" {
   assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
   let prefix = Some([JavaClassName("Earlier", None)])
   assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
+}
+
+test "semantic reads project effect metadata with its evidence record identity" {
+  let info = EffectI { id: 8, name: "Ask", owner: Some("provider"), audience: AWorld,
+    ops: ["second", "first"], ctl: true }
+  let reads = Some([LocalEffectName("Ask", Some(7)), LocalEffectName("Missing", None),
+    EffectCandidates(["Z", "Ask"]), DeclaredEffectInfo(7, info)])
+  let expected = Some([LocalEffectName("Ask", Some(17)), LocalEffectName("Missing", None),
+    EffectCandidates(["Z", "Ask"]), DeclaredEffectInfo(17, EffectI { ..info, id: 18 })])
+  assert project(reads, s => None, t => None, id => Some(id + 10), e => None) == Some(expected)
+  assert project(reads, s => None, t => None, id => if id == 8 { None } else { Some(id) }, e => None) == None
+  assert project(reads, s => None, t => None, id => if id == 7 { None } else { Some(id) }, e => None) == None
 }
 
 test "semantic reads preserve diagnostic candidate order and declaration answers" {

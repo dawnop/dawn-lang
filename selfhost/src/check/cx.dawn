@@ -487,6 +487,23 @@ pub fn effect_of(cx: Cx, id: Int) -> EffectI =
     None -> panic("unknown effect id: ${id}")
   }
 
+## Handler decisions depend on ordered operations and declaration metadata.
+pub fn local_effect_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
+  let answer = map.get(cx.effects, name)
+  (observe_type_read(cx, semantic_reads.LocalEffectName(name, answer)), answer)
+}
+
+pub fn effect_candidates_read(cx: Cx) -> (Cx, List[String]) = {
+  let names = map.keys(cx.effects)
+  (observe_type_read(cx, semantic_reads.EffectCandidates(names)), names)
+}
+
+## Handler decisions depend on ordered operations and declaration metadata.
+pub fn declared_effect_info_read(cx: Cx, id: Int) -> (Cx, EffectI) = {
+  let answer = effect_of(cx, id)
+  (observe_type_read(cx, semantic_reads.DeclaredEffectInfo(id, answer)), answer)
+}
+
 ## A row carrying exactly one declared effect.
 pub fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
 

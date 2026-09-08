@@ -141,8 +141,8 @@ MUTATIONS = {
     "skip-complete-or-reduction": (
         "src/check/exhaustive.dawn",
         ((
-            "  let normalized_matrix = simplify_matrix(adts, matrix, types_)",
-            "  let normalized_matrix = matrix",
+            "  let (matrix_state, normalized_matrix) = simplify_matrix_read(state, matrix, types_)",
+            "  let matrix_state = state\n  let normalized_matrix = matrix",
         ),),
     ),
     "drop-usefulness-budget-diagnostic": (

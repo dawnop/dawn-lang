@@ -6,7 +6,7 @@
 use std/map
 use std/list
 use check/cx.{Cx, Frame, cx_new}
-use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
+use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
@@ -441,7 +441,10 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.ConstructorHeaderAnswer(4, ConstructorHeader { id: 4, name: "Box", is_record: true, tparams: [TyVar("T", 1)] }),
       semantic_reads.ConstructorFields(4, 0, CtorI { adt: 4, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 1) }] }),
       semantic_reads.ConstructorNames(4, ["Z", "A"]), semantic_reads.DeclaredConstantName("LATER", true),
-      semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"])]),
+      semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"]),
+      semantic_reads.LocalEffectName("Ask", Some(4)), semantic_reads.EffectCandidates(["Z", "Ask"]),
+      semantic_reads.DeclaredEffectInfo(4, EffectI { id: 4, name: "Ask", owner: Some("provider"),
+        audience: AWorld, ops: ["second", "first"], ctl: true })]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -465,7 +468,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 42
+  assert len(p.function_reads.expect("read delta")) == 45
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -498,7 +501,10 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.ConstructorHeaderAnswer(44, ConstructorHeader { id: 44, name: "Box", is_record: true, tparams: [TyVar("T", 11)] }),
     semantic_reads.ConstructorFields(44, 0, CtorI { adt: 44, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 11) }] }),
     semantic_reads.ConstructorNames(44, ["Z", "A"]), semantic_reads.DeclaredConstantName("LATER", true),
-    semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"])]
+    semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"]),
+    semantic_reads.LocalEffectName("Ask", Some(44)), semantic_reads.EffectCandidates(["Z", "Ask"]),
+    semantic_reads.DeclaredEffectInfo(44, EffectI { id: 44, name: "Ask", owner: Some("provider"),
+      audience: AWorld, ops: ["second", "first"], ctl: true })]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])
