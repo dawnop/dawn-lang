@@ -1086,8 +1086,10 @@ jobs:
     # The 44-case type/alias observation run took 226.68s on 2026-09-08.
     # Typed alone: 2*227+38=492s; the 660s planning pole is unchanged.
     # The current 62-case run took 228.54s: 2*229+38=496s.
-    # budget: 3x 496s planning value
-    timeout-minutes: 25
+    # The 81-case namespace run took 239.16s; retain the larger measured
+    # 72-case member run (244.70s): 2*245+38=528s.
+    # budget: 3x 528s planning value
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1176,8 +1178,11 @@ jobs:
     # 33 controls took 174.12s locally on 2026-09-08.
     # Separate them from effects rather than exceed the 660s pole:
     # 2*(110+175)+38=608s. No existing suite or control is removed.
-    # budget: 3x 608s planning value
-    timeout-minutes: 31
+    # Namespace acceptance measured class/member controls at 184.25/226.97s
+    # under concurrent load. Their combined allowance would exceed 660s;
+    # split members below, retaining the larger observations conservatively.
+    # budget: 3x 408s planning value (2*185+38)
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1185,8 +1190,33 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Java class metadata read contracts
         run: python3 scripts/incremental-semantics-contract/java-reads.py
+
+  incremental-java-members:
+    runs-on: ubuntu-latest
+    # budget: 3x 492s planning value (2*227+38)
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Java member candidate read contracts
         run: python3 scripts/incremental-semantics-contract/java-member-reads.py
+
+  incremental-java-namespaces:
+    runs-on: ubuntu-latest
+    # Namespace/import reads: 22 compiling controls took 149.16s locally
+    # on 2026-09-08. Adding them to the 608s member/class job would
+    # exceed the unchanged 660s pole. Keep all existing controls.
+    # budget: 3x 338s planning value (2*150+38)
+    timeout-minutes: 17
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Java import and namespace read contracts
+        run: python3 scripts/incremental-semantics-contract/java-namespace-reads.py
 
   incremental-state:
     runs-on: ubuntu-latest

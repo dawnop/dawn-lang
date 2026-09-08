@@ -514,6 +514,30 @@ Constructor queries remain after argument-error and instance-new rejection;
 method queries remain after argument-error rejection. This step does not replace
 assignability, SAM/component, import-name, namespace or oracle-lifetime reads.
 
+### Java import and namespace reads (implementation in progress)
+
+Observe the Java-enabled gate only when a Java import is visited. Disabled
+imports still refuse without querying the oracle; enabled imports retain the
+actual find-class answer, including misses, before checking local-name conflicts.
+Subsequent imports must observe the namespace after earlier accepted writes.
+Record class-name lookups at static dispatch/field targets and declaration
+collision checks where the original short-circuit chain actually reaches them.
+Do not move lookups ahead of constructor/constant shadowing or syntax guards.
+These observations do not replace the other namespace answers in those guards,
+nor establish target-classpath or oracle-lifetime validity.
+When inferred functions are pending, retain the actual ordered Java namespace
+keys before constructing the static-receiver set. Explicit-only modules still
+skip this enumeration, and constructor/constant shadowing remains unchanged.
+Value-versus-module-alias resolution also retains the Java name answer only
+after local variables, functions, constructors and constants have declined.
+Owning tests compare the complete ordered read sequence, including repeated
+alias queries, rather than filtering unrelated facts from the observation log.
+The diagnostic corpus projector follows the exact immutable tuple result slot
+now that message helpers also return their observed context. It retains both
+the ordinary tail and nested early-return wording, without borrowing another
+slot, mutable/written bindings or a shadowed helper. This changes diagnostic
+extraction only; existing diagnostic golden texts remain unchanged.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

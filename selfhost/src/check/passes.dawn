@@ -46,7 +46,7 @@ use check/types.{
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
   cerr_h, cerr_o, fresh, fresh_effvar, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
-  label_eff,
+  label_eff, java_enabled_read, java_find_class_read, java_class_name_read,
   resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable,
   const_refusal_hint, no_sig,
   TySpan, ty_span_kid, ty_span_of
@@ -520,20 +520,26 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
 pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_java_uses(m) {
-    if not cx1.jsig.on {
+    let (enabled_cx, enabled) = java_enabled_read(cx1)
+    cx1 = enabled_cx
+    if not enabled {
       cx1 = cerr_h(cx1, "`use java` is not available in this compiler", d.nlo, d.nhi,
         "Java interop needs a JVM host with a class path to resolve `" ++ d.fqcn ++
           "` against; this build has none")
       continue
     }
-    match cx1.jsig.find_class(d.fqcn) {
+    let (found_cx, found) = java_find_class_read(cx1, d.fqcn)
+    cx1 = found_cx
+    match found {
       None -> {
         cx1 = cerr_h(cx1, "Java class not found: ${d.fqcn}", d.nlo, d.nhi,
           "the JDK is always visible; declare third-party jars under [java-deps] in " ++
             "dawn.toml or use a classpath option supported by this command")
       }
       Some(j) -> {
-        if map.has(cx1.java_classes, d.simple) {
+        let (name_cx, previous) = java_class_name_read(cx1, d.simple)
+        cx1 = name_cx
+        if previous != None {
           cx1 = cerr(cx1, "`" ++ d.simple ++ "` is already imported", d.nlo, d.nhi)
         } else {
           cx1 = Cx { ..cx1, java_classes: map.insert(cx1.java_classes, d.simple, j.fqcn) }
@@ -636,7 +642,9 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
   var cx1 = cx
   var shells: List[Option[Shell]] = []
   for d in module_types(m) {
-    if map.has(cx1.java_classes, d.name) {
+    let (name_cx, java_name) = java_class_name_read(cx1, d.name)
+    cx1 = name_cx
+    if java_name != None {
       cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with an imported Java class", d.nlo, d.nhi)
       shells = shells ++ [no_shell()]
       continue
@@ -1156,12 +1164,18 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         d.nlo, d.nhi)
       continue
     }
-    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
-      map.has(cx1.traits_by_name, d.name) || map.has(cx1.java_classes, d.name) {
-        cx1 = cerr_h(cx1, "effect `" ++ d.name ++ "` collides with a type of the same name",
-          d.nlo, d.nhi, "effects, traits and types share one namespace; rename one")
-        continue
-      }
+    var occupied = map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
+      map.has(cx1.traits_by_name, d.name)
+    if not occupied {
+      let (name_cx, java_name) = java_class_name_read(cx1, d.name)
+      cx1 = name_cx
+      occupied = java_name != None
+    }
+    if occupied {
+      cx1 = cerr_h(cx1, "effect `" ++ d.name ++ "` collides with a type of the same name",
+        d.nlo, d.nhi, "effects, traits and types share one namespace; rename one")
+      continue
+    }
     if map.has(cx1.effects, d.name) {
       cx1 = cerr(cx1, "effect `" ++ d.name ++ "` is defined twice", d.nlo, d.nhi)
       continue
@@ -1344,12 +1358,17 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         d.nlo, d.nhi)
       continue
     }
-    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
-      map.has(cx1.java_classes, d.name) {
-        cx1 = cerr_h(cx1, "trait `" ++ d.name ++ "` collides with a type of the same name",
-          d.nlo, d.nhi, "traits and types share one namespace; rename one")
-        continue
-      }
+    var occupied = map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name)
+    if not occupied {
+      let (name_cx, java_name) = java_class_name_read(cx1, d.name)
+      cx1 = name_cx
+      occupied = java_name != None
+    }
+    if occupied {
+      cx1 = cerr_h(cx1, "trait `" ++ d.name ++ "` collides with a type of the same name",
+        d.nlo, d.nhi, "traits and types share one namespace; rename one")
+      continue
+    }
     if map.has(cx1.traits_by_name, d.name) {
       let msg = if is_prelude_trait_name(d.name) {
         "`" ++ d.name ++ "` is a prelude trait and cannot be redefined"

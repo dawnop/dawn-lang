@@ -1463,6 +1463,12 @@ def projected_record_patterns(expr, path, fns, env=None, depth=0, seen=()):
             info = fns[callee]
             if len(args) != len(info["params"]) or any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*:", arg) for arg in args):
                 return []
+            if not path:
+                # The selected slot is now wording, not a record. Preserve
+                # literal fragments supplied to nested message helpers.
+                known, wording = expanded_patterns(expr, fns)
+                if known:
+                    return wording
             bound = {param: (arg, dict(env)) for param, arg in zip(info["params"], args)}
             return projected_record_patterns(info["body"], path, fns, bound, depth + 1, seen + (callee,))
         return []
@@ -1610,6 +1616,19 @@ def collect_sites(sources=None):
                         bodies.append(best)
                 resolved = []
                 for off, body in bodies:
+                    binding = next((item for item in let_matches if item.start() == off), None)
+                    names = binding.group(1).strip() if binding is not None else ""
+                    if names.startswith("(") and names.endswith(")"):
+                        slots = [slot.strip() for slot in names[1:-1].split(",")]
+                        between = source_code[binding.end():m.start()]
+                        call = root_call(body)
+                        if (slots.count(bare.group(1)) == 1
+                            and re.match(r"\s*let\b", source_code[off:binding.end()])
+                            and (call is None or not helper_param_is_bound(source_code[scope:off], call[0]))
+                            and not helper_param_is_bound(between, bare.group(1))
+                            and not re.search(r"\b%s\s*=(?!=|>)" % re.escape(bare.group(1)), between)):
+                            resolved += projected_record_patterns(body, (slots.index(bare.group(1)),), fns)
+                        continue
                     _, body_pats = scoped_patterns(
                         body, fns, source_code[scope:off]
                     )
@@ -1684,6 +1703,25 @@ def recorded_messages():
 
 
 def self_test():
+    tuple_helper = (
+        'fn wording(name: String) -> String = "member " ++ name ++ " refused"\n'
+        'fn choose(flag: Bool) -> (Int, String) = {\n'
+        '  if flag { return (0, wording("A.B")) }\n'
+        '  (1, "fallback diagnostic")\n}\n'
+    )
+    for binding, tail, expected in [
+        ('let (state, message) = choose(flag)', 'cerr(cx, message, 0, 1)',
+         [('fallback diagnostic',), ('member ', 'A.B', ' refused')]),
+        ('let (message, state) = choose(flag)', 'cerr(cx, message, 0, 1)', []),
+        ('var (state, message) = choose(flag)', 'cerr(cx, message, 0, 1)', []),
+        ('let (state, message) = choose(flag)', 'message = other\n cerr(cx, message, 0, 1)', []),
+        ('let choose = opaque\n let (state, message) = choose(flag)', 'cerr(cx, message, 0, 1)', []),
+    ]:
+        source = tuple_helper + 'fn report(flag: Bool) -> Unit = {\n' + binding + '\n' + tail + '\n}\n'
+        sites = collect_sites([('tuple-slot-selftest.dawn', source)])
+        if len(sites) != 1 or sites[0]['pats'] != expected:
+            print('FAIL: tuple wording lost returns or borrowed another slot/binding', sites, file=sys.stderr)
+            return 1
     record = 'Diagnostic { message: "missing exported value", hint: "unrelated suggestion" }'
     projected = literal_record_field(record, "message")
     if projected != '"missing exported value"':
@@ -2574,14 +2612,15 @@ fn query(context, name) = {
         print("FAIL: propagate_msg call sites bypassed helper expansion", file=sys.stderr)
         return 1
     named_arg_sites = [
-        site for site in collect_sites() if site["expr"] == "named_arg_msg(cx, target)"
+        site for site in collect_sites()
+        if site["expr"] == "message" and site["file"] == "selfhost/src/check/checker.dawn"
     ]
     if len(named_arg_sites) != 1 or named_arg_sites[0]["pats"] != [
-        ("`", ".", "` is a Java member; Java methods carry no parameter names"),
         (
             "this callee is a function value, and a function type carries no "
             "parameter names",
         ),
+        ("`", ".", "` is a Java member; Java methods carry no parameter names"),
     ]:
         print("FAIL: named_arg_msg lost a reachable return or tail", file=sys.stderr)
         return 1

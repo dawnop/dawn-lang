@@ -344,6 +344,28 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  let import_oracle = Jsig { ..member_oracle,
+    find_class: name => if name == "pkg.Box" { Some(java_info) } else { None } }
+  for sample in [("use java \"pkg.Box\"\nfn go(x: Box) -> Unit = ()", true, 0),
+    ("use java \"pkg.Box\"\nuse java \"pkg.Box\"", true, 1),
+    ("use java \"missing.Box\"", true, 1),
+    ("use java \"pkg.Box\"", false, 1),
+    ("use java \"pkg.Box\"\ntype Box = { value: Int }", true, 1),
+    ("use java \"pkg.Box\"\neffect Box { fn get() -> Int }", true, 1),
+    ("use java \"pkg.Box\"\ntrait Box[T] { fn get(x: T) -> Int }", true, 1),
+    ("use java \"pkg.Box\"\nfn go() = 1", true, 0),
+    ("use java \"pkg.Box\"\nfn go() -> Int !io = Box.get(value: 1)", true, 1)] {
+    let (text, enabled, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("Java namespace observation parse") }
+    let initial = Cx { ..cx_new(Some("java_namespace_read_probe"), None),
+      jsig: if enabled { import_oracle } else { jsig_refused() } }
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("Java namespace observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 

@@ -609,14 +609,27 @@ fn builtin_type_read(cx: Cx, name: String) -> (Cx, Option[BuiltinTypeI]) = {
 fn std_module_mode_read(cx: Cx) -> (Cx, Bool) =
   (observe_type_read(cx, semantic_reads.StdModuleMode(cx.is_std_module)), cx.is_std_module)
 
-fn java_class_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
+pub fn java_class_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
   let answer = map.get(cx.java_classes, name)
   (observe_type_read(cx, semantic_reads.JavaClassName(name, answer)), answer)
+}
+
+pub fn java_class_names_read(cx: Cx) -> (Cx, List[String]) = {
+  let names = map.keys(cx.java_classes)
+  (observe_type_read(cx, semantic_reads.JavaClassNames(names)), names)
 }
 
 pub fn java_class_info_read(cx: Cx, fqcn: String) -> (Cx, JClass) !io = {
   let answer = cx.jsig.class_info(fqcn)
   (observe_type_read(cx, semantic_reads.JavaClassInfo(fqcn, answer)), answer)
+}
+
+pub fn java_enabled_read(cx: Cx) -> (Cx, Bool) =
+  (observe_type_read(cx, semantic_reads.JavaEnabled(cx.jsig.on)), cx.jsig.on)
+
+pub fn java_find_class_read(cx: Cx, name: String) -> (Cx, Option[JClass]) !io = {
+  let answer = cx.jsig.find_class(name)
+  (observe_type_read(cx, semantic_reads.JavaFindClass(name, answer)), answer)
 }
 
 pub fn java_methods_read(cx: Cx, fqcn: String) -> (Cx, List[JMethod]) !io = {

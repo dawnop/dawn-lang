@@ -290,6 +290,24 @@ The Java class and member suites run together in incremental-java-reads with a
 plus 38s setup). Adding member controls to the former effect/Java job would
 exceed the unchanged 660s pole. All existing suites and controls are retained.
 
+`java-namespace-reads.py` checks Java import gates, find-class answers and ordered
+namespace enumeration. Its 22 mutations cover answer keys and values, projection,
+body capture and consumer context threading, including value-versus-module-alias
+resolution. Owning assertions retain negative answers, repeated reads and the
+original declaration, syntax and shadowing short circuits. Nine additional
+complete module/Cx cases bring the observation oracle to 81 cases, covering
+successful, missing, disabled and duplicate imports, declaration collisions,
+inferred functions and named-argument refusal. These observations do not yet
+establish classpath lifetime validity or authorize production cache reuse.
+The 22 compiling controls took 149.16s locally on 2026-09-08. They run in a
+separate incremental-java-namespaces job with a 338s planning value
+(2*150+38) and a 17-minute timeout, retaining the 660s pole and existing jobs.
+During namespace acceptance, class/member controls took 184.25/226.97s under
+concurrent load. Conservatively retaining those larger observations requires
+separate class/member jobs: 408s/21min and 492s/25min respectively. No controls
+are removed. The typed 81-case run took 239.16s; its job retains the larger
+244.70s member-batch observation, yielding 528s/27min.
+
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，

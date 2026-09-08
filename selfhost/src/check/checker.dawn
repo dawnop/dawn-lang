@@ -82,7 +82,7 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read,
+  resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read, java_class_name_read, java_class_names_read,
   java_methods_read, java_constructors_read, java_static_fields_read, is_const_serializable, const_refusal_hint, no_sig,
   TySpan
 }
@@ -438,7 +438,9 @@ fn qual_const_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(String, 
 fn resolves_to_value_read(cx: Cx, q: String) -> (Cx, Bool) = {
   if lookup(cx, q) != None { return (cx, true) }
   let (next, answer) = lookup_fn_sig_read(cx, q)
-  (next, answer != None || map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) || map.has(cx.java_classes, q))
+  if answer != None || map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) { return (next, true) }
+  let (java_cx, java_name) = java_class_name_read(next, q)
+  (java_cx, java_name != None)
 }
 
 ## `q.x` where `q` names nothing at all. Before a `.` a bare name can be a
@@ -3495,7 +3497,8 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     let (observed, next_ty, next_tree) = check_method_call(Cx { ..scope, function_reads: Some([]) }, receiver, "missing", [], None, 8, 15, 0, 17)
     assert ty == TyError && next_ty == ty && next_tree == tree
     assert cold.diags == observed.diags && len(cold.diags) == 1 && cold.next_id == observed.next_id
-    assert observed.function_reads == Some([semantic_reads.JavaClassInfo("pkg.Box", metadata), semantic_reads.JavaMethods("pkg.Box", [])])
+    let name_reads: List[semantic_reads.FunctionRead] = if static_call { [semantic_reads.JavaClassName("Foreign", Some("pkg.Box"))] } else { [] }
+    assert observed.function_reads == Some(name_reads ++ [semantic_reads.JavaClassInfo("pkg.Box", metadata), semantic_reads.JavaMethods("pkg.Box", [])])
   }
   for list_argument in [false, true] {
     let ats: List[Option[Ty]] = if list_argument { [Some(TyList(TyTuple([TyInt, TyInt])))] } else { [None] }
@@ -3506,6 +3509,152 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     assert cold.diags == observed.diags && len(cold.diags) == 1
     assert str.contains(cold.diags[0].msg, "ReadableSimple")
     assert cold.next_id == observed.next_id && observed.function_reads == expected
+  }
+}
+
+test "java import reads preserve gate misses and sequential namespace writes" {
+  let info = JClass { fqcn: "pkg.Actual", simple: "DifferentSimple", display: "ReadableBox",
+    is_interface: true, is_primitive: false, is_array: false }
+  for index in 0..5 {
+    let text = "use java \"pkg.Box\"\n" ++ if index == 4 { "use java \"pkg.Box\"\n" } else { "" }
+    let (syntax, pd) = parser.parse_module(text)
+    assert pd == []
+    let answer: Option[JClass] = if index == 1 { None } else { Some(info) }
+    let oracle = if index == 0 { jsig_refused() } else { Jsig { ..jsig_refused(), on: true,
+      find_class: name => { if name != "pkg.Box" { panic("wrong import query") }
+        answer } } }
+    let initial = Cx { ..test_cx(), jsig: oracle,
+      java_classes: if index == 3 { map.from([("Box", "pkg.Existing")]) } else { map.empty() } }
+    let cold = pass_java_uses(initial, syntax)
+    let observed = pass_java_uses(Cx { ..initial, function_reads: Some([]) }, syntax)
+    assert cold.diags == observed.diags && len(cold.diags) == if index == 2 { 0 } else { 1 }
+    let classes = if index == 2 || index == 4 { map.from([("Box", "pkg.Actual")]) } else { initial.java_classes }
+    assert cold.java_classes == classes && observed.java_classes == classes
+    assert cold.next_id == initial.next_id && observed.next_id == initial.next_id
+    var expected = [semantic_reads.JavaEnabled(index != 0)]
+    if index != 0 { expected = expected ++ [semantic_reads.JavaFindClass("pkg.Box", answer)] }
+    if index >= 2 { expected = expected ++ [semantic_reads.JavaClassName("Box", map.get(initial.java_classes, "Box"))] }
+    if index == 4 { expected = expected ++ [semantic_reads.JavaEnabled(true), semantic_reads.JavaFindClass("pkg.Box", answer),
+      semantic_reads.JavaClassName("Box", Some("pkg.Actual"))] }
+    assert observed.function_reads == Some(expected)
+  }
+}
+
+test "java namespace reads retain static target guards and diagnostic context" {
+  let (syntax, pd) = parser.parse_module("const URL: Int = 1\n")
+  assert pd == []
+  let (constant_cx, _) = check_module(test_cx(), syntax, map.empty())
+  assert constant_cx.diags == []
+  for index in 0..6 {
+    let name = if index == 1 { "Missing" } else { "URL" }
+    let receiver = if index == 5 { EVar(name, 0, 7) } else { ECtor(name, [], None, index == 2, 0, 7, 0, 7) }
+    let base = test_cx()
+    let initial = Cx { ..base, java_classes: map.from([("URL", "pkg.Box")]),
+      ctors_by_name: if index == 3 { map.from([("URL", (1, 0))]) } else { base.ctors_by_name },
+      consts: if index == 4 { constant_cx.consts } else { base.consts } }
+    let enabled = Cx { ..initial, function_reads: Some([]) }
+    let (cold, answer) = static_field_target(initial, receiver)
+    let (observed, next_answer) = static_field_target(enabled, receiver)
+    let expected: Option[String] = if index == 0 { Some("pkg.Box") } else { None }
+    let reads: List[semantic_reads.FunctionRead] = if index <= 1 { [semantic_reads.JavaClassName(name, expected)] } else { [] }
+    assert answer == expected && next_answer == answer && observed.function_reads == Some(reads)
+    assert cold.diags == observed.diags && cold.next_id == observed.next_id
+    let target = EFieldAcc(receiver, "VALUE", 8, 13, 0, 13)
+    let (cold_message_cx, message) = named_arg_msg(initial, target)
+    let (message_cx, next_message) = named_arg_msg(enabled, target)
+    assert message == next_message && str.contains(message, "Java member") == (index == 0)
+    assert message_cx.function_reads == Some(reads)
+    assert cold_message_cx.diags == message_cx.diags && cold_message_cx.next_id == message_cx.next_id
+    let args = [Arg { name: Some("value"), e: EInt(1, 20, 21), trailing: false, lo: 14, hi: 21 }]
+    let (cold_rejected, cold_ty, cold_tree) = reject_named_args(initial, target, args, 0, 22).expect("cold refusal")
+    let (rejected, ty, tree) = reject_named_args(enabled, target, args, 0, 22).expect("observed refusal")
+    assert rejected.function_reads == Some(reads)
+    assert rejected.diags == cold_rejected.diags && ty == cold_ty && tree == cold_tree
+  }
+}
+
+test "java namespace reads retain value resolution and earlier shadow guards" {
+  let (syntax, pd) = parser.parse_module("const URL: Int = 1\n")
+  assert pd == []
+  let (constant_cx, _) = check_module(test_cx(), syntax, map.empty())
+  for index in 0..5 {
+    let name = if index == 1 { "Missing" } else { "URL" }
+    let base = test_cx()
+    var initial = Cx { ..base, java_classes: map.from([("URL", "pkg.Box")]),
+      ctors_by_name: if index == 2 { map.from([("URL", (1, 0))]) } else { base.ctors_by_name },
+      consts: if index == 3 { constant_cx.consts } else { base.consts } }
+    if index == 4 {
+      let (scope, _) = declare(push_scope(initial), name, TyInt, false, 0, 3)
+      initial = scope
+    }
+    let (cold, answer) = resolves_to_value_read(initial, name)
+    let (observed, next_answer) = resolves_to_value_read(Cx { ..initial, function_reads: Some([]) }, name)
+    let function_reads = semantic_reads.record(Some([]), name, lookup_fn_sig(initial, name))
+    let expected: Option[List[semantic_reads.FunctionRead]] = if index == 4 { Some([]) } else if index >= 2 { function_reads } else {
+      semantic_reads.observe(function_reads, semantic_reads.JavaClassName(name, map.get(initial.java_classes, name)))
+    }
+    assert answer == (index != 1) && next_answer == answer
+    assert observed.function_reads == expected
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
+}
+
+test "java namespace reads retain the field expression consumer context" {
+  let initial = Cx { ..test_cx(), java_classes: map.from([("URL", "pkg.Box")]),
+    jsig: Jsig { ..jsig_refused(), on: true, static_fields_of: fq => [] } }
+  let target = EFieldAcc(ECtor("URL", [], None, false, 0, 3, 0, 3), "MISSING", 4, 11, 0, 11)
+  let (cold, ty, tree) = check_expr(initial, target, no_expected())
+  let (observed, next_ty, next_tree) = check_expr(Cx { ..initial, function_reads: Some([]) }, target, no_expected())
+  assert cold.diags == observed.diags && len(cold.diags) == 1
+  assert ty == TyError && next_ty == ty && next_tree == tree
+  assert observed.function_reads == Some([semantic_reads.ModuleAlias("URL", None), semantic_reads.ModuleAlias("URL", None),
+    semantic_reads.QualifiedConstant("URL", "MISSING", None), semantic_reads.QualifiedConstructor("URL", "MISSING", None),
+    semantic_reads.JavaClassName("URL", Some("pkg.Box")), semantic_reads.JavaStaticFields("pkg.Box", [])])
+}
+
+test "java namespace reads preserve declaration collision short circuits" {
+  for index in 0..5 {
+    let kind = if index >= 3 { index - 2 } else { index }
+    let text = if kind == 0 { "type Widget = { value: Int }\n" }
+    else if kind == 1 { "effect Widget { fn get() -> Int }\n" }
+    else { "trait Widget[T] { fn get(x: T) -> Int }\n" }
+    let (syntax, pd) = parser.parse_module(text)
+    assert pd == []
+    let base = test_cx()
+    let initial = Cx { ..base, java_classes: map.from([("Widget", "pkg.Widget")]),
+      adts_by_name: if index >= 3 { map.insert(base.adts_by_name, "Widget", 9000) } else { base.adts_by_name } }
+    let enabled = Cx { ..initial, function_reads: Some([]) }
+    let cold = if kind == 0 { let (cx, _) = pass_type_shells(initial, syntax)
+      cx } else if kind == 1 { pass_effects(initial, syntax) } else { pass_register_traits(initial, syntax) }
+    let observed = if kind == 0 { let (cx, _) = pass_type_shells(enabled, syntax)
+      cx } else if kind == 1 { pass_effects(enabled, syntax) } else { pass_register_traits(enabled, syntax) }
+    let expected: List[semantic_reads.FunctionRead] = if index >= 3 { [] }
+    else { [semantic_reads.JavaClassName("Widget", Some("pkg.Widget"))] }
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold.next_id == initial.next_id && observed.next_id == initial.next_id
+    assert observed.function_reads == Some(expected)
+  }
+}
+
+test "java namespace reads enumerate names only for pending inferred functions" {
+  for inferred in [false, true] {
+    let (syntax, pd) = parser.parse_module(if inferred { "fn go() = 1\n" } else { "fn go() -> Int = 1\n" })
+    assert pd == []
+    let initial = Cx { ..test_cx(), java_classes: map.from([("Z", "pkg.Z"), ("A", "pkg.A")]) }
+    let (cold, _) = check_module(initial, syntax, map.empty())
+    let (observed, _) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == [] && observed.diags == [] && cold.next_id == observed.next_id
+    var count = 0
+    for fact in observed.function_reads.expect("observed module") {
+      match fact {
+        semantic_reads.JavaClassNames(names) -> {
+          assert names == map.keys(initial.java_classes)
+          count = count + 1
+        }
+        _ -> ()
+      }
+    }
+    assert count == if inferred { 1 } else { 0 }
   }
 }
 
@@ -5788,8 +5937,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
               check_ctor_call(field_cx, fname, no_args, None, CBare, expected, Some(k),
                 flo, fhi, lo, hi)
             }
-            None ->
-              match static_field_target(field_cx, target) {
+            None -> {
+              let (name_cx, java_target) = static_field_target(field_cx, target)
+              field_cx = name_cx
+              match java_target {
                 # Class.FIELD reads a public static field (spec §9.1) — the receiver
                 # is a java class name (a nullary ctor spelling), not an evaluable
                 # expression
@@ -5826,6 +5977,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
                   check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
                 }
               }
+            }
           }
         }
       }
@@ -7211,20 +7363,24 @@ fn java_named_arg_msg(name: String) -> String =
 ## callee resolves in check_call, where a signature's parameter names are; what
 ## reaches here is a function *value* or a Java member, and each says what it
 ## is, because that is the thing the author got wrong.
-fn named_arg_msg(cx: Cx, target: Expr) -> String = {
+fn named_arg_msg(initial: Cx, target: Expr) -> (Cx, String) = {
+  var cx = initial
   match target {
     EFieldAcc(recv, fname, _, _, _, _) ->
       match recv {
-        ECtor(cn, _, _, _, _, _, _, _) ->
-          match static_field_target(cx, recv) {
-            Some(_) -> return java_named_arg_msg(cn ++ "." ++ fname)
+        ECtor(cn, _, _, _, _, _, _, _) -> {
+          let (name_cx, java_target) = static_field_target(cx, recv)
+          cx = name_cx
+          match java_target {
+            Some(_) -> return (cx, java_named_arg_msg(cn ++ "." ++ fname))
             None -> ()
           }
+        }
         _ -> ()
       }
     _ -> ()
   }
-  "this callee is a function value, and a function type carries no parameter names"
+  (cx, "this callee is a function value, and a function type carries no parameter names")
 }
 
 ## Stop a call whose named arguments its callee cannot take: the caller has
@@ -7255,7 +7411,8 @@ fn reject_named_args(
   match first_named(args) {
     None -> None
     Some(a) -> {
-      let cxe = cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
+      let (message_cx, message) = named_arg_msg(cx, target)
+      let cxe = cerr_h(message_cx, message, a.lo, a.hi, named_arg_hint())
       Some(named_args_stop(cxe, args, lo, hi))
     }
   }
@@ -10278,16 +10435,16 @@ fn check_java_call(
 ## Is `target` a bare java class name (a nullary ctor spelling that resolves to a
 ## `use java` class and shadows nothing)? Returns its fqcn — the receiver of a
 ## `Class.FIELD` static field read. Mirrors the static-call guard in check_method_call.
-fn static_field_target(cx: Cx, target: Expr) -> Option[String] =
+fn static_field_target(cx: Cx, target: Expr) -> (Cx, Option[String]) =
   match target {
     ECtor(cn, cargs, sp, hp, _, _, _, _) ->
       if not hp && len(cargs) == 0 && sp == None &&
       not map.has(cx.ctors_by_name, cn) && not map.has(cx.consts, cn) {
-        map.get(cx.java_classes, cn)
+        java_class_name_read(cx, cn)
       } else {
-        None
+        (cx, None)
       }
-    _ -> None
+    _ -> (cx, None)
   }
 
 ## Class.FIELD — a read-only public static field (spec §9.1). The value maps by
@@ -10487,7 +10644,9 @@ fn check_method_call(
     ECtor(cn, cargs2, sp2, hp2, _, _, _, _) ->
       if not hp2 && len(cargs2) == 0 && sp2 == None &&
       not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
-        match map.get(cx1.java_classes, cn) {
+        let (name_cx, java_target) = java_class_name_read(cx1, cn)
+        cx1 = name_cx
+        match java_target {
           Some(fq) -> {
             match first_named(args0) {
               Some(a) -> {
@@ -12298,7 +12457,9 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
     # three tables are final: pass_java_uses, the type passes and
     # pass_const_decls have all run.
     var java_recv: Set[String] = set.empty()
-    for cn in map.keys(cx1.java_classes) {
+    let (names_cx, java_names) = java_class_names_read(cx1)
+    cx1 = names_cx
+    for cn in java_names {
       if not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
         java_recv = set.insert(java_recv, cn)
       }

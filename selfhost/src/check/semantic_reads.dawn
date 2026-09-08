@@ -40,6 +40,9 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | JavaMethods(fqcn: String, answer: List[JMethod])
   | JavaConstructors(fqcn: String, answer: List[JCtor])
   | JavaStaticFields(fqcn: String, answer: List[JField])
+  | JavaEnabled(enabled: Bool)
+  | JavaFindClass(name: String, answer: Option[JClass])
+  | JavaClassNames(names: List[String])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -237,6 +240,9 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
           JavaMethods(fqcn, answer) -> JavaMethods(fqcn, answer)
           JavaConstructors(fqcn, answer) -> JavaConstructors(fqcn, answer)
           JavaStaticFields(fqcn, answer) -> JavaStaticFields(fqcn, answer)
+          JavaEnabled(enabled) -> JavaEnabled(enabled)
+          JavaFindClass(name, answer) -> JavaFindClass(name, answer)
+          JavaClassNames(names) -> JavaClassNames(names)
         }
         out = out ++ [moved]
       }
@@ -316,7 +322,9 @@ test "semantic reads preserve plain Java metadata without compiler ID mapping" {
   let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
     is_interface: true, is_primitive: false, is_array: true }
   let reads = Some([JavaClassName("Foreign", Some("pkg.Box")), JavaClassName("Missing", None),
-    JavaClassInfo("lookup.Box", info)])
+    JavaClassInfo("lookup.Box", info), JavaEnabled(true), JavaEnabled(false),
+    JavaFindClass("lookup.Found", Some(info)), JavaFindClass("lookup.Missing", None),
+    JavaClassNames(["Z", "A"]), JavaClassNames([])])
   assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
   let prefix = Some([JavaClassName("Earlier", None)])
   assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
