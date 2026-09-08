@@ -137,6 +137,12 @@ public final class BodyProbe {
             if (!SemanticSnapshot.same(mt.getField("projected").get(metadata), mt.getField("cold").get(metadata)))
                 throw new AssertionError("header metadata: projected exports differ from cold headers");
             System.out.println("header-metadata\t1\tcomplete exported metadata agrees after ID and source movement");
+            if (!SemanticSnapshot.same(mt.getField("assembled").get(metadata), mt.getField("header_state").get(metadata)))
+                throw new AssertionError("header state: assembled context differs from cold headers");
+            System.out.println("header-state\t1\tcomplete same-revision header context agrees after assembly");
+            if (!SemanticSnapshot.same(mt.getField("moved_state").get(metadata), mt.getField("next_state").get(metadata)))
+                throw new AssertionError("header state: projected context differs from cold headers");
+            System.out.println("header-state-projection\t1\tcomplete header context agrees after ID and source movement");
         }
     }
 

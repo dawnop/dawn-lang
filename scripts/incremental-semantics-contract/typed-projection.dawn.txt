@@ -17,6 +17,7 @@ use compiler/check/relocate_header.{HeaderView}
 use compiler/check/relocate_tree.{View}
 use compiler/check/source_projection
 use compiler/check/body_product
+use compiler/check/header_product
 use compiler/check/allocation
 use compiler/check/allocation.{NominalId, LocalSymbol, TypeParameter, EffectParameter}
 use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ParameterDefault, EffectDecl, module_key}
@@ -86,7 +87,8 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
 
 pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
 
-pub type MetadataTrial = { projected: ModExports, cold: ModExports }
+pub type MetadataTrial = { projected: ModExports, cold: ModExports, assembled: Cx, header_state: Cx,
+  moved_state: Cx, next_state: Cx }
 
 pub fn metadata_sample() -> MetadataTrial !io = {
   let text = "pub type Box[T] = { value: T }\n" ++
@@ -129,7 +131,16 @@ pub fn metadata_sample() -> MetadataTrial !io = {
     panic("metadata coverage")
   }
   let projected = relocate_header.exports(view, old_exports).expect("metadata projection")
-  MetadataTrial { projected: projected, cold: cold }
+  let product = header_product.capture(initial, old.cx).expect("metadata header capture")
+  let assembled = header_product.assemble(initial, product).expect("metadata header assembly")
+  let state_view = HeaderView { ..view,
+    position: (owner, path, lo) => if owner == None && path == None { Some(lo) } else { view.position(owner, path, lo) },
+    end_position: (owner, path, hi) => if owner == None && path == None { Some(hi) } else { view.end_position(owner, path, hi) } }
+  let moved_product = relocate_header.state(state_view, product, initial.owner_class, initial.src_path,
+    initial.next_id + 31).expect("metadata state projection")
+  let moved_state = header_product.assemble(Cx { ..initial, next_id: initial.next_id + 31 }, moved_product).expect("metadata moved assembly")
+  MetadataTrial { projected: projected, cold: cold, assembled: assembled, header_state: old.cx,
+    moved_state: moved_state, next_state: next.cx }
 }
 
 pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }

@@ -25,9 +25,10 @@ def main():
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
                       "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
                       "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag", "constant-type", "constant-span",
-                      "header-alias", "header-impl", "header-adt", "header-effect"]
+                      "header-alias", "header-impl", "header-adt", "header-effect",
+                      "header-state-key", "header-state-bounds", "header-state-surface"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-six compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-nine compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -80,6 +81,9 @@ def main():
                     "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "header-state-key": ("impls = map.insert(impls, next_key, moved)", "impls = map.insert(impls, key, moved)"),
+            "header-state-bounds": ("current_tparam_bounds: projected_map(p.current_tparam_bounds, id => relocate.type_var(v.ids, id),\n      bounds => projected_list(bounds, tr => relocate.trait_id(v.ids, tr)))?", "current_tparam_bounds: p.current_tparam_bounds"),
+            "header-state-surface": ("observable_impls: projected_list(p.observable_impls, i => implementation(v, i))?", "observable_impls: p.observable_impls"),
             "header-alias": ("aliases: projected_map(e.aliases, names, a => alias_info(v, a))?", "aliases: e.aliases"),
             "header-impl": ("impls: projected_list(e.impls, info => implementation(v, info))?", "impls: e.impls"),
             "header-adt": ("adt_infos: projected_map(e.adt_infos, id => relocate.nominal(v.ids, id), info => adt(v, info))?", "adt_infos: e.adt_infos"),
@@ -248,6 +252,9 @@ def main():
                                 "header-impl": "header metadata: projected exports differ from cold headers",
                                 "header-adt": "header metadata: projected exports differ from cold headers",
                                 "header-effect": "header metadata: projected exports differ from cold headers",
+                                "header-state-key": "header state: projected context differs from cold headers",
+                                "header-state-bounds": "header state: projected context differs from cold headers",
+                                "header-state-surface": "header state: projected context differs from cold headers",
                                 "default-write": "default state: replayed Cx differs from cold body boundary",
                                 "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)
