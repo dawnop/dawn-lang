@@ -76,7 +76,7 @@ use check/types.{
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use check/exhaustive.{
   LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SOr, SCtor, SLit, STuple, SList,
-  useful_result, missing_list_patterns_result
+  ReadState, useful_result_read, missing_list_patterns_result_read
 }
 use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
@@ -88,6 +88,8 @@ use check/cx.{
   local_constructor_read, local_constant_read, constant_visible_read,
   constructor_count_read, constructor_arity_read, constructor_nominal_shape_read,
   constructor_header_read, constructor_fields_read,
+  declared_effect_info_read,
+  local_effect_name_read, effect_candidates_read,
   local_nominal_name_read, constructor_names_read, declared_constant_name_read, local_value_candidates_read,
   TySpan
 }
@@ -2601,9 +2603,40 @@ fn has_index_impl(cx: Cx, t: Ty) -> Bool =
     None -> false
   }
 
+test "record field reads preserve generic substitution and refusal shortcuts" {
+  let (syntax, pd) = parser.parse_module("type Box[T] = { value: T }\ntype Choice = First | Last\n")
+  assert pd == []
+  let (base, _) = check_module(test_cx(), syntax, map.empty())
+  assert base.diags == []
+  for index in 0..5 {
+    let name = if index == 2 { "Choice" } else { "Box" }
+    let aid = map.get(base.adts_by_name, name).expect("type")
+    let args: List[Ty] = if index == 2 { [] } else { [TyInt] }
+    let ty = if index == 3 { TyInt } else if index == 4 { TyError } else { TyAdt(aid, args) }
+    let field = if index == 1 { "missing" } else { "value" }
+    let target = XError(0, 1)
+    let (cold, result, tree) = check_field_access_typed(base, ty, target, field, 2, 9, 0, 9)
+    let (observed, next_result, next_tree) = check_field_access_typed(Cx { ..base, function_reads: Some([]) },
+      ty, target, field, 2, 9, 0, 9)
+    var reads: List[semantic_reads.FunctionRead] = []
+    if index < 3 {
+      let info = adt_of(base.adts, aid)
+      let header = semantic_reads.ConstructorHeaderAnswer(aid, ConstructorHeader { id: info.id,
+        name: info.name, is_record: info.is_record, tparams: info.tparams })
+      reads = [header, header, header]
+      if index != 2 { reads = reads ++ [semantic_reads.ConstructorFields(aid, 0, info.ctors[0])] }
+    }
+    assert observed.function_reads == Some(reads)
+    assert result == (if index == 0 { TyInt } else { TyError })
+    assert next_result == result && next_tree == tree && cold.diags == observed.diags
+    assert len(cold.diags) == (if index == 0 || index == 4 { 0 } else { 1 })
+    assert cold.next_id == observed.next_id
+  }
+}
+
 ## Record field access p.x — resolve against the record's single constructor.
 pub fn check_field_access_typed(
-  cx: Cx,
+  initial: Cx,
   tt: Ty,
   target: TExpr,
   fname: String,
@@ -2612,18 +2645,28 @@ pub fn check_field_access_typed(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
+  var cx = initial
   if is_errorish(tt) { return (cx, TyError, XError(lo, hi)) }
   let bad_hint: Option[String] = match tt {
-    TyAdt(aid, _) ->
-      if adt_of(cx.adts, aid).is_record {
+    TyAdt(aid, _) -> {
+      let (header_cx, header) = constructor_header_read(cx, aid)
+      cx = header_cx
+      if header.is_record {
         None
       } else {
-        Some("`" ++ adt_of(cx.adts, aid).name ++ "` is a sum type; destructure it with match")
+        let (name_cx, named) = constructor_header_read(cx, aid)
+        cx = name_cx
+        Some("`" ++ named.name ++ "` is a sum type; destructure it with match")
       }
+    }
     _ -> None
   }
   let is_record = match tt {
-    TyAdt(aid, _) -> adt_of(cx.adts, aid).is_record
+    TyAdt(aid, _) -> {
+      let (header_cx, header) = constructor_header_read(cx, aid)
+      cx = header_cx
+      header.is_record
+    }
     _ -> false
   }
   if not is_record {
@@ -2632,8 +2675,9 @@ pub fn check_field_access_typed(
   }
   match tt {
     TyAdt(aid, targs) -> {
-      let a = adt_of(cx.adts, aid)
-      let ci = a.ctors[0]
+      let (header_cx, a) = constructor_header_read(cx, aid)
+      let (fields_cx, ci) = constructor_fields_read(header_cx, aid, 0)
+      cx = fields_cx
       var idx = -1
       var fty = TyError
       var i = 0
@@ -3125,6 +3169,87 @@ fn check_or_pattern(cx: Cx, alts: List[Pattern], scrut: Ty, mutable: Bool) -> (C
     i = i + 1
   }
   (cx1, TPOr(typed))
+}
+
+fn useful_check_read(cx: Cx, rows: List[List[SPat]], query: List[SPat], types_: List[Ty]) -> (Cx, Option[Bool]) = {
+  let (next, answer) = useful_result_read(ReadState { adts: cx.adts, reads: cx.function_reads }, rows, query, types_)
+  (Cx { ..cx, function_reads: next.reads }, answer)
+}
+
+fn missing_list_check_read(cx: Cx, rows: List[List[SPat]], ty: Ty) -> (Cx, Option[List[String]]) = {
+  let (next, answer) = missing_list_patterns_result_read(ReadState { adts: cx.adts, reads: cx.function_reads }, rows, ty)
+  (Cx { ..cx, function_reads: next.reads }, answer)
+}
+
+test "exhaustive reads reach let for and match consumers" {
+  for source in [
+    "fn go(x: (Option[Int], Int)) -> Int = { let (a, b) = x\n b }",
+    "type Bag = { item: (Option[Int], Int) }\n" ++
+      "impl Iter[Bag] {\n type Cur = Int\n type Item = (Option[Int], Int)\n" ++
+      " fn iter_start(xs: Bag) -> Int = 0\n" ++
+      " fn iter_done(xs: Bag, c: Int) -> Bool = c >= 1\n" ++
+      " fn iter_next(xs: Bag, c: Int) -> Int = c + 1\n" ++
+      " fn iter_get(xs: Bag, c: Int) -> (Option[Int], Int) = xs.item\n}\n" ++
+      "fn go(xs: Bag) -> Unit = { for (a, b) in xs { () } }",
+    "fn go(x: Option[Int]) -> Int = match x { _ -> 0 }"
+  ] {
+    let (parsed, parse_diags) = parser.parse_module(source)
+    assert parse_diags == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, parsed, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, parsed, map.empty())
+    if len(cold.diags) > 0 { panic(source ++ ": " ++ cold.diags[0].msg) }
+    assert cold.diags == [] && observed.diags == cold.diags
+    assert observed_module == cold_module && observed.next_id == cold.next_id
+    var counts: List[Int] = []
+    for read in observed.function_reads.expect("exhaustiveness consumer reads") {
+      match read {
+        semantic_reads.ConstructorCount(adt, count) -> {
+          assert adt == OPTION_ID
+          counts = counts ++ [count]
+        }
+        _ -> ()
+      }
+    }
+    assert counts == [2]
+  }
+}
+
+test "exhaustive reads retain missing constructor and list diagnostics" {
+  for is_list in [false, true] {
+    let ty_name = if is_list { "List[Option[Int]]" } else { "Option[Int]" }
+    let (parsed, parse_diags) = parser.parse_module("fn go(x: " ++ ty_name ++ ") -> Int = match x { _ if false -> 0 }")
+    assert parse_diags == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, parsed, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, parsed, map.empty())
+    assert len(cold.diags) == 1 && observed.diags == cold.diags
+    assert observed_module == cold_module && observed.next_id == cold.next_id
+    let missing = if is_list { "[], [_, ..]" } else { "Some, None" }
+    assert cold.diags[0].msg == "non-exhaustive match, missing: " ++ missing
+    var queries: List[semantic_reads.FunctionRead] = []
+    var field_slots: List[Int] = []
+    for read in observed.function_reads.expect("missing-case reads") {
+      match read {
+        semantic_reads.ConstructorCount(_, _) -> { queries = queries ++ [read] }
+        semantic_reads.ConstructorArity(_, _, _) -> { queries = queries ++ [read] }
+        semantic_reads.ConstructorFields(adt, slot, _) -> {
+          assert adt == OPTION_ID
+          field_slots = field_slots ++ [slot]
+        }
+        _ -> ()
+      }
+    }
+    let count = semantic_reads.ConstructorCount(OPTION_ID, 2)
+    let some_arity = semantic_reads.ConstructorArity(OPTION_ID, 0, 1)
+    let none_arity = semantic_reads.ConstructorArity(OPTION_ID, 1, 0)
+    let expected = if is_list { [count] } else {
+      [count, count, some_arity, count, some_arity, none_arity, count, none_arity]
+    }
+    assert queries == expected
+    let expected_slots: List[Int] = if is_list { [] } else { [0, 0, 0, 1, 1, 1] }
+    assert field_slots == expected_slots
+  }
 }
 
 fn usefulness_too_complex(cx: Cx, lo: Int, hi: Int) -> Cx =
@@ -6877,6 +7002,41 @@ fn cell_occurrences_stmt(s: Stmt, name: String) -> Int =
     }
   }
 
+test "handler reads preserve declared metadata and selected evidence fields" {
+  let (syntax, pd) = parser.parse_module("effect Ask { fn get() -> Int }\n")
+  assert pd == []
+  let (base, _) = check_module(test_cx(), syntax, map.empty())
+  assert base.diags == []
+  let eid = map.get(base.effects, "Ask").expect("effect")
+  let info = effect_of(base, eid)
+  let rec = adt_of(base.adts, eid).ctors[0]
+  let arm = HandlerArm { name: "get", params: [], binder: None, body: EInt(2, 10, 11),
+    lo: 4, hi: 11, nlo: 4, nhi: 7, blo: 0, bhi: 0 }
+  for answered in [false, true] {
+    let arms: List[HandlerArm] = if answered { [arm] } else { [] }
+    let (cold, ty, tree) = check_handle(base, "Ask", [], arms, EInt(1, 20, 21), 0, 3, 0, 21, None)
+    let (observed, next_ty, next_tree) = check_handle(Cx { ..base, function_reads: Some([]) },
+      "Ask", [], arms, EInt(1, 20, 21), 0, 3, 0, 21, None)
+    assert observed.function_reads == Some([semantic_reads.LocalEffectName("Ask", Some(eid)),
+      semantic_reads.DeclaredEffectInfo(eid, info), semantic_reads.ConstructorFields(eid, 0, rec)])
+    assert ty == next_ty && tree == next_tree && cold.diags == observed.diags
+    assert len(cold.diags) == (if answered { 0 } else { 1 })
+    assert cold.next_id == observed.next_id
+  }
+}
+
+test "handler reads preserve missing-effect recovery and candidate order" {
+  let base = Cx { ..test_cx(), effects: map.from([("Later", 8), ("Ask", 7)]) }
+  let rest = EInt(1, 20, 21)
+  let (cold, ty, tree) = check_handle(base, "Missing", [], [], rest, 0, 7, 0, 21, None)
+  let (observed, next_ty, next_tree) = check_handle(Cx { ..base, function_reads: Some([]) },
+    "Missing", [], [], rest, 0, 7, 0, 21, None)
+  assert cold.diags == observed.diags && len(cold.diags) == 1
+  assert ty == next_ty && tree == next_tree && cold.next_id == observed.next_id
+  assert observed.function_reads == Some([semantic_reads.LocalEffectName("Missing", None),
+    semantic_reads.EffectCandidates(map.keys(base.effects))])
+}
+
 ## `with handle E { op(..) => ... }` and the rest of its block
 ## (docs/effects-design.md §3.3 and §4.3).
 ##
@@ -6904,6 +7064,7 @@ fn cell_occurrences_stmt(s: Stmt, name: String) -> Int =
 ## environment the arms will run in (`passes.dawn`'s `env`). An arm is a
 ## closure, so it has exactly one evidence slot, and what goes in it is decided
 ## here rather than at the raise site.
+
 fn check_handle(
   cx: Cx,
   name: String,
@@ -6928,11 +7089,15 @@ fn check_handle(
   # no symbol.
   let (cxh, hid) = fresh(cx1)
   cx1 = cxh
-  let eid = match map.get(cx1.effects, name) {
+  let (name_cx, effect_id) = local_effect_name_read(cx1, name)
+  cx1 = name_cx
+  let eid = match effect_id {
     Some(id) -> id
     None -> {
+      let (pool_cx, names) = effect_candidates_read(cx1)
+      cx1 = pool_cx
       cx1 = cerr_o(cx1, "unknown effect `" ++ name ++ "`", nlo, nhi,
-        suggest.hint(name, map.keys(cx1.effects)))
+        suggest.hint(name, names))
       # the cells are still bound, and the remainder is still checked with the
       # licence: the handler is refused, but the block below it is the author's
       # code and a cascade of "undefined variable" on every cell read would
@@ -6948,8 +7113,10 @@ fn check_handle(
       return (pop_scope(cxr1), rret, XBlock(cstmts, Some(rcall), lo, hi, rret))
     }
   }
-  let info = effect_of(cx1, eid)
-  let rec = adt_of(cx1.adts, eid).ctors[0]
+  let (info_cx, info) = declared_effect_info_read(cx1, eid)
+  cx1 = info_cx
+  let (record_cx, rec) = constructor_fields_read(cx1, eid, 0)
+  cx1 = record_cx
   # one arm per declared operation: no fewer, no more, none unknown
   var chosen: List[Option[HandlerArm]] = []
   for _o in info.ops { chosen = chosen ++ [no_arm()] }
@@ -7774,7 +7941,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
       cx1 = cxb
       if not is_errorish(it) {
-        match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [it]) {
+        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [it])
+        cx1 = useful_cx
+        match useful_answer {
           Some(true) -> {
             let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
             cx1 = let_read_cx
@@ -7948,7 +8117,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
       cx1 = cxc
       if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
-        match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [loop_t]) {
+        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [loop_t])
+        cx1 = useful_cx
+        match useful_answer {
           Some(true) -> {
             let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
             cx1 = for_read_cx
@@ -11404,18 +11575,29 @@ fn check_match(
       ai = ai + 1
     }
     let tys = [st]
-    match useful_result(cx1.adts, rows, [SWild], tys) {
+    let (useful_cx, useful_answer) = useful_check_read(cx1, rows, [SWild], tys)
+    cx1 = useful_cx
+    match useful_answer {
       Some(true) -> {
         var too_complex = false
         let missing = match st {
           TyAdt(aid, _) -> {
-            let ad = adt_of(cx1.adts, aid)
+            let (count_cx, count) = constructor_count_read(cx1, aid)
+            cx1 = count_cx
             var names: List[String] = []
             var ci2 = 0
-            for c in ad.ctors {
-              match useful_result(
-                cx1.adts, rows, [SCtor(aid, ci2, wilds_of(len(c.fields)))], tys) {
-                Some(true) -> { names = names ++ [c.name] }
+            while ci2 < count {
+              let (arity_cx, arity) = constructor_arity_read(cx1, aid, ci2)
+              cx1 = arity_cx
+              let (case_cx, case_answer) = useful_check_read(
+                cx1, rows, [SCtor(aid, ci2, wilds_of(arity))], tys)
+              cx1 = case_cx
+              match case_answer {
+                Some(true) -> {
+                  let (name_cx, ctor) = constructor_fields_read(cx1, aid, ci2)
+                  cx1 = name_cx
+                  names = names ++ [ctor.name]
+                }
                 Some(false) -> ()
                 None -> { too_complex = true }
               }
@@ -11425,26 +11607,33 @@ fn check_match(
           }
           TyBool -> {
             var names: List[String] = []
-            match useful_result(cx1.adts, rows, [SLit(LBool(true))], tys) {
+            let (true_cx, true_answer) = useful_check_read(cx1, rows, [SLit(LBool(true))], tys)
+            cx1 = true_cx
+            match true_answer {
               Some(true) -> { names = names ++ ["true"] }
               Some(false) -> ()
               None -> { too_complex = true }
             }
-            match useful_result(cx1.adts, rows, [SLit(LBool(false))], tys) {
+            let (false_cx, false_answer) = useful_check_read(cx1, rows, [SLit(LBool(false))], tys)
+            cx1 = false_cx
+            match false_answer {
               Some(true) -> { names = names ++ ["false"] }
               Some(false) -> ()
               None -> { too_complex = true }
             }
             join(names, ", ")
           }
-          TyList(_) ->
-            match missing_list_patterns_result(cx1.adts, rows, st) {
+          TyList(_) -> {
+            let (list_cx, list_answer) = missing_list_check_read(cx1, rows, st)
+            cx1 = list_cx
+            match list_answer {
               Some(patterns) -> join(patterns, ", ")
               None -> {
                 too_complex = true
                 ""
               }
             }
+          }
           _ -> "_ (" ++ ty_show(cx1.adts, st) ++ " has too many values to enumerate)"
         }
         if too_complex {

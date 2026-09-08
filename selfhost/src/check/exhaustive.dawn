@@ -6,6 +6,8 @@
 
 use std/list
 use std/map
+use check/semantic_reads
+use check/semantic_reads.{FunctionRead, ConstructorHeader}
 use check/types.{
   Ty, TyVar, TyAdt, TyTuple, TyList, TyBool, TyInt, TyString, TyError,
   Adts, AdtI, CtorI, adt_of, subst, Eff, prelude_adts, OPTION_ID, opt_ty
@@ -27,6 +29,20 @@ pub type SPat =
 
 const USEFUL_STEP_LIMIT: Int = 8192
 const USEFUL_ROW_LIMIT: Int = 4096
+
+## Keep recursive query state immutable without coupling this pure algorithm
+## to the checker's scopes, diagnostics or allocation state.
+pub type ReadState = { adts: Adts, reads: Option[List[FunctionRead]] }
+
+fn constructor_read(state: ReadState, adt: Int, ci: Int) -> (ReadState, (ConstructorHeader, CtorI)) = {
+  let info = adt_of(state.adts, adt)
+  let header = ConstructorHeader { id: info.id, name: info.name,
+    is_record: info.is_record, tparams: info.tparams }
+  let ctor = info.ctors[ci]
+  let headers = semantic_reads.observe(state.reads, semantic_reads.ConstructorHeaderAnswer(adt, header))
+  let fields = semantic_reads.observe(headers, semantic_reads.ConstructorFields(adt, ci, ctor))
+  (ReadState { ..state, reads: fields }, (header, ctor))
+}
 
 fn slist_arity(pre: List[SPat], post: List[SPat]) -> Int = len(pre) + len(post)
 
@@ -75,10 +91,15 @@ fn expand_head_ors(matrix: List[List[SPat]]) -> Option[List[List[SPat]]] = {
 
 ## Constructor field types with the column's type arguments substituted in.
 fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
-  let a = adt_of(adts, adt)
-  let c = a.ctors[ci]
+  let (_, fields) = inst_fields_read(ReadState { adts: adts, reads: None }, adt, ci, column)
+  fields
+}
+
+fn inst_fields_read(state: ReadState, adt: Int, ci: Int, column: Ty) -> (ReadState, List[Ty]) = {
+  let (next, metadata) = constructor_read(state, adt, ci)
+  let (a, c) = metadata
   let field_tys = map(c.fields, f => f.ty)
-  match column {
+  let answer = match column {
     TyAdt(_, targs) ->
       if len(a.tparams) == 0 {
         field_tys
@@ -102,6 +123,23 @@ fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
       }
     _ -> field_tys
   }
+  (next, answer)
+}
+
+test "exhaustive reads retain generic fields and repeated query order" {
+  let adts = prelude_adts()
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  let info = adt_of(adts, OPTION_ID)
+  let header = semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams })
+  let fields = semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0])
+  let (next, answer) = inst_fields_read(initial, OPTION_ID, 0, opt_ty(TyInt))
+  assert answer == [TyInt] && answer == inst_fields(adts, OPTION_ID, 0, opt_ty(TyInt))
+  assert next.reads == Some([header, fields])
+  let (again, repeated) = inst_fields_read(next, OPTION_ID, 0, opt_ty(TyBool))
+  assert repeated == [TyBool] && again.reads == Some([header, fields, header, fields])
+  let (cold, _) = inst_fields_read(ReadState { adts: adts, reads: None }, OPTION_ID, 0, opt_ty(TyInt))
+  assert cold.reads == None
 }
 
 fn err_tys(n: Int) -> List[Ty] = {
@@ -127,9 +165,15 @@ fn all_wild(patterns: List[SPat]) -> Bool = {
 }
 
 fn complete_ctor_alts(adts: Adts, patterns: List[SPat], adt: Int) -> Bool = {
-  let info = adt_of(adts, adt)
+  let (_, answer) = complete_ctor_alts_read(ReadState { adts: adts, reads: None }, patterns, adt)
+  answer
+}
+
+fn complete_ctor_alts_read(state: ReadState, patterns: List[SPat], adt: Int) -> (ReadState, Bool) = {
+  let count = len(adt_of(state.adts, adt).ctors)
+  let next = ReadState { ..state, reads: semantic_reads.observe(state.reads, semantic_reads.ConstructorCount(adt, count)) }
   var ci = 0
-  for _ctor in info.ctors {
+  while ci < count {
     var found = false
     for pattern in patterns {
       match pattern {
@@ -138,22 +182,41 @@ fn complete_ctor_alts(adts: Adts, patterns: List[SPat], adt: Int) -> Bool = {
         _ -> ()
       }
     }
-    if not found { return false }
+    if not found { return (next, false) }
     ci = ci + 1
   }
-  len(info.ctors) > 0
+  (next, count > 0)
 }
 
-fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
-  match pattern {
+test "exhaustive reads retain constructor counts before incomplete alternatives" {
+  let adts = prelude_adts()
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  for complete in [false, true] {
+    let first = SCtor(OPTION_ID, 0, [SWild])
+    let patterns = if complete { [first, SCtor(OPTION_ID, 1, [])] } else { [first] }
+    let (next, answer) = complete_ctor_alts_read(initial, patterns, OPTION_ID)
+    assert answer == complete && answer == complete_ctor_alts(adts, patterns, OPTION_ID)
+    assert next.reads == Some([semantic_reads.ConstructorCount(OPTION_ID, 2)])
+  }
+}
+
+fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat = {
+  let (_, answer) = simplify_pat_read(ReadState { adts: adts, reads: None }, pattern, column)
+  answer
+}
+
+fn simplify_pat_read(state: ReadState, pattern: SPat, column: Ty) -> (ReadState, SPat) = {
+  var next = state
+  let answer = match pattern {
     SWild -> SWild
     SLit(_) -> pattern
     SOr(alts) -> {
       var flat: List[SPat] = []
       for alt in alts {
-        let simplified = simplify_pat(adts, alt, column)
+        let (observed, simplified) = simplify_pat_read(next, alt, column)
+        next = observed
         match simplified {
-          SWild -> return SWild
+          SWild -> return (next, SWild)
           SOr(inner) -> { flat = flat ++ inner }
           _ -> { flat = flat ++ [simplified] }
         }
@@ -168,16 +231,21 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
             _ -> ()
           }
         }
-        if has_true && has_false { return SWild }
+        if has_true && has_false { return (next, SWild) }
       }
       match column {
-        TyAdt(adt, _) -> if complete_ctor_alts(adts, flat, adt) { return SWild }
+        TyAdt(adt, _) -> {
+          let (observed, complete) = complete_ctor_alts_read(next, flat, adt)
+          next = observed
+          if complete { return (next, SWild) }
+        }
         _ -> ()
       }
       if len(flat) == 1 { flat[0] } else { SOr(flat) }
     }
     SCtor(adt, ci, subs) -> {
-      let field_tys = inst_fields(adts, adt, ci, column)
+      let (fields_state, field_tys) = inst_fields_read(next, adt, ci, column)
+      next = fields_state
       var simplified: List[SPat] = []
       var index = 0
       for sub in subs {
@@ -185,16 +253,25 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
           Some(found) -> found
           None -> TyError
         }
-        simplified = simplified ++ [simplify_pat(adts, sub, field_ty)]
+        let (observed, value) = simplify_pat_read(next, sub, field_ty)
+        next = observed
+        simplified = simplified ++ [value]
         index = index + 1
       }
       match column {
-        TyAdt(found_adt, _) ->
-          if found_adt == adt && len(adt_of(adts, adt).ctors) == 1 && all_wild(simplified) {
+        TyAdt(found_adt, _) -> {
+          var single = false
+          if found_adt == adt {
+            let count = len(adt_of(next.adts, adt).ctors)
+            next = ReadState { ..next, reads: semantic_reads.observe(next.reads, semantic_reads.ConstructorCount(adt, count)) }
+            single = count == 1
+          }
+          if single && all_wild(simplified) {
             SWild
           } else {
             SCtor(adt, ci, simplified)
           }
+        }
         _ -> SCtor(adt, ci, simplified)
       }
     }
@@ -210,7 +287,9 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
           Some(found) -> found
           None -> TyError
         }
-        simplified = simplified ++ [simplify_pat(adts, sub, elem_ty)]
+        let (observed, value) = simplify_pat_read(next, sub, elem_ty)
+        next = observed
+        simplified = simplified ++ [value]
         index = index + 1
       }
       match column {
@@ -223,8 +302,18 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
         TyList(found) -> found
         _ -> TyError
       }
-      let simplified_pre = map(pre, sub => simplify_pat(adts, sub, elem_ty))
-      let simplified_post = map(post, sub => simplify_pat(adts, sub, elem_ty))
+      var simplified_pre: List[SPat] = []
+      for sub in pre {
+        let (observed, value) = simplify_pat_read(next, sub, elem_ty)
+        next = observed
+        simplified_pre = simplified_pre ++ [value]
+      }
+      var simplified_post: List[SPat] = []
+      for sub in post {
+        let (observed, value) = simplify_pat_read(next, sub, elem_ty)
+        next = observed
+        simplified_post = simplified_post ++ [value]
+      }
       if has_rest && len(simplified_pre) == 0 && len(simplified_post) == 0 {
         SWild
       } else {
@@ -232,8 +321,35 @@ fn simplify_pat(adts: Adts, pattern: SPat, column: Ty) -> SPat =
       }
     }
   }
+  (next, answer)
+}
+
+test "exhaustive reads preserve recursive simplification and wildcard short circuits" {
+  let adts = prelude_adts()
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  let column = opt_ty(TyInt)
+  let ctor = SCtor(OPTION_ID, 0, [SWild])
+  let info = adt_of(adts, OPTION_ID)
+  let reads = [semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams }),
+    semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0]), semantic_reads.ConstructorCount(OPTION_ID, 2)]
+  let pattern = SOr([ctor, SWild, SCtor(999999, 0, [])])
+  let (next, answer) = simplify_pat_read(initial, pattern, column)
+  assert answer == SWild && next.reads == Some(reads)
+  assert answer == simplify_pat(adts, pattern, column)
+  let (matrix_state, rows) = simplify_matrix_read(initial, [[ctor], [ctor]], [column])
+  assert rows == [[ctor], [ctor]] && matrix_state.reads == Some(reads ++ reads)
+  let (list_state, list_pattern) = simplify_pat_read(initial, SList([ctor], true, [ctor]), TyList(column))
+  assert list_pattern == SList([ctor], true, [ctor]) && list_state.reads == Some(reads ++ reads)
+}
 
 fn simplify_row(adts: Adts, row: List[SPat], types_: List[Ty]) -> List[SPat] = {
+  let (_, answer) = simplify_row_read(ReadState { adts: adts, reads: None }, row, types_)
+  answer
+}
+
+fn simplify_row_read(state: ReadState, row: List[SPat], types_: List[Ty]) -> (ReadState, List[SPat]) = {
+  var next = state
   var out: List[SPat] = []
   var index = 0
   for pattern in row {
@@ -241,18 +357,33 @@ fn simplify_row(adts: Adts, row: List[SPat], types_: List[Ty]) -> List[SPat] = {
       Some(found) -> found
       None -> TyError
     }
-    out = out ++ [simplify_pat(adts, pattern, column)]
+    let (observed, value) = simplify_pat_read(next, pattern, column)
+    next = observed
+    out = out ++ [value]
     index = index + 1
   }
-  out
+  (next, out)
 }
 
 fn simplify_matrix(
   adts: Adts,
   matrix: List[List[SPat]],
   types_: List[Ty]
-) -> List[List[SPat]] =
-  map(matrix, row => simplify_row(adts, row, types_))
+) -> List[List[SPat]] = {
+  let (_, answer) = simplify_matrix_read(ReadState { adts: adts, reads: None }, matrix, types_)
+  answer
+}
+
+fn simplify_matrix_read(state: ReadState, matrix: List[List[SPat]], types_: List[Ty]) -> (ReadState, List[List[SPat]]) = {
+  var next = state
+  var out: List[List[SPat]] = []
+  for row in matrix {
+    let (observed, value) = simplify_row_read(next, row, types_)
+    next = observed
+    out = out ++ [value]
+  }
+  (next, out)
+}
 
 ## Would a value matching `q` slip through every row of `matrix`? `None`
 ## means the deterministic work budget was exhausted before the answer was
@@ -263,11 +394,33 @@ pub fn useful_result(
   q: List[SPat],
   types_: List[Ty]
 ) -> Option[Bool] = {
-  let normalized_matrix = simplify_matrix(adts, matrix, types_)
-  let normalized_q = simplify_row(adts, q, types_)
-  let (_, result) = useful_go(
-    adts, normalized_matrix, normalized_q, types_, USEFUL_STEP_LIMIT)
+  let (_, result) = useful_result_read(ReadState { adts: adts, reads: None }, matrix, q, types_)
   result
+}
+
+pub fn useful_result_read(state: ReadState, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> (ReadState, Option[Bool]) = {
+  let (matrix_state, normalized_matrix) = simplify_matrix_read(state, matrix, types_)
+  let (query_state, normalized_q) = simplify_row_read(matrix_state, q, types_)
+  let (next, remaining, result) = useful_go(query_state, normalized_matrix, normalized_q, types_, USEFUL_STEP_LIMIT)
+  (next, result)
+}
+
+test "exhaustive reads retain both normalization contexts at the public boundary" {
+  let adts = prelude_adts()
+  let info = adt_of(adts, OPTION_ID)
+  let header = semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams })
+  let fields = semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0])
+  let count = semantic_reads.ConstructorCount(OPTION_ID, 2)
+  let arity = semantic_reads.ConstructorArity(OPTION_ID, 0, 1)
+  let ctor = SCtor(OPTION_ID, 0, [SWild])
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  let (empty, empty_answer) = useful_result_read(initial, [], [ctor], [opt_ty(TyInt)])
+  assert empty_answer == Some(true)
+  assert empty.reads == Some([header, fields, count, arity, header, fields])
+  let (covered, covered_answer) = useful_result_read(initial, [[ctor]], [ctor], [opt_ty(TyInt)])
+  assert covered_answer == Some(false)
+  assert covered.reads == Some([header, fields, count, header, fields, count, arity, header, fields])
 }
 
 pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> Bool =
@@ -277,21 +430,22 @@ pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[
   }
 
 fn useful_go(
-  adts: Adts,
+  state: ReadState,
   matrix: List[List[SPat]],
   q: List[SPat],
   types_: List[Ty],
   fuel: Int
-) -> (Int, Option[Bool]) = {
-  if fuel <= 0 || len(matrix) > USEFUL_ROW_LIMIT { return (0, None) }
+) -> (ReadState, Int, Option[Bool]) = {
+  var observed = state
+  if fuel <= 0 || len(matrix) > USEFUL_ROW_LIMIT { return (observed, 0, None) }
   let expanded = match expand_head_ors(matrix) {
     Some(rows) -> rows
-    None -> return (0, None)
+    None -> return (observed, 0, None)
   }
   let cost = len(expanded) + 1
-  if fuel < cost { return (0, None) }
+  if fuel < cost { return (observed, 0, None) }
   let left0 = fuel - cost
-  if len(q) == 0 { return (left0, Some(len(expanded) == 0)) }
+  if len(q) == 0 { return (observed, left0, Some(len(expanded) == 0)) }
   let column = types_[0]
   let rest_q = list.drop(q, 1)
   let rest_t = list.drop(types_, 1)
@@ -299,26 +453,29 @@ fn useful_go(
     SOr(alts) -> {
       var left = left0
       for alt in alts {
-        let (next, result) = useful_go(adts, expanded, [alt] ++ rest_q, types_, left)
+        let (next_state, next, result) = useful_go(observed, expanded, [alt] ++ rest_q, types_, left)
+        observed = next_state
         left = next
         match result {
-          Some(true) -> return (left, Some(true))
+          Some(true) -> return (observed, left, Some(true))
           Some(false) -> ()
-          None -> return (left, None)
+          None -> return (observed, left, None)
         }
       }
-      (left, Some(false))
+      (observed, left, Some(false))
     }
-    SCtor(adt, ci, subs) ->
-      useful_go(adts, spec_ctor(adts, expanded, adt, ci), subs ++ rest_q,
-        inst_fields(adts, adt, ci, column) ++ rest_t, left0)
-    SLit(value) -> useful_go(adts, spec_lit(expanded, value), rest_q, rest_t, left0)
+    SCtor(adt, ci, subs) -> {
+      let (specialized_state, specialized) = spec_ctor_read(observed, expanded, adt, ci)
+      let (field_state, fields) = inst_fields_read(specialized_state, adt, ci, column)
+      useful_go(field_state, specialized, subs ++ rest_q, fields ++ rest_t, left0)
+    }
+    SLit(value) -> useful_go(observed, spec_lit(expanded, value), rest_q, rest_t, left0)
     STuple(subs) -> {
       let elem_tys = match column {
         TyTuple(elems) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
         _ -> err_tys(len(subs))
       }
-      useful_go(adts, spec_tuple(expanded, len(subs)), subs ++ rest_q,
+      useful_go(observed, spec_tuple(expanded, len(subs)), subs ++ rest_q,
         elem_tys ++ rest_t, left0)
     }
     SList(pre, has_rest, post) -> {
@@ -328,7 +485,7 @@ fn useful_go(
       }
       if not has_rest {
         let arity = len(pre)
-        useful_go(adts, spec_list(expanded, arity), pre ++ rest_q,
+        useful_go(observed, spec_list(expanded, arity), pre ++ rest_q,
           elem_tys_of(elem, arity) ++ rest_t, left0)
       } else {
         let arity = slist_arity(pre, post)
@@ -336,18 +493,19 @@ fn useful_go(
         var left = left0
         var length = arity
         while length <= bound {
-          let (next, result) = useful_go(adts, spec_list(expanded, length),
+          let (next_state, next, result) = useful_go(observed, spec_list(expanded, length),
             pre ++ wilds(length - arity) ++ post ++ rest_q,
             elem_tys_of(elem, length) ++ rest_t, left)
+          observed = next_state
           left = next
           match result {
-            Some(true) -> return (left, Some(true))
+            Some(true) -> return (observed, left, Some(true))
             Some(false) -> ()
-            None -> return (left, None)
+            None -> return (observed, left, None)
           }
           length = length + 1
         }
-        (left, Some(false))
+        (observed, left, Some(false))
       }
     }
     SWild -> {
@@ -357,53 +515,58 @@ fn useful_go(
           var left = left0
           var length = 0
           while length <= bound {
-            let (next, result) = useful_go(adts, spec_list(expanded, length),
+            let (next_state, next, result) = useful_go(observed, spec_list(expanded, length),
               wilds(length) ++ rest_q, elem_tys_of(elem, length) ++ rest_t, left)
+            observed = next_state
             left = next
             match result {
-              Some(true) -> return (left, Some(true))
+              Some(true) -> return (observed, left, Some(true))
               Some(false) -> ()
-              None -> return (left, None)
+              None -> return (observed, left, None)
             }
             length = length + 1
           }
-          return (left, Some(false))
+          return (observed, left, Some(false))
         }
         TyTuple(elems) ->
-          return useful_go(adts, spec_tuple(expanded, len(elems)),
+          return useful_go(observed, spec_tuple(expanded, len(elems)),
             wilds(len(elems)) ++ rest_q, elems ++ rest_t, left0)
         TyAdt(aid, _) -> {
-          let adt = adt_of(adts, aid)
+          let adt = adt_of(observed.adts, aid)
+          observed = ReadState { ..observed, reads: semantic_reads.observe(observed.reads, semantic_reads.ConstructorCount(aid, len(adt.ctors))) }
           if heads_complete(expanded, aid, len(adt.ctors)) {
             var left = left0
             var ci = 0
             for ctor in adt.ctors {
-              let (next, result) = useful_go(adts, spec_ctor(adts, expanded, aid, ci),
-                wilds(len(ctor.fields)) ++ rest_q,
-                inst_fields(adts, aid, ci, column) ++ rest_t, left)
+              let (specialized_state, specialized) = spec_ctor_read(observed, expanded, aid, ci)
+              let arity_state = ReadState { ..specialized_state, reads: semantic_reads.observe(specialized_state.reads, semantic_reads.ConstructorArity(aid, ci, len(ctor.fields))) }
+              let (field_state, fields) = inst_fields_read(arity_state, aid, ci, column)
+              let (next_state, next, result) = useful_go(field_state, specialized,
+                wilds(len(ctor.fields)) ++ rest_q, fields ++ rest_t, left)
+              observed = next_state
               left = next
               match result {
-                Some(true) -> return (left, Some(true))
+                Some(true) -> return (observed, left, Some(true))
                 Some(false) -> ()
-                None -> return (left, None)
+                None -> return (observed, left, None)
               }
               ci = ci + 1
             }
-            return (left, Some(false))
+            return (observed, left, Some(false))
           }
         }
         _ ->
           if column == TyBool && lit_has(expanded, LBool(true)) &&
           lit_has(expanded, LBool(false)) {
-            let (after_true, true_result) = useful_go(
-              adts, spec_lit(expanded, LBool(true)), rest_q, rest_t, left0)
+            let (true_state, after_true, true_result) = useful_go(
+              observed, spec_lit(expanded, LBool(true)), rest_q, rest_t, left0)
             match true_result {
-              Some(true) -> return (after_true, Some(true))
-              None -> return (after_true, None)
+              Some(true) -> return (true_state, after_true, Some(true))
+              None -> return (true_state, after_true, None)
               Some(false) -> ()
             }
             return useful_go(
-              adts, spec_lit(expanded, LBool(false)), rest_q, rest_t, after_true)
+              true_state, spec_lit(expanded, LBool(false)), rest_q, rest_t, after_true)
           }
       }
       var defaulted: List[List[SPat]] = []
@@ -413,9 +576,53 @@ fn useful_go(
           _ -> ()
         }
       }
-      useful_go(adts, defaulted, rest_q, rest_t, left0)
+      useful_go(observed, defaulted, rest_q, rest_t, left0)
     }
   }
+}
+
+test "exhaustive reads retain usefulness state across answers and exhausted fuel" {
+  let adts = prelude_adts()
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  let info = adt_of(adts, OPTION_ID)
+  let header = semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams })
+  let fields = semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0])
+  let arity = semantic_reads.ConstructorArity(OPTION_ID, 0, 1)
+  let ctor = SCtor(OPTION_ID, 0, [SWild])
+  let (hit, hit_left, hit_answer) = useful_go(initial, [], [ctor], [opt_ty(TyInt)], 100)
+  assert hit_answer == Some(true) && hit_left == 97
+  assert hit.reads == Some([arity, header, fields])
+  let (covered, covered_left, covered_answer) = useful_go(initial, [[ctor]], [ctor], [opt_ty(TyInt)], 100)
+  assert covered_answer == Some(false) && covered_left == 94
+  assert covered.reads == hit.reads
+  let (unknown, unknown_left, unknown_answer) = useful_go(initial, [], [ctor], [opt_ty(TyInt)], 1)
+  assert unknown_answer == None && unknown_left == 0
+  assert unknown.reads == hit.reads
+  let (stopped, stopped_left, stopped_answer) = useful_go(hit, [], [SCtor(999999, 0, [])], [TyError], 0)
+  assert stopped_answer == None && stopped_left == 0 && stopped.reads == hit.reads
+  let (short, short_left, short_answer) = useful_go(initial, [], [SOr([ctor, SCtor(999999, 0, [])])], [opt_ty(TyInt)], 100)
+  assert short_answer == Some(true) && short_left == 96 && short.reads == hit.reads
+  var oversized: List[List[SPat]] = []
+  for i in 0..(USEFUL_ROW_LIMIT + 1) { oversized = oversized ++ [[SWild]] }
+  let (row_stop, row_left, row_answer) = useful_go(hit, oversized, [SCtor(999999, 0, [])], [TyError], 100)
+  assert row_answer == None && row_left == 0 && row_stop.reads == hit.reads
+}
+
+test "exhaustive reads retain complete constructor traversal order" {
+  let adts = prelude_adts()
+  let initial = ReadState { adts: adts, reads: Some([]) }
+  let info = adt_of(adts, OPTION_ID)
+  let header = semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams })
+  let some_arity = semantic_reads.ConstructorArity(OPTION_ID, 0, 1)
+  let none_arity = semantic_reads.ConstructorArity(OPTION_ID, 1, 0)
+  let rows = [[SCtor(OPTION_ID, 0, [SWild])], [SCtor(OPTION_ID, 1, [])]]
+  let (next, remaining, answer) = useful_go(initial, rows, [SWild], [opt_ty(TyInt)], 100)
+  assert answer == Some(false) && remaining == 91
+  assert next.reads == Some([semantic_reads.ConstructorCount(OPTION_ID, 2),
+    some_arity, some_arity, header, semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0]),
+    none_arity, none_arity, header, semantic_reads.ConstructorFields(OPTION_ID, 1, info.ctors[1])])
 }
 
 fn heads_complete(matrix: List[List[SPat]], adt: Int, nctors: Int) -> Bool = {
@@ -448,7 +655,13 @@ fn lit_has(matrix: List[List[SPat]], v: LitV) -> Bool = {
 }
 
 fn spec_ctor(adts: Adts, matrix: List[List[SPat]], adt: Int, ci: Int) -> List[List[SPat]] = {
-  let nfields = len(ctor_at(adts, adt, ci).fields)
+  let (_, rows) = spec_ctor_read(ReadState { adts: adts, reads: None }, matrix, adt, ci)
+  rows
+}
+
+fn spec_ctor_read(state: ReadState, matrix: List[List[SPat]], adt: Int, ci: Int) -> (ReadState, List[List[SPat]]) = {
+  let nfields = len(ctor_at(state.adts, adt, ci).fields)
+  let next = ReadState { ..state, reads: semantic_reads.observe(state.reads, semantic_reads.ConstructorArity(adt, ci, nfields)) }
   var out: List[List[SPat]] = []
   for row in matrix {
     match row[0] {
@@ -458,7 +671,17 @@ fn spec_ctor(adts: Adts, matrix: List[List[SPat]], adt: Int, ci: Int) -> List[Li
       _ -> ()
     }
   }
-  out
+  (next, out)
+}
+
+test "exhaustive reads preserve constructor specialization and wildcard expansion" {
+  let adts = prelude_adts()
+  let matrix = [[SWild, SLit(LInt(1))], [SCtor(OPTION_ID, 0, [SLit(LInt(2))]), SWild],
+    [SCtor(OPTION_ID, 1, []), SWild]]
+  let (next, rows) = spec_ctor_read(ReadState { adts: adts, reads: Some([]) }, matrix, OPTION_ID, 0)
+  assert rows == [[SWild, SLit(LInt(1))], [SLit(LInt(2)), SWild]]
+  assert rows == spec_ctor(adts, matrix, OPTION_ID, 0)
+  assert next.reads == Some([semantic_reads.ConstructorArity(OPTION_ID, 0, 1)])
 }
 
 fn spec_lit(matrix: List[List[SPat]], v: LitV) -> List[List[SPat]] = {
@@ -533,12 +756,20 @@ pub fn missing_list_patterns_result(
   rows: List[List[SPat]],
   t: Ty
 ) -> Option[List[String]] = {
+  let (_, answer) = missing_list_patterns_result_read(ReadState { adts: adts, reads: None }, rows, t)
+  answer
+}
+
+pub fn missing_list_patterns_result_read(state: ReadState, rows: List[List[SPat]], t: Ty) -> (ReadState, Option[List[String]]) = {
+  var observed = state
   let bound = list_len_bound(rows, None)
   var missing: List[String] = []
   var l = 0
   while l <= bound {
     let q = SList(wilds(l), false, [])
-    match useful_result(adts, rows, [q], [t]) {
+    let (next, answer) = useful_result_read(observed, rows, [q], [t])
+    observed = next
+    match answer {
       Some(true) -> {
         var elems: List[String] = []
         for _i in 0..l { elems = elems ++ ["_"] }
@@ -546,11 +777,29 @@ pub fn missing_list_patterns_result(
         missing = missing ++ ["[" ++ join(elems, ", ") ++ "]"]
       }
       Some(false) -> ()
-      None -> return None
+      None -> return (observed, None)
     }
     l = l + 1
   }
-  Some(missing)
+  (observed, Some(missing))
+}
+
+test "exhaustive reads retain repeated missing-list probes" {
+  let adts = prelude_adts()
+  let info = adt_of(adts, OPTION_ID)
+  let header = semantic_reads.ConstructorHeaderAnswer(OPTION_ID, ConstructorHeader { id: info.id,
+    name: info.name, is_record: info.is_record, tparams: info.tparams })
+  let fields = semantic_reads.ConstructorFields(OPTION_ID, 0, info.ctors[0])
+  let count = semantic_reads.ConstructorCount(OPTION_ID, 2)
+  let normalized = [header, fields, count]
+  let rows = [[SList([SCtor(OPTION_ID, 0, [SWild])], false, [])]]
+  let t = TyList(opt_ty(TyInt))
+  let (next, answer) = missing_list_patterns_result_read(ReadState { adts: adts, reads: Some([]) }, rows, t)
+  assert answer == Some(["[]", "[_]", "[_, _, ..]"])
+  assert next.reads == Some(normalized ++ normalized ++ [count] ++ normalized ++ [count, count])
+  let (cold, cold_answer) = missing_list_patterns_result_read(ReadState { adts: adts, reads: None }, rows, t)
+  assert cold.reads == None && cold_answer == answer
+  assert missing_list_patterns_result(adts, rows, t) == answer
 }
 
 pub fn missing_list_patterns(adts: Adts, rows: List[List[SPat]], t: Ty) -> List[String] =

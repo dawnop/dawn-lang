@@ -151,8 +151,8 @@ public final class BodyProbe {
         Object trials = probe.getMethod("read_samples").invoke(null);
         var count = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_count")).findFirst().orElseThrow();
         var at = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_at")).findFirst().orElseThrow();
-        if ((Long) count.invoke(null, trials) != 95) throw new AssertionError("Unexpected function read trial count");
-        for (long i = 0; i < 95; i++) {
+        if ((Long) count.invoke(null, trials) != 101) throw new AssertionError("Unexpected function read trial count");
+        for (long i = 0; i < 101; i++) {
             Object trial = at.invoke(null, trials, i);
             Class<?> t = trial.getClass();
             if (!SemanticSnapshot.same(t.getField("replayed_cx").get(trial), t.getField("cold_cx").get(trial)))
@@ -160,7 +160,7 @@ public final class BodyProbe {
             if (!SemanticSnapshot.same(t.getField("replayed").get(trial), t.getField("cold").get(trial)))
                 throw new AssertionError("function reads: observed module differs from cold module (" + i + ")");
         }
-        System.out.println("function-reads\t95\tobservation preserves complete cold Cx and module products");
+        System.out.println("function-reads\t101\tobservation preserves complete cold Cx and module products");
     }
 
     private static void checkModuleAssembly(Class<?> probe) throws Exception {

@@ -588,6 +588,55 @@ suggestions concatenate both namespaces without deduplicating or sorting.
 These reads occur after argument recovery, matching the original diagnostic
 ordering, and later branches are skipped when an earlier diagnostic applies.
 
+### Ordinary record field observations (implementation in progress)
+
+Observe nominal headers at ordinary field-access classification and diagnostics,
+then selected constructor fields only when the receiver is a record. Preserve
+the existing error-type shortcut, repeated header reads, sum-type refusal,
+field ordering and generic substitution. This extends the method-field path;
+it does not yet cover recursive diagnostic rendering or exhaustiveness queries.
+Handler evidence-record fields use the same selected-constructor observer.
+The declared effect's identity is also its evidence record's nominal identity;
+the existing projection must retain that relationship. Handler operation
+metadata is captured with the full effect declaration (including ordered
+operations, control flag, owner and audience), projecting both query and answer
+identities. Handler name resolution retains optional effect identity and reads
+the ordered suggestion pool only on a miss, before the original recovery path.
+Recursive handler dependencies beyond these declaration reads remain.
+
+### Exhaustiveness observation seam (implementation in progress)
+
+The pure usefulness algorithm receives immutable read state containing its
+ADT view and optional log, not the full checker context. Generic field
+instantiation now returns selected constructor metadata observations alongside
+its result; the cold wrapper delegates with logging disabled. Recursive
+simplification now threads the state through alternatives, nested constructors,
+tuples, list prefixes/suffixes and matrix rows, preserving earlier reads when
+a wildcard short-circuits later alternatives. Usefulness recursion now carries
+the read state alongside remaining fuel and the optional answer. Constructor
+specialization precedes field instantiation, complete-head traversal retains
+constructor count and per-slot arity reads, and both early answers and exhausted
+budgets return the state reached so far. Missing-list probes thread that state
+across lengths while retaining a fresh usefulness budget for each probe.
+The public observed entry points share the algorithm with logging-disabled
+wrappers. Let, for and match consumers now return these observations to Cx,
+including Boolean and list missing-case probes. Missing ADT diagnostics observe
+constructor count, each probed arity and selected constructor metadata for names
+only when a missing case is reported. Consumer tests require the actual let,
+for and match paths to retain their count read and preserve cold diagnostics,
+typed modules and allocation. Compiling context-drop controls cover those three
+entry paths. Missing-case owners compare exact diagnostic text, count/arity
+query order and selected constructor-field slots for guarded-only Option and
+list matches. Five additional context-drop controls target diagnostic count,
+arity, per-case analysis, constructor names and list probes. Recursive helper
+controls additionally corrupt metadata observations, normalization state,
+alternative recursion and public/list return state. A surviving query-state
+drop exposed a gap in the original helper tests; the public-boundary owner now
+requires both normalization logs independently of the final Boolean answer.
+The expanded controls and broader acceptance must pass before this batch lands.
+This integration does not establish production cache admission on its own.
+The 8192-step and 4096-row limits and unknown results must remain unchanged.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、
