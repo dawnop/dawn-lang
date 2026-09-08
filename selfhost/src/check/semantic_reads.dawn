@@ -1,13 +1,22 @@
 # Failed name resolution is an answer too. Retain what was read at the
 # checking boundary, not an AST guess or a later lookup after inference.
-# This portable, optional log currently covers only function-name reads;
+# This portable, optional log records function-body namespace queries;
 # it is deliberately not a proof that all semantic dependencies were read.
 use std/list
-use check/types.{Sig, TyVar, TyInt, EPure}
+use check/types.{Sig, Ty, TyVar, TyInt, TyAdt, EPure}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
+pub type ExportDiagnostic = { message: String, hint: Option[String] }
+pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic
 pub type FunctionRead = FunctionAnswer(read: NamedFunctionRead) | FunctionCandidates(names: List[String]) |
-QualifiedFunction(qualifier: String, read: NamedFunctionRead) | ModuleAlias(qualifier: String, path: Option[String])
+QualifiedFunction(qualifier: String, read: NamedFunctionRead) | ModuleAlias(qualifier: String, path: Option[String]) |
+QualifiedConstant(qualifier: String, name: String, answer: Option[(String, Ty)]) |
+QualifiedConstructor(qualifier: String, name: String, answer: Option[(Int, Int)]) |
+ExportPresence(qualifier: String, present: Bool) |
+ExportDiagnosticAnswer(kind: ExportDiagnosticKind, qualifier: String, name: String, answer: Option[ExportDiagnostic])
+
+pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
+  match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
 
 pub fn record(reads: Option[List[FunctionRead]], name: String, answer: Option[Sig]) -> Option[List[FunctionRead]] =
   match reads {
@@ -53,7 +62,8 @@ pub fn append(current: Option[List[FunctionRead]], writes: Option[List[FunctionR
 
 ## The enclosing owner fixes the source module's namespace. References in
 ## successful answers must move even if their spelling did not change.
-pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig]) -> Option[Option[List[FunctionRead]]] = {
+pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] = {
   match reads {
     None -> Some(None)
     Some(entries) -> {
@@ -76,6 +86,26 @@ pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[S
             QualifiedFunction(qualifier, NamedFunctionRead { name: read.name, answer: answer })
           }
           ModuleAlias(qualifier, path) -> ModuleAlias(qualifier, path)
+          QualifiedConstant(qualifier, name, answer) -> {
+            let moved_answer = match answer {
+              None -> None
+              Some(pair) -> { let (owner, ty) = pair
+                Some((owner, type_value(ty)?))
+              }
+            }
+            QualifiedConstant(qualifier, name, moved_answer)
+          }
+          QualifiedConstructor(qualifier, name, answer) -> {
+            let moved_answer = match answer {
+              None -> None
+              Some(pair) -> { let (adt, slot) = pair
+                Some((nominal(adt)?, slot))
+              }
+            }
+            QualifiedConstructor(qualifier, name, moved_answer)
+          }
+          ExportPresence(qualifier, present) -> ExportPresence(qualifier, present)
+          ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(kind, qualifier, name, answer)
         }
         out = out ++ [moved]
       }
@@ -100,10 +130,10 @@ test "semantic reads project successful answers without dropping missing answers
     ret: TyVar("T", 1), eff: EPure, is_builtin: false, tparams: [], constraints: [],
     eparams: [], owner: Some("module"), trait_id: None, op_of: None, inferring: false }
   let reads = candidates(record(record(Some([]), "value", Some(sig)), "missing", None), ["value", "other"])
-  let moved = project(reads, s => Some(Sig { ..s, ret: TyInt })).expect("read projection").expect("enabled reads")
+  let moved = project(reads, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None).expect("read projection").expect("enabled reads")
   assert moved == [FunctionAnswer(NamedFunctionRead { name: "value", answer: Some(Sig { ..sig, ret: TyInt }) }),
     FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["value", "other"])]
-  assert project(reads, s => None) == None
+  assert project(reads, s => None, t => None, id => None) == None
 }
 
 test "semantic reads retain candidate order and empty answers" {
@@ -112,7 +142,7 @@ test "semantic reads retain candidate order and empty answers" {
   let writes = capture(prefix, reads).expect("candidate suffix")
   assert writes == Some([FunctionCandidates(["beta", "alpha", "beta"]), FunctionCandidates([])])
   assert append(prefix, writes) == Some(reads)
-  assert project(writes, s => None) == Some(writes)
+  assert project(writes, s => None, t => None, id => None) == Some(writes)
   assert candidates(None, ["ignored"]) == None
 }
 
@@ -123,10 +153,30 @@ test "semantic reads preserve qualified identities paths and projected answers" 
   let prefix = module_alias(Some([]), "h", Some("provider"))
   let reads = module_alias(qualified(qualified(prefix, "h", "value", Some(sig)), "other", "missing", None), "absent", None)
   let writes = capture(prefix, reads).expect("qualified suffix")
-  let moved = project(writes, s => Some(Sig { ..s, ret: TyInt })).expect("qualified projection")
+  let moved = project(writes, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None).expect("qualified projection")
   assert moved == Some([QualifiedFunction("h", NamedFunctionRead { name: "value", answer: Some(Sig { ..sig, ret: TyInt }) }),
     QualifiedFunction("other", NamedFunctionRead { name: "missing", answer: None }), ModuleAlias("absent", None)])
   assert append(prefix, writes) == Some(reads)
-  assert project(prefix, s => None) == Some(prefix) && project(reads, s => None) == None
+  assert project(prefix, s => None, t => None, id => None) == Some(prefix) && project(reads, s => None, t => None, id => None) == None
   assert qualified(None, "h", "value", Some(sig)) == None && module_alias(None, "h", Some("provider")) == None
+}
+
+test "semantic reads project export references in distinct domains" {
+  let diagnostic = ExportDiagnostic { message: "not exported", hint: Some("try another name") }
+  let reads = Some([QualifiedConstant("h", "VALUE", Some(("provider", TyAdt(1, [])))),
+    QualifiedConstructor("h", "Item", Some((1, 1))), QualifiedConstructor("h", "Missing", None),
+    ExportPresence("h", true), ExportDiagnosticAnswer(ValueDiagnostic, "h", "Wrong", Some(diagnostic)),
+    ExportDiagnosticAnswer(FunctionDiagnostic, "absent", "missing", None)])
+  let moved = project(reads, s => None, t => Some(TyInt), id => Some(id + 10)).expect("export projection")
+  assert moved == Some([QualifiedConstant("h", "VALUE", Some(("provider", TyInt))),
+    QualifiedConstructor("h", "Item", Some((11, 1))), QualifiedConstructor("h", "Missing", None),
+    ExportPresence("h", true), ExportDiagnosticAnswer(ValueDiagnostic, "h", "Wrong", Some(diagnostic)),
+    ExportDiagnosticAnswer(FunctionDiagnostic, "absent", "missing", None)])
+  assert project(reads, s => None, t => None, id => Some(id)) == None
+  assert project(reads, s => None, t => Some(t), id => None) == None
+  let prefix = record(Some([]), "earlier", None)
+  let combined = append(prefix, reads).expect("append exports")
+  assert capture(prefix, combined) == Some(reads)
+  assert observe(None, ExportPresence("h", true)) == None
+  assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
 }

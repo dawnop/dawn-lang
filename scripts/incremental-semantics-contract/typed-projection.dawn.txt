@@ -179,6 +179,42 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  let (exports_ast, export_pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n" ++
+    "pub const ANSWER: Int = 1\npub fn visible() -> Int = 1\nfn hidden() -> Int = 2\n")
+  if export_pd != [] { panic("export observation provider parse") }
+  let (exports_cx, _) = check_module(cx_new(Some("exports"), None), exports_ast, map.empty())
+  if exports_cx.diags != [] { panic("export observation provider check") }
+  let export_env = map.from([("exports", exports_of(exports_cx, exports_ast, "exports", "exports"))])
+  for body in ["h.ANSWER", "h.Item(1)", "h.Empty", "h.WRONG", "unknown.missing()",
+    "h.hidden()", "h.visibl()", "h.Choice", "h.ANSWE",
+    "match h.Empty { h.Empty -> 0\n h.Item(value) -> value }",
+    "match h.Empty { h.Empt -> 0\n _ -> 1 }",
+    "match h.Empty { unknown.Empty -> 0\n _ -> 1 }"] {
+    let (syntax, pd) = parser.parse_module("use exports as h\nfn go() = " ++ body ++ "\n")
+    if pd != [] { panic("export observation consumer parse") }
+    let initial = cx_new(Some("export_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, export_env)
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, export_env)
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  let iter = "type Bag = { item: h.Choice }\n" ++
+    "impl Iter[Bag] {\n type Cur = Int\n type Item = h.Choice\n" ++
+    " fn iter_start(xs: Bag) -> Int = 0\n" ++
+    " fn iter_done(xs: Bag, c: Int) -> Bool = c >= 1\n" ++
+    " fn iter_next(xs: Bag, c: Int) -> Int = c + 1\n" ++
+    " fn iter_get(xs: Bag, c: Int) -> h.Choice = xs.item\n}\n"
+  for body in ["{ let h.Item(value) = h.Item(1)\n value }",
+    "{ for h.Item(value) in (Bag { item: h.Item(1) }) { () }\n 0 }"] {
+    let (syntax, pd) = parser.parse_module("use exports as h\n" ++ iter ++ "fn go() -> Int = " ++ body ++ "\n")
+    if pd != [] { panic("refutability observation consumer parse") }
+    let initial = Cx { ..cx_new(Some("refutability_read_probe"), None), next_id: exports_cx.next_id }
+    let (cold_cx, cold) = check_module(initial, syntax, export_env)
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, export_env)
+    if len(cold_cx.diags) != 1 { panic("refutability observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 

@@ -12,7 +12,7 @@ use std/list
 use std/map
 use std/set
 use check/semantic_reads
-use check/semantic_reads.{NamedFunctionRead}
+use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic}
 use front/ast.{
   TypeRef, TNamed, Module,
   module_fns, module_types, module_consts, module_traits,
@@ -408,15 +408,15 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
 ## when `target` is a whole-module alias that exports a constant called
 ## `fname`. A miss is not an error here -- the caller has a Java-static-field
 ## path and a value path to try (LANG-06 step 3).
-fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
+fn qual_const_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(String, Ty)]) = {
   let alias_name = match target {
     # a bare lowercase name parses as a nullary constructor spelling
     ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return None } else { cn }
+      if hp || len(cargs) > 0 || sp != None { return (cx, None) } else { cn }
     EVar(n, _, _) -> n
-    _ -> return None
+    _ -> return (cx, None)
   }
-  match map.get(cx.module_exports, alias_name) {
+  let answer = match map.get(cx.module_exports, alias_name) {
     None -> None
     Some(exp) ->
       match map.get(exp.consts, fname) {
@@ -424,6 +424,12 @@ fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
         Some(t) -> Some((exp.mod_path, t))
       }
   }
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads,
+      semantic_reads.QualifiedConstant(alias_name, fname, answer)) }
+  }
+  (next, answer)
 }
 
 ## Is `q` a value this module can name? Asked of the name before a `.`, where
@@ -452,7 +458,7 @@ fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx = {
 ## `m.x` where `m` IS a whole-module alias but `x` is none of the values it
 ## exports. Falling through to the value path reported the alias itself as an
 ## undefined variable, which is worse than inconsistent: `m` is defined.
-fn qual_value_err(cx: Cx, exp: ModExports, fname: String, lo: Int, hi: Int) -> Cx = {
+fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic = {
   let msg = "module `" ++ exp.mod_path ++ "` has no exported value `" ++ fname ++ "`"
   # a name it does export, as a type, is worth saying so: otherwise the author
   # reads "no exported value `Shown`", finds `pub type Shown` and stops there
@@ -460,27 +466,85 @@ fn qual_value_err(cx: Cx, exp: ModExports, fname: String, lo: Int, hi: Int) -> C
     Some(aid) -> {
       var cs: List[String] = []
       for c in adt_of(exp.adt_infos, aid).ctors { cs = cs ++ [c.name] }
-      return cerr_h(cx, msg, lo, hi, "`" ++ fname ++
-          "` is a type there; a value of it comes from: " ++ join(cs, ", "))
+      return ExportDiagnostic { message: msg, hint: Some("`" ++ fname ++
+          "` is a type there; a value of it comes from: " ++ join(cs, ", ")) }
     }
     None -> ()
   }
-  cerr_o(cx, msg, lo, hi, suggest.hint(fname, map.keys(exp.consts) ++ map.keys(exp.ctors)))
+  ExportDiagnostic { message: msg, hint: suggest.hint(fname, map.keys(exp.consts) ++ map.keys(exp.ctors)) }
+}
+
+fn export_value_diagnostic_read(cx: Cx, q: String, name: String) -> (Cx, Option[ExportDiagnostic]) = {
+  let answer = match map.get(cx.module_exports, q) {
+    None -> None
+    Some(exp) -> Some(export_value_diagnostic(exp, name))
+  }
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads,
+      semantic_reads.ExportDiagnosticAnswer(semantic_reads.ValueDiagnostic, q, name, answer)) }
+  }
+  (next, answer)
+}
+
+fn export_function_diagnostic_read(cx: Cx, q: String, name: String) -> (Cx, Option[ExportDiagnostic]) = {
+  let answer = match map.get(cx.module_exports, q) {
+    None -> None
+    Some(exp) -> {
+      # all_names includes private declarations. Retain the historical
+      # privacy answer before considering public function suggestions.
+      var in_all = false
+      for existing in exp.all_names { if existing == name { in_all = true } }
+      Some(if in_all {
+        ExportDiagnostic { message: "`" ++ name ++ "` is private to module `" ++ exp.mod_path ++ "`",
+          hint: Some("add `pub` to its declaration in ${exp.mod_path}") }
+      } else {
+        ExportDiagnostic { message: "module `" ++ exp.mod_path ++ "` has no exported function `" ++ name ++ "`",
+          hint: suggest.hint(name, map.keys(exp.fns)) }
+      })
+    }
+  }
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads,
+      semantic_reads.ExportDiagnosticAnswer(semantic_reads.FunctionDiagnostic, q, name, answer)) }
+  }
+  (next, answer)
+}
+
+fn export_presence_read(cx: Cx, q: String) -> (Cx, Bool) = {
+  let present = map.has(cx.module_exports, q)
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, semantic_reads.ExportPresence(q, present)) }
+  }
+  (next, present)
 }
 
 ## `m.C` read as a qualified constructor: the (adt id, slot) the alias exports
 ## under `fname`, or None (LANG-06).
-fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
+fn qual_ctor_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(Int, Int)]) = {
   let alias_name = match target {
     ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return None } else { cn }
+      if hp || len(cargs) > 0 || sp != None { return (cx, None) } else { cn }
     EVar(n, _, _) -> n
-    _ -> return None
+    _ -> return (cx, None)
   }
-  match map.get(cx.module_exports, alias_name) {
+  qual_ctor_key_read(cx, alias_name, fname)
+}
+
+## Expression and pattern decisions share the same exported constructor fact.
+fn qual_ctor_key_read(cx: Cx, alias_name: String, fname: String) -> (Cx, Option[(Int, Int)]) = {
+  let answer = match map.get(cx.module_exports, alias_name) {
     None -> None
     Some(exp) -> map.get(exp.ctors, fname)
   }
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads,
+      semantic_reads.QualifiedConstructor(alias_name, fname, answer)) }
+  }
+  (next, answer)
 }
 
 ## Is the receiver of `recv.name(args)` a whole-module alias that no local
@@ -1994,6 +2058,7 @@ fn fixture_function_answers(cx: Cx) -> List[semantic_reads.NamedFunctionRead] = 
       semantic_reads.FunctionCandidates(_) -> ()
       semantic_reads.QualifiedFunction(_, _) -> ()
       semantic_reads.ModuleAlias(_, _) -> ()
+      _ -> ()
     }
   }
   out
@@ -2076,6 +2141,7 @@ test "function reads capture candidate pools on every diagnostic path" {
         semantic_reads.FunctionCandidates(names) -> { pools = pools ++ [names] }
         semantic_reads.QualifiedFunction(_, _) -> ()
         semantic_reads.ModuleAlias(_, _) -> ()
+        _ -> ()
       }
     }
     assert pools == [fn_pool(cold)]
@@ -2677,55 +2743,70 @@ pub fn binds_anything(p: Pattern) -> Bool =
     _ -> false
   }
 
-fn refutable_span(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
+fn refutable_span(cx: Cx, p: Pattern) -> Option[(Int, Int)] = {
+  let (_, answer) = refutable_span_read(cx, p)
+  answer
+}
+
+fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
   match p {
-    PWild(_, _) -> None
-    PBind(_, _, _) -> None
-    PLit(_, lo, hi) -> Some((lo, hi))
-    POr(_) -> Some((pat_lo(p), pat_hi(p)))
+    PWild(_, _) -> (cx, None)
+    PBind(_, _, _) -> (cx, None)
+    PLit(_, lo, hi) -> (cx, Some((lo, hi)))
+    POr(_) -> (cx, Some((pat_lo(p), pat_hi(p))))
     PTuple(elems, _, _) -> {
+      var next = cx
       for e in elems {
-        match refutable_span(cx, e) {
-          Some(s) -> return Some(s)
+        let (observed, answer) = refutable_span_read(next, e)
+        next = observed
+        match answer {
+          Some(s) -> return (next, Some(s))
           None -> ()
         }
       }
-      None
+      (next, None)
     }
     PList(pre, has_rest, _, _, post, lo, hi) ->
       # only [..rest] matches every list; any fixed element constrains the length
-      if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) }
+      (cx, if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) })
     PCtor(cname, pargs, _, _, _, _, lo, hi) -> {
       match map.get(cx.ctors_by_name, cname) {
         Some(key) -> {
           let (aid, _) = key
-          if len(adt_of(cx.adts, aid).ctors) > 1 { return Some((lo, hi)) }
+          if len(adt_of(cx.adts, aid).ctors) > 1 { return (cx, Some((lo, hi))) }
         }
         None -> ()
       }
+      var next = cx
       for a in pargs {
-        match refutable_span(cx, a.pat) {
-          Some(s) -> return Some(s)
+        let (observed, answer) = refutable_span_read(next, a.pat)
+        next = observed
+        match answer {
+          Some(s) -> return (next, Some(s))
           None -> ()
         }
       }
-      None
+      (next, None)
     }
     PQual(q, cname, pargs, _, _, _, _, lo, hi) -> {
-      match qual_ctor_key(cx, q, cname) {
+      let (start, key_answer) = qual_ctor_key_read(cx, q, cname)
+      var next = start
+      match key_answer {
         Some(key) -> {
           let (aid, _) = key
-          if len(adt_of(cx.adts, aid).ctors) > 1 { return Some((lo, hi)) }
+          if len(adt_of(next.adts, aid).ctors) > 1 { return (next, Some((lo, hi))) }
         }
         None -> ()
       }
       for a in pargs {
-        match refutable_span(cx, a.pat) {
-          Some(s) -> return Some(s)
+        let (observed, answer) = refutable_span_read(next, a.pat)
+        next = observed
+        match answer {
+          Some(s) -> return (next, Some(s))
           None -> ()
         }
       }
-      None
+      (next, None)
     }
   }
 
@@ -2831,9 +2912,10 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
     PCtor(cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) ->
       check_ctor_pattern(cx, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi, scrut, mutable)
     PQual(q, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) -> {
-      match map.get(cx.module_exports, q) {
+      let (presence_cx, _) = export_presence_read(cx, q)
+      match map.get(presence_cx.module_exports, q) {
         None -> {
-          var cx1 = cerr_h(cx, "unknown module alias `" ++ q ++ "` in a pattern", nlo, nhi,
+          var cx1 = cerr_h(presence_cx, "unknown module alias `" ++ q ++ "` in a pattern", nlo, nhi,
             "a qualified pattern needs a whole-module import in scope: `use <path> as " ++
               q ++ "`")
           for a in pargs {
@@ -2842,12 +2924,19 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
           }
           (cx1, TPWild)
         }
-        Some(exp) ->
-          match map.get(exp.ctors, cname) {
+        Some(exp) -> {
+          let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)
+          match constructor {
             None -> {
-              var cx1 = cerr_o(cx, "module `" ++ exp.mod_path ++
-                  "` has no exported constructor `" ++ cname ++ "`", nlo, nhi,
-                suggest.hint(cname, map.keys(exp.ctors)))
+              let diagnostic = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+                  "` has no exported constructor `" ++ cname ++ "`",
+                hint: suggest.hint(cname, map.keys(exp.ctors)) }
+              let diagnostic_cx = match pattern_cx.function_reads {
+                None -> pattern_cx
+                Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
+                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(diagnostic))) }
+              }
+              var cx1 = cerr_o(diagnostic_cx, diagnostic.message, nlo, nhi, diagnostic.hint)
               for a in pargs {
                 let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
                 cx1 = cx2
@@ -2855,9 +2944,10 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
               (cx1, TPWild)
             }
             Some(key) ->
-              check_ctor_pattern_at(cx, key, cname, pargs, has_rest, has_parens,
+              check_ctor_pattern_at(pattern_cx, key, cname, pargs, has_rest, has_parens,
                 nlo, nhi, lo, hi, scrut, mutable)
           }
+        }
       }
     }
   }
@@ -3077,14 +3167,6 @@ fn check_ctor_pattern(
     scrut, mutable)
 }
 
-## The (adt id, ctor slot) a qualified pattern names, or None. Read-only:
-## refutability asks without wanting diagnostics.
-fn qual_ctor_key(cx: Cx, q: String, cname: String) -> Option[(Int, Int)] =
-  match map.get(cx.module_exports, q) {
-    None -> None
-    Some(exp) -> map.get(exp.ctors, cname)
-  }
-
 ## The shared tail: the constructor is resolved, check argument shape and
 ## subpatterns (both the local and the module-qualified spelling land here).
 fn check_ctor_pattern_at(
@@ -3234,6 +3316,100 @@ fn check_ctor_pattern_at(
 }
 
 fn no_tpat() -> Option[TPat] = None
+
+test "export reads retain qualified pattern answers and recovery" {
+  let (syntax, pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), syntax, map.empty())
+  let exp = exports_of(provider, syntax, "helper", "helper")
+  let initial = Cx { ..provider, module_exports: map.from([("h", exp)]) }
+  let scrut = TyAdt(map.get(exp.types_by_name, "Choice").expect("Choice"), [])
+  for name in ["Empty", "Empt", "Missing"] {
+    let pat = PQual("h", name, [], false, false, 2, 7, 0, 7)
+    let (cold, cold_pat) = check_pattern(initial, pat, scrut, false)
+    let (observed, observed_pat) = check_pattern(Cx { ..initial, function_reads: Some([]) }, pat, scrut, false)
+    assert cold.diags == observed.diags && cold_pat == observed_pat && cold.next_id == observed.next_id
+    let key = map.get(exp.ctors, name)
+    var expected = [semantic_reads.ExportPresence("h", true), semantic_reads.QualifiedConstructor("h", name, key)]
+    if key == None {
+      assert len(cold.diags) == 1
+      let diagnostic = ExportDiagnostic { message: cold.diags[0].msg, hint: suggest.hint(name, map.keys(exp.ctors)) }
+      expected = expected ++ [semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, "h", name, Some(diagnostic))]
+    } else { assert cold.diags == [] }
+    assert observed.function_reads == Some(expected)
+  }
+  let child = PQual("h", "Empty", [], false, false, 10, 15, 8, 15)
+  for qualifier in ["unknown", "h"] {
+    let pat = PQual(qualifier, "Missing", [PatArg { name: None, nlo: 8, nhi: 15, pat: child }],
+      false, true, 0, 7, 0, 16)
+    let (cold, cold_pat) = check_pattern(initial, pat, scrut, false)
+    let (observed, observed_pat) = check_pattern(Cx { ..initial, function_reads: Some([]) }, pat, scrut, false)
+    assert cold.diags == observed.diags && cold_pat == observed_pat && len(cold.diags) == 1
+    let reads = observed.function_reads.expect("pattern recovery reads")
+    assert reads[0] == semantic_reads.ExportPresence(qualifier, qualifier == "h")
+    assert len(reads) == if qualifier == "h" { 5 } else { 3 }
+    assert reads[len(reads) - 2] == semantic_reads.ExportPresence("h", true)
+    assert reads[len(reads) - 1] == semantic_reads.QualifiedConstructor("h", "Empty", map.get(exp.ctors, "Empty"))
+  }
+}
+
+test "export reads preserve recursive refutability and short circuits" {
+  let (syntax, pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), syntax, map.empty())
+  assert provider.diags == []
+  let exp = exports_of(provider, syntax, "helper", "helper")
+  let initial = Cx { ..provider, module_exports: map.from([("h", exp)]), function_reads: Some([]) }
+  let missing = PQual("h", "Missing", [], false, false, 1, 8, 0, 8)
+  let item = PQual("h", "Item", [], false, false, 11, 15, 10, 15)
+  let absent = semantic_reads.QualifiedConstructor("h", "Missing", None)
+  let found = semantic_reads.QualifiedConstructor("h", "Item", map.get(exp.ctors, "Item"))
+  let pair = PTuple([missing, item, missing], 0, 25)
+  let (observed, answer) = refutable_span_read(initial, pair)
+  assert answer == Some((10, 15))
+  assert observed.function_reads == Some([absent, found])
+  assert answer == refutable_span(Cx { ..initial, function_reads: None }, pair)
+  let nested = PQual("h", "Missing", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
+    false, true, 0, 1, 0, 20)
+  let (nested_cx, nested_answer) = refutable_span_read(initial, nested)
+  assert nested_answer == answer && nested_cx.function_reads == Some([absent, found])
+  let local = PCtor("Unknown", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
+    false, true, 0, 1, 0, 20)
+  let (local_cx, local_answer) = refutable_span_read(initial, local)
+  assert local_answer == answer && local_cx.function_reads == Some([found])
+  let (skipped, _) = refutable_span_read(initial, PTuple([PLit(EInt(1, 0, 1), 0, 1), item], 0, 15))
+  assert skipped.function_reads == Some([])
+}
+
+test "export reads reach let and for refutability diagnostics" {
+  let (provider_ast, _) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n")
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  let exp = exports_of(provider, provider_ast, "helper", "helper")
+  let env = map.from([("helper", exp)])
+  for body in ["{ let h.Item(value) = h.Item(1)\n value }",
+    "{ for h.Item(value) in (Bag { item: h.Item(1) }) { () }\n 0 }"] {
+    # A local iterable avoids relying on std/list in this isolated checker fixture.
+    let iter = "type Bag = { item: h.Choice }\n" ++
+      "impl Iter[Bag] {\n type Cur = Int\n type Item = h.Choice\n" ++
+      " fn iter_start(xs: Bag) -> Int = 0\n" ++
+      " fn iter_done(xs: Bag, c: Int) -> Bool = c >= 1\n" ++
+      " fn iter_next(xs: Bag, c: Int) -> Int = c + 1\n" ++
+      " fn iter_get(xs: Bag, c: Int) -> h.Choice = xs.item\n}\n"
+    let (syntax, pd) = parser.parse_module("use helper as h\n" ++ iter ++ "fn go() -> Int = " ++ body ++ "\n")
+    assert pd == []
+    # Match the driver's global allocation order; Bag must not reuse Choice's ID.
+    let initial = Cx { ..cx_new(Some("main"), None), next_id: provider.next_id }
+    let (cold, cold_module) = check_module(initial, syntax, env)
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, env)
+    assert len(cold.diags) == 1 && cold.diags == observed.diags && cold_module == observed_module
+    assert cold.next_id == observed.next_id
+    let fact = semantic_reads.QualifiedConstructor("h", "Item", map.get(exp.ctors, "Item"))
+    var hits = 0
+    for read in observed.function_reads.expect("refutability reads") { if read == fact { hits = hits + 1 } }
+    # The initializer, pattern checker and refutability each read the constructor.
+    assert hits == 3
+  }
+}
 
 test "patterns bind, refute, and lower" {
   var cx = seed_prelude(push_scope(test_cx()))
@@ -5135,7 +5311,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
     EFieldAcc(target, fname, flo, fhi, lo, hi) -> {
-      let (field_cx, answer) = qual_fn_read(cx, target, fname)
+      let (start_cx, answer) = qual_fn_read(cx, target, fname)
+      var field_cx = start_cx
       match answer {
         Some(s) -> return check_fn_value(field_cx, fname, s, expected, lo, hi)
         None -> ()
@@ -5144,17 +5321,21 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       # (LANG-06 step 3). Checked before the Java and value paths because a
       # module alias is not a value -- spec 10.3 forbids anything else of that
       # name being in scope, so there is nothing to be ambiguous with.
-      match qual_const(field_cx, target, fname) {
+      let (const_cx, constant) = qual_const_read(field_cx, target, fname)
+      field_cx = const_cx
+      match constant {
         Some(pr) -> {
           let (mod_path, ct) = pr
           (field_cx, ct, XConstRef(mod_path, fname, lo, hi, ct))
         }
-        None ->
+        None -> {
           # `m.C` with no arguments: a nullary constructor's value, or -- in a
           # function-typed position -- the constructor as a function. Decided
           # by the same code the unqualified spelling goes through, with the
           # constructor already resolved through the alias.
-          match qual_ctor(field_cx, target, fname) {
+          let (ctor_cx, constructor) = qual_ctor_read(field_cx, target, fname)
+          field_cx = ctor_cx
+          match constructor {
             Some(k) -> {
               let no_args: List[Arg] = []
               check_ctor_call(field_cx, fname, no_args, None, CBare, expected, Some(k),
@@ -5175,9 +5356,11 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
                       let (next, found) = resolves_to_value_read(scope_cx, q)
                       scope_cx = next
                       if not found {
-                        match map.get(scope_cx.module_exports, q) {
-                          Some(exp) ->
-                            return (qual_value_err(scope_cx, exp, fname, flo, fhi),
+                        let (diagnostic_cx, diagnostic) = export_value_diagnostic_read(scope_cx, q, fname)
+                        scope_cx = diagnostic_cx
+                        match diagnostic {
+                          Some(d) ->
+                            return (cerr_o(scope_cx, d.message, flo, fhi, d.hint),
                               TyError, XError(lo, hi))
                           None -> {
                             let (next, path) = module_alias_read(scope_cx, q)
@@ -5197,6 +5380,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
                 }
               }
           }
+        }
       }
     }
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
@@ -6657,8 +6841,10 @@ fn check_apply(
       if not hp && len(cargs) == 0 && sp == None {
         return check_ctor_call(cx, cname, args0, None, CApply, expected, None, cclo, cchi, lo, hi)
       }
-    EFieldAcc(recv, fname, flo, fhi, _, _) ->
-      match qual_ctor(cx, recv, fname) {
+    EFieldAcc(recv, fname, flo, fhi, _, _) -> {
+      let (next, constructor) = qual_ctor_read(cx, recv, fname)
+      cx = next
+      match constructor {
         # `expected` is deliberately not forwarded here: the qualified spelling
         # has never seen it, and threading it in is an inference change, not
         # part of unifying the syntax.
@@ -6684,6 +6870,7 @@ fn check_apply(
           }
         }
       }
+    }
     _ -> ()
   }
   # a name: `f(x)`. check_call keeps the split a name has always had -- a local
@@ -6914,7 +7101,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       if not is_errorish(it) {
         match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [it]) {
           Some(true) -> {
-            let (plo, phi) = match refutable_span(cx1, pat) {
+            let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
+            cx1 = let_read_cx
+            let (plo, phi) = match refutable {
               Some(sp) -> sp
               None -> (pat_lo(pat), pat_hi(pat))
             }
@@ -7086,7 +7275,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
         match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [loop_t]) {
           Some(true) -> {
-            let (plo, phi) = match refutable_span(cx1, pat) {
+            let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
+            cx1 = for_read_cx
+            let (plo, phi) = match refutable {
               Some(sp) -> sp
               None -> (pat_lo(pat), pat_hi(pat))
             }
@@ -9771,32 +9962,10 @@ fn check_module_call(
               name ++ "`", nlo, nhi, h), TyError, XError(lo, hi))
         None -> ()
       }
-      match map.get(cx1.module_exports, al) {
-        Some(ex) -> {
-          var in_all = false
-          for n2 in ex.all_names {
-            if n2 == name { in_all = true }
-          }
-          if in_all {
-            return (cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ ex.mod_path ++ "`",
-              nlo, nhi, "add `pub` to its declaration in ${ex.mod_path}"),
-              TyError, XError(lo, hi))
-          }
-          # There used to be a branch here for `name` in the module's types or
-          # constants ("not a function; import it with `use m.{X}`"). It could
-          # not run, twice over. A type or constant name is TYPEIDENT by
-          # declaration (parser: `a type name (uppercase)`, `a constant name
-          # (SCREAMING_SNAKE_CASE)`), and `postfix_expr` turns `.` + TYPEIDENT
-          # into EFieldAcc, never EMethod -- and EMethod is the only way into
-          # this function. Even hoisted above the `in_all` guard it never
-          # fired: `lib.Shown()` still reported `undefined variable: lib`.
-          # And `exports_of` puts every declared name into `all_names` before
-          # it decides whether the declaration is pub, so anything in
-          # `types_by_name` or `consts` is in `all_names` too and the guard
-          # above would have returned first regardless.
-          (cerr_o(cx1, "module `" ++ ex.mod_path ++ "` has no exported function `" ++ name ++ "`",
-            nlo, nhi, suggest.hint(name, map.keys(ex.fns))), TyError, XError(lo, hi))
-        }
+      let (diagnostic_cx, diagnostic) = export_function_diagnostic_read(cx1, al, name)
+      cx1 = diagnostic_cx
+      match diagnostic {
+        Some(d) -> (cerr_o(cx1, d.message, nlo, nhi, d.hint), TyError, XError(lo, hi))
         None ->
           (cerr(cx1, "module `" ++ mod_path ++ "` has no exported function `" ++ name ++ "`",
             nlo, nhi), TyError, XError(lo, hi))
@@ -9842,7 +10011,12 @@ fn check_method_call(
         cx1 = next
         path == None
       }
-      if missing_alias && not map.has(cx1.module_exports, rname) {
+      let missing_exports = if not missing_alias { false } else {
+        let (next, present) = export_presence_read(cx1, rname)
+        cx1 = next
+        not present
+      }
+      if missing_exports {
         var cxe = undefined_qualifier_err(cx1, rname, rlo, rhi)
         for a in args {
           let (cxa, _, _) = check_expr(cxe, a, no_expected())
@@ -13393,6 +13567,83 @@ test "a labelled closure does not escape through a let, a return or an assignmen
       "  let g: fn() -> Int !io = () => 1\n" ++
       "  g()\n}\n")
   assert len(cx4.diags) == 0
+}
+
+test "export reads retain absent diagnostic and presence queries" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let (value_cx, value) = export_value_diagnostic_read(initial, "absent", "VALUE")
+  assert value == None && value_cx.function_reads == Some([
+    semantic_reads.ExportDiagnosticAnswer(semantic_reads.ValueDiagnostic, "absent", "VALUE", None)])
+  let (function_cx, function) = export_function_diagnostic_read(initial, "absent", "missing")
+  assert function == None && function_cx.function_reads == Some([
+    semantic_reads.ExportDiagnosticAnswer(semantic_reads.FunctionDiagnostic, "absent", "missing", None)])
+  let (absent_cx, present) = export_presence_read(initial, "absent")
+  assert not present && absent_cx.function_reads == Some([semantic_reads.ExportPresence("absent", false)])
+  let (const_cx, constant) = qual_const_read(initial, EInt(1, 0, 1), "VALUE")
+  let (ctor_cx, constructor) = qual_ctor_read(initial, EInt(1, 0, 1), "Item")
+  assert constant == None && constructor == None
+  assert const_cx.function_reads == Some([]) && ctor_cx.function_reads == Some([])
+}
+
+test "export reads retain constant constructor and missing answers" {
+  let (provider_ast, pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n" ++
+      "pub const ANSWER: Int = 1\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  assert provider.diags == []
+  let exp = exports_of(provider, provider_ast, "helper", "helper")
+  let env = map.from([("helper", exp)])
+  let cases: List[(String, semantic_reads.FunctionRead)] = [
+    ("fn go() -> Int = h.ANSWER", semantic_reads.QualifiedConstant("h", "ANSWER", Some(("helper", TyInt)))),
+    ("fn go() = h.Item(1)", semantic_reads.QualifiedConstructor("h", "Item", map.get(exp.ctors, "Item"))),
+    ("fn go() = h.Empty", semantic_reads.QualifiedConstructor("h", "Empty", map.get(exp.ctors, "Empty"))),
+    ("fn go() = h.WRONG", semantic_reads.QualifiedConstructor("h", "WRONG", None)),
+    ("fn go() = h.WRONG", semantic_reads.QualifiedConstant("h", "WRONG", None)),
+    ("fn go() = unknown.missing()", semantic_reads.ExportPresence("unknown", false))]
+  for pair in cases {
+    let (declaration, expected_read) = pair
+    let (user, ud) = parser.parse_module("use helper as h\n" ++ declaration ++ "\n")
+    assert ud == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, user, env)
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, user, env)
+    assert cold.diags == observed.diags && cold_module == observed_module && cold.next_id == observed.next_id
+    var hits = 0
+    for read in observed.function_reads.expect("export reads") { if read == expected_read { hits = hits + 1 } }
+    assert hits == 1
+    assert len(cold.diags) == if str.contains(declaration, "WRONG") || str.contains(declaration, "unknown") { 1 } else { 0 }
+  }
+}
+
+test "export reads retain private candidate and type-constructor diagnostics" {
+  let (provider_ast, pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n" ++
+      "pub const ANSWER: Int = 1\npub fn visible() -> Int = 1\nfn hidden() -> Int = 2\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  assert provider.diags == []
+  let env = map.from([("helper", exports_of(provider, provider_ast, "helper", "helper"))])
+  for body in ["h.hidden()", "h.visibl()", "h.Choice", "h.ANSWE"] {
+    let (user, ud) = parser.parse_module("use helper as h\nfn go() = " ++ body ++ "\n")
+    assert ud == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, user, env)
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, user, env)
+    assert len(cold.diags) == 1 && cold.diags == observed.diags && cold_module == observed_module
+    var hits = 0
+    for read in observed.function_reads.expect("export diagnostics") {
+      match read {
+        semantic_reads.ExportDiagnosticAnswer(kind, q, name, Some(d)) -> {
+          assert q == "h" && str.contains(body, name)
+          assert kind == if str.contains(body, "()") { semantic_reads.FunctionDiagnostic } else { semantic_reads.ValueDiagnostic }
+          assert d.message == cold.diags[0].msg
+          assert cold.diags[0].hint == match d.hint { Some(h) -> h, None -> "" }
+          hits = hits + 1
+        }
+        _ -> ()
+      }
+    }
+    assert hits == 1
+  }
 }
 
 test "function reads preserve qualified decisions and local shadowing" {
