@@ -386,22 +386,22 @@ PY
 
     allow-storage-generic)
       replace_once "$mutant/selfhost/src/check/cx.dawn" \
-'      for arg in targs {
-        let (cx2, ty) = resolve_type(cx1, arg)
-        cx1 = cx2
-        args = args ++ [ty]
-      }
-      return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))' \
-'      for arg in targs {
-        let (cx2, ty) = if name == "List" {
-          resolve_return_type(cx1, arg)
-        } else {
-          resolve_type(cx1, arg)
+'        for arg in targs {
+          let (cx2, ty) = resolve_type(cx1, arg)
+          cx1 = cx2
+          args = args ++ [ty]
         }
-        cx1 = cx2
-        args = args ++ [ty]
-      }
-      return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))'
+        return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))' \
+'        for arg in targs {
+          let (cx2, ty) = if name == "List" {
+            resolve_return_type(cx1, arg)
+          } else {
+            resolve_type(cx1, arg)
+          }
+          cx1 = cx2
+          args = args ++ [ty]
+        }
+        return (record_span_at(cx1, lo, hi, targs), builtin_type_apply(info, args))'
       build_mutant "$1"
       expect_marker "$1" NEVER_STORAGE_GENERIC
       ;;
