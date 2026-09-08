@@ -456,6 +456,16 @@ seeding the declaration environment; skipped paths do not acquire binder reads.
 This closes those alias decision inputs, not the remaining builtin/current
 environment, associated type/effect, Java, or runtime scheduling boundaries.
 
+### Associated-member read boundary (implementation in progress)
+
+Associated type/effect resolution must retain the scoped subject answer, its
+optional ordered trait-bound list, and each queried trait's associated-member
+names with the type/effect axis identified. Missing subjects short-circuit bounds
+and members; repeated bounds still follow the existing owner deduplication rule.
+Subjects project as their actual types, while bound/member trait IDs require a
+separate trait-domain callback. Reusing the nominal mapper or fabricating a type
+to smuggle an integer into another reference domain is not valid projection.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

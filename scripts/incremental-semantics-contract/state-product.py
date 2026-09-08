@@ -43,7 +43,7 @@ def main():
     variants = [
         ("function-read-capture", "semantic_reads.capture(before.function_reads, after.function_reads)?", "Some([])"),
         ("function-read-write", "semantic_reads.append(current.function_reads, product.function_reads)?", "current.function_reads"),
-        ("function-read-domain", "semantic_reads.project_with_source(p.function_reads, s => relocate.signature(v.ids, s),\n      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value)?", "p.function_reads"),
+        ("function-read-domain", "semantic_reads.project_with_traits(p.function_reads, s => relocate.signature(v.ids, s),\n      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value,\n      id => relocate.trait_id(v.ids, id))?", "p.function_reads"),
         ("constant-tree", "tree => relocate_tree.constant(v, tree)", "tree => Some(tree)"),
         ("symbol-order", "sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
         ("signature-write", "fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),

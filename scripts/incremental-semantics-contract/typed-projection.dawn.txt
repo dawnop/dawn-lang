@@ -255,6 +255,22 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  for sample in [("fn go[T: Left](x: T.Item) -> Unit = ()", 0),
+    ("fn go[T: Left](x: T) -> Unit !T.E = ()", 0),
+    ("fn go[T: Left](x: T.Other) -> Unit = ()", 1),
+    ("fn go[T](x: T.Item) -> Unit = ()", 1),
+    ("fn go[T](x: T) -> Unit !T.E = ()", 1),
+    ("fn go(x: X.Item) -> Unit = ()", 1)] {
+    let (declaration, errors) = sample
+    let (syntax, pd) = parser.parse_module("trait Left[T] { type Item\n effect E\n fn left(x: T) -> Unit }\n" ++ declaration ++ "\n")
+    if pd != [] { panic("associated observation parse") }
+    let initial = cx_new(Some("associated_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("associated observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 

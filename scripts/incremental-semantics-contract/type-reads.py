@@ -16,8 +16,8 @@ from cold import ROOT, edit, run
 def main():
     started = time.monotonic()
     variants = [
-        ("body_product", "effect-callback", "e => relocate.effect_row(v.ids, e), source_value)?", "e => Some(e), source_value)?"),
-        ("body_product", "alias-source-callback", "e => relocate.effect_row(v.ids, e), source_value)?", "e => relocate.effect_row(v.ids, e), (owner, source) => Some(source))?"),
+        ("body_product", "effect-callback", "e => relocate.effect_row(v.ids, e), source_value,", "e => Some(e), source_value,"),
+        ("body_product", "alias-source-callback", "e => relocate.effect_row(v.ids, e), source_value,", "e => relocate.effect_row(v.ids, e), (owner, source) => Some(source),"),
         ("body_product", "constant-source-callback", "tree => relocate_tree.constant(v, tree), source_value)", "tree => relocate_tree.constant(v, tree), (owner, source) => Some(source))"),
         ("cx", "observation", "semantic_reads.observe(cx.function_reads, fact)", "cx.function_reads"),
         ("cx", "alias-header", "semantic_reads.QualifiedAliasHeader(q, name, header_answer)", "semantic_reads.QualifiedAliasHeader(q, name, None)"),
