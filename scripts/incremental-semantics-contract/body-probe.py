@@ -24,9 +24,9 @@ def main():
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
                       "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
-                      "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag"]
+                      "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag", "constant-type", "constant-span"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-two compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -78,17 +78,19 @@ def main():
                     "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "constant-type": ("ty: relocate.ty(v.ids, c.ty)?, init: expression(v, c.init)?", "ty: c.ty, init: expression(v, c.init)?"),
+            "constant-span": ("lo: position(v, c.lo)?, hi: end_position(v, c.hi)?", "lo: c.lo, hi: c.hi"),
             "default-diagnostics": ("diags: current.diags ++ product.diagnostics",
-                                    'diags: if product.function.name == "sample\\$default\\$0" { current.diags } else { current.diags ++ product.diagnostics }'),
+                                    'diags: if match product.frame.current_sig { Some(s) -> s.name == "sample\\$default\\$0", None -> false } { current.diags } else { current.diags ++ product.diagnostics }'),
             "default-dictionary": ("TDefault { body: dx, dict_syms: dsyms }", "TDefault { body: dx, dict_syms: [] }"),
             "default-write": ("syms: apply_changes(current.syms, product.symbols)",
-                              'syms: if product.function.name == "sample\\$default\\$0" { current.syms } else { apply_changes(current.syms, product.symbols) }'),
+                              'syms: if match product.frame.current_sig { Some(s) -> s.name == "sample\\$default\\$0", None -> false } { current.syms } else { apply_changes(current.syms, product.symbols) }'),
             "impl-owner": ("sig.name != method.name || sig.owner != cx.owner_class", "sig.name != method.name || false"),
             "impl-parameters": ("sig.tparams != info.tparams", "false"),
             "impl-roles": ("sig.is_builtin ||\n                  sig.trait_id != None || sig.op_of != None", "sig.is_builtin"),
             "symbol-order": ("sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
             "inferred-write": ("fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),
-            "test-state": ("in_test: product.in_test", "in_test: if product.function.is_test { true } else { product.in_test }"),
+            "test-state": ("in_test: product.in_test", "in_test: if product.frame.current_sig == None { true } else { product.in_test }"),
             "local": ("Some(XLocal(relocate.local_id(v.ids, id)?,", "Some(XLocal(id,"),
             "capture": ("names, expression(v, body)?, local_ids(v, captures)?,", "names, expression(v, body)?, captures,"),
             "dynamic": ("Some(XCallDyn(relocate.local_id(v.ids, id)?,", "Some(XCallDyn(id,"),
@@ -233,6 +235,8 @@ def main():
                                 "module-signatures": "module assembly: replayed Cx differs from cold module state",
                                 "module-method-boundary": "module assembly: replayed module differs from cold module",
                                 "module-registered-tag": "module assembly: replayed module differs from cold module",
+                                "constant-type": "module assembly: replayed module differs from cold module",
+                                "constant-span": "module assembly: replayed module differs from cold module",
                                 "default-write": "default state: replayed Cx differs from cold body boundary",
                                 "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)
