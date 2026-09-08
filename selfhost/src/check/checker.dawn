@@ -3418,6 +3418,52 @@ test "associated reads retain subject bounds members and owner deduplication" {
   }
 }
 
+# Expected facts come from the input environment, never the observed resolver.
+fn test_named_environment(cx: Cx, name: String) -> List[semantic_reads.FunctionRead] =
+  [semantic_reads.BuiltinTypeAnswer(name, map.get(cx.btypes, name)),
+    semantic_reads.ScopedTypeParameter(name, map.get(cx.current_tparams, name))]
+
+fn test_plain_builtin(cx: Cx, name: String) -> List[semantic_reads.FunctionRead] =
+  test_named_environment(cx, name) ++ [semantic_reads.LocalAliasHeader(name, None),
+    semantic_reads.BuiltinTypeAnswer(name, map.get(cx.btypes, name)), semantic_reads.StdModuleMode(cx.is_std_module)]
+
+test "environment reads preserve reserved names shadowing and std visibility" {
+  for index in 0..8 {
+    let name = match index { 0 -> "Int", 1 -> "Int", 2 -> "Never", 3 -> "Never", 4 -> "Array", 5 -> "Array", 6 -> "Int", _ -> "Missing" }
+    let shadow = TyVar("Shadow", 8000)
+    let initial = Cx { ..test_cx(), is_std_module: index == 5,
+      current_tparams: if index >= 1 && index <= 3 { map.from([("Int", shadow), ("Never", shadow)]) } else { map.empty() } }
+    let args: List[TypeRef] = if index >= 4 && index <= 6 { [TNamed("Int", [], [], 6, 9)] } else { [] }
+    let ref = TNamed(name, args, [], 0, 10)
+    let enabled = Cx { ..initial, function_reads: Some([]) }
+    let (cold, ty) = if index == 3 { resolve_return_type(initial, ref) } else { resolve_type(initial, ref) }
+    let (observed, next_ty) = if index == 3 { resolve_return_type(enabled, ref) } else { resolve_type(enabled, ref) }
+    let expected_ty = match index { 0 -> TyInt, 1 -> shadow, 3 -> TyNever, 5 -> TyArray(TyInt), _ -> TyError }
+    assert ty == expected_ty && next_ty == ty
+    let errors = if index == 2 || index == 4 || index == 6 || index == 7 { 1 } else { 0 }
+    assert cold.diags == observed.diags && len(cold.diags) == errors
+    assert cold.next_id == initial.next_id && observed.next_id == initial.next_id
+    assert cold.current_tparams == initial.current_tparams && observed.current_tparams == initial.current_tparams
+    assert cold.btypes == initial.btypes && observed.btypes == initial.btypes
+    var expected: List[semantic_reads.FunctionRead] = [semantic_reads.BuiltinTypeAnswer(name, map.get(initial.btypes, name))]
+    if name == "Never" {
+      if index == 3 { expected = expected ++ [semantic_reads.StdModuleMode(false)] }
+    } else {
+      expected = expected ++ [semantic_reads.ScopedTypeParameter(name, map.get(initial.current_tparams, name))]
+      if index != 1 {
+        expected = expected ++ [semantic_reads.LocalAliasHeader(name, None), semantic_reads.BuiltinTypeAnswer(name, map.get(initial.btypes, name))]
+        if name != "Missing" { expected = expected ++ [semantic_reads.StdModuleMode(index == 5)] }
+        if index == 5 { expected = expected ++ test_plain_builtin(initial, "Int") }
+        if index == 4 || index == 7 {
+          expected = expected ++ [semantic_reads.NominalTypeName(None, name, None), semantic_reads.LocalTypeDiagnostic(name,
+            ExportDiagnostic { message: cold.diags[0].msg, hint: Some(cold.diags[0].hint) })]
+        }
+      }
+    }
+    assert observed.function_reads == Some(expected)
+  }
+}
+
 test "type reads retain local alias cache and cycle short circuits" {
   let (syntax, pd) = parser.parse_module("alias Alias = Int\n")
   assert pd == []
@@ -3446,8 +3492,7 @@ test "type reads retain local alias cache and cycle short circuits" {
     if cached == None && target_present {
       let prefix = [semantic_reads.LocalAliasTarget("Alias", None),
         semantic_reads.LocalAliasSource("Alias", alias_entry.owner, alias_entry.target), semantic_reads.LocalAliasResolving("Alias", active)]
-      assert reads == if active { prefix } else { prefix ++ [semantic_reads.LocalAliasBinders("Alias", [], []),
-        semantic_reads.LocalAliasHeader("Int", None)] }
+      assert reads == if active { prefix } else { prefix ++ [semantic_reads.LocalAliasBinders("Alias", [], [])] ++ test_plain_builtin(initial, "Int") }
     } else if cached == None {
       assert reads == [semantic_reads.LocalAliasTarget("Alias", None), semantic_reads.LocalAliasSource("Alias", alias_entry.owner, None)]
     } else {
@@ -3473,7 +3518,9 @@ test "type reads retain uncached alias binder inputs" {
   assert observed.function_reads == Some([semantic_reads.LocalAliasTarget("Mapper", None),
     semantic_reads.LocalAliasSource("Mapper", al.owner, al.target), semantic_reads.LocalAliasResolving("Mapper", false),
     semantic_reads.LocalAliasBinders("Mapper", al.tparams, al.eparams),
-    semantic_reads.DeclaredEffect("e", None), semantic_reads.ScopedEffectVariable("e", Some(al.eparams[0]))])
+    semantic_reads.DeclaredEffect("e", None), semantic_reads.ScopedEffectVariable("e", Some(al.eparams[0])),
+    semantic_reads.BuiltinTypeAnswer("T", None), semantic_reads.ScopedTypeParameter("T", Some(al.tparams[0])),
+    semantic_reads.BuiltinTypeAnswer("T", None), semantic_reads.ScopedTypeParameter("T", Some(al.tparams[0]))])
 }
 
 test "type reads retain local nominal answers without bypassing shadowing" {
@@ -3482,9 +3529,9 @@ test "type reads retain local nominal answers without bypassing shadowing" {
   let headers = check_module_headers(test_cx(), syntax, map.empty())
   assert headers.cx.diags == []
   let initial = Cx { ..headers.cx, current_tparams: map.from([("T", TyVar("T", 9000))]) }
-  for sample in [("Box", true, 4, 0), ("Box", false, 3, 1), ("Bxo", false, 3, 1),
-    ("Missing", false, 3, 1), ("Alias", false, 2, 0), ("Int", false, 1, 0), ("T", false, 0, 0),
-    ("Never", false, 0, 1)] {
+  for sample in [("Box", true, 11, 0), ("Box", false, 6, 1), ("Bxo", false, 6, 1),
+    ("Missing", false, 6, 1), ("Alias", false, 4, 0), ("Int", false, 5, 0), ("T", false, 2, 0),
+    ("Never", false, 1, 1)] {
     let (name, supplied, count, errors) = sample
     let args: List[TypeRef] = if supplied { [TNamed("Int", [], [], 4, 7)] } else { [] }
     let ref = TNamed(name, args, [], 0, 8)
@@ -3496,20 +3543,24 @@ test "type reads retain local nominal answers without bypassing shadowing" {
     assert len(reads) == count
     if name == "Alias" {
       let al = map.get(initial.aliases, name).expect("Alias")
-      assert reads == [semantic_reads.LocalAliasHeader("Alias", Some(AliasTypeHeader { name: al.name,
+      assert reads == test_named_environment(initial, "Alias") ++ [semantic_reads.LocalAliasHeader("Alias", Some(AliasTypeHeader { name: al.name,
         tparams: [], eparams: [], opaque_id: None, owner: al.owner })), semantic_reads.LocalAliasTarget("Alias", Some(TyInt))]
     } else if name == "Int" {
-      assert reads == [semantic_reads.LocalAliasHeader("Int", None)]
-    } else if count > 0 {
-      assert reads[0] == semantic_reads.LocalAliasHeader(name, None)
-      assert reads[1] == semantic_reads.NominalTypeName(None, name, map.get(initial.adts_by_name, name))
+      assert reads == test_plain_builtin(initial, "Int")
+    } else if name == "T" {
+      assert reads == test_named_environment(initial, "T")
+    } else if name == "Never" {
+      assert reads == [semantic_reads.BuiltinTypeAnswer("Never", map.get(initial.btypes, "Never"))]
+    } else {
+      let prefix = test_named_environment(initial, name) ++ [semantic_reads.LocalAliasHeader(name, None),
+        semantic_reads.BuiltinTypeAnswer(name, None), semantic_reads.NominalTypeName(None, name, map.get(initial.adts_by_name, name))]
       if name == "Box" {
         let id = map.get(initial.adts_by_name, name).expect("Box")
-        assert reads[2] == semantic_reads.NominalTypeShape(id, "Box", 1, [], true)
-        if supplied { assert reads[3] == semantic_reads.LocalAliasHeader("Int", None) }
+        let suffix: List[semantic_reads.FunctionRead] = if supplied { test_plain_builtin(initial, "Int") } else { [] }
+        assert reads == prefix ++ [semantic_reads.NominalTypeShape(id, "Box", 1, [], true)] ++ suffix
       } else {
-        assert reads[2] == semantic_reads.LocalTypeDiagnostic(name,
-          ExportDiagnostic { message: cold.diags[0].msg, hint: Some(cold.diags[0].hint) })
+        assert reads == prefix ++ [semantic_reads.LocalTypeDiagnostic(name,
+          ExportDiagnostic { message: cold.diags[0].msg, hint: Some(cold.diags[0].hint) })]
       }
     }
   }
@@ -3536,7 +3587,7 @@ test "type reads retain qualified alias and nominal decision boundaries" {
     assert cold.next_id == observed.next_id
     let reads = observed.function_reads.expect("type reads")
     let local_count = if written == "h.Mapper[Int, !io]" || written == "h.Box[Int]" { 2 } else { 1 }
-    assert len(reads) == count + local_count
+    assert len(reads) == count + 5 * local_count
     assert reads[0] == semantic_reads.ExportPresence(if written == "missing.Id" { "missing" } else { "h" }, written != "missing.Id")
     var alias_headers = 0
     var type_diagnostics = 0

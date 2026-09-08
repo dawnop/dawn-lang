@@ -6,7 +6,7 @@
 use std/map
 use std/list
 use check/cx.{Cx, Frame, cx_new}
-use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled}
+use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
@@ -418,7 +418,9 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.ParameterBounds(TyVar("T", 1), Some([2])),
       semantic_reads.TraitAssociatedMembers(2, semantic_reads.AssociatedType, ["Item"]),
       semantic_reads.DeclaredEffect("Ask", Some(ELabeled(EPure, [(3, "Ask")]))),
-      semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 3)))]),
+      semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 3))),
+      semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 1)) })),
+      semantic_reads.StdModuleMode(false)]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -442,7 +444,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 19
+  assert len(p.function_reads.expect("read delta")) == 21
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -459,7 +461,9 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.ParameterBounds(TyVar("T", 11), Some([22])),
     semantic_reads.TraitAssociatedMembers(22, semantic_reads.AssociatedType, ["Item"]),
     semantic_reads.DeclaredEffect("Ask", Some(ELabeled(EPure, [(43, "Ask")]))),
-    semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 33)))]
+    semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 33))),
+    semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 11)) })),
+    semantic_reads.StdModuleMode(false)]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

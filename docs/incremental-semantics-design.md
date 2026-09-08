@@ -479,6 +479,17 @@ distinction between nominal label IDs and effect-variable IDs. They cannot use
 one raw-ID mapping for both. Observation must preserve complete state, diagnostics and allocation;
 these facts alone do not establish runtime query wiring or cache admission.
 
+### Type environment read boundary (implementation in progress)
+
+Named types query the builtin table before the scoped parameter table, so
+return-only reserved names still win over recovery-scope collisions. Alias
+resolution precedes the later ordinary builtin lookup. Record each lookup where
+it occurs, including negative answers and repeated builtin queries. Visibility
+checks record the actual std-module mode only when that argument is consumed.
+Builtin metadata retains name, parameter spellings, access policy and build
+shape; leaf builds project their actual Ty through the type domain. These facts
+do not replace complete Java dependencies or runtime query wiring.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、
