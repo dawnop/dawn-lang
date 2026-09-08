@@ -551,6 +551,43 @@ queries through the existing class-info observer. Preserve argument visitation,
 candidate order, diagnostics and emitted conversion metadata. These facts alone
 do not establish oracle lifetime validity or production query admission.
 
+### Local value namespace reads (implementation in progress)
+
+Observe local constructor identity and constant type lookups, including misses.
+Constant declaration-order visibility is its own Boolean answer; hidden later
+constants must not be queried before the original cutoff guard permits them.
+Already-resolved qualified constructors skip the local lookup. Constructor ADT
+identities project through the nominal domain while slots remain declaration
+positions; constant types use the type projection domain. Shape, shadowing,
+pattern and SAM-prepass consumers must also be wired before admission.
+Constructor-count and field-arity answers are separate facts keyed by nominal
+identity (and constructor slot for arity). Both local and qualified refutability
+checks retain the count before an early return. SAM deferral and arity prepasses
+thread their contexts independently, preserving repeated lookups and syntax
+shortcuts before the Java oracle is consulted.
+Value resolution, static field/method receivers and inferred-return dependency
+scanning also retain constructor-before-constant shadow checks. A constructor
+hit skips the constant table; syntactically ineligible static receivers skip
+both. These guards use declaration presence, not constant body visibility.
+Local pattern resolution retains constructor identity even on recovery paths.
+Expected-type probes retain constructor identity, field arity and the existing
+nominal shape fact (including generic arity and record syntax), both for bare
+constructor values and explicit applications. Constructor field types and
+diagnostic suggestion pools remain separate dependencies to cover.
+Constructor calls, patterns and function values now read a focused nominal
+header (identity, name, record syntax and ordered type binders) plus the selected
+constructor's complete ordered fields. Projection translates both query and
+answer nominal identities, every binder and field type, while preserving field
+names and constructor slots. Consumers receive the focused header rather than
+an entire ADT table entry, preventing accidental unobserved access to sibling
+constructors or ownership metadata through that answer.
+Undefined-constructor diagnostics observe nominal-name resolution before the
+ordered constructor-name list, or declared-constant membership before the
+ordered suggestion pool. Pattern suggestions exclude constants; value
+suggestions concatenate both namespaces without deduplicating or sorting.
+These reads occur after argument recovery, matching the original diagnostic
+ordering, and later branches are skipped when an earlier diagnostic applies.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

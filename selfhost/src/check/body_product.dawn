@@ -6,7 +6,7 @@
 use std/map
 use std/list
 use check/cx.{Cx, Frame, cx_new}
-use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
+use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
@@ -14,7 +14,7 @@ use check/relocate
 use check/semantic_reads
 use check/jsig.{JClass, JMethod, JCtor, JField}
 use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
-  AliasTypeHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
+  AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
 use check/relocate_tree
 use check/relocate_tree.{View}
@@ -435,7 +435,13 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.JavaFindClass("lookup.Class", Some(found_class)), semantic_reads.JavaClassNames(["Z", "A"]),
       semantic_reads.JavaAssignable("pkg.Parent", "pkg.Child", false),
       semantic_reads.JavaSam("pkg.Callback", Some(methods[0])),
-      semantic_reads.JavaComponent("[Lpkg.Child;", Some("pkg.Child"))]),
+      semantic_reads.JavaComponent("[Lpkg.Child;", Some("pkg.Child")),
+      semantic_reads.LocalConstructor("Box", Some((4, 0))), semantic_reads.LocalConstant("VALUE", Some(TyVar("T", 1))),
+      semantic_reads.ConstantVisible("LATER", false), semantic_reads.ConstructorCount(4, 2), semantic_reads.ConstructorArity(4, 0, 1),
+      semantic_reads.ConstructorHeaderAnswer(4, ConstructorHeader { id: 4, name: "Box", is_record: true, tparams: [TyVar("T", 1)] }),
+      semantic_reads.ConstructorFields(4, 0, CtorI { adt: 4, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 1) }] }),
+      semantic_reads.ConstructorNames(4, ["Z", "A"]), semantic_reads.DeclaredConstantName("LATER", true),
+      semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"])]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -459,7 +465,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 32
+  assert len(p.function_reads.expect("read delta")) == 42
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -486,7 +492,13 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.JavaFindClass("lookup.Class", Some(found_class)), semantic_reads.JavaClassNames(["Z", "A"]),
     semantic_reads.JavaAssignable("pkg.Parent", "pkg.Child", false),
     semantic_reads.JavaSam("pkg.Callback", Some(methods[0])),
-    semantic_reads.JavaComponent("[Lpkg.Child;", Some("pkg.Child"))]
+    semantic_reads.JavaComponent("[Lpkg.Child;", Some("pkg.Child")),
+    semantic_reads.LocalConstructor("Box", Some((44, 0))), semantic_reads.LocalConstant("VALUE", Some(TyVar("T", 11))),
+    semantic_reads.ConstantVisible("LATER", false), semantic_reads.ConstructorCount(44, 2), semantic_reads.ConstructorArity(44, 0, 1),
+    semantic_reads.ConstructorHeaderAnswer(44, ConstructorHeader { id: 44, name: "Box", is_record: true, tparams: [TyVar("T", 11)] }),
+    semantic_reads.ConstructorFields(44, 0, CtorI { adt: 44, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 11) }] }),
+    semantic_reads.ConstructorNames(44, ["Z", "A"]), semantic_reads.DeclaredConstantName("LATER", true),
+    semantic_reads.LocalValueCandidates(true, ["Z", "A", "VALUE"])]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

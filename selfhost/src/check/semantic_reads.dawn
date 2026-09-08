@@ -5,13 +5,14 @@
 use std/list
 use front/ast.{TypeRef, TNamed}
 use check/jsig.{JClass, JMethod, JCtor, JField}
-use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
+use check/types.{Sig, Ty, Eff, CtorI, FieldI, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
 pub type AliasTypeHeader = { name: String, tparams: List[Ty], eparams: List[Eff], opaque_id: Option[Int], owner: String }
 pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic | TypeDiagnostic
 pub type AssociatedKind = AssociatedType | AssociatedEffect
+pub type ConstructorHeader = { id: Int, name: String, is_record: Bool, tparams: List[Ty] }
 pub type FunctionRead = FunctionAnswer(read: NamedFunctionRead) | FunctionCandidates(names: List[String]) |
 QualifiedFunction(qualifier: String, read: NamedFunctionRead) | ModuleAlias(qualifier: String, path: Option[String]) |
 QualifiedConstant(qualifier: String, name: String, answer: Option[(String, Ty)]) |
@@ -46,6 +47,16 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | JavaAssignable(superclass: String, subclass: String, answer: Bool)
   | JavaSam(name: String, answer: Option[JMethod])
   | JavaComponent(name: String, answer: Option[String])
+  | LocalConstructor(name: String, answer: Option[(Int, Int)])
+  | LocalConstant(name: String, answer: Option[Ty])
+  | ConstantVisible(name: String, visible: Bool)
+  | ConstructorCount(adt: Int, count: Int)
+  | ConstructorArity(adt: Int, slot: Int, arity: Int)
+  | ConstructorHeaderAnswer(adt: Int, answer: ConstructorHeader)
+  | ConstructorFields(adt: Int, slot: Int, answer: CtorI)
+  | ConstructorNames(adt: Int, names: List[String])
+  | DeclaredConstantName(name: String, present: Bool)
+  | LocalValueCandidates(include_constants: Bool, names: List[String])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -155,6 +166,36 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
             QualifiedFunction(qualifier, NamedFunctionRead { name: read.name, answer: answer })
           }
           ModuleAlias(qualifier, path) -> ModuleAlias(qualifier, path)
+          LocalConstructor(name, answer) -> {
+            let moved = match answer {
+              None -> None
+              Some(pair) -> { let (adt, slot) = pair
+                Some((nominal(adt)?, slot))
+              }
+            }
+            LocalConstructor(name, moved)
+          }
+          LocalConstant(name, answer) -> {
+            let moved = match answer { None -> None, Some(ty) -> Some(type_value(ty)?) }
+            LocalConstant(name, moved)
+          }
+          ConstantVisible(name, visible) -> ConstantVisible(name, visible)
+          ConstructorCount(adt, count) -> ConstructorCount(nominal(adt)?, count)
+          ConstructorArity(adt, slot, arity) -> ConstructorArity(nominal(adt)?, slot, arity)
+          ConstructorNames(adt, names) -> ConstructorNames(nominal(adt)?, names)
+          DeclaredConstantName(name, present) -> DeclaredConstantName(name, present)
+          LocalValueCandidates(include_constants, names) -> LocalValueCandidates(include_constants, names)
+          ConstructorHeaderAnswer(adt, answer) -> {
+            var params: List[Ty] = []
+            for ty in answer.tparams { params = params ++ [type_value(ty)?] }
+            ConstructorHeaderAnswer(nominal(adt)?, ConstructorHeader { ..answer,
+              id: nominal(answer.id)?, tparams: params })
+          }
+          ConstructorFields(adt, slot, answer) -> {
+            var fields: List[FieldI] = []
+            for field in answer.fields { fields = fields ++ [FieldI { ..field, ty: type_value(field.ty)? }] }
+            ConstructorFields(nominal(adt)?, slot, CtorI { ..answer, adt: nominal(answer.adt)?, fields: fields })
+          }
           QualifiedConstant(qualifier, name, answer) -> {
             let moved_answer = match answer {
               None -> None
@@ -334,6 +375,42 @@ test "semantic reads preserve plain Java metadata without compiler ID mapping" {
   assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
   let prefix = Some([JavaClassName("Earlier", None)])
   assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
+}
+
+test "semantic reads preserve diagnostic candidate order and declaration answers" {
+  let reads = Some([ConstructorNames(7, ["Z", "A"]), DeclaredConstantName("LATER", true),
+    DeclaredConstantName("MISSING", false), LocalValueCandidates(false, ["Z", "A"]),
+    LocalValueCandidates(true, ["Z", "A", "VALUE", "A"])])
+  let expected = Some([ConstructorNames(17, ["Z", "A"]), DeclaredConstantName("LATER", true),
+    DeclaredConstantName("MISSING", false), LocalValueCandidates(false, ["Z", "A"]),
+    LocalValueCandidates(true, ["Z", "A", "VALUE", "A"])])
+  assert project(reads, s => None, t => None, id => Some(id + 10), e => None) == Some(expected)
+  assert project(reads, s => None, t => None, id => None, e => None) == None
+}
+
+test "semantic reads project constructor field types and both nominal identities" {
+  let reads = Some([
+    ConstructorHeaderAnswer(7, ConstructorHeader { id: 8, name: "Box", is_record: true, tparams: [TyVar("T", 3)] }),
+    ConstructorFields(7, 2, CtorI { adt: 8, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 3) }] })])
+  let expected = Some([
+    ConstructorHeaderAnswer(17, ConstructorHeader { id: 18, name: "Box", is_record: true, tparams: [TyInt] }),
+    ConstructorFields(17, 2, CtorI { adt: 18, name: "Box", fields: [FieldI { name: "value", ty: TyInt }] })])
+  assert project(reads, s => Some(s), t => Some(TyInt), id => Some(id + 10), e => Some(e)) == Some(expected)
+  assert project(reads, s => Some(s), t => None, id => Some(id + 10), e => Some(e)) == None
+  assert project(reads, s => Some(s), t => Some(t), id => if id == 8 { None } else { Some(id) }, e => Some(e)) == None
+  assert project(reads, s => Some(s), t => Some(t), id => if id == 7 { None } else { Some(id) }, e => Some(e)) == None
+}
+
+test "semantic reads project local value identities and preserve visibility" {
+  let reads = Some([LocalConstructor("Box", Some((7, 2))), LocalConstructor("Missing", None),
+    LocalConstant("VALUE", Some(TyVar("T", 3))), LocalConstant("MISSING", None),
+    ConstantVisible("VALUE", true), ConstantVisible("LATER", false), ConstructorCount(7, 3), ConstructorArity(7, 2, 4)])
+  let expected = Some([LocalConstructor("Box", Some((17, 2))), LocalConstructor("Missing", None),
+    LocalConstant("VALUE", Some(TyInt)), LocalConstant("MISSING", None),
+    ConstantVisible("VALUE", true), ConstantVisible("LATER", false), ConstructorCount(17, 3), ConstructorArity(17, 2, 4)])
+  assert project(reads, s => Some(s), t => Some(TyInt), id => Some(id + 10), e => Some(e)) == Some(expected)
+  assert project(reads, s => Some(s), t => Some(TyInt), id => None, e => Some(e)) == None
+  assert project(reads, s => Some(s), t => None, id => Some(id + 10), e => Some(e)) == None
 }
 
 test "semantic reads preserve Java scoring answers and directional keys" {

@@ -325,6 +325,23 @@ The class/member/namespace regression controls measured 228.37/281.28/258.25s
 under concurrent load. Their separate jobs conservatively retain those larger
 observations at 496s/25min, 602s/31min and 556s/28min respectively.
 
+`local-value-reads.py` checks constructor/constant identities, visibility,
+constructor counts and field arities, focused headers, selected fields and
+ordered diagnostic candidate pools. Its mutations must compile and reach an
+owning assertion; bootstrap or parse failures do not count. Six additional
+complete module/Cx cases bring the observation oracle to 95 cases, covering
+generic constructors, patterns, constant references and diagnostic refusals.
+These observations do not yet establish complete dependency coverage or
+production cache validity. The 21 compiling controls took 152.08s locally on
+2026-09-08. Their independent CI job uses a 344s planning value (2*153+38)
+and an 18-minute timeout, preserving the existing 660s pole and all other
+contracts. Full batch acceptance remains required before publication.
+The complete 95-case/30-mutant typed run took 266.72s; its independent job
+now uses a 572s planning value (2*267+38) and a 29-minute timeout.
+The Java oracle regression took 250.55s, yielding 540s/27min. State products
+took 155.55s for 19 controls; they now run separately at 350s/18min, retaining
+the other state contracts and their existing budget without exceeding the pole.
+
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，

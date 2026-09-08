@@ -1088,8 +1088,9 @@ jobs:
     # The current 62-case run took 228.54s: 2*229+38=496s.
     # The 81-case namespace run took 239.16s; retain the larger measured
     # 72-case member run (244.70s): 2*245+38=528s.
-    # budget: 3x 528s planning value
-    timeout-minutes: 27
+    # The 95-case local-value run took 266.72s: 2*267+38=572s.
+    # budget: 3x 572s planning value
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1225,7 +1226,8 @@ jobs:
     runs-on: ubuntu-latest
     # All 32 compiling oracle controls took 246.67s locally on 2026-09-08.
     # Keep the unchanged 660s pole and every existing read contract.
-    # budget: 3x 532s planning value (2*247+38)
+    # Current local-value regression took 250.55s: 2*251+38=540s.
+    # budget: 3x 540s planning value
     timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
@@ -1234,6 +1236,34 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Java scoring oracle read contracts
         run: python3 scripts/incremental-semantics-contract/java-oracle-reads.py
+
+  incremental-local-values:
+    runs-on: ubuntu-latest
+    # All 21 compiling local-value controls took 152.08s on 2026-09-08.
+    # Preserve the 660s pole and every existing read contract.
+    # budget: 3x 344s planning value (2*153+38)
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Local constructor and constant read contracts
+        run: python3 scripts/incremental-semantics-contract/local-value-reads.py
+
+  incremental-state-products:
+    runs-on: ubuntu-latest
+    # All 19 state-product mutants took 155.55s on 2026-09-08.
+    # Keeping them with the other state contracts would exceed the 660s pole.
+    # budget: 3x 350s planning value (2*156+38)
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: State product contracts
+        run: python3 scripts/incremental-semantics-contract/state-product.py
 
   incremental-state:
     runs-on: ubuntu-latest
@@ -1246,6 +1276,8 @@ jobs:
     # Header state's nine mutants and field audits took 31.61s.
     # Query runtime's seventeen mutants took 41.06s.
     # 2*(90+37+57+32+42)+38=554s; no contract or negative control was removed.
+    # State products now run independently above after measuring 155.55s.
+    # Retain the existing budget for the remaining contracts; none are removed.
     # budget: 3x 554s planning value
     timeout-minutes: 28
     steps:
@@ -1255,7 +1287,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: state product and declaration identity contracts
         run: |
-          python3 scripts/incremental-semantics-contract/state-product.py
           python3 scripts/incremental-semantics-contract/identity.py
           python3 scripts/incremental-semantics-contract/header-metadata.py
           python3 scripts/incremental-semantics-contract/header-state.py

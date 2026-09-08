@@ -399,6 +399,23 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  for sample in [
+    ("type Choice[T] = Item(value: T) | Empty\nfn go() -> Choice[Int] = Item(1)", 0),
+    ("type Choice[T] = Item(value: T) | Empty\nfn go() -> Choice[Int] = Empty", 0),
+    ("type Choice = Item(value: Int) | Empty\nfn go(x: Choice) -> Int = match x { Item(v) -> v, Empty -> 0 }", 0),
+    ("const VALUE: Int = 1\nfn go() -> Int = VALUE", 0),
+    ("const FIRST: Int = LATER\nconst LATER: Int = 1", 1),
+    ("type Choice = Last | First\nfn go() -> Int = Choice", 1)] {
+    let (text, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("Local value observation parse") }
+    let initial = cx_new(Some("local_value_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("Local value observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 
