@@ -12,7 +12,7 @@ use std/list
 use std/map
 use std/set
 use check/semantic_reads
-use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic}
+use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic, AliasTypeHeader}
 use front/ast.{
   TypeRef, TNamed, Module,
   module_fns, module_types, module_consts, module_traits,
@@ -82,7 +82,7 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, resolve_return_type, is_const_serializable, const_refusal_hint, no_sig,
+  resolve_type, resolve_return_type, resolve_alias_target, is_const_serializable, const_refusal_hint, no_sig,
   TySpan
 }
 use check/passes.{
@@ -3316,6 +3316,162 @@ fn check_ctor_pattern_at(
 }
 
 fn no_tpat() -> Option[TPat] = None
+
+test "type reads retain local alias cache and cycle short circuits" {
+  let (syntax, pd) = parser.parse_module("alias Alias = Int\n")
+  assert pd == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  assert headers.cx.diags == []
+  let declaration = map.get(headers.cx.aliases, "Alias").expect("local alias")
+  let samples: List[(Option[Ty], Bool, Bool, Ty, Int)] = [
+    (Some(TyInt), true, true, TyInt, 0), (Some(TyError), false, true, TyError, 0),
+    (None, false, true, TyError, 0), (None, true, false, TyInt, 0), (None, true, true, TyError, 1)]
+  for sample in samples {
+    let (cached, target_present, active, expected, errors) = sample
+    let resolved = match cached { Some(t) -> map.from([("Alias", t)]), None -> map.empty() }
+    let alias_entry = AliasE { ..declaration, target: if target_present { declaration.target } else { None } }
+    let initial = Cx { ..headers.cx, alias_resolved: resolved,
+      alias_resolving: if active { set.from(["Alias"]) } else { set.empty() },
+      current_tparams: map.from([("Outer", TyVar("Outer", 9000))]) }
+    let (cold, cold_ty) = resolve_alias_target(initial, alias_entry, 7, 12)
+    let (observed, observed_ty) = resolve_alias_target(Cx { ..initial, function_reads: Some([]) }, alias_entry, 7, 12)
+    assert cold_ty == expected && cold_ty == observed_ty
+    assert cold.diags == observed.diags && len(cold.diags) == errors
+    assert cold.alias_resolved == observed.alias_resolved && cold.alias_resolving == observed.alias_resolving
+    assert cold.current_tparams == observed.current_tparams && cold.current_tparams == initial.current_tparams
+    assert cold.current_eff_vars == observed.current_eff_vars && cold.current_eff_vars == initial.current_eff_vars
+    assert cold.next_id == observed.next_id
+    let reads = observed.function_reads.expect("alias reads")
+    if cached == None && target_present {
+      let prefix = [semantic_reads.LocalAliasTarget("Alias", None),
+        semantic_reads.LocalAliasSource("Alias", alias_entry.owner, alias_entry.target), semantic_reads.LocalAliasResolving("Alias", active)]
+      assert reads == if active { prefix } else { prefix ++ [semantic_reads.LocalAliasBinders("Alias", [], []),
+        semantic_reads.LocalAliasHeader("Int", None)] }
+    } else if cached == None {
+      assert reads == [semantic_reads.LocalAliasTarget("Alias", None), semantic_reads.LocalAliasSource("Alias", alias_entry.owner, None)]
+    } else {
+      assert reads == [semantic_reads.LocalAliasTarget("Alias", cached)]
+    }
+  }
+}
+
+test "type reads retain uncached alias binder inputs" {
+  let (syntax, pd) = parser.parse_module("alias Mapper[T, !e] = fn(T) -> T !e\n")
+  assert pd == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  assert headers.cx.diags == []
+  let al = map.get(headers.cx.aliases, "Mapper").expect("Mapper")
+  let initial = Cx { ..headers.cx, alias_resolved: map.empty(),
+    current_tparams: map.from([("Outer", TyVar("Outer", 9000))]) }
+  let (cold, cold_ty) = resolve_alias_target(initial, al, 0, 6)
+  let (observed, observed_ty) = resolve_alias_target(Cx { ..initial, function_reads: Some([]) }, al, 0, 6)
+  assert cold_ty == observed_ty && Some(cold_ty) == map.get(headers.cx.alias_resolved, "Mapper")
+  assert cold.diags == [] && observed.diags == [] && cold.next_id == observed.next_id
+  assert cold.current_tparams == initial.current_tparams && observed.current_tparams == initial.current_tparams
+  assert cold.current_eff_vars == initial.current_eff_vars && observed.current_eff_vars == initial.current_eff_vars
+  assert observed.function_reads == Some([semantic_reads.LocalAliasTarget("Mapper", None),
+    semantic_reads.LocalAliasSource("Mapper", al.owner, al.target), semantic_reads.LocalAliasResolving("Mapper", false),
+    semantic_reads.LocalAliasBinders("Mapper", al.tparams, al.eparams)])
+}
+
+test "type reads retain local nominal answers without bypassing shadowing" {
+  let (syntax, pd) = parser.parse_module("type Box[T] = { value: T }\nalias Alias = Int\n")
+  assert pd == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  assert headers.cx.diags == []
+  let initial = Cx { ..headers.cx, current_tparams: map.from([("T", TyVar("T", 9000))]) }
+  for sample in [("Box", true, 4, 0), ("Box", false, 3, 1), ("Bxo", false, 3, 1),
+    ("Missing", false, 3, 1), ("Alias", false, 2, 0), ("Int", false, 1, 0), ("T", false, 0, 0),
+    ("Never", false, 0, 1)] {
+    let (name, supplied, count, errors) = sample
+    let args: List[TypeRef] = if supplied { [TNamed("Int", [], [], 4, 7)] } else { [] }
+    let ref = TNamed(name, args, [], 0, 8)
+    let (cold, cold_ty) = resolve_type(initial, ref)
+    let (observed, observed_ty) = resolve_type(Cx { ..initial, function_reads: Some([]) }, ref)
+    assert cold_ty == observed_ty && cold.diags == observed.diags && len(cold.diags) == errors
+    assert cold.next_id == observed.next_id
+    let reads = observed.function_reads.expect("local type reads")
+    assert len(reads) == count
+    if name == "Alias" {
+      let al = map.get(initial.aliases, name).expect("Alias")
+      assert reads == [semantic_reads.LocalAliasHeader("Alias", Some(AliasTypeHeader { name: al.name,
+        tparams: [], eparams: [], opaque_id: None, owner: al.owner })), semantic_reads.LocalAliasTarget("Alias", Some(TyInt))]
+    } else if name == "Int" {
+      assert reads == [semantic_reads.LocalAliasHeader("Int", None)]
+    } else if count > 0 {
+      assert reads[0] == semantic_reads.LocalAliasHeader(name, None)
+      assert reads[1] == semantic_reads.NominalTypeName(None, name, map.get(initial.adts_by_name, name))
+      if name == "Box" {
+        let id = map.get(initial.adts_by_name, name).expect("Box")
+        assert reads[2] == semantic_reads.NominalTypeShape(id, "Box", 1, [], true)
+        if supplied { assert reads[3] == semantic_reads.LocalAliasHeader("Int", None) }
+      } else {
+        assert reads[2] == semantic_reads.LocalTypeDiagnostic(name,
+          ExportDiagnostic { message: cold.diags[0].msg, hint: Some(cold.diags[0].hint) })
+      }
+    }
+  }
+}
+
+test "type reads retain qualified alias and nominal decision boundaries" {
+  let (provider_ast, pd) = parser.parse_module("pub alias Plain = Int\n" ++
+      "pub alias Mapper[T, !e] = fn(T) -> T !e\n" ++
+      "pub opaque type Id = Int\npub type Box[T] = { value: T }\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  assert provider.diags == []
+  let exp = exports_of(provider, provider_ast, "helper", "helper")
+  let env = map.from([("helper", exp)])
+  for sample in [("h.Plain", 3, 0), ("h.Mapper[Int, !io]", 3, 0), ("h.Id", 3, 0),
+    ("h.Box[Int]", 4, 0), ("h.Box", 4, 1), ("h.Mapper", 2, 1), ("h.Missing", 4, 1), ("missing.Id", 1, 1)] {
+    let (written, count, errors) = sample
+    let (syntax, parsed) = parser.parse_module("use helper as h\nfn go(x: " ++ written ++ ") -> Unit = ()\n")
+    assert parsed == []
+    let initial = Cx { ..cx_new(Some("main"), None), next_id: provider.next_id }
+    let (cold, cold_module) = check_module(initial, syntax, env)
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, env)
+    assert len(cold.diags) == errors && cold.diags == observed.diags && cold_module == observed_module
+    assert cold.next_id == observed.next_id
+    let reads = observed.function_reads.expect("type reads")
+    let local_count = if written == "h.Mapper[Int, !io]" || written == "h.Box[Int]" { 2 } else { 1 }
+    assert len(reads) == count + local_count
+    assert reads[0] == semantic_reads.ExportPresence(if written == "missing.Id" { "missing" } else { "h" }, written != "missing.Id")
+    var alias_headers = 0
+    var type_diagnostics = 0
+    var local_headers = 0
+    for read in reads {
+      match read {
+        semantic_reads.LocalAliasHeader(name, answer) -> {
+          local_headers = local_headers + 1
+          assert answer == None && (name == "Int" || name == "Unit")
+        }
+        semantic_reads.QualifiedAliasHeader(q, name, Some(header)) -> {
+          alias_headers = alias_headers + 1
+          let original = map.get(exp.aliases, name).expect("alias")
+          assert q == "h" && header.name == original.name && header.owner == original.owner
+          assert header.tparams == original.tparams && header.eparams == original.eparams
+          assert header.opaque_id == if original.is_opaque { Some(original.id) } else { None }
+        }
+        semantic_reads.QualifiedAliasTarget(q, name, answer) -> { assert q == "h" && answer == map.get(exp.alias_resolved, name) }
+        semantic_reads.NominalTypeName(q, name, answer) -> { assert q == Some("h") && answer == map.get(exp.types_by_name, name) }
+        semantic_reads.NominalTypeShape(id, name, arity, eparams, record) -> {
+          let info = adt_of(observed.adts, id)
+          assert name == "Box" && info.name == name && arity == 1 && eparams == [] && record
+        }
+        semantic_reads.ExportDiagnosticAnswer(kind, q, name, Some(diagnostic)) -> {
+          type_diagnostics = type_diagnostics + 1
+          assert kind == semantic_reads.TypeDiagnostic && q == "h" && name == "Missing"
+          assert diagnostic.message == cold.diags[0].msg && diagnostic.hint == Some(cold.diags[0].hint)
+        }
+        _ -> ()
+      }
+    }
+    let has_alias = written == "h.Plain" || written == "h.Mapper[Int, !io]" || written == "h.Mapper" || written == "h.Id"
+    assert alias_headers == if has_alias { 1 } else { 0 }
+    assert local_headers == local_count
+    assert type_diagnostics == if written == "h.Missing" { 1 } else { 0 }
+  }
+}
 
 test "export reads retain qualified pattern answers and recovery" {
   let (syntax, pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n")

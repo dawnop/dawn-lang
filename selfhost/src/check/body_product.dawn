@@ -9,11 +9,16 @@ use check/cx.{Cx, Frame, cx_new}
 use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
+use front/ast.{TypeRef, TNamed}
 use check/relocate
 use check/semantic_reads
-use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor}
+use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
+  AliasTypeHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
+  LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
 use check/relocate_tree
 use check/relocate_tree.{View}
+use check/relocate_header
+use check/relocate_header.{HeaderView}
 
 pub type Change[K, V] = { key: K, value: Option[V] }
 
@@ -202,15 +207,25 @@ fn projected_frame(v: View, f: Frame) -> Option[Frame] = {
 ## as handler installations. Require a complete bijection onto the target
 ## interval, not just a mapping for the symbols the tree happens to mention.
 pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = {
-  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree))
+  project_with_source(v, p, allocation_start, (owner, source) => None)
 }
 
 pub fn project_constant(v: View, p: ConstantProduct, allocation_start: Int) -> Option[ConstantProduct] = {
-  project_body(v, p, allocation_start, tree => relocate_tree.constant(v, tree))
+  project_constant_with_source(v, p, allocation_start, (owner, source) => None)
+}
+
+pub fn project_with_source(v: View, p: Product, allocation_start: Int,
+  source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Product] = {
+  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree), source_value)
+}
+
+pub fn project_constant_with_source(v: View, p: ConstantProduct, allocation_start: Int,
+  source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[ConstantProduct] = {
+  project_body(v, p, allocation_start, tree => relocate_tree.constant(v, tree), source_value)
 }
 
 fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
-  project_tree: fn(T) -> Option[T]) -> Option[BodyProduct[T]] = {
+  project_tree: fn(T) -> Option[T], source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[BodyProduct[T]] = {
   if p.allocation_count < 0 { return None }
   let old_limit = p.allocation_start + p.allocation_count
   let limit = allocation_start + p.allocation_count
@@ -244,8 +259,8 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   Some(BodyProduct { ..p, tree: project_tree(p.tree)?, allocation_start: allocation_start,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell,
-    function_reads: semantic_reads.project(p.function_reads, s => relocate.signature(v.ids, s),
-      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id))? })
+    function_reads: semantic_reads.project_with_source(p.function_reads, s => relocate.signature(v.ids, s),
+      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value)? })
 }
 
 test "body product keyed writes preserve unrelated preceding products" {
@@ -288,6 +303,38 @@ fn fixture_function(cx: Cx) -> TFun = {
     owner: cx.owner_class, trait_id: None, op_of: None, inferring: false }
   TFun { name: "fixture", sig: sig, param_syms: [], dict_syms: [], ev_syms: [], defaults: [],
     body: XUnit(0, 1), is_test: false, impl_of: None, default_of: None }
+}
+
+test "body product separates alias declaration positions from body positions" {
+  let before = Cx { ..cx_new(Some("consumer"), None), function_reads: Some([]) }
+  let target = TNamed("Int", [], [], 0, 1)
+  let after = Cx { ..before, function_reads: Some([semantic_reads.LocalAliasSource("Alias", "provider", Some(target))]) }
+  let f = fixture_function(before)
+  let p = capture(before, after, f).expect("capture source read")
+  let empty: Map[Int, Int] = map.empty()
+  let ids = relocate.new(empty, empty, empty, empty, empty).expect("source fixture ids")
+  let view = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+    assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => Some(f.sig) }
+  let header = HeaderView { ids: ids,
+    position: (owner, path, at) => if owner == Some("provider") { Some(at + 1000) } else { None },
+    end_position: (owner, path, at) => if owner == Some("provider") { Some(at + 2000) } else { None } }
+  assert project(view, p, before.next_id) == None
+  let q = project_with_source(view, p, before.next_id,
+    (owner, source) => relocate_header.type_source(header, Some(owner), source)).expect("project owned source")
+  assert q.tree.body == XUnit(100, 104)
+  let cx = assemble(before, q).expect("assemble owned source")
+  assert cx.function_reads == Some([semantic_reads.LocalAliasSource("Alias", "provider", Some(TNamed("Int", [], [], 1000, 2001)))])
+  assert project_with_source(view, p, before.next_id,
+    (owner, source) => relocate_header.type_source(header, Some("consumer"), source)) == None
+  let constant = TConst { name: "VALUE", ty: TyUnit, init: XUnit(0, 1), lo: 0, hi: 1 }
+  let saved_constant = capture_constant(before, after, constant).expect("capture constant source read")
+  assert project_constant(view, saved_constant, before.next_id) == None
+  let moved_constant = project_constant_with_source(view, saved_constant, before.next_id,
+    (owner, source) => relocate_header.type_source(header, Some(owner), source)).expect("project constant owned source")
+  assert moved_constant.tree == TConst { name: "VALUE", ty: TyUnit, init: XUnit(100, 104), lo: 100, hi: 104 }
+  let constant_cx = assemble(before, moved_constant).expect("assemble constant owned source")
+  assert constant_cx.function_reads == cx.function_reads
 }
 
 test "body product captures state writes without retaining old cumulative tables" {
@@ -348,6 +395,7 @@ test "body product restores symbol insertion order after a binding permutation" 
 }
 
 test "body product projects every state reference and the whole allocation interval" {
+  let diagnostic = ExportDiagnostic { message: "unknown type `Missing`", hint: Some("did you mean `Record`?") }
   let before = Cx { ..cx_new(None, None), next_id: 10,
     function_reads: Some([FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None })]) }
   let f = fixture_function(before)
@@ -357,7 +405,14 @@ test "body product projects every state reference and the whole allocation inter
     function_reads: Some([FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
       FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 1) }) }),
       FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"]),
-      QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 1)))), QualifiedConstructor("h", "Item", Some((4, 1)))]),
+      QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 1)))), QualifiedConstructor("h", "Item", Some((4, 1))),
+      QualifiedAliasHeader("h", "Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 1)],
+        eparams: [EffVar("e", 3)], opaque_id: Some(4), owner: "provider" })),
+      QualifiedAliasTarget("h", "Alias", Some(TyVar("T", 1))), NominalTypeName(Some("h"), "Record", Some(4)),
+      NominalTypeShape(4, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
+      LocalAliasTarget("Alias", Some(TyVar("T", 1))), LocalAliasResolving("Alias", true),
+      LocalAliasHeader("Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 1)], eparams: [EffVar("e", 3)],
+        opaque_id: Some(4), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 1)], [EffVar("e", 3)])]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -381,12 +436,19 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 5
+  assert len(p.function_reads.expect("read delta")) == 14
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
     FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"]),
-    QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 11)))), QualifiedConstructor("h", "Item", Some((44, 1)))]
+    QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 11)))), QualifiedConstructor("h", "Item", Some((44, 1))),
+    QualifiedAliasHeader("h", "Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 11)],
+      eparams: [EffVar("e", 33)], opaque_id: Some(44), owner: "provider" })),
+    QualifiedAliasTarget("h", "Alias", Some(TyVar("T", 11))), NominalTypeName(Some("h"), "Record", Some(44)),
+    NominalTypeShape(44, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
+    LocalAliasTarget("Alias", Some(TyVar("T", 11))), LocalAliasResolving("Alias", true),
+    LocalAliasHeader("Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 11)], eparams: [EffVar("e", 33)],
+      opaque_id: Some(44), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 11)], [EffVar("e", 33)])]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])
