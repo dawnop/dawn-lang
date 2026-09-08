@@ -5,8 +5,10 @@ use std/map
 use std/list
 use check/identity
 use check/identity.{DeclKey, ModuleKey, Named, ImplHead, EffectDecl, FunctionDecl, TypeDecl, TraitDecl, MethodDecl, module_key}
-use check/cx.{Cx}
+use check/cx.{Cx, cx_new}
+use front/parser
 use check/relocate
+use check/types as builtin_types
 use check/relocate.{Ids}
 use check/types.{Sig, ImplI, Ty, Eff, TyVar, EffVar, TyUnit, EPure, ELabeled}
 use front/ast.{Module, DType, DImpl, module_impls}
@@ -57,6 +59,27 @@ pub fn combine(tables: List[Table]) -> Option[Table] = {
   table(entries)
 }
 
+## Rebind a baseline into its enclosing owner, never merge unrelated worlds.
+## This does not validate revisions or authorize sharing a memo between owners.
+pub fn in_world(origin: Table, from: String, world: String) -> Option[Table] = {
+  let data: Data = origin
+  var entries: List[Entry] = []
+  for (binding, id) in map.entries(data.bindings) {
+    let declaration = binding.declaration
+    if declaration.scope.world != from { return None }
+    let moved = DeclKey { ..declaration, scope: ModuleKey { ..declaration.scope, world: world } }
+    let slot = match binding.slot {
+      LabelEvidence(effect_key) -> {
+        if effect_key.scope.world != from { return None }
+        LabelEvidence(DeclKey { ..effect_key, scope: ModuleKey { ..effect_key.scope, world: world } })
+      }
+      other -> other
+    }
+    entries = entries ++ [Entry { binding: Binding { ..binding, declaration: moved, slot: slot }, id: id }]
+  }
+  table(entries)
+}
+
 pub fn temporary(declaration: DeclKey, domain: Domain, offset: Int, id: Int) -> Entry =
   Entry { binding: Binding { declaration: declaration, domain: domain, slot: BodySlot(offset) }, id: id }
 
@@ -98,6 +121,59 @@ pub fn signature_binders(owner: DeclKey, sig: Sig) -> Option[List[Entry]] = {
   binders(owner, sig.tparams, sig.eparams)
 }
 
+fn compiler_key(world: String, kind: identity.Kind, name: String) -> DeclKey =
+  DeclKey { scope: module_key(world, "@compiler", "@compiler", ""), path: [Named(kind, name)] }
+
+## The compiler's actual declaration tables own these reserved references.
+## Repeated builtin templates deliberately share one binding; no numeric range
+## or unchanged-integer fallback grants provenance to an unobserved reference.
+pub fn compiler_headers(world: String) -> Option[Table] = {
+  var entries: List[Entry] = []
+  var known: Map[Int, Bool] = map.empty()
+  for (_, adt) in map.entries(builtin_types.prelude_adts()) {
+    let key = compiler_key(world, TypeDecl, adt.name)
+    entries = entries ++ [entry(key, NominalId, 0, adt.id)] ++ binders(key, adt.tparams, adt.bound_eparams)?
+    for t in adt.tparams {
+      match t { TyVar(_, id) -> { known = map.insert(known, id, true) }, _ -> return None }
+    }
+  }
+  for (_, tr) in map.entries(builtin_types.prelude_traits()) {
+    let key = compiler_key(world, TraitDecl, tr.name)
+    entries = entries ++ [entry(key, TraitId, 0, tr.id)] ++ binders(key, [tr.tvar], [])?
+    match tr.tvar { TyVar(_, id) -> { known = map.insert(known, id, true) }, _ -> return None }
+  }
+  for info in builtin_types.prelude_impls() {
+    for t in info.tparams {
+      match t {
+        TyVar(name, id) -> if not map.has(known, id) {
+          entries = entries ++ [entry(compiler_key(world, TypeDecl, "impl_template_" ++ name), TypeParameter, 0, id)]
+          known = map.insert(known, id, true)
+        }
+        _ -> return None
+      }
+    }
+  }
+  for (_, sig) in map.entries(builtin_types.builtins()) {
+    for t in sig.tparams {
+      match t {
+        TyVar(name, id) -> { entries = entries ++ [entry(compiler_key(world, TypeDecl, "builtin_template_" ++ name), TypeParameter, 0, id)] }
+        _ -> return None
+      }
+    }
+    for e in sig.eparams {
+      match e {
+        EffVar(name, id) -> { entries = entries ++ [entry(compiler_key(world, EffectDecl, "builtin_template_" ++ name), EffectParameter, 0, id)] }
+        _ -> return None
+      }
+    }
+  }
+  match builtin_types.erased_ev_ty() {
+    TyVar(_, id) -> { entries = entries ++ [entry(compiler_key(world, TypeDecl, "erased_runtime"), TypeParameter, 0, id)] }
+    _ -> return None
+  }
+  table(entries)
+}
+
 pub type BodyPlan = { ids: Ids, next_id: Int, old_allocations: Table, next_allocations: Table }
 
 ## Reserve the recorded allocation interval without running the target body.
@@ -116,6 +192,8 @@ pub fn body_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
 ## have been checked or replayed, with their allocation tables passed here.
 ## The signature may still describe defaults; this interval does not execute
 ## them. Return the extended tables so later products can reference their IDs.
+## Both signatures describe entry headers, not a body's inferred output: the
+## sealed output is projected only after the full interval has been reserved.
 pub fn body_segment_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
   start: Int, count: Int, target: Int, old_sig: Sig, next_sig: Sig,
   evidence: List[Int]) -> Option[BodyPlan] = {
@@ -194,8 +272,14 @@ pub fn local_effects(scope: ModuleKey, syntax: Module, effects: Map[String, Int]
 ## Read completed local headers, not imported names or partially resolved
 ## shells. Opaque aliases own nominal IDs; transparent aliases only own their
 ## binders. Trait subjects belong to their trait, not separately to each method.
+fn header_source(scope: ModuleKey, cx: Cx) -> Bool =
+  match cx.src_path {
+    None -> scope.source == ""
+    Some(path) -> path != "" && path == scope.source
+  }
+
 pub fn local_headers(scope: ModuleKey, syntax: Module, cx: Cx) -> Option[List[Entry]] = {
-  if cx.owner_class != Some(scope.emission_owner) || cx.src_path != Some(scope.source) { return None }
+  if cx.owner_class != Some(scope.emission_owner) || not header_source(scope, cx) { return None }
   var out: List[Entry] = []
   for declaration in identity.declarations(scope, syntax) {
     let key = declaration.key
@@ -258,7 +342,7 @@ pub fn local_headers(scope: ModuleKey, syntax: Module, cx: Cx) -> Option[List[En
 ## inside this revision; the emitted entries join revisions by declaration key.
 pub fn local_impl_headers(scope: ModuleKey, syntax: Module, cx: Cx,
   signatures: List[List[Option[Sig]]]) -> Option[List[Entry]] = {
-  if cx.owner_class != Some(scope.emission_owner) || cx.src_path != Some(scope.source) { return None }
+  if cx.owner_class != Some(scope.emission_owner) || not header_source(scope, cx) { return None }
   let impls = module_impls(syntax)
   if len(signatures) != len(impls) { return None }
   let declarations = identity.declarations(scope, syntax)
@@ -313,6 +397,67 @@ pub fn local_impl_headers(scope: ModuleKey, syntax: Module, cx: Cx,
 
 fn fixture_key(name: String) -> DeclKey =
   DeclKey { scope: module_key("world", "pkg/m", "pkg/m", "m.dawn"), path: [Named(FunctionDecl, name)] }
+
+test "allocation compiler declarations own only observed reserved references" {
+  let origin = compiler_headers("compiler-test")
+  assert origin != None
+  let saved = origin.expect("compiler provenance")
+  let ids = between(saved, saved).expect("compiler IDs")
+  for (_, adt) in map.entries(builtin_types.prelude_adts()) {
+    assert relocate.nominal(ids, adt.id) == Some(adt.id)
+    for t in adt.tparams {
+      match t { TyVar(_, id) -> { assert relocate.type_var(ids, id) == Some(id) }, _ -> { assert false } }
+    }
+  }
+  for (_, tr) in map.entries(builtin_types.prelude_traits()) {
+    assert relocate.trait_id(ids, tr.id) == Some(tr.id)
+    match tr.tvar { TyVar(_, id) -> { assert relocate.type_var(ids, id) == Some(id) }, _ -> { assert false } }
+  }
+  for info in builtin_types.prelude_impls() {
+    for t in info.tparams {
+      match t { TyVar(_, id) -> { assert relocate.type_var(ids, id) == Some(id) }, _ -> { assert false } }
+    }
+  }
+  for (_, sig) in map.entries(builtin_types.builtins()) {
+    for t in sig.tparams {
+      match t { TyVar(_, id) -> { assert relocate.type_var(ids, id) == Some(id) }, _ -> { assert false } }
+    }
+    for e in sig.eparams {
+      match e { EffVar(_, id) -> { assert relocate.effect_var(ids, id) == Some(id) }, _ -> { assert false } }
+    }
+  }
+  assert relocate.type_var(ids, 0) == Some(0)
+  assert relocate.nominal(ids, builtin_types.first_minted_id()) == None
+  assert relocate.type_var(ids, 1000000) == None
+  assert relocate.local_id(ids, 0) == None
+}
+
+test "allocation world rebinding preserves nested evidence owners" {
+  let declaration = fixture_key("body")
+  let effect_key = fixture_key("effect")
+  let origin = table([entry(effect_key, NominalId, 0, 1), label_parameter(declaration, effect_key, 2)]).expect("origin")
+  let moved = in_world(origin, "world", "session").expect("rebound")
+  assert in_world(moved, "session", "world") == Some(origin)
+  assert in_world(origin, "wrong", "session") == None
+  let header_only = table([entry(effect_key, NominalId, 0, 1)]).expect("header only")
+  assert in_world(header_only, "wrong", "session") == None
+  assert relocate.nominal(between(origin, moved).expect("isolated worlds"), 1) == None
+  let foreign = DeclKey { ..effect_key, scope: ModuleKey { ..effect_key.scope, world: "foreign" } }
+  let mixed = table([label_parameter(declaration, foreign, 2)]).expect("mixed evidence")
+  assert in_world(mixed, "world", "session") == None
+}
+
+test "allocation absent source is explicit rather than a wildcard" {
+  let scope = module_key("std", "std/example", "std/example", "")
+  # The source guard is independent of the declaration metadata lookup.
+  let (empty_syntax, diags) = parser.parse_module("")
+  assert len(diags) == 0
+  let cx = cx_new(Some("std/example"), None)
+  assert local_headers(scope, empty_syntax, cx) == Some([])
+  assert local_headers(ModuleKey { ..scope, source: "example.dawn" }, empty_syntax, cx) == None
+  assert local_headers(scope, empty_syntax, Cx { ..cx, src_path: Some("example.dawn") }) == None
+  assert local_impl_headers(scope, empty_syntax, cx, []) == Some([])
+}
 
 test "allocation matches provenance and domains rather than equal integers" {
   let a = fixture_key("a")

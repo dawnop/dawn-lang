@@ -259,6 +259,41 @@ TFun或trait模板重建。语法放在产物里，避免调用者给签名索�
 快照，依赖有效性及紧凑具名重定位产品仍须后续实现。测试改读生产边界，不再复制源码
 前缀生成第二套header流程；冷行为还需重构前后对拍，不能只比较两个新入口。
 
+### 推断函数的entry签名与封定签名
+
+分配计划应校验旧/新header的entry签名，再建立整个body区间的ID映射；封定签名是
+body产品的输出，由完整映射投影，不能先假设它的所有引用都属于header。默认参数
+分段后的主body同样使用原entry签名。推断函数对照已移除稠密整数映射，改用真实
+header台账和逐body的生产分配计划；前置函数已修改的body仍冷算，不伪造它的身份映射。
+目前六例覆盖标量与泛型/效果多态闭包返回及各自调用者，显式携带compiler evidence-pack
+和内建类型绑定的来源。探测的局部泛型函数被现有语言拒绝，因此不将其当作真实的
+body新类型变量案例，也不宣称任意推断类型均已覆盖。另有六个默认参数案例，其中两个
+在默认值发生类型错误，全部移动源码位置后比较诊断和完整Cx；丢默认诊断的编译负控
+要求命中该错误态的具名断言。
+
+### 来源carry接线（进行中）
+
+AnalysisCarry增加可选HeaderProvenance：保存world标签与各模块的可选分配表。普通冷
+入口不记录用户模块来源；opaque Session的内部transition启用，用户表随prefix释放，
+std来源baseline随Session释放，
+不会从Update导出或跨Session拼接。内部world标签只在该容器内解释，不是全局唯一ID。
+用户模块在真实check_module_headers后、body前生成本地header/impl来源；解析/header错误或来源
+不确定时记录None。std表来自下面的真实header入口，不拿最终Cx重建丢失的impl注册签名。
+后续重放遇到缺失来源必须冷回退；这一步只接来源生成/传递，不启用body缓存，也不
+表示依赖有效性和生产函数调度已完成；compiler intrinsic来源使用下述显式生成器。
+
+std接线使用load_std的真实ModuleHeaders，立即生成来源表，不从最终Cx推回impl签名。
+std的Cx没有源码路径，ModuleKey.source的空字符串明确表示无路径；Some(path)仍须
+逐字匹配，不能把路径缺失解释成通配。StdCtx保存以std局部world标记的表，Session
+构造时验证旧world并重绑定到容器内world；拒绝混合world表。Session保存不可变baseline
+carry，编辑时直接从baseline起步，不重复扫描std声明构造来源。
+
+compiler来源从prelude ADT/trait/impl与builtin签名的实际元数据生成，而不是为整数区间
+批量放行。ADT/trait以声明名、binder槽标识；builtin共享模板按模板名标识，prelude
+impl引用已登记的binder时保留原身份，独有的集合模板另登记。擦除后的runtime类型参数
+取erased_ev_ty的实际绑定。该baseline仅属于当前编译器实例的会话，不是跨编译器版本
+可复用的磁盘缓存。来源缺失仍拒绝投影。
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

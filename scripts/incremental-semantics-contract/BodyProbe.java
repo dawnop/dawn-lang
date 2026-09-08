@@ -86,7 +86,7 @@ public final class BodyProbe {
             var stateCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("state_count")).findFirst().orElseThrow();
             var stateAt = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("state_at")).findFirst().orElseThrow();
             long inferredLength = (Long) stateCount.invoke(null, inferred);
-            if (inferredLength != 2) throw new AssertionError("Unexpected inferred state trial count");
+            if (inferredLength != 6) throw new AssertionError("Unexpected inferred state trial count");
             for (long i = 0; i < inferredLength; i++) {
                 Object trial = stateAt.invoke(null, inferred, i);
                 Class<?> t = trial.getClass();
@@ -96,7 +96,7 @@ public final class BodyProbe {
                         || !SemanticSnapshot.same(t.getField("cold_body").get(trial), t.getField("module_body").get(trial)))
                     throw new AssertionError("inferred state: body differs from cold module (" + i + ")");
             }
-            System.out.println("inferred-state\t2\tsealed signatures and callers agree with cold module products");
+            System.out.println("inferred-state\t6\tsealed scalar and generic closure signatures replay with allocation provenance");
             Object tests = probe.getMethod("test_samples").invoke(null);
             if ((Long) stateCount.invoke(null, tests) != 1) throw new AssertionError("Unexpected test state trial count");
             Object test = stateAt.invoke(null, tests, 0L);
@@ -108,8 +108,8 @@ public final class BodyProbe {
                 throw new AssertionError("test state: body differs from cold module");
             System.out.println("test-state\t1\tassertion source and test frame agree with cold module products");
             Object defaults = probe.getMethod("default_samples").invoke(null);
-            if ((Long) stateCount.invoke(null, defaults) != 4) throw new AssertionError("Unexpected default trial count");
-            for (long i = 0; i < 4; i++) {
+            if ((Long) stateCount.invoke(null, defaults) != 6) throw new AssertionError("Unexpected default trial count");
+            for (long i = 0; i < 6; i++) {
                 Object def = stateAt.invoke(null, defaults, i);
                 Class<?> dt = def.getClass();
                 if (!SemanticSnapshot.same(dt.getField("replayed").get(def), dt.getField("cold").get(def)))
@@ -118,7 +118,7 @@ public final class BodyProbe {
                         || !SemanticSnapshot.same(dt.getField("cold_body").get(def), dt.getField("module_body").get(def)))
                     throw new AssertionError("default state: body differs from cold module (" + i + ")");
             }
-            System.out.println("default-state\t4\tindependent defaults and generic dictionaries replay before explicit and inferred bodies");
+            System.out.println("default-state\t6\tdefaults, dictionaries and moved error diagnostics replay before explicit and inferred bodies");
             Object imports = probe.getMethod("import_samples").invoke(null);
             if ((Long) stateCount.invoke(null, imports) != 2) throw new AssertionError("Unexpected import trial count");
             for (long i = 0; i < 2; i++) {

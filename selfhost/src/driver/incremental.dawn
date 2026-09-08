@@ -6,8 +6,8 @@
 use std/io.{Env}
 use std/str
 use driver/analyze.{
-  LoadedModule, LoadResult, Program, CheckedMod, ModuleStep,
-  initial_carry, analyze_module_step
+  LoadedModule, LoadResult, Program, CheckedMod, ModuleStep, AnalysisCarry,
+  initial_carry_with_provenance, analyze_module_step
 }
 use driver/stdlib.{StdCtx, std_module_of}
 use check/cx.{Cx}
@@ -22,7 +22,8 @@ type State = {
   probe: fn(Jsig) -> JsigProbe !io,
   prefix: List[Entry],
   max_modules: Int,
-  max_text_units: Int
+  max_text_units: Int,
+  baseline: AnalysisCarry
 }
 
 ## Construct a new owner when std, options, captured plan or lease changes.
@@ -47,7 +48,8 @@ pub fn new(
   if max_modules < 0 || max_text_units < 0 { panic("negative analysis cache limit") }
   State {
     std: std, opts: opts, js: js, probe: probe, prefix: [],
-    max_modules: max_modules, max_text_units: max_text_units
+    max_modules: max_modules, max_text_units: max_text_units,
+    baseline: initial_carry_with_provenance(std, "session")
   }
 }
 
@@ -62,7 +64,9 @@ fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = a == b
 pub fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io = {
   let session: State = owner
   let probe = session.probe(session.js)
-  var carry = initial_carry(session.std)
+  # This label is interpreted only inside this opaque session. No provenance
+  # table escapes Update, and a different session cannot import its prefix.
+  var carry = session.baseline
   var diags = loaded.diags
   var modules: List[CheckedMod] = []
   var prefix: List[Entry] = []

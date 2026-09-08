@@ -1072,11 +1072,11 @@ jobs:
     # Run 34159136910 took 170s before state products were added.
     # Local complete runs on 2026-09-08: typed/state oracle 99.24s,
     # source/origin/callee/header 53.92s, identity 36.38s,
-    # state's fifteen mutants 67.41s, allocation's ten mutants 33.73s.
+    # state's fifteen mutants 67.41s. Allocation now runs separately below.
     # Double rounded values and retain the checkout/toolchain allowance:
-    # 2*(100+54+37+68+34)+38=624s.
-    # budget: 3x 624s planning value
-    timeout-minutes: 32
+    # 2*(100+54+37+68)+38=556s.
+    # budget: 3x 556s planning value
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1088,7 +1088,26 @@ jobs:
           python3 scripts/incremental-semantics-contract/projection.py
           python3 scripts/incremental-semantics-contract/identity.py
           python3 scripts/incremental-semantics-contract/state-product.py
+
+  incremental-allocation:
+    runs-on: ubuntu-latest
+    # World/source/compiler admission expands allocation to sixteen mutants.
+    # Complete local run 62.05s on 2026-09-08; retain the preceding 68.96s
+    # allowance. Do not push projection past
+    # the run-pole by appending this growing suite to its serial critical path.
+    # The six production producer mutants took 94.65s on the same date.
+    # 2*(69+95)+38=366s planning value.
+    # budget: 3x 366s planning value
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: allocation provenance and world admission contracts
+        run: |
           python3 scripts/incremental-semantics-contract/allocation.py
+          python3 scripts/incremental-semantics-contract/provenance.py
 
   incremental-prefix:
     runs-on: ubuntu-latest
