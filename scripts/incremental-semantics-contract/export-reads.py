@@ -15,6 +15,13 @@ from cold import ROOT, edit, run
 
 def main():
     started = time.monotonic()
+    # Local constructors now share the inner projection expression. Anchor the
+    # qualified arm so these controls still corrupt only export dependencies.
+    constructor_projection = """QualifiedConstructor(qualifier, name, answer) -> {
+            let moved_answer = match answer {
+              None -> None
+              Some(pair) -> { let (adt, slot) = pair
+                Some((nominal(adt)?, slot))"""
     variants = [
         ("checker", "pattern-presence", "let (presence_cx, _) = export_presence_read(cx, q)", "let (discarded, _) = export_presence_read(cx, q)\n      let presence_cx = cx"),
         ("checker", "pattern-constructor", "let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)", "let (discarded, constructor) = qual_ctor_key_read(presence_cx, q, cname)\n          let pattern_cx = presence_cx"),
@@ -36,8 +43,8 @@ def main():
         ("checker", "function-hint-answer", "semantic_reads.ExportDiagnosticAnswer(semantic_reads.FunctionDiagnostic, q, name, answer)", "semantic_reads.ExportDiagnosticAnswer(semantic_reads.FunctionDiagnostic, q, name, None)"),
         ("semantic_reads", "observation", "Some(entries) -> Some(entries ++ [fact])", "Some(entries) -> Some(entries)"),
         ("semantic_reads", "constant-type", "Some((owner, type_value(ty)?))", "Some((owner, ty))"),
-        ("semantic_reads", "constructor-id", "Some((nominal(adt)?, slot))", "Some((adt, slot))"),
-        ("semantic_reads", "constructor-slot", "Some((nominal(adt)?, slot))", "Some((nominal(adt)?, nominal(slot)?))"),
+        ("semantic_reads", "constructor-id", constructor_projection, constructor_projection.replace("Some((nominal(adt)?, slot))", "Some((adt, slot))")),
+        ("semantic_reads", "constructor-slot", constructor_projection, constructor_projection.replace("Some((nominal(adt)?, slot))", "Some((nominal(adt)?, nominal(slot)?))")),
         ("semantic_reads", "presence-answer", "ExportPresence(qualifier, present) -> ExportPresence(qualifier, present)", "ExportPresence(qualifier, present) -> ExportPresence(qualifier, not present)"),
         ("semantic_reads", "diagnostic-kind", "ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(kind, qualifier, name, answer)", "ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(FunctionDiagnostic, qualifier, name, answer)"),
         ("body_product", "constant-domain", "t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id)", "t => Some(t), id => relocate.nominal(v.ids, id)"),
