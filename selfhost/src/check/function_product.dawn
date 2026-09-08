@@ -5,10 +5,10 @@
 use std/map
 use check/checker.{ModuleHeaders, check_module_headers}
 use check/cx.{Cx, ModExports, cx_new}
-use check/types.{Sig}
+use check/types.{Sig, ImplI, TraitI, MethodSig}
 use check/identity
-use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, module_key}
-use front/ast.{FnDecl, DFn}
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, module_key}
+use front/ast.{FnDecl, TraitMethod, DFn, DImpl, DTrait}
 use front/parser
 
 pub type Header = { key: DeclKey, syntax: FnDecl, signature: Sig }
@@ -17,12 +17,17 @@ pub opaque type Headers = Data
 
 ## An ambiguous or erroneous header set has no reusable function view. The
 ## ordinary checker still owns error recovery; refusal here changes no output.
-pub fn headers(scope: ModuleKey, checked: ModuleHeaders) -> Option[Headers] = {
-  if len(checked.cx.diags) != 0 || checked.cx.owner_class != Some(scope.emission_owner) { return None }
+fn admitted(scope: ModuleKey, checked: ModuleHeaders) -> Bool = {
+  if len(checked.cx.diags) != 0 || checked.cx.owner_class != Some(scope.emission_owner) { return false }
   match checked.cx.src_path {
-    Some(path) -> if path == "" || scope.source != path { return None }
-    None -> if scope.source != "" { return None }
+    Some(path) -> if path == "" || scope.source != path { return false }
+    None -> if scope.source != "" { return false }
   }
+  true
+}
+
+pub fn headers(scope: ModuleKey, checked: ModuleHeaders) -> Option[Headers] = {
+  if not admitted(scope, checked) { return None }
   let declarations = identity.declarations(scope, checked.syntax)
   var locations: Map[DeclKey, (Int, Option[Int])] = map.empty()
   for e in declarations { locations = map.insert(locations, e.key, (e.declaration, e.member)) }
@@ -58,6 +63,107 @@ pub fn get(headers: Headers, key: DeclKey) -> Option[Header] = { let data: Data 
   map.get(data.entries, key)
 }
 
+## Registered impl identity is not a substitute for the checker's body-output
+## tagging rules. Keep it as header provenance, not an eagerly retagged TFun.
+pub type MethodHeader =
+  | ImplMethod(key: DeclKey, syntax: FnDecl, signature: Sig, registered: ImplI)
+  | TraitDefault(key: DeclKey, syntax: TraitMethod, signature: Sig, trait_id: Int)
+
+type MethodData = { impls: List[DeclKey], defaults: List[DeclKey], entries: Map[DeclKey, MethodHeader] }
+pub opaque type Methods = MethodData
+
+pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
+  if not admitted(scope, checked) { return None }
+  var locations: Map[DeclKey, (Int, Option[Int])] = map.empty()
+  for e in identity.declarations(scope, checked.syntax) {
+    locations = map.insert(locations, e.key, (e.declaration, e.member))
+  }
+  var registered: Map[(Int, Int), ImplI] = map.empty()
+  for info in checked.cx.local_impls {
+    if not info.derived && info.owner == checked.cx.owner_class && info.src_path == checked.cx.src_path {
+      let span = (info.lo, info.hi)
+      if map.has(registered, span) { return None }
+      registered = map.insert(registered, span, info)
+    }
+  }
+  var entries: Map[DeclKey, MethodHeader] = map.empty()
+  var impls: List[DeclKey] = []
+  var defaults: List[DeclKey] = []
+  var declaration = 0
+  var impl_index = 0
+  for d in checked.syntax.decls {
+    match d {
+      DImpl(params, trait_name, _, _, subject, members, _, _, lo, hi) -> {
+        if impl_index >= len(checked.impl_sigs) { return None }
+        let sigs = checked.impl_sigs[impl_index]
+        let info = map.get(registered, (lo, hi))?
+        if map.get(checked.cx.traits_by_name, trait_name) != Some(info.trait_id) ||
+          len(sigs) != len(members) || len(info.tparams) != len(params) { return None }
+        let parent = ImplHead(trait_name, identity.type_shape(subject, map(params, p => p.name)))
+        let parent_key = DeclKey { scope: scope, path: [parent] }
+        if map.get(locations, parent_key) != Some((declaration, None)) { return None }
+        var member = 0
+        for syntax in members {
+          let sig = sigs[member]?
+          if sig.name != syntax.name || sig.owner != checked.cx.owner_class || sig.tparams != info.tparams ||
+            sig.is_builtin || sig.trait_id != None || sig.op_of != None { return None }
+          let key = DeclKey { scope: scope, path: [parent, Named(MethodDecl, syntax.name)] }
+          if map.get(locations, key) != Some((declaration, Some(member))) { return None }
+          entries = map.insert(entries, key, ImplMethod(key, syntax, sig, info))
+          impls = impls ++ [key]
+          member = member + 1
+        }
+        impl_index = impl_index + 1
+      }
+      DTrait(name, _, _, _, members, _, _, _, _, _, _, _) -> {
+        let tid = map.get(checked.cx.traits_by_name, name)?
+        let info = map.get(checked.cx.traits, tid)?
+        if info.name != name || info.owner != checked.cx.owner_class || info.src_path != checked.cx.src_path { return None }
+        let parent = Named(TraitDecl, name)
+        if map.get(locations, DeclKey { scope: scope, path: [parent] }) != Some((declaration, None)) { return None }
+        var signatures: Map[String, MethodSig] = map.empty()
+        for (method_name, method) in info.methods {
+          if map.has(signatures, method_name) { return None }
+          signatures = map.insert(signatures, method_name, method)
+        }
+        var member = 0
+        for syntax in members {
+          # Presence needs no equality dictionary for the entire expression AST.
+          let has_body = match syntax.body { Some(_) -> true, None -> false }
+          if has_body {
+            let method = map.get(signatures, syntax.name)?
+            if not method.has_default { return None }
+            let sig = method.sig
+            if sig.name != syntax.name || sig.owner != checked.cx.owner_class ||
+              sig.trait_id != Some(tid) || sig.is_builtin || sig.op_of != None { return None }
+            let key = DeclKey { scope: scope, path: [parent, Named(MethodDecl, syntax.name)] }
+            if map.get(locations, key) != Some((declaration, Some(member))) { return None }
+            entries = map.insert(entries, key, TraitDefault(key, syntax, sig, tid))
+            defaults = defaults ++ [key]
+          }
+          member = member + 1
+        }
+      }
+      _ -> ()
+    }
+    declaration = declaration + 1
+  }
+  if impl_index != len(checked.impl_sigs) { return None }
+  Some(MethodData { impls: impls, defaults: defaults, entries: entries })
+}
+
+pub fn impl_keys(methods: Methods) -> List[DeclKey] = { let data: MethodData = methods
+  data.impls
+}
+
+pub fn default_keys(methods: Methods) -> List[DeclKey] = { let data: MethodData = methods
+  data.defaults
+}
+
+pub fn method(methods: Methods, key: DeclKey) -> Option[MethodHeader] = { let data: MethodData = methods
+  map.get(data.entries, key)
+}
+
 test "function products bind entry signatures to stable current declarations" {
   let scope = module_key("world", "module", "module", "module.dawn")
   let (syntax, ds) = parser.parse_module("fn first(x: Int) -> Int = x\nconst K: Int = 1\nfn second() = K\n")
@@ -88,4 +194,62 @@ test "function products bind entry signatures to stable current declarations" {
   assert headers(scope, bad) == None
   # Identity must still refuse a duplicate if a caller accidentally drops diagnostics.
   assert headers(scope, ModuleHeaders { ..bad, cx: Cx { ..bad.cx, diags: [] } }) == None
+}
+
+test "method products preserve impl and default owners across declaration reorder" {
+  let forward = "trait Forward[T] {\n fn forward(x: T) -> Int\n fn twice(x: T) -> Int = forward(x) + forward(x)\n}\n"
+  let repeat = "trait Repeat[T] {\n fn repeat(x: T) -> Int\n fn again(x: T) -> Int = repeat(x)\n}\n"
+  let first = "impl[T] Forward[List[T]] { fn forward(x: List[T]) -> Int = 1 }\n"
+  let second = "impl[T] Repeat[List[T]] { fn repeat(x: List[T]) -> Int = 2 }\n"
+  let (syntax, ds) = parser.parse_module(forward ++ repeat ++ first ++ second)
+  let (edited, eds) = parser.parse_module(repeat ++ forward ++ second ++ first)
+  assert ds == [] && eds == []
+  let scope = module_key("methods", "module", "module", "module.dawn")
+  let initial = cx_new(Some("module"), Some("module.dawn"))
+  let env: Map[String, ModExports] = map.empty()
+  let old = check_module_headers(initial, syntax, env)
+  let next = check_module_headers(initial, edited, env)
+  assert old.cx.diags == [] && next.cx.diags == []
+  let a = methods(scope, old).expect("old methods")
+  let b = methods(scope, next).expect("next methods")
+  let ai = impl_keys(a)
+  let bi = impl_keys(b)
+  let ad = default_keys(a)
+  let bd = default_keys(b)
+  assert len(ai) == 2 && len(ad) == 2
+  assert ai[0] == bi[1] && ai[1] == bi[0]
+  assert ad[0] == bd[1] && ad[1] == bd[0]
+  match method(b, ai[0]).expect("moved impl") {
+    ImplMethod(key, syntax, sig, info) -> {
+      assert key == ai[0]
+      assert syntax.name == "forward" && sig.name == "forward"
+      assert sig.tparams == info.tparams
+      assert len(info.tparams) == 1
+      assert Some(info.trait_id) == map.get(next.cx.traits_by_name, "Forward")
+    }
+    _ -> { assert false }
+  }
+  match method(b, ad[0]).expect("moved default") {
+    TraitDefault(key, syntax, sig, tid) -> {
+      assert key == ad[0]
+      assert syntax.name == "twice" && syntax.body != None
+      assert sig.trait_id == Some(tid)
+      assert Some(tid) == map.get(next.cx.traits_by_name, "Forward")
+      assert Some(tid) != map.get(old.cx.traits_by_name, "Forward")
+    }
+    _ -> { assert false }
+  }
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [] }) == None
+  let sig = old.impl_sigs[0][0].expect("registered signature")
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [[Some(Sig { ..sig, is_builtin: true })], old.impl_sigs[1]] }) == None
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [[Some(Sig { ..sig, tparams: [] })], old.impl_sigs[1]] }) == None
+  let foreign = map(old.cx.local_impls, i => ImplI { ..i, owner: Some("foreign") })
+  assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, local_impls: foreign } }) == None
+  let tid = map.get(old.cx.traits_by_name, "Forward").expect("Forward trait")
+  let info = map.get(old.cx.traits, tid).expect("Forward info")
+  let (name, ms) = info.methods[1]
+  let missing = TraitI { ..info, methods: [info.methods[0], (name, MethodSig { ..ms, has_default: false })] }
+  assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, traits: map.insert(old.cx.traits, tid, missing) } }) == None
+  let wrong_owner = TraitI { ..info, owner: Some("foreign") }
+  assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, traits: map.insert(old.cx.traits, tid, wrong_owner) } }) == None
 }
