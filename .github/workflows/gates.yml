@@ -1136,10 +1136,11 @@ jobs:
     runs-on: ubuntu-latest
     # Type/alias reads: 45 compiling controls, 222.28s locally on
     # 2026-09-08, including body/constant owner-scoped source projection.
-    # Associated reads add 15 compiling controls, 61.41s locally on
-    # 2026-09-08. 2*(223+62)+38=608s; preserve the 660s pole.
-    # budget: 3x 608s planning value
-    timeout-minutes: 31
+    # Associated reads add 15 compiling controls, 77.83s locally on
+    # 2026-09-08 with ordinary effect observations present. Retain the
+    # type suite's 223s base: 2*(223+78)+38=640s; preserve the 660s pole.
+    # budget: 3x 640s planning value
+    timeout-minutes: 32
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1149,6 +1150,21 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/type-reads.py
       - name: associated type and effect read contracts
         run: python3 scripts/incremental-semantics-contract/associated-reads.py
+
+  incremental-effect-reads:
+    runs-on: ubuntu-latest
+    # Ordinary effect reads: 14 compiling controls, 77.07s locally on
+    # 2026-09-08. 2*78+38=194s; adding this to the type job would exceed
+    # the unchanged 660s pole, so retain the existing suites separately.
+    # budget: 3x 194s planning value
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ordinary effect semantic read contracts
+        run: python3 scripts/incremental-semantics-contract/effect-reads.py
 
   incremental-state:
     runs-on: ubuntu-latest

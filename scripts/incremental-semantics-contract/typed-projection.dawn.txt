@@ -271,6 +271,20 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  for sample in [("fn go() -> Unit !Ask = ()", 0), ("fn go() -> Unit !Missing = ()", 1),
+    ("fn go[!e](f: fn() -> Unit !e) -> Unit !e = f()", 0), ("fn go() -> Unit !io = ()", 0),
+    ("fn go[!e]() -> Unit !Ask !e = ()", 0),
+    ("alias Thunk[!e] = fn() -> Unit !e\nfn go(f: Thunk[!io]) -> Unit !io = f()", 0)] {
+    let (declaration, errors) = sample
+    let (syntax, pd) = parser.parse_module("effect Ask { fn ask() -> Int }\n" ++ declaration ++ "\n")
+    if pd != [] { panic("effect observation parse") }
+    let initial = cx_new(Some("effect_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("effect observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   out
 }
 

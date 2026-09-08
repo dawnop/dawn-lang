@@ -466,6 +466,19 @@ Subjects project as their actual types, while bound/member trait IDs require a
 separate trait-domain callback. Reusing the nominal mapper or fabricating a type
 to smuggle an integer into another reference domain is not valid projection.
 
+### Ordinary effect read boundary (implementation in progress)
+
+Effect atoms retain the existing precedence: intrinsic `io`, associated
+projections, declared effects, then lowercase scoped variables. A declared
+answer records the actual row produced from the name table and effect metadata,
+including its ID and display label; a miss is distinct from a pure row. Scoped
+variable reads retain both existing rows and misses before fresh allocation.
+Repeated atoms must read the updated scope and must not allocate again. Both
+answer forms use the complete effect-row projector, which preserves the existing
+distinction between nominal label IDs and effect-variable IDs. They cannot use
+one raw-ID mapping for both. Observation must preserve complete state, diagnostics and allocation;
+these facts alone do not establish runtime query wiring or cache admission.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、
