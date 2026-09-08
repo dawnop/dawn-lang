@@ -26,8 +26,10 @@ def main():
         ("checker", "return-consumer", "(info_cx, opt_ty(TyJava(rc, info.display)))", "(cx, opt_ty(TyJava(rc, info.display)))"),
         ("checker", "static-consumer", "check_java_call(info_cx, info, None, true", "check_java_call(cx1, info, None, true"),
         ("checker", "instance-consumer", "check_java_call(info_cx, info, Some(tx), false", "check_java_call(cx1, info, Some(tx), false"),
-        ("checker", "sam-diagnostic-consumer", 'cerr_h(info_cx, "this function does not fit', 'cerr_h(cx1, "this function does not fit'),
-        ("checker", "list-diagnostic-consumer", 'cerr_h(info_cx, "cannot bridge', 'cerr_h(cx1, "cannot bridge'),
+        # Drop class metadata at the renderer handoff, retaining the new
+        # rendering fact so the original Java-metadata owner remains decisive.
+        ("checker", "sam-diagnostic-consumer", 'type_display_read(info_cx, TyFn(sps, sret, EIo))', 'type_display_read(cx1, TyFn(sps, sret, EIo))'),
+        ("checker", "list-diagnostic-consumer", 'type_display_read(info_cx, t)', 'type_display_read(cx1, t)'),
         ("semantic_reads", "project-name-key", "JavaClassName(name, answer) -> JavaClassName(name, answer)", 'JavaClassName(name, answer) -> JavaClassName("wrong", answer)'),
         ("semantic_reads", "project-name-answer", "JavaClassName(name, answer) -> JavaClassName(name, answer)", "JavaClassName(name, answer) -> JavaClassName(name, None)"),
         ("semantic_reads", "project-info-key", "JavaClassInfo(fqcn, answer) -> JavaClassInfo(fqcn, answer)", "JavaClassInfo(fqcn, answer) -> JavaClassInfo(answer.fqcn, answer)"),

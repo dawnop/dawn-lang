@@ -59,7 +59,7 @@ use check/types.{
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty,
   Adts, AdtI, CtorI, FieldI, EffectI, Traits, TraitI, ImplI, Sym, Sig,
-  adt_of, trait_of, ty_show, fn_return_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  adt_of, trait_of, ty_show, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -88,7 +88,7 @@ use check/cx.{
   local_constructor_read, local_constant_read, constant_visible_read,
   constructor_count_read, constructor_arity_read, constructor_nominal_shape_read,
   constructor_header_read, constructor_fields_read,
-  declared_effect_info_read,
+  declared_effect_info_read, type_display_read, function_return_display_read, constructor_display_read, signature_display_read,
   local_effect_name_read, effect_candidates_read,
   local_nominal_name_read, constructor_names_read, declared_constant_name_read, local_value_candidates_read,
   TySpan
@@ -746,8 +746,10 @@ pub fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (
   if a == TyNever || a == TyError { return (cx, b) }
   if b == TyNever || b == TyError { return (cx, a) }
   if a == b { return (cx, a) }
-  (cerr(cx, what ++ " have mismatched types: " ++ ty_show(cx.adts, a) ++ " vs " ++
-      ty_show(cx.adts, b), lo, hi), TyError)
+  let (left_cx, left_text) = type_display_read(cx, a)
+  let (right_cx, right_text) = type_display_read(left_cx, b)
+  (cerr(right_cx, what ++ " have mismatched types: " ++ left_text ++ " vs " ++
+      right_text, lo, hi), TyError)
 }
 
 ## Structural unification of a declared type against an actual argument type,
@@ -1262,7 +1264,7 @@ fn earg_cooccurs(s: Sig, eid: Int, r: Eff) -> Option[(Eff, String)] = {
 ## Here the leftover is computed and handed to `em` before the test runs, and
 ## the containment test then passes on the substituted row.
 ##
-## Returns the map to unify with, whether a binding was added, and the hint to
+## Returns the observed context, map to unify with, whether a binding was added, and the hint to
 ## print if the shape was right but a precondition said no.
 ##
 ## Deliberately narrow, and each guard is a decision:
@@ -1312,7 +1314,7 @@ fn earg_row_subtract(
   at: Ty,
   m: Map[Int, Ty],
   em: Map[Int, Eff]
-) -> (Map[Int, Eff], Bool, Option[String]) = {
+) -> (Cx, Map[Int, Eff], Bool, Option[String]) = {
   var dps: List[Ty] = []
   var dr = TyError
   var de = EPure
@@ -1335,13 +1337,13 @@ fn earg_row_subtract(
     }
     _ -> ()
   }
-  if not is_dfn || not is_afn { return (em, false, None) }
+  if not is_dfn || not is_afn { return (cx, em, false, None) }
   # projections reduce (the subject may be pinned by `m` already); effect
   # variables do not, because one of them is what this is looking for
   let dred = reduce_eff(cx, de, m)
-  if eff_carries(reduce_eff(cx, subst_eff(dred, em), m), ae) { return (em, false, None) }
+  if eff_carries(reduce_eff(cx, subst_eff(dred, em), m), ae) { return (cx, em, false, None) }
   let vs = eff_vars(dred)
-  if len(vs) != 1 { return (em, false, None) }
+  if len(vs) != 1 { return (cx, em, false, None) }
   let (eid, ename) = vs[0]
   var bound_here = false
   for ep in s.eparams {
@@ -1350,16 +1352,16 @@ fn earg_row_subtract(
       _ -> ()
     }
   }
-  if not bound_here { return (em, false, None) }
+  if not bound_here { return (cx, em, false, None) }
   let r = eff_concrete_atoms(dred)
-  if r == EPure { return (em, false, None) }
-  let bare = ty_show(cx.adts, TyFn(dps, dr, EffVar(ename, eid)))
+  if r == EPure { return (cx, em, false, None) }
+  let (render_cx, bare) = type_display_read(cx, TyFn(dps, dr, EffVar(ename, eid)))
   let repair = "spell this parameter's row as `!" ++ ename ++ "` alone (`" ++ bare ++
     "`); the variable then takes the closure's whole row"
   match earg_cooccurs(s, eid, r) {
     Some(pr) -> {
       let (row, place) = pr
-      (em, false, Some("`" ++ ename ++ "` occurs in " ++ place ++ " as `!" ++ eff_show(row) ++
+      (render_cx, em, false, Some("`" ++ ename ++ "` occurs in " ++ place ++ " as `!" ++ eff_show(row) ++
           "`, without `!" ++ eff_show(r) ++ "`, so which row it binds to is observable there; " ++
           repair))
     }
@@ -1368,8 +1370,56 @@ fn earg_row_subtract(
         Some(p) -> p
         None -> EPure
       }
-      (map.insert(em, eid, lub_eff(prev, eff_row_minus(ae, r))), true, None)
+      (render_cx, map.insert(em, eid, lub_eff(prev, eff_row_minus(ae, r))), true, None)
     }
+  }
+}
+
+test "diagnostic reads retain eager row subtraction repair rendering" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let ev = EffVar("e", 100)
+  let row = eff_union([ev, EIo])
+  let pt = TyFn([], TyInt, row)
+  let at = TyFn([], TyInt, eff_with_labels(EPure, [(101, "Tell")]))
+  let bare = TyFn([], TyInt, ev)
+  for refused in [false, true] {
+    let sig = Sig { name: "go", param_tys: [pt], param_names: ["f"], param_defaults: [false],
+      ret: TyInt, eff: if refused { ev } else { row }, is_builtin: false,
+      tparams: [], constraints: [], eparams: [ev], owner: None, trait_id: None,
+      op_of: None, inferring: false }
+    let (observed, em, added, why) = earg_row_subtract(initial, sig, pt, at, map.empty(), map.empty())
+    let (cold, cold_em, cold_added, cold_why) = earg_row_subtract(Cx { ..initial, function_reads: None }, sig, pt, at, map.empty(), map.empty())
+    assert observed.function_reads == Some([semantic_reads.RenderedType(bare, ty_show(initial.adts, bare))])
+    assert em == cold_em && added == cold_added && why == cold_why
+    assert added == not refused && (why != None) == refused
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+    let (early, _, early_added, early_why) = earg_row_subtract(initial, sig, TyInt, at, map.empty(), map.empty())
+    assert early.function_reads == Some([]) && not early_added && early_why == None
+  }
+}
+
+test "diagnostic reads thread row repair through real calls" {
+  for refused in [false, true] {
+    let row = if refused { "e" } else { "(e | io)" }
+    let source = "effect Tell { fn tell() -> Int }\n" ++
+      "fn go(f: fn() -> Int !(e | io)) -> Int !" ++ row ++ " = 1\n" ++
+      "fn call() -> Int !(Tell | io) = go(() => tell())"
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert observed.diags == cold.diags && observed_module == cold_module
+    assert observed.next_id == cold.next_id
+    assert len(cold.diags) == (if refused { 1 } else { 0 })
+    var repairs = 0
+    for read in observed.function_reads.expect("row repair reads") {
+      match read {
+        semantic_reads.RenderedType(TyFn([], TyInt, EffVar("e", _)), _) -> { repairs = repairs + 1 }
+        _ -> ()
+      }
+    }
+    assert repairs == 1
   }
 }
 
@@ -1510,6 +1560,7 @@ pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] 
 ## it is the whole type the message says so directly rather than pointing at
 ## itself.
 pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
+  var diagnostic_cx = cx
   let rel = if tid == HASH_ID { "hash" } else { "equality" }
   let (what, hint) = match bad {
     TyFn(_, _, _) ->
@@ -1525,24 +1576,36 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
       ("`Float` has no hash",
         "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`; " ++
           "use an Int encoding (scaled integer, bits) or a String rendering instead")
-    TyArray(_) ->
-      ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel ++ ": an Array is held by identity, " ++
+    TyArray(_) -> {
+      let (next, text) = type_display_read(diagnostic_cx, bad)
+      diagnostic_cx = next
+      ("`" ++ text ++ "` has no " ++ rel ++ ": an Array is held by identity, " ++
           "not by content",
         "use the List it backs instead")
+    }
     # Same head as the fallback, different way out: a projection has no
     # contents to derive an answer from, so it gets the one hint every
     # relation gives for this shape rather than one that cannot be followed.
-    TyAssoc(_, _, _) -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel,
-      assoc_witness_hint(cx, bad))
-    _ -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel,
-      "derive the answer from its contents instead")
+    TyAssoc(_, _, _) -> {
+      let (next, text) = type_display_read(diagnostic_cx, bad)
+      let (hint_cx, hint) = assoc_witness_hint(next, bad)
+      diagnostic_cx = hint_cx
+      ("`" ++ text ++ "` has no " ++ rel, hint)
+    }
+    _ -> {
+      let (next, text) = type_display_read(diagnostic_cx, bad)
+      diagnostic_cx = next
+      ("`" ++ text ++ "` has no " ++ rel, "derive the answer from its contents instead")
+    }
   }
   let msg = if bad == t {
     what
   } else {
-    what ++ ", and `" ++ ty_show(cx.adts, t) ++ "` contains one"
+    let (next, text) = type_display_read(diagnostic_cx, t)
+    diagnostic_cx = next
+    what ++ ", and `" ++ text ++ "` contains one"
   }
-  cerr_h(cx, msg, lo, hi, hint)
+  cerr_h(diagnostic_cx, msg, lo, hi, hint)
 }
 
 ## One wording for "the subject of this goal is a projection", shared by every
@@ -1559,14 +1622,19 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
 ## What does work is in `scripts/spike-native/index_dict.dawn`: hand the value
 ## back and do the work at the call site, where the projection has already
 ## been reduced to a concrete type.
-pub fn assoc_witness_hint(cx: Cx, t: Ty) -> String =
-  "a bound applies to a type parameter, and `" ++ ty_show(cx.adts, t) ++
-  "` is not one -- it is read off whichever impl the caller picks; return the value " ++
-  "and do this at the call site, where its type is concrete"
+pub fn assoc_witness_hint(cx: Cx, t: Ty) -> (Cx, String) = {
+  let (next, text) = type_display_read(cx, t)
+  (next, "a bound applies to a type parameter, and `" ++ text ++
+      "` is not one -- it is read off whichever impl the caller picks; return the value " ++
+      "and do this at the call site, where its type is concrete")
+}
 
-pub fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: Int) -> Cx =
-  cerr_h(cx, "no `" ++ trait_name ++ "` for the projection `" ++ ty_show(cx.adts, t) ++ "`",
-    lo, hi, assoc_witness_hint(cx, t))
+pub fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: Int) -> Cx = {
+  let (message_cx, text) = type_display_read(cx, t)
+  let (hint_cx, hint) = assoc_witness_hint(message_cx, t)
+  cerr_h(hint_cx, "no `" ++ trait_name ++ "` for the projection `" ++ text ++ "`",
+    lo, hi, hint)
+}
 
 # ---- tests (slice 2) ----
 
@@ -1670,7 +1738,8 @@ pub fn check_unary(
   match op {
     OpNot -> {
       if t != TyBool && not is_errorish(t) {
-        let cx1 = cerr(cx, "`not` expects Bool, got ${ty_show(cx.adts, t)}", olo, ohi)
+        let (render_cx, text) = type_display_read(cx, t)
+        let cx1 = cerr(render_cx, "`not` expects Bool, got " ++ text, olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, TyBool, XUnary(UNot, operand, lo, hi, TyBool))
@@ -1678,7 +1747,8 @@ pub fn check_unary(
     }
     OpNeg -> {
       if not is_numeric(t) && not is_errorish(t) {
-        let cx1 = cerr(cx, "negation expects a number, got ${ty_show(cx.adts, t)}", olo, ohi)
+        let (render_cx, text) = type_display_read(cx, t)
+        let cx1 = cerr(render_cx, "negation expects a number, got " ++ text, olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, t, XUnary(UNeg, operand, lo, hi, t))
@@ -1686,7 +1756,8 @@ pub fn check_unary(
     }
     OpBnot -> {
       if t != TyInt && not is_errorish(t) {
-        let cx1 = cerr(cx, "`~` expects Int, got ${ty_show(cx.adts, t)}", olo, ohi)
+        let (render_cx, text) = type_display_read(cx, t)
+        let cx1 = cerr(render_cx, "`~` expects Int, got " ++ text, olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, TyInt, XUnary(UBnot, operand, lo, hi, TyInt))
@@ -1792,8 +1863,10 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRe
     TyVar(_, vid) ->
       match map.get(cx.frame.dict_syms, (vid, ORD_ID)) {
         None -> {
-          let cx1 = cerr_h(cx, "values of type " ++ ty_show(cx.adts, t) ++
-              " cannot be ordered", lo, hi, "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Ord]")
+          let (message_cx, message_text) = type_display_read(cx, t)
+          let (hint_cx, hint_text) = type_display_read(message_cx, t)
+          let cx1 = cerr_h(hint_cx, "values of type " ++ message_text ++
+              " cannot be ordered", lo, hi, "add the bound: [" ++ hint_text ++ ": Ord]")
           (cx1, no_wit())
         }
         Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
@@ -1802,18 +1875,24 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRe
       match impl_at(cx.impl_table, ORD_ID, t) {
         Some(_) -> (cx, Some(WConcrete(ORD_ID, t)))
         None -> {
+          var diagnostic_cx = cx
           let hint: Option[String] = match t {
-            TyAdt(aid, _) ->
-              if len(adt_of(cx.adts, aid).tparams) == 0 {
-                let ts = ty_show(cx.adts, t)
+            TyAdt(aid, _) -> {
+              let (header_cx, header) = constructor_header_read(diagnostic_cx, aid)
+              diagnostic_cx = header_cx
+              if len(header.tparams) == 0 {
+                let (next, ts) = type_display_read(diagnostic_cx, t)
+                diagnostic_cx = next
                 Some("implement it: impl Ord[" ++ ts ++ "] { fn cmp(a: " ++ ts ++ ", b: " ++
                     ts ++ ") -> Int = ... }")
               } else {
                 None
               }
+            }
             _ -> None
           }
-          (cerr_o(cx, "values of type " ++ ty_show(cx.adts, t) ++ " cannot be ordered",
+          let (message_cx, message_text) = type_display_read(diagnostic_cx, t)
+          (cerr_o(message_cx, "values of type " ++ message_text ++ " cannot be ordered",
             lo, hi, hint), no_wit())
         }
       }
@@ -1862,7 +1941,8 @@ pub fn check_binary_typed(
   match op {
     OpAdd | OpSub | OpMul | OpDiv | OpMod -> {
       if not is_numeric(lt) {
-        return (cerr(cx, "arithmetic expects numbers, left side is ${ty_show(cx.adts, lt)}",
+        let (render_cx, text) = type_display_read(cx, lt)
+        return (cerr(render_cx, "arithmetic expects numbers, left side is " ++ text,
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if lt != rt {
@@ -1871,18 +1951,22 @@ pub fn check_binary_typed(
         } else {
           None
         }
-        return (cerr_o(cx, "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++
-            " vs " ++ ty_show(cx.adts, rt), olo, ohi, hint), TyError, node(no_wit(), TyError))
+        let (left_cx, left_text) = type_display_read(cx, lt)
+        let (right_cx, right_text) = type_display_read(left_cx, rt)
+        return (cerr_o(right_cx, "both sides must have the same type: " ++ left_text ++
+            " vs " ++ right_text, olo, ohi, hint), TyError, node(no_wit(), TyError))
       }
       (cx, lt, node(no_wit(), lt))
     }
     OpBand | OpBor | OpBxor | OpShl | OpShr | OpUshr -> {
       if lt != TyInt {
-        return (cerr(cx, "bitwise operators expect Int, left side is ${ty_show(cx.adts, lt)}",
+        let (render_cx, text) = type_display_read(cx, lt)
+        return (cerr(render_cx, "bitwise operators expect Int, left side is " ++ text,
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyInt {
-        return (cerr(cx, "bitwise operators expect Int, right side is ${ty_show(cx.adts, rt)}",
+        let (render_cx, text) = type_display_read(cx, rt)
+        return (cerr(render_cx, "bitwise operators expect Int, right side is " ++ text,
           rlo, rhi), TyError, node(no_wit(), TyError))
       }
       (cx, TyInt, node(no_wit(), TyInt))
@@ -1900,21 +1984,27 @@ pub fn check_binary_typed(
       }
       if both_lists {
         if lt != rt {
-          return (cerr(cx, "`++` needs lists of the same element type: " ++
-              ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi),
+          let (left_cx, left_text) = type_display_read(cx, lt)
+          let (right_cx, right_text) = type_display_read(left_cx, rt)
+          return (cerr(right_cx, "`++` needs lists of the same element type: " ++
+              left_text ++ " vs " ++ right_text, olo, ohi),
             TyError, node(no_wit(), TyError))
         }
         return (cx, lt, node(no_wit(), lt))
       }
-      (cerr_h(cx, "`++` concatenates Strings, Bytes or Lists, got " ++ ty_show(cx.adts, lt) ++
-          " ++ " ++ ty_show(cx.adts, rt), olo, ohi,
+      let (left_cx, left_text) = type_display_read(cx, lt)
+      let (right_cx, right_text) = type_display_read(left_cx, rt)
+      (cerr_h(right_cx, "`++` concatenates Strings, Bytes or Lists, got " ++ left_text ++
+          " ++ " ++ right_text, olo, ohi,
         "use + for numbers; interpolation \"\${x}\${y}\" also builds strings"), TyError,
         node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
       if lt != rt {
-        return (cerr(cx, "== requires both sides to have the same type: " ++
-            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
+        let (left_cx, left_text) = type_display_read(cx, lt)
+        let (right_cx, right_text) = type_display_read(left_cx, rt)
+        return (cerr(right_cx, "== requires both sides to have the same type: " ++
+            left_text ++ " vs " ++ right_text, olo, ohi), TyError,
           node(no_wit(), TyError))
       }
       # One pipeline. `==` used to ask `resolve_eq_witness`, a second solver
@@ -1927,8 +2017,10 @@ pub fn check_binary_typed(
     }
     OpLt | OpLe | OpGt | OpGe -> {
       if lt != rt {
-        return (cerr(cx, "comparison requires both sides to have the same type: " ++
-            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
+        let (left_cx, left_text) = type_display_read(cx, lt)
+        let (right_cx, right_text) = type_display_read(left_cx, rt)
+        return (cerr(right_cx, "comparison requires both sides to have the same type: " ++
+            left_text ++ " vs " ++ right_text, olo, ohi), TyError,
           node(no_wit(), TyError))
       }
       # Native fast path, and an opaque type over one of these takes it too:
@@ -1945,15 +2037,90 @@ pub fn check_binary_typed(
     }
     OpAnd | OpOr -> {
       if lt != TyBool {
-        return (cerr(cx, "logical operators expect Bool, left side is ${ty_show(cx.adts, lt)}",
+        let (render_cx, text) = type_display_read(cx, lt)
+        return (cerr(render_cx, "logical operators expect Bool, left side is " ++ text,
           llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyBool {
-        return (cerr(cx, "logical operators expect Bool, right side is ${ty_show(cx.adts, rt)}",
+        let (render_cx, text) = type_display_read(cx, rt)
+        return (cerr(render_cx, "logical operators expect Bool, right side is " ++ text,
           rlo, rhi), TyError, node(no_wit(), TyError))
       }
       (cx, TyBool, node(no_wit(), TyBool))
     }
+  }
+}
+
+test "diagnostic reads retain nominal ordering template decisions" {
+  for generic in [false, true] {
+    let declaration = if generic { "type Box[T] = { value: T }" } else { "type Box = { value: Int }" }
+    let name = if generic { "Box[Int]" } else { "Box" }
+    let (syntax, pd) = parser.parse_module(declaration ++ "\nfn go(x: " ++ name ++ ") -> Bool = x < x")
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var headers = 0
+    var renders = 0
+    for read in observed.function_reads.expect("ordering template reads") {
+      match read {
+        semantic_reads.ConstructorHeaderAnswer(_, header) -> {
+          assert header.name == "Box" && len(header.tparams) == (if generic { 1 } else { 0 })
+          headers = headers + 1
+        }
+        semantic_reads.RenderedType(_, text) -> {
+          assert text == name
+          renders = renders + 1
+        }
+        _ -> ()
+      }
+    }
+    assert headers == 1 && renders == (if generic { 1 } else { 2 })
+    assert str.contains(cold.diags[0].hint, "implement it: impl Ord[Box]") == not generic
+  }
+}
+
+test "diagnostic reads retain ordering messages and repeated bound hints" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  for t in [TyBool, TyVar("T", 100)] {
+    let (observed, witness) = resolve_ord_witness(initial, t, 0, 1)
+    let (cold, cold_witness) = resolve_ord_witness(Cx { ..initial, function_reads: None }, t, 0, 1)
+    let read = semantic_reads.RenderedType(t, ty_show(initial.adts, t))
+    let expected = if t == TyBool { [read] } else { [read, read] }
+    assert observed.function_reads == Some(expected)
+    assert observed.diags == cold.diags && len(cold.diags) == 1
+    assert witness == cold_witness && observed.next_id == cold.next_id
+  }
+}
+
+test "diagnostic reads preserve binary refusal order and absorbed errors" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  for sample in [(OpAdd, TyString, TyInt, [TyString]), (OpAdd, TyInt, TyBool, [TyInt, TyBool]),
+    (OpBand, TyBool, TyInt, [TyBool]), (OpBand, TyInt, TyBool, [TyBool]),
+    (OpConcat, TyList(TyInt), TyList(TyBool), [TyList(TyInt), TyList(TyBool)]),
+    (OpConcat, TyInt, TyBool, [TyInt, TyBool]), (OpEq, TyInt, TyBool, [TyInt, TyBool]),
+    (OpLt, TyInt, TyBool, [TyInt, TyBool]), (OpAnd, TyInt, TyBool, [TyInt]),
+    (OpAnd, TyBool, TyInt, [TyInt])] {
+    let (op, lt, rt, rendered) = sample
+    let (observed, ty, expr) = check_binary_typed(initial, op, lt, rt, XError(0, 1), XError(2, 3), 0, 1, 2, 3, 1, 2, 0, 3)
+    let (cold, cold_ty, cold_expr) = check_binary_typed(Cx { ..initial, function_reads: None }, op, lt, rt, XError(0, 1), XError(2, 3), 0, 1, 2, 3, 1, 2, 0, 3)
+    var expected: List[semantic_reads.FunctionRead] = []
+    for t in rendered { expected = expected ++ [semantic_reads.RenderedType(t, ty_show(initial.adts, t))] }
+    assert observed.function_reads == Some(expected)
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert ty == cold_ty && expr == cold_expr
+  }
+  for op in [OpAdd, OpBand, OpConcat, OpEq, OpLt, OpAnd] {
+    let (silent, _, _) = check_binary_typed(initial, op, TyError, TyBool, XError(0, 1), XError(2, 3), 0, 1, 2, 3, 1, 2, 0, 3)
+    assert silent.function_reads == Some([]) && silent.diags == []
+  }
+  for sample in [(OpAdd, TyInt), (OpBand, TyInt), (OpConcat, TyString),
+    (OpConcat, TyBytes), (OpConcat, TyList(TyInt)), (OpEq, TyInt), (OpLt, TyInt), (OpAnd, TyBool)] {
+    let (op, t) = sample
+    let (valid, _, _) = check_binary_typed(initial, op, t, t, XError(0, 1), XError(2, 3), 0, 1, 2, 3, 1, 2, 0, 3)
+    assert valid.function_reads == Some([]) && valid.diags == []
   }
 }
 
@@ -2477,8 +2644,9 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
           _ -> false
         }
         if not ret_is_opt {
-          return (cerr(cx,
-            propagate_msg(cx, "an Option", "Option[...]", ty_show(cx.adts, sig_ret)),
+          let (render_cx, text) = type_display_read(cx, sig_ret)
+          return (cerr(render_cx,
+            propagate_msg(render_cx, "an Option", "Option[...]", text),
             lo, hi), TyError, XError(lo, hi))
         }
         return (cx, targs[0], node(targs[0]))
@@ -2487,30 +2655,95 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
         match sig_ret {
           TyAdt(rid, rargs) -> {
             if rid != RESULT_ID {
-              return (cerr(cx,
-                propagate_msg(cx, "a Result", "Result[...]", ty_show(cx.adts, sig_ret)),
+              let (render_cx, text) = type_display_read(cx, sig_ret)
+              return (cerr(render_cx,
+                propagate_msg(render_cx, "a Result", "Result[...]", text),
                 lo, hi), TyError, XError(lo, hi))
             }
             if rargs[1] != targs[1] {
-              return (cerr_h(cx, "`?` error types differ: " ++ ty_show(cx.adts, ot) ++ " vs " ++
-                  ty_show(cx.adts, sig_ret), lo, hi,
+              let (operand_cx, operand_text) = type_display_read(cx, ot)
+              let (return_cx, return_text) = type_display_read(operand_cx, sig_ret)
+              return (cerr_h(return_cx, "`?` error types differ: " ++ operand_text ++ " vs " ++
+                  return_text, lo, hi,
                 "there is no automatic error conversion; match and rewrap the error"),
                 TyError, XError(lo, hi))
             }
             return (cx, targs[0], node(targs[0]))
           }
-          _ -> return (cerr(cx,
-            propagate_msg(cx, "a Result", "Result[...]", ty_show(cx.adts, sig_ret)),
-            lo, hi), TyError, XError(lo, hi))
+          _ -> {
+            let (render_cx, text) = type_display_read(cx, sig_ret)
+            return (cerr(render_cx,
+              propagate_msg(render_cx, "a Result", "Result[...]", text),
+              lo, hi), TyError, XError(lo, hi))
+          }
         }
       }
-      (cerr_h(cx, "`?` needs an Option or Result, got ${ty_show(cx.adts, ot)}", lo, hi,
+      let (render_cx, text) = type_display_read(cx, ot)
+      (cerr_h(render_cx, "`?` needs an Option or Result, got " ++ text, lo, hi,
         "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
         TyError, XError(lo, hi))
     }
-    _ -> (cerr_h(cx, "`?` needs an Option or Result, got ${ty_show(cx.adts, ot)}", lo, hi,
-      "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
-      TyError, XError(lo, hi))
+    _ -> {
+      let (render_cx, text) = type_display_read(cx, ot)
+      (cerr_h(render_cx, "`?` needs an Option or Result, got " ++ text, lo, hi,
+        "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
+        TyError, XError(lo, hi))
+    }
+  }
+}
+
+test "diagnostic reads retain unwrap and non-record field refusals" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  for t in [TyInt, result_ty(TyInt, TyString)] {
+    let (observed, ty, expr) = check_unwrap_typed(initial, t, XError(0, 1), "panic", 0, 1)
+    let (cold, cold_ty, cold_expr) = check_unwrap_typed(Cx { ..initial, function_reads: None }, t, XError(0, 1), "panic", 0, 1)
+    assert observed.function_reads == Some([semantic_reads.RenderedType(t, ty_show(initial.adts, t))])
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert ty == cold_ty && expr == cold_expr
+  }
+  for t in [opt_ty(TyInt), TyError] {
+    let (silent, _, _) = check_unwrap_typed(initial, t, XError(0, 1), "panic", 0, 1)
+    assert silent.function_reads == Some([]) && silent.diags == []
+  }
+  for t in [TyInt, opt_ty(TyInt)] {
+    let (observed, ty, expr) = check_field_access_typed(initial, t, XError(0, 1), "missing", 1, 2, 0, 2)
+    let (cold, cold_ty, cold_expr) = check_field_access_typed(Cx { ..initial, function_reads: None }, t, XError(0, 1), "missing", 1, 2, 0, 2)
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("field refusal reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    assert renders == [semantic_reads.RenderedType(t, ty_show(initial.adts, t))]
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert ty == cold_ty && expr == cold_expr
+  }
+}
+
+test "diagnostic reads preserve propagation refusal order and successful shapes" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let ret_sig = Sig { name: "f", param_tys: [], param_names: [], param_defaults: [],
+    ret: TyInt, eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
+    owner: None, trait_id: None, op_of: None, inferring: false }
+  let base = adt_of(initial.adts, OPTION_ID)
+  let adts = map.insert(initial.adts, 1000, AdtI { ..base, id: 1000, name: "Other", tparams: [] })
+  for sample in [(opt_ty(TyInt), TyInt, [TyInt]),
+    (result_ty(TyInt, TyString), opt_ty(TyInt), [opt_ty(TyInt)]),
+    (result_ty(TyInt, TyString), TyInt, [TyInt]),
+    (result_ty(TyInt, TyString), result_ty(TyInt, TyBool), [result_ty(TyInt, TyString), result_ty(TyInt, TyBool)]),
+    (TyInt, opt_ty(TyInt), [TyInt]), (TyAdt(1000, []), opt_ty(TyInt), [TyAdt(1000, [])])] {
+    let (operand, ret, rendered) = sample
+    let cx = Cx { ..initial, adts: adts, frame: Frame { ..initial.frame, current_sig: Some(Sig { ..ret_sig, ret: ret }) } }
+    let (observed, ty, expr) = check_propagate_typed(cx, operand, XError(0, 1), 0, 1)
+    let (cold, cold_ty, cold_expr) = check_propagate_typed(Cx { ..cx, function_reads: None }, operand, XError(0, 1), 0, 1)
+    var expected: List[semantic_reads.FunctionRead] = []
+    for t in rendered { expected = expected ++ [semantic_reads.RenderedType(t, ty_show(adts, t))] }
+    assert observed.function_reads == Some(expected)
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert ty == cold_ty && expr == cold_expr
+  }
+  for t in [opt_ty(TyInt), result_ty(TyInt, TyString)] {
+    let cx = Cx { ..initial, frame: Frame { ..initial.frame, current_sig: Some(Sig { ..ret_sig, ret: t }) } }
+    let (valid, ty, _) = check_propagate_typed(cx, t, XError(0, 1), 0, 1)
+    assert valid.function_reads == Some([]) && valid.diags == [] && ty == TyInt
   }
 }
 
@@ -2585,12 +2818,16 @@ pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, 
         } else {
           "`!` unwraps an Option and panics on None; this value is not an Option"
         }
-        (cerr_h(cx, "`!` needs an Option, got ${ty_show(cx.adts, ot)}", lo, hi, hint),
+        let (render_cx, text) = type_display_read(cx, ot)
+        (cerr_h(render_cx, "`!` needs an Option, got " ++ text, lo, hi, hint),
           TyError, XError(lo, hi))
       }
-    _ -> (cerr_h(cx, "`!` needs an Option, got ${ty_show(cx.adts, ot)}", lo, hi,
-      "`!` unwraps an Option and panics on None; this value is not an Option"),
-      TyError, XError(lo, hi))
+    _ -> {
+      let (render_cx, text) = type_display_read(cx, ot)
+      (cerr_h(render_cx, "`!` needs an Option, got " ++ text, lo, hi,
+        "`!` unwraps an Option and panics on None; this value is not an Option"),
+        TyError, XError(lo, hi))
+    }
   }
 }
 
@@ -2626,6 +2863,7 @@ test "record field reads preserve generic substitution and refusal shortcuts" {
       reads = [header, header, header]
       if index != 2 { reads = reads ++ [semantic_reads.ConstructorFields(aid, 0, info.ctors[0])] }
     }
+    if index == 2 || index == 3 { reads = reads ++ [semantic_reads.RenderedType(ty, ty_show(base.adts, ty))] }
     assert observed.function_reads == Some(reads)
     assert result == (if index == 0 { TyInt } else { TyError })
     assert next_result == result && next_tree == tree && cold.diags == observed.diags
@@ -2670,7 +2908,8 @@ pub fn check_field_access_typed(
     _ -> false
   }
   if not is_record {
-    return (cerr_o(cx, "`.` field access needs a record value, got ${ty_show(cx.adts, tt)}",
+    let (render_cx, text) = type_display_read(cx, tt)
+    return (cerr_o(render_cx, "`.` field access needs a record value, got " ++ text,
       flo, fhi, bad_hint), TyError, XError(lo, hi))
   }
   match tt {
@@ -2917,17 +3156,18 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
             TyTuple(_) -> true
             _ -> false
           }
+          let (render_cx, text) = type_display_read(cx1, scrut)
           let msg = match scrut {
             TyTuple(stys) -> "this pattern has " ++ to_string(len(elems)) ++
-              " elements but the scrutinee is " ++ ty_show(cx1.adts, scrut)
-            _ -> "tuple pattern does not match scrutinee type ${ty_show(cx1.adts, scrut)}"
+              " elements but the scrutinee is " ++ text
+            _ -> "tuple pattern does not match scrutinee type " ++ text
           }
           let hint = match scrut {
             TyTuple(stys) -> "a tuple pattern must bind exactly " ++ to_string(len(stys)) ++
               " element(s)"
             _ -> "match a tuple pattern only against a tuple value"
           }
-          cx1 = cerr_h(cx1, msg, lo, hi, hint)
+          cx1 = cerr_h(render_cx, msg, lo, hi, hint)
         }
         var subs: List[TPat] = []
         for sub in elems {
@@ -2944,8 +3184,9 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
         TyList(e) -> e
         _ -> {
           if not is_errorish(scrut) {
-            cx1 = cerr(cx1, "list pattern does not match scrutinee type " ++
-                ty_show(cx1.adts, scrut), lo, hi)
+            let (render_cx, text) = type_display_read(cx1, scrut)
+            cx1 = cerr(render_cx, "list pattern does not match scrutinee type " ++
+                text, lo, hi)
           }
           TyError
         }
@@ -3091,9 +3332,11 @@ fn check_or_bindings(
       }
       Some(got) -> {
         if got.ty != want.ty {
-          cx1 = cerr_h(cx1, "or-pattern binding `" ++ want.name ++ "` has type " ++
-              ty_show(cx1.adts, got.ty) ++ ", but the first alternative binds " ++
-              ty_show(cx1.adts, want.ty), got.lo, got.hi,
+          let (actual_cx, actual_text) = type_display_read(cx1, got.ty)
+          let (first_cx, first_text) = type_display_read(actual_cx, want.ty)
+          cx1 = cerr_h(first_cx, "or-pattern binding `" ++ want.name ++ "` has type " ++
+              actual_text ++ ", but the first alternative binds " ++
+              first_text, got.lo, got.hi,
             "bind `" ++ want.name ++ "` at the same type in every alternative")
         }
       }
@@ -3279,8 +3522,10 @@ fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPa
   }
   var cx1 = cx
   if lt != scrut && not is_errorish(scrut) && not is_errorish(lt) {
-    cx1 = cerr(cx1, "pattern type " ++ ty_show(cx1.adts, lt) ++
-        " does not match scrutinee type " ++ ty_show(cx1.adts, scrut), lo, hi)
+    let (literal_cx, literal_text) = type_display_read(cx1, lt)
+    let (scrutinee_cx, scrutinee_text) = type_display_read(literal_cx, scrut)
+    cx1 = cerr(scrutinee_cx, "pattern type " ++ literal_text ++
+        " does not match scrutinee type " ++ scrutinee_text, lo, hi)
   }
   (cx1, TPLit(lv))
 }
@@ -3346,8 +3591,9 @@ fn check_ctor_pattern_at(
   }
   if not scrut_matches {
     if not is_errorish(scrut) {
-      cx1 = cerr(cx1, "`" ++ cname ++ "` is a " ++ a2.name ++
-          " constructor, but the scrutinee is " ++ ty_show(cx1.adts, scrut), nlo, nhi)
+      let (render_cx, text) = type_display_read(cx1, scrut)
+      cx1 = cerr(render_cx, "`" ++ cname ++ "` is a " ++ a2.name ++
+          " constructor, but the scrutinee is " ++ text, nlo, nhi)
     }
   }
   # instantiate field types with the scrutinee's type arguments
@@ -3407,7 +3653,11 @@ fn check_ctor_pattern_at(
         for f in ci.fields { fnames = fnames ++ [f.name] }
         let hint = match suggest.hint(an, fnames) {
           Some(h) -> h
-          None -> "constructor: ${ctor_render(cx1.adts, ci)}"
+          None -> {
+            let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+            cx1 = hint_cx
+            "constructor: " ++ hint_text
+          }
         }
         cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
           a.nlo, a.nhi, hint)
@@ -3448,8 +3698,9 @@ fn check_ctor_pattern_at(
     fk = fk + 1
   }
   if len(pargs) > n {
-    cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has " ++ to_string(n) ++ " field(s), the pattern names " ++
-        to_string(len(pargs)), lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
+    let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+    cx1 = cerr_h(hint_cx, "`" ++ ci.name ++ "` has " ++ to_string(n) ++ " field(s), the pattern names " ++
+        to_string(len(pargs)), lo, hi, "constructor: " ++ hint_text)
   } else if not has_rest {
     var missing: List[String] = []
     var k = 0
@@ -3663,7 +3914,11 @@ test "java reads retain return dispatch and diagnostic class metadata" {
       [semantic_reads.JavaSam("pkg.Box", Some(tj_static("run", [], "long", "pkg.Box")))]
     }
     assert cold.next_id == observed.next_id
-    assert observed.function_reads == Some(sam_reads ++ [semantic_reads.JavaClassInfo("pkg.Box", metadata)])
+    let rendered = if list_argument {
+      [semantic_reads.RenderedType(TyList(TyTuple([TyInt, TyInt])), "List[(Int, Int)]"),
+        semantic_reads.RenderedType(TyTuple([TyInt, TyInt]), "(Int, Int)")]
+    } else { [semantic_reads.RenderedType(TyFn([], TyInt, EIo), "fn() -> Int !io")] }
+    assert observed.function_reads == Some(sam_reads ++ [semantic_reads.JavaClassInfo("pkg.Box", metadata)] ++ rendered)
   }
 }
 
@@ -4248,6 +4503,34 @@ test "or-patterns share the first symbol" {
     }
     _ -> { assert false }
   }
+}
+
+test "diagnostic reads retain pattern mismatch types in evaluation order" {
+  let initial = Cx { ..seed_prelude(push_scope(test_cx())), function_reads: Some([]) }
+  for sample in [(PTuple([PWild(0, 1), PWild(2, 3)], 0, 3), TyInt, [TyInt]),
+    (PTuple([PWild(0, 1), PWild(2, 3)], 0, 3), TyTuple([TyInt]), [TyTuple([TyInt])]),
+    (PList([], false, None, None, [], 0, 3), TyInt, [TyInt]),
+    (PLit(EInt(1, 0, 1), 0, 1), TyBool, [TyInt, TyBool]),
+    (PCtor("None", no_pargs(), false, false, 0, 4, 0, 4), TyInt, [TyInt])] {
+    let (pat, scrut, rendered) = sample
+    let (observed, tree) = check_pattern(initial, pat, scrut, false)
+    let (cold, cold_tree) = check_pattern(Cx { ..initial, function_reads: None }, pat, scrut, false)
+    var reads: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("pattern diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { reads = reads ++ [read] }, _ -> () }
+    }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for ty in rendered { expected = expected ++ [semantic_reads.RenderedType(ty, ty_show(initial.adts, ty))] }
+    assert reads == expected
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert tree == cold_tree
+  }
+  let canonical = [PatBind { name: "x", sym: 1, ty: TyInt, lo: 1, hi: 2 }]
+  let actual = [PatBind { name: "x", sym: 2, ty: TyString, lo: 3, hi: 4 }]
+  let observed = check_or_bindings(initial, canonical, actual, PWild(5, 6))
+  let cold = check_or_bindings(Cx { ..initial, function_reads: None }, canonical, actual, PWild(5, 6))
+  assert observed.function_reads == Some([semantic_reads.RenderedType(TyString, "String"), semantic_reads.RenderedType(TyInt, "Int")])
+  assert observed.diags == cold.diags && observed.next_id == cold.next_id
 }
 
 test "or-patterns reject binding type mismatches" {
@@ -5226,9 +5509,11 @@ pub fn check_ctor_value(
   let ret = TyAdt(a.id, a.tparams)
   let node = (t: Ty) => XCtorValue(aid, cslot, lo, hi, t)
   if len(eps) != len(params) {
-    return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
-        " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi,
-      "constructor: ${ctor_render(cx.adts, ci)}"), TyError, XError(lo, hi))
+    let (expected_cx, expected_text) = type_display_read(cx, TyFn(eps, eret, eeff))
+    let (hint_cx, hint_text) = constructor_display_read(expected_cx, ci)
+    return (cerr_h(hint_cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
+        " field(s), but " ++ expected_text ++ " is expected", lo, hi,
+      "constructor: " ++ hint_text), TyError, XError(lo, hi))
   }
   if len(a.tparams) == 0 {
     let t0 = TyFn(params, ret, EPure)
@@ -5307,8 +5592,8 @@ pub fn resolve_witness(
     TyVar(_, vid) ->
       match map.get(cx.frame.dict_syms, (vid, trait_id)) {
         None -> {
-          let ts = ty_show(cx.adts, t)
-          (cerr_h(cx, requirer ++ " requires `" ++ tr.name ++ "[" ++ ts ++ "]`, but `" ++
+          let (render_cx, ts) = type_display_read(cx, t)
+          (cerr_h(render_cx, requirer ++ " requires `" ++ tr.name ++ "[" ++ ts ++ "]`, but `" ++
               ts ++ "` has no such bound", lo, hi,
             "add the bound: [" ++ ts ++ ": " ++ tr.name ++ "]"), no_wit())
         }
@@ -5377,11 +5662,18 @@ pub fn resolve_witness(
               _ -> ()
             }
           }
-          let ts = ty_show(cx.adts, t)
-          let hint = if trait_id == ORD_ID && not is_adt(t) {
+          let (render_cx, ts) = type_display_read(cx, t)
+          var diagnostic_cx = render_cx
+          let scalar_order = trait_id == ORD_ID && not is_adt(t)
+          let nongeneric = if scalar_order { false } else {
+            let (header_cx, answer) = is_nongeneric_adt_read(diagnostic_cx, t)
+            diagnostic_cx = header_cx
+            answer
+          }
+          let hint = if scalar_order {
             "orderable scalars are Int and String; Float has no total order (NaN), " ++
               "and everything else needs an `impl Ord`"
-          } else if is_nongeneric_adt(cx, t) {
+          } else if nongeneric {
             "define `impl " ++ tr.name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
               ts ++ "` or `" ++ tr.name ++ "`"
           } else if t == TyInt || t == TyFloat || t == TyBool || t == TyString {
@@ -5398,7 +5690,7 @@ pub fn resolve_witness(
               "[List[T]]`; write it in the module declaring `" ++ tr.name ++
               "` or the type"
           }
-          (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
+          (cerr_h(diagnostic_cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
         }
       }
   }
@@ -5603,11 +5895,41 @@ fn is_adt(t: Ty) -> Bool =
     _ -> false
   }
 
-fn is_nongeneric_adt(cx: Cx, t: Ty) -> Bool =
+fn is_nongeneric_adt_read(cx: Cx, t: Ty) -> (Cx, Bool) =
   match t {
-    TyAdt(aid, _) -> len(adt_of(cx.adts, aid).tparams) == 0
-    _ -> false
+    TyAdt(aid, _) -> {
+      let (next, header) = constructor_header_read(cx, aid)
+      (next, len(header.tparams) == 0)
+    }
+    _ -> (cx, false)
   }
+
+test "diagnostic reads retain witness rendering before nominal hint queries" {
+  let base = seed_prelude(test_cx())
+  let info = adt_of(base.adts, OPTION_ID)
+  let initial = Cx { ..base, function_reads: Some([]),
+    adts: map.insert(base.adts, 1000, AdtI { ..info, id: 1000, name: "Other", tparams: [] }) }
+  for t in [TyBool, TyVar("T", 100), TyAdt(1000, []), opt_ty(TyInt)] {
+    let (observed, witness) = resolve_witness(initial, ORD_ID, t, 0, 1, "caller")
+    let (cold, cold_witness) = resolve_witness(Cx { ..initial, function_reads: None }, ORD_ID, t, 0, 1, "caller")
+    var expected = [semantic_reads.RenderedType(t, ty_show(initial.adts, t))]
+    match t {
+      TyAdt(aid, _) -> {
+        let (_, header) = constructor_header_read(initial, aid)
+        expected = expected ++ [semantic_reads.ConstructorHeaderAnswer(aid, header)]
+      }
+      _ -> ()
+    }
+    assert observed.function_reads == Some(expected)
+    assert observed.diags == cold.diags && len(cold.diags) == 1
+    assert witness == cold_witness && witness == None
+    assert observed.next_id == cold.next_id && observed.frame == cold.frame
+  }
+  for t in [TyError, TyInt] {
+    let (observed, _) = resolve_witness(initial, ORD_ID, t, 0, 1, "caller")
+    assert observed.function_reads == Some([]) && observed.diags == []
+  }
+}
 
 test "ctor values and witnesses" {
   var cx = seed_prelude(test_cx())
@@ -5791,7 +6113,8 @@ fn check_list_elem(cx: Cx, x: ListElem, elem_t: Ty) -> (Cx, Ty, TListElem) !io =
           if is_errorish(t) {
             (cx1, TyError, TLESpread(tx))
           } else {
-            (cerr_h(cx1, "`..` spreads a list, but this is " ++ ty_show(cx1.adts, t), lo, hi,
+            let (render_cx, text) = type_display_read(cx1, t)
+            (cerr_h(render_cx, "`..` spreads a list, but this is " ++ text, lo, hi,
               "drop the `..` to make it one element"), TyError, TLESpread(tx))
           }
       }
@@ -5804,7 +6127,8 @@ fn check_list_elem(cx: Cx, x: ListElem, elem_t: Ty) -> (Cx, Ty, TListElem) !io =
         let (cx2, ct, cndx) = check_expr(cx1, a.cond, no_expected())
         cx1 = cx2
         if ct != TyBool && not is_errorish(ct) {
-          cx1 = cerr(cx1, "if condition must be Bool, got " ++ ty_show(cx1.adts, ct),
+          let (render_cx, text) = type_display_read(cx1, ct)
+          cx1 = cerr(render_cx, "if condition must be Bool, got " ++ text,
             e_lo(a.cond), e_hi(a.cond))
         }
         # an earlier arm of the same chain settles the type for a later one,
@@ -5867,7 +6191,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       let (cx1, ct, cndx) = check_expr(cx, cond, no_expected())
       var cx2 = cx1
       if ct != TyBool && not is_errorish(ct) {
-        cx2 = cerr(cx2, "if condition must be Bool, got ${ty_show(cx2.adts, ct)}",
+        let (render_cx, text) = type_display_read(cx2, ct)
+        cx2 = cerr(render_cx, "if condition must be Bool, got " ++ text,
           e_lo(cond), e_hi(cond))
       }
       let (cx3, tt, thnx) = check_expr(cx2, thn, expected)
@@ -5876,8 +6201,9 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
           # no else: statement position only, branch must be Unit
           var cx4 = cx3
           if tt != TyUnit && not is_errorish(tt) {
-            cx4 = cerr_h(cx4, "an if without else is a statement, so its branch must be Unit (got " ++
-                ty_show(cx4.adts, tt) ++ ")", e_lo(thn), e_hi(thn),
+            let (render_cx, text) = type_display_read(cx4, tt)
+            cx4 = cerr_h(render_cx, "an if without else is a statement, so its branch must be Unit (got " ++
+                text ++ ")", e_lo(thn), e_hi(thn),
               "add an else branch to produce a value")
           }
           (cx4, TyUnit, XIf(cndx, thnx, None, lo, hi, TyUnit))
@@ -6005,15 +6331,17 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       # ("no impl of `Index` for `Bool`") is true but drops the hint that
       # matters most here -- that absence has an answer, and it is `get`.
       if is_ground(tt) && not has_index_impl(cx1, tt) {
-        let cx2 = cerr_h(cx1,
-          "`[]` needs an `Index` impl for `" ++ ty_show(cx1.adts, tt) ++ "`", lo, hi,
+        let (render_cx, text) = type_display_read(cx1, tt)
+        let cx2 = cerr_h(render_cx,
+          "`[]` needs an `Index` impl for `" ++ text ++ "`", lo, hi,
           "List and Map have one; when absence is a normal case, " ++
             "use get(xs, i) / map.get(m, k)")
         let (cx3, _, _) = check_expr(cx2, index, no_expected())
         return (cx3, TyError, XError(lo, hi))
       }
-      let (cx2, w) = resolve_witness(cx1, INDEX_ID, tt, lo, hi,
-        "indexing a ${ty_show(cx1.adts, tt)}")
+      let (render_cx, text) = type_display_read(cx1, tt)
+      let (cx2, w) = resolve_witness(render_cx, INDEX_ID, tt, lo, hi,
+        "indexing a " ++ text)
       match w {
         None -> {
           let (cx3, _, _) = check_expr(cx2, index, no_expected())
@@ -6024,8 +6352,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
           let result = reduce_assoc(cx2, TyAssoc(tt, INDEX_ID, "Item"))
           let (cx3, it, ix) = check_expr(cx2, index, Some(want_idx))
           if it != want_idx && not is_errorish(it) {
-            (cerr(cx3, "this index must be `" ++ ty_show(cx3.adts, want_idx) ++
-                "`, got `" ++ ty_show(cx3.adts, it) ++ "`",
+            let (expected_cx, expected_text) = type_display_read(cx3, want_idx)
+            let (actual_cx, actual_text) = type_display_read(expected_cx, it)
+            (cerr(actual_cx, "this index must be `" ++ expected_text ++
+                "`, got `" ++ actual_text ++ "`",
               e_lo(index), e_hi(index)), TyError, XError(lo, hi))
           } else {
             (cx3, result, XIndex(tx, ix, wr, lo, hi, result))
@@ -6059,8 +6389,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
               Some(x) -> (e_lo(x), e_hi(x))
               None -> (lo, hi)
             }
-            cx3 = cerr(cx3, "`return` type mismatch: this function returns " ++
-                ty_show(cx3.adts, t) ++ ", got " ++ ty_show(cx3.adts, vt), slo, shi)
+            let (expected_cx, expected_text) = type_display_read(cx3, t)
+            let (actual_cx, actual_text) = type_display_read(expected_cx, vt)
+            cx3 = cerr(actual_cx, "`return` type mismatch: this function returns " ++
+                expected_text ++ ", got " ++ actual_text, slo, shi)
           }
           (cx3, TyNever, XReturn(vx, lo, hi))
         }
@@ -6082,8 +6414,9 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       let (cx2, t, bx) = check_expr(cx1, body, expected)
       let cx3 = leave_isolated(cx2, frame, "comptime blocks", e_lo(body), e_hi(body))
       if not is_const_serializable(cx3, t, set.empty()) && not is_errorish(t) {
-        (cerr_h(cx3, "a comptime result must be constant-serializable, got " ++
-            ty_show(cx3.adts, t), lo, hi,
+        let (render_cx, text) = type_display_read(cx3, t)
+        (cerr_h(render_cx, "a comptime result must be constant-serializable, got " ++
+            text, lo, hi,
           "Int/Float/Bool/String/Unit and List/tuple/record/ADT values of them (spec §7.2)"),
           TyError, XError(lo, hi))
       } else {
@@ -6589,14 +6922,14 @@ fn check_lambda(
   # has already said so in those terms; a second line naming "this lambda" would
   # point at a closure the author did not write.
   if have_exp && len(eps) != len(params) && not arm {
-    let want = ty_show(cx1.adts, TyFn(eps, eret, eeff))
+    let (render_cx, want) = type_display_read(cx1, TyFn(eps, eret, eeff))
     let n = to_string(len(params))
     if sugar {
-      cx1 = cerr_h(cx1, "the closure `with` introduced takes " ++ n ++ " parameter(s), but " ++
+      cx1 = cerr_h(render_cx, "the closure `with` introduced takes " ++ n ++ " parameter(s), but " ++
           want ++ " is expected", lo, hi,
         "`with` binds the names before `<-`, one per parameter")
     } else {
-      cx1 = cerr(cx1, "this lambda takes " ++ n ++ " parameter(s), but " ++ want ++
+      cx1 = cerr(render_cx, "this lambda takes " ++ n ++ " parameter(s), but " ++ want ++
           " is expected", lo, hi)
     }
   }
@@ -6772,8 +7105,10 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
     # annotation is an annotation, and a second wording for it would be a
     # second thing to keep in step
     if not assignable(cx1, it, t) {
-      cx1 = cerr(cx1, "annotated type is " ++ ty_show(cx1.adts, t) ++
-          " but the initializer is " ++ ty_show(cx1.adts, it), e_lo(c.init), e_hi(c.init))
+      let (declared_cx, declared_text) = type_display_read(cx1, t)
+      let (actual_cx, actual_text) = type_display_read(declared_cx, it)
+      cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
+          " but the initializer is " ++ actual_text, e_lo(c.init), e_hi(c.init))
     }
     tys = tys ++ [t]
     inits = inits ++ [ix]
@@ -7381,18 +7716,21 @@ fn check_handle_arms(
         } else {
           var cxa = cx1
           if len(a.params) != len(fptys) {
-            cxa = cerr_h(cxa, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
+            let (render_cx, text) = type_display_read(cxa, field.ty)
+            cxa = cerr_h(render_cx, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
                 " parameter(s), but operation `" ++ a.name ++ "` declares " ++
                 to_string(len(fptys)), a.nlo, a.nhi,
-              "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
+              "the arm is the operation's body: " ++ text)
           }
           let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true, false,
             Some(hid), None, Some(field.ty), a.lo, a.hi)
           cxa = cxb
           let (_, aret, aeff) = fn_ty_parts(at)
           if not assignable(cxa, aret, fret) {
-            cxa = cerr(cxa, "arm `" ++ a.name ++ "` returns " ++ ty_show(cxa.adts, aret) ++
-                " but operation `" ++ a.name ++ "` declares " ++ ty_show(cxa.adts, fret),
+            let (actual_cx, actual_text) = type_display_read(cxa, aret)
+            let (declared_cx, declared_text) = type_display_read(actual_cx, fret)
+            cxa = cerr(declared_cx, "arm `" ++ a.name ++ "` returns " ++ actual_text ++
+                " but operation `" ++ a.name ++ "` declares " ++ declared_text,
               e_lo(a.body), e_hi(a.body))
           }
           cxa = record_effect(cxa, aeff, a.nlo, a.nhi, a.name)
@@ -7483,10 +7821,11 @@ fn check_control_arm(
         "effect, because a row names effects and that is all the Java boundary can read")
   }
   if len(a.params) != len(fptys) {
-    cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
+    let (render_cx, text) = type_display_read(cx1, field_ty)
+    cx1 = cerr_h(render_cx, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
         " parameter(s) and a resume binder, but operation `" ++ a.name ++ "` declares " ++
         to_string(len(fptys)), a.nlo, a.nhi,
-      "the binder is the continuation, not a parameter: ${ty_show(cx1.adts, field_ty)}")
+      "the binder is the continuation, not a parameter: " ++ text)
   }
   let k_ty = TyFn([fret], answer, cont_row(reff))
   let kp = LambdaParam { name: kname, ann: None, lo: a.blo, hi: a.bhi }
@@ -7495,8 +7834,10 @@ fn check_control_arm(
   cx1 = cxb
   let (_, aret, aeff) = fn_ty_parts(at)
   if not assignable(cx1, aret, answer) {
-    cx1 = cerr_h(cx1, "arm `" ++ a.name ++ "` returns " ++ ty_show(cx1.adts, aret) ++
-        " but it answers the block, which is " ++ ty_show(cx1.adts, answer),
+    let (actual_cx, actual_text) = type_display_read(cx1, aret)
+    let (answer_cx, answer_text) = type_display_read(actual_cx, answer)
+    cx1 = cerr_h(answer_cx, "arm `" ++ a.name ++ "` returns " ++ actual_text ++
+        " but it answers the block, which is " ++ answer_text,
       e_lo(a.body), e_hi(a.body),
       "a control arm's value is the value of the whole `with handle`, not the " ++
         "operation's result -- that is what the `resume` clause bought")
@@ -7798,7 +8139,8 @@ fn check_apply(
         cx1 = cxa
       }
     }
-    return (cerr(cx1, "cannot call a value of type ${ty_show(cx1.adts, ft)}",
+    let (render_cx, text) = type_display_read(cx1, ft)
+    return (cerr(render_cx, "cannot call a value of type " ++ text,
       e_lo(target), e_hi(target)), TyError, XError(lo, hi))
   }
   if len(args) != len(fps) {
@@ -7808,8 +8150,9 @@ fn check_apply(
         cx1 = cxa
       }
     }
-    cx1 = cerr_h(cx1, "this function takes " ++ to_string(len(fps)) ++ " argument(s), got " ++
-        to_string(len(args)), lo, hi, "type: ${ty_show(cx1.adts, ft)}")
+    let (render_cx, text) = type_display_read(cx1, ft)
+    cx1 = cerr_h(render_cx, "this function takes " ++ to_string(len(fps)) ++ " argument(s), got " ++
+        to_string(len(args)), lo, hi, "type: " ++ text)
     return (cx1, fret, XError(lo, hi))
   }
   var txs: List[TExpr] = []
@@ -7821,9 +8164,12 @@ fn check_apply(
         let (cxa, at, ax) = check_expr(cx1, a, Some(pt))
         cx1 = cxa
         if not assignable(cx1, at, pt) {
-          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
-            "type: ${ty_show(cx1.adts, ft)}")
+          let (expected_cx, expected_text) = type_display_read(cx1, pt)
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          let (callable_cx, callable_text) = type_display_read(actual_cx, ft)
+          cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
+              ", got " ++ actual_text, e_lo(a), e_hi(a),
+            "type: " ++ callable_text)
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -7833,9 +8179,12 @@ fn check_apply(
       var i = 0
       for at in ats {
         if not assignable(cx1, at, fps[i]) {
-          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, fps[i]) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(args[i]), e_hi(args[i]),
-            "type: ${ty_show(cx1.adts, ft)}")
+          let (expected_cx, expected_text) = type_display_read(cx1, fps[i])
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          let (callable_cx, callable_text) = type_display_read(actual_cx, ft)
+          cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
+              ", got " ++ actual_text, e_lo(args[i]), e_hi(args[i]),
+            "type: " ++ callable_text)
         }
         i = i + 1
       }
@@ -7912,8 +8261,10 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       match ann_t {
         Some(a) ->
           if not assignable(cx1, it, a) {
-            cx1 = cerr(cx1, "annotated type is " ++ ty_show(cx1.adts, a) ++
-                " but the initializer is " ++ ty_show(cx1.adts, it), e_lo(init), e_hi(init))
+            let (declared_cx, declared_text) = type_display_read(cx1, a)
+            let (actual_cx, actual_text) = type_display_read(declared_cx, it)
+            cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
+                " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
             t = a
           }
         None -> ()
@@ -7989,8 +8340,10 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
               # cell must not leave the mark standing for the next assignment
               cx1 = Cx { ..cxb, take_cell: None }
               if not assignable(cx1, vt, ct) {
-                cx1 = cerr(cx1, "`" ++ name ++ "` is " ++ ty_show(cx1.adts, ct) ++
-                    ", cannot assign " ++ ty_show(cx1.adts, vt), e_lo(value), e_hi(value))
+                let (declared_cx, declared_text) = type_display_read(cx1, ct)
+                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
               }
               (cx1, TSExpr(cell_write(sid, name, vx, lo, hi), lo, hi))
             }
@@ -8003,8 +8356,10 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
               let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
               cx1 = cxb
               if not assignable(cx1, vt, sym.ty) {
-                cx1 = cerr(cx1, "`" ++ name ++ "` is " ++ ty_show(cx1.adts, sym.ty) ++
-                    ", cannot assign " ++ ty_show(cx1.adts, vt), e_lo(value), e_hi(value))
+                let (declared_cx, declared_text) = type_display_read(cx1, sym.ty)
+                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
               }
               (cx1, TSAssign(sid, name, vx, lo, hi))
             }
@@ -8018,7 +8373,8 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       # Java results may be dropped freely — Java APIs return `this` and
       # status codes that Dawn code rarely wants (spec §9)
       if t != TyUnit && not is_errorish(t) && not is_java_node(tx) {
-        cx2 = cerr_h(cx2, "this " ++ ty_show(cx2.adts, t) ++ " value is discarded", lo, hi,
+        let (render_cx, text) = type_display_read(cx2, t)
+        cx2 = cerr_h(render_cx, "this " ++ text ++ " value is discarded", lo, hi,
           "write let _ = ... to discard it, or move it to the block's tail/return position")
       }
       (cx2, TSExpr(tx, lo, hi))
@@ -8032,7 +8388,8 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
       cx1 = cxa
       if ct != TyBool && not is_errorish(ct) {
-        cx1 = cerr(cx1, "`assert` expects Bool, got ${ty_show(cx1.adts, ct)}", e_lo(cond), e_hi(cond))
+        let (render_cx, text) = type_display_read(cx1, ct)
+        cx1 = cerr(render_cx, "`assert` expects Bool, got " ++ text, e_lo(cond), e_hi(cond))
       }
       (cx1, TSAssert(cnx, src, lo, hi))
     }
@@ -8041,7 +8398,8 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
       cx1 = cxa
       if ct != TyBool && not is_errorish(ct) {
-        cx1 = cerr(cx1, "while condition must be Bool, got ${ty_show(cx1.adts, ct)}",
+        let (render_cx, text) = type_display_read(cx1, ct)
+        cx1 = cerr(render_cx, "while condition must be Bool, got " ++ text,
           e_lo(cond), e_hi(cond))
       }
       let d = len(cx1.frame.loop_stack)
@@ -8059,7 +8417,8 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         loop_jumps: set.remove(cx1.loop_jumps, d)
       }
       if bt != TyUnit && not is_errorish(bt) {
-        cx1 = cerr_h(cx1, "the loop body's value is discarded (" ++ ty_show(cx1.adts, bt) ++ ")",
+        let (render_cx, text) = type_display_read(cx1, bt)
+        cx1 = cerr_h(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
           e_lo(body), e_hi(body),
           "the last statement of a loop body must not be a non-Unit expression")
       }
@@ -8105,8 +8464,10 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
           let (cxb, tt2, tx2) = check_expr(cx1, te, no_expected())
           cx1 = cxb
           if (ft != TyInt && not is_errorish(ft)) || (tt2 != TyInt && not is_errorish(tt2)) {
-            cx1 = cerr(cx1, "range bounds a..b must be Int (got " ++ ty_show(cx1.adts, ft) ++
-                ".." ++ ty_show(cx1.adts, tt2) ++ ")", lo, hi)
+            let (from_cx, from_text) = type_display_read(cx1, ft)
+            let (to_cx, to_text) = type_display_read(from_cx, tt2)
+            cx1 = cerr(to_cx, "range bounds a..b must be Int (got " ++ from_text ++
+                ".." ++ to_text ++ ")", lo, hi)
           }
           loop_t = TyInt
           tx_to = Some(tx2)
@@ -8149,7 +8510,8 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         loop_jumps: set.remove(cx1.loop_jumps, d)
       }
       if bt != TyUnit && not is_errorish(bt) {
-        cx1 = cerr(cx1, "the loop body's value is discarded (" ++ ty_show(cx1.adts, bt) ++ ")",
+        let (render_cx, text) = type_display_read(cx1, bt)
+        cx1 = cerr(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
           e_lo(body), e_hi(body))
       }
       cx1 = pop_scope(cx1)
@@ -8211,13 +8573,16 @@ fn check_local_fn(
   match actual {
     TyFn(_, ar, ae) -> {
       if not assignable(cx1, ar, ret) {
-        cx1 = cerr(cx1, "the body of `" ++ name ++ "` has type " ++ ty_show(cx1.adts, ar) ++
-            " but the declared return type is " ++ ty_show(cx1.adts, ret), e_lo(body), e_hi(body))
+        let (actual_cx, actual_text) = type_display_read(cx1, ar)
+        let (return_cx, return_text) = type_display_read(actual_cx, ret)
+        cx1 = cerr(return_cx, "the body of `" ++ name ++ "` has type " ++ actual_text ++
+            " but the declared return type is " ++ return_text, e_lo(body), e_hi(body))
       }
       if ae == EIo && eff == EPure {
-        cx1 = cerr_h(cx1, "the body of `" ++ name ++ "` performs io", nlo, nhi,
+        let (hint_cx, return_text) = function_return_display_read(cx1, ret, EIo)
+        cx1 = cerr_h(hint_cx, "the body of `" ++ name ++ "` performs io", nlo, nhi,
           "declare it: fn " ++ name ++ "(...) -> " ++
-            fn_return_show(cx1.adts, ret, EIo) ++ " !io = ...")
+            return_text ++ " !io = ...")
       }
     }
     _ -> ()
@@ -8421,14 +8786,16 @@ fn check_call(
       }
       if not is_fn {
         let (cxa, _) = check_args_plain(cx1, args, pre0)
-        return (cerr(cxa, "`" ++ callee ++ "` is not a function (it is " ++
-            ty_show(cxa.adts, lt) ++ ")", clo, chi), TyError, XError(lo, hi))
+        let (render_cx, text) = type_display_read(cxa, lt)
+        return (cerr(render_cx, "`" ++ callee ++ "` is not a function (it is " ++
+            text ++ ")", clo, chi), TyError, XError(lo, hi))
       }
       if len(args) != len(lps) {
         let (cxa, _) = check_args_plain(cx1, args, pre0)
-        return (cerr_h(cxa, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
+        let (render_cx, text) = type_display_read(cxa, lt)
+        return (cerr_h(render_cx, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
             " argument(s), got " ++ to_string(len(args)), lo, hi,
-          "type: ${ty_show(cxa.adts, lt)}"), lret, XError(lo, hi))
+          "type: " ++ text), lret, XError(lo, hi))
       }
       var txs: List[TExpr] = []
       var i = 0
@@ -8437,9 +8804,12 @@ fn check_call(
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
         cx1 = cxa
         if not assignable(cx1, at, pt) {
-          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
-            "type: ${ty_show(cx1.adts, lt)}")
+          let (expected_cx, expected_text) = type_display_read(cx1, pt)
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          let (callable_cx, callable_text) = type_display_read(actual_cx, lt)
+          cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
+              ", got " ++ actual_text, e_lo(a), e_hi(a),
+            "type: " ++ callable_text)
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -8482,8 +8852,9 @@ fn check_call(
   let min_arity = required_count(s)
   if not named_present && (len(args) > len(s.param_tys) || len(args) < min_arity) {
     let (cxa, _) = check_args_plain(cx1, args, pre0)
-    let cxb = cerr_h(cxa, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
-      "signature: ${sig_render(cxa.adts, cxa.traits, s)}")
+    let (hint_cx, hint_text) = signature_display_read(cxa, s)
+    let cxb = cerr_h(hint_cx, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
+      "signature: " ++ hint_text)
     # The declared return type survives a wrong argument count, so hand it back
     # and let the context judge the body on its own (see check_ctor_call). For a
     # generic signature it does not survive: inference is seeded from the
@@ -8537,7 +8908,11 @@ fn check_call(
       SlotNoField(an) -> {
         let h = match suggest.hint(an, s.param_names) {
           Some(hh) -> hh
-          None -> "signature: ${sig_render(cx1.adts, cx1.traits, s)}"
+          None -> {
+            let (hint_cx, hint_text) = signature_display_read(cx1, s)
+            cx1 = hint_cx
+            "signature: " ++ hint_text
+          }
         }
         cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
         args_broken = true
@@ -8623,7 +8998,8 @@ fn check_call(
         # binding is offered to `unify_into` rather than made after it: the
         # union arm is a containment test over the *substituted* row, so a
         # binding that arrives late is a binding the test never sees.
-        let (em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+        let (row_cx, em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+        cx1 = row_cx
         var m3 = m
         var em3 = em_sub
         var ok = true
@@ -8645,11 +9021,16 @@ fn check_call(
         if not ok {
           let h = match why {
             Some(w) -> w
-            None -> "signature: ${sig_render(cx1.adts, cx1.traits, s)}"
+            None -> {
+              let (hint_cx, hint_text) = signature_display_read(cx1, s)
+              cx1 = hint_cx
+              "signature: " ++ hint_text
+            }
           }
-          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-              ty_show(cx1.adts, reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)) ++ ", got " ++
-              ty_show(cx1.adts, at), e_lo(a), e_hi(a), h)
+          let (expected_cx, expected_text) = type_display_read(cx1, reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m))
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          cx1 = cerr_h(actual_cx, "argument type mismatch: expected " ++
+              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
         }
       }
       at_next = at_next ++ [at_i]
@@ -8663,8 +9044,9 @@ fn check_call(
   # first (the all-positional path answered arity above and returned)
   if named_present && not args_broken &&
     (len(args) > len(s.param_tys) || len(args) < min_arity) {
-      let cxb = cerr_h(cx1, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
-        "signature: ${sig_render(cx1.adts, cx1.traits, s)}")
+      let (hint_cx, hint_text) = signature_display_read(cx1, s)
+      let cxb = cerr_h(hint_cx, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
+        "signature: " ++ hint_text)
       let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
       return (cxb, rt, XError(lo, hi))
     }
@@ -8684,9 +9066,10 @@ fn check_call(
       mi = mi + 1
     }
     if len(missing_req) > 0 {
-      let cxb = cerr_h(cx1, "missing argument(s) for `" ++ callee ++ "`: " ++
+      let (hint_cx, hint_text) = signature_display_read(cx1, s)
+      let cxb = cerr_h(hint_cx, "missing argument(s) for `" ++ callee ++ "`: " ++
           join(missing_req, ", "), lo, hi,
-        "signature: ${sig_render(cx1.adts, cx1.traits, s)}")
+        "signature: " ++ hint_text)
       let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
       return (cxb, rt, XError(lo, hi))
     }
@@ -8767,8 +9150,9 @@ fn check_call(
       _ -> TyError
     }
     if target == TyInt || target == TyFloat || target == TyBool {
-      cx1 = cerr_h(cx1, "`" ++ s.name ++ "` target must be a reference type, not " ++
-          ty_show(cx1.adts, target), lo, hi,
+      let (render_cx, text) = type_display_read(cx1, target)
+      cx1 = cerr_h(render_cx, "`" ++ s.name ++ "` target must be a reference type, not " ++
+          text, lo, hi,
         "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
     }
   }
@@ -9810,9 +10194,10 @@ fn check_ctor_call(
   # the same mistake with nothing inside it, and because the pipe (SYN-05) can
   # now write an application over any head, including this one.
   if spelling == CApply && ad.is_record {
-    return (cerr_h(cx1,
+    let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+    return (cerr_h(hint_cx,
       "record `" ++ ci.name ++ "` must be built with braces: " ++ ci.name ++ " { ... }",
-      lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}"), TyError, XError(lo, hi))
+      lo, hi, "constructor: " ++ hint_text), TyError, XError(lo, hi))
   }
   if spelling == CBare && n > 0 {
     # a bare constructor with fields, in a function-typed position, is a function value
@@ -9825,7 +10210,8 @@ fn check_ctor_call(
       "constructor `" ++ ci.name ++ "` has " ++ to_string(n) ++
         " field(s) and cannot be used bare"
     }
-    return (cerr_h(cx1, msg, lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}"),
+    let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+    return (cerr_h(hint_cx, msg, lo, hi, "constructor: " ++ hint_text),
       TyError, XError(lo, hi))
   }
   # a bare nullary constructor where a function is expected: a value, not a function
@@ -9859,7 +10245,8 @@ fn check_ctor_call(
       m = m3
       em = em3
       if not ok {
-        cx1 = cerr(cx1, "`..base` must be a " ++ ad.name ++ ", got " ++ ty_show(cx1.adts, bt),
+        let (render_cx, text) = type_display_read(cx1, bt)
+        cx1 = cerr(render_cx, "`..base` must be a " ++ ad.name ++ ", got " ++ text,
           e_lo(sp), e_hi(sp))
       }
       spread_tx = Some(sx)
@@ -9895,7 +10282,11 @@ fn check_ctor_call(
         for f in ci.fields { fnames = fnames ++ [f.name] }
         let h = match suggest.hint(an, fnames) {
           Some(hh) -> hh
-          None -> "constructor: ${ctor_render(cx1.adts, ci)}"
+          None -> {
+            let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+            cx1 = hint_cx
+            "constructor: " ++ hint_text
+          }
         }
         cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
         args_broken = true
@@ -9970,10 +10361,12 @@ fn check_ctor_call(
           m = m3
           em = em3
           if not ok {
-            cx1 = cerr_h(cx1, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
-                "` is " ++ ty_show(cx1.adts, subst(declared, m, em)) ++ ", got " ++
-                ty_show(cx1.adts, at), e_lo(a.e), e_hi(a.e),
-              "constructor: ${ctor_render(cx1.adts, ci)}")
+            let (declared_cx, declared_text) = type_display_read(cx1, subst(declared, m, em))
+            let (actual_cx, actual_text) = type_display_read(declared_cx, at)
+            let (hint_cx, hint_text) = constructor_display_read(actual_cx, ci)
+            cx1 = cerr_h(hint_cx, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
+                "` is " ++ declared_text ++ ", got " ++ actual_text, e_lo(a.e), e_hi(a.e),
+              "constructor: " ++ hint_text)
           }
         }
       }
@@ -10012,11 +10405,13 @@ fn check_ctor_call(
     # the first (`fn f() -> Int = Zero` still does not return an Int), so it is a
     # separate mistake, not a cascade -- suppressing it only defers it a rebuild.
     if len(cargs) > n {
-      cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
-          to_string(len(cargs)), lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
+      let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+      cx1 = cerr_h(hint_cx, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
+          to_string(len(cargs)), lo, hi, "constructor: " ++ hint_text)
     } else if len(missing) > 0 && not has_spread {
-      cx1 = cerr_h(cx1, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
-        lo, hi, "constructor: ${ctor_render(cx1.adts, ci)}")
+      let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+      cx1 = cerr_h(hint_cx, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
+        lo, hi, "constructor: " ++ hint_text)
       missing_reported = true
     }
   }
@@ -10571,7 +10966,7 @@ test "java oracle reads retain rejected candidates before the winning overload" 
     assert next_ty == ty && next_tree == tree && cold.diags == observed.diags && cold.diags == []
     assert observed.function_reads == Some([semantic_reads.LocalConstructor("Foreign", None), semantic_reads.LocalConstant("Foreign", None),
       semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
-      semantic_reads.JavaClassInfo("pkg.Box", info), candidates,
+      semantic_reads.JavaClassInfo("pkg.Box", info), semantic_reads.RenderedType(TyString, "String"), candidates,
       semantic_reads.JavaAssignable("pkg.Refused", "java.lang.String", false),
       semantic_reads.JavaAssignable("pkg.Parent", "java.lang.String", true)])
   }
@@ -10761,9 +11156,10 @@ fn finalize_sams(
         }
         if not fits && not is_errorish(t) {
           let (info_cx, info) = java_class_info_read(cx1, p)
-          cx1 = cerr_h(info_cx, "this function does not fit `" ++ info.simple ++ "`",
+          let (render_cx, shape_text) = type_display_read(info_cx, TyFn(sps, sret, EIo))
+          cx1 = cerr_h(render_cx, "this function does not fit `" ++ info.simple ++ "`",
             e_lo(a), e_hi(a),
-            "expected shape: " ++ ty_show(cx1.adts, TyFn(sps, sret, EIo)) ++
+            "expected shape: " ++ shape_text ++
               "\n  single abstract method: " ++ sm.desc)
         }
       }
@@ -10790,8 +11186,10 @@ fn finalize_sams(
             if bridgeable { bridges = bridges ++ [i] }
             if not bridgeable {
               let (info_cx, info) = java_class_info_read(cx1, p)
-              cx1 = cerr_h(info_cx, "cannot bridge " ++ ty_show(cx1.adts, t) ++ " to `" ++
-                  info.simple ++ "`: element type " ++ ty_show(cx1.adts, el) ++
+              let (list_cx, list_text) = type_display_read(info_cx, t)
+              let (element_cx, element_text) = type_display_read(list_cx, el)
+              cx1 = cerr_h(element_cx, "cannot bridge " ++ list_text ++ " to `" ++
+                  info.simple ++ "`: element type " ++ element_text ++
                   " does not cross", e_lo(a), e_hi(a),
                 "bridgeable elements: Int, Float, Bool, String, and Java classes; " ++
                   "nested containers, ADTs, tuples and functions stay on the Dawn side (spec §9.6)")
@@ -10804,6 +11202,50 @@ fn finalize_sams(
     i = i + 1
   }
   (cx1, atx2, convs, evs, bridges)
+}
+
+test "diagnostic reads retain Java bridge and deferred SAM refusals" {
+  let info = JClass { fqcn: "pkg.Callback", simple: "Callback", display: "Callback",
+    is_interface: true, is_primitive: false, is_array: false }
+  let method = JMethod { name: "apply", param_cls: [], ret_cls: "long", is_static: false,
+    is_varargs: false, is_abstract: true, desc: "callback descriptor", decl_cls: "pkg.Callback" }
+  let oracle = Jsig { ..jsig_refused(), class_info: name => info,
+    sam_of: name => Some(method) }
+  for index in 0..3 {
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let arg: Expr = if index == 0 { ELambda(no_lparams(), EBool(true, 0, 1), false, 0, 1) } else { EBool(true, 0, 1) }
+    let ty = if index == 1 { TyList(TyList(TyInt)) } else { TyList(TyInt) }
+    let ats: List[Option[Ty]] = if index == 0 { [None] } else { [Some(ty)] }
+    let atx: List[Option[TExpr]] = [None]
+    let (cold, trees, convs, evs, bridges) = finalize_sams(initial, ["pkg.Callback"], false, [arg], ats, atx)
+    let (observed, next_trees, next_convs, next_evs, next_bridges) = finalize_sams(Cx { ..initial, function_reads: Some([]) }, ["pkg.Callback"], false, [arg], ats, atx)
+    assert observed.diags == cold.diags && len(cold.diags) == (if index == 2 { 0 } else { 1 })
+    assert trees == next_trees && convs == next_convs && evs == next_evs && bridges == next_bridges
+    assert observed.next_id == cold.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("Java diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let tys: List[Ty] = if index == 0 { [TyFn([], TyInt, EIo)] } else if index == 1 { [ty, TyList(TyInt)] } else { [] }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for t in tys { expected = expected ++ [semantic_reads.RenderedType(t, ty_show(initial.adts, t))] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain eager Java argument descriptions on success" {
+  let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "Box",
+    is_interface: false, is_primitive: false, is_array: false }
+  let method = tj_static("get", ["long"], "long", "pkg.Box")
+  for missing in [false, true] {
+    let methods: List[JMethod] = if missing { [] } else { [method] }
+    let initial = Cx { ..test_cx(), jsig: Jsig { ..jsig_refused(), on: true, methods_of: name => methods } }
+    let (cold, ty, tree) = check_java_call(initial, info, None, true, "get", [EInt(1, 0, 1)], 0, 1, 0, 1)
+    let (observed, next_ty, next_tree) = check_java_call(Cx { ..initial, function_reads: Some([]) }, info, None, true, "get", [EInt(1, 0, 1)], 0, 1, 0, 1)
+    assert ty == next_ty && tree == next_tree && cold.diags == observed.diags
+    assert len(cold.diags) == (if missing { 1 } else { 0 })
+    assert observed.function_reads == Some([semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.JavaMethods("pkg.Box", methods)])
+  }
 }
 
 ## Java return types → Dawn (spec §9.2): references land wrapped in Option.
@@ -10882,7 +11324,11 @@ fn check_java_call(
   var si = 0
   for t0 in ats {
     match t0 {
-      Some(t) -> { shown = shown ++ [ty_show(cx1.adts, t)] }
+      Some(t) -> {
+        let (render_cx, text) = type_display_read(cx1, t)
+        cx1 = render_cx
+        shown = shown ++ [text]
+      }
       None -> { shown = shown ++ ["fn/${to_string(arities[si])}"] }
     }
     si = si + 1
@@ -11388,9 +11834,10 @@ fn check_method_call(
                   let (cxa, _, _) = check_expr(cx1, a, no_expected())
                   cx1 = cxa
                 }
-                cx1 = cerr_h(cx1, "`" ++ name ++ "` takes " ++ to_string(len(fps)) ++
+                let (field_cx, field_text) = type_display_read(cx1, ftype)
+                cx1 = cerr_h(field_cx, "`" ++ name ++ "` takes " ++ to_string(len(fps)) ++
                     " argument(s), got " ++ to_string(len(args)), lo, hi,
-                  "field type: ${ty_show(cx1.adts, ftype)}")
+                  "field type: " ++ field_text)
                 return (cx1, fret, XError(lo, hi))
               }
               var txs: List[TExpr] = []
@@ -11400,9 +11847,12 @@ fn check_method_call(
                 let (cxa, at, ax) = check_expr(cx1, a, Some(pt))
                 cx1 = cxa
                 if not assignable(cx1, at, pt) {
-                  cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-                      ty_show(cx1.adts, pt) ++ ", got " ++ ty_show(cx1.adts, at),
-                    e_lo(a), e_hi(a), "field type: ${ty_show(cx1.adts, ftype)}")
+                  let (expected_cx, expected_text) = type_display_read(cx1, pt)
+                  let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+                  let (field_cx, field_text) = type_display_read(actual_cx, ftype)
+                  cx1 = cerr_h(field_cx, "argument type mismatch: expected " ++
+                      expected_text ++ ", got " ++ actual_text,
+                    e_lo(a), e_hi(a), "field type: " ++ field_text)
                 }
                 txs = txs ++ [ax]
                 ai = ai + 1
@@ -11489,8 +11939,9 @@ fn check_match(
   let scrut_ok = sp == TyInt || sp == TyFloat || sp == TyString || sp == TyBool ||
     is_adt(st) || is_tuple_ty(st) || is_list_ty(st)
   if not scrut_ok && not is_errorish(st) {
-    cx1 = cerr(cx1, "match supports Int/Float/String/Bool, tuples, lists and user-defined types, got " ++
-        ty_show(cx1.adts, st), e_lo(scrut), e_hi(scrut))
+    let (render_cx, text) = type_display_read(cx1, st)
+    cx1 = cerr(render_cx, "match supports Int/Float/String/Bool, tuples, lists and user-defined types, got " ++
+        text, e_lo(scrut), e_hi(scrut))
   }
   var result = TyNever
   # concrete-typed arms first so an inference-only arm body (bare `None`, `[]`)
@@ -11527,7 +11978,8 @@ fn check_match(
         let (cxa, gt, gx) = check_expr(cx1, g, no_expected())
         cx1 = cxa
         if gt != TyBool && not is_errorish(gt) {
-          cx1 = cerr(cx1, "guard must be Bool, got ${ty_show(cx1.adts, gt)}", e_lo(g), e_hi(g))
+          let (render_cx, text) = type_display_read(cx1, gt)
+          cx1 = cerr(render_cx, "guard must be Bool, got " ++ text, e_lo(g), e_hi(g))
         }
         tguard = Some(gx)
       }
@@ -11634,7 +12086,11 @@ fn check_match(
               }
             }
           }
-          _ -> "_ (" ++ ty_show(cx1.adts, st) ++ " has too many values to enumerate)"
+          _ -> {
+            let (render_cx, text) = type_display_read(cx1, st)
+            cx1 = render_cx
+            "_ (" ++ text ++ " has too many values to enumerate)"
+          }
         }
         if too_complex {
           cx1 = usefulness_too_complex(cx1, lo, hi)
@@ -12176,6 +12632,34 @@ test "Never fits every SAM return representation" {
       assert ret == TyNever
     }
     None -> { assert false }
+  }
+}
+
+test "diagnostic reads retain primitive cast refusals and reference success" {
+  let object = tj_class("java.lang.Object", "Object")
+  let oracle = Jsig { ..test_jsig(), find_class: name => {
+    assert name == "java.lang.Object"
+    Some(object)
+  }, class_info: name => {
+    assert name == "java.lang.Object"
+    object
+  } }
+  for target in [TyInt, TyFloat, TyBool, TyString] {
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let text = ty_show(initial.adts, target)
+    let (syntax, pd) = parser.parse_module("use java \"java.lang.Object\"\nfn go(o: Object) -> Result[" ++ text ++ ", ForeignError] = cast(o)")
+    assert pd == []
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    let rejected = target != TyString
+    assert cold.diags == observed.diags && len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("cast diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if rejected { [semantic_reads.RenderedType(target, text)] } else { [] }
+    assert renders == expected
   }
 }
 
@@ -12723,8 +13207,10 @@ pub fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefault) 
   let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
   cxd = cxe
   if not assignable(cxd, dt, pty) {
-    cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
-        " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
+    let (param_cx, param_text) = type_display_read(cxd, pty)
+    let (default_cx, default_text) = type_display_read(param_cx, dt)
+    cxd = cerr(default_cx, "parameter `" ++ p.name ++ "` is " ++ param_text ++
+        " but its default value is " ++ default_text, e_lo(de), e_hi(de))
   }
   # The row must not depend on whether the call site omits the argument.
   for used in cxd.frame.used_effects {
@@ -12783,8 +13269,10 @@ pub fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) ->
   let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
   cx1 = cx2
   if not assignable(cx1, bt, s.ret) {
-    cx1 = cerr(cx1, "function `" ++ d.name ++ "` declares return type " ++
-        ty_show(cx1.adts, s.ret) ++ " but its body is " ++ ty_show(cx1.adts, bt),
+    let (return_cx, return_text) = type_display_read(cx1, s.ret)
+    let (body_cx, body_text) = type_display_read(return_cx, bt)
+    cx1 = cerr(body_cx, "function `" ++ d.name ++ "` declares return type " ++
+        return_text ++ " but its body is " ++ body_text,
       e_lo(d.body), e_hi(d.body))
   }
   cx1 = verify_effects(cx1, "function", d.name, s.eff, s.eparams, "the end of the signature",
@@ -12883,8 +13371,10 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
   let (cx2, bt, bx) = check_expr(cx1, body, Some(s.ret))
   cx1 = cx2
   if not assignable(cx1, bt, s.ret) {
-    cx1 = cerr(cx1, "method `" ++ m2.name ++ "` declares return type " ++
-        ty_show(cx1.adts, s.ret) ++ " but its default body is " ++ ty_show(cx1.adts, bt),
+    let (return_cx, return_text) = type_display_read(cx1, s.ret)
+    let (body_cx, body_text) = type_display_read(return_cx, bt)
+    cx1 = cerr(body_cx, "method `" ++ m2.name ++ "` declares return type " ++
+        return_text ++ " but its default body is " ++ body_text,
       e_lo(body), e_hi(body))
   }
   cx1 = verify_effects(cx1, "method", m2.name, s.eff, s.eparams, "the trait method", m2.nlo, m2.nhi)
@@ -12949,8 +13439,9 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   let (cx2, bt, bx) = check_expr(cx1, body, Some(TyUnit))
   cx1 = cx2
   if not assignable(cx1, bt, TyUnit) {
-    cx1 = cerr_h(cx1, "a test block's trailing value is discarded (" ++
-        ty_show(cx1.adts, bt) ++ ")", e_lo(body), e_hi(body),
+    let (body_cx, body_text) = type_display_read(cx1, bt)
+    cx1 = cerr_h(body_cx, "a test block's trailing value is discarded (" ++
+        body_text ++ ")", e_lo(body), e_hi(body),
       "assert on it instead of leaving it as the last expression")
   }
   cx1 = pop_scope(cx1)
@@ -12989,11 +13480,449 @@ pub fn check_const_init(
   let (cx3, bt, bx) = check_expr(cx2, d.init, Some(declared))
   cx1 = leave_isolated(cx3, frame, "const initializers", e_lo(d.init), e_hi(d.init))
   if not assignable(cx1, bt, declared) {
-    cx1 = cerr(cx1, "`" ++ d.name ++ "` declares type " ++ ty_show(cx1.adts, declared) ++
-        " but its initializer is " ++ ty_show(cx1.adts, bt), e_lo(d.init), e_hi(d.init))
+    let (declared_cx, declared_text) = type_display_read(cx1, declared)
+    let (body_cx, body_text) = type_display_read(declared_cx, bt)
+    cx1 = cerr(body_cx, "`" ++ d.name ++ "` declares type " ++ declared_text ++
+        " but its initializer is " ++ body_text, e_lo(d.init), e_hi(d.init))
   }
   cx1 = Cx { ..cx1, const_cutoff: None }
   (cx1, TConst { name: d.name, ty: declared, init: bx, lo: d.lo, hi: d.hi })
+}
+
+test "diagnostic reads retain lambda arity and match diagnostic paths" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let expected_type = TyFn([TyInt], TyInt, EPure)
+  for sugar in [false, true] {
+    let (observed, ty, tree) = check_lambda(initial, [], EInt(1, 0, 1), sugar, false, false, None, None, Some(expected_type), 0, 1)
+    let (cold, cold_ty, cold_tree) = check_lambda(Cx { ..initial, function_reads: None }, [], EInt(1, 0, 1), sugar, false, false, None, None, Some(expected_type), 0, 1)
+    assert observed.function_reads == Some([semantic_reads.RenderedType(expected_type, "fn(Int) -> Int")])
+    assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    assert ty == cold_ty && tree == cold_tree
+  }
+  for sample in [("match () { _ -> 1 }", TyUnit, true),
+    ("match 1 { _ if 0 -> 1\n_ -> 2 }", TyInt, true),
+    ("match 1 { 0 -> 1 }", TyInt, true), ("match 1 { _ -> 1 }", TyInt, false)] {
+    let (body, displayed, rejected) = sample
+    let (syntax, pd) = parser.parse_module("fn go() -> Int = " ++ body)
+    assert pd == []
+    let (cold, cold_module) = check_module(Cx { ..initial, function_reads: None }, syntax, map.empty())
+    let (observed, observed_module) = check_module(initial, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("match diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if rejected { [semantic_reads.RenderedType(displayed, ty_show(initial.adts, displayed))] } else { [] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain handler results cell initializers and assignments" {
+  for sample in [
+    ("effect Ask { fn ask() -> Int }", "ask() => true", [TyBool, TyInt]),
+    ("ctl effect Ask { fn ask() -> Int }", "ask() resume k => true", [TyBool, TyInt]),
+    ("effect Ask { fn ask(arg: Int) -> Int }", "ask() => 1", [TyFn([TyInt], TyInt, EPure)]),
+    ("ctl effect Ask { fn ask(arg: Int) -> Int }", "ask() resume k => 1", [TyFn([TyInt], TyInt, EPure)]),
+    ("effect Ask { fn ask() -> Int }", "var n: Int = true\nask() => 1", [TyInt, TyBool]),
+    ("effect Ask { fn ask() -> Int }", "var n: Int = 0\nask() => { n = true\n1 }", [TyInt, TyBool])] {
+    let (declaration, arm, rendered) = sample
+    let call = if str.contains(declaration, "arg: Int") { "ask(1)" } else { "ask()" }
+    let (syntax, pd) = parser.parse_module(declaration ++ "\nfn go() -> Int = {\nwith handle Ask {\n" ++ arm ++ "\n}\n" ++ call ++ "\n}")
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold_module == observed_module && cold.next_id == observed.next_id && cold.take_cell == observed.take_cell
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("handler diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for ty in rendered { expected = expected ++ [semantic_reads.RenderedType(ty, ty_show(initial.adts, ty))] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain local callable refusals and successful calls" {
+  let ft = TyFn([TyInt], TyInt, EPure)
+  let no_reads: List[Ty] = []
+  for sample in [("fn go() = { let f = 1\nf() }", [TyInt], true),
+    ("fn go() = { let f = (x: Int) => x\nf() }", [ft], true),
+    ("fn go() = { let f = (x: Int) => x\nf(true) }", [TyInt, TyBool, ft], true),
+    ("fn go() = { let f = (x: Int) => x\nf(1) }", no_reads, false),
+    ("fn go() = (1)()", [TyInt], true),
+    ("fn go() = ((x: Int) => x)()", [ft], true),
+    ("fn go() = ((x: Int) => x)(true)", [TyInt, TyBool, ft], true),
+    ("fn go() = ((x: Int) => x)(1)", no_reads, false),
+    ("fn go() = ((x: Int, y) => x)(true, 1)", [TyInt, TyBool, TyFn([TyInt, TyInt], TyInt, EPure)], true),
+    ("type P = { x: Int }\nfn go() -> P = P { ..true }", [TyBool], true),
+    ("type P = { f: fn(Int) -> Int }\nfn go(p: P) -> Int = p.f()", [ft], true),
+    ("type P = { f: fn(Int) -> Int }\nfn go(p: P) -> Int = p.f(true)", [TyInt, TyBool, ft], true),
+    ("type P = { f: fn(Int) -> Int }\nfn go(p: P) -> Int = p.f(1)", no_reads, false)] {
+    let (source, rendered, rejected) = sample
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("local callable diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for ty in rendered { expected = expected ++ [semantic_reads.RenderedType(ty, ty_show(initial.adts, ty))] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain discarded values conditions and range bounds" {
+  for sample in [("fn go() -> Unit = { 1\n() }", [TyInt]),
+    ("test \"bad\" { assert 1 }", [TyInt]),
+    ("fn go() -> Unit = { while 1 { () } }", [TyInt]),
+    ("fn go() -> Unit = { while false { 1 } }", [TyInt]),
+    ("fn go() -> Unit = { for _ in 0..1 { true } }", [TyBool]),
+    ("fn go() -> Unit = { for _ in false..true { () } }", [TyBool, TyBool]),
+    ("fn go() -> Unit = { let x: Int = true\n() }", [TyInt, TyBool]),
+    ("fn go() -> Unit = { var x = 1\nx = true }", [TyInt, TyBool])] {
+    let (source, rendered) = sample
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("statement diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for ty in rendered { expected = expected ++ [semantic_reads.RenderedType(ty, ty_show(initial.adts, ty))] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain eager indexing descriptions and return refusals" {
+  for sample in [("fn go() = true[0]", [TyBool], true),
+    ("fn go() = [1][true]", [TyList(TyInt), TyInt, TyBool], true),
+    ("fn go() = [1][0]", [TyList(TyInt)], false),
+    ("fn go() -> Int = { return true }", [TyInt, TyBool], true),
+    ("fn go() = comptime { () => 1 }", [TyFn([], TyInt, EPure)], true)] {
+    let (source, rendered, rejected) = sample
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("index/return diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    var expected: List[semantic_reads.FunctionRead] = []
+    for ty in rendered { expected = expected ++ [semantic_reads.RenderedType(ty, ty_show(initial.adts, ty))] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain conditional and list-element refusals" {
+  for sample in [("[..1]", true), ("[if 1 { 2 }]", true),
+    ("if 1 { () }", true), ("if true { 1 }", true),
+    ("[1, ..[2]]", false), ("[if true { 2 }]", false), ("if true { () }", false)] {
+    let (body, rejected) = sample
+    let (syntax, pd) = parser.parse_module("fn go() = " ++ body)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("conditional diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if rejected { [semantic_reads.RenderedType(TyInt, "Int")] } else { [] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain named-call fallbacks and skip spelling suggestions" {
+  for sample in [
+    ("fn move2(dx: Int, wrap: Bool) -> Int = dx", "move2(dz: 1)", false, false),
+    ("fn move2(dx: Int, wrap: Bool) -> Int = dx", "move2(unrelated: 1)", true, false),
+    ("fn move2(dx: Int, wrap: Bool) -> Int = dx", "move2(dx: 1)", true, false),
+    ("fn move2(dx: Int, wrap: Bool) -> Int = dx", "move2(dx: 1, wrap: true)", false, true),
+    ("fn move2(dx: Int = 1, wrap: Bool) -> Int = dx", "move2(dx: 1)", true, false)] {
+    let (declaration, call, renders_signature, valid) = sample
+    let (syntax, pd) = parser.parse_module(declaration ++ "\nfn go() -> Int = " ++ call)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == (if valid { 0 } else { 1 })
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    let sig = map.get(observed.fns, "move2").expect("named signature")
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("named diagnostic reads") {
+      match read { semantic_reads.RenderedSignature(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if renders_signature { [semantic_reads.RenderedSignature(sig, sig_render(observed.adts, observed.traits, sig))] } else { [] }
+    assert renders == expected
+    if not valid && not renders_signature { assert str.contains(observed.diags[0].hint, "dx") }
+  }
+}
+
+test "diagnostic reads recompute signature trait names with complete inputs" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let tv = TyVar("T", 100)
+  let sig = Sig { name: "value", param_tys: [tv], param_names: ["x"], param_defaults: [true],
+    ret: TyFn([], TyInt, EPure), eff: EIo, is_builtin: false, tparams: [tv], constraints: [[EQ_ID]],
+    eparams: [], owner: Some("module"), trait_id: None, op_of: None, inferring: false }
+  let (old, old_text) = signature_display_read(initial, sig)
+  assert old_text == "fn value[T: Eq](x: T = ...) -> (fn() -> Int) !io"
+  assert old.function_reads == Some([semantic_reads.RenderedSignature(sig, old_text)])
+  let tr = trait_of(initial.traits, EQ_ID)
+  let renamed = Cx { ..initial, traits: map.insert(initial.traits, EQ_ID, TraitI { ..tr, name: "Renamed" }) }
+  let (next, next_text) = signature_display_read(renamed, sig)
+  assert next_text == "fn value[T: Renamed](x: T = ...) -> (fn() -> Int) !io"
+  assert next.function_reads == Some([semantic_reads.RenderedSignature(sig, next_text)])
+  let (cold, cold_text) = signature_display_read(Cx { ..renamed, function_reads: None }, sig)
+  assert cold_text == next_text && cold.function_reads == None
+  assert next.diags == cold.diags && next.next_id == cold.next_id
+}
+
+test "diagnostic reads retain signature hints and argument rendering order" {
+  for sample in [("value()", false), ("value(true)", true)] {
+    let (call, mismatch) = sample
+    let (syntax, pd) = parser.parse_module("fn value(x: Int) -> Int = x\nfn go() -> Int = " ++ call)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    let sig = map.get(observed.fns, "value").expect("value signature")
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("signature diagnostic reads") {
+      match read {
+        semantic_reads.RenderedSignature(_, _) | semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }
+        _ -> ()
+      }
+    }
+    var expected = [semantic_reads.RenderedSignature(sig, "fn value(x: Int) -> Int")]
+    if mismatch { expected = expected ++ [semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.RenderedType(TyBool, "Bool")] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain structural and associated witness hints" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let projection = TyAssoc(TyInt, HASH_ID, "Item")
+  for bad in [TyUnit, TyFloat, TyFn([], TyInt, EPure), TyArray(TyInt), projection, TyBool] {
+    for nested in [false, true] {
+      let whole = if nested { TyTuple([bad]) } else { bad }
+      let observed = structural_gap_err(initial, HASH_ID, whole, bad, 0, 1)
+      let cold = structural_gap_err(Cx { ..initial, function_reads: None }, HASH_ID, whole, bad, 0, 1)
+      var expected: List[semantic_reads.FunctionRead] = match bad {
+        TyUnit -> []
+        TyFloat -> []
+        TyFn(_, _, _) -> []
+        TyAssoc(_, _, _) -> [semantic_reads.RenderedType(bad, ty_show(initial.adts, bad)),
+          semantic_reads.RenderedType(bad, ty_show(initial.adts, bad))]
+        _ -> [semantic_reads.RenderedType(bad, ty_show(initial.adts, bad))]
+      }
+      if nested { expected = expected ++ [semantic_reads.RenderedType(whole, ty_show(initial.adts, whole))] }
+      assert observed.function_reads == Some(expected)
+      assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+    }
+  }
+  let observed = assoc_witness_err(initial, "Hash", projection, 0, 1)
+  let cold = assoc_witness_err(Cx { ..initial, function_reads: None }, "Hash", projection, 0, 1)
+  assert observed.function_reads == Some([semantic_reads.RenderedType(projection, "Int.Item"),
+    semantic_reads.RenderedType(projection, "Int.Item")])
+  assert observed.diags == cold.diags && len(cold.diags) == 1 && observed.next_id == cold.next_id
+}
+
+test "diagnostic reads retain unary refusals and branch mismatch order" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  for op in [OpNot, OpNeg, OpBnot] {
+    let (observed, ty, expr) = check_unary(initial, op, TyString, XError(0, 1), 0, 1, 0, 1)
+    let (cold, cold_ty, cold_expr) = check_unary(Cx { ..initial, function_reads: None }, op, TyString, XError(0, 1), 0, 1, 0, 1)
+    assert observed.function_reads == Some([semantic_reads.RenderedType(TyString, "String")])
+    assert observed.diags == cold.diags && len(cold.diags) == 1
+    assert observed.next_id == cold.next_id && ty == cold_ty && expr == cold_expr
+  }
+  let (mismatch, result) = unify_branches(initial, TyInt, TyBool, 0, 1, "branches")
+  assert result == TyError && mismatch.function_reads == Some([
+    semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.RenderedType(TyBool, "Bool")])
+  assert mismatch.diags[0].msg == "branches have mismatched types: Int vs Bool"
+  for pair in [(TyNever, TyInt), (TyError, TyInt), (TyInt, TyNever), (TyInt, TyError), (TyInt, TyInt)] {
+    let (left, right) = pair
+    let (ok, _) = unify_branches(initial, left, right, 0, 1, "branches")
+    assert ok.function_reads == Some([]) && ok.diags == []
+  }
+  for pair in [(OpNot, TyBool), (OpNeg, TyInt), (OpBnot, TyInt), (OpNot, TyError)] {
+    let (op, operand_ty) = pair
+    let (ok, _, _) = check_unary(initial, op, operand_ty, XError(0, 1), 0, 1, 0, 1)
+    assert ok.function_reads == Some([]) && ok.diags == []
+  }
+}
+
+test "diagnostic reads retain constructor value pattern and fallback consumers" {
+  for sample in [
+    ("fn go() -> Choice = Item(1, 2)", true),
+    ("fn go() -> Choice = Item(unrelated: 1)", true),
+    ("fn go() -> Choice = Item(valuf: 1)", false),
+    ("fn go() -> fn() -> Choice = Item", true),
+    ("fn go(x: Choice) -> Int = match x { Item(_, _) -> 1 }", true),
+    ("fn go(x: Choice) -> Int = match x { Item(unrelated: _, ..) -> 1 }", true),
+    ("fn go(x: Choice) -> Int = match x { Item(valuf: _, ..) -> 1 }", false)] {
+    let (body, renders_constructor) = sample
+    let (syntax, pd) = parser.parse_module("type Choice = Item(value: Int)\n" ++ body)
+    assert pd == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var count = 0
+    for read in observed.function_reads.expect("constructor consumer reads") {
+      match read {
+        semantic_reads.RenderedConstructor(ctor, answer) -> {
+          assert ctor.name == "Item" && ctor.fields == [FieldI { name: "value", ty: TyInt }]
+          assert answer == "Item(value: Int): Choice"
+          count = count + 1
+        }
+        _ -> ()
+      }
+    }
+    assert count == (if renders_constructor { 1 } else { 0 })
+    if not renders_constructor { assert str.contains(observed.diags[0].hint, "value") }
+  }
+}
+
+test "diagnostic reads retain constructor refusal contexts and skip valid construction" {
+  for sample in [("P(1)", true), ("P", true), ("P {}", true),
+    ("P { x: true }", true), ("P { x: 1 }", false)] {
+    let (expr, rejected) = sample
+    let (syntax, pd) = parser.parse_module("type P = { x: Int }\nfn go() -> P = " ++ expr)
+    assert pd == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert len(cold.diags) == (if rejected { 1 } else { 0 })
+    assert cold.diags == observed.diags && cold_module == observed_module && cold.next_id == observed.next_id
+    var count = 0
+    for read in observed.function_reads.expect("constructor diagnostic reads") {
+      match read {
+        semantic_reads.RenderedConstructor(ctor, answer) -> {
+          assert ctor.name == "P" && ctor.fields == [FieldI { name: "x", ty: TyInt }]
+          assert answer == "P { x: Int }"
+          count = count + 1
+        }
+        _ -> ()
+      }
+    }
+    assert count == (if rejected { 1 } else { 0 })
+  }
+}
+
+test "diagnostic reads recompute constructor shape and nested field names" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let ctor = CtorI { adt: OPTION_ID, name: "Wrap", fields: [FieldI { name: "value", ty: opt_ty(TyInt) }] }
+  let (old, old_text) = constructor_display_read(initial, ctor)
+  assert old.function_reads == Some([semantic_reads.RenderedConstructor(ctor, old_text)])
+  let info = adt_of(initial.adts, OPTION_ID)
+  let renamed = Cx { ..initial, adts: map.insert(initial.adts, OPTION_ID, AdtI { ..info, name: "Renamed", is_record: true }) }
+  let (next, next_text) = constructor_display_read(renamed, ctor)
+  assert next_text == "Wrap { value: Renamed[Int] }" && old_text != next_text
+  assert next.function_reads == Some([semantic_reads.RenderedConstructor(ctor, next_text)])
+  let (cold, cold_text) = constructor_display_read(Cx { ..renamed, function_reads: None }, ctor)
+  assert cold_text == next_text && cold.function_reads == None
+  assert next.next_id == cold.next_id && next.diags == cold.diags
+}
+
+test "diagnostic reads recompute nested nominal names without changing the query type" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let ty = TyTuple([opt_ty(TyInt), TyFn([opt_ty(TyBool)], opt_ty(TyInt), EPure)])
+  let (old, old_text) = type_display_read(initial, ty)
+  assert old_text == "(Option[Int], fn(Option[Bool]) -> Option[Int])"
+  assert old.function_reads == Some([semantic_reads.RenderedType(ty, old_text)])
+  let info = adt_of(initial.adts, OPTION_ID)
+  let renamed = Cx { ..initial, adts: map.insert(initial.adts, OPTION_ID, AdtI { ..info, name: "Renamed" }) }
+  let (next, next_text) = type_display_read(renamed, ty)
+  assert next_text == "(Renamed[Int], fn(Renamed[Bool]) -> Renamed[Int])"
+  assert next.function_reads == Some([semantic_reads.RenderedType(ty, next_text)])
+  let (again, repeated) = type_display_read(next, ty)
+  assert repeated == next_text && again.function_reads == Some([
+    semantic_reads.RenderedType(ty, next_text), semantic_reads.RenderedType(ty, next_text)])
+  let (cold, cold_text) = type_display_read(Cx { ..renamed, function_reads: None }, ty)
+  assert cold_text == next_text && cold.function_reads == None
+}
+
+test "diagnostic reads retain function and trait default return mismatches" {
+  for source in ["fn go() -> Int = true", "trait Carry[T] { fn get(x: T) -> Int = true }"] {
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert len(cold.diags) == 1 && cold.diags == observed.diags
+    assert cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("return diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    assert renders == [semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.RenderedType(TyBool, "Bool")]
+  }
+}
+
+test "diagnostic reads retain default and test refusals without observing successful paths" {
+  for sample in [("fn go(x: Int = true) -> Int = x", false, false),
+    ("fn go(x: Int = 1) -> Int = x", true, false),
+    ("test \"bad\" { 1 }", false, true), ("test \"good\" { () }", true, true)] {
+    let (source, valid, is_test) = sample
+    let (syntax, pd) = parser.parse_module(source)
+    assert pd == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert len(cold.diags) == (if valid { 0 } else { 1 })
+    assert cold.diags == observed.diags && cold_module == observed_module && cold.next_id == observed.next_id
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("default/test diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if valid { [] } else if is_test {
+      [semantic_reads.RenderedType(TyInt, "Int")]
+    } else { [semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.RenderedType(TyBool, "Bool")] }
+    assert renders == expected
+  }
+}
+
+test "diagnostic reads retain constant mismatch rendering in evaluation order" {
+  for valid in [false, true] {
+    let (syntax, pd) = parser.parse_module(if valid { "const VALUE: Int = 1" } else { "const VALUE: Int = true" })
+    assert pd == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert observed_module == cold_module && observed.diags == cold.diags && observed.next_id == cold.next_id
+    assert len(cold.diags) == (if valid { 0 } else { 1 })
+    var renders: List[semantic_reads.FunctionRead] = []
+    for read in observed.function_reads.expect("diagnostic reads") {
+      match read { semantic_reads.RenderedType(_, _) -> { renders = renders ++ [read] }, _ -> () }
+    }
+    let expected: List[semantic_reads.FunctionRead] = if valid { [] } else {
+      [semantic_reads.RenderedType(TyInt, "Int"), semantic_reads.RenderedType(TyBool, "Bool")]
+    }
+    assert renders == expected
+  }
 }
 
 fn no_tfun() -> Option[TFun] = None
@@ -13721,6 +14650,13 @@ test "a local function io hint groups its returned function type" {
   assert cx1.diags[0].msg == "the body of `local` performs io"
   assert cx1.diags[0].hint ==
     "declare it: fn local(...) -> (fn() -> Int) !io = ..."
+  let (observed, _) = check_module(Cx { ..test_cx(), function_reads: Some([]) }, m, env)
+  assert observed.diags == cx1.diags && observed.next_id == cx1.next_id
+  var returns: List[semantic_reads.FunctionRead] = []
+  for read in observed.function_reads.expect("grouped return reads") {
+    match read { semantic_reads.RenderedFunctionReturn(_, _, _) -> { returns = returns ++ [read] }, _ -> () }
+  }
+  assert returns == [semantic_reads.RenderedFunctionReturn(TyFn([], TyInt, EPure), EIo, "(fn() -> Int)")]
 }
 
 test "local functions refuse outer erased evidence slots" {

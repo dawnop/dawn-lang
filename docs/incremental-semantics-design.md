@@ -637,6 +637,122 @@ The expanded controls and broader acceptance must pass before this batch lands.
 This integration does not establish production cache admission on its own.
 The 8192-step and 4096-row limits and unknown results must remain unchanged.
 
+### Diagnostic rendering queries (observation implemented; cache admission pending)
+
+Record type rendering as a pure query from the complete input type to its
+rendered diagnostic text. Reuse the existing renderer so nested ADT names,
+opaque-type spelling, function grouping and effects retain their exact rules.
+The query's type relocates through the type domain; its answer remains text.
+Validation must recompute that query against the candidate context before reuse.
+This avoids a reverse dependency from types to checker observation machinery
+and does not enumerate unrelated ADTs. Record only at actual rendering calls,
+threading Cx before emitting the corresponding diagnostic and preserving string
+evaluation order. Constructor and function-return rendering require separate
+queries with their complete inputs; ordinary type rendering alone is not full
+diagnostic coverage. Production caching stays disabled during this migration.
+
+General trait witness refusals retain the rendered subject before querying the
+nominal header for an implementation-template hint. The scalar ordering hint
+short-circuits that header query; missing generic bounds render only once even
+though the resulting text is reused in both the message and hint. Successful
+primitive witnesses and error absorption do not acquire diagnostic reads.
+
+Effect argument row subtraction returns its observed context to the call checker.
+Its repair rendering is eager in the existing implementation: both successful
+subtraction and co-occurrence refusal retain the read, while earlier shape guards
+do not. Observation does not change the effect binding or the co-occurrence rule.
+
+Function-typed record fields retain arity hints and expected/actual/field type
+rendering in that order. Java finalization records rejected SAM shapes and
+non-bridgeable list/element types after class metadata queries. Java overload
+resolution retains its eager argument descriptions on successful calls as well
+as refusals; these reads precede candidate enumeration, as the renderer does.
+
+Local validation on 2026-09-08: 777 JVM selfhost tests, 64 compiler-plan tests,
+the native selfhost gate including its separate foundation closures, and the
+release fixed point (B == C) passed. Complete typed-state projection checked
+101 comparisons and rejected 30 compiling mutations in 257.69 seconds. The
+124 diagnostic mutations passed in three disjoint shards (42/41/41 controls),
+with independent positive baselines; the slowest shard took 289.33 seconds.
+Each CI shard therefore uses a 618-second planning value (2*290+38), below the
+unchanged 660-second pole, and a 31-minute timeout. These are local measurements,
+not claims about future CI duration or production cache speed.
+
+The Core audit verified all 100 baseline module hashes. Only the two compiler
+hash manifests were refreshed (28 exact and 9 normalized entries); all 17 fixed
+text goldens remain unchanged. Typed-subject alignment explains additional
+generated identities without rewriting literals. All 49 existing read projection
+arms remain unchanged modulo branch-local temporaries and loop labels; the four
+new render facts extend projection and equality. None of this enables production
+body reuse or completes phases 3–4.
+
+The first consumers are constant initializers, annotated function returns,
+trait default returns, parameter defaults and discarded test-body values.
+Successful paths do not acquire rendering reads. Owners compare complete
+typed modules, diagnostics and allocation against logging-disabled checks,
+then assert the exact ordered rendering facts. Compiling negative controls
+corrupt query inputs/results, relocation, and each returned consumer context.
+Function-return grouping hints now have a separate query carrying the return
+type and outer effect in their respective relocation domains. The existing
+local-function io hint uses it without changing parentheses or effect suffixes;
+its owner requires the exact grouped answer and retained context. Constructor
+rendering now carries the complete constructor input, relocating its ADT owner
+and field types independently while preserving names and field order. All nine
+constructor-rendering calls now retain this query, including suggestion
+fallbacks, constructor values, field mismatches and pattern arity errors.
+Suggestion hits do not acquire the fallback rendering read. Field mismatch
+queries preserve declared-type, actual-type, constructor-hint evaluation order.
+Unary refusals and branch-type mismatches also retain rendering queries; valid
+unary operations and absorbed Never/error branches do not render or log types.
+Binary operator refusals preserve one-sided or left-before-right rendering;
+valid operations and error absorption acquire no diagnostic rendering reads.
+Ordering refusals retain repeated bound-hint rendering, and inspect a nominal
+header through the observed boundary before offering a concrete impl template.
+Actual-module owners distinguish generic nominal types (no concrete impl
+template) from non-generic ones, retaining header and rendering reads in both
+cases. Constructor owners cover value arity, call overflow, pattern overflow,
+and unknown-field fallbacks; spelling suggestions skip constructor rendering.
+Propagation refusals record incompatible return types, operand/return error-type
+mismatches in that order, and non-Option/Result operand rendering. Successful
+Option and Result propagation does not acquire diagnostic rendering reads.
+Unwrap refusals and non-record field access retain their displayed operand
+types. The existing field-access owner still checks the complete ordered read
+list, now including rendering after header reads on refusal paths only.
+Tuple/list shape mismatches, literal and constructor scrutinee mismatches, and
+or-pattern binding type disagreements retain their rendered types. Owners
+compare complete cold diagnostics and pattern trees, requiring literal-before-
+scrutinee and actual-before-first-alternative rendering order.
+List spreads and conditional elements, ordinary if conditions, and non-Unit
+branches without else retain their displayed types. Actual-module owners cover
+each refusal and successful counterparts without diagnostic rendering reads.
+Indexing retains the eagerly rendered operation description even for successful
+access, as well as missing-impl and index-type mismatch rendering. Return and
+comptime result refusals retain their displayed types. This preserves actual
+evaluation rather than assuming every renderer runs only on an error path.
+Statement diagnostics retain discarded values, assertion/loop conditions,
+discarded loop results and ordered range endpoints. Annotated initializers,
+mutable assignments and handler-cell assignments render declared before actual
+types while preserving their existing symbol and cell-state transitions.
+Local function values and general callable expressions retain non-function,
+arity and argument-type diagnostics. Argument mismatches render expected,
+actual and complete callable types in order; successful calls do not render.
+Handler cell initialization and assignment retain declared/actual rendering.
+Ordinary and control arms retain operation-shape hints and return/answer-type
+refusals; actual-module owners compare full cold products and cell-take state.
+Lambda and with-closure arity hints retain the expected function type. Match
+scrutinee/guard refusals and non-enumerable missing-case descriptions retain
+their displayed types; exhaustive successful matches skip diagnostic rendering.
+Associated-witness hints return their context with the text, so structural-gap
+and associated-witness diagnostics retain both message and hint reads. Owners
+require repeated projection rendering and nested enclosing-type rendering in
+their original order, while fixed-text refusals acquire no rendering query.
+Signature hints use a complete Sig-to-text query, recomputed against both ADT
+and trait tables and relocated through the signature projector. All five call
+diagnostics retain it. Argument mismatches render the fallback signature before
+the expected and actual types, matching the original evaluation order.
+Other expression and pattern type diagnostics still need migration before this
+boundary is complete.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

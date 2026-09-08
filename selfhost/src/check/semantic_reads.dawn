@@ -60,6 +60,10 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | DeclaredEffectInfo(id: Int, answer: EffectI)
   | LocalEffectName(name: String, answer: Option[Int])
   | EffectCandidates(names: List[String])
+  | RenderedType(ty: Ty, answer: String)
+  | RenderedFunctionReturn(ret: Ty, outer_eff: Eff, answer: String)
+  | RenderedConstructor(ctor: CtorI, answer: String)
+  | RenderedSignature(sig: Sig, answer: String)
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -189,6 +193,14 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
           DeclaredEffectInfo(id, answer) -> DeclaredEffectInfo(nominal(id)?, EffectI { ..answer, id: nominal(answer.id)? })
           LocalEffectName(name, answer) -> LocalEffectName(name, match answer { None -> None, Some(id) -> Some(nominal(id)?) })
           EffectCandidates(names) -> EffectCandidates(names)
+          RenderedType(ty, answer) -> RenderedType(type_value(ty)?, answer)
+          RenderedSignature(sig, answer) -> RenderedSignature(signature(sig)?, answer)
+          RenderedFunctionReturn(ret, outer_eff, answer) -> RenderedFunctionReturn(type_value(ret)?, effect_value(outer_eff)?, answer)
+          RenderedConstructor(ctor, answer) -> {
+            var fields: List[FieldI] = []
+            for field in ctor.fields { fields = fields ++ [FieldI { ..field, ty: type_value(field.ty)? }] }
+            RenderedConstructor(CtorI { ..ctor, adt: nominal(ctor.adt)?, fields: fields }, answer)
+          }
           DeclaredConstantName(name, present) -> DeclaredConstantName(name, present)
           LocalValueCandidates(include_constants, names) -> LocalValueCandidates(include_constants, names)
           ConstructorHeaderAnswer(adt, answer) -> {
@@ -315,6 +327,17 @@ test "semantic reads retain misses and capture only the current suffix" {
   assert append(None, writes) == None && record(None, "ignored", None) == None
 }
 
+test "semantic reads relocate signature rendering inputs without rewriting answers" {
+  let sig = Sig { name: "value", param_tys: [], param_names: [], param_defaults: [],
+    ret: TyVar("T", 1), eff: EPure, is_builtin: false, tparams: [], constraints: [],
+    eparams: [], owner: Some("module"), trait_id: None, op_of: None, inferring: false }
+  let reads = Some([RenderedSignature(sig, "fn value() -> T")])
+  let moved = Sig { ..sig, ret: TyInt }
+  assert project(reads, s => if s == sig { Some(moved) } else { None }, t => None, id => None, e => None) ==
+    Some(Some([RenderedSignature(moved, "fn value() -> T")]))
+  assert project(reads, s => None, t => Some(t), id => Some(id), e => Some(e)) == None
+}
+
 test "semantic reads project successful answers without dropping missing answers" {
   let sig = Sig { name: "value", param_tys: [], param_names: [], param_defaults: [],
     ret: TyVar("T", 1), eff: EPure, is_builtin: false, tparams: [], constraints: [],
@@ -381,6 +404,33 @@ test "semantic reads preserve plain Java metadata without compiler ID mapping" {
   assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
   let prefix = Some([JavaClassName("Earlier", None)])
   assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
+}
+
+test "semantic reads relocate constructor rendering inputs without rewriting answers" {
+  let ctor = CtorI { adt: 7, name: "Box", fields: [FieldI { name: "value", ty: TyVar("T", 8) }] }
+  let reads = Some([RenderedConstructor(ctor, "Box(value: T): Box[T]")])
+  assert project(reads, s => None, t => if t == TyVar("T", 8) { Some(TyInt) } else { None },
+    id => if id == 7 { Some(17) } else { None }, e => None) == Some(Some([
+      RenderedConstructor(CtorI { ..ctor, adt: 17, fields: [FieldI { name: "value", ty: TyInt }] }, "Box(value: T): Box[T]")]))
+  assert project(reads, s => None, t => Some(t), id => None, e => Some(e)) == None
+  assert project(reads, s => None, t => None, id => Some(id), e => Some(e)) == None
+}
+
+test "semantic reads relocate function return rendering in separate reference domains" {
+  let reads = Some([RenderedFunctionReturn(TyVar("T", 7), EffVar("e", 8), "T")])
+  assert project(reads, s => None, t => if t == TyVar("T", 7) { Some(TyVar("T", 17)) } else { None },
+    id => None, e => if e == EffVar("e", 8) { Some(EffVar("e", 18)) } else { None }) ==
+    Some(Some([RenderedFunctionReturn(TyVar("T", 17), EffVar("e", 18), "T")]))
+  assert project(reads, s => None, t => Some(t), id => Some(id), e => None) == None
+  assert project(reads, s => None, t => None, id => Some(id), e => Some(e)) == None
+}
+
+test "semantic reads relocate rendered type inputs without rewriting answers" {
+  let ty = TyAdt(7, [TyVar("T", 8)])
+  let reads = Some([RenderedType(ty, "Box[T]")])
+  assert project(reads, s => None, t => if t == ty { Some(TyAdt(17, [TyVar("T", 18)])) } else { None },
+    id => None, e => None) == Some(Some([RenderedType(TyAdt(17, [TyVar("T", 18)]), "Box[T]")]))
+  assert project(reads, s => None, t => None, id => Some(id), e => None) == None
 }
 
 test "semantic reads project effect metadata with its evidence record identity" {
