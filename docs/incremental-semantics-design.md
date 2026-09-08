@@ -205,6 +205,13 @@ Product别名携带TFun，常量通过ConstantProduct携带真实TConst，不构
 校验。test保留独立角色、当前语法及顺序。此段是P3正在实现的方案，不是生产缓存
 已经启用的声明。
 
+完整header元数据投影方案：独立relocate_header覆盖AdtI/CtorI、AliasE、TraitI/MethodSig、
+EffectI、ImplI及ModExports；复用分域ID映射，不将构造器槽/字段槽当ID平移。
+源码坐标必须按声明owner和可选source选择映射，尤其导出的AliasE仍带声明模块的
+target/nlo/nhi；透明alias的-1不是nominal引用。投影保留owner、audience和词法顺序，
+不复制新冷结果作为旧产物内容；跨声明重排后的表顺序装配与依赖有效性另由调度负责。
+此段为实现前约束，尚未声称header cache可用。
+
 27个任务包的范围估算为174–281有效人日，不是agent墙钟承诺；原型和测量后滚动修订。
 阶段报告必须列准确提交、验收命令/结果、性能样本与环境、已知回退和未达项。
 报告位置为 `docs/history/incremental-semantics-p{2,5,7}-report.md`，只在实际完成后创建。

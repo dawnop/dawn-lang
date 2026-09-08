@@ -24,9 +24,10 @@ def main():
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
                       "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
-                      "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag", "constant-type", "constant-span"]
+                      "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag", "constant-type", "constant-span",
+                      "header-alias", "header-impl", "header-adt", "header-effect"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-two compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-six compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -74,10 +75,15 @@ def main():
                         ignore=shutil.ignore_patterns("build", ".dawn"))
     if args.typed_mutant and not args.typed_mutant.startswith("module-"):
         target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant == "default-dictionary" else
+                    "relocate_header.dawn" if args.typed_mutant.startswith("header-") else
                     "allocation.dawn" if args.typed_mutant.startswith("impl-") else
                     "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "header-alias": ("aliases: projected_map(e.aliases, names, a => alias_info(v, a))?", "aliases: e.aliases"),
+            "header-impl": ("impls: projected_list(e.impls, info => implementation(v, info))?", "impls: e.impls"),
+            "header-adt": ("adt_infos: projected_map(e.adt_infos, id => relocate.nominal(v.ids, id), info => adt(v, info))?", "adt_infos: e.adt_infos"),
+            "header-effect": ("effect_infos: projected_map(e.effect_infos, id => relocate.nominal(v.ids, id), info => effect_info(v, info))?", "effect_infos: e.effect_infos"),
             "constant-type": ("ty: relocate.ty(v.ids, c.ty)?, init: expression(v, c.init)?", "ty: c.ty, init: expression(v, c.init)?"),
             "constant-span": ("lo: position(v, c.lo)?, hi: end_position(v, c.hi)?", "lo: c.lo, hi: c.hi"),
             "default-diagnostics": ("diags: current.diags ++ product.diagnostics",
@@ -126,6 +132,7 @@ def main():
                 raise RuntimeError("Body product capture anchor drifted")
             probe = probe.replace(old, new)
         probe += "\npub fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
+        probe += "pub fn metadata_sample() -> typed_projection.MetadataTrial !io = typed_projection.metadata_sample()\n"
         probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
         probe += "pub fn module_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.module_samples()\n"
         probe += "pub fn module_count(xs: List[typed_projection.ModuleTrial]) -> Int = len(xs)\n"
@@ -237,6 +244,10 @@ def main():
                                 "module-registered-tag": "module assembly: replayed module differs from cold module",
                                 "constant-type": "module assembly: replayed module differs from cold module",
                                 "constant-span": "module assembly: replayed module differs from cold module",
+                                "header-alias": "header metadata: projected exports differ from cold headers",
+                                "header-impl": "header metadata: projected exports differ from cold headers",
+                                "header-adt": "header metadata: projected exports differ from cold headers",
+                                "header-effect": "header metadata: projected exports differ from cold headers",
                                 "default-write": "default state: replayed Cx differs from cold body boundary",
                                 "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)
