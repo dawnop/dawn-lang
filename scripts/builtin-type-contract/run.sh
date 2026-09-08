@@ -459,10 +459,14 @@ PY
       replace_once "$mutant/selfhost/src/check/checker.dawn" \
 '  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
   cx1 = cx2
-  if not assignable(cx1, bt, s.ret) {' \
+  let (compatible_cx, compatible) = assignable_read(cx1, bt, s.ret)
+  cx1 = compatible_cx
+  if not compatible {' \
 '  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
   cx1 = cx2
-  if d.name != "body_contract" && not assignable(cx1, bt, s.ret) {'
+  let (compatible_cx, compatible) = assignable_read(cx1, bt, s.ret)
+  cx1 = compatible_cx
+  if d.name != "body_contract" && not compatible {'
       build_mutant "$1"
       expect_marker "$1" NEVER_BODY_DIVERGES
       ;;
