@@ -12,7 +12,7 @@ use std/list
 use std/map
 use std/set
 use check/semantic_reads
-use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic, AliasTypeHeader}
+use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic, AliasTypeHeader, ConstructorHeader}
 use front/ast.{
   TypeRef, TNamed, TAssoc, EffArg, Module,
   module_fns, module_types, module_consts, module_traits,
@@ -85,6 +85,10 @@ use check/cx.{
   resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read, java_class_name_read, java_class_names_read,
   java_methods_read, java_constructors_read, java_static_fields_read, java_component_read,
   java_sam_read, java_assignable_read, is_const_serializable, const_refusal_hint, no_sig,
+  local_constructor_read, local_constant_read, constant_visible_read,
+  constructor_count_read, constructor_arity_read, constructor_nominal_shape_read,
+  constructor_header_read, constructor_fields_read,
+  local_nominal_name_read, constructor_names_read, declared_constant_name_read, local_value_candidates_read,
   TySpan
 }
 use check/passes.{
@@ -439,9 +443,20 @@ fn qual_const_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(String, 
 fn resolves_to_value_read(cx: Cx, q: String) -> (Cx, Bool) = {
   if lookup(cx, q) != None { return (cx, true) }
   let (next, answer) = lookup_fn_sig_read(cx, q)
-  if answer != None || map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) { return (next, true) }
-  let (java_cx, java_name) = java_class_name_read(next, q)
+  if answer != None { return (next, true) }
+  let (shadow_cx, shadowed) = local_value_shadow_read(next, q)
+  if shadowed { return (shadow_cx, true) }
+  let (java_cx, java_name) = java_class_name_read(shadow_cx, q)
   (java_cx, java_name != None)
+}
+
+## Namespace guards use declaration presence, not constant body visibility.
+## A constructor hit must not query the constant table at all.
+fn local_value_shadow_read(cx: Cx, name: String) -> (Cx, Bool) = {
+  let (ctor_cx, ctor) = local_constructor_read(cx, name)
+  if ctor != None { return (ctor_cx, true) }
+  let (constant_cx, constant) = local_constant_read(ctor_cx, name)
+  (constant_cx, constant != None)
 }
 
 ## `q.x` where `q` names nothing at all. Before a `.` a bare name can be a
@@ -2774,14 +2789,17 @@ fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
       # only [..rest] matches every list; any fixed element constrains the length
       (cx, if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) })
     PCtor(cname, pargs, _, _, _, _, lo, hi) -> {
-      match map.get(cx.ctors_by_name, cname) {
+      let (name_cx, constructor) = local_constructor_read(cx, cname)
+      var next = name_cx
+      match constructor {
         Some(key) -> {
           let (aid, _) = key
-          if len(adt_of(cx.adts, aid).ctors) > 1 { return (cx, Some((lo, hi))) }
+          let (count_cx, count) = constructor_count_read(next, aid)
+          next = count_cx
+          if count > 1 { return (next, Some((lo, hi))) }
         }
         None -> ()
       }
-      var next = cx
       for a in pargs {
         let (observed, answer) = refutable_span_read(next, a.pat)
         next = observed
@@ -2798,7 +2816,9 @@ fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
       match key_answer {
         Some(key) -> {
           let (aid, _) = key
-          if len(adt_of(next.adts, aid).ctors) > 1 { return (next, Some((lo, hi))) }
+          let (count_cx, count) = constructor_count_read(next, aid)
+          next = count_cx
+          if count > 1 { return (next, Some((lo, hi))) }
         }
         None -> ()
       }
@@ -3153,11 +3173,14 @@ fn check_ctor_pattern(
   scrut: Ty,
   mutable: Bool
 ) -> (Cx, TPat) = {
-  var cx1 = cx
-  let key = match map.get(cx1.ctors_by_name, cname) {
+  let (name_cx, constructor) = local_constructor_read(cx, cname)
+  var cx1 = name_cx
+  let key = match constructor {
     None -> {
+      let (pool_cx, names) = local_value_candidates_read(cx1, false)
+      cx1 = pool_cx
       cx1 = cerr_o(cx1, "undefined constructor in pattern: ${cname}", nlo, nhi,
-        suggest.hint(cname, map.keys(cx1.ctors_by_name)))
+        suggest.hint(cname, names))
       # still check subpatterns so their bindings exist (as TyError)
       for a in pargs {
         let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
@@ -3189,8 +3212,9 @@ fn check_ctor_pattern_at(
 ) -> (Cx, TPat) = {
   var cx1 = cx
   let (aid, cslot) = key
-  let a2 = adt_of(cx1.adts, aid)
-  let ci = a2.ctors[cslot]
+  let (header_cx, a2) = constructor_header_read(cx1, aid)
+  let (fields_cx, ci) = constructor_fields_read(header_cx, aid, cslot)
+  cx1 = fields_cx
   let scrut_matches = match scrut {
     TyAdt(said, _) -> said == aid
     _ -> false
@@ -3498,7 +3522,8 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     let (observed, next_ty, next_tree) = check_method_call(Cx { ..scope, function_reads: Some([]) }, receiver, "missing", [], None, 8, 15, 0, 17)
     assert ty == TyError && next_ty == ty && next_tree == tree
     assert cold.diags == observed.diags && len(cold.diags) == 1 && cold.next_id == observed.next_id
-    let name_reads: List[semantic_reads.FunctionRead] = if static_call { [semantic_reads.JavaClassName("Foreign", Some("pkg.Box"))] } else { [] }
+    let name_reads: List[semantic_reads.FunctionRead] = if static_call { [semantic_reads.LocalConstructor("Foreign", None),
+      semantic_reads.LocalConstant("Foreign", None), semantic_reads.JavaClassName("Foreign", Some("pkg.Box"))] } else { [] }
     assert observed.function_reads == Some(name_reads ++ [semantic_reads.JavaClassInfo("pkg.Box", metadata), semantic_reads.JavaMethods("pkg.Box", [])])
   }
   for list_argument in [false, true] {
@@ -3545,6 +3570,21 @@ test "java import reads preserve gate misses and sequential namespace writes" {
   }
 }
 
+test "local namespace shadow reads ignore body cutoffs and stop at constructors" {
+  for constructor in [false, true] {
+    let base = test_cx()
+    let initial = Cx { ..base, consts: map.from([("VALUE", TyInt)]), const_cutoff: Some(set.empty()),
+      ctors_by_name: if constructor { map.from([("VALUE", (7, 2))]) } else { base.ctors_by_name } }
+    let (cold, answer) = local_value_shadow_read(initial, "VALUE")
+    let (observed, next_answer) = local_value_shadow_read(Cx { ..initial, function_reads: Some([]) }, "VALUE")
+    let reads: List[semantic_reads.FunctionRead] = if constructor {
+      [semantic_reads.LocalConstructor("VALUE", Some((7, 2)))]
+    } else { [semantic_reads.LocalConstructor("VALUE", None), semantic_reads.LocalConstant("VALUE", Some(TyInt))] }
+    assert answer && next_answer == answer && observed.function_reads == Some(reads)
+    assert cold.diags == observed.diags && cold.next_id == observed.next_id
+  }
+}
+
 test "java namespace reads retain static target guards and diagnostic context" {
   let (syntax, pd) = parser.parse_module("const URL: Int = 1\n")
   assert pd == []
@@ -3561,7 +3601,12 @@ test "java namespace reads retain static target guards and diagnostic context" {
     let (cold, answer) = static_field_target(initial, receiver)
     let (observed, next_answer) = static_field_target(enabled, receiver)
     let expected: Option[String] = if index == 0 { Some("pkg.Box") } else { None }
-    let reads: List[semantic_reads.FunctionRead] = if index <= 1 { [semantic_reads.JavaClassName(name, expected)] } else { [] }
+    var reads: List[semantic_reads.FunctionRead] = []
+    if index != 2 && index != 5 {
+      reads = [semantic_reads.LocalConstructor(name, map.get(initial.ctors_by_name, name))]
+      if index != 3 { reads = reads ++ [semantic_reads.LocalConstant(name, map.get(initial.consts, name))] }
+      if index <= 1 { reads = reads ++ [semantic_reads.JavaClassName(name, expected)] }
+    }
     assert answer == expected && next_answer == answer && observed.function_reads == Some(reads)
     assert cold.diags == observed.diags && cold.next_id == observed.next_id
     let target = EFieldAcc(receiver, "VALUE", 8, 13, 0, 13)
@@ -3595,8 +3640,11 @@ test "java namespace reads retain value resolution and earlier shadow guards" {
     let (cold, answer) = resolves_to_value_read(initial, name)
     let (observed, next_answer) = resolves_to_value_read(Cx { ..initial, function_reads: Some([]) }, name)
     let function_reads = semantic_reads.record(Some([]), name, lookup_fn_sig(initial, name))
-    let expected: Option[List[semantic_reads.FunctionRead]] = if index == 4 { Some([]) } else if index >= 2 { function_reads } else {
-      semantic_reads.observe(function_reads, semantic_reads.JavaClassName(name, map.get(initial.java_classes, name)))
+    var expected = function_reads
+    if index == 4 { expected = Some([]) } else {
+      expected = semantic_reads.observe(expected, semantic_reads.LocalConstructor(name, map.get(initial.ctors_by_name, name)))
+      if index != 2 { expected = semantic_reads.observe(expected, semantic_reads.LocalConstant(name, map.get(initial.consts, name))) }
+      if index <= 1 { expected = semantic_reads.observe(expected, semantic_reads.JavaClassName(name, map.get(initial.java_classes, name))) }
     }
     assert answer == (index != 1) && next_answer == answer
     assert observed.function_reads == expected
@@ -3614,6 +3662,7 @@ test "java namespace reads retain the field expression consumer context" {
   assert ty == TyError && next_ty == ty && next_tree == tree
   assert observed.function_reads == Some([semantic_reads.ModuleAlias("URL", None), semantic_reads.ModuleAlias("URL", None),
     semantic_reads.QualifiedConstant("URL", "MISSING", None), semantic_reads.QualifiedConstructor("URL", "MISSING", None),
+    semantic_reads.LocalConstructor("URL", None), semantic_reads.LocalConstant("URL", None),
     semantic_reads.JavaClassName("URL", Some("pkg.Box")), semantic_reads.JavaStaticFields("pkg.Box", [])])
 }
 
@@ -3925,6 +3974,11 @@ test "export reads retain qualified pattern answers and recovery" {
   let exp = exports_of(provider, syntax, "helper", "helper")
   let initial = Cx { ..provider, module_exports: map.from([("h", exp)]) }
   let scrut = TyAdt(map.get(exp.types_by_name, "Choice").expect("Choice"), [])
+  let (empty_adt, empty_slot) = map.get(exp.ctors, "Empty").expect("Empty")
+  let info = adt_of(initial.adts, empty_adt)
+  let shape_reads = [semantic_reads.ConstructorHeaderAnswer(empty_adt,
+    ConstructorHeader { id: info.id, name: info.name, is_record: info.is_record, tparams: info.tparams }),
+    semantic_reads.ConstructorFields(empty_adt, empty_slot, info.ctors[empty_slot])]
   for name in ["Empty", "Empt", "Missing"] {
     let pat = PQual("h", name, [], false, false, 2, 7, 0, 7)
     let (cold, cold_pat) = check_pattern(initial, pat, scrut, false)
@@ -3936,7 +3990,10 @@ test "export reads retain qualified pattern answers and recovery" {
       assert len(cold.diags) == 1
       let diagnostic = ExportDiagnostic { message: cold.diags[0].msg, hint: suggest.hint(name, map.keys(exp.ctors)) }
       expected = expected ++ [semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, "h", name, Some(diagnostic))]
-    } else { assert cold.diags == [] }
+    } else {
+      assert cold.diags == []
+      expected = expected ++ shape_reads
+    }
     assert observed.function_reads == Some(expected)
   }
   let child = PQual("h", "Empty", [], false, false, 10, 15, 8, 15)
@@ -3948,9 +4005,10 @@ test "export reads retain qualified pattern answers and recovery" {
     assert cold.diags == observed.diags && cold_pat == observed_pat && len(cold.diags) == 1
     let reads = observed.function_reads.expect("pattern recovery reads")
     assert reads[0] == semantic_reads.ExportPresence(qualifier, qualifier == "h")
-    assert len(reads) == if qualifier == "h" { 5 } else { 3 }
-    assert reads[len(reads) - 2] == semantic_reads.ExportPresence("h", true)
-    assert reads[len(reads) - 1] == semantic_reads.QualifiedConstructor("h", "Empty", map.get(exp.ctors, "Empty"))
+    assert len(reads) == if qualifier == "h" { 7 } else { 5 }
+    assert reads[len(reads) - 4] == semantic_reads.ExportPresence("h", true)
+    assert reads[len(reads) - 3] == semantic_reads.QualifiedConstructor("h", "Empty", map.get(exp.ctors, "Empty"))
+    assert reads[len(reads) - 2] == shape_reads[0] && reads[len(reads) - 1] == shape_reads[1]
   }
 }
 
@@ -3965,19 +4023,21 @@ test "export reads preserve recursive refutability and short circuits" {
   let item = PQual("h", "Item", [], false, false, 11, 15, 10, 15)
   let absent = semantic_reads.QualifiedConstructor("h", "Missing", None)
   let found = semantic_reads.QualifiedConstructor("h", "Item", map.get(exp.ctors, "Item"))
+  let (choice_id, _) = map.get(exp.ctors, "Item").expect("Item exported")
+  let count = semantic_reads.ConstructorCount(choice_id, 2)
   let pair = PTuple([missing, item, missing], 0, 25)
   let (observed, answer) = refutable_span_read(initial, pair)
   assert answer == Some((10, 15))
-  assert observed.function_reads == Some([absent, found])
+  assert observed.function_reads == Some([absent, found, count])
   assert answer == refutable_span(Cx { ..initial, function_reads: None }, pair)
   let nested = PQual("h", "Missing", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
     false, true, 0, 1, 0, 20)
   let (nested_cx, nested_answer) = refutable_span_read(initial, nested)
-  assert nested_answer == answer && nested_cx.function_reads == Some([absent, found])
+  assert nested_answer == answer && nested_cx.function_reads == Some([absent, found, count])
   let local = PCtor("Unknown", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
     false, true, 0, 1, 0, 20)
   let (local_cx, local_answer) = refutable_span_read(initial, local)
-  assert local_answer == answer && local_cx.function_reads == Some([found])
+  assert local_answer == answer && local_cx.function_reads == Some([semantic_reads.LocalConstructor("Unknown", None), found, count])
   let (skipped, _) = refutable_span_read(initial, PTuple([PLit(EInt(1, 0, 1), 0, 1), item], 0, 15))
   assert skipped.function_reads == Some([])
 }
@@ -4636,19 +4696,22 @@ pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
         None -> (next, false)
       }
     }
-    ECtor(cname, cargs, spread, has_parens, _, _, _, _) ->
-      match map.get(cx.ctors_by_name, cname) {
-        None -> (cx, false)
+    ECtor(cname, cargs, spread, has_parens, _, _, _, _) -> {
+      let (name_cx, constructor) = local_constructor_read(cx, cname)
+      match constructor {
+        None -> (name_cx, false)
         Some(key) -> {
           let (aid, cslot) = key
-          let a = adt_of(cx.adts, aid)
-          let ci = a.ctors[cslot]
+          let (arity_cx, fields) = constructor_arity_read(name_cx, aid, cslot)
+          let (shape_cx, shape) = constructor_nominal_shape_read(arity_cx, aid)
+          let (params, is_record) = shape
           # bare nullary generic ctor (None): element type comes from expected;
           # bare ctor-with-fields as a fn value (Some): needs the expected fn type
-          (cx, (len(ci.fields) == 0 && len(a.tparams) > 0) ||
-              (not has_parens && len(ci.fields) > 0 && not a.is_record))
+          (shape_cx, (fields == 0 && params > 0) ||
+              (not has_parens && fields > 0 && not is_record))
         }
       }
+    }
     ELambda(params, _, _, _, _) -> {
       for p in params {
         match p.ann {
@@ -4673,16 +4736,19 @@ pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
             None -> (next, false)
           }
         }
-        ECtor(cname, _, _, _, _, _, _, _) ->
-          match map.get(cx.ctors_by_name, cname) {
-            None -> (cx, false)
+        ECtor(cname, _, _, _, _, _, _, _) -> {
+          let (name_cx, constructor) = local_constructor_read(cx, cname)
+          match constructor {
+            None -> (name_cx, false)
             Some(key) -> {
               let (aid, cslot) = key
-              let a = adt_of(cx.adts, aid)
-              let ci = a.ctors[cslot]
-              (cx, len(ci.fields) == 0 && len(a.tparams) > 0)
+              let (arity_cx, fields) = constructor_arity_read(name_cx, aid, cslot)
+              let (shape_cx, shape) = constructor_nominal_shape_read(arity_cx, aid)
+              let (params, _) = shape
+              (shape_cx, fields == 0 && params > 0)
             }
           }
+        }
         _ -> (cx, false)
       }
     # same for its module-qualified spelling (map.empty(), spec §10.3) — needs
@@ -5016,7 +5082,7 @@ test "fn values instantiate from the expected type" {
 ## A constructor used bare as a function value: `map(xs, Some)`. Generics come
 ## from the expected fn type (the Kotlin checkCtorValue).
 pub fn check_ctor_value(
-  cx: Cx,
+  initial: Cx,
   aid: Int,
   cslot: Int,
   eps: List[Ty],
@@ -5025,14 +5091,14 @@ pub fn check_ctor_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  let a = adt_of(cx.adts, aid)
-  let ci = a.ctors[cslot]
+  let (header_cx, a) = constructor_header_read(initial, aid)
+  let (cx, ci) = constructor_fields_read(header_cx, aid, cslot)
   if len(ci.fields) > fn_max_params() {
     return (check_value_arity(cx, len(ci.fields), lo, hi), TyError, XError(lo, hi))
   }
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
-  let ret = adt_self_ty(a)
+  let ret = TyAdt(a.id, a.tparams)
   let node = (t: Ty) => XCtorValue(aid, cslot, lo, hi, t)
   if len(eps) != len(params) {
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
@@ -9330,6 +9396,136 @@ type CtorUse =
 ## being in scope. Everything after resolution (field names, arity, spread,
 ## generic instantiation, ctor-as-value) is then one implementation, so the
 ## qualified form cannot drift from the local one.
+test "local value reads preserve constructor SAM prepass guards and arity" {
+  let (syntax, pd) = parser.parse_module("type Choice = Item(value: Int) | Empty\n")
+  assert pd == []
+  let (initial, _) = check_module(test_cx(), syntax, map.empty())
+  assert initial.diags == []
+  for index in 0..7 {
+    let name = if index == 1 { "Empty" } else if index == 2 { "Missing" } else { "Item" }
+    let args: List[Arg] = if index == 4 { [Arg { name: None, e: EInt(1, 0, 1), trailing: false, lo: 0, hi: 1 }] } else { [] }
+    let spread: Option[Expr] = if index == 5 { Some(EInt(1, 0, 1)) } else { None }
+    let expr = if index == 6 { EInt(1, 0, 1) } else { ECtor(name, args, spread, index == 3, 0, 4, 0, 4) }
+    let (cold, deferred) = sam_deferred(initial, expr)
+    let (observed, next_deferred) = sam_deferred(Cx { ..initial, function_reads: Some([]) }, expr)
+    let key = map.get(initial.ctors_by_name, name)
+    var lookup_reads = [semantic_reads.LocalConstructor(name, key)]
+    match key {
+      Some(pair) -> { let (adt, slot) = pair
+        lookup_reads = lookup_reads ++ [semantic_reads.ConstructorArity(adt, slot, if index == 1 { 0 } else { 1 })]
+      }
+      None -> ()
+    }
+    let reads: List[semantic_reads.FunctionRead] = if index >= 3 { [] } else { lookup_reads }
+    assert deferred == (index == 0) && next_deferred == deferred
+    assert observed.function_reads == Some(reads) && observed.diags == cold.diags
+    let (cold_arity, arity) = deferred_arity(cold, expr)
+    let (observed_arity, next_arity) = deferred_arity(observed, expr)
+    let arity_reads: List[semantic_reads.FunctionRead] = if index == 6 { [] } else { lookup_reads }
+    assert arity == (if index == 1 || index == 2 || index == 6 { 0 } else { 1 }) && next_arity == arity
+    assert observed_arity.function_reads == Some(reads ++ arity_reads)
+    assert cold_arity.diags == observed_arity.diags && cold_arity.next_id == observed_arity.next_id
+  }
+}
+
+test "constructor expected-type reads retain identity arity and nominal shape" {
+  let (syntax, pd) = parser.parse_module("type Choice[T] = Item(value: T) | Empty\n")
+  assert pd == []
+  let (initial, _) = check_module(test_cx(), syntax, map.empty())
+  assert initial.diags == []
+  for index in 0..3 {
+    let name = if index == 0 { "Item" } else if index == 1 { "Empty" } else { "Missing" }
+    let key = map.get(initial.ctors_by_name, name)
+    var reads = [semantic_reads.LocalConstructor(name, key)]
+    match key {
+      Some((adt, slot)) -> {
+        let info = adt_of(initial.adts, adt)
+        reads = reads ++ [semantic_reads.ConstructorArity(adt, slot, if index == 0 { 1 } else { 0 }),
+          semantic_reads.NominalTypeShape(adt, "Choice", 1, info.eparams, false)]
+      }
+      None -> ()
+    }
+    for applied in [false, true] {
+      let ctor = ECtor(name, [], None, false, 0, 5, 0, 5)
+      let expr = if applied { EApply(ctor, [], 0, 7) } else { ctor }
+      let (cold, answer) = needs_expected_read(initial, expr)
+      let (observed, next_answer) = needs_expected_read(Cx { ..initial, function_reads: Some([]) }, expr)
+      assert answer == (if applied { index == 1 } else { index != 2 })
+      assert next_answer == answer && observed.function_reads == Some(reads)
+      assert cold.diags == observed.diags && cold.next_id == observed.next_id
+    }
+  }
+}
+
+test "pre-resolved constructors skip conflicting local names and constants" {
+  let (syntax, pd) = parser.parse_module("type Choice = Empty\n")
+  assert pd == []
+  let (base, _) = check_module(test_cx(), syntax, map.empty())
+  let key = map.get(base.ctors_by_name, "Empty").expect("constructor")
+  let initial = Cx { ..base, ctors_by_name: map.empty(), consts: map.from([("Empty", TyString)]) }
+  let (cold, ty, tree) = check_ctor_call(initial, "Empty", [], None, CBare, None, Some(key), 0, 5, 0, 5)
+  let (observed, next_ty, next_tree) = check_ctor_call(Cx { ..initial, function_reads: Some([]) },
+    "Empty", [], None, CBare, None, Some(key), 0, 5, 0, 5)
+  assert cold.diags == [] && observed.diags == cold.diags
+  assert ty != TyString && next_ty == ty && next_tree == tree
+  let (adt, slot) = key
+  let info = adt_of(initial.adts, adt)
+  assert observed.function_reads == Some([
+    semantic_reads.ConstructorHeaderAnswer(adt, ConstructorHeader { id: adt,
+      name: info.name, is_record: info.is_record, tparams: info.tparams }),
+    semantic_reads.ConstructorFields(adt, slot, info.ctors[slot])])
+}
+
+test "constructor diagnostic reads preserve type and later-constant short circuits" {
+  let (syntax, pd) = parser.parse_module("type Choice = Last | First\n")
+  assert pd == []
+  let (base, _) = check_module(test_cx(), syntax, map.empty())
+  let initial = Cx { ..base, all_const_names: set.from(["Choice", "LATER"]) }
+  for name in ["Choice", "LATER"] {
+    let (cold, ty, tree) = check_ctor_call(initial, name, [], None, CBare, None, None, 0, 6, 0, 6)
+    let (observed, next_ty, next_tree) = check_ctor_call(Cx { ..initial, function_reads: Some([]) },
+      name, [], None, CBare, None, None, 0, 6, 0, 6)
+    let nominal = map.get(initial.adts_by_name, name)
+    var reads = [semantic_reads.LocalConstructor(name, None), semantic_reads.ConstantVisible(name, true),
+      semantic_reads.LocalConstant(name, None), semantic_reads.NominalTypeName(None, name, nominal)]
+    match nominal {
+      Some(adt) -> { reads = reads ++ [semantic_reads.ConstructorNames(adt, ["Last", "First"])] }
+      None -> { reads = reads ++ [semantic_reads.DeclaredConstantName(name, true)] }
+    }
+    assert observed.function_reads == Some(reads)
+    assert ty == TyError && next_ty == ty && next_tree == tree
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert str.contains(cold.diags[0].hint, if name == "Choice" { "Last, First" } else { "top to bottom" })
+  }
+}
+
+test "local value reads preserve constant visibility before type lookup" {
+  for index in 0..4 {
+    let name = if index == 3 { "MISSING" } else { "VALUE" }
+    let cutoff: Option[Set[String]] = if index == 0 || index == 3 { None } else if index == 1 {
+      Some(set.insert(set.empty(), "VALUE"))
+    } else { Some(set.empty()) }
+    let initial = Cx { ..test_cx(), consts: map.from([("VALUE", TyInt)]), const_cutoff: cutoff }
+    let (cold, ty, tree) = check_ctor_call(initial, name, [], None, CBare, None, None, 0, 5, 0, 5)
+    let (observed, next_ty, next_tree) = check_ctor_call(Cx { ..initial, function_reads: Some([]) }, name,
+      [], None, CBare, None, None, 0, 5, 0, 5)
+    var reads = [semantic_reads.LocalConstructor(name, None), semantic_reads.ConstantVisible(name, index != 2)]
+    if index != 2 {
+      let answer: Option[Ty] = if index == 3 { None } else { Some(TyInt) }
+      reads = reads ++ [semantic_reads.LocalConstant(name, answer)]
+    }
+    if index >= 2 {
+      reads = reads ++ [semantic_reads.NominalTypeName(None, name, None),
+        semantic_reads.DeclaredConstantName(name, false),
+        semantic_reads.LocalValueCandidates(true, map.keys(initial.ctors_by_name) ++ map.keys(initial.consts))]
+    }
+    assert ty == (if index <= 1 { TyInt } else { TyError })
+    assert next_ty == ty && next_tree == tree && observed.diags == cold.diags
+    assert len(cold.diags) == (if index <= 1 { 0 } else { 1 })
+    assert observed.function_reads == Some(reads)
+  }
+}
+
 fn check_ctor_call(
   cx: Cx,
   cname: String,
@@ -9351,18 +9547,24 @@ fn check_ctor_call(
   }
   let key = match pre {
     Some(k) -> Some(k)
-    None -> map.get(cx1.ctors_by_name, cname)
+    None -> {
+      let (next, answer) = local_constructor_read(cx1, cname)
+      cx1 = next
+      answer
+    }
   }
   match key {
     None -> {
       # a bare SCREAMING_SNAKE name may be a constant reference; inside a
       # const initializer only earlier constants are visible (spec §3.2)
-      let visible = match cx1.const_cutoff {
-        Some(cut) -> set.has(cut, cname)
-        None -> true
-      }
+      let (visible_cx, visible) = constant_visible_read(cx1, cname)
+      cx1 = visible_cx
       var cd: Option[Ty] = None
-      if visible { cd = map.get(cx1.consts, cname) }
+      if visible {
+        let (constant_cx, answer) = local_constant_read(cx1, cname)
+        cx1 = constant_cx
+        cd = answer
+      }
       match cd {
         Some(ct) -> {
           if spelled_out || len(cargs) > 0 || has_spread {
@@ -9384,18 +9586,27 @@ fn check_ctor_call(
         let (cxa, _, _) = check_expr(cx1, a.e, no_expected())
         cx1 = cxa
       }
-      let hint: Option[String] = if map.has(cx1.adts_by_name, cname) {
-        let aid0 = map.get(cx1.adts_by_name, cname).expect("has")
-        let ad0 = adt_of(cx1.adts, aid0)
-        var cnames: List[String] = []
-        for c in ad0.ctors { cnames = cnames ++ [c.name] }
-        Some("`" ++ cname ++ "` is a type; build a value with one of its constructors: " ++
-            join(cnames, ", "))
-      } else if set.has(cx1.all_const_names, cname) {
-        Some("const `" ++ cname ++
-            "` is declared later in the file; constants are evaluated top to bottom")
-      } else {
-        suggest.hint(cname, map.keys(cx1.ctors_by_name) ++ map.keys(cx1.consts))
+      let (nominal_cx, nominal) = local_nominal_name_read(cx1, cname)
+      cx1 = nominal_cx
+      let hint: Option[String] = match nominal {
+        Some(aid0) -> {
+          let (names_cx, cnames) = constructor_names_read(cx1, aid0)
+          cx1 = names_cx
+          Some("`" ++ cname ++ "` is a type; build a value with one of its constructors: " ++
+              join(cnames, ", "))
+        }
+        None -> {
+          let (declared_cx, declared) = declared_constant_name_read(cx1, cname)
+          cx1 = declared_cx
+          if declared {
+            Some("const `" ++ cname ++
+                "` is declared later in the file; constants are evaluated top to bottom")
+          } else {
+            let (pool_cx, names) = local_value_candidates_read(cx1, true)
+            cx1 = pool_cx
+            suggest.hint(cname, names)
+          }
+        }
       }
       return (cerr_o(cx1, "undefined constructor: ${cname}", cclo, cchi, hint),
         TyError, XError(lo, hi))
@@ -9403,10 +9614,11 @@ fn check_ctor_call(
     Some(_) -> ()
   }
   let (aid, cslot) = key.expect("ctor")
-  let ad = adt_of(cx1.adts, aid)
-  let ci = ad.ctors[cslot]
+  let (header_cx, ad) = constructor_header_read(cx1, aid)
+  let (fields_cx, ci) = constructor_fields_read(header_cx, aid, cslot)
+  cx1 = fields_cx
   let n = len(ci.fields)
-  let self_ty = adt_self_ty(ad)
+  let self_ty = TyAdt(ad.id, ad.tparams)
   var exp_is_fn = false
   var exp_fn_ps: List[Ty] = []
   var exp_fn_ret = TyUnit
@@ -9900,46 +10112,50 @@ fn sam_snapshot(cx: Cx, i: Int, te: Eff, lo: Int, hi: Int) -> (Cx, (Int, TExpr))
 
 ## Function-shaped arguments that need the target SAM to be typed are deferred:
 ## scored by arity now, checked once the winning overload is known.
-fn sam_deferred(cx: Cx, a: Expr) -> Bool =
+fn sam_deferred(cx: Cx, a: Expr) -> (Cx, Bool) =
   match a {
     ELambda(ps, _, _, _, _) -> {
       for p in ps {
         match p.ann {
-          None -> return true
+          None -> return (cx, true)
           Some(_) -> ()
         }
       }
-      false
+      (cx, false)
     }
     ECtor(cn, cargs2, sp, hp, _, _, _, _) -> {
-      if hp || len(cargs2) > 0 { return false }
+      if hp || len(cargs2) > 0 { return (cx, false) }
       match sp {
-        Some(_) -> return false
+        Some(_) -> return (cx, false)
         None -> ()
       }
-      match map.get(cx.ctors_by_name, cn) {
+      let (name_cx, constructor) = local_constructor_read(cx, cn)
+      match constructor {
         Some(k) -> {
           let (aid, cslot) = k
-          len(adt_of(cx.adts, aid).ctors[cslot].fields) > 0
+          let (arity_cx, arity) = constructor_arity_read(name_cx, aid, cslot)
+          (arity_cx, arity > 0)
         }
-        None -> false
+        None -> (name_cx, false)
       }
     }
-    _ -> false
+    _ -> (cx, false)
   }
 
-fn deferred_arity(cx: Cx, a: Expr) -> Int =
+fn deferred_arity(cx: Cx, a: Expr) -> (Cx, Int) =
   match a {
-    ELambda(ps, _, _, _, _) -> len(ps)
-    ECtor(cn, _, _, _, _, _, _, _) ->
-      match map.get(cx.ctors_by_name, cn) {
+    ELambda(ps, _, _, _, _) -> (cx, len(ps))
+    ECtor(cn, _, _, _, _, _, _, _) -> {
+      let (name_cx, constructor) = local_constructor_read(cx, cn)
+      match constructor {
         Some(k) -> {
           let (aid, cslot) = k
-          len(adt_of(cx.adts, aid).ctors[cslot].fields)
+          constructor_arity_read(name_cx, aid, cslot)
         }
-        None -> 0
+        None -> (name_cx, 0)
       }
-    _ -> 0
+    }
+    _ -> (cx, 0)
   }
 
 ## How well one Java parameter class accepts an argument (spec §9.3); None = no fit.
@@ -10182,7 +10398,8 @@ test "java oracle reads retain rejected candidates before the winning overload" 
     let candidates = if constructor { semantic_reads.JavaConstructors("pkg.Box", ctors) } else { semantic_reads.JavaMethods("pkg.Box", methods) }
     assert ty == (if constructor { TyJava("pkg.Box", "Box") } else { TyInt })
     assert next_ty == ty && next_tree == tree && cold.diags == observed.diags && cold.diags == []
-    assert observed.function_reads == Some([semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
+    assert observed.function_reads == Some([semantic_reads.LocalConstructor("Foreign", None), semantic_reads.LocalConstant("Foreign", None),
+      semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
       semantic_reads.JavaClassInfo("pkg.Box", info), candidates,
       semantic_reads.JavaAssignable("pkg.Refused", "java.lang.String", false),
       semantic_reads.JavaAssignable("pkg.Parent", "java.lang.String", true)])
@@ -10461,7 +10678,9 @@ fn check_java_call(
   var ats: List[Option[Ty]] = []
   var atx: List[Option[TExpr]] = []
   for a in args {
-    if sam_deferred(cx1, a) {
+    let (deferred_cx, deferred) = sam_deferred(cx1, a)
+    cx1 = deferred_cx
+    if deferred {
       ats = ats ++ [no_expected()]
       atx = atx ++ [no_texpr()]
     } else {
@@ -10472,7 +10691,11 @@ fn check_java_call(
     }
   }
   var arities: List[Int] = []
-  for a in args { arities = arities ++ [deferred_arity(cx1, a)] }
+  for a in args {
+    let (arity_cx, arity) = deferred_arity(cx1, a)
+    cx1 = arity_cx
+    arities = arities ++ [arity]
+  }
   var any_err = false
   for t0 in ats {
     match t0 {
@@ -10678,9 +10901,9 @@ fn check_java_call(
 fn static_field_target(cx: Cx, target: Expr) -> (Cx, Option[String]) =
   match target {
     ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if not hp && len(cargs) == 0 && sp == None &&
-      not map.has(cx.ctors_by_name, cn) && not map.has(cx.consts, cn) {
-        java_class_name_read(cx, cn)
+      if not hp && len(cargs) == 0 && sp == None {
+        let (next, shadowed) = local_value_shadow_read(cx, cn)
+        if shadowed { (next, None) } else { java_class_name_read(next, cn) }
       } else {
         (cx, None)
       }
@@ -10882,9 +11105,8 @@ fn check_method_call(
   # static namespace / constructor: System.exit(1), StringBuilder.new()
   match target {
     ECtor(cn, cargs2, sp2, hp2, _, _, _, _) ->
-      if not hp2 && len(cargs2) == 0 && sp2 == None &&
-      not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
-        let (name_cx, java_target) = java_class_name_read(cx1, cn)
+      if not hp2 && len(cargs2) == 0 && sp2 == None {
+        let (name_cx, java_target) = static_field_target(cx1, target)
         cx1 = name_cx
         match java_target {
           Some(fq) -> {
@@ -10933,9 +11155,11 @@ fn check_method_call(
   # function `f` is ALSO in scope the call is ambiguous and errors out (spec §2.4)
   match tt {
     TyAdt(aid, targs) -> {
-      let ad = adt_of(cx1.adts, aid)
+      let (header_cx, ad) = constructor_header_read(cx1, aid)
+      cx1 = header_cx
       if ad.is_record {
-        let ci = ad.ctors[0]
+        let (fields_cx, ci) = constructor_fields_read(cx1, aid, 0)
+        cx1 = fields_cx
         var fidx = -1
         var k = 0
         for f in ci.fields {
@@ -12706,7 +12930,9 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
     let (names_cx, java_names) = java_class_names_read(cx1)
     cx1 = names_cx
     for cn in java_names {
-      if not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
+      let (shadow_cx, shadowed) = local_value_shadow_read(cx1, cn)
+      cx1 = shadow_cx
+      if not shadowed {
         java_recv = set.insert(java_recv, cn)
       }
     }

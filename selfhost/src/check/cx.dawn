@@ -14,7 +14,7 @@ use std/set
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
-  Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
+  Adts, AdtI, CtorI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
   Audience, AWorld,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
@@ -30,7 +30,7 @@ use check/types.{
 }
 use check/jsig.{Jsig, JClass, JMethod, JCtor, JField, jsig_refused}
 use check/semantic_reads
-use check/semantic_reads.{FunctionRead, AliasTypeHeader, ExportDiagnostic}
+use check/semantic_reads.{FunctionRead, AliasTypeHeader, ExportDiagnostic, ConstructorHeader}
 use front/suggest
 
 ## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
@@ -645,6 +645,76 @@ pub fn java_constructors_read(cx: Cx, fqcn: String) -> (Cx, List[JCtor]) !io = {
 pub fn java_static_fields_read(cx: Cx, fqcn: String) -> (Cx, List[JField]) !io = {
   let answer = cx.jsig.static_fields_of(fqcn)
   (observe_type_read(cx, semantic_reads.JavaStaticFields(fqcn, answer)), answer)
+}
+
+pub fn local_constructor_read(cx: Cx, name: String) -> (Cx, Option[(Int, Int)]) = {
+  let answer = map.get(cx.ctors_by_name, name)
+  (observe_type_read(cx, semantic_reads.LocalConstructor(name, answer)), answer)
+}
+
+pub fn local_nominal_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
+  let answer = map.get(cx.adts_by_name, name)
+  (observe_type_read(cx, semantic_reads.NominalTypeName(None, name, answer)), answer)
+}
+
+pub fn constructor_names_read(cx: Cx, adt: Int) -> (Cx, List[String]) = {
+  var names: List[String] = []
+  for ctor in adt_of(cx.adts, adt).ctors { names = names ++ [ctor.name] }
+  (observe_type_read(cx, semantic_reads.ConstructorNames(adt, names)), names)
+}
+
+pub fn declared_constant_name_read(cx: Cx, name: String) -> (Cx, Bool) = {
+  let present = set.has(cx.all_const_names, name)
+  (observe_type_read(cx, semantic_reads.DeclaredConstantName(name, present)), present)
+}
+
+## Preserve the actual candidate order and the pattern-only namespace boundary.
+pub fn local_value_candidates_read(cx: Cx, include_constants: Bool) -> (Cx, List[String]) = {
+  let constants: List[String] = if include_constants { map.keys(cx.consts) } else { [] }
+  let names = map.keys(cx.ctors_by_name) ++ constants
+  (observe_type_read(cx, semantic_reads.LocalValueCandidates(include_constants, names)), names)
+}
+
+pub fn constructor_count_read(cx: Cx, adt: Int) -> (Cx, Int) = {
+  let count = len(adt_of(cx.adts, adt).ctors)
+  (observe_type_read(cx, semantic_reads.ConstructorCount(adt, count)), count)
+}
+
+## Return only the nominal metadata constructor consumers actually use.
+pub fn constructor_header_read(cx: Cx, adt: Int) -> (Cx, ConstructorHeader) = {
+  let info = adt_of(cx.adts, adt)
+  let answer = ConstructorHeader { id: info.id, name: info.name,
+    is_record: info.is_record, tparams: info.tparams }
+  (observe_type_read(cx, semantic_reads.ConstructorHeaderAnswer(adt, answer)), answer)
+}
+
+pub fn constructor_fields_read(cx: Cx, adt: Int, slot: Int) -> (Cx, CtorI) = {
+  let answer = adt_of(cx.adts, adt).ctors[slot]
+  (observe_type_read(cx, semantic_reads.ConstructorFields(adt, slot, answer)), answer)
+}
+
+## Expected-type probing needs nominal arity and record syntax, not field types.
+pub fn constructor_nominal_shape_read(cx: Cx, adt: Int) -> (Cx, (Int, Bool)) = {
+  let info = adt_of(cx.adts, adt)
+  let arity = len(info.tparams)
+  let next = observe_type_read(cx, semantic_reads.NominalTypeShape(adt, info.name,
+    arity, info.eparams, info.is_record))
+  (next, (arity, info.is_record))
+}
+
+pub fn constructor_arity_read(cx: Cx, adt: Int, slot: Int) -> (Cx, Int) = {
+  let arity = len(adt_of(cx.adts, adt).ctors[slot].fields)
+  (observe_type_read(cx, semantic_reads.ConstructorArity(adt, slot, arity)), arity)
+}
+
+pub fn local_constant_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
+  let answer = map.get(cx.consts, name)
+  (observe_type_read(cx, semantic_reads.LocalConstant(name, answer)), answer)
+}
+
+pub fn constant_visible_read(cx: Cx, name: String) -> (Cx, Bool) = {
+  let visible = match cx.const_cutoff { None -> true, Some(cutoff) -> set.has(cutoff, name) }
+  (observe_type_read(cx, semantic_reads.ConstantVisible(name, visible)), visible)
 }
 
 pub fn java_assignable_read(cx: Cx, superclass: String, subclass: String) -> (Cx, Bool) !io = {
