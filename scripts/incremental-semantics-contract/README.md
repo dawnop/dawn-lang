@@ -103,8 +103,10 @@ owner和原函数名查找签名，别名不替代声明身份。该案例不覆
 
 function_product从真实ModuleHeaders构建顶层函数的具名header索引，保持当前语法与entry
 签名配对；重排案例按DeclKey读取旧body，再按当前keys顺序装配。function-products.py
-五个编译负控守来源、owner、签名错位、多余签名及重复声明身份；不是跨revision header
-有效性证明，impl/default/test的具名header接线仍未完成。
+十个编译负控守来源、owner、签名错位、多余签名、重复声明、impl参数/角色与trait默认
+元数据。独立Methods视图保留impl/default分组顺序，读取真实注册ImplI和trait MethodSig，
+不把同名方法混为一个key。header重排案例已投影两个泛型impl方法及两个效果多态默认
+方法的签名/subject/trait ID；尚未用这些视图重放方法body，也不是header依赖有效性证明。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个

@@ -413,8 +413,8 @@ pub fn header_sample() -> HeaderTrial !io = {
   let second_type = "type Second[T, !e] = { value: T }\n"
   let first_alias = "opaque type Wrapped[T, !e] = fn(T) -> T !e\n"
   let second_alias = "alias Callback[T, !e] = fn(T) -> T !e\n"
-  let first_trait = "trait Forward[T] { fn forward(x: T, f: fn() -> Int !e) -> Int !e }\n"
-  let second_trait = "trait Repeat[T] { fn repeat(x: T, f: fn() -> Int !e) -> Int !e }\n"
+  let first_trait = "trait Forward[T] {\n fn forward(x: T, f: fn() -> Int !e) -> Int !e\n fn forward_twice(x: T, f: fn() -> Int !e) -> Int !e = forward(x, f) + forward(x, f)\n}\n"
+  let second_trait = "trait Repeat[T] {\n fn repeat(x: T, f: fn() -> Int !e) -> Int !e\n fn repeat_twice(x: T, f: fn() -> Int !e) -> Int !e = repeat(x, f) + repeat(x, f)\n}\n"
   let first_impl = "impl[T] Forward[List[T]] { fn forward(x: List[T], f: fn() -> Int !e) -> Int !e = f() }\n"
   let second_impl = "impl[T] Repeat[List[T]] { fn repeat(x: List[T], f: fn() -> Int !e) -> Int !e = f() }\n"
   let tail = "pub fn thru[!e](g: fn() -> Int !e) -> Int !e = g()\n" ++
@@ -424,8 +424,14 @@ pub fn header_sample() -> HeaderTrial !io = {
   let (old_ast, opd) = parser.parse_module(old_text)
   let (new_ast, npd) = parser.parse_module(new_text)
   if len(opd) != 0 || len(npd) != 0 { panic("header fixture parse failed") }
-  let (before, sigs, impl_sigs) = headers_with_impls_for_body_probe(cx_new(Some("header"), Some("header.dawn")), old_ast, map.empty())
-  let (next, nsigs, new_impl_sigs) = headers_with_impls_for_body_probe(cx_new(Some("header"), Some("header.dawn")), new_ast, map.empty())
+  let old_headers = check_module_headers(cx_new(Some("header"), Some("header.dawn")), old_ast, map.empty())
+  let new_headers = check_module_headers(cx_new(Some("header"), Some("header.dawn")), new_ast, map.empty())
+  let before = old_headers.cx
+  let next = new_headers.cx
+  let sigs = old_headers.sigs
+  let nsigs = new_headers.sigs
+  let impl_sigs = old_headers.impl_sigs
+  let new_impl_sigs = new_headers.impl_sigs
   if len(before.diags) != 0 || len(next.diags) != 0 || before.next_id != next.next_id { panic("header fixture invalid") }
   let decl = module_fns(old_ast)[1]
   let ndecl = module_fns(new_ast)[1]
@@ -469,6 +475,27 @@ pub fn header_sample() -> HeaderTrial !io = {
   let plan = allocation.body_plan(old_table, new_table, body_owner,
     before.next_id, after.next_id - before.next_id, next.next_id, saved.sig, nsigs[1], saved.ev_syms).expect("body allocation plan")
   let ids = plan.ids
+  let old_methods = function_product.methods(scope, old_headers).expect("old named methods")
+  let new_methods = function_product.methods(scope, new_headers).expect("new named methods")
+  if len(function_product.impl_keys(old_methods)) != 2 || len(function_product.default_keys(old_methods)) != 2 {
+    panic("method header roles missing")
+  }
+  for key in function_product.impl_keys(new_methods) ++ function_product.default_keys(new_methods) {
+    let old_method = function_product.method(old_methods, key).expect("old method by key")
+    let new_method = function_product.method(new_methods, key).expect("new method by key")
+    match (old_method, new_method) {
+      (function_product.ImplMethod(_, _, old_sig, old_info), function_product.ImplMethod(_, _, new_sig, new_info)) -> {
+        if relocate.signature(ids, old_sig) != Some(new_sig) || relocate.ty(ids, old_info.subject) != Some(new_info.subject) ||
+            relocate.trait_id(ids, old_info.trait_id) != Some(new_info.trait_id) { panic("named impl header projection") }
+      }
+      (function_product.TraitDefault(_, _, old_sig, old_tid), function_product.TraitDefault(_, _, new_sig, new_tid)) -> {
+        if relocate.signature(ids, old_sig) != Some(new_sig) || relocate.trait_id(ids, old_tid) != Some(new_tid) {
+          panic("named default header projection")
+        }
+      }
+      _ -> panic("named method role mismatch")
+    }
+  }
   if plan.next_id != checked.next_id { panic("body allocation endpoint differs from cold") }
   if relocate.nominal(ids, old_ask) != Some(new_ask) || relocate.nominal(ids, old_tell) != Some(new_tell) {
     panic("header role mismatch")

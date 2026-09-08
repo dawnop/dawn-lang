@@ -278,6 +278,14 @@ const、impl方法、trait默认实现与test的有序产物。assemble_module_b
 不能用旧列表下标配新语法。此入口先覆盖顶层函数；impl/default/test各自的身份类别
 仍沿用identity，需后续接线，不将顶层函数索引宣称完整header缓存或依赖验证。
 
+impl方法和trait默认实现已建立独立具名视图：impl的真实注册信息按当前源码
+区间定位，方法签名读取ModuleHeaders.impl_sigs；trait默认签名读取同次Cx.traits。
+两类key分别为ImplHead/MethodDecl和TraitDecl/MethodDecl，不以同名方法互相替代。
+视图保存注册身份，不自行重算或改变现有body输出中的impl_of/default_of；这两个输出
+标签仍须沿用checker既有规则，并在后续重放对照中验证。声明级来源不代表依赖有效。
+重排header对照已按key匹配两个泛型impl方法及两个效果多态trait默认签名，再用真实
+来源表投影签名、注册subject和trait ID；并未因此宣称这四个方法body已经完整重放。
+
 ### 推断函数的entry签名与封定签名
 
 分配计划应校验旧/新header的entry签名，再建立整个body区间的ID映射；封定签名是
