@@ -490,6 +490,18 @@ Builtin metadata retains name, parameter spellings, access policy and build
 shape; leaf builds project their actual Ty through the type domain. These facts
 do not replace complete Java dependencies or runtime query wiring.
 
+### Java read boundary (implementation in progress)
+
+Named Java types retain the local class-name answer, including misses after
+builtin and alias short circuits. Only an accepted zero-argument use queries
+class metadata. Record the actual plain-data JClass answer, not a host Class,
+classloader or oracle closure. These names and metadata contain no compiler ID
+or source span to relocate. Their validity still requires the target classpath
+and oracle lifetime; recording answers alone does not authorize cache reuse.
+Other Java query kinds and their checker consumers remain separate required work.
+The class-info consumers for reference return types, static/instance dispatch and
+SAM/List diagnostics share the same observed lookup, retaining their returned Cx.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

@@ -253,9 +253,9 @@ label IDs and variable IDs relocate independently, including equal input integer
 with different destinations. Six complete Cx/module cases cover ordinary effects,
 variables, aliases and error recovery. Runtime query wiring and complete checker
 dependency coverage remain outstanding; these facts do not enable caching.
-The separate incremental-effect-reads job also runs associated and environment
-reads and has a 554s planning value; appending
-these controls to the type job would exceed the unchanged 660s pole.
+The separate incremental-effect-reads job also runs associated and Java reads,
+with a 644s planning value. Environment controls move intact to the type job,
+which has a 652s planning value; both preserve the unchanged 660s pole.
 
 `environment-reads.py` adds 16 compiling controls for reserved and ordinary
 builtin lookups, current type parameters, and std-module visibility. The checker
@@ -265,6 +265,16 @@ retains its name, parameter spellings, access policy and build shape; leaf types
 project through the actual type callback. Six complete Cx/module cases cover
 std-only visibility, reserved return types and nominal shadowing. These facts
 do not complete Java/trait/impl dependencies or authorize production caching.
+
+`java-reads.py` exercises the named Java class lookup and the actual plain-data
+class metadata answer. Its 21 compiling controls cover answer keys, answers,
+consumer context threading, every JClass field, and BodyProduct read capture.
+The five metadata consumers include reference returns, static and instance
+dispatch, and SAM/List diagnostics. Projection retains the lookup key separately
+from the returned class name. Four additional complete Cx/module cases bring
+the observation oracle to 66 cases. Other Java query kinds, classpath/lifetime
+validity and production query admission remain required; this is not a complete
+Java dependency cache.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

@@ -1139,9 +1139,10 @@ jobs:
     # 2026-09-08, including body/constant owner-scoped source projection.
     # Associated controls now take 99.96s: 2*(224+100)+38=686s exceeds
     # the pole. Move them intact to the effect/environment job below.
-    # Type alone: 2*224+38=486s; preserve the 660s pole.
-    # budget: 3x 486s planning value
-    timeout-minutes: 25
+    # Environment controls took 82.80s on the Java batch; move them here
+    # intact to make room below: 2*(224+83)+38=652s.
+    # budget: 3x 652s planning value
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1149,14 +1150,16 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: type and alias semantic read contracts
         run: python3 scripts/incremental-semantics-contract/type-reads.py
+      - name: named type environment read contracts
+        run: python3 scripts/incremental-semantics-contract/environment-reads.py
 
   incremental-effect-reads:
     runs-on: ubuntu-latest
-    # Local 2026-09-08: 14 ordinary effect controls 92.22s, 16 type
-    # environment controls 64.09s, 15 associated controls 99.96s.
-    # All suites retained: 2*(93+65+100)+38=554s, below the 660s pole.
-    # budget: 3x 554s planning value
-    timeout-minutes: 28
+    # Local 2026-09-08: 14 ordinary effect controls 92.22s,
+    # 15 associated controls 99.96s, 21 Java metadata controls 109.07s.
+    # Environment moves intact to type: 2*(93+100+110)+38=644s.
+    # budget: 3x 644s planning value
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1164,10 +1167,10 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: ordinary effect semantic read contracts
         run: python3 scripts/incremental-semantics-contract/effect-reads.py
-      - name: named type environment read contracts
-        run: python3 scripts/incremental-semantics-contract/environment-reads.py
       - name: associated type and effect read contracts
         run: python3 scripts/incremental-semantics-contract/associated-reads.py
+      - name: Java class metadata read contracts
+        run: python3 scripts/incremental-semantics-contract/java-reads.py
 
   incremental-state:
     runs-on: ubuntu-latest

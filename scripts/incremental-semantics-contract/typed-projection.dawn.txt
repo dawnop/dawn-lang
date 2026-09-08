@@ -5,6 +5,7 @@ use std/map
 use std/list
 use std/str
 use compiler/check/cx.{Cx, ModExports, cx_new}
+use compiler/check/jsig.{Jsig, JClass, jsig_refused}
 use compiler/check/tast.{TFun, TDefault, TModule, TConst}
 use compiler/check/types.{Sig, Sym, Ty, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
@@ -298,6 +299,26 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     let (cold_cx, cold) = check_module(initial, syntax, map.empty())
     let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
     if len(cold_cx.diags) != errors { panic("environment observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  let java_info = JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
+    is_interface: false, is_primitive: false, is_array: false }
+  let java_oracle = Jsig { ..jsig_refused(), on: true,
+    class_info: name => { if name != "pkg.Box" { panic("Java observation class query") }
+      java_info }, methods_of: name => [] }
+  for sample in [("fn go(x: Foreign) -> Foreign = x", 0),
+    ("fn go(x: Foreign[Int]) -> Unit = ()", 1),
+    ("fn go(x: Missing) -> Unit = ()", 1),
+    ("fn go() -> Unit !io = { Foreign.missing() }", 1)] {
+    let (text, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("Java observation parse") }
+    let initial = Cx { ..cx_new(Some("java_read_probe"), None), jsig: java_oracle,
+      java_classes: map.from([("Foreign", "pkg.Box")]) }
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("Java observation diagnostic path") }
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }

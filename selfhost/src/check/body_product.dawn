@@ -12,6 +12,7 @@ use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
 use check/relocate
 use check/semantic_reads
+use check/jsig.{JClass}
 use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
   AliasTypeHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
@@ -420,7 +421,9 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.DeclaredEffect("Ask", Some(ELabeled(EPure, [(3, "Ask")]))),
       semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 3))),
       semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 1)) })),
-      semantic_reads.StdModuleMode(false)]),
+      semantic_reads.StdModuleMode(false), semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
+      semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
+        is_interface: true, is_primitive: false, is_array: false })]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -444,7 +447,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 21
+  assert len(p.function_reads.expect("read delta")) == 23
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -463,7 +466,9 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.DeclaredEffect("Ask", Some(ELabeled(EPure, [(43, "Ask")]))),
     semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 33))),
     semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 11)) })),
-    semantic_reads.StdModuleMode(false)]
+    semantic_reads.StdModuleMode(false), semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
+    semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
+      is_interface: true, is_primitive: false, is_array: false })]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

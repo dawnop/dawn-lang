@@ -28,7 +28,7 @@ use check/types.{
   builtins, internal_builtins,
   prelude_adts, prelude_traits, first_minted_id
 }
-use check/jsig.{Jsig, jsig_refused}
+use check/jsig.{Jsig, JClass, jsig_refused}
 use check/semantic_reads
 use check/semantic_reads.{FunctionRead, AliasTypeHeader, ExportDiagnostic}
 use front/suggest
@@ -608,6 +608,16 @@ fn builtin_type_read(cx: Cx, name: String) -> (Cx, Option[BuiltinTypeI]) = {
 
 fn std_module_mode_read(cx: Cx) -> (Cx, Bool) =
   (observe_type_read(cx, semantic_reads.StdModuleMode(cx.is_std_module)), cx.is_std_module)
+
+fn java_class_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
+  let answer = map.get(cx.java_classes, name)
+  (observe_type_read(cx, semantic_reads.JavaClassName(name, answer)), answer)
+}
+
+pub fn java_class_info_read(cx: Cx, fqcn: String) -> (Cx, JClass) !io = {
+  let answer = cx.jsig.class_info(fqcn)
+  (observe_type_read(cx, semantic_reads.JavaClassInfo(fqcn, answer)), answer)
+}
 
 fn parameter_bounds_read(cx: Cx, subject: Ty, id: Int) -> (Cx, Option[List[Int]]) = {
   let answer = map.get(cx.current_tparam_bounds, id)
@@ -1249,7 +1259,9 @@ fn resolve_named(
     }
     None -> ()
   }
-  match map.get(cx.java_classes, name) {
+  let (java_cx, java_name) = java_class_name_read(cx, name)
+  cx = java_cx
+  match java_name {
     Some(fqcn) -> {
       if len(targs) > 0 || len(eargs) > 0 {
         return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
@@ -1259,8 +1271,8 @@ fn resolve_named(
       # to say otherwise -- vouching not for one static call but for a whole
       # recursive subsystem. Resolving a type reads the host's class path, so
       # the pass chain above says !io too; check_module already did.
-      let j = cx.jsig.class_info(fqcn)
-      return (record_span_at(cx, lo, hi, no_trefs()), TyJava(fqcn, j.display))
+      let (info_cx, j) = java_class_info_read(cx, fqcn)
+      return (record_span_at(info_cx, lo, hi, no_trefs()), TyJava(fqcn, j.display))
     }
     None -> ()
   }

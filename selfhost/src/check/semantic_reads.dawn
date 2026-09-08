@@ -4,6 +4,7 @@
 # it is deliberately not a proof that all semantic dependencies were read.
 use std/list
 use front/ast.{TypeRef, TNamed}
+use check/jsig.{JClass}
 use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
@@ -34,6 +35,8 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | ScopedEffectVariable(name: String, answer: Option[Eff])
   | BuiltinTypeAnswer(name: String, answer: Option[BuiltinTypeI])
   | StdModuleMode(is_std: Bool)
+  | JavaClassName(name: String, answer: Option[String])
+  | JavaClassInfo(fqcn: String, answer: JClass)
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -226,6 +229,8 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
             BuiltinTypeAnswer(name, moved_builtin)
           }
           StdModuleMode(is_std) -> StdModuleMode(is_std)
+          JavaClassName(name, answer) -> JavaClassName(name, answer)
+          JavaClassInfo(fqcn, answer) -> JavaClassInfo(fqcn, answer)
         }
         out = out ++ [moved]
       }
@@ -299,6 +304,16 @@ test "semantic reads project export references in distinct domains" {
   assert capture(prefix, combined) == Some(reads)
   assert observe(None, ExportPresence("h", true)) == None
   assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
+}
+
+test "semantic reads preserve plain Java metadata without compiler ID mapping" {
+  let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
+    is_interface: true, is_primitive: false, is_array: true }
+  let reads = Some([JavaClassName("Foreign", Some("pkg.Box")), JavaClassName("Missing", None),
+    JavaClassInfo("lookup.Box", info)])
+  assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
+  let prefix = Some([JavaClassName("Earlier", None)])
+  assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
 }
 
 test "semantic reads project builtin leaf types and preserve access metadata" {
