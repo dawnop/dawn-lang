@@ -11,7 +11,7 @@ use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use check/relocate
 use check/semantic_reads
-use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates}
+use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor}
 use check/relocate_tree
 use check/relocate_tree.{View}
 
@@ -244,7 +244,8 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   Some(BodyProduct { ..p, tree: project_tree(p.tree)?, allocation_start: allocation_start,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell,
-    function_reads: semantic_reads.project(p.function_reads, s => relocate.signature(v.ids, s))? })
+    function_reads: semantic_reads.project(p.function_reads, s => relocate.signature(v.ids, s),
+      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id))? })
 }
 
 test "body product keyed writes preserve unrelated preceding products" {
@@ -355,7 +356,8 @@ test "body product projects every state reference and the whole allocation inter
   let after = Cx { ..before, next_id: 12, syms: map.from([(10, symbol)]),
     function_reads: Some([FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
       FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 1) }) }),
-      FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"])]),
+      FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"]),
+      QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 1)))), QualifiedConstructor("h", "Item", Some((4, 1)))]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -368,7 +370,7 @@ test "body product projects every state reference and the whole allocation inter
   let p = capture(before, after, f).expect("capture projected fixture")
   let none: Map[Int, Int] = map.empty()
   let locals = map.from([(10, 40), (11, 41)])
-  let ids = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), locals).expect("projection ids")
+  let ids = relocate.new(map.from([(4, 44)]), map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), locals).expect("projection ids")
   let view = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
@@ -379,11 +381,12 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 3
+  assert len(p.function_reads.expect("read delta")) == 5
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
-    FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"])]
+    FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["callee", "other"]),
+    QualifiedConstant("h", "VALUE", Some(("provider", TyVar("T", 11)))), QualifiedConstructor("h", "Item", Some((44, 1)))]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

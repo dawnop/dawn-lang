@@ -148,6 +148,15 @@ the partial-expectation helper. Explicit apply retains the module-receiver decis
 before delegation. Module export metadata, constructors, constants, traits, impls
 and Java queries are not yet fully observed, so this log must not enable a body cache.
 
+Export consumers will record focused query results rather than embedding ModExports
+in the read log (Cx already owns that record and imports the log). Qualified constants
+retain their declaring module and type; constructors retain their ADT identity and
+slot. Presence and diagnostic queries retain only their actual boolean or optional
+message/hint result. Diagnostic facts exclude source spans, which belong to the body
+view. Type and constructor references must be projected with their own domains;
+missing mappings reject replay. Pattern/type/impl consumers still need explicit
+wiring before these facts can establish complete dependency validity.
+
 生产引用映射从声明来源台账派生：每个绑定由DeclKey、引用域和声明内槽定位，
 旧/新台账仅连接相同身份，不因整数相等就默认未变。一个域内重复身份对应不同ID、
 不同身份占同ID都必须拒绝；不同域允许数字重叠。缺少目标声明时不生成映射，
@@ -385,6 +394,20 @@ compiler来源从prelude ADT/trait/impl与builtin签名的实际元数据生成�
 impl引用已登记的binder时保留原身份，独有的集合模板另登记。擦除后的runtime类型参数
 取erased_ev_ty的实际绑定。该baseline仅属于当前编译器实例的会话，不是跨编译器版本
 可复用的磁盘缓存。来源缺失仍拒绝投影。
+
+### Qualified-pattern observation (in progress)
+
+Qualified constructor expressions and refutability decisions must share the same
+observed constructor query. Refutability carries the updated context through
+recursive tuple/constructor patterns, stopping at the same first refutable span
+as the cold checker. The let/for diagnostic consumers retain that context.
+Direct qualified pattern checking will observe module presence before constructor
+lookup, retain explicit missing constructor answers, and observe the resolved
+constructor-diagnostic message/hint only on the same failure path as before.
+The diagnostic query has its own kind so value/function/constructor answers cannot
+alias. Error recovery must keep threading reads from nested argument patterns.
+This does not yet observe local constructor tables or ADT constructor counts;
+those remain required dependencies before cache admission.
 
 ## 七、不做的
 

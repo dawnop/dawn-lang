@@ -81,6 +81,23 @@ golden 只能钉住「某个程序产生了什么」；它对**没有任何 case
 单块子串——后者会让「含有某个词组」的消息误算成覆盖。间接消息
 （`let msg = ...`、`named_arg_msg(...)`）会顺着同文件的绑定与函数体展开两层。
 
+### Record-valued diagnostic provenance
+
+The bounded scanner also follows explicit record fields through immutable local
+bindings, exact tuple return slots, and matching `Some` payload binders. Same-file
+helpers retain lexical binding provenance and reachable return values. Message
+fields cannot borrow hint literals, another tuple slot, or chunks from a different
+branch. Mutable values, shadowed helpers, opaque wrappers, record spreads, and
+unsupported control transfers fail closed. A loop without a return may be skipped
+when slicing a later result, but its writes cannot provide immutable wording.
+This remains message-text coverage, not proof that a particular branch executed.
+
+`python3 scripts/checker-corpus/coverage.py --selftest` exercises these boundaries,
+including unreachable returns, nested shadowing, wrong payload constructors,
+helper arguments, recursion limits, and cross-branch wording controls. The corpus
+still checks the complete ordered diagnostics; this projection does not alter its
+goldens or the uncovered-site ratchet.
+
 ## 与宿主 JDK 的耦合（两个 case）
 
 `java_calls` / `java_bridge` / `java_ambiguous` 的 hint 引用宿主自己的反射结果

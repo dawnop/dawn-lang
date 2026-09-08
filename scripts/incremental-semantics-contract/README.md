@@ -183,10 +183,24 @@ closure, which overlaps other targets and must not be counted as independent tes
 unqualified answers, diagnostic candidate lists, qualified signatures and module
 alias paths, including misses. Decisions preserve local shadowing, expected-type
 short circuits and argument scheduling. Capture/projection retain all four fact
-variants. The typed oracle additionally compares 12 enabled/disabled observation
+variants. The typed oracle additionally compares 26 enabled/disabled observation
 cases against complete cold Cx and module products; its read-state mutant must hit
 the whole-Cx assertion. Recording remains disabled by default and is not complete
 namespace coverage or production body-cache admission.
+
+`export-reads.py` adds 26 compiling controls for qualified constant and constructor
+answers, export presence, and private-name/candidate/type-constructor diagnostics.
+The additional fourteen complete-state oracle cases exercise these expression,
+call, qualified match and let/for refutability paths without stripping anything except the
+intentional observation log. Four controls retain the recursive refutability
+context and its let/for consumers, including the original short circuits.
+Projection separates constant type references from constructor nominal IDs and
+preserves constructor slots and diagnostic kinds. Four further controls retain
+qualified pattern presence, constructor and diagnostic answers, including their
+kind. Error recovery preserves nested pattern observations. Type resolution,
+local constructors, ADT/trait/impl and Java dependencies are still incomplete;
+these tests do not authorize cache admission. The incremental-export-reads job
+runs the export controls separately, preserving the unchanged 660s planning pole.
 
 The incremental-reads job runs these read controls and the existing `projection.py`
 suite. Moving source projection out of incremental-projection keeps the expanded

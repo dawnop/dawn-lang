@@ -12,7 +12,10 @@ ones with no case.
 
 By message text, not by execution. Each site's message expression is expanded
 through immutable local `let` bindings and through bounded, safely substitutable
-same-file helper calls. A possible wording becomes a sequence of literal chunks
+same-file helper calls. Explicit record fields also retain provenance through
+immutable tuple result slots and matching Some payload binders; opaque calls,
+mutable values and unproved control transfers cannot supply wording. A possible
+wording becomes a sequence of literal chunks
 (interpolations cut out); the site counts as reached only when one recorded
 diagnostic contains every chunk of one possible wording, in source order.
 
@@ -1281,6 +1284,244 @@ def scoped_patterns(expr, fns, scope_prefix):
     return (known, helper_pats) if known else (False, patterns(literals(expr), expr))
 
 
+def literal_record_field(expr, field):
+    """Project one explicit field, never another field's literals or a spread.
+
+    This deliberately does not infer a record from an opaque call, a tuple,
+    or a constructor argument. Those forms need their own provenance proof.
+    """
+    expr = expr.strip()
+    for _ in range(MAX_PROJECTION_DEPTH):
+        inner = outer_parens(expr)
+        if inner is None:
+            break
+        expr = inner.strip()
+    else:
+        return None
+    code = code_mask(expr)
+    if has_unprojected_control(expr):
+        return None
+    head = re.match(r"[A-Z][A-Za-z0-9_]*\s*\{", code)
+    if head is None:
+        return None
+    brace = head.end() - 1
+    close = matching_delimiter(code, brace)
+    if close >= len(code) or code[close + 1 :].strip():
+        return None
+    fields = {}
+    for part in split_top_level(expr, ",", brace + 1, close, code=code):
+        if not part.strip():
+            continue
+        entry = re.match(r"\s*([a-z_][A-Za-z0-9_]*)\s*:", code_mask(part))
+        if entry is None or entry.group(1) in fields:
+            return None
+        fields[entry.group(1)] = part[entry.end() :].strip()
+    return fields.get(field)
+
+
+def record_value_flow(expr, env, depth=0):
+    """Reachable values paired with lexical immutable-binding environments.
+
+    This slice retains provenance, not runtime values. Mutable bindings and
+    writes become opaque. A loop without a return cannot produce this block's
+    result; its bindings/writes are still invalidated conservatively. Transfers
+    through loops, guards, or opaque expressions remain unsupported.
+    """
+    if depth >= MAX_PROJECTION_DEPTH:
+        return None
+    expr = expr.strip()
+    code = code_mask(expr)
+    segments = block_segments(expr)
+    if segments is not None:
+        current, returned = dict(env), []
+        for index, segment in enumerate(segments):
+            masked = code_mask(segment)
+            kind, evaluated = helper_statement(segment)
+            if kind == "unsupported":
+                if not re.match(r"\s*(?:for|while)\b", masked) or re.search(r"\breturn\b", masked):
+                    return None
+                for name in list(current):
+                    if helper_param_is_bound(masked, name) or re.search(
+                        r"\b%s\s*=(?!=|>)" % re.escape(name), masked
+                    ):
+                        current[name] = None
+                continue
+            if kind == "declaration":
+                declaration = re.match(r"\s*fn\s+([a-z_][A-Za-z0-9_]*)", masked)
+                if declaration is not None:
+                    current[declaration.group(1)] = None
+                continue
+            flow = record_value_flow(evaluated, current, depth + 1) if evaluated is not None else None
+            if flow is None:
+                return None
+            values, returns, may = flow
+            returned += returns
+            if len(returned) > MAX_CANDIDATES:
+                return None
+            if not may:
+                return ([], returned, False)
+            binding = re.match(r"\s*(let|var)\s+([a-z_][A-Za-z0-9_]*)\s*(?::[^=]*)?=", masked)
+            if binding is not None:
+                name = binding.group(2)
+                current[name] = (evaluated, dict(current)) if binding.group(1) == "let" else None
+            elif kind == "statement":
+                # Destructuring and writes are not immutable scalar aliases.
+                destructured = re.match(r"\s*(?:let|var)\s+(.*?)(?<![=!<>])=(?!=|>)", masked, re.S)
+                if destructured is not None:
+                    for name in IDENT.findall(destructured.group(1)):
+                        current[name] = None
+                for name in list(current):
+                    if helper_param_is_bound(masked, name) or re.search(
+                        r"\b%s\s*=(?!=|>)" % re.escape(name), masked
+                    ):
+                        current[name] = None
+            if index == len(segments) - 1:
+                return (values if kind == "expression" else [], returned, True)
+        return ([], returned, True)
+    if word_at(code, skip_space(code, 0), "return"):
+        value = expr[skip_space(code, 0) + len("return") :].strip()
+        flow = record_value_flow(value, env, depth + 1)
+        return None if flow is None else ([], flow[0] + flow[1], False)
+    branch = branch_parts(expr, code)
+    if branch is not None:
+        kind, header, arms = branch
+        controls = [guard for guard, _ in arms if guard is not None]
+        if header is not None:
+            controls.append(header)
+        if any(has_unprojected_control(control) for control in controls):
+            return None
+        branch_env = dict(env)
+        # A pattern-bound name cannot borrow an outer immutable value. The
+        # branch projector does not infer constructor payloads inside helpers.
+        if kind == "match":
+            brace = body_brace(code, len("match"))
+            close = matching_delimiter(code, brace)
+            start = brace + 1
+            arrows = match_arrows(code, start, close)
+            for index, arrow in enumerate(arrows):
+                for name in IDENT.findall(code[start:arrow]):
+                    branch_env[name] = None
+                rhs = skip_space(code, arrow + 2, close)
+                start = match_arm_separator(code, rhs, arrows[index + 1]) + 1 if index + 1 < len(arrows) else close
+        normal, returned, may = [], [], kind == "if" and all(guard is not None for guard, _ in arms)
+        for _, body in arms:
+            flow = record_value_flow("{" + body + "}" if kind == "if" else body, branch_env, depth + 1)
+            if flow is None:
+                return None
+            normal += flow[0]
+            returned += flow[1]
+            may = may or flow[2]
+            if len(normal) + len(returned) > MAX_CANDIDATES:
+                return None
+        return (normal, returned, may)
+    if has_unprojected_control(expr):
+        return None
+    return ([(expr, dict(env))], [], True)
+
+
+def projected_record_patterns(expr, path, fns, env=None, depth=0, seen=()):
+    """Slice exact tuple slots / Some payloads / explicit fields to wording."""
+    if depth >= MAX_PROJECTION_DEPTH:
+        return []
+    env = {} if env is None else env
+    expr = expr.strip()
+    code = code_mask(expr)
+    if re.fullmatch(r"[a-z_][A-Za-z0-9_]*", code) and expr in env:
+        bound = env[expr]
+        return [] if bound is None else projected_record_patterns(bound[0], path, fns, bound[1], depth + 1, seen)
+    inner = outer_parens(expr)
+    if inner is not None:
+        parts = top_level_parts(inner)
+        if len(parts) == 1:
+            return projected_record_patterns(inner, path, fns, env, depth + 1, seen)
+        if any(has_unprojected_control(part) for part in parts):
+            return []
+        if path and isinstance(path[0], int) and path[0] < len(parts):
+            return projected_record_patterns(parts[path[0]], path[1:], fns, env, depth + 1, seen)
+        return []
+    if block_segments(expr) is not None or branch_parts(expr, code) is not None:
+        flow = record_value_flow(expr, env, depth + 1)
+        out = []
+        for value, scope in [] if flow is None else flow[0] + flow[1]:
+            out += projected_record_patterns(value, path, fns, scope, depth + 1, seen)
+            if len(out) > MAX_CANDIDATES:
+                return []
+        return out
+    call = root_call(expr)
+    constructor = re.match(r"Some\s*\(", code)
+    if constructor is not None:
+        close = matching_delimiter(code, constructor.end() - 1)
+        if close == len(code) - 1:
+            call = ("Some", scan_args(expr, constructor.end(), code))
+    if call is not None:
+        callee, args = call
+        if any(has_unprojected_control(arg) for arg in args):
+            return []
+        if callee == "Some" and path and path[0] == "Some" and len(args) == 1:
+            return projected_record_patterns(args[0], path[1:], fns, env, depth + 1, seen)
+        if callee in fns and callee not in env and callee not in seen and len(seen) < MAX_HELPER_DEPTH:
+            info = fns[callee]
+            if len(args) != len(info["params"]) or any(re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*:", arg) for arg in args):
+                return []
+            bound = {param: (arg, dict(env)) for param, arg in zip(info["params"], args)}
+            return projected_record_patterns(info["body"], path, fns, bound, depth + 1, seen + (callee,))
+        return []
+    if path:
+        value = literal_record_field(expr, path[0]) if isinstance(path[0], str) else None
+        return [] if value is None else projected_record_patterns(value, path[1:], fns, env, depth + 1, seen)
+    return patterns(literals(expr), expr)
+
+
+def option_record_patterns(text, code, scope, site, member, bindings, scope_ends, fns):
+    """Prove a Some binder comes from one immutable tuple result slot."""
+    name, field = member
+    matches = list(re.finditer(r"\bmatch\b", code[scope:site]))
+    for match in reversed(matches):
+        start = scope + match.start()
+        brace = body_brace(code, start + len("match"))
+        if brace < 0 or brace >= site:
+            continue
+        close = matching_delimiter(code, brace)
+        if not brace < site < close:
+            continue
+        arrows = match_arrows(code, brace + 1, close)
+        pattern_start = brace + 1
+        for index, arrow in enumerate(arrows):
+            rhs = skip_space(code, arrow + 2, close)
+            end = match_arm_separator(code, rhs, arrows[index + 1]) if index + 1 < len(arrows) else close
+            pattern = code[pattern_start:arrow].strip()
+            pattern_start = end + 1
+            if not rhs <= site < end or not re.fullmatch(r"Some\s*\(\s*%s\s*\)" % re.escape(name), pattern):
+                continue
+            between = code[rhs:site]
+            if helper_param_is_bound(between, name) or re.search(r"\b%s\s*=(?!=|>)" % re.escape(name), between):
+                return []
+            subject = text[start + len("match") : brace].strip()
+            if not re.fullmatch(r"[a-z_][A-Za-z0-9_]*", subject):
+                return []
+            for binding in reversed(bindings):
+                if not scope <= binding.start() < start < scope_ends[binding.start()]:
+                    continue
+                names = binding.group(1).strip()
+                if not names.startswith("(") or not names.endswith(")"):
+                    continue
+                slots = [slot.strip() for slot in names[1:-1].split(",")]
+                if slots.count(subject) != 1:
+                    continue
+                if not re.match(r"\s*let\b", code[binding.start() : binding.end()]):
+                    continue
+                between = code[binding.end():start]
+                if helper_param_is_bound(between, subject) or re.search(r"\b%s\s*=(?!=|>)" % re.escape(subject), between):
+                    return []
+                value = block_after(text, binding.end(), code)
+                call = root_call(value)
+                if call is None or helper_param_is_bound(code[scope:binding.start()], call[0]):
+                    return []
+                return projected_record_patterns(value, (slots.index(subject), "Some", field), fns)
+            return []
+    return []
+
+
 def collect_sites(sources=None):
     sites = []
     if sources is None:
@@ -1375,6 +1616,45 @@ def collect_sites(sources=None):
                     resolved += body_pats
                 if resolved:
                     pats = resolved
+            if not pats and not known_helper:
+                member = re.fullmatch(
+                    r"\s*([a-z_][A-Za-z0-9_]*)\s*\.\s*([a-z_][A-Za-z0-9_]*)\s*",
+                    code_mask(expr),
+                )
+                if member is not None:
+                    name, field = member.groups()
+                    # Do not use the existing tuple-binding approximation for
+                    # records: only an exact single-name immutable binder can
+                    # prove which object owns this field.
+                    candidates = [
+                        binding for binding in let_matches
+                        if binding.group(1).strip() == name
+                        and re.match(r"\s*let\b", source_code[binding.start() : binding.end()])
+                        and scope <= binding.start() < m.start()
+                        < scope_ends[binding.start()]
+                    ]
+                    if candidates:
+                        binding = candidates[-1]
+                        between = source_code[binding.end() : m.start()]
+                        # Nested pattern/lambda/var binders must not borrow
+                        # the outer record's wording. Reject writes as well.
+                        rebound = helper_param_is_bound(between, name)
+                        written = re.search(
+                            r"\b%s\s*(?:\.[a-z_][A-Za-z0-9_]*\s*)?=(?!=|>)"
+                            % re.escape(name), between,
+                        )
+                        if not rebound and written is None:
+                            body = block_after(text, binding.end(), source_code)
+                            value = literal_record_field(body, field)
+                            if value is not None:
+                                _, pats = scoped_patterns(
+                                    value, fns, source_code[scope : binding.start()]
+                                )
+                    if not pats:
+                        pats = option_record_patterns(
+                            text, source_code, scope, m.start(), member.groups(),
+                            let_matches, scope_ends, fns,
+                        )
             sites.append(
                 {
                     "file": rel,
@@ -1404,6 +1684,154 @@ def recorded_messages():
 
 
 def self_test():
+    record = 'Diagnostic { message: "missing exported value", hint: "unrelated suggestion" }'
+    projected = literal_record_field(record, "message")
+    if projected != '"missing exported value"':
+        print("FAIL: an explicit record field lost its wording", file=sys.stderr)
+        return 1
+    for opaque in (
+        'make(' + record + ')',
+        '(' + record + ', "another value")',
+        record + '.hint',
+        'Diagnostic { ..other, message: "missing exported value" }',
+        'Diagnostic { message: "first message", message: "second message" }',
+        'Diagnostic { hint: "missing exported value" }',
+        'Diagnostic { message: "missing exported value", hint: { return other } }',
+    ):
+        if literal_record_field(opaque, "message") is not None:
+            print("FAIL: an unproved record field supplied wording", file=sys.stderr)
+            return 1
+    record_cases = [
+        ('let diagnostic = ' + record + '\n cerr(cx, diagnostic.message, 0, 1)', True),
+        ('let diagnostic = (' + record + ')\n cerr(cx, diagnostic.message, 0, 1)', True),
+        ('let diagnostic = Diagnostic { message: if flag { "missing exported value" } '
+         'else { "private exported value" }, hint: "unrelated suggestion" }\n'
+         ' cerr(cx, diagnostic.message, 0, 1)', True),
+        ('let diagnostic = ' + record + '\n cerr(cx, diagnostic.unknown, 0, 1)', False),
+        ('let diagnostic = ' + record + '\n cerr(cx, opaque(diagnostic.message), 0, 1)', False),
+        ('let (diagnostic, other) = (' + record + ', unknown)\n'
+         ' cerr(cx, diagnostic.message, 0, 1)', False),
+        ('var diagnostic = ' + record + '\n cerr(cx, diagnostic.message, 0, 1)', False),
+        ('let diagnostic = ' + record + '\n var diagnostic = unknown\n'
+         ' cerr(cx, diagnostic.message, 0, 1)', False),
+        ('let diagnostic = ' + record + '\n diagnostic = unknown\n'
+         ' cerr(cx, diagnostic.message, 0, 1)', False),
+        ('let diagnostic = ' + record + '\n match unknown { Some(diagnostic) -> '
+         'cerr(cx, diagnostic.message, 0, 1) }', False),
+        ('{\n let diagnostic = ' + record + '\n ()\n }\n'
+         ' cerr(cx, diagnostic.message, 0, 1)', False),
+        ('let diagnostic = ' + record + '\n with diagnostic <- unknown {\n'
+         ' cerr(cx, diagnostic.message, 0, 1)\n }', False),
+        ('let diagnostic = ' + record + '\n let callback = (diagnostic) => {\n'
+         ' cerr(cx, diagnostic.message, 0, 1)\n }', False),
+    ]
+    for body, expected in record_cases:
+        sites = collect_sites([("record-field-control.dawn", 'fn fixture() = {\n ' + body + '\n}')])
+        if len(sites) != 1 or site_reached(sites[0], ["missing exported value"]) != expected:
+            print("FAIL: record field provenance control: " + body, file=sys.stderr)
+            return 1
+        if site_reached(sites[0], ["unrelated suggestion"]):
+            print("FAIL: another record field reached the message site", file=sys.stderr)
+            return 1
+    option_prelude = '''fn detail(name: String) = {
+  let message = "missing exported value"
+  match name {
+    Some(value) -> {
+      var hints = []
+      for entry in values { hints = hints ++ [entry] }
+      return Diagnostic { message: message, hint: "unrelated suggestion" }
+    }
+    None -> ()
+  }
+  Diagnostic { message: message, hint: "unrelated suggestion" }
+}
+fn query(context, name) = {
+  let answer = match name {
+    None -> None
+    Some(value) -> Some(detail(value))
+  }
+  let next = context
+  (next, answer)
+}
+'''
+    option_body = '''fn fixture() = {
+  let (next, diagnostic) = query(cx, name)
+  match diagnostic {
+    Some(d) -> cerr_o(next, d.message, 0, 1, d.hint)
+    None -> ()
+  }
+}
+'''
+    option_cases = [
+        (option_prelude + option_body, True),
+        (option_prelude + option_body.replace('(next, diagnostic)', '(diagnostic, next)'), False),
+        (option_prelude + option_body.replace('d.message', 'd.missing'), False),
+        (option_prelude + option_body.replace('match diagnostic', 'let diagnostic = unknown\n  match diagnostic'), False),
+        (option_prelude + option_body.replace('match diagnostic', 'diagnostic = unknown\n  match diagnostic'), False),
+        (option_prelude + option_body.replace('Some(d) -> cerr_o', 'Some(d) -> { var d = unknown\n cerr_o').replace('d.hint)', 'd.hint) }'), False),
+        (option_prelude + option_body.replace('  let (next, diagnostic)', '  let query = unknown\n  let (next, diagnostic)'), False),
+        (option_prelude.replace('Some(detail(value))', 'Some(opaque(detail(value)))') + option_body, False),
+        (option_prelude.replace('let message =', 'var message =') + option_body, False),
+        (option_prelude.replace('hints = hints ++ [entry]', 'return unknown') + option_body, False),
+        (option_prelude.replace('Some(detail(value))', 'Other(detail(value))') + option_body, False),
+        (option_prelude.replace('Some(detail(value))', 'Some(detail({ return unknown }))') + option_body, False),
+        (option_prelude.replace('(next, answer)', '({ return unknown }, answer)') + option_body, False),
+    ]
+    for source, expected in option_cases:
+        sites = collect_sites([("option-record-control.dawn", source)])
+        if len(sites) != 1 or site_reached(sites[0], ["missing exported value"]) != expected:
+            print("FAIL: option record provenance control: " + source, file=sys.stderr)
+            return 1
+        if site_reached(sites[0], ["unrelated suggestion"]):
+            print("FAIL: option record hint reached the message site", file=sys.stderr)
+            return 1
+    projection_helpers = {
+        "choice": {"params": [], "body": '''{
+          var private = false
+          for value in values { private = true }
+          Some(if private {
+            Diagnostic { message: "private value " ++ name ++ " in module", hint: "private hint" }
+          } else {
+            Diagnostic { message: "missing value " ++ name ++ " in exports", hint: "missing hint" }
+          })
+        }'''},
+        "early": {"params": [], "body": '{ return Some(Diagnostic { message: "live diagnostic" })\n Some(Diagnostic { message: "dead diagnostic" }) }'},
+        "recursive": {"params": [], "body": 'recursive()'},
+        "shadowed": {"params": [], "body": '{ let choice = opaque\n choice() }'},
+        "tuple_shadowed": {"params": [], "body": '{ let (choice, other) = opaque\n choice() }'},
+        "local_shadowed": {"params": [], "body": '{ fn choice() = opaque\n choice() }'},
+        "argument": {"params": ["message"], "body": 'Some(Diagnostic { message: message, hint: "argument hint" })'},
+    }
+    choice = {"pats": projected_record_patterns("choice()", ("Some", "message"), projection_helpers)}
+    for message, expected in [
+        ("private value X in module", True), ("missing value X in exports", True),
+        ("private value X in exports", False), ("missing value X in module", False),
+        ("private hint", False), ("missing hint", False),
+    ]:
+        if site_reached(choice, [message]) != expected:
+            print("FAIL: record branch wording mixed provenance", file=sys.stderr)
+            return 1
+    early = {"pats": projected_record_patterns("early()", ("Some", "message"), projection_helpers)}
+    if not site_reached(early, ["live diagnostic"]) or site_reached(early, ["dead diagnostic"]):
+        print("FAIL: unreachable record result supplied wording", file=sys.stderr)
+        return 1
+    for callee in ("recursive", "shadowed", "tuple_shadowed", "local_shadowed"):
+        if projected_record_patterns(callee + "()", ("Some", "message"), projection_helpers):
+            print("FAIL: unsafe record helper supplied wording", file=sys.stderr)
+            return 1
+    argument = {"pats": projected_record_patterns('argument("actual argument diagnostic")', ("Some", "message"), projection_helpers)}
+    if not site_reached(argument, ["actual argument diagnostic"]) or site_reached(argument, ["argument hint"]):
+        print("FAIL: record helper argument provenance was lost", file=sys.stderr)
+        return 1
+    if projected_record_patterns('choice()', ("Some", "message"), projection_helpers, depth=MAX_PROJECTION_DEPTH):
+        print("FAIL: record projection ignored its depth bound", file=sys.stderr)
+        return 1
+    if projected_record_patterns(
+        '(Some(Diagnostic { message: "unreachable tuple diagnostic" }), { return unknown })',
+        (0, "Some", "message"), projection_helpers,
+    ):
+        print("FAIL: tuple sibling transfer supplied unreachable wording", file=sys.stderr)
+        return 1
     shared = (
         '"`" ++ fname ++ "` uses the effect `" ++ name ++ '
         '"`, but a local function cannot carry an effect label"'

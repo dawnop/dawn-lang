@@ -18,7 +18,7 @@ def main():
     variants = [
         ("checker", "qualified-recording", "Some(_) -> Cx { ..cx, function_reads: semantic_reads.qualified(cx.function_reads, qualifier, name, answer) }", "Some(_) -> cx"),
         ("checker", "alias-recording", "Some(_) -> Cx { ..cx, function_reads: semantic_reads.module_alias(cx.function_reads, name, path) }", "Some(_) -> cx"),
-        ("checker", "qualified-value", "let (field_cx, answer) = qual_fn_read(cx, target, fname)", "let (_, answer) = qual_fn_read(cx, target, fname)\n      let field_cx = cx"),
+        ("checker", "qualified-value", "let (start_cx, answer) = qual_fn_read(cx, target, fname)", "let (_, answer) = qual_fn_read(cx, target, fname)\n      let start_cx = cx"),
         ("checker", "qualified-expectation", "let (next, answer) = qual_fn_read(cx, target, name)\n      match answer", "let (_, answer) = qual_fn_read(cx, target, name)\n      let next = cx\n      match answer"),
         ("checker", "qualified-call-decision", "let (next, answer) = module_fn_read(cx, rname, name)", "let (_, answer) = module_fn_read(cx, rname, name)\n          let next = cx"),
         ("checker", "qualified-partial", "(next, answer != None)\n    }", "(cx, answer != None)\n    }"),

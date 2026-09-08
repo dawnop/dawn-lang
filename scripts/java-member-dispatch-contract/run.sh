@@ -212,15 +212,11 @@ elif name == "java-first":
     )
     replace_once(
         "checker",
-        "    EFieldAcc(recv, fname, flo, fhi, _, _) ->\n      match qual_ctor(cx, recv, fname) {",
+        "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
+        "      let (next, constructor) = qual_ctor_read(cx, recv, fname)",
         "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
         "      return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)\n"
-        "      match qual_ctor(cx, recv, fname) {",
-    )
-    replace_once(
-        "checker",
-        "        None -> ()\n      }\n    _ -> ()\n  }\n  # a name: `f(x)`.",
-        "        None -> ()\n      }\n    }\n    _ -> ()\n  }\n  # a name: `f(x)`.",
+        "      let (next, constructor) = qual_ctor_read(cx, recv, fname)",
     )
 elif name == "drop-module-guard":
     replace_once(
