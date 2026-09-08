@@ -402,6 +402,8 @@ test "body product projects every state reference and the whole allocation inter
     is_varargs: false, is_abstract: false, desc: "get descriptor", decl_cls: "pkg.Parent" }]
   let constructors = [JCtor { param_cls: ["long"], is_varargs: false, desc: "constructor descriptor" }]
   let fields = [JField { name: "VALUE", type_cls: "long", decl_cls: "pkg.Parent" }]
+  let found_class = JClass { fqcn: "pkg.Actual", simple: "Actual", display: "ReadableActual",
+    is_interface: false, is_primitive: false, is_array: true }
   let before = Cx { ..cx_new(None, None), next_id: 10,
     function_reads: Some([FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None })]) }
   let f = fixture_function(before)
@@ -429,7 +431,8 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
         is_interface: true, is_primitive: false, is_array: false }),
       semantic_reads.JavaMethods("pkg.Box", methods), semantic_reads.JavaConstructors("pkg.Box", constructors),
-      semantic_reads.JavaStaticFields("pkg.Box", fields)]),
+      semantic_reads.JavaStaticFields("pkg.Box", fields), semantic_reads.JavaEnabled(true),
+      semantic_reads.JavaFindClass("lookup.Class", Some(found_class)), semantic_reads.JavaClassNames(["Z", "A"])]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -453,7 +456,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 26
+  assert len(p.function_reads.expect("read delta")) == 29
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -476,7 +479,8 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
       is_interface: true, is_primitive: false, is_array: false }),
     semantic_reads.JavaMethods("pkg.Box", methods), semantic_reads.JavaConstructors("pkg.Box", constructors),
-    semantic_reads.JavaStaticFields("pkg.Box", fields)]
+    semantic_reads.JavaStaticFields("pkg.Box", fields), semantic_reads.JavaEnabled(true),
+    semantic_reads.JavaFindClass("lookup.Class", Some(found_class)), semantic_reads.JavaClassNames(["Z", "A"])]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])
