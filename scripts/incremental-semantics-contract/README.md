@@ -19,6 +19,18 @@ CI runs them in `incremental-witness` with a 256-second planning value and a
 at all consumers remains pending. Passing this gate
 does not admit a body cache entry or establish complete dependency coverage.
 
+### Candidate context queries
+
+`python3 scripts/incremental-semantics-contract/context-revalidation.py` checks
+twenty context-owned query dispatches, four acceptance/refusal controls and
+three checker-dispatcher controls.
+Canonical query capture remains unchanged in each private subject; every mutant
+must compile and reach its named assertion owner. Two positives and 27 controls
+took 97.56 seconds locally on 2026-09-09. CI uses a 234-second planning value
+and twelve-minute timeout. The checker dispatcher combines context and witness
+queries, but still refuses unsupported facts. It does not reconstruct body-local
+scope, authorize a cache entry, or enable production body reuse.
+
 ### Diagnostic queries
 
 `python3 scripts/incremental-semantics-contract/diagnostic-reads.py` checks four

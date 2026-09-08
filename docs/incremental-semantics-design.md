@@ -694,6 +694,13 @@ fact, including ordered inference outputs. Binding lists must round-trip
 through their maps without duplicate loss or reordering. This initial witness
 query validator is not body-cache admission: namespace/header queries and
 cross-revision candidate construction must also be integrated.
+Context-owned namespace and constructor queries are revalidated through the
+same canonical observation helpers, not by comparing saved answers to each
+other. A candidate may have removed a nominal declaration or constructor slot;
+reject such retained queries before calling helpers that assume a valid ID.
+Preserve failed lookups, candidate order and scope-sensitive constant visibility.
+The supplied context must represent the corresponding body point; this API
+does not reconstruct local scopes or authorize body reuse on its own.
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate

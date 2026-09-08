@@ -79,6 +79,7 @@ use check/exhaustive.{
   ReadState, useful_result_read, missing_list_patterns_result_read
 }
 use check/cx.{
+  revalidate_context_read,
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
@@ -952,6 +953,12 @@ fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
 
 ## Recompute supported witness queries in the candidate environment. Unknown
 ## facts are not valid, and this partial validator never admits a body alone.
+pub fn revalidate_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] =
+  match revalidate_witness_read(candidate, fact) {
+    Some(answer) -> Some(answer)
+    None -> revalidate_context_read(candidate, fact)
+  }
+
 pub fn revalidate_witness_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] = {
   let initial = Cx { ..candidate, function_reads: Some([]) }
   let observed = match fact {
@@ -1010,6 +1017,16 @@ pub fn revalidate_witness_read(candidate: Cx, fact: semantic_reads.FunctionRead)
     _ -> return None
   }
   Some(observed.function_reads == Some([fact]))
+}
+
+test "candidate revalidation dispatches queries without accepting unknown facts" {
+  let initial = test_cx()
+  let missing = semantic_reads.LocalConstant("missing", None)
+  assert revalidate_read(initial, missing) == Some(true)
+  assert revalidate_read(Cx { ..initial, consts: map.insert(initial.consts, "missing", TyInt) }, missing) == Some(false)
+  assert revalidate_read(initial, semantic_reads.AssignableType(TyInt, TyInt, true)) == Some(true)
+  assert revalidate_read(initial, semantic_reads.AssignableType(TyInt, TyInt, false)) == Some(false)
+  assert revalidate_read(initial, semantic_reads.QualifiedConstant("unknown", "value", None)) == None
 }
 
 test "witness revalidation recomputes candidate facts and refuses unknown queries" {
