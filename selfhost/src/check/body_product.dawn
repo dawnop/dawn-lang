@@ -259,8 +259,9 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   Some(BodyProduct { ..p, tree: project_tree(p.tree)?, allocation_start: allocation_start,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell,
-    function_reads: semantic_reads.project_with_source(p.function_reads, s => relocate.signature(v.ids, s),
-      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value)? })
+    function_reads: semantic_reads.project_with_traits(p.function_reads, s => relocate.signature(v.ids, s),
+      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value,
+      id => relocate.trait_id(v.ids, id))? })
 }
 
 test "body product keyed writes preserve unrelated preceding products" {
@@ -412,7 +413,10 @@ test "body product projects every state reference and the whole allocation inter
       NominalTypeShape(4, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
       LocalAliasTarget("Alias", Some(TyVar("T", 1))), LocalAliasResolving("Alias", true),
       LocalAliasHeader("Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 1)], eparams: [EffVar("e", 3)],
-        opaque_id: Some(4), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 1)], [EffVar("e", 3)])]),
+        opaque_id: Some(4), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 1)], [EffVar("e", 3)]),
+      semantic_reads.ScopedTypeParameter("T", Some(TyVar("T", 1))),
+      semantic_reads.ParameterBounds(TyVar("T", 1), Some([2])),
+      semantic_reads.TraitAssociatedMembers(2, semantic_reads.AssociatedType, ["Item"])]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -436,7 +440,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 14
+  assert len(p.function_reads.expect("read delta")) == 17
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -448,7 +452,10 @@ test "body product projects every state reference and the whole allocation inter
     NominalTypeShape(44, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
     LocalAliasTarget("Alias", Some(TyVar("T", 11))), LocalAliasResolving("Alias", true),
     LocalAliasHeader("Alias", Some(AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 11)], eparams: [EffVar("e", 33)],
-      opaque_id: Some(44), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 11)], [EffVar("e", 33)])]
+      opaque_id: Some(44), owner: "provider" })), LocalAliasBinders("Alias", [TyVar("T", 11)], [EffVar("e", 33)]),
+    semantic_reads.ScopedTypeParameter("T", Some(TyVar("T", 11))),
+    semantic_reads.ParameterBounds(TyVar("T", 11), Some([22])),
+    semantic_reads.TraitAssociatedMembers(22, semantic_reads.AssociatedType, ["Item"])]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

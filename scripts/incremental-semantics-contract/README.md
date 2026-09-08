@@ -183,7 +183,7 @@ closure, which overlaps other targets and must not be counted as independent tes
 unqualified answers, diagnostic candidate lists, qualified signatures and module
 alias paths, including misses. Decisions preserve local shadowing, expected-type
 short circuits and argument scheduling. Capture/projection retain all four fact
-variants. The typed oracle additionally compares 44 enabled/disabled observation
+variants. The typed oracle additionally compares 50 enabled/disabled observation
 cases against complete cold Cx and module products; its read-state mutant must hit
 the whole-Cx assertion. Recording remains disabled by default and is not complete
 namespace coverage or production body-cache admission.
@@ -233,6 +233,17 @@ short circuits; uncached expansion records its actual type/effect binder inputs.
 Both header forms share extraction and projection, with independent reference
 domains. Builtin/current-environment dependencies, source-view runtime wiring, associated types/effects and
 Java reflection still need their own observed dependencies and validity boundary.
+
+`associated-reads.py` adds 15 compiling controls for scoped subjects, optional
+ordered bounds, and type/effect member lists. Owning cases retain absent versus
+empty bounds, duplicate-bound owner deduplication, missing members and ambiguity
+on both axes. Projection uses independent type, nominal and trait mappings;
+the body-product owner exercises the actual trait callback. Six additional
+whole-Cx/module cases compare observed and cold associated resolution, including
+error recovery. These observations do not yet establish complete effect or
+scope dependencies, runtime query wiring, or production cache admission.
+The existing incremental-type-reads job runs these controls after the type/alias
+suite, with a 608s planning value below the unchanged 660s pole.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

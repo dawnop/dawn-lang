@@ -10,6 +10,7 @@ pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
 pub type AliasTypeHeader = { name: String, tparams: List[Ty], eparams: List[Eff], opaque_id: Option[Int], owner: String }
 pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic | TypeDiagnostic
+pub type AssociatedKind = AssociatedType | AssociatedEffect
 pub type FunctionRead = FunctionAnswer(read: NamedFunctionRead) | FunctionCandidates(names: List[String]) |
 QualifiedFunction(qualifier: String, read: NamedFunctionRead) | ModuleAlias(qualifier: String, path: Option[String]) |
 QualifiedConstant(qualifier: String, name: String, answer: Option[(String, Ty)]) |
@@ -26,6 +27,9 @@ LocalAliasResolving(name: String, active: Bool) |
 LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | LocalAliasHeader(name: String, answer: Option[AliasTypeHeader])
   | LocalAliasBinders(name: String, tparams: List[Ty], eparams: List[Eff])
+  | ScopedTypeParameter(name: String, answer: Option[Ty])
+  | ParameterBounds(subject: Ty, answer: Option[List[Int]])
+  | TraitAssociatedMembers(id: Int, kind: AssociatedKind, names: List[String])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -105,7 +109,14 @@ pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[S
 ## A caller without source provenance must reject, never keep stale positions.
 pub fn project_with_source(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
   type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
-  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Option[List[FunctionRead]]] = {
+  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Option[List[FunctionRead]]] =
+  project_with_traits(reads, signature, type_value, nominal, effect_value, source_value, id => None)
+
+## Trait references in scope bounds cannot borrow the nominal ID mapping.
+pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef],
+  trait_value: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] = {
   match reads {
     None -> Some(None)
     Some(entries) -> {
@@ -176,6 +187,22 @@ pub fn project_with_source(reads: Option[List[FunctionRead]], signature: fn(Sig)
             let moved_source = match target { None -> None, Some(source) -> Some(source_value(owner, source)?) }
             LocalAliasSource(name, owner, moved_source)
           }
+          ScopedTypeParameter(name, answer) -> {
+            let moved_parameter = match answer { None -> None, Some(ty) -> Some(type_value(ty)?) }
+            ScopedTypeParameter(name, moved_parameter)
+          }
+          ParameterBounds(subject, answer) -> {
+            let moved_bounds = match answer {
+              None -> None
+              Some(bounds) -> {
+                var ids: List[Int] = []
+                for id in bounds { ids = ids ++ [trait_value(id)?] }
+                Some(ids)
+              }
+            }
+            ParameterBounds(type_value(subject)?, moved_bounds)
+          }
+          TraitAssociatedMembers(id, kind, names) -> TraitAssociatedMembers(trait_value(id)?, kind, names)
         }
         out = out ++ [moved]
       }
@@ -249,6 +276,26 @@ test "semantic reads project export references in distinct domains" {
   assert capture(prefix, combined) == Some(reads)
   assert observe(None, ExportPresence("h", true)) == None
   assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
+}
+
+test "semantic reads project associated bounds in the trait domain" {
+  let reads = Some([ScopedTypeParameter("T", Some(TyVar("T", 1))), ScopedTypeParameter("Missing", None),
+    ParameterBounds(TyVar("T", 1), Some([1, 2, 1])), ParameterBounds(TyVar("U", 2), None),
+    TraitAssociatedMembers(1, AssociatedType, ["Item", "Item", "Other"]), TraitAssociatedMembers(2, AssociatedEffect, [])])
+  let type_map: fn(Ty) -> Option[Ty] = t => match t { TyVar(n, id) -> Some(TyVar(n, id + 10)), _ -> None }
+  let moved = project_with_traits(reads, s => None, type_map, id => Some(id + 1000), e => None,
+    (owner, source) => None, id => Some(id + 100))
+  assert moved == Some(Some([ScopedTypeParameter("T", Some(TyVar("T", 11))), ScopedTypeParameter("Missing", None),
+    ParameterBounds(TyVar("T", 11), Some([101, 102, 101])), ParameterBounds(TyVar("U", 12), None),
+    TraitAssociatedMembers(101, AssociatedType, ["Item", "Item", "Other"]), TraitAssociatedMembers(102, AssociatedEffect, [])]))
+  assert project(reads, s => None, type_map, id => Some(id), e => None) == None
+  assert project_with_traits(reads, s => None, type_map, id => Some(id), e => None,
+    (owner, source) => None, id => None) == None
+  assert project_with_traits(reads, s => None, t => None, id => Some(id), e => None,
+    (owner, source) => None, id => Some(id)) == None
+  let empty = Some([ParameterBounds(TyVar("T", 1), Some([])), ScopedTypeParameter("Missing", None)])
+  assert project_with_traits(empty, s => None, type_map, id => None, e => None,
+    (owner, source) => None, id => None) == Some(Some([ParameterBounds(TyVar("T", 11), Some([])), ScopedTypeParameter("Missing", None)]))
 }
 
 test "semantic reads require owner scoped alias source projection" {

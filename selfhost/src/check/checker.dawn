@@ -14,7 +14,7 @@ use std/set
 use check/semantic_reads
 use check/semantic_reads.{NamedFunctionRead, ExportDiagnostic, AliasTypeHeader}
 use front/ast.{
-  TypeRef, TNamed, Module,
+  TypeRef, TNamed, TAssoc, Module,
   module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests,
   TraitMethod, Expr,
@@ -3316,6 +3316,60 @@ fn check_ctor_pattern_at(
 }
 
 fn no_tpat() -> Option[TPat] = None
+
+test "associated reads retain subject bounds members and owner deduplication" {
+  let (syntax, pd) = parser.parse_module("trait Left[T] { type Item\n effect E\n fn left(x: T) -> Unit }\n" ++
+      "trait Right[T] { type Item\n effect E\n fn right(x: T) -> Unit }\n" ++
+      "trait Other[T] { type Other\n effect F\n fn other(x: T) -> Unit }\n")
+  assert pd == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  assert headers.cx.diags == []
+  let left = map.get(headers.cx.traits_by_name, "Left").expect("Left")
+  let right = map.get(headers.cx.traits_by_name, "Right").expect("Right")
+  let other = map.get(headers.cx.traits_by_name, "Other").expect("Other")
+  let parameter = TyVar("T", 9000)
+  let samples: List[(Bool, Option[List[Int]], Int)] = [(false, Some([left]), 1),
+    (true, None, 1), (true, Some([]), 1), (true, Some([other]), 1), (true, Some([left]), 0),
+    (true, Some([left, left]), 0), (true, Some([left, right]), 1), (true, Some([other, left]), 0)]
+  for effect_axis in [false, true] {
+    for sample in samples {
+      let (present, bounds, errors) = sample
+      let initial = Cx { ..headers.cx,
+        current_tparams: if present { map.from([("T", parameter)]) } else { map.empty() },
+        current_tparam_bounds: match bounds { Some(bs) -> map.from([(9000, bs)]), None -> map.empty() } }
+      let enabled = Cx { ..initial, function_reads: Some([]) }
+      let (cold, observed) = if effect_axis {
+        let (cold, row) = resolve_eff_at(initial, ["T.E"], 0, 6)
+        let (observed, next_row) = resolve_eff_at(enabled, ["T.E"], 0, 6)
+        assert row == next_row && row == if errors == 0 { EffAssoc("T", 9000, left, "E") } else { EPure }
+        (cold, observed)
+      } else {
+        let (cold, ty) = resolve_type(initial, TAssoc("T", "Item", 0, 6))
+        let (observed, next_ty) = resolve_type(enabled, TAssoc("T", "Item", 0, 6))
+        assert ty == next_ty && ty == if errors == 0 { TyAssoc(parameter, left, "Item") } else { TyError }
+        (cold, observed)
+      }
+      assert cold.diags == observed.diags && len(cold.diags) == errors && cold.next_id == observed.next_id
+      assert cold.current_tparams == observed.current_tparams
+      assert map.len(cold.current_tparam_bounds) == map.len(observed.current_tparam_bounds)
+      for entry in map.entries(cold.current_tparam_bounds) {
+        let (id, bounds) = entry
+        assert map.get(observed.current_tparam_bounds, id) == Some(bounds)
+      }
+      var expected: List[semantic_reads.FunctionRead] = [semantic_reads.ScopedTypeParameter("T", if present { Some(parameter) } else { None })]
+      if present {
+        expected = expected ++ [semantic_reads.ParameterBounds(parameter, bounds)]
+        let inspected: List[Int] = match bounds { Some(bs) -> bs, None -> [] }
+        for id in inspected {
+          let info = trait_of(initial.traits, id)
+          let kind = if effect_axis { semantic_reads.AssociatedEffect } else { semantic_reads.AssociatedType }
+          expected = expected ++ [semantic_reads.TraitAssociatedMembers(id, kind, if effect_axis { info.eff_assoc } else { info.assoc })]
+        }
+      }
+      assert observed.function_reads == Some(expected)
+    }
+  }
+}
 
 test "type reads retain local alias cache and cycle short circuits" {
   let (syntax, pd) = parser.parse_module("alias Alias = Int\n")

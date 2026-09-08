@@ -540,8 +540,10 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
 ## associated effect. Zero declarers and ambiguity are both errors here;
 ## nothing is deferred. The atom keeps only the subject's display name and
 ## tvar id, so `Eff` never contains a `Ty`.
-fn resolve_eff_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Eff) =
-  match map.get(cx.current_tparams, subj) {
+fn resolve_eff_assoc(initial: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Eff) = {
+  let (subject_cx, subject) = scoped_type_parameter_read(initial, subj)
+  var cx = subject_cx
+  match subject {
     None ->
       (cerr_h(cx, "a projection's subject must be a type parameter in scope, and `" ++
           subj ++ "` is not one", lo, hi,
@@ -552,13 +554,17 @@ fn resolve_eff_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (C
         TyVar(_, id) -> id
         _ -> -1
       }
-      let bs = match map.get(cx.current_tparam_bounds, vid) {
+      let (bounds_cx, bounds) = parameter_bounds_read(cx, v, vid)
+      cx = bounds_cx
+      let bs = match bounds {
         Some(x) -> x
         None -> []
       }
       var owners: List[Int] = []
       for tid in bs {
-        for an in trait_of(cx.traits, tid).eff_assoc {
+        let (members_cx, members) = trait_associated_members_read(cx, tid, semantic_reads.AssociatedEffect)
+        cx = members_cx
+        for an in members {
           if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
         }
       }
@@ -574,6 +580,23 @@ fn resolve_eff_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (C
       }
     }
   }
+}
+
+fn scoped_type_parameter_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
+  let answer = map.get(cx.current_tparams, name)
+  (observe_type_read(cx, semantic_reads.ScopedTypeParameter(name, answer)), answer)
+}
+
+fn parameter_bounds_read(cx: Cx, subject: Ty, id: Int) -> (Cx, Option[List[Int]]) = {
+  let answer = map.get(cx.current_tparam_bounds, id)
+  (observe_type_read(cx, semantic_reads.ParameterBounds(subject, answer)), answer)
+}
+
+fn trait_associated_members_read(cx: Cx, id: Int, kind: semantic_reads.AssociatedKind) -> (Cx, List[String]) = {
+  let info = trait_of(cx.traits, id)
+  let names = match kind { semantic_reads.AssociatedType -> info.assoc, semantic_reads.AssociatedEffect -> info.eff_assoc }
+  (observe_type_read(cx, semantic_reads.TraitAssociatedMembers(id, kind, names)), names)
+}
 
 fn is_upper_name(s: String) -> Bool = {
   for c in code_points(s) {
@@ -757,8 +780,10 @@ fn no_trefs() -> List[TypeRef] = []
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one
 ## of its bounds must declare `name` (assoc-types-design.md D2). Zero declarers
 ## and ambiguity are both errors here; nothing is deferred.
-fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Ty) =
-  match map.get(cx.current_tparams, subj) {
+fn resolve_assoc(initial: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Ty) = {
+  let (subject_cx, subject) = scoped_type_parameter_read(initial, subj)
+  var cx = subject_cx
+  match subject {
     None ->
       (cerr_h(cx, "a projection's subject must be a type parameter in scope, and `" ++
           subj ++ "` is not one", lo, hi,
@@ -769,13 +794,17 @@ fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, T
         TyVar(_, id) -> id
         _ -> -1
       }
-      let bs = match map.get(cx.current_tparam_bounds, vid) {
+      let (bounds_cx, bounds) = parameter_bounds_read(cx, v, vid)
+      cx = bounds_cx
+      let bs = match bounds {
         Some(x) -> x
         None -> []
       }
       var owners: List[Int] = []
       for tid in bs {
-        for an in trait_of(cx.traits, tid).assoc {
+        let (members_cx, members) = trait_associated_members_read(cx, tid, semantic_reads.AssociatedType)
+        cx = members_cx
+        for an in members {
           if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
         }
       }
@@ -791,6 +820,8 @@ fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, T
       }
     }
   }
+
+}
 
 ## `m.T` — a type qualified by a whole-module alias (LANG-06). Resolution
 ## reads the exporter's surface: a pub alias means what the declaring module
