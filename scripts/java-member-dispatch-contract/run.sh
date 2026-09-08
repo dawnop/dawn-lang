@@ -188,18 +188,21 @@ def replace_once(key: str, old: str, new: str) -> None:
     text[key] = text[key].replace(old, new)
 
 
-DISPATCH_ARM = """        None ->
-          if not module_alias_receiver(cx, recv) {
+DISPATCH_ARM = """        None -> {
+          let (next, is_alias) = module_alias_receiver_read(cx, recv)
+          cx = next
+          if not is_alias {
             return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
-          }"""
+          }
+        }"""
 
 if name == "drop-dispatch":
     replace_once("checker", DISPATCH_ARM, "        None -> ()")
 elif name == "static-only":
     replace_once(
         "checker",
-        "          if not module_alias_receiver(cx, recv) {",
-        "          if not module_alias_receiver(cx, recv) && static_field_target(cx, recv) != None {",
+        "          if not is_alias {",
+        "          if not is_alias && static_field_target(cx, recv) != None {",
     )
 elif name == "java-first":
     replace_once(
@@ -222,7 +225,7 @@ elif name == "java-first":
 elif name == "drop-module-guard":
     replace_once(
         "checker",
-        "          if not module_alias_receiver(cx, recv) {",
+        "          if not is_alias {",
         "          if true {",
     )
 elif name == "field-wins":
@@ -230,6 +233,8 @@ elif name == "field-wins":
         "checker",
         DISPATCH_ARM,
         """        None -> {
+          let (next, is_alias) = module_alias_receiver_read(cx, recv)
+          cx = next
           var field_first = false
           match static_field_target(cx, recv) {
             Some(fq) -> {
@@ -239,7 +244,7 @@ elif name == "field-wins":
             }
             None -> ()
           }
-          if not module_alias_receiver(cx, recv) && not field_first {
+          if not is_alias && not field_first {
             return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
           }
         }""",
@@ -261,10 +266,10 @@ elif name == "drop-staticness":
 elif name == "bare-member-calls":
     replace_once(
         "checker",
-        "                Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)",
+        "                Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)",
         "                Some(_) -> {\n"
         "                  let no_args: List[Arg] = []\n"
-        "                  check_method_call(cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
+        "                  check_method_call(field_cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
         "                }",
     )
 elif name == "parser-uppercase-method":
