@@ -30,6 +30,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   摘要用中文这条**自 2026-07-25 起再没出现过**（`git log --format='%s' -200` 里 0 条中文，
   历史上 126 条）；`type(scope):` 前缀也基本退了（近 200 条里 4 条）。以 `git log` 为准。
   正文写什么见文末「重要约定」。
+- **All public GitHub writing must be in English, without Chinese text.** This includes
+  commit subjects and bodies, PR titles and bodies, PR/issue comments, code review
+  replies, and any other publicly posted text. The Chinese documentation convention
+  must never be applied to PR bodies or other public discussions. Check the entire
+  text before publishing, not just the title or subject. Do not rewrite pushed
+  commit history to enforce this rule retroactively; obtain maintainer confirmation
+  before translating already-merged PR bodies.
 
 写代码时别把 docs 的语言带进去，反之亦然。
 
