@@ -132,6 +132,11 @@ public final class BodyProbe {
             }
             System.out.println("import-state\t2\tprovider provenance survives selective and qualified imports");
             checkModuleAssembly(probe);
+            Object metadata = probe.getMethod("metadata_sample").invoke(null);
+            Class<?> mt = metadata.getClass();
+            if (!SemanticSnapshot.same(mt.getField("projected").get(metadata), mt.getField("cold").get(metadata)))
+                throw new AssertionError("header metadata: projected exports differ from cold headers");
+            System.out.println("header-metadata\t1\tcomplete exported metadata agrees after ID and source movement");
         }
     }
 

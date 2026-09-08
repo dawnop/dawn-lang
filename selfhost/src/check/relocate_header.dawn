@@ -1,0 +1,220 @@
+# Exported metadata still contains references into the declaring revision:
+# fields, binders, associated members and unresolved alias source positions.
+# Keep those domains explicit; constructor slots and audience/owner strings
+# are not allocation IDs. This visitor preserves order, not cache validity.
+use std/map
+use check/relocate
+use check/relocate.{Ids}
+use check/types.{Ty, Eff, Sig, FieldI, CtorI, AdtI, TraitI, MethodSig, EffectI, ImplI,
+  TyInt, TyVar, TyAdt, TyFn, TyAssoc, EPure, EffVar, EffAssoc, ELabeled, AModule }
+use check/cx.{AliasE, ModExports}
+use front/ast.{TypeRef, EffArg, TNamed, TQual, TAssoc, TTuple, TFn}
+
+pub type HeaderView = {
+  ids: Ids,
+  position: fn(Option[String], Option[String], Int) -> Option[Int],
+  end_position: fn(Option[String], Option[String], Int) -> Option[Int]
+}
+
+fn projected_list[A, B](values: List[A], move: fn(A) -> Option[B]) -> Option[List[B]] = {
+  var out: List[B] = []
+  for value in values { out = out ++ [move(value)?] }
+  Some(out)
+}
+
+fn projected_map[K: Eq + Hash, V, L: Eq + Hash, W](values: Map[K, V],
+  key: fn(K) -> Option[L], move: fn(V) -> Option[W]) -> Option[Map[L, W]] = {
+  var out: Map[L, W] = map.empty()
+  for (k, value) in map.entries(values) {
+    let moved = key(k)?
+    if map.has(out, moved) { return None }
+    out = map.insert(out, moved, move(value)?)
+  }
+  Some(out)
+}
+
+pub fn constructor(v: HeaderView, c: CtorI) -> Option[CtorI] = {
+  let move: fn(FieldI) -> Option[FieldI] = f => {
+    Some(FieldI { ..f, ty: relocate.ty(v.ids, f.ty)? })
+  }
+  let fields = projected_list(c.fields, move)?
+  Some(CtorI { ..c, adt: relocate.nominal(v.ids, c.adt)?, fields: fields })
+}
+
+pub fn adt(v: HeaderView, a: AdtI) -> Option[AdtI] = {
+  Some(AdtI { ..a, id: relocate.nominal(v.ids, a.id)?,
+    tparams: projected_list(a.tparams, t => relocate.ty(v.ids, t))?,
+    bound_eparams: projected_list(a.bound_eparams, e => relocate.effect_row(v.ids, e))?,
+    ctors: projected_list(a.ctors, c => constructor(v, c))? })
+}
+
+pub fn trait_info(v: HeaderView, t: TraitI) -> Option[TraitI] = {
+  let move_method: fn((String, MethodSig)) -> Option[(String, MethodSig)] = entry => {
+    let (name, method) = entry
+    Some((name, MethodSig { ..method, sig: relocate.signature(v.ids, method.sig)? }))
+  }
+  let methods = projected_list(t.methods, move_method)?
+  let move_default: fn((String, Eff)) -> Option[(String, Eff)] = entry => {
+    let (name, eff) = entry
+    Some((name, relocate.effect_row(v.ids, eff)?))
+  }
+  let defaults = projected_list(t.eff_defaults, move_default)?
+  Some(TraitI { ..t, id: relocate.trait_id(v.ids, t.id)?, tvar: relocate.ty(v.ids, t.tvar)?,
+    methods: methods, eff_defaults: defaults })
+}
+
+pub fn effect_info(v: HeaderView, e: EffectI) -> Option[EffectI] = {
+  Some(EffectI { ..e, id: relocate.nominal(v.ids, e.id)? })
+}
+
+pub fn implementation(v: HeaderView, i: ImplI) -> Option[ImplI] = {
+  let constraints = projected_list(i.constraints, bs => projected_list(bs, tr => relocate.trait_id(v.ids, tr)))?
+  let move_associated: fn((String, Ty)) -> Option[(String, Ty)] = entry => {
+    let (name, t) = entry
+    Some((name, relocate.ty(v.ids, t)?))
+  }
+  let associated = projected_list(i.assoc_bindings, move_associated)?
+  let move_effect: fn((String, Eff)) -> Option[(String, Eff)] = entry => {
+    let (name, e) = entry
+    Some((name, relocate.effect_row(v.ids, e)?))
+  }
+  let effects = projected_list(i.eff_bindings, move_effect)?
+  Some(ImplI { ..i, trait_id: relocate.trait_id(v.ids, i.trait_id)?, subject: relocate.ty(v.ids, i.subject)?,
+    tparams: projected_list(i.tparams, t => relocate.ty(v.ids, t))?, constraints: constraints,
+    assoc_bindings: associated, eff_bindings: effects,
+    lo: v.position(i.owner, i.src_path, i.lo)?, hi: v.end_position(i.owner, i.src_path, i.hi)? })
+}
+
+fn effect_argument(v: HeaderView, owner: Option[String], e: EffArg) -> Option[EffArg] = {
+  Some(EffArg { ..e, lo: v.position(owner, None, e.lo)?, hi: v.end_position(owner, None, e.hi)? })
+}
+
+## Alias targets resolve in their declaring module, never an importer's scope.
+## Names remain syntax; only source positions move here, not spelling/binders.
+pub fn type_source(v: HeaderView, owner: Option[String], t: TypeRef) -> Option[TypeRef] = {
+  match t {
+    TNamed(name, args, effects, lo, hi) -> Some(TNamed(name,
+      projected_list(args, a => type_source(v, owner, a))?,
+      projected_list(effects, e => effect_argument(v, owner, e))?,
+      v.position(owner, None, lo)?, v.end_position(owner, None, hi)?))
+    TQual(qual, name, args, effects, lo, hi) -> Some(TQual(qual, name,
+      projected_list(args, a => type_source(v, owner, a))?,
+      projected_list(effects, e => effect_argument(v, owner, e))?,
+      v.position(owner, None, lo)?, v.end_position(owner, None, hi)?))
+    TAssoc(subject, name, lo, hi) -> Some(TAssoc(subject, name,
+      v.position(owner, None, lo)?, v.end_position(owner, None, hi)?))
+    TTuple(elems, lo, hi) -> Some(TTuple(projected_list(elems, e => type_source(v, owner, e))?,
+      v.position(owner, None, lo)?, v.end_position(owner, None, hi)?))
+    TFn(params, ret, effects, lo, hi) -> Some(TFn(projected_list(params, p => type_source(v, owner, p))?,
+      type_source(v, owner, ret)?, effects, v.position(owner, None, lo)?, v.end_position(owner, None, hi)?))
+  }
+}
+
+pub fn alias_info(v: HeaderView, a: AliasE) -> Option[AliasE] = {
+  # Transparent aliases deliberately have no nominal allocation.
+  if not a.is_opaque && a.id != -1 { return None }
+  let id = if a.is_opaque { relocate.nominal(v.ids, a.id)? } else { a.id }
+  let target = match a.target {
+    Some(t) -> Some(type_source(v, Some(a.owner), t)?)
+    None -> None
+  }
+  Some(AliasE { ..a, id: id, target: target,
+    tparams: projected_list(a.tparams, t => relocate.ty(v.ids, t))?,
+    eparams: projected_list(a.eparams, e => relocate.effect_row(v.ids, e))?,
+    nlo: v.position(Some(a.owner), None, a.nlo)?, nhi: v.end_position(Some(a.owner), None, a.nhi)? })
+}
+
+## Preserve insertion/lexical order. Reordering declarations requires a
+## separate current-order assembly, not sorting these maps by numeric IDs.
+pub fn exports(v: HeaderView, e: ModExports) -> Option[ModExports] = {
+  let names: fn(String) -> Option[String] = name => Some(name)
+  let move_ctor: fn((Int, Int)) -> Option[(Int, Int)] = entry => {
+    let (id, slot) = entry
+    Some((relocate.nominal(v.ids, id)?, slot))
+  }
+  let ctors = projected_map(e.ctors, names, move_ctor)?
+  Some(ModExports { ..e,
+    fns: projected_map(e.fns, names, s => relocate.signature(v.ids, s))?,
+    types_by_name: projected_map(e.types_by_name, names, id => relocate.nominal(v.ids, id))?,
+    aliases: projected_map(e.aliases, names, a => alias_info(v, a))?,
+    alias_resolved: projected_map(e.alias_resolved, names, t => relocate.ty(v.ids, t))?,
+    ctors: ctors, consts: projected_map(e.consts, names, t => relocate.ty(v.ids, t))?,
+    traits_by_name: projected_map(e.traits_by_name, names, id => relocate.trait_id(v.ids, id))?,
+    effects: projected_map(e.effects, names, id => relocate.nominal(v.ids, id))?,
+    effect_infos: projected_map(e.effect_infos, id => relocate.nominal(v.ids, id), info => effect_info(v, info))?,
+    impls: projected_list(e.impls, info => implementation(v, info))?,
+    adt_infos: projected_map(e.adt_infos, id => relocate.nominal(v.ids, id), info => adt(v, info))?,
+    trait_infos: projected_map(e.trait_infos, id => relocate.trait_id(v.ids, id), info => trait_info(v, info))? })
+}
+
+fn fixture_view() -> HeaderView = {
+  let ids = relocate.new(map.from([(10, 110)]), map.from([(20, 120)]),
+    map.from([(30, 130)]), map.from([(40, 140)]), map.empty()).expect("header fixture IDs")
+  HeaderView { ids: ids,
+    position: (owner, path, n) => if owner == Some("decl") && (path == None || path == Some("decl.dawn")) { Some(n + 1000) } else { None },
+    end_position: (owner, path, n) => if owner == Some("decl") && (path == None || path == Some("decl.dawn")) { Some(n + 2000) } else { None } }
+}
+
+test "header metadata projects binders constructors and retained audience" {
+  let v = fixture_view()
+  let field = FieldI { name: "run", ty: TyFn([TyVar("T", 30)], TyAdt(10, []), EffVar("e", 40)) }
+  let a = AdtI { id: 10, name: "Cell", is_record: true, tparams: [TyVar("T", 30)], eparams: ["e"],
+    ctors: [CtorI { adt: 10, name: "Cell", fields: [field] }], derives_show: true, derives_ord: false,
+    owner: Some("decl"), audience: AModule("decl"), bound_eparams: [EffVar("e", 40)] }
+  let moved = adt(v, a).expect("header ADT")
+  assert moved.id == 110 && moved.tparams == [TyVar("T", 130)] && moved.bound_eparams == [EffVar("e", 140)]
+  assert moved.ctors == [CtorI { adt: 110, name: "Cell", fields: [FieldI { name: "run",
+    ty: TyFn([TyVar("T", 130)], TyAdt(110, []), EffVar("e", 140)) }] }]
+  assert moved.owner == a.owner && moved.audience == a.audience && moved.derives_show && not moved.derives_ord
+  let empty_ids = relocate.new(map.empty(), map.empty(), map.empty(), map.empty(), map.empty()).expect("empty header IDs")
+  assert adt(HeaderView { ..v, ids: empty_ids }, a) == None
+  let e = EffectI { id: 10, name: "Ask", owner: Some("decl"), audience: AModule("decl"), ops: ["second", "first"], ctl: true }
+  assert effect_info(v, e) == Some(EffectI { ..e, id: 110 })
+}
+
+test "header metadata projects trait and impl associated bindings and locations" {
+  let v = fixture_view()
+  let sig = Sig { name: "get", param_tys: [TyVar("T", 30)], param_names: ["x"], param_defaults: [false],
+    ret: TyAssoc(TyVar("T", 30), 20, "Item"), eff: EffAssoc("T", 30, 20, "Run"), is_builtin: false,
+    tparams: [TyVar("T", 30)], constraints: [[20]], eparams: [], owner: Some("decl"), trait_id: Some(20), op_of: None, inferring: false }
+  let t = TraitI { id: 20, name: "Carry", tvar: TyVar("T", 30), is_pub: true, owner: Some("decl"), src_path: Some("decl.dawn"),
+    methods: [("get", MethodSig { sig: sig, has_default: true })], assoc: ["Item"], eff_assoc: ["Run"],
+    eff_defaults: [("Run", ELabeled(EPure, [(10, "Ask")]))], injects: false }
+  let moved = trait_info(v, t).expect("header trait")
+  assert moved.id == 120 && moved.tvar == TyVar("T", 130) && not moved.injects
+  let (_, method) = moved.methods[0]
+  assert method.has_default
+  assert method.sig.ret == TyAssoc(TyVar("T", 130), 120, "Item")
+  assert method.sig.eff == EffAssoc("T", 130, 120, "Run")
+  assert method.sig.trait_id == Some(120) && method.sig.param_tys == [TyVar("T", 130)]
+  assert len(method.sig.constraints) == 1 && len(method.sig.constraints[0]) == 1 && method.sig.constraints[0][0] == 120
+  assert moved.eff_defaults == [("Run", ELabeled(EPure, [(110, "Ask")]))]
+  let i = ImplI { trait_id: 20, subject: TyAdt(10, [TyVar("T", 30)]), tparams: [TyVar("T", 30)], constraints: [[20]],
+    lo: 1, hi: 4, derived: true, owner: Some("decl"), src_path: Some("decl.dawn"), provided: ["get"],
+    assoc_bindings: [("Item", TyVar("T", 30))], eff_bindings: [("Run", ELabeled(EPure, [(10, "Ask")]))] }
+  let mi = implementation(v, i).expect("header impl")
+  assert mi.trait_id == 120 && mi.subject == TyAdt(110, [TyVar("T", 130)]) && mi.tparams == [TyVar("T", 130)]
+  assert len(mi.constraints) == 1 && len(mi.constraints[0]) == 1 && mi.constraints[0][0] == 120
+  assert mi.assoc_bindings == [("Item", TyVar("T", 130))]
+  assert mi.eff_bindings == [("Run", ELabeled(EPure, [(110, "Ask")]))]
+  assert mi.lo == 1001 && mi.hi == 2004 && mi.derived && mi.provided == ["get"]
+  assert implementation(v, ImplI { ..i, owner: Some("foreign") }) == None
+  assert implementation(v, ImplI { ..i, src_path: Some("foreign.dawn") }) == None
+}
+
+test "header metadata projects alias syntax only in its declaring source" {
+  let v = fixture_view()
+  let target = TFn([TNamed("T", [], [EffArg { atoms: ["e"], lo: 2, hi: 3 }], 1, 4)],
+    TTuple([TQual("dep", "Cell", [], [], 5, 6), TAssoc("T", "Item", 7, 8)], 5, 9), ["e"], 0, 10)
+  let a = AliasE { name: "Alias", tparams: [TyVar("T", 30)], eparams: [EffVar("e", 40)], target: Some(target),
+    is_opaque: false, id: -1, owner: "decl", audience: AModule("decl"), nlo: 0, nhi: 1 }
+  let moved = alias_info(v, a).expect("header alias")
+  assert moved.id == -1 && moved.nlo == 1000 && moved.nhi == 2001
+  assert moved.tparams == [TyVar("T", 130)] && moved.eparams == [EffVar("e", 140)]
+  assert moved.target == Some(TFn([TNamed("T", [], [EffArg { atoms: ["e"], lo: 1002, hi: 2003 }], 1001, 2004)],
+    TTuple([TQual("dep", "Cell", [], [], 1005, 2006), TAssoc("T", "Item", 1007, 2008)], 1005, 2009), ["e"], 1000, 2010))
+  assert alias_info(v, AliasE { ..a, owner: "foreign" }) == None
+  assert alias_info(v, AliasE { ..a, id: 10 }) == None
+  assert alias_info(v, AliasE { ..a, is_opaque: true, id: 10 }).expect("opaque alias").id == 110
+  assert alias_info(v, AliasE { ..a, target: None }).expect("imported alias").target == None
+}

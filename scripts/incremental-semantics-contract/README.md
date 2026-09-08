@@ -62,7 +62,7 @@ test block状态的完整冷模块对照，丢封定签名写入、保留错误i
 必须命中具名的运行时拒绝断言；默认参数另有丢符号写入的完整Cx负控。
 另有丢默认值字典符号的编译负控，必须命中泛型默认值的具名字典断言。
 另有丢默认参数诊断的编译负控，必须命中默认错误态的具名断言。
-编译或链接失败不算通过（typed-all共二十二个负控）。typed模式还比较23个body状态产品的
+编译或链接失败不算通过（typed-all共二十六个负控）。typed模式还比较23个body状态产品的
 原坐标装配；22次源码编辑的body边界Cx现在由生产`body_product`提取、投影和装配，
 不再调用旧私有观察写集replay。固定header案例的分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
 不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
@@ -118,6 +118,17 @@ Values视图保持常量/test角色、顺序和常量前序可见集；四个新
 nominal类型、三个常量与两个test，比较完整TModule/Cx；两个typed新负控丢常量类型
 和源码投影必须命中整模块断言。这是已知可复用语料的产物重放，不证明一般可见集
 变化时的缓存有效性，也不跳过后续依赖接线。
+
+relocate_header投影完整导出记录中的类型/构造器、alias、trait方法及关联成员、
+效果和impl元数据。真实header案例使用源码前缀与不同起始分配计数，来源表仍从实际
+声明生成；独立Java比较整个ModExports，包括Map顺序。四个编译负控分别漏投影
+alias/impl/ADT/effect表，必须命中导出记录不一致断言。此例不改变声明顺序；投影
+保留旧顺序，不能替代跨声明重排后的当前顺序装配。
+header-metadata.py的十二个编译负控守binder、构造字段、trait方法/default、impl关联
+类型/效果/owner/位置和alias的哨兵/源码/effect。透明alias的-1不是nominal引用；
+另审计十种metadata记录的投影/保留字段，每种均有新增未分类字段的拒绝自测。
+源码回调按声明owner和可选路径选择映射。该脚本在incremental-state执行；native另跑
+relocate_header的53项owning依赖闭包，不与其他target相加。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个

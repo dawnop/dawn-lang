@@ -4,7 +4,7 @@
 use std/map
 use std/list
 use std/str
-use compiler/check/cx.{Cx, cx_new}
+use compiler/check/cx.{Cx, ModExports, cx_new}
 use compiler/check/tast.{TFun, TDefault, TModule, TConst}
 use compiler/check/types.{Sig, Sym, Ty, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
@@ -12,6 +12,8 @@ use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_
 use compiler/check/function_product
 use compiler/check/relocate
 use compiler/check/relocate_tree
+use compiler/check/relocate_header
+use compiler/check/relocate_header.{HeaderView}
 use compiler/check/relocate_tree.{View}
 use compiler/check/source_projection
 use compiler/check/body_product
@@ -83,6 +85,52 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
 }
 
 pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
+
+pub type MetadataTrial = { projected: ModExports, cold: ModExports }
+
+pub fn metadata_sample() -> MetadataTrial !io = {
+  let text = "pub type Box[T] = { value: T }\n" ++
+    "pub alias Thunk[T, !e] = fn(T) -> T !e\n" ++
+    "pub opaque type Token = Int\n" ++
+    "pub effect Ask { fn ask() -> Int }\n" ++
+    "pub trait Carry[T] {\n type Item\n effect Run = !Ask\n fn get(x: T) -> T.Item !T.Run\n}\n" ++
+    "impl[T] Carry[Box[T]] {\n type Item = T\n fn get(x: Box[T]) -> T !Ask = x.value\n}\n" ++
+    "pub fn usebox[T](x: Box[T]) -> Box[T] = x\n" ++
+    "pub const NAME: String = \"metadata\"\n"
+  let prefix = "# moved header source\n"
+  let edited = prefix ++ text
+  let (syntax, ds) = parser.parse_module(text)
+  let (next_syntax, nds) = parser.parse_module(edited)
+  if ds != [] || nds != [] { panic("metadata parse") }
+  let scope = module_key("metadata-world", "metadata", "metadata", "metadata.dawn")
+  let initial = cx_new(Some("metadata"), Some("metadata.dawn"))
+  let old = check_module_headers(initial, syntax, map.empty())
+  let next = check_module_headers(Cx { ..initial, next_id: initial.next_id + 31 }, next_syntax, map.empty())
+  if old.cx.diags != [] || next.cx.diags != [] { panic("metadata headers") }
+  let reserved = allocation.compiler_headers(scope.world).expect("metadata compiler origins")
+  let old_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, syntax, old.cx).expect("metadata old declarations")).expect("metadata old table"),
+    allocation.table(allocation.local_impl_headers(scope, syntax, old.cx, old.impl_sigs).expect("metadata old impls")).expect("metadata old impl table")]).expect("metadata old combined")
+  let next_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, next_syntax, next.cx).expect("metadata next declarations")).expect("metadata next table"),
+    allocation.table(allocation.local_impl_headers(scope, next_syntax, next.cx, next.impl_sigs).expect("metadata next impls")).expect("metadata next impl table")]).expect("metadata next combined")
+  let source = source_projection.between(text, edited, 0, str.len(text), str.len(prefix), str.len(edited)).expect("metadata source")
+  let view = HeaderView { ids: allocation.between(old_table, next_table).expect("metadata ids"),
+    position: (owner, path, lo) => if owner == Some("metadata") && (path == None || path == Some("metadata.dawn")) {
+      map.get(source.starts, lo)
+    } else { None },
+    end_position: (owner, path, hi) => if owner == Some("metadata") && (path == None || path == Some("metadata.dawn")) {
+      map.get(source.ends, hi)
+    } else { None } }
+  let old_exports = exports_of(old.cx, syntax, "metadata", "metadata")
+  let cold = exports_of(next.cx, next_syntax, "metadata", "metadata")
+  if map.get(old_exports.types_by_name, "Box") == map.get(cold.types_by_name, "Box") ||
+    map.len(old_exports.aliases) != 2 || map.len(old_exports.effects) != 1 || len(old_exports.impls) == 0 {
+    panic("metadata coverage")
+  }
+  let projected = relocate_header.exports(view, old_exports).expect("metadata projection")
+  MetadataTrial { projected: projected, cold: cold }
+}
 
 pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
 
