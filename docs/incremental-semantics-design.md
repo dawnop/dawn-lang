@@ -502,6 +502,18 @@ Other Java query kinds and their checker consumers remain separate required work
 The class-info consumers for reference return types, static/instance dispatch and
 SAM/List diagnostics share the same observed lookup, retaining their returned Cx.
 
+### Java candidate-list reads (implementation in progress)
+
+Capture the actual ordered methods, constructors and static fields returned by
+the metadata oracle before checker filtering, sorting or overload selection.
+Empty answers are dependencies too. Preserve every plain-data metadata field,
+including descriptors, declaring owners, parameter order and duplicate entries;
+projection does not reinterpret these strings as compiler IDs or source spans.
+Consumers must retain the observed Cx on success and diagnostic recovery paths.
+Constructor queries remain after argument-error and instance-new rejection;
+method queries remain after argument-error rejection. This step does not replace
+assignability, SAM/component, import-name, namespace or oracle-lifetime reads.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

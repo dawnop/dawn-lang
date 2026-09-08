@@ -1156,10 +1156,10 @@ jobs:
   incremental-effect-reads:
     runs-on: ubuntu-latest
     # Local 2026-09-08: 14 ordinary effect controls 92.22s,
-    # 15 associated controls 99.96s, 21 Java metadata controls 109.07s.
-    # Environment moves intact to type: 2*(93+100+110)+38=644s.
-    # budget: 3x 644s planning value
-    timeout-minutes: 33
+    # 15 associated controls 99.96s. Java suites move intact below.
+    # 2*(93+100)+38=424s, preserving the 660s pole.
+    # budget: 3x 424s planning value
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1169,8 +1169,24 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/effect-reads.py
       - name: associated type and effect read contracts
         run: python3 scripts/incremental-semantics-contract/associated-reads.py
+
+  incremental-java-reads:
+    runs-on: ubuntu-latest
+    # Class metadata's 21 controls took 109.07s; member candidates'
+    # 33 controls took 174.12s locally on 2026-09-08.
+    # Separate them from effects rather than exceed the 660s pole:
+    # 2*(110+175)+38=608s. No existing suite or control is removed.
+    # budget: 3x 608s planning value
+    timeout-minutes: 31
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Java class metadata read contracts
         run: python3 scripts/incremental-semantics-contract/java-reads.py
+      - name: Java member candidate read contracts
+        run: python3 scripts/incremental-semantics-contract/java-member-reads.py
 
   incremental-state:
     runs-on: ubuntu-latest

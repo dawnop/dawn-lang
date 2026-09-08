@@ -12,7 +12,7 @@ use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
 use check/relocate
 use check/semantic_reads
-use check/jsig.{JClass}
+use check/jsig.{JClass, JMethod, JCtor, JField}
 use check/semantic_reads.{FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
   AliasTypeHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
@@ -398,6 +398,10 @@ test "body product restores symbol insertion order after a binding permutation" 
 
 test "body product projects every state reference and the whole allocation interval" {
   let diagnostic = ExportDiagnostic { message: "unknown type `Missing`", hint: Some("did you mean `Record`?") }
+  let methods = [JMethod { name: "get", param_cls: ["long"], ret_cls: "pkg.Result", is_static: true,
+    is_varargs: false, is_abstract: false, desc: "get descriptor", decl_cls: "pkg.Parent" }]
+  let constructors = [JCtor { param_cls: ["long"], is_varargs: false, desc: "constructor descriptor" }]
+  let fields = [JField { name: "VALUE", type_cls: "long", decl_cls: "pkg.Parent" }]
   let before = Cx { ..cx_new(None, None), next_id: 10,
     function_reads: Some([FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None })]) }
   let f = fixture_function(before)
@@ -423,7 +427,9 @@ test "body product projects every state reference and the whole allocation inter
       semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 1)) })),
       semantic_reads.StdModuleMode(false), semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
       semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
-        is_interface: true, is_primitive: false, is_array: false })]),
+        is_interface: true, is_primitive: false, is_array: false }),
+      semantic_reads.JavaMethods("pkg.Box", methods), semantic_reads.JavaConstructors("pkg.Box", constructors),
+      semantic_reads.JavaStaticFields("pkg.Box", fields)]),
     fns: map.from([("inferred", Sig { ..f.sig, ret: TyVar("T", 1) })]),
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
@@ -447,7 +453,7 @@ test "body product projects every state reference and the whole allocation inter
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104
   assert cx.take_cell == Some(40)
-  assert len(p.function_reads.expect("read delta")) == 23
+  assert len(p.function_reads.expect("read delta")) == 26
   let reads = cx.function_reads.expect("assembled reads")
   assert reads == [FunctionAnswer(NamedFunctionRead { name: "earlier", answer: None }),
     FunctionAnswer(NamedFunctionRead { name: "callee", answer: Some(Sig { ..f.sig, ret: TyVar("T", 11) }) }),
@@ -468,7 +474,9 @@ test "body product projects every state reference and the whole allocation inter
     semantic_reads.BuiltinTypeAnswer("Builtin", Some(BuiltinTypeI { name: "Builtin", params: ["T"], access: BtStdOnly, build: BtLeaf(TyVar("T", 11)) })),
     semantic_reads.StdModuleMode(false), semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
     semantic_reads.JavaClassInfo("pkg.Box", JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
-      is_interface: true, is_primitive: false, is_array: false })]
+      is_interface: true, is_primitive: false, is_array: false }),
+    semantic_reads.JavaMethods("pkg.Box", methods), semantic_reads.JavaConstructors("pkg.Box", constructors),
+    semantic_reads.JavaStaticFields("pkg.Box", fields)]
   assert cx.current_tparams == map.from([("T", TyVar("T", 11))])
   assert cx.current_eff_vars == map.from([("e", EffVar("e", 33))])
   assert map.len(cx.current_tparam_bounds) == 1 && map.get(cx.current_tparam_bounds, 11) == Some([22])

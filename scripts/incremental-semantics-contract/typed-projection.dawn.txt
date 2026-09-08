@@ -5,7 +5,7 @@ use std/map
 use std/list
 use std/str
 use compiler/check/cx.{Cx, ModExports, cx_new}
-use compiler/check/jsig.{Jsig, JClass, jsig_refused}
+use compiler/check/jsig.{Jsig, JClass, JMethod, JCtor, JField, jsig_refused}
 use compiler/check/tast.{TFun, TDefault, TModule, TConst}
 use compiler/check/types.{Sig, Sym, Ty, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
@@ -319,6 +319,28 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     let (cold_cx, cold) = check_module(initial, syntax, map.empty())
     let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
     if len(cold_cx.diags) != errors { panic("Java observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  let member_oracle = Jsig { ..java_oracle,
+    methods_of: name => [JMethod { name: "get", param_cls: [], ret_cls: "long", is_static: true,
+      is_varargs: false, is_abstract: false, desc: "get descriptor", decl_cls: "pkg.Parent" }],
+    ctors_of: name => [JCtor { param_cls: [], is_varargs: false, desc: "constructor descriptor" }],
+    static_fields_of: name => [JField { name: "VALUE", type_cls: "long", decl_cls: "pkg.Parent" }] }
+  for sample in [("fn go() -> Int !io = Foreign.get()", 0),
+    ("fn go() -> Int !io = Foreign.missing()", 1),
+    ("fn go() -> Foreign !io = Foreign.new()", 0),
+    ("fn go() -> Foreign !io = Foreign.new(1, 2)", 1),
+    ("fn go() -> Int !io = Foreign.VALUE", 0),
+    ("fn go() -> Int !io = Foreign.MISSING", 1)] {
+    let (text, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("Java member observation parse") }
+    let initial = Cx { ..cx_new(Some("java_member_read_probe"), None), jsig: member_oracle,
+      java_classes: map.from([("Foreign", "pkg.Box")]) }
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("Java member observation diagnostic path") }
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
