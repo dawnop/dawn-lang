@@ -43,6 +43,9 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | JavaEnabled(enabled: Bool)
   | JavaFindClass(name: String, answer: Option[JClass])
   | JavaClassNames(names: List[String])
+  | JavaAssignable(superclass: String, subclass: String, answer: Bool)
+  | JavaSam(name: String, answer: Option[JMethod])
+  | JavaComponent(name: String, answer: Option[String])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -243,6 +246,9 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
           JavaEnabled(enabled) -> JavaEnabled(enabled)
           JavaFindClass(name, answer) -> JavaFindClass(name, answer)
           JavaClassNames(names) -> JavaClassNames(names)
+          JavaAssignable(superclass, subclass, answer) -> JavaAssignable(superclass, subclass, answer)
+          JavaSam(name, answer) -> JavaSam(name, answer)
+          JavaComponent(name, answer) -> JavaComponent(name, answer)
         }
         out = out ++ [moved]
       }
@@ -328,6 +334,18 @@ test "semantic reads preserve plain Java metadata without compiler ID mapping" {
   assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
   let prefix = Some([JavaClassName("Earlier", None)])
   assert capture(prefix, append(prefix, reads).expect("append Java reads")) == Some(reads)
+}
+
+test "semantic reads preserve Java scoring answers and directional keys" {
+  let method = JMethod { name: "apply", param_cls: ["long", "pkg.Input"], ret_cls: "pkg.Output",
+    is_static: false, is_varargs: true, is_abstract: true, desc: "SAM descriptor", decl_cls: "pkg.Parent" }
+  let reads = Some([JavaAssignable("pkg.Parent", "pkg.Child", true),
+    JavaAssignable("pkg.Child", "pkg.Parent", false), JavaSam("pkg.Callback", Some(method)),
+    JavaSam("pkg.NotCallback", None), JavaComponent("[Lpkg.Input;", Some("pkg.Input")),
+    JavaComponent("pkg.NotArray", None)])
+  assert project(reads, s => None, t => None, id => None, e => None) == Some(reads)
+  let prefix = Some([JavaComponent("Earlier", None)])
+  assert capture(prefix, append(prefix, reads).expect("append scoring reads")) == Some(reads)
 }
 
 test "semantic reads preserve ordered Java candidates and empty answers" {

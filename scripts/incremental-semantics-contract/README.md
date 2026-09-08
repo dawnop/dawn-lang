@@ -308,6 +308,23 @@ separate class/member jobs: 408s/21min and 492s/25min respectively. No controls
 are removed. The typed 81-case run took 239.16s; its job retains the larger
 244.70s member-batch observation, yielding 528s/27min.
 
+`java-oracle-reads.py` checks directional assignability, optional SAM metadata
+and optional array components. It retains queries from rejected candidates,
+fixed-arity attempts and packed arguments, plus repeated finalization queries.
+The controls cover query keys/answers, all eight SAM method fields, projection,
+body capture, candidate loops and scoring/finalization context propagation.
+Only compiled mutations reaching owning assertions count. Eight additional
+complete module/Cx cases bring the observation oracle to 89 cases; these cover
+static and instance calls, rejected conversions, packed methods/constructors
+and deferred SAM arguments. Classpath lifetime and production admission still
+require separate validation before these facts can authorize cache reuse.
+The 32 compiling controls took 246.67s locally on 2026-09-08. The dedicated
+incremental-java-oracles job uses a 532s planning value (2*247+38) and a
+27-minute timeout, without removing existing controls or raising the 660s pole.
+The class/member/namespace regression controls measured 228.37/281.28/258.25s
+under concurrent load. Their separate jobs conservatively retain those larger
+observations at 496s/25min, 602s/31min and 556s/28min respectively.
+
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，
