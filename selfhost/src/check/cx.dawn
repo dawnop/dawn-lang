@@ -16,11 +16,11 @@ use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
   Adts, AdtI, CtorI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
-  Audience, AWorld,
+  Audience, AWorld, EQ_ID,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union, eff_base, eff_labels,
-  adt_of, trait_of, subst, ty_show, fn_return_show, ctor_render, sig_render,
+  adt_of, trait_of, subst, ty_show, fn_return_show, ctor_render, sig_render, has_impl_at, insert_impl, sub_goals, impl_at,
   BuiltinTypeI, builtin_type_map,
   builtin_type_visible, builtin_type_visible_at_return,
   builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
@@ -610,6 +610,99 @@ fn resolve_eff_assoc(initial: Cx, subj: String, name: String, lo: Int, hi: Int) 
         (cx, EffAssoc(subj, vid, owners[0], name))
       }
     }
+  }
+}
+
+pub fn implementation_arity_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Option[Int]) = {
+  let answer = match impl_at(cx.impl_table, trait_id, subject) {
+    None -> None
+    Some(imp) -> Some(len(imp.tparams))
+  }
+  (observe_type_read(cx, semantic_reads.ImplementationArity(trait_id, subject, answer)), answer)
+}
+
+pub fn implementation_subgoals_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, List[(Int, Ty)]) = {
+  let answer = sub_goals(cx.impl_table, trait_id, subject)
+  (observe_type_read(cx, semantic_reads.ImplementationSubgoals(trait_id, subject, answer)), answer)
+}
+
+pub fn implementation_presence_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Bool) = {
+  let answer = has_impl_at(cx.impl_table, trait_id, subject)
+  (observe_type_read(cx, semantic_reads.ImplementationPresence(trait_id, subject, answer)), answer)
+}
+
+pub fn trait_name_read(cx: Cx, id: Int) -> (Cx, String) = {
+  let answer = trait_of(cx.traits, id).name
+  (observe_type_read(cx, semantic_reads.TraitName(id, answer)), answer)
+}
+
+pub fn dictionary_symbol_read(cx: Cx, binder: Int, trait_id: Int) -> (Cx, Option[Int]) = {
+  let answer = map.get(cx.frame.dict_syms, (binder, trait_id))
+  (observe_type_read(cx, semantic_reads.DictionarySymbol(binder, trait_id, answer)), answer)
+}
+
+test "trait name reads retain candidate names and disabled logging" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let info = trait_of(initial.traits, EQ_ID)
+  for name in ["Original", "Renamed"] {
+    let candidate = Cx { ..initial, traits: map.insert(initial.traits, 700, TraitI { ..info, name: name }) }
+    let (observed, answer) = trait_name_read(candidate, 700)
+    let (cold, cold_answer) = trait_name_read(Cx { ..candidate, function_reads: None }, 700)
+    assert answer == name && cold_answer == name
+    assert observed.function_reads == Some([semantic_reads.TraitName(700, name)]) && cold.function_reads == None
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
+  let (original, answer) = trait_name_read(initial, EQ_ID)
+  assert answer == info.name && original.function_reads == Some([semantic_reads.TraitName(EQ_ID, info.name)])
+}
+
+test "implementation arity reads distinguish absent ground and conditional impls" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  for count in [-1, 0, 1] {
+    let imp = ImplI { trait_id: 700, subject: TyList(TyVar("T", 701)),
+      tparams: if count == 1 { [TyVar("T", 701)] } else { [] }, constraints: [],
+      lo: 0, hi: 1, derived: false, owner: None, src_path: None, provided: [], assoc_bindings: [], eff_bindings: [] }
+    let candidate = if count < 0 { initial } else { Cx { ..initial, impl_table: insert_impl(initial.impl_table, imp) } }
+    let expected: Option[Int] = if count < 0 { None } else { Some(count) }
+    let (observed, answer) = implementation_arity_read(candidate, 700, TyList(TyInt))
+    assert answer == expected
+    assert observed.function_reads == Some([semantic_reads.ImplementationArity(700, TyList(TyInt), expected)])
+  }
+}
+
+test "implementation subgoal reads preserve bound order duplicates and fallback" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let subject = TyList(TyInt)
+  let imp = ImplI { trait_id: 700, subject: TyList(TyVar("T", 701)), tparams: [TyVar("T", 701)],
+    constraints: [[703, 702, 703]], lo: 0, hi: 1, derived: false, owner: None,
+    src_path: None, provided: [], assoc_bindings: [], eff_bindings: [] }
+  for conditional in [false, true] {
+    let candidate = if conditional { Cx { ..initial, impl_table: insert_impl(initial.impl_table, imp) } } else { initial }
+    let expected = if conditional { [(703, TyInt), (702, TyInt), (703, TyInt)] } else { [(700, TyInt)] }
+    let (observed, goals) = implementation_subgoals_read(candidate, 700, subject)
+    assert goals == expected && observed.function_reads == Some([semantic_reads.ImplementationSubgoals(700, subject, expected)])
+    let (cold, cold_goals) = implementation_subgoals_read(Cx { ..candidate, function_reads: None }, 700, subject)
+    assert cold_goals == goals && cold.function_reads == None && cold.diags == observed.diags
+  }
+  let (empty, goals) = implementation_subgoals_read(initial, 700, TyInt)
+  assert goals == [] && empty.function_reads == Some([semantic_reads.ImplementationSubgoals(700, TyInt, [])])
+}
+
+test "implementation presence reads retain hits misses and disabled logging" {
+  let initial = Cx { ..test_cx(), function_reads: Some([]) }
+  let imp = ImplI { trait_id: 700, subject: TyInt, tparams: [], constraints: [],
+    lo: 0, hi: 1, derived: false, owner: None, src_path: None, provided: [],
+    assoc_bindings: [], eff_bindings: [] }
+  for present in [false, true] {
+    let candidate = if present { Cx { ..initial, impl_table: insert_impl(initial.impl_table, imp) } } else { initial }
+    let (observed, answer) = implementation_presence_read(candidate, 700, TyInt)
+    assert answer == present
+    assert observed.function_reads == Some([semantic_reads.ImplementationPresence(700, TyInt, present)])
+    let (cold, cold_answer) = implementation_presence_read(Cx { ..candidate, function_reads: None }, 700, TyInt)
+    assert cold_answer == answer && cold.function_reads == None
+    assert observed.next_id == cold.next_id && observed.diags == cold.diags
+    let (headless, absent) = implementation_presence_read(candidate, 700, TyTuple([]))
+    assert not absent && headless.function_reads == Some([semantic_reads.ImplementationPresence(700, TyTuple([]), false)])
   }
 }
 

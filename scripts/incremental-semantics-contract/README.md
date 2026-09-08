@@ -2,6 +2,25 @@
 
 ## Diagnostic rendering read contracts
 
+### Witness observation and candidate recomputation (acceptance in progress)
+
+`python3 scripts/incremental-semantics-contract/witness-revalidation.py` runs a
+private positive checker subject and compiling negative controls for candidate
+recomputation, nominal recursion context, scope-sensitive concreteness,
+assignment operands, inference outputs and reduction binding inputs. Each
+negative must fail its named assertion owner, not merely fail compilation.
+The projection controls additionally cover all eleven new fact variants,
+separate dictionary/trait/binder domains, inference input/output bindings, and
+missing mappings. Each mutation changes one production expression; checker and
+projection modules are restored between subjects to prevent combined mutations.
+The 31 controls and two positive baselines took 108.71 seconds on 2026-09-09.
+CI runs them in `incremental-witness` with a 256-second planning value and a
+13-minute timeout, preserving the existing run pole. Complete capture coverage
+at all consumers remains pending. Passing this gate
+does not admit a body cache entry or establish complete dependency coverage.
+
+### Diagnostic queries
+
 `python3 scripts/incremental-semantics-contract/diagnostic-reads.py` checks four
 positive modules and 124 compiling negative controls. Each negative must reach
 an owning assertion; compilation errors and unrelated failures are rejected.
