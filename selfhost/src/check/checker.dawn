@@ -11357,7 +11357,22 @@ pub fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> 
   ModuleHeaders { syntax: m, cx: cx1, sigs: sigs, impl_sigs: impl_sigs, const_tys: const_tys }
 }
 
-pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {
+## Keep checking order separate from emission order. Replayed bodies must use
+## the same final assembly as cold bodies, including synthesized defaults.
+## These products still belong to one revision and contain no validity proof.
+pub type ModuleBodies = {
+  cx: Cx,
+  functions: List[TFun],
+  constants: List[TConst],
+  impl_methods: List[TFun],
+  trait_defaults: List[TFun],
+  tests: List[TFun]
+}
+
+pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =
+  assemble_module_bodies(check_module_body_products(headers))
+
+pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
   let m = headers.syntax
   var cx1 = headers.cx
   let sigs = headers.sigs
@@ -11550,6 +11565,15 @@ pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {
       None -> ()
     }
   }
+  ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
+    impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests }
+}
+
+## No checking or fresh allocation here: descriptor registration and default
+## synthesis must be identical for freshly checked and reassembled products.
+pub fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
+  var cx1 = products.cx
+  var fns_out = products.functions
   # Synthesize the default-value functions (#207 §4.4): one zero-parameter
   # pure function per defaulted parameter, appended as ordinary module
   # functions -- lowering, both backends and the comptime interpreter treat
@@ -11587,8 +11611,8 @@ pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {
       k = k + 1
     }
   }
-  fns_out = fns_out ++ synth ++ impl_tfuns ++ default_tfuns
-  (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests, syms: cx1.syms })
+  fns_out = fns_out ++ synth ++ products.impl_methods ++ products.trait_defaults
+  (cx1, TModule { fns: fns_out, consts: products.constants, tests: products.tests, syms: cx1.syms })
 }
 
 ## The diagnostics of one source, in order.
@@ -11768,6 +11792,58 @@ test "check_module: a whole module checks end to end" {
   assert len(tm.fns) == 3
   assert len(tm.consts) == 1
   assert len(tm.tests) == 1
+}
+
+test "module body assembly preserves roles and synthesized default registration" {
+  let src = "type Coin = { v: Int }\n" ++
+    "trait Waxy[T] {\n  fn wax(x: T) -> Int\n  fn buff(x: T) -> Int = wax(x) + 1\n}\n" ++
+    "impl Waxy[Coin] {\n  fn wax(x: Coin) -> Int = x.v * 2\n}\n" ++
+    "fn add(x: Int = 7) -> Int = x + 1\n" ++
+    "fn inferred() = add()\nconst K: Int = 3\n" ++
+    "fn choose[T: Waxy](x: fn(T) -> Int = (t) => wax(t)) -> Int = 1\n" ++
+    "test \"first\" { assert K == 3 }\ntest \"second\" { assert add() == 8 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let products = check_module_body_products(check_module_headers(test_cx(), m, env))
+  assert products.cx.diags == []
+  assert map(products.functions, f => f.name) == ["add", "inferred", "choose"]
+  assert len(products.constants) == 1
+  assert len(products.impl_methods) == 1
+  assert len(products.trait_defaults) == 1
+  assert len(products.tests) == 2
+  let parent = products.functions[0]
+  let ds = default_sig(parent.sig, parent.name, 0, TyInt)
+  let generic = products.functions[2]
+  let gs = default_sig(generic.sig, generic.name, 0, generic.sig.param_tys[0])
+  assert not map.has(products.cx.fns, ds.name)
+  assert not map.has(products.cx.fns, gs.name)
+  let (assembled, tm) = assemble_module_bodies(products)
+  assert assembled.next_id == products.cx.next_id
+  assert assembled.diags == products.cx.diags
+  assert assembled.syms == products.cx.syms
+  assert assembled.fns == map.insert(map.insert(products.cx.fns, ds.name, ds), gs.name, gs)
+  assert tm.consts == products.constants
+  assert tm.tests == products.tests
+  assert tm.syms == products.cx.syms
+  assert len(tm.fns) == 7
+  assert list.take(tm.fns, 3) == products.functions
+  assert list.drop(tm.fns, 5) == products.impl_methods ++ products.trait_defaults
+  let dv = parent.defaults[0].expect("default product")
+  assert tm.fns[3].name == ds.name
+  assert tm.fns[3].sig == ds
+  assert tm.fns[3].body == dv.body
+  assert tm.fns[3].dict_syms == dv.dict_syms
+  let gd = generic.defaults[0].expect("generic default product")
+  assert len(gd.dict_syms) == 1
+  assert tm.fns[4].sig == gs
+  assert tm.fns[4].body == gd.body
+  assert tm.fns[4].dict_syms == gd.dict_syms
+  let (cold, cold_tm) = check_module(test_cx(), m, env)
+  assert cold_tm == tm
+  assert cold.fns == assembled.fns
+  assert cold.next_id == assembled.next_id
+  assert cold.diags == assembled.diags
 }
 
 test "check_module: a bare None arm infers from a concrete sibling arm" {

@@ -98,7 +98,10 @@ owner和原函数名查找签名，别名不替代声明身份。该案例不覆
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个
-owning断言负控，以及ModuleHeaders推断状态/const类型保留的两个负控（共11个）。
+owning断言负控，以及ModuleHeaders推断状态/const类型保留的两个负控。
+ModuleBodies将body检查与最终装配分离；五个装配负控覆盖impl/default顺序、const、
+test、默认辅助函数签名登记及泛型字典保留（合计16个）。这只是同revision生产边界，
+不是模块cache有效性证明，也尚未接上跨revision的具名header重组。
 源码token相等不证明AST相等，尤其不能忽略换行的语义。
 `identity.py` 验证生产声明候选身份及八个成功编译负控：重复父声明及子路径、
 类型/关联效果的绑定槽归一、默认参数歧义、模块world隔离。具名owning断言必须失败，
