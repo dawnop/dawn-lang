@@ -131,6 +131,23 @@ public final class BodyProbe {
                     throw new AssertionError("import state: body differs from cold module");
             }
             System.out.println("import-state\t2\tprovider provenance survives selective and qualified imports");
+            checkModuleAssembly(probe);
         }
+    }
+
+    private static void checkModuleAssembly(Class<?> probe) throws Exception {
+        Object modules = probe.getMethod("module_samples").invoke(null);
+        var moduleCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_count")).findFirst().orElseThrow();
+        var moduleAt = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_at")).findFirst().orElseThrow();
+        if ((Long) moduleCount.invoke(null, modules) != 8) throw new AssertionError("Unexpected module assembly trial count");
+        for (long i = 0; i < 8; i++) {
+            Object trial = moduleAt.invoke(null, modules, i);
+            Class<?> t = trial.getClass();
+            if (!SemanticSnapshot.same(t.getField("replayed").get(trial), t.getField("cold").get(trial)))
+                throw new AssertionError("module assembly: replayed module differs from cold module (" + i + ")");
+            if (!SemanticSnapshot.same(t.getField("replayed_cx").get(trial), t.getField("cold_cx").get(trial)))
+                throw new AssertionError("module assembly: replayed Cx differs from cold module state (" + i + ")");
+        }
+        System.out.println("module-assembly\t8\tnamed reordered bodies and synthesized defaults assemble complete cold modules and Cx");
     }
 }

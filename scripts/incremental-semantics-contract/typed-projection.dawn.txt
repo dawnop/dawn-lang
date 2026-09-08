@@ -5,10 +5,11 @@ use std/map
 use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
-use compiler/check/tast.{TFun, TDefault}
+use compiler/check/tast.{TFun, TDefault, TModule}
 use compiler/check/types.{Sig, Sym, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, exports_of}
+use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies}
+use compiler/check/function_product
 use compiler/check/relocate
 use compiler/check/relocate_tree
 use compiler/check/relocate_tree.{View}
@@ -85,6 +86,74 @@ pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_s
 
 pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
 
+pub type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
+
+pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample()] ++ default_module_samples()
+
+type SavedFunction = { before: Cx, after: Cx, product: body_product.Product }
+
+fn reordered_module_sample() -> ModuleTrial !io = {
+  let first = "fn first[T](x: T) -> T = { let a = x\n a }\n"
+  let second = "fn second[U](x: U) -> U = { let b = x\n let c = b\n c }\n"
+  let caller = "fn caller(x: Int) -> Int = first(x) + second(x)\n"
+  let text = first ++ second ++ caller
+  let edited = "# moved declarations\n" ++ second ++ first ++ caller
+  let (syntax, ds) = parser.parse_module(text)
+  let (next_syntax, nds) = parser.parse_module(edited)
+  if ds != [] || nds != [] { panic("named module parse") }
+  let scope = module_key("named-world", "named", "named", "named.dawn")
+  let initial = cx_new(Some("named"), Some("named.dawn"))
+  let old_headers = check_module_headers(initial, syntax, map.empty())
+  let next_headers = check_module_headers(initial, next_syntax, map.empty())
+  let old_named = function_product.headers(scope, old_headers).expect("old named headers")
+  let next_named = function_product.headers(scope, next_headers).expect("next named headers")
+  let old_keys = function_product.keys(old_named)
+  let next_keys = function_product.keys(next_named)
+  if old_keys[0] != next_keys[1] || old_keys[1] != next_keys[0] { panic("named module did not reorder") }
+  if function_product.get(old_named, old_keys[0]).expect("old first").signature ==
+      function_product.get(next_named, old_keys[0]).expect("next first").signature {
+    panic("named module did not move generic header IDs")
+  }
+  var saved: Map[DeclKey, SavedFunction] = map.empty()
+  var old_cx = old_headers.cx
+  for key in old_keys {
+    let header = function_product.get(old_named, key).expect("old declaration")
+    let (after, body) = check_fn(old_cx, header.syntax, header.signature)
+    let product = body_product.capture(old_cx, after, body).expect("named capture")
+    saved = map.insert(saved, key, SavedFunction { before: old_cx, after: after, product: product })
+    old_cx = after
+  }
+  let reserved = allocation.compiler_headers(scope.world).expect("named compiler origins")
+  var old_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, syntax, old_headers.cx).expect("old named origins")).expect("old table")]).expect("old combined")
+  var next_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, next_syntax, next_headers.cx).expect("next named origins")).expect("next table")]).expect("next combined")
+  var replayed = next_headers.cx
+  var functions: List[TFun] = []
+  for key in next_keys {
+    let entry = function_product.get(next_named, key).expect("next declaration")
+    let prior = function_product.get(old_named, key).expect("prior declaration")
+    let body = map.get(saved, key).expect("named body lookup")
+    let plan = allocation.body_plan(old_table, next_table, key, body.product.allocation_start,
+      body.product.allocation_count, replayed.next_id, prior.signature, entry.signature,
+      body.product.function.ev_syms).expect("named allocation")
+    let source = source_projection.between(text, edited, prior.syntax.lo, prior.syntax.hi,
+      entry.syntax.lo, entry.syntax.hi).expect("named source")
+    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: body.after.syms,
+      assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+      callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
+    let projected = body_product.project(view, body.product, replayed.next_id).expect("named projection")
+    replayed = body_product.assemble(replayed, projected).expect("named replay")
+    functions = functions ++ [projected.function]
+    old_table = plan.old_allocations
+    next_table = plan.next_allocations
+  }
+  let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
+    cx: replayed, functions: functions, constants: [], impl_methods: [], trait_defaults: [], tests: [] })
+  let (cold_cx, cold) = check_module(initial, next_syntax, map.empty())
+  ModuleTrial { replayed_cx: assembled_cx, cold_cx: cold_cx, replayed: assembled, cold: cold, states: [] }
+}
+
 pub fn import_samples() -> List[StateTrial] !io = [import_sample(false), import_sample(true)]
 
 fn import_sample(qualified: Bool) -> StateTrial !io = {
@@ -148,11 +217,13 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   StateTrial { replayed: replayed, cold: cold, relocated: projected.function, cold_body: cold_body, module_body: whole.fns[0] }
 }
 
-pub fn default_samples() -> List[StateTrial] !io = [default_sample(false, false, false), default_sample(true, false, false),
+pub fn default_samples() -> List[StateTrial] !io = map(default_module_samples(), m => m.states[0])
+
+fn default_module_samples() -> List[ModuleTrial] !io = [default_sample(false, false, false), default_sample(true, false, false),
   default_sample(false, true, false), default_sample(true, true, false),
   default_sample(false, false, true), default_sample(true, false, true)]
 
-fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> StateTrial !io = {
+fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !io = {
   let prefix = if generic { "trait Marker[T] { fn mark(x: T) -> Int }\nfn sample[T: Marker]" } else { "fn sample" }
   let params = if generic { "(x: fn(T) -> Int = (t) => mark(t), y: Int = { let w = 2\n w })" }
     else if invalid { "(x: Int = true, y: Int = { let w = 2\n w })" }
@@ -218,16 +289,21 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> StateTrial !i
     let (cx, _, value) = check_fn_inferred(next, new_decl, nsigs[0])
     (cx, value)
   } else { check_fn(next, new_decl, nsigs[0]) }
-  let (_, whole) = check_module(new_base, new_syntax, map.empty())
+  let (whole_cx, whole) = check_module(new_base, new_syntax, map.empty())
+  let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
+    cx: replayed, functions: [body], constants: [], impl_methods: [], trait_defaults: [], tests: [] })
   let expected_diags = if invalid { 1 } else { 0 }
   if len(replayed.diags) != expected_diags || len(cold.diags) != expected_diags { panic("default boundary check failed") }
-  StateTrial { replayed: replayed, cold: cold, relocated: body, cold_body: cold_body, module_body: whole.fns[0] }
+  ModuleTrial { replayed_cx: assembled_cx, cold_cx: whole_cx, replayed: assembled, cold: whole,
+    states: [StateTrial { replayed: replayed, cold: cold, relocated: body, cold_body: cold_body, module_body: whole.fns[0] }] }
 }
 
 ## The source order here is deliberately dependency order. This checks state
 ## products, not a replacement scheduler: the module oracle still uses the
 ## production inferred-function scheduling loop independently.
-pub fn inferred_samples() -> List[StateTrial] !io = {
+pub fn inferred_samples() -> List[StateTrial] !io = inferred_module_sample().states
+
+fn inferred_module_sample() -> ModuleTrial !io = {
   let text = "alias Counter = Int\nfn lead(x: Int) = { let y = x + 1\n y }\n" ++
     "fn inferred(x: Counter) = { let z = x + 2\n z }\n" ++
     "fn caller(x: Int) = inferred(x)\n" ++
@@ -258,6 +334,7 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
   var cold = new_header
   var replayed = new_header
   var out: List[StateTrial] = []
+  var functions: List[TFun] = []
   var i = 0
   while i < len(old_decls) {
     if not old_sigs[i].inferring || not new_sigs[i].inferring { panic("fixture signature was not inferred") }
@@ -265,7 +342,10 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
     let (after, sealed, body) = check_fn_inferred(before, old_decls[i], old_sigs[i])
     let (checked, _, cold_body) = check_fn_inferred(cold, new_decls[i], new_sigs[i])
     if sealed.inferring || map.get(after.fns, old_decls[i].name) != Some(sealed) { panic("inferred signature not sealed") }
-    if i == 0 { replayed = checked } else {
+    if i == 0 {
+      replayed = checked
+      functions = functions ++ [cold_body]
+    } else {
       let delta = replayed.next_id - before.next_id
       if delta != 1 { panic("inferred fixture did not move allocation") }
       let key = DeclKey { scope: scope, path: [Named(FunctionDecl, old_decls[i].name)] }
@@ -280,6 +360,7 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
       let projected = body_product.project(view, saved, replayed.next_id).expect("inferred projection: " ++ body.name)
       replayed = body_product.assemble(replayed, projected).expect("inferred assembly")
       let moved = projected.function
+      functions = functions ++ [moved]
       old_table = plan.old_allocations
       new_table = plan.next_allocations
       out = out ++ [StateTrial { replayed: replayed, cold: checked, relocated: moved,
@@ -289,7 +370,9 @@ pub fn inferred_samples() -> List[StateTrial] !io = {
     cold = checked
     i = i + 1
   }
-  out
+  let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
+    cx: replayed, functions: functions, constants: [], impl_methods: [], trait_defaults: [], tests: [] })
+  ModuleTrial { replayed_cx: assembled_cx, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }
 }
 
 pub fn test_samples() -> List[StateTrial] !io = {
