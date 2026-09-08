@@ -28,7 +28,8 @@ SPREAD_LIST_CHECK = """        _ ->
           if is_errorish(t) {
             (cx1, TyError, TLESpread(tx))
           } else {
-            (cerr_h(cx1, "`..` spreads a list, but this is " ++ ty_show(cx1.adts, t), lo, hi,
+            let (render_cx, text) = type_display_read(cx1, t)
+            (cerr_h(render_cx, "`..` spreads a list, but this is " ++ text, lo, hi,
               "drop the `..` to make it one element"), TyError, TLESpread(tx))
           }
 """
@@ -47,7 +48,8 @@ COND_EXPECTATION = """        let body_exp: Option[Ty] =
 
 # a conditional element's condition is a Bool
 COND_BOOL = """        if ct != TyBool && not is_errorish(ct) {
-          cx1 = cerr(cx1, "if condition must be Bool, got " ++ ty_show(cx1.adts, ct),
+          let (render_cx, text) = type_display_read(cx1, ct)
+          cx1 = cerr(render_cx, "if condition must be Bool, got " ++ text,
             e_lo(a.cond), e_hi(a.cond))
         }
 """
