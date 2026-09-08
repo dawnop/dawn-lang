@@ -1219,6 +1219,155 @@ fn observe_type_read(cx: Cx, fact: FunctionRead) -> Cx =
     Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, fact) }
   }
 
+## Recompute context-owned queries without changing the candidate's log. The
+## caller supplies the corresponding scope; successful queries alone do not
+## validate a body. Removed nominal IDs and slots reject rather than panic.
+pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool] = {
+  let initial = Cx { ..candidate, function_reads: Some([]) }
+  match fact {
+    semantic_reads.ConstructorCount(id, _) | semantic_reads.ConstructorNames(id, _) |
+    semantic_reads.ConstructorHeaderAnswer(id, _) | semantic_reads.NominalTypeShape(id, _, _, _, _) -> {
+      if not map.has(initial.adts, id) { return Some(false) }
+    }
+    semantic_reads.ConstructorFields(id, slot, _) | semantic_reads.ConstructorArity(id, slot, _) -> {
+      let info = match map.get(initial.adts, id) { Some(info) -> info, None -> return Some(false) }
+      if slot < 0 || slot >= len(info.ctors) { return Some(false) }
+    }
+    semantic_reads.DeclaredEffectInfo(id, _) -> {
+      if not map.has(initial.effect_infos, id) { return Some(false) }
+    }
+    semantic_reads.DeclaredEffect(name, _) -> {
+      match map.get(initial.effects, name) {
+        Some(id) -> if not map.has(initial.effect_infos, id) { return Some(false) }
+        None -> ()
+      }
+    }
+    _ -> ()
+  }
+  let observed = match fact {
+    semantic_reads.LocalConstructor(name, _) -> { let (next, _) = local_constructor_read(initial, name)
+      next }
+    semantic_reads.LocalConstant(name, _) -> { let (next, _) = local_constant_read(initial, name)
+      next }
+    semantic_reads.ConstantVisible(name, _) -> { let (next, _) = constant_visible_read(initial, name)
+      next }
+    semantic_reads.DeclaredConstantName(name, _) -> { let (next, _) = declared_constant_name_read(initial, name)
+      next }
+    semantic_reads.LocalValueCandidates(include_constants, _) -> { let (next, _) = local_value_candidates_read(initial, include_constants)
+      next }
+    semantic_reads.NominalTypeName(None, name, _) -> { let (next, _) = local_nominal_name_read(initial, name)
+      next }
+    semantic_reads.ConstructorCount(id, _) -> { let (next, _) = constructor_count_read(initial, id)
+      next }
+    semantic_reads.ConstructorNames(id, _) -> { let (next, _) = constructor_names_read(initial, id)
+      next }
+    semantic_reads.ConstructorHeaderAnswer(id, _) -> { let (next, _) = constructor_header_read(initial, id)
+      next }
+    semantic_reads.ConstructorFields(id, slot, _) -> { let (next, _) = constructor_fields_read(initial, id, slot)
+      next }
+    semantic_reads.ConstructorArity(id, slot, _) -> { let (next, _) = constructor_arity_read(initial, id, slot)
+      next }
+    semantic_reads.NominalTypeShape(id, _, _, _, _) -> { let (next, _) = constructor_nominal_shape_read(initial, id)
+      next }
+    semantic_reads.LocalEffectName(name, _) -> { let (next, _) = local_effect_name_read(initial, name)
+      next }
+    semantic_reads.EffectCandidates(_) -> { let (next, _) = effect_candidates_read(initial)
+      next }
+    semantic_reads.DeclaredEffectInfo(id, _) -> { let (next, _) = declared_effect_info_read(initial, id)
+      next }
+    semantic_reads.ScopedTypeParameter(name, _) -> { let (next, _) = scoped_type_parameter_read(initial, name)
+      next }
+    semantic_reads.ScopedEffectVariable(name, _) -> { let (next, _) = scoped_effect_variable_read(initial, name)
+      next }
+    semantic_reads.DeclaredEffect(name, _) -> { let (next, _) = declared_effect_read(initial, name)
+      next }
+    semantic_reads.BuiltinTypeAnswer(name, _) -> { let (next, _) = builtin_type_read(initial, name)
+      next }
+    semantic_reads.StdModuleMode(_) -> { let (next, _) = std_module_mode_read(initial)
+      next }
+    _ -> return None
+  }
+  Some(observed.function_reads == Some([fact]))
+}
+
+test "context revalidation recomputes every supported query family" {
+  let base = cx_new(None, None)
+  let id = map.keys(base.adts)[0]
+  assert len(adt_of(base.adts, id).ctors) > 0
+  let effect_info = EffectI { id: 700, name: "Ask", owner: None, audience: AWorld, ops: ["ask"], ctl: false }
+  let initial = Cx { ..base, function_reads: Some([]),
+    ctors_by_name: map.from([("Make", (id, 0))]), adts_by_name: map.from([("Box", id)]),
+    consts: map.from([("value", TyInt)]), all_const_names: set.from(["value"]),
+    effects: map.from([("Ask", 700)]), effect_infos: map.from([(700, effect_info)]),
+    current_tparams: map.from([("T", TyInt)]), current_eff_vars: map.from([("e", EIo)]) }
+  let (c1, _) = local_constructor_read(initial, "Make")
+  let (c2, _) = local_constant_read(c1, "value")
+  let (c3, _) = constant_visible_read(c2, "value")
+  let (c4, _) = declared_constant_name_read(c3, "value")
+  let (c5, _) = local_value_candidates_read(c4, true)
+  let (c6, _) = local_nominal_name_read(c5, "Box")
+  let (c7, _) = constructor_count_read(c6, id)
+  let (c8, _) = constructor_names_read(c7, id)
+  let (c9, _) = constructor_header_read(c8, id)
+  let (c10, _) = constructor_fields_read(c9, id, 0)
+  let (c11, _) = constructor_arity_read(c10, id, 0)
+  let (c12, _) = constructor_nominal_shape_read(c11, id)
+  let (c13, _) = local_effect_name_read(c12, "Ask")
+  let (c14, _) = effect_candidates_read(c13)
+  let (c15, _) = declared_effect_info_read(c14, 700)
+  let (c16, _) = scoped_type_parameter_read(c15, "T")
+  let (c17, _) = scoped_effect_variable_read(c16, "e")
+  let (c18, _) = declared_effect_read(c17, "Ask")
+  let (c19, _) = builtin_type_read(c18, "Int")
+  let (c20, _) = std_module_mode_read(c19)
+  let facts = c20.function_reads.expect("all context query families")
+  assert len(facts) == 20
+  let changed = Cx { ..initial, adts: map.empty(), adts_by_name: map.empty(), ctors_by_name: map.empty(),
+    consts: map.empty(), all_const_names: set.empty(), const_cutoff: Some(set.empty()),
+    effects: map.empty(), effect_infos: map.empty(), current_tparams: map.empty(), current_eff_vars: map.empty(),
+    btypes: map.empty(), is_std_module: true }
+  for fact in facts {
+    assert revalidate_context_read(initial, fact) == Some(true)
+    assert revalidate_context_read(changed, fact) == Some(false)
+  }
+  assert initial.function_reads == Some([]) && changed.function_reads == Some([])
+}
+
+test "context revalidation rejects changed misses and scope answers" {
+  let base = cx_new(None, None)
+  let initial = Cx { ..base, function_reads: Some([semantic_reads.StdModuleMode(false)]) }
+  let missing = semantic_reads.LocalConstant("value", None)
+  assert revalidate_context_read(initial, missing) == Some(true)
+  let changed = Cx { ..initial, consts: map.insert(initial.consts, "value", TyInt) }
+  assert revalidate_context_read(changed, missing) == Some(false)
+  assert revalidate_context_read(changed, semantic_reads.LocalConstant("value", Some(TyInt))) == Some(true)
+  assert revalidate_context_read(initial, semantic_reads.ConstantVisible("value", true)) == Some(true)
+  let hidden = Cx { ..initial, const_cutoff: Some(set.empty()) }
+  assert revalidate_context_read(hidden, semantic_reads.ConstantVisible("value", true)) == Some(false)
+  assert revalidate_context_read(initial, semantic_reads.NominalTypeName(Some("other"), "Missing", None)) == None
+  assert initial.function_reads == Some([semantic_reads.StdModuleMode(false)]) && initial.diags == []
+  let (_, names) = local_value_candidates_read(changed, true)
+  assert revalidate_context_read(changed, semantic_reads.LocalValueCandidates(true, names)) == Some(true)
+  assert revalidate_context_read(changed, semantic_reads.LocalValueCandidates(true, names ++ names)) == Some(false)
+}
+
+test "context revalidation rejects removed nominal IDs and invalid slots" {
+  let initial = cx_new(None, None)
+  let missing = -1
+  assert revalidate_context_read(initial, semantic_reads.ConstructorCount(missing, 0)) == Some(false)
+  assert revalidate_context_read(initial, semantic_reads.ConstructorNames(missing, [])) == Some(false)
+  assert revalidate_context_read(initial, semantic_reads.ConstructorArity(missing, 0, 0)) == Some(false)
+  let broken = Cx { ..initial, effects: map.insert(initial.effects, "Missing", missing) }
+  assert revalidate_context_read(broken, semantic_reads.DeclaredEffect("Missing", None)) == Some(false)
+  for id in map.keys(initial.adts) {
+    let (_, count) = constructor_count_read(initial, id)
+    assert revalidate_context_read(initial, semantic_reads.ConstructorCount(id, count)) == Some(true)
+    assert revalidate_context_read(initial, semantic_reads.ConstructorCount(id, count + 1)) == Some(false)
+    assert revalidate_context_read(initial, semantic_reads.ConstructorArity(id, -1, 0)) == Some(false)
+    assert revalidate_context_read(initial, semantic_reads.ConstructorArity(id, count, 0)) == Some(false)
+  }
+}
+
 ## ---- effect arguments at a type application (spec §6.3) ----
 
 ## The effect-argument half of a type application's arity. A declaration that
