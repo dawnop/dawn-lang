@@ -8,7 +8,7 @@ use check/cx.{Cx, ModExports, cx_new}
 use check/types.{Sig, ImplI, TraitI, MethodSig}
 use check/identity
 use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, module_key}
-use front/ast.{FnDecl, TraitMethod, DFn, DImpl, DTrait}
+use front/ast.{FnDecl, TraitMethod, TypeRef, DFn, DImpl, DTrait}
 use front/parser
 
 pub type Header = { key: DeclKey, syntax: FnDecl, signature: Sig }
@@ -69,7 +69,8 @@ pub type MethodHeader =
   | ImplMethod(key: DeclKey, syntax: FnDecl, signature: Sig, registered: ImplI)
   | TraitDefault(key: DeclKey, syntax: TraitMethod, signature: Sig, trait_id: Int)
 
-type MethodData = { impls: List[DeclKey], defaults: List[DeclKey], entries: Map[DeclKey, MethodHeader] }
+pub type ImplGroup = { key: DeclKey, trait_name: String, subject: TypeRef, methods: List[DeclKey] }
+type MethodData = { impls: List[DeclKey], defaults: List[DeclKey], entries: Map[DeclKey, MethodHeader], groups: List[ImplGroup] }
 pub opaque type Methods = MethodData
 
 pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
@@ -89,6 +90,7 @@ pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
   var entries: Map[DeclKey, MethodHeader] = map.empty()
   var impls: List[DeclKey] = []
   var defaults: List[DeclKey] = []
+  var groups: List[ImplGroup] = []
   var declaration = 0
   var impl_index = 0
   for d in checked.syntax.decls {
@@ -102,6 +104,7 @@ pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
         let parent = ImplHead(trait_name, identity.type_shape(subject, map(params, p => p.name)))
         let parent_key = DeclKey { scope: scope, path: [parent] }
         if map.get(locations, parent_key) != Some((declaration, None)) { return None }
+        var group_keys: List[DeclKey] = []
         var member = 0
         for syntax in members {
           let sig = sigs[member]?
@@ -111,8 +114,10 @@ pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
           if map.get(locations, key) != Some((declaration, Some(member))) { return None }
           entries = map.insert(entries, key, ImplMethod(key, syntax, sig, info))
           impls = impls ++ [key]
+          group_keys = group_keys ++ [key]
           member = member + 1
         }
+        groups = groups ++ [ImplGroup { key: parent_key, trait_name: trait_name, subject: subject, methods: group_keys }]
         impl_index = impl_index + 1
       }
       DTrait(name, _, _, _, members, _, _, _, _, _, _, _) -> {
@@ -149,7 +154,11 @@ pub fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods] = {
     declaration = declaration + 1
   }
   if impl_index != len(checked.impl_sigs) { return None }
-  Some(MethodData { impls: impls, defaults: defaults, entries: entries })
+  Some(MethodData { impls: impls, defaults: defaults, entries: entries, groups: groups })
+}
+
+pub fn impl_groups(methods: Methods) -> List[ImplGroup] = { let data: MethodData = methods
+  data.groups
 }
 
 pub fn impl_keys(methods: Methods) -> List[DeclKey] = { let data: MethodData = methods
@@ -219,6 +228,12 @@ test "method products preserve impl and default owners across declaration reorde
   assert len(ai) == 2 && len(ad) == 2
   assert ai[0] == bi[1] && ai[1] == bi[0]
   assert ad[0] == bd[1] && ad[1] == bd[0]
+  let groups = impl_groups(a)
+  assert len(groups) == 2
+  assert groups[0].methods == [ai[0]] && groups[1].methods == [ai[1]]
+  assert groups[0].key.path ++ [Named(MethodDecl, "forward")] == ai[0].path
+  assert groups[0].trait_name == "Forward"
+  assert impl_groups(b)[0].key == groups[1].key
   match method(b, ai[0]).expect("moved impl") {
     ImplMethod(key, syntax, sig, info) -> {
       assert key == ai[0]
@@ -252,4 +267,10 @@ test "method products preserve impl and default owners across declaration reorde
   assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, traits: map.insert(old.cx.traits, tid, missing) } }) == None
   let wrong_owner = TraitI { ..info, owner: Some("foreign") }
   assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, traits: map.insert(old.cx.traits, tid, wrong_owner) } }) == None
+  let (empty_impl, empty_ds) = parser.parse_module("trait Only[T] { fn only(x: T) -> Int = 1 }\nimpl[T] Only[List[T]] {}\n")
+  assert empty_ds == []
+  let empty_methods = methods(scope, check_module_headers(initial, empty_impl, env)).expect("empty impl group")
+  assert len(impl_groups(empty_methods)) == 1
+  assert impl_groups(empty_methods)[0].methods == []
+  assert impl_keys(empty_methods) == [] && len(default_keys(empty_methods)) == 1
 }

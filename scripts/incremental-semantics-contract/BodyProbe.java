@@ -139,8 +139,8 @@ public final class BodyProbe {
         Object modules = probe.getMethod("module_samples").invoke(null);
         var moduleCount = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_count")).findFirst().orElseThrow();
         var moduleAt = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_at")).findFirst().orElseThrow();
-        if ((Long) moduleCount.invoke(null, modules) != 8) throw new AssertionError("Unexpected module assembly trial count");
-        for (long i = 0; i < 8; i++) {
+        if ((Long) moduleCount.invoke(null, modules) != 9) throw new AssertionError("Unexpected module assembly trial count");
+        for (long i = 0; i < 9; i++) {
             Object trial = moduleAt.invoke(null, modules, i);
             Class<?> t = trial.getClass();
             if (!SemanticSnapshot.same(t.getField("replayed").get(trial), t.getField("cold").get(trial)))
@@ -148,6 +148,6 @@ public final class BodyProbe {
             if (!SemanticSnapshot.same(t.getField("replayed_cx").get(trial), t.getField("cold_cx").get(trial)))
                 throw new AssertionError("module assembly: replayed Cx differs from cold module state (" + i + ")");
         }
-        System.out.println("module-assembly\t8\tnamed reordered bodies and synthesized defaults assemble complete cold modules and Cx");
+        System.out.println("module-assembly\t9\treordered functions, impls and defaults assemble complete cold modules and Cx");
     }
 }

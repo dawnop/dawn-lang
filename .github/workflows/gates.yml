@@ -1070,14 +1070,16 @@ jobs:
   incremental-projection:
     runs-on: ubuntu-latest
     # Run 34159136910 took 170s before state products were added.
-    # Local complete runs on 2026-09-08: typed/state oracle 136.88s,
-    # source/origin/callee/header/assembly 70.49s,
-    # state's fifteen mutants 67.41s. Allocation now runs separately below.
+    # Local complete runs on 2026-09-08: twenty-mutant typed oracle 143.35s,
+    # source/origin/callee/header/assembly/impl entry 102.05s (eighteen mutants),
+    # state's fifteen mutants 67.41s. Allocation runs separately below.
     # Double rounded values and retain the checkout/toolchain allowance:
     # Identity now runs with allocation below to keep this under the pole.
-    # 2*(137+71+68)+38=590s.
-    # budget: 3x 590s planning value
-    timeout-minutes: 30
+    # Keeping state here would cost 2*(144+103+68)+38=668s, above the
+    # unchanged 660s pole. Move that independent contract to its own job.
+    # 2*(144+103)+38=532s.
+    # budget: 3x 532s planning value
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1087,7 +1089,22 @@ jobs:
         run: |
           python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
           python3 scripts/incremental-semantics-contract/projection.py
-          python3 scripts/incremental-semantics-contract/state-product.py
+
+  incremental-state:
+    runs-on: ubuntu-latest
+    # Independent state-product contract, split from projection once their
+    # combined planning value exceeded the 660s pole. Local 67.41s on
+    # 2026-09-08: double the rounded value and retain 38s setup allowance.
+    # 2*68+38=174s; no contract or negative control was removed.
+    # budget: 3x 174s planning value
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: state product capture projection and assembly contracts
+        run: python3 scripts/incremental-semantics-contract/state-product.py
 
   incremental-allocation:
     runs-on: ubuntu-latest
@@ -1096,10 +1113,10 @@ jobs:
     # allowance. Do not push projection past
     # the run-pole by appending this growing suite to its serial critical path.
     # The six production producer mutants took 94.65s on the same date.
-    # Named function/method headers and ten mutants took 61.17s locally.
+    # Named function/method headers and eleven mutants took 67.20s locally.
     # Identity's eight mutants took 36.38s and move here from projection.
-    # 2*(69+95+62+37)+38=564s planning value.
-    # budget: 3x 564s planning value
+    # 2*(69+95+68+37)+38=576s planning value.
+    # budget: 3x 576s planning value
     timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4

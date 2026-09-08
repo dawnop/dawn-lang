@@ -6,9 +6,9 @@ use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
 use compiler/check/tast.{TFun, TDefault, TModule}
-use compiler/check/types.{Sig, Sym, eff_labels, sig_abi_eff}
+use compiler/check/types.{Sig, Sym, Ty, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies}
+use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies, impl_body_key, check_trait_default, strip_param_defaults}
 use compiler/check/function_product
 use compiler/check/relocate
 use compiler/check/relocate_tree
@@ -88,9 +88,107 @@ pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun
 
 pub type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
 
-pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample()] ++ default_module_samples()
+pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample()] ++ default_module_samples()
 
 type SavedFunction = { before: Cx, after: Cx, product: body_product.Product }
+
+fn method_signature(method: function_product.MethodHeader) -> Sig = match method {
+  function_product.ImplMethod(_, _, sig, _) -> sig
+  function_product.TraitDefault(_, _, sig, _) -> sig
+}
+
+fn method_span(method: function_product.MethodHeader) -> (Int, Int) = match method {
+  function_product.ImplMethod(_, syntax, _, _) -> (syntax.lo, syntax.hi)
+  function_product.TraitDefault(_, syntax, _, _) -> (syntax.lo, syntax.hi)
+}
+
+fn check_method_source(cx: Cx, method: function_product.MethodHeader) -> (Cx, TFun) !io = match method {
+  function_product.ImplMethod(_, syntax, sig, _) -> check_fn(cx, strip_param_defaults(syntax), sig)
+  function_product.TraitDefault(_, syntax, sig, _) -> check_trait_default(cx, syntax, sig, syntax.body.expect("default body"))
+}
+
+fn method_module_sample() -> ModuleTrial !io = {
+  let forward = "trait Forward[T] {\n fn forward(x: T) -> Int\n fn alternate(x: T) -> Int\n fn twice(x: T) -> Int = forward(x) + alternate(x)\n}\n"
+  let repeat = "trait Repeat[T] {\n fn repeat(x: T) -> Int\n fn other(x: T) -> Int\n fn again(x: T) -> Int = repeat(x) + other(x)\n}\n"
+  let first = "impl[T] Forward[List[T]] {\n fn forward(x: List[T]) -> Int = 1\n fn alternate(x: List[T]) -> Int = 3\n}\n"
+  let second = "impl[T] Repeat[List[T]] {\n fn repeat(x: List[T]) -> Int = 2\n fn other(x: List[T]) -> Int = 4\n}\n"
+  let text = forward ++ repeat ++ first ++ second
+  let edited = "# moved methods\n" ++ repeat ++ forward ++ second ++ first
+  let (syntax, ds) = parser.parse_module(text)
+  let (next_syntax, nds) = parser.parse_module(edited)
+  if ds != [] || nds != [] { panic("method module parse") }
+  let scope = module_key("method-world", "methods", "methods", "methods.dawn")
+  let initial = cx_new(Some("methods"), Some("methods.dawn"))
+  let old_headers = check_module_headers(initial, syntax, map.empty())
+  let next_headers = check_module_headers(initial, next_syntax, map.empty())
+  let old_methods = function_product.methods(scope, old_headers).expect("old method entries")
+  let next_methods = function_product.methods(scope, next_headers).expect("next method entries")
+  var saved: Map[DeclKey, SavedFunction] = map.empty()
+  var old_cx = old_headers.cx
+  for key in function_product.impl_keys(old_methods) ++ function_product.default_keys(old_methods) {
+    let entry = function_product.method(old_methods, key).expect("old method")
+    let (after, body) = check_method_source(old_cx, entry)
+    if body.impl_of != None || body.default_of != None { panic("method body was already tagged") }
+    saved = map.insert(saved, key, SavedFunction { before: old_cx, after: after,
+      product: body_product.capture(old_cx, after, body).expect("method capture") })
+    old_cx = after
+  }
+  let reserved = allocation.compiler_headers(scope.world).expect("method compiler provenance")
+  let old_entries = allocation.local_headers(scope, syntax, old_headers.cx).expect("old method headers") ++
+    allocation.local_impl_headers(scope, syntax, old_headers.cx, old_headers.impl_sigs).expect("old impl headers")
+  let next_entries = allocation.local_headers(scope, next_syntax, next_headers.cx).expect("next method headers") ++
+    allocation.local_impl_headers(scope, next_syntax, next_headers.cx, next_headers.impl_sigs).expect("next impl headers")
+  var old_table = allocation.combine([reserved, allocation.table(old_entries).expect("old method table")]).expect("old combined methods")
+  var next_table = allocation.combine([reserved, allocation.table(next_entries).expect("next method table")]).expect("next combined methods")
+  var replayed = next_headers.cx
+  var impls: List[TFun] = []
+  var defaults: List[TFun] = []
+  # The cold pipeline fixes the tag once per impl, not once per method.
+  var tags: Map[DeclKey, Option[(Int, Ty)]] = map.empty()
+  var order: List[DeclKey] = []
+  for group in function_product.impl_groups(next_methods) {
+    order = order ++ group.methods
+  }
+  order = order ++ function_product.default_keys(next_methods)
+  for key in order {
+    for group in function_product.impl_groups(next_methods) {
+      if len(group.methods) > 0 && group.methods[0] == key {
+        let tag = impl_body_key(replayed, group.trait_name, group.subject)
+        for member in group.methods { tags = map.insert(tags, member, tag) }
+      }
+    }
+    let entry = function_product.method(next_methods, key).expect("next method")
+    let prior = function_product.method(old_methods, key).expect("prior method")
+    let body = map.get(saved, key).expect("method body by key")
+    let plan = allocation.body_plan(old_table, next_table, key, body.product.allocation_start,
+      body.product.allocation_count, replayed.next_id, method_signature(prior), method_signature(entry),
+      body.product.function.ev_syms).expect("method allocation")
+    let (old_lo, old_hi) = method_span(prior)
+    let (next_lo, next_hi) = method_span(entry)
+    let source = source_projection.between(text, edited, old_lo, old_hi, next_lo, next_hi).expect("method source")
+    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: body.after.syms,
+      assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+      callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
+    let projected = body_product.project(view, body.product, replayed.next_id).expect("method projection")
+    replayed = body_product.assemble(replayed, projected).expect("method replay")
+    match entry {
+      function_product.ImplMethod(_, _, _, info) -> {
+        impls = impls ++ [TFun { ..projected.function, impl_of: map.get(tags, key).expect("current impl tag") }]
+      }
+      function_product.TraitDefault(_, _, _, tid) -> {
+        defaults = defaults ++ [TFun { ..projected.function, default_of: Some(tid) }]
+      }
+    }
+    old_table = plan.old_allocations
+    next_table = plan.next_allocations
+  }
+  if len(impls) != 4 || len(defaults) != 2 { panic("method products missing") }
+  let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
+    cx: replayed, functions: [], constants: [], impl_methods: impls, trait_defaults: defaults, tests: [] })
+  let (cold_cx, cold) = check_module(initial, next_syntax, map.empty())
+  if len(assembled_cx.diags) != 0 || len(cold_cx.diags) != 0 { panic("method module diagnostics") }
+  ModuleTrial { replayed_cx: assembled_cx, cold_cx: cold_cx, replayed: assembled, cold: cold, states: [] }
+}
 
 fn reordered_module_sample() -> ModuleTrial !io = {
   let first = "fn first[T](x: T) -> T = { let a = x\n a }\n"

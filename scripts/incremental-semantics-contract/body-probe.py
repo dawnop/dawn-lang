@@ -24,9 +24,9 @@ def main():
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
                       "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
-                      "module-functions", "module-signatures"]
+                      "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its eighteen compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -162,6 +162,10 @@ def main():
                 "module-signatures": (
                     "ModuleTrial { replayed_cx: assembled_cx, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }",
                     "ModuleTrial { replayed_cx: Cx { ..assembled_cx, fns: map.empty() }, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }"),
+                "module-method-boundary": ("len(group.methods) > 0 && group.methods[0] == key",
+                                           "group.key.path == list.take(key.path, 1)"),
+                "module-registered-tag": ('impl_of: map.get(tags, key).expect("current impl tag")',
+                                          'impl_of: Some((info.trait_id, info.subject))'),
             }[args.typed_mutant]
             if typed_source.count(old) != 1:
                 raise RuntimeError("Module assembly mutation anchor drifted")
@@ -227,6 +231,8 @@ def main():
         expected_comparison = ({"inferred-write": "inferred state: replayed Cx differs from cold body boundary",
                                 "module-functions": "module assembly: replayed module differs from cold module",
                                 "module-signatures": "module assembly: replayed Cx differs from cold module state",
+                                "module-method-boundary": "module assembly: replayed module differs from cold module",
+                                "module-registered-tag": "module assembly: replayed module differs from cold module",
                                 "default-write": "default state: replayed Cx differs from cold body boundary",
                                 "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)

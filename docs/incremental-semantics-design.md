@@ -286,6 +286,13 @@ impl方法和trait默认实现已建立独立具名视图：impl的真实注册�
 重排header对照已按key匹配两个泛型impl方法及两个效果多态trait默认签名，再用真实
 来源表投影签名、注册subject和trait ID；并未因此宣称这四个方法body已经完整重放。
 
+方法body重放保留冷路径的两段边界：check_fn/check_trait_default生成未附角色标签的
+TFun，标签在外层补入。impl_body_key从当前Cx与当前impl的trait名/subject计算，按
+原顺序在每个impl的方法循环之前执行一次；不以注册ImplI.subject替代。这次解析会
+读取当时的current_tparams，旧/新声明重排时标签可能不同，必须在当前上下文重算。
+缓存body不携带旧impl标签作为可复用语义输入；默认实现同样在投影后附当前trait ID。
+这保留既有冷结果，不改变泛型impl的语言或发射契约。
+
 ### 推断函数的entry签名与封定签名
 
 分配计划应校验旧/新header的entry签名，再建立整个body区间的ID映射；封定签名是
