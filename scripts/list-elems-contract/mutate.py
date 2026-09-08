@@ -43,7 +43,9 @@ SPREAD_EXPECTATION = """      let list_exp: Option[Ty] = match el_exp {
 
 # a conditional element's body is checked at the element type
 COND_EXPECTATION = """        let body_exp: Option[Ty] =
-          if t != TyNever && is_concrete(cx1, t) { Some(t) } else { el_exp }
+          if t != TyNever && { let (next, concrete) = is_concrete_read(cx1, t)
+            cx1 = next
+            concrete } { Some(t) } else { el_exp }
 """
 
 # a conditional element's condition is a Bool
