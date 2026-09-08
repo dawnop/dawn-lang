@@ -1,5 +1,26 @@
 # 增量语义契约夹具
 
+## Diagnostic rendering read contracts
+
+`python3 scripts/incremental-semantics-contract/diagnostic-reads.py` checks four
+positive modules and 124 compiling negative controls. Each negative must reach
+an owning assertion; compilation errors and unrelated failures are rejected.
+These contracts cover query inputs, answers, relocation, and context threading
+through actual diagnostic consumers. They do not prove production cache reuse.
+
+Use `--shards 3 --shard 0` (then indices 1 and 2) to run disjoint partitions.
+Every partition independently runs all four positive modules. All partitions
+must pass to accept the suite. `--check-shards --shards 3` validates current
+mutation anchors, unique identities, and complete nonempty partitions without
+compiling. `--self-test` exercises eight CLI acceptance/refusal cases, including
+invalid indices and empty partitions. The default invocation still runs every
+negative control.
+
+Set `DAWN_BIN` to a frozen compiler when editing the subject concurrently. The
+script snapshots subject sources and checks private copies; never replace that
+compiler while a run is active. Final bootstrap, native and full selfhost gates
+must still use the current production toolchain.
+
 多文件 LSP 已启用保守前缀缓存；CLI 与 standalone 仍走冷分析。
 下列冷路径命令本身不证明缓存命中，命中由前缀/工作区执行计数门禁另行验证。
 

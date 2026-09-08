@@ -20,7 +20,7 @@ use check/types.{
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union, eff_base, eff_labels,
-  adt_of, trait_of, subst,
+  adt_of, trait_of, subst, ty_show, fn_return_show, ctor_render, sig_render,
   BuiltinTypeI, builtin_type_map,
   builtin_type_visible, builtin_type_visible_at_return,
   builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
@@ -611,6 +611,26 @@ fn resolve_eff_assoc(initial: Cx, subj: String, name: String, lo: Int, hi: Int) 
       }
     }
   }
+}
+
+pub fn signature_display_read(cx: Cx, sig: Sig) -> (Cx, String) = {
+  let answer = sig_render(cx.adts, cx.traits, sig)
+  (observe_type_read(cx, semantic_reads.RenderedSignature(sig, answer)), answer)
+}
+
+pub fn constructor_display_read(cx: Cx, ctor: CtorI) -> (Cx, String) = {
+  let answer = ctor_render(cx.adts, ctor)
+  (observe_type_read(cx, semantic_reads.RenderedConstructor(ctor, answer)), answer)
+}
+
+pub fn function_return_display_read(cx: Cx, ret: Ty, outer_eff: Eff) -> (Cx, String) = {
+  let answer = fn_return_show(cx.adts, ret, outer_eff)
+  (observe_type_read(cx, semantic_reads.RenderedFunctionReturn(ret, outer_eff, answer)), answer)
+}
+
+pub fn type_display_read(cx: Cx, ty: Ty) -> (Cx, String) = {
+  let answer = ty_show(cx.adts, ty)
+  (observe_type_read(cx, semantic_reads.RenderedType(ty, answer)), answer)
 }
 
 fn scoped_type_parameter_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
