@@ -27,6 +27,7 @@ def main():
         ("ambiguous-identity", "if map.get(locations, key) != Some((declaration, None)) { return None }", "if false { return None }"),
     ]
     method_mutations = [
+        ("impl-groups", "groups = groups ++ [ImplGroup { key: parent_key, trait_name: trait_name, subject: subject, methods: group_keys }]", "groups = groups"),
         ("impl-owner", "info.owner == checked.cx.owner_class", "true"),
         ("impl-parameters", "sig.tparams != info.tparams ||", "false ||"),
         ("impl-role", "sig.is_builtin || sig.trait_id != None || sig.op_of != None", "false"),
@@ -52,7 +53,7 @@ def main():
             elif not status or not owning(output, "check/function_product", owner):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: function products " + name, flush=True)
-    print(f"OK: named function/method headers and ten compiling mutants, {time.monotonic() - started:.2f}s")
+    print(f"OK: named function/method headers and eleven compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":

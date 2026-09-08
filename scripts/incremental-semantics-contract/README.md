@@ -62,7 +62,7 @@ test block状态的完整冷模块对照，丢封定签名写入、保留错误i
 必须命中具名的运行时拒绝断言；默认参数另有丢符号写入的完整Cx负控。
 另有丢默认值字典符号的编译负控，必须命中泛型默认值的具名字典断言。
 另有丢默认参数诊断的编译负控，必须命中默认错误态的具名断言。
-编译或链接失败不算通过（typed-all共十八个负控）。typed模式还比较23个body状态产品的
+编译或链接失败不算通过（typed-all共二十个负控）。typed模式还比较23个body状态产品的
 原坐标装配；22次源码编辑的body边界Cx现在由生产`body_product`提取、投影和装配，
 不再调用旧私有观察写集replay。固定header案例的分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
 不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
@@ -96,23 +96,28 @@ owner和原函数名查找签名，别名不替代声明身份。该案例不覆
 来源，Session保留固定baseline；内建来源从实际prelude/builtin元数据生成，三个来源
 重排案例不再手写evidence-pack映射。尚未启用body缓存调度。
 
-另有八个完整模块重放对照：一例函数交换源码顺序、一例前置函数改动后复用六个推断函数，以及上述六个默认
+另有九个完整模块重放对照：一例函数交换源码顺序、一例前置函数改动后复用六个推断函数、一例泛型impl与trait默认方法重排，以及上述六个默认
 参数案例。将重定位结果送入生产assemble_module_bodies，独立反射比较整个TModule和
 最终Cx，包括合成默认函数、签名表和Map顺序。漏装函数/清空最终签名表的两个负控仅
 修改重放侧，必须命中整模块断言；这些是fixture装配/比较器负控，不冒充生产调度门禁。
 
 function_product从真实ModuleHeaders构建顶层函数的具名header索引，保持当前语法与entry
 签名配对；重排案例按DeclKey读取旧body，再按当前keys顺序装配。function-products.py
-十个编译负控守来源、owner、签名错位、多余签名、重复声明、impl参数/角色与trait默认
+十一个编译负控守来源、owner、签名错位、多余签名、重复声明、impl分组/参数/角色与trait默认
 元数据。独立Methods视图保留impl/default分组顺序，读取真实注册ImplI和trait MethodSig，
 不把同名方法混为一个key。header重排案例已投影两个泛型impl方法及两个效果多态默认
-方法的签名/subject/trait ID；尚未用这些视图重放方法body，也不是header依赖有效性证明。
+方法的签名/subject/trait ID。新增整模块案例重放四个泛型impl方法和两个trait默认方法的
+无标签body，再按当前impl组入口计算发射标签、按当前trait登记默认方法标签。
+注册subject不能替代入口上下文的解析结果；每个方法重新计算也不等价于每组一次。
+两个fixture负控分别打破这两个约束，必须命中整模块冷路径对照。
+空impl组由具名索引owning测试覆盖；这不是生产缓存调度或header依赖有效性证明。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个
 owning断言负控，以及ModuleHeaders推断状态/const类型保留的两个负控。
 ModuleBodies将body检查与最终装配分离；五个装配负控覆盖impl/default顺序、const、
-test、默认辅助函数签名登记及泛型字典保留（合计16个）。这只是同revision生产边界，
+test、默认辅助函数签名登记及泛型字典保留；另两个负控守impl入口类型参数与trait查找
+（合计18个）。这只是同revision生产边界，
 不是模块cache有效性证明，也尚未接上跨revision的具名header重组。
 源码token相等不证明AST相等，尤其不能忽略换行的语义。
 `identity.py` 验证生产声明候选身份及八个成功编译负控：重复父声明及子路径、
@@ -127,7 +132,7 @@ native-selfhost-tests 分别执行tree、source及identity的owning依赖闭包�
 覆盖签名/alias/约束写入、frame替换、诊断、环境守卫、分配起点及未进入syms的
 分配ID、类型/效果域、handler cell及非单调ID映射后的symbol插入顺序。
 另有Cx字段分类审计及新增未分类字段的拒绝负控。
-该入口在incremental-projection执行；native脚本另跑body_product的58项owning依赖
+该入口在独立incremental-state任务执行，避免与投影串行后超出660s上限；native脚本另跑body_product的58项owning依赖
 闭包（与其他目标重叠，不相加当独立测试数）。
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、

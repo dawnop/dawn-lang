@@ -21,6 +21,12 @@ def owning(output, module, title):
 def main():
     started = time.monotonic()
     jobs = [
+        ("checker", "impl body tags read the entry scope without publishing lookup diagnostics", [
+            ("impl-entry-scope", "let (_, subj) = resolve_type(cx, subject)",
+             "let (_, subj) = resolve_type(Cx { ..cx, current_tparams: map.empty() }, subject)"),
+            ("impl-entry-trait", "match map.get(cx.traits_by_name, trait_name) {\n    Some(t) -> {\n      let (_, subj) = resolve_type(cx, subject)",
+             "match Some(77) {\n    Some(t) -> {\n      let (_, subj) = resolve_type(cx, subject)"),
+        ]),
         ("checker", "module body assembly preserves roles and synthesized default registration", [
             ("assembly-role-order", "fns_out ++ synth ++ products.impl_methods ++ products.trait_defaults",
              "fns_out ++ synth ++ products.trait_defaults ++ products.impl_methods"),
@@ -75,7 +81,7 @@ def main():
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
                 print("OK: projection " + module + " " + name, flush=True)
             target.write_text(original)
-    print(f"OK: source/evidence/callee/header/assembly projection and sixteen compiling mutants, {time.monotonic() - started:.2f}s")
+    print(f"OK: source/evidence/callee/header/assembly projection and eighteen compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":

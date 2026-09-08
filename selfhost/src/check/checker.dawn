@@ -11372,6 +11372,18 @@ pub type ModuleBodies = {
 pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =
   assemble_module_bodies(check_module_body_products(headers))
 
+## Preserve the cold pipeline's body-entry lookup, including discarded
+## diagnostics. Registered impl metadata is not a replacement for this view
+## of the current context. Compute once per impl, before checking its methods.
+pub fn impl_body_key(cx: Cx, trait_name: String, subject: TypeRef) -> Option[(Int, Ty)] !io =
+  match map.get(cx.traits_by_name, trait_name) {
+    Some(t) -> {
+      let (_, subj) = resolve_type(cx, subject)
+      if subj == TyError { None } else { Some((t, subj)) }
+    }
+    None -> None
+  }
+
 pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
   let m = headers.syntax
   var cx1 = headers.cx
@@ -11499,13 +11511,7 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
     let msigs = impl_sigs[ii]
     # recover (trait id, subject) for codegen's mangled impl-method names;
     # both lookups re-run what registration already validated, diags discarded
-    let imp_key: Option[(Int, Ty)] = match map.get(cx1.traits_by_name, imd.trait_name) {
-      Some(t) -> {
-        let (_, subj) = resolve_type(cx1, imd.subject)
-        if subj == TyError { None } else { Some((t, subj)) }
-      }
-      None -> None
-    }
+    let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
     var mi = 0
     for me in imd.methods {
       match msigs[mi] {
@@ -11792,6 +11798,21 @@ test "check_module: a whole module checks end to end" {
   assert len(tm.fns) == 3
   assert len(tm.consts) == 1
   assert len(tm.tests) == 1
+}
+
+test "impl body tags read the entry scope without publishing lookup diagnostics" {
+  let subject = TNamed("List", [TNamed("T", [], [], 1, 2)], [], 0, 3)
+  let initial = Cx { ..test_cx(), traits_by_name: map.from([("Read", 77)]),
+    current_tparams: map.from([("T", TyInt)]) }
+  assert impl_body_key(initial, "Read", subject) == Some((77, TyList(TyInt)))
+  let changed = Cx { ..initial, current_tparams: map.from([("T", TyString)]) }
+  assert impl_body_key(changed, "Read", subject) == Some((77, TyList(TyString)))
+  assert impl_body_key(initial, "Missing", subject) == None
+  # Keep the existing whole-subject TyError test: a nested unresolved type
+  # is not silently converted to a new refusal policy by this extraction.
+  let absent = Cx { ..initial, current_tparams: map.empty() }
+  assert impl_body_key(absent, "Read", subject) == Some((77, TyList(TyError)))
+  assert absent.diags == []
 }
 
 test "module body assembly preserves roles and synthesized default registration" {
