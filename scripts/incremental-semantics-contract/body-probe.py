@@ -23,9 +23,10 @@ def main():
     parser.add_argument("--typed", action="store_true", help="compare the production typed-tree mapper against the cold bodies")
     typed_variants = ["local", "capture", "dynamic", "position", "assertion", "pack-order", "evidence-origin",
                       "inferred-write", "test-state", "symbol-order", "default-write", "default-dictionary",
-                      "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics"]
+                      "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
+                      "module-functions", "module-signatures"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its sixteen compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its eighteen compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -71,7 +72,7 @@ def main():
     for directory in ("selfhost", "compiler-plan"):
         shutil.copytree(ROOT / directory, output / directory,
                         ignore=shutil.ignore_patterns("build", ".dawn"))
-    if args.typed_mutant:
+    if args.typed_mutant and not args.typed_mutant.startswith("module-"):
         target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant == "default-dictionary" else
                     "allocation.dawn" if args.typed_mutant.startswith("impl-") else
                     "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
@@ -124,6 +125,9 @@ def main():
             probe = probe.replace(old, new)
         probe += "\npub fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
         probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
+        probe += "pub fn module_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.module_samples()\n"
+        probe += "pub fn module_count(xs: List[typed_projection.ModuleTrial]) -> Int = len(xs)\n"
+        probe += "pub fn module_at(xs: List[typed_projection.ModuleTrial], i: Int) -> typed_projection.ModuleTrial = xs[i]\n"
         probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
         probe += "pub fn default_samples() -> List[typed_projection.StateTrial] !io = typed_projection.default_samples()\n"
         probe += "pub fn import_samples() -> List[typed_projection.StateTrial] !io = typed_projection.import_samples()\n"
@@ -149,7 +153,20 @@ def main():
             raise RuntimeError("Typed corpus extension anchor drifted")
         probe = probe.replace(old, old + " ++\n" + (HERE / "typed-extra.dawn.txt").read_text().strip())
         probe = probe.replace('if d.name == "wrong" { 1 }', 'if d.name == "wrong" || d.name == "asserted" { 1 }')
-        (fixture / "src/typed_projection.dawn").write_text((HERE / "typed-projection.dawn.txt").read_text())
+        typed_source = (HERE / "typed-projection.dawn.txt").read_text()
+        if args.typed_mutant and args.typed_mutant.startswith("module-"):
+            # Corrupt only the replay-side assembly input/result. Changing the
+            # common assembler would corrupt the cold oracle too and prove less.
+            old, new = {
+                "module-functions": ("functions = functions ++ [moved]", "functions = functions"),
+                "module-signatures": (
+                    "ModuleTrial { replayed_cx: assembled_cx, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }",
+                    "ModuleTrial { replayed_cx: Cx { ..assembled_cx, fns: map.empty() }, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }"),
+            }[args.typed_mutant]
+            if typed_source.count(old) != 1:
+                raise RuntimeError("Module assembly mutation anchor drifted")
+            typed_source = typed_source.replace(old, new)
+        (fixture / "src/typed_projection.dawn").write_text(typed_source)
     (fixture / "src/bodyprobe.dawn").write_text(probe)
     identity = (HERE / ("declaration-identity.dawn.txt" if args.typed else "body-identity.dawn.txt")).read_text()
     relocation = (HERE / "body-relocate.dawn.txt").read_text()
@@ -208,6 +225,8 @@ def main():
             print("OK: compiling impl-header mutant rejected: " + args.typed_mutant)
             return
         expected_comparison = ({"inferred-write": "inferred state: replayed Cx differs from cold body boundary",
+                                "module-functions": "module assembly: replayed module differs from cold module",
+                                "module-signatures": "module assembly: replayed Cx differs from cold module state",
                                 "default-write": "default state: replayed Cx differs from cold body boundary",
                                 "symbol-order": "reordered header: replayed Cx differs from cold body boundary",
                                 "test-state": "test state: replayed Cx differs from cold body boundary"}.get(args.typed_mutant)

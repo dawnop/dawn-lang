@@ -1070,11 +1070,12 @@ jobs:
   incremental-projection:
     runs-on: ubuntu-latest
     # Run 34159136910 took 170s before state products were added.
-    # Local complete runs on 2026-09-08: typed/state oracle 99.24s,
-    # source/origin/callee/header/assembly 70.49s, identity 36.38s,
+    # Local complete runs on 2026-09-08: typed/state oracle 136.88s,
+    # source/origin/callee/header/assembly 70.49s,
     # state's fifteen mutants 67.41s. Allocation now runs separately below.
     # Double rounded values and retain the checkout/toolchain allowance:
-    # 2*(100+71+37+68)+38=590s.
+    # Identity now runs with allocation below to keep this under the pole.
+    # 2*(137+71+68)+38=590s.
     # budget: 3x 590s planning value
     timeout-minutes: 30
     steps:
@@ -1086,7 +1087,6 @@ jobs:
         run: |
           python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
           python3 scripts/incremental-semantics-contract/projection.py
-          python3 scripts/incremental-semantics-contract/identity.py
           python3 scripts/incremental-semantics-contract/state-product.py
 
   incremental-allocation:
@@ -1096,9 +1096,11 @@ jobs:
     # allowance. Do not push projection past
     # the run-pole by appending this growing suite to its serial critical path.
     # The six production producer mutants took 94.65s on the same date.
-    # 2*(69+95)+38=366s planning value.
-    # budget: 3x 366s planning value
-    timeout-minutes: 19
+    # Named function headers took 42.50s; retain that over the later 29.63s.
+    # Identity's eight mutants took 36.38s and move here from projection.
+    # 2*(69+95+43+37)+38=526s planning value.
+    # budget: 3x 526s planning value
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1108,6 +1110,8 @@ jobs:
         run: |
           python3 scripts/incremental-semantics-contract/allocation.py
           python3 scripts/incremental-semantics-contract/provenance.py
+          python3 scripts/incremental-semantics-contract/function-products.py
+          python3 scripts/incremental-semantics-contract/identity.py
 
   incremental-prefix:
     runs-on: ubuntu-latest
@@ -3328,9 +3332,10 @@ jobs:
     # Run 34159136910 took 324s with identity. Keep the conservative 418s
     # base and add 2*13s for state products (12.70s local on 2026-09-08).
     # Allocation's separate target took 12.08s locally on 2026-09-08.
-    # Keep the 444s base and add 2*13s = 470s.
-    # budget: 3x 470s planning value (see the note above)
-    timeout-minutes: 24
+    # Keep the 470s base; the named-header target took 37.12s locally.
+    # Add 2*38s = 546s without reducing the prior allowance.
+    # budget: 3x 546s planning value (see the note above)
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
 

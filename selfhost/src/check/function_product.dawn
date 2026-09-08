@@ -1,0 +1,91 @@
+# Entry signatures and syntax must stay paired when declarations move. The
+# ordered keys describe the current source; lookup uses declaration identity,
+# never a saved list index. This is provenance, not dependency validity, and
+# the full header checker still runs before constructing this view.
+use std/map
+use check/checker.{ModuleHeaders, check_module_headers}
+use check/cx.{Cx, ModExports, cx_new}
+use check/types.{Sig}
+use check/identity
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, module_key}
+use front/ast.{FnDecl, DFn}
+use front/parser
+
+pub type Header = { key: DeclKey, syntax: FnDecl, signature: Sig }
+type Data = { order: List[DeclKey], entries: Map[DeclKey, Header] }
+pub opaque type Headers = Data
+
+## An ambiguous or erroneous header set has no reusable function view. The
+## ordinary checker still owns error recovery; refusal here changes no output.
+pub fn headers(scope: ModuleKey, checked: ModuleHeaders) -> Option[Headers] = {
+  if len(checked.cx.diags) != 0 || checked.cx.owner_class != Some(scope.emission_owner) { return None }
+  match checked.cx.src_path {
+    Some(path) -> if path == "" || scope.source != path { return None }
+    None -> if scope.source != "" { return None }
+  }
+  let declarations = identity.declarations(scope, checked.syntax)
+  var locations: Map[DeclKey, (Int, Option[Int])] = map.empty()
+  for e in declarations { locations = map.insert(locations, e.key, (e.declaration, e.member)) }
+  var entries: Map[DeclKey, Header] = map.empty()
+  var order: List[DeclKey] = []
+  var declaration = 0
+  var function = 0
+  for d in checked.syntax.decls {
+    match d {
+      DFn(syntax) -> {
+        if function >= len(checked.sigs) { return None }
+        let signature = checked.sigs[function]
+        if signature.name != syntax.name || signature.owner != checked.cx.owner_class { return None }
+        let key = DeclKey { scope: scope, path: [Named(FunctionDecl, syntax.name)] }
+        if map.get(locations, key) != Some((declaration, None)) { return None }
+        entries = map.insert(entries, key, Header { key: key, syntax: syntax, signature: signature })
+        order = order ++ [key]
+        function = function + 1
+      }
+      _ -> ()
+    }
+    declaration = declaration + 1
+  }
+  if function != len(checked.sigs) { return None }
+  Some(Data { order: order, entries: entries })
+}
+
+pub fn keys(headers: Headers) -> List[DeclKey] = { let data: Data = headers
+  data.order
+}
+
+pub fn get(headers: Headers, key: DeclKey) -> Option[Header] = { let data: Data = headers
+  map.get(data.entries, key)
+}
+
+test "function products bind entry signatures to stable current declarations" {
+  let scope = module_key("world", "module", "module", "module.dawn")
+  let (syntax, ds) = parser.parse_module("fn first(x: Int) -> Int = x\nconst K: Int = 1\nfn second() = K\n")
+  let (edited, eds) = parser.parse_module("# moved\nfn second() = K\nconst K: Int = 1\nfn first(x: Int) -> Int = x\n")
+  assert ds == [] && eds == []
+  let env: Map[String, ModExports] = map.empty()
+  let initial = cx_new(Some("module"), Some("module.dawn"))
+  let old = check_module_headers(initial, syntax, env)
+  let next = check_module_headers(initial, edited, env)
+  let a = headers(scope, old).expect("old function headers")
+  let b = headers(scope, next).expect("new function headers")
+  let ka = keys(a)
+  let kb = keys(b)
+  assert len(ka) == 2
+  assert ka[0] == kb[1] && ka[1] == kb[0]
+  let second = get(b, ka[1]).expect("moved second")
+  assert second.signature.inferring
+  assert second.syntax.name == "second"
+  assert second.syntax != get(a, ka[1]).expect("old second").syntax
+  assert get(b, DeclKey { ..ka[0], scope: ModuleKey { ..scope, world: "other" } }) == None
+  assert headers(ModuleKey { ..scope, source: "elsewhere.dawn" }, old) == None
+  assert headers(ModuleKey { ..scope, emission_owner: "other" }, old) == None
+  assert headers(scope, ModuleHeaders { ..old, sigs: [] }) == None
+  assert headers(scope, ModuleHeaders { ..old, sigs: old.sigs ++ [old.sigs[0]] }) == None
+  assert headers(scope, ModuleHeaders { ..old, sigs: [old.sigs[1], old.sigs[0]] }) == None
+  let (duplicate, _) = parser.parse_module("fn same() -> Int = 1\nfn same() -> Int = 2\n")
+  let bad = check_module_headers(initial, duplicate, env)
+  assert headers(scope, bad) == None
+  # Identity must still refuse a duplicate if a caller accidentally drops diagnostics.
+  assert headers(scope, ModuleHeaders { ..bad, cx: Cx { ..bad.cx, diags: [] } }) == None
+}
