@@ -82,7 +82,8 @@ use check/cx.{
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
-  resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read, is_const_serializable, const_refusal_hint, no_sig,
+  resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read,
+  java_methods_read, java_constructors_read, java_static_fields_read, is_const_serializable, const_refusal_hint, no_sig,
   TySpan
 }
 use check/passes.{
@@ -3494,7 +3495,7 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     let (observed, next_ty, next_tree) = check_method_call(Cx { ..scope, function_reads: Some([]) }, receiver, "missing", [], None, 8, 15, 0, 17)
     assert ty == TyError && next_ty == ty && next_tree == tree
     assert cold.diags == observed.diags && len(cold.diags) == 1 && cold.next_id == observed.next_id
-    assert observed.function_reads == expected
+    assert observed.function_reads == Some([semantic_reads.JavaClassInfo("pkg.Box", metadata), semantic_reads.JavaMethods("pkg.Box", [])])
   }
   for list_argument in [false, true] {
     let ats: List[Option[Ty]] = if list_argument { [Some(TyList(TyTuple([TyInt, TyInt])))] } else { [None] }
@@ -3505,6 +3506,61 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     assert cold.diags == observed.diags && len(cold.diags) == 1
     assert str.contains(cold.diags[0].msg, "ReadableSimple")
     assert cold.next_id == observed.next_id && observed.function_reads == expected
+  }
+}
+
+test "java member reads preserve candidate lists on success and missing results" {
+  let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "ReadableBox",
+    is_interface: false, is_primitive: false, is_array: false }
+  let method = tj_static("get", [], "long", "pkg.Parent")
+  let other_method = tj_static("ignored", [], "long", "pkg.Other")
+  let ctor = JCtor { param_cls: [], is_varargs: false, desc: "a constructor" }
+  let other_ctor = JCtor { param_cls: ["long"], is_varargs: false, desc: "z constructor" }
+  let field = JField { name: "VALUE", type_cls: "long", decl_cls: "pkg.Parent" }
+  let other_field = JField { name: "OTHER", type_cls: "long", decl_cls: "pkg.Other" }
+  for index in 0..6 {
+    let empty = index >= 3
+    let kind = index % 3
+    let methods: List[JMethod] = if empty { [] } else { [other_method, method, method] }
+    let constructors: List[JCtor] = if empty { [] } else { [other_ctor, ctor, other_ctor] }
+    let fields: List[JField] = if empty { [] } else { [other_field, field, field] }
+    let oracle = Jsig { ..jsig_refused(), on: true,
+      methods_of: fq => { if kind != 0 || fq != "pkg.Box" { panic("unexpected methods query") }
+        methods },
+      ctors_of: fq => { if kind != 1 || fq != "pkg.Box" { panic("unexpected constructors query") }
+        constructors },
+      static_fields_of: fq => { if kind != 2 || fq != "pkg.Box" { panic("unexpected fields query") }
+        fields } }
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let enabled = Cx { ..initial, function_reads: Some([]) }
+    let name = if kind == 1 { "new" } else { "get" }
+    let (cold, ty, tree) = if kind == 2 { check_java_static_field(initial, "pkg.Box", "VALUE", 4, 9, 0, 9) }
+    else { check_java_call(initial, info, None, true, name, [], 4, 9, 0, 9) }
+    let (observed, next_ty, next_tree) = if kind == 2 { check_java_static_field(enabled, "pkg.Box", "VALUE", 4, 9, 0, 9) }
+    else { check_java_call(enabled, info, None, true, name, [], 4, 9, 0, 9) }
+    let expected_ty = if empty { TyError } else if kind == 1 { TyJava("pkg.Box", "ReadableBox") } else { TyInt }
+    assert ty == expected_ty && next_ty == ty && next_tree == tree
+    assert cold.diags == observed.diags && len(cold.diags) == if empty { 1 } else { 0 }
+    assert cold.next_id == observed.next_id
+    let fact = if kind == 0 { semantic_reads.JavaMethods("pkg.Box", methods) }
+    else if kind == 1 { semantic_reads.JavaConstructors("pkg.Box", constructors) }
+    else { semantic_reads.JavaStaticFields("pkg.Box", fields) }
+    assert observed.function_reads == Some([fact])
+  }
+}
+
+test "java member reads preserve argument and instance constructor short circuits" {
+  let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "Box",
+    is_interface: false, is_primitive: false, is_array: false }
+  for index in 0..3 {
+    let initial = test_cx()
+    let name = if index == 2 { "get" } else { "new" }
+    let args: List[Expr] = if index == 0 { [] } else { [EVar("missing", 5, 12)] }
+    let (cold, ty, tree) = check_java_call(initial, info, None, index != 0, name, args, 1, 4, 0, 13)
+    let (observed, next_ty, next_tree) = check_java_call(Cx { ..initial, function_reads: Some([]) }, info, None, index != 0, name, args, 1, 4, 0, 13)
+    assert ty == TyError && next_ty == ty && next_tree == tree
+    assert cold.diags == observed.diags && len(cold.diags) == 1
+    assert cold.next_id == observed.next_id
   }
 }
 
@@ -10050,7 +10106,9 @@ fn check_java_call(
       return (cerr(cx1, "`.new` is called on the class, not on an instance", nlo, nhi),
         TyError, XError(lo, hi))
     }
-    let cands = sort_ctors(cx1.jsig.ctors_of(cls.fqcn))
+    let (constructors_cx, constructors) = java_constructors_read(cx1, cls.fqcn)
+    cx1 = constructors_cx
+    let cands = sort_ctors(constructors)
     var bph = -1
     var bsc = -1
     var best: List[JCtor] = []
@@ -10119,7 +10177,9 @@ fn check_java_call(
     return (cx1, rt, XJava(call, lo, hi, rt))
   }
   var matching: List[JMethod] = []
-  for m0 in cx1.jsig.methods_of(cls.fqcn) {
+  let (methods_cx, methods) = java_methods_read(cx1, cls.fqcn)
+  cx1 = methods_cx
+  for m0 in methods {
     if m0.name == name && m0.is_static == is_static { matching = matching ++ [m0] }
   }
   var same_name: List[JMethod] = []
@@ -10234,7 +10294,7 @@ fn static_field_target(cx: Cx, target: Expr) -> Option[String] =
 ## §9.2 exactly like a method return (references wrap in Option, small ints/floats
 ## widen); the read is !io like every Java interop.
 fn check_java_static_field(
-  cx: Cx,
+  initial: Cx,
   fq: String,
   fname: String,
   flo: Int,
@@ -10242,8 +10302,9 @@ fn check_java_static_field(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
+  let (cx, fields) = java_static_fields_read(initial, fq)
   var found: Option[JField] = None
-  for f in cx.jsig.static_fields_of(fq) {
+  for f in fields {
     match found {
       None -> if f.name == fname { found = Some(f) }
       Some(_) -> ()

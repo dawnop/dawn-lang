@@ -253,8 +253,8 @@ label IDs and variable IDs relocate independently, including equal input integer
 with different destinations. Six complete Cx/module cases cover ordinary effects,
 variables, aliases and error recovery. Runtime query wiring and complete checker
 dependency coverage remain outstanding; these facts do not enable caching.
-The separate incremental-effect-reads job also runs associated and Java reads,
-with a 644s planning value. Environment controls move intact to the type job,
+The separate incremental-effect-reads job also runs associated reads,
+with a 424s planning value. Environment controls move intact to the type job,
 which has a 652s planning value; both preserve the unchanged 660s pole.
 
 `environment-reads.py` adds 16 compiling controls for reserved and ordinary
@@ -271,10 +271,24 @@ class metadata answer. Its 21 compiling controls cover answer keys, answers,
 consumer context threading, every JClass field, and BodyProduct read capture.
 The five metadata consumers include reference returns, static and instance
 dispatch, and SAM/List diagnostics. Projection retains the lookup key separately
-from the returned class name. Four additional complete Cx/module cases bring
-the observation oracle to 66 cases. Other Java query kinds, classpath/lifetime
+from the returned class name. Four complete Cx/module cases cover these class
+metadata consumers. Other Java query kinds, classpath/lifetime
 validity and production query admission remain required; this is not a complete
 Java dependency cache.
+
+`java-member-reads.py` adds 33 compiling controls for ordered method, constructor
+and static-field answers. Every metadata field, query key, list order and
+consumer context is covered by owning assertions. Lists retain duplicate and
+unused candidates before filtering or sorting, and empty results are recorded.
+The BodyProduct fixture captures and projects all three facts; six additional
+complete Cx/module cases bring the observation oracle to 72 cases. Argument
+errors and instance constructor calls must still short-circuit before metadata
+queries. Assignability, SAM/component and remaining namespace/import queries
+are separate requirements; recording candidates does not authorize cache reuse.
+The Java class and member suites run together in incremental-java-reads with a
+608s planning value (109.07s and 174.12s local measurements, rounded up, doubled,
+plus 38s setup). Adding member controls to the former effect/Java job would
+exceed the unchanged 660s pole. All existing suites and controls are retained.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
