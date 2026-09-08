@@ -29,7 +29,8 @@ use check/types.{
   prelude_adts, prelude_traits, first_minted_id
 }
 use check/jsig.{Jsig, jsig_refused}
-use check/semantic_reads.{FunctionRead}
+use check/semantic_reads
+use check/semantic_reads.{FunctionRead, AliasTypeHeader, ExportDiagnostic}
 use front/suggest
 
 ## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
@@ -624,11 +625,14 @@ fn record_span_at(cx: Cx, lo: Int, hi: Int, kids: List[TypeRef]) -> Cx =
   }
 
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
-pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
-  match map.get(cx.alias_resolved, al.name) {
+pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
+  let cached = map.get(initial.alias_resolved, al.name)
+  var cx = observe_type_read(initial, semantic_reads.LocalAliasTarget(al.name, cached))
+  match cached {
     Some(t) -> return (cx, t)
     None -> ()
   }
+  cx = observe_type_read(cx, semantic_reads.LocalAliasSource(al.name, al.owner, al.target))
   let ref = match al.target {
     None -> {
       let cx1 = Cx { ..cx, alias_resolved: map.insert(cx.alias_resolved, al.name, TyError) }
@@ -636,12 +640,15 @@ pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx
     }
     Some(r) -> r
   }
-  if set.has(cx.alias_resolving, al.name) {
+  let active = set.has(cx.alias_resolving, al.name)
+  cx = observe_type_read(cx, semantic_reads.LocalAliasResolving(al.name, active))
+  if active {
     var cx1 = cerr_h(cx, "type alias `" ++ al.name ++ "` refers to itself", use_lo, use_hi,
       "aliases are transparent and cannot be recursive")
     cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, al.name, TyError) }
     return (cx1, TyError)
   }
+  cx = observe_type_read(cx, semantic_reads.LocalAliasBinders(al.name, al.tparams, al.eparams))
   var tp: Map[String, Ty] = map.empty()
   for v in al.tparams {
     match v {
@@ -791,7 +798,7 @@ fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, T
 ## separate from values (spec §10.3), so a lowercase name in type position
 ## can only be one of these.
 fn resolve_qual(
-  cx: Cx,
+  initial: Cx,
   q: String,
   name: String,
   targs: List[TypeRef],
@@ -799,6 +806,8 @@ fn resolve_qual(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty) !io = {
+  var cx = initial
+  cx = observe_type_read(cx, semantic_reads.ExportPresence(q, map.has(cx.module_exports, q)))
   let exp = match map.get(cx.module_exports, q) {
     None ->
       return (cerr_h(cx, "unknown module alias `" ++ q ++ "` in a type position", lo, hi,
@@ -806,7 +815,10 @@ fn resolve_qual(
         TyError)
     Some(e) -> e
   }
-  match map.get(exp.aliases, name) {
+  let alias_answer = map.get(exp.aliases, name)
+  let header_answer = match alias_answer { None -> None, Some(al) -> Some(alias_type_header(al)) }
+  cx = observe_type_read(cx, semantic_reads.QualifiedAliasHeader(q, name, header_answer))
+  match alias_answer {
     Some(al) -> {
       let enames = alias_enames(al)
       let (cxe, bad_earg) = check_alias_eargs(cx, al, enames, eargs, lo, hi)
@@ -816,12 +828,14 @@ fn resolve_qual(
       }
       # imported aliases carry their declaring module's resolution; nothing
       # here re-resolves the target against this module's scope
-      let target = match map.get(exp.alias_resolved, name) {
+      let target_answer = map.get(exp.alias_resolved, name)
+      let target_cx = observe_type_read(cxe, semantic_reads.QualifiedAliasTarget(q, name, target_answer))
+      let target = match target_answer {
         Some(t) -> t
         None -> TyError
       }
-      if target == TyError { return (cxe, TyError) }
-      let (cxs, em0) = earg_subst(cxe, al.eparams, eargs)
+      if target == TyError { return (target_cx, TyError) }
+      let (cxs, em0) = earg_subst(target_cx, al.eparams, eargs)
       if len(al.tparams) == 0 {
         let m0: Map[Int, Ty] = map.empty()
         return (record_span_at(cxs, lo, hi, no_trefs()),
@@ -848,10 +862,14 @@ fn resolve_qual(
     }
     None -> ()
   }
-  match map.get(exp.types_by_name, name) {
+  let nominal_answer = map.get(exp.types_by_name, name)
+  cx = observe_type_read(cx, semantic_reads.NominalTypeName(Some(q), name, nominal_answer))
+  match nominal_answer {
     Some(aid) -> {
       let info = adt_of(cx.adts, aid)
-      let (cxe, bad_earg) = refuse_nominal_earg(cx, info.name,
+      let shape_cx = observe_type_read(cx, semantic_reads.NominalTypeShape(aid, info.name,
+        len(info.tparams), info.eparams, info.is_record))
+      let (cxe, bad_earg) = refuse_nominal_earg(shape_cx, info.name,
         if info.is_record { "a record type" } else { "a variant type" },
         len(info.eparams) > 0, eargs, lo, hi)
       if bad_earg { return (cxe, TyError) }
@@ -879,11 +897,21 @@ fn resolve_qual(
             "exported types: ${join(sort(pool), ", ")}"
           }
       }
-      (cerr_h(cx, "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`",
-        lo, hi, hint), TyError)
+      let message = "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`"
+      let diagnostic = ExportDiagnostic { message: message, hint: Some(hint) }
+      let diagnostic_cx = observe_type_read(cx, semantic_reads.ExportDiagnosticAnswer(semantic_reads.TypeDiagnostic,
+        q, name, Some(diagnostic)))
+      (cerr_h(diagnostic_cx, message, lo, hi, hint), TyError)
     }
   }
 }
+
+## This log is optional and does not make a partial read set cache-valid.
+fn observe_type_read(cx: Cx, fact: FunctionRead) -> Cx =
+  match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, fact) }
+  }
 
 ## ---- effect arguments at a type application (spec §6.3) ----
 
@@ -1042,7 +1070,7 @@ fn alias_enames(al: AliasE) -> List[String] = {
 }
 
 fn resolve_named(
-  cx: Cx,
+  initial: Cx,
   name: String,
   targs: List[TypeRef],
   eargs: List[EffArg],
@@ -1050,6 +1078,7 @@ fn resolve_named(
   hi: Int,
   type_use: TypeUse
 ) -> (Cx, Ty) !io = {
+  var cx = initial
   # Return-only names are hard-reserved, so they win even if a rejected
   # declaration left a same-spelled type parameter in the recovery scope.
   match map.get(cx.btypes, name) {
@@ -1077,7 +1106,10 @@ fn resolve_named(
     }
     None -> ()
   }
-  match map.get(cx.aliases, name) {
+  let local_alias = map.get(cx.aliases, name)
+  let local_header = match local_alias { None -> None, Some(al) -> Some(alias_type_header(al)) }
+  cx = observe_type_read(cx, semantic_reads.LocalAliasHeader(name, local_header))
+  match local_alias {
     Some(al) -> {
       let enames = alias_enames(al)
       # the effect axis is asked first: an argument on an axis the declaration
@@ -1165,7 +1197,9 @@ fn resolve_named(
     }
     None -> ()
   }
-  match map.get(cx.adts_by_name, name) {
+  let local_nominal = map.get(cx.adts_by_name, name)
+  cx = observe_type_read(cx, semantic_reads.NominalTypeName(None, name, local_nominal))
+  match local_nominal {
     None -> {
       let pool = map.keys(cx.adts_by_name) ++ map.keys(cx.aliases) ++
         map.keys(cx.java_classes) ++ public_builtin_type_names()
@@ -1174,11 +1208,15 @@ fn resolve_named(
         None -> "builtin types: " ++ join(public_builtin_type_names(), ", ") ++
           " — or declare `type " ++ name ++ " = ...`"
       }
-      (cerr_h(cx, "unknown type: ${name}", lo, hi, hint), TyError)
+      let diagnostic = ExportDiagnostic { message: "unknown type: ${name}", hint: Some(hint) }
+      let diagnostic_cx = observe_type_read(cx, semantic_reads.LocalTypeDiagnostic(name, diagnostic))
+      (cerr_h(diagnostic_cx, diagnostic.message, lo, hi, hint), TyError)
     }
     Some(aid) -> {
       let info = adt_of(cx.adts, aid)
-      let (cxe, bad_earg) = refuse_nominal_earg(cx, info.name,
+      let local_shape_cx = observe_type_read(cx, semantic_reads.NominalTypeShape(aid, info.name,
+        len(info.tparams), info.eparams, info.is_record))
+      let (cxe, bad_earg) = refuse_nominal_earg(local_shape_cx, info.name,
         if info.is_record { "a record type" } else { "a variant type" },
         len(info.eparams) > 0, eargs, lo, hi)
       if bad_earg { return (cxe, TyError) }
@@ -1206,6 +1244,10 @@ fn resolve_named(
 ## since a target need not mention every parameter.
 pub fn wrap_opaque(al: AliasE, args: List[Ty], target: Ty) -> Ty =
   if al.is_opaque { TyOpaque(al.id, al.name, al.owner, args, target) } else { target }
+
+fn alias_type_header(al: AliasE) -> AliasTypeHeader =
+  AliasTypeHeader { name: al.name, tparams: al.tparams, eparams: al.eparams,
+    opaque_id: if al.is_opaque { Some(al.id) } else { None }, owner: al.owner }
 
 ## The std types whose representation means different things on the two
 ## backends, and so cannot be written down in Core.

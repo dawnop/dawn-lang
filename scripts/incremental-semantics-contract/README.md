@@ -183,7 +183,7 @@ closure, which overlaps other targets and must not be counted as independent tes
 unqualified answers, diagnostic candidate lists, qualified signatures and module
 alias paths, including misses. Decisions preserve local shadowing, expected-type
 short circuits and argument scheduling. Capture/projection retain all four fact
-variants. The typed oracle additionally compares 26 enabled/disabled observation
+variants. The typed oracle additionally compares 44 enabled/disabled observation
 cases against complete cold Cx and module products; its read-state mutant must hit
 the whole-Cx assertion. Recording remains disabled by default and is not complete
 namespace coverage or production body-cache admission.
@@ -205,6 +205,34 @@ runs the export controls separately, preserving the unchanged 660s planning pole
 The incremental-reads job runs these read controls and the existing `projection.py`
 suite. Moving source projection out of incremental-projection keeps the expanded
 typed oracle below the unchanged 660s planning pole without removing any controls.
+
+`type-reads.py` adds 45 compiling controls for qualified alias headers and resolved
+targets, local/qualified nominal name/shape reads, type diagnostics, and local
+alias cache/cycle decisions. Eighteen
+further whole-state cases cover transparent/opaque aliases, effect substitution,
+nominal arity errors, missing types/modules and earlier shadowing branches.
+Alias type/effect binders project separately; a
+transparent alias has no nominal ID to relocate. The BodyProduct fixture captures
+and assembles the four reference-bearing type fact forms plus exact local type
+diagnostics, including actual effect-row relocation. One control bypasses only
+that callback; two more corrupt the projected diagnostic message or hint. Each
+must fail its owning read comparison. Cached alias targets retain the distinction
+between no cache entry and a cached error; cycle reads occur only after a cache
+miss with a declaration target. Owning tests preserve those short circuits, and
+the body-product fixture relocates cached targets while retaining cycle answers.
+After a cache miss, declaration source reads retain the alias name, owner and
+optional complete target syntax. Source-aware function and constant projection
+entry points use an explicit owner-aware callback; source-free entry points
+reject present declaration targets. Owning tests map identical original body and
+foreign declaration offsets to different destinations using the production
+header syntax projector, and reject an incorrect owner. Missing targets do not
+require a fabricated source mapping.
+The `incremental-type-reads` CI job runs this suite separately. Local alias lookup
+records both positive headers and misses after the reserved-builtin/type-parameter
+short circuits; uncached expansion records its actual type/effect binder inputs.
+Both header forms share extraction and projection, with independent reference
+domains. Builtin/current-environment dependencies, source-view runtime wiring, associated types/effects and
+Java reflection still need their own observed dependencies and validity boundary.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

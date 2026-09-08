@@ -180,7 +180,9 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
       replayed: observed, cold: cold, states: [] }]
   }
   let (exports_ast, export_pd) = parser.parse_module("pub type Choice = Item(value: Int) | Empty\n" ++
-    "pub const ANSWER: Int = 1\npub fn visible() -> Int = 1\nfn hidden() -> Int = 2\n")
+    "pub const ANSWER: Int = 1\npub fn visible() -> Int = 1\nfn hidden() -> Int = 2\n" ++
+    "pub alias Plain = Int\npub alias Mapper[T, !e] = fn(T) -> T !e\n" ++
+    "pub opaque type Id = Int\npub type Box[T] = { value: T }\n")
   if export_pd != [] { panic("export observation provider parse") }
   let (exports_cx, _) = check_module(cx_new(Some("exports"), None), exports_ast, map.empty())
   if exports_cx.diags != [] { panic("export observation provider check") }
@@ -212,6 +214,44 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     let (cold_cx, cold) = check_module(initial, syntax, export_env)
     let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, export_env)
     if len(cold_cx.diags) != 1 { panic("refutability observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  for sample in [("h.Plain", 0), ("h.Mapper[Int, !io]", 0), ("h.Id", 0), ("h.Box[Int]", 0),
+    ("h.Box", 1), ("h.Mapper", 1), ("h.Missing", 1), ("missing.Id", 1)] {
+    let (written, errors) = sample
+    let (syntax, pd) = parser.parse_module("use exports as h\nfn go(x: " ++ written ++ ") -> Unit = ()\n")
+    if pd != [] { panic("type observation consumer parse") }
+    let initial = Cx { ..cx_new(Some("type_read_probe"), None), next_id: exports_cx.next_id }
+    let (cold_cx, cold) = check_module(initial, syntax, export_env)
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, export_env)
+    if len(cold_cx.diags) != errors { panic("type observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  for sample in [("fn go(x: Box[Int]) -> Unit = ()", 0), ("fn go(x: Box) -> Unit = ()", 1),
+    ("fn go(x: Bxo) -> Unit = ()", 1), ("fn go(x: Missing) -> Unit = ()", 1),
+    ("fn go(x: Alias) -> Unit = ()", 0), ("fn go(x: Int) -> Unit = ()", 0),
+    ("fn go[T](x: T) -> Unit = ()", 0)] {
+    let (declaration, errors) = sample
+    let (syntax, pd) = parser.parse_module("type Box[T] = { value: T }\nalias Alias = Int\n" ++ declaration ++ "\n")
+    if pd != [] { panic("local type observation parse") }
+    let initial = cx_new(Some("local_type_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("local type observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  for text in ["alias Inner = Int\nalias Outer = Inner\nfn go(x: Outer) -> Outer = x\n",
+    "alias Mapper[T, !e] = fn(T) -> T !e\nfn go(f: Mapper[Int, !io], x: Int) -> Int !io = f(x)\n",
+    "opaque type Id = Int\nfn go(x: Id) -> Id = x\n"] {
+    let (syntax, pd) = parser.parse_module(text)
+    if pd != [] { panic("local alias observation parse") }
+    let initial = cx_new(Some("local_alias_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if cold_cx.diags != [] { panic("local alias observation diagnostic path") }
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }

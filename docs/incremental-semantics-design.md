@@ -409,6 +409,53 @@ alias. Error recovery must keep threading reads from nested argument patterns.
 This does not yet observe local constructor tables or ADT constructor counts;
 those remain required dependencies before cache admission.
 
+### Type-resolution observations (in progress)
+
+Qualified type resolution reads alias headers, already-resolved alias targets,
+nominal name bindings and the nominal arity/effect-parameter metadata that drives
+its checks. Observe these at their actual branch boundaries, preserving the
+alias-first order and avoiding reads after rejected argument arity. Alias headers
+contain only the fields this resolver consumes, not AliasE's unresolved AST or
+source spans; this avoids a dependency cycle through Cx. Type and effect binders
+project in distinct domains, and only opaque alias IDs are nominal references.
+Transparent aliases have no nominal ID to relocate. Builtin/compiler inputs,
+local alias resolution, associated projections and Java reflection still require
+their own validity boundary before production cache admission.
+
+Local nominal lookup is observed only after the existing type-parameter, alias,
+builtin and Java branches decline the name. Missing-name diagnostics retain their
+resolved message/hint, including suggestions from the original ordered candidate
+pool. This does not substitute for observing earlier alias/Java decisions: a
+new shadowing declaration must invalidate those decisions as well.
+
+Local alias resolution must distinguish a cached target (including `TyError`)
+from a missing cache entry. A cached result short-circuits declaration expansion
+and cycle checks; a missing declaration target also returns before consulting the
+in-flight set. Record the cache answer and the actual cycle-membership decision
+at those boundaries, without introducing reads on skipped paths. These facts do
+not replace the separate dependency on the alias declaration and its owner-scoped
+target syntax. Retaining and relocating that syntax remains necessary before
+admitting a product that expanded an uncached declaration.
+
+The source fact retains the alias name, declaring owner, and optional complete
+`TypeRef`, recorded after a cache miss and before target absence/cycle handling.
+`semantic_reads.project_with_source` and the corresponding body/constant product
+entry points take an explicit owner-aware syntax projection callback. Existing
+source-free entry points reject a present declaration target rather than retain
+its old spans. The owner-aware implementation can use `relocate_header.type_source`
+with its declaration-scoped `HeaderView`; it must not use the body's local span
+map for a foreign declaration. Runtime wiring of these source views remains
+separate outstanding work.
+
+Local alias lookup now records its positive or negative header answer after the
+reserved-return builtin and current type-parameter short circuits, and before
+ordinary builtin/Java/nominal fallback. Local and qualified header answers share
+their field extraction and reference-domain projection. Uncached expansion also
+records the actual type/effect binder lists after source/cycle checks and before
+seeding the declaration environment; skipped paths do not acquire binder reads.
+This closes those alias decision inputs, not the remaining builtin/current
+environment, associated type/effect, Java, or runtime scheduling boundaries.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

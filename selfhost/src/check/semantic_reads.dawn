@@ -3,17 +3,29 @@
 # This portable, optional log records function-body namespace queries;
 # it is deliberately not a proof that all semantic dependencies were read.
 use std/list
-use check/types.{Sig, Ty, TyVar, TyInt, TyAdt, EPure}
+use front/ast.{TypeRef, TNamed}
+use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
-pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic
+pub type AliasTypeHeader = { name: String, tparams: List[Ty], eparams: List[Eff], opaque_id: Option[Int], owner: String }
+pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic | TypeDiagnostic
 pub type FunctionRead = FunctionAnswer(read: NamedFunctionRead) | FunctionCandidates(names: List[String]) |
 QualifiedFunction(qualifier: String, read: NamedFunctionRead) | ModuleAlias(qualifier: String, path: Option[String]) |
 QualifiedConstant(qualifier: String, name: String, answer: Option[(String, Ty)]) |
 QualifiedConstructor(qualifier: String, name: String, answer: Option[(Int, Int)]) |
 ExportPresence(qualifier: String, present: Bool) |
-ExportDiagnosticAnswer(kind: ExportDiagnosticKind, qualifier: String, name: String, answer: Option[ExportDiagnostic])
+ExportDiagnosticAnswer(kind: ExportDiagnosticKind, qualifier: String, name: String, answer: Option[ExportDiagnostic]) |
+QualifiedAliasHeader(qualifier: String, name: String, answer: Option[AliasTypeHeader]) |
+QualifiedAliasTarget(qualifier: String, name: String, answer: Option[Ty]) |
+NominalTypeName(qualifier: Option[String], name: String, answer: Option[Int]) |
+NominalTypeShape(id: Int, name: String, arity: Int, eparams: List[String], is_record: Bool) |
+LocalTypeDiagnostic(name: String, answer: ExportDiagnostic) |
+LocalAliasTarget(name: String, answer: Option[Ty]) |
+LocalAliasResolving(name: String, active: Bool) |
+LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
+  | LocalAliasHeader(name: String, answer: Option[AliasTypeHeader])
+  | LocalAliasBinders(name: String, tparams: List[Ty], eparams: List[Eff])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -62,8 +74,38 @@ pub fn append(current: Option[List[FunctionRead]], writes: Option[List[FunctionR
 
 ## The enclosing owner fixes the source module's namespace. References in
 ## successful answers must move even if their spelling did not change.
+fn project_alias_binders(tparams: List[Ty], eparams: List[Eff], type_value: fn(Ty) -> Option[Ty],
+  effect_value: fn(Eff) -> Option[Eff]) -> Option[(List[Ty], List[Eff])] = {
+  var types: List[Ty] = []
+  for ty in tparams { types = types ++ [type_value(ty)?] }
+  var effects: List[Eff] = []
+  for eff in eparams { effects = effects ++ [effect_value(eff)?] }
+  Some((types, effects))
+}
+
+fn project_alias_header(answer: Option[AliasTypeHeader], type_value: fn(Ty) -> Option[Ty],
+  nominal: fn(Int) -> Option[Int], effect_value: fn(Eff) -> Option[Eff]) -> Option[Option[AliasTypeHeader]] = {
+  let moved = match answer {
+    None -> None
+    Some(header) -> {
+      let (types, effects) = project_alias_binders(header.tparams, header.eparams, type_value, effect_value)?
+      let opaque = match header.opaque_id { None -> None, Some(id) -> Some(nominal(id)?) }
+      Some(AliasTypeHeader { ..header, tparams: types, eparams: effects, opaque_id: opaque })
+    }
+  }
+  Some(moved)
+}
+
 pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
-  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] = {
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff]) -> Option[Option[List[FunctionRead]]] =
+  project_with_source(reads, signature, type_value, nominal, effect_value, (owner, source) => None)
+
+## Declaration spans belong to their owner, not the body consuming the alias.
+## A caller without source provenance must reject, never keep stale positions.
+pub fn project_with_source(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Option[List[FunctionRead]]] = {
   match reads {
     None -> Some(None)
     Some(entries) -> {
@@ -106,6 +148,34 @@ pub fn project(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[S
           }
           ExportPresence(qualifier, present) -> ExportPresence(qualifier, present)
           ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(kind, qualifier, name, answer)
+          QualifiedAliasHeader(qualifier, name, answer) -> {
+            let moved_answer = project_alias_header(answer, type_value, nominal, effect_value)?
+            QualifiedAliasHeader(qualifier, name, moved_answer)
+          }
+          LocalAliasHeader(name, answer) -> LocalAliasHeader(name, project_alias_header(answer, type_value, nominal, effect_value)?)
+          LocalAliasBinders(name, tparams, eparams) -> {
+            let (types, effects) = project_alias_binders(tparams, eparams, type_value, effect_value)?
+            LocalAliasBinders(name, types, effects)
+          }
+          QualifiedAliasTarget(qualifier, name, answer) -> {
+            let moved_answer = match answer { None -> None, Some(ty) -> Some(type_value(ty)?) }
+            QualifiedAliasTarget(qualifier, name, moved_answer)
+          }
+          NominalTypeName(qualifier, name, answer) -> {
+            let moved_answer = match answer { None -> None, Some(id) -> Some(nominal(id)?) }
+            NominalTypeName(qualifier, name, moved_answer)
+          }
+          NominalTypeShape(id, name, arity, eparams, is_record) -> NominalTypeShape(nominal(id)?, name, arity, eparams, is_record)
+          LocalTypeDiagnostic(name, answer) -> LocalTypeDiagnostic(name, answer)
+          LocalAliasTarget(name, answer) -> {
+            let moved_target = match answer { None -> None, Some(ty) -> Some(type_value(ty)?) }
+            LocalAliasTarget(name, moved_target)
+          }
+          LocalAliasResolving(name, active) -> LocalAliasResolving(name, active)
+          LocalAliasSource(name, owner, target) -> {
+            let moved_source = match target { None -> None, Some(source) -> Some(source_value(owner, source)?) }
+            LocalAliasSource(name, owner, moved_source)
+          }
         }
         out = out ++ [moved]
       }
@@ -130,10 +200,10 @@ test "semantic reads project successful answers without dropping missing answers
     ret: TyVar("T", 1), eff: EPure, is_builtin: false, tparams: [], constraints: [],
     eparams: [], owner: Some("module"), trait_id: None, op_of: None, inferring: false }
   let reads = candidates(record(record(Some([]), "value", Some(sig)), "missing", None), ["value", "other"])
-  let moved = project(reads, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None).expect("read projection").expect("enabled reads")
+  let moved = project(reads, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None, e => None).expect("read projection").expect("enabled reads")
   assert moved == [FunctionAnswer(NamedFunctionRead { name: "value", answer: Some(Sig { ..sig, ret: TyInt }) }),
     FunctionAnswer(NamedFunctionRead { name: "missing", answer: None }), FunctionCandidates(["value", "other"])]
-  assert project(reads, s => None, t => None, id => None) == None
+  assert project(reads, s => None, t => None, id => None, e => None) == None
 }
 
 test "semantic reads retain candidate order and empty answers" {
@@ -142,7 +212,7 @@ test "semantic reads retain candidate order and empty answers" {
   let writes = capture(prefix, reads).expect("candidate suffix")
   assert writes == Some([FunctionCandidates(["beta", "alpha", "beta"]), FunctionCandidates([])])
   assert append(prefix, writes) == Some(reads)
-  assert project(writes, s => None, t => None, id => None) == Some(writes)
+  assert project(writes, s => None, t => None, id => None, e => None) == Some(writes)
   assert candidates(None, ["ignored"]) == None
 }
 
@@ -153,11 +223,11 @@ test "semantic reads preserve qualified identities paths and projected answers" 
   let prefix = module_alias(Some([]), "h", Some("provider"))
   let reads = module_alias(qualified(qualified(prefix, "h", "value", Some(sig)), "other", "missing", None), "absent", None)
   let writes = capture(prefix, reads).expect("qualified suffix")
-  let moved = project(writes, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None).expect("qualified projection")
+  let moved = project(writes, s => Some(Sig { ..s, ret: TyInt }), t => None, id => None, e => None).expect("qualified projection")
   assert moved == Some([QualifiedFunction("h", NamedFunctionRead { name: "value", answer: Some(Sig { ..sig, ret: TyInt }) }),
     QualifiedFunction("other", NamedFunctionRead { name: "missing", answer: None }), ModuleAlias("absent", None)])
   assert append(prefix, writes) == Some(reads)
-  assert project(prefix, s => None, t => None, id => None) == Some(prefix) && project(reads, s => None, t => None, id => None) == None
+  assert project(prefix, s => None, t => None, id => None, e => None) == Some(prefix) && project(reads, s => None, t => None, id => None, e => None) == None
   assert qualified(None, "h", "value", Some(sig)) == None && module_alias(None, "h", Some("provider")) == None
 }
 
@@ -167,16 +237,61 @@ test "semantic reads project export references in distinct domains" {
     QualifiedConstructor("h", "Item", Some((1, 1))), QualifiedConstructor("h", "Missing", None),
     ExportPresence("h", true), ExportDiagnosticAnswer(ValueDiagnostic, "h", "Wrong", Some(diagnostic)),
     ExportDiagnosticAnswer(FunctionDiagnostic, "absent", "missing", None)])
-  let moved = project(reads, s => None, t => Some(TyInt), id => Some(id + 10)).expect("export projection")
+  let moved = project(reads, s => None, t => Some(TyInt), id => Some(id + 10), e => None).expect("export projection")
   assert moved == Some([QualifiedConstant("h", "VALUE", Some(("provider", TyInt))),
     QualifiedConstructor("h", "Item", Some((11, 1))), QualifiedConstructor("h", "Missing", None),
     ExportPresence("h", true), ExportDiagnosticAnswer(ValueDiagnostic, "h", "Wrong", Some(diagnostic)),
     ExportDiagnosticAnswer(FunctionDiagnostic, "absent", "missing", None)])
-  assert project(reads, s => None, t => None, id => Some(id)) == None
-  assert project(reads, s => None, t => Some(t), id => None) == None
+  assert project(reads, s => None, t => None, id => Some(id), e => None) == None
+  assert project(reads, s => None, t => Some(t), id => None, e => None) == None
   let prefix = record(Some([]), "earlier", None)
   let combined = append(prefix, reads).expect("append exports")
   assert capture(prefix, combined) == Some(reads)
   assert observe(None, ExportPresence("h", true)) == None
   assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
+}
+
+test "semantic reads require owner scoped alias source projection" {
+  let old = TNamed("Int", [], [], 0, 3)
+  let next = TNamed("Int", [], [], 100, 104)
+  let reads = Some([LocalAliasSource("Alias", "provider", Some(old)), LocalAliasSource("Imported", "other", None)])
+  assert project(reads, s => Some(s), t => Some(t), id => Some(id), e => Some(e)) == None
+  let moved = project_with_source(reads, s => Some(s), t => Some(t), id => Some(id), e => Some(e),
+    (owner, source) => if owner == "provider" && source == old { Some(next) } else { None })
+  assert moved == Some(Some([LocalAliasSource("Alias", "provider", Some(next)), LocalAliasSource("Imported", "other", None)]))
+  assert project_with_source(reads, s => Some(s), t => Some(t), id => Some(id), e => Some(e),
+    (owner, source) => if owner == "consumer" { Some(next) } else { None }) == None
+  let absent = Some([LocalAliasSource("Imported", "provider", None)])
+  assert project(absent, s => None, t => None, id => None, e => None) == Some(absent)
+}
+
+test "semantic reads project type and effect binders independently" {
+  let diagnostic = ExportDiagnostic { message: "unknown type `Missing`", hint: Some("did you mean `Record`?") }
+  let header = AliasTypeHeader { name: "Alias", tparams: [TyVar("T", 1)], eparams: [EffVar("e", 1)],
+    opaque_id: Some(1), owner: "provider" }
+  let reads = Some([QualifiedAliasHeader("h", "Alias", Some(header)), QualifiedAliasHeader("h", "Missing", None),
+    QualifiedAliasTarget("h", "Alias", Some(TyVar("T", 1))), QualifiedAliasTarget("h", "Missing", None),
+    NominalTypeName(Some("h"), "Record", Some(1)), NominalTypeName(None, "Missing", None),
+    NominalTypeShape(1, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
+    LocalAliasTarget("Alias", Some(TyVar("T", 1))), LocalAliasTarget("Missing", None),
+    LocalAliasResolving("Alias", true), LocalAliasResolving("Other", false),
+    LocalAliasHeader("Alias", Some(header)), LocalAliasHeader("Missing", None),
+    LocalAliasBinders("Alias", [TyVar("T", 1)], [EffVar("e", 1)])])
+  let moved = project(reads, s => None, t => Some(TyInt), id => Some(id + 10), e => Some(EIo)).expect("type reads projection")
+  assert moved == Some([QualifiedAliasHeader("h", "Alias", Some(AliasTypeHeader { ..header,
+    tparams: [TyInt], eparams: [EIo], opaque_id: Some(11) })), QualifiedAliasHeader("h", "Missing", None),
+    QualifiedAliasTarget("h", "Alias", Some(TyInt)), QualifiedAliasTarget("h", "Missing", None),
+    NominalTypeName(Some("h"), "Record", Some(11)), NominalTypeName(None, "Missing", None),
+    NominalTypeShape(11, "Record", 1, ["e"], true), LocalTypeDiagnostic("Missing", diagnostic),
+    LocalAliasTarget("Alias", Some(TyInt)), LocalAliasTarget("Missing", None),
+    LocalAliasResolving("Alias", true), LocalAliasResolving("Other", false),
+    LocalAliasHeader("Alias", Some(AliasTypeHeader { ..header, tparams: [TyInt], eparams: [EIo], opaque_id: Some(11) })),
+    LocalAliasHeader("Missing", None), LocalAliasBinders("Alias", [TyInt], [EIo])])
+  assert project(reads, s => None, t => None, id => Some(id), e => Some(e)) == None
+  assert project(reads, s => None, t => Some(t), id => None, e => Some(e)) == None
+  assert project(reads, s => None, t => Some(t), id => Some(id), e => None) == None
+  let transparent = Some([QualifiedAliasHeader("h", "Alias", Some(AliasTypeHeader { ..header, opaque_id: None }))])
+  assert project(transparent, s => None, t => Some(t), id => None, e => Some(e)) == Some(transparent)
+  let prefix = record(Some([]), "earlier", None)
+  assert capture(prefix, append(prefix, reads).expect("append type reads")) == Some(reads)
 }
