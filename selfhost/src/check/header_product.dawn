@@ -1,0 +1,131 @@
+# A header result includes private scope and residual binders, not just its
+# public exports. Keep persistent table snapshots without retaining an input
+# Cx or its host capability. This same-revision product is not a dependency
+# proof; a different revision must project it before assembly.
+use std/map
+use std/list
+use check/cx.{Cx, AliasE, ModExports, Origin, TySpan, cx_new}
+use check/types.{Adts, Traits, Impls, Effects, ImplI, Sig, Ty, Eff, TyInt}
+use front/token.{Diag}
+
+pub type HeaderProduct = {
+  allocation_start: Int,
+  allocation_count: Int,
+  diagnostics: List[Diag],
+  adts: Adts,
+  traits: Traits,
+  fns: Map[String, Sig],
+  fn_origin: Map[String, Origin],
+  adts_by_name: Map[String, Int],
+  aliases: Map[String, AliasE],
+  alias_resolved: Map[String, Ty],
+  alias_resolving: Set[String],
+  ctors_by_name: Map[String, (Int, Int)],
+  traits_by_name: Map[String, Int],
+  local_traits: List[String],
+  local_impls: List[ImplI],
+  observable_impls: List[ImplI],
+  impl_table: Impls,
+  module_aliases: Map[String, String],
+  module_fn_sigs: Map[(String, String), Sig],
+  imported_names: Map[String, String],
+  consts: Map[String, Ty],
+  const_order: List[String],
+  all_const_names: Set[String],
+  java_classes: Map[String, String],
+  effects: Map[String, Int],
+  effect_infos: Effects,
+  current_eff_vars: Map[String, Eff],
+  current_tparams: Map[String, Ty],
+  current_tparam_bounds: Map[Int, List[Int]],
+  module_exports: Map[String, ModExports],
+  ty_spans: Map[(Int, Int), TySpan],
+  record_ty_spans: Bool
+}
+
+# jsig is a capability, not equality-comparable data. The caller owns its
+# lease and must reject external reads before considering reuse. These are
+# transition invariants, not comparisons with a future cache consumer.
+fn environment_unchanged(a: Cx, b: Cx) -> Bool =
+  a.std_fns == b.std_fns && a.bins == b.bins && a.hidden_bins == b.hidden_bins &&
+  a.btypes == b.btypes && a.const_cutoff == b.const_cutoff && a.frame == b.frame &&
+  a.syms == b.syms && a.in_test == b.in_test && a.is_std_module == b.is_std_module &&
+  a.owner_class == b.owner_class && a.src_path == b.src_path && a.line_starts == b.line_starts &&
+  a.moved == b.moved && a.loop_jumps == b.loop_jumps && a.take_cell == b.take_cell
+
+pub fn capture(before: Cx, after: Cx) -> Option[HeaderProduct] = {
+  if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
+  if len(after.diags) < len(before.diags) || list.take(after.diags, len(before.diags)) != before.diags { return None }
+  Some(HeaderProduct {
+    allocation_start: before.next_id, allocation_count: after.next_id - before.next_id,
+    diagnostics: list.drop(after.diags, len(before.diags)),
+    adts: after.adts, traits: after.traits, fns: after.fns, fn_origin: after.fn_origin,
+    adts_by_name: after.adts_by_name, aliases: after.aliases, alias_resolved: after.alias_resolved,
+    alias_resolving: after.alias_resolving, ctors_by_name: after.ctors_by_name,
+    traits_by_name: after.traits_by_name, local_traits: after.local_traits,
+    local_impls: after.local_impls, observable_impls: after.observable_impls, impl_table: after.impl_table,
+    module_aliases: after.module_aliases, module_fn_sigs: after.module_fn_sigs,
+    imported_names: after.imported_names, consts: after.consts, const_order: after.const_order,
+    all_const_names: after.all_const_names, java_classes: after.java_classes,
+    effects: after.effects, effect_infos: after.effect_infos,
+    current_eff_vars: after.current_eff_vars, current_tparams: after.current_tparams,
+    current_tparam_bounds: after.current_tparam_bounds, module_exports: after.module_exports,
+    ty_spans: after.ty_spans, record_ty_spans: after.record_ty_spans
+  })
+}
+
+## Install only in the admitted input environment. Table snapshots preserve
+## the producing order; they cannot merge independent declaration edits.
+pub fn assemble(current: Cx, product: HeaderProduct) -> Option[Cx] = {
+  if current.next_id != product.allocation_start || product.allocation_count < 0 { return None }
+  let limit = current.next_id + product.allocation_count
+  if limit < current.next_id { return None }
+  Some(Cx { ..current,
+    next_id: limit, diags: current.diags ++ product.diagnostics,
+    adts: product.adts, traits: product.traits, fns: product.fns, fn_origin: product.fn_origin,
+    adts_by_name: product.adts_by_name, aliases: product.aliases, alias_resolved: product.alias_resolved,
+    alias_resolving: product.alias_resolving, ctors_by_name: product.ctors_by_name,
+    traits_by_name: product.traits_by_name, local_traits: product.local_traits,
+    local_impls: product.local_impls, observable_impls: product.observable_impls, impl_table: product.impl_table,
+    module_aliases: product.module_aliases, module_fn_sigs: product.module_fn_sigs,
+    imported_names: product.imported_names, consts: product.consts, const_order: product.const_order,
+    all_const_names: product.all_const_names, java_classes: product.java_classes,
+    effects: product.effects, effect_infos: product.effect_infos,
+    current_eff_vars: product.current_eff_vars, current_tparams: product.current_tparams,
+    current_tparam_bounds: product.current_tparam_bounds, module_exports: product.module_exports,
+    ty_spans: product.ty_spans, record_ty_spans: product.record_ty_spans
+  })
+}
+
+test "header product captures scope resets and appends diagnostics" {
+  let first = Diag { msg: "before", lo: 1, hi: 2, hint: "" }
+  let next = Diag { msg: "header", lo: 3, hi: 4, hint: "" }
+  let before = Cx { ..cx_new(Some("decl"), Some("decl.dawn")), diags: [first],
+    ty_spans: map.from([((1, 2), TySpan { lo: 1, hi: 2, kids: [] })]), record_ty_spans: true }
+  let after = Cx { ..before, next_id: before.next_id + 3, diags: [first, next],
+    consts: map.from([("SECOND", TyInt), ("FIRST", TyInt)]), const_order: ["SECOND", "FIRST"],
+    current_tparams: map.from([("T", TyInt)]), ty_spans: map.empty(), record_ty_spans: false }
+  let product = capture(before, after).expect("header product")
+  let restored = assemble(before, product).expect("header assembly")
+  assert restored.next_id == after.next_id && restored.diags == [first, next]
+  assert map.keys(restored.consts) == ["SECOND", "FIRST"] && restored.const_order == after.const_order
+  assert restored.current_tparams == after.current_tparams && map.len(restored.ty_spans) == 0 && not restored.record_ty_spans
+  let prefix = Cx { ..before, diags: [] }
+  assert assemble(prefix, product).expect("current diagnostic prefix").diags == [next]
+}
+
+fn missing[T](value: Option[T]) -> Bool = match value {
+  Some(_) -> false
+  None -> true
+}
+
+test "header product refuses incompatible transition and allocation boundaries" {
+  let before = cx_new(Some("decl"), Some("decl.dawn"))
+  assert missing(capture(before, Cx { ..before, owner_class: Some("foreign") }))
+  assert missing(capture(before, Cx { ..before, next_id: before.next_id - 1 }))
+  let diagnostic = Diag { msg: "old", lo: 1, hi: 2, hint: "" }
+  assert missing(capture(Cx { ..before, diags: [diagnostic] }, before))
+  let product = capture(before, before).expect("empty header transition")
+  assert missing(assemble(Cx { ..before, next_id: before.next_id + 1 }, product))
+  assert missing(assemble(before, HeaderProduct { ..product, allocation_count: -1 }))
+}

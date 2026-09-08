@@ -45,6 +45,14 @@ std/plan/lease/options 替换必须新建分析 owner。逐出仅损失速度，
 
 ## 四、函数级演进
 
+header 状态产物必须覆盖 body 入口实际读取的完整表，而非只保存公开导出面。
+先按真实 header 前后边界捕获完整持久化表快照（不是逐声明 delta），将诊断记为
+追加后缀、分配记为起点和数量；不保存 Java capability 或整个输入/输出 Cx。
+frame、symbols、源码身份和宿主环境必须在 header 内保持不变，否则捕获失败。
+header 出口清空的 `ty_spans` 与 `record_ty_spans` 属于显式覆盖，不当作输入不变量。
+同 revision 装配要求准确分配起点，保留调用方 capability/源码环境/诊断前缀。
+跨 revision 还需要全状态投影、当前顺序装配和依赖有效性；未完成这些之前不接缓存。
+
 ModuleKey/DeclKey 与 body-local 临时 ID 分离，缓存产物中所有引用必须可重定位。
 保持既有输出顺序；若做不到，先复核设计并请求发射契约裁决，不扩大 golden 消噪。
 query 记录真实语义读取，含 scope/候选集的失败查找、impl、alias、trait/effect metadata。

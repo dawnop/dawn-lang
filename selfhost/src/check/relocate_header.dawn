@@ -5,9 +5,11 @@
 use std/map
 use check/relocate
 use check/relocate.{Ids}
-use check/types.{Ty, Eff, Sig, FieldI, CtorI, AdtI, TraitI, MethodSig, EffectI, ImplI,
+use check/types.{Ty, Eff, Sig, FieldI, CtorI, AdtI, TraitI, MethodSig, EffectI, ImplI, Impls, head_of,
   TyInt, TyVar, TyAdt, TyFn, TyAssoc, EPure, EffVar, EffAssoc, ELabeled, AModule }
-use check/cx.{AliasE, ModExports}
+use check/cx.{AliasE, ModExports, TySpan}
+use check/header_product.{HeaderProduct}
+use front/token.{Diag}
 use front/ast.{TypeRef, EffArg, TNamed, TQual, TAssoc, TTuple, TFn}
 
 pub type HeaderView = {
@@ -145,6 +147,62 @@ pub fn exports(v: HeaderView, e: ModExports) -> Option[ModExports] = {
     impls: projected_list(e.impls, info => implementation(v, info))?,
     adt_infos: projected_map(e.adt_infos, id => relocate.nominal(v.ids, id), info => adt(v, info))?,
     trait_infos: projected_map(e.trait_infos, id => relocate.trait_id(v.ids, id), info => trait_info(v, info))? })
+}
+
+fn type_span(v: HeaderView, owner: Option[String], path: Option[String], s: TySpan) -> Option[TySpan] = {
+  Some(TySpan { lo: v.position(owner, path, s.lo)?, hi: v.end_position(owner, path, s.hi)?,
+    kids: projected_list(s.kids, child => type_span(v, owner, path, child))? })
+}
+
+## Project complete header-owned tables, including non-exported bindings.
+## The allocation plan and dependency proof are supplied by the scheduler;
+## this does not infer a new allocation schedule from the old integer IDs.
+pub fn state(v: HeaderView, p: HeaderProduct, owner: Option[String], path: Option[String],
+  allocation_start: Int) -> Option[HeaderProduct] = {
+  if p.allocation_count < 0 || allocation_start + p.allocation_count < allocation_start { return None }
+  let names: fn(String) -> Option[String] = name => Some(name)
+  let move_ctor: fn((Int, Int)) -> Option[(Int, Int)] = entry => {
+    let (id, slot) = entry
+    Some((relocate.nominal(v.ids, id)?, slot))
+  }
+  var impls: Impls = map.empty()
+  for (key, info) in map.entries(p.impl_table) {
+    if key != (info.trait_id, head_of(info.subject)?) { return None }
+    let moved = implementation(v, info)?
+    let next_key = (moved.trait_id, head_of(moved.subject)?)
+    if map.has(impls, next_key) { return None }
+    impls = map.insert(impls, next_key, moved)
+  }
+  let span_key: fn((Int, Int)) -> Option[(Int, Int)] = pair => {
+    let (lo, hi) = pair
+    Some((v.position(owner, path, lo)?, v.end_position(owner, path, hi)?))
+  }
+  let move_diag: fn(Diag) -> Option[Diag] = d => {
+    Some(Diag { ..d, lo: v.position(owner, path, d.lo)?, hi: v.end_position(owner, path, d.hi)? })
+  }
+  Some(HeaderProduct { ..p, allocation_start: allocation_start,
+    diagnostics: projected_list(p.diagnostics, move_diag)?,
+    adts: projected_map(p.adts, id => relocate.nominal(v.ids, id), a => adt(v, a))?,
+    traits: projected_map(p.traits, id => relocate.trait_id(v.ids, id), t => trait_info(v, t))?,
+    fns: projected_map(p.fns, names, s => relocate.signature(v.ids, s))?,
+    adts_by_name: projected_map(p.adts_by_name, names, id => relocate.nominal(v.ids, id))?,
+    aliases: projected_map(p.aliases, names, a => alias_info(v, a))?,
+    alias_resolved: projected_map(p.alias_resolved, names, t => relocate.ty(v.ids, t))?,
+    ctors_by_name: projected_map(p.ctors_by_name, names, move_ctor)?,
+    traits_by_name: projected_map(p.traits_by_name, names, id => relocate.trait_id(v.ids, id))?,
+    local_impls: projected_list(p.local_impls, i => implementation(v, i))?,
+    observable_impls: projected_list(p.observable_impls, i => implementation(v, i))?,
+    impl_table: impls,
+    module_fn_sigs: projected_map(p.module_fn_sigs, key => Some(key), s => relocate.signature(v.ids, s))?,
+    consts: projected_map(p.consts, names, t => relocate.ty(v.ids, t))?,
+    effects: projected_map(p.effects, names, id => relocate.nominal(v.ids, id))?,
+    effect_infos: projected_map(p.effect_infos, id => relocate.nominal(v.ids, id), e => effect_info(v, e))?,
+    current_eff_vars: projected_map(p.current_eff_vars, names, e => relocate.effect_row(v.ids, e))?,
+    current_tparams: projected_map(p.current_tparams, names, t => relocate.ty(v.ids, t))?,
+    current_tparam_bounds: projected_map(p.current_tparam_bounds, id => relocate.type_var(v.ids, id),
+      bounds => projected_list(bounds, tr => relocate.trait_id(v.ids, tr)))?,
+    module_exports: projected_map(p.module_exports, names, e => exports(v, e))?,
+    ty_spans: projected_map(p.ty_spans, span_key, s => type_span(v, owner, path, s))? })
 }
 
 fn fixture_view() -> HeaderView = {

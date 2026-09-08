@@ -128,7 +128,16 @@ header-metadata.py的十二个编译负控守binder、构造字段、trait方法
 类型/效果/owner/位置和alias的哨兵/源码/effect。透明alias的-1不是nominal引用；
 另审计十种metadata记录的投影/保留字段，每种均有新增未分类字段的拒绝自测。
 源码回调按声明owner和可选路径选择映射。该脚本在incremental-state执行；native另跑
-relocate_header的53项owning依赖闭包，不与其他target相加。
+relocate_header及其header_product依赖的55项owning测试，不与其他target相加。
+
+header_product捕获完整header作用域表、诊断后缀与分配区间，不保留整个Cx或Java
+capability。真实header案例进一步比较capture/assemble后的整个Cx，再将完整状态
+投影到移动后的ID和源码空间，与冷Cx严格对照。三个编译负控分别漏移impl索引键、
+残留bounds和公开impl集；typed-all合计29个编译负控。
+header-state.py的九个编译负控守环境、分配、诊断前后缀、常量表、类型作用域及
+type-span清空状态；完整Cx捕获/装配和HeaderProduct投影字段审计另有五个结构负控。
+这些完整表快照仍保留生产顺序，不是逐声明delta，不能合并任意独立声明编辑；
+输入环境有效性、当前顺序装配和生产调度仍须接线。没有借此启用header cache。
 
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个
