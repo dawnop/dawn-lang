@@ -17,6 +17,7 @@ def main():
     started = time.monotonic()
     title = "function products bind entry signatures to stable current declarations"
     method_title = "method products preserve impl and default owners across declaration reorder"
+    value_title = "value products preserve constant visibility and separate test identities"
     path = Path("selfhost/src/check/function_product.dawn")
     original = (ROOT / path).read_text()
     mutations = [
@@ -35,6 +36,12 @@ def main():
         ("trait-owner", "info.name != name || info.owner != checked.cx.owner_class || info.src_path != checked.cx.src_path",
          "info.name != name || info.src_path != checked.cx.src_path"),
     ]
+    value_mutations = [
+        ("constant-type", "if map.get(checked.cx.consts, name) != Some(declared) { return None }", ""),
+        ("constant-tail", "if ci != len(checked.const_tys) { return None }", ""),
+        ("constant-visibility", "ConstantHeader(key, syntax, declared, visible)", "ConstantHeader(key, syntax, declared, set.empty())"),
+        ("test-role", "tests = tests ++ [key]", "tests = constants ++ [key]"),
+    ]
     with tempfile.TemporaryDirectory(prefix="dawn-function-products-") as temp:
         private = Path(temp)
         for directory in ("selfhost", "compiler-plan"):
@@ -44,6 +51,7 @@ def main():
         subjects = [("positive", original, title)]
         subjects += [(name, edit(original, old, new), title) for name, old, new in mutations]
         subjects += [(name, edit(original, old, new), method_title) for name, old, new in method_mutations]
+        subjects += [(name, edit(original, old, new), value_title) for name, old, new in value_mutations]
         for name, source, owner in subjects:
             (private / path).write_text(source)
             status, output = run("test", private / path)
@@ -53,7 +61,7 @@ def main():
             elif not status or not owning(output, "check/function_product", owner):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: function products " + name, flush=True)
-    print(f"OK: named function/method headers and eleven compiling mutants, {time.monotonic() - started:.2f}s")
+    print(f"OK: named function/method/value headers and fifteen compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":

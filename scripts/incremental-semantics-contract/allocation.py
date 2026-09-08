@@ -17,6 +17,7 @@ def main():
     started = time.monotonic()
     original = (ROOT / "selfhost/src/check/allocation.dawn").read_text()
     variants = [
+        ("constant-type", "if relocate.ty(header_ids, old_ty) != Some(next_ty) { return None }", ""),
         ("binding-conflict", "if id != e.id", "if false"),
         ("owner-conflict", "if binding != e.binding", "if false"),
         ("target-identity", "map.get(b.bindings, binding)", "map.get(a.bindings, binding)"),

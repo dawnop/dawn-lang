@@ -7,7 +7,7 @@ use std/map
 use std/list
 use check/cx.{Cx, Frame, cx_new}
 use check/types.{Sig, Sym, Ty, Eff, TyInt, TyUnit, TyVar, EPure, EffVar}
-use check/tast.{TFun, XUnit}
+use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use check/relocate
 use check/relocate_tree
@@ -44,8 +44,8 @@ pub fn apply_changes[K: Eq + Hash, V](current: Map[K, V], writes: List[Change[K,
 
 ## This is still in the producing revision's ID and source coordinate space.
 ## Never install it in another revision before projecting every reference.
-pub type Product = {
-  function: TFun,
+pub type BodyProduct[T] = {
+  tree: T,
   allocation_start: Int,
   allocation_count: Int,
   symbols: List[Change[Int, Sym]],
@@ -61,6 +61,9 @@ pub type Product = {
   const_cutoff: Option[Set[String]],
   take_cell: Option[Int]
 }
+
+pub alias Product = BodyProduct[TFun]
+pub alias ConstantProduct = BodyProduct[TConst]
 
 # The Java oracle is a capability, not an equality-comparable value. Capture
 # and replay belong to one owner/lease; that invariant is held by the caller.
@@ -84,11 +87,19 @@ fn environment_unchanged(a: Cx, b: Cx) -> Bool =
 ## Top-level function/default/method bodies finish their nested frames. This
 ## boundary is not an independently cached expression or suspended lambda.
 pub fn capture(before: Cx, after: Cx, function: TFun) -> Option[Product] = {
+  capture_body(before, after, function)
+}
+
+pub fn capture_constant(before: Cx, after: Cx, constant: TConst) -> Option[ConstantProduct] = {
+  capture_body(before, after, constant)
+}
+
+fn capture_body[T](before: Cx, after: Cx, tree: T) -> Option[BodyProduct[T]] = {
   if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
   if len(after.frame.lambda_stack) != 0 || len(after.frame.loop_stack) != 0 { return None }
   if len(after.diags) < len(before.diags) || list.take(after.diags, len(before.diags)) != before.diags { return None }
-  Some(Product {
-    function: function, allocation_start: before.next_id, allocation_count: after.next_id - before.next_id,
+  Some(BodyProduct {
+    tree: tree, allocation_start: before.next_id, allocation_count: after.next_id - before.next_id,
     symbols: changes(before.syms, after.syms, (a, b) => a == b), signatures: changes(before.fns, after.fns, (a, b) => a == b),
     aliases: changes(before.alias_resolved, after.alias_resolved, (a, b) => a == b),
     bounds: changes(before.current_tparam_bounds, after.current_tparam_bounds, (a, b) => a == b),
@@ -102,7 +113,7 @@ pub fn capture(before: Cx, after: Cx, function: TFun) -> Option[Product] = {
 
 ## Exact-coordinate assembly for a dependency-validated input. This API does
 ## not validate reads and cannot be used as a cache-validity predicate.
-pub fn assemble(current: Cx, product: Product) -> Option[Cx] = {
+pub fn assemble[T](current: Cx, product: BodyProduct[T]) -> Option[Cx] = {
   if current.next_id != product.allocation_start { return None }
   let limit = current.next_id + product.allocation_count
   if product.allocation_count < 0 || limit < current.next_id { return None }
@@ -186,6 +197,15 @@ fn projected_frame(v: View, f: Frame) -> Option[Frame] = {
 ## as handler installations. Require a complete bijection onto the target
 ## interval, not just a mapping for the symbols the tree happens to mention.
 pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = {
+  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree))
+}
+
+pub fn project_constant(v: View, p: ConstantProduct, allocation_start: Int) -> Option[ConstantProduct] = {
+  project_body(v, p, allocation_start, tree => relocate_tree.constant(v, tree))
+}
+
+fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
+  project_tree: fn(T) -> Option[T]) -> Option[BodyProduct[T]] = {
   if p.allocation_count < 0 { return None }
   let old_limit = p.allocation_start + p.allocation_count
   let limit = allocation_start + p.allocation_count
@@ -216,7 +236,7 @@ pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = 
     Some(cell) -> Some(relocate.local_id(v.ids, cell)?)
     None -> None
   }
-  Some(Product { ..p, function: relocate_tree.function(v, p.function)?, allocation_start: allocation_start,
+  Some(BodyProduct { ..p, tree: project_tree(p.tree)?, allocation_start: allocation_start,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell })
 }
@@ -228,6 +248,31 @@ test "body product keyed writes preserve unrelated preceding products" {
   assert apply_changes(before, writes) == after
   assert apply_changes(map.insert(before, "preceding", 5), writes) == map.insert(after, "preceding", 5)
   assert changes(before, before, (a, b) => a == b) == []
+}
+
+test "body product constants project their real tree and share state admission" {
+  let before = Cx { ..cx_new(None, None), next_id: 10 }
+  let ty = TyVar("T", 1)
+  let constant = TConst { name: "VALUE", ty: ty, init: XLocal(10, "x", 0, 1, ty), lo: 0, hi: 1 }
+  let symbol = Sym { name: "x", ty: ty, mutable: false, dlo: 0, dhi: 1,
+    dict_of: None, ev_of: None, cell_of: None }
+  let after = Cx { ..before, next_id: 11, syms: map.from([(10, symbol)]),
+    current_tparams: map.from([("T", ty)]) }
+  let saved = capture_constant(before, after, constant).expect("constant capture")
+  let none: Map[Int, Int] = map.empty()
+  let ids = relocate.new(none, none, map.from([(1, 2)]), none, map.from([(10, 40)])).expect("constant ids")
+  let v = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+    assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+    callee: (owner, name, builtin, tr) => None }
+  let moved = project_constant(v, saved, 40).expect("constant projection")
+  assert moved.tree == TConst { name: "VALUE", ty: TyVar("T", 2),
+    init: XLocal(40, "x", 100, 104, TyVar("T", 2)), lo: 100, hi: 104 }
+  let assembled = assemble(Cx { ..before, next_id: 40 }, moved).expect("constant state assembly")
+  assert assembled.next_id == 41 && map.get(assembled.syms, 40).expect("constant symbol").ty == TyVar("T", 2)
+  assert assembled.current_tparams == map.from([("T", TyVar("T", 2))])
+  assert project_constant(View { ..v, ends: map.empty() }, saved, 40) == None
+  match assemble(before, moved) { Some(_) -> { assert false }, None -> () }
+  assert capture_constant(before, Cx { ..after, owner_class: Some("foreign") }, constant) == None
 }
 
 fn fixture_function(cx: Cx) -> TFun = {
@@ -319,7 +364,7 @@ test "body product projects every state reference and the whole allocation inter
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let q = project(view, p, 40).expect("project product")
   let cx = assemble(Cx { ..before, next_id: 40 }, q).expect("assemble projected product")
-  assert cx.next_id == 42 && q.function.body == XUnit(100, 104)
+  assert cx.next_id == 42 && q.tree.body == XUnit(100, 104)
   let moved = map.get(cx.syms, 40).expect("projected symbol")
   assert moved.ty == TyVar("T", 11) && moved.dict_of == Some((22, 11))
   assert moved.cell_of == Some((40, TyInt)) && moved.dlo == 100 && moved.dhi == 104

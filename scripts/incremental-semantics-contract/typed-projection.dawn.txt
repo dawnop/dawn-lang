@@ -5,10 +5,10 @@ use std/map
 use std/list
 use std/str
 use compiler/check/cx.{Cx, cx_new}
-use compiler/check/tast.{TFun, TDefault, TModule}
+use compiler/check/tast.{TFun, TDefault, TModule, TConst}
 use compiler/check/types.{Sig, Sym, Ty, eff_labels, sig_abi_eff}
 use compiler/front/token.{Diag}
-use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies, impl_body_key, check_trait_default, strip_param_defaults}
+use compiler/check/checker.{headers_for_body_probe, headers_with_impls_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_const_init, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies, impl_body_key, check_trait_default, strip_param_defaults}
 use compiler/check/function_product
 use compiler/check/relocate
 use compiler/check/relocate_tree
@@ -88,9 +88,115 @@ pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun
 
 pub type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
 
-pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample()] ++ default_module_samples()
+pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample(), value_module_sample()] ++ default_module_samples()
 
 type SavedFunction = { before: Cx, after: Cx, product: body_product.Product }
+type SavedConstant = { before: Cx, after: Cx, product: body_product.ConstantProduct }
+
+fn value_module_sample() -> ModuleTrial !io = {
+  let first = "type First = { v: Int }\n"
+  let second = "type Second = { v: Int }\n"
+  let a = "const A: First = { let n = 1\n First { v: n } }\n"
+  let b = "const B: Second = { let n = 2\n let m = n\n Second { v: m } }\n"
+  let c = "const C: Int = A.v + B.v\n"
+  let ta = "test \"A\" { let x = A.v\n assert x == 1 }\n"
+  let tb = "test \"B\" { assert B.v == 2\n assert C == 3 }\n"
+  let text = first ++ second ++ a ++ ta ++ b ++ c ++ tb
+  let edited = "# moved values\n" ++ second ++ first ++ b ++ tb ++ a ++ c ++ ta
+  let (syntax, ds) = parser.parse_module(text)
+  let (next_syntax, nds) = parser.parse_module(edited)
+  if ds != [] || nds != [] { panic("value module parse") }
+  let scope = module_key("value-world", "values", "values", "values.dawn")
+  let initial = cx_new(Some("values"), Some("values.dawn"))
+  let old_headers = check_module_headers(initial, syntax, map.empty())
+  let next_headers = check_module_headers(initial, next_syntax, map.empty())
+  let old_named = function_product.values(scope, old_headers).expect("old value headers")
+  let next_named = function_product.values(scope, next_headers).expect("new value headers")
+  var constants: Map[DeclKey, SavedConstant] = map.empty()
+  var tests: Map[DeclKey, SavedFunction] = map.empty()
+  var old_cx = old_headers.cx
+  for key in function_product.constant_keys(old_named) {
+    match function_product.value(old_named, key).expect("old constant") {
+      function_product.ConstantHeader(_, d, ty, visible) -> {
+        let (after, tree) = check_const_init(old_cx, d, ty, visible)
+        let product = body_product.capture_constant(old_cx, after, tree).expect("constant capture")
+        constants = map.insert(constants, key, SavedConstant { before: old_cx, after: after, product: product })
+        old_cx = after
+      }
+      _ -> panic("constant role")
+    }
+  }
+  for key in function_product.test_keys(old_named) {
+    match function_product.value(old_named, key).expect("old test") {
+      function_product.TestHeader(_, d) -> {
+        let (after, tree) = check_test(old_cx, d.name, d.body)
+        tests = map.insert(tests, key, SavedFunction { before: old_cx, after: after,
+          product: body_product.capture(old_cx, after, tree).expect("test capture") })
+        old_cx = after
+      }
+      _ -> panic("test role")
+    }
+  }
+  let reserved = allocation.compiler_headers(scope.world).expect("value compiler origins")
+  var old_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, syntax, old_headers.cx).expect("old value origins")).expect("old value table")]).expect("old value combined")
+  var next_table = allocation.combine([reserved,
+    allocation.table(allocation.local_headers(scope, next_syntax, next_headers.cx).expect("new value origins")).expect("new value table")]).expect("new value combined")
+  var replayed = next_headers.cx
+  var moved_constants: List[TConst] = []
+  var moved_tests: List[TFun] = []
+  for key in function_product.constant_keys(next_named) {
+    match function_product.value(next_named, key).expect("next constant") {
+      function_product.ConstantHeader(_, d, ty, _) -> {
+        let saved = map.get(constants, key).expect("saved constant")
+        let p = saved.product
+        let plan = allocation.constant_plan(old_table, next_table, key, p.allocation_start,
+          p.allocation_count, replayed.next_id, p.tree.ty, ty).expect("constant allocation")
+        let source = source_projection.between(text, edited, p.tree.lo, p.tree.hi, d.lo, d.hi).expect("constant source")
+        let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: saved.after.syms,
+          assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+          callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
+        let projected = body_product.project_constant(view, p, replayed.next_id).expect("constant projection")
+        replayed = body_product.assemble(replayed, projected).expect("constant replay")
+        moved_constants = moved_constants ++ [projected.tree]
+        old_table = plan.old_allocations
+        next_table = plan.next_allocations
+      }
+      _ -> panic("next constant role")
+    }
+  }
+  for key in function_product.test_keys(next_named) {
+    match function_product.value(next_named, key).expect("next test") {
+      function_product.TestHeader(_, d) -> {
+        let saved = map.get(tests, key).expect("saved test")
+        let p = saved.product
+        # Test signatures have only fixed Unit/io metadata, no header binders.
+        let plan = allocation.body_plan(old_table, next_table, key, p.allocation_start,
+          p.allocation_count, replayed.next_id, p.tree.sig, p.tree.sig, []).expect("test allocation")
+        let prior = match function_product.value(old_named, key).expect("prior test") {
+          function_product.TestHeader(_, old) -> old
+          _ -> panic("prior test role")
+        }
+        let source = source_projection.between(text, edited, prior.lo, prior.hi, d.lo, d.hi).expect("test source")
+        let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: saved.after.syms,
+          assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
+          callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
+        let projected = body_product.project(view, p, replayed.next_id).expect("test projection")
+        replayed = body_product.assemble(replayed, projected).expect("test replay")
+        moved_tests = moved_tests ++ [projected.tree]
+        old_table = plan.old_allocations
+        next_table = plan.next_allocations
+      }
+      _ -> panic("next test role")
+    }
+  }
+  let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies { cx: replayed, functions: [],
+    constants: moved_constants, tests: moved_tests, impl_methods: [], trait_defaults: [] })
+  let (cold_cx, cold) = check_module(initial, next_syntax, map.empty())
+  if old_cx.diags != [] || cold_cx.diags != [] { panic("value module diagnostics") }
+  if len(assembled.consts) != 3 || len(assembled.tests) != 2 { panic("value module count") }
+  ModuleTrial { replayed_cx: assembled_cx, cold_cx: cold_cx, replayed: assembled, cold: cold, states: [] }
+}
 
 fn method_signature(method: function_product.MethodHeader) -> Sig = match method {
   function_product.ImplMethod(_, _, sig, _) -> sig
@@ -162,7 +268,7 @@ fn method_module_sample() -> ModuleTrial !io = {
     let body = map.get(saved, key).expect("method body by key")
     let plan = allocation.body_plan(old_table, next_table, key, body.product.allocation_start,
       body.product.allocation_count, replayed.next_id, method_signature(prior), method_signature(entry),
-      body.product.function.ev_syms).expect("method allocation")
+      body.product.tree.ev_syms).expect("method allocation")
     let (old_lo, old_hi) = method_span(prior)
     let (next_lo, next_hi) = method_span(entry)
     let source = source_projection.between(text, edited, old_lo, old_hi, next_lo, next_hi).expect("method source")
@@ -173,10 +279,10 @@ fn method_module_sample() -> ModuleTrial !io = {
     replayed = body_product.assemble(replayed, projected).expect("method replay")
     match entry {
       function_product.ImplMethod(_, _, _, info) -> {
-        impls = impls ++ [TFun { ..projected.function, impl_of: map.get(tags, key).expect("current impl tag") }]
+        impls = impls ++ [TFun { ..projected.tree, impl_of: map.get(tags, key).expect("current impl tag") }]
       }
       function_product.TraitDefault(_, _, _, tid) -> {
-        defaults = defaults ++ [TFun { ..projected.function, default_of: Some(tid) }]
+        defaults = defaults ++ [TFun { ..projected.tree, default_of: Some(tid) }]
       }
     }
     old_table = plan.old_allocations
@@ -234,7 +340,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
     let body = map.get(saved, key).expect("named body lookup")
     let plan = allocation.body_plan(old_table, next_table, key, body.product.allocation_start,
       body.product.allocation_count, replayed.next_id, prior.signature, entry.signature,
-      body.product.function.ev_syms).expect("named allocation")
+      body.product.tree.ev_syms).expect("named allocation")
     let source = source_projection.between(text, edited, prior.syntax.lo, prior.syntax.hi,
       entry.syntax.lo, entry.syntax.hi).expect("named source")
     let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: body.after.syms,
@@ -242,7 +348,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
       callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
     let projected = body_product.project(view, body.product, replayed.next_id).expect("named projection")
     replayed = body_product.assemble(replayed, projected).expect("named replay")
-    functions = functions ++ [projected.function]
+    functions = functions ++ [projected.tree]
     old_table = plan.old_allocations
     next_table = plan.next_allocations
   }
@@ -312,7 +418,7 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   let (cold, cold_body) = check_fn(next, decl, nsigs[0])
   let (_, whole) = check_module(new_base, syntax, new_env)
   if len(after.diags) != 0 || len(cold.diags) != 0 { panic("import consumer body failed") }
-  StateTrial { replayed: replayed, cold: cold, relocated: projected.function, cold_body: cold_body, module_body: whole.fns[0] }
+  StateTrial { replayed: replayed, cold: cold, relocated: projected.tree, cold_body: cold_body, module_body: whole.fns[0] }
 }
 
 pub fn default_samples() -> List[StateTrial] !io = map(default_module_samples(), m => m.states[0])
@@ -382,7 +488,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
   let main_saved = body_product.capture(old_cx, old_after, old_body).expect("main capture")
   let main_projected = body_product.project(main_view, main_saved, new_cx.next_id).expect("main projection")
   let replayed = body_product.assemble(new_cx, main_projected).expect("main assembly")
-  let body = main_projected.function
+  let body = main_projected.tree
   let (cold, cold_body) = if inferred {
     let (cx, _, value) = check_fn_inferred(next, new_decl, nsigs[0])
     (cx, value)
@@ -457,7 +563,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
       let saved = body_product.capture(before, after, body).expect("inferred capture")
       let projected = body_product.project(view, saved, replayed.next_id).expect("inferred projection: " ++ body.name)
       replayed = body_product.assemble(replayed, projected).expect("inferred assembly")
-      let moved = projected.function
+      let moved = projected.tree
       functions = functions ++ [moved]
       old_table = plan.old_allocations
       new_table = plan.next_allocations
@@ -646,6 +752,6 @@ pub fn header_sample() -> HeaderTrial !io = {
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let product = body_product.capture(before, after, saved).expect("header body capture")
   let projected = body_product.project(v, product, next.next_id).expect("header body projection")
-  HeaderTrial { relocated: projected.function, cold: cold,
+  HeaderTrial { relocated: projected.tree, cold: cold,
     replayed_state: body_product.assemble(next, projected).expect("header body assembly"), cold_state: checked }
 }

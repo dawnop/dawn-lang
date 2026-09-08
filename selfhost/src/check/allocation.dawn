@@ -210,6 +210,21 @@ pub fn body_segment_plan(old_headers: Table, next_headers: Table, owner: DeclKey
     moved_evidence = map.insert(moved_evidence, id, target + evidence[0] - start + index)
     index = index + 1
   }
+  reserve_interval(old_headers, next_headers, owner, start, count, target, moved_evidence)
+}
+
+## Initializers have a declared type, not a function signature or entry
+## evidence pack. Their complete fresh interval still needs all three domains.
+pub fn constant_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
+  start: Int, count: Int, target: Int, old_ty: Ty, next_ty: Ty) -> Option[BodyPlan] = {
+  let header_ids = between(old_headers, next_headers)?
+  if relocate.ty(header_ids, old_ty) != Some(next_ty) { return None }
+  reserve_interval(old_headers, next_headers, owner, start, count, target, map.empty())
+}
+
+fn reserve_interval(old_headers: Table, next_headers: Table, owner: DeclKey,
+  start: Int, count: Int, target: Int, moved_evidence: Map[Int, Int]) -> Option[BodyPlan] = {
+  if start < 0 || count < 0 || target < 0 || start + count < start || target + count < target { return None }
   let a: Data = old_headers
   let b: Data = next_headers
   var old_entries: List[Entry] = []
@@ -473,6 +488,22 @@ test "allocation matches provenance and domains rather than equal integers" {
   assert relocate.nominal(between(old, foreign).expect("no matches"), 1) == None
   let renamed = table([entry(fixture_key("renamed"), NominalId, 0, 1)]).expect("rename")
   assert relocate.nominal(between(old, renamed).expect("no rename match"), 1) == None
+}
+
+test "allocation constant plans validate the declared type without function metadata" {
+  let owner = fixture_key("VALUE")
+  let before = table([entry(owner, NominalId, 0, 10)]).expect("constant old type")
+  let after = table([entry(owner, NominalId, 0, 20)]).expect("constant new type")
+  let old_ty = builtin_types.TyAdt(10, [])
+  let next_ty = builtin_types.TyAdt(20, [])
+  let plan = constant_plan(before, after, owner, 30, 2, 40, old_ty, next_ty).expect("constant plan")
+  assert plan.next_id == 42
+  assert relocate.ty(plan.ids, old_ty) == Some(next_ty)
+  assert relocate.local_id(plan.ids, 30) == Some(40) && relocate.local_id(plan.ids, 31) == Some(41)
+  assert relocate.type_var(plan.ids, 31) == Some(41) && relocate.effect_var(plan.ids, 31) == Some(41)
+  assert constant_plan(before, after, owner, 30, 2, 40, old_ty, TyUnit) == None
+  assert constant_plan(before, after, owner, 30, -1, 40, old_ty, next_ty) == None
+  assert constant_plan(before, after, owner, 30, 2, -1, old_ty, next_ty) == None
 }
 
 test "allocation rejects competing owners and inconsistent binding observations" {

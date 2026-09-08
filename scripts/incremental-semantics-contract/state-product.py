@@ -41,6 +41,7 @@ def main():
     else:
         raise RuntimeError("Cx field audit accepted its negative control")
     variants = [
+        ("constant-tree", "tree => relocate_tree.constant(v, tree)", "tree => Some(tree)"),
         ("symbol-order", "sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
         ("signature-write", "fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),
         ("alias-write", "alias_resolved: apply_changes(current.alias_resolved, product.aliases)", "alias_resolved: current.alias_resolved"),

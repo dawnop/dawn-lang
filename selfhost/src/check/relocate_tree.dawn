@@ -420,6 +420,11 @@ pub fn function(v: View, f: TFun) -> Option[TFun] = {
     impl_of: impl_ref, default_of: opt_trait(v, f.default_of)? })
 }
 
+pub fn constant(v: View, c: TConst) -> Option[TConst] = {
+  Some(TConst { ..c, ty: relocate.ty(v.ids, c.ty)?, init: expression(v, c.init)?,
+    lo: position(v, c.lo)?, hi: end_position(v, c.hi)? })
+}
+
 ## This projects an already checked module, not its checker state or the
 ## declaration scheduler. Callers still own validity and cold-ID allocation.
 pub fn module(v: View, m: TModule) -> Option[TModule] = {
@@ -429,8 +434,7 @@ pub fn module(v: View, m: TModule) -> Option[TModule] = {
   for f in m.tests { tests = tests ++ [function(v, f)?] }
   var consts: List[TConst] = []
   for c in m.consts {
-    consts = consts ++ [TConst { ..c, ty: relocate.ty(v.ids, c.ty)?, init: expression(v, c.init)?,
-      lo: position(v, c.lo)?, hi: end_position(v, c.hi)? }]
+    consts = consts ++ [constant(v, c)?]
   }
   var syms: Map[Int, Sym] = map.empty()
   for (id, s) in map.entries(m.syms) {

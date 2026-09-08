@@ -3,12 +3,13 @@
 # never a saved list index. This is provenance, not dependency validity, and
 # the full header checker still runs before constructing this view.
 use std/map
+use std/set
 use check/checker.{ModuleHeaders, check_module_headers}
 use check/cx.{Cx, ModExports, cx_new}
-use check/types.{Sig, ImplI, TraitI, MethodSig}
+use check/types.{Sig, Ty, TyInt, TyString, ImplI, TraitI, MethodSig}
 use check/identity
-use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, module_key}
-use front/ast.{FnDecl, TraitMethod, TypeRef, DFn, DImpl, DTrait}
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, ConstDecl, TestDecl, module_key}
+use front/ast.{FnDecl, TraitMethod, TypeRef, ConstView, TestView, DFn, DImpl, DTrait, DConst, DTest}
 use front/parser
 
 pub type Header = { key: DeclKey, syntax: FnDecl, signature: Sig }
@@ -60,6 +61,71 @@ pub fn keys(headers: Headers) -> List[DeclKey] = { let data: Data = headers
 }
 
 pub fn get(headers: Headers, key: DeclKey) -> Option[Header] = { let data: Data = headers
+  map.get(data.entries, key)
+}
+
+## Constants see only preceding constants; tests run after all other bodies.
+## Keep these role orders separate from source interleaving. The visible set
+## describes a current input, not permission to reuse a previously read name.
+pub type ValueHeader =
+  | ConstantHeader(key: DeclKey, syntax: ConstView, declared: Ty, visible: Set[String])
+  | TestHeader(key: DeclKey, syntax: TestView)
+type ValueData = { constants: List[DeclKey], tests: List[DeclKey], entries: Map[DeclKey, ValueHeader] }
+pub opaque type Values = ValueData
+
+pub fn values(scope: ModuleKey, checked: ModuleHeaders) -> Option[Values] = {
+  if not admitted(scope, checked) { return None }
+  var locations: Map[DeclKey, (Int, Option[Int])] = map.empty()
+  for e in identity.declarations(scope, checked.syntax) {
+    locations = map.insert(locations, e.key, (e.declaration, e.member))
+  }
+  var entries: Map[DeclKey, ValueHeader] = map.empty()
+  var constants: List[DeclKey] = []
+  var tests: List[DeclKey] = []
+  var visible: Set[String] = set.empty()
+  var declaration = 0
+  var ci = 0
+  for d in checked.syntax.decls {
+    match d {
+      DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) -> {
+        if ci >= len(checked.const_tys) { return None }
+        let declared = checked.const_tys[ci]?
+        if map.get(checked.cx.consts, name) != Some(declared) { return None }
+        let key = DeclKey { scope: scope, path: [Named(ConstDecl, name)] }
+        let expected: (Int, Option[Int]) = (declaration, None)
+        if map.get(locations, key) != Some(expected) { return None }
+        let syntax = ConstView { name: name, is_pub: is_pub, ann: ann, init: init,
+          lo: lo, hi: hi, nlo: nlo, nhi: nhi }
+        entries = map.insert(entries, key, ConstantHeader(key, syntax, declared, visible))
+        constants = constants ++ [key]
+        visible = set.insert(visible, name)
+        ci = ci + 1
+      }
+      DTest(name, body, lo, hi, nlo, nhi) -> {
+        let key = DeclKey { scope: scope, path: [Named(TestDecl, name)] }
+        let expected: (Int, Option[Int]) = (declaration, None)
+        if map.get(locations, key) != Some(expected) { return None }
+        let syntax = TestView { name: name, body: body, lo: lo, hi: hi, nlo: nlo, nhi: nhi }
+        entries = map.insert(entries, key, TestHeader(key, syntax))
+        tests = tests ++ [key]
+      }
+      _ -> ()
+    }
+    declaration = declaration + 1
+  }
+  if ci != len(checked.const_tys) { return None }
+  Some(ValueData { constants: constants, tests: tests, entries: entries })
+}
+
+pub fn constant_keys(values: Values) -> List[DeclKey] = { let data: ValueData = values
+  data.constants
+}
+
+pub fn test_keys(values: Values) -> List[DeclKey] = { let data: ValueData = values
+  data.tests
+}
+
+pub fn value(values: Values, key: DeclKey) -> Option[ValueHeader] = { let data: ValueData = values
   map.get(data.entries, key)
 }
 
@@ -203,6 +269,47 @@ test "function products bind entry signatures to stable current declarations" {
   assert headers(scope, bad) == None
   # Identity must still refuse a duplicate if a caller accidentally drops diagnostics.
   assert headers(scope, ModuleHeaders { ..bad, cx: Cx { ..bad.cx, diags: [] } }) == None
+}
+
+test "value products preserve constant visibility and separate test identities" {
+  let scope = module_key("world", "module", "module", "module.dawn")
+  let env: Map[String, ModExports] = map.empty()
+  let initial = cx_new(Some("module"), Some("module.dawn"))
+  let (syntax, ds) = parser.parse_module("const A: Int = 1\ntest \"A\" { assert true }\nconst B: Int = A\ntest \"B\" { assert true }\n")
+  let (edited, eds) = parser.parse_module("test \"B\" { assert true }\nconst B: Int = A\nconst A: Int = 1\ntest \"A\" { assert true }\n")
+  assert ds == [] && eds == []
+  let old = check_module_headers(initial, syntax, env)
+  let next = check_module_headers(initial, edited, env)
+  let a = values(scope, old).expect("old values")
+  let b = values(scope, next).expect("new values")
+  let ac = constant_keys(a)
+  let at = test_keys(a)
+  assert len(ac) == 2 && len(at) == 2
+  assert constant_keys(b) == [ac[1], ac[0]] && test_keys(b) == [at[1], at[0]]
+  assert ac[0] != at[0]
+  match value(a, ac[1]).expect("old B") {
+    ConstantHeader(key, d, declared, visible) -> {
+      assert key == ac[1] && d.name == "B" && declared == TyInt
+      assert visible == set.from(["A"])
+    }
+    _ -> { assert false }
+  }
+  match value(b, ac[1]).expect("moved B") {
+    ConstantHeader(_, _, _, visible) -> { assert visible == set.empty() }
+    _ -> { assert false }
+  }
+  match value(b, at[0]).expect("moved test A") {
+    TestHeader(key, d) -> { assert key == at[0] && d.name == "A" }
+    _ -> { assert false }
+  }
+  assert values(ModuleKey { ..scope, emission_owner: "foreign" }, old) == None
+  assert values(ModuleKey { ..scope, source: "foreign.dawn" }, old) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: [] }) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: old.const_tys ++ [Some(TyInt)] }) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: [Some(TyString), Some(TyInt)] }) == None
+  let (duplicate, _) = parser.parse_module("test \"same\" {}\ntest \"same\" {}\n")
+  let bad = check_module_headers(initial, duplicate, env)
+  assert values(scope, ModuleHeaders { ..bad, cx: Cx { ..bad.cx, diags: [] } }) == None
 }
 
 test "method products preserve impl and default owners across declaration reorder" {
