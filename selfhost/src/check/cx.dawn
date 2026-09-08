@@ -505,15 +505,19 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
       cx1 = cx2
       effs = effs ++ [e]
     } else {
-      match map.get(cx1.effects, a) {
-        Some(eid) -> { effs = effs ++ [label_eff(cx1, eid)] }
+      let (declared_cx, declared) = declared_effect_read(cx1, a)
+      cx1 = declared_cx
+      match declared {
+        Some(row) -> { effs = effs ++ [row] }
         None ->
           if is_upper_name(a) {
             cx1 = cerr_h(cx1, "unknown effect `" ++ a ++ "`", lo, hi,
               "declare it with `effect " ++ a ++ " { ... }` (or import it); " ++
                 "effect variables are lowercase")
           } else {
-            match map.get(cx1.current_eff_vars, a) {
+            let (variable_cx, variable) = scoped_effect_variable_read(cx1, a)
+            cx1 = variable_cx
+            match variable {
               Some(v) -> { effs = effs ++ [v] }
               None -> {
                 # spec §6.3: an effect variable is introduced by appearing.
@@ -532,6 +536,16 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
     }
   }
   (cx1, eff_union(effs))
+}
+
+fn declared_effect_read(cx: Cx, name: String) -> (Cx, Option[Eff]) = {
+  let answer = match map.get(cx.effects, name) { None -> None, Some(id) -> Some(label_eff(cx, id)) }
+  (observe_type_read(cx, semantic_reads.DeclaredEffect(name, answer)), answer)
+}
+
+fn scoped_effect_variable_read(cx: Cx, name: String) -> (Cx, Option[Eff]) = {
+  let answer = map.get(cx.current_eff_vars, name)
+  (observe_type_read(cx, semantic_reads.ScopedEffectVariable(name, answer)), answer)
 }
 
 ## `!C.E` -- the row-atom twin of `resolve_assoc` below, same discipline

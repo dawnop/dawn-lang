@@ -4,7 +4,7 @@
 # it is deliberately not a proof that all semantic dependencies were read.
 use std/list
 use front/ast.{TypeRef, TNamed}
-use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar}
+use check/types.{Sig, Ty, Eff, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
@@ -30,6 +30,8 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | ScopedTypeParameter(name: String, answer: Option[Ty])
   | ParameterBounds(subject: Ty, answer: Option[List[Int]])
   | TraitAssociatedMembers(id: Int, kind: AssociatedKind, names: List[String])
+  | DeclaredEffect(name: String, answer: Option[Eff])
+  | ScopedEffectVariable(name: String, answer: Option[Eff])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -203,6 +205,14 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
             ParameterBounds(type_value(subject)?, moved_bounds)
           }
           TraitAssociatedMembers(id, kind, names) -> TraitAssociatedMembers(trait_value(id)?, kind, names)
+          DeclaredEffect(name, answer) -> {
+            let moved_effect = match answer { None -> None, Some(row) -> Some(effect_value(row)?) }
+            DeclaredEffect(name, moved_effect)
+          }
+          ScopedEffectVariable(name, answer) -> {
+            let moved_variable = match answer { None -> None, Some(row) -> Some(effect_value(row)?) }
+            ScopedEffectVariable(name, moved_variable)
+          }
         }
         out = out ++ [moved]
       }
@@ -276,6 +286,29 @@ test "semantic reads project export references in distinct domains" {
   assert capture(prefix, combined) == Some(reads)
   assert observe(None, ExportPresence("h", true)) == None
   assert observe(Some([]), ExportPresence("absent", false)) == Some([ExportPresence("absent", false)])
+}
+
+test "semantic reads project declared and scoped effect answers" {
+  let reads = Some([DeclaredEffect("Ask", Some(ELabeled(EPure, [(1, "ProviderAsk")]))),
+    DeclaredEffect("Missing", None), ScopedEffectVariable("e", Some(EffVar("e", 2))),
+    ScopedEffectVariable("new", None), ScopedEffectVariable("pure", Some(EPure))])
+  let effect_map: fn(Eff) -> Option[Eff] = row => match row {
+    ELabeled(base, labels) -> {
+      let (id, name) = labels[0]
+      Some(ELabeled(base, [(id + 100, name)]))
+    }
+    EffVar(name, id) -> Some(EffVar(name, id + 100))
+    EPure -> Some(EPure)
+    _ -> None
+  }
+  assert project(reads, s => None, t => None, id => None, effect_map) == Some(Some([
+    DeclaredEffect("Ask", Some(ELabeled(EPure, [(101, "ProviderAsk")]))), DeclaredEffect("Missing", None),
+    ScopedEffectVariable("e", Some(EffVar("e", 102))), ScopedEffectVariable("new", None), ScopedEffectVariable("pure", Some(EPure))]))
+  assert project(reads, s => None, t => None, id => Some(id + 1000), e => None) == None
+  let scoped = Some([ScopedEffectVariable("e", Some(EffVar("e", 2)))])
+  assert project(scoped, s => None, t => None, id => Some(id), e => None) == None
+  let absent = Some([DeclaredEffect("Missing", None), ScopedEffectVariable("new", None)])
+  assert project(absent, s => None, t => None, id => None, e => None) == Some(absent)
 }
 
 test "semantic reads project associated bounds in the trait domain" {

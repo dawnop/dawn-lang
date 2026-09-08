@@ -183,7 +183,7 @@ closure, which overlaps other targets and must not be counted as independent tes
 unqualified answers, diagnostic candidate lists, qualified signatures and module
 alias paths, including misses. Decisions preserve local shadowing, expected-type
 short circuits and argument scheduling. Capture/projection retain all four fact
-variants. The typed oracle additionally compares 50 enabled/disabled observation
+variants. The typed oracle additionally compares 56 enabled/disabled observation
 cases against complete cold Cx and module products; its read-state mutant must hit
 the whole-Cx assertion. Recording remains disabled by default and is not complete
 namespace coverage or production body-cache admission.
@@ -243,7 +243,18 @@ whole-Cx/module cases compare observed and cold associated resolution, including
 error recovery. These observations do not yet establish complete effect or
 scope dependencies, runtime query wiring, or production cache admission.
 The existing incremental-type-reads job runs these controls after the type/alias
-suite, with a 608s planning value below the unchanged 660s pole.
+suite, with a 640s planning value below the unchanged 660s pole.
+
+`effect-reads.py` covers declared effect rows and scoped effect-variable answers,
+including negative answers, metadata labels, lookup precedence and repeated reads
+after fresh allocation. Fourteen compiling controls must reach their owning
+assertions. Leaf and BodyProduct tests preserve the effect-row domain: declared
+label IDs and variable IDs relocate independently, including equal input integers
+with different destinations. Six complete Cx/module cases cover ordinary effects,
+variables, aliases and error recovery. Runtime query wiring and complete checker
+dependency coverage remain outstanding; these facts do not enable caching.
+The separate incremental-effect-reads job has a 194s planning value; appending
+these controls to the type job would exceed the unchanged 660s pole.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
