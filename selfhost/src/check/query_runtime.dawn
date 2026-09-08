@@ -1,0 +1,318 @@
+# Queries record successful reads, not guessed syntax dependencies. Keeping
+# one immutable owner makes nested evaluation explicit on both backends and
+# prevents partial publication. Semantic failure is a value; a missing memo
+# instead asks the caller to evaluate it. No checker consumer is wired yet.
+use std/map
+use std/set
+use std/list
+
+type Dependency[K] = { key: K, stamp: Int }
+type Memo[K, V] = { value: V, stamp: Int, input: Bool, dependencies: List[Dependency[K]] }
+type Pending[K] = { key: K, reads: List[Dependency[K]], blocked: Set[K] }
+type Data[K, V] = {
+  revision: Int,
+  next_stamp: Int,
+  memos: Map[K, Memo[K, V]],
+  readers: Map[K, Set[K]],
+  dirty: Set[K],
+  stack: List[Pending[K]],
+  same: fn(V, V) -> Bool
+}
+
+pub opaque type Engine[K, V] = Data[K, V]
+pub type Answer[K, V] = Available(value: V) | Needs(key: K) | Cycle(path: List[K])
+pub type Read[K, V] = { engine: Engine[K, V], answer: Answer[K, V] }
+
+pub fn new[K, V](same: fn(V, V) -> Bool) -> Engine[K, V] =
+  Data { revision: 0, next_stamp: 1, memos: map.empty(), readers: map.empty(),
+    dirty: set.empty(), stack: [], same: same }
+
+pub fn revision[K, V](engine: Engine[K, V]) -> Int = { let data: Data[K, V] = engine
+  data.revision
+}
+
+pub fn advance[K, V](engine: Engine[K, V]) -> Option[Engine[K, V]] = { let data: Data[K, V] = engine
+  if len(data.stack) != 0 || data.revision + 1 <= data.revision { return None }
+  Some(Data { ..data, revision: data.revision + 1 })
+}
+
+fn invalidate[K: Eq + Hash, V](data: Data[K, V], key: K) -> Data[K, V] = {
+  var dirty = data.dirty
+  var queue: List[K] = [key]
+  var seen: Set[K] = set.empty()
+  var index = 0
+  while index < len(queue) {
+    let current = queue[index]
+    index = index + 1
+    if not set.has(seen, current) {
+      seen = set.insert(seen, current)
+      match map.get(data.readers, current) {
+        Some(readers) -> {
+          for reader in set.to_list(readers) {
+            dirty = set.insert(dirty, reader)
+            queue = queue ++ [reader]
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  Data { ..data, dirty: dirty }
+}
+
+fn detach[K: Eq + Hash, V](data: Data[K, V], key: K) -> Data[K, V] = {
+  var readers = data.readers
+  match map.get(data.memos, key) {
+    Some(memo) -> {
+      for dep in memo.dependencies {
+        match map.get(readers, dep.key) {
+          Some(users) -> {
+            let remaining = set.remove(users, key)
+            readers = if set.len(remaining) == 0 { map.remove(readers, dep.key) } else { map.insert(readers, dep.key, remaining) }
+          }
+          None -> ()
+        }
+      }
+    }
+    None -> ()
+  }
+  Data { ..data, readers: readers }
+}
+
+fn publish[K: Eq + Hash, V](data: Data[K, V], key: K, value: V, input: Bool,
+  dependencies: List[Dependency[K]]) -> Option[Data[K, V]] = {
+  let previous = map.get(data.memos, key)
+  let same = match previous {
+    Some(old) -> data.same(old.value, value)
+    None -> false
+  }
+  if not same && data.next_stamp + 1 <= data.next_stamp { return None }
+  let stamp = match previous {
+    Some(old) -> if same { old.stamp } else { data.next_stamp }
+    None -> data.next_stamp
+  }
+  var next = detach(data, key)
+  var readers = next.readers
+  for dep in dependencies {
+    let users = match map.get(readers, dep.key) { Some(xs) -> xs, None -> set.empty() }
+    readers = map.insert(readers, dep.key, set.insert(users, key))
+  }
+  let memo = Memo { value: value, stamp: stamp, input: input, dependencies: dependencies }
+  next = Data { ..next, memos: map.insert(next.memos, key, memo), readers: readers,
+    dirty: set.remove(next.dirty, key), next_stamp: if same { next.next_stamp } else { next.next_stamp + 1 } }
+  Some(if same { next } else { invalidate(next, key) })
+}
+
+## Inputs may contain a semantic error or negative lookup as their value.
+## Keep them distinct from computed keys; changing a key's role is refused.
+pub fn input[K: Eq + Hash, V](engine: Engine[K, V], key: K, value: V) -> Option[Engine[K, V]] = {
+  let data: Data[K, V] = engine
+  if len(data.stack) != 0 { return None }
+  match map.get(data.memos, key) { Some(old) -> if not old.input { return None }, None -> () }
+  Some(publish(data, key, value, true, [])?)
+}
+
+pub fn remove[K: Eq + Hash, V](engine: Engine[K, V], key: K) -> Option[Engine[K, V]] = {
+  let data: Data[K, V] = engine
+  if len(data.stack) != 0 { return None }
+  let next = detach(invalidate(data, key), key)
+  Some(Data { ..next, memos: map.remove(next.memos, key), dirty: set.remove(next.dirty, key) })
+}
+
+fn active[K: Eq, V](data: Data[K, V], key: K) -> Bool = {
+  for pending in data.stack { if pending.key == key { return true } }
+  false
+}
+
+# Revalidation can clean a dirty parent without executing it when a child
+# recomputed to an equal result. A missing/changed dependency remains dirty.
+fn validate[K: Eq + Hash, V](data: Data[K, V], key: K, visiting: Set[K]) -> (Data[K, V], Bool) = {
+  if active(data, key) || set.has(visiting, key) { return (data, false) }
+  let memo = match map.get(data.memos, key) { Some(m) -> m, None -> return (data, false) }
+  if not set.has(data.dirty, key) { return (data, true) }
+  var next = data
+  let path = set.insert(visiting, key)
+  for dep in memo.dependencies {
+    let (checked, valid) = validate(next, dep.key, path)
+    next = checked
+    if not valid { return (next, false) }
+    let current = map.get(next.memos, dep.key).expect("validated query dependency")
+    if current.stamp != dep.stamp { return (next, false) }
+  }
+  (Data { ..next, dirty: set.remove(next.dirty, key) }, true)
+}
+
+pub fn read[K: Eq + Hash, V](engine: Engine[K, V], key: K) -> Read[K, V] = {
+  let data: Data[K, V] = engine
+  let (checked, valid) = validate(data, key, set.empty())
+  var next = checked
+  let answer: Answer[K, V] = if active(data, key) {
+    var path: List[K] = []
+    for pending in data.stack { path = path ++ [pending.key] }
+    Cycle(path ++ [key])
+  } else if valid {
+    Available(map.get(next.memos, key).expect("validated query").value)
+  } else { Needs(key) }
+  if len(next.stack) != 0 {
+    let top = next.stack[len(next.stack) - 1]
+    var reads: List[Dependency[K]] = []
+    for dep in top.reads { if dep.key != key { reads = reads ++ [dep] } }
+    var blocked = set.insert(top.blocked, key)
+    if valid {
+      reads = reads ++ [Dependency { key: key, stamp: map.get(next.memos, key).expect("query read stamp").stamp }]
+      blocked = set.remove(blocked, key)
+    }
+    next = Data { ..next, stack: list.take(next.stack, len(next.stack) - 1) ++ [Pending { ..top, reads: reads, blocked: blocked }] }
+  }
+  Read { engine: next, answer: answer }
+}
+
+pub fn begin[K: Eq + Hash, V](engine: Engine[K, V], key: K) -> Option[Engine[K, V]] = {
+  let data: Data[K, V] = engine
+  if active(data, key) { return None }
+  match map.get(data.memos, key) { Some(old) -> if old.input { return None }, None -> () }
+  # A previously clean reader of this active query must not bypass cycle
+  # detection through its old memo. Abort can revalidate it unchanged.
+  let next = invalidate(data, key)
+  Some(Data { ..next, stack: next.stack ++ [Pending { key: key, reads: [], blocked: set.empty() }] })
+}
+
+pub fn finish[K: Eq + Hash, V](engine: Engine[K, V], key: K, value: V) -> Option[Engine[K, V]] = {
+  let data: Data[K, V] = engine
+  if len(data.stack) == 0 { return None }
+  let top = data.stack[len(data.stack) - 1]
+  if top.key != key || set.len(top.blocked) != 0 { return None }
+  for dep in top.reads {
+    let current = map.get(data.memos, dep.key)?
+    if set.has(data.dirty, dep.key) || current.stamp != dep.stamp { return None }
+  }
+  let next = Data { ..data, stack: list.take(data.stack, len(data.stack) - 1) }
+  Some(publish(next, key, value, false, top.reads)?)
+}
+
+pub fn abort[K: Eq, V](engine: Engine[K, V], key: K) -> Option[Engine[K, V]] = {
+  let data: Data[K, V] = engine
+  if len(data.stack) == 0 || data.stack[len(data.stack) - 1].key != key { return None }
+  Some(Data { ..data, stack: list.take(data.stack, len(data.stack) - 1) })
+}
+
+fn fixture() -> Engine[String, Int] = new((a, b) => a == b)
+fn available(r: Read[String, Int]) -> Int = match r.answer {
+  Available(value) -> value
+  _ -> -999999
+}
+fn needs(r: Read[String, Int]) -> Bool = match r.answer { Needs(_) -> true, _ -> false }
+fn absent[T](value: Option[T]) -> Bool = match value { None -> true, Some(_) -> false }
+
+test "query runtime propagates changes and stops at equal results" {
+  var e = input(fixture(), "source", 1).expect("query input")
+  e = begin(e, "header").expect("header begin")
+  let source = read(e, "source")
+  assert available(source) == 1
+  e = finish(source.engine, "header", 10).expect("header finish")
+  e = begin(e, "body").expect("body begin")
+  e = finish(read(e, "header").engine, "body", 20).expect("body finish")
+  e = advance(e).expect("query revision")
+  assert revision(e) == 1
+  e = input(e, "source", 2).expect("changed source")
+  assert needs(read(e, "body"))
+  e = begin(e, "header").expect("header recheck")
+  e = finish(read(e, "source").engine, "header", 10).expect("equal header")
+  let body = read(e, "body")
+  assert available(body) == 20
+  let data: Data[String, Int] = body.engine
+  assert not set.has(data.dirty, "body")
+  e = input(body.engine, "source", 3).expect("another source")
+  e = begin(e, "header").expect("changed header begin")
+  e = finish(read(e, "source").engine, "header", 11).expect("changed header finish")
+  assert needs(read(e, "body"))
+}
+
+test "query runtime replaces edges and prevents same revision ABA" {
+  var e = input(input(fixture(), "a", 1).expect("a"), "b", 2).expect("b")
+  e = begin(e, "query").expect("query begin")
+  e = finish(read(e, "a").engine, "query", 4).expect("query finish")
+  e = begin(e, "query").expect("replace begin")
+  e = finish(read(e, "b").engine, "query", 4).expect("replace finish")
+  e = input(e, "a", 3).expect("unused input")
+  let data: Data[String, Int] = e
+  assert not set.has(data.dirty, "query")
+  assert available(read(e, "query")) == 4
+  e = remove(e, "b").expect("remove b")
+  assert needs(read(e, "query"))
+  e = input(e, "b", 2).expect("restore b")
+  assert needs(read(e, "query"))
+  assert revision(e) == 0
+}
+
+test "query runtime rejects partial publication cycles and in flight inputs" {
+  var e = begin(fixture(), "parent").expect("parent")
+  let missing = read(e, "child")
+  assert needs(missing)
+  e = missing.engine
+  assert absent(finish(e, "parent", 0))
+  assert absent(input(e, "input", 1)) && absent(advance(e)) && absent(remove(e, "child"))
+  e = begin(e, "child").expect("child")
+  let cycle = read(e, "parent")
+  let path = match cycle.answer { Cycle(path) -> path, _ -> [] }
+  assert path == ["parent", "child", "parent"]
+  assert absent(begin(cycle.engine, "parent")) && absent(finish(cycle.engine, "child", 1))
+  assert absent(abort(cycle.engine, "parent"))
+  e = abort(cycle.engine, "child").expect("abort child")
+  e = begin(e, "child").expect("retry child")
+  e = finish(e, "child", 2).expect("publish child")
+  e = finish(read(e, "child").engine, "parent", 3).expect("publish parent")
+  assert available(read(e, "parent")) == 3
+  assert absent(input(e, "parent", 4))
+  e = input(e, "input", 1).expect("input after completion")
+  assert absent(begin(e, "input"))
+}
+
+test "query runtime detects recursion through a previously clean memo" {
+  var e = begin(fixture(), "parent").expect("initial parent")
+  e = finish(e, "parent", 1).expect("initial parent value")
+  e = begin(e, "child").expect("initial child")
+  e = finish(read(e, "parent").engine, "child", 2).expect("initial child value")
+  e = begin(e, "parent").expect("recompute parent")
+  let child = read(e, "child")
+  assert needs(child)
+  assert absent(finish(child.engine, "parent", 1))
+  e = begin(child.engine, "child").expect("recompute child")
+  let cycle = read(e, "parent")
+  assert match cycle.answer { Cycle(_) -> true, _ -> false }
+  e = abort(cycle.engine, "child").expect("abort recursive child")
+  e = abort(e, "parent").expect("abort recursive parent")
+  assert available(read(e, "child")) == 2
+}
+
+test "query runtime caches negative results and keeps owners independent" {
+  let empty: Option[Int] = None
+  let initial: Engine[String, Option[Int]] = new((a, b) => a == b)
+  var e = input(initial, "scope", empty).expect("negative scope")
+  e = begin(e, "lookup").expect("negative lookup")
+  let scope = read(e, "scope")
+  let negative = match scope.answer { Available(value) -> value, _ -> panic("negative result was not cached") }
+  assert negative == None
+  e = finish(scope.engine, "lookup", negative).expect("negative lookup publication")
+  let old = e
+  e = input(e, "scope", Some(7)).expect("newly introduced name")
+  assert match read(e, "lookup").answer { Needs(_) -> true, _ -> false }
+  assert match read(old, "lookup").answer { Available(value) -> value == None, _ -> false }
+  assert match read(initial, "scope").answer { Needs(_) -> true, _ -> false }
+}
+
+test "query runtime refuses changed read stamps and releases evicted edges" {
+  var e = begin(fixture(), "child").expect("child")
+  e = finish(e, "child", 1).expect("initial child")
+  e = begin(e, "parent").expect("parent")
+  e = read(e, "child").engine
+  e = begin(e, "child").expect("recompute read child")
+  assert absent(finish(e, "parent", 0))
+  e = finish(e, "child", 2).expect("replace read child")
+  assert absent(finish(e, "parent", 3))
+  e = finish(read(e, "child").engine, "parent", 3).expect("fresh read")
+  e = remove(e, "parent").expect("evict parent")
+  let data: Data[String, Int] = e
+  assert not map.has(data.readers, "child")
+  assert needs(read(e, "parent")) && available(read(e, "child")) == 2
+}

@@ -139,6 +139,15 @@ type-span清空状态；完整Cx捕获/装配和HeaderProduct投影字段审计�
 这些完整表快照仍保留生产顺序，不是逐声明delta，不能合并任意独立声明编辑；
 输入环境有效性、当前顺序装配和生产调度仍须接线。没有借此启用header cache。
 
+query_runtime是参数化key/value的不可变查询owner：显式输入、嵌套计算栈、读取stamp、
+反向失效和相等结果截断传播。删除重建使用独立单调stamp，不用revision代替结果版本。
+负查询结果是普通value，缺失memo才是Needs；未完成读取不能finish。重新计算父查询
+先使其旧读者重新验证，避免经旧memo绕过循环检测；abort不发布半成品。
+query-runtime.py的17个成功编译负控覆盖传播、相等截断、边替换、读取记录、循环、
+提交边界、角色、驱逐、同revision ABA及在计算期间写入/推进revision/驱逐的拒绝。
+JVM/native各有6个owning图测试。它尚未接真实checker，不能据此声称scope/impl/body
+读取已完整覆盖或函数增量已上线；后续真实消费者必须明确语义相等及源码视图依赖。
+
 `projection.py` 补源码边界分裂、token/断言来源、旧断言文本及checker两条evidence
 构造分支的六个成功编译负控，另有callee owner、模块别名表和签名冲突拒绝的三个
 owning断言负控，以及ModuleHeaders推断状态/const类型保留的两个负控。
