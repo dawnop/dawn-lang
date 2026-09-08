@@ -202,7 +202,13 @@ elif name == "static-only":
     replace_once(
         "checker",
         "          if not is_alias {",
-        "          if not is_alias && static_field_target(cx, recv) != None {",
+        "          var static_target = false\n"
+        "          if not is_alias {\n"
+        "            let (target_cx, target) = static_field_target(cx, recv)\n"
+        "            cx = target_cx\n"
+        "            static_target = target != None\n"
+        "          }\n"
+        "          if not is_alias && static_target {",
     )
 elif name == "java-first":
     replace_once(
@@ -232,7 +238,9 @@ elif name == "field-wins":
           let (next, is_alias) = module_alias_receiver_read(cx, recv)
           cx = next
           var field_first = false
-          match static_field_target(cx, recv) {
+          let (target_cx, target) = static_field_target(cx, recv)
+          cx = target_cx
+          match target {
             Some(fq) -> {
               for f in cx.jsig.static_fields_of(fq) {
                 if f.name == fname { field_first = true }
