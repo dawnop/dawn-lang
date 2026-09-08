@@ -75,8 +75,10 @@ def main():
         ('semantic_reads', 'header-answer-id', 'id: nominal(answer.id)?, tparams: params', 'id: answer.id, tparams: params'),
         ('semantic_reads', 'header-binder', 'for ty in answer.tparams { params = params ++ [type_value(ty)?] }', 'for ty in answer.tparams { params = params ++ [ty] }'),
         ('semantic_reads', 'field-answer-id', 'CtorI { ..answer, adt: nominal(answer.adt)?, fields: fields }', 'CtorI { ..answer, adt: answer.adt, fields: fields }'),
-        ('semantic_reads', 'field-type', 'FieldI { ..field, ty: type_value(field.ty)? }', 'FieldI { ..field, ty: field.ty }'),
-        ('semantic_reads', 'field-name', 'FieldI { ..field, ty: type_value(field.ty)? }', 'FieldI { ..field, name: "wrong", ty: type_value(field.ty)? }'),
+        # Select ConstructorFields, not the independent rendered-constructor
+        # projection that now uses the same FieldI reconstruction expression.
+        ('semantic_reads', 'field-type', 'for field in answer.fields { fields = fields ++ [FieldI { ..field, ty: type_value(field.ty)? }] }', 'for field in answer.fields { fields = fields ++ [FieldI { ..field, ty: field.ty }] }'),
+        ('semantic_reads', 'field-name', 'for field in answer.fields { fields = fields ++ [FieldI { ..field, ty: type_value(field.ty)? }] }', 'for field in answer.fields { fields = fields ++ [FieldI { ..field, name: "wrong", ty: type_value(field.ty)? }] }'),
         ('semantic_reads', 'field-slot', 'ConstructorFields(nominal(adt)?, slot, CtorI', 'ConstructorFields(nominal(adt)?, slot + 1, CtorI'),
         ('body_product', 'capture', 'semantic_reads.capture(before.function_reads, after.function_reads)?', 'before.function_reads'),
     ]
