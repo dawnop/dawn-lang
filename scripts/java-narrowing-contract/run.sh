@@ -60,17 +60,17 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-old = '''          } else if cx.jsig.is_assignable(p, fq) {
-            Some(1)
-          } else {
-            None
+old = '''          } else {
+            let (next, fits) = java_assignable_read(cx, p, fq)
+            cx = next
+            if fits { Some(1) } else { None }
           }'''
-new = '''          } else if cx.jsig.is_assignable(p, fq) {
-            Some(1)
-          } else if fq == "java.lang.Object" && not is_prim_name(p) {
-            Some(1)
-          } else {
-            None
+new = '''          } else {
+            let (next, fits) = java_assignable_read(cx, p, fq)
+            cx = next
+            if fits { Some(1) } else if fq == "java.lang.Object" && not is_prim_name(p) {
+              Some(1)
+            } else { None }
           }'''
 if text.count(old) != 1:
     raise SystemExit("checker mutation anchor drifted")

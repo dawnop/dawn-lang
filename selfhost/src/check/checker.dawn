@@ -83,7 +83,8 @@ use check/cx.{
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
   resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read, java_class_name_read, java_class_names_read,
-  java_methods_read, java_constructors_read, java_static_fields_read, is_const_serializable, const_refusal_hint, no_sig,
+  java_methods_read, java_constructors_read, java_static_fields_read, java_component_read,
+  java_sam_read, java_assignable_read, is_const_serializable, const_refusal_hint, no_sig,
   TySpan
 }
 use check/passes.{
@@ -3508,7 +3509,11 @@ test "java reads retain return dispatch and diagnostic class metadata" {
     assert cold_trees == next_trees && cold_convs == next_convs && cold_evs == next_evs && cold_bridges == next_bridges
     assert cold.diags == observed.diags && len(cold.diags) == 1
     assert str.contains(cold.diags[0].msg, "ReadableSimple")
-    assert cold.next_id == observed.next_id && observed.function_reads == expected
+    let sam_reads: List[semantic_reads.FunctionRead] = if list_argument { [] } else {
+      [semantic_reads.JavaSam("pkg.Box", Some(tj_static("run", [], "long", "pkg.Box")))]
+    }
+    assert cold.next_id == observed.next_id
+    assert observed.function_reads == Some(sam_reads ++ [semantic_reads.JavaClassInfo("pkg.Box", metadata)])
   }
 }
 
@@ -9701,35 +9706,44 @@ fn is_prim_name(p: String) -> Bool =
   p == "long" || p == "int" || p == "short" || p == "byte" || p == "double" ||
   p == "float" || p == "boolean" || p == "char" || p == "void"
 
-fn sam_of_nonprim(js: Jsig, p: String) -> Option[JMethod] !io =
-  if is_prim_name(p) { None } else { js.sam_of(p) }
+fn sam_of_nonprim(cx: Cx, p: String) -> (Cx, Option[JMethod]) !io =
+  if is_prim_name(p) { (cx, None) } else { java_sam_read(cx, p) }
 
-fn sam_param_ty(js: Jsig, p: String) -> Option[Ty] !io =
-  if p == "long" || p == "int" || p == "short" || p == "byte" {
-    Some(TyInt)
-  } else if p == "double" || p == "float" {
-    Some(TyFloat)
-  } else if p == "boolean" {
-    Some(TyBool)
-  } else if p == "char" {
-    None
-  } else if p == "java.lang.String" {
-    Some(TyString)
-  } else if p == "[B" {
-    Some(TyBytes)
-  } else {
-    Some(TyJava(p, js.class_info(p).display))
-  }
+fn sam_param_ty(cx: Cx, p: String) -> (Cx, Option[Ty]) !io = {
+  var cx1 = cx
+  let answer: Option[Ty] =
+    if p == "long" || p == "int" || p == "short" || p == "byte" {
+      Some(TyInt)
+    } else if p == "double" || p == "float" {
+      Some(TyFloat)
+    } else if p == "boolean" {
+      Some(TyBool)
+    } else if p == "char" {
+      None
+    } else if p == "java.lang.String" {
+      Some(TyString)
+    } else if p == "[B" {
+      Some(TyBytes)
+    } else {
+      let (next, info) = java_class_info_read(cx1, p)
+      cx1 = next
+      Some(TyJava(p, info.display))
+    }
+  (cx1, answer)
+}
 
 ## SAM signature → the Dawn function shape a converted argument must have
 ## (spec §9.4). Callback parameters arrive unwrapped. A char parameter remains
 ## unconvertible; a char return seeds Never, so only a diverging callback fits.
-fn sam_fn_ty(js: Jsig, sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
+fn sam_fn_ty(cx: Cx, sm: JMethod) -> (Cx, Option[(List[Ty], Ty)]) !io = {
+  var cx1 = cx
   var ps: List[Ty] = []
   for p in sm.param_cls {
-    match sam_param_ty(js, p) {
+    let (param_cx, parameter) = sam_param_ty(cx1, p)
+    cx1 = param_cx
+    match parameter {
       Some(t) -> { ps = ps ++ [t] }
-      None -> return None
+      None -> return (cx1, None)
     }
   }
   let r = sm.ret_cls
@@ -9748,38 +9762,68 @@ fn sam_fn_ty(js: Jsig, sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
   } else if r == "[B" {
     Some(TyBytes)
   } else {
-    Some(TyJava(r, js.class_info(r).display))
+    let (next, info) = java_class_info_read(cx1, r)
+    cx1 = next
+    Some(TyJava(r, info.display))
   }
   match ret {
-    Some(rt) -> Some((ps, rt))
-    None -> None
+    Some(rt) -> (cx1, Some((ps, rt)))
+    None -> (cx1, None)
   }
 }
 
 ## May a Dawn return land where the SAM asks for j? (the boxed rep must be assignable)
-fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
-  if j == "void" {
-    r == TyUnit || r == TyNever
-  } else if j == "long" || j == "int" || j == "short" || j == "byte" {
-    r == TyInt || r == TyNever
-  } else if j == "double" || j == "float" {
-    r == TyFloat || r == TyNever
-  } else if j == "boolean" {
-    r == TyBool || r == TyNever
-  } else if j == "char" {
-    r == TyNever
-  } else {
-    match r {
-      TyString -> js.is_assignable(j, "java.lang.String")
-      TyBytes -> js.is_assignable(j, "[B")
-      TyInt -> js.is_assignable(j, "java.lang.Long")
-      TyFloat -> js.is_assignable(j, "java.lang.Double")
-      TyBool -> js.is_assignable(j, "java.lang.Boolean")
-      TyJava(fq, _) -> js.is_assignable(j, fq)
-      TyNever -> true
-      _ -> false
+fn sam_ret_compatible(cx: Cx, r: Ty, j: String) -> (Cx, Bool) !io = {
+  var cx1 = cx
+  let answer =
+    if j == "void" {
+      r == TyUnit || r == TyNever
+    } else if j == "long" || j == "int" || j == "short" || j == "byte" {
+      r == TyInt || r == TyNever
+    } else if j == "double" || j == "float" {
+      r == TyFloat || r == TyNever
+    } else if j == "boolean" {
+      r == TyBool || r == TyNever
+    } else if j == "char" {
+      r == TyNever
+    } else {
+      match r {
+        TyString -> {
+          let (next, fits) = java_assignable_read(cx1, j, "java.lang.String")
+          cx1 = next
+          fits
+        }
+        TyBytes -> {
+          let (next, fits) = java_assignable_read(cx1, j, "[B")
+          cx1 = next
+          fits
+        }
+        TyInt -> {
+          let (next, fits) = java_assignable_read(cx1, j, "java.lang.Long")
+          cx1 = next
+          fits
+        }
+        TyFloat -> {
+          let (next, fits) = java_assignable_read(cx1, j, "java.lang.Double")
+          cx1 = next
+          fits
+        }
+        TyBool -> {
+          let (next, fits) = java_assignable_read(cx1, j, "java.lang.Boolean")
+          cx1 = next
+          fits
+        }
+        TyJava(fq, _) -> {
+          let (next, fits) = java_assignable_read(cx1, j, fq)
+          cx1 = next
+          fits
+        }
+        TyNever -> true
+        _ -> false
+      }
     }
-  }
+  (cx1, answer)
+}
 
 ## The evidence a function value takes with it when it leaves the language
 ## (spec §6.5's boundary clause, §9.4).
@@ -9899,21 +9943,28 @@ fn deferred_arity(cx: Cx, a: Expr) -> Int =
   }
 
 ## How well one Java parameter class accepts an argument (spec §9.3); None = no fit.
-fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io =
-  match at {
+fn param_score(initial: Cx, p: String, at: Option[Ty], arity: Int) -> (Cx, Option[Int]) !io = {
+  var cx = initial
+  let answer: Option[Int] = match at {
     # deferred lambda / bare constructor: match a convertible SAM by arity
-    None ->
-      match sam_of_nonprim(cx.jsig, p) {
-        Some(sm) ->
-          match sam_fn_ty(cx.jsig, sm) {
+    None -> {
+      let (sam_cx, sam) = sam_of_nonprim(cx, p)
+      cx = sam_cx
+      match sam {
+        Some(sm) -> {
+          let (shape_cx, shape) = sam_fn_ty(cx, sm)
+          cx = shape_cx
+          match shape {
             Some(ft) -> {
               let (sps, _) = ft
               if len(sps) == arity { Some(2) } else { None }
             }
             None -> None
           }
+        }
         None -> None
       }
+    }
     Some(t) ->
       match t {
         TyInt -> if p == "long" { Some(2) } else if p == "int" { Some(1) } else { None }
@@ -9922,44 +9973,54 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
         TyString ->
           if p == "java.lang.String" {
             Some(2)
-          } else if cx.jsig.is_assignable(p, "java.lang.String") {
-            Some(1)
           } else {
-            None
+            let (next, fits) = java_assignable_read(cx, p, "java.lang.String")
+            cx = next
+            if fits { Some(1) } else { None }
           }
         # Bytes is a raw byte[] at runtime, so it passes to Java byte[] params directly
         TyBytes ->
           if p == "[B" {
             Some(2)
-          } else if not is_prim_name(p) && cx.jsig.is_assignable(p, "[B") {
-            Some(1)
+          } else if not is_prim_name(p) {
+            let (next, fits) = java_assignable_read(cx, p, "[B")
+            cx = next
+            if fits { Some(1) } else { None }
           } else {
             None
           }
         TyJava(fq, _) ->
           if p == fq {
             Some(2)
-          } else if cx.jsig.is_assignable(p, fq) {
-            Some(1)
           } else {
-            None
+            let (next, fits) = java_assignable_read(cx, p, fq)
+            cx = next
+            if fits { Some(1) } else { None }
           }
-        TyFn(fps, fret, _) ->
-          match sam_of_nonprim(cx.jsig, p) {
-            Some(sm) ->
-              match sam_fn_ty(cx.jsig, sm) {
+        TyFn(fps, fret, _) -> {
+          let (sam_cx, sam) = sam_of_nonprim(cx, p)
+          cx = sam_cx
+          match sam {
+            Some(sm) -> {
+              let (shape_cx, shape) = sam_fn_ty(cx, sm)
+              cx = shape_cx
+              match shape {
                 Some(ft) -> {
                   let (sps, _) = ft
-                  if fps == sps && sam_ret_compatible(cx.jsig, fret, sm.ret_cls) {
-                    Some(2)
+                  if fps == sps {
+                    let (return_cx, fits) = sam_ret_compatible(cx, fret, sm.ret_cls)
+                    cx = return_cx
+                    if fits { Some(2) } else { None }
                   } else {
                     None
                   }
                 }
                 None -> None
               }
+            }
             None -> None
           }
+        }
         # a Dawn List bridges to the three collection interfaces only (spec §9.6)
         TyList(_) ->
           if p == "java.util.List" {
@@ -9972,6 +10033,8 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
         _ -> None
       }
   }
+  (cx, answer)
+}
 
 ## Reflection returns methods in an unspecified, process-varying order; sort
 ## by rendering so resolution and candidate lists are deterministic.
@@ -10014,11 +10077,12 @@ fn sort_ctors(cs: List[JCtor]) -> List[JCtor] = {
 
 ## The i-th parameter as the argument at i sees it: inside a packed variadic
 ## part that is the array's component type, not the array.
-fn param_at(js: Jsig, params: List[String], packs: Bool, i: Int) -> String !io =
+fn param_at(cx: Cx, params: List[String], packs: Bool, i: Int) -> (Cx, String) !io =
   if packs && i >= len(params) - 1 {
-    js.component_of(params[len(params) - 1]).expect("varargs component")
+    let (next, component) = java_component_read(cx, params[len(params) - 1])
+    (next, component.expect("varargs component"))
   } else {
-    params[i]
+    (cx, params[i])
   }
 
 fn score_with(
@@ -10027,22 +10091,27 @@ fn score_with(
   packs: Bool,
   ats: List[Option[Ty]],
   arities: List[Int]
-) -> Option[Int] !io = {
+) -> (Cx, Option[Int]) !io = {
   if packs {
-    if len(ats) < len(params) - 1 { return None }
+    if len(ats) < len(params) - 1 { return (cx, None) }
   } else if len(params) != len(ats) {
-    return None
+    return (cx, None)
   }
+  var cx1 = cx
   var total = 0
   var i = 0
   while i < len(ats) {
-    match param_score(cx, param_at(cx.jsig, params, packs, i), ats[i], arities[i]) {
+    let (param_cx, parameter) = param_at(cx1, params, packs, i)
+    cx1 = param_cx
+    let (score_cx, score) = param_score(cx1, parameter, ats[i], arities[i])
+    cx1 = score_cx
+    match score {
       Some(sc) -> { total = total + sc }
-      None -> return None
+      None -> return (cx1, None)
     }
     i = i + 1
   }
-  Some(total)
+  (cx1, Some(total))
 }
 
 ## Two-phase resolution (spec §9.3, after JLS): phase 1 tries every candidate
@@ -10054,18 +10123,173 @@ fn fit_score(
   is_varargs: Bool,
   ats: List[Option[Ty]],
   arities: List[Int]
-) -> Option[(Int, Int)] !io = {
-  match score_with(cx, params, false, ats, arities) {
-    Some(sc) -> return Some((1, sc))
+) -> (Cx, Option[(Int, Int)]) !io = {
+  let (fixed_cx, fixed_score) = score_with(cx, params, false, ats, arities)
+  match fixed_score {
+    Some(sc) -> return (fixed_cx, Some((1, sc)))
     None -> ()
   }
   if is_varargs {
-    match score_with(cx, params, true, ats, arities) {
-      Some(sc) -> return Some((0, sc))
-      None -> ()
+    let (packed_cx, packed_score) = score_with(fixed_cx, params, true, ats, arities)
+    match packed_score {
+      Some(sc) -> return (packed_cx, Some((0, sc)))
+      None -> return (packed_cx, None)
     }
   }
-  None
+  (fixed_cx, None)
+}
+
+test "java oracle reads retain missing SAM and component answers as values" {
+  let method = JMethod { name: "run", param_cls: [], ret_cls: "long", is_static: false,
+    is_varargs: false, is_abstract: true, desc: "run descriptor", decl_cls: "pkg.Parent" }
+  for found in [false, true] {
+    let sam: Option[JMethod] = if found { Some(method) } else { None }
+    let component: Option[String] = if found { Some("pkg.Child") } else { None }
+    let oracle = Jsig { ..jsig_refused(), sam_of: name => sam, component_of: name => component }
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let (cold_sam, cold_method) = java_sam_read(initial, "pkg.Callback")
+    let (cold, cold_component) = java_component_read(cold_sam, "array-query")
+    let (sam_cx, next_method) = java_sam_read(Cx { ..initial, function_reads: Some([]) }, "pkg.Callback")
+    let (observed, next_component) = java_component_read(sam_cx, "array-query")
+    assert cold_method == sam && next_method == sam && cold_component == component && next_component == component
+    assert observed.function_reads == Some([semantic_reads.JavaSam("pkg.Callback", sam),
+      semantic_reads.JavaComponent("array-query", component)])
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
+}
+
+test "java oracle reads retain rejected candidates before the winning overload" {
+  let info = JClass { fqcn: "pkg.Box", simple: "Box", display: "Box",
+    is_interface: false, is_primitive: false, is_array: false }
+  let method = JMethod { name: "take", param_cls: ["pkg.Parent"], ret_cls: "long", is_static: true,
+    is_varargs: false, is_abstract: false, desc: "z winner", decl_cls: "pkg.Box" }
+  let methods = [method, JMethod { ..method, param_cls: ["pkg.Refused"], desc: "a refused" }]
+  let ctors = [JCtor { param_cls: ["pkg.Parent"], is_varargs: false, desc: "z winner" },
+    JCtor { param_cls: ["pkg.Refused"], is_varargs: false, desc: "a refused" }]
+  let oracle = Jsig { ..jsig_refused(), class_info: name => info,
+    methods_of: name => methods, ctors_of: name => ctors,
+    is_assignable: (sup, sub) => {
+      assert sub == "java.lang.String"
+      sup == "pkg.Parent"
+    } }
+  for constructor in [false, true] {
+    let initial = Cx { ..test_cx(), jsig: oracle, java_classes: map.from([("Foreign", "pkg.Box")]) }
+    let target = ECtor("Foreign", [], None, false, 0, 7, 0, 7)
+    let args = [Arg { name: None, e: EStr([SPText("x")], 12, 15), trailing: false, lo: 12, hi: 15 }]
+    let name = if constructor { "new" } else { "take" }
+    let (cold, ty, tree) = check_method_call(initial, target, name, args, None, 8, 12, 0, 16)
+    let (observed, next_ty, next_tree) = check_method_call(Cx { ..initial, function_reads: Some([]) }, target, name, args, None, 8, 12, 0, 16)
+    let candidates = if constructor { semantic_reads.JavaConstructors("pkg.Box", ctors) } else { semantic_reads.JavaMethods("pkg.Box", methods) }
+    assert ty == (if constructor { TyJava("pkg.Box", "Box") } else { TyInt })
+    assert next_ty == ty && next_tree == tree && cold.diags == observed.diags && cold.diags == []
+    assert observed.function_reads == Some([semantic_reads.JavaClassName("Foreign", Some("pkg.Box")),
+      semantic_reads.JavaClassInfo("pkg.Box", info), candidates,
+      semantic_reads.JavaAssignable("pkg.Refused", "java.lang.String", false),
+      semantic_reads.JavaAssignable("pkg.Parent", "java.lang.String", true)])
+  }
+}
+
+test "java oracle reads preserve assignability direction and primitive shortcuts" {
+  let cases = [("pkg.Parent", TyString, "java.lang.String", true),
+    ("pkg.Parent", TyBytes, "[B", true), ("pkg.Parent", TyJava("pkg.Child", "Child"), "pkg.Child", true),
+    ("pkg.Refused", TyString, "java.lang.String", true),
+    ("java.lang.String", TyString, "", false), ("[B", TyBytes, "", false),
+    ("int", TyBytes, "", false), ("pkg.Child", TyJava("pkg.Child", "Child"), "", false)]
+  for (target, arg, source, queried) in cases {
+    let accepted = target != "pkg.Refused"
+    let oracle = Jsig { ..jsig_refused(), is_assignable: (sup, sub) => {
+      assert queried && sup == target && sub == source
+      accepted
+    } }
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let (cold, score) = param_score(initial, target, Some(arg), 0)
+    let (observed, next_score) = param_score(Cx { ..initial, function_reads: Some([]) }, target, Some(arg), 0)
+    let expected: Option[Int] = if queried { if accepted { Some(1) } else { None } } else {
+      if target == "int" { None } else { Some(2) }
+    }
+    let reads: List[semantic_reads.FunctionRead] = if queried { [semantic_reads.JavaAssignable(target, source, accepted)] } else { [] }
+    assert score == expected && next_score == score
+    assert observed.function_reads == Some(reads)
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
+  for (arg, source) in [(TyString, "java.lang.String"), (TyBytes, "[B"), (TyInt, "java.lang.Long"),
+    (TyFloat, "java.lang.Double"), (TyBool, "java.lang.Boolean"), (TyJava("pkg.Child", "Child"), "pkg.Child")] {
+    for accepted in [true, false] {
+      let oracle = Jsig { ..jsig_refused(), is_assignable: (sup, sub) => {
+        assert sup == "pkg.Parent" && sub == source
+        accepted
+      } }
+      let initial = Cx { ..test_cx(), jsig: oracle }
+      let (cold, answer) = sam_ret_compatible(initial, arg, "pkg.Parent")
+      let (observed, next_answer) = sam_ret_compatible(Cx { ..initial, function_reads: Some([]) }, arg, "pkg.Parent")
+      assert answer == accepted && next_answer == answer
+      assert observed.function_reads == Some([semantic_reads.JavaAssignable("pkg.Parent", source, accepted)])
+      assert observed.diags == cold.diags && observed.next_id == cold.next_id
+    }
+  }
+}
+
+test "java oracle reads retain SAM shape and return queries across refusals" {
+  let input = JClass { fqcn: "pkg.Input", simple: "Input", display: "Input",
+    is_interface: false, is_primitive: false, is_array: false }
+  let output = JClass { ..input, fqcn: "pkg.Output", simple: "Output", display: "Output" }
+  for index in 0..6 {
+    let method = JMethod { name: "apply", param_cls: if index == 4 { ["char", "pkg.Input"] } else { ["pkg.Input"] },
+      ret_cls: "pkg.Output", is_static: false, is_varargs: false, is_abstract: true,
+      desc: "callback descriptor", decl_cls: "pkg.Callback" }
+    let sam: Option[JMethod] = if index == 3 { None } else { Some(method) }
+    let oracle = Jsig { ..jsig_refused(), sam_of: name => {
+      assert name == "pkg.Callback"
+      sam
+    }, class_info: name => {
+      assert name == "pkg.Input" || name == "pkg.Output"
+      if name == "pkg.Input" { input } else { output }
+    }, is_assignable: (sup, sub) => {
+      assert sup == "pkg.Output" && sub == "java.lang.String"
+      index != 1
+    } }
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let target = if index == 5 { "int" } else { "pkg.Callback" }
+    let params = if index == 2 { [TyInt] } else { [TyJava("pkg.Input", "Input")] }
+    let arg = Some(TyFn(params, TyString, EPure))
+    let (cold, answer) = param_score(initial, target, arg, 1)
+    let (observed, next_answer) = param_score(Cx { ..initial, function_reads: Some([]) }, target, arg, 1)
+    let expected: Option[Int] = if index == 0 { Some(2) } else { None }
+    var reads: List[semantic_reads.FunctionRead] = if index == 5 { [] } else { [semantic_reads.JavaSam(target, sam)] }
+    if index <= 2 {
+      reads = reads ++ [semantic_reads.JavaClassInfo("pkg.Input", input), semantic_reads.JavaClassInfo("pkg.Output", output)]
+      if index <= 1 { reads = reads ++ [semantic_reads.JavaAssignable("pkg.Output", "java.lang.String", index != 1)] }
+    }
+    assert answer == expected && next_answer == answer
+    assert observed.function_reads == Some(reads)
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
+}
+
+test "java oracle reads retain packed component queries on success and refusal" {
+  let oracle = Jsig { ..jsig_refused(), component_of: name => {
+    assert name == "[J"
+    Some("long")
+  } }
+  for index in 0..4 {
+    let params = if index == 0 { ["long"] } else { ["[J"] }
+    let args: List[Option[Ty]] = if index == 0 { [Some(TyInt)] } else if index == 1 {
+      [Some(TyInt), Some(TyInt)]
+    } else if index == 2 { [Some(TyBool)] } else { [] }
+    let initial = Cx { ..test_cx(), jsig: oracle }
+    let arities: List[Int] = if index == 1 { [0, 0] } else if index == 3 { [] } else { [0] }
+    let (cold, answer) = fit_score(initial, params, index != 0, args, arities)
+    let (observed, next_answer) = fit_score(Cx { ..initial, function_reads: Some([]) },
+      params, index != 0, args, arities)
+    let expected: Option[(Int, Int)] = if index == 0 { Some((1, 2)) } else if index == 1 {
+      Some((0, 4))
+    } else if index == 2 { None } else { Some((0, 0)) }
+    let read = semantic_reads.JavaComponent("[J", Some("long"))
+    let reads: List[semantic_reads.FunctionRead] = if index == 1 { [read, read] } else if index == 2 { [read] } else { [] }
+    assert answer == expected && next_answer == answer
+    assert observed.function_reads == Some(reads)
+    assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  }
 }
 
 ## Error paths: type the deferred arguments so their subtrees get visited.
@@ -10110,12 +10334,17 @@ fn finalize_sams(
   var bridges: List[Int] = []
   var i = 0
   for a in args {
-    let p = param_at(cx1.jsig, params, packs, i)
+    let (param_cx, p) = param_at(cx1, params, packs, i)
+    cx1 = param_cx
     var out_i = atx[i]
     match ats[i] {
       None -> {
-        let sm = sam_of_nonprim(cx1.jsig, p).expect("sam scored")
-        let ft = sam_fn_ty(cx1.jsig, sm).expect("sam shape scored")
+        let (sam_cx, sam) = sam_of_nonprim(cx1, p)
+        cx1 = sam_cx
+        let sm = sam.expect("sam scored")
+        let (shape_cx, shape) = sam_fn_ty(cx1, sm)
+        cx1 = shape_cx
+        let ft = shape.expect("sam shape scored")
         let (sps, sret) = ft
         let (cxa, t, ax) = check_expr(cx1, a, Some(TyFn(sps, sret, EIo)))
         cx1 = cxa
@@ -10126,9 +10355,13 @@ fn finalize_sams(
         var row: Eff = EPure
         match t {
           TyFn(tps, tret, te) ->
-            if tps == sps && sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) {
-              fits = true
-              row = te
+            if tps == sps {
+              let (return_cx, compatible) = sam_ret_compatible(cx1, tret, sm.ret_cls)
+              cx1 = return_cx
+              if compatible {
+                fits = true
+                row = te
+              }
             }
           _ -> ()
         }
@@ -10148,8 +10381,10 @@ fn finalize_sams(
       }
       Some(t) ->
         match t {
-          TyFn(_, _, te) ->
-            match sam_of_nonprim(cx1.jsig, p) {
+          TyFn(_, _, te) -> {
+            let (sam_cx, sam) = sam_of_nonprim(cx1, p)
+            cx1 = sam_cx
+            match sam {
               Some(sm2) -> {
                 convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)]
                 let (cxs, ev) = sam_snapshot(cx1, i, te, e_lo(a), e_hi(a))
@@ -10158,6 +10393,7 @@ fn finalize_sams(
               }
               None -> ()
             }
+          }
           TyList(el) -> {
             # zero-copy bridge: elements cross as their boxed reps, so only
             # scalars, String and Java references may cross (spec §9.6)
@@ -10270,7 +10506,9 @@ fn check_java_call(
     var bsc = -1
     var best: List[JCtor] = []
     for c in cands {
-      match fit_score(cx1, c.param_cls, c.is_varargs, ats, arities) {
+      let (score_cx, score) = fit_score(cx1, c.param_cls, c.is_varargs, ats, arities)
+      cx1 = score_cx
+      match score {
         Some(f) -> {
           let (ph, sc) = f
           if ph > bph || (ph == bph && sc > bsc) {
@@ -10368,7 +10606,9 @@ fn check_java_call(
   var bsc = -1
   var best: List[JMethod] = []
   for m2 in same_name {
-    match fit_score(cx1, m2.param_cls, m2.is_varargs, ats, arities) {
+    let (score_cx, score) = fit_score(cx1, m2.param_cls, m2.is_varargs, ats, arities)
+    cx1 = score_cx
+    match score {
       Some(f) -> {
         let (ph, sc) = f
         if ph > bph || (ph == bph && sc > bsc) {
@@ -11513,9 +11753,11 @@ test "Never fits every SAM return representation" {
     "void", "long", "int", "short", "byte", "float", "double", "boolean", "char",
     "java.lang.String"
   ] {
-    assert sam_ret_compatible(js, TyNever, ret)
+    let (_, compatible) = sam_ret_compatible(Cx { ..test_cx(), jsig: js }, TyNever, ret)
+    assert compatible
   }
-  match sam_fn_ty(js, tj_static("getAsChar", [], "char", "Chars")) {
+  let (_, shape) = sam_fn_ty(Cx { ..test_cx(), jsig: js }, tj_static("getAsChar", [], "char", "Chars"))
+  match shape {
     Some((params, ret)) -> {
       assert len(params) == 0
       assert ret == TyNever
@@ -11528,10 +11770,14 @@ test "Java Object arguments require checked narrowing" {
   let cx = Cx { ..test_cx(), jsig: test_jsig() }
   let obj = TyJava("java.lang.Object", "Object")
   let string_ref = TyJava("java.lang.String", "String")
-  assert param_score(cx, "java.lang.String", Some(obj), 0) == None
-  assert param_score(cx, "java.lang.Object", Some(string_ref), 0) == Some(1)
-  assert param_score(cx, "[B", Some(TyBytes), 0) == Some(2)
-  assert param_score(cx, "java.util.List", Some(TyList(TyString)), 0) == Some(2)
+  let (_, object_score) = param_score(cx, "java.lang.String", Some(obj), 0)
+  let (_, string_score) = param_score(cx, "java.lang.Object", Some(string_ref), 0)
+  let (_, bytes_score) = param_score(cx, "[B", Some(TyBytes), 0)
+  let (_, list_score) = param_score(cx, "java.util.List", Some(TyList(TyString)), 0)
+  assert object_score == None
+  assert string_score == Some(1)
+  assert bytes_score == Some(2)
+  assert list_score == Some(2)
 }
 
 test "a Java char return explains the incompatible character models" {

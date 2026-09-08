@@ -538,6 +538,19 @@ the ordinary tail and nested early-return wording, without borrowing another
 slot, mutable/written bindings or a shadowed helper. This changes diagnostic
 extraction only; existing diagnostic golden texts remain unchanged.
 
+### Java oracle scoring reads (implementation in progress)
+
+Retain assignability's ordered superclass/subclass query and Boolean answer,
+SAM lookup's optional complete method metadata, and array component lookup's
+optional name. Primitive shortcuts must not query the oracle. Scoring must
+thread context through every visited candidate, including rejected candidates
+and unsuccessful fixed-arity attempts before varargs fallback. Finalization
+must retain repeated queries rather than reuse an unproved answer.
+SAM parameter/return conversion also reads class metadata; route these remaining
+queries through the existing class-info observer. Preserve argument visitation,
+candidate order, diagnostics and emitted conversion metadata. These facts alone
+do not establish oracle lifetime validity or production query admission.
+
 ## 七、不做的
 
 不新增语法、改变推断/可见性、扩展comptime语言能力；不做磁盘缓存、跨进程共享、

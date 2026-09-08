@@ -344,6 +344,39 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
     out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
       replayed: observed, cold: cold, states: [] }]
   }
+  let scoring_method = JMethod { name: "take", param_cls: ["pkg.Parent"], ret_cls: "long", is_static: true,
+    is_varargs: false, is_abstract: false, desc: "take descriptor", decl_cls: "pkg.Box" }
+  let scoring_oracle = Jsig { ..java_oracle,
+    methods_of: name => [scoring_method,
+      JMethod { ..scoring_method, name: "reject", param_cls: ["pkg.Refused"], desc: "reject descriptor" },
+      JMethod { ..scoring_method, name: "packed", param_cls: ["[J"], is_varargs: true, desc: "packed descriptor" },
+      JMethod { ..scoring_method, name: "invoke", param_cls: ["pkg.Callback"], desc: "invoke descriptor" },
+      JMethod { ..scoring_method, name: "instance", is_static: false, desc: "instance descriptor" }],
+    ctors_of: name => [JCtor { param_cls: ["[J"], is_varargs: true, desc: "packed constructor" }],
+    is_assignable: (sup, sub) => sup == "pkg.Parent" && sub == "java.lang.String",
+    sam_of: name => if name == "pkg.Callback" {
+      Some(JMethod { ..scoring_method, name: "run", param_cls: [], is_static: false, is_abstract: true })
+    } else { None },
+    component_of: name => if name == "[J" { Some("long") } else { None } }
+  for sample in [("fn go() -> Int !io = Foreign.take(\"x\")", 0),
+    ("fn go() -> Int !io = Foreign.reject(\"x\")", 1),
+    ("fn go() -> Int !io = Foreign.packed(1, 2)", 0),
+    ("fn go() -> Int !io = Foreign.packed(true)", 1),
+    ("fn go() -> Int !io = Foreign.invoke(() => 1)", 0),
+    ("fn go() -> Int !io = Foreign.invoke(() => true)", 1),
+    ("fn go() -> Foreign !io = Foreign.new(1, 2)", 0),
+    ("fn go(x: Foreign) -> Int !io = x.instance(\"x\")", 0)] {
+    let (text, errors) = sample
+    let (syntax, pd) = parser.parse_module(text ++ "\n")
+    if pd != [] { panic("Java scoring observation parse") }
+    let initial = Cx { ..cx_new(Some("java_scoring_read_probe"), None), jsig: scoring_oracle,
+      java_classes: map.from([("Foreign", "pkg.Box")]) }
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    if len(cold_cx.diags) != errors { panic("Java scoring observation diagnostic path") }
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
   let import_oracle = Jsig { ..member_oracle,
     find_class: name => if name == "pkg.Box" { Some(java_info) } else { None } }
   for sample in [("use java \"pkg.Box\"\nfn go(x: Box) -> Unit = ()", true, 0),
