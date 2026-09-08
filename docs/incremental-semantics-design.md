@@ -637,6 +637,87 @@ The expanded controls and broader acceptance must pass before this batch lands.
 This integration does not establish production cache admission on its own.
 The 8192-step and 4096-row limits and unknown results must remain unchanged.
 
+### Witness dependency capture (implementation in progress)
+
+Implementation existence is a distinct query from selecting an implementation:
+`has_impl_at` consumes only presence, while witness construction and associated
+type/effect reduction consume the selected implementation's fields. Record
+presence queries with the complete trait and subject inputs, including misses;
+recompute them against the candidate implementation table before reuse. Relocate
+the trait through the trait domain and the subject through the type domain.
+Do not promote a presence fact into evidence that a selected implementation or
+its associated bindings are unchanged.
+The main witness branch consumes the selected implementation's type-parameter
+count, not its complete metadata. Its arity query records `None` separately
+from `Some(0)` and conditional arities. Conditional bounds are covered by the
+separate ordered sub-goal query. Associated bindings and emitted implementation
+bodies still need their own dependencies; neither query proves those unchanged.
+The general witness resolver also records the trait name at its original eager
+lookup, after error absorption and before projection or opaque fallback. This
+query observes only the name consumed by diagnostics, not all trait metadata.
+Its ID uses the trait relocation domain and its text remains unchanged; a
+candidate rename must be detected by recomputing the query, not by projection.
+Dictionary lookup records the rigid type binder, required trait and optional
+local symbol. These are three independent identity domains. Projection without
+binder/local mappings refuses these facts; a missing dictionary remains a miss.
+The resolver must retain the read before forwarding and capturing the symbol.
+Associated-type reduction may be observed at its pure result boundary: record
+the complete input type and resulting type, then recompute the canonical
+reducer in the candidate context before reuse. This preserves opaque fallback,
+binding selection and recursive unification without a duplicate reducer or an
+extra traversal that guesses which implementations were consumed. Both input
+and answer require type relocation. This aggregate query validates only the
+reduction result, not emitted implementation bodies. Index and iterable item
+consumers retain the query before checking subsequent expressions. Inference
+and effect-reduction consumers remain required migration work.
+Effect reduction additionally records the complete ordered type-binding map as
+binder/type pairs, alongside its input and result rows. Binder keys, bound types
+and effect rows use their separate relocation domains. The canonical reducer
+is recomputed with those bindings in the candidate context; a projected answer
+alone does not validate it. Call effects and emitted associated-evidence
+arguments retain this observation before their subsequent consumers.
+Type-contained effect reduction uses the same complete binding input and a
+type-valued input/result query. Function-value instantiation, call argument
+expectations, mismatch rendering, return types and synthesized default calls
+must thread both associated-type and type-effect queries in their original
+order. Internal unification remains a separate pure query boundary to cover.
+Unification observations contain declared/actual types, complete ordered input
+type/effect bindings, complete output bindings and the match verdict, including
+partial bindings on failure. Recompute canonical unification in the candidate
+context. Type-binder and effect-binder keys are distinct relocation domains;
+never project either through nominal or local symbol IDs. A failed first pass
+followed by a retry retains both queries in order.
+The candidate revalidator distinguishes an unequal supported query from an
+unsupported query. Neither may admit reuse. It invokes canonical query helpers
+in an isolated observation context and compares the newly computed complete
+fact, including ordered inference outputs. Binding lists must round-trip
+through their maps without duplicate loss or reordering. This initial witness
+query validator is not body-cache admission: namespace/header queries and
+cross-revision candidate construction must also be integrated.
+Inference branch eligibility is a dependency too: `is_concrete` distinguishes
+rigid parameters in the current scope from unbound variables. Record its full
+type input and Boolean answer at the actual short-circuit point; candidate
+validation requires the corresponding scope, not an arbitrary module header.
+Assignment compatibility also depends on the candidate module's opaque-type
+visibility. Record source type, target type and the canonical Boolean result
+before each actual compatibility decision. This covers successful assignments
+as well as diagnostics; checking only rendered refusal text misses successes.
+
+Thread observations through structural-gap recursion in the original order:
+implementation presence first, then tuple/container elements or nominal fields,
+stopping at the first gap. Preserve the existing visited-name policy and opaque
+fallback order; changing either is a separate semantic decision. Subsequent
+work must cover selected implementation metadata, ordered conditional sub-goals,
+trait metadata and dictionary lookup, and associated type/effect reduction.
+Do not enumerate unrelated implementations to compensate for missing consumers.
+The private `probe_witness`/`probe_args` pair has no incoming production call:
+its only references are internal recursion. It is not a prerequisite for
+production dependency capture. The reachable opaque ordering fast path must,
+however, retain each implementation-presence miss before peeling to its target,
+even when the final primitive comparison bypasses witness construction.
+Production body caching remains disabled until these boundaries and candidate
+revalidation are complete.
+
 ### Diagnostic rendering queries (observation implemented; cache admission pending)
 
 Record type rendering as a pure query from the complete input type to its

@@ -8,6 +8,8 @@ use check/jsig.{JClass, JMethod, JCtor, JField}
 use check/types.{Sig, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
+pub type InferenceBindings = { types: List[(Int, Ty)], effects: List[(Int, Eff)] }
+pub type UnificationRead = { declared: Ty, actual: Ty, before: InferenceBindings, after: InferenceBindings, matched: Bool }
 pub type ExportDiagnostic = { message: String, hint: Option[String] }
 pub type AliasTypeHeader = { name: String, tparams: List[Ty], eparams: List[Eff], opaque_id: Option[Int], owner: String }
 pub type ExportDiagnosticKind = ValueDiagnostic | FunctionDiagnostic | ConstructorDiagnostic | TypeDiagnostic
@@ -32,6 +34,14 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | ScopedTypeParameter(name: String, answer: Option[Ty])
   | ParameterBounds(subject: Ty, answer: Option[List[Int]])
   | TraitAssociatedMembers(id: Int, kind: AssociatedKind, names: List[String])
+  | TraitName(id: Int, name: String)
+  | DictionarySymbol(binder: Int, trait_id: Int, symbol: Option[Int])
+  | ReducedAssociatedType(input: Ty, answer: Ty)
+  | ReducedEffect(input: Eff, bindings: List[(Int, Ty)], answer: Eff)
+  | ReducedTypeEffects(input: Ty, bindings: List[(Int, Ty)], answer: Ty)
+  | UnifiedTypes(query: UnificationRead)
+  | ConcreteType(input: Ty, answer: Bool)
+  | AssignableType(input: Ty, target: Ty, answer: Bool)
   | DeclaredEffect(name: String, answer: Option[Eff])
   | ScopedEffectVariable(name: String, answer: Option[Eff])
   | BuiltinTypeAnswer(name: String, answer: Option[BuiltinTypeI])
@@ -64,6 +74,9 @@ LocalAliasSource(name: String, owner: String, target: Option[TypeRef])
   | RenderedFunctionReturn(ret: Ty, outer_eff: Eff, answer: String)
   | RenderedConstructor(ctor: CtorI, answer: String)
   | RenderedSignature(sig: Sig, answer: String)
+  | ImplementationPresence(trait_id: Int, subject: Ty, present: Bool)
+  | ImplementationSubgoals(trait_id: Int, subject: Ty, goals: List[(Int, Ty)])
+  | ImplementationArity(trait_id: Int, subject: Ty, parameters: Option[Int])
 
 pub fn observe(reads: Option[List[FunctionRead]], fact: FunctionRead) -> Option[List[FunctionRead]] =
   match reads { None -> None, Some(entries) -> Some(entries ++ [fact]) }
@@ -150,7 +163,35 @@ pub fn project_with_source(reads: Option[List[FunctionRead]], signature: fn(Sig)
 pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
   type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
   effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef],
-  trait_value: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] = {
+  trait_value: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] =
+  project_with_locals(reads, signature, type_value, nominal, effect_value, source_value, trait_value,
+    id => None, id => None)
+
+## Dictionary answers refer to local symbols, never nominal declarations.
+pub fn project_with_locals(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef],
+  trait_value: fn(Int) -> Option[Int], binder_value: fn(Int) -> Option[Int],
+  local_value: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] =
+  project_with_inference(reads, signature, type_value, nominal, effect_value, source_value,
+    trait_value, binder_value, local_value, id => None)
+
+fn project_inference(bindings: InferenceBindings, type_value: fn(Ty) -> Option[Ty],
+  effect_value: fn(Eff) -> Option[Eff], binder: fn(Int) -> Option[Int],
+  effect_binder: fn(Int) -> Option[Int]) -> Option[InferenceBindings] = {
+  var types: List[(Int, Ty)] = []
+  var effects: List[(Int, Eff)] = []
+  for (id, ty) in bindings.types { types = types ++ [(binder(id)?, type_value(ty)?)] }
+  for (id, row) in bindings.effects { effects = effects ++ [(effect_binder(id)?, effect_value(row)?)] }
+  Some(InferenceBindings { types: types, effects: effects })
+}
+
+## Inference map keys require the effect-binder domain as well as type binders.
+pub fn project_with_inference(reads: Option[List[FunctionRead]], signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty], nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff], source_value: fn(String, TypeRef) -> Option[TypeRef],
+  trait_value: fn(Int) -> Option[Int], binder_value: fn(Int) -> Option[Int],
+  local_value: fn(Int) -> Option[Int], effect_binder: fn(Int) -> Option[Int]) -> Option[Option[List[FunctionRead]]] = {
   match reads {
     None -> Some(None)
     Some(entries) -> {
@@ -194,6 +235,32 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
           LocalEffectName(name, answer) -> LocalEffectName(name, match answer { None -> None, Some(id) -> Some(nominal(id)?) })
           EffectCandidates(names) -> EffectCandidates(names)
           RenderedType(ty, answer) -> RenderedType(type_value(ty)?, answer)
+          ReducedAssociatedType(input, answer) -> ReducedAssociatedType(type_value(input)?, type_value(answer)?)
+          ConcreteType(input, answer) -> ConcreteType(type_value(input)?, answer)
+          AssignableType(input, target, answer) -> AssignableType(type_value(input)?, type_value(target)?, answer)
+          UnifiedTypes(q) -> UnifiedTypes(UnificationRead { declared: type_value(q.declared)?, actual: type_value(q.actual)?,
+            before: project_inference(q.before, type_value, effect_value, binder_value, effect_binder)?,
+            after: project_inference(q.after, type_value, effect_value, binder_value, effect_binder)?, matched: q.matched })
+          ReducedEffect(input, bindings, answer) -> {
+            var moved: List[(Int, Ty)] = []
+            for (id, ty) in bindings { moved = moved ++ [(binder_value(id)?, type_value(ty)?)] }
+            ReducedEffect(effect_value(input)?, moved, effect_value(answer)?)
+          }
+          ReducedTypeEffects(input, bindings, answer) -> {
+            var moved: List[(Int, Ty)] = []
+            for (id, ty) in bindings { moved = moved ++ [(binder_value(id)?, type_value(ty)?)] }
+            ReducedTypeEffects(type_value(input)?, moved, type_value(answer)?)
+          }
+          ImplementationPresence(trait_id, subject, present) -> ImplementationPresence(trait_value(trait_id)?, type_value(subject)?, present)
+          ImplementationArity(trait_id, subject, parameters) -> ImplementationArity(trait_value(trait_id)?, type_value(subject)?, parameters)
+          ImplementationSubgoals(trait_id, subject, goals) -> {
+            var moved: List[(Int, Ty)] = []
+            for goal in goals {
+              let (id, ty) = goal
+              moved = moved ++ [(trait_value(id)?, type_value(ty)?)]
+            }
+            ImplementationSubgoals(trait_value(trait_id)?, type_value(subject)?, moved)
+          }
           RenderedSignature(sig, answer) -> RenderedSignature(signature(sig)?, answer)
           RenderedFunctionReturn(ret, outer_eff, answer) -> RenderedFunctionReturn(type_value(ret)?, effect_value(outer_eff)?, answer)
           RenderedConstructor(ctor, answer) -> {
@@ -278,6 +345,11 @@ pub fn project_with_traits(reads: Option[List[FunctionRead]], signature: fn(Sig)
             ParameterBounds(type_value(subject)?, moved_bounds)
           }
           TraitAssociatedMembers(id, kind, names) -> TraitAssociatedMembers(trait_value(id)?, kind, names)
+          TraitName(id, name) -> TraitName(trait_value(id)?, name)
+          DictionarySymbol(binder, trait_id, symbol) -> {
+            let answer = match symbol { None -> None, Some(id) -> Some(local_value(id)?) }
+            DictionarySymbol(binder_value(binder)?, trait_value(trait_id)?, answer)
+          }
           DeclaredEffect(name, answer) -> {
             let moved_effect = match answer { None -> None, Some(row) -> Some(effect_value(row)?) }
             DeclaredEffect(name, moved_effect)
@@ -325,6 +397,46 @@ test "semantic reads retain misses and capture only the current suffix" {
   assert append(empty, writes) == Some(writes)
   assert capture(after, prefix) == None && capture(None, after) == None
   assert append(None, writes) == None && record(None, "ignored", None) == None
+}
+
+test "semantic reads relocate implementation arity without mapping counts" {
+  let subject = TyAdt(8, [])
+  let values: List[Option[Int]] = [None, Some(0), Some(2)]
+  for count in values {
+    let reads = Some([ImplementationArity(7, subject, count)])
+    assert project_with_traits(reads, s => None, t => Some(TyAdt(18, [])), id => None, e => None,
+      (owner, source) => None, id => Some(id + 100)) == Some(Some([
+        ImplementationArity(107, TyAdt(18, []), count)]))
+    assert project_with_traits(reads, s => None, t => Some(t), id => Some(id), e => None,
+      (owner, source) => None, id => None) == None
+    assert project_with_traits(reads, s => None, t => None, id => Some(id), e => None,
+      (owner, source) => None, id => Some(id)) == None
+  }
+}
+
+test "semantic reads relocate ordered implementation subgoals" {
+  let subject = TyAdt(8, [])
+  let reads = Some([ImplementationSubgoals(7, subject, [(9, TyInt), (7, subject), (9, TyInt)])])
+  let move: fn(Ty) -> Option[Ty] = t => if t == subject { Some(TyAdt(18, [])) } else { Some(t) }
+  assert project_with_traits(reads, s => None, move, id => None, e => None,
+    (owner, source) => None, id => Some(id + 100)) == Some(Some([
+      ImplementationSubgoals(107, TyAdt(18, []), [(109, TyInt), (107, TyAdt(18, [])), (109, TyInt)])]))
+  assert project_with_traits(reads, s => None, move, id => None, e => None,
+    (owner, source) => None, id => if id == 9 { None } else { Some(id) }) == None
+  assert project_with_traits(reads, s => None, t => if t == TyInt { None } else { Some(t) }, id => None, e => None,
+    (owner, source) => None, id => Some(id)) == None
+}
+
+test "semantic reads relocate implementation presence in separate domains" {
+  let reads = Some([ImplementationPresence(7, TyAdt(8, []), false), ImplementationPresence(7, TyInt, true)])
+  let move: fn(Ty) -> Option[Ty] = t => if t == TyAdt(8, []) { Some(TyAdt(18, [])) } else { Some(t) }
+  assert project_with_traits(reads, s => None, move, id => None, e => None,
+    (owner, source) => None, id => Some(id + 100)) == Some(Some([
+      ImplementationPresence(107, TyAdt(18, []), false), ImplementationPresence(107, TyInt, true)]))
+  assert project_with_traits(reads, s => None, move, id => Some(id), e => None,
+    (owner, source) => None, id => None) == None
+  assert project_with_traits(reads, s => None, t => None, id => Some(id), e => None,
+    (owner, source) => None, id => Some(id)) == None
 }
 
 test "semantic reads relocate signature rendering inputs without rewriting answers" {
@@ -544,6 +656,107 @@ test "semantic reads project declared and scoped effect answers" {
   assert project(scoped, s => None, t => None, id => Some(id), e => None) == None
   let absent = Some([DeclaredEffect("Missing", None), ScopedEffectVariable("new", None)])
   assert project(absent, s => None, t => None, id => None, e => None) == Some(absent)
+}
+
+test "semantic reads relocate both assignability operands" {
+  let reads = Some([AssignableType(TyAdt(1, []), TyAdt(2, []), false)])
+  let move: fn(Ty) -> Option[Ty] = t => match t { TyAdt(id, args) -> Some(TyAdt(id + 10, args)), _ -> None }
+  assert project(reads, s => None, move, id => None, e => None) ==
+    Some(Some([AssignableType(TyAdt(11, []), TyAdt(12, []), false)]))
+  for missing in [1, 2] {
+    assert project(reads, s => None, t => if t == TyAdt(missing, []) { None } else { move(t) },
+      id => Some(id), e => None) == None
+  }
+}
+
+test "semantic reads relocate concreteness inputs and retain verdicts" {
+  let reads = Some([ConcreteType(TyVar("T", 1), false)])
+  assert project(reads, s => None, t => Some(TyVar("T", 11)), id => None, e => None) ==
+    Some(Some([ConcreteType(TyVar("T", 11), false)]))
+  assert project(reads, s => None, t => None, id => Some(id), e => None) == None
+}
+
+test "semantic reads project unification bindings in independent domains" {
+  let before = InferenceBindings { types: [(1, TyAdt(1, []))], effects: [(1, EffVar("e", 1))] }
+  let after = InferenceBindings { types: [(1, TyAdt(2, []))], effects: [(1, EIo)] }
+  let q = UnificationRead { declared: TyAdt(1, []), actual: TyAdt(2, []), before: before, after: after, matched: false }
+  let move: fn(Ty) -> Option[Ty] = t => match t { TyAdt(id, args) -> Some(TyAdt(id + 10, args)), _ -> None }
+  let row: fn(Eff) -> Option[Eff] = e => match e { EffVar(n, id) -> Some(EffVar(n, id + 20)), _ -> Some(e) }
+  let reads = Some([UnifiedTypes(q)])
+  assert project_with_inference(reads, s => None, move, id => None, row, (owner, source) => None,
+    id => None, id => Some(id + 30), id => None, id => Some(id + 40)) == Some(Some([
+      UnifiedTypes(UnificationRead { declared: TyAdt(11, []), actual: TyAdt(12, []),
+        before: InferenceBindings { types: [(31, TyAdt(11, []))], effects: [(41, EffVar("e", 21))] },
+        after: InferenceBindings { types: [(31, TyAdt(12, []))], effects: [(41, EIo)] }, matched: false })]))
+  for missing in [0, 1, 2, 3] {
+    assert project_with_inference(reads, s => None, t => if missing == 0 { None } else { move(t) }, id => None,
+      e => if missing == 1 { None } else { row(e) }, (owner, source) => None, id => None,
+      id => if missing == 2 { None } else { Some(id) }, id => None,
+      id => if missing == 3 { None } else { Some(id) }) == None
+  }
+}
+
+test "semantic reads relocate type effect reduction inputs bindings and answers" {
+  let reads = Some([ReducedTypeEffects(TyAdt(1, []), [(1, TyAdt(2, []))], TyAdt(3, []))])
+  let move: fn(Ty) -> Option[Ty] = t => match t { TyAdt(id, args) -> Some(TyAdt(id + 10, args)), _ -> None }
+  assert project_with_locals(reads, s => None, move, id => None, e => None, (owner, source) => None,
+    id => None, id => Some(id + 30), id => None) == Some(Some([
+      ReducedTypeEffects(TyAdt(11, []), [(31, TyAdt(12, []))], TyAdt(13, []))]))
+  for missing in [1, 2, 3, 4] {
+    assert project_with_locals(reads, s => None, t => if t == TyAdt(missing, []) { None } else { move(t) },
+      id => None, e => None, (owner, source) => None, id => None,
+      id => if missing == 4 { None } else { Some(id) }, id => None) == None
+  }
+}
+
+test "semantic reads relocate effect reduction rows and ordered bindings" {
+  let input = EffVar("e", 1)
+  let answer = EffVar("f", 2)
+  let reads = Some([ReducedEffect(input, [(1, TyAdt(1, [])), (2, TyInt)], answer)])
+  let move: fn(Ty) -> Option[Ty] = t => match t { TyAdt(id, args) -> Some(TyAdt(id + 10, args)), _ -> Some(t) }
+  let row: fn(Eff) -> Option[Eff] = e => match e { EffVar(n, id) -> Some(EffVar(n, id + 20)), _ -> None }
+  assert project_with_locals(reads, s => None, move, id => None, row, (owner, source) => None,
+    id => None, id => Some(id + 30), id => None) == Some(Some([
+      ReducedEffect(EffVar("e", 21), [(31, TyAdt(11, [])), (32, TyInt)], EffVar("f", 22))]))
+  for missing in [0, 1, 2, 3] {
+    assert project_with_locals(reads, s => None, t => if missing == 0 { None } else { move(t) }, id => None,
+      e => if (missing == 1 && e == input) || (missing == 2 && e == answer) { None } else { row(e) },
+      (owner, source) => None, id => None, id => if missing == 3 { None } else { Some(id) }, id => None) == None
+  }
+}
+
+test "semantic reads require both reduction input and answer mappings" {
+  let reads = Some([ReducedAssociatedType(TyAdt(1, []), TyAdt(2, []))])
+  let move: fn(Ty) -> Option[Ty] = t => match t { TyAdt(id, args) -> Some(TyAdt(id + 10, args)), _ -> None }
+  assert project(reads, s => None, move, id => None, e => None) ==
+    Some(Some([ReducedAssociatedType(TyAdt(11, []), TyAdt(12, []))]))
+  for missing in [1, 2] {
+    assert project(reads, s => None, t => if t == TyAdt(missing, []) { None } else { move(t) },
+      id => Some(id), e => None) == None
+  }
+}
+
+test "semantic reads project dictionary binders traits and locals independently" {
+  let reads = Some([DictionarySymbol(1, 1, Some(1)), DictionarySymbol(1, 1, None)])
+  assert project_with_locals(reads, s => None, t => None, id => Some(999), e => None,
+    (owner, source) => None, id => Some(21), id => Some(31), id => Some(41)) ==
+    Some(Some([DictionarySymbol(31, 21, Some(41)), DictionarySymbol(31, 21, None)]))
+  for missing in [0, 1, 2] {
+    assert project_with_locals(reads, s => None, t => None, id => Some(id), e => None,
+      (owner, source) => None, id => if missing == 0 { None } else { Some(id) },
+      id => if missing == 1 { None } else { Some(id) },
+      id => if missing == 2 { None } else { Some(id) }) == None
+  }
+  assert project_with_traits(reads, s => None, t => Some(t), id => Some(id), e => None,
+    (owner, source) => None, id => Some(id)) == None
+}
+
+test "semantic reads project trait names without changing their answers" {
+  let reads = Some([TraitName(1, "Readable")])
+  assert project_with_traits(reads, s => None, t => None, id => Some(id + 1000), e => None,
+    (owner, source) => None, id => Some(id + 100)) == Some(Some([TraitName(101, "Readable")]))
+  assert project_with_traits(reads, s => None, t => None, id => Some(id), e => None,
+    (owner, source) => None, id => None) == None
 }
 
 test "semantic reads project associated bounds in the trait domain" {
