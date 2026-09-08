@@ -11,6 +11,8 @@ use std/str
 use std/list
 use std/map
 use std/set
+use check/semantic_reads
+use check/semantic_reads.{NamedFunctionRead}
 use front/ast.{
   TypeRef, TNamed, Module,
   module_fns, module_types, module_consts, module_traits,
@@ -426,22 +428,26 @@ fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
 
 ## Is `q` a value this module can name? Asked of the name before a `.`, where
 ## the alternative reading is a whole-module alias.
-fn resolves_to_value(cx: Cx, q: String) -> Bool =
-  lookup(cx, q) != None || lookup_fn_sig(cx, q) != None ||
-  map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) || map.has(cx.java_classes, q)
+fn resolves_to_value_read(cx: Cx, q: String) -> (Cx, Bool) = {
+  if lookup(cx, q) != None { return (cx, true) }
+  let (next, answer) = lookup_fn_sig_read(cx, q)
+  (next, answer != None || map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) || map.has(cx.java_classes, q))
+}
 
 ## `q.x` where `q` names nothing at all. Before a `.` a bare name can be a
 ## value or a whole-module alias (spec §10.3), and this used to be reported by
 ## checking `q` as if only the first reading existed -- "undefined variable",
 ## in the one position where a missing `use ... as q` is just as likely. The
 ## type and pattern positions have said "module alias" all along.
-fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx =
-  cerr_h(cx, "undefined variable or module alias: ${q}", lo, hi,
-    match moved_or_suggest(cx, q, local_names(cx) ++ fn_pool(cx)) {
+fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx = {
+  let (next, pool) = fn_pool_read(cx)
+  cerr_h(next, "undefined variable or module alias: ${q}", lo, hi,
+    match moved_or_suggest(next, q, local_names(next) ++ pool) {
       Some(h) -> h
       None -> "a qualified access needs a whole-module import in scope: `use <path> as " ++
         q ++ "`"
     })
+}
 
 ## `m.x` where `m` IS a whole-module alias but `x` is none of the values it
 ## exports. Falling through to the value path reported the alias itself as an
@@ -483,26 +489,47 @@ fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
 ## rules of spec §10.3 own it. Same predicate as check_method_call's own
 ## module branch, asked one level earlier because check_apply must decide
 ## whether to delegate at all.
-fn module_alias_receiver(cx: Cx, recv: Expr) -> Bool = {
+fn module_alias_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
+  let path = map.get(cx.module_aliases, name)
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.module_alias(cx.function_reads, name, path) }
+  }
+  (next, path)
+}
+
+fn module_fn_read(cx: Cx, qualifier: String, name: String) -> (Cx, Option[Sig]) = {
+  let answer = map.get(cx.module_fn_sigs, (qualifier, name))
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.qualified(cx.function_reads, qualifier, name, answer) }
+  }
+  (next, answer)
+}
+
+fn module_alias_receiver_read(cx: Cx, recv: Expr) -> (Cx, Bool) = {
   let alias_name = match recv {
     ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return false } else { cn }
+      if hp || len(cargs) > 0 || sp != None { return (cx, false) } else { cn }
     EVar(n, _, _) -> n
-    _ -> return false
+    _ -> return (cx, false)
   }
-  lookup(cx, alias_name) == None && map.has(cx.module_aliases, alias_name)
+  if lookup(cx, alias_name) != None { return (cx, false) }
+  let (next, path) = module_alias_read(cx, alias_name)
+  (next, path != None)
 }
 
 ## Value position must use the same exported signature as a qualified call,
 ## including its declaring owner and the bounds/effects checked by fn values.
-fn qual_fn(cx: Cx, target: Expr, name: String) -> Option[Sig] = {
-  if not module_alias_receiver(cx, target) { return None }
+fn qual_fn_read(cx: Cx, target: Expr, name: String) -> (Cx, Option[Sig]) = {
+  let (next, is_alias) = module_alias_receiver_read(cx, target)
+  if not is_alias { return (next, None) }
   let alias_name = match target {
     EVar(n, _, _) -> n
     ECtor(n, _, _, _, _, _, _, _) -> n
-    _ -> return None
+    _ -> return (next, None)
   }
-  map.get(cx.module_fn_sigs, (alias_name, name))
+  module_fn_read(next, alias_name, name)
 }
 
 # ---- tests ----
@@ -1918,6 +1945,18 @@ pub fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
       }
   }
 
+## Observe the answer at the lookup boundary, including absence. The pure
+## compatibility lookup above remains available to tooling; recording is
+## explicit because pure decision helpers must thread their reads too.
+pub fn lookup_fn_sig_read(cx: Cx, name: String) -> (Cx, Option[Sig]) = {
+  let answer = lookup_fn_sig(cx, name)
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.record(cx.function_reads, name, answer) }
+  }
+  (next, answer)
+}
+
 ## The candidate pool for "did you mean" on a function name. Synthesized
 ## names (`f$default$k`) are not in it: no typo can mean one.
 pub fn fn_pool(cx: Cx) -> List[String] = {
@@ -1934,6 +1973,134 @@ pub fn visible_builtin_names(cx: Cx) -> List[String] = {
     if builtin_visible(cx, cx.hidden_bins, n) { out = out ++ [n] }
   }
   out
+}
+
+## Candidate order and duplicates are part of the diagnostic input, not a
+## set of individual positive lookups. Retain the actual pool even if empty.
+pub fn fn_pool_read(cx: Cx) -> (Cx, List[String]) = {
+  let names = fn_pool(cx)
+  let next = match cx.function_reads {
+    None -> cx
+    Some(_) -> Cx { ..cx, function_reads: semantic_reads.candidates(cx.function_reads, names) }
+  }
+  (next, names)
+}
+
+fn fixture_function_answers(cx: Cx) -> List[semantic_reads.NamedFunctionRead] = {
+  var out: List[semantic_reads.NamedFunctionRead] = []
+  for read in cx.function_reads.expect("enabled function reads") {
+    match read {
+      semantic_reads.FunctionAnswer(answer) -> { out = out ++ [answer] }
+      semantic_reads.FunctionCandidates(_) -> ()
+      semantic_reads.QualifiedFunction(_, _) -> ()
+      semantic_reads.ModuleAlias(_, _) -> ()
+    }
+  }
+  out
+}
+
+test "function reads observe values calls and negative answers without changing cold results" {
+  let text = "fn target(x: Int) -> Int = x\n" ++
+    "fn caller() -> Int = { let f = target\n target(f(1)) }\n" ++
+    "fn missing() -> Int = missing_fn()\n" ++
+    "fn missing_value() -> Int = unknown_value\n"
+  let (syntax, parse_diags) = parser.parse_module(text)
+  assert len(parse_diags) == 0
+  let initial = test_cx()
+  let (cold, cold_module) = check_module(initial, syntax, map.empty())
+  let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+  assert observed.diags == cold.diags && observed.next_id == cold.next_id
+  assert observed_module == cold_module && cold.function_reads == None
+  let reads = fixture_function_answers(observed)
+  var names: List[String] = []
+  for r in reads { names = names ++ [r.name] }
+  assert names == ["target", "target", "target", "target", "missing_fn", "missing_fn", "unknown_value", "unknown_value"]
+  assert reads[0].answer.expect("function value answer").ret == TyInt
+  assert reads[1].answer.expect("function call answer").ret == TyInt
+  assert reads[4].answer == None && reads[5].answer == None && reads[6].answer == None && reads[7].answer == None
+}
+
+test "function reads include the function side of field call ambiguity" {
+  let text = "type Box = { run: fn(Int) -> Int }\n" ++
+    "fn run(b: Box, x: Int) -> Int = x\n" ++
+    "fn caller(b: Box) -> Int = b.run(1)\n"
+  let (syntax, parse_diags) = parser.parse_module(text)
+  assert len(parse_diags) == 0
+  let initial = test_cx()
+  let (cold, cold_module) = check_module(initial, syntax, map.empty())
+  let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+  assert len(observed.diags) == 1 && observed.diags == cold.diags && observed_module == cold_module
+  let reads = fixture_function_answers(observed)
+  assert len(reads) == 1 && reads[0].name == "run" && reads[0].answer != None
+}
+
+test "function reads preserve expectation short circuits and argument scheduling" {
+  let text = "fn mono(x: Int) -> Int = x\n" ++
+    "fn generic[T](x: T) -> T = x\n" ++
+    "fn apply(f: fn(Int) -> Int) -> Int = f(1)\n" ++
+    "fn caller() -> Int = apply(generic)\n"
+  let (syntax, parse_diags) = parser.parse_module(text)
+  assert len(parse_diags) == 0
+  let initial = test_cx()
+  let headers = check_module_headers(initial, syntax, map.empty())
+  let enabled = Cx { ..headers.cx, function_reads: Some([]) }
+  let list_expr = EListLit([LeExpr(EVar("mono", 0, 4)), LeExpr(EVar("generic", 5, 12))], 0, 13)
+  let (list_cx, list_needs) = needs_expected_read(enabled, list_expr)
+  let list_reads = fixture_function_answers(list_cx)
+  assert not list_needs && len(list_reads) == 1 && list_reads[0].name == "mono"
+  let tuple_expr = ETupleLit([EVar("generic", 0, 7), EVar("mono", 8, 12)], 0, 13)
+  let (tuple_cx, tuple_needs) = needs_expected_read(enabled, tuple_expr)
+  let tuple_reads = fixture_function_answers(tuple_cx)
+  assert tuple_needs && len(tuple_reads) == 1 && tuple_reads[0].name == "generic"
+  let (cold, cold_module) = check_module(initial, syntax, map.empty())
+  let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+  assert cold.diags == [] && observed.diags == [] && observed_module == cold_module
+  var names: List[String] = []
+  for r in fixture_function_answers(observed) { names = names ++ [r.name] }
+  assert names == ["apply", "apply", "generic", "generic", "generic"]
+}
+
+test "function reads capture candidate pools on every diagnostic path" {
+  for body in ["missing_value", "missing_call()", "missing_owner.value", "{ missing_assignment = 1\n 0 }"] {
+    let text = "fn target() -> Int = 1\nfn caller() -> Int = " ++ body ++ "\n"
+    let (syntax, parse_diags) = parser.parse_module(text)
+    assert parse_diags == []
+    let initial = test_cx()
+    let (cold, cold_module) = check_module(initial, syntax, map.empty())
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    assert len(cold.diags) == 1 && observed.diags == cold.diags && observed_module == cold_module
+    var pools: List[List[String]] = []
+    for read in observed.function_reads.expect("diagnostic reads") {
+      match read {
+        semantic_reads.FunctionAnswer(_) -> ()
+        semantic_reads.FunctionCandidates(names) -> { pools = pools ++ [names] }
+        semantic_reads.QualifiedFunction(_, _) -> ()
+        semantic_reads.ModuleAlias(_, _) -> ()
+      }
+    }
+    assert pools == [fn_pool(cold)]
+  }
+  let initial = Cx { ..test_cx(), fns: map.empty(), std_fns: map.empty(), bins: map.empty(), function_reads: Some([]) }
+  let (observed, names) = fn_pool_read(initial)
+  assert names == [] && observed.function_reads == Some([semantic_reads.FunctionCandidates([])])
+  let disabled = Cx { ..initial, function_reads: None }
+  let (unchanged, disabled_names) = fn_pool_read(disabled)
+  assert disabled_names == [] && unchanged.function_reads == None
+  assert unchanged.diags == disabled.diags && unchanged.next_id == disabled.next_id
+}
+
+test "function reads include failed value alternatives before a qualifier" {
+  let text = "fn field() -> Int = missing_owner.value\n" ++
+    "fn method() -> Int = missing_owner.run()\n"
+  let (syntax, parse_diags) = parser.parse_module(text)
+  assert len(parse_diags) == 0
+  let initial = test_cx()
+  let (cold, cold_module) = check_module(initial, syntax, map.empty())
+  let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+  assert len(cold.diags) == 2 && observed.diags == cold.diags && observed_module == cold_module
+  let reads = fixture_function_answers(observed)
+  assert len(reads) == 2 && reads[0].name == "missing_owner" && reads[1].name == "missing_owner"
+  assert reads[0].answer == None && reads[1].answer == None
 }
 
 ## One name from each std-only family, and one from each family that is
@@ -3647,58 +3814,72 @@ test "an isolated context reports its own effects, then restores all eight field
 
 ## Does this expression need an expected type to check at all? (drives the
 ## two-round argument checking; the Kotlin needsExpected.)
-pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
+pub fn needs_expected(cx: Cx, e: Expr) -> Bool = {
+  let (_, answer) = needs_expected_read(cx, e)
+  answer
+}
+
+pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
   match e {
     EListLit(elems, _, _) -> {
-      if len(elems) == 0 { return true }
+      if len(elems) == 0 { return (cx, true) }
+      var next = cx
       for x in elems {
-        if not needs_expected_elem(cx, x) { return false }
+        let (observed, answer) = needs_expected_elem_read(next, x)
+        next = observed
+        if not answer { return (next, false) }
       }
-      true
+      (next, true)
     }
     ETupleLit(elems, _, _) -> {
+      var next = cx
       for x in elems {
-        if needs_expected(cx, x) { return true }
+        let (observed, answer) = needs_expected_read(next, x)
+        next = observed
+        if answer { return (next, true) }
       }
-      false
+      (next, false)
     }
     # a generic function used as a value is instantiated from the expected type
     EVar(name, _, _) -> {
       match lookup(cx, name) {
-        Some(_) -> return false
+        Some(_) -> return (cx, false)
         None -> ()
       }
-      match lookup_fn_sig(cx, name) {
-        Some(s) -> len(s.tparams) > 0
-        None -> false
+      let (next, answer) = lookup_fn_sig_read(cx, name)
+      match answer {
+        Some(s) -> (next, len(s.tparams) > 0)
+        None -> (next, false)
       }
     }
-    EFieldAcc(target, name, _, _, _, _) ->
-      match qual_fn(cx, target, name) {
-        Some(s) -> len(s.tparams) > 0
-        None -> false
+    EFieldAcc(target, name, _, _, _, _) -> {
+      let (next, answer) = qual_fn_read(cx, target, name)
+      match answer {
+        Some(s) -> (next, len(s.tparams) > 0)
+        None -> (next, false)
       }
+    }
     ECtor(cname, cargs, spread, has_parens, _, _, _, _) ->
       match map.get(cx.ctors_by_name, cname) {
-        None -> false
+        None -> (cx, false)
         Some(key) -> {
           let (aid, cslot) = key
           let a = adt_of(cx.adts, aid)
           let ci = a.ctors[cslot]
           # bare nullary generic ctor (None): element type comes from expected;
           # bare ctor-with-fields as a fn value (Some): needs the expected fn type
-          (len(ci.fields) == 0 && len(a.tparams) > 0) ||
-            (not has_parens && len(ci.fields) > 0 && not a.is_record)
+          (cx, (len(ci.fields) == 0 && len(a.tparams) > 0) ||
+              (not has_parens && len(ci.fields) > 0 && not a.is_record))
         }
       }
     ELambda(params, _, _, _, _) -> {
       for p in params {
         match p.ann {
-          None -> return true
+          None -> return (cx, true)
           Some(_) -> ()
         }
       }
-      false
+      (cx, false)
     }
     # a zero-arg generic call (map_empty()) can only be typed from context, and
     # so can a written-out generic construction with no arguments (`Nil()`)
@@ -3706,25 +3887,26 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
       match target {
         EVar(callee, _, _) -> {
           match lookup(cx, callee) {
-            Some(_) -> return false
+            Some(_) -> return (cx, false)
             None -> ()
           }
-          match lookup_fn_sig(cx, callee) {
-            Some(s) -> len(s.tparams) > 0 && len(args) == 0
-            None -> false
+          let (next, answer) = lookup_fn_sig_read(cx, callee)
+          match answer {
+            Some(s) -> (next, len(s.tparams) > 0 && len(args) == 0)
+            None -> (next, false)
           }
         }
         ECtor(cname, _, _, _, _, _, _, _) ->
           match map.get(cx.ctors_by_name, cname) {
-            None -> false
+            None -> (cx, false)
             Some(key) -> {
               let (aid, cslot) = key
               let a = adt_of(cx.adts, aid)
               let ci = a.ctors[cslot]
-              len(ci.fields) == 0 && len(a.tparams) > 0
+              (cx, len(ci.fields) == 0 && len(a.tparams) > 0)
             }
           }
-        _ -> false
+        _ -> (cx, false)
       }
     # same for its module-qualified spelling (map.empty(), spec §10.3) — needs
     # the import env, resolved by the caller via a pre-filled table; here the
@@ -3733,17 +3915,18 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
       match target {
         EVar(rname, _, _) -> {
           match lookup(cx, rname) {
-            Some(_) -> return false
+            Some(_) -> return (cx, false)
             None -> ()
           }
-          match map.get(cx.module_fn_sigs, (rname, name)) {
-            Some(s) -> len(s.tparams) > 0 && len(args) == 0
-            None -> false
+          let (next, answer) = module_fn_read(cx, rname, name)
+          match answer {
+            Some(s) -> (next, len(s.tparams) > 0 && len(args) == 0)
+            None -> (next, false)
           }
         }
-        _ -> false
+        _ -> (cx, false)
       }
-    _ -> false
+    _ -> (cx, false)
   }
 
 ## The same question for one list-literal element. A spread asks it of its
@@ -3751,15 +3934,23 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
 ## conditional element asks it of its bodies, under the rule the literal
 ## itself uses: one body that types on its own settles the element, so the
 ## whole form needs an expectation only when every body does.
-pub fn needs_expected_elem(cx: Cx, x: ListElem) -> Bool =
+pub fn needs_expected_elem(cx: Cx, x: ListElem) -> Bool = {
+  let (_, answer) = needs_expected_elem_read(cx, x)
+  answer
+}
+
+pub fn needs_expected_elem_read(cx: Cx, x: ListElem) -> (Cx, Bool) =
   match x {
-    LeExpr(e) -> needs_expected(cx, e)
-    LeSpread(e, _, _) -> needs_expected(cx, e)
+    LeExpr(e) -> needs_expected_read(cx, e)
+    LeSpread(e, _, _) -> needs_expected_read(cx, e)
     LeIf(arms, _, _) -> {
+      var next = cx
       for a in arms {
-        if not needs_expected(cx, if_body_value(a.body)) { return false }
+        let (observed, answer) = needs_expected_read(next, if_body_value(a.body))
+        next = observed
+        if not answer { return (next, false) }
       }
-      true
+      (next, true)
     }
   }
 
@@ -4569,23 +4760,25 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
 
 ## Check one expression against an optional expected type (the Kotlin
 ## checkExpr/inferExpr pair). Returns (state, type, typed node).
-pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
-  match see_through_expected(cx, e, expected) {
-    Some(t) -> check_expr_at(cx, e, Some(t))
-    None -> check_expr_at(cx, e, expected)
+pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
+  let (next, needs) = needs_expected_read(cx, e)
+  match see_through_expected(next, needs, expected) {
+    Some(t) -> check_expr_at(next, e, Some(t))
+    None -> check_expr_at(next, e, expected)
   }
+}
 
 ## The expectation as the declaring module sees it. Peeling here rather than
 ## at each leaf is the point: inference reaches `map.empty()`/`[]`/`None` with
 ## a concrete type, and the result converts back through `assignable`. Outside
 ## the declaring module nothing is peeled, so the expectation stays opaque.
-fn see_through_expected(cx: Cx, e: Expr, expected: Option[Ty]) -> Option[Ty] =
+fn see_through_expected(cx: Cx, needs: Bool, expected: Option[Ty]) -> Option[Ty] =
   # Only for expressions that cannot be typed without an expectation. Anything
   # that types itself keeps the opaque expectation and converts at the
   # boundary instead -- peeling for those loses the type inside inference:
   # `generic_id(i)` at an `Id` would bind `T` to the target and then reject
   # the argument it was handed.
-  if not needs_expected(cx, e) {
+  if not needs {
     None
   } else {
     match expected {
@@ -4753,8 +4946,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       var defer_at: List[Bool] = []
       var order: List[Int] = []
       var i = 0
+      var decision_cx = cx
       for x in elems {
-        let d = needs_expected_elem(cx, x)
+        let (next, d) = needs_expected_elem_read(decision_cx, x)
+        decision_cx = next
         defer_at = defer_at ++ [d]
         if not d { order = order ++ [i] }
         i = i + 1
@@ -4765,7 +4960,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         if d { order = order ++ [i] }
         i = i + 1
       }
-      var cx1 = cx
+      var cx1 = decision_cx
       var checked: List[TListElem] = []
       for idx in order {
         let x = elems[idx]
@@ -4940,56 +5135,64 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
     EFieldAcc(target, fname, flo, fhi, lo, hi) -> {
-      match qual_fn(cx, target, fname) {
-        Some(s) -> return check_fn_value(cx, fname, s, expected, lo, hi)
+      let (field_cx, answer) = qual_fn_read(cx, target, fname)
+      match answer {
+        Some(s) -> return check_fn_value(field_cx, fname, s, expected, lo, hi)
         None -> ()
       }
       # `m.NAME` where `m` is a whole-module alias: a qualified constant
       # (LANG-06 step 3). Checked before the Java and value paths because a
       # module alias is not a value -- spec 10.3 forbids anything else of that
       # name being in scope, so there is nothing to be ambiguous with.
-      match qual_const(cx, target, fname) {
+      match qual_const(field_cx, target, fname) {
         Some(pr) -> {
           let (mod_path, ct) = pr
-          (cx, ct, XConstRef(mod_path, fname, lo, hi, ct))
+          (field_cx, ct, XConstRef(mod_path, fname, lo, hi, ct))
         }
         None ->
           # `m.C` with no arguments: a nullary constructor's value, or -- in a
           # function-typed position -- the constructor as a function. Decided
           # by the same code the unqualified spelling goes through, with the
           # constructor already resolved through the alias.
-          match qual_ctor(cx, target, fname) {
+          match qual_ctor(field_cx, target, fname) {
             Some(k) -> {
               let no_args: List[Arg] = []
-              check_ctor_call(cx, fname, no_args, None, CBare, expected, Some(k),
+              check_ctor_call(field_cx, fname, no_args, None, CBare, expected, Some(k),
                 flo, fhi, lo, hi)
             }
             None ->
-              match static_field_target(cx, target) {
+              match static_field_target(field_cx, target) {
                 # Class.FIELD reads a public static field (spec §9.1) — the receiver
                 # is a java class name (a nullary ctor spelling), not an evaluable
                 # expression
-                Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
+                Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)
                 None -> {
                   # a bare name that is not a value: the module readings, which
                   # the value path below can only call an undefined variable
+                  var scope_cx = field_cx
                   match target {
-                    EVar(q, qlo, qhi) ->
-                      if not resolves_to_value(cx, q) {
-                        match map.get(cx.module_exports, q) {
+                    EVar(q, qlo, qhi) -> {
+                      let (next, found) = resolves_to_value_read(scope_cx, q)
+                      scope_cx = next
+                      if not found {
+                        match map.get(scope_cx.module_exports, q) {
                           Some(exp) ->
-                            return (qual_value_err(cx, exp, fname, flo, fhi),
+                            return (qual_value_err(scope_cx, exp, fname, flo, fhi),
                               TyError, XError(lo, hi))
-                          None ->
-                            if not map.has(cx.module_aliases, q) {
-                              return (undefined_qualifier_err(cx, q, qlo, qhi),
+                          None -> {
+                            let (next, path) = module_alias_read(scope_cx, q)
+                            scope_cx = next
+                            if path == None {
+                              return (undefined_qualifier_err(scope_cx, q, qlo, qhi),
                                 TyError, XError(lo, hi))
                             }
+                          }
                         }
                       }
+                    }
                     _ -> ()
                   }
-                  let (cx1, tt, tx) = check_expr(cx, target, no_expected())
+                  let (cx1, tt, tx) = check_expr(scope_cx, target, no_expected())
                   check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
                 }
               }
@@ -5253,12 +5456,15 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
       }
     }
     None -> {
-      match lookup_fn_sig(cx1, name) {
-        Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
-        None ->
-          (cerr_o(cx1, "undefined variable: ${name}", lo, hi,
-            moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1))),
+      let (cx2, answer) = lookup_fn_sig_read(cx1, name)
+      match answer {
+        Some(s) -> check_fn_value(cx2, name, s, expected, lo, hi)
+        None -> {
+          let (cx3, pool) = fn_pool_read(cx2)
+          (cerr_o(cx3, "undefined variable: ${name}", lo, hi,
+            moved_or_suggest(cx3, name, local_names(cx3) ++ pool)),
             TyError, XError(lo, hi))
+        }
       }
     }
   }
@@ -6435,13 +6641,14 @@ fn reject_named_args(
 ## Argument names outside a construction are a type error here, not a syntax
 ## error in the parser: the shape is legal, the callee is what makes it wrong.
 fn check_apply(
-  cx: Cx,
+  initial: Cx,
   target: Expr,
   args0: List[Arg],
   expected: Option[Ty],
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
+  var cx = initial
   # a constructor: `Circle(1.0)`, `Rect(2.0, h: 3.0)`, or its qualified
   # spelling `m.C(a, b)` (LANG-06). Routed into check_ctor_call so field names,
   # arity, spread and generic instantiation are decided by one implementation.
@@ -6469,10 +6676,13 @@ fn check_apply(
         # A module alias is excluded rather than delegated: `m.CONST(1)` and
         # `m.missing(1)` have Dawn answers (a constant that is not callable, an
         # unexported name) that a Java lookup would overwrite with a worse one.
-        None ->
-          if not module_alias_receiver(cx, recv) {
+        None -> {
+          let (next, is_alias) = module_alias_receiver_read(cx, recv)
+          cx = next
+          if not is_alias {
             return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
           }
+        }
       }
     _ -> ()
   }
@@ -6723,8 +6933,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       cx1 = cxa
       match found {
         None -> {
-          cx1 = cerr_o(cx1, "undefined variable: ${name}", nlo, nhi,
-            moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1)))
+          let (next, pool) = fn_pool_read(cx1)
+          cx1 = cerr_o(next, "undefined variable: ${name}", nlo, nhi,
+            moved_or_suggest(next, name, local_names(next) ++ pool))
           let (cxb, _, vx) = check_expr(cx1, value, no_expected())
           (cxb, TSExpr(vx, lo, hi))
         }
@@ -6988,12 +7199,15 @@ fn check_local_fn(
 
 # ---- calls ----
 
-fn accepts_partial_expected(cx: Cx, e: Expr) -> Bool =
+fn accepts_partial_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
   match e {
-    ELambda(_, _, _, _, _) -> true
-    EVar(_, _, _) -> true
-    EFieldAcc(target, name, _, _, _, _) -> qual_fn(cx, target, name) != None
-    _ -> false
+    ELambda(_, _, _, _, _) -> (cx, true)
+    EVar(_, _, _) -> (cx, true)
+    EFieldAcc(target, name, _, _, _, _) -> {
+      let (next, answer) = qual_fn_read(cx, target, name)
+      (next, answer != None)
+    }
+    _ -> (cx, false)
   }
 
 ## Check argument i; a UFCS receiver (always args[0]) was already checked by
@@ -7204,15 +7418,20 @@ fn check_call(
   }
   let sig = match resolved_sig {
     Some(s0) -> Some(s0)
-    None -> lookup_fn_sig(cx1, callee)
+    None -> {
+      let (next, answer) = lookup_fn_sig_read(cx1, callee)
+      cx1 = next
+      answer
+    }
   }
   let s = match sig {
     Some(s2) -> s2
     None -> {
       # still check the arguments so their subtrees get types/symbols
       let (cxa, _) = check_args_plain(cx1, args, pre0)
-      return (cerr_o(cxa, "undefined function: ${callee}", clo, chi,
-        moved_or_suggest(cxa, callee, fn_pool(cxa))),
+      let (cxb, pool) = fn_pool_read(cxa)
+      return (cerr_o(cxb, "undefined function: ${callee}", clo, chi,
+        moved_or_suggest(cxb, callee, pool)),
         TyError, XError(lo, hi))
     }
   }
@@ -7342,14 +7561,22 @@ fn check_call(
         Some(_) -> true
         None -> false
       }
-      let skip = round == 0 && needs_expected(cx1, a)
+      let skip = if round == 0 {
+        let (next, answer) = needs_expected_read(cx1, a)
+        cx1 = next
+        answer
+      } else { false }
       if not done && not skip {
         let pt = s.param_tys[pidx[i]]
         let substd = reduce_ty_effs(cx1, reduce_assoc(cx1, subst(pt, m, em)), m)
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
-        let exp2: Option[Ty] =
-          if is_concrete(cx1, substd) || accepts_partial_expected(cx1, a) { Some(substd) } else { None }
+        let accepts = if is_concrete(cx1, substd) { true } else {
+          let (next, answer) = accepts_partial_expected_read(cx1, a)
+          cx1 = next
+          answer
+        }
+        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
         cx1 = cxa
         at_i = Some(at)
@@ -8544,7 +8771,12 @@ fn check_ctor_call(
         None -> false
       }
       if idx >= 0 && not already {
-        if not (round == 0 && needs_expected(cx1, a.e)) {
+        let skip = if round == 0 {
+          let (next, answer) = needs_expected_read(cx1, a.e)
+          cx1 = next
+          answer
+        } else { false }
+        if not skip {
           let declared = ci.fields[idx].ty
           let sub = subst(declared, m, em)
           let exp2: Option[Ty] = if is_concrete(cx1, sub) { Some(sub) } else { None }
@@ -9515,7 +9747,9 @@ fn check_module_call(
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
   var cx1 = cx
-  match map.get(cx1.module_fn_sigs, (al, name)) {
+  let (next, answer) = module_fn_read(cx1, al, name)
+  cx1 = next
+  match answer {
     # reuse the ordinary call machinery with the resolved (imported) signature
     Some(s) -> check_call(cx1, name, args0, expected, None, Some(s), nlo, nhi, lo, hi)
     None -> {
@@ -9523,7 +9757,9 @@ fn check_module_call(
         let (cxa, _, _) = check_expr(cx1, a, no_expected())
         cx1 = cxa
       }
-      let mod_path = match map.get(cx1.module_aliases, al) {
+      let (alias_cx, path) = module_alias_read(cx1, al)
+      cx1 = alias_cx
+      let mod_path = match path {
         Some(p) -> p
         None -> al
       }
@@ -9586,18 +9822,27 @@ fn check_method_call(
   let args = arg_exprs(args0)
   # module-qualified call: alias.fn(args), where alias is a whole-module import
   match target {
-    EVar(rname, _, _) ->
-      if lookup(cx1, rname) == None && map.has(cx1.module_aliases, rname) {
-        return check_module_call(cx1, rname, name, args0, expected, nlo, nhi, lo, hi)
+    EVar(rname, _, _) -> {
+      if lookup(cx1, rname) == None {
+        let (next, path) = module_alias_read(cx1, rname)
+        cx1 = next
+        if path != None { return check_module_call(cx1, rname, name, args0, expected, nlo, nhi, lo, hi) }
       }
+    }
     _ -> ()
   }
   # a bare name that is neither a value nor an alias: both readings of `q.f()`
   # fail, and the value path below would report only one of them
   match target {
-    EVar(rname, rlo, rhi) ->
-      if not resolves_to_value(cx1, rname) && not map.has(cx1.module_aliases, rname) &&
-      not map.has(cx1.module_exports, rname) {
+    EVar(rname, rlo, rhi) -> {
+      let (next, found) = resolves_to_value_read(cx1, rname)
+      cx1 = next
+      let missing_alias = if found { false } else {
+        let (next, path) = module_alias_read(cx1, rname)
+        cx1 = next
+        path == None
+      }
+      if missing_alias && not map.has(cx1.module_exports, rname) {
         var cxe = undefined_qualifier_err(cx1, rname, rlo, rhi)
         for a in args {
           let (cxa, _, _) = check_expr(cxe, a, no_expected())
@@ -9605,6 +9850,7 @@ fn check_method_call(
         }
         return (cxe, TyError, XError(lo, hi))
       }
+    }
     _ -> ()
   }
   # static namespace / constructor: System.exit(1), StringBuilder.new()
@@ -9694,8 +9940,11 @@ fn check_method_call(
                 }
                 None -> ()
               }
-              let fn_in_scope = lookup(cx1, name) != None ||
-                lookup_fn_sig(cx1, name) != None
+              let fn_in_scope = if lookup(cx1, name) != None { true } else {
+                let (next, answer) = lookup_fn_sig_read(cx1, name)
+                cx1 = next
+                answer != None
+              }
               if fn_in_scope {
                 for a in args {
                   let (cxa, _, _) = check_expr(cx1, a, no_expected())
@@ -9829,7 +10078,8 @@ fn check_match(
   var order: List[Int] = []
   var oi = 0
   for arm in arms {
-    let d = needs_expected(cx1, arm.body)
+    let (next, d) = needs_expected_read(cx1, arm.body)
+    cx1 = next
     defer_at = defer_at ++ [d]
     if not d { order = order ++ [oi] }
     oi = oi + 1
@@ -13143,6 +13393,89 @@ test "a labelled closure does not escape through a let, a return or an assignmen
       "  let g: fn() -> Int !io = () => 1\n" ++
       "  g()\n}\n")
   assert len(cx4.diags) == 0
+}
+
+test "function reads preserve qualified decisions and local shadowing" {
+  let (syntax, pd) = parser.parse_module("fn identity[T](x: T) -> T = x\n")
+  assert pd == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  let sig = map.get(headers.cx.fns, "identity").expect("generic signature")
+  let initial = Cx { ..headers.cx, function_reads: Some([]), module_aliases: map.from([("h", "provider")]),
+    module_fn_sigs: map.from([(("h", "identity"), sig)]) }
+  let recv = EVar("h", 0, 1)
+  let field = EFieldAcc(recv, "identity", 2, 10, 0, 10)
+  let expected = Some([semantic_reads.ModuleAlias("h", Some("provider")),
+    semantic_reads.QualifiedFunction("h", NamedFunctionRead { name: "identity", answer: Some(sig) })])
+  let (decision, needs) = needs_expected_read(initial, field)
+  assert needs && decision.function_reads == expected
+  let (partial, accepts) = accepts_partial_expected_read(initial, field)
+  assert accepts && partial.function_reads == expected
+  let (method, method_needs) = needs_expected_read(initial, EMethod(recv, "identity", [], 2, 10, 0, 12))
+  assert method_needs && method.function_reads == Some([
+    semantic_reads.QualifiedFunction("h", NamedFunctionRead { name: "identity", answer: Some(sig) })])
+  let local = Cx { ..initial, frame: Frame { ..initial.frame, scopes: [map.from([("h", 42)])] } }
+  let (shadowed, answer) = qual_fn_read(local, recv, "identity")
+  assert answer == None && shadowed.function_reads == Some([])
+  let (local_method, local_needs) = needs_expected_read(local, EMethod(recv, "identity", [], 2, 10, 0, 12))
+  assert not local_needs && local_method.function_reads == Some([])
+  let absent = Cx { ..initial, module_aliases: map.empty() }
+  let (missing, missing_answer) = qual_fn_read(absent, recv, "identity")
+  assert missing_answer == None && missing.function_reads == Some([semantic_reads.ModuleAlias("h", None)])
+  let (retargeted, _) = qual_fn_read(Cx { ..initial, module_aliases: map.from([("h", "replacement")]) }, recv, "identity")
+  assert retargeted.function_reads.expect("retargeted alias")[0] == semantic_reads.ModuleAlias("h", Some("replacement"))
+  let (applied, _, _) = check_apply(initial, field, [pos_arg(EInt(1, 11, 12))], None, 0, 13)
+  var aliases = 0
+  for read in applied.function_reads.expect("apply receiver reads") {
+    match read { semantic_reads.ModuleAlias(_, _) -> { aliases = aliases + 1 }, _ -> () }
+  }
+  assert aliases == 3
+}
+
+test "function reads record qualified values calls and negative answers" {
+  let (provider_ast, pd) = parser.parse_module("pub fn double(x: Int) -> Int = x * 2\n" ++
+      "pub fn identity[T](x: T) -> T = x\n")
+  assert pd == []
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  assert provider.diags == []
+  let env = map.from([("helper", exports_of(provider, provider_ast, "helper", "helper"))])
+  for declaration in ["fn go() -> fn(Int) -> Int = h.double", "fn go() -> Int = h.double(1)",
+    "fn go() -> fn(Int) -> Int = h.missing", "fn go() -> Int = h.missing(1)",
+    "fn apply[T, U](f: fn(T) -> U, x: T) -> U = f(x)\nfn go() = apply(h.identity, 1)",
+    "fn hold[T](x: T) -> T = x\nfn go() = hold(h.double)"] {
+    let (user, ud) = parser.parse_module("use helper as h\n" ++ declaration ++ "\n")
+    assert ud == []
+    let initial = cx_new(Some("main"), None)
+    let (cold, cold_module) = check_module(initial, user, env)
+    let (observed, observed_module) = check_module(Cx { ..initial, function_reads: Some([]) }, user, env)
+    assert observed.diags == cold.diags && observed_module == cold_module && observed.next_id == cold.next_id
+    var answers: List[semantic_reads.NamedFunctionRead] = []
+    var aliases: List[Option[String]] = []
+    for read in observed.function_reads.expect("qualified reads") {
+      match read {
+        semantic_reads.QualifiedFunction(q, answer) -> { assert q == "h"
+          answers = answers ++ [answer]
+        }
+        semantic_reads.ModuleAlias(q, path) -> { assert q == "h"
+          aliases = aliases ++ [path]
+        }
+        _ -> ()
+      }
+    }
+    let generic = str.contains(declaration, "h.identity")
+    let partial = str.contains(declaration, "hold")
+    # Function-shaped expectations are already concrete to this checker.
+    # An unbound T receiving a function value exercises the partial branch.
+    assert len(answers) == (if partial { 4 } else if generic { 3 } else { 2 }) && len(aliases) > 0
+    for path in aliases { assert path == Some("helper") }
+    let missing = str.contains(declaration, "missing")
+    assert len(cold.diags) == if missing { 1 } else { 0 }
+    for answer in answers {
+      assert answer.name == if missing { "missing" } else if generic { "identity" } else { "double" }
+      if missing { assert answer.answer == None } else {
+        assert answer.answer.expect("exported answer").owner == Some("helper")
+      }
+    }
+  }
 }
 
 test "qualified exported functions are values with contextual generic inference" {

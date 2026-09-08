@@ -62,10 +62,14 @@ test block状态的完整冷模块对照，丢封定签名写入、保留错误i
 必须命中具名的运行时拒绝断言；默认参数另有丢符号写入的完整Cx负控。
 另有丢默认值字典符号的编译负控，必须命中泛型默认值的具名字典断言。
 另有丢默认参数诊断的编译负控，必须命中默认错误态的具名断言。
-编译或链接失败不算通过（typed-all共二十六个负控）。typed模式还比较23个body状态产品的
-原坐标装配；22次源码编辑的body边界Cx现在由生产`body_product`提取、投影和装配，
-不再调用旧私有观察写集replay。固定header案例的分配/引用域仍由夹具提供，不是生产query接线。目标符号映射来自header绑定顺序，
-不从cold body反推答案；header/type/trait全形状和实际缓存有效性仍未完成。
+Compilation or linking failures do not count as passing negative controls;
+typed-all now contains 30 compiling controls. Typed mode also compares assembly
+of 23 body products in their original coordinates. The 22 source-edit replays use
+production `body_product` capture, projection and assembly, not the old private
+write-set replay. Fixed-header allocation/reference views still come from the
+fixture, not production query wiring. Target symbol mappings follow header binding
+order, not answers reconstructed from cold bodies; complete header/type/trait
+coverage and actual cache validity remain unfinished.
 
 header重排案例使用`allocation.local_headers`台账连接生产声明索引的局部ADT、
 opaque/透明alias、trait及方法、效果和函数签名binder，同时反转成对声明，
@@ -130,10 +134,12 @@ header-metadata.py的十二个编译负控守binder、构造字段、trait方法
 源码回调按声明owner和可选路径选择映射。该脚本在incremental-state执行；native另跑
 relocate_header及其header_product依赖的55项owning测试，不与其他target相加。
 
-header_product捕获完整header作用域表、诊断后缀与分配区间，不保留整个Cx或Java
-capability。真实header案例进一步比较capture/assemble后的整个Cx，再将完整状态
-投影到移动后的ID和源码空间，与冷Cx严格对照。三个编译负控分别漏移impl索引键、
-残留bounds和公开impl集；typed-all合计29个编译负控。
+header_product captures complete header scope tables, diagnostic suffixes and
+allocation intervals without retaining the entire Cx or a Java capability. Real
+header fixtures compare the complete assembled Cx, then project the complete state
+into moved ID/source coordinates and compare against cold Cx. Three compiling
+controls omit impl-key relocation or retain old bounds/observable impls; these are
+part of the 30 typed-all controls.
 header-state.py的九个编译负控守环境、分配、诊断前后缀、常量表、类型作用域及
 type-span清空状态；完整Cx捕获/装配和HeaderProduct投影字段审计另有五个结构负控。
 这些完整表快照仍保留生产顺序，不是逐声明delta，不能合并任意独立声明编辑；
@@ -164,13 +170,27 @@ test、默认辅助函数签名登记及泛型字典保留；另两个负控守i
 native-selfhost-tests 分别执行tree、source及identity的owning依赖闭包（包含重叠依赖），
 因为新模块尚未被nmain导入，不能只跑主图就宣称它们有native覆盖。
 
-`state-product.py` 验证状态产品提取/装配及跨坐标投影的16个成功编译负控，
-覆盖签名/alias/约束写入、frame替换、诊断、环境守卫、分配起点及未进入syms的
-分配ID、类型/效果域、handler cell及非单调ID映射后的symbol插入顺序。
-另有Cx字段分类审计及新增未分类字段的拒绝负控。
-另一个负控跳过整个常量树的投影，必须命中真实TConst的owning断言。
-该入口在独立incremental-state任务执行，避免与投影串行后超出660s上限；native脚本另跑body_product的60项owning依赖
-闭包（与其他目标重叠，不相加当独立测试数）。
+`state-product.py` runs 19 compiling controls for capture, assembly and coordinate
+projection: signature/alias/bound writes, frames, diagnostics, environment guards,
+allocation starts and ghost IDs, type/effect domains, handler cells, symbol order,
+constant trees, and read-log suffix capture, assembly and reference relocation.
+It also audits every Cx field and rejects an added unclassified field. The constant
+tree control must hit the real TConst owning assertion. This remains in the separate
+incremental-state job; the native suite also runs body_product's owning dependency
+closure, which overlaps other targets and must not be counted as independent tests.
+
+`function-reads.py` runs 33 compiling controls against actual checker reads:
+unqualified answers, diagnostic candidate lists, qualified signatures and module
+alias paths, including misses. Decisions preserve local shadowing, expected-type
+short circuits and argument scheduling. Capture/projection retain all four fact
+variants. The typed oracle additionally compares 12 enabled/disabled observation
+cases against complete cold Cx and module products; its read-state mutant must hit
+the whole-Cx assertion. Recording remains disabled by default and is not complete
+namespace coverage or production body-cache admission.
+
+The incremental-reads job runs these read controls and the existing `projection.py`
+suite. Moving source projection out of incremental-projection keeps the expanded
+typed oracle below the unchanged 660s planning pole without removing any controls.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求

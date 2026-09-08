@@ -53,12 +53,15 @@ COND_BOOL = """        if ct != TyBool && not is_errorish(ct) {
 """
 
 # an element form that needs an expectation is checked in the second round
-NEEDS_EXPECTED_SPREAD = "    LeSpread(e, _, _) -> needs_expected(cx, e)\n"
+NEEDS_EXPECTED_SPREAD = "    LeSpread(e, _, _) -> needs_expected_read(cx, e)\n"
 NEEDS_EXPECTED_COND = """    LeIf(arms, _, _) -> {
+      var next = cx
       for a in arms {
-        if not needs_expected(cx, if_body_value(a.body)) { return false }
+        let (observed, answer) = needs_expected_read(next, if_body_value(a.body))
+        next = observed
+        if not answer { return (next, false) }
       }
-      true
+      (next, true)
     }
 """
 
@@ -160,13 +163,13 @@ MUTATIONS = {
     "needs-expected-blind-to-spread": (
         CHECKER,
         NEEDS_EXPECTED_SPREAD,
-        "    LeSpread(_e, _, _) -> false\n",
+        "    LeSpread(_e, _, _) -> (cx, false)\n",
     ),
     # 8: the same sentence for a conditional element. See 7.
     "needs-expected-blind-to-cond": (
         CHECKER,
         NEEDS_EXPECTED_COND,
-        """    LeIf(_arms, _, _) -> false
+        """    LeIf(_arms, _, _) -> (cx, false)
 """,
     ),
     # 9: an `else if` chain with no final else is one element form as a whole,

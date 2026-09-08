@@ -22,7 +22,7 @@ def audit_fields(cx_source, product_source):
     unchanged = set(re.findall(r"a\.([a-z_]+) == b\.\1", product_source))
     written = {"diags", "next_id", "fns", "alias_resolved", "frame", "syms",
                "current_eff_vars", "current_tparams", "current_tparam_bounds",
-               "in_test", "const_cutoff", "loop_jumps", "take_cell"}
+               "in_test", "const_cutoff", "loop_jumps", "take_cell", "function_reads"}
     # jsig is the one owner-held capability; it is intentionally not Eq data.
     classified = unchanged | written | {"jsig"}
     if fields != classified or unchanged & written:
@@ -41,6 +41,9 @@ def main():
     else:
         raise RuntimeError("Cx field audit accepted its negative control")
     variants = [
+        ("function-read-capture", "semantic_reads.capture(before.function_reads, after.function_reads)?", "Some([])"),
+        ("function-read-write", "semantic_reads.append(current.function_reads, product.function_reads)?", "current.function_reads"),
+        ("function-read-domain", "semantic_reads.project(p.function_reads, s => relocate.signature(v.ids, s))?", "p.function_reads"),
         ("constant-tree", "tree => relocate_tree.constant(v, tree)", "tree => Some(tree)"),
         ("symbol-order", "sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
         ("signature-write", "fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),

@@ -147,6 +147,41 @@ pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun
 
 pub type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
 
+# Compare every cold Cx field, not just diagnostics and the next allocation.
+# Only the intentionally added observation log is removed for the comparison.
+pub fn read_samples() -> List[ModuleTrial] !io = {
+  var out: List[ModuleTrial] = []
+  for body in ["missing_value", "missing_call()", "missing_owner.value", "{ missing_assignment = 1\n 0 }",
+    "{ let f = target\n target(f(1)) }", "apply(generic)"] {
+    let text = "fn target(x: Int) -> Int = x\n" ++
+      "fn generic[T](x: T) -> T = x\n" ++
+      "fn apply(f: fn(Int) -> Int) -> Int = f(1)\n" ++
+      "fn caller() -> Int = " ++ body ++ "\n"
+    let (syntax, _) = parser.parse_module(text)
+    let initial = cx_new(Some("read_probe"), Some("read_probe.dawn"))
+    let (cold_cx, cold) = check_module(initial, syntax, map.empty())
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, map.empty())
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  let (provider_ast, _) = parser.parse_module("pub fn double(x: Int) -> Int = x * 2\n" ++
+    "pub fn identity[T](x: T) -> T = x\n")
+  let (provider, _) = check_module(cx_new(Some("helper"), None), provider_ast, map.empty())
+  let env = map.from([("helper", exports_of(provider, provider_ast, "helper", "helper"))])
+  for declaration in ["fn go() -> fn(Int) -> Int = h.double", "fn go() -> Int = h.double(1)",
+    "fn go() -> fn(Int) -> Int = h.missing", "fn go() -> Int = h.missing(1)",
+    "fn apply[T, U](f: fn(T) -> U, x: T) -> U = f(x)\nfn go() = apply(h.identity, 1)",
+    "fn hold[T](x: T) -> T = x\nfn go() = hold(h.double)"] {
+    let (syntax, _) = parser.parse_module("use helper as h\n" ++ declaration ++ "\n")
+    let initial = cx_new(Some("qualified_read_probe"), None)
+    let (cold_cx, cold) = check_module(initial, syntax, env)
+    let (observed_cx, observed) = check_module(Cx { ..initial, function_reads: Some([]) }, syntax, env)
+    out = out ++ [ModuleTrial { replayed_cx: Cx { ..observed_cx, function_reads: None }, cold_cx: cold_cx,
+      replayed: observed, cold: cold, states: [] }]
+  }
+  out
+}
+
 pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample(), value_module_sample()] ++ default_module_samples()
 
 type SavedFunction = { before: Cx, after: Cx, product: body_product.Product }

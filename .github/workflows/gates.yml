@@ -1080,16 +1080,35 @@ jobs:
     # unchanged 660s pole. Move that independent contract to its own job.
     # With constant/test products: 2*(198+103)+38=640s. Retain this
     # allowance after the expanded 29-mutant header-state run (186.23s).
-    # budget: 3x 640s planning value
-    timeout-minutes: 32
+    # The 30-mutant read-observation run took 218.46s on 2026-09-08.
+    # 2*(219+103)+38=682s exceeds the pole; move the independent source
+    # projection suite to incremental-reads below. Typed alone: 2*219+38=476s.
+    # budget: 3x 476s planning value
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: typed product and source projection contracts
+      - name: typed product projection contracts
         run: |
           python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
+
+  incremental-reads:
+    runs-on: ubuntu-latest
+    # Real function/alias reads: 33 compiling mutants, 160.27s locally on
+    # 2026-09-08. Keep the existing source projection allowance of 103s.
+    # 2*(161+103)+38=566s; no previous contract or control is removed.
+    # budget: 3x 566s planning value
+    timeout-minutes: 29
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: semantic read and source projection contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/function-reads.py
           python3 scripts/incremental-semantics-contract/projection.py
 
   incremental-state:

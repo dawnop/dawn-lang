@@ -125,6 +125,29 @@ P4 查询运行时采用会话内不可变 owner，key/value 先参数化，不�
 本层先由人工图和成功编译负控验收；真实 scope/header/body 读取仍需后续接线，
 不能以图算法通过宣称函数增量已上线。
 
+Actual reads first enter an optional function-name log on Cx, retaining the
+Option[Sig] returned at lookup time, including misses. Recording is disabled by
+default and adds neither mutable host callbacks nor a new checker effect.
+Function values, direct calls, and field/function ambiguity checks thread Cx;
+body products capture and project answers, while header capture requires the log
+to remain unchanged. This observes only part of the function namespace, not every
+dependency. Unqualified decisions in needs_expected/resolves_to_value also thread
+Cx, preserving short circuits and two-pass argument order; the old Bool/Option
+interfaces remain available to consumers that do not collect dependencies.
+
+FunctionAnswer and FunctionCandidates are distinct read facts in the same optional
+log. The four diagnostic consumers record the actual candidate list, including its
+order, duplicates, and an empty answer; candidate reads are not disguised as missing
+function lookups. Body capture and projection retain both variants.
+
+QualifiedFunction retains the qualifier and its successful or missing signature;
+ModuleAlias separately retains the actual module path or absence. Qualified values,
+calls, expected-type decisions and partial expected arguments thread these facts.
+Local shadowing skips the alias read, and a concrete expected type still bypasses
+the partial-expectation helper. Explicit apply retains the module-receiver decision
+before delegation. Module export metadata, constructors, constants, traits, impls
+and Java queries are not yet fully observed, so this log must not enable a body cache.
+
 生产引用映射从声明来源台账派生：每个绑定由DeclKey、引用域和声明内槽定位，
 旧/新台账仅连接相同身份，不因整数相等就默认未变。一个域内重复身份对应不同ID、
 不同身份占同ID都必须拒绝；不同域允许数字重叠。缺少目标声明时不生成映射，
