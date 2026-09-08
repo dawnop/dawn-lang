@@ -132,6 +132,7 @@ public final class BodyProbe {
             }
             System.out.println("import-state\t2\tprovider provenance survives selective and qualified imports");
             checkModuleAssembly(probe);
+            checkReadObservation(probe);
             Object metadata = probe.getMethod("metadata_sample").invoke(null);
             Class<?> mt = metadata.getClass();
             if (!SemanticSnapshot.same(mt.getField("projected").get(metadata), mt.getField("cold").get(metadata)))
@@ -144,6 +145,22 @@ public final class BodyProbe {
                 throw new AssertionError("header state: projected context differs from cold headers");
             System.out.println("header-state-projection\t1\tcomplete header context agrees after ID and source movement");
         }
+    }
+
+    private static void checkReadObservation(Class<?> probe) throws Exception {
+        Object trials = probe.getMethod("read_samples").invoke(null);
+        var count = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_count")).findFirst().orElseThrow();
+        var at = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("module_at")).findFirst().orElseThrow();
+        if ((Long) count.invoke(null, trials) != 12) throw new AssertionError("Unexpected function read trial count");
+        for (long i = 0; i < 12; i++) {
+            Object trial = at.invoke(null, trials, i);
+            Class<?> t = trial.getClass();
+            if (!SemanticSnapshot.same(t.getField("replayed_cx").get(trial), t.getField("cold_cx").get(trial)))
+                throw new AssertionError("function reads: observed Cx differs from cold module state (" + i + ")");
+            if (!SemanticSnapshot.same(t.getField("replayed").get(trial), t.getField("cold").get(trial)))
+                throw new AssertionError("function reads: observed module differs from cold module (" + i + ")");
+        }
+        System.out.println("function-reads\t12\tobservation preserves complete cold Cx and module products");
     }
 
     private static void checkModuleAssembly(Class<?> probe) throws Exception {

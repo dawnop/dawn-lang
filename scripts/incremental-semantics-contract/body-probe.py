@@ -26,9 +26,9 @@ def main():
                       "impl-owner", "impl-parameters", "impl-roles", "default-diagnostics",
                       "module-functions", "module-signatures", "module-method-boundary", "module-registered-tag", "constant-type", "constant-span",
                       "header-alias", "header-impl", "header-adt", "header-effect",
-                      "header-state-key", "header-state-bounds", "header-state-surface"]
+                      "header-state-key", "header-state-bounds", "header-state-surface", "read-state"]
     parser.add_argument("--typed-mutant", choices=typed_variants)
-    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its twenty-nine compiling mutations")
+    parser.add_argument("--typed-all", action="store_true", help="run the typed positive and its thirty compiling mutations")
     variants = ["skip-symbol", "skip-captures", "skip-spans", "skip-operator-spans", "ambiguous-key",
                 "skip-cx-symbols", "skip-diagnostics", "skip-symbol-location"]
     modes = parser.add_mutually_exclusive_group()
@@ -75,12 +75,14 @@ def main():
         shutil.copytree(ROOT / directory, output / directory,
                         ignore=shutil.ignore_patterns("build", ".dawn"))
     if args.typed_mutant and not args.typed_mutant.startswith("module-"):
-        target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant == "default-dictionary" else
+        target = output / "selfhost/src/check" / ("checker.dawn" if args.typed_mutant in ("default-dictionary", "read-state") else
                     "relocate_header.dawn" if args.typed_mutant.startswith("header-") else
                     "allocation.dawn" if args.typed_mutant.startswith("impl-") else
                     "body_product.dawn" if args.typed_mutant in ("inferred-write", "test-state", "symbol-order", "default-write", "default-diagnostics") else "relocate_tree.dawn")
         tree = target.read_text()
         replacements = {
+            "read-state": ("Some(_) -> Cx { ..cx, function_reads: semantic_reads.candidates(cx.function_reads, names) }",
+                           "Some(_) -> Cx { ..cx, next_id: cx.next_id + 1, function_reads: semantic_reads.candidates(cx.function_reads, names) }"),
             "header-state-key": ("impls = map.insert(impls, next_key, moved)", "impls = map.insert(impls, key, moved)"),
             "header-state-bounds": ("current_tparam_bounds: projected_map(p.current_tparam_bounds, id => relocate.type_var(v.ids, id),\n      bounds => projected_list(bounds, tr => relocate.trait_id(v.ids, tr)))?", "current_tparam_bounds: p.current_tparam_bounds"),
             "header-state-surface": ("observable_impls: projected_list(p.observable_impls, i => implementation(v, i))?", "observable_impls: p.observable_impls"),
@@ -139,6 +141,7 @@ def main():
         probe += "pub fn metadata_sample() -> typed_projection.MetadataTrial !io = typed_projection.metadata_sample()\n"
         probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
         probe += "pub fn module_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.module_samples()\n"
+        probe += "pub fn read_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.read_samples()\n"
         probe += "pub fn module_count(xs: List[typed_projection.ModuleTrial]) -> Int = len(xs)\n"
         probe += "pub fn module_at(xs: List[typed_projection.ModuleTrial], i: Int) -> typed_projection.ModuleTrial = xs[i]\n"
         probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
@@ -242,6 +245,7 @@ def main():
             print("OK: compiling impl-header mutant rejected: " + args.typed_mutant)
             return
         expected_comparison = ({"inferred-write": "inferred state: replayed Cx differs from cold body boundary",
+                                "read-state": "function reads: observed Cx differs from cold module state",
                                 "module-functions": "module assembly: replayed module differs from cold module",
                                 "module-signatures": "module assembly: replayed Cx differs from cold module state",
                                 "module-method-boundary": "module assembly: replayed module differs from cold module",
