@@ -5,9 +5,11 @@
 # feature discipline: the N-1 jar must be able to compile HEAD selfhost/src.
 #
 #   corpus     — every in-repo Dawn target emits byte-identically under both
-#                compilers; backend-dawn (the production ecosystem corpus) is
-#                swept with lex/parse dumps and the formatter, which need no
-#                third-party class path
+#                compilers
+#   ecosystem  — `--corpus site` additionally sweeps backend-dawn, the
+#                production ecosystem corpus, with lex/parse dumps and the
+#                formatter, which need no third-party class path. Off by
+#                default; see below
 #   declaring  — an intentional output change lands with an
 #                `Emit-Change(<label>):` line in its commit message, one line
 #                per check label it moves; the script scans the commits since
@@ -18,8 +20,41 @@
 # The N-1 jar downloads from the GitHub release named in
 # scripts/seed-release.txt (dawn-selfhost.jar preferred, the Kotlin dawn.jar
 # for releases predating the dual publish) and caches under .dawn/seeds/.
+#
+# ---- why the ecosystem corpus is opt-in ----
+#
+# It is fetched over the network from another repository at a pinned commit, so
+# while it ran by default this gate could go red for GitHub being unreachable,
+# for a force-push over there, or for that repository turning private. None of
+# those is a statement about this compiler, and all of them landed on the path
+# every push has to pass. The pin is stale by construction as well: nothing
+# advances it, so the "ecosystem user" it stands for is written against an
+# older language version and answers a smaller question every week
+# (ARCH-N07, 2026-09-07).
+#
+# So: gates.yml's `prev-diff` job runs this script with no arguments and gets
+# the in-repo corpus only, while .github/workflows/nightly.yml passes
+# `--corpus site` once a day. The three labels the ecosystem corpus supplies
+# (`lex backend-dawn`, `parse backend-dawn`, `fmt backend-dawn`) are therefore
+# still checked, a day later rather than a push later. Nothing else moved: with
+# `--corpus site` this script does exactly what it did before.
+#
+#   ./scripts/selfhost-prev-diff.sh                  # in-repo corpus (CI push)
+#   ./scripts/selfhost-prev-diff.sh --corpus site    # + backend-dawn (nightly)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+CORPUS=none
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) CORPUS=$2; shift 2 ;;
+    *) echo "usage: $0 [--corpus site|none]" >&2; exit 2 ;;
+  esac
+done
+case $CORPUS in
+  site | none) ;;
+  *) echo "error: --corpus takes 'site' or 'none', not '$CORPUS'" >&2; exit 2 ;;
+esac
 
 ROOT=$(pwd)
 . scripts/seedjar.sh
@@ -42,22 +77,26 @@ trap 'rm -rf "$OUT"' EXIT
 ECO="$OUT/eco"
 ECO_URL=${DAWNOP_SITE_URL:-https://github.com/dawnop/dawnop-site.git}
 ECO_REV=a72bfc9f6e5063e1015814392099ff3b89938687
-git init --quiet "$ECO"
-git -C "$ECO" remote add origin "$ECO_URL"
-if ! git -C "$ECO" fetch --quiet --depth 1 origin "$ECO_REV"; then
-  echo "ERROR: failed to fetch pinned backend-dawn corpus $ECO_REV" >&2
-  exit 1
+if [ "$CORPUS" = site ]; then
+  git init --quiet "$ECO"
+  git -C "$ECO" remote add origin "$ECO_URL"
+  if ! git -C "$ECO" fetch --quiet --depth 1 origin "$ECO_REV"; then
+    echo "ERROR: failed to fetch pinned backend-dawn corpus $ECO_REV" >&2
+    exit 1
+  fi
+  if ! git -C "$ECO" checkout --quiet --detach FETCH_HEAD; then
+    echo "ERROR: failed to check out pinned backend-dawn corpus $ECO_REV" >&2
+    exit 1
+  fi
+  ECO_HEAD=$(git -C "$ECO" rev-parse HEAD)
+  if [ "$ECO_HEAD" != "$ECO_REV" ]; then
+    echo "ERROR: backend-dawn corpus resolved to $ECO_HEAD, expected $ECO_REV" >&2
+    exit 1
+  fi
+  echo "OK   pinned backend-dawn corpus $ECO_REV"
+else
+  echo "SKIP backend-dawn corpus (--corpus site enables it; nightly.yml passes it)"
 fi
-if ! git -C "$ECO" checkout --quiet --detach FETCH_HEAD; then
-  echo "ERROR: failed to check out pinned backend-dawn corpus $ECO_REV" >&2
-  exit 1
-fi
-ECO_HEAD=$(git -C "$ECO" rev-parse HEAD)
-if [ "$ECO_HEAD" != "$ECO_REV" ]; then
-  echo "ERROR: backend-dawn corpus resolved to $ECO_HEAD, expected $ECO_REV" >&2
-  exit 1
-fi
-echo "OK   pinned backend-dawn corpus $ECO_REV"
 
 # feature discipline: the previous release must compile today's selfhost
 "${PREV[@]}" build selfhost "${PREV_STD[@]}" -o "$OUT/head-by-prev.jar" > /dev/null
@@ -93,25 +132,27 @@ done
 
 # the production ecosystem corpus: front-end dumps + formatter over
 # backend-dawn (its java-deps are not on this class path, so no emit)
-files=$(find "$ECO/backend-dawn/src" -name '*.dawn' | sort)
-# shellcheck disable=SC2086
-"${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
-# shellcheck disable=SC2086
-"${HEAD_BIN[@]}" __lex $files > "$OUT/eco-lex-head.txt"
-if diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null
-then gate "lex backend-dawn" 0; else gate "lex backend-dawn" 1; fi
-# shellcheck disable=SC2086
-"${PREV[@]}" __parse $files > "$OUT/eco-parse-prev.txt"
-# shellcheck disable=SC2086
-"${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
-if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
-then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
-cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
-cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
-"${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
-"${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
-if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
-then gate "fmt backend-dawn" 0; else gate "fmt backend-dawn" 1; fi
+if [ "$CORPUS" = site ]; then
+  files=$(find "$ECO/backend-dawn/src" -name '*.dawn' | sort)
+  # shellcheck disable=SC2086
+  "${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
+  # shellcheck disable=SC2086
+  "${HEAD_BIN[@]}" __lex $files > "$OUT/eco-lex-head.txt"
+  if diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null
+  then gate "lex backend-dawn" 0; else gate "lex backend-dawn" 1; fi
+  # shellcheck disable=SC2086
+  "${PREV[@]}" __parse $files > "$OUT/eco-parse-prev.txt"
+  # shellcheck disable=SC2086
+  "${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
+  if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
+  then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
+  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
+  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
+  "${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
+  "${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
+  if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
+  then gate "fmt backend-dawn" 0; else gate "fmt backend-dawn" 1; fi
+fi
 
 [ "$fail" = 0 ] || exit 1
 echo "OK: HEAD agrees with $TAG on the corpus (undeclared-diff check passed)"

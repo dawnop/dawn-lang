@@ -1,0 +1,56 @@
+name: nightly
+
+# Gates worth running, but not worth running on every push.
+#
+# There is one so far: the ecosystem corpus of scripts/selfhost-prev-diff.sh.
+# That script's `--corpus site` clones dawnop-site at a pinned commit and
+# sweeps its backend-dawn sources with the previous release's toolchain and
+# HEAD's, which is where the `lex backend-dawn`, `parse backend-dawn` and
+# `fmt backend-dawn` labels come from. It ran on the push path until
+# 2026-09-11, and there it put a third-party checkout on the path every commit
+# has to pass: GitHub being unreachable, a force-push in that repository, or
+# that repository turning private all read as this compiler being broken. Once
+# a day is the same evidence at a small fraction of the exposure, and the
+# corpus is a slow-moving pin rather than something a single commit can break
+# in a way a day's delay hides (ARCH-N07, 2026-09-07).
+#
+# Scheduled workflows run from the default branch only, so this file is read
+# from main no matter what is on other branches. `workflow_dispatch` is here so
+# a person can ask for the same evidence without waiting for the hour.
+#
+# No `# budget:` line below, deliberately. scripts/check-gate-budgets.py reads
+# gates.yml, ci.yml and release.yml, the workflows a push or a tag waits on;
+# the budget rule exists to keep those from being killed by a slow runner and
+# to cap what the every-push run may claim. Nothing waits on this run, so the
+# timeout here is a runaway stop and not a claim about the work. The step took
+# 97s inside gates.yml's `prev-diff` job, and 15 minutes is generous on top of
+# the toolchain setup and the rest of the differential the script runs anyway.
+on:
+  schedule:
+    # 04:40 UTC. GitHub's cron is best effort and drops runs at busy times, so
+    # this asks for a trough rather than an even hour.
+    - cron: '40 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  ecosystem-corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the declared-change scan walks commits since the N-1 tag
+          fetch-depth: 0
+
+      # build: false -- the script drives the seed and builds what it needs
+      # itself, so a toolchain built up front would only be built again.
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+
+      # The whole differential, not only the three ecosystem labels: the N-1
+      # comparison the corpus needs is the same one the in-repo targets use, so
+      # running it twice would be the expensive way to run it once.
+      - name: N vs N-1 differential, with the backend-dawn corpus
+        run: ./scripts/selfhost-prev-diff.sh --corpus site
