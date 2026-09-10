@@ -1,6 +1,42 @@
-<!-- doc-check: translation-of README.md @ 788b48efb4aa7850 -->
+<!-- doc-check: translation-of README.md @ 9dad6ce6de501c03 -->
+
+<p align="center">
+  <a href="https://dawn-lang.dawnop.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="site/assets/logo-white.svg">
+      <img src="site/assets/logo.svg" width="180" alt="Dawn">
+    </picture>
+  </a>
+</p>
+
+<div align="center">
 
 # Dawn
+
+</div>
+
+<p align="center">
+  <em>一门小而优雅的函数式语言：不可变数据、代数数据类型、把效果写进类型签名。</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/dawnop/dawn-lang/actions/workflows/ci.yml"><img
+    src="https://img.shields.io/github/actions/workflow/status/dawnop/dawn-lang/ci.yml?branch=main&amp;label=CI"
+    alt="CI"></a>
+  <a href="https://github.com/dawnop/dawn-lang/releases"><img
+    src="https://img.shields.io/github/v/release/dawnop/dawn-lang" alt="Latest release"></a>
+  <a href="LICENSE"><img
+    src="https://img.shields.io/github/license/dawnop/dawn-lang" alt="License"></a>
+  <a href="https://dawn-lang.dawnop.com"><img
+    src="https://img.shields.io/badge/website-dawn--lang.dawnop.com-4F46E5" alt="Website"></a>
+  <a href="https://dawn-lang.dawnop.com/playground.html"><img
+    src="https://img.shields.io/badge/playground-try%20it-7C3AED" alt="Playground"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang"><img
+    src="https://img.shields.io/badge/VS%20Code-marketplace-007ACC"
+    alt="VS Code extension"></a>
+  <img src="https://img.shields.io/badge/backends-JVM%20%7C%20C-DB2777"
+    alt="Backends: JVM and C">
+</p>
 
 *[English](README.md) — 正本是英文；本文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
