@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 1b913dd7ec669146 -->
+<!-- doc-check: translation-of README.md @ 905ca621a4102f33 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -128,13 +128,12 @@ myapp/
 
 ### 一、效果进类型
 
-函数默认纯，碰 IO 必须标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。这条轴处处承重：
-`std` 绝大部分是纯的、并且在签名上说了；编译器给自己不纯的那些部分打标；签名不说而函数伸手到
-外界，是编译错误。（`scripts/doc-check.py` 的 effect-inference 探针把两个分支都钉住了：显式声明为纯
-却调用 `println` 的签名被拒，不写效果的那个推断出 `!io`。）
+函数默认纯，碰 IO 必须标 `!io`，看签名即知它碰不碰外界；签名不说而函数伸手到外界，是编译
+错误。（`scripts/doc-check.py` 的 effect-inference 探针把两个分支都钉住了：显式声明为纯却
+调用 `println` 的签名被拒，不写效果的那个推断出 `!io`。）
 
-还有第二条轴：**用户自己声明的具名效果**。`effect` 声明操作、
-`with handle` 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。
+第二条轴是**用户自己声明的具名效果**：`effect` 声明操作，`with handle` 就地应答，标签随签名
+传播，只在 handle 这一个语法节点上被减掉。
 
 ```dawn run
 effect Ask {
@@ -150,28 +149,17 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-臂有两种形状。**尾恢复**臂就是普通闭包：就地运行，返回值即操作的结果，不捕获延续，于是两个
-后端都不必为它各造一套栈魔法。声明为 `ctl` 的效果还可以带**控制臂**
-（`op(x) resume k => ...`）：它绑定延续而不是恢复延续，`k` 是一个普通函数值，可以活得比装
-handler 的那一帧更久，并且可以被恢复**一次**。恢复两次不支持。确定不会再恢复的延续，对它调
-`discard` 丢弃，被挂起的那些帧攒下的释放动作由这一下跑完。
+臂有两种形状。**尾恢复**臂就是普通闭包：就地运行，返回值即操作的结果，不捕获延续。声明为
+`ctl` 的效果还可以带**控制臂**（`op(x) resume k => ...`）：它绑定延续而不是恢复延续，`k` 是
+一个普通函数值，可以活得比装 handler 的那一帧更久，最多再被恢复一次。确定不会再恢复的延续，
+对它调 `discard` 丢弃。
 
 两种形状都有规范、两个后端都实现了、对拍语料也盯着，而且**这一档的内部使用者就在本仓**：
-`std/io` 声明了 `Fs`，把文件系统写成十四个操作，生产安装的 handler 是 `with_fs_real`，
-于是测试可以用一张表应答一次文件读取。同一个模块还声明了 `Proc`，把「跑另一个程序」写成一个
-操作，生产 handler 是 `with_proc_real`，于是测试可以按住一整条命令行而不启动任何东西。还声明了
-`Env`，把工作目录与环境变量写成两个操作，生产 handler 是 `with_env_real`，于是测试可以自己
-决定程序从周遭读到什么。它还声明了 `Exit`，把「结束进程」写成一个 `ctl` 操作，生产臂不恢复：
-`io.exit` 的体就是这个操作，于是退出码顺着行走，由拥有这份工作的那一帧决定「结束」是什么意思。
-另有一条只声明、还没有使用者：`Console` 把四个打印函数写成四个操作，于是一条命令行失败时的
-诊断行也能和退出码一起被测试读回来。第六个是 `std/gpu`：它声明了 `Gpu`，把设备的宿主侧写成六个操作，
-测试安装的 handler 是一个纯的假设备，于是 `!Gpu` 程序在没有 GPU 的机器上也能跑。这六条声明
-落在 `std/` 与 `selfhost/src/` 下
-仅有的两个文件里；`doc-check.py` 持有这份清单（`NAMED_EFFECT_EXPECTED`），清单外冒出声明、
-或其中一条消失，它都会把这一段判红。编译器自己就跑在这一档上：它的 `main` 把整个 dispatch 包在
-`with_fs_real` 里、里面再包一层 `with_exit_real`，于是工具链读写的每个文件都过 `Fs`、
-结束时的每个退出码都过 `Exit`，而 driver 的分析测试把同一份代码跑在
-一张表装的文件树上（`selfhost/src/driver/fsmem.dawn`）。
+`std/io` 声明了 `Fs`、`Proc`、`Env`、`Exit` 与 `Console`，`std/gpu` 声明了 `Gpu`，每条声明
+旁边就是生产装的 handler，测试里另有假实现。`doc-check.py` 持有这份清单
+（`NAMED_EFFECT_EXPECTED`），`std/` 或 `selfhost/src/` 下别处冒出声明，它就把这一段判红。
+编译器自己也跑在这一档上：它的 `main` 被 `Fs` 与 `Exit` 的 handler 包着，driver 的分析测试
+则把同一份代码跑在一棵内存里的文件树上（`selfhost/src/driver/fsmem.dawn`）。
 （[docs/spec.md](docs/spec.md) §6.5；[docs/oneshot-design.md](docs/oneshot-design.md)；
 对拍语料 `scripts/spike-native/effect_handler.dawn`；示例集 `examples/effects/`。）
 

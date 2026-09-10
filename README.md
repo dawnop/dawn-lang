@@ -142,17 +142,14 @@ measurement, a section of the spec.
 
 ### 1. Effects are in the type
 
-Functions are pure by default; touching IO requires the `!io` label — the signature
-tells you whether it reaches outside, so testing a pure function needs no mocks. That
-axis carries weight everywhere: almost all of `std` is pure and says so, the compiler
-labels the parts of itself that are not, and a function reaching outside from a
-signature that stays silent about it is a compile error. (`scripts/doc-check.py`'s
-effect-inference probe pins both branches: an explicitly pure signature that calls
-`println` is rejected, an unannotated one infers `!io`.)
+Functions are pure by default; touching IO requires the `!io` label, so the signature
+tells you whether it reaches outside; reaching outside from a silent signature is a
+compile error. (`scripts/doc-check.py`'s effect-inference probe pins both branches: a
+pure signature calling `println` is rejected, an unannotated one infers `!io`.)
 
-There is a second axis: **named effects you declare yourself**. `effect` declares the
-operations, `with handle` answers them on the spot, the label propagates along
-signatures and is subtracted at exactly one syntactic node, the handler.
+A second axis is **named effects you declare yourself**: `effect` declares the
+operations, `with handle` answers them on the spot, and the label travels along
+signatures, subtracted at exactly one syntactic node, the handler.
 
 ```dawn run
 effect Ask {
@@ -169,37 +166,21 @@ pub fn main() -> Unit !io = {
 ```
 
 Arms come in two shapes. A **tail-resumptive** arm is an ordinary closure: it runs in
-place, its return value is the operation's result, and no continuation is captured, so
-neither backend needs stack magic for it. An effect declared `ctl` may also carry a
-**control arm** (`op(x) resume k => ...`), which binds the continuation instead of
-resuming it: `k` is an ordinary function value, it may outlive the frame that installed
-the handler, and it may be resumed **once**. Resuming twice is not supported. A
-continuation that will never be resumed is abandoned by calling `discard` on it, which
-is what runs the releases the suspended frames are holding.
+place, its return value is the operation's result, capturing no continuation. An
+effect declared `ctl` may also carry a **control arm** (`op(x) resume k => ...`), which
+binds the continuation instead of resuming it: `k` is an ordinary function value that
+may outlive its handler's frame and may be resumed at most **once**. One that will never
+be resumed is abandoned with `discard`.
 
-Both shapes are specified, implemented on both backends and held by the differential
+Both are specified, implemented on both backends and held by the differential
 corpus, and **the tier's internal consumers are in this repository**: `std/io` declares
-`Fs`, the file system as fourteen operations, with `with_fs_real` as the handler
-production installs, so a test can answer a file read from a table. The same module
-declares `Proc`, running another program as one operation, with `with_proc_real` for
-production, so a test can hold a command line without starting anything, and `Env`, the
-working directory and the environment as two operations, with `with_env_real` for
-production, so a test can decide what a program reads out of its surroundings. It also
-declares `Exit`, ending the process as one `ctl` operation whose production arm never
-resumes: `io.exit`'s body is that operation, so a status travels a row and the frame
-that owns the work decides what ending it means. One more is declared and not yet spoken
-for: `Console`, the four print functions as four operations, so that a test can read back
-the diagnostic line a command failed with alongside its status. The sixth is `std/gpu`,
-which declares `Gpu`, the host side of a device as six operations, with a pure fake
-device as the handler a test installs, so a `!Gpu` program runs on a machine with no GPU.
-Those are the six declarations, in the two files under `std/` and `selfhost/src/` that
-carry any; `doc-check.py` keeps the list (`NAMED_EFFECT_EXPECTED`) and reds this
-paragraph when a declaration appears outside it or one of them goes away.
-The compiler itself runs on the tier: its `main` installs `with_fs_real` around the
-whole dispatch and `with_exit_real` inside it, so every file the toolchain reads or
-writes goes through `Fs` and every status it ends on goes through `Exit`, and the
-driver's analysis tests run that same code over a file tree held in a table
-(`selfhost/src/driver/fsmem.dawn`). ([docs/spec.md](docs/spec.md) §6.5;
+`Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, each with
+production's handler beside it and a fake for tests. `doc-check.py` keeps that list
+(`NAMED_EFFECT_EXPECTED`) and reds this paragraph if a declaration appears elsewhere
+under `std/` or `selfhost/src/`. The compiler runs on the tier itself: its `main` is
+wrapped in `Fs` and `Exit` handlers, and the driver's analysis tests run that code over
+an in-memory file tree (`selfhost/src/driver/fsmem.dawn`).
+([docs/spec.md](docs/spec.md) §6.5;
 [docs/oneshot-design.md](docs/oneshot-design.md); differential corpus
 `scripts/spike-native/effect_handler.dawn`; gallery `examples/effects/`.)
 
