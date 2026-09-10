@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 3584463dba00cc2d -->
+<!-- doc-check: translation-of site/pages/home.md @ b155ace308dd0a12 -->
 
 # 首页文案 —— 中文译本
 
@@ -14,7 +14,7 @@ type · match · effect · !io
 
 ## lede
 
-一门小而优雅的函数式语言：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进类型签名。编译器已自举，两个平级后端——JVM 字节码与 C——在同一份源码上给出同一个答案；这件事由门禁管着，不是一句承诺。
+一门小而优雅的函数式语言：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进类型签名。编译器已自举，两个平级后端——JVM 字节码与 C——在同一份源码上给出同一个答案；cuTile 设备后端把 kernel 带上 NVIDIA GPU，没有 GPU 的机器上由纯的假设备给出同一个答案。这件事由门禁管着，不是一句承诺。
 
 ## cta-primary
 

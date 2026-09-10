@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 1481c4fd5861abd8 -->
+<!-- doc-check: translation-of README.md @ 1b913dd7ec669146 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -44,6 +44,9 @@
 类型签名。语言小，实现也小——紧凑的标准库保持**零 `use java`**；编译器**已自举且只此一套**
 （最初的 Kotlin 实现归档在 `kotlin-final` tag）。两个**平级**后端：**JVM 字节码**与 **C**
 （再交给 `cc`）；同一份源码在两边给出同一个答案，这件事由门禁机器管着，不是一句承诺。
+NVIDIA GPU 另有一个 **cuTile 设备后端**：kernel 体是一个带具名效果的普通 Dawn 函数，
+降低成 CUDA Tile IR 之后经 CUDA driver 启动；同一段宿主程序在没有 GPU 的机器上由纯的
+假设备跑完，给出同一个答案。
 
 ```dawn run
 type Shape =
@@ -188,6 +191,12 @@ handler 的那一帧更久，并且可以被恢复**一次**。恢复两次不�
 规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。它的**适用范围**是两个后端都能编的
 那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内。这条边界
 划在哪儿，见[两样东西都叫「native」](#两样东西都叫native)。
+
+同一条思路一直伸到 GPU 上。**cuTile 设备后端**上的 kernel 要在真硬件上与手写的宿主参考实现
+对拍，`scripts/tile-gpu-diff` 跑这件事并把判词追加进台账；台账末行盖不住的 tile 路径改动，
+CI 的台账门会判红。宿主侧仍然跑在 JVM 或 native C 上：只有 native 那侧碰 `libcuda`，
+JVM 上真设备的 launch 一律被拒。
+（[docs/tile-backend-design.md](docs/tile-backend-design.md)。）
 
 ### 三、native 侧既没有 GC，也没有 malloc/free
 

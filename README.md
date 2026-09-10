@@ -45,7 +45,10 @@ small and so is the implementation — a compact standard library with **zero `u
 a compiler that is **self-hosted, and the only one there is** (the original Kotlin
 implementation is archived at the `kotlin-final` tag). Two **peer** backends: **JVM
 bytecode** and **C** (handed on to `cc`). That the same source gives the same answer on
-both is held true by a gate, not by a promise.
+both is held true by a gate, not by a promise. For NVIDIA GPUs there is a **cuTile
+device backend**: a kernel body is an ordinary Dawn function under a named effect,
+lowered to CUDA Tile IR and launched through the CUDA driver, and a pure fake device
+runs the same host program, for the same answer, on a machine with no GPU.
 
 ```dawn run
 type Shape =
@@ -221,6 +224,14 @@ scope is the programs both backends can compile: the C backend refuses `use java
 so a program with Java interop in it has one answer rather than two and is outside
 the comparison. Where that boundary runs is under
 [Two different things are called "native"](#two-different-things-are-called-native).
+
+The same idea reaches the GPU. A kernel written for the **cuTile device backend** is
+compared against a handwritten host reference on real hardware by
+`scripts/tile-gpu-diff`, which appends its verdict to a ledger; a CI gate reds any
+change to the tile path that the ledger's last run does not cover. The host side still
+runs on JVM or native C: only native talks to `libcuda`, and on the JVM a real-device
+launch is refused outright.
+([docs/tile-backend-design.md](docs/tile-backend-design.md).)
 
 ### 3. On the native side there is neither a GC nor malloc/free
 

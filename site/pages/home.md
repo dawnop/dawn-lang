@@ -19,7 +19,7 @@ type · match · effect · !io
 
 ## lede
 
-A small, elegant functional language: immutable data, algebraic data types with exhaustive pattern matching, effects written into the type signature. The compiler is self-hosted, and its two peer backends — JVM bytecode and C — give the same answer on the same source. A gate keeps that true, not a promise.
+A small, elegant functional language: immutable data, algebraic data types with exhaustive pattern matching, effects written into the type signature. The compiler is self-hosted, and its two peer backends — JVM bytecode and C — give the same answer on the same source; a cuTile device backend takes kernels to NVIDIA GPUs, and a pure fake device gives that same answer where there is no GPU. A gate keeps that true, not a promise.
 
 ## cta-primary
 
