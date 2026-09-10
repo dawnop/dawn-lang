@@ -106,7 +106,7 @@ release 戳，编译器拿它认出「这个 std 不是我发布时那个」，�
 测试会红）→ 提交 → `git push origin main` 并等
 main CI 通过 → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`。禁止
 `git push --tags`，它会把无关 tag 一起发布。`release.yml` 开头先要求 `ci` 已经在这个
-tag 指向的 commit 上绿过——上面那句「等 main CI 通过」买的就是这个：它去问 Actions API，
+tag 指向的 commit 上绿过，上面那句「等 main CI 通过」买的就是这个：它去问 Actions API，
 而不是把刚在同一个 sha 上跑完的 67 个 job 再跑一遍；随后校验 tag 与 version 一致、
 把 `dawn-selfhost.jar` 与 native 资产传上 Release。main CI 未绿就打的 tag 会在几秒内红，
 等它绿了重跑一次 release workflow 即可。四件资产发布完成后只运行

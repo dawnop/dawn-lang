@@ -5,11 +5,10 @@
 # feature discipline: the N-1 jar must be able to compile HEAD selfhost/src.
 #
 #   corpus     — every in-repo Dawn target emits byte-identically under both
-#                compilers
-#   ecosystem  — `--corpus site` additionally sweeps backend-dawn, the
-#                production ecosystem corpus, with lex/parse dumps and the
-#                formatter, which need no third-party class path. Off by
-#                default; see below
+#                compilers. backend-dawn, the production ecosystem corpus, is
+#                swept the same way under `--corpus site`, with lex/parse dumps
+#                and the formatter, which need no third-party class path; it is
+#                off by default, and the section below says why
 #   declaring  — an intentional output change lands with an
 #                `Emit-Change(<label>):` line in its commit message, one line
 #                per check label it moves; the script scans the commits since
