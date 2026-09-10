@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 4554434b82c6ce7b -->
+<!-- doc-check: translation-of site/pages/home.md @ 3584463dba00cc2d -->
 
 # 首页文案 —— 中文译本
 
@@ -34,7 +34,7 @@ type · match · effect · !io
 
 ## feature-effects-body
 
-函数默认是纯的，碰 IO 必须在签名标 `!io`，看签名即知它碰不碰外界。第二条轴是你自己声明的**具名效果**：`effect` 声明操作，`with handle` 就地应答，标签随签名传播，在 handler 处被减掉。声明为 `ctl` 的效果还可以带控制臂，它绑定延续而不是恢复延续，最多再恢复一次。两个后端都实现了这一档，而且**内部使用者就在本仓**：`std/io` 声明了 `Fs`、`Proc`、`Env`、`Exit` 与 `Console`，`std/gpu` 声明了 `Gpu`，生产 handler 就在声明旁边，测试里用表或假实现应答。编译器自己就跑在这一档上：它的 `main` 被 `Fs` 与 `Exit` 的 handler 包着，于是它读的每个文件、结束时的每个退出码都过一层效果。
+函数默认是纯的，碰 IO 必须在签名标 `!io`，看签名即知它碰不碰外界。第二条轴是你自己声明的**具名效果**：`effect` 声明操作，`with handle` 就地应答，标签随签名传播，在 handler 处被减掉。`ctl` 效果还可以带控制臂，它绑定延续而不是恢复延续，最多再恢复一次。两个后端都实现了这一档，而且**内部使用者就在本仓**：`std/io` 声明了 `Fs`、`Proc`、`Env`、`Exit` 与 `Console`，`std/gpu` 声明了 `Gpu`，生产 handler 就在声明旁边，测试里用假实现应答。编译器自己就跑在这一档上：它的 `main` 被 `Fs` 与 `Exit` 的 handler 包着，于是它读的每个文件、结束时的每个退出码都过一层效果。
 
 ## feature-comptime-title
 

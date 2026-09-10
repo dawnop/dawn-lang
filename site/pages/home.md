@@ -39,7 +39,7 @@ Effects in the type
 
 ## feature-effects-body
 
-Functions are pure by default; touching IO requires `!io` on the signature, which tells you whether it reaches outside. A second axis is **named effects you declare**: `effect` declares the operations, `with handle` answers them, and the label travels along signatures, subtracted at the handler. An effect declared `ctl` may carry a control arm, binding the continuation rather than resuming it, to be resumed once at most. Both backends implement it, and **the tier's internal consumers are in this repository**: `std/io` declares `Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, production handlers beside the declarations and tables or fakes in the tests. The compiler runs on the tier: its `main` is wrapped in `Fs` and `Exit` handlers, so every file it reads and every exit status goes through an effect.
+Functions are pure by default; touching IO requires `!io` on the signature, which tells you whether it reaches outside. A second axis is **named effects you declare**: `effect` declares the operations, `with handle` answers them, and the label travels along signatures, subtracted at the handler. A `ctl` effect may also carry a control arm, which binds the continuation instead of resuming it, once at most. Both backends implement it, and **the tier's internal consumers are in this repository**: `std/io` declares `Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, with production handlers beside the declarations and fakes in the tests. The compiler runs on the tier: its `main` is wrapped in `Fs` and `Exit` handlers, so every file it reads and every exit status goes through an effect.
 
 ## feature-comptime-title
 
