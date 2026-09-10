@@ -62,16 +62,55 @@ name: gates
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
 #
-# The run's wall clock is its longest job, and the 3x budget rule already
-# forces every job's worst observation into its own budget line -- so the line
-# below caps what any of those lines may claim, and the #299 speedup is held
-# by check-gate-budgets.py instead of by memory. A job that regresses past the
-# pole must restate its budget, the restatement collides with the pole, and
-# raising the pole is a visible, reviewable edit rather than a silent slide.
-# 660s = native-diff's historical worst (589s, in export-surface's note) with
-# headroom for its documented non-reproducibility. This pins the per-job
-# claims, not the literal run wall clock: queueing and the coverage guard's
-# tail are outside it, and a checker cannot read a future run.
+# THE RUN'S WALL CLOCK IS NOT ITS LONGEST JOB. It was when the pole was
+# written and it has not been for some time. Measured on run 34484938024
+# (2026-09-10, main, 68 jobs): the run's span was 1506s and its longest job
+# was `test` at 670s. Every one of the 25 completed main runs of
+# 2026-09-08T00:18Z .. 2026-09-10T13:48Z spans between 1174s and 2105s, and
+# not one of them comes near its own longest job.
+#
+# What sets the span is the queue. 68 jobs against an account ceiling of 20
+# concurrent runners gives
+#
+#     span >= max(longest job, total job-seconds / 20)
+#
+# and on that run the binding term was the second: max(670, 23,395 / 20) =
+# max(670, 1170) = 1170s, against a measured 1506s (29% packing loss). 46 of
+# the 68 jobs queued for more than 60s, median 329s, worst 986s.
+#
+# The pole worked in reverse under that arithmetic. Every time it forced a
+# split it added one more ~36s setup, which raised the total, which raised
+# the span's own lower bound by ~1.8s. Splitting bought budget headroom and
+# not wall clock -- which native-diff's note below had already worked out for
+# its own hypothetical fifth shard, without noticing that the same sentence
+# was by then true of every shard that already existed.
+#
+# So the pole is no longer a claim about the longest job. It is set at the
+# QUEUE FLOOR: the figure a single job may claim before it, alone, would be
+# the run's critical path. A job that claims past it must split, exactly as
+# before, and raising the pole is still a visible, reviewable edit rather
+# than a silent slide.
+#
+# 2026-09-11, the arithmetic behind 950s, so the next person can redo it:
+#
+#   projected job-seconds per push, after this batch and the tile split
+#   (run 34484938024's per-job actuals, minus the setups each merge saves,
+#   minus tile-golden's 5338 and editor-grammar's 15)          17,286
+#   / 20 concurrent runners = the queue floor                     864s
+#   tallest claim this file then carries (builtin-type-1)         889s
+#   tallest claim anywhere under the pole, once the tile shards
+#   move to .github/workflows/tile.yml as six rather than eleven  914s
+#   the round figure above all three                              950s
+#
+# 950s is 86s over the queue floor, so a job that sits at the pole is the
+# critical path by about ten per cent and is meant to feel like it. Redo the
+# first line with scripts/gate-observations.py when the job set changes; the
+# ceiling of 20 is the account's, measured 2026-08-15 (the arithmetic lives
+# in dawnop-site's ci.yml).
+#
+# This still pins the per-job claims and not the literal run wall clock:
+# queueing, dispatch delay and the coverage guard's tail are outside it, and
+# a checker cannot read a future run.
 #
 # 2026-09-03: the pole held, and it held by being enforced. native-diff had
 # reached 1119s and contracts 759s, both of which would have had to claim
@@ -118,16 +157,34 @@ name: gates
 #   scripts/gate-observations.py --since <ISO> --out /tmp/obs.json
 #   scripts/check-gate-budgets.py --observed /tmp/obs.json
 #
-# run-pole: 660s (the worst figure any job's budget line may claim)
+# 2026-09-11: the pole moves for the first time, 660s -> 950s, and it moves
+# because its premise was measured false rather than because a job asked. The
+# same batch merges seven shard families back down (20 incremental jobs to 8,
+# builtin-type and native-diff 4 to 2, syntax-mutants 3 to 2, export-surface
+# 3 to 1, pipe-contract and contracts 2 to 1): every one of those splits was
+# bought with the old premise, and none of them is buying wall clock any
+# more. Nothing leaves the push path here -- a merged shard is the same
+# mutants on one runner instead of two.
+#
+# run-pole: 950s (the worst figure any job's budget line may claim)
 on:
   workflow_call:
 
 jobs:
-  # Acceptance gate 1 of docs/native-backend-plan.md 5, in four shards since
-  # 2026-09-03. Its own job since 2026-08-07, when it was 390s of the 860s
-  # test job and shared nothing with the rest of that list but the toolchain.
+  # Acceptance gate 1 of docs/native-backend-plan.md 5, in two shards since
+  # 2026-09-11 and in four before that. Its own job since 2026-08-07, when it
+  # was 390s of the 860s test job and shared nothing with the rest of that
+  # list but the toolchain.
   #
-  # Why four. This was the run's wall clock and had passed the pole: 1119s on
+  # Why two, 2026-09-11. Four shards cost 863 job-seconds on run 34484938024,
+  # of which 161 was four repetitions of the same setup, and the longest of
+  # them was 275s -- well under a third of the pole. Four was bought to get
+  # one job off the run's wall clock, which is the premise this file's header
+  # has now retired: the span's binding term is the total, so the two extra
+  # shards were adding ~72s to it. Two keeps the whole corpus on the push
+  # path at 452s and 374s.
+  #
+  # Why four was right in 2026-09-03. This was the run's wall clock and had passed the pole: 1119s on
   # run 33748678694 against a budget line claiming 557s and a 660s pole, with
   # a daily median that went 675s (08-31) -> 812s (09-02) -> 999s (09-03). The
   # cause is not any one entry -- gates.yml's own per-entry notes below add up
@@ -149,7 +206,7 @@ jobs:
   #
   # The delete contract is shard 1's, decided in run.sh rather than here: it is
   # one selfhost rebuild, it does not divide, and running it in four places
-  # would pay for it four times. `./scripts/spike-native/run.sh --shard 1/4`
+  # would pay for it in every shard. `./scripts/spike-native/run.sh --shard 1/2`
   # locally is then exactly what shard 1's job runs.
   #
   # Planning values, since no sharded run of this exists yet. Local wall clock,
@@ -171,12 +228,13 @@ jobs:
   # was not idle (another build was running), which inflates the local figures
   # rather than deflating them, so the direction of that error is safe.
   #
-  # Trigger for N=8: split again when a shard's own observation passes 550s
-  # rather than restate a line, because 550s is where the next restatement
-  # collides with the pole. Against splitting further today: a run of this
-  # workflow already holds far more jobs than the account ceiling of 20, so shards
-  # five through eight would queue behind the first wave and buy budget
-  # headroom rather than wall clock.
+  # Trigger for N=4 again: split when a shard's own observation passes 950s,
+  # the pole. Nothing under that is worth a shard any more. A run of this
+  # workflow still holds more jobs than the account ceiling of 20, so an extra
+  # shard queues behind the first wave and raises the run's own lower bound by
+  # the setup it adds -- which is the argument this note used to make about
+  # shards five through eight, and which is now true of shards three and four
+  # as well.
 
   native-diff-1:
     runs-on: ubuntu-latest
@@ -194,8 +252,13 @@ jobs:
     # 2026-09-11: 275s (run 34226728503) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 32s over the 243s claim.
-    # budget: 3x 275s worst observed
-    timeout-minutes: 14
+    # 2026-09-11, N=4 -> N=2. The corpus is redealt round robin over two
+    # shards, so this one now runs what shards 1 and 3 ran between them
+    # (position % 2 == 0 is exactly position % 4 in {0, 2}). Its work is
+    # their two worst observations less the setup that is no longer paid
+    # twice: (275 - 36) + (213 - 36) = 416s, plus one 36s setup.
+    # budget: 3x 452s planning value (two merged shards' worst observations)
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -292,10 +355,10 @@ jobs:
       # budget line is not restated for `effect_handler_state`'s reason: a
       # corpus this parallel absorbs one entry into a scheduling gap, and
       # 557s is a runner observation on an unchanged script.
-      - name: native differential (both backends, plus written expectations; shard 1 of 4)
+      - name: native differential (both backends, plus written expectations; shard 1 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/spike-native/run.sh --shard 1/4
+        run: ./scripts/spike-native/run.sh --shard 1/2
 
       - name: record which entries this shard ran
         uses: actions/upload-artifact@v4
@@ -323,8 +386,10 @@ jobs:
     # 2026-09-11: 203s (run 34182960906) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 9s over the 194s claim.
-    # budget: 3x 203s worst observed
-    timeout-minutes: 11
+    # 2026-09-11, N=4 -> N=2: what shards 2 and 4 ran between them.
+    # (203 - 36) + (207 - 36) = 338s of work, plus one 36s setup.
+    # budget: 3x 374s planning value (two merged shards' worst observations)
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -332,76 +397,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The corpus ledger is above native-diff-1.
-      - name: native differential (both backends, plus written expectations; shard 2 of 4)
+      - name: native differential (both backends, plus written expectations; shard 2 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/spike-native/run.sh --shard 2/4
+        run: ./scripts/spike-native/run.sh --shard 2/2
 
       - name: record which entries this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-spike-native-2
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
-
-  native-diff-3:
-    runs-on: ubuntu-latest
-    # 2026-09-04: observation replaces the planning value: 169s (run
-    # 33810671364) over the post-prune window native-diff-1 names, against
-    # the 288s planning value.
-    # 2026-09-06: 210s (run 33983385267) over the 12 completed main runs of
-    # 09-05T11:40Z .. 09-06T08:26Z, 41s over the 169s claim.
-    # 2026-09-11: 213s (run 34484938024) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 3s over the 210s claim.
-    # budget: 3x 213s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # The corpus ledger is above native-diff-1.
-      - name: native differential (both backends, plus written expectations; shard 3 of 4)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/spike-native/run.sh --shard 3/4
-
-      - name: record which entries this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-spike-native-3
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
-
-  native-diff-4:
-    runs-on: ubuntu-latest
-    # 2026-09-04: observation replaces the planning value: 180s (run
-    # 33846134581) over the post-prune window native-diff-1 names, against
-    # the 289s planning value.
-    # 2026-09-06: 252s (run 33975855173) over the 12 completed main runs of
-    # 09-05T11:40Z .. 09-06T08:26Z, 72s over the 180s claim.
-    # budget: 3x 252s worst observed
-    timeout-minutes: 13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # The corpus ledger is above native-diff-1.
-      - name: native differential (both backends, plus written expectations; shard 4 of 4)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/spike-native/run.sh --shard 4/4
-
-      - name: record which entries this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-spike-native-4
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -481,8 +485,11 @@ jobs:
   # The syntax family's compiling mutants: syntax-small's five, pattern-or's
   # fourteen and for-pattern's twenty-eight, one whole compiler build each.
   # As one step of checker-corpus they measured 926~1111s on five consecutive
-  # main runs — the whole run's wall clock — so they run as three round-robin
-  # shards (#299). Every shard re-runs all three harnesses' fixture contracts
+  # main runs — the whole run's wall clock — so they ran as three round-robin
+  # shards (#299), and as two since 2026-09-11: three cost 1702 job-seconds on
+  # run 34484938024 with 118 of it starting the same toolchain a third time,
+  # and the third shard stopped buying wall clock when the run became
+  # queue-bound. Every shard re-runs all three harnesses' fixture contracts
   # and matrix validations, which are seconds, so no shard is a partial
   # verdict about what the contracts assert; only the mutants are divided.
   # Each shard writes down the mutants it actually executed, and
@@ -509,17 +516,23 @@ jobs:
     # 2026-09-11: 649s (run 34259782743) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 116s over the 533s claim.
-    # budget: 3x 649s worst observed
-    timeout-minutes: 33
+    # 2026-09-11, N=3 -> N=2. Three shards' worst observations were 649 /
+    # 578 / 522s, which is 1641s of work once the three setups are taken
+    # out; two shards divide it 821s each, plus one 36s setup. The deal is
+    # by position % 2 and the old three-way membership does not carry over,
+    # so both lines take the same half of the total rather than a sum of
+    # named predecessors.
+    # budget: 3x 857s planning value (half the three shards' observed work)
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 1)
+      - name: syntax ownership and recovery contract (shard 1 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 1/3
+        run: ./scripts/syntax-small-contract/run.sh --shard 1/2
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -539,54 +552,22 @@ jobs:
     # 2026-09-11: 578s (run 34247069047) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 54s over the 524s claim.
-    # budget: 3x 578s worst observed
-    timeout-minutes: 29
+    # 2026-09-11: the other half of the same total; see shard 1.
+    # budget: 3x 857s planning value (half the three shards' observed work)
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 2)
+      - name: syntax ownership and recovery contract (shard 2 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 2/3
+        run: ./scripts/syntax-small-contract/run.sh --shard 2/2
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-syntax-2
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
-
-  syntax-mutants-3:
-    runs-on: ubuntu-latest
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 404s (run 33727540404), which the
-    # 340s claim was 64s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-04, post-prune window: 416s (run 33801126953) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 12s over the 404s claim.
-    # 2026-09-06: 451s (run 33993175064) over the 12 completed main runs of
-    # 09-05T11:40Z .. 09-06T08:26Z, 35s over the 416s claim.
-    # 2026-09-11: 522s (run 34484938024) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 71s over the 451s claim.
-    # budget: 3x 522s worst observed
-    timeout-minutes: 27
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 3)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 3/3
-      - name: record which mutants this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-syntax-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -598,8 +579,17 @@ jobs:
   # a partial verdict, and each reports to mutant-shards-complete like the
   # syntax shards above.
   #
-  # N=2 -> N=4 on 2026-09-05, and the trigger was the POLE and not a single
-  # observation. Both halves had passed their claims in the post-prune window
+  # N=4 -> N=2 on 2026-09-11, and the trigger is the pole moving to 950s
+  # under a measured premise (the file header has the arithmetic). Four
+  # shards cost 1501 job-seconds on run 34484938024, 156 of it four setups,
+  # and the tallest of them claimed 540s against a pole that is now 950s.
+  # Two shards claim 889s and 771s, which puts the whole 26-mutant matrix on
+  # the push path for two setups rather than four. 889s is the tallest claim
+  # in this file, and the trigger below is what happens when it stops being
+  # true.
+  #
+  # Why four was right in 2026-09-05: the trigger then was the POLE and not a
+  # single observation. Both halves had passed their claims in the post-prune window
   # (585s and 590s against 557s and 553s), so both had to restate, and a
   # restatement of 590s is a 3x 590s line -- 70s of headroom left under the
   # pole and nothing to spend it on. #299's reason for stopping at two ("the
@@ -633,12 +623,12 @@ jobs:
   # holds the union to scripts/builtin-type-contract/matrix.txt, which run.sh
   # also holds against its own executable list in both directions at startup.
   #
-  # Trigger for N=5: split again when a shard's own OBSERVATION passes 550s
-  # rather than restate a line, because 550s doubled is already past the
-  # pole. Against splitting further today: a run of this workflow already
-  # holds far more jobs than the account ceiling of 20, so a fifth shard would
-  # queue behind the first wave and buy budget headroom rather than wall
-  # clock.
+  # Trigger for N=4 again: split when a shard's own OBSERVATION passes 950s,
+  # the pole, or when anything makes shard 1's 889s untrue. This family
+  # carries the tallest claim in the file, so it is the one most likely to
+  # ask. A split costs one more setup on a run whose span's lower bound is
+  # the total, so it buys no wall clock; what it buys is the room to keep
+  # every mutant on the push path, which is the only thing worth a setup.
   builtin-type-1:
     runs-on: ubuntu-latest
     # The observation this replaces is 585s (run 33853792854, the post-prune
@@ -658,17 +648,23 @@ jobs:
     # post steps, doubled for a cold runner: the rule this file has used
     # since the first split.
     # 200 + 70 = 270, doubled is 540s.
-    # budget: 3x 540s planning value (200s local + 70s setup, doubled)
-    timeout-minutes: 27
+    # 2026-09-11, N=4 -> N=2. Round robin over two shards puts what shards
+    # 1 and 3 ran into this one: (535 - 36) + (390 - 36) = 853s of work,
+    # plus one 36s setup. That is the tallest claim in this file and it sits
+    # 61s under the 950s pole, which is the pole doing its job rather than a
+    # comfortable margin: the next observation over 889s asks for a third
+    # shard or for the pole, and a third shard is the cheaper answer.
+    # budget: 3x 889s planning value (two merged shards' worst observations)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 1)
+      - name: builtin type inventory contract (shard 1 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 1/4
+        run: ./scripts/builtin-type-contract/run.sh --shard 1/2
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -684,74 +680,23 @@ jobs:
     # three. Each line restates the arithmetic on its own reading, because a
     # budget line has to be readable beside the timeout it bounds.
     # 198 + 70 = 268, doubled is 536s.
-    # budget: 3x 536s planning value (198s local + 70s setup, doubled)
-    timeout-minutes: 27
+    # 2026-09-11, N=4 -> N=2: what shards 2 and 4 ran between them.
+    # (428 - 36) + (379 - 36) = 735s of work, plus one 36s setup.
+    # budget: 3x 771s planning value (two merged shards' worst observations)
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 2)
+      - name: builtin type inventory contract (shard 2 of 2)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 2/4
+        run: ./scripts/builtin-type-contract/run.sh --shard 2/2
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-builtin-type-2
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
-
-  builtin-type-3:
-    runs-on: ubuntu-latest
-    # The third shard, added with the N=2 -> N=4 split on 2026-09-05. Same
-    # matrix, same probe, same arithmetic; the note above builtin-type-1
-    # carries the measurements. This and the fourth hold six mutants each
-    # against the first two shards' seven: the per-mutant costs are flat to
-    # within 1.27x, so the count is what a shard's load tracks, and the
-    # readings sit in the order the counts predict.
-    # 190 + 70 = 260, doubled is 520s.
-    # budget: 3x 520s planning value (190s local + 70s setup, doubled)
-    timeout-minutes: 26
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 3)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 3/4
-      - name: record which mutants this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-builtin-type-3
-          path: ${{ runner.temp }}/mutant-coverage
-          if-no-files-found: error
-          retention-days: 1
-
-  builtin-type-4:
-    runs-on: ubuntu-latest
-    # The fourth shard, added with the N=2 -> N=4 split on 2026-09-05. Same
-    # matrix, same probe, same arithmetic; the note above builtin-type-1
-    # carries the measurements. Six mutants, like the third.
-    # 196 + 70 = 266, doubled is 532s.
-    # budget: 3x 532s planning value (196s local + 70s setup, doubled)
-    timeout-minutes: 27
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 4)
-        env:
-          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 4/4
-      - name: record which mutants this shard ran
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutant-coverage-builtin-type-4
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -824,8 +769,13 @@ jobs:
     # minutes, so the timeout follows.
     # 2026-09-06: 567s (run 33993175064) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 27s over the 540s claim.
-    # budget: 3x 567s worst observed
-    timeout-minutes: 29
+    # 2026-09-11: 670s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 103s over the 567s claim. This is the one line the 2026-09-11 batch's
+    # first commit could not restate: 670s was over the 660s pole, so it
+    # waited for the pole to move.
+    # budget: 3x 670s worst observed
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
 
@@ -973,11 +923,14 @@ jobs:
   # JDK's own Schubfach and Unicode tables, java.util.zip, AddressSanitizer.
   # These share nothing with the suite above but the toolchain, and together
   # they were 180s of the old `test` job.
-  # The contract block, in two jobs since 2026-09-03. It was 759s against a
-  # 660s run pole, and with native-diff sharded it would have been the run's
-  # longest job. Its 25 steps share nothing but the toolchain -- each drives
-  # its own script over its own fixtures -- so the boundary is drawn where the
-  # measured seconds balance, and nothing else had to change.
+  # The contract block, one job again since 2026-09-11 and two from
+  # 2026-09-03 until then. It was split because it was 759s against a 660s
+  # run pole and, with native-diff sharded, would have been the run's longest
+  # job. The pole is 950s now (the file header has the arithmetic) and the
+  # two halves cost 857 job-seconds on run 34484938024, 73 of it two setups,
+  # so the whole block on one runner claims 836s and is 114s under. The rest
+  # of this note is the split's own reasoning, kept because the deal it
+  # describes is still how the steps are ordered in the file.
   #
   # No matrix and no `--shard`: what is being divided is a written list of
   # steps, not a list of items a runner iterates, so a shard library would add
@@ -1006,8 +959,8 @@ jobs:
   # already written together at the end of the list. Balancing by seconds and
   # cutting along that seam turned out to be the same cut.
   #
-  # The ledger below is the old job's, kept because it is where each step's
-  # cost was argued; the two budget lines that follow supersede its arithmetic.
+  # The ledger below is the pre-split job's, kept because it is where each
+  # step's cost was argued; the budget line that follows supersedes it.
     # 545~576s complete on five consecutive main runs (2026-08-18/19, with
     # both of the steps the older 654s planning value had to add on paper).
     # The classfile step's thirteen Never mutants (~180s of its 246~258s)
@@ -1063,25 +1016,340 @@ jobs:
     # observation supersedes the 491s planning value; 3x is 1674s, so the
     # timeout is 28 minutes. It remains below the 660s run-pole, which does
     # not move.
-  incremental-semantics:
+  # The incremental-semantics contracts, in eight jobs since 2026-09-11 and in
+  # twenty before that. Nothing here is a shard of a shared matrix: each is a
+  # complete contract over its own scripts in
+  # scripts/incremental-semantics-contract/, and the jobs share nothing but
+  # the toolchain. So the grouping is free, and what fixes it is cost.
+  #
+  # Why eight. Twenty jobs cost 6237 job-seconds on run 34484938024, of which
+  # 744 was twenty repetitions of the same ~36s setup, and the family was
+  # 26.7% of the whole run. The split was bought on the premise the header
+  # above has now retired: with 68 jobs against 20 runners the span's lower
+  # bound is the TOTAL, so each extra job raised it. Eight is the fewest that
+  # keeps every merged job under the 950s pole.
+  #
+  # The deal is by observed cost, from the 25 completed main runs of
+  # 09-08T00:18Z .. 09-10T13:48Z. Each job's work is its worst observation
+  # minus one setup; the twenty add up to 6441s of work, which is 805s a job
+  # if it divided perfectly, and the packing below tops out at 838s:
+  #
+  #   1  838  prefix 497 + java-reads 341
+  #   2  834  diagnostic-0 361 + effect-reads 312 + context 161
+  #   3  834  local-values 367 + state 342 + state-products 125
+  #   4  827  type-reads 430 + export-reads 205 + java-namespaces 192
+  #   5  804  reads 414 + projection 390
+  #   6  804  diagnostic-2 349 + java-oracles 240 + java-members 215
+  #   7  778  allocation 419 + diagnostic-1 359
+  #   8  722  semantics 517 + witness 205
+  #
+  # Each budget line below is its group's total plus the one setup the merged
+  # job still pays. They are planning values by the letter of this file's rule
+  # -- no run of a merged job exists -- but they are built out of observations
+  # rather than local timings, and they are ceilings twice over: a sum of
+  # worst cases from runs that were not the same run.
+  #
+  # diagnostic-reads.py's three inner shards (--shards 3 --shard 0..2) are
+  # deliberately dealt into three different jobs, so its own split survives
+  # the merge and its --self-test still runs once per shard.
+  #
+  # Nothing leaves the push path. The same scripts run on the same trees; what
+  # changes is that they run one after another on one runner instead of each
+  # paying for its own.
+  #
+  # Each job keeps the per-contract notes its old job carried. Their
+  # arithmetic is superseded by the lines above -- a planning value computed
+  # for another job shape is void -- but it is where each contract's cost was
+  # argued, and that is worth keeping beside the step it argues about.
+  incremental-1:
     runs-on: ubuntu-latest
-    # Planning update: the original complete suite took 81.07s locally and
-    # the three workspace-owner mutants took 83.97s on 2026-09-08.
-    # Double rounded 82+84s, plus 38s fixed overhead: 370s.
-    # The complete body identity/relocation prototype took 35.66s locally,
-    # then 45.27s and 47.64s under concurrent validation on 2026-09-08.
-    # Add 2*48s: 466s before the typed mapper contract below.
-    # Typed relocation's 23-mutant runs took 78.86s and 65.26s. Add 2*79s:
-    # 624s total. Full tree/source contracts have their own job below so this
-    # job stays within the agreed 660s run pole.
-    # Engine prefix mutants have their own independent owning job below.
-    # budget: 3x 624s planning value
-    timeout-minutes: 32
+    # prefix 497s + java-reads 341s
+    # = 838s of work, plus one 36s setup = 874s.
+    # budget: 3x 874s planning value (two merged jobs' worst observations)
+    timeout-minutes: 44
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-prefix job until 2026-09-11.
+      # Full warm/frozen-cold products plus twelve compiling engine mutants:
+      # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
+      # This is a complete engine contract, not a shard of a shared matrix.
+      # 2026-09-11: 533s (run 34484938024) over the 25 completed main runs of
+      # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+      # 9s over the 524s claim.
+      - name: incremental prefix equivalence and execution counts
+        run: python3 scripts/incremental-semantics-contract/prefix.py
+
+      # was the incremental-java-reads job until 2026-09-11.
+      # Class metadata's 21 controls took 109.07s; member candidates'
+      # 33 controls took 174.12s locally on 2026-09-08.
+      # Separate them from effects rather than exceed the 660s pole:
+      # 2*(110+175)+38=608s. No existing suite or control is removed.
+      # Namespace acceptance measured class/member controls at 184.25/226.97s
+      # under concurrent load. Their combined allowance would exceed 660s;
+      # split members below, retaining the larger observations conservatively.
+      # Oracle regression measured 228.37s under concurrent load; retain it.
+      - name: Java class metadata read contracts
+        run: python3 scripts/incremental-semantics-contract/java-reads.py
+
+  incremental-2:
+    runs-on: ubuntu-latest
+    # diagnostic-0 361s + effect-reads 312s + context 161s
+    # = 834s of work, plus one 36s setup = 870s.
+    # budget: 3x 870s planning value (three merged jobs' worst observations)
+    timeout-minutes: 44
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-diagnostic-0 job until 2026-09-11.
+      # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
+      # Keep independent positive baselines and the existing 660s planning pole.
+      - name: Validate diagnostic shard CLI and coverage
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
+      - name: Diagnostic rendering read contracts shard 0
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 0
+
+      # was the incremental-effect-reads job until 2026-09-11.
+      # Local 2026-09-08: 14 ordinary effect controls 92.22s,
+      # 15 associated controls 99.96s. Java suites move intact below.
+      # 2*(93+100)+38=424s, preserving the 660s pole.
+      - name: ordinary effect semantic read contracts
+        run: python3 scripts/incremental-semantics-contract/effect-reads.py
+      - name: associated type and effect read contracts
+        run: python3 scripts/incremental-semantics-contract/associated-reads.py
+
+      # was the incremental-context job until 2026-09-11.
+      # Two positive closures and 27 controls took 97.56s on 2026-09-09.
+      - name: Candidate context query revalidation contracts
+        run: python3 scripts/incremental-semantics-contract/context-revalidation.py
+
+  incremental-3:
+    runs-on: ubuntu-latest
+    # local-values 367s + state 342s + state-products 125s
+    # = 834s of work, plus one 36s setup = 870s.
+    # budget: 3x 870s planning value (three merged jobs' worst observations)
+    timeout-minutes: 44
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-local-values job until 2026-09-11.
+      # All 49 compiling local-value/exhaustiveness controls took 222.83s on 2026-09-08.
+      # Preserve the 660s pole and every existing read contract.
+      - name: Local constructor and constant read contracts
+        run: python3 scripts/incremental-semantics-contract/local-value-reads.py
+
+      # was the incremental-state job until 2026-09-11.
+      # Independent state-product contract, split from projection once their
+      # combined planning value exceeded the 660s pole. Local 89.67s on
+      # 2026-09-08: double the rounded value and retain 38s setup allowance.
+      # Identity's independent eight mutants move here from allocation (36.38s)
+      # to make room for its growing declaration product contracts.
+      # Header metadata's twelve mutants took 56.21s on the same date.
+      # Header state's nine mutants and field audits took 31.61s.
+      # Query runtime's seventeen mutants took 41.06s.
+      # 2*(90+37+57+32+42)+38=554s; no contract or negative control was removed.
+      # State products now run independently above after measuring 155.55s.
+      # Retain the existing budget for the remaining contracts; none are removed.
+      - name: state product and declaration identity contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/identity.py
+          python3 scripts/incremental-semantics-contract/header-metadata.py
+          python3 scripts/incremental-semantics-contract/header-state.py
+          python3 scripts/incremental-semantics-contract/query-runtime.py
+
+      # was the incremental-state-products job until 2026-09-11.
+      # All 19 state-product mutants took 155.55s on 2026-09-08.
+      # Keeping them with the other state contracts would exceed the 660s pole.
+      - name: State product contracts
+        run: python3 scripts/incremental-semantics-contract/state-product.py
+
+  incremental-4:
+    runs-on: ubuntu-latest
+    # type-reads 430s + export-reads 205s + java-namespaces 192s
+    # = 827s of work, plus one 36s setup = 863s.
+    # budget: 3x 863s planning value (three merged jobs' worst observations)
+    timeout-minutes: 44
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-type-reads job until 2026-09-11.
+      # Type/alias reads: 45 compiling controls, 223.72s locally on
+      # 2026-09-08, including body/constant owner-scoped source projection.
+      # Associated controls now take 99.96s: 2*(224+100)+38=686s exceeds
+      # the pole. Move them intact to the effect/environment job below.
+      # Environment controls took 82.80s on the Java batch; move them here
+      # intact to make room below: 2*(224+83)+38=652s.
+      - name: type and alias semantic read contracts
+        run: python3 scripts/incremental-semantics-contract/type-reads.py
+      - name: named type environment read contracts
+        run: python3 scripts/incremental-semantics-contract/environment-reads.py
+
+      # was the incremental-export-reads job until 2026-09-11.
+      # Export/pattern reads: 26 compiling controls, 114.85s locally on
+      # 2026-09-08. Keep all existing read/source controls in their own job.
+      # 2*115+38=268s, below the unchanged 660s planning pole.
+      # With the type/alias closure, the same 26 controls took 144.17s locally
+      # on 2026-09-08. Restate conservatively: 2*145+38=328s.
+      - name: export and qualified pattern read contracts
+        run: python3 scripts/incremental-semantics-contract/export-reads.py
+
+      # was the incremental-java-namespaces job until 2026-09-11.
+      # Namespace/import reads: 22 compiling controls took 149.16s locally
+      # on 2026-09-08. Adding them to the 608s member/class job would
+      # exceed the unchanged 660s pole. Keep all existing controls.
+      # Oracle regression measured 258.25s under concurrent load.
+      - name: Java import and namespace read contracts
+        run: python3 scripts/incremental-semantics-contract/java-namespace-reads.py
+
+  incremental-5:
+    runs-on: ubuntu-latest
+    # reads 414s + projection 390s
+    # = 804s of work, plus one 36s setup = 840s.
+    # budget: 3x 840s planning value (two merged jobs' worst observations)
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-reads job until 2026-09-11.
+      # Real function/alias reads: 33 compiling mutants, 160.27s locally on
+      # 2026-09-08. Keep the existing source projection allowance of 103s.
+      # 2*(161+103)+38=566s; no previous contract or control is removed.
+      # The expanded type/alias checker closure took 174.46s for these same
+      # 33 controls on 2026-09-08: 2*(175+103)+38=594s, still under the pole.
+      - name: semantic read and source projection contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/function-reads.py
+          python3 scripts/incremental-semantics-contract/projection.py
+
+      # was the incremental-projection job until 2026-09-11.
+      # Run 34159136910 took 170s before state products were added.
+      # Local complete runs on 2026-09-08: twenty-two-mutant typed oracle 197.09s,
+      # The expanded twenty-six-mutant header run took 176.82s; retain 198s.
+      # source/origin/callee/header/assembly/impl entry 102.05s (eighteen mutants),
+      # State and allocation run separately below.
+      # Double rounded values and retain the checkout/toolchain allowance:
+      # Identity now runs with state below to keep allocation under the pole.
+      # Keeping state here would cost 2*(144+103+68)+38=668s, above the
+      # unchanged 660s pole. Move that independent contract to its own job.
+      # With constant/test products: 2*(198+103)+38=640s. Retain this
+      # allowance after the expanded 29-mutant header-state run (186.23s).
+      # The 30-mutant read-observation run took 218.46s on 2026-09-08.
+      # 2*(219+103)+38=682s exceeds the pole; move the independent source
+      # projection suite to incremental-reads below. Typed alone: 2*219+38=476s.
+      # The 44-case type/alias observation run took 226.68s on 2026-09-08.
+      # Typed alone: 2*227+38=492s; the 660s planning pole is unchanged.
+      # The current 62-case run took 228.54s: 2*229+38=496s.
+      # The 81-case namespace run took 239.16s; retain the larger measured
+      # 72-case member run (244.70s): 2*245+38=528s.
+      # The 95-case local-value run took 266.72s: 2*267+38=572s.
+      - name: typed product projection contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
+
+  incremental-6:
+    runs-on: ubuntu-latest
+    # diagnostic-2 349s + java-oracles 240s + java-members 215s
+    # = 804s of work, plus one 36s setup = 840s.
+    # budget: 3x 840s planning value (three merged jobs' worst observations)
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-diagnostic-2 job until 2026-09-11.
+      # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
+      # Keep independent positive baselines and the existing 660s planning pole.
+      - name: Validate diagnostic shard CLI and coverage
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
+      - name: Diagnostic rendering read contracts shard 2
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 2
+
+      # was the incremental-java-oracles job until 2026-09-11.
+      # All 32 compiling oracle controls took 246.67s locally on 2026-09-08.
+      # Keep the unchanged 660s pole and every existing read contract.
+      # Current local-value regression took 250.55s: 2*251+38=540s.
+      - name: Java scoring oracle read contracts
+        run: python3 scripts/incremental-semantics-contract/java-oracle-reads.py
+
+      # was the incremental-java-members job until 2026-09-11.
+      # Oracle regression measured 281.28s under concurrent load.
+      - name: Java member candidate read contracts
+        run: python3 scripts/incremental-semantics-contract/java-member-reads.py
+
+  incremental-7:
+    runs-on: ubuntu-latest
+    # allocation 419s + diagnostic-1 359s
+    # = 778s of work, plus one 36s setup = 814s.
+    # budget: 3x 814s planning value (two merged jobs' worst observations)
+    timeout-minutes: 41
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-allocation job until 2026-09-11.
+      # Constant admission expands allocation to seventeen mutants.
+      # Complete local run 89.37s on 2026-09-08. Do not push projection past
+      # the run-pole by appending this growing suite to its serial critical path.
+      # The six production producer mutants took 94.65s on the same date.
+      # Named function/method/value headers and fifteen mutants took 112.97s.
+      # Keeping identity here costs 708s, so it moves to state above.
+      # 2*(90+95+113)+38=634s planning value.
+      - name: allocation provenance and world admission contracts
+        run: |
+          python3 scripts/incremental-semantics-contract/allocation.py
+          python3 scripts/incremental-semantics-contract/provenance.py
+          python3 scripts/incremental-semantics-contract/function-products.py
+
+      # was the incremental-diagnostic-1 job until 2026-09-11.
+      # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
+      # Keep independent positive baselines and the existing 660s planning pole.
+      - name: Validate diagnostic shard CLI and coverage
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
+      - name: Diagnostic rendering read contracts shard 1
+        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 1
+
+  incremental-8:
+    runs-on: ubuntu-latest
+    # semantics 517s + witness 205s
+    # = 722s of work, plus one 36s setup = 758s.
+    # budget: 3x 758s planning value (two merged jobs' worst observations)
+    timeout-minutes: 38
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # was the incremental-semantics job until 2026-09-11.
+      # Planning update: the original complete suite took 81.07s locally and
+      # the three workspace-owner mutants took 83.97s on 2026-09-08.
+      # Double rounded 82+84s, plus 38s fixed overhead: 370s.
+      # The complete body identity/relocation prototype took 35.66s locally,
+      # then 45.27s and 47.64s under concurrent validation on 2026-09-08.
+      # Add 2*48s: 466s before the typed mapper contract below.
+      # Typed relocation's 23-mutant runs took 78.86s and 65.26s. Add 2*79s:
+      # 624s total. Full tree/source contracts have their own job below so this
+      # job stays within the agreed 660s run pole.
+      # Engine prefix mutants have their own independent owning job below.
       - name: incremental semantic observation and cold reference
         run: |
           python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
@@ -1092,347 +1360,15 @@ jobs:
           python3 scripts/incremental-semantics-contract/relocate.py
           ./bin/dawn test scripts/incremental-semantics-contract
 
-  incremental-projection:
-    runs-on: ubuntu-latest
-    # Run 34159136910 took 170s before state products were added.
-    # Local complete runs on 2026-09-08: twenty-two-mutant typed oracle 197.09s,
-    # The expanded twenty-six-mutant header run took 176.82s; retain 198s.
-    # source/origin/callee/header/assembly/impl entry 102.05s (eighteen mutants),
-    # State and allocation run separately below.
-    # Double rounded values and retain the checkout/toolchain allowance:
-    # Identity now runs with state below to keep allocation under the pole.
-    # Keeping state here would cost 2*(144+103+68)+38=668s, above the
-    # unchanged 660s pole. Move that independent contract to its own job.
-    # With constant/test products: 2*(198+103)+38=640s. Retain this
-    # allowance after the expanded 29-mutant header-state run (186.23s).
-    # The 30-mutant read-observation run took 218.46s on 2026-09-08.
-    # 2*(219+103)+38=682s exceeds the pole; move the independent source
-    # projection suite to incremental-reads below. Typed alone: 2*219+38=476s.
-    # The 44-case type/alias observation run took 226.68s on 2026-09-08.
-    # Typed alone: 2*227+38=492s; the 660s planning pole is unchanged.
-    # The current 62-case run took 228.54s: 2*229+38=496s.
-    # The 81-case namespace run took 239.16s; retain the larger measured
-    # 72-case member run (244.70s): 2*245+38=528s.
-    # The 95-case local-value run took 266.72s: 2*267+38=572s.
-    # budget: 3x 572s planning value
-    timeout-minutes: 29
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: typed product projection contracts
-        run: |
-          python3 scripts/incremental-semantics-contract/body-probe.py --typed --typed-all --java-home "$JAVA_HOME" --output "$RUNNER_TEMP/incremental-typed-tree"
-
-  incremental-reads:
-    runs-on: ubuntu-latest
-    # Real function/alias reads: 33 compiling mutants, 160.27s locally on
-    # 2026-09-08. Keep the existing source projection allowance of 103s.
-    # 2*(161+103)+38=566s; no previous contract or control is removed.
-    # The expanded type/alias checker closure took 174.46s for these same
-    # 33 controls on 2026-09-08: 2*(175+103)+38=594s, still under the pole.
-    # budget: 3x 594s planning value
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: semantic read and source projection contracts
-        run: |
-          python3 scripts/incremental-semantics-contract/function-reads.py
-          python3 scripts/incremental-semantics-contract/projection.py
-
-  incremental-export-reads:
-    runs-on: ubuntu-latest
-    # Export/pattern reads: 26 compiling controls, 114.85s locally on
-    # 2026-09-08. Keep all existing read/source controls in their own job.
-    # 2*115+38=268s, below the unchanged 660s planning pole.
-    # With the type/alias closure, the same 26 controls took 144.17s locally
-    # on 2026-09-08. Restate conservatively: 2*145+38=328s.
-    # budget: 3x 328s planning value
-    timeout-minutes: 17
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: export and qualified pattern read contracts
-        run: python3 scripts/incremental-semantics-contract/export-reads.py
-
-  incremental-type-reads:
-    runs-on: ubuntu-latest
-    # Type/alias reads: 45 compiling controls, 223.72s locally on
-    # 2026-09-08, including body/constant owner-scoped source projection.
-    # Associated controls now take 99.96s: 2*(224+100)+38=686s exceeds
-    # the pole. Move them intact to the effect/environment job below.
-    # Environment controls took 82.80s on the Java batch; move them here
-    # intact to make room below: 2*(224+83)+38=652s.
-    # budget: 3x 652s planning value
-    timeout-minutes: 33
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: type and alias semantic read contracts
-        run: python3 scripts/incremental-semantics-contract/type-reads.py
-      - name: named type environment read contracts
-        run: python3 scripts/incremental-semantics-contract/environment-reads.py
-
-  incremental-effect-reads:
-    runs-on: ubuntu-latest
-    # Local 2026-09-08: 14 ordinary effect controls 92.22s,
-    # 15 associated controls 99.96s. Java suites move intact below.
-    # 2*(93+100)+38=424s, preserving the 660s pole.
-    # budget: 3x 424s planning value
-    timeout-minutes: 22
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: ordinary effect semantic read contracts
-        run: python3 scripts/incremental-semantics-contract/effect-reads.py
-      - name: associated type and effect read contracts
-        run: python3 scripts/incremental-semantics-contract/associated-reads.py
-
-  incremental-java-reads:
-    runs-on: ubuntu-latest
-    # Class metadata's 21 controls took 109.07s; member candidates'
-    # 33 controls took 174.12s locally on 2026-09-08.
-    # Separate them from effects rather than exceed the 660s pole:
-    # 2*(110+175)+38=608s. No existing suite or control is removed.
-    # Namespace acceptance measured class/member controls at 184.25/226.97s
-    # under concurrent load. Their combined allowance would exceed 660s;
-    # split members below, retaining the larger observations conservatively.
-    # Oracle regression measured 228.37s under concurrent load; retain it.
-    # budget: 3x 496s planning value (2*229+38)
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Java class metadata read contracts
-        run: python3 scripts/incremental-semantics-contract/java-reads.py
-
-  incremental-java-members:
-    runs-on: ubuntu-latest
-    # Oracle regression measured 281.28s under concurrent load.
-    # budget: 3x 602s planning value (2*282+38)
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Java member candidate read contracts
-        run: python3 scripts/incremental-semantics-contract/java-member-reads.py
-
-  incremental-java-namespaces:
-    runs-on: ubuntu-latest
-    # Namespace/import reads: 22 compiling controls took 149.16s locally
-    # on 2026-09-08. Adding them to the 608s member/class job would
-    # exceed the unchanged 660s pole. Keep all existing controls.
-    # Oracle regression measured 258.25s under concurrent load.
-    # budget: 3x 556s planning value (2*259+38)
-    timeout-minutes: 28
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Java import and namespace read contracts
-        run: python3 scripts/incremental-semantics-contract/java-namespace-reads.py
-
-  incremental-java-oracles:
-    runs-on: ubuntu-latest
-    # All 32 compiling oracle controls took 246.67s locally on 2026-09-08.
-    # Keep the unchanged 660s pole and every existing read contract.
-    # Current local-value regression took 250.55s: 2*251+38=540s.
-    # budget: 3x 540s planning value
-    timeout-minutes: 27
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Java scoring oracle read contracts
-        run: python3 scripts/incremental-semantics-contract/java-oracle-reads.py
-
-  incremental-local-values:
-    runs-on: ubuntu-latest
-    # All 49 compiling local-value/exhaustiveness controls took 222.83s on 2026-09-08.
-    # Preserve the 660s pole and every existing read contract.
-    # budget: 3x 484s planning value (2*223+38)
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Local constructor and constant read contracts
-        run: python3 scripts/incremental-semantics-contract/local-value-reads.py
-
-  incremental-witness:
-    runs-on: ubuntu-latest
-    # Two positive modules plus 31 compiling controls took 108.71s on 2026-09-09.
-    # budget: 3x 256s planning value (2*109+38)
-    timeout-minutes: 13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      # was the incremental-witness job until 2026-09-11.
+      # Two positive modules plus 31 compiling controls took 108.71s on 2026-09-09.
       - name: Witness observation and candidate revalidation contracts
         run: python3 scripts/incremental-semantics-contract/witness-revalidation.py
 
-  incremental-context:
+  contracts:
     runs-on: ubuntu-latest
-    # Two positive closures and 27 controls took 97.56s on 2026-09-09.
-    # budget: 3x 234s planning value (2*98+38)
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Candidate context query revalidation contracts
-        run: python3 scripts/incremental-semantics-contract/context-revalidation.py
-
-  incremental-diagnostic-0:
-    runs-on: ubuntu-latest
-    # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
-    # Keep independent positive baselines and the existing 660s planning pole.
-    # budget: 3x 618s planning value (2*290+38)
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate diagnostic shard CLI and coverage
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
-      - name: Diagnostic rendering read contracts shard 0
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 0
-
-  incremental-diagnostic-1:
-    runs-on: ubuntu-latest
-    # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
-    # Keep independent positive baselines and the existing 660s planning pole.
-    # budget: 3x 618s planning value (2*290+38)
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate diagnostic shard CLI and coverage
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
-      - name: Diagnostic rendering read contracts shard 1
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 1
-
-  incremental-diagnostic-2:
-    runs-on: ubuntu-latest
-    # All 124 controls passed across three shards on 2026-09-08; slowest 289.33s.
-    # Keep independent positive baselines and the existing 660s planning pole.
-    # budget: 3x 618s planning value (2*290+38)
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate diagnostic shard CLI and coverage
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --self-test
-      - name: Diagnostic rendering read contracts shard 2
-        run: python3 scripts/incremental-semantics-contract/diagnostic-reads.py --shards 3 --shard 2
-
-  incremental-state-products:
-    runs-on: ubuntu-latest
-    # All 19 state-product mutants took 155.55s on 2026-09-08.
-    # Keeping them with the other state contracts would exceed the 660s pole.
-    # budget: 3x 350s planning value (2*156+38)
-    timeout-minutes: 18
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: State product contracts
-        run: python3 scripts/incremental-semantics-contract/state-product.py
-
-  incremental-state:
-    runs-on: ubuntu-latest
-    # Independent state-product contract, split from projection once their
-    # combined planning value exceeded the 660s pole. Local 89.67s on
-    # 2026-09-08: double the rounded value and retain 38s setup allowance.
-    # Identity's independent eight mutants move here from allocation (36.38s)
-    # to make room for its growing declaration product contracts.
-    # Header metadata's twelve mutants took 56.21s on the same date.
-    # Header state's nine mutants and field audits took 31.61s.
-    # Query runtime's seventeen mutants took 41.06s.
-    # 2*(90+37+57+32+42)+38=554s; no contract or negative control was removed.
-    # State products now run independently above after measuring 155.55s.
-    # Retain the existing budget for the remaining contracts; none are removed.
-    # budget: 3x 554s planning value
-    timeout-minutes: 28
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: state product and declaration identity contracts
-        run: |
-          python3 scripts/incremental-semantics-contract/identity.py
-          python3 scripts/incremental-semantics-contract/header-metadata.py
-          python3 scripts/incremental-semantics-contract/header-state.py
-          python3 scripts/incremental-semantics-contract/query-runtime.py
-
-  incremental-allocation:
-    runs-on: ubuntu-latest
-    # Constant admission expands allocation to seventeen mutants.
-    # Complete local run 89.37s on 2026-09-08. Do not push projection past
-    # the run-pole by appending this growing suite to its serial critical path.
-    # The six production producer mutants took 94.65s on the same date.
-    # Named function/method/value headers and fifteen mutants took 112.97s.
-    # Keeping identity here costs 708s, so it moves to state above.
-    # 2*(90+95+113)+38=634s planning value.
-    # budget: 3x 634s planning value
-    timeout-minutes: 32
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: allocation provenance and world admission contracts
-        run: |
-          python3 scripts/incremental-semantics-contract/allocation.py
-          python3 scripts/incremental-semantics-contract/provenance.py
-          python3 scripts/incremental-semantics-contract/function-products.py
-
-  incremental-prefix:
-    runs-on: ubuntu-latest
-    # Full warm/frozen-cold products plus twelve compiling engine mutants:
-    # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
-    # This is a complete engine contract, not a shard of a shared matrix.
-    # 2026-09-11: 533s (run 34484938024) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 9s over the 524s claim.
-    # budget: 3x 533s worst observed
-    timeout-minutes: 27
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: incremental prefix equivalence and execution counts
-        run: python3 scripts/incremental-semantics-contract/prefix.py
-
-  contracts-1:
-    runs-on: ubuntu-latest
+    # The lines below are the split job's ledger. The 2026-09-11 note above
+    # the timeout supersedes them.
     # No CI observation of this half exists yet -- the job is new. The
     # planning value is this half's own steps at their worst over the five
     # runs above (375s) plus the job's fixed overhead at its worst over the
@@ -1448,8 +1384,12 @@ jobs:
     # 2026-09-11: 550s (run 34177318302) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 131s over the 419s claim.
-    # budget: 3x 550s worst observed
-    timeout-minutes: 28
+    # 2026-09-11, the two halves are one job again. Worst observations 550s
+    # and 322s; on one runner that is 872 - 36 = 836s. The split was made on
+    # 2026-09-03 because the unsplit job would have had to claim past the
+    # 660s pole; the pole is 950s now and this claim is 114s under it.
+    # budget: 3x 836s planning value (two merged jobs' worst observations)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1627,25 +1567,10 @@ jobs:
       - name: Error model contract
         run: ./scripts/error-contract/run.sh
 
-  # The other half: the steps that build a private compiler or a sanitized
-  # runtime. See contracts-1 for the split and the arithmetic.
-  contracts-2:
-    runs-on: ubuntu-latest
-    # 346s of steps plus the same 38s of fixed overhead, from the same five
-    # runs; no observation of this job itself yet.
-    # 2026-09-04: 386s (run 33779014329) over the four completed main runs of
-    # 2026-09-03 (15:26Z .. 17:42Z) replaces the planning value, 2s over it.
-    # The pruned tree ran 215s, for the reason contracts-1 gives.
-    # 2026-09-04, post-prune window: 447s (run 33801126953) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 61s over the 386s claim.
-    # budget: 3x 447s worst observed
-    timeout-minutes: 23
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+      # The steps below were the contracts-2 job until 2026-09-11: the half
+      # that builds a private compiler or a sanitized runtime. The two halves
+      # never shared anything but the toolchain, which is why the split was
+      # free to make and is now free to undo.
 
       # The atomic manifest write, its six failure steps, a live mutant per
       # promise, and the two call sites it was raised for -- `dawn add` and
@@ -1721,6 +1646,7 @@ jobs:
   # The supply-chain guards below joined it on 2026-08-10: they are the other
   # gates that resolve dependencies, read dawn.lock or drive the planner's
   # fetch, and they cost 68s in a job that had room for them.
+
   java-target-classpath:
     runs-on: ubuntu-latest
     # 262s predicted (194s + 68s moved in); 270s then 281s measured on two
@@ -3350,8 +3276,11 @@ jobs:
         run: ./scripts/java-narrowing-contract/run.sh
 
   # SYN-05: the general pipe. It left the `test` job when it grew its mutants,
-  # for the reason export-surface is split above: one build per rule does not
-  # fit in a job that is already 216s.
+  # for the reason export-surface gives above: one build per rule does not fit
+  # in a job that is already 216s. It was two shards from 2026-08 until
+  # 2026-09-11 and is one again, for export-surface's reason: 567 job-seconds
+  # on run 34484938024 with 74 of them two setups, and 651s unsharded against
+  # a 950s pole.
   #
   # What the mutants own is not the pipe's behaviour, which the checker,
   # grammar and native corpora all pin. It is that each of those assertions is
@@ -3361,10 +3290,12 @@ jobs:
   # had no equivalent until now. So every mutant runs the whole assertion set
   # and its red set is diffed against a recorded matrix; asserting only that a
   # mutant reddens its owner would leave the ownership itself unchecked, which
-  # is the same failure one level up. Every shard re-runs the fixture, editor
-  # and formatter contracts and validates the whole ownership structure, which
-  # reads the record and needs no build, so no shard is a partial verdict.
-  pipe-contract-1:
+  # is the same failure one level up. While this was sharded, every shard
+  # re-ran the fixture, editor and formatter contracts and validated the whole
+  # ownership structure, so that no shard was a partial verdict; unsharded,
+  # run.sh does that once. `--shard` is gone from the invocation rather than
+  # spelled `1/1`, because run.sh defaults to the whole matrix.
+  pipe-contract:
     runs-on: ubuntu-latest
     # 152s and 140s locally for the two shards (7 and 6 builds each, plus the
     # fixture contract); 300s for the whole suite. Running all 22 assertions
@@ -3388,37 +3319,18 @@ jobs:
     # 2026-09-11: 358s (run 34259782743) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 45s over the 313s claim.
-    # budget: 3x 358s worst observed
-    timeout-minutes: 18
+    # 2026-09-11, N=2 -> N=1. Worst observations 358s and 329s; unsharded
+    # that is 687 - 36 = 651s. The note above about a third shard is void:
+    # the pole is 950s now and this claim is 299s under it.
+    # budget: 3x 651s planning value (two merged shards' worst observations)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: general pipe contract (shard 1)
-        run: ./scripts/pipe-contract/run.sh --shard 1/2
-
-  pipe-contract-2:
-    runs-on: ubuntu-latest
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 265s (run 33744995496), which the
-    # 258s claim was 7s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-04, post-prune window: 611s (run 33807243516) over the 20
-    # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
-    # pruning knife (e797abb0), 346s over the 265s claim.
-    # That claim sits 49s under the 660s pole, so a restatement much past it
-    # collides with the pole; the answer then is a third shard, not a taller
-    # pole.
-    # budget: 3x 611s worst observed
-    timeout-minutes: 31
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: general pipe contract (shard 2)
-        run: ./scripts/pipe-contract/run.sh --shard 2/2
+      - name: general pipe contract
+        run: ./scripts/pipe-contract/run.sh
 
   # SYN-09: which Java member `recv.name(args)` reaches. Its own job for the
   # same reason java-target-classpath is: the subject is a javac-built fixture
@@ -3842,17 +3754,19 @@ jobs:
         run: ./scripts/selfhost-lsp-diff.sh
 
   # SEM-07: a public declaration may only name identities its audience can
-  # name. Three jobs rather than one because the evidence is 24 mutant
-  # compilers -- one per rule -- and a mutant costs a whole build. Splitting
-  # keeps this off the critical path; every shard re-runs the fixture contract,
-  # which is seconds, so no shard is a partial verdict about what the validator
-  # accepts and rejects.
+  # name. The evidence is 24 mutant compilers -- one per rule -- and a mutant
+  # costs a whole build, which is why this was three jobs from 2026-08 until
+  # 2026-09-11. Splitting was to keep it off the critical path, and the
+  # critical path here is now the queue: the three shards cost 711 job-seconds
+  # on run 34484938024 of which 140 was three setups, and the whole matrix on
+  # one runner claims 644s against a 950s pole. One job, and the fixture
+  # contract it re-ran in every shard now runs once.
   #
   # The rules this owns are all silent when broken: a walker that peels an
   # opaque representation still accepts every legal program, one that stops at
   # a root's first leak still rejects the fixture, and one that runs after the
   # bodies still emits the same text. None of that is visible to a golden.
-  export-surface-1:
+  export-surface:
     runs-on: ubuntu-latest
     # 122s locally for one shard (8 builds + the fixture contract); 201s, 192s
     # and 206s measured across the three shards in the first run to carry them
@@ -3861,49 +3775,19 @@ jobs:
     # 2026-09-11: 261s (run 34484938024) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 55s over the 206s claim.
-    # budget: 3x 261s worst observed
-    timeout-minutes: 14
+    # 2026-09-11, N=3 -> N=1. The three shards' worst observations were 261
+    # / 242 / 213s; unsharded that is 716 - 2 * 36 = 644s, the two setups
+    # being what the split was buying. run.sh defaults to 1/1, so the flag
+    # goes rather than becoming `--shard 1/1`.
+    # budget: 3x 644s planning value (three merged shards' worst observations)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 1)
-        run: ./scripts/export-surface-contract/run.sh --shard 1/3
-
-  export-surface-2:
-    runs-on: ubuntu-latest
-    # 2026-09-03: restated from the Actions API -- the worst of 57
-    # completed main runs since 09-02 is 227s (run 33708763790), which the
-    # 206s claim was 21s under. scripts/gate-observations.py pulled it;
-    # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # 2026-09-11: 242s (run 34484938024) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 15s over the 227s claim.
-    # budget: 3x 242s worst observed
-    timeout-minutes: 13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 2)
-        run: ./scripts/export-surface-contract/run.sh --shard 2/3
-
-  export-surface-3:
-    runs-on: ubuntu-latest
-    # 2026-09-11: 213s (run 34233296391) over the 25 completed main runs of
-    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-    # 7s over the 206s claim.
-    # budget: 3x 213s worst observed
-    timeout-minutes: 11
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: public API surface contract (shard 3)
-        run: ./scripts/export-surface-contract/run.sh --shard 3/3
+      - name: public API surface contract
+        run: ./scripts/export-surface-contract/run.sh
 
   # The union guard for the sharded mutant matrices. Sharding introduced
   # exactly one new way to be wrong — a mutant no shard runs — and nothing
@@ -3926,15 +3810,10 @@ jobs:
     needs:
       - native-diff-1
       - native-diff-2
-      - native-diff-3
-      - native-diff-4
       - syntax-mutants-1
       - syntax-mutants-2
-      - syntax-mutants-3
       - builtin-type-1
       - builtin-type-2
-      - builtin-type-3
-      - builtin-type-4
       - tile-golden-1
       - tile-golden-2
       - tile-golden-3

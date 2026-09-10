@@ -25,19 +25,22 @@ drift this catches.
 
 gates.yml additionally carries one file-level line:
 
-    # run-pole: 660s (the worst figure any job's budget line may claim)
+    # run-pole: 950s (the worst figure any job's budget line may claim)
 
-The run's wall clock is its longest job, and the 3x rule already forces every
-job's worst observation into its budget line -- so capping the worst claim
-caps the run, and the speedup that bought the current pole is held by a
-machine instead of by memory. A job that regresses past the pole must restate
-its budget (the 3x rule), the restatement collides with the pole, and raising
-the pole is a visible, reviewable edit. What this pins is the per-job claims,
-not the literal run wall clock: queueing, dispatch delay and the coverage
-guard's tail are outside it, and a checker cannot read a future run. ci.yml
-and release.yml are not under the pole -- their jobs (the secrets scan, the
-release pipeline) are not part of the every-push gate run whose length the
-pole exists to hold.
+The pole used to be a claim about the longest job, on the premise that the
+run's wall clock is its longest job. That premise was measured false on
+2026-09-10 (run 34484938024: span 1506s, longest job 670s) and gates.yml's
+header now carries the replacement. The pole is the QUEUE FLOOR --
+total job-seconds divided by the account's 20 concurrent runners -- so it is
+the figure a single job may claim before it, alone, becomes the run's
+critical path. Everything else about it is unchanged: a job that regresses
+past the pole must restate its budget (the 3x rule), the restatement collides
+with the pole, and raising the pole is a visible, reviewable edit. What this
+pins is the per-job claims, not the literal run wall clock: queueing,
+dispatch delay and the coverage guard's tail are outside it, and a checker
+cannot read a future run. ci.yml and release.yml are not under the pole --
+their jobs (the secrets scan, the release pipeline) are not part of the
+every-push gate run whose length the pole exists to hold.
 
 Both halves of that arithmetic read the same file the claim lives in, so
 neither can notice a claim that has simply stopped being true: a job can
