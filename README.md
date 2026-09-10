@@ -33,8 +33,8 @@
   <a href="https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang"><img
     src="https://img.shields.io/badge/VS%20Code-marketplace-007ACC"
     alt="VS Code extension"></a>
-  <img src="https://img.shields.io/badge/backends-JVM%20%7C%20C-DB2777"
-    alt="Backends: JVM and C">
+  <img src="https://img.shields.io/badge/backends-JVM%20%7C%20C%20%7C%20cuTile-DB2777"
+    alt="Backends: JVM, C and cuTile">
 </p>
 
 *[中文版](README.zh-CN.md)*

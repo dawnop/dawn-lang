@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 9dad6ce6de501c03 -->
+<!-- doc-check: translation-of README.md @ 1481c4fd5861abd8 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -34,8 +34,8 @@
   <a href="https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang"><img
     src="https://img.shields.io/badge/VS%20Code-marketplace-007ACC"
     alt="VS Code extension"></a>
-  <img src="https://img.shields.io/badge/backends-JVM%20%7C%20C-DB2777"
-    alt="Backends: JVM and C">
+  <img src="https://img.shields.io/badge/backends-JVM%20%7C%20C%20%7C%20cuTile-DB2777"
+    alt="Backends: JVM, C and cuTile">
 </p>
 
 *[English](README.md) — 正本是英文；本文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
