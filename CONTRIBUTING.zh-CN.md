@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ 559f0add1c7404bc -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ a3871113da3a340f -->
 
 # 怎么在这个仓库里做事
 
