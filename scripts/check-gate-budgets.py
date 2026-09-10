@@ -42,6 +42,22 @@ cannot read a future run. ci.yml and release.yml are not under the pole --
 their jobs (the secrets scan, the release pipeline) are not part of the
 every-push gate run whose length the pole exists to hold.
 
+WHICH FILES THIS READS. Every .github/workflows/*.yml that carries at least
+one `# budget:` line, discovered rather than listed. It used to be a list of
+three names, and on 2026-09-11 a push's gate set stopped being three files:
+editor-grammar.yml and tile.yml are gate workflows behind `paths:` triggers,
+and a hand-kept list would have let their timeouts and their claims go
+unchecked exactly the way a hand-kept gate list once let release.yml's subset
+drift from ci.yml's. tile.yml in particular is where the tallest claim in the
+repository now lives, so leaving it outside the pole would have made the pole
+a statement about a strict subset of the gates.
+
+A workflow with NO `# budget:` line is skipped whole, and the skipped files
+are printed so the exemption is visible rather than silent. That is
+nightly.yml's documented position: nothing waits on a scheduled run, so its
+timeout is a runaway stop and not a claim about the work. It is also, plainly,
+the way out of this check, which is why the names are printed every run.
+
 Both halves of that arithmetic read the same file the claim lives in, so
 neither can notice a claim that has simply stopped being true: a job can
 double in cost while its timeout stays three times a number nobody remeasured.
@@ -77,7 +93,6 @@ import re
 import sys
 from pathlib import Path
 
-WORKFLOWS = ["gates.yml", "ci.yml", "release.yml", "editor-grammar.yml"]
 TIMEOUT_RE = re.compile(r"^(\s*)timeout-minutes:\s*(\d+)\s*$")
 BUDGET_RE = re.compile(r"^\s*#\s*budget:\s*(.+?)\s*$")
 THREE_X_RE = re.compile(r"^3x\s+(\d+)s\b")
@@ -87,6 +102,40 @@ RUN_POLE_RE = re.compile(r"^#\s*run-pole:\s*(\d+)s\b")
 
 MULTIPLE = 3
 RUN_POLE_FILE = "gates.yml"
+
+# Not part of the every-push gate run whose length the pole exists to hold, so
+# their claims are checked against the 3x rule and not against the pole. Their
+# timeouts are checked like everyone else's.
+POLE_EXEMPT = {"ci.yml", "release.yml"}
+
+
+def workflow_path(root, name):
+    """Where a workflow file lives.
+
+    Spelled as one literal join chain and called from everywhere else,
+    because gate-map's rule B reads `root / "a" / "b"` chains and this one is
+    the only reason anything in this repository watches .github/workflows.
+    Its negative control is gatemap's `drop-the-one-path-join` mutant, which
+    replaces this expression with `root` and requires the coupling to
+    vanish -- so there has to stay exactly one of these in this file.
+    """
+    return root / ".github" / "workflows" / name
+
+
+def budgeted_workflows(root):
+    """-> (files carrying a `# budget:` line, files skipped for carrying none).
+
+    Both halves are returned because the caller prints the second one. A
+    workflow can leave this check by having no budget line, and that is a
+    real decision some workflow will want to make; what it may not do is make
+    it quietly.
+    """
+    carried, skipped = [], []
+    for path in sorted(workflow_path(root, ".").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        (carried if any(BUDGET_RE.match(ln) for ln in text.splitlines())
+         else skipped).append(path.name)
+    return carried, skipped
 
 
 def check_text(text, name):
@@ -199,13 +248,12 @@ def check_observed(records, observations, name):
     return problems, notes
 
 
-def check_run_pole(text, name):
-    """Return the complaints about the file-level run-pole cap.
+def find_run_pole(text, name):
+    """-> (problems, the pole in seconds or None).
 
-    Applied to gates.yml only (see the module docstring for why the other
-    workflows are exempt). Exactly one `# run-pole: <N>s` line must exist,
-    and no job's `3x <N>s` budget claim may exceed it; floor budgets are
-    outside it for the reason they are outside the 3x rule.
+    The line lives in gates.yml and governs every workflow that is part of a
+    push's gate set, which since 2026-09-11 is more than one file. Exactly one
+    `# run-pole: <N>s` line must exist.
     """
     lines = text.splitlines()
     poles = []
@@ -217,15 +265,22 @@ def check_run_pole(text, name):
         return [
             f"{name}: no `# run-pole:` line -- the cap on what any job's"
             " budget may claim is gone"
-        ]
+        ], None
     if len(poles) > 1:
         where = ", ".join(str(line_number) for line_number, _pole in poles)
         return [
             f"{name}: {len(poles)} `# run-pole:` lines (lines {where});"
             " exactly one may exist"
-        ]
-    pole = poles[0][1]
+        ], None
+    return [], poles[0][1]
 
+
+def check_claims_under_pole(text, name, pole):
+    """No job's `3x <N>s` budget claim may exceed the pole.
+
+    Floor budgets are outside it for the reason they are outside the 3x rule.
+    """
+    lines = text.splitlines()
     problems = []
     job = "?"
     for i, line in enumerate(lines):
@@ -248,6 +303,14 @@ def check_run_pole(text, name):
                 " reviewable edits, not silent ones"
             )
     return problems
+
+
+def check_run_pole(text, name):
+    """The pole line and this file's own claims, for the file that carries it."""
+    problems, pole = find_run_pole(text, name)
+    if pole is None:
+        return problems
+    return problems + check_claims_under_pole(text, name, pole)
 
 
 def selftest(root):
@@ -324,6 +387,30 @@ jobs:
             failures.append(f"mutant not caught: {label}")
         else:
             print(f"  refused: {label}")
+
+    # The pole now governs files that do not carry it, so the claim check has
+    # to be seen refusing one on its own. Without this, a bug that only ever
+    # compared a file with its own pole line would pass every case above.
+    borrowed_good = """\
+jobs:
+  long:
+    # budget: 3x 900s worst observed
+    timeout-minutes: 45
+"""
+    if check_claims_under_pole(borrowed_good, "good-borrowed.yml", 950):
+        failures.append(
+            "a claim under a pole read from another file was refused"
+        )
+    else:
+        print("  accepted: a claim under a pole read from another file")
+    if not check_claims_under_pole(
+        borrowed_good.replace("3x 900s", "3x 1000s"), "mutant-borrowed.yml", 950
+    ):
+        failures.append(
+            "mutant not caught: a claim over a pole read from another file"
+        )
+    else:
+        print("  refused: a claim over a pole read from another file")
 
     if check_run_pole(pole_good, "good-pole.yml"):
         failures.append(
@@ -408,18 +495,34 @@ def main():
             f" .. {report.get('newest_run_created', '?')})"
         )
 
-    problems = []
+    workflows, skipped = budgeted_workflows(root)
+    if skipped:
+        print(
+            "note: no `# budget:` line, so not read: " + ", ".join(skipped)
+        )
+    if RUN_POLE_FILE not in workflows:
+        print(
+            f"{RUN_POLE_FILE} carries no budget line, so the run-pole line"
+            " cannot be read -- the cap on what any job may claim is gone",
+            file=sys.stderr,
+        )
+        return 1
+
+    pole_problems, pole = find_run_pole(
+        workflow_path(root, RUN_POLE_FILE).read_text(encoding="utf-8"),
+        RUN_POLE_FILE,
+    )
+
+    problems = list(pole_problems)
     notes = []
     checked = 0
-    for name in WORKFLOWS:
-        path = root / ".github" / "workflows" / name
-        if not path.exists():
-            continue
+    for name in workflows:
+        path = workflow_path(root, name)
         checked += 1
         text = path.read_text(encoding="utf-8")
         problems.extend(check_text(text, name))
-        if name == RUN_POLE_FILE:
-            problems.extend(check_run_pole(text, name))
+        if pole is not None and name not in POLE_EXEMPT:
+            problems.extend(check_claims_under_pole(text, name, pole))
         if observations is not None:
             found, said = check_observed(
                 collect_budgets(text, name), observations, name
@@ -445,7 +548,10 @@ def main():
             "OK: every budget line is at or above the worst run in the"
             " observation file"
         )
-    print(f"OK: {checked} workflow file(s), every timeout backed by a budget line")
+    print(
+        f"OK: {checked} workflow file(s) under a {pole}s pole"
+        f" ({', '.join(workflows)}), every timeout backed by a budget line"
+    )
     return 0
 
 

@@ -42,8 +42,25 @@ against a matrix file and knows nothing about what a name denotes, so read
 "mutant" below as "work item": a kernel absent from the union is refused
 exactly as a mutant absent from it is.
 
+One run does not always dispatch every harness. Since 2026-09-11 the
+tile-golden shards live in .github/workflows/tile.yml behind a `paths:`
+trigger, so gates.yml's run has no tile-golden record to reassemble and
+tile.yml's run has nothing but one. Two flags say which, and they say it in
+the workflow rather than here:
+
+    --exclude-harness NAME   this run does not dispatch NAME's shards
+    --only-harness NAME      this run dispatches only NAME's shards
+
+Both are refused for a name the tree carries no matrix for, and they are
+mutually exclusive. That refusal is the point of having them at all: the
+alternative was to let a harness that reported nothing pass quietly, which is
+the exact failure the paragraphs above describe, one level up. A harness
+deleted, renamed, or moved to a workflow that forgot to run it still turns
+this red, because the flag naming it stops resolving.
+
 Usage:
     check.py --coverage-dir DIR [--root REPO_ROOT]
+             [--exclude-harness NAME]... | [--only-harness NAME]...
     check.py --self-test
 """
 
@@ -174,6 +191,41 @@ def expected_harnesses(root):
     return names
 
 
+def filter_harnesses(derived, only, exclude):
+    """Narrow the tree's harness set to the ones this run dispatches.
+
+    Every name in either list must be one the tree derived, so a typo, a
+    rename or a deletion is a hard failure rather than a harness that quietly
+    stops being expected. Refusing an empty result is the same rule at the
+    other end: a run that expects nothing proves nothing.
+    """
+    if only and exclude:
+        raise SystemExit(
+            "--only-harness and --exclude-harness are mutually exclusive; "
+            "one says what this run dispatches and the other says what it "
+            "does not"
+        )
+    known = set(derived)
+    for flag, names in (("--only-harness", only), ("--exclude-harness", exclude)):
+        unknown = sorted(set(names) - known)
+        if unknown:
+            raise SystemExit(
+                f"{flag} names harness(es) with no matrix file in the tree: "
+                f"{unknown}; the tree has {sorted(known)}. A flag that names "
+                "nothing would silence a harness instead of describing one."
+            )
+    if only:
+        kept = [h for h in derived if h in set(only)]
+    else:
+        kept = [h for h in derived if h not in set(exclude)]
+    if not kept:
+        raise SystemExit(
+            "no harness left to check after --only-harness/--exclude-harness; "
+            "refusing to conclude anything about coverage from an empty set"
+        )
+    return kept
+
+
 def check_harness_set(expected, reported):
     """Return the problems with *which* harnesses reported, before what they ran.
 
@@ -234,8 +286,15 @@ def check(harness, shards, expected):
     return problems
 
 
-def run(coverage_dir, root):
-    harnesses = expected_harnesses(root)
+def run(coverage_dir, root, only=(), exclude=()):
+    derived = expected_harnesses(root)
+    harnesses = filter_harnesses(derived, list(only), list(exclude))
+    if only or exclude:
+        flag = "--only-harness" if only else "--exclude-harness"
+        print(
+            f"      {flag} {sorted(only or exclude)}: {len(harnesses)} of "
+            f"{len(derived)} harness(es) in the tree are expected from this run"
+        )
     print(
         f"      expecting {len(harnesses)} harness(es) under {root}: {harnesses}"
     )
@@ -351,7 +410,70 @@ def self_test():
         ),
     ]
 
+    # The two flags that say which harnesses a run dispatches. They exist so
+    # a workflow that runs some of the shards can still be held to all of the
+    # ones it does run, and every case below is about the same thing: a name
+    # that stops resolving must be a failure, never a silence.
+    four_names = [f"h{i}" for i in range(4)]
+
+    def filtered(only, exclude):
+        return filter_harnesses(four_names, only, exclude)
+
+    filter_cases = [
+        ("no flags leaves the tree's set alone", ([], []), four_names),
+        ("--exclude-harness drops exactly one", ([], ["h2"]),
+         ["h0", "h1", "h3"]),
+        ("--only-harness keeps exactly one", (["h2"], []), ["h2"]),
+        ("--only-harness keeps two, in tree order", (["h3", "h0"], []),
+         ["h0", "h3"]),
+    ]
+    filter_refusals = [
+        ("--exclude-harness for a name the tree does not carry", ([], ["ghost"])),
+        ("--only-harness for a name the tree does not carry", (["ghost"], [])),
+        ("both flags at once", (["h0"], ["h1"])),
+        ("excluding every harness there is", ([], list(four_names))),
+    ]
+
     bad = 0
+    for name, (only, exclude), want in filter_cases:
+        try:
+            got = filtered(only, exclude)
+        except SystemExit as exc:
+            bad += 1
+            print(f"FAIL  self-test {name!r}: refused a clean input: {exc}")
+            continue
+        if got != want:
+            bad += 1
+            print(f"FAIL  self-test {name!r}: got {got}, wanted {want}")
+        else:
+            print(f"PASS  self-test: {name}")
+    for name, (only, exclude) in filter_refusals:
+        try:
+            filtered(only, exclude)
+        except SystemExit:
+            print(f"PASS  self-test: refused {name}")
+        else:
+            bad += 1
+            print(f"FAIL  self-test: accepted {name}")
+
+    # And the half that matters most: excluding one harness must not stop a
+    # DIFFERENT one from being missed. A filter that swallowed the whole check
+    # would pass every case above.
+    kept = filtered([], ["h2"])
+    if not check_harness_set(kept, [h for h in kept if h != "h0"]):
+        bad += 1
+        print("FAIL  self-test: after --exclude-harness, an unreported harness "
+              "was not refused")
+    else:
+        print("PASS  self-test: after --exclude-harness, an unlisted matrix "
+              "still reds")
+    if not check_harness_set(kept, kept + ["h2"]):
+        bad += 1
+        print("FAIL  self-test: a record from the excluded harness was accepted")
+    else:
+        print("PASS  self-test: a record from an excluded harness is refused, "
+              "not ignored")
+
     for name, shards, expected, want in cases:
         problems = check("demo", shards, expected)
         got = len(problems)
@@ -435,7 +557,8 @@ def self_test():
         else:
             print("PASS  self-test: txt names are one per line, comments skipped")
 
-    total = len(cases) + len(set_cases) + 3
+    total = (len(cases) + len(set_cases) + len(filter_cases)
+             + len(filter_refusals) + 2 + 3)
     if bad:
         raise SystemExit(1)
     print(f"PASS  coverage checker self-test ({total} cases)")
@@ -450,6 +573,20 @@ def main():
         default=pathlib.Path(__file__).resolve().parents[2],
         help="repository root (holds scripts/<harness>/matrix.{txt,tsv})",
     )
+    ap.add_argument(
+        "--only-harness",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="this run dispatches only these harnesses' shards",
+    )
+    ap.add_argument(
+        "--exclude-harness",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="this run does not dispatch these harnesses' shards",
+    )
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -458,7 +595,7 @@ def main():
         return
     if args.coverage_dir is None:
         ap.error("--coverage-dir is required unless --self-test")
-    run(args.coverage_dir, args.root)
+    run(args.coverage_dir, args.root, args.only_harness, args.exclude_harness)
 
 
 if __name__ == "__main__":

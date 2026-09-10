@@ -1,0 +1,442 @@
+name: tile
+
+# packages/tileir's Tile IR against the two records that can say it is wrong:
+# the text and bytecode goldens beside scripts/tile-golden/run.sh (layer 0 of
+# docs/tile-backend-design.md 6.2: both backends, byte for byte, plus the
+# handler's determinism) and NVIDIA's `tileiras` assembling each bytecode
+# golden for sm_86 (layer 1: the one verdict from outside this repository,
+# with a reader and a verifier behind it that name the offset and the
+# operation when they refuse), and every cubin carrying a GLOBAL FUNC named
+# after its kernel. Layer 1's verdict is the exit code AND an empty error
+# stream: knife 7b measured tileiras writing a cubin, exiting 0 and printing a
+# refusal (an f64 `tanh` with a rounding mode it does not accept), which a
+# gate reading only the status would have called green.
+#
+# WHAT LEFT THE PUSH PATH ON 2026-09-11, said plainly because it is a coverage
+# loss and not a rearrangement: sixty-seven mutants and the two-backend byte
+# comparison of 184 kernels no longer run on a push that touches none of the
+# paths below. They run on the next daily schedule instead. A push that does
+# touch those paths still runs all of it before the change can land.
+#
+# Why it was worth it: eleven shards were 5338 job-seconds of run 34484938024,
+# 22.8% of every push, on a run whose span is set by its total (gates.yml's
+# header has that arithmetic). Over the thirty main pushes before the move,
+# the paths below were touched on none of them.
+#
+# What the trigger cannot see, and this is the honest cost rather than zero:
+# scripts/tile-golden/run.sh:20-24 renders every kernel on BOTH backends and
+# compares the bytes, so a change to the compiler's emit side can turn this
+# red without touching anything tile-shaped. scripts/gate-map/gatemap.py does
+# not model that coupling and returns no tile-golden row for
+# selfhost/src/c/emitc.dawn. So the trigger names selfhost/src/c/** and
+# selfhost/src/ir/** by hand: they are the emit side, they were touched on 0
+# of those same thirty pushes, and naming them costs nothing until the day it
+# matters. Everything else gatemap does couple to tile-golden is named too
+# (runtime/c, std/gpu.dawn, std/narrow.dawn, scripts/narrow-contract,
+# scripts/mutant-coverage, selfhost/src/driver, selfhost/src/main.dawn,
+# bin/dawn); the list below is a superset of what gatemap knows, never a
+# subset.
+#
+# The daily run is the backstop for everything the list still misses. A
+# schedule runs from the default branch only, so this file is read from main
+# whatever is on other branches, and `workflow_dispatch` is here so a person
+# can ask for the same evidence without waiting for the hour.
+#
+# The budget lines below are under gates.yml's `# run-pole:`, the same as the
+# jobs that stayed. scripts/check-gate-budgets.py reads every workflow that
+# carries a `# budget:` line and holds all of them to that one pole; its
+# header says why.
+on:
+  push:
+    branches: [main]
+    # The two lists are written out twice rather than shared with a YAML
+    # anchor: GitHub's workflow parser does not resolve aliases. Keep them
+    # identical.
+    paths:
+      - 'packages/tileir/**'
+      - 'scripts/tile-golden/**'
+      - 'scripts/tile-gpu-diff/**'
+      - 'scripts/leetgpu-diff/**'
+      - 'scripts/narrow-contract/**'
+      - 'scripts/mutant-coverage/**'
+      - 'std/gpu.dawn'
+      - 'std/narrow.dawn'
+      - 'runtime/c/**'
+      - 'selfhost/src/c/**'
+      - 'selfhost/src/ir/**'
+      - 'selfhost/src/driver/**'
+      - 'selfhost/src/main.dawn'
+      - 'bin/dawn'
+      - '.github/workflows/tile.yml'
+      - '.github/actions/**'
+  pull_request:
+    paths:
+      - 'packages/tileir/**'
+      - 'scripts/tile-golden/**'
+      - 'scripts/tile-gpu-diff/**'
+      - 'scripts/leetgpu-diff/**'
+      - 'scripts/narrow-contract/**'
+      - 'scripts/mutant-coverage/**'
+      - 'std/gpu.dawn'
+      - 'std/narrow.dawn'
+      - 'runtime/c/**'
+      - 'selfhost/src/c/**'
+      - 'selfhost/src/ir/**'
+      - 'selfhost/src/driver/**'
+      - 'selfhost/src/main.dawn'
+      - 'bin/dawn'
+      - '.github/workflows/tile.yml'
+      - '.github/actions/**'
+  schedule:
+    # 05:20 UTC, twenty minutes behind nightly.yml so the two do not contend
+    # for runners. GitHub's cron is best effort and drops runs at busy times,
+    # which is a reason to ask for a trough and a reason not to treat a missed
+    # night as a verdict.
+    - cron: '20 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: tile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # SIX round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
+  # 184 kernels, then the 67 mutants, in run order), eleven until 2026-09-11.
+  # Sharding by kind was the plan written down at knife 7b and the phase
+  # measurement retired it: neither half dominates, the kernel half grows
+  # faster (~8s per new kernel against ~21s per new mutant), and a split by
+  # kind would have left one job carrying it. Every Nth item of the mixed list
+  # divides both at once and spreads the outliers with them (`reverse` alone
+  # costs five average kernels).
+  #
+  # Why six rather than eleven. Eleven was reached by nine successive splits,
+  # every one of them forced by the 660s pole and argued as budget headroom
+  # rather than wall clock. This workflow is not queue-bound the way gates.yml
+  # is: six jobs against a ceiling of 20 all start at once, so here the span
+  # really is the longest job, and eleven shards bought nothing but eleven
+  # copies of a ~41s setup. Six is the fewest that keeps a shard under the
+  # 950s pole.
+  #
+  # The arithmetic, from the 25 completed main runs of 09-08T00:18Z ..
+  # 09-10T13:48Z (the 2026-09-10 CI audit's obs.json). The eleven shards'
+  # worst observations are 552 / 496 / 555 / 503 / 529 / 501 / 494 / 515 /
+  # 522 / 522 / 495s, which is 5684s; the setup that eleven shards paid
+  # eleven times is 448 job-seconds of run 34484938024, or 41s each, so the
+  # items are 5684 - 11 * 41 = 5233s of work. Six round-robin shards divide
+  # that evenly by construction: 873s each, plus the one 41s setup a shard
+  # still pays, is 914s.
+  #
+  # That is a ceiling twice over -- a sum of worst cases from runs that were
+  # not the same run -- and it is 36s under the pole. If a real six-way shard
+  # observes past 914s, the restatement collides with the pole and the answer
+  # is a seventh shard, not a taller pole. Seven would be 748 + 41 = 789s.
+  #
+  # The split cannot reach the verdicts. A kernel's four runs, its two goldens
+  # and its assembly all happen inside one shard, and each mutant compares
+  # against the recorded goldens on disk rather than against its own shard's
+  # kernel output, so the named red sets survive being dealt into six jobs.
+  # What sharding does introduce is the shard family's one failure: a shard
+  # that silently skips a slice prints the same PASS lines and exits 0. So
+  # each records what it ran, and tile-shards-complete below holds the union
+  # to matrix.txt.
+  #
+  # tileiras is an offline assembler: no GPU, no driver, it links libc, libm
+  # and libpthread only and reads libnvvm.so.4 and execs ptxas from two
+  # sibling wheels. install-tileiras.sh downloads the three wheels
+  # scripts/tile-golden/toolchain.txt pins by exact version and refuses any
+  # whose sha256 differs (a checksum from the same place as the file is not a
+  # check); the pin and the bytecode version the writer emits are held
+  # together by run.sh. The wheels are 150 MB and nothing outside this file
+  # needs them, which is a second reason these are jobs of their own.
+
+  tile-golden-1:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; the note above has the
+    # arithmetic. Shard 1 also carries the two ledger gates and the wheel
+    # cache contract, which are sub-second between them.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # shard 1 alone reads git: the GPU diff ledger's ancestry test needs
+          # the history. The other five do not, and are not deepened.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tileiras wheel cache refuses altered pins and bytes
+        run: python3 scripts/tile-golden/install-contract.py
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 1 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 1/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-1
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+      # Two steps that are shard 1's alone, both well under a second and
+      # neither shardable.
+      #
+      # Layer 2's ledger gate (docs 6.4, decision D4): tile-gpu-diff/run.sh
+      # --check reads the last line of scripts/tile-gpu-diff/ledger.txt and
+      # requires its commit to be an ancestor of HEAD with no tile path
+      # changed since, its result pass or blocked, and toolchain.txt's driver
+      # line to agree. The GPU run itself happens on a developer machine with
+      # a driver (the runner has none); the gate proves it happened at this
+      # tree.
+      - name: GPU diff ledger is current (layer 2 ran at this tree)
+        run: ./scripts/tile-gpu-diff/run.sh --check
+
+      - name: the leetgpu ledger (a listed problem has a kernel and a device run)
+        run: |
+          python3 scripts/leetgpu-diff/check.py
+          python3 scripts/leetgpu-diff/check.py --self-test
+
+  tile-golden-2:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 2 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 2/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-3:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 3 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 3/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-3
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-4:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 4 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 4/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-4
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-5:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 5 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 5/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-5
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-6:
+    runs-on: ubuntu-latest
+    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
+    # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
+    timeout-minutes: 46
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (184 kernels and sixty-seven mutants, both backends; shard 6 of 6)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 6/6
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-6
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  # The union guard for this matrix, and the counterpart of gates.yml's
+  # mutant-shards-complete. Sharding introduces exactly one new way to be
+  # wrong, a work item no shard runs, and nothing else can see it: each shard
+  # prints its own PASS lines and exits 0 whether it covered its slice or not.
+  # So each records what it executed and this reassembles the records and
+  # holds their union to scripts/tile-golden/matrix.txt.
+  #
+  # `--only-harness tile-golden` rather than the whole tree: this run dispatches
+  # tile-golden's shards and nothing else, so every other sharded harness would
+  # be reported absent here, correctly and uselessly. gates.yml's guard passes
+  # the mirror-image `--exclude-harness tile-golden`. Both flags are refused for
+  # a name the tree does not carry a matrix for, so neither can quietly cover a
+  # harness that was deleted or renamed.
+  #
+  # `if: always()` so a red shard cannot swallow the completeness verdict; the
+  # two failures stay separately attributable. The self-test runs first because
+  # a guard whose red has never been observed is not a guard.
+  tile-shards-complete:
+    needs:
+      - tile-golden-1
+      - tile-golden-2
+      - tile-golden-3
+      - tile-golden-4
+      - tile-golden-5
+      - tile-golden-6
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: the coverage checker can refuse
+        run: python3 scripts/mutant-coverage/check.py --self-test
+      - name: collect every shard's coverage record
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutant-coverage-*
+          path: coverage
+      - name: the union of the shards is the whole matrix
+        run: |
+          python3 scripts/mutant-coverage/check.py \
+            --coverage-dir coverage --only-harness tile-golden
