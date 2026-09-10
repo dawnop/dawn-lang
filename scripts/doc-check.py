@@ -2171,10 +2171,8 @@ OUTWARD_CORPUS_COUNTS = (
 BINARY_SIZE_LITERAL = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:KiB|MiB|GiB|KB|MB|GB)\b", re.I)
 TOOLCHAIN_ARTIFACT_SECTIONS = (
-    ("README.md", "Two different things are called \"native\""),
-    ("README.md", "The road without a JVM"),
-    ("README.zh-CN.md", "两样东西都叫「native」"),
-    ("README.zh-CN.md", "不装 JVM 的那条路"),
+    ("README.md", "The toolchain"),
+    ("README.zh-CN.md", "工具链"),
 )
 
 # The install instructions download release assets by name, and the release
@@ -2727,7 +2725,7 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
         return ["repository policy self-test: a volatile corpus count stayed green"], 0
 
     binary_size = dict(files)
-    toolchain_heading = "The road without a JVM"
+    toolchain_heading = "The toolchain"
     toolchain_section = markdown_section(binary_size["README.md"], toolchain_heading)
     if toolchain_section is None:
         return ["repository policy self-test: binary-size section fixture is absent"], 0

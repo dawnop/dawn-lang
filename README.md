@@ -70,10 +70,7 @@ pub fn main() -> Unit !io =
 
 ## Install
 
-Every release publishes four install assets: two artifacts and the SHA-256 of
-each. Check the digest. The seed the toolchain bootstraps from is verified on every
-single use, and an install step that skipped the same check would be the one
-place where that discipline stopped.
+Every release publishes two artifacts, each with its SHA-256. Check the digest.
 
 **Without a JVM** (linux-x86_64): one static executable, with `std` and the C
 runtime inside it.
@@ -107,12 +104,11 @@ backend and it refuses `use java`; the jar is the JVM toolchain. Which you want,
 and what each cannot do, is under [The toolchain](#the-toolchain) below.
 
 A release also carries two files that describe it rather than install it:
-`dawn-pub-api.json`, every public signature in `std` and in `packages/` with
-its effect row, and `dawn-pub-api-diff.md`, the classified difference from the
-previous release. The second is the one to read before upgrading. Effects are
-in the types, so a unit that started doing IO cannot do it quietly: the report
-names the expansion. It is a report and not a gate, and it compares signatures
-rather than behavior.
+`dawn-pub-api.json`, every public signature in `std` and in `packages/` with its
+effect row, and `dawn-pub-api-diff.md`, the classified difference from the previous
+release. Read the second before upgrading: effects are in the types, so a unit that
+started doing IO cannot do it quietly, and the report (signatures, not behavior)
+names the expansion.
 
 **From a checkout**, which is what the rest of this file assumes: `./bin/dawn`
 downloads the seed on first use, verifies it against
@@ -203,8 +199,8 @@ list here, because a divergence is a red build:
 The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1). Its
 scope is the programs both backends can compile: the C backend refuses `use java`,
 so a program with Java interop in it has one answer rather than two and is outside
-the comparison. Where that boundary runs is under
-[Two different things are called "native"](#two-different-things-are-called-native).
+the comparison, while every entry under `scripts/spike-native/` is inside that
+intersection by construction ([The toolchain](#the-toolchain)).
 
 The same idea reaches the GPU. A kernel written for the **cuTile device backend** is
 compared against a handwritten host reference on real hardware by
@@ -217,38 +213,31 @@ launch is refused outright.
 ### 3. On the native side there is neither a GC nor malloc/free
 
 Ownership is inferred by the compiler, via Perceus reference counting plus reuse
-analysis (rewrite in place when `rc == 1`). User code contains no memory-management
-primitive at all. Measured on the whole compiler front end running `checker.dawn`,
-after strings were brought into the accounting too: **peak RSS 1.46 GB → 81 MB
-(−94%)**, wall clock 2.77s → 2.10s (−24%), **LSan unreachable-at-exit 246 million
-bytes → 0**. On that same run reuse analysis rewrites in place rather than copying
-for most of its opportunities (83% of `array_with` calls as this is written; it is a
-rate, and the gates below budget it rather than pin it).
+analysis (rewrite in place when `rc == 1`), and user code contains no
+memory-management primitive at all. Measured on the whole compiler front end running
+`checker.dawn`, that is **peak RSS down 94%**.
 ([docs/perceus-design.md](docs/perceus-design.md) §5.7, §6.4; gates
 `scripts/rc-contract`, `scripts/array-contract`, `scripts/map-reuse-contract` and
 spike-native's always-on `detect_leaks=1`.)
 
 ### 4. The semantics do not borrow from the host
 
-An answer should not change with the host's version, so wherever there is data the
+An answer should not change with the host's version, so where there is data the
 language carries its own:
 
 - **The Unicode case and classification tables belong to the compiler**
-  (`selfhost/src/embed/unicode_case.dawn`, `unicode_class.dawn`); codegen writes them into
-  `dawn/rt/Strings` and `__emitc` writes them into the generated C, so both backends
-  carry the same table. It used to be `Character.toUpperCase` on one side and a
-  generated header on the other — which is "one answer" only while two JDKs happen to
-  agree on their Unicode version. (`scripts/unicode-contract`, every push.)
+  (`selfhost/src/embed/unicode_case.dawn`, `unicode_class.dawn`); both backends are
+  handed the same table, one by codegen into `dawn/rt/Strings` and one by `__emitc`
+  into the generated C. (`scripts/unicode-contract`, every push.)
 - **`Float` rendering is Schubfach in pure Dawn** (`std/fmt.dawn`): the rule is owned
-  by the spec and does not follow the host if the host changes algorithm.
+  by the spec, not by the host's algorithm.
 - **The narrow float formats are arithmetic, not a cast to the host's**
-  (`std/narrow.dawn`): bfloat16, binary16 and binary32 are opaque types over
-  `Float` whose every operation is that format's correctly rounded one, checked
-  against an exact rational oracle on both backends. (`scripts/narrow-contract`,
-  every push.)
-- **The UTF-8 decoder is our own strict walker** (`runtime/c/dawn_rt.c`): it rejects
-  overlong forms, surrogate halves and anything past U+10FFFF, answers U+FFFD on
-  malformed input and reports how many bytes it consumed.
+  (`std/narrow.dawn`): bfloat16, binary16 and binary32 are opaque types over `Float`,
+  every operation correctly rounded for that format and checked against an exact
+  rational oracle on both backends. (`scripts/narrow-contract`, every push.)
+- **The UTF-8 decoder is our own strict walker** (`runtime/c/dawn_rt.c`): overlong
+  forms, surrogate halves and anything past U+10FFFF are rejected, malformed input
+  answering U+FFFD.
 - `Ord[String]` is **code-point order**, and `cmp` promises only `-1`/`0`/`1`
   ([docs/spec.md](docs/spec.md) §3.5).
 
@@ -286,16 +275,13 @@ types through the traits above), no mutable references. The reasoning is in
 [docs/design.md](docs/design.md).
 
 **"No exceptions" needs stating precisely**: Dawn has no `throw`/`catch`, and every
-recoverable failure goes through `Result` + `?`. But an exception thrown by a
-`use java` call still **passes through** the Dawn stack and terminates the program
-(panic semantics). There are two barriers at that boundary, both returning
+recoverable failure goes through `Result` + `?`. An exception thrown by a `use java`
+call still **passes through** the Dawn stack and terminates the program (panic
+semantics). Two barriers sit at that boundary, both returning
 `Result[T, ForeignError]`: `catch_fault` intercepts foreign failure and lets panics
-through, and `catch_panic` is an isolation point (one request's panic becomes a 500
-instead of taking down the process). `bracket` intercepts nothing; it only guarantees
-that release runs exactly once on every exit path. `cast` no longer **throws**: its
-signature is pure and failure is a value. This division of labour is
-backend-independent — native has no exceptions, and a failure carries a kind along the
-same `longjmp`. ([docs/spec.md](docs/spec.md) §9.8.)
+through, `catch_panic` is an isolation point, and `bracket` intercepts nothing at all,
+guaranteeing only that release runs exactly once on every exit path.
+([docs/spec.md](docs/spec.md) §9.8.)
 
 ## The toolchain
 
@@ -316,10 +302,9 @@ as the entry point).
 ```
 
 Dependencies come in two kinds: source packages (`url` + `hash`, content-addressed,
-version selection by MVS — a single version is not a convenience for Dawn but a
-load-bearing wall, since impl coherence is a whole-program unique mapping) and
-`[java-deps]` (coursier resolves the transitive Maven closure; meaningful on the JVM
-backend only). See [docs/package-design.md](docs/package-design.md).
+single-version selection by MVS, which impl coherence needs) and `[java-deps]`
+(coursier resolves the transitive Maven closure; meaningful on the JVM backend only).
+See [docs/package-design.md](docs/package-design.md).
 
 The built-in LSP server exists once per backend with byte-aligned output: live
 diagnostics, hover, go-to-definition, document outline. The front end does full error
@@ -327,55 +312,13 @@ recovery, so a broken file reports all of its errors at once. The VS Code extens
 on the [marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
 (`dawnop.dawn-lang`); Neovim / Helix configuration is in [editors/](editors/).
 
-### Two different things are called "native"
-
-`dawn build --native` and `dawnc` both hand you an executable that runs without a
-JVM installed, and they are not the same road. The word alone will not tell you
-which one you are on:
-
-| | `dawn build --native` | `dawnc` |
-|---|---|---|
-| What it is | GraalVM `native-image` over the jar the JVM backend just wrote | the C backend: Core to C, handed to `cc` |
-| Which backend compiled your code | JVM bytecode | C |
-| `use java` | works, compiled into the image | **refused**, on purpose |
-| `[java-deps]` | resolved and included | not applicable |
-| Needs on the machine | GraalVM `native-image` | a `cc` |
-| Where you get it | you run it, from a checkout | `dawnc-linux-x86_64`, in every release |
-| Targets | wherever GraalVM runs | linux-x86_64 only |
-
-One file settles it. `examples/interop/interop.dawn` uses `use java`:
-`dawn build --native` writes an executable that runs, while `dawnc check` on
-the same file answers `Java interop needs a JVM host with a class path to
-resolve java.lang.String against; this build has none`.
-
-The collision is historical: `--native` predates the C backend, and everything
-under `scripts/` spelled `native` (`spike-native`, `native-fixpoint.sh`,
-`native-cli-diff.sh`, `release-native.sh`) means the C backend, not the flag.
-Read the flag as "package the JVM build ahead of time" and the scripts as "the
-second backend".
-
-**This is also the scope of the parity claim above.** "Two backends, one answer"
-is a claim about the programs both backends can compile, and every program
-containing `use java` is outside it, because on those there is no second answer
-to compare against. Every entry under `scripts/spike-native/` is inside that
-intersection by construction.
-
-### The road without a JVM
-
-**As of v0.50.0**, every release also carries **`dawnc-linux-x86_64`**: a single-file
-static executable produced by the C backend, with `std` and the C runtime embedded.
-It needs neither this repository nor a JVM.
-
-Its subcommands are `check|emitc|build|run|test|fmt|doc|add|lsp`; `build`/`run` invoke
-the machine's `cc` (overridable with `$CC`) and the rest do not touch a C toolchain at
-all. Packaging a jar, `lock` and `cache` need a JVM and are therefore not among its
-subcommands. The one target is linux-x86_64; the reasoning is in
-[docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1.
-
-**Precisely stated**: "you can use Dawn without ever touching a JVM" holds — there is a
-complete path from compiler to artifact. But the **bootstrap seed is still a jar**
-(`scripts/seed-release.txt`), `bin/dawn` is still the JVM toolchain, and the JVM
-backend is still a first-class target.
+Two things are called native, and they are different roads. `dawn build --native`
+packages the jar the JVM backend just wrote with GraalVM `native-image`, so
+`use java` still works; `dawnc`, the static linux-x86_64 executable every release
+ships, is the C backend with `std` and the runtime embedded, needs no JVM and
+refuses `use java`. The bootstrap seed is still a jar
+(`scripts/seed-release.txt`), and the JVM backend is still a first-class target.
+The rest is in [docs/native-driver-plan.md](docs/native-driver-plan.md).
 
 ## Documentation
 

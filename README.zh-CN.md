@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 905ca621a4102f33 -->
+<!-- doc-check: translation-of README.md @ a1acc975ab05cdd2 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -68,8 +68,7 @@ pub fn main() -> Unit !io =
 
 ## 安装
 
-每个 release 挂四件安装资产：两个产物，外加各自的 SHA-256。**请核对摘要**。工具链自举用的种子
-每次使用前都要验一遍，安装这一步如果跳过同样的核对，那这套纪律就只在这里断了。
+每个 release 挂两个产物，各带自己的 SHA-256。**请核对摘要**。
 
 **不装 JVM**（linux-x86_64）：一个静态可执行文件，`std` 与 C 运行时都在里面。
 
@@ -101,8 +100,8 @@ java -jar dawn-selfhost.jar run hello.dawn
 
 release 还挂两件**描述**它、而不是安装它的文件：`dawn-pub-api.json` 是 `std` 与 `packages/`
 里每一条公开签名连同它的效果行，`dawn-pub-api-diff.md` 是与上一个 release 的分类差异。
-升级前该读的是后者。效果就在类型里，所以某个单元开始做 IO 是藏不住的：报告会把这次扩张点名。
-它是报告不是门禁，而且它比的是签名，不是行为。
+升级前该读的是后者：效果就在类型里，某个单元开始做 IO 藏不住，这份比签名不比行为的报告
+会把这次扩张点名。
 
 **从仓库检出**（本文其余部分默认的就是这条路）：`./bin/dawn` 首次运行会下载种子、按
 `scripts/seed-checksums.txt` 验它，再用它编译 HEAD。
@@ -177,8 +176,8 @@ pub fn main() -> Unit !io = {
   JVM 发的 C == native 自己发的 C == 再发一次的 C。
 
 规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。它的**适用范围**是两个后端都能编的
-那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内。这条边界
-划在哪儿，见[两样东西都叫「native」](#两样东西都叫native)。
+那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内，而
+`scripts/spike-native/` 下的每个语料入口按构造都在这个交集里（[工具链](#工具链)）。
 
 同一条思路一直伸到 GPU 上。**cuTile 设备后端**上的 kernel 要在真硬件上与手写的宿主参考实现
 对拍，`scripts/tile-gpu-diff` 跑这件事并把判词追加进台账；台账末行盖不住的 tile 路径改动，
@@ -188,11 +187,8 @@ JVM 上真设备的 launch 一律被拒。
 
 ### 三、native 侧既没有 GC，也没有 malloc/free
 
-所有权由编译器推导，走 Perceus 引用计数 + 复用分析（`rc == 1` 就地改写）。用户代码里没有任何
-内存管理原语。整个编译器前端跑 `checker.dawn` 的实测，在字符串也入账之后：**峰值 RSS
-1.46 GB → 81 MB（−94%）**、墙钟 2.77s → 2.10s（−24%）、**LSan 出口不可达 2.46 亿字节 → 0**。
-同一次运行里，复用分析把大多数机会写成了就地改写而不是复制（写下这句时是 `array_with`
-调用的 83%；它是个比率，下面的门禁给它立预算而不是钉死）。
+所有权由编译器推导，走 Perceus 引用计数 + 复用分析（`rc == 1` 就地改写），用户代码里没有
+任何内存管理原语。整个编译器前端跑 `checker.dawn` 的实测：**峰值 RSS 降了 94%**。
 （[docs/perceus-design.md](docs/perceus-design.md) §5.7、§6.4；门禁 `scripts/rc-contract`、
 `scripts/array-contract`、`scripts/map-reuse-contract` 与 spike-native 常开的 `detect_leaks=1`。）
 
@@ -200,16 +196,15 @@ JVM 上真设备的 launch 一律被拒。
 
 答案不该随宿主的版本变，所以有数据的地方语言自己带数据：
 
-- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/embed/unicode_case.dawn`、`unicode_class.dawn`），
-  codegen 写进 `dawn/rt/Strings`、`__emitc` 写进生成的 C，两边领同一份表。从前是一边
-  `Character.toUpperCase`、另一边生成的头文件——那只在两个 JDK 的 Unicode 版本恰好相同时才是
-  「一个答案」。（`scripts/unicode-contract`，每次 push。）
-- **`Float` 渲染是纯 Dawn 的 Schubfach**（`std/fmt.dawn`），规则由规范拥有，宿主换算法也不跟。
+- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/embed/unicode_case.dawn`、`unicode_class.dawn`）：
+  codegen 写进 `dawn/rt/Strings`、`__emitc` 写进生成的 C，两边领同一份表。
+  （`scripts/unicode-contract`，每次 push。）
+- **`Float` 渲染是纯 Dawn 的 Schubfach**（`std/fmt.dawn`），规则由规范拥有，不随宿主的算法。
 - **窄浮点格式是自己的算术，不是向宿主的一次转换**（`std/narrow.dawn`）：bfloat16、
-  binary16、binary32 是 `Float` 之上的 opaque 类型，每个运算都是该格式正确舍入的那一个，
-  在两个后端上对着精确有理数 oracle 核对。（`scripts/narrow-contract`，每次 push。）
+  binary16、binary32 是 `Float` 之上的 opaque 类型，每个运算都按该格式正确舍入，并在两个
+  后端上对着精确有理数 oracle 核对。（`scripts/narrow-contract`，每次 push。）
 - **UTF-8 解码器是自己的严格 walker**（`runtime/c/dawn_rt.c`）：拒 overlong 形式、代理半区、
-  超出 U+10FFFF，畸形输入答 U+FFFD 并报告吃掉几个字节。
+  超出 U+10FFFF，畸形输入答 U+FFFD。
 - `Ord[String]` 是**码点序**，`cmp` 只承诺 `-1`/`0`/`1`（[docs/spec.md](docs/spec.md) §3.5）。
 
 ### 五、trait 有条件 impl 和关联类型，集合是 Dawn 写的
@@ -238,11 +233,9 @@ JVM 上真设备的 launch 一律被拒。
 类型）、没有可变引用。理由见 [docs/design.md](docs/design.md)。
 
 **「没有异常」要说准**：Dawn 没有 `throw`/`catch`，可恢复失败一律走 `Result` + `?`。
-但 `use java` 调用抛出的异常仍会**穿透** Dawn 栈并终止程序（等同 panic 语义）——边界上有
-两个屏障，都返回 `Result[T, ForeignError]`：`catch_fault` 拦外部失败、放 panic 穿透，
-`catch_panic` 是隔离点（单个请求 panic 变 500，而不是掀翻进程）。`bracket` 谁也不拦，只
-保证 release 在每条退出路径上恰好跑一次。`cast` 已经**不抛**了：它签名为纯，失败是一个值。
-这条分工与后端无关——native 没有异常，失败带一个种类走同一条 `longjmp`。
+`use java` 调用抛出的异常仍会**穿透** Dawn 栈并终止程序（等同 panic 语义）。边界上有两个
+屏障，都返回 `Result[T, ForeignError]`：`catch_fault` 拦外部失败、放 panic 穿透，
+`catch_panic` 是隔离点；`bracket` 谁也不拦，只保证 release 在每条退出路径上恰好跑一次。
 （[docs/spec.md](docs/spec.md) §9.8。）
 
 ## 工具链
@@ -261,56 +254,20 @@ JVM 上真设备的 launch 一律被拒。
 ./bin/dawn lsp                              # LSP 服务器（stdio，编辑器用）
 ```
 
-依赖有两种：源码包（`url` + `hash` 内容寻址，MVS 选版本——单版本对 Dawn 不是便利而是承重墙，
-impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Maven 传递依赖，只在 JVM 后端
-有意义），见 [docs/package-design.md](docs/package-design.md)。
+依赖有两种：源码包（`url` + `hash` 内容寻址，MVS 选单一版本，impl 一致性需要它）与
+`[java-deps]`（coursier 解析 Maven 传递依赖，只在 JVM 后端有意义），
+见 [docs/package-design.md](docs/package-design.md)。
 
 内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
 前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code 扩展已上
 [marketplace](https://marketplace.visualstudio.com/items?itemName=dawnop.dawn-lang)
 （`dawnop.dawn-lang`）；Neovim / Helix 配置见 [editors/](editors/)。
 
-### 两样东西都叫「native」
-
-`dawn build --native` 与 `dawnc` 都会给你一个不装 JVM 也能跑的可执行文件，但它们不是同一条路。
-光看这个词分不出你在哪条上：
-
-| | `dawn build --native` | `dawnc` |
-|---|---|---|
-| 它是什么 | 拿 JVM 后端刚写出来的 jar 过一遍 GraalVM `native-image` | C 后端：Core 出 C，交给 `cc` |
-| 你的代码由谁编 | JVM 字节码 | C |
-| `use java` | 可用，编进映像里 | **拒绝**，有意为之 |
-| `[java-deps]` | 解析并带上 | 无此概念 |
-| 机器上要有 | GraalVM `native-image` | 一个 `cc` |
-| 从哪儿来 | 自己在仓库检出里跑出来 | 每个 release 挂的 `dawnc-linux-x86_64` |
-| 目标平台 | GraalVM 能跑的地方 | 只有 linux-x86_64 |
-
-一个文件就能说清。`examples/interop/interop.dawn` 用了 `use java`：`dawn build --native`
-写出一个跑得起来的可执行文件；`dawnc check` 对同一个文件答的是
-`Java interop needs a JVM host with a class path to resolve java.lang.String against;
-this build has none`。
-
-撞名是历史造成的：`--native` 比 C 后端早，而 `scripts/` 下所有带 `native` 的东西
-（`spike-native`、`native-fixpoint.sh`、`native-cli-diff.sh`、`release-native.sh`）指的都是
-C 后端，不是那个 flag。把 flag 读成「把 JVM 那份产物提前打包」，把脚本读成「第二个后端」。
-
-**上面那条对等承诺的范围也在这里。**「两个后端一个答案」说的是两个后端都能编的那些程序，
-凡是带 `use java` 的都在范围之外——那些程序根本没有第二个答案可比。`scripts/spike-native/`
-下的每个语料入口按构造就在这个交集里。
-
-### 不装 JVM 的那条路
-
-**从 v0.50.0 起**，每个 release 还挂着 **`dawnc-linux-x86_64`**：C 后端编出来的单文件静态
-可执行程序，std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
-
-子命令是 `check|emitc|build|run|test|fmt|doc|add|lsp`；`build`/`run` 会调用机器上的 `cc`
-（`$CC` 可覆盖），其余的不碰 C 工具链。打包成 jar、`lock`、`cache` 需要 JVM，故不在它的
-子命令里。只有 linux-x86_64 一个目标，理由见
-[docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
-
-**说准一点**：「用 Dawn 可以完全不碰 JVM」成立——从编译器到产物有一条完整的路径；但
-**自举种子仍然是 jar**（`scripts/seed-release.txt`），`bin/dawn` 仍是 JVM 工具链，JVM
-后端仍是一等目标。
+有两样东西都叫 native，它们不是同一条路。`dawn build --native` 是把 JVM 后端刚写出来的 jar
+交给 GraalVM `native-image` 打包，所以 `use java` 照样能用；`dawnc` 是每个 release 都挂着的
+linux-x86_64 静态可执行文件，出自 C 后端，`std` 与运行时都嵌在里面，不需要 JVM，并且拒绝
+`use java`。自举种子仍然是 jar（`scripts/seed-release.txt`），JVM 后端仍是一等目标。
+其余细节见 [docs/native-driver-plan.md](docs/native-driver-plan.md)。
 
 ## 文档
 
