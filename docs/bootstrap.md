@@ -66,7 +66,9 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    配方；`release.yml` 与日常 `selfhost-fixpoint.sh` 都只能调用它。它在 tag 上重建
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C`、独立
    emit、原子提升后的最终路径仍与 C 相同；workflow 再精确核对源码版本、tag 与
-   artifact 输出——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
+   artifact 输出——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置，
+自 2026-09-11 起由 `release.yml` 的 `verified` job 机器强制：它查 Actions API 确认
+`ci.yml` 在这个 sha 上成功过，否则拒绝这个 tag（此前是在 tag 上把同一套门禁再跑一遍）。
 3. **单一推进入口**：release 四件资产齐全后只运行
    `./scripts/advance-seed.sh <tag>`。脚本从 `origin` 新鲜解析 tag commit，前后复核 tag
    没有移动，校验 tag 版本、HEAD 祖先关系与版本单调性；再从 GitHub Release 下载

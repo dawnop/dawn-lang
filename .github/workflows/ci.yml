@@ -5,14 +5,22 @@ name: ci
 # site on push. The compiler suite runs in seconds, so there is no reason not to.
 #
 # `branches:` on a push trigger matches branch pushes only, so `git push --tags`
-# does not start a run here — the tag's gates are release.yml's `gates` job,
-# which `uses:` the same gates.yml this does. A release still shows two full
-# gate runs at one sha (f96fd45 on 2026-08-07 is an instance): one for the
-# version-bump commit landing on main, one for the tag pushed at it seconds
-# later. Those are two events, not a duplicated trigger, and neither is the one
-# to drop — main's run is the branch's own verdict, and release.yml re-running
-# the gates on a tag that could point anywhere is the whole reason gates.yml
-# exists as one file.
+# does not start a run here. This is therefore the only workflow that runs the
+# gates, and a tag reads its verdict rather than asking for a second one.
+#
+# It used to ask. release.yml opened with its own `uses: ./.github/workflows/
+# gates.yml`, so a release showed two complete gate runs at one sha (f96fd45 on
+# 2026-08-07, and v0.76.0 at sha 21728208 thirteen minutes apart) and the note
+# here defended them: a tag can point at any commit, including one this workflow
+# never saw, so re-running the identical definition was the way to be sure it
+# does not. The premise was right and the remedy was expensive, about 23,000
+# job-seconds and 25 minutes per release to re-decide a decided sha. Since
+# 2026-09-11 release.yml opens with a `verified` job instead, which asks the
+# Actions API whether this workflow succeeded on that exact commit and refuses
+# the tag otherwise. The two events are still two events; only the second one's
+# 67 jobs are gone. gates.yml remains one file for the same reason as before:
+# the release path is held to the identical gate set, and now it is held to the
+# identical run.
 on:
   push:
     branches: [main]

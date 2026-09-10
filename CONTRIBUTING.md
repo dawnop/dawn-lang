@@ -140,8 +140,12 @@ When the two disagree, the `std/ stamps itself with this toolchain's version`
 test in `driver/stdlib` goes red) → commit → `git push origin main` and wait for
 main CI → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`. Never
 `git push --tags`; it publishes unrelated tags along with it. `release.yml`
-checks the tag against the version, runs the full test suite, and uploads
-`dawn-selfhost.jar` and the native assets to the Release. Only once all four
+starts by requiring that `ci` has already gone green on the tagged commit,
+which is what "wait for main CI" above buys: it asks the Actions API rather
+than re-running the 67-job suite that just ran on that same sha. It then checks
+the tag against the version and uploads `dawn-selfhost.jar` and the native
+assets to the Release. A tag pushed before main CI is green fails in seconds;
+re-run the release workflow once it is. Only once all four
 assets are published, run `./scripts/advance-seed.sh v0.9.0`. It validates the
 GitHub Release JAR and the std in the remote tag archive, then advances the three
 seed files in order (digest manifest, std manifest, pointer); hand-editing
