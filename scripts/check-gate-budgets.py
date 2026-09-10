@@ -74,7 +74,7 @@ import re
 import sys
 from pathlib import Path
 
-WORKFLOWS = ["gates.yml", "ci.yml", "release.yml"]
+WORKFLOWS = ["gates.yml", "ci.yml", "release.yml", "editor-grammar.yml"]
 TIMEOUT_RE = re.compile(r"^(\s*)timeout-minutes:\s*(\d+)\s*$")
 BUDGET_RE = re.compile(r"^\s*#\s*budget:\s*(.+?)\s*$")
 THREE_X_RE = re.compile(r"^3x\s+(\d+)s\b")

@@ -3,16 +3,22 @@ name: gates
 # The single definition of "this commit passes".
 #
 # Why it is its own file: ci.yml ran the full suite on main, release.yml ran a
-# hand-copied subset on a tag — selfhost tests and site tests, and nothing
-# else. A tag can point at any commit, which is exactly why release.yml said
-# it re-ran the suite; what it actually re-ran skipped packages, playground,
+# hand-copied subset on a tag (selfhost tests and site tests, and nothing
+# else). A tag can point at any commit, which is why release.yml said it
+# re-ran the suite; what it actually re-ran skipped packages, playground,
 # every contract, the native differential and formatting. Two hand-maintained
 # lists of the same gates drift, and this one already had.
 #
-# So the gates live here once and both callers `uses:` this file. Adding a
-# gate in one place now adds it everywhere, which is the only arrangement
-# that stays true. (The audit-fixes branch proposed this shape on 2026-07-25;
-# the content below is the gate set as of the merge, not that snapshot.)
+# So the gates live here once, and ci.yml `uses:` this file. That is the only
+# caller now. release.yml was the second until 2026-09-11: it re-ran all of
+# this on the tag's sha, minutes after ci.yml had already run it on the same
+# sha. Since 6f0ec90a the tag path reads that verdict instead of re-deciding
+# it, through release.yml's `verified` job, which refuses a tag whose commit
+# carries no successful ci.yml run. A tag is still held to this file; what
+# stopped is running this file twice over one commit. Adding a gate here
+# still adds it everywhere, which is the only arrangement that stays true.
+# (The audit-fixes branch proposed this shape on 2026-07-25; the content
+# below is the gate set as of the merge, not that snapshot.)
 #
 # The gates are spread over independent jobs rather than run in one. That is
 # scheduling and nothing else — no gate was dropped, weakened or made
@@ -41,14 +47,17 @@ name: gates
 # creation order roughly tracks definition order: the jobs that queue should
 # be the short tail, which fits in slots the first finishers free. That is a
 # soft nudge, not a contract — GitHub does not promise dispatch order. A run
-# of this workflow holds 47 jobs (2026-09-07, tile-golden's eleventh shard on
-# top of the tenth), and ci.yml adds its own `secrets`, so 48 against the
-# ceiling of 20: the second wave starts as the first finishes, which is why
-# the four native-diff shards are defined first. The 47th job does not
-# lengthen the run: with 46 already queuing against 20 runners the span is
-# set by the tail, not by the count. What the eleventh shard buys is budget
-# headroom and not wall clock, and it was forced rather than chosen:
-# tile-golden-11's note has the arithmetic.
+# of this workflow holds more jobs than that ceiling, and ci.yml adds its own
+# `secrets` on top: the second wave starts as the first finishes, which is why
+# the native-diff shards are defined first.
+#
+# No count is quoted here any more, and that is deliberate. Every count this
+# paragraph ever carried went stale and took an argument with it: on
+# 2026-09-10 it still said 47 against a real 67, and the twenty
+# `incremental-*` jobs added over 09-08 and 09-09 were the whole difference.
+# The same three sentences had been used to argue that one more shard was
+# free. `grep -c '^  [a-z0-9-]*:$' .github/workflows/gates.yml` answers the
+# question in the only way that cannot go stale.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -165,7 +174,7 @@ jobs:
   # Trigger for N=8: split again when a shard's own observation passes 550s
   # rather than restate a line, because 550s is where the next restatement
   # collides with the pole. Against splitting further today: a run of this
-  # workflow already holds 46 jobs against an account ceiling of 20, so shards
+  # workflow already holds far more jobs than the account ceiling of 20, so shards
   # five through eight would queue behind the first wave and buy budget
   # headroom rather than wall clock.
 
@@ -182,8 +191,11 @@ jobs:
     # pruning knife (e797abb0).
     # 2026-09-06: 243s (run 34005661241) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 21s over the 222s claim.
-    # budget: 3x 243s worst observed
-    timeout-minutes: 13
+    # 2026-09-11: 275s (run 34226728503) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 32s over the 243s claim.
+    # budget: 3x 275s worst observed
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -308,8 +320,11 @@ jobs:
     # 09-04T12:10Z. See native-diff-1 for why the lowering waited.
     # 2026-09-06: 194s (run 34012685819) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 19s over the 175s claim.
-    # budget: 3x 194s worst observed
-    timeout-minutes: 10
+    # 2026-09-11: 203s (run 34182960906) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 9s over the 194s claim.
+    # budget: 3x 203s worst observed
+    timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -337,7 +352,10 @@ jobs:
     # the 288s planning value.
     # 2026-09-06: 210s (run 33983385267) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 41s over the 169s claim.
-    # budget: 3x 210s worst observed
+    # 2026-09-11: 213s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 3s over the 210s claim.
+    # budget: 3x 213s worst observed
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
@@ -422,9 +440,7 @@ jobs:
           # the gate map replays four commits' trees as fixtures, and reads
           # the Emit-Change declarations back to the last tag.
           #
-          # release.yml reuses this file at a tag, so the full history is
-          # fetched there too, and the fixtures pin five specific SHAs. That
-          # is fine forward (a tag is always cut after those commits, and main
+          # The fixtures pin five specific SHAs. That is fine forward (main
           # is never rewritten) and it does mean this workflow can no longer
           # run at a commit older than the oldest fixture. If you ever need
           # that, drop the stanzas rather than the fetch depth.
@@ -490,8 +506,11 @@ jobs:
     # pruning knife (e797abb0), 15s over the 476s claim.
     # 2026-09-06: 533s (run 34012685819) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 42s over the 491s claim.
-    # budget: 3x 533s worst observed
-    timeout-minutes: 27
+    # 2026-09-11: 649s (run 34259782743) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 116s over the 533s claim.
+    # budget: 3x 649s worst observed
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -517,8 +536,11 @@ jobs:
     # scripts/check-gate-budgets.py --observed is the audit that named it.
     # 2026-09-06: 524s (run 34020053279) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 18s over the 506s claim.
-    # budget: 3x 524s worst observed
-    timeout-minutes: 27
+    # 2026-09-11: 578s (run 34247069047) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 54s over the 524s claim.
+    # budget: 3x 578s worst observed
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -547,8 +569,11 @@ jobs:
     # pruning knife (e797abb0), 12s over the 404s claim.
     # 2026-09-06: 451s (run 33993175064) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 35s over the 416s claim.
-    # budget: 3x 451s worst observed
-    timeout-minutes: 23
+    # 2026-09-11: 522s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 71s over the 451s claim.
+    # budget: 3x 522s worst observed
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -611,7 +636,7 @@ jobs:
   # Trigger for N=5: split again when a shard's own OBSERVATION passes 550s
   # rather than restate a line, because 550s doubled is already past the
   # pole. Against splitting further today: a run of this workflow already
-  # holds 46 jobs against an account ceiling of 20, so a fifth shard would
+  # holds far more jobs than the account ceiling of 20, so a fifth shard would
   # queue behind the first wave and buy budget headroom rather than wall
   # clock.
   builtin-type-1:
@@ -1393,7 +1418,10 @@ jobs:
     # Full warm/frozen-cold products plus twelve compiling engine mutants:
     # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
     # This is a complete engine contract, not a shard of a shared matrix.
-    # budget: 3x 524s planning value
+    # 2026-09-11: 533s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 9s over the 524s claim.
+    # budget: 3x 533s worst observed
     timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
@@ -1417,8 +1445,11 @@ jobs:
     # 419s (run 33774195662) over the four completed main runs of 2026-09-03
     # (15:26Z .. 17:42Z), 6s over it. The pruned tree ran 271s; the line may
     # not follow that while pre-prune runs are in the window.
-    # budget: 3x 419s worst observed
-    timeout-minutes: 21
+    # 2026-09-11: 550s (run 34177318302) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 131s over the 419s claim.
+    # budget: 3x 550s worst observed
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1708,8 +1739,11 @@ jobs:
     # This one is in the window's longest run (span 2706s, the same runner
     # contention tree-policy's note describes); the other eleven readings are
     # 224 to 317s. Restated anyway, for the reason given there.
-    # budget: 3x 337s worst observed
-    timeout-minutes: 17
+    # 2026-09-11: 376s (run 34259782743) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 39s over the 337s claim.
+    # budget: 3x 376s worst observed
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1796,8 +1830,11 @@ jobs:
     # (e797abb0), 29s over the 453s planning value.
     # 2026-09-06: 490s (run 34012685819) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 8s over the 482s claim.
-    # budget: 3x 490s worst observed
-    timeout-minutes: 25
+    # 2026-09-11: 581s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 91s over the 490s claim.
+    # budget: 3x 581s worst observed
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2046,9 +2083,9 @@ jobs:
   # OBSERVED over 550s, and the projection is ~395 / 393 / 400s.
   #
   # A third shard buys budget headroom and not wall clock, and that is the
-  # whole of what it buys: runs of this workflow now hold 46 jobs against an
+  # whole of what it buys: runs of this workflow hold far more jobs than the
   # account concurrency limit of 20 (the arithmetic is in this file's header),
-  # so the 38th queued behind the first wave rather than starting beside it,
+  # so a new shard queues behind the first wave rather than starting beside it,
   # and tile has never been a run's long pole -- native-diff at 783~1119s over
   # the last fortnight is. The span does not shorten. What changes is that
   # every shard is back under the 660s pole with room for the next knife.
@@ -2290,7 +2327,7 @@ jobs:
     #
     # The eighth shard buys BUDGET HEADROOM and not wall clock, which is
     # what every split here has bought since knife 16: a run of this
-    # workflow now holds 46 jobs against an account ceiling of 20, so the
+    # workflow holds far more jobs than the account ceiling of 20, so the
     # 44th queues behind the first wave, and tile has never been the run's
     # long pole.
     #
@@ -2361,7 +2398,7 @@ jobs:
     # 16s is a quarter of what T15 had, so the next knife almost certainly
     # does split, and this is what it costs: nine shards of THIS matrix are
     # 541 to 572s, and a ninth shard buys nothing but that headroom (a run
-    # of this workflow would be 45 jobs against an account ceiling of 20).
+    # of this workflow already exceeds the account ceiling of 20).
     #
     # CI is nowhere near either trigger: scripts/gate-observations.py over
     # the 25 runs of 2026-09-04 to 09-05 reads 427 / 458 / 432 / 445 / 445 /
@@ -2421,8 +2458,8 @@ jobs:
     # shards of 217 items should observe near 350s, 200s under the 550s
     # observation that would trigger an eleventh. The tenth shard buys
     # BUDGET HEADROOM and not wall clock, which is what every split here has
-    # bought since knife 16: a run of this workflow now holds 46 jobs
-    # against an account ceiling of 20, so the 46th queues behind the first
+    # bought since knife 16: a run of this workflow holds far more jobs
+    # than the account ceiling of 20, so a new one queues behind the first
     # wave, and tile has never been the run's long pole.
     #
     # KNIFE T11 (2026-09-06, five kernels and three mutants; matrix 224 ->
@@ -3292,8 +3329,11 @@ jobs:
     # pruning knife (e797abb0), 8s over the 357s claim.
     # 2026-09-06: 412s (run 34021875218) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 47s over the 365s claim.
-    # budget: 3x 412s worst observed
-    timeout-minutes: 21
+    # 2026-09-11: 491s (run 34259782743) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 79s over the 412s claim.
+    # budget: 3x 491s worst observed
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3345,8 +3385,11 @@ jobs:
     # pruning knife (e797abb0), 8s over the 284s claim.
     # 2026-09-06: 313s (run 34020053279) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 21s over the 292s claim.
-    # budget: 3x 313s worst observed
-    timeout-minutes: 16
+    # 2026-09-11: 358s (run 34259782743) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 45s over the 313s claim.
+    # budget: 3x 358s worst observed
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3387,8 +3430,11 @@ jobs:
     # 300s predicted from java-target-classpath's nine builds (270s there;
     # locally the ten cost 158s, which is not the runner's figure), 292s
     # measured in the first run to carry it (31364390451); see `test`.
-    # budget: 3x 292s worst observed
-    timeout-minutes: 15
+    # 2026-09-11: 317s (run 34228544128) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 25s over the 292s claim.
+    # budget: 3x 317s worst observed
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3507,7 +3553,10 @@ jobs:
     # completed main runs since 09-02 is 526s (run 33748678694), which the
     # 496s claim was 30s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 526s worst observed
+    # 2026-09-11: 534s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 8s over the 526s claim.
+    # budget: 3x 534s worst observed
     timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
@@ -3581,12 +3630,10 @@ jobs:
   # the same one native-cli-diff.sh uses when DAWNC_BIN is unset. The recipe
   # lives in scripts/native-selfhost-tests.sh so that it runs on a laptop too.
   #
-  # This job was gates.yml's 37th (36 before); tile-golden's fourth and fifth
-  # shards and builtin-type's third and fourth have since made 41. It does not shorten
-  # the run and is not meant to: with 37 already queuing against an account
-  # ceiling of 20 runners, the span is set by the tail, and this job's
-  # projected 380s is well under the tallest claims (test 540s,
-  # prev-diff-native 526s).
+  # Adding this job did not shorten the run and was not meant to: with more
+  # jobs queuing than the account's ceiling of 20 runners, the span is set by
+  # the tail, and this job's projected 380s was well under the tallest claims
+  # of the day (test 540s, prev-diff-native 526s).
   native-selfhost-tests:
     runs-on: ubuntu-latest
     # No CI observation yet. Local, one machine, 2026-09-04: the script is
@@ -3679,8 +3726,11 @@ jobs:
     # pruning knife (e797abb0), 4s over the 313s claim.
     # 2026-09-06: 352s (run 34021875218) over the 12 completed main runs of
     # 09-05T11:40Z .. 09-06T08:26Z, 35s over the 317s claim.
-    # budget: 3x 352s worst observed
-    timeout-minutes: 18
+    # 2026-09-11: 397s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 45s over the 352s claim.
+    # budget: 3x 397s worst observed
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3697,8 +3747,11 @@ jobs:
     # 2026-09-04, post-prune window: 94s (run 33871426552) over the 20
     # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
     # pruning knife (e797abb0), 4s over the 90s claim.
-    # budget: 3x 94s combined worst observed
-    timeout-minutes: 5
+    # 2026-09-11: 107s (run 34206154371) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 13s over the 94s claim.
+    # budget: 3x 107s worst observed
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3707,38 +3760,6 @@ jobs:
           build: 'false'
       - name: dependency re-exec inherits the effective parent heap
         run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/dependency-heap-contract/run.py
-
-  # The extension grammar is editor behavior, not documentation. Exercise it
-  # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
-  # broken scope rule cannot hide behind the compiler toolchain setup.
-  editor-grammar:
-    runs-on: ubuntu-latest
-    # measured 6s; a floor, for the reason tree-policy gives.
-    # budget: floor (seconds-scale job)
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: npm
-          cache-dependency-path: editors/vscode/package-lock.json
-      - name: VS Code TextMate scope contract
-        working-directory: editors/vscode
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm test --silent
-
-      # The extension was publishable in principle and had never been packaged,
-      # which is how its manifest came to claim MIT in an Apache-2.0 repository
-      # and to point at an icon that did not exist. Packaging is the step that
-      # reads the manifest as the marketplace reads it, so it runs here rather
-      # than being remembered at publish time. The .vsix is not uploaded: only
-      # the maintainer's marketplace token can publish, and a build artifact
-      # nobody installs is not evidence of anything.
-      - name: the extension packages
-        working-directory: editors/vscode
-        run: npm run package
 
   # What a toolchain says when the std it loaded is not the std it shipped
   # with (#226). Every failure used to be one sentence, and on the native
@@ -3779,7 +3800,21 @@ jobs:
     # 2026-09-04, post-prune window: 255s (run 33788664118) over the 20
     # completed main runs of 09-03T17:42Z .. 09-04T12:10Z, all after the std
     # pruning knife (e797abb0), 40s over the 215s claim.
-    # budget: 3x 255s worst observed
+    # 2026-09-11: 250s (run 34259782743) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json).
+    #
+    # This job got smaller on a36b4a27 and this line does not yet show it.
+    # The dawnop-site corpus left `N vs N-1 differential` for nightly.yml:
+    # that step measured ~97s in CI, of which the clone and the three sweeps
+    # of backend-dawn are ~60s, so a window taken entirely after the move
+    # should read about 190s here and this line should then be ~190s with a
+    # 10-minute timeout. It is not written down yet for the reason
+    # native-diff-1's 2026-09-04 note gives: a claim is a claim about the
+    # worst run in the observation window, every run in this one still
+    # includes the corpus, and check-gate-budgets.py --observed refuses a
+    # claim under the window's maximum. Restate it from the first window with
+    # no pre-move run left in it.
+    # budget: 3x 250s worst observed
     timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
@@ -3823,8 +3858,11 @@ jobs:
     # and 206s measured across the three shards in the first run to carry them
     # (31389692620), so the runner costs less here than checker-corpus's ratio
     # predicted. All three sit well under native-diff's 589s critical path.
-    # budget: 3x 206s worst observed
-    timeout-minutes: 11
+    # 2026-09-11: 261s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 55s over the 206s claim.
+    # budget: 3x 261s worst observed
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3839,8 +3877,11 @@ jobs:
     # completed main runs since 09-02 is 227s (run 33708763790), which the
     # 206s claim was 21s under. scripts/gate-observations.py pulled it;
     # scripts/check-gate-budgets.py --observed is the audit that named it.
-    # budget: 3x 227s worst observed
-    timeout-minutes: 12
+    # 2026-09-11: 242s (run 34484938024) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 15s over the 227s claim.
+    # budget: 3x 242s worst observed
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -3851,7 +3892,10 @@ jobs:
 
   export-surface-3:
     runs-on: ubuntu-latest
-    # budget: 3x 206s worst observed
+    # 2026-09-11: 213s (run 34233296391) over the 25 completed main runs of
+    # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
+    # 7s over the 206s claim.
+    # budget: 3x 213s worst observed
     timeout-minutes: 11
     steps:
       - uses: actions/checkout@v4
@@ -3876,8 +3920,8 @@ jobs:
   # because a guard whose red has never been observed is not a guard; it
   # feeds every refusal shape (missing shard, dropped mutant, double-run,
   # shard-count disagreement, absent harness) through the checker and
-  # requires each to be refused. Artifacts are run-scoped, so release.yml
-  # reusing this workflow at a tag cannot cross-read a branch run's records.
+  # requires each to be refused. Artifacts are run-scoped, so no other run's
+  # records can be cross-read into this one.
   mutant-shards-complete:
     needs:
       - native-diff-1

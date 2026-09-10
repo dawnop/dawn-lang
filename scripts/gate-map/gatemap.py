@@ -184,7 +184,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
-WORKFLOWS = ["gates.yml", "ci.yml", "release.yml"]
+WORKFLOWS = ["gates.yml", "ci.yml", "release.yml", "editor-grammar.yml"]
 
 # Workflows that only run for a tag. Their gates are real, but they are not
 # what a branch push is measured against, so the report says so.

@@ -1,0 +1,68 @@
+name: editor-grammar
+
+# The VS Code extension's TextMate grammar, on the pushes that can change it.
+#
+# It lived in gates.yml until 2026-09-11 and ran on every push, which is the
+# arrangement gates.yml is for: a gate whose subject is the compiler cannot be
+# path-filtered, because almost every push touches selfhost/src. This one's
+# subject is not the compiler. `scripts/gate-map/gatemap.py
+# editors/vscode/package.json` returns this gate and nothing else, and
+# `gatemap.py selfhost/src/lex/lexer.dawn` reaches it only through the path
+# joins inside the JavaScript test, which is the grammar's own fixture set. In
+# the thirty main pushes before the move, editors/ was touched on none of them.
+#
+# gates.yml is a `workflow_call` file with no `on:` of its own, so a per-job
+# `paths:` filter is not expressible there. That is the only reason this is a
+# separate file rather than a filtered job.
+#
+# What leaves the every-push path: nothing that watches the compiler. The
+# grammar contract sees exactly the trees that carry a change to editors/, and
+# a push that changes editors/ still runs it before the change can land.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'editors/**'
+      - '.github/workflows/editor-grammar.yml'
+  pull_request:
+    paths:
+      - 'editors/**'
+      - '.github/workflows/editor-grammar.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: editor-grammar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The extension grammar is editor behavior, not documentation. Exercise it
+  # with VS Code's TextMate engine and Oniguruma WASM in a standalone job so a
+  # broken scope rule cannot hide behind the compiler toolchain setup.
+  editor-grammar:
+    runs-on: ubuntu-latest
+    # measured 6s; a floor, for the reason tree-policy gives in gates.yml.
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: VS Code TextMate scope contract
+        working-directory: editors/vscode
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test --silent
+
+      # The extension was publishable in principle and had never been packaged,
+      # which is how its manifest came to claim MIT in an Apache-2.0 repository
+      # and to point at an icon that did not exist. Packaging is the step that
+      # reads the manifest as the marketplace reads it, so it runs here rather
+      # than being remembered at publish time. The .vsix is not uploaded: only
+      # the maintainer's marketplace token can publish, and a build artifact
+      # nobody installs is not evidence of anything.
+      - name: the extension packages
+        working-directory: editors/vscode
+        run: npm run package
