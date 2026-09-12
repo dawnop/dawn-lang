@@ -26,6 +26,8 @@ def main():
         ('current-isolation', 'isolated: cx.frame.isolated', 'isolated: false'),
         ('current-test-mode', 'in_test: cx.in_test', 'in_test: false'),
         ('current-handler-cell', 'take_cell: cx.take_cell', 'take_cell: None'),
+        ('current-constant-cutoff', 'const_cutoff: cx.const_cutoff', 'const_cutoff: None'),
+        ('current-loop-jumps', 'loop_jumps: cx.loop_jumps', 'loop_jumps: set.empty()'),
         ('unpaired-body',
          'if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }',
          'if false { return None }'),
