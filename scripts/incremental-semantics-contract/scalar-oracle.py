@@ -33,8 +33,12 @@ def main():
          '            (Counts { ..count, reused: count.reused + 1 }, checked, tree)\n          }'),
         ('lost-current-symbols', '}, after, product.tree)',
          '}, Cx { ..after, syms: map.empty() }, product.tree)'),
-        ('stale-source', 'let moved = body_product.project(view, p, cx.next_id)?',
-         'let moved = BodyProduct { ..p, allocation_start: cx.next_id }'),
+        ('stale-source',
+         '  let moved = match cx.function_reads {\n'
+         '    None -> body_product.project_without_reads(view, p, cx.next_id)?\n'
+         '    Some(_) -> body_product.project(view, p, cx.next_id)?\n'
+         '  }',
+         '  let moved = BodyProduct { ..p, allocation_start: cx.next_id }'),
         ('header-only-ids', 'let view = View { ids: ids,',
          'let view = View { ids: allocation.reserver_ids(prepared.reserver),'),
         ('missing-local-symbols', 'symbols: saved.symbols,\n    assertion:',
