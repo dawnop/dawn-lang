@@ -156,11 +156,11 @@ fn row(index: Int, metric: String, nanos: Int) -> Unit !io =
 ## makes the split panic rather than report a split of something else.
 type Acc = { checked: Int, reused: Int, shape: Int, reval: Int, proj: Int, asm: Int }
 
-type Prior = { syntax: FnDecl, signature: Sig, product: Product,
+type Prior = { syntax: FnDecl, signature: Sig, product: Product, declaration: Int,
   binders: List[String], symbols: Map[Int, Sym] }
 type Prepared = { scope: ModuleKey, entries: Map[DeclKey, Prior], allowed: Map[DeclKey, Int],
-  reserver: allocation.Reserver, ids: relocate.Ids,
-  old_source: source_projection.Indexed, source: source_projection.Indexed }
+  reserver: allocation.Reserver,
+  old_tokens: source_projection.Tokens, tokens: source_projection.Tokens }
 
 fn primitive(t: Ty) -> Bool = match t {
   TyInt -> true, TyFloat -> true, TyBool -> true, TyUnit -> true, _ -> false
@@ -190,7 +190,7 @@ fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
 fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syntax(s) == h.syntax
 
 ## The record-time half of admission, mirrored from `scalar_replay.recorded`.
-fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
+fn recorded(prior: FnDecl, prior_sig: Sig, p: Product, declaration: Int) -> Option[Prior] = {
   if p.tree.sig != prior_sig || p.tree.name != prior.name ||
     p.signatures != [] || p.aliases != [] || len(p.bounds) != 0 ||
     p.diagnostics != [] { return None }
@@ -222,15 +222,15 @@ fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
   }
   if set.len(written) != map.len(symbols) { return None }
   let names = scalar_shape.binders(prior.body, prior_sig.param_names)?
-  Some(Prior { syntax: prior, signature: prior_sig, product: p,
+  Some(Prior { syntax: prior, signature: prior_sig, product: p, declaration: declaration,
     binders: names, symbols: symbols })
 }
 
 fn admitted_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded) -> Map[DeclKey, Prior] = {
-  var originals: Map[DeclKey, FnDecl] = map.empty()
+  var originals: Map[DeclKey, (FnDecl, Int)] = map.empty()
   for entry in identity.declarations(scope, old.syntax) {
     match old.syntax.decls[entry.declaration] {
-      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
+      DFn(d) -> { originals = map.insert(originals, entry.key, (d, entry.declaration)) }
       _ -> ()
     }
   }
@@ -243,11 +243,16 @@ fn admitted_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded) -> Ma
           entries = map.remove(entries, k)
         } else {
           seen = set.insert(seen, k)
-          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
-            match recorded(prior, prior_sig, product) {
-              Some(value) -> { entries = map.insert(entries, k, value) }
-              None -> ()
+          match map.get(originals, k) {
+            Some((declared, declaration)) -> {
+              if declared == prior && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
+                match recorded(prior, prior_sig, product, declaration) {
+                  Some(value) -> { entries = map.insert(entries, k, value) }
+                  None -> ()
+                }
+              }
             }
+            None -> ()
           }
         }
       }
@@ -260,24 +265,26 @@ fn admitted_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded) -> Ma
 ## Per-body admission guard, split out so its cost can be read separately.
 ## Returns the reserved relocation and the recorded local symbols only when
 ## every structural precondition of replay holds.
-type Shaped = { prior: FnDecl, product: Product, symbols: Map[Int, Sym], ids: relocate.Ids }
+type Shaped = { prior: FnDecl, product: Product, symbols: Map[Int, Sym], ids: relocate.Ids,
+  prior_declaration: Int, declaration_new: Int }
 
 fn shape_ok(p: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Shaped] = {
   if cx.diags != [] { return None }
   let bound = parameters(d, sig)?
   let key = DeclKey { scope: p.scope, path: [Named(FunctionDecl, d.name)] }
-  if not map.has(p.allowed, key) { return None }
+  let declaration = map.get(p.allowed, key)?
   let saved = map.get(p.entries, key)?
   let prior = saved.syntax
   let prior_sig = saved.signature
-  if relocate.signature(p.ids, prior_sig) != Some(sig) { return None }
+  if prior_sig.param_names != sig.param_names { return None }
   if not scalar_shape.same(prior.body, d.body, bound) { return None }
   for name in saved.binders {
     if map.has(cx.module_aliases, name) { return None }
   }
   let ids = allocation.reserved_plan(p.reserver, key, saved.product.allocation_start,
     saved.product.allocation_count, cx.next_id, prior_sig, sig, [])?
-  Some(Shaped { prior: prior, product: saved.product, symbols: saved.symbols, ids: ids })
+  Some(Shaped { prior: prior, product: saved.product, symbols: saved.symbols, ids: ids,
+    prior_declaration: saved.declaration, declaration_new: declaration })
 }
 
 fn timed_function(p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
@@ -291,12 +298,16 @@ fn timed_function(p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
     Some(saved) -> {
       let prior = saved.prior
       let t2 = System.nanoTime()
-      let positions = source_projection.between_indexed(p.old_source, p.source, prior.lo, prior.hi, d.lo, d.hi)
+      let positions = source_projection.pair(p.old_tokens, p.tokens,
+        saved.prior_declaration, saved.declaration_new, prior.lo, prior.hi, d.lo, d.hi)
       let moved = match positions {
         None -> None
         Some(pos) -> {
-          let view = View { ids: saved.ids, positions: pos.starts, ends: pos.ends,
-            symbols: saved.symbols, assertion: (text, lo, hi) => source_projection.assertion(pos, text, lo, hi),
+          let view = View { ids: saved.ids,
+            positions: (at) => source_projection.start_at(pos, at),
+            ends: (at) => source_projection.end_at(pos, at),
+            symbols: saved.symbols,
+            assertion: (text, lo, hi) => source_projection.assertion_at(pos, text, lo, hi),
             callee: (owner, name, builtin, trait_id) => None }
           body_product.project(view, saved.product, cx.next_id)
         }
@@ -365,8 +376,8 @@ fn instrumented_replay(scope: ModuleKey, old_headers: allocation.Table,
   }
   let q1 = System.nanoTime()
   let prepared = Prepared { scope: scope, entries: entries, allowed: allowed,
-    reserver: prepared_reserver, ids: allocation.reserver_ids(prepared_reserver),
-    old_source: source_snapshot.indexed(old_source), source: source_snapshot.indexed(source) }
+    reserver: prepared_reserver,
+    old_tokens: source_snapshot.tokens(old_source), tokens: source_snapshot.tokens(source) }
   let cold: BodyExecutor[Acc] = checker.cold_body_executor()
   let executor: BodyExecutor[Acc] = BodyExecutor {
     function: (acc, cx, d, sig) => timed_function(prepared, acc, cx, d, sig, cold),

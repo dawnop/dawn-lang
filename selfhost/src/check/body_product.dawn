@@ -19,7 +19,7 @@ use check/semantic_reads.{UnificationRead, InferenceBindings, FunctionRead, Name
   AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
 use check/relocate_tree
-use check/relocate_tree.{View}
+use check/relocate_tree.{View, from_map}
 use check/relocate_header
 use check/relocate_header.{HeaderView}
 
@@ -236,7 +236,7 @@ fn projected_changes[K, V, L, W](writes: List[Change[K, V]], key: fn(K) -> Optio
 
 fn projected_symbol(v: View, s: Sym) -> Option[Sym] = {
   let next = relocate.sym(v.ids, s)?
-  Some(Sym { ..next, dlo: map.get(v.positions, s.dlo)?, dhi: map.get(v.ends, s.dhi)? })
+  Some(Sym { ..next, dlo: v.positions(s.dlo)?, dhi: v.ends(s.dhi)? })
 }
 
 fn projected_bounds(v: View, bounds: List[Int]) -> Option[List[Int]] = {
@@ -266,7 +266,7 @@ fn projected_frame(v: View, f: Frame) -> Option[Frame] = {
     let moved = relocate.effect_row(v.ids, e)?
     if map.has(witnesses, moved) { return None }
     let (lo, hi, name) = span
-    witnesses = map.insert(witnesses, moved, (map.get(v.positions, lo)?, map.get(v.ends, hi)?, name))
+    witnesses = map.insert(witnesses, moved, (v.positions(lo)?, v.ends(hi)?, name))
   }
   let signature = match f.current_sig {
     Some(s) -> Some(relocate.signature(v.ids, s)?)
@@ -326,7 +326,7 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   let bounds = projected_changes(p.bounds, id => relocate.type_var(v.ids, id), bs => projected_bounds(v, bs))?
   var diagnostics: List[Diag] = []
   for d in p.diagnostics {
-    diagnostics = diagnostics ++ [Diag { ..d, lo: map.get(v.positions, d.lo)?, hi: map.get(v.ends, d.hi)? }]
+    diagnostics = diagnostics ++ [Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }]
   }
   var tparams: Map[String, Ty] = map.empty()
   for (name, t) in map.entries(p.tparams) { tparams = map.insert(tparams, name, relocate.ty(v.ids, t)?) }
@@ -367,7 +367,7 @@ test "body product constants project their real tree and share state admission" 
   let saved = capture_constant(before, after, constant).expect("constant capture")
   let none: Map[Int, Int] = map.empty()
   let ids = relocate.new(none, none, map.from([(1, 2)]), none, map.from([(10, 40)])).expect("constant ids")
-  let v = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+  let v = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => None }
   let moved = project_constant(v, saved, 40).expect("constant projection")
@@ -377,7 +377,7 @@ test "body product constants project their real tree and share state admission" 
   let assembled = assemble(Cx { ..before, next_id: 40 }, moved).expect("constant state assembly")
   assert assembled.next_id == 41 && map.get(assembled.syms, 40).expect("constant symbol").ty == TyVar("T", 2)
   assert assembled.current_tparams == map.from([("T", TyVar("T", 2))])
-  assert project_constant(View { ..v, ends: map.empty() }, saved, 40) == None
+  assert project_constant(View { ..v, ends: from_map(none) }, saved, 40) == None
   match assemble(before, moved) { Some(_) -> { assert false }, None -> () }
   assert capture_constant(before, Cx { ..after, owner_class: Some("foreign") }, constant) == None
 }
@@ -398,7 +398,7 @@ test "body product separates alias declaration positions from body positions" {
   let p = capture(before, after, f).expect("capture source read")
   let empty: Map[Int, Int] = map.empty()
   let ids = relocate.new(empty, empty, empty, empty, empty).expect("source fixture ids")
-  let view = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+  let view = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let header = HeaderView { ids: ids,
@@ -525,7 +525,7 @@ test "body product restores symbol insertion order after a binding permutation" 
   let p = capture(before, after, f).expect("capture permutation")
   let none: Map[Int, Int] = map.empty()
   let ids = relocate.new(none, none, none, none, map.from([(10, 41), (11, 40)])).expect("swapped IDs")
-  let view = View { ids: ids, positions: map.from([(0, 0)]), ends: map.from([(1, 1)]),
+  let view = View { ids: ids, positions: from_map(map.from([(0, 0)])), ends: from_map(map.from([(1, 1)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let projected = project(view, p, 40).expect("project permutation")
@@ -614,7 +614,7 @@ test "body product projects every state reference and the whole allocation inter
   let none: Map[Int, Int] = map.empty()
   let locals = map.from([(10, 40), (11, 41)])
   let ids = relocate.new(map.from([(4, 44), (3, 43)]), map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), locals).expect("projection ids")
-  let view = View { ids: ids, positions: map.from([(0, 100)]), ends: map.from([(1, 104)]),
+  let view = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let q = project(view, p, 40).expect("project product")
@@ -691,7 +691,7 @@ test "body product projects every state reference and the whole allocation inter
   assert cx.frame.used_effects == [EffVar("e", 33)]
   assert cx.frame.eff_witness == map.from([(EffVar("e", 33), (100, 104, "callee"))])
   assert cx.diags == [Diag { msg: "body", lo: 100, hi: 104, hint: "" }]
-  assert project(View { ..view, ends: none }, p, 40) == None
+  assert project(View { ..view, ends: from_map(none) }, p, 40) == None
   let missing = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), map.from([(10, 40)])).expect("partial ids")
   assert project(View { ..view, ids: missing }, p, 40) == None
   assert project(view, p, 41) == None

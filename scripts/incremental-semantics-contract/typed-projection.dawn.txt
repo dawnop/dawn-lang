@@ -15,7 +15,7 @@ use compiler/check/relocate
 use compiler/check/relocate_tree
 use compiler/check/relocate_header
 use compiler/check/relocate_header.{HeaderView}
-use compiler/check/relocate_tree.{View}
+use compiler/check/relocate_tree.{View, from_map}
 use compiler/check/source_projection
 use compiler/check/body_product
 use compiler/check/header_product
@@ -41,7 +41,7 @@ pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) 
     p = p + 1
   }
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
-  let v = View { ids: ids, positions: positions, ends: positions, assertion: (src, lo, hi) => Some(src), symbols: after.syms,
+  let v = View { ids: ids, positions: from_map(positions), ends: from_map(positions), assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("typed projection failed: " ++ f.name)
 }
@@ -59,7 +59,7 @@ pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int,
   let source = source_projection.between(old_text, new_text, old_lo, old_hi, new_lo, new_hi)
     .expect("source projection: " ++ f.name)
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
-  let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+  let v = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("source-aware typed projection failed: " ++ f.name)
@@ -78,7 +78,7 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
     id = id + 1
   }
   let ids = relocate.new(stable, stable, stable, stable, stable).expect("state relocation tables")
-  let view = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+  let view = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("state capture: " ++ body.name)
@@ -490,7 +490,7 @@ fn value_module_sample() -> ModuleTrial !io = {
         let plan = allocation.constant_plan(old_table, next_table, key, p.allocation_start,
           p.allocation_count, replayed.next_id, p.tree.ty, ty).expect("constant allocation")
         let source = source_projection.between(text, edited, p.tree.lo, p.tree.hi, d.lo, d.hi).expect("constant source")
-        let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: saved.after.syms,
+        let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: saved.after.syms,
           assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
           callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
         let projected = body_product.project_constant(view, p, replayed.next_id).expect("constant projection")
@@ -515,7 +515,7 @@ fn value_module_sample() -> ModuleTrial !io = {
           _ -> panic("prior test role")
         }
         let source = source_projection.between(text, edited, prior.lo, prior.hi, d.lo, d.hi).expect("test source")
-        let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: saved.after.syms,
+        let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: saved.after.syms,
           assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
           callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
         let projected = body_product.project(view, p, replayed.next_id).expect("test projection")
@@ -609,7 +609,7 @@ fn method_module_sample() -> ModuleTrial !io = {
     let (old_lo, old_hi) = method_span(prior)
     let (next_lo, next_hi) = method_span(entry)
     let source = source_projection.between(text, edited, old_lo, old_hi, next_lo, next_hi).expect("method source")
-    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: body.after.syms,
+    let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: body.after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
       callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
     let projected = body_product.project(view, body.product, replayed.next_id).expect("method projection")
@@ -680,7 +680,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
       body.product.tree.ev_syms).expect("named allocation")
     let source = source_projection.between(text, edited, prior.syntax.lo, prior.syntax.hi,
       entry.syntax.lo, entry.syntax.hi).expect("named source")
-    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: body.after.syms,
+    let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: body.after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
       callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
     let projected = body_product.project(view, body.product, replayed.next_id).expect("named projection")
@@ -746,7 +746,7 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   let plan = allocation.body_plan(old_table, new_table, owner, before.next_id, after.next_id - before.next_id,
     next.next_id, body.sig, nsigs[0], body.ev_syms).expect("import body plan")
   let source = source_projection.between(text, text, decl.lo, decl.hi, decl.lo, decl.hi).expect("import source")
-  let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+  let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("import body capture")
@@ -800,7 +800,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
     let key = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name), Named(ParameterDefault, p.name)] }
     let plan = allocation.body_plan(old_table, new_table, key, old_cx.next_id, after.next_id - old_cx.next_id,
       new_cx.next_id, sig, new_sig, []).expect("default allocation")
-    let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+    let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
     let saved = body_product.capture(old_cx, after, fn_value).expect("default capture")
@@ -819,7 +819,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
   let owner = DeclKey { scope: scope, path: [Named(FunctionDecl, decl.name)] }
   let main_plan = allocation.body_segment_plan(old_table, new_table, owner,
     old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, sigs[0], nsigs[0], old_body.ev_syms).expect("main allocation")
-  let main_view = View { ids: main_plan.ids, positions: source.starts, ends: source.ends, symbols: old_after.syms,
+  let main_view = View { ids: main_plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: old_after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let main_saved = body_product.capture(old_cx, old_after, old_body).expect("main capture")
@@ -894,7 +894,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
         after.next_id - before.next_id, replayed.next_id, old_sigs[i], new_sigs[i], body.ev_syms).expect("inferred allocation")
       let source = source_projection.between(text, edited,
         old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi).expect("inferred source")
-      let view = View { ids: plan.ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+      let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
         assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
         callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
       let saved = body_product.capture(before, after, body).expect("inferred capture")
@@ -1084,7 +1084,7 @@ pub fn header_sample() -> HeaderTrial !io = {
     impl_index = impl_index + 1
   }
   let source = source_projection.between(old_text, new_text, decl.lo, decl.hi, ndecl.lo, ndecl.hi).expect("header source view")
-  let v = View { ids: ids, positions: source.starts, ends: source.ends, symbols: after.syms,
+  let v = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
     callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
   let product = body_product.capture(before, after, saved).expect("header body capture")

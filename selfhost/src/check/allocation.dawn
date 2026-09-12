@@ -221,24 +221,32 @@ pub fn body_segment_plan(old_headers: Table, next_headers: Table, owner: DeclKey
 ## once: the header relocation, its reverse index, and the set of IDs each
 ## table already owns per domain. Reserving one interval then costs the
 ## interval, not the module.
-type ReserverData = { ids: Ids, prepared: relocate.Extender,
-  old_owned: Map[(Domain, Int), Bool], next_owned: Map[(Domain, Int), Bool] }
+## Only the three domains a body interval reserves are indexed: nominal and
+## trait IDs never receive a temporary, so owning one cannot collide.
+type Owned = { types: Map[Int, Bool], effects: Map[Int, Bool], locals: Map[Int, Bool] }
+type ReserverData = { ids: Ids, prepared: relocate.Extender, old_owned: Owned, next_owned: Owned }
 pub opaque type Reserver = ReserverData
 
+fn owned(t: Table) -> Owned = {
+  let data: Data = t
+  var types: Map[Int, Bool] = map.empty()
+  var effects: Map[Int, Bool] = map.empty()
+  var locals: Map[Int, Bool] = map.empty()
+  for (binding, id) in map.entries(data.bindings) {
+    match binding.domain {
+      TypeParameter -> { types = map.insert(types, id, true) }
+      EffectParameter -> { effects = map.insert(effects, id, true) }
+      LocalSymbol -> { locals = map.insert(locals, id, true) }
+      _ -> ()
+    }
+  }
+  Owned { types: types, effects: effects, locals: locals }
+}
+
 pub fn reserver(old_headers: Table, next_headers: Table) -> Option[Reserver] = {
-  let a: Data = old_headers
-  let b: Data = next_headers
   let ids = between(old_headers, next_headers)?
-  var old_owned: Map[(Domain, Int), Bool] = map.empty()
-  for (binding, id) in map.entries(a.bindings) {
-    old_owned = map.insert(old_owned, (binding.domain, id), true)
-  }
-  var next_owned: Map[(Domain, Int), Bool] = map.empty()
-  for (binding, id) in map.entries(b.bindings) {
-    next_owned = map.insert(next_owned, (binding.domain, id), true)
-  }
   Some(ReserverData { ids: ids, prepared: relocate.extender(ids),
-    old_owned: old_owned, next_owned: next_owned })
+    old_owned: owned(old_headers), next_owned: owned(next_headers) })
 }
 
 ## The header relocation this reserver was built from, before any interval.
@@ -258,8 +266,9 @@ pub fn reserved_plan(r: Reserver, owner: DeclKey, start: Int, count: Int, target
   for present in next_sig.param_defaults { if present { return None } }
   if start < 0 || count < 0 || target < 0 || start + count < start || target + count < target { return None }
   let data: ReserverData = r
-  if relocate.signature(data.ids, old_sig) != Some(next_sig) { return None }
-  let order = relocate.evidence_permutation(data.ids, old_sig)?
+  let moved = relocate.signature(data.ids, old_sig)?
+  if moved != next_sig { return None }
+  let order = relocate.evidence_order(data.ids, old_sig, moved)?
   if len(evidence) != len(order) { return None }
   var moved_evidence: Map[Int, Int] = map.empty()
   var index = 0
@@ -275,12 +284,12 @@ pub fn reserved_plan(r: Reserver, owner: DeclKey, start: Int, count: Int, target
   var offset = 0
   while offset < count {
     let moved_local = map.get(moved_evidence, start + offset).unwrap_or(target + offset)
-    if map.has(data.old_owned, (TypeParameter, start + offset)) ||
-      map.has(data.old_owned, (EffectParameter, start + offset)) ||
-      map.has(data.old_owned, (LocalSymbol, start + offset)) ||
-      map.has(data.next_owned, (TypeParameter, target + offset)) ||
-      map.has(data.next_owned, (EffectParameter, target + offset)) ||
-      map.has(data.next_owned, (LocalSymbol, moved_local)) { return None }
+    if map.has(data.old_owned.types, start + offset) ||
+      map.has(data.old_owned.effects, start + offset) ||
+      map.has(data.old_owned.locals, start + offset) ||
+      map.has(data.next_owned.types, target + offset) ||
+      map.has(data.next_owned.effects, target + offset) ||
+      map.has(data.next_owned.locals, moved_local) { return None }
     types = map.insert(types, start + offset, target + offset)
     effects = map.insert(effects, start + offset, target + offset)
     locals = map.insert(locals, start + offset, moved_local)

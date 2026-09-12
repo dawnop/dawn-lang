@@ -60,15 +60,20 @@ pub fn callee_signature(cx: Cx, owner: Option[String], name: String, builtin: Bo
 ## A missing boundary, symbol or declaration invalidates the saved product.
 pub type View = {
   ids: Ids,
-  positions: Map[Int, Int],
-  ends: Map[Int, Int],
+  positions: fn(Int) -> Option[Int],
+  ends: fn(Int) -> Option[Int],
   assertion: fn(Option[String], Int, Int) -> Option[Option[String]],
   symbols: Map[Int, Sym],
   callee: fn(Option[String], String, Bool, Option[Int]) -> Option[Sig]
 }
 
-fn position(v: View, old: Int) -> Option[Int] = map.get(v.positions, old)
-fn end_position(v: View, old: Int) -> Option[Int] = map.get(v.ends, old)
+fn position(v: View, old: Int) -> Option[Int] = v.positions(old)
+fn end_position(v: View, old: Int) -> Option[Int] = v.ends(old)
+
+## A boundary lookup backed by an explicit table. A projection that already
+## knows its token boundaries answers directly instead of writing one entry
+## per code point first.
+pub fn from_map(m: Map[Int, Int]) -> fn(Int) -> Option[Int] = (at) => map.get(m, at)
 
 fn local_name(v: View, id: Int, old: String) -> Option[String] = {
   let saved = map.get(v.symbols, id)?
@@ -470,8 +475,8 @@ fn fixture_view() -> View = {
     map.insert(swap, 0, 0), swap, map.insert(map.insert(empty, 1, 91), 2, 92)).expect("valid fixture IDs")
   let symbol = Sym { name: "x", ty: TyInt, mutable: false, dlo: 10, dhi: 11,
     dict_of: None, ev_of: None, cell_of: None }
-  View { ids: ids, positions: map.insert(map.insert(empty, 10, 110), 11, 115),
-    ends: map.insert(map.insert(empty, 10, 110), 11, 115), assertion: (src, lo, hi) => Some(src),
+  View { ids: ids, positions: from_map(map.insert(map.insert(empty, 10, 110), 11, 115)),
+    ends: from_map(map.insert(map.insert(empty, 10, 110), 11, 115)), assertion: (src, lo, hi) => Some(src),
     symbols: map.insert(map.empty(), 1, symbol), callee: (owner, name, builtin, tr) => Some(fixture_signature()) }
 }
 

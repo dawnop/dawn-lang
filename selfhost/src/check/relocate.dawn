@@ -298,8 +298,14 @@ pub fn evidence_slot(ids: Ids, slot: EvidenceRole) -> Option[EvidenceRole] =
 ## For each new ABI slot, return the corresponding old operand index.
 ## Operands themselves must be relocated separately, without re-evaluation.
 ## Include parameter-bound effect variables even for a pure function body.
-pub fn evidence_permutation(ids: Ids, s: Sig) -> Option[List[Int]] = {
-  let target = evidence_slots(signature(ids, s)?)
+pub fn evidence_permutation(ids: Ids, s: Sig) -> Option[List[Int]] =
+  evidence_order(ids, s, signature(ids, s)?)
+
+## The same permutation, for a caller that has already relocated the
+## signature. Relocating it a second time is the largest part of the work and
+## the answer is the same value.
+pub fn evidence_order(ids: Ids, s: Sig, moved: Sig) -> Option[List[Int]] = {
+  let target = evidence_slots(moved)
   var source: List[EvidenceRole] = []
   for slot in evidence_slots(s) { source = source ++ [evidence_slot(ids, slot)?] }
   if len(source) != len(target) { return None }

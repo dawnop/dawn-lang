@@ -5,7 +5,7 @@
 use std/map
 use std/str
 use front/lexer
-use front/token.{Token, NEWLINE, EOF}
+use front/token.{Token, TokKind, NEWLINE, EOF}
 
 pub type Projection = {
   starts: Map[Int, Int], ends: Map[Int, Int],
@@ -38,6 +38,175 @@ pub fn between_indexed(old: Indexed, next: Indexed, old_lo: Int, old_hi: Int,
   Some(Projection { starts: starts, ends: ends, old_text: a.text, new_text: b.text,
     old_lo: old_lo, old_hi: old_hi, new_lo: new_lo, new_hi: new_hi })
 }
+
+## One declaration's token facts, taken once for the revision that owns them.
+##
+## `between` re-lexes both declaration slices on every admitted body and then
+## writes one map entry per code point, twice over. Both halves are
+## per-revision facts wearing a per-pair disguise: a token's kind, spelling
+## and boundaries belong to one text. Taking them once per revision leaves the
+## pairing with two list comparisons and a binary search per relocated
+## position.
+##
+## `texts` is each token's source spelling. The lexer builds every token's
+## `text` by copying the code points of `[lo, hi)`, which is the same slice
+## `between` compares; construction re-checks the width so a token whose text
+## is not its span is refused rather than trusted.
+pub type Slice = { lo: Int, hi: Int, kinds: List[TokKind], texts: List[String],
+  los: List[Int], his: List[Int] }
+
+type TokensData = { text: String, slices: Map[Int, Slice] }
+
+## One revision's declaration token facts. The representation stays private
+## because a slice is only meaningful beside the text it was lexed from.
+pub opaque type Tokens = TokensData
+
+## The piecewise relocation of one paired declaration range: one linear piece
+## per token, which is exactly the mapping `between` materializes per code
+## point. `moved` holds the new start of the token at the same index.
+pub type Coords = { old_text: String, new_text: String,
+  old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int,
+  los: List[Int], his: List[Int], moved: List[Int] }
+
+## Lex one revision once and keep the tokens of each named declaration range.
+## `spans` is `(declaration index, lo, hi)`, ascending and disjoint; a range
+## that does not begin and end on token boundaries keeps no slice, so a
+## consumer asking for it is refused rather than given a partial lex.
+pub fn tokens_of(indexed: Indexed, spans: List[(Int, Int, Int)]) -> Option[Tokens] = {
+  let data: IndexedData = indexed
+  let (all, diagnostics) = lexer.lex(data.text)
+  if len(diagnostics) != 0 { return None }
+  var kept: List[Token] = []
+  for t in all {
+    if t.kind != NEWLINE && t.kind != EOF {
+      if t.hi - t.lo != str.len(t.text) { return None }
+      kept = kept ++ [t]
+    }
+  }
+  var slices: Map[Int, Slice] = map.empty()
+  var cursor = 0
+  var previous = 0
+  for (declaration, lo, hi) in spans {
+    if lo < previous || hi < lo || hi > len(data.cps) { return None }
+    previous = hi
+    while cursor < len(kept) && kept[cursor].hi <= lo { cursor = cursor + 1 }
+    var i = cursor
+    var kinds: List[TokKind] = []
+    var texts: List[String] = []
+    var los: List[Int] = []
+    var his: List[Int] = []
+    var aligned = true
+    while i < len(kept) && kept[i].lo < hi {
+      let t = kept[i]
+      if t.lo < lo || t.hi > hi { aligned = false }
+      kinds = kinds ++ [t.kind]
+      texts = texts ++ [t.text]
+      los = los ++ [t.lo]
+      his = his ++ [t.hi]
+      i = i + 1
+    }
+    if aligned {
+      slices = map.insert(slices, declaration, Slice { lo: lo, hi: hi, kinds: kinds,
+        texts: texts, los: los, his: his })
+    }
+  }
+  Some(TokensData { text: data.text, slices: slices })
+}
+
+fn floor_index(xs: List[Int], value: Int) -> Int = {
+  var low = 0
+  var high = len(xs) - 1
+  var found = -1
+  while low <= high {
+    let mid = low + (high - low) / 2
+    if xs[mid] <= value {
+      found = mid
+      low = mid + 1
+    } else { high = mid - 1 }
+  }
+  found
+}
+
+fn ceil_index(xs: List[Int], value: Int) -> Int = {
+  var low = 0
+  var high = len(xs) - 1
+  var found = -1
+  while low <= high {
+    let mid = low + (high - low) / 2
+    if xs[mid] >= value {
+      found = mid
+      high = mid - 1
+    } else { low = mid + 1 }
+  }
+  found
+}
+
+fn token_start(c: Coords, old: Int) -> Option[Int] = {
+  let i = floor_index(c.los, old)
+  if i < 0 || old >= c.his[i] { return None }
+  Some(c.moved[i] + old - c.los[i])
+}
+
+fn token_end(c: Coords, old: Int) -> Option[Int] = {
+  let i = ceil_index(c.his, old)
+  if i < 0 || old <= c.los[i] { return None }
+  Some(c.moved[i] + old - c.los[i])
+}
+
+## The start boundary `old` moves to, or none when no token covers it. The
+## declaration's own start answers for itself, as `between`'s final insert does.
+pub fn start_at(c: Coords, old: Int) -> Option[Int] = match token_start(c, old) {
+  Some(moved) -> Some(moved)
+  None -> if old == c.old_lo { Some(c.new_lo) } else { None }
+}
+
+pub fn end_at(c: Coords, old: Int) -> Option[Int] = match token_end(c, old) {
+  Some(moved) -> Some(moved)
+  None -> if old == c.old_hi { Some(c.new_hi) } else { None }
+}
+
+## Pair two already-lexed declaration ranges. Equal kinds and equal spellings
+## are the proof, the same one `between` makes token by token; the ranges are
+## named by declaration so one revision's slice cannot answer for another's.
+## A declaration boundary that falls inside a token must move to the paired
+## boundary, which is the one conflict `between`'s checked inserts can report.
+pub fn pair(old: Tokens, next: Tokens, old_declaration: Int, new_declaration: Int,
+  old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int) -> Option[Coords] = {
+  let a: TokensData = old
+  let b: TokensData = next
+  let x = map.get(a.slices, old_declaration)?
+  let y = map.get(b.slices, new_declaration)?
+  if x.lo != old_lo || x.hi != old_hi || y.lo != new_lo || y.hi != new_hi { return None }
+  if x.kinds != y.kinds || x.texts != y.texts { return None }
+  let c = Coords { old_text: a.text, new_text: b.text,
+    old_lo: old_lo, old_hi: old_hi, new_lo: new_lo, new_hi: new_hi,
+    los: x.los, his: x.his, moved: y.los }
+  match token_start(c, old_lo) {
+    Some(moved) -> if moved != new_lo { return None }
+    None -> ()
+  }
+  match token_end(c, old_hi) {
+    Some(moved) -> if moved != new_hi { return None }
+    None -> ()
+  }
+  Some(c)
+}
+
+## Parser stores the exact condition substring ending at the assertion's hi.
+## The paired form of `assertion`, reading the same coordinates.
+pub fn assertion_at(c: Coords, src: Option[String], lo: Int, hi: Int) -> Option[Option[String]] =
+  match src {
+    None -> Some(None)
+    Some(text) -> {
+      let start = hi - str.len(text)
+      if lo < c.old_lo || hi > c.old_hi || start < lo || start > hi ||
+        str.slice(c.old_text, start, hi) != text { return None }
+      let nlo = start_at(c, start)?
+      let nhi = end_at(c, hi)?
+      if nlo < c.new_lo || nhi > c.new_hi || nhi < nlo { return None }
+      Some(Some(str.slice(c.new_text, nlo, nhi)))
+    }
+  }
 
 fn tokens(text: String, lo: Int, hi: Int) -> Option[List[Token]] = {
   if lo < 0 || hi < lo || hi > str.len(text) { return None }
@@ -138,4 +307,58 @@ test "source projection indexed ranges agree with whole source coordinates" {
     assert between_indexed(a, b, lo, hi, nlo, nhi) == between(old, next, lo, hi, nlo, nhi)
   }
   assert between_indexed(index("x+1"), index("x+2"), 0, 3, 0, 3) == None
+}
+
+test "source projection token slices keep every lexer span and spelling" {
+  let text = "fn f(x: Int) -> Int = {\n let a = \"s t\"\n let b = 'c'\n let d = 1.5e3\n let e = x >= 1 && x != 2\n x\n}\n"
+  let (all, diagnostics) = lexer.lex(text)
+  assert diagnostics == []
+  let cps = code_points(text)
+  # Every token's `text` is the source slice of its own span. The paired
+  # projection compares spellings through that field instead of re-slicing.
+  for t in all {
+    if t.kind != NEWLINE && t.kind != EOF {
+      assert t.text == lexer.slice_cps(cps, t.lo, t.hi)
+      assert t.hi - t.lo == str.len(t.text)
+    }
+  }
+}
+
+test "source projection paired ranges agree with the token comparison" {
+  let old = "# 🌅\nfn answer(x: Int) -> Int = {\n let y = x+1\n y * 2\n}\n"
+  let next = "# λ🌅 moved\n\nfn answer(x: Int) -> Int = {\n let y = x + 1\n y * 2\n}\n"
+  let old_lo = 4
+  let old_hi = str.len(old)
+  let new_lo = 12
+  let new_hi = str.len(next)
+  let a = index(old)
+  let b = index(next)
+  let left = tokens_of(a, [(0, old_lo, old_hi)]).expect("recorded tokens")
+  let right = tokens_of(b, [(0, new_lo, new_hi)]).expect("candidate tokens")
+  let coords = pair(left, right, 0, 0, old_lo, old_hi, new_lo, new_hi).expect("paired range")
+  let oracle = between(old, next, old_lo, old_hi, new_lo, new_hi).expect("token projection")
+  var q = old_lo - 2
+  while q <= old_hi + 2 {
+    assert start_at(coords, q) == map.get(oracle.starts, q)
+    assert end_at(coords, q) == map.get(oracle.ends, q)
+    q = q + 1
+  }
+  assert assertion_at(coords, Some("x+1"), old_lo, old_hi) ==
+    assertion(oracle, Some("x+1"), old_lo, old_hi)
+  assert assertion_at(coords, None, old_lo, old_hi) == Some(None)
+  assert assertion_at(coords, Some("nope"), old_lo, old_hi) == None
+  # A changed spelling and a changed token count are refused, as `between`
+  # refuses them; an unknown declaration index has no slice to answer with.
+  let renamed = "fn answer(x: Int) -> Int = {\n let z = x + 1\n z * 2\n}\n"
+  let changed = index(renamed)
+  let other = tokens_of(changed, [(0, 0, str.len(renamed))]).expect("renamed tokens")
+  assert pair(left, other, 0, 0, old_lo, old_hi, 0, str.len(renamed)) == None
+  assert between(old, renamed, old_lo, old_hi, 0, str.len(renamed)) == None
+  assert pair(left, right, 1, 0, old_lo, old_hi, new_lo, new_hi) == None
+  assert pair(left, right, 0, 0, old_lo, old_hi - 1, new_lo, new_hi) == None
+  # A range that cuts a token keeps no slice at all.
+  assert match tokens_of(a, [(0, old_lo + 1, old_hi)]) {
+    Some(cut) -> pair(cut, right, 0, 0, old_lo + 1, old_hi, new_lo, new_hi) == None
+    None -> false
+  }
 }

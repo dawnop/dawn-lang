@@ -13,10 +13,11 @@
 # the tree in a snapshot is the tree of its own text by construction, so a
 # consumer only has to compare it with the headers it was given.
 use front/parser
-use front/ast.{Module}
+use front/ast.{Module, DFn}
 use check/source_projection
 
-type SnapshotData = { syntax: Module, indexed: source_projection.Indexed }
+type SnapshotData = { syntax: Module, indexed: source_projection.Indexed,
+  tokens: source_projection.Tokens }
 
 ## One revision's replay inputs. The representation stays private because the
 ## pairing is the whole guarantee: no caller can put one revision's tree
@@ -29,7 +30,18 @@ pub opaque type Snapshot = SnapshotData
 pub fn of(text: String) -> Option[Snapshot] = {
   let (syntax, diagnostics) = parser.parse_module(text)
   if diagnostics != [] { return None }
-  Some(SnapshotData { syntax: syntax, indexed: source_projection.index(text) })
+  let indexed = source_projection.index(text)
+  var spans: List[(Int, Int, Int)] = []
+  var declaration = 0
+  for decl in syntax.decls {
+    match decl {
+      DFn(d) -> { spans = spans ++ [(declaration, d.lo, d.hi)] }
+      _ -> ()
+    }
+    declaration = declaration + 1
+  }
+  let tokens = source_projection.tokens_of(indexed, spans)?
+  Some(SnapshotData { syntax: syntax, indexed: indexed, tokens: tokens })
 }
 
 ## The tree this snapshot parsed. The owner checks headers from exactly this
@@ -46,6 +58,14 @@ pub fn indexed(s: Snapshot) -> source_projection.Indexed = {
   data.indexed
 }
 
+## The per-declaration token facts of the same text, lexed once with it.
+## Function declarations only: those are the ranges a cross-revision executor
+## pairs, and a range with no slice is refused rather than lexed on demand.
+pub fn tokens(s: Snapshot) -> source_projection.Tokens = {
+  let data: SnapshotData = s
+  data.tokens
+}
+
 test "source snapshot pairs one parse with the index of its own text" {
   let text = "# 🌅\nfn answer() -> Int = 42\n"
   let snapshot = of(text).expect("clean revision")
@@ -55,4 +75,9 @@ test "source snapshot pairs one parse with the index of its own text" {
   assert source_projection.between_indexed(indexed(snapshot), indexed(snapshot),
     0, 5, 0, 5) == source_projection.between(text, text, 0, 5, 0, 5)
   assert match of("fn broken( -> Int = 42\n") { None -> true, Some(_) -> false }
+  let paired = source_projection.pair(tokens(snapshot), tokens(snapshot), 0, 0, 4, 27, 4, 27)
+  assert match paired {
+    Some(coords) -> source_projection.start_at(coords, 4) == Some(4)
+    None -> false
+  }
 }

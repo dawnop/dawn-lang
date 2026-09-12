@@ -34,7 +34,7 @@ type Counts = { checked: Int, reused: Int }
 ## answer on its own already answered. The candidate revision cannot change
 ## any of these, so they are settled once beside the recording rather than
 ## once per replay per body.
-type Prior = { syntax: FnDecl, signature: Sig, product: Product,
+type Prior = { syntax: FnDecl, signature: Sig, product: Product, declaration: Int,
   binders: List[String], symbols: Map[Int, Sym] }
 
 type Ready = { headers: allocation.Table, source: Snapshot, entries: Map[DeclKey, Prior] }
@@ -46,8 +46,8 @@ type AdmittedData = { scope: ModuleKey, ready: Option[Ready] }
 pub opaque type Admitted = AdmittedData
 
 type Prepared = { scope: ModuleKey, ready: Ready, reserver: allocation.Reserver,
-  ids: relocate.Ids, allowed: Map[DeclKey, Int],
-  old_source: source_projection.Indexed, source: source_projection.Indexed }
+  allowed: Map[DeclKey, Int],
+  old_tokens: source_projection.Tokens, tokens: source_projection.Tokens }
 
 fn primitive(t: Ty) -> Bool = match t {
   TyInt -> true, TyFloat -> true, TyBool -> true, TyUnit -> true, _ -> false
@@ -90,7 +90,7 @@ fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syn
 ## the same shape and the same binder names, so these answers carry over.
 ## Refusing here is refusing to record an admission verdict, not refusing a
 ## body: an unadmitted body is checked cold like any other.
-fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
+fn recorded(prior: FnDecl, prior_sig: Sig, p: Product, declaration: Int) -> Option[Prior] = {
   # Class membership of the recorded declaration is not re-asked here. The
   # replay path proves it: `parameters` accepts the candidate header,
   # `relocate.signature` carries the recorded header onto it field for field,
@@ -131,17 +131,17 @@ fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
   # binder the recorded body declares so the candidate revision can be asked
   # the same question without walking its body a second time.
   let names = scalar_shape.binders(prior.body, prior_sig.param_names)?
-  Some(Prior { syntax: prior, signature: prior_sig, product: p,
+  Some(Prior { syntax: prior, signature: prior_sig, product: p, declaration: declaration,
     binders: names, symbols: symbols })
 }
 
 fn ready(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Option[Ready] = {
   if old.cx.diags != [] || not snapshot_matches(old, old_source) { return None }
   let headers = table(scope, old)?
-  var originals: Map[DeclKey, FnDecl] = map.empty()
+  var originals: Map[DeclKey, (FnDecl, Int)] = map.empty()
   for entry in identity.declarations(scope, old.syntax) {
     match old.syntax.decls[entry.declaration] {
-      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
+      DFn(d) -> { originals = map.insert(originals, entry.key, (d, entry.declaration)) }
       _ -> ()
     }
   }
@@ -154,11 +154,16 @@ fn ready(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Reco
           entries = map.remove(entries, k)
         } else {
           seen = set.insert(seen, k)
-          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
-            match recorded(prior, prior_sig, product) {
-              Some(entry_value) -> { entries = map.insert(entries, k, entry_value) }
-              None -> ()
+          match map.get(originals, k) {
+            Some((declared, declaration)) -> {
+              if declared == prior && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
+                match recorded(prior, prior_sig, product, declaration) {
+                  Some(entry_value) -> { entries = map.insert(entries, k, entry_value) }
+                  None -> ()
+                }
+              }
             }
+            None -> ()
           }
         }
       }
@@ -192,33 +197,41 @@ fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Opt
   for entry in identity.declarations(scope, next.syntax) {
     allowed = map.insert(allowed, entry.key, entry.declaration)
   }
-  Some(Prepared { scope: scope, ready: settled, reserver: reserver,
-    ids: allocation.reserver_ids(reserver), allowed: allowed,
-    old_source: source_snapshot.indexed(settled.source), source: source_snapshot.indexed(source) })
+  Some(Prepared { scope: scope, ready: settled, reserver: reserver, allowed: allowed,
+    old_tokens: source_snapshot.tokens(settled.source), tokens: source_snapshot.tokens(source) })
 }
 
 fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
   if cx.diags != [] { return None }
   let bound = parameters(d, sig)?
   let key = DeclKey { scope: prepared.scope, path: [Named(FunctionDecl, d.name)] }
-  if not map.has(prepared.allowed, key) { return None }
+  let declaration = map.get(prepared.allowed, key)?
   let saved = map.get(prepared.ready.entries, key)?
   let prior = saved.syntax
   let prior_sig = saved.signature
   let p = saved.product
-  # Relocating the recorded header onto the candidate one settles the
-  # parameter names, so `bound` is the recorded body's binding set too, and
-  # the recorded binder list describes this body as well.
-  if relocate.signature(prepared.ids, prior_sig) != Some(sig) { return None }
+  # `parameters` proved the candidate declaration binds exactly `sig`'s
+  # parameter names, so equal names make `bound` the recorded body's binding
+  # set as well, and the recorded binder list describes this body too. The
+  # rest of the header is relocated field for field by the reservation below,
+  # which refuses unless the recorded signature carries onto this one.
+  if prior_sig.param_names != sig.param_names { return None }
   if not scalar_shape.same(prior.body, d.body, bound) { return None }
   for name in saved.binders {
     if map.has(cx.module_aliases, name) { return None }
   }
   let ids = allocation.reserved_plan(prepared.reserver, key,
     p.allocation_start, p.allocation_count, cx.next_id, prior_sig, sig, [])?
-  let positions = source_projection.between_indexed(prepared.old_source, prepared.source, prior.lo, prior.hi, d.lo, d.hi)?
-  let view = View { ids: ids, positions: positions.starts, ends: positions.ends,
-    symbols: saved.symbols, assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
+  # Both revisions lexed their own declarations once. Pairing them is two
+  # list comparisons over kinds and spellings, and the relocation it returns
+  # answers each boundary from the token that covers it.
+  let coords = source_projection.pair(prepared.old_tokens, prepared.tokens,
+    saved.declaration, declaration, prior.lo, prior.hi, d.lo, d.hi)?
+  let view = View { ids: ids,
+    positions: (at) => source_projection.start_at(coords, at),
+    ends: (at) => source_projection.end_at(coords, at),
+    symbols: saved.symbols,
+    assertion: (text, lo, hi) => source_projection.assertion_at(coords, text, lo, hi),
     callee: (owner, name, builtin, trait_id) => None }
   let moved = body_product.project(view, p, cx.next_id)?
   for read in moved.function_reads? {
