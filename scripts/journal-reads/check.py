@@ -548,16 +548,16 @@ pub type Cx = {
 pub fn cerr(cx: Cx, msg: String) -> Cx = Cx { ..cx, diags: cx.diags ++ [msg] }
 pub fn alias_shadow(cx: Cx, name: String) -> Cx =
   match map.get(cx.module_aliases, name) { None -> cx, Some(_) -> cerr(cx, name) }
-pub fn local_effect_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
-  let answer = map.get(cx.effects, name)
-  (Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, semantic_reads.LocalEffectName(name, answer)) }, answer)
+pub fn effect_slot_read(cx: Cx, slot: String) -> (Cx, Option[Int]) = {
+  let answer = map.get(cx.effects, slot)
+  (Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, semantic_reads.EffectSlot(slot, answer)) }, answer)
 }
 test "ignored" { let x = cx.module_aliases }
 # cx.module_aliases in a comment
 pub fn quoted() -> String = "cx.module_aliases"
 ''',
     'check/semantic_reads': '''
-pub type FunctionRead = LocalEffectName(name: String, answer: Option[Int]) |
+pub type FunctionRead = EffectSlot(slot: String, answer: Option[Int]) |
 StdModuleMode(is_std: Bool)
 
 pub fn observe(reads: Int, fact: Int) -> Int = reads
@@ -577,7 +577,7 @@ pub fn check_test(cx: Cx) -> Cx = check_fn(cx)
 pub fn check_const_init(cx: Cx) -> Cx = check_fn(cx)
 pub fn declare(cx: Cx, name: String) -> Cx = {
   let seed = cx.next_id
-  let (cx1, answer) = cx.local_effect_name_read(name)
+  let (cx1, answer) = cx.effect_slot_read(name)
   alias_shadow(cx1, name)
 }
 pub fn unreached(cx: Cx) -> Int = cx.next_id
@@ -592,9 +592,9 @@ pub fn candidate(cx: Cx, name: String) -> Option[Int] = {
 
 CONTROL_LEDGER = '''
 check/cx.dawn::cerr::diags | write | | the old list inside its own append
-check/cx.dawn::local_effect_name_read::function_reads | write | | the old log inside its own append
+check/cx.dawn::effect_slot_read::function_reads | write | | the old log inside its own append
 check/cx.dawn::alias_shadow::module_aliases | uncovered | compensated-by=check/scalar_replay.dawn::candidate | the shadowing report leaves no fact
-check/cx.dawn::local_effect_name_read::effects | logged | LocalEffectName | the lookup is the fact's answer
+check/cx.dawn::effect_slot_read::effects | logged | EffectSlot | the lookup is the fact's answer
 check/checker.dawn::declare::next_id | product | next_id | the allocator is body-local
 '''
 
@@ -635,9 +635,9 @@ pub fn candidate(cx: Cx, name: String) -> Option[Int] = Some(1)
     # 4. A `logged` row whose function stopped recording the fact.
     silent = dict(CONTROL_TREE)
     silent['check/cx'] = CONTROL_TREE['check/cx'].replace(
-        'semantic_reads.observe(cx.function_reads, semantic_reads.LocalEffectName(name, answer))',
+        'semantic_reads.observe(cx.function_reads, semantic_reads.EffectSlot(slot, answer))',
         'cx.function_reads')
-    run(silent, CONTROL_LEDGER, 'silent read accessor', 'no longer records LocalEffectName')
+    run(silent, CONTROL_LEDGER, 'silent read accessor', 'no longer records EffectSlot')
 
     # 5. A `product` row naming a field assemble does not reinstall.
     run(CONTROL_TREE, CONTROL_LEDGER.replace(
