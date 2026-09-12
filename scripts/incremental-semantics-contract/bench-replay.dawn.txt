@@ -504,12 +504,15 @@ fn run_split(kind: String, n: Int, rounds: Int) -> Unit !io = {
 
 ## The two halves of snapshot provenance, priced apart.
 ##
-## `snapshot_build` is what the revision's owner pays once, and it parses; it
-## is not replay's cost, because the owner had to parse the revision anyway to
+## `snapshot_of` is what the revision's owner pays once, and it parses; it is
+## not replay's cost, because the owner had to parse the revision anyway to
 ## check its headers. `bind_pair` is what replay still pays before it looks at
 ## a single body: two tree comparisons against the headers each snapshot
-## accompanies. `parse` and `index` are `snapshot_build`'s two parts, and
-## `parse` by itself is what a reparsing replay used to pay twice per call.
+## accompanies. `parse` is that parse timed alone, and it is also what a
+## reparsing replay used to pay twice per call. `index` is the separate decode
+## of the same text: the snapshot no longer makes it, because the parse hands
+## back the code points and the tokens it already had, so this row is the pass
+## that construction dropped rather than a part of it.
 fn run_parse(kind: String, n: Int, rounds: Int) -> Unit !io = {
   let text = subject(kind, n)
   let headers = headers_of(text)
@@ -532,7 +535,6 @@ fn run_parse(kind: String, n: Int, rounds: Int) -> Unit !io = {
     row(r, "parse", t1 - t0)
     row(r, "index", t2 - t1)
     row(r, "compare", t3 - t2)
-    row(r, "snapshot_build", t2 - t0)
     row(r, "snapshot_of", t5 - t4)
     row(r, "bind_pair", 2 * (t3 - t2))
   }

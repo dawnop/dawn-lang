@@ -27,10 +27,17 @@ pub opaque type Snapshot = SnapshotData
 ## Parse and index one revision, once. A module that does not parse cleanly
 ## has no snapshot: the coordinates of a recovered tree are not evidence about
 ## the text, and every consumer here refuses such a revision anyway.
+##
+## One lex serves all three results. The parser decodes the text and lexes it
+## to build the tree, so asking it for both back leaves the index and the
+## token facts with no pass of their own: this used to decode the text twice
+## and lex it twice, which was about a quarter of the construction. Refusing
+## the revision on any diagnostic refuses an unclean token stream too, since
+## the parse's diagnostics open with the lexer's.
 pub fn of(text: String) -> Option[Snapshot] = {
-  let (syntax, diagnostics) = parser.parse_module(text)
+  let (syntax, diagnostics, cps, toks) = parser.parse_module_lexed(text)
   if diagnostics != [] { return None }
-  let indexed = source_projection.index(text)
+  let indexed = source_projection.index_cps(text, cps)
   var spans: List[(Int, Int, Int)] = []
   var declaration = 0
   for decl in syntax.decls {
@@ -40,7 +47,7 @@ pub fn of(text: String) -> Option[Snapshot] = {
     }
     declaration = declaration + 1
   }
-  let tokens = source_projection.tokens_of(indexed, spans)?
+  let tokens = source_projection.tokens_from(indexed, toks, spans)?
   Some(SnapshotData { syntax: syntax, indexed: indexed, tokens: tokens })
 }
 
@@ -64,6 +71,64 @@ pub fn indexed(s: Snapshot) -> source_projection.Indexed = {
 pub fn tokens(s: Snapshot) -> source_projection.Tokens = {
   let data: SnapshotData = s
   data.tokens
+}
+
+## The construction this module replaced, kept as the oracle for the one-lex
+## path: parse the text, decode it a second time, lex it a third. Every stored
+## field has to come out the same, and a revision the old path refused has to
+## stay refused.
+fn separately_lexed(text: String) -> Option[SnapshotData] = {
+  let (syntax, diagnostics) = parser.parse_module(text)
+  if diagnostics != [] { return None }
+  let indexed = source_projection.index(text)
+  var spans: List[(Int, Int, Int)] = []
+  var declaration = 0
+  for decl in syntax.decls {
+    match decl {
+      DFn(d) -> { spans = spans ++ [(declaration, d.lo, d.hi)] }
+      _ -> ()
+    }
+    declaration = declaration + 1
+  }
+  let tokens = source_projection.tokens_of(indexed, spans)?
+  Some(SnapshotData { syntax: syntax, indexed: indexed, tokens: tokens })
+}
+
+fn opened(text: String) -> Option[SnapshotData] = match of(text) {
+  Some(s) -> {
+    let data: SnapshotData = s
+    Some(data)
+  }
+  None -> None
+}
+
+test "source snapshot stores what a separately lexed revision stores" {
+  # The module fixtures of this file and of source_projection, a revision the
+  # lexer itself rejects (unterminated string), and one whose second
+  # declaration only survives because `sync_decl` resynchronizes past a broken
+  # first one. The last two have diagnostics, so both paths must refuse them.
+  let broken_lex = "fn f() -> String = \"oops\nfn g() -> Int = 1\n"
+  let recovered = "fn broken( -> Int = 42\nfn after() -> Int = 1\n"
+  for text in ["# 🌅\nfn answer() -> Int = 42\n",
+    "fn f(x: Int) -> Int = {\n let a = \"s t\"\n let b = 'c'\n x\n}\n",
+    "# λ🌅 moved\n\nfn answer(x: Int) -> Int = {\n let y = x + 1\n y * 2\n}\n",
+    "const K: Int = 1\nfn uses() -> Int = K\ntest \"t\" { assert true }\n",
+    "", broken_lex, recovered] {
+    let built = opened(text)
+    let oracle = separately_lexed(text)
+    assert built == oracle
+    match (built, oracle) {
+      (Some(a), Some(b)) -> {
+        assert a.syntax == b.syntax
+        assert a.indexed == b.indexed
+        assert a.tokens == b.tokens
+      }
+      (None, None) -> ()
+      _ -> panic("one path built a snapshot and the other refused")
+    }
+  }
+  assert match separately_lexed(broken_lex) { None -> true, Some(_) -> false }
+  assert match separately_lexed(recovered) { None -> true, Some(_) -> false }
 }
 
 test "source snapshot pairs one parse with the index of its own text" {

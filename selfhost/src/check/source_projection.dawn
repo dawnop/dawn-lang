@@ -21,6 +21,15 @@ pub opaque type Indexed = IndexedData
 ## for every token slice. The original unindexed path remains an oracle.
 pub fn index(text: String) -> Indexed = IndexedData { text: text, cps: code_points(text) }
 
+## The same index from code points the caller already decoded.
+##
+## `code_points` is a whole pass over the text, and the lexer made this exact
+## array on the way in: `parser.parse_module_lexed` hands back the array its
+## own parse ran over. The caller owes the pairing, the way `index` owes it to
+## itself: `cps` must be the code points of `text` and of nothing else.
+pub fn index_cps(text: String, cps: List[Char]) -> Indexed =
+  IndexedData { text: text, cps: cps }
+
 pub fn between_indexed(old: Indexed, next: Indexed, old_lo: Int, old_hi: Int,
   new_lo: Int, new_hi: Int) -> Option[Projection] = {
   let a: IndexedData = old
@@ -76,6 +85,20 @@ pub fn tokens_of(indexed: Indexed, spans: List[(Int, Int, Int)]) -> Option[Token
   let data: IndexedData = indexed
   let (all, diagnostics) = lexer.lex(data.text)
   if len(diagnostics) != 0 { return None }
+  tokens_from(indexed, all, spans)
+}
+
+## The same slices from a token stream the caller already has.
+##
+## `parser.parse_module_lexed` hands back the tokens its own parse ran over,
+## so a snapshot no longer lexes its revision a second time to learn what the
+## parser already read. The tokens must be the whole stream of exactly this
+## text, in lexer order; a caller that has not refused the revision's lexer
+## diagnostics must refuse them here, because `tokens_of` refuses them and
+## these slices cannot tell a recovered token from a clean one.
+pub fn tokens_from(indexed: Indexed, all: List[Token],
+  spans: List[(Int, Int, Int)]) -> Option[Tokens] = {
+  let data: IndexedData = indexed
   var kept: List[Token] = []
   for t in all {
     if t.kind != NEWLINE && t.kind != EOF {

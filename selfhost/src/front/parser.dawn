@@ -166,6 +166,23 @@ fn is_blank_str(v: String) -> Bool = {
 ## Parse a whole file: lex, then descend. Never fails — broken declarations are
 ## reported and skipped, like the Kotlin recovery points.
 pub fn parse_module(text: String) -> (Module, List[Diag]) = {
+  let (syntax, diagnostics, _, _) = parse_module_lexed(text)
+  (syntax, diagnostics)
+}
+
+## `parse_module` plus the code points and the token stream of the same lex.
+##
+## The lexer builds both on the way in and the parser drops both on the way
+## out, so a caller that also needs them lexed the text a second time. Handing
+## them back costs nothing here and saves a whole decode plus a whole lex
+## there; it also makes the pairing stronger, because the tokens a consumer
+## indexes are the tokens this tree was parsed from rather than a second lex
+## that merely ought to agree.
+##
+## The diagnostics are the parse's, and they open with the lexer's: a caller
+## that refuses a revision with any diagnostic has therefore also refused
+## every revision whose token stream is not clean.
+pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List[Token]) = {
   let (cps, toks, lexds) = lex_cps(text)
   let p = P { toks: toks, cps: Some(cps) }
   var st = St { pos: 0, diags: lexds }
@@ -185,7 +202,7 @@ pub fn parse_module(text: String) -> (Module, List[Diag]) = {
     }
     st = skip_nl(p, st)
   }
-  (Module { decls: decls }, st.diags)
+  (Module { decls: decls }, st.diags, cps, toks)
 }
 
 fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
