@@ -28,9 +28,10 @@ def main():
     for anchor, helper in arms:
         variants.append(('discard-' + helper, anchor, anchor.replace('\n      next }', '\n      initial }'), owner))
     variants.extend([
-        ('accept-changed', 'Some(observed.function_reads == Some([fact]))', 'Some(true)', owner),
-        ('accept-removed-nominal', 'if not map.has(initial.adts, id) { return Some(false) }',
-         'if not map.has(initial.adts, id) { return Some(true) }',
+        ('accept-changed', 'Some(semantic_reads.observed_equal(m, fact, observed.function_reads))',
+         'Some(true)', owner),
+        ('accept-removed-nominal', 'if not map.has(initial.adts, m.nominal(id)?) { return Some(false) }',
+         'if not map.has(initial.adts, m.nominal(id)?) { return Some(true) }',
          'context revalidation rejects removed nominal IDs and invalid slots'),
         ('accept-invalid-slot', 'if slot < 0 || slot >= len(info.ctors) { return Some(false) }',
          'if slot < 0 || slot >= len(info.ctors) { return Some(true) }',
@@ -47,9 +48,10 @@ def main():
     dispatch_end = checker.index('pub fn revalidate_witness_read(', dispatch_start)
     dispatch = checker[dispatch_start:dispatch_end]
     dispatch_variants = [
-        ('discard-context-result', 'None -> revalidate_context_read(candidate, fact)', 'None -> None'),
+        ('discard-context-result', 'None -> revalidate_context_read_under(m, candidate, fact)', 'None -> None'),
         ('accept-witness-refusal', 'Some(answer) -> Some(answer)', 'Some(answer) -> Some(true)'),
-        ('accept-unknown-query', 'None -> revalidate_context_read(candidate, fact)', 'None -> Some(true)'),
+        ('accept-unknown-query', 'None -> revalidate_context_read_under(m, candidate, fact)',
+         'None -> Some(true)'),
     ]
     subjects.append(('dispatch-positive', 'checker', checker, None))
     subjects.extend((name, 'checker', checker[:dispatch_start] + edit(dispatch, old, new) + checker[dispatch_end:],

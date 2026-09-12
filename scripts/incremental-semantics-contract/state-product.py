@@ -44,7 +44,10 @@ def main():
     variants = [
         ("function-read-capture", "semantic_reads.capture(before.function_reads, after.function_reads)?", "Some([])"),
         ("function-read-write", "semantic_reads.append(current.function_reads, product.function_reads)?", "current.function_reads"),
-        ("function-read-domain", "semantic_reads.project_with_inference(p.function_reads, s => relocate.signature(v.ids, s),\n      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value,\n      id => relocate.trait_id(v.ids, id), id => relocate.type_var(v.ids, id), id => relocate.local_id(v.ids, id),\n      id => relocate.effect_var(v.ids, id))?", "p.function_reads"),
+        ("function-read-domain", "semantic_reads.project_mapped(p.function_reads, read_mapping(v, source_value))",
+         "Some(p.function_reads)"),
+        ("function-read-relocation", "effect_binder: id => relocate.effect_var(v.ids, id) }",
+         "effect_binder: id => Some(id) }"),
         ("constant-tree", "tree => relocate_tree.constant(v, tree)", "tree => Some(tree)"),
         ("symbol-order", "sort_by(moved_symbols, (a, b) => cmp(a.key, b.key))", "moved_symbols"),
         ("signature-write", "fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),

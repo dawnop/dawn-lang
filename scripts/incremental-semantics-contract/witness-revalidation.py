@@ -19,9 +19,10 @@ def main():
     owner = 'witness revalidation recomputes candidate facts and refuses unknown queries'
     structural = 'witness reads preserve nominal recursion guards and substituted first gaps'
     variants = [
-        ('accept-changed-answer', 'Some(observed.function_reads == Some([fact]))', 'Some(true)', owner),
-        ('accept-missing-trait', 'if not map.has(initial.traits, id) { return Some(false) }',
-         'if not map.has(initial.traits, id) { return Some(true) }', owner),
+        ('accept-changed-answer', 'Some(semantic_reads.observed_equal(m, fact, observed.function_reads))',
+         'Some(true)', owner),
+        ('accept-missing-trait', 'if not map.has(initial.traits, moved) { return Some(false) }',
+         'if not map.has(initial.traits, moved) { return Some(true) }', owner),
         ('ignore-candidate-owner', 'let initial = Cx { ..candidate, function_reads: Some([]) }',
          'let initial = Cx { ..candidate, owner_class: Some("m"), function_reads: Some([]) }',
          'unification revalidation checks candidate opacity and complete answers'),
