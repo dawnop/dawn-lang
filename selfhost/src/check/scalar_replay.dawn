@@ -333,3 +333,28 @@ test "scalar replay refuses binders that shadow candidate module aliases" {
   assert actual.bodies.functions == expected.functions
   assert actual.bodies.cx.syms == expected.cx.syms
 }
+
+test "scalar replay refuses re-parsed statement boundaries with equal tokens" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let before = "fn compute(x: Int) -> Int = {\n let a = 1\n let b = a\n - x\n}\n"
+  let after = "fn compute(x: Int) -> Int = {\n let a = 1\n let b = a - x\n}\n"
+  let (old_syntax, old_ds) = parser.parse_module(before)
+  let (next_syntax, next_ds) = parser.parse_module(after)
+  assert old_ds == [] && next_ds == []
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, old_syntax, map.empty())
+  let next = checker.check_module_headers(base, next_syntax, map.empty())
+  assert old.cx.diags == [] && next.cx.diags == []
+  assert source_matches(old, before) && source_matches(next, after)
+  let saved = body_execution.record(scope, old)
+  assert saved.refused == 0
+  let actual = replay(scope, old, before, saved, next, after)
+  let expected = checker.check_module_body_products(next)
+  let cold_diags: Int = len(expected.cx.diags)
+  assert cold_diags == 1
+  assert actual.reused == 0 && actual.checked == 1
+  assert actual.bodies.functions == expected.functions
+  assert actual.bodies.cx.diags == expected.cx.diags
+  assert actual.bodies.cx.syms == expected.cx.syms
+  assert actual.bodies.cx.next_id == expected.cx.next_id
+}

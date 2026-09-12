@@ -15,7 +15,7 @@ pub type Comparison = { old: ModuleBodies, current: ModuleBodies }
 pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
 pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
 pub fn main() -> Unit !io = { let pairs = samples()
-  if len(pairs) != 28 { panic("scalar pair count") }
+  if len(pairs) != 32 { panic("scalar pair count") }
 }
 
 pub fn samples() -> List[Comparison] !io = {
@@ -64,32 +64,45 @@ pub fn samples() -> List[Comparison] !io = {
       pairs = pairs ++ [Comparison { old: cold, current: current.bodies }]
     }
   }
-  pairs ++ local_samples()
+  pairs ++ local_samples() ++ boundary_samples()
 }
 
 fn local_samples() -> List[Comparison] !io = {
   let body = "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n"
-  let before = "fn prefix() -> Int = 0\n" ++ body
   let prefix = "type Added = { n: Int }\nfn prefix(a: Int, b: Int) -> Int = a + b\n"
-  let cases = [
+  replay_cases("local", "fn prefix() -> Int = 0\n" ++ body, [
     (prefix ++ "# moved\n" ++ body, 1),
     (body ++ prefix, 1),
     (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 2\n if y > 0 { y * 2 } else { -x }\n}\n", 0),
     (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { x }\n}\n", 0),
     (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 1\n let x = y * 2\n x\n}\n", 0),
     (prefix ++ "fn compute(x: Int) -> Int = {\n let y: Int = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n", 0)
-  ]
+  ])
+}
+
+## Newlines carry statement boundaries, and the token projection drops them.
+## These two revisions have one token stream and two parses, so only the paired
+## syntax trees can tell them apart.
+fn boundary_samples() -> List[Comparison] !io = {
+  let before = "fn compute(x: Int) -> Int = {\n let a = 1\n let b = a\n - x\n}\n"
+  replay_cases("boundary", before, [
+    ("# moved\n" ++ before, 1),
+    ("fn compute(x: Int) -> Int = {\n let a = 1\n let b = a - x\n}\n", 0)
+  ])
+}
+
+fn replay_cases(label: String, before: String, cases: List[(String, Int)]) -> List[Comparison] !io = {
   let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
   let (syntax, ds) = parser.parse_module(before)
-  if ds != [] { panic("old local fixture parse") }
+  if ds != [] { panic(label ++ " fixture parse") }
   let old = checker.check_module_headers(base, syntax, map.empty())
   let saved = body_execution.record(scope, old)
-  if saved.refused != 0 || saved.bodies.cx.diags != [] { panic("old local capture") }
+  if saved.refused != 0 || saved.bodies.cx.diags != [] { panic(label ++ " capture") }
   var pairs: List[Comparison] = []
   for (after, hits) in cases {
     let (next_syntax, next_ds) = parser.parse_module(after)
-    if next_ds != [] { panic("new local fixture parse") }
+    if next_ds != [] { panic(label ++ " candidate parse") }
     let headers = checker.check_module_headers(base, next_syntax, map.empty())
     for logging in [false, true] {
       let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,

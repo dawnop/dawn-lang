@@ -26,6 +26,9 @@ def main():
         ('current-isolation', 'isolated: cx.frame.isolated', 'isolated: false'),
         ('current-test-mode', 'in_test: cx.in_test', 'in_test: false'),
         ('current-handler-cell', 'take_cell: cx.take_cell', 'take_cell: None'),
+        ('unpaired-body',
+         'if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }',
+         'if false { return None }'),
         ('alias-shadowed-binders', 'if map.has(cx.module_aliases, name) { return None }',
          'if false { return None }'),
     ]

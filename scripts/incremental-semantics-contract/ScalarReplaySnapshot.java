@@ -18,7 +18,7 @@ public final class ScalarReplaySnapshot {
         var at = java.util.Arrays.stream(reference.getMethods())
                 .filter(m -> m.getName().equals("sample_at")).findFirst().orElseThrow();
         long length = (Long) size.invoke(null, samples);
-        if (length != 28) throw new AssertionError("Expected 28 replay pairs, got " + length);
+        if (length != 32) throw new AssertionError("Expected 32 replay pairs, got " + length);
         for (long i = 0; i < length; i++) {
             Object pair = at.invoke(null, samples, i);
             Object cold = pair.getClass().getField("old").get(pair);
@@ -39,6 +39,6 @@ public final class ScalarReplaySnapshot {
                 }
             }
         }
-        System.out.println("PASS: scalar full products, 28 pairs and independent body entry counts");
+        System.out.println("PASS: scalar full products, 32 pairs and independent body entry counts");
     }
 }

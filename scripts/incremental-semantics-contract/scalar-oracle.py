@@ -41,6 +41,9 @@ def main():
          'symbols: map.empty(), assertion:'),
         ('lost-local-journal', 'Some(_) -> moved.body_writes',
          'Some(_) -> Some([])'),
+        ('unpaired-body',
+         'if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }',
+         'if false { return None }'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-scalar-oracle-') as temp:
         root = Path(temp)
@@ -74,12 +77,13 @@ def main():
                     raise RuntimeError('Positive failed\n' + result.stdout)
             else:
                 owner = ('FAIL: scalar independent execution count'
-                         if name in ('disguised-cold', 'header-only-ids', 'missing-local-symbols')
+                         if name in ('disguised-cold', 'header-only-ids', 'missing-local-symbols',
+                                     'unpaired-body')
                          else 'FAIL: scalar full product')
                 if not result.returncode or owner not in result.stdout:
                     raise RuntimeError(name + ' missed independent oracle\n' + result.stdout)
             print('OK: scalar oracle ' + name, flush=True)
-    print(f'OK: 28 complete replay products and {len(variants)} compiling controls, {time.monotonic() - started:.2f}s')
+    print(f'OK: 32 complete replay products and {len(variants)} compiling controls, {time.monotonic() - started:.2f}s')
 
 
 if __name__ == '__main__':
