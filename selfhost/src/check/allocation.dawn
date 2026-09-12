@@ -213,6 +213,82 @@ pub fn body_segment_plan(old_headers: Table, next_headers: Table, owner: DeclKey
   reserve_interval(old_headers, next_headers, owner, start, count, target, moved_evidence)
 }
 
+## One revision pair, prepared for repeated body reservations.
+##
+## `body_plan` rebuilds both binding tables and the whole relocation for every
+## body it reserves, so a module's entire header table is walked once per
+## body. Everything in that work which depends only on the pair is done here,
+## once: the header relocation, its reverse index, and the set of IDs each
+## table already owns per domain. Reserving one interval then costs the
+## interval, not the module.
+type ReserverData = { ids: Ids, prepared: relocate.Extender,
+  old_owned: Map[(Domain, Int), Bool], next_owned: Map[(Domain, Int), Bool] }
+pub opaque type Reserver = ReserverData
+
+pub fn reserver(old_headers: Table, next_headers: Table) -> Option[Reserver] = {
+  let a: Data = old_headers
+  let b: Data = next_headers
+  let ids = between(old_headers, next_headers)?
+  var old_owned: Map[(Domain, Int), Bool] = map.empty()
+  for (binding, id) in map.entries(a.bindings) {
+    old_owned = map.insert(old_owned, (binding.domain, id), true)
+  }
+  var next_owned: Map[(Domain, Int), Bool] = map.empty()
+  for (binding, id) in map.entries(b.bindings) {
+    next_owned = map.insert(next_owned, (binding.domain, id), true)
+  }
+  Some(ReserverData { ids: ids, prepared: relocate.extender(ids),
+    old_owned: old_owned, next_owned: next_owned })
+}
+
+## The header relocation this reserver was built from, before any interval.
+pub fn reserver_ids(r: Reserver) -> Ids = { let data: ReserverData = r
+  data.ids
+}
+
+## Reserve one body interval against a prepared pair. The result is exactly
+## `body_plan`'s `ids`; the extended tables `body_plan` also returns are not
+## produced, because reserving a second interval against this one is not this
+## path's business. A temporary whose ID either table already owns is refused
+## here for the same reason `table` refuses it there: two bindings would claim
+## one allocation. Agreement with `body_plan` is asserted below.
+pub fn reserved_plan(r: Reserver, owner: DeclKey, start: Int, count: Int, target: Int,
+  old_sig: Sig, next_sig: Sig, evidence: List[Int]) -> Option[Ids] = {
+  for present in old_sig.param_defaults { if present { return None } }
+  for present in next_sig.param_defaults { if present { return None } }
+  if start < 0 || count < 0 || target < 0 || start + count < start || target + count < target { return None }
+  let data: ReserverData = r
+  if relocate.signature(data.ids, old_sig) != Some(next_sig) { return None }
+  let order = relocate.evidence_permutation(data.ids, old_sig)?
+  if len(evidence) != len(order) { return None }
+  var moved_evidence: Map[Int, Int] = map.empty()
+  var index = 0
+  for old_index in order {
+    let id = evidence[old_index]
+    if id < start || id >= start + count || evidence[old_index] != evidence[0] + old_index { return None }
+    moved_evidence = map.insert(moved_evidence, id, target + evidence[0] - start + index)
+    index = index + 1
+  }
+  var types: Map[Int, Int] = map.empty()
+  var effects: Map[Int, Int] = map.empty()
+  var locals: Map[Int, Int] = map.empty()
+  var offset = 0
+  while offset < count {
+    let moved_local = map.get(moved_evidence, start + offset).unwrap_or(target + offset)
+    if map.has(data.old_owned, (TypeParameter, start + offset)) ||
+      map.has(data.old_owned, (EffectParameter, start + offset)) ||
+      map.has(data.old_owned, (LocalSymbol, start + offset)) ||
+      map.has(data.next_owned, (TypeParameter, target + offset)) ||
+      map.has(data.next_owned, (EffectParameter, target + offset)) ||
+      map.has(data.next_owned, (LocalSymbol, moved_local)) { return None }
+    types = map.insert(types, start + offset, target + offset)
+    effects = map.insert(effects, start + offset, target + offset)
+    locals = map.insert(locals, start + offset, moved_local)
+    offset = offset + 1
+  }
+  relocate.extend(data.prepared, types, effects, locals)
+}
+
 ## Initializers have a declared type, not a function signature or entry
 ## evidence pack. Their complete fresh interval still needs all three domains.
 pub fn constant_plan(old_headers: Table, next_headers: Table, owner: DeclKey,
@@ -587,4 +663,57 @@ test "allocation body plans reserve ghost IDs and permute evidence by role" {
   assert body_plan(old, next, owner, 20, 5, -1, sig, moved, [21, 22]) == None
   assert body_plan(old, next, owner, 20, 5, 40, sig, sig, [21, 22]) == None
   assert body_plan(old, next, owner, 20, 5, 40, Sig { ..sig, param_defaults: [true] }, moved, [21, 22]) == None
+}
+
+test "allocation prepared reservations agree with rebuilding both tables" {
+  let owner = fixture_key("body")
+  let a = fixture_key("A")
+  let b = fixture_key("B")
+  let old = table([entry(a, NominalId, 0, 1), entry(b, NominalId, 0, 2)]).expect("old headers")
+  let next = table([entry(a, NominalId, 0, 2), entry(b, NominalId, 0, 1)]).expect("next headers")
+  let sig = Sig { name: "body", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+    eff: ELabeled(EPure, [(1, "A"), (2, "B")]), is_builtin: false, tparams: [], constraints: [],
+    eparams: [], owner: None, trait_id: None, op_of: None, inferring: false }
+  let moved = relocate.signature(between(old, next).expect("header IDs"), sig).expect("new signature")
+  let pure = Sig { ..sig, eff: EPure }
+  let prepared = reserver(old, next).expect("prepared pair")
+  assert reserver_ids(prepared) == between(old, next).expect("header IDs")
+  for (start, count, target, old_sig, next_sig, evidence) in [
+    (20, 5, 40, sig, moved, [21, 22]),
+    (20, 5, 40, sig, moved, [21, 23]),
+    (20, 5, 40, sig, moved, [19, 20]),
+    (20, 5, 40, sig, moved, []),
+    (20, -1, 40, sig, moved, [21, 22]),
+    (20, 5, -1, sig, moved, [21, 22]),
+    (-1, 5, 40, sig, moved, [21, 22]),
+    (20, 5, 40, sig, sig, [21, 22]),
+    (20, 5, 40, Sig { ..sig, param_defaults: [true] }, moved, [21, 22]),
+    (20, 5, 40, sig, Sig { ..moved, param_defaults: [true] }, [21, 22]),
+    (0, 0, 0, pure, pure, []),
+    (7, 3, 7, pure, pure, []),
+    (0, 4, 0, pure, pure, [])
+  ] {
+    let rebuilt = match body_plan(old, next, owner, start, count, target, old_sig, next_sig, evidence) {
+      Some(plan) -> Some(plan.ids), None -> None
+    }
+    assert reserved_plan(prepared, owner, start, count, target, old_sig, next_sig, evidence) == rebuilt
+  }
+  # An interval that lands on an ID either table already owns must be refused,
+  # exactly as the rebuilt table refuses two bindings claiming one allocation.
+  let claimed_old = table([entry(a, LocalSymbol, 0, 20)]).expect("old claim")
+  let claimed_next = table([entry(a, LocalSymbol, 0, 40)]).expect("next claim")
+  for (left, right) in [(claimed_old, next), (old, claimed_next), (claimed_old, claimed_next)] {
+    let pair = reserver(left, right).expect("claimed pair")
+    let rebuilt = match body_plan(left, right, owner, 20, 2, 40, pure, pure, []) {
+      Some(plan) -> Some(plan.ids), None -> None
+    }
+    assert reserved_plan(pair, owner, 20, 2, 40, pure, pure, []) == rebuilt
+    assert rebuilt == None
+  }
+  let plan = body_plan(old, next, owner, 20, 5, 40, sig, moved, [21, 22]).expect("body plan")
+  let following = reserver(plan.old_allocations, plan.next_allocations).expect("following pair")
+  assert reserved_plan(following, fixture_key("following"), 25, 1, 45, pure, pure, []) ==
+    Some(body_plan(plan.old_allocations, plan.next_allocations, fixture_key("following"),
+      25, 1, 45, pure, pure, []).expect("following interval").ids)
+  assert reserved_plan(following, fixture_key("following"), 25, 1, 44, pure, pure, []) == None
 }

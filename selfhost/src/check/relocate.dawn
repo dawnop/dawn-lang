@@ -59,6 +59,64 @@ pub fn new(
     locals: locals, evidence: evidence })
 }
 
+## A relocation prepared for repeated body intervals. `new` costs one pass
+## over every map it is given, so rebuilding the whole relocation once per
+## body charges the module's header tables to each body. A body adds a handful
+## of interval mappings, so the reverse index `new` computes is built once
+## here and only the added entries are checked against it.
+type ExtenderData = { data: Data, type_targets: Set[Int], effect_targets: Set[Int],
+  local_targets: Set[Int], evidence_targets: Set[Int] }
+pub opaque type Extender = ExtenderData
+
+pub fn extender(owner: Ids) -> Extender = {
+  let ids: Data = owner
+  ExtenderData { data: ids,
+    type_targets: set.from(map.values(ids.type_vars)),
+    effect_targets: set.from(map.values(ids.effect_vars)),
+    local_targets: set.from(map.values(ids.locals)),
+    evidence_targets: set.from(map.values(ids.evidence)) }
+}
+
+## Add disjoint mappings to a prepared relocation. This is `new` over the
+## merged maps, with the same refusals: a source ID the base already maps, a
+## target ID the base already reaches, or an evidence band collision. The base
+## maps came from `new`, so they are already injective and their evidence is
+## already built; nothing here revisits them.
+pub fn extend(e: Extender, type_vars: Map[Int, Int], effect_vars: Map[Int, Int],
+  locals: Map[Int, Int]) -> Option[Ids] = {
+  let x: ExtenderData = e
+  var types = x.data.type_vars
+  var type_targets = x.type_targets
+  for (old, next) in map.entries(type_vars) {
+    if map.has(types, old) || set.has(type_targets, next) { return None }
+    types = map.insert(types, old, next)
+    type_targets = set.insert(type_targets, next)
+  }
+  var local_ids = x.data.locals
+  var local_targets = x.local_targets
+  for (old, next) in map.entries(locals) {
+    if map.has(local_ids, old) || set.has(local_targets, next) { return None }
+    local_ids = map.insert(local_ids, old, next)
+    local_targets = set.insert(local_targets, next)
+  }
+  var effects = x.data.effect_vars
+  var effect_targets = x.effect_targets
+  var evidence = x.data.evidence
+  var evidence_targets = x.evidence_targets
+  for (old, next) in map.entries(effect_vars) {
+    if map.has(effects, old) || set.has(effect_targets, next) { return None }
+    let source_key = var_key(old)
+    let target_key = var_key(next)
+    if map.has(evidence, source_key) || set.has(evidence_targets, target_key) { return None }
+    effects = map.insert(effects, old, next)
+    effect_targets = set.insert(effect_targets, next)
+    evidence = map.insert(evidence, source_key, target_key)
+    evidence_targets = set.insert(evidence_targets, target_key)
+  }
+  Some(Data { ..x.data, type_vars: types, effect_vars: effects, locals: local_ids,
+    evidence: evidence })
+}
+
 pub fn nominal(owner: Ids, id: Int) -> Option[Int] = { let ids: Data = owner
   map.get(ids.nominals, id)
 }
@@ -428,4 +486,39 @@ test "relocation traverses collection types and propagates missing references" {
   }
   assert effect_row(ids, EPure) == Some(EPure)
   assert effect_row(ids, EIo) == Some(EIo)
+}
+
+test "prepared relocation extension agrees with rebuilding the whole relocation" {
+  let nominals: Map[Int, Int] = map.from([(1, 11)])
+  let traits: Map[Int, Int] = map.from([(2, 12)])
+  let type_vars: Map[Int, Int] = map.from([(3, 13)])
+  let effect_vars: Map[Int, Int] = map.from([(4, 14)])
+  let locals: Map[Int, Int] = map.from([(5, 15)])
+  let base = new(nominals, traits, type_vars, effect_vars, locals).expect("header relocation")
+  let prepared = extender(base)
+  assert extend(prepared, map.empty(), map.empty(), map.empty()) == Some(base)
+  for (added_types, added_effects, added_locals) in [
+    (map.from([(30, 40)]), map.from([(31, 41)]), map.from([(32, 42)])),
+    (map.empty(), map.empty(), map.from([(30, 40), (31, 41), (32, 42)])),
+    (map.from([(30, 40), (31, 41)]), map.empty(), map.empty())
+  ] {
+    var merged_types = type_vars
+    for (old, next) in map.entries(added_types) { merged_types = map.insert(merged_types, old, next) }
+    var merged_effects = effect_vars
+    for (old, next) in map.entries(added_effects) { merged_effects = map.insert(merged_effects, old, next) }
+    var merged_locals = locals
+    for (old, next) in map.entries(added_locals) { merged_locals = map.insert(merged_locals, old, next) }
+    assert extend(prepared, added_types, added_effects, added_locals) ==
+      new(nominals, traits, merged_types, merged_effects, merged_locals)
+  }
+  # A source or target the base already owns is refused rather than merged:
+  # rebuilding would silently replace the base mapping or lose injectivity.
+  assert extend(prepared, map.from([(3, 99)]), map.empty(), map.empty()) == None
+  assert extend(prepared, map.from([(99, 13)]), map.empty(), map.empty()) == None
+  assert extend(prepared, map.empty(), map.from([(4, 99)]), map.empty()) == None
+  assert extend(prepared, map.empty(), map.from([(99, 14)]), map.empty()) == None
+  assert extend(prepared, map.empty(), map.empty(), map.from([(5, 99)])) == None
+  assert extend(prepared, map.empty(), map.empty(), map.from([(99, 15)])) == None
+  assert extend(prepared, map.from([(30, 40), (31, 40)]), map.empty(), map.empty()) == None
+  assert new(nominals, traits, type_vars, map.from([(4, 14), (99, 14)]), locals) == None
 }
