@@ -1,0 +1,473 @@
+# Private benchmark subject: cost of cold body checking, of scheduler recording
+# and of the opt-in scalar replay executor, measured at the production entries.
+#
+# Nothing here changes checker, recorder or executor semantics. The replay phase
+# split is a fixture-local re-composition of the same public producers that
+# `check/scalar_replay` calls, validated in-process against the production
+# `scalar_replay.replay` on reused/checked counts and on total wall time.
+#
+# Driven by `bench-replay.py`; run it, not this file. Output is TSV on stdout:
+#   meta<TAB>key<TAB>value
+#   round<TAB>index<TAB>metric<TAB>nanos
+use std/map
+use std/str
+use std/set
+use compiler/front/parser
+use compiler/front/ast.{Module, FnDecl, Expr, EInt, EFloat, EBool, EUnit, DFn}
+use compiler/front/token.{Diag}
+use compiler/check/checker
+use compiler/check/checker.{ModuleHeaders, ModuleBodies, BodyExecutor}
+use compiler/check/cx.{Cx, Frame, cx_new, ModExports}
+use compiler/check/body_execution
+use compiler/check/body_execution.{Recorded, SavedFunction, FunctionInput}
+use compiler/check/body_product
+use compiler/check/body_product.{Product, BodyProduct}
+use compiler/check/scalar_replay
+use compiler/check/identity
+use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl}
+use compiler/check/allocation
+use compiler/check/relocate
+use compiler/check/source_projection
+use compiler/check/relocate_tree.{View}
+use compiler/check/semantic_reads.{AssignableType}
+use compiler/check/tast.{TFun}
+use compiler/check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, EPure}
+use compiler/jvm/jreflect.{jsig_real}
+use java "java.lang.System"
+use java "java.lang.Integer"
+
+# ---------------------------------------------------------------- subjects
+
+fn join(parts: List[String]) -> String = {
+  var out = ""
+  for p in parts { out = out ++ p ++ "\n" }
+  out
+}
+
+fn show_diags(ds: List[Diag]) -> String = {
+  var out = ""
+  for d in ds { out = out ++ d.msg ++ " | " }
+  out
+}
+
+## One module per class. Support declarations are a fixed O(1) prefix; the
+## per-body cost divides by the number of bodies the scheduler actually ran.
+pub fn subject(kind: String, n: Int) -> String = {
+  var parts: List[String] = []
+  if kind == "scalar" {
+    for i in 0..n { parts = parts ++ ["fn s${i}() -> Int = ${i}"] }
+  }
+  if kind == "arith" {
+    for i in 0..n {
+      parts = parts ++ ["fn p${i}(a: Int, b: Int) -> Int = {\n  let c = a + b * 2\n  let d = c - a + ${i}\n  let e = if d > 0 { d } else { 0 - d }\n  e + c * 3 - d\n}"]
+    }
+  }
+  if kind == "calls" {
+    parts = parts ++ ["fn helper(x: Int) -> Int = x + 1", "fn helper2(x: Int, y: Int) -> Int = x * y - 1"]
+    for i in 0..n {
+      parts = parts ++ ["fn c${i}(a: Int) -> Int = helper(a) + helper2(a, ${i}) + helper(a + ${i})"]
+    }
+  }
+  if kind == "generic" {
+    parts = parts ++ ["trait Scale[T] { fn scale(x: T, k: Int) -> Int }",
+      "type Coin = { value: Int }",
+      "impl Scale[Coin] { fn scale(x: Coin, k: Int) -> Int = x.value * k }"]
+    for i in 0..n {
+      parts = parts ++ ["fn g${i}[T: Scale](x: T, y: T) -> Int = scale(x, ${i}) + scale(y, 2) + scale(x, 3)"]
+    }
+  }
+  if kind == "inferred" {
+    for i in 0..n {
+      parts = parts ++ ["fn q${i}(a: Int, b: Int) = {\n  let add = (x: Int, y: Int) => x + y\n  let twice = (f: fn(Int, Int) -> Int, x: Int) => f(x, x)\n  let t = twice(add, a + ${i})\n  let u = twice((x, y) => x * y, b)\n  t + u\n}"]
+    }
+  }
+  if kind == "method" {
+    parts = parts ++ ["trait Shine[T] { fn shine(x: T) -> Int }"]
+    for i in 0..n {
+      parts = parts ++ ["type W${i} = { v: Int }", "impl Shine[W${i}] { fn shine(x: W${i}) -> Int = x.v * 2 + ${i} }"]
+    }
+  }
+  if kind == "default" {
+    for i in 0..n {
+      parts = parts ++ ["trait Buff${i}[T] { fn raw${i}(x: T) -> Int\n  fn buff${i}(x: T) -> Int = raw${i}(x) + ${i} }"]
+    }
+  }
+  if kind == "java" {
+    parts = parts ++ ["use java \"java.lang.Math\""]
+    for i in 0..n {
+      parts = parts ++ ["fn j${i}(x: Int) -> Int !io = Math.abs(x - ${i}) + Math.max(x, ${i})"]
+    }
+  }
+  join(parts)
+}
+
+fn empty_env() -> Map[String, ModExports] = map.empty()
+
+fn base_cx() -> Cx = Cx { ..cx_new(Some("sample"), Some("sample.dawn")), jsig: jsig_real() }
+
+fn scope_key() -> ModuleKey = identity.module_key("bench", "sample", "sample", "sample.dawn")
+
+fn headers_of(text: String) -> ModuleHeaders !io = {
+  let (syntax, ds) = parser.parse_module(text)
+  if ds != [] { panic("subject parse: ${show_diags(ds)}") }
+  let h = checker.check_module_headers(base_cx(), syntax, empty_env())
+  if h.cx.diags != [] { panic("subject headers: ${show_diags(h.cx.diags)}") }
+  h
+}
+
+fn body_count(b: ModuleBodies) -> Int =
+  len(b.functions) + len(b.constants) + len(b.impl_methods) + len(b.trait_defaults) + len(b.tests)
+
+# ---------------------------------------------------------------- reporting
+
+fn meta(key: String, value: String) -> Unit !io = println("meta\t${key}\t${value}")
+
+fn row(index: Int, metric: String, nanos: Int) -> Unit !io =
+  println("round\t${index}\t${metric}\t${nanos}")
+
+# ---------------------------------------------------------------- phase split
+
+## The counters below mirror `check/scalar_replay`'s own steps one for one.
+## `shape` is its `eligible`/product-field/`relocate.signature` guard, `reval`
+## its `checker.revalidate_read` loop, `proj` its source projection plus
+## `body_product.project`, `asm` its `body_product.assemble`.
+type Acc = { checked: Int, reused: Int, shape: Int, reval: Int, proj: Int, asm: Int }
+
+type Prior = { syntax: FnDecl, signature: Sig, product: Product }
+type Prepared = { ids: relocate.Ids, entries: Map[DeclKey, Prior], allowed: Set[DeclKey],
+  old_source: source_projection.Indexed, source: source_projection.Indexed }
+
+fn literal_type(e: Expr) -> Option[Ty] = match e {
+  EInt(_, _, _) -> Some(TyInt)
+  EFloat(_, _, _) -> Some(TyFloat)
+  EBool(_, _, _) -> Some(TyBool)
+  EUnit(_, _) -> Some(TyUnit)
+  _ -> None
+}
+
+fn eligible(d: FnDecl, s: Sig) -> Bool =
+  d.params == [] && d.tparams == [] && d.eparams == [] && d.effs == [] && d.ret != None &&
+  s.param_tys == [] && s.param_names == [] && s.param_defaults == [] &&
+  s.tparams == [] && s.eparams == [] && len(s.constraints) == 0 && s.eff == EPure &&
+  not s.inferring && not s.is_builtin && s.trait_id == None && literal_type(d.body) == Some(s.ret)
+
+fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
+  allocation.combine([allocation.compiler_headers(scope.world)?,
+    allocation.table(allocation.local_headers(scope, h.syntax, h.cx)?)?])
+
+fn source_matches(h: ModuleHeaders, text: String) -> Bool = {
+  let (syntax, diagnostics) = parser.parse_module(text)
+  diagnostics == [] && syntax == h.syntax
+}
+
+fn pair_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded,
+  next: ModuleHeaders) -> (Set[DeclKey], Map[DeclKey, Prior]) = {
+  var allowed: Set[DeclKey] = set.empty()
+  for entry in identity.declarations(scope, next.syntax) {
+    allowed = set.insert(allowed, entry.key)
+  }
+  var originals: Map[DeclKey, FnDecl] = map.empty()
+  for entry in identity.declarations(scope, old.syntax) {
+    match old.syntax.decls[entry.declaration] {
+      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
+      _ -> ()
+    }
+  }
+  var entries: Map[DeclKey, Prior] = map.empty()
+  var seen: Set[DeclKey] = set.empty()
+  for entry in saved.entries {
+    match entry {
+      SavedFunction(k, FunctionInput(prior, prior_sig, false), product) -> {
+        if set.has(seen, k) {
+          entries = map.remove(entries, k)
+        } else {
+          seen = set.insert(seen, k)
+          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
+            entries = map.insert(entries, k, Prior { syntax: prior, signature: prior_sig, product: product })
+          }
+        }
+      }
+      _ -> ()
+    }
+  }
+  (allowed, entries)
+}
+
+## Shape guard, split out so its cost can be read separately. Returns the
+## saved entry only when every structural precondition of replay holds.
+fn shape_ok(scope: ModuleKey, p: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Prior] = {
+  if not eligible(d, sig) || cx.diags != [] { return None }
+  let key = DeclKey { scope: scope, path: [Named(FunctionDecl, d.name)] }
+  if not set.has(p.allowed, key) { return None }
+  let saved = map.get(p.entries, key)?
+  if not eligible(saved.syntax, saved.signature) { return None }
+  let prod = saved.product
+  let prior_sig = saved.signature
+  if prod.tree.sig != prior_sig || prod.tree.name != saved.syntax.name ||
+    prod.allocation_count != 0 || prod.symbols != [] || prod.signatures != [] || prod.aliases != [] ||
+    len(prod.bounds) != 0 || prod.diagnostics != [] || prod.body_writes != Some([]) ||
+    prod.function_reads != Some([AssignableType(prior_sig.ret, prior_sig.ret, true)]) { return None }
+  if relocate.signature(p.ids, prior_sig) != Some(sig) { return None }
+  Some(saved)
+}
+
+fn timed_function(scope: ModuleKey, p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
+  cold: BodyExecutor[Acc]) -> (Acc, Cx, TFun) !io = {
+  let t0 = System.nanoTime()
+  let shaped = shape_ok(scope, p, cx, d, sig)
+  let t1 = System.nanoTime()
+  var a = Acc { ..acc, shape: acc.shape + (t1 - t0) }
+  match shaped {
+    None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+    Some(saved) -> {
+      let prior = saved.syntax
+      let t2 = System.nanoTime()
+      let positions = source_projection.between_indexed(p.old_source, p.source, prior.lo, prior.hi, d.lo, d.hi)
+      let moved = match positions {
+        None -> None
+        Some(pos) -> {
+          let view = View { ids: p.ids, positions: pos.starts, ends: pos.ends,
+            symbols: map.empty(), assertion: (text, lo, hi) => source_projection.assertion(pos, text, lo, hi),
+            callee: (owner, name, builtin, trait_id) => None }
+          body_product.project(view, saved.product, cx.next_id)
+        }
+      }
+      let t3 = System.nanoTime()
+      a = Acc { ..a, proj: a.proj + (t3 - t2) }
+      match moved {
+        None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+        Some(product) -> {
+          let t4 = System.nanoTime()
+          var ok = true
+          match product.function_reads {
+            None -> { ok = false }
+            Some(reads) -> {
+              for read in reads {
+                if checker.revalidate_read(cx, read) != Some(true) { ok = false }
+              }
+            }
+          }
+          let t5 = System.nanoTime()
+          a = Acc { ..a, reval: a.reval + (t5 - t4) }
+          if not ok {
+            cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+          } else {
+            let carried = BodyProduct { ..product, in_test: cx.in_test, const_cutoff: cx.const_cutoff,
+              loop_jumps: cx.loop_jumps, take_cell: cx.take_cell,
+              function_reads: match cx.function_reads { None -> None, Some(_) -> product.function_reads },
+              body_writes: match cx.body_writes { None -> None, Some(_) -> product.body_writes },
+              frame: Frame { ..product.frame, isolated: cx.frame.isolated } }
+            let t6 = System.nanoTime()
+            let assembled = body_product.assemble(cx, carried)
+            let t7 = System.nanoTime()
+            a = Acc { ..a, asm: a.asm + (t7 - t6) }
+            match assembled {
+              Some(after) -> (Acc { ..a, reused: a.reused + 1 }, after, carried.tree)
+              None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+type Split = { parse: Int, index: Int, pair: Int, alloc: Int, acc: Acc, total: Int, bodies: Int }
+
+fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: String, saved: Recorded,
+  next: ModuleHeaders, source: String) -> Split !io = {
+  let start = System.nanoTime()
+  let p0 = System.nanoTime()
+  let ok = old.cx.diags == [] && next.cx.diags == [] &&
+    source_matches(old, old_source) && source_matches(next, source)
+  let p1 = System.nanoTime()
+  if not ok { panic("instrumented replay: source snapshots did not match") }
+  let a0 = System.nanoTime()
+  let old_table = table(scope, old)
+  let next_table = table(scope, next)
+  let ids = match (old_table, next_table) {
+    (Some(a), Some(b)) -> allocation.between(a, b)
+    _ -> None
+  }
+  let a1 = System.nanoTime()
+  let plan = match ids { Some(v) -> v, None -> panic("instrumented replay: no allocation plan") }
+  let q0 = System.nanoTime()
+  let (allowed, entries) = pair_entries(scope, old, saved, next)
+  let q1 = System.nanoTime()
+  let i0 = System.nanoTime()
+  let indexed_old = source_projection.index(old_source)
+  let indexed_new = source_projection.index(source)
+  let i1 = System.nanoTime()
+  let prepared = Prepared { ids: plan, entries: entries, allowed: allowed,
+    old_source: indexed_old, source: indexed_new }
+  let cold: BodyExecutor[Acc] = checker.cold_body_executor()
+  let executor: BodyExecutor[Acc] = BodyExecutor {
+    function: (acc, cx, d, sig) => timed_function(scope, prepared, acc, cx, d, sig, cold),
+    inferred_body: (a, cx, d, sig) => cold.inferred_body(Acc { ..a, checked: a.checked + 1 }, cx, d, sig),
+    constant: (a, cx, d, ty, visible) => cold.constant(Acc { ..a, checked: a.checked + 1 }, cx, d, ty, visible),
+    method: (a, cx, tr, subject, d, sig) => cold.method(Acc { ..a, checked: a.checked + 1 }, cx, tr, subject, d, sig),
+    default_body: (a, cx, tr, d, sig, body) => cold.default_body(Acc { ..a, checked: a.checked + 1 }, cx, tr, d, sig, body),
+    test_body: (a, cx, name, body) => cold.test_body(Acc { ..a, checked: a.checked + 1 }, cx, name, body)
+  }
+  let zero = Acc { checked: 0, reused: 0, shape: 0, reval: 0, proj: 0, asm: 0 }
+  let (acc, bodies) = checker.execute_module_bodies(next, zero, executor)
+  let stop = System.nanoTime()
+  Split { parse: p1 - p0, index: i1 - i0, pair: q1 - q0, alloc: a1 - a0, acc: acc,
+    total: stop - start, bodies: body_count(bodies) }
+}
+
+# ---------------------------------------------------------------- modes
+
+fn edited(text: String) -> String = "# edited elsewhere in the file\n" ++ text
+
+fn run_cold(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let text = subject(kind, n)
+  let headers = headers_of(text)
+  var executed = 0
+  for r in 0..rounds {
+    let t0 = System.nanoTime()
+    let bodies = checker.check_module_body_products(headers)
+    let t1 = System.nanoTime()
+    if bodies.cx.diags != [] { panic("cold bodies: ${show_diags(bodies.cx.diags)}") }
+    executed = body_count(bodies)
+    row(r, "cold", t1 - t0)
+  }
+  meta("bodies", "${executed}")
+  meta("source_bytes", "${str.len(text)}")
+}
+
+fn run_record(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let text = subject(kind, n)
+  let headers = headers_of(text)
+  let scope = scope_key()
+  var executed = 0
+  var refused = 0
+  for r in 0..rounds {
+    let t0 = System.nanoTime()
+    let saved = body_execution.record(scope, headers)
+    let t1 = System.nanoTime()
+    if saved.bodies.cx.diags != [] { panic("record bodies: ${show_diags(saved.bodies.cx.diags)}") }
+    executed = body_count(saved.bodies)
+    refused = saved.refused
+    row(r, "record", t1 - t0)
+  }
+  meta("bodies", "${executed}")
+  meta("refused", "${refused}")
+}
+
+type Setup = { scope: ModuleKey, old: ModuleHeaders, before: String, saved: Recorded,
+  next: ModuleHeaders, after: String }
+
+## One revision pair: the same module, edited only by a leading comment. Every
+## body keeps its text and its declaration identity, and every byte offset moves.
+fn replay_setup(kind: String, n: Int) -> Setup !io = {
+  let before = subject(kind, n)
+  let after = edited(before)
+  let scope = scope_key()
+  let old = headers_of(before)
+  let saved = body_execution.record(scope, old)
+  if saved.refused != 0 { panic("replay setup: ${saved.refused} refused recordings") }
+  Setup { scope: scope, old: old, before: before, saved: saved,
+    next: headers_of(after), after: after }
+}
+
+fn run_replay(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let s = replay_setup(kind, n)
+  var reused = 0
+  var checked = 0
+  for r in 0..rounds {
+    let t0 = System.nanoTime()
+    let result = scalar_replay.replay(s.scope, s.old, s.before, s.saved, s.next, s.after)
+    let t1 = System.nanoTime()
+    reused = result.reused
+    checked = result.checked
+    row(r, "replay", t1 - t0)
+  }
+  meta("reused", "${reused}")
+  meta("checked", "${checked}")
+}
+
+## The phase split runs in its own JVM so it gets the same warmup treatment as
+## the production entry it decomposes; the two totals are then comparable.
+fn run_split(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let s = replay_setup(kind, n)
+  let control = scalar_replay.replay(s.scope, s.old, s.before, s.saved, s.next, s.after)
+  var bodies = 0
+  for r in 0..rounds {
+    let split = instrumented_replay(s.scope, s.old, s.before, s.saved, s.next, s.after)
+    if split.acc.reused != control.reused || split.acc.checked != control.checked {
+      panic("instrumented split disagrees: ${split.acc.reused}/${split.acc.checked} vs ${control.reused}/${control.checked}")
+    }
+    bodies = split.bodies
+    row(r, "split_total", split.total)
+    row(r, "split_parse", split.parse)
+    row(r, "split_index", split.index)
+    row(r, "split_pair", split.pair)
+    row(r, "split_alloc", split.alloc)
+    row(r, "split_shape", split.acc.shape)
+    row(r, "split_reval", split.acc.reval)
+    row(r, "split_proj", split.acc.proj)
+    row(r, "split_asm", split.acc.asm)
+  }
+  meta("reused", "${control.reused}")
+  meta("checked", "${control.checked}")
+  meta("bodies", "${bodies}")
+}
+
+## What replay pays before it looks at a single body: the two source snapshots
+## are reparsed and compared against the header syntax they must belong to.
+fn run_parse(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let text = subject(kind, n)
+  let headers = headers_of(text)
+  for r in 0..rounds {
+    let t0 = System.nanoTime()
+    let (syntax, ds) = parser.parse_module(text)
+    let t1 = System.nanoTime()
+    let same = ds == [] && syntax == headers.syntax
+    let t2 = System.nanoTime()
+    if not same { panic("reparse did not match the header syntax") }
+    row(r, "parse", t1 - t0)
+    row(r, "compare", t2 - t1)
+    row(r, "snapshot_pair", 2 * (t2 - t0))
+  }
+  meta("source_bytes", "${str.len(text)}")
+  meta("decls", "${len(headers.syntax.decls)}")
+}
+
+## Cost of the nanoTime pairs the split adds, so the split can be discounted.
+fn run_timer(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  for r in 0..rounds {
+    let t0 = System.nanoTime()
+    var sink = 0
+    for i in 0..n {
+      let a = System.nanoTime()
+      let b = System.nanoTime()
+      sink = sink + (b - a)
+    }
+    let t1 = System.nanoTime()
+    if sink < 0 { panic("timer sink") }
+    row(r, "timer", t1 - t0)
+  }
+  meta("pairs", "${n}")
+}
+
+pub fn main() -> Unit !io = {
+  let a = args()
+  if len(a) < 3 { panic("usage: <cold|record|replay|split|parse|timer> <class> <n> [rounds]") }
+  let mode = a[0]
+  let kind = a[1]
+  let n = Integer.parseInt(a[2])
+  let rounds = if len(a) > 3 { Integer.parseInt(a[3]) } else { 11 }
+  meta("mode", mode)
+  meta("class", kind)
+  meta("n", "${n}")
+  meta("rounds", "${rounds}")
+  meta("java", match System.getProperty("java.version") { Some(v) -> v, None -> "unknown" })
+  if mode == "cold" { run_cold(kind, n, rounds) }
+  else { if mode == "record" { run_record(kind, n, rounds) }
+  else { if mode == "replay" { run_replay(kind, n, rounds) }
+  else { if mode == "split" { run_split(kind, n, rounds) }
+  else { if mode == "parse" { run_parse(kind, n, rounds) }
+  else { if mode == "timer" { run_timer(kind, n, rounds) }
+  else { panic("unknown mode ${mode}") } } } } } }
+}
