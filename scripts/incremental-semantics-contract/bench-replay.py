@@ -33,9 +33,9 @@ JVM_FLAGS = ["-Xss64m", "-Xmx2g", "-XX:+UseSerialGC"]
 # bounds (dictionary passing), (5) inference-heavy bodies with lambdas,
 # (6a) impl methods, (6b) trait defaults, (7) bodies reaching Java via `use java`.
 CLASSES = ["scalar", "arith", "calls", "generic", "inferred", "method", "default", "java"]
-# Replay admits the closed scalar-literal producer only.
-# Class 2 is measured too, to price the admission attempt that always misses.
-REPLAY_CLASSES = ["scalar", "arith"]
+# Replay admits the closed scalar-literal producer only. The other classes are
+# measured too: their admission always misses, which prices what an extended
+# executor would pay before it reused anything.
 
 
 def parse_rows(text):
@@ -90,7 +90,7 @@ def main():
         if mode == "timer":
             targets.append(("timer", "scalar", 1000))
             continue
-        for kind in (REPLAY_CLASSES if mode in ("replay", "split") else CLASSES):
+        for kind in CLASSES:
             for size in sizes:
                 targets.append((mode, kind, size))
 

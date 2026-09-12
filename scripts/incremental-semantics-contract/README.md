@@ -93,6 +93,21 @@ JDK/OS/参数、构建日志、摘要和进程峰值 RSS；每轮必须无诊断
 parse replay 不是 loader 内部分段，不能从 load 相减；RSS 包含启动、std 和整个进程，
 不是缓存保留内存。八个样本不足以声称稳定的加速倍数；这个入口只测冷分析阶段。
 
+## 重放代价剖面（仅本地）
+
+```sh
+python3 scripts/incremental-semantics-contract/bench-replay.py \
+  --java-home /path/to/jdk21 --output review/replay-cost
+```
+
+`bench-replay.py` 与其 `bench-replay.dawn.txt` 只测量，不改任何 checker / recorder /
+executor 语义；它按函数体类别（字面量标量、原语参数算术、具名非泛型调用、带 trait bound
+的泛型、含闭包的推断体、impl 方法、trait 默认体、`use java`）分别计冷检查、scheduler
+录制与 `check/scalar_replay` 的每阶段代价，并给出打破平衡所需的每体成本表。
+**它不进 CI，也不该进**：输出是墙钟毫秒，随机器与并发负载浮动一到三成，门禁没有可比对
+的东西；同理它没有 `# budget:` 行。阶段拆分是在夹具里用生产的公开 producer 重新组合的，
+每次运行都在同一进程内与生产 `scalar_replay.replay` 的 reused/checked 计数对账。
+
 ## 前缀与工作区
 
 后续函数级演进的私有决策门见[第3期函数体原型](body-probe.md)：
