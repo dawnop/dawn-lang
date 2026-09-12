@@ -2,7 +2,7 @@
 # Pair the supported parsed trees independently so newline-sensitive statement
 # boundaries and shadowing cannot borrow a retained body's local references.
 use std/set
-use front/ast.{Expr, EInt, EFloat, EBool, EUnit, EVar, EUnary, EBinary, EIf, EBlock, SLet}
+use front/ast.{Expr, EInt, EFloat, EBool, EUnit, EVar, EUnary, EBinary, EIf, EBlock, SLet, OpNeg, OpAdd}
 
 pub fn same(a: Expr, b: Expr, bound: Set[String]) -> Bool = match (a, b) {
   (EInt(x, _, _), EInt(y, _, _)) -> x == y
@@ -34,6 +34,39 @@ pub fn same(a: Expr, b: Expr, bound: Set[String]) -> Bool = match (a, b) {
   _ -> false
 }
 
+## checker.declare reports a binder that shadows an imported module alias, and
+## that read of the alias table leaves no journal entry. Collect every name the
+## admitted class declares so admission can ask the candidate revision the same
+## question. This walk fails closed on any node `same` does not pair: extending
+## the class without extending this collector refuses rather than dropping the
+## diagnostic.
+pub fn binders(e: Expr, into: List[String]) -> Option[List[String]] = match e {
+  EInt(_, _, _) -> Some(into)
+  EFloat(_, _, _) -> Some(into)
+  EBool(_, _, _) -> Some(into)
+  EUnit(_, _) -> Some(into)
+  EVar(_, _, _) -> Some(into)
+  EUnary(_, x, _, _) -> binders(x, into)
+  EBinary(_, x, y, _, _, _, _) -> binders(y, binders(x, into)?)
+  EIf(c, x, y, _, _) -> optional_binders(y, binders(x, binders(c, into)?)?)
+  EBlock(xs, tail, _, _) -> {
+    var out = into
+    for s in xs {
+      match s {
+        SLet(name, false, None, init, _, _) -> { out = binders(init, out)? ++ [name] }
+        _ -> return None
+      }
+    }
+    optional_binders(tail, out)
+  }
+  _ -> None
+}
+
+fn optional_binders(e: Option[Expr], into: List[String]) -> Option[List[String]] = match e {
+  None -> Some(into)
+  Some(x) -> binders(x, into)
+}
+
 fn optional(a: Option[Expr], b: Option[Expr], bound: Set[String]) -> Bool = match (a, b) {
   (None, None) -> true
   (Some(x), Some(y)) -> same(x, y, bound)
@@ -59,4 +92,15 @@ test "scalar shape requires lexical ownership before each initializer" {
   let mutable = EBlock([SLet("y", true, None, x, 0, 4)], Some(y), 0, 6)
   assert not same(mutable, mutable, set.from(["x"]))
   assert not same(local, EBlock([], Some(x), 0, 6), set.from(["x"]))
+}
+
+test "scalar shape collects every declared binder and refuses unpaired nodes" {
+  let x = EVar("x", 0, 1)
+  assert binders(x, ["x"]) == Some(["x"])
+  let inner = EBlock([SLet("b", false, None, x, 0, 2)], Some(EVar("b", 0, 1)), 0, 3)
+  let branch = EIf(EBool(true, 0, 1), inner, Some(EUnary(OpNeg, x, 0, 2)), 0, 4)
+  let nested = EBlock([SLet("a", false, None, EInt(1, 0, 1), 0, 2)], Some(branch), 0, 5)
+  assert binders(nested, []) == Some(["a", "b"])
+  assert binders(EBlock([SLet("m", true, None, x, 0, 2)], Some(x), 0, 3), []) == None
+  assert binders(EBlock([], Some(EBinary(OpAdd, x, x, 0, 1, 0, 2)), 0, 3), []) == Some([])
 }

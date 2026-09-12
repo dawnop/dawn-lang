@@ -111,6 +111,13 @@ fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) 
   let p = saved.product
   if not eligible(prior, prior_sig) { return None }
   if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }
+  # checker.declare reports a binder that shadows an imported module alias, and
+  # that table read leaves no journal entry to revalidate. The recorded revision
+  # refused any such body through its own diagnostics; the candidate revision
+  # still owes the answer, because installing the product never runs declare.
+  for name in scalar_shape.binders(d.body, sig.param_names)? {
+    if map.has(cx.module_aliases, name) { return None }
+  }
   if p.tree.sig != prior_sig || p.tree.name != prior.name ||
     p.signatures != [] || p.aliases != [] || len(p.bounds) != 0 || p.diagnostics != [] { return None }
   let reads = p.function_reads?
@@ -297,4 +304,32 @@ test "scalar replay refuses changed inputs and preserves current observation mod
       assert extra.reused == 0 && extra.checked == 1
     }
   }
+}
+
+test "scalar replay refuses binders that shadow candidate module aliases" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let (dep_syntax, dep_ds) = parser.parse_module("pub fn one() -> Int = 1\n")
+  assert dep_ds == []
+  let (dep_cx, _) = checker.check_module(cx_new(Some("dep"), Some("dep.dawn")), dep_syntax, map.empty())
+  assert dep_cx.diags == []
+  let env = map.from([("dep", checker.exports_of(dep_cx, dep_syntax, "dep", "dep"))])
+  let before = "fn compute(x: Int) -> Int = {\n let y = x + 1\n y\n}\n"
+  let after = "use dep as y\n" ++ before
+  let (old_syntax, old_ds) = parser.parse_module(before)
+  let (next_syntax, next_ds) = parser.parse_module(after)
+  assert old_ds == [] && next_ds == []
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, old_syntax, env)
+  let next = checker.check_module_headers(base, next_syntax, env)
+  assert old.cx.diags == [] && next.cx.diags == []
+  assert map.has(next.cx.module_aliases, "y")
+  let saved = body_execution.record(scope, old)
+  let actual = replay(scope, old, before, saved, next, after)
+  let expected = checker.check_module_body_products(next)
+  let cold_diags: Int = len(expected.cx.diags)
+  assert cold_diags == 1
+  assert actual.reused == 0 && actual.checked == 1
+  assert actual.bodies.cx.diags == expected.cx.diags
+  assert actual.bodies.functions == expected.functions
+  assert actual.bodies.cx.syms == expected.cx.syms
 }

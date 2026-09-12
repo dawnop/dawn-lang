@@ -26,6 +26,8 @@ def main():
         ('current-isolation', 'isolated: cx.frame.isolated', 'isolated: false'),
         ('current-test-mode', 'in_test: cx.in_test', 'in_test: false'),
         ('current-handler-cell', 'take_cell: cx.take_cell', 'take_cell: None'),
+        ('alias-shadowed-binders', 'if map.has(cx.module_aliases, name) { return None }',
+         'if false { return None }'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-scalar-replay-') as temp:
         root = Path(temp)
