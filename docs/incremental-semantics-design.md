@@ -749,15 +749,34 @@ and their replayed tables across all six roles. Six compiling controls bypass
 the real symbol, evidence, dictionary, bound, inferred-signature and lazy-alias
 writer calls. The lexical inventory is not a type-checked call-graph proof.
 
-The next integration slice extends the opt-in executor to primitive parameters
-and immutable unannotated locals. Admission must pair parsed expression and
-statement structure (not just equal token streams), prove references belong to
-corresponding lexical binders, reserve the recorded allocation interval, and
-project every fresh symbol and journal event. Calls, closures, generic contexts,
-annotations and unsupported statements remain cold until their corresponding
-query-context proofs exist. Complete-product and actual checker-entry oracles
-must cover reordered declarations and shifted allocations before acceptance.
-This extension is work in progress, with no performance or phase-5 claim.
+The opt-in executor also admits primitive parameters and immutable unannotated
+locals. Admission pairs the two parsed bodies over a closed expression and
+statement class instead of trusting equal token streams: the token projection
+drops newlines, so one token stream can carry two statement boundaries and two
+meanings. Every variable reference must belong to a corresponding lexical
+binder, the recorded allocation interval is reserved at the current scheduler
+entry, and every fresh symbol and journal event is projected. The interval is a
+bijection onto the reserved target range, including fresh IDs that never enter
+the symbol table. Calls, closures, generic contexts, annotations and unsupported
+statements stay cold until their query-context proofs exist.
+
+Binder names carry one dependency the write journal does not record. The
+checker reports a local whose name shadows an imported module alias, and reads
+the alias table without leaving an observation. The literal-only class never
+reached that declaration path, so admitting parameters and locals opened the
+gap: a candidate revision that adds the alias lost the diagnostic. Admission now
+collects the class's binder names and compares them against the candidate
+revision's aliases. The collector fails closed on every node the shape pairing
+does not cover, so widening the class without widening the collector refuses
+instead of dropping a diagnostic.
+
+Oracle coverage adds shifted prefixes, reordered declarations, changed literals,
+changed references, shadowing locals, added annotations and re-parsed statement
+boundaries. Seven compiling controls run against the complete-product oracle and
+ten against the executor's own refusal tests, including controls that neutralize
+the tree pairing, the alias comparison, the reserved interval, the projected
+local symbols and the projected journal. This remains an opt-in module executor
+with no performance or phase-5 claim.
 
 The first cross-revision executor admits a closed scalar-literal producer:
 explicit Int/Float/Bool/Unit return, no parameters, defaults, binders or effects,
@@ -777,7 +796,7 @@ eligibility guard makes that mapping sufficient without reserving a new body
 interval. Performance acceptance remains outstanding.
 An independent Java counter instruments canonical checker entries in a private
 subject, while a reflection oracle compares every ModuleBodies and Cx field
-over sixteen cold/replay pairs. A compiling disguised-cold mutant recomputes
+over thirty-two cold/replay pairs. A compiling disguised-cold mutant recomputes
 the body while reporting a hit; the entry counter must reject it even though
 the semantic products agree. Separate mutants lose accumulated symbols or
 retain stale source coordinates, and must fail the full-product comparison.
