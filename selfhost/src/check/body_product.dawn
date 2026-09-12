@@ -81,20 +81,30 @@ pub alias ConstantProduct = BodyProduct[TConst]
 # and replay belong to one owner/lease; that invariant is held by the caller.
 # Every other Cx field not recorded above must remain unchanged. A body may
 # fill alias_resolved, but must not leave alias resolution in flight.
-fn environment_unchanged(a: Cx, b: Cx) -> Bool =
-  a.adts == b.adts && a.traits == b.traits && a.fn_origin == b.fn_origin &&
-  a.std_fns == b.std_fns && a.bins == b.bins && a.hidden_bins == b.hidden_bins &&
-  a.btypes == b.btypes && a.adts_by_name == b.adts_by_name && a.aliases == b.aliases &&
-  a.alias_resolving == b.alias_resolving && a.ctors_by_name == b.ctors_by_name &&
-  a.traits_by_name == b.traits_by_name && a.local_traits == b.local_traits &&
+# Map equality ordinarily materializes insertion-ordered entries, including a
+# sort. Environment admission needs membership, not order. Walking the trie
+# preserves the same cardinality/key/value proof without that allocation and
+# sorting cost. Strict capture still uses the independent standard Eq path.
+fn environment_map_same[K: Eq + Hash, V: Eq](a: Map[K, V], b: Map[K, V], tracked: Bool) -> Bool =
+  if not tracked { a == b } else {
+    map.len(a) == map.len(b) && map.fold(a, true, (same, key, value) =>
+        same && match map.get(b, key) { Some(other) -> value == other, None -> false })
+  }
+
+fn environment_unchanged(a: Cx, b: Cx, tracked: Bool) -> Bool =
+  environment_map_same(a.adts, b.adts, tracked) && environment_map_same(a.traits, b.traits, tracked) && environment_map_same(a.fn_origin, b.fn_origin, tracked) &&
+  environment_map_same(a.std_fns, b.std_fns, tracked) && environment_map_same(a.bins, b.bins, tracked) && a.hidden_bins == b.hidden_bins &&
+  environment_map_same(a.btypes, b.btypes, tracked) && environment_map_same(a.adts_by_name, b.adts_by_name, tracked) && environment_map_same(a.aliases, b.aliases, tracked) &&
+  a.alias_resolving == b.alias_resolving && environment_map_same(a.ctors_by_name, b.ctors_by_name, tracked) &&
+  environment_map_same(a.traits_by_name, b.traits_by_name, tracked) && a.local_traits == b.local_traits &&
   a.local_impls == b.local_impls && a.observable_impls == b.observable_impls &&
-  a.impl_table == b.impl_table && a.module_aliases == b.module_aliases &&
-  a.module_fn_sigs == b.module_fn_sigs && a.imported_names == b.imported_names &&
-  a.consts == b.consts && a.const_order == b.const_order && a.all_const_names == b.all_const_names &&
-  a.java_classes == b.java_classes && a.effects == b.effects && a.effect_infos == b.effect_infos &&
+  environment_map_same(a.impl_table, b.impl_table, tracked) && environment_map_same(a.module_aliases, b.module_aliases, tracked) &&
+  environment_map_same(a.module_fn_sigs, b.module_fn_sigs, tracked) && environment_map_same(a.imported_names, b.imported_names, tracked) &&
+  environment_map_same(a.consts, b.consts, tracked) && a.const_order == b.const_order && a.all_const_names == b.all_const_names &&
+  environment_map_same(a.java_classes, b.java_classes, tracked) && environment_map_same(a.effects, b.effects, tracked) && environment_map_same(a.effect_infos, b.effect_infos, tracked) &&
   a.is_std_module == b.is_std_module && a.owner_class == b.owner_class &&
-  a.src_path == b.src_path && a.line_starts == b.line_starts && a.moved == b.moved &&
-  a.module_exports == b.module_exports && a.ty_spans == b.ty_spans && a.record_ty_spans == b.record_ty_spans
+  a.src_path == b.src_path && a.line_starts == b.line_starts && environment_map_same(a.moved, b.moved, tracked) &&
+  environment_map_same(a.module_exports, b.module_exports, tracked) && environment_map_same(a.ty_spans, b.ty_spans, tracked) && a.record_ty_spans == b.record_ty_spans
 
 ## Top-level function/default/method bodies finish their nested frames. This
 ## boundary is not an independently cached expression or suspended lambda.
@@ -149,7 +159,7 @@ fn touched_changes[K: Eq + Hash, V](before: Map[K, V], after: Map[K, V], keys: L
 }
 
 fn capture_with_mode[T](before: Cx, after: Cx, tree: T, tracked: Bool) -> Option[BodyProduct[T]] = {
-  if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
+  if not environment_unchanged(before, after, tracked) || after.next_id < before.next_id { return None }
   if len(after.frame.lambda_stack) != 0 || len(after.frame.loop_stack) != 0 { return None }
   if len(after.diags) < len(before.diags) || list.take(after.diags, len(before.diags)) != before.diags { return None }
   let journal = write_journal.capture(before.body_writes, after.body_writes)?
@@ -467,6 +477,30 @@ test "body product journaled extraction agrees with strict table differences" {
   assert capture_journaled(before, Cx { ..after, effects: map.from([("Unexpected", 9)]) }, tree) == None
   let unreported = Cx { ..before, syms: map.insert(before.syms, 11, symbol) }
   assert capture_journaled(before, unreported, tree) == None
+}
+
+test "body product journaled environment equality preserves membership and values" {
+  let original = map.from([("A", 1), ("B", 2)])
+  let reordered = map.from([("B", 2), ("A", 1)])
+  let changed = map.from([("A", 3), ("B", 2)])
+  let replaced = map.from([("A", 1), ("C", 2)])
+  let missing = map.from([("A", 1)])
+  let extra = map.from([("A", 1), ("B", 2), ("C", 3)])
+  for candidate in [original, reordered, changed, replaced, missing, extra] {
+    assert environment_map_same(original, candidate, true) == (original == candidate)
+    let before = Cx { ..cx_new(None, None), body_writes: Some([]), effects: original }
+    let after = Cx { ..before, effects: candidate }
+    let tree = fixture_function(before)
+    let strict = capture(before, after, tree)
+    let tracked = capture_journaled(before, after, tree)
+    assert strict == tracked
+    assert match tracked { Some(_) -> original == candidate, None -> original != candidate }
+  }
+  assert environment_map_same(original, reordered, true)
+  assert not environment_map_same(original, changed, true)
+  assert not environment_map_same(original, replaced, true)
+  assert not environment_map_same(original, missing, true)
+  assert not environment_map_same(original, extra, true)
 }
 
 test "body product rejects unowned writes and diagnostic prefix replacement" {

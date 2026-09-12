@@ -1,0 +1,107 @@
+# Injected privately into body_execution so the strict extractor observes the
+# exact same canonical body execution as the journal extractor. In particular,
+# existing-key mutations cannot hide behind unchanged table cardinalities.
+fn journal_consumer_compare[T](before: Cx, after: Cx,
+  strict: Option[body_product.BodyProduct[T]], fast: Option[body_product.BodyProduct[T]]) -> Bool = {
+  if not (match strict { Some(_) -> true, None -> false }) { return false }
+  if not (match fast { Some(_) -> true, None -> false }) { return false }
+  let expected = body_product.assemble(before, strict.expect("strict body" )).expect("strict replay")
+  let actual = body_product.assemble(before, fast.expect("journal body")).expect("journal replay")
+  if actual.syms != after.syms || expected.syms != after.syms { return false }
+  if actual.fns != after.fns || expected.fns != after.fns { return false }
+  if actual.alias_resolved != after.alias_resolved || expected.alias_resolved != after.alias_resolved { return false }
+  if map.keys(actual.current_tparam_bounds) != map.keys(after.current_tparam_bounds) { return false }
+  if map.keys(expected.current_tparam_bounds) != map.keys(after.current_tparam_bounds) { return false }
+  for id in map.keys(after.current_tparam_bounds) {
+    if map.get(actual.current_tparam_bounds, id) != map.get(after.current_tparam_bounds, id) { return false }
+    if map.get(expected.current_tparam_bounds, id) != map.get(after.current_tparam_bounds, id) { return false }
+  }
+  actual.body_writes == after.body_writes
+}
+
+fn journal_consumer_function(before: Cx, after: Cx, tree: journal_tast.TFun) -> Bool =
+  journal_consumer_compare(before, after, body_product.capture(before, after, tree),
+    body_product.capture_journaled(before, after, tree))
+
+test "journal consumers agree with strict extraction at every body entry" {
+  let src = "alias Number = Int\n" ++
+    "type Coin = { v: Int }\n" ++
+    "trait Waxy[T] { fn wax(x: T) -> Int\n fn buff(x: T) -> Int = wax(x) + 1 }\n" ++
+    "impl Waxy[Coin] { fn wax(x: Coin) -> Int = x.v }\n" ++
+    "effect Ask { fn ask() -> Int }\n" ++
+    "fn effectful() -> Int !Ask = ask()\n" ++
+    "fn generic[T: Waxy](x: T) -> Int = wax(x)\n" ++
+    "fn caller() = leaf()\nfn leaf() = 2\nconst A: Int = 1\nconst B: Int = A\n" ++
+    "fn add(x: Int = 7) -> Int = { let y: Number = x\n y + B }\n" ++
+    "test \"result\" { assert add() == 8 }\n"
+  let (syntax, ds) = parser.parse_module(src)
+  assert ds == []
+  let raw = checker.check_module_headers(cx_new(None, None), syntax, map.empty())
+  assert raw.cx.diags == []
+  let headers = ModuleHeaders { ..raw, cx: Cx { ..raw.cx, alias_resolved: map.empty(), body_writes: Some([]) } }
+  let executor: BodyExecutor[Int] = BodyExecutor {
+    function: (n, cx, d, sig) => {
+      let (next, tree) = checker.check_fn(cx, d, sig)
+      assert journal_consumer_function(cx, next, tree)
+      (n + 1, next, tree)
+    },
+    inferred_body: (n, cx, d, sig) => {
+      let (next, _, tree) = checker.check_fn_inferred(cx, d, sig)
+      assert journal_consumer_function(cx, next, tree)
+      (n + 1, next, tree)
+    },
+    constant: (n, cx, d, ty, visible) => {
+      let (next, tree) = checker.check_const_init(cx, d, ty, visible)
+      assert journal_consumer_compare(cx, next, body_product.capture_constant(cx, next, tree),
+        body_product.capture_constant_journaled(cx, next, tree))
+      (n + 1, next, tree)
+    },
+    method: (n, cx, trait_name, subject, d, sig) => {
+      let (next, tree) = checker.check_fn(cx, d, sig)
+      assert journal_consumer_function(cx, next, tree)
+      (n + 1, next, tree)
+    },
+    default_body: (n, cx, trait_id, d, sig, body) => {
+      let (next, tree) = checker.check_trait_default(cx, d, sig, body)
+      assert journal_consumer_function(cx, next, tree)
+      (n + 1, next, tree)
+    },
+    test_body: (n, cx, name, body) => {
+      let (next, tree) = checker.check_test(cx, name, body)
+      assert journal_consumer_function(cx, next, tree)
+      (n + 1, next, tree)
+    }
+  }
+  let (count, bodies) = checker.execute_module_bodies(headers, 0, executor)
+  assert count == 10 && bodies.cx.diags == []
+  var symbol = false
+  var signature = false
+  var alias_written = false
+  var bound = false
+  for key in bodies.cx.body_writes.expect("consumer journal") {
+    match key {
+      write_journal.SymbolKey(_) -> { symbol = true }
+      write_journal.SignatureKey(_) -> { signature = true }
+      write_journal.AliasKey(_) -> { alias_written = true }
+      write_journal.BoundsKey(_) -> { bound = true }
+    }
+  }
+  assert symbol && signature && alias_written && bound
+  var evidence = false
+  var dictionary = false
+  for (id, sym) in map.entries(bodies.cx.syms) {
+    var writes = 0
+    for key in bodies.cx.body_writes.expect("symbol events") {
+      if key == write_journal.SymbolKey(id) { writes = writes + 1 }
+    }
+    match sym.ev_of { Some(_) -> {
+      evidence = true
+      assert writes == 2
+    }, None -> () }
+    match sym.dict_of { Some(_) -> {
+      dictionary = true
+      assert writes == 1
+    }, None -> () }
+  }
+  assert evidence && dictionary
+}
