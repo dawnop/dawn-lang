@@ -31,7 +31,7 @@ use check/types.{
 }
 use check/jsig.{Jsig, JClass, JMethod, JCtor, JField, jsig_refused}
 use check/semantic_reads
-use check/semantic_reads.{FunctionRead, AliasTypeHeader, ExportDiagnostic, ConstructorHeader}
+use check/semantic_reads.{FunctionRead, Mapping, AliasTypeHeader, ExportDiagnostic, ConstructorHeader}
 use front/suggest
 
 ## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
@@ -1246,19 +1246,28 @@ fn observe_type_read(cx: Cx, fact: FunctionRead) -> Cx =
 ## Recompute context-owned queries without changing the candidate's log. The
 ## caller supplies the corresponding scope; successful queries alone do not
 ## validate a body. Removed nominal IDs and slots reject rather than panic.
-pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool] = {
+pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool] =
+  revalidate_context_read_under(semantic_reads.identity_mapping(), candidate, fact)
+
+## The same validator with a fact still in the recording revision's
+## coordinates. A query input is moved because the recomputation reads the
+## candidate's own tables; the recorded answer is not moved at all, because
+## the comparison walks it beside the observed answer and maps one identity
+## at a time. A reference this relocation cannot move refuses the fact, which
+## is what rebuilding it would have done.
+pub fn revalidate_context_read_under(m: Mapping, candidate: Cx, fact: FunctionRead) -> Option[Bool] = {
   let initial = Cx { ..candidate, function_reads: Some([]) }
   match fact {
     semantic_reads.ConstructorCount(id, _) | semantic_reads.ConstructorNames(id, _) |
     semantic_reads.ConstructorHeaderAnswer(id, _) | semantic_reads.NominalTypeShape(id, _, _, _, _) -> {
-      if not map.has(initial.adts, id) { return Some(false) }
+      if not map.has(initial.adts, m.nominal(id)?) { return Some(false) }
     }
     semantic_reads.ConstructorFields(id, slot, _) | semantic_reads.ConstructorArity(id, slot, _) -> {
-      let info = match map.get(initial.adts, id) { Some(info) -> info, None -> return Some(false) }
+      let info = match map.get(initial.adts, m.nominal(id)?) { Some(info) -> info, None -> return Some(false) }
       if slot < 0 || slot >= len(info.ctors) { return Some(false) }
     }
     semantic_reads.DeclaredEffectInfo(id, _) -> {
-      if not map.has(initial.effect_infos, id) { return Some(false) }
+      if not map.has(initial.effect_infos, m.nominal(id)?) { return Some(false) }
     }
     semantic_reads.DeclaredEffect(name, _) -> {
       match map.get(initial.effects, name) {
@@ -1281,23 +1290,23 @@ pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool
       next }
     semantic_reads.NominalTypeName(None, name, _) -> { let (next, _) = local_nominal_name_read(initial, name)
       next }
-    semantic_reads.ConstructorCount(id, _) -> { let (next, _) = constructor_count_read(initial, id)
+    semantic_reads.ConstructorCount(id, _) -> { let (next, _) = constructor_count_read(initial, m.nominal(id)?)
       next }
-    semantic_reads.ConstructorNames(id, _) -> { let (next, _) = constructor_names_read(initial, id)
+    semantic_reads.ConstructorNames(id, _) -> { let (next, _) = constructor_names_read(initial, m.nominal(id)?)
       next }
-    semantic_reads.ConstructorHeaderAnswer(id, _) -> { let (next, _) = constructor_header_read(initial, id)
+    semantic_reads.ConstructorHeaderAnswer(id, _) -> { let (next, _) = constructor_header_read(initial, m.nominal(id)?)
       next }
-    semantic_reads.ConstructorFields(id, slot, _) -> { let (next, _) = constructor_fields_read(initial, id, slot)
+    semantic_reads.ConstructorFields(id, slot, _) -> { let (next, _) = constructor_fields_read(initial, m.nominal(id)?, slot)
       next }
-    semantic_reads.ConstructorArity(id, slot, _) -> { let (next, _) = constructor_arity_read(initial, id, slot)
+    semantic_reads.ConstructorArity(id, slot, _) -> { let (next, _) = constructor_arity_read(initial, m.nominal(id)?, slot)
       next }
-    semantic_reads.NominalTypeShape(id, _, _, _, _) -> { let (next, _) = constructor_nominal_shape_read(initial, id)
+    semantic_reads.NominalTypeShape(id, _, _, _, _) -> { let (next, _) = constructor_nominal_shape_read(initial, m.nominal(id)?)
       next }
     semantic_reads.LocalEffectName(name, _) -> { let (next, _) = local_effect_name_read(initial, name)
       next }
     semantic_reads.EffectCandidates(_) -> { let (next, _) = effect_candidates_read(initial)
       next }
-    semantic_reads.DeclaredEffectInfo(id, _) -> { let (next, _) = declared_effect_info_read(initial, id)
+    semantic_reads.DeclaredEffectInfo(id, _) -> { let (next, _) = declared_effect_info_read(initial, m.nominal(id)?)
       next }
     semantic_reads.ScopedTypeParameter(name, _) -> { let (next, _) = scoped_type_parameter_read(initial, name)
       next }
@@ -1311,7 +1320,7 @@ pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool
       next }
     _ -> return None
   }
-  Some(observed.function_reads == Some([fact]))
+  Some(semantic_reads.observed_equal(m, fact, observed.function_reads))
 }
 
 test "context revalidation recomputes every supported query family" {

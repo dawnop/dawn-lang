@@ -5,7 +5,9 @@
 use std/list
 use front/ast.{TypeRef, TNamed}
 use check/jsig.{JClass, JMethod, JCtor, JField}
-use check/types.{Sig, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyVar, TyInt, TyAdt, EPure, EIo, EffVar, ELabeled, BuiltinTypeI, BtLeaf, BtList, BtStdOnly, BtPublic}
+use check/types.{Sig, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyVar, TyInt, TyAdt, TyList, TyMap, TySet,
+  TyArray, TyOpaque, TyAssoc, TyTuple, TyFn, EPure, EIo, EffVar, EffAssoc, ELabeled, BuiltinTypeI, BtLeaf,
+  BtList, BtStdOnly, BtPublic}
 
 pub type NamedFunctionRead = { name: String, answer: Option[Sig] }
 pub type InferenceBindings = { types: List[(Int, Ty)], effects: List[(Int, Eff)] }
@@ -387,6 +389,372 @@ pub fn project_with_inference(reads: Option[List[FunctionRead]], signature: fn(S
     }
   }
 }
+
+## One relocation in the two forms its consumers need. The value functions
+## rebuild a reference in the candidate's coordinates, which is what a
+## recomputation needs for its query inputs. The identity functions answer for
+## one reference at a time, which is what a side-by-side comparison needs: a
+## comparison walks the recorded fact beside the candidate's own answer and
+## never builds the relocated answer at all.
+pub type Mapping = {
+  signature: fn(Sig) -> Option[Sig],
+  type_value: fn(Ty) -> Option[Ty],
+  nominal: fn(Int) -> Option[Int],
+  effect_value: fn(Eff) -> Option[Eff],
+  source_value: fn(String, TypeRef) -> Option[TypeRef],
+  trait_value: fn(Int) -> Option[Int],
+  binder_value: fn(Int) -> Option[Int],
+  local_value: fn(Int) -> Option[Int],
+  effect_binder: fn(Int) -> Option[Int]
+}
+
+## The relocation from a revision to itself. Comparing under it is ordinary
+## equality, which is what a same-revision caller of the validator wants.
+pub fn identity_mapping() -> Mapping =
+  Mapping { signature: s => Some(s), type_value: t => Some(t), nominal: id => Some(id),
+    effect_value: e => Some(e), source_value: (owner, source) => Some(source),
+    trait_value: id => Some(id), binder_value: id => Some(id), local_value: id => Some(id),
+    effect_binder: id => Some(id) }
+
+## `project_with_inference` addressed by one record, so a caller that also
+## compares in place carries one relocation rather than nine closures.
+pub fn project_mapped(reads: Option[List[FunctionRead]], m: Mapping) -> Option[Option[List[FunctionRead]]] =
+  project_with_inference(reads, m.signature, m.type_value, m.nominal, m.effect_value, m.source_value,
+    m.trait_value, m.binder_value, m.local_value, m.effect_binder)
+
+## The single fact an isolated observation produced, compared with the
+## recorded one under this relocation. More than one fact, or none at all, is
+## not an observation of this one query and cannot validate it.
+pub fn observed_equal(m: Mapping, recorded: FunctionRead, observed: Option[List[FunctionRead]]) -> Bool =
+  match observed {
+    Some(entries) -> len(entries) == 1 && equal_under(m, recorded, entries[0])
+    None -> false
+  }
+
+fn mapped_is(moved: Option[Int], observed: Int) -> Bool =
+  match moved {
+    Some(id) -> id == observed
+    None -> false
+  }
+
+fn nominal_is(m: Mapping, recorded: Int, observed: Int) -> Bool = mapped_is(m.nominal(recorded), observed)
+fn trait_is(m: Mapping, recorded: Int, observed: Int) -> Bool = mapped_is(m.trait_value(recorded), observed)
+fn binder_is(m: Mapping, recorded: Int, observed: Int) -> Bool = mapped_is(m.binder_value(recorded), observed)
+fn effect_binder_is(m: Mapping, recorded: Int, observed: Int) -> Bool = mapped_is(m.effect_binder(recorded), observed)
+fn local_is(m: Mapping, recorded: Int, observed: Int) -> Bool = mapped_is(m.local_value(recorded), observed)
+
+## A type walked beside its candidate answer. Every arm maps exactly the
+## identity domain `relocate.ty` maps there, and the leaf arm is the one that
+## carries no reference at all.
+fn same_ty(m: Mapping, a: Ty, b: Ty) -> Bool =
+  match (a, b) {
+    (TyVar(an, ai), TyVar(bn, bi)) -> an == bn && binder_is(m, ai, bi)
+    (TyAdt(ai, aargs), TyAdt(bi, bargs)) -> nominal_is(m, ai, bi) && same_tys(m, aargs, bargs)
+    (TyList(ae), TyList(be)) -> same_ty(m, ae, be)
+    (TySet(ae), TySet(be)) -> same_ty(m, ae, be)
+    (TyArray(ae), TyArray(be)) -> same_ty(m, ae, be)
+    (TyMap(ak, av), TyMap(bk, bv)) -> same_ty(m, ak, bk) && same_ty(m, av, bv)
+    (TyTuple(ae), TyTuple(be)) -> same_tys(m, ae, be)
+    (TyOpaque(ai, an, ao, aargs, at), TyOpaque(bi, bn, bo, bargs, bt)) ->
+      nominal_is(m, ai, bi) && an == bn && ao == bo && same_tys(m, aargs, bargs) && same_ty(m, at, bt)
+    (TyAssoc(asub, atr, an), TyAssoc(bsub, btr, bn)) ->
+      same_ty(m, asub, bsub) && trait_is(m, atr, btr) && an == bn
+    (TyFn(aps, ar, ae), TyFn(bps, br, be)) ->
+      same_tys(m, aps, bps) && same_ty(m, ar, br) && same_eff(m, ae, be)
+    _ -> a == b
+  }
+
+fn same_tys(m: Mapping, a: List[Ty], b: List[Ty]) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for t in a {
+    if not same_ty(m, t, b[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+## The two composite rows are normalized by the canonical builder, which can
+## reorder and collapse atoms once their identities move, so the comparison
+## goes through the builder instead of guessing the normal form. The four
+## atom shapes carry one identity each and are walked in place.
+fn same_eff(m: Mapping, a: Eff, b: Eff) -> Bool =
+  match (a, b) {
+    (EPure, EPure) -> true
+    (EIo, EIo) -> true
+    (EffVar(an, ai), EffVar(bn, bi)) -> an == bn && effect_binder_is(m, ai, bi)
+    (EffAssoc(asub, atv, atr, an), EffAssoc(bsub, btv, btr, bn)) ->
+      asub == bsub && binder_is(m, atv, btv) && trait_is(m, atr, btr) && an == bn
+    _ -> m.effect_value(a) == Some(b)
+  }
+
+fn same_effs(m: Mapping, a: List[Eff], b: List[Eff]) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for e in a {
+    if not same_eff(m, e, b[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_opt_ty(m: Mapping, a: Option[Ty], b: Option[Ty]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> same_ty(m, x, y)
+    _ -> false
+  }
+
+fn same_opt_eff(m: Mapping, a: Option[Eff], b: Option[Eff]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> same_eff(m, x, y)
+    _ -> false
+  }
+
+fn same_opt_nominal(m: Mapping, a: Option[Int], b: Option[Int]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> nominal_is(m, x, y)
+    _ -> false
+  }
+
+fn same_opt_local(m: Mapping, a: Option[Int], b: Option[Int]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> local_is(m, x, y)
+    _ -> false
+  }
+
+fn same_trait_ids(m: Mapping, a: List[Int], b: List[Int]) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for id in a {
+    if not trait_is(m, id, b[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_sig(m: Mapping, a: Sig, b: Sig) -> Bool = {
+  if a.name != b.name || a.param_names != b.param_names || a.param_defaults != b.param_defaults ||
+    a.is_builtin != b.is_builtin || a.owner != b.owner || a.inferring != b.inferring { return false }
+  if not same_tys(m, a.param_tys, b.param_tys) || not same_ty(m, a.ret, b.ret) ||
+    not same_eff(m, a.eff, b.eff) || not same_tys(m, a.tparams, b.tparams) ||
+    not same_effs(m, a.eparams, b.eparams) { return false }
+  if len(a.constraints) != len(b.constraints) { return false }
+  var i = 0
+  for bounds in a.constraints {
+    if not same_trait_ids(m, bounds, b.constraints[i]) { return false }
+    i = i + 1
+  }
+  let traits = match (a.trait_id, b.trait_id) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> trait_is(m, x, y)
+    _ -> false
+  }
+  if not traits { return false }
+  match (a.op_of, b.op_of) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> {
+      let (aid, aslot) = x
+      let (bid, bslot) = y
+      nominal_is(m, aid, bid) && aslot == bslot
+    }
+    _ -> false
+  }
+}
+
+fn same_opt_sig(m: Mapping, a: Option[Sig], b: Option[Sig]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> same_sig(m, x, y)
+    _ -> false
+  }
+
+fn same_named(m: Mapping, a: NamedFunctionRead, b: NamedFunctionRead) -> Bool =
+  a.name == b.name && same_opt_sig(m, a.answer, b.answer)
+
+fn same_nominal_slot(m: Mapping, a: Option[(Int, Int)], b: Option[(Int, Int)]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> {
+      let (aid, aslot) = x
+      let (bid, bslot) = y
+      nominal_is(m, aid, bid) && aslot == bslot
+    }
+    _ -> false
+  }
+
+fn same_fields(m: Mapping, a: List[FieldI], b: List[FieldI]) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for field in a {
+    let other = b[i]
+    if field.name != other.name || not same_ty(m, field.ty, other.ty) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_ctor(m: Mapping, a: CtorI, b: CtorI) -> Bool =
+  nominal_is(m, a.adt, b.adt) && a.name == b.name && same_fields(m, a.fields, b.fields)
+
+fn same_alias_header(m: Mapping, a: Option[AliasTypeHeader], b: Option[AliasTypeHeader]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> x.name == y.name && x.owner == y.owner &&
+      same_tys(m, x.tparams, y.tparams) && same_effs(m, x.eparams, y.eparams) &&
+      same_opt_nominal(m, x.opaque_id, y.opaque_id)
+    _ -> false
+  }
+
+fn same_type_bindings(m: Mapping, a: List[(Int, Ty)], b: List[(Int, Ty)], binder: Bool) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for entry in a {
+    let (key, value) = entry
+    let (other_key, other_value) = b[i]
+    let keyed = if binder { binder_is(m, key, other_key) } else { trait_is(m, key, other_key) }
+    if not keyed || not same_ty(m, value, other_value) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_effect_bindings(m: Mapping, a: List[(Int, Eff)], b: List[(Int, Eff)]) -> Bool = {
+  if len(a) != len(b) { return false }
+  var i = 0
+  for entry in a {
+    let (key, value) = entry
+    let (other_key, other_value) = b[i]
+    if not effect_binder_is(m, key, other_key) || not same_eff(m, value, other_value) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn same_inference(m: Mapping, a: InferenceBindings, b: InferenceBindings) -> Bool =
+  same_type_bindings(m, a.types, b.types, true) && same_effect_bindings(m, a.effects, b.effects)
+
+fn same_builtin(m: Mapping, a: Option[BuiltinTypeI], b: Option[BuiltinTypeI]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> {
+      if x.name != y.name || x.params != y.params || x.access != y.access { return false }
+      match (x.build, y.build) {
+        (BtLeaf(at), BtLeaf(bt)) -> same_ty(m, at, bt)
+        _ -> x.build == y.build
+      }
+    }
+    _ -> false
+  }
+
+fn same_opt_source(m: Mapping, owner: String, a: Option[TypeRef], b: Option[TypeRef]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> m.source_value(owner, x) == Some(y)
+    _ -> false
+  }
+
+fn same_bounds(m: Mapping, a: Option[List[Int]], b: Option[List[Int]]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> same_trait_ids(m, x, y)
+    _ -> false
+  }
+
+fn same_qualified_constant(m: Mapping, a: Option[(String, Ty)], b: Option[(String, Ty)]) -> Bool =
+  match (a, b) {
+    (None, None) -> true
+    (Some(x), Some(y)) -> {
+      let (aowner, aty) = x
+      let (bowner, bty) = y
+      aowner == bowner && same_ty(m, aty, bty)
+    }
+    _ -> false
+  }
+
+## Whether the recorded fact, moved by this relocation, is the fact the
+## candidate revision just observed. This is `project_mapped` on one entry
+## followed by equality, with the relocated copy never built: each arm maps
+## one identity at a time and stops at the first disagreement. A fact whose
+## projection copies its payload verbatim compares as itself, which is what
+## the final arm says; two different fact shapes compare unequal there too.
+pub fn equal_under(m: Mapping, recorded: FunctionRead, observed: FunctionRead) -> Bool =
+  match (recorded, observed) {
+    (FunctionAnswer(a), FunctionAnswer(b)) -> same_named(m, a, b)
+    (QualifiedFunction(aq, a), QualifiedFunction(bq, b)) -> aq == bq && same_named(m, a, b)
+    (LocalConstructor(an, a), LocalConstructor(bn, b)) -> an == bn && same_nominal_slot(m, a, b)
+    (LocalConstant(an, a), LocalConstant(bn, b)) -> an == bn && same_opt_ty(m, a, b)
+    (ConstructorCount(aid, a), ConstructorCount(bid, b)) -> nominal_is(m, aid, bid) && a == b
+    (ConstructorArity(aid, aslot, a), ConstructorArity(bid, bslot, b)) ->
+      nominal_is(m, aid, bid) && aslot == bslot && a == b
+    (ConstructorNames(aid, a), ConstructorNames(bid, b)) -> nominal_is(m, aid, bid) && a == b
+    (ConstructorHeaderAnswer(aid, a), ConstructorHeaderAnswer(bid, b)) ->
+      nominal_is(m, aid, bid) && nominal_is(m, a.id, b.id) && a.name == b.name &&
+      a.is_record == b.is_record && same_tys(m, a.tparams, b.tparams)
+    (ConstructorFields(aid, aslot, a), ConstructorFields(bid, bslot, b)) ->
+      nominal_is(m, aid, bid) && aslot == bslot && same_ctor(m, a, b)
+    (DeclaredEffectInfo(aid, a), DeclaredEffectInfo(bid, b)) ->
+      nominal_is(m, aid, bid) && nominal_is(m, a.id, b.id) && a.name == b.name &&
+      a.owner == b.owner && a.audience == b.audience && a.ops == b.ops && a.ctl == b.ctl
+    (LocalEffectName(an, a), LocalEffectName(bn, b)) -> an == bn && same_opt_nominal(m, a, b)
+    (NominalTypeName(aq, an, a), NominalTypeName(bq, bn, b)) ->
+      aq == bq && an == bn && same_opt_nominal(m, a, b)
+    (NominalTypeShape(aid, an, aa, ae, ar), NominalTypeShape(bid, bn, ba, be, br)) ->
+      nominal_is(m, aid, bid) && an == bn && aa == ba && ae == be && ar == br
+    (RenderedType(at, a), RenderedType(bt, b)) -> same_ty(m, at, bt) && a == b
+    (RenderedSignature(asig, a), RenderedSignature(bsig, b)) -> same_sig(m, asig, bsig) && a == b
+    (RenderedFunctionReturn(aret, aeff, a), RenderedFunctionReturn(bret, beff, b)) ->
+      same_ty(m, aret, bret) && same_eff(m, aeff, beff) && a == b
+    (RenderedConstructor(actor, a), RenderedConstructor(bctor, b)) -> same_ctor(m, actor, bctor) && a == b
+    (ReducedAssociatedType(ain, a), ReducedAssociatedType(bin, b)) ->
+      same_ty(m, ain, bin) && same_ty(m, a, b)
+    (ConcreteType(ain, a), ConcreteType(bin, b)) -> same_ty(m, ain, bin) && a == b
+    (AssignableType(ain, atarget, a), AssignableType(bin, btarget, b)) ->
+      same_ty(m, ain, bin) && same_ty(m, atarget, btarget) && a == b
+    (ReducedEffect(ain, abindings, a), ReducedEffect(bin, bbindings, b)) ->
+      same_eff(m, ain, bin) && same_type_bindings(m, abindings, bbindings, true) && same_eff(m, a, b)
+    (ReducedTypeEffects(ain, abindings, a), ReducedTypeEffects(bin, bbindings, b)) ->
+      same_ty(m, ain, bin) && same_type_bindings(m, abindings, bbindings, true) && same_ty(m, a, b)
+    (UnifiedTypes(a), UnifiedTypes(b)) ->
+      same_ty(m, a.declared, b.declared) && same_ty(m, a.actual, b.actual) &&
+      same_inference(m, a.before, b.before) && same_inference(m, a.after, b.after) &&
+      a.matched == b.matched
+    (ImplementationPresence(aid, asubject, a), ImplementationPresence(bid, bsubject, b)) ->
+      trait_is(m, aid, bid) && same_ty(m, asubject, bsubject) && a == b
+    (ImplementationArity(aid, asubject, a), ImplementationArity(bid, bsubject, b)) ->
+      trait_is(m, aid, bid) && same_ty(m, asubject, bsubject) && a == b
+    (ImplementationSubgoals(aid, asubject, a), ImplementationSubgoals(bid, bsubject, b)) ->
+      trait_is(m, aid, bid) && same_ty(m, asubject, bsubject) && same_type_bindings(m, a, b, false)
+    (QualifiedConstant(aq, an, a), QualifiedConstant(bq, bn, b)) ->
+      aq == bq && an == bn && same_qualified_constant(m, a, b)
+    (QualifiedConstructor(aq, an, a), QualifiedConstructor(bq, bn, b)) ->
+      aq == bq && an == bn && same_nominal_slot(m, a, b)
+    (QualifiedAliasHeader(aq, an, a), QualifiedAliasHeader(bq, bn, b)) ->
+      aq == bq && an == bn && same_alias_header(m, a, b)
+    (QualifiedAliasTarget(aq, an, a), QualifiedAliasTarget(bq, bn, b)) ->
+      aq == bq && an == bn && same_opt_ty(m, a, b)
+    (LocalAliasHeader(an, a), LocalAliasHeader(bn, b)) -> an == bn && same_alias_header(m, a, b)
+    (LocalAliasBinders(an, atparams, aeparams), LocalAliasBinders(bn, btparams, beparams)) ->
+      an == bn && same_tys(m, atparams, btparams) && same_effs(m, aeparams, beparams)
+    (LocalAliasTarget(an, a), LocalAliasTarget(bn, b)) -> an == bn && same_opt_ty(m, a, b)
+    (LocalAliasSource(an, aowner, a), LocalAliasSource(bn, bowner, b)) ->
+      an == bn && aowner == bowner && same_opt_source(m, aowner, a, b)
+    (ScopedTypeParameter(an, a), ScopedTypeParameter(bn, b)) -> an == bn && same_opt_ty(m, a, b)
+    (ScopedEffectVariable(an, a), ScopedEffectVariable(bn, b)) -> an == bn && same_opt_eff(m, a, b)
+    (DeclaredEffect(an, a), DeclaredEffect(bn, b)) -> an == bn && same_opt_eff(m, a, b)
+    (ParameterBounds(asubject, a), ParameterBounds(bsubject, b)) ->
+      same_ty(m, asubject, bsubject) && same_bounds(m, a, b)
+    (TraitAssociatedMembers(aid, akind, a), TraitAssociatedMembers(bid, bkind, b)) ->
+      trait_is(m, aid, bid) && akind == bkind && a == b
+    (TraitName(aid, a), TraitName(bid, b)) -> trait_is(m, aid, bid) && a == b
+    (DictionarySymbol(abinder, aid, a), DictionarySymbol(bbinder, bid, b)) ->
+      binder_is(m, abinder, bbinder) && trait_is(m, aid, bid) && same_opt_local(m, a, b)
+    (BuiltinTypeAnswer(an, a), BuiltinTypeAnswer(bn, b)) -> an == bn && same_builtin(m, a, b)
+    _ -> recorded == observed
+  }
 
 test "semantic reads retain misses and capture only the current suffix" {
   let empty: Option[List[FunctionRead]] = Some([])

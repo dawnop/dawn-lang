@@ -79,7 +79,7 @@ use check/exhaustive.{
   ReadState, useful_result_read, missing_list_patterns_result_read
 }
 use check/cx.{
-  revalidate_context_read,
+  revalidate_context_read_under,
   write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
@@ -955,69 +955,104 @@ fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
 ## Recompute supported witness queries in the candidate environment. Unknown
 ## facts are not valid, and this partial validator never admits a body alone.
 pub fn revalidate_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] =
-  match revalidate_witness_read(candidate, fact) {
+  revalidate_read_under(semantic_reads.identity_mapping(), candidate, fact)
+
+## The same validator for a fact still in the recording revision's
+## coordinates. Only a query input is moved, because the recomputation reads
+## the candidate's own tables; the recorded answer stays where it is and the
+## comparison walks it beside the observed answer, mapping one identity at a
+## time. This costs the size of the fact and builds no relocated copy of it.
+## A reference this relocation cannot move refuses the fact, which is what
+## rebuilding the fact would have done.
+pub fn revalidate_read_under(m: semantic_reads.Mapping, candidate: Cx,
+  fact: semantic_reads.FunctionRead) -> Option[Bool] =
+  match revalidate_witness_read_under(m, candidate, fact) {
     Some(answer) -> Some(answer)
-    None -> revalidate_context_read(candidate, fact)
+    None -> revalidate_context_read_under(m, candidate, fact)
   }
 
-pub fn revalidate_witness_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] = {
+pub fn revalidate_witness_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] =
+  revalidate_witness_read_under(semantic_reads.identity_mapping(), candidate, fact)
+
+pub fn revalidate_witness_read_under(m: semantic_reads.Mapping, candidate: Cx,
+  fact: semantic_reads.FunctionRead) -> Option[Bool] = {
   let initial = Cx { ..candidate, function_reads: Some([]) }
   let observed = match fact {
     semantic_reads.ImplementationPresence(id, subject, _) -> {
-      let (next, _) = implementation_presence_read(initial, id, subject)
+      let (next, _) = implementation_presence_read(initial, m.trait_value(id)?, m.type_value(subject)?)
       next
     }
     semantic_reads.ImplementationArity(id, subject, _) -> {
-      let (next, _) = implementation_arity_read(initial, id, subject)
+      let (next, _) = implementation_arity_read(initial, m.trait_value(id)?, m.type_value(subject)?)
       next
     }
     semantic_reads.ImplementationSubgoals(id, subject, _) -> {
-      let (next, _) = implementation_subgoals_read(initial, id, subject)
+      let (next, _) = implementation_subgoals_read(initial, m.trait_value(id)?, m.type_value(subject)?)
       next
     }
     semantic_reads.TraitName(id, _) -> {
-      if not map.has(initial.traits, id) { return Some(false) }
-      let (next, _) = trait_name_read(initial, id)
+      let moved = m.trait_value(id)?
+      if not map.has(initial.traits, moved) { return Some(false) }
+      let (next, _) = trait_name_read(initial, moved)
       next
     }
     semantic_reads.DictionarySymbol(binder, id, _) -> {
-      let (next, _) = dictionary_symbol_read(initial, binder, id)
+      let (next, _) = dictionary_symbol_read(initial, m.binder_value(binder)?, m.trait_value(id)?)
       next
     }
     semantic_reads.ReducedAssociatedType(input, _) -> {
-      let (next, _) = reduce_assoc_read(initial, input)
+      let (next, _) = reduce_assoc_read(initial, m.type_value(input)?)
       next
     }
     semantic_reads.ConcreteType(input, _) -> {
-      let (next, _) = is_concrete_read(initial, input)
+      let (next, _) = is_concrete_read(initial, m.type_value(input)?)
       next
     }
     semantic_reads.AssignableType(input, target, _) -> {
-      let (next, _) = assignable_read(initial, input, target)
+      let (next, _) = assignable_read(initial, m.type_value(input)?, m.type_value(target)?)
       next
     }
     semantic_reads.ReducedEffect(input, bindings, _) -> {
-      let m = map.from(bindings)
-      if map.entries(m) != bindings { return None }
-      let (next, _) = reduce_eff_read(initial, input, m)
+      let moved = moved_bindings(m, bindings)?
+      let table = map.from(moved)
+      if map.entries(table) != moved { return None }
+      let (next, _) = reduce_eff_read(initial, m.effect_value(input)?, table)
       next
     }
     semantic_reads.ReducedTypeEffects(input, bindings, _) -> {
-      let m = map.from(bindings)
-      if map.entries(m) != bindings { return None }
-      let (next, _) = reduce_ty_effs_read(initial, input, m)
+      let moved = moved_bindings(m, bindings)?
+      let table = map.from(moved)
+      if map.entries(table) != moved { return None }
+      let (next, _) = reduce_ty_effs_read(initial, m.type_value(input)?, table)
       next
     }
     semantic_reads.UnifiedTypes(q) -> {
-      let m = map.from(q.before.types)
-      let em = map.from(q.before.effects)
-      if map.entries(m) != q.before.types || map.entries(em) != q.before.effects { return None }
-      let (next, _, _, _) = unify_into_read(initial, q.declared, q.actual, m, em)
+      let types = moved_bindings(m, q.before.types)?
+      let rows = moved_effect_bindings(m, q.before.effects)?
+      let tm = map.from(types)
+      let em = map.from(rows)
+      if map.entries(tm) != types || map.entries(em) != rows { return None }
+      let (next, _, _, _) = unify_into_read(initial, m.type_value(q.declared)?, m.type_value(q.actual)?, tm, em)
       next
     }
     _ -> return None
   }
-  Some(observed.function_reads == Some([fact]))
+  Some(semantic_reads.observed_equal(m, fact, observed.function_reads))
+}
+
+## A recorded binding list in the candidate's coordinates. Keys and values are
+## separate domains, and the list order is the recorded one: the canonical
+## round-trip check above still decides whether it is a map at all.
+fn moved_bindings(m: semantic_reads.Mapping, bindings: List[(Int, Ty)]) -> Option[List[(Int, Ty)]] = {
+  var out: List[(Int, Ty)] = []
+  for (id, t) in bindings { out = out ++ [(m.binder_value(id)?, m.type_value(t)?)] }
+  Some(out)
+}
+
+fn moved_effect_bindings(m: semantic_reads.Mapping, bindings: List[(Int, Eff)]) -> Option[List[(Int, Eff)]] = {
+  var out: List[(Int, Eff)] = []
+  for (id, e) in bindings { out = out ++ [(m.effect_binder(id)?, m.effect_value(e)?)] }
+  Some(out)
 }
 
 test "candidate revalidation dispatches queries without accepting unknown facts" {

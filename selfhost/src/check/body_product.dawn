@@ -15,7 +15,7 @@ use check/relocate
 use check/semantic_reads
 use check/write_journal
 use check/jsig.{JClass, JMethod, JCtor, JField}
-use check/semantic_reads.{UnificationRead, InferenceBindings, FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
+use check/semantic_reads.{Mapping, UnificationRead, InferenceBindings, FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
   AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
 use check/relocate_tree
@@ -290,22 +290,48 @@ pub fn project(v: View, p: Product, allocation_start: Int) -> Option[Product] = 
   project_with_source(v, p, allocation_start, (owner, source) => None)
 }
 
+## The relocation `project` gives the read log, as one record. A caller that
+## revalidates the recorded log in place holds this same relocation, so the
+## rebuilt copy and the in-place comparison cannot drift apart.
+pub fn read_mapping(v: View, source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Mapping =
+  Mapping { signature: s => relocate.signature(v.ids, s),
+    type_value: t => relocate.ty(v.ids, t), nominal: id => relocate.nominal(v.ids, id),
+    effect_value: e => relocate.effect_row(v.ids, e), source_value: source_value,
+    trait_value: id => relocate.trait_id(v.ids, id), binder_value: id => relocate.type_var(v.ids, id),
+    local_value: id => relocate.local_id(v.ids, id), effect_binder: id => relocate.effect_var(v.ids, id) }
+
+## The read log in the candidate's coordinates, on its own. Revalidation does
+## not need it: the same relocation compares the recorded log in place. A
+## caller that installs the log asks for it here.
+pub fn projected_reads[T](v: View, p: BodyProduct[T],
+  source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Option[List[FunctionRead]]] =
+  semantic_reads.project_mapped(p.function_reads, read_mapping(v, source_value))
+
+## `project` for a caller that revalidates the recorded log in place and does
+## not install the projected one. The product comes back with no log rather
+## than a rebuilt one, which is the coordinate-free answer: every leaf the
+## rebuild would map is mapped by the comparison, and both refuse on the same
+## missing mapping, so skipping the rebuild admits nothing extra.
+pub fn project_without_reads(v: View, p: Product, allocation_start: Int) -> Option[Product] =
+  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree), (owner, source) => None, false)
+
 pub fn project_constant(v: View, p: ConstantProduct, allocation_start: Int) -> Option[ConstantProduct] = {
   project_constant_with_source(v, p, allocation_start, (owner, source) => None)
 }
 
 pub fn project_with_source(v: View, p: Product, allocation_start: Int,
   source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Product] = {
-  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree), source_value)
+  project_body(v, p, allocation_start, tree => relocate_tree.function(v, tree), source_value, true)
 }
 
 pub fn project_constant_with_source(v: View, p: ConstantProduct, allocation_start: Int,
   source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[ConstantProduct] = {
-  project_body(v, p, allocation_start, tree => relocate_tree.constant(v, tree), source_value)
+  project_body(v, p, allocation_start, tree => relocate_tree.constant(v, tree), source_value, true)
 }
 
 fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
-  project_tree: fn(T) -> Option[T], source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[BodyProduct[T]] = {
+  project_tree: fn(T) -> Option[T], source_value: fn(String, TypeRef) -> Option[TypeRef],
+  keep_reads: Bool) -> Option[BodyProduct[T]] = {
   if p.allocation_count < 0 { return None }
   let old_limit = p.allocation_start + p.allocation_count
   let limit = allocation_start + p.allocation_count
@@ -340,10 +366,7 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell,
     body_writes: write_journal.project(p.body_writes, id => relocate.local_id(v.ids, id), id => relocate.type_var(v.ids, id))?,
-    function_reads: semantic_reads.project_with_inference(p.function_reads, s => relocate.signature(v.ids, s),
-      t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value,
-      id => relocate.trait_id(v.ids, id), id => relocate.type_var(v.ids, id), id => relocate.local_id(v.ids, id),
-      id => relocate.effect_var(v.ids, id))? })
+    function_reads: if keep_reads { projected_reads(v, p, source_value)? } else { None } })
 }
 
 test "body product keyed writes preserve unrelated preceding products" {
