@@ -30,7 +30,8 @@ def main():
         ("semantic_reads", "variable-domain", "ScopedEffectVariable(name, moved_variable)", "ScopedEffectVariable(name, answer)"),
         ("semantic_reads", "declared-projected-name", "DeclaredEffect(name, moved_effect)", 'DeclaredEffect("wrong", moved_effect)'),
         ("semantic_reads", "variable-projected-name", "ScopedEffectVariable(name, moved_variable)", 'ScopedEffectVariable("wrong", moved_variable)'),
-        ("body_product", "effect-callback", "e => relocate.effect_row(v.ids, e), source_value,", "e => Some(e), source_value,"),
+        ("body_product", "effect-callback", "effect_value: e => relocate.effect_row(v.ids, e), source_value: source_value,",
+         "effect_value: e => Some(e), source_value: source_value,"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
                for name in ("cx", "semantic_reads", "body_product")}

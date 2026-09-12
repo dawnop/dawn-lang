@@ -31,7 +31,8 @@ def main():
         ("semantic_reads", "members-domain", "TraitAssociatedMembers(trait_value(id)?, kind, names)", "TraitAssociatedMembers(id, kind, names)"),
         ("semantic_reads", "trait-not-nominal", "TraitAssociatedMembers(trait_value(id)?, kind, names)", "TraitAssociatedMembers(nominal(id)?, kind, names)"),
         ("semantic_reads", "projected-axis", "TraitAssociatedMembers(trait_value(id)?, kind, names)", "TraitAssociatedMembers(trait_value(id)?, AssociatedType, names)"),
-        ("body_product", "trait-callback", "id => relocate.trait_id(v.ids, id), id => relocate.type_var(v.ids, id)", "id => Some(id), id => relocate.type_var(v.ids, id)"),
+        ("body_product", "trait-callback", "trait_value: id => relocate.trait_id(v.ids, id), binder_value: id => relocate.type_var(v.ids, id),",
+         "trait_value: id => Some(id), binder_value: id => relocate.type_var(v.ids, id),"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
                for name in ("cx", "semantic_reads", "body_product")}

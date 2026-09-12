@@ -32,7 +32,8 @@ def main():
         ("semantic_reads", "builtin-access", "Some(BuiltinTypeI { ..info, build: build })", "Some(BuiltinTypeI { ..info, access: BtPublic, build: build })"),
         ("semantic_reads", "builtin-build", "Some(BuiltinTypeI { ..info, build: build })", "Some(BuiltinTypeI { ..info, build: BtList })"),
         ("semantic_reads", "projected-mode", "StdModuleMode(is_std) -> StdModuleMode(is_std)", "StdModuleMode(is_std) -> StdModuleMode(false)"),
-        ("body_product", "type-callback", "t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id)", "t => Some(t), id => relocate.nominal(v.ids, id)"),
+        ("body_product", "type-callback", "type_value: t => relocate.ty(v.ids, t), nominal: id => relocate.nominal(v.ids, id),",
+         "type_value: t => Some(t), nominal: id => relocate.nominal(v.ids, id),"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
                for name in ("cx", "semantic_reads", "body_product")}

@@ -47,8 +47,10 @@ def main():
         ("semantic_reads", "constructor-slot", constructor_projection, constructor_projection.replace("Some((nominal(adt)?, slot))", "Some((nominal(adt)?, nominal(slot)?))")),
         ("semantic_reads", "presence-answer", "ExportPresence(qualifier, present) -> ExportPresence(qualifier, present)", "ExportPresence(qualifier, present) -> ExportPresence(qualifier, not present)"),
         ("semantic_reads", "diagnostic-kind", "ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(kind, qualifier, name, answer)", "ExportDiagnosticAnswer(kind, qualifier, name, answer) -> ExportDiagnosticAnswer(FunctionDiagnostic, qualifier, name, answer)"),
-        ("body_product", "constant-domain", "t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id)", "t => Some(t), id => relocate.nominal(v.ids, id)"),
-        ("body_product", "constructor-domain", "t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id)", "t => relocate.ty(v.ids, t), id => Some(id)"),
+        ("body_product", "constant-domain", "type_value: t => relocate.ty(v.ids, t), nominal: id => relocate.nominal(v.ids, id),",
+         "type_value: t => Some(t), nominal: id => relocate.nominal(v.ids, id),"),
+        ("body_product", "constructor-domain", "type_value: t => relocate.ty(v.ids, t), nominal: id => relocate.nominal(v.ids, id),",
+         "type_value: t => relocate.ty(v.ids, t), nominal: id => Some(id),"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
                for name in ("checker", "semantic_reads", "body_product")}
