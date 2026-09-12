@@ -13,6 +13,32 @@ pub type Projection = {
   old_lo: Int, old_hi: Int, new_lo: Int, new_hi: Int
 }
 
+type IndexedData = { text: String, cps: List[Char] }
+pub opaque type Indexed = IndexedData
+
+## Bind a code-point index to exactly the source snapshot that produced it.
+## Repeated body projections must not seek from the whole file's beginning
+## for every token slice. The original unindexed path remains an oracle.
+pub fn index(text: String) -> Indexed = IndexedData { text: text, cps: code_points(text) }
+
+pub fn between_indexed(old: Indexed, next: Indexed, old_lo: Int, old_hi: Int,
+  new_lo: Int, new_hi: Int) -> Option[Projection] = {
+  let a: IndexedData = old
+  let b: IndexedData = next
+  if old_lo < 0 || old_hi < old_lo || old_hi > len(a.cps) ||
+    new_lo < 0 || new_hi < new_lo || new_hi > len(b.cps) { return None }
+  let old_piece = lexer.slice_cps(a.cps, old_lo, old_hi)
+  let next_piece = lexer.slice_cps(b.cps, new_lo, new_hi)
+  let local = between(old_piece, next_piece, 0, old_hi - old_lo, 0, new_hi - new_lo)?
+  let empty: Map[Int, Int] = map.empty()
+  let starts = map.fold(local.starts, empty, (out, key, value) =>
+      map.insert(out, key + old_lo, value + new_lo))
+  let ends = map.fold(local.ends, empty, (out, key, value) =>
+      map.insert(out, key + old_lo, value + new_lo))
+  Some(Projection { starts: starts, ends: ends, old_text: a.text, new_text: b.text,
+    old_lo: old_lo, old_hi: old_hi, new_lo: new_lo, new_hi: new_hi })
+}
+
 fn tokens(text: String, lo: Int, hi: Int) -> Option[List[Token]] = {
   if lo < 0 || hi < lo || hi > str.len(text) { return None }
   let (all, diagnostics) = lexer.lex_at(str.slice(text, lo, hi), lo)
@@ -99,4 +125,17 @@ test "source projection updates assertion text with codepoint coordinates" {
   assert assertion(p, Some("y>0"), 0, 10) == None
   assert assertion(p, None, 0, 10) == Some(None)
   assert map.get(p.starts, 7) == Some(11)
+}
+
+test "source projection indexed ranges agree with whole source coordinates" {
+  let old = "# 🌅\nfn answer() -> Int = 42\n"
+  let next = "# λ🌅\n\nfn answer() -> Int = 42\n"
+  let a = index(old)
+  let b = index(next)
+  for (lo, hi, nlo, nhi) in [(0, str.len(old), 0, str.len(next)),
+    (4, str.len(old), 6, str.len(next)), (4, 6, 6, 8), (0, 0, 0, 0),
+    (-1, 3, 0, 3), (5, 4, 6, 8), (0, str.len(old) + 1, 0, str.len(next))] {
+    assert between_indexed(a, b, lo, hi, nlo, nhi) == between(old, next, lo, hi, nlo, nhi)
+  }
+  assert between_indexed(index("x+1"), index("x+2"), 0, 3, 0, 3) == None
 }

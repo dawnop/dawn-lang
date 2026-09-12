@@ -32,7 +32,7 @@ def main():
              "fns_out ++ synth ++ products.trait_defaults ++ products.impl_methods"),
             ("assembly-constants", "consts: products.constants, tests: products.tests", "consts: [], tests: products.tests"),
             ("assembly-tests", "consts: products.constants, tests: products.tests", "consts: products.constants, tests: []"),
-            ("assembly-default-signature", "cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, ds.name, ds) }", "cx1 = cx1"),
+            ("assembly-default-signature", "cx1 = write_signature(cx1, ds.name, ds)", "cx1 = cx1"),
             ("assembly-default-dictionary", "dict_syms: dd.dict_syms,", "dict_syms: [],"),
         ]),
         ("checker", "check_module: a whole module checks end to end", [
@@ -45,10 +45,14 @@ def main():
             ("callee-conflict", "Some(previous) -> if previous != sig { return None }", "Some(previous) -> ()"),
         ]),
         ("source_projection", "source projection ", [
-            ("same-boundary-table", "ends: ends, old_text:", "ends: starts, old_text:"),
+            ("same-boundary-table", "ends: ends, old_text: old_text,", "ends: starts, old_text: old_text,"),
             ("changed-token", "a.kind != b.kind || str.slice(old_text, a.lo, a.hi) != str.slice(new_text, b.lo, b.hi)", "false"),
             ("stale-assertion", "Some(Some(str.slice(p.new_text, nlo, nhi)))", "Some(Some(text))"),
             ("unchecked-assertion-origin", "str.slice(p.old_text, start, hi) != text", "false"),
+            ("indexed-source-domain", "let starts = map.fold(local.starts, empty, (out, key, value) =>\n      map.insert(out, key + old_lo, value + new_lo))",
+             "let starts = map.fold(local.starts, empty, (out, key, value) =>\n      map.insert(out, key + new_lo, value + new_lo))"),
+            ("indexed-target-domain", "let ends = map.fold(local.ends, empty, (out, key, value) =>\n      map.insert(out, key + old_lo, value + new_lo))",
+             "let ends = map.fold(local.ends, empty, (out, key, value) =>\n      map.insert(out, key + old_lo, value + old_lo))"),
         ]),
         ("checker", "evidence reads preserve distinct origins behind the same runtime key", [
             ("lost-crossed-origin", "if crossed {\n        (cx1, Some(XEvRead(key, origin, lo, hi, ty)))",
@@ -81,7 +85,8 @@ def main():
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
                 print("OK: projection " + module + " " + name, flush=True)
             target.write_text(original)
-    print(f"OK: source/evidence/callee/header/assembly projection and eighteen compiling mutants, {time.monotonic() - started:.2f}s")
+    count = sum(len(mutations) for _, _, mutations in jobs)
+    print(f"OK: source/evidence/callee/header/assembly projection and {count} compiling mutants, {time.monotonic() - started:.2f}s")
 
 
 if __name__ == "__main__":

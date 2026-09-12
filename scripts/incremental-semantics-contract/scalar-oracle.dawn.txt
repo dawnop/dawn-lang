@@ -1,0 +1,68 @@
+# Private fixture: the Java counter is injected into canonical checker entries,
+# never into the executor's self-reported counters or its admission decisions.
+use compiler/front/parser
+use compiler/check/checker
+use compiler/check/checker.{ModuleHeaders, ModuleBodies}
+use compiler/check/body_execution
+use compiler/check/scalar_replay
+use compiler/check/cx.{Cx, cx_new}
+use compiler/check/identity.{module_key}
+use compiler/check/semantic_reads
+use std/map
+use java "contract.ScalarReplaySnapshot"
+
+pub type Comparison = { old: ModuleBodies, current: ModuleBodies }
+pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
+pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
+pub fn main() -> Unit !io = { let pairs = samples()
+  if len(pairs) != 16 { panic("scalar pair count") }
+}
+
+pub fn samples() -> List[Comparison] !io = {
+  let support = "const A: Int = 1\nfn leaf() = A\n" ++
+    "type Coin = { value: Int }\n" ++
+    "trait Waxy[T] { fn wax(x: T) -> Int\n fn buff(x: T) -> Int = wax(x) }\n" ++
+    "impl Waxy[Coin] { fn wax(x: Coin) -> Int = x.value }\n" ++
+    "fn other(x: Int) -> Int = x\ntest \"sample\" { assert leaf() == 1 }\n"
+  let before = "fn answer() -> Int = 42\n" ++ support
+  let cases = [
+    ("# moved\nfn answer() -> Int = 42\n", 1),
+    ("type Added = { n: Int }\nfn answer() -> Int = 42\n", 1),
+    ("fn answer() -> Int = 43\n", 0),
+    ("fn answer() -> Bool = true\n", 0),
+    ("fn answer() -> Int = { 42 }\n", 0),
+    ("fn answer() = 42\n", 0),
+    ("fn answer() -> Int = true\n", 0),
+    ("fn answer() -> Int = 42\nfn answer() -> Int = 42\n", 0)
+  ]
+  let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let (syntax, ds) = parser.parse_module(before)
+  if ds != [] { panic("old scalar fixture parse") }
+  let old = checker.check_module_headers(base, syntax, map.empty())
+  let saved = body_execution.record(scope, old)
+  if saved.refused != 0 { panic("old scalar capture") }
+  var pairs: List[Comparison] = []
+  for (tail, hits) in cases {
+    let after = support ++ tail
+    let (next_syntax, next_ds) = parser.parse_module(after)
+    if next_ds != [] { panic("new scalar fixture parse") }
+    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    for logging in [false, true] {
+      let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
+        function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
+        body_writes: if logging { Some([]) } else { None } } }
+      ScalarReplaySnapshot.reset()
+      let current = scalar_replay.replay(scope, old, before, saved, next, after)
+      let calls = ScalarReplaySnapshot.count()
+      if current.reused != hits || calls != current.checked {
+        panic("FAIL: scalar independent execution count")
+      }
+      ScalarReplaySnapshot.reset()
+      let cold = checker.check_module_body_products(next)
+      if ScalarReplaySnapshot.count() != calls + hits { panic("FAIL: scalar cold execution count") }
+      pairs = pairs ++ [Comparison { old: cold, current: current.bodies }]
+    }
+  }
+  pairs
+}

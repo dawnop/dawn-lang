@@ -1,0 +1,239 @@
+# Exercise cross-revision admission at the real scheduler boundary before
+# general queries have reconstructible local contexts. This deliberately
+# closed producer class has one primitive return-compatibility observation,
+# no allocation or table writes, and no callees. Unsupported bodies stay cold.
+# This is an opt-in module executor, not the incremental session entry point.
+use std/map
+use std/set
+use check/checker
+use check/checker.{ModuleHeaders, ModuleBodies, BodyExecutor}
+use check/cx.{Cx, Frame, cx_new}
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, EPure}
+use check/tast.{TFun}
+use check/body_execution
+use check/body_execution.{Recorded, SavedFunction, FunctionInput}
+use check/body_product
+use check/body_product.{Product, BodyProduct}
+use check/identity
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl}
+use check/allocation
+use check/relocate
+use check/source_projection
+use check/relocate_tree.{View}
+use check/semantic_reads.{AssignableType}
+use front/parser
+use front/ast.{FnDecl, Expr, EInt, EFloat, EBool, EUnit, DFn}
+
+pub type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int }
+type Counts = { checked: Int, reused: Int }
+type Prior = { syntax: FnDecl, signature: Sig, product: Product }
+type Prepared = { ids: relocate.Ids, entries: Map[DeclKey, Prior], allowed: Set[DeclKey],
+  old_source: source_projection.Indexed, source: source_projection.Indexed }
+
+fn literal_type(e: Expr) -> Option[Ty] = match e {
+  EInt(_, _, _) -> Some(TyInt)
+  EFloat(_, _, _) -> Some(TyFloat)
+  EBool(_, _, _) -> Some(TyBool)
+  EUnit(_, _) -> Some(TyUnit)
+  _ -> None
+}
+
+fn eligible(d: FnDecl, s: Sig) -> Bool =
+  d.params == [] && d.tparams == [] && d.eparams == [] && d.effs == [] && d.ret != None &&
+  s.param_tys == [] && s.param_names == [] && s.param_defaults == [] &&
+  s.tparams == [] && s.eparams == [] && len(s.constraints) == 0 && s.eff == EPure &&
+  not s.inferring && not s.is_builtin && s.trait_id == None && literal_type(d.body) == Some(s.ret)
+
+fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
+  allocation.combine([allocation.compiler_headers(scope.world)?,
+    allocation.table(allocation.local_headers(scope, h.syntax, h.cx)?)?])
+
+fn source_matches(h: ModuleHeaders, text: String) -> Bool = {
+  let (syntax, diagnostics) = parser.parse_module(text)
+  diagnostics == [] && syntax == h.syntax
+}
+
+fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHeaders,
+  old_source: String, source: String) -> Option[Prepared] = {
+  let ids = allocation.between(table(scope, old)?, table(scope, next)?)?
+  var allowed: Set[DeclKey] = set.empty()
+  for entry in identity.declarations(scope, next.syntax) {
+    allowed = set.insert(allowed, entry.key)
+  }
+  var originals: Map[DeclKey, FnDecl] = map.empty()
+  for entry in identity.declarations(scope, old.syntax) {
+    match old.syntax.decls[entry.declaration] {
+      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
+      _ -> ()
+    }
+  }
+  var entries: Map[DeclKey, Prior] = map.empty()
+  var seen: Set[DeclKey] = set.empty()
+  for entry in saved.entries {
+    match entry {
+      SavedFunction(k, FunctionInput(prior, prior_sig, false), product) -> {
+        if set.has(seen, k) {
+          entries = map.remove(entries, k)
+        } else {
+          seen = set.insert(seen, k)
+          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
+            entries = map.insert(entries, k, Prior { syntax: prior, signature: prior_sig, product: product })
+          }
+        }
+      }
+      _ -> ()
+    }
+  }
+  Some(Prepared { ids: ids, entries: entries, allowed: allowed,
+    old_source: source_projection.index(old_source), source: source_projection.index(source) })
+}
+
+fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
+  if not eligible(d, sig) || cx.diags != [] { return None }
+  let key = DeclKey { scope: scope, path: [Named(FunctionDecl, d.name)] }
+  if not set.has(prepared.allowed, key) { return None }
+  let saved = map.get(prepared.entries, key)?
+  let prior = saved.syntax
+  let prior_sig = saved.signature
+  let p = saved.product
+  if not eligible(prior, prior_sig) { return None }
+  if p.tree.sig != prior_sig || p.tree.name != prior.name ||
+    p.allocation_count != 0 || p.symbols != [] || p.signatures != [] || p.aliases != [] ||
+    len(p.bounds) != 0 || p.diagnostics != [] || p.body_writes != Some([]) ||
+    p.function_reads != Some([AssignableType(prior_sig.ret, prior_sig.ret, true)]) { return None }
+  # The closed producer above allocates nothing. Header IDs therefore suffice;
+  # unlike general bodies it has no interval/evidence permutation to extend.
+  if relocate.signature(prepared.ids, prior_sig) != Some(sig) { return None }
+  let positions = source_projection.between_indexed(prepared.old_source, prepared.source, prior.lo, prior.hi, d.lo, d.hi)?
+  let view = View { ids: prepared.ids, positions: positions.starts, ends: positions.ends,
+    symbols: map.empty(), assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
+    callee: (owner, name, builtin, trait_id) => None }
+  let moved = body_product.project(view, p, cx.next_id)?
+  for read in moved.function_reads? {
+    if checker.revalidate_read(cx, read) != Some(true) { return None }
+  }
+  # These fields pass through this closed producer unchanged. The old final
+  # value is not a write: preserve the corresponding current scheduler state.
+  Some(BodyProduct { ..moved, in_test: cx.in_test, const_cutoff: cx.const_cutoff,
+    loop_jumps: cx.loop_jumps, take_cell: cx.take_cell,
+    function_reads: match cx.function_reads { None -> None, Some(_) -> moved.function_reads },
+    body_writes: match cx.body_writes { None -> None, Some(_) -> moved.body_writes },
+    frame: Frame { ..moved.frame, isolated: cx.frame.isolated } })
+}
+
+## Inputs must come from the canonical header/recording producers in one
+## owner world. Reparse both source snapshots so unrelated text cannot lend
+## positions to those products. Every failed admission executes the cold body.
+pub fn replay(scope: ModuleKey, old: ModuleHeaders, old_source: String, saved: Recorded,
+  next: ModuleHeaders, source: String) -> Replayed !io = {
+  let valid = old.cx.diags == [] && next.cx.diags == [] &&
+    source_matches(old, old_source) && source_matches(next, source)
+  let prepared: Option[Prepared] = if valid { prepare(scope, old, saved, next, old_source, source) } else { None }
+  let cold: BodyExecutor[Counts] = checker.cold_body_executor()
+  let executor: BodyExecutor[Counts] = BodyExecutor {
+    function: (count, cx, d, sig) => {
+      let hit: Option[Product] = if valid { match prepared {
+        Some(p) -> candidate(scope, p, cx, d, sig)
+        None -> None
+      } } else { None }
+      match hit {
+        Some(product) -> match body_product.assemble(cx, product) {
+          Some(after) -> (Counts { ..count, reused: count.reused + 1 }, after, product.tree)
+          None -> cold.function(Counts { ..count, checked: count.checked + 1 }, cx, d, sig)
+        }
+        None -> cold.function(Counts { ..count, checked: count.checked + 1 }, cx, d, sig)
+      }
+    },
+    inferred_body: (n, cx, d, sig) => cold.inferred_body(Counts { ..n, checked: n.checked + 1 }, cx, d, sig),
+    constant: (n, cx, d, ty, visible) => cold.constant(Counts { ..n, checked: n.checked + 1 }, cx, d, ty, visible),
+    method: (n, cx, tr, subject, d, sig) => cold.method(Counts { ..n, checked: n.checked + 1 }, cx, tr, subject, d, sig),
+    default_body: (n, cx, tr, d, sig, body) => cold.default_body(Counts { ..n, checked: n.checked + 1 }, cx, tr, d, sig, body),
+    test_body: (n, cx, name, body) => cold.test_body(Counts { ..n, checked: n.checked + 1 }, cx, name, body)
+  }
+  let (count, bodies) = checker.execute_module_bodies(next, Counts { checked: 0, reused: 0 }, executor)
+  Replayed { bodies: bodies, checked: count.checked, reused: count.reused }
+}
+
+test "scalar replay moves unchanged bodies through the current scheduler" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let before = "fn answer() -> Int = 42\nfn other(x: Int) -> Int = x\n"
+  let after = "type Added = { value: Int }\nfn other(x: Int) -> Int = x\n# moved\nfn answer() -> Int = 42\n"
+  let (old_syntax, old_ds) = parser.parse_module(before)
+  let (new_syntax, new_ds) = parser.parse_module(after)
+  assert old_ds == [] && new_ds == []
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, old_syntax, map.empty())
+  let next = checker.check_module_headers(base, new_syntax, map.empty())
+  let saved = body_execution.record(scope, old)
+  assert saved.refused == 0
+  assert source_matches(old, before) && source_matches(next, after)
+  let sig = map.get(next.cx.fns, "answer").expect("answer header")
+  let declaration = match new_syntax.decls[2] { DFn(d) -> d, _ -> panic("answer syntax") }
+  assert eligible(declaration, sig)
+  assert match table(scope, old) { Some(_) -> true, None -> false }
+  assert match table(scope, next) { Some(_) -> true, None -> false }
+  assert match candidate(scope, prepare(scope, old, saved, next, before, after).expect("prepared owner"), next.cx, declaration, sig) {
+    Some(_) -> true, None -> false
+  }
+  let actual = replay(scope, old, before, saved, next, after)
+  let expected = checker.check_module_body_products(next)
+  assert actual.reused == 1 && actual.checked == 1
+  assert actual.bodies.functions == expected.functions
+  assert actual.bodies.constants == expected.constants
+  assert actual.bodies.cx.frame == expected.cx.frame
+  assert actual.bodies.cx.syms == expected.cx.syms
+  assert actual.bodies.cx.next_id == expected.cx.next_id
+  assert actual.bodies.cx.diags == expected.cx.diags
+  assert actual.bodies.cx.function_reads == expected.cx.function_reads
+  assert actual.bodies.cx.body_writes == expected.cx.body_writes
+}
+
+test "scalar replay refuses changed inputs and preserves current observation modes" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let before = "fn answer() -> Int = 42\n"
+  let (syntax, diagnostics) = parser.parse_module(before)
+  assert diagnostics == []
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, syntax, map.empty())
+  let saved = body_execution.record(scope, old)
+  for (text, hits) in [
+    ("# moved\nfn answer() -> Int = 42\n", 1),
+    ("fn answer() -> Int = 43\n", 0),
+    ("fn answer() -> Bool = true\n", 0),
+    ("fn answer(x: Int) -> Int = x\n", 0),
+    ("fn answer() = 42\n", 0),
+    ("fn renamed() -> Int = 42\n", 0),
+    ("fn answer() -> Int = { 42 }\n", 0)
+  ] {
+    let (next_syntax, next_ds) = parser.parse_module(text)
+    assert next_ds == []
+    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    for logging in [false, true] {
+      let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
+        in_test: true, const_cutoff: Some(set.empty()), take_cell: Some(999),
+        loop_jumps: set.from([999]), frame: Frame { ..headers.cx.frame, isolated: true },
+        function_reads: if logging { Some([AssignableType(TyUnit, TyUnit, true)]) } else { None },
+        body_writes: if logging { Some([]) } else { None } } }
+      let actual = replay(scope, old, before, saved, next, text)
+      let expected = checker.check_module_body_products(next)
+      assert actual.reused == hits && actual.checked == 1 - hits
+      assert actual.bodies.functions == expected.functions
+      assert actual.bodies.cx.frame == expected.cx.frame
+      assert actual.bodies.cx.in_test == expected.cx.in_test
+      assert actual.bodies.cx.const_cutoff == expected.cx.const_cutoff
+      assert actual.bodies.cx.take_cell == expected.cx.take_cell
+      assert actual.bodies.cx.loop_jumps == expected.cx.loop_jumps
+      assert actual.bodies.cx.function_reads == expected.cx.function_reads
+      assert actual.bodies.cx.body_writes == expected.cx.body_writes
+      assert actual.bodies.cx.diags == expected.cx.diags
+      let mismatch = replay(scope, old, before ++ "# wrong snapshot\n", saved, next, text)
+      # A different comment-only snapshot reparses identically and is safe:
+      # its body coordinates are unchanged. Changed parsed input is not.
+      assert mismatch.reused == hits
+      let unrelated = replay(scope, old, "fn wrong() -> Int = 42\n", saved, next, text)
+      assert unrelated.reused == 0 && unrelated.checked == 1
+      let extra = replay(scope, old, before ++ "fn extra() -> Int = 0\n", saved, next, text)
+      assert extra.reused == 0 && extra.checked == 1
+    }
+  }
+}
