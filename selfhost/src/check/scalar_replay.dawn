@@ -74,11 +74,6 @@ fn parameters(d: FnDecl, s: Sig) -> Option[Set[String]] = {
   Some(bound)
 }
 
-fn eligible(d: FnDecl, s: Sig) -> Bool = match parameters(d, s) {
-  None -> false
-  Some(bound) -> scalar_shape.same(d.body, d.body, bound)
-}
-
 fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
   allocation.combine([allocation.compiler_headers(scope.world)?,
     allocation.table(allocation.local_headers(scope, h.syntax, h.cx)?)?])
@@ -96,7 +91,12 @@ fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syn
 ## Refusing here is refusing to record an admission verdict, not refusing a
 ## body: an unadmitted body is checked cold like any other.
 fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
-  if not eligible(prior, prior_sig) { return None }
+  # Class membership of the recorded declaration is not re-asked here. The
+  # replay path proves it: `parameters` accepts the candidate header,
+  # `relocate.signature` carries the recorded header onto it field for field,
+  # and `scalar_shape.same` pairs the two bodies, which only succeeds when
+  # both consist of nodes this class supports. A guard here would be one no
+  # fixture can distinguish, and an undistinguished guard is not a guard.
   if p.tree.sig != prior_sig || p.tree.name != prior.name ||
     p.signatures != [] || p.aliases != [] || len(p.bounds) != 0 || p.diagnostics != [] { return None }
   let reads = p.function_reads?
@@ -174,6 +174,14 @@ fn ready(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Reco
 ## and never per candidate body.
 pub fn admit(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Admitted =
   AdmittedData { scope: scope, ready: ready(scope, old, old_source, saved) }
+
+## How many recorded bodies this admission settled. Observable so a caller
+## can tell "nothing was admitted" from "nothing was offered"; it grants no
+## access to the products themselves.
+pub fn admitted_count(admitted: Admitted) -> Int = {
+  let data: AdmittedData = admitted
+  match data.ready { None -> 0, Some(settled) -> map.len(settled.entries) }
+}
 
 fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Option[Prepared] = {
   let scope = admitted.scope
@@ -273,7 +281,7 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   assert snapshot_matches(old, old_snapshot) && snapshot_matches(next, next_snapshot)
   let sig = map.get(next.cx.fns, "answer").expect("answer header")
   let declaration = match new_syntax.decls[2] { DFn(d) -> d, _ -> panic("answer syntax") }
-  assert eligible(declaration, sig)
+  assert parameters(declaration, sig) != None
   assert match table(scope, old) { Some(_) -> true, None -> false }
   assert match table(scope, next) { Some(_) -> true, None -> false }
   let admitted: AdmittedData = admit(scope, old, old_snapshot, saved)

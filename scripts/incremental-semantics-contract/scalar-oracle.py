@@ -35,14 +35,14 @@ def main():
          '}, Cx { ..after, syms: map.empty() }, product.tree)'),
         ('stale-source', 'let moved = body_product.project(view, p, cx.next_id)?',
          'let moved = BodyProduct { ..p, allocation_start: cx.next_id }'),
-        ('header-only-ids', 'let view = View { ids: plan.ids,',
+        ('header-only-ids', 'let view = View { ids: ids,',
          'let view = View { ids: prepared.ids,'),
-        ('missing-local-symbols', 'symbols: symbols, assertion:',
+        ('missing-local-symbols', 'symbols: saved.symbols, assertion:',
          'symbols: map.empty(), assertion:'),
         ('lost-local-journal', 'Some(_) -> moved.body_writes',
          'Some(_) -> Some([])'),
         ('unpaired-body',
-         'if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }',
+         'if not scalar_shape.same(prior.body, d.body, bound) { return None }',
          'if false { return None }'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-scalar-oracle-') as temp:

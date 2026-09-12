@@ -43,6 +43,7 @@ pub fn samples() -> List[Comparison] !io = {
   let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
   if saved.refused != 0 { panic("old scalar capture") }
+  let admitted = scalar_replay.admit(scope, old, old_snapshot, saved)
   var pairs: List[Comparison] = []
   for (tail, hits) in cases {
     let after = support ++ tail
@@ -55,7 +56,7 @@ pub fn samples() -> List[Comparison] !io = {
         function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
       ScalarReplaySnapshot.reset()
-      let current = scalar_replay.replay(scope, old, old_snapshot, saved, next, next_snapshot)
+      let current = scalar_replay.replay(admitted, next, next_snapshot)
       let calls = ScalarReplaySnapshot.count()
       if current.reused != hits || calls != current.checked {
         panic("FAIL: scalar independent execution count")
@@ -102,6 +103,7 @@ fn replay_cases(label: String, before: String, cases: List[(String, Int)]) -> Li
   let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
   if saved.refused != 0 || saved.bodies.cx.diags != [] { panic(label ++ " capture") }
+  let admitted = scalar_replay.admit(scope, old, old_snapshot, saved)
   var pairs: List[Comparison] = []
   for (after, hits) in cases {
     let next_snapshot = match source_snapshot.of(after) {
@@ -113,7 +115,7 @@ fn replay_cases(label: String, before: String, cases: List[(String, Int)]) -> Li
         function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
       ScalarReplaySnapshot.reset()
-      let current = scalar_replay.replay(scope, old, old_snapshot, saved, next, next_snapshot)
+      let current = scalar_replay.replay(admitted, next, next_snapshot)
       let calls = ScalarReplaySnapshot.count()
       if current.reused != hits || calls != current.checked {
         panic("FAIL: scalar independent execution count")

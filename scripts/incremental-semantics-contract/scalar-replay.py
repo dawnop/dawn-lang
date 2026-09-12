@@ -18,10 +18,8 @@ def main():
     path = 'selfhost/src/check/scalar_replay.dawn'
     original = (ROOT / path).read_text()
     variants = [
-        ('disable-replay', 'let hit: Option[Product] = if valid {',
-         'let hit: Option[Product] = if false {'),
-        ('source-owner', 'snapshot_matches(old, old_source) && snapshot_matches(next, source)',
-         'true'),
+        ('disable-replay', 'Some(p) -> candidate(p, cx, d, sig)', 'Some(p) -> None'),
+        ('source-owner', 'not snapshot_matches(old, old_source)', 'false'),
         ('observer-mode', 'Some(_) -> moved.function_reads', 'Some(_) -> None'),
         ('current-isolation', 'isolated: cx.frame.isolated', 'isolated: false'),
         ('current-test-mode', 'in_test: cx.in_test', 'in_test: false'),
@@ -29,10 +27,18 @@ def main():
         ('current-constant-cutoff', 'const_cutoff: cx.const_cutoff', 'const_cutoff: None'),
         ('current-loop-jumps', 'loop_jumps: cx.loop_jumps', 'loop_jumps: set.empty()'),
         ('unpaired-body',
-         'if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }',
+         'if not scalar_shape.same(prior.body, d.body, bound) { return None }',
          'if false { return None }'),
         ('alias-shadowed-binders', 'if map.has(cx.module_aliases, name) { return None }',
          'if false { return None }'),
+        # The record-time half of admission. Its verdicts are what the replay
+        # path stops recomputing, so each one needs its own control.
+        ('recorded-binders', 'let names = scalar_shape.binders(prior.body, prior_sig.param_names)?',
+         'let names: List[String] = []'),
+        ('header-only-interval',
+         'let ids = allocation.reserved_plan(prepared.reserver, key,\n'
+         '    p.allocation_start, p.allocation_count, cx.next_id, prior_sig, sig, [])?',
+         'let ids = allocation.reserver_ids(prepared.reserver)'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-scalar-replay-') as temp:
         root = Path(temp)
