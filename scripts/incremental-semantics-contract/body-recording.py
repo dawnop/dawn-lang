@@ -27,6 +27,9 @@ def main():
         ('drop-observer-prefix', 'Some(prefix ++ entries)', 'Some(entries)'),
         ('leak-private-log', 'let reads = match before.function_reads {\n    None -> None',
          'let reads = match before.function_reads {\n    None -> after.function_reads'),
+        ('drop-write-prefix', 'Some(prefix ++ keys)', 'Some(keys)'),
+        ('leak-private-writes', 'let writes = match before.body_writes {\n    None -> None',
+         'let writes = match before.body_writes {\n    None -> after.body_writes'),
         ('drop-trace', 'let start = observed(cx)', 'let start = cx'),
     ]
     subjects = [('positive', original)]

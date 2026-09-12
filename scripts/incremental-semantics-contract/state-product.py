@@ -20,6 +20,7 @@ def audit_fields(cx_source, product_source):
     block = cx_source.split(start, 1)[1].split("\n}", 1)[0]
     fields = set(re.findall(r"^  ([a-z_]+):", block, re.M))
     unchanged = set(re.findall(r"a\.([a-z_]+) == b\.\1", product_source))
+    unchanged |= set(re.findall(r"environment_map_same\(a\.([a-z_]+), b\.\1, tracked\)", product_source))
     written = {"diags", "next_id", "fns", "alias_resolved", "frame", "syms",
                "current_eff_vars", "current_tparams", "current_tparam_bounds",
                "in_test", "const_cutoff", "loop_jumps", "take_cell", "function_reads", "body_writes"}
@@ -51,7 +52,10 @@ def main():
         ("bound-write", "current_tparam_bounds: apply_changes(current.current_tparam_bounds, product.bounds)", "current_tparam_bounds: current.current_tparam_bounds"),
         ("frame-reset", "frame: product.frame", "frame: current.frame"),
         ("diagnostic-write", "diags: current.diags ++ product.diagnostics", "diags: current.diags"),
-        ("environment-write", "not environment_unchanged(before, after)", "false"),
+        ("environment-write", "not environment_unchanged(before, after, tracked)", "false"),
+        ("environment-value", "Some(other) -> value == other", "Some(other) -> true"),
+        ("environment-key", "Some(other) -> value == other, None -> false", "Some(other) -> value == other, None -> true"),
+        ("environment-size", "map.len(a) == map.len(b) && map.fold", "map.fold"),
         ("allocation-start", "current.next_id != product.allocation_start", "false"),
         ("unobserved-allocation", "while id < old_limit", "while false"),
         ("diagnostic-span", "Diag { ..d, lo: map.get(v.positions, d.lo)?, hi: map.get(v.ends, d.hi)? }", "d"),

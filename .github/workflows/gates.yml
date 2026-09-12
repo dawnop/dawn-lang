@@ -1019,8 +1019,10 @@ jobs:
     # observation supersedes the 491s planning value; 3x is 1674s, so the
     # timeout is 28 minutes. It remains below the 950s run-pole, which does
     # not move.
-  # The incremental-semantics contracts, in eight jobs since 2026-09-11 and in
-  # twenty before that. Nothing here is a shard of a shared matrix: each is a
+  # The existing incremental-semantics contracts were consolidated into eight
+  # jobs on 2026-09-11, from twenty. The new body-execution contracts below
+  # add a ninth job without removing or redistributing those contracts.
+  # Nothing here is a shard of a shared matrix: each is a
   # complete contract over its own scripts in
   # scripts/incremental-semantics-contract/, and the jobs share nothing but
   # the toolchain. So the grouping is free, and what fixes it is cost.
@@ -1136,8 +1138,12 @@ jobs:
     runs-on: ubuntu-latest
     # local-values 367s + state 342s + state-products 125s
     # = 834s of work, plus one 36s setup = 870s.
-    # budget: 3x 870s planning value (three merged jobs' worst observations)
-    timeout-minutes: 44
+    # 2026-09-12: three new environment-comparison controls increase local
+    # state-product time from 69.04s to 88.97s. Retain the existing baseline
+    # and add twice the rounded 20s delta; do not replace runner history with
+    # a faster local result. New planning total: 870 + 40 = 910s.
+    # budget: 3x 910s planning value (existing baseline plus new controls)
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1367,6 +1373,36 @@ jobs:
       # Two positive modules plus 31 compiling controls took 108.71s on 2026-09-09.
       - name: Witness observation and candidate revalidation contracts
         run: python3 scripts/incremental-semantics-contract/witness-revalidation.py
+
+  incremental-body-execution:
+    runs-on: ubuntu-latest
+    # New contracts, not a split of the eight existing jobs. Local complete
+    # runs: executor 78.66s, recorder 54.44s, scheduler 30.48s, journal 44.62s
+    # on 2026-09-10/12. Double the rounded totals for runner headroom and add
+    # one 36s setup: 2 * (79 + 55 + 31 + 45) + 36 = 456s. This is a planning
+    # estimate, not a runner observation; replace it after the first CI run.
+    # The expanded nine-control recorder took 52.00s, within its 55s term.
+    # Six actual-consumer controls took 36.57s; the ownership inventory took
+    # under 1s. Add 2 * (37 + 1) = 76s, for a total of 532s.
+    # budget: 3x 532s planning value (new complete body execution contracts)
+    timeout-minutes: 27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stateful body executor contracts
+        run: python3 scripts/incremental-semantics-contract/body-executor.py
+      - name: Full-product frozen body scheduler oracle
+        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
+      - name: Opt-in body recording contracts
+        run: python3 scripts/incremental-semantics-contract/body-recording.py
+      - name: Body write journal contracts
+        run: python3 scripts/incremental-semantics-contract/write-journal.py
+      - name: Body table writer ownership inventory
+        run: python3 scripts/incremental-semantics-contract/journal-coverage.py
+      - name: Canonical body writer consumer contracts
+        run: python3 scripts/incremental-semantics-contract/journal-consumers.py
 
   contracts:
     runs-on: ubuntu-latest

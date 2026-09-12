@@ -734,6 +734,20 @@ The same 1000-function fixture then recorded in roughly 280 ms on 2026-09-12,
 down from roughly 900 ms, but still far above cold checking. In particular,
 immutable environment comparisons still revisit module-wide data per body.
 Recording remains opt-in until the remaining cost and admission proof are closed.
+Environment membership checks now use a trie fold in the journaled path,
+preserving cardinality, key presence and value equality without materializing
+and sorting entries. The strict extractor still uses standard Map equality.
+Three compiling controls separately break cardinality, membership and value
+checks; reordered entries remain equivalent. The same private 1000-function
+fixture measured roughly 46–53 ms recording in warm rounds on 2026-09-12,
+versus roughly 3–8 ms cold (eight alternating-order rounds, JVM 21, SerialGC).
+This removes sorting overhead, not the remaining repeated environment scans;
+it does not establish linear scaling or justify enabling session recording.
+A lexical inventory pins all production Cx table-constructor owners, while
+an independent actual-scheduler fixture compares strict and journaled products
+and their replayed tables across all six roles. Six compiling controls bypass
+the real symbol, evidence, dictionary, bound, inferred-signature and lazy-alias
+writer calls. The lexical inventory is not a type-checked call-graph proof.
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate
