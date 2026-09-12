@@ -25,6 +25,18 @@ use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ParameterD
 use compiler/front/parser
 use compiler/front/ast.{module_fns, module_tests}
 
+## Every callee query these fixtures make is answered twice: once through the
+## per-revision index production carries, once through the linear scan the
+## index replaced. Disagreement is fatal, so the whole typed-projection corpus
+## is an equivalence oracle for the index on real header shapes.
+pub fn checked_callee(cx: Cx, owner: Option[String], name: String, builtin: Bool,
+  tr: Option[Int]) -> Option[Sig] = {
+  let indexed = relocate_tree.callee_signature(relocate_tree.callee_index(cx), cx, owner, name, builtin, tr)
+  let scanned = relocate_tree.scanned_callee_signature(cx, owner, name, builtin, tr)
+  if indexed != scanned { panic("callee index disagrees with the linear scan: " ++ name) }
+  indexed
+}
+
 pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) -> TFun = {
   var stable: Map[Int, Int] = map.empty()
   var locals: Map[Int, Int] = map.empty()
@@ -42,7 +54,7 @@ pub fn body(f: TFun, before: Cx, after: Cx, delta: Int, span: Int, length: Int) 
   }
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
   let v = View { ids: ids, positions: from_map(positions), ends: from_map(positions), assertion: (src, lo, hi) => Some(src), symbols: after.syms,
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("typed projection failed: " ++ f.name)
 }
 
@@ -61,7 +73,7 @@ pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int,
   let ids = relocate.new(stable, stable, stable, stable, locals).expect("fixture relocation tables")
   let v = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   relocate_tree.function(v, f).expect("source-aware typed projection failed: " ++ f.name)
 }
 
@@ -80,7 +92,7 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int,
   let ids = relocate.new(stable, stable, stable, stable, stable).expect("state relocation tables")
   let view = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("state capture: " ++ body.name)
   let projected = body_product.project(view, saved, current.next_id).expect("state projection: " ++ body.name)
   body_product.assemble(current, projected).expect("state assembly: " ++ body.name)
@@ -492,7 +504,7 @@ fn value_module_sample() -> ModuleTrial !io = {
         let source = source_projection.between(text, edited, p.tree.lo, p.tree.hi, d.lo, d.hi).expect("constant source")
         let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: saved.after.syms,
           assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-          callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
+          callee: (owner, name, builtin, tr) => checked_callee(saved.before, owner, name, builtin, tr) }
         let projected = body_product.project_constant(view, p, replayed.next_id).expect("constant projection")
         replayed = body_product.assemble(replayed, projected).expect("constant replay")
         moved_constants = moved_constants ++ [projected.tree]
@@ -517,7 +529,7 @@ fn value_module_sample() -> ModuleTrial !io = {
         let source = source_projection.between(text, edited, prior.lo, prior.hi, d.lo, d.hi).expect("test source")
         let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: saved.after.syms,
           assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-          callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(saved.before, owner, name, builtin, tr) }
+          callee: (owner, name, builtin, tr) => checked_callee(saved.before, owner, name, builtin, tr) }
         let projected = body_product.project(view, p, replayed.next_id).expect("test projection")
         replayed = body_product.assemble(replayed, projected).expect("test replay")
         moved_tests = moved_tests ++ [projected.tree]
@@ -611,7 +623,7 @@ fn method_module_sample() -> ModuleTrial !io = {
     let source = source_projection.between(text, edited, old_lo, old_hi, next_lo, next_hi).expect("method source")
     let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: body.after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-      callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
+      callee: (owner, name, builtin, tr) => checked_callee(body.before, owner, name, builtin, tr) }
     let projected = body_product.project(view, body.product, replayed.next_id).expect("method projection")
     replayed = body_product.assemble(replayed, projected).expect("method replay")
     match entry {
@@ -682,7 +694,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
       entry.syntax.lo, entry.syntax.hi).expect("named source")
     let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: body.after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-      callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(body.before, owner, name, builtin, tr) }
+      callee: (owner, name, builtin, tr) => checked_callee(body.before, owner, name, builtin, tr) }
     let projected = body_product.project(view, body.product, replayed.next_id).expect("named projection")
     replayed = body_product.assemble(replayed, projected).expect("named replay")
     functions = functions ++ [projected.tree]
@@ -748,7 +760,7 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   let source = source_projection.between(text, text, decl.lo, decl.hi, decl.lo, decl.hi).expect("import source")
   let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("import body capture")
   let projected = body_product.project(view, saved, next.next_id).expect("import body projection")
   let replayed = body_product.assemble(next, projected).expect("import body assembly")
@@ -802,7 +814,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
       new_cx.next_id, sig, new_sig, []).expect("default allocation")
     let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
       assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
     let saved = body_product.capture(old_cx, after, fn_value).expect("default capture")
     let projected = body_product.project(view, saved, new_cx.next_id).expect("default projection")
     new_cx = body_product.assemble(new_cx, projected).expect("default assembly")
@@ -821,7 +833,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
     old_cx.next_id, old_after.next_id - old_cx.next_id, new_cx.next_id, sigs[0], nsigs[0], old_body.ev_syms).expect("main allocation")
   let main_view = View { ids: main_plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: old_after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   let main_saved = body_product.capture(old_cx, old_after, old_body).expect("main capture")
   let main_projected = body_product.project(main_view, main_saved, new_cx.next_id).expect("main projection")
   let replayed = body_product.assemble(new_cx, main_projected).expect("main assembly")
@@ -896,7 +908,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
         old_decls[i].lo, old_decls[i].hi, new_decls[i].lo, new_decls[i].hi).expect("inferred source")
       let view = View { ids: plan.ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
         assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-        callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+        callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
       let saved = body_product.capture(before, after, body).expect("inferred capture")
       let projected = body_product.project(view, saved, replayed.next_id).expect("inferred projection: " ++ body.name)
       replayed = body_product.assemble(replayed, projected).expect("inferred assembly")
@@ -1086,7 +1098,7 @@ pub fn header_sample() -> HeaderTrial !io = {
   let source = source_projection.between(old_text, new_text, decl.lo, decl.hi, ndecl.lo, ndecl.hi).expect("header source view")
   let v = View { ids: ids, positions: from_map(source.starts), ends: from_map(source.ends), symbols: after.syms,
     assertion: (src, lo, hi) => source_projection.assertion(source, src, lo, hi),
-    callee: (owner, name, builtin, tr) => relocate_tree.callee_signature(before, owner, name, builtin, tr) }
+    callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   let product = body_product.capture(before, after, saved).expect("header body capture")
   let projected = body_product.project(v, product, next.next_id).expect("header body projection")
   HeaderTrial { relocated: projected.tree, cold: cold,

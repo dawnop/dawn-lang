@@ -21,10 +21,81 @@ use check/tast.{
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd
 }
 
+## What one (owner, name) key resolves to across the three function tables.
+## Two different signatures under one key is exactly the observation the scan
+## below refuses; recording the refusal keeps it without rescanning.
+type CalleeEntry = CalleeUnique(sig: Sig) | CalleeConflict
+
+type CalleeTable = { by_key: CalleeKeys }
+
+## The non-builtin, non-trait function signatures of one revision, keyed by
+## the pair a call site names. Opaque because the guarantee is the pairing:
+## an index answers for the revision it was built from and no other.
+pub opaque type CalleeIndex = CalleeTable
+
+alias CalleeKeys = Map[(Option[String], String), CalleeEntry]
+
+fn index_signature(into: CalleeKeys, sig: Sig) -> CalleeKeys = {
+  if sig.is_builtin || sig.trait_id != None { return into }
+  let key = (sig.owner, sig.name)
+  match map.get(into, key) {
+    None -> map.insert(into, key, CalleeUnique(sig))
+    Some(CalleeUnique(previous)) ->
+      if previous != sig { map.insert(into, key, CalleeConflict) } else { into }
+    Some(CalleeConflict) -> into
+  }
+}
+
+## One pass over the three tables a call site can name, for a whole revision.
+## The scan it replaces is per call site, so a module with n functions and m
+## named calls paid n*m; this pays n once and a hash lookup per call. The
+## answer is order-free: a key is unique when every signature filed under it
+## is the same value, and conflicting when two differ, which is what the scan
+## reports whichever table it meets first.
+pub fn callee_index(cx: Cx) -> CalleeIndex = {
+  var by_key: CalleeKeys = map.empty()
+  for (_, sig) in map.entries(cx.fns) { by_key = index_signature(by_key, sig) }
+  for (_, sig) in map.entries(cx.std_fns) { by_key = index_signature(by_key, sig) }
+  for (_, sig) in map.entries(cx.module_fn_sigs) { by_key = index_signature(by_key, sig) }
+  CalleeTable { by_key: by_key }
+}
+
 ## Calls carry the declaring owner, not the alias used to reach it. Reading
 ## only the local spelling loses qualified imports and can pick a shadowing
 ## function with an unrelated signature. Conflicting observations fail closed.
-pub fn callee_signature(cx: Cx, owner: Option[String], name: String, builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
+##
+## Builtins and trait methods answer from their own tables, which are keyed by
+## the question already. Only the plain-function case needed an index, and it
+## must be the index of `cx`: `scanned_callee_signature` is the oracle.
+pub fn callee_signature(ix: CalleeIndex, cx: Cx, owner: Option[String], name: String,
+  builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
+  if builtin {
+    if owner != None || tr != None { return None }
+    return map.get(cx.bins, name)
+  }
+  match tr {
+    Some(id) -> {
+      let info = map.get(cx.traits, id)?
+      for (method, value) in info.methods {
+        if method == name && value.sig.owner == owner { return Some(value.sig) }
+      }
+      return None
+    }
+    None -> ()
+  }
+  let table: CalleeTable = ix
+  match map.get(table.by_key, (owner, name)) {
+    Some(CalleeUnique(sig)) -> Some(sig)
+    Some(CalleeConflict) -> None
+    None -> None
+  }
+}
+
+## The linear scan `callee_signature` replaced, kept as the oracle its index
+## is checked against. Not for production use: it concatenates the three
+## tables and walks them once per call site.
+pub fn scanned_callee_signature(cx: Cx, owner: Option[String], name: String,
+  builtin: Bool, tr: Option[Int]) -> Option[Sig] = {
   if builtin {
     if owner != None || tr != None { return None }
     return map.get(cx.bins, name)
@@ -460,12 +531,83 @@ test "tree callee lookup preserves declaring owners across module aliases" {
   let imported = Sig { ..fixture_signature(), owner: Some("library"), ret: TyInt }
   let cx = Cx { ..cx_new(Some("consumer"), None), fns: map.from([("f", local)]),
     module_fn_sigs: map.from([(("dep", "f"), imported), (("other_alias", "f"), imported)]) }
-  assert callee_signature(cx, Some("library"), "f", false, None) == Some(imported)
-  assert callee_signature(cx, Some("consumer"), "f", false, None) == Some(local)
-  assert callee_signature(cx, None, "f", false, None) == None
+  let ix = callee_index(cx)
+  assert callee_signature(ix, cx, Some("library"), "f", false, None) == Some(imported)
+  assert callee_signature(ix, cx, Some("consumer"), "f", false, None) == Some(local)
+  assert callee_signature(ix, cx, None, "f", false, None) == None
   let conflict = Cx { ..cx, module_fn_sigs: map.insert(cx.module_fn_sigs, ("conflict", "f"), Sig { ..imported, ret: TyUnit }) }
-  assert callee_signature(conflict, Some("library"), "f", false, None) == None
-  assert callee_signature(cx, Some("library"), "f", true, None) == None
+  assert callee_signature(callee_index(conflict), conflict, Some("library"), "f", false, None) == None
+  assert callee_signature(ix, cx, Some("library"), "f", true, None) == None
+}
+
+## The index is a way of finding the answer, not a different answer. Ask both
+## it and the scan every query shape a call site can produce: each owner the
+## revision knows plus an unknown one, each declared name plus an undeclared
+## one, each trait id plus an unknown one, and both builtin flags.
+fn callee_answers_agree(cx: Cx) -> Bool = {
+  let ix = callee_index(cx)
+  var owners: List[Option[String]] = [None, Some("absent_owner")]
+  var names: List[String] = ["absent_name"]
+  var traits: List[Option[Int]] = [None, Some(-7)]
+  for (name, sig) in map.entries(cx.fns) {
+    owners = owners ++ [sig.owner]
+    names = names ++ [name, sig.name]
+  }
+  for (name, sig) in map.entries(cx.std_fns) {
+    owners = owners ++ [sig.owner]
+    names = names ++ [name, sig.name]
+  }
+  for (_, sig) in map.entries(cx.module_fn_sigs) {
+    owners = owners ++ [sig.owner]
+    names = names ++ [sig.name]
+  }
+  for (name, _) in map.entries(cx.bins) { names = names ++ [name] }
+  for (id, info) in map.entries(cx.traits) {
+    traits = traits ++ [Some(id)]
+    for (method, value) in info.methods {
+      names = names ++ [method]
+      owners = owners ++ [value.sig.owner]
+    }
+  }
+  for owner in owners {
+    for name in names {
+      for tr in traits {
+        for builtin in [false, true] {
+          if callee_signature(ix, cx, owner, name, builtin, tr) !=
+            scanned_callee_signature(cx, owner, name, builtin, tr) { return false }
+        }
+      }
+    }
+  }
+  true
+}
+
+test "the callee index answers exactly what the linear scan answers" {
+  let base = cx_new(Some("consumer"), None)
+  let local = Sig { ..fixture_signature(), owner: Some("consumer") }
+  let imported = Sig { ..fixture_signature(), owner: Some("library"), ret: TyInt }
+  let same_g = Sig { ..fixture_signature(), name: "g", owner: Some("consumer") }
+  let other_g = Sig { ..fixture_signature(), name: "g", owner: Some("consumer"), ret: TyInt }
+  let only_h = Sig { ..fixture_signature(), name: "h", owner: Some("library") }
+  # One key carrying the same signature three times, one key carrying two
+  # different signatures, and two entries the scan filters out before it
+  # compares anything.
+  let duplicates = Cx { ..base,
+    fns: map.from([("f", imported), ("g", same_g)]),
+    std_fns: map.from([("f", imported), ("g", other_g)]),
+    module_fn_sigs: map.from([(("dep", "f"), imported), (("dep", "h"), only_h),
+      (("shadow", "h"), Sig { ..only_h, is_builtin: true, ret: TyUnit }),
+      (("bound", "h"), Sig { ..only_h, trait_id: Some(-3), ret: TyUnit })]) }
+  let ix = callee_index(duplicates)
+  assert callee_signature(ix, duplicates, Some("library"), "f", false, None) == Some(imported)
+  assert callee_signature(ix, duplicates, Some("consumer"), "g", false, None) == None
+  assert callee_signature(ix, duplicates, Some("library"), "h", false, None) == Some(only_h)
+  assert callee_answers_agree(duplicates)
+  assert callee_answers_agree(base)
+  let aliases = Cx { ..base, fns: map.from([("f", local)]),
+    module_fn_sigs: map.from([(("dep", "f"), imported), (("other_alias", "f"), imported),
+      (("conflict", "f"), Sig { ..imported, ret: TyUnit })]) }
+  assert callee_answers_agree(aliases)
 }
 
 fn fixture_view() -> View = {

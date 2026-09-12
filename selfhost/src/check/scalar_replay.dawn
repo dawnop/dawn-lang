@@ -22,6 +22,7 @@ use check/write_journal.{SymbolKey}
 use check/source_projection
 use check/source_snapshot
 use check/source_snapshot.{Snapshot}
+use check/relocate_tree
 use check/relocate_tree.{View}
 use check/semantic_reads.{AssignableType}
 use front/ast.{FnDecl, DFn}
@@ -45,7 +46,7 @@ type AdmittedData = { scope: ModuleKey, ready: Option[Ready] }
 pub opaque type Admitted = AdmittedData
 
 type Prepared = { scope: ModuleKey, ready: Ready, reserver: allocation.Reserver,
-  allowed: Map[DeclKey, Int],
+  allowed: Map[DeclKey, Int], callees: relocate_tree.CalleeIndex,
   old_tokens: source_projection.Tokens, tokens: source_projection.Tokens }
 
 fn primitive(t: Ty) -> Bool = match t {
@@ -196,7 +197,14 @@ fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Opt
   for entry in identity.declarations(scope, next.syntax) {
     allowed = map.insert(allowed, entry.key, entry.declaration)
   }
+  # The candidate revision's function tables, keyed once by the pair a call
+  # site names. It belongs here for the same reason the reservation does:
+  # `prepare` runs once per candidate revision, `relocation` runs once per
+  # body, and a table built per body would cost a module-sized pass per body.
+  # It is built from the header revision's `cx`, which is the revision these
+  # products are relocated onto.
   Some(Prepared { scope: scope, ready: settled, reserver: reserver, allowed: allowed,
+    callees: relocate_tree.callee_index(next.cx),
     old_tokens: source_snapshot.tokens(settled.source), tokens: source_snapshot.tokens(source) })
 }
 
@@ -236,6 +244,10 @@ fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior,
     ends: (at) => source_projection.end_at(coords, at),
     symbols: saved.symbols,
     assertion: (text, lo, hi) => source_projection.assertion_at(coords, text, lo, hi),
+    # Admission is closed to named calls: `scalar_shape.same` pairs no call
+    # node and `recorded` accepts no read but `AssignableType`, so no admitted
+    # body has a callee to resolve. Widening this class is what consumes
+    # `prepared.callees`; until then the relocation refuses every call node.
     callee: (owner, name, builtin, trait_id) => None }
   Some((saved, view))
 }
@@ -320,6 +332,15 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   assert match prepare(admitted, next, next_snapshot) {
     Some(p) -> match candidate(p, next.cx, declaration, sig) { Some(_) -> true, None -> false }
     None -> false
+  }
+  # The index the preparation carries is the revision's own: on a real
+  # candidate revision it answers every declared callee the way the scan it
+  # replaced does.
+  let prepared = prepare(admitted, next, next_snapshot).expect("prepared candidate")
+  let no_trait: Option[Int] = None
+  for (_, declared) in map.entries(next.cx.fns) {
+    assert relocate_tree.callee_signature(prepared.callees, next.cx, declared.owner, declared.name, false, no_trait) ==
+      relocate_tree.scanned_callee_signature(next.cx, declared.owner, declared.name, false, no_trait)
   }
   let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)

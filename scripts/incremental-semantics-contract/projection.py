@@ -40,9 +40,13 @@ def main():
             ("header-const-types", "impl_sigs: impl_sigs, const_tys: const_tys }", "impl_sigs: impl_sigs, const_tys: [] }"),
         ]),
         ("relocate_tree", "tree callee lookup preserves declaring owners across module aliases", [
-            ("callee-owner", "sig.owner == owner && sig.name == name", "sig.name == name"),
-            ("callee-module-alias", "for (_, sig) in map.entries(cx.module_fn_sigs) { candidates = candidates ++ [sig] }", ""),
-            ("callee-conflict", "Some(previous) -> if previous != sig { return None }", "Some(previous) -> ()"),
+            # The production lookup is the index, so these three mutate the
+            # index. The linear scan they used to mutate is now only the
+            # oracle `callee_answers_agree` compares against.
+            ("callee-owner", "let key = (sig.owner, sig.name)",
+             "let key: (Option[String], String) = (None, sig.name)"),
+            ("callee-module-alias", "for (_, sig) in map.entries(cx.module_fn_sigs) { by_key = index_signature(by_key, sig) }", ""),
+            ("callee-conflict", "if previous != sig { map.insert(into, key, CalleeConflict) } else { into }", "into"),
         ]),
         ("source_projection", "source projection ", [
             ("same-boundary-table", "ends: ends, old_text: old_text,", "ends: starts, old_text: old_text,"),

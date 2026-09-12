@@ -211,6 +211,26 @@ ADT的效果参数原先只保留名字，字段解析时的真实binder ID随�
 反转ADT、opaque/透明alias、trait和效果，核对类型/效果binder及方法完整签名映射，
 然后比较body重放与冷检查的完整Cx。正例不代表生产缓存已接入，入口分支专属负控仍需补齐。
 
+The callee lookup that paragraph describes is now index-backed. `callee_index`
+makes one pass over the three tables a call site can name, `cx.fns`,
+`cx.std_fns` and `cx.module_fn_sigs`, and files every non-builtin, non-trait
+signature under the pair `(owner, name)` the call site spells, recording a
+conflict when two different signatures land on one key. `callee_signature`
+takes that index and answers with one hash lookup; the builtin and trait
+branches are unchanged, because their own tables are already keyed by the
+question. The linear scan is kept as `scanned_callee_signature` and is the
+oracle the index is checked against, not a production entry: the index answers
+exactly what the scan answers for the same `cx`, including the conflict
+refusal, which the inline tests assert over synthetic duplicate keys and the
+typed-projection fixtures assert on every query they make. The index is owned
+by `scalar_replay`'s prepared candidate and lives exactly as long as it: it is
+built once per candidate revision beside the allocation reservation, from the
+header revision's `cx`, so widening admission cannot put a module-sized pass on
+the per-body path. Admission of named calls stays closed. `scalar_shape.same`
+pairs no call node and `recorded` accepts no read but `AssignableType`, so the
+relocation each admitted body receives still refuses every call site; the index
+is the prerequisite for widening that class, not the widening.
+
 body状态产物先从真实检查前后提取：符号、推断签名、alias解析结果、累积类型参数
 约束用逐键变化表示，诊断保存追加后缀，不保留两份完整Cx。
 提取必须拒绝声明环境等未声明的写入及诊断前缀改写；Jsig是同owner能力，不能用Eq
