@@ -748,6 +748,39 @@ an independent actual-scheduler fixture compares strict and journaled products
 and their replayed tables across all six roles. Six compiling controls bypass
 the real symbol, evidence, dictionary, bound, inferred-signature and lazy-alias
 writer calls. The lexical inventory is not a type-checked call-graph proof.
+
+The first cross-revision executor admits a closed scalar-literal producer:
+explicit Int/Float/Bool/Unit return, no parameters, defaults, binders or effects,
+and precisely the successful primitive return-compatibility observation.
+It reparses source snapshots against their header syntax, pairs unique
+declaration identities, derives compiler/local allocation tables, projects
+source boundaries and product state, and revalidates the observed return
+compatibility before assembly. A missing proof or unsupported role executes
+the canonical cold callback. Checked/reused counts describe actual callback
+execution, not candidate lookup or successful projection alone.
+Pass-through checker fields come from the current scheduling context, and
+private logs are adapted to the current observation mode only after validation.
+This opt-in module executor is an integration step, not general query-context
+admission, a session implementation, or phase-5 acceptance. Declaration indices
+and header-ID mappings are prepared once per module replay; the zero-allocation
+eligibility guard makes that mapping sufficient without reserving a new body
+interval. Performance acceptance remains outstanding.
+An independent Java counter instruments canonical checker entries in a private
+subject, while a reflection oracle compares every ModuleBodies and Cx field
+over sixteen cold/replay pairs. A compiling disguised-cold mutant recomputes
+the body while reporting a hit; the entry counter must reject it even though
+the semantic products agree. Separate mutants lose accumulated symbols or
+retain stale source coordinates, and must fail the full-product comparison.
+The replay API benchmark (100/500/1000 zero-parameter literal functions, eight
+alternating-order rounds, JVM 21 SerialGC, headers prepared before timing)
+includes source snapshot checks and provenance admission. At 1000 functions,
+the initial prepared-index path took roughly 150ms versus roughly 1–4ms cold.
+Whole-source code-point slicing still repeatedly sought from the file start.
+An opaque source index now binds code points to their snapshot and projects
+local declaration slices before translating boundaries back to file positions;
+the original unindexed mapper remains the equality oracle. The same benchmark
+then took roughly 28–39ms in warm rounds on 2026-09-12. This is still slower
+than cold checking these trivial bodies and is not grounds for default enablement.
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate

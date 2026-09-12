@@ -1226,8 +1226,12 @@ jobs:
     runs-on: ubuntu-latest
     # reads 414s + projection 390s
     # = 804s of work, plus one 36s setup = 840s.
-    # budget: 3x 840s planning value (two merged jobs' worst observations)
-    timeout-minutes: 42
+    # Two indexed-source controls were added on 2026-09-12. The complete
+    # twenty-control local suite took 92.24s; allow 5s per new control locally
+    # (an estimate, not a per-control measurement), doubled for CI. Retain
+    # the existing runner-derived baseline: 840 + 2 * (2 * 5) = 860s.
+    # budget: 3x 860s planning value (existing baseline plus indexed controls)
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1384,8 +1388,13 @@ jobs:
     # The expanded nine-control recorder took 52.00s, within its 55s term.
     # Six actual-consumer controls took 36.57s; the ownership inventory took
     # under 1s. Add 2 * (37 + 1) = 76s, for a total of 532s.
-    # budget: 3x 532s planning value (new complete body execution contracts)
-    timeout-minutes: 27
+    # Scalar replay's six compiling controls took 34.22s on 2026-09-12;
+    # add 2 * 35s to the existing planning total, for 602s.
+    # The prepared-index rerun took 37.80s; add 2 * (38 - 35) = 6s.
+    # Full-product replay oracle and three independent controls took 20.22s;
+    # add 2 * 21s. Total planning value: 602 + 6 + 42 = 650s.
+    # budget: 3x 650s planning value (new complete body execution contracts)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1403,6 +1412,10 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/journal-coverage.py
       - name: Canonical body writer consumer contracts
         run: python3 scripts/incremental-semantics-contract/journal-consumers.py
+      - name: Scalar cross-revision executor contracts
+        run: python3 scripts/incremental-semantics-contract/scalar-replay.py
+      - name: Scalar full-product and real execution oracle
+        run: python3 scripts/incremental-semantics-contract/scalar-oracle.py
 
   contracts:
     runs-on: ubuntu-latest
