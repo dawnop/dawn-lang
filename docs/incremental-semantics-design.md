@@ -824,11 +824,13 @@ then took roughly 28–39ms in warm rounds on 2026-09-12. This is still slower
 than cold checking these trivial bodies and is not grounds for default enablement.
 
 Replay inputs are versioned snapshots, not source text. `check/source_snapshot`
-parses one revision once and keeps the resulting module beside the code-point
-index the token projection needs. Its representation is private and its only
-constructor parses the text it indexes, so a snapshot's tree is always the tree
-of its own text and no caller can pair one revision's tree with another
-revision's code points. The owner that checks a revision's headers checks them
+lexes and parses one revision once and keeps the resulting module beside the
+code-point index and the declaration token facts the token projection needs;
+all three come out of that one lex, because `parser.parse_module_lexed` hands
+back the code points and the token stream its own parse ran over. Its
+representation is private and its only constructor parses the text it indexes,
+so a snapshot's tree is always the tree of its own text and no caller can pair
+one revision's tree with another revision's code points. The owner that checks a revision's headers checks them
 from that same tree, and replay proves provenance by comparing the snapshot's
 tree with the headers it accompanies. That is the admission evidence the earlier
 reparse produced, at the cost of one structural comparison rather than a lexer
@@ -932,14 +934,27 @@ typed tree now costs more than type-checking the body that produced it, so the
 projection of the product, not admission, is the next thing that has to get
 cheaper.
 
-Snapshot construction pays for this. `source_snapshot.of` roughly doubles,
-from 3.5 to 8.0ms for the literal module and from 92.0 to 165.6ms for the
-195KB inference-heavy one, because it lexes the revision a second time: the
-parse inside it already lexed the text but `parser.parse_module` does not hand
-back its token stream. That is the obvious next saving and it is a change to the
-parser's public surface, not to this executor. Until then the arithmetic is
-that a revision's snapshot has to be replayed against several later revisions
-before it repays its own construction.
+Snapshot construction no longer pays for this three times over. It used to lex
+its revision three times: `parser.parse_module` decoded the text and tokenized
+it to build the tree and then dropped both, `source_projection.index` decoded it
+again, and `tokens_of` lexed it again. `parser.parse_module_lexed` returns the
+code points and the token stream beside the tree and the diagnostics, and
+`source_projection.index_cps` and `tokens_from` take them instead of recomputing
+them, so a snapshot is one lex. `parse_module` is that entry's wrapper and its
+behaviour and diagnostics are unchanged; `tokens_of` keeps its own lex and is
+the oracle the one-lex path is compared against, field by field, on clean
+revisions, on one the lexer rejects and on one recovered by `sync_decl`.
+
+Measured 2026-09-12 on the local benchmark (1000 bodies per class, 30 rounds
+dropping 12, three campaigns per side interleaved, JVM 21 SerialGC, shared
+machine, medians of campaign medians). `source_snapshot.of` fell from 99.2 to
+79.8ms for the primitive-parameter class, from 169.2 to 117.5ms for the 195KB
+inference-heavy one and from 7.4 to 4.4ms for the literal one. Replay itself is
+unchanged, as it has to be: both snapshots are built outside the timed call, and
+the residual spread across five campaigns per side is smaller than the drift of
+the machine over the session. The arithmetic is still that a revision's snapshot
+has to be replayed against several later revisions before it repays its own
+construction, now at 60 to 80% of the price.
 
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
