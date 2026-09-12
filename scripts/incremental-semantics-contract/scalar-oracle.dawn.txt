@@ -1,10 +1,10 @@
 # Private fixture: the Java counter is injected into canonical checker entries,
 # never into the executor's self-reported counters or its admission decisions.
-use compiler/front/parser
 use compiler/check/checker
 use compiler/check/checker.{ModuleHeaders, ModuleBodies}
 use compiler/check/body_execution
 use compiler/check/scalar_replay
+use compiler/check/source_snapshot
 use compiler/check/cx.{Cx, cx_new}
 use compiler/check/identity.{module_key}
 use compiler/check/semantic_reads
@@ -37,23 +37,25 @@ pub fn samples() -> List[Comparison] !io = {
   ]
   let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let (syntax, ds) = parser.parse_module(before)
-  if ds != [] { panic("old scalar fixture parse") }
-  let old = checker.check_module_headers(base, syntax, map.empty())
+  let old_snapshot = match source_snapshot.of(before) {
+    Some(s) -> s, None -> panic("old scalar fixture parse")
+  }
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
   if saved.refused != 0 { panic("old scalar capture") }
   var pairs: List[Comparison] = []
   for (tail, hits) in cases {
     let after = support ++ tail
-    let (next_syntax, next_ds) = parser.parse_module(after)
-    if next_ds != [] { panic("new scalar fixture parse") }
-    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    let next_snapshot = match source_snapshot.of(after) {
+      Some(s) -> s, None -> panic("new scalar fixture parse")
+    }
+    let headers = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
     for logging in [false, true] {
       let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
         function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
       ScalarReplaySnapshot.reset()
-      let current = scalar_replay.replay(scope, old, before, saved, next, after)
+      let current = scalar_replay.replay(scope, old, old_snapshot, saved, next, next_snapshot)
       let calls = ScalarReplaySnapshot.count()
       if current.reused != hits || calls != current.checked {
         panic("FAIL: scalar independent execution count")
@@ -94,22 +96,24 @@ fn boundary_samples() -> List[Comparison] !io = {
 fn replay_cases(label: String, before: String, cases: List[(String, Int)]) -> List[Comparison] !io = {
   let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let (syntax, ds) = parser.parse_module(before)
-  if ds != [] { panic(label ++ " fixture parse") }
-  let old = checker.check_module_headers(base, syntax, map.empty())
+  let old_snapshot = match source_snapshot.of(before) {
+    Some(s) -> s, None -> panic(label ++ " fixture parse")
+  }
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
   if saved.refused != 0 || saved.bodies.cx.diags != [] { panic(label ++ " capture") }
   var pairs: List[Comparison] = []
   for (after, hits) in cases {
-    let (next_syntax, next_ds) = parser.parse_module(after)
-    if next_ds != [] { panic(label ++ " candidate parse") }
-    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    let next_snapshot = match source_snapshot.of(after) {
+      Some(s) -> s, None -> panic(label ++ " candidate parse")
+    }
+    let headers = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
     for logging in [false, true] {
       let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
         function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
       ScalarReplaySnapshot.reset()
-      let current = scalar_replay.replay(scope, old, before, saved, next, after)
+      let current = scalar_replay.replay(scope, old, old_snapshot, saved, next, next_snapshot)
       let calls = ScalarReplaySnapshot.count()
       if current.reused != hits || calls != current.checked {
         panic("FAIL: scalar independent execution count")

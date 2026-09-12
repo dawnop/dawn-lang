@@ -21,9 +21,10 @@ use check/scalar_shape
 use check/write_journal.{SymbolKey}
 use check/relocate
 use check/source_projection
+use check/source_snapshot
+use check/source_snapshot.{Snapshot}
 use check/relocate_tree.{View}
 use check/semantic_reads.{AssignableType}
-use front/parser
 use front/ast.{FnDecl, DFn}
 
 pub type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int }
@@ -58,13 +59,13 @@ fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
   allocation.combine([allocation.compiler_headers(scope.world)?,
     allocation.table(allocation.local_headers(scope, h.syntax, h.cx)?)?])
 
-fn source_matches(h: ModuleHeaders, text: String) -> Bool = {
-  let (syntax, diagnostics) = parser.parse_module(text)
-  diagnostics == [] && syntax == h.syntax
-}
+## A snapshot parsed its own text, so comparing its tree with the headers is
+## the whole provenance check: equal trees mean the retained coordinates
+## address this revision. Nothing is lexed or parsed here.
+fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syntax(s) == h.syntax
 
 fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHeaders,
-  old_source: String, source: String) -> Option[Prepared] = {
+  old_source: Snapshot, source: Snapshot) -> Option[Prepared] = {
   let old_headers = table(scope, old)?
   let next_headers = table(scope, next)?
   let ids = allocation.between(old_headers, next_headers)?
@@ -98,7 +99,7 @@ fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHe
   }
   Some(Prepared { ids: ids, entries: entries, allowed: allowed,
     old_headers: old_headers, next_headers: next_headers,
-    old_source: source_projection.index(old_source), source: source_projection.index(source) })
+    old_source: source_snapshot.indexed(old_source), source: source_snapshot.indexed(source) })
 }
 
 fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
@@ -168,12 +169,13 @@ fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) 
 }
 
 ## Inputs must come from the canonical header/recording producers in one
-## owner world. Reparse both source snapshots so unrelated text cannot lend
+## owner world. Both source snapshots carry the tree of their own text, and
+## each must equal the headers it accompanies, so unrelated text cannot lend
 ## positions to those products. Every failed admission executes the cold body.
-pub fn replay(scope: ModuleKey, old: ModuleHeaders, old_source: String, saved: Recorded,
-  next: ModuleHeaders, source: String) -> Replayed !io = {
+pub fn replay(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded,
+  next: ModuleHeaders, source: Snapshot) -> Replayed !io = {
   let valid = old.cx.diags == [] && next.cx.diags == [] &&
-    source_matches(old, old_source) && source_matches(next, source)
+    snapshot_matches(old, old_source) && snapshot_matches(next, source)
   let prepared: Option[Prepared] = if valid { prepare(scope, old, saved, next, old_source, source) } else { None }
   let cold: BodyExecutor[Counts] = checker.cold_body_executor()
   let executor: BodyExecutor[Counts] = BodyExecutor {
@@ -204,24 +206,24 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
   let before = "fn answer() -> Int = 42\nfn other(x: Int) -> Int = x\n"
   let after = "type Added = { value: Int }\nfn other(x: Int) -> Int = x\n# moved\nfn answer() -> Int = 42\n"
-  let (old_syntax, old_ds) = parser.parse_module(before)
-  let (new_syntax, new_ds) = parser.parse_module(after)
-  assert old_ds == [] && new_ds == []
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+  let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
+  let new_syntax = source_snapshot.syntax(next_snapshot)
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let old = checker.check_module_headers(base, old_syntax, map.empty())
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let next = checker.check_module_headers(base, new_syntax, map.empty())
   let saved = body_execution.record(scope, old)
   assert saved.refused == 0
-  assert source_matches(old, before) && source_matches(next, after)
+  assert snapshot_matches(old, old_snapshot) && snapshot_matches(next, next_snapshot)
   let sig = map.get(next.cx.fns, "answer").expect("answer header")
   let declaration = match new_syntax.decls[2] { DFn(d) -> d, _ -> panic("answer syntax") }
   assert eligible(declaration, sig)
   assert match table(scope, old) { Some(_) -> true, None -> false }
   assert match table(scope, next) { Some(_) -> true, None -> false }
-  assert match candidate(scope, prepare(scope, old, saved, next, before, after).expect("prepared owner"), next.cx, declaration, sig) {
+  assert match candidate(scope, prepare(scope, old, saved, next, old_snapshot, next_snapshot).expect("prepared owner"), next.cx, declaration, sig) {
     Some(_) -> true, None -> false
   }
-  let actual = replay(scope, old, before, saved, next, after)
+  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   assert actual.reused == 2 && actual.checked == 0
   assert actual.bodies.functions == expected.functions
@@ -239,14 +241,13 @@ test "scalar replay relocates lexical locals after changed allocation prefixes" 
   let body = "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n"
   let before = "fn prefix() -> Int = 0\n" ++ body
   let after = "type Added = { n: Int }\nfn prefix(a: Int, b: Int) -> Int = a + b\n# shifted\n" ++ body
-  let (old_syntax, old_ds) = parser.parse_module(before)
-  let (next_syntax, next_ds) = parser.parse_module(after)
-  assert old_ds == [] && next_ds == []
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+  let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let old = checker.check_module_headers(base, old_syntax, map.empty())
-  let next = checker.check_module_headers(base, next_syntax, map.empty())
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
+  let next = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
-  let actual = replay(scope, old, before, saved, next, after)
+  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   assert actual.reused == 1 && actual.checked == 1
   assert actual.bodies.functions == expected.functions
@@ -259,10 +260,9 @@ test "scalar replay relocates lexical locals after changed allocation prefixes" 
 test "scalar replay refuses changed inputs and preserves current observation modes" {
   let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
   let before = "fn answer() -> Int = 42\n"
-  let (syntax, diagnostics) = parser.parse_module(before)
-  assert diagnostics == []
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let old = checker.check_module_headers(base, syntax, map.empty())
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
   for (text, hits) in [
     ("# moved\nfn answer() -> Int = 42\n", 1),
@@ -273,16 +273,15 @@ test "scalar replay refuses changed inputs and preserves current observation mod
     ("fn renamed() -> Int = 42\n", 0),
     ("fn answer() -> Int = { 42 }\n", 0)
   ] {
-    let (next_syntax, next_ds) = parser.parse_module(text)
-    assert next_ds == []
-    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    let next_snapshot = source_snapshot.of(text).expect("candidate snapshot")
+    let headers = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
     for logging in [false, true] {
       let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
         in_test: true, const_cutoff: Some(set.empty()), take_cell: Some(999),
         loop_jumps: set.from([999]), frame: Frame { ..headers.cx.frame, isolated: true },
         function_reads: if logging { Some([AssignableType(TyUnit, TyUnit, true)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
-      let actual = replay(scope, old, before, saved, next, text)
+      let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
       let expected = checker.check_module_body_products(next)
       assert actual.reused == hits && actual.checked == 1 - hits
       assert actual.bodies.functions == expected.functions
@@ -294,13 +293,16 @@ test "scalar replay refuses changed inputs and preserves current observation mod
       assert actual.bodies.cx.function_reads == expected.cx.function_reads
       assert actual.bodies.cx.body_writes == expected.cx.body_writes
       assert actual.bodies.cx.diags == expected.cx.diags
-      let mismatch = replay(scope, old, before ++ "# wrong snapshot\n", saved, next, text)
-      # A different comment-only snapshot reparses identically and is safe:
+      let trailing = source_snapshot.of(before ++ "# wrong snapshot\n").expect("trailing comment")
+      let mismatch = replay(scope, old, trailing, saved, next, next_snapshot)
+      # A different comment-only snapshot parses to the same tree and is safe:
       # its body coordinates are unchanged. Changed parsed input is not.
       assert mismatch.reused == hits
-      let unrelated = replay(scope, old, "fn wrong() -> Int = 42\n", saved, next, text)
+      let wrong = source_snapshot.of("fn wrong() -> Int = 42\n").expect("unrelated module")
+      let unrelated = replay(scope, old, wrong, saved, next, next_snapshot)
       assert unrelated.reused == 0 && unrelated.checked == 1
-      let extra = replay(scope, old, before ++ "fn extra() -> Int = 0\n", saved, next, text)
+      let added = source_snapshot.of(before ++ "fn extra() -> Int = 0\n").expect("added declaration")
+      let extra = replay(scope, old, added, saved, next, next_snapshot)
       assert extra.reused == 0 && extra.checked == 1
     }
   }
@@ -308,23 +310,22 @@ test "scalar replay refuses changed inputs and preserves current observation mod
 
 test "scalar replay refuses binders that shadow candidate module aliases" {
   let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
-  let (dep_syntax, dep_ds) = parser.parse_module("pub fn one() -> Int = 1\n")
-  assert dep_ds == []
+  let dep_syntax = source_snapshot.syntax(
+    source_snapshot.of("pub fn one() -> Int = 1\n").expect("dependency snapshot"))
   let (dep_cx, _) = checker.check_module(cx_new(Some("dep"), Some("dep.dawn")), dep_syntax, map.empty())
   assert dep_cx.diags == []
   let env = map.from([("dep", checker.exports_of(dep_cx, dep_syntax, "dep", "dep"))])
   let before = "fn compute(x: Int) -> Int = {\n let y = x + 1\n y\n}\n"
   let after = "use dep as y\n" ++ before
-  let (old_syntax, old_ds) = parser.parse_module(before)
-  let (next_syntax, next_ds) = parser.parse_module(after)
-  assert old_ds == [] && next_ds == []
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+  let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let old = checker.check_module_headers(base, old_syntax, env)
-  let next = checker.check_module_headers(base, next_syntax, env)
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), env)
+  let next = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), env)
   assert old.cx.diags == [] && next.cx.diags == []
   assert map.has(next.cx.module_aliases, "y")
   let saved = body_execution.record(scope, old)
-  let actual = replay(scope, old, before, saved, next, after)
+  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   let cold_diags: Int = len(expected.cx.diags)
   assert cold_diags == 1
@@ -338,17 +339,16 @@ test "scalar replay refuses re-parsed statement boundaries with equal tokens" {
   let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
   let before = "fn compute(x: Int) -> Int = {\n let a = 1\n let b = a\n - x\n}\n"
   let after = "fn compute(x: Int) -> Int = {\n let a = 1\n let b = a - x\n}\n"
-  let (old_syntax, old_ds) = parser.parse_module(before)
-  let (next_syntax, next_ds) = parser.parse_module(after)
-  assert old_ds == [] && next_ds == []
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+  let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
   let base = cx_new(Some("sample"), Some("sample.dawn"))
-  let old = checker.check_module_headers(base, old_syntax, map.empty())
-  let next = checker.check_module_headers(base, next_syntax, map.empty())
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
+  let next = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
   assert old.cx.diags == [] && next.cx.diags == []
-  assert source_matches(old, before) && source_matches(next, after)
+  assert snapshot_matches(old, old_snapshot) && snapshot_matches(next, next_snapshot)
   let saved = body_execution.record(scope, old)
   assert saved.refused == 0
-  let actual = replay(scope, old, before, saved, next, after)
+  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   let cold_diags: Int = len(expected.cx.diags)
   assert cold_diags == 1

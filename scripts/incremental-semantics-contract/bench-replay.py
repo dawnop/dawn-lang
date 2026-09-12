@@ -6,6 +6,8 @@ gate to compare. Nothing here changes checker, recorder or executor semantics;
 the subject calls the same production entries the scheduler uses.
 
 Each target is a fresh JVM with a fixed GC, and reports raw per-round nanos.
+The memory mode is the exception: it reports retained heap bytes per snapshot,
+measured across forced collections, and drops no warmup rounds.
 The first rounds are warmup and are dropped before the median: on these subjects
 the first round runs five to fifteen times slower than steady state, and the
 tail only settles after about ten rounds, so the default drops twelve. Peak RSS is the
@@ -27,6 +29,9 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 SUBJECT = HERE / "bench-replay.dawn.txt"
 JVM_FLAGS = ["-Xss64m", "-Xmx2g", "-XX:+UseSerialGC"]
+# Retained-heap rounds. Each one keeps another snapshot alive, so a handful is
+# enough and a long run would only measure the list holding them.
+MEMORY_ROUNDS = 5
 
 # (1) literal-only scalar, (2) primitive parameters with locals and arithmetic,
 # (3) calls to annotated non-generic functions, (4) generic functions with trait
@@ -72,7 +77,8 @@ def main():
     parser.add_argument("--rounds", type=int, default=30)
     parser.add_argument("--warmup", type=int, default=12,
                         help="dropped rounds; these subjects need about ten to reach steady JIT state")
-    parser.add_argument("--only", default="", help="comma-separated subset of cold,parse,record,replay,split,timer")
+    parser.add_argument("--only", default="",
+                        help="comma-separated subset of cold,parse,record,replay,split,memory,timer")
     args = parser.parse_args()
     if args.rounds - args.warmup < 8:
         raise SystemExit("at least 8 measured rounds are required")
@@ -80,7 +86,7 @@ def main():
     if not java.exists():
         raise SystemExit("no java under " + str(args.java_home))
     sizes = [int(value) for value in args.sizes.split(",")]
-    modes = [m for m in ("cold", "parse", "record", "replay", "split", "timer")
+    modes = [m for m in ("cold", "parse", "record", "replay", "split", "memory", "timer")
              if not args.only or m in args.only.split(",")]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -89,6 +95,12 @@ def main():
     for mode in modes:
         if mode == "timer":
             targets.append(("timer", "scalar", 1000))
+            continue
+        if mode == "memory":
+            # Heap attribution needs few rounds, and every round retains one
+            # more snapshot; the largest size answers the question.
+            for kind in CLASSES:
+                targets.append(("memory", kind, sizes[-1]))
             continue
         for kind in CLASSES:
             for size in sizes:
@@ -139,8 +151,9 @@ def main():
         for index, (mode, kind, size) in enumerate(targets):
             name = f"{index:02d}-{mode}-{kind}-{size}"
             rss = output / (name + ".rss.txt")
+            rounds = MEMORY_ROUNDS if mode == "memory" else args.rounds
             command = ["/usr/bin/time", "-v", "-o", str(rss), str(java), *JVM_FLAGS,
-                       "-jar", str(jar), mode, kind, str(size), str(args.rounds)]
+                       "-jar", str(jar), mode, kind, str(size), str(rounds)]
             with (output / (name + ".tsv")).open("w") as out, \
                  (output / (name + ".stderr")).open("w") as err:
                 subprocess.run(command, cwd=ROOT, stdout=out, stderr=err, check=True, timeout=3600)
@@ -148,10 +161,13 @@ def main():
             metrics = sorted({metric for _, metric, _ in rows})
             summary = {"mode": mode, "class": kind, "n": size, "raw": name + ".tsv",
                        "meta": meta, "peak_rss_kb": peak_rss_kb(rss), "median_ns": {}}
+            # The memory mode reports retained bytes, not wall time, and its
+            # first round is as valid as its last; it drops no warmup.
+            warmup = 0 if mode == "memory" else args.warmup
             for metric in metrics:
                 series = [value for round_index, m, value in rows
-                          if m == metric and round_index >= args.warmup]
-                if len(series) < args.rounds - args.warmup:
+                          if m == metric and round_index >= warmup]
+                if len(series) < rounds - warmup:
                     raise RuntimeError(f"{name}: {metric} has {len(series)} measured rounds")
                 summary["median_ns"][metric] = statistics.median(series)
                 summary.setdefault("stdev_ns", {})[metric] = (
@@ -161,8 +177,10 @@ def main():
             summary["median_us_per_body"] = {
                 metric: value / 1000.0 / bodies for metric, value in summary["median_ns"].items()}
             summaries.append(summary)
+            unit = (lambda v: f"{v / 1024.0:.1f}KiB") if mode == "memory" else (
+                lambda v: f"{v / 1e6:.3f}ms")
             print(f"{name}: " + "  ".join(
-                f"{metric}={summary['median_ns'][metric] / 1e6:.3f}ms" for metric in metrics),
+                f"{metric}={unit(summary['median_ns'][metric])}" for metric in metrics),
                 flush=True)
 
     metadata["load_after"] = load_average()

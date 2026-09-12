@@ -1,0 +1,58 @@
+# One revision's parsed module and the code-point index its body projections
+# need, produced by a single parse and retained together.
+#
+# The cross-revision executor used to take two source `String`s and reparse
+# both on every call, to prove that the coordinates inside a retained product
+# still address the text it was handed. That proof cost more than checking the
+# whole module cold: a 195 KB module paid roughly 156 ms of reparse against a
+# 41 ms cold body check (measured 2026-09-12). The owner that produced the
+# headers already parsed the revision, so the tree exists before replay is
+# asked anything.
+#
+# Binding the tree to the text here keeps the same proof without the reparse:
+# the tree in a snapshot is the tree of its own text by construction, so a
+# consumer only has to compare it with the headers it was given.
+use front/parser
+use front/ast.{Module}
+use check/source_projection
+
+type SnapshotData = { syntax: Module, indexed: source_projection.Indexed }
+
+## One revision's replay inputs. The representation stays private because the
+## pairing is the whole guarantee: no caller can put one revision's tree
+## beside another revision's code points.
+pub opaque type Snapshot = SnapshotData
+
+## Parse and index one revision, once. A module that does not parse cleanly
+## has no snapshot: the coordinates of a recovered tree are not evidence about
+## the text, and every consumer here refuses such a revision anyway.
+pub fn of(text: String) -> Option[Snapshot] = {
+  let (syntax, diagnostics) = parser.parse_module(text)
+  if diagnostics != [] { return None }
+  Some(SnapshotData { syntax: syntax, indexed: source_projection.index(text) })
+}
+
+## The tree this snapshot parsed. The owner checks headers from exactly this
+## value, so the revision is parsed once; a consumer compares it against the
+## headers it was handed to prove both describe the same revision.
+pub fn syntax(s: Snapshot) -> Module = {
+  let data: SnapshotData = s
+  data.syntax
+}
+
+## The code-point index of the same text, for token projection.
+pub fn indexed(s: Snapshot) -> source_projection.Indexed = {
+  let data: SnapshotData = s
+  data.indexed
+}
+
+test "source snapshot pairs one parse with the index of its own text" {
+  let text = "# 🌅\nfn answer() -> Int = 42\n"
+  let snapshot = of(text).expect("clean revision")
+  let (parsed, diagnostics) = parser.parse_module(text)
+  assert diagnostics == []
+  assert syntax(snapshot) == parsed
+  assert source_projection.between_indexed(indexed(snapshot), indexed(snapshot),
+    0, 5, 0, 5) == source_projection.between(text, text, 0, 5, 0, 5)
+  assert match of("fn broken( -> Int = 42\n") { None -> true, Some(_) -> false }
+}

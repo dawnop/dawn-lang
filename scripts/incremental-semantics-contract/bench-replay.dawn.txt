@@ -28,6 +28,8 @@ use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl}
 use compiler/check/allocation
 use compiler/check/relocate
 use compiler/check/source_projection
+use compiler/check/source_snapshot
+use compiler/check/source_snapshot.{Snapshot}
 use compiler/check/relocate_tree.{View}
 use compiler/check/semantic_reads.{AssignableType}
 use compiler/check/tast.{TFun}
@@ -35,6 +37,7 @@ use compiler/check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, EPure}
 use compiler/jvm/jreflect.{jsig_real}
 use java "java.lang.System"
 use java "java.lang.Integer"
+use java "java.lang.Runtime"
 
 # ---------------------------------------------------------------- subjects
 
@@ -107,13 +110,19 @@ fn base_cx() -> Cx = Cx { ..cx_new(Some("sample"), Some("sample.dawn")), jsig: j
 
 fn scope_key() -> ModuleKey = identity.module_key("bench", "sample", "sample", "sample.dawn")
 
-fn headers_of(text: String) -> ModuleHeaders !io = {
-  let (syntax, ds) = parser.parse_module(text)
-  if ds != [] { panic("subject parse: ${show_diags(ds)}") }
-  let h = checker.check_module_headers(base_cx(), syntax, empty_env())
+## One parse per revision: the snapshot keeps the tree the headers are checked
+## from, beside the code-point index replay projects through.
+fn snapshot_of(text: String) -> Snapshot = match source_snapshot.of(text) {
+  Some(s) -> s, None -> panic("subject parse")
+}
+
+fn headers_of_snapshot(s: Snapshot) -> ModuleHeaders !io = {
+  let h = checker.check_module_headers(base_cx(), source_snapshot.syntax(s), empty_env())
   if h.cx.diags != [] { panic("subject headers: ${show_diags(h.cx.diags)}") }
   h
 }
+
+fn headers_of(text: String) -> ModuleHeaders !io = headers_of_snapshot(snapshot_of(text))
 
 fn body_count(b: ModuleBodies) -> Int =
   len(b.functions) + len(b.constants) + len(b.impl_methods) + len(b.trait_defaults) + len(b.tests)
@@ -155,10 +164,7 @@ fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
   allocation.combine([allocation.compiler_headers(scope.world)?,
     allocation.table(allocation.local_headers(scope, h.syntax, h.cx)?)?])
 
-fn source_matches(h: ModuleHeaders, text: String) -> Bool = {
-  let (syntax, diagnostics) = parser.parse_module(text)
-  diagnostics == [] && syntax == h.syntax
-}
+fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syntax(s) == h.syntax
 
 fn pair_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded,
   next: ModuleHeaders) -> (Set[DeclKey], Map[DeclKey, Prior]) = {
@@ -272,14 +278,14 @@ fn timed_function(scope: ModuleKey, p: Prepared, acc: Acc, cx: Cx, d: FnDecl, si
   }
 }
 
-type Split = { parse: Int, index: Int, pair: Int, alloc: Int, acc: Acc, total: Int, bodies: Int }
+type Split = { bind: Int, pair: Int, alloc: Int, acc: Acc, total: Int, bodies: Int }
 
-fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: String, saved: Recorded,
-  next: ModuleHeaders, source: String) -> Split !io = {
+fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded,
+  next: ModuleHeaders, source: Snapshot) -> Split !io = {
   let start = System.nanoTime()
   let p0 = System.nanoTime()
   let ok = old.cx.diags == [] && next.cx.diags == [] &&
-    source_matches(old, old_source) && source_matches(next, source)
+    snapshot_matches(old, old_source) && snapshot_matches(next, source)
   let p1 = System.nanoTime()
   if not ok { panic("instrumented replay: source snapshots did not match") }
   let a0 = System.nanoTime()
@@ -294,12 +300,8 @@ fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: String,
   let q0 = System.nanoTime()
   let (allowed, entries) = pair_entries(scope, old, saved, next)
   let q1 = System.nanoTime()
-  let i0 = System.nanoTime()
-  let indexed_old = source_projection.index(old_source)
-  let indexed_new = source_projection.index(source)
-  let i1 = System.nanoTime()
   let prepared = Prepared { ids: plan, entries: entries, allowed: allowed,
-    old_source: indexed_old, source: indexed_new }
+    old_source: source_snapshot.indexed(old_source), source: source_snapshot.indexed(source) }
   let cold: BodyExecutor[Acc] = checker.cold_body_executor()
   let executor: BodyExecutor[Acc] = BodyExecutor {
     function: (acc, cx, d, sig) => timed_function(scope, prepared, acc, cx, d, sig, cold),
@@ -312,7 +314,7 @@ fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: String,
   let zero = Acc { checked: 0, reused: 0, shape: 0, reval: 0, proj: 0, asm: 0 }
   let (acc, bodies) = checker.execute_module_bodies(next, zero, executor)
   let stop = System.nanoTime()
-  Split { parse: p1 - p0, index: i1 - i0, pair: q1 - q0, alloc: a1 - a0, acc: acc,
+  Split { bind: p1 - p0, pair: q1 - q0, alloc: a1 - a0, acc: acc,
     total: stop - start, bodies: body_count(bodies) }
 }
 
@@ -355,20 +357,22 @@ fn run_record(kind: String, n: Int, rounds: Int) -> Unit !io = {
   meta("refused", "${refused}")
 }
 
-type Setup = { scope: ModuleKey, old: ModuleHeaders, before: String, saved: Recorded,
-  next: ModuleHeaders, after: String }
+type Setup = { scope: ModuleKey, old: ModuleHeaders, before: Snapshot, saved: Recorded,
+  next: ModuleHeaders, after: Snapshot }
 
 ## One revision pair: the same module, edited only by a leading comment. Every
 ## body keeps its text and its declaration identity, and every byte offset moves.
+## Both snapshots are built here, outside the timed region: each is the single
+## parse its own revision's headers were checked from.
 fn replay_setup(kind: String, n: Int) -> Setup !io = {
-  let before = subject(kind, n)
-  let after = edited(before)
+  let before = snapshot_of(subject(kind, n))
+  let after = snapshot_of(edited(subject(kind, n)))
   let scope = scope_key()
-  let old = headers_of(before)
+  let old = headers_of_snapshot(before)
   let saved = body_execution.record(scope, old)
   if saved.refused != 0 { panic("replay setup: ${saved.refused} refused recordings") }
   Setup { scope: scope, old: old, before: before, saved: saved,
-    next: headers_of(after), after: after }
+    next: headers_of_snapshot(after), after: after }
 }
 
 fn run_replay(kind: String, n: Int, rounds: Int) -> Unit !io = {
@@ -400,8 +404,7 @@ fn run_split(kind: String, n: Int, rounds: Int) -> Unit !io = {
     }
     bodies = split.bodies
     row(r, "split_total", split.total)
-    row(r, "split_parse", split.parse)
-    row(r, "split_index", split.index)
+    row(r, "split_bind", split.bind)
     row(r, "split_pair", split.pair)
     row(r, "split_alloc", split.alloc)
     row(r, "split_shape", split.acc.shape)
@@ -414,8 +417,14 @@ fn run_split(kind: String, n: Int, rounds: Int) -> Unit !io = {
   meta("bodies", "${bodies}")
 }
 
-## What replay pays before it looks at a single body: the two source snapshots
-## are reparsed and compared against the header syntax they must belong to.
+## The two halves of snapshot provenance, priced apart.
+##
+## `snapshot_build` is what the revision's owner pays once, and it parses; it
+## is not replay's cost, because the owner had to parse the revision anyway to
+## check its headers. `bind_pair` is what replay still pays before it looks at
+## a single body: two tree comparisons against the headers each snapshot
+## accompanies. `parse` and `index` are `snapshot_build`'s two parts, and
+## `parse` by itself is what a reparsing replay used to pay twice per call.
 fn run_parse(kind: String, n: Int, rounds: Int) -> Unit !io = {
   let text = subject(kind, n)
   let headers = headers_of(text)
@@ -423,15 +432,61 @@ fn run_parse(kind: String, n: Int, rounds: Int) -> Unit !io = {
     let t0 = System.nanoTime()
     let (syntax, ds) = parser.parse_module(text)
     let t1 = System.nanoTime()
-    let same = ds == [] && syntax == headers.syntax
+    let indexed = source_projection.index(text)
     let t2 = System.nanoTime()
+    let same = ds == [] && syntax == headers.syntax
+    let t3 = System.nanoTime()
     if not same { panic("reparse did not match the header syntax") }
+    if match source_projection.between_indexed(indexed, indexed, 0, 0, 0, 0) {
+      Some(_) -> false, None -> true
+    } { panic("index did not bind to its own snapshot") }
     row(r, "parse", t1 - t0)
-    row(r, "compare", t2 - t1)
-    row(r, "snapshot_pair", 2 * (t2 - t0))
+    row(r, "index", t2 - t1)
+    row(r, "compare", t3 - t2)
+    row(r, "snapshot_build", t2 - t0)
+    row(r, "bind_pair", 2 * (t3 - t2))
   }
   meta("source_bytes", "${str.len(text)}")
   meta("decls", "${len(headers.syntax.decls)}")
+}
+
+## Retained cost, attributed rather than estimated: settle the heap, read used
+## bytes, retain one more value, settle and read again.
+##
+## Two metrics, because only one of them is new memory. `retained_index` is the
+## code-point index, which nothing retained before: replay built it per call
+## and dropped it. `retained_snapshot` also builds a fresh tree, which the real
+## owner does not: there the snapshot holds the same tree the headers hold, so
+## the index is the whole marginal cost and the difference between the two
+## numbers is the tree this fixture parsed a second time.
+fn used_heap() -> Int !io = {
+  let rt = Runtime.getRuntime().expect("runtime")
+  var i = 0
+  while i < 4 {
+    System.gc()
+    i = i + 1
+  }
+  rt.totalMemory() - rt.freeMemory()
+}
+
+fn run_memory(kind: String, n: Int, rounds: Int) -> Unit !io = {
+  let text = subject(kind, n)
+  var indexes: List[source_projection.Indexed] = []
+  for r in 0..rounds {
+    let before = used_heap()
+    indexes = indexes ++ [source_projection.index(text)]
+    let after = used_heap()
+    row(r, "retained_index", after - before)
+  }
+  var keep: List[Snapshot] = []
+  for r in 0..rounds {
+    let before = used_heap()
+    keep = keep ++ [snapshot_of(text)]
+    let after = used_heap()
+    row(r, "retained_snapshot", after - before)
+  }
+  if len(keep) != rounds || len(indexes) != rounds { panic("values were not retained") }
+  meta("source_bytes", "${str.len(text)}")
 }
 
 ## Cost of the nanoTime pairs the split adds, so the split can be discounted.
@@ -453,7 +508,7 @@ fn run_timer(kind: String, n: Int, rounds: Int) -> Unit !io = {
 
 pub fn main() -> Unit !io = {
   let a = args()
-  if len(a) < 3 { panic("usage: <cold|record|replay|split|parse|timer> <class> <n> [rounds]") }
+  if len(a) < 3 { panic("usage: <cold|record|replay|split|parse|memory|timer> <class> <n> [rounds]") }
   let mode = a[0]
   let kind = a[1]
   let n = Integer.parseInt(a[2])
@@ -468,6 +523,7 @@ pub fn main() -> Unit !io = {
   else { if mode == "replay" { run_replay(kind, n, rounds) }
   else { if mode == "split" { run_split(kind, n, rounds) }
   else { if mode == "parse" { run_parse(kind, n, rounds) }
+  else { if mode == "memory" { run_memory(kind, n, rounds) }
   else { if mode == "timer" { run_timer(kind, n, rounds) }
-  else { panic("unknown mode ${mode}") } } } } } }
+  else { panic("unknown mode ${mode}") } } } } } } }
 }

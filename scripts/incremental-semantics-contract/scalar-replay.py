@@ -20,7 +20,7 @@ def main():
     variants = [
         ('disable-replay', 'let hit: Option[Product] = if valid {',
          'let hit: Option[Product] = if false {'),
-        ('source-owner', 'source_matches(old, old_source) && source_matches(next, source)',
+        ('source-owner', 'snapshot_matches(old, old_source) && snapshot_matches(next, source)',
          'true'),
         ('observer-mode', 'Some(_) -> moved.function_reads', 'Some(_) -> None'),
         ('current-isolation', 'isolated: cx.frame.isolated', 'isolated: false'),
