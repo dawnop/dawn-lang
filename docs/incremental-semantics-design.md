@@ -713,6 +713,22 @@ reject such retained queries before calling helpers that assume a valid ID.
 Preserve failed lookups, candidate order and scope-sensitive constant visibility.
 The supplied context must represent the corresponding body point; this API
 does not reconstruct local scopes or authorize body reuse on its own.
+Both validators take the relocation onto the candidate revision explicitly, so
+a recorded fact is revalidated where it lies rather than rebuilt first. A query
+input is still moved, because the recomputation reads the candidate's own
+tables; the recorded answer is not, because the comparison walks it beside the
+observed answer and maps one reference at a time. The comparison is defined to
+answer exactly what projecting the fact and comparing for equality answers, one
+arm per projection arm, and a reference the relocation cannot move refuses the
+fact the same way projecting it would have. Normalized effect rows are the
+exception the definition needs: relocating the atoms of a union or a label
+carrier can reorder and collapse them, so those two shapes are compared through
+the canonical builder rather than in place. The same-revision entry points
+supply the identity relocation and are unchanged by this. This is a cost
+statement, not a strength statement: reuse admits and refuses exactly what it
+did. What it buys is that a caller which does not install the projected read
+log never builds one, so the log costs the size of the facts it validates
+instead of the size of the facts it validates plus a relocated copy of them.
 
 The body scheduler must remain the single owner of inferred dependency order,
 constant visibility, method tagging, default synthesis and diagnostic order.
