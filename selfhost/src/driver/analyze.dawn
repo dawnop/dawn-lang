@@ -23,7 +23,8 @@ use check/passes.{
   pass_register_traits, pass_register_impls, pass_fn_signatures,
   pass_const_decls
 }
-use check/checker.{check_module, check_module_headers, check_module_bodies, exports_of, check_fn, check_fn_inferred}
+use check/checker.{check_module, check_module_headers, check_module_bodies, assemble_module_bodies, exports_of, check_fn, check_fn_inferred}
+use check/body_execution
 use check/allocation
 use check/relocate
 use check/identity.{module_key}
@@ -735,6 +736,7 @@ pub type ModuleStep = {
   checked: CheckedMod,
   diags: List[LocDiag],
   after: AnalysisCarry,
+  body_records: Option[List[body_execution.Saved]],
   check_runs: Int,
   comptime_runs: Int
 }
@@ -834,6 +836,21 @@ pub fn analyze_observed(
 pub fn analyze_module_step(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver]
+) -> ModuleStep !Env !io =
+  module_step_with_recording(mf0, before, std, opts, js, observer, false)
+
+## Explicit integration entry while recording cost and cache admission are
+## under validation. Existing prefix sessions keep their cold-miss cost until
+## the recorder is efficient enough and a safe replay path actually exists.
+pub fn analyze_module_step_recorded(
+  mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
+  js: Jsig, observer: Option[AnalysisObserver]
+) -> ModuleStep !Env !io =
+  module_step_with_recording(mf0, before, std, opts, js, observer, true)
+
+fn module_step_with_recording(
+  mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
+  js: Jsig, observer: Option[AnalysisObserver], record_bodies: Bool
 ) -> ModuleStep !Env !io = {
   var diags: List[LocDiag] = []
   # The one place a module's identity is settled, and the reason it is here
@@ -880,14 +897,15 @@ pub fn analyze_module_step(
   var check_runs = 0
   var comptime_runs = 0
   var local_provenance: Option[allocation.Table] = None
+  var body_records: Option[List[body_execution.Saved]] = None
   if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
     let (cx1, tm1) = match before.provenance {
       None -> check_module(cx, mf.m, before.exports)
       Some(origin) -> {
         let headers = check_module_headers(cx, mf.m, before.exports)
+        let scope = module_key(origin.world, mf.mod_path, mf.class_name, mf.path)
         if len(headers.cx.diags) == 0 {
-          let scope = module_key(origin.world, mf.mod_path, mf.class_name, mf.path)
           match allocation.local_headers(scope, headers.syntax, headers.cx) {
             Some(entries) -> match allocation.local_impl_headers(scope, headers.syntax, headers.cx, headers.impl_sigs) {
               Some(methods) -> { local_provenance = allocation.table(entries ++ methods) }
@@ -896,7 +914,11 @@ pub fn analyze_module_step(
             None -> ()
           }
         }
-        check_module_bodies(headers)
+        if record_bodies {
+          let recorded = body_execution.record(scope, headers)
+          body_records = Some(recorded.entries)
+          assemble_module_bodies(recorded.bodies)
+        } else { check_module_bodies(headers) }
       }
     }
     check_runs = 1
@@ -935,6 +957,7 @@ pub fn analyze_module_step(
     input: mf,
     checked: checked,
     diags: diags,
+    body_records: body_records,
     after: AnalysisCarry { exports: exports, impls: impls, next_id: cx.next_id,
       provenance: match before.provenance {
         None -> None
@@ -1833,8 +1856,13 @@ test "module provenance carry keeps exporting owners across header reorder" {
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
         text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None }
-      let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
+      let consumed = analyze_module_step_recorded(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
+      assert len(consumed.body_records.expect("recorded consumer body")) == 1
+      assert match cold.body_records { None -> true, Some(_) -> false }
+      let ordinary = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
+      assert match ordinary.body_records { None -> true, Some(_) -> false }
+      assert consumed.checked.tm == ordinary.checked.tm && consumed.diags == ordinary.diags
       let carried = consumed.after.provenance.expect("consumer provenance")
       assert carried.world == initial_origins.world
       assert map.get(carried.modules, "library") == Some(Some(table))

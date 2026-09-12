@@ -1,0 +1,47 @@
+# Compiled only with the frozen pre-extraction scheduler in a private checker.
+use compiler/front/parser
+use compiler/check/checker.{ModuleBodies, check_module_headers, reference_module_body_products}
+use compiler/check/body_execution
+use compiler/check/cx.{Cx, cx_new}
+use compiler/check/identity.{module_key}
+use compiler/check/semantic_reads
+use std/map
+
+pub type Comparison = { old: ModuleBodies, current: ModuleBodies }
+pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
+pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
+
+pub fn main() -> Unit !io = {
+  let pairs = samples()
+  if sample_count(pairs) != 16 { panic("expected sixteen scheduler pairs") }
+  let first = sample_at(pairs, 0)
+  if len(first.old.cx.diags) != 0 { panic("clean scheduler fixture has diagnostics") }
+}
+
+pub fn samples() -> List[Comparison] !io = {
+  let cases = [
+    "fn caller() = leaf()\nfn leaf() = 2\nconst A: Int = 1\nconst B: Int = A\nfn add(x: Int = 7) -> Int = x + B\ntest \"result\" { assert add() == 8 }\n",
+    "type Coin = { v: Int }\ntrait Waxy[T] { fn wax(x: T) -> Int\n fn buff(x: T) -> Int = wax(x) + 1 }\nimpl Waxy[Coin] { fn wax(x: Coin) -> Int = x.v }\n",
+    "fn recursive() = recursive()\nfn bad() -> Int = true\nfn good() -> Int = 1\n",
+    "const A: Int = B\nconst B: Int = 2\nfn bad(x: Int = false) -> Int = x\n",
+    "fn duplicate() -> Int = 1\nfn duplicate() -> Int = 2\n",
+    "fn closure(x: Int) -> Int = { let f = () => x + 1\n f() }\n",
+    "fn first() = second()\nfn second() = first()\ntest \"failure\" { missing() }\n",
+    ""
+  ]
+  var results: List[Comparison] = []
+  let scope = module_key("scheduler", "sample", "sample", "sample.dawn")
+  for source in cases {
+    let (syntax, ds) = parser.parse_module(source)
+    if len(ds) != 0 { panic("scheduler fixture must parse") }
+    for logging in [false, true] {
+      let base = cx_new(Some("sample"), Some("sample.dawn"))
+      let start = Cx { ..base, function_reads: if logging { Some([semantic_reads.StdModuleMode(true)]) } else { None } }
+      let headers = check_module_headers(start, syntax, map.empty())
+      let old = reference_module_body_products(headers)
+      let current = body_execution.record(scope, headers).bodies
+      results = results ++ [Comparison { old: old, current: current }]
+    }
+  }
+  results
+}

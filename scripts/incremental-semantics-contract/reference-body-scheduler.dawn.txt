@@ -1,0 +1,196 @@
+# Frozen from main 1b8d99f1267eec2a2377812605162960a6205751, before executor extraction.
+# Test-only independent scheduling oracle; do not mechanically update with production.
+pub fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
+  let m = headers.syntax
+  var cx1 = headers.cx
+  let sigs = headers.sigs
+  let impl_sigs = headers.impl_sigs
+  let const_tys = headers.const_tys
+  # 5. inferred functions first, in call-dependency order — every callee's
+  # signature is final before any caller is checked; a cycle must annotate
+  let fnds = module_fns(m)
+  # What the inferred pass produced, keyed by declaration index. It fills
+  # scattered positions in dependency order, and writing each result into a
+  # list made the pass O(F^2) in the module's function count: a 3200-function
+  # module spent 1.02s above the floor on the rebuilds alone.
+  var inferred: Map[Int, TFun] = map.empty()
+  var pending: List[Int] = []
+  var i = 0
+  for d in fnds {
+    if sigs[i].inferring { pending = pending ++ [i] }
+    i = i + 1
+  }
+  if len(pending) > 0 {
+    var pending_names: Set[String] = set.empty()
+    for idx in pending { pending_names = set.insert(pending_names, fnds[idx].name) }
+    var deps: Map[String, List[String]] = map.empty()
+    # the aliases are fixed for the module: pass_imports has already run, and a
+    # local declaration may not shadow one (spec §10.3)
+    let mod_alias_names: Set[String] = set.from(map.keys(cx1.module_aliases))
+    # `Class.m(..)` is a Java static call only when neither a constructor nor a
+    # constant claims the name first — that is check_method_call's static arm,
+    # and subtracting the two here keeps rs_java_static a membership test. All
+    # three tables are final: pass_java_uses, the type passes and
+    # pass_const_decls have all run.
+    var java_recv: Set[String] = set.empty()
+    let (names_cx, java_names) = java_class_names_read(cx1)
+    cx1 = names_cx
+    for cn in java_names {
+      let (shadow_cx, shadowed) = local_value_shadow_read(cx1, cn)
+      cx1 = shadow_cx
+      if not shadowed {
+        java_recv = set.insert(java_recv, cn)
+      }
+    }
+    for idx in pending {
+      let d = fnds[idx]
+      var sc = ref_scope(mod_alias_names, java_recv)
+      for p in fnds[idx].params { sc = rs_bind(sc, p.name) }
+      let refs: Set[String] = name_refs(d.body, set.empty(), sc)
+      var dlist: List[String] = []
+      for r in set.to_list(refs) {
+        if set.has(pending_names, r) { dlist = dlist ++ [r] }
+      }
+      deps = map.insert(deps, d.name, dlist)
+    }
+    var done: Set[String] = set.empty()
+    var progress = true
+    while progress {
+      progress = false
+      var remaining: List[Int] = []
+      for idx in pending {
+        let d = fnds[idx]
+        let dlist = map.get(deps, d.name).expect("dep")
+        var ready = true
+        for r in dlist {
+          if not set.has(done, r) { ready = false }
+        }
+        if ready {
+          # each pending index is completed at most once, so the signature this
+          # reads is still the unsealed one the list held
+          let (cxe, _, tf) = check_fn_inferred(cx1, d, sigs[idx])
+          cx1 = cxe
+          inferred = map.insert(inferred, idx, tf)
+          done = set.insert(done, d.name)
+          progress = true
+        } else {
+          remaining = remaining ++ [idx]
+        }
+      }
+      pending = remaining
+    }
+    # what remains is a dependency cycle
+    for idx in pending {
+      let d = fnds[idx]
+      cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
+          "`: it is recursive (directly or mutually)", d.nlo, d.nhi,
+        "declare it: fn " ++ d.name ++ "(...) -> T = ...")
+    }
+  }
+  # 5.5. constant initializers, in declaration order (a const sees only
+  # earlier consts; that order is also the evaluation order)
+  var tconsts: List[TConst] = []
+  var visible: Set[String] = set.empty()
+  var ci = 0
+  for d in module_consts(m) {
+    match const_tys[ci] {
+      Some(declared) -> {
+        let (cxe, tc) = check_const_init(cx1, d, declared, visible)
+        cx1 = cxe
+        tconsts = tconsts ++ [tc]
+      }
+      None -> ()
+    }
+    visible = set.insert(visible, d.name)
+    ci = ci + 1
+  }
+  # annotated function bodies. The typed functions are assembled here, in
+  # declaration order, taking the inferred pass's result where it has one --
+  # the sealed signature it also produced went into cx.fns at the time and is
+  # not read back, and an inferring index never reaches check_fn.
+  var tfuns: List[Option[TFun]] = []
+  i = 0
+  for d in fnds {
+    if not sigs[i].inferring {
+      let (cxe, tf) = check_fn(cx1, d, sigs[i])
+      cx1 = cxe
+      tfuns = tfuns ++ [Some(tf)]
+    } else {
+      match map.get(inferred, i) {
+        Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
+        None -> { tfuns = tfuns ++ [no_tfun()] }
+      }
+    }
+    i = i + 1
+  }
+  # 5.75. impl method bodies and trait default bodies (full signatures, so
+  # they check like ordinary annotated functions)
+  var ii = 0
+  var impl_tfuns: List[TFun] = []
+  for imd in module_impls(m) {
+    let msigs = impl_sigs[ii]
+    # recover (trait id, subject) for codegen's mangled impl-method names;
+    # both lookups re-run what registration already validated, diags discarded
+    let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
+    var mi = 0
+    for me in imd.methods {
+      match msigs[mi] {
+        Some(ms) -> {
+          # registration refused any parameter defaults; strip them so the
+          # refusal is not followed by the value's own diagnostics
+          let (cxe, tf) = check_fn(cx1, strip_param_defaults(me), ms)
+          cx1 = cxe
+          impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
+        }
+        None -> ()
+      }
+      mi = mi + 1
+    }
+    ii = ii + 1
+  }
+  var default_tfuns: List[TFun] = []
+  for td in module_traits(m) {
+    let tid = map.get(cx1.traits_by_name, td.name)
+    match tid {
+      Some(t) -> {
+        let tr = trait_of(cx1.traits, t)
+        for me in td.methods {
+          match me.body {
+            Some(b) -> {
+              var msig: Option[Sig] = None
+              for entry in tr.methods {
+                let (mname, ms2) = entry
+                if mname == me.name { msig = Some(ms2.sig) }
+              }
+              match msig {
+                Some(s2) -> {
+                  let (cxe, tf) = check_trait_default(cx1, me, s2, b)
+                  cx1 = cxe
+                  default_tfuns = default_tfuns ++ [TFun { ..tf, default_of: Some(t) }]
+                }
+                None -> ()
+              }
+            }
+            None -> ()
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  var ttests: List[TFun] = []
+  for t in module_tests(m) {
+    let (cxe, tf) = check_test(cx1, t.name, t.body)
+    cx1 = cxe
+    ttests = ttests ++ [tf]
+  }
+  var fns_out: List[TFun] = []
+  for sl in tfuns {
+    match sl {
+      Some(tf) -> { fns_out = fns_out ++ [tf] }
+      None -> ()
+    }
+  }
+  ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
+    impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests }
+}

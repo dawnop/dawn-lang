@@ -22,7 +22,7 @@ def audit_fields(cx_source, product_source):
     unchanged = set(re.findall(r"a\.([a-z_]+) == b\.\1", product_source))
     written = {"diags", "next_id", "fns", "alias_resolved", "frame", "syms",
                "current_eff_vars", "current_tparams", "current_tparam_bounds",
-               "in_test", "const_cutoff", "loop_jumps", "take_cell", "function_reads"}
+               "in_test", "const_cutoff", "loop_jumps", "take_cell", "function_reads", "body_writes"}
     # jsig is the one owner-held capability; it is intentionally not Eq data.
     classified = unchanged | written | {"jsig"}
     if fields != classified or unchanged & written:

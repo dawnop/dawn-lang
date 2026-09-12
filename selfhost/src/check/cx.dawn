@@ -11,6 +11,7 @@ use std/str
 use std/list
 use std/map
 use std/set
+use check/write_journal
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
@@ -182,6 +183,7 @@ pub type Cx = {
   frame: Frame,
   # symbol table: id → symbol
   syms: Map[Int, Sym],
+  body_writes: Option[List[write_journal.Key]],
   # declared effects visible here: name -> effect id, which is also the id of
   # the synthesised evidence record (docs/effects-design.md §5.1)
   effects: Map[String, Int],
@@ -349,6 +351,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
       isolated: false
     },
     syms: map.empty(),
+    body_writes: None,
     current_eff_vars: map.empty(),
     current_tparams: map.empty(),
     current_tparam_bounds: map.empty(),
@@ -922,6 +925,27 @@ fn record_span_at(cx: Cx, lo: Int, hi: Int, kids: List[TypeRef]) -> Cx =
     }
   }
 
+## Table mutations report their keys only when a body recorder requests it.
+pub fn write_symbol(cx: Cx, id: Int, value: Sym) -> Cx = Cx {
+  ..cx, syms: map.insert(cx.syms, id, value),
+  body_writes: write_journal.observe(cx.body_writes, write_journal.SymbolKey(id))
+}
+
+pub fn write_signature(cx: Cx, name: String, value: Sig) -> Cx = Cx {
+  ..cx, fns: map.insert(cx.fns, name, value),
+  body_writes: write_journal.observe(cx.body_writes, write_journal.SignatureKey(name))
+}
+
+pub fn write_alias(cx: Cx, name: String, value: Ty) -> Cx = Cx {
+  ..cx, alias_resolved: map.insert(cx.alias_resolved, name, value),
+  body_writes: write_journal.observe(cx.body_writes, write_journal.AliasKey(name))
+}
+
+pub fn write_bounds(cx: Cx, id: Int, value: List[Int]) -> Cx = Cx {
+  ..cx, current_tparam_bounds: map.insert(cx.current_tparam_bounds, id, value),
+  body_writes: write_journal.observe(cx.body_writes, write_journal.BoundsKey(id))
+}
+
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
 pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
   let cached = map.get(initial.alias_resolved, al.name)
@@ -933,7 +957,7 @@ pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -
   cx = observe_type_read(cx, semantic_reads.LocalAliasSource(al.name, al.owner, al.target))
   let ref = match al.target {
     None -> {
-      let cx1 = Cx { ..cx, alias_resolved: map.insert(cx.alias_resolved, al.name, TyError) }
+      let cx1 = write_alias(cx, al.name, TyError)
       return (cx1, TyError)
     }
     Some(r) -> r
@@ -943,7 +967,7 @@ pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -
   if active {
     var cx1 = cerr_h(cx, "type alias `" ++ al.name ++ "` refers to itself", use_lo, use_hi,
       "aliases are transparent and cannot be recursive")
-    cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, al.name, TyError) }
+    cx1 = write_alias(cx1, al.name, TyError)
     return (cx1, TyError)
   }
   cx = observe_type_read(cx, semantic_reads.LocalAliasBinders(al.name, al.tparams, al.eparams))
@@ -978,9 +1002,9 @@ pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -
   var cx3 = Cx { ..cx2, current_tparams: saved_tp, current_eff_vars: saved_ev }
   cx3 = Cx {
     ..cx3,
-    alias_resolving: set.remove(cx3.alias_resolving, al.name),
-    alias_resolved: map.insert(cx3.alias_resolved, al.name, t)
+    alias_resolving: set.remove(cx3.alias_resolving, al.name)
   }
+  cx3 = write_alias(cx3, al.name, t)
   (cx3, t)
 }
 

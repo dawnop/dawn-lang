@@ -1,0 +1,232 @@
+# Capture products at the scheduler's real entry contexts, not by replaying
+# a second copy of its ordering rules. Saved entries contain syntax and keyed
+# writes, never a complete historical Cx or a Java capability. Capture is not
+# admission: callers must validate dependencies and relocate before replay.
+use std/map
+use std/set
+use check/checker
+use check/checker.{ModuleHeaders, ModuleBodies, BodyExecutor}
+use check/cx.{Cx, cx_new}
+use check/body_product
+use check/body_product.{Product, ConstantProduct}
+use check/identity
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ConstDecl, TestDecl, MethodDecl, TraitDecl, ImplHead}
+use check/types.{Sig, Ty, TyVar}
+use front/ast.{FnDecl, ConstView, TraitMethod, Expr, TypeRef}
+use front/parser
+use check/semantic_reads
+use check/write_journal
+
+pub type Input =
+  | FunctionInput(syntax: FnDecl, signature: Sig, inferred: Bool)
+  | MethodInput(trait_name: String, subject: TypeRef, syntax: FnDecl, signature: Sig)
+  | DefaultInput(trait_name: String, syntax: TraitMethod, signature: Sig)
+  | TestInput(name: String, body: Expr)
+
+pub type Saved =
+  | SavedFunction(key: DeclKey, input: Input, product: Product)
+  | SavedConstant(key: DeclKey, syntax: ConstView, declared: Ty, visible: Set[String], product: ConstantProduct)
+
+type State = { entries: List[Saved], checked: Int, refused: Int }
+pub type Recorded = { bodies: ModuleBodies, entries: List[Saved], checked: Int, refused: Int }
+
+fn named(scope: ModuleKey, name: String, kind: identity.Kind) -> DeclKey =
+  DeclKey { scope: scope, path: [Named(kind, name)] }
+
+fn observed(cx: Cx) -> Cx = Cx { ..cx, function_reads: Some([]), body_writes: Some([]) }
+
+## Preserve an enclosing observer's prefix, but do not enable it for a caller
+## that requested no log. The private per-body trace is stored in the product.
+fn restore_log(before: Cx, after: Cx) -> Cx = {
+  let reads = match before.function_reads {
+    None -> None
+    Some(prefix) -> match after.function_reads {
+      Some(entries) -> Some(prefix ++ entries)
+      None -> None
+    }
+  }
+  let writes = match before.body_writes {
+    None -> None
+    Some(prefix) -> match after.body_writes { Some(keys) -> Some(prefix ++ keys), None -> None }
+  }
+  Cx { ..after, function_reads: reads, body_writes: writes }
+}
+
+fn save_function(state: State, allowed: Set[DeclKey], key: Option[DeclKey], input: Input,
+  product: Option[Product]) -> State = {
+  let next = State { ..state, checked: state.checked + 1 }
+  match (key, product) {
+    (Some(k), Some(p)) -> {
+      if set.has(allowed, k) {
+        return State { ..next, entries: next.entries ++ [SavedFunction(k, input, p)] }
+      }
+    }
+    _ -> ()
+  }
+  State { ..next, refused: next.refused + 1 }
+}
+
+fn method_key(scope: ModuleKey, trait_name: String, subject: TypeRef, d: FnDecl, sig: Sig) -> Option[DeclKey] = {
+  var binders: List[String] = []
+  for ty in sig.tparams {
+    match ty { TyVar(name, _) -> { binders = binders ++ [name] }, _ -> return None }
+  }
+  Some(DeclKey { scope: scope, path: [ImplHead(trait_name, identity.type_shape(subject, binders)), Named(MethodDecl, d.name)] })
+}
+
+pub fn record(scope: ModuleKey, headers: ModuleHeaders) -> Recorded !io = {
+  var allowed: Set[DeclKey] = set.empty()
+  let path_matches = match headers.cx.src_path { Some(path) -> scope.source == path && path != "", None -> scope.source == "" }
+  if headers.cx.diags == [] && headers.cx.owner_class == Some(scope.emission_owner) && path_matches {
+    allowed = set.from(map(identity.declarations(scope, headers.syntax), e => e.key))
+  }
+  let admitted = allowed
+  let executor: BodyExecutor[State] = BodyExecutor {
+    function: (state, cx, d, sig) => {
+      let start = observed(cx)
+      let (next, tree) = checker.check_fn(start, d, sig)
+      let saved = save_function(state, admitted, Some(named(scope, d.name, FunctionDecl)),
+        FunctionInput(d, sig, false), body_product.capture_journaled(start, next, tree))
+      (saved, restore_log(cx, next), tree)
+    },
+    inferred_body: (state, cx, d, sig) => {
+      let start = observed(cx)
+      let (next, _, tree) = checker.check_fn_inferred(start, d, sig)
+      let saved = save_function(state, admitted, Some(named(scope, d.name, FunctionDecl)),
+        FunctionInput(d, sig, true), body_product.capture_journaled(start, next, tree))
+      (saved, restore_log(cx, next), tree)
+    },
+    constant: (state, cx, d, ty, visible) => {
+      let start = observed(cx)
+      let (next, tree) = checker.check_const_init(start, d, ty, visible)
+      let key = named(scope, d.name, ConstDecl)
+      var saved = State { ..state, checked: state.checked + 1 }
+      let product = body_product.capture_constant_journaled(start, next, tree)
+      match product {
+        Some(p) -> {
+          if set.has(admitted, key) {
+            saved = State { ..saved, entries: saved.entries ++ [SavedConstant(key, d, ty, visible, p)] }
+          } else { saved = State { ..saved, refused: saved.refused + 1 } }
+        }
+        None -> { saved = State { ..saved, refused: saved.refused + 1 } }
+      }
+      (saved, restore_log(cx, next), tree)
+    },
+    method: (state, cx, trait_name, subject, d, sig) => {
+      let start = observed(cx)
+      let (next, tree) = checker.check_fn(start, d, sig)
+      let saved = save_function(state, admitted, method_key(scope, trait_name, subject, d, sig),
+        MethodInput(trait_name, subject, d, sig), body_product.capture_journaled(start, next, tree))
+      (saved, restore_log(cx, next), tree)
+    },
+    default_body: (state, cx, tid, d, sig, body) => {
+      let start = observed(cx)
+      let (next, tree) = checker.check_trait_default(start, d, sig, body)
+      let trait_name = match map.get(cx.traits, tid) { Some(info) -> info.name, None -> "" }
+      let key = DeclKey { scope: scope, path: [Named(TraitDecl, trait_name), Named(MethodDecl, d.name)] }
+      let saved = save_function(state, admitted, Some(key), DefaultInput(trait_name, d, sig),
+        body_product.capture_journaled(start, next, tree))
+      (saved, restore_log(cx, next), tree)
+    },
+    test_body: (state, cx, name, body) => {
+      let start = observed(cx)
+      let (next, tree) = checker.check_test(start, name, body)
+      let saved = save_function(state, admitted, Some(named(scope, name, TestDecl)), TestInput(name, body),
+        body_product.capture_journaled(start, next, tree))
+      (saved, restore_log(cx, next), tree)
+    }
+  }
+  let initial = State { entries: [], checked: 0, refused: 0 }
+  let (state, bodies) = checker.execute_module_bodies(headers, initial, executor)
+  Recorded { bodies: bodies, entries: state.entries, checked: state.checked, refused: state.refused }
+}
+
+test "body recording captures all roles at actual scheduler entries" {
+  let src = "type Coin = { v: Int }\n" ++
+    "trait Waxy[T] { fn wax(x: T) -> Int\n fn buff(x: T) -> Int = wax(x) + 1 }\n" ++
+    "impl Waxy[Coin] { fn wax(x: Coin) -> Int = x.v }\n" ++
+    "fn caller() = leaf()\nfn leaf() = 2\nconst A: Int = 1\nconst B: Int = A\n" ++
+    "fn add(x: Int = 7) -> Int = x + B\ntest \"result\" { assert add() == 8 }\n"
+  let (syntax, ds) = parser.parse_module(src)
+  assert ds == []
+  let scope = identity.module_key("recording", "sample", "sample", "sample.dawn")
+  let start = cx_new(Some("sample"), Some("sample.dawn"))
+  let headers = checker.check_module_headers(start, syntax, map.empty())
+  let cold = checker.check_module_body_products(headers)
+  let actual = record(scope, headers)
+  assert actual.checked == 8 && actual.refused == 0 && len(actual.entries) == 8
+  var names: List[String] = []
+  var total_reads = 0
+  for entry in actual.entries {
+    match entry {
+      SavedFunction(key, input, product) -> {
+        assert key.scope == scope
+        assert match product.function_reads { Some(_) -> true, None -> false }
+        total_reads = total_reads + len(product.function_reads.expect("body-local observations"))
+        match input {
+          FunctionInput(d, _, inferring) -> {
+            names = names ++ [d.name]
+            assert key == named(scope, d.name, FunctionDecl)
+            if inferring { assert len(product.signatures) > 0 }
+          }
+          MethodInput(_, _, d, _) -> { names = names ++ [d.name]
+            assert len(key.path) == 2 && product.tree.impl_of == None }
+          DefaultInput(_, d, _) -> { names = names ++ [d.name]
+            assert len(key.path) == 2 }
+          TestInput(name, _) -> { names = names ++ [name]
+            assert key == named(scope, name, TestDecl) }
+        }
+      }
+      SavedConstant(key, d, _, visible, product) -> {
+        names = names ++ [d.name]
+        assert key == named(scope, d.name, ConstDecl)
+        if d.name == "A" { assert visible == set.empty() } else { assert visible == set.from(["A"]) }
+        assert match product.function_reads { Some(_) -> true, None -> false }
+        total_reads = total_reads + len(product.function_reads.expect("constant observations"))
+      }
+    }
+  }
+  assert names == ["leaf", "caller", "A", "B", "add", "wax", "buff", "result"]
+  assert total_reads > 0 && actual.bodies.cx.function_reads == None
+  var replayed = headers.cx
+  for entry in actual.entries {
+    let initial = observed(replayed)
+    let replay = match entry {
+      SavedFunction(_, _, product) -> body_product.assemble(initial, product)
+      SavedConstant(_, _, _, _, product) -> body_product.assemble(initial, product)
+    }
+    assert match replay { Some(_) -> true, None -> false }
+    replayed = restore_log(replayed, replay.expect("recorded state replay"))
+  }
+  assert replayed.syms == actual.bodies.cx.syms && replayed.fns == actual.bodies.cx.fns
+  assert replayed.alias_resolved == actual.bodies.cx.alias_resolved && replayed.frame == actual.bodies.cx.frame
+  assert replayed.diags == actual.bodies.cx.diags && replayed.next_id == actual.bodies.cx.next_id
+  assert match replayed.body_writes { None -> true, Some(_) -> false }
+  let (next, tm) = checker.assemble_module_bodies(actual.bodies)
+  let (old, cold_tm) = checker.assemble_module_bodies(cold)
+  assert tm == cold_tm && next.next_id == old.next_id && next.diags == old.diags
+  assert next.fns == old.fns && next.alias_resolved == old.alias_resolved && next.frame == old.frame
+  let prefix = Some([semantic_reads.StdModuleMode(true)])
+  let observed_headers = ModuleHeaders { ..headers, cx: Cx { ..headers.cx, function_reads: prefix } }
+  let observed_cold = checker.check_module_body_products(observed_headers)
+  let observed_actual = record(scope, observed_headers)
+  assert observed_actual.bodies.cx.function_reads == observed_cold.cx.function_reads
+  let journal_headers = ModuleHeaders { ..headers, cx: Cx { ..headers.cx, body_writes: Some([write_journal.AliasKey("prefix")]) } }
+  let journal_cold = checker.check_module_body_products(journal_headers)
+  assert record(scope, journal_headers).bodies.cx.body_writes == journal_cold.cx.body_writes
+  assert record(ModuleKey { ..scope, source: "foreign.dawn" }, headers).refused == 8
+}
+
+test "body recording refuses ambiguous declarations without changing recovery" {
+  let (syntax, ds) = parser.parse_module("fn duplicate() -> Int = 1\nfn duplicate() -> Int = 2\n")
+  assert ds == []
+  let scope = identity.module_key("recording", "sample", "sample", "sample.dawn")
+  let start = cx_new(Some("sample"), Some("sample.dawn"))
+  let headers = checker.check_module_headers(start, syntax, map.empty())
+  let actual = record(scope, headers)
+  let cold = checker.check_module_body_products(headers)
+  assert actual.checked == 2 && actual.refused == 2 && len(actual.entries) == 0
+  assert actual.bodies.functions == cold.functions && actual.bodies.cx.diags == cold.cx.diags
+  let hidden = ModuleHeaders { ..headers, cx: Cx { ..headers.cx, diags: [] } }
+  assert len(record(scope, hidden).entries) == 0
+}
