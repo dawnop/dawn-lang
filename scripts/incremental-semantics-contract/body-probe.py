@@ -106,7 +106,7 @@ def main():
             "local": ("Some(XLocal(relocate.local_id(v.ids, id)?,", "Some(XLocal(id,"),
             "capture": ("names, expression(v, body)?, local_ids(v, captures)?,", "names, expression(v, body)?, captures,"),
             "dynamic": ("Some(XCallDyn(relocate.local_id(v.ids, id)?,", "Some(XCallDyn(id,"),
-            "position": ("= map.get(v.positions, old)", "= Some(old)"),
+            "position": ("= v.positions(old)", "= Some(old)"),
             "assertion": ("v.assertion(src, lo, hi)?", "src"),
             "pack-order": ("let parts = ordered_parts(pack_parts(v, x)?)?", "let parts = pack_parts(v, x)?"),
             "evidence-origin": ("Some(XEvRead(relocate.evidence_key(v.ids, key)?, moved,",

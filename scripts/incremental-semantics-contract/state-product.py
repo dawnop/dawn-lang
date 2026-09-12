@@ -58,7 +58,7 @@ def main():
         ("environment-size", "map.len(a) == map.len(b) && map.fold", "map.fold"),
         ("allocation-start", "current.next_id != product.allocation_start", "false"),
         ("unobserved-allocation", "while id < old_limit", "while false"),
-        ("diagnostic-span", "Diag { ..d, lo: map.get(v.positions, d.lo)?, hi: map.get(v.ends, d.hi)? }", "d"),
+        ("diagnostic-span", "Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }", "d"),
         ("bound-domain", "out = out ++ [relocate.trait_id(v.ids, tr)?]", "out = out ++ [tr]"),
         ("used-effect-domain", "used = used ++ [relocate.effect_row(v.ids, e)?]", "used = used ++ [e]"),
         ("handler-cell", "Some(cell) -> Some(relocate.local_id(v.ids, cell)?)", "Some(cell) -> Some(cell)"),
