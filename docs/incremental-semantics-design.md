@@ -793,7 +793,7 @@ with no performance or phase-5 claim.
 The first cross-revision executor admits a closed scalar-literal producer:
 explicit Int/Float/Bool/Unit return, no parameters, defaults, binders or effects,
 and precisely the successful primitive return-compatibility observation.
-It reparses source snapshots against their header syntax, pairs unique
+It takes one parsed snapshot per revision, pairs unique
 declaration identities, derives compiler/local allocation tables, projects
 source boundaries and product state, and revalidates the observed return
 compatibility before assembly. A missing proof or unsupported role executes
@@ -822,6 +822,45 @@ local declaration slices before translating boundaries back to file positions;
 the original unindexed mapper remains the equality oracle. The same benchmark
 then took roughly 28–39ms in warm rounds on 2026-09-12. This is still slower
 than cold checking these trivial bodies and is not grounds for default enablement.
+
+Replay inputs are versioned snapshots, not source text. `check/source_snapshot`
+parses one revision once and keeps the resulting module beside the code-point
+index the token projection needs. Its representation is private and its only
+constructor parses the text it indexes, so a snapshot's tree is always the tree
+of its own text and no caller can pair one revision's tree with another
+revision's code points. The owner that checks a revision's headers checks them
+from that same tree, and replay proves provenance by comparing the snapshot's
+tree with the headers it accompanies. That is the admission evidence the earlier
+reparse produced, at the cost of one structural comparison rather than a lexer
+and parser run; no admission check was dropped, and the executor no longer
+imports the parser at all. Retaining a snapshot beyond the call is what makes
+this sound as well as cheaper: the recorded revision's snapshot is kept with its
+recorded products, and the candidate revision's snapshot is the one the current
+analysis just parsed. This changes no session input shape: no default analysis
+path records or replays, and `driver/incremental` is untouched.
+
+Measured 2026-09-12 on the local benchmark (1000 bodies per class, 30 rounds
+dropping 12, three campaigns each side, JVM 21 SerialGC, shared machine, medians
+of campaign medians). The per-module cost replay paid before reaching its first
+body fell from 12.5 to 162.8ms to 3.6 to 15.4ms, and stopped tracking source size: the
+195KB inference-heavy module paid 162.8ms of it and now pays 4.8ms, while the
+remaining term is `allocation.local_headers` and tracks declaration count
+instead. Whole-call replay fell 13% to 80% by class. Snapshot construction, the
+parse the revision's owner already owed, is 3.7 to 78.9ms and is not replay's cost;
+what replay still pays for provenance is 0.2 to 6.0ms of tree comparison. One
+retained snapshot costs 7.2 bytes of heap per source code point for its index
+(161KB to 1.4MB across these modules, attributed by forced-collection heap
+deltas, not estimated); the tree it also holds is the headers' own tree and is
+not new memory.
+
+This does not make replay competitive. With the module-level cost removed, the
+per-body admission guard is the whole remaining wall: 51.5µs per reused body for
+the literal class and 77.7µs for the primitive-parameter class, flat in module
+size, against 1.4µs and 13.5µs to check the same bodies cold. Source projection,
+which was 47% of the literal class's replay before the class widened, is now
+12.4µs and 89.3µs per body respectively. Replay still loses to cold checking on
+every class that it admits, by a factor of 13 to 50, and phase 5 remains
+unstarted.
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate
