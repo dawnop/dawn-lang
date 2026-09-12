@@ -1,0 +1,55 @@
+# Record touched keys at mutation owners. Values stay in the current tables;
+# the product extractor reads only these keys instead of scanning every
+# preceding body's symbols and every function signature in the module.
+use std/list
+
+pub type Key = SymbolKey(id: Int) | SignatureKey(name: String) | AliasKey(name: String) | BoundsKey(id: Int)
+
+pub fn observe(journal: Option[List[Key]], key: Key) -> Option[List[Key]] =
+  match journal { None -> None, Some(keys) -> Some(keys ++ [key]) }
+
+pub fn capture(before: Option[List[Key]], after: Option[List[Key]]) -> Option[Option[List[Key]]] =
+  match (before, after) {
+    (None, None) -> Some(None)
+    (Some(prefix), Some(keys)) -> {
+      if len(keys) < len(prefix) || list.take(keys, len(prefix)) != prefix { return None }
+      Some(Some(list.drop(keys, len(prefix))))
+    }
+    _ -> None
+  }
+
+pub fn append(current: Option[List[Key]], writes: Option[List[Key]]) -> Option[Option[List[Key]]] =
+  match (current, writes) {
+    (None, None) -> Some(None)
+    (Some(prefix), Some(keys)) -> Some(Some(prefix ++ keys))
+    _ -> None
+  }
+
+pub fn project(journal: Option[List[Key]], local: fn(Int) -> Option[Int], binder: fn(Int) -> Option[Int]) -> Option[Option[List[Key]]] = {
+  let keys = match journal { None -> return Some(None), Some(keys) -> keys }
+  var out: List[Key] = []
+  for key in keys {
+    let next = match key {
+      SymbolKey(id) -> SymbolKey(local(id)?)
+      BoundsKey(id) -> BoundsKey(binder(id)?)
+      SignatureKey(name) -> SignatureKey(name)
+      AliasKey(name) -> AliasKey(name)
+    }
+    out = out ++ [next]
+  }
+  Some(Some(out))
+}
+
+test "write journal preserves repeated mutations and rejects missing domains" {
+  let prefix = Some([AliasKey("before")])
+  let current = observe(observe(prefix, SymbolKey(1)), SymbolKey(1))
+  let delta = capture(prefix, current).expect("journal suffix")
+  assert delta == Some([SymbolKey(1), SymbolKey(1)])
+  assert append(prefix, delta) == Some(current)
+  assert capture(current, prefix) == None && append(None, delta) == None
+  let keys = Some([SymbolKey(1), BoundsKey(1), SignatureKey("f"), AliasKey("A")])
+  assert project(keys, id => Some(id + 10), id => Some(id + 20)) ==
+    Some(Some([SymbolKey(11), BoundsKey(21), SignatureKey("f"), AliasKey("A")]))
+  assert project(keys, id => None, id => Some(id)) == None
+  assert project(keys, id => Some(id), id => None) == None
+}

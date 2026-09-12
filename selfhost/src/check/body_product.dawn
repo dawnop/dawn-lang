@@ -5,13 +5,15 @@
 # dependencies and relocation are separate from capturing these writes.
 use std/map
 use std/list
-use check/cx.{Cx, Frame, cx_new}
+use std/set
+use check/cx.{Cx, Frame, cx_new, write_symbol, write_signature, write_alias, write_bounds}
 use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
 use check/relocate
 use check/semantic_reads
+use check/write_journal
 use check/jsig.{JClass, JMethod, JCtor, JField}
 use check/semantic_reads.{UnificationRead, InferenceBindings, FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
   AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
@@ -68,7 +70,8 @@ pub type BodyProduct[T] = {
   in_test: Bool,
   const_cutoff: Option[Set[String]],
   take_cell: Option[Int],
-  function_reads: Option[List[FunctionRead]]
+  function_reads: Option[List[FunctionRead]],
+  body_writes: Option[List[write_journal.Key]]
 }
 
 pub alias Product = BodyProduct[TFun]
@@ -104,20 +107,85 @@ pub fn capture_constant(before: Cx, after: Cx, constant: TConst) -> Option[Const
 }
 
 fn capture_body[T](before: Cx, after: Cx, tree: T) -> Option[BodyProduct[T]] = {
+  capture_with_mode(before, after, tree, false)
+}
+
+## Only the instrumented canonical body producer may use touched-key capture.
+## The strict extractor above remains an independent completeness oracle.
+pub fn capture_journaled(before: Cx, after: Cx, tree: TFun) -> Option[Product] =
+  capture_with_mode(before, after, tree, true)
+
+pub fn capture_constant_journaled(before: Cx, after: Cx, tree: TConst) -> Option[ConstantProduct] =
+  capture_with_mode(before, after, tree, true)
+
+fn touched_changes[K: Eq + Hash, V](before: Map[K, V], after: Map[K, V], keys: List[K],
+  same: fn(V, V) -> Bool) -> Option[List[Change[K, V]]] = {
+  var seen: Set[K] = set.empty()
+  var out: List[Change[K, V]] = []
+  var removed: List[Change[K, V]] = []
+  var expected_size = map.len(before)
+  for key in keys {
+    if not set.has(seen, key) {
+      seen = set.insert(seen, key)
+      let old = map.get(before, key)
+      let next = map.get(after, key)
+      match (old, next) {
+        (Some(a), Some(b)) -> if not same(a, b) { out = out ++ [Change { key: key, value: Some(b) }] }
+        (None, Some(b)) -> {
+          expected_size = expected_size + 1
+          out = out ++ [Change { key: key, value: Some(b) }]
+        }
+        (Some(_), None) -> {
+          expected_size = expected_size - 1
+          let absent: Option[V] = None
+          removed = removed ++ [Change { key: key, value: absent }]
+        }
+        (None, None) -> ()
+      }
+    }
+  }
+  if expected_size != map.len(after) { return None }
+  Some(out ++ removed)
+}
+
+fn capture_with_mode[T](before: Cx, after: Cx, tree: T, tracked: Bool) -> Option[BodyProduct[T]] = {
   if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
   if len(after.frame.lambda_stack) != 0 || len(after.frame.loop_stack) != 0 { return None }
   if len(after.diags) < len(before.diags) || list.take(after.diags, len(before.diags)) != before.diags { return None }
+  let journal = write_journal.capture(before.body_writes, after.body_writes)?
+  let (symbols, signatures, aliases, bounds) = if tracked {
+    let keys = journal?
+    var symbols: List[Int] = []
+    var signatures: List[String] = []
+    var aliases: List[String] = []
+    var bounds: List[Int] = []
+    for key in keys {
+      match key {
+        write_journal.SymbolKey(id) -> { symbols = symbols ++ [id] }
+        write_journal.SignatureKey(name) -> { signatures = signatures ++ [name] }
+        write_journal.AliasKey(name) -> { aliases = aliases ++ [name] }
+        write_journal.BoundsKey(id) -> { bounds = bounds ++ [id] }
+      }
+    }
+    (touched_changes(before.syms, after.syms, symbols, (a, b) => a == b)?,
+      touched_changes(before.fns, after.fns, signatures, (a, b) => a == b)?,
+      touched_changes(before.alias_resolved, after.alias_resolved, aliases, (a, b) => a == b)?,
+      touched_changes(before.current_tparam_bounds, after.current_tparam_bounds, bounds, (a, b) => a == b)?)
+  } else {
+    (changes(before.syms, after.syms, (a, b) => a == b), changes(before.fns, after.fns, (a, b) => a == b),
+      changes(before.alias_resolved, after.alias_resolved, (a, b) => a == b),
+      changes(before.current_tparam_bounds, after.current_tparam_bounds, (a, b) => a == b))
+  }
   Some(BodyProduct {
     tree: tree, allocation_start: before.next_id, allocation_count: after.next_id - before.next_id,
-    symbols: changes(before.syms, after.syms, (a, b) => a == b), signatures: changes(before.fns, after.fns, (a, b) => a == b),
-    aliases: changes(before.alias_resolved, after.alias_resolved, (a, b) => a == b),
-    bounds: changes(before.current_tparam_bounds, after.current_tparam_bounds, (a, b) => a == b),
+    symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds,
     diagnostics: list.drop(after.diags, len(before.diags)),
     frame: after.frame,
     tparams: after.current_tparams, effect_vars: after.current_eff_vars,
     loop_jumps: after.loop_jumps, in_test: after.in_test,
     const_cutoff: after.const_cutoff, take_cell: after.take_cell,
-    function_reads: semantic_reads.capture(before.function_reads, after.function_reads)?
+    function_reads: semantic_reads.capture(before.function_reads, after.function_reads)?,
+    body_writes: journal
   })
 }
 
@@ -138,7 +206,8 @@ pub fn assemble[T](current: Cx, product: BodyProduct[T]) -> Option[Cx] = {
     current_tparams: product.tparams, current_eff_vars: product.effect_vars,
     loop_jumps: product.loop_jumps, in_test: product.in_test,
     const_cutoff: product.const_cutoff, take_cell: product.take_cell,
-    function_reads: semantic_reads.append(current.function_reads, product.function_reads)?
+    function_reads: semantic_reads.append(current.function_reads, product.function_reads)?,
+    body_writes: write_journal.append(current.body_writes, product.body_writes)?
   })
 }
 
@@ -260,6 +329,7 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   Some(BodyProduct { ..p, tree: project_tree(p.tree)?, allocation_start: allocation_start,
     symbols: symbols, signatures: signatures, aliases: aliases, bounds: bounds, diagnostics: diagnostics,
     frame: projected_frame(v, p.frame)?, tparams: tparams, effect_vars: effect_vars, take_cell: take_cell,
+    body_writes: write_journal.project(p.body_writes, id => relocate.local_id(v.ids, id), id => relocate.type_var(v.ids, id))?,
     function_reads: semantic_reads.project_with_inference(p.function_reads, s => relocate.signature(v.ids, s),
       t => relocate.ty(v.ids, t), id => relocate.nominal(v.ids, id), e => relocate.effect_row(v.ids, e), source_value,
       id => relocate.trait_id(v.ids, id), id => relocate.type_var(v.ids, id), id => relocate.local_id(v.ids, id),
@@ -276,12 +346,13 @@ test "body product keyed writes preserve unrelated preceding products" {
 }
 
 test "body product constants project their real tree and share state admission" {
-  let before = Cx { ..cx_new(None, None), next_id: 10 }
+  let before = Cx { ..cx_new(None, None), next_id: 10, body_writes: Some([]) }
   let ty = TyVar("T", 1)
   let constant = TConst { name: "VALUE", ty: ty, init: XLocal(10, "x", 0, 1, ty), lo: 0, hi: 1 }
   let symbol = Sym { name: "x", ty: ty, mutable: false, dlo: 0, dhi: 1,
     dict_of: None, ev_of: None, cell_of: None }
   let after = Cx { ..before, next_id: 11, syms: map.from([(10, symbol)]),
+    body_writes: Some([write_journal.SymbolKey(10), write_journal.BoundsKey(1)]),
     current_tparams: map.from([("T", ty)]) }
   let saved = capture_constant(before, after, constant).expect("constant capture")
   let none: Map[Int, Int] = map.empty()
@@ -290,6 +361,7 @@ test "body product constants project their real tree and share state admission" 
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => None }
   let moved = project_constant(v, saved, 40).expect("constant projection")
+  assert moved.body_writes == Some([write_journal.SymbolKey(40), write_journal.BoundsKey(2)])
   assert moved.tree == TConst { name: "VALUE", ty: TyVar("T", 2),
     init: XLocal(40, "x", 100, 104, TyVar("T", 2)), lo: 100, hi: 104 }
   let assembled = assemble(Cx { ..before, next_id: 40 }, moved).expect("constant state assembly")
@@ -364,6 +436,37 @@ test "body product captures state writes without retaining old cumulative tables
   assert map.get(result.frame.dict_syms, (12, 22)) == None
   assert map.get(result.frame.dict_syms, (11, 21)) == Some(31)
   assert match assemble(Cx { ..input, next_id: input.next_id + 1 }, p) { None -> true, Some(_) -> false }
+}
+
+test "body product journaled extraction agrees with strict table differences" {
+  let initial = cx_new(None, None)
+  let tree = fixture_function(initial)
+  let symbol = Sym { name: "x", ty: TyInt, mutable: false, dlo: 0, dhi: 1,
+    dict_of: None, ev_of: None, cell_of: None }
+  let before = Cx { ..initial, next_id: 11, body_writes: Some([]),
+    syms: map.from([(10, symbol)]), fns: map.from([("fixture", tree.sig)]),
+    alias_resolved: map.from([("A", TyInt)]), current_tparam_bounds: map.from([(7, [1])]) }
+  let a = write_symbol(before, 10, Sym { ..symbol, mutable: true })
+  let b = write_symbol(a, 10, Sym { ..symbol, name: "updated" })
+  let c = write_signature(b, "fixture", Sig { ..tree.sig, ret: TyInt })
+  let d = write_alias(c, "A", TyUnit)
+  let after = write_bounds(d, 7, [2, 3])
+  let strict = capture(before, after, tree).expect("strict capture")
+  let saved = capture_journaled(before, after, tree)
+  assert match saved { Some(_) -> true, None -> false }
+  let fast = saved.expect("journaled capture")
+  assert fast.symbols == strict.symbols && fast.signatures == strict.signatures
+  assert fast.aliases == strict.aliases && fast.bounds == strict.bounds
+  assert len(fast.symbols) == 1 && len(fast.body_writes.expect("write keys")) == 5
+  let replay = assemble(before, fast).expect("journaled replay")
+  assert replay.syms == after.syms && replay.fns == after.fns && replay.alias_resolved == after.alias_resolved
+  assert map.get(replay.current_tparam_bounds, 7) == Some([2, 3])
+  assert replay.body_writes == after.body_writes
+  let absent = Cx { ..after, body_writes: None }
+  assert capture_journaled(before, absent, tree) == None
+  assert capture_journaled(before, Cx { ..after, effects: map.from([("Unexpected", 9)]) }, tree) == None
+  let unreported = Cx { ..before, syms: map.insert(before.syms, 11, symbol) }
+  assert capture_journaled(before, unreported, tree) == None
 }
 
 test "body product rejects unowned writes and diagnostic prefix replacement" {

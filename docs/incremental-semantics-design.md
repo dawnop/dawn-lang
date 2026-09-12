@@ -701,6 +701,39 @@ reject such retained queries before calling helpers that assume a valid ID.
 Preserve failed lookups, candidate order and scope-sensitive constant visibility.
 The supplied context must represent the corresponding body point; this API
 does not reconstruct local scopes or authorize body reuse on its own.
+
+The body scheduler must remain the single owner of inferred dependency order,
+constant visibility, method tagging, default synthesis and diagnostic order.
+An explicit, state-threaded body executor provides the integration boundary:
+the cold entry uses canonical body checkers; a session executor may capture or
+replay validated products at those same entry points. The executor must receive
+the current context, not a saved header context. Introducing this boundary does
+not itself enable reuse; candidate admission and cross-revision projection must
+be validated before the session supplies any replaying executor.
+The explicit recorded module-step entry records body products through that
+executor. Each entry holds the actual syntax/signature input and keyed writes;
+it does not retain the entry Cx or Java capability. Per-body observation logs
+are isolated and then restored to the caller's logging mode. Ambiguous keys or
+capture failures omit the entry without changing cold checking or recovery.
+No recorded entry is replayed yet; ordinary module steps and prefix sessions
+do not enable recording. A local synthetic measurement on 2026-09-12 found
+that scanning accumulated maps for each product made 1000 simple bodies take
+roughly 900 ms to record versus roughly 3 ms to check without recording.
+This is recorder overhead, not a cache speedup. Before enabling recording in
+sessions, replace repeated whole-context map scans with verified write tracking
+and measure the complete cold/record/replay paths. Module-prefix admission
+rules remain intact.
+The first write-tracking implementation records symbol, signature, alias and
+parameter-bound keys at their actual body mutation owners. Journal capture,
+append and projection preserve repeated writes and distinguish local-symbol
+IDs from type-binder IDs. The strict extractor remains available independently;
+the journaled extractor compares touched keys, checks table cardinalities and
+still validates the unchanged environment. Producer coverage remains essential:
+equal cardinalities alone cannot prove that an existing-key update was logged.
+The same 1000-function fixture then recorded in roughly 280 ms on 2026-09-12,
+down from roughly 900 ms, but still far above cold checking. In particular,
+immutable environment comparisons still revisit module-wide data per body.
+Recording remains opt-in until the remaining cost and admission proof are closed.
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate

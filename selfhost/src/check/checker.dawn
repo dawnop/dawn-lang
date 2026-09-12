@@ -80,6 +80,7 @@ use check/exhaustive.{
 }
 use check/cx.{
   revalidate_context_read,
+  write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
@@ -159,7 +160,7 @@ fn declare_sym(
     ev_of: None,
     cell_of: cell
   }
-  var cx3 = Cx { ..cx2, syms: map.insert(cx2.syms, id, sym) }
+  var cx3 = write_symbol(cx2, id, sym)
   if name != "_" {
     let inner2 = map.insert(cx3.frame.scopes[len(cx3.frame.scopes) - 1], name, id)
     let scopes2 = list.take(cx3.frame.scopes, len(cx3.frame.scopes) - 1) ++ [inner2]
@@ -267,7 +268,7 @@ pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
 fn declare_evidence(cx: Cx, name: String, ty: Ty, key: Int, lo: Int, hi: Int) -> (Cx, Int) = {
   let (cx1, sid) = declare(cx, name, ty, false, lo, hi)
   let sym = sym_of(cx1, sid)
-  (Cx { ..cx1, syms: map.insert(cx1.syms, sid, Sym { ..sym, ev_of: Some(key) }) }, sid)
+  (write_symbol(cx1, sid, Sym { ..sym, ev_of: Some(key) }), sid)
 }
 
 ## Was `name` found outside the innermost closure being checked?
@@ -13426,14 +13427,13 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
             ev_of: None,
             cell_of: None
           }
-          cx1 = Cx {
+          cx1 = write_symbol(Cx {
             ..cx2,
-            syms: map.insert(cx2.syms, sid, sym),
             frame: Frame {
               ..cx2.frame,
               dict_syms: map.insert(cx2.frame.dict_syms, (vid, tr_id), sid)
             }
-          }
+          }, sid, sym)
         }
         _ -> ()
       }
@@ -13480,22 +13480,21 @@ fn enter_fn(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     }
   }
   var tp: Map[String, Ty] = map.empty()
-  var bd = cx.current_tparam_bounds
+  var entry = cx
   var ti = 0
   for tv in s.tparams {
     match tv {
       TyVar(tn, tvid) -> {
         tp = map.insert(tp, tn, tv)
-        bd = map.insert(bd, tvid, bounds_of(s, ti))
+        entry = write_bounds(entry, tvid, bounds_of(s, ti))
       }
       _ -> ()
     }
     ti = ti + 1
   }
   var cx1 = Cx {
-    ..cx,
+    ..entry,
     current_tparams: tp,
-    current_tparam_bounds: bd,
     current_eff_vars: ev,
     frame: Frame { ..cx.frame, current_sig: Some(s) }
   }
@@ -13941,7 +13940,7 @@ pub fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefa
   # resolves to exactly this signature, and sealing the inferred return type
   # replaces it in place. The origin it was bound under does not move.
   if map.get(cx3.fns, d.name) == Some(s) {
-    cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
+    cx3 = write_signature(cx3, d.name, sealed)
   }
   (cx3, sealed,
     TFun {
@@ -14621,7 +14620,53 @@ pub fn impl_body_key(cx: Cx, trait_name: String, subject: TypeRef) -> Option[(In
     None -> None
   }
 
+## Session state travels through actual body entries in cold scheduling order.
+## The scheduler still owns method tags and synthesis; executors must not
+## substitute a saved context for the current entry context.
+pub type BodyExecutor[S] = {
+  function: fn(S, Cx, FnDecl, Sig) -> (S, Cx, TFun) !io,
+  inferred_body: fn(S, Cx, FnDecl, Sig) -> (S, Cx, TFun) !io,
+  constant: fn(S, Cx, ConstView, Ty, Set[String]) -> (S, Cx, TConst) !io,
+  method: fn(S, Cx, String, TypeRef, FnDecl, Sig) -> (S, Cx, TFun) !io,
+  default_body: fn(S, Cx, Int, TraitMethod, Sig, Expr) -> (S, Cx, TFun) !io,
+  test_body: fn(S, Cx, String, Expr) -> (S, Cx, TFun) !io
+}
+
+pub fn cold_body_executor[S]() -> BodyExecutor[S] = BodyExecutor {
+  function: (state, cx, d, sig) => {
+    let (next, tree) = check_fn(cx, d, sig)
+    (state, next, tree)
+  },
+  inferred_body: (state, cx, d, sig) => {
+    let (next, _, tree) = check_fn_inferred(cx, d, sig)
+    (state, next, tree)
+  },
+  constant: (state, cx, d, ty, visible) => {
+    let (next, tree) = check_const_init(cx, d, ty, visible)
+    (state, next, tree)
+  },
+  method: (state, cx, trait_name, subject, d, sig) => {
+    let (next, tree) = check_fn(cx, d, sig)
+    (state, next, tree)
+  },
+  default_body: (state, cx, trait_id, d, sig, body) => {
+    let (next, tree) = check_trait_default(cx, d, sig, body)
+    (state, next, tree)
+  },
+  test_body: (state, cx, name, body) => {
+    let (next, tree) = check_test(cx, name, body)
+    (state, next, tree)
+  }
+}
+
 pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
+  let executor: BodyExecutor[Unit] = cold_body_executor()
+  let (_, products) = execute_module_bodies(headers, (), executor)
+  products
+}
+
+pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
+  var state = initial
   let m = headers.syntax
   var cx1 = headers.cx
   let sigs = headers.sigs
@@ -14689,7 +14734,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
         if ready {
           # each pending index is completed at most once, so the signature this
           # reads is still the unsealed one the list held
-          let (cxe, _, tf) = check_fn_inferred(cx1, d, sigs[idx])
+          let (next_state, cxe, tf) = executor.inferred_body(state, cx1, d, sigs[idx])
+          state = next_state
           cx1 = cxe
           inferred = map.insert(inferred, idx, tf)
           done = set.insert(done, d.name)
@@ -14716,7 +14762,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
   for d in module_consts(m) {
     match const_tys[ci] {
       Some(declared) -> {
-        let (cxe, tc) = check_const_init(cx1, d, declared, visible)
+        let (next_state, cxe, tc) = executor.constant(state, cx1, d, declared, visible)
+        state = next_state
         cx1 = cxe
         tconsts = tconsts ++ [tc]
       }
@@ -14733,7 +14780,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
   i = 0
   for d in fnds {
     if not sigs[i].inferring {
-      let (cxe, tf) = check_fn(cx1, d, sigs[i])
+      let (next_state, cxe, tf) = executor.function(state, cx1, d, sigs[i])
+      state = next_state
       cx1 = cxe
       tfuns = tfuns ++ [Some(tf)]
     } else {
@@ -14759,7 +14807,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
         Some(ms) -> {
           # registration refused any parameter defaults; strip them so the
           # refusal is not followed by the value's own diagnostics
-          let (cxe, tf) = check_fn(cx1, strip_param_defaults(me), ms)
+          let (next_state, cxe, tf) = executor.method(state, cx1, imd.trait_name, imd.subject, strip_param_defaults(me), ms)
+          state = next_state
           cx1 = cxe
           impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
         }
@@ -14785,7 +14834,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
               }
               match msig {
                 Some(s2) -> {
-                  let (cxe, tf) = check_trait_default(cx1, me, s2, b)
+                  let (next_state, cxe, tf) = executor.default_body(state, cx1, t, me, s2, b)
+                  state = next_state
                   cx1 = cxe
                   default_tfuns = default_tfuns ++ [TFun { ..tf, default_of: Some(t) }]
                 }
@@ -14801,7 +14851,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
   }
   var ttests: List[TFun] = []
   for t in module_tests(m) {
-    let (cxe, tf) = check_test(cx1, t.name, t.body)
+    let (next_state, cxe, tf) = executor.test_body(state, cx1, t.name, t.body)
+    state = next_state
     cx1 = cxe
     ttests = ttests ++ [tf]
   }
@@ -14812,8 +14863,8 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
       None -> ()
     }
   }
-  ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
-    impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests }
+  (state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
+    impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests })
 }
 
 ## No checking or fresh allocation here: descriptor registration and default
@@ -14851,7 +14902,7 @@ pub fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
             impl_of: None,
             default_of: None
           }]
-          cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, ds.name, ds) }
+          cx1 = write_signature(cx1, ds.name, ds)
         }
         None -> ()
       }
@@ -15054,6 +15105,98 @@ test "impl body tags read the entry scope without publishing lookup diagnostics"
   let absent = Cx { ..initial, current_tparams: map.empty() }
   assert impl_body_key(absent, "Read", subject) == Some((77, TyList(TyError)))
   assert absent.diags == []
+}
+
+test "body executor threads current state through every scheduled role" {
+  let src = "type Coin = { v: Int }\n" ++
+    "trait Waxy[T] { fn wax(x: T) -> Int\n fn buff(x: T) -> Int = wax(x) + 1 }\n" ++
+    "impl Waxy[Coin] { fn wax(x: Coin) -> Int = x.v }\n" ++
+    "fn caller() = leaf()\nfn leaf() = 2\n" ++
+    "const A: Int = 1\nconst B: Int = A\n" ++
+    "fn add(x: Int = 7) -> Int = x + B\ntest \"result\" { assert add() == 8 }\n"
+  let (syntax, ds) = parser.parse_module(src)
+  assert ds == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  assert headers.cx.diags == []
+  let cold = check_module_body_products(headers)
+  assert cold.cx.diags == []
+  let executor: BodyExecutor[List[String]] = BodyExecutor {
+    function: (state, cx, d, sig) => {
+      assert state == ["infer leaf", "infer caller", "const A", "const B"]
+      let (next, tree) = check_fn(cx, d, sig)
+      (state ++ ["fn " ++ d.name], next, tree)
+    },
+    inferred_body: (state, cx, d, sig) => {
+      if d.name == "caller" {
+        let leaf = map.get(cx.fns, "leaf").expect("current inferred callee")
+        assert not leaf.inferring && leaf.ret == TyInt
+        assert state == ["infer leaf"]
+      } else { assert state == [] }
+      let (next, _, tree) = check_fn_inferred(cx, d, sig)
+      (state ++ ["infer " ++ d.name], next, tree)
+    },
+    constant: (state, cx, d, ty, visible) => {
+      assert not map.get(cx.fns, "caller").expect("sealed caller").inferring
+      if d.name == "A" { assert visible == set.empty() }
+      else { assert visible == set.from(["A"]) }
+      let (next, tree) = check_const_init(cx, d, ty, visible)
+      (state ++ ["const " ++ d.name], next, tree)
+    },
+    method: (state, cx, trait_name, subject, d, sig) => {
+      assert trait_name == "Waxy" && impl_body_key(cx, trait_name, subject) != None
+      let (next, tree) = check_fn(cx, d, sig)
+      assert tree.impl_of == None
+      (state ++ ["method " ++ d.name], next, tree)
+    },
+    default_body: (state, cx, tid, d, sig, body) => {
+      assert sig.trait_id == Some(tid)
+      let (next, tree) = check_trait_default(cx, d, sig, body)
+      (state ++ ["default " ++ d.name], next, tree)
+    },
+    test_body: (state, cx, name, body) => {
+      let (next, tree) = check_test(cx, name, body)
+      (state ++ ["test " ++ name], next, tree)
+    }
+  }
+  let (trace, actual) = execute_module_bodies(headers, [], executor)
+  assert trace == ["infer leaf", "infer caller", "const A", "const B", "fn add", "method wax", "default buff", "test result"]
+  assert actual.functions == cold.functions && actual.constants == cold.constants
+  assert actual.impl_methods == cold.impl_methods && actual.trait_defaults == cold.trait_defaults && actual.tests == cold.tests
+  assert actual.cx.diags == cold.cx.diags && actual.cx.next_id == cold.cx.next_id
+  assert actual.cx.syms == cold.cx.syms && actual.cx.fns == cold.cx.fns
+  assert actual.cx.frame == cold.cx.frame && actual.cx.alias_resolved == cold.cx.alias_resolved
+  assert len(map.keys(actual.cx.current_tparam_bounds)) == len(map.keys(cold.cx.current_tparam_bounds))
+  for (id, bounds) in map.entries(cold.cx.current_tparam_bounds) {
+    assert map.get(actual.cx.current_tparam_bounds, id).expect("retained bounds") == bounds
+  }
+  let (assembled, tm) = assemble_module_bodies(actual)
+  let (cold_assembled, cold_tm) = assemble_module_bodies(cold)
+  assert tm == cold_tm && assembled.fns == cold_assembled.fns
+}
+
+test "body executor preserves cycle refusal and diagnostic recovery" {
+  let (syntax, ds) = parser.parse_module("fn recursive() = recursive()\nfn bad() -> Int = true\nfn good() -> Int = 1\n")
+  assert ds == []
+  let headers = check_module_headers(test_cx(), syntax, map.empty())
+  let base: BodyExecutor[List[String]] = cold_body_executor()
+  let executor = BodyExecutor { ..base,
+    inferred_body: (state, cx, d, sig) => {
+      assert false
+      let (next, _, tree) = check_fn_inferred(cx, d, sig)
+      (state, next, tree)
+    },
+    function: (state, cx, d, sig) => {
+      assert len(cx.diags) > 0
+      let (next, tree) = check_fn(cx, d, sig)
+      (state ++ [d.name], next, tree)
+    }
+  }
+  let (trace, actual) = execute_module_bodies(headers, [], executor)
+  let cold = check_module_body_products(headers)
+  assert trace == ["bad", "good"]
+  assert len(actual.cx.diags) == 2 && actual.cx.diags == cold.cx.diags
+  assert actual.functions == cold.functions && actual.cx.syms == cold.cx.syms
+  assert actual.cx.next_id == cold.cx.next_id
 }
 
 test "module body assembly preserves roles and synthesized default registration" {
