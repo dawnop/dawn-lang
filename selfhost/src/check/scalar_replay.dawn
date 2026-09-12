@@ -29,30 +29,54 @@ use front/ast.{FnDecl, DFn}
 
 pub type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int }
 type Counts = { checked: Int, reused: Int }
-type Prior = { syntax: FnDecl, signature: Sig, product: Product }
-type Prepared = { ids: relocate.Ids, entries: Map[DeclKey, Prior], allowed: Set[DeclKey],
-  old_headers: allocation.Table, next_headers: allocation.Table,
+
+## One saved body, with every admission question the recorded revision can
+## answer on its own already answered. The candidate revision cannot change
+## any of these, so they are settled once beside the recording rather than
+## once per replay per body.
+type Prior = { syntax: FnDecl, signature: Sig, product: Product,
+  binders: List[String], symbols: Map[Int, Sym] }
+
+type Ready = { headers: allocation.Table, source: Snapshot, entries: Map[DeclKey, Prior] }
+type AdmittedData = { scope: ModuleKey, ready: Option[Ready] }
+
+## A recorded revision prepared for replay. The representation stays private
+## because the pairing is the guarantee: the snapshot inside is the one whose
+## headers produced these products, and no caller can substitute another.
+pub opaque type Admitted = AdmittedData
+
+type Prepared = { scope: ModuleKey, ready: Ready, reserver: allocation.Reserver,
+  ids: relocate.Ids, allowed: Map[DeclKey, Int],
   old_source: source_projection.Indexed, source: source_projection.Indexed }
 
 fn primitive(t: Ty) -> Bool = match t {
   TyInt -> true, TyFloat -> true, TyBool -> true, TyUnit -> true, _ -> false
 }
 
-fn eligible(d: FnDecl, s: Sig) -> Bool = {
+## The half of class membership decidable from the declaration header, and the
+## parameter names the body may refer to. Walking the body is the other half,
+## and admission runs that walk once, pairing the two revisions, rather than
+## once per revision.
+fn parameters(d: FnDecl, s: Sig) -> Option[Set[String]] = {
   if d.tparams != [] || d.eparams != [] || d.effs != [] || d.ret == None ||
     s.tparams != [] || s.eparams != [] || len(s.constraints) != 0 || s.eff != EPure ||
     s.inferring || s.is_builtin || s.trait_id != None || not primitive(s.ret) ||
-    len(d.params) != len(s.param_tys) || len(d.params) != len(s.param_names) { return false }
-  for present in s.param_defaults { if present { return false } }
+    len(d.params) != len(s.param_tys) || len(d.params) != len(s.param_names) { return None }
+  for present in s.param_defaults { if present { return None } }
   var bound: Set[String] = set.empty()
   var i = 0
   for param in d.params {
     if param.default != None || param.name != s.param_names[i] ||
-      not primitive(s.param_tys[i]) || set.has(bound, param.name) { return false }
+      not primitive(s.param_tys[i]) || set.has(bound, param.name) { return None }
     bound = set.insert(bound, param.name)
     i = i + 1
   }
-  scalar_shape.same(d.body, d.body, bound)
+  Some(bound)
+}
+
+fn eligible(d: FnDecl, s: Sig) -> Bool = match parameters(d, s) {
+  None -> false
+  Some(bound) -> scalar_shape.same(d.body, d.body, bound)
 }
 
 fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
@@ -64,61 +88,15 @@ fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
 ## address this revision. Nothing is lexed or parsed here.
 fn snapshot_matches(h: ModuleHeaders, s: Snapshot) -> Bool = source_snapshot.syntax(s) == h.syntax
 
-fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHeaders,
-  old_source: Snapshot, source: Snapshot) -> Option[Prepared] = {
-  let old_headers = table(scope, old)?
-  let next_headers = table(scope, next)?
-  let ids = allocation.between(old_headers, next_headers)?
-  var allowed: Set[DeclKey] = set.empty()
-  for entry in identity.declarations(scope, next.syntax) {
-    allowed = set.insert(allowed, entry.key)
-  }
-  var originals: Map[DeclKey, FnDecl] = map.empty()
-  for entry in identity.declarations(scope, old.syntax) {
-    match old.syntax.decls[entry.declaration] {
-      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
-      _ -> ()
-    }
-  }
-  var entries: Map[DeclKey, Prior] = map.empty()
-  var seen: Set[DeclKey] = set.empty()
-  for entry in saved.entries {
-    match entry {
-      SavedFunction(k, FunctionInput(prior, prior_sig, false), product) -> {
-        if set.has(seen, k) {
-          entries = map.remove(entries, k)
-        } else {
-          seen = set.insert(seen, k)
-          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
-            entries = map.insert(entries, k, Prior { syntax: prior, signature: prior_sig, product: product })
-          }
-        }
-      }
-      _ -> ()
-    }
-  }
-  Some(Prepared { ids: ids, entries: entries, allowed: allowed,
-    old_headers: old_headers, next_headers: next_headers,
-    old_source: source_snapshot.indexed(old_source), source: source_snapshot.indexed(source) })
-}
-
-fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
-  if not eligible(d, sig) || cx.diags != [] { return None }
-  let key = DeclKey { scope: scope, path: [Named(FunctionDecl, d.name)] }
-  if not set.has(prepared.allowed, key) { return None }
-  let saved = map.get(prepared.entries, key)?
-  let prior = saved.syntax
-  let prior_sig = saved.signature
-  let p = saved.product
+## Settle one saved body against its own revision. Class membership, the
+## product's own field guards, the local symbols it installs and the binder
+## names it declares all read the recorded revision only; a candidate that
+## fails the pairing below never reaches a product, and one that passes it has
+## the same shape and the same binder names, so these answers carry over.
+## Refusing here is refusing to record an admission verdict, not refusing a
+## body: an unadmitted body is checked cold like any other.
+fn recorded(prior: FnDecl, prior_sig: Sig, p: Product) -> Option[Prior] = {
   if not eligible(prior, prior_sig) { return None }
-  if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }
-  # checker.declare reports a binder that shadows an imported module alias, and
-  # that table read leaves no journal entry to revalidate. The recorded revision
-  # refused any such body through its own diagnostics; the candidate revision
-  # still owes the answer, because installing the product never runs declare.
-  for name in scalar_shape.binders(d.body, sig.param_names)? {
-    if map.has(cx.module_aliases, name) { return None }
-  }
   if p.tree.sig != prior_sig || p.tree.name != prior.name ||
     p.signatures != [] || p.aliases != [] || len(p.bounds) != 0 || p.diagnostics != [] { return None }
   let reads = p.function_reads?
@@ -148,12 +126,91 @@ fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) 
     }
   }
   if set.len(written) != map.len(symbols) { return None }
+  # checker.declare reports a binder that shadows an imported module alias,
+  # and that table read leaves no journal entry to revalidate. Name every
+  # binder the recorded body declares so the candidate revision can be asked
+  # the same question without walking its body a second time.
+  let names = scalar_shape.binders(prior.body, prior_sig.param_names)?
+  Some(Prior { syntax: prior, signature: prior_sig, product: p,
+    binders: names, symbols: symbols })
+}
+
+fn ready(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Option[Ready] = {
+  if old.cx.diags != [] || not snapshot_matches(old, old_source) { return None }
+  let headers = table(scope, old)?
+  var originals: Map[DeclKey, FnDecl] = map.empty()
+  for entry in identity.declarations(scope, old.syntax) {
+    match old.syntax.decls[entry.declaration] {
+      DFn(d) -> { originals = map.insert(originals, entry.key, d) }
+      _ -> ()
+    }
+  }
+  var entries: Map[DeclKey, Prior] = map.empty()
+  var seen: Set[DeclKey] = set.empty()
+  for entry in saved.entries {
+    match entry {
+      SavedFunction(k, FunctionInput(prior, prior_sig, false), product) -> {
+        if set.has(seen, k) {
+          entries = map.remove(entries, k)
+        } else {
+          seen = set.insert(seen, k)
+          if map.get(originals, k) == Some(prior) && map.get(old.cx.fns, prior.name) == Some(prior_sig) {
+            match recorded(prior, prior_sig, product) {
+              Some(entry_value) -> { entries = map.insert(entries, k, entry_value) }
+              None -> ()
+            }
+          }
+        }
+      }
+      _ -> ()
+    }
+  }
+  Some(Ready { headers: headers, source: old_source, entries: entries })
+}
+
+## Bind one recording to the revision that produced it, and answer every
+## admission question that revision can answer alone. This is the record-time
+## half of admission: it runs once per recorded revision, not once per replay,
+## and never per candidate body.
+pub fn admit(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Admitted =
+  AdmittedData { scope: scope, ready: ready(scope, old, old_source, saved) }
+
+fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Option[Prepared] = {
+  let scope = admitted.scope
+  let settled = admitted.ready?
+  let next_headers = table(scope, next)?
+  let reserver = allocation.reserver(settled.headers, next_headers)?
+  var allowed: Map[DeclKey, Int] = map.empty()
+  for entry in identity.declarations(scope, next.syntax) {
+    allowed = map.insert(allowed, entry.key, entry.declaration)
+  }
+  Some(Prepared { scope: scope, ready: settled, reserver: reserver,
+    ids: allocation.reserver_ids(reserver), allowed: allowed,
+    old_source: source_snapshot.indexed(settled.source), source: source_snapshot.indexed(source) })
+}
+
+fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
+  if cx.diags != [] { return None }
+  let bound = parameters(d, sig)?
+  let key = DeclKey { scope: prepared.scope, path: [Named(FunctionDecl, d.name)] }
+  if not map.has(prepared.allowed, key) { return None }
+  let saved = map.get(prepared.ready.entries, key)?
+  let prior = saved.syntax
+  let prior_sig = saved.signature
+  let p = saved.product
+  # Relocating the recorded header onto the candidate one settles the
+  # parameter names, so `bound` is the recorded body's binding set too, and
+  # the recorded binder list describes this body as well.
   if relocate.signature(prepared.ids, prior_sig) != Some(sig) { return None }
-  let plan = allocation.body_plan(prepared.old_headers, prepared.next_headers, key,
+  if not scalar_shape.same(prior.body, d.body, bound) { return None }
+  for name in saved.binders {
+    if map.has(cx.module_aliases, name) { return None }
+  }
+  let ids = allocation.reserved_plan(prepared.reserver, key,
     p.allocation_start, p.allocation_count, cx.next_id, prior_sig, sig, [])?
   let positions = source_projection.between_indexed(prepared.old_source, prepared.source, prior.lo, prior.hi, d.lo, d.hi)?
-  let view = View { ids: plan.ids, positions: positions.starts, ends: positions.ends,
-    symbols: symbols, assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
+  let view = View { ids: ids, positions: positions.starts, ends: positions.ends,
+    symbols: saved.symbols, assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
     callee: (owner, name, builtin, trait_id) => None }
   let moved = body_product.project(view, p, cx.next_id)?
   for read in moved.function_reads? {
@@ -172,18 +229,17 @@ fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) 
 ## owner world. Both source snapshots carry the tree of their own text, and
 ## each must equal the headers it accompanies, so unrelated text cannot lend
 ## positions to those products. Every failed admission executes the cold body.
-pub fn replay(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded,
-  next: ModuleHeaders, source: Snapshot) -> Replayed !io = {
-  let valid = old.cx.diags == [] && next.cx.diags == [] &&
-    snapshot_matches(old, old_source) && snapshot_matches(next, source)
-  let prepared: Option[Prepared] = if valid { prepare(scope, old, saved, next, old_source, source) } else { None }
+pub fn replay(admitted: Admitted, next: ModuleHeaders, source: Snapshot) -> Replayed !io = {
+  let data: AdmittedData = admitted
+  let valid = next.cx.diags == [] && snapshot_matches(next, source)
+  let prepared: Option[Prepared] = if valid { prepare(data, next, source) } else { None }
   let cold: BodyExecutor[Counts] = checker.cold_body_executor()
   let executor: BodyExecutor[Counts] = BodyExecutor {
     function: (count, cx, d, sig) => {
-      let hit: Option[Product] = if valid { match prepared {
-        Some(p) -> candidate(scope, p, cx, d, sig)
+      let hit: Option[Product] = match prepared {
+        Some(p) -> candidate(p, cx, d, sig)
         None -> None
-      } } else { None }
+      }
       match hit {
         Some(product) -> match body_product.assemble(cx, product) {
           Some(after) -> (Counts { ..count, reused: count.reused + 1 }, after, product.tree)
@@ -220,10 +276,12 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   assert eligible(declaration, sig)
   assert match table(scope, old) { Some(_) -> true, None -> false }
   assert match table(scope, next) { Some(_) -> true, None -> false }
-  assert match candidate(scope, prepare(scope, old, saved, next, old_snapshot, next_snapshot).expect("prepared owner"), next.cx, declaration, sig) {
-    Some(_) -> true, None -> false
+  let admitted: AdmittedData = admit(scope, old, old_snapshot, saved)
+  assert match prepare(admitted, next, next_snapshot) {
+    Some(p) -> match candidate(p, next.cx, declaration, sig) { Some(_) -> true, None -> false }
+    None -> false
   }
-  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
+  let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   assert actual.reused == 2 && actual.checked == 0
   assert actual.bodies.functions == expected.functions
@@ -247,7 +305,7 @@ test "scalar replay relocates lexical locals after changed allocation prefixes" 
   let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
   let next = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
   let saved = body_execution.record(scope, old)
-  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
+  let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   assert actual.reused == 1 && actual.checked == 1
   assert actual.bodies.functions == expected.functions
@@ -281,7 +339,7 @@ test "scalar replay refuses changed inputs and preserves current observation mod
         loop_jumps: set.from([999]), frame: Frame { ..headers.cx.frame, isolated: true },
         function_reads: if logging { Some([AssignableType(TyUnit, TyUnit, true)]) } else { None },
         body_writes: if logging { Some([]) } else { None } } }
-      let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
+      let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
       let expected = checker.check_module_body_products(next)
       assert actual.reused == hits && actual.checked == 1 - hits
       assert actual.bodies.functions == expected.functions
@@ -294,15 +352,15 @@ test "scalar replay refuses changed inputs and preserves current observation mod
       assert actual.bodies.cx.body_writes == expected.cx.body_writes
       assert actual.bodies.cx.diags == expected.cx.diags
       let trailing = source_snapshot.of(before ++ "# wrong snapshot\n").expect("trailing comment")
-      let mismatch = replay(scope, old, trailing, saved, next, next_snapshot)
+      let mismatch = replay(admit(scope, old, trailing, saved), next, next_snapshot)
       # A different comment-only snapshot parses to the same tree and is safe:
       # its body coordinates are unchanged. Changed parsed input is not.
       assert mismatch.reused == hits
       let wrong = source_snapshot.of("fn wrong() -> Int = 42\n").expect("unrelated module")
-      let unrelated = replay(scope, old, wrong, saved, next, next_snapshot)
+      let unrelated = replay(admit(scope, old, wrong, saved), next, next_snapshot)
       assert unrelated.reused == 0 && unrelated.checked == 1
       let added = source_snapshot.of(before ++ "fn extra() -> Int = 0\n").expect("added declaration")
-      let extra = replay(scope, old, added, saved, next, next_snapshot)
+      let extra = replay(admit(scope, old, added, saved), next, next_snapshot)
       assert extra.reused == 0 && extra.checked == 1
     }
   }
@@ -325,7 +383,7 @@ test "scalar replay refuses binders that shadow candidate module aliases" {
   assert old.cx.diags == [] && next.cx.diags == []
   assert map.has(next.cx.module_aliases, "y")
   let saved = body_execution.record(scope, old)
-  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
+  let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   let cold_diags: Int = len(expected.cx.diags)
   assert cold_diags == 1
@@ -348,7 +406,7 @@ test "scalar replay refuses re-parsed statement boundaries with equal tokens" {
   assert snapshot_matches(old, old_snapshot) && snapshot_matches(next, next_snapshot)
   let saved = body_execution.record(scope, old)
   assert saved.refused == 0
-  let actual = replay(scope, old, old_snapshot, saved, next, next_snapshot)
+  let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)
   let cold_diags: Int = len(expected.cx.diags)
   assert cold_diags == 1
