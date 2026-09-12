@@ -300,7 +300,7 @@ fn timed_function(p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
       let t2 = System.nanoTime()
       let positions = source_projection.pair(p.old_tokens, p.tokens,
         saved.prior_declaration, saved.declaration_new, prior.lo, prior.hi, d.lo, d.hi)
-      let moved = match positions {
+      let relocated = match positions {
         None -> None
         Some(pos) -> {
           let view = View { ids: saved.ids,
@@ -309,21 +309,22 @@ fn timed_function(p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
             symbols: saved.symbols,
             assertion: (text, lo, hi) => source_projection.assertion_at(pos, text, lo, hi),
             callee: (owner, name, builtin, trait_id) => None }
-          body_product.project(view, saved.product, cx.next_id)
+          Some(view)
         }
       }
       let t3 = System.nanoTime()
       a = Acc { ..a, proj: a.proj + (t3 - t2) }
-      match moved {
+      match relocated {
         None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
-        Some(product) -> {
+        Some(view) -> {
           let t4 = System.nanoTime()
           var ok = true
-          match product.function_reads {
+          let mapping = body_product.read_mapping(view, (owner, source) => None)
+          match saved.product.function_reads {
             None -> { ok = false }
             Some(reads) -> {
               for read in reads {
-                if checker.revalidate_read(cx, read) != Some(true) { ok = false }
+                if checker.revalidate_read_under(mapping, cx, read) != Some(true) { ok = false }
               }
             }
           }
@@ -332,18 +333,30 @@ fn timed_function(p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
           if not ok {
             cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
           } else {
-            let carried = BodyProduct { ..product, in_test: cx.in_test, const_cutoff: cx.const_cutoff,
-              loop_jumps: cx.loop_jumps, take_cell: cx.take_cell,
-              function_reads: match cx.function_reads { None -> None, Some(_) -> product.function_reads },
-              body_writes: match cx.body_writes { None -> None, Some(_) -> product.body_writes },
-              frame: Frame { ..product.frame, isolated: cx.frame.isolated } }
-            let t6 = System.nanoTime()
-            let assembled = body_product.assemble(cx, carried)
-            let t7 = System.nanoTime()
-            a = Acc { ..a, asm: a.asm + (t7 - t6) }
-            match assembled {
-              Some(after) -> (Acc { ..a, reused: a.reused + 1 }, after, carried.tree)
+            let t8 = System.nanoTime()
+            let moved = match cx.function_reads {
+              None -> body_product.project_without_reads(view, saved.product, cx.next_id)
+              Some(_) -> body_product.project(view, saved.product, cx.next_id)
+            }
+            let t9 = System.nanoTime()
+            a = Acc { ..a, proj: a.proj + (t9 - t8) }
+            match moved {
               None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+              Some(product) -> {
+                let carried = BodyProduct { ..product, in_test: cx.in_test, const_cutoff: cx.const_cutoff,
+                  loop_jumps: cx.loop_jumps, take_cell: cx.take_cell,
+                  function_reads: match cx.function_reads { None -> None, Some(_) -> product.function_reads },
+                  body_writes: match cx.body_writes { None -> None, Some(_) -> product.body_writes },
+                  frame: Frame { ..product.frame, isolated: cx.frame.isolated } }
+                let t6 = System.nanoTime()
+                let assembled = body_product.assemble(cx, carried)
+                let t7 = System.nanoTime()
+                a = Acc { ..a, asm: a.asm + (t7 - t6) }
+                match assembled {
+                  Some(after) -> (Acc { ..a, reused: a.reused + 1 }, after, carried.tree)
+                  None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
+                }
+              }
             }
           }
         }
