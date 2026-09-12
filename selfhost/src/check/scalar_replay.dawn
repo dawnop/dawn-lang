@@ -200,7 +200,12 @@ fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Opt
     old_tokens: source_snapshot.tokens(settled.source), tokens: source_snapshot.tokens(source) })
 }
 
-fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
+## The recorded body paired with the relocation onto this candidate: every
+## admission question that needs both revisions, and nothing that needs the
+## product. Separate from `candidate` so the equivalence of the two
+## revalidation paths can be asserted on the same relocation the production
+## path builds.
+fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {
   if cx.diags != [] { return None }
   let bound = parameters(d, sig)?
   let key = DeclKey { scope: prepared.scope, path: [Named(FunctionDecl, d.name)] }
@@ -232,9 +237,24 @@ fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product]
     symbols: saved.symbols,
     assertion: (text, lo, hi) => source_projection.assertion_at(coords, text, lo, hi),
     callee: (owner, name, builtin, trait_id) => None }
-  let moved = body_product.project(view, p, cx.next_id)?
-  for read in moved.function_reads? {
-    if checker.revalidate_read(cx, read) != Some(true) { return None }
+  Some((saved, view))
+}
+
+fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Product] = {
+  let (saved, view) = relocation(prepared, cx, d, sig)?
+  let p = saved.product
+  # The recorded log is revalidated where it lies. Each fact is walked beside
+  # the answer the candidate revision observes, with this relocation applied
+  # one identity at a time, so nothing is rebuilt in candidate coordinates to
+  # be compared and thrown away. The rebuilt log is only what an observing
+  # caller installs, so it is built only when the caller is observing.
+  let mapping = body_product.read_mapping(view, (owner, source) => None)
+  for read in p.function_reads? {
+    if checker.revalidate_read_under(mapping, cx, read) != Some(true) { return None }
+  }
+  let moved = match cx.function_reads {
+    None -> body_product.project_without_reads(view, p, cx.next_id)?
+    Some(_) -> body_product.project(view, p, cx.next_id)?
   }
   # These fields pass through this closed producer unchanged. The old final
   # value is not a write: preserve the corresponding current scheduler state.
@@ -312,6 +332,57 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   assert actual.bodies.cx.diags == expected.cx.diags
   assert actual.bodies.cx.function_reads == expected.cx.function_reads
   assert actual.bodies.cx.body_writes == expected.cx.body_writes
+}
+
+test "scalar replay revalidates recorded reads in place and through the projection" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let body = "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n"
+  var compared = 0
+  # The second pair shifts the candidate's allocation interval and every byte
+  # offset, so agreement is asserted with the relocation carrying something.
+  for (before, after) in [
+    ("fn answer() -> Int = 42\nfn other(x: Int) -> Int = x\n",
+      "type Added = { value: Int }\nfn other(x: Int) -> Int = x\n# moved\nfn answer() -> Int = 42\n"),
+    ("fn prefix() -> Int = 0\n" ++ body,
+      "type Added = { n: Int }\nfn prefix(a: Int, b: Int) -> Int = a + b\n# shifted\n" ++ body)
+  ] {
+    let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+    let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
+    let new_syntax = source_snapshot.syntax(next_snapshot)
+    let base = cx_new(Some("sample"), Some("sample.dawn"))
+    let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
+    let next = checker.check_module_headers(base, new_syntax, map.empty())
+    let saved = body_execution.record(scope, old)
+    let admitted: AdmittedData = admit(scope, old, old_snapshot, saved)
+    let prepared = prepare(admitted, next, next_snapshot).expect("prepared candidate revision")
+    for entry in identity.declarations(scope, new_syntax) {
+      match new_syntax.decls[entry.declaration] {
+        DFn(d) -> {
+          let sig = map.get(next.cx.fns, d.name).expect("candidate header")
+          match relocation(prepared, next.cx, d, sig) {
+            Some((prior, view)) -> {
+              let mapping = body_product.read_mapping(view, (owner, source) => None)
+              let reads = prior.product.function_reads.expect("recorded log")
+              let moved = body_product.projected_reads(view, prior.product, (owner, source) => None)
+                .expect("projected log").expect("enabled log")
+              assert len(moved) == len(reads) && len(reads) > 0
+              var i = 0
+              for read in reads {
+                let in_place = checker.revalidate_read_under(mapping, next.cx, read)
+                assert in_place == checker.revalidate_read(next.cx, moved[i])
+                assert in_place == Some(true)
+                compared = compared + 1
+                i = i + 1
+              }
+            }
+            None -> ()
+          }
+        }
+        _ -> ()
+      }
+    }
+  }
+  assert compared == 3
 }
 
 test "scalar replay relocates lexical locals after changed allocation prefixes" {

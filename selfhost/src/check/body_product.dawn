@@ -7,16 +7,18 @@ use std/map
 use std/list
 use std/set
 use check/cx.{Cx, Frame, cx_new, write_symbol, write_signature, write_alias, write_bounds}
-use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyInt, TyUnit, TyVar, EPure, EffVar, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
+use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyInt, TyUnit, TyVar, TyAdt, TyList,
+  TyAssoc, TyFn, EPure, EffVar, EUnion, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
 use front/token.{Diag}
 use front/ast.{TypeRef, TNamed}
 use check/relocate
+use check/relocate.{Ids}
 use check/semantic_reads
 use check/write_journal
 use check/jsig.{JClass, JMethod, JCtor, JField}
 use check/semantic_reads.{Mapping, UnificationRead, InferenceBindings, FunctionRead, NamedFunctionRead, FunctionAnswer, FunctionCandidates, QualifiedConstant, QualifiedConstructor,
-  AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic,
+  AliasTypeHeader, ConstructorHeader, QualifiedAliasHeader, QualifiedAliasTarget, NominalTypeName, NominalTypeShape, LocalTypeDiagnostic, ExportDiagnostic, LocalAliasSource,
   LocalAliasTarget, LocalAliasResolving, LocalAliasHeader, LocalAliasBinders }
 use check/relocate_tree
 use check/relocate_tree.{View, from_map}
@@ -718,4 +720,174 @@ test "body product projects every state reference and the whole allocation inter
   let missing = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), map.from([(10, 40)])).expect("partial ids")
   assert project(View { ..view, ids: missing }, p, 40) == None
   assert project(view, p, 41) == None
+}
+
+## The relocation the two admission paths share, with every identity domain
+## actually moved: a projection that forgot one would answer the same as a
+## comparison that forgot the same one, and the pair below would agree for
+## the wrong reason.
+fn fixture_read_relocation() -> Ids = {
+  let empty: Map[Int, Int] = map.empty()
+  relocate.new(map.insert(map.insert(empty, 1, 11), 2, 12), map.insert(empty, 3, 13),
+    map.insert(empty, 4, 14), map.insert(empty, 5, 15), map.insert(empty, 6, 16))
+    .expect("read relocation fixture")
+}
+
+fn fixture_read_view(ids: Ids) -> View = {
+  let empty: Map[Int, Int] = map.empty()
+  View { ids: ids, positions: from_map(empty), ends: from_map(empty),
+    assertion: (src, lo, hi) => Some(src), symbols: map.empty(),
+    callee: (owner, name, builtin, tr) => None }
+}
+
+## One recorded fact per projection arm that moves a reference, plus a few the
+## projection copies verbatim. Spelled in the recording revision's
+## coordinates, so `fixture_read_relocation` changes every reference in it.
+fn fixture_read_corpus() -> List[FunctionRead] = {
+  let element = TyVar("T", 4)
+  let subject = TyAdt(1, [element])
+  let row = EffVar("e", 5)
+  let ctor = CtorI { adt: 1, name: "Make", fields: [FieldI { name: "value", ty: subject }] }
+  let header = AliasTypeHeader { name: "A", tparams: [element], eparams: [row],
+    opaque_id: Some(1), owner: "provider" }
+  let signature = Sig { name: "f", param_tys: [subject], param_names: ["x"], param_defaults: [false],
+    ret: element, eff: row, is_builtin: false, tparams: [element], constraints: [[3]],
+    eparams: [row], owner: Some("provider"), trait_id: Some(3), op_of: Some((2, 0)), inferring: false }
+  let bindings = InferenceBindings { types: [(4, subject)], effects: [(5, row)] }
+  [FunctionAnswer(NamedFunctionRead { name: "f", answer: Some(signature) }),
+    FunctionAnswer(NamedFunctionRead { name: "gone", answer: None }),
+    semantic_reads.QualifiedFunction("h", NamedFunctionRead { name: "f", answer: Some(signature) }),
+    FunctionCandidates(["f", "gone"]),
+    semantic_reads.ModuleAlias("h", Some("provider")),
+    semantic_reads.LocalConstructor("Make", Some((1, 0))),
+    semantic_reads.LocalConstant("value", Some(subject)),
+    semantic_reads.ConstantVisible("value", true),
+    semantic_reads.ConstructorCount(1, 2),
+    semantic_reads.ConstructorArity(1, 0, 1),
+    semantic_reads.ConstructorNames(1, ["Make"]),
+    semantic_reads.ConstructorHeaderAnswer(1, ConstructorHeader { id: 1, name: "Box",
+      is_record: true, tparams: [element] }),
+    semantic_reads.ConstructorFields(1, 0, ctor),
+    semantic_reads.DeclaredEffectInfo(2, EffectI { id: 2, name: "Ask", owner: Some("provider"),
+      audience: AWorld, ops: ["ask"], ctl: false }),
+    semantic_reads.LocalEffectName("Ask", Some(2)),
+    NominalTypeName(None, "Box", Some(1)),
+    NominalTypeName(Some("h"), "Other", Some(2)),
+    NominalTypeShape(1, "Box", 1, ["e"], true),
+    semantic_reads.RenderedType(subject, "Box[T]"),
+    semantic_reads.RenderedSignature(signature, "fn f(x: Box[T]) -> T !e"),
+    semantic_reads.RenderedFunctionReturn(subject, row, "Box[T] !e"),
+    semantic_reads.RenderedConstructor(ctor, "Make(Box[T])"),
+    semantic_reads.ReducedAssociatedType(TyAssoc(subject, 3, "Item"), subject),
+    semantic_reads.ConcreteType(subject, false),
+    semantic_reads.AssignableType(subject, TyList(subject), true),
+    semantic_reads.ReducedEffect(row, [(4, subject)], EPure),
+    semantic_reads.ReducedTypeEffects(TyFn([subject], element, row), [(4, subject)],
+      TyFn([subject], element, EPure)),
+    semantic_reads.UnifiedTypes(UnificationRead { declared: subject, actual: TyList(subject),
+      before: bindings, after: InferenceBindings { types: [(4, element)], effects: [(5, EPure)] },
+      matched: false }),
+    semantic_reads.ImplementationPresence(3, subject, true),
+    semantic_reads.ImplementationArity(3, subject, Some(1)),
+    semantic_reads.ImplementationSubgoals(3, subject, [(3, element)]),
+    QualifiedConstant("h", "VALUE", Some(("provider", subject))),
+    QualifiedConstructor("h", "Make", Some((1, 0))),
+    semantic_reads.ExportPresence("h", true),
+    QualifiedAliasHeader("h", "A", Some(header)),
+    QualifiedAliasTarget("h", "A", Some(subject)),
+    LocalAliasHeader("A", Some(header)),
+    LocalAliasBinders("A", [element], [row]),
+    LocalAliasTarget("A", Some(subject)),
+    LocalAliasResolving("A", true),
+    LocalAliasSource("A", "provider", Some(TNamed("Int", [], [], 0, 1))),
+    semantic_reads.ScopedTypeParameter("T", Some(element)),
+    semantic_reads.ScopedEffectVariable("e", Some(row)),
+    semantic_reads.DeclaredEffect("Ask", Some(ELabeled(EPure, [(2, "Ask")]))),
+    semantic_reads.ParameterBounds(element, Some([3])),
+    semantic_reads.TraitAssociatedMembers(3, semantic_reads.AssociatedType, ["Item"]),
+    semantic_reads.TraitName(3, "Eq"),
+    semantic_reads.DictionarySymbol(4, 3, Some(6)),
+    semantic_reads.BuiltinTypeAnswer("Int", Some(BuiltinTypeI { name: "Int", params: [],
+      access: BtStdOnly, build: BtLeaf(subject) })),
+    semantic_reads.StdModuleMode(true)]
+}
+
+test "body product read comparison answers for the projection it replaces" {
+  let ids = fixture_read_relocation()
+  let v = fixture_read_view(ids)
+  let source: fn(String, TypeRef) -> Option[TypeRef] =
+    (owner, node) => match node {
+      TNamed(n, args, effs, lo, hi) -> Some(TNamed(n, args, effs, lo + 1000, hi + 1000))
+      _ -> None
+    }
+  let m = read_mapping(v, source)
+  let corpus = fixture_read_corpus()
+  var answers: List[FunctionRead] = []
+  for fact in corpus {
+    let moved = semantic_reads.project_mapped(Some([fact]), m).expect("projected fact").expect("enabled log")
+    assert len(moved) == 1
+    answers = answers ++ moved
+  }
+  # A corpus whose projection is itself would not tell the two paths apart.
+  var moved_facts = 0
+  var i = 0
+  for fact in corpus {
+    if answers[i] != fact { moved_facts = moved_facts + 1 }
+    i = i + 1
+  }
+  assert moved_facts == len(corpus) - 7
+  let candidates = corpus ++ answers
+  i = 0
+  for fact in corpus {
+    for other in candidates {
+      assert semantic_reads.equal_under(m, fact, other) == (other == answers[i])
+    }
+    # The relocation applied on one side only. Every fact that moves must see
+    # its own projected answer as unequal without it, and its own recorded
+    # spelling as unequal with it.
+    if answers[i] != fact {
+      assert not semantic_reads.equal_under(semantic_reads.identity_mapping(), fact, answers[i])
+      assert not semantic_reads.equal_under(m, fact, fact)
+    }
+    i = i + 1
+  }
+}
+
+test "body product read comparison refuses references this revision dropped" {
+  let ids = fixture_read_relocation()
+  let m = read_mapping(fixture_read_view(ids), (owner, node) => None)
+  # 9 is a header-domain identity the candidate revision no longer declares,
+  # so the relocation has no entry for it in any domain.
+  let dropped: List[(FunctionRead, FunctionRead)] = [
+    (semantic_reads.ConstructorCount(9, 2), semantic_reads.ConstructorCount(9, 2)),
+    (semantic_reads.TraitName(9, "Eq"), semantic_reads.TraitName(9, "Eq")),
+    (semantic_reads.ScopedTypeParameter("T", Some(TyVar("T", 9))),
+      semantic_reads.ScopedTypeParameter("T", Some(TyVar("T", 9)))),
+    (semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 9))),
+      semantic_reads.ScopedEffectVariable("e", Some(EffVar("e", 9)))),
+    (semantic_reads.DictionarySymbol(4, 3, Some(9)), semantic_reads.DictionarySymbol(14, 13, Some(9)))]
+  for (recorded, candidate) in dropped {
+    assert semantic_reads.project_mapped(Some([recorded]), m) == None
+    assert not semantic_reads.equal_under(m, recorded, candidate)
+  }
+}
+
+test "body product read comparison reorders normalized rows before comparing" {
+  let empty: Map[Int, Int] = map.empty()
+  # The relocation inverts the order of two evidence variables, so the
+  # candidate's own row carries them in the opposite order from the recorded
+  # one. A comparison that walked the row in place would accept the order the
+  # recording happened to have.
+  let ids = relocate.new(empty, empty, empty,
+    map.insert(map.insert(empty, 5, 17), 7, 15), empty).expect("permuting relocation")
+  let m = read_mapping(fixture_read_view(ids), (owner, node) => None)
+  let recorded = semantic_reads.ScopedEffectVariable("e",
+    Some(EUnion([(5, "a"), (7, "b")], [], false)))
+  let permuted = semantic_reads.ScopedEffectVariable("e",
+    Some(EUnion([(15, "b"), (17, "a")], [], false)))
+  let kept_order = semantic_reads.ScopedEffectVariable("e",
+    Some(EUnion([(17, "a"), (15, "b")], [], false)))
+  assert semantic_reads.project_mapped(Some([recorded]), m) == Some(Some([permuted]))
+  assert semantic_reads.equal_under(m, recorded, permuted)
+  assert not semantic_reads.equal_under(m, recorded, kept_order)
 }
