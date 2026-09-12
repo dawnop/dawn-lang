@@ -64,3 +64,6 @@ echo "== selfhost tests, native backend =="
 "$DAWNC" test selfhost/src/check/function_product.dawn
 "$DAWNC" test selfhost/src/check/relocate_header.dawn
 "$DAWNC" test selfhost/src/check/query_runtime.dawn
+# The opt-in replay executor is not a production nmain dependency. Include its
+# complete closure explicitly, including recorder and indexed-source tests.
+"$DAWNC" test selfhost/src/check/scalar_replay.dawn
