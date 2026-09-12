@@ -4,7 +4,8 @@
 # proof; a different revision must project it before assembly.
 use std/map
 use std/list
-use check/cx.{Cx, AliasE, ModExports, Origin, TySpan, cx_new}
+use check/cx.{Cx, AliasE, ModExports, Origin, TySpan, cx_new, write_alias}
+use check/write_journal
 use check/types.{Adts, Traits, Impls, Effects, ImplI, Sig, Ty, Eff, TyInt}
 use front/token.{Diag}
 
@@ -52,7 +53,7 @@ fn environment_unchanged(a: Cx, b: Cx) -> Bool =
   a.syms == b.syms && a.in_test == b.in_test && a.is_std_module == b.is_std_module &&
   a.owner_class == b.owner_class && a.src_path == b.src_path && a.line_starts == b.line_starts &&
   a.moved == b.moved && a.loop_jumps == b.loop_jumps && a.take_cell == b.take_cell &&
-  a.function_reads == b.function_reads
+  a.function_reads == b.function_reads && a.body_writes == b.body_writes
 
 pub fn capture(before: Cx, after: Cx) -> Option[HeaderProduct] = {
   if not environment_unchanged(before, after) || after.next_id < before.next_id { return None }
@@ -130,4 +131,15 @@ test "header product refuses incompatible transition and allocation boundaries" 
   let product = capture(before, before).expect("empty header transition")
   assert missing(assemble(Cx { ..before, next_id: before.next_id + 1 }, product))
   assert missing(assemble(before, HeaderProduct { ..product, allocation_count: -1 }))
+}
+
+test "header product preserves unchanged journals and refuses body journal writes" {
+  let initial = cx_new(Some("decl"), Some("decl.dawn"))
+  assert missing(capture(initial, Cx { ..initial, body_writes: Some([]) }))
+  let before = Cx { ..initial, body_writes: Some([write_journal.AliasKey("prior")]) }
+  let after = Cx { ..before, consts: map.from([("VALUE", TyInt)]) }
+  let product = capture(before, after).expect("unchanged header journal")
+  let restored = assemble(before, product).expect("header journal retained")
+  assert restored.body_writes == before.body_writes
+  assert missing(capture(before, write_alias(before, "Number", TyInt)))
 }

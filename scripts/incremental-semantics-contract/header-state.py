@@ -25,8 +25,9 @@ def audit(cx, product):
     stored = fields(product, "HeaderProduct") - {"allocation_start", "allocation_count", "diagnostics"}
     unchanged = set(re.findall(r"a\.([a-z_]+) == b\.\1", product))
     written = stored | {"diags", "next_id"}
-    if fields(cx, "Cx") != unchanged | written | {"jsig"} or unchanged & written:
-        raise RuntimeError("Unclassified or overlapping header context fields")
+    classified = unchanged | written | {"jsig"}
+    if fields(cx, "Cx") != classified or unchanged & written:
+        raise RuntimeError(f"Unclassified/stale header context fields: {fields(cx, 'Cx') ^ classified}; overlap: {unchanged & written}")
     for field in stored:
         if product.count(field + ": after." + field) != 1 or product.count(field + ": product." + field) != 1:
             raise RuntimeError("Missing header capture/assembly: " + field)
@@ -76,6 +77,7 @@ def main():
     print("OK: header context field audit and three negative controls", flush=True)
     variants = [
         ("environment", "not environment_unchanged(before, after)", "false"),
+        ("body-journal", "a.body_writes == b.body_writes", "true"),
         ("allocation-start", "current.next_id != product.allocation_start", "false"),
         ("allocation-count", " || product.allocation_count < 0 { return None }\n  let limit = current.next_id + product.allocation_count\n  if limit < current.next_id { return None }",
          " { return None }\n  let limit = current.next_id + product.allocation_count"),
