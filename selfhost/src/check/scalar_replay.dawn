@@ -1,14 +1,14 @@
 # Exercise cross-revision admission at the real scheduler boundary before
 # general queries have reconstructible local contexts. This deliberately
-# closed producer class has one primitive return-compatibility observation,
-# no allocation or table writes, and no callees. Unsupported bodies stay cold.
+# producer class has primitive compatibility observations and lexically proven
+# local references, with no callees. Unsupported bodies stay cold.
 # This is an opt-in module executor, not the incremental session entry point.
 use std/map
 use std/set
 use check/checker
 use check/checker.{ModuleHeaders, ModuleBodies, BodyExecutor}
 use check/cx.{Cx, Frame, cx_new}
-use check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, EPure}
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, Sym, EPure}
 use check/tast.{TFun}
 use check/body_execution
 use check/body_execution.{Recorded, SavedFunction, FunctionInput}
@@ -17,32 +17,42 @@ use check/body_product.{Product, BodyProduct}
 use check/identity
 use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl}
 use check/allocation
+use check/scalar_shape
+use check/write_journal.{SymbolKey}
 use check/relocate
 use check/source_projection
 use check/relocate_tree.{View}
 use check/semantic_reads.{AssignableType}
 use front/parser
-use front/ast.{FnDecl, Expr, EInt, EFloat, EBool, EUnit, DFn}
+use front/ast.{FnDecl, DFn}
 
 pub type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int }
 type Counts = { checked: Int, reused: Int }
 type Prior = { syntax: FnDecl, signature: Sig, product: Product }
 type Prepared = { ids: relocate.Ids, entries: Map[DeclKey, Prior], allowed: Set[DeclKey],
+  old_headers: allocation.Table, next_headers: allocation.Table,
   old_source: source_projection.Indexed, source: source_projection.Indexed }
 
-fn literal_type(e: Expr) -> Option[Ty] = match e {
-  EInt(_, _, _) -> Some(TyInt)
-  EFloat(_, _, _) -> Some(TyFloat)
-  EBool(_, _, _) -> Some(TyBool)
-  EUnit(_, _) -> Some(TyUnit)
-  _ -> None
+fn primitive(t: Ty) -> Bool = match t {
+  TyInt -> true, TyFloat -> true, TyBool -> true, TyUnit -> true, _ -> false
 }
 
-fn eligible(d: FnDecl, s: Sig) -> Bool =
-  d.params == [] && d.tparams == [] && d.eparams == [] && d.effs == [] && d.ret != None &&
-  s.param_tys == [] && s.param_names == [] && s.param_defaults == [] &&
-  s.tparams == [] && s.eparams == [] && len(s.constraints) == 0 && s.eff == EPure &&
-  not s.inferring && not s.is_builtin && s.trait_id == None && literal_type(d.body) == Some(s.ret)
+fn eligible(d: FnDecl, s: Sig) -> Bool = {
+  if d.tparams != [] || d.eparams != [] || d.effs != [] || d.ret == None ||
+    s.tparams != [] || s.eparams != [] || len(s.constraints) != 0 || s.eff != EPure ||
+    s.inferring || s.is_builtin || s.trait_id != None || not primitive(s.ret) ||
+    len(d.params) != len(s.param_tys) || len(d.params) != len(s.param_names) { return false }
+  for present in s.param_defaults { if present { return false } }
+  var bound: Set[String] = set.empty()
+  var i = 0
+  for param in d.params {
+    if param.default != None || param.name != s.param_names[i] ||
+      not primitive(s.param_tys[i]) || set.has(bound, param.name) { return false }
+    bound = set.insert(bound, param.name)
+    i = i + 1
+  }
+  scalar_shape.same(d.body, d.body, bound)
+}
 
 fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
   allocation.combine([allocation.compiler_headers(scope.world)?,
@@ -55,7 +65,9 @@ fn source_matches(h: ModuleHeaders, text: String) -> Bool = {
 
 fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHeaders,
   old_source: String, source: String) -> Option[Prepared] = {
-  let ids = allocation.between(table(scope, old)?, table(scope, next)?)?
+  let old_headers = table(scope, old)?
+  let next_headers = table(scope, next)?
+  let ids = allocation.between(old_headers, next_headers)?
   var allowed: Set[DeclKey] = set.empty()
   for entry in identity.declarations(scope, next.syntax) {
     allowed = set.insert(allowed, entry.key)
@@ -85,6 +97,7 @@ fn prepare(scope: ModuleKey, old: ModuleHeaders, saved: Recorded, next: ModuleHe
     }
   }
   Some(Prepared { ids: ids, entries: entries, allowed: allowed,
+    old_headers: old_headers, next_headers: next_headers,
     old_source: source_projection.index(old_source), source: source_projection.index(source) })
 }
 
@@ -97,16 +110,42 @@ fn candidate(scope: ModuleKey, prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) 
   let prior_sig = saved.signature
   let p = saved.product
   if not eligible(prior, prior_sig) { return None }
+  if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }
   if p.tree.sig != prior_sig || p.tree.name != prior.name ||
-    p.allocation_count != 0 || p.symbols != [] || p.signatures != [] || p.aliases != [] ||
-    len(p.bounds) != 0 || p.diagnostics != [] || p.body_writes != Some([]) ||
-    p.function_reads != Some([AssignableType(prior_sig.ret, prior_sig.ret, true)]) { return None }
-  # The closed producer above allocates nothing. Header IDs therefore suffice;
-  # unlike general bodies it has no interval/evidence permutation to extend.
+    p.signatures != [] || p.aliases != [] || len(p.bounds) != 0 || p.diagnostics != [] { return None }
+  let reads = p.function_reads?
+  if reads == [] { return None }
+  for read in reads {
+    match read {
+      AssignableType(a, b, true) -> if not primitive(a) || not primitive(b) { return None }
+      _ -> return None
+    }
+  }
+  var symbols: Map[Int, Sym] = map.empty()
+  for change in p.symbols {
+    let symbol = change.value?
+    if change.key < p.allocation_start || change.key >= p.allocation_start + p.allocation_count ||
+      map.has(symbols, change.key) || not primitive(symbol.ty) || symbol.mutable ||
+      symbol.dict_of != None || symbol.ev_of != None || symbol.cell_of != None { return None }
+    symbols = map.insert(symbols, change.key, symbol)
+  }
+  var written: Set[Int] = set.empty()
+  for write in p.body_writes? {
+    match write {
+      SymbolKey(id) -> {
+        if not map.has(symbols, id) { return None }
+        written = set.insert(written, id)
+      }
+      _ -> return None
+    }
+  }
+  if set.len(written) != map.len(symbols) { return None }
   if relocate.signature(prepared.ids, prior_sig) != Some(sig) { return None }
+  let plan = allocation.body_plan(prepared.old_headers, prepared.next_headers, key,
+    p.allocation_start, p.allocation_count, cx.next_id, prior_sig, sig, [])?
   let positions = source_projection.between_indexed(prepared.old_source, prepared.source, prior.lo, prior.hi, d.lo, d.hi)?
-  let view = View { ids: prepared.ids, positions: positions.starts, ends: positions.ends,
-    symbols: map.empty(), assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
+  let view = View { ids: plan.ids, positions: positions.starts, ends: positions.ends,
+    symbols: symbols, assertion: (text, lo, hi) => source_projection.assertion(positions, text, lo, hi),
     callee: (owner, name, builtin, trait_id) => None }
   let moved = body_product.project(view, p, cx.next_id)?
   for read in moved.function_reads? {
@@ -177,7 +216,7 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   }
   let actual = replay(scope, old, before, saved, next, after)
   let expected = checker.check_module_body_products(next)
-  assert actual.reused == 1 && actual.checked == 1
+  assert actual.reused == 2 && actual.checked == 0
   assert actual.bodies.functions == expected.functions
   assert actual.bodies.constants == expected.constants
   assert actual.bodies.cx.frame == expected.cx.frame
@@ -186,6 +225,28 @@ test "scalar replay moves unchanged bodies through the current scheduler" {
   assert actual.bodies.cx.diags == expected.cx.diags
   assert actual.bodies.cx.function_reads == expected.cx.function_reads
   assert actual.bodies.cx.body_writes == expected.cx.body_writes
+}
+
+test "scalar replay relocates lexical locals after changed allocation prefixes" {
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let body = "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n"
+  let before = "fn prefix() -> Int = 0\n" ++ body
+  let after = "type Added = { n: Int }\nfn prefix(a: Int, b: Int) -> Int = a + b\n# shifted\n" ++ body
+  let (old_syntax, old_ds) = parser.parse_module(before)
+  let (next_syntax, next_ds) = parser.parse_module(after)
+  assert old_ds == [] && next_ds == []
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, old_syntax, map.empty())
+  let next = checker.check_module_headers(base, next_syntax, map.empty())
+  let saved = body_execution.record(scope, old)
+  let actual = replay(scope, old, before, saved, next, after)
+  let expected = checker.check_module_body_products(next)
+  assert actual.reused == 1 && actual.checked == 1
+  assert actual.bodies.functions == expected.functions
+  assert actual.bodies.cx.syms == expected.cx.syms
+  assert actual.bodies.cx.next_id == expected.cx.next_id
+  assert actual.bodies.cx.frame == expected.cx.frame
+  assert actual.bodies.cx.diags == expected.cx.diags
 }
 
 test "scalar replay refuses changed inputs and preserves current observation modes" {

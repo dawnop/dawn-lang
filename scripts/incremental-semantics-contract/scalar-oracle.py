@@ -35,6 +35,12 @@ def main():
          '}, Cx { ..after, syms: map.empty() }, product.tree)'),
         ('stale-source', 'let moved = body_product.project(view, p, cx.next_id)?',
          'let moved = BodyProduct { ..p, allocation_start: cx.next_id }'),
+        ('header-only-ids', 'let view = View { ids: plan.ids,',
+         'let view = View { ids: prepared.ids,'),
+        ('missing-local-symbols', 'symbols: symbols, assertion:',
+         'symbols: map.empty(), assertion:'),
+        ('lost-local-journal', 'Some(_) -> moved.body_writes',
+         'Some(_) -> Some([])'),
     ]
     with tempfile.TemporaryDirectory(prefix='dawn-scalar-oracle-') as temp:
         root = Path(temp)
@@ -67,11 +73,13 @@ def main():
                 if result.returncode or 'PASS: scalar full products' not in result.stdout:
                     raise RuntimeError('Positive failed\n' + result.stdout)
             else:
-                owner = 'FAIL: scalar independent execution count' if name == 'disguised-cold' else 'FAIL: scalar full product'
+                owner = ('FAIL: scalar independent execution count'
+                         if name in ('disguised-cold', 'header-only-ids', 'missing-local-symbols')
+                         else 'FAIL: scalar full product')
                 if not result.returncode or owner not in result.stdout:
                     raise RuntimeError(name + ' missed independent oracle\n' + result.stdout)
             print('OK: scalar oracle ' + name, flush=True)
-    print(f'OK: 16 complete replay products and {len(variants)} compiling controls, {time.monotonic() - started:.2f}s')
+    print(f'OK: 28 complete replay products and {len(variants)} compiling controls, {time.monotonic() - started:.2f}s')
 
 
 if __name__ == '__main__':

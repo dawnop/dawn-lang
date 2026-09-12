@@ -15,7 +15,7 @@ pub type Comparison = { old: ModuleBodies, current: ModuleBodies }
 pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
 pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
 pub fn main() -> Unit !io = { let pairs = samples()
-  if len(pairs) != 16 { panic("scalar pair count") }
+  if len(pairs) != 28 { panic("scalar pair count") }
 }
 
 pub fn samples() -> List[Comparison] !io = {
@@ -26,13 +26,13 @@ pub fn samples() -> List[Comparison] !io = {
     "fn other(x: Int) -> Int = x\ntest \"sample\" { assert leaf() == 1 }\n"
   let before = "fn answer() -> Int = 42\n" ++ support
   let cases = [
-    ("# moved\nfn answer() -> Int = 42\n", 1),
-    ("type Added = { n: Int }\nfn answer() -> Int = 42\n", 1),
-    ("fn answer() -> Int = 43\n", 0),
-    ("fn answer() -> Bool = true\n", 0),
-    ("fn answer() -> Int = { 42 }\n", 0),
-    ("fn answer() = 42\n", 0),
-    ("fn answer() -> Int = true\n", 0),
+    ("# moved\nfn answer() -> Int = 42\n", 2),
+    ("type Added = { n: Int }\nfn answer() -> Int = 42\n", 2),
+    ("fn answer() -> Int = 43\n", 1),
+    ("fn answer() -> Bool = true\n", 1),
+    ("fn answer() -> Int = { 42 }\n", 1),
+    ("fn answer() = 42\n", 1),
+    ("fn answer() -> Int = true\n", 1),
     ("fn answer() -> Int = 42\nfn answer() -> Int = 42\n", 0)
   ]
   let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
@@ -47,6 +47,49 @@ pub fn samples() -> List[Comparison] !io = {
     let after = support ++ tail
     let (next_syntax, next_ds) = parser.parse_module(after)
     if next_ds != [] { panic("new scalar fixture parse") }
+    let headers = checker.check_module_headers(base, next_syntax, map.empty())
+    for logging in [false, true] {
+      let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,
+        function_reads: if logging { Some([semantic_reads.StdModuleMode(false)]) } else { None },
+        body_writes: if logging { Some([]) } else { None } } }
+      ScalarReplaySnapshot.reset()
+      let current = scalar_replay.replay(scope, old, before, saved, next, after)
+      let calls = ScalarReplaySnapshot.count()
+      if current.reused != hits || calls != current.checked {
+        panic("FAIL: scalar independent execution count")
+      }
+      ScalarReplaySnapshot.reset()
+      let cold = checker.check_module_body_products(next)
+      if ScalarReplaySnapshot.count() != calls + hits { panic("FAIL: scalar cold execution count") }
+      pairs = pairs ++ [Comparison { old: cold, current: current.bodies }]
+    }
+  }
+  pairs ++ local_samples()
+}
+
+fn local_samples() -> List[Comparison] !io = {
+  let body = "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n"
+  let before = "fn prefix() -> Int = 0\n" ++ body
+  let prefix = "type Added = { n: Int }\nfn prefix(a: Int, b: Int) -> Int = a + b\n"
+  let cases = [
+    (prefix ++ "# moved\n" ++ body, 1),
+    (body ++ prefix, 1),
+    (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 2\n if y > 0 { y * 2 } else { -x }\n}\n", 0),
+    (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 1\n if y > 0 { y * 2 } else { x }\n}\n", 0),
+    (prefix ++ "fn compute(x: Int) -> Int = {\n let y = x + 1\n let x = y * 2\n x\n}\n", 0),
+    (prefix ++ "fn compute(x: Int) -> Int = {\n let y: Int = x + 1\n if y > 0 { y * 2 } else { -x }\n}\n", 0)
+  ]
+  let scope = module_key("scalar-oracle", "sample", "sample", "sample.dawn")
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let (syntax, ds) = parser.parse_module(before)
+  if ds != [] { panic("old local fixture parse") }
+  let old = checker.check_module_headers(base, syntax, map.empty())
+  let saved = body_execution.record(scope, old)
+  if saved.refused != 0 || saved.bodies.cx.diags != [] { panic("old local capture") }
+  var pairs: List[Comparison] = []
+  for (after, hits) in cases {
+    let (next_syntax, next_ds) = parser.parse_module(after)
+    if next_ds != [] { panic("new local fixture parse") }
     let headers = checker.check_module_headers(base, next_syntax, map.empty())
     for logging in [false, true] {
       let next = ModuleHeaders { ..headers, cx: Cx { ..headers.cx,

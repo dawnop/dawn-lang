@@ -749,6 +749,16 @@ and their replayed tables across all six roles. Six compiling controls bypass
 the real symbol, evidence, dictionary, bound, inferred-signature and lazy-alias
 writer calls. The lexical inventory is not a type-checked call-graph proof.
 
+The next integration slice extends the opt-in executor to primitive parameters
+and immutable unannotated locals. Admission must pair parsed expression and
+statement structure (not just equal token streams), prove references belong to
+corresponding lexical binders, reserve the recorded allocation interval, and
+project every fresh symbol and journal event. Calls, closures, generic contexts,
+annotations and unsupported statements remain cold until their corresponding
+query-context proofs exist. Complete-product and actual checker-entry oracles
+must cover reordered declarations and shifted allocations before acceptance.
+This extension is work in progress, with no performance or phase-5 claim.
+
 The first cross-revision executor admits a closed scalar-literal producer:
 explicit Int/Float/Bool/Unit return, no parameters, defaults, binders or effects,
 and precisely the successful primitive return-compatibility observation.

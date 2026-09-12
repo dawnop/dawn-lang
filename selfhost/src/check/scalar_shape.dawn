@@ -1,0 +1,62 @@
+# Token projection establishes coordinates, not parsing or lexical ownership.
+# Pair the supported parsed trees independently so newline-sensitive statement
+# boundaries and shadowing cannot borrow a retained body's local references.
+use std/set
+use front/ast.{Expr, EInt, EFloat, EBool, EUnit, EVar, EUnary, EBinary, EIf, EBlock, SLet}
+
+pub fn same(a: Expr, b: Expr, bound: Set[String]) -> Bool = match (a, b) {
+  (EInt(x, _, _), EInt(y, _, _)) -> x == y
+  (EFloat(x, _, _), EFloat(y, _, _)) -> x == y
+  (EBool(x, _, _), EBool(y, _, _)) -> x == y
+  (EUnit(_, _), EUnit(_, _)) -> true
+  (EVar(x, _, _), EVar(y, _, _)) -> x == y && set.has(bound, x)
+  (EUnary(op, x, _, _), EUnary(next, y, _, _)) -> op == next && same(x, y, bound)
+  (EBinary(op, x, y, _, _, _, _), EBinary(next, u, v, _, _, _, _)) ->
+    op == next && same(x, u, bound) && same(y, v, bound)
+  (EIf(c, x, y, _, _), EIf(d, u, v, _, _)) ->
+    same(c, d, bound) && same(x, u, bound) && optional(y, v, bound)
+  (EBlock(xs, tail, _, _), EBlock(ys, next, _, _)) -> {
+    if len(xs) != len(ys) { return false }
+    var locals = bound
+    var i = 0
+    while i < len(xs) {
+      match (xs[i], ys[i]) {
+        (SLet(name, false, None, init, _, _), SLet(other, false, None, value, _, _)) -> {
+          if name != other || not same(init, value, locals) { return false }
+          locals = set.insert(locals, name)
+        }
+        _ -> return false
+      }
+      i = i + 1
+    }
+    optional(tail, next, locals)
+  }
+  _ -> false
+}
+
+fn optional(a: Option[Expr], b: Option[Expr], bound: Set[String]) -> Bool = match (a, b) {
+  (None, None) -> true
+  (Some(x), Some(y)) -> same(x, y, bound)
+  _ -> false
+}
+
+test "scalar shape requires lexical ownership before each initializer" {
+  let x = EVar("x", 0, 1)
+  let y = EVar("y", 2, 3)
+  assert not same(x, x, set.empty())
+  assert same(x, EVar("x", 20, 21), set.from(["x"]))
+  assert not same(x, y, set.from(["x", "y"]))
+  let local = EBlock([SLet("y", false, None, x, 0, 4)], Some(y), 0, 6)
+  assert same(local, local, set.from(["x"]))
+  assert not same(local, local, set.empty())
+  let self_reference = EBlock([SLet("y", false, None, y, 0, 4)], Some(y), 0, 6)
+  assert not same(self_reference, self_reference, set.from(["x"]))
+  let branch = EIf(EBool(true, 0, 1), local, Some(x), 0, 6)
+  let escaped = EBlock([SLet("z", false, None, branch, 0, 6)], Some(y), 0, 8)
+  assert not same(escaped, escaped, set.from(["x"]))
+  let shadowed = EBlock([SLet("x", false, None, x, 0, 4)], Some(x), 0, 6)
+  assert same(shadowed, shadowed, set.from(["x"]))
+  let mutable = EBlock([SLet("y", true, None, x, 0, 4)], Some(y), 0, 6)
+  assert not same(mutable, mutable, set.from(["x"]))
+  assert not same(local, EBlock([], Some(x), 0, 6), set.from(["x"]))
+}
