@@ -316,6 +316,18 @@ comptime环境。执行计数证明少做工作，不能只看耗时；总是col
 新增不变量配成功编译且命中 owning assertion 的负控，不把timeout/build failure算红。
 私有测试observer不改变LSP协议。golden需要重录时先核对差异，不靠重录宣称等价。
 
+未写下的表读取是这条线的结构性风险，动态门禁看不见它：夹具用哪两个 revision 写的，
+body 就在哪两个 revision 上重放正确，换一个没人想到的输入才丢诊断。`cx.alias_shadow`
+读 `cx.module_aliases` 报告遮蔽 imported module alias，不留任何 fact，候选 revision
+新增 `use dep as y` 时就丢掉了那条诊断（2012333e 在 admission 侧补了守卫）。该类问题
+由 `scripts/journal-reads/check.py` 静态兜底：从 `check/checker` 的七个 body 入口
+走保守调用图，收集可达代码里每一处 `Cx` 表读取，与 `scripts/journal-reads/ledger.txt`
+双向对账，逐条给出 logged/product/write/uncovered 四种判词，uncovered 必须写明理由
+并声明 `backlog` 或 `compensated-by=<site>`（被点名的守卫若不再读该字段就红）。
+它是词法扫描，不跟随闭包里的 `Cx`，`logged` 只证明同一条调用链上记录过某个 fact，
+不证明那个 fact 的答案就是这次读取的答案；限制逐条写在 `scripts/journal-reads/README.md`。
+每次扩大 admission 类别（调用、泛型、方法）之前，先看它的 `--uncovered` 清单。
+
 ### 模块header生产边界（P3接线中）
 
 将check_module既有header前缀抽为check_module_headers，具名ModuleHeaders保存同一次

@@ -484,6 +484,21 @@ jobs:
           python3 scripts/tileir-features/check.py
           python3 scripts/tileir-features/check.py --self-test
 
+      # Which Cx table reads a function body makes without writing anything
+      # down. A replayed body is only sound if every question it asked of the
+      # module environment was recorded, and an unrecorded read is invisible to
+      # every dynamic gate here: the body replays correctly on the revisions
+      # the fixtures were written with, and loses a diagnostic on the one
+      # nobody thought of (cx.alias_shadow did exactly that, 2012333e). This
+      # scans the sources, walks the call graph from the body entry points and
+      # holds the whole read set to scripts/journal-reads/ledger.txt. Text
+      # files only, so it needs no toolchain and belongs with the other two
+      # steps above. 0.7s for the gate and 0.04s for the self-test locally.
+      - name: every Cx table read on the body path is accounted for
+        run: |
+          python3 scripts/journal-reads/check.py
+          python3 scripts/journal-reads/check.py --self-test
+
   # The syntax family's compiling mutants: syntax-small's five, pattern-or's
   # fourteen and for-pattern's twenty-eight, one whole compiler build each.
   # As one step of checker-corpus they measured 926~1111s on five consecutive
