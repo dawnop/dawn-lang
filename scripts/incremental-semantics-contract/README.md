@@ -109,7 +109,9 @@ executor 语义；它按函数体类别（字面量标量、原语参数算术�
 每次运行都在同一进程内与生产 `scalar_replay.replay` 的 reused/checked 计数对账。
 
 `parse` 模式把快照的两半分开计价：`snapshot_build`（parse + index）是修订所有者本来就要
-付的一次解析，`bind_pair` 是重放自己仍要付的两次语法树比对。`memory` 模式不计时，它报
+付的一次解析，`bind_pair` 是重放自己仍要付的两次语法树比对；`snapshot_of` 是
+`source_snapshot.of` 的全部代价，含它为每个函数声明取的 token 事实。`record` 模式另报
+`admit`，即 `scalar_replay.admit` 在录制之后一次性定下的准入判定。`memory` 模式不计时，它报
 保留一个 `source_projection.Indexed` 与保留一个完整 `Snapshot` 各占多少堆字节（强制 GC
 前后取差）；真实所有者里语法树与 header 共用，故索引那一项就是快照的边际内存。
 

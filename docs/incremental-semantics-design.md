@@ -913,6 +913,34 @@ that ignores newlines cannot separate `let b = a` followed by `- x` from
 a fixture in the product oracle, and it is why `scalar_shape.same` stays on the
 replay path rather than being replaced by the token comparison.
 
+Measured 2026-09-12 on the local benchmark (1000 bodies per class, 30 rounds
+dropping 12, three campaigns per side interleaved, JVM 21 SerialGC, shared
+machine, medians of campaign medians; reused counts unchanged at 1000, 1000, 2
+and 0). The per-body admission guard fell from 51.6 to 1.0µs for the literal
+class and from 78.0 to 10.9µs for the primitive-parameter class. Source
+projection fell from 12.7 to 2.6µs and from 89.9 to 22.2µs. Whole-call replay
+fell 90% and 78%, to 6.9ms against 1.2ms cold and 38.0ms against 13.8ms cold.
+For the classes replay refuses, what it pays to reuse nothing fell to 1.5 to
+15.2µs per body.
+
+Replay still loses, and the margin is now small enough to name what is left. The
+marginal cost of reusing one primitive-parameter body is 34.8µs against 13.8µs
+to check it cold, and it decomposes as: `body_product.project` 19.8µs,
+`allocation.reserved_plan` 6.5µs, `scalar_shape.same` with the binder scan
+2.2µs, the token pairing 2.3µs, `body_product.assemble` 1.4µs. Relocating a
+typed tree now costs more than type-checking the body that produced it, so the
+projection of the product, not admission, is the next thing that has to get
+cheaper.
+
+Snapshot construction pays for this. `source_snapshot.of` roughly doubles,
+from 3.5 to 8.0ms for the literal module and from 92.0 to 165.6ms for the
+195KB inference-heavy one, because it lexes the revision a second time: the
+parse inside it already lexed the text but `parser.parse_module` does not hand
+back its token stream. That is the obvious next saving and it is a change to the
+parser's public surface, not to this executor. Until then the arithmetic is
+that a revision's snapshot has to be replayed against several later revisions
+before it repays its own construction.
+
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate
