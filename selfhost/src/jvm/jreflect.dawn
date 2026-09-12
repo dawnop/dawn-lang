@@ -8,6 +8,10 @@
 # java.lang.reflect.Array — the sanctioned detour around Dawn's no-array-
 # indexing rule (spec §9.5).
 #
+# Each oracle keeps a `JCache` of what it has already asked the host (see the
+# type below): the checker asks `methods_of` once per call site, and answering
+# it from reflection every time was the most expensive thing a body could do.
+#
 # Everything here is honestly !io (reflection reads the world's class path),
 # which makes the checker itself !io — that is the true story.
 
@@ -25,12 +29,204 @@ use java "java.lang.reflect.Method"
 use java "java.lang.reflect.Constructor"
 use java "java.lang.reflect.Field"
 use java "java.lang.reflect.Modifier"
+use java "java.util.HashMap"
+use java "java.util.IdentityHashMap"
 use java "java.util.Objects"
 use java "java.lang.invoke.MethodHandles"
 use java "java.lang.invoke.MethodHandle"
 use java "java.util.concurrent.atomic.AtomicLong"
 
 type TargetLoader = { base: ClassLoader, closeable: URLClassLoader }
+
+## What one oracle has already paid the host for.
+##
+## The lifetime is the oracle's: the cache is built where the `Jsig` is built
+## (`jsig_with`, `jsig_real`) and nothing but that record's own closures can
+## reach it, so it dies with the lease that holds the `Jsig` and a new lease
+## starts empty. That is the boundary the design asks for: a Java answer is
+## only trusted inside its lease, and this keeps none of them outside one.
+## It also sits *below* `observe_queries`, so a cache hit is still a counted
+## query and the replay admission story is unchanged.
+##
+## The key is the fully qualified name. Within one cache that is the loaded
+## class's identity and not merely its name, because a `Jsig` is bound to one
+## ClassLoader for its whole life: two loaders are two oracles and therefore
+## two caches. Per-member rows are keyed by the reflective object's identity,
+## which is well defined precisely because the member arrays are cached too,
+## so every query walks the same `Method`/`Constructor` instances.
+##
+## What it holds is decided by what can cross: a Dawn value cannot be stored
+## in a host container (spec §9.6 bridges scalar-element Lists only, one way),
+## so this keeps the arrays reflection returns plus the two derived strings
+## whose computation dominates the walk (`toString()` is over half of a
+## `methods_of` on `java.lang.Math`). The plain-data records are rebuilt from
+## them on every query, which is what makes a hit answer exactly what a fresh
+## reflection would: same order, same duplicates, same misses.
+##
+## Caching is sound here rather than merely cheap: the loader is fixed, the
+## public members of a loaded class cannot change, and a name that failed to
+## resolve against a fixed search path cannot start resolving.
+type JCache = {
+  # fqcn -> Class
+  found: HashMap,
+  # fqcn -> "", membership only: the names that did not resolve
+  missing: HashMap,
+  # fqcn -> the Method[] / Constructor[] / Field[] reflection handed back
+  methods: HashMap,
+  ctors: HashMap,
+  fields: HashMap,
+  # Method|Constructor -> toString(), and -> parameter class names joined by ","
+  desc: IdentityHashMap,
+  params: IdentityHashMap
+}
+
+fn cache_new() -> JCache !io =
+  JCache {
+    found: HashMap.new(),
+    missing: HashMap.new(),
+    methods: HashMap.new(),
+    ctors: HashMap.new(),
+    fields: HashMap.new(),
+    desc: IdentityHashMap.new(),
+    params: IdentityHashMap.new()
+  }
+
+## A cache for one question by a caller that keeps nothing: the module-level
+## entry points below answer against the system loader and hold no oracle, so
+## every one of their calls reflects afresh.
+fn no_cache() -> JCache !io = cache_new()
+
+## Reclaiming a cached row. Unlike the five walks further down this takes its
+## target from a written type and not from a type parameter, so one helper per
+## stored shape is enough.
+fn cached_string(o: Object, at: String) -> String = {
+  let got: Result[String, ForeignError] = cast(o)
+  match got {
+    Ok(s) -> s
+    Err(e) -> panic("jreflect." ++ at ++ ": not a String: ${e.message}")
+  }
+}
+
+fn cached_class(o: Object) -> Class = {
+  let got: Result[Class, ForeignError] = cast(o)
+  match got {
+    Ok(c) -> c
+    Err(e) -> panic("jreflect.resolve_class: not a Class: ${e.message}")
+  }
+}
+
+## `find_class_raw_with` with both answers kept, the miss included: a miss
+## costs a `forName` failure per step of the `$` walk, and the checker asks
+## about the same names over and over.
+fn resolve_class(jc: JCache, loader: ClassLoader, fqcn: String) -> Option[Class] !io = {
+  match jc.found.get(fqcn) {
+    Some(o) -> return Some(cached_class(o))
+    None -> ()
+  }
+  if jc.missing.containsKey(fqcn) { return None }
+  match find_class_raw_with(loader, fqcn) {
+    Some(c) -> {
+      jc.found.put(fqcn, c)
+      Some(c)
+    }
+    None -> {
+      jc.missing.put(fqcn, "")
+      None
+    }
+  }
+}
+
+## The member arrays. `getMethods()` and friends hand back a fresh defensive
+## copy on every call; we keep the first one and read it without ever writing
+## to it, so the copy stays the JDK's guarantee and becomes ours as well.
+fn methods_array(jc: JCache, loader: ClassLoader, fqcn: String) -> Object !io =
+  match jc.methods.get(fqcn) {
+    Some(a) -> a
+    None -> {
+      let c = resolve_class(jc, loader, fqcn).expect("methods_of on unresolved class")
+      jc.methods.put(fqcn, c.getMethods().expect("methods"))
+      jc.methods.get(fqcn).expect("methods just cached")
+    }
+  }
+
+fn ctors_array(jc: JCache, loader: ClassLoader, fqcn: String) -> Object !io =
+  match jc.ctors.get(fqcn) {
+    Some(a) -> a
+    None -> {
+      let c = resolve_class(jc, loader, fqcn).expect("ctors_of on unresolved class")
+      jc.ctors.put(fqcn, c.getConstructors().expect("constructors"))
+      jc.ctors.get(fqcn).expect("constructors just cached")
+    }
+  }
+
+fn fields_array(jc: JCache, loader: ClassLoader, fqcn: String) -> Object !io =
+  match jc.fields.get(fqcn) {
+    Some(a) -> a
+    None -> {
+      let c = resolve_class(jc, loader, fqcn).expect("static_fields_of on unresolved class")
+      jc.fields.put(fqcn, c.getFields().expect("fields"))
+      jc.fields.get(fqcn).expect("fields just cached")
+    }
+  }
+
+## The parameter list, kept as one comma-joined string. A class name cannot
+## contain a comma (the fact `sig_key` already rests on), so splitting is the
+## join's exact inverse. Keeping the `Class[]` instead would still pay
+## `getParameterTypes()`'s defensive clone and a reflective walk per query;
+## measured on `java.lang.Math`, the string is the cheaper of the two.
+##
+## The list is only kept when the join reproduces it. That refuses nothing a
+## Java class path actually holds; it is there so the cache cannot answer
+## something reflection would not, on the evidence of this file alone.
+fn split_params(joined: String) -> List[String] =
+  if joined == "" { [] } else { str.split(joined, ",") }
+
+fn method_params(jc: JCache, m: Method) -> List[String] !io =
+  match jc.params.get(m) {
+    Some(o) -> split_params(cached_string(o, "method_params"))
+    None -> {
+      let ps = class_names(
+        Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null"))
+      let joined = join(ps, ",")
+      if split_params(joined) == ps { let _ = jc.params.put(m, joined) }
+      ps
+    }
+  }
+
+fn ctor_params(jc: JCache, k: Constructor) -> List[String] !io =
+  match jc.params.get(k) {
+    Some(o) -> split_params(cached_string(o, "ctor_params"))
+    None -> {
+      let ps = class_names(
+        Objects.requireNonNull(k.getParameterTypes().expect("param types")).expect("non-null"))
+      let joined = join(ps, ",")
+      if split_params(joined) == ps { let _ = jc.params.put(k, joined) }
+      ps
+    }
+  }
+
+## `desc` is `Method.toString()`, printed verbatim in overload-resolution error
+## candidates. It is also the single most expensive field on the walk: the JDK
+## renders modifiers, type names and the throws clause from scratch every call.
+fn method_desc(jc: JCache, m: Method) -> String !io =
+  match jc.desc.get(m) {
+    Some(o) -> cached_string(o, "method_desc")
+    None -> {
+      let d = m.toString().expect("method toString")
+      jc.desc.put(m, d)
+      d
+    }
+  }
+
+fn ctor_desc(jc: JCache, k: Constructor) -> String !io =
+  match jc.desc.get(k) {
+    Some(o) -> cached_string(o, "ctor_desc")
+    None -> {
+      let d = k.toString().expect("ctor toString")
+      jc.desc.put(k, d)
+      d
+    }
+  }
 
 const ASM_BRIDGE_CLASS: String = "dawn.rt.Asm"
 const ASM_WRITER_BRIDGE_CLASS: String = "dawn.rt.AsmWriter"
@@ -91,55 +287,69 @@ fn target_has_asm(loader: ClassLoader) -> Bool !io =
   }
 
 fn target_find_class_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   fqcn: String
 ) -> Option[JClass] !io =
   match bridge_class(fqcn) {
     Some(j) -> if asm_bridge { Some(j) } else { None }
-    None -> find_class_with(loader, fqcn)
+    None -> find_class_with(jc, loader, fqcn)
   }
 
-fn target_class_info_with(loader: ClassLoader, asm_bridge: Bool, fqcn: String) -> JClass !io =
-  match target_find_class_with(loader, asm_bridge, fqcn) {
+fn target_class_info_with(
+  jc: JCache,
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> JClass !io =
+  match target_find_class_with(jc, loader, asm_bridge, fqcn) {
     Some(j) -> j
     None -> panic("class vanished between target queries: ${fqcn}")
   }
 
 fn target_methods_of_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   fqcn: String
 ) -> List[JMethod] !io =
   if asm_bridge && fqcn == ASM_BRIDGE_CLASS {
-    asm_bridge_methods() ++ methods_of_with(loader, "java.lang.Object")
+    asm_bridge_methods() ++ methods_of_with(jc, loader, "java.lang.Object")
   } else if asm_bridge && fqcn == ASM_WRITER_BRIDGE_CLASS {
-    asm_writer_bridge_methods() ++ methods_of_with(loader, ASM_CLASS_WRITER)
+    asm_writer_bridge_methods() ++ methods_of_with(jc, loader, ASM_CLASS_WRITER)
   } else {
-    methods_of_with(loader, fqcn)
+    methods_of_with(jc, loader, fqcn)
   }
 
-fn target_ctors_of_with(loader: ClassLoader, asm_bridge: Bool, fqcn: String) -> List[JCtor] !io =
+fn target_ctors_of_with(
+  jc: JCache,
+  loader: ClassLoader,
+  asm_bridge: Bool,
+  fqcn: String
+) -> List[JCtor] !io =
   if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
     []
   } else {
-    ctors_of_with(loader, fqcn)
+    ctors_of_with(jc, loader, fqcn)
   }
 
 fn target_static_fields_of_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   fqcn: String
 ) -> List[JField] !io =
   if asm_bridge && fqcn == ASM_BRIDGE_CLASS {
-    static_fields_of_with(loader, "java.lang.Object")
+    static_fields_of_with(jc, loader, "java.lang.Object")
   } else if asm_bridge && fqcn == ASM_WRITER_BRIDGE_CLASS {
-    static_fields_of_with(loader, ASM_CLASS_WRITER)
+    static_fields_of_with(jc, loader, ASM_CLASS_WRITER)
   } else {
-    static_fields_of_with(loader, fqcn)
+    static_fields_of_with(jc, loader, fqcn)
   }
 
 fn target_is_assignable_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   sup: String,
@@ -149,16 +359,17 @@ fn target_is_assignable_with(
   (sub == ASM_BRIDGE_CLASS || sub == ASM_WRITER_BRIDGE_CLASS) {
     true
   } else if asm_bridge && sub == ASM_BRIDGE_CLASS {
-    is_assignable_with(loader, sup, "java.lang.Object")
+    is_assignable_with(jc, loader, sup, "java.lang.Object")
   } else if asm_bridge && sub == ASM_WRITER_BRIDGE_CLASS {
-    is_assignable_with(loader, sup, ASM_CLASS_WRITER)
+    is_assignable_with(jc, loader, sup, ASM_CLASS_WRITER)
   } else if asm_bridge && (sup == ASM_BRIDGE_CLASS || sup == ASM_WRITER_BRIDGE_CLASS) {
     false
   } else {
-    is_assignable_with(loader, sup, sub)
+    is_assignable_with(jc, loader, sup, sub)
   }
 
 fn target_sam_of_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   fqcn: String
@@ -166,10 +377,11 @@ fn target_sam_of_with(
   if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
     None
   } else {
-    sam_of_with(loader, fqcn)
+    sam_of_with(jc, loader, fqcn)
   }
 
 fn target_component_of_with(
+  jc: JCache,
   loader: ClassLoader,
   asm_bridge: Bool,
   fqcn: String
@@ -177,23 +389,29 @@ fn target_component_of_with(
   if asm_bridge && (fqcn == ASM_BRIDGE_CLASS || fqcn == ASM_WRITER_BRIDGE_CLASS) {
     None
   } else {
-    component_of_with(loader, fqcn)
+    component_of_with(jc, loader, fqcn)
   }
 
 ## The oracle these implementations add up to — what the JVM main hands the
 ## checker in place of the refusal `cx_new` starts with.
-pub fn jsig_real() -> Jsig =
+##
+## It allocates: the oracle owns one `JCache`, so it is built here and not
+## anywhere a caller could share it between two of them.
+pub fn jsig_real() -> Jsig !io = {
+  let jc = cache_new()
+  let loader = sys_loader()
   Jsig {
     on: true,
-    find_class: find_class,
-    class_info: class_info,
-    methods_of: methods_of,
-    ctors_of: ctors_of,
-    static_fields_of: static_fields_of,
-    is_assignable: is_assignable,
-    sam_of: sam_of,
-    component_of: component_of
+    find_class: fqcn => find_class_with(jc, loader, fqcn),
+    class_info: fqcn => class_info_with(jc, loader, fqcn),
+    methods_of: fqcn => methods_of_with(jc, loader, fqcn),
+    ctors_of: fqcn => ctors_of_with(jc, loader, fqcn),
+    static_fields_of: fqcn => static_fields_of_with(jc, loader, fqcn),
+    is_assignable: (sup, sub) => is_assignable_with(jc, loader, sup, sub),
+    sam_of: fqcn => sam_of_with(jc, loader, fqcn),
+    component_of: fqcn => component_of_with(jc, loader, fqcn)
   }
+}
 
 fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
 
@@ -231,20 +449,22 @@ fn loader_for(jars: List[String]) -> TargetLoader !io = {
   TargetLoader { base: base, closeable: closeable }
 }
 
-fn jsig_with(loader: ClassLoader, asm_bridge: Bool) -> Jsig =
+fn jsig_with(loader: ClassLoader, asm_bridge: Bool) -> Jsig !io = {
+  let jc = cache_new()
   Jsig {
     on: true,
-    find_class: fqcn => target_find_class_with(loader, asm_bridge, fqcn),
-    class_info: fqcn => target_class_info_with(loader, asm_bridge, fqcn),
-    methods_of: fqcn => target_methods_of_with(loader, asm_bridge, fqcn),
-    ctors_of: fqcn => target_ctors_of_with(loader, asm_bridge, fqcn),
-    static_fields_of: fqcn => target_static_fields_of_with(loader, asm_bridge, fqcn),
-    is_assignable: (sup, sub) => target_is_assignable_with(loader, asm_bridge, sup, sub),
-    sam_of: fqcn => target_sam_of_with(loader, asm_bridge, fqcn),
-    component_of: fqcn => target_component_of_with(loader, asm_bridge, fqcn)
+    find_class: fqcn => target_find_class_with(jc, loader, asm_bridge, fqcn),
+    class_info: fqcn => target_class_info_with(jc, loader, asm_bridge, fqcn),
+    methods_of: fqcn => target_methods_of_with(jc, loader, asm_bridge, fqcn),
+    ctors_of: fqcn => target_ctors_of_with(jc, loader, asm_bridge, fqcn),
+    static_fields_of: fqcn => target_static_fields_of_with(jc, loader, asm_bridge, fqcn),
+    is_assignable: (sup, sub) => target_is_assignable_with(jc, loader, asm_bridge, sup, sub),
+    sam_of: fqcn => target_sam_of_with(jc, loader, asm_bridge, fqcn),
+    component_of: fqcn => target_component_of_with(jc, loader, asm_bridge, fqcn)
   }
+}
 
-fn lease_with(loader: TargetLoader, asm_bridge: Bool) -> JsigLease =
+fn lease_with(loader: TargetLoader, asm_bridge: Bool) -> JsigLease !io =
   JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => loader.closeable.close() }
 
 ## A target-local oracle. Its platform parent exposes the JDK but not the
@@ -317,22 +537,24 @@ fn jclass_of(c: Class) -> JClass !io =
   }
 
 ## Resolve a class name to plain data; None when nothing on the class path matches.
-fn find_class_with(loader: ClassLoader, fqcn: String) -> Option[JClass] !io =
-  match find_class_raw_with(loader, fqcn) {
+fn find_class_with(jc: JCache, loader: ClassLoader, fqcn: String) -> Option[JClass] !io =
+  match resolve_class(jc, loader, fqcn) {
     Some(c) -> Some(jclass_of(c))
     None -> None
   }
 
-pub fn find_class(fqcn: String) -> Option[JClass] !io = find_class_with(sys_loader(), fqcn)
+pub fn find_class(fqcn: String) -> Option[JClass] !io =
+  find_class_with(no_cache(), sys_loader(), fqcn)
 
 ## Class data for a name that is known to resolve (e.g. came from a Method).
-fn class_info_with(loader: ClassLoader, fqcn: String) -> JClass !io =
-  match find_class_with(loader, fqcn) {
+fn class_info_with(jc: JCache, loader: ClassLoader, fqcn: String) -> JClass !io =
+  match find_class_with(jc, loader, fqcn) {
     Some(j) -> j
     None -> panic("class vanished between queries: ${fqcn}")
   }
 
-pub fn class_info(fqcn: String) -> JClass !io = class_info_with(sys_loader(), fqcn)
+pub fn class_info(fqcn: String) -> JClass !io =
+  class_info_with(no_cache(), sys_loader(), fqcn)
 
 # The five reflective walks below all reclaim an erased `Array.get` element as
 # the class the JDK declared the array to hold — `getMethods()` is `Method[]`,
@@ -362,25 +584,24 @@ fn class_names(arr: Object) -> List[String] !io = {
   out
 }
 
-fn method_of(m: Method) -> JMethod !io = {
+fn method_of(jc: JCache, m: Method) -> JMethod !io = {
   let mods = m.getModifiers()
   JMethod {
     name: m.getName().expect("method name"),
-    param_cls: class_names(Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null")),
+    param_cls: method_params(jc, m),
     ret_cls: m.getReturnType().expect("return type").getName().expect("class name"),
     is_static: Modifier.isStatic(mods),
     is_varargs: m.isVarArgs(),
     is_abstract: Modifier.isAbstract(mods),
-    desc: m.toString().expect("method toString"),
+    desc: method_desc(jc, m),
     decl_cls: m.getDeclaringClass().expect("declaring class").getName().expect("class name")
   }
 }
 
 ## Every public method of `fqcn`, bridges and synthetics already dropped
 ## (the Kotlin checker filters them at every use site).
-fn methods_of_with(loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
-  let c = find_class_raw_with(loader, fqcn).expect("methods_of on unresolved class")
-  let arr = c.getMethods().expect("methods")
+fn methods_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
+  let arr = methods_array(jc, loader, fqcn)
   var out: List[JMethod] = []
   let n = Array.getLength(arr)
   var i = 0
@@ -390,18 +611,18 @@ fn methods_of_with(loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
       Ok(v) -> v
       Err(e) -> panic("jreflect.methods_of: not a Method: ${e.message}")
     }
-    if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(m)] }
+    if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(jc, m)] }
     i = i + 1
   }
   out
 }
 
-pub fn methods_of(fqcn: String) -> List[JMethod] !io = methods_of_with(sys_loader(), fqcn)
+pub fn methods_of(fqcn: String) -> List[JMethod] !io =
+  methods_of_with(no_cache(), sys_loader(), fqcn)
 
 ## Every public constructor of `fqcn`, synthetics dropped.
-fn ctors_of_with(loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
-  let c = find_class_raw_with(loader, fqcn).expect("ctors_of on unresolved class")
-  let arr = c.getConstructors().expect("constructors")
+fn ctors_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
+  let arr = ctors_array(jc, loader, fqcn)
   var out: List[JCtor] = []
   let n = Array.getLength(arr)
   var i = 0
@@ -413,9 +634,9 @@ fn ctors_of_with(loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
     }
     if not k.isSynthetic() {
       out = out ++ [JCtor {
-        param_cls: class_names(Objects.requireNonNull(k.getParameterTypes().expect("param types")).expect("non-null")),
+        param_cls: ctor_params(jc, k),
         is_varargs: k.isVarArgs(),
-        desc: k.toString().expect("ctor toString")
+        desc: ctor_desc(jc, k)
       }]
     }
     i = i + 1
@@ -423,13 +644,13 @@ fn ctors_of_with(loader: ClassLoader, fqcn: String) -> List[JCtor] !io = {
   out
 }
 
-pub fn ctors_of(fqcn: String) -> List[JCtor] !io = ctors_of_with(sys_loader(), fqcn)
+pub fn ctors_of(fqcn: String) -> List[JCtor] !io =
+  ctors_of_with(no_cache(), sys_loader(), fqcn)
 
 ## Every public static field of `fqcn` (Class.getFields() returns only public
 ## members, including inherited ones; we keep the static ones). Spec §9.1.
-fn static_fields_of_with(loader: ClassLoader, fqcn: String) -> List[JField] !io = {
-  let c = find_class_raw_with(loader, fqcn).expect("static_fields_of on unresolved class")
-  let arr = c.getFields().expect("fields")
+fn static_fields_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> List[JField] !io = {
+  let arr = fields_array(jc, loader, fqcn)
   var out: List[JField] = []
   let n = Array.getLength(arr)
   var i = 0
@@ -451,20 +672,22 @@ fn static_fields_of_with(loader: ClassLoader, fqcn: String) -> List[JField] !io 
   out
 }
 
-pub fn static_fields_of(fqcn: String) -> List[JField] !io = static_fields_of_with(sys_loader(), fqcn)
+pub fn static_fields_of(fqcn: String) -> List[JField] !io =
+  static_fields_of_with(no_cache(), sys_loader(), fqcn)
 
 ## Class.isAssignableFrom over names: may `sub` stand where `sup` is expected?
-fn is_assignable_with(loader: ClassLoader, sup: String, sub: String) -> Bool !io =
-  match find_class_raw_with(loader, sup) {
+fn is_assignable_with(jc: JCache, loader: ClassLoader, sup: String, sub: String) -> Bool !io =
+  match resolve_class(jc, loader, sup) {
     None -> false
     Some(s) ->
-      match find_class_raw_with(loader, sub) {
+      match resolve_class(jc, loader, sub) {
         None -> false
         Some(b) -> s.isAssignableFrom(b)
       }
   }
 
-pub fn is_assignable(sup: String, sub: String) -> Bool !io = is_assignable_with(sys_loader(), sup, sub)
+pub fn is_assignable(sup: String, sub: String) -> Bool !io =
+  is_assignable_with(no_cache(), sys_loader(), sup, sub)
 
 ## What makes two methods the same overload: the name and the parameter list.
 ## A class name cannot contain a comma, so joining them is a faithful key.
@@ -478,16 +701,16 @@ fn sig_key(m: JMethod) -> String = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")
 ## loop -- and the first of them re-enumerated `java.lang.Object`'s methods
 ## reflectively on every candidate, so a wide interface paid for Object once
 ## per method it declares.
-fn sam_of_with(loader: ClassLoader, fqcn: String) -> Option[JMethod] !io = {
-  let j = class_info_with(loader, fqcn)
+fn sam_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> Option[JMethod] !io = {
+  let j = class_info_with(jc, loader, fqcn)
   if not j.is_interface { return None }
   var from_object: Set[String] = set.empty()
-  for om in methods_of_with(loader, "java.lang.Object") {
+  for om in methods_of_with(jc, loader, "java.lang.Object") {
     from_object = set.insert(from_object, sig_key(om))
   }
   var found: List[JMethod] = []
   var seen: Set[String] = set.empty()
-  for m in methods_of_with(loader, fqcn) {
+  for m in methods_of_with(jc, loader, fqcn) {
     let key = sig_key(m)
     if m.is_abstract && not set.has(from_object, key) && not set.has(seen, key) {
       seen = set.insert(seen, key)
@@ -497,11 +720,12 @@ fn sam_of_with(loader: ClassLoader, fqcn: String) -> Option[JMethod] !io = {
   if len(found) == 1 { Some(found[0]) } else { None }
 }
 
-pub fn sam_of(fqcn: String) -> Option[JMethod] !io = sam_of_with(sys_loader(), fqcn)
+pub fn sam_of(fqcn: String) -> Option[JMethod] !io =
+  sam_of_with(no_cache(), sys_loader(), fqcn)
 
 ## The component type name of an array class, or None.
-fn component_of_with(loader: ClassLoader, fqcn: String) -> Option[String] !io =
-  match find_class_raw_with(loader, fqcn) {
+fn component_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> Option[String] !io =
+  match resolve_class(jc, loader, fqcn) {
     None -> None
     Some(c) ->
       match c.getComponentType() {
@@ -510,7 +734,8 @@ fn component_of_with(loader: ClassLoader, fqcn: String) -> Option[String] !io =
       }
   }
 
-pub fn component_of(fqcn: String) -> Option[String] !io = component_of_with(sys_loader(), fqcn)
+pub fn component_of(fqcn: String) -> Option[String] !io =
+  component_of_with(no_cache(), sys_loader(), fqcn)
 
 # ---- tests ----
 
@@ -595,6 +820,65 @@ test "target-local leases retain the platform classes" {
     Some(j) -> { assert j.simple == "String" }
     None -> { assert false }
   }
+}
+
+test "a repeated query answers exactly what fresh reflection answers" {
+  let js = jsig_real()
+  let find = js.find_class
+  let info = js.class_info
+  let methods = js.methods_of
+  let ctors = js.ctors_of
+  let fields = js.static_fields_of
+  let assignable = js.is_assignable
+  let sam = js.sam_of
+  let component = js.component_of
+  let cls = "java.lang.Integer"
+  # the module-level entries hold no oracle, so each of them reflects afresh:
+  # they are the uncached control the kept answers are compared against.
+  assert methods(cls) == methods_of(cls)
+  assert methods(cls) == methods(cls)
+  assert ctors(cls) == ctors_of(cls)
+  assert ctors(cls) == ctors(cls)
+  assert fields(cls) == static_fields_of(cls)
+  assert fields(cls) == fields(cls)
+  assert find(cls) == find_class(cls)
+  assert info(cls) == class_info(cls)
+  assert sam("java.util.Comparator") == sam_of("java.util.Comparator")
+  assert component("[I") == component_of("[I")
+  assert assignable("java.lang.Object", cls) == is_assignable("java.lang.Object", cls)
+  # varargs and zero-argument parameter lists survive the round trip that
+  # keeping a parameter list as one joined string puts it through
+  assert methods("java.lang.String") == methods_of("java.lang.String")
+  assert ctors("java.lang.String") == ctors_of("java.lang.String")
+  # a name that does not resolve is kept as a miss, and stays one
+  assert find("no.such.CachedClass") == None
+  assert find("no.such.CachedClass") == None
+  assert not assignable("no.such.CachedClass", cls)
+  # the nested-class walk is answered from the same row on the second ask
+  assert find("java.util.Map.Entry") == find_class("java.util.Map.Entry")
+  assert find("java.util.Map.Entry") == find_class("java.util.Map.Entry")
+}
+
+test "each oracle keeps its own answers and inherits none" {
+  # a class the compiler's own class path has and a bare target lease, whose
+  # platform parent has not. A cache shared between oracles would answer the
+  # second query out of the first one's row.
+  let app = ASM_CLASS_WRITER
+  let system = jsig_real()
+  let system_find = system.find_class
+  assert system_find(app) != None
+  let lease = jsig_for([])
+  let seen: (Option[JClass], Option[JClass]) = bracket(lease, held => held.close(), held => {
+    let find = held.jsig.find_class
+    (find(app), find("java.lang.String"))
+  })
+  let (target_app, target_string) = seen
+  assert target_app == None
+  assert target_string != None
+  # and the closed lease left nothing behind for the next oracle to read
+  let again = jsig_real()
+  let again_find = again.find_class
+  assert again_find(app) != None
 }
 
 test "methods carry their shapes" {
