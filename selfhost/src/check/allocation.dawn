@@ -709,9 +709,13 @@ test "allocation prepared reservations agree with rebuilding both tables" {
   }
   # An interval that lands on an ID either table already owns must be refused,
   # exactly as the rebuilt table refuses two bindings claiming one allocation.
-  let claimed_old = table([entry(a, LocalSymbol, 0, 20)]).expect("old claim")
-  let claimed_next = table([entry(a, LocalSymbol, 0, 40)]).expect("next claim")
-  for (left, right) in [(claimed_old, next), (old, claimed_next), (claimed_old, claimed_next)] {
+  var claimed: List[(Table, Table)] = []
+  for domain in [TypeParameter, EffectParameter, LocalSymbol] {
+    let claimed_old = table([entry(a, domain, 0, 20)]).expect("old claim")
+    let claimed_next = table([entry(a, domain, 0, 40)]).expect("next claim")
+    claimed = claimed ++ [(claimed_old, next), (old, claimed_next), (claimed_old, claimed_next)]
+  }
+  for (left, right) in claimed {
     let pair = reserver(left, right).expect("claimed pair")
     let rebuilt = match body_plan(left, right, owner, 20, 2, 40, pure, pure, []) {
       Some(plan) -> Some(plan.ids), None -> None

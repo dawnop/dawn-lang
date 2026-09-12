@@ -23,8 +23,27 @@ def main():
         ("target-identity", "map.get(b.bindings, binding)", "map.get(a.bindings, binding)"),
         ("negative-slot", "HeaderSlot(index) -> if index < 0", "HeaderSlot(index) -> if false"),
         ("trait-domain", "TraitId -> { traits = map.insert(traits, id, target) }", "TraitId -> { types = map.insert(types, id, target) }"),
-        ("body-evidence", "map.get(moved_evidence, start + offset).unwrap_or(target + offset)", "target + offset"),
-        ("body-ghost", "while offset < count {", "while offset < count - 1 {"),
+        ("body-evidence",
+         "let moved = if domain == LocalSymbol { map.get(moved_evidence, start + offset).unwrap_or(target + offset) }",
+         "let moved = if domain == LocalSymbol { target + offset }"),
+        ("body-ghost", "while offset < count {\n    for domain in [TypeParameter, EffectParameter, LocalSymbol] {",
+         "while offset < count - 1 {\n    for domain in [TypeParameter, EffectParameter, LocalSymbol] {"),
+        # The prepared path is pinned to `body_plan` by the inline oracle, so a
+        # mutant on either side of that equality has to break it.
+        ("reserved-evidence",
+         "let moved_local = map.get(moved_evidence, start + offset).unwrap_or(target + offset)",
+         "let moved_local = target + offset"),
+        ("reserved-ghost", "while offset < count {\n    let moved_local",
+         "while offset < count - 1 {\n    let moved_local"),
+        ("reserved-owner",
+         "if map.has(data.old_owned.types, start + offset) ||\n"
+         "      map.has(data.old_owned.effects, start + offset) ||\n"
+         "      map.has(data.old_owned.locals, start + offset) ||\n"
+         "      map.has(data.next_owned.types, target + offset) ||\n"
+         "      map.has(data.next_owned.effects, target + offset) ||\n"
+         "      map.has(data.next_owned.locals, moved_local) { return None }",
+         "if false { return None }"),
+        ("reserved-signature", "if moved != next_sig { return None }", "if false { return None }"),
         ("body-endpoint", "next_id: target + count", "next_id: target + count - 1"),
         ("body-carry", "old_allocations: old_allocations, next_allocations: next_allocations",
          "old_allocations: old_headers, next_allocations: next_headers"),

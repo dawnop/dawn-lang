@@ -861,6 +861,58 @@ which was 47% of the literal class's replay before the class widened, is now
 12.4µs and 89.3µs per body respectively. Replay still loses to cold checking on
 every class that it admits, by a factor of 13 to 50, and phase 5 remains
 unstarted.
+
+Admission is split by which revision can answer it. `scalar_replay.admit` binds
+one recording to the snapshot whose headers produced it and settles everything
+the recorded revision decides alone: the product's own field guards, its
+observed reads, the local symbols it installs, and the binder names its body
+declares. It runs once per recording, not once per replay and never once per
+candidate body. Replay then takes that value, and per body it asks only what
+the candidate revision can change: the header half of class membership, the
+declaration pairing, the recorded header relocated onto the candidate one, the
+alias question over the recorded binder names, and the reserved allocation
+interval. Class membership of the *recorded* body is not re-asked anywhere: the
+pairing proves it, because `scalar_shape.same` succeeds only when both trees
+consist of nodes this class supports, and a guard no fixture can distinguish is
+not a guard.
+
+The recorded binder list replaces a second walk of the candidate body. It is
+sound because the pairing establishes the two bodies have the same block
+structure and the same `let` names, and the parameter-name comparison
+establishes the same seed; the alias diagnostic `checker.declare` reports leaves
+no journal entry, so the question itself must still be asked of the candidate
+module's alias table, and it is.
+
+Reserving a body interval no longer rebuilds the module. `allocation.body_plan`
+built two extended binding tables and a whole relocation for every body, so a
+module's entire header table was walked once per body; that is why the guard was
+flat in module size and large. `allocation.reserver` does the pair-dependent work
+once (the header relocation, its reverse index, and the IDs each table already
+owns in the three domains an interval reserves) and `allocation.reserved_plan`
+then costs the interval. It is pinned to the old path by an inline oracle:
+for the same inputs it returns exactly `body_plan`'s relocation, or refuses
+exactly where `body_plan` refuses. `relocate.extend` is the matching primitive,
+equal to rebuilding with `relocate.new` over the merged maps and refusing the
+same conflicts, without revisiting the maps it extends.
+
+Token facts are taken once per revision too. `source_projection.between_indexed`
+re-lexed both declaration slices on every admitted body and then wrote one map
+entry per code point, twice over, and the executor paid that per reused body.
+A snapshot now lexes its revision once and keeps, for each function
+declaration, its token kinds, its token spellings and its token boundaries;
+pairing two declarations is two list comparisons, and the relocation it returns
+answers each boundary from the token that covers it by binary search. The map
+`between` materialized is gone: `relocate_tree.View` takes two boundary lookups
+rather than two tables. The original `between`/`between_indexed` remain, and
+remain the equality oracle: an inline test compares the paired form against them
+position by position over a declaration range.
+
+Pairing is still two parsed trees, not two token streams. A token comparison
+that ignores newlines cannot separate `let b = a` followed by `- x` from
+`let b = a - x`: one token sequence, two parses. That pair is an inline test and
+a fixture in the product oracle, and it is why `scalar_shape.same` stays on the
+replay path rather than being replaced by the token comparison.
+
 Inference branch eligibility is a dependency too: `is_concrete` distinguishes
 rigid parameters in the current scope from unbound variables. Record its full
 type input and Boolean answer at the actual short-circuit point; candidate
