@@ -23,6 +23,8 @@ use compiler/check/body_execution.{Recorded, SavedFunction, FunctionInput}
 use compiler/check/body_product
 use compiler/check/body_product.{Product, BodyProduct}
 use compiler/check/scalar_replay
+use compiler/check/scalar_shape
+use compiler/check/write_journal.{SymbolKey}
 use compiler/check/identity
 use compiler/check/identity.{ModuleKey, DeclKey, Named, FunctionDecl}
 use compiler/check/allocation
@@ -33,7 +35,7 @@ use compiler/check/source_snapshot.{Snapshot}
 use compiler/check/relocate_tree.{View}
 use compiler/check/semantic_reads.{AssignableType}
 use compiler/check/tast.{TFun}
-use compiler/check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, EPure}
+use compiler/check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, Sig, Sym, EPure}
 use compiler/jvm/jreflect.{jsig_real}
 use java "java.lang.System"
 use java "java.lang.Integer"
@@ -137,28 +139,42 @@ fn row(index: Int, metric: String, nanos: Int) -> Unit !io =
 # ---------------------------------------------------------------- phase split
 
 ## The counters below mirror `check/scalar_replay`'s own steps one for one.
-## `shape` is its `eligible`/product-field/`relocate.signature` guard, `reval`
-## its `checker.revalidate_read` loop, `proj` its source projection plus
-## `body_product.project`, `asm` its `body_product.assemble`.
+## `shape` is its `eligible`/binder/product-field guard through
+## `relocate.signature` and `allocation.body_plan`, `proj` its source
+## projection plus `body_product.project`, `reval` its
+## `checker.revalidate_read` loop, `asm` its `body_product.assemble`.
+##
+## This mirror is the fixture's only real obligation, and it is checked: every
+## run compares its reused/checked counts against production replay in the same
+## process. An admission rule that lands in the executor without landing here
+## makes the split panic rather than report a split of something else.
 type Acc = { checked: Int, reused: Int, shape: Int, reval: Int, proj: Int, asm: Int }
 
 type Prior = { syntax: FnDecl, signature: Sig, product: Product }
 type Prepared = { ids: relocate.Ids, entries: Map[DeclKey, Prior], allowed: Set[DeclKey],
+  old_headers: allocation.Table, next_headers: allocation.Table,
   old_source: source_projection.Indexed, source: source_projection.Indexed }
 
-fn literal_type(e: Expr) -> Option[Ty] = match e {
-  EInt(_, _, _) -> Some(TyInt)
-  EFloat(_, _, _) -> Some(TyFloat)
-  EBool(_, _, _) -> Some(TyBool)
-  EUnit(_, _) -> Some(TyUnit)
-  _ -> None
+fn primitive(t: Ty) -> Bool = match t {
+  TyInt -> true, TyFloat -> true, TyBool -> true, TyUnit -> true, _ -> false
 }
 
-fn eligible(d: FnDecl, s: Sig) -> Bool =
-  d.params == [] && d.tparams == [] && d.eparams == [] && d.effs == [] && d.ret != None &&
-  s.param_tys == [] && s.param_names == [] && s.param_defaults == [] &&
-  s.tparams == [] && s.eparams == [] && len(s.constraints) == 0 && s.eff == EPure &&
-  not s.inferring && not s.is_builtin && s.trait_id == None && literal_type(d.body) == Some(s.ret)
+fn eligible(d: FnDecl, s: Sig) -> Bool = {
+  if d.tparams != [] || d.eparams != [] || d.effs != [] || d.ret == None ||
+    s.tparams != [] || s.eparams != [] || len(s.constraints) != 0 || s.eff != EPure ||
+    s.inferring || s.is_builtin || s.trait_id != None || not primitive(s.ret) ||
+    len(d.params) != len(s.param_tys) || len(d.params) != len(s.param_names) { return false }
+  for present in s.param_defaults { if present { return false } }
+  var bound: Set[String] = set.empty()
+  var i = 0
+  for param in d.params {
+    if param.default != None || param.name != s.param_names[i] ||
+      not primitive(s.param_tys[i]) || set.has(bound, param.name) { return false }
+    bound = set.insert(bound, param.name)
+    i = i + 1
+  }
+  scalar_shape.same(d.body, d.body, bound)
+}
 
 fn table(scope: ModuleKey, h: ModuleHeaders) -> Option[allocation.Table] =
   allocation.combine([allocation.compiler_headers(scope.world)?,
@@ -200,21 +216,57 @@ fn pair_entries(scope: ModuleKey, old: ModuleHeaders, saved: Recorded,
 }
 
 ## Shape guard, split out so its cost can be read separately. Returns the
-## saved entry only when every structural precondition of replay holds.
-fn shape_ok(scope: ModuleKey, p: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Prior] = {
+## reserved interval and projected local symbols only when every structural
+## precondition of replay holds.
+type Shaped = { prior: FnDecl, product: Product, symbols: Map[Int, Sym], plan: allocation.BodyPlan }
+
+fn shape_ok(scope: ModuleKey, p: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[Shaped] = {
   if not eligible(d, sig) || cx.diags != [] { return None }
   let key = DeclKey { scope: scope, path: [Named(FunctionDecl, d.name)] }
   if not set.has(p.allowed, key) { return None }
   let saved = map.get(p.entries, key)?
-  if not eligible(saved.syntax, saved.signature) { return None }
-  let prod = saved.product
+  let prior = saved.syntax
   let prior_sig = saved.signature
-  if prod.tree.sig != prior_sig || prod.tree.name != saved.syntax.name ||
-    prod.allocation_count != 0 || prod.symbols != [] || prod.signatures != [] || prod.aliases != [] ||
-    len(prod.bounds) != 0 || prod.diagnostics != [] || prod.body_writes != Some([]) ||
-    prod.function_reads != Some([AssignableType(prior_sig.ret, prior_sig.ret, true)]) { return None }
+  let prod = saved.product
+  if not eligible(prior, prior_sig) { return None }
+  if not scalar_shape.same(prior.body, d.body, set.from(prior_sig.param_names)) { return None }
+  for name in scalar_shape.binders(d.body, sig.param_names)? {
+    if map.has(cx.module_aliases, name) { return None }
+  }
+  if prod.tree.sig != prior_sig || prod.tree.name != prior.name ||
+    prod.signatures != [] || prod.aliases != [] || len(prod.bounds) != 0 ||
+    prod.diagnostics != [] { return None }
+  let reads = prod.function_reads?
+  if reads == [] { return None }
+  for read in reads {
+    match read {
+      AssignableType(a, b, true) -> if not primitive(a) || not primitive(b) { return None }
+      _ -> return None
+    }
+  }
+  var symbols: Map[Int, Sym] = map.empty()
+  for change in prod.symbols {
+    let symbol = change.value?
+    if change.key < prod.allocation_start || change.key >= prod.allocation_start + prod.allocation_count ||
+      map.has(symbols, change.key) || not primitive(symbol.ty) || symbol.mutable ||
+      symbol.dict_of != None || symbol.ev_of != None || symbol.cell_of != None { return None }
+    symbols = map.insert(symbols, change.key, symbol)
+  }
+  var written: Set[Int] = set.empty()
+  for write in prod.body_writes? {
+    match write {
+      SymbolKey(id) -> {
+        if not map.has(symbols, id) { return None }
+        written = set.insert(written, id)
+      }
+      _ -> return None
+    }
+  }
+  if set.len(written) != map.len(symbols) { return None }
   if relocate.signature(p.ids, prior_sig) != Some(sig) { return None }
-  Some(saved)
+  let plan = allocation.body_plan(p.old_headers, p.next_headers, key,
+    prod.allocation_start, prod.allocation_count, cx.next_id, prior_sig, sig, [])?
+  Some(Shaped { prior: prior, product: prod, symbols: symbols, plan: plan })
 }
 
 fn timed_function(scope: ModuleKey, p: Prepared, acc: Acc, cx: Cx, d: FnDecl, sig: Sig,
@@ -226,14 +278,14 @@ fn timed_function(scope: ModuleKey, p: Prepared, acc: Acc, cx: Cx, d: FnDecl, si
   match shaped {
     None -> cold.function(Acc { ..a, checked: a.checked + 1 }, cx, d, sig)
     Some(saved) -> {
-      let prior = saved.syntax
+      let prior = saved.prior
       let t2 = System.nanoTime()
       let positions = source_projection.between_indexed(p.old_source, p.source, prior.lo, prior.hi, d.lo, d.hi)
       let moved = match positions {
         None -> None
         Some(pos) -> {
-          let view = View { ids: p.ids, positions: pos.starts, ends: pos.ends,
-            symbols: map.empty(), assertion: (text, lo, hi) => source_projection.assertion(pos, text, lo, hi),
+          let view = View { ids: saved.plan.ids, positions: pos.starts, ends: pos.ends,
+            symbols: saved.symbols, assertion: (text, lo, hi) => source_projection.assertion(pos, text, lo, hi),
             callee: (owner, name, builtin, trait_id) => None }
           body_product.project(view, saved.product, cx.next_id)
         }
@@ -300,7 +352,11 @@ fn instrumented_replay(scope: ModuleKey, old: ModuleHeaders, old_source: Snapsho
   let q0 = System.nanoTime()
   let (allowed, entries) = pair_entries(scope, old, saved, next)
   let q1 = System.nanoTime()
+  let (old_table_value, next_table_value) = match (old_table, next_table) {
+    (Some(a), Some(b)) -> (a, b), _ -> panic("instrumented replay: no allocation tables")
+  }
   let prepared = Prepared { ids: plan, entries: entries, allowed: allowed,
+    old_headers: old_table_value, next_headers: next_table_value,
     old_source: source_snapshot.indexed(old_source), source: source_snapshot.indexed(source) }
   let cold: BodyExecutor[Acc] = checker.cold_body_executor()
   let executor: BodyExecutor[Acc] = BodyExecutor {

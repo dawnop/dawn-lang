@@ -38,9 +38,13 @@ MEMORY_ROUNDS = 5
 # bounds (dictionary passing), (5) inference-heavy bodies with lambdas,
 # (6a) impl methods, (6b) trait defaults, (7) bodies reaching Java via `use java`.
 CLASSES = ["scalar", "arith", "calls", "generic", "inferred", "method", "default", "java"]
-# Replay admits the closed scalar-literal producer only. The other classes are
-# measured too: their admission always misses, which prices what an extended
-# executor would pay before it reused anything.
+# Replay admits the closed producer over primitive parameters and immutable
+# locals: `scalar` and `arith` are reused whole, and `calls` reuses only its two
+# leaf helpers. The remaining classes always miss, which prices what an extended
+# executor would pay before it reused anything. The phase-split subject mirrors
+# that admission and checks itself against production counts every run, so a
+# widened executor makes the split fail rather than silently price a narrower
+# rule than the one in production.
 
 
 def parse_rows(text):
