@@ -8,10 +8,14 @@
 #
 #   ./scripts/export-surface-contract/run.sh              # everything
 #   ./scripts/export-surface-contract/run.sh --shard 1/2  # fixtures + half
+#   ./scripts/export-surface-contract/run.sh --self-test  # the harness itself
 #
 # Sharding exists because a mutant costs one whole compiler build. The shard
 # split is a CI wall-clock decision and nothing else: every shard runs the
 # fixture contract, and the mutants are divided round-robin.
+#
+# --self-test is one negative control over this file rather than over the
+# compiler, and it needs no compiler of its own: see self_test below.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,9 +28,11 @@ trap 'rm -rf "$work"' EXIT
 shard_i=1
 shard_n=1
 only=
+self_test_only=
 case "${1:-}" in
   --shard) shard_i=${2%%/*}; shard_n=${2##*/} ;;
   --only) only=$2 ;;
+  --self-test) self_test_only=yes ;;
 esac
 
 fail() {
@@ -64,6 +70,107 @@ refuse_std_break() {
       fail "$mutation: the bundled std does not load under this mutant, so $name never ran; that channel is mutant_breaks_std's" ;;
   esac
 }
+
+# ---- one mutant compiler -------------------------------------------------
+#
+# Up here rather than beside its callers because the self-test below is the
+# only caller that must run before the fixture contract does.
+
+build_mutant() {
+  local mutation=$1 dir="$work/$mutation"
+  mkdir -p "$dir"
+  cp -R "$root/selfhost" "$dir/selfhost"
+  ln -s "$root/packages" "$dir/packages"
+  ln -s "$root/compiler-plan" "$dir/compiler-plan"
+  # mutate.py's exit status, before anything is built. An anchor that has
+  # drifted under a multi-edit mutation leaves the tree carrying half of it
+  # (`surface-after-bodies` writes one edit here and one in the backfill
+  # table), and a build of that tree answers a question nobody asked: the
+  # contract still goes red, for a reason the mutant does not document.
+  # Unchecked, that was silent, because this function runs inside a command
+  # substitution and errexit does not reach into one.
+  if ! python3 "$here/mutate.py" "$mutation" "$dir" > "$dir/mutate.out" 2>&1; then
+    cat "$dir/mutate.out" >&2
+    fail "$mutation: mutate.py did not apply the mutation, so no mutant was built"
+  fi
+  if ! run_dawn "$dawn" build "$dir/selfhost" -o "$dir/compiler.jar" > "$dir/build.out" 2>&1; then
+    cat "$dir/build.out" >&2
+    fail "$mutation mutant did not compile"
+  fi
+  if ! java -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
+    cat "$dir/version.out" >&2
+    fail "$mutation mutant compiled but could not run"
+  fi
+  printf '%s\n' "$dir/compiler.jar"
+}
+
+# ---- self-test -----------------------------------------------------------
+#
+# The negative control for the check above. It takes the anchor of a real
+# mutation out of a copy of the tree, points build_mutant at the copy, and
+# requires the harness to stop with mutate.py's own words and without starting
+# a build. Removing the status check turns this red the way it has to be
+# turned red: the drifted tree gets built instead.
+#
+# The compiler here is a stub that records being run, so "before any build" is
+# asserted and not assumed. Nothing real is compiled and nothing outside $work
+# is touched, which is why this costs a copy of selfhost and no more.
+
+self_test() {
+  local mutation=surface-after-bodies
+  local scratch="$work/self-test" out="$work/self-test.out"
+  mkdir -p "$scratch"
+  cp -R "$root/selfhost" "$scratch/selfhost"
+
+  python3 - "$here" "$scratch" "$mutation" <<'EOF'
+import importlib.util
+import sys
+from pathlib import Path
+
+here, scratch, mutation = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location("mutate", here + "/mutate.py")
+mutate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mutate)
+# The backfill edit, which is the one that lands second: the tree is already
+# half mutated by the time its anchor is looked for.
+rel, old, _new = mutate.EXTRA_EDITS[mutation]
+path = scratch / rel
+text = path.read_text()
+if text.count(old) != 1:
+    raise SystemExit(f"self-test: {mutation}'s backfill anchor is already drifted")
+path.write_text(text.replace(old, "", 1))
+EOF
+
+  printf '#!/bin/sh\ntouch %s\nexit 1\n' "$scratch/a-build-was-started" > "$scratch/stub-compiler"
+  chmod +x "$scratch/stub-compiler"
+
+  # build_mutant reads $root and $dawn, so the scratch tree and the stub are
+  # handed to it exactly the way a real run hands it the real ones. This mode
+  # is terminal, so they are not put back. The call is wrapped in a subshell
+  # because `fail` exits, and a control over what `fail` reports has to
+  # survive it being reached.
+  root=$scratch
+  dawn=$scratch/stub-compiler
+  if ( build_mutant "$mutation" ) > "$out" 2>&1; then
+    cat "$out" >&2
+    fail "self-test: a drifted anchor produced a mutant"
+  fi
+  if ! grep -Fq 'mutation anchor drifted' "$out"; then
+    cat "$out" >&2
+    fail "self-test: the harness stopped, but not for the drift it was given"
+  fi
+  if [ -e "$scratch/a-build-was-started" ]; then
+    cat "$out" >&2
+    fail "self-test: the half-mutated tree was built before the drift was noticed"
+  fi
+  echo "PASS  a drifted mutation anchor stops the harness before any build"
+}
+
+if [ -n "$self_test_only" ]; then
+  self_test
+  echo "OK: 1 negative control over the harness itself"
+  exit 0
+fi
 
 # ---- assertions on the real compiler -------------------------------------
 
@@ -267,24 +374,6 @@ expect_std_refuses "$internal_std" \
 echo "PASS  public surfaces name only what their audience can name"
 
 # ---- mutants -------------------------------------------------------------
-
-build_mutant() {
-  local mutation=$1 dir="$work/$mutation"
-  mkdir -p "$dir"
-  cp -R "$root/selfhost" "$dir/selfhost"
-  ln -s "$root/packages" "$dir/packages"
-  ln -s "$root/compiler-plan" "$dir/compiler-plan"
-  python3 "$here/mutate.py" "$mutation" "$dir"
-  if ! run_dawn "$dawn" build "$dir/selfhost" -o "$dir/compiler.jar" > "$dir/build.out" 2>&1; then
-    cat "$dir/build.out" >&2
-    fail "$mutation mutant did not compile"
-  fi
-  if ! java -jar "$dir/compiler.jar" --version > "$dir/version.out" 2>&1; then
-    cat "$dir/version.out" >&2
-    fail "$mutation mutant compiled but could not run"
-  fi
-  printf '%s\n' "$dir/compiler.jar"
-}
 
 # The mutant must lose exactly the named diagnostic and keep everything else
 # it had: a mutant that stops checking altogether is not evidence about a rule.
