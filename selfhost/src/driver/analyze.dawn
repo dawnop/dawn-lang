@@ -27,6 +27,7 @@ use check/checker.{check_module, check_module_headers, check_module_bodies, asse
 use check/body_execution
 use check/allocation
 use check/relocate
+use check/identity
 use check/identity.{module_key}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
@@ -718,7 +719,14 @@ pub type AnalysisCarry = {
   exports: Map[String, ModExports],
   impls: Impls,
   next_id: Int,
-  provenance: Option[HeaderProvenance]
+  provenance: Option[HeaderProvenance],
+  # The position view lives on the carry rather than on `ModuleStep` because
+  # its readers are not the step that produced it: a diagnostic or a lowering
+  # resolves an offset owned by some other module, long after that module's
+  # step returned. `ModuleStep.after` is what a session keeps, so a view put
+  # here is reachable from every consumer a step is reachable from, and one
+  # reused prefix step carries the views of the modules before it unchanged.
+  decl_spans: Map[String, identity.DeclSpans]
 }
 
 ## These tables belong to the enclosing analysis owner. A world label is not
@@ -741,8 +749,13 @@ pub type ModuleStep = {
   comptime_runs: Int
 }
 
-pub fn initial_carry(std: StdCtx) -> AnalysisCarry =
-  AnalysisCarry { exports: std.exports, impls: std.impls, next_id: std.next_id, provenance: None }
+pub fn initial_carry(std: StdCtx) -> AnalysisCarry = {
+  # The bundled library is already checked; its own sources are given a view
+  # when one of them is analyzed again as an ordinary module.
+  let no_spans: Map[String, identity.DeclSpans] = map.empty()
+  AnalysisCarry { exports: std.exports, impls: std.impls, next_id: std.next_id, provenance: None,
+    decl_spans: no_spans }
+}
 
 pub fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarry = {
   var modules: Map[String, Option[allocation.Table]] = map.empty()
@@ -756,6 +769,14 @@ pub fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarr
   AnalysisCarry { ..initial_carry(std), provenance: Some(HeaderProvenance { world: world, modules: modules,
     intrinsics: allocation.compiler_headers(world) }) }
 }
+
+## Which analysis owner's keys the views on this carry belong to. A session
+## names its world; a cold run has exactly one owner and no name for it.
+fn analysis_world(carry: AnalysisCarry) -> String =
+  match carry.provenance {
+    Some(origin) -> origin.world
+    None -> "cold"
+  }
 
 fn analysis_event(
   observer: Option[AnalysisObserver], name: String, stage: AnalysisStage, entering: Bool
@@ -861,6 +882,12 @@ fn module_step_with_recording(
   # for the bundled library's own sources, and wrong in the direction that
   # takes the std-only surface away from the code that defines it.
   let (mf, is_std) = std_identity(std, mf0)
+  # Built on the cold path too: one code path is worth more than the fraction
+  # of a percent it costs, and a renderer cannot ask for a view that only the
+  # session mode builds. The world label is the enclosing analysis owner's,
+  # which a cold run does not name; `cold` is that run's own label.
+  let spans = identity.declaration_spans(
+    module_key(analysis_world(before), mf.mod_path, mf.class_name, mf.path), mf.m)
   analysis_event(observer, mf.mod_path, AnalyzeModule, true)
   for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
   let parse_failed = len(mf.pdiags) > 0
@@ -959,6 +986,7 @@ fn module_step_with_recording(
     diags: diags,
     body_records: body_records,
     after: AnalysisCarry { exports: exports, impls: impls, next_id: cx.next_id,
+      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans),
       provenance: match before.provenance {
         None -> None
         Some(origin) -> Some(HeaderProvenance { ..origin,

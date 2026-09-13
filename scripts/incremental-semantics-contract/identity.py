@@ -18,9 +18,9 @@ def main():
     original = (ROOT / "selfhost/src/check/identity.dawn").read_text()
     variants = [
         ("duplicate-parent", "if unique { out = out ++ [e] }", "out = out ++ [e]"),
-        ("parent-not-checked", "var depth = 1", "var depth = len(e.key.path)"),
+        ("parent-not-checked", "var depth = 1", "var depth = len(e.entry.key.path)"),
         ("binder-spelling", "return BoundType(i)", "return NamedType(name, [], [])"),
-        ("default-ambiguity", "param.default != None && same == 1", "param.default != None"),
+        ("default-ambiguity", "if same == 1 {", "if same >= 1 {"),
         ("world-erased", "DeclKey { scope: scope, path: path }",
          'DeclKey { scope: ModuleKey { ..scope, world: "shared" }, path: path }'),
         ("effect-binder-spelling", "return ProjectedEffect(i, parts[1])", "return NamedEffect(name)"),

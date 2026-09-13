@@ -7,7 +7,7 @@ use std/list
 use std/str
 use front/parser
 use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
-  DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava }
+  DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava, e_lo, e_hi }
 
 pub type ModuleKey = { world: String, logical_module: String, emission_owner: String, source: String }
 
@@ -48,6 +48,21 @@ pub type Part =
 pub type DeclKey = { scope: ModuleKey, path: List[Part] }
 ## Indices locate the current syntax only. They do not participate in keys.
 pub type Entry = { key: DeclKey, declaration: Int, member: Option[Int] }
+
+## Where a declaration sits in the revision that was parsed, in code points.
+## A span is the part of an entry that an edit anywhere in the file can move,
+## which is why it is kept outside the key rather than inside it.
+pub type Span = { lo: Int, hi: Int }
+
+## An entry and the span of the syntax it was read off.
+pub type Located = { entry: Entry, span: Span }
+
+## The per-revision answer to "where does the declaration with this key start
+## and end". Consumers that hold a position relative to a declaration resolve
+## it against this view at render or lower time, so an edit outside the
+## declaration moves the answer without invalidating the declaration's own
+## semantic product.
+pub type DeclSpans = { spans: Map[DeclKey, Span] }
 
 fn effect_atom(name: String, binders: List[String]) -> EffectShape = {
   let parts = str.split(name, ".")
@@ -93,81 +108,105 @@ pub fn type_shape(t: TypeRef, binders: List[String]) -> TypeShape =
 fn entry(scope: ModuleKey, path: List[Part], declaration: Int, member: Option[Int]) -> Entry =
   Entry { key: DeclKey { scope: scope, path: path }, declaration: declaration, member: member }
 
+fn located_entry(scope: ModuleKey, path: List[Part], declaration: Int, member: Option[Int],
+  lo: Int, hi: Int) -> Located =
+  Located { entry: entry(scope, path, declaration, member), span: Span { lo: lo, hi: hi } }
+
 ## Imports are environment inputs rather than independently checked bodies.
 ## Reordering an unambiguous declaration changes only its syntax locator.
-pub fn declarations(scope: ModuleKey, m: Module) -> List[Entry] = {
-  var all: List[Entry] = []
+##
+## Spans come off the same syntax node as the key, so they are collected here
+## rather than by a second walk: a separate pass would read the tree twice and
+## could disagree with this one about which declarations survive.
+pub fn located(scope: ModuleKey, m: Module) -> List[Located] = {
+  var all: List[Located] = []
   var i = 0
   for d in m.decls {
     match d {
       DFn(f) -> {
         let path = [Named(FunctionDecl, f.name)]
-        all = all ++ [entry(scope, path, i, None)]
+        all = all ++ [located_entry(scope, path, i, None, f.lo, f.hi)]
         var p = 0
         for param in f.params {
           var same = 0
           for other in f.params { if other.name == param.name { same = same + 1 } }
-          if param.default != None && same == 1 {
-            all = all ++ [entry(scope, path ++ [Named(ParameterDefault, param.name)], i, Some(p))]
+          if same == 1 {
+            match param.default {
+              ## A parameter's own span is its name token, so the default
+              ## expression is the whole of what this entry owns.
+              Some(dflt) -> {
+                all = all ++ [located_entry(scope, path ++ [Named(ParameterDefault, param.name)], i, Some(p),
+                  e_lo(dflt), e_hi(dflt))]
+              }
+              None -> ()
+            }
           }
           p = p + 1
         }
       }
       DType(t) -> {
         let path = [Named(TypeDecl, t.name)]
-        all = all ++ [entry(scope, path, i, None)]
+        all = all ++ [located_entry(scope, path, i, None, t.lo, t.hi)]
         var c = 0
         for ctor in t.ctors {
-          all = all ++ [entry(scope, path ++ [Named(ConstructorDecl, ctor.name)], i, Some(c))]
+          all = all ++ [located_entry(scope, path ++ [Named(ConstructorDecl, ctor.name)], i, Some(c), ctor.lo, ctor.hi)]
           c = c + 1
         }
       }
-      DTrait(name, _, _, _, methods, associated, effect_members, _, _, _, _, _) -> {
+      DTrait(name, _, _, _, methods, associated, effect_members, _, lo, hi, _, _) -> {
         let path = [Named(TraitDecl, name)]
-        all = all ++ [entry(scope, path, i, None)]
+        all = all ++ [located_entry(scope, path, i, None, lo, hi)]
         var j = 0
         for method in methods {
-          all = all ++ [entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j), method.lo, method.hi)]
           j = j + 1
         }
         j = 0
         for member in associated {
-          all = all ++ [entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j),
+            member.lo, member.hi)]
           j = j + 1
         }
         j = 0
         for member in effect_members {
-          all = all ++ [entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j),
+            member.lo, member.hi)]
           j = j + 1
         }
       }
       DEffect(e) -> {
         let path = [Named(EffectDecl, e.name)]
-        all = all ++ [entry(scope, path, i, None)]
+        all = all ++ [located_entry(scope, path, i, None, e.lo, e.hi)]
         var j = 0
         for op in e.ops {
-          all = all ++ [entry(scope, path ++ [Named(OperationDecl, op.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(OperationDecl, op.name)], i, Some(j), op.lo, op.hi)]
           j = j + 1
         }
       }
-      DConst(name, _, _, _, _, _, _, _) -> { all = all ++ [entry(scope, [Named(ConstDecl, name)], i, None)] }
-      DTest(name, _, _, _, _, _) -> { all = all ++ [entry(scope, [Named(TestDecl, name)], i, None)] }
-      DImpl(params, trait_name, _, _, subject, methods, associated, effect_members, _, _) -> {
+      DConst(name, _, _, _, lo, hi, _, _) -> {
+        all = all ++ [located_entry(scope, [Named(ConstDecl, name)], i, None, lo, hi)]
+      }
+      DTest(name, _, lo, hi, _, _) -> {
+        all = all ++ [located_entry(scope, [Named(TestDecl, name)], i, None, lo, hi)]
+      }
+      DImpl(params, trait_name, _, _, subject, methods, associated, effect_members, lo, hi) -> {
         let path = [ImplHead(trait_name, type_shape(subject, map(params, p => p.name)))]
-        all = all ++ [entry(scope, path, i, None)]
+        all = all ++ [located_entry(scope, path, i, None, lo, hi)]
         var j = 0
         for method in methods {
-          all = all ++ [entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(MethodDecl, method.name)], i, Some(j), method.lo, method.hi)]
           j = j + 1
         }
         j = 0
         for member in associated {
-          all = all ++ [entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(AssociatedTypeDecl, member.name)], i, Some(j),
+            member.lo, member.hi)]
           j = j + 1
         }
         j = 0
         for member in effect_members {
-          all = all ++ [entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j))]
+          all = all ++ [located_entry(scope, path ++ [Named(AssociatedEffectDecl, member.name)], i, Some(j),
+            member.lo, member.hi)]
           j = j + 1
         }
       }
@@ -177,19 +216,38 @@ pub fn declarations(scope: ModuleKey, m: Module) -> List[Entry] = {
     i = i + 1
   }
   var counts: Map[List[Part], Int] = map.empty()
-  for e in all { counts = map.insert(counts, e.key.path, map.get(counts, e.key.path).unwrap_or(0) + 1) }
-  var out: List[Entry] = []
+  for e in all {
+    counts = map.insert(counts, e.entry.key.path, map.get(counts, e.entry.key.path).unwrap_or(0) + 1)
+  }
+  var out: List[Located] = []
   for e in all {
     var unique = true
     var depth = 1
-    while depth <= len(e.key.path) {
-      if map.get(counts, list.take(e.key.path, depth)) != Some(1) { unique = false }
+    while depth <= len(e.entry.key.path) {
+      if map.get(counts, list.take(e.entry.key.path, depth)) != Some(1) { unique = false }
       depth = depth + 1
     }
     if unique { out = out ++ [e] }
   }
   out
 }
+
+pub fn declarations(scope: ModuleKey, m: Module) -> List[Entry] =
+  map(located(scope, m), l => l.entry)
+
+## One revision's position view. A key a duplicate parent poisons is absent
+## here for the same reason it is absent from `declarations`: the view never
+## picks one of two declarations that claim the same key.
+pub fn spans_of(ls: List[Located]) -> DeclSpans = {
+  var out: Map[DeclKey, Span] = map.empty()
+  for l in ls { out = map.insert(out, l.entry.key, l.span) }
+  DeclSpans { spans: out }
+}
+
+pub fn declaration_spans(scope: ModuleKey, m: Module) -> DeclSpans =
+  spans_of(located(scope, m))
+
+pub fn span_of(view: DeclSpans, key: DeclKey) -> Option[Span] = map.get(view.spans, key)
 
 test "identity removes positions and normalizes impl type binders" {
   let a = TNamed("List", [TNamed("T", [], [], 5, 6)], [], 0, 7)
@@ -202,11 +260,14 @@ test "identity removes positions and normalizes impl type binders" {
 fn fixture_scope() -> ModuleKey =
   ModuleKey { world: "session", logical_module: "pkg/m", emission_owner: "pkg/m", source: "m.dawn" }
 
-fn fixture_entries(source: String) -> List[Entry] = {
+fn fixture_module(source: String) -> Module = {
   let (m, ds) = parser.parse_module(source)
   if len(ds) != 0 { panic("identity fixture parse failed: " ++ ds[0].msg) }
-  declarations(fixture_scope(), m)
+  m
 }
+
+fn fixture_entries(source: String) -> List[Entry] =
+  declarations(fixture_scope(), fixture_module(source))
 
 fn named_key(es: List[Entry], path: List[Part]) -> Option[DeclKey] = {
   for e in es { if e.key.path == path { return Some(e.key) } }
@@ -282,4 +343,91 @@ test "identity indexes associated declarations and bindings under their own pare
   let duplicated = fixture_entries("trait P[T] { type Item\n type Item\n effect E\n fn value(x: T) -> Int }\n")
   assert named_key(duplicated, trait_path ++ [Named(AssociatedTypeDecl, "Item")]) == None
   assert named_key(duplicated, trait_path ++ [Named(AssociatedEffectDecl, "E")]) != None
+}
+
+fn fixture_spans(source: String) -> DeclSpans =
+  declaration_spans(fixture_scope(), fixture_module(source))
+
+fn fixture_key(path: List[Part]) -> DeclKey = DeclKey { scope: fixture_scope(), path: path }
+
+fn span_text(source: String, view: DeclSpans, path: List[Part]) -> Option[String] =
+  match span_of(view, fixture_key(path)) {
+    Some(sp) -> Some(str.slice(source, sp.lo, sp.hi))
+    None -> None
+  }
+
+fn encloses(outer: Span, inner: Span) -> Bool = outer.lo < inner.lo && inner.hi <= outer.hi
+
+test "declaration spans slice the revision they were read from" {
+  let source = "## doc\nfn f() -> Int = 1\ntype Choice = Item(value: Int) | Empty\nconst K: Int = 7\n"
+  let view = fixture_spans(source)
+  assert span_text(source, view, [Named(FunctionDecl, "f")]) == Some("fn f() -> Int = 1")
+  assert span_text(source, view, [Named(TypeDecl, "Choice")]) == Some("type Choice = Item(value: Int) | Empty")
+  assert span_text(source, view, [Named(ConstDecl, "K")]) == Some("const K: Int = 7")
+  assert span_of(view, fixture_key([Named(FunctionDecl, "absent")])) == None
+  assert span_of(view, fixture_key([Named(FunctionDecl, "f")])).expect("f is declared once").lo ==
+    str.index_of(source, "fn f").expect("f is in the source")
+}
+
+test "a reorder keeps the keys and moves their spans" {
+  let old = "fn f(x: Int = 1) -> Int = x\nfn g() -> Int = 2\n"
+  let next = "# moved\nfn g() -> Int = 2\nfn f(x: Int = 1) -> Int = x\n"
+  let f = [Named(FunctionDecl, "f")]
+  let g = [Named(FunctionDecl, "g")]
+  let dflt = f ++ [Named(ParameterDefault, "x")]
+  let old_view = fixture_spans(old)
+  let next_view = fixture_spans(next)
+  let old_keys = map(located(fixture_scope(), fixture_module(old)), l => l.entry.key)
+  let next_keys = map(located(fixture_scope(), fixture_module(next)), l => l.entry.key)
+  assert len(old_keys) == len(next_keys)
+  for k in old_keys { assert list.contains(next_keys, k) }
+  assert span_of(old_view, fixture_key(f)) != span_of(next_view, fixture_key(f))
+  assert span_of(old_view, fixture_key(g)) != span_of(next_view, fixture_key(g))
+  assert span_text(old, old_view, f) == span_text(next, next_view, f)
+  assert span_text(old, old_view, g) == span_text(next, next_view, g)
+  # A parameter's span is its name token, so the default's own syntax is what
+  # the entry for it points at.
+  assert span_text(old, old_view, dflt) == Some("1")
+  assert span_text(next, next_view, dflt) == Some("1")
+  assert span_of(old_view, fixture_key(dflt)) != span_of(next_view, fixture_key(dflt))
+}
+
+test "a duplicated declaration is absent from the view rather than picking one" {
+  let source = "fn f() -> Int = 1\nfn f() -> Int = 2\nfn g() -> Int = 3\n"
+  let view = fixture_spans(source)
+  assert span_of(view, fixture_key([Named(FunctionDecl, "f")])) == None
+  assert span_text(source, view, [Named(FunctionDecl, "g")]) == Some("fn g() -> Int = 3")
+  let poisoned = fixture_spans("effect Ask { fn a() -> Int }\neffect Ask { fn b() -> Int }\n")
+  assert span_of(poisoned, fixture_key([Named(EffectDecl, "Ask")])) == None
+  assert span_of(poisoned, fixture_key([Named(EffectDecl, "Ask"), Named(OperationDecl, "a")])) == None
+}
+
+test "a member span sits inside the span of the declaration that owns it" {
+  let source = "type Choice = Item(value: Int) | Empty\n" ++
+    "trait P[T] { type Item\n effect E\n fn value(x: T) -> Int }\n" ++
+    "impl P[Int] { type Item = Int\n effect E = !()\n fn value(x: Int) -> Int = x }\n" ++
+    "effect Ask { fn ask() -> Int }\n"
+  let view = fixture_spans(source)
+  let choice = [Named(TypeDecl, "Choice")]
+  let trait_path = [Named(TraitDecl, "P")]
+  let impl_path = [ImplHead("P", NamedType("Int", [], []))]
+  let ask = [Named(EffectDecl, "Ask")]
+  let pairs = [
+    (choice, choice ++ [Named(ConstructorDecl, "Item")]),
+    (trait_path, trait_path ++ [Named(MethodDecl, "value")]),
+    (trait_path, trait_path ++ [Named(AssociatedTypeDecl, "Item")]),
+    (trait_path, trait_path ++ [Named(AssociatedEffectDecl, "E")]),
+    (impl_path, impl_path ++ [Named(MethodDecl, "value")]),
+    (impl_path, impl_path ++ [Named(AssociatedTypeDecl, "Item")]),
+    (impl_path, impl_path ++ [Named(AssociatedEffectDecl, "E")]),
+    (ask, ask ++ [Named(OperationDecl, "ask")])
+  ]
+  for pair in pairs {
+    let (parent, member) = pair
+    let outer = span_of(view, fixture_key(parent)).expect("parent is declared once")
+    let inner = span_of(view, fixture_key(member)).expect("member is declared once")
+    assert encloses(outer, inner)
+  }
+  assert span_text(source, view, choice ++ [Named(ConstructorDecl, "Item")]) == Some("Item(value: Int)")
+  assert span_text(source, view, ask ++ [Named(OperationDecl, "ask")]) == Some("fn ask() -> Int")
 }
