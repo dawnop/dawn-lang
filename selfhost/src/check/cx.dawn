@@ -12,7 +12,7 @@ use std/list
 use std/map
 use std/set
 use check/write_journal
-use front/token.{Diag}
+use front/token.{Diag, DiagOwner}
 use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
   Adts, AdtI, CtorI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
@@ -199,6 +199,19 @@ pub type Cx = {
   is_std_module: Bool,
   owner_class: Option[String],
   src_path: Option[String],
+  # the resolved module path this context is checking, which is how a
+  # diagnostic names the view its owner is looked up in. Only the driver can
+  # answer it, and a context built by hand has no module to be part of, so it
+  # enters no declaration and every diagnostic it raises stays absolute.
+  mod_path: Option[String],
+  # the declaration whose interior is being checked, and where it starts.
+  # `cerr` subtracts that start, so a diagnostic raised inside a declaration
+  # is recorded relative to it and stays valid when the declaration moves.
+  # Both are unset outside a declaration this module's span view can name,
+  # and a diagnostic raised there keeps absolute positions rather than being
+  # measured from a base nothing can recover.
+  owner: Option[DiagOwner],
+  owner_lo: Int,
   # code-point offsets of line starts in the current source (set by the driver)
   line_starts: List[Int],
   # removed-name → where-it-went hints (populated by the std loader)
@@ -359,6 +372,9 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     is_std_module: is_std,
     owner_class: owner_class,
     src_path: src_path,
+    mod_path: None,
+    owner: None,
+    owner_lo: 0,
     line_starts: [],
     moved: map.empty(),
     module_exports: map.empty(),
@@ -434,11 +450,30 @@ pub fn test_cx() -> Cx = cx_new(None, None)
 
 # ---- diagnostics ----
 
+## Bind the declaration whose interior is about to be checked. `start` is that
+## declaration's own position in this revision, which the caller has from the
+## module's span view; a declaration the view cannot name (a duplicate, say)
+## has no start to measure from, and `unowned` is the answer for it.
+pub fn owned_by(cx: Cx, module: String, decl: String, start: Int) -> Cx =
+  Cx { ..cx, owner: Some(DiagOwner { module: module, decl: decl }), owner_lo: start }
+
+pub fn unowned(cx: Cx) -> Cx = Cx { ..cx, owner: None, owner_lo: 0 }
+
+## The one constructor: every checker diagnostic is measured against the
+## declaration that owns it when there is one, and left absolute when there
+## is not.
+fn raised(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Diag =
+  match cx.owner {
+    Some(owner) ->
+      Diag { msg: msg, lo: lo - cx.owner_lo, hi: hi - cx.owner_lo, hint: hint, owner: Some(owner) }
+    None -> Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None }
+  }
+
 pub fn cerr(cx: Cx, msg: String, lo: Int, hi: Int) -> Cx =
-  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: "" }] }
+  Cx { ..cx, diags: cx.diags ++ [raised(cx, msg, lo, hi, "")] }
 
 pub fn cerr_h(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Cx =
-  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: hint }] }
+  Cx { ..cx, diags: cx.diags ++ [raised(cx, msg, lo, hi, hint)] }
 
 ## An error with an optional hint (the Kotlin `sink.error(msg, span, hint?)`).
 pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx =

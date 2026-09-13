@@ -43,6 +43,13 @@ fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
 ## Render one diagnostic against its source text (label is always `error`:
 ## the Kotlin sink's warn() has no call sites, so the selfhost Diag carries
 ## no severity).
+##
+## Every entry here wants `d.lo`/`d.hi` in positions of `text`. A diagnostic
+## the checker raised inside a declaration carries offsets from that
+## declaration instead, and the caller is the one holding the span view that
+## turns those back into positions, so the caller resolves through
+## `check/identity.absolute` before handing one here. This module stays below
+## the checker and does not reach for that view itself.
 pub fn render(path: String, text: String, d: Diag) -> String =
   render_at(path, view_of(text), line_starts_of(text), d)
 
@@ -113,7 +120,7 @@ pub fn render_all(diags: List[(String, Diag)]) -> String !Fs = {
 
 test "renders the arrow, source line, caret and hint" {
   let text = "fn f() -> Int = true\n"
-  let d = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "return an Int" }
+  let d = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "return an Int", owner: None }
   let r = render("a.dawn", text, d)
   assert r ==
     "error: type mismatch\n" ++
@@ -127,7 +134,7 @@ test "renders the arrow, source line, caret and hint" {
 test "caret clamps to the line and to one unit minimum" {
   let text = "ab\ncd\n"
   # zero-width span at end of line 2 -> single caret past the text
-  let d = Diag { msg: "m", lo: 5, hi: 5, hint: "" }
+  let d = Diag { msg: "m", lo: 5, hi: 5, hint: "", owner: None }
   let r = render("x", text, d)
   assert r == "error: m\n  --> x:2:3\n  |\n2 | cd\n  |   ^\n"
 }
@@ -140,7 +147,7 @@ test "count line pluralizes" {
 test "columns count code points, not utf-16 units" {
   # 🎈 is one code point (two UTF-16 units); `b` is at code-point column 3, so
   # the arrow reads :1:3 (a UTF-16 renderer would wrongly say :1:4).
-  let d = Diag { msg: "here", lo: 2, hi: 3, hint: "" }
+  let d = Diag { msg: "here", lo: 2, hi: 3, hint: "", owner: None }
   let r = render("a.dawn", "a🎈b", d)
   assert str.contains(r, "--> a.dawn:1:3")
   assert str.contains(r, "a🎈b")

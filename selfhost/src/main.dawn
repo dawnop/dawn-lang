@@ -30,7 +30,7 @@ use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
-  analyze_program
+  analyze_program, rendered_diags
 }
 use compiler_plan/source
 use pkg/vendor
@@ -303,7 +303,7 @@ fn collect_program(
           load_target(std, target)
         }
       let prog = analyze_program(loaded, std, opts, jsig_real())
-      if len(prog.diags) > 0 { fail_compile(prog.diags) }
+      if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
       mods = prog.modules
     }
     for cm in mods {
@@ -930,7 +930,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   for ld in ds {
     out = out ++ [LocDiag {
       path: ld.path,
-      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint }
+      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint, owner: None }
     }]
   }
   out
@@ -1172,7 +1172,8 @@ fn lsp_lease_problem(path: String, message: String) -> LocDiag =
     msg: message,
     lo: 0,
     hi: 0,
-    hint: "save to retry lock or transient setup failures; after changing dawn.toml, close every document in this project and reopen one to capture a fresh plan"
+    hint: "save to retry lock or transient setup failures; after changing dawn.toml, close every document in this project and reopen one to capture a fresh plan",
+    owner: None
   } }
 
 ## The lease is taken from a frame that does not otherwise touch the file
@@ -2073,7 +2074,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return
     }
   }
-  if len(prog.diags) > 0 { fail_doc(prog.diags) }
+  if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
   console_print(doc.project_json(prog))
 }
 
@@ -2111,7 +2112,7 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let t = targets[0]
   let loaded = load_target(std, t)
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
-  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   let (adts, traits, impl_table, prog_fns) = cdriver.program_tables(std, prog.modules)
 
   # `--dump` writes one .core per module next to the coverage count. The
@@ -2258,7 +2259,7 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let t = target
   let loaded = load_target(std, t)
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
-  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   let text = match cdriver.c_text(std, prog) {
     Ok(s) -> s
     Err(e) -> return cli_error(e ++ " in " ++ t)
@@ -2334,7 +2335,7 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
           Ok(plan) -> {
             let loaded = load_planned(plan)
             match analyze_target_scoped(plan, loaded, std) {
-              Ok(prog) -> { all = all ++ prog.diags }
+              Ok(prog) -> { all = all ++ rendered_diags(prog) }
               Err(e) -> return fail_target_setup(e)
             }
           }

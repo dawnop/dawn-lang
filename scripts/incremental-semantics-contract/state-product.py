@@ -61,7 +61,14 @@ def main():
         ("environment-size", "map.len(a) == map.len(b) && map.fold", "map.fold"),
         ("allocation-start", "current.next_id != product.allocation_start", "false"),
         ("unobserved-allocation", "while id < old_limit", "while false"),
-        ("diagnostic-span", "Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }", "d"),
+        # An owned diagnostic is measured from its declaration, so it rebases
+        # through the owner rather than moving like an absolute position, and
+        # what the rebase moves is whatever the declaration's interior moved.
+        ("diagnostic-owner",
+         "Some(_) -> Diag { ..d, lo: v.positions(v.owner_start + d.lo)? - v.next_owner_start,\n"
+         "        hi: v.ends(v.owner_start + d.hi)? - v.next_owner_start }",
+         "Some(_) -> Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }"),
+        ("diagnostic-span", "hi: v.ends(v.owner_start + d.hi)? - v.next_owner_start", "hi: d.hi"),
         ("bound-domain", "out = out ++ [relocate.trait_id(v.ids, tr)?]", "out = out ++ [tr]"),
         ("used-effect-domain", "used = used ++ [relocate.effect_row(v.ids, e)?]", "used = used ++ [e]"),
         ("handler-cell", "Some(cell) -> Some(relocate.local_id(v.ids, cell)?)", "Some(cell) -> Some(cell)"),

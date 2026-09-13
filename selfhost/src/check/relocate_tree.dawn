@@ -131,6 +131,14 @@ pub fn scanned_callee_signature(cx: Cx, owner: Option[String], name: String,
 ## A missing boundary, symbol or declaration invalidates the saved product.
 pub type View = {
   ids: Ids,
+  # Where the declaration this view moves starts, in the revision the product
+  # was recorded from and in the one it is being installed into. Absolute
+  # positions go through `positions`/`ends`; positions already relative to the
+  # declaration (a diagnostic's) are rebased through the same two tables and
+  # this pair, which makes them unchanged exactly when the declaration moved
+  # without its interior moving.
+  owner_start: Int,
+  next_owner_start: Int,
   positions: fn(Int) -> Option[Int],
   ends: fn(Int) -> Option[Int],
   assertion: fn(Option[String], Int, Int) -> Option[Option[String]],
@@ -617,7 +625,8 @@ fn fixture_view() -> View = {
     map.insert(swap, 0, 0), swap, map.insert(map.insert(empty, 1, 91), 2, 92)).expect("valid fixture IDs")
   let symbol = Sym { name: "x", ty: TyInt, mutable: false, dlo: 10, dhi: 11,
     dict_of: None, ev_of: None, cell_of: None }
-  View { ids: ids, positions: from_map(map.insert(map.insert(empty, 10, 110), 11, 115)),
+  View { ids: ids, owner_start: 10, next_owner_start: 110,
+    positions: from_map(map.insert(map.insert(empty, 10, 110), 11, 115)),
     ends: from_map(map.insert(map.insert(empty, 10, 110), 11, 115)), assertion: (src, lo, hi) => Some(src),
     symbols: map.insert(map.empty(), 1, symbol), callee: (owner, name, builtin, tr) => Some(fixture_signature()) }
 }

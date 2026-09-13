@@ -104,8 +104,23 @@ pub type Token = {
   segs: List[Seg]
 }
 
+## Which declaration a diagnostic's positions are measured from. The
+## declaration is named by the module path the analysis resolved and by the
+## text of its `check/identity` path rather than by a `DeclKey` value: a lexer
+## diagnostic has to be constructible here, and this module sits below the
+## checker that owns those keys.
+pub type DiagOwner = { module: String, decl: String }
+
 ## One diagnostic. `hint` is empty when there is none.
-pub type Diag = { msg: String, lo: Int, hi: Int, hint: String }
+##
+## `lo` and `hi` are absolute code-point offsets while `owner` is None, and
+## offsets from the owning declaration's start once it is Some. A diagnostic
+## raised inside a declaration therefore survives an edit that moves the
+## declaration without changing its text, which is what lets a reused body
+## product keep its diagnostics rather than reprojecting them. Exactly one
+## function turns the pair back into positions in the revision being rendered
+## (`check/identity.absolute`); no other reader may read `lo`/`hi` without it.
+pub type Diag = { msg: String, lo: Int, hi: Int, hint: String, owner: Option[DiagOwner] }
 
 ## The Kotlin TokenType enum spelling, the vocabulary of the golden lex dump.
 pub fn kind_name(k: TokKind) -> String =

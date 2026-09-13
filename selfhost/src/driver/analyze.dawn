@@ -173,7 +173,7 @@ fn walk_dawn(dir: String) -> List[String] !Fs = {
 }
 
 fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
-  LocDiag { path: path, d: Diag { msg: msg, lo: 0, hi: 0, hint: hint } }
+  LocDiag { path: path, d: Diag { msg: msg, lo: 0, hi: 0, hint: hint, owner: None } }
 
 # Planner diagnostics use a package-local record to keep this frontend out of
 # compiler_plan's dependency graph. Convert only where loading adopts them.
@@ -182,7 +182,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   for ld in ds {
     out = out ++ [LocDiag {
       path: ld.path,
-      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint }
+      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint, owner: None }
     }]
   }
   out
@@ -454,7 +454,8 @@ fn resolve(
               msg: "invalid module path segment `" ++ b ++ "`",
               lo: u.nlo,
               hi: u.nhi,
-              hint: "path segments are lowercase identifiers: [a-z_][a-z0-9_]*"
+              hint: "path segments are lowercase identifiers: [a-z_][a-z0-9_]*",
+              owner: None
             } }]
             continue
           }
@@ -499,7 +500,8 @@ fn resolve(
                       "` is both a [deps] package and a local module path",
                     lo: u.nlo,
                     hi: u.nhi,
-                    hint: "rename the src/" ++ u.segs[0] ++ "/ directory or the dependency alias"
+                    hint: "rename the src/" ++ u.segs[0] ++ "/ directory or the dependency alias",
+                    owner: None
                   } }]
                   edge_ok = false
                 } else if len(u.segs) == 1 {
@@ -507,7 +509,8 @@ fn resolve(
                     msg: "cannot import the package `" ++ u.segs[0] ++ "` itself",
                     lo: u.nlo,
                     hi: u.nhi,
-                    hint: "import one of its modules: `use " ++ u.segs[0] ++ "/<module>`"
+                    hint: "import one of its modules: `use " ++ u.segs[0] ++ "/<module>`",
+                    owner: None
                   } }]
                   edge_ok = false
                 } else {
@@ -562,7 +565,8 @@ fn resolve(
                 msg: "cannot find module `" ++ u.path ++ "`",
                 lo: u.nlo,
                 hi: u.nhi,
-                hint: "expected a file at ${dep_file}"
+                hint: "expected a file at ${dep_file}",
+                owner: None
               } }]
             }
           }
@@ -582,7 +586,8 @@ fn resolve(
         msg: "the module path `" ++ mp ++ "` is reserved for the bundled standard library",
         lo: 0,
         hi: 0,
-        hint: "move the file out of src/std"
+        hint: "move the file out of src/std",
+        owner: None
       } }]
     }
   }
@@ -609,7 +614,8 @@ fn resolve(
             msg: "module `" ++ u.path ++ "` is imported more than once",
             lo: u.nlo,
             hi: u.nhi,
-            hint: ""
+            hint: "",
+            owner: None
           } }]
         }
         seen = set.insert(seen, (u.path, sel))
@@ -683,7 +689,8 @@ fn topo_sort(
                 msg: "circular module dependency: ${join(names, " → ")}",
                 lo: ulo,
                 hi: uhi,
-                hint: "modules must form a directed acyclic graph (spec §10.5)"
+                hint: "modules must form a directed acyclic graph (spec §10.5)",
+                owner: None
               } }]
             }
           }
@@ -710,7 +717,22 @@ pub type CheckedMod = {
   ct: CtOut
 }
 
-pub type Program = { modules: List[CheckedMod], diags: List[LocDiag] }
+## The program plus the position view of the revision it was analyzed from.
+## A diagnostic raised inside a declaration carries an offset from that
+## declaration, so nothing may render `diags` without this map; `rendered_diags`
+## is the only reader that puts the two together.
+pub type Program = { modules: List[CheckedMod], diags: List[LocDiag], decl_spans: Map[String, identity.DeclSpans] }
+
+## Every diagnostic of this program in absolute positions of this revision.
+## Reached from each render site rather than from program assembly on purpose:
+## a session hands back diagnostics that a reused step produced against an
+## older layout, and only the program being rendered knows where their
+## declarations sit now.
+pub fn rendered_diags(prog: Program) -> List[LocDiag] = {
+  var out: List[LocDiag] = []
+  for ld in prog.diags { out = out ++ [LocDiag { ..ld, d: identity.absolute(prog.decl_spans, ld.d) }] }
+  out
+}
 
 ## All state that advances between modules, including failed ones. An impl
 ## is program-wide, not activated by an import; ids must keep their original
@@ -848,7 +870,7 @@ pub fn analyze_observed(
     diags = diags ++ step.diags
     out = out ++ [step.checked]
   }
-  Program { modules: out, diags: diags }
+  Program { modules: out, diags: diags, decl_spans: carry.decl_spans }
 }
 
 ## One exact transition of the original loop. Even a parse failure publishes
@@ -884,10 +906,9 @@ fn module_step_with_recording(
   let (mf, is_std) = std_identity(std, mf0)
   # Built on the cold path too: one code path is worth more than the fraction
   # of a percent it costs, and a renderer cannot ask for a view that only the
-  # session mode builds. The world label is the enclosing analysis owner's,
-  # which a cold run does not name; `cold` is that run's own label.
-  let spans = identity.declaration_spans(
-    module_key(analysis_world(before), mf.mod_path, mf.class_name, mf.path), mf.m)
+  # session mode builds. It names no analysis owner, so the same revision
+  # answers the same way whoever analyzed it.
+  let spans = identity.declaration_spans(mf.m)
   analysis_event(observer, mf.mod_path, AnalyzeModule, true)
   for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
   let parse_failed = len(mf.pdiags) > 0
@@ -911,6 +932,8 @@ fn module_step_with_recording(
     std_fns: std.std_fns,
     moved: std.moved,
     line_starts: lexer.line_starts_of(mf.text),
+    # names the span view a diagnostic raised in this module resolves against
+    mod_path: Some(mf.mod_path),
     next_id: before.next_id,
     # std's impls are part of the baseline, not something `use` turns on --
     # and neither are the ones the modules before this got to

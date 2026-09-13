@@ -20,6 +20,7 @@ use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, error_text}
 use json/render.{render}
 use driver/analyze.{
   Program, ProjectPlan, LocDiag,
+  rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
   project_module_path, load_entries_over, canon
 }
@@ -1269,7 +1270,9 @@ fn diagnostics_of_program(
   prog: Program
 ) -> Map[String, List[Json]] !Fs !Env = {
   var out: Map[String, List[Json]] = map.empty()
-  for ld in prog.diags { out = add_loc_diag(st, path_by_uri, out, ld) }
+  # Positions go out to the editor, so they are resolved against the program
+  # being published rather than against whatever revision produced them.
+  for ld in rendered_diags(prog) { out = add_loc_diag(st, path_by_uri, out, ld) }
   out
 }
 
@@ -1325,7 +1328,8 @@ fn conflict_diagnostics(
     msg: "multiple open documents resolve to the same file with different text",
     lo: 0,
     hi: 0,
-    hint: "close one duplicate URI or make their contents identical"
+    hint: "close one duplicate URI or make their contents identical",
+    owner: None
   }
   for uri in sort(map.keys(path_by_uri)) {
     let path = map.get(path_by_uri, uri).expect("workspace path")
@@ -1440,7 +1444,7 @@ fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
 
 fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env = {
   var out: List[Json] = []
-  for ld in prog.diags {
+  for ld in rendered_diags(prog) {
     let own = match d.canonical_path {
       Some(path) -> canon(ld.path) == path
       None -> true

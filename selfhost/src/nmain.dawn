@@ -24,6 +24,7 @@
 # gives that program under `check`. `scripts/selfhost-lsp-diff.sh` takes
 # DAWN_SELF and runs the whole scripted session against this binary.
 
+use std/map
 use std/io
 use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
@@ -33,7 +34,8 @@ use front/diag
 use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease, refused_probe}
-use driver/analyze.{Program, LocDiag, load_file, load_target, analyze_program}
+use driver/analyze.{Program, LocDiag, load_file, load_target, analyze_program, rendered_diags}
+use check/identity
 use check/tast.{TModule}
 use c/cdriver
 use version.{VERSION}
@@ -351,7 +353,7 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Consol
   }
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
-  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   prog
 }
 
@@ -630,7 +632,7 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   for target in targets {
     let loaded = load_target(std, target)
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
-    all = all ++ prog.diags
+    all = all ++ rendered_diags(prog)
   }
   if len(all) > 0 { return fail_compile(all) }
   console_println("ok")
@@ -854,7 +856,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
-  if len(prog.diags) > 0 { fail_doc(prog.diags) }
+  if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
   console_print(doc.project_json(prog))
 }
 
@@ -922,7 +924,8 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
   let std = load_or_die(std_dir)
-  let prog = if std_tests { Program { modules: [], diags: [] } } else { analyzed(std, target) }
+  let no_spans: Map[String, identity.DeclSpans] = map.empty()
+  let prog = if std_tests { Program { modules: [], diags: [], decl_spans: no_spans } } else { analyzed(std, target) }
   # the modules whose test blocks are being run: the target's, or std's own
   # under --stdlib
   var suite: List[(String, String, TModule)] = []

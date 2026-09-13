@@ -9,7 +9,7 @@ use std/set
 use check/cx.{Cx, Frame, cx_new, write_symbol, write_signature, write_alias, write_bounds}
 use check/types.{Sig, Sym, Ty, Eff, CtorI, FieldI, EffectI, AWorld, TyInt, TyUnit, TyVar, TyAdt, TyList, TyAssoc, TyFn, EPure, EffVar, EUnion, ELabeled, BuiltinTypeI, BtStdOnly, BtLeaf}
 use check/tast.{TFun, TConst, XUnit, XLocal}
-use front/token.{Diag}
+use front/token.{Diag, DiagOwner}
 use front/ast.{TypeRef, TNamed}
 use check/relocate
 use check/relocate.{Ids}
@@ -104,6 +104,7 @@ fn environment_unchanged(a: Cx, b: Cx, tracked: Bool) -> Bool =
   environment_map_same(a.consts, b.consts, tracked) && a.const_order == b.const_order && a.all_const_names == b.all_const_names &&
   environment_map_same(a.java_classes, b.java_classes, tracked) && environment_map_same(a.effects, b.effects, tracked) && environment_map_same(a.effect_infos, b.effect_infos, tracked) &&
   a.is_std_module == b.is_std_module && a.owner_class == b.owner_class &&
+  a.mod_path == b.mod_path && a.owner == b.owner && a.owner_lo == b.owner_lo &&
   a.src_path == b.src_path && a.line_starts == b.line_starts && environment_map_same(a.moved, b.moved, tracked) &&
   environment_map_same(a.module_exports, b.module_exports, tracked) && environment_map_same(a.ty_spans, b.ty_spans, tracked) && a.record_ty_spans == b.record_ty_spans
 
@@ -351,9 +352,21 @@ fn project_body[T](v: View, p: BodyProduct[T], allocation_start: Int,
   let signatures = projected_changes(p.signatures, name => Some(name), s => relocate.signature(v.ids, s))?
   let aliases = projected_changes(p.aliases, name => Some(name), t => relocate.ty(v.ids, t))?
   let bounds = projected_changes(p.bounds, id => relocate.type_var(v.ids, id), bs => projected_bounds(v, bs))?
+  # An owned diagnostic's positions are offsets from the declaration that
+  # raised it, so a declaration that only moved leaves them alone: the rebase
+  # is the identity there, and the render sites add the declaration's start in
+  # whichever revision they are rendering. An edit inside the declaration
+  # moves its interior too, and the offsets go through the same token
+  # projection the tree does. A diagnostic with no owner is still in file
+  # coordinates and moves the way every other position in the tree moves.
   var diagnostics: List[Diag] = []
   for d in p.diagnostics {
-    diagnostics = diagnostics ++ [Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }]
+    let moved = match d.owner {
+      Some(_) -> Diag { ..d, lo: v.positions(v.owner_start + d.lo)? - v.next_owner_start,
+        hi: v.ends(v.owner_start + d.hi)? - v.next_owner_start }
+      None -> Diag { ..d, lo: v.positions(d.lo)?, hi: v.ends(d.hi)? }
+    }
+    diagnostics = diagnostics ++ [moved]
   }
   var tparams: Map[String, Ty] = map.empty()
   for (name, t) in map.entries(p.tparams) { tparams = map.insert(tparams, name, relocate.ty(v.ids, t)?) }
@@ -391,7 +404,8 @@ test "body product constants project their real tree and share state admission" 
   let saved = capture_constant(before, after, constant).expect("constant capture")
   let none: Map[Int, Int] = map.empty()
   let ids = relocate.new(none, none, map.from([(1, 2)]), none, map.from([(10, 40)])).expect("constant ids")
-  let v = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
+  let v = View { ids: ids, owner_start: 0, next_owner_start: 100,
+    positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => None }
   let moved = project_constant(v, saved, 40).expect("constant projection")
@@ -422,7 +436,8 @@ test "body product separates alias declaration positions from body positions" {
   let p = capture(before, after, f).expect("capture source read")
   let empty: Map[Int, Int] = map.empty()
   let ids = relocate.new(empty, empty, empty, empty, empty).expect("source fixture ids")
-  let view = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
+  let view = View { ids: ids, owner_start: 0, next_owner_start: 100,
+    positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let header = HeaderView { ids: ids,
@@ -451,7 +466,7 @@ test "body product captures state writes without retaining old cumulative tables
   let before = Cx { ..cx, current_tparam_bounds: map.from([(10, [20])]),
     frame: Frame { ..cx.frame, dict_syms: map.from([((10, 20), 30)]) } }
   let f = fixture_function(before)
-  let d = Diag { msg: "body", lo: 0, hi: 1, hint: "" }
+  let d = Diag { msg: "body", lo: 0, hi: 1, hint: "", owner: None }
   let after = Cx { ..before, next_id: before.next_id + 2,
     fns: map.insert(before.fns, "inferred", f.sig), alias_resolved: map.from([("Alias", TyInt)]),
     current_tparam_bounds: map.insert(before.current_tparam_bounds, 11, [21]),
@@ -529,7 +544,7 @@ test "body product journaled environment equality preserves membership and value
 
 test "body product rejects unowned writes and diagnostic prefix replacement" {
   let cx = cx_new(None, None)
-  let d = Diag { msg: "before", lo: 0, hi: 1, hint: "" }
+  let d = Diag { msg: "before", lo: 0, hi: 1, hint: "", owner: None }
   let before = Cx { ..cx, diags: [d] }
   let f = fixture_function(before)
   assert capture(before, Cx { ..before, effects: map.from([("New", 42)]) }, f) == None
@@ -549,7 +564,8 @@ test "body product restores symbol insertion order after a binding permutation" 
   let p = capture(before, after, f).expect("capture permutation")
   let none: Map[Int, Int] = map.empty()
   let ids = relocate.new(none, none, none, none, map.from([(10, 41), (11, 40)])).expect("swapped IDs")
-  let view = View { ids: ids, positions: from_map(map.from([(0, 0)])), ends: from_map(map.from([(1, 1)])),
+  let view = View { ids: ids, owner_start: 0, next_owner_start: 0,
+    positions: from_map(map.from([(0, 0)])), ends: from_map(map.from([(1, 1)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let projected = project(view, p, 40).expect("project permutation")
@@ -629,7 +645,7 @@ test "body product projects every state reference and the whole allocation inter
     alias_resolved: map.from([("Alias", TyVar("T", 1))]),
     current_tparams: map.from([("T", TyVar("T", 1))]), current_eff_vars: map.from([("e", EffVar("e", 3))]),
     current_tparam_bounds: map.from([(1, [2])]), take_cell: Some(10),
-    diags: [Diag { msg: "body", lo: 0, hi: 1, hint: "" }],
+    diags: [owned_diagnostic()],
     frame: Frame { ..before.frame, scopes: [map.from([("x", 10)])],
       current_sig: Some(Sig { ..f.sig, ret: TyVar("T", 1) }),
       dict_syms: map.from([((1, 2), 10)]), used_effects: [EffVar("e", 3)],
@@ -638,7 +654,8 @@ test "body product projects every state reference and the whole allocation inter
   let none: Map[Int, Int] = map.empty()
   let locals = map.from([(10, 40), (11, 41)])
   let ids = relocate.new(map.from([(4, 44), (3, 43)]), map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), locals).expect("projection ids")
-  let view = View { ids: ids, positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
+  let view = View { ids: ids, owner_start: 0, next_owner_start: 100,
+    positions: from_map(map.from([(0, 100)])), ends: from_map(map.from([(1, 104)])),
     assertion: (src, lo, hi) => Some(src), symbols: after.syms,
     callee: (owner, name, builtin, tr) => Some(f.sig) }
   let q = project(view, p, 40).expect("project product")
@@ -714,12 +731,28 @@ test "body product projects every state reference and the whole allocation inter
   assert cx.frame.current_sig == Some(Sig { ..f.sig, ret: TyVar("T", 11) })
   assert cx.frame.used_effects == [EffVar("e", 33)]
   assert cx.frame.eff_witness == map.from([(EffVar("e", 33), (100, 104, "callee"))])
-  assert cx.diags == [Diag { msg: "body", lo: 100, hi: 104, hint: "" }]
+  # The diagnostic stays measured from the declaration that raised it, and the
+  # render sites add that declaration's start in the revision they render. Its
+  # start is where the declaration starts, so it does not move; its end sits
+  # inside the declaration, which this fixture stretches, so the rebase moves
+  # it by exactly what the token projection says.
+  assert cx.diags == [Diag { ..owned_diagnostic(), lo: 0, hi: 4 }]
+  # One with no owner is in file coordinates and moves like the tree does.
+  let unowned_diagnostic = Diag { msg: "body", lo: 0, hi: 1, hint: "", owner: None }
+  assert project(view, BodyProduct { ..p, diagnostics: [unowned_diagnostic] }, 40)
+    .expect("unowned diagnostic projection").diagnostics ==
+    [Diag { ..unowned_diagnostic, lo: 100, hi: 104 }]
   assert project(View { ..view, ends: from_map(none) }, p, 40) == None
   let missing = relocate.new(none, map.from([(2, 22)]), map.from([(1, 11)]), map.from([(3, 33)]), map.from([(10, 40)])).expect("partial ids")
   assert project(View { ..view, ids: missing }, p, 40) == None
   assert project(view, p, 41) == None
 }
+
+## A diagnostic the way the checker records one inside a declaration: the
+## positions are offsets from that declaration, and the owner says which one.
+fn owned_diagnostic() -> Diag =
+  Diag { msg: "body", lo: 0, hi: 1, hint: "",
+    owner: Some(DiagOwner { module: "pkg/m", decl: "Nf4:body" }) }
 
 ## The relocation the two admission paths share, with every identity domain
 ## actually moved: a projection that forgot one would answer the same as a
@@ -734,7 +767,8 @@ fn fixture_read_relocation() -> Ids = {
 
 fn fixture_read_view(ids: Ids) -> View = {
   let empty: Map[Int, Int] = map.empty()
-  View { ids: ids, positions: from_map(empty), ends: from_map(empty),
+  View { ids: ids, owner_start: 0, next_owner_start: 0,
+    positions: from_map(empty), ends: from_map(empty),
     assertion: (src, lo, hi) => Some(src), symbols: map.empty(),
     callee: (owner, name, builtin, tr) => None }
 }

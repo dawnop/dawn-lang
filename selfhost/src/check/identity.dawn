@@ -6,6 +6,7 @@ use std/map
 use std/list
 use std/str
 use front/parser
+use front/token.{Diag, DiagOwner}
 use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava, e_lo, e_hi }
 
@@ -62,7 +63,14 @@ pub type Located = { entry: Entry, span: Span }
 ## it against this view at render or lower time, so an edit outside the
 ## declaration moves the answer without invalidating the declaration's own
 ## semantic product.
-pub type DeclSpans = { spans: Map[DeclKey, Span] }
+## Addressed by the text of the declaration's path rather than by the key
+## itself, for two reasons. A consumer below the checker cannot name a
+## `DeclKey` at all, which is the case a diagnostic is in. And a key's scope
+## names the analysis owner, so keeping it here would make one revision's
+## positions differ between a cold run and a session that analyzed the same
+## text. A path is unique inside a view because a view belongs to one module
+## and a repeated path is dropped from it.
+pub type DeclSpans = { by_path: Map[String, Span] }
 
 fn effect_atom(name: String, binders: List[String]) -> EffectShape = {
   let parts = str.split(name, ".")
@@ -103,6 +111,76 @@ pub fn type_shape(t: TypeRef, binders: List[String]) -> TypeShape =
     TAssoc(subject, name, _, _) -> AssociatedType(bare(subject, binders), name)
     TTuple(es, _, _) -> TupleType(shapes(es, binders))
     TFn(ps, ret, es, _, _) -> FunctionType(shapes(ps, binders), type_shape(ret, binders), effect_atoms(es, binders))
+  }
+
+## A declaration path written as text, injectively: every atom carries its
+## own length, so distinct paths cannot spell the same string and no escape
+## table has to be kept in step with the shapes. Nothing decodes this; it
+## exists so a consumer below the checker can carry a declaration's identity
+## without naming a `DeclKey`.
+pub fn path_text(path: List[Part]) -> String = {
+  var out = ""
+  for part in path { out = out ++ part_text(part) }
+  out
+}
+
+fn atom(s: String) -> String = to_string(str.len(s)) ++ ":" ++ s
+
+fn part_text(part: Part) -> String =
+  match part {
+    Named(kind, name) -> "N" ++ kind_text(kind) ++ atom(name)
+    ImplHead(trait_name, subject) -> "I" ++ atom(trait_name) ++ shape_text(subject)
+  }
+
+fn kind_text(k: Kind) -> String =
+  match k {
+    FunctionDecl -> "f"
+    TypeDecl -> "t"
+    TraitDecl -> "r"
+    EffectDecl -> "e"
+    ConstDecl -> "c"
+    TestDecl -> "s"
+    MethodDecl -> "m"
+    ConstructorDecl -> "k"
+    OperationDecl -> "o"
+    ParameterDefault -> "d"
+    AssociatedTypeDecl -> "a"
+    AssociatedEffectDecl -> "b"
+  }
+
+fn shapes_text(ts: List[TypeShape]) -> String = {
+  var out = to_string(len(ts)) ++ ";"
+  for t in ts { out = out ++ shape_text(t) }
+  out
+}
+
+fn effect_row_text(es: List[EffectShape]) -> String = {
+  var out = to_string(len(es)) ++ ";"
+  for e in es { out = out ++ effect_text(e) }
+  out
+}
+
+fn effect_rows_text(es: List[List[EffectShape]]) -> String = {
+  var out = to_string(len(es)) ++ ";"
+  for row in es { out = out ++ effect_row_text(row) }
+  out
+}
+
+fn effect_text(e: EffectShape) -> String =
+  match e {
+    NamedEffect(name) -> "e" ++ atom(name)
+    ProjectedEffect(slot, member) -> "p" ++ atom(to_string(slot)) ++ atom(member)
+  }
+
+fn shape_text(t: TypeShape) -> String =
+  match t {
+    BoundType(slot) -> "b" ++ atom(to_string(slot))
+    NamedType(name, args, es) -> "n" ++ atom(name) ++ shapes_text(args) ++ effect_rows_text(es)
+    QualifiedType(owner, name, args, es) ->
+      "q" ++ atom(owner) ++ atom(name) ++ shapes_text(args) ++ effect_rows_text(es)
+    AssociatedType(subject, member) -> "a" ++ shape_text(subject) ++ atom(member)
+    TupleType(elems) -> "t" ++ shapes_text(elems)
+    FunctionType(params, ret, es) -> "F" ++ shapes_text(params) ++ shape_text(ret) ++ effect_row_text(es)
   }
 
 fn entry(scope: ModuleKey, path: List[Part], declaration: Int, member: Option[Int]) -> Entry =
@@ -239,15 +317,49 @@ pub fn declarations(scope: ModuleKey, m: Module) -> List[Entry] =
 ## here for the same reason it is absent from `declarations`: the view never
 ## picks one of two declarations that claim the same key.
 pub fn spans_of(ls: List[Located]) -> DeclSpans = {
-  var out: Map[DeclKey, Span] = map.empty()
-  for l in ls { out = map.insert(out, l.entry.key, l.span) }
-  DeclSpans { spans: out }
+  var out: Map[String, Span] = map.empty()
+  for l in ls { out = map.insert(out, path_text(l.entry.key.path), l.span) }
+  DeclSpans { by_path: out }
 }
 
-pub fn declaration_spans(scope: ModuleKey, m: Module) -> DeclSpans =
-  spans_of(located(scope, m))
+## The scope a view is read under does not reach the view, so it is the one
+## that says nothing. Keeping the walk scoped keeps it the same walk the key
+## enumeration uses, which is what makes the two agree about which
+## declarations survive.
+fn unscoped() -> ModuleKey = module_key("", "", "", "")
 
-pub fn span_of(view: DeclSpans, key: DeclKey) -> Option[Span] = map.get(view.spans, key)
+pub fn declaration_spans(m: Module) -> DeclSpans = spans_of(located(unscoped(), m))
+
+pub fn span_of(view: DeclSpans, key: DeclKey) -> Option[Span] = span_at(view, path_text(key.path))
+
+pub fn span_at(view: DeclSpans, decl: String) -> Option[Span] = map.get(view.by_path, decl)
+
+## Where each declaration of this module starts, addressed the same way. The
+## checker uses it to decide whether it can name the declaration it is about
+## to enter, and to measure that declaration's diagnostics from it.
+pub fn declaration_starts(m: Module) -> Map[String, Int] = {
+  var out: Map[String, Int] = map.empty()
+  for l in located(unscoped(), m) { out = map.insert(out, path_text(l.entry.key.path), l.span.lo) }
+  out
+}
+
+## The one place a diagnostic's `lo`/`hi` become positions in a revision.
+## An owner names its module and its declaration; the views are this
+## revision's, so a declaration that moved answers with where it moved to.
+## A diagnostic with no owner is already absolute, and so is one whose owner
+## this revision cannot locate, which is the same conservative answer the
+## checker gave when it declined to make the diagnostic relative.
+pub fn absolute(views: Map[String, DeclSpans], d: Diag) -> Diag =
+  match d.owner {
+    None -> d
+    Some(owner) -> match map.get(views, owner.module) {
+      None -> d
+      Some(view) -> match span_at(view, owner.decl) {
+        None -> d
+        Some(sp) -> Diag { ..d, lo: sp.lo + d.lo, hi: sp.lo + d.hi, owner: None }
+      }
+    }
+  }
 
 test "identity removes positions and normalizes impl type binders" {
   let a = TNamed("List", [TNamed("T", [], [], 5, 6)], [], 0, 7)
@@ -345,8 +457,7 @@ test "identity indexes associated declarations and bindings under their own pare
   assert named_key(duplicated, trait_path ++ [Named(AssociatedEffectDecl, "E")]) != None
 }
 
-fn fixture_spans(source: String) -> DeclSpans =
-  declaration_spans(fixture_scope(), fixture_module(source))
+fn fixture_spans(source: String) -> DeclSpans = declaration_spans(fixture_module(source))
 
 fn fixture_key(path: List[Part]) -> DeclKey = DeclKey { scope: fixture_scope(), path: path }
 
@@ -430,4 +541,56 @@ test "a member span sits inside the span of the declaration that owns it" {
   }
   assert span_text(source, view, choice ++ [Named(ConstructorDecl, "Item")]) == Some("Item(value: Int)")
   assert span_text(source, view, ask ++ [Named(OperationDecl, "ask")]) == Some("fn ask() -> Int")
+}
+
+fn start_of(view: DeclSpans, path: List[Part]) -> Option[Int] =
+  match span_of(view, fixture_key(path)) {
+    Some(sp) -> Some(sp.lo)
+    None -> None
+  }
+
+test "declaration path text separates paths that share a spelling" {
+  assert path_text([Named(FunctionDecl, "f")]) != path_text([Named(TestDecl, "f")])
+  assert path_text([Named(FunctionDecl, "ab")]) !=
+    path_text([Named(FunctionDecl, "a"), Named(FunctionDecl, "b")])
+  assert path_text([ImplHead("P", NamedType("Int", [], []))]) !=
+    path_text([ImplHead("P", NamedType("Bool", [], []))])
+  assert path_text([ImplHead("P", NamedType("List", [BoundType(0)], []))]) ==
+    path_text([ImplHead("P", NamedType("List", [BoundType(0)], []))])
+}
+
+test "declaration starts answer exactly what the span view answers" {
+  let source = "fn f() -> Int = 1\nfn g() -> Int = 2\nfn f() -> Int = 3\n"
+  let starts = declaration_starts(fixture_module(source))
+  let view = fixture_spans(source)
+  let g = [Named(FunctionDecl, "g")]
+  assert map.get(starts, path_text(g)) == start_of(view, g)
+  assert map.get(starts, path_text(g)) != None
+  # a duplicate is nameable in neither, so the checker declines to measure
+  # from it and the renderer is never asked to place it
+  let f = [Named(FunctionDecl, "f")]
+  assert map.get(starts, path_text(f)) == None
+  assert start_of(view, f) == None
+}
+
+test "a diagnostic resolves against the revision being rendered" {
+  let source = "fn f() -> Int = 1\nfn g() -> Int = true\n"
+  let moved = "# a comment above everything else\n" ++ source
+  let owner = DiagOwner { module: "pkg/m", decl: path_text([Named(FunctionDecl, "g")]) }
+  let raised = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "", owner: Some(owner) }
+  let here = absolute(map.from([("pkg/m", fixture_spans(source))]), raised)
+  let there = absolute(map.from([("pkg/m", fixture_spans(moved))]), raised)
+  let g_here = str.index_of(source, "fn g").expect("g is in the source")
+  let g_there = str.index_of(moved, "fn g").expect("g is in the moved source")
+  assert g_here != g_there
+  assert here == Diag { msg: "type mismatch", lo: g_here + 16, hi: g_here + 20, hint: "", owner: None }
+  assert there == Diag { ..here, lo: g_there + 16, hi: g_there + 20 }
+  # an owner this revision cannot place keeps the positions it came with
+  # rather than inventing a base for them, and so does a diagnostic that
+  # never had an owner
+  let no_views: Map[String, DeclSpans] = map.empty()
+  assert absolute(no_views, raised) == raised
+  assert absolute(map.from([("other", fixture_spans(source))]), raised) == raised
+  let already = Diag { ..raised, owner: None }
+  assert absolute(map.from([("pkg/m", fixture_spans(source))]), already) == already
 }

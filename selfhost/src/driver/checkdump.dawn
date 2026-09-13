@@ -6,8 +6,13 @@
 #   C <name> <esc value | !failed>            each const's comptime value
 
 use std/map
+use std/str
 use check/types.{Adts, adt_of, sig_render}
-use driver/analyze.{Program}
+use check/identity
+use check/identity.{Named, FunctionDecl}
+use driver/analyze.{Program, LocDiag, rendered_diags}
+use front/parser
+use front/token.{Diag, DiagOwner}
 use front/ast.{module_fns, module_consts}
 use front/lexdump
 
@@ -44,7 +49,9 @@ pub fn cv_show(adts: Adts, v: CValue) -> String =
 
 pub fn render(prog: Program) -> String = {
   var out = ""
-  for ld in prog.diags {
+  # The golden prints positions in the file, so the owner-relative ones the
+  # checker recorded are resolved against this program's own view first.
+  for ld in rendered_diags(prog) {
     out = out ++ "D\t" ++ ld.path ++ "\t" ++ to_string(ld.d.lo) ++ "\t" ++
       to_string(ld.d.hi) ++ "\t" ++ lexdump.esc(ld.d.msg) ++ "\t" ++ lexdump.esc(ld.d.hint) ++ "\n"
   }
@@ -71,3 +78,19 @@ pub fn render(prog: Program) -> String = {
   out
 }
 use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt}
+
+test "the dump prints where a diagnostic sits in the revision it dumps" {
+  # A diagnostic raised inside `g` is recorded as an offset from `g`, so a
+  # dump that read `prog.diags` instead of resolving it would print the
+  # offset and claim it was a position in the file.
+  let source = "fn f() -> Int = 1\nfn g() -> Int = true\n"
+  let (m, pd) = parser.parse_module(source)
+  assert len(pd) == 0
+  let owner = DiagOwner { module: "g", decl: identity.path_text([Named(FunctionDecl, "g")]) }
+  let raised = Diag { msg: "m", lo: 16, hi: 20, hint: "", owner: Some(owner) }
+  let prog = Program { modules: [], diags: [LocDiag { path: "g.dawn", d: raised }],
+    decl_spans: map.from([("g", identity.declaration_spans(m))]) }
+  let start = str.index_of(source, "fn g").expect("g is in the source")
+  assert render(prog) ==
+    "D\tg.dawn\t" ++ to_string(start + 16) ++ "\t" ++ to_string(start + 20) ++ "\tm\t\n"
+}

@@ -52,6 +52,7 @@ fn environment_unchanged(a: Cx, b: Cx) -> Bool =
   a.btypes == b.btypes && a.const_cutoff == b.const_cutoff && a.frame == b.frame &&
   a.syms == b.syms && a.in_test == b.in_test && a.is_std_module == b.is_std_module &&
   a.owner_class == b.owner_class && a.src_path == b.src_path && a.line_starts == b.line_starts &&
+  a.mod_path == b.mod_path && a.owner == b.owner && a.owner_lo == b.owner_lo &&
   a.moved == b.moved && a.loop_jumps == b.loop_jumps && a.take_cell == b.take_cell &&
   a.function_reads == b.function_reads && a.body_writes == b.body_writes
 
@@ -100,8 +101,8 @@ pub fn assemble(current: Cx, product: HeaderProduct) -> Option[Cx] = {
 }
 
 test "header product captures scope resets and appends diagnostics" {
-  let first = Diag { msg: "before", lo: 1, hi: 2, hint: "" }
-  let next = Diag { msg: "header", lo: 3, hi: 4, hint: "" }
+  let first = Diag { msg: "before", lo: 1, hi: 2, hint: "", owner: None }
+  let next = Diag { msg: "header", lo: 3, hi: 4, hint: "", owner: None }
   let before = Cx { ..cx_new(Some("decl"), Some("decl.dawn")), diags: [first],
     ty_spans: map.from([((1, 2), TySpan { lo: 1, hi: 2, kids: [] })]), record_ty_spans: true }
   let after = Cx { ..before, next_id: before.next_id + 3, diags: [first, next],
@@ -126,7 +127,7 @@ test "header product refuses incompatible transition and allocation boundaries" 
   assert missing(capture(before, Cx { ..before, owner_class: Some("foreign") }))
   assert missing(capture(before, Cx { ..before, function_reads: Some([]) }))
   assert missing(capture(before, Cx { ..before, next_id: before.next_id - 1 }))
-  let diagnostic = Diag { msg: "old", lo: 1, hi: 2, hint: "" }
+  let diagnostic = Diag { msg: "old", lo: 1, hi: 2, hint: "", owner: None }
   assert missing(capture(Cx { ..before, diags: [diagnostic] }, before))
   let product = capture(before, before).expect("empty header transition")
   assert missing(assemble(Cx { ..before, next_id: before.next_id + 1 }, product))

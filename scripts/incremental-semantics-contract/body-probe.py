@@ -164,6 +164,22 @@ def main():
         if probe.count(anchor) != 1:
             raise RuntimeError("Source state replay anchor drifted")
         probe = probe.replace(anchor, "    replayed_cx = typed_projection.source_state(replayed_cx, saved.before, saved.after, saved.body, id_delta, fixture_text(), edited, old_decls[index].lo, old_decls[index].hi, new_decls[index].lo, new_decls[index].hi)")
+        # The scheduler owns the declaration boundary, and a body's captured
+        # diagnostics are recorded against it. Drive check_fn the way the
+        # scheduler does, or the projection refuses an unanchored diagnostic.
+        for old, new in [
+            ("let (after, body) = check_fn(before, d, signatures[index])",
+             "let (after, body) = typed_projection.checked_body(before, m, d, signatures[index])"),
+            ("let (shifted, shifted_body) = check_fn(Cx { ..before, next_id: before.next_id + 1000 }, d, signatures[index])",
+             "let (shifted, shifted_body) = typed_projection.checked_body(Cx { ..before, next_id: before.next_id + 1000 }, m, d, signatures[index])"),
+            ("let (first, _) = check_fn(headers, new_decls[0], signatures[0])",
+             "let (first, _) = typed_projection.checked_body(headers, new_ast, new_decls[0], signatures[0])"),
+            ("let (checked, _) = check_fn(cold_cx, new_decls[index], signatures[index])",
+             "let (checked, _) = typed_projection.checked_body(cold_cx, new_ast, new_decls[index], signatures[index])"),
+        ]:
+            if probe.count(old) != 1:
+                raise RuntimeError("Declaration boundary anchor drifted: " + old)
+            probe = probe.replace(old, new)
         old = '"pub fn wrong() -> Int = false\\n"'
         if probe.count(old) != 1:
             raise RuntimeError("Typed corpus extension anchor drifted")

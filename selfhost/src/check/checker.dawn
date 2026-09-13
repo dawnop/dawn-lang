@@ -83,7 +83,7 @@ use check/cx.{
   write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, ModExports,
   cx_new, test_cx, check_value_arity,
-  cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
+  cerr, cerr_h, cerr_o, owned_by, unowned, fresh, alias_shadow, effect_of, resolve_eff_at,
   resolve_type, resolve_return_type, resolve_alias_target, java_class_info_read, java_class_name_read, java_class_names_read,
   java_methods_read, java_constructors_read, java_static_fields_read, java_component_read,
   java_sam_read, java_assignable_read, is_const_serializable, const_refusal_hint, no_sig,
@@ -95,6 +95,7 @@ use check/cx.{
   local_nominal_name_read, constructor_names_read, declared_constant_name_read, local_value_candidates_read,
   TySpan
 }
+use check/identity
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
   pass_effects, pass_resolve_aliases, pass_register_traits, pass_register_impls,
@@ -14700,9 +14701,30 @@ pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = 
   products
 }
 
+## Enter the declaration a body belongs to, so that every diagnostic the body
+## raises is measured from the declaration rather than from the file. A
+## declaration `check/identity` refuses to name -- a duplicate, or one whose
+## parent is duplicated -- has no start to measure from and is left unowned,
+## which keeps its diagnostics absolute.
+fn enter_decl(cx: Cx, starts: Map[String, Int], path: List[identity.Part]) -> Cx =
+  match cx.mod_path {
+    None -> unowned(cx)
+    Some(module) -> {
+      let decl = identity.path_text(path)
+      match map.get(starts, decl) {
+        Some(start) -> owned_by(cx, module, decl, start)
+        None -> unowned(cx)
+      }
+    }
+  }
+
 pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
   var state = initial
   let m = headers.syntax
+  # One walk of this module's declarations, the same one the span view on the
+  # carry is built from, so the two cannot disagree about which declarations
+  # can be named.
+  let starts = identity.declaration_starts(m)
   var cx1 = headers.cx
   let sigs = headers.sigs
   let impl_sigs = headers.impl_sigs
@@ -14769,9 +14791,10 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
         if ready {
           # each pending index is completed at most once, so the signature this
           # reads is still the unsealed one the list held
-          let (next_state, cxe, tf) = executor.inferred_body(state, cx1, d, sigs[idx])
+          let owner = enter_decl(cx1, starts, [identity.Named(identity.FunctionDecl, d.name)])
+          let (next_state, cxe, tf) = executor.inferred_body(state, owner, d, sigs[idx])
           state = next_state
-          cx1 = cxe
+          cx1 = unowned(cxe)
           inferred = map.insert(inferred, idx, tf)
           done = set.insert(done, d.name)
           progress = true
@@ -14797,9 +14820,10 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
   for d in module_consts(m) {
     match const_tys[ci] {
       Some(declared) -> {
-        let (next_state, cxe, tc) = executor.constant(state, cx1, d, declared, visible)
+        let owner = enter_decl(cx1, starts, [identity.Named(identity.ConstDecl, d.name)])
+        let (next_state, cxe, tc) = executor.constant(state, owner, d, declared, visible)
         state = next_state
-        cx1 = cxe
+        cx1 = unowned(cxe)
         tconsts = tconsts ++ [tc]
       }
       None -> ()
@@ -14815,9 +14839,10 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
   i = 0
   for d in fnds {
     if not sigs[i].inferring {
-      let (next_state, cxe, tf) = executor.function(state, cx1, d, sigs[i])
+      let owner = enter_decl(cx1, starts, [identity.Named(identity.FunctionDecl, d.name)])
+      let (next_state, cxe, tf) = executor.function(state, owner, d, sigs[i])
       state = next_state
-      cx1 = cxe
+      cx1 = unowned(cxe)
       tfuns = tfuns ++ [Some(tf)]
     } else {
       match map.get(inferred, i) {
@@ -14836,15 +14861,18 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
     # recover (trait id, subject) for codegen's mangled impl-method names;
     # both lookups re-run what registration already validated, diags discarded
     let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
+    let impl_head = [identity.ImplHead(imd.trait_name,
+      identity.type_shape(imd.subject, map(imd.tparams, tp => tp.name)))]
     var mi = 0
     for me in imd.methods {
       match msigs[mi] {
         Some(ms) -> {
           # registration refused any parameter defaults; strip them so the
           # refusal is not followed by the value's own diagnostics
-          let (next_state, cxe, tf) = executor.method(state, cx1, imd.trait_name, imd.subject, strip_param_defaults(me), ms)
+          let owner = enter_decl(cx1, starts, impl_head ++ [identity.Named(identity.MethodDecl, me.name)])
+          let (next_state, cxe, tf) = executor.method(state, owner, imd.trait_name, imd.subject, strip_param_defaults(me), ms)
           state = next_state
-          cx1 = cxe
+          cx1 = unowned(cxe)
           impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
         }
         None -> ()
@@ -14869,9 +14897,11 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
               }
               match msig {
                 Some(s2) -> {
-                  let (next_state, cxe, tf) = executor.default_body(state, cx1, t, me, s2, b)
+                  let owner = enter_decl(cx1, starts,
+                    [identity.Named(identity.TraitDecl, td.name), identity.Named(identity.MethodDecl, me.name)])
+                  let (next_state, cxe, tf) = executor.default_body(state, owner, t, me, s2, b)
                   state = next_state
-                  cx1 = cxe
+                  cx1 = unowned(cxe)
                   default_tfuns = default_tfuns ++ [TFun { ..tf, default_of: Some(t) }]
                 }
                 None -> ()
@@ -14886,9 +14916,10 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
   }
   var ttests: List[TFun] = []
   for t in module_tests(m) {
-    let (next_state, cxe, tf) = executor.test_body(state, cx1, t.name, t.body)
+    let owner = enter_decl(cx1, starts, [identity.Named(identity.TestDecl, t.name)])
+    let (next_state, cxe, tf) = executor.test_body(state, owner, t.name, t.body)
     state = next_state
-    cx1 = cxe
+    cx1 = unowned(cxe)
     ttests = ttests ++ [tf]
   }
   var fns_out: List[TFun] = []
