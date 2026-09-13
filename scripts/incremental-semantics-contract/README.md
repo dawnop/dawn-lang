@@ -1,5 +1,38 @@
 # 增量语义契约夹具
 
+## Running the whole family locally
+
+`sweep.sh` runs every invocation the nine `incremental-*` jobs in
+`.github/workflows/gates.yml` run, in parallel, on one machine, because every
+change under `selfhost/src/check/` has to be put in front of all of them before
+it merges: the mutants here are pinned to literal source strings, a harness
+whose anchor has drifted still looks like a working harness, and main went red
+at ca33cdbe for exactly that. The list is parsed out of gates.yml at run time
+rather than written down a second time, so a harness added to an existing job is
+swept without anyone remembering to, and `sweep.sh --self-test` compares that
+parse against a plain grep of the same file so the sweep cannot quietly run a
+subset (45 invocations today, 43 after deduplicating the three jobs that each
+run `diagnostic-reads.py --self-test`). Harnesses start longest first, since the
+sweep is tail-bound rather than throughput-bound: `prefix.py` alone is about 13
+minutes of a 24 minute sweep and is the whole wall clock if it starts in the
+last wave. The durations that order them are read from the previous run's log,
+and from a static table of the ten longest until there is one; they affect
+nothing but the order, and `--self-test` checks the set and the count rather
+than the sequence. Measured 2026-09-13 on a 16 core / 15.6 GiB machine with the
+toolchain already built, in gates.yml order: 25m30s at 5 jobs (7.7 GiB peak in
+use), 24m42s at the default 8 (9.4 GiB) and 23m44s at 12 (12.1 GiB); longest
+first at 8 jobs it is 23m33s (9.8 GiB), against roughly 62 minutes of running
+them by hand one after another. Wall clock is nearly flat in the job count
+because a single harness forks `dawn build` per mutant and already takes about
+2.8 cores, so the cores saturate at around five harnesses and only the memory
+keeps climbing; the default is `nproc`/2 because 12 buys 58 seconds for 2.7 GiB
+of the headroom, while ordering bought 70 seconds for none. Progress goes to
+`--log` (one PASS/FAIL line per harness as it lands, full output in
+`out-<name>.txt` beside it), a failure that is an anchor drift is reported as
+one with the string the harness was looking for and the line of its own source
+that spells it, and `--only` and `--list` select. Nothing in CI runs this script
+and gates.yml does not know it exists.
+
 ## Diagnostic rendering read contracts
 
 ### Witness observation and candidate recomputation (acceptance in progress)
