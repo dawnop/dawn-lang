@@ -707,12 +707,20 @@ fn reordered_module_sample() -> ModuleTrial !io = {
   ModuleTrial { replayed_cx: assembled_cx, cold_cx: cold_cx, replayed: assembled, cold: cold, states: [] }
 }
 
-pub fn import_samples() -> List[StateTrial] !io = [import_sample(false), import_sample(true)]
+pub fn import_samples() -> List[StateTrial] !io = [import_sample(0), import_sample(1), import_sample(2)]
 
-fn import_sample(qualified: Bool) -> StateTrial !io = {
+## Three consumer shapes over the same reordered provider. 0 imports the names
+## themselves; 1 keeps the module name and spells a qualified type in the
+## signature plus a qualified call; 2 spells a qualified type in a body
+## annotation and reads a qualified constant. The current effect syntax does
+## not accept `!dep.Ask`, so there is no qualified effect case to write.
+fn import_sample(kind: Int) -> StateTrial !io = {
+  let qualified = kind != 0
   let ask = if qualified { "pub type First = { value: Int }\n" } else { "pub effect Ask { fn ask() -> Int }\n" }
   let tell = if qualified { "pub type Second = { value: Int }\n" } else { "pub effect Tell { fn tell() -> Int }\n" }
-  let tail = if qualified { "pub fn identity[T](x: T) -> T = x\n" } else { "" }
+  let tail = if kind == 1 { "pub fn identity[T](x: T) -> T = x\n" }
+    else if kind == 2 { "pub const ORIGIN: First = First { value: 0 }\n" }
+    else { "" }
   let (old_library, old_pd) = parser.parse_module(ask ++ tell ++ tail)
   let (new_library, new_pd) = parser.parse_module(tell ++ ask ++ tail)
   let base = cx_new(Some("library"), Some("library.dawn"))
@@ -723,7 +731,8 @@ fn import_sample(qualified: Bool) -> StateTrial !io = {
   }
   let old_env = map.from([("library", exports_of(provider, old_library, "library", "library"))])
   let new_env = map.from([("library", exports_of(new_provider, new_library, "library", "library"))])
-  let text = if qualified { "use library as dep\npub fn both(x: dep.First) -> dep.First = dep.identity(x)\n" }
+  let text = if kind == 1 { "use library as dep\npub fn both(x: dep.First) -> dep.First = dep.identity(x)\n" }
+    else if kind == 2 { "use library as dep\npub fn both() -> Int = { let v: dep.First = dep.ORIGIN\n v.value }\n" }
     else { "use library.{Ask, Tell}\npub fn both() -> Int !Ask !Tell = ask() + tell()\n" }
   let (syntax, pd) = parser.parse_module(text)
   if len(pd) != 0 { panic("import consumer parse failed: " ++ join(map(pd, d => d.msg), "; ")) }
