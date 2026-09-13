@@ -11,18 +11,25 @@ at ca33cdbe for exactly that. The list is parsed out of gates.yml at run time
 rather than written down a second time, so a harness added to an existing job is
 swept without anyone remembering to, and `sweep.sh --self-test` compares that
 parse against a plain grep of the same file so the sweep cannot quietly run a
-subset (45 invocations today, 43 after deduplicating the three jobs that each
+subset (48 invocations today, 46 after deduplicating the three jobs that each
 run `diagnostic-reads.py --self-test`). Harnesses start longest first, since the
-sweep is tail-bound rather than throughput-bound: `prefix.py` alone is about 13
-minutes of a 24 minute sweep and is the whole wall clock if it starts in the
-last wave. The durations that order them are read from the previous run's log,
-and from a static table of the ten longest until there is one; they affect
-nothing but the order, and `--self-test` checks the set and the count rather
-than the sequence. Measured 2026-09-13 on a 16 core / 15.6 GiB machine with the
+sweep is tail-bound rather than throughput-bound: the longest harness is the
+whole wall clock if it starts in the last wave. `prefix.py` was that harness at
+771s of a 1413s sweep, and the floor the sweep could not go under; on
+2026-09-13 its twelve engine mutants were split three ways (`--shards 3 --shard
+I`, dealt to three jobs in gates.yml, which is where the sweep reads them
+from), so the floor is now its longest shard, about 312s. That is shard 0, the
+one that also runs the positive subject; the other two are four mutants each.
+The durations that order them are read from the previous run's log, and from a
+static table of the longest until there is one; they affect nothing but the
+order, and `--self-test` checks the set and the count rather than the
+sequence. Measured 2026-09-13 on a 16 core / 15.6 GiB machine with the
 toolchain already built, in gates.yml order: 25m30s at 5 jobs (7.7 GiB peak in
 use), 24m42s at the default 8 (9.4 GiB) and 23m44s at 12 (12.1 GiB); longest
 first at 8 jobs it is 23m33s (9.8 GiB), against roughly 62 minutes of running
-them by hand one after another. Wall clock is nearly flat in the job count
+them by hand one after another; those four figures are from before the
+`prefix.py` split and were not remeasured. Wall clock is nearly flat in the job
+count
 because a single harness forks `dawn build` per mutant and already takes about
 2.8 cores, so the cores saturate at around five harnesses and only the memory
 keeps climbing; the default is `nproc`/2 because 12 buys 58 seconds for 2.7 GiB
@@ -453,7 +460,10 @@ took 155.55s for 19 controls; they now run separately at 350s/18min, retaining
 the other state contracts and their existing budget without exceeding the pole.
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
-std身份变化及构造器的负预算拒绝。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
+std身份变化及构造器的负预算拒绝。`--shards N --shard I` 按 index 取模把这12个负控
+分片（约定同 `diagnostic-reads.py`），不带旗标时行为不变：正样本加全部12个负控。
+正样本只在 shard 0 跑，代价与理由写在 prefix.py 分片处；每个分片仍会先套用全部
+锚点，所以锚点漂移在任何一片都是硬失败。`lsp-prefix.py` 覆盖三个工作区接线负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。工作区计数测试在共享server里，
 同时由 JVM/native selfhost 套件运行。原有 `scripts/lsp-workspace-contract/run.sh`
 另行守18个协议案例和20个资源/工作区负控，不能只靠新计数测试替代它。

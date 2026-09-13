@@ -1073,6 +1073,12 @@ jobs:
   # deliberately dealt into three different jobs, so its own split survives
   # the merge and its --self-test still runs once per shard.
   #
+  # prefix.py was dealt the same way on 2026-09-13 and the table above is the
+  # packing before that: its 497s left job 1 and came back as three shards of
+  # 192s, 153s and 153s in jobs 1, 8 and body-execution. The work is the same
+  # thirteen subjects, so nothing was added to the run; what moved is where
+  # they are paid for, and why is sweep.sh rather than CI.
+  #
   # Nothing leaves the push path. The same scripts run on the same trees; what
   # changes is that they run one after another on one runner instead of each
   # paying for its own.
@@ -1083,25 +1089,43 @@ jobs:
   # argued, and that is worth keeping beside the step it argues about.
   incremental-1:
     runs-on: ubuntu-latest
-    # prefix 497s + java-reads 341s
-    # = 838s of work, plus one 36s setup = 874s.
-    # budget: 3x 874s planning value (two merged jobs' worst observations)
-    timeout-minutes: 44
+    # prefix shard 0 192s + its 2s shard-CLI self-test + java-reads 341s
+    # = 535s of work, plus one 36s setup = 571s.
+    # prefix's 497s was one run of all thirteen of its subjects. Its subjects
+    # cost the same as each other (24.3 to 24.4s each, measured locally on
+    # 2026-09-13), so a shard's term is its share of that observation by
+    # subject count: five thirteenths here (191.15, taken as 192), four
+    # thirteenths in each of the two jobs below. The three shards add back up
+    # to the 497s that left this job.
+    # budget: 3x 571s planning value (java-reads' observation plus prefix's shard 0)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # was the incremental-prefix job until 2026-09-11.
+      # was the incremental-prefix job until 2026-09-11, and one undivided
+      # prefix.py run until 2026-09-13.
       # Full warm/frozen-cold products plus twelve compiling engine mutants:
       # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
       # This is a complete engine contract, not a shard of a shared matrix.
       # 2026-09-11: 533s (run 34484938024) over the 25 completed main runs of
       # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
       # 9s over the 524s claim.
-      - name: incremental prefix equivalence and execution counts
-        run: python3 scripts/incremental-semantics-contract/prefix.py
+      # 2026-09-13: the twelve engine mutants are dealt over three shards by
+      # index modulo 3, one shard to a job (shard 1 in incremental-8, shard 2
+      # in incremental-body-execution). The reason is sweep.sh, where this one
+      # harness was 771s of a 1413s local sweep and the floor under it. No
+      # work is added: the positive subject stays in shard 0 rather than being
+      # rerun in each shard, and prefix.py says beside the partition what that
+      # costs and what still holds the other two shards' oracle up.
+      # --self-test is the shard CLI's own contract, 0.32s locally, run once
+      # here rather than in each of the three jobs.
+      - name: incremental prefix equivalence and execution counts, shard 0
+        run: |
+          python3 scripts/incremental-semantics-contract/prefix.py --self-test
+          python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 0
 
       # was the incremental-java-reads job until 2026-09-11.
       # Class metadata's 21 controls took 109.07s; member candidates'
@@ -1361,8 +1385,12 @@ jobs:
     runs-on: ubuntu-latest
     # semantics 517s + witness 205s
     # = 722s of work, plus one 36s setup = 758s.
-    # budget: 3x 758s planning value (two merged jobs' worst observations)
-    timeout-minutes: 38
+    # 2026-09-13: prefix's shard 1 lands here, four of its thirteen subjects,
+    # 153s of its 497s observation. 758 + 153 = 911s, under the 950s pole and
+    # under the 920s of incremental-3, which is the longest job in this run
+    # and stays it.
+    # budget: 3x 911s planning value (existing baseline plus prefix's shard 1)
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1395,6 +1423,12 @@ jobs:
       - name: Witness observation and candidate revalidation contracts
         run: python3 scripts/incremental-semantics-contract/witness-revalidation.py
 
+      # prefix's shard 1, dealt here from incremental-1 on 2026-09-13. Four
+      # engine mutants and no positive subject; the arithmetic and the reason
+      # are on the shard 0 step there.
+      - name: incremental prefix engine mutants shard 1
+        run: python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 1
+
   incremental-body-execution:
     runs-on: ubuntu-latest
     # New contracts, not a split of the eight existing jobs. Local complete
@@ -1414,8 +1448,10 @@ jobs:
     # from six to ten (58.87s) and the oracle from three to seven over 32
     # pairs (39.21s), both local on 2026-09-12. Those replace the 35s and 21s
     # terms above: add 2 * (59 - 35) + 2 * (40 - 21) = 86s, for 736s.
-    # budget: 3x 736s planning value (new complete body execution contracts)
-    timeout-minutes: 37
+    # 2026-09-13: prefix's shard 2 lands here, four of its thirteen subjects,
+    # 153s of its 497s observation, for 736 + 153 = 889s.
+    # budget: 3x 889s planning value (body execution contracts plus prefix's shard 2)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1437,6 +1473,12 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/scalar-replay.py
       - name: Scalar full-product and real execution oracle
         run: python3 scripts/incremental-semantics-contract/scalar-oracle.py
+
+      # prefix's shard 2, dealt here from incremental-1 on 2026-09-13. Four
+      # engine mutants and no positive subject; the arithmetic and the reason
+      # are on the shard 0 step there.
+      - name: incremental prefix engine mutants shard 2
+        run: python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 2
 
   contracts:
     runs-on: ubuntu-latest

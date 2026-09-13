@@ -16,10 +16,10 @@
 # plain grep of the same file, so the sweep cannot quietly run a subset.
 #
 # Harnesses start longest first, because the sweep is tail-bound rather than
-# throughput-bound: prefix.py alone runs about 13 minutes of a 24 minute sweep,
-# and if it starts in the last wave it is the wall clock by itself. Durations
-# come from the previous run's log, and from a static table of the ten longest
-# until there is one. Ordering is the only thing they affect.
+# throughput-bound: the longest harness, if it starts in the last wave, is the
+# wall clock by itself. Durations come from the previous run's log, and from a
+# static table of the longest until there is one. Ordering is the only thing
+# they affect.
 #
 # Measured 2026-09-13 on a 16 core / 15.6 GiB machine (WSL2, GraalVM 21), with
 # the toolchain already built, 43 invocations after dedup, all passing:
@@ -42,8 +42,12 @@
 # 3.5 GiB on a machine that is also being used for something else. Ordering
 # bought 70 seconds at 8-way for nothing, which is more than the 12-way fan-out
 # bought, and still leaves 5.8 GiB. Against roughly 62 minutes of serial
-# hand-running that is a 2.6x speed-up, and the floor under it is one harness:
-# prefix.py ran 771s in that sweep.
+# hand-running that is a 2.6x speed-up, and the floor under it was one
+# harness: prefix.py ran 771s in that sweep, half again the next longest. On
+# 2026-09-13 it was given `--shards 3 --shard I` and gates.yml deals its three
+# shards to three jobs, so the sweep now runs them as three harnesses and the
+# floor is the longest of those, about 312s: the shard that keeps the positive
+# subject. The table above is from before that split and was not remeasured.
 #
 # Usage:
 #   sweep.sh [--jobs N] [--log PATH] [--only NAME[,NAME...]]

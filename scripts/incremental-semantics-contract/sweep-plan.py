@@ -12,9 +12,9 @@ mutation anchors are literal source strings, they drift silently, and a sweep
 that quietly runs a subset is worth less than no sweep at all.
 
 The order is longest-first, because the sweep is tail-bound: at eight-way
-parallelism the four slowest harnesses run 810s, 665s, 625s and 623s, so one of
-them starting late is the whole wall clock. Durations come from the previous
-sweep's log where there is one, and otherwise from the static table below.
+parallelism the slowest harnesses run 665s, 625s, 623s and 592s, so one of them
+starting late is the whole wall clock. Durations come from the previous sweep's
+log where there is one, and otherwise from the static table below.
 
 Modes:
   (default)        one TAB-separated `name<TAB>command` line per deduplicated
@@ -67,14 +67,24 @@ COMMAND_PREFIXES = ("python3 scripts/incremental-semantics-contract/", "./bin/da
 # A sweep log line: status, name, seconds.
 LOG_LINE = re.compile(r"^(?:PASS|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s\s*$", re.M)
 
-# The ten slowest harnesses of the 8-way run of 2026-09-13, in seconds under
-# that run's own contention. Used only until a real sweep log exists at the
-# default path, which is the first run on a machine. Everything absent from
-# this table is "not one of the long ones", which is what silence means in a
-# table that is deliberately only the tail; silence in a real log means
-# something else and is handled differently in hints() below.
+# The slowest harnesses of the 8-way run of 2026-09-13, in seconds under that
+# run's own contention. Used only until a real sweep log exists at the default
+# path, which is the first run on a machine. Everything absent from this table
+# is "not one of the long ones", which is what silence means in a table that is
+# deliberately only the tail; silence in a real log means something else and is
+# handled differently in hints() below.
+#
+# It was that run's ten until 2026-09-13, when prefix.py's single 811s entry
+# became its three shards. That 811s is not remeasured here: the run it came
+# from no longer exists to be rerun, and prefix's subjects cost the same as
+# each other (24.3 to 24.4s each, and 122.52s for the five-subject shard 0,
+# measured alone on a 16 core machine at loadavg 3.5 to 4.9 on 2026-09-13), so
+# the 811s divides by subject count: five thirteenths to shard 0, which keeps
+# the positive subject, and four to each of the others.
 STATIC_HINTS = {
-    "prefix": 811,
+    "prefix-shards-3-shard-0": 312,
+    "prefix-shards-3-shard-1": 250,
+    "prefix-shards-3-shard-2": 250,
     "local-value-reads": 665,
     "diagnostic-reads-shards-3-shard-0": 625,
     "diagnostic-reads-shards-3-shard-2": 623,
