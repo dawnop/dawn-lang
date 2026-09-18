@@ -382,13 +382,18 @@ fn prepare(admitted: AdmittedData, next: ModuleHeaders, source: Snapshot) -> Opt
 ## Sharing a verdict is sound exactly when recomputing it reads only what the
 ## revision settled before any body ran. `AssignableType` is such a family:
 ## `assignable` answers from the two types the fact carries and the owner this
-## module is checked under, and nothing a body does moves either. The families
+## module is checked under, and nothing a body does moves either.
+## `BuiltinTypeAnswer` reads only `btypes`, also preserved by the scheduler;
+## a missing builtin is just as revision-local as a present one. This does
+## not include the separate scoped lookup that may follow a builtin miss.
+## The families
 ## that read what the scheduler rebinds per declaration are not, and the
 ## signature binders below are revalidated per body for that reason. The
 ## allowlist is closed so that widening the admitted class has to make this
 ## decision rather than inherit it.
 fn shared(read: FunctionRead) -> Bool = match read {
   AssignableType(_, _, _) -> true
+  BuiltinTypeAnswer(_, _) -> true
   _ -> false
 }
 
@@ -1538,6 +1543,91 @@ test "scalar replay carries one memo across the bodies of a revision and no furt
     query_runtime.Needs(_) -> true
     _ -> false
   }
+}
+
+test "scalar replay shares builtin hits and misses but not signature binders" {
+  # Int is deliberately a signature binder in the last two functions. The
+  # builtin probe succeeds, but the subsequent scoped probe resolves each
+  # declaration's distinct binder. Sharing one must not share the other.
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let text = "fn first[T](x: T) -> T = {\n let y: T = x\n y\n}\n" ++
+    "fn second[T](x: T) -> T = {\n let y: T = x\n y\n}\n" ++
+    "fn third[Int](x: Int) -> Int = {\n let y: Int = x\n y\n}\n" ++
+    "fn fourth[Int](x: Int) -> Int = {\n let y: Int = x\n y\n}\n"
+  let snapshot = source_snapshot.of(text).expect("builtin memo snapshot")
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let headers = checker.check_module_headers(base, source_snapshot.syntax(snapshot), map.empty())
+  let saved = body_execution.record(scope, headers)
+  assert saved.refused == 0 && saved.bodies.cx.diags == []
+  let admitted: AdmittedData = admit(scope, headers, snapshot, saved)
+  assert admitted_count(admitted) == 4
+  var prepared = prepare(admitted, headers, snapshot).expect("builtin candidate")
+  var questions = 0
+  var hits = 0
+  var scoped_reads = 0
+  for (index, name) in [(0, "first"), (1, "second"), (2, "third"), (3, "fourth")] {
+    let d = match headers.syntax.decls[index] { DFn(fn_decl) -> fn_decl, _ -> panic("function") }
+    let sig = map.get(headers.cx.fns, name).expect("signature")
+    let (prior, _) = relocation(prepared, headers.cx, d, sig).expect("builtin relocation")
+    for fact in prior.product.function_reads.expect("real recorded queries") {
+      match fact {
+        BuiltinTypeAnswer(_, _) -> {
+          assert shared(fact)
+          questions = questions + 1
+          match query_runtime.read(prepared.memo, fact).answer {
+            query_runtime.Available(value) -> {
+              assert value == Some(true)
+              hits = hits + 1
+            }
+            _ -> ()
+          }
+        }
+        ScopedTypeParameter(_, _) -> {
+          scoped_reads = scoped_reads + 1
+          assert not shared(fact)
+        }
+        _ -> ()
+      }
+    }
+    let (next, verdict) = candidate(prepared, headers.cx, d, sig)
+    assert match verdict { Reused(_) -> true, _ -> false }
+    prepared = next
+  }
+  assert questions == 4 && hits == 2 && scoped_reads == 4
+  let (pass, bodies) = checker.execute_module_bodies(headers,
+    Pass { counts: zero_counts(), prepared: prepare(admitted, headers, snapshot) }, pass_executor())
+  assert pass.counts.reused == 4
+  assert bodies.functions == checker.check_module_body_products(headers).functions
+  let finished = pass.prepared.expect("executor memo")
+  let fresh = prepare(admitted, headers, snapshot).expect("fresh revision")
+  let changed = Cx { ..headers.cx, btypes: map.insert(map.remove(headers.cx.btypes, "Int"),
+    "T", map.get(headers.cx.btypes, "Int").expect("builtin Int")) }
+  for fact in [BuiltinTypeAnswer("Int", map.get(headers.cx.btypes, "Int")), BuiltinTypeAnswer("T", None)] {
+    assert match query_runtime.read(finished.memo, fact).answer {
+      query_runtime.Available(value) -> value == Some(true)
+      _ -> false
+    }
+    assert match query_runtime.read(fresh.memo, fact).answer {
+      query_runtime.Needs(_) -> true
+      _ -> false
+    }
+    # A new revision can remove a hit or turn a miss into a hit. Neither
+    # change may inherit this revision's successful validation.
+    let (memo, verdict) = revalidated(fresh.memo, changed, changed, fact)
+    assert verdict == Some(false)
+    let (again, cached) = revalidated(memo, changed, changed, fact)
+    assert cached == verdict
+    assert match query_runtime.read(again, fact).answer {
+      query_runtime.Available(value) -> value == Some(false)
+      _ -> false
+    }
+  }
+  let changed_headers = ModuleHeaders { ..headers, cx: changed }
+  let refused = replay(admit(scope, headers, snapshot, saved), changed_headers, snapshot)
+  assert refused.reused == 0 && refused.cold_rejected == 4 && refused.cold_unadmitted == 0
+  let cold = checker.check_module_body_products(changed_headers)
+  assert refused.bodies.functions == cold.functions
+  assert refused.bodies.cx.diags == cold.cx.diags
 }
 
 test "scalar replay reuses a generic body under the candidate signature's binders" {

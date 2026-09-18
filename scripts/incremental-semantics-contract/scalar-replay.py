@@ -38,6 +38,11 @@ def main():
         ('memo-stale-hit', 'query_runtime.Available(value) -> (asked.engine, value)',
          'query_runtime.Available(value) -> (asked.engine, None)'),
         ('memo-family-closed', 'AssignableType(_, _, _) -> true', 'AssignableType(_, _, _) -> false'),
+        ('memo-builtin-disabled', 'BuiltinTypeAnswer(_, _) -> true', 'BuiltinTypeAnswer(_, _) -> false'),
+        ('memo-builtin-misses-disabled', 'BuiltinTypeAnswer(_, _) -> true',
+         'BuiltinTypeAnswer(_, answer) -> answer != None'),
+        ('memo-builtin-hits-disabled', 'BuiltinTypeAnswer(_, _) -> true',
+         'BuiltinTypeAnswer(_, answer) -> answer == None'),
         ('memo-wrong-key',
          'let opened = match query_runtime.begin(asked.engine, read) {\n'
          '        Some(engine) -> engine\n'

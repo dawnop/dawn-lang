@@ -204,6 +204,19 @@ typed tree 的跨度、符号的声明位置与 frame 记下的效果见证位�
 
 ## 五、七期与报告
 
+### Candidate-local builtin query memo
+
+Extend the existing opt-in replay memo to `BuiltinTypeAnswer`, including
+missing names. Its canonical reader consults only `Cx.btypes`, which the body
+scheduler preserves; signature-local type parameters remain separate queries
+and must still be revalidated under each candidate function's binders. Memo
+keys retain both the requested name and recorded answer. Each preparation
+starts an empty memo, so a different revision's builtin table cannot inherit a
+previous verdict. Tests must exercise real annotated bodies, both positive
+and negative lookups, and rejection when the candidate table changes.
+This does not enable production body replay or cross-revision memo retention,
+and makes no end-to-end latency claim.
+
 P4 查询运行时采用会话内不可变 owner，key/value 先参数化，不把 Cx stringify 当作
 语义相等。owner 固定结果等价回调；真实接线必须区分语义和源码视图 key。
 显式 input 写入推进独立单调结果 stamp，revision 只划分编辑批次，避免同 revision
