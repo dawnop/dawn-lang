@@ -755,3 +755,21 @@ Int 上,末尾收一次和每步收一次结果相同(都是 mod 2³² 的同一
 **native 顺带补上 `dawn_hash_bytes`。** `Bytes` 是哈希标量(`hash_scalars`),而 C 运行时
 从来没给它写过哈希——`scalar_rt` 一路落到 `no_rt`。JVM 那边是 `Arrays.hashCode`,
 所以 C 侧照抄那个折叠,元素按**有符号** byte 取,这跟结构哈希是同一个形状。
+
+## Dictionary constructor identity correction (issues #144 and #146)
+
+A dictionary definition is identified by trait, instantiated subject and
+constructor arity. The same subject can require both a singleton and an
+applied dictionary, so deduplicating on the first two alone can connect an
+application to a private singleton constructor. Positive arities receive an
+explicit suffix in emitted dictionary names; zero-argument names stay intact.
+Primitive slots and implementation bridges must carry the same shape suffix:
+their bodies can read the argument fields of that specific dictionary class.
+Semantic dictionary-environment lookup remains keyed by trait and subject,
+since it selects evidence in scope rather than an emitted constructor.
+
+Validation must cover both request orders, repeated same-shape requests,
+zero-goal applications, real nested-list/map comparisons inside checker
+modules, and JVM/native execution. Reviewed Core and emission changes are
+recorded explicitly. This fixes generated-symbol identity without changing
+trait lookup, evidence order, or source-language behavior.

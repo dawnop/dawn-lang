@@ -29,7 +29,7 @@ use check/types.{
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty, erased_ctl_ty,
   EV_PACK_ID, ev_pack_ty, key_is_label, key_effect_id, label_key,
-  Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
+  Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
@@ -1344,6 +1344,12 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
 fn dict_key(tid: Int, subject: Ty) -> String =
   "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject)
 
+## Constructor shape is part of emitted identity, but not of semantic
+## evidence lookup in dict_env. Keep singleton names and distinguish every
+## applied shape independently of which module or use first requested it.
+fn dict_shape_suffix(nargs: Int) -> String =
+  if nargs == 0 { "" } else { "\$args" ++ to_string(nargs) }
+
 ## The trait method's signature with the subject substituted in and its
 ## projections rewritten to the impl's own bindings: what the impl's own
 ## method actually takes (the checker pinned that shape at registration), so
@@ -1472,7 +1478,8 @@ fn dict_def(
   goals: List[(Int, Ty)],
   param: Bool
 ) -> (LSt, String) = {
-  let key = dict_key(tid, subject)
+  let nargs = if param { len(goals) } else { 0 }
+  let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)
   for d in st.dicts {
     if d.key == key { return (st, key) }
   }
@@ -1486,7 +1493,7 @@ fn dict_def(
         key: key,
         trait_id: tid,
         subject: subject,
-        nargs: if param { len(goals) } else { 0 },
+        nargs: nargs,
         slots: []
       }]
   }
@@ -1665,7 +1672,8 @@ fn make_bridge(
   # dictionary class it reads its arguments out of, so `Box[Int]` and
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
   # spellings agree, which is why nothing that existed before changed name.
-  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
+  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++
+    dict_shape_suffix(if param { len(goals) } else { 0 })
   if list.any(st.lifted, f => f.name == name) {
     (st, name)
   } else {
@@ -1813,7 +1821,8 @@ fn make_prim_slot(
   method: String
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
-  let name = "prim$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
+  let name = "prim$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++
+    dict_shape_suffix(if param { len(goals) } else { 0 })
   if list.any(st.lifted, f => f.name == name) { return (st, name) }
   var st1 = st
   var ps: List[CParam] = []
@@ -3947,6 +3956,59 @@ fn slots_monotonic(slots: List[Option[Int]]) -> Bool = {
     }
   }
   true
+}
+
+test "dictionary constructors and slots keep their argument shape in either request order" {
+  let initial = LSt {
+    next_sym: 0, next_loop: 0, owner: "dictionary_shapes", cur_loop: -1,
+    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
+    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
+    prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
+    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None
+  }
+  for bridge in [false, true] {
+    # Exercise both slot producers directly. The explicit implementation is
+    # a lowering fixture, not a claim that source can override prelude Eq.
+    var start = initial
+    if bridge {
+      for imp in prelude_impls() {
+        if imp.trait_id == EQ_ID && imp.subject == TyInt {
+          start = LSt { ..start, impls: insert_impl(start.impls,
+            ImplI { ..imp, provided: ["eq"], owner: Some("implementation") }) }
+        }
+      }
+    }
+    let subject = if bridge { TyInt } else { TyTuple([TyInt]) }
+    let goals = [(EQ_ID, TyBool)]
+    for first in [false, true] {
+      let (a, first_key) = dict_def(start, EQ_ID, subject, goals, first)
+      let (b, second_key) = dict_def(a, EQ_ID, subject, goals, not first)
+      assert first_key != second_key
+      let (c, again) = dict_def(b, EQ_ID, subject, goals, first)
+      assert again == first_key && len(c.dicts) == len(b.dicts) && len(c.lifted) == len(b.lifted)
+      var names: List[String] = []
+      var arities: List[Int] = []
+      for d in c.dicts {
+        if d.subject == subject && d.trait_id == EQ_ID {
+          arities = arities ++ [d.nargs]
+          for slot in d.slots {
+            match slot {
+              CSlotFn(_, name) -> { names = names ++ [name] }
+              _ -> panic("expected generated equality slot")
+            }
+          }
+        }
+      }
+      assert arities == (if first { [1, 0] } else { [0, 1] })
+      assert len(names) == 2 && names[0] != names[1]
+    }
+  }
+  # An empty argument list is the same scaffold in both modes.
+  let (a, singleton) = dict_def(initial, EQ_ID, TyInt, [], false)
+  let (b, empty_apply) = dict_def(a, EQ_ID, TyInt, [], true)
+  assert singleton == empty_apply && len(a.dicts) == len(b.dicts)
+  assert dict_shape_suffix(0) != dict_shape_suffix(1)
+  assert dict_shape_suffix(1) != dict_shape_suffix(2)
 }
 
 test "constructor arguments evaluate in written order" {

@@ -1677,19 +1677,8 @@ test "scalar replay reuses a generic body under the candidate signature's binder
   assert actual.reused == 1 && actual.checked == 0
   assert actual.bodies.functions == expected.functions
   assert actual.bodies.cx.current_tparams == expected.cx.current_tparams
-  # The bound row of every binder in scope, compared entry by entry rather
-  # than map against map: comparing two `Map[Int, List[Int]]` values here
-  # links against a generated dictionary class that this module cannot load
-  # (see the report; it is a compiler defect, not a property of this test).
-  var bound_rows = 0
-  for (id, declared) in map.entries(expected.cx.current_tparam_bounds) {
-    match map.get(actual.bodies.cx.current_tparam_bounds, id) {
-      Some(replayed) -> { assert len(replayed) == len(declared) }
-      None -> panic("the replayed module lost a bound row")
-    }
-    bound_rows = bound_rows + 1
-  }
-  assert bound_rows == map.len(actual.bodies.cx.current_tparam_bounds) && bound_rows > 0
+  assert map.len(expected.cx.current_tparam_bounds) > 0
+  assert actual.bodies.cx.current_tparam_bounds == expected.cx.current_tparam_bounds
   assert actual.bodies.cx.frame == expected.cx.frame
   assert actual.bodies.cx.syms == expected.cx.syms
   assert actual.bodies.cx.decl_slots == expected.cx.decl_slots
