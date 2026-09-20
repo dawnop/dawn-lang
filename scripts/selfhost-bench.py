@@ -98,6 +98,14 @@ class BenchError(RuntimeError):
         self.exit_code = exit_code
 
 
+class HeapSampleWindowMiss(BenchError):
+    """A vanished process cannot supply a sample; never accept its flags."""
+
+    def __init__(self, message: str, elapsed_seconds: float) -> None:
+        super().__init__(message)
+        self.elapsed_seconds = elapsed_seconds
+
+
 class SchemaError(ValueError):
     pass
 
@@ -1197,17 +1205,33 @@ def query_max_heap(
     identity_reader: IdentityReader = read_process_stat,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> int:
-    if not identity_is_current(identity, identity_reader):
-        raise BenchError(f"Java process {identity.pid} exited before jcmd attach")
-    result = runner(
-        [os.fspath(jcmd), str(identity.pid), "VM.flags"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=8,
-    )
-    if not identity_is_current(identity, identity_reader):
-        raise BenchError(f"Java process {identity.pid} changed identity during jcmd attach")
+    started = time.monotonic()
+
+    def require_identity(phase: str) -> None:
+        current = identity_reader(identity.pid)
+        if current is None:
+            raise HeapSampleWindowMiss(
+                f"Java process {identity.pid} exited or became unavailable {phase} jcmd attach",
+                time.monotonic() - started,
+            )
+        if current.identity != identity:
+            raise BenchError(f"Java process {identity.pid} changed identity {phase} jcmd attach")
+
+    require_identity("before")
+    try:
+        result = runner(
+            [os.fspath(jcmd), str(identity.pid), "VM.flags"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8,
+        )
+    except subprocess.TimeoutExpired:
+        # A timeout with a live target is an attach failure, not a missed
+        # lifetime. PID reuse must likewise never enter the retry path.
+        require_identity("during")
+        raise
+    require_identity("during")
     if result.returncode != 0:
         raise BenchError(
             f"jcmd attach failed for {identity.pid}: "

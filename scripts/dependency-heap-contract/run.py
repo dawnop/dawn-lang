@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+import math
 import os
 from pathlib import Path
 import shutil
@@ -30,6 +31,8 @@ MUTATED_ASSERTIONS = {"heap.inherits_parent_max"}
 EXPECTED_ROLES = ("compiler", "dependency_reexec")
 OVERRIDE_HEAP_BYTES = 384 * 1024 * 1024
 FIXTURE_SLEEP_MILLIS = 4_000
+MAX_SAMPLE_ATTEMPTS = 3
+MAX_FIXTURE_SLEEP_MILLIS = 32_000
 FIXTURE_MARKER = "dependency-heap-contract-ok"
 
 
@@ -278,16 +281,20 @@ def build_mutant(
     return time.monotonic() - started
 
 
-def write_fixture(work: Path) -> tuple[Path, Path]:
-    fixture = work / "fixture.dawn"
+def write_fixture_source(fixture: Path, sleep_millis: int) -> None:
     fixture.write_text(
         'use java "java.lang.Thread"\n\n'
         "pub fn main() -> Unit !io = {\n"
-        f"  let _ = Thread.sleep({FIXTURE_SLEEP_MILLIS})\n"
+        f"  let _ = Thread.sleep({sleep_millis})\n"
         f'  println("{FIXTURE_MARKER}")\n'
         "}\n",
         encoding="utf-8",
     )
+
+
+def write_fixture(work: Path) -> tuple[Path, Path]:
+    fixture = work / "fixture.dawn"
+    write_fixture_source(fixture, FIXTURE_SLEEP_MILLIS)
     dependency = work / "empty.jar"
     with zipfile.ZipFile(dependency, "w") as archive:
         archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n\n")
@@ -318,16 +325,33 @@ def profile_case(
     env["JAVA_HOME"] = os.fspath(toolchain.java.parent.parent)
     if jvm_opts is not None:
         env["DAWN_JVM_OPTS"] = jvm_opts
-    result = bench.profile_command(
-        [launcher, "run", "--cp", dependency, fixture],
-        cwd=source_root,
-        env=env,
-        classifier=bench.workload_classifier("compiler"),
-        expected_roles=EXPECTED_ROLES,
-        java_roles=set(EXPECTED_ROLES),
-        jcmd=toolchain.jcmd,
-        timeout=30,
-    )
+    sleep_millis = FIXTURE_SLEEP_MILLIS
+    for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
+        write_fixture_source(fixture, sleep_millis)
+        try:
+            result = bench.profile_command(
+                [launcher, "run", "--cp", dependency, fixture],
+                cwd=source_root,
+                env=env,
+                classifier=bench.workload_classifier("compiler"),
+                expected_roles=EXPECTED_ROLES,
+                java_roles=set(EXPECTED_ROLES),
+                jcmd=toolchain.jcmd,
+                timeout=30 + sleep_millis / 1000,
+            )
+            break
+        except bench.HeapSampleWindowMiss as error:
+            if attempt == MAX_SAMPLE_ATTEMPTS:
+                raise ContractError(
+                    f"{name}: missed heap sampling window after {attempt} attempts: {error}"
+                ) from error
+            # Replay only this disposable fixture, after profile_command has
+            # cleaned up the previous process group. Never combine evidence
+            # across attempts or retry an assertion/identity/attach failure.
+            sleep_millis = min(MAX_FIXTURE_SLEEP_MILLIS, max(
+                sleep_millis * 2, math.ceil(error.elapsed_seconds * 2000) + 1000,
+            ))
+            print(f"RETRY {name}: {error}; fixture lifetime={sleep_millis}ms", flush=True)
     parent = result.roles.get("compiler", {})
     child = result.roles.get("dependency_reexec", {})
     return CaseEvidence(
@@ -423,6 +447,8 @@ def main() -> int:
         print("usage: run.py [--candidate-only | --matrix-selftest]", file=sys.stderr)
         return 2
 
+    sampling_tests = run_checked([sys.executable, HERE / "sampling_test.py"], cwd=ROOT)
+    print(sampling_tests.stdout + sampling_tests.stderr, end="")
     mutations = mutator_keys()
     matrix_text = MATRIX.read_text(encoding="utf-8")
     records = parse_matrix(matrix_text, mutations)

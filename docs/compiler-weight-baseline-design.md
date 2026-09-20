@@ -225,3 +225,24 @@ Phase 2 只修改 `maybe_with_known_deps` 创建的子编译器 JVM。父编译�
 本阶段不改变 `spawn_java`，因此 `run` 目标程序和 `TestMain` 的堆策略不随本次提交变化。
 `-Xss512m`、JAR 压缩、native strip 与 static link 也保持原状。#230 的 dependency re-exec
 堆继承范围至此完成，Phase 1 telemetry 继续负责观察，不为其他重量指标增加预算。
+
+### Heap sampling window recovery (#91)
+
+The profiler distinguishes an unavailable/exited process from a different
+`(pid, starttime)` before and after `jcmd`, including its timeout path. Neither
+case can contribute heap evidence. Identity changes remain fatal; only a missed
+process lifetime raises the dedicated `HeapSampleWindowMiss` error.
+
+The dependency contract may replay its disposable fixture at most three times.
+After a missed window, its next lifetime is the larger of twice the previous
+lifetime and twice the observed attach latency plus one second, capped at 32
+seconds. Each attempt gets a fresh process tree and its own complete evidence;
+the previous tree is cleaned up before a retry. Successful samples with unequal
+heaps, malformed flags, live-target attach failures and PID reuse are not retried.
+General benchmark workloads are never replayed by this mechanism.
+
+Deterministic sampling tests cover exit and reuse on both sides of attach,
+timeouts, bounded adaptive retries and preservation of unequal heap evidence.
+The existing compiling negative control still owns only
+`heap.inherits_parent_max`. Twenty consecutive main CI job successes without
+reruns remain a separate post-merge observation, not a local-test claim.
