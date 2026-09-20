@@ -2,6 +2,7 @@
 """Pin the timing recovery without relying on scheduler luck or weakening heap checks."""
 
 import importlib.util
+from concurrent.futures import Future
 from pathlib import Path
 import subprocess
 import sys
@@ -69,6 +70,28 @@ class SamplingTests(unittest.TestCase):
             with self.assertRaises(bench.BenchError) as raised:
                 self.query([self.same, self.same])
             self.assertNotIsInstance(raised.exception, bench.HeapSampleWindowMiss)
+
+    def test_concurrent_fatal_failure_wins_over_a_missed_window_in_either_order(self):
+        miss = bench.HeapSampleWindowMiss("exited", 5)
+        for fatal in (bench.BenchError("changed identity"), RuntimeError("attach failed")):
+            for outcomes in ([miss, fatal], [fatal, miss]):
+                futures = {}
+                for pid, error in enumerate(outcomes):
+                    future = Future()
+                    future.set_exception(error)
+                    futures[bench.ProcessIdentity(pid, 100)] = future
+                with self.assertRaises(bench.BenchError) as raised:
+                    bench.collect_heap_samples(futures)
+                self.assertNotIsInstance(raised.exception, bench.HeapSampleWindowMiss)
+
+    def test_collector_returns_complete_values_or_propagates_window_miss(self):
+        future = Future()
+        future.set_result(123)
+        self.assertEqual(bench.collect_heap_samples({self.identity: future}), {self.identity: 123})
+        missed = Future()
+        missed.set_exception(bench.HeapSampleWindowMiss("exited", 5))
+        with self.assertRaises(bench.HeapSampleWindowMiss):
+            bench.collect_heap_samples({self.identity: future, self.changed.identity: missed})
 
     def profile(self, outcomes):
         profiler = Mock(side_effect=outcomes)

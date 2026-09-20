@@ -240,6 +240,8 @@ seconds. Each attempt gets a fresh process tree and its own complete evidence;
 the previous tree is cleaned up before a retry. Successful samples with unequal
 heaps, malformed flags, live-target attach failures and PID reuse are not retried.
 General benchmark workloads are never replayed by this mechanism.
+When concurrent samples fail differently, any fatal error takes precedence over
+a missed window regardless of the order in which their futures were recorded.
 
 Deterministic sampling tests cover exit and reuse on both sides of attach,
 timeouts, bounded adaptive retries and preservation of unequal heap evidence.

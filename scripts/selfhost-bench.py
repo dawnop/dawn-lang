@@ -1240,6 +1240,24 @@ def query_max_heap(
     return parse_max_heap(result.stdout)
 
 
+def collect_heap_samples(futures: Mapping[ProcessIdentity, Future[int]]) -> dict[ProcessIdentity, int]:
+    values: dict[ProcessIdentity, int] = {}
+    errors: list[BenchError] = []
+    for identity, future in futures.items():
+        try:
+            values[identity] = future.result()
+        except BenchError as error:
+            errors.append(error)
+        except Exception as error:
+            errors.append(BenchError(f"jcmd attach failed for {identity.pid}: {error}"))
+    if errors:
+        # A late parent sample must not hide a child's fatal attach/identity
+        # failure just because its future was inserted first.
+        raise next((error for error in errors
+                    if not isinstance(error, HeapSampleWindowMiss)), errors[0])
+    return values
+
+
 def process_group_has_live_members(process_group: int) -> bool:
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -1430,16 +1448,7 @@ def profile_command(
             stdout = stdout_file.read().decode("utf-8", errors="replace")
             stderr = stderr_file.read().decode("utf-8", errors="replace")
 
-            heap_values: dict[ProcessIdentity, int] = {}
-            for identity, future in heap_futures.items():
-                try:
-                    heap_values[identity] = future.result()
-                except Exception as error:
-                    if isinstance(error, BenchError):
-                        raise error
-                    raise BenchError(
-                        f"jcmd attach failed for {identity.pid}: {error}"
-                    ) from error
+            heap_values = collect_heap_samples(heap_futures)
 
             roles: dict[str, dict[str, int | None]] = {}
             for role, identities in role_observations.items():
