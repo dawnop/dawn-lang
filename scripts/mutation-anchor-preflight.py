@@ -77,17 +77,17 @@ def modes(source, label):
     return sorted(set(keys))
 
 
-def shell_source(text, label):
+def shell_source(text, label, argument="$name"):
     # Select the existing mutation block by its mode argument, not by copying
     # its contents or executing the build-heavy shell surrounding it.
-    blocks = re.findall(r'(?m)^\s*python3 - "\$name"[^\n]*(?:\\\n[^\n]*)*<<\'PY\'\n(.*?)^PY$',
+    blocks = re.findall(r'(?m)^\s*python3 - "' + re.escape(argument) + r'"[^\n]*(?:\\\n[^\n]*)*<<\'PY\'\n(.*?)^PY$',
                         text, re.S | re.M)
     if len(blocks) != 1:
         raise PreflightError(f"{label}: expected one mutation Python block, found {len(blocks)}")
     return blocks[0]
 
 
-def exercise(root, source, label, mode, arguments, overrides=None):
+def exercise(root, source, label, mode, arguments, overrides=None, pass_mode=True):
     """Intercept the mutator's file API; writes never reach the repository."""
     original_read = Path.read_text
     original_open = builtins.open
@@ -117,7 +117,7 @@ def exercise(root, source, label, mode, arguments, overrides=None):
         return len(text)
 
     output = io.StringIO()
-    argv = [label, mode, *(str((root / arg).resolve()) for arg in arguments)]
+    argv = [label, *([mode] if pass_mode else []), *(str((root / arg).resolve()) for arg in arguments)]
     try:
         with patch.object(Path, "read_text", read_text), \
                 patch.object(Path, "write_text", write_text), \
@@ -162,10 +162,24 @@ def check(root, overrides=None):
             exercise(root, source, label, mode, arguments, subject)
             count += 1
 
+    label = "scripts/std-version-contract/run.sh"
+    source = shell_source((root / label).read_text(), label,
+                          "$probe/selfhost/src/embed/stdsrc.dawn")
+    exercise(root, source, label, "embedded-probe", ("selfhost/src/embed/stdsrc.dawn",),
+             overrides, pass_mode=False)
+    count += 1
+
     gm = runpy.run_path(str(root / "scripts/gate-map/gatemap.py"))
     tree = gm["Tree"](root, overrides=overrides)
     baseline = gm["Baseline"](tree)
     for mutant in gm["mutants"](baseline):
+        if mutant.record is not None:
+            rel = "scripts/gate-map/unseen.txt"
+            try:
+                mutant.record(tree.read(rel))
+            except (Exception, SystemExit) as error:
+                raise PreflightError(f"scripts/gate-map/gatemap.py:{mutant.name} [{rel}]: {error}") from error
+            count += 1
         for rel, edit in mutant.edits.items():
             try:
                 edit(tree.read(rel), rel)

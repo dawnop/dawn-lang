@@ -42,6 +42,16 @@ class PreflightTests(unittest.TestCase):
             p.exercise(p.ROOT, (p.ROOT / label).read_text(), label,
                        "surface-after-bodies", (".",), {target: original.replace(old, "")})
 
+    def test_gate_map_record_anchors_are_not_skipped(self):
+        target = "scripts/gate-map/unseen.txt"
+        original = (p.ROOT / target).read_text()
+        changed = "\n".join(line for line in original.splitlines()
+                            if not line.startswith("LICENSE ")) + "\n"
+        self.assertNotEqual(changed, original)
+        with self.assertRaisesRegex(p.PreflightError, "a-recorded-gap-with-no-reason") as raised:
+            p.check(p.ROOT, {target: changed})
+        self.assertIn(target, str(raised.exception))
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -74,6 +84,17 @@ class PreflightTests(unittest.TestCase):
         for source in ("", 'python3 - "$name" <<\'PY\'\npass\nPY\n' * 2):
             with self.assertRaises(p.PreflightError):
                 p.shell_source(source, "fixture.sh")
+
+    def test_embedded_std_probe_anchor_is_checked(self):
+        label = "scripts/std-version-contract/run.sh"
+        source = p.shell_source((p.ROOT / label).read_text(), label,
+                                "$probe/selfhost/src/embed/stdsrc.dawn")
+        target = "selfhost/src/embed/stdsrc.dawn"
+        original = (p.ROOT / target).read_text()
+        changed = original.replace('if name == "modules.txt"', 'if name == "missing.txt"')
+        with self.assertRaisesRegex(p.PreflightError, "embedded-probe"):
+            p.exercise(p.ROOT, source, label, "embedded-probe", (target,),
+                       {target: changed}, pass_mode=False)
 
     def test_no_builds_or_direct_writes(self):
         for source in (

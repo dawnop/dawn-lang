@@ -15,6 +15,8 @@ of `scripts/**/mutate.py` must match the adapters and explicit exclusions; addin
 a mutator without an adapter fails. The two shell contract adapters extract
 their existing mutation Python blocks without executing the surrounding shell.
 The Java classpath bracket mutant receives its existing instrumentation first.
+The embedded-stdlib corruption probe is checked separately from the named
+stdlib mutations, and gate-map's record edits retain their source anchors too.
 
 Gate-map edits are applied to its own baseline texts without running each
 mutated coverage map. Their existing cardinality contracts remain authoritative:
