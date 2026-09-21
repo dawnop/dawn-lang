@@ -140,7 +140,7 @@ def exercise(root, source, label, mode, arguments, overrides=None):
 
 def check(root, overrides=None):
     root = root.resolve()
-    found = {str(path.relative_to(root)) for path in (root / "scripts").rglob("mutate.py")}
+    found = {str(path.relative_to(root)) for path in root.glob("scripts/**/mutate.py")}
     expected = {f"scripts/{name}/mutate.py" for name in ADAPTERS.keys() | EXCLUSIONS.keys()}
     if found != expected:
         raise PreflightError(f"mutator inventory drift: unregistered={sorted(found - expected)}, missing={sorted(expected - found)}")

@@ -51,6 +51,14 @@ class PreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(p.PreflightError, "unregistered=.*new-contract/mutate.py"):
                 p.check(root)
 
+    def test_inventory_does_not_claim_all_scripts_as_covered(self):
+        gm = runpy.run_path(str(p.ROOT / "scripts/gate-map/gatemap.py"))
+        tree = gm["Tree"](p.ROOT, files=["scripts/manual.sh", "scripts/example/mutate.py"])
+        source = (p.ROOT / "scripts/mutation-anchor-preflight.py").read_text()
+        inputs = gm["python_inputs"](source, tree) | gm["path_tokens"](source, tree)
+        self.assertIn("scripts/example/mutate.py", inputs)
+        self.assertNotIn("scripts/manual.sh", inputs)
+
     def test_shell_anchors_use_the_real_embedded_mutator(self):
         label = "scripts/java-target-classpath-contract/run.sh"
         source = p.shell_source((p.ROOT / label).read_text(), label)
