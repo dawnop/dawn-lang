@@ -436,7 +436,9 @@ jobs:
     # are 78 to 174s, so 241s is a contended outlier and not a new level.
     # The rule does not have an exception for that: a claim is a claim about
     # the worst run in the window, so the line follows it up.
-    # budget: 3x 241s worst observed
+    # 2026-09-21: anchor preflight plus controls measured 10.955s locally.
+    # Add 11s to the previous 241s observation; the 13-minute ceiling still fits.
+    # budget: 3x 252s worst observed
     timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
@@ -451,6 +453,11 @@ jobs:
           fetch-depth: 0
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
+
+      - name: mutation anchors match before compiler builds
+        run: |
+          python3 scripts/mutation-anchor-preflight.py
+          python3 scripts/mutation-anchor-preflight-test.py
 
       # The 3x rule below was prose until 2026-08-10, and prose drifted: two
       # jobs sat three seconds under their own bound for a day. It reads the
