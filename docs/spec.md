@@ -588,6 +588,13 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl；
   `Display` 不可 derive（理由见下面 `Display` 那条）。
   元组没有 head，写不出 impl，前四者对元组由编译器按结构合成。
+- **`derive` 是一张封闭表**：可 derive 的只有 `Ord` 与 `Show` 两项，表在编译器里只写一处
+  （`types.derivable_traits`），`derive` 列表里任何别的名字都是编译错误，诊断列出表内各项。
+  `Eq`/`Hash` 不在表里，因为它们**不需要请求**：每个类型都有结构化的 `Eq`/`Hash`（§4.3、
+  下面 `Eq`/`Hash` 那条），写 impl 是覆盖（Go 的结构体 `==` 同此）；`Show` 需要请求，
+  因为渲染把表示印出来，是一个呈现决定，相等与哈希不是（opaque 类型同理，§2.7）。
+  用户 trait 不能 derive：derive 要编译器知道该 trait 的结构规则，Dawn 没有让库陈述它的
+  编译期元编程（Haskell 2010 的 deriving 同样只收 Prelude 的封闭集合）。
 - **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
   `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur
   fn iter_done(c: C, k: C.Cur) -> Bool  fn iter_next(c: C, k: C.Cur) -> C.Cur
