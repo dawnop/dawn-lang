@@ -380,7 +380,7 @@ expect_diags pkg_reject_private_leak 1 \
 expect_diags pkg_reject_impl_assoc 1 \
   'observable impl `HasItem[Open]` exposes private type `Secret`'
 expect_project_ok pkg_foreign/lib
-expect_project_fails pkg_foreign '`seam` is package-private to package `lib`'
+expect_project_fails pkg_foreign '`seam` is package-private to package `surface_lib`'
 
 # Every name `dawn doc` publishes for one module, sorted, one per line.
 doc_names() {
