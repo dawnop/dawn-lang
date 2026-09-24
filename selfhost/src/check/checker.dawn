@@ -3996,17 +3996,17 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
           match constructor {
             None -> {
               let refused = pkg_private(exp, cname)
-              let diagnostic = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+              let missing = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
                   "` has no exported constructor `" ++ cname ++ "`",
                 hint: suggest.hint(cname, map.keys(exp.ctors)) }
-              let answer = if refused { pkg_private_export(exp, cname) } else { diagnostic }
+              let diagnostic = if refused { pkg_private_export(exp, cname) } else { missing }
               let diagnostic_cx = match pattern_cx.function_reads {
                 None -> pattern_cx
                 Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
-                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(answer))) }
+                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(diagnostic))) }
               }
               var cx1 = if refused { pkg_private_err(diagnostic_cx, exp, cname, nlo, nhi) } else {
-                cerr_o(diagnostic_cx, diagnostic.message, nlo, nhi, diagnostic.hint)
+                cerr_o(diagnostic_cx, missing.message, nlo, nhi, missing.hint)
               }
               for a in pargs {
                 let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
