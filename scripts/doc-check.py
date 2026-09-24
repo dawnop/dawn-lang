@@ -368,6 +368,14 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
+        "an unused import is an error, decided per name",
+        (
+            ("docs/spec.md", "**未使用的引入是编译错误**（`unused import: <name>`），不是警告"),
+            ("docs/spec.en.md", "**An unused import is a compile error** (`unused import: "
+             "<name>`), not a warning"),
+        ),
+    ),
+    (
         "failure payload contract",
         (
             ("docs/spec.md", "**载荷契约**（对每个后端）："),

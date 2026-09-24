@@ -62,9 +62,12 @@ def main():
         # and installing it is putting that row back. A product that installs
         # no row leaves the declaration where the header pass left it, so its
         # body's bindings are handed out a second time.
+        # The import goes too: an import nothing uses is an error, and a
+        # mutant that does not compile proves nothing.
         ("owner-row-not-installed",
          "    decl_slots: installed_slots(current, product.owner_decl, product.owner_slots),",
-         "    decl_slots: current.decl_slots,"),
+         "    decl_slots: current.decl_slots,",
+         ("slots_of, installed_slots, with_slots", "slots_of, with_slots")),
         # Six controls stood here and are gone with the decisions they turned
         # off (K5). `function-read-relocation`, `bound-key`,
         # `used-effect-domain` and `sealed-signature` replaced a relocation
@@ -84,7 +87,13 @@ def main():
                             ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         target = root / "selfhost/src/check/body_product.dawn"
-        for name, source in [("positive", original)] + [(n, edit(original, a, b)) for n, a, b in variants]:
+        mutants = []
+        for n, a, b, *also in variants:
+            source = edit(original, a, b)
+            for extra_old, extra_new in also:
+                source = edit(source, extra_old, extra_new)
+            mutants.append((n, source))
+        for name, source in [("positive", original)] + mutants:
             target.write_text(source)
             status, output = run("test", target)
             if name == "positive":

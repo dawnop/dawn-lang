@@ -207,8 +207,6 @@ self_test() {
     local d="$1"
     mkdir -p "$d/corpus"
     cat > "$d/corpus/effect_probe.dawn" <<'EOF'
-use std/io
-
 effect Ask {
   fn ask() -> Int
 }

@@ -197,6 +197,10 @@ new_never_mutant use-pop-for-wide-bottom
 replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
   '    CallTwo -> { m.visitInsn(OP_POP2) }' \
   '    CallTwo -> { m.visitInsn(OP_POP) }'
+# OP_POP2's import goes with its only use: an unused import is an error
+replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
+  'OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD' \
+  'OP_NEW, OP_POP, OP_PUTFIELD'
 build_never_mutant use-pop-for-wide-bottom
 expect_never_marker use-pop-for-wide-bottom NEVER_WIDE_SAM_ADAPTER_TERMINATION
 

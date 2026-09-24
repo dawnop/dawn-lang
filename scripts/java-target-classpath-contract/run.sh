@@ -186,10 +186,16 @@ EOF
 cat > "$work/asm/src/main.dawn" <<'EOF'
 use java "org.objectweb.asm.ClassWriter"
 
+# named in a signature, so the import is used (an unused one is an error)
+fn keep(w: ClassWriter) -> ClassWriter = w
+
 pub fn main() -> Unit !io = ()
 EOF
 cat > "$work/coursier/src/main.dawn" <<'EOF'
 use java "coursierapi.Fetch"
+
+# named in a signature, so the import is used (an unused one is an error)
+fn keep(f: Fetch) -> Fetch = f
 
 pub fn main() -> Unit !io = ()
 EOF

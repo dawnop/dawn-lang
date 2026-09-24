@@ -138,8 +138,6 @@ if ! "$DAWN" --version > "$OUT/version" 2>&1 || [ ! -s "$OUT/version" ]; then
 fi
 
 cat > "$OUT/canary.dawn" <<'CANARY'
-use std/io
-
 pub fn main() -> Unit !io = println("twin-canary")
 CANARY
 "$DAWN" run "$OUT/canary.dawn" > "$OUT/canary.out" 2>&1

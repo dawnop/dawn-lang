@@ -159,13 +159,19 @@ MUTATIONS = {
         LSPC,
         "fn may_name_module(qc: QCx, path: String) -> Bool =\n"
         "  audience_covers(declared_audience(path), AModule(qc.entry.mod_path, package_of(qc.entry.cx)))\n",
-        "fn may_name_module(qc: QCx, path: String) -> Bool = true\n",
+        # `true || ...` rather than `true`: the call is the only use of several
+        # imports, and an import nothing uses is an error
+        "fn may_name_module(qc: QCx, path: String) -> Bool =\n"
+        "  true || audience_covers(declared_audience(path), AModule(qc.entry.mod_path, package_of(qc.entry.cx)))\n",
     ),
     # 16 -- the surface is validated before any body
     "surface-after-bodies": (
         CHECKER,
         "  cx1 = pass_export_surface(cx1, m)\n"
         "  let no_spans: Map[(Int, Int), TySpan] = map.empty()\n",
+        # `if false` rather than nothing: the call is the pass's only use in
+        # this module, and an import nothing uses is an error
+        "  if false { cx1 = pass_export_surface(cx1, m) }\n"
         "  let no_spans: Map[(Int, Int), TySpan] = map.empty()\n",
     ),
     # 17 -- the exporter validates its own surface, the importer does not

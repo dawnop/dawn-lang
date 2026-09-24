@@ -130,7 +130,11 @@ def main():
     (fixture / "dawn.toml").write_text((HERE / "dawn.toml").read_text())
     probe = (HERE / "body-probe.dawn.txt").read_text()
     if args.typed:
-        probe = probe.replace("use relocation\n", "use relocation\nuse typed_projection\n")
+        # every use of `relocation` and of `check_fn` is replaced below, and an
+        # import nothing uses is an error
+        probe = probe.replace("use relocation\n", "use typed_projection\n")
+        probe = probe.replace("{headers_for_body_probe, check_fn, check_module}",
+                              "{headers_for_body_probe, check_module}")
         probe = probe.replace("use typed_projection\n", "use typed_projection\nuse compiler/check/body_product\n")
         for old, new in [
             ("pub type Trial = { name: String,", "pub type Trial = { assembled: Cx, raw: TFun, name: String,"),
@@ -205,6 +209,10 @@ def main():
             if typed_source.count(old) != 1:
                 raise RuntimeError("Module assembly mutation anchor drifted")
             typed_source = typed_source.replace(old, new)
+            # a mutant that spells std/list brings the import it needs; the
+            # unmutated module has no use for it, and an unused import is an error
+            if "list." in new:
+                typed_source = typed_source.replace("use compiler/check/cx.", "use std/list\nuse compiler/check/cx.", 1)
         (fixture / "src/typed_projection.dawn").write_text(typed_source)
     (fixture / "src/bodyprobe.dawn").write_text(probe)
     # a project's entry module is src/main.dawn (spec §10.5); the fixture's own

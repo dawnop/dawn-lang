@@ -65,6 +65,9 @@ def main():
     reference = (HERE / "reference-tests.dawn.txt").read_text()
     reference = edit(reference, "use std/io\n",
                      "use std/io\nuse compiler/driver/incremental\n")
+    # both calls below are replaced, and an import nothing uses is an error
+    reference = edit(reference, "LocDiag, analyze_program, analyze_reference}",
+                     "LocDiag, analyze_reference}")
     reference = edit(reference, "use compiler/check/jsig.{jsig_refused}",
                      "use compiler/check/jsig.{jsig_refused, refused_probe}")
     reference = edit(reference, "    for loaded in cases {\n      for opts in [ct_default(), ct_fuel(0)] {",

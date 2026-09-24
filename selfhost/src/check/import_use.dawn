@@ -1,0 +1,552 @@
+# An import nothing refers to is a compile error (spec §10.2,
+# docs/unused-imports-design.md). This module decides which imports those are.
+#
+# Why a walk over the syntax and not a flag set at each lookup: the checker
+# resolves a name in a dozen tables (functions, types, constructors, traits,
+# effects, constants, aliases, module aliases, Java classes), and a body the
+# incremental engine replays from a saved product performs none of those
+# lookups again. A "used" bit written at lookup time would be right for a cold
+# check and wrong for a replayed one. The syntax is the same in both, and
+# which import a spelling can reach is fixed once `pass_imports` has run, so
+# the answer here is a function of the module's text and its import tables.
+#
+# The walk errs one way only. A spelling that merely looks like an imported
+# name -- a local `let` shadowing it is subtracted, but a record field that
+# happens to share the name is not a spelling this walk ever sees -- can only
+# make an import look used. It can never make a used import look unused,
+# because every position a name can resolve through is visited. A missed
+# error costs a dead line; a false one breaks a correct program.
+
+use std/map
+use std/set
+use std/str
+use check/cx.{Cx, cerr_h, effect_of}
+use check/types.{adt_of}
+use front/ast.{
+  Module, Decl, DFn, DEffect, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest,
+  FnDecl, Param, LambdaParam, TypeParamDecl, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
+  Expr, EVar, EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  EUnwrap, EIndex, EReturn, EStr, EComptime, EBinary, EUnary, EIf, EMatch, EBlock,
+  EHandle, SPInterp, LeExpr, LeSpread, LeIf, Arg, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
+  SAssert, SWhile, SFor, Pattern, PLit, PBind, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList, PatArg,
+  ImportName, import_local
+}
+
+## What a module's code spells, outside its `use` declarations: `names` holds
+## every unqualified spelling in any namespace (value, type, constructor,
+## trait, effect), `quals` every qualifier in front of a `.` that can only be
+## a module alias. `bound` is the walk's own scope, not part of the answer.
+type Refs = { names: Set[String], quals: Set[String] }
+
+type Walk = { refs: Refs, aliases: Set[String], javas: Set[String] }
+
+fn note(w: Walk, name: String) -> Walk =
+  Walk { ..w, refs: Refs { ..w.refs, names: set.insert(w.refs.names, name) } }
+
+fn note_qual(w: Walk, q: String) -> Walk =
+  Walk { ..w, refs: Refs { ..w.refs, quals: set.insert(w.refs.quals, q) } }
+
+## A spelling that may carry one qualifier: `dep.Ask` in an effect row or a
+## handler, `m.Tr` wherever a trait is named. The part before the dot is a
+## module alias (or, uppercase, a type parameter, which no import binds); the
+## part after it is not an unqualified spelling of anything this module
+## imports, so it is not noted.
+fn note_spelled(w: Walk, name: String) -> Walk =
+  match str.index_of(name, ".") {
+    Some(i) -> note_qual(w, str.slice(name, 0, i))
+    None -> note(w, name)
+  }
+
+fn note_all(w: Walk, names: List[String]) -> Walk = {
+  var o = w
+  for n in names { o = note_spelled(o, n) }
+  o
+}
+
+# ---- types ----
+
+fn walk_tref(w: Walk, t: TypeRef) -> Walk =
+  match t {
+    TNamed(name, args, eargs, _, _) -> walk_eargs(walk_trefs(note(w, name), args), eargs)
+    TQual(q, _, args, eargs, _, _) -> walk_eargs(walk_trefs(note_qual(w, q), args), eargs)
+    # the subject is a type parameter and the member an associated name;
+    # neither is something a `use` binds
+    TAssoc(_, _, _, _) -> w
+    TTuple(elems, _, _) -> walk_trefs(w, elems)
+    TFn(params, ret, effs, _, _) -> note_all(walk_tref(walk_trefs(w, params), ret), effs)
+  }
+
+fn walk_trefs(w: Walk, ts: List[TypeRef]) -> Walk = {
+  var o = w
+  for t in ts { o = walk_tref(o, t) }
+  o
+}
+
+fn walk_eargs(w: Walk, es: List[EffArg]) -> Walk = {
+  var o = w
+  for e in es { o = note_all(o, e.atoms) }
+  o
+}
+
+fn walk_opt_tref(w: Walk, t: Option[TypeRef]) -> Walk =
+  match t {
+    Some(x) -> walk_tref(w, x)
+    None -> w
+  }
+
+fn walk_tparams(w: Walk, tps: List[TypeParamDecl]) -> Walk = {
+  var o = w
+  for tp in tps {
+    for b in tp.bounds { o = note_spelled(o, b.name) }
+  }
+  o
+}
+
+# ---- expressions ----
+
+## Is `target` a spelling that settles `target.f` somewhere other than this
+## module's function namespace -- a module alias, or a bare `use java` class
+## name in receiver position? Then `f` is a member of that thing and not an
+## unqualified spelling (the same two cases `name_refs` subtracts, for the
+## same reason).
+fn member_of_other(w: Walk, bound: Set[String], target: Expr) -> Bool =
+  match target {
+    EVar(q, _, _) -> not set.has(bound, q) && set.has(w.aliases, q)
+    ECtor(cn, _, _) -> set.has(w.javas, cn)
+    _ -> false
+  }
+
+## `target` in front of a `.`: an unbound name there is the one position a
+## module alias is spelled in an expression (`m.f(..)`, `m.C`, `m.NAME`). A
+## module alias cannot be shadowed by a local (spec §10.3), so the only
+## binding it could be confused with is subtracted here too.
+fn qualify_of(w: Walk, bound: Set[String], target: Expr) -> Walk =
+  match target {
+    EVar(q, _, _) -> if set.has(bound, q) { w } else { note_qual(w, q) }
+    _ -> w
+  }
+
+fn walk_args(w: Walk, bound: Set[String], args: List[Arg]) -> Walk = {
+  var o = w
+  # a named argument's name is a parameter or a field, never an import
+  for a in args { o = walk_expr(o, bound, a.e) }
+  o
+}
+
+fn bind_lparams(bound: Set[String], ps: List[LambdaParam]) -> Set[String] = {
+  var o = bound
+  for p in ps { o = set.insert(o, p.name) }
+  o
+}
+
+fn walk_lparams(w: Walk, ps: List[LambdaParam]) -> Walk = {
+  var o = w
+  for p in ps { o = walk_opt_tref(o, p.ann) }
+  o
+}
+
+fn walk_expr(w: Walk, bound: Set[String], e: Expr) -> Walk =
+  match e {
+    # a local binding of the same name is what this spelling reaches. A bare
+    # spelling is never a module alias, even when one is spelled the same:
+    # with `use std/map` in scope, `map(xs, f)` is the prelude function, and
+    # only `map.insert(..)` names the module (qualify_of below).
+    EVar(name, _, _) -> if set.has(bound, name) { w } else { note(w, name) }
+    EApply(target, args, _, _) -> walk_args(walk_expr(w, bound, target), bound, args)
+    EMethod(target, name, args, _, _, _, _) -> {
+      # `x.f(a)` may be `f(x, a)` (UFCS, spec §4.3), so `f` is a spelling
+      let o = if member_of_other(w, bound, target) { w } else { note(w, name) }
+      walk_args(walk_expr(qualify_of(o, bound, target), bound, target), bound, args)
+    }
+    ELambda(params, body, _, _, _) ->
+      walk_expr(walk_lparams(w, params), bind_lparams(bound, params), body)
+    ECtor(name, _, _) -> note(w, name)
+    ERecord(name, fields, spread, _, _, _, _) -> {
+      var o = walk_args(note(w, name), bound, fields)
+      match spread {
+        Some(sp) -> { o = walk_expr(o, bound, sp) }
+        None -> ()
+      }
+      o
+    }
+    EFieldAcc(target, _, _, _, _, _) -> walk_expr(qualify_of(w, bound, target), bound, target)
+    EListLit(elems, _, _) -> {
+      var o = w
+      for x in elems {
+        match x {
+          LeExpr(v) -> { o = walk_expr(o, bound, v) }
+          LeSpread(v, _, _) -> { o = walk_expr(o, bound, v) }
+          LeIf(arms, _, _) -> {
+            for a in arms { o = walk_expr(walk_expr(o, bound, a.cond), bound, a.body) }
+          }
+        }
+      }
+      o
+    }
+    ETupleLit(elems, _, _) -> walk_exprs(w, bound, elems)
+    EPropagate(v, _, _) -> walk_expr(w, bound, v)
+    EUnwrap(v, _, _) -> walk_expr(w, bound, v)
+    EIndex(t, i, _, _) -> walk_expr(walk_expr(w, bound, t), bound, i)
+    EReturn(v, _, _) ->
+      match v {
+        Some(x) -> walk_expr(w, bound, x)
+        None -> w
+      }
+    EStr(parts, _, _) -> {
+      var o = w
+      for pt in parts {
+        match pt {
+          SPInterp(x) -> { o = walk_expr(o, bound, x) }
+          _ -> ()
+        }
+      }
+      o
+    }
+    EComptime(body, _, _) -> walk_expr(w, bound, body)
+    EBinary(_, l, r, _, _, _, _) -> walk_expr(walk_expr(w, bound, l), bound, r)
+    EUnary(_, v, _, _) -> walk_expr(w, bound, v)
+    EIf(c, t, els, _, _) -> {
+      let o = walk_expr(walk_expr(w, bound, c), bound, t)
+      match els {
+        Some(x) -> walk_expr(o, bound, x)
+        None -> o
+      }
+    }
+    EMatch(scrut, arms, _, _) -> {
+      var o = walk_expr(w, bound, scrut)
+      for arm in arms {
+        o = walk_pat(o, arm.pat)
+        let inner = bind_pat(bound, arm.pat)
+        match arm.guard {
+          Some(g) -> { o = walk_expr(o, inner, g) }
+          None -> ()
+        }
+        o = walk_expr(o, inner, arm.body)
+      }
+      o
+    }
+    EBlock(stmts, tail, _, _) -> {
+      var o = w
+      var b = bound
+      for st in stmts {
+        let (o1, b1) = walk_stmt(o, b, st)
+        o = o1
+        b = b1
+      }
+      match tail {
+        Some(t) -> walk_expr(o, b, t)
+        None -> o
+      }
+    }
+    # the handled effect is spelled here; an arm's name is one of its
+    # operations, answered rather than called
+    EHandle(name, cells, arms, rest, _, _, _, _) -> {
+      var o = note_spelled(w, name)
+      for c in cells { o = walk_expr(walk_tref(o, c.ann), bound, c.init) }
+      for a in arms {
+        o = walk_expr(walk_lparams(o, a.params), bind_lparams(bound, a.params), a.body)
+      }
+      walk_expr(o, bound, rest)
+    }
+    _ -> w
+  }
+
+fn walk_exprs(w: Walk, bound: Set[String], es: List[Expr]) -> Walk = {
+  var o = w
+  for x in es { o = walk_expr(o, bound, x) }
+  o
+}
+
+## A statement's spellings, and the scope the next statement sees.
+fn walk_stmt(w: Walk, bound: Set[String], s: Stmt) -> (Walk, Set[String]) =
+  match s {
+    SLet(name, _, ann, init, _, _) ->
+      (walk_expr(walk_opt_tref(w, ann), bound, init), set.insert(bound, name))
+    SLetPat(pat, _, init, _, _) ->
+      (walk_pat(walk_expr(w, bound, init), pat), bind_pat(bound, pat))
+    # a local function is in scope in its own body and after it
+    SLocalFn(name, params, ret, effs, body, _, _, _, _) -> {
+      let inner = set.insert(bound, name)
+      let o = note_all(walk_tref(walk_lparams(w, params), ret), effs)
+      (walk_expr(o, bind_lparams(inner, params), body), inner)
+    }
+    SAssign(_, value, _, _, _, _) -> (walk_expr(w, bound, value), bound)
+    SExpr(e, _, _) -> (walk_expr(w, bound, e), bound)
+    SAssert(cond, _, _, _) -> (walk_expr(w, bound, cond), bound)
+    SWhile(cond, body, _, _) -> (walk_expr(walk_expr(w, bound, cond), bound, body), bound)
+    SFor(pat, from, to, body, _, _) -> {
+      var o = walk_expr(w, bound, from)
+      match to {
+        Some(t) -> { o = walk_expr(o, bound, t) }
+        None -> ()
+      }
+      o = walk_pat(o, pat)
+      (walk_expr(o, bind_pat(bound, pat), body), bound)
+    }
+  }
+
+# ---- patterns ----
+
+## The constructors, constants and qualifiers a pattern spells.
+fn walk_pat(w: Walk, p: Pattern) -> Walk =
+  match p {
+    PLit(lit, _, _) -> walk_expr(w, set.empty(), lit)
+    POr(alts) -> {
+      var o = w
+      for a in alts { o = walk_pat(o, a) }
+      o
+    }
+    PCtor(name, args, _, _, _, _, _) -> walk_pargs(note(w, name), args)
+    PRecord(name, fields, _, _, _, _, _) -> walk_pargs(note(w, name), fields)
+    PQual(q, _, args, _, _, _, _, _) -> walk_pargs(note_qual(w, q), args)
+    PQualRecord(q, _, fields, _, _, _, _, _) -> walk_pargs(note_qual(w, q), fields)
+    PTuple(elems, _, _) -> {
+      var o = w
+      for x in elems { o = walk_pat(o, x) }
+      o
+    }
+    PList(pre, _, _, _, post, _, _) -> {
+      var o = w
+      for x in pre { o = walk_pat(o, x) }
+      for x in post { o = walk_pat(o, x) }
+      o
+    }
+    _ -> w
+  }
+
+fn walk_pargs(w: Walk, args: List[PatArg]) -> Walk = {
+  var o = w
+  for a in args { o = walk_pat(o, a.pat) }
+  o
+}
+
+## The names a pattern binds.
+fn bind_pat(bound: Set[String], p: Pattern) -> Set[String] =
+  match p {
+    PBind(name, _, _) -> set.insert(bound, name)
+    POr(alts) -> {
+      var o = bound
+      for a in alts { o = bind_pat(o, a) }
+      o
+    }
+    PCtor(_, args, _, _, _, _, _) -> bind_pargs(bound, args)
+    PRecord(_, fields, _, _, _, _, _) -> bind_pargs(bound, fields)
+    PQual(_, _, args, _, _, _, _, _) -> bind_pargs(bound, args)
+    PQualRecord(_, _, fields, _, _, _, _, _) -> bind_pargs(bound, fields)
+    PTuple(elems, _, _) -> {
+      var o = bound
+      for x in elems { o = bind_pat(o, x) }
+      o
+    }
+    PList(pre, _, rest_name, _, post, _, _) -> {
+      var o = bound
+      for x in pre { o = bind_pat(o, x) }
+      match rest_name {
+        Some(n) -> { o = set.insert(o, n) }
+        None -> ()
+      }
+      for x in post { o = bind_pat(o, x) }
+      o
+    }
+    _ -> bound
+  }
+
+fn bind_pargs(bound: Set[String], args: List[PatArg]) -> Set[String] = {
+  var o = bound
+  for a in args { o = bind_pat(o, a.pat) }
+  o
+}
+
+# ---- declarations ----
+
+fn walk_params(w: Walk, bound: Set[String], ps: List[Param]) -> Walk = {
+  var o = w
+  for p in ps {
+    o = walk_tref(o, p.tref)
+    match p.default {
+      Some(d) -> { o = walk_expr(o, bound, d) }
+      None -> ()
+    }
+  }
+  o
+}
+
+fn bind_params(ps: List[Param]) -> Set[String] = {
+  var o: Set[String] = set.empty()
+  for p in ps { o = set.insert(o, p.name) }
+  o
+}
+
+fn walk_fn(w: Walk, f: FnDecl) -> Walk = {
+  # a default is checked in the declaring scope, before any parameter exists
+  var o = walk_params(walk_tparams(w, f.tparams), set.empty(), f.params)
+  o = note_all(walk_opt_tref(o, f.ret), f.effs)
+  walk_expr(o, bind_params(f.params), f.body)
+}
+
+fn walk_decl(w: Walk, d: Decl) -> Walk =
+  match d {
+    DFn(f) -> walk_fn(w, f)
+    DEffect(e) -> {
+      var o = w
+      for op in e.ops { o = walk_tref(walk_params(o, set.empty(), op.params), op.ret) }
+      o
+    }
+    DType(t) -> {
+      var o = w
+      for c in t.ctors {
+        for fd in c.fields { o = walk_tref(o, fd.tref) }
+      }
+      for b in t.derives { o = note_spelled(o, b.name) }
+      walk_opt_tref(o, t.alias_target)
+    }
+    DConst(_, _, ann, init, _, _, _, _) -> walk_expr(walk_tref(w, ann), set.empty(), init)
+    DTrait(_, _, _, _, methods, _, eff_assoc, _, _, _, _, _) -> {
+      var o = w
+      for m in methods {
+        o = note_all(walk_tref(walk_params(o, set.empty(), m.params), m.ret), m.effs)
+        match m.body {
+          Some(b) -> { o = walk_expr(o, bind_params(m.params), b) }
+          None -> ()
+        }
+      }
+      for ea in eff_assoc {
+        match ea.default {
+          Some(atoms) -> { o = note_all(o, atoms) }
+          None -> ()
+        }
+      }
+      o
+    }
+    DImpl(tparams, trait_name, _, _, subject, methods, assoc, eff_binds, _, _) -> {
+      var o = walk_tref(note_spelled(walk_tparams(w, tparams), trait_name), subject)
+      for m in methods { o = walk_fn(o, m) }
+      for a in assoc { o = walk_tref(o, a.tref) }
+      for b in eff_binds { o = note_all(o, b.atoms) }
+      o
+    }
+    DUseJava(_, _, _, _, _) -> w
+    DUseModule(_, _, _, _, _, _, _) -> w
+    DTest(_, body, _, _, _, _) -> walk_expr(w, set.empty(), body)
+  }
+
+## Everything the module spells outside its imports, tests included: a
+## test block shares the file's `use` header, so what it uses is used.
+fn module_refs(cx: Cx, m: Module) -> Refs = {
+  var w = Walk { refs: Refs { names: set.empty(), quals: set.empty() },
+    aliases: set.from(map.keys(cx.module_aliases)), javas: set.from(map.keys(cx.java_classes)) }
+  for d in m.decls { w = walk_decl(w, d) }
+  w.refs
+}
+
+## Every spelling a selectively imported name can be reached through: the name
+## itself, a type's constructors (importing a type imports them, spec §10.3),
+## an effect's operations (importing an effect makes them callable). A
+## constructor or operation the module also imports by its own name is
+## reached through that import, not this one: `use m.{Shape, Circle}` with only
+## `Circle` spelled leaves `Shape` removable, and the error says so.
+fn reach_of(cx: Cx, named: Set[String], name: String) -> List[String] = {
+  var out = [name]
+  match map.get(cx.adts_by_name, name) {
+    Some(aid) -> {
+      for c in adt_of(cx.adts, aid).ctors {
+        if c.name != name && not set.has(named, c.name) { out = out ++ [c.name] }
+      }
+    }
+    None -> ()
+  }
+  match map.get(cx.effects, name) {
+    Some(eid) -> {
+      for op in effect_of(cx, eid).ops {
+        if not set.has(named, op) { out = out ++ [op] }
+      }
+    }
+    None -> ()
+  }
+  out
+}
+
+## Every name the module imports selectively, whatever it resolved to.
+fn selectively_named(m: Module) -> Set[String] = {
+  var out: Set[String] = set.empty()
+  for d in m.decls {
+    match d {
+      DUseModule(_, Some(names), _, _, _, _, _) -> {
+        for n in names { out = set.insert(out, import_local(n)) }
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## Where a selective list entry ends: after its rename when it has one.
+fn item_hi(n: ImportName) -> Int =
+  match n.local {
+    Some(r) -> r.hi
+    None -> n.hi
+  }
+
+fn any_in(names: Set[String], xs: List[String]) -> Bool = {
+  for x in xs {
+    if set.has(names, x) { return true }
+  }
+  false
+}
+
+fn unused(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "unused import: " ++ name, lo, hi,
+    "remove it: nothing in this module, its tests included, refers to it")
+
+## Report every import nothing refers to, in source order -- but only for a
+## module that has no other diagnostic. A body that failed to check may have
+## stopped before the spelling that uses an import, so the use set of a
+## module with errors is not known to be complete, and a false "unused" on
+## top of a real error sends the author the wrong way.
+##
+## Only imports that resolved are asked about: one that did not has already
+## been reported (a missing module, a private name) or was refused, and it
+## is not an import of anything.
+pub fn report_unused_imports(cx: Cx, m: Module) -> Cx = {
+  if cx.diags != [] { return cx }
+  let refs = module_refs(cx, m)
+  let named = selectively_named(m)
+  var cx1 = cx
+  for d in m.decls {
+    match d {
+      DUseJava(fqcn, _, _, nlo, nhi) -> {
+        let simple = match str.last_index_of(fqcn, ".") {
+          Some(i) -> str.drop(fqcn, i + 1)
+          None -> fqcn
+        }
+        if map.has(cx.java_classes, simple) && not set.has(refs.names, simple) {
+          cx1 = unused(cx1, simple, nlo, nhi)
+        }
+      }
+      DUseModule(segs, selective, aname, _, _, nlo, nhi) ->
+        match selective {
+          None -> {
+            let (bound_name, alo, ahi) = match aname {
+              Some(n) -> (n.name, n.lo, n.hi)
+              None -> (segs[len(segs) - 1], nlo, nhi)
+            }
+            if map.has(cx.module_aliases, bound_name) && not set.has(refs.quals, bound_name) {
+              cx1 = unused(cx1, bound_name, alo, ahi)
+            }
+          }
+          Some(names) -> {
+            for n in names {
+              # a renamed import is spelled, and so used, by its local name;
+              # the report names what the author wrote, the exported name
+              let bound_as = import_local(n)
+              if map.has(cx.imported_names, bound_as) && not any_in(refs.names, reach_of(cx, named, bound_as)) {
+                cx1 = unused(cx1, n.name, n.lo, item_hi(n))
+              }
+            }
+          }
+        }
+      _ -> ()
+    }
+  }
+  cx1
+}

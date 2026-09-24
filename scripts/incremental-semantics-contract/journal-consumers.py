@@ -48,6 +48,10 @@ def main():
                 source = edit(originals[module], old, new)
                 if name == 'dictionary':
                     source = edit(source, '}, sid, sym)\n', '}, sid, sym), body_writes: cx2.body_writes }\n')
+                if name == 'bounds':
+                    # the import goes with its only use: an unused import is an error
+                    source = edit(source, '  write_symbol, write_signature, write_bounds,\n',
+                                  '  write_symbol, write_signature,\n')
                 (root / f'selfhost/src/check/{module}.dawn').write_text(source)
             status, output = run('test', root / 'selfhost/src/check/body_execution.dawn')
             if name == 'positive':
