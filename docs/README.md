@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` contains 122 documents <!-- doc-check: doc-count --> covering specifications,
+`docs/` contains 123 documents <!-- doc-check: doc-count --> covering specifications,
 research, designs, progress reports, retrospectives and operations. Historical
 claims may no longer describe the implementation. This index groups the material
 and records document lifecycles; `scripts/doc-check.py` verifies both the count
