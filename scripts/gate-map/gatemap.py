@@ -30,10 +30,10 @@ paths no gate watches) is a ratchet checked in both directions.
 
 ## The four verdicts, and what each is worth
 
-  exact    Something recorded in the repository moves when this file changes:
-           a Core golden hash, or an `Emit-Change` label. Editing the file
-           forces a deliberate re-record or declaration, so no change of any
-           kind passes silently.
+  exact    Something recorded or declared moves when this file changes: an
+           `Emit-Change` label, or, on a tree whose workflow still ran the
+           Core IR diff as a step, the Core golden. Editing the file forces a
+           deliberate declaration, so no change of any kind passes silently.
 
   coupled  A gate somewhere else spells out a sentence this file builds. Only
            that sentence is watched, and only from a directory the author of
@@ -92,9 +92,12 @@ paths no gate watches) is a ratchet checked in both directions.
      binds it to one is in the tree.
      Bare directory names count only where a word cannot be prose: handed to
      the toolchain, or appended to a list of units.
-  C  The Core golden records one hash per compiler module, so every module it
-     names is exact for the Core IR golden step. This is what 98b9896 needed.
-     From: scripts/core-golden/selfhost.sha.
+  C  A step that runs scripts/selfhost-core-diff.sh dumps the Core of every
+     compiler module, so every module is exact for it. This is what 98b9896
+     needed. From: the workflow, and the tree's own selfhost/src/**.dawn.
+     Since 2026-09-25 no step runs it (it is an on-demand tool, see
+     docs/recorded-numbers-design.md), so on today's tree the rule contributes
+     nothing; it still speaks on the historical trees the fixtures replay.
   D  prev-diff compiles each corpus target's source in both output legs, so the
      target's own corpus content cancels: it is blind there. That is the general
      rule and the driver modules of 98b9896 are one case of it. std is the
@@ -167,11 +170,9 @@ and the residue is written down in unseen.txt where somebody can read it.
              rather than asserted: an assertion two mutants can redden is owned
              by neither. The record is mutants.txt and the rules are in the
              block comment above `Check`.
-  structure  every path-shaped command in every workflow resolves; every module
-             in the Core golden resolves to a file that exists; every compiler
-             module has a golden entry; every label section names a
-             differential some step runs; rule D's premises still hold. A rule
-             whose premise moved is void, not stale.
+  structure  every path-shaped command in every workflow resolves; every label
+             section names a differential some step runs; rule D's premises
+             still hold. A rule whose premise moved is void, not stale.
   ratchet    the set of paths with no gate equals unseen.txt, in both
              directions, and each line's stated reason is one the map still
              supports. A new unwatched file reds this, so does a listed file
@@ -225,10 +226,13 @@ MIN_LITERAL = 14
 # not a path list: every value is required to be a directory that exists.
 CLI_TARGET_ALIASES = {"--stdlib": "std"}
 
-# The tree files this checker reads as evidence, named once so that rules C, D
+# The tree files this checker reads as evidence, named once so that rules D
 # and F, rule A/B's attribution and the structural checks all mean the same
 # files.
-CORE_GOLDEN = "scripts/core-golden/selfhost.sha"
+CORE_DIFF = "scripts/selfhost-core-diff.sh"
+# Read out of git history only, by the `golden-moved` ground verb: the golden
+# left the tree on 2026-09-25, and the commits the fixtures cite still carry it.
+HISTORICAL_CORE_GOLDEN = "scripts/core-golden/selfhost.sha"
 EMIT_LABELS = "scripts/emit-labels.txt"
 PREV_DIFF = "scripts/selfhost-prev-diff.sh"
 STD_MODULE_INDEX = "std/modules.txt"
@@ -295,7 +299,6 @@ HEAD_COMPILER_REASON = (
 # stops working, loudly.
 SELF = "scripts/gate-map/gatemap.py"
 SELF_INPUTS = (
-    CORE_GOLDEN,
     EMIT_LABELS,
     PREV_DIFF,
     STD_MODULE_INDEX,
@@ -710,8 +713,7 @@ def _resolve(cand, tree):
         head = cand.split("/")[0]
         if not head.strip("*"):
             return set()
-        # `packages/*/dawn.toml`, `examples/*/`, `scripts/core-golden/*.core`:
-        # a shell glob is how several gates state their input, so expand it
+        # `packages/*/dawn.toml`, `examples/*/`: a shell glob is how several gates state their input, so expand it
         # rather than dropping it.
         hit = {f for f in tree.files if fnmatch_path(f, cand)}
         hit |= {d for d in tree.dirs if fnmatch_path(d, cand)}
@@ -1912,7 +1914,6 @@ class Observation:
 class Map:
     def __init__(self, tree):
         self.tree = tree
-        self.manifests = manifests(tree)
         self.gates = gates_of(tree)
         self.by_path = {}
         self.owned = {}
@@ -2104,65 +2105,38 @@ class Map:
     # ---- rule C -------------------------------------------------------
     def core_gate(self):
         for gate in self.gates:
-            if any("selfhost-core-diff.sh" in c for c in gate.commands):
+            if any(CORE_DIFF in c for c in gate.commands):
                 return gate
         return None
 
-    def core_modules(self):
-        """Module name -> source path, from the golden that records them.
+    def compiler_modules(self):
+        """Module name -> source path, for every compiler module in the tree.
 
-        A module whose package no name declares is left out and reported
-        separately: "this package is not declared anywhere" and "this file is
-        missing" are two different pieces of news, and folding them together
-        would let one mutant redden both.
+        Derived from the tree's own files. It used to be read out of the Core
+        golden, which made the golden the list of compiler modules and every
+        module added or removed a re-record; the tree already says which
+        modules there are.
         """
-        record = self.tree.read(CORE_GOLDEN)
-        packages, _ = self.manifests
         out = {}
-        for line in record.splitlines():
-            parts = line.split()
-            if len(parts) != 2 or not parts[1].endswith(".core"):
-                continue
-            module = parts[1][2:-len(".core")] if parts[1].startswith("./") else parts[1][:-len(".core")]
-            path, unknown = module_source(module, self.tree, packages)
-            if unknown is None:
-                out[module] = path
-        return out
-
-    def undeclared_packages(self):
-        """Golden modules whose package name no manifest declares."""
-        packages, _ = self.manifests
-        out = []
-        for line in self.tree.read(CORE_GOLDEN).splitlines():
-            parts = line.split()
-            if len(parts) != 2 or not parts[1].endswith(".core"):
-                continue
-            module = parts[1][2:-len(".core")] if parts[1].startswith("./") else parts[1][:-len(".core")]
-            if module_source(module, self.tree, packages)[1] is not None:
-                out.append(module)
+        for f in self.tree.files:
+            if f.startswith("selfhost/src/") and f.endswith(".dawn"):
+                out[f[len("selfhost/src/"):-len(".dawn")].replace("/", ".")] = f
         return out
 
     def _rule_c(self):
+        # No step runs the Core diff on a tree after 2026-09-25, and that is not
+        # a void premise: the diff became an on-demand tool, and a compiler
+        # module having no `exact` gate is what the map should then say.
         gate = self.core_gate()
         if gate is None:
-            self.problems.append(
-                "no workflow step runs scripts/selfhost-core-diff.sh, so the "
-                "Core golden rule has no gate to attribute; rule C is void"
-            )
             return
-        for module, path in self.core_modules().items():
-            if path is None:
-                self.problems.append(
-                    f"{CORE_GOLDEN} records module `{module}`, "
-                    f"which resolves to no file in the tree"
-                )
-                continue
+        for module, path in sorted(self.compiler_modules().items()):
             self.add(
                 path,
                 Observation(
                     "exact",
                     gate.id,
-                    f"core-golden/selfhost.sha records module `{module}`",
+                    f"the Core IR diff dumps compiler module `{module}`",
                 ),
             )
 
@@ -2558,91 +2532,7 @@ class Map:
         return out
 
 
-PKG_PREFIX = "dawn$pkg$"
 MANIFEST = "dawn.toml"
-MANIFEST_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"\s*$')
-
-
-def manifests(tree):
-    """-> ({package name: its directory}, [problem]).
-
-    A package's directory is not its name, and reading it as one is how this
-    file's own rule C broke: `dawn$pkg$compiler_plan` was resolved by turning
-    the `_` back into a `-` and looking for a directory of that name, which
-    happened to work and was two guesses stacked. Neither holds.
-    `compiler-plan/dawn.toml` declares `name = "compiler_plan"` with the
-    underscore, so there is no mangling to undo; and `packages/web/dawn.toml`
-    already declares `name = "web2"` under the repository's v2-in-name rule,
-    in a directory still called `web`. The moment that package enters the Core
-    golden the guess reds on a correct tree.
-
-    So the name comes from the manifest that declares it, which is the only
-    thing that ever knew it. `analyze.dawn` builds the class name as
-    `dawn$pkg$` ++ the manifest's `name`, verbatim.
-
-    The scan stops at the first `[section]` header: `name` inside `[deps]` is
-    a dependency alias, not this package's name.
-    """
-    by_name, source, problems = {}, {}, []
-    for f in tree.files:
-        if f != MANIFEST and not f.endswith("/" + MANIFEST):
-            continue
-        directory = f[: -(len(MANIFEST) + 1)] if "/" in f else "."
-        name = None
-        for line in tree.read(f).splitlines():
-            if line.lstrip().startswith("["):
-                break
-            match = MANIFEST_NAME.match(line)
-            if match:
-                name = match.group(1)
-                break
-        if name is None:
-            problems.append(
-                f"{f} declares no `name` before its first section, so the "
-                "package in that directory cannot be named by anything that "
-                "reads the golden"
-            )
-            continue
-        if name in by_name:
-            problems.append(
-                f"the package name `{name}` is declared by two manifests, "
-                f"{source[name]} and {f}, so a module recorded as "
-                f"`{PKG_PREFIX}{name}.<module>` names two directories"
-            )
-            continue
-        by_name[name] = directory
-        source[name] = f
-    return by_name, problems
-
-
-def module_source(module, tree, packages):
-    """`check.checker` -> selfhost/src/check/checker.dawn, and the two other
-    shapes the golden uses: `std.str` for the bundled std, and
-    `dawn$pkg$<name>.<module>` for a source package.
-
-    -> (path, None) when it resolves, (None, None) when the file is missing,
-    and (None, module) when no declared package name begins it.
-    """
-    if module.startswith(PKG_PREFIX):
-        rest = module[len(PKG_PREFIX):]
-        # the longest declared name this module begins with. Longest because a
-        # package may be named as a prefix of another, and the manifest set is
-        # what decides where the name ends; splitting on the first `.` would
-        # be a guess about the name's shape.
-        owner = None
-        for name in packages:
-            if rest.startswith(name + ".") and (owner is None or len(name) > len(owner)):
-                owner = name
-        if owner is None:
-            return None, module
-        inner = rest[len(owner) + 1:].replace(".", "/")
-        cand = f"{packages[owner]}/src/{inner}.dawn"
-        return (cand if cand in tree.fileset else None), None
-    if module.startswith("std."):
-        cand = f"std/{module[len('std.'):].replace('.', '/')}.dawn"
-        return (cand if cand in tree.fileset else None), None
-    cand = f"selfhost/src/{module.replace('.', '/')}.dawn"
-    return (cand if cand in tree.fileset else None), None
 
 
 LABEL_SECTION_RE = re.compile(r"^#\s*-{2,}\s*(\S+?)\s*-{2,}\s*$")
@@ -2924,30 +2814,6 @@ def check_structure(gm):
     problems = list(gm.problems)
     tree = gm.tree
 
-    # the manifest map rule C resolves package modules through. A name that is
-    # declared twice, or not at all, is reported here and nowhere else, so that
-    # "the package is not named" and "the file is missing" stay two answers.
-    problems += gm.manifests[1]
-    for module in gm.undeclared_packages():
-        problems.append(
-            f"{CORE_GOLDEN} records module `{module}`, and no manifest "
-            "declares a package whose name begins it. A package's directory "
-            "is not its name; read dawn.toml"
-        )
-
-    # every compiler module has a golden entry (rule C, the other direction)
-    recorded = set()
-    for module, path in gm.core_modules().items():
-        if path:
-            recorded.add(path)
-    for f in tree.files:
-        if f.startswith("selfhost/src/") and f.endswith(".dawn") and f not in recorded:
-            problems.append(
-                f"{f} is a compiler module with no entry in "
-                "scripts/core-golden/selfhost.sha. Either the golden is "
-                "stale or the module is unreachable, and both are news"
-            )
-
     # The label table. Every declarable label belongs to exactly one
     # differential, and that differential is one step of some job: `prev-diff`
     # is the name of a job with four of them in it, and a label under one
@@ -3103,7 +2969,9 @@ def parse_fixtures(path):
         contains <rev>:<path> <text>     the file at that rev has that text
         lacks <rev>:<path> <text>        it does not
         golden-moved <commit> <module>   the commit rewrote that module's line
-                                         in the Core golden
+                                         in the Core golden (a file that left
+                                         the tree on 2026-09-25; the verb
+                                         reads history, which still has it)
 
     A fixture with no `ground` line is rejected: a fixture nobody measured is
     exactly the rot this directory exists to kill.
@@ -3185,7 +3053,7 @@ def check_ground(fixture):
         elif verb == "golden-moved":
             commit, _, module = rest.partition(" ")
             module = module.strip()
-            diff = run_git(["show", "--format=", commit, "--", CORE_GOLDEN])
+            diff = run_git(["show", "--format=", commit, "--", HISTORICAL_CORE_GOLDEN])
             sides = {
                 side
                 for side in "-+"
@@ -3197,7 +3065,7 @@ def check_ground(fixture):
             if sides != {"-", "+"}:
                 problems.append(
                     f"{fixture['name']}: `{line}` is not true; {commit} does "
-                    f"not rewrite `{module}`'s line in {CORE_GOLDEN}"
+                    f"not rewrite `{module}`'s line in {HISTORICAL_CORE_GOLDEN}"
                 )
         else:
             problems.append(
@@ -3362,7 +3230,6 @@ class Baseline:
         self.unwatched = len(gm.unseen())
         self.coupling = choose_coupling(tree)
         self.signature_coupling = choose_signature_coupling(tree)
-        self.package = choose_package(tree)
         self.js_gate = choose_js_gate(gm)
         self.import_edge = choose_import_edge(gm)
         self.read_edge = choose_read_edge(gm)
@@ -3531,7 +3398,7 @@ def choose_js_gate(gm):
     the package.json that binds it to `npm test`), or None.
 
     Derived from the tree rather than written down, for the reason
-    `choose_package` gives one paragraph further on. `js_join_probe` is about
+    `choose_coupling` gives. `js_join_probe` is about
     whichever file the JavaScript gate is; with the name spelled out here, a
     mutant that renames it to `.cjs` would redden that probe by renaming its
     subject, and a rename is exactly what has to stay invisible.
@@ -3545,31 +3412,6 @@ def choose_js_gate(gm):
     if not modules or manifest is None:
         return None
     return script, modules[0], manifest
-
-
-def choose_package(tree):
-    """-> (name, its manifest) for a package the Core golden records.
-
-    Chosen from the tree for the reason `choose_coupling` is: a hard-coded
-    package is a fixture nobody re-measures, and this one was caught being
-    exactly that. The mutants below named `json`, which is right here and
-    wrong on the branch that renames it to `json2` while keeping the
-    directory, so `--check` could not run there at all.
-    """
-    packages, _ = manifests(tree)
-    golden = tree.read(CORE_GOLDEN)
-    for name in sorted(packages):
-        manifest = f"{packages[name]}/{MANIFEST}"
-        if f"{PKG_PREFIX}{name}." not in golden:
-            continue
-        if tree.read(manifest).count(f'name = "{name}"') != 1:
-            continue
-        return name, manifest
-    raise SystemExit(
-        "gate-map selftest: no package in the Core golden has a manifest "
-        "declaring its name exactly once, so rule C's package half has "
-        "nothing to mutate"
-    )
 
 
 def choose_coupling(tree):
@@ -3635,32 +3477,6 @@ def _has_head_compiler_coarse(gm, path="selfhost/dawn.toml"):
 # Each entry is (name, what it asserts, predicate). The predicate is true when
 # the assertion is green, so a mutant "reddens" one by making it false.
 ASSERTIONS = [
-    (
-        "golden_module_resolves",
-        "every module the Core golden records names a file in the tree",
-        lambda c, b: _clean(c.problems, "resolves to no file in the tree"),
-    ),
-    (
-        "golden_covers_selfhost",
-        "every compiler module has an entry in the Core golden",
-        lambda c, b: _clean(c.problems, "with no entry in"),
-    ),
-    (
-        "package_name_declared",
-        "every package the Core golden names is declared by a manifest, "
-        "which is the only thing that knows a package's name",
-        lambda c, b: _clean(c.problems, "no manifest declares a package"),
-    ),
-    (
-        "package_name_unambiguous",
-        "no package name is declared by two manifests",
-        lambda c, b: _clean(c.problems, "is declared by two manifests"),
-    ),
-    (
-        "manifest_names_its_package",
-        "every manifest names the package in its directory",
-        lambda c, b: _clean(c.problems, "declares no `name` before"),
-    ),
     (
         "commands_resolve",
         "every path-shaped command in a workflow step names a file",
@@ -3847,9 +3663,8 @@ def swap_all(old, new):
     """A replacement that is meant to hit every occurrence, and at least one.
 
     The stricter `swap` is wrong where the mutation is a rename across a
-    record: a package's golden entries are one line per module, and pinning
-    the count would make the selftest brittle about how many modules a package
-    has. What must still fail loudly is the anchor going away entirely.
+    file: a JavaScript gate calls `path.join` as often as it has inputs, and
+    pinning the count would make the selftest brittle about how many it has. What must still fail loudly is the anchor going away entirely.
     """
 
     def apply(text, where):
@@ -3963,7 +3778,6 @@ def regenerate_record(gm, note="regenerated by the selftest"):
 # A suffix and a path the tree never has, so a mutant that plants one is
 # planting something and not colliding with something.
 RENAMED = "_renamed_by_the_selftest"
-PROBE_MANIFEST = "scripts/gate-map/selftest-probe/dawn.toml"
 COMPILER_PROBE_PROJECT = "gate-map-selftest/compiler-dep"
 COMPILER_PROBE_MANIFEST = f"{COMPILER_PROBE_PROJECT}/dawn.toml"
 COMPILER_PROBE_SOURCE = f"{COMPILER_PROBE_PROJECT}/src/value.dawn"
@@ -4035,69 +3849,6 @@ def mutants(base):
         base, ".mjs", then(js_segment, JS_ESM)(base.tree.read(js_script), js_script)
     )
     return [
-        Mutant(
-            "golden-names-a-ghost-module",
-            "rule C, forwards: a golden entry for a module that is not there",
-            edits={CORE_GOLDEN: append("0" * 64 + "  ./front.ghost.core\n")},
-        ),
-        Mutant(
-            "golden-forgets-a-module",
-            "rule C, backwards: a compiler module the golden does not record",
-            edits={CORE_GOLDEN: drop_line("./main.core")},
-        ),
-        Mutant(
-            "package-renamed-in-its-manifest",
-            "rule C's package half. The manifest is the only thing that knows "
-            "a package's name, and while rule C guessed the name from the "
-            "directory this mutant was silent: nothing read the file it edits",
-            edits={
-                base.package[1]: swap(
-                    f'name = "{base.package[0]}"',
-                    f'name = "{base.package[0]}{RENAMED}"',
-                )
-            },
-        ),
-        Mutant(
-            "two-manifests-one-package-name",
-            "a package name that names two directories, so a golden module "
-            "under it would resolve to either. It adds a manifest rather than "
-            "editing one, which keeps it away from `package_name_declared`: "
-            "the added file sorts after the real one, so the golden still "
-            "resolves and only the ambiguity is news",
-            files=lambda fs: fs + [PROBE_MANIFEST],
-            edits={
-                PROBE_MANIFEST: provide(
-                    f'schema = 1\nname = "{base.package[0]}"\n'
-                )
-            },
-        ),
-        Mutant(
-            "a-manifest-that-names-nothing",
-            "a package with no name at all, added the same way and for the "
-            "same reason",
-            files=lambda fs: fs + [PROBE_MANIFEST],
-            edits={PROBE_MANIFEST: provide("schema = 1\n")},
-        ),
-        Mutant(
-            "package-whose-name-is-not-its-directory",
-            "the shape the lib-web3-json2 branch has, where a major bump "
-            "renames the package and keeps the directory. Recorded with an "
-            "empty red set: a manifest-driven rule C is unmoved by it, and a "
-            "rule C that resolved names to directories reddened "
-            "golden_module_resolves on a perfectly good tree, which is how "
-            "this was found. `package-renamed-in-its-manifest` edits the same "
-            "manifest and is counted, so the pair cannot go vacuous",
-            edits={
-                base.package[1]: swap(
-                    f'name = "{base.package[0]}"',
-                    f'name = "{base.package[0]}{RENAMED}"',
-                ),
-                CORE_GOLDEN: swap_all(
-                    f"{PKG_PREFIX}{base.package[0]}.",
-                    f"{PKG_PREFIX}{base.package[0]}{RENAMED}.",
-                ),
-            },
-        ),
         Mutant(
             "workflow-runs-a-missing-script",
             "a step whose command names a path into this repository and is "
