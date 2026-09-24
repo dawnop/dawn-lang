@@ -235,7 +235,7 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 
 1. 本机 staging 目录（在本机 prefix 的 `stage/` 下，不在 worktree 里）放本目录的工具、一个 git bundle（该提交加全部 tag）、每个 job 一份 JSON、一个 `.crun.yaml`。`remote_root` 是 `<集群 prefix>/jobs/<sha>/tree-<工具摘要>`，按提交与工具版本唯一，不会与别的项目互相 `rsync --delete`（第 5 刀之前只按提交区分，见该节「途中查出」）。`.crun.yaml` 不进仓库。
 2. 在集群上跑 `inputs.py verify`。缺或红时，用第二个 staging 目录（硬链接到本机 prefix 的 `inputs/`）推到 `<集群 prefix>/inputs`，先用 `tar` 解出 python（此时 prefix 里还没有解释器），再由 `inputs.py install` 解包其余工具链并整体复核。
-3. 每个 job 一次 `crun run -n 0 --no-build -- env -i ... prefix.py run-job`，并行度由 `--jobs` 给。crun 从控制端每次都会推一次 staging 目录，未变时 3s 左右，推送由 crun 自己串行化。
+3. 每个 job 一次 `crun run -n 0 --no-build -- env -i ... prefix.py run-job`，并行度由 `--jobs` 给。crun 从控制端每次都会推一次 staging 目录，未变时 3s 左右，推送由 crun 自己串行化。（2026-09-25 起改为 `-d` 后台运行加轮询，见「集群运行可续」一节。）
 4. `run-job` 把结果片段打印成一行、同时存进 `<集群 prefix>/out/<sha>/<run>/fragments`；日志与制品留在集群的 `out/<sha>/<run>/`，不拉回。本机只解析片段，照常由 runner 合成 `bundle.json`。
 
 偏离任务单的三处：
@@ -418,6 +418,62 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 自测从 11 例增到 14 例：PR 事件的成功运行（`head_branch` 为 `main`）拒；非默认分支的 push 成功运行拒；main 的 push 成功运行与一次失败的 PR 运行并存时收。负控：删掉事件条件，第 1 例红（`pull request run green: exit 0, want 1`）；删掉分支条件，第 2 例红。
 
 墙钟：0。`verified` job 的 API 查询次数不变，只是本地多过滤一步。行为变化：非 main 分支上的 push 运行不再被接受（今天 `ci.yml` 只在 main 上响应 push，`ci.yml:25-26`，所以没有这种运行）。
+
+## 集群运行可续（2026-09-25）
+
+### 为什么
+
+同步的 `crun run` 在整个 job 期间占着一条 SSH 会话，而 crun 自己的断连哨兵会在会话断开时杀掉远端任务（它本来是为了「本地被杀、远端别留着」）。全套跑到二十多分钟时 crun 退出 255 已观测两次，两次都整批作废；原先的重试只覆盖「job 还没开始就失败」。
+
+### 两个前提（先核实，再动码）
+
+| 前提 | 做法 | 结果 |
+|---|---|---|
+| `-d` 能与 `-n 0` 同用 | 从一个只含 `.crun.yaml` 的临时 staging 目录跑 `crun run -n 0 --no-build -d -- bash -c 'sleep 300; echo alive > <prefix>/tmp/probe-…'` | 成立：11s 返回，退出 0，打印 job id；`crun jobs` 显示 running |
+| tmux 会话在 SSH 断开后存活 | 上一行的 crun 返回时它的 SSH 会话就已结束；5 分钟后读 probe 文件 | 成立：文件在启动后 301s 写出，内容 `alive`，`crun jobs -a` 记 `exit:0`；之后 probe 文件与临时 staging 目录已删 |
+
+### 做法
+
+- **后台启动。** 每个 job 是一次 `crun run -n 0 --no-build -d -- bash -c <包装>`。远端命令不变（仍是 `env -i … prefix.py run-job`），包装只多三件事：先 `mkdir <prefix>/out/<sha>/<run>.ctl/<job>.claim` 认领（已存在就什么也不做、退出 0，所以重复启动无害）；把 run-job 的 stdout、stderr 写进同一目录；最后用 rename 写 `<job>.exit`（退出码与远端起止时刻）。控制目录放在 `out/<sha>/<run>` 旁边而不是里面：`<run>` 目录由降权后的 uid 创建，root 先建了它，那个 uid 就写不进 `fragments/`。
+- **轮询。** 一个轮询线程，每 `poll=`（默认 30）秒一次短 `crun run -n 0 --no-sync --no-build`，一次问完所有未收回的 job：没认领（absent）、已认领（running）、或已结束（附退出码、片段、stdout、stderr，base64）。轮询断连只丢这一轮。一次轮询或启动超过 300s 按断连处理。
+- **启动没确认。** crun 返回非 0 或没打印 job id 时不重试，交给下一轮轮询：已认领就收养，连续两轮没认领才重新启动（至多三次）。
+- **判红。** 结束了但没有片段的 job 判红；超过 `timeout-minutes × (timeout-scale + 1)` 还没结束的判红并 `crun kill`。run-job 里本地后端自己的超时是 `timeout-minutes × timeout-scale`，先触发，所以正常情况下超时会以步骤结果的形式回来。
+- **续跑。** runner 每次运行写 `<out>/invocation.json`，crun 后端把运行 id 写进 `<out>/crun/run-id`。`run.sh --resume <out>` 复用两者（只许改 `--jobs`），prepare 时轮询全部 job 一次：已结束的由 runner 直接记为完成、不占 worker；还在跑的等它；没认领的启动。本地后端不支持续跑（它的 job 是控制端的子进程，随控制端一起死），runner 直接拒绝。
+
+`--no-sync` 并不省掉推送：从控制端发起的 crun 每次都会先推 staging 目录（它只跳过集群内跨机同步），所以一次轮询约等于一次推送加一条短命令。轮询是一个线程统一发的，不是每个 job 一个，推送次数与 job 数无关。
+
+### 桩自测（`crun_stub_selftest.py`）
+
+桩 crun 在本机执行命令，用一个目录充当集群 prefix；prefix 里的 python3 也是桩，对 `prefix.py run-job` 按 job 文件算出固定的片段。中间的 runner、backend_crun、bundle 都是真代码，计划来自真实提交上的 gates.yml。本机 24s：
+
+| 情形 | 结果 |
+|---|---|
+| 干净运行 | 参照证据包，`complete = true` |
+| 第 2、5 次轮询断在执行前，第 3 次断在执行后 | 与参照逐字节相同 |
+| 第 1、7 次启动断在执行前 | 逐字节相同；两个 job 各启动两次 |
+| 第 2、9 次启动断在执行后（已在「集群」上跑起来） | 逐字节相同；没有 job 被重复启动 |
+| 第 3 次轮询时 SIGKILL 控制端，然后 `--resume` | 逐字节相同；某次是 7 个收回、16 个还在跑并等到、16 个由续跑的控制端启动（三类的比例随调度略有出入，三类都得出现，否则自测判红） |
+| 负控：job 结束后删掉 `test` 的远端片段，再 `--resume` | 退出 1，`complete = false`，`test` 的步骤全部记为未执行 |
+
+变异体：把「启动没确认」改回旧行为（直接判失败），两个启动断连的情形变红；让 runner 忽略 `--resume`（每次都新建运行 id），续跑情形与负控都变红。
+
+### 实测（集群）
+
+| 项 | 结果 |
+|---|---|
+| 小跑 `--only std-version,export-surface`（a95a505d，`poll=45`） | 两个 job 全绿；一次轮询端到端 8s（推送加短命令），11 次轮询 0 次断；控制端比远端多占 27s 与 57s（启动约 10s 加等下一轮轮询）。据此默认改为 30s |
+| 全套 368b4a09，`--jobs 16`，`isolation=1`，`--keep-going` | 01:37:10 起跑；569s 时 `kill -9` 控制端（此时 20 个 job 已启动，4 个已收回）；7s 后 `run.sh --resume` |
+| 续跑 prepare 的一次轮询 | `4 done, 16 running, 19 absent`：4 个直接收回（不占 worker），16 个等原来的 job 跑完，19 个由续跑的控制端启动；`dispatch.txt` 共 39 行，**没有 job 被启动两次** |
+| 结果 | **`complete = true`**：175 个 run 步骤全部执行、全部退出 0；`bundle.py verify` `COMPLETE`；39 次隔离检查全部 0 条；证据包 sha256 `de7e0ba5…` |
+| 墙钟 | 续跑段 1657s（45 次轮询，0 次断），两段合计 2233s（含 7s 间隔与续跑的 23s prepare）。同步后端此前两次全套 1722s、1730s；这次另有一个写者的全套同时占着集群（它仍用同步后端），最长的 job `native-selfhost-tests` 远端 869s，所以 2233s 不是干净的对比，只能说明量级 |
+| 每 job 控制端额外占用 | 本控制端启动的 23 个 job：最少 28s、中位 52s、最多 113s、平均 53s（含排队等推送锁的启动，启动本身 11–60s、中位 15s，加等下一轮轮询）。它占的是 worker 名额，不在远端的 job 时长里 |
+
+### 不做的（理由）
+
+- **按 `crun logs` 或 `/run/crun/jobs/*.exit` 取结果。** 那是 crun 的内部布局，退出码也只是外层流水线的；认领目录与 `.exit` 在 prefix 里，由本仓的包装写，语义自己定。
+- **续跑时重跑没有片段的 job。** 任务单允许「重跑或判红」。重跑要先清掉认领与上次的制品目录，而没有片段通常意味着 job 本身坏了（或有人动了集群上的文件），悄悄重跑会把这件事藏起来；判红后整次再跑一遍即可。
+- **每个 job 一个轮询。** 推送由 crun 串行化，16 个 job 各自轮询会把推送排满；一个线程一次问完，轮询开销与 job 数无关。
+- **`anchor-readers.txt` 登记。** 新代码不按字面量读源码文本（只读 gates.yml 的计划与集群上的 JSON），不涉及。`steps_lock.py` 也不涉及：没有碰 gates.yml 的 run 行。
 
 ## 与 #167 的关系
 
