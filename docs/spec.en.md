@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5dc77bddd7edb464 -->
+<!-- doc-check: translation-of docs/spec.md @ 7c3accf8eb374fce -->
 
 # Dawn Language Specification
 
@@ -715,6 +715,16 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   `Display` cannot be derived (the reason is under `Display` below).
   A tuple has no head, so no impl can be written for it; the first four are synthesised
   structurally for tuples by the compiler.
+- **`derive` is a closed table**: only `Ord` and `Show` can be derived, the table is written in
+  exactly one place in the compiler (`types.derivable_traits`), any other name in a `derive` list is
+  a compile error, and the diagnostic lists the table's entries. `Eq`/`Hash` are not in the table
+  because they **need no request**: every type has a structural `Eq`/`Hash` (§4.3 and the
+  `Eq`/`Hash` entry below), and an impl overrides it (as Go's struct `==` does); `Show` has to be
+  requested because rendering prints the representation, which is a presentation decision, while
+  equality and hashing are not (the same reason applies to opaque types, §2.7). A user trait cannot
+  be derived: a derive needs the compiler to know the trait's structural rule, and Dawn has no
+  compile-time metaprogramming for a library to state one (Haskell 2010's deriving likewise only
+  accepts a closed set from the Prelude).
 - **`Iter`** declares two associated types and four methods (associated types are covered further
   down this section):
   `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur

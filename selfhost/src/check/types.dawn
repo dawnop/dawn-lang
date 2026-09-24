@@ -1011,8 +1011,9 @@ pub type AdtI = {
   # no position for one (spec §6.3).
   eparams: List[String],
   ctors: List[CtorI],
-  derives_show: Bool,
-  derives_ord: Bool,
+  # the traits `derive` asked for, by id, each one a row of
+  # `derivable_traits()` (the parse pass refuses any other name)
+  derives: List[Int],
   owner: Option[String],
   # who may name this type (SEM-07). Stored rather than derived from a
   # `is_pub` flag because the answer belongs to the *declaring* module: an
@@ -1901,8 +1902,7 @@ pub fn ev_pack_adt() -> AdtI =
         ]
       }
     ],
-    derives_show: false,
-    derives_ord: false,
+    derives: [],
     owner: None,
     audience: AWorld,
     bound_eparams: []
@@ -2327,6 +2327,50 @@ pub const INDEX_ID: Int = 5
 ## renderable.
 pub const DISPLAY_ID: Int = 6
 
+## One prelude trait `derive` can mint an impl of.
+pub type Derivable = { name: String, trait_id: Int, adjective: String }
+
+## The traits `derive` accepts: a closed table, and the only place the list is
+## written (docs/builtin-privileges-design.md 3). The parse pass reads names
+## off it, the impl pass mints one impl per row a type asked for, the field
+## check words its refusal with `adjective`, and the diagnostic for any other
+## name lists the rows -- so adding a derivable trait is adding a row.
+##
+## It used to be two string comparisons and two Bool fields on `AdtI`, with the
+## pair repeated in three passes, while the diagnostic implied an open set.
+##
+## Closed on purpose, as Haskell 2010's deriving clause is: a derive needs the
+## compiler to know the trait's structural rule, and Dawn has no compile-time
+## metaprogramming to let a library state one. `Eq`/`Hash` are absent because
+## they are not requested at all -- every type has them structurally, and an
+## impl overrides that (spec 3.5). `Display` is absent because it is a
+## presentation decision, written by hand.
+##
+## Ord before Show: the order impls are minted in, which is what this pass
+## did before the table existed.
+pub fn derivable_traits() -> List[Derivable] = [
+  Derivable { name: "Ord", trait_id: ORD_ID, adjective: "orderable" },
+  Derivable { name: "Show", trait_id: SHOW_ID, adjective: "printable" }
+]
+
+pub fn derivable_named(name: String) -> Option[Derivable] = {
+  for d in derivable_traits() {
+    if d.name == name { return Some(d) }
+  }
+  None
+}
+
+## The table as a diagnostic lists it.
+pub fn derivable_names() -> String = join(map(derivable_traits(), d => d.name), ", ")
+
+## Did this type's declaration ask for `derive <tid>`?
+pub fn adt_derives(info: AdtI, tid: Int) -> Bool = {
+  for d in info.derives {
+    if d == tid { return true }
+  }
+  false
+}
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -2363,8 +2407,7 @@ pub fn prelude_adts() -> Adts = {
       CtorI { adt: OPTION_ID, name: "Some", fields: [FieldI { name: "value", ty: ot }] },
       CtorI { adt: OPTION_ID, name: "None", fields: [] }
     ],
-    derives_show: true,
-    derives_ord: false,
+    derives: [SHOW_ID],
     owner: None,
     audience: AWorld,
     bound_eparams: []
@@ -2381,8 +2424,7 @@ pub fn prelude_adts() -> Adts = {
       CtorI { adt: RESULT_ID, name: "Ok", fields: [FieldI { name: "value", ty: rt }] },
       CtorI { adt: RESULT_ID, name: "Err", fields: [FieldI { name: "error", ty: re }] }
     ],
-    derives_show: true,
-    derives_ord: false,
+    derives: [SHOW_ID],
     owner: None,
     audience: AWorld,
     bound_eparams: []
@@ -2420,8 +2462,7 @@ pub fn prelude_adts() -> Adts = {
         ]
       }
     ],
-    derives_show: true,
-    derives_ord: false,
+    derives: [SHOW_ID],
     owner: None,
     audience: AWorld,
     bound_eparams: []
@@ -4427,7 +4468,7 @@ test "ForeignError is a prelude record whose fields every backend can answer" {
   assert fe.name == "ForeignError"
   assert fe.is_record
   assert fe.tparams == []
-  assert fe.derives_show
+  assert adt_derives(fe, SHOW_ID)
   let ci = fe.ctors[0]
   # a record's one constructor wears the type's name, as every other record does
   assert ci.name == "ForeignError"
