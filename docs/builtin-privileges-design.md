@@ -132,7 +132,32 @@ hint 给出标注写法（`let x: Int = id(...)` 或带标注参数的 lambda）
 
 ## 7. 实施记录
 
-（实现后回填：提交、集群 run、实测。）
+分支 `fix/builtin-privileges`，基线 `b2e19e06`（交付时仍是 `origin/main`）。提交（每条裁决一个）：
+
+| 提交 | 内容 |
+|---|---|
+| `58096317` | 本设计文档 |
+| `74635037` | SPC-10：`Ord[Bool]`/`Ord[Bytes]`，`<` 快路径读 `ord_scalars()`；运行时 `dawn_cmp_bool`/`dawn_cmp_bytes` |
+| `26ccc4bb` | SPC-03：`Unit` 进四张表，`lower.unit_relation` 折常量；std/io 八个 `ok` lambda 删除 |
+| `39e3b90e` | SPC-08：`derivable_traits()` 表，`AdtI.derives: List[Int]` |
+| `511dd8f6` | gates-external：crun 作业失败时回显失败步骤的日志（见下） |
+| `48e2e813` | SPC-17：opaque 不继承 `Show`；std/narrow 三个 `impl Show`；opaque-twin、display-layering 契约改写 |
+| `e6c2501a` | SPC-18：`f[T](x)` 一条诊断；参数已报错时不再追报未绑定类型参数 |
+| `3f68a6b7` | Core golden 在最终树上重录 |
+
+集群全套（`--jobs 16`，39 个 job、175 个 run step）：`3f68a6b7` 上 `complete=true`，墙钟 2678 s。
+没有任何 emit/run/fmt/lsp 差分变动，因此没有 `Emit-Change` 声明。
+
+途中实测到的三件事：
+
+- `Result[Unit, E]` 的 `==` 在 checker 里走 `resolve_witness`，lowering 的 `Unit` 折叠必须同时挂在
+  `eq_at`/`cmp_at`（见证路径）和无见证的运算符路径上，否则 `() < ()` 会作为 `CBinary` 到达后端。
+- `infer_never_actual` 语料的第二条（空列表实参报错之后再报「推不出 T」）按 SPC-18 的新规则消失；
+  `Never` 实参（`panic(..)`）不算报过错，照旧报。
+- `scripts/lsp-workspace-contract/prepared-lifecycle.py` 把 LSP 测试闭包的测试总数写死（660），
+  本批新增一个 `passes.dawn` 内联测试，五个分片全红，改成 661。任何往 `check/` 加测试的刀都会撞它。
+
+负控原始输出在交接报告 `agent-handoff/builtin-privileges-report-20260924.md`。
 
 ## 不做的（理由）
 
