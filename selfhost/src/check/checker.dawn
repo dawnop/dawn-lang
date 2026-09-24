@@ -70,7 +70,7 @@ use check/types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   head_of, impl_at, has_impl_at, insert_impl,
-  is_eq_scalar, is_ord_scalar, ord_scalar_names, is_ground, expandable, type_args_of, sub_goals,
+  is_eq_scalar, is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
@@ -7231,6 +7231,21 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     # left as projections when it is a rigid parameter, which is exactly what
     # a projection in a parameter position is for (#119 D6).
     EIndex(target, index, lo, hi) -> {
+      # `f[T](x)` is how Go spells an explicit instantiation, and Dawn parses
+      # it as indexing the function `f` with the expression `T`. Left to the
+      # general path that is three errors, none of which names the collision
+      # (`f` used as a value, `T` an undefined constructor, and the missing
+      # call-site type arguments last and on the *outer* call). So it is
+      # recognised here, before either side is checked, and said once.
+      match call_site_type_args_read(cx, target, index) {
+        (spc_cx, Some((fname, tn))) ->
+          return (cerr_h(spc_cx, "Dawn has no call-site type arguments: `" ++ fname ++ "[" ++ tn ++
+              "]` reads as indexing the function `" ++ fname ++ "`", lo, hi,
+            "a type parameter is bound only by the arguments and the expected type: call `" ++
+              fname ++ "(...)` and annotate the binding that takes its result, or the one " ++
+              "an argument comes from"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+        _ -> ()
+      }
       let (cx1, tt, tx) = check_expr(cx, target, no_expected())
       if is_errorish(tt) {
         let (cx2, _, _) = check_expr(cx1, index, no_expected())
@@ -7652,6 +7667,82 @@ pub fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> (Cx, Option
 
 ## A variable read: a local (with capture bookkeeping), else a top-level fn or
 ## builtin used as a value, else undefined.
+## `f[T]` where `f` is a generic function or builtin (not a local) and `T` is a
+## type, not a value: the name and the type as written, when it is that shape.
+##
+## Pure until the shape is certain -- the index must spell a type and the
+## target must be a bare name no local binds -- and only then does it look the
+## name up, so an ordinary `xs[i]` records no read it did not record before.
+## A caller that gets `None` back carries on from its own `cx`.
+fn call_site_type_args_read(cx: Cx, target: Expr, index: Expr) -> (Cx, Option[(String, String)]) = {
+  let fname = match target {
+    EVar(n, _, _) -> n
+    _ -> return (cx, None)
+  }
+  if not spells_type_shape(index) || bound_locally(cx, fname) { return (cx, None) }
+  let (sig_cx, answer) = lookup_fn_sig_read(cx, fname)
+  match answer {
+    Some(s) -> if len(s.tparams) == 0 { return (cx, None) }
+    None -> return (cx, None)
+  }
+  let (type_cx, tn) = spelled_type_read(sig_cx, index)
+  match tn {
+    Some(text) -> (type_cx, Some((fname, text)))
+    None -> (cx, None)
+  }
+}
+
+## The syntactic half: a bare constructor name, or one indexed by such names
+## (`List[Int]`). No lookups; `spelled_type_read` decides whether it is a type.
+fn spells_type_shape(e: Expr) -> Bool =
+  match e {
+    ECtor(_, args, spread, _, _, _, _, _) ->
+      match spread {
+        Some(_) -> false
+        None -> len(args) == 0
+      }
+    EIndex(t, i, _, _) -> spells_type_shape(t) && spells_type_shape(i)
+    _ -> false
+  }
+
+## The type an index expression spells, as written: a builtin type name or a
+## nominal type of this module, possibly applied (`List[Int]`).
+fn spelled_type_read(cx: Cx, e: Expr) -> (Cx, Option[String]) =
+  match e {
+    ECtor(name, _, _, _, _, _, _, _) ->
+      if list.contains(public_builtin_type_names(), name) {
+        (cx, Some(name))
+      } else {
+        let (next, nominal) = local_nominal_name_read(cx, name)
+        match nominal {
+          Some(_) -> (next, Some(name))
+          None -> (next, None)
+        }
+      }
+    EIndex(t, i, _, _) -> {
+      let (head_cx, head) = spelled_type_read(cx, t)
+      let (arg_cx, arg) = spelled_type_read(head_cx, i)
+      match head {
+        Some(h) ->
+          match arg {
+            Some(a) -> (arg_cx, Some(h ++ "[" ++ a ++ "]"))
+            None -> (arg_cx, None)
+          }
+        None -> (arg_cx, None)
+      }
+    }
+    _ -> (cx, None)
+  }
+
+## Does a local (a parameter, a `let`, a lambda parameter) bind `name` here?
+## Asked without `resolve_local`, which also records a capture.
+fn bound_locally(cx: Cx, name: String) -> Bool = {
+  for scope in cx.frame.scopes {
+    if map.has(scope, name) { return true }
+  }
+  false
+}
+
 fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   let (cx1, found) = resolve_local(cx, name, lo, hi, false)
   match found {
@@ -10051,6 +10142,20 @@ fn check_call(
     }
   }
   if len(unbound) > 0 {
+    # An argument that already failed binds nothing, and it has had its say:
+    # the unbound parameter is its consequence, not a second finding. This is
+    # what kept `to_string(id[Int](3))` at three errors after the inner one was
+    # made to name the real problem (SPC-18). `TyError` only: a `Never` actual
+    # (`panic(..)`) typechecked fine and leaves the parameter unbound for a
+    # reason of its own, which is still reported below.
+    for slot in at_slots {
+      match slot {
+        Some(at) -> if at == TyError {
+          return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+        }
+        None -> ()
+      }
+    }
     # Not "annotate the use site": Dawn has no call-site type arguments, so
     # there is nothing at the call to annotate, and the old wording sent people
     # looking for a turbofish. A type parameter is bound by what the arguments
