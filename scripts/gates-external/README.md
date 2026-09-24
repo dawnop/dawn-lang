@@ -35,6 +35,7 @@ scripts/gates-external/run.sh --sha <sha> --backend crun --prefix ~/dawn-gates -
     --backend-opt remote-prefix=<cluster dir> [--backend-opt isolation=1] [--only ...] \
     [--backend-opt run-as=UID:GID|root] [--backend-opt private-tmp=0] [--backend-opt poll=45]
 scripts/gates-external/run.sh --resume <out> [--jobs N]   # after the controller died
+scripts/gates-external/crun_stub_selftest.py   # disconnects and --resume against a stub crun
 ```
 
 Exit status of `run.sh`: 0 complete, 1 ran but not complete, 2 refused to
@@ -47,6 +48,7 @@ plan, 3 the bundle was refused (leak or schema), nothing written.
 | `gatesplan.py` | what runs: every job and `run:` step of gates.yml at the commit, read from git; each `uses:` resolved through the substitution table, anything unmodelled refused |
 | `backend_local.py` | where and how: one job at a time on this machine, in a fresh worktree (a fresh clone inside a prefix) |
 | `backend_crun.py` | where and how, on the cluster: ships the input pack and the tools once, then one detached zero-card `crun run -d` per job, each running `prefix.py run-job` (the local backend in prefix mode) inside the cluster's prefix, and one poll for all jobs still out every 45 s; resumable |
+| `crun_stub_selftest.py` | the crun backend against a stub crun: dropped polls and launches give the same bundle bytes, a killed controller resumed gives the same bytes, a fragment deleted before `--resume` gives `complete=false` |
 | `bundle.py` | what it means: schema whitelist, leak filter, and `complete` |
 | `runner.py` | when: schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json`, `bundle.json` and `invocation.json` (what `--resume` reads back) |
 | `run.sh` | the entry point |
