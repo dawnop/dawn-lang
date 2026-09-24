@@ -422,6 +422,41 @@ def shared_tmp_state():
         return None, []
 
 
+FAILED_LOG_TAIL = 80
+
+
+def report_failed_logs(logs, log):
+    """Echo the tail of the failing step's output to the controller.
+
+    The logs stay under the remote prefix, which the controller never reads
+    back, so a red job on the crun backend used to say which step failed and
+    nothing about why: finding out meant opening a shell on the cluster, which
+    the backend's contract rules out. The failing step is the last one that
+    ran (a job stops at its first failure unless keep-going is set, and then
+    the tail of the last is still the most useful single answer), so its two
+    streams are the newest files here. Printed to stderr, which the controller
+    keeps in out/crun/job-<id>.txt and does not put into the bundle.
+    """
+    if not logs.is_dir():
+        return
+    newest = sorted((f for f in logs.iterdir() if f.suffix in (".out", ".err")),
+                    key=lambda f: f.stat().st_mtime_ns)[-2:]
+    for f in sorted(newest):
+        every = f.read_text(errors="replace").splitlines()
+        # A test runner's verdict lines are rarely in its last lines: `dawn test`
+        # ends with a summary after hundreds of PASS lines. So the lines naming
+        # a failure come first, wherever they are, and then the tail.
+        failing = [line for line in every if "FAIL" in line][:FAILED_LOG_TAIL]
+        if failing:
+            log(f"failed step log {f.name}: {len(failing)} line(s) naming a failure:")
+            for line in failing:
+                log(f"  ! {line}")
+        lines = every[-FAILED_LOG_TAIL:]
+        log(f"failed step log {f.name} (last {len(lines)} lines):")
+        for line in lines:
+            log(f"  | {line}")
+
+
 def cmd_run_job(args):
     """Run one planned job inside the prefix: the crun backend's remote half.
 
@@ -504,6 +539,8 @@ def cmd_run_job(args):
         log(f"private /tmp: {'modified' if tmp_after[0] != tmp_before[0] else 'untouched'} "
             f"during the job, {len(tmp_after[1])} entr(ies) left "
             f"{' '.join(tmp_after[1][:8])}")
+    if not result.get("ok"):
+        report_failed_logs(out / "logs" / job["id"], log)
     fragment = {"job": job["id"], "result": result, "toolchain": backend.toolchain()}
     fragments = out / "fragments"
     fragments.mkdir(parents=True, exist_ok=True)
