@@ -339,6 +339,13 @@ TRANSLATIONS = {
 
 SPEC_CONTRACTS = (
     (
+        "io is the only ambient effect",
+        (
+            ("docs/spec.md", "**`io` 是唯一的环境效果。**"),
+            ("docs/spec.en.md", "**`io` is the only ambient effect.**"),
+        ),
+    ),
+    (
         "failure payload contract",
         (
             ("docs/spec.md", "**载荷契约**（对每个后端）："),

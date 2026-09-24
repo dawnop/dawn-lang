@@ -49,6 +49,7 @@ use front/ast.{
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
 use front/lexer.{lex_cps, lex_at, slice_cps}
+use front/effect_name
 
 # ---- parser state ----
 
@@ -477,8 +478,8 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
           "effect parameters are lowercase, like the variables they bind: [!e]")))
       }
       let (st3, n) = want(p, st2, IDENT, "an effect parameter name (lowercase)")?
-      if n.text == "io" {
-        return Err((st3, pd_h("`io` is a built-in effect and cannot be a parameter name",
+      if effect_name.ambient(n.text) {
+        return Err((st3, pd_h("`" ++ n.text ++ "` is the ambient effect and cannot be a parameter name",
           bang.lo, n.hi, "pick another name: [!e]")))
       }
       # `pure` is refused here as well as at every use (`refuse_pure`). A
