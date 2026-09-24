@@ -286,7 +286,7 @@ linux-x86_64 静态可执行文件，出自 C 后端，`std` 与运行时都嵌�
 
 ## 状态
 
-当前工具链 0.77.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
+当前工具链 0.78.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
 效果处理器、包管理，以及 [cuTile 设备后端](docs/tile-backend-design.md)）落地记录在
 `docs/` 各自的设计文档里。
 
