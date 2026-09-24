@@ -1,0 +1,25 @@
+# `with_fs_real` is effect-polymorphic like its four siblings (SPC-05,
+# docs/effects-window-design.md 5): a body whose row is `!Fs !Log`, with `Log`
+# a program's own effect, passes through it and has `Log` answered by a
+# handler outside. It used to take only `!Fs !io` and refused this body with
+# `expected fn() -> Int !(Fs|io), got fn() -> Int !(Fs|Log)`.
+use std/io.{Fs}
+use std/io
+
+effect Log {
+  fn log(line: String) -> Unit
+}
+
+fn probe(path: String) -> Int !Fs !Log = {
+  log("probing")
+  if io.fs_exists(path) { 1 } else { 0 }
+}
+
+pub fn main() -> Unit !io = {
+  with handle Log { log(line) => println("log: " ++ line) }
+  let found = io.with_fs_real(() => probe("/definitely/not/a/path/here"))
+  println(to_string(found))
+  # and the other nesting order, which the closed row also refused
+  let again = io.with_proc_real(() => io.with_fs_real(() => probe("/")))
+  println(to_string(again))
+}
