@@ -89,11 +89,11 @@ MUTATIONS = {
     "drop-qualified-pattern-queries": (
         "src/lsp/lspq.dawn",
         ((
-            """    PQual(_, _, args, _, _, nlo, nhi, _, _) -> {
+            """    PQual(_, _, args, _, nlo, nhi, _, _) -> {
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
 """,
-            "    PQual(_, _, _, _, _, _, _, _, _) -> ()\n",
+            "    PQual(_, _, _, _, _, _, _, _) -> ()\n",
         ),),
     ),
     "duplicate-arm-test": (

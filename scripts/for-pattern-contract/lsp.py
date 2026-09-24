@@ -84,7 +84,7 @@ TOP_LEVEL_IN_TEXT = (
     "type InChoice = InLeft(value: Int) | InRight(value: Int)\n"
     "type InWrap = InWrap(value: InChoice)\n"
     "fn in_probe(xs: List[InWrap]) -> Unit = {\n"
-    "  for InWrap(InLeft(value) |  in) in xs { () }\n"
+    "  for InWrap(InLeft(value) |  in 0) in xs { () }\n"
     "}\n"
 )
 NO_PIPE_TEXT = (
@@ -240,7 +240,10 @@ def main() -> int:
     newline_gap = NEWLINE_TEXT.index("|  in") + len("| ")
     nested_gap = NESTED_TEXT.index("|  ,") + len("| ")
     record_gap = RECORD_TEXT.index("|  ,") + len("| ")
-    nested_in_gap = TOP_LEVEL_IN_TEXT.index("|  in)") + len("| ")
+    # `in` is a contextual keyword (spec 1.4): nested in the pattern it is a
+    # name, so the `0` after it is what keeps this header incomplete, and the
+    # nested word must still not be taken for the header's delimiter
+    nested_in_gap = TOP_LEVEL_IN_TEXT.index("|  in 0)") + len("| ")
     no_pipe_gap = NO_PIPE_TEXT.index("  in") + 1
     nonboundary_gap = NONBOUNDARY_TEXT.index("|  +") + len("| ")
     interval_gaps = []

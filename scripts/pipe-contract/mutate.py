@@ -32,7 +32,10 @@ OTHER_ARM = "      other -> EApply(other, [pos_arg(left)], e_lo(left), e_hi(othe
 # the parse error the pipe used to own, restored verbatim (spans aside) by the
 # mutant that puts a rulebook back into the parser
 OLD_REFUSAL = (
-    "      ECtor(_, _, _, _, _, _, elo, ehi) -> return Err((st3, pd_h(\n"
+    "      ECtor(_, elo, ehi) -> return Err((st3, pd_h(\n"
+    '        "the right side of `|>` must be a call, a function name, or a lambda",\n'
+    '        elo, ehi, "x |> f(a) is equivalent to f(x, a)")))\n'
+    "      ERecord(_, _, _, _, _, elo, ehi) -> return Err((st3, pd_h(\n"
     '        "the right side of `|>` must be a call, a function name, or a lambda",\n'
     '        elo, ehi, "x |> f(a) is equivalent to f(x, a)")))\n'
 )
