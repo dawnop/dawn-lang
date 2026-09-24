@@ -93,4 +93,8 @@ job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`i
 
 ## 提交
 
-（实现后回填）
+分支 `ci/tooling-window`（2026-09-24 rebase 到 `origin/fix/builtin-privileges`，即 PR #216 的树；合入时哈希会变，故按主题列）：
+
+- 9(a)「Hold gate anchors to exactly once, unflipped and enrolled」：present 恰一次、`ARC-10` 锚点重写（带 `Anchor-Change(ARC-10):`）、`scripts/anchor-guard.py` 与 `scripts/anchor-readers.txt`、tree-policy 接线与 steps lock 重录。
+- 9(b)「Audit budget claims against a week of observations nightly」：nightly `budget-observations` 与 `scripts/nightly-issue.sh`；随后「Restate two mutant-shard budgets to their seven-day worst runs」把首跑就会点名的两条声明（`syntax-mutants-2` 897 s、`builtin-type-2` 809 s）提前重述。
+- 9(c)「Advance the ecosystem pin and red nightly when it falls behind」：`ECO_REV` 推进到 `dc0a8fb`、`--check-pin`、nightly `corpus-pin`。
