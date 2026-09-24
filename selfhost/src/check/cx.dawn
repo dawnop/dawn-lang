@@ -610,18 +610,26 @@ pub fn exports_seen_by(exp: ModExports, viewer: PackageId) -> ModExports = {
     ctors: ctors, consts: consts, traits_by_name: traits, effects: effects }
 }
 
-## The miss diagnostic for a name that `exports_seen_by` took away, asked
-## before any "private" or "no exported" answer. It can only fire across a
+## Did `exports_seen_by` take `name` away? Every miss diagnostic asks this
+## before its "private" or "no exported" answer. It can only be true across a
 ## package boundary: inside the package the name is still in the tables and
 ## the lookup never missed.
-pub fn pkg_private_diagnostic(exp: ModExports, name: String) -> Option[ExportDiagnostic] =
-  if list.contains(exp.pkg_only, name) {
-    let pkg = package_display(exp.package)
-    Some(ExportDiagnostic {
-      message: "`" ++ name ++ "` is package-private to package `" ++ pkg ++ "`",
-      hint: Some("only modules of package `" ++ pkg ++ "` may name it")
-    })
-  } else { None }
+pub fn pkg_private(exp: ModExports, name: String) -> Bool = list.contains(exp.pkg_only, name)
+
+fn pkg_private_msg(exp: ModExports, name: String) -> String =
+  "`" ++ name ++ "` is package-private to package `" ++ package_display(exp.package) ++ "`"
+
+fn pkg_private_hint(exp: ModExports) -> String =
+  "only modules of package `" ++ package_display(exp.package) ++ "` may name it"
+
+## The miss diagnostic for such a name, as a record for the read paths that
+## journal their answer...
+pub fn pkg_private_export(exp: ModExports, name: String) -> ExportDiagnostic =
+  ExportDiagnostic { message: pkg_private_msg(exp, name), hint: Some(pkg_private_hint(exp)) }
+
+## ...and raised, for the paths that report directly.
+pub fn pkg_private_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, pkg_private_msg(exp, name), lo, hi, pkg_private_hint(exp))
 
 ## A fresh state for the tests that live beside the checker.
 pub fn test_cx() -> Cx = cx_new(None, None)
@@ -877,10 +885,7 @@ fn qualified_effect_diagnostic(cx: Cx, qualifier: String, name: String) -> Expor
       let wrong_kind = map.has(exp.fns, name) || map.has(exp.types_by_name, name) ||
         map.has(exp.aliases, name) || map.has(exp.ctors, name) || map.has(exp.consts, name) ||
         map.has(exp.traits_by_name, name)
-      match pkg_private_diagnostic(exp, name) {
-        Some(d) -> return d
-        None -> ()
-      }
+      if pkg_private(exp, name) { return pkg_private_export(exp, name) }
       let message = if wrong_kind {
         "`" ++ qualifier ++ "." ++ name ++ "` is not an effect"
       } else if list.contains(exp.all_names, name) {
@@ -1738,16 +1743,14 @@ fn resolve_qual(
             "exported types: ${join(sort(pool), ", ")}"
           }
       }
-      let diagnostic = match pkg_private_diagnostic(exp, name) {
-        Some(d) -> d
-        None -> ExportDiagnostic {
-          message: "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`",
-          hint: Some(hint)
-        }
-      }
+      let refused = pkg_private(exp, name)
+      let message = "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`"
+      let diagnostic = ExportDiagnostic { message: message, hint: Some(hint) }
+      let answer = if refused { pkg_private_export(exp, name) } else { diagnostic }
       let diagnostic_cx = observe_type_read(cx, semantic_reads.ExportDiagnosticAnswer(semantic_reads.TypeDiagnostic,
-        q, name, Some(diagnostic)))
-      (cerr_o(diagnostic_cx, diagnostic.message, lo, hi, diagnostic.hint), TyError)
+        q, name, Some(answer)))
+      if refused { return (pkg_private_err(diagnostic_cx, exp, name, lo, hi), TyError) }
+      (cerr_h(diagnostic_cx, message, lo, hi, hint), TyError)
     }
   }
 }

@@ -51,7 +51,7 @@ use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, Na
 use check/cx.{
   resolve_named_effect,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
-  package_of, exports_seen_by, pkg_private_diagnostic,
+  package_of, exports_seen_by, pkg_private, pkg_private_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
   alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
   label_eff, java_enabled_read, java_find_class_read, java_class_name_read,
@@ -3673,10 +3673,7 @@ fn inject_selective(
   let nothing = f == None && ty == None && cn == None && ct == None && al == None &&
     tr == None && ef == None
   if nothing {
-    match pkg_private_diagnostic(exp, name) {
-      Some(d) -> return cerr_o(cx1, d.message, lo, hi, d.hint)
-      None -> ()
-    }
+    if pkg_private(exp, name) { return pkg_private_err(cx1, exp, name, lo, hi) }
     var known = false
     for n in exp.all_names {
       if n == name { known = true }

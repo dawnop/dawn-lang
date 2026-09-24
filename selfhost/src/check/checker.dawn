@@ -84,7 +84,7 @@ use check/cx.{
   label_eff,
   revalidate_context_read,
   write_symbol, write_signature, write_bounds,
-  AliasE, Cx, Frame, LambdaCx, ModExports, package_of, pkg_private_diagnostic,
+  AliasE, Cx, Frame, LambdaCx, ModExports, package_of, pkg_private, pkg_private_export, pkg_private_err,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
@@ -495,10 +495,7 @@ fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx = {
 ## exports. Falling through to the value path reported the alias itself as an
 ## undefined variable, which is worse than inconsistent: `m` is defined.
 fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic = {
-  match pkg_private_diagnostic(exp, fname) {
-    Some(d) -> return d
-    None -> ()
-  }
+  if pkg_private(exp, fname) { return pkg_private_export(exp, fname) }
   let msg = "module `" ++ exp.mod_path ++ "` has no exported value `" ++ fname ++ "`"
   # a name it does export, as a type, is worth saying so: otherwise the author
   # reads "no exported value `Shown`", finds `pub type Shown` and stops there
@@ -535,8 +532,8 @@ fn export_function_diagnostic_read(cx: Cx, q: String, name: String) -> (Cx, Opti
       # privacy answer before considering public function suggestions.
       var in_all = false
       for existing in exp.all_names { if existing == name { in_all = true } }
-      Some(if list.contains(exp.pkg_only, name) {
-        pkg_private_diagnostic(exp, name).expect("a package-private name")
+      Some(if pkg_private(exp, name) {
+        pkg_private_export(exp, name)
       } else if in_all {
         ExportDiagnostic { message: "`" ++ name ++ "` is private to module `" ++ exp.mod_path ++ "`",
           hint: Some("add `pub` to its declaration in ${exp.mod_path}") }
@@ -3998,18 +3995,19 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
           let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)
           match constructor {
             None -> {
-              let diagnostic = match pkg_private_diagnostic(exp, cname) {
-                Some(d) -> d
-                None -> ExportDiagnostic { message: "module `" ++ exp.mod_path ++
-                    "` has no exported constructor `" ++ cname ++ "`",
-                  hint: suggest.hint(cname, map.keys(exp.ctors)) }
-              }
+              let refused = pkg_private(exp, cname)
+              let diagnostic = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+                  "` has no exported constructor `" ++ cname ++ "`",
+                hint: suggest.hint(cname, map.keys(exp.ctors)) }
+              let answer = if refused { pkg_private_export(exp, cname) } else { diagnostic }
               let diagnostic_cx = match pattern_cx.function_reads {
                 None -> pattern_cx
                 Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
-                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(diagnostic))) }
+                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(answer))) }
               }
-              var cx1 = cerr_o(diagnostic_cx, diagnostic.message, nlo, nhi, diagnostic.hint)
+              var cx1 = if refused { pkg_private_err(diagnostic_cx, exp, cname, nlo, nhi) } else {
+                cerr_o(diagnostic_cx, diagnostic.message, nlo, nhi, diagnostic.hint)
+              }
               for a in pargs {
                 let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
                 cx1 = cx2
