@@ -365,6 +365,51 @@ expect_project_fails unused_export_project \
 expect_project_fails phantom_distinct \
   'declares return type Phantom[String] but its body is Phantom[Int]'
 
+# ---- pub(pkg) (docs/package-visibility-design.md) -------------------------
+#
+# The Package audience: a pub(pkg) root answers to its package, a pub root may
+# not name a pub(pkg) identity, and `dawn doc` publishes pub alone. The
+# boundary itself is a project with a [deps] package, because a package is
+# where a module was loaded from and a single file is always the root package.
+
+expect_clean pkg_accepted
+expect_diags pkg_reject_public_leak 1 \
+  'public function `leak` exposes package-private type `Seam`'
+expect_diags pkg_reject_private_leak 1 \
+  'package-private function `bad` exposes private type `Secret`'
+expect_diags pkg_reject_impl_assoc 1 \
+  'observable impl `HasItem[Open]` exposes private type `Secret`'
+expect_project_ok pkg_foreign/lib
+expect_project_fails pkg_foreign '`seam` is package-private to package `lib`'
+
+# Every name `dawn doc` publishes for one module, sorted, one per line.
+doc_names() {
+  local compiler=$1 source=$2 out
+  out="$work/docn.$$.$RANDOM"
+  run_dawn "$compiler" doc "$source" > "$out" 2>&1 || {
+    cat "$out" >&2
+    fail "doc $source did not run"
+  }
+  python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+m = d["modules"][0]
+names = [x["name"] for k in ("fns", "types", "consts", "traits", "effects") for x in m[k]]
+print("\n".join(sorted(names + ["impl " + i for i in m["impls"]])))' "$out"
+}
+
+doc_pkg_want='Ask
+Col
+MAX
+Measure
+Open
+api
+impl Measure[Open]'
+got=$(doc_names "$dawn" "$cases/doc_pkg.dawn")
+[ "$got" = "$doc_pkg_want" ] || {
+  printf '%s\n' "$got" >&2
+  fail "doc_pkg: dawn doc published a pub(pkg) item, or lost a pub one"
+}
+
 expect_std_ok "$root/std"
 expect_std_refuses "$world_std" \
   'public function `surface_contract_world_array` exposes standard-library-internal type `Array`'
@@ -543,6 +588,10 @@ mutants=(
   "skip-fn-return"
   "array-is-world"
   "stdonly-collapses-to-world"
+  "pkg-always-visible"
+  "doc-publishes-pkg"
+  "pkg-root-is-world"
+  "package-covers-world"
 )
 
 run_mutant() {
@@ -631,6 +680,35 @@ Sketch[Card]' ;;
       mutant_std_accepts "$1" "$world_std" ;;
     stdonly-collapses-to-world)
       mutant_std_refuses "$1" "$root/std" 'standard-library-internal type `Array`' ;;
+    pkg-always-visible)
+      # the boundary is gone: the dependent project is accepted, and the
+      # checker corpus's cross-package case no longer matches its golden
+      local mutant out corpus
+      mutant=$(build_mutant "$1")
+      out="$work/pkgvis.$RANDOM"
+      if ! run_dawn "$mutant" check "$here/pkg_foreign" > "$out" 2>&1; then
+        cat "$out" >&2
+        fail "$1: the dependent project is still refused"
+      fi
+      corpus="$root/scripts/checker-corpus/cases/package_visibility"
+      if diags_of "$mutant" "$corpus.d/entry.dawn" |
+        sed 's|\t[^\t]*/\([^\t/]*\)\t|\t\1\t|' | cmp -s - "$corpus.expected"; then
+        fail "$1: the checker corpus golden still matches"
+      fi
+      echo "PASS  $1 compiles, then turns pkg_foreign and the checker corpus red" ;;
+    doc-publishes-pkg)
+      local mutant got
+      mutant=$(build_mutant "$1")
+      got=$(doc_names "$mutant" "$cases/doc_pkg.dawn")
+      printf '%s\n' "$got" | grep -qx 'seam' || {
+        printf '%s\n' "$got" >&2
+        fail "$1: doc still leaves the pub(pkg) function out"
+      }
+      echo "PASS  $1 compiles, then turns doc_pkg red" ;;
+    pkg-root-is-world)
+      mutant_adds "$1" pkg_accepted 'exposes package-private type `Seam`' ;;
+    package-covers-world)
+      mutant_drops "$1" pkg_reject_public_leak 'public function `leak`' ;;
     *) fail "no assertion for mutant $1" ;;
   esac
 }

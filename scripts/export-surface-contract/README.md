@@ -72,6 +72,23 @@ filter stays green under it. Aimed one line higher it would redden mutant #15
 as well (measured: the doc output becomes all three impls), and an assertion two
 mutants can redden is owned by neither. Same correction as `2d5f19a`.
 
+## `pub(pkg)`
+
+`docs/package-visibility-design.md` adds a Package audience between World and
+Module. Four fixtures hold the surface half (`pkg_accepted`,
+`pkg_reject_public_leak`, `pkg_reject_private_leak`, `pkg_reject_impl_assoc`:
+an impl of a package-private trait is observable to the package and so still
+validated), `doc_pkg.dawn` holds the doc half as an exact name list, and
+`pkg_foreign/` holds the boundary itself — a project whose `[deps]` package
+`lib` has a package-private seam its sibling module may call and the project
+may not. A single file cannot hold that case: a package is where a module was
+loaded from, and a lone file is always the root package.
+
+Four mutants, one per rule: `pkg-always-visible` (the import boundary lets
+everything through; it must redden `pkg_foreign` *and* make the checker
+corpus's `package_visibility` case disagree with its golden),
+`doc-publishes-pkg`, `pkg-root-is-world` and `package-covers-world`.
+
 ## Not here
 
 * **A projection's private subject, and a private effect nested in a written
