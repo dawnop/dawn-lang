@@ -1,8 +1,10 @@
 # 语法破坏性窗口设计（裁决 2，v0.78.0）
 
-> 状态：**proposed** —— 裁决 2（`agent-handoff/rulings-20260924.md`）的落地方案。六条改动一次过，
-> 随 v0.78.0 发布；种子推进之前 `selfhost/src` 不用任何新语法，被删掉的拼写全仓迁走。
+> 状态：**current** —— 裁决 2（`agent-handoff/rulings-20260924.md`）的落地记录，六条改动已在分支
+> `feat/syntax-window` 实现，随 v0.78.0 发布；种子推进之前 `selfhost/src` 不用任何新语法，被删掉的拼写全仓迁走。
 > 调研（各语言做法与出处）见 `agent-handoff/research-syntax-window-20260924.md`，本文只写 Dawn 的做法与理由。
+> 与原方案的偏离有三处，均在对应小节写明：SYN-N04 改为报错而不是字面（协调方改裁）、`CtorUse` 保留（§3.2）、
+> SYN-N08 连带修了 SYN-N10 的 `|` 一半（§4.3）。
 
 ## 0. 范围
 
@@ -321,3 +323,21 @@ match c {
 - **`None()` 这种无字段构造器加空括号**：不在裁决 2 范围。
 - **局部 `fn` 引入新的效果变量**：等于局部多态，要给绑定者列表定 ABI（`effect-params-design.md` 决策 5 的同一个面），裁决只要求具名效果。
 - **site 构建期高亮器与 play-ui 的 CodeMirror 词表**：它们是启发式着色器，不是契约；按词着色 `in`/`with` 不影响正确性，本刀不改。
+
+## 9. 落地记录
+
+提交按主题列（main 线性历史、rebase 合并会改写哈希，所以不记哈希）：
+
+| 提交主题 | 内容 |
+|---|---|
+| Write down the syntax window design for ruling 2 | 本设计文档 |
+| Demote java, test, assert, with and in to contextual keywords | SYN-N03 + SYN-N01：五个上下文关键字；spec、tmLanguage、scope contract 对账；SYN-17 关账 |
+| Refuse $name in strings and keep ${expr} as the one interpolation | SYN-N04：`$name` 报错并给两种改法；fmt 窗口迁移；全仓 440 处迁移 |
+| Build and match records with braces and constructors with parentheses | SYN-N05 + SYN-N11：记录 `{}`、构造器 `()`；`ECtor`/`ERecord`、`PCtor`/`PRecord` 分节点 |
+| Allow a leading bar on or-patterns and align multi-line alternatives | SYN-N08：前导 `\|`；行首 `\|` 不续接按位或；fmt 对齐与 `PIPE` 续行 |
+| Let a local fn declare named effects in its row | SPC-19：局部 `fn` 的具名效果行 |
+| Carry the syntax window through the syntax contracts；Follow the static-call consumer …；Count the syntax window's new tests … | 语法契约、增量语义契约、prepared LSP 闭包计数随新语法迁移 |
+| Let a declared formatter change reach the fmt differential's declaration | `selfhost-fmt-diff.sh`：`formatted` 行交给声明判定 |
+| Re-record the Core golden …；GPU diff 台账行 | 在最终树上重录与补跑 |
+
+验收实测见 `agent-handoff/syntax-window-report-20260924.md`。
