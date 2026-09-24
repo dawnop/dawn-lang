@@ -49,6 +49,8 @@ SOURCES = (
     "selfhost/src/check/cx.dawn",
     "selfhost/src/check/passes.dawn",
     "selfhost/src/check/checker*.dawn",
+    # the unused-import diagnostic, which the checker raises last
+    "selfhost/src/check/import_use.dawn",
 )
 CASES = "scripts/checker-corpus/cases"
 UNCOVERED = "scripts/checker-corpus/uncovered.txt"
