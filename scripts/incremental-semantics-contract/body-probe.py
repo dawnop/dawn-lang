@@ -207,6 +207,9 @@ def main():
             typed_source = typed_source.replace(old, new)
         (fixture / "src/typed_projection.dawn").write_text(typed_source)
     (fixture / "src/bodyprobe.dawn").write_text(probe)
+    # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+    # `main` is an ordinary function now, so a two-line entry forwards to it
+    (fixture / "src/main.dawn").write_text("use bodyprobe\n\npub fn main() -> Unit !io = bodyprobe.main()\n")
     identity = (HERE / ("declaration-identity.dawn.txt" if args.typed else "body-identity.dawn.txt")).read_text()
     relocation = (HERE / "body-relocate.dawn.txt").read_text()
     mutations = {

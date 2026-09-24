@@ -54,7 +54,13 @@ pub type LoadedModule = {
   text: String,
   m: Module,
   pdiags: List[Diag],
-  pkg: Option[source.PkgR]
+  pkg: Option[source.PkgR],
+  # The program's entry module: `src/main.dawn` of a project, or the file a
+  # command named. Only this module's `main` is the entry point and carries
+  # its constraints (spec §10.5); a `main` anywhere else is an ordinary
+  # function. Settled by the load, which is the only place that knows which
+  # file the command named.
+  entry: Bool
 }
 
 ## A diagnostic paired with where it should be reported (a module path for
@@ -412,15 +418,25 @@ pub fn load_entries_over(
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    false
+    false,
+    entry_file(plan)
   ))
+
+## The file whose module is the program's entry (spec §10.1, §10.5): the one
+## a command named, or a project's `src/main.dawn`. Canonical, because that
+## is how the loader compares the files it reads.
+fn entry_file(plan: ProjectPlan) -> Option[String] !Env =
+  match plan.source.target {
+    source.SourceFile(file) -> Some(canon(file))
+    source.ProjectDirectory(dir) -> Some(canon(dir ++ "/src/main.dawn"))
+  }
 
 ## Opt-in loader capture; cold callers retain their original result API.
 pub fn load_entries_over_prepared(
   plan: ProjectPlan, entries: List[String], over: Map[String, String]
 ) -> PreparedLoad !Fs !Env !io =
   resolve(plan.source.source_root, entries, planner_diags(plan.source.diags),
-    plan.source.pkgs, over, true)
+    plan.source.pkgs, over, true, entry_file(plan))
 
 fn resolve(
   root: String,
@@ -428,7 +444,8 @@ fn resolve(
   diags0: List[LocDiag],
   pkgs: Map[String, source.PkgR],
   over: Map[String, String],
-  capture: Bool
+  capture: Bool,
+  entry: Option[String]
 ) -> PreparedLoad !Fs !Env !io = {
   var diags = diags0
   let root_abs = canon(root)
@@ -462,7 +479,8 @@ fn resolve(
             text: text,
             m: m,
             pdiags: pdiags,
-            pkg: None
+            pkg: None,
+            entry: entry == Some(c)
           }
           by_canon = map.insert(by_canon, c, mod_path)
           by_path = map.insert(by_path, mod_path, mf)
@@ -599,7 +617,8 @@ fn resolve(
                 text: text,
                 m: m2,
                 pdiags: pdiags2,
-                pkg: dep_pkg
+                pkg: dep_pkg,
+                entry: false
               }
               by_canon = map.insert(by_canon, dep_canon, mod_path)
               by_path = map.insert(by_path, mod_path, mf2)
@@ -1045,6 +1064,7 @@ fn module_step_with_recording(
   var cx = cx_new(Some(mf.class_name), Some(mf.path))
   cx = Cx {
     ..cx,
+    is_entry_module: mf.entry,
     # the module's own name got a vote in `cx_new` and does not get one
     # here: `src/std/foo.dawn` is spelled like std and is not std
     is_std_module: is_std,
@@ -1368,7 +1388,9 @@ fn prepare_standalone_with_capture(path: String, text: String, capture: Bool) ->
     text: text,
     m: parsed.syntax,
     pdiags: parsed.diagnostics,
-    pkg: None
+    pkg: None,
+    # a single document analysed on its own is its own program's entry
+    entry: true
   }
   let proofs = match parsed.snapshot {
     Some(snapshot) -> map.from([("main", snapshot)])
@@ -1548,7 +1570,7 @@ test "cached module transitions renew bodies and publish the current carry" {
       let (text, hits, clean) = sample
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None }
+        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let warm = analyze_module_step_cached(input, baseline, std, ct_default(), jsig_refused(), None, cache)
       let cold = analyze_module_step(input, baseline, std, ct_default(), jsig_refused(), None)
       assert warm.step.checked.tm == cold.checked.tm
@@ -1576,7 +1598,7 @@ test "cached module transitions renew bodies and publish the current carry" {
     }
     let (syntax, pd) = parser.parse_module(original)
     let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-      text: original, m: syntax, pdiags: pd, pkg: None }
+      text: original, m: syntax, pdiags: pd, pkg: None, entry: false }
     # Every owner coordinate independently prevents borrowing the old cache.
     for altered in [LoadedModule { ..input, mod_path: "renamed" },
       LoadedModule { ..input, class_name: "renamed" },
@@ -1628,7 +1650,7 @@ test "cached module transitions recompute comptime and recover from evaluation e
       let text = "fn leaf() -> Int = ${expression}\nconst RESULT: Int = leaf()\nfn runtime() -> Int = leaf()\n"
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None }
+        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let warm = analyze_module_step_cached(input, baseline, std, ct_default(), jsig_refused(), None, cache)
       let cold = analyze_module_step(input, baseline, std, ct_default(), jsig_refused(), None)
       assert warm.step.checked.tm == cold.checked.tm
@@ -2436,7 +2458,7 @@ test "module provenance carry keeps exporting owners across header reorder" {
     for text in [first ++ second, second ++ first] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None }
+        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       let cold = analyze_module_step(input, initial_carry(std), std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0 && step.checked.tm == cold.checked.tm
@@ -2460,7 +2482,7 @@ test "module provenance carry keeps exporting owners across header reorder" {
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
-        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None }
+        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step_recorded(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
       assert len(consumed.body_records.expect("recorded consumer body")) == 1
@@ -2494,7 +2516,7 @@ test "module provenance carry keeps exporting owners across header reorder" {
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
     let (renamed_ast, renamed_pd) = parser.parse_module(renamed_text)
     let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
-      text: renamed_text, m: renamed_ast, pdiags: renamed_pd, pkg: None }
+      text: renamed_text, m: renamed_ast, pdiags: renamed_pd, pkg: None, entry: false }
     let renamed_step = analyze_module_step(renamed_input, initial, std, ct_default(), jsig_refused(), None)
     assert len(renamed_step.diags) == 0
     assert match map.get(renamed_step.checked.cx.fns, "renamed_of").expect("renamed generic").tparams[0] {
@@ -2508,7 +2530,7 @@ test "module provenance carry keeps exporting owners across header reorder" {
     for text in ["fn broken(", "fn broken(x: Missing) -> Unit = ()\n"] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "broken", class_name: "broken", path: "/provenance/broken.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None }
+        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) > 0
       assert map.get(step.after.provenance.expect("failed module provenance").modules, "broken") == Some(None)
@@ -2539,7 +2561,7 @@ test "a consumer names a provider's effect without minting the provider's identi
     for text in [asks ++ generic, generic ++ asks] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None }
+        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let table = map.get(step.after.provenance.expect("provider provenance").modules, "library")
@@ -2567,7 +2589,7 @@ test "a consumer names a provider's effect without minting the provider's identi
         "fn relay[!f](g: fn() -> Int !f) -> Int !f = dep.twice(g)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
-        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None }
+        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       # The effect the consumer resolved is the provider's declaration, by
       # value and by derivation: a second mint in the consumer's owner would

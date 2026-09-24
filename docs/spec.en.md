@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ a5bcf057e94af5fd -->
+<!-- doc-check: translation-of docs/spec.md @ 67f15d483372fa7f -->
 
 # Dawn Language Specification
 
@@ -2069,7 +2069,7 @@ fn logged(x: Int) -> Int !Ask !io = {
   signature, or `with handle` on the spot. Calling an operation directly, that call is the
   operation call; where the label arrives through a function value or an effect-polymorphic call,
   the report lands on **that call**, not on the callee's definition.
-- Only `pub fn main` must have an empty label set — it has no caller to supply evidence, so the
+- Only the entry module's `pub fn main` must have an empty label set — it has no caller to supply evidence, so the
   "nobody answers" error lands on `main`'s own signature. An ordinary `pub fn` may carry the label
   of a `pub effect`, for its caller to propagate or handle; it is a *private* effect in a public
   surface that the export-surface validation refuses (§3.3).
@@ -3571,7 +3571,11 @@ than at the use site.
   `const` referenced across modules is already evaluated before the using side is.
 - Type identity: one `type` declaration is one type across the whole program (each file is
   parsed/checked exactly once).
-- Entry: the main module's `pub fn main() -> Unit !io`.
+- Entry: the **entry module**'s `pub fn main() -> Unit !io`. The entry module is the file a
+  command names, or a project's `src/main.dawn`; **`main` is reserved only in the entry
+  module**, and its shape (no parameters, returns `Unit`, `!io`, `pub`, no labels in its row)
+  is checked only there. A `main` in any other module is an ordinary function, of any
+  signature and any visibility.
 
 ### 10.6 The bundled standard library and the prelude
 

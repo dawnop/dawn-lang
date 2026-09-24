@@ -79,6 +79,9 @@ def main():
         ]:
             text = edit(text, before, after)
         (fixture / "src/reference.dawn").write_text(text + "\n" + (HERE / "bounded-replay-cases.dawn.txt").read_text())
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
         for name, bounded_source, replay_source, owner in subjects:
             (root / "selfhost/src/check/bounded_replay.dawn").write_text(bounded_source)
             (root / "selfhost/src/check/scalar_replay.dawn").write_text(replay_source)

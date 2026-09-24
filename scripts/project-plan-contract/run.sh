@@ -89,7 +89,8 @@ old = '''pub fn load_entries_over(
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    false
+    false,
+    entry_file(plan)
   ))
 '''
 new = '''pub fn load_entries_over(
@@ -107,7 +108,8 @@ new = '''pub fn load_entries_over(
     planner_diags(fresh.source.diags),
     fresh.source.pkgs,
     over,
-    false
+    false,
+    entry_file(fresh)
   ))
 }
 '''

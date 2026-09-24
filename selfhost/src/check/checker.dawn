@@ -2363,12 +2363,16 @@ test "main cannot owe a declared effect" {
     "pub fn main() -> Unit !Ask !io = ()\n"
   let (m, _) = parser.parse_module(src)
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, _) = check_module(test_cx(), m, env)
+  # the entry module's `main` is the entry point (spec §10.5)
+  let (cx1, _) = check_module(Cx { ..test_cx(), is_entry_module: true }, m, env)
   var saw = false
   for d in cx1.diags {
     if d.msg == "main cannot declare the effect `Ask`" { saw = true }
   }
   assert saw
+  # and anywhere else `main` is an ordinary function, free to carry a label
+  let (lib, _) = check_module(test_cx(), m, env)
+  for d in lib.diags { assert not str.starts_with(d.msg, "main ") }
 }
 
 ## Unary operators (the Kotlin inferExpr's Unary arm).

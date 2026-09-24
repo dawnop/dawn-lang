@@ -346,6 +346,20 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
+        "main is reserved only in the entry module",
+        (
+            ("docs/spec.md", "**`main` 只在入口模块是保留名**"),
+            ("docs/spec.en.md", "**`main` is reserved only in the entry\n  module**"),
+        ),
+    ),
+    (
+        "selective-import renaming is general",
+        (
+            ("docs/spec.md", "对一切导出成员通用——函数、常量、类型、构造器、`alias`、trait、效果一视同仁"),
+            ("docs/spec.en.md", "and that holds for every exported member alike — functions, constants, types,\n  constructors, `alias`es, traits and effects"),
+        ),
+    ),
+    (
         "failure payload contract",
         (
             ("docs/spec.md", "**载荷契约**（对每个后端）："),
