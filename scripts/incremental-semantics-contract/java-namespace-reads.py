@@ -24,7 +24,7 @@ def main():
         ("passes", "find-consumer", "cx1 = found_cx", "cx1 = cx1"),
         ("passes", "import-name-consumer", "cx1 = name_cx\n        if previous", "cx1 = cx1\n        if previous"),
         ("passes", "type-collision-consumer", "cx1 = name_cx\n    if java_name", "cx1 = cx1\n    if java_name"),
-        ("checker", "static-consumer", "cx1 = name_cx\n        match java_target", "cx1 = cx1\n        match java_target"),
+        ("checker", "static-consumer", "cx1 = name_cx\n      match java_target", "cx1 = cx1\n      match java_target"),
         ("checker", "field-consumer", "field_cx = name_cx", "field_cx = field_cx"),
         ("checker", "message-consumer", "\n          cx = name_cx\n", "\n          cx = cx\n"),
         ("checker", "refusal-consumer", "cerr_h(message_cx, message,", "cerr_h(cx, message,"),
