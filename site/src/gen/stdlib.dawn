@@ -65,7 +65,7 @@ fn chrome(lang: Lang, root: String) -> Chrome =
       traits_title: "Prelude traits",
       traits_intro: "<p>The five traits the prelude brings. Their method names " ++
         "enter the function namespace as well, and a top-level declaration in the " ++
-        """calling module shadows them (<a href="$root/spec.html#s10-6">spec §10.6</a>).""" ++
+        """calling module shadows them (<a href="${root}/spec.html#s10-6">spec §10.6</a>).""" ++
         "</p>\n",
       modules_title: "Modules",
       modules_intro: "<p>Brought in with <code>use std/x</code> and then called " ++
@@ -81,7 +81,7 @@ fn chrome(lang: Lang, root: String) -> Chrome =
         "会在下面「模块」一节里以限定拼写再出现一次——同一个函数，两种写法。</p>\n",
       traits_title: "预置 trait",
       traits_intro: "<p>随 prelude 而来的五个 trait。它们的方法名同样进入函数命名空间，" ++
-        """可被本模块的顶层声明遮蔽（<a href="$root/zh/spec.html#s10-6">规范 §10.6</a>）。</p>""" ++
+        """可被本模块的顶层声明遮蔽（<a href="${root}/zh/spec.html#s10-6">规范 §10.6</a>）。</p>""" ++
         "\n",
       modules_title: "模块",
       modules_intro: "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
@@ -134,19 +134,19 @@ fn prose(docs: List[String], text: String) -> String =
   } else {
     match parser.parse(text) {
       Ok(bs) -> render_doc(bs, u => map_doc_url(".", docs, u)).html
-      Err(e) -> panic("a doc comment is not Markdown: $e\n---\n$text")
+      Err(e) -> panic("a doc comment is not Markdown: ${e}\n---\n${text}")
     }
   }
 
 ## One documented entry: its qualified spelling as the anchor, the declaration
 ## exactly as the compiler renders it, then the prose.
 fn entry(docs: List[String], title: String, id: String, sig: String, doc: String) -> String =
-  """<div class="api-item" id="$id">""" ++ "\n" ++
-  """<h3 class="api-name"><a href="#$id">""" ++ escape_html(title) ++ "</a></h3>\n" ++
+  """<div class="api-item" id="${id}">""" ++ "\n" ++
+  """<h3 class="api-name"><a href="#${id}">""" ++ escape_html(title) ++ "</a></h3>\n" ++
   """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
   """<div class="api-doc">""" ++ "\n" ++ prose(docs, doc) ++ "</div>\n</div>"
 
-fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "$qual.$name" }
+fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "${qual}.${name}" }
 
 fn fn_entry(docs: List[String], qual: String, id_base: String, f: Json) -> String =
   entry(docs, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
@@ -159,7 +159,7 @@ fn ctor_decl(c: Json) -> String = {
 
 fn record_decl(head: String, c: Json) -> String = {
   let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
-  "type $head = { " ++ join(fs, ", ") ++ " }"
+  "type ${head} = { " ++ join(fs, ", ") ++ " }"
 }
 
 ## The declaration, reassembled from what the compiler reported. A type with no
@@ -171,12 +171,12 @@ fn type_decl(t: Json) -> String = {
   let head = if len(ps) == 0 { name } else { name ++ "[" ++ join(ps, ", ") ++ "]" }
   let ctors = jarr(jget(t, "ctors"))
   match get(ctors, 0) {
-    None -> "type $head"
+    None -> "type ${head}"
     Some(first) ->
       if jbool(jget(t, "record")) {
         record_decl(head, first)
       } else {
-        "type $head = " ++ join(map(ctors, c => ctor_decl(c)), " | ")
+        "type ${head} = " ++ join(map(ctors, c => ctor_decl(c)), " | ")
       }
   }
 }
@@ -190,7 +190,7 @@ fn type_entry(docs: List[String], id_base: String, t: Json) -> String =
 
 fn const_entry(docs: List[String], qual: String, id_base: String, c: Json) -> String = {
   let name = field(c, "name")
-  entry(docs, qualify(qual, name), "$id_base-$name", "const $name: " ++ field(c, "type"),
+  entry(docs, qualify(qual, name), "${id_base}-${name}", "const ${name}: " ++ field(c, "type"),
     field(c, "doc"))
 }
 
@@ -204,7 +204,7 @@ fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
   for m in jarr(jget(t, "methods")) {
     body = body ++ "\n  " ++ field(m, "sig")
   }
-  entry(docs, name, "$id_base-trait-$name", "trait $name[$tp] {$body\n}", field(t, "doc"))
+  entry(docs, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", field(t, "doc"))
 }
 
 ## Dead for every std module today — nothing there declares a `pub effect` yet
@@ -216,7 +216,7 @@ fn effect_entry(docs: List[String], id_base: String, e: Json) -> String = {
   for op in jarr(jget(e, "ops")) {
     body = body ++ "\n  " ++ field(op, "sig")
   }
-  entry(docs, name, "$id_base-effect-$name", "effect $name {$body\n}", field(e, "doc"))
+  entry(docs, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", field(e, "doc"))
 }
 
 ## The impls a module registers. Coherence is program-wide — it does not ask
@@ -232,10 +232,10 @@ fn impls_html(c: Chrome, m: Json) -> String = {
 }
 
 fn section(id: String, title: String, intro: String, body: String) -> String =
-  """<h2 id="$id">""" ++ escape_html(title) ++ "</h2>\n" ++ intro ++ body
+  """<h2 id="${id}">""" ++ escape_html(title) ++ "</h2>\n" ++ intro ++ body
 
 fn sub(id: String, title: String) -> String =
-  """<h3 class="api-group" id="$id">""" ++ escape_html(title) ++ "</h3>\n"
+  """<h3 class="api-group" id="${id}">""" ++ escape_html(title) ++ "</h3>\n"
 
 # ---- the three generated sections ----
 
@@ -244,7 +244,7 @@ fn prelude_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
   var toc: List[TocEntry] = []
   for g in jarr(jget(root, "groups")) {
     let name = field(g, "name")
-    let gid = "g-$name"
+    let gid = "g-${name}"
     toc = toc ++ [TocEntry { level: 3, id: gid, text: name }]
     html = html ++ [sub(gid, name)]
     for f in jarr(jget(g, "fns")) {
@@ -322,7 +322,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
   var rows: List[ApiRow] = []
   for g in jarr(jget(api, "groups")) {
     let name = field(g, "name")
-    rows = rows ++ [api_row(name, "prelude group", "", "g-$name")]
+    rows = rows ++ [api_row(name, "prelude group", "", "g-${name}")]
     for f in jarr(jget(g, "fns")) {
       rows = rows ++ [api_row(field(f, "name"), field(f, "sig"), field(f, "doc"),
         "p-" ++ field(f, "name"))]
@@ -335,11 +335,11 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     let path = field(m, "path")
     let base = slug(path)
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
-    rows = rows ++ [api_row(path, "module", field(m, "doc"), "m-$base")]
+    rows = rows ++ [api_row(path, "module", field(m, "doc"), "m-${base}")]
     for t in jarr(jget(m, "types")) {
       rows = rows
         ++ [api_row(field(t, "name"), type_decl(t), field(t, "doc"),
-          "$base-type-" ++ field(t, "name"))]
+          "${base}-type-" ++ field(t, "name"))]
     }
     for t in jarr(jget(m, "traits")) {
       rows = rows ++ [trait_row(base, t)]
@@ -347,18 +347,18 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     for c in jarr(jget(m, "consts")) {
       let name = field(c, "name")
       rows = rows
-        ++ [api_row(qualify(qual, name), "const $name: " ++ field(c, "type"), field(c, "doc"),
-          "$base-$name")]
+        ++ [api_row(qualify(qual, name), "const ${name}: " ++ field(c, "type"), field(c, "doc"),
+          "${base}-${name}")]
     }
     for e in jarr(jget(m, "effects")) {
       rows = rows
         ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), field(e, "doc"),
-          "$base-effect-" ++ field(e, "name"))]
+          "${base}-effect-" ++ field(e, "name"))]
     }
     for f in jarr(jget(m, "fns")) {
       let name = field(f, "name")
       rows = rows
-        ++ [api_row(qualify(qual, name), field(f, "sig"), field(f, "doc"), "$base-$name")]
+        ++ [api_row(qualify(qual, name), field(f, "sig"), field(f, "doc"), "${base}-${name}")]
     }
   }
   rows
@@ -366,8 +366,8 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
 
 fn trait_row(base: String, t: Json) -> ApiRow = {
   let name = field(t, "name")
-  api_row(name, "trait $name[" ++ field(t, "typeParam") ++ "]", field(t, "doc"),
-    "$base-trait-$name")
+  api_row(name, "trait ${name}[" ++ field(t, "typeParam") ++ "]", field(t, "doc"),
+    "${base}-trait-${name}")
 }
 
 # ---- the page ----
@@ -377,8 +377,8 @@ fn trait_row(base: String, t: Json) -> ApiRow = {
 ## layout; the translation sits under `/zh/`, like every other paired page.
 fn stdlib_source(out: String, lang: Lang) -> (String, String, String) =
   match lang {
-    En -> ("site/pages/stdlib.md", "$out/stdlib.html", ".")
-    Zh -> ("site/pages/stdlib.zh.md", "$out/zh/stdlib.html", "..")
+    En -> ("site/pages/stdlib.md", "${out}/stdlib.html", ".")
+    Zh -> ("site/pages/stdlib.zh.md", "${out}/zh/stdlib.html", "..")
   }
 
 ## The standard library reference. `lang` picks the intro document, the chrome
@@ -404,7 +404,7 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let intro =
     match parser.parse(must_read(src)) {
       Ok(bs) -> render_doc(bs, u => map_doc_url(root, docs, u))
-      Err(e) -> panic("$src: $e")
+      Err(e) -> panic("${src}: ${e}")
     }
   let (pre, pre_toc) = prelude_html(docs, api)
   let (mods, mod_toc) = modules_html(c, docs, api)

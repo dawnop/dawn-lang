@@ -18,7 +18,7 @@ use gen/search.{read_api, search_index}
 fn parsed(path: String) -> List[Block] !Fs =
   match parse(must_read(path)) {
     Ok(bs) -> bs
-    Err(e) -> panic("$path: $e")
+    Err(e) -> panic("${path}: ${e}")
   }
 
 # Byte IO for the assets. read_file/write_file are UTF-8 string APIs and would
@@ -35,13 +35,13 @@ fn parsed(path: String) -> List[Block] !Fs =
 fn read_bin(src: String) -> Bytes !Fs =
   match io.read_bytes(src) {
     Ok(b) -> b
-    Err(e) -> panic("cannot read $src: $e")
+    Err(e) -> panic("cannot read ${src}: ${e}")
   }
 
 fn write_bin(dst: String, content: Bytes) -> Unit !Fs !io =
   match io.write_bytes(dst, content) {
-    Ok(_) -> println("  wrote $dst")
-    Err(e) -> panic("cannot write $dst: $e")
+    Ok(_) -> println("  wrote ${dst}")
+    Err(e) -> panic("cannot write ${dst}: ${e}")
   }
 
 ## Write one asset and answer the name the pages must link to.
@@ -61,8 +61,8 @@ fn write_bin(dst: String, content: Bytes) -> Unit !Fs !io =
 ## pre-fingerprint HTML is plausibly still in a cache.
 fn emit_asset(out: String, name: String, content: Bytes) -> String !Fs !io = {
   let fp = fingerprint(name, content)
-  write_bin("$out/assets/$fp", content)
-  write_bin("$out/assets/$name", content)
+  write_bin("${out}/assets/${fp}", content)
+  write_bin("${out}/assets/${name}", content)
   fp
 }
 
@@ -154,7 +154,7 @@ fn emit_bridge(out: String) -> String !Fs !io = {
     repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
 }
 
-fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom/js/$name"))
+fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom/js/${name}"))
 
 ## Point one vendored module at the name another really got.
 ##
@@ -164,11 +164,11 @@ fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom
 ## neither. So a change in how packages/tea-dom/js spells its imports stops the
 ## build here rather than shipping a demo page that fails to load.
 fn repoint(text: String, spec: String, name: String) -> String !io = {
-  let quoted = "'$spec'"
+  let quoted = "'${spec}'"
   if str.contains(text, quoted) {
-    str.replace(text, quoted, "'./$name'")
+    str.replace(text, quoted, "'./${name}'")
   } else {
-    panic("no import of `$spec` to repoint — packages/tea-dom/js changed how it "
+    panic("no import of `${spec}` to repoint — packages/tea-dom/js changed how it "
         ++ "spells its imports, and the vendored copies would import files that "
         ++ "are not there")
   }
@@ -183,7 +183,7 @@ fn emit_wasm(out: String, name: String, src: String) -> String !Fs !io =
   match io.read_bytes(src) {
     Ok(b) -> emit_asset(out, name, b)
     Err(_) -> {
-      println("  warning: $src missing — writing placeholder $name")
+      println("  warning: ${src} missing — writing placeholder ${name}")
       emit_text(out, name, "dawn tea: reactor not built; see site/build.sh")
     }
   }
@@ -192,7 +192,7 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
   match io.read_file(src) {
     Ok(text) -> emit_text(out, name, text)
     Err(_) -> {
-      println("  warning: $src missing — writing placeholder $name")
+      println("  warning: ${src} missing — writing placeholder ${name}")
       emit_text(out, name, stub)
     }
   }
@@ -204,10 +204,10 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
 # the gate red. Reading it with must_read is the other half: a card cannot be
 # added without an expectation, because the build dies without the file.
 fn card_source(base: String) -> String !Fs =
-  highlight_dawn(str.trim(must_read("$base.dawn")))
+  highlight_dawn(str.trim(must_read("${base}.dawn")))
 
 fn card_output(base: String) -> String !Fs =
-  `<pre class="output"><code>` ++ escape_html(str.trim(must_read("$base.out"))) ++
+  `<pre class="output"><code>` ++ escape_html(str.trim(must_read("${base}.out"))) ++
   "</code></pre>"
 
 fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
@@ -223,18 +223,18 @@ fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> Str
   """
 <section class="hero">
 <div class="hero-copy">
-<p class="eyebrow">$eyebrow</p>
+<p class="eyebrow">${eyebrow}</p>
 <h1 class="wordmark">Dawn</h1>
-<p class="lede">$lede</p>
+<p class="lede">${lede}</p>
 <div class="cta-row">
-<a class="btn btn-primary" href="$root/$tut">$cta1</a>
-<a class="btn btn-ghost" href="$root/$exs">$cta2</a>
+<a class="btn btn-primary" href="${root}/${tut}">${cta1}</a>
+<a class="btn btn-ghost" href="${root}/${exs}">${cta2}</a>
 </div>
 </div>
 <figure class="code-window">
 <figcaption class="code-window__bar"><span class="fname">main.dawn</span><span class="run">dawn run</span></figcaption>
-<pre class="dawn"><code>$hl</code></pre>
-$out
+<pre class="dawn"><code>${hl}</code></pre>
+${out}
 </figure>
 </section>
 """
@@ -246,11 +246,11 @@ fn feature_block(title: String, desc: String, base: String) -> String !Fs = {
   """
 <article class="feature">
 <div class="feature-text">
-<h3>$title</h3>
-<p>$desc</p>
+<h3>${title}</h3>
+<p>${desc}</p>
 </div>
-<div class="feature-code"><pre class="dawn"><code>$hl</code></pre>
-$out</div>
+<div class="feature-code"><pre class="dawn"><code>${hl}</code></pre>
+${out}</div>
 </article>
 """
 }
@@ -284,9 +284,9 @@ pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let docs = doc_files()
   let (src, dst, root, title) =
     match lang {
-      En -> ("site/pages/home.md", "$out/index.html", ".",
+      En -> ("site/pages/home.md", "${out}/index.html", ".",
         "Dawn — a small, elegant functional language")
-      Zh -> ("site/pages/home.zh.md", "$out/zh/index.html", "..", "Dawn 语言")
+      Zh -> ("site/pages/home.zh.md", "${out}/zh/index.html", "..", "Dawn 语言")
     }
   let c = load_copy(src)
   let mu = (u: String) => map_doc_url(root, docs, u)
@@ -309,8 +309,8 @@ pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
 ## `/zh/` -- the same rule the front page, the tutorial and the rest follow.
 fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String) =
   match lang {
-    En -> ("docs/$base.en.md", "$out/$base.html", ".")
-    Zh -> ("docs/$base.md", "$out/zh/$base.html", "..")
+    En -> ("docs/${base}.en.md", "${out}/${base}.html", ".")
+    Zh -> ("docs/${base}.md", "${out}/zh/${base}.html", "..")
   }
 
 fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !Fs !io = {
@@ -318,7 +318,7 @@ fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !Fs !i
   let (src, dst, root) = doc_source(base, out, lang)
   let doc = render_doc(parsed(src), u => map_doc_url(root, docs, u))
   write_page(dst,
-    page_with_toc(a, lang, "$base.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
+    page_with_toc(a, lang, "${base}.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
 }
 
 pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
@@ -343,8 +343,8 @@ test "each language's document is read from its own file and lands in its own pl
 pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let (dst, root) =
     match lang {
-      En -> ("$out/playground.html", ".")
-      Zh -> ("$out/zh/playground.html", "..")
+      En -> ("${out}/playground.html", ".")
+      Zh -> ("${out}/zh/playground.html", "..")
     }
   # full-width IDE page: the editor frame IS the page (no heading, no reading
   # column) — .dp-page/.dp-ide layout comes with the editor bundle's css
@@ -354,8 +354,8 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   # one copy, reached from wherever the page sits
   let pcss = a.play_css
   let pjs = a.play_js
-  let head = """<link rel="stylesheet" href="$root/assets/$pcss">""" ++ "\n" ++
-    """<script type="module" src="$root/assets/$pjs"></script>"""
+  let head = """<link rel="stylesheet" href="${root}/assets/${pcss}">""" ++ "\n" ++
+    """<script type="module" src="${root}/assets/${pjs}"></script>"""
   write_page(dst,
     shell_ext(a, lang, "playground.html", "Playground — Dawn", root, "playground", head,
       mount_body))
@@ -407,9 +407,9 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "to rewrite it.",
       todo_src: "View the source · todo.dawn",
       sources: "Source: "
-        ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
+        ++ """<a href="${root}/${counter_page}"><code>tea_dom_counter</code></a>"""
         ++ " and "
-        ++ """<a href="$root/$todo_page"><code>tea_dom_todo_keyed</code></a>"""
+        ++ """<a href="${root}/${todo_page}"><code>tea_dom_todo_keyed</code></a>"""
         ++ " in the gallery. The architecture is "
         ++ """<a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-core">"""
         ++ "<code>packages/tea-core</code></a>, the DOM vocabulary and the wire format "
@@ -438,9 +438,9 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "那个元素，而不是重写它。",
       todo_src: "查看源码 · todo.dawn",
       sources: "源码：图库里的 "
-        ++ """<a href="$root/$counter_page"><code>tea_dom_counter</code></a>"""
+        ++ """<a href="${root}/${counter_page}"><code>tea_dom_counter</code></a>"""
         ++ " 与 "
-        ++ """<a href="$root/$todo_page"><code>tea_dom_todo_keyed</code></a>"""
+        ++ """<a href="${root}/${todo_page}"><code>tea_dom_todo_keyed</code></a>"""
         ++ "。架构在 "
         ++ """<a href="https://github.com/dawnop/dawn-lang/tree/main/packages/tea-core">"""
         ++ "<code>packages/tea-core</code></a>，DOM 词汇与线格式在 "
@@ -460,13 +460,13 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
 ## nothing here reads programs.
 fn tea_frame(id: String, wasm: String, heading: String, note: String, source: String) -> String =
   """
-<h2>$heading</h2>
+<h2>${heading}</h2>
 <div class="tea-frame">
-<div class="tea-mount" id="$id" data-wasm="$wasm"></div>
+<div class="tea-mount" id="${id}" data-wasm="${wasm}"></div>
 <p class="tea-error"></p>
 </div>
-<p class="tea-note">$note</p>
-$source
+<p class="tea-note">${note}</p>
+${source}
 """
 
 ## The pure half of one demo, read out of the tree and folded away under the
@@ -503,8 +503,8 @@ fn todo_source_path() -> String = "examples/projects/tea_dom_todo_keyed/src/todo
 pub fn gen_tea(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let (dst, root) =
     match lang {
-      En -> ("$out/tea.html", ".")
-      Zh -> ("$out/zh/tea.html", "..")
+      En -> ("${out}/tea.html", ".")
+      Zh -> ("${out}/zh/tea.html", "..")
     }
   write_page(dst, tea_page(a, lang, root))
 }
@@ -517,13 +517,13 @@ fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs = {
     lang_path(lang, "examples/tea_dom_counter.html"),
     lang_path(lang, "examples/tea_dom_todo_keyed.html"))
   let app = a.tea_js
-  let head = """<link rel="modulepreload" href="$root/assets/$app">"""
+  let head = """<link rel="modulepreload" href="${root}/assets/${app}">"""
   let body =
     `<main class="content tea-demo">` ++ "\n"
     ++ "<h1>${c.title}</h1>\n<p>${c.lede}</p>\n<p>${c.aside}</p>\n"
-    ++ tea_frame("tea-counter", "$root/assets/${a.tea_counter}", c.counter, c.counter_note,
+    ++ tea_frame("tea-counter", "${root}/assets/${a.tea_counter}", c.counter, c.counter_note,
       tea_source(c.counter_src, counter_source_path()))
-    ++ tea_frame("tea-todo", "$root/assets/${a.tea_todo}", c.todo, c.todo_note,
+    ++ tea_frame("tea-todo", "${root}/assets/${a.tea_todo}", c.todo, c.todo_note,
       tea_source(c.todo_src, todo_source_path()))
     ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</main>\n"
     ++ tea_watchdog(c.stuck) ++ "\n" ++ tea_mount_script(root, app)
@@ -619,7 +619,7 @@ window.__teaWatchdog = setTimeout(function () {
   document.querySelectorAll('.tea-mount').forEach(function (host) {
     var banner = host.parentElement.querySelector('.tea-error');
     if (host.childNodes.length === 0 && banner && banner.textContent === '') {
-      banner.textContent = '$message';
+      banner.textContent = '${message}';
     }
   });
 }, 4000);
@@ -631,7 +631,7 @@ window.__teaWatchdog = setTimeout(function () {
 fn tea_mount_script(root: String, app: String) -> String =
   """
 <script type="module">
-import { mount } from '$root/assets/$app';
+import { mount } from '${root}/assets/${app}';
 for (const host of document.querySelectorAll('.tea-mount')) {
   const banner = host.parentElement.querySelector('.tea-error');
   try {

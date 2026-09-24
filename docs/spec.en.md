@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ c91221785e01eb67 -->
+<!-- doc-check: translation-of docs/spec.md @ 88dbdf1f38adc167 -->
 
 # Dawn Language Specification
 
@@ -171,18 +171,25 @@ Double-quoted strings, with the escapes `\n \t \r \\ \" \$` and Unicode `\u{1F60
 **Braces `{` `}` are ordinary characters and need no escaping** — convenient for writing JSON, CSS
 and code generation.
 
-Interpolation is introduced by `$` (as in Kotlin/Swift): `$name` inserts a simple identifier,
-`${expr}` inserts an arbitrary expression. The interpolated type must have a `Show` witness — the
+Interpolation has one spelling: `${expr}` inserts an arbitrary expression (a name is written
+`${name}` too). The interpolated type must have a `Show` witness — the
 built-in scalars, user types that write `impl Show` or `derive Show`, and containers and tuples
 whose elements are renderable (see §4.3):
 
 ```dawn
 let n = 3
-println("got $n items, first = ${list.get(0)}")
+println("got ${n} items, first = ${list.get(0)}")
 ```
 
-When `$` is not followed by an identifier or `{` it is a literal dollar sign (`"$5"` needs no
-escaping); to force a literal `$` use `\$`. The effects of the expressions inside an interpolation
+A `$` directly followed by a character that can start a name (a letter or `_`) is a **lexical
+error**; the diagnostic names both repairs, `${name}` to interpolate or `\$name` for the literal. A
+`$` followed by anything else (a digit, a space, punctuation, the end of the string) is still a
+literal dollar sign (`"$5"` needs no escaping); to write a literal `$` before `{` use `\$`.
+(Before v0.78.0 there was a short form `$name` that took the longest identifier, so `"$obj_x"` and
+`"$obj.name"` silently read a value the author did not write. It was removed rather than re-read as
+a literal because re-reading it would make every program written the old way silently print other
+text; an error makes every occurrence visible. The v0.78.0 `dawn fmt` rewrites `$name` to
+`${name}`, see [`syntax-window-design.md`](syntax-window-design.md) §2.) The effects of the expressions inside an interpolation
 are unioned into the effects of the whole string expression.
 
 A `${...}` **must fit on one line** (spanning lines reports `interpolation cannot span lines`), and
@@ -582,7 +589,7 @@ Only these are allowed at module top level: `use`, `type` (including `opaque typ
 fn add(a: Int, b: Int) -> Int = a + b
 
 fn greet(name: String) -> Unit !io = {
-  println("hi, $name")
+  println("hi, ${name}")
 }
 ```
 
@@ -1401,8 +1408,8 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 ### 4.7 Loops
 
 ```dawn
-for x in [1, 2, 3] { println("$x") }
-for (key, value) in entries { println("$key=$value") }
+for x in [1, 2, 3] { println("${x}") }
+for (key, value) in entries { println("${key}=${value}") }
 while queue.non_empty() { ... }
 ```
 
@@ -1764,8 +1771,8 @@ second round, so they do not depend on source order.
 ```dawn
 match shape {
   Circle(r) if r > 100.0 -> "big circle"
-  Circle(r)              -> "circle $r"
-  Rect(w, h)             -> "rect ${w}x$h"
+  Circle(r)              -> "circle ${r}"
+  Rect(w, h)             -> "rect ${w}x${h}"
   Point                  -> "point"
 }
 ```
@@ -4158,7 +4165,7 @@ xs[0]                            # subscript: goes through the Index trait; out 
 [a, ..xs, if c { b }]            # list elements: spread / conditional; newlines separate too (§4.11)
 read_file(path)?                 # Result propagation
 if n < 0 { return "negative" }   # early return (§4.9)
-xs.each { x => println("$x") }  # tail block: the last argument (§4.3)
+xs.each { x => println("${x}") }  # tail block: the last argument (§4.3)
 with f <- bracket(open(p), close)  # the rest of the block becomes the use closure (§4.10)
 comptime { heavy_pure_calc() }   # compile-time evaluation
 

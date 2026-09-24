@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ a1acc975ab05cdd2 -->
+<!-- doc-check: translation-of README.md @ 2cd8ae1f222fd181 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -63,7 +63,7 @@ pub fn main() -> Unit !io =
   [Circle(1.0), Rect(2.0, 3.0)]
     |> map(area)
     |> fold(0.0, (a, x) => a + x)
-    |> t => println("total: $t")
+    |> t => println("total: ${t}")
 ```
 
 ## 安装

@@ -148,16 +148,21 @@ O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md)
 双引号字符串，支持转义 `\n \t \r \\ \" \$` 与 Unicode `\u{1F600}`。
 **花括号 `{` `}` 是普通字符，无需转义**——写 JSON、CSS、代码生成很方便。
 
-插值由 `$` 引导（同 Kotlin/Swift）：`$name` 插入一个简单标识符，`${expr}` 插入
-任意表达式；被插值的类型必须有 `Show` 见证——预置标量、写了 `impl Show` 或
+插值只有一种写法：`${expr}` 插入任意表达式（一个名字也写 `${name}`）；被插值的类型必须有 `Show` 见证——预置标量、写了 `impl Show` 或
 `derive Show` 的用户类型、以及元素可渲染的容器与元组（见 §4.3）：
 
 ```dawn
 let n = 3
-println("got $n items, first = ${list.get(0)}")
+println("got ${n} items, first = ${list.get(0)}")
 ```
 
-`$` 后不接标识符或 `{` 时就是字面美元号（`"$5"` 无需转义）；要强制字面 `$` 用 `\$`。
+`$` 后紧跟可以开始名字的字符（字母或 `_`）是**词法错误**：诊断给出两种改法，
+`${name}` 插值或 `\$name` 字面。`$` 后接其它字符（数字、空格、标点、字符串结尾）仍是字面
+美元号（`"$5"` 无需转义）；要在 `{` 前写字面 `$` 用 `\$`。
+（v0.78.0 之前还有 `$name` 短形，以词法最长匹配吞名字，`"$obj_x"` 与 `"$obj.name"` 会静默取到
+作者没写的值；它被删除而不是改读成字面，是因为改读会让按旧写法写的程序静默输出另一段文本，
+报错才能让每一处都被看见。v0.78.0 的 `dawn fmt` 把 `$name` 改写成 `${name}`，见
+[`syntax-window-design.md`](syntax-window-design.md) §2。）
 插值内的表达式效果并入整个字符串表达式的效果。
 
 `${...}` **必须写在一行内**（跨行报 `interpolation cannot span lines`）——这条限制对
@@ -478,7 +483,7 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 fn add(a: Int, b: Int) -> Int = a + b
 
 fn greet(name: String) -> Unit !io = {
-  println("hi, $name")
+  println("hi, ${name}")
 }
 ```
 
@@ -1124,8 +1129,8 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 ### 4.7 循环
 
 ```dawn
-for x in [1, 2, 3] { println("$x") }
-for (key, value) in entries { println("$key=$value") }
+for x in [1, 2, 3] { println("${x}") }
+for (key, value) in entries { println("${key}=${value}") }
 while queue.non_empty() { ... }
 ```
 
@@ -1433,8 +1438,8 @@ for 头的范围（§4.7）、record 展开 `P { ..p }`（§2.4）、pattern 余
 ```dawn
 match shape {
   Circle(r) if r > 100.0 -> "big circle"
-  Circle(r)              -> "circle $r"
-  Rect(w, h)             -> "rect ${w}x$h"
+  Circle(r)              -> "circle ${r}"
+  Rect(w, h)             -> "rect ${w}x${h}"
   Point                  -> "point"
 }
 ```
@@ -3322,7 +3327,7 @@ xs[0]                            # 下标：走 Index trait；越界 panic，问
 [a, ..xs, if c { b }]            # 列表元素形式：展开 / 条件元素；多行时换行也分隔（§4.11）
 read_file(path)?                 # Result 传播
 if n < 0 { return "negative" }   # 提前返回（§4.9）
-xs.each { x => println("$x") }  # 尾块：最后一个实参（§4.3）
+xs.each { x => println("${x}") }  # 尾块：最后一个实参（§4.3）
 with f <- bracket(open(p), close)  # 块剩下的部分成为 use 闭包（§4.10）
 comptime { heavy_pure_calc() }   # 编译期求值
 

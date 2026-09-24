@@ -45,15 +45,15 @@ pub fn main() -> Unit !io =
 Hello, Dawn
 ```
 
-String interpolation is introduced by `$`: `$name` interpolates a plain variable,
-`${expr}` any expression (the value interpolated has to be printable). Braces on their
-own are ordinary characters — without a `$` there is no interpolation:
+String interpolation is written `${expr}`, for a plain variable as much as for any
+expression (the value interpolated has to be printable). Braces on their own are ordinary
+characters — without a `$` there is no interpolation:
 
 ```dawn run
 pub fn main() -> Unit !io = {
   let name = "Dawn"
   let year = 2026
-  println("$name was born in $year")
+  println("${name} was born in ${year}")
 }
 ```
 ```output
@@ -204,8 +204,8 @@ List patterns destructure head and tail:
 fn describe(xs: List[Int]) -> String =
   match xs {
     [] -> "empty"
-    [x] -> "just $x"
-    [first, ..rest] -> "$first, and ${len(rest)} more"
+    [x] -> "just ${x}"
+    [first, ..rest] -> "${first}, and ${len(rest)} more"
   }
 
 pub fn main() -> Unit !io = {
@@ -228,7 +228,7 @@ fn divmod(a: Int, b: Int) -> (Int, Int) = (a / b, a % b)
 
 pub fn main() -> Unit !io = {
   let (q, r) = divmod(17, 5)
-  println("$q remainder $r")
+  println("${q} remainder ${r}")
 }
 ```
 ```output
@@ -251,14 +251,14 @@ pub fn main() -> Unit !io = {
     if i == 3 { continue }
     sum = sum + i
   }
-  println("$sum")
+  println("${sum}")
 
   var n = 0
   while true {
     n = n + 1
     if n * n > 30 { break }
   }
-  println("$n")
+  println("${n}")
 }
 ```
 ```output
@@ -276,7 +276,7 @@ unrecoverable kind there is `panic`, which does not return and therefore needs n
 
 ```dawn run
 fn half(x: Int) -> Result[Int, String] =
-  if x % 2 == 0 { Ok(x / 2) } else { Err("$x is odd") }
+  if x % 2 == 0 { Ok(x / 2) } else { Err("${x} is odd") }
 
 fn quarter(x: Int) -> Result[Int, String] = {
   let h = half(x)?
@@ -285,8 +285,8 @@ fn quarter(x: Int) -> Result[Int, String] = {
 
 pub fn main() -> Unit !io =
   match quarter(20) {
-    Ok(v) -> println("got $v")
-    Err(e) -> println("error: $e")
+    Ok(v) -> println("got ${v}")
+    Err(e) -> println("error: ${e}")
   }
 ```
 ```output

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ b7032c255fff8ea3 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 60e15fef7172fde7 -->
 
 # Dawn 教程
 
@@ -42,14 +42,14 @@ pub fn main() -> Unit !io =
 你好，Dawn
 ```
 
-字符串插值由 `$` 引导：`$name` 插简单变量，`${expr}` 插任意表达式（插入的值必须可打印）。
+字符串插值写作 `${expr}`，简单变量与任意表达式一样写（插入的值必须可打印）。
 花括号本身是普通字符——不写 `$` 就不是插值：
 
 ```dawn run
 pub fn main() -> Unit !io = {
   let name = "Dawn"
   let year = 2026
-  println("$name 诞生于 $year")
+  println("${name} 诞生于 ${year}")
 }
 ```
 ```output
@@ -195,8 +195,8 @@ pub fn main() -> Unit !io = {
 fn describe(xs: List[Int]) -> String =
   match xs {
     [] -> "空"
-    [x] -> "单个 $x"
-    [first, ..rest] -> "首个 $first，还有 ${len(rest)} 个"
+    [x] -> "单个 ${x}"
+    [first, ..rest] -> "首个 ${first}，还有 ${len(rest)} 个"
   }
 
 pub fn main() -> Unit !io = {
@@ -218,7 +218,7 @@ fn divmod(a: Int, b: Int) -> (Int, Int) = (a / b, a % b)
 
 pub fn main() -> Unit !io = {
   let (q, r) = divmod(17, 5)
-  println("$q 余 $r")
+  println("${q} 余 ${r}")
 }
 ```
 ```output
@@ -240,14 +240,14 @@ pub fn main() -> Unit !io = {
     if i == 3 { continue }
     sum = sum + i
   }
-  println("$sum")
+  println("${sum}")
 
   var n = 0
   while true {
     n = n + 1
     if n * n > 30 { break }
   }
-  println("$n")
+  println("${n}")
 }
 ```
 ```output
@@ -264,7 +264,7 @@ Dawn 没有异常。可恢复的错误走 `Result[T, E]`；`?` 在 `Ok`/`Some` �
 
 ```dawn run
 fn half(x: Int) -> Result[Int, String] =
-  if x % 2 == 0 { Ok(x / 2) } else { Err("$x 是奇数") }
+  if x % 2 == 0 { Ok(x / 2) } else { Err("${x} 是奇数") }
 
 fn quarter(x: Int) -> Result[Int, String] = {
   let h = half(x)?
@@ -273,8 +273,8 @@ fn quarter(x: Int) -> Result[Int, String] = {
 
 pub fn main() -> Unit !io =
   match quarter(20) {
-    Ok(v) -> println("得到 $v")
-    Err(e) -> println("错误：$e")
+    Ok(v) -> println("得到 ${v}")
+    Err(e) -> println("错误：${e}")
   }
 ```
 ```output

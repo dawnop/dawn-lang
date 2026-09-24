@@ -75,8 +75,6 @@ fn mk_diag(msg: String, lo: Int, hi: Int) -> Diag =
 fn diag_h(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
   Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None }
 
-fn no_diags() -> List[Diag] = []
-
 fn no_segs() -> List[Seg] = []
 
 fn no_cps() -> List[Char] = []
@@ -202,14 +200,15 @@ fn lex_go(
       let r = if c == '"' {
         lex_string(s, i)
       } else if c == '`' {
-        lex_raw(s, i)
+        with_no_diags(lex_raw(s, i))
       } else {
-        lex_char(s, i)
+        with_no_diags(lex_char(s, i))
       }
       match r {
         Ok(jt) -> {
-          let (j, t) = jt
+          let (j, t, soft) = jt
           toks = toks ++ [t]
+          diags = diags ++ soft
           i = j
         }
         Err(fd) -> {
@@ -447,13 +446,18 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
 
 # ---- strings (with interpolation segmentation) ----
 
-fn lex_string(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] =
+## A string literal. Besides the token, the diagnostics that do not stop the
+## token from being built: a `$name` (see `lex_dollar`) is refused, but the
+## literal around it is still one token, so the formatter can rewrite it and a
+## parse can go on to report everything else in the file.
+fn lex_string(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag)] =
   if cp_at(s, start + 1) == '"' && cp_at(s, start + 2) == '"' {
     lex_triple(s, start)
   } else {
     var i = start + 1
     var segs: List[Seg] = []
     var buf: List[Char] = []
+    var soft: List[Diag] = []
     while true {
       if i >= s.n || s.cps[i] == '\n' {
         return Err((i, mk_diag("unterminated string", off(s, start), off(s, i))))
@@ -467,38 +471,67 @@ fn lex_string(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] =
         buf = buf ++ [cp]
         i = j
       } else if c == '$' {
-        let (j, sg, bf) = lex_dollar(s, i, segs, buf)?
+        let (j, sg, bf, d) = lex_dollar(s, i, segs, buf)?
         i = j
         segs = sg
         buf = bf
+        soft = soft ++ d
       } else {
         buf = buf ++ [c]
         i = i + 1
       }
     }
-    Ok((i, str_tok(s, start, i, flush(segs, buf))))
+    Ok((i, str_tok(s, start, i, flush(segs, buf)), soft))
   }
 
-## Interpolation is $-led (spec §1.6): `$name` splices a simple identifier and
-## `${expr}` splices an expression. A `$` not followed by an identifier or `{`
-## is a literal `$`.
+fn with_no_diags(r: Result[(Int, Token), (Int, Diag)]) -> Result[(Int, Token, List[Diag]), (Int, Diag)] =
+  match r {
+    Ok((j, t)) -> Ok((j, t, no_diags()))
+    Err(e) -> Err(e)
+  }
+
+fn no_diags() -> List[Diag] = []
+
+## The message of the `$name` refusal. The formatter reads it to tell this
+## diagnostic from every other: it is the one lexer diagnostic the formatter
+## repairs rather than refuses (fmt.migrate_dollar_names).
+pub fn is_dollar_name(d: Diag) -> Bool = str.starts_with(d.msg, "`$` followed by a name")
+
+## Interpolation is `${expr}` and nothing else (spec §1.6). A `$` followed by
+## what could start a name is refused rather than read: the short form `$name`
+## was removed in the syntax window (docs/syntax-window-design.md §2), and
+## reading the same text as a literal `$name` would silently turn every
+## program still written the old way into wrong text -- SQL, URLs and
+## signatures that compile and print something else. So the text is an error
+## that names both repairs, and the literal is kept as it stands only so the
+## rest of the file still lexes. Any other `$` -- before a digit, a space,
+## punctuation or the closing quote -- is a literal `$`, as it always was.
 fn lex_dollar(
   s: Src,
   at: Int,
   segs: List[Seg],
   buf: List[Char]
-) -> Result[(Int, List[Seg], List[Char]), (Int, Diag)] = {
+) -> Result[(Int, List[Seg], List[Char], List[Diag]), (Int, Diag)] = {
   let next = cp_at(s, at + 1)
   if next == '{' {
     let (j, sg) = lex_brace_interp(s, at)?
-    Ok((j, flush(segs, buf) ++ [sg], no_cps()))
+    Ok((j, flush(segs, buf) ++ [sg], no_cps(), no_diags()))
   } else if char_is_letter(next) || next == '_' {
     var i = at + 1
-    let name_start = i
     while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
-    Ok((i, flush(segs, buf) ++ [SCode(text_of(s, name_start, i), off(s, name_start))], no_cps()))
+    let name = text_of(s, at + 1, i)
+    let d = diag_h("`$` followed by a name is not an interpolation: `$" ++ name ++ "`",
+      off(s, at), off(s, i),
+      "write `\${" ++ name ++ "}` to interpolate it, or `\\$" ++ name ++ "` for a literal dollar sign")
+    var lit = buf
+    var k = at
+    while k < i {
+      lit = lit ++ [s.cps[k]]
+      k = k + 1
+    }
+    Ok((i, segs, lit, [d]))
   } else {
-    Ok((at + 1, segs, buf ++ ['$']))
+    Ok((at + 1, segs, buf ++ ['$'], no_diags()))
   }
 }
 
@@ -534,14 +567,16 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
       if depth == 0 { break }
       i = i + 1
     } else if c == '"' || c == '`' || c == '\'' {
+      # a nested literal's own soft diagnostics are not collected here: the
+      # parser re-lexes this interpolation's code and reports them then
       let r = if c == '"' {
         lex_string(s, i)
       } else if c == '`' {
-        lex_raw(s, i)
+        with_no_diags(lex_raw(s, i))
       } else {
-        lex_char(s, i)
+        with_no_diags(lex_char(s, i))
       }
-      let (j, _) = r?
+      let (j, _, _) = r?
       i = j
     } else if c == '\n' {
       return Err((i, mk_diag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
@@ -664,10 +699,11 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
 ## Multiline string: """ ... """ (spec §1.6). The newline right after the
 ## opening quotes and the one before the closing quotes are stripped, as is
 ## the common indentation of the non-blank lines.
-fn lex_triple(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
+fn lex_triple(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag)] = {
   var i = start + 3
   var segs: List[Seg] = []
   var buf: List[Char] = []
+  var soft: List[Diag] = []
   while true {
     if i >= s.n {
       return Err((i, mk_diag("unterminated \"\"\" string", off(s, start), off(s, start) + 3)))
@@ -682,16 +718,17 @@ fn lex_triple(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
       buf = buf ++ [cp]
       i = j
     } else if c == '$' {
-      let (j, sg, bf) = lex_dollar(s, i, segs, buf)?
+      let (j, sg, bf, d) = lex_dollar(s, i, segs, buf)?
       i = j
       segs = sg
       buf = bf
+      soft = soft ++ d
     } else {
       buf = buf ++ [c]
       i = i + 1
     }
   }
-  Ok((i, str_tok(s, start, i, strip_triple_indent(flush(segs, buf)))))
+  Ok((i, str_tok(s, start, i, strip_triple_indent(flush(segs, buf))), soft))
 }
 
 ## Raw string: `...` (spec §1.6). Everything between the backticks is literal.
@@ -1043,8 +1080,25 @@ test "char literals carry their code point" {
 }
 
 test "string with interpolation segments" {
-  let (toks, ds) = lex("\"a\$x \${y + 1}\"")
-  assert toks[0].segs == [SText("a"), SCode("x", 3), SText(" "), SCode("y + 1", 7)]
+  let (toks, ds) = lex("\"a\${x} \${y + 1}\"")
+  assert ds == []
+  assert toks[0].segs == [SText("a"), SCode("x", 4), SText(" "), SCode("y + 1", 9)]
+}
+
+test "a dollar before a name is refused and names both repairs" {
+  # `"$a.b"` used to splice `a` and append ".b"; it is now an error rather
+  # than a literal, so no program written the old way prints other text
+  let (toks, ds) = lex("\"\$a.b \$_x \$5\"")
+  assert len(ds) == 2
+  assert ds[0].msg == "`\$` followed by a name is not an interpolation: `\$a`"
+  assert ds[0].hint == "write `\${a}` to interpolate it, or `\\\$a` for a literal dollar sign"
+  assert ds[0].lo == 1 && ds[0].hi == 3
+  assert is_dollar_name(ds[0]) && is_dollar_name(ds[1])
+  # the literal is still one token, so the rest of the file lexes
+  assert toks[0].kind == STRING
+  assert toks[0].segs == [SText("\$a.b \$_x \$5")]
+  let (_, clean) = lex("\"\${a}.b \\\$a \$5 \$ \$\"")
+  assert clean == []
 }
 
 test "escapes in strings" {

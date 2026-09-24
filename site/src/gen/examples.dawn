@@ -73,7 +73,7 @@ fn dawn_files_under(path: String) -> List[String] !Fs =
   if io.is_dir(path) {
     var out: List[String] = []
     for name in must_list(path) {
-      out = out ++ dawn_files_under("$path/$name")
+      out = out ++ dawn_files_under("${path}/${name}")
     }
     out
   } else if str.ends_with(path, ".dawn") {
@@ -99,13 +99,13 @@ fn main_first(files: List[String]) -> List[String] =
 pub fn collect_examples() -> List[Example] !Fs = {
   var units: List[Example] = []
   for group in must_list("examples") {
-    let dir = "examples/$group"
+    let dir = "examples/${group}"
     if io.is_dir(dir) {
       for name in must_list(dir) {
-        let path = "$dir/$name"
-        if io.is_dir(path) && io.is_dir("$path/src") {
+        let path = "${dir}/${name}"
+        if io.is_dir(path) && io.is_dir("${path}/src") {
           units = units ++
-            [Example { slug: name, group: group, files: main_first(dawn_files_under("$path/src")) }]
+            [Example { slug: name, group: group, files: main_first(dawn_files_under("${path}/src")) }]
         } else if str.ends_with(name, ".dawn") {
           units = units ++ [Example { slug: stem(name), group: group, files: [path] }]
         }
@@ -121,12 +121,12 @@ fn registration_gaps(table: List[String], found: List[String]) -> List[String] =
   var gaps: List[String] = []
   for d in found {
     if not has(table, d) {
-      gaps = gaps ++ ["examples/$d has no row in the group table of site/src/gen/examples.dawn"]
+      gaps = gaps ++ ["examples/${d} has no row in the group table of site/src/gen/examples.dawn"]
     }
   }
   for id in table {
     if not has(found, id) {
-      gaps = gaps ++ ["the group table has a row for `$id`, but examples/$id holds no examples"]
+      gaps = gaps ++ ["the group table has a row for `${id}`, but examples/${id} holds no examples"]
     }
   }
   gaps
@@ -198,8 +198,8 @@ fn example_page(ex: Example) -> String !Fs = {
 ## every other paired page.
 fn gallery_dir(out: String, lang: Lang) -> (String, String) =
   match lang {
-    En -> ("$out/examples", "..")
-    Zh -> ("$out/zh/examples", "../..")
+    En -> ("${out}/examples", "..")
+    Zh -> ("${out}/zh/examples", "../..")
   }
 
 ## The example gallery. `lang` is the chrome's language only: the programs, and
@@ -218,14 +218,14 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     panic(gap)
   }
   for dup in duplicate_slugs(map(units, u => u.slug)) {
-    panic("two examples both want the slug `$dup`, so one page would overwrite the other")
+    panic("two examples both want the slug `${dup}`, so one page would overwrite the other")
   }
 
   var body = "<h1>${c.heading}</h1>\n<p>${c.lede}</p>"
   for g in groups() {
     var items = ""
     for ex in filter(units, u => u.group == g.id) {
-      write_page("$dir/${ex.slug}.html",
+      write_page("${dir}/${ex.slug}.html",
         page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
           example_page(ex)))
       items = items ++ "\n" ++
@@ -236,7 +236,7 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
   }
 
-  write_page("$dir/index.html",
+  write_page("${dir}/index.html",
     page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
 }
 
