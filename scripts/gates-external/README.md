@@ -34,6 +34,7 @@ scripts/gates-external/prefix.py selftest --prefix ~/dawn-gates [--break-env-i]
 scripts/gates-external/run.sh --sha <sha> --backend crun --prefix ~/dawn-gates --jobs 16 \
     --backend-opt remote-prefix=<cluster dir> [--backend-opt isolation=1] [--only ...] \
     [--backend-opt run-as=UID:GID|root] [--backend-opt private-tmp=0] [--backend-opt poll=45]
+scripts/gates-external/run.sh --resume <out> [--jobs N]   # after the controller died
 ```
 
 Exit status of `run.sh`: 0 complete, 1 ran but not complete, 2 refused to
@@ -47,7 +48,7 @@ plan, 3 the bundle was refused (leak or schema), nothing written.
 | `backend_local.py` | where and how: one job at a time on this machine, in a fresh worktree (a fresh clone inside a prefix) |
 | `backend_crun.py` | where and how, on the cluster: ships the input pack and the tools once, then one detached zero-card `crun run -d` per job, each running `prefix.py run-job` (the local backend in prefix mode) inside the cluster's prefix, and one poll for all jobs still out every 45 s; resumable |
 | `bundle.py` | what it means: schema whitelist, leak filter, and `complete` |
-| `runner.py` | when: schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json` and `bundle.json` |
+| `runner.py` | when: schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json`, `bundle.json` and `invocation.json` (what `--resume` reads back) |
 | `run.sh` | the entry point |
 | `prefix.py` | the prefix layout, the whitelist environment every prefix job gets, `check-isolation`, and `run-job` (a crun job's remote half) |
 | `inputs.py` | the offline input pack: download, check against `inputs.lock.json`, lay out, `verify` |
