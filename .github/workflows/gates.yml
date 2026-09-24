@@ -1877,11 +1877,15 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-1') }}
     runs-on: ubuntu-latest
-    # classfile 203 + ASM adapter 40 + call sites 13 + Core golden 23 +
+    # classfile 203 + ASM adapter 40 + call sites 13 +
     # opaque twin 47 + dtoa 15 + inflate 33 + unicode 4 + array 8 +
     # collections 6 + path 3 + JSON 8 + table freight 7 + dict owner 5 +
     # dict shapes 32 + intrinsic parity 1 + builtin mirror 6 + error model 3
-    # = 457s, plus 50s fixed overhead = 507s.
+    # = 434s, plus 50s fixed overhead = 484s.
+    # 2026-09-25: the Core IR golden step (22s and 21s in runs 36033690490
+    # and 36024756336) left this job; the diff is an on-demand tool now
+    # (docs/recorded-numbers-design.md). The budget line is left on the
+    # observed worst until new runs replace it.
     # 2026-09-24, restated: 475s worst (run 35866197071) over its 5 successful
     # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
     # budget: 3x 475s worst observed (run 35866197071)
@@ -1928,15 +1932,6 @@ jobs:
           rm -rf "${RUNNER_TEMP:?}/gate-emit" && mkdir -p "$RUNNER_TEMP/gate-emit"
           ./bin/dawn __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null
           ./scripts/adapter-callsites.py "$RUNNER_TEMP/gate-emit"
-
-      # `__emit` compares bytes, which covers Core only where a shipping
-      # backend reads it. CModule.dicts has no shipping reader at all, and
-      # CParam.mode / CDup / CSDrop are emitted as nothing by `__emit`, which
-      # is the JVM emitter -- all three can be rewritten with every other gate
-      # staying green (the counting nodes reach only the C backend). This
-      # is what sees them, and it is the "Core unchanged" evidence R4 rests on.
-      - name: Core IR golden
-        run: ./scripts/selfhost-core-diff.sh
 
       # Spec 2.7 promises an opaque type *is* its target at run time, and that
       # promise is one a script can hold: run each case twice, once with

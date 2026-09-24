@@ -84,11 +84,10 @@ EOF
 seam_files() { # <tree-root>
   (
     cd "$1"
-    # core-golden is emitted output: std.reactor.core legitimately contains these intrinsic names.
     grep -RIl --fixed-strings 'reactor_state_' . \
       --exclude=retained.sh \
       --exclude-dir=.dawn --exclude-dir=.git --exclude-dir=build \
-      --exclude-dir=core-golden --exclude-dir=target 2>/dev/null | LC_ALL=C sort || true
+      --exclude-dir=target 2>/dev/null | LC_ALL=C sort || true
   )
 }
 
