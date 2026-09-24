@@ -1,7 +1,7 @@
 # 门禁自身的漂移：锚点、预算观测、生态语料 pin
 
 > 状态：**current**。裁决 9 的三条（2026-09-24，`agent-handoff/rulings-20260924.md` 与其改裁记录）：
-> 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。9(a)、9(b) 已落地；9(c) 在随后的提交里落地。
+> 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。三条都已落地，提交见文末。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -71,12 +71,15 @@ job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`i
   另打印 pin 的 `.dawn-version` 与本仓种子，供人看、不判红。不 clone。
 - nightly 加 `corpus-pin` job（`contents: read`、`issues: write`），红了开「pin 落后」的 issue，规则同 9(b)。
 
+实测（本机，2026-09-24）：`--check-pin` 5.7 s（三次 `gh api`）；新 pin 下 `--corpus site` 全程 1 分 08 秒，`lex/parse/fmt backend-dawn` 三条都 OK。
+负控：把 `scripts/selfhost-prev-diff.sh` 的 `ECO_REV=` 行 sed 回 `a72bfc9f…`，`--check-pin` 退出 1，打印 `STALE … is behind …`；改回后退出 0。
+
 草案的「落后本仓 release 超过一个版本即红」不做：dawnop-site 按跨仓契约只在重大改进时升钉，那条判据第一天就红、并且长期红。
 
 ## 墙钟
 
 - push 门：+0。tree-policy 多两条命令共约 0.25 s，预算行从 431 s 记为 432 s，timeout 不变。
-- nightly：新增两个并行 job，不需要工具链；`budget-observations` 本机 1 分 42 秒（上界），`corpus-pin` 本机 3 次 `gh api` 约 5 s。
+- nightly：新增两个并行 job，不需要工具链；`budget-observations` 本机 1 分 42 秒（上界），`corpus-pin` 本机 5.7 s。
   两者与 `ecosystem-corpus` 并行，nightly 的总墙钟不变；多花的是 runner 分钟数，约 2 分钟。`budget-observations` 的 `timeout-minutes: 15` 是失控上限，不是预算声明（nightly 不带 `# budget:` 行，理由见该文件头）。
 
 ## 不做的（理由）

@@ -119,3 +119,53 @@ jobs:
             echo '```'
           } > issue.md
           scripts/nightly-issue.sh "nightly: gate budgets under-declared" issue.md
+
+  # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
+  # nothing advances answers an older question every week: it sat at a72bfc9
+  # (v0.59.0) through three `.dawn-version` bumps over there. The rule is
+  # dawnop-site's, not this repository's: the pin may not be older than
+  # dawnop-site's latest commit that changed `.dawn-version`
+  # (scripts/selfhost-prev-diff.sh has the reasoning and the three API
+  # calls). It is its own job because it needs no toolchain and must still
+  # report when the corpus job is red for an unrelated reason.
+  corpus-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read    # the checkout; dawnop-site is public
+      issues: write     # the report when the pin is behind
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the ecosystem pin is not behind dawnop-site's last Dawn bump
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/selfhost-prev-diff.sh --check-pin > pin.txt 2>&1 || status=$?
+          cat pin.txt
+          exit "${status:-0}"
+
+      - name: report a stale pin as an issue
+        if: failure() && steps.pin.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The ecosystem corpus pin (\`ECO_REV\` in"
+            echo "scripts/selfhost-prev-diff.sh) is behind dawnop-site's latest"
+            echo "\`.dawn-version\` change, or the check could not read dawnop-site."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Advance \`ECO_REV\` to that commit or later and run"
+            echo "\`./scripts/selfhost-prev-diff.sh --corpus site\` once. Output:"
+            echo
+            echo '```'
+            cat pin.txt 2>/dev/null || echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: ecosystem corpus pin is behind dawnop-site" issue.md
