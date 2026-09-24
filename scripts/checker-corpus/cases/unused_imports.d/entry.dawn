@@ -1,0 +1,47 @@
+# Unused imports are errors, one per name (spec §10.2). Reported below, in
+# source order: `other` (a whole-module alias nothing qualifies), `Shape` (its
+# constructor is spelled, but `Circle` is imported by name too), `thrice` (the
+# only spelling is a local that shadows it), `LIMIT`, `Math`, `str`, `map`
+# (spelled only bare, where it is the prelude function), and `half`: a renamed
+# import is used through its local name, and reported by the name written first.
+use lib
+use other
+use lib.{Shape, Circle, Pt, Ask, twice, thrice, only_in_tests, LIMIT, quad as four, half as halve}
+use java "java.lang.StringBuilder"
+use java "java.lang.Math"
+use std/str
+use std/map
+use broken
+
+fn first(n: Int) -> Int = lib.twice(n) + broken.value()
+
+fn round(r: Int) -> Int =
+  match Circle(r) {
+    Circle(x) -> x
+    _ -> 0
+  }
+
+fn origin() -> Int = Pt { x: 0, y: 0 }.x
+
+# an effect row spells the effect it names
+fn asked() -> Int !Ask = ask()
+
+# a renamed import is spelled by its local name
+fn quadrupled() -> Int = four(2)
+
+# a UFCS call spells the function it reaches
+fn doubled() -> Int = 3.twice()
+
+# the prelude `map`, not the module alias of the same spelling
+fn bumped() -> List[Int] = map([1], x => x + 1)
+
+fn shadowed() -> Int = {
+  let thrice = 1
+  thrice + 1
+}
+
+fn built() -> String !io = StringBuilder.new().toString().expect("non-null")
+
+test "a use in a test block is a use" {
+  assert only_in_tests(1) == 1
+}
