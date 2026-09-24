@@ -28,8 +28,8 @@ use check/cx.{ModExports, package_of}
 use lsp/lspq.{QCx, locals_at, in_for_pattern}
 use front/lexer.{SourceView, view_of, slice_cp, lex}
 use front/token.{
-  Token, TokKind, FOR, IN, PIPE, NEWLINE, EOF, IDENT,
-  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT, BANG, WITH
+  Token, TokKind, FOR, PIPE, NEWLINE, EOF, IDENT,
+  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT, BANG
 }
 use front/ast.{
   module_traits, module_fns, module_types, module_consts, module_effects, module_uses, VisPub
@@ -301,7 +301,8 @@ fn for_header_in(toks: List[Token], at: Int) -> Option[Int] = {
       i = i + 1
       continue
     }
-    if kind == IN && pattern_top(parens, brackets, braces) {
+    # `in` is a contextual keyword (spec §1.4): an identifier token by kind
+    if kind == IDENT && toks[i].text == "in" && pattern_top(parens, brackets, braces) {
       return Some(i)
     }
     if kind == LPAREN {
@@ -335,8 +336,8 @@ fn recursive_pattern_boundary(
   brackets: Int,
   braces: Int
 ) -> Bool =
-  if boundary == IN {
-    is_header_in && pattern_top(parens, brackets, braces)
+  if is_header_in {
+    pattern_top(parens, brackets, braces)
   } else if boundary == PIPE {
     true
   } else if boundary == COMMA {
@@ -821,7 +822,8 @@ fn effect_reference_tail(text: String) -> Bool = {
   while i >= 0 {
     let t = tokens[i]
     if t.kind == BANG { return true }
-    if t.kind == IDENT && t.text == "handle" && i > 0 && tokens[i - 1].kind == WITH { return true }
+    if t.kind == IDENT && t.text == "handle" && i > 0 && tokens[i - 1].kind == IDENT &&
+      tokens[i - 1].text == "with" { return true }
     if t.kind != IDENT && t.kind != TYPEIDENT && t.kind != DOT && t.kind != PIPE &&
       t.kind != LPAREN && t.kind != NEWLINE && t.kind != EOF { return false }
     i = i - 1

@@ -2407,9 +2407,9 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
         else:
             seen += 1
         keywords = markdown_section(spec, keyword_heading)
-        if keywords is None or "opaque" not in inline_code_spans(keywords):
-            bad.append(f"{rel}: contextual keyword inventory omits opaque")
-        else:
+        problems = keyword_inventory_problems(keywords)
+        bad.extend(f"{rel}: {problem}" for problem in problems)
+        if not problems:
             seen += 1
         for heading in visibility_headings:
             visibility = markdown_section(spec, heading)
@@ -2639,6 +2639,67 @@ def check_add_exports_selftest() -> tuple[list[str], int]:
         if not problems:
             return [f"--add-exports self-test: {label} stayed green"], 0
     return [], len(mutants)
+
+
+KEYWORD_TABLE_ARM = re.compile(r'^\s*"([a-z_]+)"\s*->\s*Some\([A-Z_]+\)\s*$', re.M)
+CONTEXTUAL_KEYWORD_SITE = re.compile(r'\bis_word\(p, [^,]+, \d+, "([a-z_]+)"\)')
+KEYWORD_ROW = re.compile(r'^\|\s*`([a-z_]+)`\s*\|', re.M)
+
+
+def compiler_keywords() -> tuple[set[str], set[str]]:
+    """The hard keywords (token.keyword's table) and the contextual keywords
+    (the parser's is_word sites). Both are read from source, never listed here:
+    a hand-kept list is what let `ctl` and `resume` go missing from three
+    documents at once (SYN-N01). An empty read is itself a failure, so a
+    reshaped table cannot pass by matching nothing."""
+    token = (ROOT / "selfhost/src/front/token.dawn").read_text(encoding="utf-8")
+    start = token.find("pub fn keyword(text: String)")
+    end = token.find("_ -> None", start)
+    hard = set(KEYWORD_TABLE_ARM.findall(token[start:end])) if start >= 0 and end > start else set()
+    parser = (ROOT / "selfhost/src/front/parser.dawn").read_text(encoding="utf-8")
+    contextual = set(CONTEXTUAL_KEYWORD_SITE.findall(parser))
+    return hard, contextual
+
+
+def keyword_inventory_problems(section: str | None,
+                               truth: tuple[set[str], set[str]] | None = None) -> list[str]:
+    """spec §1.4 against the compiler: the fenced block lists exactly the hard
+    keywords, and the table's first column lists exactly the contextual ones."""
+    hard, contextual = truth if truth is not None else compiler_keywords()
+    if not hard or not contextual:
+        return ["could not read the keyword inventory from token.dawn / parser.dawn"]
+    if section is None:
+        return ["§1.4 keyword section is missing"]
+    blocks = [body for _, body, _ in fences(section)]
+    listed_hard = set(blocks[0].split()) if blocks else set()
+    listed_contextual = set(KEYWORD_ROW.findall(section))
+    problems = []
+    if listed_hard != hard:
+        problems.append("§1.4 hard keywords differ from token.keyword: "
+                        f"missing {sorted(hard - listed_hard)}, extra {sorted(listed_hard - hard)}")
+    if listed_contextual != contextual:
+        problems.append("§1.4 contextual keywords differ from the parser's is_word sites: "
+                        f"missing {sorted(contextual - listed_contextual)}, "
+                        f"extra {sorted(listed_contextual - contextual)}")
+    return problems
+
+
+def keyword_inventory_selftest() -> tuple[list[str], int]:
+    """Each direction of drift has to be red, or the check proves nothing."""
+    truth = ({"fn", "let"}, {"in", "with"})
+    good = "```\nfn let\n```\n\n| 词 | x |\n|---|---|\n| `in` | a |\n| `with` | b |\n"
+    bad = []
+    if keyword_inventory_problems(good, truth):
+        bad.append("keyword inventory selftest: an exact inventory was refused")
+    for name, text in (
+        ("missing hard", good.replace("fn let", "fn")),
+        ("extra hard", good.replace("fn let", "fn let in")),
+        ("missing contextual", good.replace("| `with` | b |\n", "")),
+        ("extra contextual", good + "| `ctl` | c |\n"),
+    ):
+        if not keyword_inventory_problems(text, truth):
+            bad.append(f"keyword inventory selftest: {name} stayed green")
+    return bad, 5
 
 
 def check_repository_contracts() -> tuple[list[str], int]:
@@ -4289,6 +4350,9 @@ def main() -> None:
     bad, policies_seen = check_repository_contracts()
     problems += bad
     bad, n = check_repository_contracts_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = keyword_inventory_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_add_exports()

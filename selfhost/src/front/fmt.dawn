@@ -27,7 +27,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE, PUB,
+  USE, ELSE, FN, FOR, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -48,7 +48,12 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   }
   let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
-  Ok(reflow(cps, stream, unary_minus(raw), postfix_bang(raw), block_arrow(cps, raw)))
+  let marks = Marks {
+    unary: unary_minus(raw),
+    postfix: postfix_bang(raw),
+    keywords: contextual_keywords(raw)
+  }
+  Ok(reflow(cps, stream, marks, block_arrow(cps, raw)))
 }
 
 ## Only a type declaration's optional first bar is redundant. Keep this a
@@ -299,18 +304,49 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
   false
 }
 
+## The token-level facts `space` needs, each a set of span starts: unary `-`,
+## postfix `!`, and the contextual keywords standing in their position.
+type Marks = { unary: Set[Int], postfix: Set[Int], keywords: Set[Int] }
+
+## Span starts of the contextual keywords (spec §1.4) that sit where they are
+## keywords rather than names, for the two that can be followed by a bracket:
+## the `in` of a `for` header -- the first `in` at the `for`'s own bracket depth
+## -- and an `assert` opening a line. The lexer hands both over as IDENT, and an
+## identifier before `[` or `(` hugs it (`xs[0]`, `f(x)`), which would print
+## `for x in[1, 2]`. The other contextual keywords are never followed by a
+## bracket in their keyword position, so the ordinary rules already space them.
+fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  var depth = 0
+  var for_depth = -1
+  var i = 0
+  while i < len(raw) {
+    let t = raw[i]
+    let k = t.kind
+    if k == FOR {
+      for_depth = depth
+    } else if k == IDENT && t.text == "in" && depth == for_depth {
+      out = set.insert(out, t.lo)
+      for_depth = -1
+    } else if k == IDENT && t.text == "assert" &&
+      (i == 0 || raw[i - 1].kind == NEWLINE || raw[i - 1].kind == LBRACE) &&
+      i + 1 < len(raw) && (raw[i + 1].kind == LPAREN || raw[i + 1].kind == LBRACKET) {
+        out = set.insert(out, t.lo)
+      }
+    if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
+    if k == RPAREN || k == RBRACKET || k == RBRACE { depth = depth - 1 }
+    i = i + 1
+  }
+  out
+}
+
 ## A still-open bracket: the indent (in levels) its closer aligns to, and whether
 ## it is a brace. The brace flag is what tells a *body* from a mid-expression
 ## bracket when `reflow` picks an anchor.
 type Opener = { at: Int, brace: Bool }
 
-fn reflow(
-  cps: List[Char],
-  toks: List[Token],
-  unary: Set[Int],
-  postfix: Set[Int],
-  barrow: Set[Int]
-) -> String = {
+fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) -> String = {
+  let unary = marks.unary
   var out: List[String] = []
   var openers: List[Opener] = []
   var line_indent = 0
@@ -365,7 +401,7 @@ fn reflow(
     } else {
       if nl == 0 {
         let on_use_line = line_first.kind == USE
-        if t.kind == COMMENT || space(prev, t, unary, postfix, on_use_line) {
+        if t.kind == COMMENT || space(prev, t, marks, on_use_line) {
           out = out ++ [" "]
         }
         out = out ++ [ttext]
@@ -454,9 +490,15 @@ fn is_continuation(
 
 # ---- spacing between two tokens already known to be on the same line ----
 
-fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_line: Bool) -> Bool = {
+fn space(prev: Token, cur: Token, marks: Marks, on_use_line: Bool) -> Bool = {
+  let unary = marks.unary
+  let postfix = marks.postfix
   let p = prev.kind
   let c = cur.kind
+  # a contextual keyword in its position is spaced like the keyword it is:
+  # `for x in [1, 2]`, `assert (a)`, not the call/index spacing an identifier
+  # before a bracket would get
+  if set.has(marks.keywords, prev.lo) { return true }
   # a module path prints tight: use greet/words.{Lang, greet} (spec §10.2)
   if on_use_line && (p == SLASH || c == SLASH || p == LBRACE || c == RBRACE) { return false }
   # openers hug what follows; closers/commas/colons/? hug what precedes
@@ -700,6 +742,14 @@ test "the associated-effect spellings keep their bang an effect marker" {
   assert fmt_of(row) == row
   let bare = "fn k[T: P](x: T) -> Int !T.E = run(x)\n"
   assert fmt_of(bare) == bare
+}
+
+test "a contextual keyword in its position is spaced as a keyword" {
+  let src = "fn f(xs: List[Int]) -> Unit = {\n  for x in [1, 2] { () }\n  for (a, b) in (xs, xs) { () }\n" ++
+    "  assert (true)\n  let in = xs\n  in[0]\n}\n"
+  assert fmt_of(src) == src
+  assert fmt_of("fn f() -> Unit = {\n  for x in[1] { () }\n}\n") ==
+    "fn f() -> Unit = {\n  for x in [1] { () }\n}\n"
 }
 
 test "use paths print tight and unary minus hugs" {

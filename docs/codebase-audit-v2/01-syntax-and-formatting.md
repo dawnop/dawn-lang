@@ -311,9 +311,14 @@
 - **原建议：** 加入 `RBRACKET`，并用统一的 expression-terminator predicate 避免下一种容器再漏；
   前半已落地，后半因不同 production 的停止集合并不相同而明确拒绝。
 
-## SYN-17 — P3 — `java` 是全局硬关键字
+## SYN-17 — P3 — `java` 是全局硬关键字（已修）
 
 <!-- audit-anchor: present selfhost/src/front/token.dawn | "java" -> Some(JAVA) -->
+
+> **后续处置（2026-09-24，语法破坏性窗口，裁决 2）：已修。** 按本条「统一 contextual-keyword
+> 方案」的前提一并裁决：`java test assert with in` 五个单一位置硬关键字都降为上下文关键字，
+> lexer 产普通 IDENT，parser 经 `is_word` 在唯一位置判别；spec §1.4、TextMate grammar 与
+> scope contract 改为从 `token.dawn` 与 `parser.dawn` 对账（`docs/syntax-window-design.md` §1）。
 
 > **后续处置（2026-08-09）：维持 open，但归 D/P3 关键字预算设计项。** 当前 parser、规范与
 > TextMate grammar 对 hard keyword 身份一致，没有实现 bug；是否为 `java` 归还普通标识符空间
