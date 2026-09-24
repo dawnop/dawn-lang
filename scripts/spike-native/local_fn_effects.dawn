@@ -1,0 +1,32 @@
+# Local functions with named effect rows (SPC-19, spec §6.2), on both backends.
+# A local `fn` is a closure like a lambda: its value carries one evidence pack
+# and the call that runs it builds that pack from the declared row. Until the
+# syntax window every row but `!io` and pure was refused, on the stated ground
+# that a local function is lifted without evidence; this pins that the lifted
+# body does read its pack -- through a direct call, a self call that is not in
+# tail position, a self tail call that becomes a loop, and an effect variable
+# of the enclosing signature.
+effect Ask {
+  fn ask() -> Int
+}
+
+fn outer() -> Int !Ask = {
+  let f = () => ask() + 1
+  fn g() -> Int !Ask = ask() + 2
+  fn h(n: Int) -> Int !Ask = if n == 0 { ask() } else { h(n - 1) + 1 }
+  fn k(n: Int, acc: Int) -> Int !Ask = if n == 0 { acc + ask() } else { k(n - 1, acc + 1) }
+  f() + g() + h(3) + k(2, 0)
+}
+
+fn twice(f: fn() -> Int !e) -> Int !e = f() + f()
+
+fn poly(f: fn() -> Int !e) -> Int !e = {
+  fn probe() -> Int !e = twice(f)
+  probe()
+}
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 10 }
+  println("${outer()}")
+  println("${poly(() => ask())}")
+}

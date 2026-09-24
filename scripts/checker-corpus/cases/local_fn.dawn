@@ -1,6 +1,8 @@
 # checker.dawn: local functions
 use std/io
 
+# a local function declares no type parameters and no effect parameters: its
+# row may name the enclosing signature's variables but cannot bind one
 pub fn eff_var() -> Int = {
   fn inner(f: fn() -> Int !e) -> Int !e = f()
   1
@@ -28,17 +30,18 @@ pub effect Ask {
   fn get() -> Int
 }
 
-# #43: a local `fn` is lifted with no evidence parameter of its own, so a label
-# its body raises has nowhere to arrive from even though the name resolves
-# through the enclosing signature. Refused at the raise, which is the only
-# place that can name the call.
+# #43: a label the body raises and the local function's row does not declare
+# has nowhere to arrive from, even though the name resolves through the
+# enclosing signature. Refused at the raise, which is the only place that can
+# name the call; the repair is to write it into the row (SPC-19).
 pub fn label_from_signature() -> Int !Ask = {
   fn inner() -> Int = get()
   inner()
 }
 
 # the same hole one step over: the handler is in the enclosing *body* rather
-# than the enclosing signature, and the lifted body cannot read that either.
+# than the enclosing signature, and an undeclared label cannot reach the local
+# function from there either.
 pub fn label_from_enclosing_handler() -> Int = {
   with handle Ask { get() => 1 }
   fn inner() -> Int = get()
@@ -86,6 +89,33 @@ pub trait Runner[T] {
 pub fn projection_from_signature[T: Runner](x: T) -> Int !T.E = {
   fn probe() -> Int = run(x)
   probe()
+}
+
+# Accepted since the syntax window (SPC-19): the row declares the label, the
+# variable or the projection, so the call that runs the local function
+# supplies it in the pack, exactly as for a lambda. No line in the golden.
+pub fn label_declared() -> Int !Ask = {
+  fn inner() -> Int !Ask = get()
+  inner()
+}
+
+pub fn variable_declared(f: fn() -> Int !e) -> Int !e = {
+  fn probe() -> Int !e = twice(f)
+  probe()
+}
+
+pub fn projection_declared[T: Runner](x: T) -> Int !T.E = {
+  fn probe() -> Int !T.E = run(x)
+  probe()
+}
+
+# the row is a fixed promise: io the body performs has to be in it
+pub fn declared_row_without_io() -> Int !Ask = {
+  fn inner() -> Int !Ask = {
+    io.println("x")
+    get()
+  }
+  inner()
 }
 
 # Own-axis controls: ordinary pure and !io function values need no hidden
