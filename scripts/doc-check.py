@@ -172,7 +172,9 @@ check whose blind spot is undocumented gets mistaken for a check:
     author; the spec and the design notes are edited in Chinese by every
     language change, so there the Chinese is the original. Either way the
     digest is what makes drift a failing check rather than a thing somebody
-    notices later.
+    notices later. `--fix-translation-digests` re-registers every digest and
+    changes no other byte; it is the second half of that obligation, never the
+    first.
     The fence half is a *shape* check, not a byte comparison, and the reason
     is measured: README.zh-CN.md translates the comments inside its ```dawn
     and ```bash blocks, which is the convention here -- the code is the same
@@ -1453,10 +1455,80 @@ def check_translations() -> tuple[list[str], int]:
             bad.append(
                 f"{rel_tr}: registered against {rel_src} @ {got}, but {rel_src} "
                 f"is now @ {want}. {rel_src} is the original: update the "
-                f"translation to match it, then re-register the digest.")
+                f"translation to match it, then re-register the digest "
+                f"(scripts/doc-check.py --fix-translation-digests).")
             continue
         bad += fence_shape_mismatch(rel_tr, tr_text, rel_src, src_text)
     return bad, seen
+
+
+def refresh_translation_digest(tr_text: str, rel_src: str,
+                               want: str) -> tuple[str, str | None]:
+    """The translation with its marker's digest set to `want`, and nothing else.
+
+    Only the hex run inside the one `translation-of` marker is replaced; every
+    other byte, the marker's own spacing included, is returned as it came. A
+    document with no marker, with two, or with one naming another original is
+    returned untouched with the reason: which original a translation follows
+    is a registration a human makes, not something to repair.
+    """
+    lines = tr_text.split("\n")
+    hits = [(i, m) for i, m in enumerate(map(TRANSLATION_MARKER.match, lines)) if m]
+    if len(hits) != 1:
+        return tr_text, f"{len(hits)} translation-of marker(s), not 1"
+    i, m = hits[0]
+    if m.group(1) != rel_src:
+        return tr_text, f"the marker names {m.group(1)}, not {rel_src}"
+    line = lines[i]
+    lines[i] = line[:m.start(2)] + want + line[m.end(2):]
+    return "\n".join(lines), None
+
+
+def fix_translation_digests() -> int:
+    """`--fix-translation-digests`: re-register every translation's digest.
+
+    What it saves is copying sixteen hex digits by hand, and only that. The
+    obligation check_translations stands for is unchanged: bring the
+    translation level with its original first, then re-register -- this is the
+    second half, and running it without the first is the escape its docstring
+    already names."""
+    status = 0
+    for rel_tr, rel_src in sorted(TRANSLATIONS.items()):
+        tr, src = ROOT / rel_tr, ROOT / rel_src
+        if not tr.exists() or not src.exists():
+            print(f"{rel_tr}: {rel_tr if not tr.exists() else rel_src} does not "
+                  f"exist; not touched", file=sys.stderr)
+            status = 1
+            continue
+        text = tr.read_text(encoding="utf-8")
+        new, why = refresh_translation_digest(
+            text, rel_src, translation_digest(src.read_text(encoding="utf-8")))
+        if why:
+            print(f"{rel_tr}: {why}; not touched", file=sys.stderr)
+            status = 1
+        elif new != text:
+            tr.write_text(new, encoding="utf-8")
+            print(f"{rel_tr}: digest re-registered against {rel_src}")
+    return status
+
+
+def refresh_translation_digest_selftest() -> tuple[list[str], int]:
+    """The fixer moves the digest and not one other byte."""
+    body = ("# Title\n\n  <!--  doc-check: translation-of  a.md @ 0123abcd -->  \n"
+            "text with 0123abcd in it\n")
+    got, why = refresh_translation_digest(body, "a.md", "feedface")
+    want = body.replace("a.md @ 0123abcd", "a.md @ feedface")
+    bad = []
+    if why or got != want:
+        bad.append("translation digest fixer self-test: the marker's digest was "
+                   "not the only thing replaced")
+    for text, rel in ((body, "b.md"), ("# no marker\n", "a.md"),
+                      (body + body, "a.md")):
+        out, why = refresh_translation_digest(text, rel, "feedface")
+        if why is None or out != text:
+            bad.append("translation digest fixer self-test: a marker it must "
+                       "refuse was rewritten")
+    return bad, 4
 
 
 def effect_contract_problems(rel: str, text: str) -> tuple[list[str], int]:
@@ -4297,6 +4369,11 @@ def warm_toolchain() -> list[str]:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--fix-translation-digests"]:
+        sys.exit(fix_translation_digests())
+    if sys.argv[1:]:
+        print("usage: doc-check.py [--fix-translation-digests]", file=sys.stderr)
+        sys.exit(2)
     problems: list[str] = []
 
     # Before anything that spawns `bin/dawn` -- the examples, the tutorial
@@ -4363,6 +4440,9 @@ def main() -> None:
     problems += bad
     selftests_seen += n
     bad, n = check_status_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = refresh_translation_digest_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_tracked_documents_selftest()
