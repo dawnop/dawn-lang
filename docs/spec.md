@@ -9,9 +9,8 @@
 > 而这是仓库里唯一有资格裁判语义争议的文档。版本号跟 `VERSION` 走，不再单独编号。
 
 本文是语法与语义的权威定义。设计动机见 [design.md](design.md)。
-[grammar.ebnf](grammar.ebnf) 是一份**历史**的机器可读语法，**已落后于 parser**
-（它自己头部列了已知不符）——当参考读，别当裁判；文法有争议时以本文与
-`selfhost/src/front/parser.dawn` 为准，可执行的那份期望在 `scripts/grammar-corpus/`。
+仓库不另设形式化语法文件：文法有争议时以本文与 `selfhost/src/front/parser.dawn` 为准，
+可执行的那份期望在 `scripts/grammar-corpus/`。
 
 规范用词：**必须**（违反即编译错误）、**保证**（实现承诺的行为）、
 **未定义**（本规范不承诺，勿依赖）。

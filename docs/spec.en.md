@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 9b1330dfdcd71ed3 -->
+<!-- doc-check: translation-of docs/spec.md @ 04c6ebc9dc2bb154 -->
 
 # Dawn Language Specification
 
@@ -14,10 +14,9 @@
 > number follows `VERSION`; it is no longer numbered separately.
 
 This document is the authoritative definition of the syntax and semantics. For design motivation
-see [design.en.md](design.en.md). [grammar.ebnf](grammar.ebnf) is a **historical** machine-readable
-grammar and has **fallen behind the parser** (its own header lists the known mismatches) — read it
-as a reference, not as a judge. When the grammar is in dispute, this document and
-`selfhost/src/front/parser.dawn` win; the executable expectations live in `scripts/grammar-corpus/`.
+see [design.en.md](design.en.md). The repository keeps no separate formal grammar file: when the
+grammar is in dispute, this document and `selfhost/src/front/parser.dawn` win; the executable
+expectations live in `scripts/grammar-corpus/`.
 
 Wording of this specification: **must** (violating it is a compile error), **guaranteed**
 (behaviour the implementation promises), **undefined** (not promised by this specification; do not rely on it).

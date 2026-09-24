@@ -1,6 +1,6 @@
 # 语法 accept/reject 语料（TEST-04）
 
-`docs/grammar.ebnf` 自 2026-07-25 标为 **historical**——手工维护第二份近似语法必然
+`docs/grammar.ebnf` 自 2026-07-25 标为 **historical**，2026-09-24 删除——手工维护第二份近似语法必然
 再次过期，而它过期的方式最糟：读起来仍然可信。当时写下的出路是两条，
 「要么从 parser 的 production 生成，要么纳入 accept/reject corpus 测试」。
 这里是第二条。
