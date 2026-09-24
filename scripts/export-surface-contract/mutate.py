@@ -18,6 +18,7 @@ CHECKER = "selfhost/src/check/checker.dawn"
 TYPES = "selfhost/src/check/types.dawn"
 DOC = "selfhost/src/doc.dawn"
 LSPC = "selfhost/src/lsp/lspc.dawn"
+CX = "selfhost/src/check/cx.dawn"
 
 
 def replace_once(text: str, old: str, new: str, name: str) -> str:
@@ -250,6 +251,31 @@ MUTATIONS = {
         "        BtStdOnly -> AWorld\n",
     ),
     # the three-audience model itself: collapse StdOnly into World everywhere
+    # pub(pkg) (docs/package-visibility-design.md): the import boundary is the
+    # one place another package loses the package-private names
+    "pkg-always-visible": (
+        CX,
+        "  if exp.package == viewer || len(exp.pkg_only) == 0 { return exp }\n",
+        "  if true { return exp }\n",
+    ),
+    # ...and `dawn doc` publishes `pub` alone
+    "doc-publishes-pkg": (
+        DOC,
+        "  for fd in module_fns(cm.m) {\n    if fd.vis == VisPub {\n",
+        "  for fd in module_fns(cm.m) {\n    if vis_exported(fd.vis) {\n",
+    ),
+    # a pub(pkg) root answers to its package, not to the world
+    "pkg-root-is-world": (
+        PASSES,
+        "    VisPkg -> Some(APackage(package_of(cx)))\n",
+        "    VisPkg -> Some(public_root)\n",
+    ),
+    # and a package-private identity is not nameable by the world
+    "package-covers-world": (
+        TYPES,
+        "    APackage(p) ->\n      match root {\n        AWorld -> false\n",
+        "    APackage(p) ->\n      match root {\n        AWorld -> true\n",
+    ),
     "stdonly-collapses-to-world": (
         TYPES,
         "pub fn declared_audience(owner: String) -> Audience =\n"
@@ -274,6 +300,12 @@ EXTRA_HELPERS = {
 # it. `surface-after-bodies` has to put the call back at the end: a mutant that
 # merely deleted the pass would prove nothing about *when* it runs.
 EXTRA_EDITS = {
+    "doc-publishes-pkg": (
+        DOC,
+        "  Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub\n}",
+        "  Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub,\n"
+        "  vis_exported\n}",
+    ),
     "surface-after-bodies": (
         CHECKER,
         "pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =\n"
