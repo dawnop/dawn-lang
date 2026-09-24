@@ -25,13 +25,13 @@ type Settings = { name: String, retries: Int }
 ## only thing in the signature about the outside world is the label.
 fn read_settings(dir: String) -> Result[Settings, String] !Fs = {
   if not io.is_dir(dir) {
-    return Err("no settings directory at $dir")
+    return Err("no settings directory at ${dir}")
   }
-  let name = line("$dir/name")?
-  let retries = line("$dir/retries")?
+  let name = line("${dir}/name")?
+  let retries = line("${dir}/retries")?
   match parse_int(retries) {
     Some(n) -> Ok(Settings { name: name, retries: n })
-    None -> Err("retries is not a number: $retries")
+    None -> Err("retries is not a number: ${retries}")
   }
 }
 
@@ -40,13 +40,13 @@ fn read_settings(dir: String) -> Result[Settings, String] !Fs = {
 fn line(path: String) -> Result[String, String] !Fs =
   match io.read_file(path) {
     Ok(text) -> Ok(str.trim(text))
-    Err(_e) -> Err("cannot read $path")
+    Err(_e) -> Err("cannot read ${path}")
   }
 
 fn describe(r: Result[Settings, String]) -> String =
   match r {
     Ok(s) -> "name=${s.name} retries=${s.retries}"
-    Err(m) -> "error: $m"
+    Err(m) -> "error: ${m}"
   }
 
 # ---- handler one: the disk, through std ----
@@ -56,11 +56,11 @@ fn describe(r: Result[Settings, String]) -> String =
 fn on_disk() -> Unit !Fs !io = {
   match io.temp_dir("", "dawn-settings") {
     Ok(dir) -> {
-      let _ = io.write_file("$dir/name", "orion\n")
-      let _ = io.write_file("$dir/retries", "3\n")
+      let _ = io.write_file("${dir}/name", "orion\n")
+      let _ = io.write_file("${dir}/retries", "3\n")
       io.println("disk:    ${describe(read_settings(dir))}")
-      let _ = io.delete("$dir/name")
-      let _ = io.delete("$dir/retries")
+      let _ = io.delete("${dir}/name")
+      let _ = io.delete("${dir}/retries")
       let _ = io.delete(dir)
       ()
     }
@@ -101,13 +101,13 @@ fn with_fs_table[T](files: List[(String, String)], body: fn() -> T !Fs) -> T = {
 }
 
 fn missing(path: String) -> ForeignError =
-  ForeignError { kind: "table.no_such_file", message: "no file at $path", cause: None }
+  ForeignError { kind: "table.no_such_file", message: "no file at ${path}", cause: None }
 
 fn read_only(op: String, path: String) -> ForeignError =
-  ForeignError { kind: "table.read_only", message: "$op: the table holds no writes ($path)", cause: None }
+  ForeignError { kind: "table.read_only", message: "${op}: the table holds no writes (${path})", cause: None }
 
 fn text_only(op: String, path: String) -> ForeignError =
-  ForeignError { kind: "table.text_only", message: "$op: the table holds text only ($path)", cause: None }
+  ForeignError { kind: "table.text_only", message: "${op}: the table holds text only (${path})", cause: None }
 
 fn lookup(files: List[(String, String)], path: String) -> Option[String] = {
   for entry in files {
@@ -128,7 +128,7 @@ fn has_file(files: List[(String, String)], path: String) -> Bool =
 fn is_dir_in(files: List[(String, String)], path: String) -> Bool = {
   for entry in files {
     let (p, _text) = entry
-    if str.starts_with(p, "$path/") { return true }
+    if str.starts_with(p, "${path}/") { return true }
   }
   false
 }
@@ -137,7 +137,7 @@ fn children(files: List[(String, String)], dir: String) -> List[String] = {
   var names: List[String] = []
   for entry in files {
     let (p, _text) = entry
-    match str.strip_prefix(p, "$dir/") {
+    match str.strip_prefix(p, "${dir}/") {
       Some(rest) -> if not str.contains(rest, "/") { names = names ++ [rest] }
       None -> ()
     }

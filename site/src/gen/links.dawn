@@ -48,11 +48,11 @@ use gen/fingerprint.{is_fingerprinted}
 use html/play.{play_decode}
 
 fn files_under(base: String, rel: String) -> List[String] !Fs = {
-  let path = if rel == "" { base } else { "$base/$rel" }
+  let path = if rel == "" { base } else { "${base}/${rel}" }
   if io.is_dir(path) {
     var out: List[String] = []
     for name in must_list(path) {
-      let child = if rel == "" { name } else { "$rel/$name" }
+      let child = if rel == "" { name } else { "${rel}/${name}" }
       out = out ++ files_under(base, child)
     }
     out
@@ -145,7 +145,7 @@ fn ids_of(html: String) -> List[String] = attr_values(html, " id=\"")
 ## the section number, and that is always the first thing in a heading.
 fn headings_at(html: String, lvl: Int) -> List[(String, String)] = {
   let cs = code_points(html)
-  let open = code_points("<h$lvl id=\"")
+  let open = code_points("<h${lvl} id=\"")
   var out: List[(String, String)] = []
   var i = 0
   var going = true
@@ -257,7 +257,7 @@ fn frag_of(href: String) -> String =
 ## Resolve href against the page's directory and normalize . / .. segments.
 fn resolve(dir: String, href: String) -> String = {
   let no_anchor = path_of(href)
-  let raw = if dir == "" { no_anchor } else { "$dir/$no_anchor" }
+  let raw = if dir == "" { no_anchor } else { "${dir}/${no_anchor}" }
   var stack: List[String] = []
   for part in str.split(raw, "/") {
     if part == ".." {
@@ -310,13 +310,13 @@ fn index_hrefs(name: String, text: String) -> List[String] = {
               Some(JStr(href)) -> {
                 out = out ++ [href]
               }
-              _ -> panic("assets/$name: an index row is not five strings")
+              _ -> panic("assets/${name}: an index row is not five strings")
             }
-          _ -> panic("assets/$name: an index row is not an array")
+          _ -> panic("assets/${name}: an index row is not an array")
         }
       }
     }
-    Err(e) -> panic("assets/$name is not JSON: " ++ error_text(e))
+    Err(e) -> panic("assets/${name} is not JSON: " ++ error_text(e))
   }
   out
 }
@@ -339,7 +339,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
   var id_entries: List[(String, Set[String])] = []
   for f in set.to_list(files) {
     if str.ends_with(f, ".html") {
-      id_entries = id_entries ++ [(f, set.from(ids_of(must_read("$out/$f"))))]
+      id_entries = id_entries ++ [(f, set.from(ids_of(must_read("${out}/${f}"))))]
     }
   }
   let ids = map.from(id_entries)
@@ -363,18 +363,18 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       # That is the failure this catches and the previous paragraph's check
       # cannot. A heading whose text prints no number is skipped, not
       # guessed at: 25 of them are unnumbered on purpose.
-      for h in headings_of(must_read("$out/$f")) {
+      for h in headings_of(must_read("${out}/${f}")) {
         let (hid, htext) = h
         let want = id_number(hid)
         let got = leading_number(htext)
         if want != "" && got != "" {
           numbered = numbered + 1
           if want != got {
-            broken = broken ++ ["$f: id \"$hid\" claims §$want but the heading prints §$got"]
+            broken = broken ++ ["${f}: id \"${hid}\" claims §${want} but the heading prints §${got}"]
           }
         }
       }
-      for href in hrefs_of(must_read("$out/$f")) {
+      for href in hrefs_of(must_read("${out}/${f}")) {
         if not is_external(href) {
           let path = path_of(href)
           let frag = frag_of(href)
@@ -386,7 +386,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
             checked = checked + 1
             target_exists = set.has(files, target)
             if not target_exists {
-              broken = broken ++ ["$f -> $href (resolved: $target)"]
+              broken = broken ++ ["${f} -> ${href} (resolved: ${target})"]
             }
             # A page must reach the shared assets by their fingerprinted names.
             # Existence cannot see this one: both names are on disk, so a page
@@ -400,7 +400,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
               let name = last_segment(target)
               if not is_fingerprinted(name) {
                 broken = broken
-                  ++ ["$f -> $href: assets/$name carries no content hash, so its URL "
+                  ++ ["${f} -> ${href}: assets/${name} carries no content hash, so its URL "
                       ++ "cannot change when its bytes do"]
               }
             }
@@ -412,14 +412,14 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
               payloads = payloads + 1
               if not is_editor_payload(frag) {
                 broken = broken
-                  ++ ["$f -> $target#...: the fragment is not standard Base64 over "
+                  ++ ["${f} -> ${target}#...: the fragment is not standard Base64 over "
                       ++ "well-formed UTF-8, so the editor cannot load it"]
               }
             } else {
               anchors = anchors + 1
               let page_ids = unwrap_or(map.get(ids, target), set.empty())
               if not set.has(page_ids, frag) {
-                broken = broken ++ ["$f -> $href (no id \"$frag\" in $target)"]
+                broken = broken ++ ["${f} -> ${href} (no id \"${frag}\" in ${target})"]
               }
             }
           }
@@ -430,13 +430,13 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
   # The search indexes, whose hrefs are in an asset rather than in a page.
   var indexes = 0
   var index_links = 0
-  for name in must_list("$out/assets") {
+  for name in must_list("${out}/assets") {
     if is_search_index(name) {
       indexes = indexes + 1
-      let hrefs = index_hrefs(name, must_read("$out/assets/$name"))
+      let hrefs = index_hrefs(name, must_read("${out}/assets/${name}"))
       if len(hrefs) == 0 {
         broken = broken
-          ++ ["assets/$name: the search index is empty, so the panel can find nothing"]
+          ++ ["assets/${name}: the search index is empty, so the panel can find nothing"]
       }
       for href in hrefs {
         index_links = index_links + 1
@@ -444,12 +444,12 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
         let frag = frag_of(href)
         if not set.has(files, target) {
           broken = broken
-            ++ ["assets/$name -> $href: the index names a page that was never written "
-                ++ "(resolved: $target)"]
+            ++ ["assets/${name} -> ${href}: the index names a page that was never written "
+                ++ "(resolved: ${target})"]
         } else if frag != "" {
           let page_ids = unwrap_or(map.get(ids, target), set.empty())
           if not set.has(page_ids, frag) {
-            broken = broken ++ ["assets/$name -> $href (no id \"$frag\" in $target)"]
+            broken = broken ++ ["assets/${name} -> ${href} (no id \"${frag}\" in ${target})"]
           }
         }
       }
@@ -462,15 +462,15 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
   }
   if len(broken) > 0 {
     for b in broken {
-      println("BROKEN LINK: $b")
+      println("BROKEN LINK: ${b}")
     }
     panic("${len(broken)} broken links")
   }
   println(
-    "  link check: $checked internal href/src(s), $anchors #fragment(s) and $numbered numbered "
-      ++ "heading id(s) across $pages pages, all resolve; $assets of them reach assets/ "
-      ++ "and every one is content-hashed; $payloads prefilled Playground fragment(s) decode; "
-      ++ "$index_links search-index href(s) in $indexes index(es) resolve, fragments included")
+    "  link check: ${checked} internal href/src(s), ${anchors} #fragment(s) and ${numbered} numbered "
+      ++ "heading id(s) across ${pages} pages, all resolve; ${assets} of them reach assets/ "
+      ++ "and every one is content-hashed; ${payloads} prefilled Playground fragment(s) decode; "
+      ++ "${index_links} search-index href(s) in ${indexes} index(es) resolve, fragments included")
 }
 
 test "resolution normalizes relative segments" {

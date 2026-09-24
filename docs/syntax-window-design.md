@@ -53,20 +53,22 @@
 ### 1.3 三份手抄表改为对账（SYN-N01）
 
 真相源是两处源码：硬关键字 = `token.dawn` 的 `keyword` 表；上下文关键字 = `parser.dawn` 里
-`… .text == "<word>"` 的判定点（今天 11 个：`opaque ctl as derive handle resume`，加本刀五个）。
-- `editors/vscode/test/scope-contract.js`：删掉手写的 `CONTEXTUAL_KEYWORDS` 常量，改成从
-  `parser.dawn` 抽取（正则取 `IDENT && … .text == "…"` 与 `is_ctx_kw(…, "…")` 两种判定形），
-  抽取结果为空即红；与 grammar 的 `x-dawn-contextual-keywords` 与 `contextualKeywords` 模式逐项相等。
+`is_word(p, st, n, "<word>")` 的调用点（parser 按文本认词一律经这个 helper，所以调用点集合就是清单；
+今天 11 个：`opaque ctl as derive handle resume` 加本刀五个）。
+- `editors/vscode/test/scope-contract.js`：删掉手写的 `CONTEXTUAL_KEYWORDS` 常量，改成从 `parser.dawn` 的
+  `is_word` 调用点抽取，抽取结果为空即红；与 grammar 的 `x-dawn-contextual-keywords` 与 `contextualKeywords`
+  模式逐项相等；另加一条：每个上下文关键字在 `let x = <word>` 里不得带任何关键字 scope。
 - `dawn.tmLanguage.json`：五个词从 `x-dawn-hard-keywords` 挪到 `x-dawn-contextual-keywords`，
-  各配一条带上下文的模式（`use java`、行首 `test "`、行首 `assert`/`with`、`for … in`）；补上漏登的 `ctl`、`resume`。
-- `scripts/doc-check.py`：spec §1.4 的上下文关键字清单与同一份抽取结果逐项相等（替换今天只查 `opaque` 一个词的检查），
-  硬关键字代码块与 `token.keyword` 逐项相等；spec.en.md 同规。
-  抽取逻辑写一份（doc-check 里一个函数），scope-contract 用自己的 JS 抽取但比对同一个源文件，两边任何一边
-  漏项都红。
+  各配一条带上下文的模式（`use java "`、行首 `test "`、行首 `assert`/`with`、`for … in`）；补上漏登的 `ctl`、`resume`。
+- `scripts/doc-check.py`：spec §1.4 的硬关键字代码块与 `token.keyword` 逐项相等、上下文关键字表第一列与
+  `is_word` 调用点逐项相等（替换今天只查 `opaque` 一个词的检查）；spec.en.md 同规；五条自检（多/少 × 硬/上下文，
+  加一条精确清单不误报）。
 
 ### 1.4 fmt
 
-`fmt.dawn` 不 import 这五个 kind，无需改动。
+五个词成了 IDENT 之后，`for x in [1, 2]` 会按「标识符后的 `[` 贴紧」印成 `in[1, 2]`，行首 `assert (x)` 同理。
+fmt 加一个 token 级集合 `contextual_keywords`：`for` 同深度上的第一个 `in`、行首后跟 `(`/`[` 的 `assert`，
+按关键字加空格。其余三个词在关键字位置后面不会跟括号，原规则已经对。
 
 ### 1.5 负控
 
@@ -82,35 +84,59 @@
 之前：`"$name"` 以词法最长匹配吞标识符（`lexer.lex_dollar` 的第二个分支），`"$obj_x"` 在同时有
 `obj` 与 `obj_x` 时静默取后者，`"$obj.name"` 静默变成 `obj` 拼 `".name"`。
 
-之后：`$` 后接 `{` 才是插值；`$` 后接任何别的字符（包括字母）都是字面 `$`。`\$` 转义保留（写字面 `${`
-仍需要它）。不新增诊断（裁决原文）：`"$x"` 今后就是两个字符 `$x`，与 JS 模板字面量同规则，
-也与 Dawn 今天「`$` 后不是标识符」的行为一致。
+之后（**永久规则**）：`${expr}` 是唯一的插值写法。`$` 后紧跟能开始名字的字符（字母或 `_`）是
+**词法错误**，诊断同时给出两种改法：
+
+```
+error: `$` followed by a name is not an interpolation: `$a`
+  = hint: write `${a}` to interpolate it, or `\$a` for a literal dollar sign
+```
+
+`$` 后接其它字符（数字、空格、标点、串尾）仍是字面 `$`；`\$` 转义保留（写字面 `$name` 与字面 `${`
+都靠它）。这是 Kotlin 的同款规则：`$` 接名字必是插值，字面要转义。
+
+**改裁记录（2026-09-24，协调方）**：裁决 2 原文是「删除后 `"$x"` 里的 `$` 是普通字符，不新增诊断」。
+下游勘察（`agent-handoff/site-impact-20260924.md`）数到 dawnop-site 有 307 处 `$name`；若它们静默变成
+字面文本，SQL、签名串、URL 全部错文而编译照过。静默错文正是 SYN-N04 要消灭的那一类（合法程序算出
+作者没写的值），把它换个方向再造一次不可接受；显式错误让每一处都被看见，fmt 迁移又让修复是机械的。
+所以改为报错。
 
 ### 2.2 实现
 
-- `lexer.lex_dollar` 删标识符分支。
+- `lexer.lex_dollar` 的标识符分支改为产一条诊断，字面量本身照旧成一个 token（文本按原样收进 SText），
+  所以文件其余部分照常词法、照常报错，fmt 也能拿到完整 token 流。为此 `lex_string` / `lex_triple`
+  多返回一组「不阻止 token 成形」的诊断，`lex_go` 汇入总诊断；插值代码里嵌套字面量的这类诊断不在
+  外层收集（parser 重新词法插值代码时会报，避免重复）。
 - AST 不变（插值仍是 `SPInterp(expr)`）。
+- `lexer.is_dollar_name(d)` 按消息前缀认出这一类诊断，fmt 靠它区分「可修复」与「必须拒绝」。
 
-### 2.3 fmt 迁移规则（只在本窗口存在）
+### 2.3 fmt 迁移规则（本窗口）
 
-`dawn fmt` 对每个 STRING token 的源文本做一次改写：不在 `\` 转义之后、不在 `${ … }` 内部代码之外的
-`$ident`（`ident` 按旧词法 `is_ident_part` 最长匹配）改写为 `${ident}`；`${ … }` 内部的嵌套字符串递归
-同样处理。raw 字符串（反引号）没有插值，不动。改写是纯文本的，不需要重新词法。
+`dawn fmt` 对每个 STRING token 的源文本做一次改写（`fmt.migrate_dollar_names`）：`\` 转义之后的字符
+原样，`${ … }` 内部代码里的嵌套字符串递归同样处理，其余 `$ident`（`ident` 按旧词法最长匹配）改写为
+`${ident}`；raw 字符串（反引号）没有插值，不动。`format` 在词法诊断全是 `$name` 类时照常排版（这类
+诊断不丢 token），其它词法诊断照旧拒绝。
 
-这条规则**只能活一个窗口**：窗口之后 `"$x"` 的正确含义是字面 `$x`，而迁移会把它改成插值，
-等于替作者改义。所以它随 v0.78.0 发布（下游 dawnop-site 升钉时用 v0.78.0 的 `dawn fmt` 迁移），
-**下一个种子（v0.78.0）推进后的第一个版本删除**，fmt 恢复「只改空白」的承诺。删除时本节改为历史。
+因为 `$name` 从此恒是错误，这条迁移不会改变任何能编译的程序的含义。它仍按协调方要求**只在本窗口
+存在**：v0.78.0 发布、下游用 v0.78.0 的 `dawn fmt` 迁完之后，第一个版本删除它，fmt 恢复「只改空白与
+单行首竖线」的承诺。
 
 ### 2.4 全仓迁移
 
-`dawn fmt` 迁移全部 `.dawn`（selfhost、std、packages、site、playground、examples、compiler-plan、scripts 下的语料）；
-`docs/`、`README*`、`site/pages` 里 ```dawn 代码块用同一规则的 Python 等价实现迁移（一次性脚本放 scratchpad，不入库；
-fence 以外的文字里描述旧语法的 `$name` 按新 spec 改写）。std 改动后重新生成 `selfhost/src/embed/stdsrc.dawn`。
+- `.dawn`：一次性 Python 脚本（与 fmt 迁移同一算法，但不改其它排版，放 scratchpad 不入库）迁了 44 个
+  文件 400 处（site 为主；`selfhost/src` 与 `std` 零处，所以无需重生成 stdsrc）。交叉验证：对其中 36 个
+  在 fmt 覆盖范围内的文件，取 `origin/main` 原文跑新 `dawn fmt`，结果与脚本迁移后的文件逐字节相同。
+- 文档 ```dawn 代码块：spec、spec.en、tutorial、tutorial.zh-CN、README、README.zh-CN 共 40 处；
+  插值一节的散文按新规则改写。
+- 迁移后全仓 `$name` 零命中（新编译器编译全部语料即证）。
 
 ### 2.5 负控
 
-- 探针 `p_dollar.dawn`：`let a = "A"` 后 `println("$a.b")`。旧编译器输出 `A.b`（取到 `a`）；新编译器输出 `$a.b`。
-- 迁移：`dawn fmt` 把 `"$a.b"` 改成 `"${a}.b"`，再跑一次不动（不动点）。
+- 探针 `p_dollar.dawn`：`let a = "A"`、`obj`、`obj_x` 后 `println("$a.b")`、`println("B:$obj_x")`。
+  种子 v0.77.0 输出 `A.b` / `B:WRONG`（静默取值）；新编译器报两条错并给出两种改法；
+  `dawn fmt` 改成 `"${a}.b"` / `"B:${obj_x}"`，再跑不动。
+- grammar corpus：`reject/dollar_name.dawn` 钉两条诊断的顺序与措辞；`accept/dollar_literals.dawn`
+  钉 `$5`、`$ `、`$-`、`\$a`、`\${a}`、串尾 `$` 都是字面。
 
 ## 3. SYN-N05 / SYN-N11：构造器拼写
 
@@ -264,7 +290,6 @@ match c {
 - **RX-08 `type`/`alias`/`opaque type` 三分维持**：三种形式各一种含义（Go alias/definition、Gleam opaque 同构），只留 hint 文案。
 - **fmt 不删单行或-模式的前导 `|`**：和类型声明单行删首竖线是 token 级可判的（`type X =` 后第一个 token）；
   match 臂的前导 `|` 与上一臂体末尾之间没有 token 级可靠边界（臂体可以跨行），删错会改义。前导 `|` 是裁决给的可选形式，保留。
-- **不为 `$name` 加诊断**：裁决原文「不新增诊断」；删除后 `$x` 是字面字符，没有静默取错值的可能。
 - **fmt 不归一构造器括号**：fmt 是 token 级，不知道名字指向记录还是构造器（可能跨模块）；由 checker 报错给 hint。
 - **`None()` 这种无字段构造器加空括号**：不在裁决 2 范围。
 - **局部 `fn` 引入新的效果变量**：等于局部多态，要给绑定者列表定 ABI（`effect-params-design.md` 决策 5 的同一个面），裁决只要求具名效果。

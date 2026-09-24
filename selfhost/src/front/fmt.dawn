@@ -40,11 +40,19 @@ use front/token.{
 ## unsafe. `Err` means the caller must leave the file exactly as it found it.
 pub fn format(source: String) -> Result[String, List[Diag]] = {
   let (cps, raw, comments, diags) = lexer.lex_with_comments_cps(source)
-  if len(diags) > 0 { return Err(diags) }
+  # A `$name` is the one lexer diagnostic that leaves every token intact and
+  # that this pass repairs (migrate_dollar_names), so it does not refuse.
+  var refused: List[Diag] = []
+  for d in diags {
+    if not lexer.is_dollar_name(d) { refused = refused ++ [d] }
+  }
+  if len(refused) > 0 { return Err(refused) }
   let bars = single_line_type_bars(cps, raw)
   var code: List[Token] = []
   for t in raw {
-    if t.kind != NEWLINE && t.kind != EOF && not set.has(bars, t.lo) { code = code ++ [t] }
+    if t.kind != NEWLINE && t.kind != EOF && not set.has(bars, t.lo) {
+      code = code ++ [if t.kind == STRING { migrate_dollar_names(t) } else { t }]
+    }
   }
   let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
@@ -54,6 +62,100 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
     keywords: contextual_keywords(raw)
   }
   Ok(reflow(cps, stream, marks, block_arrow(cps, raw)))
+}
+
+## The syntax-window migration (docs/syntax-window-design.md §2.3): every
+## `$name` in a string literal becomes `${name}`, in nested literals inside a
+## `${ ... }` too. The lexer refuses `$name` since the window, so this never
+## changes what a compiling program means; it moves source written for the
+## short form onto the one spelling left. It runs on the literal's source text,
+## which is what the token reprints: an escape `\$` and everything after it
+## stay as written, raw literals have no interpolation and are left alone.
+##
+## Window-only: it is deleted in the first release after v0.78.0 becomes the
+## seed, once the downstream code it exists for has been migrated.
+fn migrate_dollar_names(t: Token) -> Token = {
+  let cps = code_points(t.text)
+  if len(cps) == 0 || cps[0] != '"' || not list.contains(cps, '$') { return t }
+  let (out, _) = mig_string(cps, 0)
+  Token { ..t, text: from_code_points(out) }
+}
+
+fn mig_is_name_start(c: Char) -> Bool = char_is_letter(c) || c == '_'
+
+fn mig_is_name_part(c: Char) -> Bool = char_is_alnum(c) || c == '_'
+
+fn mig_at(cps: List[Char], i: Int) -> Char = if i < len(cps) { cps[i] } else { ' ' }
+
+## A string literal from its opening quote at `start`: the rewritten text and
+## the index just past its closing quote.
+fn mig_string(cps: List[Char], start: Int) -> (List[Char], Int) = {
+  let triple = mig_at(cps, start + 1) == '"' && mig_at(cps, start + 2) == '"'
+  let q = if triple { 3 } else { 1 }
+  var out: List[Char] = list.take(list.drop(cps, start), q)
+  var i = start + q
+  while i < len(cps) {
+    let c = cps[i]
+    if c == '"' && (not triple || (mig_at(cps, i + 1) == '"' && mig_at(cps, i + 2) == '"')) {
+      out = out ++ list.take(list.drop(cps, i), q)
+      return (out, i + q)
+    } else if c == '\\' {
+      out = out ++ [c, mig_at(cps, i + 1)]
+      i = i + 2
+    } else if c == '$' && mig_at(cps, i + 1) == '{' {
+      let (code, j) = mig_code(cps, i + 2)
+      out = out ++ ['$', '{'] ++ code
+      i = j
+    } else if c == '$' && mig_is_name_start(mig_at(cps, i + 1)) {
+      var j = i + 1
+      while j < len(cps) && mig_is_name_part(cps[j]) { j = j + 1 }
+      out = out ++ ['$', '{'] ++ list.take(list.drop(cps, i + 1), j - i - 1) ++ ['}']
+      i = j
+    } else {
+      out = out ++ [c]
+      i = i + 1
+    }
+  }
+  (out, i)
+}
+
+## The code of a `${ ... }` from just past its `{`: the rewritten code with its
+## closing `}`, and the index past that brace. Nested literals are walked the
+## way the lexer walks them, so a brace inside one does not close the code.
+fn mig_code(cps: List[Char], start: Int) -> (List[Char], Int) = {
+  var out: List[Char] = []
+  var depth = 1
+  var i = start
+  while i < len(cps) {
+    let c = cps[i]
+    if c == '"' {
+      let (lit, j) = mig_string(cps, i)
+      out = out ++ lit
+      i = j
+    } else if c == '`' || c == '\'' {
+      out = out ++ [c]
+      i = i + 1
+      while i < len(cps) && cps[i] != c {
+        if cps[i] == '\\' && c == '\'' {
+          out = out ++ [cps[i]]
+          i = i + 1
+        }
+        out = out ++ [mig_at(cps, i)]
+        i = i + 1
+      }
+      out = out ++ [c]
+      i = i + 1
+    } else {
+      out = out ++ [c]
+      i = i + 1
+      if c == '{' { depth = depth + 1 }
+      if c == '}' {
+        depth = depth - 1
+        if depth == 0 { return (out, i) }
+      }
+    }
+  }
+  (out, i)
 }
 
 ## Only a type declaration's optional first bar is redundant. Keep this a
@@ -750,6 +852,18 @@ test "a contextual keyword in its position is spaced as a keyword" {
   assert fmt_of(src) == src
   assert fmt_of("fn f() -> Unit = {\n  for x in[1] { () }\n}\n") ==
     "fn f() -> Unit = {\n  for x in [1] { () }\n}\n"
+}
+
+test "the window migration rewrites the short interpolation form" {
+  # `@` stands for `$` in these sources, so this file needs no escapes to say
+  # what it tests and reads the same under the seed and after the window
+  let d = (text: String) => str.replace(text, "@", "$")
+  let src = d("fn f(a: String, b: Int) -> String = \"@a.b @{b} \\@a @5 @ @{g(\"@a\")} '@'\" ++ `@a`\n")
+  let want = d("fn f(a: String, b: Int) -> String = \"@{a}.b @{b} \\@a @5 @ @{g(\"@{a}\")} '@'\" ++ `@a`\n")
+  assert fmt_of(src) == want
+  assert fmt_of(want) == want
+  let triple = d("fn f(n: Int) -> String = \"\"\"\n  n=@n_1 @{n}\n  \"\"\"\n")
+  assert fmt_of(triple) == d("fn f(n: Int) -> String = \"\"\"\n  n=@{n_1} @{n}\n  \"\"\"\n")
 }
 
 test "use paths print tight and unary minus hugs" {

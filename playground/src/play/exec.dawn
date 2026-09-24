@@ -47,7 +47,7 @@ fn slurp(path: String) -> String !Fs =
 # Strip the throwaway temp directory out of diagnostics so users see a clean
 # "prog.dawn:line:col" instead of /var/folders/.../dawn-play-<uuid>/prog.dawn.
 fn strip_dir(text: String, dir: String) -> String =
-  join(str.split(text, "$dir/"), "")
+  join(str.split(text, "${dir}/"), "")
 
 # Prepend the sudo-whitelisted sandbox wrapper. The wrapper takes the working
 # directory as its first argument, then the command to run inside a throwaway
@@ -64,7 +64,7 @@ fn sandboxed(dir: String, argv: List[String]) -> List[String] !io =
 fn make_world_writable(dir: String) -> Unit !io = {
   let p = ProcessBuilder.new(["chmod", "0777", dir])
   p.redirectErrorStream(true)
-  p.redirectOutput(File.new("$dir/.chmod.log"))
+  p.redirectOutput(File.new("${dir}/.chmod.log"))
   p.start().expect("chmod").waitFor()
   ()
 }
@@ -92,7 +92,7 @@ fn cleanup(dir: String) -> Unit !io = {
 # The budget is `compile_timeout_secs()` — separate from the run budget, since
 # a cold compiler is legitimately slower than the program it produces.
 fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !Fs !io = {
-  let build_out = "$dir/build.txt"
+  let build_out = "${dir}/build.txt"
   let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
   bp.redirectErrorStream(true)
   bp.redirectOutput(File.new(build_out))
@@ -120,11 +120,11 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
 ## the whole unit of file work anyway.
 pub fn check(code: String) -> Outcome !io = with_fs_real(() => {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  let dir = "${temp_root()}/dawn-play-$id"
-  let src = "$dir/prog.dawn"
-  let jar = "$dir/prog.jar"
+  let dir = "${temp_root()}/dawn-play-${id}"
+  let src = "${dir}/prog.dawn"
+  let jar = "${dir}/prog.jar"
   let outcome = match io.write_file(src, code) {
-    Err(e) -> CompileError("cannot stage source: $e")
+    Err(e) -> CompileError("cannot stage source: ${e}")
     Ok(_) -> {
       if sandbox_enabled() { make_world_writable(dir) } else { () }
       match compile_phase(dir, src, jar) {
@@ -139,12 +139,12 @@ pub fn check(code: String) -> Outcome !io = with_fs_real(() => {
 
 pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  let dir = "${temp_root()}/dawn-play-$id"
-  let src = "$dir/prog.dawn"
-  let jar = "$dir/prog.jar"
+  let dir = "${temp_root()}/dawn-play-${id}"
+  let src = "${dir}/prog.dawn"
+  let jar = "${dir}/prog.jar"
   # write_file creates parent directories as needed
   let outcome = match io.write_file(src, code) {
-    Err(e) -> CompileError("cannot stage source: $e")
+    Err(e) -> CompileError("cannot stage source: ${e}")
     Ok(_) -> {
       # Under the sandbox each phase runs as a fresh DynamicUser (a different
       # transient uid), so the per-request temp dir must be world-accessible for
@@ -156,7 +156,7 @@ pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
         Err(diags) -> CompileError(diags)
         Ok(_) -> {
           # phase 2: run the compiled jar under a wall-clock limit
-          let run_out = "$dir/run.txt"
+          let run_out = "${dir}/run.txt"
           let rp = ProcessBuilder.new(sandboxed(dir, [java_bin(), "-jar", jar]))
           rp.redirectErrorStream(true)
           rp.redirectOutput(File.new(run_out))

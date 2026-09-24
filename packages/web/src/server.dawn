@@ -86,11 +86,11 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[Bytes, HttpError] !io = {
   if limit <= 0 {
     Ok(stream.readAllBytes()!)
   } else if declared_length(ex) > limit {
-    Err(http_error(413, "request body exceeds $limit bytes"))
+    Err(http_error(413, "request body exceeds ${limit} bytes"))
   } else {
     let raw = stream.readNBytes(limit + 1)!
     if bytes.len(raw) > limit {
-      Err(http_error(413, "request body exceeds $limit bytes"))
+      Err(http_error(413, "request body exceeds ${limit} bytes"))
     } else {
       Ok(raw)
     }
@@ -199,8 +199,8 @@ fn pump_stream(s: InputStream, out: OutputStream) -> Unit !io =
     ()
   }) {
     Pumped -> ()
-    TransferFailed(m) -> println("stream body: transfer failed after commit: $m")
-    PumpPanicked(m) -> println("stream body panicked: $m")
+    TransferFailed(m) -> println("stream body: transfer failed after commit: ${m}")
+    PumpPanicked(m) -> println("stream body panicked: ${m}")
   }
 
 # Everything about to be handed to jdk.httpserver that is a header field,
@@ -258,7 +258,7 @@ fn write_response(ex: HttpExchange, response: Response) -> Unit !io = {
   let r = match response_problem(response) {
     None -> response
     Some(p) -> {
-      println("response withheld: $p")
+      println("response withheld: ${p}")
       # the rejected response may own an upstream stream, and nothing else
       # will close it
       drop_body(response.body)
@@ -585,8 +585,8 @@ fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 fn delete_quietly(path: String) -> Unit !io =
   with_fs_real(() => match delete(path) {
     Ok(Deleted) -> ()
-    Ok(NotFound) -> println("temp body file was already absent: $path")
-    Err(m) -> println("temp body file not deleted: $path (${m.message})")
+    Ok(NotFound) -> println("temp body file was already absent: ${path}")
+    Err(m) -> println("temp body file not deleted: ${path} (${m.message})")
   })
 
 ## The release for the spilled request body: a Request owns its temp file for
@@ -688,7 +688,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
       # every route, including paths nothing would match. Dispatch has already
       # run, but no handler has: the decision is only read for its tags.
       if has_dot_segment(raw_path) {
-        println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
+        println("${ex.getRequestMethod()!} ${raw_path} -> 400 (dot segment)")
         Err(http_error(400, "path contains a dot segment"))
       } else {
         # an oversized body is refused before it is read, which is the whole

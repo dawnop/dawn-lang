@@ -276,7 +276,7 @@ fn check_alias_pairs(names: List[String]) -> List[String] = {
     if is_fingerprinted(name) {
       if not list.contains(names, plain_name(name)) {
         bad = bad
-          ++ ["assets/$name: no plain-name alias — a visitor whose cached HTML "
+          ++ ["assets/${name}: no plain-name alias — a visitor whose cached HTML "
               ++ "still asks for ${plain_name(name)} gets a 404"]
       }
     } else {
@@ -288,7 +288,7 @@ fn check_alias_pairs(names: List[String]) -> List[String] = {
       }
       if not found {
         bad = bad
-          ++ ["assets/$name: shipped under its plain name only, so its URL does not "
+          ++ ["assets/${name}: shipped under its plain name only, so its URL does not "
               ++ "change when its bytes do — the `immutable` header will hold "
               ++ "returning visitors on the old copy"]
       }
@@ -299,7 +299,7 @@ fn check_alias_pairs(names: List[String]) -> List[String] = {
 
 pub fn check_assets(out: String) -> Unit !Fs !io = {
   let known = [default_code()] ++ override_codes()
-  let names = must_list("$out/assets")
+  let names = must_list("${out}/assets")
   var bad: List[String] = check_alias_pairs(names)
   var texts: List[TextDecl] = []
   var sheets = 0
@@ -313,7 +313,7 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
       ()
     } else if str.ends_with(name, ".css") {
       sheets = sheets + 1
-      let css = must_read("$out/assets/$name")
+      let css = must_read("${out}/assets/${name}")
       # A comment that ended earlier than its author thought. `*/` inside a
       # comment body is not an escape and not an error -- it just closes the
       # comment, and everything after it is read as CSS. What follows is
@@ -328,7 +328,7 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
       # in the remainder, which is what makes this one comparison enough.
       if str.contains(strip_comments(css), "*/") {
         bad = bad
-          ++ ["assets/$name: a `*/` is left over after the comments are stripped, so a "
+          ++ ["assets/${name}: a `*/` is left over after the comments are stripped, so a "
               ++ "comment ended earlier than it looks and the rules after it are being "
               ++ "read as garbage"]
       }
@@ -340,7 +340,7 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
           for code in lang_codes_in(sel) {
             if not list.contains(known, code) {
               bad = bad
-                ++ ["assets/$name: `$sel` pins lang=\"$code\", which no page of "
+                ++ ["assets/${name}: `${sel}` pins lang=\"${code}\", which no page of "
                     ++ "this site declares — the rule matches nothing"]
             }
           }
@@ -350,7 +350,7 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
           let codes = lang_codes_in(sel)
           if has_cjk(decl) && len(codes) == 0 {
             bad = bad
-              ++ ["assets/$name: `$decl` under `$sel` is not language-scoped, so it "
+              ++ ["assets/${name}: `${decl}` under `${sel}` is not language-scoped, so it "
                   ++ "puts Chinese on every page of the site, English ones included"]
           }
           if is_page_text(decl) {
@@ -362,9 +362,9 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
     } else if str.ends_with(name, ".js") || str.ends_with(name, ".mjs") {
       bundles = bundles + 1
       # A bundle both trees load has no language of its own to follow.
-      if has_han(must_read("$out/assets/$name")) {
+      if has_han(must_read("${out}/assets/${name}")) {
         bad = bad
-          ++ ["assets/$name: a bundle shared by both language trees contains Chinese "
+          ++ ["assets/${name}: a bundle shared by both language trees contains Chinese "
               ++ "text, which reaches the English pages too"]
       }
     }
@@ -381,22 +381,22 @@ pub fn check_assets(out: String) -> Unit !Fs !io = {
     for want in known {
       let wanted = if want == default_code() { "" } else { want }
       if not list.contains(codes, wanted) {
-        let which = if wanted == "" { "unscoped default" } else { "lang=\"$want\" override" }
+        let which = if wanted == "" { "unscoped default" } else { "lang=\"${want}\" override" }
         bad = bad
-          ++ ["assets/$where: `$base` sets text with `content:` but has no $which, so "
-              ++ "$want readers get another language's words"]
+          ++ ["assets/${where}: `${base}` sets text with `content:` but has no ${which}, so "
+              ++ "${want} readers get another language's words"]
       }
     }
   }
   if len(bad) > 0 {
     for b in bad {
-      println("ASSET LANG: $b")
+      println("ASSET LANG: ${b}")
     }
     panic("${len(bad)} shared-asset finding(s); see the ASSET LANG lines above")
   }
   println(
-    "  asset lang check: $contents content declaration(s) in $sheets stylesheet(s) and "
-      ++ "$bundles shared bundle(s), all follow the page language; ${len(names)} file(s) "
+    "  asset lang check: ${contents} content declaration(s) in ${sheets} stylesheet(s) and "
+      ++ "${bundles} shared bundle(s), all follow the page language; ${len(names)} file(s) "
       ++ "in assets/, each one fingerprinted and aliased")
 }
 
