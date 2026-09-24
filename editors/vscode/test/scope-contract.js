@@ -15,7 +15,7 @@ const GRAMMAR_PATH = path.join(__dirname, "../syntaxes/dawn.tmLanguage.json");
 const CORPUS_PATH = path.join(__dirname, "scope-corpus.json");
 const TOKEN_PATH = path.join(ROOT, "selfhost/src/front/token.dawn");
 const LEXER_PATH = path.join(ROOT, "selfhost/src/front/lexer.dawn");
-const CONTEXTUAL_KEYWORDS = ["opaque", "as", "derive", "handle"];
+const PARSER_PATH = path.join(ROOT, "selfhost/src/front/parser.dawn");
 const REQUIRED_DEV_DEPENDENCIES = {
   "vscode-oniguruma": "2.0.1",
   "vscode-textmate": "9.3.2"
@@ -41,6 +41,22 @@ function hardKeywords() {
   const words = entries.map(match => match[1]);
   assert.equal(new Set(words).size, words.length, "compiler keyword table contains duplicates");
   return words;
+}
+
+// The contextual keywords are the words the parser recognises by their text:
+// every one of them goes through `is_word(p, st, ahead, "<word>")`, so that
+// call site is the inventory. This list used to be a constant here, compared
+// against the grammar's own copy -- two hand-written lists agreeing with each
+// other, which could not notice `ctl` and `resume` joining the parser
+// (SYN-N01). Reading the parser makes a new contextual keyword red here until
+// the grammar highlights it.
+function contextualKeywords() {
+  const source = fs.readFileSync(PARSER_PATH, "utf8");
+  assert.ok(/^fn is_word\(/m.test(source), "parser has no is_word helper to read contextual keywords from");
+  const words = [...source.matchAll(/\bis_word\(p, [^,]+, \d+, "([a-z_]+)"\)/g)]
+    .map(match => match[1]);
+  assert.ok(words.length > 0, "no contextual keyword was read from the parser");
+  return [...new Set(words)];
 }
 
 function compilerOperators() {
@@ -245,11 +261,12 @@ function verifyHardKeywordInventory(rawGrammar, compilerWords) {
   }
 }
 
-function verifyContextualInventory(rawGrammar) {
+function verifyContextualInventory(rawGrammar, compilerWords) {
+  const CONTEXTUAL_KEYWORDS = compilerWords;
   assert.deepEqual(
-    rawGrammar["x-dawn-contextual-keywords"],
-    CONTEXTUAL_KEYWORDS,
-    "contextual keyword inventory must remain exact"
+    sorted(rawGrammar["x-dawn-contextual-keywords"]),
+    sorted(CONTEXTUAL_KEYWORDS),
+    "contextual keyword inventory differs from the parser's is_word sites"
   );
   const patterns = rawGrammar.repository.contextualKeywords.patterns;
   const words = patterns.map(pattern => pattern["x-dawn-word"]);
@@ -313,10 +330,19 @@ async function validate(rawGrammar) {
     );
     assertions += 1;
   }
-  const javaTokens = tokenize(grammar, "java");
-  const javaScopes = scopesForSpan(javaTokens.tokenLines[0], { start: 0, end: 4 });
-  assert.ok(javaScopes.includes("keyword.declaration.dawn"), "java must remain a hard keyword");
-  assertions += 1;
+  // A contextual keyword standing alone is a name: no hard-keyword scope, and no
+  // contextual scope either, because no context was given.
+  const contextual = contextualKeywords();
+  for (const word of contextual) {
+    const tokenized = tokenize(grammar, `let x = ${word}`);
+    const start = 8;
+    const scopes = scopesForSpan(tokenized.tokenLines[0], { start, end: start + word.length });
+    assert.ok(
+      !scopes.some(isHardKeywordScope),
+      `contextual keyword ${word} is highlighted as a keyword outside its context: ${scopes.join(", ")}`
+    );
+    assertions += 1;
+  }
 
   const operators = compilerOperators();
   for (const operator of operators) {
@@ -330,13 +356,13 @@ async function validate(rawGrammar) {
   }
 
   verifyHardKeywordInventory(rawGrammar, keywords);
-  verifyContextualInventory(rawGrammar);
+  verifyContextualInventory(rawGrammar, contextual);
   assertions += verifyOperatorInventory(rawGrammar, operators);
   return {
     cases: corpus.cases.length,
     assertions,
     keywords: keywords.length,
-    contextual: CONTEXTUAL_KEYWORDS.length,
+    contextual: contextual.length,
     operators: operators.length
   };
 }
@@ -384,7 +410,7 @@ async function negativeControls(grammar) {
     }],
     ["hard keyword addition", candidate => {
       const pattern = candidate.repository.hardKeywords.patterns[1];
-      const changed = pattern.match.replace("|test)", "|test|bogus)");
+      const changed = pattern.match.replace("|effect)", "|effect|bogus)");
       assert.notEqual(changed, pattern.match, "hard keyword addition mutation did not apply");
       pattern.match = changed;
     }],

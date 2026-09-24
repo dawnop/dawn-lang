@@ -103,9 +103,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（87）
+#### 当前 fixed（88）
 
-- 语法（18）：`SYN-01`–`SYN-16`、`SYN-18`、`SYN-19`。
+- 语法（19）：`SYN-01`–`SYN-19`。
 - 语义（14）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-10`–`SEM-18`。
 - 架构（7）：`ARC-03`–`ARC-06`、`ARC-09`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
@@ -118,9 +118,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
 - 库（1）：`LIB-16`。
 
-#### 当前 open（4）
+#### 当前 open（3）
 
-- 语法（1）：`SYN-17`。
 - 语义（1）：`SEM-09`。
 - 架构（2）：`ARC-07`、`ARC-10`。
 
@@ -128,8 +127,8 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**87 fixed + 6 partial + 4 open + 2 retracted = 99**。逐专题矩阵：
-语法 **18/0/1/0**、语义 **14/1/1/2**、架构 **7/4/2/0**、工具链 **17/0/0/0**、
+当前计数自检：**88 fixed + 6 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
+语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **7/4/2/0**、工具链 **17/0/0/0**、
 库 **18/1/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
@@ -417,7 +416,7 @@ comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义�
    货币」，而是「要不要先把货币焊成不可观察的」**——`Data.Text` 换过货币、公开 API 零破坏，
    靠的就是从不暴露位置。明细与三路调研见语义册的 `SEM-04`。
 4. **低耦合自治批：** `SYN-11`、B200-1B 后续、`SYN-09`、`SYN-05`、`SEM-07` 与
-   `SYN-13` 均已关账；`SYN-17` 只留在 D/P3 关键字预算设计队列。
+   `SYN-13` 均已关账；`SYN-17` 由语法破坏性窗口（裁决 2，`docs/syntax-window-design.md` §1）关账。
 5. **类型化阶段产品：** `ARC-07` 后接 `ARC-08`，再以稳定 lowered identity 推进
    `ARC-11B`；不把 `ARC-09/10` 的 HOLD 项混入自治队列。`ARC-12` 已单独收口
    （模块级 `LowerCache` + 贯穿的 lifted-lambda 计数器），它给 `ARC-11B` 提供的是

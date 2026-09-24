@@ -18,9 +18,9 @@ use std/list
 use front/token.{
   Token, TokKind, Seg, SText, SCode, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
-  FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL, EFFECT,
-  MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
-  COMPTIME, TEST, ASSERT, WITH, TRUE, FALSE, NOT,
+  FN, LET, VAR, TYPE, ALIAS, CONST, USE, PUB, TRAIT, IMPL, EFFECT,
+  MATCH, IF, ELSE, FOR, WHILE, RETURN, BREAK, CONTINUE,
+  COMPTIME, TRUE, FALSE, NOT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -102,6 +102,15 @@ fn kind_of(p: P, st: St) -> TokKind = cur(p, st).kind
 fn kind_ahead(p: P, st: St, ahead: Int) -> TokKind = tok_at(p, st.pos, ahead).kind
 
 fn at_kind(p: P, st: St, k: TokKind) -> Bool = kind_of(p, st) == k
+
+## A contextual keyword: the identifier `w`, `ahead` tokens from the cursor.
+## Every word the parser recognises by its text rather than by its kind goes
+## through here, so the inventory (spec §1.4) is the set of literal words passed
+## to it, and the editor grammar and doc-check read it off this file.
+fn is_word(p: P, st: St, ahead: Int, w: String) -> Bool = {
+  let t = tok_at(p, st.pos, ahead)
+  t.kind == IDENT && t.text == w
+}
 
 fn adv(p: P, st: St) -> (St, Token) = {
   let t = p.toks[st.pos]
@@ -220,7 +229,7 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
     # restriction being attempted -- nothing else may follow `pub` -- and it
     # is told which one Dawn has rather than being read as a declaration.
     if at_kind(p, st0, LPAREN) {
-      let names_pkg = kind_ahead(p, st0, 1) == IDENT && tok_at(p, st0.pos, 1).text == "pkg"
+      let names_pkg = is_word(p, st0, 1, "pkg")
       if names_pkg && kind_ahead(p, st0, 2) == RPAREN {
         st0 = adv1(p, adv1(p, adv1(p, st0)))
         vis = VisPkg
@@ -230,6 +239,9 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
     }
   }
   let k = kind_of(p, st0)
+  # `test` is contextual: at the head of a top-level declaration an identifier
+  # has no other reading, so the word itself decides and `test_decl` reports a
+  # missing name string precisely. Everywhere else it is an ordinary name.
   let kind: Option[TopDeclKind] =
     if k == FN { Some(HFn) }
     else if k == TYPE { Some(HType) }
@@ -239,11 +251,11 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
     else if k == IMPL { Some(HImpl) }
     else if k == EFFECT { Some(HEffect) }
     else if k == USE { Some(HUse) }
-    else if k == TEST { Some(HTest) }
-    else if k == IDENT && cur(p, st0).text == "opaque" {
+    else if is_word(p, st0, 0, "test") { Some(HTest) }
+    else if is_word(p, st0, 0, "opaque") {
       if kind_ahead(p, st0, 1) == TYPE { Some(HOpaqueType) } else { Some(HBadOpaque) }
     }
-    else if k == IDENT && cur(p, st0).text == "ctl" {
+    else if is_word(p, st0, 0, "ctl") {
       # `ctl` sits where `opaque` sits -- after `pub`, before the keyword it
       # modifies -- because that is how `pub` composes with a contextual
       # modifier today (`pub opaque type`), and effects gain nothing from a
@@ -333,7 +345,14 @@ fn top_decl(p: P, st: St) -> PR[Decl] =
 
 fn use_decl(p: P, st: St) -> PR[Decl] = {
   let (st1, kw) = adv(p, st)
-  if at_kind(p, st1, JAVA) { java_use(p, st1, kw) } else { module_use(p, st1, kw) }
+  # `java` is contextual: `use java "a.B"` imports a class, and only the class
+  # name string after it makes it one, so a module path starting `java/` and a
+  # module named `java` stay ordinary paths.
+  if is_word(p, st1, 0, "java") && kind_ahead(p, st1, 1) == STRING {
+    java_use(p, st1, kw)
+  } else {
+    module_use(p, st1, kw)
+  }
 }
 
 fn java_use(p: P, st: St, kw: Token) -> PR[Decl] = {
@@ -395,8 +414,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
   if not at_kind(p, st2, DOT) {
     # optional `use a/b/c as name` rename (`as` is a contextual keyword — it is
     # only special right after a whole-module path, never reserved)
-    let t = cur(p, st2)
-    if t.kind == IDENT && t.text == "as" {
+    if is_word(p, st2, 0, "as") {
       let (st_al, an) = want(p, adv1(p, st2), IDENT, "an alias name after `as`")?
       let als = ImportName { name: an.text, lo: an.lo, hi: an.hi, local: None }
       return Ok((st_al, DUseModule(segs, None, Some(als), kw.lo, an.hi, nlo, nhi)))
@@ -419,8 +437,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     # turn a function's spelling into a constructor's or back.
     var local: Option[ImportRename] = None
     var st8b = st8
-    let t_as = cur(p, st8)
-    if t_as.kind == IDENT && t_as.text == "as" {
+    if is_word(p, st8, 0, "as") {
       let st_l = adv1(p, st8)
       let kind_word = if k == IDENT { "a lowercase name" } else { "an uppercase name" }
       let (st_r, r) = want(p, st_l, k, kind_word ++ " after `as` (a rename keeps the case of `" ++
@@ -687,8 +704,8 @@ fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
 fn parse_derives(p: P, st: St) -> PR[List[Bound]] = {
   var look = st.pos
   while p.toks[look].kind == NEWLINE { look = look + 1 }
-  let lt = p.toks[look]
-  if not (lt.kind == IDENT && lt.text == "derive") {
+  let at_look = St { ..st, pos: look }
+  if not is_word(p, at_look, 0, "derive") {
     let none: List[Bound] = []
     return Ok((st, none))
   }
@@ -1481,7 +1498,10 @@ fn statement(p: P, st: St) -> PR[Stmt] = {
     while_stmt(p, st)
   } else if k == FOR {
     for_stmt(p, st)
-  } else if k == ASSERT {
+  } else if is_word(p, st, 0, "assert") && starts_expr(kind_ahead(p, st, 1)) {
+    # `assert` is contextual: it opens an assertion only when an expression
+    # follows it, which as a plain name it never legally could (two operands
+    # side by side). `assert = 1`, `assert.x` and a bare `assert` are names.
     assert_stmt(p, st)
   } else if k == IDENT {
     # assignment: IDENT = ... (as opposed to == comparison)
@@ -1613,7 +1633,11 @@ fn no_lambda_header(p: P, st: St, cond: Expr, kw: String) -> Result[Unit, (St, D
 fn for_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   let (st2, pat) = pattern_p(p, st1)?
-  let (st3, _) = want(p, st2, IN, "`in`")?
+  # `in` is contextual: it is read here, after the loop pattern, and nowhere else
+  if not is_word(p, st2, 0, "in") {
+    return Err((st2, perr(p, st2, "expected `in`")))
+  }
+  let st3 = adv1(p, st2)
   let (st4, from) = expression(p, st3, true)?
   var to: Option[Expr] = None
   var st5 = st4
@@ -1625,6 +1649,30 @@ fn for_stmt(p: P, st: St) -> PR[Stmt] = {
   }
   let (st8, body) = block_expr(p, st5)?
   Ok((st8, SFor(pat, from, to, body, kw.lo, e_hi(body))))
+}
+
+## Whether a token of this kind can begin an expression: what `assert` must be
+## followed by to open an assertion (see `statement`). A binary operator, `=`,
+## `.`, a closer or a line end cannot, so `assert` before one of those is the
+## plain name it spells.
+fn starts_expr(k: TokKind) -> Bool =
+  k == INT || k == CHAR || k == FLOAT || k == STRING || k == IDENT || k == TYPEIDENT ||
+  k == TRUE || k == FALSE || k == NOT || k == MINUS || k == TILDE || k == LPAREN ||
+  k == LBRACKET || k == LBRACE || k == IF || k == MATCH || k == RETURN || k == BREAK ||
+  k == CONTINUE || k == COMPTIME
+
+## Whether the cursor stands on a `with` statement. `with` is contextual: the
+## statement form always puts a name right after it (`with x <- f()`,
+## `with handle E { ... }`), and a plain name followed by another name is never
+## a legal expression, so that pair is the whole test. `with(x)` and
+## `with = 1` keep `with` an ordinary identifier. `_`, an uppercase word and
+## `<-` are admitted too -- `<-` exists only in this statement -- so
+## `with _ <- f()`, `with Ask { ... }` and `with <- f()` still reach the
+## statement's own diagnostics instead of a generic "expected a newline".
+fn starts_with_stmt(p: P, st: St) -> Bool = {
+  let k1 = kind_ahead(p, st, 1)
+  is_word(p, st, 0, "with") &&
+    (k1 == IDENT || k1 == UNDERSCORE || k1 == TYPEIDENT || k1 == LARROW)
 }
 
 fn expr_stmt(p: P, st: St) -> PR[Stmt] = {
@@ -2078,7 +2126,12 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   } else if k == IDENT {
     # `x => e`: one token of lookahead past a name. Nothing else in the grammar
     # puts `=>` after a bare identifier, so no backtracking is needed.
-    if kind_ahead(p, st, 1) == FATARROW {
+    if starts_with_stmt(p, st) {
+      # `with` is a statement, not an expression: it needs a rest-of-block to
+      # turn into a closure, and only a block has one (spec §4.10).
+      Err((st, perr_h(p, st, "`with` is a statement and needs an enclosing block",
+        "wrap the body in braces: fn f() = { with x <- g(...) ... }")))
+    } else if kind_ahead(p, st, 1) == FATARROW {
       bare_lambda1(p, st, nb)
     } else {
       let (st1, name) = adv(p, st)
@@ -2118,11 +2171,6 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     Ok((st2, EComptime(b, t.lo, e_hi(b))))
   } else if k == TYPEIDENT {
     ctor_expr(p, st, nb)
-  } else if k == WITH {
-    # `with` is a statement, not an expression: it needs a rest-of-block to turn
-    # into a closure, and only a block has one (spec §4.10).
-    Err((st, perr_h(p, st, "`with` is a statement and needs an enclosing block",
-      "wrap the body in braces: fn f() = { with x <- g(...) ... }")))
   } else if k == DOTDOT {
     # `..` never starts an expression: each of its roles is a position, and
     # naming them is the whole diagnostic. The list-element spread is the one
@@ -2549,7 +2597,7 @@ fn block_body(
   var with_tail: Option[Expr] = None
   var done = false
   while not done && not at_kind(p, st1, RBRACE) && not at_kind(p, st1, EOF) {
-    if at_kind(p, st1, WITH) {
+    if starts_with_stmt(p, st1) {
       match with_stmt(p, st1) {
         Ok(r) -> {
           let (st2, e) = r
@@ -2611,7 +2659,7 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   # `handle` is contextual, never reserved: it is the handler clause only when
   # what follows is not the binder arrow. `with handle <- f()` stays a binding
   # named `handle`, which is what keeps every existing `fn handle` compiling.
-  if at_kind(p, st1, IDENT) && cur(p, st1).text == "handle" && kind_ahead(p, st1, 1) != LARROW {
+  if is_word(p, st1, 0, "handle") && kind_ahead(p, st1, 1) != LARROW {
     return handle_stmt(p, adv1(p, st1), kw)
   }
   # a plain name, like a lambda parameter -- which is what it becomes. `_` is
@@ -2789,7 +2837,7 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
   # always point somewhere inside this arm
   var blo = name.lo
   var bhi = name.hi
-  if at_kind(p, st2, IDENT) && cur(p, st2).text == "resume" {
+  if is_word(p, st2, 0, "resume") {
     let kw = cur(p, st2)
     let (st_k, k) = want(p, adv1(p, st2), IDENT,
       "a name for the continuation (`op(a) resume k => ...`)")?

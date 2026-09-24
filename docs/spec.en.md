@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 50c3c1442211a694 -->
+<!-- doc-check: translation-of docs/spec.md @ c91221785e01eb67 -->
 
 # Dawn Language Specification
 
@@ -66,19 +66,44 @@ values use `lower_snake_case` (`[a-z][a-z0-9_]*`), types use `UpperCamelCase`
 ### 1.4 Keywords
 
 ```
-fn let var type alias const use java pub
-match if else for in while with
+fn let var type alias const use pub
+match if else for while
 return break continue
-comptime test assert
+comptime
 trait impl effect
 true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are five further **contextual keywords**, which remain ordinary identifiers elsewhere:
-`derive` (only at the tail of a `type` declaration), `as` (only in the renaming position of `use`,
-§10.2), `handle` (after `with`, when the next token is not `<-`, §6.5), `opaque` (only directly
-before `type`, where it introduces an opaque type, §2.7), and `pkg` (only after `pub(`, §10.4).
+There are twelve further **contextual keywords**. Each has a special meaning in exactly one
+syntactic position and remains an ordinary identifier everywhere else (`let in = 1` and a field
+named `test` are both legal):
+
+| Word | Its one syntactic position |
+|---|---|
+| `java` | `use java "a.B"`: after `use`, followed by a class-name string (§9.1) |
+| `test` | at the head of a top-level declaration: `test "name" { … }` (§3.4) |
+| `assert` | at the start of a statement, followed by an expression (§3.4); in `assert = 1` and `assert.x` it is a name |
+| `with` | at the start of a statement, followed by a name or `<-` (§4.10) |
+| `in` | in a `for` header, after the pattern (§4.7) |
+| `derive` | at the tail of a `type` declaration (§3.5) |
+| `as` | in the renaming position of `use` (§10.2) |
+| `handle` | after `with`, when the next token is not `<-` (§6.5) |
+| `opaque` | directly before `type`, introducing an opaque type (§2.7) |
+| `ctl` | directly before `effect`, declaring a suspendable effect (§6.5) |
+| `resume` | after a handler arm's parameter list: `op(a) resume k => …` (§6.5) |
+| `pkg` | only after `pub(`: `pub(pkg)` (§10.4) |
+
+The statement-start tests are "what a plain name could never legally be followed by": a name
+directly followed by an expression or by another name is never a legal program, so giving those
+sequences to the keyword takes no legal spelling away. The one cost is that a function named
+`assert` cannot be called as `assert(x)` at the start of a statement (that is an assertion).
+
+Both lists are reconciled by machine: the hard keywords are the `keyword` table in
+`selfhost/src/front/token.dawn`, and the contextual keywords are the `is_word(…, "<word>")` sites
+in `selfhost/src/front/parser.dawn`. `scripts/doc-check.py` and the editor grammar's contract test
+(`editors/vscode/test/scope-contract.js`) both read those two places, so a word missing from this
+section or from the grammar file is red.
 
 **Symbol tokens take the longest match** (as with `>>>`/`>=`/`->`/`|>`). The binding arrow `<-` of
 the `with` statement (§4.10) follows the same rule: `a<-b` reads as `a <- b`, not `a < (-b)`. The

@@ -56,18 +56,39 @@
 ### 1.4 关键字
 
 ```
-fn let var type alias const use java pub
-match if else for in while with
+fn let var type alias const use pub
+match if else for while
 return break continue
-comptime test assert
+comptime
 trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有五个，
-它们在别处仍是普通标识符：`derive`（只出现在 `type` 声明尾部）、`as`（只出现在
-`use` 的重命名位，§10.2）、`handle`（`with` 之后且下一个 token 不是 `<-` 时，§6.5）、
-`opaque`（只在紧接 `type` 时引入不透明类型，§2.7）、`pkg`（只在 `pub(` 之后，§10.4）。
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十二个，
+它们只在各自唯一的语法位置有特殊含义，在别处仍是普通标识符（`let in = 1`、字段名 `test` 都合法）：
+
+| 词 | 唯一的语法位置 |
+|---|---|
+| `java` | `use java "a.B"`：`use` 之后且后面跟类名字符串（§9.1） |
+| `test` | 顶层声明首：`test "名字" { … }`（§3.4） |
+| `assert` | 语句首且后面跟一个表达式（§3.4）；`assert = 1`、`assert.x` 里是名字 |
+| `with` | 语句首且后面跟一个名字或 `<-`（§4.10） |
+| `in` | `for` 头里 pattern 之后（§4.7） |
+| `derive` | `type` 声明尾部（§3.5） |
+| `as` | `use` 的重命名位（§10.2） |
+| `handle` | `with` 之后且下一个 token 不是 `<-`（§6.5） |
+| `opaque` | 紧接 `type`，引入不透明类型（§2.7） |
+| `ctl` | 紧接 `effect`，声明可挂起的效果（§6.5） |
+| `resume` | handler 臂的参数表之后：`op(a) resume k => …`（§6.5） |
+| `pkg` | 只在 `pub(` 之后：`pub(pkg)`（§10.4） |
+
+语句首的判据取「作为普通名字它后面不可能合法地跟什么」：名字后面紧跟一个表达式或另一个名字
+从来不是合法程序，所以把这种串分给关键字不夺走任何合法写法。唯一的代价是：名叫 `assert` 的
+函数不能在语句首写成 `assert(x)` 调用（那是断言）。
+
+上面两份清单由机器对账：硬关键字即 `selfhost/src/front/token.dawn` 的 `keyword` 表，上下文关键字即
+`selfhost/src/front/parser.dawn` 里 `is_word(…, "<词>")` 的判定点；`scripts/doc-check.py` 与编辑器语法的
+契约测试（`editors/vscode/test/scope-contract.js`）都从这两处读，本节或语法文件漏一个就红。
 
 **符号 token 取最长匹配**（同 `>>>`/`>=`/`->`/`|>`）。`with` 语句的绑定箭头
 `<-`（§4.10）也照这条：`a<-b` 读作 `a <- b`，不是 `a < (-b)`。写了空格的

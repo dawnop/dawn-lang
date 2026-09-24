@@ -1697,3 +1697,28 @@ test "a projection's subject is a bare name; an applied head is refused" {
   let (_, ds) = parse_module("fn f[C: Iter](c: C) -> List[Int].Item = panic(\"x\")")
   assert str.contains(ds[0].msg, "bare type parameter")
 }
+
+test "java test assert with in are contextual keywords" {
+  # names everywhere outside their one position (spec §1.4)
+  for src in [
+    "type R = { java: Int, test: Int, assert: Int, with: Int, in: Int }",
+    "fn f(in: Int) -> Int = { let test = in\n  var assert = test\n  assert = 1\n  assert + with(in) }",
+    "fn java() -> Int = 1",
+    "use java/io",
+  ] {
+    let (_, ds) = parse_module(src)
+    assert ds == []
+  }
+  # and keywords in it
+  let out = rendered("use java \"java.util.ArrayList\"\ntest \"t\" {\n  assert 1 == 1\n  for x in xs { () }\n}")
+  assert str.contains(out, "UseJava ")
+  assert str.contains(out, "Test ")
+  assert str.contains(out, "Assert")
+  assert str.contains(out, "For")
+  let out2 = rendered("fn f() -> Unit = {\n  with x <- g()\n  h(x)\n}")
+  assert str.contains(out2, "Lambda")
+  # an assertion needs an expression after the word; `assert(x)` stays one
+  let (m, ds) = parse_module("fn f() -> Unit = {\n  assert(true)\n}")
+  assert ds == []
+  assert str.contains(rendered("fn f() -> Unit = {\n  assert(true)\n}"), "Assert")
+}
