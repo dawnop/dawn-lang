@@ -1,7 +1,7 @@
 # Opt-in prepared LSP ownership controls
 
 `python3 scripts/lsp-workspace-contract/prepared-lifecycle.py` runs the full
-660-test server closure once unchanged, then once for each of seven isolated
+663-test server closure once unchanged, then once for each of seven isolated
 production mutations. Set `DAWN_BIN` to a current compiler launcher and use
 JDK 21 for both `JAVA_HOME` and `PATH`. The subjects live in a temporary copy;
 the repository source and every inline assertion remain unchanged.
