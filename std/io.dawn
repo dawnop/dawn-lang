@@ -450,7 +450,7 @@ pub effect Fs {
 ## This is the production handler: a program's `main` (or the innermost
 ## boundary that owns a whole unit of file work) installs it once, and
 ## everything beneath sees `Fs`. A test installs arms of its own instead.
-pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
+pub fn with_fs_real[T, !e](body: fn() -> T !Fs !e) -> T !io = {
   with handle Fs {
     fs_is_dir(path) => io_is_dir(path)
     fs_exists(path) => io_exists(path)
@@ -500,12 +500,12 @@ pub fn with_fs_real[T](body: fn() -> T !Fs !io) -> T !io = {
 # `posix_spawn` directly. Nothing on that path passes through an arm here.
 #
 # The wrapper's body row is `!e` rather than a closed `!(Proc | io)`, and that
-# is not decoration. A closed row can only be the outermost wrapper:
-# `with_fs_real`'s is closed, so `with_proc_real(() => with_fs_real(...))` does
-# not check, and with a closed row here neither would the order that does. The
-# first test below is that claim, made machine-checked. A new wrapper in this
-# module takes `!e`; `with_fs_real` keeps the closed row it has until something
-# needs to sit outside it, because widening it costs a release.
+# is not decoration. A closed row can only be the outermost wrapper: with one,
+# `with_proc_real(() => with_fs_real(...))` would check in one nesting order
+# and not the other. The first test below is that claim, made machine-checked.
+# Every production handler here takes `!e`, `with_fs_real` included since
+# 2026-09-24 (SPC-05): an old caller's body row `!Fs !io` still checks,
+# with `e := io`, so widening it cost the seed nothing.
 #
 # As with `Fs`, the declaration shipped one release before anything moved onto
 # it (docs/bootstrap.md, the seed feature discipline). `run` is that caller
