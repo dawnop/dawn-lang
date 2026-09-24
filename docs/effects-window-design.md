@@ -1,6 +1,6 @@
 # 效果窗口：环境效果、效果限定与改名、`catch_panic` 的行、`unsafe_pure` 删除、`main` 只在入口
 
-> 状态：**current**（已落地于分支 `fix/effects-window`，基线 `b2e19e06`，落地记录在文末）。依据是
+> 状态：**current**（已落地于分支 `fix/effects-window`，基线 `b2e19e06`，后 rebase 到 main `15f62267`（#216、#218 合入后）；落地记录在文末）。依据是
 > `agent-handoff/rulings-20260924.md` 的裁决 4、5，以及协调者 2026-09-24 对改名范围的追加裁决（通用改名，见 §3）。
 > 外部先例调研（带出处）在 `agent-handoff/research-effects-window-20260924.md`，本文只摘结论。
 > 调研原文：`agent-handoff/debt-survey-2026-09-07/02-semantics.md` 的 SPC-02/04/05/06/07/14/22，
@@ -301,16 +301,16 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 
 | 节 | 提交 | 负控（先证明会红） |
 |---|---|---|
-| 0 设计 | `22acaa8b` | — |
-| 1 ARCH-N13 | `5dc70e2b` | 静态：`rtclasses` 的 test 读 rtsrc，旧文案在即红 |
-| 2 SPC-07 | `585cddca` | `resolve_eff_at` 查类型三读改成 `None` → `effect_atom_table` 前三行变成 `unknown effect` |
-| 3 SPC-06 id 成员 | `08426888` | `effect_name_clash`：两库同名效果裸引入仍是冲突 |
-| 3 SPC-06 函数/常量 | `a396bc6a` | `spike-native/import_rename` 两后端跑通调用、默认实参、函数值、常量 |
-| 4 SPC-22 | `54fd4c79` | 表项放回 `eff: EIo` → `catch_effects` 多出三条诊断 |
-| 5 SPC-05 | `4edaab14` | `spike-native/fs_real_polymorphic`（旧签名下 `!Fs !Log` 被拒） |
-| 6 裁决 5 | `c9d71030` | std 里写 `unsafe_pure { 1 }` → std 不加载 |
-| 7 SPC-04 | `0dd9edf4` | 入口判断改 `if false` → `main_entry_only` 的库模块多两条 |
-| Core golden | `6514ce58` | — |
+| 0 设计 | `806d0729` | — |
+| 1 ARCH-N13 | `3ca0e35e` | 静态：`rtclasses` 的 test 读 rtsrc，旧文案在即红 |
+| 2 SPC-07 | `a33d1ac6` | `resolve_eff_at` 查类型三读改成 `None` → `effect_atom_table` 前三行变成 `unknown effect` |
+| 3 SPC-06 id 成员 | `3c0ea304` | `effect_name_clash`：两库同名效果裸引入仍是冲突 |
+| 3 SPC-06 函数/常量 | `1b2b997c` | `spike-native/import_rename` 两后端跑通调用、默认实参、函数值、常量 |
+| 4 SPC-22 | `c185f351` | 表项放回 `eff: EIo` → `catch_effects` 多出三条诊断 |
+| 5 SPC-05 | `2e6995ff` | `spike-native/fs_real_polymorphic`（旧签名下 `!Fs !Log` 被拒） |
+| 6 裁决 5 | `50ab34c3` | std 里写 `unsafe_pure { 1 }` → std 不加载 |
+| 7 SPC-04 | `7aeb3f22` | 入口判断改 `if false` → `main_entry_only` 的库模块多两条 |
+| Core golden | `e37913f8` | — |
 
 实现中的偏离：`ambient_effects()` 是函数而非常量；route C 与 `unsafe_pure` 同一提交（理由见 §6）；
 spec §6.4 留墓碑而非删节；§6.1 的「环境效果」是小节而非新节号。`selfhost/src` 里因 `catch_panic` 而带 `!io`
