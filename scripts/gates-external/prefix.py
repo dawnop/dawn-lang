@@ -331,7 +331,7 @@ def writable_paths(prefix, sha):
     """What a job may write: everything else in the prefix stays root's.
 
     toolchain/ and inputs/ are not in the list, so a job cannot change the
-    toolchain it is measured with; jobs/<sha>/tree is crun's mirror of the
+    toolchain it is measured with; jobs/<sha>/tree-<tools> is crun's mirror of the
     staging directory and is only read.
     """
     prefix = Path(prefix)
