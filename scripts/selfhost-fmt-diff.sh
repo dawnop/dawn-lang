@@ -87,8 +87,17 @@ if [ "$k_status" -ne "$d_status" ]; then
   exit 1
 fi
 
-sed "s|$OUT/k/|<corpus>/|g" "$OUT/k.log" > "$OUT/k.log.norm"
-sed "s|$OUT/d/|<corpus>/|g" "$OUT/d.log" > "$OUT/d.log.norm"
+# What each formatter *says* must agree, except for the one line that only
+# restates the bytes: `formatted <file>` is printed exactly when the output
+# differs from the input, so which files each side rewrote is already in the
+# tree comparison below -- where a declared `Emit-Change(fmt)` can answer for
+# it. Compared here as well, a formatter change that the previous release
+# would undo on already-formatted files (the syntax window's line-leading `|`
+# and trailing-`|` rules did) could never be declared: this check ran first
+# and failed without consulting the declaration. Diagnostics and every other
+# line stay strict.
+sed "s|$OUT/k/|<corpus>/|g" "$OUT/k.log" | grep -v '^formatted <corpus>/' > "$OUT/k.log.norm" || true
+sed "s|$OUT/d/|<corpus>/|g" "$OUT/d.log" | grep -v '^formatted <corpus>/' > "$OUT/d.log.norm" || true
 if ! diff "$OUT/k.log.norm" "$OUT/d.log.norm" > "$OUT/log-diff.txt"; then
   echo "FAIL: $TAG and $SELF disagree on what they say about the corpus" >&2
   head -40 "$OUT/log-diff.txt" >&2
