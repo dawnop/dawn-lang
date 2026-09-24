@@ -22,10 +22,11 @@ use front/ast.{
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
-  Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList, PatArg, MatchArm,
+  Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList, PatArg,
+  MatchArm,
   Arg, pos_arg, arg_exprs, first_named,
   SPText, SPInterp, EFloat, EStr, EUnit, EBreak, EContinue, pat_lo, pat_hi, e_lo, e_hi,
-  EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
+  EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, ERecord, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
   EComptime, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
@@ -433,8 +434,7 @@ test "evidence reads preserve distinct origins behind the same runtime key" {
 fn qual_const_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(String, Ty)]) = {
   let alias_name = match target {
     # a bare lowercase name parses as a nullary constructor spelling
-    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return (cx, None) } else { cn }
+    ECtor(cn, _, _) -> cn
     EVar(n, _, _) -> n
     _ -> return (cx, None)
   }
@@ -564,8 +564,7 @@ fn export_presence_read(cx: Cx, q: String) -> (Cx, Bool) = {
 ## under `fname`, or None (LANG-06).
 fn qual_ctor_read(cx: Cx, target: Expr, fname: String) -> (Cx, Option[(Int, Int)]) = {
   let alias_name = match target {
-    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return (cx, None) } else { cn }
+    ECtor(cn, _, _) -> cn
     EVar(n, _, _) -> n
     _ -> return (cx, None)
   }
@@ -612,8 +611,7 @@ fn module_fn_read(cx: Cx, qualifier: String, name: String) -> (Cx, Option[Sig]) 
 
 fn module_alias_receiver_read(cx: Cx, recv: Expr) -> (Cx, Bool) = {
   let alias_name = match recv {
-    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if hp || len(cargs) > 0 || sp != None { return (cx, false) } else { cn }
+    ECtor(cn, _, _) -> cn
     EVar(n, _, _) -> n
     _ -> return (cx, false)
   }
@@ -629,7 +627,7 @@ fn qual_fn_read(cx: Cx, target: Expr, name: String) -> (Cx, Option[Sig]) = {
   if not is_alias { return (next, None) }
   let alias_name = match target {
     EVar(n, _, _) -> n
-    ECtor(n, _, _, _, _, _, _, _) -> n
+    ECtor(n, _, _) -> n
     _ -> return (next, None)
   }
   module_fn_read(next, alias_name, name)
@@ -3772,13 +3770,8 @@ pub fn binds_anything(p: Pattern) -> Bool =
       }
       false
     }
-    PCtor(_, pargs, _, _, _, _, _, _) -> {
-      for a in pargs {
-        if binds_anything(a.pat) { return true }
-      }
-      false
-    }
-    PQual(_, _, pargs, _, _, _, _, _, _) -> {
+    PCtor(_, pargs, _, _, _, _, _) | PRecord(_, pargs, _, _, _, _, _) |
+    PQual(_, _, pargs, _, _, _, _, _) | PQualRecord(_, _, pargs, _, _, _, _, _) -> {
       for a in pargs {
         if binds_anything(a.pat) { return true }
       }
@@ -3829,7 +3822,7 @@ fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
     PList(pre, has_rest, _, _, post, lo, hi) ->
       # only [..rest] matches every list; any fixed element constrains the length
       (cx, if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) })
-    PCtor(cname, pargs, _, _, _, _, lo, hi) -> {
+    PCtor(cname, pargs, _, _, _, lo, hi) | PRecord(cname, pargs, _, _, _, lo, hi) -> {
       let (name_cx, constructor) = local_constructor_read(cx, cname)
       var next = name_cx
       match constructor {
@@ -3851,7 +3844,7 @@ fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
       }
       (next, None)
     }
-    PQual(q, cname, pargs, _, _, _, _, lo, hi) -> {
+    PQual(q, cname, pargs, _, _, _, lo, hi) | PQualRecord(q, cname, pargs, _, _, _, lo, hi) -> {
       let (start, key_answer) = qual_ctor_key_read(cx, q, cname)
       var next = start
       match key_answer {
@@ -3976,52 +3969,76 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
       }
       (cx1, TPList(pres, has_rest, rest_sym, posts))
     }
-    PCtor(cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) ->
-      check_ctor_pattern(cx, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi, scrut, mutable)
-    PQual(q, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) -> {
-      let (presence_cx, _) = export_presence_read(cx, q)
-      match map.get(presence_cx.module_exports, q) {
+    PCtor(cname, pargs, has_rest, nlo, nhi, lo, hi) ->
+      check_ctor_pattern(cx, cname, pargs, has_rest, false, nlo, nhi, lo, hi, scrut, mutable)
+    PRecord(cname, pargs, has_rest, nlo, nhi, lo, hi) ->
+      check_ctor_pattern(cx, cname, pargs, has_rest, true, nlo, nhi, lo, hi, scrut, mutable)
+    PQual(q, cname, pargs, has_rest, nlo, nhi, lo, hi) ->
+      check_qual_pattern(cx, q, cname, pargs, has_rest, false, nlo, nhi, lo, hi, scrut, mutable)
+    PQualRecord(q, cname, pargs, has_rest, nlo, nhi, lo, hi) ->
+      check_qual_pattern(cx, q, cname, pargs, has_rest, true, nlo, nhi, lo, hi, scrut, mutable)
+  }
+
+## `m.C(..)` / `m.P { .. }` (LANG-06): resolve through the alias, then the same
+## checking the unqualified spellings get. `braces` says which of the two
+## pattern forms was written -- a record pattern or a constructor pattern --
+## and is read off the node kind by the caller.
+fn check_qual_pattern(
+  cx: Cx,
+  q: String,
+  cname: String,
+  pargs: List[PatArg],
+  has_rest: Bool,
+  braces: Bool,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int,
+  scrut: Ty,
+  mutable: Bool
+) -> (Cx, TPat) = {
+  let (presence_cx, _) = export_presence_read(cx, q)
+  match map.get(presence_cx.module_exports, q) {
+    None -> {
+      var cx1 = cerr_h(presence_cx, "unknown module alias `" ++ q ++ "` in a pattern", nlo, nhi,
+        "a qualified pattern needs a whole-module import in scope: `use <path> as " ++
+          q ++ "`")
+      for a in pargs {
+        let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+        cx1 = cx2
+      }
+      (cx1, TPWild)
+    }
+    Some(exp) -> {
+      let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)
+      match constructor {
         None -> {
-          var cx1 = cerr_h(presence_cx, "unknown module alias `" ++ q ++ "` in a pattern", nlo, nhi,
-            "a qualified pattern needs a whole-module import in scope: `use <path> as " ++
-              q ++ "`")
+          let refused = pkg_private(exp, cname)
+          let missing = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+              "` has no exported constructor `" ++ cname ++ "`",
+            hint: suggest.hint(cname, map.keys(exp.ctors)) }
+          let diagnostic = if refused { pkg_private_export(exp, cname) } else { missing }
+          let diagnostic_cx = match pattern_cx.function_reads {
+            None -> pattern_cx
+            Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
+              semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(diagnostic))) }
+          }
+          var cx1 = if refused { pkg_private_err(diagnostic_cx, exp, cname, nlo, nhi) } else {
+            cerr_o(diagnostic_cx, missing.message, nlo, nhi, missing.hint)
+          }
           for a in pargs {
             let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
             cx1 = cx2
           }
           (cx1, TPWild)
         }
-        Some(exp) -> {
-          let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)
-          match constructor {
-            None -> {
-              let refused = pkg_private(exp, cname)
-              let missing = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
-                  "` has no exported constructor `" ++ cname ++ "`",
-                hint: suggest.hint(cname, map.keys(exp.ctors)) }
-              let diagnostic = if refused { pkg_private_export(exp, cname) } else { missing }
-              let diagnostic_cx = match pattern_cx.function_reads {
-                None -> pattern_cx
-                Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
-                  semantic_reads.ExportDiagnosticAnswer(semantic_reads.ConstructorDiagnostic, q, cname, Some(diagnostic))) }
-              }
-              var cx1 = if refused { pkg_private_err(diagnostic_cx, exp, cname, nlo, nhi) } else {
-                cerr_o(diagnostic_cx, missing.message, nlo, nhi, missing.hint)
-              }
-              for a in pargs {
-                let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
-                cx1 = cx2
-              }
-              (cx1, TPWild)
-            }
-            Some(key) ->
-              check_ctor_pattern_at(pattern_cx, key, cname, pargs, has_rest, has_parens,
-                nlo, nhi, lo, hi, scrut, mutable)
-          }
-        }
+        Some(key) ->
+          check_ctor_pattern_at(pattern_cx, key, cname, pargs, has_rest, braces,
+            nlo, nhi, lo, hi, scrut, mutable)
       }
     }
   }
+}
 
 type PatBind = { name: String, sym: Int, ty: Ty, lo: Int, hi: Int }
 
@@ -4297,7 +4314,7 @@ fn check_ctor_pattern(
   cname: String,
   pargs: List[PatArg],
   has_rest: Bool,
-  has_parens: Bool,
+  braces: Bool,
   nlo: Int,
   nhi: Int,
   lo: Int,
@@ -4322,19 +4339,22 @@ fn check_ctor_pattern(
     }
     Some(k) -> k
   }
-  check_ctor_pattern_at(cx1, key, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi,
+  check_ctor_pattern_at(cx1, key, cname, pargs, has_rest, braces, nlo, nhi, lo, hi,
     scrut, mutable)
 }
 
 ## The shared tail: the constructor is resolved, check argument shape and
 ## subpatterns (both the local and the module-qualified spelling land here).
+## `braces` is which pattern form was written: `P { .. }` (PRecord) or
+## `C(..)` / bare `C` (PCtor). A record is matched with braces and a sum-type
+## constructor with parentheses, the way each is built (spec §2.3/§2.4).
 fn check_ctor_pattern_at(
   cx: Cx,
   key: (Int, Int),
   cname: String,
   pargs: List[PatArg],
   has_rest: Bool,
-  has_parens: Bool,
+  braces: Bool,
   nlo: Int,
   nhi: Int,
   lo: Int,
@@ -4383,14 +4403,29 @@ fn check_ctor_pattern_at(
   var field_tys: List[Ty] = []
   for f in ci.fields { field_tys = field_tys ++ [subst(f.ty, inst, em)] }
   let n = len(ci.fields)
-  if not has_parens && n > 0 {
-    cx1 = cerr_h(cx1, "constructor `" ++ ci.name ++ "` has " ++ to_string(n) ++
-        " field(s); a bare name does not match it", lo, hi,
-      "write " ++ ci.name ++ "(..) to ignore the fields, or destructure them")
+  # the other form's brackets: refused the way the expression side refuses
+  # them, before any field is matched, since the subpatterns were written
+  # against a shape that is not this one
+  if braces != a2.is_record {
+    let (form_cx, form_text) = constructor_display_read(cx1, ci)
+    let msg = if a2.is_record {
+      "record `" ++ ci.name ++ "` is matched with braces: " ++ ci.name ++ " { ... }"
+    } else {
+      "constructor `" ++ ci.name ++ "` is matched with parentheses: " ++ ci.name ++ "(...)"
+    }
+    cx1 = cerr_h(form_cx, msg, lo, hi, "constructor: " ++ form_text)
     for a in pargs {
       let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
       cx1 = cx2
     }
+    return (cx1, TPWild)
+  }
+  # `C` and `C()` are one pattern and both match none of the fields; `C(..)`
+  # is how a pattern says it does not care about them
+  if not braces && n > 0 && len(pargs) == 0 && not has_rest {
+    cx1 = cerr_h(cx1, "constructor `" ++ ci.name ++ "` has " ++ to_string(n) ++
+        " field(s), and this pattern matches none of them", lo, hi,
+      "write " ++ ci.name ++ "(..) to ignore the fields, or destructure them")
     return (cx1, TPWild)
   }
   # (field, sub-pattern) pairs, collected in pattern order and turned into the
@@ -4662,7 +4697,7 @@ test "java reads retain return dispatch and diagnostic class metadata" {
   assert scalar == TyInt
   for static_call in [true, false] {
     let (scope, _) = declare(push_scope(initial), "x", TyJava("pkg.Box", "Box"), false, 0, 1)
-    let receiver = if static_call { ECtor("Foreign", [], None, false, 0, 7, 0, 7) } else { EVar("x", 0, 1) }
+    let receiver = if static_call { ECtor("Foreign", 0, 7) } else { EVar("x", 0, 1) }
     let (cold, ty, tree) = check_method_call(scope, receiver, "missing", [], None, 8, 15, 0, 17)
     let (observed, next_ty, next_tree) = check_method_call(Cx { ..scope, function_reads: Some([]) }, receiver, "missing", [], None, 8, 15, 0, 17)
     assert ty == TyError && next_ty == ty && next_tree == tree
@@ -4741,7 +4776,7 @@ test "java namespace reads retain static target guards and diagnostic context" {
   assert constant_cx.diags == []
   for index in 0..6 {
     let name = if index == 1 { "Missing" } else { "URL" }
-    let receiver = if index == 5 { EVar(name, 0, 7) } else { ECtor(name, [], None, index == 2, 0, 7, 0, 7) }
+    let receiver = if index == 5 { EVar(name, 0, 7) } else if index == 2 { ERecord(name, [], None, 0, 7, 0, 7) } else { ECtor(name, 0, 7) }
     let base = test_cx()
     let initial = Cx { ..base, java_classes: map.from([("URL", "pkg.Box")]),
       ctors_by_name: if index == 3 { map.from([("URL", (1, 0))]) } else { base.ctors_by_name },
@@ -4804,7 +4839,7 @@ test "java namespace reads retain value resolution and earlier shadow guards" {
 test "java namespace reads retain the field expression consumer context" {
   let initial = Cx { ..test_cx(), java_classes: map.from([("URL", "pkg.Box")]),
     jsig: Jsig { ..jsig_refused(), on: true, static_fields_of: fq => [] } }
-  let target = EFieldAcc(ECtor("URL", [], None, false, 0, 3, 0, 3), "MISSING", 4, 11, 0, 11)
+  let target = EFieldAcc(ECtor("URL", 0, 3), "MISSING", 4, 11, 0, 11)
   let (cold, ty, tree) = check_expr(initial, target, no_expected())
   let (observed, next_ty, next_tree) = check_expr(Cx { ..initial, function_reads: Some([]) }, target, no_expected())
   assert cold.diags == observed.diags && len(cold.diags) == 1
@@ -5215,7 +5250,7 @@ test "export reads retain qualified pattern answers and recovery" {
     ConstructorHeader { id: info.id, name: info.name, is_record: info.is_record, tparams: info.tparams }),
     semantic_reads.ConstructorFields(empty_adt, empty_slot, info.ctors[empty_slot])]
   for name in ["Empty", "Empt", "Missing"] {
-    let pat = PQual("h", name, [], false, false, 2, 7, 0, 7)
+    let pat = PQual("h", name, [], false, 2, 7, 0, 7)
     let (cold, cold_pat) = check_pattern(initial, pat, scrut, false)
     let (observed, observed_pat) = check_pattern(Cx { ..initial, function_reads: Some([]) }, pat, scrut, false)
     assert cold.diags == observed.diags && cold_pat == observed_pat && cold.decl_slots == observed.decl_slots
@@ -5231,10 +5266,10 @@ test "export reads retain qualified pattern answers and recovery" {
     }
     assert observed.function_reads == Some(expected)
   }
-  let child = PQual("h", "Empty", [], false, false, 10, 15, 8, 15)
+  let child = PQual("h", "Empty", [], false, 10, 15, 8, 15)
   for qualifier in ["unknown", "h"] {
     let pat = PQual(qualifier, "Missing", [PatArg { name: None, nlo: 8, nhi: 15, pat: child }],
-      false, true, 0, 7, 0, 16)
+      false, 0, 7, 0, 16)
     let (cold, cold_pat) = check_pattern(initial, pat, scrut, false)
     let (observed, observed_pat) = check_pattern(Cx { ..initial, function_reads: Some([]) }, pat, scrut, false)
     assert cold.diags == observed.diags && cold_pat == observed_pat && len(cold.diags) == 1
@@ -5254,8 +5289,8 @@ test "export reads preserve recursive refutability and short circuits" {
   assert provider.diags == []
   let exp = exports_of(provider, syntax, "helper", "helper")
   let initial = Cx { ..provider, module_exports: map.from([("h", exp)]), function_reads: Some([]) }
-  let missing = PQual("h", "Missing", [], false, false, 1, 8, 0, 8)
-  let item = PQual("h", "Item", [], false, false, 11, 15, 10, 15)
+  let missing = PQual("h", "Missing", [], false, 1, 8, 0, 8)
+  let item = PQual("h", "Item", [], false, 11, 15, 10, 15)
   let absent = semantic_reads.QualifiedConstructor("h", "Missing", None)
   let found = semantic_reads.QualifiedConstructor("h", "Item", map.get(exp.ctors, "Item"))
   let (choice_id, _) = map.get(exp.ctors, "Item").expect("Item exported")
@@ -5266,11 +5301,11 @@ test "export reads preserve recursive refutability and short circuits" {
   assert observed.function_reads == Some([absent, found, count])
   assert answer == refutable_span(Cx { ..initial, function_reads: None }, pair)
   let nested = PQual("h", "Missing", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
-    false, true, 0, 1, 0, 20)
+    false, 0, 1, 0, 20)
   let (nested_cx, nested_answer) = refutable_span_read(initial, nested)
   assert nested_answer == answer && nested_cx.function_reads == Some([absent, found, count])
   let local = PCtor("Unknown", [PatArg { name: None, nlo: 0, nhi: 0, pat: item }],
-    false, true, 0, 1, 0, 20)
+    false, 0, 1, 0, 20)
   let (local_cx, local_answer) = refutable_span_read(initial, local)
   assert local_answer == answer && local_cx.function_reads == Some([semantic_reads.LocalConstructor("Unknown", None), found, count])
   let (skipped, _) = refutable_span_read(initial, PTuple([PLit(EInt(1, 0, 1), 0, 1), item], 0, 15))
@@ -5312,7 +5347,7 @@ test "patterns bind, refute, and lower" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Some(x) against Option[Int] binds x: Int
   let p = PCtor("Some", [PatArg { name: None, nlo: 5, nhi: 6, pat: PBind("x", 5, 6) }],
-    false, true, 0, 4, 0, 7)
+    false, 0, 4, 0, 7)
   let (cx1, tp) = check_pattern(cx, p, opt_ty(TyInt), false)
   assert len(cx1.diags) == 0
   assert sym_of(cx1, lookup(cx1, "x").expect("bound")).ty == TyInt
@@ -5367,7 +5402,7 @@ test "diagnostic reads retain pattern mismatch types in evaluation order" {
     (PTuple([PWild(0, 1), PWild(2, 3)], 0, 3), TyTuple([TyInt]), [TyTuple([TyInt])]),
     (PList([], false, None, None, [], 0, 3), TyInt, [TyInt]),
     (PLit(EInt(1, 0, 1), 0, 1), TyBool, [TyInt, TyBool]),
-    (PCtor("None", no_pargs(), false, false, 0, 4, 0, 4), TyInt, [TyInt])] {
+    (PCtor("None", no_pargs(), false, 0, 4, 0, 4), TyInt, [TyInt])] {
     let (pat, scrut, rendered) = sample
     let (observed, tree) = check_pattern(initial, pat, scrut, false)
     let (cold, cold_tree) = check_pattern(Cx { ..initial, function_reads: None }, pat, scrut, false)
@@ -5418,14 +5453,14 @@ test "ctor pattern field discipline" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Ok(v: x, ..) on Result[Int, String]; then a missing-field case
   let good = PCtor("Ok", [PatArg { name: Some("value"), nlo: 3, nhi: 8, pat: PBind("x", 10, 11) }],
-    false, true, 0, 2, 0, 12)
+    false, 0, 2, 0, 12)
   let (cx1, _) = check_pattern(cx, good, result_ty(TyInt, TyString), false)
   assert len(cx1.diags) == 0
-  let bare = PCtor("Ok", no_pargs(), false, false, 0, 2, 0, 2)
+  let bare = PCtor("Ok", no_pargs(), false, 0, 2, 0, 2)
   let (cx2, _) = check_pattern(cx, bare, result_ty(TyInt, TyString), false)
-  assert str.contains(cx2.diags[0].msg, "a bare name does not match it")
+  assert str.contains(cx2.diags[0].msg, "this pattern matches none of them")
   let wrong = PCtor("Ok", [PatArg { name: Some("nope"), nlo: 3, nhi: 7, pat: PWild(9, 10) }],
-    false, true, 0, 2, 0, 11)
+    false, 0, 2, 0, 11)
   let (cx3, _) = check_pattern(cx, wrong, result_ty(TyInt, TyString), false)
   assert cx3.diags[0].msg == "`Ok` has no field `nope`"
   # the caret is on the field name, not on the sub-pattern it was written for
@@ -5468,8 +5503,8 @@ fn rs_pattern(sc: RefScope, p: Pattern) -> RefScope =
       for alt in alts { o = rs_pattern(o, alt) }
       o
     }
-    PCtor(_, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
-    PQual(_, _, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
+    PCtor(_, args, _, _, _, _, _) | PRecord(_, args, _, _, _, _, _) |
+    PQual(_, _, args, _, _, _, _, _) | PQualRecord(_, _, args, _, _, _, _, _) -> rs_pargs(sc, args)
     PTuple(elems, _, _) -> {
       var o = sc
       for x in elems { o = rs_pattern(o, x) }
@@ -5505,15 +5540,14 @@ fn rs_qualified(sc: RefScope, target: Expr) -> Bool =
 ## Is `target` a `use java` class name in receiver position — i.e. is
 ## `target.m(..)` a Java static call rather than a UFCS rewrite of this
 ## module's `m`? A bare capitalized receiver reaches the checker as a
-## zero-argument `ECtor`, and check_method_call's static arm claims it only
-## when no argument list was written; a receiver that *was* written with
-## parentheses is an ordinary construction, so its edge stays. The names a
+## bare `ECtor`, and check_method_call's static arm claims only that node; a
+## receiver written as a record literal is an ordinary construction, so its
+## edge stays. The names a
 ## constructor or a constant claims ahead of the Java class are already gone
 ## from `javas` (check_module builds it), so membership is the whole test.
 fn rs_java_static(sc: RefScope, target: Expr) -> Bool =
   match target {
-    ECtor(cn, cargs, spread, has_parens, _, _, _, _) ->
-      not has_parens && len(cargs) == 0 && spread == None && set.has(sc.javas, cn)
+    ECtor(cn, _, _) -> set.has(sc.javas, cn)
     _ -> false
   }
 
@@ -5587,13 +5621,13 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       }
       o
     }
-    ECtor(_, cargs, spread, _, _, _, _, _) -> {
+    ERecord(_, fields, spread, _, _, _, _) -> {
       var o = out
       match spread {
         Some(sp) -> { o = name_refs(sp, o, sc) }
         None -> ()
       }
-      for a in cargs { o = name_refs(a.e, o, sc) }
+      for a in fields { o = name_refs(a.e, o, sc) }
       o
     }
     EFieldAcc(target, _, _, _, _, _) -> name_refs(target, out, sc)
@@ -5702,7 +5736,7 @@ test "a bound name is not an edge to the top-level function it shadows" {
   # name here is bound, so nothing but the scrutinee `d` comes out (ARC-01).
   let arm = MatchArm {
     pat: PCtor("Some", [PatArg { name: None, nlo: 0, nhi: 0, pat: PBind("e", 0, 1) }],
-      false, true, 0, 1, 0, 1),
+      false, 0, 1, 0, 1),
     guard: None,
     body: EApply(EVar("b", 0, 1), [pos_arg(EVar("c", 0, 1)), pos_arg(EVar("e", 0, 1))], 0, 1),
     lo: 0,
@@ -5747,16 +5781,16 @@ test "a module-qualified call is not an edge to a same-named local function" {
 test "a Java static call is not an edge to a same-named local function" {
   # Integer.toHexString(n) mentions `toHexString`, but that call is answered by
   # java.lang.Integer and never reaches a local function of that name (ARC-01)
-  let recv = ECtor("Integer", no_cargs(), None, false, 0, 7, 0, 7)
+  let recv = ECtor("Integer", 0, 7)
   let call = EMethod(recv, "toHexString", [pos_arg(EVar("n", 0, 1))], 0, 1, 0, 1)
   let javas = set.insert(set.empty(), "Integer")
   assert set.to_list(name_refs(call, set.empty(), ref_scope(set.empty(), javas))) == ["n"]
   # with no `use java` class of that name the receiver is a constructor, and
   # UFCS puts the edge back
   assert set.has(name_refs(call, set.empty(), ref_scope(set.empty(), set.empty())), "toHexString")
-  # a written argument list is an ordinary construction, not the static
+  # a record literal is an ordinary construction, not the static
   # namespace: check_method_call declines it there too, so the edge stays
-  let built = EMethod(ECtor("Integer", no_cargs(), None, true, 0, 7, 0, 9), "toHexString",
+  let built = EMethod(ERecord("Integer", no_cargs(), None, 0, 7, 0, 9), "toHexString",
     [], 0, 1, 0, 1)
   assert set.has(name_refs(built, set.empty(), ref_scope(set.empty(), javas)), "toHexString")
 }
@@ -5916,6 +5950,24 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool = {
   answer
 }
 
+## The constructor half of needs_expected_read: a bare head (`None`, `Some`)
+## or a record literal. A nullary generic constructor takes its type
+## arguments from the expected type either way; a bare constructor with fields
+## is a function value, whose parameter types only the expected fn type gives.
+fn ctor_needs_expected_read(cx: Cx, cname: String, bare: Bool) -> (Cx, Bool) = {
+  let (name_cx, constructor) = local_constructor_read(cx, cname)
+  match constructor {
+    None -> (name_cx, false)
+    Some(key) -> {
+      let (aid, cslot) = key
+      let (arity_cx, fields) = constructor_arity_read(name_cx, aid, cslot)
+      let (shape_cx, shape) = constructor_nominal_shape_read(arity_cx, aid)
+      let (params, is_record) = shape
+      (shape_cx, (fields == 0 && params > 0) || (bare && fields > 0 && not is_record))
+    }
+  }
+}
+
 pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
   match e {
     EListLit(elems, _, _) -> {
@@ -5956,22 +6008,8 @@ pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
         None -> (next, false)
       }
     }
-    ECtor(cname, cargs, spread, has_parens, _, _, _, _) -> {
-      let (name_cx, constructor) = local_constructor_read(cx, cname)
-      match constructor {
-        None -> (name_cx, false)
-        Some(key) -> {
-          let (aid, cslot) = key
-          let (arity_cx, fields) = constructor_arity_read(name_cx, aid, cslot)
-          let (shape_cx, shape) = constructor_nominal_shape_read(arity_cx, aid)
-          let (params, is_record) = shape
-          # bare nullary generic ctor (None): element type comes from expected;
-          # bare ctor-with-fields as a fn value (Some): needs the expected fn type
-          (shape_cx, (fields == 0 && params > 0) ||
-              (not has_parens && fields > 0 && not is_record))
-        }
-      }
-    }
+    ECtor(cname, _, _) -> ctor_needs_expected_read(cx, cname, true)
+    ERecord(cname, _, _, _, _, _, _) -> ctor_needs_expected_read(cx, cname, false)
     ELambda(params, _, _, _, _) -> {
       for p in params {
         match p.ann {
@@ -5996,7 +6034,7 @@ pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
             None -> (next, false)
           }
         }
-        ECtor(cname, _, _, _, _, _, _, _) -> {
+        ECtor(cname, _, _) -> {
           let (name_cx, constructor) = local_constructor_read(cx, cname)
           match constructor {
             None -> (name_cx, false)
@@ -7376,12 +7414,15 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         (cx4, t, XComptime(bx, owner_off(cx, lo), owner_off(cx, hi), t))
       }
     }
-    ECtor(cname, cargs, spread, has_braces, cclo, cchi, lo, hi) ->
-      # the ECtor node itself is only ever a head: bare, or the braced record
-      # literal. The parenthesised spelling is an EApply over the bare head and
-      # reaches check_ctor_call from check_apply, tagged CApply.
-      check_ctor_call(cx, cname, cargs, spread, if has_braces { CBraces } else { CBare },
-        expected, None, cclo, cchi, lo, hi)
+    # the three constructor constructs are three nodes: a bare head here, a
+    # record literal, and an EApply over a bare head, which reaches
+    # check_ctor_call from check_apply
+    ECtor(cname, lo, hi) -> {
+      let none: List[Arg] = []
+      check_ctor_call(cx, cname, none, None, CBare, expected, None, lo, hi, lo, hi)
+    }
+    ERecord(cname, fields, spread, nlo, nhi, lo, hi) ->
+      check_ctor_call(cx, cname, fields, spread, CBraces, expected, None, nlo, nhi, lo, hi)
     ELambda(params, body, sugar, lo, hi) ->
       check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
@@ -7482,7 +7523,7 @@ fn unwrap_msg(operand: Expr) -> String = {
   let desc: Option[String] = match operand {
     EMethod(recv, mname, _, _, _, _, _) ->
       match recv {
-        ECtor(rname, _, _, _, _, _, _, _) -> Some(rname ++ "." ++ mname ++ "()")
+        ECtor(rname, _, _) -> Some(rname ++ "." ++ mname ++ "()")
         EVar(rname, _, _) -> Some(rname ++ "." ++ mname ++ "()")
         _ -> Some("${mname}()")
       }
@@ -7720,11 +7761,7 @@ fn call_site_type_args_read(cx: Cx, target: Expr, index: Expr) -> (Cx, Option[(S
 ## (`List[Int]`). No lookups; `spelled_type_read` decides whether it is a type.
 fn spells_type_shape(e: Expr) -> Bool =
   match e {
-    ECtor(_, args, spread, _, _, _, _, _) ->
-      match spread {
-        Some(_) -> false
-        None -> len(args) == 0
-      }
+    ECtor(_, _, _) -> true
     EIndex(t, i, _, _) -> spells_type_shape(t) && spells_type_shape(i)
     _ -> false
   }
@@ -7733,7 +7770,7 @@ fn spells_type_shape(e: Expr) -> Bool =
 ## nominal type of this module, possibly applied (`List[Int]`).
 fn spelled_type_read(cx: Cx, e: Expr) -> (Cx, Option[String]) =
   match e {
-    ECtor(name, _, _, _, _, _, _, _) ->
+    ECtor(name, _, _) ->
       if list.contains(public_builtin_type_names(), name) {
         (cx, Some(name))
       } else {
@@ -8161,7 +8198,7 @@ fn cell_repeated(n: Int) -> Int = if n > 0 { 2 } else { 0 }
 fn cell_occurrences(e: Expr, name: String) -> Int =
   match e {
     EInt(_, _, _) | EChar(_, _, _) | EFloat(_, _, _) | EBool(_, _, _) | EUnit(_, _) |
-    EBreak(_, _) | EContinue(_, _) -> 0
+    EBreak(_, _) | EContinue(_, _) | ECtor(_, _, _) -> 0
     EVar(n, _, _) -> if n == name { 1 } else { 0 }
     EStr(parts, _, _) -> {
       var o = 0
@@ -8184,7 +8221,7 @@ fn cell_occurrences(e: Expr, name: String) -> Int =
       o
     }
     ELambda(_, body, _, _, _) -> cell_repeated(cell_occurrences(body, name))
-    ECtor(_, args, spread, _, _, _, _, _) -> {
+    ERecord(_, args, spread, _, _, _, _) -> {
       var o = 0
       match spread {
         Some(sp) -> { o = o + cell_occurrences(sp, name) }
@@ -8911,7 +8948,7 @@ fn named_arg_msg(initial: Cx, target: Expr) -> (Cx, String) = {
   match target {
     EFieldAcc(recv, fname, _, _, _, _) ->
       match recv {
-        ECtor(cn, _, _, _, _, _, _, _) -> {
+        ECtor(cn, _, _) -> {
           let (name_cx, java_target) = static_field_target(cx, recv)
           cx = name_cx
           match java_target {
@@ -8984,10 +9021,8 @@ fn check_apply(
   # spelling `m.C(a, b)` (LANG-06). Routed into check_ctor_call so field names,
   # arity, spread and generic instantiation are decided by one implementation.
   match target {
-    ECtor(cname, cargs, sp, hp, cclo, cchi, _, _) ->
-      if not hp && len(cargs) == 0 && sp == None {
-        return check_ctor_call(cx, cname, args0, None, CApply, expected, None, cclo, cchi, lo, hi)
-      }
+    ECtor(cname, cclo, cchi) ->
+      return check_ctor_call(cx, cname, args0, None, CApply, expected, None, cclo, cchi, lo, hi)
     EFieldAcc(recv, fname, flo, fhi, _, _) -> {
       let (next, constructor) = qual_ctor_read(cx, recv, fname)
       cx = next
@@ -10950,12 +10985,14 @@ fn infer_blocked_by_missing(ci: CtorI, slots: List[Option[Int]], vid: Int) -> Bo
   in_missing && not in_present
 }
 
-## How the constructor was *spelled* at this use site. This used to be one
-## `has_parens: Bool`, and that Bool could not tell `Point { x: 1 }` from
-## `Point(1)`: both arrived as `true`, so the braces-only rule for records
-## (spec §2.4) checked nothing on the parenthesised spelling and `Point(1, 2)`
-## compiled. Three spellings, three cases -- the record rule then falls out of
-## a match instead of out of a negation nobody could read.
+## Which of the three constructor constructs is being checked. Each is its own
+## AST node -- a bare `ECtor`, an `ERecord` literal, an `EApply` over a bare
+## head -- and this is read off the node kind by the caller, never recorded by
+## the parser: the syntax window (docs/syntax-window-design.md §3) removed the
+## `has_parens` flag the AST used to carry for it. It exists because two of the
+## rules are about which construct was used, not about the arguments: a record
+## is built with braces and a sum-type constructor with parentheses (spec
+## §2.3/§2.4), and a bare head is a value rather than a construction.
 type CtorUse =
   # `None`, `Point` -- no arguments written at all
   | CBare
@@ -10982,7 +11019,10 @@ test "local value reads preserve constructor SAM prepass guards and arity" {
     let name = if index == 1 { "Empty" } else if index == 2 { "Missing" } else { "Item" }
     let args: List[Arg] = if index == 4 { [Arg { name: None, e: EInt(1, 0, 1), trailing: false, lo: 0, hi: 1 }] } else { [] }
     let spread: Option[Expr] = if index == 5 { Some(EInt(1, 0, 1)) } else { None }
-    let expr = if index == 6 { EInt(1, 0, 1) } else { ECtor(name, args, spread, index == 3, 0, 4, 0, 4) }
+    # 3, 4 and 5 are record literals: braces with nothing, an argument, a spread
+    let expr = if index == 6 { EInt(1, 0, 1) } else if index >= 3 { ERecord(name, args, spread, 0, 4, 0, 4) } else {
+      ECtor(name, 0, 4)
+    }
     let (cold, deferred) = sam_deferred(initial, expr)
     let (observed, next_deferred) = sam_deferred(Cx { ..initial, function_reads: Some([]) }, expr)
     let key = map.get(initial.ctors_by_name, name)
@@ -10998,8 +11038,8 @@ test "local value reads preserve constructor SAM prepass guards and arity" {
     assert observed.function_reads == Some(reads) && observed.diags == cold.diags
     let (cold_arity, arity) = deferred_arity(cold, expr)
     let (observed_arity, next_arity) = deferred_arity(observed, expr)
-    let arity_reads: List[semantic_reads.FunctionRead] = if index == 6 { [] } else { lookup_reads }
-    assert arity == (if index == 1 || index == 2 || index == 6 { 0 } else { 1 }) && next_arity == arity
+    let arity_reads: List[semantic_reads.FunctionRead] = if index >= 3 { [] } else { lookup_reads }
+    assert arity == (if index == 0 { 1 } else { 0 }) && next_arity == arity
     assert observed_arity.function_reads == Some(reads ++ arity_reads)
     assert cold_arity.diags == observed_arity.diags && cold_arity.decl_slots == observed_arity.decl_slots
   }
@@ -11023,7 +11063,7 @@ test "constructor expected-type reads retain identity arity and nominal shape" {
       None -> ()
     }
     for applied in [false, true] {
-      let ctor = ECtor(name, [], None, false, 0, 5, 0, 5)
+      let ctor = ECtor(name, 0, 5)
       let expr = if applied { EApply(ctor, [], 0, 7) } else { ctor }
       let (cold, answer) = needs_expected_read(initial, expr)
       let (observed, next_answer) = needs_expected_read(Cx { ..initial, function_reads: Some([]) }, expr)
@@ -11209,16 +11249,22 @@ fn check_ctor_call(
     }
     _ -> ()
   }
-  # a record is built with braces and with nothing else (spec §2.4). `Point(1, 2)`
-  # is the spelling this rule exists to refuse, and until CtorUse existed it was
-  # indistinguishable here from `Point { x: 1, y: 2 }` -- so it compiled. The
-  # check sits on the spelling rather than on the arguments because `Point()` is
-  # the same mistake with nothing inside it, and because the pipe (SYN-05) can
-  # now write an application over any head, including this one.
+  # a record is built with braces and with nothing else (spec §2.4). The check
+  # sits on the construct rather than on the arguments because `Point()` is the
+  # same mistake with nothing inside it, and because the pipe (SYN-05) can write
+  # an application over any head, including this one.
   if spelling == CApply && ad.is_record {
     let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
     return (cerr_h(hint_cx,
       "record `" ++ ci.name ++ "` must be built with braces: " ++ ci.name ++ " { ... }",
+      lo, hi, "constructor: " ++ hint_text), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  # and a sum-type constructor is applied with parentheses (spec §2.3): the
+  # braces are the record literal, which this constructor is not
+  if spelling == CBraces && not ad.is_record {
+    let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+    return (cerr_h(hint_cx,
+      "constructor `" ++ ci.name ++ "` is built with parentheses: " ++ ci.name ++ "(...)",
       lo, hi, "constructor: " ++ hint_text), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
   if spelling == CBare && n > 0 {
@@ -11261,10 +11307,9 @@ fn check_ctor_call(
   }
   var spread_tx: Option[TExpr] = None
   match spread {
+    # only a record literal carries a spread, and a record literal naming a
+    # sum-type constructor was refused above
     Some(sp) -> {
-      if not ad.is_record {
-        cx1 = cerr(cx1, "`..base` functional update only works on records", e_lo(sp), e_hi(sp))
-      }
       let (eligibility_cx, concrete) = is_concrete_read(cx1, self_ty)
       cx1 = eligibility_cx
       let sexp: Option[Ty] = if concrete { Some(self_ty) } else { None }
@@ -11723,12 +11768,7 @@ fn sam_deferred(cx: Cx, a: Expr) -> (Cx, Bool) =
       }
       (cx, false)
     }
-    ECtor(cn, cargs2, sp, hp, _, _, _, _) -> {
-      if hp || len(cargs2) > 0 { return (cx, false) }
-      match sp {
-        Some(_) -> return (cx, false)
-        None -> ()
-      }
+    ECtor(cn, _, _) -> {
       let (name_cx, constructor) = local_constructor_read(cx, cn)
       match constructor {
         Some(k) -> {
@@ -11745,7 +11785,7 @@ fn sam_deferred(cx: Cx, a: Expr) -> (Cx, Bool) =
 fn deferred_arity(cx: Cx, a: Expr) -> (Cx, Int) =
   match a {
     ELambda(ps, _, _, _, _) -> (cx, len(ps))
-    ECtor(cn, _, _, _, _, _, _, _) -> {
+    ECtor(cn, _, _) -> {
       let (name_cx, constructor) = local_constructor_read(cx, cn)
       match constructor {
         Some(k) -> {
@@ -11990,7 +12030,7 @@ test "java oracle reads retain rejected candidates before the winning overload" 
     } }
   for constructor in [false, true] {
     let initial = Cx { ..test_cx(), jsig: oracle, java_classes: map.from([("Foreign", "pkg.Box")]) }
-    let target = ECtor("Foreign", [], None, false, 0, 7, 0, 7)
+    let target = ECtor("Foreign", 0, 7)
     let args = [Arg { name: None, e: EStr([SPText("x")], 12, 15), trailing: false, lo: 12, hi: 15 }]
     let name = if constructor { "new" } else { "take" }
     let (cold, ty, tree) = check_method_call(initial, target, name, args, None, 8, 12, 0, 16)
@@ -12551,13 +12591,10 @@ fn check_java_call(
 ## `Class.FIELD` static field read. Mirrors the static-call guard in check_method_call.
 fn static_field_target(cx: Cx, target: Expr) -> (Cx, Option[String]) =
   match target {
-    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
-      if not hp && len(cargs) == 0 && sp == None {
-        let (next, shadowed) = local_value_shadow_read(cx, cn)
-        if shadowed { (next, None) } else { java_class_name_read(next, cn) }
-      } else {
-        (cx, None)
-      }
+    ECtor(cn, _, _) -> {
+      let (next, shadowed) = local_value_shadow_read(cx, cn)
+      if shadowed { (next, None) } else { java_class_name_read(next, cn) }
+    }
     _ -> (cx, None)
   }
 
@@ -12755,27 +12792,26 @@ fn check_method_call(
   }
   # static namespace / constructor: System.exit(1), StringBuilder.new()
   match target {
-    ECtor(cn, cargs2, sp2, hp2, _, _, _, _) ->
-      if not hp2 && len(cargs2) == 0 && sp2 == None {
-        let (name_cx, java_target) = static_field_target(cx1, target)
-        cx1 = name_cx
-        match java_target {
-          Some(fq) -> {
-            match first_named(args0) {
-              Some(a) -> {
-                let qual = cn ++ "." ++ name
-                let cxe = cerr_h(cx1, java_named_arg_msg(qual), a.lo, a.hi, named_arg_hint())
-                return named_args_stop(cxe, args0, lo, hi)
-              }
-              None -> ()
+    ECtor(cn, _, _) -> {
+      let (name_cx, java_target) = static_field_target(cx1, target)
+      cx1 = name_cx
+      match java_target {
+        Some(fq) -> {
+          match first_named(args0) {
+            Some(a) -> {
+              let qual = cn ++ "." ++ name
+              let cxe = cerr_h(cx1, java_named_arg_msg(qual), a.lo, a.hi, named_arg_hint())
+              return named_args_stop(cxe, args0, lo, hi)
             }
-            let (info_cx, info) = java_class_info_read(cx1, fq)
-            return check_java_call(info_cx, info, None, true, name, args,
-              nlo, nhi, lo, hi)
+            None -> ()
           }
-          None -> ()
+          let (info_cx, info) = java_class_info_read(cx1, fq)
+          return check_java_call(info_cx, info, None, true, name, args,
+            nlo, nhi, lo, hi)
         }
+        None -> ()
       }
+    }
     _ -> ()
   }
   let (cx2, tt, tx) = check_expr(cx1, target, no_expected())
@@ -13258,7 +13294,7 @@ test "calls: builtins, dynamic targets, arity and undefined" {
 test "argument names name a signature or a constructor; a value callee says so" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let bare_some = ECtor("Some", [], None, false, 0, 4, 0, 4)
+  let bare_some = ECtor("Some", 0, 4)
   # (1) a constructor accepts them -- and validates them against its fields
   let named = EApply(bare_some,
     [Arg { name: Some("value"), e: EInt(1, 12, 13), trailing: false, lo: 5, hi: 13 }], 0, 14)
@@ -13288,7 +13324,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
   # (4) a Java member: Java metadata has no parameter names
   cx = Cx { ..cx, jsig: test_jsig(),
     java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
-  let jrecv = ECtor("Long", [], None, false, 0, 4, 0, 4)
+  let jrecv = ECtor("Long", 0, 4)
   let on_java = EApply(EFieldAcc(jrecv, "MAX_VALUE", 5, 14, 0, 14),
     [Arg { name: Some("a"), e: EInt(1, 18, 19), trailing: false, lo: 15, hi: 19 }], 0, 20)
   let (cx5, _, _) = check_expr(cx, on_java, no_expected())
@@ -13461,7 +13497,7 @@ test "the same call, four callees, four kinds of typed node" {
   }
   # a constructor name constructs
   let (_, _, n3) = check_expr(cx,
-    EApply(ECtor("Some", [], None, false, 0, 4, 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7),
+    EApply(ECtor("Some", 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7),
     no_expected())
   match n3 {
     XCtor(..) -> ()
@@ -13481,12 +13517,12 @@ test "ctor calls infer type arguments; constants land as refs" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   # Some(1) : Option[Int]
-  let e = EApply(ECtor("Some", [], None, false, 0, 4, 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7)
+  let e = EApply(ECtor("Some", 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7)
   let (cx1, t, _) = check_expr(cx, e, no_expected())
   assert t == opt_ty(TyInt)
   assert len(cx1.diags) == 0
   # bare None cannot infer without context, lands with one
-  let e2 = ECtor("None", [], None, false, 0, 4, 0, 4)
+  let e2 = ECtor("None", 0, 4)
   let (cx2, _, _) = check_expr(cx, e2, no_expected())
   assert str.contains(cx2.diags[0].msg, "cannot infer type parameter(s) T for `None`")
   let (cx3, t3, _) = check_expr(cx, e2, Some(opt_ty(TyString)))
@@ -13494,7 +13530,7 @@ test "ctor calls infer type arguments; constants land as refs" {
   assert len(cx3.diags) == 0
   # a SCREAMING const reference
   cx = Cx { ..cx, consts: map.insert(cx.consts, "LIMIT", TyInt) }
-  let (cx4, t4, node4) = check_expr(cx, ECtor("LIMIT", [], None, false, 0, 5, 0, 5), no_expected())
+  let (cx4, t4, node4) = check_expr(cx, ECtor("LIMIT", 0, 5), no_expected())
   assert t4 == TyInt
   match node4 {
     XConstRef(_, n, ..) -> { assert n == "LIMIT" }
@@ -13508,7 +13544,7 @@ test "match checks arms, unifies results and demands exhaustiveness" {
   let (cxo, _) = declare(cx, "o", opt_ty(TyInt), false, 0, 1)
   let arm = MatchArm {
     pat: PCtor("Some", [PatArg { name: None, nlo: 10, nhi: 11, pat: PBind("v", 10, 11) }],
-      false, true, 5, 9, 5, 12),
+      false, 5, 9, 5, 12),
     guard: None,
     body: EVar("v", 16, 17),
     lo: 5,
@@ -13733,7 +13769,7 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
   cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   cx = push_scope(cx)
   # Math.abs(1): the long overload beats int; primitive return is Int
-  let recv = ECtor("Math", [], None, false, 0, 4, 0, 4)
+  let recv = ECtor("Math", 0, 4)
   let call = EMethod(recv, "abs", [pos_arg(EInt(1, 9, 10))], 5, 8, 0, 11)
   let (cx1, t, node) = check_expr(cx, call, no_expected())
   assert t == TyInt
@@ -13747,7 +13783,7 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
     _ -> { assert false }
   }
   # a String return lands as Option[String]
-  let recv2 = ECtor("Long", [], None, false, 0, 4, 0, 4)
+  let recv2 = ECtor("Long", 0, 4)
   let call2 = EMethod(recv2, "toHexString", [pos_arg(EInt(5, 17, 18))], 5, 16, 0, 19)
   let (cx2, t2, _) = check_expr(cx, call2, no_expected())
   assert t2 == opt_ty(TyString)
@@ -13765,7 +13801,7 @@ test "static field access reads Class.FIELD, maps types, rejects unknowns" {
   cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Integer", "java.lang.Integer") }
   cx = push_scope(cx)
   # Math.PI is a double -> Float; the node is a field read
-  let recv = ECtor("Math", [], None, false, 0, 4, 0, 4)
+  let recv = ECtor("Math", 0, 4)
   let f1 = EFieldAcc(recv, "PI", 5, 7, 0, 7)
   let (cx1, t1, node) = check_expr(cx, f1, no_expected())
   assert t1 == TyFloat
@@ -13779,7 +13815,7 @@ test "static field access reads Class.FIELD, maps types, rejects unknowns" {
     _ -> { assert false }
   }
   # Integer.MAX_VALUE is an int -> Int
-  let recv2 = ECtor("Integer", [], None, false, 0, 7, 0, 7)
+  let recv2 = ECtor("Integer", 0, 7)
   let f2 = EFieldAcc(recv2, "MAX_VALUE", 8, 17, 0, 17)
   let (cx2, t2, _) = check_expr(cx, f2, no_expected())
   assert t2 == TyInt

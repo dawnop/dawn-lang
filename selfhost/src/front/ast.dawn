@@ -306,13 +306,22 @@ pub type Expr =
 # `return` crossing this boundary must talk about `with`, not accuse the
 # author of a lambda they never typed.
   | ELambda(params: List[LambdaParam], body: Expr, sugar: Bool, lo: Int, hi: Int)
-  | ECtor(
+# an uppercase name standing alone: a constructor head, a nullary
+# constructor's value, a constant or a Java class receiver. `Circle(1.0)` is an
+# EApply over this node (SYN-02); what the name resolves to decides the rest.
+  | ECtor(name: String, lo: Int, hi: Int)
+# a record literal `Point { x: 1.0 }` / `Point { ..p, x: 3.0 }`. Its own node,
+# not a flag on ECtor: braces and parentheses are two constructs -- a record is
+# built with braces and a sum-type constructor is applied with parentheses, in
+# expressions and patterns alike (docs/syntax-window-design.md §3) -- so the
+# checker reads which one was written off the node kind, not off a spelling
+# bit. `fields` are all named (`{ x }` is `{ x: x }`); `nlo`/`nhi` span the name.
+  | ERecord(
     name: String,
-    args: List[Arg],
+    fields: List[Arg],
     spread: Option[Expr],
-    has_parens: Bool,
-    clo: Int,
-    chi: Int,
+    nlo: Int,
+    nhi: Int,
     lo: Int,
     hi: Int
   )
@@ -358,23 +367,36 @@ pub type Pattern =
   | PBind(name: String, lo: Int, hi: Int)
   | PWild(lo: Int, hi: Int)
   | POr(alts: List[Pattern])
-  | PCtor(
+# a constructor pattern `Circle(r)` / `Rect(w: w, ..)`, or a bare `Point`.
+# The bare name and `Point()` are one pattern: both match no field.
+  | PCtor(name: String, args: List[PatArg], has_rest: Bool, nlo: Int, nhi: Int, lo: Int, hi: Int)
+# a record pattern `Point { x, y: 0, .. }`: the braces are their own construct,
+# as ERecord's are (every field is named; `{ x }` binds `x`)
+  | PRecord(
     name: String,
-    args: List[PatArg],
+    fields: List[PatArg],
     has_rest: Bool,
-    has_parens: Bool,
     nlo: Int,
     nhi: Int,
     lo: Int,
     hi: Int
   )
-# a module-qualified constructor pattern: `m.C(..)` / `m.C { .. }` (LANG-06)
+# the module-qualified spellings of the two: `m.C(..)` and `m.P { .. }` (LANG-06)
   | PQual(
     qual: String,
     name: String,
     args: List[PatArg],
     has_rest: Bool,
-    has_parens: Bool,
+    nlo: Int,
+    nhi: Int,
+    lo: Int,
+    hi: Int
+  )
+  | PQualRecord(
+    qual: String,
+    name: String,
+    fields: List[PatArg],
+    has_rest: Bool,
     nlo: Int,
     nhi: Int,
     lo: Int,
@@ -616,7 +638,8 @@ pub fn e_lo(e: Expr) -> Int =
     EApply(_, _, lo, _) -> lo
     EMethod(_, _, _, _, _, lo, _) -> lo
     ELambda(_, _, _, lo, _) -> lo
-    ECtor(_, _, _, _, _, _, lo, _) -> lo
+    ECtor(_, lo, _) -> lo
+    ERecord(_, _, _, _, _, lo, _) -> lo
     EFieldAcc(_, _, _, _, lo, _) -> lo
     EListLit(_, lo, _) -> lo
     ETupleLit(_, lo, _) -> lo
@@ -647,7 +670,8 @@ pub fn e_hi(e: Expr) -> Int =
     EApply(_, _, _, hi) -> hi
     EMethod(_, _, _, _, _, _, hi) -> hi
     ELambda(_, _, _, _, hi) -> hi
-    ECtor(_, _, _, _, _, _, _, hi) -> hi
+    ECtor(_, _, hi) -> hi
+    ERecord(_, _, _, _, _, _, hi) -> hi
     EFieldAcc(_, _, _, _, _, hi) -> hi
     EListLit(_, _, hi) -> hi
     ETupleLit(_, _, hi) -> hi
@@ -690,8 +714,10 @@ pub fn pat_lo(p: Pattern) -> Int =
     PBind(_, lo, _) -> lo
     PWild(lo, _) -> lo
     POr(alts) -> pat_lo(alts[0])
-    PCtor(_, _, _, _, _, _, lo, _) -> lo
-    PQual(_, _, _, _, _, _, _, lo, _) -> lo
+    PCtor(_, _, _, _, _, lo, _) -> lo
+    PRecord(_, _, _, _, _, lo, _) -> lo
+    PQual(_, _, _, _, _, _, lo, _) -> lo
+    PQualRecord(_, _, _, _, _, _, lo, _) -> lo
     PTuple(_, lo, _) -> lo
     PList(_, _, _, _, _, lo, _) -> lo
   }
@@ -702,8 +728,10 @@ pub fn pat_hi(p: Pattern) -> Int =
     PBind(_, _, hi) -> hi
     PWild(_, hi) -> hi
     POr(alts) -> pat_hi(alts[len(alts) - 1])
-    PCtor(_, _, _, _, _, _, _, hi) -> hi
-    PQual(_, _, _, _, _, _, _, _, hi) -> hi
+    PCtor(_, _, _, _, _, _, hi) -> hi
+    PRecord(_, _, _, _, _, _, hi) -> hi
+    PQual(_, _, _, _, _, _, _, hi) -> hi
+    PQualRecord(_, _, _, _, _, _, _, hi) -> hi
     PTuple(_, _, hi) -> hi
     PList(_, _, _, _, _, _, hi) -> hi
   }

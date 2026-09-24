@@ -182,10 +182,7 @@ test "pipe inserts into whatever call the right side already is" {
   match piped_body("fn f() = x |> Some(1)") {
     EApply(callee, args, c, d) -> {
       match callee {
-        ECtor(n, cargs, sp, hp, a, b, e2, f2) -> {
-          assert n == "Some"
-          assert hp == false
-        }
+        ECtor(n, a, b) -> { assert n == "Some" }
         _ -> { assert false }
       }
       assert len(args) == 2
@@ -308,11 +305,15 @@ test "every call is one application node" {
   assert str.contains(out, "Var g ")
   let out2 = rendered("fn f() = Some(1)")
   assert str.contains(out2, "Apply nargs=1")
-  assert str.contains(out2, "CtorCall Some parens=false")
-  # a record literal is not an application -- braces, not parens
+  assert str.contains(out2, "Ctor Some ")
+  # a record literal is not an application -- braces, not parens -- and it is
+  # a node of its own rather than a flag on the constructor head
   let out3 = rendered("fn f() = Point { x: 1 }")
   assert not str.contains(out3, "Apply")
-  assert str.contains(out3, "CtorCall Point parens=true")
+  assert str.contains(out3, "Record Point spread=false")
+  let out4 = rendered("fn f(p: P) -> Int = match p {\n  P { x } -> x\n  Q(y) -> y\n}")
+  assert str.contains(out4, "PRecord P rest=false")
+  assert str.contains(out4, "PCtor Q rest=false")
 }
 
 test "an argument may be named at every call position" {
@@ -704,7 +705,7 @@ test "or-patterns are flat, recursive, and looser than pattern atoms" {
           POr(outer) -> {
             assert len(outer) == 2
             match outer[0] {
-              PCtor(_, args, _, _, _, _, _, _) -> match args[0].pat {
+              PCtor(_, args, _, _, _, _, _) -> match args[0].pat {
                 PTuple(elems, _, _) -> {
                   match elems[0] {
                     POr(inner) -> { assert len(inner) == 3 }
@@ -774,7 +775,7 @@ test "or-pattern pipes may lead continuation lines without joining match arms" {
           _ -> { assert false }
         }
         match arms[1].pat {
-          PCtor(name, _, _, _, _, _, _, _) -> { assert name == "Other" }
+          PCtor(name, _, _, _, _, _, _) -> { assert name == "Other" }
           _ -> { assert false }
         }
       }
@@ -804,7 +805,7 @@ test "a qualified constructor let enters structural pattern parsing" {
   match m.decls[0] {
     DFn(f) -> match f.body {
       EBlock(stmts, _, _, _) -> match stmts[0] {
-        SLetPat(PQual(q, name, _, _, _, _, _, _, _), _, _, _, _) -> {
+        SLetPat(PQual(q, name, _, _, _, _, _, _), _, _, _, _) -> {
           assert q == "m"
           assert name == "One"
         }
@@ -832,7 +833,7 @@ test "a broken line-leading alternative recovers at the next arm" {
       EMatch(_, arms, _, _) -> {
         assert len(arms) == 1
         match arms[0].pat {
-          PCtor(name, _, _, _, _, _, _, _) -> { assert name == "Right" }
+          PCtor(name, _, _, _, _, _, _) -> { assert name == "Right" }
           _ -> { assert false }
         }
       }
@@ -942,10 +943,7 @@ test "a header expression refuses a record literal" {
           match stmts[0] {
             SWhile(cond, body, c, d) ->
               match cond {
-                ECtor(name, args, spread, has_parens, e2, f2, g2, h2) -> {
-                  assert name == "C"
-                  assert has_parens == false
-                }
+                ECtor(name, e2, f2) -> { assert name == "C" }
                 _ -> { assert false }
               }
             _ -> { assert false }

@@ -17,11 +17,11 @@ use front/ast.{
   TNamed, TQual, TAssoc, TTuple, TFn,
   StrPart, SPText, SPInterp,
   EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
-  ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
+  ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf,
   EBreak, EContinue, EComptime, EBinary, EUnary, EIf, EMatch,
   EBlock, EHandle,
-  PLit, PBind, PWild, POr, PCtor, PTuple, PList,
+  PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
   e_lo, e_hi, pat_lo, pat_hi, module_uses, UseView, module_fns, module_impls, module_traits
@@ -919,12 +919,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       let args = arg_exprs(args0)
       match target {
         EVar(callee, vlo, vhi) -> { q = walk_named_call(qc, q, callee, vlo, vhi, args, te) }
-        ECtor(cname, cargs, spread, hp, clo, chi, _, _) ->
-          if not hp && len(cargs) == 0 && spread == None {
-            q = walk_ctor_call(qc, q, args0, None, clo, chi, te)
-          } else {
-            q = walk_apply_value(qc, q, target, args, te)
-          }
+        ECtor(cname, clo, chi) -> { q = walk_ctor_call(qc, q, args0, None, clo, chi, te) }
         # `recv.member(args)`, whose callee is never a value: the checker
         # decides what it is, and each answer parks the receiver and the
         # arguments in its own typed node rather than under an `XApply`. Left
@@ -1038,8 +1033,12 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XTupleLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
         _ -> { q = walk_list(qc, q, elems, no_texprs(elems)) }
       }
-    ECtor(_, args, spread, _, clo, chi, _, _) -> {
-      q = walk_ctor_call(qc, q, args, spread, clo, chi, te)
+    ECtor(_, clo, chi) -> {
+      let none: List[Arg] = []
+      q = walk_ctor_call(qc, q, none, None, clo, chi, te)
+    }
+    ERecord(_, fields, spread, nlo, nhi, _, _) -> {
+      q = walk_ctor_call(qc, q, fields, spread, nlo, nhi, te)
     }
     EFieldAcc(target, _, flo, fhi, _, _) ->
       match te {
@@ -1502,10 +1501,16 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
         i = i + 1
       }
     }
-    PCtor(_, args, _, _, nlo, nhi, _, _) -> {
+    PCtor(_, args, _, nlo, nhi, _, _) -> {
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
-    PQual(_, _, args, _, _, nlo, nhi, _, _) -> {
+    PRecord(_, args, _, nlo, nhi, _, _) -> {
+      q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
+    }
+    PQual(_, _, args, _, nlo, nhi, _, _) -> {
+      q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
+    }
+    PQualRecord(_, _, args, _, nlo, nhi, _, _) -> {
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PTuple(elems, _, _) -> {
@@ -2034,7 +2039,7 @@ fn collect_e(
         None ->
           match target {
             EVar(_, _, _) -> ()
-            ECtor(_, _, _, _, _, _, _, _) -> ()
+            ECtor(_, _, _) -> ()
             _ -> { acc = collect_e(qc, acc, target, None, before) }
           }
       }
@@ -2044,7 +2049,7 @@ fn collect_e(
         i = i + 1
       }
     }
-    ECtor(_, args, spread, _, _, _, _, _) -> {
+    ERecord(_, args, spread, _, _, _, _) -> {
       let (tspread, written) = match te {
         Some(XCtor(_, _, w, _, sp, _, _, _)) -> (sp, w)
         _ -> {

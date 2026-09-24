@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 88dbdf1f38adc167 -->
+<!-- doc-check: translation-of docs/spec.md @ d3340dd133a017e4 -->
 
 # Dawn Language Specification
 
@@ -388,6 +388,12 @@ type Shape =
 
 - Constructor fields **must** be named; a construction call may pass by position or by name:
   `Rect(2.0, h: 3.0)`.
+- **A sum-type constructor uses parentheses only**, in construction and in patterns alike:
+  `Rect { w: 2.0, h: 3.0 }` is an error ("constructor `Rect` is built with parentheses"), and so
+  is `Rect { w, .. }` in a pattern ("constructor `Rect` is matched with parentheses"). Braces
+  belong to records (§2.4): whatever brackets the declaration uses, construction and matching use
+  too, one spelling for one thing (since v0.78.0, which closed the second spelling;
+  [`syntax-window-design.md`](syntax-window-design.md) §3).
 - The bare name of a constructor (one with fields) in function position is an **ordinary function
   value**: `map(xs, Some)` is equivalent to `map(xs, x => Some(x))`. Type parameters are inferred
   from the expected function type (the element type of `Some` comes from the context); a type
@@ -410,9 +416,10 @@ let d = p.x                        # field access
 A record is sugar for a single-constructor product type, and supports pattern matching just the
 same. Fields are immutable — "modification" is functional update.
 
-**A record can only be built with braces.** `Point(1.0, 2.0)`, `Point(x: 1.0, y: 2.0)` and
-`Point()` are all errors ("record `Point` must be built with braces"), whether the parentheses
-were written directly or produced by a pipeline (§4.4). The reason is that spelling and meaning
+**A record can only be built with braces, and only matched with them.** `Point(1.0, 2.0)`,
+`Point(x: 1.0, y: 2.0)` and `Point()` are all errors ("record `Point` must be built with braces"),
+whether the parentheses were written directly or produced by a pipeline (§4.4); `Point(x: a)` in a
+pattern is an error too ("record `Point` is matched with braces", since v0.78.0). The reason is that spelling and meaning
 correspond one to one: fields in the brace form must be named, and filling a record positionally
 would turn field order into an ABI; a record's bare name is not a constructor function either
 (§2.3, last bullet). `x |> Point { ... }` is not "filling in fields" — it **calls a record value**,
@@ -1791,8 +1798,8 @@ to the arm body expression.
 | Literal | `0`, `"yes"`, `true` | matches if equal |
 | Binding | `x` | always matches, and binds |
 | Wildcard | `_` | always matches, binds nothing |
-| Constructor | `Some(x)`, `Rect(w, h)`, `Rect(w: w, ..)` | destructures by position or by name, `..` ignores the remaining fields |
-| Record | `Point { x, .. }` | field destructuring |
+| Constructor | `Some(x)`, `Rect(w, h)`, `Rect(w: w, ..)` | destructures by position or by name, `..` ignores the remaining fields; parentheses only |
+| Record | `Point { x, .. }` | field destructuring; braces only |
 | Tuple | `(a, b)` | |
 | List | `[]`, `[x, ..rest]` | empty list / head and rest |
 | Or | `0 \| 1 \| 2` | any alternative matches (the bindings of every alternative must agree) |
@@ -1801,7 +1808,8 @@ to the arm body expression.
 `|` has the lowest precedence in a pattern. It may occur recursively inside constructor, record,
 tuple, and list patterns, and is collected in source order as a flat n-ary or-pattern. `(pat)` is
 grouping only; a tuple pattern still requires a comma. The `|` may start a continuation line, as in
-`A\n  | B`. A newline followed by a pattern without `|` still starts the next match arm. At run time
+`A\n  | B`. A newline followed by a pattern without `|` still starts the next match arm.
+ At run time
 the first matching alternative is selected, with no backtracking inside that or-pattern. A match-arm
 guard applies to the whole or-pattern and runs at most once. If it is false, matching continues at
 the next arm. The body also runs at most once.
