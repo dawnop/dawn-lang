@@ -1,6 +1,6 @@
 # 在 GitHub 之外跑完整门禁集
 
-> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、crun 后端）、第 3b′ 刀（集群上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）与第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：集群全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。
+> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、crun 后端）、第 3b′ 刀（集群上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）、第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）与第 5 刀（2026-09-24：C 编译器进输入包，本机与集群证据包的 `toolchain` 逐字段相等）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：集群全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。
 
 ## 要解决的问题
 
@@ -163,7 +163,7 @@ status 步骤 `if: always()`，verify 步骤的 outcome 不是 `success` 就写 
 
 ### 布局
 
-`prefix.py` 的文件头写了完整布局：`toolchain/`（GraalVM CE 21.0.2、node 20.20.2、wasi-sdk 34、python 3.12.3）、`inputs/`（下载原件、种子 jar 与 std、coursier 缓存、`MANIFEST.json`）、`jobs/<sha>/`（每 job 的检出与临时目录）、`home/`、`tmp/`、`cache/`、`out/<sha>/`。
+`prefix.py` 的文件头写了完整布局：`toolchain/`（GraalVM CE 21.0.2、node 20.20.2、wasi-sdk 34、python 3.12.3；第 5 刀起还有 C 编译器 `gcc-13.3.0/`）、`inputs/`（下载原件、种子 jar 与 std、coursier 缓存、`MANIFEST.json`）、`jobs/<sha>/`（每 job 的检出与临时目录）、`home/`、`tmp/`、`cache/`、`out/<sha>/`。
 
 ### 输入包与锁
 
@@ -177,13 +177,14 @@ status 步骤 `if: always()`，verify 步骤的 outcome 不是 `success` 就写 
 | python | 3.12.3 | ubuntu-latest（24.04）的 `python3` 是 3.12.3。用 python-build-standalone 20240415 的可重定位构建，同版本 |
 | 种子 jar 与 std | 随 `scripts/seed-release.txt` | 从本机 `.dawn/seeds` 复制，按 `scripts/seed-checksums.txt`、`seed-std-checksums.txt` 校验。不在锁里再抄一份：那会是第二张每次发版都要推进的表，而 `advance-seed.sh` 不知道它 |
 | coursier 缓存 | `selfhost/dawn.lock` | 在 prefix 里用 `COURSIER_CACHE` 指向 `inputs/coursier` 跑一次 `./bin/dawn --version` 收集；三个 jar 按 `dawn.lock` 的 artifact 摘要核对 |
-| pip wheel | 无 | `gates.yml` 的步骤只用标准库。唯一用 PyYAML 的是 `gatesplan.py` 自己，它只在控制端解析计划；远端执行半边不 import 它（`import yaml` 挪进了解析函数） |
+| C 编译器 | gcc 13.3.0（运行时 14.2.0） | 第 5 刀加的，十个 conda-forge 包，见「第 5 刀」一节 |
+| pip wheel | zstandard 0.23.0 | 第 5 刀加的，只给 `inputs.py` 解 `.conda` 用，门禁步骤看不到它。此外 `gates.yml` 的步骤只用标准库。唯一用 PyYAML 的是 `gatesplan.py` 自己，它只在控制端解析计划；远端执行半边不 import 它（`import yaml` 挪进了解析函数） |
 
 `MANIFEST.json` 在 prefix 里，记每件的相对路径、字节数、文件 sha256 或目录树摘要。`verify` 逐件重算，下载物同时对锁核对，所以改了 MANIFEST 也替改过的原件作不了保。目录树摘要只取文件名、内容、属主可执行位与符号链接目标：普通用户解包受 umask 影响、root 解包保留原模式，同一个包要在两边都核得过。`__pycache__` 也不计入：python-build-standalone 不带字节码，解释器首次 import 标准库时写在旁边，并且自己按源文件校验它。第一次实测就是这一条红的。
 
 ### 执行壳
 
-prefix 模式下一个 job 的环境等价于 `env -i` 加白名单：`PATH` = prefix 各工具链 bin + `/usr/bin:/bin`（git、cc、bash、curl、coreutils 仍来自系统）；`JAVA_HOME`、`GRAALVM_HOME` 指 prefix 的 GraalVM；`HOME`、`TMPDIR`、`RUNNER_TEMP`、`XDG_CACHE_HOME`、`COURSIER_CACHE` 都在 prefix 下；`LANG=C.UTF-8`（ubuntu-latest 的值；没有 locale 时 JVM 的文件名编码退回 ASCII）；`CI=true`；加上本地后端本来就设的每 job `GITHUB_*`。
+prefix 模式下一个 job 的环境等价于 `env -i` 加白名单：`PATH` = prefix 各工具链 bin + `/usr/bin:/bin`（git、bash、curl、coreutils 仍来自系统；cc 在第 5 刀之前也是，之后是输入包里的，见「第 5 刀」）；`JAVA_HOME`、`GRAALVM_HOME` 指 prefix 的 GraalVM；`HOME`、`TMPDIR`、`RUNNER_TEMP`、`XDG_CACHE_HOME`、`COURSIER_CACHE` 都在 prefix 下；`LANG=C.UTF-8`（ubuntu-latest 的值；没有 locale 时 JVM 的文件名编码退回 ASCII）；`CI=true`；加上本地后端本来就设的每 job `GITHUB_*`。
 
 `XDG_CACHE_HOME` 与 `COURSIER_CACHE` 取的是 runner 上的默认位置（`$HOME/.cache`、`$HOME/.cache/coursier/v1`，`HOME` 在 prefix 里），coursier 缓存从输入包恢复到那里。第 3 刀曾把它们放在 prefix 单独的 `cache/` 下；第 3b′ 刀在当前 main 上跑全套时，`configured-lsp-contract.py` 与 `source-parse-counts.py` 以退出 2 红：它们不看 `COURSIER_CACHE`，直接在 `~/.cache/coursier/v1/https` 下找 ASM 9.7.1，而 CI 的工具链 action 恰好把缓存恢复在 `~/.cache/coursier`。环境与 CI 不同的地方就是会被某个脚本读到的地方，所以改成与 CI 相同，而不是改脚本。
 
@@ -232,7 +233,7 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 
 流程：
 
-1. 本机 staging 目录（在本机 prefix 的 `stage/` 下，不在 worktree 里）放本目录的工具、一个 git bundle（该提交加全部 tag）、每个 job 一份 JSON、一个 `.crun.yaml`。`remote_root` 是 `<集群 prefix>/jobs/<sha>/tree`，按提交唯一，不会与别的项目互相 `rsync --delete`。`.crun.yaml` 不进仓库。
+1. 本机 staging 目录（在本机 prefix 的 `stage/` 下，不在 worktree 里）放本目录的工具、一个 git bundle（该提交加全部 tag）、每个 job 一份 JSON、一个 `.crun.yaml`。`remote_root` 是 `<集群 prefix>/jobs/<sha>/tree-<工具摘要>`，按提交与工具版本唯一，不会与别的项目互相 `rsync --delete`（第 5 刀之前只按提交区分，见该节「途中查出」）。`.crun.yaml` 不进仓库。
 2. 在集群上跑 `inputs.py verify`。缺或红时，用第二个 staging 目录（硬链接到本机 prefix 的 `inputs/`）推到 `<集群 prefix>/inputs`，先用 `tar` 解出 python（此时 prefix 里还没有解释器），再由 `inputs.py install` 解包其余工具链并整体复核。
 3. 每个 job 一次 `crun run -n 0 --no-build -- env -i ... prefix.py run-job`，并行度由 `--jobs` 给。crun 从控制端每次都会推一次 staging 目录，未变时 3s 左右，推送由 crun 自己串行化。
 4. `run-job` 把结果片段打印成一行、同时存进 `<集群 prefix>/out/<sha>/<run>/fragments`；日志与制品留在集群的 `out/<sha>/<run>/`，不拉回。本机只解析片段，照常由 runner 合成 `bundle.json`。
@@ -254,7 +255,7 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 | 首次推送 staging（工具 + bundle，13.6 MB） | 23s |
 | 首次送输入包（578 MiB）并在集群上解包、复核 | 604s；之后每次 `inputs.py verify` 绿，推送加复核约 10s |
 | `--only tree-policy`（带 `isolation=1`） | 5 步全绿，job 176s（含隔离检查的两次 `find`）；`check-isolation` 在 `/` 与 prefix 所在文件系统上 0 条 |
-| 工具链字段对比本机 prefix | `java`、`node`、`python` 逐字相同（`21.0.2+13-jvmci-23.1-b30`、`v20.20.2`、`3.12.3`）；`cc` 不同（本机 gcc 13.3，集群 gcc 11.4），见「不做的」 |
+| 工具链字段对比本机 prefix | `java`、`node`、`python` 逐字相同（`21.0.2+13-jvmci-23.1-b30`、`v20.20.2`、`3.12.3`）；`cc` 不同（本机 gcc 13.3，集群 gcc 11.4），当时记在「不做的」，第 5 刀已收 |
 | 全套 `--jobs 16` | 墙钟 1348s（本机 `--jobs 8` 是 4969s）；35 个 job 里 31 个全绿；131 个 run 步骤执行 114 个，110 个退出码 0；`complete = false`；`bundle.py verify` 复算一致；种子摘要与 `seed-checksums.txt` 一致 |
 
 四个红 job 全部是集群环境造成的，不是替换表或 prefix 的问题，照实记录、没有改仓库源码：
@@ -325,9 +326,88 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 5f18182b 那次各 job 的秒数（含 crun 推送与两次 `find`）：最长的是 `incremental-2` 921s、`test` 884s、`syntax-mutants-1/2` 878/871s、`incremental-4` 867s；`wasm-target` 497s（wasi-sdk 走输入包），`docs` 449s（npm 离线）。工具链字段：`java` `21.0.2+13-jvmci-23.1-b30`、`python` `3.12.3`、`node` `v20.20.2`、种子 `a320e3ee…e679`，`cc` 是集群的 gcc 11.4。
 
-本机 prefix 全套（5f18182b，`--jobs 8`，load 约 28）：墙钟 4893s，39 个 job 里 38 个绿，`complete = false`。红的是 `compiler-weight-contract` 的一个变异体对照：`sampling-200ms` 预期只让「采样间隔」一条断言红，负载下 `bench.vmhwm_reads_proc` 也红了。不是 shim 造成的：同一检出单跑这个合约，用不带 shim 的同一 GraalVM 构建，在 24 个 busy loop（load 约 25）下以逐字相同的断言红过；空闲时带 shim 本机两次绿、集群三次绿。两份证据包的 `toolchain` 里 `java`、`python`、`node`、种子摘要相等，`cc` 不等（集群 gcc 11.4、本机 gcc 13.3，cc 不在输入包里，见「不做的」）。
+本机 prefix 全套（5f18182b，`--jobs 8`，load 约 28）：墙钟 4893s，39 个 job 里 38 个绿，`complete = false`。红的是 `compiler-weight-contract` 的一个变异体对照：`sampling-200ms` 预期只让「采样间隔」一条断言红，负载下 `bench.vmhwm_reads_proc` 也红了。不是 shim 造成的：同一检出单跑这个合约，用不带 shim 的同一 GraalVM 构建，在 24 个 busy loop（load 约 25）下以逐字相同的断言红过；空闲时带 shim 本机两次绿、集群三次绿。两份证据包的 `toolchain` 里 `java`、`python`、`node`、种子摘要相等，`cc` 不等（集群 gcc 11.4、本机 gcc 13.3，cc 当时不在输入包里；第 5 刀已收，见该节）。
 
 私有 `/tmp` 也说明了它为什么必要：5f18182b 那次有 20 个 job 结束时在自己的 `/tmp` 里留了东西（`dawn-selfhost-stdlib`、`dawn-selfhost-lsp-def`、`dawn-lsp-standalone-close-*.tmp`、`dawn-map-fold-*`、`dawn-spike-io-cli` 等）。这些是门禁脚本与 JVM 直接写 `/tmp` 的产物，CI 上随 VM 消失；没有私有 `/tmp` 时它们会留在共享容器的 `/tmp` 里。没有一个 job 留下 `hsperfdata_*`。
+
+## 第 5 刀：C 编译器进输入包
+
+### 为什么
+
+第 3 刀之后，步骤里只剩 C 编译器还取自 `/usr/bin`：同一个提交，集群的证据包写 `cc` = gcc 11.4，本机写 gcc 13.3。集群的 gcc 11.4 带 ASan，`native-diff` 因此能绿，但它不是 CI 用的编译器，证据包也就说不清跑的是什么。
+
+### 选什么
+
+先看 CI 实际用什么。`gates.yml` 里 C 编译器只有两种来路：`wasm-target` 自己下载钉住的 wasi-sdk，把 `DAWN_WASM_CC` 写进 `GITHUB_ENV`，这一半第 3b′ 刀已在输入包里；其余全部是 ubuntu-latest 的 `cc`。`wasm-target` 的 C driver 一步与 `java-target-classpath-contract` 直接写 `cc`，其余脚本写 `${CC:-cc}`，native driver（`nmain.dawn`）不设 `CC` 时也用 `cc`。ubuntu-latest（24.04）的 `cc` 是 gcc 13.3.0，而它的 `libasan8`、`libgcc-s1`、`libstdc++6` 由 gcc-14 构建（14.2.0-4ubuntu2~24.04，本机与 runner 同一发行版，`dpkg -l libasan8` 可见）。所以要钉的是「gcc 13.3.0 编译器加 gcc 14.2.0 运行时」这一对。
+
+| 候选 | 结论 |
+|---|---|
+| LLVM 官方预编译 tarball | 否。是 clang，不是 CI 用的编译器；18.1.8 为 1.04 GB，19.1.7 为 1.65 GB，20.1.8 为 2.02 GB（GitHub 返回的 `content-length`），按 0.6 MB/s 推到集群要 30 到 55 分钟 |
+| Ubuntu 24.04 的 deb（gcc-13、libasan8 等） | 否。对 glibc 2.39 构建，集群容器是 glibc 2.35，编译器本身与它链出的程序都可能起不来 |
+| zig cc | 否。不带 ASan 运行时，`spike-native` 缺 ASan 即失败 |
+| conda-forge 的 gcc 13.3.0 | 采用。可重定位；编译器二进制对 glibc 2.17 构建，只依赖 libc、libm、libdl；自带 sysroot，glibc 版本可选 |
+
+包清单（`inputs.lock.json` 的 `conda_toolchains`，十个，共 121 MiB）：`gcc_impl_linux-64` 13.3.0；`gcc` 13.3.0，只含 `bin/cc`、`bin/gcc` 等指向 `x86_64-conda-linux-gnu-gcc` 的符号链接，所以 `cc` 这个名字也来自上游，输入包里没有手写的文件；`libgcc-devel_linux-64` 13.3.0；`binutils_impl_linux-64` 与 `ld_impl_linux-64` 2.42（24.04 的 binutils 也是 2.42）；`sysroot_linux-64` 2.34 与 `kernel-headers_linux-64` 5.14.0；运行时 `libsanitizer`、`libgcc`、`libstdcxx` 14.2.0。
+
+两处取舍：
+
+- **sysroot 选 2.34，不选 CI 的 2.39。** 链出的程序在宿主上用宿主的 `libc.so.6` 运行，要求的符号版本不能新于宿主。集群是 2.35，2.34 是不超过它的最新一版（conda-forge 另有 2.17、2.28、2.39）。头文件因此与 CI 不同；`-std=c11` 下的运行时没有用到 2.34 与 2.39 之间新增的接口，下面的集群全套为证。
+- **运行时是 14.2.0，不是与编译器同源的 13.3.0。** 这不只是为了与 CI 一致。conda-forge 的 gcc 13.3.0 自带的 libasan 在本机内核上（高熵 ASLR，mmap 随机化 32 位）随机死于 `AddressSanitizer:DEADLYSIGNAL`：一个最小的 ASan 程序连跑 50 次，9 次卡死；换成 14.2.0 的 libasan，100 次 0 次；宿主的 Ubuntu 组合 50 次 0 次。`scripts/spike-native/run.sh` 在 ASan 不可用时 fail-closed，这种随机失败会直接变成门禁的偶发红。libasan.so.8 的 ABI 在 13 与 14 之间不变，Ubuntu 这样配也是这个道理。
+
+### 解包与重定位
+
+`.conda` 是 zip，里面是 zstd 压缩的 tar。prefix 的 python 3.12 没有 zstd 模块，集群容器有没有 `zstd` 命令不知道，也不许装。所以锁里另钉一个 `zstandard` 0.23.0 的 cp312 wheel，由 prefix 的 python 带着它解包（`inputs.py conda-unpack`，`build` 与 `install` 都调它）：两边是同一个解释器、同一份代码，不依赖宿主工具。解包按每个包自己的 `info/paths.json` 核：只解出其中列出的文件（`gcc` 包 payload 里的 `info/licenses/LICENSE` 这类 conda 留在包缓存、不链进环境的文件跳过），多一个少一个都拒绝，每个普通文件按其中记录的 sha256 核，两个包给出同一路径也拒绝。
+
+这十个包里有 85 个文本文件带着构建前缀的占位符（gcc 的 `specs`、binutils 的链接脚本、sysroot 的 clang 配置等），`conda install` 会把占位符换成安装位置，`inputs.py` 照做。其中 gcc 的 `specs` 给每次非静态链接加 `-rpath <工具链>/lib`，ASan 程序就是靠它找到输入包里的 libasan：不这样，本机会悄悄用上宿主的 libasan8，集群上只有 gcc 11 的 libasan6，程序起不来。代价是这些文件里写着 prefix 的绝对路径，所以目录树摘要对它们先把实际位置换回占位符再算（`MANIFEST.json` 的该行记下是哪些文件、各自的占位符），同一份包解在任何位置摘要都相同。实测：在一个目录 `build`，把 `inputs/` 硬链接到另一个目录再 `install`，摘要一致、`verify` 绿，后者 `specs` 里的 rpath 指向后者。
+
+### 注入：只动 PATH
+
+步骤找编译器只有一种方式，PATH 上的 `cc`（上面三种写法都归结于此）。所以白名单只改了一项：`PATH` 在 `/usr/bin` 之前加上 `toolchain/gcc-13.3.0/bin`。偏离任务单的两处：
+
+- **不设 `CC`。** CI 不设它。设成绝对路径对 `${CC:-cc}` 等价，对直接写 `cc` 的两处无效，PATH 反正要改；多设一个 CI 没有的变量，只是多一处与 CI 的差别。仓库自己也这么看：`scripts/selfhost-bench.py` 把 `CC` 列在 `POLLUTING_ENV` 里，环境里有它就拒绝测量。
+- **不设 `DAWN_WASM_CC`。** 它由 `wasm-target` 自己的步骤写进 `GITHUB_ENV`，指向输入包里已有的 wasi-sdk；全局设它，别的 job 就会看到 CI 上没有的变量。
+
+`prefix.py selftest` 多了一条「`cc` 是输入包的」；`--break-env-i`（把宿主环境垫在下面）时它与另三条一起红，报 `/usr/bin/cc`。
+
+### 不进替换表
+
+任务单要求在替换表登记，没有加行，理由是实测出来的。`substitutions` 由提交的 `gates.yml` 推出，核验方（`verify-external.yml` 用默认分支的 `gatesplan.py`）要求证据包里的表逐行等于它推出的表。无条件加一行 `adjust:cc-input-pack`，已发布的 14535104 的证据包（`refs/notes/gates` 上那份，sha256 `f866a2b7…`）立刻核不过：`bundle.py verify` 从 `COMPLETE` 变成 `INVALID substitutions: not the table this tree's gates.yml produces`。也找不到按提交区分的条件：编译器是 runner 的事，不在 `gates.yml` 里。它与 python、node、java 同类，第 3 刀起那三者只记在 `toolchain` 字段，不占替换表的行；`cc` 现在一样，而 `toolchain.cc` 的值 `cc (conda-forge gcc 13.3.0-2) 13.3.0` 本身就写明了来源。
+
+### 与并行使用者兼容
+
+本机 `~/dawn-gates` 与集群 prefix 同时被别的分支的旧 `inputs.py` 使用。旧 `verify` 只读 `MANIFEST.json` 的 `items`，按它自己的锁给每个 download 行取摘要（新包名不在旧锁里，会抛异常），并且不做重定位就算目录树摘要（`cc` 那一行会红）。所以新行放在新键 `conda_items` 下，旧工具看不见。同一理由的两处小改：`build` 写 MANIFEST 改为先写临时文件再改名；npm 缓存在仍然完好时沿用上次的，不再每次重填（重填的字节必然不同，会在别人用着时改掉缓存和摘要）。实测：本机 prefix `build` 前后 `items` 除 `download_seconds` 外逐项相同；改动前的 `inputs.py verify` 在新包上绿（本机与另一目录各一次）。
+
+### 途中查出：staging 只按提交区分
+
+第一次集群全套（b2e19e06，本分支的工具）的证据包 `toolchain.cc` 是 `null`：39 个 job 里 21 个报输入包的 gcc 13.3，18 个报容器的 gcc 11.4，`crun backend: jobs disagree on toolchain.cc`。原因不在编译器：本机 staging 目录是 `stage/jobs/<sha>`，远端树是 `jobs/<sha>/tree`，只按提交区分；而 origin/main 的头正是别的写者会拿来当基线跑的提交。本次 prepare 之后一分钟（10:05:33），另一个分支的控制端用它自己的旧工具重新 stage 了同一个 sha，此后每次 crun 推送都把旧的 `prefix.py` 推到同一个远端树，后启动的 job 跑的就是它（事后本机 staging 里的 `prefix.py` 不含 `conda_toolchains`，mtime 是那个 worktree 的）。一个 job 跑什么，由提交和这套工具共同决定，所以 staging 目录与远端树现在都带上工具摘要（`TOOL_FILES` 的 sha256 前 12 位）：`stage/jobs/<sha>-<摘要>`、`jobs/<sha>/tree-<摘要>`。输入包的 staging 目录同理改成每次运行一个，推完删掉。
+
+### 实测（2026-09-24）
+
+| 项 | 结果 |
+|---|---|
+| 本机 `inputs.py build`（下载已在，只加编译器） | 19s；十个包解包加重定位 2.3s，85 个文件重定位；`toolchain/gcc-13.3.0` 解开 764.5 MiB |
+| 送到集群 | 首次 `inputs.py verify` 红（锁里的编译器不在远端 MANIFEST），`inputs/` 再推一次、远端 `install`、复核共 225s；已有的四套工具链 `already matches`，只解了编译器（2.5s） |
+| 本机 prefix `--only native-selfhost-tests,native-diff-1`（62481320，`--jobs 2`） | 5 个 run 步骤全部 exit 0，墙钟 891s |
+| 集群同上 | 5 个 run 步骤全部 exit 0，墙钟 997s（含上一行的 225s） |
+| 两份证据包的 `toolchain` | 逐字段相等，`diff` 输出为空：`cc` `cc (conda-forge gcc 13.3.0-2) 13.3.0`、`java` `21.0.2+13-jvmci-23.1-b30`、`python` `3.12.3`、`node` `v20.20.2`、`seed_jar_sha256` `a320e3ee…e679`；`substitutions` 也相同 |
+| ASan 真的跑了 | 本机 `spike-native` 分片 1 的逐项结果与改动前（宿主 gcc）那次逐字相同：只有 `ctl_vthread`、`effect_sam_snapshot` 两个条目整条 `blocked`（改动前也是），其余条目的 `:asan` 都是 ok。缺 ASan 时每个条目的 `:asan` 都会是 `blocked` |
+| 集群全套，origin/main 头 b2e19e06，本分支工具（d3ec809b），`--jobs 16`，每个 job 套隔离检查 | **`complete = true`**：175 个 run 步骤全部执行、全部 exit 0，39 个 job 全绿；`bundle.py verify` `COMPLETE`；39 次隔离检查全部 0 条；证据包 sha256 `62470de4…4526`。墙钟 2892s（上次全套 1722s；这次另有三个写者同时占着集群，最长的 `incremental-2` 1535s，上次 925s） |
+| 集群全套的 `toolchain` 对本机 `--only` | 逐字段相等，`diff` 输出为空 |
+| 修 staging 之前的那次全套（同一提交，d3ec809b 之前的工具） | `toolchain.cc` 为 `null`（见上一节），另有两处红：`compiler-weight-contract` 的 `selfhost-bench-contract/run.py`（exit 1）与 `docs` 的 `playground/test/contract.sh`（exit 7；脚本在 `set -e` 下把 `$(curl …)` 赋给变量，7 最可能是 curl 的「连不上」，步骤日志留在集群上没有取回）。两者都不调 C 编译器；那次各 job 比上次慢 2 到 3 倍（`list-elems-contract` 1838s，上次 587s）。同一 job 在本机 prefix 单跑绿（370s），修好后的全套里两者也都绿。归为负载下的计时，照实记下，没有改被测脚本 |
+
+### 负控
+
+| 做法 | 结果 |
+|---|---|
+| 锁住的编译器包（`gcc_impl_linux-64` 的 `.conda`）第 1000000 字节翻一位 | `inputs.py verify` 红：`sha256 5608…3be5 is not the lock's c3e9…f774`；复原后绿 |
+| 重定位过的 `specs` 里改 rpath | 红：`toolchain cc … tree digest … differs from MANIFEST`；复原后绿 |
+| 解开后的 `lib/libasan.so.8.0.0` 第 4096 字节翻一位 | 红，同上；复原后绿 |
+| `zstandard` wheel 第 2000 字节翻一位 | 红，对锁不符；复原后绿 |
+| `prefix.py` 第 110 行 `lock["downloads"] + lock.get("conda_toolchains", [])` 用 sed 改回 `lock["downloads"]`（去掉 PATH 注入） | `prefix.py selftest` 红：`FAIL cc is the input pack's: /usr/bin/cc`；`run.sh --only tree-policy` 的证据包 `toolchain.cc` 回到宿主的 `cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0`；`git checkout` 复原 |
+| `prefix.py selftest --break-env-i` | 红，`cc` 一条报 `/usr/bin/cc`，与 `JAVA_HOME`、PATH、宿主变量三条一起 |
+| 在 `gatesplan.ADJUSTMENTS` 加一行无条件的 `adjust:cc-input-pack` | 已发布的 14535104 证据包 `bundle.py verify` 由 `COMPLETE` 变 `INVALID substitutions`（见「不进替换表」） |
+
+前四条改的是临时目录里的一份 prefix 副本，下载物先 `cp` 成独立的 inode 再改，共享 prefix 里的原件未动（事后 sha256 仍是 `c3e9f243…`）。
 
 ## 与 #167 的关系
 
@@ -381,6 +461,7 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 - **时长字段。** 证据包不记时长。时长是机器画像的一部分（核数、负载、邻居），不是树的性质；它也无法被验证者复核。本地计时写在 `summary.json`，只给跑的人看。
 - **把 `/tmp/gate-emit` 改掉。** 任务单明确本刀不改仓库源码，且 #168 正在改 `gates.yml`；列进上一节。（8097 与 `fuser -k` 已由 #173 改掉。）
 - **解析复合 action 并逐步替换其内部步骤。** 复合 action 的内部是 GraalVM 下载与缓存，没有门禁；整体替换加指纹更简单，也更早暴露变化。
-- **prefix 里的 cc。** C 编译器仍来自 `/usr/bin`（本机 gcc 13.3，集群 gcc 11.4），证据包的 `toolchain.cc` 会随机器变化。把 gcc 连同 libasan 打进输入包是另一件事；集群上又不允许 apt。
+- **宿主的 glibc 运行时。** 第 5 刀的 sysroot 只管链接；链出的程序运行时仍用宿主的 `libc.so.6`（集群 2.35，本机 2.39），与 git、bash 一样是宿主的。把 glibc 也带进来要连动态加载器一起带，那是容器镜像的事。
+- **`clang` 与 binutils 的无前缀名。** 输入包的 `bin/` 上 PATH 的只有 gcc 的名字（`cc`、`gcc`、`cpp`、`gcov*`、`gcc-ar/nm/ranlib`），binutils 只有 `x86_64-conda-linux-gnu-*` 前缀名，gcc 自己按相对路径找 `as`、`ld`。门禁里直接调的 binutils 只有 `release-native.sh` 的 `readelf`（只读检查产物的 ELF 头），用宿主的；`clang` 只在 `DAWN_WASM_CC` 未设时作 wasm 的默认值，而 `wasm-target` 总会设它。
 - **node 版本与 `lts/*`。** `docs` job 在 CI 上用 `setup-node` 的 `lts/*`，按任务单这里钉的是 20 LTS；两者不一定相同，证据包如实记录 `node` 字段。
 - **覆盖 `tile.yml`、`editor-grammar.yml`、`nightly.yml`。** 任务单的范围是 `gates.yml`。前两个是按路径触发的门禁工作流，`tile.yml` 需要 GPU；把它们纳入是 crun 后端那一刀的事。
