@@ -16,8 +16,10 @@ How a run goes (all remote paths under --backend-opt remote-prefix=P):
   prepare   1. a staging directory (not a worktree) holding this directory's
                tools, a git bundle of the commit and every tag, one JSON per
                planned job, and a .crun.yaml whose remote_root is
-               P/jobs/<sha>/tree, unique per commit so no two projects ever
-               rsync --delete into each other
+               P/jobs/<sha>/tree-<tools>, unique per commit and per version
+               of these tools (a digest of TOOL_FILES), so no two projects,
+               and no two controllers with different tools, ever rsync
+               --delete into each other
             2. `inputs.py verify` on the cluster; if the pack is missing or
                red, a second staging directory (hard links to the local
                prefix's inputs/) goes to P/inputs and `inputs.py install`
@@ -58,6 +60,7 @@ Options (--backend-opt):
   start-gap=SECONDS   minimum spacing between crun starts (default 2)
 """
 
+import hashlib
 import json
 import os
 import shlex
@@ -111,7 +114,15 @@ class CrunBackend:
         self.fragments = {}
         self.start_lock = threading.Lock()
         self.last_start = 0.0
-        self.tree_remote = f"{self.remote}/jobs/{self.tree}/tree"
+        # What a job runs is the commit and these tools, so both name the
+        # staging directory and the remote tree. Keyed by the commit alone,
+        # two controllers on one commit with different tools (a branch's run
+        # of origin/main as its baseline, beside this one) overwrite each
+        # other's tools/ between crun pushes, and a job runs whichever landed
+        # last: seen as 18 of 39 jobs of one run reporting the cluster's gcc
+        # 11.4 instead of the input pack's compiler.
+        self.tools_tag = tools_digest()[:12]
+        self.tree_remote = f"{self.remote}/jobs/{self.tree}/tree-{self.tools_tag}"
 
     # ------------------------------------------------------------ helpers
 
@@ -154,7 +165,7 @@ class CrunBackend:
 
     def prepare(self):
         plan = gatesplan.plan_at(str(self.repo), self.tree)
-        stage = self.stage_root / "jobs" / self.tree
+        stage = self.stage_root / "jobs" / f"{self.tree}-{self.tools_tag}"
         self.stage = stage
         t0 = time.monotonic()
         tools = stage / "tools"
@@ -212,7 +223,7 @@ class CrunBackend:
                            str(self.local_prefix)], capture_output=True).returncode != 0:
             raise SystemExit("crun backend: the local input pack does not verify; "
                              "run inputs.py build first")
-        stage = self.stage_root / "inputs"
+        stage = self.stage_root / f"inputs-{self.run_id}"
         shutil.rmtree(stage, ignore_errors=True)
         subprocess.run(["cp", "-al", str(local_inputs), str(stage)], check=True)
         self._write_crun_yaml(stage, f"{self.remote}/inputs")
@@ -231,6 +242,7 @@ class CrunBackend:
         self.log(f"crun backend: shipping the input pack ({size / 2**20:.0f} MiB) to "
                  f"{self.remote}/inputs")
         code, out, err = self._crun(stage, self._envi() + ["bash", "-c", script], "inputs-ship")
+        shutil.rmtree(stage, ignore_errors=True)  # hard links, one per run
         self.log(f"crun backend: input pack shipped and installed: exit {code} in "
                  f"{time.monotonic() - t0:.0f}s")
         if code != 0:
@@ -301,6 +313,16 @@ class CrunBackend:
 
     def cleanup(self):
         pass
+
+
+def tools_digest():
+    """sha256 over TOOL_FILES, names and bytes: what a remote job executes."""
+    digest = hashlib.sha256()
+    for name in TOOL_FILES:
+        data = (HERE / name).read_bytes()
+        digest.update(f"{name} {len(data)}\n".encode())
+        digest.update(data)
+    return digest.hexdigest()
 
 
 def urllib_name(url):

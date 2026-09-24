@@ -15,7 +15,8 @@ persistent disk.
 
 Layout (created by `layout`):
 
-    toolchain/<dir>/     one per download in inputs.lock.json
+    toolchain/<dir>/     one per download in inputs.lock.json, and one per
+                         conda toolchain (the C compiler, gcc-13.3.0/)
     inputs/downloads/    the archives, as downloaded
     inputs/seeds/<tag>/  inputs/std-seeds/<tag>/  inputs/coursier/
     inputs/MANIFEST.json what inputs.py put there, with a sha256 per item
@@ -88,8 +89,13 @@ def ensure_layout(prefix):
 def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
     """The complete environment a job sees: nothing from the caller.
 
-    PATH is the prefix's toolchain bins, then /usr/bin:/bin for git, cc, bash,
-    curl and coreutils, which the prefix does not carry. LANG is ubuntu-latest's
+    PATH is the prefix's toolchain bins, then /usr/bin:/bin for git, bash,
+    curl and coreutils, which the prefix does not carry. The C compiler is
+    one of the toolchain bins: the steps find it only as `cc` on PATH (bare
+    in wasm-target's driver step and the classpath contract, `${CC:-cc}` in
+    the scripts, and the native driver's own default), so PATH is the one
+    place to inject it. CC is not set, since CI does not set it, and neither
+    is DAWN_WASM_CC, which wasm-target's own step writes. LANG is ubuntu-latest's
     value: without any locale the JVM's file-name encoding falls back to ASCII.
     DAWN_SEED is deliberately absent: CI does not set it, and set it would
     make seedjar.sh skip its checksum and print a warning CI never prints; the
@@ -100,7 +106,8 @@ def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
     """
     prefix = Path(prefix)
     bins = []
-    for item in load_lock()["downloads"]:
+    lock = load_lock()
+    for item in lock["downloads"] + lock.get("conda_toolchains", []):
         if item["bin"]:
             bins.append(str(prefix / "toolchain" / item["dir"] / item["bin"]))
     env = dict(os.environ) if inherit_host else {}
@@ -271,12 +278,13 @@ def cmd_exec(args):
 
 
 def cmd_selftest(args):
-    """A host JAVA_HOME and PATH entry must not reach a job's shell."""
+    """A host JAVA_HOME, PATH entry or C compiler must not reach a job's shell."""
     prefix = Path(args.prefix).resolve()
     ensure_layout(prefix)
     want = str(java_home(prefix))
     leak = "/leaked/host/jdk"
-    probe = 'printf "%s\\n%s\\n%s\\n" "$JAVA_HOME" "$PATH" "${HOST_ONLY_VARIABLE:-unset}"'
+    probe = ('printf "%s\\n%s\\n%s\\n%s\\n" "$JAVA_HOME" "$PATH" '
+             '"${HOST_ONLY_VARIABLE:-unset}" "$(command -v cc || echo none)"')
     saved = {k: os.environ.get(k) for k in ("JAVA_HOME", "HOST_ONLY_VARIABLE", "PATH")}
     os.environ["JAVA_HOME"] = leak
     os.environ["HOST_ONLY_VARIABLE"] = "leaked"
@@ -296,6 +304,10 @@ def cmd_selftest(args):
         ("no host PATH entry", leak not in out[1], out[1]),
         ("no host-only variable", out[2] == "unset", out[2]),
     ]
+    compilers = [str(prefix / "toolchain" / entry["dir"] / entry["bin"] / "cc")
+                 for entry in load_lock().get("conda_toolchains", [])]
+    if compilers:
+        checks.append(("cc is the input pack's", out[3] in compilers, out[3]))
     ok = True
     for name, good, seen in checks:
         print(f"{'ok  ' if good else 'FAIL'} {name}: {seen}")
@@ -319,7 +331,7 @@ def writable_paths(prefix, sha):
     """What a job may write: everything else in the prefix stays root's.
 
     toolchain/ and inputs/ are not in the list, so a job cannot change the
-    toolchain it is measured with; jobs/<sha>/tree is crun's mirror of the
+    toolchain it is measured with; jobs/<sha>/tree-<tools> is crun's mirror of the
     staging directory and is only read.
     """
     prefix = Path(prefix)

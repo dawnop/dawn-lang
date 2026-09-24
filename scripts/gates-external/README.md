@@ -109,13 +109,13 @@ It does not decide what runs (`gatesplan.py`) or what counts as complete
 
 `--prefix DIR` runs every job inside one directory. Its layout is in
 `prefix.py`'s docstring: `toolchain/` (GraalVM CE 21.0.2, node 20, wasi-sdk 34,
-python 3.12.3), `inputs/` (the archives, the seed jar and std, a coursier
+python 3.12.3, and the C compiler, gcc 13.3.0), `inputs/` (the archives, the seed jar and std, a coursier
 cache, `MANIFEST.json`), `jobs/<sha>/`, `home/`, `tmp/`, `cache/`,
 `out/<sha>/`. No location is written into the code.
 
 A prefix job's environment is not the caller's minus a drop list; it is built
-from nothing (the effect of `env -i`): `PATH` is the toolchain bins then
-`/usr/bin:/bin`, `JAVA_HOME` and `GRAALVM_HOME` the prefix's GraalVM, `HOME`,
+from nothing (the effect of `env -i`): `PATH` is the toolchain bins (the
+compiler's among them) then `/usr/bin:/bin`, `JAVA_HOME` and `GRAALVM_HOME` the prefix's GraalVM, `HOME`,
 `TMPDIR`, `RUNNER_TEMP`, `XDG_CACHE_HOME` and `COURSIER_CACHE` under the prefix
 (the last two at a runner's defaults below `HOME`, `.cache` and
 `.cache/coursier/v1`, because gate scripts read `~/.cache/coursier/v1` directly),
@@ -139,6 +139,28 @@ carries times, so two fills differ. The lock pins the lockfile it is filled
 from (`npm_caches`), npm checks every tarball it takes from the cache against
 that lockfile's integrity fields, and MANIFEST records the tree digest of the
 cache that was built, which `verify` holds it to.
+
+The C compiler is what ubuntu-latest's `cc` is: gcc 13.3.0, with the
+sanitizer, libgcc_s and libstdc++ runtimes Ubuntu 24.04 builds from gcc
+14.2.0. The lock pins it as ten conda-forge packages (`conda_toolchains`,
+121 MiB) with a glibc 2.34 sysroot, so what they link starts on a host from
+2.34 up (the cluster has 2.35). The 14.2.0 runtime is not cosmetic: gcc
+13.3.0's own libasan dies with `AddressSanitizer:DEADLYSIGNAL` on a kernel
+with 32-bit mmap randomisation, and `spike-native` fails closed without
+ASan. The packages are unpacked by the prefix's python with a pinned
+`zstandard` wheel (`.conda` members are zstd tars), checked file by file
+against each package's `info/paths.json`, and relocated as `conda install`
+does: gcc's specs then add `-rpath <toolchain>/lib` to every link, which is
+how an ASan binary finds the pack's libasan and not the host's. The
+relocated files are hashed with the placeholder put back, so the tree digest
+is the same wherever the prefix lives. Steps reach the compiler only as `cc`
+on `PATH`; `CC` and `DAWN_WASM_CC` are not set, as on CI. The compiler's
+MANIFEST rows sit under `conda_items`, which verifiers from before it do not
+read, because the shared prefixes are verified by other branches' tools too.
+It is recorded in `toolchain.cc` (`cc (conda-forge gcc 13.3.0-2) 13.3.0`),
+like python, node and java, and has no substitution row: that table is
+derived from the commit, and a new unconditional row would invalidate
+bundles already published.
 
 `inputs.py` trusts only the digests in `inputs.lock.json`. The seed jar and std
 are checked against `scripts/seed-checksums.txt` and `seed-std-checksums.txt`,
