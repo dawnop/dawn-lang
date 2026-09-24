@@ -409,6 +409,16 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 前四条改的是临时目录里的一份 prefix 副本，下载物先 `cp` 成独立的 inode 再改，共享 prefix 里的原件未动（事后 sha256 仍是 `c3e9f243…`）。
 
+## release 守卫的 ci 证据只认 main 的 push 运行（2026-09-25）
+
+`release_evidence.py` 的第 1 条证据原来是「`ci.yml` 在该 sha 上有任意一次成功运行，不限事件与分支」，理由是 `ci.yml` 在所有分支上调用同一个 `gates.yml`。#168 之后这个前提不成立：`pull_request` 运行只跑 `plan.py` 选的子集，其余 job 跳过、按 success 计；Actions API 把 PR 运行记在 PR 头提交的 sha 下。同一个 sha 先在 PR 上子集绿、再原样快进推到 main 时，`any(success)` 会把子集绿当全集证据，哪怕 main 上那次全集是红的。今天走 `gh pr merge --rebase` 总会产生新 sha，所以还没踩到；快进合入一旦常用就会踩到。
+
+改法：`ci_evidence` 只接受 `event == "push"` 且 `head_branch` 为默认分支、已完成且成功的运行；其它运行照样列出，每行末尾注明拒因（`refused: event pull_request, not push ...` 或 `refused: pushed to <branch>, not main`）。`plan.py` 对非 `pull_request` 事件一律答 `all`，这是「main 的 push 运行就是全集」的依据。事件与分支两个条件缺一不可：fork 从自己的 `main` 开的 PR，运行的 `head_branch` 也是 `main`，只查分支拦不住它。
+
+自测从 11 例增到 14 例：PR 事件的成功运行（`head_branch` 为 `main`）拒；非默认分支的 push 成功运行拒；main 的 push 成功运行与一次失败的 PR 运行并存时收。负控：删掉事件条件，第 1 例红（`pull request run green: exit 0, want 1`）；删掉分支条件，第 2 例红。
+
+墙钟：0。`verified` job 的 API 查询次数不变，只是本地多过滤一步。行为变化：非 main 分支上的 push 运行不再被接受（今天 `ci.yml` 只在 main 上响应 push，`ci.yml:25-26`，所以没有这种运行）。
+
 ## 与 #167 的关系
 
 #167 要的是「分片之后各分片步骤的并集仍等于原 job 的步骤」的核对。本刀的多重集比较（`bundle.multiset_diff`）就是这个并集检查的核心：它逐条点名少了的和多出的命令。

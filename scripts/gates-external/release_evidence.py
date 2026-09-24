@@ -11,10 +11,23 @@ workflow only calls it.
 
 The two sources of evidence, either of which is enough:
 
-1. ci.yml has a completed, successful run whose head_sha is this commit. On
-   any branch: ci.yml calls the same gates.yml everywhere, so where the
-   commit was when it went green does not change the verdict (release.yml's
-   note on `verified` settled this before this script existed).
+1. ci.yml has a completed, successful run whose head_sha is this commit,
+   triggered by a push to the default branch. Only that run is the whole
+   gate set. Until 2026-09-23 any successful run would do, on any branch or
+   event, because ci.yml called the same gates.yml everywhere and every run
+   was the whole set. The two-tier CI (#168) ended that: a pull_request run
+   executes only the jobs scripts/gate-map/plan.py names for its diff, and
+   the rest report as skipped, which GitHub counts as success. The Actions
+   API files a pull request run under the pull request's head sha, so a
+   commit that went green as a pull request head and was then pushed to main
+   unchanged (a fast-forward) would pass with `any(success)` on the strength
+   of a subset, even if main's full run of the same sha was red. So the run
+   must say event `push` and head_branch the default branch; plan.py answers
+   `all` for every event that is not a pull request, which is what makes
+   such a run the whole set. Refused runs are still listed, each with the
+   reason, so a red guard shows what it did find. Matching on head_sha alone
+   is also what Envoy's workflow policy warns against: head_sha is a key a
+   pull request author controls.
 
 2. The latest commit status with context `gates/maintainer` on this commit is
    `success`, and it was written by verify-external.yml on this repository's
@@ -102,15 +115,31 @@ def parse_time(stamp):
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
-def ci_evidence(api, repo, sha):
+def ci_refusal(run, default_branch):
+    """Why a ci.yml run cannot stand for the whole gate set, or None."""
+    if run.get("event") != "push":
+        return f"event {run.get('event')}, not push (a pull request runs a subset)"
+    if run.get("head_branch") != default_branch:
+        return f"pushed to {run.get('head_branch')}, not {default_branch}"
+    return None
+
+
+def ci_evidence(api, repo, sha, default_branch):
     """(ok, pending, lines) for source 1."""
     pages = api(f"repos/{repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100")
     runs = [run for page in pages for run in page.get("workflow_runs", [])]
-    lines = [f"  {run.get('status')}\t{run.get('conclusion') or 'pending'}\t"
-             f"{run.get('head_branch')}\t{run.get('html_url')}" for run in runs]
-    ok = any(run.get("status") == "completed" and run.get("conclusion") == "success"
-             for run in runs)
-    pending = any(run.get("status") != "completed" for run in runs)
+    lines, ok, pending = [], False, False
+    for run in runs:
+        refusal = ci_refusal(run, default_branch)
+        lines.append(f"  {run.get('status')}\t{run.get('conclusion') or 'pending'}\t"
+                     f"{run.get('event')}\t{run.get('head_branch')}\t{run.get('html_url')}"
+                     + (f"\trefused: {refusal}" if refusal else ""))
+        if refusal:
+            continue
+        if run.get("status") == "completed" and run.get("conclusion") == "success":
+            ok = True
+        elif run.get("status") != "completed":
+            pending = True
     return ok, pending, lines or ["  (none)"]
 
 
@@ -167,12 +196,14 @@ def external_evidence(api, repo, sha, default_branch, server):
 
 def decide(api, repo, sha, default_branch, server, out):
     """Print both checks and return the exit status."""
-    ci_ok, pending, ci_lines = ci_evidence(api, repo, sha)
+    ci_ok, pending, ci_lines = ci_evidence(api, repo, sha, default_branch)
     ext_ok, ext_lines = external_evidence(api, repo, sha, default_branch, server)
-    print(f"check 1, ci.yml runs at {sha} (status, conclusion, branch, url):", file=out)
+    print(f"check 1, ci.yml push runs on {default_branch} at {sha} "
+          "(status, conclusion, event, branch, url):", file=out)
     for line in ci_lines:
         print(line, file=out)
-    print(f"  -> {'green' if ci_ok else 'no successful run'}", file=out)
+    print(f"  -> {'green' if ci_ok else f'no successful push run on {default_branch}'}",
+          file=out)
     print(f"check 2, {CONTEXT} status written by {VERIFY_WORKFLOW} on {default_branch}:",
           file=out)
     for line in ext_lines:
@@ -187,7 +218,8 @@ def decide(api, repo, sha, default_branch, server, out):
               "that run to go green (or publish external evidence), then re-run this release "
               "workflow", file=out)
     else:
-        print(f"::error::neither check holds on {sha}: no successful ci.yml run and no accepted "
+        print(f"::error::neither check holds on {sha}: no successful ci.yml push run on "
+              f"{default_branch} and no accepted "
               f"{CONTEXT} status. Get ci green on this commit or publish signed external "
               "evidence (scripts/gates-external/publish.py), then re-run this release "
               "workflow, or delete the tag and push it again at a verified commit.", file=out)
@@ -211,8 +243,9 @@ def self_test():
     runs_ci = f"repos/{repo}/actions/workflows/ci.yml/runs"
     stats = f"repos/{repo}/commits/{sha}/statuses"
     run_path = f"repos/{repo}/actions/runs/7"
-    ci_green = {"workflow_runs": [{"status": "completed", "conclusion": "success",
-                                   "head_branch": "main", "html_url": "u"}]}
+    main_push = {"status": "completed", "conclusion": "success", "event": "push",
+                 "head_branch": "main", "html_url": "u"}
+    ci_green = {"workflow_runs": [main_push]}
     ci_none = {"workflow_runs": []}
     good_status = {"context": CONTEXT, "state": "success", "id": 1,
                    "created_at": "2026-09-24T10:00:30Z", "creator": {"login": BOT},
@@ -243,7 +276,20 @@ def self_test():
         "later failure supersedes": (
             case(ci_none, [dict(good_status, state="failure", id=2,
                                 created_at="2026-09-24T10:00:50Z"), good_status]), 1),
-        "ci pending only": (case({"workflow_runs": [{"status": "in_progress"}]}, []), 1),
+        "ci pending only": (case({"workflow_runs": [dict(main_push, status="in_progress",
+                                                        conclusion=None)]}, []), 1),
+        # Since the two-tier CI (#168) only a push run on the default branch is
+        # the whole gate set; a pull request run is a subset whatever it says.
+        # Its head_branch is the pull request's head branch, which is `main`
+        # for a fork's main, so the branch test alone does not refuse it.
+        "pull request run green": (
+            case({"workflow_runs": [dict(main_push, event="pull_request")]}, []), 1),
+        "push run on another branch green": (
+            case({"workflow_runs": [dict(main_push, head_branch="feature")]}, []), 1),
+        "main push green beside a pull request run": (
+            case({"workflow_runs": [dict(main_push, event="pull_request",
+                                         head_branch="feature", conclusion="failure"),
+                                    main_push]}, []), 0),
     }
     failures = []
     for label, (api, want) in cases.items():
