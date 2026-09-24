@@ -54,7 +54,15 @@ def main():
          'None -> Some(true)'),
     ]
     subjects.append(('dispatch-positive', 'checker', checker, None))
-    subjects.extend((name, 'checker', checker[:dispatch_start] + edit(dispatch, old, new) + checker[dispatch_end:],
+    def dispatch_mutant(old, new):
+        text = checker[:dispatch_start] + edit(dispatch, old, new) + checker[dispatch_end:]
+        # a mutant that drops the dispatch's only call drops its import too:
+        # an unused import is an error, and a mutant that does not compile
+        # proves nothing
+        if 'revalidate_context_read(' in old and 'revalidate_context_read(' not in new:
+            text = edit(text, '  revalidate_context_read,\n', '')
+        return text
+    subjects.extend((name, 'checker', dispatch_mutant(old, new),
                      'candidate revalidation dispatches queries without accepting unknown facts')
                     for name, old, new in dispatch_variants)
     # Qualified effects are captured by a real provider/consumer fixture in

@@ -57,6 +57,9 @@ def mutants(jar, verifier):
         ("narrow", "jvm/emit.dawn", [
             ('    if rc == "byte" { m.visitInsn(OP_I2B) }\n', ''),
             ('    if rc == "short" { m.visitInsn(OP_I2S) }\n', ''),
+            # their imports go with their only uses: an unused import is an
+            # error, and a mutant that does not compile proves nothing
+            ('OP_I2B, OP_I2L, OP_I2S, ', 'OP_I2L, '),
         ], "SAM_NARROW_VALUE"),
     ]
     for name, relative, edits, marker in variants:

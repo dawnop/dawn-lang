@@ -153,11 +153,15 @@ stale = '''fn stale_public_builtin_type_names() -> List[String] =
   ["Int", "Float", "Bool", "String", "Unit", "List"]
 
 '''
-if text.count(anchor) != 1 or text.count("public_builtin_type_names()") != 2:
+# the import goes with its last use: an unused import is an error, and a
+# mutant that does not compile proves nothing
+imported = "  public_builtin_type_names,\n"
+if (text.count(anchor) != 1 or text.count("public_builtin_type_names()") != 2
+        or text.count(imported) != 1):
     raise SystemExit("stale-checker-consumer mutation anchor drifted")
 path.write_text(text.replace(
     "public_builtin_type_names()", "stale_public_builtin_type_names()"
-).replace(anchor, stale + anchor))
+).replace(anchor, stale + anchor).replace(imported, ""))
 PY
       build_mutant "$1"
       expect_marker "$1" CHECKER_TYPE_INVENTORY
@@ -172,9 +176,11 @@ path = Path(sys.argv[1])
 text = path.read_text()
 old = "  for t in public_builtin_type_names() {\n"
 new = '  for t in ["Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set"] {\n'
-if text.count(old) != 1:
+# the import goes with its only use (an unused import is an error)
+imported = "  public_builtin_type_names, return_only_builtin_type_names,\n"
+if text.count(old) != 1 or text.count(imported) != 1:
     raise SystemExit("stale-lsp-consumer mutation anchor drifted")
-path.write_text(text.replace(old, new))
+path.write_text(text.replace(old, new).replace(imported, "  return_only_builtin_type_names,\n"))
 PY
       build_mutant "$1"
       expect_marker "$1" LSP_TYPE_INVENTORY
@@ -184,6 +190,10 @@ PY
       replace_once "$mutant/selfhost/src/lsp/lspc.dawn" \
         '    for t in return_only_builtin_type_names() {' \
         '    for t in public_builtin_type_names() {'
+      # the import goes with its only use (an unused import is an error)
+      replace_once "$mutant/selfhost/src/lsp/lspc.dawn" \
+        '  public_builtin_type_names, return_only_builtin_type_names,' \
+        '  public_builtin_type_names,'
       build_mutant "$1"
       expect_marker "$1" LSP_NEVER_RETURN_CONTEXT
       ;;

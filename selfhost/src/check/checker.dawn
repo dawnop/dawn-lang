@@ -106,6 +106,7 @@ use check/cx.{
 use check/identity
 use check/identity.{minted}
 use check/tast_positions
+use check/import_use
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
   pass_effects, pass_resolve_aliases, pass_register_traits, pass_register_impls,
@@ -15435,6 +15436,10 @@ pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: Bo
       None -> ()
     }
   }
+  # Last, because whether an import is unused is only decided for a module
+  # every other check passed (docs/unused-imports-design.md §2). Here and not
+  # in `check_module`, so a replayed body and a cold one reach the same end.
+  cx1 = import_use.report_unused_imports(cx1, m)
   (state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
     impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests })
 }
@@ -17574,8 +17579,9 @@ test "an operation imported from two effects is refused, whichever `use` is firs
   assert cx_ba.diags[0].msg == "`ask` is imported more than once (from `b` and `a`)"
   assert str.contains(cx_ba.diags[0].hint, "an operation of both `B` and `A`")
   # naming the operation beside its own effect is redundant, not a second
-  # import: the name and the module it came from are both the same
-  let (m_same, _) = parser.parse_module("use a.{A, ask}\n")
+  # import: the name and the module it came from are both the same. Both are
+  # used, since an unused import is an error of its own
+  let (m_same, _) = parser.parse_module("use a.{A, ask}\nfn f() -> Int !A = ask()\n")
   let (cx_same, _) = check_module(cx_new(Some("m"), None), m_same, env)
   assert len(cx_same.diags) == 0
 }

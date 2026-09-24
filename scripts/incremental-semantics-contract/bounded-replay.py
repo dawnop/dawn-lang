@@ -23,7 +23,12 @@ def main():
     bounded = (ROOT / "selfhost/src/check/bounded_replay.dawn").read_text()
     replay = (ROOT / "selfhost/src/check/scalar_replay.dawn").read_text()
     variants = [
-        ("root-result", "replay", "saved.bounded && tex_ty(p.tree.body) != sig.ret", "false", "bounded replay rejected root result"),
+        # A trailing list is further edits to the same module: a mutant that
+        # removes the last use of an import removes the import too, because an
+        # import nothing uses is an error and a mutant that does not compile
+        # proves nothing.
+        ("root-result", "replay", "saved.bounded && tex_ty(p.tree.body) != sig.ret", "false", "bounded replay rejected root result",
+         [("use check/tast.{TFun, tex_ty}", "use check/tast.{TFun}")]),
         ("witness-role", "bounded", "witnesses == expected", "true", "bounded replay rejected witness role"),
         ("argument-unification", "bounded", "not matched || map.len(next_effects) != 0", "map.len(next_effects) != 0", "bounded replay rejected argument unification"),
         ("argument-role", "bounded", "symbol.ty != ty || ", "", "bounded replay rejected argument role"),
@@ -35,7 +40,8 @@ def main():
         ("entry-frame", "replay", """match function_entry_proof.prove(cx, d, sig, p) {
       Some(proof) -> function_entry_proof.context(proof)
       None -> return (prepared, Rejected)
-    }""", "checker.function_entry(cx, d, sig).cx", "bounded replay rejected entry frame"),
+    }""", "checker.function_entry(cx, d, sig).cx", "bounded replay rejected entry frame",
+         [("use check/function_entry_proof\n", "")]),
         ("unknown-fact", "bounded", "semantic_reads.AssignableType(_, _, _) -> true\n  _ -> false",
          "semantic_reads.AssignableType(_, _, _) -> true\n  semantic_reads.StdModuleMode(_) -> true\n  _ -> false", "bounded replay rejected unknown fact"),
         ("disguised-cold", "replay", "Some(after) -> (reused(stepped), after, product.tree)\n          None -> cold.function",
@@ -46,9 +52,14 @@ def main():
     ]
     subjects = [("positive", bounded, replay, None)]
     if not args.positive_only:
-        for name, target, before, after, owner in variants:
-            subjects.append((name, edit(bounded, before, after) if target == "bounded" else bounded,
-                             edit(replay, before, after) if target == "replay" else replay, owner))
+        for name, target, before, after, owner, *also in variants:
+            edits = [(before, after)] + (also[0] if also else [])
+            def mutated(text):
+                for old, new in edits:
+                    text = edit(text, old, new)
+                return text
+            subjects.append((name, mutated(bounded) if target == "bounded" else bounded,
+                             mutated(replay) if target == "replay" else replay, owner))
     checker = (ROOT / "selfhost/src/check/checker.dawn").read_text()
     for name in ("check_fn", "check_fn_inferred", "check_const_init", "check_trait_default", "check_test"):
         checker, count = re.subn(r"(pub fn " + name + r"\([^{}]*?!io = \{\n)", r"\1  GenericTrace.enter()\n", checker)

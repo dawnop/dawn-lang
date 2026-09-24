@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6579e64d930a2dca -->
+<!-- doc-check: translation-of docs/spec.md @ 7d7ca381aaed7fb6 -->
 
 # Dawn Language Specification
 
@@ -1908,9 +1908,9 @@ outside effect position, and is refused everywhere inside one (§6.3).
 2. A function whose signature is not marked `!io`, with an io effect appearing in its body →
    compile error (the error points out which call introduced io, and suggests adding `!io` to
    the signature or eliminating that call).
-3. Marked `!io` but the body is pure → allowed (room reserved for evolution); a "redundant `!io`"
-   lint needs type analysis, and the current `dawn fmt --check` only checks formatting — that hint is
-   **not implemented** (left for later).
+3. Marked `!io` but the body is pure → allowed (room reserved for evolution). Dawn has one
+   diagnostic level and no lints; a "redundant `!io`" rule will either be an error some day or
+   not exist.
 4. A pure function is **guaranteed**: same arguments return the same value, no observable side
    effects. The compiler may fold it, deduplicate it, and call it at comptime on that basis.
    Named effects are inside that guarantee too: a function value's type carries its full effect
@@ -3570,6 +3570,16 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
   it brings along (a type's constructors, an effect's operations) and the name diagnostics
   print all stay the same; to rename something brought along, list it and rename it on its
   own. Clash checks use the local name.
+- **An unused import is a compile error** (`unused import: <name>`), not a warning — Dawn
+  has one diagnostic level. It is decided per name: a whole-module import by the alias it
+  binds, a selective import name by name (a
+  renamed one by its local name, reported as the exported name the author wrote), `use java` by the class name it binds; a use
+  inside a test block counts as a use. An imported type can be used through its
+  constructors and an imported effect through its operations (unless that constructor or
+  operation is itself imported by name). The rule stays silent while the module has any
+  other diagnostic; there is no "import for side effects" exemption, because a module has
+  no initialization side effects and an impl does not need `use` to take effect. The
+  reasoning and precedents are in [`unused-imports-design.md`](unused-imports-design.md).
 
 ### 10.3 Name resolution (disambiguation rules)
 
