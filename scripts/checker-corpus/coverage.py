@@ -2965,7 +2965,7 @@ def main():
                         k, why = body.split("\t", 1)
                         old[k] = why
         with open(path, "w", encoding="utf-8") as f:
-            f.write(HEADER % (len(sites), n_cov, len(uncovered)))
+            f.write(HEADER)
             for k, s in uncovered:
                 f.write("  %s\t%s\n" % (k, old.get(k, "TODO: reason")))
         print(
@@ -3006,9 +3006,8 @@ HEADER = """# `cerr` call sites in the checker's modules that no corpus case rea
 # is kept across regenerations, so write it once.
 #
 # A ratchet in both directions (see coverage.py): a new unreached site fails
-# the build, and so does a listed site that became reachable.
-#
-# %d sites, %d reached, %d here.
+# the build, and so does a listed site that became reachable. How many sites
+# there are and how many are reached is printed on every run, not kept here.
 #
 #   <message expression>\t<why no case reaches it>
 """
