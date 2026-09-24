@@ -185,12 +185,13 @@ check whose blind spot is undocumented gets mistaken for a check:
     checks in repository_contract_problems. It
     deliberately does not compare whole paragraphs or infer translation
     quality; it catches known failure modes without turning prose into snapshots.
-  * count: the number is read only off lines carrying the
-    `<!-- doc-check: doc-count -->` marker, for the same reason version does
-    not match a bare semver -- most numbers in this corpus are counts of
-    something else. The coverage half needs no marker: docs/README.md is the
-    index, and a document it does not link is a document with no status
-    anybody can find.
+  * index: coverage, not a count. docs/README.md is the index, and a
+    document it does not link is a document with no status anybody can find.
+    It used to state how many documents docs/ holds, behind a `doc-count`
+    marker this file checked; that number was one the tree already decides,
+    169 commits since 2026-08-01 existed to restate it, and it was removed on
+    2026-09-25 (docs/recorded-numbers-design.md). The count is printed on
+    every run below instead, where it cannot go stale.
 
 Three of the checks read prose rather than syntax -- status, version and
 sections -- and until 2026-08-07 the prose they read could only be Chinese.
@@ -671,8 +672,6 @@ FENCE_LINE = re.compile(r"^[ \t]*```")
 # ordinary words (`Statuses`), the Chinese one is not a prefix of anything the
 # blockquote anchor would let through.
 STATUS_LINE = re.compile(r"^\s*>\s*\**\s*(?:状态|Status\b)")
-DOC_COUNT_MARKER = "<!-- doc-check: doc-count -->"
-INTEGER = re.compile(r"\b(\d+)\b")
 # Phrases that assert *the current toolchain version*, as opposed to naming a
 # release in a landing log or a tag in an example command. Measured over the
 # whole repository before being written down: they match one site, and that
@@ -1310,26 +1309,6 @@ def check_status_selftest() -> tuple[list[str], int]:
     if not bad or seen != 0:
         return ["status scope self-test: an actual docs/ file escaped the status check"], 0
     return [], 2
-
-
-def check_doc_count(path: pathlib.Path, text: str, total: int) -> tuple[list[str], int]:
-    """docs/README.md opens by saying how many documents docs/ holds. It said
-    43 while the directory held 58, and there is no way for a reader to notice
-    -- which is the same shape as the version claim this file already reads
-    from source, so it is settled the same way: the number stays in the prose,
-    the marker hands it to a machine, and adding a document turns the gate red
-    until the sentence is corrected."""
-    bad: list[str] = []
-    claims = 0
-    for n, line in enumerate(text.split("\n"), 1):
-        if DOC_COUNT_MARKER not in line:
-            continue
-        for m in INTEGER.finditer(line.replace(DOC_COUNT_MARKER, "")):
-            claims += 1
-            if int(m.group(1)) != total:
-                bad.append(f"{path.relative_to(ROOT)}:{n}: claims docs/ holds "
-                           f"{m.group(1)} document(s), but it holds {total}")
-    return bad, claims
 
 
 def check_index_coverage(texts: dict) -> tuple[list[str], int]:
@@ -4328,13 +4307,9 @@ def main() -> None:
         print(f"FAIL: {len(bad)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
     blocks = anchors_seen = sections_seen = claims_seen = recorded = 0
-    status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
+    status_seen = indexed_seen = pages_seen = transl_seen = 0
     contracts_seen = policies_seen = audit_seen = fences_seen = selftests_seen = 0
     version = toolchain_version()
-    # What docs/README.md's opening sentence counts: the Markdown documents
-    # under docs/, which is DOCS minus the top-level files it does not index
-    # (README, README.zh-CN, CLAUDE, CONTRIBUTING, CONTRIBUTING.zh-CN).
-    doc_total = sum(1 for p in DOCS if p.is_relative_to(ROOT / "docs"))
 
     # Both cross-document checks need every document's headings before any
     # document can be judged, so the indexes are built in one pass first.
@@ -4441,9 +4416,6 @@ def main() -> None:
             bad, n = check_status(path, text)
             problems += bad
             status_seen += n
-            bad, n = check_doc_count(path, text, doc_total)
-            problems += bad
-            counts_seen += n
             bad, n = check_fence_policy(path, text)
             problems += bad
             fences_seen += n
@@ -4457,12 +4429,13 @@ def main() -> None:
             print(p, file=sys.stderr)
         print(f"FAIL: {len(problems)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"OK: {len(DOCS)} documents, {blocks} checked block(s) "
+    in_docs = sum(1 for p in DOCS if p.is_relative_to(ROOT / "docs"))
+    print(f"OK: {len(DOCS)} documents ({in_docs} under docs/), {blocks} checked block(s) "
           f"({recorded} held to a recorded output), {fences_seen} tutorial "
           f"fence(s), {pages_seen} site program(s); "
           f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
-          f"{indexed_seen} index entr(ies), {counts_seen} document count(s) "
+          f"{indexed_seen} index entr(ies) "
           f"and {transl_seen} translation(s) resolved; {contracts_seen} pinned "
           f"spec contract clause(s), {policies_seen} repository policy check(s) and "
           f"{audit_seen} audit status check(s), {selftests_seen} negative-control "
