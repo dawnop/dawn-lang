@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` contains 123 documents <!-- doc-check: doc-count --> covering specifications,
+`docs/` contains 124 documents <!-- doc-check: doc-count --> covering specifications,
 research, designs, progress reports, retrospectives and operations. Historical
 claims may no longer describe the implementation. This index groups the material
 and records document lifecycles; `scripts/doc-check.py` verifies both the count
@@ -92,6 +92,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [named-args-design.md](named-args-design.md) | current | #207 的方案：具名实参推广到 `Sig` 支持的 callee + 默认参数（合成 `f$default$k` 零元纯函数）。四条用户终裁在其 §9：实参求值顺序改**写序**（本批唯一 Emit-Change）、单层名、默认值任意纯表达式、std 采用另批。 |
 | [tail-block-design.md](tail-block-design.md) | current | #206 的方案：裸 `{ ... }` 尾块（Kotlin 式，含 `{ x => }` 参数头）落到既有 `attach_trailing`，区分机制 = 头部禁记录字面量的开关扩义（`ns`→`nb`）。用户终裁在其 §13：方案乙、guard 位不禁；期 2 的最终口径是 `fn` 不再属于表达式，尾块是唯一 trailing form。 |
 | [match-arm-separators-design.md](match-arm-separators-design.md) | current | SYN-10 的定稿：match 臂只由物理换行或逗号分隔，尾逗号合法；删除 FIRST(pattern) 邻接，并以三类 delimiter-aware recovery 与绝对 grammar corpus 固定边界。 |
+| [syntax-window-design.md](syntax-window-design.md) | proposed | 裁决 2 的语法破坏性窗口（v0.78.0）：五个硬关键字降为上下文关键字并对账三份关键字表、删 `$name` 插值短形（fmt 窗口内迁移）、记录只用 `{}` 与构造器只用 `()`、或-模式前导 `\|`、局部 `fn` 具名效果；各条的 AST 变化、fmt 迁移、Emit-Change 与种子顺序。 |
 | [int-min-literal-design.md](int-min-literal-design.md) | current | SYN-08 的定稿：三进制共用无溢出 magnitude parser，仅直接一元负号消费精确 `2^63` marker；双后端与生成 C 契约固定 `INT64_MIN`。 |
 | [lsp-framing-design.md](lsp-framing-design.md) | current | TOOL-07 的定稿：共享层在 stdin read 前限制 8 KiB header/64 MiB body，严格解析重复 `Content-Length`，并把不可重同步的 framing failure 固定为一次错误后关读循环。 |
 | [source-plan-design.md](source-plan-design.md) | current | TOOL-10 的定稿及 2026-08-09 架构修订：独立无 Java 的 `compiler-plan/` 先形成唯一最终图，再从选中 `PkgR` 收 Java 坐标。 |
