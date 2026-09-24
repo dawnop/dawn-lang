@@ -316,6 +316,13 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 spec §6.4 留墓碑而非删节；§6.1 的「环境效果」是小节而非新节号。`selfhost/src` 里因 `catch_panic` 而带 `!io`
 的签名（`lsp/server`、`main`、`ir/interp` 等）按种子约束未收窄，下一个 release 推进种子后再做。
 
+**种子推进到 v0.78.0 之后的回填（2026-09-25，分支 `fix/post-seed-cleanup`）**：`selfhost/src` 里 `catch_panic`
+的 14 个调用点逐个去 `!io` 后跑 `dawn check selfhost`。只有两个函数的 `!io` 是 `catch_panic` 给的：
+`c/emitc.gaps` 与 `ir/interp.ev_get_panics`，已收窄为纯（调用者都是 test 块，不再往外传）。其余调用点所在函数的
+`!io` 都另有来源，编译器逐条报出：`ir/interp.probe_builtin`（`call_builtin`）、`lsp/server.close_lease`
+（`JsigLease.close`）、`lsp/server.activate_workspace`（`host.project` 与 `rebuild_workspace`）、`main.run_lower`
+（`jsig_real`、`analyze_program`、`load_std` 等）；`check/jsig`、`ir/interp`、`lsp/server` 其余几处在 test 块里，没有签名。
+
 SPC-04 的连带：仓里有依赖「依赖序里第一个有 `main` 的模块」的地方。`scripts/incremental-semantics-contract`
 这个包的入口原本是 `src/bench.dawn`，改名为 `src/main.dawn`；十一个增量契约脚本在临时目录里拼项目夹具，
 把带 `pub fn main` 的模块写成别的名字，现在各自多写一个两行的 `src/main.dawn` 转发过去（不改原模块名，
