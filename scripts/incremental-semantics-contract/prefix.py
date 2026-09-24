@@ -89,8 +89,7 @@ def main():
         ("resume-suffix", "      matching = false\n", "      ()\n"),
         ("cache-errors", "len(computed.diags) != 0 || ", ""),
         ("cache-java", " || probe.queries() != queries_before", ""),
-        ("ignore-loader", "len(loaded.diags) == 0 && ", ""),
-        ("ignore-ffi", "not session.opts.ffi", "true"),
+        ("ignore-loader", "  var matching = len(loaded.diags) == 0\n", "  var matching = true\n"),
         # Weaken only prefix retention; the new body-map safeguards remain
         # intact. These fixtures deliberately use the prefix-only owner.
         ("ignore-eviction", "  State { ..session, prefix: [], bodies: map.empty() }",

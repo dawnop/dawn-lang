@@ -59,8 +59,9 @@ pub type WitRef =
   | WConcrete(trait_id: Int, subject: Ty)
   | WApply(trait_id: Int, subject: Ty, args: List[WitRef])
 
-## One Java call, resolved: enough for comptime route C (static, scalar
-## marshalling) and for codegen. Parameter/return types are JVM class names;
+## One Java call, resolved: enough for codegen, its only reader since the
+## compile-time Java route went (docs/effects-window-design.md 6).
+## Parameter/return types are JVM class names;
 ## `target` is None for statics. `sam_convs` records (arg index, param class,
 ## SAM name, SAM descriptor-ish data) for the codegen bridges; `list_bridges`
 ## the arg indices crossing as java.util.List.
@@ -229,7 +230,6 @@ pub type TExpr =
   | XBreak(lo: Int, hi: Int)
   | XContinue(lo: Int, hi: Int)
   | XComptime(body: TExpr, lo: Int, hi: Int, ty: Ty)
-  | XUnsafePure(body: TExpr, lo: Int, hi: Int, ty: Ty)
 # `wit` is the trait witness behind an operator that is really a method call:
 # Ord for < <= > >= on non-scalars, Eq for == and != where the type overrides it
   | XBinary(
@@ -398,7 +398,6 @@ pub fn x_lo(e: TExpr) -> Int =
     XBreak(lo, _) -> lo
     XContinue(lo, _) -> lo
     XComptime(_, lo, _, _) -> lo
-    XUnsafePure(_, lo, _, _) -> lo
     XBinary(_, _, _, _, _, _, lo, _, _) -> lo
     XUnary(_, _, lo, _, _) -> lo
     XIf(_, _, _, lo, _, _) -> lo
@@ -437,7 +436,6 @@ pub fn x_hi(e: TExpr) -> Int =
     XBreak(_, hi) -> hi
     XContinue(_, hi) -> hi
     XComptime(_, _, hi, _) -> hi
-    XUnsafePure(_, _, hi, _) -> hi
     XBinary(_, _, _, _, _, _, _, hi, _) -> hi
     XUnary(_, _, _, hi, _) -> hi
     XIf(_, _, _, _, hi, _) -> hi
@@ -477,7 +475,6 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XBreak(_, _) -> TyNever
     XContinue(_, _) -> TyNever
     XComptime(_, _, _, ty) -> ty
-    XUnsafePure(_, _, _, ty) -> ty
     XBinary(_, _, _, _, _, _, _, _, ty) -> ty
     XUnary(_, _, _, _, ty) -> ty
     XIf(_, _, _, _, _, ty) -> ty

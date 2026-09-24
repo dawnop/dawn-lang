@@ -320,12 +320,12 @@ pub fn main() -> Unit !io = {
 EOF
 
 RUN_EMPTY=$'argc=0\n'
-RUN_OPTION_LIKE=$'argc=4\n0|0|\n1|2|--\n2|14|--comptime-ffi\n3|2|-o\n'
+RUN_OPTION_LIKE=$'argc=4\n0|0|\n1|2|--\n2|9|--closure\n3|2|-o\n'
 
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, omitted separator)" run "$RUN_ARGV"
 run_expect 0 "$RUN_EMPTY" "" "run (empty argv, explicit separator)" run "$RUN_ARGV" --
 run_expect 0 "$RUN_OPTION_LIKE" "" "run (opaque option-like and empty argv)" \
-  run "$RUN_ARGV" -- "" -- --comptime-ffi -o
+  run "$RUN_ARGV" -- "" -- --closure -o
 run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
   run --std "$ROOT/std" "$RUN_ARGV"
 

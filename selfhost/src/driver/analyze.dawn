@@ -1087,7 +1087,7 @@ fn module_step_with_recording(
         }
         # Binding may alter only loader-resolved import paths. Recovered or
         # mismatched syntax never lends source coordinates to cached bodies.
-        let snapshot: Option[source_snapshot.Snapshot] = if cache_bodies && not opts.ffi {
+        let snapshot: Option[source_snapshot.Snapshot] = if cache_bodies {
           match prepared_snapshot {
             Some(snapshot) -> snapshot
             None -> match source_snapshot.of(mf.text) {
@@ -1649,13 +1649,6 @@ test "cached module transitions recompute comptime and recover from evaluation e
           assert warm.counts.expect("failed CT counts").retained == 0
         }
       }
-      let ffi = CtOpts { ..ct_default(), ffi: true }
-      let disabled = analyze_module_step_cached(input, baseline, std, ffi, jsig_refused(), None, cache)
-      let ffi_cold = analyze_module_step(input, baseline, std, ffi, jsig_refused(), None)
-      assert disabled.cache == None && disabled.counts == None
-      assert disabled.step.checked.tm == ffi_cold.checked.tm
-      assert disabled.step.checked.ct == ffi_cold.checked.ct
-      assert disabled.step.diags == ffi_cold.diags
       cache = warm.cache
     }
   })

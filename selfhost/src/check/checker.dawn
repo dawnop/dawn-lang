@@ -28,7 +28,7 @@ use front/ast.{
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
-  EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
+  EComptime, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView,
   EHandle, HandlerArm, HandlerCell, DEffect, EffectDeclR, EffectOp, module_effects
 }
@@ -36,7 +36,7 @@ use check/tast.{
   TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
-  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
+  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
@@ -5626,7 +5626,6 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       o
     }
     EComptime(body, _, _) -> name_refs(body, out, sc)
-    EUnsafePure(body, _, _) -> name_refs(body, out, sc)
     # every part of `with handle E { .. }` is ordinary code the function runs:
     # the state cells' initializers (evaluated at the installation, in the
     # enclosing scope), the arm bodies (each a lambda over the operation's
@@ -7365,7 +7364,6 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         (cx4, t, XComptime(bx, owner_off(cx, lo), owner_off(cx, hi), t))
       }
     }
-    EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
     ECtor(cname, cargs, spread, has_braces, cclo, cchi, lo, hi) ->
       # the ECtor node itself is only ever a head: bare, or the braced record
       # literal. The parenthesised spelling is an EApply over the bare head and
@@ -7792,78 +7790,6 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
   }
 }
 
-# ---- unsafe_pure ----
-
-## unsafe_pure { body } (docs/pure-ffi-design.md §3.2): the body checks as
-## usual — locals stay in scope — but its effects are captured in isolation.
-## Concrete io is masked to Pure; an effect variable is rejected; a body that
-## did no io at all flags the stamp as redundant.
-##
-## std-only (LANG-01, docs/audit/purity-boundary-design.md step 1): the stamp
-## unconditionally erases an effect the checker proved, and everything purity
-## licenses — folding, reordering, dropping a call — believes it. That is a
-## soundness escape hatch, and design.md's original ruling was that it does
-## not open to user code. std is the one place a wrapper over a host call is
-## reviewed, versioned and differentially tested with the compiler itself;
-## nothing outside std uses the stamp today (ecosystem scanned 2026-07-30).
-fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
-  let (cxm, is_std) = std_module_mode_read(cx)
-  if not is_std {
-    let (cxe, t0, bx0) = check_expr(cxm, body, expected)
-    return (cerr_h(cxe, "unsafe_pure is not available in user code", lo, hi,
-      "the stamp erases a proven io effect, and everything purity licenses believes it; " ++
-        "declare the function !io, or — if the computation truly is pure — ask for a std " ++
-        "function (docs/audit/purity-boundary-design.md)"), t0, bx0)
-  }
-  let saved_used = cxm.frame.used_effects
-  let saved_wit = cxm.frame.eff_witness
-  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
-  let cx0 = Cx { ..cxm, frame: Frame { ..cxm.frame, used_effects: [], eff_witness: empty_w } }
-  let (cx1, t, bx) = check_expr(cx0, body, expected)
-  let inner = cx1.frame.used_effects
-  var cx2 = Cx { ..cx1, frame: Frame { ..cx1.frame, used_effects: saved_used, eff_witness: saved_wit } }
-  # the stamp vouches that a concrete io effect is absent, and that is all it
-  # can vouch for: a declared effect is served by evidence, and masking it
-  # would leave a call with a parameter nothing fills (design §4.5)
-  for u in inner {
-    let ls = eff_labels(u)
-    if len(ls) > 0 {
-      let (wlo, whi, wname) = eff_witness_at(cx1, u, (lo, hi, "?"))
-      cx2 = record_effect(cx2, eff_with_labels(EPure, ls), wlo, whi, wname)
-    }
-  }
-  var poly: Option[Eff] = None
-  for u in inner {
-    match u {
-      EffVar(_, _) -> if poly == None { poly = Some(u) }
-      EUnion(_, _, _) -> if poly == None { poly = Some(u) }
-      EffAssoc(_, _, _, _) -> if poly == None { poly = Some(u) }
-      _ -> ()
-    }
-  }
-  match poly {
-    Some(p) -> {
-      cx2 = cerr_h(cx2, "unsafe_pure cannot mask the effect variable !" ++ eff_show(p) ++
-          " — it only vouches that a concrete io effect is absent", lo, hi,
-        "the block calls an effect-polymorphic function (e.g. a higher-order `map`/`fold`); " ++
-          "rewrite it as pure Dawn recursion over first-order pure primitives (docs/pure-ffi-design.md §3.3)")
-    }
-    None -> {
-      var has_io = false
-      for u in inner {
-        if u == EIo { has_io = true }
-      }
-      if not has_io && not is_errorish(t) {
-        cx2 = cerr_h(cx2, "redundant unsafe_pure: the block is already pure", lo, hi,
-          "drop `unsafe_pure { … }` and keep the inner expression — the stamp is only for vouching " ++
-            "a Java interop call the effect checker would otherwise flag !io")
-      }
-    }
-  }
-  # masked: the body's io is deliberately not folded back into the saved record
-  (cx2, t, XUnsafePure(bx, owner_off(cx, lo), owner_off(cx, hi), t))
-}
-
 # ---- lambdas and application ----
 
 ## `settled_arm_eff` and `settle_lambda_eff` stood here: a closure's row,
@@ -8286,7 +8212,6 @@ fn cell_occurrences(e: Expr, name: String) -> Int =
         None -> 0
       }
     EComptime(body, _, _) -> cell_occurrences(body, name)
-    EUnsafePure(body, _, _) -> cell_occurrences(body, name)
     EBinary(_, l, r, _, _, _, _) -> cell_occurrences(l, name) + cell_occurrences(r, name)
     EUnary(_, operand, _, _) -> cell_occurrences(operand, name)
     EIf(cond, thn, els, _, _) -> {
@@ -13789,39 +13714,6 @@ test "a Java char return explains the incompatible character models" {
     "or returns `String`"
 }
 
-test "unsafe_pure masks io and flags redundancy" {
-  # std module: the stamp is std-only (purity-boundary step 1)
-  var cx = seed_prelude(test_cx())
-  cx = Cx { ..cx, is_std_module: true }
-  cx = push_scope(cx)
-  # a pure body makes the stamp a no-op
-  let e = EUnsafePure(EInt(1, 12, 13), 0, 14)
-  let (cx1, t, _) = check_expr(cx, e, no_expected())
-  assert t == TyInt
-  assert str.contains(cx1.diags[0].msg, "redundant unsafe_pure")
-  # a Java-call body (io) is masked: no diags, no recorded effect
-  cx = Cx { ..cx, jsig: test_jsig(),
-    java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
-  let recv = ECtor("Long", [], None, false, 12, 16, 12, 16)
-  let jc = EMethod(recv, "toHexString", [pos_arg(EInt(5, 29, 30))], 17, 28, 12, 31)
-  let p = EUnsafePure(jc, 0, 33)
-  let (cx2, t2, _) = check_expr(cx, p, no_expected())
-  assert t2 == opt_ty(TyString)
-  assert len(cx2.diags) == 0
-  assert len(cx2.frame.used_effects) == 0
-}
-
-test "unsafe_pure is refused outside std" {
-  # the same expression a std module may write is an error in user code:
-  # the stamp erases a proven effect, and that door does not open outward
-  var cx = seed_prelude(test_cx())
-  cx = push_scope(cx)
-  let e = EUnsafePure(EInt(1, 12, 13), 0, 14)
-  let (cx1, _, _) = check_expr(cx, e, no_expected())
-  assert len(cx1.diags) > 0
-  assert str.contains(cx1.diags[0].msg, "not available in user code")
-}
-
 test "java calls resolve overloads, wrap references and reject unknowns" {
   var cx = seed_prelude(test_cx())
   cx = Cx { ..cx, jsig: test_jsig(),
@@ -17008,7 +16900,7 @@ test "a trait default body forwards the method's effect variable" {
   assert str.contains(cx2.diags[0].msg, "`twice`")
 }
 
-test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
+test "an operation cannot be a value" {
   # not for its row -- a labelled *function* is an ordinary function value now
   # -- but because `ask` names no function at all: an operation call is a field
   # read off a handler's record plus a closure call, so there is nothing for a
@@ -17016,16 +16908,6 @@ test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
   let cx = eff_check("fn f() -> Int !Ask = {\n  let g = ask\n  g()\n}\n")
   assert cx.diags[0].msg == "effect operation `ask` cannot be used as a value"
   assert str.contains(cx.diags[0].hint, "wrap it in a lambda")
-  # unsafe_pure vouches that io is absent; evidence is not something it can vouch for
-  let (m2, p2) = parser.parse_module(eff_src("fn f() -> Int = unsafe_pure { ask() }\n"))
-  assert len(p2) == 0
-  let env: Map[String, ModExports] = map.empty()
-  let (cx2, _) = check_module(cx_new(Some("std/x"), None), m2, env)
-  var saw = false
-  for d in cx2.diags {
-    if str.contains(d.msg, "uses the effect `Ask`") { saw = true }
-  }
-  assert saw
 }
 
 test "a jump out of a handler arm names `with handle`, not a lambda" {
