@@ -103,7 +103,7 @@ type Ctl =
 ## expression. Lifted lambdas are keyed by their generated name (`lambda$0`,
 ## `lambda$1`, ...) in the very table above them; a counter that restarted
 ## would let the second expression's `lambda$0` land on the first's entry.
-pub type LowerCache = {
+pub(pkg) type LowerCache = {
   # bodies lowered so far, keyed "owner.name" -- including the lambdas
   # lowering lifted out of them. Lowering happens on demand because one
   # comptime run touches a handful of functions out of the whole program.
@@ -1842,7 +1842,7 @@ pub type CtOut = {
 ## because nothing downstream of comptime wants it. Driver, emitter and `doc`
 ## all keep a `CtOut` per module for the length of the build, and the lowered
 ## bodies would ride along there for no reader.
-pub type CtRun = {
+pub(pkg) type CtRun = {
   out: CtOut,
   cache: LowerCache
 }
@@ -2060,10 +2060,9 @@ fn walk_stmt(icx: ICx, fuel: Int, s: TStmt, acc: CtRun) -> CtRun !io =
 ## module has not yet joined it, so its checked direct functions are added
 ## explicitly. The predicate is repeated defensively on `by_owner`: production
 ## builds it through `note_direct_fn`, but accepting a method body here would
-## make this boundary lossy again for any other caller.
-## `pub` only for ir/interp_test (docs/unused-imports-design.md §4); `pub(pkg)`
-## once the seed can compile it.
-pub fn program_sigs(
+## make this boundary lossy again for any other caller. Package-private for
+## ir/interp_test (docs/unused-imports-design.md §4).
+pub(pkg) fn program_sigs(
   by_owner: Map[String, Map[String, TFun]],
   tm: TModule,
   owner: String
@@ -2105,10 +2104,10 @@ pub fn eval_comptime(
 
 ## The same run, with the cache still attached. Only this module's tests have
 ## a reason to look at it: from the outside, whether two consts shared a
-## lowered body is not observable, and that is the point. It is `pub` because
-## those tests live in ir/interp_test (docs/unused-imports-design.md §4), and
-## becomes `pub(pkg)` once the seed can compile that.
-pub fn eval_module(
+## lowered body is not observable, and that is the point. It is package-private
+## rather than private because those tests live in ir/interp_test
+## (docs/unused-imports-design.md §4).
+pub(pkg) fn eval_module(
   tm: TModule,
   std_fns: Map[String, TFun],
   by_owner: Map[String, Map[String, TFun]],

@@ -183,7 +183,9 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
 | `scripts/checker-corpus/cases/` | 跨包正反例 |
 | `scripts/export-surface-contract/` | 夹具与两个变异体 |
 
-`selfhost/src` 自身**不使用** `pub(pkg)`：种子 v0.77.0 的 parser 不认它（种子约束）。
+`selfhost/src` 自身在本刀**不使用** `pub(pkg)`：种子 v0.77.0 的 parser 不认它（种子约束）。
+种子推进到 v0.78.0 之后，第一批用上它的是 `ir/interp` 只为兄弟测试模块开的四项
+（`program_sigs`、`eval_module`、`CtRun`、`LowerCache`，见 unused-imports-design §4）。
 
 ## 六、错误文案
 

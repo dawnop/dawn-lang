@@ -131,6 +131,7 @@ trait 默认体与 test 都检查完之后。选这里而不是 `check_module`�
   （`program_sigs`、`eval_module` 及其返回的 `CtRun`/`LowerCache`），它们因此改为
   `pub`，并在声明处注明「只为 `ir/interp_test` 公开」。`pub(pkg)`（裁决 1，已合入 main）要等
   种子能编（v0.78.0）之后才能在 selfhost 里写，这几处应收窄为 `pub(pkg)`——那正是「包内可见」的本义。
+  种子推进到 v0.78.0 后已收窄（2026-09-25，分支 `fix/post-seed-cleanup`），声明处的「等种子」注释随之删除。
   `no_impls`、`test_sig`、`test_tfun` 是小夹具，测试模块自己写一份，不为它们开口子；
   帧数上限那条 test 改为直接写出 16，而不读私有常量 `MAX_FAILURE_FRAMES`。
 
