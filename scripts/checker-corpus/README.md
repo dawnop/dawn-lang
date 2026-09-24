@@ -24,7 +24,7 @@
 
 **不检查**：`diag.dawn` 的人类渲染（那由它自己的内联 test 与
 `selfhost-prev-diff.sh` 守），也不检查诊断之外的东西——`dawn check` 输出里的
-`M` / `F` / `C` 行由 `selfhost-core-diff` 一侧覆盖，这里只留 `D` 行。
+`M` / `F` / `C` 行由 `selfhost-core-diff` 一侧覆盖（2026-09-25 起它是按需工具，不再是 CI 门），这里只留 `D` 行。
 
 **不只是 checker 的**：诊断流是一条，`analyze.dawn` 的模块加载诊断（`imports` case
 里的「module `lib` is imported more than once」）与 checker 的混在一起按序发出。

@@ -437,9 +437,6 @@ fi
 echo "PASS  archive failure is reported once across aliases and phases"
 
 test ! -e "$root/selfhost/src/pkg/manifest.dawn" || fail "light manifest parser still exists"
-if grep -q 'pkg\.manifest\.core' "$root/scripts/core-golden/selfhost.sha"; then
-  fail "deleted light manifest module remains in the Core baseline"
-fi
 for forbidden in \
   'type Coord' \
   'parse_coord' \

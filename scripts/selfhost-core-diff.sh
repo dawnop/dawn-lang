@@ -1,8 +1,28 @@
 #!/usr/bin/env bash
-# Core IR golden. docs/native-backend-plan.md 11.4 S0.4.
+# Core IR diff between two revisions: which modules' Core moved, and how.
+# docs/native-backend-plan.md 11.4 S0.4; on demand since 2026-09-25
+# (docs/recorded-numbers-design.md).
 #
-#   ./scripts/selfhost-core-diff.sh            # compare against the golden
-#   ./scripts/selfhost-core-diff.sh --record   # regenerate it
+#   ./scripts/selfhost-core-diff.sh                    # merge-base(origin/main, HEAD) vs HEAD
+#   ./scripts/selfhost-core-diff.sh --base <rev>       # <rev> vs HEAD
+#   ./scripts/selfhost-core-diff.sh --base A --head B  # A vs B
+#   ./scripts/selfhost-core-diff.sh --out <dir> ...    # keep both dumps and the full diff
+#
+# Exit 0: no module's Core differs. Exit 1: some did, and they are listed.
+# Exit 2: the comparison could not be made.
+#
+# ## What it is for
+#
+# The identity proof of a pure-refactoring batch: "nothing moved except the
+# modules this batch declares". #88's twelve knives, Perceus and the
+# `CModule.dicts` repair were each read off this diff. Paste its output into
+# the PR body; that is where the evidence lives.
+#
+# It used to be a per-commit CI gate against a golden recorded in the tree
+# (scripts/core-golden/). That turned it into a ritual: every commit touching
+# the compiler re-recorded the golden without reading it, and every rebase of
+# a parallel branch re-recorded it again. The question it answers is a
+# question about two revisions, so it now takes two revisions.
 #
 # ## Why this exists when `__emit` already compares bytes
 #
@@ -14,161 +34,196 @@
 #   * `CDup` / `CSDrop` -- built by `rc.dawn` on the way into the C backend
 #     only, so `__emit`, which is the JVM emitter, walks past both.
 #
-# Those were what Perceus changed first, and this golden predating it is what
-# made "Perceus touched nothing else" checkable.
+# `CModule.dicts` was the third: the JVM emitter used to re-derive dictionary
+# class names from the checker's `impl_table`, so the table lowering built had
+# one consumer, the then-unfinished C backend, and it could be wrong with every
+# gate green. It *was* wrong, and this diff is where the repair was read. The
+# JVM builds its dictionaries from the table now; this is still the one place
+# that shows the table itself.
 #
-# `CModule.dicts` was the third, and the reason this golden exists: the JVM
-# emitter re-derived dictionary class names from the checker's `impl_table`,
-# so the table lowering built had one consumer and it was the unfinished C
-# backend -- it could be emptied, renamed, or filled with slots naming
-# functions that do not exist, and every gate stayed green. It *was* wrong,
-# and this diff is where the repair was read. The JVM now builds its
-# dictionaries from the table too, so the golden is no longer the only
-# witness; it is still the one that shows the table itself.
+# ## What is dumped
 #
-# ## Two goldens, for two questions
+# Every module of the compiler (`__lower --dump D selfhost`, which includes the
+# std modules and source packages the compiler uses), and three programs with
+# the std modules they reach. Programs chosen for coverage, not size: calc has
+# closures, `?` and list work; traits has dictionaries with both slot kinds
+# and a derived Ord; eqhash has the Eq/Hash bounds, which are the only
+# construct that forwards a dictionary at runtime.
 #
-#   golden/*.core        three programs, in full. Answers *what* changed --
-#                        the diff is readable, and dictionary tables are right
-#                        at the top of each file.
-#   golden/selfhost.sha  one line per module of the compiler itself. Answers
-#                        *whether* anything changed across every module there
-#                        is -- the file is the count, so it is not restated
-#                        here -- without carrying 7MB in the repository.
-#                        Regenerate locally to see the content. Exact: it moves
-#                        for anything at all, noise included.
+# ## One directory, used twice
+#
+# Each side is checked out with `git worktree add` at the *same* path, one
+# after the other, and bootstrapped from its own seed there. Not two
+# directories side by side: a panic site bakes the path it was compiled from.
+# Measured 2026-08-04 -- `__lower --dump D /abs/path/to/selfhost` puts
+#
+#   str "unwrapped None at /home/dawn/workspace/dawn-lang/selfhost/src/main.dawn:164"
+#
+# in main.core where the relative form puts `selfhost/src/main.dawn:164`. The
+# lowering below is always handed the relative `selfhost`, and the directory
+# is the same on both sides anyway, so no module differs for where it was
+# built. No normalisation is applied: line numbers left Core with #142, and
+# generated names are derived from declarations, not from a global counter
+# (the note beside `ty_key` in `selfhost/src/ir/core.dawn`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-golden="$ROOT/scripts/core-golden"
-mode=check
-[ "${1:-}" = "--record" ] && mode=record
+usage() {
+  echo "usage: $0 [--base <rev>] [--head <rev>] [--out <dir>]" >&2
+  exit 2
+}
 
-# ## There is no noise filter any more
-#
-# `selfhost.sha` is the only golden of the compiler's Core, and it is exact. A
-# companion `selfhost.norm.sha` used to hold the same hashes with generated
-# `$Adt<N>` names alpha-renamed, because type inference and ADT declarations
-# shared one counter and an unrelated addition anywhere renumbered generated
-# names everywhere. That counter is gone: nominal and trait ids are derived
-# from the declaration, and binder and local ids are packed keys densified per
-# module during lowering, so a generated name in a module nobody touched is
-# the same string in the next revision. The note beside `ty_key` in
-# `selfhost/src/ir/core.dawn` says what the number is and is not.
+base="" head=HEAD out=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --base) [ $# -ge 2 ] || usage; base=$2; shift 2 ;;
+    --head) [ $# -ge 2 ] || usage; head=$2; shift 2 ;;
+    --out) [ $# -ge 2 ] || usage; out=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
 
-# Programs chosen for coverage, not size: calc has closures, `?` and list
-# work; traits has dictionaries with both slot kinds and a derived Ord; eqhash
-# has the Eq/Hash bounds, which are the only construct that forwards a
-# dictionary at runtime.
-#
-# A program is named twice: once by its module name, which is what the dump
-# file is called and therefore what the golden is called, and once by the path
-# it lives at. The two stopped coinciding when the examples were grouped by
-# topic, and the module name is the half that must not move -- renaming a
-# golden would make a reshuffle of directories look like a change in Core.
+commit_of() {
+  git -C "$ROOT" rev-parse --verify -q "$1^{commit}" || {
+    echo "error: $1 names no commit" >&2
+    exit 2
+  }
+}
+if [ -z "$base" ]; then
+  base=$(git -C "$ROOT" merge-base origin/main "$head") || {
+    echo "error: no merge-base of origin/main and $head; pass --base" >&2
+    exit 2
+  }
+fi
+base_sha=$(commit_of "$base")
+head_sha=$(commit_of "$head")
+
+# A module is named by its dump file; a program by the module name its dump
+# file carries, and separately by the path it lives at.
 PROGS=(calc traits eqhash)
 PROG_PATHS=(examples/projects/calc.dawn examples/traits/traits.dawn examples/traits/eqhash.dawn)
 
-OUT=${TMPDIR:-/tmp}/core-golden.$$
-mkdir -p "$OUT"
-trap 'rm -rf "$OUT"' EXIT
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawn-core-diff.XXXXXX")
+TREE="$WORK/tree"
+cleanup() {
+  git -C "$ROOT" worktree remove --force "$TREE" > /dev/null 2>&1 || true
+  git -C "$ROOT" worktree prune > /dev/null 2>&1 || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
-"$ROOT/bin/dawn" --version > /dev/null
+# Both sides share one seed cache, the caller's, so each seed is fetched once.
+# Each side's own std: an inherited DAWN_STD would hand both sides one std.
+export DAWN_SEED_CACHE="${DAWN_SEED_CACHE:-$ROOT/.dawn/seeds}"
+unset DAWN_STD
 
-for i in "${!PROGS[@]}"; do
-  p="${PROGS[$i]}"
-  mkdir -p "$OUT/$p"
-  "$ROOT/bin/dawn" __lower --dump "$OUT/$p" "${PROG_PATHS[$i]}" > "$OUT/$p.log"
-  if ! grep -q ', 0 failed' "$OUT/$p.log"; then
-    echo "FAIL: lowering $p left gaps" >&2
-    cat "$OUT/$p.log" >&2
-    exit 1
+lower_into() { # <dump dir> <log> <target>
+  mkdir -p "$1"
+  if ! ./bin/dawn __lower --dump "$1" "$3" > "$2" 2>&1 \
+      || ! grep -q ', 0 failed' "$2"; then
+    echo "error: lowering $3 failed or left gaps at $(git rev-parse --short HEAD)" >&2
+    cat "$2" >&2
+    exit 2
   fi
-done
+}
 
-# std is lowered once per program. The dumps must agree: std's Core is
-# supposed to be a property of std, but `program_tables` unions the *user*
-# program's impls into the tables lowering consults, so "independent of the
-# target" is an assumption and not a theorem. Check it rather than assume it,
-# and store one copy.
-first="${PROGS[0]}"
-for f in "$OUT/$first"/std.*.core; do
-  base=$(basename "$f")
-  for p in "${PROGS[@]:1}"; do
-    if ! cmp -s "$f" "$OUT/$p/$base"; then
-      echo "FAIL: $base lowers differently under $first and $p." >&2
-      echo "      std's Core has become target-dependent -- that is the news," >&2
-      echo "      not the golden mismatch." >&2
-      diff -u "$f" "$OUT/$p/$base" | head -40 >&2
-      exit 1
-    fi
+dump_side() { # <rev> <side>
+  local dest="$WORK/$2"
+  git -C "$ROOT" worktree add -q --detach "$TREE" "$1"
+  (
+    cd "$TREE"
+    echo "[$2] $(git rev-parse --short HEAD): bootstrapping" >&2
+    ./bin/dawn --version > "$WORK/$2.version.log" 2>&1 || {
+      echo "error: the toolchain at $1 did not build" >&2
+      cat "$WORK/$2.version.log" >&2
+      exit 2
+    }
+    for i in "${!PROGS[@]}"; do
+      if [ ! -f "${PROG_PATHS[$i]}" ]; then
+        echo "[$2] ${PROG_PATHS[$i]} is not in this revision; ${PROGS[$i]} skipped" >&2
+        continue
+      fi
+      lower_into "$dest/${PROGS[$i]}" "$WORK/$2.${PROGS[$i]}.log" "${PROG_PATHS[$i]}"
+    done
+    # relative, and it must stay relative: see "One directory, used twice"
+    lower_into "$dest/selfhost" "$WORK/$2.selfhost.log" selfhost
+  )
+  git -C "$ROOT" worktree remove --force "$TREE"
+
+  # std is lowered once per program. The dumps must agree: std's Core is
+  # supposed to be a property of std, but `program_tables` unions the *user*
+  # program's impls into the tables lowering consults, so "independent of the
+  # target" is an assumption and not a theorem. Checked, not assumed.
+  local first="" p f
+  for p in "${PROGS[@]}"; do
+    [ -d "$dest/$p" ] || continue
+    if [ -z "$first" ]; then first=$p; continue; fi
+    for f in "$dest/$first"/std.*.core; do
+      [ -f "$dest/$p/$(basename "$f")" ] || continue
+      if ! cmp -s "$f" "$dest/$p/$(basename "$f")"; then
+        echo "error: [$2] $(basename "$f") lowers differently under $first and $p." >&2
+        echo "       std's Core has become target-dependent -- that is the news." >&2
+        diff -u "$f" "$dest/$p/$(basename "$f")" | head -40 >&2
+        exit 2
+      fi
+    done
   done
-done
+}
 
-mkdir -p "$OUT/flat"
-cp "$OUT/$first"/std.*.core "$OUT/flat/"
-for p in "${PROGS[@]}"; do cp "$OUT/$p/$p.core" "$OUT/flat/"; done
+dump_side "$base_sha" base
+dump_side "$head_sha" head
 
-# the compiler itself: hashes only.
-#
-# `selfhost` here is relative, and must stay relative: a panic site bakes the
-# *path* it was compiled from, and the driver bakes whatever path it was
-# handed. Measured 2026-08-04 -- `__lower --dump D /abs/path/to/selfhost` puts
-#
-#   str "unwrapped None at /home/dawn/workspace/dawn-lang/selfhost/src/main.dawn:164"
-#
-# in main.core where the relative form puts `selfhost/src/main.dawn:164`, so
-# "$ROOT/selfhost" would make this golden differ on every machine and in every
-# worktree. (`bin/dawn build` does hand an absolute root, which is why the
-# built jar carries the absolute string and two worktrees' class files differ.)
-mkdir -p "$OUT/self"
-"$ROOT/bin/dawn" __lower --dump "$OUT/self" selfhost > "$OUT/self.log"
-if ! grep -q ', 0 failed' "$OUT/self.log"; then
-  echo "FAIL: lowering selfhost left gaps" >&2
-  cat "$OUT/self.log" >&2
-  exit 1
+# Compare dump by dump. A module appears once per target that reaches it
+# (std.list under every program and under selfhost); it is listed once, with
+# the targets it moved under.
+( cd "$WORK/base" && find . -name '*.core' | sort ) > "$WORK/base.list"
+( cd "$WORK/head" && find . -name '*.core' | sort ) > "$WORK/head.list"
+: > "$WORK/moved"
+: > "$WORK/full.diff"
+while read -r rel; do
+  b="$WORK/base/$rel" h="$WORK/head/$rel"
+  target=${rel#./}; target=${target%%/*}
+  module=$(basename "$rel" .core)
+  if [ ! -f "$b" ]; then
+    printf '%s\t%s\tadded\n' "$module" "$target" >> "$WORK/moved"
+  elif [ ! -f "$h" ]; then
+    printf '%s\t%s\tremoved\n' "$module" "$target" >> "$WORK/moved"
+  elif ! cmp -s "$b" "$h"; then
+    printf '%s\t%s\tchanged\n' "$module" "$target" >> "$WORK/moved"
+    diff -u --label "base/$rel" --label "head/$rel" "$b" "$h" >> "$WORK/full.diff" || true
+  fi
+done < <(sort -u "$WORK/base.list" "$WORK/head.list")
+
+compared=$(sort -u "$WORK/base.list" "$WORK/head.list" | wc -l | tr -d ' ')
+echo "Core IR: base $(git -C "$ROOT" rev-parse --short "$base_sha") vs head $(git -C "$ROOT" rev-parse --short "$head_sha"), $compared dump(s) compared"
+
+if [ -n "$out" ]; then
+  mkdir -p "$out"
+  rm -rf "$out/base" "$out/head"
+  cp -r "$WORK/base" "$WORK/head" "$out/"
+  cp "$WORK/full.diff" "$out/core.diff"
 fi
-( cd "$OUT/self" && sha256sum ./*.core | sort -k2 ) > "$OUT/selfhost.sha"
 
-if [ "$mode" = record ]; then
-  rm -rf "$golden"
-  mkdir -p "$golden"
-  cp "$OUT/flat"/*.core "$golden/"
-  cp "$OUT/selfhost.sha" "$golden/"
-  echo "recorded $(ls "$golden"/*.core | wc -l | tr -d ' ') dumps + $(wc -l < "$golden/selfhost.sha" | tr -d ' ') module hashes"
+if [ ! -s "$WORK/moved" ]; then
+  echo "Core unchanged: 0 module(s) differ"
   exit 0
 fi
 
-if [ ! -d "$golden" ]; then
-  echo "FAIL: no golden at $golden; run --record" >&2
-  exit 1
+n=$(cut -f1 "$WORK/moved" | sort -u | wc -l | tr -d ' ')
+echo "Core changed in $n module(s):"
+sort "$WORK/moved" | awk -F'\t' '
+  $1 != m { if (m != "") printf "  %-40s %s [%s]\n", m, k, t; m = $1; k = $3; t = $2; next }
+  { t = t " " $2; if ($3 != k) k = k "/" $3 }
+  END { printf "  %-40s %s [%s]\n", m, k, t }'
+echo
+lines=$(wc -l < "$WORK/full.diff" | tr -d ' ')
+head -200 "$WORK/full.diff"
+if [ "$lines" -gt 200 ]; then
+  if [ -n "$out" ]; then
+    echo "... ($lines diff lines in all; the rest is in $out/core.diff)"
+  else
+    echo "... ($lines diff lines in all; rerun with --out <dir> to keep them)"
+  fi
 fi
-
-fail=0
-if ! diff -ru "$golden" "$OUT/flat" -x 'selfhost*.sha' > "$OUT/d.txt"; then
-  echo "Core IR changed:"
-  head -80 "$OUT/d.txt"
-  n=$(wc -l < "$OUT/d.txt" | tr -d ' ')
-  [ "$n" -gt 80 ] && echo "... ($n diff lines total)"
-  fail=1
-fi
-
-if ! diff -u "$golden/selfhost.sha" "$OUT/selfhost.sha" > "$OUT/s.txt"; then
-  echo
-  moved=$(grep -E '^[+-][0-9a-f]{64} ' "$OUT/s.txt" \
-    | sed -E 's|^.*  \./(.*)\.core$|\1|' | sort -u)
-  echo "Core IR of the compiler changed in these modules:"
-  for m in $moved; do echo "  $m"; done
-  echo "  (rerun with --dump to see the content: bin/dawn __lower --dump <dir> selfhost)"
-  fail=1
-fi
-
-if [ "$fail" -ne 0 ]; then
-  echo
-  echo "If the change is intended, review the diff above and re-record:"
-  echo "  ./scripts/selfhost-core-diff.sh --record"
-  exit 1
-fi
-
-echo "core golden ok ($(ls "$golden"/*.core | wc -l | tr -d ' ') dumps, $(wc -l < "$golden/selfhost.sha" | tr -d ' ') module hashes)"
+exit 1
