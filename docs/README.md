@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` contains 119 documents <!-- doc-check: doc-count --> covering specifications,
+`docs/` contains 120 documents <!-- doc-check: doc-count --> covering specifications,
 research, designs, progress reports, retrospectives and operations. Historical
 claims may no longer describe the implementation. This index groups the material
 and records document lifecycles; `scripts/doc-check.py` verifies both the count
@@ -78,6 +78,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。 |
 | [native-operand-snapshot-design.md](native-operand-snapshot-design.md) | current | #84 的操作数值快照：后续赋值不能改变前置值，借用引用沿用 RC 临时绑定清理。 |
 | [function-value-arity-design.md](function-value-arity-design.md) | current | #87 的函数值与效果操作参数上限；在检查期报告，保留宽参数直接调用。 |
+| [builtin-privileges-design.md](builtin-privileges-design.md) | current | 裁决 6：`Ord[Bool]`/`Ord[Bytes]`、`Unit` 进标量表、derive 表驱动、opaque 不继承 `Show`、`f[T](x)` 诊断。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
 | [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、空 alternative 的 token recovery、限定 constructor completion、Core placement 与 28 条独立负控。 |
 | [compiler-weight-baseline-design.md](compiler-weight-baseline-design.md) | current | #230 的严格重量基线与 dependency re-exec 堆继承：Phase 1 固定 release 产物、递归进程树 RSS、逐角色堆与 VAS、启动时间和 JSON schema，Phase 2 让子编译器继承父 JVM 的实际最大堆并由真实 `jcmd` 负控固定。 |
