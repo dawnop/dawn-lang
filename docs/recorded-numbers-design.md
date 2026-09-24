@@ -86,3 +86,19 @@ owner 断言」之外，还要求汇总行恰为 `1 of N test(s) failed`，N 取
   同样是重录，问题一样。脚本头注释自己写着 JVM 已经从 `CModule.dicts` 建字典，golden 不再是那张表的唯一见证；
   `CParam.mode` 与 `CDup`/`CSDrop` 只有 C 后端读，它们的**行为**由 native 差分与 native 自举固定点看着，
   「这一刀有没有碰到它们」这个问题留给按需的 `--base`。
+
+## 落地（2026-09-25，分支 `ci/recorded-numbers`）
+
+| 裁决 | 提交（主题；PR 以 rebase 合入，哈希会变） | 负控 |
+|---|---|---|
+| 1 gatemap 模块清单改从树派生 | Derive gatemap's compiler module list from the tree, not the Core golden | `gatemap.py --check` 在该提交单独跑也绿：28 个变异体对 23 条断言，11 个 fixture 全部重放（98b9896 仍给 `exact`） |
+| 1 golden 出树、步骤删除、脚本改 `--base` | Turn the Core IR golden into an on-demand diff between two revisions | 只改注释的临时提交（`ir/lower.dawn` 第 1 行注释加字）：`Core unchanged: 0 module(s) differ`，退出 0，71 s。改 lowering 的临时提交（`lower_unwrap` 的 Option 臂 panic 串加后缀）：列出 `ir.lower`、`jvm.jarw`、`main`、`pkg.vendor` 四个模块，退出 1，83 s；只改 Result 臂的那一版只列出 `ir.lower` 自己（编译器与三个示例里没有对 Result 用 `!` 的地方） |
+| 1 CONTRIBUTING 与两篇设计文档 | Ask pure refactorings to paste the Core diff into the PR body | 译本摘要由 `--fix-translation-digests` 重登，只动标记行 |
+| 2 README 篇数 | Stop restating the document count in docs/README.md | README 写回 `999 documents <!-- doc-check: doc-count -->`，doc-check 仍绿 |
+| 3 uncovered.txt 表头 | Stop writing site counts into the uncovered.txt header | `coverage.py` 的 `HEADER` 与文件头逐字节相同，`--record` 不会再改它 |
+| 4 prepared-lifecycle（#217） | Hold the prepared LSP controls to the count their own positive reports | 见报告：删一个非 owner 的 lsp 内联测试，shard 1 仍绿；删 standalone owner 测试，shard 1 红在 owner 断言上 |
+| 5 `--fix-translation-digests` | Add doc-check.py --fix-translation-digests | 自测 4 例进 doc-check 的负控计数；在 CONTRIBUTING 上真实使用一次 |
+
+墙钟：`contracts-1` 少了 Core IR golden 一步，历史实测 22 s / 21 s；该 job 约 467 s，最慢 job 876 s（`syntax-mutants-1`），run pole 不变。
+没做：`packages/tileir/src/lower.dawn`、`scripts/spike-native/index_ok.dawn`、`selfhost/src/check/passes.dawn` 三处注释仍提到 golden。
+前两处改了会动 tile 台账的输入摘要或 native 语料，后一处在 selfhost 源码里，本批不碰；它们描述的是当时的事实。
