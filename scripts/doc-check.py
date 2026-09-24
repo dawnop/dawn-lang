@@ -3476,16 +3476,11 @@ INDEX_LIFECYCLE_UNSTATED = {
 def document_lifecycle(text: str) -> str | None:
     """The lifecycle a document claims for itself, or None if it claims none.
 
-    Only the status line is read. A document that discusses `historical` EBNF in
-    its prose is not thereby historical, and a check that searched the whole
+    Only the status line is read. A document that discusses `historical` material
+    in its prose is not thereby historical, and a check that searched the whole
     file would say it was."""
     head = text.split("\n")[:12]
     line = next((one for one in head if STATUS_LINE.match(one)), None)
-    if line is None:
-        # grammar.ebnf carries its status in an EBNF comment; it is a document
-        # in the index like any other, and it is not Markdown.
-        line = next((one for one in head
-                     if "状态" in one or "Status" in one), None)
     if line is None:
         return None
     match = INDEX_LIFECYCLE_WORD.search(line)
