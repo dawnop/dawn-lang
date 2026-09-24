@@ -9,12 +9,15 @@
 checker 没有任何「这条 import 没人用」的诊断，所以 `use` 只增不减。调研 ARCH-N03
 按**整条声明**数出 13 条死 import（`driver/analyze.dawn` 那条 `use check/passes.{...}`
 十个名字一个没用，`arch-split-design.md` 10.4 一个月前就记过，至今还在），外加
-两条只被 test 用到的反向边 `ir/interp → check/checker`、`jvm/jfold → check/checker`。
+两条只被 test 用到的反向边 `ir/interp → check/checker`、`jvm/jfold → check/checker`（后者随效果窗口删掉 `jvm/jfold` 而消失，见 §4）。
 
 按**名字**数要多得多：本刀在全仓跑新诊断，selfhost 一处就报出 213 个名字
 （第一轮 191，细化类型/效果的可达规则后又 22，见 §3.3），`scripts/` 下的
-语料与探针另有 230 余个（绝大多数是 `use std/io` 而只用了 prelude 的 `println`）。
+语料、包与示例另有 238 个（绝大多数是 `use std/io` 而只用了 prelude 的 `println`）。
 这就是没有诊断时 import 表的自然状态：写的时候加，删用法的时候不删。
+本分支 rebase 到效果窗口、`pub(pkg)`、语法窗口三批之上后，selfhost 又报出 81 个
+（三批改过的 import 表在冲突里取了上游，加上它们各自不再用的名字），
+单独一个提交删掉；selfhost 之外没有新增。
 
 后果三条（ARCH-N03 原文）：`use` 图不再是架构事实，任何「谁依赖谁」的推理读的都是
 被污染的图；gate-map 的依赖推理跟着失真；Dawn 硬禁模块环，一条死 import 就可能让
@@ -29,7 +32,9 @@ checker 没有任何「这条 import 没人用」的诊断，所以 `use` 只增
    LSP 一律 `severity: 1`；`dawn check` 有诊断即退出 1），本刀不新增第二种。
 2. **按名字报**：整模块引入按它绑定的别名（`use a/b` 是 `b`，`use a/b as x` 是 `x`），
    选择性引入 `use m.{x, y}` **逐名**报（`y` 没用就只报 `y`），`use java "p.C"` 按
-   它绑定的简单名 `C`。三种一视同仁，不留特例。
+   它绑定的简单名 `C`。三种一视同仁，不留特例。改过名的 `use m.{x as y}` 看本地名
+   `y` 有没有被拼写，报告里写作者写下的导出名 `x`（spec §10.2 的改名规则：诊断里
+   打印的名字不随改名变）。
 3. **test 用到算用到**。test 块与生产代码共享文件头的 `use`，`dawn check` 也检查
    test 体（调研里的探针），所以检查器看到的只有一个视图：含 test 的整个模块。
    在这个视图上算使用，就不会有 Rust #59426 那种「同一个 import 在一个构建里用了、
@@ -83,7 +88,7 @@ checker 解析一个名字要查十来张表（函数、类型、构造器、tra
 （例如 UFCS 名其实落在 Java 实例方法上），只会让 import 看起来「用了」；不存在让
 一条真正被用的 import 看起来「没用」的情形，因为每个名字能解析经过的位置都被遍历。
 漏报的代价是一行死代码，误报的代价是一个正确的程序编不过——所以只接受前一种。
-全仓清账（§5）同时是这条性质的实测：删掉诊断报的每一个名字后，全仓每个
+本刀的全仓清账同时是这条性质的实测：删掉诊断报的每一个名字后，全仓每个
 `dawn check` 目标都照旧通过，没有一次删错。
 
 ### 3.2 在哪里发
@@ -104,29 +109,35 @@ trait 默认体与 test 都检查完之后。选这里而不是 `check_module`�
 另行引入的，删掉 `Eff` 程序照旧成立。于是可达集减去「本模块也按名引入了的」构造器
 与操作（§2 的最后一条规则），这 22 个名字随之被报出并删除。
 
+第二处收紧来自 dawnop-site 的实测：第一版把任何未绑定的裸拼写都当作模块别名的
+使用，于是 `use std/map` 加一处 prelude 的 `map(xs, f)` 算作用了 `std/map`。别名在
+表达式里只在 `.` 前面出现（`m.f(..)`、`m.C`、`m.NAME`），现在只在那里记。本仓
+全量复查没有新增，dawnop-site 因此多报一条（§7）。
+
 ## 4. test-only 反向边：兄弟测试模块
 
 裁决原稿要把两条边改成「test 自己的 `use`」。调研探针证明 test 块内不能写 `use`
 （parser 只在顶层接受 `USE`），裁决改为兄弟测试模块，先例是
 `selfhost/src/front/parser_test.dawn`。落地：
 
-- `ir/interp.dawn` 里调 `check_module`/`exports_of` 的 17 个 test 与只为它们存在的
-  辅助函数（`test_tfun`、`fake_jsig` 一族、两段 FFI 源码）挪到 `ir/interp_test.dawn`；
-  `jvm/jfold.dawn` 的 1 个挪到 `jvm/jfold_test.dawn`。两个生产模块随之去掉对
-  `check/checker`、`front/parser`（以及 jfold 对 `check/cx`）的引入。
+- `ir/interp.dawn` 里调 `check_module`/`exports_of` 的 14 个 test 挪到
+  `ir/interp_test.dawn`，`ir/interp` 随之去掉对 `check/checker`、`front/parser` 的引入。
+  另一条边 `jvm/jfold → check/checker` 不用再挪：效果窗口（裁决 5）删掉 `unsafe_pure`
+  与编译期 Java 路线时，`jvm/jfold` 整个模块连同它的 test 一起删了。
 - **发现规则**：目录模式加载 `src/` 下全部模块并执行其全部 test 块（spec §10.5），
   `dawn test selfhost` 因此收得到新模块，与 `front/parser_test` 同一条路。
 - **代价，调研没写到的一条**：Go 的 `_test.go` 与被测包同包，看得见私有名；Dawn 的
-  兄弟模块是另一个模块，只看得见 `pub`。被挪走的 test 用到 `ir/interp` 的三个私有项
+  兄弟模块是另一个模块，只看得见 `pub`。被挪走的 test 用到 `ir/interp` 的四个私有项
   （`program_sigs`、`eval_module` 及其返回的 `CtRun`/`LowerCache`），它们因此改为
-  `pub`，并在声明处注明「只为 `ir/interp_test` 公开」。`pub(pkg)`（裁决 1）落地、
-  且种子能编之后，这几处应收窄为 `pub(pkg)`——那正是「包内可见」的本义。
-  `no_impls` 只是一个带类型的空表，测试模块自己写一份，不为它开口子。
+  `pub`，并在声明处注明「只为 `ir/interp_test` 公开」。`pub(pkg)`（裁决 1，已合入 main）要等
+  种子能编（v0.78.0）之后才能在 selfhost 里写，这几处应收窄为 `pub(pkg)`——那正是「包内可见」的本义。
+  `no_impls`、`test_sig`、`test_tfun` 是小夹具，测试模块自己写一份，不为它们开口子；
+  帧数上限那条 test 改为直接写出 16，而不读私有常量 `MAX_FAILURE_FRAMES`。
 
 ARCH-N03 的第三档（只被 test 调用的**顶层 helper** 进了 Core 与依赖图，例如
 `check/checker.dawn` 的 `msgs_of` 一族、`main.dawn` 的 `cli_read`）不在本刀：
 它们引用的都是真实存在的 import，新诊断不会报，本刀也没有让它们消失；
-Core golden 因此只随本刀实际挪动的模块重录（§6）。
+Core golden 因此只随本刀实际改动的模块重录。
 
 ## 5. 与 SEM-07 audience 表、`pub(pkg)` 的关系
 
@@ -154,32 +165,48 @@ Go 能把它定成错误，靠的是 goimports/gopls 把日常摩擦降下来。
 ## 7. dawnop-site 影响估计
 
 dawnop-site 默认分支 `main` @ `dc0a8fb5`（`gh api` 取树与 44 个 `.dawn` 文件，
-共 14,492 行、394 行 `use`；未 clone）。它钉在 v0.72.0，新语言下会先撞别的变化，
-所以没有拿新编译器直接跑，而是用一个 token 级静态估计：一个名字在 `use` 声明之外
-的任何标识符 token 里出现就算用了（去掉注释，保留字符串，因为 `${...}` 与 `$name`
-插值里的名字是真引用）。这个口径**只会高估使用**，所以得数是下界：
+共 14,492 行、394 行 `use`；未 clone）。两种口径：
+
+1. **静态估计**（动码前）：一个名字在 `use` 声明之外的任何标识符 token 里出现就算
+   用了（去掉注释，保留字符串，因为 `${...}` 与 `$name` 插值里的名字是真引用）。
+   得 7 个名字、6 个文件。
+2. **实测**（实现后）：把 `backend-dawn/dawn.toml` 的三个 url 依赖换成本分支
+   `packages/` 下的路径依赖，用本分支编译器 `dawn check`。报出 **8 个名字、5 个文件**：
 
 | 文件 | 名字 |
 |---|---|
-| `backend-dawn/src/api/api_articles.dawn` | `std/map` |
-| `backend-dawn/src/api/api_public.dawn` | `std/map`、`util/jsonx.{detail}` |
-| `backend-dawn/src/qiniu/rs.dawn` | `std/map` |
-| `backend-dawn/src/svc/auth.dawn` | `std/map` |
-| `backend-dawn/src/svc/monitor.dawn` | `util/http.{Pending}`、`use java "java.net.URI"` |
+| `src/api/api_articles.dawn` | `std/map` |
+| `src/api/api_public.dawn` | `std/map`、`util/jsonx.{detail}`、`repo/repo_article.{by_slug}` |
+| `src/qiniu/rs.dawn` | `std/map`（只以裸拼写 `map(..)` 出现，那是 prelude 函数） |
+| `src/svc/auth.dawn` | `std/map` |
+| `src/svc/monitor.dawn` | `util/http.{Pending}`、`use java "java.net.URI"` |
 
-**下次升钉会撞 7 条左右，6 个文件**，都是删一行或删一个名字。口径校准：同一脚本
-在本仓 selfhost 上报 203 个，新诊断实报 213 个——token 口径把类型经构造器、
-效果经操作的「用到」算作没用（多报），又把遮蔽与字段同名算作用到（少报），两者
-大致相抵；对 dawnop-site 这种很少整批导入构造器的代码，下界更接近实数。升钉时以
-新编译器的实报为准，LSP 的 code action 可以逐条修。
+两种口径的出入正好是 token 口径的两个盲点：`by_slug` 只以 `repo_page.by_slug`
+的成员名出现（token 口径把它算作用到），`rs.dawn` 的 `map` 只以 prelude 函数出现。
+另有 `src/config.dawn`、`src/main.dawn` 两个模块因 v0.72→v0.77 的 `Env` 效果错误
+（裁决 2 补充改裁里记的那两处）本次不报；token 口径在这两个文件里一条也没找到。
+
+**结论：下次升钉会撞 8 条左右，5 个文件，都是删一行或删一个名字**，LSP 的 code
+action 可以逐条修。另一个会同时发生的事：升钉会把 `[deps]` 的 tag 一起抬到同一个
+release，而那个 release 的 `packages/` 已经被本刀清过（v0.72.0 的 `packages/web`
+里就有一条死的 `use java "java.net.URLConnection"`）；如果只升编译器不升依赖，
+依赖包自己的死 import 也会报。
 
 ## 8. 可执行的负控
 
-- `scripts/checker-corpus/cases/unused_imports.d`：正例（整模块、选择性逐名、
-  `use java`、只在 test 里用、经构造器用、经效果操作用、被局部遮蔽的拼写不算）与
-  反例（有别的错误时一条也不报）。
-- 变异体：把 `report_unused_imports` 的发出关掉，语料必须红（报告里有前红后绿的记录）。
-- 一个故意留下的死 import 让 `dawn check` 退出 1（报告里有命令输出）。
+- `scripts/checker-corpus/cases/unused_imports.d`：八个应报的名字（没人限定的别名、
+  构造器按名另行引入的类型、只被局部遮蔽拼写的函数、常量、改过名却没用的 `half as halve`、
+  `use java` 类、std 模块、只以裸拼写出现的 `std/map`），一组不应报的使用（限定访问、记录字面量、构造器、
+  效果行、UFCS、Java 静态调用、经本地名使用的改名引入、test 块），以及一个自带真错误的兄弟模块——它自己的
+  死 import 不报。
+- 变异体（一次性、手工、记录在提交信息与交付报告里）：让 `report_unused_imports`
+  直接返回，语料少六行变红；去掉「有其它诊断就不报」的守卫，`broken.dawn` 多出
+  `unused import: list` 变红；把非末名的删除范围改成不带逗号，LSP 契约红两项。
+- 一个故意留下的死 import 让 `dawn check` 退出 1。
+
+没有把这些变异体登记进 CI 的变异矩阵：每个编译型变异体要一次完整编译（门禁里实测
+约 25–30s 一个），而这里的归属断言就是 checker-corpus 的逐字节 golden，任何一条诊断
+少了或多了它都红。
 
 ## 9. 不做的（理由）
 
@@ -187,6 +214,7 @@ dawnop-site 默认分支 `main` @ `dc0a8fb5`（`gh api` 取树与 44 个 `.dawn`
   本地忽略，同一份代码两种判定；Gleam 一加 warning 就得再加 `--warnings-as-errors`；
   Go FAQ 的理由是 warning 档会被弱情形填满、把真错误淹掉。为一条规则给 Diag、LSP
   severity、CLI 退出码、`dawn check` 的「有诊断即 1」同时开第二个维度，不值。
+- **常驻 CI 的编译型变异体**。见 §8。
 - **`_` 或任何逃生舱**。见 §2 第 5 条：没有为副作用而引入的正当场景。
 - **test 块内的 `use`**。那是给 test 开一种新的局部 `use` 形式，与「一件事一种写法」
   相违；兄弟测试模块是现成的一种写法（§4）。也不为它开语言 issue。
