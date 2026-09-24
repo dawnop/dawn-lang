@@ -46,6 +46,7 @@ use front/ast.{
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
   DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
+  Vis, VisPrivate, VisPkg, VisPub,
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
 use front/lexer.{lex_cps, lex_at, slice_cps}
@@ -84,8 +85,9 @@ type TopDeclKind =
   | HCtlEffect
   | HBadCtl
   | HBadPub
+  | HBadPubScope
 
-type TopDeclHead = { kind: TopDeclKind, st: St, is_pub: Bool }
+type TopDeclHead = { kind: TopDeclKind, st: St, vis: Vis }
 
 fn cur(p: P, st: St) -> Token = tok_at(p, st.pos, 0)
 
@@ -208,10 +210,24 @@ pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List
 
 fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
   var st0 = st
-  var is_pub = false
+  var vis = VisPrivate
   if at_kind(p, st0, PUB) {
     st0 = adv1(p, st0)
-    is_pub = true
+    vis = VisPub
+    # `pub(pkg)` (docs/package-visibility-design.md §三). `pkg` is special
+    # only here, right after `pub(`, so it takes no identifier away from
+    # anyone. A `pub(` that goes on to anything else is still a visibility
+    # restriction being attempted -- nothing else may follow `pub` -- and it
+    # is told which one Dawn has rather than being read as a declaration.
+    if at_kind(p, st0, LPAREN) {
+      let names_pkg = kind_ahead(p, st0, 1) == IDENT && tok_at(p, st0.pos, 1).text == "pkg"
+      if names_pkg && kind_ahead(p, st0, 2) == RPAREN {
+        st0 = adv1(p, adv1(p, adv1(p, st0)))
+        vis = VisPkg
+      } else {
+        return Some(TopDeclHead { kind: HBadPubScope, st: st0, vis: vis })
+      }
+    }
   }
   let k = kind_of(p, st0)
   let kind: Option[TopDeclKind] =
@@ -237,10 +253,10 @@ fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
       # word introduces.
       if kind_ahead(p, st0, 1) == EFFECT { Some(HCtlEffect) } else { Some(HBadCtl) }
     }
-    else if is_pub { Some(HBadPub) }
+    else if vis != VisPrivate { Some(HBadPub) }
     else { None }
   match kind {
-    Some(head) -> Some(TopDeclHead { kind: head, st: st0, is_pub: is_pub })
+    Some(head) -> Some(TopDeclHead { kind: head, st: st0, vis: vis })
     None -> None
   }
 }
@@ -273,40 +289,43 @@ fn top_decl(p: P, st: St) -> PR[Decl] =
     None -> top_decl_error(p, st)
     Some(head) -> match head.kind {
       HFn -> {
-        let (st1, f) = fn_decl(p, head.st, head.is_pub, false)?
+        let (st1, f) = fn_decl(p, head.st, head.vis, false)?
         Ok((st1, DFn(f)))
       }
-      HType -> type_decl(p, head.st, head.is_pub)
-      HAlias -> alias_decl(p, head.st, head.is_pub, false)
-      HConst -> const_decl(p, head.st, head.is_pub)
-      HTrait -> trait_decl(p, head.st, head.is_pub)
-      HEffect -> effect_decl(p, head.st, head.is_pub, false)
+      HType -> type_decl(p, head.st, head.vis)
+      HAlias -> alias_decl(p, head.st, head.vis, false)
+      HConst -> const_decl(p, head.st, head.vis)
+      HTrait -> trait_decl(p, head.st, head.vis)
+      HEffect -> effect_decl(p, head.st, head.vis, false)
       HImpl ->
-        if head.is_pub {
+        if head.vis != VisPrivate {
           Err((head.st, perr(p, head.st,
             "an impl cannot be pub (its visibility follows the trait)")))
         } else {
           impl_decl(p, head.st)
         }
       HTest ->
-        if head.is_pub {
+        if head.vis != VisPrivate {
           Err((head.st, perr(p, head.st, "test blocks cannot be pub")))
         } else {
           test_decl(p, head.st)
         }
       HUse ->
-        if head.is_pub {
+        if head.vis != VisPrivate {
           Err((head.st, perr(p, head.st, "use declarations cannot be pub")))
         } else {
           use_decl(p, head.st)
         }
-      HOpaqueType -> alias_decl(p, adv1(p, head.st), head.is_pub, true)
+      HOpaqueType -> alias_decl(p, adv1(p, head.st), head.vis, true)
       HBadOpaque -> Err((head.st,
         perr(p, head.st, "`opaque` introduces `opaque type Name = ...`")))
-      HCtlEffect -> effect_decl(p, adv1(p, head.st), head.is_pub, true)
+      HCtlEffect -> effect_decl(p, adv1(p, head.st), head.vis, true)
       HBadCtl -> Err((head.st,
         perr(p, head.st, "`ctl` introduces `ctl effect Name { ... }`")))
       HBadPub -> top_decl_error(p, head.st)
+      HBadPubScope -> Err((head.st, perr_h(p, head.st,
+        "visibility can only be restricted to the package: write `pub(pkg)`",
+        "Dawn has `pub` and `pub(pkg)`; there is no `pub(super)` or `pub(in ...)`")))
     }
   }
 
@@ -427,7 +446,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
 
 # ---- const and test declarations ----
 
-fn const_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+fn const_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let (st1, kw) = want(p, st, CONST, "`const`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a constant name (SCREAMING_SNAKE_CASE)")?
   if has_lower(name.text) {
@@ -439,7 +458,7 @@ fn const_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let (st5, _) = want(p, st4, EQ, "`=`")?
   let st6 = skip_nl(p, st5)
   let (st7, init) = expression(p, st6, false)?
-  Ok((st7, DConst(name.text, is_pub, t, init, kw.lo, e_hi(init), name.lo, name.hi)))
+  Ok((st7, DConst(name.text, vis, t, init, kw.lo, e_hi(init), name.lo, name.hi)))
 }
 
 fn has_lower(v: String) -> Bool = {
@@ -562,7 +581,7 @@ fn type_params(p: P, st: St) -> PR[(List[TypeParamDecl], List[EffParamDecl])] = 
 ## `opaque type Name[T] = TypeRef`, which parses identically and differs only
 ## in who may see through it. One parser, because the shapes are the same
 ## shape: a name, type parameters, and a target.
-fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
+fn alias_decl(p: P, st: St, vis: Vis, is_opaque: Bool) -> PR[Decl] = {
   let (st1, kw) =
     if is_opaque { want(p, st, TYPE, "`type`")? } else { want(p, st, ALIAS, "`alias`")? }
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
@@ -579,7 +598,7 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
   let (st5, target) = type_ref(p, st4)?
   let names = map(tparam_decls, t => t.name)
   Ok((st5, DType(TypeDeclR {
-    is_pub: is_pub,
+    vis: vis,
     is_opaque: is_opaque,
     name: name.text,
     tparams: names,
@@ -595,7 +614,7 @@ fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
   })))
 }
 
-fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let (st1, kw) = want(p, st, TYPE, "`type`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
   let (st3, tps) = type_params(p, st2)?
@@ -610,7 +629,7 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let eparams = map(eparam_decls, e => e.name)
   let (st4, _) = want(p, st3, EQ, "`=`")?
   if at_kind(p, st4, LBRACE) {
-    return record_decl(p, st4, is_pub, kw, name, tparams, eparams)
+    return record_decl(p, st4, vis, kw, name, tparams, eparams)
   }
   # `type` declares a nominal type only. The parser recognizes alias shapes,
   # not names: a bare TYPEIDENT is always a constructor, and the checker owns
@@ -647,7 +666,7 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
     ctors[len(ctors) - 1].hi
   }
   Ok((st11, DType(TypeDeclR {
-    is_pub: is_pub,
+    vis: vis,
     is_opaque: false,
     name: name.text,
     tparams: tparams,
@@ -690,7 +709,7 @@ fn parse_derives(p: P, st: St) -> PR[List[Bound]] = {
 fn record_decl(
   p: P,
   st: St,
-  is_pub: Bool,
+  vis: Vis,
   kw: Token,
   name: Token,
   tparams: List[String],
@@ -721,7 +740,7 @@ fn record_decl(
   let (st6, derives) = parse_derives(p, st5)?
   let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else { close.hi }
   Ok((st6, DType(TypeDeclR {
-    is_pub: is_pub,
+    vis: vis,
     is_opaque: false,
     name: name.text,
     tparams: tparams,
@@ -777,7 +796,7 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
 
 # ---- fn declarations ----
 
-fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
+fn fn_decl(p: P, st: St, vis: Vis, in_impl: Bool) -> PR[FnDecl] = {
   let (st1, fn_tok) = want(p, st, FN, "`fn`")?
   let (st2, name_tok) = want(p, st1, IDENT, "a function name (lowercase)")?
   let (st3, tps) = type_params(p, st2)?
@@ -809,7 +828,7 @@ fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
   } else if in_impl {
     let (st8, _) = want(p, st7, ARROW, "`->` (impl methods must declare their full signature)")?
     st7 = st8
-  } else if is_pub {
+  } else if vis != VisPrivate {
     let (st8, _) = want(p, st7, ARROW, "`->` (pub functions must declare a return type)")?
     st7 = st8
   }
@@ -818,7 +837,7 @@ fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
   let st12 = skip_nl(p, st11)
   let (st13, body) = expression(p, st12, false)?
   Ok((st13, FnDecl {
-    is_pub: is_pub,
+    vis: vis,
     name: name_tok.text,
     tparams: tparams,
     eparams: eparams,
@@ -860,7 +879,7 @@ fn typed_params(p: P, st: St, what: String) -> PR[List[Param]] = {
 
 # ---- trait and impl declarations ----
 
-fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+fn trait_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {
   let (st1, kw) = want(p, st, TRAIT, "`trait`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "a trait name (uppercase)")?
   let (st3, _) = want(p, st2, LBRACKET,
@@ -899,7 +918,7 @@ fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   if len(methods) == 0 {
     return Err((st10, pd("a trait must declare at least one method", kw.lo, close.hi)))
   }
-  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, eff_assoc, is_pub,
+  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, eff_assoc, vis,
     kw.lo, close.hi, name.lo, name.hi)))
 }
 
@@ -1014,7 +1033,7 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
 ## prefixes that say something about the declaration without being the word
 ## that introduces it. The span still starts at `effect`, exactly as it starts
 ## after a `pub`.
-fn effect_decl(p: P, st: St, is_pub: Bool, is_ctl: Bool) -> PR[Decl] = {
+fn effect_decl(p: P, st: St, vis: Vis, is_ctl: Bool) -> PR[Decl] = {
   let (st1, kw) = want(p, st, EFFECT, "`effect`")?
   let (st2, name) = want(p, st1, TYPEIDENT, "an effect name (uppercase)")?
   if at_kind(p, st2, LBRACKET) {
@@ -1035,7 +1054,7 @@ fn effect_decl(p: P, st: St, is_pub: Bool, is_ctl: Bool) -> PR[Decl] = {
     return Err((st7, pd("an effect must declare at least one operation", kw.lo, close.hi)))
   }
   Ok((st7, DEffect(EffectDeclR {
-    is_pub: is_pub,
+    vis: vis,
     is_ctl: is_ctl,
     name: name.text,
     ops: ops,
@@ -1122,7 +1141,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
       eff_binds = eff_binds ++ [a]
       st8 = want_sep(p, st9)?
     } else {
-      let (st9, m) = fn_decl(p, st8, false, true)?
+      let (st9, m) = fn_decl(p, st8, VisPrivate, true)?
       methods = methods ++ [m]
       st8 = want_sep(p, st9)?
     }

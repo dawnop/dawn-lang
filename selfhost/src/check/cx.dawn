@@ -19,7 +19,7 @@ use front/ast.{TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg}
 use check/types.{
   Adts, AdtI, CtorI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   no_eparam_names, fn_max_params,
-  Audience, AWorld, EQ_ID,
+  Audience, AWorld, EQ_ID, PackageId, PkgRoot, PkgStd, PkgDep, package_display,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, EffAssoc, eff_union, eff_base, eff_labels,
@@ -231,6 +231,12 @@ pub type Cx = {
   # the entry point (spec §10.5). Set by the loader; false for std, for a
   # dependency and for any module checked outside a program.
   is_entry_module: Bool,
+  # the `[deps]` package this module was loaded from, by its manifest's real
+  # name; None for the project being checked and for the bundled std. Set by
+  # the driver, which is the only place that knows (`LoadedModule.pkg`).
+  # `package_of` reads it together with `is_std_module` rather than a stored
+  # `PackageId`, so the std half has one source of truth and not two.
+  dep_package: Option[String],
   owner_class: Option[String],
   src_path: Option[String],
   # the resolved module path this context is checking, which is how a
@@ -401,6 +407,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     in_test: false,
     is_std_module: is_std,
     is_entry_module: false,
+    dep_package: None,
     owner_class: owner_class,
     src_path: src_path,
     mod_path: None,
@@ -526,9 +533,26 @@ pub type Origin =
 # or "operation"
   | OLocal(kind: String)
 
+## The package the module being checked belongs to
+## (docs/package-visibility-design.md §4.1).
+pub fn package_of(cx: Cx) -> PackageId =
+  if cx.is_std_module {
+    PkgStd
+  } else {
+    match cx.dep_package {
+      Some(n) -> PkgDep(n)
+      None -> PkgRoot
+    }
+  }
+
 ## The pub surface of one checked module (the Kotlin ModuleExports): carried by
 ## value, with the ADT/trait table fragments an importer grafts into its own
 ## id tables. `all_names` lets an importer tell "private" apart from "unknown".
+##
+## `pub(pkg)` declarations are in the name tables like `pub` ones, and
+## `pkg_only` says which they are. They are taken out again for an importer in
+## another package by `exports_seen_by`, the one place the package boundary is
+## drawn; everything downstream of it reads the filtered tables.
 pub type ModExports = {
   mod_path: String,
   class_name: String,
@@ -549,8 +573,55 @@ pub type ModExports = {
   effect_infos: Effects,
   impls: List[ImplI],
   adt_infos: Map[Int, AdtI],
-  trait_infos: Map[Int, TraitI]
+  trait_infos: Map[Int, TraitI],
+  # the package of the exporting module
+  package: PackageId,
+  # names exported by `pub(pkg)`: those declarations, a package-private type's
+  # constructors, a package-private effect's operations and a package-private
+  # trait's injected methods
+  pkg_only: List[String]
 }
+
+## `exp` as a module of package `viewer` sees it. The same package sees all of
+## it; any other sees the `pub` names only. The id-keyed tables are left
+## whole: an identity still has to mean the same thing in every module, and a
+## package-private type can sit inside a public one's representation.
+pub fn exports_seen_by(exp: ModExports, viewer: PackageId) -> ModExports = {
+  if exp.package == viewer || len(exp.pkg_only) == 0 { return exp }
+  var fns = exp.fns
+  var types = exp.types_by_name
+  var aliases = exp.aliases
+  var resolved = exp.alias_resolved
+  var ctors = exp.ctors
+  var consts = exp.consts
+  var traits = exp.traits_by_name
+  var effects = exp.effects
+  for n in exp.pkg_only {
+    fns = map.remove(fns, n)
+    types = map.remove(types, n)
+    aliases = map.remove(aliases, n)
+    resolved = map.remove(resolved, n)
+    ctors = map.remove(ctors, n)
+    consts = map.remove(consts, n)
+    traits = map.remove(traits, n)
+    effects = map.remove(effects, n)
+  }
+  ModExports { ..exp, fns: fns, types_by_name: types, aliases: aliases, alias_resolved: resolved,
+    ctors: ctors, consts: consts, traits_by_name: traits, effects: effects }
+}
+
+## The miss diagnostic for a name that `exports_seen_by` took away, asked
+## before any "private" or "no exported" answer. It can only fire across a
+## package boundary: inside the package the name is still in the tables and
+## the lookup never missed.
+pub fn pkg_private_diagnostic(exp: ModExports, name: String) -> Option[ExportDiagnostic] =
+  if list.contains(exp.pkg_only, name) {
+    let pkg = package_display(exp.package)
+    Some(ExportDiagnostic {
+      message: "`" ++ name ++ "` is package-private to package `" ++ pkg ++ "`",
+      hint: Some("only modules of package `" ++ pkg ++ "` may name it")
+    })
+  } else { None }
 
 ## A fresh state for the tests that live beside the checker.
 pub fn test_cx() -> Cx = cx_new(None, None)
@@ -806,6 +877,10 @@ fn qualified_effect_diagnostic(cx: Cx, qualifier: String, name: String) -> Expor
       let wrong_kind = map.has(exp.fns, name) || map.has(exp.types_by_name, name) ||
         map.has(exp.aliases, name) || map.has(exp.ctors, name) || map.has(exp.consts, name) ||
         map.has(exp.traits_by_name, name)
+      match pkg_private_diagnostic(exp, name) {
+        Some(d) -> return d
+        None -> ()
+      }
       let message = if wrong_kind {
         "`" ++ qualifier ++ "." ++ name ++ "` is not an effect"
       } else if list.contains(exp.all_names, name) {
@@ -1663,11 +1738,16 @@ fn resolve_qual(
             "exported types: ${join(sort(pool), ", ")}"
           }
       }
-      let message = "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`"
-      let diagnostic = ExportDiagnostic { message: message, hint: Some(hint) }
+      let diagnostic = match pkg_private_diagnostic(exp, name) {
+        Some(d) -> d
+        None -> ExportDiagnostic {
+          message: "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`",
+          hint: Some(hint)
+        }
+      }
       let diagnostic_cx = observe_type_read(cx, semantic_reads.ExportDiagnosticAnswer(semantic_reads.TypeDiagnostic,
         q, name, Some(diagnostic)))
-      (cerr_h(diagnostic_cx, message, lo, hi, hint), TyError)
+      (cerr_o(diagnostic_cx, diagnostic.message, lo, hi, diagnostic.hint), TyError)
     }
   }
 }

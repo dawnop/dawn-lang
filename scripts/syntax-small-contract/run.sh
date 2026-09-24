@@ -257,7 +257,7 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-type_decl = "fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {\n"
+type_decl = "fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {\n"
 builtin_table = """fn is_builtin_scalar(name: String) -> Bool =
   match name {
     "Int" | "Float" | "Bool" | "String" | "Unit" -> true

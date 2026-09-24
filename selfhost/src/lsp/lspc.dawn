@@ -24,7 +24,7 @@ use check/types.{
   ty_named, builtin_type_at, builtin_type_name_reserved, hard_reserved_builtin_type_name,
   Audience, AModule, audience_covers, declared_audience
 }
-use check/cx.{ModExports}
+use check/cx.{ModExports, package_of}
 use lsp/lspq.{QCx, locals_at, in_for_pattern}
 use front/lexer.{SourceView, view_of, slice_cp, lex}
 use front/token.{
@@ -32,7 +32,7 @@ use front/token.{
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT, BANG, WITH
 }
 use front/ast.{
-  module_traits, module_fns, module_types, module_consts, module_effects, module_uses
+  module_traits, module_fns, module_types, module_consts, module_effects, module_uses, VisPub
 }
 use front/parser
 use driver/analyze.{use_candidates}
@@ -495,7 +495,7 @@ fn path_char(c: Char) -> Bool = is_word(c) || c == '/'
 ## The question is asked of the document's own module, not of a root audience:
 ## `std/map` is a world-facing module that may nonetheless name them.
 fn may_name_module(qc: QCx, path: String) -> Bool =
-  audience_covers(declared_audience(path), AModule(qc.entry.mod_path))
+  audience_covers(declared_audience(path), AModule(qc.entry.mod_path, package_of(qc.entry.cx)))
 
 ## Everything a `use` line admits at the cursor.
 fn use_completions(
@@ -642,14 +642,19 @@ fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
 ## parser found. No signatures — nothing has checked this module — and no
 ## trait methods, which become importable only once the trait is known to
 ## inject them.
+##
+## `pub` only, not `pub(pkg)`: nothing here says which package the unloaded
+## module belongs to, and a name the next keystroke may not write is worse
+## than one fewer suggestion. A same-package module is loaded, and so read
+## above, whenever the document is checked as part of its project.
 fn declared_items(it0: Items, text: String) -> List[CItem] = {
   var it = it0
   let (m, _) = parser.parse_module(text)
   for d in module_fns(m) {
-    if d.is_pub { it = add(it, d.name, 3, Some("fn ${d.name}"), "0") }
+    if d.vis == VisPub { it = add(it, d.name, 3, Some("fn ${d.name}"), "0") }
   }
   for d in module_types(m) {
-    if d.is_pub {
+    if d.vis == VisPub {
       let kind = match d.alias_target {
         Some(_) -> "alias "
         None -> "type "
@@ -659,13 +664,13 @@ fn declared_items(it0: Items, text: String) -> List[CItem] = {
     }
   }
   for d in module_consts(m) {
-    if d.is_pub { it = add(it, d.name, 21, Some("const ${d.name}"), "0") }
+    if d.vis == VisPub { it = add(it, d.name, 21, Some("const ${d.name}"), "0") }
   }
   for d in module_traits(m) {
-    if d.is_pub { it = add(it, d.name, 8, Some("trait ${d.name}"), "0") }
+    if d.vis == VisPub { it = add(it, d.name, 8, Some("trait ${d.name}"), "0") }
   }
   for d in module_effects(m) {
-    if d.is_pub { it = add(it, d.name, 23, Some("effect ${d.name}"), "0") }
+    if d.vis == VisPub { it = add(it, d.name, 23, Some("effect ${d.name}"), "0") }
   }
   it.out
 }

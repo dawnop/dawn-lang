@@ -916,19 +916,43 @@ pub fn ty_named(name: String) -> Option[Ty] =
 ## std may name it, so replacing it cannot break a program.
 pub fn internal_std_modules() -> List[String] = ["std/hamt", "std/pvec"]
 
+## The source unit a module was loaded as: the unit `pub(pkg)` opens a
+## declaration to (docs/package-visibility-design.md §4.1). One `dawn.toml`
+## is one package: the project being checked, each `[deps]` package under its
+## manifest's real name, and the bundled standard library as a whole.
+##
+## The root project needs no name. Nothing depends on it, so no module outside
+## it can ever be told that one of its names is package-private.
+pub type PackageId =
+  | PkgRoot
+  | PkgStd
+  | PkgDep(name: String)
+
+## How a diagnostic names a package.
+pub fn package_display(p: PackageId) -> String =
+  match p {
+    PkgRoot -> "the root package"
+    PkgStd -> "std"
+    PkgDep(n) -> n
+  }
+
 ## Who may write a name. The whole of SEM-07's visibility vocabulary: every
 ## source of an identity — builtin, prelude, imported module, local
-## declaration — is normalised to one of these three before the validator
-## compares anything, so no read point gets to rebuild "public enough" out of
-## a boolean and a guess.
+## declaration — is normalised to one of these before the validator compares
+## anything, so no read point gets to rebuild "public enough" out of a boolean
+## and a guess.
 ##
-##   World          any module that can `use` the declarer may name it
-##   StdOnly        only the bundled standard library may name it
-##   Module(owner)  only `owner` itself may name it
+##   World              any module that can `use` the declarer may name it
+##   StdOnly            only the bundled standard library may name it
+##   Package(pkg)       every module of package `pkg` may name it (`pub(pkg)`)
+##   Module(owner, pkg) only `owner` itself may name it; `pkg` is the package
+##                      `owner` belongs to, which is what a `Package` identity
+##                      is compared against when a module is the viewer
 pub type Audience =
   | AWorld
   | AStdOnly
-  | AModule(owner: String)
+  | APackage(pkg: PackageId)
+  | AModule(owner: String, pkg: PackageId)
 
 ## Is `path` part of the bundled standard library? The same test `cx_new` runs
 ## to set `is_std_module`, kept here so an owner string read off an `AdtI` can
@@ -954,24 +978,41 @@ pub fn audience_covers(identity: Audience, root: Audience) -> Bool =
       match root {
         AWorld -> false
         AStdOnly -> true
-        AModule(m) -> is_std_path(m)
+        APackage(q) -> q == PkgStd
+        AModule(m, _) -> is_std_path(m)
       }
-    AModule(owner) ->
+    # the internal-std modules' `pub` stops at StdOnly, and every module that
+    # can see a StdOnly root is in the std package -- so a std package-private
+    # name covers one, and no other package's does
+    APackage(p) ->
+      match root {
+        AWorld -> false
+        AStdOnly -> p == PkgStd
+        APackage(q) -> p == q
+        AModule(_, q) -> p == q
+      }
+    AModule(owner, _) ->
       match root {
         AWorld -> false
         AStdOnly -> false
-        AModule(m) -> m == owner
+        APackage(_) -> false
+        AModule(m, _) -> m == owner
       }
   }
 
-## The audience of a declaration in `owner` that is `pub` or not. `owner` is
-## `None` only where there is no module identity at all (a bare `cx_new(None,
-## None)`, which the driver never builds): nothing can be private to a module
-## that does not exist, so those declarations are World.
-pub fn decl_audience(owner: Option[String], is_pub: Bool) -> Audience =
+## The audience of a declaration in `owner` (of package `pkg`) that is `pub`,
+## `pub(pkg)` or neither -- `exported` and `pkg_only` are `Vis` spelled for a
+## layer that does not import the AST. `owner` is `None` only where there is
+## no module identity at all (a bare `cx_new(None, None)`, which the driver
+## never builds): nothing can be private to a module that does not exist, so
+## those declarations are World.
+pub fn decl_audience(owner: Option[String], pkg: PackageId, exported: Bool, pkg_only: Bool) -> Audience =
   match owner {
     None -> AWorld
-    Some(ow) -> if is_pub { declared_audience(ow) } else { AModule(ow) }
+    Some(ow) ->
+      if not exported { AModule(ow, pkg) }
+      else if pkg_only { APackage(pkg) }
+      else { declared_audience(ow) }
   }
 
 ## A compiler-owned type name's audience, read off the inventory rather than
@@ -1927,7 +1968,8 @@ pub type TraitI = {
   name: String,
   # the subject type parameter (a TyVar)
   tvar: Ty,
-  is_pub: Bool,
+  # who may name it (SEM-07), decided by the declaring module
+  audience: Audience,
   owner: Option[String],
   src_path: Option[String],
   # methods by name, in declaration order
@@ -2153,11 +2195,11 @@ pub fn trait_of(traits: Traits, id: Int) -> TraitI =
     None -> panic("unknown trait id: ${id}")
   }
 
-## Who may name this trait (SEM-07). Derived rather than stored, because
-## `TraitI` — alone among the four identity records — already carries both
-## halves of the answer, and a stored copy could disagree with the `is_pub`
-## the exporter reads.
-pub fn trait_audience(t: TraitI) -> Audience = decl_audience(t.owner, t.is_pub)
+## Who may name this trait (SEM-07). Stored on the record like every other
+## identity's: it used to be derived from `is_pub` and `owner`, which stopped
+## being enough when the answer came to depend on the declaring package as
+## well, and an importer has no way to know the declarer's package.
+pub fn trait_audience(t: TraitI) -> Audience = t.audience
 
 pub fn impl_display(adts: Adts, traits: Traits, i: ImplI) -> String =
   trait_of(traits, i.trait_id).name ++ "[" ++ ty_show(adts, i.subject) ++ "]"
@@ -2502,7 +2544,7 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
     id: tid,
     name: name,
     tvar: tv,
-    is_pub: true,
+    audience: AWorld,
     owner: None,
     src_path: None,
     methods: [(m, MethodSig { sig: sig, has_default: false })],
@@ -2536,7 +2578,7 @@ pub fn prelude_traits() -> Traits = {
     id: ORD_ID,
     name: "Ord",
     tvar: tv,
-    is_pub: true,
+    audience: AWorld,
     owner: None,
     src_path: None,
     methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
@@ -2564,7 +2606,7 @@ pub fn prelude_traits() -> Traits = {
     id: ITER_ID,
     name: "Iter",
     tvar: iv,
-    is_pub: true,
+    audience: AWorld,
     owner: None,
     src_path: None,
     methods: [
@@ -2602,7 +2644,7 @@ pub fn prelude_traits() -> Traits = {
     id: INDEX_ID,
     name: "Index",
     tvar: xv,
-    is_pub: true,
+    audience: AWorld,
     owner: None,
     src_path: None,
     methods: [
@@ -2624,7 +2666,7 @@ pub fn prelude_traits() -> Traits = {
     id: DISPLAY_ID,
     name: "Display",
     tvar: dv,
-    is_pub: true,
+    audience: AWorld,
     owner: None,
     src_path: None,
     methods: [

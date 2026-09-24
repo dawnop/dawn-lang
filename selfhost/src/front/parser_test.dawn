@@ -14,7 +14,7 @@ use front/ast.{
   PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
   Stmt, SLetPat, SWhile,
   Decl, DFn, DType, DConst, DUseModule, DImpl, Module,
-  TypeRef, TQual, TNamed, TFn
+  TypeRef, TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub
 }
 
 fn rendered(src: String) -> String = {
@@ -113,7 +113,7 @@ test "a function declaration parses to one decl" {
 test "multiplication binds tighter than addition" {
   let (m, ds) = parse_module("const A: Int = 1 + 2 * 3")
   match m.decls[0] {
-    DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) ->
+    DConst(name, vis, ann, init, lo, hi, nlo, nhi) ->
       match init {
         EBinary(op, left, right, olo, ohi, xlo, xhi) -> {
           assert op == OpAdd
@@ -380,12 +380,35 @@ test "declaration recovery anchors at contextual opaque type" {
   }
 }
 
+test "pub(pkg) is a third visibility, and pkg is only special after pub(" {
+  let (m, ds) = parse_module(
+    "pub(pkg) type Seam = { n: Int }\npub(pkg) fn f(pkg: Int) -> Int = pkg\n" ++
+      "pub(pkg) opaque type H = Int\npub type Open = { n: Int }\nfn pkg() -> Int = 1\n")
+  assert len(ds) == 0
+  var vis: List[Vis] = []
+  for d in m.decls {
+    match d {
+      DType(t) -> { vis = vis ++ [t.vis] }
+      DFn(f) -> { vis = vis ++ [f.vis] }
+      _ -> { assert false }
+    }
+  }
+  assert vis == [VisPkg, VisPkg, VisPkg, VisPub, VisPrivate]
+  let (_, bad) = parse_module("pub(crate) fn f() -> Int = 1\n")
+  assert len(bad) == 1
+  assert bad[0].msg == "visibility can only be restricted to the package: write `pub(pkg)`"
+  # still a contract: a package-visible function states its return type
+  let (_, untyped) = parse_module("pub(pkg) fn f() = 1\n")
+  assert len(untyped) == 1
+  assert str.contains(untyped[0].msg, "must declare a return type")
+}
+
 test "public opaque type parses directly and through recovery" {
   let (direct, direct_diags) = parse_module("pub opaque type UserId = List[Int]")
   assert len(direct_diags) == 0
   match direct.decls[0] {
     DType(t) -> {
-      assert t.is_pub
+      assert t.vis == VisPub
       assert t.is_opaque
     }
     _ -> { assert false }
@@ -397,7 +420,7 @@ test "public opaque type parses directly and through recovery" {
   assert recovered_diags[0].msg == "expected a parameter name, found `=`"
   match recovered.decls[0] {
     DType(t) -> {
-      assert t.is_pub
+      assert t.vis == VisPub
       assert t.is_opaque
     }
     _ -> { assert false }
@@ -443,7 +466,7 @@ test "a binary operator may lead its continuation line" {
   let (m, ds) = parse_module("const A: Bool = x\n  && y")
   assert len(ds) == 0
   match m.decls[0] {
-    DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) ->
+    DConst(name, vis, ann, init, lo, hi, nlo, nhi) ->
       match init {
         EBinary(op, l, r, a, b, c, d) -> ()
         _ -> { assert false }

@@ -444,6 +444,23 @@ pub type AssocBind = { name: String, tref: TypeRef, lo: Int, hi: Int, nlo: Int, 
 ## the empty row `!()`); registration resolves and polices them.
 pub type EffAssocBind = { name: String, atoms: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int }
 
+## Who may name a top-level declaration (spec §10.4). Three values rather than
+## two flags: `pub` with a package restriction is not a fourth state that a
+## pair of booleans would let exist unasked for (`pub(pkg)` without `pub`).
+##
+##   VisPrivate  the declaring module only (no modifier)
+##   VisPkg      every module of the declaring package (`pub(pkg)`)
+##   VisPub      every module that can `use` the declarer (`pub`)
+pub type Vis =
+  | VisPrivate
+  | VisPkg
+  | VisPub
+
+## Is the declaration visible outside its own module at all? `pub` and
+## `pub(pkg)` both put it into the module's exports; the package boundary is
+## drawn later, where an importer meets those exports.
+pub fn vis_exported(v: Vis) -> Bool = v != VisPrivate
+
 pub type TraitMethod = {
   name: String,
   params: List[Param],
@@ -457,7 +474,7 @@ pub type TraitMethod = {
 }
 
 pub type FnDecl = {
-  is_pub: Bool,
+  vis: Vis,
   name: String,
   tparams: List[TypeParamDecl],
   # The `!e` items of the same bracketed list, kept apart from `tparams` for the
@@ -476,7 +493,7 @@ pub type FnDecl = {
 }
 
 pub type TypeDeclR = {
-  is_pub: Bool,
+  vis: Vis,
   # `opaque type N[..] = T`: nominal to every other module, its target to this
   # one. Carries alias_target like an alias does -- the difference is only who
   # is allowed to see through it.
@@ -520,7 +537,7 @@ pub type EffectOp = {
 ## `ctl` is contextual like `handle` and `resume`, so nothing named `ctl` had to
 ## give up the name; the flag is false for every effect written today.
 pub type EffectDeclR = {
-  is_pub: Bool,
+  vis: Vis,
   is_ctl: Bool,
   name: String,
   ops: List[EffectOp],
@@ -536,7 +553,7 @@ pub type Decl =
   | DType(t: TypeDeclR)
   | DConst(
     name: String,
-    is_pub: Bool,
+    vis: Vis,
     ann: TypeRef,
     init: Expr,
     lo: Int,
@@ -552,7 +569,7 @@ pub type Decl =
     methods: List[TraitMethod],
     assoc: List[AssocDecl],
     eff_assoc: List[EffAssocDecl],
-    is_pub: Bool,
+    vis: Vis,
     lo: Int,
     hi: Int,
     nlo: Int,
@@ -728,7 +745,7 @@ pub fn module_types(m: Module) -> List[TypeDeclR] = {
 
 pub type ConstView = {
   name: String,
-  is_pub: Bool,
+  vis: Vis,
   ann: TypeRef,
   init: Expr,
   lo: Int,
@@ -741,10 +758,10 @@ pub fn module_consts(m: Module) -> List[ConstView] = {
   var out: List[ConstView] = []
   for d in m.decls {
     match d {
-      DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) -> {
+      DConst(name, vis, ann, init, lo, hi, nlo, nhi) -> {
         out = out ++ [ConstView {
           name: name,
-          is_pub: is_pub,
+          vis: vis,
           ann: ann,
           init: init,
           lo: lo,
@@ -767,7 +784,7 @@ pub type TraitView = {
   methods: List[TraitMethod],
   assoc: List[AssocDecl],
   eff_assoc: List[EffAssocDecl],
-  is_pub: Bool,
+  vis: Vis,
   lo: Int,
   hi: Int,
   nlo: Int,
@@ -778,7 +795,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
   var out: List[TraitView] = []
   for d in m.decls {
     match d {
-      DTrait(name, tp, tplo, tphi, methods, assoc, effa, is_pub, lo, hi, nlo, nhi) -> {
+      DTrait(name, tp, tplo, tphi, methods, assoc, effa, vis, lo, hi, nlo, nhi) -> {
         out = out ++ [TraitView {
           name: name,
           tp: tp,
@@ -787,7 +804,7 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
           methods: methods,
           assoc: assoc,
           eff_assoc: effa,
-          is_pub: is_pub,
+          vis: vis,
           lo: lo,
           hi: hi,
           nlo: nlo,

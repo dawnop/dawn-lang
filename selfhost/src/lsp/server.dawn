@@ -35,7 +35,7 @@ use check/checker.{
   exports_of, visible_bins,
   check_module_headers, check_module_body_products, assemble_module_bodies
 }
-use check/cx.{Cx, ModExports, cx_new}
+use check/cx.{Cx, ModExports, cx_new, package_of, exports_seen_by}
 use check/identity.{module_key}
 use check/tast.{TModule}
 use check/scalar_replay
@@ -561,6 +561,16 @@ fn doc_qcx(st: LspState, analysis: Analysis) -> Option[QCx] = {
       for cm in analysis.prog.modules {
         env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
       }
+      # every surface the editor offers from here on is the one this document
+      # may name: the same `exports_seen_by` pass_imports applies, once, so a
+      # completion never offers another package's `pub(pkg)` name
+      let viewer = package_of(e.cx)
+      var seen: Map[String, ModExports] = map.empty()
+      for pr in map.entries(env) {
+        let (path, exp) = pr
+        seen = map.insert(seen, path, exports_seen_by(exp, viewer))
+      }
+      env = seen
       Some(QCx {
         entry: e,
         prog: analysis.prog,
