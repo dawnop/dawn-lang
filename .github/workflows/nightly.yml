@@ -2,7 +2,8 @@ name: nightly
 
 # Gates worth running, but not worth running on every push.
 #
-# There is one so far: the ecosystem corpus of scripts/selfhost-prev-diff.sh.
+# Each job below says why it is here rather than on the push path. The first
+# is the ecosystem corpus of scripts/selfhost-prev-diff.sh.
 # That script's `--corpus site` clones dawnop-site at a pinned commit and
 # sweeps its backend-dawn sources with the previous release's toolchain and
 # HEAD's, which is where the `lex backend-dawn`, `parse backend-dawn` and
@@ -54,3 +55,67 @@ jobs:
       # running it twice would be the expensive way to run it once.
       - name: N vs N-1 differential, with the backend-dawn corpus
         run: ./scripts/selfhost-prev-diff.sh --corpus site
+
+  # Ruling 9(b). check-gate-budgets.py in tree-policy holds every timeout to
+  # its `# budget:` line, but whether the line is still the worst observation
+  # needs the Actions API, and a push gate that reads the network goes red for
+  # the network (gate-observations.py's header). So it runs here: the last
+  # seven days of ci.yml on main, compared with every declared claim. On
+  # 2026-09-03 twenty-one claims sat under their own worst run and every gate
+  # was green; this is the check that would have said so.
+  #
+  # Red opens an issue (scripts/nightly-issue.sh): a scheduled run blocks
+  # nothing, so a red nobody is told about is a red nobody sees. It reads the
+  # API directly and no previous run's artifact, so it has no first-run case
+  # and no retention window. Measured locally 2026-09-24: 1m52s to read 25
+  # runs, 0.06s to compare; nothing here builds.
+  budget-observations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Listed in full: a `permissions:` block sets everything it omits to none.
+    permissions:
+      actions: read     # the runs and their jobs, for gate-observations.py
+      contents: read    # the checkout
+      issues: write     # the report when the claims are wrong
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: every budget claim is at least its worst observed run
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          # One file for both, so the issue quotes whichever one failed.
+          # --runs is a ceiling well above a week of main pushes, so the
+          # seven days bound the window and not the default of 25 runs
+          # (about two days on 2026-09-23).
+          python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
+              --since "$since" --runs 150 --out obs.json > budgets.txt 2>&1 &&
+            python3 scripts/check-gate-budgets.py --observed obs.json \
+              >> budgets.txt 2>&1 || status=$?
+          cat budgets.txt
+          exit "${status:-0}"
+
+      - name: report under-declared budgets as an issue
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly budget audit found \`# budget:\` claims below the"
+            echo "worst observed run of their job, or could not read the runs."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Restate each line the output names (3x rule, run pole) or say"
+            echo "why the observation is an outlier. Output:"
+            echo
+            echo '```'
+            cat budgets.txt 2>/dev/null || echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: gate budgets under-declared" issue.md

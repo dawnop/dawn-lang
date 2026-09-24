@@ -1,7 +1,7 @@
 # 门禁自身的漂移：锚点、预算观测、生态语料 pin
 
 > 状态：**current**。裁决 9 的三条（2026-09-24，`agent-handoff/rulings-20260924.md` 与其改裁记录）：
-> 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。9(a) 已落地；9(b)、9(c) 在随后的提交里落地。
+> 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。9(a)、9(b) 已落地；9(c) 在随后的提交里落地。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -52,8 +52,10 @@
 job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`issues: write`；红了由 `scripts/nightly-issue.sh` 开一个固定标题的 issue，
 正文贴欠声明表；同标题的 issue 已开着就追加评论，不重开（Rust Reference 每日 grammar check 的做法）。不读上次 artifact。
 
-实测（本机，2026-09-24）：`gate-observations.py` 读 25 次 ci.yml 运行 1 分 52 秒（本机经 WSL2 网络，runner 上应更快），
-`check-gate-budgets.py --observed` 0.06 s。**今天就会红两条**：`syntax-mutants-2` 声明 882 s、实测 897 s，`builtin-type-2` 声明 794 s、实测 809 s。
+实测（本机，2026-09-24）：`gate-observations.py --since <7 天前> --runs 150` 读到 29 次 ci.yml 运行（09-18 到 09-23），1 分 42 秒
+（本机经 WSL2 网络；默认的 `--runs 25` 只覆盖约两天，所以 nightly 把 `--runs` 抬到 150，让 7 天成为真正的窗口），
+`check-gate-budgets.py --observed` 0.06 s。把 job 的两步原样抽出来在本机跑（`GITHUB_REPOSITORY` 手设，开 issue 那一行换成 echo），
+审计步退出 1、issue 正文生成正确。**今天就会红两条**：`syntax-mutants-2` 声明 882 s、实测 897 s，`builtin-type-2` 声明 794 s、实测 809 s。
 这是它该报的东西，本批不改这两行（push 门不在本批范围），留给 nightly 开的 issue。
 
 ## 9(c) 生态语料 pin
@@ -74,8 +76,8 @@ job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`i
 ## 墙钟
 
 - push 门：+0。tree-policy 多两条命令共约 0.25 s，预算行从 431 s 记为 432 s，timeout 不变。
-- nightly：新增两个并行 job，不需要工具链；`budget-observations` 本机 1 分 52 秒（上界），`corpus-pin` 本机 3 次 `gh api` 约 5 s。
-  两者与 `ecosystem-corpus` 并行，nightly 的总墙钟不变；多花的是 runner 分钟数，约 2 分钟。
+- nightly：新增两个并行 job，不需要工具链；`budget-observations` 本机 1 分 42 秒（上界），`corpus-pin` 本机 3 次 `gh api` 约 5 s。
+  两者与 `ecosystem-corpus` 并行，nightly 的总墙钟不变；多花的是 runner 分钟数，约 2 分钟。`budget-observations` 的 `timeout-minutes: 15` 是失控上限，不是预算声明（nightly 不带 `# budget:` 行，理由见该文件头）。
 
 ## 不做的（理由）
 
