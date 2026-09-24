@@ -17,6 +17,12 @@
 #   run.sh --sha <sha> --backend local --out <dir> --dry-run   # the plan only
 #   run.sh --sha <sha> --backend local --prefix DIR [--only ...]   # inside a prefix
 #   run.sh --sha <sha> --backend crun --prefix DIR --jobs 16       # on the cluster
+#   run.sh --resume <out> [--jobs N]   # continue a crun run whose controller died
+#
+# --resume reads <out>/invocation.json, which every run writes, so it takes no
+# other option but --jobs. Jobs the cluster finished meanwhile are collected,
+# jobs still running are waited for, and jobs never started are launched; a
+# job that ended without a result fragment stays red (runner.py, backend_crun.py).
 #
 # --prefix DIR runs every job inside the prefix prefix.py lays out and
 # inputs.py fills: its JDK, python, node and seed, an environment built from
@@ -45,7 +51,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --keep-going) args+=(--backend-opt keep-going=1); shift ;;
     --dry-run) args+=(--dry-run); shift ;;
-    --sha|--backend|--out|--jobs|--only|--backend-opt|--repo|--prefix)
+    --sha|--backend|--out|--jobs|--only|--backend-opt|--repo|--prefix|--resume)
       [ $# -ge 2 ] || { echo "run.sh: $1 needs a value" >&2; exit 2; }
       args+=("$1" "$2"); shift 2 ;;
     -h|--help)

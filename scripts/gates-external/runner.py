@@ -15,6 +15,17 @@ the point of the design, so it is spelled out:
                  waits for them and then runs whatever they returned, as
                  `if: always()` asks
 
+Resuming (--resume OUT). A controller can die mid-run (an SSH drop that
+takes the terminal with it, a killed shell) while a backend's jobs keep
+running elsewhere. The first run writes OUT/invocation.json; --resume OUT
+reads it back, so the resumed run plans the same commit with the same
+options and only --jobs may differ, and asks the backend to reuse its run.
+Only a backend that says RESUMABLE can: the local one runs jobs as children
+of this process, so nothing outlives it. The backend's finished() hands back
+the jobs that ended while no controller was watching; they are marked done
+without taking a worker slot, and the rest are scheduled as usual (the
+backend waits for one still running rather than starting it again).
+
 Things that are useful locally but must not reach the bundle (timings, the
 memory peak, per-job exit codes, the paths of the logs) go to summary.json
 and the terminal. The bundle is written only by bundle.build, which refuses
@@ -82,7 +93,28 @@ def main():
     parser.add_argument("--backend-opt", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the plan (jobs, needs, run steps, substitutions) and stop")
-    args = parser.parse_args()
+    parser.add_argument("--resume", metavar="OUT",
+                        help="continue the run whose --out was OUT, with its recorded options")
+    argv = sys.argv[1:]
+    if "--resume" in argv:
+        # The recorded invocation supplies every required option; --jobs may
+        # be given again, anything else is refused below.
+        index = argv.index("--resume")
+        if index + 1 >= len(argv):
+            parser.error("--resume needs a value")
+        record = Path(argv[index + 1]) / "invocation.json"
+        try:
+            saved = json.loads(record.read_text())
+        except (OSError, ValueError) as error:
+            print(f"gates-external: cannot resume: {record}: {error}", file=sys.stderr)
+            return 2
+        extra = [a for a in argv[:index] + argv[index + 2:]]
+        if any(a != "--jobs" and a.startswith("--") for a in extra):
+            print("gates-external: --resume takes only --jobs besides it; the rest comes from "
+                  f"{record}", file=sys.stderr)
+            return 2
+        argv = saved["argv"] + extra + ["--resume", argv[index + 1]]
+    args = parser.parse_args(argv)
 
     started = time.monotonic()
     if not args.out and not args.prefix:
@@ -135,6 +167,28 @@ def main():
     except ImportError as error:
         print(f"gates-external: no backend {args.backend!r} ({error})", file=sys.stderr)
         return 2
+    if args.resume:
+        if Path(args.resume).resolve() != out:
+            print(f"gates-external: --resume {args.resume} is not this run's out ({out})",
+                  file=sys.stderr)
+            return 2
+        if not getattr(module, "RESUMABLE", False):
+            print(f"gates-external: the {args.backend} backend cannot resume a run",
+                  file=sys.stderr)
+            return 2
+        options["resume"] = "1"
+    else:
+        # Everything but --jobs, which a resumed run may change. Paths are
+        # made absolute so the record does not depend on the shell's cwd.
+        recorded = ["--sha", plan["tree"], "--backend", args.backend, "--out", str(out),
+                    "--repo", str(Path(args.repo).resolve())]
+        if args.prefix:
+            recorded += ["--prefix", str(Path(args.prefix).resolve())]
+        if args.only:
+            recorded += ["--only", args.only]
+        for item in args.backend_opt:
+            recorded += ["--backend-opt", item]
+        (out / "invocation.json").write_text(json.dumps({"argv": recorded}, indent=2) + "\n")
     backend = module.create({"repo": Path(args.repo).resolve(), "tree": plan["tree"],
                              "out": out, "options": options, "log": log})
     log(f"tree {plan['tree']}, gates.yml blob {plan['gates_blob']}, {len(jobs)} jobs, "
@@ -176,6 +230,17 @@ def main():
         for job in jobs:
             if job not in selected:
                 done[job["id"]].set()
+        # Jobs an earlier controller of this run left finished: done, with
+        # the result the backend read back, before any worker starts.
+        earlier = backend.finished() if args.resume else {}
+        for job_id, result in sorted(earlier.items()):
+            if job_id in done and any(j["id"] == job_id for j in selected):
+                results[job_id] = result
+                timings[job_id] = 0
+                done[job_id].set()
+                log(f"collected {job_id} from the earlier controller: "
+                    f"{'ok' if result['ok'] else 'FAILED'}")
+        selected = [j for j in selected if j["id"] not in results]
         # Jobs with needs are submitted last so a waiting job never holds a
         # worker slot while the jobs it waits for are still queued.
         ordered = [j for j in selected if not j["needs"]] + [j for j in selected if j["needs"]]
