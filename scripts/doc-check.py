@@ -384,17 +384,24 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
-        "the barriers' effect rows, which are no longer one row",
+        "the barriers' effect rows, which are one row again",
         (
-            ("docs/spec.md", "这一对的效果行**不再是同一个**"),
-            ("docs/spec.en.md", "This pair's effect row is **no longer one row**"),
+            ("docs/spec.md", "这一对的效果行**是同一个**"),
+            ("docs/spec.en.md", "This pair's effect row is **one row**"),
         ),
     ),
     (
-        "the three barriers in one line",
+        "the three barriers share one row",
         (
-            ("docs/spec.md", "于是**三个屏障排成一条线**"),
-            ("docs/spec.en.md", "So **the three barriers line up**"),
+            ("docs/spec.md", "于是**三个屏障共用一条行**"),
+            ("docs/spec.en.md", "So **the three barriers share one row**"),
+        ),
+    ),
+    (
+        "language-raised failure messages agree across backends",
+        (
+            ("docs/spec.md", "**语言自己发出的失败，\n  消息两后端逐字节相同**"),
+            ("docs/spec.en.md", "**a failure the language itself raises has a byte-identical message on\n  both backends**"),
         ),
     ),
     (

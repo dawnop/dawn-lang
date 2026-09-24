@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ae0313450d0bb387 -->
+<!-- doc-check: translation-of docs/spec.md @ 047782666b5a3e00 -->
 
 # Dawn Language Specification
 
@@ -3251,9 +3251,9 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
   protected closure's row is an **effect parameter** `!e`: the closure may be pure, may be
   `!io`, and may carry a label or an effect variable, as long as those effects have a
   handler answering them outside the barrier. The whole call's row **is** that row — the
-  barrier adds nothing of its own to it. It and its companion `catch_panic` are no longer
-  the same shape; the reason is at the end of §9.8.1 and in
-  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.5.
+  barrier adds nothing of its own to it. Its companion `catch_panic` has the same shape
+  (the two differed between 2026-09-01 and 2026-09-24); the reason is at the end of §9.8.1
+  and in [`docs/effects-window-design.md`](effects-window-design.md) §4.
 - It only intercepts `java.lang.Exception` and its subclasses; `Error` is not intercepted
   — **a Dawn panic (`dawn.rt.PanicError` is a subclass of `Error`) passes through
   unchanged**, a panic is still a bug and is not recoverable.
@@ -3264,11 +3264,10 @@ fn parse(s: String) -> Result[Int, ForeignError] !io =
 - Failures inside the boundary propagate as usual: wrapping `catch_fault` around a whole
   compound call is enough, there is no need to wrap call by call.
 
-The companion `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !io` is the
-same shape only in its parameter: the protected closure's row is just as free, while this
-one's **own row is pinned to `!io`**, because the failure it catches is recorded in no row
-anywhere (the end of §9.8.1 puts the two side by side). It intercepts **two kinds, a Dawn
-panic (`PanicError`) and `Exception`** — not any `Throwable`: `VirtualMachineError` (heap
+The companion `catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e` has the
+same shape: the protected closure's row is the whole call's row, and the barrier adds no
+effect of its own (the end of §9.8.1 puts the three barriers side by side). It intercepts
+**two kinds, a Dawn panic (`PanicError`) and `Exception`** — not any `Throwable`: `VirtualMachineError` (heap
 exhausted, stack overflow) passes through, resource exhaustion is not a value. It is for a
 **supervision boundary** — one request on a server, one execution of a task runner: a
 panic in one request should become a 500 and be logged, rather than take down the whole
@@ -3311,8 +3310,10 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 **The payload contract** (on every backend):
 
 - `message` has **no length limit** and equals, byte for byte, the String the failure
-  was raised with; a failure the language itself raises (`panic(m)`) is byte-identical
-  across backends. Setting a limit means picking a number, and any number will one day
+  was raised with; **a failure the language itself raises has a byte-identical message on
+  both backends** — `panic(m)`, `assert`, an out-of-bounds index, division by zero, an
+  invalid code point, `expect`, without exception (pinned by differential corpora in
+  `scripts/spike-native/` such as `divzero_messages`, `index_panic_text` and `catch_kinds`). Setting a limit means picking a number, and any number will one day
   be crossed by a legitimate message; truncation would also have to handle character
   boundaries — so this is "no truncation clause", not "a generous limit".
 - `message` is well-formed UTF-8. A direct consequence of the String invariant (§4.8),
@@ -3329,25 +3330,26 @@ There is only this one pair of barriers (only this pair **intercepts** failure; 
 `bracket` of §9.8.2 intercepts nothing), only the `ForeignError` payload, and **the
 String version is not kept**.
 
-This pair's effect row is **no longer one row**: `catch_fault` carries the protected
-closure's, `catch_panic` is pinned to `!io`. The criterion did not change — whoever
-observes a failure is impure — what changed is reading it against **which** failure is
-observed:
+This pair's effect row is **one row**: the protected closure's, with nothing added by the
+barrier. The promise of a pure function is **the same arguments give the same value, within
+one program and one build** (§6.2 rule 4), checked against **which** failure is observed:
 
 - **A fault is a failure caused by the outside world**, and every route out there is
   charged before it can raise one (an io primitive and a `use java` call are both
   unconditionally `!io`). So whoever can reach that `Err` is impure already, and a second
   charge from the barrier is one nobody owes.
-- **A panic is a failure the language defines itself**, and no row anywhere records that
-  one can happen, so the barrier is the only place left to record it. Its observables are
-  exactly the ones a pure function may not have: an `assert` message is a function of the
-  source text, a failure the runtime raises by itself says different things on the two
-  backends (§9.8.1 promises byte-identity for `panic(m)` only), and folding or
-  deduplicating pure calls changes how many times the catch happens.
+- **A panic is a failure the language defines itself, and its arguments decide it**:
+  evaluation is strict and its order is fixed, so whether a pure closure panics on given
+  arguments, and with what message, is settled, folding or deduplicating pure calls cannot
+  change what is caught, and how many times the catch happens is not observable. Source
+  text inside a message (an `assert`'s expression) is part of the program, as a string
+  literal is; the **backend** part of a message is excluded by the payload contract above
+  (byte-identical on both). Comptime still refuses `catch_panic` outright (§7), so the
+  compiler never folds a build machine's message into an artifact.
 
-So **the three barriers line up**: the `bracket` of §9.8.2 observes nothing,
+So **the three barriers share one row**: the `bracket` of §9.8.2 observes nothing,
 `catch_fault` observes a failure `io` has already been charged for, and `catch_panic`
-observes one nobody was charged for. The first two carry a variable, the third `!io`.
+observes one its arguments decide. All three carry the variable.
 
 > **The line rests on an invariant**: **a fault only comes from io.** It used to carry one
 > named exception: a continuation's row was once unconditionally pure, so a function with a
@@ -3450,10 +3452,10 @@ Three guarantees:
   one row, and `bracket` adds no effect of its own. So a `bracket` over a pure resource is
   pure, an `!io` one is `!io`, and a labelled one passes its label straight through. The
   pair of barriers in §9.8 binds an effect parameter too (`catch_fault[T, !e]`), so a free
-  row on the closure being run is common to all three. The real difference left belongs to
-  `catch_panic` alone: its own row is pinned to `!io`, while `bracket`'s and
-  `catch_fault`'s own rows **are** the variable. The reason is at the end of §9.8.1 and in
-  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.3, §7.4, §7.5.
+  row on the closure being run is common to all three, and so is the primitive's **own**
+  row being that variable (`catch_panic`'s was pinned to `!io` before 2026-09-24). The
+  reason is at the end of §9.8.1 and in
+  [`docs/effects-window-design.md`](effects-window-design.md) §4.
 
 > It gets no surface syntax like `defer`: the protected region is always **one closure
 > call**, so `return`/`?`/`break` cannot cross out of it at the language level, and the

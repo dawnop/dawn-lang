@@ -829,3 +829,23 @@ spec §9.8.1 末尾按这个写法记着，不写成无例外的正条文。
 逃逸一条 **fault**（§7.5.3 的洞，做成可跑的程序），两后端对拍。它不钉 `kind` 字面量——
 `kind` 是声明为后端相关的（runtime-intrinsics-design.md §12.4），所以每条穿越的失败都跟
 「同一条 fault，中间不放 discard」比较。把比较改成钉字面量，两后端立刻分歧。
+
+### 7.6 `catch_panic` 也放开（2026-09-24 裁决 4）
+
+三个屏障重新是一个形状：`catch_panic[T, !e](f: fn() -> T !e) -> Result[T, ForeignError] !e`。
+裁决依据、外部先例与论证全文在 [`docs/effects-window-design.md`](../effects-window-design.md) §4，
+这里只记它对本节的影响：
+
+- §7.2 的三条论证：论证一 §7.5.1 已证不成立；论证二的「后端」成分改由载荷契约承担——
+  语言自己发出的失败，消息两后端逐字节相同（SPC-02 由 `da884438` 修，ARCH-N13 的 `Array`
+  越界文案同批修，spec §9.8.1）；论证三在严格、定序求值下不成立（纯闭包在给定实参上 panic 与否、
+  消息是什么都已确定，折叠与消重不改变捕获结果）。「源码文本」那一半从来不构成不纯。
+- §7.3 的重开条件（panic 升为效果行成员）**没有**被用掉：panic 仍不在行里，`catch_panic`
+  仍不是行减多态。
+- §7.5.6 的看护翻面：`catch_effects.dawn` 里 `pure_caller_panic` 与 `pure_slot_panic`
+  改为**接受**，并把 `catch_panic` 的纯结果交给只收纯 fn 值的槽——把 `!io` 放回去，
+  这个 case 多出三条诊断（负控实测记录在分支报告）。`check/types` 的内联测试把两个屏障的
+  `sig.eff` 都断言为 `EffVar`。
+- Codex 评审（`agent-handoff/debt-survey-2026-09-07/05-codex-review.md` 第 105 行）指出
+  「`!io` 里允许观察 build 相关内容，不反证纯函数也可以」，这条成立，所以新论证不再引用
+  「消息已经在 `!io` 里跨后端分歧」，而是把跨后端一致写成契约。
