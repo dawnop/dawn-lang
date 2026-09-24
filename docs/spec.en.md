@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 2601c4192493914c -->
+<!-- doc-check: translation-of docs/spec.md @ 9b1330dfdcd71ed3 -->
 
 # Dawn Language Specification
 
@@ -401,6 +401,12 @@ the field, bind it first with `let g = r.f`; to call the function, name it direc
   `fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`
 - Monomorphism: type parameters must be fully inferable at every call site; higher-kinded types
   (HKT) are not supported.
+- **There are no call-site type arguments**: a type parameter is fixed only by the arguments and the
+  expected type. `f[Int](x)` (Go's spelling of explicit instantiation) means "index the function `f`
+  with the expression `Int`" in Dawn; the compiler recognises that shape and reports a single
+  "Dawn has no call-site type arguments" (when the subject is a generic function or builtin and the
+  index spells a type). To fix the type, annotate the binding that takes the result or the place an
+  argument comes from.
 - Implemented as erasure + boxing; monomorphisation is an optional later optimisation and does
   not affect semantics.
 - **No subtyping, no inheritance, no variance.** Types are either equal or different.
