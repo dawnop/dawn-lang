@@ -1709,6 +1709,14 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
       # build (RP-12: interp and intrinsics must give one answer).
       c = str_cmp_cp(a, as_str(rv))
     }
+    # false < true, the order Ord[Bool] gives (types.ord_scalars)
+    VBool(a) -> {
+      let b = match rv {
+        VBool(x) -> x
+        _ -> panic("comptime interpreter bug: mixed comparison")
+      }
+      c = if a == b { 0 } else if a { 1 } else { -1 }
+    }
     VFloat(a) -> {
       let b = match rv {
         VFloat(x) -> x

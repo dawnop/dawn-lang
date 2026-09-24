@@ -2740,7 +2740,7 @@ pub fn is_hash_scalar(t: Ty) -> Bool = {
   false
 }
 
-## The subset the prelude also *orders*, and `Float` is not in it.
+## The scalars the prelude *orders*, and `Float` is not among them.
 ##
 ## `Ord` is a total order -- that is what `sort` and `derive Ord` need, and
 ## what a `[T: Ord]` bound promises. Float has none: NaN is unordered against
@@ -2751,7 +2751,25 @@ pub fn is_hash_scalar(t: Ty) -> Bool = {
 ## trait more: `<`/`<=`/`>`/`>=` on scalars never consulted a witness in the
 ## first place, so they still work and still mean IEEE. What changes is that
 ## `[T: Ord]` no longer accepts Float.
-pub fn ord_scalars() -> List[Ty] = [TyInt, TyString]
+##
+## `Bool` and `Bytes` joined on 2026-09-24 (docs/builtin-privileges-design.md
+## 1). Both have a natural total order -- `false < true`, the declaration
+## order `derive Ord` gives any two-constructor enum; bytes unsigned and
+## lexicographic, shorter first on a shared prefix, which is the algorithm
+## String already runs on native -- and neither had a reason written next to
+## its absence. The user could not supply one either: `impl Ord[Bool]` is an
+## orphan anywhere a user can write it.
+##
+## This is also the table the `<` fast path reads (`checker.check_binary_typed`):
+## every scalar here compares natively, and `Float` is the one named exception
+## there -- a partial order still has a native `<`. Two lists used to answer
+## the two questions, which is how Bool had `==` but neither `<` nor `sort`.
+pub fn ord_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes]
+
+## The table above as a diagnostic spells it, so the hint that lists the
+## orderable scalars cannot drift from the list it describes.
+pub fn ord_scalar_names() -> String =
+  join(map(ord_scalars(), s => ty_show(prelude_adts(), s)), ", ")
 
 pub fn is_ord_scalar(t: Ty) -> Bool = {
   for s in ord_scalars() {

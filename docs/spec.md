@@ -676,9 +676,15 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
     要两个效果就写两个成员。
   - **bound 是检查，不是定义**：投影读出的永远是 impl 的实际绑定（每个主体唯一）；
     消费者在 bound 上写下的行只是上界（impl 侧 ⊑ 它），两者并存。
-- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
-  （**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
+- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Bool`/`String`/`Bytes`
+  的 impl（**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
   撤销了此前照 `Double.compare` 给的那份）。
+  - **`Ord[Bool]`**：`false < true`，即两个构造器按声明序（与 `derive Ord` 对和类型的规则同一条；
+    Rust、Haskell、OCaml 同此序）。
+  - **`Ord[Bytes]`**：**无符号**逐字节字典序，首个不同的字节定大小，公共前缀相等时短者小
+    （与 Rust `[u8]`、Haskell `ByteString` 同）。这正是 `Ord[String]` 在 UTF-8 上的算法。
+  - 这两条 2026-09-24 补上（[builtin-privileges-design.md](builtin-privileges-design.md) §1）；
+    此前 `Bool`/`Bytes` 有 `==` 而无 `<`，也进不了 `sort`，且用户无处写这两条 impl（孤儿规则）。
   - **`cmp` 只承诺符号**：小于返回 `-1`、相等返回 `0`、大于返回 `1`，
     **不承诺其它幅值**——此前 `cmp("a", "z")` 会把宿主的码元差 `-25` 漏出来，
     2026-07-31 起全类型统一 −1/0/1（把结果当差值缩放本就可能溢出，std 一直只用符号）。
@@ -690,7 +696,7 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
 
   `derive Ord` 生成字段字典序比较
   （和类型先比构造器声明顺序，构造器不同时只产生 `-1`/`1`），字段须为
-  `Int`/`String`、自身具 Ord impl 的类型，或该类型自己的类型参数
+  有 `Ord` 的标量、自身具 Ord impl 的类型，或该类型自己的类型参数
   （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
@@ -940,14 +946,16 @@ let area = {
 - `==`/`!=` 默认是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）；
   类型可用 `impl Eq` 覆盖这个默认（§3.5）。
 - 排序比较 `<`/`<=`/`>`/`>=` 有**两套机制**，不是一套：
-  - 在 `Int`/`Float`/`String` 上它们是**不解见证的原生运算**——不查 impl、不建字典。
+  - 在有 `Ord` 的标量（`Int`/`Bool`/`String`/`Bytes`，§3.5）与 `Float` 上它们是
+    **不解见证的原生运算**——不查 impl、不建字典。这两组是同一张表（`Ord` 的标量表）
+    加上唯一的例外 `Float`：`Float` 有原生 `<` 而无全序。
     `Float` 上是 IEEE 语义（NaN 参与的比较一律 false，见上文数值边缘语义）。
     其他具体类型桥接到预置 trait `Ord` 的 `cmp`（见 §3.5）——有 impl
     （手写或 `derive Ord`）即可比较。
   - `[T: Ord]` 是 trait bound，走字典：受它约束的类型参数上，`<` 与 `cmp`/`sort`
     一样解 `Ord` 的见证。`Float` 没有 impl（拒绝理由见上文「`Float` 没有 `Ord`」，
     不在此重复），故 `cmp(1.5, 2.5)` 不编译，而 `1.5 < 2.5` 照旧合法。
-  - 两套机制在 `Int`/`String` 上**答案相同**（`String` 上 `<` 与 `cmp` 是同一条
+  - 两套机制在 `Ord` 的每个标量上**答案相同**（`String` 上 `<` 与 `cmp` 是同一条
     比较、同一个序——**码点序**，见 §3.5），在 `Float` 上**有意不同**：原生 `<`
     是 IEEE 偏序，`Ord` 要的是全序，Float 只有前者。
 - 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持

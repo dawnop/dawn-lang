@@ -40,7 +40,7 @@ use check/types.{
   hard_reserved_builtin_type_name, peel_opaque,
   prelude_impls, prelude_trait_ids, fn_max_params, ctl_max_op_params,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, Head, head_of, impl_at,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, ord_scalars, Head, head_of, impl_at,
   has_impl_at, insert_impl, type_args_of, sub_goals
 }
 
@@ -547,8 +547,9 @@ test "prelude seeding wires names to ids" {
   assert map.get(cx.ctors_by_name, "None") == Some((OPTION_ID, 1))
   assert map.get(cx.traits_by_name, "Ord") == Some(ORD_ID)
   assert map.has(cx.fns, "cmp")
-  assert has_impl_at(cx.impl_table, ORD_ID, TyInt)
-  assert not has_impl_at(cx.impl_table, ORD_ID, TyBool)
+  for t in ord_scalars() {
+    assert has_impl_at(cx.impl_table, ORD_ID, t)
+  }
   # Eq/Hash/Show ride the same rail, each over its own list of scalars: the
   # three differ, and each difference is a decision rather than an oversight
   assert map.get(cx.traits_by_name, "Eq") == Some(EQ_ID)
@@ -563,7 +564,6 @@ test "prelude seeding wires names to ids" {
   for t in hash_scalars() {
     assert has_impl_at(cx.impl_table, HASH_ID, t)
   }
-  assert not has_impl_at(cx.impl_table, ORD_ID, TyBytes)
   # Float compares but does not order and does not hash (spec 4.3)
   assert has_impl_at(cx.impl_table, EQ_ID, TyFloat)
   assert not has_impl_at(cx.impl_table, ORD_ID, TyFloat)

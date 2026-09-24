@@ -1123,11 +1123,13 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
     let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
     (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
-  } else if (op == CLt || op == CLe || op == CGt || op == CGe) && lt == TyString {
-    # `dawn_str` is a struct, so C's relational operators do not apply to it;
-    # the order is the same code-point order `dawn_cmp_str` gives the Ord
-    # dictionary.
-    (st2, "(dawn_cmp_str(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
+  } else if (op == CLt || op == CLe || op == CGt || op == CGe) && (lt == TyString || lt == TyBytes) {
+    # `dawn_str` and `dawn_bytes` are structs, so C's relational operators do
+    # not apply to them; the order is the one `dawn_cmp_str`/`dawn_cmp_bytes`
+    # give the Ord dictionary. Bool needs no arm: C's `<` on `bool` is already
+    # false < true.
+    let f = if lt == TyBytes { "dawn_cmp_bytes" } else { "dawn_cmp_str" }
+    (st2, "(" ++ f ++ "(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
   } else if op == CMod && ty == TyFloat {
     # C's `%` is integer-only. `fmod` is the IEEE remainder the JVM's DREM is.
     (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
@@ -1527,10 +1529,10 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
     # a link error waiting for the first caller; the gap below is the honest
     # answer, and it is the same one Cursor gets.
     TyString -> "${prefix}_str"
-    # Bool and Bytes have an Eq and a Hash but no order, so only one of the two
-    # prefixes reaches them; the other falls through to the gap below
-    TyBool -> if prefix == "dawn_hash" { "${prefix}_bool" } else { no_rt(what, t) }
-    TyBytes -> if prefix == "dawn_hash" { "${prefix}_bytes" } else { no_rt(what, t) }
+    # Bool and Bytes are in both tables since 2026-09-24 (ord_scalars gained
+    # them), so both prefixes name a runtime function
+    TyBool -> "${prefix}_bool"
+    TyBytes -> "${prefix}_bytes"
     # an opaque type is its target at run time, here as everywhere
     TyOpaque(_, _, _, _, tgt) -> scalar_rt(prefix, tgt, what)
     # Cursor has no native representation yet (bytes-design.md): an honest
@@ -2663,8 +2665,6 @@ test "every scalar relation the emitter names is one the runtime defines" {
   assert not str.contains(header, "dawn_cmp_float")
   assert gaps("dawn_hash", TyFloat)
   assert gaps("dawn_cmp", TyFloat)
-  assert gaps("dawn_cmp", TyBool)
-  assert gaps("dawn_cmp", TyBytes)
 }
 
 test "the evidence-pack primitives the emitter calls are the ones the runtime has" {

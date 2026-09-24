@@ -1,0 +1,63 @@
+# `Ord[Bool]` and `Ord[Bytes]` (docs/builtin-privileges-design.md 1), on both
+# backends and through every door an ordering comes in by: the native `<`
+# (no witness), `cmp` (the prelude intrinsic), `sort` (a dictionary built for
+# `[T: Ord]`), a derived comparison over fields of the two types, a tuple, and
+# an opaque type over Bytes, which orders as its target.
+#
+# The Bytes cases are chosen so a wrong order shows: 0xFF against 0x01 is
+# where a *signed* byte comparison (Java's `byte` is signed) answers the other
+# way, a shared prefix is where a comparison that forgets the lengths answers
+# 0, and the empty value is where a memcmp over a NULL buffer would go wrong.
+use std/io
+use std/list
+use std/bytes
+
+type Tagged = { flag: Bool, data: Bytes } derive Show, Ord
+
+opaque type Key = Bytes
+
+fn key(b: Bytes) -> Key = b
+
+fn hex(b: Option[Bytes]) -> Bytes =
+  match b {
+    Some(x) -> x
+    None -> bytes.utf8("")
+  }
+
+fn largest[T: Ord](xs: List[T]) -> T = {
+  var best = xs[0]
+  for x in xs {
+    if best < x { best = x }
+  }
+  best
+}
+
+pub fn main() -> Unit !io = {
+  let lo = hex(bytes.from_hex("01"))
+  let hi = hex(bytes.from_hex("ff"))
+  let ab = hex(bytes.from_hex("6162"))
+  let abc = hex(bytes.from_hex("616263"))
+  let empty = hex(bytes.from_hex(""))
+
+  println("-- Bool --")
+  println("${false < true} ${true < false} ${true <= true} ${false >= true}")
+  println("${cmp(false, true)} ${cmp(true, true)} ${cmp(true, false)}")
+  println(to_string(sort([true, false, true, false])))
+  println(to_string(largest([false, true, false])))
+
+  println("-- Bytes --")
+  println("${lo < hi} ${hi < lo} ${ab < abc} ${abc <= ab} ${empty < lo}")
+  println("${cmp(lo, hi)} ${cmp(hi, lo)} ${cmp(ab, abc)} ${cmp(abc, abc)} ${cmp(empty, empty)}")
+  println(join(map(sort([hi, abc, empty, lo, ab]), b => "<" ++ bytes.to_hex(b) ++ ">"), " "))
+  println(bytes.to_hex(largest([lo, hi, ab])))
+
+  println("-- derived, tuples, opaque --")
+  let ts = [
+    Tagged { flag: true, data: lo },
+    Tagged { flag: false, data: hi },
+    Tagged { flag: true, data: empty }
+  ]
+  println(join(map(sort(ts), t => "${t.flag}:" ++ bytes.to_hex(t.data)), " "))
+  println(to_string(sort([(true, 1), (false, 2), (true, 0)])))
+  println("${key(lo) < key(hi)} ${cmp(key(hi), key(lo))}")
+}

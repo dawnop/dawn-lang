@@ -70,7 +70,7 @@ use check/types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   head_of, impl_at, has_impl_at, insert_impl,
-  is_eq_scalar, is_ground, expandable, type_args_of, sub_goals,
+  is_eq_scalar, is_ord_scalar, ord_scalar_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
@@ -2721,8 +2721,12 @@ pub fn check_binary_typed(
       # (spec §2.7), which is what `resolve_ord_witness` peels to anyway.
       # Without the peel `'0' <= c` on a `Char` lowered to `cmp(a, b) <= 0` --
       # a call, where the same comparison one layer down is one instruction.
+      #
+      # The set is `ord_scalars()` itself plus Float, the one scalar with a
+      # native `<` and no total order. It used to be its own three-name list,
+      # which is how Bool and Bytes came to have `==` and no `<`.
       let (subject_cx, ol) = ord_subject_read(cx, lt)
-      if ol == TyInt || ol == TyFloat || ol == TyString {
+      if is_ord_scalar(ol) || ol == TyFloat {
         return (subject_cx, TyBool, node(no_wit(), TyBool))
       }
       let (cx1, w) = resolve_ord_witness(subject_cx, lt, olo, ohi)
@@ -2882,9 +2886,15 @@ test "binary checking covers the operator families" {
   let (cx3, t3, _) = check_binary_typed(cx, OpLt, TyInt, TyInt, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert t3 == TyBool
   assert len(cx3.diags) == 0
-  # ordering a Bool needs an Ord impl and there is none
-  let (cx4, t4, _) = check_binary_typed(cx, OpLt, TyBool, TyBool, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
-  assert cx4.diags[0].msg == "values of type Bool cannot be ordered"
+  # Bool and Bytes are orderable scalars and take the native path, like Int
+  for scalar in [TyBool, TyBytes] {
+    let (cxs, ts, _) = check_binary_typed(cx, OpLt, scalar, scalar, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+    assert ts == TyBool && len(cxs.diags) == 0
+  }
+  # ordering a function needs an Ord impl and there is none
+  let fnt = TyFn([], TyInt, EPure)
+  let (cx4, t4, _) = check_binary_typed(cx, OpLt, fnt, fnt, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert str.contains(cx4.diags[0].msg, "cannot be ordered")
   let (cx5, t5, _) = check_binary_typed(cx, OpConcat, TyString, TyString, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert t5 == TyString
   let (cx6, t6, _) = check_binary_typed(cx, OpEq,
@@ -6533,8 +6543,8 @@ pub fn resolve_witness(
             answer
           }
           let hint = if scalar_order {
-            "orderable scalars are Int and String; Float has no total order (NaN), " ++
-              "and everything else needs an `impl Ord`"
+            "the orderable scalars are " ++ ord_scalar_names() ++
+              "; Float has no total order (NaN), and everything else needs an `impl Ord`"
           } else if nongeneric {
             "define `impl " ++ trait_name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
               ts ++ "` or `" ++ trait_name ++ "`"
@@ -6809,23 +6819,28 @@ test "ctor values and witnesses" {
   # arity mismatch reports with the ctor render
   let (cx2, t2, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt, TyInt], TyUnit, EPure, 0, 4)
   assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
-  # witness: Int has a prelude Ord impl, Bool does not
+  # witness: Int, Bool and Bytes have a prelude Ord impl, Float does not
   let (cx3, ok3) = resolve_witness(cx, ORD_ID, TyInt, 0, 4, "`sort`")
   assert ok3 == Some(WConcrete(ORD_ID, TyInt))
-  let (cx4, ok4) = resolve_witness(cx, ORD_ID, TyBool, 0, 4, "`sort`")
+  for scalar in [TyBool, TyBytes] {
+    let (_, oks) = resolve_witness(cx, ORD_ID, scalar, 0, 4, "`sort`")
+    assert oks == Some(WConcrete(ORD_ID, scalar))
+  }
+  let (cx4, ok4) = resolve_witness(cx, ORD_ID, TyFloat, 0, 4, "`sort`")
   assert ok4 == None
-  assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
-  # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
+  assert cx4.diags[0].msg == "no impl of `Ord` for `Float`"
+  # Ord over a non-ADT gets the ordering-specific hint, listing the table
   assert str.contains(cx4.diags[0].hint, "Float has no total order")
+  assert str.contains(cx4.diags[0].hint, "Int, Bool, String, Bytes")
   # A ground tuple gets the compiler's lexicographic witness, but every part
-  # must still provide Ord -- Bool cannot hide inside the structural rule.
+  # must still provide Ord -- Float cannot hide inside the structural rule.
   let pair = TyTuple([TyInt, TyString])
   let (cx4a, ok4a) = resolve_witness(cx, ORD_ID, pair, 0, 4, "`sort`")
   assert len(cx4a.diags) == 0
   assert ok4a == Some(WConcrete(ORD_ID, pair))
-  let (cx4b, ok4b) = resolve_witness(cx, ORD_ID, TyTuple([TyInt, TyBool]), 0, 4, "`sort`")
+  let (cx4b, ok4b) = resolve_witness(cx, ORD_ID, TyTuple([TyInt, TyFloat]), 0, 4, "`sort`")
   assert ok4b == None
-  assert cx4b.diags[0].msg == "no impl of `Ord` for `Bool`"
+  assert cx4b.diags[0].msg == "no impl of `Ord` for `Float`"
   # Eq over a type with no impl is the structural default, and it is the same
   # kind of witness as one an impl supplies -- the table, not the witness,
   # records which of the two it was

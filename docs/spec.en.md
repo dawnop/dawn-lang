@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e039c0378a72c3a2 -->
+<!-- doc-check: translation-of docs/spec.md @ 059a3704e93f0c83 -->
 
 # Dawn Language Specification
 
@@ -831,10 +831,18 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   - **A bound is a check, not a definition**: a projection always reads the impl's actual
     binding (unique per subject); a row written on a consumer's bound is only an upper bound
     (the impl's side ⊑ it), and the two coexist.
-- The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for `Int`/`String`
-  (**`Float` has none**: under NaN there is no total order to give — the reasons for refusing are
-  in §4.3, numeric edge semantics; the one previously given following `Double.compare` was
-  reverted on 2026-07-26).
+- The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for
+  `Int`/`Bool`/`String`/`Bytes` (**`Float` has none**: under NaN there is no total order to
+  give — the reasons for refusing are in §4.3, numeric edge semantics; the one previously given
+  following `Double.compare` was reverted on 2026-07-26).
+  - **`Ord[Bool]`**: `false < true`, that is, the two constructors in declaration order (the same
+    rule `derive Ord` applies to a sum type; Rust, Haskell and OCaml use the same order).
+  - **`Ord[Bytes]`**: **unsigned** byte-by-byte lexicographic order; the first differing byte
+    decides, and on an equal common prefix the shorter is smaller (as in Rust's `[u8]` and
+    Haskell's `ByteString`). This is exactly the algorithm of `Ord[String]` over UTF-8.
+  - These two were added on 2026-09-24 ([builtin-privileges-design.md](builtin-privileges-design.md)
+    §1); before that `Bool`/`Bytes` had `==` but no `<`, could not be sorted, and a user had
+    nowhere to write either impl (the orphan rule).
   - **`cmp` promises only the sign**: less than returns `-1`, equal returns `0`, greater returns
     `1`, and **no other magnitude is promised** — `cmp("a", "z")` used to leak the host's code
     unit difference `-25`; since 2026-07-31 every type uniformly returns −1/0/1 (treating the
@@ -852,7 +860,7 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
 
   `derive Ord` generates a field-lexicographic comparison (a sum type compares constructor
   declaration order first, and when the constructors differ it produces only `-1`/`1`), and the
-  fields must be `Int`/`String`, a type with an Ord impl of its own, or a type parameter of the
+  fields must be a scalar with `Ord`, a type with an Ord impl of its own, or a type parameter of the
   type itself (in which case what is generated is a conditional impl:
   `type Box[T] = { v: T } derive Ord` gives `impl[T: Ord] Ord[Box[T]]`). `List[T]` has a
   lexicographic impl written in std.
@@ -1162,8 +1170,10 @@ implementations are cross-checked against this, "happens to agree" is not allowe
   excepted — comparing functions is a compile error); a type can override that default with
   `impl Eq` (§3.5).
 - The ordering comparisons `<`/`<=`/`>`/`>=` have **two mechanisms**, not one:
-  - On `Int`/`Float`/`String` they are **native operations that resolve no witness** — no
-    impl lookup, no dictionary built. On `Float` the semantics are IEEE (any comparison
+  - On the scalars with `Ord` (`Int`/`Bool`/`String`/`Bytes`, §3.5) and on `Float` they are
+    **native operations that resolve no witness** — no impl lookup, no dictionary built. The
+    two are one table (the `Ord` scalar table) plus its single exception `Float`, which has a
+    native `<` and no total order. On `Float` the semantics are IEEE (any comparison
     involving NaN is false, see the numeric edge semantics above).
     Other concrete types bridge to `cmp` of the built-in trait `Ord` (see §3.5) — having an
     impl (hand-written or `derive Ord`) is enough to compare.
@@ -1171,7 +1181,7 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     constrained by it, `<` resolves the `Ord` witness just as `cmp`/`sort` do. `Float` has
     no impl (the reason for refusing is under "`Float` has no `Ord`" above and is not
     repeated here), so `cmp(1.5, 2.5)` does not compile while `1.5 < 2.5` stays legal.
-  - The two mechanisms **give the same answer** on `Int`/`String` (on `String`, `<` and
+  - The two mechanisms **give the same answer** on every scalar with `Ord` (on `String`, `<` and
     `cmp` are the same comparison and the same order — **code point order**, see §3.5), and
     **differ on purpose** on `Float`: native `<` is the IEEE partial order, `Ord` wants a
     total order, and Float only has the former.
