@@ -1,0 +1,640 @@
+# The interpreter's tests that need a checked module to run on. They live in a
+# sibling module rather than beside the interpreter because building a typed
+# module takes the whole checker, and a test inside ir/interp made
+# `ir/interp -> check/checker` an edge of the production import graph that no
+# production code walked (docs/unused-imports-design.md §4). A test block
+# cannot write its own `use`, so the edge moved with the tests -- the shape
+# front/parser_test already had.
+#
+# What this costs: a sibling module sees only what ir/interp publishes. The
+# few items these tests reach into (`eval_module`, `program_sigs` and the run
+# record they return) are `pub` for this module's sake and say so; they become
+# `pub(pkg)` once the seed can compile it. `no_impls`, `test_sig` and
+# `test_tfun` are fixtures small enough to write twice rather than publish.
+
+use std/str
+use std/map
+use std/set
+use front/parser
+use check/cx.{ModExports, Cx, cx_new}
+use check/checker.{check_module, exports_of}
+use check/tast.{TExpr, TFun, XError}
+use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
+use ir/core.{CValue, VInt, VBool, VStr, VList, CCall, CDirect, CImpl, CDefault}
+use ir/lower
+use ir/interp.{
+  eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
+}
+
+fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
+
+fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: params,
+    param_names: [],
+    param_defaults: [],
+    ret: ret,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    eparams: [],
+    owner: None,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+
+fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
+  TFun {
+    name: name,
+    sig: test_sig(name, params, ret),
+    param_syms: [],
+    dict_syms: [],
+    ev_syms: [],
+    defaults: [],
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+
+test "an empty user impl calls its default; explicit methods still call their bodies" {
+  let src = "trait Defaulted[T] {\n" ++
+    "  fn defaulted(x: T) -> Int = 42\n" ++
+    "}\n" ++
+    "type Empty = Empty\n" ++
+    "impl Defaulted[Empty] {\n" ++
+    "}\n" ++
+    "const A: Int = defaulted(Empty)\n" ++
+    "trait Required[T] {\n" ++
+    "  fn required(x: T) -> Int\n" ++
+    "}\n" ++
+    "type Filled = Filled\n" ++
+    "impl Required[Filled] {\n" ++
+    "  fn required(x: Filled) -> Int = 41\n" ++
+    "}\n" ++
+    "const B: Int = required(Filled)\n" ++
+    "trait Overridden[T] {\n" ++
+    "  fn overridden(x: T) -> Int = 1\n" ++
+    "}\n" ++
+    "type Override = Override\n" ++
+    "impl Overridden[Override] {\n" ++
+    "  fn overridden(x: Override) -> Int = 43\n" ++
+    "}\n" ++
+    "const C: Int = overridden(Override)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("traits.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(42))
+  assert map.get(out.consts, "B") == Some(VInt(41))
+  assert map.get(out.consts, "C") == Some(VInt(43))
+
+  let sigs = program_sigs(no_owner, tm, "m")
+  let lowered = (i: Int) => {
+    let (ce, _lifted, _dicts, _next) = lower.lower_expr_only("m", tm.consts[i].init,
+      cx1.traits, cx1.impl_table, cx1.adts, sigs, tm.syms, 0)
+    ce
+  }
+  match lowered(0) {
+    CCall(CDefault(_, _, "defaulted"), _, _) -> ()
+    _ -> { assert false }
+  }
+  match lowered(1) {
+    CCall(CImpl(_, _, _, "required"), _, _) -> ()
+    _ -> { assert false }
+  }
+  match lowered(2) {
+    CCall(CImpl(_, _, _, "overridden"), _, _) -> ()
+    _ -> { assert false }
+  }
+}
+
+test "interpreter identity tables keep direct, impl, and default spellings separate" {
+  # Importing a trait by name does not inject its methods. A local direct
+  # function may therefore legally use the same spelling as the imported
+  # trait's default and this module's impl method.
+  let defs_src = "pub trait Same[T] {\n" ++
+    "  fn same(x: T) -> Int = 9\n" ++
+    "}\n"
+  let (defs_m, defs_pdiags) = parser.parse_module(defs_src)
+  assert len(defs_pdiags) == 0
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (defs_cx, defs_tm) =
+    check_module(cx_new(Some("defs"), Some("defs.dawn")), defs_m, empty_env)
+  assert len(defs_cx.diags) == 0
+  let defs_exp = exports_of(defs_cx, defs_m, "defs", "defs")
+
+  let src = "use defs.{Same}\n" ++
+    "pub type Empty = Empty\n" ++
+    "pub type Explicit = Explicit\n" ++
+    "pub fn same(a: Int, b: Int) -> Int = a + b\n" ++
+    "impl Same[Empty] {\n" ++
+    "}\n" ++
+    "impl Same[Explicit] {\n" ++
+    "  fn same(x: Explicit) -> Int = 7\n" ++
+    "}\n" ++
+    "const DIRECT: Int = same(20, 22)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env = map.from([("defs", defs_exp)])
+  let cx0 = cx_new(Some("same_impl"), Some("same_impl.dawn"))
+  let (cx1, tm) = check_module(cx0, m, env)
+  assert len(cx1.diags) == 0
+  let impl_exp = exports_of(cx1, m, "same_impl", "same_impl")
+  let tid = map.get(cx1.traits_by_name, "Same").expect("Same trait")
+  let explicit_id = map.get(cx1.adts_by_name, "Explicit").expect("Explicit ADT")
+
+  # `defs` contains only the default body. It must not enter either direct
+  # table, while the same-spelled local impl must not replace the direct fn.
+  var defs_direct: Map[String, TFun] = map.empty()
+  var all_impls = no_impls()
+  for f in defs_tm.fns {
+    defs_direct = note_direct_fn(defs_direct, f)
+    all_impls = note_trait_fn(all_impls, "defs", f)
+  }
+  assert map.get(defs_direct, "same") == None
+  var local_direct: Map[String, TFun] = map.empty()
+  var prior_direct = defs_direct
+  var explicit_fn: Option[TFun] = None
+  for f in tm.fns {
+    local_direct = note_direct_fn(local_direct, f)
+    prior_direct = note_direct_fn(prior_direct, f)
+    all_impls = note_trait_fn(all_impls, "same_impl", f)
+    match f.impl_of {
+      Some(_) -> { explicit_fn = Some(f) }
+      None -> ()
+    }
+  }
+  let direct_fn = map.get(local_direct, "same").expect("direct same")
+  let impl_fn = explicit_fn.expect("impl same")
+  let default_fn = defs_tm.fns[0]
+  assert direct_fn.sig.param_tys == [TyInt, TyInt]
+  assert impl_fn.sig.param_tys == [TyAdt(explicit_id, [])]
+  assert default_fn.sig.param_tys != direct_fn.sig.param_tys
+  assert default_fn.sig.param_tys != impl_fn.sig.param_tys
+
+  let defs_owners = map.from([("defs", defs_direct)])
+  let direct_out = eval_comptime(tm, defs_direct, defs_owners, all_impls, set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "same_impl", ct_fuel(1000000))
+  assert len(direct_out.diags) == 0
+  assert map.get(direct_out.consts, "DIRECT") == Some(VInt(42))
+
+  # A third, ordinary source module imports the trait method and the two
+  # subjects, so the checker -- not this test -- produces the CImpl/CDefault
+  # call inputs. The evaluator context below is deliberately hand-assembled
+  # from all three modules. Production driver/analyze does not yet carry prior
+  # user modules' direct or trait bodies into eval_comptime; this is an
+  # interpreter identity test, not an end-to-end cross-module comptime claim.
+  let caller_src = "use defs.{same}\n" ++
+    "use same_impl.{Empty, Explicit}\n" ++
+    "const IMPL: Int = same(Explicit)\n" ++
+    "const DEFAULT: Int = same(Empty)\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("defs", defs_exp), ("same_impl", impl_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let caller_seed = Cx { ..caller0, impl_table: cx1.impl_table }
+  let (caller_cx, caller_tm) = check_module(caller_seed, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+  let owners = map.from([("defs", defs_direct), ("same_impl", local_direct)])
+  let out = eval_comptime(caller_tm, prior_direct, owners, all_impls, set.empty(), caller_cx.adts,
+    caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "IMPL") == Some(VInt(7))
+  assert map.get(out.consts, "DEFAULT") == Some(VInt(9))
+
+  let direct_sigs = program_sigs(defs_owners, tm, "same_impl")
+  assert map.get(direct_sigs, ("defs", "same")) == None
+  assert map.get(direct_sigs, ("same_impl", "same")).expect("direct signature").param_tys ==
+    [TyInt, TyInt]
+  let (direct_core, _direct_lifted, _direct_dicts, _direct_next) =
+    lower.lower_expr_only("same_impl", tm.consts[0].init, cx1.traits, cx1.impl_table,
+      cx1.adts, direct_sigs, tm.syms, 0)
+  match direct_core {
+    CCall(CDirect(o, "same"), _, _) -> { assert o == "same_impl" }
+    _ -> { assert false }
+  }
+
+  let caller_sigs = program_sigs(owners, caller_tm, "caller")
+  assert map.get(caller_sigs, ("defs", "same")) == None
+  assert map.get(caller_sigs, ("same_impl", "same")).expect("direct signature").param_tys ==
+    [TyInt, TyInt]
+  let lowered = (i: Int) => {
+    let (ce, _lifted, _dicts, _next) = lower.lower_expr_only("caller", caller_tm.consts[i].init,
+      caller_cx.traits, caller_cx.impl_table, caller_cx.adts, caller_sigs, caller_tm.syms, 0)
+    ce
+  }
+  match lowered(0) {
+    CCall(CImpl(o, got_tid, subject, "same"), _, _) -> {
+      assert o == "same_impl"
+      assert got_tid == tid
+      assert subject == TyAdt(explicit_id, [])
+    }
+    _ -> { assert false }
+  }
+  match lowered(1) {
+    CCall(CDefault(o, got_tid, "same"), _, _) -> {
+      assert o == "defs"
+      assert got_tid == tid
+    }
+    _ -> { assert false }
+  }
+}
+
+test "a standard helper keeps the fuel hint beside its inner and outer frames" {
+  let helper_src = "pub fn burn() -> Int = {\n" ++
+    "  var n = 0\n" ++
+    "  while true { n = n + 1 }\n" ++
+    "  n\n" ++
+    "}\n" ++
+    "pub fn wrap() -> Int = burn()\n"
+  let (helper_m, helper_pdiags) = parser.parse_module(helper_src)
+  assert len(helper_pdiags) == 0
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (helper_cx, helper_tm) =
+    check_module(cx_new(Some("std/helper"), Some("helper.dawn")), helper_m, empty_env)
+  assert len(helper_cx.diags) == 0
+  let helper_exp = exports_of(helper_cx, helper_m, "std/helper", "std/helper")
+
+  let caller_src = "use std/helper.{wrap}\n" ++
+    "fn outer() -> Int = wrap()\n" ++
+    "const VALUE: Int = outer()\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("std/helper", helper_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let (caller_cx, caller_tm) = check_module(caller0, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+
+  var helper_direct: Map[String, TFun] = map.empty()
+  for f in helper_tm.fns { helper_direct = note_direct_fn(helper_direct, f) }
+  let owners = map.from([("std/helper", helper_direct)])
+  let out = eval_comptime(caller_tm, helper_direct, owners, no_impls(), set.empty(),
+    caller_cx.adts, caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(250))
+  assert len(out.diags) == 1
+  let hint = out.diags[0].hint
+  assert str.starts_with(hint,
+    "raise it with --comptime-fuel, or simplify the computation\n\n")
+  assert str.contains(hint, "at direct `std/helper.burn`")
+  assert str.contains(hint, "at direct `std/helper.wrap`")
+  assert str.contains(hint, "at direct `caller.outer`")
+}
+
+test "same-named direct failures retain their resolved owners" {
+  let empty_env: Map[String, ModExports] = map.empty()
+  let (left_m, left_pdiags) =
+    parser.parse_module("pub fn same() -> Int = panic(\"left\")\n")
+  assert len(left_pdiags) == 0
+  let (left_cx, left_tm) =
+    check_module(cx_new(Some("left"), Some("left.dawn")), left_m, empty_env)
+  assert len(left_cx.diags) == 0
+  let left_exp = exports_of(left_cx, left_m, "left", "left")
+
+  let (right_m, right_pdiags) =
+    parser.parse_module("pub fn same() -> Int = panic(\"right\")\n")
+  assert len(right_pdiags) == 0
+  let right0 = cx_new(Some("right"), Some("right.dawn"))
+  let (right_cx, right_tm) =
+    check_module(right0, right_m, empty_env)
+  assert len(right_cx.diags) == 0
+  let right_exp = exports_of(right_cx, right_m, "right", "right")
+
+  let caller_src = "use left\nuse right\n" ++
+    "const LEFT: Int = left.same()\n" ++
+    "const RIGHT: Int = right.same()\n"
+  let (caller_m, caller_pdiags) = parser.parse_module(caller_src)
+  assert len(caller_pdiags) == 0
+  let caller_env = map.from([("left", left_exp), ("right", right_exp)])
+  let caller0 = cx_new(Some("caller"), Some("caller.dawn"))
+  let (caller_cx, caller_tm) = check_module(caller0, caller_m, caller_env)
+  assert len(caller_cx.diags) == 0
+
+  var left_direct: Map[String, TFun] = map.empty()
+  for f in left_tm.fns { left_direct = note_direct_fn(left_direct, f) }
+  var right_direct: Map[String, TFun] = map.empty()
+  for f in right_tm.fns { right_direct = note_direct_fn(right_direct, f) }
+  var flat = left_direct
+  for f in right_tm.fns { flat = note_direct_fn(flat, f) }
+  let owners = map.from([("left", left_direct), ("right", right_direct)])
+  let out = eval_comptime(caller_tm, flat, owners, no_impls(), set.empty(), caller_cx.adts,
+    caller_cx.traits, caller_cx.impl_table, "caller", ct_fuel(1000000))
+  assert len(out.diags) == 2
+  assert str.contains(out.diags[0].hint, "at direct `left.same`")
+  assert not str.contains(out.diags[0].hint, "at direct `right.same`")
+  assert str.contains(out.diags[1].hint, "at direct `right.same`")
+  assert not str.contains(out.diags[1].hint, "at direct `left.same`")
+}
+
+test "dynamic, impl, and default failures each carry their real frame" {
+  let src = "trait Defaulted[T] {\n" ++
+    "  fn explode(x: T) -> Int = panic(\"default\")\n" ++
+    "}\n" ++
+    "type Empty = Empty\n" ++
+    "impl Defaulted[Empty] {}\n" ++
+    "fn via_default() -> Int = explode(Empty)\n" ++
+    "trait Required[T] { fn burst(x: T) -> Int }\n" ++
+    "type Filled = Filled\n" ++
+    "impl Required[Filled] { fn burst(x: Filled) -> Int = panic(\"impl\") }\n" ++
+    "fn via_impl() -> Int = burst(Filled)\n" ++
+    "fn dyn_boom() -> Int = panic(\"dynamic\")\n" ++
+    "fn invoke(f: fn() -> Int) -> Int = f()\n" ++
+    "const DEFAULT: Int = via_default()\n" ++
+    "const IMPL: Int = via_impl()\n" ++
+    "const DYNAMIC: Int = invoke(dyn_boom)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("frames.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 3
+
+  let default_hint = out.diags[0].hint
+  assert str.contains(default_hint, "at default `m::Defaulted#")
+  assert str.contains(default_hint, ".explode`")
+  assert str.contains(default_hint, "at direct `m.via_default`")
+
+  let impl_hint = out.diags[1].hint
+  assert str.contains(impl_hint, "at impl `m::Required#")
+  assert str.contains(impl_hint, ".burst`")
+  assert str.contains(impl_hint, "at direct `m.via_impl`")
+
+  let dynamic_hint = out.diags[2].hint
+  assert str.contains(dynamic_hint, "at dynamic `m.")
+  assert str.contains(dynamic_hint, "at direct `m.dyn_boom`")
+  assert str.contains(dynamic_hint, "at direct `m.invoke`")
+}
+
+test "comptime call chains retain the nearest sixteen frames" {
+  let src = "fn limit_00() -> Int = limit_01()\n" ++
+    "fn limit_01() -> Int = limit_02()\n" ++
+    "fn limit_02() -> Int = limit_03()\n" ++
+    "fn limit_03() -> Int = limit_04()\n" ++
+    "fn limit_04() -> Int = limit_05()\n" ++
+    "fn limit_05() -> Int = limit_06()\n" ++
+    "fn limit_06() -> Int = limit_07()\n" ++
+    "fn limit_07() -> Int = limit_08()\n" ++
+    "fn limit_08() -> Int = limit_09()\n" ++
+    "fn limit_09() -> Int = limit_10()\n" ++
+    "fn limit_10() -> Int = limit_11()\n" ++
+    "fn limit_11() -> Int = limit_12()\n" ++
+    "fn limit_12() -> Int = limit_13()\n" ++
+    "fn limit_13() -> Int = limit_14()\n" ++
+    "fn limit_14() -> Int = limit_15()\n" ++
+    "fn limit_15() -> Int = limit_16()\n" ++
+    "fn limit_16() -> Int = limit_17()\n" ++
+    "fn limit_17() -> Int = limit_18()\n" ++
+    "fn limit_18() -> Int = limit_19()\n" ++
+    "fn limit_19() -> Int = panic(\"bottom\")\n" ++
+    "const VALUE: Int = limit_00()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("limit.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 1
+  let hint = out.diags[0].hint
+  # sixteen frames, the bound ir/interp keeps (MAX_FAILURE_FRAMES), plus the text before them
+  assert len(str.split(hint, "\n  at ")) == 16 + 1
+  assert str.contains(hint, "at direct `m.limit_19`")
+  assert str.contains(hint, "at direct `m.limit_04`")
+  assert not str.contains(hint, "at direct `m.limit_03`")
+  assert str.ends_with(hint, "  ... outer calls omitted")
+}
+
+test "Map and Set calls have signatures but remain ordinary comptime refusals" {
+  let src = "const M: Int = {\n" ++
+    "  let m: Map[Int, Int] = map_empty()\n" ++
+    "  map_size(m)\n" ++
+    "}\n" ++
+    "fn set_count() -> Int = {\n" ++
+    "  let s: Set[Int] = set_from([1])\n" ++
+    "  set_size(s)\n" ++
+    "}\n" ++
+    "const S: Int = set_count()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("std/t"), Some("collections.dawn")), m, env)
+  assert len(cx1.diags) == 0
+
+  var hamt: Map[String, TFun] = map.empty()
+  hamt = map.insert(hamt, "empty",
+    test_tfun("empty", [], TyMap(TyInt, TyInt), XError(0, 0)))
+  hamt = map.insert(hamt, "sfrom",
+    test_tfun("sfrom", [TyError], TySet(TyInt), XError(0, 0)))
+  hamt = map.insert(hamt, "count",
+    test_tfun("count", [TyError], TyInt, XError(0, 0)))
+  var owners: Map[String, Map[String, TFun]] = map.empty()
+  owners = map.insert(owners, "std/hamt", hamt)
+  let no_fns: Map[String, TFun] = map.empty()
+  let out = eval_comptime(tm, no_fns, owners, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "std/t", ct_fuel(1000000))
+  assert len(out.diags) == 2
+  assert out.diags[0].msg == "comptime: Map and Set operations are not available at comptime"
+  assert out.diags[1].msg == "comptime: Map and Set operations are not available at comptime"
+  assert map.get(out.consts, "M") == None
+  assert map.get(out.consts, "S") == None
+}
+
+test "consts evaluate in declaration order and fold across references" {
+  let src = "const A: Int = 1 + 2\n" ++
+    "const B: List[Int] = [A, 4]\n" ++
+    "const C: String = \"x\" ++ to_string(A)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(3))
+  assert map.get(out.consts, "B") == Some(VList([VInt(3), VInt(4)]))
+  assert map.get(out.consts, "C") == Some(VStr("x3"))
+}
+
+test "one module's lowering cache outlives the expression that filled it" {
+  # `helper` is called from two consts, and each of the last two consts lifts
+  # a lambda of its own. Both halves of the cache are read from the run that
+  # produced them, because from outside `eval_comptime` neither is visible.
+  let src = "fn helper(x: Int) -> Int = x + 1\n" ++
+    "const A: Int = helper(1)\n" ++
+    "const B: Int = helper(10)\n" ++
+    "const C: Int = {\n" ++
+    "  let f = (x: Int) => x * 2\n" ++
+    "  f(3)\n" ++
+    "}\n" ++
+    "const D: Int = {\n" ++
+    "  let g = (x: Int) => x * 3\n" ++
+    "  g(4)\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("m.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let run = eval_module(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(run.out.diags) == 0
+  assert map.get(run.out.consts, "A") == Some(VInt(2))
+  assert map.get(run.out.consts, "B") == Some(VInt(11))
+  assert map.get(run.out.consts, "C") == Some(VInt(6))
+  assert map.get(run.out.consts, "D") == Some(VInt(12))
+
+  let cached = (k: String) =>
+    match map.get(run.cache.fns, k) {
+      Some(_) -> true
+      None -> false
+    }
+  # lowered while folding `A`, and still there four expressions later
+  assert cached("m.helper")
+  # each lifted lambda kept a name of its own. Restarting the counter per
+  # expression would file `g` on top of `f` under `m.lambda$0`
+  assert cached("m.lambda$0")
+  assert cached("m.lambda$1")
+  assert run.cache.next_lam == 2
+}
+
+test "const initializers run blocks, local fns, matches and loops" {
+  let src = "const D: Int = {\n" ++
+    "  fn go(n: Int) -> Int = if n == 0 { 0 } else { n + go(n - 1) }\n" ++
+    "  go(10)\n" ++
+    "}\n" ++
+    "const G: Int = match [1, 2, 3] {\n" ++
+    "  [x, ..rest] -> x + len(rest) * 10\n" ++
+    "  [] -> 0\n" ++
+    "}\n" ++
+    "const H: Int = {\n" ++
+    "  var acc = 0\n" ++
+    "  for i in 0 ..5 {\n" ++
+    "    if i == 3 { continue }\n" ++
+    "    acc = acc + i\n" ++
+    "  }\n" ++
+    "  acc\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "D") == Some(VInt(55))
+  assert map.get(out.consts, "G") == Some(VInt(21))
+  assert map.get(out.consts, "H") == Some(VInt(7))
+}
+
+test "a self tail call in a const folds without growing the interpreter stack" {
+  # spec §12.4 is a lowering rewrite, so the interpreter inherits it: this
+  # would blow past MAX_CALL_DEPTH if the call still built a frame
+  let src = "const T: Int = {\n" ++
+    "  fn up(i: Int, n: Int) -> Int = if i >= n { i } else { up(i + 1, n) }\n" ++
+    "  up(0, 200000)\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_default())
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "T") == Some(VInt(200000))
+}
+
+test "comptime failures become diagnostics; blocks in bodies fold" {
+  let src = "const E: Int = 1 / 0\n" ++
+    "fn f() -> Int = comptime { 6 * 7 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 1
+  assert out.diags[0].msg == "comptime: panicked: Int division by zero"
+  assert map.len(out.blocks) == 1
+  var vals: List[CValue] = []
+  for k in map.keys(out.blocks) {
+    vals = vals ++ [map.get(out.blocks, k).expect("block")]
+  }
+  assert vals == [VInt(42)]
+}
+
+test "float folds agree with the backends on signed zero and NaN" {
+  # every one of these had (or could have had) a comptime answer that differed
+  # from what the emitted program computes: Double.compare puts -0.0 below
+  # 0.0, and a negation written as `0.0 - f` loses the sign of zero
+  let src = "const A: Bool = comptime { (0.0 - 1.0) * 0.0 < 0.0 }\n" ++
+    "const B: Bool = comptime { (0.0 - 1.0) * 0.0 <= 0.0 }\n" ++
+    "const C: Bool = comptime { 1.0 / (-0.0) < 0.0 }\n" ++
+    "const D: Bool = comptime { let n = 0.0 / 0.0\n  n == n }\n" ++
+    "const E: Bool = comptime { let n = 0.0 / 0.0\n  n <= n }\n" ++
+    "const F: Bool = comptime { -0.0 == 0.0 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VBool(false))
+  assert map.get(out.consts, "B") == Some(VBool(true))
+  assert map.get(out.consts, "C") == Some(VBool(true))
+  assert map.get(out.consts, "D") == Some(VBool(false))
+  assert map.get(out.consts, "E") == Some(VBool(false))
+  assert map.get(out.consts, "F") == Some(VBool(true))
+}
+
+test "fuel exhaustion becomes a diagnostic" {
+  # a loop burns fuel without growing the interpreter's host stack (deep
+  # interpreted recursion needs the -Xss512m the real runner passes)
+  let src = "const L: Int = {\n" ++
+    "  var acc = 0\n" ++
+    "  while true { acc = acc + 1 }\n" ++
+    "  acc\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(2000))
+  assert len(out.diags) == 1
+  assert str.contains(out.diags[0].msg, "fuel exhausted")
+}
