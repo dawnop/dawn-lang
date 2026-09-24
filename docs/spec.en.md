@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 04c6ebc9dc2bb154 -->
+<!-- doc-check: translation-of docs/spec.md @ 5a0f1aedb6c3fe9e -->
 
 # Dawn Language Specification
 
@@ -1823,6 +1823,27 @@ an absorbing element**, so `!io !e` may not cancel `!e` and both atoms stay in t
 Both axes are trivially decidable: union is componentwise union of finite sets plus one boolean or,
 containment is set containment per axis.
 
+#### Ambient effects
+
+**`io` is the only ambient effect.** Ambient effects are a tier, not "a lowercase atom": one is
+written into any row without a declaration, occupies no evidence slot, is answered by no handler
+and subtracted from the row by none, and any signature that writes it admits it. A program cannot
+declare an ambient effect (`effect` declares named effects on the label axis), so today the tier
+has exactly one member, `io`.
+
+What an atom is comes from **tables**, not from its spelling, looked up in this order: the ambient
+table → the named effects in scope (including selective imports and renames, §10.2) → a module
+alias's exports (`!dep.Ask`) → a type parameter's associated effects (`!T.E`) → this signature's
+effect variables. For a name no table knows, the spelling only decides which diagnostic is
+reported: an uppercase name was meant as an effect and gets "unknown effect" (or "is a type, not an
+effect" when it is a type); a lowercase name is an effect variable, introduced by appearing (§6.3).
+The two always agree on a legal program because the case is enforced **at the declaration site**:
+`effect` takes only an uppercase name, an effect parameter only a lowercase one, and a rename may
+not change the case class.
+
+`pure` is likewise reserved only in effect position: it is not a keyword, is an ordinary identifier
+outside effect position, and is refused everywhere inside one (§6.3).
+
 ### 6.2 Rules
 
 1. The effect of a function body = the union of the effects of every call in it.
@@ -2080,9 +2101,10 @@ fn logged(x: Int) -> Int !Ask !io = {
 
 - A named effect is written in the effect position, alongside `!io` and effect variables; several
   annotations can be stacked (`!Ask !io`), or written as a union (`!(io | Ask)`).
-- Deciding what `!name` is, is a **table lookup**: `name` hits an `effect` declaration in scope →
-  named effect; otherwise it is an effect variable (the old behaviour). Capitalised but not found →
-  "unknown effect" is reported, because effect variables are lowercase by convention.
+- Deciding what `!name` is, is a **table lookup**; the order and the diagnostics for a miss are in
+  §6.1 "Ambient effects": a hit on an `effect` declaration in scope → named effect; when no table
+  knows the name, a lowercase one is an effect variable and an uppercase one reports "unknown
+  effect" ("is a type, not an effect" when it is a type).
 - Performed but nobody answers (neither declared in the signature nor handled) → the error is
   reported on **the call nobody answers**, with two ways out: add the annotation to the
   signature, or `with handle` on the spot. Calling an operation directly, that call is the

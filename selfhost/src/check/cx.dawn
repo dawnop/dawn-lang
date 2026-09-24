@@ -873,7 +873,7 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
   var cx1 = cx
   var effs: List[Eff] = []
   for a in atoms {
-    if a == "io" {
+    if effect_name.ambient(a) {
       effs = effs ++ [EIo]
     } else if effect_name.qualified(a) {
       let (next, id) = resolve_named_effect(cx1, a, lo, hi)
@@ -900,10 +900,23 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
       match declared {
         Some(row) -> { effs = effs ++ [row] }
         None ->
+          # No effect table knows the name. The type tables may: a type
+          # written where an effect goes is a different mistake from a name
+          # nobody declared, and only a lookup can tell them apart -- the
+          # spelling of `String` and of `Missing` is the same shape
+          # (docs/effects-window-design.md 2). Each answer is read through
+          # the recorded accessors, so replay sees what this diagnostic
+          # depended on.
           if is_upper_name(a) {
-            cx1 = cerr_h(cx1, "unknown effect `" ++ a ++ "`", lo, hi,
-              "declare it with `effect " ++ a ++ " { ... }` (or import it); " ++
-                "effect variables are lowercase")
+            let (kind_cx, kind) = type_kind_of_name(cx1, a)
+            cx1 = kind_cx
+            cx1 = match kind {
+              Some(what) -> cerr_h(cx1, "`" ++ a ++ "` is " ++ what ++ ", not an effect", lo, hi,
+                "an effect row names declared effects, `io`, and lowercase effect variables")
+              None -> cerr_h(cx1, "unknown effect `" ++ a ++ "`", lo, hi,
+                "declare it with `effect " ++ a ++ " { ... }` (or import it); " ++
+                  "effect variables are lowercase")
+            }
           } else {
             let (variable_cx, variable) = scoped_effect_variable_read(cx1, a)
             cx1 = variable_cx
@@ -926,6 +939,19 @@ pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff
     }
   }
   (cx1, eff_union(effs))
+}
+
+## What a name that no effect table knows is in the type tables, worded for
+## a diagnostic: a type parameter in scope, a builtin type, or a declared
+## type. None when it is none of them either.
+fn type_kind_of_name(cx: Cx, name: String) -> (Cx, Option[String]) = {
+  let (tp_cx, tp) = scoped_type_parameter_read(cx, name)
+  if tp != None { return (tp_cx, Some("a type parameter")) }
+  let (bt_cx, bt) = builtin_type_read(tp_cx, name)
+  if bt != None { return (bt_cx, Some("a builtin type")) }
+  let (nt_cx, nt) = local_nominal_name_read(bt_cx, name)
+  if nt != None { return (nt_cx, Some("a type")) }
+  (nt_cx, None)
 }
 
 fn declared_effect_read(cx: Cx, name: String) -> (Cx, Option[Eff]) = {

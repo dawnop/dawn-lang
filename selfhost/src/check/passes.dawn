@@ -246,34 +246,35 @@ pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) ->
 # ---- declaration-site type checks ----
 
 ## The first unbound effect variable inside a type reference, with the span of
-## the function type that wrote it. Builtins and declaration references are
-## resolved later, and any name the declaration binds in its own
-## parameter table (`type Box[!e] = { f: fn(Int) -> Int !e }`).
+## the function type that wrote it. An atom is accounted for when a table
+## says what it is (`atom_accounted`): `declared` is every effect name the
+## module can see, `bound` any name the declaration binds in its own parameter
+## table (`type Box[!e] = { f: fn(Int) -> Int !e }`).
 ##
 ## Keep scanning past labels so an earlier declaration cannot conceal a later
 ## variable without a binder.
-pub fn stray_eff_atom(ref: TypeRef, bound: List[String]) -> Option[(String, Int, Int)] =
+pub fn stray_eff_atom(ref: TypeRef, declared: List[String], bound: List[String]) -> Option[(String, Int, Int)] =
   match ref {
     TAssoc(_, _, _, _) -> None
     TFn(params, ret, effs, lo, hi) -> {
       for a in effs {
-        # Declarations and projections are resolved later. Keep walking: a
-        # legal label must not conceal an unbound variable later in the row.
-        if a != "io" && not effect_name.declared(a) && not list_has_name(bound, a) {
+        # Keep walking: a legal label must not conceal an unbound variable
+        # later in the row.
+        if not atom_accounted(a, declared, bound) {
           return Some((a, lo, hi))
         }
       }
       for p in params {
-        match stray_eff_atom(p, bound) {
+        match stray_eff_atom(p, declared, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      stray_eff_atom(ret, bound)
+      stray_eff_atom(ret, declared, bound)
     }
     TTuple(elems, _, _) -> {
       for e in elems {
-        match stray_eff_atom(e, bound) {
+        match stray_eff_atom(e, declared, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -282,21 +283,21 @@ pub fn stray_eff_atom(ref: TypeRef, bound: List[String]) -> Option[(String, Int,
     }
     TQual(_, _, targs, eargs, _, _) -> {
       for e in targs {
-        match stray_eff_atom(e, bound) {
+        match stray_eff_atom(e, declared, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      stray_earg_atom(eargs, bound)
+      stray_earg_atom(eargs, declared, bound)
     }
     TNamed(_, targs, eargs, _, _) -> {
       for e in targs {
-        match stray_eff_atom(e, bound) {
+        match stray_eff_atom(e, declared, bound) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      stray_earg_atom(eargs, bound)
+      stray_earg_atom(eargs, declared, bound)
     }
   }
 
@@ -304,15 +305,38 @@ pub fn stray_eff_atom(ref: TypeRef, bound: List[String]) -> Option[(String, Int,
 ## `alias A[!e] = Thunk[!e]` accounts for its atom, `alias A = Thunk[!x]` does
 ## not. Written out rather than folded into the `TFn` arm because the span a
 ## diagnostic underlines is the argument's, not an enclosing function type's.
-fn stray_earg_atom(eargs: List[EffArg], bound: List[String]) -> Option[(String, Int, Int)] = {
+fn stray_earg_atom(eargs: List[EffArg], declared: List[String], bound: List[String]) -> Option[(String, Int, Int)] = {
   for ea in eargs {
     for a in ea.atoms {
-      if a != "io" && not effect_name.declared(a) && not list_has_name(bound, a) {
+      if not atom_accounted(a, declared, bound) {
         return Some((a, ea.lo, ea.hi))
       }
     }
   }
   None
+}
+
+## Whether a row atom in a type declaration is something other than a
+## variable with no binder. The tables answer first -- the ambient table, the
+## effects the module can see, the declaration's own binders -- and a dotted
+## atom is a route to a declaration or a projection, resolved later and never
+## a binder. Only a name no table knows falls to its spelling, and then only
+## to pick which report it gets: an uppercase one was meant as an effect and
+## `resolve_eff_at` says "unknown effect" for it once; a lowercase one is the
+## variable this pass refuses (docs/effects-window-design.md 2).
+fn atom_accounted(a: String, declared: List[String], bound: List[String]) -> Bool =
+  effect_name.ambient(a) || list_has_name(declared, a) || list_has_name(bound, a) ||
+  effect_name.dotted(a) || effect_name.upper(a)
+
+## Every effect name a module can say bare while its type declarations are
+## walked: the ones already in scope (imports, and this module's own once
+## `pass_effects` has numbered them) and the module's `effect` declarations,
+## which alias targets are walked before -- `pass_type_shells` runs ahead of
+## `pass_effects` because an operation's signature needs the type shells.
+pub fn effect_names_in_scope(cx: Cx, m: Module) -> List[String] = {
+  var out = map.keys(cx.effects)
+  for d in module_effects(m) { out = out ++ [d.name] }
+  out
 }
 
 fn list_has_name(names: List[String], n: String) -> Bool = {
@@ -337,15 +361,16 @@ fn list_has_name(names: List[String], n: String) -> Bool = {
 ##     Int !Ask }` means what it says -- whoever calls `f` supplies the handler
 ##     -- and the refusal is gone.
 ##
-## Telling them apart needs only the spelling, not the effect table, so this
-## still runs before `pass_effects` and the pass order is unchanged. An
-## uppercase atom that names nothing is not silently accepted by dropping the
-## refusal: it reaches `resolve_eff_at`, which is where "unknown effect" is
-## reported and always was.
+## Telling them apart asks the effect tables first (`atom_accounted`); the
+## module's own declarations are read off its syntax, which is what lets this
+## still run before `pass_effects` with the pass order unchanged. An
+## uppercase atom that no table knows is not silently accepted by dropping the
+## refusal: it reaches `resolve_eff_at`, which is where "unknown effect" (or
+## "is a type, not an effect") is reported and always was.
 ##
 ## True in the result means the reference was refused.
-pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Bool) =
-  match stray_eff_atom(ref, bound) {
+pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, declared: List[String], bound: List[String]) -> (Cx, Bool) =
+  match stray_eff_atom(ref, declared, bound) {
     Some(t) -> {
       let (name, lo, hi) = t
       (cerr_h(cx, "effect variable `" ++ name ++ "` has no binder here", lo, hi,
@@ -358,35 +383,47 @@ pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, bound: List[String]) -> (Cx, Boo
 test "a type declaration accounts for io and for the names it binds, nothing else" {
   let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
   let nothing: List[String] = []
-  assert stray_eff_atom(ty("io"), nothing) == None
-  assert stray_eff_atom(ty("e"), nothing) == Some(("e", 10, 30))
-  assert stray_eff_atom(ty("e"), ["e"]) == None
-  assert stray_eff_atom(ty("e"), ["a", "e"]) == None
-  assert stray_eff_atom(ty("b"), ["a", "e"]) == Some(("b", 10, 30))
+  assert stray_eff_atom(ty("io"), nothing, nothing) == None
+  assert stray_eff_atom(ty("e"), nothing, nothing) == Some(("e", 10, 30))
+  assert stray_eff_atom(ty("e"), nothing, ["e"]) == None
+  assert stray_eff_atom(ty("e"), nothing, ["a", "e"]) == None
+  assert stray_eff_atom(ty("b"), nothing, ["a", "e"]) == Some(("b", 10, 30))
   # A declaration is not a variable, and must not hide a later variable.
-  assert stray_eff_atom(ty("Ask"), nothing) == None
-  assert stray_eff_atom(ty("dep.Ask"), nothing) == None
+  assert stray_eff_atom(ty("Ask"), ["Ask"], nothing) == None
+  assert stray_eff_atom(ty("dep.Ask"), nothing, nothing) == None
   let mixed = TFn([], TNamed("Int", [], [], 0, 3), ["dep.Ask", "e"], 10, 30)
-  assert stray_eff_atom(mixed, nothing) == Some(("e", 10, 30))
+  assert stray_eff_atom(mixed, nothing, nothing) == Some(("e", 10, 30))
   # and it is found through the shapes a type can nest in
   let nested = TNamed("List", [TTuple([TNamed("Int", [], [], 0, 3), ty("e")], 5, 40)], [], 4, 41)
-  assert stray_eff_atom(nested, nothing) == Some(("e", 10, 30))
-  assert stray_eff_atom(nested, ["e"]) == None
+  assert stray_eff_atom(nested, nothing, nothing) == Some(("e", 10, 30))
+  assert stray_eff_atom(nested, nothing, ["e"]) == None
+}
+
+test "a name no table knows is refused as a variable only when it is spelled as one" {
+  let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
+  let nothing: List[String] = []
+  # an undeclared uppercase name is left to `resolve_eff_at`, which says
+  # "unknown effect" once, rather than reported here as a variable
+  assert stray_eff_atom(ty("Missing"), nothing, nothing) == None
+  # a declared name is accounted for by the table whatever else is in it
+  assert atom_accounted("Ask", ["Log", "Ask"], nothing)
+  assert not atom_accounted("e", ["Ask"], nothing)
+  assert atom_accounted("io", nothing, nothing)
 }
 
 test "an unbound effect variable is refused and a label is not" {
   let ty = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 10, 30)
   let nothing: List[String] = []
-  let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing)
+  let (cx1, bad1) = refuse_decl_effvar(test_cx(), ty("e"), nothing, nothing)
   assert bad1
   assert cx1.diags[0].msg == "effect variable `e` has no binder here"
   # A written label is legal; an unknown declaration is resolved and diagnosed
   # later by `resolve_eff_at`, rather than mistaken for an unbound variable.
-  let (cx2, bad2) = refuse_decl_effvar(cx1, ty("Ask"), ["Ask"])
+  let (cx2, bad2) = refuse_decl_effvar(cx1, ty("Ask"), ["Ask"], nothing)
   assert not bad2
   assert len(cx2.diags) == 1
   # and the binder is what makes the variable legal
-  let (cx3, bad3) = refuse_decl_effvar(cx2, ty("e"), ["e"])
+  let (cx3, bad3) = refuse_decl_effvar(cx2, ty("e"), nothing, ["e"])
   assert not bad3
   assert len(cx3.diags) == 1
 }
@@ -708,7 +745,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     }
     match d.alias_target {
       Some(target) -> {
-        let (cxe, bad_eff) = refuse_decl_effvar(cx1, target, d.eparams)
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, target, effect_names_in_scope(cx1, m), d.eparams)
         cx1 = cxe
         var tvs: List[Ty] = []
         for tn in d.tparams {
@@ -921,7 +958,7 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
         }
         fnames = set.insert(fnames, f.name)
         # same refusal as an alias target: a field's `!e` would have no binder
-        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref, d.eparams)
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref, effect_names_in_scope(cx1, m), d.eparams)
         cx1 = cxe
         if bad_eff {
           fields = fields ++ [FieldI { name: f.name, ty: TyError }]
@@ -1340,7 +1377,7 @@ fn resolve_ground_row(cx: Cx, atoms: List[String], nlo: Int, nhi: Int) -> (Cx, O
   var row: Eff = EPure
   var bad = false
   for a in atoms {
-    if a == "io" {
+    if effect_name.ambient(a) {
       row = EIo
     } else {
       let (next, id) = resolve_named_effect(cx1, a, nlo, nhi)

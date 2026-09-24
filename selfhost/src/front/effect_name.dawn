@@ -1,21 +1,52 @@
 # Written effect names share one classification across declaration validation
 # and resolution. Qualification is a route to a declaration, never a binder.
+#
+# What an atom *is* comes from tables, not from its spelling: the ambient
+# table below, then the effects a module can see, then the binders a
+# signature or declaration writes (spec §6.1, docs/effects-window-design.md
+# 2). Spelling is left one job, and it is the naming rule's rather than a
+# classifier's: when no table knows a name, an uppercase one was meant as an
+# effect (so "unknown effect") and a lowercase one is a variable introduced by
+# appearing. The two agree on every legal program because the declaration
+# sites enforce the case -- `effect` takes an uppercase name, `[!e]` a
+# lowercase one, and a selective-import rename keeps the case it renames.
 use std/str
+
+## The ambient effects: written without a declaration, answered by no
+## handler, occupying no evidence slot, and admitted by every row. `io` is
+## the only one and a program cannot declare another (spec §6.1).
+pub fn ambient_effects() -> List[String] = ["io"]
+
+pub fn ambient(name: String) -> Bool = {
+  for a in ambient_effects() {
+    if a == name { return true }
+  }
+  false
+}
 
 pub fn upper(name: String) -> Bool = {
   for c in code_points(name) { return char_is_upper(c) }
   false
 }
 
+## A dotted atom's first segment is a module alias or a type parameter, and
+## the grammar decides which by token kind (an alias is an IDENT, a type
+## parameter a TYPEIDENT), the way Koka's type grammar tells a type variable
+## from a constructor lexically. Neither kind is ever a binder.
 pub fn qualified(name: String) -> Bool = str.contains(name, ".") && not upper(name)
 
 pub fn projection(name: String) -> Bool = str.contains(name, ".") && upper(name)
 
-pub fn declared(name: String) -> Bool = upper(name) || qualified(name)
+pub fn dotted(name: String) -> Bool = str.contains(name, ".")
+
+test "the ambient table is io alone" {
+  assert ambient("io")
+  assert not ambient("Io") && not ambient("e") && not ambient("io.Fs")
+}
 
 test "qualification does not introduce an effect variable or a projection" {
-  assert qualified("dep.Ask") && declared("dep.Ask")
+  assert qualified("dep.Ask") && dotted("dep.Ask")
   assert projection("T.E") && not qualified("T.E")
-  assert declared("Ask") && not projection("Ask")
-  assert not declared("e") && not declared("io")
+  assert not projection("Ask") && not dotted("Ask")
+  assert not qualified("io") && not dotted("e")
 }

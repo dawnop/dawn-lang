@@ -4499,7 +4499,10 @@ test "effect reads preserve precedence scope updates and allocation" {
     let expected_reads: List[semantic_reads.FunctionRead] = match index {
       0 -> []
       1 -> [semantic_reads.DeclaredEffect("Ask", Some(declared))]
-      2 -> [semantic_reads.DeclaredEffect("Missing", None)]
+      # an uppercase name no effect table knows is asked of the type tables
+      # too, so that a type written as an effect is reported as one
+      2 -> [semantic_reads.DeclaredEffect("Missing", None), semantic_reads.ScopedTypeParameter("Missing", None),
+        semantic_reads.BuiltinTypeAnswer("Missing", None), semantic_reads.NominalTypeName(None, "Missing", None)]
       3 -> [semantic_reads.DeclaredEffect("e", Some(declared))]
       4 -> lookup_v
       5 -> lookup_fresh
@@ -9580,7 +9583,7 @@ fn check_local_fn(
   var body_local_fn: Option[String] = Some(name)
   if len(effs) == 0 {
     eff = EPure
-  } else if len(effs) == 1 && effs[0] == "io" {
+  } else if len(effs) == 1 && effect_name.ambient(effs[0]) {
     eff = EIo
   } else {
     cx1 = cerr_h(cx1, "local functions cannot declare effect variables", nlo, nhi,
