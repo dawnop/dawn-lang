@@ -880,6 +880,16 @@ ad03cbb02b18 2026-09-02 560.94 13.3.36 sm_86 blocked:cuda.CUDA_ERROR_INVALID_IMA
 「blocked 是允许状态」是新加的语义，因为一台装不进 cubin 的机器的诚实记录比没有记录有用，
 门拒绝的是沉默。负控：把末行 commit 改成一个非祖先（另一分支的 sha），`--check` 红，原文见刀 4 报告。
 
+**2026-09-24 起台账按输入摘要认身份，不再按 commit。** main 改为线性历史、PR 一律在 GitHub 上 rebase 合并，
+合并会重写分支上每个 SHA，于是台账记下的 commit 永远不是合并后 HEAD 的祖先，上面的祖先判定只能是红的。
+门真正要问的是「这一份 tile 输入在真机上跑过没有」，内容可以在任何历史上回答它。`run.sh` 写行时在 `#` 之后
+的 kv 区加 `inputs=<12 hex>`：对上述 tile 路径在 HEAD 的 `git ls-tree -r` 条目（三份台账除外）加
+`dawn_rt.c` 的 GPU 段文本取 sha256 前 12 位，定义只在 `scripts/tile-gpu-diff/inputs.py` 一处，
+只读 git 对象不读工作区，所以 CI 的 checkout 与本机对同一提交算出同一个值。`--check` 在末行带 `inputs=` 时
+只比 HEAD 重算的摘要是否相等；不带的旧行沿用上面的祖先与 diff 判定（已有的行不改）。前六个字段不变，
+commit 仍记，只作出处，`leetgpu-diff/check.py`、`tileir-features/check.py` 等读者不受影响；
+`ledger-sm90.txt`/`ledger-sm100.txt` 同一规则。负控：改 `std/narrow.dawn` 一行注释并提交，`--check` 红；改回绿。
+
 **560.94 上的实测**（`cuDriverGetVersion` 答 12060）：`cuInit` / `cuDeviceGet` / `cuCtxCreate_v2` /
 `cuMemAlloc_v2` / `cuMemcpyHtoD_v2` / `cuMemcpyDtoH_v2` 全部 `CUDA_SUCCESS`，四组输入的内存回读逐位
 相同；`cuModuleLoadData` 对 `tileiras 13.3.36 --gpu-name sm_86` 出的 cubin 答

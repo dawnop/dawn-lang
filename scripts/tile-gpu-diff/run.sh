@@ -441,10 +441,13 @@
 #                      blocked before the launch, because there the mutant
 #                      and the clean run are indistinguishable.
 #   ledger    one line appended to the ledger the toolchain file names:
-#               <commit> <date> <driver> <tileiras> <gpu-name> <result> [# note]
+#               <commit> <date> <driver> <tileiras> <gpu-name> <result> # inputs=<12 hex> ...
 #             commit is HEAD (12 hex; refused when the tile paths have
 #             uncommitted changes, since the line would name a tree that was
 #             not run), driver is nvidia-smi's, and result is the verdict.
+#             inputs= is the digest of the tile inputs at HEAD (inputs.py),
+#             which is what --check keys the line by; the commit stays as
+#             provenance only.
 #             Refused unless the toolchain file's `driver` line already says
 #             the driver nvidia-smi reports and its `gpu-name` line already
 #             says what nvidia-smi's compute_cap makes of the card: the
@@ -453,8 +456,10 @@
 #
 # --check, the gate the `tile` job runs on every push (docs 6.4):
 #
-#   the last ledger line parses; its commit exists and is an ancestor of
-#   HEAD; its date is a day that has happened; its result is `pass` or
+#   the last ledger line parses; its `inputs=` digest equals the digest
+#   inputs.py computes at HEAD (a line written before 2026-09-24 has none,
+#   and is held to the old rule instead: its commit exists and is an ancestor
+#   of HEAD, with no tile path changed since); its date is a day that has happened; its result is `pass` or
 #   `blocked:...` (a recorded `fail` may sit in the history but not at the
 #   end); no tile path changed between that commit and HEAD, where the tile
 #   paths are packages/tileir, std/gpu.dawn, std/narrow.dawn (the bf16
@@ -572,12 +577,29 @@ if not lines:
           "machine with a driver and commit the line it appends; a blocked run counts, silence does not.")
     sys.exit(1)
 last = lines[-1].split("#", 1)[0].split()
+note = lines[-1].split("#", 1)[1] if "#" in lines[-1] else ""
+m_inputs = re.search(r"\binputs=([0-9a-f]{12})\b", note)
 if len(last) != 6:
     print(f"FAIL: the last ledger line has {len(last)} fields, not 6: {lines[-1]!r}")
     sys.exit(1)
 commit, date, driver, tileiras, gpu, result = last
 
-if not re.fullmatch(r"[0-9a-f]{7,40}", commit):
+# Keyed by content since 2026-09-24: main is linear and pull requests are
+# rebase-merged, which rewrites every SHA on the branch, so the recorded
+# commit can never be an ancestor of what lands. The digest of the tile
+# inputs answers the real question -- was this exact input run on a device --
+# on any history. A line written before then has no digest and keeps the old
+# commit rule below.
+sys.path.insert(0, str(pathlib.Path("scripts/tile-gpu-diff").resolve()))
+import inputs as tile_inputs
+
+if m_inputs:
+    recorded, now_digest = m_inputs.group(1), tile_inputs.digest("HEAD")
+    if recorded != now_digest:
+        problems.append(f"the tile input digest at HEAD is {now_digest} and the ledger's last line "
+                        f"records {recorded}: tile paths changed since that run. Re-run "
+                        f"scripts/tile-gpu-diff/run.sh and commit the line it appends")
+elif not re.fullmatch(r"[0-9a-f]{7,40}", commit):
     problems.append(f"commit {commit!r} is not a hex id")
 elif git("cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
     problems.append(f"commit {commit} is not in this repository (a shallow checkout cannot run this gate; "
@@ -623,8 +645,12 @@ if problems:
     for p in problems:
         print("FAIL: " + p)
     sys.exit(1)
-print(f"PASS  ledger: {commit} ({date}, driver {driver}, tileiras {tileiras}, {gpu}) is an ancestor of HEAD "
-      f"with no tile path changed since; result {result}")
+if m_inputs:
+    print(f"PASS  ledger: inputs {m_inputs.group(1)} ({commit}, {date}, driver {driver}, tileiras {tileiras}, "
+          f"{gpu}) is the tile input digest at HEAD; result {result}")
+else:
+    print(f"PASS  ledger: {commit} ({date}, driver {driver}, tileiras {tileiras}, {gpu}) is an ancestor of HEAD "
+          f"with no tile path changed since; result {result}")
 PY
   exit $?
 fi
@@ -5192,10 +5218,11 @@ dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn 
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
-  scripts/tile-gpu-diff/mutate.py)"
+  scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
+inputs_digest="$(python3 "$here/inputs.py" HEAD)" || fail "inputs.py could not digest the tile inputs at HEAD"
 today="$(date -u +%F)"
 line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
@@ -5205,7 +5232,7 @@ summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary arch=$arch_probe"
-if [ -n "$note" ]; then line="$line # $note; $summary"; else line="$line # $summary"; fi
+if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
 echo "tile-gpu-diff: $verdict"
