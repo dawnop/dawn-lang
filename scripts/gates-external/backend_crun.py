@@ -33,7 +33,7 @@ How a run goes (all remote paths under --backend-opt remote-prefix=P):
             directory on every call (an unchanged tree is a few seconds; crun
             serialises the pushes itself)
   poll      one thread, one short `crun run -n 0 --no-sync --no-build` every
-            poll=SECONDS (default 45) for every job still out, which prints
+            poll=SECONDS (default 30) for every job still out, which prints
             each job's state: absent, running (claimed), or done with its
             exit code, fragment, stdout and stderr
   results   run-job writes its result fragment to
@@ -86,7 +86,7 @@ Options (--backend-opt):
                       does not keep a job out of them)
   keep-going=1, timeout-scale=F   passed through to the local backend
   start-gap=SECONDS   minimum spacing between crun starts (default 2)
-  poll=SECONDS        interval between polls (default 45)
+  poll=SECONDS        interval between polls (default 30)
   wait-scale=F        how long the controller waits for a job, as a multiple
                       of its timeout-minutes (default: timeout-scale + 1, so
                       the job's own timeout inside run-job fires first and is
@@ -154,7 +154,7 @@ class CrunBackend:
         self.private_tmp = opts.get("private-tmp", "1") == "1"
         self.start_gap = float(opts.get("start-gap", "2"))
         self.pass_opts = [f"{k}={opts[k]}" for k in ("keep-going", "timeout-scale") if k in opts]
-        self.poll_interval = float(opts.get("poll", "45"))
+        self.poll_interval = float(opts.get("poll", "30"))
         self.wait_scale = float(opts.get("wait-scale",
                                          float(opts.get("timeout-scale", "2")) + 1))
         run_id_file = self.out / "crun" / "run-id"
