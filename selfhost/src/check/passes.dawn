@@ -21,6 +21,7 @@ use front/ast.{
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
   DEffect, EffectDeclR, EffectOp, AssocBind, ImportName, import_local,
+  Vis, VisPrivate, VisPkg, VisPub, vis_exported,
   e_lo, e_hi
 }
 
@@ -28,7 +29,7 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever, TyError, TyVar,
   TyAssoc, TyAdt, TyList, TyJava,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, EffVar, ELabeled,
-  Audience, AWorld, AStdOnly, AModule, audience_covers, decl_audience, declared_audience,
+  Audience, AWorld, AStdOnly, APackage, AModule, audience_covers, decl_audience, declared_audience,
   trait_audience, builtin_type_audience, internal_std_modules,
   eff_subsumes, eff_suffix, eff_show, eff_labels, eff_assocs, eff_params_of, subst_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
@@ -50,6 +51,7 @@ use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, Na
 use check/cx.{
   resolve_named_effect,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
+  package_of, exports_seen_by, pkg_private_diagnostic,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
   alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
   label_eff, java_enabled_read, java_find_class_read, java_class_name_read,
@@ -788,7 +790,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
               Some(c) -> c
               None -> ""
             },
-            audience: decl_audience(cx1.owner_class, d.is_pub),
+            audience: vis_audience(cx1, d.vis),
             nlo: d.nlo,
             nhi: d.nhi
           })
@@ -872,7 +874,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       ctors: ctor_infos,
       derives: derives,
       owner: cx1.owner_class,
-      audience: decl_audience(cx1.owner_class, d.is_pub),
+      audience: vis_audience(cx1, d.vis),
       bound_eparams: []
     }
     cx1 = Cx {
@@ -995,7 +997,7 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
 test "type shells and fields build recursive types" {
   # type Tree[T] = | Leaf | Node(v: T, kids: List[Tree[T]])
   let m = Module { decls: [DType(TypeDeclR {
-    is_pub: false,
+    vis: VisPrivate,
     is_opaque: false,
     name: "Tree",
     tparams: ["T"],
@@ -1050,7 +1052,7 @@ test "type shells and fields build recursive types" {
 
 test "duplicate constructors and prelude clashes are caught" {
   let mk = (name: String) => DType(TypeDeclR {
-    is_pub: false,
+    vis: VisPrivate,
     is_opaque: false,
     name: name,
     tparams: [],
@@ -1079,7 +1081,7 @@ test "redeclaring Array collides in std and nowhere else" {
   # failed later with `declares return type Array[Int] but its body is
   # Array[Int]`, two different types printing the same.
   let decl = DType(TypeDeclR {
-    is_pub: false,
+    vis: VisPrivate,
     is_opaque: false,
     name: "Array",
     tparams: ["T"],
@@ -1119,7 +1121,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
   # alias A = B, alias B = A  → cycle; type P = { f: fn() -> Unit } derive Show → not printable
   let m = Module { decls: [
     DType(TypeDeclR {
-      is_pub: false,
+      vis: VisPrivate,
       is_opaque: false,
       name: "A",
       tparams: [],
@@ -1134,7 +1136,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       nhi: 7
     }),
     DType(TypeDeclR {
-      is_pub: false,
+      vis: VisPrivate,
       is_opaque: false,
       name: "B",
       tparams: [],
@@ -1149,7 +1151,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
       nhi: 19
     }),
     DType(TypeDeclR {
-      is_pub: false,
+      vis: VisPrivate,
       is_opaque: false,
       name: "P",
       tparams: [],
@@ -1333,7 +1335,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     # the evidence record is unspellable (`ev$E`), so it can never appear in a
     # written header -- but it shares the effect's audience so that nothing
     # downstream has to special-case a record with no answer
-    let ev_audience = decl_audience(cx1.owner_class, d.is_pub)
+    let ev_audience = vis_audience(cx1, d.vis)
     let info = AdtI {
       id: eid,
       name: rec_name,
@@ -1495,7 +1497,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         id: tid,
         name: d.name,
         tvar: tvar,
-        is_pub: d.is_pub,
+        audience: vis_audience(cx1, d.vis),
         owner: cx1.owner_class,
         src_path: cx1.src_path,
         methods: [],
@@ -1593,7 +1595,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       id: tid,
       name: d.name,
       tvar: tvar,
-      is_pub: d.is_pub,
+      audience: vis_audience(cx1, d.vis),
       owner: cx1.owner_class,
       src_path: cx1.src_path,
       methods: methods,
@@ -1627,7 +1629,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], [], [], false, 0, 40, 6, 9)] }
+  }], [], [], VisPrivate, 0, 40, 6, 9)] }
   var cx = seed_prelude(test_cx())
   cx = pass_register_traits(cx, m)
   assert len(cx.diags) == 0
@@ -1648,7 +1650,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], [], [], false, 0, 40, 6, 9)] }
+  }], [], [], VisPrivate, 0, 40, 6, 9)] }
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
@@ -1658,7 +1660,7 @@ test "every prelude trait name is refused as a redefinition" {
   # the guard used to name three of the five by hand, so `trait Show` and
   # `trait Iter` came out as "defined twice" on a file that declares them once
   for name in prelude_trait_names() {
-    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], [], false, 0, 40, 6, 9)] }
+    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], [], VisPrivate, 0, 40, 6, 9)] }
     let cx = pass_register_traits(seed_prelude(test_cx()), m)
     assert len(cx.diags) == 1
     assert cx.diags[0].msg == "`" ++ name ++ "` is a prelude trait and cannot be redefined"
@@ -2363,7 +2365,7 @@ test "impl registration enforces coherence and signature matching" {
     nhi: 20
   }
   fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], [], lo + 4, lo + 7), [FnDecl {
-    is_pub: false,
+    vis: VisPrivate,
     name: "eq4",
     tparams: no_tparams(),
     eparams: no_eparams(),
@@ -2380,7 +2382,7 @@ test "impl registration enforces coherence and signature matching" {
     nhi: 3
   }], [], [], lo, lo + 20)
   let m = Module { decls: [
-    DTrait("Eq4", "T", 10, 11, [tm], [], [], false, 0, 40, 6, 9),
+    DTrait("Eq4", "T", 10, 11, [tm], [], [], VisPrivate, 0, 40, 6, 9),
     good_impl(50),
     good_impl(80)
   ] }
@@ -2394,7 +2396,7 @@ test "impl registration enforces coherence and signature matching" {
   assert len(cx.local_impls) == 1
   # a missing method reports with the expected render
   let m2 = Module { decls: [
-    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], [], false, 0, 40, 6, 9),
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], [], VisPrivate, 0, 40, 6, 9),
     DImpl([], "Eq5", 50, 53, TNamed("Int", [], [], 54, 57), no_fn_decls(), [], [], 50, 70)
   ] }
   var cx2 = seed_prelude(test_cx())
@@ -2581,7 +2583,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
   # fn f[T: Ord](x: T) -> T   and   fn g(x: Int) = x  (inferring → io placeholder)
   let m = Module { decls: [
     DFn(FnDecl {
-      is_pub: false,
+      vis: VisPrivate,
       name: "f",
       tparams: [TypeParamDecl {
         name: "T",
@@ -2600,7 +2602,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       nhi: 4
     }),
     DFn(FnDecl {
-      is_pub: false,
+      vis: VisPrivate,
       name: "g",
       tparams: no_tparams(),
       eparams: no_eparams(),
@@ -2628,7 +2630,7 @@ test "a signature's effect variables land in eparams once each, in mint order" {
   let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
   let m = Module { decls: [
     DFn(FnDecl {
-      is_pub: false,
+      vis: VisPrivate,
       name: "h",
       tparams: no_tparams(),
       eparams: no_eparams(),
@@ -2693,7 +2695,7 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
     Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
   ]
   let decl = FnDecl {
-    is_pub: false,
+    vis: VisPrivate,
     name: "h",
     tparams: no_tparams(),
     eparams: [binder("c"), binder("a"), binder("b")],
@@ -2806,7 +2808,7 @@ pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
       if len(sig.param_tys) > 0 || sig.ret != TyUnit {
         cx1 = cerr(cx1, "main must have the signature fn main() -> Unit !io", d.nlo, d.nhi)
       }
-      if not d.is_pub {
+      if d.vis != VisPub {
         cx1 = cerr_h(cx1, "main must be pub", d.nlo, d.nhi, "write pub fn main() -> Unit !io")
       }
       # main is the outermost frame: there is no caller to hand it evidence,
@@ -2834,11 +2836,11 @@ pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
 
 test "const declarations register in order with serializability checks" {
   let m = Module { decls: [
-    DConst("A", false, TNamed("Int", [], [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
-    DConst("B", false,
+    DConst("A", VisPrivate, TNamed("Int", [], [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
+    DConst("B", VisPrivate,
       TNamed("Map", [TNamed("Int", [], [], 30, 33), TNamed("Int", [], [], 35, 38)], [], 26, 39),
       EInt(0, 42, 43), 20, 43, 26, 27),
-    DConst("A", false, TNamed("Int", [], [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
+    DConst("A", VisPrivate, TNamed("Int", [], [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
   ] }
   var cx = seed_prelude(test_cx())
   let (cxcd, _) = pass_const_decls(cx, m)
@@ -2852,7 +2854,7 @@ test "const declarations register in order with serializability checks" {
 
 test "main shape violations are reported" {
   let m = Module { decls: [DFn(FnDecl {
-    is_pub: false,
+    vis: VisPrivate,
     name: "main",
     tparams: no_tparams(),
     eparams: no_eparams(),
@@ -2914,6 +2916,7 @@ fn plain_span(lo: Int, hi: Int) -> TySpan = TySpan { lo: lo, hi: hi, kids: [] }
 fn leak_word(a: Audience) -> String =
   match a {
     AStdOnly -> "standard-library-internal"
+    APackage(_) -> "package-private"
     _ -> "private"
   }
 
@@ -2922,6 +2925,14 @@ fn leak_fix(a: Audience, name: String) -> String =
     AStdOnly -> "only the standard library may name `" ++ name ++
       "`; remove it from this public surface"
     _ -> "make `" ++ name ++ "` public or remove it from this public surface"
+  }
+
+## How a root's own visibility reads in a surface diagnostic: `public
+## function`, or `package-private function` for a `pub(pkg)` root.
+fn root_word(root: Audience) -> String =
+  match root {
+    APackage(_) -> "package-private"
+    _ -> "public"
   }
 
 fn leak_at(kind: String, name: String, a: Audience, path: String, sp: TySpan) -> SurfaceLeak =
@@ -2943,6 +2954,22 @@ fn module_root_audience(cx: Cx) -> Audience =
   match cx.owner_class {
     None -> AWorld
     Some(ow) -> declared_audience(ow)
+  }
+
+## The audience a declaration of this module is published to, from what its
+## author wrote: its own module, its package, or the module's root audience.
+## Every identity this module registers gets its audience here, so the answer
+## to "what did `pub(pkg)` mean" is written once.
+fn vis_audience(cx: Cx, v: Vis) -> Audience =
+  decl_audience(cx.owner_class, package_of(cx), vis_exported(v), v == VisPkg)
+
+## The root a declaration of visibility `v` is validated against, or None for
+## a private one, which is not a surface root at all (design §四).
+fn vis_root(cx: Cx, public_root: Audience, v: Vis) -> Option[Audience] =
+  match v {
+    VisPrivate -> None
+    VisPkg -> Some(APackage(package_of(cx)))
+    VisPub -> Some(public_root)
   }
 
 ## A local opaque type answers from its own alias entry. An imported one is in
@@ -3221,7 +3248,7 @@ fn surface_fn(cx: Cx, root: Audience, d: FnDecl) -> Cx = {
   # `pub fn` must annotate its return type (the parser refuses otherwise), so
   # a public root is never still inferring at this point
   if sig.inferring || sig_poisoned(sig) { return cx }
-  surface_report(cx, "public function `" ++ d.name ++ "`",
+  surface_report(cx, root_word(root) ++ " function `" ++ d.name ++ "`",
     surface_sig_leaks(cx, root, sig, d.tparams, d.params, d.ret,
       "function `" ++ d.name ++ "`", plain_span(d.nlo, d.nhi)))
 }
@@ -3239,7 +3266,7 @@ fn surface_const(
     None -> return cx
   }
   if ty_poisoned(ty) { return cx }
-  surface_report(cx, "public constant `" ++ name ++ "`",
+  surface_report(cx, root_word(root) ++ " constant `" ++ name ++ "`",
     surface_ty_leaks(cx, root, ty, ty_span_of(cx, ann), "constant `" ++ name ++ "` type"))
 }
 
@@ -3278,7 +3305,7 @@ fn surface_adt(cx: Cx, root: Audience, d: TypeDeclR) -> Cx = {
         surface_ty_leaks(cx, root, f.ty, field_span(cx, d, ctor.name, f.name, fb), where)
     }
   }
-  surface_report(cx, "public type `" ++ d.name ++ "`", leaks)
+  surface_report(cx, root_word(root) ++ " type `" ++ d.name ++ "`", leaks)
 }
 
 fn surface_type_decl(cx: Cx, root: Audience, d: TypeDeclR) -> Cx =
@@ -3302,7 +3329,7 @@ fn surface_type_decl(cx: Cx, root: Audience, d: TypeDeclR) -> Cx =
               # a transparent alias is a spelling, so what is published is the
               # target it expands to -- the alias's own `pub` is not the
               # question (design §5.2)
-              surface_report(cx, "public alias `" ++ d.name ++ "`",
+              surface_report(cx, root_word(root) ++ " alias `" ++ d.name ++ "`",
                 surface_ty_leaks(cx, root, t, ty_span_of(cx, target),
                   "alias `" ++ d.name ++ "` target"))
             }
@@ -3318,7 +3345,7 @@ fn surface_effect(cx: Cx, root: Audience, d: EffectDeclR) -> Cx = {
       Some(sig) ->
         if not sig_poisoned(sig) {
           cx1 = surface_report(cx1,
-            "public effect `" ++ d.name ++ "` operation `" ++ op.name ++ "`",
+            root_word(root) ++ " effect `" ++ d.name ++ "` operation `" ++ op.name ++ "`",
             surface_sig_leaks(cx1, root, sig, no_tparam_decls(), op.params, Some(op.ret),
               "effect `" ++ d.name ++ "` operation `" ++ op.name ++ "`",
               plain_span(op.nlo, op.nhi)))
@@ -3355,7 +3382,7 @@ fn surface_trait(
         mret = Some(pm.ret)
       }
     }
-    cx1 = surface_report(cx1, "public trait `" ++ name ++ "` method `" ++ mname ++ "`",
+    cx1 = surface_report(cx1, root_word(root) ++ " trait `" ++ name ++ "` method `" ++ mname ++ "`",
       surface_sig_leaks(cx1, root, ms.sig, no_tparam_decls(), mparams, mret,
         "trait `" ++ name ++ "` method `" ++ mname ++ "`", fb))
   }
@@ -3391,7 +3418,7 @@ fn impl_is_observable(cx: Cx, root: Audience, tr: TraitI, imp: ImplI, head: TySp
 
 fn surface_impl(
   cx: Cx,
-  root: Audience,
+  root0: Audience,
   tps: List[TypeParamDecl],
   assoc: List[AssocBind],
   tlo: Int,
@@ -3406,6 +3433,11 @@ fn surface_impl(
   let tr = trait_of(cx.traits, imp.trait_id)
   let head = plain_span(tlo, thi)
   if ty_poisoned(imp.subject) { return cx }
+  # the module's own root first; an impl the world cannot observe may still
+  # be observable to the package -- a `pub(pkg)` trait implemented for a
+  # public type -- and then its bounds and bindings answer to the package
+  let pkg_root = APackage(package_of(cx))
+  let root = if impl_is_observable(cx, root0, tr, imp, head) { root0 } else { pkg_root }
   if not impl_is_observable(cx, root, tr, imp, head) { return cx }
   let shown = tr.name ++ "[" ++ ty_show(cx.adts, imp.subject) ++ "]"
   let path = "impl `" ++ shown ++ "`"
@@ -3433,14 +3465,25 @@ pub fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
   var cx1 = cx
   for d in m.decls {
     match d {
-      DFn(f) -> { if f.is_pub { cx1 = surface_fn(cx1, root, f) } }
-      DType(t) -> { if t.is_pub { cx1 = surface_type_decl(cx1, root, t) } }
-      DConst(name, is_pub, ann, _, _, _, nlo, nhi) -> {
-        if is_pub { cx1 = surface_const(cx1, root, name, ann, nlo, nhi) }
+      DFn(f) -> match vis_root(cx1, root, f.vis) {
+        Some(r) -> { cx1 = surface_fn(cx1, r, f) }
+        None -> ()
       }
-      DEffect(e) -> { if e.is_pub { cx1 = surface_effect(cx1, root, e) } }
-      DTrait(name, _, _, _, methods, _, _, is_pub, _, _, nlo, nhi) -> {
-        if is_pub { cx1 = surface_trait(cx1, root, name, methods, nlo, nhi) }
+      DType(t) -> match vis_root(cx1, root, t.vis) {
+        Some(r) -> { cx1 = surface_type_decl(cx1, r, t) }
+        None -> ()
+      }
+      DConst(name, vis, ann, _, _, _, nlo, nhi) -> match vis_root(cx1, root, vis) {
+        Some(r) -> { cx1 = surface_const(cx1, r, name, ann, nlo, nhi) }
+        None -> ()
+      }
+      DEffect(e) -> match vis_root(cx1, root, e.vis) {
+        Some(r) -> { cx1 = surface_effect(cx1, r, e) }
+        None -> ()
+      }
+      DTrait(name, _, _, _, methods, _, _, vis, _, _, nlo, nhi) -> match vis_root(cx1, root, vis) {
+        Some(r) -> { cx1 = surface_trait(cx1, r, name, methods, nlo, nhi) }
+        None -> ()
       }
       # an impl has no `pub` to read: observability is decided from its head.
       # Derived impls have no written head to visit at all, and their surface
@@ -3524,7 +3567,12 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
         }
         continue
       }
-      Some(e) -> e
+      # The package boundary, and the only place it is drawn
+      # (docs/package-visibility-design.md §4.2): a module of another package
+      # sees the exporter's `pub` names and not its `pub(pkg)` ones. Every
+      # read after this -- selective import, qualified access, the body's
+      # `module_exports` -- sees the filtered tables and asks nothing again.
+      Some(e) -> exports_seen_by(e, package_of(cx))
     }
     # graft the exporter's table fragments into this checker's id tables
     var adts2 = cx1.adts
@@ -3625,6 +3673,10 @@ fn inject_selective(
   let nothing = f == None && ty == None && cn == None && ct == None && al == None &&
     tr == None && ef == None
   if nothing {
+    match pkg_private_diagnostic(exp, name) {
+      Some(d) -> return cerr_o(cx1, d.message, lo, hi, d.hint)
+      None -> ()
+    }
     var known = false
     for n in exp.all_names {
       if n == name { known = true }

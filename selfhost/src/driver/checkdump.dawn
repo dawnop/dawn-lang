@@ -13,7 +13,7 @@ use check/identity.{Named, FunctionDecl}
 use driver/analyze.{Program, LocDiag, rendered_diags}
 use front/parser
 use front/token.{Diag, DiagOwner}
-use front/ast.{module_fns, module_consts}
+use front/ast.{module_fns, module_consts, vis_exported}
 use front/lexdump
 
 ## Render one comptime value for the golden (both sides must agree).
@@ -58,7 +58,7 @@ pub fn render(prog: Program) -> String = {
   for cm in prog.modules {
     out = out ++ "M\t" ++ cm.mod_path ++ "\n"
     for fd in module_fns(cm.m) {
-      if fd.is_pub {
+      if vis_exported(fd.vis) {
         match map.get(cm.cx.fns, fd.name) {
           Some(s) -> {
             out = out ++ "F\t" ++ lexdump.esc(sig_render(cm.cx.adts, cm.cx.traits, s)) ++ "\n"

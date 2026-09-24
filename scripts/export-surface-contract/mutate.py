@@ -157,7 +157,7 @@ MUTATIONS = {
     "lsp-ignores-audience": (
         LSPC,
         "fn may_name_module(qc: QCx, path: String) -> Bool =\n"
-        "  audience_covers(declared_audience(path), AModule(qc.entry.mod_path))\n",
+        "  audience_covers(declared_audience(path), AModule(qc.entry.mod_path, package_of(qc.entry.cx)))\n",
         "fn may_name_module(qc: QCx, path: String) -> Bool = true\n",
     ),
     # 16 -- the surface is validated before any body

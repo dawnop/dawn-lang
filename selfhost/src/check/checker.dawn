@@ -30,7 +30,8 @@ use front/ast.{
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
   EComptime, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView,
-  EHandle, HandlerArm, HandlerCell, DEffect, EffectDeclR, EffectOp, module_effects
+  EHandle, HandlerArm, HandlerCell, DEffect, EffectDeclR, EffectOp, module_effects,
+  VisPkg, vis_exported
 }
 use check/tast.{
   TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
@@ -71,7 +72,7 @@ use check/types.{
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
-  AWorld
+  AWorld, PkgDep
 }
 use check/jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use check/exhaustive.{
@@ -83,7 +84,7 @@ use check/cx.{
   label_eff,
   revalidate_context_read,
   write_symbol, write_signature, write_bounds,
-  AliasE, Cx, Frame, LambdaCx, ModExports,
+  AliasE, Cx, Frame, LambdaCx, ModExports, package_of, pkg_private_diagnostic,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
@@ -494,6 +495,10 @@ fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx = {
 ## exports. Falling through to the value path reported the alias itself as an
 ## undefined variable, which is worse than inconsistent: `m` is defined.
 fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic = {
+  match pkg_private_diagnostic(exp, fname) {
+    Some(d) -> return d
+    None -> ()
+  }
   let msg = "module `" ++ exp.mod_path ++ "` has no exported value `" ++ fname ++ "`"
   # a name it does export, as a type, is worth saying so: otherwise the author
   # reads "no exported value `Shown`", finds `pub type Shown` and stops there
@@ -530,7 +535,9 @@ fn export_function_diagnostic_read(cx: Cx, q: String, name: String) -> (Cx, Opti
       # privacy answer before considering public function suggestions.
       var in_all = false
       for existing in exp.all_names { if existing == name { in_all = true } }
-      Some(if in_all {
+      Some(if list.contains(exp.pkg_only, name) {
+        pkg_private_diagnostic(exp, name).expect("a package-private name")
+      } else if in_all {
         ExportDiagnostic { message: "`" ++ name ++ "` is private to module `" ++ exp.mod_path ++ "`",
           hint: Some("add `pub` to its declaration in ${exp.mod_path}") }
       } else {
@@ -3991,9 +3998,12 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
           let (pattern_cx, constructor) = qual_ctor_key_read(presence_cx, q, cname)
           match constructor {
             None -> {
-              let diagnostic = ExportDiagnostic { message: "module `" ++ exp.mod_path ++
-                  "` has no exported constructor `" ++ cname ++ "`",
-                hint: suggest.hint(cname, map.keys(exp.ctors)) }
+              let diagnostic = match pkg_private_diagnostic(exp, cname) {
+                Some(d) -> d
+                None -> ExportDiagnostic { message: "module `" ++ exp.mod_path ++
+                    "` has no exported constructor `" ++ cname ++ "`",
+                  hint: suggest.hint(cname, map.keys(exp.ctors)) }
+              }
               let diagnostic_cx = match pattern_cx.function_reads {
                 None -> pattern_cx
                 Some(_) -> Cx { ..pattern_cx, function_reads: semantic_reads.observe(pattern_cx.function_reads,
@@ -17258,25 +17268,32 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   var traits2: Map[String, Int] = map.empty()
   var effects2: Map[String, Int] = map.empty()
   var all: List[String] = []
+  # what `pub(pkg)` put in the tables above (docs/package-visibility-design.md §4.2)
+  var pkg_only: List[String] = []
   for d in module_fns(m) {
     all = all ++ [d.name]
-    if d.is_pub {
+    if vis_exported(d.vis) {
       match map.get(cx.fns, d.name) {
-        Some(s) -> { fns2 = map.insert(fns2, d.name, s) }
+        Some(s) -> {
+          fns2 = map.insert(fns2, d.name, s)
+          if d.vis == VisPkg { pkg_only = pkg_only ++ [d.name] }
+        }
         None -> ()
       }
     }
   }
   for d in module_types(m) {
     all = all ++ [d.name]
-    if d.is_pub {
+    if vis_exported(d.vis) {
       match map.get(cx.adts_by_name, d.name) {
         Some(aid) -> {
           types2 = map.insert(types2, d.name, aid)
+          if d.vis == VisPkg { pkg_only = pkg_only ++ [d.name] }
           # a pub type brings its constructors (spec §10.3)
           var ci = 0
           for c in adt_of(cx.adts, aid).ctors {
             ctors2 = map.insert(ctors2, c.name, (aid, ci))
+            if d.vis == VisPkg && not list.contains(pkg_only, c.name) { pkg_only = pkg_only ++ [c.name] }
             ci = ci + 1
           }
         }
@@ -17285,6 +17302,7 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
       match map.get(cx.aliases, d.name) {
         Some(al) -> {
           aliases2 = map.insert(aliases2, d.name, al)
+          if d.vis == VisPkg && not list.contains(pkg_only, d.name) { pkg_only = pkg_only ++ [d.name] }
           match map.get(cx.alias_resolved, d.name) {
             Some(t) -> { ares2 = map.insert(ares2, d.name, t) }
             None -> ()
@@ -17296,9 +17314,12 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   }
   for d in module_consts(m) {
     all = all ++ [d.name]
-    if d.is_pub {
+    if vis_exported(d.vis) {
       match map.get(cx.consts, d.name) {
-        Some(t) -> { consts2 = map.insert(consts2, d.name, t) }
+        Some(t) -> {
+          consts2 = map.insert(consts2, d.name, t)
+          if d.vis == VisPkg { pkg_only = pkg_only ++ [d.name] }
+        }
         None -> ()
       }
     }
@@ -17306,15 +17327,19 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   for d in module_effects(m) {
     all = all ++ [d.name]
     for op in d.ops { all = all ++ [op.name] }
-    if d.is_pub {
+    if vis_exported(d.vis) {
       match map.get(cx.effects, d.name) {
         Some(eid) -> {
           effects2 = map.insert(effects2, d.name, eid)
+          if d.vis == VisPkg { pkg_only = pkg_only ++ [d.name] }
           # a pub effect brings its operations, the way a pub trait brings its
           # methods: they are the only way to raise it
           for op in effect_of(cx, eid).ops {
             match map.get(cx.fns, op) {
-              Some(sg) -> { fns2 = map.insert(fns2, op, sg) }
+              Some(sg) -> {
+                fns2 = map.insert(fns2, op, sg)
+                if d.vis == VisPkg { pkg_only = pkg_only ++ [op] }
+              }
               None -> ()
             }
           }
@@ -17326,10 +17351,11 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   for d in module_traits(m) {
     all = all ++ [d.name]
     for me in d.methods { all = all ++ [me.name] }
-    if d.is_pub {
+    if vis_exported(d.vis) {
       match map.get(cx.traits_by_name, d.name) {
         Some(tid) -> {
           traits2 = map.insert(traits2, d.name, tid)
+          if d.vis == VisPkg { pkg_only = pkg_only ++ [d.name] }
           let ti = trait_of(cx.traits, tid)
           # a pub trait's methods are importable like pub fns -- unless the
           # trait does not put them in a function namespace to begin with
@@ -17337,6 +17363,7 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
             for entry in ti.methods {
               let (mname, ms) = entry
               fns2 = map.insert(fns2, mname, ms.sig)
+              if d.vis == VisPkg { pkg_only = pkg_only ++ [mname] }
             }
           }
         }
@@ -17360,7 +17387,9 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
     effect_infos: cx.effect_infos,
     impls: cx.local_impls,
     adt_infos: cx.adts,
-    trait_infos: cx.traits
+    trait_infos: cx.traits,
+    package: package_of(cx),
+    pkg_only: pkg_only
   }
 }
 
@@ -17394,6 +17423,37 @@ test "exports_of exposes the pub surface, and imports consume it" {
   let (m3, _) = parser.parse_module(src3)
   let (cx3, _) = check_module(cx_new(Some("use_site"), None), m3, env)
   assert cx3.diags[0].msg == "`hidden` is private to module `geom`"
+}
+
+test "pub(pkg) names reach their own package and stop at its boundary" {
+  let src = "pub(pkg) type Seam = { n: Int }\n" ++
+    "pub(pkg) fn seam(n: Int) -> Seam = Seam { n: n }\n" ++
+    "pub fn api(n: Int) -> Int = seam(n).n\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env0: Map[String, ModExports] = map.empty()
+  let lib = Cx { ..cx_new(Some("lib/core"), None), dep_package: Some("lib") }
+  let (cx1, _) = check_module(lib, m, env0)
+  assert len(cx1.diags) == 0
+  let exp = exports_of(cx1, m, "lib/core", "lib/core")
+  assert exp.package == PkgDep("lib")
+  assert exp.pkg_only == ["seam", "Seam"]
+  let env = map.from([("lib/core", exp)])
+  let use_src = "use lib/core\n" ++
+    "pub fn go() -> Int = core.seam(1).n + core.api(2)\n"
+  let (m2, _) = parser.parse_module(use_src)
+  # a sibling module of the same package names it like a `pub` one
+  let sibling = Cx { ..cx_new(Some("lib/user"), None), dep_package: Some("lib") }
+  let (cx2, _) = check_module(sibling, m2, env)
+  assert len(cx2.diags) == 0
+  # the project that depends on the package does not
+  let (cx3, _) = check_module(cx_new(Some("main"), None), m2, env)
+  assert len(cx3.diags) == 1
+  assert cx3.diags[0].msg == "`seam` is package-private to package `lib`"
+  # nor does another package, and the answer is the same whichever it is
+  let other = Cx { ..cx_new(Some("web/x"), None), dep_package: Some("web") }
+  let (cx4, _) = check_module(other, m2, env)
+  assert len(cx4.diags) == 1 && cx4.diags[0].msg == cx3.diags[0].msg
 }
 
 ## Two modules, each exporting an effect whose single operation is `ask` (test

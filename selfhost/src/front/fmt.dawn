@@ -27,7 +27,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE,
+  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -490,6 +490,9 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
   # `impl[T: Eq] Eq[List[T]]`, the way a fn's hug its name. IMPL is not in
   # is_value_end because it never ends a value; this is its own rule.
   if c == LBRACKET && p == IMPL { return false }
+  # `pub(pkg)` is one modifier, spelled tight like a call; nothing else may
+  # follow `pub` with a parenthesis (docs/package-visibility-design.md §三)
+  if c == LPAREN && p == PUB { return false }
   # unary minus hugs its operand
   if set.has(unary, prev.lo) { return false }
   true
@@ -586,6 +589,13 @@ test "formatting is idempotent and fixes indentation" {
   let once = fmt_of(src)
   assert once == "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ -> 2\n  }\n"
   assert fmt_of(once) == once
+}
+
+test "pub(pkg) prints as one tight modifier" {
+  let src = "pub (pkg) fn g() -> Int = 1\npub(  pkg ) type T = { a: Int }\nfn pkg() -> Int = pkg2(pkg)\n"
+  let want = "pub(pkg) fn g() -> Int = 1\npub(pkg) type T = { a: Int }\nfn pkg() -> Int = pkg2(pkg)\n"
+  assert fmt_of(src) == want
+  assert fmt_of(want) == want
 }
 
 test "single-line sum types omit only their optional first bar" {
