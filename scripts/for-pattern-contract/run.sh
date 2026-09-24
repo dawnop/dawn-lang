@@ -215,7 +215,7 @@ syntax_ok() {
   [ "$(grep -Fc 'PTuple ' "$output/parse.out")" -ge 1 ] || return 1
   [ "$(grep -Fc 'PList npre=1 rest=true restname=tail' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PCtor Pair ' "$output/parse.out")" -eq 1 ] || return 1
-  [ "$(grep -Fc 'PCtor Record ' "$output/parse.out")" -eq 1 ] || return 1
+  [ "$(grep -Fc 'PRecord Record ' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PArg name=left' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PArg name=right' "$output/parse.out")" -eq 1 ] || return 1
   [ "$(grep -Fc 'PQual q.Only ' "$output/parse.out")" -eq 1 ] || return 1

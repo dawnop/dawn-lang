@@ -330,14 +330,20 @@ fn for_header_in(toks: List[Token], at: Int) -> Option[Int] = {
 }
 
 fn recursive_pattern_boundary(
-  boundary: TokKind,
+  next: Token,
   is_header_in: Bool,
   parens: Int,
   brackets: Int,
   braces: Int
-) -> Bool =
+) -> Bool = {
+  let boundary = next.kind
   if is_header_in {
     pattern_top(parens, brackets, braces)
+  } else if boundary == IDENT && next.text == "in" {
+    # an `in` that is not the header's is no boundary: nested in the pattern
+    # it is a name (`in` is contextual, spec §1.4), and it never closes an
+    # alternative the way the header's `in` does
+    false
   } else if boundary == PIPE {
     true
   } else if boundary == COMMA {
@@ -351,6 +357,7 @@ fn recursive_pattern_boundary(
   } else {
     false
   }
+}
 
 ## Is `pos` the empty atom after an or-pattern pipe? The token after the gap
 ## must be a boundary at the same recursive-pattern depth, rather than a typed
@@ -379,7 +386,7 @@ fn missing_for_alternative_at(
   if not previous_is_pipe(toks, previous) { return false }
   let (parens, brackets, braces) = pattern_depth_before(toks, at, previous)
 
-  recursive_pattern_boundary(toks[next].kind, next == header_in, parens, brackets, braces)
+  recursive_pattern_boundary(toks[next], next == header_in, parens, brackets, braces)
 }
 
 fn qualified_incomplete_alternative_at(
@@ -408,7 +415,7 @@ fn qualified_incomplete_alternative_at(
       return false
     }
   let (parens, brackets, braces) = pattern_depth_before(toks, at, previous)
-  recursive_pattern_boundary(toks[next].kind, next == header_in, parens, brackets, braces)
+  recursive_pattern_boundary(toks[next], next == header_in, parens, brackets, braces)
 }
 
 fn in_incomplete_qualified_for_pattern(text: String, alias_lo: Int, pos: Int) -> Bool = {
