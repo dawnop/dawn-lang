@@ -348,8 +348,21 @@ The unchanged 1,000-function Scale workload was measured in isolated fresh
 JVMs, 30 rounds with 12 warmups (18 measured samples), keeping the 1,001-body
 census and complete cold oracle. Median operation times were cold 52.613 ms,
 record 165.253 ms, admit 7.812 ms, replay 124.647 ms and renewal 232.101 ms.
-Replay is approximately 2.37 times slower than cold: **G3 is not met**.
-These are operation wall times, not CPU or retained semantic-cache memory.
+Replay was approximately 2.37 times slower than cold at that point, before
+`f4f6062e`. These are operation wall times, not CPU or retained
+semantic-cache memory.
+
+These numbers are superseded. After `f4f6062e` the same 1,000-function
+workload measured locally (2026-09-22) replayed generic bodies in 46.5 ms
+against 52.2 ms cold (0.89), which did not reproduce elsewhere. The
+2026-09-24 remeasurement at `b2e19e06` on a cluster machine, three rounds of
+18 samples each, every round followed by an adjacent cold guard, gives these
+median replay/cold ratios: calls 0.80, generic 1.15 (1.08 to 1.24), lambda
+inferred 1.17 (no body admitted) and primitive inferred about 1.5. Renewal is
+about 1.3 times cold for generic and 1.15 for calls, down from about 3 before
+assembly-owned renewal (`9b74b720`, `2e2daf57`); lambda inferred renewal is
+still about 4 times cold. Only calls replays below cold: **G3 is still not
+met**.
 
 Private exact-method instrumentation on the identical frozen benchmark JAR
 attributes 77.227 ms of a 133.148 ms instrumented replay to 1,000 exact source

@@ -782,8 +782,8 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 
 | 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
 |----|-----------|------|--------|-----------|
-| 0 文本 golden | 是 | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
-| 1 字节码编译 | 是（刀 3 起；今天是 `tile-golden-1` 到 `tile-golden-6` 六片，刀 T5 起） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 0 文本 golden | 碰 tile 路径的 push（2026-09-11 起在 `tile.yml`，另有每日全量） | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
+| 1 字节码编译 | 同层 0（刀 3 起进门；今天是 `tile-golden-1` 到 `tile-golden-6` 六片，2026-09-11 起按 `matrix.txt` round-robin，此前一度分到十一片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
 | 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档）；刀 16 起对比的单位可以是一**串** launch 而不是一次，刀 17 把这串的价钱压到「一道题一个 kernel」 | 其它架构 |
 
 层 0 golden 放 `scripts/tile-golden/*.mlir` 与 `*.tilebc`（字节码也钉，两后端逐字节），确定性
