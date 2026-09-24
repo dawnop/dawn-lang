@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层与生命周期索引。**每篇文档的权威生命周期在它自己的
 > 文件头**；本索引只帮助定位材料，不登记设计任务进度。
 
-`docs/` contains 124 documents <!-- doc-check: doc-count --> covering specifications,
+`docs/` contains 125 documents <!-- doc-check: doc-count --> covering specifications,
 research, designs, progress reports, retrospectives and operations. Historical
 claims may no longer describe the implementation. This index groups the material
 and records document lifecycles; `scripts/doc-check.py` verifies both the count
@@ -152,6 +152,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-window-design.md](effects-window-design.md) | current | 裁决 4、5 的效果窗口：`io` 是唯一的环境效果、效果原子按声明表分类；效果限定名与通用的选择性引入改名 `use m.{x as y}`；`catch_panic` 去 `!io`；`with_fs_real`/`with_gpu_real` 效果多态；删除 `unsafe_pure` 与 `--comptime-ffi`；`main` 只在入口模块保留。 |
 | [qualified-effects-design.md](qualified-effects-design.md) | current | Module-qualified effect references, shared resolution, and incremental validation for issue #145. |
+| [unused-imports-design.md](unused-imports-design.md) | current | 裁决 8：未使用的 import 是编译错误（按名、含 `use java`、test 算使用、模块有其它错误时不报、无逃生舱），test-only 反向边挪进兄弟测试模块，LSP 删除 code action。 |
 | [session-body-replay-design.md](session-body-replay-design.md) | current | Session-owned body reuse, checked import resolution, shared cache budgets, and production acceptance boundaries. |
 | [generic-dictionary-admission-design.md](generic-dictionary-admission-design.md) | current | Original bounded-generic production traces, refusal counts, dictionary entry invariants, and the next candidate-proof boundary. |
 | [source-equality-oracle-design.md](source-equality-oracle-design.md) | current | Raw source equality oracles for code-point ranges, Unicode, trivia, and invalid or empty ranges. |
