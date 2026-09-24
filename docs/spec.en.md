@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 67f15d483372fa7f -->
+<!-- doc-check: translation-of docs/spec.md @ 50c3c1442211a694 -->
 
 # Dawn Language Specification
 
@@ -75,10 +75,10 @@ true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are four further **contextual keywords**, which remain ordinary identifiers elsewhere:
+There are five further **contextual keywords**, which remain ordinary identifiers elsewhere:
 `derive` (only at the tail of a `type` declaration), `as` (only in the renaming position of `use`,
-§10.2), `handle` (after `with`, when the next token is not `<-`, §6.5), and `opaque` (only directly
-before `type`, where it introduces an opaque type, §2.7).
+§10.2), `handle` (after `with`, when the next token is not `<-`, §6.5), `opaque` (only directly
+before `type`, where it introduces an opaque type, §2.7), and `pkg` (only after `pub(`, §10.4).
 
 **Symbol tokens take the longest match** (as with `>>>`/`>=`/`->`/`|>`). The binding arrow `<-` of
 the `with` statement (§4.10) follows the same rule: `a<-b` reads as `a <- b`, not `a < (-b)`. The
@@ -3551,6 +3551,27 @@ non-`pub` item → error (`` `parse` is private to module json/parser ``, with a
 outside the module either; the full rules for transparent aliases, the opaque boundary, public
 traits/effects and reachable impls are in §3.3, and the error is reported at the declaration rather
 than at the use site.
+
+**Package visibility `pub(pkg)`** (2026-09-24, [design](package-visibility-design.md)): there are
+three visibility levels — module-private (nothing written), `pub(pkg)`, and `pub`. `pub(pkg)` may be
+written everywhere `pub` may, and means the same except for the boundary: **a `pub(pkg)` declaration
+is visible to every module of the same package (one `dawn.toml` unit) and invisible outside it**. A
+package is one source unit as the loader sees it: the project being checked (with or without a
+`dawn.toml`), each `[deps]` source package (by the real name in its manifest), and the bundled
+standard library as a whole. Importing or qualified access to a `pub(pkg)` item from outside the
+package → error (`` `seam` is package-private to package `web` ``).
+
+- `pkg` is a keyword only after `pub(`; anything after `pub(` other than `pkg)` is an error (Dawn
+  has no `pub(super)` or `pub(in …)`). A `pub(pkg) fn`, like a `pub fn`, must state its return type.
+- Public surface: a `pub` declaration's signature may not mention a `pub(pkg)` type, trait or effect
+  (`` public function `f` exposes package-private type `T` ``); a `pub(pkg)` declaration's signature
+  may mention `pub(pkg)` identities of the same package and may not mention module-private ones. The
+  decision is the table of the public surface rules in §3.3, with one more level.
+- `dawn doc` output contains `pub` items only; `pub(pkg)` items are not part of the public surface.
+- Visibility is a check-time notion only: after lowering, Core and both backends do not distinguish
+  the three levels.
+- Fields have no visibility of their own: a record field is visible wherever its type is. Hiding a
+  representation is what `opaque type` (§2.7) is for.
 
 > **Load scope (2026-07-30, LANG-07)**: `dawn run/test/build <dir>` loads **every** module
 > under `src/` by default — modules that are never referenced are checked too (bit-rot

@@ -64,10 +64,10 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有四个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有五个，
 它们在别处仍是普通标识符：`derive`（只出现在 `type` 声明尾部）、`as`（只出现在
 `use` 的重命名位，§10.2）、`handle`（`with` 之后且下一个 token 不是 `<-` 时，§6.5）、
-`opaque`（只在紧接 `type` 时引入不透明类型，§2.7）。
+`opaque`（只在紧接 `type` 时引入不透明类型，§2.7）、`pkg`（只在 `pub(` 之后，§10.4）。
 
 **符号 token 取最长匹配**（同 `>>>`/`>=`/`->`/`|>`）。`with` 语句的绑定箭头
 `<-`（§4.10）也照这条：`a<-b` 读作 `a <- b`，不是 `a < (-b)`。写了空格的
@@ -2854,6 +2854,22 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
 导出的声明内部也不得泄漏模块外无法命名的私有 type / trait / effect；transparent alias、opaque
 边界、公开 trait/effect 与可达 impl 的完整判定在 §3.3，错误报在声明处而不是使用处。
+
+**包内可见 `pub(pkg)`**（2026-09-24，[设计](package-visibility-design.md)）：可见性共三档——
+模块私有（不写）、`pub(pkg)`、`pub`。`pub(pkg)` 能写在 `pub` 能写的每个位置，含义相同，只是
+边界不同：**`pub(pkg)` 声明对同一个包（一个 `dawn.toml` 单元）内的所有模块可见，对包外不可见**。
+包是装载器眼中的一个源码单元：被检查的工程自身（有无 `dawn.toml` 都算一个）、每个 `[deps]`
+源码包（按其 manifest 的真名）、捆绑标准库整体。包外引入或限定访问 `pub(pkg)` 项 → 错误
+（`` `seam` is package-private to package `web` ``）。
+
+- `pkg` 只在 `pub(` 之后是关键字；`pub(` 后面不是 `pkg)` 是错误（Dawn 没有 `pub(super)`、
+  `pub(in …)`）。`pub(pkg) fn` 与 `pub fn` 一样必须写返回类型。
+- 公开面：`pub` 声明的签名不得提及 `pub(pkg)` 的 type / trait / effect（`` public function `f`
+  exposes package-private type `T` ``）；`pub(pkg)` 声明的签名可以提及同包的 `pub(pkg)` 身份，
+  不得提及模块私有身份。判定与 §3.3 的公开面规则同一张表，只多一档。
+- `dawn doc` 的输出只含 `pub` 项；`pub(pkg)` 项不进公开面。
+- 可见性只是检查期概念：lowering 之后的 Core 与两个后端不区分三档。
+- 字段没有单独的可见性：记录字段随所属类型可见。隐藏表示用 `opaque type`（§2.7）。
 
 > **加载范围（2026-07-30，LANG-07）**：`dawn run/test/build <dir>` 默认加载 `src/` 下
 > **全部**模块——未被引用的模块也检查（bit-rot 防护，这是对的默认）。`--closure`
