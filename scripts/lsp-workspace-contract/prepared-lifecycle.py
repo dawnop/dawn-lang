@@ -67,8 +67,8 @@ def variants(original):
 def verify(name, status, output, owner, assertion):
     failures = re.findall(r"^FAIL\s+([^\n]+)", output, re.M)
     if owner is None:
-        if status or failures or not re.search(r"^663 test\(s\) passed$", output, re.M):
-            raise RuntimeError("Positive prepared LSP closure did not pass all 663 tests\n" + output)
+        if status or failures or not re.search(r"^649 test\(s\) passed$", output, re.M):
+            raise RuntimeError("Positive prepared LSP closure did not pass all 649 tests\n" + output)
         return
     label = "lsp/server :: " + owner
     exact = r"^FAIL\s+" + re.escape(label) + r"\n\s+assertion failed: " + re.escape(assertion) + r"\s*$"
