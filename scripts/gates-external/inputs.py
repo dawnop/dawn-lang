@@ -23,7 +23,35 @@ What the lock pins and what it does not:
     whose sha256 the lock pins. The cache's own bytes are not reproducible
     (npm's index carries times), so the lock pins the lockfile, whose
     integrity fields npm checks on every tarball it takes from the cache,
-    and MANIFEST records the tree digest of the cache that was built.
+    and MANIFEST records the tree digest of the cache that was built;
+  - the C compiler (lock key conda_toolchains): conda-forge packages, each
+    pinned by URL and sha256, unpacked together into one toolchain directory
+    the way `conda install` lays out an environment. A .conda package is a
+    zip of zstd-compressed tars, and the prefix's python 3.12 has no zstd,
+    so the unpacking runs in that interpreter with a pinned zstandard wheel
+    (lock key wheels) on its path: the same code on every machine, and no
+    host tool deciding what gets unpacked.
+
+Why the compiler is in the pack at all: it was the one tool the steps took
+from /usr/bin, so an external run's bundle said `cc` = gcc 11.4 on the
+cluster and gcc 13.3 on a workstation for the same commit. What CI runs is
+ubuntu-latest's `cc`, gcc 13.3.0, whose sanitizer, libgcc_s and libstdc++
+runtimes Ubuntu 24.04 builds from gcc 14.2.0; the lock pins conda-forge
+builds of exactly that pairing. The pairing is not cosmetic: gcc 13.3's own
+libasan dies with AddressSanitizer:DEADLYSIGNAL on a kernel with 32 bits of
+mmap randomisation (9 of 50 runs here), 14.2's does not (0 of 100), and
+scripts/spike-native/run.sh fails closed without ASan. conda-forge rather
+than LLVM's release tarball: those are clang, not what CI runs, and 1 to
+2 GB, where these packages are 121 MiB.
+
+Relocation. conda records, per package, the files that carry the build
+prefix as a text placeholder (info/paths.json) and rewrites it to the
+install location. So does this module; gcc's specs are one of those files,
+and the `-rpath <toolchain>/lib` they add to every non-static link is how
+an ASan binary finds the pack's libasan instead of the host's (or none, on
+the cluster, which has only gcc 11's). Those files then name the prefix, so
+their digest is taken with the location put back to the placeholder: the
+same tree digest on every machine, as with the java shims.
 
 One change is made to an unpacked toolchain, and it is part of the layout,
 not of the download: each GraalVM launcher in bin/ (java, javac, jar, ...)
@@ -49,6 +77,8 @@ Subcommands:
     install --prefix P      extract toolchains from inputs/downloads (a shipped
                             pack) and verify
     verify  --prefix P [--repo R]
+    conda-unpack ...        internal: what build and install run under the
+                            prefix's python to unpack the compiler
 """
 
 import argparse
@@ -75,7 +105,7 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def tree_digest(root):
+def tree_digest(root, relocated=None):
     """A digest of a directory's names, contents, executable bits and links.
 
     Modes other than the executable bit and owners are left out: tar applies
@@ -83,9 +113,14 @@ def tree_digest(root):
     the same pack must verify on both. `__pycache__` directories are left out
     as well: python-build-standalone ships no bytecode, the interpreter writes
     it beside the stdlib on first import, and it validates each file against
-    its source itself. Returns (digest, bytes, files).
+    its source itself. `relocated` ({relative path: placeholder}) names files
+    whose placeholder was rewritten to `root`; they are hashed with `root`
+    put back, so the digest does not depend on where the prefix lives.
+    Returns (digest, bytes, files).
     """
     root = Path(root)
+    relocated = relocated or {}
+    location = str(root).encode()
     digest = hashlib.sha256()
     total = files = 0
     for dirpath, dirnames, filenames in os.walk(root):
@@ -99,7 +134,12 @@ def tree_digest(root):
             elif path.is_file():
                 size = path.stat().st_size
                 x = "x" if path.stat().st_mode & 0o100 else "-"
-                digest.update(f"F {rel} {x} {size} {sha256_file(path)}\n".encode())
+                if rel in relocated:
+                    data = path.read_bytes().replace(location, relocated[rel].encode())
+                    size, content = len(data), hashlib.sha256(data).hexdigest()
+                else:
+                    content = sha256_file(path)
+                digest.update(f"F {rel} {x} {size} {content}\n".encode())
                 total += size
                 files += 1
         # a symlinked directory was recorded as a link; do not walk into it
@@ -270,6 +310,134 @@ def extract(item, prefix, archive, log):
     return target
 
 
+# ----------------------------------------------------- conda toolchains
+
+def package_item(url, sha256):
+    """A conda package as a download: named by its file, which is unique."""
+    name = urllib.parse.unquote(url.rsplit("/", 1)[1])
+    return {"name": name.removesuffix(".conda"), "version": "conda", "url": url, "sha256": sha256}
+
+
+def pinned_archives(lock):
+    """Every archive the lock pins, as download items: {name: item}."""
+    items = list(lock["downloads"]) + list(lock.get("wheels", []))
+    for entry in lock.get("conda_toolchains", []):
+        items += [package_item(p["url"], p["sha256"]) for p in entry["packages"]]
+    return {item["name"]: item for item in items}
+
+
+def prefix_python(prefix):
+    return prefix_mod.toolchain_dir(prefix, "python") / "bin" / "python3"
+
+
+def conda_unpack(args):
+    """Unpack .conda packages into one directory; run by the prefix's python.
+
+    Prints {relative path: placeholder} for the text files that carry the
+    build prefix. Unpacks what conda links into an environment, the files
+    info/paths.json lists (a payload's own info/ files stay out, as conda
+    keeps them in its package cache), and refuses a package with any other
+    file or missing one, a file whose bytes are not the ones it records,
+    a file two packages both ship, and a binary-mode placeholder (conda pads
+    those with NULs inside compiled code; none of the pinned packages has one,
+    and this module does not pretend to do it).
+    """
+    import io
+    import tarfile
+    import zipfile
+    sys.path.insert(0, args.wheel_dir)
+    import zstandard
+    into = Path(args.into)
+    owner, relocate = {}, {}
+
+    def member(zf, prefix):
+        found = [n for n in zf.namelist() if n.startswith(prefix) and n.endswith(".tar.zst")]
+        if len(found) != 1:
+            raise SystemExit(f"inputs: {zf.filename} has {len(found)} {prefix}*.tar.zst members")
+        return found[0]
+
+    for archive in args.archives:
+        label = Path(archive).name
+        with zipfile.ZipFile(archive) as zf:
+            with zf.open(member(zf, "info-")) as raw:
+                info = zstandard.ZstdDecompressor().stream_reader(raw).read()
+            with tarfile.open(fileobj=io.BytesIO(info)) as tar:
+                paths = json.load(tar.extractfile("info/paths.json"))["paths"]
+            record = {p["_path"]: p for p in paths}
+            shipped = set()
+            with zf.open(member(zf, "pkg-")) as raw, \
+                    zstandard.ZstdDecompressor().stream_reader(raw) as stream, \
+                    tarfile.open(fileobj=stream, mode="r|") as tar:
+                for entry in tar:
+                    if entry.name not in record and entry.name.startswith("info/"):
+                        # package metadata that conda keeps in its package
+                        # cache and never links into an environment
+                        continue
+                    if not entry.isdir():
+                        if entry.name in owner:
+                            raise SystemExit(f"inputs: {label} and {owner[entry.name]} both ship "
+                                             f"{entry.name}")
+                        owner[entry.name] = label
+                        shipped.add(entry.name)
+                    tar.extract(entry, into, filter="tar")
+        if shipped != set(record):
+            raise SystemExit(f"inputs: {label} unpacked {sorted(shipped ^ set(record))[:5]} "
+                             f"differently from its info/paths.json")
+        for rel, p in record.items():
+            path = into / rel
+            if p.get("path_type") == "hardlink" and not path.is_symlink() \
+                    and sha256_file(path) != p.get("sha256"):
+                raise SystemExit(f"inputs: {label}: {rel} is not the file its paths.json records")
+            if "prefix_placeholder" in p:
+                if p.get("file_mode") != "text":
+                    raise SystemExit(f"inputs: {label}: {rel} has a {p.get('file_mode')} "
+                                     f"placeholder, which this unpacker does not relocate")
+                relocate[rel] = p["prefix_placeholder"]
+    print(json.dumps(relocate, sort_keys=True))
+    return 0
+
+
+def extract_conda(entry, prefix, log):
+    """Unpack every package of one conda toolchain and relocate it.
+
+    Returns {relative path: placeholder} for MANIFEST, which verify needs to
+    take the tree digest independently of the location.
+    """
+    lock = prefix_mod.load_lock()
+    target = prefix / "toolchain" / entry["dir"]
+    tmp = target.with_name(target.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    wheel = next(item for item in lock["wheels"] if item["name"] == "zstandard")
+    wheel_dir = prefix / "tmp" / "inputs-wheels" / f"zstandard-{wheel['version']}"
+    shutil.rmtree(wheel_dir, ignore_errors=True)
+    wheel_dir.mkdir(parents=True)
+    import zipfile
+    with zipfile.ZipFile(prefix / "inputs" / "downloads" / archive_name(wheel)) as zf:
+        zf.extractall(wheel_dir)
+    archives = [str(prefix / "inputs" / "downloads" / archive_name(package_item(**p)))
+                for p in entry["packages"]]
+    t0 = time.monotonic()
+    done = subprocess.run([str(prefix_python(prefix)), "-B", str(Path(__file__).resolve()),
+                           "conda-unpack", "--wheel-dir", str(wheel_dir), "--into", str(tmp)]
+                          + archives, capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+    shutil.rmtree(wheel_dir, ignore_errors=True)
+    if done.returncode != 0:
+        raise SystemExit(f"inputs: unpacking {entry['name']} failed:\n{done.stdout}{done.stderr}")
+    relocated = json.loads(done.stdout)
+    # conda's text relocation: the placeholder becomes the install location,
+    # which is `target` (the directory is renamed there below)
+    for rel, placeholder in relocated.items():
+        path = tmp / rel
+        path.write_bytes(path.read_bytes().replace(placeholder.encode(), str(target).encode()))
+    shutil.rmtree(target, ignore_errors=True)
+    tmp.rename(target)
+    log(f"{entry['name']}: {len(archives)} conda packages unpacked into toolchain/{entry['dir']}, "
+        f"{len(relocated)} file(s) relocated, in {time.monotonic() - t0:.1f}s")
+    return relocated
+
+
 # -------------------------------------------------------------- commands
 
 def build(args):
@@ -288,14 +456,36 @@ def build(args):
             install_shims(target)
             extra["launcher_sha256"] = archive_launchers(archive)
         tree, size, files = tree_digest(target)
-        items.append({"name": item["name"], "version": item["version"], "kind": "download",
-                      "path": archive.relative_to(prefix).as_posix(),
-                      "bytes": archive.stat().st_size, "sha256": item["sha256"],
-                      "source": item["url"], "download_seconds": round(seconds, 1)})
+        items.append(download_row(item, archive, seconds, prefix))
         items.append({"name": item["name"], "version": item["version"], "kind": "toolchain",
                       "path": target.relative_to(prefix).as_posix(), "bytes": size,
                       "files": files, "tree_sha256": tree,
                       "source": f"extracted from {archive.name}", **extra})
+    # The compiler's rows go under their own key, conda_items: verifiers from
+    # before it entered the pack read only `items`, index every download row
+    # there by the lock they carry, and hash every toolchain without
+    # relocation, so a row of these in `items` would turn them red. The local
+    # and cluster prefixes are verified by several branches' tools at once.
+    lock = prefix_mod.load_lock()
+    conda_items = []
+    for item in lock.get("wheels", []):
+        archive, seconds = fetch(item, prefix, log)
+        conda_items.append(download_row(item, archive, seconds, prefix))
+    for entry in lock.get("conda_toolchains", []):
+        packages = [package_item(**p) for p in entry["packages"]]
+        for item in packages:
+            archive, seconds = fetch(item, prefix, log)
+            conda_items.append(download_row(item, archive, seconds, prefix))
+        # always unpacked afresh: the relocated files are only known from the
+        # packages, and unpacking takes seconds
+        relocated = extract_conda(entry, prefix, log)
+        target = prefix / "toolchain" / entry["dir"]
+        tree, size, files = tree_digest(target, relocated)
+        conda_items.append({"name": entry["name"], "version": entry["version"], "kind": "toolchain",
+                      "path": target.relative_to(prefix).as_posix(), "bytes": size,
+                      "files": files, "tree_sha256": tree,
+                      "source": f"{len(packages)} conda packages",
+                      "packages": [item["name"] for item in packages], "relocated": relocated})
 
     tag = (repo / "scripts/seed-release.txt").read_text().strip()
     seed_cache = Path(args.seed_cache) if args.seed_cache else git_common_dir(repo).parent / ".dawn/seeds"
@@ -333,15 +523,28 @@ def build(args):
                   "path": "inputs/coursier", "bytes": size, "files": files, "tree_sha256": tree,
                   "source": "./bin/dawn --version with COURSIER_CACHE in the prefix"})
 
+    manifest_path = prefix / "inputs" / "MANIFEST.json"
+    previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"items": []}
     for entry in prefix_mod.load_lock().get("npm_caches", []):
-        items.append(build_npm_cache(prefix, repo, entry, log))
+        items.append(reuse_npm_cache(prefix, entry, previous, log)
+                     or build_npm_cache(prefix, repo, entry, log))
 
-    manifest = {"schema": 1, "items": items}
-    (prefix / "inputs" / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest = {"schema": 1, "items": items, "conda_items": conda_items}
+    # written whole and renamed: other runs may be reading it
+    tmp_manifest = manifest_path.with_name(manifest_path.name + ".tmp")
+    tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp_manifest.rename(manifest_path)
     shutil.copy2(prefix_mod.LOCK_FILE, prefix / "inputs" / "inputs.lock.json")
-    for row in items:
+    for row in items + conda_items:
         print(f"  {row['kind']:10} {row['name']:9} {row['version']:20} {mib(row['bytes']):>11}  {row['path']}")
     return verify(argparse.Namespace(prefix=str(prefix), repo=str(repo)))
+
+
+def download_row(item, archive, seconds, prefix):
+    return {"name": item["name"], "version": item["version"], "kind": "download",
+            "path": archive.relative_to(prefix).as_posix(),
+            "bytes": archive.stat().st_size, "sha256": item["sha256"],
+            "source": item["url"], "download_seconds": round(seconds, 1)}
 
 
 def prime_coursier(prefix, repo, tag, coursier, log):
@@ -371,6 +574,24 @@ def prime_coursier(prefix, repo, tag, coursier, log):
     log(f"coursier: primed by ./bin/dawn --version ({done.stdout.strip()}) in "
         f"{time.monotonic() - t0:.0f}s")
     shutil.rmtree(work, ignore_errors=True)
+
+
+def reuse_npm_cache(prefix, entry, previous, log):
+    """The previous build's npm cache row, when that cache is still intact.
+
+    A refill is never the same bytes (npm's index carries times), so
+    rebuilding it would change the cache, and the digest in MANIFEST, under
+    anyone using the prefix at that moment; `build` for some other input
+    (the compiler) must not do that.
+    """
+    cache = prefix / entry["dir"]
+    for row in previous.get("items", []):
+        if row["kind"] == "npm-cache" and row["name"] == entry["name"] \
+                and row.get("lockfile_sha256") == entry["lockfile_sha256"] \
+                and cache.is_dir() and tree_digest(cache)[0] == row["tree_sha256"]:
+            log(f"{entry['name']}: {entry['dir']} is the cache the last build filled; kept")
+            return row
+    return None
 
 
 def build_npm_cache(prefix, repo, entry, log):
@@ -443,6 +664,22 @@ def install(args):
             log(f"{item['name']}: toolchain/{item['dir']} already matches")
             continue
         extract(item, prefix, archive, log)
+    lock = prefix_mod.load_lock()
+    for item in lock.get("wheels", []):
+        if sha256_file(prefix / "inputs" / "downloads" / archive_name(item)) != item["sha256"]:
+            raise SystemExit(f"inputs: {archive_name(item)} does not match the lock")
+    rows = {row["name"]: row for row in manifest.get("conda_items", [])
+            if row["kind"] == "toolchain"}
+    for entry in lock.get("conda_toolchains", []):
+        for item in (package_item(**p) for p in entry["packages"]):
+            if sha256_file(prefix / "inputs" / "downloads" / archive_name(item)) != item["sha256"]:
+                raise SystemExit(f"inputs: {archive_name(item)} does not match the lock")
+        target = prefix / "toolchain" / entry["dir"]
+        row = rows.get(entry["name"], {})
+        if target.exists() and tree_digest(target, row.get("relocated"))[0] == row.get("tree_sha256"):
+            log(f"{entry['name']}: toolchain/{entry['dir']} already matches")
+            continue
+        extract_conda(entry, prefix, log)
     return verify(argparse.Namespace(prefix=str(prefix), repo=None))
 
 
@@ -453,11 +690,11 @@ def verify(args):
         print(f"inputs verify: no {manifest_path}")
         return 1
     manifest = json.loads(manifest_path.read_text())
-    lock = {item["name"]: item for item in prefix_mod.load_lock()["downloads"]}
+    lock = pinned_archives(prefix_mod.load_lock())
     npm_lock = {item["name"]: item for item in prefix_mod.load_lock().get("npm_caches", [])}
     bad = 0
     t0 = time.monotonic()
-    for row in manifest["items"]:
+    for row in manifest["items"] + manifest.get("conda_items", []):
         path = prefix / row["path"]
         problems = []
         if not path.exists():
@@ -477,7 +714,7 @@ def verify(args):
                 if got != want:
                     problems.append("not the digest scripts/seed-checksums.txt records")
         else:
-            got = tree_digest(path)[0]
+            got = tree_digest(path, row.get("relocated"))[0]
             if got != row["tree_sha256"]:
                 problems.append(f"tree digest {got} differs from MANIFEST")
             if row["kind"] == "toolchain" and row["name"] == "graalvm":
@@ -501,7 +738,13 @@ def verify(args):
         print(f"{status} {row['kind']:10} {row['name']:9} {row['version']:20} "
               f"{mib(row['bytes']):>11}  {row['path']}{'  ' + '; '.join(problems) if problems else ''}")
         bad += bool(problems)
-    missing = set(lock) - {r["name"] for r in manifest["items"] if r["kind"] == "download"}
+    missing = set(lock) - {r["name"] for r in manifest["items"] + manifest.get("conda_items", [])
+                           if r["kind"] == "download"}
+    conda_lock = {entry["name"] for entry in prefix_mod.load_lock().get("conda_toolchains", [])}
+    for name in sorted(conda_lock - {r["name"] for r in manifest.get("conda_items", [])
+                                     if r["kind"] == "toolchain"}):
+        print(f"FAIL toolchain  {name} in inputs.lock.json but not in MANIFEST")
+        bad += 1
     for name in sorted(missing):
         print(f"FAIL download   {name:9} in inputs.lock.json but not in MANIFEST")
         bad += 1
@@ -528,8 +771,14 @@ def main():
     p = sub.add_parser("verify")
     p.add_argument("--prefix", required=True)
     p.add_argument("--repo")
+    # internal: what extract_conda runs under the prefix's python
+    p = sub.add_parser("conda-unpack")
+    p.add_argument("--wheel-dir", required=True)
+    p.add_argument("--into", required=True)
+    p.add_argument("archives", nargs="+")
     args = parser.parse_args()
-    return {"build": build, "install": install, "verify": verify}[args.cmd](args)
+    return {"build": build, "install": install, "verify": verify,
+            "conda-unpack": conda_unpack}[args.cmd](args)
 
 
 if __name__ == "__main__":
