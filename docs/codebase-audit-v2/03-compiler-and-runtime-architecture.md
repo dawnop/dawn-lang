@@ -289,7 +289,7 @@
 
 ## ARC-10 — P2 — 512 MB 栈被当作通用递归策略
 
-<!-- audit-anchor: present bin/dawn | -Xss512m -->
+<!-- audit-anchor: present bin/dawn | DAWN_JVM_OPTS:--Xss512m -->
 
 > **后续处置（2026-08-09）：open/HOLD。** `ceval-trampoline-verdict` 已否决“只 trampoline
 > comptime 就摘掉大栈”的旧方案；用户程序深递归、parser/checker 对抗输入、JVM/native entry

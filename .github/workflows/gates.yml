@@ -550,7 +550,10 @@ jobs:
     # The PyYAML step is an import when the module is there and a pinned
     # wheel install (1.9s locally into a scratch prefix) when it is not;
     # 3s for it gives 431s, still 22 minutes.
-    # budget: 3x 431s worst observed plus the steps lock and PyYAML (run 35890458801, 427s)
+    # 2026-09-24, later: scripts/anchor-guard.py and its self-test measured
+    # 0.19s and 0.05s locally, which double and round up to 1s: 432s, 22
+    # minutes.
+    # budget: 3x 432s worst observed plus the steps lock, PyYAML and the anchor guard (run 35890458801, 427s)
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
@@ -566,10 +569,17 @@ jobs:
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
 
+      # anchor-guard.py: an audit anchor may not change kind or literal
+      # without an `Anchor-Change(<ID>):` line since the last release, and a
+      # script that reads source text by spelling may not arrive unregistered
+      # in scripts/anchor-readers.txt (ruling 9(a)). Needs the tag, which the
+      # fetch-depth above already brings.
       - name: mutation anchors match before compiler builds
         run: |
           python3 scripts/mutation-anchor-preflight.py
           python3 scripts/mutation-anchor-preflight-test.py
+          python3 scripts/anchor-guard.py
+          python3 scripts/anchor-guard.py --selftest
 
       # The 3x rule below was prose until 2026-08-10, and prose drifted: two
       # jobs sat three seconds under their own bound for a day. It reads the

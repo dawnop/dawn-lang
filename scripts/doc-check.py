@@ -3183,6 +3183,14 @@ def check_audit_indexes() -> tuple[list[str], int]:
 # rule is what keeps an anchor from drifting into an unrelated file that
 # happens to be stable.
 #
+# A `present` literal must match exactly once (ruling 9(a), 2026-09-24). At
+# least once was the rule until then, and `-Xss512m` matched twice in bin/dawn:
+# a comment and the default. Deleting the default would have left the comment
+# answering for it. `absent` cannot be held to a count -- an open finding's
+# absent literal matches zero times by definition -- so the other half of the
+# risk is scripts/anchor-guard.py's: an anchor, once written, does not change
+# kind or literal without an `Anchor-Change(<ID>):` line in a commit message.
+#
 # What this does not promise: an anchor can be vacuous. `absent` fails silent
 # if the fix arrives under a different name, and the check cannot know that.
 # Under-claiming is the tolerable direction -- a false red gets a gate
@@ -3266,7 +3274,15 @@ def audit_anchor_problems(detail_texts: dict[str, str],
                        f"[anchor_path_resolves]")
             continue
         resolved += 1
-        found = literal in text
+        hits = text.count(literal)
+        if kind == "present" and hits > 1:
+            bad.append(f"{audit_id}: present audit-anchor `{literal}` matches "
+                       f"{hits} times in {rel}. A literal that matches twice "
+                       f"stays found when the code the finding describes is "
+                       f"fixed in one place and not the other; quote more of it "
+                       f"until it matches once [anchor_present_once]")
+            continue
+        found = hits > 0
         holds = found if kind == "present" else not found
         if status in ("open", "partial") and not holds:
             was = "is gone from" if kind == "present" else "has arrived in"
@@ -3345,6 +3361,7 @@ AUDIT_ANCHOR_MUTANTS = (
     ("an-anchor-on-a-literal-too-short-to-mean-anything",
      "anchor_literal_nonvacuous"),
     ("a-second-anchor-on-one-finding", "anchor_one"),
+    ("a-present-literal-that-matches-twice", "anchor_present_once"),
     ("prose-that-quotes-a-literal", None),
 )
 
@@ -3396,6 +3413,11 @@ def audit_anchor_mutant(name: str, details: dict[str, str],
         details[rel] += probe.rstrip("\n") + \
             "\n<!-- audit-anchor: present std/cursor.dawn | Cursor -->\n"
         states["open"].add("SEM-99")
+    elif name == "a-present-literal-that-matches-twice":
+        details[rel] += "\n## SEM-99 — P2 — self-test probe\n\n" \
+                        "<!-- audit-anchor: present std/cursor.dawn | dawn_selftest_probe -->\n"
+        states["open"].add("SEM-99")
+        sources["std/cursor.dawn"] += "\nfn dawn_selftest_probe() = 1\n" * 2
     elif name == "prose-that-quotes-a-literal":
         details[rel] += probe
         states["open"].add("SEM-99")
