@@ -41,6 +41,9 @@ def main():
         (fixture / "src").mkdir(parents=True)
         shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
         shutil.copyfile(HERE / "generic-trace.dawn.txt", fixture / "src/reference.dawn")
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
         status, output = run("build", "--cp", oracle, fixture, "-o", root / "subject.jar")
         if status:
             raise RuntimeError("Generic trace failed to compile\n" + output)

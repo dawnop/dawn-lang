@@ -240,6 +240,9 @@ def main():
         fixture = Path(temp) / "bench"
         (fixture / "src").mkdir(parents=True)
         shutil.copyfile(SUBJECT, fixture / "src/reference.dawn")
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
         shutil.copyfile(WORKLOADS, fixture / "src/workloads.dawn")
         (fixture / "dawn.toml").write_text(
             'schema = 1\nname = "bench_replay"\n\n[deps]\n'

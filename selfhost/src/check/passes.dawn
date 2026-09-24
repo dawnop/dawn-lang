@@ -2791,8 +2791,13 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
   (cx1, decl_tys)
 }
 
-## Pass 4: the entry point check (main's shape and visibility).
+## Pass 4: the entry point check (main's shape and visibility), on the entry
+## module only. Elsewhere `main` is an ordinary name and a `fn main() -> Int`
+## is an ordinary helper (spec §10.5, SPC-04): the language reserves no other
+## identifier, and the entry is a property of the program, which the loader
+## settles, not of the spelling.
 pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
+  if not cx.is_entry_module { return cx }
   var cx1 = cx
   var i = 0
   for d in module_fns(m) {
@@ -2860,12 +2865,15 @@ test "main shape violations are reported" {
     nlo: 3,
     nhi: 7
   })] }
-  var cx = seed_prelude(test_cx())
+  var cx = Cx { ..seed_prelude(test_cx()), is_entry_module: true }
   let (cx1, sigs) = pass_fn_signatures(cx, m)
   let cx2 = pass_main_check(cx1, m, sigs)
   assert len(cx2.diags) == 2
   assert cx2.diags[0].msg == "main must have the signature fn main() -> Unit !io"
   assert cx2.diags[1].msg == "main must be pub"
+  # and outside the entry module the same declaration is an ordinary function
+  let lib = pass_main_check(Cx { ..cx1, is_entry_module: false }, m, sigs)
+  assert len(lib.diags) == len(cx1.diags)
 }
 
 # ---- SEM-07: the public surface validator (docs/public-surface-design.md) ----

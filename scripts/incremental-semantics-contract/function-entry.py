@@ -65,6 +65,9 @@ def main():
             'use compiler/check/cx as compiler_cx\nuse compiler/check/tast.{TFun}\n'
             'use compiler/front/ast.{FnDecl}\n' + subject + "\n"
             + (HERE / "function-entry-cases.dawn.txt").read_text())
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
         status, output = run("build", "--cp", oracle, fixture, "-o", root / "subject.jar")
         if status:
             raise RuntimeError("Function entry fixture failed to compile\n" + output)

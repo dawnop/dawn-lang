@@ -62,6 +62,9 @@ def main():
         (fixture / 'src').mkdir(parents=True)
         shutil.copy(here / 'dawn.toml', fixture / 'dawn.toml')
         (fixture / 'src/source_parse_counts.dawn').write_text((here / 'source-parse-counts.dawn.txt').read_text())
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use source_parse_counts\n\npub fn main() -> Unit !io = source_parse_counts.main()\n")
         jar = root / 'subject.jar'
         for name, text, sample, actual in [('positive', source, None, None)] + variants:
             before = time.monotonic()

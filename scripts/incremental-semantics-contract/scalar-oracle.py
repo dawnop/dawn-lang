@@ -81,6 +81,9 @@ def main():
         (fixture / 'src').mkdir(parents=True)
         shutil.copyfile(HERE / 'dawn.toml', fixture / 'dawn.toml')
         shutil.copyfile(HERE / 'scalar-oracle.dawn.txt', fixture / 'src/reference.dawn')
+        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
+        # `main` is an ordinary function now, so a two-line entry forwards to it
+        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
         for name, source in [('positive', original)] + [
                 (name, edit(original, old, new)) for name, old, new in variants]:
             (root / 'selfhost/src/check/scalar_replay.dawn').write_text(source)
