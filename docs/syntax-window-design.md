@@ -167,9 +167,16 @@ error: `$` followed by a name is not an interpolation: `$a`
   `PRecord(name, fields, has_rest, …)` / `PQualRecord(qual, name, …)`：花括号是记录模式，圆括号（或裸名）是构造器模式。
   裸名 `C` 与 `C()` 不再区分：「构造器有字段、模式一个子模式也没给也没写 `..`」统一报
   `constructor \`C\` has N field(s); a bare name does not match it`（hint 照旧：写 `C(..)`）。
-- checker 的 `CtorUse` 三值删除：拼写由节点种类决定。`check_ctor_call` 的三个入口（裸名头、`ERecord`、
-  `EApply` 于构造器头）在入口处各自判「记录 vs 构造器」的拼写错并返回，共享尾部只收「是不是裸名引用」
-  一个语义量（裸名是值或函数值，不是一次构造）。
+- checker 的 `CtorUse` 三值**保留名字，改了来源**：它今天是「正在检查的是哪一种构造器构造」——裸名 `ECtor`、
+  `ERecord` 字面量、`EApply` 于裸名头——由调用方按节点种类给出，不再从 AST 的拼写位读出。它必须存在，
+  因为有两条规则本来就关于「写的是哪种构造」而不是关于实参：记录用花括号、构造器用圆括号（本节），
+  以及裸名是值不是一次构造。删掉它只能把同一个三分拆进三个入口函数、各自复制「解析名字、常量回退、
+  未定义构造器提示」那一段（带增量引擎的 read 记账），那是复制不是简化。任务单写「删 CtorUse 三值」，
+  这里偏离，理由如上；AST 上记拼写的 `has_parens` 已全部删除，这是裁决真正要的那一半。
+- 模式侧同理：`check_ctor_pattern_at` 收一个 `braces: Bool`，由 `PRecord`/`PQualRecord` 与 `PCtor`/`PQual`
+  两类节点给出。
+- `..base` 的「functional update only works on records」一条随之不可达（花括号用在构造器上先被新诊断拒绝，
+  圆括号里没有 `..`），删除。
 
 保留的字段（有语义，不是拼写记号）：
 - `Arg.trailing`：尾块/`with` 挂上的实参填**最后一个声明的形参**，不参加「位置实参不能跟在具名之后」规则，

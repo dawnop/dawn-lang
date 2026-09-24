@@ -38,11 +38,11 @@ use front/ast.{
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   UnOp, OpNeg, OpNot, OpBnot,
   Arg, pos_arg, trail_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
-  EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
   ListElem, LeExpr, LeSpread, LeIf, ListIfArm,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm, HandlerCell,
-  PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PQual, PTuple, PList,
+  PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
   DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
@@ -2193,8 +2193,7 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
 fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
   if at_kind(p, st1, LBRACE) && not nb { return record_lit(p, st1, name) }
-  let none: List[Arg] = []
-  Ok((st1, ECtor(name.text, none, None, false, name.lo, name.hi, name.lo, name.hi)))
+  Ok((st1, ECtor(name.text, name.lo, name.hi)))
 }
 
 ## `( arg, ... )` — the EBNF `call_args`, shared by the application postfix and
@@ -2266,7 +2265,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
   let (st5, close) = want(p, st1, RBRACE, "`}`")?
-  Ok((st5, ECtor(name.text, args, spread, true, name.lo, name.hi, name.lo, close.hi)))
+  Ok((st5, ERecord(name.text, args, spread, name.lo, name.hi, name.lo, close.hi)))
 }
 
 ## Parse the segments of a STRING token: text stays text, each interpolation is
@@ -3060,8 +3059,10 @@ fn pattern_atom(p: P, st: St) -> PR[Pattern] = {
       let st2 = adv1(p, st1)
       let (st3, pc) = ctor_pat(p, st2)?
       return match pc {
-        PCtor(name, args, rest, parens, nlo, nhi, _, hi) ->
-          Ok((st3, PQual(q.text, name, args, rest, parens, nlo, nhi, q.lo, hi)))
+        PCtor(name, args, rest, nlo, nhi, _, hi) ->
+          Ok((st3, PQual(q.text, name, args, rest, nlo, nhi, q.lo, hi)))
+        PRecord(name, fields, rest, nlo, nhi, _, hi) ->
+          Ok((st3, PQualRecord(q.text, name, fields, rest, nlo, nhi, q.lo, hi)))
         _ -> Err((st3, perr(p, st3, "expected a constructor pattern after the module alias")))
       }
     }
@@ -3167,7 +3168,7 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
   if at_kind(p, st1, LBRACE) { return record_pat(p, st1, name) }
   if not at_kind(p, st1, LPAREN) {
     let none: List[PatArg] = []
-    return Ok((st1, PCtor(name.text, none, false, false, name.lo, name.hi, name.lo, name.hi)))
+    return Ok((st1, PCtor(name.text, none, false, name.lo, name.hi, name.lo, name.hi)))
   }
   var st2 = skip_nl(p, adv1(p, st1))
   var args: List[PatArg] = []
@@ -3198,7 +3199,7 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
     if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
   }
   let (st8, close) = want(p, st2, RPAREN, "`)`")?
-  Ok((st8, PCtor(name.text, args, rest, true, name.lo, name.hi, name.lo, close.hi)))
+  Ok((st8, PCtor(name.text, args, rest, name.lo, name.hi, name.lo, close.hi)))
 }
 
 ## Point { x, y: 0, .. } — field shorthand `x` binds the field to `x`
@@ -3232,5 +3233,5 @@ fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
   let (st6, close) = want(p, st1, RBRACE, "`}`")?
-  Ok((st6, PCtor(name.text, args, rest, true, name.lo, name.hi, name.lo, close.hi)))
+  Ok((st6, PRecord(name.text, args, rest, name.lo, name.hi, name.lo, close.hi)))
 }
