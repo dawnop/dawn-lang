@@ -203,10 +203,15 @@ scalar value）、`Float`（double）、`Bool`、`String`、`Bytes`（不可变�
 （`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），占一个引用槽位，
 C 后端给它一个字节。
 
-只有两条例外，都不是表示上的限制：
+只有一条例外，它不是表示上的限制：
 
 - **构造子字段不能是 `Unit`**——没有载荷的分支写成裸构造子就是了，这是建模的说法。
-- **`Eq`/`Hash`/`Show` 对 `Unit` 无实现**——只有一个值，答案会是常量。
+
+`Unit` 与其他标量一样有 `Eq`/`Hash`/`Ord`/`Show` 四个 impl（§3.5），答案都是常量：
+`() == ()`、`cmp((), ()) == 0`、`hash(()) == 1`（合成哈希的种子，一个部分都没有）、
+渲染为 `()`。常量本身没有用处，用处在组合上：`Result[Unit, E]` 因此可比较、可打印、
+可作键。（2026-09-24 之前这三个 impl 是故意不给的，理由正是「答案会是常量」；
+[builtin-privileges-design.md](builtin-privileges-design.md) §2 记了为什么那笔账算错了。）
 
 **没有 null。** 所有类型的值都必然有效；可缺失用 `Option[T]` 表达。
 **没有隐式转换。** `Int` → `Float` 必须显式 `to_float(n)`。
@@ -676,8 +681,8 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
     要两个效果就写两个成员。
   - **bound 是检查，不是定义**：投影读出的永远是 impl 的实际绑定（每个主体唯一）；
     消费者在 bound 上写下的行只是上界（impl 侧 ⊑ 它），两者并存。
-- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Bool`/`String`/`Bytes`
-  的 impl（**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
+- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Bool`/`String`/`Bytes`/`Unit`
+  的 impl（`Unit` 的 `cmp` 恒为 `0`，§2.1；**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
   撤销了此前照 `Double.compare` 给的那份）。
   - **`Ord[Bool]`**：`false < true`，即两个构造器按声明序（与 `derive Ord` 对和类型的规则同一条；
     Rust、Haskell、OCaml 同此序）。
@@ -701,8 +706,8 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
   `trait Hash[T] { fn hash(x: T) -> Int }`。`Eq` 的标量 impl 是
-  `Int`/`Float`/`Bool`/`String`/`Bytes`；`Hash` 的**没有 `Float`**（拒绝理由见 §4.3
-  数值边缘语义，同 `Ord[Float]`），故是四个。
+  `Int`/`Float`/`Bool`/`String`/`Bytes`/`Unit`；`Hash` 的**没有 `Float`**（拒绝理由见 §4.3
+  数值边缘语义，同 `Ord[Float]`），故是五个。
   **没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
   隐式实现 Eq；写 impl 是为了**覆盖**它。
   - 覆盖后 `==` 即该 impl，容器与嵌套比较一并跟随。
@@ -716,7 +721,8 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
     逐部分 `h = 31*h + hash(part)`，32 位环绕算术；元组按元素序，构造器按字段序，
     **有一个以上构造器时构造器序号作为第一个部分先折进去**（一个构造器时没有可分辨的
     标签，与 `==`/`cmp` 同一条规则）。
-  - 四个标量叶子的算法同样定义在此（全部 32 位环绕算术，结果为 32 位数）：
+  - 五个标量叶子的算法同样定义在此（全部 32 位环绕算术，结果为 32 位数）：
+    - `Unit`：`1`，即上面复合规则的种子（一个部分都没有）。
     - `Int`：`v ^ (v >>> 32)`，取低 32 位。
     - `Bool`：`true` 得 `1231`，`false` 得 `1237`。
     - `String`：种子 `0`，逐 **UTF-16 码元** `h = 31*h + unit`。哈希的货币是
@@ -946,7 +952,7 @@ let area = {
 - `==`/`!=` 默认是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）；
   类型可用 `impl Eq` 覆盖这个默认（§3.5）。
 - 排序比较 `<`/`<=`/`>`/`>=` 有**两套机制**，不是一套：
-  - 在有 `Ord` 的标量（`Int`/`Bool`/`String`/`Bytes`，§3.5）与 `Float` 上它们是
+  - 在有 `Ord` 的标量（`Int`/`Bool`/`String`/`Bytes`/`Unit`，§3.5）与 `Float` 上它们是
     **不解见证的原生运算**——不查 impl、不建字典。这两组是同一张表（`Ord` 的标量表）
     加上唯一的例外 `Float`：`Float` 有原生 `<` 而无全序。
     `Float` 上是 IEEE 语义（NaN 参与的比较一律 false，见上文数值边缘语义）。

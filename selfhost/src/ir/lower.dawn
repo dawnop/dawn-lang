@@ -597,7 +597,8 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   } else if t == TyString {
     (st, e)
   } else if t == TyUnit {
-    (st, CStr("()"))
+    # evaluated before it is discarded, as every other relation's operand is
+    (st, unit_relation([e], CStr("()"), TyString))
   } else {
     match t {
       TyOpaque(_, _, _, _, tgt) ->
@@ -1986,7 +1987,19 @@ fn eq_subject(st: LSt, t: Ty) -> Ty =
     _ -> t
   }
 
+## A prelude relation at `Unit`, which is a constant: the operands are still
+## evaluated, in order and for their effects, and then discarded
+## (docs/builtin-privileges-design.md 2). Folded here rather than handed to the
+## backends, so no backend ever sees a Unit operand of `==`, `cmp`, `hash` or
+## `show`, and none needs a primitive that returns a constant.
+fn unit_relation(operands: List[CExpr], answer: CExpr, ty: Ty) -> CExpr = {
+  var discards: List[CStmt] = []
+  for e in operands { discards = discards ++ [CSDiscard(e)] }
+  CBlock(discards, Some(answer), ty)
+}
+
 fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  if t == TyUnit { return (st, unit_relation([a, b], CBool(true), TyBool)) }
   # the scalars a backend compares natively. From here on `CBinary(CEq, ..)`
   # means this and nothing else.
   if is_eq_scalar(t) { return (st, CBinary(CEq, a, b, TyBool)) }
@@ -2233,6 +2246,7 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
 ## every type -- the checker refuses `Ord` where no impl and no derive supply
 ## it -- so reaching the end here is a compiler bug rather than a gap.
 fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  if t == TyUnit { return (st, unit_relation([a, b], CInt(0), TyInt)) }
   if is_ord_scalar(t) { return (st, CIntrinsic("cmp", [a, b], TyInt)) }
   if has_impl_at(st.impls, ORD_ID, t) {
     let imp = impl_for(st, ORD_ID, t)
@@ -2418,6 +2432,9 @@ fn narrow32(e: CExpr) -> CExpr =
 fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   # the scalars a backend hashes itself. Float is deliberately not among them
   # (types.hash_scalars): no hash can agree with an equality where -0.0 == 0.0.
+  # Unit's is the structural seed (spec 3.5): a value with no parts folds
+  # nothing into it.
+  if t == TyUnit { return (st, unit_relation([x], CInt(1), TyInt)) }
   if is_hash_scalar(t) { return (st, CIntrinsic("hash", [x], TyInt)) }
   if has_impl_at(st.impls, HASH_ID, t) {
     let imp = impl_for(st, HASH_ID, t)
@@ -2584,6 +2601,8 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   # unerased, one arm per backend. Erased, it was unimplementable on native,
   # where a `void*` and a kind tag are all there is to identify a value by.
   if t == TyBytes { return (st, CIntrinsic("str_of_bytes", [x], TyString)) }
+  # the sixth, and the one no backend renders: the spelling of its one value
+  if t == TyUnit { return (st, unit_relation([x], CStr("()"), TyString)) }
   if has_impl_at(st.impls, SHOW_ID, t) {
     let imp = impl_for(st, SHOW_ID, t)
     if provides(imp, "show") {
@@ -2796,6 +2815,12 @@ fn is_eq_op(op: TBinOp) -> Bool =
   match op {
     BEq -> true
     BNeq -> true
+    _ -> false
+  }
+
+fn is_relation_op(op: TBinOp) -> Bool =
+  match op {
+    BEq | BNeq | BLt | BLe | BGt | BGe -> true
     _ -> false
   }
 
@@ -3381,7 +3406,24 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           # `eq_subject`, not the operand type: an opaque over a scalar has
           # no equality of its own (`eq_at` peels to the target), so it keeps
           # the scalar's node here too rather than becoming `not (a == b)`.
-          if is_eq_op(op) && not is_eq_scalar(eq_subject(st, tex_ty(l))) {
+          #
+          # Unit is the exception to both halves: its relations are constants
+          # folded by `eq_at`/`cmp_at` (`unit_relation`), so a Unit operand
+          # never becomes a backend's `CBinary`.
+          if is_relation_op(op) && peel_opaque(tex_ty(l)) == TyUnit {
+            let (st1, lv) = lower_expr(st, l)
+            let (st2, rv) = lower_expr(st1, r)
+            if is_eq_op(op) {
+              let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))
+              match op {
+                BEq -> (st3, c)
+                _ -> (st3, negated(c))
+              }
+            } else {
+              let (st3, c) = cmp_at(st2, lv, rv, tex_ty(l))
+              (st3, CBinary(bin_op(op), c, CInt(0), TyBool))
+            }
+          } else if is_eq_op(op) && not is_eq_scalar(eq_subject(st, tex_ty(l))) {
             let (st1, lv) = lower_expr(st, l)
             let (st2, rv) = lower_expr(st1, r)
             let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))

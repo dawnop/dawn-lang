@@ -1,0 +1,44 @@
+# `Unit` in the four scalar tables (docs/builtin-privileges-design.md 2):
+# `==`, `cmp`/`<`, `hash` and the rendering, on both backends, directly and
+# through the things they exist for -- `Result[Unit, E]` compared and printed,
+# a Unit key, a tuple holding one, a generic function bounded on all four.
+#
+# Each relation is a constant, and lowering folds it rather than handing the
+# backends a Unit operand. What the fold must still do is evaluate its
+# operands, left to right, for their effects: the `noisy` lines are the check
+# that a constant answer did not swallow the calls that produced it.
+use std/io
+use std/list
+use std/map
+
+fn noisy(tag: String) -> Unit !io = print(tag)
+
+fn done(fail: Bool) -> Result[Unit, String] = if fail { Err("no") } else { Ok(()) }
+
+fn all_four[T: Eq + Hash + Ord + Show](x: T) -> String =
+  "${x == x} ${cmp(x, x)} ${hash(x) == hash(x)} ${to_string(x)}"
+
+pub fn main() -> Unit !io = {
+  println("-- relations --")
+  println("${() == ()} ${() != ()} ${() < ()} ${() <= ()} ${() > ()} ${() >= ()}")
+  println("${cmp((), ())} ${hash(())} ${to_string(())} ${()}")
+
+  println("-- operands still run, in order --")
+  let same = noisy("a") == noisy("b")
+  println(" ${same}")
+  let before = noisy("c") < noisy("d")
+  println(" ${before}")
+  println(" ${to_string(noisy("e"))}")
+
+  println("-- Result[Unit, E] --")
+  println("${done(false) == Ok(())} ${done(true) == Ok(())} ${done(true) != done(false)}")
+  println("${to_string(done(false))} ${to_string(done(true))}")
+
+  println("-- containers and generics --")
+  let m: Map[Unit, Int] = map.insert(map.empty(), (), 7)
+  println(to_string(map.get(m, ())))
+  println(to_string(((), 1) == ((), 1)))
+  println(to_string(((), "x")))
+  println(to_string(sort([((), 2), ((), 1)])))
+  println(all_four(()))
+}
