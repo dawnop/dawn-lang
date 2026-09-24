@@ -55,9 +55,9 @@ def main():
         # only place left where a consumer could mint a provider's identity
         # without touching `identity` itself.
         ("mint-imported-effect", EFFECTS, passes_path,
-         "cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, name, eid) }",
+         "cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, local, eid) }",
          "let (own_cx, own) = mint(cx1, EffectDecl, name, lo, hi)\n"
-         "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, name, own),\n"
+         "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, local, own),\n"
          "        effect_infos: map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),
         # Four consumer-side controls stood here and are gone with the
         # production code they mutated (K5). `module_references` and

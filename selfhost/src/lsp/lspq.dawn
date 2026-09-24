@@ -621,7 +621,18 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl) -> Q = {
   walk_e(qc, q, f.body, tf_body(tf))
 }
 
+## Hover and definition on one selective-import entry. A renamed entry
+## (`Name as Local`) answers on both halves: the local name is the one the rest
+## of the file writes, so it is the one a reader points at.
 fn visit_selective(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
+  let q1 = visit_selective_at(qc, q0, exp, imp)
+  match imp.local {
+    Some(r) -> visit_selective_at(qc, q1, exp, ImportName { ..imp, lo: r.lo, hi: r.hi })
+    None -> q1
+  }
+}
+
+fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   var q = q0
   match map.get(exp.fns, imp.name) {
     Some(s) -> {

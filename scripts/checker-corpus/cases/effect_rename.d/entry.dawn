@@ -1,0 +1,63 @@
+# Effects are ordinary module members (SPC-06, docs/effects-window-design.md 3):
+# two libraries may export the same effect name and one consumer can use both,
+# either qualified through module aliases or renamed with `as` in a selective
+# import. The rename is general -- a type, a constructor and a trait rename the
+# same way -- and it changes a name table only, so what a diagnostic prints
+# is the declared name.
+#
+# Accepted lines produce nothing; the golden holds the refused ones.
+use loga as la
+use logb as lb
+use loga.{Log as ALog, Level as ALevel, Loud as ALoud, Shout as Yell, shout}
+use logb.{Log as BLog, Level}
+
+# accepted: both effects in one row, qualified
+fn both_qualified() -> Unit !la.Log !lb.Log = {
+  la.log_a("a")
+  lb.log_b("b")
+}
+
+# accepted: the same row through the renamed names, answered by handlers that
+# select the effects by their local names
+fn both_renamed() -> Unit !ALog !BLog = {
+  log_a("a")
+  log_b("b")
+}
+
+fn run_both() -> Unit = {
+  with handle ALog { log_a(line) => () }
+  with handle lb.Log { log_b(line) => () }
+  both_renamed()
+  both_qualified()
+}
+
+# accepted: a renamed type, and a constructor renamed on its own. The type's
+# constructors came in under their declared names (`Quiet`); the rename of
+# `Loud` is a second name for that one constructor.
+fn level_a(x: ALevel) -> Int =
+  match x {
+    Quiet -> 0
+    ALoud -> 1
+  }
+
+fn level_b(x: Level) -> Int =
+  match x {
+    Low -> 0
+    High -> 1
+  }
+
+# accepted: a renamed trait in a bound (its method is imported by its own
+# name, as it would be without the rename)
+fn yell_twice[T: Yell](x: T) -> String = shout(x) ++ shout(x)
+
+# refused: the old names are not bound by a rename
+fn old_effect_name() -> Unit !Log = ()
+
+# refused: a rename does not change what the name is -- the diagnostic prints
+# the declared name of the type the local name stands for
+fn mismatch(x: ALevel) -> Int = x
+
+pub fn main() -> Unit !io = {
+  run_both()
+  println(to_string(level_a(Quiet) + level_b(High)))
+}

@@ -33,7 +33,7 @@ use front/ast.{
   EffArg,
   Param, LambdaParam,
   AssocDecl, EffAssocDecl, AssocBind, EffAssocBind,
-  FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
+  FieldDecl, CtorDecl, ImportName, ImportRename, StrPart, SPText, SPInterp,
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   UnOp, OpNeg, OpNot, OpBnot,
@@ -379,7 +379,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     let t = cur(p, st2)
     if t.kind == IDENT && t.text == "as" {
       let (st_al, an) = want(p, adv1(p, st2), IDENT, "an alias name after `as`")?
-      let als = ImportName { name: an.text, lo: an.lo, hi: an.hi }
+      let als = ImportName { name: an.text, lo: an.lo, hi: an.hi, local: None }
       return Ok((st_al, DUseModule(segs, None, Some(als), kw.lo, an.hi, nlo, nhi)))
     }
     return Ok((st2, DUseModule(segs, None, None, kw.lo, nhi, nlo, nhi)))
@@ -394,8 +394,27 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
       return Err((st7, perr(p, st7, "expected an imported name (a function, type, or constant)")))
     }
     let (st8, n) = adv(p, st7)
-    names = names ++ [ImportName { name: n.text, lo: n.lo, hi: n.hi }]
-    st7 = skip_nl(p, st8)
+    # `Name as Local` renames the entry (spec §10.2). `as` is contextual here
+    # as it is after a whole-module path. The local name keeps the imported
+    # name's token kind: case is meaning in this language, so a rename cannot
+    # turn a function's spelling into a constructor's or back.
+    var local: Option[ImportRename] = None
+    var st8b = st8
+    let t_as = cur(p, st8)
+    if t_as.kind == IDENT && t_as.text == "as" {
+      let st_l = adv1(p, st8)
+      let kind_word = if k == IDENT { "a lowercase name" } else { "an uppercase name" }
+      let (st_r, r) = want(p, st_l, k, kind_word ++ " after `as` (a rename keeps the case of `" ++
+          n.text ++ "`)")?
+      if r.text == n.text {
+        return Err((st_r, pd_h("`" ++ n.text ++ " as " ++ r.text ++ "` renames nothing", n.lo, r.hi,
+          "write `" ++ n.text ++ "`")))
+      }
+      local = Some(ImportRename { name: r.text, lo: r.lo, hi: r.hi })
+      st8b = st_r
+    }
+    names = names ++ [ImportName { name: n.text, lo: n.lo, hi: n.hi, local: local }]
+    st7 = skip_nl(p, st8b)
     if at_kind(p, st7, COMMA) { st7 = skip_nl(p, adv1(p, st7)) } else { break }
   }
   let (st9, close) = want(p, st7, RBRACE, "`}`")?
