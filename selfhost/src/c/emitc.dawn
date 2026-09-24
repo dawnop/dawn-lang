@@ -2650,13 +2650,21 @@ test "every scalar relation the emitter names is one the runtime defines" {
   # native toolchain), so the declaration is right here to check against. The
   # subjects are exactly the two tables in types.dawn, which is what keeps
   # this from turning into a second hand-kept list.
+  #
+  # Unit is in both tables and in neither runtime: lowering folds its
+  # relations to constants (`lower.unit_relation`), so `hash`/`cmp` never
+  # reach here at Unit, and the gap is the right answer if one ever did.
   let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
   for t in hash_scalars() {
+    if t == TyUnit { continue }
     assert str.contains(header, "${scalar_rt("dawn_hash", t, "hash")}(")
   }
   for t in ord_scalars() {
+    if t == TyUnit { continue }
     assert str.contains(header, "${scalar_rt("dawn_cmp", t, "cmp")}(")
   }
+  assert gaps("dawn_hash", TyUnit)
+  assert gaps("dawn_cmp", TyUnit)
   # and the other direction, which is the one that was broken: a type in
   # neither table must reach the gap rather than a name. Float had an arm here
   # naming symbols the runtime does not declare, and could keep it for as long

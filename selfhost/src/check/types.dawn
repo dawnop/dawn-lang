@@ -2712,8 +2712,18 @@ fn prelude_assoc_impl(
     eff_bindings: []
   }
 
-## The scalars the backends compare for equality natively.
-pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
+## The scalars whose equality ships with the language.
+##
+## `Unit` is in all four tables since 2026-09-24
+## (docs/builtin-privileges-design.md 2). Each relation is a constant there --
+## one value, so `==` is true, `cmp` is 0, the hash is the structural seed and
+## the rendering is `()` -- and it was left out on exactly that ground. What
+## that cost was not the constant: it was `Result[Unit, E]`, the most common
+## return type in std/io, which could be neither compared nor printed, with a
+## hint pointing at a module no user can write into. Lowering folds the four
+## constants itself (`lower.unit_relation`), so no backend sees a Unit operand
+## of a relation; every other scalar here a backend compares natively.
+pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit]
 
 ## The scalars that *hash*, which is not the same list, and the difference is
 ## `Float`.
@@ -2723,7 +2733,7 @@ pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
 ## Rust reaches the same place by not implementing `Hash` for `f64`. One table
 ## answered both questions until 2026-07-26, which is why `Float` could be a
 ## Map key and two equal keys could land in different buckets.
-pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes]
+pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes, TyUnit]
 
 ## Is this one of the scalars whose equality the backend implements natively?
 pub fn is_eq_scalar(t: Ty) -> Bool = {
@@ -2764,7 +2774,7 @@ pub fn is_hash_scalar(t: Ty) -> Bool = {
 ## every scalar here compares natively, and `Float` is the one named exception
 ## there -- a partial order still has a native `<`. Two lists used to answer
 ## the two questions, which is how Bool had `==` but neither `<` nor `sort`.
-pub fn ord_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes]
+pub fn ord_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes, TyUnit]
 
 ## The table above as a diagnostic spells it, so the hint that lists the
 ## orderable scalars cannot drift from the list it describes.
@@ -2778,10 +2788,9 @@ pub fn is_ord_scalar(t: Ty) -> Bool = {
   false
 }
 
-## The scalars the language renders itself. `Cursor` is absent because it is
-## an opaque handle with nothing to print, and `Unit` because `()` is not a
-## value anyone asks to see -- the two ways this list differs from `eq_scalars`.
-pub fn show_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
+## The scalars the language renders itself: the same list as `eq_scalars`.
+## `Unit` renders as `()`, the spelling of its one value.
+pub fn show_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit]
 
 pub fn is_show_scalar(t: Ty) -> Bool = {
   for s in show_scalars() {
@@ -4099,6 +4108,9 @@ test "prelude shapes" {
   assert not is_ord_scalar(TyFloat)
   assert is_eq_scalar(TyFloat)
   assert not is_hash_scalar(TyFloat)
+  # and Unit is in all four (builtin-privileges-design.md 2)
+  assert is_eq_scalar(TyUnit) && is_hash_scalar(TyUnit) && is_ord_scalar(TyUnit) &&
+    is_show_scalar(TyUnit)
 }
 
 test "builtin type inventory keeps its surface boundaries" {

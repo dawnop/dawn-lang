@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 059a3704e93f0c83 -->
+<!-- doc-check: translation-of docs/spec.md @ 5dc77bddd7edb464 -->
 
 # Dawn Language Specification
 
@@ -240,12 +240,18 @@ At runtime it has a real representation — a singleton object (`dawn/rt/Unit`, 
 representation as `None` and as constructors without fields), occupying one reference slot; the C
 backend gives it one byte.
 
-There are only two exceptions, and neither is a restriction of the representation:
+There is only one exception, and it is not a restriction of the representation:
 
 - **A constructor field cannot be `Unit`** — a branch with no payload is simply written as a bare
   constructor; this is a statement about modelling.
-- **`Eq`/`Hash`/`Show` have no implementation for `Unit`** — there is only one value, so the answer
-  would be a constant.
+
+Like the other scalars, `Unit` has the four impls `Eq`/`Hash`/`Ord`/`Show` (§3.5), and every answer
+is a constant: `() == ()`, `cmp((), ()) == 0`, `hash(()) == 1` (the seed of the synthesized hash:
+there are no parts), and it renders as `()`. The constant itself is useless; the use is in
+composition: `Result[Unit, E]` can therefore be compared, printed and used as a key. (Before
+2026-09-24 these impls were withheld on purpose, for exactly the reason "the answer would be a
+constant"; [builtin-privileges-design.md](builtin-privileges-design.md) §2 records why that
+accounting was wrong.)
 
 **There is no null.** A value of any type is necessarily valid; possible absence is expressed with
 `Option[T]`.
@@ -832,7 +838,7 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
     binding (unique per subject); a row written on a consumer's bound is only an upper bound
     (the impl's side ⊑ it), and the two coexist.
 - The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for
-  `Int`/`Bool`/`String`/`Bytes` (**`Float` has none**: under NaN there is no total order to
+  `Int`/`Bool`/`String`/`Bytes`/`Unit` (`Unit`'s `cmp` is always `0`, §2.1; **`Float` has none**: under NaN there is no total order to
   give — the reasons for refusing are in §4.3, numeric edge semantics; the one previously given
   following `Double.compare` was reverted on 2026-07-26).
   - **`Ord[Bool]`**: `false < true`, that is, the two constructors in declaration order (the same
@@ -866,8 +872,8 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   lexicographic impl written in std.
 - The built-in `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` and
   `trait Hash[T] { fn hash(x: T) -> Int }`. `Eq`'s scalar impls are
-  `Int`/`Float`/`Bool`/`String`/`Bytes`; `Hash` has **no `Float`** (the reason for refusing it
-  is under numeric edge semantics in §4.3, as for `Ord[Float]`), so it has four.
+  `Int`/`Float`/`Bool`/`String`/`Bytes`/`Unit`; `Hash` has **no `Float`** (the reason for
+  refusing it is under numeric edge semantics in §4.3, as for `Ord[Float]`), so it has five.
   **There is no `derive Eq`**: `==` is already structural
   for every type (§4.3), which amounts to every type implementing Eq implicitly; you write an
   impl in order to **override** it.
@@ -886,8 +892,9 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
     tuples in element order, constructors in field order, and **when there is more than one
     constructor the constructor's ordinal is folded in first as the first part** (with a single
     constructor there is no distinguishable tag — the same rule as `==`/`cmp`).
-  - The algorithms for the four scalar leaves are likewise defined here (all 32-bit wrapping
+  - The algorithms for the five scalar leaves are likewise defined here (all 32-bit wrapping
     arithmetic, the result a 32-bit number):
+    - `Unit`: `1`, the seed of the compound rule above (there are no parts).
     - `Int`: `v ^ (v >>> 32)`, take the low 32 bits.
     - `Bool`: `true` gives `1231`, `false` gives `1237`.
     - `String`: seed `0`, then `h = 31*h + unit` per **UTF-16 code unit**. The currency of
@@ -1170,7 +1177,7 @@ implementations are cross-checked against this, "happens to agree" is not allowe
   excepted — comparing functions is a compile error); a type can override that default with
   `impl Eq` (§3.5).
 - The ordering comparisons `<`/`<=`/`>`/`>=` have **two mechanisms**, not one:
-  - On the scalars with `Ord` (`Int`/`Bool`/`String`/`Bytes`, §3.5) and on `Float` they are
+  - On the scalars with `Ord` (`Int`/`Bool`/`String`/`Bytes`/`Unit`, §3.5) and on `Float` they are
     **native operations that resolve no witness** — no impl lookup, no dictionary built. The
     two are one table (the `Ord` scalar table) plus its single exception `Float`, which has a
     native `<` and no total order. On `Float` the semantics are IEEE (any comparison

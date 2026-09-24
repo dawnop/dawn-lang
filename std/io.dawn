@@ -785,10 +785,10 @@ pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
 # and being match-able is the whole reason they are names rather than
 # sentences, so they are the `kind`s worth pinning.
 #
-# `Unit` has no equality, so `Result[Unit, ForeignError]` cannot be compared
-# with `==` and the blocks below carry a local `ok` lambda instead of a
-# module-level helper -- a private `fn` here would be dead code in every build
-# that is not `dawn test --stdlib`, and would show up in std/io's own Core.
+# A write that succeeded is asserted as `== Ok(())`, and one that must fail as
+# `!= Ok(())`: the second never looks inside the `Err`, so it is the same
+# check on every backend. (Until `Unit` had an equality, 2026-09-24, each
+# block carried a local `ok` lambda to say this.)
 #
 # Each block makes its own temp directory and takes it away again. Nothing here
 # reads the repository: a test that depends on the tree it is run from breaks
@@ -796,10 +796,6 @@ pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
 
 test "temp_dir makes a fresh directory, and a file round trips through it" {
   with_fs_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
@@ -819,18 +815,18 @@ test "temp_dir makes a fresh directory, and a file round trips through it" {
 
     let f = d ++ "/hello.txt"
     assert not exists(f)
-    assert ok(write_file(f, "hello"))
+    assert write_file(f, "hello") == Ok(())
     assert exists(f)
     assert not is_dir(f)
     assert read_file(f) == Ok("hello")
     # overwriting is not appending
-    assert ok(write_file(f, "again"))
+    assert write_file(f, "again") == Ok(())
     assert read_file(f) == Ok("again")
-    assert ok(write_file(f, ""))
+    assert write_file(f, "") == Ok(())
     assert read_file(f) == Ok("")
     # missing parents are created on the way
     let nested = d ++ "/a/b/c.txt"
-    assert ok(write_file(nested, "deep"))
+    assert write_file(nested, "deep") == Ok(())
     assert read_file(nested) == Ok("deep")
     assert is_dir(d ++ "/a/b")
 
@@ -898,10 +894,6 @@ test "a path that is not there is an Err, and never a panic" {
 
 test "list_dir sorts by code point, and names a non-directory itself" {
   with_fs_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
@@ -909,9 +901,9 @@ test "list_dir sorts by code point, and names a non-directory itself" {
     let d = made(temp_dir("", "dawn-std-test-"))
     let nothing: List[String] = []
     assert list_dir(d) == Ok(nothing)
-    assert ok(write_file(d ++ "/zeta", "1"))
-    assert ok(write_file(d ++ "/Alpha", "1"))
-    assert ok(write_file(d ++ "/mid", "1"))
+    assert write_file(d ++ "/zeta", "1") == Ok(())
+    assert write_file(d ++ "/Alpha", "1") == Ok(())
+    assert write_file(d ++ "/mid", "1") == Ok(())
     # not the order the OS handed over, and not case-insensitive: 'A' is 65
     assert list_dir(d) == Ok(["Alpha", "mid", "zeta"])
     assert delete(d ++ "/zeta") == Ok(Deleted)
@@ -923,14 +915,14 @@ test "list_dir sorts by code point, and names a non-directory itself" {
     # astral name begins with the surrogate 0xD83D (55357). A backend sorting
     # its own way -- `Arrays.sort` is UTF-16 units -- answers these two the
     # other way round, which is why the sort is in std and not below it.
-    assert ok(write_file(d ++ "/\u{1F600}", "1"))
-    assert ok(write_file(d ++ "/\u{FFFD}", "1"))
+    assert write_file(d ++ "/\u{1F600}", "1") == Ok(())
+    assert write_file(d ++ "/\u{FFFD}", "1") == Ok(())
     assert list_dir(d) == Ok(["\u{FFFD}", "\u{1F600}"])
     assert delete(d ++ "/\u{1F600}") == Ok(Deleted)
     assert delete(d ++ "/\u{FFFD}") == Ok(Deleted)
 
     # the one kind std mints, so the one a caller may match on
-    assert ok(write_file(d ++ "/plain.txt", "1"))
+    assert write_file(d ++ "/plain.txt", "1") == Ok(())
     match list_dir(d ++ "/plain.txt") {
       Ok(_) -> { assert false }
       Err(e) -> { assert e.kind == "io.not_a_directory" }
@@ -948,25 +940,21 @@ test "list_dir sorts by code point, and names a non-directory itself" {
 
 test "mkdirs is idempotent on a directory; delete says what it removed" {
   with_fs_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
     }
     let d = made(temp_dir("", "dawn-std-test-"))
     # every missing directory above it, in one call
-    assert ok(mkdirs(d ++ "/m1/m2"))
+    assert mkdirs(d ++ "/m1/m2") == Ok(())
     assert is_dir(d ++ "/m1")
     assert is_dir(d ++ "/m1/m2")
     # an existing directory is not a failure
-    assert ok(mkdirs(d ++ "/m1/m2"))
-    assert ok(mkdirs(d))
+    assert mkdirs(d ++ "/m1/m2") == Ok(())
+    assert mkdirs(d) == Ok(())
     # an existing *file* is
-    assert ok(write_file(d ++ "/f.txt", "x"))
-    assert not ok(mkdirs(d ++ "/f.txt"))
+    assert write_file(d ++ "/f.txt", "x") == Ok(())
+    assert mkdirs(d ++ "/f.txt") != Ok(())
 
     # Missing is a normal outcome. A non-empty directory is a host refusal, not
     # another spelling of absence, and delete never empties it for the caller.
@@ -987,17 +975,13 @@ test "mkdirs is idempotent on a directory; delete says what it removed" {
 
 test "delete rejects ambiguous path spellings without changing the target" {
   with_fs_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
     }
     let d = made(temp_dir("", "dawn-std-test-"))
     let f = d ++ "/kept"
-    assert ok(write_file(f, "x"))
+    assert write_file(f, "x") == Ok(())
 
     match delete("") {
       Ok(_) -> { assert false }
@@ -1031,36 +1015,32 @@ test "delete rejects ambiguous path spellings without changing the target" {
 
 test "rename replaces the destination; bytes survive what a String need not" {
   with_fs_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
     }
     let d = made(temp_dir("", "dawn-std-test-"))
-    assert ok(write_file(d ++ "/src.txt", "moved"))
-    assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+    assert write_file(d ++ "/src.txt", "moved") == Ok(())
+    assert rename(d ++ "/src.txt", d ++ "/dst.txt") == Ok(())
     assert not exists(d ++ "/src.txt")
     assert read_file(d ++ "/dst.txt") == Ok("moved")
     # onto an existing destination: replaced, not refused
-    assert ok(write_file(d ++ "/src.txt", "second"))
-    assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+    assert write_file(d ++ "/src.txt", "second") == Ok(())
+    assert rename(d ++ "/src.txt", d ++ "/dst.txt") == Ok(())
     assert read_file(d ++ "/dst.txt") == Ok("second")
     assert not exists(d ++ "/src.txt")
-    assert not ok(rename(d ++ "/nope", d ++ "/dst.txt"))
+    assert rename(d ++ "/nope", d ++ "/dst.txt") != Ok(())
 
     # the byte pair is the point: 0x00 0xFF is not UTF-8, so this round trip is
     # one `read_file`/`write_file` could not make
     let raw = bytes_from_array(array_push(array_push(array_new(), 0x00), 0xFF))
-    assert ok(write_bytes(d ++ "/raw.bin", raw))
+    assert write_bytes(d ++ "/raw.bin", raw) == Ok(())
     assert read_bytes(d ++ "/raw.bin") == Ok(raw)
     let none_at_all = bytes_from_array(array_new())
-    assert ok(write_bytes(d ++ "/empty.bin", none_at_all))
+    assert write_bytes(d ++ "/empty.bin", none_at_all) == Ok(())
     assert read_bytes(d ++ "/empty.bin") == Ok(none_at_all)
     # and the two halves see the same file
-    assert ok(write_file(d ++ "/text.txt", "abc"))
+    assert write_file(d ++ "/text.txt", "abc") == Ok(())
     assert read_bytes(d ++ "/text.txt") == Ok(bytes_utf8("abc"))
 
     assert delete(d ++ "/dst.txt") == Ok(Deleted)
@@ -1073,10 +1053,6 @@ test "rename replaces the destination; bytes survive what a String need not" {
 
 test "run answers the exit status; a program that cannot start is an Err" {
   with_fs_real(() => with_proc_real(() => {
-    let ok = (r: Result[Unit, ForeignError]) => match r {
-      Ok(_) -> true
-      Err(_) -> false
-    }
     let made = (r: Result[String, ForeignError]) => match r {
       Ok(p) -> p
       Err(_) -> ""
@@ -1111,7 +1087,7 @@ test "run answers the exit status; a program that cannot start is an Err" {
     assert run(["sh", "-c", "printf out; printf err 1>&2"], out, err) == Ok(0)
     assert read_file(out) == Ok("out")
     assert read_file(err) == Ok("err")
-    assert ok(write_file(d ++ "/keep.txt", "x"))
+    assert write_file(d ++ "/keep.txt", "x") == Ok(())
     assert delete(d ++ "/keep.txt") == Ok(Deleted)
     assert delete(out) == Ok(Deleted)
     assert delete(err) == Ok(Deleted)
@@ -1120,10 +1096,6 @@ test "run answers the exit status; a program that cannot start is an Err" {
 }
 
 test "with_fs_real answers every operation from the host" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
   with_fs_real(() => {
     let d = match fs_temp_dir("", "dawn-std-fs-") {
       Ok(p) -> p
@@ -1135,17 +1107,17 @@ test "with_fs_real answers every operation from the host" {
     assert not fs_is_symlink(d)
     # the operations see the same file system the functions do
     assert exists(d)
-    assert ok(fs_mkdirs(d ++ "/sub"))
+    assert fs_mkdirs(d ++ "/sub") == Ok(())
     assert is_dir(d ++ "/sub")
     let f = d ++ "/sub/a.txt"
-    assert ok(fs_write_file(f, "alpha"))
+    assert fs_write_file(f, "alpha") == Ok(())
     assert fs_read_file(f) == Ok("alpha")
     assert read_file(f) == Ok("alpha")
     assert fs_read_bytes(f) == Ok(bytes_utf8("alpha"))
-    assert ok(fs_write_bytes(d ++ "/sub/b.bin", bytes_utf8("beta")))
-    assert ok(fs_rename(d ++ "/sub/b.bin", d ++ "/sub/c.bin"))
+    assert fs_write_bytes(d ++ "/sub/b.bin", bytes_utf8("beta")) == Ok(())
+    assert fs_rename(d ++ "/sub/b.bin", d ++ "/sub/c.bin") == Ok(())
     assert not fs_exists(d ++ "/sub/b.bin")
-    assert ok(fs_copy_permissions(f, d ++ "/sub/c.bin"))
+    assert fs_copy_permissions(f, d ++ "/sub/c.bin") == Ok(())
     # unsorted is the contract of the primitive; the sort is list_dir's
     match fs_list_names(d ++ "/sub") {
       Ok(names) -> { assert list.sort(names) == ["a.txt", "c.bin"] }
@@ -1178,10 +1150,6 @@ test "with_fs_real answers every operation from the host" {
 }
 
 test "a handler over a table answers Fs without a host" {
-  let ok = (r: Result[Unit, ForeignError]) => match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
   let absent = (p: String) => ForeignError {
     kind: "test.absent",
     message: "no such entry: " ++ p,
@@ -1218,8 +1186,8 @@ test "a handler over a table answers Fs without a host" {
   assert fs_temp_dir("/virt", "t-") == Ok("/virt/t-0")
   assert fs_delete("/virt/a.txt") == Ok(true)
   assert fs_delete("/virt/gone") == Ok(false)
-  assert ok(fs_write_file("/virt/n.txt", "new"))
-  assert ok(fs_write_file("/virt/m.txt", "more"))
+  assert fs_write_file("/virt/n.txt", "new") == Ok(())
+  assert fs_write_file("/virt/m.txt", "more") == Ok(())
   # the table saw the writes in order, and no host was involved
   assert writes == [("/virt/n.txt", "new"), ("/virt/m.txt", "more")]
   # and the public functions ride the same handler

@@ -2020,11 +2020,6 @@ pub fn structural_gap_read(initial: Cx, tid: Int, t: Ty, seen: Set[String]) -> (
       # the D1 growable vector: mutable, and compared by reference. Until it
       # is a Dawn type with an impl there is no content equality to give.
       TyArray(_) -> (cx, Some(t))
-      # There is one Unit and it carries no information, so equality and hash
-      # would be constants -- the same ground on which Show refuses it. A rule
-      # about the relation, not about the representation: a Unit is an
-      # ordinary reference on the JVM and an ordinary byte in C.
-      TyUnit -> (cx, Some(t))
       # reached only for Hash: `Eq[Float]` is a prelude impl, so for equality
       # the table above has already answered
       TyFloat -> (cx, Some(t))
@@ -2170,9 +2165,6 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
       } else {
         ("functions cannot be compared", "compare the values they produce, not the functions")
       }
-    TyUnit ->
-      ("`Unit` has no ${rel}",
-        "there is one Unit and it carries no information, so the answer would be a constant")
     TyFloat ->
       ("`Float` has no hash",
         "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`; " ++
@@ -6781,7 +6773,7 @@ test "diagnostic reads retain witness rendering before nominal hint queries" {
   let info = adt_of(base.adts, OPTION_ID)
   let initial = Cx { ..base, function_reads: Some([]),
     adts: map.insert(base.adts, 1000, AdtI { ..info, id: 1000, name: "Other", tparams: [] }) }
-  for t in [TyBool, TyVar("T", 100), TyAdt(1000, []), opt_ty(TyInt)] {
+  for t in [TyFloat, TyVar("T", 100), TyAdt(1000, []), opt_ty(TyInt)] {
     let (observed, witness) = resolve_witness(initial, ORD_ID, t, 0, 1, "caller")
     let (cold, cold_witness) = resolve_witness(Cx { ..initial, function_reads: None }, ORD_ID, t, 0, 1, "caller")
     var expected: List[semantic_reads.FunctionRead] = match t {
@@ -14731,13 +14723,12 @@ test "diagnostic reads retain signature hints and argument rendering order" {
 test "diagnostic reads retain structural and associated witness hints" {
   let initial = Cx { ..test_cx(), function_reads: Some([]) }
   let projection = TyAssoc(TyInt, HASH_ID, "Item")
-  for bad in [TyUnit, TyFloat, TyFn([], TyInt, EPure), TyArray(TyInt), projection, TyBool] {
+  for bad in [TyFloat, TyFn([], TyInt, EPure), TyArray(TyInt), projection, TyBool] {
     for nested in [false, true] {
       let whole = if nested { TyTuple([bad]) } else { bad }
       let observed = structural_gap_err(initial, HASH_ID, whole, bad, 0, 1)
       let cold = structural_gap_err(Cx { ..initial, function_reads: None }, HASH_ID, whole, bad, 0, 1)
       var expected: List[semantic_reads.FunctionRead] = match bad {
-        TyUnit -> []
         TyFloat -> []
         TyFn(_, _, _) -> []
         TyAssoc(_, _, _) -> [semantic_reads.RenderedType(bad, ty_show(initial.adts, bad)),
