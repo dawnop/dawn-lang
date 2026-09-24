@@ -288,7 +288,7 @@ static void *panic_out_of_bounds(dawn_clo *f) {
 }
 
 static void test_panic_message(void) {
-  static const char want[] = "Array index out of bounds";
+  static const char want[] = "array index 0 out of bounds for length 0";
   panic_subject = dawn_array_new();
   dawn_clo *c = dawn_clo_new((void *)panic_out_of_bounds, 0, 0);
   /* the empty pack: this closure raises nothing that needs evidence, and a

@@ -3256,12 +3256,26 @@ dawn_array *dawn_array_new(void) {
 
 int64_t dawn_array_len(const dawn_array *a) { return (int64_t)a->len; }
 
+/* The bounds panic, worded exactly as the JVM's `array_bounds_panic`
+ * (jvm/rtclasses.dawn) words it. A panic message is a value once
+ * `catch_panic` hands it back, and a pure one since that barrier stopped
+ * charging `io` (docs/effects-window-design.md 4), so the two backends must
+ * not disagree on it: this used to say `Array index out of bounds` with no
+ * index and no length (ARCH-N13). */
+static void dawn_array_bounds_panic(int64_t i, int64_t len) {
+  char buf[96];
+  int n = snprintf(buf, sizeof buf, "array index %lld out of bounds for length %lld",
+                   (long long)i, (long long)len);
+  /* a stack string: `dawn_raise` copies the message into the payload */
+  dawn_panic(dawn_str_lit(buf, n));
+}
+
 /* Bounds are the caller's business on the JVM too -- std/pvec and std/hamt
  * index within a length they just read. A check here is cheap next to what a
  * wild read costs, and native has no verifier to catch it. */
 void *dawn_array_get(const dawn_array *a, int64_t i) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_panic(DAWN_LIT("Array index out of bounds"));
+    dawn_array_bounds_panic(i, (int64_t)a->len);
   }
   return a->buf->data[i];
 }
@@ -3313,7 +3327,7 @@ uint64_t dawn_array_with_copied = 0;
  * version whose slots these are too. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_panic(DAWN_LIT("Array index out of bounds"));
+    dawn_array_bounds_panic(i, (int64_t)a->len);
   }
   if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
     dawn_array_with_inplace++;
@@ -3352,7 +3366,7 @@ uint64_t dawn_array_steal_dup = 0;
  * transfer is skipped, exactly as in `dawn_array_with`. */
 void *dawn_array_steal(dawn_array *a, int64_t i) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_panic(DAWN_LIT("Array index out of bounds"));
+    dawn_array_bounds_panic(i, (int64_t)a->len);
   }
   if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
     dawn_array_steal_taken++;

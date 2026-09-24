@@ -14,6 +14,7 @@ use check/types.{Adts, adt_of, adt_jvm_name, ctor_jvm_name, ctl_max_op_params}
 use ir/reach.{TableUse}
 use embed/unicode_case
 use embed/unicode_class
+use embed/rtsrc
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
@@ -2034,6 +2035,13 @@ fn array_ctor_desc() -> String = "([Ljava/lang/Object;L" ++ ATOMIC_INT ++ ";I)V"
 ## that order -- factored out because push builds one on each of its two paths.
 fn array_wrap_desc() -> String = "L" ++ ARRAY_CLASS ++ ";"
 
+## The two halves of an `Array` bounds panic around the index. The native
+## runtime spells the same sentence (`dawn_array_bounds_panic` in
+## runtime/c/dawn_rt.c) and the test below holds the two together: a panic
+## message is a value `catch_panic` hands back to pure code (ARCH-N13).
+const ARRAY_BOUNDS_HEAD: String = "array index "
+const ARRAY_BOUNDS_TAIL: String = " out of bounds for length "
+
 ## Throw a PanicError whose message is `prefix ++ i ++ " out of bounds for
 ## length " ++ v.len`, with the array in local 0 and the index in local `ivar`.
 fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io = {
@@ -2045,7 +2053,7 @@ fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io =
   append_const(m, prefix)
   m.visitVarInsn(OP_LLOAD, ivar)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
-  append_const(m, " out of bounds for length ")
+  append_const(m, ARRAY_BOUNDS_TAIL)
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
   m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
@@ -2240,7 +2248,7 @@ fn gen_array_get(cw: ClassWriter) -> Unit !io = {
   gv.visitInsn(OP_AALOAD)
   gv.visitInsn(OP_ARETURN)
   gv.visitLabel(bad)
-  array_bounds_panic(gv, "array index ", 1)
+  array_bounds_panic(gv, ARRAY_BOUNDS_HEAD, 1)
   close_mv(gv)
 }
 
@@ -2382,7 +2390,7 @@ fn gen_array_with(cw: ClassWriter) -> Unit !io = {
   wv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
   wv.visitInsn(OP_ARETURN)
   wv.visitLabel(bad)
-  array_bounds_panic(wv, "array index ", 1)
+  array_bounds_panic(wv, ARRAY_BOUNDS_HEAD, 1)
   close_mv(wv)
 }
 
@@ -4376,4 +4384,11 @@ pub fn gen_ctl_k_class(supers: List[String]) -> Bytes !io = {
   close_mv(d)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+test "the native runtime words an Array bounds panic the way this one does" {
+  let c = rtsrc.source("dawn_rt.c").expect("the embedded runtime source")
+  assert str.contains(c, "\"" ++ ARRAY_BOUNDS_HEAD ++ "%lld" ++ ARRAY_BOUNDS_TAIL ++ "%lld\"")
+  # the old native wording carried neither the index nor the length
+  assert not str.contains(c, "dawn_panic(DAWN_LIT(\"Array index out of bounds\"))")
 }
