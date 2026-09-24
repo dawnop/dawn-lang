@@ -51,6 +51,8 @@ use front/ast.{
 }
 use front/token.{Diag}
 use front/fmt
+use front/parser as source_parser
+use check/import_use
 
 fn crlf() -> String = from_code_points(['\r', '\n'])
 
@@ -1215,7 +1217,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ])),
       ("definitionProvider", JBool(true)),
       ("documentSymbolProvider", JBool(true)),
-      ("documentFormattingProvider", JBool(true))
+      ("documentFormattingProvider", JBool(true)),
+      ("codeActionProvider", JBool(true))
     ]))]))
   } else if method == "initialized" {
     ()
@@ -1241,6 +1244,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     respond(id, handle_symbols(st, params))
   } else if method == "textDocument/formatting" {
     respond(id, handle_formatting(st, params))
+  } else if method == "textDocument/codeAction" {
+    respond(id, handle_code_action(st, params))
   } else if method == "shutdown" {
     respond(id, JNull)
   } else {
@@ -2074,6 +2079,55 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
     }
     None -> JArr([])
   }
+}
+
+# ---- code actions ----
+
+## `dawn fmt` reads tokens and cannot know what a module uses, so removing an
+## unused import -- a compile error (docs/unused-imports-design.md §6) -- is
+## offered here instead: one quickfix per `unused import: <name>` diagnostic
+## the client hands back. Only those: any other diagnostic, or a range with
+## none, gets no action. The edit is computed on the buffer as it is now, and
+## a buffer that no longer has that import at that place gets nothing rather
+## than a guess.
+fn handle_code_action(st: LspState, params: Json) -> Json = {
+  let d = match doc_of(st, params) {
+    Some(found) -> found
+    None -> return JArr([])
+  }
+  let uri = ostr(get_or_null(params, "textDocument"), "uri")
+  let given = match oget(get_or_null(params, "context"), "diagnostics") {
+    Some(JArr(xs)) -> xs
+    _ -> []
+  }
+  let (m, _) = source_parser.parse_module(d.text)
+  var out: List[Json] = []
+  for dj in given {
+    let first = str.split(ostr(dj, "message"), "\n")[0]
+    match str.strip_prefix(first, "unused import: ") {
+      Some(name) -> {
+        let start = get_or_null(get_or_null(dj, "range"), "start")
+        let at = lsp_offset(d.view, d.ls, oint(start, "line"), oint(start, "character"))
+        match import_use.removal_span(m, at, name) {
+          Some((lo, hi0, whole)) -> {
+            # a whole declaration takes its line break with it
+            let hi = if whole && hi0 < len(d.view.cps) && d.view.cps[hi0] == '\n' { hi0 + 1 } else { hi0 }
+            let edit = jobj([("range", jrange(d.view, d.ls, lo, hi)), ("newText", JStr(""))])
+            out = out ++ [jobj([
+              ("title", JStr("Remove unused import `" ++ name ++ "`")),
+              ("kind", JStr("quickfix")),
+              ("diagnostics", JArr([dj])),
+              ("isPreferred", JBool(true)),
+              ("edit", jobj([("changes", jobj([(uri, JArr([edit]))]))]))
+            ])]
+          }
+          None -> ()
+        }
+      }
+      None -> ()
+    }
+  }
+  JArr(out)
 }
 
 test "a bundled std buffer keeps its std identity through the document seam" {
