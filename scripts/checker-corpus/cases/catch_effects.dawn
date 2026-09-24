@@ -1,9 +1,9 @@
-# The two io barriers bind an effect parameter over the closure they protect
-# (#343, SEM-11 §7.4), and since 2026-09-01 they no longer agree about their
-# own rows (§7.5): `catch_fault` carries the closure's row and adds nothing,
-# `catch_panic` still raises `!io`. Those are separate claims and this case
-# pins each of them, because the shape only makes sense together: the closure's
-# row is free for both barriers, and the barrier's own row is free for one.
+# The two barriers bind an effect parameter over the closure they protect
+# (#343, SEM-11 §7.4). They disagreed about their own rows from 2026-09-01
+# (§7.5, `catch_panic` still raised `!io`) until 2026-09-24, when `catch_panic`
+# stopped adding anything too (docs/effects-window-design.md 4): both carry
+# the closure's row and nothing else. This case pins that for each of them,
+# because "accepted" alone would also pass a barrier that widened its row.
 #
 # What the golden must show, and what it must go on *not* showing:
 #
@@ -12,13 +12,12 @@
 #     the ordinary "does not declare" complaint, at the label. A barrier that
 #     swallowed the label would make those two lines silent, which is the
 #     failure this case is aimed at.
-#   - `catch_panic` is still `!io`. A pure signature that calls it is refused
-#     even when nothing inside the closure is impure.
-#   - `catch_fault` is not, and "accepted" is too weak to pin that: a barrier
-#     that had widened its row to `!(e|io)` would also accept a pure caller's
-#     `!io` signature. So a pure caller of `catch_fault` is handed to a slot
-#     that takes a pure function value, which is a claim about the row and not
-#     about the diagnostic count.
+#   - neither barrier raises `!io` of its own, and "accepted" is too weak to
+#     pin that: a barrier that had widened its row to `!(e|io)` would also
+#     accept a caller's over-declared `!io`. So a pure caller of each barrier
+#     is handed to a slot that takes a pure function value, which is a claim
+#     about the row and not about the diagnostic count. Put `!io` back on
+#     `catch_panic` and `pure_slot_panic` below is refused.
 effect Ask {
   fn get() -> Int
 }
@@ -37,7 +36,7 @@ fn caught_handled() -> Result[Int, ForeignError] = {
 }
 
 # accepted: the row spelled as a variable and forwarded, the shape a std
-# wrapper would have. `catch_panic` still adds its own `!io` on top of it.
+# wrapper would have. The `!io` here is over-declared and still legal.
 fn guarded(f: fn() -> Int !e) -> Result[Int, ForeignError] !e !io = catch_panic(f)
 
 # accepted: the same wrapper over the other barrier, which is the shape that
@@ -64,15 +63,22 @@ fn still_declares_io() -> Result[Int, ForeignError] !io = catch_fault(() => 1)
 # instantiated variable is charged to the caller exactly like `bracket`'s.
 fn label_undeclared() -> Result[Int, ForeignError] !io = catch_fault(asks)
 
-# refused: `catch_panic`'s own row is `!io` and purity still means purity, even
-# though nothing this closure calls is impure
-fn pure_caller_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n)
+# accepted: a pure caller of `catch_panic`. This line was refused until
+# 2026-09-24 ("is not declared !io but calls `catch_panic` (!io)").
+fn pure_caller_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n / (n - 3))
 
-# refused: the label is declared and the `!io` is not, which separates the two
-# rows in one diagnostic. This line used to read `catch_fault` and was the
-# minimal sample of what §7.5 unlocked; the same line over `catch_fault` is
-# `caught_labelled` at the top of this file and is accepted now.
-fn panic_io_undeclared() -> Result[Int, ForeignError] !Ask = catch_panic(asks)
+# accepted, and the line that pins the row: `pure_caller_panic` goes into a
+# slot that takes a pure function value, so a `catch_panic` that raised `!io`
+# of its own would make this an argument type mismatch
+fn pure_slot_panic() -> Result[Int, ForeignError] = apply_pure(pure_caller_panic, 3)
+
+# accepted: the label crosses and is declared, and nothing else is owed. This
+# line was the minimal sample of `catch_panic`'s `!io` until 2026-09-24.
+fn panic_labelled() -> Result[Int, ForeignError] !Ask = catch_panic(asks)
+
+# refused: the label crosses `catch_panic` exactly as it crosses `catch_fault`,
+# and an undeclared one is charged to the caller
+fn panic_label_undeclared() -> Result[Int, ForeignError] = catch_panic(asks)
 
 pub fn main() -> Unit !io = {
   with handle Ask { get() => 1 }

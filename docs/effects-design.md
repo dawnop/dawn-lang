@@ -46,7 +46,8 @@ Haskell 的 `effectful` 生态整个跑在这一档上（abort 用真异常）�
   诚实的成本起点。
 - **aborting handler**（操作不返回调用点）：那是失败机制的形状，Dawn 已有
   `catch_fault`/`catch_panic`/`bracket`。「异常式效果」映射到既有屏障族，不给 handler
-  加逃逸档——`effectful` 同款取舍。
+  加逃逸档——`effectful` 同款取舍。（屏障族的效果行此后两次改动，现状是三个都是 `!e`，
+  见 [effects-window-design.md](effects-window-design.md) §4。）
 - **参数化效果**（`effect Yield[T]`）：把 `Ty` 塞进 `Eff` 会让 subst 的类型/效果双 map
   互递归、`Map[Eff, …]` 的键全动。**另立项**（原先记作「留给 RX-10 期权 B」，那是错的：
   B 是把 `Eff` 塞进类型参数表，方向相反，见 §7 开放项 5 与

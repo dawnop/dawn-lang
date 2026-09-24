@@ -27,13 +27,11 @@ fn use_impure(n: Int) -> Unit = bracket(n, x => (), x => println(to_string(x)))
 
 fn release_impure(n: Int) -> Int = bracket(n, x => println("bye"), x => x)
 
-# `catch_panic` holds `!io`, so this one is refused in a pure signature even
-# though nothing it calls is impure.
+# accepted: neither barrier adds a row of its own (`catch_panic` held `!io`
+# until 2026-09-24, docs/effects-window-design.md 4), so both of these pure
+# signatures stand. catch_effects pins the row itself through a pure slot.
 fn caught_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n)
 
-# ...and its neighbour, the same line one word apart, is not. A repair that
-# reached both barriers instead of one shows up as this line going silent
-# together with the one above it rather than on its own.
 fn caught_fault(n: Int) -> Result[Int, ForeignError] = catch_fault(() => n)
 
 pub fn main() -> Unit !io = { println(to_string(pure_bracket(1))) }
