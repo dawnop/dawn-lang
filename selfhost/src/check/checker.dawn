@@ -6070,6 +6070,14 @@ fn if_body_value(e: Expr) -> Expr =
 
 ## A top-level function or builtin used as a value; generics need the expected
 ## type (the Kotlin checkFnValue).
+## The symbol a call or a function value names. A signature carries the name
+## its function was declared with, and that is the name the backends and the
+## callee index know (`callee_index`: calls carry the declaring owner and
+## name, not the spelling used to reach them). The written name differs from
+## it only under a selective-import rename. A builtin has no declaration
+## elsewhere to name, so its written name is its symbol.
+fn emitted_fn_name(s: Sig, written: String) -> String = if s.is_builtin { written } else { s.name }
+
 pub fn check_fn_value(
   initial: Cx,
   name: String,
@@ -6116,7 +6124,10 @@ pub fn check_fn_value(
     EffVar(_, _) -> true
     _ -> false
   }
-  let node = (t: Ty) => XFnValue(f.owner, name, f.is_builtin, t, owner_off(initial, lo), owner_off(initial, hi))
+  # the declared name, not the one written here: they differ exactly when the
+  # function came in through `use m.{name as local}` (spec §10.2)
+  let symbol = emitted_fn_name(f, name)
+  let node = (t: Ty) => XFnValue(f.owner, symbol, f.is_builtin, t, owner_off(initial, lo), owner_off(initial, hi))
   if len(f.tparams) == 0 && not eff_is_var {
     return (cx, declared, node(declared))
   }
@@ -6275,7 +6286,7 @@ fn eta_bounded_fn_value(
     if f.is_builtin {
       XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), iret)
     } else {
-      XCallFn(f.owner, name, args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), iret)
+      XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), iret)
     }
   (cx1, inst, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), inst))
 }
@@ -9753,7 +9764,7 @@ fn default_call(
 ) -> (Cx, TExpr) = {
   let none_tid: Option[Int] = None
   let (next, pty) = reduce_instantiated_read(cx, subst(s.param_tys[idx], m, em), m)
-  (next, XCallFn(s.owner, callee ++ "\$default\$" ++ to_string(idx), [], wits, [], none_tid,
+  (next, XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), [], wits, [], none_tid,
     owner_off(cx, lo), owner_off(cx, hi), pty))
 }
 
@@ -10389,7 +10400,7 @@ fn check_call(
         XApply(XField(recv, idx, owner_off(cx, clo), owner_off(cx, chi), TyFn(s.param_tys, s.ret, EPure)), txs2,
           [env], owner_off(cx, lo), owner_off(cx, hi), ret)
       }
-      None -> XCallFn(s.owner, callee, txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), ret)
+      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), ret)
     }
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }

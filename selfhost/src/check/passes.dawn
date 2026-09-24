@@ -3630,10 +3630,6 @@ fn inject_selective(
     return cerr_o(cx1, "module `" ++ from_path ++ "` has no exported name `" ++ name ++ "`",
       lo, hi, suggest.hint(name, pool))
   }
-  if local != name && (f != None || cn != None) {
-    return cerr_h(cx1, "renaming a function or constant in a selective import is not supported yet",
-      lo, hi, "import it as `" ++ name ++ "`, or qualify it through a module alias")
-  }
   match map.get(cx1.imported_names, local) {
     Some(prev) -> {
       # an operation registered by `use m.{E}` (design D8) may also be named in
@@ -3646,6 +3642,9 @@ fn inject_selective(
     None -> ()
   }
   cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, local, from_path) }
+  if local != name {
+    cx1 = Cx { ..cx1, import_renames: map.insert(cx1.import_renames, local, name) }
+  }
   match f {
     Some(sig) -> { cx1 = bind_fn(cx1, local, sig, OImport(from_path), lo, hi) }
     None -> ()
@@ -3688,8 +3687,8 @@ fn inject_selective(
     Some(t) -> {
       cx1 = Cx {
         ..cx1,
-        consts: map.insert(cx1.consts, name, t),
-        const_order: cx1.const_order ++ [name]
+        consts: map.insert(cx1.consts, local, t),
+        const_order: cx1.const_order ++ [local]
       }
     }
     None -> ()

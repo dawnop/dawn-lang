@@ -90,11 +90,14 @@ pub fn merged_consts(
   var out = ct.consts
   for name in map.keys(cx.consts) {
     if not map.has(out, name) {
+      # a renamed import is filed under the name this module wrote and found
+      # under the one its declaring module used (spec §10.2)
+      let declared = map.get(cx.import_renames, name).unwrap_or(name)
       match map.get(cx.imported_names, name) {
         Some(from) ->
           match map.get(by_mod, from) {
             Some(vals) ->
-              match map.get(vals, name) {
+              match map.get(vals, declared) {
                 Some(v) -> { out = map.insert(out, name, v) }
                 None -> ()
               }

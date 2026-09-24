@@ -1,0 +1,36 @@
+# `use m.{Name as Local}` for every kind of member, on both backends (spec
+# §10.2, docs/effects-window-design.md 3). A rename changes the importing
+# module's name table only, so each renamed name must reach the member it
+# was declared as: a call, a call that fills a default argument, a function
+# value, a constant, a constructor in an expression and in a pattern, a trait
+# method, and an effect in a row and in a handler.
+use lib.{
+  parse as p, twice as double, LIMIT as MAX, Level as Lvl, Loud as Noisy, Quiet,
+  describe as desc, Log as L, log_line
+}
+use std/list.{map as list_map}
+
+fn level(x: Lvl) -> Int =
+  match x {
+    Quiet -> 0
+    Noisy(n) -> n
+  }
+
+fn logged() -> Int !L = {
+  log_line("hi")
+  1
+}
+
+pub fn main() -> Unit !io = {
+  println(to_string(p("abc")))
+  println(to_string(p("abc", base: 2)))
+  println(to_string(list_map([1, 2, 3], double)))
+  println(to_string(MAX))
+  println(to_string(level(Noisy(7)) + level(Quiet)))
+  println(desc(5))
+  let r = {
+    with handle L { log_line(s) => println("log: " ++ s) }
+    logged()
+  }
+  println(to_string(r))
+}
