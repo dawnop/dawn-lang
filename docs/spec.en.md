@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5a0f1aedb6c3fe9e -->
+<!-- doc-check: translation-of docs/spec.md @ ae0313450d0bb387 -->
 
 # Dawn Language Specification
 
@@ -2021,24 +2021,31 @@ are not Java types, so an instance call like `s.substring(…)` does not work to
 
 ### 6.5 Named effects and `with handle`
 
-#### Module-qualified effect names
+#### Qualified names and renaming
 
-With `use library as dep`, `!dep.Ask` names the public effect `Ask` declared
-by `library`. The lowercase first segment is a module alias, not an effect
-variable; `!T.E` retains its uppercase-first associated-projection meaning.
-Qualification is available in every effect row, including function types,
-effect arguments and unions such as `!(io | dep.Ask | e)`. It also names a
-single ground effect in trait defaults and impl bindings (`effect E = !dep.Ask`),
-and a handler selector (`with handle dep.Ask { ask() => 42 }`). Handler arms
-use the operation's unqualified name within the selected effect.
+An effect is an ordinary module member, reached by the same routes as a type or a function: with
+`use library as dep`, `!dep.Ask` names the public effect `Ask` declared by `library`; with
+`use std/io`, `!io.Fs` works the same way (`io` there is a module alias, not the ambient effect
+`io`, which is an undotted atom). The lowercase first segment is a module alias, not an effect
+variable; `!T.E` retains its uppercase-first associated-projection meaning. Qualification is
+available in every effect row, including function types, effect arguments and unions such as
+`!(io | dep.Ask | e)`. It also names a single ground effect in trait defaults and impl bindings
+(`effect E = !dep.Ask`), and a handler selector (`with handle dep.Ask { ask() => 42 }`). Handler
+arms use the operation's unqualified name within the selected effect.
 
-Qualified and selectively imported names resolve to the same provider-owned
-effect identity. Different modules' same-named effects remain distinct; a
-whole-module import does not introduce the effect or its operations into the
-unqualified namespace. Missing aliases, missing or private effects, and exported
-members of the wrong kind are errors, never implicit effect-variable binders.
-Only two segments are supported. Ground bindings still reject variables,
-associated projections and unions; qualification does not relax that rule.
+A selective import can rename an effect: after `use std/io.{Fs as Files}` a row writes `!Files` and
+a handler `with handle Files { ... }` (the general renaming rule is in §10.2). A rename changes this
+module's name table only; the effect's identity, the operation names it brings along and the name
+diagnostics print all stay the same.
+
+Qualified, selectively imported and renamed names resolve to the same provider-owned effect
+identity. Different modules' same-named effects remain distinct; a whole-module import does not
+introduce the effect or its operations into the unqualified namespace. When two libraries export
+effects of the same name, using both means qualifying or renaming them; importing both bare is a
+clash error. Missing aliases, missing or private effects, and exported members of the wrong kind
+are errors, never implicit effect-variable binders. Only two segments are supported. Ground
+bindings still reject variables, associated projections and unions; qualification does not relax
+that rule.
 
 `effect` declares a set of operation signatures; the call site calls an operation directly, and the
 `with handle` **lexically nearest to the call** answers it.
@@ -3532,11 +3539,20 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
 - `use` may appear anywhere at the top level (the same as `use java`), and `dawn fmt` does
   not reorder them.
 - **`as` renaming**: a whole-module import can name its alias explicitly with
-  `use a/b/c as name` (the default alias = the last segment). `as` is a **contextual
-  keyword** (special only after a whole-module path, not a reserved word, still usable as
-  an ordinary identifier); it applies only to whole-module imports, selective imports do
-  not need it. If two whole-module imports share a last segment, giving them different
-  `as` aliases lets them coexist (otherwise the same last segment → error).
+  `use a/b/c as name` (the default alias = the last segment); each entry of a selective
+  import can be written `Name as Local` (`use json/value.{Json as J, render as show_json}`),
+  and that holds for every exported member alike — functions, constants, types,
+  constructors, `alias`es, traits and effects. `as` is a **contextual keyword** (special only
+  after a whole-module path and after a selective-list entry, not a reserved word, still
+  usable as an ordinary identifier). If two whole-module imports share a last segment,
+  giving them different `as` aliases lets them coexist (otherwise the same last segment →
+  error).
+- The renaming rules: the module binds only `Local`, and `Name` is not visible; `Local` must
+  be of the same case class as `Name` (case is meaning, §1), and `Name as Name` is an error.
+  A rename changes this module's name table only: the imported member's identity, the names
+  it brings along (a type's constructors, an effect's operations) and the name diagnostics
+  print all stay the same; to rename something brought along, list it and rename it on its
+  own. Clash checks use the local name.
 
 ### 10.3 Name resolution (disambiguation rules)
 

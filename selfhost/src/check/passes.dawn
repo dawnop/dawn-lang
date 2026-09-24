@@ -20,7 +20,7 @@ use front/ast.{
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
   Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
-  DEffect, EffectDeclR, EffectOp, AssocBind,
+  DEffect, EffectDeclR, EffectOp, AssocBind, ImportName, import_local,
   e_lo, e_hi
 }
 
@@ -3582,7 +3582,7 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
       }
       Some(names) -> {
         for imp in names {
-          cx1 = inject_selective(cx1, u.path, exp, imp.name, imp.lo, imp.hi)
+          cx1 = inject_selective(cx1, u.path, exp, imp, imp.lo, imp.hi)
         }
       }
     }
@@ -3590,15 +3590,23 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
   cx1
 }
 
+## One entry of a selective import. The export tables are asked for `name`,
+## the exporter's; what this module binds is `local`, which differs from it
+## only under `use m.{Name as Local}` (spec §10.2). A rename changes a name
+## table and nothing else: the id behind it, what diagnostics print for it and
+## everything the entry brings along -- a type's constructors, an effect's
+## operations -- keep the names they were declared with.
 fn inject_selective(
   cx: Cx,
   from_path: String,
   exp: ModExports,
-  name: String,
+  entry: ImportName,
   lo: Int,
   hi: Int
 ) -> Cx = {
   var cx1 = cx
+  let name = entry.name
+  let local = import_local(entry)
   let f = map.get(exp.fns, name)
   let ty = map.get(exp.types_by_name, name)
   let cn = map.get(exp.consts, name)
@@ -3622,20 +3630,24 @@ fn inject_selective(
     return cerr_o(cx1, "module `" ++ from_path ++ "` has no exported name `" ++ name ++ "`",
       lo, hi, suggest.hint(name, pool))
   }
-  match map.get(cx1.imported_names, name) {
+  if local != name && (f != None || cn != None) {
+    return cerr_h(cx1, "renaming a function or constant in a selective import is not supported yet",
+      lo, hi, "import it as `" ++ name ++ "`, or qualify it through a module alias")
+  }
+  match map.get(cx1.imported_names, local) {
     Some(prev) -> {
       # an operation registered by `use m.{E}` (design D8) may also be named in
       # that same `use` list: redundant, not a second import
-      let redundant = prev == from_path && rode_in_as_op(cx1, name, prev)
+      let redundant = prev == from_path && rode_in_as_op(cx1, local, prev)
       if not redundant {
-        return import_dup(cx1, name, prev, from_path, f, lo, hi)
+        return import_dup(cx1, local, prev, from_path, f, lo, hi)
       }
     }
     None -> ()
   }
-  cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, name, from_path) }
+  cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, local, from_path) }
   match f {
-    Some(sig) -> { cx1 = bind_fn(cx1, name, sig, OImport(from_path), lo, hi) }
+    Some(sig) -> { cx1 = bind_fn(cx1, local, sig, OImport(from_path), lo, hi) }
     None -> ()
   }
   # a type brings its constructors (spec §10.3); a ctor may also be named directly
@@ -3650,7 +3662,7 @@ fn inject_selective(
       }
       cx1 = Cx {
         ..cx1,
-        adts_by_name: map.insert(cx1.adts_by_name, name, aid),
+        adts_by_name: map.insert(cx1.adts_by_name, local, aid),
         ctors_by_name: cbn
       }
     }
@@ -3658,10 +3670,10 @@ fn inject_selective(
   }
   match al {
     Some(ae) -> {
-      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, name, AliasE { ..ae, target: no_tref() }) }
+      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, local, AliasE { ..ae, target: no_tref() }) }
       match map.get(exp.alias_resolved, name) {
         Some(t) -> {
-          cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, name, t) }
+          cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, local, t) }
         }
         None -> ()
       }
@@ -3669,7 +3681,7 @@ fn inject_selective(
     None -> ()
   }
   match ct {
-    Some(k) -> { cx1 = Cx { ..cx1, ctors_by_name: map.insert(cx1.ctors_by_name, name, k) } }
+    Some(k) -> { cx1 = Cx { ..cx1, ctors_by_name: map.insert(cx1.ctors_by_name, local, k) } }
     None -> ()
   }
   match cn {
@@ -3683,14 +3695,14 @@ fn inject_selective(
     None -> ()
   }
   match tr {
-    Some(tid) -> { cx1 = Cx { ..cx1, traits_by_name: map.insert(cx1.traits_by_name, name, tid) } }
+    Some(tid) -> { cx1 = Cx { ..cx1, traits_by_name: map.insert(cx1.traits_by_name, local, tid) } }
     None -> ()
   }
   # an imported effect brings its operations, as a type brings its
   # constructors: `use m.{Ask}` is what makes both `!Ask` and `ask()` sayable
   match ef {
     Some(eid) -> {
-      cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, name, eid) }
+      cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, local, eid) }
       for op in effect_of(cx1, eid).ops {
         match map.get(exp.fns, op) {
           Some(sg) -> {

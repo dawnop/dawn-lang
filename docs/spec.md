@@ -1632,24 +1632,24 @@ pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # 仅 std 模块
 
 ### 6.5 具名效果与 `with handle`
 
-#### Module-qualified effect names
+#### 限定名与改名
 
-With `use library as dep`, `!dep.Ask` names the public effect `Ask` declared
-by `library`. The lowercase first segment is a module alias, not an effect
-variable; `!T.E` retains its uppercase-first associated-projection meaning.
-Qualification is available in every effect row, including function types,
-effect arguments and unions such as `!(io | dep.Ask | e)`. It also names a
-single ground effect in trait defaults and impl bindings (`effect E = !dep.Ask`),
-and a handler selector (`with handle dep.Ask { ask() => 42 }`). Handler arms
-use the operation's unqualified name within the selected effect.
+效果是普通的模块成员，到达它的路径与类型、函数相同：`use library as dep` 之后，`!dep.Ask`
+指 `library` 声明的公开效果 `Ask`；`use std/io` 之后 `!io.Fs` 同理（这里的 `io` 是模块别名，
+不是环境效果 `io`——环境效果是不带点的原子）。小写首段是模块别名，不是效果变量；
+`!T.E` 仍是大写首段的关联效果投影。限定名在一切效果行里可用，包括函数类型、效果实参与并
+（`!(io | dep.Ask | e)`）；也可以在 trait 默认与 impl 绑定里命名单个地面效果
+（`effect E = !dep.Ask`），以及当 handler 选择子（`with handle dep.Ask { ask() => 42 }`）。
+臂里写操作在所选效果内的非限定名。
 
-Qualified and selectively imported names resolve to the same provider-owned
-effect identity. Different modules' same-named effects remain distinct; a
-whole-module import does not introduce the effect or its operations into the
-unqualified namespace. Missing aliases, missing or private effects, and exported
-members of the wrong kind are errors, never implicit effect-variable binders.
-Only two segments are supported. Ground bindings still reject variables,
-associated projections and unions; qualification does not relax that rule.
+选择性引入可以给效果改名：`use std/io.{Fs as Files}` 之后行里写 `!Files`、handler 写
+`with handle Files { ... }`（改名的通用规则见 §10.2）。改名只改本模块的名字表，效果的身份、
+它带进来的操作名、诊断里打印的名字都不变。
+
+限定名、选择性引入与改名解析到同一个由提供方拥有的效果身份。不同模块的同名效果仍是不同的效果；
+整模块引入不把效果或它的操作带进非限定命名空间。两个库导出同名效果时，两个都用就写限定名
+或改名，两个都裸引入是冲突错误。缺失的别名、缺失或私有的效果、种类不对的导出成员都是错误，
+绝不隐式成为效果变量的绑定者。只支持两段。地面绑定仍拒绝变量、关联投影与并，限定名不放松这条规则。
 
 `effect` 声明一组操作签名，调用处直接调操作，由**调用处词法上最近的** `with handle` 应答。
 
@@ -2847,10 +2847,15 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - 一个模块的**整模块引入**与**选择性引入**各至多一次，两者可并存——前者绑别名、
   后者绑名字，是两件事。同一形式出现两次是错误（两条选择性引入即使括号内名字不同也算）。
 - `use` 可出现在顶层任意位置（与 `use java` 一致），`dawn fmt` 不重排。
-- **`as` 重命名**：整模块引入可用 `use a/b/c as name` 显式指定别名（默认别名 = 末段）。
-  `as` 是**上下文关键字**（只在整模块路径之后特殊，不是保留字，仍可作普通标识符）；只用于
-  整模块引入，选择性引入不需要。两个整模块引入若末段同名，用不同 `as` 别名即可并存
-  （否则末段同名 → 错误）。
+- **`as` 重命名**：整模块引入可用 `use a/b/c as name` 显式指定别名（默认别名 = 末段）；
+  选择性引入的每一项可写 `Name as Local`（`use json/value.{Json as J, render as show_json}`），
+  对一切导出成员通用——函数、常量、类型、构造器、`alias`、trait、效果一视同仁。
+  `as` 是**上下文关键字**（只在整模块路径与选择性列表项之后特殊，不是保留字，仍可作普通标识符）。
+  两个整模块引入若末段同名，用不同 `as` 别名即可并存（否则末段同名 → 错误）。
+- 改名的规则：本模块只绑 `Local`，`Name` 不可见；`Local` 与 `Name` 必须同一大小写类别
+  （大小写是语义，§1），`Name as Name` 是错误。改名只改本模块的名字表：被引入者的身份、
+  它随身带进来的名字（类型的构造器、效果的操作）、诊断里打印的名字都不变；
+  要改随身带进来的名字，就把它单独写进列表改。冲突检查按本地名做。
 
 ### 10.3 名字解析（消歧规则）
 
