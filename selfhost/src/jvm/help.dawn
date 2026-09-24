@@ -28,7 +28,7 @@ use jvm/ops.{
   OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_D2F, OP_DCMPG, OP_DCMPL,
   OP_DSTORE, OP_DUP, OP_DUP2, OP_GOTO, OP_I2L, OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFGE,
   OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
-  OP_ISTORE, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_0, OP_LSTORE, OP_NEW, OP_NEWARRAY, OP_POP,
+  OP_ISTORE, OP_ISUB, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_0, OP_LSTORE, OP_NEW, OP_NEWARRAY, OP_POP,
   OP_POP2
 }
 
@@ -215,6 +215,12 @@ fn emit_scalar_cmp_at(m: MethodVisitor, t: Ty) -> Unit !io = {
       # the total order, which disagrees with `<` on NaN and -0.0 on purpose
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
     }
+    # false < true; a Bool is a JVM int 0/1 on the stack, and Integer.compare
+    # already answers -1/0/1
+    TyBool -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Integer", "compare", "(II)I", false)
+    }
+    TyBytes -> emit_bytes_cmp(m)
     TyString -> {
       # code point order, sign only -- not String.compareTo, which is UTF-16
       # code unit order and hands back a unit difference (spec 3.5, RP-06)
@@ -226,6 +232,17 @@ fn emit_scalar_cmp_at(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyOpaque(_, _, _, _, tgt) -> emit_scalar_cmp_at(m, tgt)
     _ -> panic("codegen: no scalar order for ${ty_key(t)}")
   }
+  ()
+}
+
+## Two `byte[]` on the stack -> -1/0/1 in unsigned lexicographic order,
+## shorter first on a shared prefix (spec 3.5). `compareUnsigned` is exactly
+## that order, but its magnitude is a byte or length difference, and `cmp`
+## promises the sign only -- native's `dawn_cmp_bytes` answers -1/0/1, so the
+## JVM folds its answer the same way rather than leak a difference.
+fn emit_bytes_cmp(m: MethodVisitor) -> Unit !io = {
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "compareUnsigned", "([B[B)I", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Integer", "signum", "(I)I", false)
   ()
 }
 
@@ -303,6 +320,11 @@ pub fn gen_ordering(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
     # order, via the runtime's cmp rather than compareTo's UTF-16 unit order
     m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
       "(Ljava/lang/String;Ljava/lang/String;)I", false)
+  } else if t == TyBool {
+    # two ints 0/1: their difference is already the comparison
+    m.visitInsn(OP_ISUB)
+  } else if t == TyBytes {
+    emit_bytes_cmp(m)
   } else {
     let use_g = match op {
       BLt -> true

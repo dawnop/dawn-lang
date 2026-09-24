@@ -964,6 +964,8 @@ int64_t dawn_hash_str(dawn_str *s);
 int64_t dawn_hash_bytes(const dawn_bytes *b);
 int64_t dawn_cmp_int(int64_t a, int64_t b);
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b);
+int64_t dawn_cmp_bool(bool a, bool b);
+int64_t dawn_cmp_bytes(const dawn_bytes *a, const dawn_bytes *b);
 
 /* arithmetic whose C behaviour would be undefined where the JVM's is not.
  * The shifts are the third member of this family and are emitted inline --

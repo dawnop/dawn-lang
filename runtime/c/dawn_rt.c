@@ -1567,6 +1567,21 @@ int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
   return a->len < b->len ? -1 : (a->len > b->len ? 1 : 0);
 }
 
+/* false < true (spec 3.5), the declaration order `derive Ord` gives any
+ * two-constructor enum. */
+int64_t dawn_cmp_bool(bool a, bool b) { return a == b ? 0 : (a ? 1 : -1); }
+
+int64_t dawn_cmp_bytes(const dawn_bytes *a, const dawn_bytes *b) {
+  /* Unsigned lexicographic, sign only: `dawn_cmp_str`'s algorithm, which is
+   * already a byte order -- memcmp compares as unsigned char -- and a shared
+   * prefix leaves the shorter one smaller. The JVM's answer is
+   * Arrays.compareUnsigned folded to its sign, the same order. */
+  int64_t n = a->len < b->len ? a->len : b->len;
+  int c = n > 0 ? memcmp(a->p, b->p, (size_t)n) : 0;
+  if (c != 0) return c < 0 ? -1 : 1;
+  return a->len < b->len ? -1 : (a->len > b->len ? 1 : 0);
+}
+
 int64_t dawn_idiv(int64_t a, int64_t b) {
   if (b == 0) {
     dawn_panic(DAWN_LIT("Int division by zero"));
