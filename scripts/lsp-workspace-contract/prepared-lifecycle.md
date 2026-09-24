@@ -1,8 +1,10 @@
 # Opt-in prepared LSP ownership controls
 
 `python3 scripts/lsp-workspace-contract/prepared-lifecycle.py` runs the full
-649-test server closure once unchanged, then once for each of seven isolated
-production mutations. Set `DAWN_BIN` to a current compiler launcher and use
+server test closure once unchanged, then once for each of seven isolated
+production mutations. The unchanged run's `N test(s) passed` is the total the
+controls are held to: each must report `1 of N test(s) failed`. No total is
+written down here or in the script (#217). Set `DAWN_BIN` to a current compiler launcher and use
 JDK 21 for both `JAVA_HOME` and `PATH`. The subjects live in a temporary copy;
 the repository source and every inline assertion remain unchanged.
 

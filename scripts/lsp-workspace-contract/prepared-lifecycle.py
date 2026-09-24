@@ -5,6 +5,12 @@ Each isolated production mutation runs the complete server test closure. Only
 its exact owning assertion is accepted: compiler, linker, timeout, incidental
 panic, and unrelated test failures are not negative-control evidence. These
 controls do not claim to distinguish prepared loading from safe legacy reparsing.
+
+How many tests the closure holds is not written here. The unchanged positive
+runs first on the same tree and its `N test(s) passed` is the total every
+control is then held to (`1 of N test(s) failed`): a mutation may fail its
+owner and nothing else, and may not change which tests exist. A literal total
+here went stale with every inline test added to the closure (#217).
 """
 import argparse
 import re
@@ -64,17 +70,25 @@ def variants(original):
             for name, old, new, owner, assertion in controls]
 
 
-def verify(name, status, output, owner, assertion):
+def verify(name, status, output, owner, assertion, total=None):
+    """-> the closure's test count for the positive; None for a control.
+
+    A control is held to `total`, the count its own tree's positive reported.
+    """
     failures = re.findall(r"^FAIL\s+([^\n]+)", output, re.M)
     if owner is None:
-        if status or failures or not re.search(r"^649 test\(s\) passed$", output, re.M):
-            raise RuntimeError("Positive prepared LSP closure did not pass all 649 tests\n" + output)
-        return
+        passed = re.findall(r"^(\d+) test\(s\) passed$", output, re.M)
+        if status or failures or len(passed) != 1 or int(passed[0]) == 0:
+            raise RuntimeError("Positive prepared LSP closure did not pass every test\n" + output)
+        return int(passed[0])
     label = "lsp/server :: " + owner
     exact = r"^FAIL\s+" + re.escape(label) + r"\n\s+assertion failed: " + re.escape(assertion) + r"\s*$"
+    summary = r"^1 of " + str(total) + r" test\(s\) failed$"
     if (not status or failures != [label] or not re.search(exact, output, re.M)
+            or not re.search(summary, output, re.M)
             or re.search(r"^error:|Exception in thread|LinkageError", output, re.M)):
         raise RuntimeError(name + " missed its sole exact owning assertion\n" + output)
+    return None
 
 
 def partition(controls, shards, shard):
@@ -94,8 +108,8 @@ def verify_workflow(text):
 
 def self_test():
     owner, assertion = STANDALONE, "stats.checked_bodies == 1 && stats.reused_bodies == 1"
-    failure = f"FAIL  lsp/server :: {owner}\n  assertion failed: {assertion}\n"
-    verify("self-test", 1, failure, owner, assertion)
+    failure = f"FAIL  lsp/server :: {owner}\n  assertion failed: {assertion}\n1 of 7 test(s) failed\n"
+    verify("self-test", 1, failure, owner, assertion, 7)
     rejected = [
         (0, failure), (1, "error: does not compile\n"),
         (1, failure.replace(assertion, "false")),
@@ -104,14 +118,30 @@ def self_test():
         (1, failure + "Exception in thread main\n"),
         (1, failure + "LinkageError\n"),
         (1, failure.replace("assertion failed: " + assertion, "missing owner")),
+        (1, failure.replace("1 of 7", "1 of 6")),
+        (1, failure.replace("1 of 7 test(s) failed\n", "")),
     ]
     for status, output in rejected:
         try:
-            verify("self-test", status, output, owner, assertion)
+            verify("self-test", status, output, owner, assertion, 7)
         except RuntimeError:
             continue
         raise RuntimeError("Prepared LSP failure oracle accepted unrelated evidence")
     print(f"OK: prepared LSP assertion oracle rejects {len(rejected)} false controls")
+    if verify("self-test", 0, "5 test(s) passed\n", None, None) != 5:
+        raise RuntimeError("Prepared LSP positive oracle misread the closure's count")
+    positives = [
+        (1, "5 test(s) passed\n"), (0, "0 test(s) passed\n"), (0, "no summary\n"),
+        (0, "5 test(s) passed\n5 test(s) passed\n"),
+        (0, "FAIL  lsp/server :: unrelated test\n5 test(s) passed\n"),
+    ]
+    for status, output in positives:
+        try:
+            verify("self-test", status, output, None, None)
+        except RuntimeError:
+            continue
+        raise RuntimeError("Prepared LSP positive oracle accepted a closure that did not pass")
+    print(f"OK: prepared LSP positive oracle reads the count and rejects {len(positives)} false positives")
     controls = list(range(7))
     for shards in range(1, 8):
         groups = [partition(controls, shards, shard) for shard in range(shards)]
@@ -166,11 +196,13 @@ def main():
                             ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         target = root / SUBJECT
+        total = None
         for name, source, owner, assertion in [("positive", original, None, None)] + selected:
             target.write_text(source)
             before = time.monotonic()
             status, output = run("test", target)
-            verify(name, status, output, owner, assertion)
+            counted = verify(name, status, output, owner, assertion, total)
+            total = counted if counted is not None else total
             print(f"OK: prepared LSP {name}, {time.monotonic() - before:.2f}s", flush=True)
     print(f"OK: {len(selected)} compiling prepared LSP controls, shard {args.shard}/{args.shards}, {time.monotonic() - started:.2f}s")
 
