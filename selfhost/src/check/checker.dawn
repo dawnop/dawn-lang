@@ -6433,11 +6433,27 @@ pub fn resolve_witness(
   # modules; it does not give the value a second equality, hash or order --
   # at run time it IS the target, so a witness that disagreed with the target
   # would be a witness for a value that does not exist.
+  #
+  # Except `Show`, which does not fall back (2026-09-24,
+  # docs/builtin-privileges-design.md 4). A relation answers true/false or a
+  # sign and leaks nothing; a rendering prints the representation itself,
+  # which is the one thing the type was declared to hide. GHC's
+  # GeneralizedNewtypeDeriving draws the same line: it reuses the
+  # representation's dictionary for every class except Show and Read.
   match t {
     TyOpaque(_, _, _, _, tgt) -> {
       let (next, present) = implementation_presence_read(cx, trait_id, t)
       cx = next
-      if not present { return resolve_witness(cx, trait_id, tgt, lo, hi, requirer) }
+      if not present {
+        if trait_id == SHOW_ID {
+          let (render_cx, ts) = type_display_read(cx, t)
+          return (cerr_h(render_cx, "no impl of `Show` for `" ++ ts ++ "`", lo, hi,
+            "an opaque type does not inherit its target's `Show`: printing it would print " ++
+              "the representation it hides; write `impl Show` for `" ++ ts ++
+              "` in the module declaring it, or convert to the target there first"), no_wit())
+        }
+        return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
+      }
     }
     _ -> ()
   }

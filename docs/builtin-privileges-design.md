@@ -103,6 +103,9 @@ spec §2.7 的别名替换法判据：允许看见 `TyOpaque` 的事从五件变
 selfhost 内部的 opaque 类型（`check/*`、`driver/*`）若有打印点，同样逐个补 impl 或改打印点，结果在 §7 回填。
 
 **破坏性**：上表「不可打印」的类型上 `to_string`/`${}`/`derive Show` 字段现在是编译错误。
+一个不显然的推论：`Index[Map[K, V]]` 要求 `K: Show`（缺键 panic 的文案要印出键），所以以
+「没写 `impl Show` 的 opaque 句柄」为键的 `Map` 不再能用 `m[k]`，要改用 `map.get`（本仓内无此用法，
+`dawn check` 扫过 std、packages、site、playground、compiler-plan、selfhost）。
 dawnop-site 按 `.dawn-version` 钉 release，本改动不影响它，直到它升钉；升钉时的迁移是「在需要打印处先转成 target」
 或「请求补 `impl Show`」。
 

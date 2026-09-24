@@ -4,12 +4,13 @@
 # trait (spec §4.3); what `Display` adds is a way for a type to join it.
 #
 # Two rules are pinned here, and this is the only place a program states them:
-#   - a `Display` impl wins over whatever `Show` the value would otherwise
-#     render through, including a `Show` inherited from an opaque target and
-#     including the String identity;
-#   - it is asked at *every* peel layer of an opaque stack, not once on the type
-#     as written. Asking once is the SEM-03 shape, where a redacting `Show` was
-#     honoured one field deep and ignored at the top level.
+#   - a `Display` impl wins over the `Show` the value would otherwise render
+#     through;
+#   - it is the type's own: an opaque type with no `Display` renders through
+#     its own `Show`, never through a `Display` a layer or two below it. Until
+#     2026-09-24 an opaque type inherited its target's rendering and the rule
+#     was the opposite (ask at every peel layer); with no inheritance there is
+#     nothing to peel.
 #
 # `Char` is the std type that carries one at each layer, and they differ:
 # `${c}` is the character, while `show(c)` is the source literal `'a'`, the way
@@ -28,6 +29,24 @@ opaque type Inner = String
 opaque type Outer = Inner
 opaque type Deep = Outer
 opaque type Tag = String
+
+# Each opaque type writes its own `Show`, since none inherits one. Inner's is
+# the String inside, quoted; Outer's and Deep's are markers, so a rendering
+# borrowed from a layer below would show.
+impl Show[Inner] {
+  fn show(x: Inner) -> String = {
+    let s: String = x
+    show(s)
+  }
+}
+
+impl Show[Outer] {
+  fn show(x: Outer) -> String = "<outer>"
+}
+
+impl Show[Deep] {
+  fn show(x: Deep) -> String = "<deep>"
+}
 
 # A type may carry both, and they answer different questions: `Show` is what a
 # structure containing one prints, `Display` is what a log line prints.
@@ -67,17 +86,17 @@ pub fn main() -> Unit !io = {
 
   # Display wins over an own Show ...
   println(to_string(tag_of("x")))
-  # ... and over the String identity an opaque type over String inherits
+  # ... and over Inner's own Show
   println(to_string(inner_of("x")))
-  # every peel layer is asked: neither of these two carries a Display, and the
-  # one two and three layers down is still found
+  # neither of these two carries a Display, and the one a layer or two down is
+  # not theirs: each renders through its own Show
   println(to_string(outer_of(inner_of("x"))))
   println(to_string(deep_of(outer_of(inner_of("x")))))
 
   # what Display does not touch: the nested rendering. A Char is its own
   # `Show` in a list, a record and a tuple, and that is a *literal*, not the
-  # top-level character; Tag is still `***`; and an opaque type over String
-  # with no Show of its own is still the String's, quoted.
+  # top-level character; Tag is still `***`; and Inner's Show is the String
+  # inside, quoted.
   println(to_string(['a', 'b']))
   println(to_string(Row { c: 'a', t: tag_of("x") }))
   println(to_string(('a', tag_of("x"))))

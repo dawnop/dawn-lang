@@ -575,23 +575,19 @@ fn un_op(op: TUnOp) -> CUnOp =
 ## function and so cannot be found from the type alone.
 fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   # `to_string` of a String is the String itself, and that is a fact about the
-  # *representation* -- so an opaque type over String must not pick up the
-  # quoting `show` gives a String inside a structure. It does not follow that
-  # it inherits the identity: an `impl Show[Secret]` is the whole reason the
-  # type was declared, and it wins here as it does everywhere else (spec §324,
-  # and it already won inside a record). Peeling the whole stack up front is
-  # how a redacting `Show` came to print the plaintext for `to_string(secret)`
-  # while `Box { s: secret }` redacted it (audit SEM-03), so the peel is one
-  # layer at a time with the impl question asked in between.
+  # *representation*. An opaque type does not reach it: since 2026-09-24 an
+  # opaque type inherits no rendering from its target (checker.resolve_witness,
+  # docs/builtin-privileges-design.md 4), so the only way one gets here is with
+  # an `impl Show` of its own, and that impl is its answer -- at the top level
+  # exactly as one field deep (audit SEM-03 was the two disagreeing). There is
+  # no peel any more, and so no stack to ask a question at every layer of.
   #
   # A `Display` impl on `t` is the type's own answer to this question, so it is
   # asked before any of the rules below -- including the String identity, which
-  # is the language's answer for a type that has none. The question is here
-  # rather than in the opaque arm on purpose: `to_str` recurses into an opaque
-  # target, so asking at the top asks again at every peel layer, which is the
-  # shape SEM-03 says this has to have. `Show[T]` remains the bound, so nothing
-  # becomes renderable that was not; a type variable still renders through its
-  # `Show` witness, the same static-type rule the String line above states.
+  # is the language's answer for a type that has none. `Show[T]` remains the
+  # bound, so nothing becomes renderable that was not; a type variable still
+  # renders through its `Show` witness, the same static-type rule the String
+  # line above states.
   if has_own_display(st, t) {
     display_at(st, e, t)
   } else if t == TyString {
@@ -601,8 +597,6 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
     (st, unit_relation([e], CStr("()"), TyString))
   } else {
     match t {
-      TyOpaque(_, _, _, _, tgt) ->
-        if has_own_show(st, t) { show_at(st, e, t) } else { to_str(st, e, tgt, wit) }
       TyVar(_, _) ->
         match wit {
           Some(w) -> {
@@ -615,17 +609,8 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
     }
   }
 
-## Does `t` have a `Show` impl written on `t` itself -- the same question
-## `show_at` asks before it lets an opaque type fall through to its target.
-fn has_own_show(st: LSt, t: Ty) -> Bool =
-  if has_impl_at(st.impls, SHOW_ID, t) {
-    provides(impl_for(st, SHOW_ID, t), "show")
-  } else {
-    false
-  }
-
-## The same question for `Display`, which only `to_str` asks: a user-facing
-## rendering is never inherited from a target, so there is no fall-through here.
+## Does `t` have a `Display` impl written on `t` itself? Only `to_str` asks:
+## no rendering is inherited from a target, so there is no fall-through here.
 fn has_own_display(st: LSt, t: Ty) -> Bool =
   if has_impl_at(st.impls, DISPLAY_ID, t) {
     provides(impl_for(st, DISPLAY_ID, t), "display")
@@ -2611,13 +2596,9 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
         CImpl(owner_or(imp.owner, st1.owner), SHOW_ID, t, "show"), [x] ++ ds, TyString))
     }
   }
-  # An opaque type with no impl of its own renders as its target: the value
-  # on the other side of the barrier is that target. Placed *after* the impl
-  # check, because an `impl Show[Id]` is exactly the reason to declare one.
-  match t {
-    TyOpaque(_, _, _, _, tgt) -> return show_at(st, x, tgt)
-    _ -> ()
-  }
+  # No opaque arm: an opaque type with no `impl Show` of its own has no
+  # rendering (it used to render as its target, which printed the very
+  # representation the type hides), and the checker refuses it before here.
   if is_ground(t) && expandable(t) {
     let (st1, name) = struct_show_fn(st, t)
     return (st1, CCall(CDirect(st1.owner, name), [x], TyString))

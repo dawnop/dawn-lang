@@ -6,11 +6,18 @@
 # The list literals are annotated rather than inferred: a bare `[1, 2, 3]` is
 # `List[Int]`, and converting it to `List[Meters]` would be a conversion
 # inside an expression, which spec 2.7 does not do.
+#
+# Rendering goes through the target explicitly (`raw` below): since
+# 2026-09-24 an opaque type inherits no `Show` from its target (spec 2.7), so
+# the two spellings no longer render alike and rendering is not part of the
+# twin property. What the case is about is unchanged.
 use std/io
 
 opaque type Meters = Int
 
 fn id[T](x: T) -> T = x
+
+fn raw(m: Meters) -> Int = m
 
 fn pair[T](x: T) -> (T, T) = (x, x)
 
@@ -22,12 +29,12 @@ fn first[T](xs: List[T], fallback: T) -> T =
 
 pub fn main() -> Unit !io = {
   let m: Meters = 3
-  println(to_string(id(m)))
+  println(to_string(raw(id(m))))
   match pair(m) {
-    (a, b) -> println("${a} ${b}")
+    (a, b) -> println("${raw(a)} ${raw(b)}")
   }
   let xs: List[Meters] = [m, m]
   println(to_string(len(xs)))
-  println(to_string(first(xs, m)))
+  println(to_string(raw(first(xs, m))))
   println(to_string(xs == [m, m]))
 }

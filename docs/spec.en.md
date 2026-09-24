@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7c3accf8eb374fce -->
+<!-- doc-check: translation-of docs/spec.md @ 2601c4192493914c -->
 
 # Dawn Language Specification
 
@@ -477,8 +477,20 @@ a `UserId` position. This is the discipline of a newtype, and it also keeps "opa
 decision in the implementation rather than special cases scattered everywhere.
 
 **Opacity blocks the view, it does not change the semantics**: at runtime an opaque type **is** its
-target type — the same representation, the same equality, hashing, ordering and rendering, on both
-backends, at zero cost. `opaque` is a soft keyword; only `opaque type` means anything.
+target type — the same representation, the same equality, hashing and ordering (`Eq`/`Hash`/`Ord`,
+and `Index`/`Iter`, the target's unless the type writes its own), on both backends, at zero cost.
+`opaque` is a soft keyword; only `opaque type` means anything.
+
+**Rendering is the one exception**: an opaque type does **not** inherit its target's `Show` (and so
+not its `Display` either). A relation only answers true/false or a sign and exposes nothing; a
+rendering prints the representation as it is, which is exactly what the type hides. To print one,
+write `impl Show[N]` in the declaring module (and `impl Display[N]` when needed); without it,
+`to_string`, `${…}`, a field under `derive Show` and a `[T: Show]` bound are all compile errors for
+it. (Since 2026-09-24; before that it was inherited, and fourteen handle types in `std` and
+`packages` would print a handle number or internal state. GHC's `GeneralizedNewtypeDeriving` draws
+the same line: it reuses the representation's dictionary, except for `Show`/`Read`, which do not
+look through. The audit and the verdict per type are in
+[builtin-privileges-design.md](builtin-privileges-design.md) §4.)
 
 A generic opaque type's **instance identity** is its declaration identity together with its
 instantiated arguments; the target answers only questions about runtime representation. Even when a
@@ -487,11 +499,12 @@ types; substitution, equality, unification, display and export-surface validatio
 arguments along. "The representation is not public" does not imply "the type parameters are hidden".
 
 > **The criterion for implementers (the alias-substitution test)**: replace `opaque type N = T` in
-> place with `alias N = T`; if some function's answer changes, it is either one of the five things
-> below, or it is a bug. **Only five things** are allowed to see `TyOpaque`: the assignability and
+> place with `alias N = T`; if some function's answer changes, it is either one of the six things
+> below, or it is a bug. **Only six things** are allowed to see `TyOpaque`: the assignability and
 > unification decision (who can convert), impl selection (`head_of`/`impl_at`), symbol naming
-> (`ty_key`/`dict_key`/impl method names), the type name in diagnostics, and export-surface
-> visibility (§3.3: it checks the identity and the explicit arguments, **not** the representation).
+> (`ty_key`/`dict_key`/impl method names), the type name in diagnostics, export-surface
+> visibility (§3.3: it checks the identity and the explicit arguments, **not** the representation),
+> and `Show` witness resolution (the exception above: it does not fall back to the target).
 > Every other function that eats a `Ty` — width, descriptor, slot, boxing, which instruction,
 > whether it can be a constant, whether some trait has an answer — takes the target's answer.
 > The order is fixed too: **ask about identity before representation**. `impl Eq[UserId]` must come
@@ -499,12 +512,14 @@ arguments along. "The representation is not public" does not imply "the type par
 > The mechanised form is in `scripts/opaque-twin/`: every corpus program is run twice, once as
 > written and once with `alias` substituted, and the outputs must agree (a compile error counts as
 > output). Doing this by hand once on 2026-07-27 caught 12 places.
+> Rendering is outside that property because of the exception above; the corpus renders through
+> the target explicitly.
 
 An opaque type can be given its own impls (`impl Show[UserId]`, `impl Display[UserId]`), which take
 precedence over the target type's; the orphan rule counts an opaque type as a local type of the
-module that declares it. "The rendering is the target's too", above, is stated on the premise that
-the type wrote none of its own: `Char` wrote both (`impl Display[Char]` and `impl Show[Char]`,
-§1.5), so neither of its renderings is the `Int`'s while `==`, `<` and hashing still are.
+module that declares it. `Char` wrote both (`impl Display[Char]` and `impl Show[Char]`, §1.5), so
+it can be rendered, and neither of its renderings is the `Int`'s while `==`, `<` and hashing still
+are.
 `scripts/opaque-twin/char.dawn` pins all four, claim by claim, each rendering in both directions:
 equal to the string its impl is defined to produce, and not equal to the `Int`'s.
 
@@ -753,8 +768,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     already exists; nothing becomes renderable that was not.
   - **It cannot be derived.** `derive Show` says "render my structure", while a `Display` is a
     decision about presentation: one per type, hand written.
-  - **An opaque type is asked at every peel layer** (§4.3): with no `Display` on
-    `opaque type A = B`, `B`'s is used; if `A` writes one, `A`'s wins.
+  - **Only the type itself is asked** (§4.3): with no `Display` on `opaque type A = B`, `A` uses
+    its own `Show` and does not borrow `B`'s `Display` (an opaque type inherits no rendering,
+    §2.7).
   The one impl that ships with the language is `impl Display[Char]` (in `std/char`, §1.5; the
   same module writes the other layer's `impl Show[Char]`).
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
@@ -1242,10 +1258,11 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     `to_string(x)`/`${x}` first ask whether the **static type** of `x` has a `Display` impl: if
     it does, that is the rendering; only otherwise do the rest of this section's rules apply
     (including the `String` identity above). Two boundaries:
-    - **An opaque type is peeled one layer at a time, and the question is asked again at each
-      layer.** With no `Display` on `opaque type A = B`, `B`'s is used, and if `B` has none the
-      peel continues. Peeling the whole stack before asking would make a rendering written on an
-      inner layer stop working at the top level, which is the defect audit SEM-03 recorded.
+    - **Only the type itself is asked; nothing is peeled.** An opaque type inherits no rendering
+      from its target (§2.7), so an opaque type that reaches `to_string` always has a `Show` of
+      its own; with no `Display` on `opaque type A = B`, `A` renders through its own `Show` and
+      does not borrow `B`'s `Display`. (Before 2026-09-24 rendering was inherited and the rule
+      here was "peel one layer at a time and ask again at each"; its premise went, and so did it.)
     - **The `Show` layer does not move.** A type that writes a `Display` still renders through
       `Show` when it is nested inside a structure, and a type variable under a `[T: Show]` bound
       still renders through its witness (see above).
@@ -1411,7 +1428,8 @@ let c = rows[1][0]   # chainable, composes with ?/./()
 - Indexing is resolved by the built-in trait **`Index`** (§3.5): the impls for `List`
   (`Idx = Int`) and `Map` (`Idx` = the key type) ship with the language, and **a user type
   gets `[]` by writing one `impl Index`**; a type with no impl is a compile error. An
-  `opaque type` inherits its target type's impl (as with `==`/`${…}`/`for..in`).
+  `opaque type` inherits its target type's impl (as with `==`/`for..in`; rendering is the
+  exception, §2.7).
 - comptime supports `List` indexing (out of range is a compile error).
 - **Read-only** — there is no `xs[i] = v`, and `Index` has no corresponding write method.
   Lists and maps are immutable; a user type, even a mutable one, is not written through `[]`.
