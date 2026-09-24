@@ -847,18 +847,19 @@ test "a broken line-leading alternative recovers at the next arm" {
   }
 }
 
-test "a line-leading pipe cannot start a match arm" {
+test "a line-leading pipe may start a match arm" {
+  # the optional first bar (spec §5.1); it was an "expected a pattern" before
+  # the syntax window
   let src = "fn f(c: Choice) -> Int =\n" ++
     "  match c {\n" ++
     "    | Left(x) -> x\n" ++
     "    Right(y) -> y\n" ++
     "  }"
   let (m, ds) = parse_module(src)
-  assert len(ds) == 1
-  assert ds[0].msg == "expected a pattern"
+  assert ds == []
   match m.decls[0] {
     DFn(f) -> match f.body {
-      EMatch(_, arms, _, _) -> { assert len(arms) == 1 }
+      EMatch(_, arms, _, _) -> { assert len(arms) == 2 }
       _ -> { assert false }
     }
     _ -> { assert false }
@@ -1719,4 +1720,40 @@ test "java test assert with in are contextual keywords" {
   let (m, ds) = parse_module("fn f() -> Unit = {\n  assert(true)\n}")
   assert ds == []
   assert str.contains(rendered("fn f() -> Unit = {\n  assert(true)\n}"), "Assert")
+}
+
+test "a pattern may begin with a bar, and a line-leading bar is never a bitwise or" {
+  # the optional first bar of spec §5.1, in an arm, a let and a nested pattern
+  let src = "fn f(c: C, x: Int) -> Int = {\n  let | (a, b) = (1, 2)\n  match c {\n" ++
+    "    | A\n    | B -> x\n    | D -> 2\n    E(| F | G) -> 3\n  }\n}"
+  let (m, ds) = parse_module(src)
+  assert ds == []
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EBlock(_, tail, _, _) -> match tail {
+        Some(EMatch(_, arms, _, _)) -> {
+          # `x` then a line `| D -> 2` is two arms, not `x | D`
+          assert len(arms) == 3
+          match arms[0].pat {
+            POr(alts) -> { assert len(alts) == 2 }
+            _ -> { assert false }
+          }
+          match arms[0].body {
+            EVar(n, _, _) -> { assert n == "x" }
+            _ -> { assert false }
+          }
+          match arms[1].pat {
+            PCtor(n, _, _, _, _, _, _) -> { assert n == "D" }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+  # a trailing bar still wraps a bitwise or
+  let (_, ds2) = parse_module("fn g(a: Int, b: Int) -> Int =\n  a |\n    b")
+  assert ds2 == []
 }

@@ -1471,7 +1471,22 @@ match shape {
 
 `|` 是 pattern 的最低优先级，递归出现在构造器、记录、元组与列表 pattern 内，并按
 源码顺序收集为扁平的 n-ary or-pattern。`(pat)` 只用于分组，tuple pattern 仍需要逗号。
-`|` 可以放在续行行首，例如 `A\n  | B`；换行后若没有 `|`，pattern 仍开始下一个 match 臂。
+`|` 可以放在续行行首，例如 `A\n| B`；换行后若没有 `|`，pattern 仍开始下一个 match 臂。
+pattern 的**首个 `|` 可写可不写**，与和类型声明（§2.3）同一条规则：`| A | B -> 1` 与 `A | B -> 1` 相同，
+多行或-模式因此可以每支一行、各带竖线，`dawn fmt` 把这些竖线与臂对齐：
+
+```dawn
+fn light(c: Color) -> Int =
+  match c {
+    | Red
+    | Amber -> 0
+    Green -> 1
+  }
+```
+
+行首的 `|` 只属于 pattern：它不续接上一行的按位或（`0 -> x` 换行 `| A -> 2` 是两个臂，不是 `x | A`），
+按位或要跨行时把 `|` 留在行尾，与行首 `-` 是前缀而不续接减法同理（v0.78.0 起）。
+
 运行时选择第一个匹配的 alternative，选中后不在同一 or-pattern 内回溯。match 臂的 guard
 作用于整个 or-pattern，最多执行一次；guard 为 false 时进入下一臂，body 也最多执行一次。
 

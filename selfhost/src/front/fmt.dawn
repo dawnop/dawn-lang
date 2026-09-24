@@ -512,7 +512,13 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         # collapse >=2 blank lines to 1
         out = out ++ [if nl >= 2 { "\n\n" } else { "\n" }]
         let pl = if have_prev_code { prev_code } else { prev }
-        let cont = is_continuation(pl, t, unary, barrow)
+        # a line-leading `|` in a brace is an alternative of a match arm's
+        # pattern (the parser gives a line-leading bar to patterns alone), and
+        # the alternatives line up with the arm instead of stepping in under
+        # it; a bar in a bracket or at a declaration's `=` still continues
+        let arm_bar = t.kind == PIPE && len(openers) > 0 && openers[len(openers) - 1].brace &&
+          not is_cont_ender(pl.kind)
+        let cont = not arm_bar && is_continuation(pl, t, unary, barrow)
         line_indent = indent_of(t, openers, line_indent, cont)
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
@@ -686,9 +692,15 @@ fn is_callable_before_paren(k: TokKind) -> Bool =
 
 # BANG is absent for the same reason as in the lexer's continues_line: a line
 # ending in `!` is a postfix unwrap, and the next line starts a new statement.
+#
+# PIPE is present, as it is in continues_line: since the syntax window a
+# line-leading `|` belongs to patterns alone, so a bitwise or wraps with its
+# `|` at the end of the line, and that line has to read as continued. It used
+# to be missing here while the lexer continued it (SYN-N10): `let a = 6 |` then
+# `1` parsed as one statement and printed as two.
 fn is_cont_ender(k: TokKind) -> Bool =
   k == PLUS || k == MINUS || k == STAR || k == SLASH || k == PERCENT ||
-  k == PLUSPLUS || k == PIPEGT || k == AMPAMP || k == PIPEPIPE ||
+  k == PLUSPLUS || k == PIPEGT || k == PIPE || k == AMPAMP || k == PIPEPIPE ||
   k == AMP || k == CARET || k == SHL || k == SHR || k == USHR ||
   k == EQEQ || k == NEQ || k == LT || k == LE || k == GT || k == GE ||
   k == ARROW || k == LARROW || k == FATARROW || k == EQ || k == DOT || k == NOT
@@ -758,7 +770,7 @@ test "multiline sum types retain their first bar and physical layout" {
   for src in [
     "type Flag =\n  | On\n  | Off\n",
     "type Flag = | On\n  | Off\n",
-    "type Flag = |\nOn\n",
+    "type Flag = |\n  On\n",
     "type Tree[T] = | Node(\n  value: T,\n  next: Tree[T]\n)\n",
     "type Flag = | On\n# next constructor\n  | Off\n",
     "type Flag = | On\nderive Show\n",
@@ -798,15 +810,38 @@ test "single-line type boundaries do not consume the next declaration" {
   }
 }
 
-test "a pattern continuation keeps its leading pipe" {
+test "a multi-line or-pattern lines its bars up with the arm" {
+  # a line-leading bar in a match body is an alternative, never a bitwise-or
+  # continuation (the parser gives it to patterns alone), so it stands where
+  # the arm stands instead of stepping in under it
   let src = "fn f(c: Choice) -> Int =\n" ++
     "  match c {\n" ++
     "    Left(x)\n" ++
     "      | Right(x) -> x\n" ++
+    "    | Up\n" ++
+    "        | Down -> 1\n" ++
     "    Other -> 0\n" ++
     "  }\n"
-  assert fmt_of(src) == src
-  assert fmt_of(fmt_of(src)) == src
+  let want = "fn f(c: Choice) -> Int =\n" ++
+    "  match c {\n" ++
+    "    Left(x)\n" ++
+    "    | Right(x) -> x\n" ++
+    "    | Up\n" ++
+    "    | Down -> 1\n" ++
+    "    Other -> 0\n" ++
+    "  }\n"
+  assert fmt_of(src) == want
+  assert fmt_of(want) == want
+  # inside a bracket, and at a declaration's `=`, a bar still continues
+  let nested = "fn g(c: Choice) -> Int =\n  match c {\n    Some(A\n        | B) -> 1\n    _ -> 0\n  }\n"
+  assert fmt_of(nested) == nested
+  let decl = "type Flag =\n  | On\n  | Off\n"
+  assert fmt_of(decl) == decl
+  # a bitwise or wraps with its bar at the end of the line, and the next line
+  # reads as the continuation it is (the lexer continues it: SYN-N10)
+  let wrap = "fn f() -> Int = {\n  let a = 6 |\n    1\n  a\n}\n"
+  assert fmt_of("fn f() -> Int = {\n  let a = 6 |\n  1\n  a\n}\n") == wrap
+  assert fmt_of(wrap) == wrap
 }
 
 test "a comment between the arrow and the body is transparent" {
@@ -885,10 +920,10 @@ test "the range operator closes up and the spread and rest prefixes do not" {
   # a call or an index ends a value too, so the operand can be either side
   let c = "fn g(xs: List[Int]) -> Int = {\n  for i in lo(xs)..len(xs) { use_it(i) }\n  0\n}\n"
   assert fmt_of(c) == c
-  # A line-leading pattern pipe keeps the same continuation indentation as a
-  # match pattern. The formatter only sees tokens, so this also guards that it
+  # A line-leading pattern pipe lines up the way a match pattern's does, with
+  # the construct it continues. The formatter only sees tokens, so this also guards that it
   # does not invent a for-specific layout rule.
-  let p = "fn each(xs: List[Bool]) -> Unit = {\n  for true\n    | false in xs { () }\n}\n"
+  let p = "fn each(xs: List[Bool]) -> Unit = {\n  for true\n  | false in xs { () }\n}\n"
   assert fmt_of(p) == p
   assert fmt_of(fmt_of(p)) == p
   # the record spread: the space belongs to the `{`, which is not a value end
@@ -1001,7 +1036,7 @@ test "a call hugs its callee even when the callee is not a name" {
   assert fmt_of(e) == e
   # the union survives a line break inside it, and a declared effect's
   # uppercase name is a name like any other
-  let u = "fn s(f: fn() -> Unit !e1) -> Unit !(e1 |\n  Ask) = f()\n"
+  let u = "fn s(f: fn() -> Unit !e1) -> Unit !(e1 |\n    Ask) = f()\n"
   assert fmt_of(u) == u
   # neither of these can be a union, so both are calls
   let z = "fn c(o: Option[fn() -> Int]) -> Int = o!()\n"

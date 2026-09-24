@@ -167,8 +167,8 @@ error: `$` followed by a name is not an interpolation: `$a`
   `PRecord(name, fields, has_rest, …)` / `PQualRecord(qual, name, …)`：花括号是记录模式，圆括号（或裸名）是构造器模式。
   裸名 `C` 与 `C()` 不再区分：「构造器有字段、模式一个子模式也没给也没写 `..`」统一报
   `constructor \`C\` has N field(s); a bare name does not match it`（hint 照旧：写 `C(..)`）。
-- checker 的 `CtorUse` 三值**保留名字，改了来源**：它今天是「正在检查的是哪一种构造器构造」——裸名 `ECtor`、
-  `ERecord` 字面量、`EApply` 于裸名头——由调用方按节点种类给出，不再从 AST 的拼写位读出。它必须存在，
+- checker 的 `CtorUse` 三值**保留名字，改了来源**：它今天是「正在检查的是哪一种构造器构造」（裸名 `ECtor`、
+  `ERecord` 字面量、`EApply` 于裸名头），由调用方按节点种类给出，不再从 AST 的拼写位读出。它必须存在，
   因为有两条规则本来就关于「写的是哪种构造」而不是关于实参：记录用花括号、构造器用圆括号（本节），
   以及裸名是值不是一次构造。删掉它只能把同一个三分拆进三个入口函数、各自复制「解析名字、常量回退、
   未定义构造器提示」那一段（带增量引擎的 read 记账），那是复制不是简化。任务单写「删 CtorUse 三值」，
@@ -232,7 +232,15 @@ match c {
 裁定：**行首 `|` 属于模式，不续接按位或**。按位或要跨行就把 `|` 留在行尾（lexer 的
 `continues_line` 本来就认行尾 `|`）。这与行首 `-` 不续接减法（`parser.lead_op` 不收算术对）同一个理由：
 一个符号在行首有两种含义时，行首只给其中一种。实现：`bor_expr` 不再用 `lead1` 跨换行找 `|`。
-破坏面：全仓编译即知，迁移时报告实数。
+
+破坏面实测：全仓 3 处（`std/gpu.dawn` 两处、`packages/tileir/src/bytecode.dawn` 一处），都是括号里行首 `|`
+续接的按位或，迁成行尾 `|`；std 改动后重生成 `embed/stdsrc.dawn`。行首 `|` 停住解析时，`want` 与
+`primary_expr` 的诊断带一条 hint（`perr_bar`）：「行首 `|` 是 pattern 的分支；按位或要跨行，把 `|` 放在上一行行尾」。
+
+同一刀顺带修 SYN-N10 的 `|` 那一半：fmt 的 `is_cont_ender` 补上 `PIPE`，与 lexer 的 `continues_line` 一致。
+否则迁成行尾 `|` 的按位或，下一行会被 fmt 排成与语句同级（`packages/inflate/src/gzip.dawn` 的 `le32`
+今天就是这样被排错的，本刀一并改对）。行尾 `|` 写法的多行或-模式随之按续行缩进一级；对齐排法是前导 `|` 那一种。
+这改变了 fmt 对若干已有文件的输出（`Emit-Change(fmt)`）。
 
 ### 4.4 负控
 
