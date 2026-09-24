@@ -11,6 +11,12 @@
 > `ty_key` 旁的注释。今天的判据是逐字节的 `selfhost.sha` 一行不动。本文其余内容
 > 是落地记录，保持原样。
 >
+> **2026-09-25：Core golden 整体出树、不再是 CI 门，改为按需**：
+> `scripts/selfhost-core-diff.sh --base <rev>` 在同一目录先后自举两个修订并列出 Core 变了的模块，
+> 纯搬运刀的恒等判据是这份清单为空（或只含声明动了的模块），证据贴在 PR 正文
+> （见 [recorded-numbers-design.md](recorded-numbers-design.md)）。下文提到的 `selfhost.sha`、
+> `--record` 与 `.gitattributes` 守卫都是当时的做法。
+>
 > 勘察基线 **4ae6b61**，文中 file:line 与实测输出均对该提交，已逐条复核——两份勘察
 > 备忘录给的三个关键数字被本文的复测推翻（§1.2），本文用的是复测后的。
 > 前置阅读：[audit/lowered-ir-design.md](audit/lowered-ir-design.md) §3.2/§五

@@ -118,6 +118,17 @@ red build** (REL-02, `scripts/emitchange.sh`).
 > growing, can only be closed by putting golden snapshots in the repository. It
 > is recorded as REL-02 in `docs/codebase-audit.md` and it is not done.
 
+**A pure refactoring shows its identity in the PR body.** When a batch claims to
+change no behaviour (moving declarations, splitting a module, renaming
+internals), paste the output of
+`./scripts/selfhost-core-diff.sh --base <the batch's base>` into the PR body. It
+bootstraps both revisions in one directory, dumps the Core IR of every compiler
+module and of three example programs, and lists the modules whose Core differs,
+with the diff. The claim to check is that the list holds only the modules the
+batch says it moved. Nothing about it is recorded in the tree: until 2026-09-25
+a Core golden was, every compiler commit re-recorded it, and nobody read the
+re-records ([docs/recorded-numbers-design.md](docs/recorded-numbers-design.md)).
+
 **Never add a Claude attribution** (no `Co-Authored-By`, no `Claude-Session`).
 This project is held to open-source standards.
 
