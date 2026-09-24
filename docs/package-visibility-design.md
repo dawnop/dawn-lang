@@ -259,4 +259,24 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
 
 ## 十、实现回填
 
-（实现后填：提交哈希、验收输出摘要、与本文不一致处。）
+落地于分支 `feat/package-visibility`（基线 `b2e19e06`），提交按顺序：设计稿、语言落地、spec、
+checker-corpus、export-surface 契约，外加一个修 export-reads 锚点的小提交。
+
+与上文不一致处，逐条：
+
+- **缺名诊断的形状**。§4.2 写的是一个 `pkg_private_diagnostic` 返回 `Option`；实现改成
+  `pkg_private`（判定）+ `pkg_private_export`（给要记账的读路径的记录）+ `pkg_private_err`
+  （直接报错）。原因是 `scripts/checker-corpus/coverage.py` 只跨同文件 helper 解析措辞、
+  不跟 match 里 `Some(d)` 的绑定，`Option` 形状让三个 `cerr` 点失去可证明的措辞、棘轮红。
+  「no exported type/constructor」两处原有记录保留原字面，覆盖率不变（288/294）。
+- **期望外的锚点**。`scripts/syntax-small-contract/run.sh` 的一个变异体锚在
+  `fn type_decl(p: P, st: St, is_pub: Bool)` 上，`scripts/export-surface-contract/mutate.py` 的
+  `lsp-ignores-audience` 锚在 `AModule(qc.entry.mod_path)` 上，都随改名更新；
+  `incremental-semantics-contract/export-reads.py` 锚在记账值的名字 `Some(diagnostic)` 上，
+  实现保留该名字。
+- **fmt**：`pub (pkg)` 原被打成带空格的形式，`front/fmt.dawn` 加一条「`pub` 后的 `(` 贴紧」。
+- **LSP**：`exports_seen_by` 在 `lsp/server.doc_qcx` 构造 `exports_env` 时一次性施加，
+  lspc/lspq 所有读 `exports_env` 的地方因此都只见本包可见的名字。这一处没有专门的 LSP 契约，
+  它与 checker 共用同一个函数，函数本身由 `pkg-always-visible` 变异体钉住。
+
+Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg)` 的程序逐字不变。
