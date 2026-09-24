@@ -1,6 +1,6 @@
 # 效果窗口：环境效果、效果限定与改名、`catch_panic` 的行、`unsafe_pure` 删除、`main` 只在入口
 
-> 状态：**current**（落地中，分支 `fix/effects-window`，基线 `b2e19e06`）。依据是
+> 状态：**current**（已落地于分支 `fix/effects-window`，基线 `b2e19e06`，落地记录在文末）。依据是
 > `agent-handoff/rulings-20260924.md` 的裁决 4、5，以及协调者 2026-09-24 对改名范围的追加裁决（通用改名，见 §3）。
 > 外部先例调研（带出处）在 `agent-handoff/research-effects-window-20260924.md`，本文只摘结论。
 > 调研原文：`agent-handoff/debt-survey-2026-09-07/02-semantics.md` 的 SPC-02/04/05/06/07/14/22，
@@ -48,7 +48,7 @@ SPC-02 在调研之后已经修了：`da884438`（2026-09-07）把 `runtime/c/da
 
 ### 实现
 
-- `front/effect_name.dawn`：加 `AMBIENT = ["io"]` 与 `ambient(name)`；`declared` 删除（它是拼写判据本身）。
+- `front/effect_name.dawn`：加 `ambient_effects() = ["io"]` 与 `ambient(name)`；`declared` 删除（它是拼写判据本身）。
   parser 的 `[!io]` 绑定者拒绝改读 `ambient`。
 - `check/cx.dawn` `resolve_eff_at`：第一分支 `a == "io"` 改 `effect_name.ambient(a)`；
   落空的大写分支先查类型参数、内建类型、声明的类型（都经已有的 `semantic_reads` 读：
@@ -221,17 +221,20 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 - `--comptime-ffi` 与 route C：没有 `unsafe_pure`，`use java` 调用恒为 `!io`，`const`/comptime 块要求纯，
   route C 从此**不可达**。一个永远不起作用、帮助文本却说它能折叠的开关比没有更糟，同刀删：
   `jvm/jfold.dawn` 整个文件、`CtOpts.ffi`/`jcall`、`interp.dawn` 的反射调用路径与其测试、`main.dawn`/`nmain.dawn` 的开关解析与帮助文本。
-  这一半单独一个提交，便于评审。
+  原计划单独一个提交；实际与 `unsafe_pure` 同一提交，因为 route C 的测试夹具本身就用 `unsafe_pure` 写成，
+  拆开会留下一个测试红的中间提交。`jreflect.invoke_static` 随之无人调用，一并删除；`driver` 里两处
+  「开了 ffi 就不缓存」的分支与两个对应的增量契约变异体（`allow-ffi-cache`、`ignore-ffi`）也删掉。
 - 工具与门禁：`editors/vscode/syntaxes/dawn.tmLanguage.json` 两处、`scripts/checker-corpus/cases/unsafe_pure.*`、
   `coverage.py` 与 `uncovered.txt` 相关行、`scripts/journal-reads/ledger.txt` 两行、`doc-check.py:705` 注释。
-- 文档：spec §6.4 整节删除（后续节号顺延），§1 保留字表去掉 `unsafe_pure`；`spec.en.md` 同步；
+- 文档：spec §6.4 改成墓碑（保留节号，免得全仓 §6.5/§6.6 的引用顺延），§1 保留字表去掉 `unsafe_pure`；`spec.en.md` 同步；
   `docs/pure-ffi-design.md` 头部状态加一行「`unsafe_pure` 与 route C 已删除（本文）」；`docs/README.md` 索引行同步。
   其余历史文档（审计、计划）里的提及是历史记录，不改。
 
 ### 负控
 
-删除前在 `std/list.dawn` 临时加一行 `unsafe_pure { 1 }`：HEAD 报 parse 错（`unsafe_pure` 成了普通标识符，
-后跟 `{` 是语法错误）。记录命令与输出后撤回。
+删除后在 `std/list.dawn` 末尾临时加一行 `pub fn stamped() -> Int = unsafe_pure { 1 }` 并重生成 stdsrc：
+工具链拒绝加载这份 std（`module std/list does not check: undefined function: unsafe_pure`——`unsafe_pure`
+成了普通标识符，`{ 1 }` 被读成尾块实参）。记录输出后撤回。
 
 ### Emit-Change
 
@@ -252,16 +255,19 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 
 - `driver/analyze.dawn`：`LoadedModule` 加 `entry: Bool`，由 `load_entries_over` 按 plan 的目标算出
   （`SourceFile(f)` → `f`；`ProjectDirectory(d)` → `d/src/main.dawn`，按 canon 路径比）。LSP 单文档分析的那一个是入口。
-  body 缓存的身份比较把 `entry` 算进去（与 `mod_path`/`path` 同列）。
+  `entry` 只影响头部检查（`pass_main_check`），不影响任何函数体，所以 body 缓存的作用域键不变；
+  前缀复用比较整个 `LoadedModule`，字段自动算进去。
 - `check/cx.dawn`：`Cx.is_entry_module`，`module_step` 从 `LoadedModule.entry` 设。
 - `passes.pass_main_check`：非入口直接返回。
-- 后端：`main.dawn`、`c/cdriver.dawn`、`jvm/emit.dawn` 的入口判定改读 `cm.cx.is_entry_module`。
+- 后端：`main.dawn`、`c/cdriver.dawn` 的入口判定改读 `cm.cx.is_entry_module`；`jvm/emit.dawn` 只给
+  `class_name == args_owner`（即入口类）生成 `main(String[])` 包装。
+- `Cx.is_entry_module` 与 `is_std_module` 同列进头部产物与 body 产物的「环境不变」判定。
 
 ### 语料
 
-`scripts/checker-corpus` 的项目 case（若语料器只收单文件，则进 `spike-native` 的项目条目）：
-库模块 `fn main() -> Int = 42` 被入口调用，编译运行输出 42；入口模块写 `fn main() -> Int` 仍报两条旧诊断。
-负控：`pass_main_check` 的入口判断删掉 → 库模块那条红。
+`scripts/checker-corpus/cases/main_entry_only.d`：库模块私有 `fn main(x: Int) -> Int`，不报；入口模块
+`fn main() -> Int` 仍报两条旧诊断。负控：把入口判断改成 `if false` → 库模块多出同样两条。
+`scripts/spike-native/library_main`：库模块定义 `fn main(x: Int) -> Int`，入口调用它，两后端输出一致。
 
 ### spec 改动
 
@@ -290,3 +296,28 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 - **三段以上的效果限定名**（`!a.b.Ask`）：模块别名只有一段，`use a/b as ab` 已覆盖；spec 维持「只支持两段」。
 - **改名构造器之外的「连带成员」改名**（类型改名时把构造器一起改）：一个名字一个 `as`，连带改会让一行 `use`
   引入调用方看不见的新名字。
+
+## 落地记录（2026-09-24）
+
+| 节 | 提交 | 负控（先证明会红） |
+|---|---|---|
+| 0 设计 | `22acaa8b` | — |
+| 1 ARCH-N13 | `5dc70e2b` | 静态：`rtclasses` 的 test 读 rtsrc，旧文案在即红 |
+| 2 SPC-07 | `585cddca` | `resolve_eff_at` 查类型三读改成 `None` → `effect_atom_table` 前三行变成 `unknown effect` |
+| 3 SPC-06 id 成员 | `08426888` | `effect_name_clash`：两库同名效果裸引入仍是冲突 |
+| 3 SPC-06 函数/常量 | `a396bc6a` | `spike-native/import_rename` 两后端跑通调用、默认实参、函数值、常量 |
+| 4 SPC-22 | `54fd4c79` | 表项放回 `eff: EIo` → `catch_effects` 多出三条诊断 |
+| 5 SPC-05 | `4edaab14` | `spike-native/fs_real_polymorphic`（旧签名下 `!Fs !Log` 被拒） |
+| 6 裁决 5 | `c9d71030` | std 里写 `unsafe_pure { 1 }` → std 不加载 |
+| 7 SPC-04 | `0dd9edf4` | 入口判断改 `if false` → `main_entry_only` 的库模块多两条 |
+| Core golden | `6514ce58` | — |
+
+实现中的偏离：`ambient_effects()` 是函数而非常量；route C 与 `unsafe_pure` 同一提交（理由见 §6）；
+spec §6.4 留墓碑而非删节；§6.1 的「环境效果」是小节而非新节号。`selfhost/src` 里因 `catch_panic` 而带 `!io`
+的签名（`lsp/server`、`main`、`ir/interp` 等）按种子约束未收窄，下一个 release 推进种子后再做。
+
+SPC-04 的连带：仓里有依赖「依赖序里第一个有 `main` 的模块」的地方。`scripts/incremental-semantics-contract`
+这个包的入口原本是 `src/bench.dawn`，改名为 `src/main.dawn`；十一个增量契约脚本在临时目录里拼项目夹具，
+把带 `pub fn main` 的模块写成别的名字，现在各自多写一个两行的 `src/main.dawn` 转发过去（不改原模块名，
+因为脚本按模块名解析测试输出）。
+
