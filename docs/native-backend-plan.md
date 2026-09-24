@@ -679,7 +679,7 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 | S0.1 | 差分 harness 比 stdout + stderr + 退出码 | ✅ `616d3f7` |
 | S0.2 | 语料 + 手写 `.expect` + `known-red.txt` ratchet | ✅ `616d3f7` 四个语料六条红;`eq_bytes` 后补,八条红在案 |
 | S0.3 | 收回穷尽性检查 | ✅ `c2a891e`。往 `Ty` 插一个探针变体,报错数 **3 → 9**,两个后端都在内(改动前 emitc **一处都没有**) |
-| S0.4 | Core IR golden | ✅ `scripts/selfhost-core-diff.sh` 进 CI:三个程序的全量 dump + 编译器 52 模块的哈希清单 |
+| S0.4 | Core IR golden | ✅ `scripts/selfhost-core-diff.sh` 进 CI:三个程序的全量 dump + 编译器 52 模块的哈希清单。**2026-09-25 起按需**:golden 出树,脚本改为 `--base <rev>` 对比两个修订,不再是 CI 门(见 [recorded-numbers-design.md](recorded-numbers-design.md)) |
 | S0.5 | 自举耗时基线 | ✅ `scripts/selfhost-bench.sh` + `.baseline`(**本地工具,不进 CI**) |
 
 三点要记:

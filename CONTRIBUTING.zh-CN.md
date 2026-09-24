@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ a3871113da3a340f -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ c7513a9974fdfe91 -->
 
 # 怎么在这个仓库里做事
 
@@ -88,6 +88,13 @@
 > 否则你看到的绿是别人的声明挡出来的。#124 把「没人看过的 label 也被豁免」这半
 > 堵死了，剩下的一半——同一个 label 的差异变大——只有 golden 快照进仓库才能关，
 > 记在 `docs/codebase-audit.md` 的 REL-02 里，没做。
+
+**纯重构在 PR 正文里给出恒等证明。** 一个批次声称不改任何行为（搬声明、拆模块、改内部
+命名）时，把 `./scripts/selfhost-core-diff.sh --base <该批次的基线>` 的输出贴进 PR 正文。
+它在同一个目录里先后自举两个修订，dump 编译器全部模块和三个示例程序的 Core IR，列出 Core
+有差异的模块并附 diff。要核对的是：清单里只有这个批次自己说动了的模块。这件事不在树里
+留任何记录：2026-09-25 之前树里有一份 Core golden，每个碰编译器的提交都要重录它，重录的
+内容没人读（[docs/recorded-numbers-design.md](docs/recorded-numbers-design.md)）。
 
 **绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
 
