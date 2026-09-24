@@ -152,7 +152,19 @@ fn want(p: P, st: St, k: TokKind, what: String) -> PR[Token] =
   if at_kind(p, st, k) {
     Ok(adv(p, st))
   } else {
-    Err((st, perr(p, st, "expected " ++ what ++ ", found `" ++ cur(p, st).text ++ "`")))
+    Err((st, perr_bar(p, st, "expected " ++ what ++ ", found `" ++ cur(p, st).text ++ "`")))
+  }
+
+## `perr`, plus the one hint a line-leading `|` needs wherever it stops the
+## parse. Such a bar is a pattern alternative and never continues a bitwise or
+## (see `bor_expr`), so the likeliest author of this error wrapped a bitwise or
+## the way it used to be wrapped; the hint says where the bar goes instead.
+fn perr_bar(p: P, st: St, msg: String) -> Diag =
+  if at_kind(p, st, PIPE) && st.pos > 0 && p.toks[st.pos - 1].kind == NEWLINE {
+    perr_h(p, st, msg, "a line that begins with `|` is a pattern alternative; " ++
+        "to continue a bitwise or on the next line, end this line's predecessor with `|`")
+  } else {
+    perr(p, st, msg)
   }
 
 ## Separator between statements/declarations: at least one NEWLINE (or block end / EOF).
@@ -1558,8 +1570,9 @@ fn let_stmt(p: P, st: St, mutable: Bool) -> PR[Stmt] = {
     kind_ahead(p, st1, 2) == TYPEIDENT
   let or_after_name = (k == IDENT || k == UNDERSCORE) &&
     at_kind(p, lead1(p, adv1(p, st1), PIPE), PIPE)
+  # a leading `|` is a pattern's optional first bar (spec §5.1)
   if k == LPAREN || k == TYPEIDENT || k == LBRACKET || k == INT || k == CHAR ||
-    k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING ||
+    k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING || k == PIPE ||
     qualified_ctor || or_after_name {
       let (st2, pat) = pattern_p(p, st1)?
       if at_kind(p, st2, COLON) {
@@ -1815,10 +1828,17 @@ fn cmp_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
 }
 
 # Bitwise sits between comparison and concat (Rust order, spec §4.3).
+#
+# A `|` that begins a line does not continue a bitwise or: since or-patterns
+# may begin with a bar, `0 -> x` followed by a line `| A -> 2` is two match
+# arms, and a line-leading bar belongs to patterns alone -- the way a
+# line-leading `-` is a prefix and never a subtraction (`lead_op` excludes the
+# arithmetic pair). A bitwise or wraps with the `|` at the end of the line,
+# which the lexer already continues (`continues_line`).
 fn bor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   var (st1, left) = bxor_expr(p, st, nb)?
   while true {
-    let sta = lead1(p, st1, PIPE)
+    let sta = st1
     if not at_kind(p, sta, PIPE) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
@@ -2181,7 +2201,7 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
       "it spreads only in a list-literal element (`[a, ..xs]`), a record base " ++
         "(`Point { ..p }`), a rest pattern (`[x, ..rest]`) or a range (`0..n`)")))
   } else {
-    Err((st, perr(p, st, "expected an expression, found `" ++ t.text ++ "`")))
+    Err((st, perr_bar(p, st, "expected an expression, found `" ++ t.text ++ "`")))
   }
 }
 
@@ -2989,8 +3009,13 @@ fn match_arm(p: P, st: St) -> PR[MatchArm] = {
 
 # ---- patterns ----
 
+## `pattern = ["|"] alt {"|" alt}`: the first bar is optional, as it is before
+## the first constructor of a sum type (spec §2.3, §5.1), so a multi-line
+## or-pattern can put every alternative on its own line behind its own bar.
+## The bar leaves no trace in the tree: `| A` is `A`.
 fn pattern_p(p: P, st: St) -> PR[Pattern] = {
-  let (st1, first) = pattern_atom(p, st)?
+  let st0 = if at_kind(p, st, PIPE) { skip_nl(p, adv1(p, st)) } else { st }
+  let (st1, first) = pattern_atom(p, st0)?
   var st2 = st1
   var alts: List[Pattern] = match first {
     POr(xs) -> xs

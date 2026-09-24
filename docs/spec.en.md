@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d3340dd133a017e4 -->
+<!-- doc-check: translation-of docs/spec.md @ 1835959c2b604437 -->
 
 # Dawn Language Specification
 
@@ -1808,9 +1808,26 @@ to the arm body expression.
 `|` has the lowest precedence in a pattern. It may occur recursively inside constructor, record,
 tuple, and list patterns, and is collected in source order as a flat n-ary or-pattern. `(pat)` is
 grouping only; a tuple pattern still requires a comma. The `|` may start a continuation line, as in
-`A\n  | B`. A newline followed by a pattern without `|` still starts the next match arm.
- At run time
-the first matching alternative is selected, with no backtracking inside that or-pattern. A match-arm
+`A\n| B`. A newline followed by a pattern without `|` still starts the next match arm.
+**A pattern's first `|` is optional**, the same rule as a sum-type declaration's (§2.3): `| A | B -> 1`
+is `A | B -> 1`, so a multi-line or-pattern can give every alternative its own line and its own bar,
+and `dawn fmt` lines those bars up with the arm:
+
+```dawn
+fn light(c: Color) -> Int =
+  match c {
+    | Red
+    | Amber -> 0
+    Green -> 1
+  }
+```
+
+A line-leading `|` belongs to patterns alone: it does not continue a bitwise or from the line above
+(`0 -> x` followed by a line `| A -> 2` is two arms, not `x | A`); a bitwise or that wraps keeps its
+`|` at the end of the line, the way a line-leading `-` is a prefix and never continues a subtraction
+(since v0.78.0).
+
+At run time the first matching alternative is selected, with no backtracking inside that or-pattern. A match-arm
 guard applies to the whole or-pattern and runs at most once. If it is false, matching continues at
 the next arm. The body also runs at most once.
 
