@@ -2,21 +2,41 @@
 # `desc_of` peels, so the field was loaded at the target's width, while the
 # match that picks the comparison and the boxing did not -- and ASM rejected
 # the frame rather than the program failing.
+#
+# The two records used to `derive Show` and print themselves. Since 2026-09-24
+# an opaque type inherits no `Show` from its target (spec 2.7), so a field of
+# one is not derivable-printable and the two spellings no longer render alike;
+# `leg`/`route` below read the fields back out and render them through the
+# target instead, which still loads each field at its width.
 use std/io
 
 pub opaque type Meters = Int
 pub opaque type Name = String
 
-pub type Leg = Leg(d: Meters, label: Name) derive Show
+pub type Leg = Leg(d: Meters, label: Name)
 
-pub type Route = Route(a: Leg, b: Leg) derive Show
+pub type Route = Route(a: Leg, b: Leg)
+
+fn leg(l: Leg) -> String =
+  match l {
+    Leg(d, label) -> {
+      let n: Int = d
+      let s: String = label
+      "Leg(${n}, ${show(s)})"
+    }
+  }
+
+fn route(r: Route) -> String =
+  match r {
+    Route(a, b) -> "Route(" ++ leg(a) ++ ", " ++ leg(b) ++ ")"
+  }
 
 pub fn main() -> Unit !io = {
   let x = Leg(3, "north")
   let y = Leg(3, "north")
   let z = Leg(4, "south")
-  println(to_string(x))
-  println(to_string(Route(x, z)))
+  println(leg(x))
+  println(route(Route(x, z)))
   println(to_string(x == y))
   println(to_string(x == z))
 }

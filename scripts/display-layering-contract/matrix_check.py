@@ -10,27 +10,26 @@ from pathlib import Path
 import sys
 
 
-MUTATIONS = ("drop-display-question", "ask-display-once")
+MUTATIONS = ("drop-display-question", "inherit-display")
 WINS = "display_wins_over_show"
-LAYERS = "display_is_asked_at_every_peel_layer"
+LAYERS = "display_is_not_inherited"
 CONTROL = "show_stays_the_nested_rendering"
 
 OWNERS = {
     "drop-display-question": WINS,
-    "ask-display-once": LAYERS,
+    "inherit-display": LAYERS,
 }
 REDS = {
-    "drop-display-question": (WINS, LAYERS),
-    "ask-display-once": (LAYERS,),
+    "drop-display-question": (WINS,),
+    "inherit-display": (LAYERS,),
 }
 
 BASE = """role\tdrop-display-question\tcounted
-role\task-display-once\tcounted
+role\tinherit-display\tcounted
 owner\tdrop-display-question\tdisplay_wins_over_show
-owner\task-display-once\tdisplay_is_asked_at_every_peel_layer
+owner\tinherit-display\tdisplay_is_not_inherited
 red\tdrop-display-question\tdisplay_wins_over_show
-red\tdrop-display-question\tdisplay_is_asked_at_every_peel_layer
-red\task-display-once\tdisplay_is_asked_at_every_peel_layer
+red\tinherit-display\tdisplay_is_not_inherited
 control\tshow_stays_the_nested_rendering
 """
 
@@ -165,46 +164,46 @@ def self_test() -> None:
             "role\tno-such-mutant\tcounted",
         ),
         "role kind lies": replaced(
-            "role\task-display-once\tcounted",
-            "role\task-display-once\trecorded",
+            "role\tinherit-display\tcounted",
+            "role\tinherit-display\trecorded",
         ),
         "owner assertion lies": replaced(
-            "owner\task-display-once\tdisplay_is_asked_at_every_peel_layer",
-            "owner\task-display-once\tdisplay_wins_over_show",
+            "owner\tinherit-display\tdisplay_is_not_inherited",
+            "owner\tinherit-display\tdisplay_wins_over_show",
         ),
         "owner is claimed by both mutants": replaced(
-            "red\task-display-once\tdisplay_is_asked_at_every_peel_layer",
-            "red\task-display-once\tdisplay_wins_over_show",
+            "red\tinherit-display\tdisplay_is_not_inherited",
+            "red\tinherit-display\tdisplay_wins_over_show",
         ),
         "a red row is dropped": replaced(
-            "red\tdrop-display-question\tdisplay_is_asked_at_every_peel_layer\n", ""
+            "red\tdrop-display-question\tdisplay_wins_over_show\n", ""
         ),
-        "a red row is invented": BASE + f"red\task-display-once\t{WINS}\n",
+        "a red row is invented": BASE + f"red\tinherit-display\t{WINS}\n",
         # the wider mutant claiming the assertion the narrower one reddens
         "owners are swapped": replaced(
             f"owner\tdrop-display-question\t{WINS}\n"
-            f"owner\task-display-once\t{LAYERS}\n",
+            f"owner\tinherit-display\t{LAYERS}\n",
             f"owner\tdrop-display-question\t{LAYERS}\n"
-            f"owner\task-display-once\t{WINS}\n",
+            f"owner\tinherit-display\t{WINS}\n",
         ),
-        "the control is recorded red": BASE + f"red\task-display-once\t{CONTROL}\n",
+        "the control is recorded red": BASE + f"red\tinherit-display\t{CONTROL}\n",
         "control lies": replaced(
             f"control\t{CONTROL}", "control\tdisplay_wins_over_show"
         ),
         "control is duplicated": BASE + f"control\t{CONTROL}\n",
         "control is missing": replaced(f"control\t{CONTROL}\n", ""),
-        "role is missing": replaced("role\task-display-once\tcounted\n", ""),
-        "role is duplicated": BASE + "role\task-display-once\tcounted\n",
+        "role is missing": replaced("role\tinherit-display\tcounted\n", ""),
+        "role is duplicated": BASE + "role\tinherit-display\tcounted\n",
         "owner is missing": replaced(
             "owner\tdrop-display-question\tdisplay_wins_over_show\n", ""
         ),
         "owner is duplicated": BASE + (
             "owner\tdrop-display-question\tdisplay_wins_over_show\n"
         ),
-        "red is duplicated": BASE + f"red\task-display-once\t{LAYERS}\n",
+        "red is duplicated": BASE + f"red\tinherit-display\t{LAYERS}\n",
         "record is unknown": BASE + "note\tnot-a-contract-record\n",
         "role field count is wrong": replaced(
-            "role\task-display-once\tcounted", "role\task-display-once"
+            "role\tinherit-display\tcounted", "role\tinherit-display"
         ),
         "control field count is wrong": replaced(
             f"control\t{CONTROL}", f"control\t{CONTROL}\textra"

@@ -21,14 +21,14 @@ import sys
 # out of the probe, or a new one nobody classified, fails the harness instead of
 # being silently unchecked.
 GROUPS = {
-    # A Display impl decides the top-level rendering, in place of whatever Show
-    # the value would otherwise have gone through: the one it inherits from an
-    # opaque target (Char over Int), one the type wrote itself (Tag), and the
-    # String identity (Inner over String).
+    # A Display impl decides the top-level rendering, in place of the Show the
+    # value would otherwise go through: Char's, Tag's and Inner's, each written
+    # on the type itself.
     "display_wins_over_show": ("top-char", "top-tag", "layer1"),
-    # And the question is asked again at every peel layer of an opaque stack,
-    # rather than once on the type as written.
-    "display_is_asked_at_every_peel_layer": ("layer2", "layer3"),
+    # And it is the type's own: an opaque type with no Display renders through
+    # its own Show, never through a Display one or two layers below it (an
+    # opaque type inherits no rendering from its target, 2026-09-24).
+    "display_is_not_inherited": ("layer2", "layer3"),
     # The control: Display is the top-level rendering and touches nothing else.
     # A value inside a structure still renders through Show, and a value behind
     # a `[T: Show]` bound still renders through its witness.
@@ -103,8 +103,8 @@ BASE_EXPECT = (
     "top-char\ta\n"
     "top-tag\t[redacted]\n"
     "layer1\t<inner>\n"
-    "layer2\t<inner>\n"
-    "layer3\t<inner>\n"
+    "layer2\t<outer>\n"
+    "layer3\t<deep>\n"
     "nested-list\t[97, 98]\n"
     "nested-tag\t[***]\n"
     "nested-inner\t[\"x\"]\n"
@@ -163,7 +163,7 @@ def self_test() -> None:
         parse(BASE_EXPECT + "surprise\t1\n", "expect")
     ))
     must_refuse("a missing label passed validation", lambda: validate_groups(
-        parse(BASE_EXPECT.replace("layer3\t<inner>\n", ""), "expect")
+        parse(BASE_EXPECT.replace("layer3\t<deep>\n", ""), "expect")
     ))
     must_refuse("a line without a tab parsed", lambda: parse("nope\n", "expect"))
     must_refuse("a duplicate label parsed", lambda: parse("a\t1\na\t2\n", "expect"))

@@ -394,29 +394,40 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 这是 newtype 的纪律，也让「不透明」在实现上只是一条判定，而不是散落各处的特判。
 
 **不透明只挡视线，不改语义**：运行期一个不透明类型**就是**它的目标类型——同样的表示、
-同样的相等、哈希、序与渲染，两个后端都如此，零开销。`opaque` 是软关键字，
-只有 `opaque type` 有意义。
+同样的相等、哈希与序（`Eq`/`Hash`/`Ord`，以及 `Index`/`Iter`，自己没写就用目标的），
+两个后端都如此，零开销。`opaque` 是软关键字，只有 `opaque type` 有意义。
+
+**唯一的例外是渲染**：不透明类型**不**继承目标的 `Show`（也就不继承 `Display`）。
+关系只回答真假或符号，不暴露表示；渲染把表示原样印出来，而那正是这个类型要藏的东西。
+要打印就在声明模块写 `impl Show[N]`（需要时再写 `impl Display[N]`）；没写，`to_string`、
+`${…}`、`derive Show` 的字段、`[T: Show]` 约束对它都是编译错误。
+（2026-09-24 起；此前继承，`std` 与 `packages` 的十四个句柄类型因此会把句柄号或内部状态
+印出来。GHC 的 `GeneralizedNewtypeDeriving` 是同一条切分：复用表示的字典，唯独
+`Show`/`Read` 不看穿。审计与逐个类型的处置见
+[builtin-privileges-design.md](builtin-privileges-design.md) §4。）
 
 泛型不透明类型的**实例身份**由声明 identity 与实例化实参共同组成，target 只回答运行期表示。
 即使某个类型参数根本不出现在 target 里，`Phantom[Int]` 与 `Phantom[String]` 仍是两个类型；
 替换、相等、统一、显示与公开面校验都带着这些实参走。「表示不公开」不蕴含「类型参数也隐藏」。
 
 > **给实现者的判据（别名替换法）**：把 `opaque type N = T` 原地换成 `alias N = T`，
-> 若某个函数的答案变了，它要么是下面五件事之一，要么就是 bug。**只有五件事**允许看见
+> 若某个函数的答案变了，它要么是下面六件事之一，要么就是 bug。**只有六件事**允许看见
 > `TyOpaque`：可赋值性与统一判定（谁能转换）、impl 选择（`head_of`/`impl_at`）、
-> 符号命名（`ty_key`/`dict_key`/impl 方法名）、诊断里的类型名，以及公开面可见性校验
-> （§3.3：查 identity 与显式实参，**不查** representation）。
+> 符号命名（`ty_key`/`dict_key`/impl 方法名）、诊断里的类型名、公开面可见性校验
+> （§3.3：查 identity 与显式实参，**不查** representation），以及 `Show` 见证解析
+> （上一段的例外：不落回目标）。
 > 其余每一个吃 `Ty` 的函数——宽度、描述符、槽位、装箱、哪条指令、能不能当常量、
 > 某个 trait 有没有答案——都取目标的答案。
 > 次序也是定的：**先问身份再问表示**，`impl Eq[UserId]` 必须先于「按 Int 比较」，
 > 否则声明它就没意义了。
 > 机器化在 `scripts/opaque-twin/`：每个语料跑两遍，一遍原样一遍换成 `alias`，
 > 输出必须一致（编译错误也算输出）。2026-07-27 用手工做这件事一次抓出 12 处。
+> 渲染因上面的例外不在这个性质里，语料经目标显式渲染。
 
 可以给不透明类型写自己的 impl（`impl Show[UserId]`、`impl Display[UserId]`），它优先于
-目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。上一段「渲染也是目标的」正是
-以「自己没写」为前提：`Char` 两层都写了（`impl Display[Char]` 与 `impl Show[Char]`，§1.5），
-所以它的渲染两层都不是 `Int` 的，而 `==`、`<`、哈希仍然是。`scripts/opaque-twin/char.dawn`
+目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。`Char` 两层都写了
+（`impl Display[Char]` 与 `impl Show[Char]`，§1.5），所以它可以渲染，且两层都不是 `Int` 的，
+而 `==`、`<`、哈希仍然是。`scripts/opaque-twin/char.dawn`
 把这四件事逐条钉住，两个渲染各钉两向：等于 impl 该出的那个串，且不等于 `Int` 的。
 
 > 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
@@ -617,8 +628,8 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     不让任何原本渲染不出来的类型渲染得出来。
   - **不可 derive。** `derive Show` 说的是「按我的结构渲染」，而一份 `Display` 是一个
     呈现决定：一个类型一份，手写。
-  - **opaque type 逐层问**（§4.3）：`opaque type A = B` 上没写 `Display` 时，用 `B` 的
-    那一份；`A` 写了就是 `A` 的。
+  - **只问类型自己**（§4.3）：`opaque type A = B` 上没写 `Display` 时，`A` 用自己的
+    `Show`，不借 `B` 的 `Display`（不透明类型不继承任何渲染，§2.7）。
   语言自带的唯一一份是 `impl Display[Char]`（在 `std/char`，§1.5；同一个模块也写了
   那一层对应的 `impl Show[Char]`）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
@@ -999,9 +1010,10 @@ let area = {
   - **顶层这一层类型可以自己接管，写法是 `impl Display`（§3.5）。**
     `to_string(x)`/`${x}` 先问 `x` 的**静态类型**有没有 `Display` impl：有就用它，
     没有才落到本节其余各条（含上一条的 `String` 恒等）。两条边界：
-    - **opaque type 是逐层剥的，每剥一层重问一次。** `opaque type A = B` 上没写
-      `Display` 时拿到 `B` 的那一份，`B` 也没写就再往下。一次剥到底再问会让写在里层的
-      渲染在顶层失效，那是审计 SEM-03 记下的缺陷。
+    - **只问类型自己，不往下剥。** 不透明类型不继承目标的渲染（§2.7），能进
+      `to_string` 的不透明类型必有自己的 `Show`；`opaque type A = B` 上没写 `Display`
+      时 `A` 走自己的 `Show`，不借 `B` 的 `Display`。（2026-09-24 之前渲染可继承，
+      这里是「逐层剥、每层重问」；前提没了，这条也就删了。）
     - **`Show` 那一层不动。** 写了 `Display` 的类型嵌在结构里仍走 `Show`，
       `[T: Show]` 约束下的类型变量仍走见证（同上条）。
     `Show` 是嵌套那一份、`Display` 是顶层那一份，两个名字对上 Rust 的 `Debug` 与
@@ -1132,7 +1144,8 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
   （panic 语义，同 Rust）；越界/缺键是正常分支时用 `get(xs, i)` / `map.get(m, k)`（返回 `Option`）。
 - 下标由预置 trait **`Index`** 求解（§3.5）：`List`（`Idx = Int`）与 `Map`
   （`Idx = 键类型`）的 impl 随语言提供，**用户类型写一个 `impl Index` 即可支持 `[]`**；
-  没有 impl 的类型是编译错误。`opaque type` 沿用其目标类型的 impl（同 `==`/`${…}`/`for..in`）。
+  没有 impl 的类型是编译错误。`opaque type` 沿用其目标类型的 impl（同 `==`/`for..in`；
+  渲染例外，§2.7）。
 - comptime 中支持 `List` 下标（越界为编译错误）。
 - **只读**——没有 `xs[i] = v`，`Index` 也没有对应的写方法。列表与映射不可变；
   用户类型即使可变也不经 `[]` 写入。

@@ -1,8 +1,8 @@
 # `to_string(x)` and `${x}` are the *unquoted* rendering; `show` is the nested
-# one, which quotes a String. An opaque type is its target at run time, so with
-# nothing of its own to say it renders as its target -- but an `impl Show`
-# written on the opaque name is what the type was declared for, and it wins in
-# every position, the two unquoted ones included.
+# one, which quotes a String. An opaque type renders only through an impl
+# written on its own name -- it inherits no rendering from its target since
+# 2026-09-24 -- and that impl wins in every position, the two unquoted ones
+# included.
 #
 # It used to lose there: `to_string` peeled the whole opaque stack before it
 # asked, saw String, and returned the value verbatim. A redacting `Show` was
@@ -12,10 +12,29 @@
 opaque type Secret = String
 opaque type Name = String
 opaque type Meters = Int
-opaque type Layer = Secret
 
 impl Show[Secret] {
   fn show(x: Secret) -> String = "***"
+}
+
+# A name renders the way its String would: quoted nested, bare at the top level.
+# Both layers have to be written, because nothing is inherited.
+impl Show[Name] {
+  fn show(x: Name) -> String = {
+    let s: String = x
+    show(s)
+  }
+}
+
+impl Display[Name] {
+  fn display(x: Name) -> String = x
+}
+
+impl Show[Meters] {
+  fn show(x: Meters) -> String = {
+    let n: Int = x
+    show(n)
+  }
 }
 
 fn secret_of(s: String) -> Secret = s
@@ -23,8 +42,6 @@ fn secret_of(s: String) -> Secret = s
 fn name_of(s: String) -> Name = s
 
 fn meters_of(n: Int) -> Meters = n
-
-fn layer_of(s: Secret) -> Layer = s
 
 type Card = { who: Name, pin: Secret } derive Show
 
@@ -36,11 +53,8 @@ pub fn main() -> Unit !io = {
   # ... and one field or one element deep, as it always did
   println(to_string(Card { who: name_of("ada"), pin: s }))
   println(to_string([s]))
-  # an opaque type with nothing of its own still renders as its target, and
-  # still unquoted at the top level
+  # the two layers a name wrote: unquoted at the top level, quoted nested
   println(to_string(name_of("ada")))
   println("${name_of("ada")}")
   println(to_string(meters_of(7)))
-  # a second layer with no impl of its own reaches the first layer's
-  println(to_string(layer_of(s)))
 }

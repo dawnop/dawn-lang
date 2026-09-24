@@ -13,8 +13,9 @@
 # The rules, both in `to_str` (selfhost/src/ir/lower.dawn):
 #   - a `Display` impl decides the top-level rendering, in place of the `Show`
 #     the value would otherwise render through;
-#   - the question is asked at every peel layer of an opaque stack rather than
-#     once on the type as written.
+#   - the `Display` is the type's own: an opaque type without one renders
+#     through its own `Show`, never through a `Display` from a layer below
+#     (an opaque type inherits no rendering from its target since 2026-09-24).
 #
 # Why a mutant harness and not just an expectation: `probe.expect` being green
 # says the compiler agrees with it today, not that anything would notice if the

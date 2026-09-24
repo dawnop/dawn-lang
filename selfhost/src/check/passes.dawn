@@ -448,11 +448,14 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
               }
               true
             }
-            # Whether a field can be rendered or ordered is a question about
-            # the value, and an opaque type's value is its target's (spec
-            # 2.7). Below the `impl_at` above, so an `impl Show[Id]` still
-            # answers for the wrapper first.
-            TyOpaque(_, _, _, _, tgt) -> derived_field_ok(cx, tid, own, tgt)
+            # Whether a field can be ordered is a question about the value,
+            # and an opaque type's value is its target's (spec 2.7). Below
+            # the `impl_at` above, so an impl on the wrapper answers first.
+            # Rendering is the exception: an opaque type does not inherit its
+            # target's `Show` (checker.resolve_witness says why), so a field
+            # of one is printable only through an impl written on it.
+            TyOpaque(_, _, _, _, tgt) ->
+              if tid == SHOW_ID { false } else { derived_field_ok(cx, tid, own, tgt) }
             _ -> false
           }
       }

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Break one Display layering rule in a compiler tree copy.
 
-Two mutations, one per rule the batch added to `to_str`:
+Two mutations, one per rule `to_str` holds:
 
   drop-display-question  the Display question is not asked at all, so every
-                         value renders through the Show it did before.
+                         value renders through its Show.
 
-  ask-display-once       the question is asked on the type as written and never
-                         again while an opaque stack is peeled, which is the
-                         `to_str` shape the design rejected (asking inside the
-                         opaque arm instead of above it).
+  inherit-display        an opaque type with no Display of its own borrows one
+                         from any layer below it, which is what the peel did
+                         before 2026-09-24, when an opaque type still inherited
+                         its target's rendering. It is the plausible wrong
+                         answer now: the value renders, just not as its own
+                         `Show` says.
 
 Both are anchored on exact text and refuse to run when the anchor drifts: a
 mutation that silently applied to nothing would report a green mutant, which is
@@ -34,43 +36,31 @@ NO_DISPLAY_QUESTION = """  if t == TyString {
 # Deleting them too would be a second, independent edit, and the rule under test
 # is where the question is asked rather than whether the helpers exist.
 
-OPAQUE_ARM = (
-    "        if has_own_show(st, t) { show_at(st, e, t) }"
-    " else { to_str(st, e, tgt, wit) }\n"
-)
+TO_STR_MATCH = """    match t {
+      TyVar(_, _) ->
+        match wit {"""
 
-OPAQUE_ARM_ONCE = (
-    "        if has_own_show(st, t) { show_at(st, e, t) }"
-    " else { to_str_once(st, e, tgt, wit) }\n"
-)
+# The old peel, as an arm of `to_str`: an opaque type asks every layer below
+# it for a Display before it falls back to its own Show.
+TO_STR_MATCH_INHERITING = """    match t {
+      TyOpaque(_, _, _, _, tgt) ->
+        if has_display_below(st, tgt) { to_str(st, e, tgt, wit) } else { show_at(st, e, t) }
+      TyVar(_, _) ->
+        match wit {"""
 
-# `to_str` with the Display question removed, recursing into itself: reached only
-# from the opaque arm, so the question is asked exactly once, on the type the
-# call site wrote.
-TO_STR_ONCE = """fn to_str_once(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
-  if t == TyString {
-    (st, e)
-  } else if t == TyUnit {
-    (st, CStr("()"))
+HAS_OWN_DISPLAY_DOC = "## Does `t` have a `Display` impl written on `t` itself?"
+
+HAS_DISPLAY_BELOW = """fn has_display_below(st: LSt, t: Ty) -> Bool =
+  if has_own_display(st, t) {
+    true
   } else {
     match t {
-      TyOpaque(_, _, _, _, tgt) ->
-        if has_own_show(st, t) { show_at(st, e, t) } else { to_str_once(st, e, tgt, wit) }
-      TyVar(_, _) ->
-        match wit {
-          Some(w) -> {
-            let (st1, d) = witness_value(st, w)
-            show_through_dict(st1, d, e, t)
-          }
-          None -> show_at(st, e, t)
-        }
-      _ -> show_at(st, e, t)
+      TyOpaque(_, _, _, _, tgt) -> has_display_below(st, tgt)
+      _ -> false
     }
   }
 
 """
-
-HAS_OWN_SHOW_DOC = "## Does `t` have a `Show` impl written on `t` itself"
 
 
 def replace_once(text: str, old: str, new: str, mutation: str, what: str) -> str:
@@ -90,13 +80,13 @@ def main() -> None:
         text = replace_once(
             text, DISPLAY_QUESTION, NO_DISPLAY_QUESTION, mutation, "display question"
         )
-    elif mutation == "ask-display-once":
+    elif mutation == "inherit-display":
         text = replace_once(
-            text, OPAQUE_ARM, OPAQUE_ARM_ONCE, mutation, "opaque arm"
+            text, TO_STR_MATCH, TO_STR_MATCH_INHERITING, mutation, "to_str match"
         )
         text = replace_once(
-            text, HAS_OWN_SHOW_DOC, TO_STR_ONCE + HAS_OWN_SHOW_DOC, mutation,
-            "has_own_show doc comment"
+            text, HAS_OWN_DISPLAY_DOC, HAS_DISPLAY_BELOW + HAS_OWN_DISPLAY_DOC, mutation,
+            "has_own_display doc comment"
         )
     else:
         raise SystemExit(f"unknown mutation: {mutation}")

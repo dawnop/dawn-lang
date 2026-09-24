@@ -18,6 +18,25 @@ opaque type Outer = Inner
 opaque type Deep = Outer
 opaque type Tag = String
 
+# Every opaque type here writes its own `Show`: none inherits one from its
+# target (2026-09-24). Inner's renders the String inside, quoted, the way a
+# String renders nested; Outer's and Deep's are markers, so a rendering that
+# came from a layer below would show.
+impl Show[Inner] {
+  fn show(x: Inner) -> String = {
+    let s: String = x
+    show(s)
+  }
+}
+
+impl Show[Outer] {
+  fn show(x: Outer) -> String = "<outer>"
+}
+
+impl Show[Deep] {
+  fn show(x: Deep) -> String = "<deep>"
+}
+
 impl Show[Tag] {
   fn show(t: Tag) -> String = "***"
 }
@@ -41,14 +60,15 @@ fn tag_of(s: String) -> Tag = s
 fn render[T: Show](x: T) -> String = "${x}"
 
 pub fn main() -> Unit !io = {
-  # display_wins_over_show: over a Show the type wrote itself (both `Char` and
-  # `Tag` write one, and it is not this answer), and over the String identity
+  # display_wins_over_show: over a Show the type wrote itself (`Char`, `Tag`
+  # and `Inner` all write one, and it is not this answer)
   println("top-char\t${'a'}")
   println("top-tag\t${tag_of("x")}")
   println("layer1\t${inner_of("x")}")
 
-  # display_is_asked_at_every_peel_layer: the impl is two and three opaque
-  # layers below the type as written, and neither layer above it carries one
+  # display_is_not_inherited: Inner's Display is one and two opaque layers
+  # below these, and neither layer has a Display of its own, so each renders
+  # through its own Show
   println("layer2\t${outer_of(inner_of("x"))}")
   println("layer3\t${deep_of(outer_of(inner_of("x")))}")
 

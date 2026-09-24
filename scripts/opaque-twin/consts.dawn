@@ -1,6 +1,11 @@
 # Constant-serializability is a question about the representation, so an
 # opaque type is exactly as const-able as its target. It was not: the match
 # had no TyOpaque arm and ended `_ -> false`.
+#
+# Rendering goes through the target explicitly (`raw`/`text` below): since
+# 2026-09-24 an opaque type inherits no `Show` from its target (spec 2.7), so
+# the two spellings no longer render alike and rendering is not part of the
+# twin property. What the case is about is unchanged.
 use std/io
 
 opaque type Meters = Int
@@ -14,11 +19,15 @@ const LABEL: Name = "north"
 const PAIR: (Meters, Name) = (D, LABEL)
 const LEGS: List[Meters] = [D, D]
 
+fn raw(m: Meters) -> Int = m
+
+fn text(n: Name) -> String = n
+
 pub fn main() -> Unit !io = {
-  println(to_string(D))
-  println(to_string(LABEL))
+  println(to_string(raw(D)))
+  println(to_string(text(LABEL)))
   match PAIR {
-    (a, b) -> println("${a} ${b}")
+    (a, b) -> println("${raw(a)} ${text(b)}")
   }
   println(to_string(len(LEGS)))
 }

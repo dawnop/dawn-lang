@@ -5,7 +5,7 @@
 # and what it must flip is the declaration itself.
 #
 # On the opaque side the run pins, against each target, that identity is the
-# target's: `==`, hashing (a Map key) and rendering of a `Tile[F64]`, a
+# target's: `==` and hashing (a Map key) of a `Tile[F64]`, a
 # `Param[F32]` and an `Idx` are those of the Int, the (Int, String) and the
 # Int under them. The phantom parameter is bound from the argument
 # (`raw_of(t)` needs no annotation), which is what the alias twin cannot do:
@@ -46,7 +46,8 @@ pub fn main() -> Unit !io = {
   let c: Tile[F64] = 9
   same("Tile ==", to_string(a == b), to_string(7 == 7))
   same("Tile == across handles", to_string(a == c), to_string(7 == 9))
-  same("Tile rendering", to_string(a), to_string(7))
+  # no rendering claim: since 2026-09-24 an opaque type inherits no `Show` from
+  # its target (spec 2.7), so a handle is not printable at all
   let m: Map[Tile[F64], Int] = map.from([(a, 1), (c, 2)])
   let n: Map[Int, Int] = map.from([(7, 1), (9, 2)])
   same("Tile hash lookup", to_string(map.get(m, b)), to_string(map.get(n, 7)))
@@ -59,7 +60,6 @@ pub fn main() -> Unit !io = {
   let rawr: (Int, String) = (1, "f32")
   same("Param ==", to_string(p == q), to_string(rawp == rawp))
   same("Param == across positions", to_string(p == r), to_string(rawp == rawr))
-  same("Param rendering", to_string(p), to_string(rawp))
   let pm: Map[Param[F32], Int] = map.from([(p, 1), (r, 2)])
   let pn: Map[(Int, String), Int] = map.from([(rawp, 1), (rawr, 2)])
   same("Param hash lookup", to_string(map.get(pm, q)), to_string(map.get(pn, rawp)))
@@ -67,7 +67,6 @@ pub fn main() -> Unit !io = {
   let i: Idx = 3
   let j: Idx = 3
   same("Idx ==", to_string(i == j), to_string(3 == 3))
-  same("Idx rendering", to_string(i), to_string(3))
   same("Idx <", to_string(i < c_idx(4)), to_string(3 < 4))
 
   # the phantom is bound from the argument, no annotation needed

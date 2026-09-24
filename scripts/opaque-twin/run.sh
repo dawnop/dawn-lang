@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # The alias twin: spec 2.6 says `opaque type N = T` and `alias N = T` differ in
 # exactly one thing -- 「谁被允许看穿它」 -- and 2.7 says that at run time an
-# opaque type *is* its target: same representation, same equality, hash, order
-# and rendering. So the two spellings must produce the same output, and that is
-# a property a script can check.
+# opaque type *is* its target: same representation, same equality, hash and
+# order. So the two spellings must produce the same output, and that is a
+# property a script can check.
+#
+# Rendering left the property on 2026-09-24: an opaque type inherits no `Show`
+# from its target (docs/builtin-privileges-design.md 4), so `to_string` of one
+# with no impl of its own is a compile error where the alias prints. The cases
+# render through the target explicitly; the refusal itself is pinned by
+# scripts/checker-corpus/cases/opaque_show.dawn.
 #
 #   ./scripts/opaque-twin/run.sh              # every case
 #   ./scripts/opaque-twin/run.sh str bytes    # just these
