@@ -370,9 +370,10 @@ clean checkout、Core、N/N-1 与 Emit 四类证据缺一不可。单跑 `./bin/
 阶段一（`TyOpaque` 带 `args`）与阶段二（visibility pass）都在 selfhost 里：
 `check/types.dawn` 的 `Audience = AWorld | AStdOnly | AModule(owner)` 与 `audience_covers`
 是唯一的可见性词汇；`AdtI`、`EffectI` 与 `AliasE` 各存一个 `audience` 字段，由**声明模块**
-决定后随 `ModExports` 整体嫁接过去，所以导入方不必重新解释别人的 `pub`；`TraitI` 是四种身份
-记录里唯一本来就同时带 `is_pub` 与 `owner` 的，因此它的 audience 由 `trait_audience` 推导，
-存一份副本只会有机会和导出器读的 `is_pub` 说法不一。校验器是 `check/passes.dawn` 的
+决定后随 `ModExports` 整体嫁接过去，所以导入方不必重新解释别人的 `pub`；`TraitI` 原是四种身份
+记录里唯一由 `is_pub` 与 `owner` 推导 audience 的，`pub(pkg)`（[package-visibility-design.md](package-visibility-design.md)）
+落地后 audience 还取决于声明方的包，导入方推不出来，于是它也改为存 `audience`（2026-09-24）。
+`Audience` 随之多了 `APackage(pkg)` 一档，`AModule` 带上所属包。校验器是 `check/passes.dawn` 的
 `pass_export_surface`，调用点在 `check_module` 的 `pass_main_check` 之后、任何 body 之前。
 
 `Array` 的 `StdOnly` 不是一句约定：`std/pvec` 的 `pub fn to_array` 合法，而同样在 std 里、

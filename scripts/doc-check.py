@@ -360,6 +360,14 @@ SPEC_CONTRACTS = (
         ),
     ),
     (
+        "package visibility boundary",
+        (
+            ("docs/spec.md", "**`pub(pkg)` 声明对同一个包（一个 `dawn.toml` 单元）内的所有模块可见，对包外不可见**"),
+            ("docs/spec.en.md", "**a `pub(pkg)` declaration is visible to every module of the same "
+             "package (one `dawn.toml` unit) and invisible outside it**"),
+        ),
+    ),
+    (
         "failure payload contract",
         (
             ("docs/spec.md", "**载荷契约**（对每个后端）："),
