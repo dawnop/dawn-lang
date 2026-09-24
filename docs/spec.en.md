@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1835959c2b604437 -->
+<!-- doc-check: translation-of docs/spec.md @ 6579e64d930a2dca -->
 
 # Dawn Language Specification
 
@@ -665,13 +665,14 @@ column(kids, align: 1, gap: 12)
   closure; there is no symbol to hang one on) and Java methods take none, each with its own
   refusal.
 
-**Local named functions**: a block may contain a `fn name(params) -> T [!io] = body` statement —
+**Local named functions**: a block may contain a `fn name(params) -> T [!Row] = body` statement —
 essentially "a lambda whose name is visible inside its own body", so it **can recurse** (a self
 tail call compiles to a loop, §12.4), can capture enclosing bindings (by value, same rule as
 lambdas), and can be passed as a value. Parameter types and the return type must be written out
-in full; the effect can only be `!io` or pure (lift to the top level for effect polymorphism);
-type parameters cannot be declared (the enclosing function's type parameters are naturally in
-scope).
+in full; the effect row follows the rule of a written function type (§6.2, rule 8): `!io`, named
+effects, and the effect variables and associated-effect projections the enclosing signature binds
+may be written, but no new effect variable can be introduced; type parameters cannot be declared
+(the enclosing function's type parameters are naturally in scope).
 
 ```dawn
 fn sum(xs: List[Int]) -> Int = {
@@ -1928,6 +1929,14 @@ outside effect position, and is refused everywhere inside one (§6.3).
    and it subtracts only the label it answers. A signature promising `!io` over a variable it binds
    is not a drop: that is containment (§6.6), and the variable still has an evidence slot from that
    signature's binder list.
+8. **A local `fn`'s row follows the same rule as a lambda's and a written function type's**:
+   `fn g() -> Int !Ask = ask()` is legal, and so are `!e` and `!T.E` when the enclosing signature
+   binds them; the same body written as a lambda and as a local `fn` can do the same things. The one
+   difference is that a lambda's row is inferred from its body while a local `fn`'s is a written,
+   fixed promise (as a top-level signature's is, §3.1), so using a label, variable or projection
+   the row leaves out is an error; a local `fn` cannot introduce a new effect variable (it cannot
+   declare type parameters either). Before v0.78.0 a local `fn`'s row could only be `!io` or pure
+   (SPC-19).
 
 ### 6.3 Effect polymorphism
 
@@ -2573,12 +2582,11 @@ each has its own criterion.
   rigid effect has no name for `with handle` to spell.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
-- **Local functions**: a local `fn`'s row is `!io` or pure, and its body may not use an evidence
-  slot held only by an enclosing signature (a named label, effect variable, or associated-effect
-  projection). It is lifted to an ordinary function with no evidence parameter, so reaching an
-  enclosing binding lexically is not the same as holding that evidence at run time. A named label
-  can instead be handled inside its own body; otherwise lift the function to the top level and
-  declare the label, variable, or projection on its own signature.
+- **Local functions**: the rule is §6.2, rule 8. A local `fn` is a closure, its value always
+  carries one evidence pack, and the call builds that pack from the row it wrote, so every label,
+  variable and projection in the row is supplied by the call; one the row leaves out cannot be
+  reached from the body (reaching an enclosing binding lexically is not holding that evidence at
+  run time), which is why the row has to be written in full.
 - **Written function types**: `fn(…) -> T !E` is legal in every `TypeRef` position, including
   parameters, return types, `let` annotations, `alias` targets, record/variant fields, generic
   arguments, tuple elements, and trait / impl method parameter types. A written label reads as

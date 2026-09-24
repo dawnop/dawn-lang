@@ -260,11 +260,23 @@ match c {
 ### 5.2 实现
 
 局部 `fn` 本来就是「名字在自身体内可见的 lambda」（`lower` 里 `TSLocalFn` → `lift_lambda`），函数值恒带一格
-证据包（spec §6.5 实现段）。所以具名行不需要新 ABI：调用点按行建包，体内的效果操作从自己那一格包里读
-（`XEvRead`），与 lambda 完全一样。§6.5 「边界」一段「被提升成一个没有证据参数的普通函数」是旧理由，删掉。
-`check_local_fn` 改为：行 = `resolve_fn_row(effs)`（写出的函数类型用的那一段），体按这个行检查；
-`local_fn_missing_evidence` 与三条 `local_fn_effect*` 诊断随之只剩一种情形：体内用了行里**没写**的标签/变量/投影，
-措辞改为「not declared in `g`'s row」，hint 为「add it to `g`'s row: fn g(...) -> T !(…)」。
+证据包（spec §6.5 实现段），lifted 函数的 `evs` 就是那一格包；非尾自调用经 `self_value` 重建闭包走值调用
+（调用点按行建包，标签取自本帧的包），尾自调用改写成循环（包不变）。所以具名行不需要新 ABI，
+§6.5「边界」一段「被提升成一个没有证据参数的普通函数」是旧理由，删掉。
+
+- `check_local_fn`：行 = `resolve_eff_at(effs)`，即写出来的函数类型用的那一段解析器。解析之前先拒绝
+  「外层签名没有绑定的小写原子」（`enclosing_vars` 取自读参数类型**之前**的 `current_eff_vars`，因为参数类型里
+  首次出现的变量会被那次解析铸出来），报 ``g` cannot introduce the effect variable `!e``；有这条错时体不再被
+  逐原子追责（与旧实现一样，避免同一个行的回声）。
+- `LambdaCx.local_fn` 从 `Option[String]` 改成 `Option[LocalFn]`（名字 + 写出的行）；
+  `local_fn_missing_evidence` 多收一个谓词，行里有这个原子就放行（标签按 id、变量按 id、投影按 (tvar, trait, name)），
+  于是那次读走 lambda 的路径（`XEvRead` 自己的包）。行里没有的照旧报，措辞改为 ``g` uses the effect `Ask`,
+  which its row does not declare``，hint 为「declare it: fn g(...) -> T !Ask」。
+- 体做了 io 而行里没有 io 的判断从 `ae == EIo && eff == EPure` 改成按 io 原子判断（`row_has_io`），
+  hint 给出合并后的行。
+- 负控与证据：`scripts/spike-native/local_fn_effects.dawn`（JVM 与 native 两个后端输出 `48` / `20`，对 `.expect`
+  逐字相等），覆盖直调、非尾自调用、尾自调用、外层效果变量；checker corpus `local_fn` 加三个接受例与一个
+  「写了具名行却做 io」的拒绝例；种子 v0.77.0 对同一探针报 6 条错。
 
 ### 5.3 spec
 
