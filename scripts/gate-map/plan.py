@@ -17,9 +17,11 @@ that tool and runs only the jobs holding a gate that can see the change.
 
 That makes CI two tiers, and the second tier is what keeps the first one
 honest. A push to main still runs every job: this script answers `all` for
-any event that is not a pull request, and release.yml's `verified` guard only
-accepts a successful ci.yml run on the main sha it tags. So a pull request's
-subset is an early answer, never the verdict a release stands on. Whatever
+any event that is not a pull request, and release.yml's `verified` guard
+(scripts/gates-external/release_evidence.py) only accepts a successful
+ci.yml run whose event is `push` and whose branch is main, refusing a pull
+request run of the same sha by its event. So a pull request's subset is an
+early answer, never the verdict a release stands on. Whatever
 the subset misses is found on main, one push later, by the full run.
 
 This imports gatemap rather than parsing its text output. The text is for a

@@ -55,7 +55,7 @@ plan, 3 the bundle was refused (leak or schema), nothing written.
 | `allowed_signers` | the one public key (identity and namespace `dawn-gates`) a signed bundle is verified against |
 | `publish.py` | refuses an invalid or incomplete bundle, signs it, writes the note on `refs/notes/gates`, pushes it, dispatches `verify-external.yml` |
 | `verify_note.py` | reads the note, checks the signature and then the bundle against the commit through `bundle.check`, the code `bundle.py verify` runs |
-| `release_evidence.py` | release.yml's `verified` verdict: a green ci.yml run at the tag's sha, or a `gates/maintainer` success written by verify-external.yml on the default branch (the header lists every check); `--selftest` runs first on every tag |
+| `release_evidence.py` | release.yml's `verified` verdict: a green ci.yml run at the tag's sha triggered by a push to the default branch (a pull request run is a subset and is refused), or a `gates/maintainer` success written by verify-external.yml on the default branch (the header lists every check); `--selftest` runs first on every tag |
 | `steps_lock.py`, `steps.lock.json` | the checked-in expectation of every job family's `run:` steps (issue #167); tree-policy runs `check` on every push |
 
 ## The steps lock: removing a step has to be said
