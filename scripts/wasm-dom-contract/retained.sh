@@ -339,10 +339,16 @@ run_mutant drop-retained-state "$mutant_tree" any
 # Wrong on purpose: publish an uninitialised Root before calling `step`, then
 # roll it back only after `step` returns. Successful turns are unchanged, but a
 # panic skips the rollback and line 5 observes that the old state was lost.
+# The publish sits in `serve`, beside the barrier, rather than inside the
+# pure `advance` closure: that placement needed `unsafe_pure`, which is gone
+# (docs/effects-window-design.md 6), and the observable is the same.
 prepare_mutant commit-before-success
 apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
-  $'  Root(advance: line => {\n    let (replacement, reply) = step(Some(state), line)' \
-  $'  Root(advance: line => {\n    let installed = rooted(state, step)\n    let pending = Root(advance: next_line => first(step, next_line))\n    unsafe_pure { reactor_state_set(pending) }\n    let (replacement, reply) = step(Some(state), line)\n    unsafe_pure { reactor_state_set(installed) }'
+  $'      let attempted = catch_panic(() =>\n' \
+  $'      match current {\n        Some(_) -> reactor_state_set(Root(advance: next_line => first(step, next_line)))\n        None -> ()\n      }\n      let attempted = catch_panic(() =>\n'
+apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
+  $'          Ok(answer) -> answer\n' \
+  $'          Ok(answer) -> {\n            match current {\n              Some(root) -> reactor_state_set(root)\n              None -> ()\n            }\n            answer\n          }\n'
 run_mutant commit-before-success "$mutant_tree" line-five
 
 echo "retained state ok (JVM process + wasm instance, 2 seam mutants + 2/2 production mutants killed)"

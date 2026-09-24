@@ -94,9 +94,6 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## the way in and restores on the way out. `enter_isolated` hands the old frame
 ## back and `leave_isolated` puts it back with one field write, where both used
 ## to copy eight fields by hand through a twin record called EffFrame.
-## (`unsafe_pure` is *not* one of them, though this comment used to say it was:
-## `check_unsafe_pure` hand-saves `used_effects` and `eff_witness` and nothing
-## else, and never goes through here.)
 ##
 ## These nine are exactly the ones that twin listed: the
 ## type is the restore set, so a tenth field added here silently widens what an
@@ -328,7 +325,7 @@ pub type LambdaCx =
 
 ## A fresh checker state for one module.
 ##
-## `is_std_module` -- what opens the std-only builtins, `unsafe_pure` and the
+## `is_std_module` -- what opens the std-only builtins and the
 ## representation modules -- is *proposed* here from the module's name, and
 ## every production caller overwrites it. The name is not evidence: a project
 ## file at `src/std/foo.dawn` is spelled exactly like a bundled module and is
@@ -2141,10 +2138,9 @@ fn resolve_named(
         return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
           TyError)
       }
-      # Reflecting on a class is honestly !io, and an `unsafe_pure` here used
-      # to say otherwise -- vouching not for one static call but for a whole
-      # recursive subsystem. Resolving a type reads the host's class path, so
-      # the pass chain above says !io too; check_module already did.
+      # Reflecting on a class is honestly !io. Resolving a type reads the
+      # host's class path, so the pass chain above says !io too; check_module
+      # already did.
       let (info_cx, j) = java_class_info_read(cx, fqcn)
       return (record_span_at(info_cx, lo, hi, no_trefs()), TyJava(fqcn, j.display))
     }

@@ -43,7 +43,6 @@ def variants():
          'if true { Some(data.admitted) } else { None }', transition),
         ('ignore-source-binding', 'Some(parsed) -> source_snapshot.resolved(parsed, mf.m)',
          'Some(parsed) -> Some(parsed)', transition),
-        ('allow-ffi-cache', 'if cache_bodies && not opts.ffi {', 'if cache_bodies {', comptime),
         ('retain-error-cache', 'if diags != [] {\n    body_cache = None',
          'if false {\n    body_cache = None', comptime),
         ('skip-warm-comptime', 'if len(cx.diags) == 0 {\n      analysis_event',
@@ -100,9 +99,9 @@ def main():
     ]
     if args.self_test:
         parts = [partition(controls, 3, shard) for shard in range(3)]
-        assert [len(part) for part in parts] == [3, 2, 2]
+        assert [len(part) for part in parts] == [2, 2, 2]
         names = [item[0] for part in parts for item in part] + [item[0] for item in observers]
-        assert len(names) == len(set(names)) == 9
+        assert len(names) == len(set(names)) == 8
         assert set(names) == {item[0] for item in controls + observers}
         for part in parts + [observers]:
             subjects = with_positive(source, part)

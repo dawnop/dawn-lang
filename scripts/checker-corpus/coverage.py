@@ -527,8 +527,8 @@ HEADER_BINARY_OPS = (
 
 def body_brace(code, pos, depth=0):
     """First brace belonging to this header, past its complete expression."""
-    # primary_expr's braced forms are block, if, match, comptime and
-    # unsafe_pure. Parentheses and lists contain any braces they own; record
+    # primary_expr's braced forms are block, if, match and comptime.
+    # Parentheses and lists contain any braces they own; record
     # and tail-block suffixes are disabled by the header's `nb` mode. A braced
     # primary may also follow a unary/binary operator, `return` or `=>`.
     if depth >= MAX_PROJECTION_DEPTH:
@@ -565,7 +565,7 @@ def body_brace(code, pos, depth=0):
                     want_primary = False
                     bare_return = False
                     continue
-            if want_primary and word in ("comptime", "unsafe_pure"):
+            if want_primary and word == "comptime":
                 brace = skip_space(code, end)
                 if brace >= len(code) or code[brace] != "{":
                     return -1
@@ -2102,12 +2102,6 @@ fn query(context, name) = {
             [("comptime yes message",), ("comptime no message",)],
         ),
         (
-            "unsafe_pure condition",
-            'if unsafe_pure { marker == "unsafe-key" } { "unsafe yes message" } '
-            'else { "unsafe no message" }',
-            [("unsafe yes message",), ("unsafe no message",)],
-        ),
-        (
             "binary block operand",
             'if false || { true } { "binary yes message" } '
             'else { "binary no message" }',
@@ -2339,11 +2333,6 @@ fn query(context, name) = {
             "comptime branch",
             'comptime { "comptime prefix " ++ if flag { "comptime left" } '
             'else { "comptime right" } }',
-        ),
-        (
-            "unsafe_pure branch",
-            'unsafe_pure { if flag { "unsafe left" } else { "unsafe right" } '
-            '++ " unsafe suffix" }',
         ),
         (
             "block branch",

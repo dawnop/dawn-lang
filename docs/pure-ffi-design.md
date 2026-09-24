@@ -11,7 +11,11 @@
 > Java 调用 + Comptime 接上 std）；阶段4 = 批 A（String 组）/ 批 B（高阶列表）/ 批 C（io 半边 +
 > 排序族）逐批迁移，每批的实测在 §十起的施工日志里。
 >
-> **先读 §十八**：route C 今天要 `--comptime-ffi`、默认关，`unsafe_pure` 在全生态已零使用点；
+> **已删除（2026-09-24，裁决 5）**：`unsafe_pure` 关键字、它的检查、route C 与 `--comptime-ffi`
+> 一并从编译器与 spec 移除（spec §6.4 留墓碑）；删除理由、零使用点核实与重开条件见
+> [`effects-window-design.md`](effects-window-design.md) §6。下文是它存在时的设计记录。
+>
+> **先读 §十八**：route C 当时要 `--comptime-ffi`、默认关，`unsafe_pure` 在全生态已零使用点；
 > 本文前面关于「std 靠 unsafe_pure 转发」的写法都已被 intrinsic 契约取代
 > （[`runtime-intrinsics-design.md`](runtime-intrinsics-design.md)）。§十四那句「现表 46，
 > 且到达端态」是 2026-07-22 的计数，端态那半已被后续推翻——今天的数与推翻它的三个提交

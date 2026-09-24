@@ -34,11 +34,11 @@ use std/map
 use std/set
 use front/token.{Diag}
 use check/tast.{
-  TExpr, TStmt, TFun, TModule, TJavaCall,
+  TExpr, TStmt, TFun, TModule,
   XStr, XLambda, XApply, XJava, XPropagate, XUnwrap, XReturn, XIndex,
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
   TLEExpr, TLESpread, TLEIf,
-  XBinary, XUnary, XIf, XMatch, XBlock, XComptime, XUnsafePure,
+  XBinary, XUnary, XIf, XMatch, XBlock, XComptime,
   XError,
   TSPText, TSPInterp,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
@@ -66,7 +66,6 @@ use ir/lower
 use front/parser
 use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of}
-use check/jsig.{Jsig, JClass, JMethod, jsig_refused}
 
 type CtFrame =
   | FDirect(owner: String, name: String)
@@ -133,44 +132,21 @@ alias ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)]
 
 alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 
-## What a comptime run is allowed to do, and how much of it.
-##
-## `fuel` is a tuning knob. `ffi` is not: it is the capability to reach
-## `eval_java`, which invokes a JDK static method *inside the compiler
-## process*. Compiling a source file must not be a way to run code on the
-## machine doing the compiling, so this is off unless the person running the
-## compiler passes `--comptime-ffi`. An `unsafe_pure` in the source vouches
-## that a call is pure; it does not, and must not, also grant that call the
-## run of the host -- those are promises to different parties.
-##
-## `jcall` is how a granted call actually happens: policy lives here, the
-## reflective invoke lives in `jfold`, and a main that can host it wires
-## `jfold.fold_call` in. The default refuses, so this module -- and every
-## module a JVM-less main pulls in -- carries no `use java`.
-pub type CtOpts = {
-  fuel: Int,
-  ffi: Bool,
-  jcall: fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io
-}
+## How much a comptime run may do. `fuel` is the whole of it since the
+## compile-time Java route went with `unsafe_pure` (docs/effects-window-design.md
+## 6): a `use java` call is `!io`, a const or comptime block is pure, and no
+## source can put the one inside the other, so there is no host call left for
+## a flag to grant.
+pub type CtOpts = { fuel: Int }
 
 pub const DEFAULT_FUEL: Int = 100000000
 
-## The default `jcall`: a compiler with no host JVM wired in. Only reachable
-## when policy said yes (--comptime-ffi) but no main provided the capability.
-pub fn jcall_refused(
-  jc: TJavaCall,
-  args: List[CValue]
-) -> Result[CValue, (String, String)] !io =
-  Err(("compile-time Java calls are not available in this compiler",
-    "this build cannot invoke a host JVM; make this a runtime call instead of a const"))
-
-## Defaults: all the fuel a real compile gets, and no host FFI.
-pub fn ct_default() -> CtOpts =
-  CtOpts { fuel: DEFAULT_FUEL, ffi: false, jcall: jcall_refused }
+## Defaults: all the fuel a real compile gets.
+pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
-pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n, ffi: false, jcall: jcall_refused }
+pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -201,10 +177,7 @@ type ICx = {
   # which `by_owner` is not, since two impls in one module can both define
   # `eq`.
   impl_fns: Map[(Int, String, String), (String, TFun)],
-  syms: Map[Int, Sym],
-  # whether this run may call into the host JVM, and how (see CtOpts)
-  ffi: Bool,
-  jcall: fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io
+  syms: Map[Int, Sym]
 }
 
 # A deliberate constant, not a value derived from the stack. Measured
@@ -1343,68 +1316,16 @@ fn merge_sort(
   Ok((st3, out))
 }
 
-# ---- route C: fold a vouched Java call ----
+# ---- a Java call reached at compile time ----
 
-## The class's simple name, for diagnostics. A string split, not reflection:
-## the messages this feeds must not be a reason to import `jreflect` here.
-fn simple_of(fqcn: String) -> String = {
-  let parts = str.split(fqcn, ".")
-  parts[len(parts) - 1]
-}
-
-## Route C (docs/pure-ffi-design.md): only static methods, only across the
-## scalar/String boundary. The policy checks live here; the marshalling and
-## the reflective invoke live behind `icx.jcall` (see CtOpts) -- `jfold` on a
-## JVM host, a refusal otherwise.
-##
-## There is no `unsafe_pure` check here any more, because Core drops the
-## marker -- lowering treats the block as transparent. The effect system is
-## the enforcement: without an `unsafe_pure` the call is `!io`, and an `!io`
-## expression cannot reach a const or a comptime block in the first place.
-##
-## That enforcement answers "is this call pure?". It does not answer "may the
-## compiler run it?", and `icx.ffi` is what does: reaching this function means
-## invoking a JDK method in the compiler's own process, so it is a capability
-## the person running the compiler grants, never one the source being compiled
-## grants itself. The three limits below (static only, scalar boundary only)
-## are real but they are not a sandbox -- `System.load(String)` is a static
-## method taking a String and returning void.
-fn eval_java(icx: ICx, st: ESt, env: Env, j: CJava) -> ER !io = {
-  let jc = j.call
-  let simple = simple_of(jc.fqcn)
-  if not icx.ffi {
-    return cerrh(st, env, "compile-time Java calls are disabled",
-      "folding this would invoke `" ++ simple ++ "." ++
-        jc.method ++ "` inside the compiler; pass --comptime-ffi to allow it, or " ++
-        "make this a runtime call instead of a const")
-  }
-  if jc.is_ctor {
-    return cerr(st, env, "Java constructors are not available at compile time")
-  }
-  if jc.is_field {
-    return cerr(st, env, "Java static fields are not available at compile time")
-  }
-  if not jc.is_static {
-    return cerrh(st, env, "only static Java methods can be folded",
-      "`" ++ simple ++ "." ++ jc.method ++ "` needs a receiver, and comptime " ++
-        "has no way to build a Java object")
-  }
-  var st1 = st
-  var env1 = env
-  var vals: List[CValue] = []
-  for a in j.args {
-    let (st2, env2, v) = ceval(icx, st1, env1, a)?
-    st1 = st2
-    env1 = env2
-    vals = vals ++ [v]
-  }
-  # a Java call is opaque to the fuel counter, so charge a flat cost
-  let (st3, env3, _) = burn_n(st1, env1, 100)?
-  match icx.jcall(jc, vals) {
-    Ok(v) -> Ok((st3, env3, v))
-    Err((m, h)) -> cerrh(st3, env3, m, h)
-  }
-}
+## Unreachable from any program that checks: a `use java` call is `!io` and a
+## const or comptime block is pure, and nothing in the language vouches the
+## one into the other since `unsafe_pure` was removed
+## (docs/effects-window-design.md 6). It is a refusal rather than a panic
+## because the interpreter is also driven by probes that skip the checker.
+fn eval_java(st: ESt, env: Env, j: CJava) -> ER =
+  cerr(st, env, "a Java call cannot be evaluated at compile time: `" ++ j.call.fqcn ++ "." ++
+      j.call.method ++ "` is io")
 
 # ---- the evaluator ----
 
@@ -1614,7 +1535,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
       }
     CBreak(id) -> Err((st, env, KBreak(id)))
     CContinue(id) -> Err((st, env, KContinue(id)))
-    CForeign(j, _) -> eval_java(icx, st, env, j)
+    CForeign(j, _) -> eval_java(st, env, j)
     # A dictionary is a value here, the same three ways Core builds one: a
     # statically registered singleton, a construction from its parts', and a
     # part read back out of the one a slot body was handed.
@@ -2114,7 +2035,6 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, acc: CtRun) -> CtRun !io =
         None -> acc1
       }
     }
-    XUnsafePure(body, ..) -> walk_expr(icx, fuel, body, acc)
     _ -> acc
   }
 
@@ -2236,9 +2156,7 @@ fn eval_module(
     impls: impls,
     prog_fns: prog_fns,
     impl_fns: impl_fns,
-    syms: tm.syms,
-    ffi: opts.ffi,
-    jcall: opts.jcall
+    syms: tm.syms
   }
   for c in tm.consts {
     # a comptime block inside the initializer folds first
@@ -2298,9 +2216,7 @@ fn probe_icx() -> ICx = {
     impls: cx.impl_table,
     prog_fns: map.empty(),
     impl_fns: no_impls(),
-    syms: no_syms,
-    ffi: false,
-    jcall: jcall_refused
+    syms: no_syms
   }
 }
 
@@ -3002,149 +2918,6 @@ test "`show` is the nested rendering and `to_string` is not" {
   # literal "<value>" the merged arm used to fold in
   assert show_value(VList([VInt(1)])) == None
   assert show_value(VUnit) == None
-}
-
-fn ffi_java_src() -> String =
-  "use java \"java.lang.Math\"\n" ++
-  "const F: Int = unsafe_pure { Math.abs(-5) }\n" ++
-  "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
-  "use java \"java.lang.Long\"\n"
-
-fn nested_ffi_java_src() -> String =
-  "use java \"java.lang.Math\"\n" ++
-  "fn leaf() -> Int = unsafe_pure { Math.abs(-5) }\n" ++
-  "fn outer() -> Int = leaf()\n" ++
-  "const F: Int = outer()\n"
-
-# A hand-written signature oracle for the two classes ffi_java_src touches:
-# these tests exercise the *comptime* refusal, which only fires after the
-# program checks, and checking may not reach for jreflect here — this module
-# must stay compilable without a JVM host. That a pure-Dawn stand-in is
-# enough to check a `use java` program is the point of the `Jsig` seam.
-
-fn fake_jclass(fqcn: String, simple: String) -> JClass =
-  JClass {
-    fqcn: fqcn,
-    simple: simple,
-    display: simple,
-    is_interface: false,
-    is_primitive: false,
-    is_array: false
-  }
-
-fn fake_find_class(fqcn: String) -> Option[JClass] !io =
-  if fqcn == "java.lang.Math" {
-    Some(fake_jclass(fqcn, "Math"))
-  } else if fqcn == "java.lang.Long" {
-    Some(fake_jclass(fqcn, "Long"))
-  } else {
-    None
-  }
-
-fn fake_class_info(fqcn: String) -> JClass !io =
-  match fake_find_class(fqcn) {
-    Some(j) -> j
-    None -> panic("fake jsig: unknown class ${fqcn}")
-  }
-
-fn fake_methods_of(fqcn: String) -> List[JMethod] !io =
-  if fqcn == "java.lang.Math" {
-    [JMethod {
-      name: "abs",
-      param_cls: ["long"],
-      ret_cls: "long",
-      is_static: true,
-      is_varargs: false,
-      is_abstract: false,
-      desc: "public static long java.lang.Math.abs(long)",
-      decl_cls: "java.lang.Math"
-    }]
-  } else if fqcn == "java.lang.Long" {
-    [JMethod {
-      name: "toHexString",
-      param_cls: ["long"],
-      ret_cls: "java.lang.String",
-      is_static: true,
-      is_varargs: false,
-      is_abstract: false,
-      desc: "public static java.lang.String java.lang.Long.toHexString(long)",
-      decl_cls: "java.lang.Long"
-    }]
-  } else {
-    []
-  }
-
-fn fake_jsig() -> Jsig = {
-  let base = jsig_refused()
-  Jsig {
-    ..base,
-    on: true,
-    find_class: fake_find_class,
-    class_info: fake_class_info,
-    methods_of: fake_methods_of
-  }
-}
-
-# the granted-and-folded case lives in jfold's tests: it needs the real
-# reflective hook, and this module must stay compilable without one
-
-test "route C reaches only a refusal when no host hook is wired in" {
-  # policy said yes (ffi: true), but the default jcall is jcall_refused --
-  # the shape a compiler without a JVM host is in
-  let (m, pdiags) = parser.parse_module(ffi_java_src())
-  assert len(pdiags) == 0
-  let env: Map[String, ModExports] = map.empty()
-  # a std-module fixture: unsafe_pure is std-only (LANG-01 step 1)
-  let cx0 = cx_new(Some("std/t"), None)
-  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
-  assert len(cx1.diags) == 0
-  let no_fns: Map[String, TFun] = map.empty()
-  let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, "m",
-    CtOpts { fuel: 1000000, ffi: true, jcall: jcall_refused })
-  assert len(out.diags) == 2
-  assert str.contains(out.diags[0].msg, "not available in this compiler")
-  assert map.get(out.consts, "F") == None
-}
-
-test "route C is refused by default, however well vouched the call is" {
-  # the same source, and the `unsafe_pure` still type-checks -- purity is the
-  # author's claim about the call, not permission to run it in this process
-  let (m, pdiags) = parser.parse_module(ffi_java_src())
-  assert len(pdiags) == 0
-  let env: Map[String, ModExports] = map.empty()
-  # a std-module fixture: unsafe_pure is std-only (LANG-01 step 1)
-  let cx0 = cx_new(Some("std/t"), None)
-  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
-  assert len(cx1.diags) == 0
-  let no_fns: Map[String, TFun] = map.empty()
-  let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
-  assert len(out.diags) == 2
-  assert str.contains(out.diags[0].msg, "compile-time Java calls are disabled")
-  assert str.contains(out.diags[0].hint, "--comptime-ffi")
-  assert map.get(out.consts, "F") == None
-}
-
-test "nested route C refusal keeps its actionable hint before the call chain" {
-  let (m, pdiags) = parser.parse_module(nested_ffi_java_src())
-  assert len(pdiags) == 0
-  let env: Map[String, ModExports] = map.empty()
-  let cx0 = cx_new(Some("std/t"), None)
-  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
-  assert len(cx1.diags) == 0
-  let no_fns: Map[String, TFun] = map.empty()
-  let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, "std/t", ct_fuel(1000000))
-  assert len(out.diags) == 1
-  let hint = out.diags[0].hint
-  assert str.starts_with(hint, "folding this would invoke `Math.abs` inside the compiler;")
-  assert str.contains(hint, "\n\ncomptime call chain (innermost first):")
-  assert str.contains(hint, "at direct `std/t.leaf`")
-  assert str.contains(hint, "at direct `std/t.outer`")
 }
 
 test "fuel exhaustion becomes a diagnostic" {

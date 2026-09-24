@@ -135,7 +135,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 |---|---|---|
 | [bytes-design.md](bytes-design.md) | historical | 一等 `Bytes`（M7 序 4）的动码前设计；权威条文在 spec §9.5.1。 |
 | [cast-interop.md](cast-interop.md) | historical | 把 `as_XXX` 家族收敛成一个泛型 `cast` 的设计。失败行为已被 LANG-02 改成 `Result[T, ForeignError]`，文中相关各处已就地订正。 |
-| [pure-ffi-design.md](pure-ffi-design.md) | historical | `unsafe_pure` 与 builtin→stdlib 迁移的地基，四个阶段于 2026-07-22 关账。 |
+| [pure-ffi-design.md](pure-ffi-design.md) | historical | `unsafe_pure` 与 builtin→stdlib 迁移的地基，四个阶段于 2026-07-22 关账；`unsafe_pure` 与 route C 已于 2026-09-24 删除。 |
 | [sourceview-design.md](sourceview-design.md) | historical | 切片器收敛：内部位置货币整体换成码点索引，UTF-16 只在 LSP 出线边界由 `SourceView` 重建。 |
 | [streaming-design.md](streaming-design.md) | historical | 流式请求体（WebDAV PUT 恒定内存）的草案。 |
 | [streaming-response-design.md](streaming-response-design.md) | historical | 流式响应（GET 代理下载恒定内存）的草案，上一篇 §六留的尾巴。 |

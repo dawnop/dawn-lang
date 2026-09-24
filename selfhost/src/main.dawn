@@ -78,7 +78,6 @@ use c/rc
 use c/infer
 use c/emitc
 use c/cdriver
-use jvm/jfold.{fold_call}
 use jvm/jreflect.{jsig_real, jsig_for, query_probe}
 use check/jsig.{JsigLease}
 use c/emitc.{EmitMod}
@@ -732,10 +731,6 @@ fn usage() -> String = join([
   "                                       platform path separator; repeatable. `build` records",
   "                                       them in the jar manifest's Class-Path. Merged with",
   "                                       anything dawn.toml's [java-deps] resolves to.",
-  "  --comptime-ffi                       let a const or comptime block fold a `use java` call by",
-  "                                       invoking it inside the compiler. Off by default: that is",
-  "                                       running the compiled source's code on this machine, so it",
-  "                                       is yours to grant, not the source's to take.",
   "",
   "environment:",
   "  DAWN_MAVEN_MIRROR                    Maven repository to fetch [java-deps] from",
@@ -751,11 +746,10 @@ fn usage() -> String = join([
   "                                       arguments for its own usage."
 ], "\n") ++ "\n"
 
-## `--comptime-fuel N` / `--comptime-fuel=N` and `--comptime-ffi`;
-## (options, args without the flags).
+## `--comptime-fuel N` / `--comptime-fuel=N`; (options, args without the
+## flags).
 fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console !io = {
   var fuel = DEFAULT_FUEL
-  var ffi = false
   var out: List[String] = []
   var i = 0
   while i < len(rest) {
@@ -772,17 +766,12 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console 
         None -> { cli_error("--comptime-fuel needs a number") }
       }
       i = i + 1
-    } else if a == "--comptime-ffi" {
-      ffi = true
-      i = i + 1
     } else {
       out = out ++ [a]
       i = i + 1
     }
   }
-  # this main runs on a JVM, so a granted `--comptime-ffi` gets the real
-  # reflective hook; a main without a host would leave the refusing default
-  (CtOpts { fuel: fuel, ffi: ffi, jcall: fold_call }, out)
+  (CtOpts { fuel: fuel }, out)
 }
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
@@ -836,7 +825,6 @@ fn run_usage() -> String =
 fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
   var cpjars: List[String] = []
   var fuel = DEFAULT_FUEL
-  var ffi = false
   var closure = false
   var std_dir = "std"
   var target = ""
@@ -865,9 +853,6 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
         Some(n) -> { fuel = n }
         None -> { cli_error("--comptime-fuel needs a number") }
       }
-      i = i + 1
-    } else if a == "--comptime-ffi" {
-      ffi = true
       i = i + 1
     } else if a == "--closure" {
       closure = true
@@ -904,7 +889,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
   }
   RunArgs {
     cpjars: cpjars,
-    opts: CtOpts { fuel: fuel, ffi: ffi, jcall: fold_call },
+    opts: CtOpts { fuel: fuel },
     closure: closure,
     std_dir: std_dir,
     target: target,
@@ -1101,12 +1086,11 @@ fn peek_target(rest: List[String]) -> String = {
     let a = rest[i]
     if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" {
       i = i + 2
-    } else if a == "--native" || a == "--check" || a == "--comptime-ffi" ||
-      a == "--closure" {
-        i = i + 1
-      } else {
-        return a
-      }
+    } else if a == "--native" || a == "--check" || a == "--closure" {
+      i = i + 1
+    } else {
+      return a
+    }
   }
   ""
 }
@@ -2624,7 +2608,7 @@ test "`dawn run` stops taking options at the target" {
     ()
   }) == (Some(2), usage, "")
   assert cli_read(() => {
-    let _ = parse_run_args(["prog.dawn", "--comptime-ffi"])
+    let _ = parse_run_args(["prog.dawn", "--closure"])
     ()
   }) == (Some(2), usage, "")
 }

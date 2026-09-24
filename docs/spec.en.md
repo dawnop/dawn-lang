@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 047782666b5a3e00 -->
+<!-- doc-check: translation-of docs/spec.md @ a5bcf057e94af5fd -->
 
 # Dawn Language Specification
 
@@ -69,7 +69,7 @@ values use `lower_snake_case` (`[a-z][a-z0-9_]*`), types use `UpperCamelCase`
 fn let var type alias const use java pub
 match if else for in while with
 return break continue
-comptime unsafe_pure test assert
+comptime test assert
 trait impl effect
 true false not
 ```
@@ -1958,66 +1958,18 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   and the result can be called in a pure context.
 - Instantiation at the call site: in `map(xs, println)`, `e = io`, so the whole call is io.
 
-### 6.4 Escape hatch: `unsafe_pure` (std only)
+### 6.4 (removed) `unsafe_pure`
 
-`unsafe_pure { <expression> }` is the expression block for **pure FFI**: the author guarantees the
-wrapped expression is pure, and on that basis the type system **masks** its effect from `!io` **to
-pure**, so one host interop call can support a pure function. For the design see
-[`docs/pure-ffi-design.md`](pure-ffi-design.md).
-
-**Not available to user code (narrowed 2026-07-30, LANG-01)**: this stamp unconditionally erases an
-effect the checker had proved, and every inference that purity licenses (folding, reordering,
-dropping calls) will believe it — that is a soundness hole, and `design.md`'s original verdict was
-already "the unsafe escape is not opened to user code". It is legal only inside a bundled std
-module (`is_std_module`); appearing in a user module is a compile error. std is the only code that
-ships with the compiler, bootstraps with it and is guarded by the same N vs N−1 differential
-comparison — the guarantee is only reconciled by someone if it is kept there. If a pure wrapper
-really is needed outside std, it should become an std function (no escape valve: giving one would
-be the same as not narrowing).
-
-```dawn
-use java "java.lang.Math"
-
-pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # legal only inside an std module
-```
-
-> **And std does not use it today either.** The example above used to be real code in `std/str`;
-> today std has not one `unsafe_pure` and not one `use java` — those operations have become part of
-> the **intrinsic contract** (§11), honoured by the backend instead of vouched for one call site at
-> a time. So `unsafe_pure` has **zero use sites** in the whole ecosystem: it is kept as a mechanism
-> for future std low-level wrappers, not as language surface.
-
-What is wrapped must be a **static method call**: Dawn's native types (String/List/Bytes/Map/Set)
-are not Java types, so an instance call like `s.substring(…)` does not work today
-(`pure-ffi-design.md` §9).
-
-- **It changes only the effect, it does not relax typing**: type checking and overload resolution
-  inside the block proceed as usual; the only dimension covered is "effect".
-- **Masking an effect variable is refused**: if an effect-polymorphic call appears inside the block
-  (`!e`, such as higher-order `map`/`fold`), that is an error — masking it to pure is a lie, and
-  when `e = io` even the value cannot be pinned down. This guard rail forces higher-order code onto
-  the right path, "pure Dawn recursion over first-order pure primitives" (§6.3), so `unsafe_pure`
-  only ever appears on the lowest-level first-order wrappers.
-- **Redundant is an error**: if the block is already pure (no io) → `redundant unsafe_pure` is
-  reported, which guarantees every `unsafe_pure` carries payload and that `grep unsafe_pure` is the
-  complete trust list.
-- **Unsoundness**: this is a hole you can lie through (the name is barbed as a warning). Mitigation
-  is the greppable name + the redundancy lint + a two-layer structure that converges the guarantee
-  onto a very small number of first-order primitives; the compiler does not verify Java purity (it
-  cannot).
-- **Transparent at run time**: codegen emits the inner expression directly, with no run-time marker
-  of any kind.
-- **Compile-time folding (route C) needs `--comptime-ffi`, off by default**:
-  `const A: Int = unsafe_pure { Math.max(3, 7) }` folds to 7, but only when that flag is on. Two
-  further restrictions: only **static** methods are reflected, and the boundary types are limited
-  to `Int/Float/Bool/String/Unit`.
-- **Purity and permission are two things** (split 2026-07-27): `unsafe_pure` once doubled as route
-  C's licence, so "I guarantee this call is pure" got read along the way as "the compiler may run
-  it inside its own process". The former is the author's assertion about the **program**, the
-  latter is a demand on **the machine compiling this source** — different victims, so they should
-  not share one notation. None of these three gates is a sandbox: `System.load(String)` is static,
-  takes a String, returns void. So the gate is opened by **the person running the compiler**, not
-  by **the source being compiled**.
+This section used to define `unsafe_pure { <expression> }`: an expression stamp, legal only inside
+std, that masked `!io` to pure, together with the compile-time Java folding it licensed (route C)
+and the `--comptime-ffi` switch. It was removed on 2026-09-24 along with the keyword (ruling 5): it
+had zero use sites in the whole ecosystem, and what it carried — "one host call supports a pure
+function" — is carried on the **declaration side** by the intrinsic contract (§11): a primitive's
+effect row ships with the compiler and is guarded by the bootstrap and the differentials, rather
+than vouched for one call site at a time. `unsafe_pure` is an ordinary identifier from now on. The
+design and the reasons for removal are in [`docs/pure-ffi-design.md`](pure-ffi-design.md) and
+[`docs/effects-window-design.md`](effects-window-design.md) §6. The section number is kept so that
+references to §6.5 and §6.6 across the tree do not shift.
 
 ### 6.5 Named effects and `with handle`
 
@@ -2582,8 +2534,6 @@ each has its own criterion.
   value's type and the call site supplies the evidence. An **effect operation itself** cannot: an
   operation call is "read the evidence field + call the closure", so there is no function symbol to
   take, and the diagnostic says so. Write it as a lambda (`() => ask()`).
-- `unsafe_pure` masks io only, **not labels**: labels are the input to evidence synthesis, and
-  masking one breaks the parameter.
 - **Effect-polymorphic code forwards, it does not install handlers**: `with handle E` names one concrete
   effect syntactically, so the point where a handler is installed is always monomorphic. A `!e` in
   a signature can only pass the row along; installing a handler means writing the effect's name.
@@ -4037,7 +3987,7 @@ error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
 
 The separator itself is not forwarded. Every token after it reaches the program's `args()`
 verbatim and without further interpretation, including an empty string, `--`,
-`--comptime-ffi`, and `-o`. `args()` is whole-program input: whether the call is in the entry
+`--closure`, and `-o`. `args()` is whole-program input: whether the call is in the entry
 module or any dependency module, it returns the same list supplied when that program was
 started. The JVM and native drivers keep independent parsers and are held
 to one absolute stdout/stderr/exit contract; see `run-argv-boundary-design.md` for the full

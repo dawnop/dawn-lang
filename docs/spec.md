@@ -59,7 +59,7 @@
 fn let var type alias const use java pub
 match if else for in while with
 return break continue
-comptime unsafe_pure test assert
+comptime test assert
 trait impl effect
 true false not
 ```
@@ -1585,50 +1585,14 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   规范化为 `!io`；两者皆纯则规范化为纯，结果可在纯上下文调用。
 - 调用点实例化：`map(xs, println)` 中 `e = io`，故整个调用是 io。
 
-### 6.4 逃生门：`unsafe_pure`（仅限 std）
+### 6.4 （已删除）`unsafe_pure`
 
-`unsafe_pure { <表达式> }` 是**纯 FFI** 的表达式块：作者担保被包裹的表达式为纯，
-类型系统据此把它的效果由 `!io` **屏蔽为 pure**，于是一个宿主互操作调用可以支撑一个
-纯函数。设计见 [`docs/pure-ffi-design.md`](pure-ffi-design.md)。
-
-**用户代码不可用（2026-07-30 收窄，LANG-01）**：这个戳无条件抹掉检查器证明过的效果，
-而纯性许可的一切推理（折叠、重排、省略调用）都会相信它——这是健全性的口子，
-`design.md` 的原始裁决本就是「unsafe escape 不向用户代码开放」。它只在捆绑 std 模块内
-合法（`is_std_module`）；用户模块中出现即编译错误。std 是唯一随编译器一起发布、
-一起自举、一起被 N vs N−1 差分守护的代码——担保收在那儿才有人对账。
-真有 std 之外的纯包装需求，它应该成为一个 std 函数（不给逃生阀：给了等于没收窄）。
-
-```dawn
-use java "java.lang.Math"
-
-pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # 仅 std 模块内合法
-```
-
-> **而 std 今天也不用它。** 上面这个例子曾经是 `std/str` 的真实写法；今天 std 一处
-> `unsafe_pure`、一处 `use java` 都没有——那些操作已成为 **intrinsic 契约**的一部分（§11），
-> 由后端负责兑现，而不是由调用点逐个作保。所以 `unsafe_pure` 在整个生态里**零使用点**：
-> 留着它是给未来 std 底层包装的机制，不是语言表面。
-
-被包裹的必须是**静态方法调用**：Dawn 原生类型（String/List/Bytes/Map/Set）不是 Java 类型，
-`s.substring(…)` 这种实例调用今天走不通（[`pure-ffi-design.md`](pure-ffi-design.md) §九）。
-
-- **只改效果，不放松类型**：块内类型检查、重载消解一律照常；被盖的只有「效果」这一维。
-- **拒绝屏蔽效果变量**：块内若出现效果多态调用（`!e`，如高阶 `map`/`fold`），报错——
-  盖成纯即撒谎，且 `e = io` 时值都定不下来。这条护栏把高阶代码逼向「纯 Dawn 递归 over
-  一阶 pure 原语」的正道（§6.3），故 `unsafe_pure` 只会出现在最底层一阶包装上。
-- **多余即报错**：块内本就纯（无 io）→ 报 `redundant unsafe_pure`，保证每处 `unsafe_pure`
-  都是载荷性的、`grep unsafe_pure` 即完整信任清单。
-- **不健全性**：这是可撒谎的口子（名字带刺以示警）。缓解靠具名可 grep + 多余 lint +
-  两层结构把担保收敛到极少数一阶原语；编译器不验证 Java 纯度（做不到）。
-- **运行期透明**：codegen 直接生成内层表达式，无任何运行期标记。
-- **编译期折叠（route C）需要 `--comptime-ffi`，默认关**：`const A: Int = unsafe_pure { Math.max(3, 7) }`
-  折叠为 7，但只在这个 flag 打开时。限制另有两条：只反射**静态**方法，边界类型限
-  `Int/Float/Bool/String/Unit`。
-- **纯度与许可是两件事**（2026-07-27 分家）：`unsafe_pure` 曾同时充当 route C 的许可证，
-  于是「我担保这个调用是纯的」被顺带读成「编译器可以在自己的进程里跑它」。前者是作者对
-  **程序**的断言，后者是对**编译这份源码的那台机器**的索取——受害人不同，就不该同一个记号。
-  这三道闸都不是沙箱：`System.load(String)` 就是静态、String 入参、void 返回。故门由
-  **运行编译器的人**开，不由**被编译的源码**开。
+本节曾定义 `unsafe_pure { <表达式> }`：一个只在 std 内合法、把 `!io` 屏蔽为纯的表达式戳子，
+以及随它而来的编译期 Java 折叠（route C）与 `--comptime-ffi` 开关。2026-09-24 连同关键字一起删除
+（裁决 5）：它在整个生态里零使用点，而它承担的「一个宿主调用支撑一个纯函数」已经由 intrinsic 契约
+在**声明侧**承担（§11）——一个原语的效果行由编译器随自身发布，受自举与差分守护，不由调用点逐个作保。
+`unsafe_pure` 从此是普通标识符。设计与删除理由见 [`docs/pure-ffi-design.md`](pure-ffi-design.md)
+与 [`docs/effects-window-design.md`](effects-window-design.md) §6。节号保留，免得全仓的 §6.5、§6.6 引用顺延。
 
 ### 6.5 具名效果与 `with handle`
 
@@ -2100,7 +2064,6 @@ native 上是停下那条栈、换另一条来跑，两者不同是刻意的。�
 - **函数值**：带标签的具名函数可以当值传，行进入值的类型，调用点供证据。
   **效果操作本身**不能：操作调用是「读证据字段 + 调闭包」，没有可取的函数符号，
   诊断也是这么说的。写成 lambda（`() => ask()`）即可。
-- `unsafe_pure` 只遮 io，**不遮标签**：标签是证据合成的输入，遮了就断参数。
 - **效果多态代码能转发、不能装 handler**：`with handle E` 在语法上就点名一个具体效果，
   所以 handler 的安装点永远是单态的。签名里的 `!e` 只能把行传下去，装 handler 要写出
   效果的名字；同一堵墙的另一面是 `pub fn main` 的 labels 必须为空。
@@ -3217,7 +3180,7 @@ error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
 ```
 
 分隔符自身不转发；其后的 token 不再解释，逐字原样进入程序的 `args()`，包括空串、`--`、
-`--comptime-ffi` 与 `-o`。`args()` 是整程序输入：无论调用写在入口模块还是任意依赖模块，
+`--closure` 与 `-o`。`args()` 是整程序输入：无论调用写在入口模块还是任意依赖模块，
 都返回启动该程序时传入的同一份列表。JVM 与 native 驱动各自实现 parser，以共同的绝对
 stdout/stderr/exit 契约保持一致；完整理由见 `run-argv-boundary-design.md`。
 
