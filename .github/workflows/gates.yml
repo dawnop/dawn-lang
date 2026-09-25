@@ -765,14 +765,20 @@ jobs:
         run: python3 scripts/gate-map/plan.py --check-wiring --selftest
 
       # The evidence tier (the plan job's first step) and release.yml's guard
-      # read one module, release_evidence.py. Its refusals are the whole of
+      # read one module, release_evidence.py, and publish.py --rerun-ci is
+      # what re-runs ci once a status lands. Their refusals are the whole of
       # the tier's safety, so they are held on every push rather than only
       # when a tag is cut: a status by a person, a target_url at another run,
-      # an evidence-tier run standing in for a full one. It runs against a
-      # stub API, with no network: 0.03s locally.
+      # an evidence-tier run standing in for a full one, a failed verify
+      # re-running ci. Both run against stubs, with no network and no key:
+      # 0.03s and 0.02s locally. Only publish.py's --rerun-ci half runs
+      # here: its signing half calls ssh-keygen, which exits 255 under a uid
+      # with no passwd entry, and that is how the external runner executes
+      # every job (docs/gates-external-design.md, non-root execution).
       - name: the external evidence readers keep their refusals
         run: |
           python3 scripts/gates-external/release_evidence.py --selftest
+          python3 scripts/gates-external/publish.py --selftest-rerun-ci
 
       # Issue #167: a reshard moves run steps between the shards of one job
       # family, and "no gate was dropped" was a claim nothing checked. This
