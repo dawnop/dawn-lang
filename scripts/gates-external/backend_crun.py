@@ -243,6 +243,11 @@ class CrunBackend:
 
     def prepare(self):
         plan = gatesplan.plan_at(str(self.repo), self.tree)
+        # the seed this commit pins: a pack built for an older one verifies
+        # green row by row and then sends every toolchain step to the network
+        self.seed_tag = subprocess.run(
+            ["git", "-C", str(self.repo), "show", f"{self.tree}:scripts/seed-release.txt"],
+            check=True, capture_output=True, text=True).stdout.strip()
         stage = self.stage_root / "jobs" / f"{self.tree}-{self.tools_tag}"
         self.stage = stage
         t0 = time.monotonic()
@@ -308,16 +313,19 @@ class CrunBackend:
     def _verify_remote(self, stage, sync):
         py = self._python()
         script = (f"if [ -x {py} ]; then exec {py} -B {self.tree_remote}/tools/inputs.py verify "
-                  f"--prefix {self.remote}; else echo 'no prefix python yet'; exit 1; fi")
+                  f"--prefix {self.remote} --seed-tag {shlex.quote(self.seed_tag)}; "
+                  f"else echo 'no prefix python yet'; exit 1; fi")
         return self._crun(stage, self._envi() + ["bash", "-c", script], "inputs-verify", sync=sync)
 
     def _ship_inputs(self):
         """Hard links to the local prefix's inputs/, pushed to P/inputs by crun."""
         local_inputs = self.local_prefix / "inputs"
         if subprocess.run([sys.executable, "-B", str(HERE / "inputs.py"), "verify", "--prefix",
-                           str(self.local_prefix)], capture_output=True).returncode != 0:
-            raise SystemExit("crun backend: the local input pack does not verify; "
-                             "run inputs.py build first")
+                           str(self.local_prefix), "--seed-tag", self.seed_tag],
+                          capture_output=True).returncode != 0:
+            raise SystemExit(f"crun backend: the local input pack does not verify for seed "
+                             f"{self.seed_tag}; run inputs.py build --repo <a checkout at "
+                             f"{self.tree}> first")
         stage = self.stage_root / f"inputs-{self.run_id}"
         shutil.rmtree(stage, ignore_errors=True)
         subprocess.run(["cp", "-al", str(local_inputs), str(stage)], check=True)
