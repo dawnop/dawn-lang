@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, raw, header, headers_all, query, query_all, param, param_segs, body_text, with_header, valid_header_name, valid_header_value, escape_field}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, valid_header_name, valid_header_value, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -1069,16 +1069,19 @@ test "the four no-content status classes carry no body, whatever the handler bui
 test "response_problem passes what can travel and names what cannot" {
   assert response_problem(text(200, "ok")) == None
   assert response_problem(with_header(text(200, "ok"), "X-A", "a b\tc")) == None
-  # content_type is handed to headers.set unchecked: raw/binary/streaming take
-  # it as a parameter and no constructor validates it, so this is the one
-  # unvalidated path that needs no record literal to reach
-  match response_problem(raw(200, "text/plain\r\nX-Evil: 1", "")) {
+  # content_type is handed to headers.set unchecked here; the constructors
+  # refuse it now, so only a record literal reaches this far
+  match response_problem(Response {
+    status: 200, content_type: "text/plain\r\nX-Evil: 1", headers: [], body: Text(""),
+  }) {
     Some(p) -> { assert str.contains(p, "illegal Content-Type") }
     None -> { assert false }
   }
   # the gap between the two predicates: the JDK's checkValue permits an
   # obs-fold ("\r\n" + SP), valid_header_value refuses it
-  match response_problem(raw(200, "text/plain\r\n x", "")) {
+  match response_problem(Response {
+    status: 200, content_type: "text/plain\r\n x", headers: [], body: Text(""),
+  }) {
     Some(p) -> { assert str.contains(p, "illegal Content-Type") }
     None -> { assert false }
   }
@@ -1115,7 +1118,9 @@ fn folded_header_response() -> Response =
 test "a response carrying a header that cannot travel is withheld, not written" {
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/folded", ex => write_response(ex, folded_header_response()))
-  srv.createContext("/ctype", ex => write_response(ex, raw(200, "text/plain\r\n x", "ok")))
+  srv.createContext("/ctype", ex => write_response(ex, Response {
+    status: 200, content_type: "text/plain\r\n x", headers: [], body: Text("ok"),
+  }))
   srv.createContext("/ok", ex => write_response(ex, text(200, "ok")))
   srv.start()
   let port = srv.getAddress()!.getPort()

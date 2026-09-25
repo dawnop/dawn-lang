@@ -38,7 +38,7 @@ Ktor 把 `Transfer-Encoding` 从用户手里拿走（`UnsafeHeaderException`）�
 | W1 | 四个 seam 收进包内 | `pub` → `pub(pkg)`；manifest `name = "web5"`、`version = "5.0.0"`，同一提交 |
 | W2 | opaque `Response` | `pub(pkg) type ResponseRep` + `pub opaque type Response = ResponseRep`；只读访问器 `response_status`/`response_content_type`/`response_headers`/`response_body`；`pub(pkg) fn response_rep` 给 server 取表示；删 `response_problem` |
 | W3 | status 范围 | 每个构造器要求 200..599，越界 panic；`HttpError` 渲染时越界即中立 500 |
-| W4 | 帧头归服务器 | `with_header` 拒 `Transfer-Encoding`；`Content-Length` 必须是十进制非负整数，且与已知 body 长度一致（`Empty` body 不比对，HEAD 元数据要用它），一个响应只收一个 |
+| W4 | 帧头归服务器 | `with_header` 拒 `Transfer-Encoding`；`Content-Length` 必须是十进制非负整数，且与 body 长度一致；无内容的 body（`Empty` 与空 Text/Binary，server 对三者同样按无 body 发）不比对，HEAD 元数据要用它（dawnop-site 的 WebDAV HEAD 就是 `raw(200, mime, "")` 加文件大小）；不定长流上一律拒；一个响应只收一个 |
 | W5 | 定长流 | `Stream(value, length: Option[Int])`；`streaming_sized` 发精确 `Content-Length`，泵完比对字节数，短了记一行截断 |
 | W6 | opaque `ServerHandle` | 私有 record 加 `pub opaque type`；公开 `handle_port` |
 | W7 | 删 `serve_app_bounded` | 入口三合二 |
@@ -85,7 +85,7 @@ dawnop-site（调研 §0.4，main dc0a8fb）：`webdav.dawn:1551` 一个 test �
 W8 涉及两行（`main.dawn:92` 的 `ServerConfig.max_body` 与 `with_body_limit(2000000, …)`），
 若其中有非正值须改成正数，随站点下次升钉一起改；
 `[deps.web]` 换 url/hash 与 `version = "5.0.0"`，`use web/...` 25 行不动（别名）。
-站内两处自设 `Content-Length` 都在空 body 上（HEAD 的 `with_meta`、OPTIONS），W4 放行。
+站内两处自设 `Content-Length` 都在空 body 上（HEAD 的 `with_meta` 是 `raw(200, mime, "")`、OPTIONS 是 `text(200, "")` 加 `"0"`），W4 放行。
 
 ## 五、门禁
 
