@@ -26,13 +26,12 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, EPure, EIo, EffVar, prelude_adts,
+  Sym, Sig, EPure, EIo, EffVar, prelude_adts,
   eff_labels, nev, fn_arity, erased_ev_ty,
   EV_PACK_ID, EV_MISS_MSG,
-  reduce_eff_via_bindings, reduce_ty_effs_via_bindings,
   Traits, TraitI, ImplI, trait_of, EQ_ID, HASH_ID,
   intrinsics,
-  Impls, impl_at, reduce_via_bindings, sig_abi_eff
+  Impls, impl_at, sig_abi_eff
 }
 use check/tast.{TJavaCall, TModule, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
@@ -70,7 +69,7 @@ use ir/core.{
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
   CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault
 }
-use ir/lower.{LMod}
+use ir/lower.{LMod, subst_subject, trait_method_sig}
 use ir/reach
 use ir/reach.{Live}
 use jvm/jreflect
@@ -557,83 +556,6 @@ fn impl_of(gx: GenCtx, tid: Int, subject: Ty) -> ImplI =
   match impl_at(gx.impl_table, tid, subject) {
     Some(i) -> i
     None -> panic("codegen: no impl for trait ${tid}")
-  }
-
-fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
-  for entry in tr.methods {
-    let (mn, ms) = entry
-    if mn == name { return ms.sig }
-  }
-  panic("codegen: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
-}
-
-## The trait method's signature with the subject substituted for the tvar and
-## projections rewritten to the impl's bindings — the concrete shape of the
-## impl's provided static (checker verified match). The binding RHS goes in
-## verbatim, mirroring lower.dawn's subst_subject: the impl method's declared
-## signature is the descriptor, so `Cur = Int` is an I slot and `Item = T`
-## stays an erased Object one.
-fn subst_subject(
-  tr: TraitI,
-  s: Sig,
-  subject: Ty,
-  bindings: List[(String, Ty)],
-  ebindings: List[(String, Eff)]
-) -> Sig = {
-  let vid = match tr.tvar {
-    TyVar(_, v) -> v
-    _ -> panic("trait tvar")
-  }
-  var ps: List[Ty] = []
-  for p in s.param_tys {
-    ps = ps ++ [reduce_ty_effs_via_bindings(
-      reduce_via_bindings(subst_tvar(p, vid, subject), tr.id, subject, bindings),
-      vid, tr.id, ebindings)]
-  }
-  Sig {
-    ..s,
-    param_tys: ps,
-    ret: reduce_ty_effs_via_bindings(
-      reduce_via_bindings(subst_tvar(s.ret, vid, subject), tr.id, subject, bindings),
-      vid, tr.id, ebindings),
-    # the row too: the impl method's own labels are its evidence layout, and
-    # the descriptor below is rebuilt from this signature (mirror of
-    # lower.dawn's subst_subject; a drift between the two is a VerifyError)
-    eff: reduce_eff_via_bindings(s.eff, vid, tr.id, ebindings)
-  }
-}
-
-fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
-  match t {
-    TyVar(_, v) -> if v == vid { to } else { t }
-    TyAssoc(s, tid, n) -> TyAssoc(subst_tvar(s, vid, to), tid, n)
-    TyOpaque(id, n, ow, args, tgt) -> TyOpaque(id, n, ow,
-      map(args, a => subst_tvar(a, vid, to)), subst_tvar(tgt, vid, to))
-    TyList(e) -> TyList(subst_tvar(e, vid, to))
-    TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
-    TySet(e) -> TySet(subst_tvar(e, vid, to))
-    TyArray(e) -> TyArray(subst_tvar(e, vid, to))
-    TyTuple(es) -> {
-      var out: List[Ty] = []
-      for e in es { out = out ++ [subst_tvar(e, vid, to)] }
-      TyTuple(out)
-    }
-    TyAdt(aid, args) -> {
-      var out: List[Ty] = []
-      for a in args { out = out ++ [subst_tvar(a, vid, to)] }
-      TyAdt(aid, out)
-    }
-    TyFn(ps, r, e) -> {
-      var out: List[Ty] = []
-      for p in ps { out = out ++ [subst_tvar(p, vid, to)] }
-      TyFn(out, subst_tvar(r, vid, to), e)
-    }
-    # the variants with no type arguments to walk into. Spelled out rather than
-    # left to a wildcard: a new *parameterised* variant landing here would
-    # silently stop substituting, which shows up as a wrong descriptor much
-    # later
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
-    TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
 fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {
