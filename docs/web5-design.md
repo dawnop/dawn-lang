@@ -1,7 +1,7 @@
 # `packages/web` 第五个 major（`web5 / 5.0.0`）
 
 > 状态：**current** —— 2026-09-25 主会话裁定候选 A（一个 major 收 W1–W9，进 v0.79.0）后、
-> 动码前写成，实现后在 §七回填。调研原文（他语言对照、dawnop-site 调用点计数、两次 JDK 探针）
+> 动码前写成，实现后已在 §七回填。调研原文（他语言对照、dawnop-site 调用点计数、两次 JDK 探针）
 > 在 `agent-handoff/research-web5-major-20260925.md`（本仓外），结论摘在 §二。
 
 ## 一、问题
@@ -82,8 +82,9 @@ method 仍是 String，集合仍开放（任意 2xx..5xx、任意 WebDAV 动词�
 
 仓内：`playground` 只用 `text`/`raw`/`body_text`/`serve_app`，不读 `Response` 字段，源码不改。
 dawnop-site（调研 §0.4，main dc0a8fb）：`webdav.dawn:1551` 一个 test 改用 `response_headers`；
-W8 涉及两行（`main.dawn:92` 的 `ServerConfig.max_body` 与 `with_body_limit(2000000, …)`），
-若其中有非正值须改成正数，随站点下次升钉一起改；
+W8 触及的两行（`main.dawn:93` 的 `max_body: DEFAULT_MAX_BODY` 与 `:97` 的
+`with_body_limit(2000000, …)`）都已是正数，只收正数的形状下**不用改**（若当初选 `Option[Int]`
+才是两行）；
 `[deps.web]` 换 url/hash 与 `version = "5.0.0"`，`use web/...` 25 行不动（别名）。
 站内两处自设 `Content-Length` 都在空 body 上（HEAD 的 `with_meta` 是 `raw(200, mime, "")`、OPTIONS 是 `text(200, "")` 加 `"0"`），W4 放行。
 
@@ -110,4 +111,26 @@ W8 涉及两行（`main.dawn:92` 的 `ServerConfig.max_body` 与 `with_body_limi
 
 ## 七、实现回填
 
-（实现后回填）
+2026-09-25，分支 `feat/web5`，按「一条裁决一个提交」切成七个代码提交，前后各一个文档提交：
+W1（seam 与改名同提交）→ W3/W4/W9（构造校验，先于 opaque，好让每个中间树都绿）→
+W2（opaque 与 LIB-16 翻 fixed 同提交，anchor 随之消失）→ W5 → W6 → W7 → W8 → 文档。
+包内 test 72 → 81 项（删两项写边界 test，加十一项），`playground` 源码零改动。
+
+与 §三的偏离，都在实现时被事实推翻：
+
+- **W4 的豁免从 `Empty` 放宽到「无内容 body」。** 动码前写的是 `Empty` 不比对；读
+  dawnop-site 发现 WebDAV HEAD 是 `raw(200, mime, "")`（`Text("")`）加文件大小，按原规则会在
+  构造处 panic，线上 HEAD 全挂。server 对空 Text/Binary 与 `Empty` 本来就同样按无 body 发
+  （`body_length` 都给 -1），所以豁免跟着 server 的判定走，而不是跟着构造子走。
+- **W5 不自己数字节。** `transferTo` 的返回值就是搬运量；上游多给时 JDK 的定长输出流在
+  `write` 里抛出（已有的 `TransferFailed`），少给时关闭定长流抛「insufficient bytes written」，
+  连接在承诺长度之前断开。这层只需比对计数并记 `Truncated`，没有逐块 `Bytes` 分配。
+- **W8 在 server 内部留了 `Option[Int]`。** 公开面只收正数，但 `raw-body` 路由确实不设上限，
+  `read_body` 的开关从 `limit <= 0` 哨兵换成 `Option[Int]`，哨兵在包里彻底消失。
+- **LIB-17 的 audit anchor 是 `absent … limit > 0`（fixed）**，即这串字面量必须**在**
+  middleware.dawn 里。新写法 `if limit > 0 { 包装 } else { panic }` 保住了它，anchor 不动。
+
+opaque 指向 `pub(pkg)` 表示这一格没有现成夹具，动码前先用两包探针验证放行，web5 落地后
+又从包外对真实的 `web5` 复验：字面量报 `undefined constructor: Response`，读字段报
+`` `.` field access needs a record value, got Response ``，引入 `ResponseRep`/`response_rep`/
+`dispatch_segs`/`Dispatch` 都报 `` package-private to package `web5` ``。

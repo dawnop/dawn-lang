@@ -439,8 +439,9 @@ comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义�
    全是路径依赖、无一处 url+hash 钉，而路径依赖不参与 MVS，于是这次 major 的下游迁移成本
    恰好是零。`LIB-13` 形状相同而代价不同：`packages/web` 是 `web3 / 3.0.0`、已随 `v0.64.0`
    发出、被 dawnop-site 以 tag url + d1 hash 钉住消费，收窄要开 `web4 / 4.0.0`（连包名一起改）
-   并逼下游提一个改 manifest 的提交。**为删几个零调用者的名字付这笔钱不成立**，故它连同
-   `LIB-06`（另属 std 的 forwarder 纪律）与 `LIB-16` 余项按下一个 major 与迁移窗口分批。
+   并逼下游提一个改 manifest 的提交。**为删几个零调用者的名字付这笔钱不成立。** 之后的
+   窗口都已开过：`LIB-06` 与 `LIB-13` 随 `web4 / 4.0.0` 关账（`LIB-13` 余下四个 seam 等到
+   `pub(pkg)`），`LIB-13` 残差与 `LIB-16` 随 `web5 / 5.0.0` 关账，这一条已无待 major 的项。
    `SEM-09/10` 是 intentional delayed capability/ABI，不作为自治修 bug。（`SEM-16` 的 HOLD
    已于 2026-08-19 由用户裁「做」并落地，两层渲染都是 `std/char` 自己的，故转 fixed。）
 
