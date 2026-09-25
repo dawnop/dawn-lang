@@ -157,6 +157,14 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
   `plan.py` 选的子集，其余 job 跳过、按 success 计，而 Actions API 把 PR 运行记在 PR 头提交的 sha 下；
   同一个 sha 若先在 PR 上子集绿、再原样快进推到 main，`any(success)` 会把子集当全集，
   哪怕 main 上那次全集是红的。所以 2026-09-25 起只认 push 到默认分支的运行，其它运行照样列出并注明拒因。
+- **PR 与 main 上的证据档（2026-09-25 起）**。`gates.yml` 的 `plan` job 先用
+  `release_evidence.py --external-only`（与守卫第 2 条同一份代码）读头提交（PR 头或推送的 sha）的
+  `gates/maintainer`；接受就输出 `all=false`、`jobs=[]`，所有 gate job 跳过，按 success 计。
+  不接受、API 读不了或超时都照旧规划。证据只对被签的那个 sha 有效：rebase 之后的新 sha 在 GitHub 上照常跑；
+  fork 的 PR 没有这个 status，行为不变。推送时 ci 已经开跑，`publish.py --rerun-ci` 在 verify 成功、
+  status 可被接受之后取消该 sha 上本仓仍在跑的 `ci.yml` 并重跑。因为证据档会让 main 上出现「全部跳过」的
+  push 运行，守卫第 1 条同时收紧：读回运行的 job 列表，有 job 被跳过就不算全集。设计见
+  [gates-external-design.md](gates-external-design.md)「PR 与 main 上的证据档」。
 - 换钥就是改默认分支上的 `allowed_signers`。旧钥签的 note 从那个提交起核不过，没有多钥过渡期。
 
 ## 链

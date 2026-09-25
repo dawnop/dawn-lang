@@ -254,3 +254,33 @@ What nobody but the key holder can vouch for is that the steps really ran;
 the exit codes and output digests are the maintainer's statement. The
 protocol and its limits are in [docs/bootstrap.md](../../docs/bootstrap.md)
 (Chinese).
+
+## The evidence tier
+
+gates.yml's `plan` job reads the head commit's `gates/maintainer` status
+before it plans (`release_evidence.py --external-only`, exit 0 accepted, 1
+not, 2 API unreadable). Accepted means everything the release guard asks:
+state `success`, creator `github-actions[bot]`, a `target_url` that is a run
+of this repository, and that run read back as a successful
+`workflow_dispatch` of `verify-external.yml` on the default branch, with the
+status written inside its time window. Then the plan answers `all=false`,
+`jobs=[]` and every gate job skips. Anything else, a timeout included, plans
+as before, and the log says `refused: <why>`.
+
+ci.yml starts when a commit is pushed, before the evidence exists, so the
+publishing side closes the loop:
+
+```bash
+scripts/gates-external/publish.py <sha> --bundle <out>/bundle.json --rerun-ci
+```
+
+waits for the verify run it dispatched, checks the status the same way the
+plan will, then cancels this repository's still-running ci.yml runs of the
+sha and re-runs the newest pull_request and push run; the re-run plans again
+and skips. A failed verify or a refused status re-runs nothing. A rebase
+makes a new sha with no status, and that one runs on GitHub as usual.
+
+The release guard is unchanged in what it accepts: a full ci.yml push run on
+the default branch, or the status above. Since the tier can make a push run
+green with every gate skipped, the guard reads each candidate run's jobs and
+refuses one with a skipped job.
