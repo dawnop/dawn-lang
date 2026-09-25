@@ -8,12 +8,12 @@
 
 - JSON 旧有大整数、非有限输出与控制字符问题已经修复，不应重复；inflate 的三项 P1 与 Web
   tempfile ownership 也已关闭。streaming body 吞掉全部失败那条（`LIB-18`）也已关闭：
-  fault 与 panic 现在由嵌套屏障分开并各自记录。当前剩余风险集中在 Web 公开 invariant，
-  以及 `LIB-18` 当初连带记下、至今仍未验证的 streaming clean-truncation 候选（要检测它
-  必须让 `Stream` 携带 expected length，那是被设计文档推迟到下一个 web major 的事）。
-- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。其中 query/form 与 JSON error 已由后续两个 major 关闭，Digest 已随 `sha2 / 2.0.0` 变成 opaque，只剩 Response 在册。
+  fault 与 panic 现在由嵌套屏障分开并各自记录。Web 公开 invariant 那条（`LIB-16`）
+  随 `web5` major 关闭。`LIB-18` 当初连带记下的 streaming clean-truncation 候选仍是
+  未验证的静态候选（要检测它必须让 `Stream` 携带 expected length，见总纲 §4.1）。
+- packages 的共同问题是 public record/Map/String 过早丢掉 invariant：Digest 可伪造、Response 可构造非法状态、query/form 丢重复值、JSON error 只有人类字符串。其中 query/form 与 JSON error 已由后续两个 major 关闭，Digest 已随 `sha2 / 2.0.0` 变成 opaque，Response 已随 `web5 / 5.0.0` 变成 opaque。
 - early language/package 允许 breaking change，应优先把无效状态从公开类型中移除，而不是在 write boundary 继续 sanitizer/默认值补丁。
-- **本篇按目录写 `packages/web/src/…`、`packages/json/src/…`，但目录名不是包名**：包管理器的 v2 换名规则要求 major ≥ 2 的包名带上 major，所以这两个包的 `name` 分别是 `web3` 与 `json2`（各自的 `dawn.toml`），消费者靠别名保住 `use web/...` 的拼写。版本随 major 走，读 manifest 不读本文。
+- **本篇按目录写 `packages/web/src/…`、`packages/json/src/…`，但目录名不是包名**：包管理器的 v2 换名规则要求 major ≥ 2 的包名带上 major，所以这两个包的 `name` 分别是 `web5` 与 `json2`（各自的 `dawn.toml`），消费者靠别名保住 `use web/...` 的拼写。版本随 major 走，读 manifest 不读本文。
 
 ## LIB-01 — P1 — 解压上限在完整 materialize 之后才检查（已修）
 
@@ -360,7 +360,7 @@
 - **影响：** start/stop lifecycle 没有确定释放全部 resources；stop exception 时 latch 也可能不 release。
 - **建议：** handle 持有 executor；`stop` 的 finally 顺序停止 server、shutdown executor、无条件 countDown。
 
-## LIB-16 — P2 — `Response` 可公开构造非法 HTTP 状态（部分修复）
+## LIB-16 — P2 — `Response` 可公开构造非法 HTTP 状态（已修）
 
 <!-- audit-anchor: present packages/web/src/types.dawn | pub type Response = { -->
 
@@ -397,6 +397,31 @@
 > **method/status 换成受限类型**，理由是封闭枚举必须配 `Other(String)` 逃生口等于绕回 String；
 > 它没有一个字提到 opaque `Response`，也没有否掉校验本身（它给的替代方案正是「String 常量
 > 加启动时校验」）。只有在「opaque 是为了给 status 一个封闭类型」这层意义上那句转述才成立。
+>
+> **三次处置（2026-09-25，web5 major）：fixed。** 私有于包的 record `ResponseRep`
+> （`pub(pkg)`）加 `pub opaque type Response = ResponseRep`，读用 `response_status`/
+> `response_content_type`/`response_headers`/`response_body`（WAI 的形状），`web/server`
+> 经 `pub(pkg) fn response_rep` 取表示，没有反方向的转换。包外字面量报
+> `undefined constructor: Response`、字段读取报 `` `.` field access needs a record value ``、
+> 引入表示报 `` `ResponseRep` is package-private to package `web5` ``。
+> 于是校验只在构造处一份：每个构造器经同一个 `build` 查 status（200..599，见下）与
+> `content_type`，`with_header`/`try_with_header` 查名值与帧头（拒 `Transfer-Encoding`；
+> `Content-Length` 须是十进制且与有内容的 body 等长）。写边界的 `response_problem` 与
+> `withheld_response` **删除**：非法响应已不可构造，第二份规则只剩漂移的机会（主会话裁定
+> 「判定只在一处」）。构造器的拒绝是 panic，落在 handler 的逐请求隔离里渲染成 500，
+> 与 `with_header` 一直以来的结局相同；server 的端到端 test 钉住这一条。
+>
+> 本项原文的 status 一半顺带关掉：修复前 status 完全不校验，而 jdk.httpserver 照单全收
+> （研究探针：99、600、1000、42、-5 原样上线，最终响应 `100` 让客户端挂死）。现在构造器
+> 要求 200..599（web 没有 upgrade，也没有发临时响应的 API，1xx 作最终响应一律是 bug），
+> `HttpError` 越界在渲染时换成中立 500、头保留（CORS 印在头上）。
+>
+> **受检 `HeaderName`/`HeaderValue` 不做（主会话 2026-09-25 裁定）。** opaque 之后
+> `with_header` 是写入头的唯一路径，它已经做名值与帧头检查；受检类型只是同一个不变量的
+> 第二种表达，站点侧却要改约 20 处。受检 header 类型只在「header 容器本身公开可写」的库里
+> 出现（Rust `http` 的 `HeaderMap`）；WAI、Plug、http4s、Ktor 都是字符串加单点校验。
+> 本项「建议」里的 validated `HeaderName/HeaderValue` 因此按「单点校验」兑现，不按类型兑现。
+> 设计与不做清单见 [web5-design.md](../web5-design.md)。随 `web5 / 5.0.0` 发。
 
 - **证据：S。** `Response` 是 public record literal：`packages/web/src/types.dawn:81`；header sanitizer 删除字符而非拒绝：`:214`；write boundary 不重新 validate：`packages/web/src/server.dawn:131`；no-body status 只覆盖 204/304：`:94`。
 - **边界：** header name `":"` 可变 empty，`"X:A"` 与 `"XA"` collision；1xx/205 仍可带 entity。

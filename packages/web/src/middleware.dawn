@@ -7,7 +7,7 @@ use std/bytes
 use std/list
 use std/map
 use java "java.lang.System"
-use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error}
+use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body}
 
 ## One access-log line per request: method, path, status, wall time.
 pub fn with_logging(next: Handler) -> Handler =
@@ -16,7 +16,7 @@ pub fn with_logging(next: Handler) -> Handler =
     let out = next(req)
     let ms = (System.nanoTime() - started) / 1000000
     let status = match out {
-      Ok(r) -> r.status
+      Ok(r) -> response_status(r)
       Err(e) -> e.status
     }
     println("${req.method} ${req.path} -> ${status} (${ms}ms)")
@@ -182,13 +182,13 @@ test "CORS sends no Allow-Origin to an origin that is not allow-listed" {
     Ok(r) -> {
       # it used to answer with the *first configured* origin, which a shared
       # cache can then hand to a different origin's request
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) == None
-      assert list.find(r.headers, h => {
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Origin", "https://a.example")) == None
+      assert list.find(response_headers(r), h => {
         let (k, _) = h
         k == "Access-Control-Allow-Origin"
       }) == None
       # the denial is still Origin-dependent, so it still has to vary on it
-      assert list.find(r.headers, h => h == ("Vary", "Origin")) != None
+      assert list.find(response_headers(r), h => h == ("Vary", "Origin")) != None
     }
     Err(_) -> { assert false }
   }
@@ -198,20 +198,20 @@ test "CORS echoes an allow-listed origin, and always varies on Origin" {
   let app = with_cors("https://a.example, https://b.example", ok_handler)
   match app(req_of("GET", map.from([("origin", ["https://b.example"])]))) {
     Ok(r) -> {
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://b.example")) != None
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Credentials", "true")) != None
-      assert list.find(r.headers, h => h == ("Vary", "Origin")) != None
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Origin", "https://b.example")) != None
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Credentials", "true")) != None
+      assert list.find(response_headers(r), h => h == ("Vary", "Origin")) != None
     }
     Err(_) -> { assert false }
   }
   # no Origin header at all: nothing to echo
   match app(req_of("GET", map.empty())) {
     Ok(r) -> {
-      assert list.find(r.headers, h => {
+      assert list.find(response_headers(r), h => {
         let (k, _) = h
         k == "Access-Control-Allow-Origin"
       }) == None
-      assert list.find(r.headers, h => h == ("Vary", "Origin")) != None
+      assert list.find(response_headers(r), h => h == ("Vary", "Origin")) != None
     }
     Err(_) -> { assert false }
   }
@@ -227,9 +227,9 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
   ])))
   match pre {
     Ok(r) -> {
-      assert r.status == 204
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")) != None
+      assert response_status(r) == 204
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")) != None
     }
     Err(_) -> { assert false }
   }
@@ -237,8 +237,8 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
   # read DAV/Allow off one); it used to be swallowed by the 204 above
   match app(req_of("OPTIONS", map.empty())) {
     Ok(r) -> {
-      assert r.status == 200
-      assert r.body == Text("ok")
+      assert response_status(r) == 200
+      assert response_body(r) == Text("ok")
     }
     Err(_) -> { assert false }
   }
@@ -247,9 +247,9 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
   # other response
   match app(req_of("OPTIONS", map.from([("origin", ["https://a.example"])]))) {
     Ok(r) -> {
-      assert r.status == 200
-      assert r.body == Text("ok")
-      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
+      assert response_status(r) == 200
+      assert response_body(r) == Text("ok")
+      assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
     }
     Err(_) -> { assert false }
   }
@@ -315,7 +315,7 @@ test "with_body_limit counts bytes, not code points" {
   }
   # 8 bytes exactly: allowed
   match app(mk("12345678")) {
-    Ok(r) -> { assert r.status == 200 }
+    Ok(r) -> { assert response_status(r) == 200 }
     Err(_) -> { assert false }
   }
 }
@@ -325,16 +325,16 @@ test "a limit of zero or less is unbounded, the same reading the server gives it
   # 0 used to mean "reject every non-empty body" here while server.read_body
   # read the same request without any ceiling at all
   match with_body_limit(0, ok_handler)(mk("123456789")) {
-    Ok(r) -> { assert r.status == 200 }
+    Ok(r) -> { assert response_status(r) == 200 }
     Err(_) -> { assert false }
   }
   # a negative limit used to reject even the empty body
   match with_body_limit(-1, ok_handler)(mk("")) {
-    Ok(r) -> { assert r.status == 200 }
+    Ok(r) -> { assert response_status(r) == 200 }
     Err(_) -> { assert false }
   }
   match with_body_limit(-1, ok_handler)(mk("123456789")) {
-    Ok(r) -> { assert r.status == 200 }
+    Ok(r) -> { assert response_status(r) == 200 }
     Err(_) -> { assert false }
   }
   # and a positive one still bounds
