@@ -129,6 +129,22 @@ batch says it moved. Nothing about it is recorded in the tree: until 2026-09-25
 a Core golden was, every compiler commit re-recorded it, and nobody read the
 re-records ([docs/recorded-numbers-design.md](docs/recorded-numbers-design.md)).
 
+**A new gate has to fit under the push total.** Every job in
+`.github/workflows/gates.yml` carries a `# budget: 3x <N>s` line, and the sum of
+those claims may not exceed the file's `# push-total:` line
+(`scripts/check-gate-budgets.py`, in tree-policy); `tile.yml` has its own
+`# path-total:`. The totals were set to the sum on 2026-09-25, so there is no
+headroom: a new job or a raised claim pays for itself by slimming or retiring
+something, or the push raises the line and says so in a commit message:
+`Gate-Budget(push-total): <old>s -> <new>s <why>`. Lowering needs no line,
+except that a push which lowers push-total while
+`scripts/gates-external/steps.lock.json` loses run steps writes
+`Gate-Retire(<family>): <why>` for each family that lost one, so dropped
+coverage cannot pass as a speed-up. Both are checked per push by
+`scripts/check-gate-budget-trailers.py` in ci.yml's `secrets` job. They are not
+Emit-Change labels and do not go in `scripts/emit-labels.txt`. Why the cap
+exists is in [docs/gate-drift-guards-design.md](docs/gate-drift-guards-design.md).
+
 **Never add a Claude attribution** (no `Co-Authored-By`, no `Claude-Session`).
 This project is held to open-source standards.
 

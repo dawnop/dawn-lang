@@ -2,6 +2,7 @@
 
 > 状态：**current**。裁决 9 的三条（2026-09-24，`agent-handoff/rulings-20260924.md` 与其改裁记录）：
 > 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。三条都已落地，提交见文末。
+> 2026-09-25 追加「总量棘轮」一节（门禁总量调研推荐的 (a1)+(c)，用户同日批准）：push-total / path-total 上限、`Gate-Budget` / `Gate-Retire` 声明、nightly 总量报表。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -98,3 +99,102 @@ job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`i
 - 9(a)「Hold gate anchors to exactly once, unflipped and enrolled」：present 恰一次、`ARC-10` 锚点重写（带 `Anchor-Change(ARC-10):`）、`scripts/anchor-guard.py` 与 `scripts/anchor-readers.txt`、tree-policy 接线与 steps lock 重录。
 - 9(b)「Audit budget claims against a week of observations nightly」：nightly `budget-observations` 与 `scripts/nightly-issue.sh`；随后「Restate two mutant-shard budgets to their seven-day worst runs」把首跑就会点名的两条声明（`syntax-mutants-2` 897 s、`builtin-type-2` 809 s）提前重述。
 - 9(c)「Advance the ecosystem pin and red nightly when it falls behind」：`ECO_REV` 推进到 `dc0a8fb`、`--check-pin`、nightly `corpus-pin`。
+
+## 总量棘轮（2026-09-25）
+
+依据：`agent-handoff/research-gate-budget-ratchet-20260925.md`（§0 实测、§3 事故、§4 候选），推荐 (a1)+(c)，用户 09-25 批准。
+
+### 为什么单 job 规则管不住总量
+
+`check-gate-budgets.py` 原有的三条规则都是**单 job** 的：timeout ≥ 3 倍声明、声明不超过 pole、nightly 核对声明 ≥ 7 天最坏观测。
+2026-08-25 到 09-24 之间 main 的 360 次 ci.yml push，成功运行的中位总量从 7.2k 涨到 21.6k job 秒（2.9 倍），这些规则全程都满足，门禁全绿。
+增长全部来自**新加的 job**（09-23 一天就加了 5 个），不是既有 job 变慢；一个本身不大的新 job 过得了任何单 job 规则。
+而本仓一次运行的墙钟由排队决定（`span ≥ max(最长 job, 总量/20)`，gates.yml 头注释），所以总量才是墙钟跟着走的那个数。
+
+pole 的算术就是这样过期的：09-11 按投影 17,286 job 秒算出排队下限 864 s、定 pole 950 s，并写明「job 集合一变就重算」。
+09-23T19:00Z 到 09-24T21:06Z 的 12 次成功 main push（run 35907509360 到 36056324369）实测：按 job 中位合计 22,601，最新一次 21,669，
+排队下限约 1,080 s，已高出 pole 约 130 s；最长 job 876 到 937 s。没人重算，也没有检查会因此变红（调研 §0.5）。
+可见性这条路在本仓已经失灵过：tile.yml 挪出 push 路径时依据是「前 30 次 push 一次都没碰」，09-12 以后 80 次里跑了 19 次，同样没人发现（§3 第 3 条）。
+
+### 机制
+
+1. **上限行**（`scripts/check-gate-budgets.py`，tree-policy，离线）。`gates.yml` 一行 `# push-total: 29319s`，`tile.yml` 一行 `# path-total: 5484s`，
+   含义是该文件所有 `3x <N>s` 声明之和不得超过它。初值就是当天的和，没有余量。钉在**声明**而不是实测上：声明是最坏值，
+   nightly 审计保证声明 ≥ 实测最坏，所以声明之和是实际总量的有效上界，而且不联网也算得出；比值当天是 29,319 / 22,601 = 1.30。
+   行缺失、重复、不是 `<N>s`、写错文件、写在没有 `3x` 声明的文件里，都红。求和走 `collect_budgets`，与 `--observed` 读的是同一批声明。
+   floor 声明不计入，理由与 pole 相同。editor-grammar.yml 只有 floor，不设上限。
+2. **升上限要声明**（`scripts/check-gate-budget-trailers.py`，ci.yml `secrets` job）。比较 push 区间两端树上的两个上限：
+   升了，区间内的提交信息要有 `Gate-Budget(<push-total|path-total>): <旧>s -> <新>s <理由>`，旧/新数字与两端树一致；
+   分几次升可以逐次声明，要求的是从起点到终点有一条声明链。
+3. **防删覆盖**。push-total 降了、且 `scripts/gates-external/steps.lock.json` 两端相比某个家族少了 run 步骤，
+   每个少了步骤的家族都要有 `Gate-Retire(<family>): <理由>`；点名一个没少步骤的家族也红。步骤都在（纯瘦身）不需要声明。
+   对应 GHC 的 `Metric Decrease:` 与 Rust post-merge 报告单列的 `[missing]`（调研 §3 第 6 条）。tile.yml 没有 steps lock，path-total 没有这一条。
+4. **nightly 报表**（`scripts/gate-totals.py`，nightly `budget-observations` job）。读 14 天的 ci.yml 与 tile.yml main 运行，
+   在 step summary 写一张表：push 次数、成功（全集）次数、每次成功 push 的中位 job 秒、中位 span、按族占比
+   （incremental / 变异体 / native 差分 / contracts / 其它）、tile.yml 触发次数与触发率。
+   本周中位总量比上周涨超 10%，或 tile.yml 本周触发率超过 20%，就经 `scripts/nightly-issue.sh` 开 issue（标题 `nightly: gate totals over their limits`）。
+   这两条是上限行看不见的漂移：实测总量在上限之下爬升，以及按路径触发的门跑得比挪出时预言的勤。
+
+### 声明格式与解析
+
+- 一行一个名字，不收通配，理由必填；以 `Gate-Budget` / `Gate-Retire` 开头、后面紧跟 `(` 或 `:` 却解析不了的行是错误。
+  只看关键字不够：说明这条规则的提交信息正文折行时，恰好有一行以这个词开头，实现这一刀时本刀自己的提交就这样红过一次。
+- **不进 `scripts/emit-labels.txt`，不走 `scripts/emitchange.sh`。** emitchange 按整个 release 窗口读声明，一个标签声明一次就罩住之后同标签的所有变化
+  （builtin-decl-mirror 那次「同标签互吞」）；这里按 push 两端读，用自己的解析器。
+- 区间：push 是 `before..HEAD`；PR 是 `origin/<base>...HEAD`，基准取 merge base；force-push 使 `before` 不可达时区间退化为 `HEAD`，
+  这时对每个碰过两个 workflow 或 steps lock 的提交，逐个与其父提交比较、只认它自己的提交信息（比 push 严）。
+- 起点树上没有上限行（引入它的这次 push，或 2026-09-25 以前的区间）只报告、不判红。
+- 上限行的读法复用 `check-gate-budgets.py` 的 `read_total`，steps lock 的读法复用 `steps_lock.py` 的 `from_lock`，各只有一份解析。
+
+### 为何不做路径门控
+
+调研 §0.6 与 §4(b)：359 个 main push 区间里 294 次（82%）碰了 `plan.py` 的 FORCED 路径，这时 plan 本来就答全集；
+就算给引擎划一个偏窄的闭包，仍有 62% 的 push 要跑。main 上门控 `incremental-*` 平均每次只省约 1,300 job 秒（6%），省的恰好是本来就便宜的 docs/scripts push。
+代价是「main push 就是全集」这条不变量：release 守卫的第 1 条证据、gates-external 的「全集」定义、plan.py 头注释都依赖它；
+另外 main 上 21% 的运行被 `cancel-in-progress` 取消，按 `before..after` 算 diff 会漏掉被取消那次 push 的改动（§3 第 4 条），
+Mozilla 就出过「子集漏到 central」的事故（§3 第 1 条）。所以本刀不做路径门控，main 的 `cancel-in-progress` 也不动。
+
+### pole 为什么不动
+
+pole 现在低于排队下限，但两个数回答的已经是两个问题：pole 钉单 job 临界路径（最长 job 实测 937 s，总量降回来那天，超过 950 s 的 job 就是墙钟），
+总量交给 push-total。把 pole 抬到新的下限只会让每个 job 多出 130 s 余量，墙钟一秒不省，因为下限高是 job 多了，那是 push-total 该管的事。
+gates.yml 里那段 09-11 的算术保留为记录，后面补了 09-25 的实测与这条理由。
+
+### 实测
+
+- 负控 1：把 tree-policy 的声明从 432 s 改成 1432 s，三条规则同时红（3 倍 timeout、pole、push-total：`sum to 30319s, 1000s over the 29319s push-total`）。
+- 负控 2：把五条 700 s 以下的声明各加 200 s，timeout 同步到 3 倍（每条仍在 pole 之下），**只有** push-total 红。这正是单 job 规则看不见的情形。
+- `check-gate-budgets.py` 自测 19 个变异体（新增 7 个）；本机 0.04 s，与改前持平。
+- `check-gate-budget-trailers.py --selftest` 15 个临时仓库用例（裁定的五种区间加错数字、两步链、错家族、解析不了、裸关键字、折行正文、path-total、PR 区间、force-push 两向），本机 0.64 s；
+  一个 push 区间 0.06 s；force-push 兜底扫 290 个提交 4.3 s。
+- `gate-totals.py --selftest` 6 组夹具周，0.04 s。
+- 真数据（本机，2026-09-25 03:07Z 为止的 14 天，只读 API）：`gate-observations.py` 读 80 次 ci.yml 运行 6 分 00 秒、33 次 tile.yml 运行 1 分 00 秒（本机链路慢，同一链路上审计读 25 次要 1 分 52 秒），
+  `gate-totals.py` 0.04 s。本周 41 次 push、32 次成功，中位 21,128 job 秒、span 1,606 s；上周 39 次、30 次成功，中位 17,612、span 1,376 s；
+  本周 incremental 32.8%、变异体 17.4%、native 10.8%、contracts 4.1%、其它 34.9%。**两条都超限，首跑就会开 issue**：
+  中位总量 +20.0%（09-23 新加的 5 个 job），tile.yml 本周 41 次 push 里跑了 10 次（24%）。这是它该报的东西，本刀不处理。
+
+### 墙钟
+
+- push 门：tree-policy +0 s（上限规则并在既有一步里，0.04 s 不变）；`secrets` +约 0.7 s（自测 0.64 s + 区间 0.06 s），仍是秒级 floor job。都不在关键路径上。
+- nightly：`budget-observations` 多读一遍 14 天的 ci.yml 与 tile.yml（不加宽审计自己的 7 天窗口，那会改变审计把声明比到的对象）。timeout 从 15 分钟放到 30 分钟，这是失控上限，不是预算声明。
+
+### 不做的（理由）
+
+- **把上限钉在实测总量上**：要联网，只能放 nightly；push 门要离线（调研 §4 拍板点 1）。实测那一面由 nightly 报表看。
+- **要求上限等于声明之和**（降了声明必须同步降上限）：裁定是「和 ≤ 上限」。代价是瘦身后留下的余量能被下一个新 job 无声吃掉；
+  gates.yml 的注释要求瘦身后随手调低。若这件事真的发生，再把规则收紧成相等。
+- **tile.yml 按 24% 触发率折算进 push-total**：触发率会漂（§3 第 3 条），折算系数本身就是一个会过期的参照物；改为单独的 path-total 加 nightly 触发率报表。
+- **path-total 的防删覆盖**：tile.yml 没有 steps lock；要做得先给它建 lock。
+- **Gate-Budget 声明但上限没升时判红**：只报告不判红。声明多写不造成覆盖损失。
+- **路径门控、main 不取消**：见上。
+
+### 提交
+
+分支 `ci/gate-budget-ratchet`（基线 origin/main `882351c2`；合入时哈希会变，按主题列）：
+
+- 「Cap the sum of each gate workflow's budget claims」：`check-gate-budgets.py` 的 push-total / path-total 规则与 7 个变异体；两行上限随之写入（让该提交自己的树过自己加的规则）。
+- 「Explain the total lines and restate the stale pole arithmetic」：两个 workflow 里上限行的注释；重写 gates.yml 过期的 pole 算术。
+- 「Require a declaration to raise a gate total or retire a gate step」：`check-gate-budget-trailers.py` 与 ci.yml `secrets` 接线。
+- 「Report job-seconds per push to main nightly」：`gate-observations.py` 输出逐运行记录、`gate-totals.py`、nightly 两步。
+- 「Write down the gate total ratchet」：本节与 CONTRIBUTING 双语。
+
