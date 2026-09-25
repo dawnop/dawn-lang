@@ -43,6 +43,11 @@ contains. So the two `Array` cases mutate a *copy of the real std*:
 * adding the same to `std/pvec`, whose roots stop at `StdOnly`, must be
   accepted, while a private type in its element must still be refused.
 
+`std/pvec` and `std/hamt` themselves declare with `pub(pkg)` now, so the real
+std has no `StdOnly` root left; the accepted `std/pvec` case is the only thing
+that still exercises `declared_audience`, and `stdonly-collapses-to-world` is
+aimed at it.
+
 Those two are why the audience model has three values. A public/private boolean
 gets one of them wrong whichever way it is drawn.
 

@@ -906,11 +906,13 @@ pub fn ty_named(name: String) -> Option[Ty] =
 # ---- audience (SEM-07; docs/public-surface-design.md §二) ----
 
 ## The bundled modules that exist to hold a representation, not to be called:
-## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
-## std/map, std/set and the lowering of a list primitive call into them, and
-## bundled std has no visibility level below `pub` — so the boundary is here
-## instead, next to `builtin_type_inventory`, which draws the same line for
-## `Array` (audit RD-06).
+## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. Their declarations are
+## `pub(pkg)`, which already keeps every name inside std; this list is what
+## is left of the older boundary drawn here before std could write that
+## (audit RD-06). It still refuses `use` of either module outside std with a
+## diagnostic that names the container to use instead, keeps both out of the
+## `dawn doc` reference and out of `use` completion, and caps a `pub` written
+## in either at `StdOnly` (docs/package-visibility-design.md §10).
 ##
 ## The point is that the representation can be replaced whole. Nothing outside
 ## std may name it, so replacing it cannot break a program.
@@ -960,10 +962,9 @@ pub type Audience =
 pub fn is_std_path(path: String) -> Bool =
   path == "std" || str.starts_with(path, "std/")
 
-## The audience a `pub` declaration in `owner` actually reaches. Bundled std
-## has no visibility level below `pub`, so an internal-std module's exports
-## stop at `StdOnly` however they are spelled; everything else reaches the
-## world.
+## The audience a `pub` declaration in `owner` actually reaches. An
+## internal-std module declares with `pub(pkg)`; a `pub` written there anyway
+## still stops at `StdOnly`. Everything else reaches the world.
 pub fn declared_audience(owner: String) -> Audience =
   if list.contains(internal_std_modules(), owner) { AStdOnly } else { AWorld }
 

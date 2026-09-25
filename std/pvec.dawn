@@ -31,13 +31,13 @@ const MASK: Int = 31
 
 ## A trie node. Leaves hold elements, branches hold nodes, and both are one
 ## `Array` of at most 32 slots — the shape that makes a path copy bounded.
-pub type VNode[T] =
+pub(pkg) type VNode[T] =
   | VLeaf(items: Array[T])
   | VBranch(kids: Array[VNode[T]])
 
 ## A whole vector: how many elements, how deep the trie is, the trie, and the
 ## unfinished last block.
-pub type Vec[T] = { cnt: Int, shift: Int, root: VNode[T], tail: Array[T] }
+pub(pkg) type Vec[T] = { cnt: Int, shift: Int, root: VNode[T], tail: Array[T] }
 
 # ---- small array helpers ----
 
@@ -88,14 +88,14 @@ fn leaf_for[T](v: Vec[T], i: Int) -> Array[T] =
 # ---- construction ----
 
 ## A vector with no elements.
-pub fn empty[T]() -> Vec[T] = {
+pub(pkg) fn empty[T]() -> Vec[T] = {
   let e: Array[VNode[T]] = array_new()
   let t: Array[T] = array_new()
   Vec { cnt: 0, shift: BITS, root: VBranch(e), tail: t }
 }
 
 ## Number of elements.
-pub fn count[T](v: Vec[T]) -> Int = v.cnt
+pub(pkg) fn count[T](v: Vec[T]) -> Int = v.cnt
 
 fn new_path[T](level: Int, node: VNode[T]) -> VNode[T] =
   if level == 0 { node } else { VBranch(arr1(new_path(level - BITS, node))) }
@@ -135,7 +135,7 @@ fn push_tail[T](cnt: Int, level: Int, parent: VNode[T], tail: Array[T]) -> VNode
 ## branch that consumes it. Reading the fields off `v` directly would keep the
 ## whole old vector alive until the function returns, and `push_tail`'s
 ## in-place `array_with` needs the root's count down to 1 by then.
-pub fn push[T](v: Vec[T], x: T) -> Vec[T] = {
+pub(pkg) fn push[T](v: Vec[T], x: T) -> Vec[T] = {
   let Vec { cnt, shift, root, tail } = v
   if array_len(tail) < WIDTH {
     Vec { cnt: cnt + 1, shift: shift, root: root, tail: array_push(tail, x) }
@@ -174,7 +174,7 @@ pub fn push[T](v: Vec[T], x: T) -> Vec[T] = {
 fn at[T](v: Vec[T], i: Int) -> T = array_get(leaf_for(v, i), i & MASK)
 
 ## Element `i`, panicking out of range — what `xs[i]` means.
-pub fn index[T](v: Vec[T], i: Int) -> T =
+pub(pkg) fn index[T](v: Vec[T], i: Int) -> T =
   if i < 0 || i >= v.cnt {
     panic("index " ++ to_string(i) ++ " out of bounds for length " ++ to_string(v.cnt))
   } else {
@@ -185,10 +185,10 @@ pub fn index[T](v: Vec[T], i: Int) -> T =
 ## accessor, and the same function `index` is: the comparison it costs is
 ## nothing beside `leaf_for`, so there is no unchecked public reader to make
 ## the saving worth a wrong answer.
-pub fn nth[T](v: Vec[T], i: Int) -> T = index(v, i)
+pub(pkg) fn nth[T](v: Vec[T], i: Int) -> T = index(v, i)
 
 ## Element `i`, or `None` when it is out of range.
-pub fn get[T](v: Vec[T], i: Int) -> Option[T] =
+pub(pkg) fn get[T](v: Vec[T], i: Int) -> Option[T] =
   if i < 0 || i >= v.cnt { None } else { Some(at(v, i)) }
 
 # ---- bulk ----
@@ -211,13 +211,13 @@ fn fold_block[T, A](blk: Array[T], i: Int, stop: Int, acc: A, f: fn(A, T) -> A !
   if i >= stop { acc } else { fold_block(blk, i + 1, stop, f(acc, array_get(blk, i)), f) }
 
 ## Every element in order, as one flat array.
-pub fn to_array[T](v: Vec[T]) -> Array[T] = {
+pub(pkg) fn to_array[T](v: Vec[T]) -> Array[T] = {
   let e: Array[T] = array_new()
   each_block(v, 0, e, (a, x) => array_push(a, x))
 }
 
 ## A vector holding `a`'s elements in order.
-pub fn from_array[T](a: Array[T]) -> Vec[T] = {
+pub(pkg) fn from_array[T](a: Array[T]) -> Vec[T] = {
   var v: Vec[T] = empty()
   var i = 0
   while i < array_len(a) {
@@ -229,7 +229,7 @@ pub fn from_array[T](a: Array[T]) -> Vec[T] = {
 
 ## `a` then `b`. Linear in `b`, which is the shape `++` is used in: the right
 ## side is almost always a single element being accumulated.
-pub fn concat[T](a: Vec[T], b: Vec[T]) -> Vec[T] =
+pub(pkg) fn concat[T](a: Vec[T], b: Vec[T]) -> Vec[T] =
   if b.cnt == 0 { a } else { each_block(b, 0, a, (v, x) => push(v, x)) }
 
 ## The elements in `[from, to)`. Both ends are clamped into `[0, len]` and
@@ -242,7 +242,7 @@ pub fn concat[T](a: Vec[T], b: Vec[T]) -> Vec[T] =
 ## on 100 elements answered with elements 96..98), and a larger one reached the
 ## array layer's own panic, whose wording differs between the two backends. The
 ## last public unchecked reader; RD-01 took `nth`'s away for the same reason.
-pub fn slice[T](v: Vec[T], from: Int, to: Int) -> Vec[T] = {
+pub(pkg) fn slice[T](v: Vec[T], from: Int, to: Int) -> Vec[T] = {
   var out: Vec[T] = empty()
   var i = clamp_idx(from, v.cnt)
   let stop = clamp_idx(to, v.cnt)
@@ -256,7 +256,7 @@ pub fn slice[T](v: Vec[T], from: Int, to: Int) -> Vec[T] = {
 fn clamp_idx(i: Int, n: Int) -> Int = if i < 0 { 0 } else if i > n { n } else { i }
 
 ## `[from, to)` as a vector of Ints.
-pub fn range(from: Int, to: Int) -> Vec[Int] = {
+pub(pkg) fn range(from: Int, to: Int) -> Vec[Int] = {
   var out: Vec[Int] = empty()
   var i = from
   while i < to {
@@ -309,7 +309,7 @@ fn msort[T](a: Array[T], cmp: fn(T, T) -> Int !e) -> Array[T] !e = {
 }
 
 ## Stable ascending sort by `cmp`.
-pub fn sort_by[T](v: Vec[T], cmp: fn(T, T) -> Int !e) -> Vec[T] !e =
+pub(pkg) fn sort_by[T](v: Vec[T], cmp: fn(T, T) -> Int !e) -> Vec[T] !e =
   from_array(msort(to_array(v), cmp))
 
 # scripts/pvec-contract drives `push`/`get`/`nth` at twelve sizes and compares
