@@ -49,6 +49,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
+| [symbol-id-design.md](symbol-id-design.md) | current | 裁决 10：顶层函数的 symbol ID 就是既有 `DeclKey` 路径（不引入序号或内容哈希），依赖图、调度、header 产物与 LSP 改为按它引用；刀序 S1 保序调度（ARC-08）、S2 真边与 SCC（ARC-01）、S3 具名 header 产物（ARC-07）、S4 TFun 带键。 |
 | [gate-map-dependencies-design.md](gate-map-dependencies-design.md) | current | 从示例 manifest 的本地依赖闭包推导包到示例门禁的归属，并以增删依赖和传递依赖负控固定。 |
 | [gates-external-design.md](gates-external-design.md) | current | 在 GitHub 之外按该提交的 `gates.yml` 跑全部门禁：命令清单运行时派生、`uses:` 替换表、字段白名单的证据包与按多重集重算的 `complete`；维护者签名、`refs/notes/gates` 与 `verify-external.yml` 写 `gates/maintainer` status；prefix 隔离执行、锁定摘要的离线输入包与 `check-isolation` 隔离证明。 |
 | [gate-drift-guards-design.md](gate-drift-guards-design.md) | current | 裁决 9：审计 `present` 锚点恰一次、锚点翻面要 `Anchor-Change(<ID>):` 声明、读源码文本的脚本清单 fail closed（`scripts/anchor-readers.txt`）；nightly 预算观测与生态语料 pin 陈旧检查，红了自动开 issue；总量棘轮：push-total / path-total 上限、`Gate-Budget` / `Gate-Retire` 声明、nightly 每次 push 的 job 秒报表。 |
