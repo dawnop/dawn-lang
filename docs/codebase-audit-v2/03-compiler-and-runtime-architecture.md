@@ -16,6 +16,11 @@
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn name_refs -->
 
+> **处置去向（2026-09-26）：** 余下的实例 Java receiver 伪边由
+> [symbol-id-design.md](../symbol-id-design.md) 的 S2（检查时记录真边、按 SCC 试检）关闭；
+> 那份设计也记下了同源的新误报（真环的非递归依赖者被报成递归）。光把 `name_refs` 的键从名字换成
+> 声明身份关不掉本项，理由见该文 §3.2。
+
 > **后续处置（2026-08-09）：partial。** `RefScope` 现已排除参数、lambda、pattern/local
 > binding 与 module alias，原最小参数重名反例关闭；但非 module receiver 的
 > `EMethod(target, name, ...)` 仍无条件把裸 `name` 记为本模块函数边：
@@ -211,6 +216,9 @@
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | impl_sigs[ii] -->
 
+> **处置去向（2026-09-26）：** checker 半边由 [symbol-id-design.md](../symbol-id-design.md)
+> 的 S3（`ModuleHeaders` 改为声明顺序的路径列表 + 按路径的 Map）关闭；emit 半边维持下文订正里的非目标判决。
+
 - **证据：S。** impl registration 返回与 AST 二维 List 位置对齐的 signatures：`selfhost/src/check/passes.dawn:1382`；checker 直接索引 `impl_sigs[ii]`/`msigs[mi]` 并重新解析 trait/subject：`selfhost/src/check/checker.dawn:7402`、`:7405`、`:7414`。
 - JVM emitter 同时接收 `TModule` 与 `LMod`，先按 `fi` 取 `lm.fns[fi]`，之后才比较 name：`selfhost/src/jvm/emit.dawn:1324`、`:1390`、`:1394`。`docs/arch-split-design.md:748` 也记录了该边界。
 - **影响：** error recovery、filter、reorder 或独立阶段测试只要造成长度偏差，就先 OOB；API 类型不能表达“这是该 declaration 的产物”。
@@ -226,6 +234,9 @@
 ## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度（部分修复）
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | var remaining: List[Int] = [] -->
+
+> **处置去向（2026-09-26）：** 调度半边由 [symbol-id-design.md](../symbol-id-design.md)
+> 的 S1（按语法边一次拓扑、按 `(round, idx)` 执行，完成顺序与旧算法逐项相同）关闭。
 
 - **证据：S。** pending functions 每轮全表扫描：`selfhost/src/check/checker.dawn:7337`；逆拓扑依赖链可每轮只完成一个。每完成一项又用 `take ++ [x] ++ drop` 重建 `sealed` 与 `tfuns`：`selfhost/src/check/checker.dawn:7352`；`take/drop` 会遍历复制：`std/list.dawn:195`、`:201`。
 - **影响：** 顶层函数数 F 时，单回填已经 O(F²)；generated code、超大 module 与未来 incremental check 会首先暴露。

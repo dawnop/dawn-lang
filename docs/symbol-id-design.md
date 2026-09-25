@@ -1,0 +1,116 @@
+# 顶层声明的 symbol ID：按声明身份引用
+
+> 状态：**current**。S0（本文）已落，S1 实现中，S2 到 S4 未开始。裁决来源：2026-09-24 裁决 10（V-02 解冻）及同日改裁。
+> 前置已完成：声明身份 `check/identity`（M0.5 K0 到 K8，2026-09-13 到 09-14）。
+
+## 一、问题
+
+裁决 10 立项时的前提是「顶层声明没有 symbol ID」，这个前提有一半在立项前就已经过期。
+2026-09-13 到 09-14 的增量语义引擎 M0.5（K0 到 K8）已经把声明身份做完：
+`check/identity` 的 `DeclKey = { scope, path }`；nominal、trait、effect 的整数由 `identity.derive`
+从「模块 + 种类 + 名字」派生；binder 与 local 是 `identity.pack(声明号, 槽位)`；`Cx.next_id` 已删
+（审计 ARC-09 已修）。顶层函数其实也已经有派生整数：调度器进入每个函数时
+`enter_decl_owner` 把 `minted_path(owner, [Named(FunctionDecl, name)])` 驻留进 `Cx.identities`，
+只是这个整数今天只当 binder 打包的底数用，没有人拿它当引用键。
+所以本设计**不引入新 ID**，剩下的另一半是「按 ID 引用」。
+
+但顶层函数之间的引用仍有五处不经过这个身份：
+
+1. 返回推断的依赖图以裸名为键，边由 `name_refs` 在任何函数体被检查之前从语法猜出；
+   实例 Java 方法与本模块同名函数会合成假环（ARC-01），真环的非递归依赖者也被报成递归。
+2. 调度每轮全表扫描 pending，逆序链是二次的（ARC-08）。
+3. header 产物是三张与 AST 按下标对齐的平行 List，下游靠逐下标核对名字补救（ARC-07）。
+4. `TFun` 不带声明键，LSP 按函数体的 `(lo, hi)` 线性配对。
+5. 写日志 `SignatureKey` 以名字为键（本设计判为无需改动，见第六节）。
+
+## 二、表示
+
+函数的 symbol ID 就是它的声明路径：顶层函数 `[Named(FunctionDecl, name)]`，impl 方法
+`[ImplHead(trait, subject), Named(MethodDecl, name)]`，trait 默认体 `[Named(TraitDecl, t), Named(MethodDecl, m)]`。
+模块内用 `identity.path_text(path)` 作键；跨模块用 `DeclKey`；需要整数时用
+`identity.derive(identity.minted_path(owner, path))`，它已由 `cx.interned` 驻留并对撞车报硬错误。
+
+不引入新类型，不引入跨会话驻留表：派生值是拼写的纯函数，同一声明在任何会话、任何后端都是同一个整数。
+
+### 为什么不是序号，也不是内容哈希
+
+| 候选 | 前面插入声明 | 改函数体 | 改签名 | 结论 |
+|---|---|---|---|---|
+| 模块 + 声明序号 | 全部后移 | 不变 | 不变 | 否 |
+| 内容哈希 | 不变 | 变 | 变 | 否 |
+| 模块 + 种类 + 名字 | 不变 | 不变 | 不变 | 采用 |
+
+序号：rust-analyzer 的 `AstIdMap` 原本用条目位置作 id，「adding or removing an item invalidates the ast id of everything
+below it」，PR #19837 改为哈希名字等要素。内容哈希：Unison 的定义身份是语法树哈希，修改定义即换哈希、依赖者都要更新；
+增量检查要的恰恰是「签名没变就截断」，身份与「变没变」必须分开（rustc 的 DefPathHash 对 Fingerprint、Salsa 的 interned 对 backdating）。
+撞车：rustc 对 `DefPathHash` 穷举检查并中止编译，本仓 `cx.interned` 同样报错不微扰。
+
+## 三、依赖图与调度
+
+### 3.1 保序调度
+
+pending 以声明下标排序、以路径为身份。沿 `name_refs` 的语法边做一次拓扑，给每个函数算
+`round(f) = max over 依赖 g of (idx(g) < idx(f) ? round(g) : round(g) + 1)`（无依赖为 1），
+按 `(round, idx)` 执行。这与旧算法「每轮按下标扫、依赖齐了就完成」的完成顺序逐项相同，
+所以诊断顺序（诊断按检查顺序输出）、`TFun` 与 Core 不变；复杂度从最坏 O(P²) 次就绪判断降到 O(V+E)。
+
+### 3.2 环：真边
+
+语法边是过近似，只用来排序。对强连通分量（含自环）逐个试检成员：
+检查中若在调用定型处用到了本分量内仍未封签名的返回类型或效果，记下这条真边，丢弃本次试检的 `Cx` 与执行器状态，
+待依赖封定后重试；一轮无进展时剩下的成员构成真环，逐个报 `cannot infer the return type of ... recursive`。
+「只问是否存在」的查找（例如 fn 字段歧义判定）不算真边。
+
+真环成员的返回类型封为 `TyError`，环外的依赖者照常检查，由既有的 errorish 抑制吞掉级联，不再被报成递归。
+
+这与 Salsa（查询重入活动栈即为环）和 TypeScript（推断返回类型时重入报 TS7023）同一思路：
+环由实际解析判定，而不是由语法近似判定。
+
+### 3.3 行为变化
+
+今天被接受的程序语法图无环，行为逐字节不变。今天被拒的两类程序改变：
+实例 Java 方法与同名顶层函数的假环不再报错；真环的依赖者不再被报成递归。
+
+## 四、具名 header 产物
+
+`ModuleHeaders` 的 `sigs`、`impl_sigs`、`const_tys` 改为「声明顺序的路径列表 + 按路径的 Map」。
+产物由键找到自己的声明，不再依赖与 AST 的下标对齐；`function_product.headers` 的逐下标名字核对随之删除。
+JVM 发射器里 `TModule`/`LMod` 的位置对齐维持 `arch-split-design.md` 的非目标判决，不在本设计内。
+
+## 五、TFun 与 LSP
+
+`TFun`、`TConst` 增加 `decl: String`（`path_text`，与 `DiagOwner.decl` 同一拼写）。
+LSP 取函数的类型化树改为按键查，不再线性扫描并比较函数体跨度。
+子表达式的位置并行遍历不在本设计内（需要 checker 建 span 到类型化节点的索引）。
+
+## 六、不做的（理由）
+
+- **不把 Core 的函数引用换成整数。** `CDirect(owner, name)` 不含任何计数器，已经跨修订稳定，也是两个后端的符号来源；
+  换成整数只产生 Emit-Change，没有收益。
+- **不改写日志的 `SignatureKey(name)`。** 模块内重复声明整组下毒，名字已是单射；换成路径只换拼写。
+- **不改读取事实的名字键。** 「查名字 f 得到什么」是名字查询，新增同名声明应当使它失效，以名字为键才对。
+- **不在 Sig 里存声明 id。** Sig 已带 `owner` 与 `name`，id 可派生；Sig 参与结构相等与 memo 键，冗余字段只增加不一致的机会。
+- **不做跨会话驻留表。** 派生值是纯函数，不需要持久化。
+- **不在本设计里做 OriginId（ARC-11B）。** 它缺的是 Core 通用遍历原语（RC-03），不是身份。
+
+## 七、刀序与验收
+
+| 刀 | 内容 | 冷输出 | 关键验收 |
+|---|---|---|---|
+| S1 | 保序调度 | 不变 | 冻结参考调度器 `body-scheduler.py` 原样通过；8000 函数逆序链的二次项消失 |
+| S2 | SCC 与真边 | 仅今天被拒的程序变化 | 假环程序通过；真环依赖者不再误报；三个变异体 |
+| S3 | 具名 header 产物 | 不变 | golden 与 prev-diff 不变；契约全扫 |
+| S4 | TFun 带键、LSP 按键 | 不变 | LSP 会话对拍不变 |
+
+每刀碰 `check/`，按仓库规矩跑增量语义契约全扫；审计锚点（`pub fn name_refs`、`impl_sigs[ii]`、
+`var remaining: List[Int] = []`）随刀翻面并改处置文字。
+
+## 八、状态
+
+| 刀 | 状态 | 提交 |
+|---|---|---|
+| S0 | 已落（本文；审计 ARC-01/07/08 指向本文） | 本 PR |
+| S1 | 本 PR | |
+| S2 | 未开始 | |
+| S3 | 未开始 | |
+| S4 | 未开始 | |
