@@ -708,18 +708,34 @@ pub const DEFAULT_MAX_BODY: Int = 8388608
 ## shape states it here (web/types.ErrorFormat).
 pub type ServerConfig = { host: String, port: Int, max_body: Int, errors: ErrorFormat }
 
-## A running server. `port` is the real bound port — the point of port 0.
-## `executor` is the request pool `start` created, owned by the handle so that
-## `stop` can shut it down: jdk.httpserver's own `stop` does not touch an
-## executor it was handed. `done` is what lets join/stop compose over
-## jdk.httpserver, which has a stop but no join: join awaits the latch, stop
-## opens it after stopping the JDK server.
-##
-## (The design sketched the handle as server + port only. Without the latch
-## there is nothing for join to block on; without the executor there is nothing
-## to shut down, and a start/stop cycle left one behind every time, so a test
-## suite or a reloading server accumulates them for the life of the process.)
-pub type ServerHandle = { server: HttpServer, port: Int, executor: ExecutorService, done: CountDownLatch }
+# A running server. `port` is the real bound port — the point of port 0.
+# `executor` is the request pool `start` created, owned by the handle so that
+# `stop` can shut it down: jdk.httpserver's own `stop` does not touch an
+# executor it was handed. `done` is what lets join/stop compose over
+# jdk.httpserver, which has a stop but no join: join awaits the latch, stop
+# opens it after stopping the JDK server.
+#
+# (The design sketched the handle as server + port only. Without the latch
+# there is nothing for join to block on; without the executor there is nothing
+# to shut down, and a start/stop cycle left one behind every time, so a test
+# suite or a reloading server accumulates them for the life of the process.)
+type ServerHandleRep = { server: HttpServer, port: Int, executor: ExecutorService, done: CountDownLatch }
+
+# Opaque since web5. As a public record a handle could be written by hand,
+# pairing a server with an executor and a latch it never owned, and `stop` would
+# shut down whatever it was handed; its four fields were also the one part of
+# the lifecycle a caller had no business reading. `start` is the only way to
+# get one, and the port is the one thing worth reading off it.
+## A running server, as `start` returns it: `join` blocks on it, `stop` ends
+## it, and `handle_port` reads the port it actually bound (the point of port 0).
+pub opaque type ServerHandle = ServerHandleRep
+
+## The port the server actually bound — with port 0 in the config, the one the
+## OS picked.
+pub fn handle_port(h: ServerHandle) -> Int = {
+  let rep: ServerHandleRep = h
+  rep.port
+}
 
 # Bind cfg.host:cfg.port, serve requests on virtual threads, and return
 # immediately with the handle. The caller decides what the rest of the
@@ -748,7 +764,7 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   # (A port-0 test transcript with a random port in it broke run-diff, which
   # rightly treats test stdout as a deterministic artifact.) The classic
   # entry points below keep the message.
-  ServerHandle {
+  ServerHandleRep {
     server: server,
     port: server.getAddress()!.getPort(),
     executor: pool,
@@ -758,7 +774,10 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
 
 ## Block until stop() releases this handle. A server's main() usually ends
 ## here — returning would let the JVM exit out from under the request threads.
-pub fn join(h: ServerHandle) -> Unit !io = h.done.await()
+pub fn join(h: ServerHandle) -> Unit !io = {
+  let rep: ServerHandleRep = h
+  rep.done.await()
+}
 
 # What stop releases, on every way out of it. Bracketed rather than written
 # after `server.stop`, because `server.stop` can throw: a stop that failed
@@ -767,7 +786,7 @@ pub fn join(h: ServerHandle) -> Unit !io = h.done.await()
 # not be relied on to end them. The executor goes first (it is the resource
 # the handle owns); the latch last, since releasing it is what lets another
 # thread observe the shutdown as finished.
-fn release_handle(h: ServerHandle) -> Unit !io = {
+fn release_handle(h: ServerHandleRep) -> Unit !io = {
   let _ = catch_fault(() => h.executor.shutdown())
   h.done.countDown()
 }
@@ -777,7 +796,8 @@ fn release_handle(h: ServerHandle) -> Unit !io = {
 ## executor is shut down, and then every join() blocked on this handle returns.
 ## Every one of those happens even if the JDK's own stop throws.
 pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
-  with held <- bracket(h, release_handle)
+  let rep: ServerHandleRep = h
+  with held <- bracket(rep, release_handle)
   held.server.stop(grace_secs)
 }
 
@@ -798,7 +818,7 @@ pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middlewa
 ## main() to end by blocking.
 pub fn serve_app_with(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
   let h = start(cfg, routes, middleware)
-  println("listening on http://${cfg.host}:${h.port}")
+  println("listening on http://${cfg.host}:${handle_port(h)}")
   join(h)
 }
 
@@ -1452,15 +1472,15 @@ test "lifecycle: port 0 binds a real port, serves, and join returns after stop" 
   let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
   let h = start(cfg, [route_get("/hello", hello_handler)], [])
   # the OS picked the port; the handle reports the real one, and it works
-  assert h.port > 0
-  let (st, body) = test_fetch_bytes("http://127.0.0.1:${h.port}/hello")
+  assert handle_port(h) > 0
+  let (st, body) = test_fetch_bytes("http://127.0.0.1:${handle_port(h)}/hello")
   assert st == 200
   assert body == bytes.utf8("hello")
   stop(h, 0)
   # stop released the latch: join returns instead of blocking forever
   join(h)
   # and the listener really closed — a fresh connection is refused
-  match catch_fault(() => Socket.new("127.0.0.1", h.port)) {
+  match catch_fault(() => Socket.new("127.0.0.1", handle_port(h))) {
     Ok(s) -> {
       s.close()
       assert false
@@ -1472,29 +1492,31 @@ test "lifecycle: port 0 binds a real port, serves, and join returns after stop" 
 test "stop shuts the request executor down, and does so even if the JDK's stop throws" {
   let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
   let h = start(cfg, [route_get("/hello", hello_handler)], [])
+  let rep: ServerHandleRep = h
   # the pool is live while the server is: it answers a request on it
-  assert h.executor.isShutdown() == false
-  let (st, _b) = test_fetch_bytes("http://127.0.0.1:${h.port}/hello")
+  assert rep.executor.isShutdown() == false
+  let (st, _b) = test_fetch_bytes("http://127.0.0.1:${handle_port(h)}/hello")
   assert st == 200
   stop(h, 0)
   # ...and the handle owns it, so stopping the server shut it down. Before it
   # was in the handle nothing ever did, and each start/stop cycle left one.
-  assert h.executor.isShutdown() == true
+  assert rep.executor.isShutdown() == true
 
   # the release is bracketed, so a failing server.stop still shuts the pool
   # down and still opens the latch. `stop(grace)` with a negative grace is the
   # JDK's own documented IllegalArgumentException, so no fake is needed.
   let h2 = start(cfg, [route_get("/hello", hello_handler)], [])
+  let rep2: ServerHandleRep = h2
   match catch_fault(() => stop(h2, -1)) {
     Ok(_) -> { assert false }
     Err(_) -> ()
   }
-  assert h2.executor.isShutdown() == true
+  assert rep2.executor.isShutdown() == true
   # the latch opened too: join returns rather than blocking forever
   join(h2)
   # shutting the executor down leaves the JDK server unstopped, so close the
   # listener before the test ends
-  h2.server.stop(0)
+  rep2.server.stop(0)
 }
 
 test "start refuses a broken route table before binding a socket" {
