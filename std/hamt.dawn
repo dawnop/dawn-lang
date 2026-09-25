@@ -28,7 +28,7 @@
 
 ## One node of the trie. `NColl` holds leaves whose hashes are equal, which is
 ## the only case a branch cannot separate.
-pub type Node[K, V] =
+pub(pkg) type Node[K, V] =
   | NEmpty
   | NLeaf(h: Int, k: K, v: V, seq: Int)
   | NColl(h: Int, kids: Array[Node[K, V]])
@@ -36,7 +36,7 @@ pub type Node[K, V] =
 
 ## A whole map: the trie, how many entries are live in it, and the counter the
 ## next insertion takes its position from.
-pub type Hamt[K, V] = { root: Node[K, V], count: Int, nseq: Int }
+pub(pkg) type Hamt[K, V] = { root: Node[K, V], count: Int, nseq: Int }
 
 const BITS: Int = 5
 
@@ -249,13 +249,13 @@ fn coll_del[K: Eq, V](kids: Array[Node[K, V]], i: Int, k: K) -> Array[Node[K, V]
 # ---- the map surface ----
 
 ## A map with no entries.
-pub fn empty[K, V]() -> Hamt[K, V] = Hamt { root: NEmpty, count: 0, nseq: 0 }
+pub(pkg) fn empty[K, V]() -> Hamt[K, V] = Hamt { root: NEmpty, count: 0, nseq: 0 }
 
 ## Number of live entries.
-pub fn count[K, V](m: Hamt[K, V]) -> Int = m.count
+pub(pkg) fn count[K, V](m: Hamt[K, V]) -> Int = m.count
 
 ## The value bound to `k`, or `None`.
-pub fn get[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Option[V] =
+pub(pkg) fn get[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Option[V] =
   match node_leaf(m.root, 0, hash32(k), k) {
     Some(leaf) ->
       match leaf {
@@ -268,14 +268,14 @@ pub fn get[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Option[V] =
 ## The value bound to `k`, panicking when it is absent — what `m[k]` means.
 ## Naming the missing key is why this one asks for `Show` and nothing else
 ## does.
-pub fn index[K: Eq + Hash + Show, V](m: Hamt[K, V], k: K) -> V =
+pub(pkg) fn index[K: Eq + Hash + Show, V](m: Hamt[K, V], k: K) -> V =
   match get(m, k) {
     Some(v) -> v
     None -> panic("key not found: " ++ show(k))
   }
 
 ## Whether `k` is bound.
-pub fn has[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Bool =
+pub(pkg) fn has[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Bool =
   match node_leaf(m.root, 0, hash32(k), k) {
     Some(_) -> true
     None -> false
@@ -290,7 +290,7 @@ pub fn has[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Bool =
 # what lets the spine be rewritten in place instead of path-copied
 # (perceus-design.md 6). Written `..m`-style, `m` survives to the end of the
 # expression and pins the whole spine at rc 2.
-pub fn assoc[K: Eq + Hash, V](m: Hamt[K, V], k: K, v: V) -> Hamt[K, V] = {
+pub(pkg) fn assoc[K: Eq + Hash, V](m: Hamt[K, V], k: K, v: V) -> Hamt[K, V] = {
   let h = hash32(k)
   let root = m.root
   let count = m.count
@@ -317,7 +317,7 @@ fn leaf_seq[K, V](n: Node[K, V]) -> Int =
 
 ## A copy without `k`; absent keys are fine.
 # Field bindings before the rebuild, for assoc's reason.
-pub fn dissoc[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Hamt[K, V] = {
+pub(pkg) fn dissoc[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Hamt[K, V] = {
   let h = hash32(k)
   let root = m.root
   let count = m.count
@@ -364,7 +364,7 @@ fn ordered[K, V](m: Hamt[K, V]) -> List[(Int, K, V)] = {
 }
 
 ## The (key, value) pairs, in insertion order.
-pub fn entries[K, V](m: Hamt[K, V]) -> List[(K, V)] = {
+pub(pkg) fn entries[K, V](m: Hamt[K, V]) -> List[(K, V)] = {
   var out: List[(K, V)] = []
   for e in ordered(m) {
     let (_, k, v) = e
@@ -374,7 +374,7 @@ pub fn entries[K, V](m: Hamt[K, V]) -> List[(K, V)] = {
 }
 
 ## The keys, in insertion order.
-pub fn keys[K, V](m: Hamt[K, V]) -> List[K] = {
+pub(pkg) fn keys[K, V](m: Hamt[K, V]) -> List[K] = {
   var out: List[K] = []
   for e in ordered(m) {
     let (_, k, _) = e
@@ -384,7 +384,7 @@ pub fn keys[K, V](m: Hamt[K, V]) -> List[K] = {
 }
 
 ## The values, in insertion order of their keys.
-pub fn values[K, V](m: Hamt[K, V]) -> List[V] = {
+pub(pkg) fn values[K, V](m: Hamt[K, V]) -> List[V] = {
   var out: List[V] = []
   for e in ordered(m) {
     let (_, _, v) = e
@@ -414,12 +414,12 @@ fn kids_fold[K, V, A](kids: Array[Node[K, V]], i: Int, acc: A, f: fn(A, K, V) ->
 ## so `f` sees the entries in no promised order and each exactly once. A fold
 ## whose answer depends on the order it met the entries in belongs on
 ## `entries(m)`.
-pub fn fold[K, V, A](m: Hamt[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e =
+pub(pkg) fn fold[K, V, A](m: Hamt[K, V], init: A, f: fn(A, K, V) -> A !e) -> A !e =
   node_fold(m.root, init, f)
 
 ## A map from a list of pairs; a repeated key keeps the last value and the
 ## first position.
-pub fn from[K: Eq + Hash, V](es: List[(K, V)]) -> Hamt[K, V] = {
+pub(pkg) fn from[K: Eq + Hash, V](es: List[(K, V)]) -> Hamt[K, V] = {
   var m: Hamt[K, V] = empty()
   for e in es {
     let (k, v) = e
@@ -436,10 +436,10 @@ pub fn from[K: Eq + Hash, V](es: List[(K, V)]) -> Hamt[K, V] = {
 # what a set wants.
 
 ## A copy with `x` added; an existing element keeps its position.
-pub fn sadd[T: Eq + Hash](s: Hamt[T, Bool], x: T) -> Hamt[T, Bool] = assoc(s, x, true)
+pub(pkg) fn sadd[T: Eq + Hash](s: Hamt[T, Bool], x: T) -> Hamt[T, Bool] = assoc(s, x, true)
 
 ## A set from a list; duplicates collapse onto the first occurrence.
-pub fn sfrom[T: Eq + Hash](xs: List[T]) -> Hamt[T, Bool] = {
+pub(pkg) fn sfrom[T: Eq + Hash](xs: List[T]) -> Hamt[T, Bool] = {
   var s: Hamt[T, Bool] = empty()
   for x in xs {
     s = sadd(s, x)

@@ -291,6 +291,16 @@ cat >> "$world_std/bytes.dawn" <<'EOF'
 pub fn surface_contract_world_array(a: Array[Int]) -> Int = array_len(a)
 EOF
 
+# std/hamt and std/pvec declare with `pub(pkg)`, so the real std no longer
+# has a `pub` root in either; this copy puts one back. It names `Array` and
+# nothing private, so it must be accepted: a `pub` in an internal-std module
+# still stops at `StdOnly`, and that is the only thing that keeps it legal.
+internal_pub_std=$(std_copy internal-pub)
+cat >> "$internal_pub_std/pvec.dawn" <<'EOF'
+
+pub fn surface_contract_internal_pub_array(a: Array[Int]) -> Int = array_len(a)
+EOF
+
 internal_std=$(std_copy internal)
 cat >> "$internal_std/pvec.dawn" <<'EOF'
 
@@ -411,6 +421,7 @@ got=$(doc_names "$dawn" "$cases/doc_pkg.dawn")
 }
 
 expect_std_ok "$root/std"
+expect_std_ok "$internal_pub_std"
 expect_std_refuses "$world_std" \
   'public function `surface_contract_world_array` exposes standard-library-internal type `Array`'
 expect_std_refuses "$internal_std" \
@@ -679,7 +690,8 @@ Sketch[Card]' ;;
     array-is-world)
       mutant_std_accepts "$1" "$world_std" ;;
     stdonly-collapses-to-world)
-      mutant_std_refuses "$1" "$root/std" 'standard-library-internal type `Array`' ;;
+      mutant_std_refuses "$1" "$internal_pub_std" \
+        'public function `surface_contract_internal_pub_array` exposes standard-library-internal type `Array`' ;;
     pkg-always-visible)
       # the boundary is gone: the dependent project is accepted, and the
       # checker corpus's cross-package case no longer matches its golden
