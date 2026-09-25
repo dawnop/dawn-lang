@@ -73,9 +73,21 @@ jobs:
   # API directly and no previous run's artifact, so it has no first-run case
   # and no retention window. Measured locally 2026-09-24: 1m52s to read 25
   # runs, 0.06s to compare; nothing here builds.
+  #
+  # 2026-09-25: the job also reports what a push to main costs, week against
+  # week (scripts/gate-totals.py has the why): job-seconds per successful
+  # push, span, the share of each job family and how often tile.yml fires,
+  # as a table in the step summary, and an issue when the median grows more
+  # than 10% on the week before or tile.yml runs on more than one push in
+  # five. It reads fourteen days rather than seven, so it fetches its own
+  # records instead of widening the audit's window, which would change what
+  # the audit holds the claims to. That second read is the cost: measured
+  # locally 2026-09-25, 6m00s for 80 ci.yml runs and 1m00s for 33 tile.yml
+  # runs (the local link is slow; the audit's 25 runs took 1m52s on it), and
+  # 0.04s to compute. Hence 30 minutes rather than 15, as a runaway stop.
   budget-observations:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     # Listed in full: a `permissions:` block sets everything it omits to none.
     permissions:
       actions: read     # the runs and their jobs, for gate-observations.py
@@ -123,6 +135,56 @@ jobs:
             echo '```'
           } > issue.md
           scripts/nightly-issue.sh "nightly: gate budgets under-declared" issue.md
+
+      # The totals are a report, so they run whether or not the audit above
+      # was green. The table goes in the step summary every night; the issue
+      # only when gate-totals.py exits 1.
+      - name: job-seconds per push, week against week
+        id: totals
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
+              --since "$since" --runs 400 --out ci-weeks.json > totals.txt 2>&1 &&
+            python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
+              --workflow tile.yml --allow-empty --since "$since" --runs 400 \
+              --out tile-weeks.json >> totals.txt 2>&1 &&
+            python3 scripts/gate-totals.py --ci ci-weeks.json \
+              --tile tile-weeks.json > table.md 2>> totals.txt || status=$?
+          cat totals.txt
+          if [ -s table.md ]; then
+            cat table.md
+            cat table.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "${status:-0}"
+
+      - name: report gate totals over their limits as an issue
+        if: ${{ !cancelled() && steps.totals.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly gate totals report crossed a limit (median job-seconds"
+            echo "per successful push up more than 10% on the week before, or"
+            echo "tile.yml on more than one push in five), or could not read the runs."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "The push total in gates.yml caps the claims; this is the measured"
+            echo "side. Name the jobs that grew, or say why the week is an outlier."
+            echo
+            cat table.md 2>/dev/null || true
+            echo
+            echo '```'
+            cat totals.txt 2>/dev/null || echo "(no output was captured)"
+            echo '```'
+          } > totals-issue.md
+          scripts/nightly-issue.sh "nightly: gate totals over their limits" totals-issue.md
 
   # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
   # nothing advances answers an older question every week: it sat at a72bfc9
