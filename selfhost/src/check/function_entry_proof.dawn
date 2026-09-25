@@ -78,8 +78,13 @@ test "bounded entry prefix requires complete ordered canonical trait names" {
 
 ## Entry-only, not permission to replay. The product must already be paired
 ## and projected by the caller; no historical Cx is accepted or retained.
+##
+## `candidate.diags` is the scheduler's running list, so it holds whatever
+## the bodies checked before this one reported. Those are not this entry's:
+## every diagnostic question below asks whether the entry itself appended one,
+## by length against the list it started from, never whether the list is empty.
 pub(pkg) fn prove(candidate: Cx, declaration: FnDecl, signature: Sig, product: Product) -> Option[Proof] = {
-  if len(candidate.diags) != 0 || candidate.in_test || candidate.frame.isolated ||
+  if candidate.in_test || candidate.frame.isolated ||
     candidate.owner_lo != declaration.lo || product.owner_decl != candidate.owner_decl ||
     signature.owner != candidate.owner_class || signature.name != declaration.name ||
     map.get(candidate.fns, declaration.name) != Some(signature) ||
@@ -108,7 +113,7 @@ pub(pkg) fn prove(candidate: Cx, declaration: FnDecl, signature: Sig, product: P
     index = index + 1
   }
   let (resolved, bounds) = passes.resolve_bounds(candidate, declaration.tparams)
-  if len(resolved.diags) != 0 || bounds != signature.constraints { return None }
+  if len(resolved.diags) != len(candidate.diags) || bounds != signature.constraints { return None }
   index = 0
   for parameter in declaration.params {
     match parameter.default { Some(_) -> return None, None -> () }
@@ -126,7 +131,7 @@ pub(pkg) fn prove(candidate: Cx, declaration: FnDecl, signature: Sig, product: P
   # the live candidate; its allocations are never installed by this API.
   let observed = Cx { ..candidate, function_reads: Some([]), body_writes: Some([]) }
   let entry = checker.function_entry(observed, declaration, signature)
-  if len(entry.cx.diags) != 0 { return None }
+  if len(entry.cx.diags) != len(candidate.diags) { return None }
   let entry_reads = entry.cx.function_reads?
   if not entry_prefix(reads, entry_reads) { return None }
   let dicts = checker.function_dictionaries(entry.cx, signature)

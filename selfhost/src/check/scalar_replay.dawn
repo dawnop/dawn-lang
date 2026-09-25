@@ -299,7 +299,11 @@ fn recorded(prior: FnDecl, prior_sig: Sig, p: Product, declaration: Int,
     if publication.key != prior.name || publication.value != Some(p.tree.sig) { return None }
   } else if p.tree.sig != prior_sig || p.signatures != [] { return None }
   if p.tree.name != prior.name || p.aliases != [] || len(p.bounds) != 0 ||
-    p.tparams != tparams || p.effect_vars != eff_vars || p.diagnostics != [] { return None }
+    p.tparams != tparams || p.effect_vars != eff_vars { return None }
+  # The per-body diagnostic guard. The delta is this body's own, measured
+  # against the list it was entered with, so it is empty exactly when this
+  # body reported nothing, whatever the bodies before it reported.
+  if p.diagnostics != [] { return None }
   let reads = p.function_reads?
   if reads == [] && not inferred { return None }
   for read in reads {
@@ -511,8 +515,14 @@ fn revalidated(memo: Memo, cx: Cx, scoped: Cx, read: FunctionRead) -> (Memo, Opt
 ## product. Separate from `candidate` so the equivalence of the two
 ## revalidation paths can be asserted on the same relocation the production
 ## path builds.
+##
+## There is no diagnostic guard here, on purpose. `cx.diags` is the
+## scheduler's running list and holds what earlier bodies reported; the
+## checker only appends to it and never reads it back while checking a body,
+## so another body's error says nothing about this one. The guard is per body
+## and lives in `recorded`: a product whose own check reported a diagnostic is
+## never admitted, so it is checked cold and reports it again in its place.
 fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {
-  if cx.diags != [] { return None }
   if len(sig.constraints) != 0 {
     if not bounded_replay.header(d, sig) { return None }
   } else { let _ = parameters(d, sig)? }
@@ -1571,11 +1581,10 @@ test "scalar replay raises the diagnostics of a mixed assembly in cold order" {
   # the declarations in, and a replay that interleaved a reused body with a
   # cold one has to produce the cold list item for item.
   #
-  # Reuse stops at the first diagnostic: `relocation` refuses a candidate
-  # context that already carries one, so `three` is checked cold here although
-  # its own bytes did not change and the diagnostic-free revision above reuses
-  # the same body. That is the shape of a mixed assembly today, and it is
-  # asserted rather than assumed.
+  # Reuse does not stop at the first diagnostic: `three` is reused although
+  # `two` already put one in the scheduler's list, because that diagnostic is
+  # not `three`'s. `two` and `four` reported their own when they were
+  # recorded, so they are checked cold and report them again in their places.
   let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
   let before = "fn one() -> Int = 1\nfn two() -> Int = missing_a\n" ++
     "fn three() -> Int = 3\nfn four() -> Int = missing_b\n"
@@ -1589,10 +1598,41 @@ test "scalar replay raises the diagnostics of a mixed assembly in cold order" {
   let saved = body_execution.record(scope, old)
   let actual = replay(admit(scope, old, old_snapshot, saved), next, next_snapshot)
   let expected = checker.check_module_body_products(next)
-  assert actual.reused == 1 && actual.checked == 3
+  assert actual.reused == 2 && actual.checked == 2
   assert map(actual.bodies.functions, f => f.name) == ["one", "two", "three", "four"]
   assert map(actual.bodies.cx.diags, d => d.msg) ==
     ["undefined variable: missing_a", "undefined variable: missing_b"]
+  assert actual.bodies.cx.diags == expected.cx.diags
+  assert actual.bodies.functions == expected.functions
+  assert actual.bodies.cx.syms == expected.cx.syms
+  assert actual.bodies.cx.decl_slots == expected.cx.decl_slots
+}
+
+test "scalar replay does not reuse a body whose own check reported a diagnostic" {
+  # The per-body guard, on a body that is otherwise inside the admitted class.
+  # Binding `y` twice in one scope is reported, but both bindings are typed
+  # and the tree has no error node in it, so nothing but the diagnostic keeps
+  # `twice` out: take the guard away and it is admitted and replayed. `three`
+  # comes after it, so a guard that looked at the scheduler's whole list
+  # instead of the body's own delta would send `three` cold as well.
+  let scope = identity.module_key("scalar", "sample", "sample", "sample.dawn")
+  let before = "fn one() -> Int = 1\nfn twice(x: Int) -> Int = {\n let y = x\n let y = y + x\n y\n}\n" ++
+    "fn three() -> Int = 3\n"
+  let after = "type Added = { n: Int }\n" ++ before
+  let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
+  let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
+  let base = cx_new(Some("sample"), Some("sample.dawn"))
+  let old = checker.check_module_headers(base, source_snapshot.syntax(old_snapshot), map.empty())
+  let next = checker.check_module_headers(base, source_snapshot.syntax(next_snapshot), map.empty())
+  assert old.cx.diags == [] && next.cx.diags == []
+  let saved = body_execution.record(scope, old)
+  assert saved.refused == 0
+  let admitted = admit(scope, old, old_snapshot, saved)
+  assert admitted_count(admitted) == 2
+  let actual = replay(admitted, next, next_snapshot)
+  let expected = checker.check_module_body_products(next)
+  assert map(expected.cx.diags, d => d.msg) == ["`y` is already bound in this scope"]
+  assert actual.reused == 2 && actual.checked == 1 && actual.cold_unadmitted == 1
   assert actual.bodies.cx.diags == expected.cx.diags
   assert actual.bodies.functions == expected.functions
   assert actual.bodies.cx.syms == expected.cx.syms

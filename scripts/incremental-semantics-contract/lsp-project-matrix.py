@@ -22,12 +22,12 @@ COUNT_FIELDS = ("checked_bodies", "reused_bodies", "reused_modules",
                 "cold_rejected_bodies", "unobserved_modules", "retained_body_products")
 EXPECTED_COUNTS = {
     "provider-body": (1, 3, 0, 0, 0, 4),
-    "provider-signature": (3, 1, 0, 1, 0, 2),
+    "provider-signature": (2, 2, 0, 1, 0, 2),
     "consumer-recovery": (2, 0, 1, 0, 0, 4),
-    "provider-error": (2, 0, 0, 0, 1, 0),
+    "provider-error": (1, 1, 0, 0, 1, 0),
     "provider-recovery": (4, 0, 0, 0, 0, 4),
     "provider-move": (0, 4, 0, 0, 0, 4),
-    "close-provider": (3, 1, 0, 1, 0, 2),
+    "close-provider": (2, 2, 0, 1, 0, 2),
     "reopen-provider": (3, 1, 0, 0, 0, 4),
 }
 
