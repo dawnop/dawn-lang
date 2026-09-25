@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Fourteen checks, each unambiguous on purpose (a doc lint with false positives
+Fifteen checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -48,6 +48,9 @@ gets disabled, and then it protects nothing):
             statuses is still wrong, and the partition check cannot see that
   contracts  settled semantic and repository-governance clauses remain present;
              this is a targeted pin, not full prose comparison
+  fixed     no tracked file outside docs/ names an issue in FIXED_ISSUES as
+            the reason for a workaround: a comment saying a fixed bug is live
+            is a wrong document that happens to live in a source file
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -2761,6 +2764,60 @@ def keyword_inventory_selftest() -> tuple[list[str], int]:
     return bad, 5
 
 
+# Issues that are fixed and guarded, each with the design record that is now
+# the only place allowed to discuss it. A workaround comment citing one of
+# these outside docs/ tells a reader that an ordinary shape is broken when it
+# is not, and it is the shape the next reader copies (issue 189: twenty-two
+# sites kept a recursion and a comment for the RC operand fix long after the
+# fix landed). The pattern is built from the numbers so this file never
+# matches itself.
+FIXED_ISSUES = {68: "docs/rc-operand-unwind-design.md"}
+FIXED_ISSUE_CLAIM = re.compile(
+    r"\bissue #(" + "|".join(str(n) for n in sorted(FIXED_ISSUES)) + r")\b")
+
+
+def fixed_issue_problems(files: dict[str, str]) -> list[str]:
+    bad = []
+    for rel, text in sorted(files.items()):
+        if rel.startswith("docs/"):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            m = FIXED_ISSUE_CLAIM.search(line)
+            if m:
+                n = int(m.group(1))
+                bad.append(f"{rel}:{lineno}: cites issue {n} as live, but it is fixed "
+                           f"({FIXED_ISSUES[n]}); write the plain form or state today's reason")
+    return bad
+
+
+def check_fixed_issue_claims() -> tuple[list[str], int]:
+    # A fixed-string prefilter; the regex below decides (`#680` is not `#68`).
+    needles = [arg for n in sorted(FIXED_ISSUES) for arg in ("-e", f"issue #{n}")]
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "grep", "-l", "-I", "-z", "-F", *needles,
+         "--", ".", ":!docs"],
+        capture_output=True)
+    if proc.returncode not in (0, 1):
+        return [f"fixed issues: `git grep` failed (exit {proc.returncode}): "
+                f"{proc.stderr.decode(errors='replace').strip()}"], 0
+    rels = [r for r in proc.stdout.decode().split("\0") if r]
+    files = {rel: (ROOT / rel).read_text(encoding="utf-8", errors="replace") for rel in rels}
+    return fixed_issue_problems(files), len(FIXED_ISSUES)
+
+
+def check_fixed_issue_claims_selftest() -> tuple[list[str], int]:
+    """The old std/gpu comment in a scratch source file is red; the same text
+    under docs/ and a bare mention of the number are green."""
+    old = ("# `out = out ++ [gpu_download(h)?]` makes the C backend's reference counter\n"
+           "# panic, which is dawn-lang issue #" + "68 and not this module's bug.\n")
+    bad = []
+    if not fixed_issue_problems({"scripts/scratch.dawn": old}):
+        bad.append("fixed issues selftest: the old workaround comment stayed green")
+    if fixed_issue_problems({"docs/scratch.md": old, "scripts/scratch.dawn": "# see #" + "68\n"}):
+        bad.append("fixed issues selftest: docs/ or a bare number was refused")
+    return bad, 2
+
+
 def check_repository_contracts() -> tuple[list[str], int]:
     files = {rel: (ROOT / rel).read_text(encoding="utf-8")
              for rel in REPOSITORY_POLICY_FILES if (ROOT / rel).exists()}
@@ -4409,6 +4466,12 @@ def main() -> None:
     selftests_seen += n
     bad, policies_seen = check_repository_contracts()
     problems += bad
+    bad, n = check_fixed_issue_claims()
+    problems += bad
+    policies_seen += n
+    bad, n = check_fixed_issue_claims_selftest()
+    problems += bad
+    selftests_seen += n
     bad, n = check_repository_contracts_selftest()
     problems += bad
     selftests_seen += n
