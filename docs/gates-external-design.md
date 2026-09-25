@@ -481,8 +481,8 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 ### 做法
 
-- `ci.yml` 给 `gates.yml` 多传一个输入 `head: ${{ github.event.pull_request.head.sha || github.sha }}`，并在调用 job 上授予 `contents/statuses/actions: read`。本仓默认 token 是受限档（`gh api repos/dawnop/dawn-lang/actions/permissions/workflow` 读到 `"read"`），它只带 contents；被调用的工作流只能收窄调用方给的权限，所以必须由 `ci.yml` 给，`plan` job 再声明恰好这三项。
-- `plan` job 先跑一步 `evidence`：`timeout 20 release_evidence.py --external-only --sha "$HEAD"`。退出码 0 写 `accepted=true` 并把核验行贴进 step summary；1（没有可接受的 status）、2（API 读不了）、124（超时）一律写 `accepted=false`，日志里有 `refused: <why>` 或 `exit 2`。
+- `ci.yml` 给 `gates.yml` 多传一个输入 `head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}`（只在 PR 上有值），并在调用 job 上授予 `contents/statuses/actions: read`。本仓默认 token 是受限档（`gh api repos/dawnop/dawn-lang/actions/permissions/workflow` 读到 `"read"`），它只带 contents；被调用的工作流只能收窄调用方给的权限，所以必须由 `ci.yml` 给，`plan` job 再声明恰好这三项。
+- `plan` job 先跑一步 `evidence`：事件不是 `pull_request` 或 `head` 为空时只打印 `evidence: not a pull request; planning as usual` 并直接走规划；否则 `timeout 20 release_evidence.py --external-only --sha "$HEAD"`。退出码 0 写 `accepted=true` 并把核验行贴进 step summary；1（没有可接受的 status）、2（API 读不了）、124（超时）一律写 `accepted=false`，日志里有 `refused: <why>` 或 `exit 2`。
 - 规划那一步开头读 `accepted`：为 true 就写 `all=false`、`jobs=[]` 并 `exit 0`，不调 `plan.py`；否则与之前逐字相同。
 - 所以 plan 的输出仍然只有 `all`/`jobs` 两个键，gate job 的 `if:`、`gatesplan.py`、`steps.lock.json` 都不用动（`gatesplan` 整个替换 plan job，不看它的步骤；`--self-test` 与 `--sha` 在本刀上照常通过）。
 
@@ -492,9 +492,11 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全跳过；但它今天本来就能把 `ci.yml` 改成什么都不跑。PR 检查对恶意作者从来不是边界，边界在 main 与 release。
 
-### release 守卫为什么要跟着收紧
+### 只在 PR 上生效；release 守卫的第二道
 
-证据档在 push 事件上同样生效，于是 main 上会出现「push 事件、默认分支、结论 success，但所有 gate job 都 skipped」的运行。守卫的第 1 条原来只看事件与分支，会把它当全集。平时无害，因为同一个 sha 上第 2 条也成立；但若之后又有一次 verify 写了 `failure`（最新 status 覆盖旧的），第 2 条不再成立，第 1 条却仍会凭这次全跳过的运行放行。所以第 1 条现在对通过事件与分支检查的成功运行再读一次 `actions/runs/<id>/jobs?filter=latest`，有任何 job 为 `skipped` 就拒（`refused: N of M job(s) skipped ... (an evidence-tier run, not the whole gate set)`），没有 job 也拒。
+证据档只在 `pull_request` 事件生效（主会话裁决，2026-09-25）。「main 的 push 运行就是全集」要按构造成立，不靠守卫事后拒：`ci.yml` 在 push 上传空的 `head`，证据步骤见空就不查；`plan.py --check-wiring` 要求 `head` 的表达式含 `github.event_name == 'pull_request'`，改成无条件传 `github.sha` 的变异体会红。另一个理由是 nightly 的 gate-totals 把 main 上 success 的 push 运行当全集算中位 job-seconds，一次全跳过的 main 运行会污染报表。代价是快进合入时 main 也拿不到证据档的省时（今天走 `gh pr merge --rebase`，main 的 sha 总是新的，本来就拿不到）。
+
+守卫的收紧保留，作为第二道：假如上面的构造哪天丢了，main 上会出现「push 事件、默认分支、结论 success，但所有 gate job 都 skipped」的运行。守卫的第 1 条原来只看事件与分支，会把它当全集；若之后又有一次 verify 写了 `failure`（最新 status 覆盖旧的），第 2 条不再成立，第 1 条却仍会凭这次全跳过的运行放行。所以第 1 条现在对通过事件与分支检查的成功运行再读一次 `actions/runs/<id>/jobs?filter=latest`，有任何 job 为 `skipped` 就拒（`refused: N of M job(s) skipped ... (an evidence-tier run, not the whole gate set)`），没有 job 也拒。
 
 这条依据实测：main 的全集运行 34484938024 列出 68 个 job 全部 `success`；PR 子集运行 35953200476 列出 41 个 job，38 个 `skipped`、3 个 `success`。也就是说 API 对被 `if:` 跳过的 job 报 `skipped`，而全集运行里没有 job 被跳过（`mutant-shards-complete` 的条件在 `all` 时也为真）。这只让守卫更严，接受集合是原来的子集；自测加了「只有证据档运行」「证据档运行 + status 已被 failure 覆盖」两例，均拒。
 
@@ -508,11 +510,11 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 
 ### 时序：publish 之后自动重跑 ci（第 2 刀）
 
-推送的那一刻 `ci.yml` 就开跑了，那时还没有证据。`publish.py --rerun-ci` 在派发之后：用 `gh run list --workflow verify-external.yml --event workflow_dispatch` 找派发之后创建的那次 run，`gh run watch` 等它结束；结论不是 success 就停；是 success 再用 `external_evidence()` 回读 status，plan 不会接受就停；否则取该 sha 上本仓的 `ci.yml` 运行（`pull_request` 与 `push` 事件，各取最新一次），还在跑的先 `gh run cancel` 并等它落定，再 `gh run rerun`。重跑沿用原来的事件与 `head`，plan 读到证据后全部跳过。没有 ci 运行时只打印提示：下一次推送或开 PR 会自己读到证据。
+推送的那一刻 `ci.yml` 就开跑了，那时还没有证据。`publish.py --rerun-ci` 在派发之后：用 `gh run list --workflow verify-external.yml --event workflow_dispatch` 找派发之后创建的那次 run，`gh run watch` 等它结束；结论不是 success 就停；是 success 再用 `external_evidence()` 回读 status，plan 不会接受就停；否则取该 sha 上本仓的 `ci.yml` `pull_request` 运行的最新一次（push 运行不读证据，重跑它只会再跑全集），还在跑的先 `gh run cancel` 并等它落定，再 `gh run rerun`。重跑沿用原来的事件与 `head`，plan 读到证据后全部跳过。没有 ci 运行时只打印提示：下一次推送或开 PR 会自己读到证据。
 
 ### 墙钟
 
-- 没有证据时 plan 多一步：本机桩 `gh`（无网络）整步 0.05 s；本机经代理对真仓库查一次（`--external-only`，e61c2574，无 status）1.67 s；托管 runner 上 release 守卫的同类查询（3–4 次 API）整步 2 s（2026-09-24T19:17Z 那次 release 运行），所以一次查询按不到 1 s 计。plan 的声明从 `3x 8s worst observed`（#232 按观测重述）改为 `3x 10s planning value`：最坏 8 s（run 36042621336），再加这次查询；多出的 2 s 由 `compiler-weight-contract`（508 s → 506 s，最坏观测 461 s）付，push-total 26149 s 不动。timeout 仍是 2 分钟：20 s 查询上限 + 40 s 建图上限 + 3x 声明。
+- 没有证据时 PR 上的 plan 多一步（push 上证据步骤不调 API，只多一次 shell 判断）：本机桩 `gh`（无网络）整步 0.05 s；本机经代理对真仓库查一次（`--external-only`，e61c2574，无 status）1.67 s；托管 runner 上 release 守卫的同类查询（3–4 次 API）整步 2 s（2026-09-24T19:17Z 那次 release 运行），所以一次查询按不到 1 s 计。plan 的声明从 `3x 8s worst observed`（#232 按观测重述）改为 `3x 10s planning value`：最坏 8 s（run 36042621336），再加这次查询；多出的 2 s 由 `compiler-weight-contract`（508 s → 506 s，最坏观测 461 s）付，push-total 26149 s 不动。timeout 仍是 2 分钟：20 s 查询上限 + 40 s 建图上限 + 3x 声明。
 - 有证据时：plan 跳过 `plan.py`，只多两次 API；整次 `ci.yml` 约为 plan（checkout 加两次查询，十来秒）+ `secrets`（约 17 s）+ 起机排队，约 1 分钟。gate job 全部 skipped，不占 runner。
 - 本刀自己的 PR 碰了 `.github/`，`plan.py` 的 `forced` 规则让它在 GitHub 上跑全集（约 25 分钟一次）。
 - gate-observations 只统计 conclusion 为 success 的 job，skipped 的 job 不进观测，证据档运行不会压低预算审计的观测值。
@@ -520,8 +522,8 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 ### 负控（自测里常驻）
 
 - `release_evidence.py --selftest`：`--external-only` 8 例（接受、不查 ci、无 status、个人账户、`target_url` 指向 `ci.yml` 的 run、pending、被 failure 覆盖、API 不可读退出 2）；默认模式加 3 例与一条单独断言（证据档运行不算第 1 条）。
-- `plan.py --selftest`：从 `gates.yml` 取出 plan job 的两步 shell，桩 `gh` 下跑 6 例；接受时规划步的 `GITHUB_OUTPUT` 必须恰为 `all=false\njobs=[]\n`，其余必须落到规划器并在日志里写出原因。`--check-wiring` 新增 4 个变异体：`ci.yml` 不传 `head`、删掉证据步骤、plan job 丢 `statuses: read`、`ci.yml` 的 test job 丢 `actions: read`。
-- `publish.py --selftest`（及只跑这一半的 `--selftest-rerun-ci`）：`--rerun-ci` 5 例加一条顺序断言（verify 失败不重跑；status 被拒不重跑；无 ci 运行只提示；在跑的先取消、等落定、再重跑；只重跑本仓各事件最新一次，不碰 fork 的）。
+- `plan.py --selftest`：从 `gates.yml` 取出 plan job 的两步 shell，桩 `gh` 下跑 8 例（其中 push 两例：`head` 为空、以及带 `head` 且证据可接受，都必须不调 `gh`、照常规划）；接受时规划步的 `GITHUB_OUTPUT` 必须恰为 `all=false\njobs=[]\n`，其余必须落到规划器并在日志里写出原因。`--check-wiring` 新增 5 个变异体：`ci.yml` 不传 `head`、`ci.yml` 无条件传 `head`、删掉证据步骤、plan job 丢 `statuses: read`、`ci.yml` 的 test job 丢 `actions: read`。
+- `publish.py --selftest`（及只跑这一半的 `--selftest-rerun-ci`）：`--rerun-ci` 6 例加一条顺序断言（verify 失败不重跑；status 被拒不重跑；无 ci 运行只提示；只有 push 运行也只提示；在跑的先取消、等落定、再重跑；只重跑本仓最新一次 PR 运行，不碰 fork 与 push 的）。
 - `release_evidence.py --selftest` 与 `publish.py --selftest-rerun-ci` 进 tree-policy 的新一步（本地 0.03 s 与 0.13 s），`steps.lock.json` 相应多两条。不放完整的 `publish.py --selftest`：它的签名那一半调 `ssh-keygen`，而外部运行以没有 passwd 条目的 uid 执行（第 3b′ 刀），`ssh-keygen` 在那里报 `No user exists for uid ...` 退出 255；第一次集群全套就是因此 `complete=false`。
 
 ### 不做的（理由）

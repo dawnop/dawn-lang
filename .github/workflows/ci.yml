@@ -109,7 +109,10 @@ jobs:
   # an accepted `gates/maintainer` status the whole gate set of that commit
   # already passed off GitHub and every gate job skips. It is the pull
   # request's head, not the merge ref, because the head is what an external
-  # run tested; on a push it is the pushed sha.
+  # run tested. On any other event it is empty and no evidence is read: a
+  # push to main runs every gate by construction, not by the release guard
+  # refusing a skipped run afterwards, and nightly's gate-totals counts each
+  # green main push run as the whole set.
   #
   # The permissions are what that read needs. The repository's default
   # token is contents-only, and a called workflow cannot ask for more than
@@ -125,4 +128,4 @@ jobs:
     with:
       event: ${{ github.event_name }}
       base: ${{ github.event.pull_request.base.sha }}
-      head: ${{ github.event.pull_request.head.sha || github.sha }}
+      head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}

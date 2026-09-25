@@ -58,11 +58,12 @@ module docstring gives the reason for each; its self-test removes each one in
 turn and requires a case to go red. `--check-wiring` holds every gates.yml
 job to `needs: [plan]` and an `if:` that tests its own id.
 
-Before any of that, the plan job asks whether the head commit carries a
+Before any of that, on a pull request, the plan job asks whether the head commit carries a
 verified `gates/maintainer` status (`scripts/gates-external/release_evidence.py
 --external-only`, the release guard's own checks). If it does, the plan is
-`all=false`, `jobs=[]` and every gate job skips, on a pull request or a push:
-the signed external run of that exact commit already was the whole set. A
+`all=false`, `jobs=[]` and every gate job skips: the signed external run of
+that exact commit already was the whole set. A push reads no evidence
+(ci.yml passes no head sha on a push), so main stays the whole set. A
 rebased pull request has a new head sha with no status, so it plans as
 usual; a fork's pull request never has one. `--check-wiring` also holds the
 evidence step, the `head` input and the token scopes it needs, and

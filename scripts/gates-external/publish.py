@@ -32,8 +32,8 @@ verify-external run it dispatched (`gh run list` for the run, `gh run watch`
 until it ends), and only when that run succeeded and the status it wrote
 passes the same acceptance the plan job will make
 (release_evidence.external_evidence), finds this repository's ci.yml runs of
-the sha (pull_request and push events, never a fork's), cancels any still
-running and re-runs the newest of each event. The re-run plans again, finds
+the sha (pull_request events only, since a push never reads evidence; never
+a fork's), cancels one still running and re-runs the newest. The re-run plans again, finds
 the status, and skips. A failed verify, a status the plan would refuse, or
 no ci run at all re-runs nothing: the first two because the re-run would
 plan exactly as before, the last because the next push or pull request will
@@ -147,7 +147,9 @@ def publish(repo, sha, text, remote, push, dispatch, env=None):
 
 # ------------------------------------------------------------ --rerun-ci
 
-CI_EVENTS = ("pull_request", "push")
+# Pull requests only: a push run never reads evidence (ci.yml passes no
+# head sha on a push), so re-running one would re-run the whole set.
+CI_EVENTS = ("pull_request",)
 # How far the dispatch's own clock may lead GitHub's when picking the run it
 # started out of `gh run list`; and how long to wait for that run to appear
 # and for a cancelled ci run to settle before re-running it.
@@ -235,8 +237,9 @@ def rerun_ci(repo, sha, dispatched_at, gh=run_gh, sleep=time.sleep, clock=time.m
         if r["event"] not in newest or r["id"] > newest[r["event"]]["id"]:
             newest[r["event"]] = r
     if not newest:
-        print(f"rerun-ci: no ci.yml run of this repository on {sha} yet; the next push "
-              "or pull request of it takes the evidence tier by itself", file=out)
+        print(f"rerun-ci: no ci.yml pull request run of this repository on {sha} yet; "
+              "a pull request opened or pushed at it takes the evidence tier by itself",
+              file=out)
         return 0
     for event in CI_EVENTS:
         r = newest.get(event)
@@ -324,16 +327,19 @@ def rerun_selftest():
         ("verify green, a person's status: nothing re-run",
          dict(statuses=[dict(good_status, creator={"login": "someone"})]), 1, [],
          "refused: written by someone"),
-        ("verify green, no ci run: a hint only", dict(), 0, [], "no ci.yml run"),
+        ("verify green, no ci run: a hint only", dict(), 0, [], "no ci.yml pull request run"),
         ("verify green, ci running: cancel, then re-run",
          dict(ci_runs=[dict(own, id=50, event="pull_request", status="in_progress")]), 0,
          ["run cancel 50", "run rerun 50"], "cancelled ci.yml run 50"),
-        ("verify green, ci finished: re-run the newest per event, not a fork's",
+        ("verify green, ci finished: re-run the newest pull request run only",
          dict(ci_runs=[dict(own, id=40, event="pull_request", status="completed"),
                        dict(own, id=41, event="pull_request", status="completed"),
                        dict(fork, id=60, event="pull_request", status="completed"),
                        dict(own, id=45, event="push", status="completed")]), 0,
-         ["run rerun 41", "run rerun 45"], "re-running ci.yml run 45"),
+         ["run rerun 41"], "re-running ci.yml run 41"),
+        ("verify green, only a push run: a hint only",
+         dict(ci_runs=[dict(own, id=45, event="push", status="in_progress")]), 0, [],
+         "no ci.yml pull request run"),
     ]
     failures = []
     for label, kwargs, want, want_calls, needle in cases:
@@ -430,7 +436,7 @@ def selftest():
             failures.append(f"the complete bundle was refused: {error}")
 
     rerun_failures = rerun_selftest()
-    shown += 6 - len(rerun_failures)
+    shown += 7 - len(rerun_failures)
     failures += rerun_failures
     for line in failures:
         print(f"FAIL publish selftest: {line}", file=sys.stderr)
@@ -463,7 +469,7 @@ def main():
             print(f"FAIL publish --rerun-ci selftest: {line}", file=sys.stderr)
         if failures:
             return 1
-        print("OK: publish --rerun-ci selftest, 6 cases")
+        print("OK: publish --rerun-ci selftest, 7 cases")
         return 0
     if not args.sha or not args.bundle:
         parser.error("a sha and --bundle are required")

@@ -29,15 +29,17 @@ The two sources of evidence, either of which is enough:
    is also what Envoy's workflow policy warns against: head_sha is a key a
    pull request author controls.
 
-   Since the evidence tier (2026-09-25) event and branch are not enough
-   either. gates.yml's plan job skips every gate job when the commit already
-   carries an accepted `gates/maintainer` status (the mode below), and it
-   does that on a push to main as well as on a pull request, so a push run
-   on main can be green having run nothing. Such a run is source 2 read at
-   plan time, not source 1, and if the status is later superseded by a
-   failure it must not keep standing in as a full run. So the run's jobs are
-   read back as well, and a run in which any job was skipped is refused. A
-   full run skips none: every gate job runs when the plan says `all`.
+   Since the evidence tier (2026-09-25) the run's jobs are read back too,
+   and a run in which any job was skipped is refused. gates.yml's plan job
+   skips every gate job of a pull request whose head already carries an
+   accepted `gates/maintainer` status (the mode below). A push never takes
+   that path: ci.yml passes no head sha on a push, so main's push runs are
+   the whole set by construction. This check is the second line behind that
+   construction. Were it ever lost, a push run on main could be green having
+   run nothing, which is source 2 read at plan time and not source 1, and
+   which must not keep standing in as a full run once the status is
+   superseded by a failure. A full run skips none: every gate job runs when
+   the plan says `all`.
 
 2. The latest commit status with context `gates/maintainer` on this commit is
    `success`, and it was written by verify-external.yml on this repository's

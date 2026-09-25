@@ -24,8 +24,9 @@ request run of the same sha by its event. So a pull request's subset is an
 early answer, never the verdict a release stands on. Whatever
 the subset misses is found on main, one push later, by the full run.
 
-One answer is decided before this script runs. gates.yml's plan job first
-asks scripts/gates-external/release_evidence.py --external-only whether the
+One answer is decided before this script runs. On a pull request,
+gates.yml's plan job first asks
+scripts/gates-external/release_evidence.py --external-only whether the
 head commit carries a verified `gates/maintainer` status, and when it does
 it writes `all=false`, `jobs=[]` and never calls this: the whole gate set of
 that exact commit already passed off GitHub. That is the evidence tier
@@ -325,13 +326,15 @@ def wiring_problems(gates_text, ci_text):
 # both files, and the head sha it reads about. Losing any of them does not
 # redden a run: the tier just stops happening, or (without the scopes) the
 # read fails and counts as no evidence. That is why it is held here.
-HEAD_INPUT = "head: ${{ github.event.pull_request.head.sha || github.sha }}"
+HEAD_INPUT = ("head: ${{ github.event_name == 'pull_request' && "
+              "github.event.pull_request.head.sha || '' }}")
 EVIDENCE_NEEDLES = (
     ("the evidence read", "release_evidence.py --external-only"),
     ("the evidence step's output", 'echo "accepted=true" >> "$GITHUB_OUTPUT"'),
     ("the plan reading it", "ACCEPTED: ${{ steps.evidence.outputs.accepted }}"),
     ("the empty plan on acceptance", 'if [ "$ACCEPTED" = true ]; then'),
     ("the head sha", "HEAD_SHA: ${{ inputs.head }}"),
+    ("the pull-request-only test", 'if [ "$EVENT" != pull_request ] || [ -z "$HEAD_SHA" ]; then'),
     ("statuses: read", "statuses: read"),
     ("actions: read", "actions: read"),
 )
@@ -348,6 +351,14 @@ def job_block(text, job):
 
 def evidence_problems(gates_text, ci_text):
     problems = []
+    # Pull requests only: a push to main is the whole gate set by
+    # construction, so ci.yml's `head` must be empty on any other event.
+    heads = re.findall(r"^\s+head:\s*(.*)$", ci_text.split("\njobs:", 1)[-1], re.M)
+    for expr in heads:
+        if "github.event_name == 'pull_request'" not in expr:
+            problems.append(f"{CI}: passes `head: {expr}` without the pull_request "
+                            "condition, so a push would read evidence and could skip "
+                            "the whole set")
     block = job_block(gates_text.split("\njobs:", 1)[-1], PLAN_JOB)
     for what, needle in EVIDENCE_NEEDLES:
         if needle not in block:
@@ -667,6 +678,9 @@ def wiring_selftest():
          gates_text.replace("\n  plan:\n", "\n  plan-moved:\n", 1), ci_text),
         ("ci.yml not passing the head sha",
          gates_text, ci_text.replace(HEAD_INPUT, "")),
+        ("ci.yml passing the head sha on every event",
+         gates_text, ci_text.replace(
+             HEAD_INPUT, "head: ${{ github.event.pull_request.head.sha || github.sha }}")),
         ("the plan job without its evidence step",
          drop_evidence_step(gates_text), ci_text),
         ("the plan job without `statuses: read`",
@@ -706,6 +720,8 @@ STUB_GH = """#!/usr/bin/env python3
 import json, os, sys
 table = json.load(open(os.environ["STUB_GH_TABLE"]))
 args = sys.argv[1:]
+with open(os.environ["STUB_GH_CALLS"], "a") as calls:
+    calls.write(json.dumps(args) + "\\n")
 path = args[-1] if args[:1] == ["api"] else None
 for prefix, answer in table.items():
     if path and path.startswith(prefix):
@@ -726,8 +742,10 @@ def evidence_step_selftest():
     read out of gates.yml, each step gets its own GITHUB_OUTPUT file, and the
     only thing replaced is `gh`. An accepted status must leave the plan
     step's output as exactly `all=false` and `jobs=[]`; every refusal must
-    fall through to the planner (a push, so it answers `all` without a map)
-    and say why in the log.
+    fall through to the planner and say why in the log. The pull request
+    cases pass no base sha, so the planner answers `all` by its `base` rule
+    without building a map. A push must not read evidence at all, even with
+    a head sha and an accepting API behind it.
     """
     import os
     import shutil
@@ -755,34 +773,44 @@ def evidence_step_selftest():
            "updated_at": "2026-09-24T10:01:00Z"}
     stats = f"repos/{repo}/commits/{sha}/statuses"
     runp = f"repos/{repo}/actions/runs/7"
+    PR = "pull_request"
+    good = {stats: [status], runp: run}
     cases = [
-        # (label, head, table, accepted, needle in the log)
-        ("accepted", sha, {stats: [status], runp: run}, True, "accepted:"),
-        ("a person's status", sha,
+        # (label, event, head, table, accepted, needle in the log)
+        ("accepted", PR, sha, good, True, "accepted:"),
+        ("a person's status", PR, sha,
          {stats: [dict(status, creator={"login": "someone"})], runp: run},
          False, "refused: written by someone"),
-        ("target_url at a ci.yml run", sha,
+        ("target_url at a ci.yml run", PR, sha,
          {stats: [status], runp: dict(run, path=".github/workflows/ci.yml",
                                      event="pull_request")},
          False, "refused: run 7 is .github/workflows/ci.yml"),
-        ("no status", sha, {stats: []}, False, "refused: no gates/maintainer status"),
-        ("API outage", sha, {stats: "FAIL"}, False, "exit 2"),
-        ("no head sha", "", {}, False, "no head sha passed"),
+        ("no status", PR, sha, {stats: []}, False, "refused: no gates/maintainer status"),
+        ("API outage", PR, sha, {stats: "FAIL"}, False, "exit 2"),
+        ("a pull request with no head sha", PR, "", good, False,
+         "evidence: not a pull request; planning as usual"),
+        # ci.yml passes no head on a push; even if one arrived, with
+        # evidence that would be accepted, the push reads none.
+        ("a push, head empty", "push", "", good, False,
+         "evidence: not a pull request; planning as usual"),
+        ("a push with a head and good evidence", "push", sha, good, False,
+         "evidence: not a pull request; planning as usual"),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         bindir = Path(tmp) / "bin"
         bindir.mkdir()
         (bindir / "gh").write_text(STUB_GH)
         (bindir / "gh").chmod(0o755)
-        for number, (label, head, table, accepted, needle) in enumerate(cases):
+        for number, (label, event, head, table, accepted, needle) in enumerate(cases):
             case_dir = Path(tmp) / f"case{number}"
             case_dir.mkdir()
             (case_dir / "table.json").write_text(json.dumps(table))
             env = dict(os.environ, PATH=f"{bindir}:{os.environ.get('PATH', '')}",
                        STUB_GH_TABLE=str(case_dir / "table.json"),
+                       STUB_GH_CALLS=str(case_dir / "calls"),
                        RUNNER_TEMP=str(case_dir), GITHUB_STEP_SUMMARY=str(case_dir / "summary"),
                        GH_TOKEN="stub", HEAD_SHA=head, REPO=repo, DEFAULT_BRANCH="main",
-                       EVENT="push", BASE="")
+                       EVENT=event, BASE="")
             outs, log = {}, ""
             for sid in ("evidence", "plan"):
                 out = case_dir / f"{sid}.out"
@@ -808,9 +836,16 @@ def evidence_step_selftest():
                 failures.append(f"{label}: evidence step wrote {outs['evidence-raw']!r}")
             if needle not in log:
                 failures.append(f"{label}: the log does not say {needle!r}: {log[-400:]!r}")
+            called = (case_dir / "calls").exists()
+            if event != PR and called:
+                failures.append(f"{label}: a push called gh")
             if not [f for f in failures if f.startswith(label + ":")]:
-                print(f"  PASS  plan job steps, stub gh, {label} -> "
-                      + ("all=false jobs=[]" if accepted else "planner (all=true on a push)"))
+                plan_out = outs["plan"]
+                shown = (f"all={plan_out.get('all')} jobs={plan_out.get('jobs')}"
+                         if accepted else
+                         f"all={plan_out.get('all')} jobs=<{len(json.loads(plan_out.get('jobs', '[]')))}>")
+                print(f"  PASS  plan job steps, stub gh, {event} {label} -> {shown}"
+                      + ("" if called else " (gh not called)"))
     for f in failures:
         print(f"SELFTEST FAIL: evidence tier: {f}", file=sys.stderr)
     return failures
