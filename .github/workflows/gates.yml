@@ -115,11 +115,11 @@ name: gates
 # its own hypothetical fifth shard, without noticing that the same sentence
 # was by then true of every shard that already existed.
 #
-# So the pole is no longer a claim about the longest job. It is set at the
+# So the pole is no longer a claim about the longest job. It was set at the
 # QUEUE FLOOR: the figure a single job may claim before it, alone, would be
 # the run's critical path. A job that claims past it must split, exactly as
 # before, and raising the pole is still a visible, reviewable edit rather
-# than a silent slide.
+# than a silent slide. (It no longer sits at the floor; 2026-09-25 below.)
 #
 # 2026-09-11, the arithmetic behind 950s, so the next person can redo it:
 #
@@ -132,11 +132,35 @@ name: gates
 #   shards, which are under the same pole (see check-gate-budgets)  914s
 #   the round figure above all three                              950s
 #
-# 950s is 86s over the queue floor, so a job that sits at the pole is the
-# critical path by about ten per cent and is meant to feel like it. Redo the
-# first line with scripts/gate-observations.py when the job set changes; the
+# 950s was 86s over the queue floor, so a job that sat at the pole was the
+# critical path by about ten per cent and was meant to feel like it. The
 # ceiling of 20 is the account's, measured 2026-08-15 (the arithmetic lives
 # in dawnop-site's ci.yml).
+#
+# 2026-09-25: that projection went stale and nothing noticed. This paragraph
+# asked for its first line to be redone when the job set changed; the job
+# set grew by five on 09-23 alone, and nobody redid it, because no check
+# read it. Measured over the 12 successful main pushes of
+# 2026-09-23T19:00Z .. 09-24T21:06Z (runs 35907509360 .. 36056324369):
+#
+#   job-seconds per push, sum of per-job medians                22,601
+#   the newest of them (run 36056324369), every job              21,669
+#   / 20 concurrent runners = the queue floor, about            1,080s
+#   the longest job on each of those runs                   876 .. 937s
+#   the pole                                                       950s
+#
+# So the pole now sits about 130s UNDER the queue floor, and the run's span
+# (1491s to 5021s over those 12, median about 1647s) is set by the total,
+# not by any one job. The pole stays at 950s anyway, because the two numbers
+# now answer different questions. The pole pins the single-job critical
+# path: the longest job measured 937s, and a job allowed past 950s would be
+# the thing that sets the span the day the total comes back down. The total
+# is pinned by its own line, `# push-total:` below, which
+# check-gate-budgets.py holds this file's claims to and which only goes up
+# with a `Gate-Budget(push-total)` line in the commit message (that script's
+# header has the rule). Raising the pole to the new floor would have let
+# every job grow by 130s and bought nothing: the floor is high because there
+# are more jobs, and that is the push total's to hold, not the pole's.
 #
 # This still pins the per-job claims and not the literal run wall clock:
 # queueing, dispatch delay and the coverage guard's tail are outside it, and
@@ -195,6 +219,21 @@ name: gates
 # bought with the old premise, and none of them is buying wall clock any
 # more. Nothing leaves the push path here -- a merged shard is the same
 # mutants on one runner instead of two.
+#
+# The push total. Every `3x <N>s` claim in this file added up may not exceed
+# the line below: check-gate-budgets.py refuses the tree otherwise. It was
+# set on 2026-09-25 at the sum the claims then had, 29,319s (1.30x the
+# measured 22,601, because a claim is the worst run and not the median), so
+# a new job has no headroom to hide in. To add one, retire or slim something
+# first, or raise the line and say so: the push that raises it carries a
+# commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
+# which scripts/check-gate-budget-trailers.py holds in ci.yml's secrets job.
+# Lowering it needs no line, and should follow any slimming: a line left
+# above the sum is headroom the next job can take without saying so. The one
+# kind of lowering that does need a line is a lost step: when the same push
+# drops a run step from scripts/gates-external/steps.lock.json, each family
+# that lost one owes `Gate-Retire(<family>): <why>`, so a deletion cannot
+# pass as a speed-up.
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
 # push-total: 29319s (the most this file's `3x` claims may add up to)

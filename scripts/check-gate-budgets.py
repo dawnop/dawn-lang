@@ -30,10 +30,12 @@ gates.yml additionally carries one file-level line:
 The pole used to be a claim about the longest job, on the premise that the
 run's wall clock is its longest job. That premise was measured false on
 2026-09-10 (run 34484938024: span 1506s, longest job 670s) and gates.yml's
-header now carries the replacement. The pole is the QUEUE FLOOR --
-total job-seconds divided by the account's 20 concurrent runners -- so it is
+header now carries the replacement. The pole was set at the QUEUE FLOOR --
+total job-seconds divided by the account's 20 concurrent runners -- so it was
 the figure a single job may claim before it, alone, becomes the run's
-critical path. Everything else about it is unchanged: a job that regresses
+critical path. By 2026-09-25 the total had grown past it (a floor of about
+1,080s against the 950s pole) with every rule here green, which is what the
+push total below is for; the pole stays, as the cap on one job. Everything else about it is unchanged: a job that regresses
 past the pole must restate its budget (the 3x rule), the restatement collides
 with the pole, and raising the pole is a visible, reviewable edit. What this
 pins is the per-job claims, not the literal run wall clock: queueing,
