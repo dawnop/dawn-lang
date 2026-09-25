@@ -70,7 +70,7 @@ def main():
         ("journal", "product.body_writes != entry.cx.body_writes", "false", "entry journal"),
         ("reads", "not entry_prefix(reads, entry_reads)", "false", "entry read prefix"),
         ("header-bounds", "map.get(candidate.current_tparam_bounds, id) != Some(signature.constraints[index])", "false", "header bounds"),
-        ("written-bounds", "len(resolved.diags) != 0 || bounds != signature.constraints", "false", "written bounds"),
+        ("written-bounds", "len(resolved.diags) != len(candidate.diags) || bounds != signature.constraints", "false", "written bounds"),
     ]
     subjects = [("positive", source, None)]
     if not args.positive_only:

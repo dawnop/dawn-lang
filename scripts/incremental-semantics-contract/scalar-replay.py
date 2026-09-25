@@ -66,13 +66,13 @@ def selection_selftest(variants, parser):
     core = select_variants(variants, 'core')
     calls = select_variants(variants, 'calls')
     assert select_variants(variants, 'all') == variants
-    assert len(core) == 41 and len(calls) == 7
+    assert len(core) == 43 and len(calls) == 7
     names = [variant[0] for variant in core + calls]
     assert len(names) == len(set(names))
     assert sorted(names) == sorted(variant[0] for variant in variants)
     assert all(variant[1] == SUBJECT for variant in calls)
     partitions = [select_variants(variants, 'core', 3, shard) for shard in range(3)]
-    assert [len(part) for part in partitions] == [14, 14, 13]
+    assert [len(part) for part in partitions] == [15, 14, 14]
     assert all(part == core[index::3] for index, part in enumerate(partitions))
     partitions.append(calls)
     partitioned_names = [variant[0] for part in partitions for variant in part]
@@ -86,7 +86,7 @@ def selection_selftest(variants, parser):
         assert [entry[0] for entry in selected[1:]] == [variant[0] for variant in part]
     for suite, shards, shard in [
             ('core', 0, 0), ('calls', -1, 0), ('core', 3, -1),
-            ('core', 3, 3), ('calls', 8, 0), ('calls', 8, 7), ('all', 49, 48)]:
+            ('core', 3, 3), ('calls', 8, 0), ('calls', 8, 7), ('all', 51, 50)]:
         try:
             select_variants(variants, suite, shards, shard)
         except ValueError:
@@ -103,7 +103,7 @@ def selection_selftest(variants, parser):
             pass
         else:
             raise AssertionError('accepted incomplete or duplicate workflow coverage')
-    print('OK: scalar replay partitions and workflow preserve all 48 controls and independent positives')
+    print('OK: scalar replay partitions and workflow preserve all 50 controls and independent positives')
 
 
 def main():
@@ -270,6 +270,17 @@ def main():
         ('recorded-declaration-index',
          '    saved.declaration, declaration, prior.lo, prior.hi, d.lo, d.hi) { return None }',
          '    declaration, declaration, prior.lo, prior.hi, d.lo, d.hi) { return None }'),
+        # The diagnostic guard is per body (#165). Dropping it admits a body
+        # whose own check reported something; widening it back to the
+        # scheduler's whole list sends every body after the first diagnostic
+        # cold, which is precision lost rather than an unsound result, so the
+        # assertion it reddens is a count.
+        ('own-diagnostic-admitted', '  if p.diagnostics != [] { return None }',
+         '  if false { return None }'),
+        ('whole-context-diagnostics',
+         'fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {\n',
+         'fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {\n'
+         '  if cx.diags != [] { return None }\n'),
     ]
     # The assembly boundary is not this module's to break: the order the
     # declarations come out in and the order their diagnostics come out in are

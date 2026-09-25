@@ -86,6 +86,23 @@ MUTATIONS = {
                    "    continue")],
         "owns": [(kind, "inferred_return") for kind in CLASSES],
     },
+    # The diagnostic guard widened back to the scheduler's whole list: every
+    # member scheduled after the broken one goes cold again (#165).
+    "whole-context-diagnostics": {
+        "edits": [("selfhost/src/check/scalar_replay.dawn",
+                   "fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {\n",
+                   "fn relocation(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> Option[(Prior, View)] = {\n"
+                   "  if cx.diags != [] { return None }\n")],
+        "owns": [(kind, "body_one_type_error") for kind in CLASSES if not MEMBERS_REFUSED[kind]],
+    },
+    # The same widening in the bounded entry proof alone, which the generic
+    # class passes through after relocation.
+    "entry-proof-whole-context": {
+        "edits": [("selfhost/src/check/function_entry_proof.dawn",
+                   "  if candidate.in_test || candidate.frame.isolated ||",
+                   "  if len(candidate.diags) != 0 || candidate.in_test || candidate.frame.isolated ||")],
+        "owns": [("generic", "body_one_type_error")],
+    },
 }
 
 
@@ -93,7 +110,6 @@ MUTATIONS = {
 
 def oracle(kind, edit, n):
     """Exact counts per step; the derivation is in the design document."""
-    m = n // 2
     role = ROLE_BODIES[kind]
     refused = MEMBERS_REFUSED[kind]
     base = SUPPORT_FUNCTIONS[kind] + n + role
@@ -114,9 +130,10 @@ def oracle(kind, edit, n):
     elif edit in ("body_one", "ws_inside"):
         forward = back = one
     elif edit == "body_one_type_error":
-        # relocation refuses once the scheduler context holds a diagnostic,
-        # so the edited member and every member scheduled after it go cold.
-        forward, back = row(base, role + members_cold(n - m), diags=True), one
+        # Only the edited member goes cold: the diagnostic guard is per body
+        # (#165), so the members scheduled after it are replayed although the
+        # scheduler's list already holds its diagnostic.
+        forward, back = dict(one, diags=True), one
     elif edit == "inferred_return":
         forward = back = row(base + PROBE_BODIES, role + members_cold(0) + 1, PROBE_CALLERS)
     elif edit == "insert_decl":
@@ -385,8 +402,10 @@ def self_test():
     cells = parse(synthetic(n, CLASSES, EDITS), CLASSES, EDITS, n)
     rows, ok = table(cells, CLASSES, EDITS, n)
     assert ok and len(rows) == 2 * len(CLASSES) * len(EDITS)
-    # The n=20 census the production run reported when this oracle was written.
-    assert oracle("calls", "body_one_type_error", n)["replay"]["cold_unadmitted"] == 10
+    # The n=20 census the production run reported: 10 cold while the guard
+    # read the whole scheduler context, 1 once it was per body (#165).
+    assert oracle("calls", "body_one_type_error", n)["replay"]["cold_unadmitted"] == 1
+    assert oracle("calls", "body_one_type_error", n)["replay"]["reused"] == 21
     assert oracle("generic", "inferred_return", n)["renew"]["reused"] == 20
     assert oracle("inferred", "inferred_return", n)["back"]["cold_unadmitted"] == 21
     rejected = 0
