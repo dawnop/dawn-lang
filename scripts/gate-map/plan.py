@@ -24,6 +24,16 @@ request run of the same sha by its event. So a pull request's subset is an
 early answer, never the verdict a release stands on. Whatever
 the subset misses is found on main, one push later, by the full run.
 
+One answer is decided before this script runs. gates.yml's plan job first
+asks scripts/gates-external/release_evidence.py --external-only whether the
+head commit carries a verified `gates/maintainer` status, and when it does
+it writes `all=false`, `jobs=[]` and never calls this: the whole gate set of
+that exact commit already passed off GitHub. That is the evidence tier
+(docs/gates-external-design.md). It is a shell step rather than a rule here
+because it is not about the diff, and because every fallback below must
+stay a way to run more, never less. `--check-wiring` holds the step in
+place and `--selftest` runs it against a stub `gh`.
+
 This imports gatemap rather than parsing its text output. The text is for a
 person and its layout is free to change; the Map object is what the text is
 printed from.
@@ -108,6 +118,10 @@ job first, exposing `all` and `jobs`; every other job `needs: plan` and has
 an `if:` that runs it when `all` is true or its own id is in `jobs`. A job
 that forgot either half would silently run on every pull request (no needs)
 or never (an `if` naming another job), and neither shows up as a red.
+The same goes for the evidence tier's pieces: ci.yml passing `head` and the
+two token scopes, the plan job's evidence step before its planning step,
+and the planning step reading the evidence step's answer. Losing any of them
+reddens nothing on its own; the tier just stops happening.
 """
 
 import argparse
@@ -292,13 +306,60 @@ def wiring_problems(gates_text, ci_text):
     for needle in (
         "event: ${{ github.event_name }}",
         "base: ${{ github.event.pull_request.base.sha }}",
+        HEAD_INPUT,
     ):
         if needle not in ci_text:
             problems.append(f"{CI}: does not pass `{needle}` to {GATES_NAME}")
-    for needle in ("inputs:", "event:", "base:"):
+    for needle in ("inputs:", "event:", "base:", "head:"):
         head = gates_text.split("\njobs:", 1)[0]
         if not re.search(r"^\s+" + re.escape(needle), head, re.M):
             problems.append(f"{GATES}: workflow_call declares no `{needle}`")
+    problems += evidence_problems(gates_text, ci_text)
+    return problems
+
+
+# The evidence tier (docs/gates-external-design.md): the plan job reads the
+# head commit's gates/maintainer status before it plans. Each needle is one
+# piece a deletion would silently lose: the read itself, the step that turns
+# an acceptance into the empty plan, the token scopes the read needs in
+# both files, and the head sha it reads about. Losing any of them does not
+# redden a run: the tier just stops happening, or (without the scopes) the
+# read fails and counts as no evidence. That is why it is held here.
+HEAD_INPUT = "head: ${{ github.event.pull_request.head.sha || github.sha }}"
+EVIDENCE_NEEDLES = (
+    ("the evidence read", "release_evidence.py --external-only"),
+    ("the evidence step's output", 'echo "accepted=true" >> "$GITHUB_OUTPUT"'),
+    ("the plan reading it", "ACCEPTED: ${{ steps.evidence.outputs.accepted }}"),
+    ("the empty plan on acceptance", 'if [ "$ACCEPTED" = true ]; then'),
+    ("the head sha", "HEAD_SHA: ${{ inputs.head }}"),
+    ("statuses: read", "statuses: read"),
+    ("actions: read", "actions: read"),
+)
+
+
+def job_block(text, job):
+    """The lines of one job in a workflow file, or "" when absent."""
+    m = re.search(r"^  " + re.escape(job) + r":\s*$", text, re.M)
+    if not m:
+        return ""
+    nxt = re.search(r"^  [A-Za-z][\w-]*:\s*$", text[m.end():], re.M)
+    return text[m.start(): m.end() + nxt.start()] if nxt else text[m.start():]
+
+
+def evidence_problems(gates_text, ci_text):
+    problems = []
+    block = job_block(gates_text.split("\njobs:", 1)[-1], PLAN_JOB)
+    for what, needle in EVIDENCE_NEEDLES:
+        if needle not in block:
+            problems.append(f"{GATES} ({PLAN_JOB}): lost {what}, `{needle}`")
+    if block and block.find("id: evidence") > block.find("id: plan"):
+        problems.append(f"{GATES} ({PLAN_JOB}): the evidence step does not come "
+                        "before the planning step")
+    caller = job_block(ci_text.split("\njobs:", 1)[-1], "test")
+    for scope in ("statuses: read", "actions: read"):
+        if scope not in caller:
+            problems.append(f"{CI} (test): does not grant `{scope}`, which the "
+                            "plan's evidence read needs")
     return problems
 
 
@@ -571,6 +632,7 @@ def selftest():
         print("  PASS  the needs closure selects the aggregator of a selected shard")
 
     failures += wiring_selftest()
+    failures += evidence_step_selftest()
     if failures:
         return 1
     print(f"selftest: {len(cases)} case(s), {len(RULES)} fallback(s) each "
@@ -603,6 +665,14 @@ def wiring_selftest():
          gates_text, ci_text.replace("event: ${{ github.event_name }}", "")),
         ("the plan job moved below a gate",
          gates_text.replace("\n  plan:\n", "\n  plan-moved:\n", 1), ci_text),
+        ("ci.yml not passing the head sha",
+         gates_text, ci_text.replace(HEAD_INPUT, "")),
+        ("the plan job without its evidence step",
+         drop_evidence_step(gates_text), ci_text),
+        ("the plan job without `statuses: read`",
+         gates_text.replace("      statuses: read", "      statuses: none", 1), ci_text),
+        ("ci.yml's test job without `actions: read`",
+         gates_text, ci_text.replace("      actions: read\n", "", 1)),
     ]
     for label, g, c in mutants:
         if g == gates_text and c == ci_text:
@@ -614,6 +684,145 @@ def wiring_selftest():
         else:
             print(f"  refused: {label}")
     return failures
+
+
+def plan_step_scripts(gates_text):
+    """-> {step id: its `run: |` block, dedented} for the plan job's steps."""
+    block = job_block(gates_text.split("\njobs:", 1)[-1], PLAN_JOB)
+    scripts = {}
+    for m in re.finditer(r"^      - name: .*\n((?:        .*\n|\s*\n)*)", block, re.M):
+        body = m.group(1)
+        sid = re.search(r"^        id: (\S+)", body, re.M)
+        run = re.search(r"^        run: \|\n((?:          .*\n|\s*\n)*)", body, re.M)
+        if sid and run:
+            scripts[sid.group(1)] = "".join(
+                line[10:] + "\n" for line in run.group(1).splitlines())
+    return scripts
+
+
+# A stand-in for `gh api --paginate PATH`: answers from a JSON table keyed by
+# path prefix, or fails like an unreachable API when the table says "FAIL".
+STUB_GH = """#!/usr/bin/env python3
+import json, os, sys
+table = json.load(open(os.environ["STUB_GH_TABLE"]))
+args = sys.argv[1:]
+path = args[-1] if args[:1] == ["api"] else None
+for prefix, answer in table.items():
+    if path and path.startswith(prefix):
+        if answer == "FAIL":
+            sys.stderr.write("HTTP 502: stub outage\\n")
+            sys.exit(1)
+        print(json.dumps(answer))
+        sys.exit(0)
+sys.stderr.write("stub gh: unexpected call %r\\n" % (args,))
+sys.exit(1)
+"""
+
+
+def evidence_step_selftest():
+    """Run the plan job's own two shell steps against a stub `gh`.
+
+    This is the plan job as GitHub runs it, less GitHub: the step text is
+    read out of gates.yml, each step gets its own GITHUB_OUTPUT file, and the
+    only thing replaced is `gh`. An accepted status must leave the plan
+    step's output as exactly `all=false` and `jobs=[]`; every refusal must
+    fall through to the planner (a push, so it answers `all` without a map)
+    and say why in the log.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    failures = []
+    scripts = plan_step_scripts(read(GATES))
+    if set(scripts) != {"evidence", "plan"}:
+        print(f"SELFTEST FAIL: the plan job's steps are {sorted(scripts)}, not "
+              "evidence and plan", file=sys.stderr)
+        return ["evidence-steps"]
+    if not shutil.which("bash"):
+        print("SELFTEST FAIL: no bash to run the plan job's steps", file=sys.stderr)
+        return ["evidence-bash"]
+    repo, sha = "o/r", "a" * 40
+    status = {"context": "gates/maintainer", "state": "success", "id": 1,
+              "created_at": "2026-09-24T10:00:30Z",
+              "creator": {"login": "github-actions[bot]"},
+              "target_url": f"https://github.com/{repo}/actions/runs/7"}
+    run = {"repository": {"full_name": repo},
+           "path": ".github/workflows/verify-external.yml",
+           "event": "workflow_dispatch", "head_branch": "main",
+           "status": "completed", "conclusion": "success",
+           "run_started_at": "2026-09-24T10:00:00Z",
+           "updated_at": "2026-09-24T10:01:00Z"}
+    stats = f"repos/{repo}/commits/{sha}/statuses"
+    runp = f"repos/{repo}/actions/runs/7"
+    cases = [
+        # (label, head, table, accepted, needle in the log)
+        ("accepted", sha, {stats: [status], runp: run}, True, "accepted:"),
+        ("a person's status", sha,
+         {stats: [dict(status, creator={"login": "someone"})], runp: run},
+         False, "refused: written by someone"),
+        ("target_url at a ci.yml run", sha,
+         {stats: [status], runp: dict(run, path=".github/workflows/ci.yml",
+                                     event="pull_request")},
+         False, "refused: run 7 is .github/workflows/ci.yml"),
+        ("no status", sha, {stats: []}, False, "refused: no gates/maintainer status"),
+        ("API outage", sha, {stats: "FAIL"}, False, "exit 2"),
+        ("no head sha", "", {}, False, "no head sha passed"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        bindir = Path(tmp) / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(STUB_GH)
+        (bindir / "gh").chmod(0o755)
+        for number, (label, head, table, accepted, needle) in enumerate(cases):
+            case_dir = Path(tmp) / f"case{number}"
+            case_dir.mkdir()
+            (case_dir / "table.json").write_text(json.dumps(table))
+            env = dict(os.environ, PATH=f"{bindir}:{os.environ.get('PATH', '')}",
+                       STUB_GH_TABLE=str(case_dir / "table.json"),
+                       RUNNER_TEMP=str(case_dir), GITHUB_STEP_SUMMARY=str(case_dir / "summary"),
+                       GH_TOKEN="stub", HEAD_SHA=head, REPO=repo, DEFAULT_BRANCH="main",
+                       EVENT="push", BASE="")
+            outs, log = {}, ""
+            for sid in ("evidence", "plan"):
+                out = case_dir / f"{sid}.out"
+                out.write_text("")
+                env["GITHUB_OUTPUT"] = str(out)
+                if sid == "plan":
+                    env["ACCEPTED"] = outs["evidence"].get("accepted", "")
+                proc = subprocess.run(["bash", "-e", "-c", scripts[sid]], cwd=ROOT, env=env,
+                                      capture_output=True, text=True, timeout=120)
+                log += proc.stdout + proc.stderr
+                if proc.returncode != 0:
+                    failures.append(f"{label}: step {sid} exited {proc.returncode}")
+                raw = out.read_text()
+                outs[sid] = dict(ln.split("=", 1) for ln in raw.splitlines() if "=" in ln)
+                outs[sid + "-raw"] = raw
+            want = "all=false\njobs=[]\n" if accepted else None
+            got = outs["plan-raw"]
+            if accepted and got != want:
+                failures.append(f"{label}: the plan wrote {got!r}, not {want!r}")
+            elif not accepted and outs["plan"].get("all") != "true":
+                failures.append(f"{label}: fell through but the plan wrote {got!r}")
+            if (outs["evidence"].get("accepted") == "true") != accepted:
+                failures.append(f"{label}: evidence step wrote {outs['evidence-raw']!r}")
+            if needle not in log:
+                failures.append(f"{label}: the log does not say {needle!r}: {log[-400:]!r}")
+            if not [f for f in failures if f.startswith(label + ":")]:
+                print(f"  PASS  plan job steps, stub gh, {label} -> "
+                      + ("all=false jobs=[]" if accepted else "planner (all=true on a push)"))
+    for f in failures:
+        print(f"SELFTEST FAIL: evidence tier: {f}", file=sys.stderr)
+    return failures
+
+
+def drop_evidence_step(gates_text):
+    """gates.yml with the plan job's evidence step cut out, as a mutant."""
+    start = gates_text.find("      - name: accept verified external evidence")
+    end = gates_text.find("      - name: plan which gate jobs this run needs")
+    if start < 0 or end < start:
+        return gates_text
+    return gates_text[:start] + gates_text[end:]
 
 
 def main(argv=None):

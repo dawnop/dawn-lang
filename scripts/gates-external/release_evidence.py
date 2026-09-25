@@ -29,6 +29,16 @@ The two sources of evidence, either of which is enough:
    is also what Envoy's workflow policy warns against: head_sha is a key a
    pull request author controls.
 
+   Since the evidence tier (2026-09-25) event and branch are not enough
+   either. gates.yml's plan job skips every gate job when the commit already
+   carries an accepted `gates/maintainer` status (the mode below), and it
+   does that on a push to main as well as on a pull request, so a push run
+   on main can be green having run nothing. Such a run is source 2 read at
+   plan time, not source 1, and if the status is later superseded by a
+   failure it must not keep standing in as a full run. So the run's jobs are
+   read back as well, and a run in which any job was skipped is refused. A
+   full run skips none: every gate job runs when the plan says `all`.
+
 2. The latest commit status with context `gates/maintainer` on this commit is
    `success`, and it was written by verify-external.yml on this repository's
    default branch, in a run that itself succeeded. A commit status is not
@@ -68,7 +78,19 @@ procedure to itself, it is not a defence against the maintainer.
 Exit status: 0 when either source holds, 1 when neither does, 2 when the API
 could not be read (which is not a verdict).
 
+`--external-only` asks source 2 alone, with the same code and the same exit
+statuses. It is what gates.yml's plan job runs before planning (the evidence
+tier, docs/gates-external-design.md): an accepted status there turns every
+gate job of the run into a skip, because the signed external run already was
+the whole gate set of this commit. It is a separate mode rather than a flag
+on the default one because the release guard must not change with it: the
+default mode still holds source 1 to a full push run on the default branch,
+and still accepts source 2 exactly as before, no more. Every reason a status
+is not accepted is printed as a `refused: <why>` line, so the plan's log says
+why a run fell back to planning.
+
     release_evidence.py --repo OWNER/NAME --sha SHA --default-branch main
+    release_evidence.py --repo OWNER/NAME --sha SHA --default-branch main --external-only
     release_evidence.py --selftest
 """
 
@@ -95,8 +117,13 @@ def gh_api(path):
                           capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise ApiError(f"gh api {path} failed ({proc.returncode}): {proc.stderr.strip()}")
+    return decode_pages(proc.stdout, path)
+
+
+def decode_pages(text, path):
+    """`gh api --paginate` output as a list of pages (publish.py reuses it)."""
     # --paginate concatenates one JSON document per page; decode them in turn.
-    pages, text, pos = [], proc.stdout, 0
+    pages, pos = [], 0
     decoder = json.JSONDecoder()
     while True:
         while pos < len(text) and text[pos].isspace():
@@ -124,6 +151,27 @@ def ci_refusal(run, default_branch):
     return None
 
 
+def skipped_refusal(api, repo, run):
+    """Why a green push run did not run every job, or None.
+
+    Only asked of a run that is otherwise accepted, so a guard over runs it
+    refuses anyway spends no call on them. `filter=latest` reads the jobs
+    of the run's latest attempt, which is the attempt its conclusion is.
+    """
+    run_id = run.get("id")
+    if not run_id:
+        return "the run has no id to read its jobs by"
+    pages = api(f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
+    jobs = [job for page in pages for job in page.get("jobs", [])]
+    if not jobs:
+        return "no jobs listed for the run"
+    skipped = [job.get("name") or "?" for job in jobs if job.get("conclusion") == "skipped"]
+    if skipped:
+        return (f"{len(skipped)} of {len(jobs)} job(s) skipped, e.g. {skipped[0]} "
+                "(an evidence-tier run, not the whole gate set)")
+    return None
+
+
 def ci_evidence(api, repo, sha, default_branch):
     """(ok, pending, lines) for source 1."""
     pages = api(f"repos/{repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100")
@@ -131,6 +179,9 @@ def ci_evidence(api, repo, sha, default_branch):
     lines, ok, pending = [], False, False
     for run in runs:
         refusal = ci_refusal(run, default_branch)
+        if (refusal is None and run.get("status") == "completed"
+                and run.get("conclusion") == "success"):
+            refusal = skipped_refusal(api, repo, run)
         lines.append(f"  {run.get('status')}\t{run.get('conclusion') or 'pending'}\t"
                      f"{run.get('event')}\t{run.get('head_branch')}\t{run.get('html_url')}"
                      + (f"\trefused: {refusal}" if refusal else ""))
@@ -148,7 +199,7 @@ def external_evidence(api, repo, sha, default_branch, server):
     pages = api(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
     statuses = [s for page in pages for s in page if s.get("context") == CONTEXT]
     if not statuses:
-        return False, [f"  no {CONTEXT} status on this commit"]
+        return False, [f"  refused: no {CONTEXT} status on this commit"]
     # The API lists a commit's statuses newest first; sort anyway so the
     # verdict does not rest on that ordering.
     latest = max(statuses, key=lambda s: (s.get("created_at") or "", s.get("id") or 0))
@@ -226,6 +277,21 @@ def decide(api, repo, sha, default_branch, server, out):
     return 1
 
 
+def decide_external(api, repo, sha, default_branch, server, out):
+    """--external-only: source 2 alone, as gates.yml's plan job asks it."""
+    ok, lines = external_evidence(api, repo, sha, default_branch, server)
+    print(f"{CONTEXT} status on {sha}, written by {VERIFY_WORKFLOW} on {default_branch}:",
+          file=out)
+    for line in lines:
+        print(line, file=out)
+    if ok:
+        print(f"accepted: {sha} carries verified external evidence of the whole gate set",
+              file=out)
+        return 0
+    print(f"not accepted: {sha} carries no accepted {CONTEXT} status", file=out)
+    return 1
+
+
 # ------------------------------------------------------------------ self-test
 
 def _fake(tables):
@@ -243,8 +309,16 @@ def self_test():
     runs_ci = f"repos/{repo}/actions/workflows/ci.yml/runs"
     stats = f"repos/{repo}/commits/{sha}/statuses"
     run_path = f"repos/{repo}/actions/runs/7"
-    main_push = {"status": "completed", "conclusion": "success", "event": "push",
+    main_push = {"id": 42, "status": "completed", "conclusion": "success", "event": "push",
                  "head_branch": "main", "html_url": "u"}
+    jobs_path = f"repos/{repo}/actions/runs/42/jobs"
+    full_jobs = {"jobs": [{"name": "secrets", "conclusion": "success"},
+                          {"name": "test / plan", "conclusion": "success"},
+                          {"name": "test / docs", "conclusion": "success"}]}
+    # What the plan's evidence tier leaves behind: plan ran, every gate skipped.
+    tier_jobs = {"jobs": [{"name": "secrets", "conclusion": "success"},
+                          {"name": "test / plan", "conclusion": "success"},
+                          {"name": "test / docs", "conclusion": "skipped"}]}
     ci_green = {"workflow_runs": [main_push]}
     ci_none = {"workflow_runs": []}
     good_status = {"context": CONTEXT, "state": "success", "id": 1,
@@ -255,8 +329,11 @@ def self_test():
                 "conclusion": "success", "run_started_at": "2026-09-24T10:00:00Z",
                 "updated_at": "2026-09-24T10:01:00Z"}
 
-    def case(ci, statuses, run=good_run):
-        return _fake({runs_ci: [ci], stats: [statuses], run_path: [run]})
+    def case(ci, statuses, run=good_run, jobs=full_jobs):
+        return _fake({runs_ci: [ci], stats: [statuses], run_path: [run], jobs_path: [jobs]})
+
+    superseded = [dict(good_status, state="failure", id=2,
+                       created_at="2026-09-24T10:00:50Z"), good_status]
 
     cases = {
         "only ci green": (case(ci_green, []), 0),
@@ -290,17 +367,59 @@ def self_test():
             case({"workflow_runs": [dict(main_push, event="pull_request",
                                          head_branch="feature", conclusion="failure"),
                                     main_push]}, []), 0),
+        # The evidence tier (2026-09-25): a push run on main whose plan
+        # accepted a gates/maintainer status skipped every gate. That run is
+        # not source 1. With the status since superseded by a failure, the
+        # commit has only that status's history and no full main run, and
+        # the default mode must refuse it.
+        "main push run of the evidence tier alone": (
+            case(ci_green, [], jobs=tier_jobs), 1),
+        "evidence-tier main run, its status since superseded": (
+            case(ci_green, superseded, jobs=tier_jobs), 1),
+        "main push run with no jobs listed": (case(ci_green, [], jobs={"jobs": []}), 1),
     }
     failures = []
     for label, (api, want) in cases.items():
         got = decide(api, repo, sha, "main", "https://github.com", io.StringIO())
         if got != want:
             failures.append(f"{label}: exit {got}, want {want}")
+    # Beside an accepted status the evidence-tier run is still not source 1:
+    # the exit is 0 on source 2's strength alone.
+    ci_ok, _, ci_lines = ci_evidence(case(ci_green, [good_status], jobs=tier_jobs),
+                                     repo, sha, "main")
+    if ci_ok or not any("evidence-tier run" in line for line in ci_lines):
+        failures.append("an evidence-tier main run counted as source 1: " + " | ".join(ci_lines))
+
+    # --external-only: source 2 alone, and a refusal always says why.
+    ci_trap = _fake({stats: [[good_status]], run_path: [good_run]})
+    external = {
+        "accepted": (case(ci_none, [good_status]), 0, "accepted:"),
+        "no ci consulted": (ci_trap, 0, "accepted:"),
+        "no status": (case(ci_none, []), 1, "refused: no gates/maintainer status"),
+        "status written by a person": (
+            case(ci_none, [dict(good_status, creator={"login": "someone"})]), 1,
+            "refused: written by someone"),
+        "target_url at a ci.yml run": (
+            case(ci_none, [good_status], dict(good_run, path=".github/workflows/ci.yml",
+                                              event="pull_request")), 1,
+            "refused: run 7 is .github/workflows/ci.yml"),
+        "status pending": (case(ci_none, [dict(good_status, state="pending")]), 1,
+                           "refused: state is pending"),
+        "superseded by a failure": (case(ci_none, superseded), 1, "refused: state is failure"),
+        "API unreadable": (_fake({}), 2, "could not read the evidence"),
+    }
+    for label, (api, want, needle) in external.items():
+        out = io.StringIO()
+        got = evaluate(api, repo, sha, "main", "https://github.com", out, external_only=True)
+        if got != want or needle not in out.getvalue():
+            failures.append(f"--external-only {label}: exit {got}, want {want} with "
+                            f"{needle!r}; printed {out.getvalue()!r}")
     for line in failures:
         print(f"FAIL release_evidence self-test: {line}", file=sys.stderr)
     if failures:
         return 1
-    print(f"OK: release_evidence self-test, {len(cases)} cases")
+    print(f"OK: release_evidence self-test, {len(cases) + 1} default-mode cases, "
+          f"{len(external)} --external-only cases")
     return 0
 
 
@@ -312,6 +431,8 @@ def main():
     parser.add_argument("--default-branch")
     parser.add_argument("--server", default=os.environ.get("GITHUB_SERVER_URL",
                                                            "https://github.com"))
+    parser.add_argument("--external-only", action="store_true",
+                        help="ask source 2 alone (gates.yml's plan job)")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
     if args.selftest:
@@ -320,11 +441,22 @@ def main():
         parser.error("--repo, --sha and --default-branch are required")
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
         parser.error(f"--sha must be 40 lowercase hex, got {args.sha!r}")
+    return evaluate(gh_api, args.repo, args.sha, args.default_branch,
+                    args.server.rstrip("/"), sys.stdout, args.external_only)
+
+
+def evaluate(api, repo, sha, default_branch, server, out, external_only=False):
+    """Either mode, with an unreadable API turned into exit status 2."""
     try:
-        return decide(gh_api, args.repo, args.sha, args.default_branch,
-                      args.server.rstrip("/"), sys.stdout)
+        if external_only:
+            return decide_external(api, repo, sha, default_branch, server, out)
+        return decide(api, repo, sha, default_branch, server, out)
     except ApiError as error:
-        print(f"::error::could not read the evidence: {error}")
+        # The plan job reads 2 as "no evidence" and plans as before; only
+        # the release guard shows it as an error.
+        tag = "note" if external_only else "::error::"
+        sep = ": " if external_only else ""
+        print(f"{tag}{sep}could not read the evidence: {error}", file=out)
         return 2
 
 

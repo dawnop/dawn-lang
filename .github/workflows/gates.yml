@@ -48,7 +48,16 @@ name: gates
 # run of the same sha is refused by event, since it is a subset) nor an
 # accepted external run, and an external run is the whole set by
 # construction (gatesplan.py takes the plan as `all`), so the release safety
-# surface is exactly what it was. What the subset buys is the queue: 39 jobs
+# surface is exactly what it was.
+#
+# A third answer since 2026-09-25, the evidence tier: when the head commit
+# carries a verified `gates/maintainer` status the plan skips every job, on
+# a pull request or a push alike (the plan job's note has the checks). That
+# does not reopen the release surface: the guard's first source now also
+# refuses a push run with a skipped job, so such a run is never mistaken for
+# a full one, and its second source is the very status the plan accepted.
+#
+# What the subset buys is the queue: 39 jobs
 # and ~23,600 job-seconds per pull request against 20 runners made one run
 # ~25 minutes and three queued pull requests about an hour, and #163 ran all
 # of it for two paragraphs of documentation. What it costs is that a gate
@@ -266,6 +275,13 @@ on:
         type: string
         required: false
         default: ''
+      # The commit the plan's evidence tier asks about: the pull request's
+      # head, or the pushed sha. Not the merge ref, which no external run
+      # ever tested. Empty means no evidence is looked for.
+      head:
+        type: string
+        required: false
+        default: ''
 
 jobs:
   # The pull-request tier's planner (see the header). It checks out the
@@ -275,6 +291,26 @@ jobs:
   # whole set: `all=true`, so a broken plan runs everything rather than
   # nothing. The map itself was 7.5s locally on 2026-09-23; plan.py gives up
   # on it at 40s and answers `all`.
+  #
+  # The evidence tier (2026-09-25, docs/gates-external-design.md) comes
+  # before all of that. When the head commit carries a `gates/maintainer`
+  # status that release_evidence.py --external-only accepts -- written by
+  # github-actions[bot] in a successful verify-external.yml run on the
+  # default branch, the same checks the release guard makes -- the whole
+  # gate set of that commit has already passed off GitHub, and the plan
+  # answers `all=false`, `jobs=[]`: every gate job skips, which GitHub counts
+  # as success. Anything short of that (no status, a person's status, a
+  # status pointing at another run, an unreadable API, a read that hangs) is
+  # no evidence, and the plan goes on exactly as before. A fork's pull
+  # request never has the status, so it never takes this path. The evidence
+  # is for the head commit and the pull request tests the merge ref; that
+  # gap is the subset tier's own residue, and main's run closes it.
+  #
+  # permissions: the read needs statuses and actions, which the repository's
+  # restricted default token does not carry (it is contents only). A called
+  # workflow can only narrow what its caller grants, so ci.yml's `test` job
+  # grants these three and this job asks for exactly them; the gate jobs
+  # get the caller's grant, which is read-only either way.
   plan:
     runs-on: ubuntu-latest
     # 2026-09-24, restated: 7s worst (run 35895759154) over its five
@@ -287,19 +323,72 @@ jobs:
     # successful main runs of 09-18 .. 09-25 (gate-observations --since
     # 2026-09-11, cut to the nightly audit's seven days).
     # 40s plus 3x 8s is 64s, still inside 2 minutes.
-    # budget: 3x 8s worst observed (run 36042621336)
+    # 2026-09-25, later: plus the evidence read on a pull request. That read
+    # is one API call when there is no status and two when there is; the
+    # release guard's own step, three or four calls, took 2s on a runner
+    # (release run of 2026-09-24T19:17Z), so 10s is a planning value to
+    # restate once the tier has pull request runs behind it. A push reads no
+    # evidence, and when evidence is accepted plan.py does not run, so both
+    # of those paths are shorter. The read is cut at 20s and then counts as
+    # no evidence: 20s + 40s + 3x the claim still fits the 2 minutes. The 2s
+    # it adds to the push total are paid by compiler-weight-contract.
+    # budget: 3x 10s planning value (8s worst observed plus the evidence read)
     timeout-minutes: 2
+    permissions:
+      contents: read  # the checkout
+      statuses: read  # the gates/maintainer status on the head commit
+      actions: read   # the verify-external.yml run its target_url names
     outputs:
       all: ${{ steps.plan.outputs.all }}
       jobs: ${{ steps.plan.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
+      # Exit 0 is the only acceptance. 1 is "no accepted status" and 2 is
+      # "the API could not be read"; both, and a timeout, plan as before.
+      - name: accept verified external evidence for the head commit
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "note: no head sha passed ('$HEAD_SHA'); not looking for evidence"
+            echo "accepted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rc=0
+          timeout 20 python3 scripts/gates-external/release_evidence.py --external-only \
+            --repo "$REPO" --sha "$HEAD_SHA" --default-branch "$DEFAULT_BRANCH" \
+            > "$RUNNER_TEMP/evidence.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/evidence.log"
+          if [ "$rc" = 0 ]; then
+            echo "accepted=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Evidence tier: every gate job skips"
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/evidence.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "note: no accepted external evidence (exit $rc); planning as usual"
+            echo "accepted=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: plan which gate jobs this run needs
         id: plan
         env:
           EVENT: ${{ inputs.event }}
           BASE: ${{ inputs.base }}
+          ACCEPTED: ${{ steps.evidence.outputs.accepted }}
         run: |
+          if [ "$ACCEPTED" = true ]; then
+            echo "evidence: the head commit's whole gate set passed off GitHub; skipping every gate job"
+            echo "all=false" >> "$GITHUB_OUTPUT"
+            echo "jobs=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT" = pull_request ] && [ -n "$BASE" ]; then
             git fetch --no-tags --depth=1 origin "$BASE" \
               || echo "note: could not fetch base $BASE; the plan will say all"
@@ -674,6 +763,16 @@ jobs:
       # requiring a case to go red. One process, one map: 7.5s locally.
       - name: every gate job is wired to the pull-request plan
         run: python3 scripts/gate-map/plan.py --check-wiring --selftest
+
+      # The evidence tier (the plan job's first step) and release.yml's guard
+      # read one module, release_evidence.py. Its refusals are the whole of
+      # the tier's safety, so they are held on every push rather than only
+      # when a tag is cut: a status by a person, a target_url at another run,
+      # an evidence-tier run standing in for a full one. It runs against a
+      # stub API, with no network: 0.03s locally.
+      - name: the external evidence readers keep their refusals
+        run: |
+          python3 scripts/gates-external/release_evidence.py --selftest
 
       # Issue #167: a reshard moves run steps between the shards of one job
       # family, and "no gate was dropped" was a claim nothing checked. This
@@ -3089,7 +3188,10 @@ jobs:
     # 36042621336) over the nightly audit's seven days, 09-18 .. 09-25. The
     # 873s planning value above was 412s over it; restated to the
     # observation plus a tenth, 508s, and the timeout to 3x that.
-    # budget: 3x 508s worst observed plus a tenth (run 36042621336)
+    # 2026-09-25, later: 506s, 2s paid to plan's evidence step (plan went
+    # 8s -> 10s); still 45s over the worst observation, and 3x 506s keeps
+    # the 26-minute timeout.
+    # budget: 3x 506s worst observed plus a tenth, less 2s paid to plan (run 36042621336)
     timeout-minutes: 26
     steps:
       - uses: actions/checkout@v4

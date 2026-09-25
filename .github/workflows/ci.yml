@@ -104,9 +104,25 @@ jobs:
   # The event and base sha are what gates.yml's `plan` job decides from: a
   # pull request runs the gate jobs that can see its diff, anything else runs
   # them all (see gates.yml's header and scripts/gate-map/plan.py).
+  #
+  # `head` is the commit the plan's evidence tier asks about: when it carries
+  # an accepted `gates/maintainer` status the whole gate set of that commit
+  # already passed off GitHub and every gate job skips. It is the pull
+  # request's head, not the merge ref, because the head is what an external
+  # run tested; on a push it is the pushed sha.
+  #
+  # The permissions are what that read needs. The repository's default
+  # token is contents-only, and a called workflow cannot ask for more than
+  # its caller grants, so they are granted here; every gates.yml job gets
+  # them, all three read-only.
   test:
+    permissions:
+      contents: read
+      statuses: read
+      actions: read
     uses: ./.github/workflows/gates.yml
     secrets: inherit
     with:
       event: ${{ github.event_name }}
       base: ${{ github.event.pull_request.base.sha }}
+      head: ${{ github.event.pull_request.head.sha || github.sha }}
