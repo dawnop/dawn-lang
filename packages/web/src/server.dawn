@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, streaming_sized, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -99,10 +99,10 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[Bytes, HttpError] !io = {
 # The length write_response hands to sendResponseHeaders, in jdk.httpserver's
 # convention: n > 0 is an exact Content-Length, 0 selects chunked transfer
 # encoding, -1 means no body at all. The body kind picks the framing
-# (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, and only
-# Stream — whose length is unknown up front — stays chunked. An empty
-# Text/Binary maps to -1, because 0 would mean chunked; the JDK then emits
-# Content-Length: 0 itself.
+# (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, a Stream
+# its stated length, and only a Stream whose length is unknown up front stays
+# chunked. An empty body of any kind maps to -1, because 0 would mean chunked;
+# the JDK then emits Content-Length: 0 itself.
 #
 # Four status classes never carry content no matter what the handler built:
 # 1xx informational (RFC 9110 §15.2), 204 No Content (§15.3.5), 205 Reset
@@ -122,7 +122,8 @@ fn body_length(status: Int, body: ResponseBody) -> Int =
       Empty -> -1
       Text(s) -> exact_length(bytes.len(bytes.utf8(s)))
       Binary(b) -> exact_length(bytes.len(b))
-      Stream(_) -> 0
+      Stream(_, Some(n)) -> exact_length(n)
+      Stream(_, None) -> 0
     }
   }
 
@@ -133,21 +134,27 @@ fn exact_length(n: Int) -> Int = if n == 0 { -1 } else { n }
 ## no resource.
 fn drop_body(body: ResponseBody) -> Unit !io =
   match body {
-    Stream(s) -> close_stream(s)
+    Stream(s, _) -> close_stream(s)
     _ -> ()
   }
 
-# How pumping a streaming body ended. Three outcomes, not two: the point of the
-# type is that a failed transfer and a panicking program are told apart, and
-# both are told apart from a clean EOF.
+# How pumping a streaming body ended. The point of the type is that a failed
+# transfer and a panicking program are told apart, and both are told apart from
+# a clean EOF. A stream of stated length adds the fourth: a clean EOF before
+# the length, which without a length to compare against is indistinguishable
+# from a complete transfer (the LIB-18 truncation candidate). More than the
+# stated length never gets here as a count: the JDK's fixed-length stream
+# refuses the write, and that is a TransferFailed.
 type PumpOutcome =
   | Pumped
+  | Truncated(sent: Int, expected: Int)
   | TransferFailed(message: String)
   | PumpPanicked(message: String)
 
 # Pump an upstream stream and say how it ended, with the pumping step passed in
-# so a test can drive all three outcomes without a socket (the `spill_with`
-# arrangement above, for the same reason).
+# so a test can drive every outcome without a socket (the `spill_with`
+# arrangement above, for the same reason). The step returns how many bytes it
+# moved (transferTo's count), which is what `expected` is compared against.
 #
 # The two barriers are nested rather than unioned. `catch_fault` catches
 # java.lang.Exception and lets a Dawn panic through (spec §9.8), `catch_panic`
@@ -163,13 +170,17 @@ type PumpOutcome =
 #
 # The bracket is inside the outer barrier so that the upstream stream closes on
 # every one of the three ways out, before the outcome is read.
-fn pump_with(s: InputStream, pump: fn(InputStream) -> Unit !io) -> PumpOutcome !io = {
+fn pump_with(s: InputStream, expected: Option[Int], pump: fn(InputStream) -> Int !io) -> PumpOutcome !io = {
   let pumped = catch_panic(() => {
     with up <- bracket(s, close_stream)
     catch_fault(() => pump(up))
   })
   match pumped {
-    Ok(Ok(_)) -> Pumped
+    Ok(Ok(sent)) ->
+      match expected {
+        Some(n) -> if sent < n { Truncated(sent, n) } else { Pumped }
+        None -> Pumped
+      }
     Ok(Err(e)) -> TransferFailed(e.message)
     Err(m) -> PumpPanicked(m.message)
   }
@@ -184,20 +195,22 @@ fn pump_with(s: InputStream, pump: fn(InputStream) -> Unit !io) -> PumpOutcome !
 # transfer stopped after the response was already committed.
 #
 # Nothing is sent to the client either way: the headers went out before the
-# first byte (chunked framing, docs/streaming-response-design.md §4.3), so the status
-# is spent and the only remaining signal is the connection ending short.
+# first byte (docs/streaming-response-design.md §4.3), so the status is spent
+# and the only remaining signal is the connection ending short. For a stream of
+# stated length that signal is a real one: the Content-Length promised more
+# than arrived, and closing the JDK's fixed-length stream short of it throws
+# ("insufficient bytes written"), which ends the connection instead of letting
+# the exchange look complete.
 #
 # Log ordering, so nobody reads it as interleaving: `with_logging`
 # (web/middleware.dawn) writes its access line when the handler returns, and
 # write_response runs after that, at the end of `handle`. A failed stream
 # therefore logs *after* its own `GET /x -> 200` line. That is the shape of the
 # pipeline, not a lost message.
-fn pump_stream(s: InputStream, out: OutputStream) -> Unit !io =
-  match pump_with(s, up => {
-    let _n = up.transferTo(out)
-    ()
-  }) {
+fn pump_stream(s: InputStream, expected: Option[Int], out: OutputStream) -> Unit !io =
+  match pump_with(s, expected, up => up.transferTo(out)) {
     Pumped -> ()
+    Truncated(sent, n) -> println("stream body: upstream ended after ${sent} of ${n} bytes")
     TransferFailed(m) -> println("stream body: transfer failed after commit: ${m}")
     PumpPanicked(m) -> println("stream body panicked: ${m}")
   }
@@ -252,7 +265,7 @@ fn write_response(ex: HttpExchange, response: Response) -> Unit !io = {
       # a failure cannot escape into `handle`'s caller, because write_response
       # runs outside that function's own isolation barrier. See pump_stream for
       # what is logged and why the failure is not sent to the client.
-      Stream(s) -> pump_stream(s, out)
+      Stream(s, expected) -> pump_stream(s, expected, out)
     }
   }
 }
@@ -995,7 +1008,7 @@ test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for 
   assert body_length(200, Text("")) == -1
   assert body_length(200, Binary(bytes.utf8("abcd"))) == 4
   assert body_length(200, Binary(bytes.utf8(""))) == -1
-  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")))) == 0
+  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")), None)) == 0
 }
 
 test "the four no-content status classes carry no body, whatever the handler built" {
@@ -1009,8 +1022,8 @@ test "the four no-content status classes carry no body, whatever the handler bui
   assert body_length(205, Text("hello")) == -1
   assert body_length(304, Binary(bytes.utf8("x"))) == -1
   # a stream on one of these is dropped rather than pumped (see drop_body)
-  assert body_length(100, Stream(test_stream_of(bytes.utf8("x")))) == -1
-  assert body_length(205, Stream(test_stream_of(bytes.utf8("x")))) == -1
+  assert body_length(100, Stream(test_stream_of(bytes.utf8("x")), None)) == -1
+  assert body_length(205, Stream(test_stream_of(bytes.utf8("x")), None)) == -1
   # the neighbours are ordinary statuses and keep their bodies
   assert body_length(200, Text("hello")) == 5
   assert body_length(203, Text("hello")) == 5
@@ -1168,19 +1181,14 @@ test "pumping a streaming body tells EOF, a failed transfer and a panic apart" {
   # a bug in this program both looked exactly like a request that ended well.
   # No socket is needed for any of them.
   let sink = ByteArrayOutputStream.new()
-  assert pump_with(test_stream_of(bytes.utf8("streamed")), up => {
-    let _n = up.transferTo(test_sink_of(sink))
-    ()
-  }) == Pumped
+  assert pump_with(test_stream_of(bytes.utf8("streamed")), None, up => up.transferTo(test_sink_of(sink))) ==
+    Pumped
   assert sink.toByteArray().expect("bytes") == bytes.utf8("streamed")
 
   # an upstream that fails on read — the shape a client hanging up mid-download
   # also takes, which is why the log wording does not claim to know which
   let sink2 = ByteArrayOutputStream.new()
-  match pump_with(test_broken_stream(), up => {
-    let _n = up.transferTo(test_sink_of(sink2))
-    ()
-  }) {
+  match pump_with(test_broken_stream(), None, up => up.transferTo(test_sink_of(sink2))) {
     TransferFailed(m) -> { assert m != "" }
     _ -> { assert false }
   }
@@ -1188,8 +1196,75 @@ test "pumping a streaming body tells EOF, a failed transfer and a panic apart" {
 
   # a bug in this program: not a java.lang.Exception, so it goes straight past
   # the inner catch_fault to the outer catch_panic (spec §9.8) with its message
-  assert pump_with(test_stream_of(bytes.utf8("x")), _up => panic("pump bug")) ==
+  assert pump_with(test_stream_of(bytes.utf8("x")), None, _up => panic("pump bug")) ==
     PumpPanicked("pump bug")
+}
+
+test "a stream of stated length that ends early is a truncation, not a success" {
+  # the LIB-18 candidate: a clean EOF before the end used to be
+  # indistinguishable from a complete transfer, because nothing said how long
+  # the stream was meant to be
+  let sink = ByteArrayOutputStream.new()
+  assert pump_with(test_stream_of(bytes.utf8("abc")), Some(10), up => up.transferTo(test_sink_of(sink))) ==
+    Truncated(3, 10)
+  # exactly the stated length is a clean finish
+  let sink2 = ByteArrayOutputStream.new()
+  assert pump_with(test_stream_of(bytes.utf8("abc")), Some(3), up => up.transferTo(test_sink_of(sink2))) ==
+    Pumped
+  # an unsized stream has nothing to compare against, as before
+  let sink3 = ByteArrayOutputStream.new()
+  assert pump_with(test_stream_of(bytes.utf8("abc")), None, up => up.transferTo(test_sink_of(sink3))) ==
+    Pumped
+  # the length also decides the framing: exact when stated, chunked when not
+  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")), Some(5))) == 5
+  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")), Some(0))) == -1
+  assert body_length(204, Stream(test_stream_of(bytes.utf8("x")), Some(5))) == -1
+}
+
+test "a stream's Content-Length is its stated length, and an unsized stream has none" {
+  let sized = () => streaming_sized(200, "video/mp4", test_stream_of(bytes.utf8("abcd")), 4)
+  let unsized = () => streaming(200, "video/mp4", test_stream_of(bytes.utf8("abcd")))
+  # the stated length is the one a handler may repeat
+  match catch_panic(() => with_header(sized(), "Content-Length", "4")) {
+    Ok(_) -> { assert true }
+    Err(_) -> { assert false }
+  }
+  match catch_panic(() => with_header(sized(), "Content-Length", "5")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert m.message == "header Content-Length says 5 but the body is 4 bytes" }
+  }
+  # next to chunked framing a Content-Length is the RFC 9112 §6.1 violation
+  match catch_panic(() => with_header(unsized(), "Content-Length", "4")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "unknown length") }
+  }
+  # a byte count is not negative
+  match catch_panic(() => streaming_sized(200, "video/mp4", test_stream_of(bytes.utf8("")), -1)) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "illegal stream length -1") }
+  }
+}
+
+test "a sized stream goes out with its exact Content-Length, and a short one ends short" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/whole", ex =>
+      write_response(ex, streaming_sized(200, "application/octet-stream", test_stream_of(bytes.utf8("streamed")), 8)))
+  srv.createContext("/short", ex =>
+      write_response(ex, streaming_sized(200, "application/octet-stream", test_stream_of(bytes.utf8("abc")), 10)))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let whole = test_connect("GET", "http://127.0.0.1:${port}/whole")
+  assert whole.getHeaderField("Content-Length") == Some("8")
+  assert whole.getHeaderField("Transfer-encoding") == None
+  assert whole.getInputStream()!.readAllBytes()! == bytes.utf8("streamed")
+  # the promise is on the wire before the upstream runs dry, and the connection
+  # then ends three bytes into ten: the client can see it was cut short, which a
+  # chunked stream ending the same way would have hidden behind its last chunk
+  let short = raw_http(port, get_line("/short"))
+  assert str.starts_with(short, "HTTP/1.1 200")
+  assert str.contains(str.to_lower(short), "content-length: 10")
+  assert str.ends_with(short, "\r\n\r\nabc")
+  srv.stop(0)
 }
 
 test "raw path split: interior empties stay, lead and one trailing drop" {
