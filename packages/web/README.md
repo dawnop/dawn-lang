@@ -85,6 +85,74 @@ and actix-web do on the same input; a caller that truly wants the lossy view
 still has `bytes.decode_utf8_lossy(req.body)`, one line, stated at the call
 site.
 
+## Responses (5.0)
+
+`Response` is opaque. It comes from the constructors (`text`, `json_response`,
+`json_ok`, `raw`, `binary`, `streaming`, `streaming_sized`, `redirect`,
+`attachment`, `error_response`) and from `with_header`, and it is read with
+`response_status`, `response_content_type`, `response_headers` and
+`response_body`. There is no literal, so there is no response that skipped the
+checks the constructors make, and those checks are the only ones: the server
+writes what it is given. (Until 5.0 a record literal could build anything, and
+3.1 re-checked headers at the write boundary to catch it.)
+
+What a constructor refuses, it refuses with a panic, which the per-request
+isolation renders as a `500`, the same verdict `with_header` has always given a
+header the program built out of its own strings:
+
+| Check | Rule |
+|---|---|
+| status | `200..599`. jdk.httpserver sends any number as written (`99`, `600`, `-5`), and a final `100` leaves the client waiting for a response that never comes. There is no `1xx` here: nothing in this framework sends an interim response. |
+| content type | A legal header value, like any other: `raw`/`binary`/`streaming` pass it straight to `Content-Type`. |
+| `Transfer-Encoding` | Never accepted from a handler. The body kind decides the framing; a handler's copy used to go out next to the JDK's own `Content-length`, which RFC 9112 §6.1 forbids. |
+| `Content-Length` | A decimal byte count, once, equal to the body's length when the body has content. Any count is accepted on a body with no content, because that is how a `HEAD` answer states the length of what it does not carry. Never on a stream of unknown length. |
+
+An `HttpError` stays a plain record. Its status is checked where it is rendered:
+out of range, it becomes the neutral `500` (`ErrorFormat.internal_message`),
+with its headers kept so a CORS stamp still reaches the browser.
+
+The status check is a range, not a closed enumeration. `docs/audit/web-api-v2-design.md`
+(section 4) turned down a `Method`/`Status` type because a closed set needs an
+`Other(String)` escape hatch, which is a `String` with extra steps. That argument
+does not apply here: the status is still an `Int`, any code in `200..599` is
+accepted, and what is refused was never valid HTTP. Route methods get the same
+treatment at startup: `validate_routes` refuses a method that is not an
+uppercase token (`route_method_of("get", ...)` used to be accepted and then never
+matched anything, since methods are compared exactly).
+
+Checked `HeaderName`/`HeaderValue` types are deliberately absent. With `Response`
+opaque, `with_header` is the one way a header gets in, and it already checks
+the name, the value and the framing rules; a second type would state the same
+invariant twice. WAI, Plug, http4s and Ktor draw the line the same way.
+
+### Streams of a known length
+
+`streaming(status, content_type, stream)` is chunked: the length is unknown,
+and so an upstream that ends early with a clean EOF looks exactly like one that
+delivered everything. When the length is known (an object store's
+`Content-Length`), `streaming_sized(status, content_type, stream, length)` sends
+it as an exact `Content-Length`. The server counts what it pumps; a short
+upstream is logged as a truncation, and the connection ends before the promised
+length, so the client can tell as well.
+
+## Server lifecycle and limits (5.0)
+
+`start` returns an opaque `ServerHandle`: `join` blocks on it, `stop` ends it,
+`handle_port` reads the port it bound (the point of `port: 0`). It used to be a
+public record, which let a caller hand `stop` an executor it never owned.
+
+A body ceiling is a positive byte count. `start` panics on a non-positive
+`ServerConfig.max_body` before binding, and `with_body_limit` panics when it is
+built with one. Until 5.0, `0` meant unbounded, which made the value most likely
+to be a slip the one that switched the guard off. Routes that legitimately take
+more say so with a tag: `raw-body` (bounded by nginx in front) or `stream-body`
+(spilled to disk, never held in memory). `serve_app_bounded` is gone; set
+`max_body` in the `ServerConfig` passed to `serve_app_with`.
+
+The router's dispatch machinery (`dispatch_segs`, `validate_routes`,
+`route_meta`, `Dispatch`) is package-private since 5.0: `start` is what runs
+it.
+
 ## CORS and OPTIONS (2.1)
 
 `with_cors` answers a **preflight** itself and lets everything else through to

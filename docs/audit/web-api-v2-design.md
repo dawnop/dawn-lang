@@ -225,6 +225,12 @@ pub fn serve_app(port: Int, routes: List[Route], mw: List[Middleware]) -> Unit !
   dawnop-site 在用），而 status 是三位数字的开放集合。
   给它们封闭类型就得同时给一个 `Other(String)` 逃生口——那等于回到 String，
   只是多了一层包装。**改成 String 常量 + 启动时校验**（§2.4）拿到的是同样的收益。
+  > **web5（2026-09-25）补注：范围校验不是封闭枚举，本条的反对理由对它不成立。**
+  > `web5 / 5.0.0` 让每个响应构造器要求 status 在 200..599、`validate_routes` 要求 method
+  > 是大写 token。status 仍是 Int、method 仍是 String，集合仍开放（任意 2xx..5xx、任意
+  > WebDAV 动词），不需要 `Other(String)` 逃生口；被拒的只是在 HTTP 里本来就不合法的值
+  > （越界 status 被 jdk.httpserver 原样发出，小写 method 永远匹配不到请求行）。这正是本条
+  > 给的替代方案「常量 + 启动时校验」漏掉的那半。见 [web5-design.md](../web5-design.md) §3.3。
 - **把 `body: String` 做成惰性解码**（WEB-01 的剩余项）。
   同时保留 byte[] 和 String 确实是双份峰值，但 8 MiB 的服务器上限已经把它限住了；
   改成惰性要么让 `Request` 带一个可变槽（与不可变记录冲突），
