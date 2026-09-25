@@ -289,26 +289,25 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
 ## real device would need, kept honest by the kernel's width.
 fn blocks(n: Int) -> Int = (n + WIDTH - 1) / WIDTH
 
-# Allocate and fill one buffer per pair, in order. Recursion rather than a
-# `for` with `?` in it (dawn-lang issue #68), and over the raw operations
+# Allocate and fill one buffer per pair, in order, over the raw operations
 # rather than over `Tensor[D]`, because one launch here takes buffers of two
 # formats and a list cannot hold two types.
-fn alloc_upload(bufs: List[Buf], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
-  if i >= len(bufs) {
-    Ok(acc)
-  } else {
-    let (dt, data) = bufs[i]
+fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for (dt, data) in bufs {
     let h = gpu.gpu_alloc(dt, len(data))?
     gpu.gpu_upload(h, data)?
-    alloc_upload(bufs, i + 1, acc ++ [h])
+    hs = hs ++ [h]
   }
+  Ok(hs)
+}
 
 ## One kernel over `bufs` on a `grid` by 1 by 1 grid: allocate, upload,
 ## launch, wait, read the LAST buffer back, release. A refusal is the answer,
 ## and the handles issued before it are left to the handler, which here is
 ## pure and takes them with it.
 fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], ForeignError] !Gpu = {
-  let hs = alloc_upload(bufs, 0, [])?
+  let hs = alloc_upload(bufs)?
   launch(name, grid, hs)?
   sync()?
   let got = gpu.gpu_download(hs[len(hs) - 1])?

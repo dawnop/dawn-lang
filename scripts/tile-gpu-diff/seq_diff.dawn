@@ -376,41 +376,30 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 fn blank() -> Trace =
   Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
 
-# Allocate and fill one buffer per entry, in order. Written as recursion
-# rather than a `for` with `?` in it, for the reason gath_diff gives
-# (dawn-lang issue #68).
-fn alloc_all(bufs: List[Buf], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
-  if i >= len(bufs) {
-    Ok(acc)
-  } else {
-    match gpu.gpu_alloc(bufs[i].dtype, len(bufs[i].data)) {
-      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
-      Err(e) -> Err(e)
-    }
+# Allocate and fill one buffer per entry, in order.
+fn alloc_all(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for b in bufs {
+    hs = hs ++ [gpu.gpu_alloc(b.dtype, len(b.data))?]
   }
+  Ok(hs)
+}
 
-fn upload_all(hs: List[Int], bufs: List[Buf], i: Int) -> Result[Unit, ForeignError] !Gpu =
-  if i >= len(hs) {
-    Ok(())
-  } else {
-    match gpu.gpu_upload(hs[i], bufs[i].data) {
-      Ok(_) -> upload_all(hs, bufs, i + 1)
-      Err(e) -> Err(e)
-    }
+fn upload_all(hs: List[Int], bufs: List[Buf]) -> Result[Unit, ForeignError] !Gpu = {
+  for i in 0..len(hs) {
+    gpu.gpu_upload(hs[i], bufs[i].data)?
   }
+  Ok(())
+}
 
-## Every buffer the verdict reads, in order, laid end to end. Written as
-## recursion for `alloc_all`'s reason.
-fn download_all(hs: List[Int], bufs: List[Buf], names: List[String], i: Int,
-  acc: List[Float]) -> Result[List[Float], ForeignError] !Gpu =
-  if i >= len(names) {
-    Ok(acc)
-  } else {
-    match gpu.gpu_download(hs[buf_pos(bufs, names[i])]) {
-      Ok(v) -> download_all(hs, bufs, names, i + 1, acc ++ v)
-      Err(e) -> Err(e)
-    }
+## Every buffer the verdict reads, in order, laid end to end.
+fn download_all(hs: List[Int], bufs: List[Buf], names: List[String]) -> Result[List[Float], ForeignError] !Gpu = {
+  var out: List[Float] = []
+  for name in names {
+    out = out ++ gpu.gpu_download(hs[buf_pos(bufs, name)])?
   }
+  Ok(out)
+}
 
 fn release(hs: List[Int]) -> Unit !Gpu = {
   for h in hs {
@@ -463,11 +452,11 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
 ## FIRST refusal that stops it, and `note` carries the message.
 fn stages(bufs: List[Buf], steps: List[Step], reads: List[String],
   at: Int, reset: String, trip: String) -> Trace !Gpu =
-  match alloc_all(bufs, 0, []) {
+  match alloc_all(bufs) {
     Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
     Ok(hs) -> {
       let t0 = Trace { ..blank(), alloc: "ok" }
-      match upload_all(hs, bufs, 0) {
+      match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
           Trace { ..t0, upload: e.kind, note: e.message }
@@ -481,7 +470,7 @@ fn stages(bufs: List[Buf], steps: List[Step], reads: List[String],
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = download_all(hs, bufs, reads, 0, [])
+              let r = download_all(hs, bufs, reads)
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)
