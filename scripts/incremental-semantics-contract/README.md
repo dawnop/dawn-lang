@@ -1,5 +1,21 @@
 # 增量语义契约夹具
 
+## 探针住在编译器包内
+
+检查器状态（`Cx`、`Frame`、`LambdaCx` 及其签名闭包）对 selfhost 包是 `pub(pkg)`，本目录
+这个 `[deps]` 引用 selfhost 的工程看不到它。所以：
+
+- checked-in 的测试模块在 `selfhost/src/contract/`（`cold`、`prefix`、`probe`、
+  `session_bodies`、`prepared_sessions`、`cached_module_observer`），由
+  `./bin/dawn test selfhost` 执行；基准正文是 `contract/bench.dawn` 的 `run`，本目录的
+  `src/main.dawn` 只转发给它。`main.dawn` 与 `nmain.dawn` 都不导入 `contract/`。
+- `*.dawn.txt` 模板按包内写法书写（`use check/...`，不带 `compiler/`；除 `main` 外一律
+  `pub(pkg)`）。harness 用 `cold.install_probe` 把它们写进私有副本的
+  `selfhost/src/contract/<name>.dawn`，夹具工程只剩一个转发 `main` 的入口；
+  Java 预言机按 `dawn$pkg$selfhost.contract.<name>` 反射取类。
+- 跑 `dawn test` 的 harness 按 `contract/<name> ::` 匹配模块名。
+
+
 ## Raw source equality controls
 
 `source-equality.py` runs the source projection positive and four private
@@ -142,8 +158,8 @@ must still use the current production toolchain.
 
 - `python3 scripts/incremental-semantics-contract/probe.py`：八个 Java hook 与
   refusing guard 的九个可编译负控。
-- `./bin/dawn test scripts/incremental-semantics-contract`：query probe 集成、
-  冷路径阶段嵌套、错误恢复和 loader 诊断顺序。
+- `selfhost/src/contract/` 的六个测试模块（由 `./bin/dawn test selfhost` 执行）：query probe
+  集成、冷路径阶段嵌套、错误恢复和 loader 诊断顺序。
 - `python3 scripts/incremental-semantics-contract/cold.py`：私有源码副本中注入
   冻结旧循环，对照相同 StdCtx、LoadedModule 和 CtOpts；六个变异体只改新路径。
   需 JDK 21+ 的 `java/javac/jar`。
@@ -201,7 +217,7 @@ executor 语义；它按函数体类别（字面量标量、原语参数算术�
 前后取差）；真实所有者里语法树与 header 共用，故索引那一项就是快照的边际内存。
 
 类别生成器与 `equal_bodies` 在 `replay-workloads.dawn.txt`，与下面的编辑矩阵共用；两个
-harness 都把它拷成夹具的 `src/workloads.dawn`。
+harness 都把它写进私有 selfhost 副本的 `contract/workloads.dawn`。
 
 ## 真实编辑矩阵（计数，无计时）
 

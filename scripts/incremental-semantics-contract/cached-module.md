@@ -22,13 +22,15 @@ linkage, or a panic. Each subject reports elapsed wall time, including compilati
 and its test dependency closure; these are gate-cost measurements, not replay
 speedup measurements.
 
-The external `src/cached_module_observer.dawn` fixture owns mutable Java state outside
-the portable compiler. It observes the exact ordered module/check/comptime
+The `selfhost/src/contract/cached_module_observer.dawn` test module owns mutable Java
+state outside the portable compiler: it is a module of the compiler package, because
+the analysis steps it drives carry checker state, which is `pub(pkg)`, and nothing in
+`main.dawn` or `nmain.dawn` imports it. It observes the exact ordered module/check/comptime
 intervals on both cold and warm transitions, compares semantic products, and
 checks that a tooling query after a warm hit reaches the current host oracle
 without touching the previous generation's oracle. A warm hit must occur before
-the host assertions are meaningful. The fixture does not put Java imports in
-`selfhost` and does not duplicate the semantic engine.
+the host assertions are meaningful. Its Java import reaches neither driver's module
+graph, and it does not duplicate the semantic engine.
 
 CI runs the three driver partitions in checker-corpus, docs, and prev-diff;
 prev-diff-native runs the separate observer suite. No controls are omitted or

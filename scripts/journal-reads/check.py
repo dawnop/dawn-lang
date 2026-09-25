@@ -149,7 +149,7 @@ class Fn:
 
 
 def cx_fields(sources):
-    body = re.search(r'pub type Cx = \{(.*?)\n\}', sources['check/cx'], re.S)
+    body = re.search(r'pub(?:\(pkg\))? type Cx = \{(.*?)\n\}', sources['check/cx'], re.S)
     if body is None:
         raise SystemExit('journal-reads: the Cx record declaration moved out of check/cx.dawn')
     found = re.findall(r'^\s{2}([a-z_][A-Za-z_0-9]*):', body.group(1), re.M)

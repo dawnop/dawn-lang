@@ -1,7 +1,7 @@
 # Session body-cache controls
 
 `python3 scripts/incremental-semantics-contract/session-bodies.py` runs the
-external `src/session_bodies.dawn` fixture against private copies of the actual
+`selfhost/src/contract/session_bodies.dawn` test module against private copies of the actual
 `driver/incremental` implementation. Thirteen compiling mutations cover actual
 body counts, current-generation replacement, canonical prefix identity,
 duplicate identities, eviction, persistent disablement, four shared-capacity

@@ -17,7 +17,7 @@ from cold import ROOT, edit, run
 def main():
     started = time.monotonic()
     original = (ROOT / 'selfhost/src/check/cx.dawn').read_text()
-    start = original.index('pub fn revalidate_context_read(')
+    start = original.index('pub(pkg) fn revalidate_context_read(')
     end = original.index('\ntest ', start)
     body = original[start:end]
     owner = 'context revalidation recomputes every supported query family'
@@ -44,8 +44,8 @@ def main():
         for name, old, new, test in variants
     ]
     checker = (ROOT / 'selfhost/src/check/checker.dawn').read_text()
-    dispatch_start = checker.index('pub fn revalidate_read(')
-    dispatch_end = checker.index('pub fn revalidate_witness_read(', dispatch_start)
+    dispatch_start = checker.index('pub(pkg) fn revalidate_read(')
+    dispatch_end = checker.index('pub(pkg) fn revalidate_witness_read(', dispatch_start)
     dispatch = checker[dispatch_start:dispatch_end]
     dispatch_variants = [
         ('discard-context-result', 'None -> revalidate_context_read(candidate, fact)', 'None -> None'),
