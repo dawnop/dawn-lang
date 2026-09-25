@@ -38,6 +38,16 @@ A reusable workflow's jobs are reported under `"<caller job> / <job>"`
 (gates.yml's `native-diff` arrives as `test / native-diff`, because ci.yml
 calls it from a job named `test`). The prefix is stripped so the names match
 the keys in the workflow file; a bare name is kept as it is.
+
+The report also keeps every run it read, under "per_run": its event, its
+conclusion, each successful job's seconds and the run's span (creation to the
+last job's finish, queueing included, unlike the per-job figure). The maximum
+per job is what the budget audit needs; the per-run records are what
+scripts/gate-totals.py adds up for the nightly report of job-seconds per push,
+and keeping them here means that report reads the same API answers, through
+the same reader, as the audit does. `--allow-empty` writes a report with no
+runs instead of failing: a path-triggered workflow (tile.yml) can go a week
+without a push that touches its paths, and that is an answer, not an error.
 """
 
 import argparse
@@ -99,14 +109,14 @@ def parse_since(text):
     return when
 
 
-def collect(repo, branch, workflow, runs, since):
+def collect(repo, branch, workflow, runs, since, allow_empty=False):
     listed = gh_json([
         "gh", "run", "list",
         "--repo", repo,
         "--workflow", workflow,
         "--branch", branch,
         "--limit", str(max(runs * 2, runs)),
-        "--json", "databaseId,status,conclusion,createdAt,headSha",
+        "--json", "databaseId,status,conclusion,createdAt,headSha,event",
     ])
     picked = []
     for run in listed:
@@ -117,7 +127,7 @@ def collect(repo, branch, workflow, runs, since):
         picked.append(run)
         if len(picked) >= runs:
             break
-    if not picked:
+    if not picked and not allow_empty:
         raise SystemExit(
             f"no completed {workflow} runs on {branch} matched"
             f"{' since ' + since.isoformat() if since else ''}"
@@ -125,12 +135,18 @@ def collect(repo, branch, workflow, runs, since):
 
     seconds = {}
     where = {}
+    per_run = []
     for run in picked:
         payload = gh_json([
             "gh", "api",
             f"repos/{repo}/actions/runs/{run['databaseId']}/jobs?per_page=100",
         ])
+        jobs = {}
+        last = None
         for job in payload.get("jobs", []):
+            if job.get("completed_at"):
+                done = parse_time(job["completed_at"])
+                last = done if last is None or done > last else last
             if job.get("conclusion") != "success":
                 continue
             if not job.get("started_at") or not job.get("completed_at"):
@@ -140,10 +156,21 @@ def collect(repo, branch, workflow, runs, since):
                 .total_seconds()
             )
             name = strip_caller(job["name"])
+            jobs[name] = took
             if took > seconds.get(name, -1):
                 seconds[name] = took
                 where[name] = run["databaseId"]
-    return picked, seconds, where
+        per_run.append({
+            "id": run["databaseId"],
+            "created": run["createdAt"],
+            "event": run.get("event"),
+            "conclusion": run.get("conclusion"),
+            "head_sha": run.get("headSha"),
+            "span": (int((last - parse_time(run["createdAt"])).total_seconds())
+                     if last else None),
+            "jobs": dict(sorted(jobs.items())),
+        })
+    return picked, seconds, where, per_run
 
 
 def main():
@@ -156,11 +183,15 @@ def main():
     ap.add_argument("--since", default=None,
                     help="ignore runs created before this ISO timestamp")
     ap.add_argument("--out", type=pathlib.Path, required=True)
+    ap.add_argument("--allow-empty", action="store_true",
+                    help="write an empty report when no run matched, rather"
+                    " than fail (for a path-triggered workflow)")
     args = ap.parse_args()
 
     since = parse_since(args.since) if args.since else None
-    picked, seconds, where = collect(
-        args.repo, args.branch, args.workflow, args.runs, since
+    picked, seconds, where, per_run = collect(
+        args.repo, args.branch, args.workflow, args.runs, since,
+        args.allow_empty,
     )
     report = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -169,15 +200,16 @@ def main():
         "workflow": args.workflow,
         "since": since.isoformat() if since else None,
         "runs": [run["databaseId"] for run in picked],
-        "oldest_run_created": picked[-1]["createdAt"],
-        "newest_run_created": picked[0]["createdAt"],
+        "oldest_run_created": picked[-1]["createdAt"] if picked else None,
+        "newest_run_created": picked[0]["createdAt"] if picked else None,
         "worst_run": where,
         "jobs": dict(sorted(seconds.items())),
+        "per_run": per_run,
     }
     args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(
         f"wrote {args.out}: {len(seconds)} job(s) over {len(picked)} run(s)"
-        f" ({picked[-1]['createdAt']} .. {picked[0]['createdAt']})"
+        f" ({report['oldest_run_created']} .. {report['newest_run_created']})"
     )
     for name, took in sorted(seconds.items(), key=lambda kv: -kv[1]):
         print(f"  {took:5d}s  {name}  (run {where[name]})")
