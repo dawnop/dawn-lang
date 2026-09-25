@@ -175,25 +175,70 @@ pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> Resu
 
 # ---- response constructors ----
 
-## A `text/plain; charset=utf-8` response.
-pub fn text(status: Int, body: String) -> Response =
-  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: Text(body) }
+# The status range every constructor enforces. RFC 9110 §15 makes 100..599 the
+# valid codes, but a 1xx is an interim response and this framework neither
+# upgrades a connection nor has a way to send one ahead of the final answer:
+# whatever a handler returns *is* the final response, so a 1xx there is always a
+# bug. jdk.httpserver checks nothing at all (99, 600 and -5 all reach the wire
+# as written, and a final `100 Continue` leaves the client waiting for a
+# response that never comes), so this is the only check there is.
+fn status_problem(status: Int) -> Option[String] =
+  if status < 200 || status > 599 {
+    Some("illegal response status ${status}: a final response is 200..599")
+  } else {
+    None
+  }
 
-## A rendered JSON response (`application/json; charset=utf-8`) at any status.
+# `raw`/`binary`/`streaming` take the content type as a parameter and the
+# server sets it as Content-Type verbatim, so it is a header value like any
+# other and gets the same predicate `with_header` applies.
+fn content_type_problem(content_type: String) -> Option[String] =
+  if valid_header_value(content_type) {
+    None
+  } else {
+    Some("illegal Content-Type: " ++ escape_field(content_type))
+  }
+
+# Every constructor ends here, so a response that cannot travel is refused
+# where it is built: a panic, the same verdict `with_header` gives a header the
+# program built out of its own strings, and inside a handler the per-request
+# isolation renders it as a 500.
+fn build(status: Int, content_type: String, body: ResponseBody) -> Response = {
+  match status_problem(status) {
+    Some(p) -> panic(p)
+    None -> ()
+  }
+  match content_type_problem(content_type) {
+    Some(p) -> panic(p)
+    None -> ()
+  }
+  Response { status: status, content_type: content_type, headers: [], body: body }
+}
+
+## A `text/plain; charset=utf-8` response. Every constructor refuses a status
+## outside 200..599 with a panic: a final response is never 1xx here, since
+## nothing in this framework sends an interim one.
+pub fn text(status: Int, body: String) -> Response =
+  build(status, "text/plain; charset=utf-8", Text(body))
+
+## A rendered JSON response (`application/json; charset=utf-8`) at any status
+## in 200..599.
 pub fn json_response(status: Int, j: Json) -> Response =
-  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: Text(render(j)) }
+  build(status, "application/json; charset=utf-8", Text(render(j)))
 
 ## `json_response` at 200 — the ordinary success shape of a JSON API.
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
 
 ## A raw pre-rendered text body under any content type — the escape hatch for
-## a wire format this module has no constructor for (XML, HTML, WebDAV).
+## a wire format this module has no constructor for (XML, HTML, WebDAV). A
+## content type that cannot travel as a header value panics, as `with_header`
+## does.
 pub fn raw(status: Int, content_type: String, body: String) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: Text(body) }
+  build(status, content_type, Text(body))
 
 ## A binary body: raw Bytes written verbatim, with an exact Content-Length.
 pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: Binary(raw) }
+  build(status, content_type, Binary(raw))
 
 ## A streaming body: a live InputStream pumped to the socket in constant
 ## memory, chunked (the length is unknown up front). The server closes the
@@ -206,7 +251,7 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 ## orderly one cannot be, since telling them apart needs a length to compare
 ## against and nothing carries one.
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: Stream(stream) }
+  build(status, content_type, Stream(stream))
 
 # ---- header hygiene ----
 #
@@ -282,12 +327,13 @@ pub fn escape_field(s: String) -> String = {
 }
 
 # The refusal, worded once, used by both `with_header` (as a panic) and
-# `try_with_header` (as a 400).
+# `try_with_header` (as a 400). It takes the response because two of the rules
+# are about the response the header would join, not about the header alone.
 #
 # `to_string` used to stand where `escape_field` does. On a String it is the
 # identity, so it neither quoted nor escaped anything and only made the two
 # arms look like they disagreed about quoting.
-fn header_problem(name: String, value: String) -> Option[String] =
+fn header_problem(r: Response, name: String, value: String) -> Option[String] =
   if not valid_header_name(name) {
     Some("illegal header name: " ++ escape_field(name))
   } else if not valid_header_value(value) {
@@ -297,8 +343,72 @@ fn header_problem(name: String, value: String) -> Option[String] =
     # that failed is reported by the arm above, escaped.
     Some("illegal value for header " ++ name ++ ": " ++ escape_field(value))
   } else {
-    None
+    framing_problem(r, name, value)
   }
+
+# The framing headers belong to the server: the body kind decides them (see
+# web/server.body_length), and a handler's own copy can only disagree with
+# that decision. jdk.httpserver does not reconcile the two. A handler's
+# Transfer-Encoding goes out next to the JDK's Content-length, which RFC 9112
+# §6.1 forbids outright and a proxy in front may frame differently from the
+# client; a handler's Content-Length that disagrees with the body is silently
+# replaced by the JDK's own on most responses and passed through verbatim on a
+# HEAD, so the same wrong number is sometimes corrected and sometimes sent.
+#
+# So Transfer-Encoding is refused outright (Ktor draws the same line), and a
+# Content-Length must be a decimal byte count that matches the body whenever
+# the body has content to match. The exception is a body with no content
+# (`Empty`, or an empty Text/Binary, which the server frames the same way): a
+# HEAD answer states the length of a representation it does not carry, and
+# that is the one case where a handler's own Content-Length is the only source
+# of it (dawnop-site's WebDAV HEAD is `raw(200, mime, "")` plus the file's
+# size). A stream has no length to compare, and a Content-Length next to
+# chunked framing is the RFC 9112 §6.1 violation again. One response carries
+# one Content-Length.
+#
+# `name` is a token by the time this runs (header_problem checked it), so it
+# is interpolated raw, as the arm above does.
+fn framing_problem(r: Response, name: String, value: String) -> Option[String] = {
+  let lower = str.to_lower(name)
+  if lower == "transfer-encoding" {
+    return Some("header " ++ name ++ " is the server's to set: the body kind decides the framing")
+  }
+  if lower != "content-length" { return None }
+  for h in r.headers {
+    let (k, _) = h
+    if str.to_lower(k) == "content-length" {
+      return Some("duplicate header " ++ name ++ ": a response carries one Content-Length")
+    }
+  }
+  match decimal_length(value) {
+    None -> Some("illegal value for header " ++ name ++ ": " ++ escape_field(value) ++
+        " is not a decimal byte count")
+    Some(n) ->
+      match r.body {
+        Empty -> None
+        Text(s) -> length_mismatch(name, n, bytes.len(bytes.utf8(s)))
+        Binary(b) -> length_mismatch(name, n, bytes.len(b))
+        Stream(_) -> Some("header " ++ name ++ " on a stream of unknown length: the server frames it chunked")
+      }
+  }
+}
+
+fn length_mismatch(name: String, claimed: Int, actual: Int) -> Option[String] =
+  if actual == 0 || claimed == actual {
+    None
+  } else {
+    Some("header " ++ name ++ " says ${claimed} but the body is ${actual} bytes")
+  }
+
+# RFC 9110 §8.6: Content-Length = 1*DIGIT. `parse_int` alone would take a sign.
+fn decimal_length(v: String) -> Option[Int] = {
+  let cs = code_points(v)
+  if len(cs) == 0 { return None }
+  for c in cs {
+    if c < '0' || c > '9' { return None }
+  }
+  parse_int(v)
+}
 
 ## Append one response header. Records are immutable, so this returns a new
 ## Response.
@@ -310,8 +420,13 @@ fn header_problem(name: String, value: String) -> Option[String] =
 ## connection.) For a name or value derived from request input, either check it
 ## first with `valid_header_name`/`valid_header_value` or use `try_with_header`,
 ## which answers 400 instead.
+##
+## The framing headers are the server's: `Transfer-Encoding` is always refused,
+## and `Content-Length` must be a decimal byte count equal to the body's length
+## (any count on a body with no content, which is how a HEAD answer states the
+## length of what it does not carry; never on a stream of unknown length), once.
 pub fn with_header(r: Response, name: String, value: String) -> Response =
-  match header_problem(name, value) {
+  match header_problem(r, name, value) {
     Some(p) -> panic(p)
     None -> Response { ..r, headers: r.headers ++ [(name, value)] }
   }
@@ -320,7 +435,7 @@ pub fn with_header(r: Response, name: String, value: String) -> Response =
 ## is a 400 the handler can propagate with `?`, not a panic and never a silent
 ## edit of the value.
 pub fn try_with_header(r: Response, name: String, value: String) -> Result[Response, HttpError] =
-  match header_problem(name, value) {
+  match header_problem(r, name, value) {
     Some(p) -> Err(http_error(400, p))
     None -> Ok(Response { ..r, headers: r.headers ++ [(name, value)] })
   }
@@ -328,8 +443,7 @@ pub fn try_with_header(r: Response, name: String, value: String) -> Result[Respo
 # A redirect carries no content, so its body is `Empty` rather than an empty
 # `Text`. The wire is the same either way (body_length maps both to -1), but
 # only one of them says so.
-fn bodyless(status: Int) -> Response =
-  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: Empty }
+fn bodyless(status: Int) -> Response = build(status, "text/plain; charset=utf-8", Empty)
 
 ## A redirect: status (301/302/303/307) plus a Location header, empty body.
 ## A Location that cannot travel as a field value panics (see `with_header`);
@@ -438,11 +552,22 @@ pub fn default_errors() -> ErrorFormat =
     param_separator: ": ",
   }
 
+# An HttpError is a public record and stays one (a test builds them, and the
+# status is data the handler chose), so its status is checked here, where it
+# becomes a response, rather than where it is built. Out of range is a bug in
+# whoever built the error; the client gets the same neutral 500 a panic gets,
+# and the error's headers still ride along, since the CORS stamp is on them and
+# an error the page cannot read is the case LIB-10 was about.
 ## The server's rendering of the Err branch and of its own 404/405, worded by
 ## `fmt`. The error's own headers ride along (through the with_header guard),
-## so a 401 can carry its WWW-Authenticate challenge.
+## so a 401 can carry its WWW-Authenticate challenge. An error whose status is
+## outside 200..599 renders as a 500 with `fmt.internal_message`.
 pub fn error_response_with(fmt: ErrorFormat, e: HttpError) -> Response = {
-  let base = json_response(e.status, JObj(map.from([(fmt.detail_key, JStr(e.message))])))
+  let (status, message) = match status_problem(e.status) {
+    None -> (e.status, e.message)
+    Some(_) -> (500, fmt.internal_message)
+  }
+  let base = json_response(status, JObj(map.from([(fmt.detail_key, JStr(message))])))
   fold(e.headers, base, (r, h) => {
     let (k, v) = h
     with_header(r, k, v)
@@ -938,4 +1063,113 @@ test "the 422 wording separates name from complaint, by configuration" {
     Err(e) -> { assert e.message == "page：Input should be greater than or equal to 1" }
     Ok(_) -> { assert false }
   }
+}
+
+# Whether building the response panicked, and with what. Every constructor
+# refusal is a panic, so this is the one question the tests below ask.
+fn refusal(build: fn() -> Response) -> Option[String] =
+  match catch_panic(build) {
+    Ok(_) -> None
+    Err(m) -> Some(m.message)
+  }
+
+test "every constructor refuses a status outside 200..599" {
+  # jdk.httpserver sends any of these as written; a final 100 leaves the client
+  # waiting for a response that never comes
+  assert refusal(() => text(100, "x")) != None
+  assert refusal(() => text(199, "x")) != None
+  assert refusal(() => text(600, "x")) != None
+  assert refusal(() => raw(-5, "text/plain", "x")) != None
+  assert refusal(() => json_response(99, JStr("x"))) != None
+  assert refusal(() => binary(1000, "application/octet-stream", bytes.utf8("x"))) != None
+  assert refusal(() => redirect(42, "/x")) != None
+  match refusal(() => text(101, "x")) {
+    Some(m) -> { assert m == "illegal response status 101: a final response is 200..599" }
+    None -> { assert false }
+  }
+  # the edges are in, and so is every status the framework itself renders
+  assert refusal(() => text(200, "x")) == None
+  assert refusal(() => text(599, "x")) == None
+  assert refusal(() => text(204, "")) == None
+  assert refusal(() => redirect(308, "/x")) == None
+}
+
+test "a content type that cannot travel is refused where it is passed in" {
+  # raw/binary/streaming take it as a parameter and the server sets it as
+  # Content-Type verbatim; this was the one unchecked path in 3.1.0, caught
+  # only at the write boundary
+  match refusal(() => raw(200, "text/plain\r\nX-Evil: 1", "")) {
+    Some(m) -> { assert m == "illegal Content-Type: text/plain\\r\\nX-Evil: 1" }
+    None -> { assert false }
+  }
+  # an obs-fold passes the JDK's own checkValue and not valid_header_value
+  assert refusal(() => raw(200, "text/plain\r\n x", "")) != None
+  assert refusal(() => binary(200, "a\u{0}b", bytes.utf8(""))) != None
+  assert refusal(() => raw(200, "text/csv; charset=utf-8", "a,b")) == None
+}
+
+test "Transfer-Encoding is the server's, in any spelling" {
+  # it used to go out next to the JDK's own Content-length (RFC 9112 §6.1)
+  match refusal(() => with_header(text(200, "hello"), "Transfer-Encoding", "chunked")) {
+    Some(m) -> { assert str.contains(m, "server's to set") }
+    None -> { assert false }
+  }
+  assert refusal(() => with_header(text(200, "hello"), "transfer-encoding", "chunked")) != None
+  # the request-input form answers 400 instead
+  match try_with_header(text(200, "hello"), "TRANSFER-ENCODING", "gzip") {
+    Err(e) -> { assert e.status == 400 }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "a Content-Length must be the body's length, where the body has one" {
+  # equal to the UTF-8 byte count: accepted, and the header travels as given
+  assert with_header(text(200, "中文"), "Content-Length", "6").headers ==
+    [("Content-Length", "6")]
+  assert refusal(() => with_header(binary(200, "application/octet-stream", bytes.utf8("abcd")),
+    "content-length", "4")) == None
+  # a disagreement used to be rewritten by the JDK on GET and sent as-is on HEAD
+  match refusal(() => with_header(text(200, "hello"), "Content-Length", "11")) {
+    Some(m) -> { assert m == "header Content-Length says 11 but the body is 5 bytes" }
+    None -> { assert false }
+  }
+  # a byte count is 1*DIGIT: no sign, no space, not empty
+  assert refusal(() => with_header(text(200, "hello"), "Content-Length", "+5")) != None
+  assert refusal(() => with_header(text(200, "hello"), "Content-Length", " 5")) != None
+  assert refusal(() => with_header(text(200, ""), "Content-Length", "")) != None
+  assert refusal(() => with_header(text(200, ""), "Content-Length", "-1")) != None
+  # a body with no content states the length of what it does not carry: a HEAD
+  # answer (WebDAV's) is the one place a handler's own Content-Length is the
+  # source. An empty Text is framed exactly as Empty is, so it counts too
+  assert refusal(() => with_header(redirect(302, "/x"), "Content-Length", "1234")) == None
+  assert refusal(() => with_header(raw(200, "video/mp4", ""), "Content-Length", "1234")) == None
+  assert refusal(() => with_header(binary(200, "video/mp4", bytes.utf8("")), "Content-Length", "9")) == None
+  # one per response
+  match refusal(() => with_header(with_header(text(200, "hi"), "Content-Length", "2"),
+    "CONTENT-LENGTH", "2")) {
+    Some(m) -> { assert str.contains(m, "duplicate header") }
+    None -> { assert false }
+  }
+  # the request-input form answers 400 for a mismatch too
+  match try_with_header(text(200, "hello"), "Content-Length", "4") {
+    Err(e) -> { assert e.status == 400 }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "an HttpError out of range renders as the neutral 500, headers kept" {
+  let bad = HttpError {
+    status: 42, message: "leaks nothing", code: None, headers: [("Vary", "Origin")],
+  }
+  let r = error_response(bad)
+  assert r.status == 500
+  assert r.body == Text("{\"error\":\"internal server error\"}")
+  # the CORS stamp rides on the headers, and an error the page cannot read is
+  # what LIB-10 was about
+  assert r.headers == [("Vary", "Origin")]
+  let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail", internal_message: "oops" }
+  assert error_response_with(fastapi, HttpError { ..bad, status: 1000 }).body ==
+    Text("{\"detail\":\"oops\"}")
+  # in range is untouched
+  assert error_response(http_error(418, "teapot")).status == 418
 }
