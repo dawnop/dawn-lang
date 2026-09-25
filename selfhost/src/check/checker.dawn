@@ -15281,36 +15281,104 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       }
       deps = map.insert(deps, d.name, dlist)
     }
-    var done: Set[String] = set.empty()
-    var progress = true
-    while progress {
-      progress = false
-      var remaining: List[Int] = []
-      for idx in pending {
-        let d = fnds[idx]
-        let dlist = map.get(deps, d.name).expect("dep")
-        var ready = true
-        for r in dlist {
-          if not set.has(done, r) { ready = false }
-        }
-        if ready {
-          # each pending index is completed at most once, so the signature this
-          # reads is still the unsealed one the list held
-          let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
-          let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
-          state = next_state
-          cx1 = left(owner, cxe)
-          inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
-          done = set.insert(done, d.name)
-          progress = true
-        } else {
-          remaining = remaining ++ [idx]
+    # The order is the one a round-by-round scan in declaration order gives:
+    # each round walks the still-pending indices by index and completes every
+    # one whose dependencies are all done, so completion runs in (round,
+    # index) order. It is computed here instead of scanned, because a chain
+    # whose callers come first completes one function per round and the scan
+    # was quadratic in it (ARC-08). The order is load-bearing: diagnostics
+    # come out in checking order, and so do the identifiers bodies mint.
+    #
+    # A name is done at its first completion in that order. An index f waits
+    # for each name r it depends on; if r was done at (k, g), f can complete
+    # in round k when g < f (the scan passes g before f) and in round k + 1
+    # otherwise, and in no earlier round than 1. So f's round is the largest
+    # such bound, which needs only the times its dependencies were done: one
+    # pass in topological order of names settles every round. Instances of a
+    # duplicated name share its dependency list, as they did in the scan; the
+    # name is done at the earliest of their times. A name that depends on
+    # itself, or on a name that is never done, is never done: that is the
+    # cycle reported below.
+    var instances: Map[String, List[Int]] = map.empty()
+    var waiting: Map[String, Int] = map.empty()
+    var dependents: Map[String, List[String]] = map.empty()
+    var queue: List[String] = []
+    for idx in pending {
+      let n = fnds[idx].name
+      match map.get(instances, n) {
+        Some(xs) -> { instances = map.insert(instances, n, xs ++ [idx]) }
+        None -> {
+          instances = map.insert(instances, n, [idx])
+          let dlist = map.get(deps, n).expect("dep")
+          waiting = map.insert(waiting, n, len(dlist))
+          for r in dlist {
+            dependents = map.insert(dependents, r, map.get(dependents, r).unwrap_or([]) ++ [n])
+          }
+          if len(dlist) == 0 { queue = queue ++ [n] }
         }
       }
-      pending = remaining
     }
-    # what remains is a dependency cycle
+    var done_round: Map[String, Int] = map.empty()
+    var done_index: Map[String, Int] = map.empty()
+    var round: Map[Int, Int] = map.empty()
+    var qi = 0
+    while qi < len(queue) {
+      let n = queue[qi]
+      qi = qi + 1
+      let dlist = map.get(deps, n).expect("dep")
+      var first_round = 0
+      var first_index = -1
+      for f in map.get(instances, n).expect("instances") {
+        var r = 1
+        for dep in dlist {
+          let dk = map.get(done_round, dep).expect("done")
+          let bound = if map.get(done_index, dep).expect("done") < f { dk } else { dk + 1 }
+          if bound > r { r = bound }
+        }
+        round = map.insert(round, f, r)
+        if first_index < 0 || r < first_round || (r == first_round && f < first_index) {
+          first_round = r
+          first_index = f
+        }
+      }
+      done_round = map.insert(done_round, n, first_round)
+      done_index = map.insert(done_index, n, first_index)
+      for m in map.get(dependents, n).unwrap_or([]) {
+        let left_over = map.get(waiting, m).expect("waiting") - 1
+        waiting = map.insert(waiting, m, left_over)
+        if left_over == 0 { queue = queue ++ [m] }
+      }
+    }
+    # Bucket by round; walking the pending indices in order fills each bucket
+    # in index order, so the buckets read in round order are (round, index).
+    var by_round: Map[Int, List[Int]] = map.empty()
+    var last_round = 0
+    var stuck: List[Int] = []
     for idx in pending {
+      match map.get(round, idx) {
+        Some(r) -> {
+          by_round = map.insert(by_round, r, map.get(by_round, r).unwrap_or([]) ++ [idx])
+          if r > last_round { last_round = r }
+        }
+        None -> { stuck = stuck ++ [idx] }
+      }
+    }
+    var k = 1
+    while k <= last_round {
+      for idx in map.get(by_round, k).unwrap_or([]) {
+        let d = fnds[idx]
+        # each pending index is completed at most once, so the signature this
+        # reads is still the unsealed one the list held
+        let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
+        let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
+        state = next_state
+        cx1 = left(owner, cxe)
+        inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
+      }
+      k = k + 1
+    }
+    # what remains is a dependency cycle, or depends on one
+    for idx in stuck {
       let d = fnds[idx]
       cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
           "`: it is recursive (directly or mutually)", d.nlo, d.nhi,

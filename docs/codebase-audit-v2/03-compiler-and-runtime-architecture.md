@@ -231,12 +231,17 @@
   即 Emit-Change。所以本项**只有 checker 那半是活账**（`impl_sigs[ii]`/`msigs[mi]`，
   对应 #88 的余账「`pass_register_impls` 可拆块」）；emit 那半判不做，重开要先推翻上述非目标。
 
-## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度（部分修复）
+## ARC-08 — P2 — 返回推断调度与回填至少二次复杂度（已修）
 
 <!-- audit-anchor: present selfhost/src/check/checker.dawn | var remaining: List[Int] = [] -->
 
-> **处置去向（2026-09-26）：** 调度半边由 [symbol-id-design.md](../symbol-id-design.md)
-> 的 S1（按语法边一次拓扑、按 `(round, idx)` 执行，完成顺序与旧算法逐项相同）关闭。
+> **已修（2026-09-26，[symbol-id-design.md](../symbol-id-design.md) S1）。** 调度半边关闭：
+> `execute_module_bodies` 不再逐轮全表扫描 pending，而是按名字对语法边做一次 Kahn 拓扑，
+> 给每个函数算 `round = max(依赖 g: idx(g) < idx(f) ? round(g) : round(g) + 1)`，按 `(round, idx)` 执行。
+> 这与旧的「每轮按下标扫」完成顺序逐项相同（论证见该文 §3.1，含同名重复声明），所以诊断顺序、`TFun`
+> 与 Core 都不变；冻结参考调度器原样通过。实测 8000 函数逆序链比正序多出的 4.23 s（旧）降到 −0.07 s（新），
+> 同机交错 5 轮中位数。回填半边已于 2026-08-17 关闭（见下），两半都关，本项转已修。
+> 下面的锚点 `var remaining: List[Int] = []` 是旧扫描循环的一行，已从树上消失。
 
 - **证据：S。** pending functions 每轮全表扫描：`selfhost/src/check/checker.dawn:7337`；逆拓扑依赖链可每轮只完成一个。每完成一项又用 `take ++ [x] ++ drop` 重建 `sealed` 与 `tfuns`：`selfhost/src/check/checker.dawn:7352`；`take/drop` 会遍历复制：`std/list.dawn:195`、`:201`。
 - **影响：** 顶层函数数 F 时，单回填已经 O(F²)；generated code、超大 module 与未来 incremental check 会首先暴露。

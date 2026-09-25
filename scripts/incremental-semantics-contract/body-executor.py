@@ -39,8 +39,8 @@ def main():
     # The inferred arm's own declaration boundary, indented apart from the
     # annotated one: the body is entered from the stale header context rather
     # than from the context the passes before it left.
-    stale = ('          let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])',
-             '          let owner = enter_decl(headers.cx, view, [identity.Named(identity.FunctionDecl, d.name)])')
+    stale = ('        let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])',
+             '        let owner = enter_decl(headers.cx, view, [identity.Named(identity.FunctionDecl, d.name)])')
     subjects.append(('stale-inferred-context', edit(original, stale[0], stale[1])))
     with tempfile.TemporaryDirectory(prefix='dawn-body-executor-') as temp:
         root = Path(temp)
