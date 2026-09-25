@@ -19,6 +19,30 @@ DAWN = os.environ.get("DAWN_BIN", str(ROOT / "bin/dawn"))
 OWNER = "cold transition agrees with the frozen loop on full semantic products"
 
 
+# A probe reads checker state, and checker state is `pub(pkg)` to the compiler
+# package, so a probe is a module of the private compiler copy, written to
+# `selfhost/src/contract/<name>.dawn`, rather than a module of the fixture. The
+# fixture is only the entry `dawn build` needs: a `main` forwarding to the
+# probe's. An oracle that loads a probe by reflection names it by this prefix.
+PROBE_CLASS_PREFIX = "dawn$pkg$selfhost.contract."
+
+
+def install_probe(root, modules, entry="reference", fixture=None):
+    """Write `modules` ({name: source}) into root's compiler copy under
+    contract/, and a fixture whose main forwards to `entry`.main()."""
+    contract = root / "selfhost/src/contract"
+    contract.mkdir(parents=True, exist_ok=True)
+    for name, text in modules.items():
+        (contract / (name + ".dawn")).write_text(text)
+    fixture = fixture or root / "scripts/incremental-semantics-contract"
+    (fixture / "src").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
+    # a project's entry module is src/main.dawn (spec §10.5)
+    (fixture / "src/main.dawn").write_text(
+        f"use compiler/contract/{entry}\n\npub fn main() -> Unit !io = {entry}.main()\n")
+    return fixture
+
+
 def run(*args):
     result = subprocess.run([DAWN, *map(str, args)], cwd=ROOT, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
@@ -55,9 +79,7 @@ def main():
         for directory in ("selfhost", "compiler-plan"):
             shutil.copytree(ROOT / directory, root / directory, ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
-        fixture = root / "scripts/incremental-semantics-contract"
-        shutil.copytree(HERE, fixture)
-        (fixture / "src/reference.dawn").write_text((HERE / "reference-tests.dawn.txt").read_text())
+        fixture = install_probe(root, {"reference": (HERE / "reference-tests.dawn.txt").read_text()})
         driver = root / "selfhost/src/driver/analyze.dawn"
         for name, source in subjects:
             driver.write_text(source + "\n" + reference)

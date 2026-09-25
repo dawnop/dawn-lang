@@ -10,7 +10,7 @@ public final class BoundedEntryProofTrace {
     }
 
     public static void main(String[] args) throws Exception {
-        Class<?> reference = Class.forName("reference");
+        Class<?> reference = Class.forName("dawn$pkg$selfhost.contract.reference");
         Object suite = method(reference, "proof_cases").invoke(null);
         long count = (Long) method(reference, "proof_pair_count").invoke(null, suite);
         long accepted = (Long) method(reference, "proof_accept_count").invoke(null, suite);

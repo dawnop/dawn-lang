@@ -3,30 +3,30 @@
 # ID range; this is not the eventual declaration provenance allocator.
 use std/map
 use std/str
-use compiler/check/cx.{Cx, cx_new, owned_by, measured_from, unowned, mint_cursor, slots_of, enter_decl_owner}
-use compiler/check/jsig.{Jsig, JClass, JMethod, JCtor, JField, jsig_refused}
-use compiler/check/tast.{TFun, TDefault, TModule, TConst}
-use compiler/check/types.{Sig, Ty}
-use compiler/front/token.{Diag}
-use compiler/check/checker.{headers_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_const_init, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies, impl_body_key, check_trait_default, strip_param_defaults}
-use compiler/check/function_product
-use compiler/check/callee_index
-use compiler/check/body_admit
-use compiler/check/body_admit.{View}
-use compiler/check/tast_positions
-use compiler/check/body_product
-use compiler/check/header_product
-use compiler/check/allocation
-use compiler/check/identity.{ModuleKey, DeclKey, Part, Named, FunctionDecl, TestDecl, module_key,
+use check/cx.{Cx, cx_new, owned_by, measured_from, unowned, mint_cursor, slots_of, enter_decl_owner}
+use check/jsig.{Jsig, JClass, JMethod, JCtor, JField, jsig_refused}
+use check/tast.{TFun, TDefault, TModule, TConst}
+use check/types.{Sig, Ty}
+use front/token.{Diag}
+use check/checker.{headers_for_body_probe, check_fn, check_fn_body, check_param_default, default_sig, check_fn_inferred, check_fn_inferred_body, check_test, check_const_init, check_module, check_module_headers, exports_of, ModuleBodies, assemble_module_bodies, impl_body_key, check_trait_default, strip_param_defaults}
+use check/function_product
+use check/callee_index
+use check/body_admit
+use check/body_admit.{View}
+use check/tast_positions
+use check/body_product
+use check/header_product
+use check/allocation
+use check/identity.{ModuleKey, DeclKey, Part, Named, FunctionDecl, TestDecl, module_key,
   path_text, declaration_spans, span_at}
-use compiler/front/parser
-use compiler/front/ast.{Module, FnDecl, module_fns, module_tests}
+use front/parser
+use front/ast.{Module, FnDecl, module_fns, module_tests}
 
 ## Every callee query these fixtures make is answered twice: once through the
 ## per-revision index production carries, once through the linear scan the
 ## index replaced. Disagreement is fatal, so the whole typed-projection corpus
 ## is an equivalence oracle for the index on real header shapes.
-pub fn checked_callee(cx: Cx, owner: Option[String], name: String, builtin: Bool,
+pub(pkg) fn checked_callee(cx: Cx, owner: Option[String], name: String, builtin: Bool,
   tr: Option[Int]) -> Option[Sig] = {
   let indexed = callee_index.signature(callee_index.of(cx), cx, owner, name, builtin, tr)
   let scanned = callee_index.scanned_signature(cx, owner, name, builtin, tr)
@@ -75,12 +75,12 @@ fn shifted_diags(cx: Cx, keep: Int, delta: Int) -> Cx = {
 ## body binds inside that declaration rather than in the module's free pool.
 ## A fixture that captures a product has to hold this context on both sides
 ## of the check, because a capture compares the two.
-pub fn owned_decl(cx: Cx, m: Module, d: FnDecl) -> Cx =
+pub(pkg) fn owned_decl(cx: Cx, m: Module, d: FnDecl) -> Cx =
   owned_path(cx, m, [Named(FunctionDecl, d.name)])
 
 ## The same for any declaration the span view can name, which is how a test
 ## block is opened.
-pub fn owned_path(cx: Cx, m: Module, path: List[Part]) -> Cx = {
+pub(pkg) fn owned_path(cx: Cx, m: Module, path: List[Part]) -> Cx = {
   let decl = path_text(path)
   match span_at(declaration_spans(m), decl) {
     Some(sp) -> {
@@ -97,7 +97,7 @@ pub fn owned_path(cx: Cx, m: Module, path: List[Part]) -> Cx = {
   }
 }
 
-pub fn probe_decl(cx: Cx, m: Module, d: FnDecl) -> Cx = {
+pub(pkg) fn probe_decl(cx: Cx, m: Module, d: FnDecl) -> Cx = {
   # The owner is named here rather than taken from `cx.mod_path`, which these
   # fixtures leave empty: a diagnostic raised with no owner to name stays
   # absolute (`cx.raised`), and this probe's trials replay a body onto a
@@ -111,7 +111,7 @@ pub fn probe_decl(cx: Cx, m: Module, d: FnDecl) -> Cx = {
   }
 }
 
-pub fn checked_body(before: Cx, m: Module, d: FnDecl, sig: Sig) -> (Cx, TFun) !io = {
+pub(pkg) fn checked_body(before: Cx, m: Module, d: FnDecl, sig: Sig) -> (Cx, TFun) !io = {
   let (next, tree) = check_fn(probe_decl(before, m, d), d, sig)
   # Still inside the declaration. Production captures a body product before
   # the scheduler leaves, and a capture taken outside reads the free pool's
@@ -123,7 +123,7 @@ pub fn checked_body(before: Cx, m: Module, d: FnDecl, sig: Sig) -> (Cx, TFun) !i
 ## declaration, exactly as the product recorded from it does. The scheduler
 ## turns them into positions at the declaration's exit; a fixture comparing
 ## one with a cold module has to do the same thing, and this is that step.
-pub fn resolved_body(cx: Cx, m: Module, d: FnDecl, f: TFun) -> TFun = {
+pub(pkg) fn resolved_body(cx: Cx, m: Module, d: FnDecl, f: TFun) -> TFun = {
   let decl = path_text([Named(FunctionDecl, d.name)])
   match span_at(declaration_spans(m), decl) {
     Some(sp) -> tast_positions.function(
@@ -142,7 +142,7 @@ pub fn resolved_body(cx: Cx, m: Module, d: FnDecl, f: TFun) -> TFun = {
 fn shift(delta: Int, width: Int) -> tast_positions.Resolver =
   tast_positions.owned(delta, delta + width, None, [])
 
-pub fn shifted(delta: Int, width: Int, f: TFun) -> TFun = tast_positions.function(shift(delta, width), f)
+pub(pkg) fn shifted(delta: Int, width: Int, f: TFun) -> TFun = tast_positions.function(shift(delta, width), f)
 
 fn shifted_constant(delta: Int, width: Int, c: TConst) -> TConst =
   tast_positions.constant(shift(delta, width), c)
@@ -182,7 +182,7 @@ fn admitted_body(v: View, f: TFun) -> TFun = {
 ## The tree a body recorded, once the candidate revision has said it can
 ## install it. Nothing in it moves any more, so what used to be a rebuild is
 ## the admission walk and the recorded tree itself.
-pub fn body(f: TFun, before: Cx, after: Cx, delta: Int) -> TFun = {
+pub(pkg) fn body(f: TFun, before: Cx, after: Cx, delta: Int) -> TFun = {
   if not body_admit.function(local_view(before, after, delta), f) {
     panic("typed admission failed: " ++ f.name)
   }
@@ -192,7 +192,7 @@ pub fn body(f: TFun, before: Cx, after: Cx, delta: Int) -> TFun = {
 ## The same projection onto a declaration that moved. Nothing positional
 ## happens here: the spans are measured from the declaration, so the move is
 ## in where the tree is resolved, and that is the fixture's own last step.
-pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int, cx: Cx, m: Module, d: FnDecl) -> TFun = {
+pub(pkg) fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int, cx: Cx, m: Module, d: FnDecl) -> TFun = {
   if not body_admit.function(local_view(before, after, delta), f) {
     panic("source-aware typed admission failed: " ++ f.name)
   }
@@ -201,7 +201,7 @@ pub fn body_in_source(f: TFun, before: Cx, after: Cx, delta: Int, cx: Cx, m: Mod
 
 # The fixture still supplies allocation/provenance tables, but the complete
 # write product and its source/ID projection now belong to production code.
-pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int) -> Cx = {
+pub(pkg) fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int) -> Cx = {
   let view = View { symbols: after.syms,
     callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }
   let saved = body_product.capture(before, after, body).expect("state capture: " ++ body.name)
@@ -209,7 +209,7 @@ pub fn source_state(current: Cx, before: Cx, after: Cx, body: TFun, delta: Int) 
   body_product.assemble(current, projected).expect("state assembly: " ++ body.name)
 }
 
-pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
+pub(pkg) type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_state: Cx }
 
 ## The header product a revision's own header passes wrote, captured and put
 ## back. What used to sit beside it -- the same tables projected onto a second
@@ -217,9 +217,9 @@ pub type HeaderTrial = { relocated: TFun, cold: TFun, replayed_state: Cx, cold_s
 ## same integers in both revisions, and its positions are offsets from the
 ## declaration that recorded them, so the projection had nothing left to do
 ## and the fixture had to invent the movement it was checking (K7).
-pub type MetadataTrial = { assembled: Cx, header_state: Cx }
+pub(pkg) type MetadataTrial = { assembled: Cx, header_state: Cx }
 
-pub fn metadata_sample() -> MetadataTrial !io = {
+pub(pkg) fn metadata_sample() -> MetadataTrial !io = {
   let text = "pub type Box[T] = { value: T }\n" ++
     "pub alias Thunk[T, !e] = fn(T) -> T !e\n" ++
     "pub opaque type Token = Int\n" ++
@@ -266,13 +266,13 @@ pub fn metadata_sample() -> MetadataTrial !io = {
   MetadataTrial { assembled: assembled, header_state: old.cx }
 }
 
-pub type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
+pub(pkg) type StateTrial = { replayed: Cx, cold: Cx, relocated: TFun, cold_body: TFun, module_body: TFun }
 
-pub type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
+pub(pkg) type ModuleTrial = { replayed_cx: Cx, cold_cx: Cx, replayed: TModule, cold: TModule, states: List[StateTrial] }
 
 # Compare every cold Cx field, not just diagnostics and the next allocation.
 # Only the intentionally added observation log is removed for the comparison.
-pub fn read_samples() -> List[ModuleTrial] !io = {
+pub(pkg) fn read_samples() -> List[ModuleTrial] !io = {
   var out: List[ModuleTrial] = []
   for body in ["missing_value", "missing_call()", "missing_owner.value", "{ missing_assignment = 1\n 0 }",
     "{ let f = target\n target(f(1)) }", "apply(generic)"] {
@@ -547,7 +547,7 @@ pub fn read_samples() -> List[ModuleTrial] !io = {
   out
 }
 
-pub fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample(), value_module_sample()] ++ default_module_samples()
+pub(pkg) fn module_samples() -> List[ModuleTrial] !io = [inferred_module_sample(), reordered_module_sample(), method_module_sample(), value_module_sample()] ++ default_module_samples()
 
 type SavedFunction = { before: Cx, after: Cx, product: body_product.Product }
 type SavedConstant = { before: Cx, after: Cx, product: body_product.ConstantProduct }
@@ -822,7 +822,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
   ModuleTrial { replayed_cx: assembled_cx, cold_cx: cold_cx, replayed: assembled, cold: cold, states: [] }
 }
 
-pub fn import_samples() -> List[StateTrial] !io = [import_sample(0), import_sample(1), import_sample(2)]
+pub(pkg) fn import_samples() -> List[StateTrial] !io = [import_sample(0), import_sample(1), import_sample(2)]
 
 ## Three consumer shapes over the same reordered provider. 0 imports the names
 ## themselves; 1 keeps the module name and spells a qualified type in the
@@ -898,7 +898,7 @@ fn import_sample(kind: Int) -> StateTrial !io = {
     cold_body: cold_body, module_body: whole.fns[0] }
 }
 
-pub fn default_samples() -> List[StateTrial] !io = map(default_module_samples(), m => m.states[0])
+pub(pkg) fn default_samples() -> List[StateTrial] !io = map(default_module_samples(), m => m.states[0])
 
 fn default_module_samples() -> List[ModuleTrial] !io = [default_sample(false, false, false), default_sample(true, false, false),
   default_sample(false, true, false), default_sample(true, true, false),
@@ -992,7 +992,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
 ## The source order here is deliberately dependency order. This checks state
 ## products, not a replacement scheduler: the module oracle still uses the
 ## production inferred-function scheduling loop independently.
-pub fn inferred_samples() -> List[StateTrial] !io = inferred_module_sample().states
+pub(pkg) fn inferred_samples() -> List[StateTrial] !io = inferred_module_sample().states
 
 fn inferred_module_sample() -> ModuleTrial !io = {
   let text = "alias Counter = Int\nfn lead(x: Int) = { let y = x + 1\n y }\n" ++
@@ -1069,7 +1069,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
   ModuleTrial { replayed_cx: assembled_cx, cold_cx: whole_cx, replayed: assembled, cold: whole, states: out }
 }
 
-pub fn test_samples() -> List[StateTrial] !io = {
+pub(pkg) fn test_samples() -> List[StateTrial] !io = {
   let text = "test \"lead\" { let x = 1\n assert x == 1 }\n" ++
     "test \"body\" { let y = 2\n assert y > 0 }\n"
   # The edit lengthens the first test and moves the second; the second's own
@@ -1116,7 +1116,7 @@ pub fn test_samples() -> List[StateTrial] !io = {
 ## Reverse real effect declarations, so label IDs and ABI slots reverse.
 ## Target body-local slots are derived from the new header's binding order,
 ## not read out of the cold body used as the comparison oracle.
-pub fn header_sample() -> HeaderTrial !io = {
+pub(pkg) fn header_sample() -> HeaderTrial !io = {
   let ask = "pub effect Ask { fn ask() -> Int }\n"
   let tell = "pub effect Tell { fn tell() -> Int }\n"
   let first_type = "type First[T, !e] = { f: fn(T) -> T !e }\n"

@@ -12,14 +12,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, run
+from cold import ROOT, HERE, install_probe, run
 
 
 def main():
     started = time.monotonic()
     checker = (ROOT / "selfhost/src/check/checker.dawn").read_text()
     for name in ("check_fn", "check_fn_inferred", "check_const_init", "check_trait_default", "check_test"):
-        checker, count = re.subn(r"(pub fn " + name + r"\([^{}]*?!io = \{\n)",
+        checker, count = re.subn(r"(pub\(pkg\) fn " + name + r"\([^{}]*?!io = \{\n)",
                                  r"\1  GenericTrace.enter()\n", checker)
         if count != 1:
             raise RuntimeError("Generic trace canonical entry anchor drifted: " + name)
@@ -37,13 +37,7 @@ def main():
                             ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         (root / "selfhost/src/check/checker.dawn").write_text(checker)
-        fixture = root / "scripts/incremental-semantics-contract"
-        (fixture / "src").mkdir(parents=True)
-        shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
-        shutil.copyfile(HERE / "generic-trace.dawn.txt", fixture / "src/reference.dawn")
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+        fixture = install_probe(root, {"reference": (HERE / "generic-trace.dawn.txt").read_text()})
         status, output = run("build", "--cp", oracle, fixture, "-o", root / "subject.jar")
         if status:
             raise RuntimeError("Generic trace failed to compile\n" + output)

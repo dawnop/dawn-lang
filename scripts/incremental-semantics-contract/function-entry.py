@@ -13,14 +13,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, edit, run
+from cold import ROOT, HERE, edit, install_probe, run
 
 
 def main():
     started = time.monotonic()
     checker = (ROOT / "selfhost/src/check/checker.dawn").read_text()
     for name in ("check_fn", "check_fn_inferred", "check_const_init", "check_trait_default", "check_test"):
-        checker, count = re.subn(r"(pub fn " + name + r"\([^{}]*?!io = \{\n)",
+        checker, count = re.subn(r"(pub\(pkg\) fn " + name + r"\([^{}]*?!io = \{\n)",
                                  r"\1  GenericTrace.enter()\n", checker)
         if count != 1:
             raise RuntimeError("Function entry counter anchor drifted: " + name)
@@ -51,23 +51,17 @@ def main():
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         (root / "selfhost/src/check/checker.dawn").write_text(checker)
         (root / "selfhost/src/check/scalar_replay.dawn").write_text(replay)
-        fixture = root / "scripts/incremental-semantics-contract"
-        (fixture / "src").mkdir(parents=True)
-        shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
         subject = (HERE / "generic-trace.dawn.txt").read_text()
-        subject = edit(subject, "use compiler/check/checker.{ModuleBodies}",
-                       "use compiler/check/checker.{ModuleBodies, ModuleHeaders, BodyExecutor}")
-        subject = edit(subject, "use compiler/check/cx.{cx_new, slots_of}",
-                       "use compiler/check/cx.{Cx, cx_new, slots_of}")
-        subject = edit(subject, "use compiler/check/types.{TyVar, Sym}",
-                       "use compiler/check/types.{TyVar, Sym, Sig}")
-        (fixture / "src/reference.dawn").write_text(
-            'use compiler/check/cx as compiler_cx\nuse compiler/check/tast.{TFun}\n'
-            'use compiler/front/ast.{FnDecl}\n' + subject + "\n"
-            + (HERE / "function-entry-cases.dawn.txt").read_text())
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+        subject = edit(subject, "use check/checker.{ModuleBodies}",
+                       "use check/checker.{ModuleBodies, ModuleHeaders, BodyExecutor}")
+        subject = edit(subject, "use check/cx.{cx_new, slots_of}",
+                       "use check/cx.{Cx, cx_new, slots_of}")
+        subject = edit(subject, "use check/types.{TyVar, Sym}",
+                       "use check/types.{TyVar, Sym, Sig}")
+        fixture = install_probe(root, {"reference":
+            'use check/cx as compiler_cx\nuse check/tast.{TFun}\n'
+            'use front/ast.{FnDecl}\n' + subject + "\n"
+            + (HERE / "function-entry-cases.dawn.txt").read_text()})
         status, output = run("build", "--cp", oracle, fixture, "-o", root / "subject.jar")
         if status:
             raise RuntimeError("Function entry fixture failed to compile\n" + output)

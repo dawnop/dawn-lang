@@ -26,6 +26,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from cold import install_probe
+
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 SUBJECT = HERE / "edit-matrix.dawn.txt"
@@ -264,16 +266,17 @@ def check_anchors():
 
 
 def build(compiler_root, out_dir, log):
-    fixture = out_dir / "fixture"
-    (fixture / "src").mkdir(parents=True)
-    shutil.copyfile(SUBJECT, fixture / "src/reference.dawn")
-    # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-    # `main` is an ordinary function now, so a two-line entry forwards to it
-    (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
-    shutil.copyfile(WORKLOADS, fixture / "src/workloads.dawn")
-    (fixture / "dawn.toml").write_text(
-        'schema = 1\nname = "edit_matrix"\n\n[deps]\n'
-        f'compiler = "{compiler_root / "selfhost"}"\ncompiler_plan = "{compiler_root / "compiler-plan"}"\n')
+    # The subject is a module of the compiler package (contract/reference), so
+    # it is written into a compiler copy: the controls' own, or a fresh one
+    # when measuring the checkout, which is never written to.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if compiler_root == ROOT:
+        compiler_root = out_dir / "tree"
+        for directory in ("selfhost", "compiler-plan"):
+            shutil.copytree(ROOT / directory, compiler_root / directory,
+                            ignore=shutil.ignore_patterns("build", ".dawn"))
+        (compiler_root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
+    fixture = install_probe(compiler_root, {"reference": SUBJECT.read_text(), "workloads": WORKLOADS.read_text()})
     jar = out_dir / "edit-matrix.jar"
     dawn = os.environ.get("DAWN_BIN", str(ROOT / "bin/dawn"))
     result = subprocess.run([dawn, "build", str(fixture), "-o", str(jar)], cwd=ROOT, text=True,

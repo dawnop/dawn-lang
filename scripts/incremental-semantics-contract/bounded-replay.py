@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, edit, run
+from cold import ROOT, HERE, edit, install_probe, run
 
 
 def main():
@@ -62,7 +62,7 @@ def main():
                              mutated(replay) if target == "replay" else replay, owner))
     checker = (ROOT / "selfhost/src/check/checker.dawn").read_text()
     for name in ("check_fn", "check_fn_inferred", "check_const_init", "check_trait_default", "check_test"):
-        checker, count = re.subn(r"(pub fn " + name + r"\([^{}]*?!io = \{\n)", r"\1  GenericTrace.enter()\n", checker)
+        checker, count = re.subn(r"(pub\(pkg\) fn " + name + r"\([^{}]*?!io = \{\n)", r"\1  GenericTrace.enter()\n", checker)
         if count != 1:
             raise RuntimeError("Bounded replay actual counter anchor drifted: " + name)
     with tempfile.TemporaryDirectory(prefix="dawn-bounded-replay-") as temp:
@@ -77,9 +77,6 @@ def main():
             shutil.copytree(ROOT / directory, root / directory, ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         (root / "selfhost/src/check/checker.dawn").write_text('use java "contract.GenericTrace"\n' + checker)
-        fixture = root / "scripts/incremental-semantics-contract"
-        (fixture / "src").mkdir(parents=True)
-        shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
         text = (HERE / "generic-trace.dawn.txt").read_text()
         for before, after in [
             (".{ModuleBodies}", ".{ModuleBodies, ModuleHeaders}"),
@@ -89,10 +86,7 @@ def main():
             (".{Key, BoundsKey, SymbolKey}", ".{Key, BoundsKey, SymbolKey, SignatureKey}"),
         ]:
             text = edit(text, before, after)
-        (fixture / "src/reference.dawn").write_text(text + "\n" + (HERE / "bounded-replay-cases.dawn.txt").read_text())
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+        fixture = install_probe(root, {"reference": text + "\n" + (HERE / "bounded-replay-cases.dawn.txt").read_text()})
         for name, bounded_source, replay_source, owner in subjects:
             (root / "selfhost/src/check/bounded_replay.dawn").write_text(bounded_source)
             (root / "selfhost/src/check/scalar_replay.dawn").write_text(replay_source)

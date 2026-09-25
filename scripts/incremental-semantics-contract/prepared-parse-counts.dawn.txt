@@ -2,12 +2,12 @@
 # include all preparation; only the separate consumer excludes std/loader setup.
 use std/io
 use std/map
-use compiler/driver/analyze
-use compiler/driver/analyze.{ProjectPlan, ModuleIndex}
-use compiler/driver/incremental
-use compiler/driver/stdlib.{load_std, std_load_error_text}
-use compiler/check/jsig.{jsig_refused, refused_probe}
-use compiler/ir/interp.{ct_default}
+use driver/analyze
+use driver/analyze.{ProjectPlan, ModuleIndex}
+use driver/incremental
+use driver/stdlib.{load_std, std_load_error_text}
+use check/jsig.{jsig_refused, refused_probe}
+use ir/interp.{ct_default}
 use compiler_plan/source.{SourcePlan, SourceFile}
 use java "contract.SourceParseCounts"
 
@@ -29,23 +29,23 @@ fn clean(loaded: analyze.LoadResult) -> Bool = {
   true
 }
 
-pub fn project_on() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
+pub(pkg) fn project_on() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
   let loaded = analyze.prepared_result(analyze.load_entries_over_prepared(plan(), ["/prepared/main.dawn"], overlay()))
   clean(loaded) && loaded.modules[0].mod_path == "leaf"
 }))
 
-pub fn project_off() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
+pub(pkg) fn project_off() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
   let loaded = analyze.load_entries_over(plan(), ["/prepared/main.dawn"], overlay())
   clean(loaded) && loaded.modules[2].mod_path == "main"
 }))
 
-pub fn standalone() -> Bool = {
+pub(pkg) fn standalone() -> Bool = {
   let input = analyze.prepare_standalone("<lsp>", "fn leaf() = 42\n")
   let loaded = analyze.prepared_result(input)
   loaded.diags == [] && len(loaded.modules) == 1 && len(loaded.modules[0].m.decls) == 1
 }
 
-pub fn session_consumer() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
+pub(pkg) fn session_consumer() -> Bool !io = io.with_fs_real(() => io.with_env_real(() => {
   let std = match load_std("std") {
     Ok(value) -> value
     Err(error) -> panic(std_load_error_text(error))

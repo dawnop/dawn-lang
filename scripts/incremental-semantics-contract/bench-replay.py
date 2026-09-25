@@ -27,6 +27,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cold import install_probe
+
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 SUBJECT = HERE / "bench-replay.dawn.txt"
@@ -237,16 +239,14 @@ def main():
         metadata["sources"][directory] = digest.hexdigest()
 
     with tempfile.TemporaryDirectory(prefix="dawn-bench-replay-") as temp:
-        fixture = Path(temp) / "bench"
-        (fixture / "src").mkdir(parents=True)
-        shutil.copyfile(SUBJECT, fixture / "src/reference.dawn")
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
-        shutil.copyfile(WORKLOADS, fixture / "src/workloads.dawn")
-        (fixture / "dawn.toml").write_text(
-            'schema = 1\nname = "bench_replay"\n\n[deps]\n'
-            f'compiler = "{ROOT / "selfhost"}"\ncompiler_plan = "{ROOT / "compiler-plan"}"\n')
+        # The subject is a module of the compiler package (contract/reference),
+        # so it is written into a private copy; the checkout is never written to.
+        tree = Path(temp) / "tree"
+        for directory in ("selfhost", "compiler-plan"):
+            shutil.copytree(ROOT / directory, tree / directory,
+                            ignore=shutil.ignore_patterns("build", ".dawn"))
+        (tree / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
+        fixture = install_probe(tree, {"reference": SUBJECT.read_text(), "workloads": WORKLOADS.read_text()})
         jar = output / "bench-replay.jar"
         with (output / "build.log").open("w") as log:
             subprocess.run([str(compiler), "build", str(fixture), "-o", str(jar)],

@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, edit, run
+from cold import ROOT, edit, install_probe, run
 
 
 def main():
@@ -56,13 +56,8 @@ def main():
             shutil.copytree(ROOT / directory, root / directory,
                             ignore=shutil.ignore_patterns('build', '.dawn'))
         (root / 'packages').symlink_to(ROOT / 'packages', target_is_directory=True)
-        fixture = root / 'scripts/incremental-semantics-contract'
-        (fixture / 'src').mkdir(parents=True)
-        shutil.copy(here / 'dawn.toml', fixture / 'dawn.toml')
-        (fixture / 'src/prepared_parse_counts.dawn').write_text((here / 'prepared-parse-counts.dawn.txt').read_text())
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use prepared_parse_counts\n\npub fn main() -> Unit !io = prepared_parse_counts.main()\n")
+        fixture = install_probe(root, {'prepared_parse_counts': (here / 'prepared-parse-counts.dawn.txt').read_text()},
+                                entry='prepared_parse_counts')
         jar = root / 'subject.jar'
         for name, text, sample, expected, actual in [('positive', original, None, None, None)] + variants:
             before = time.monotonic()

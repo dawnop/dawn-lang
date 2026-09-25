@@ -150,19 +150,14 @@ def main():
                             ignore=shutil.ignore_patterns('build', '.dawn'))
         (root / 'packages').symlink_to(ROOT / 'packages', target_is_directory=True)
         target = root / 'selfhost/src/driver/analyze.dawn'
-        fixture = root / 'scripts/incremental-semantics-contract'
-        fixture.mkdir(parents=True)
-        here = Path(__file__).resolve().parent
-        shutil.copy(here / 'dawn.toml', fixture / 'dawn.toml')
-        (fixture / 'src').mkdir()
-        observer_target = fixture / 'src/cached_module_observer.dawn'
-        shutil.copy(here / 'src/cached_module_observer.dawn', observer_target)
+        # The observer tests are a module of the compiler package, copied with it.
+        observer_target = root / 'selfhost/src/contract/cached_module_observer.dawn'
         subjects = []
         if args.suite in ('driver', 'all'):
             subjects += [(name, text, owner, target, 'driver/analyze')
                          for name, text, owner in with_positive(source, selected)]
         if args.suite in ('observer', 'all'):
-            subjects += [(name, text, owner, observer_target, 'cached_module_observer')
+            subjects += [(name, text, owner, observer_target, 'contract/cached_module_observer')
                          for name, text, owner in with_positive(source, observers, 'observer-positive')]
         for name, text, owner, test_target, module in subjects:
             target.write_text(text)

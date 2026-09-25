@@ -61,7 +61,7 @@ def subjects(source, controls):
 
 
 def owning_failure(status, output, owner):
-    failure = re.search(r'^FAIL\s+session_bodies :: ' + re.escape(owner) +
+    failure = re.search(r'^FAIL\s+contract/session_bodies :: ' + re.escape(owner) +
                         r'\n\s+assertion failed:', output, re.M)
     invalid = re.search(r'^error:|Exception in thread|LinkageError|NoSuchMethodError|'
                         r'NoClassDefFoundError|VerifyError|\bpanic:', output, re.M)
@@ -109,7 +109,7 @@ def main():
                 pass
             else:
                 raise AssertionError('invalid partition accepted')
-        good = 'FAIL  session_bodies :: owner\n  assertion failed: expected\n'
+        good = 'FAIL  contract/session_bodies :: owner\n  assertion failed: expected\n'
         assert owning_failure(1, good, 'owner')
         assert not owning_failure(0, good, 'owner')
         assert not owning_failure(1, good, 'other')
@@ -135,19 +135,15 @@ def main():
             shutil.copytree(ROOT / directory, root / directory,
                             ignore=shutil.ignore_patterns('build', '.dawn'))
         (root / 'packages').symlink_to(ROOT / 'packages', target_is_directory=True)
-        here = Path(__file__).resolve().parent
-        fixture = root / 'scripts/incremental-semantics-contract'
-        (fixture / 'src').mkdir(parents=True)
-        shutil.copy(here / 'dawn.toml', fixture / 'dawn.toml')
-        target = fixture / 'src/session_bodies.dawn'
-        shutil.copy(here / 'src/session_bodies.dawn', target)
+        # The tests are a module of the compiler package, copied with it.
+        target = root / 'selfhost/src/contract/session_bodies.dawn'
         for name, text, owner in subjects(source, selected):
             (root / 'selfhost/src/driver/incremental.dawn').write_text(text)
             before = time.monotonic()
             status, output = run('test', target)
             if owner is None:
                 if status or 'test(s) passed' not in output or not all(
-                        re.search(r'^PASS\s+session_bodies :: ' + re.escape(item[2]) + r'$', output, re.M)
+                        re.search(r'^PASS\s+contract/session_bodies :: ' + re.escape(item[2]) + r'$', output, re.M)
                         for item in selected):
                     raise RuntimeError('Session positive failed\n' + output)
             elif not owning_failure(status, output, owner):

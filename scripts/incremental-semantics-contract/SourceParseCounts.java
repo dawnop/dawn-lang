@@ -134,6 +134,10 @@ public final class SourceParseCounts {
 
     public static void verify(Path jar, String fixtureName, String owner,
                               String[] samples, long[][] expected) throws Exception {
+        // The label is the module's own name: a fixture class is named by its
+        // module path, and a probe in the compiler package carries that
+        // package's class prefix, which the reports have never spelled.
+        String label = fixtureName.substring(fixtureName.lastIndexOf('.') + 1);
         if (samples.length != expected.length) throw new IllegalArgumentException("Sample/count shape mismatch");
         // Independently execute the unmodified bytes before adding counters.
         // Each mutant must preserve all fixture outcomes, not just the first
@@ -163,14 +167,14 @@ public final class SourceParseCounts {
                 Object valid = sample.invoke(null);
                 if (!Boolean.TRUE.equals(valid)) throw new AssertionError("Semantic sample failed " + samples[index]);
                 if (!Arrays.equals(COUNTS, expected[index])) {
-                    System.out.println("FAIL  " + fixtureName + " :: " + owner);
+                    System.out.println("FAIL  " + label + " :: " + owner);
                     System.out.println("  assertion failed: " + samples[index] + " expected=" +
                                        Arrays.toString(expected[index]) + " actual=" + Arrays.toString(COUNTS));
                     System.exit(1);
                 }
                 System.out.println("COUNT " + samples[index] + " " + Arrays.toString(COUNTS));
             }
-            System.out.println("PASS  " + fixtureName + " :: " + owner);
+            System.out.println("PASS  " + label + " :: " + owner);
         }
     }
 }

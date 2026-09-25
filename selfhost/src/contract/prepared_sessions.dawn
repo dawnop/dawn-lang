@@ -1,15 +1,20 @@
 # Prepared loader inputs must enter the same session lifecycle as arbitrary
 # loaded inputs, with identical semantic products and actual body accounting.
+#
+# A module of the compiler package because checker state is `pub(pkg)`; it
+# moved here from scripts/incremental-semantics-contract/src. Nothing in
+# main.dawn or nmain.dawn imports contract/, so `dawn test selfhost` runs it
+# and neither driver links it.
 use std/io
 use std/map
-use compiler/driver/analyze.{prepare_standalone, prepared_result, analyze_program,
-  ProjectPlan, ModuleIndex, load_entries_over, load_entries_over_prepared}
+use driver/analyze.{prepare_standalone, prepared_result, analyze_program,
+  ProjectPlan, ModuleIndex, load_entries_over, load_entries_over_prepared }
 use compiler_plan/source.{SourcePlan, SourceFile}
-use compiler/driver/incremental
-use compiler/driver/stdlib.{load_std, std_load_error_text}
-use compiler/driver/checkdump
-use compiler/check/jsig.{jsig_refused, refused_probe}
-use compiler/ir/interp.{ct_default}
+use driver/incremental
+use driver/stdlib.{load_std, std_load_error_text}
+use driver/checkdump
+use check/jsig.{jsig_refused, refused_probe}
+use ir/interp.{ct_default}
 
 test "prepared sessions preserve legacy counts products and error recovery" {
   io.with_fs_real(() => io.with_env_real(() => {
@@ -114,9 +119,9 @@ test "prepared project sessions preserve module generations and mixed entry life
       let next = incremental.analyze_prepared(prepared_owner, input)
       let legacy = incremental.analyze(legacy_owner, loaded)
       let mixed_a = if iteration % 2 == 0 { incremental.analyze(legacy_first, loaded) }
-        else { incremental.analyze_prepared(legacy_first, input) }
+      else { incremental.analyze_prepared(legacy_first, input) }
       let mixed_b = if iteration % 2 == 0 { incremental.analyze_prepared(prepared_first, input) }
-        else { incremental.analyze(prepared_first, loaded) }
+      else { incremental.analyze(prepared_first, loaded) }
       let cold = analyze_program(loaded, std, ct_default(), jsig_refused())
       for result in [next, legacy, mixed_a, mixed_b] {
         assert result.stats == next.stats

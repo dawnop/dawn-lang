@@ -3,20 +3,20 @@
 # not proof that an arbitrary semantic product is safely relocatable.
 use std/map
 use std/str
-use compiler/front/parser
-use compiler/front/ast.{Module, FnDecl, module_fns}
-use compiler/check/cx.{Cx, cx_new, mint_cursor, with_slots, enter_decl_owner, unowned}
-use compiler/check/identity.{declaration_spans, span_at, path_text, Named, FunctionDecl}
-use compiler/check/checker.{headers_for_body_probe, check_fn, check_module}
-use compiler/check/tast.{TFun}
-use relocation
-use identity
-use relocation.{Move}
-use identity.{ModuleKey}
+use front/parser
+use front/ast.{Module, FnDecl, module_fns}
+use check/cx.{Cx, cx_new, mint_cursor, with_slots, enter_decl_owner, unowned}
+use check/identity.{declaration_spans, span_at, path_text, Named, FunctionDecl}
+use check/checker.{headers_for_body_probe, check_fn, check_module}
+use check/tast.{TFun}
+use contract/relocation
+use contract/identity
+use contract/relocation.{Move}
+use contract/identity.{ModuleKey}
 
-pub type Trial = { name: String, before: Cx, after: Cx, body: TFun, shifted: Cx, shifted_body: TFun, module_body: TFun, relocated: TFun }
-pub fn sample_count(xs: List[Trial]) -> Int = len(xs)
-pub fn sample_at(xs: List[Trial], index: Int) -> Trial = xs[index]
+pub(pkg) type Trial = { name: String, before: Cx, after: Cx, body: TFun, shifted: Cx, shifted_body: TFun, module_body: TFun, relocated: TFun }
+pub(pkg) fn sample_count(xs: List[Trial]) -> Int = len(xs)
+pub(pkg) fn sample_at(xs: List[Trial], index: Int) -> Trial = xs[index]
 
 fn fixture_text() -> String =
   "pub effect Ask { fn ask() -> Int }\n" ++
@@ -44,7 +44,7 @@ fn entered_decl(cx: Cx, m: Module, d: FnDecl) -> Cx = {
   }
 }
 
-pub fn samples() -> List[Trial] !io = {
+pub(pkg) fn samples() -> List[Trial] !io = {
   let text = fixture_text()
   let (m, diagnostics) = parser.parse_module(text)
   if len(diagnostics) != 0 { panic("body probe parse failed") }
@@ -82,11 +82,11 @@ pub fn samples() -> List[Trial] !io = {
   trials
 }
 
-pub type EditTrial = { relocated: TFun, cold: TFun, id_delta: Int, span_delta: Int, replayed_cx: Cx, cold_cx: Cx }
-pub fn edit_count(xs: List[EditTrial]) -> Int = len(xs)
-pub fn edit_at(xs: List[EditTrial], index: Int) -> EditTrial = xs[index]
+pub(pkg) type EditTrial = { relocated: TFun, cold: TFun, id_delta: Int, span_delta: Int, replayed_cx: Cx, cold_cx: Cx }
+pub(pkg) fn edit_count(xs: List[EditTrial]) -> Int = len(xs)
+pub(pkg) fn edit_at(xs: List[EditTrial], index: Int) -> EditTrial = xs[index]
 
-pub fn edit_samples() -> List[EditTrial] !io = {
+pub(pkg) fn edit_samples() -> List[EditTrial] !io = {
   let old = samples()
   let (old_ast, _) = parser.parse_module(fixture_text())
   let old_decls = module_fns(old_ast)

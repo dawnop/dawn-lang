@@ -11,7 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, edit, run
+from cold import ROOT, HERE, edit, install_probe, run
 
 
 def main():
@@ -44,13 +44,7 @@ def main():
             shutil.copytree(ROOT / directory, root / directory,
                             ignore=shutil.ignore_patterns('build', '.dawn'))
         (root / 'packages').symlink_to(ROOT / 'packages', target_is_directory=True)
-        fixture = root / 'scripts/incremental-semantics-contract'
-        (fixture / 'src').mkdir(parents=True)
-        shutil.copyfile(HERE / 'dawn.toml', fixture / 'dawn.toml')
-        shutil.copyfile(HERE / 'body-scheduler-tests.dawn.txt', fixture / 'src/reference.dawn')
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+        fixture = install_probe(root, {'reference': (HERE / 'body-scheduler-tests.dawn.txt').read_text()})
         target = root / 'selfhost/src/check/checker.dawn'
         subjects = [('positive', original)] + [(n, edit(original, a, b)) for n, a, b in variants]
         for name, source in subjects:

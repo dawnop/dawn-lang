@@ -79,7 +79,7 @@ public final class GenericTrace {
 
     public static void main(String[] args) throws Exception {
         boolean quiet = Arrays.asList(args).contains("--quiet");
-        Class<?> reference = Class.forName("reference");
+        Class<?> reference = Class.forName("dawn$pkg$selfhost.contract.reference");
         Object samples = method(reference, "samples").invoke(null);
         long count = (Long) method(reference, "sample_count").invoke(null, samples);
         if (count != 3) throw new AssertionError("Expected three original bounded-generic classes");
