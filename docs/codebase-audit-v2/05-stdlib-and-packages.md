@@ -438,6 +438,12 @@
 > 现在两处对 0 与负数给同一个答案，`middleware.dawn` 的单测钉住这一条。建议里的
 > `Option[Int]` 表示法没有采用：统一读法已经关闭本项指出的分歧边界，换类型是另一次
 > 包破坏，留给下一个 major。
+>
+> **web5（2026-09-25）收尾：** 下一个 major 到了，裁定的形状不是 `Option[Int]` 而是**只收正数**：
+> `ServerConfig.max_body` 非正时 `start` 在绑端口前 panic，`with_body_limit` 非正时构造即 panic，
+> 公开面上不再有「不限」。「不限」只剩一个正当用途（大上传），它已经有 `raw-body`/`stream-body`
+> 两个路由标签（nginx 或磁盘兜底）；server 内部给这两类路由的 `read_body` 用 `Option[Int]`，
+> 开关回到类型里。`serve_app_bounded`（「0 = 不限」唯一的 API 文档出处）同批删除。
 
 - **证据：S。** middleware 直接 `len > limit`：`packages/web/src/middleware.dawn:53`；底层 reader 把 `limit <= 0` 当 unlimited：`packages/web/src/server.dawn:76`。
 - **边界：** `-1` 在底层 unlimited、在 middleware 连 empty body 都拒；`0` 分别是 unlimited 与 empty-only。

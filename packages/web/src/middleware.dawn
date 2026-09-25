@@ -47,24 +47,28 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 # `str.len` code points for a while, so a body of CJK or emoji got up to 3-4x
 # the stated budget the message named in bytes.)
 #
-# `limit <= 0` is unbounded, which is the meaning the server has always given
-# the same number (server.read_body reads without a ceiling below 1, and
-# serve_app_bounded documents 0 as unbounded). This used to compare `> limit`
-# with no floor, so the two layers disagreed on exactly the values a caller is
-# likeliest to reach for: `0` meant "reject every non-empty body" here and "read
-# anything" there, and a negative limit rejected the empty body too. One
-# meaning, stated once, obeyed in both places.
+# The limit is a positive byte count, and anything else panics here, where the
+# application is assembled, rather than at the first request. Until web5,
+# `limit <= 0` was unbounded (the reading the server gave its own ceiling, and
+# before that the two layers disagreed on exactly these values); a number that
+# doubles as an off switch is the one config value most likely to be a mistake
+# and the one that turns the guard off. A route that needs no limit says so
+# with the "raw-body" tag.
 ## Reject bodies over a byte budget (the bytes, not the code points) before
-## the handler sees them. `limit <= 0` is unbounded, the same reading the
-## server gives its own ceiling. Routes tagged "raw-body" opt out, since an
-## upload is bounded in front, by nginx. A policy check, not a memory guard: the
+## the handler sees them. `limit` must be positive; anything else panics when
+## the middleware is built. Routes tagged "raw-body" opt out, since an upload
+## is bounded in front, by nginx. A policy check, not a memory guard: the
 ## server's own ceiling (`server.DEFAULT_MAX_BODY`) bounds the allocation.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
-  req =>
-  if limit > 0 && route_has_tag(req, "raw-body") == false && bytes.len(req.body) > limit {
-    Err(http_error(413, "request body exceeds ${limit} bytes"))
+  if limit > 0 {
+    req =>
+      if route_has_tag(req, "raw-body") == false && bytes.len(req.body) > limit {
+        Err(http_error(413, "request body exceeds ${limit} bytes"))
+      } else {
+        next(req)
+      }
   } else {
-    next(req)
+    panic("with_body_limit: the limit must be a positive byte count, got ${limit}")
   }
 
 # `origins` is a comma-separated allow-list; the request's Origin is
@@ -320,24 +324,19 @@ test "with_body_limit counts bytes, not code points" {
   }
 }
 
-test "a limit of zero or less is unbounded, the same reading the server gives it" {
-  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body: bytes.utf8(body) }
-  # 0 used to mean "reject every non-empty body" here while server.read_body
-  # read the same request without any ceiling at all
-  match with_body_limit(0, ok_handler)(mk("123456789")) {
-    Ok(r) -> { assert response_status(r) == 200 }
-    Err(_) -> { assert false }
+test "a limit of zero or less is refused where the middleware is built" {
+  # 0 used to mean unbounded here and in the server, which made the value most
+  # likely to be a slip the one that switched the guard off
+  match catch_panic(() => with_body_limit(0, ok_handler)) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "positive byte count, got 0") }
   }
-  # a negative limit used to reject even the empty body
-  match with_body_limit(-1, ok_handler)(mk("")) {
-    Ok(r) -> { assert response_status(r) == 200 }
-    Err(_) -> { assert false }
-  }
-  match with_body_limit(-1, ok_handler)(mk("123456789")) {
-    Ok(r) -> { assert response_status(r) == 200 }
-    Err(_) -> { assert false }
+  match catch_panic(() => with_body_limit(-1, ok_handler)) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "got -1") }
   }
   # and a positive one still bounds
+  let mk = (body: String) => Request { ..req_of("POST", map.empty()), body: bytes.utf8(body) }
   match with_body_limit(4, ok_handler)(mk("12345")) {
     Err(e) -> { assert e.status == 413 }
     Ok(_) -> { assert false }

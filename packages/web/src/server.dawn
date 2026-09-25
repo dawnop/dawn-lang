@@ -79,20 +79,26 @@ fn declared_length(ex: HttpExchange) -> Int !io =
 # one byte past the ceiling — enough to know the body is oversized, and the most
 # that can ever be allocated for one.
 #
-# limit <= 0 means unbounded, for the routes that opt out (see `handle`).
-fn read_body(ex: HttpExchange, limit: Int) -> Result[Bytes, HttpError] !io = {
+# `None` is unbounded, and only the "raw-body" routes get it (see
+# `build_request`): nginx bounds those in front. This used to be `limit <= 0`,
+# a number doubling as a switch, and the same number was the public ceiling, so
+# a config of 0 silently meant no ceiling at all. The public ceiling is a
+# positive number now (`start` refuses anything else) and the switch is a type.
+fn read_body(ex: HttpExchange, limit: Option[Int]) -> Result[Bytes, HttpError] !io = {
   let stream = ex.getRequestBody()!
-  if limit <= 0 {
-    Ok(stream.readAllBytes()!)
-  } else if declared_length(ex) > limit {
-    Err(http_error(413, "request body exceeds ${limit} bytes"))
-  } else {
-    let raw = stream.readNBytes(limit + 1)!
-    if bytes.len(raw) > limit {
-      Err(http_error(413, "request body exceeds ${limit} bytes"))
-    } else {
-      Ok(raw)
-    }
+  match limit {
+    None -> Ok(stream.readAllBytes()!)
+    Some(n) ->
+      if declared_length(ex) > n {
+        Err(http_error(413, "request body exceeds ${n} bytes"))
+      } else {
+        let raw = stream.readNBytes(n + 1)!
+        if bytes.len(raw) > n {
+          Err(http_error(413, "request body exceeds ${n} bytes"))
+        } else {
+          Ok(raw)
+        }
+      }
   }
 }
 
@@ -479,7 +485,7 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
   # ceiling — except routes tagged "raw-body" (uploads bounded by nginx's
   # client_max_body_size instead), which opt out of it.
   let streaming = meta_has_tag(meta, "stream-body")
-  let limit = if meta_has_tag(meta, "raw-body") { 0 } else { max_body }
+  let limit: Option[Int] = if meta_has_tag(meta, "raw-body") { None } else { Some(max_body) }
   # Every other field is read off the exchange *before* the spill, on purpose:
   # the spill is the only step that leaves something on disk, so once it has
   # succeeded nothing between it and the returned Request may fail. All that is
@@ -701,9 +707,11 @@ pub const DEFAULT_MAX_BODY: Int = 8388608
 
 # ---- server lifecycle (WEB-10) ----
 
-## Where the server listens, the in-memory body ceiling its requests get, and
-## the wording of the errors it renders itself. port 0 asks the OS for a free
-## port; the ServerHandle reports the one actually bound. `default_errors()` is
+## Where the server listens, the in-memory body ceiling its requests get (a
+## positive byte count; `start` panics on anything else, since there is no
+## "unbounded" — routes that need more opt out with the "raw-body" or
+## "stream-body" tag), and the wording of the errors it renders itself. port 0
+## asks the OS for a free port; `handle_port` reports the one actually bound. `default_errors()` is
 ## the neutral wording — an application whose clients expect another error
 ## shape states it here (web/types.ErrorFormat).
 pub type ServerConfig = { host: String, port: Int, max_body: Int, errors: ErrorFormat }
@@ -751,6 +759,12 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   match validate_routes(routes) {
     Err(e) -> panic("route table: " ++ e)
     Ok(_) -> ()
+  }
+  # A ceiling of 0 used to mean "no ceiling", so the one config value most
+  # likely to be a mistake was also the one that turned the guard off. There
+  # is no unbounded setting any more; a route that needs one says so by tag.
+  if cfg.max_body <= 0 {
+    panic("server config: max_body must be a positive byte count, got ${cfg.max_body}")
   }
   let addr = InetSocketAddress.new(cfg.host, cfg.port)
   let server = HttpServer.create(addr, 0)!
@@ -1517,6 +1531,17 @@ test "stop shuts the request executor down, and does so even if the JDK's stop t
   # shutting the executor down leaves the JDK server unstopped, so close the
   # listener before the test ends
   rep2.server.stop(0)
+}
+
+test "start refuses a body ceiling that is not positive" {
+  # 0 used to switch the ceiling off; now it is a config error at startup
+  for bad in [0, -1] {
+    let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: bad, errors: default_errors() }
+    match catch_panic(() => start(cfg, [route_get("/hello", hello_handler)], [])) {
+      Ok(_) -> { assert false }
+      Err(m) -> { assert str.contains(m.message, "max_body must be a positive byte count") }
+    }
+  }
 }
 
 test "start refuses a broken route table before binding a socket" {
