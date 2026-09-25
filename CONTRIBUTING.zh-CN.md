@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ c7513a9974fdfe91 -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ 706ca3c53527b591 -->
 
 # 怎么在这个仓库里做事
 
@@ -95,6 +95,19 @@
 有差异的模块并附 diff。要核对的是：清单里只有这个批次自己说动了的模块。这件事不在树里
 留任何记录：2026-09-25 之前树里有一份 Core golden，每个碰编译器的提交都要重录它，重录的
 内容没人读（[docs/recorded-numbers-design.md](docs/recorded-numbers-design.md)）。
+
+**新门禁要装进 push 总量。** `.github/workflows/gates.yml` 里每个 job 都有一行
+`# budget: 3x <N>s`，这些声明之和不得超过该文件的 `# push-total:` 行
+（`scripts/check-gate-budgets.py`，在 tree-policy 里）；`tile.yml` 另有
+`# path-total:`。两个上限在 2026-09-25 钉在当时的和上，没有余量：新 job 或调高的
+声明要靠瘦身或退役别的门来腾地方，否则就由这次 push 调高上限，并在提交信息里写明：
+`Gate-Budget(push-total): <旧>s -> <新>s <理由>`。调低不用写，只有一种例外：
+一次 push 调低了 push-total，同时 `scripts/gates-external/steps.lock.json` 少了
+run 步骤，那么每个少了步骤的家族都要写一行 `Gate-Retire(<家族>): <理由>`，
+免得删掉的覆盖冒充提速。两者都由 ci.yml `secrets` job 里的
+`scripts/check-gate-budget-trailers.py` 按 push 检查。它们不是 Emit-Change 标签，
+不进 `scripts/emit-labels.txt`。为什么要有这个上限，见
+[docs/gate-drift-guards-design.md](docs/gate-drift-guards-design.md)。
 
 **绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
 
