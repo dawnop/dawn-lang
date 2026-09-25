@@ -1,11 +1,13 @@
 # Only compiled after the frozen loop is injected into a private driver.
+# Written to the compiler copy as contract/reference; SemanticSnapshot drives
+# `samples` by reflection, and `main` exists so the fixture entry reaches it.
 use std/io
-use compiler/front/parser
-use compiler/driver/analyze.{Program, LoadedModule, LoadResult, LocDiag, analyze_program, analyze_reference}
-use compiler/driver/stdlib.{load_std, std_load_error_text}
-use compiler/check/jsig.{jsig_refused}
-use compiler/ir/interp.{ct_default, ct_fuel}
-pub type Comparison = { old: Program, current: Program }
+use front/parser
+use driver/analyze.{Program, LoadedModule, LoadResult, LocDiag, analyze_program, analyze_reference}
+use driver/stdlib.{load_std, std_load_error_text}
+use check/jsig.{jsig_refused}
+use ir/interp.{ct_default, ct_fuel}
+pub(pkg) type Comparison = { old: Program, current: Program }
 
 fn input(name: String, text: String) -> LoadedModule = {
   let (m, pd) = parser.parse_module(text)
@@ -15,11 +17,11 @@ fn input(name: String, text: String) -> LoadedModule = {
   }
 }
 
-pub fn sample_count(xs: List[Comparison]) -> Int = len(xs)
+pub(pkg) fn sample_count(xs: List[Comparison]) -> Int = len(xs)
 
-pub fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
+pub(pkg) fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index]
 
-pub fn samples() -> List[Comparison] !io = {
+pub(pkg) fn samples() -> List[Comparison] !io = {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {
       Ok(s) -> s
@@ -69,3 +71,5 @@ pub fn samples() -> List[Comparison] !io = {
     results
   }))
 }
+
+pub fn main() -> Unit !io = ()

@@ -3,17 +3,17 @@
 # This is not the final nominal/type/effect/source-view relocation protocol.
 use std/map
 use std/list
-use compiler/check/cx.{Cx, Frame, slots_of, installed_slots}
-use compiler/check/types.{Sym}
-use compiler/front/token.{Diag}
-use compiler/check/tast.{
+use check/cx.{Cx, Frame, slots_of, installed_slots}
+use check/types.{Sym}
+use front/token.{Diag}
+use check/tast.{
   TFun, TDefault, TExpr, TStmt, WitRef, WForward, WConcrete, WApply,
   XInt, XBool, XUnit, XLocal, XEvRead, XCallDyn, XCallBuiltin, XCallFn,
   XApply, XLambda, XCtor, XField, XBinary, XIf, XBlock, XBreak, XContinue,
   TSLet, TSLocalFn, TSAssign, TSExpr, TSWhile
 }
 
-pub type Move = { start: Int, limit: Int, delta: Int, span: Int }
+pub(pkg) type Move = { start: Int, limit: Int, delta: Int, span: Int }
 
 fn position(p: Int, m: Move) -> Int = p + m.span
 
@@ -101,7 +101,7 @@ fn stmt(s: TStmt, m: Move) -> TStmt =
     _ -> panic("unsupported statement in symbol-only relocation prototype")
   }
 
-pub fn relocate(f: TFun, m: Move) -> TFun = {
+pub(pkg) fn relocate(f: TFun, m: Move) -> TFun = {
   let defaults = map(f.defaults, d => match d {
     Some(value) -> Some(TDefault { body: expr(value.body, m),
       dict_syms: ids(value.dict_syms, m) })
@@ -115,7 +115,7 @@ pub fn relocate(f: TFun, m: Move) -> TFun = {
 # Replay the observed fixed-header body delta, keeping the new module's header
 # and earlier symbols. Full Cx comparison in the probe detects omitted writes;
 # this is intentionally not a claim that these are all language-wide writes.
-pub fn replay(cx: Cx, before: Cx, after: Cx, m: Move) -> Cx = {
+pub(pkg) fn replay(cx: Cx, before: Cx, after: Cx, m: Move) -> Cx = {
   var syms = cx.syms
   for id in map.keys(after.syms) {
     if id >= m.start && id < m.limit {

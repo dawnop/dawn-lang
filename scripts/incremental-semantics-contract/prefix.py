@@ -18,12 +18,12 @@ import sys
 import tempfile
 import time
 
-from cold import ROOT, HERE, OWNER, edit, run
+from cold import ROOT, HERE, OWNER, edit, install_probe, run
 
 
 def owning_assertion(output):
     return bool(re.search(
-        r"^FAIL\s+prefix :: prefix cache [^\n]*\n\s+assertion failed:", output, re.M))
+        r"^FAIL\s+contract/prefix :: prefix cache [^\n]*\n\s+assertion failed:", output, re.M))
 
 
 def check_cli():
@@ -59,17 +59,17 @@ def main():
     if args.shards < 1 or not 0 <= args.shard < args.shards:
         parser.error('require --shards >= 1 and 0 <= --shard < --shards')
     started = time.monotonic()
-    assert owning_assertion("FAIL  prefix :: prefix cache control\n      assertion failed: expected hit\n")
-    assert not owning_assertion("FAIL  prefix :: prefix cache control\n      NoSuchMethodError\n")
+    assert owning_assertion("FAIL  contract/prefix :: prefix cache control\n      assertion failed: expected hit\n")
+    assert not owning_assertion("FAIL  contract/prefix :: prefix cache control\n      NoSuchMethodError\n")
     assert not owning_assertion("FAIL  elsewhere :: prefix cache control\n      assertion failed: x\n")
     reference = (HERE / "reference-tests.dawn.txt").read_text()
     reference = edit(reference, "use std/io\n",
-                     "use std/io\nuse compiler/driver/incremental\n")
+                     "use std/io\nuse driver/incremental\n")
     # both calls below are replaced, and an import nothing uses is an error
     reference = edit(reference, "LocDiag, analyze_program, analyze_reference}",
                      "LocDiag, analyze_reference}")
-    reference = edit(reference, "use compiler/check/jsig.{jsig_refused}",
-                     "use compiler/check/jsig.{jsig_refused, refused_probe}")
+    reference = edit(reference, "use check/jsig.{jsig_refused}",
+                     "use check/jsig.{jsig_refused, refused_probe}")
     reference = edit(reference, "    for loaded in cases {\n      for opts in [ct_default(), ct_fuel(0)] {",
                      "    for opts in [ct_default(), ct_fuel(0)] {\n"
                      "      var owner = incremental.new(std, opts, jsig_refused(), refused_probe, 100, 100000)\n"
@@ -161,9 +161,8 @@ def main():
         for directory in ("selfhost", "compiler-plan"):
             shutil.copytree(ROOT / directory, root / directory, ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
-        fixture = root / "scripts/incremental-semantics-contract"
-        shutil.copytree(HERE, fixture)
-        (fixture / "src/reference.dawn").write_text(reference)
+        fixture = install_probe(root, {"reference": reference})
+        counts = root / "selfhost/src/contract/prefix.dawn"
         driver = root / "selfhost/src/driver/analyze.dawn"
         driver.write_text(driver.read_text() + "\n" + (HERE / "reference-loop.dawn.txt").read_text())
         for name, source in subjects:
@@ -180,7 +179,7 @@ def main():
                 r"^FAIL\s+reference :: " + re.escape(OWNER), result.stdout, re.M)
             if result.returncode and not semantic_failure:
                 raise RuntimeError(f"{name} oracle execution failed\n{result.stdout}")
-            status, output = run("test", fixture)
+            status, output = run("test", counts)
             count_failure = status and owning_assertion(output)
             if name == "positive":
                 if result.returncode or status:

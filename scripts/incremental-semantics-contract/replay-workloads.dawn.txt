@@ -12,7 +12,7 @@
 # member's body literal is a parameter rather than always its index so that an
 # edit can change exactly one body (a different literal, or `false` for a type
 # error) while keeping its name and every other byte of the module.
-use compiler/check/checker.{ModuleBodies}
+use check/checker.{ModuleBodies}
 
 fn join(parts: List[String]) -> String = {
   var out = ""
@@ -21,7 +21,7 @@ fn join(parts: List[String]) -> String = {
 }
 
 ## The declarations every member of a class may call. O(1) in n.
-pub fn support(kind: String) -> List[String] = {
+pub(pkg) fn support(kind: String) -> List[String] = {
   if kind == "calls" {
     return ["fn helper(x: Int) -> Int = x + 1", "fn helper2(x: Int, y: Int) -> Int = x * y - 1"]
   }
@@ -38,7 +38,7 @@ pub fn support(kind: String) -> List[String] = {
 
 ## Member `i` of a class, with `lit` spelled where the body uses its index.
 ## `member(kind, i, "${i}")` is the member `subject` generates.
-pub fn member(kind: String, i: Int, lit: String) -> String = {
+pub(pkg) fn member(kind: String, i: Int, lit: String) -> String = {
   if kind == "scalar" { return "fn s${i}() -> Int = ${lit}" }
   if kind == "arith" {
     return "fn p${i}(a: Int, b: Int) -> Int = {\n  let c = a + b * 2\n  let d = c - a + ${lit}\n  let e = if d > 0 { d } else { 0 - d }\n  e + c * 3 - d\n}"
@@ -62,20 +62,20 @@ pub fn member(kind: String, i: Int, lit: String) -> String = {
 }
 
 ## The n members of a class, in index order.
-pub fn members(kind: String, n: Int) -> List[String] = {
+pub(pkg) fn members(kind: String, n: Int) -> List[String] = {
   var out: List[String] = []
   for i in 0..n { out = out ++ [member(kind, i, "${i}")] }
   out
 }
 
-pub fn render(parts: List[String]) -> String = join(parts)
+pub(pkg) fn render(parts: List[String]) -> String = join(parts)
 
 ## One module per class. Support declarations are a fixed O(1) prefix; the
 ## per-body cost divides by the number of bodies the scheduler actually ran.
-pub fn subject(kind: String, n: Int) -> String = render(support(kind) ++ members(kind, n))
+pub(pkg) fn subject(kind: String, n: Int) -> String = render(support(kind) ++ members(kind, n))
 
 # Compare actual scheduler outputs, not another implementation of checking.
-pub fn equal_bodies(actual: ModuleBodies, expected: ModuleBodies) -> Bool =
+pub(pkg) fn equal_bodies(actual: ModuleBodies, expected: ModuleBodies) -> Bool =
   actual.functions == expected.functions && actual.constants == expected.constants &&
   actual.impl_methods == expected.impl_methods && actual.trait_defaults == expected.trait_defaults &&
   actual.tests == expected.tests && actual.cx.diags == expected.cx.diags &&
@@ -91,5 +91,5 @@ pub fn equal_bodies(actual: ModuleBodies, expected: ModuleBodies) -> Bool =
   actual.cx.const_cutoff == expected.cx.const_cutoff && actual.cx.loop_jumps == expected.cx.loop_jumps &&
   actual.cx.take_cell == expected.cx.take_cell
 
-pub fn body_count(b: ModuleBodies) -> Int =
+pub(pkg) fn body_count(b: ModuleBodies) -> Int =
   len(b.functions) + len(b.constants) + len(b.impl_methods) + len(b.trait_defaults) + len(b.tests)

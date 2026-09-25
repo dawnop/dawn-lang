@@ -2,15 +2,15 @@
 # input. Returned complete products are compared independently by the host.
 use std/list
 use std/str
-use compiler/check/function_entry_proof as proof
-use compiler/check/cx as proof_cx
-use compiler/front/ast.{FnDecl, TypeParamDecl, Bound}
-use compiler/check/tast.{TFun}
-use compiler/check/body_product
-use compiler/check/body_admit.{View}
+use check/function_entry_proof as proof
+use check/cx as proof_cx
+use front/ast.{FnDecl, TypeParamDecl, Bound}
+use check/tast.{TFun}
+use check/body_product
+use check/body_admit.{View}
 
 type ProofState = { saved: Map[String, Product], accepted: Int, refused: Int, forge: Bool }
-pub type ProofSuite = { pairs: List[Pair], accepted: Int, refused: Int }
+pub(pkg) type ProofSuite = { pairs: List[Pair], accepted: Int, refused: Int }
 
 fn checked_proof(cx: Cx, d: FnDecl, sig: Sig, product: Product) -> Option[proof.Proof] !io = {
   let before = GenericTrace.count()
@@ -119,7 +119,7 @@ fn proof_step(state: ProofState, cx: Cx, d: FnDecl, sig: Sig) -> (ProofState, Cx
   (ProofState { ..state, accepted: accepted, refused: rejected }, after, tree)
 }
 
-pub fn proof_cases() -> ProofSuite !io = {
+pub(pkg) fn proof_cases() -> ProofSuite !io = {
   var pairs: List[Pair] = []
   var accepted = 0
   var rejected = 0
@@ -188,7 +188,7 @@ pub fn proof_cases() -> ProofSuite !io = {
   ProofSuite { pairs: pairs, accepted: accepted, refused: rejected }
 }
 
-pub fn proof_pair_count(suite: ProofSuite) -> Int = len(suite.pairs)
-pub fn proof_pair_at(suite: ProofSuite, index: Int) -> Pair = suite.pairs[index]
-pub fn proof_accept_count(suite: ProofSuite) -> Int = suite.accepted
-pub fn proof_refuse_count(suite: ProofSuite) -> Int = suite.refused
+pub(pkg) fn proof_pair_count(suite: ProofSuite) -> Int = len(suite.pairs)
+pub(pkg) fn proof_pair_at(suite: ProofSuite, index: Int) -> Pair = suite.pairs[index]
+pub(pkg) fn proof_accept_count(suite: ProofSuite) -> Int = suite.accepted
+pub(pkg) fn proof_refuse_count(suite: ProofSuite) -> Int = suite.refused

@@ -6,7 +6,7 @@ import java.lang.reflect.Modifier;
 /** Compare every scheduler product and Cx field, without generated Eq dictionaries. */
 public final class BodySchedulerSnapshot {
     public static void main(String[] args) throws Exception {
-        Class<?> reference = Class.forName("reference");
+        Class<?> reference = Class.forName("dawn$pkg$selfhost.contract.reference");
         Object samples = reference.getMethod("samples").invoke(null);
         var count = java.util.Arrays.stream(reference.getMethods())
                 .filter(m -> m.getName().equals("sample_count")).findFirst().orElseThrow();

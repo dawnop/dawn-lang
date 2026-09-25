@@ -3,16 +3,16 @@
 use std/list
 use std/io
 use std/str
-use compiler/check/tast.{TExpr, TFun, XBinary, XCallFn, XLocal, WForward}
-use compiler/check/semantic_reads.{UnificationRead, InferenceBindings}
-use compiler/driver/analyze.{Program, CheckedMod, prepare_standalone, prepared_result, analyze_program}
-use compiler/driver/incremental
-use compiler/driver/stdlib.{load_std, std_load_error_text}
-use compiler/check/jsig.{jsig_refused, refused_probe}
-use compiler/ir/interp.{ct_default}
+use check/tast.{TExpr, TFun, XBinary, XCallFn, XLocal, WForward}
+use check/semantic_reads.{UnificationRead, InferenceBindings}
+use driver/analyze.{Program, CheckedMod, prepare_standalone, prepared_result, analyze_program}
+use driver/incremental
+use driver/stdlib.{load_std, std_load_error_text}
+use check/jsig.{jsig_refused, refused_probe}
+use ir/interp.{ct_default}
 
-pub type ProgramPair = { cold: Program, actual: Program }
-pub type BoundedSuite = { bodies: List[Pair], programs: List[ProgramPair] }
+pub(pkg) type ProgramPair = { cold: Program, actual: Program }
+pub(pkg) type BoundedSuite = { bodies: List[Pair], programs: List[ProgramPair] }
 
 fn first_argument(e: TExpr) -> TExpr = match e {
   XBinary(_, left, _, _, _, _, _, _, _) -> first_argument(left)
@@ -66,7 +66,7 @@ fn changed_product(p: Product, mode: String) -> Product = {
   BodyProduct { ..p, tree: TFun { ..p.tree, body: changed_call(p.tree.body, p, mode) } }
 }
 
-pub fn bounded_cases() -> BoundedSuite !io = {
+pub(pkg) fn bounded_cases() -> BoundedSuite !io = {
   var pairs: List[Pair] = []
   let scope = identity.module_key("generic-trace", "sample", "sample", "sample.dawn")
   let sample = samples()[2]
@@ -174,9 +174,9 @@ fn prepared_bounded_cases() -> List[ProgramPair] !io = io.with_fs_real(() => io.
   pairs
 }))
 
-pub fn bounded_body_count(suite: BoundedSuite) -> Int = len(suite.bodies)
-pub fn bounded_body_at(suite: BoundedSuite, index: Int) -> Pair = suite.bodies[index]
-pub fn bounded_program_count(suite: BoundedSuite) -> Int = len(suite.programs)
-pub fn bounded_program_at(suite: BoundedSuite, index: Int) -> ProgramPair = suite.programs[index]
-pub fn bounded_module_count(p: Program) -> Int = len(p.modules)
-pub fn bounded_module_at(p: Program, index: Int) -> CheckedMod = p.modules[index]
+pub(pkg) fn bounded_body_count(suite: BoundedSuite) -> Int = len(suite.bodies)
+pub(pkg) fn bounded_body_at(suite: BoundedSuite, index: Int) -> Pair = suite.bodies[index]
+pub(pkg) fn bounded_program_count(suite: BoundedSuite) -> Int = len(suite.programs)
+pub(pkg) fn bounded_program_at(suite: BoundedSuite, index: Int) -> ProgramPair = suite.programs[index]
+pub(pkg) fn bounded_module_count(p: Program) -> Int = len(p.modules)
+pub(pkg) fn bounded_module_at(p: Program, index: Int) -> CheckedMod = p.modules[index]

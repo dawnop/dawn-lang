@@ -13,14 +13,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, edit, run
+from cold import ROOT, HERE, edit, install_probe, run
 
 
 def main():
     started = time.monotonic()
     checker = (ROOT / 'selfhost/src/check/checker.dawn').read_text()
     for name in ('check_fn', 'check_fn_inferred', 'check_const_init', 'check_trait_default', 'check_test'):
-        pattern = r'(pub fn ' + name + r'\([^{}]*?!io = \{\n)'
+        pattern = r'(pub\(pkg\) fn ' + name + r'\([^{}]*?!io = \{\n)'
         checker, count = re.subn(pattern, r'\1  ScalarReplaySnapshot.enter()\n', checker)
         if count != 1:
             raise RuntimeError('Canonical entry anchor drifted: ' + name)
@@ -77,13 +77,7 @@ def main():
                             ignore=shutil.ignore_patterns('build', '.dawn'))
         (root / 'packages').symlink_to(ROOT / 'packages', target_is_directory=True)
         (root / 'selfhost/src/check/checker.dawn').write_text(checker)
-        fixture = root / 'scripts/incremental-semantics-contract'
-        (fixture / 'src').mkdir(parents=True)
-        shutil.copyfile(HERE / 'dawn.toml', fixture / 'dawn.toml')
-        shutil.copyfile(HERE / 'scalar-oracle.dawn.txt', fixture / 'src/reference.dawn')
-        # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-        # `main` is an ordinary function now, so a two-line entry forwards to it
-        (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+        fixture = install_probe(root, {'reference': (HERE / 'scalar-oracle.dawn.txt').read_text()})
         for name, source in [('positive', original)] + [
                 (name, edit(original, old, new)) for name, old, new in variants]:
             (root / 'selfhost/src/check/scalar_replay.dawn').write_text(source)

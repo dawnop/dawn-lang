@@ -15,7 +15,7 @@ public final class BoundedReplayTrace {
     }
     public static void main(String[] args) throws Exception {
         GenericTrace.main(new String[]{"--quiet"});
-        Class<?> reference = Class.forName("reference");
+        Class<?> reference = Class.forName("dawn$pkg$selfhost.contract.reference");
         Object suite = method(reference, "bounded_cases").invoke(null);
         long bodies = (Long) method(reference, "bounded_body_count").invoke(null, suite);
         long programs = (Long) method(reference, "bounded_program_count").invoke(null, suite);

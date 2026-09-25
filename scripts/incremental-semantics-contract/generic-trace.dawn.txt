@@ -2,22 +2,22 @@
 # recording and replay boundary. The Java oracle compares every Cx field and
 # counts canonical checker calls independently of reported replay statistics.
 use std/map
-use compiler/check/checker
-use compiler/check/checker.{ModuleBodies}
-use compiler/check/cx.{cx_new, slots_of}
-use compiler/check/body_execution
-use compiler/check/body_execution.{SavedFunction, FunctionInput}
-use compiler/check/body_product.{Product}
-use compiler/check/types.{TyVar, Sym}
-use compiler/check/semantic_reads
-use compiler/check/write_journal.{Key, BoundsKey, SymbolKey}
-use compiler/check/scalar_replay
-use compiler/check/identity
-use compiler/check/source_snapshot
+use check/checker
+use check/checker.{ModuleBodies}
+use check/cx.{cx_new, slots_of}
+use check/body_execution
+use check/body_execution.{SavedFunction, FunctionInput}
+use check/body_product.{Product}
+use check/types.{TyVar, Sym}
+use check/semantic_reads
+use check/write_journal.{Key, BoundsKey, SymbolKey}
+use check/scalar_replay
+use check/identity
+use check/source_snapshot
 use java "contract.GenericTrace"
 
-pub type Pair = { cold: ModuleBodies, actual: ModuleBodies }
-pub type Sample = { label: String, source: String, products: List[Product], pairs: List[Pair] }
+pub(pkg) type Pair = { cold: ModuleBodies, actual: ModuleBodies }
+pub(pkg) type Sample = { label: String, source: String, products: List[Product], pairs: List[Pair] }
 
 fn trial(label: String, support: String, functions: String, reordered: String,
   total: Int, generic_count: Int) -> Sample !io = {
@@ -145,7 +145,7 @@ fn trial(label: String, support: String, functions: String, reordered: String,
   Sample { label: label, source: support ++ functions, products: products, pairs: pairs }
 }
 
-pub fn samples() -> List[Sample] !io = {
+pub(pkg) fn samples() -> List[Sample] !io = {
   let scale = "trait Scale[T] { fn scale(x: T, k: Int) -> Int }\n" ++
     "type Coin = { value: Int }\n" ++
     "impl Scale[Coin] { fn scale(x: Coin, k: Int) -> Int = x.value * k }\n"
@@ -160,11 +160,11 @@ pub fn samples() -> List[Sample] !io = {
     trial("two-parameters", scale, paired, "# moved\n" ++ paired, 2, 1)]
 }
 
-pub fn sample_count(values: List[Sample]) -> Int = len(values)
-pub fn sample_at(values: List[Sample], index: Int) -> Sample = values[index]
-pub fn pair_count(value: Sample) -> Int = len(value.pairs)
-pub fn pair_at(value: Sample, index: Int) -> Pair = value.pairs[index]
-pub fn product_count(value: Sample) -> Int = len(value.products)
-pub fn product_at(value: Sample, index: Int) -> Product = value.products[index]
+pub(pkg) fn sample_count(values: List[Sample]) -> Int = len(values)
+pub(pkg) fn sample_at(values: List[Sample], index: Int) -> Sample = values[index]
+pub(pkg) fn pair_count(value: Sample) -> Int = len(value.pairs)
+pub(pkg) fn pair_at(value: Sample, index: Int) -> Pair = value.pairs[index]
+pub(pkg) fn product_count(value: Sample) -> Int = len(value.products)
+pub(pkg) fn product_at(value: Sample, index: Int) -> Product = value.products[index]
 
 pub fn main() -> Unit !io = ()

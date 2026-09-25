@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from cold import ROOT, HERE, DAWN
+from cold import ROOT, HERE, DAWN, install_probe
 
 
 def main():
@@ -121,40 +121,38 @@ def main():
     (output / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
     checker = output / "selfhost/src/check/checker.dawn"
     source = checker.read_text()
-    checker.write_text(source + "\npub fn headers_with_impls_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig], List[List[Option[Sig]]]) !io = {\n"
+    checker.write_text(source + "\npub(pkg) fn headers_with_impls_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig], List[List[Option[Sig]]]) !io = {\n"
                        + "  let headers = check_module_headers(cx, m, env)\n  (headers.cx, headers.sigs, headers.impl_sigs)\n}\n"
-                       + "\npub fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
+                       + "\npub(pkg) fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
                        + "  let (next, sigs, _) = headers_with_impls_for_body_probe(cx, m, env)\n  (next, sigs)\n}\n")
     fixture = output / "scripts/body-probe"
-    (fixture / "src").mkdir(parents=True)
-    (fixture / "dawn.toml").write_text((HERE / "dawn.toml").read_text())
     probe = (HERE / "body-probe.dawn.txt").read_text()
     if args.typed:
         # every use of `relocation` and of `check_fn` is replaced below, and an
         # import nothing uses is an error
-        probe = probe.replace("use relocation\n", "use typed_projection\n")
+        probe = probe.replace("use contract/relocation\n", "use contract/typed_projection\n")
         probe = probe.replace("{headers_for_body_probe, check_fn, check_module}",
                               "{headers_for_body_probe, check_module}")
-        probe = probe.replace("use typed_projection\n", "use typed_projection\nuse compiler/check/body_product\n")
+        probe = probe.replace("use contract/typed_projection\n", "use contract/typed_projection\nuse check/body_product\n")
         for old, new in [
-            ("pub type Trial = { name: String,", "pub type Trial = { assembled: Cx, raw: TFun, name: String,"),
+            ("pub(pkg) type Trial = { name: String,", "pub(pkg) type Trial = { assembled: Cx, raw: TFun, name: String,"),
             ("Trial { name: d.name,", 'Trial { assembled: body_product.assemble(before, body_product.capture(before, after, raw).expect("body product capture: " ++ d.name)).expect("body product assembly"), raw: raw, name: d.name,'),
         ]:
             if probe.count(old) != 1:
                 raise RuntimeError("Body product capture anchor drifted")
             probe = probe.replace(old, new)
-        probe += "\npub fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
-        probe += "pub fn metadata_sample() -> typed_projection.MetadataTrial !io = typed_projection.metadata_sample()\n"
-        probe += "\npub fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
-        probe += "pub fn module_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.module_samples()\n"
-        probe += "pub fn read_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.read_samples()\n"
-        probe += "pub fn module_count(xs: List[typed_projection.ModuleTrial]) -> Int = len(xs)\n"
-        probe += "pub fn module_at(xs: List[typed_projection.ModuleTrial], i: Int) -> typed_projection.ModuleTrial = xs[i]\n"
-        probe += "pub fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
-        probe += "pub fn default_samples() -> List[typed_projection.StateTrial] !io = typed_projection.default_samples()\n"
-        probe += "pub fn import_samples() -> List[typed_projection.StateTrial] !io = typed_projection.import_samples()\n"
-        probe += "pub fn state_count(xs: List[typed_projection.StateTrial]) -> Int = len(xs)\n"
-        probe += "pub fn state_at(xs: List[typed_projection.StateTrial], i: Int) -> typed_projection.StateTrial = xs[i]\n"
+        probe += "\npub(pkg) fn header_sample() -> typed_projection.HeaderTrial !io = typed_projection.header_sample()\n"
+        probe += "pub(pkg) fn metadata_sample() -> typed_projection.MetadataTrial !io = typed_projection.metadata_sample()\n"
+        probe += "\npub(pkg) fn inferred_samples() -> List[typed_projection.StateTrial] !io = typed_projection.inferred_samples()\n"
+        probe += "pub(pkg) fn module_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.module_samples()\n"
+        probe += "pub(pkg) fn read_samples() -> List[typed_projection.ModuleTrial] !io = typed_projection.read_samples()\n"
+        probe += "pub(pkg) fn module_count(xs: List[typed_projection.ModuleTrial]) -> Int = len(xs)\n"
+        probe += "pub(pkg) fn module_at(xs: List[typed_projection.ModuleTrial], i: Int) -> typed_projection.ModuleTrial = xs[i]\n"
+        probe += "pub(pkg) fn test_samples() -> List[typed_projection.StateTrial] !io = typed_projection.test_samples()\n"
+        probe += "pub(pkg) fn default_samples() -> List[typed_projection.StateTrial] !io = typed_projection.default_samples()\n"
+        probe += "pub(pkg) fn import_samples() -> List[typed_projection.StateTrial] !io = typed_projection.import_samples()\n"
+        probe += "pub(pkg) fn state_count(xs: List[typed_projection.StateTrial]) -> Int = len(xs)\n"
+        probe += "pub(pkg) fn state_at(xs: List[typed_projection.StateTrial], i: Int) -> typed_projection.StateTrial = xs[i]\n"
         old = "relocation.relocate(body, Move {\n        start: mint_cursor(before), limit: mint_cursor(after), delta: 0, span: 0 })"
         new = "typed_projection.body(raw, before, after, 0)"
         if probe.count(old) != 1:
@@ -212,12 +210,8 @@ def main():
             # a mutant that spells std/list brings the import it needs; the
             # unmutated module has no use for it, and an unused import is an error
             if "list." in new:
-                typed_source = typed_source.replace("use compiler/check/cx.", "use std/list\nuse compiler/check/cx.", 1)
-        (fixture / "src/typed_projection.dawn").write_text(typed_source)
-    (fixture / "src/bodyprobe.dawn").write_text(probe)
-    # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-    # `main` is an ordinary function now, so a two-line entry forwards to it
-    (fixture / "src/main.dawn").write_text("use bodyprobe\n\npub fn main() -> Unit !io = bodyprobe.main()\n")
+                typed_source = typed_source.replace("use check/cx.", "use std/list\nuse check/cx.", 1)
+        install_probe(output, {"typed_projection": typed_source}, entry="bodyprobe", fixture=fixture)
     identity = (HERE / ("declaration-identity.dawn.txt" if args.typed else "body-identity.dawn.txt")).read_text()
     relocation = (HERE / "body-relocate.dawn.txt").read_text()
     mutations = {
@@ -240,8 +234,8 @@ def main():
         if relocation.count(old) != 1:
             raise RuntimeError("Relocation mutation anchor drifted")
         relocation = relocation.replace(old, new)
-    (fixture / "src/relocation.dawn").write_text(relocation)
-    (fixture / "src/identity.dawn").write_text(identity)
+    install_probe(output, {"bodyprobe": probe, "relocation": relocation, "identity": identity},
+                  entry="bodyprobe", fixture=fixture)
     classes = output / "classes"
     classes.mkdir()
     subprocess.run([str(javac), "--release", "21", "-d", str(classes),
@@ -307,7 +301,7 @@ def main():
         "body_product_sha256": hashlib.sha256((output / "selfhost/src/check/body_product.dawn").read_bytes()).hexdigest() if args.typed else None,
         "allocation_sha256": hashlib.sha256((output / "selfhost/src/check/allocation.dawn").read_bytes()).hexdigest() if args.typed else None,
         "typed_tree_sha256": hashlib.sha256((output / "selfhost/src/check/body_admit.dawn").read_bytes()).hexdigest() if args.typed else None,
-        "typed_view_sha256": hashlib.sha256((fixture / "src/typed_projection.dawn").read_bytes()).hexdigest() if args.typed else None,
+        "typed_view_sha256": hashlib.sha256((output / "selfhost/src/contract/typed_projection.dawn").read_bytes()).hexdigest() if args.typed else None,
         "note": "Typed mode: 23 fixed-header bodies with production state capture/assembly, 22 nonuniform source edit replays through production product projection, one reversed effect-header tree case, two inferred body/caller states and one test block state; fixture-only ID/callee views are not production cache validity. Legacy mode: 11 fixed-header bodies and ten uniform-source replays.",
     }, indent=2) + "\n")
     print(result.stdout, end="")

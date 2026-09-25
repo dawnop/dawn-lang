@@ -28,7 +28,7 @@ public final class FunctionEntryTrace {
 
     public static void main(String[] args) throws Exception {
         GenericTrace.main(args);
-        Class<?> reference = Class.forName("reference");
+        Class<?> reference = Class.forName("dawn$pkg$selfhost.contract.reference");
         Object suite = method(reference, "entry_cases").invoke(null);
         long comparisons = (Long) method(reference, "entry_pair_count").invoke(null, suite);
         if (comparisons != 32) throw new AssertionError("function entry baseline expected 32 pairs, got " + comparisons);

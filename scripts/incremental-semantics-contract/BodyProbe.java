@@ -17,7 +17,7 @@ public final class BodyProbe {
     }
 
     public static void main(String[] args) throws Exception {
-        Class<?> probe = Class.forName("bodyprobe");
+        Class<?> probe = Class.forName("dawn$pkg$selfhost.contract.bodyprobe");
         Object samples = probe.getMethod("samples").invoke(null);
         var count = Arrays.stream(probe.getMethods()).filter(m -> m.getName().equals("sample_count"))
                 .findFirst().orElseThrow();

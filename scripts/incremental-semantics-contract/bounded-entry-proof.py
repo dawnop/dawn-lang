@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from cold import ROOT, HERE, edit, run
+from cold import ROOT, HERE, edit, install_probe, run
 
 
 def owning_failure(status, output, owner):
@@ -35,7 +35,7 @@ def classifier_selftest():
     stack = ('Exception in thread "main" java.lang.reflect.InvocationTargetException\n'
              '\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n'
              'Caused by: dawn.rt.PanicError: ' + owner + '\n'
-             '\tat reference.refused(Unknown Source)\n\t... 2 more\n')
+             '\tat dawn$pkg$selfhost.contract.reference.refused(Unknown Source)\n\t... 2 more\n')
     assert owning_failure(1, stack, owner)
     for status, output in [
         (0, stack), (-9, stack), (124, stack), (2, stack),
@@ -82,7 +82,7 @@ def main():
             "bounded entry proof executed body checker"))
     checker = (ROOT / "selfhost/src/check/checker.dawn").read_text()
     for name in ("check_fn", "check_fn_inferred", "check_const_init", "check_trait_default", "check_test"):
-        checker, count = re.subn(r"(pub fn " + name + r"\([^{}]*?!io = \{\n)",
+        checker, count = re.subn(r"(pub\(pkg\) fn " + name + r"\([^{}]*?!io = \{\n)",
                                  r"\1  GenericTrace.enter()\n", checker)
         if count != 1:
             raise RuntimeError("Bounded entry counter anchor drifted: " + name)
@@ -101,9 +101,6 @@ def main():
                             ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         (root / "selfhost/src/check/checker.dawn").write_text(checker)
-        fixture = root / "scripts/incremental-semantics-contract"
-        (fixture / "src").mkdir(parents=True)
-        shutil.copyfile(HERE / "dawn.toml", fixture / "dawn.toml")
         text = (HERE / "generic-trace.dawn.txt").read_text()
         for old, new in [
             (".{ModuleBodies}", ".{ModuleBodies, ModuleHeaders, BodyExecutor}"),
@@ -124,12 +121,9 @@ def main():
             (root / "selfhost/src/check/function_entry_proof.dawn").write_text(source if isolated else subject)
             if isolated:
                 (root / "selfhost/src/check/function_entry_probe.dawn").write_text(subject)
-            (fixture / "src/reference.dawn").write_text(edit(reference,
-                'use compiler/check/function_entry_proof as proof',
-                'use compiler/check/function_entry_probe as proof') if isolated else reference)
-            # a project's entry module is src/main.dawn (spec §10.5); the fixture's own
-            # `main` is an ordinary function now, so a two-line entry forwards to it
-            (fixture / "src/main.dawn").write_text("use reference\n\npub fn main() -> Unit !io = reference.main()\n")
+            fixture = install_probe(root, {"reference": edit(reference,
+                'use check/function_entry_proof as proof',
+                'use check/function_entry_probe as proof') if isolated else reference})
             status, output = run("build", "--cp", oracle, fixture, "-o", root / "subject.jar")
             if status:
                 raise RuntimeError(f"Bounded entry {name} failed to compile\n{output}")
