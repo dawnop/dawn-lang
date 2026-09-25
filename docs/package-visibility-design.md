@@ -282,3 +282,45 @@ checker-corpus、export-surface 契约，外加一个修 export-reads 锚点的�
   它与 checker 共用同一个函数，函数本身由 `pkg-always-visible` 变异体钉住。
 
 Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg)` 的程序逐字不变。
+
+### 10.1 种子推进到 v0.78.0 之后的收尾（2026-09-25，分支 `fix/pkgvis-followups`）
+
+§九 的三处，外加一处门禁基础设施，逐条：
+
+- **std/hamt、std/pvec 改 `pub(pkg)`**（`fae6a7e8`）。两个模块 30 处 `pub` 全改，
+  `selfhost/src/embed/stdsrc.dawn` 随 `gen-stdsrc.py` 重生。`StdOnly` 与
+  `internal_std_modules` **没有删**：删除的前提是它们只为「std 写不出 `pub(pkg)`」而存在，
+  实查不成立。名单另外还承担三条 `pub(pkg)` 替代不了的规则：
+  `passes.pass_imports` 在 std 外拒绝 `use std/hamt`/`use std/pvec` 并给出该用哪个容器的提示
+  （spec §10.6）；`doc.dawn` 据它把两个模块整体排除出参考文档（两处实现、三处测试断言）；
+  `scripts/lsp-use-completion.py` 读它决定 `use` 补全不提供这两个模块。`StdOnly` 本身还是
+  内建类型 `Array`（`BtStdOnly`）的 audience，`export-surface` 契约钉着它的诊断措辞
+  `standard-library-internal type` 和两个变异体。按裁决只做前半，删除另议。
+  连带一处门禁修正：真 std 里不再有 `StdOnly` 根，`stdonly-collapses-to-world` 变异体
+  在真 std 上存活（集群 export-surface 红，实测）。契约改为往 std 副本的 `pvec.dawn`
+  追加一个只提 `Array` 的 `pub fn`，未变异时必须通过，变异体瞄准这份副本。
+- **ARCH-N05**（`fa5ebea0`）。`ir/lower` 的 `subst_subject`、`trait_method_sig` 改
+  `pub(pkg)`；`jvm/emit` 删掉自己的 `trait_method_sig`、`subst_subject`、`subst_tvar`
+  （77 行），改 `use ir/lower.{LMod, subst_subject, trait_method_sig}`，顺带去掉因此不再用的
+  四个 `check/types` 导入；panic 前缀统一为 `lower:`。两份替换并非同一个遍历：
+  `types.subst` 在函数类型上还会对效果行跑 `subst_eff`（空映射下只经 `eff_union` 重新规范化），
+  `subst_tvar` 原样保留效果。验收：集群 `prev-diff`（五语料 class 逐字节）、`prev-diff-native`、
+  `native-diff-1/2`、`classfile-never-mutants` 全绿，没有差异可报。
+- **ARCH-N12 未做**。把 `Cx`/`Frame`/`LambdaCx` 改 `pub(pkg)` 后 `dawn check selfhost` 报
+  354 条泄漏诊断（第一层，14 个文件）：326 条 `public function ... exposes package-private type Cx`、
+  22 条同类 `public type`，外加 `LambdaCx` 3 条、`Frame` 3 条。§九 9.2 的「3 行可见性改动」
+  漏算了 §4.3 自己定的规则：`pub` 签名提到 `pub(pkg)` 身份即泄漏。连锁会一路传到
+  `driver/analyze.CheckedMod` 与 `driver/stdlib.StdCtx`，也就是契约脚本本该改走的
+  「`driver/analyze` 公开入口」本身就携带 `Cx`，给不了不含 `Cx` 的出口。
+  包外直接 `use .../check/cx` 的有 13 个文件（`incremental-semantics-contract` 12 个、
+  `builtin-decl-contract/dump` 1 个），其中多处读 `slots_of`、`mint_cursor`、`enter_decl_owner`
+  等内部件。按裁决「脚本随之红就不改 `Cx`」，`Cx` 保持 `pub`。要收这一条，先要定
+  selfhost 对包外暴露的检查器 API 是什么（契约探针要的是内部件，不是公开入口），
+  那是另一个设计问题，不是可见性改写。
+- **外部门禁输入包的种子**（`08e6c99c`）。种子推进后集群输入包仍只有 v0.77.0：
+  `inputs.py verify` 只拿每一行对 MANIFEST 和锁文件，旧种子的包照样全绿，后端于是不重推，
+  每个 toolchain 步骤转去 GitHub 拉 v0.78.0，而集群节点连不上，
+  `test`、`checker-corpus`、`contracts-1`、`prev-diff` 开跑 40 s 内全红。
+  `verify` 加 `--seed-tag`，MANIFEST 缺该 tag 的种子或 std 即红；crun 后端从被测提交的
+  `scripts/seed-release.txt` 取 tag 传给远端与本地两次 verify；prefix 内的本地后端缺种子时
+  直接报缺哪个，不再去碰网络。负控：对未重建的本地包 `verify --seed-tag v0.78.0` 报两项 FAIL。
