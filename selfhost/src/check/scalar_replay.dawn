@@ -35,13 +35,13 @@ use front/ast.{FnDecl, DFn}
 ## What one replay pass did with the candidate revision's declarations.
 ## `checked` is the two cold columns added up and is kept because it is what
 ## a caller that only wants "how much was not reused" asks for.
-pub type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int,
+pub(pkg) type Replayed = { bodies: ModuleBodies, checked: Int, reused: Int,
   cold_unadmitted: Int, cold_rejected: Int }
 
 ## The next cache contains only products captured in this execution. Visits
 ## count both hits and cold callbacks; capture refusal only affects the next
 ## revision, never the correctness of the current result.
-pub type Renewed = { replayed: Replayed, admitted: Admitted,
+pub(pkg) type Renewed = { replayed: Replayed, admitted: Admitted,
   visited: Int, capture_refused: Int }
 
 ## The three ways a declaration leaves this pass, counted apart because they
@@ -420,7 +420,7 @@ fn ready(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, entries_sav
 ## admission question that revision can answer alone. This is the record-time
 ## half of admission: it runs once per recorded revision, not once per replay,
 ## and never per candidate body.
-pub fn admit(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Admitted =
+pub(pkg) fn admit(scope: ModuleKey, old: ModuleHeaders, old_source: Snapshot, saved: Recorded) -> Admitted =
   AdmittedData { scope: scope, ready: ready(scope, old, old_source, saved.entries, saved.bodies.cx) }
 
 ## How many recorded bodies this admission settled. Observable so a caller
@@ -630,7 +630,7 @@ fn candidate(prepared: Prepared, cx: Cx, d: FnDecl, sig: Sig) -> (Prepared, Verd
 ## owner world. Both source snapshots carry the tree of their own text, and
 ## each must equal the headers it accompanies, so unrelated text cannot lend
 ## positions to those products. Every failed admission executes the cold body.
-pub fn replay(admitted: Admitted, next: ModuleHeaders, source: Snapshot) -> Replayed !io = {
+pub(pkg) fn replay(admitted: Admitted, next: ModuleHeaders, source: Snapshot) -> Replayed !io = {
   let data: AdmittedData = admitted
   let valid = next.cx.diags == [] && snapshot_matches(next, source)
   let prepared: Option[Prepared] = if valid { prepare(data, next, source) } else { None }
@@ -649,7 +649,7 @@ fn replay_result(outcome: Pass, bodies: ModuleBodies) -> Replayed =
 ## and newly added declarations. Recording observes replay installation before
 ## absolute positions are materialized, retaining its dependency/write journals.
 ## Only current pre-body headers and current source may bind the next cache.
-pub fn replay_and_record(admitted: Admitted, next: ModuleHeaders, source: Snapshot) -> Renewed !io = {
+pub(pkg) fn replay_and_record(admitted: Admitted, next: ModuleHeaders, source: Snapshot) -> Renewed !io = {
   let data: AdmittedData = admitted
   let valid = next.cx.diags == [] && snapshot_matches(next, source)
   let prepared: Option[Prepared] = if valid { prepare(data, next, source) } else { None }

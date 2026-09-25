@@ -108,7 +108,7 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
 ## writes the first three from inside an isolated body whenever it holds a
 ## local fn.
-pub type Frame = {
+pub(pkg) type Frame = {
   # lexical scopes, innermost last; each maps name → symbol id
   scopes: List[Map[String, Int]],
   # effect bookkeeping for the body being checked
@@ -125,7 +125,7 @@ pub type Frame = {
 }
 
 ## The checker state: every mutable member of the Kotlin Checker class.
-pub type Cx = {
+pub(pkg) type Cx = {
   diags: List[Diag],
   # The declaration whose bindings are being minted, and how many each
   # declaration has minted so far. Together they are what `next_id` used to
@@ -295,7 +295,7 @@ pub type Cx = {
 ## A local `fn`'s name and the row it declared (see `LambdaCx.local_fn`).
 pub type LocalFn = { name: String, row: Eff }
 
-pub type LambdaCx =
+pub(pkg) type LambdaCx =
   {
     boundary: Int,
     expected_ret: Option[Ty],
@@ -350,7 +350,7 @@ pub type LambdaCx =
 ## The proposal survives for the test fixtures that build a `Cx` by hand and
 ## have no file behind them. Nothing that decides a real program's access
 ## reaches it.
-pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
+pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   let is_std = match owner_class {
     Some(o) -> o == "std" || str.starts_with(o, "std/")
     None -> false
@@ -537,7 +537,7 @@ pub type Origin =
 
 ## The package the module being checked belongs to
 ## (docs/package-visibility-design.md §4.1).
-pub fn package_of(cx: Cx) -> PackageId =
+pub(pkg) fn package_of(cx: Cx) -> PackageId =
   if cx.is_std_module {
     PkgStd
   } else {
@@ -630,11 +630,11 @@ pub fn pkg_private_export(exp: ModExports, name: String) -> ExportDiagnostic =
   ExportDiagnostic { message: pkg_private_msg(exp, name), hint: Some(pkg_private_hint(exp)) }
 
 ## ...and raised, for the paths that report directly.
-pub fn pkg_private_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn pkg_private_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi: Int) -> Cx =
   cerr_h(cx, pkg_private_msg(exp, name), lo, hi, pkg_private_hint(exp))
 
 ## A fresh state for the tests that live beside the checker.
-pub fn test_cx() -> Cx = cx_new(None, None)
+pub(pkg) fn test_cx() -> Cx = cx_new(None, None)
 
 # ---- diagnostics ----
 
@@ -642,7 +642,7 @@ pub fn test_cx() -> Cx = cx_new(None, None)
 ## declaration's own position in this revision, which the caller has from the
 ## module's span view; a declaration the view cannot name (a duplicate, say)
 ## has no start to measure from, and `unowned` is the answer for it.
-pub fn owned_by(cx: Cx, module: String, decl: String, start: Int) -> Cx =
+pub(pkg) fn owned_by(cx: Cx, module: String, decl: String, start: Int) -> Cx =
   Cx { ..cx, owner: Some(DiagOwner { module: module, decl: decl }), owner_lo: start }
 
 ## The same base without a diagnostic owner. A context the driver did not
@@ -650,7 +650,7 @@ pub fn owned_by(cx: Cx, module: String, decl: String, start: Int) -> Cx =
 ## against, so they stay absolute; the typed tree it builds is measured from
 ## the declaration all the same, because the seam that resolves the tree is
 ## the declaration's own exit and needs no module name to find it.
-pub fn measured_from(cx: Cx, start: Int) -> Cx =
+pub(pkg) fn measured_from(cx: Cx, start: Int) -> Cx =
   Cx { ..cx, owner: None, owner_lo: start }
 
 ## Outside every declaration: no base to measure a diagnostic from, and no
@@ -658,7 +658,7 @@ pub fn measured_from(cx: Cx, start: Int) -> Cx =
 ## view cannot name is entered here on purpose, and what its body binds lands
 ## in the free pool -- distinct from everything else, and stable against
 ## nothing.
-pub fn unowned(cx: Cx) -> Cx =
+pub(pkg) fn unowned(cx: Cx) -> Cx =
   Cx { ..cx, owner: None, owner_lo: 0, owner_decl: module_pool(cx) }
 
 ## Where the frame first saw an effect raised, back in the coordinates a
@@ -666,7 +666,7 @@ pub fn unowned(cx: Cx) -> Cx =
 ## else a body records does, measured from the declaration, so that a saved
 ## body carries it to wherever that declaration ends up; the sites that blame
 ## it want a position in the file, and this is the one place the two meet.
-pub fn eff_witness_at(cx: Cx, e: Eff, fallback: (Int, Int, String)) -> (Int, Int, String) =
+pub(pkg) fn eff_witness_at(cx: Cx, e: Eff, fallback: (Int, Int, String)) -> (Int, Int, String) =
   match map.get(cx.frame.eff_witness, e) {
     Some(w) -> {
       let (lo, hi, name) = w
@@ -682,12 +682,12 @@ pub fn eff_witness_at(cx: Cx, e: Eff, fallback: (Int, Int, String)) -> (Int, Int
 ## outside a declaration the module's span view can name, which is the same
 ## case `raised` leaves absolute; the two must agree, because the seam that
 ## resolves the tree resolves it against the same view and the same owner.
-pub fn owner_off(cx: Cx, at: Int) -> Int = at - cx.owner_lo
+pub(pkg) fn owner_off(cx: Cx, at: Int) -> Int = at - cx.owner_lo
 
 ## The inverse, for the few places that read a span back out of what the body
 ## already recorded and hand it to a diagnostic. Everything the checker itself
 ## passes around is a position; only what it has already stored is an offset.
-pub fn owner_at(cx: Cx, off: Int) -> Int = off + cx.owner_lo
+pub(pkg) fn owner_at(cx: Cx, off: Int) -> Int = off + cx.owner_lo
 
 ## The one constructor: every checker diagnostic is measured against the
 ## declaration that owns it when there is one, and left absolute when there
@@ -699,14 +699,14 @@ fn raised(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Diag =
     None -> Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None }
   }
 
-pub fn cerr(cx: Cx, msg: String, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn cerr(cx: Cx, msg: String, lo: Int, hi: Int) -> Cx =
   Cx { ..cx, diags: cx.diags ++ [raised(cx, msg, lo, hi, "")] }
 
-pub fn cerr_h(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Cx =
+pub(pkg) fn cerr_h(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Cx =
   Cx { ..cx, diags: cx.diags ++ [raised(cx, msg, lo, hi, hint)] }
 
 ## An error with an optional hint (the Kotlin `sink.error(msg, span, hint?)`).
-pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx =
+pub(pkg) fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx =
   match hint {
     Some(h) -> cerr_h(cx, msg, lo, hi, h)
     None -> cerr(cx, msg, lo, hi)
@@ -714,7 +714,7 @@ pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx
 
 ## Reject a function value at its written source boundary, not at runtime
 ## interface loading. Named direct calls are deliberately not checked here.
-pub fn check_value_arity(cx: Cx, count: Int, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn check_value_arity(cx: Cx, count: Int, lo: Int, hi: Int) -> Cx =
   if count > fn_max_params() {
     cerr_h(cx, "function values support at most " ++ to_string(fn_max_params()) ++
         " parameters, but this value has " ++ to_string(count), lo, hi,
@@ -736,14 +736,14 @@ fn no_slots() -> Map[Int, Int] = map.empty()
 ## That works for the same reason it worked for the counter and for a better
 ## one: a declaration's keys are consecutive by construction
 ## (`identity.pack`), not by nothing else having minted in between.
-pub fn mint_cursor(cx: Cx) -> Int =
+pub(pkg) fn mint_cursor(cx: Cx) -> Int =
   identity.pack(cx.owner_decl, slot_of(cx)).unwrap_or(0)
 
 ## How many bindings the declaration this context is inside has minted.
-pub fn slot_of(cx: Cx) -> Int = map.get(cx.decl_slots, cx.owner_decl).unwrap_or(0)
+pub(pkg) fn slot_of(cx: Cx) -> Int = map.get(cx.decl_slots, cx.owner_decl).unwrap_or(0)
 
 ## The same for a named declaration, whichever one this context is inside.
-pub fn slots_of(cx: Cx, declaration: Int) -> Int =
+pub(pkg) fn slots_of(cx: Cx, declaration: Int) -> Int =
   map.get(cx.decl_slots, declaration).unwrap_or(0)
 
 ## Put one declaration's count back, which is what installing a body product
@@ -755,11 +755,11 @@ pub fn slots_of(cx: Cx, declaration: Int) -> Int =
 ## count of one or more, so keeping zero out is what makes the table itself
 ## comparable -- a body that bound nothing must leave the table the cold path
 ## would have left.
-pub fn with_slots(cx: Cx, declaration: Int, slots: Int) -> Cx =
+pub(pkg) fn with_slots(cx: Cx, declaration: Int, slots: Int) -> Cx =
   Cx { ..cx, decl_slots: installed_slots(cx, declaration, slots) }
 
 ## The table itself, for the one caller that spells the whole record update.
-pub fn installed_slots(cx: Cx, declaration: Int, slots: Int) -> Map[Int, Int] =
+pub(pkg) fn installed_slots(cx: Cx, declaration: Int, slots: Int) -> Map[Int, Int] =
   if slots == 0 { cx.decl_slots } else { map.insert(cx.decl_slots, declaration, slots) }
 
 ## One binding of the declaration this context is inside.
@@ -768,7 +768,7 @@ pub fn installed_slots(cx: Cx, declaration: Int, slots: Int) -> Map[Int, Int] =
 ## than a wrong answer, so it is reported and the declaration keeps the key it
 ## last issued; every later binding of that declaration then shares it, which
 ## is only reached after a diagnostic has already been raised.
-pub fn fresh(cx: Cx) -> (Cx, Int) = {
+pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {
   let slot = slot_of(cx)
   match identity.pack(cx.owner_decl, slot) {
     Some(id) -> (Cx { ..cx, decl_slots: map.insert(cx.decl_slots, cx.owner_decl, slot + 1) }, id)
@@ -809,7 +809,7 @@ fn interned(cx: Cx, decl: Minted, lo: Int, hi: Int) -> (Cx, Int) = {
 }
 
 ## The id of a nominal or trait declaration.
-pub fn mint(cx: Cx, kind: identity.Kind, name: String, lo: Int, hi: Int) -> (Cx, Int) =
+pub(pkg) fn mint(cx: Cx, kind: identity.Kind, name: String, lo: Int, hi: Int) -> (Cx, Int) =
   interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)
 
 ## Enter the declaration whose bindings are about to be minted. Every pass
@@ -821,21 +821,21 @@ pub fn mint(cx: Cx, kind: identity.Kind, name: String, lo: Int, hi: Int) -> (Cx,
 ## Idempotent, and deliberately so: a declaration is entered once by the
 ## header passes and again by the body scheduler, and the second entry
 ## continues the first's slots rather than reissuing them.
-pub fn enter_decl_owner(cx: Cx, path: List[Part], lo: Int, hi: Int) -> Cx = {
+pub(pkg) fn enter_decl_owner(cx: Cx, path: List[Part], lo: Int, hi: Int) -> Cx = {
   let (interned_cx, id) = interned(cx, minted_path(cx.owner_class.unwrap_or(""), path), lo, hi)
   Cx { ..interned_cx, owner_decl: id }
 }
 
 ## Leave it again, without naming what comes next. Anything minted from here
 ## until the next declaration is entered belongs to the free pool.
-pub fn leave_decl_owner(cx: Cx) -> Cx = Cx { ..cx, owner_decl: module_pool(cx) }
+pub(pkg) fn leave_decl_owner(cx: Cx) -> Cx = Cx { ..cx, owner_decl: module_pool(cx) }
 
 ## This module's free pool. Nothing production mints here: every pass that
 ## walks declarations enters each one first, and the inline test beside
 ## `check_module` is where that is said.
-pub fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))
+pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))
 
-pub fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
+pub(pkg) fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
   let (cx1, id) = fresh(cx)
   (cx1, EffVar(name, id))
 }
@@ -843,7 +843,7 @@ pub fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
 # ---- module aliases ----
 
 ## A local declaration may not shadow a whole-module alias (spec §10.3).
-pub fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
   match map.get(cx.module_aliases, name) {
     None -> cx
     Some(mod_path) -> alias_shadow_at(cx, name, mod_path, lo, hi)
@@ -851,7 +851,7 @@ pub fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
 
 ## The same report when the alias is the one arriving second: the module path is
 ## in hand but not yet in the table, so there is nothing to look up.
-pub fn alias_shadow_at(cx: Cx, name: String, mod_path: String, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn alias_shadow_at(cx: Cx, name: String, mod_path: String, lo: Int, hi: Int) -> Cx =
   cerr_h(cx, "`" ++ name ++ "` shadows the imported module `" ++ mod_path ++ "`",
     lo, hi, "an imported module's alias and your names share one namespace; rename one")
 
@@ -859,14 +859,14 @@ pub fn alias_shadow_at(cx: Cx, name: String, mod_path: String, lo: Int, hi: Int)
 
 ## The declared effect behind an id (the table is grafted across modules the
 ## way the ADT table is).
-pub fn effect_of(cx: Cx, id: Int) -> EffectI =
+pub(pkg) fn effect_of(cx: Cx, id: Int) -> EffectI =
   match map.get(cx.effect_infos, id) {
     Some(e) -> e
     None -> panic("unknown effect id: ${id}")
   }
 
 ## Handler decisions depend on ordered operations and declaration metadata.
-pub fn local_effect_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
+pub(pkg) fn local_effect_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
   let answer = map.get(cx.effects, name)
   (observe_type_read(cx, semantic_reads.LocalEffectName(name, answer)), answer)
 }
@@ -912,7 +912,7 @@ fn qualified_effect_diagnostic_read(cx: Cx, qualifier: String, name: String) -> 
 ## All declared-effect positions share the same provider lookup. Only a
 ## qualified failure is diagnosed here; bare-name callers retain their own
 ## recovery and suggestions. Neither route introduces an effect variable.
-pub fn resolve_named_effect(cx: Cx, name: String, lo: Int, hi: Int) -> (Cx, Option[Int]) = {
+pub(pkg) fn resolve_named_effect(cx: Cx, name: String, lo: Int, hi: Int) -> (Cx, Option[Int]) = {
   if not effect_name.qualified(name) { return local_effect_name_read(cx, name) }
   let parts = str.split(name, ".")
   let (next, answer) = qualified_effect_name_read(cx, parts[0], parts[1])
@@ -928,13 +928,13 @@ pub fn resolve_named_effect(cx: Cx, name: String, lo: Int, hi: Int) -> (Cx, Opti
   }
 }
 
-pub fn effect_candidates_read(cx: Cx) -> (Cx, List[String]) = {
+pub(pkg) fn effect_candidates_read(cx: Cx) -> (Cx, List[String]) = {
   let names = map.keys(cx.effects)
   (observe_type_read(cx, semantic_reads.EffectCandidates(names)), names)
 }
 
 ## Handler decisions depend on ordered operations and declaration metadata.
-pub fn declared_effect_info_read(cx: Cx, id: Int) -> (Cx, EffectI) = {
+pub(pkg) fn declared_effect_info_read(cx: Cx, id: Int) -> (Cx, EffectI) = {
   let answer = effect_of(cx, id)
   (observe_type_read(cx, semantic_reads.DeclaredEffectInfo(id, answer)), answer)
 }
@@ -945,7 +945,7 @@ pub fn declared_effect_info_read(cx: Cx, id: Int) -> (Cx, EffectI) = {
 ## accessor so admission can put the question to the candidate revision. An id
 ## a row names is an id the effect table declared, which is why this asks the
 ## accessor that panics on a missing one, the way `label_eff` does.
-pub fn ctl_labels_read(cx: Cx, e: Eff) -> (Cx, List[String]) = {
+pub(pkg) fn ctl_labels_read(cx: Cx, e: Eff) -> (Cx, List[String]) = {
   var cx1 = cx
   var out: List[String] = []
   for l in eff_labels(e) {
@@ -958,9 +958,9 @@ pub fn ctl_labels_read(cx: Cx, e: Eff) -> (Cx, List[String]) = {
 }
 
 ## A row carrying exactly one declared effect.
-pub fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
+pub(pkg) fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
 
-pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff) = {
+pub(pkg) fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff) = {
   var cx1 = cx
   var effs: List[Eff] = []
   for a in atoms {
@@ -1103,7 +1103,7 @@ fn resolve_eff_assoc(initial: Cx, subj: String, name: String, lo: Int, hi: Int) 
   }
 }
 
-pub fn implementation_arity_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Option[Int]) = {
+pub(pkg) fn implementation_arity_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Option[Int]) = {
   let answer = match impl_at(cx.impl_table, trait_id, subject) {
     None -> None
     Some(imp) -> Some(len(imp.tparams))
@@ -1111,22 +1111,22 @@ pub fn implementation_arity_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Opt
   (observe_type_read(cx, semantic_reads.ImplementationArity(trait_id, subject, answer)), answer)
 }
 
-pub fn implementation_subgoals_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, List[(Int, Ty)]) = {
+pub(pkg) fn implementation_subgoals_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, List[(Int, Ty)]) = {
   let answer = sub_goals(cx.impl_table, trait_id, subject)
   (observe_type_read(cx, semantic_reads.ImplementationSubgoals(trait_id, subject, answer)), answer)
 }
 
-pub fn implementation_presence_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Bool) = {
+pub(pkg) fn implementation_presence_read(cx: Cx, trait_id: Int, subject: Ty) -> (Cx, Bool) = {
   let answer = has_impl_at(cx.impl_table, trait_id, subject)
   (observe_type_read(cx, semantic_reads.ImplementationPresence(trait_id, subject, answer)), answer)
 }
 
-pub fn trait_name_read(cx: Cx, id: Int) -> (Cx, String) = {
+pub(pkg) fn trait_name_read(cx: Cx, id: Int) -> (Cx, String) = {
   let answer = trait_of(cx.traits, id).name
   (observe_type_read(cx, semantic_reads.TraitName(id, answer)), answer)
 }
 
-pub fn dictionary_symbol_read(cx: Cx, binder: Int, trait_id: Int) -> (Cx, Option[Int]) = {
+pub(pkg) fn dictionary_symbol_read(cx: Cx, binder: Int, trait_id: Int) -> (Cx, Option[Int]) = {
   let answer = map.get(cx.frame.dict_syms, (binder, trait_id))
   (observe_type_read(cx, semantic_reads.DictionarySymbol(binder, trait_id, answer)), answer)
 }
@@ -1196,22 +1196,22 @@ test "implementation presence reads retain hits misses and disabled logging" {
   }
 }
 
-pub fn signature_display_read(cx: Cx, sig: Sig) -> (Cx, String) = {
+pub(pkg) fn signature_display_read(cx: Cx, sig: Sig) -> (Cx, String) = {
   let answer = sig_render(cx.adts, cx.traits, sig)
   (observe_type_read(cx, semantic_reads.RenderedSignature(sig, answer)), answer)
 }
 
-pub fn constructor_display_read(cx: Cx, ctor: CtorI) -> (Cx, String) = {
+pub(pkg) fn constructor_display_read(cx: Cx, ctor: CtorI) -> (Cx, String) = {
   let answer = ctor_render(cx.adts, ctor)
   (observe_type_read(cx, semantic_reads.RenderedConstructor(ctor, answer)), answer)
 }
 
-pub fn function_return_display_read(cx: Cx, ret: Ty, outer_eff: Eff) -> (Cx, String) = {
+pub(pkg) fn function_return_display_read(cx: Cx, ret: Ty, outer_eff: Eff) -> (Cx, String) = {
   let answer = fn_return_show(cx.adts, ret, outer_eff)
   (observe_type_read(cx, semantic_reads.RenderedFunctionReturn(ret, outer_eff, answer)), answer)
 }
 
-pub fn type_display_read(cx: Cx, ty: Ty) -> (Cx, String) = {
+pub(pkg) fn type_display_read(cx: Cx, ty: Ty) -> (Cx, String) = {
   let answer = ty_show(cx.adts, ty)
   (observe_type_read(cx, semantic_reads.RenderedType(ty, answer)), answer)
 }
@@ -1226,104 +1226,104 @@ fn builtin_type_read(cx: Cx, name: String) -> (Cx, Option[BuiltinTypeI]) = {
   (observe_type_read(cx, semantic_reads.BuiltinTypeAnswer(name, answer)), answer)
 }
 
-pub fn std_module_mode_read(cx: Cx) -> (Cx, Bool) =
+pub(pkg) fn std_module_mode_read(cx: Cx) -> (Cx, Bool) =
   (observe_type_read(cx, semantic_reads.StdModuleMode(cx.is_std_module)), cx.is_std_module)
 
 ## The std loader's removed-name hints: where a name that is no longer a
 ## builtin went. Only a diagnostic hint reads it, but the answer is a property
 ## of the environment the body was checked against and std can move a name
 ## again, so it is written down like every other table lookup.
-pub fn moved_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
+pub(pkg) fn moved_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
   let answer = map.get(cx.moved, name)
   (observe_type_read(cx, semantic_reads.MovedName(name, answer)), answer)
 }
 
-pub fn java_class_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
+pub(pkg) fn java_class_name_read(cx: Cx, name: String) -> (Cx, Option[String]) = {
   let answer = map.get(cx.java_classes, name)
   (observe_type_read(cx, semantic_reads.JavaClassName(name, answer)), answer)
 }
 
-pub fn java_class_names_read(cx: Cx) -> (Cx, List[String]) = {
+pub(pkg) fn java_class_names_read(cx: Cx) -> (Cx, List[String]) = {
   let names = map.keys(cx.java_classes)
   (observe_type_read(cx, semantic_reads.JavaClassNames(names)), names)
 }
 
-pub fn java_class_info_read(cx: Cx, fqcn: String) -> (Cx, JClass) !io = {
+pub(pkg) fn java_class_info_read(cx: Cx, fqcn: String) -> (Cx, JClass) !io = {
   let answer = cx.jsig.class_info(fqcn)
   (observe_type_read(cx, semantic_reads.JavaClassInfo(fqcn, answer)), answer)
 }
 
-pub fn java_enabled_read(cx: Cx) -> (Cx, Bool) =
+pub(pkg) fn java_enabled_read(cx: Cx) -> (Cx, Bool) =
   (observe_type_read(cx, semantic_reads.JavaEnabled(cx.jsig.on)), cx.jsig.on)
 
-pub fn java_find_class_read(cx: Cx, name: String) -> (Cx, Option[JClass]) !io = {
+pub(pkg) fn java_find_class_read(cx: Cx, name: String) -> (Cx, Option[JClass]) !io = {
   let answer = cx.jsig.find_class(name)
   (observe_type_read(cx, semantic_reads.JavaFindClass(name, answer)), answer)
 }
 
-pub fn java_methods_read(cx: Cx, fqcn: String) -> (Cx, List[JMethod]) !io = {
+pub(pkg) fn java_methods_read(cx: Cx, fqcn: String) -> (Cx, List[JMethod]) !io = {
   let answer = cx.jsig.methods_of(fqcn)
   (observe_type_read(cx, semantic_reads.JavaMethods(fqcn, answer)), answer)
 }
 
-pub fn java_constructors_read(cx: Cx, fqcn: String) -> (Cx, List[JCtor]) !io = {
+pub(pkg) fn java_constructors_read(cx: Cx, fqcn: String) -> (Cx, List[JCtor]) !io = {
   let answer = cx.jsig.ctors_of(fqcn)
   (observe_type_read(cx, semantic_reads.JavaConstructors(fqcn, answer)), answer)
 }
 
-pub fn java_static_fields_read(cx: Cx, fqcn: String) -> (Cx, List[JField]) !io = {
+pub(pkg) fn java_static_fields_read(cx: Cx, fqcn: String) -> (Cx, List[JField]) !io = {
   let answer = cx.jsig.static_fields_of(fqcn)
   (observe_type_read(cx, semantic_reads.JavaStaticFields(fqcn, answer)), answer)
 }
 
-pub fn local_constructor_read(cx: Cx, name: String) -> (Cx, Option[(Int, Int)]) = {
+pub(pkg) fn local_constructor_read(cx: Cx, name: String) -> (Cx, Option[(Int, Int)]) = {
   let answer = map.get(cx.ctors_by_name, name)
   (observe_type_read(cx, semantic_reads.LocalConstructor(name, answer)), answer)
 }
 
-pub fn local_nominal_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
+pub(pkg) fn local_nominal_name_read(cx: Cx, name: String) -> (Cx, Option[Int]) = {
   let answer = map.get(cx.adts_by_name, name)
   (observe_type_read(cx, semantic_reads.NominalTypeName(None, name, answer)), answer)
 }
 
-pub fn constructor_names_read(cx: Cx, adt: Int) -> (Cx, List[String]) = {
+pub(pkg) fn constructor_names_read(cx: Cx, adt: Int) -> (Cx, List[String]) = {
   var names: List[String] = []
   for ctor in adt_of(cx.adts, adt).ctors { names = names ++ [ctor.name] }
   (observe_type_read(cx, semantic_reads.ConstructorNames(adt, names)), names)
 }
 
-pub fn declared_constant_name_read(cx: Cx, name: String) -> (Cx, Bool) = {
+pub(pkg) fn declared_constant_name_read(cx: Cx, name: String) -> (Cx, Bool) = {
   let present = set.has(cx.all_const_names, name)
   (observe_type_read(cx, semantic_reads.DeclaredConstantName(name, present)), present)
 }
 
 ## Preserve the actual candidate order and the pattern-only namespace boundary.
-pub fn local_value_candidates_read(cx: Cx, include_constants: Bool) -> (Cx, List[String]) = {
+pub(pkg) fn local_value_candidates_read(cx: Cx, include_constants: Bool) -> (Cx, List[String]) = {
   let constants: List[String] = if include_constants { map.keys(cx.consts) } else { [] }
   let names = map.keys(cx.ctors_by_name) ++ constants
   (observe_type_read(cx, semantic_reads.LocalValueCandidates(include_constants, names)), names)
 }
 
-pub fn constructor_count_read(cx: Cx, adt: Int) -> (Cx, Int) = {
+pub(pkg) fn constructor_count_read(cx: Cx, adt: Int) -> (Cx, Int) = {
   let count = len(adt_of(cx.adts, adt).ctors)
   (observe_type_read(cx, semantic_reads.ConstructorCount(adt, count)), count)
 }
 
 ## Return only the nominal metadata constructor consumers actually use.
-pub fn constructor_header_read(cx: Cx, adt: Int) -> (Cx, ConstructorHeader) = {
+pub(pkg) fn constructor_header_read(cx: Cx, adt: Int) -> (Cx, ConstructorHeader) = {
   let info = adt_of(cx.adts, adt)
   let answer = ConstructorHeader { id: info.id, name: info.name,
     is_record: info.is_record, tparams: info.tparams }
   (observe_type_read(cx, semantic_reads.ConstructorHeaderAnswer(adt, answer)), answer)
 }
 
-pub fn constructor_fields_read(cx: Cx, adt: Int, slot: Int) -> (Cx, CtorI) = {
+pub(pkg) fn constructor_fields_read(cx: Cx, adt: Int, slot: Int) -> (Cx, CtorI) = {
   let answer = adt_of(cx.adts, adt).ctors[slot]
   (observe_type_read(cx, semantic_reads.ConstructorFields(adt, slot, answer)), answer)
 }
 
 ## Expected-type probing needs nominal arity and record syntax, not field types.
-pub fn constructor_nominal_shape_read(cx: Cx, adt: Int) -> (Cx, (Int, Bool)) = {
+pub(pkg) fn constructor_nominal_shape_read(cx: Cx, adt: Int) -> (Cx, (Int, Bool)) = {
   let info = adt_of(cx.adts, adt)
   let arity = len(info.tparams)
   let next = observe_type_read(cx, semantic_reads.NominalTypeShape(adt, info.name,
@@ -1331,32 +1331,32 @@ pub fn constructor_nominal_shape_read(cx: Cx, adt: Int) -> (Cx, (Int, Bool)) = {
   (next, (arity, info.is_record))
 }
 
-pub fn constructor_arity_read(cx: Cx, adt: Int, slot: Int) -> (Cx, Int) = {
+pub(pkg) fn constructor_arity_read(cx: Cx, adt: Int, slot: Int) -> (Cx, Int) = {
   let arity = len(adt_of(cx.adts, adt).ctors[slot].fields)
   (observe_type_read(cx, semantic_reads.ConstructorArity(adt, slot, arity)), arity)
 }
 
-pub fn local_constant_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
+pub(pkg) fn local_constant_read(cx: Cx, name: String) -> (Cx, Option[Ty]) = {
   let answer = map.get(cx.consts, name)
   (observe_type_read(cx, semantic_reads.LocalConstant(name, answer)), answer)
 }
 
-pub fn constant_visible_read(cx: Cx, name: String) -> (Cx, Bool) = {
+pub(pkg) fn constant_visible_read(cx: Cx, name: String) -> (Cx, Bool) = {
   let visible = match cx.const_cutoff { None -> true, Some(cutoff) -> set.has(cutoff, name) }
   (observe_type_read(cx, semantic_reads.ConstantVisible(name, visible)), visible)
 }
 
-pub fn java_assignable_read(cx: Cx, superclass: String, subclass: String) -> (Cx, Bool) !io = {
+pub(pkg) fn java_assignable_read(cx: Cx, superclass: String, subclass: String) -> (Cx, Bool) !io = {
   let answer = cx.jsig.is_assignable(superclass, subclass)
   (observe_type_read(cx, semantic_reads.JavaAssignable(superclass, subclass, answer)), answer)
 }
 
-pub fn java_sam_read(cx: Cx, name: String) -> (Cx, Option[JMethod]) !io = {
+pub(pkg) fn java_sam_read(cx: Cx, name: String) -> (Cx, Option[JMethod]) !io = {
   let answer = cx.jsig.sam_of(name)
   (observe_type_read(cx, semantic_reads.JavaSam(name, answer)), answer)
 }
 
-pub fn java_component_read(cx: Cx, name: String) -> (Cx, Option[String]) !io = {
+pub(pkg) fn java_component_read(cx: Cx, name: String) -> (Cx, Option[String]) !io = {
   let answer = cx.jsig.component_of(name)
   (observe_type_read(cx, semantic_reads.JavaComponent(name, answer)), answer)
 }
@@ -1395,7 +1395,7 @@ pub fn tref_span(ref: TypeRef) -> (Int, Int) =
 ## resolved (or resolved while recording was off) answers with its own span
 ## and no children, which is the same degradation an expanded alias gets: the
 ## enclosing written token.
-pub fn ty_span_of(cx: Cx, ref: TypeRef) -> TySpan = {
+pub(pkg) fn ty_span_of(cx: Cx, ref: TypeRef) -> TySpan = {
   let (lo, hi) = tref_span(ref)
   match map.get(cx.ty_spans, (lo, hi)) {
     Some(sp) -> sp
@@ -1444,28 +1444,28 @@ test "a body pass records no type spans" {
 }
 
 ## Table mutations report their keys only when a body recorder requests it.
-pub fn write_symbol(cx: Cx, id: Int, value: Sym) -> Cx = Cx {
+pub(pkg) fn write_symbol(cx: Cx, id: Int, value: Sym) -> Cx = Cx {
   ..cx, syms: map.insert(cx.syms, id, value),
   body_writes: write_journal.observe(cx.body_writes, write_journal.SymbolKey(id))
 }
 
-pub fn write_signature(cx: Cx, name: String, value: Sig) -> Cx = Cx {
+pub(pkg) fn write_signature(cx: Cx, name: String, value: Sig) -> Cx = Cx {
   ..cx, fns: map.insert(cx.fns, name, value),
   body_writes: write_journal.observe(cx.body_writes, write_journal.SignatureKey(name))
 }
 
-pub fn write_alias(cx: Cx, name: String, value: Ty) -> Cx = Cx {
+pub(pkg) fn write_alias(cx: Cx, name: String, value: Ty) -> Cx = Cx {
   ..cx, alias_resolved: map.insert(cx.alias_resolved, name, value),
   body_writes: write_journal.observe(cx.body_writes, write_journal.AliasKey(name))
 }
 
-pub fn write_bounds(cx: Cx, id: Int, value: List[Int]) -> Cx = Cx {
+pub(pkg) fn write_bounds(cx: Cx, id: Int, value: List[Int]) -> Cx = Cx {
   ..cx, current_tparam_bounds: map.insert(cx.current_tparam_bounds, id, value),
   body_writes: write_journal.observe(cx.body_writes, write_journal.BoundsKey(id))
 }
 
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
-pub fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
+pub(pkg) fn resolve_alias_target(initial: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
   let cached = map.get(initial.alias_resolved, al.name)
   var cx = observe_type_read(initial, semantic_reads.LocalAliasTarget(al.name, cached))
   match cached {
@@ -1548,10 +1548,10 @@ type TypeUse =
   | TypeStorage
   | TypeReturn
 
-pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
+pub(pkg) fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
   resolve_type_for(cx, ref, TypeStorage)
 
-pub fn resolve_return_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
+pub(pkg) fn resolve_return_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
   resolve_type_for(cx, ref, TypeReturn)
 
 fn resolve_type_for(cx: Cx, ref: TypeRef, type_use: TypeUse) -> (Cx, Ty) !io =
@@ -1772,7 +1772,7 @@ fn observe_type_read(cx: Cx, fact: FunctionRead) -> Cx =
 ## A fact recorded in another revision comes here too. It used to arrive with
 ## a relocation beside it; the query inputs below and the recorded answer are
 ## the same integers in both revisions, so there is nothing to apply.
-pub fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool] = {
+pub(pkg) fn revalidate_context_read(candidate: Cx, fact: FunctionRead) -> Option[Bool] = {
   let initial = Cx { ..candidate, function_reads: Some([]) }
   match fact {
     semantic_reads.ConstructorCount(id, _) | semantic_reads.ConstructorNames(id, _) |
@@ -2354,7 +2354,7 @@ fn const_hint_default() -> String =
 ## rather than a recursion rule, and the `_ -> false` at the bottom is the
 ## safe default a wildcard is allowed to be: a new variant is not serializable
 ## until someone says how.
-pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
+pub(pkg) fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
   match t {
     TyInt | TyFloat | TyBool | TyString -> true
     # One value, so the constant is the singleton. Refusing it was a
@@ -2418,7 +2418,7 @@ pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
 ## `reduce_assoc_read` records a whole reduction. The subject is a type built
 ## out of derived ids, so the candidate revision can be asked the same
 ## question and will walk its own tables to answer it.
-pub fn const_serializable_read(cx: Cx, t: Ty) -> (Cx, Bool) = {
+pub(pkg) fn const_serializable_read(cx: Cx, t: Ty) -> (Cx, Bool) = {
   let answer = is_const_serializable(cx, t, set.empty())
   (observe_type_read(cx, semantic_reads.ConstSerializable(t, answer)), answer)
 }

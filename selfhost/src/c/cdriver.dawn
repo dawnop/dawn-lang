@@ -8,15 +8,16 @@
 # calls them too.
 
 use std/io
-use std/io.{Env}
+use std/io.{Env, Fs, Proc}
 use std/map
 use std/str
 use ir/core.{CValue, CFun, CModule, CParam, CMode, COwned, CBorrowed, mode_owned}
 use check/types.{Adts, Traits, Impls, Sig, prelude_adts}
 use check/cx.{Cx}
-use ir/interp.{CtOut}
-use driver/stdlib.{StdCtx}
-use driver/analyze.{CheckedMod, Program}
+use ir/interp.{CtOut, ct_default}
+use driver/stdlib.{StdCtx, load_std, std_load_error_text}
+use driver/analyze.{CheckedMod, Program, analyze_program, load_target}
+use check/jsig.{jsig_refused}
 use ir/lower
 use c/rc
 use c/infer
@@ -32,7 +33,7 @@ use compiler_plan/envmem.{AskedGet}
 
 ## The program-wide tables codegen reads: every module's ADTs, traits, impls
 ## and function signatures, std's first, later declarations winning.
-pub fn program_tables(
+pub(pkg) fn program_tables(
   std: StdCtx,
   mods: List[CheckedMod]
 ) -> (Adts, Traits, Impls, Map[(String, String), Sig]) = {
@@ -82,7 +83,7 @@ pub fn program_tables(
 
 ## This module's const-name → value view: its own comptime results, plus
 ## imported consts resolved in their declaring module's results.
-pub fn merged_consts(
+pub(pkg) fn merged_consts(
   cx: Cx,
   ct: CtOut,
   by_mod: Map[String, Map[String, CValue]]
@@ -500,11 +501,30 @@ fn tables(live: Option[Live]) -> TableUse =
 ## `main`. std goes in first: a C translation unit needs a definition for
 ## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
 ## calls `std/pvec.from_array`.
-pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = {
+pub(pkg) fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = {
   let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
   let lv = live(units, prog, false)
   Ok(emitc.emit_program(units, entry, tables(lv), lv, adts, modes))
+}
+
+## A source target, whole, as the C translation unit `emitc` prints, for tools
+## outside this package. `c_text` and the pipeline in front of it take and
+## return checker state (`StdCtx`, `Program`), which is `pub(pkg)`; this entry
+## carries only paths in and text out, so a benchmark can drive the real
+## pipeline without reaching into that state. Diagnostics and a missing `main`
+## come back as Err rather than a process exit: the caller decides what a
+## failed compile means to it.
+pub fn compile_to_c(std_dir: String, target: String) -> Result[String, String] !Fs !Proc !Env !io = {
+  let std = match load_std(std_dir) {
+    Ok(s) -> s
+    Err(e) -> return Err(std_load_error_text(e))
+  }
+  let prog = analyze_program(load_target(std, target), std, ct_default(), jsig_refused())
+  if len(prog.diags) > 0 {
+    return Err(target ++ ": " ++ to_string(len(prog.diags)) ++ " diagnostics")
+  }
+  c_text(std, prog)
 }
 
 ## The same translation unit with the test blocks compiled in and a generated
@@ -517,7 +537,7 @@ pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = {
 ##
 ## `std_tests` is `--stdlib`: the tests being run are std's own, and `prog`
 ## carries no modules at all.
-pub fn c_test_text(
+pub(pkg) fn c_test_text(
   std: StdCtx,
   prog: Program,
   tests: List[(String, Int, String)],

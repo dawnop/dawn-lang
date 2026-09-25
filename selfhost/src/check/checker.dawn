@@ -119,17 +119,17 @@ use front/parser
 
 # ---- scopes and symbols ----
 
-pub fn push_scope(cx: Cx) -> Cx = {
+pub(pkg) fn push_scope(cx: Cx) -> Cx = {
   let empty: Map[String, Int] = map.empty()
   Cx { ..cx, frame: Frame { ..cx.frame, scopes: cx.frame.scopes ++ [empty] } }
 }
 
-pub fn pop_scope(cx: Cx) -> Cx = {
+pub(pkg) fn pop_scope(cx: Cx) -> Cx = {
   let outer = list.take(cx.frame.scopes, len(cx.frame.scopes) - 1)
   Cx { ..cx, frame: Frame { ..cx.frame, scopes: outer } }
 }
 
-pub fn sym_of(cx: Cx, id: Int) -> Sym =
+pub(pkg) fn sym_of(cx: Cx, id: Int) -> Sym =
   match map.get(cx.syms, id) {
     Some(s) -> s
     None -> panic("unknown symbol id: ${id}")
@@ -137,7 +137,7 @@ pub fn sym_of(cx: Cx, id: Int) -> Sym =
 
 ## Declare a name in the innermost scope (the Kotlin `declare`): re-binding in
 ## the same scope is an error; `_` never binds.
-pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) -> (Cx, Int) =
+pub(pkg) fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) -> (Cx, Int) =
   declare_sym(cx, name, ty, mutable, no_cell(), lo, hi)
 
 fn no_cell() -> Option[(Int, Ty)] = None
@@ -183,7 +183,7 @@ fn declare_sym(
 }
 
 ## Find a name in the scope stack, innermost first (no capture bookkeeping).
-pub fn lookup(cx: Cx, name: String) -> Option[Int] = {
+pub(pkg) fn lookup(cx: Cx, name: String) -> Option[Int] = {
   var i = len(cx.frame.scopes) - 1
   while i >= 0 {
     match map.get(cx.frame.scopes[i], name) {
@@ -196,7 +196,7 @@ pub fn lookup(cx: Cx, name: String) -> Option[Int] = {
 }
 
 ## Every name currently in scope — the "did you mean" candidate pool.
-pub fn local_names(cx: Cx) -> List[String] = {
+pub(pkg) fn local_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
   for sc in cx.frame.scopes { out = out ++ map.keys(sc) }
   out
@@ -211,7 +211,7 @@ fn eff_seen(cx: Cx, e: Eff) -> Bool = {
   false
 }
 
-pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
+pub(pkg) fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
   if e == EPure { return cx }
   if eff_seen(cx, e) { return cx }
   Cx {
@@ -243,7 +243,7 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
 ## the id, not just the name, so two modules declaring the same effect name
 ## cannot shadow each other's evidence; `$` keeps it unspellable, so nothing a
 ## user writes can bind or read it.
-pub fn ev_local_name(cx: Cx, id: Int) -> (Cx, String) = {
+pub(pkg) fn ev_local_name(cx: Cx, id: Int) -> (Cx, String) = {
   let (cx1, info) = declared_effect_info_read(cx, id)
   (cx1, ev_label_name(id, info.name))
 }
@@ -271,7 +271,7 @@ pub fn ev_var_local_name(vid: Int) -> String = ev_var_name(vid)
 ## -- so a program with no effect declarations resolves exactly as before. An
 ## uppercase atom that resolves to nothing would silently become an effect
 ## variable named `Ask`, which is never what the author meant, so it reports.
-pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
+pub(pkg) fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
   resolve_eff_at(cx, atoms, 0, 0)
 
 # ---- evidence in scope ----
@@ -764,7 +764,7 @@ test "assignability reads revalidate opaque visibility in either direction" {
   }
 }
 
-pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
+pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
   if t == target || is_errorish(t) || target == TyError { return true }
   match t {
     TyFn(ps, r, e) ->
@@ -784,7 +784,7 @@ pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
 }
 
 ## Unify branch types (Never and TyError are absorbed); errors mention `what`.
-pub fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (Cx, Ty) = {
+pub(pkg) fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (Cx, Ty) = {
   if a == TyNever || a == TyError { return (cx, b) }
   if b == TyNever || b == TyError { return (cx, a) }
   if a == b { return (cx, a) }
@@ -803,7 +803,7 @@ pub fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (
 ## answers for itself first and then through its target, mirroring
 ## resolve_witness. A projection over a still-rigid subject stays put: the
 ## canonical-form invariant only bans it from ground types.
-pub fn reduce_assoc_read(cx: Cx, t: Ty) -> (Cx, Ty) = {
+pub(pkg) fn reduce_assoc_read(cx: Cx, t: Ty) -> (Cx, Ty) = {
   let answer = reduce_assoc(cx, t)
   (Cx { ..cx, function_reads: semantic_reads.observe(cx.function_reads, semantic_reads.ReducedAssociatedType(t, answer)) }, answer)
 }
@@ -827,7 +827,7 @@ test "associated reduction reads retain changed bindings and unresolved answers"
   assert answer == input && unresolved.function_reads == Some([semantic_reads.ReducedAssociatedType(input, input)])
 }
 
-pub fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
+pub(pkg) fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
   match t {
     TyAssoc(s0, tid, n) -> {
       let s = reduce_assoc(cx, s0)
@@ -980,7 +980,7 @@ fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
 ## way in and the recorded answer on the way out; every domain a fact names is
 ## the same integer in both revisions now, so there was nothing for either
 ## half to do.
-pub fn revalidate_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] = {
+pub(pkg) fn revalidate_read(candidate: Cx, fact: semantic_reads.FunctionRead) -> Option[Bool] = {
   let function_answer = revalidate_function_read(candidate, fact)
   if function_answer != None { return function_answer }
   match revalidate_witness_read(candidate, fact) {
@@ -1016,7 +1016,7 @@ fn revalidate_function_read(candidate: Cx, fact: semantic_reads.FunctionRead) ->
   Some(semantic_reads.observed_equal(fact, recomputed.function_reads))
 }
 
-pub fn revalidate_witness_read(candidate: Cx,
+pub(pkg) fn revalidate_witness_read(candidate: Cx,
   fact: semantic_reads.FunctionRead) -> Option[Bool] = {
   let initial = Cx { ..candidate, function_reads: Some([]) }
   let observed = match fact {
@@ -1378,7 +1378,7 @@ test "unification reads retain complete bindings on success and partial failure"
   }
 }
 
-pub fn unify_into(
+pub(pkg) fn unify_into(
   cx: Cx,
   declared: Ty,
   actual: Ty,
@@ -1570,7 +1570,7 @@ pub fn unify_into(
 ## reads to build the pack. `!io` covering an effect variable is a statement a
 ## signature may make about itself and a value may not make about where it is
 ## going.
-pub fn unify_eff(
+pub(pkg) fn unify_eff(
   cx: Cx,
   declared: Eff,
   actual: Eff,
@@ -1968,7 +1968,7 @@ test "concreteness reads revalidate rigid parameter scope changes" {
   assert fn_concrete
 }
 
-pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
+pub(pkg) fn is_concrete(cx: Cx, t: Ty) -> Bool =
   match t {
     TyVar(_, id) -> {
       for v in map.values(cx.current_tparams) {
@@ -2012,12 +2012,12 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
 ##
 ## An impl ends the walk: the impl is the definition, and what its fields are
 ## made of is its own business.
-pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] = {
+pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] = {
   let (_, answer) = structural_gap_read(cx, tid, t, seen)
   answer
 }
 
-pub fn structural_gap_read(initial: Cx, tid: Int, t: Ty, seen: Set[String]) -> (Cx, Option[Ty]) = {
+pub(pkg) fn structural_gap_read(initial: Cx, tid: Int, t: Ty, seen: Set[String]) -> (Cx, Option[Ty]) = {
   let (presence_cx, present) = implementation_presence_read(initial, tid, t)
   var cx = presence_cx
   if present {
@@ -2163,7 +2163,7 @@ test "witness reads preserve structural recursion and first-gap short circuits" 
 ## One wording for every door. `bad` is the part `tid` has no answer for; when
 ## it is the whole type the message says so directly rather than pointing at
 ## itself.
-pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
+pub(pkg) fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
   var diagnostic_cx = cx
   let rel = if tid == HASH_ID { "hash" } else { "equality" }
   let (what, hint) = match bad {
@@ -2223,14 +2223,14 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
 ## What does work is in `scripts/spike-native/index_dict.dawn`: hand the value
 ## back and do the work at the call site, where the projection has already
 ## been reduced to a concrete type.
-pub fn assoc_witness_hint(cx: Cx, t: Ty) -> (Cx, String) = {
+pub(pkg) fn assoc_witness_hint(cx: Cx, t: Ty) -> (Cx, String) = {
   let (next, text) = type_display_read(cx, t)
   (next, "a bound applies to a type parameter, and `" ++ text ++
       "` is not one -- it is read off whichever impl the caller picks; return the value " ++
       "and do this at the call site, where its type is concrete")
 }
 
-pub fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: Int) -> Cx = {
+pub(pkg) fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: Int) -> Cx = {
   let (message_cx, text) = type_display_read(cx, t)
   let (hint_cx, hint) = assoc_witness_hint(message_cx, t)
   cerr_h(hint_cx, "no `" ++ trait_name ++ "` for the projection `" ++ text ++ "`",
@@ -2384,7 +2384,7 @@ test "main cannot owe a declared effect" {
 }
 
 ## Unary operators (the Kotlin inferExpr's Unary arm).
-pub fn check_unary(
+pub(pkg) fn check_unary(
   cx: Cx,
   op: UnOp,
   t: Ty,
@@ -2519,7 +2519,7 @@ test "witness reads retain opaque ordering fallback before the scalar fast path"
   assert witness == Some(WConcrete(EQ_ID, TyInt)) && general.diags == []
 }
 
-pub fn resolve_ord_witness(initial: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
+pub(pkg) fn resolve_ord_witness(initial: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
   var cx = initial
   if is_errorish(t) { return (cx, no_wit()) }
   # The same first question `resolve_witness` asks, and for the same reason:
@@ -2599,7 +2599,7 @@ pub fn resolve_ord_witness(initial: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
 ## Binary operators over already-checked operand types (the Kotlin checkBinary
 ## after both sides are typed; short-circuit evaluation order is the caller's
 ## job since it must thread Cx through left then right).
-pub fn check_binary_typed(
+pub(pkg) fn check_binary_typed(
   cx: Cx,
   op: BinOp,
   lt: Ty,
@@ -2910,7 +2910,7 @@ test "binary checking covers the operator families" {
 ## name exists here goes through it -- resolution, the "did you mean" pool, and
 ## the language server's tables. When they disagreed, the server offered names
 ## the checker then refused.
-pub fn builtin_visible(cx: Cx, hidden: Set[String], name: String) -> Bool =
+pub(pkg) fn builtin_visible(cx: Cx, hidden: Set[String], name: String) -> Bool =
   cx.is_std_module || not set.has(hidden, name)
 
 ## The builtin table as visible from this module: user-code resolution skips
@@ -2922,7 +2922,7 @@ pub fn builtin_visible(cx: Cx, hidden: Set[String], name: String) -> Bool =
 ## which is a third build of the same map, since the intrinsic table starts
 ## from `builtins()`. Three tables per unresolved name, on the path every name
 ## in a module walks.
-pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
+pub(pkg) fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
   let sig = match map.get(cx.bins, name) {
     None -> return None
     Some(s) -> s
@@ -2933,7 +2933,7 @@ pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
 ## `bins` keeping only what `cx`'s module may name. The language server builds
 ## its table once per query and every consumer -- hover, go to definition,
 ## completion -- reads it, so filtering here is what keeps them all honest.
-pub fn visible_bins(bins: Map[String, Sig], cx: Cx) -> Map[String, Sig] = {
+pub(pkg) fn visible_bins(bins: Map[String, Sig], cx: Cx) -> Map[String, Sig] = {
   if cx.is_std_module { return bins }
   let hidden = cx.hidden_bins
   var out: Map[String, Sig] = map.empty()
@@ -2947,7 +2947,7 @@ pub fn visible_bins(bins: Map[String, Sig], cx: Cx) -> Map[String, Sig] = {
 ## The visible builtin names — the "did you mean" pool half.
 ## Resolution for a called/read function name: local decls → std → builtins
 ## (spec §10.6 — the shadowing is total in this module).
-pub fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
+pub(pkg) fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
   match map.get(cx.fns, name) {
     Some(s) -> Some(s)
     None ->
@@ -2960,7 +2960,7 @@ pub fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
 ## Observe the answer at the lookup boundary, including absence. The pure
 ## compatibility lookup above remains available to tooling; recording is
 ## explicit because pure decision helpers must thread their reads too.
-pub fn lookup_fn_sig_read(cx: Cx, name: String) -> (Cx, Option[Sig]) = {
+pub(pkg) fn lookup_fn_sig_read(cx: Cx, name: String) -> (Cx, Option[Sig]) = {
   let answer = lookup_fn_sig(cx, name)
   let next = match cx.function_reads {
     None -> cx
@@ -2971,7 +2971,7 @@ pub fn lookup_fn_sig_read(cx: Cx, name: String) -> (Cx, Option[Sig]) = {
 
 ## The candidate pool for "did you mean" on a function name. Synthesized
 ## names (`f$default$k`) are not in it: no typo can mean one.
-pub fn fn_pool(cx: Cx) -> List[String] = {
+pub(pkg) fn fn_pool(cx: Cx) -> List[String] = {
   var out: List[String] = []
   for n in map.keys(cx.fns) {
     if not str.contains(n, "\$") { out = out ++ [n] }
@@ -2979,7 +2979,7 @@ pub fn fn_pool(cx: Cx) -> List[String] = {
   out ++ map.keys(cx.std_fns) ++ visible_builtin_names(cx)
 }
 
-pub fn visible_builtin_names(cx: Cx) -> List[String] = {
+pub(pkg) fn visible_builtin_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
   for n in map.keys(cx.bins) {
     if builtin_visible(cx, cx.hidden_bins, n) { out = out ++ [n] }
@@ -2989,7 +2989,7 @@ pub fn visible_builtin_names(cx: Cx) -> List[String] = {
 
 ## Candidate order and duplicates are part of the diagnostic input, not a
 ## set of individual positive lookups. Retain the actual pool even if empty.
-pub fn fn_pool_read(cx: Cx) -> (Cx, List[String]) = {
+pub(pkg) fn fn_pool_read(cx: Cx) -> (Cx, List[String]) = {
   let names = fn_pool(cx)
   let next = match cx.function_reads {
     None -> cx
@@ -3170,23 +3170,23 @@ test "internal builtins hide from user code but not std" {
 ## Every diagnostic about crossing a closure boundary asks this first: the author
 ## of a `with` block wrote straight-line statements, so naming "a lambda" would
 ## point at code that is not on the screen.
-pub fn in_with_sugar(cx: Cx) -> Bool =
+pub(pkg) fn in_with_sugar(cx: Cx) -> Bool =
   len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].sugar
 
 ## Is the innermost lambda a `with handle` arm?
-pub fn in_handler_arm(cx: Cx) -> Bool =
+pub(pkg) fn in_handler_arm(cx: Cx) -> Bool =
   len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].arm
 
 ## Is the innermost lambda a *control* arm -- one written with a `resume k`
 ## clause? It answers the whole `with handle` block rather than the operation,
 ## which is what every diagnostic below has to say instead of naming the
 ## operation (docs/oneshot-design.md §11.4).
-pub fn in_control_arm(cx: Cx) -> Bool =
+pub(pkg) fn in_control_arm(cx: Cx) -> Bool =
   len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].ctl
 
 ## The message for a jump that would have to leave a `with` region (spec §4.10),
 ## in the words of whichever of the two closures `with` makes it is standing in.
-pub fn with_cross_msg_cx(cx: Cx, kw: String) -> String =
+pub(pkg) fn with_cross_msg_cx(cx: Cx, kw: String) -> String =
   if in_handler_arm(cx) {
     "`" ++ kw ++ "` cannot cross a `with handle` arm: the arm is a closure the " ++
       "handler calls, not part of the enclosing function"
@@ -3203,7 +3203,7 @@ pub fn with_cross_msg(kw: String) -> String =
 ## at a time: `with` makes two closures the author never spelled -- an arm and
 ## the block remainder -- so saying "lambda" points at code that is not on the
 ## screen (docs/effects-design.md §7.1).
-pub fn assign_across_msg(lc: LambdaCx, name: String) -> (String, String) =
+pub(pkg) fn assign_across_msg(lc: LambdaCx, name: String) -> (String, String) =
   if lc.arm {
     ("cannot assign to `" ++ name ++ "` from inside a `with handle` arm",
       "an arm is a closure and captures by value; hand the value back as the " ++
@@ -3217,7 +3217,7 @@ pub fn assign_across_msg(lc: LambdaCx, name: String) -> (String, String) =
       "lambdas capture by value; use the result of the lambda instead")
   }
 
-pub fn capture_var_msg(lc: LambdaCx) -> (String, String) =
+pub(pkg) fn capture_var_msg(lc: LambdaCx) -> (String, String) =
   if lc.arm {
     ("a `with handle` arm cannot capture `var` bindings (capture is by value)",
       "bind it to a let before the handler, or pass it in as an operation parameter")
@@ -3242,7 +3242,7 @@ pub fn capture_var_msg(lc: LambdaCx) -> (String, String) =
 ## reader is most likely to hit by accident: everything after `with x <- f()`
 ## is a closure handed to `f`, so a cell read down there has left the region
 ## even though nothing on the page looks like it did.
-pub fn capture_cell_msg(lc: LambdaCx, name: String) -> (String, String) =
+pub(pkg) fn capture_cell_msg(lc: LambdaCx, name: String) -> (String, String) =
   if lc.arm {
     ("`" ++ name ++ "` belongs to another handler's `with handle` and cannot be " ++
         "used from this arm",
@@ -3262,7 +3262,7 @@ pub fn capture_cell_msg(lc: LambdaCx, name: String) -> (String, String) =
 ## The value is checked by the caller (recursion lives there); this decides the
 ## target type or errors. Returns Some(target) when a value should be checked
 ## against it, None when the return is malformed (already reported).
-pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
+pub(pkg) fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
   if len(cx.frame.lambda_stack) > 0 {
     # A `with` region is refused outright rather than quietly returning from the
     # synthesized closure: that reads as the enclosing function's return only
@@ -3301,7 +3301,7 @@ pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
 
 ## break/continue — valid only inside a loop of the current function.
 ## Returns the loop's marker id (its span-lo works as identity) or -1.
-pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
+pub(pkg) fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   if len(cx.frame.loop_stack) == 0 {
     return (cerr(cx, "`" ++ kw ++ "` can only be used inside a loop body", lo, hi), false)
   }
@@ -3352,7 +3352,7 @@ fn propagate_msg(cx: Cx, on: String, want: String, got: String) -> String =
   }
 
 ## expr? — unwrap Ok/Some or early-return the Err/None (spec §8.1).
-pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   if is_errorish(ot) { return (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   # the node closes over the result type once it is known
   let node = (t: Ty) => XPropagate(operand, owner_off(cx, lo), owner_off(cx, hi), t)
@@ -3566,7 +3566,7 @@ test "loop jumps respect lambda boundaries" {
 
 ## expr! — Option[T] -> T, panicking on None (spec §8.2). The panic message is
 ## assembled by the caller (it needs source/line info); this checks the type.
-pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+pub(pkg) fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   if is_errorish(ot) { return (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   match ot {
     TyAdt(aid, targs) ->
@@ -3636,7 +3636,7 @@ test "record field reads preserve generic substitution and refusal shortcuts" {
 }
 
 ## Record field access p.x — resolve against the record's single constructor.
-pub fn check_field_access_typed(
+pub(pkg) fn check_field_access_typed(
   initial: Cx,
   tt: Ty,
   target: TExpr,
@@ -3876,7 +3876,7 @@ fn refutable_span_read(cx: Cx, p: Pattern) -> (Cx, Option[(Int, Int)]) =
 
 ## Check one pattern against the scrutinee type, declaring its bindings and
 ## producing the typed pattern (the Kotlin checkPattern).
-pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat) =
+pub(pkg) fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat) =
   match p {
     PWild(_, _) -> (cx, TPWild)
     PBind(name, lo, hi) -> {
@@ -5836,7 +5836,7 @@ fn no_lparams() -> List[LambdaParam] = []
 ## empty effect record (the Kotlin checkComptimeBody's prologue). What comes
 ## back is the whole outgoing frame, which is what makes the restore in
 ## leave_isolated one write instead of eight.
-pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
+pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let empty_d: Map[(Int, Int), Int] = map.empty()
   let fresh_scope: Map[String, Int] = map.empty()
@@ -5859,7 +5859,7 @@ pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
 
 ## Leave the isolated context: every effect the body used is an error (`what`
 ## names the construct), then the frame is restored.
-pub fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: Int) -> Cx = {
+pub(pkg) fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: Int) -> Cx = {
   var cx1 = cx
   for used in cx.frame.used_effects {
     let (wlo, whi, name) = eff_witness_at(cx, used, (blo, bhi, "?"))
@@ -5951,7 +5951,7 @@ test "an isolated context reports its own effects, then restores all eight field
 
 ## Does this expression need an expected type to check at all? (drives the
 ## two-round argument checking; the Kotlin needsExpected.)
-pub fn needs_expected(cx: Cx, e: Expr) -> Bool = {
+pub(pkg) fn needs_expected(cx: Cx, e: Expr) -> Bool = {
   let (_, answer) = needs_expected_read(cx, e)
   answer
 }
@@ -5974,7 +5974,7 @@ fn ctor_needs_expected_read(cx: Cx, cname: String, bare: Bool) -> (Cx, Bool) = {
   }
 }
 
-pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
+pub(pkg) fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
   match e {
     EListLit(elems, _, _) -> {
       if len(elems) == 0 { return (cx, true) }
@@ -6081,12 +6081,12 @@ pub fn needs_expected_read(cx: Cx, e: Expr) -> (Cx, Bool) =
 ## conditional element asks it of its bodies, under the rule the literal
 ## itself uses: one body that types on its own settles the element, so the
 ## whole form needs an expectation only when every body does.
-pub fn needs_expected_elem(cx: Cx, x: ListElem) -> Bool = {
+pub(pkg) fn needs_expected_elem(cx: Cx, x: ListElem) -> Bool = {
   let (_, answer) = needs_expected_elem_read(cx, x)
   answer
 }
 
-pub fn needs_expected_elem_read(cx: Cx, x: ListElem) -> (Cx, Bool) =
+pub(pkg) fn needs_expected_elem_read(cx: Cx, x: ListElem) -> (Cx, Bool) =
   match x {
     LeExpr(e) -> needs_expected_read(cx, e)
     LeSpread(e, _, _) -> needs_expected_read(cx, e)
@@ -6133,7 +6133,7 @@ fn if_body_value(e: Expr) -> Expr =
 ## elsewhere to name, so its written name is its symbol.
 fn emitted_fn_name(s: Sig, written: String) -> String = if s.is_builtin { written } else { s.name }
 
-pub fn check_fn_value(
+pub(pkg) fn check_fn_value(
   initial: Cx,
   name: String,
   f: Sig,
@@ -6402,7 +6402,7 @@ test "fn values instantiate from the expected type" {
 
 ## A constructor used bare as a function value: `map(xs, Some)`. Generics come
 ## from the expected fn type (the Kotlin checkCtorValue).
-pub fn check_ctor_value(
+pub(pkg) fn check_ctor_value(
   initial: Cx,
   aid: Int,
   cslot: Int,
@@ -6477,7 +6477,7 @@ pub fn check_ctor_value(
 ## Satisfy one trait requirement at a use site (the general resolveWitness):
 ## rigid type parameter → the caller's dictionary is forwarded (and captured by
 ## every enclosing lambda); concrete subject → coherence gives the unique impl.
-pub fn resolve_witness(
+pub(pkg) fn resolve_witness(
   initial: Cx,
   trait_id: Int,
   t: Ty,
@@ -7010,7 +7010,7 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
 
 ## Check one expression against an optional expected type (the Kotlin
 ## checkExpr/inferExpr pair). Returns (state, type, typed node).
-pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
+pub(pkg) fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
   let (next, needs) = needs_expected_read(cx, e)
   match see_through_expected(next, needs, expected) {
     Some(t) -> check_expr_at(next, e, Some(t))
@@ -7666,7 +7666,7 @@ fn cell_hid(sym: Sym) -> Option[Int] =
 ## that owns it. `handler_of` is what tells the two apart -- it is `None` on
 ## the sugar remainder and `Some` on the handler's -- and `arm` is what splits
 ## a handler's own two frames.
-pub fn resolve_local(
+pub(pkg) fn resolve_local(
   cx: Cx,
   name: String,
   lo: Int,
@@ -7728,7 +7728,7 @@ pub fn resolve_local(
 ## spellings, populated by the std loader, plus the intrinsics std has since
 ## taken over), else did-you-mean. No version in the message -- the names in
 ## that map left at different times.
-pub fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> (Cx, Option[String]) = {
+pub(pkg) fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> (Cx, Option[String]) = {
   let (cx1, moved) = moved_name_read(cx, name)
   match moved {
     Some(w) -> (cx1, Some("`" ++ name ++ "` is not a builtin; " ++ w))
@@ -13959,7 +13959,7 @@ fn dict_sym_list(cx: Cx, s: Sig) -> List[Int] = {
 
 ## Read the canonical dictionary ABI order from an independently entered
 ## function context. This does not allocate or record semantic observations.
-pub fn function_dictionaries(cx: Cx, s: Sig) -> List[Int] = dict_sym_list(cx, s)
+pub(pkg) fn function_dictionaries(cx: Cx, s: Sig) -> List[Int] = dict_sym_list(cx, s)
 
 ## The shared prologue of checkFn and friends: bind the signature frame and
 ## dictionaries, fresh effect record, one root scope.
@@ -14293,7 +14293,7 @@ fn no_tdefault() -> Option[TDefault] = None
 ## a default like any other; `enter_fn` mints the dictionary symbols and they
 ## are carried out here, because the synthesized function has to bind the very
 ## symbols its body was checked against.
-pub fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefault) !io = {
+pub(pkg) fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefault) !io = {
   let p = d.params[k]
   let de = p.default.expect("parameter default boundary requires a default expression")
   let pty = s.param_tys[k]
@@ -14342,19 +14342,19 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]
 }
 
 ## Check one annotated function body against its signature (the Kotlin checkFn).
-pub fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
+pub(pkg) fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
   check_fn_body(cx0, d, s, dtxs)
 }
 
-pub type FunctionEntry = { cx: Cx, parameters: List[Int] }
+pub(pkg) type FunctionEntry = { cx: Cx, parameters: List[Int] }
 
 ## The canonical ordinary-function prologue, also usable as temporary proof
 ## context. Callers that only validate must keep the original scheduler Cx;
 ## this returned value does not install anything into that immutable input.
 ## Defaults have already run. Final dictionary/evidence collection stays at
 ## body exit so extracting this prologue does not reorder semantic reads.
-pub fn function_entry(cx: Cx, d: FnDecl, s: Sig) -> FunctionEntry = {
+pub(pkg) fn function_entry(cx: Cx, d: FnDecl, s: Sig) -> FunctionEntry = {
   var cx1 = enter_fn(cx, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
@@ -14370,7 +14370,7 @@ pub fn function_entry(cx: Cx, d: FnDecl, s: Sig) -> FunctionEntry = {
 ## Defaults have already been checked in declaration order. Keeping this
 ## boundary separate lets incremental scheduling capture each default's state
 ## without checking it again when only the main expression needs execution.
-pub fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, TFun) !io = {
+pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, TFun) !io = {
   let entry = function_entry(cx, d, s)
   var cx1 = entry.cx
   let psyms = entry.parameters
@@ -14408,14 +14408,14 @@ pub fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) ->
 ## Check the body of a signature-inferred function and seal its signature:
 ## ret = the body's type, eff = the body's effects (or the declared one, which
 ## is then enforced as usual). The Kotlin checkFnInferred.
-pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig) -> (Cx, Sig, TFun) !io = {
+pub(pkg) fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig) -> (Cx, Sig, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
   check_fn_inferred_body(cx0, d, s, dtxs)
 }
 
 ## The inferred counterpart of check_fn_body also publishes the sealed
 ## signature. Replaying defaults must not bypass this module-visible write.
-pub fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, Sig, TFun) !io = {
+pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]]) -> (Cx, Sig, TFun) !io = {
   var cx1 = enter_fn(cx, s, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
@@ -14470,7 +14470,7 @@ pub fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefa
 
 ## Check a trait's default method body against its own signature (T stays
 ## rigid). The Kotlin checkTraitDefault.
-pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, TFun) !io = {
+pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, TFun) !io = {
   var cx1 = enter_fn(cx, s, m2.nlo, m2.nhi)
   var psyms: List[Int] = []
   var i = 0
@@ -14529,7 +14529,7 @@ fn test_sig(name: String) -> Sig =
   }
 
 ## Check one test block: fresh frame, assert allowed, io implicit (spec §3.4).
-pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
+pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   let empty_tp: Map[String, Ty] = map.empty()
   let empty_ev: Map[String, Eff] = map.empty()
   let empty_d: Map[(Int, Int), Int] = map.empty()
@@ -14579,7 +14579,7 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
 
 ## The initializer must be pure, comptime-evaluable, and match the declared
 ## type; only earlier constants are visible (the Kotlin checkConstInit).
-pub fn check_const_init(
+pub(pkg) fn check_const_init(
   cx: Cx,
   d: ConstView,
   declared: Ty,
@@ -15051,12 +15051,12 @@ fn no_tfun() -> Option[TFun] = None
 ## passes 0–4 register declarations, pass 5 checks bodies — inferred functions
 ## first in call-dependency order, then consts, annotated fns, impl methods,
 ## trait defaults, tests.
-pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io =
+pub(pkg) fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io =
   check_module_bodies(check_module_headers(cx, m, env))
 
 ## A same-revision stage product. Syntax and positional signature tables travel
 ## together; this is not permission to reuse headers in a different environment.
-pub type ModuleHeaders = {
+pub(pkg) type ModuleHeaders = {
   syntax: Module,
   cx: Cx,
   sigs: List[Sig],
@@ -15064,7 +15064,7 @@ pub type ModuleHeaders = {
   const_tys: List[Option[Ty]]
 }
 
-pub fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
+pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
   var cx1 = seed_prelude(cx)
   # the header passes below record where each written type reference sat, so
   # the public surface validator can blame the innermost token the author
@@ -15111,7 +15111,7 @@ pub fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> 
 ## Keep checking order separate from emission order. Replayed bodies must use
 ## the same final assembly as cold bodies, including synthesized defaults.
 ## These products still belong to one revision and contain no validity proof.
-pub type ModuleBodies = {
+pub(pkg) type ModuleBodies = {
   cx: Cx,
   functions: List[TFun],
   constants: List[TConst],
@@ -15120,13 +15120,13 @@ pub type ModuleBodies = {
   tests: List[TFun]
 }
 
-pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =
+pub(pkg) fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =
   assemble_module_bodies(check_module_body_products(headers))
 
 ## Preserve the cold pipeline's body-entry lookup, including discarded
 ## diagnostics. Registered impl metadata is not a replacement for this view
 ## of the current context. Compute once per impl, before checking its methods.
-pub fn impl_body_key(cx: Cx, trait_name: String, subject: TypeRef) -> Option[(Int, Ty)] !io =
+pub(pkg) fn impl_body_key(cx: Cx, trait_name: String, subject: TypeRef) -> Option[(Int, Ty)] !io =
   match map.get(cx.traits_by_name, trait_name) {
     Some(t) -> {
       let (_, subj) = resolve_type(cx, subject)
@@ -15138,7 +15138,7 @@ pub fn impl_body_key(cx: Cx, trait_name: String, subject: TypeRef) -> Option[(In
 ## Session state travels through actual body entries in cold scheduling order.
 ## The scheduler still owns method tags and synthesis; executors must not
 ## substitute a saved context for the current entry context.
-pub type BodyExecutor[S] = {
+pub(pkg) type BodyExecutor[S] = {
   function: fn(S, Cx, FnDecl, Sig) -> (S, Cx, TFun) !io,
   inferred_body: fn(S, Cx, FnDecl, Sig) -> (S, Cx, TFun) !io,
   constant: fn(S, Cx, ConstView, Ty, Set[String]) -> (S, Cx, TConst) !io,
@@ -15147,7 +15147,7 @@ pub type BodyExecutor[S] = {
   test_body: fn(S, Cx, String, Expr) -> (S, Cx, TFun) !io
 }
 
-pub fn cold_body_executor[S]() -> BodyExecutor[S] = BodyExecutor {
+pub(pkg) fn cold_body_executor[S]() -> BodyExecutor[S] = BodyExecutor {
   function: (state, cx, d, sig) => {
     let (next, tree) = check_fn(cx, d, sig)
     (state, next, tree)
@@ -15174,7 +15174,7 @@ pub fn cold_body_executor[S]() -> BodyExecutor[S] = BodyExecutor {
   }
 }
 
-pub fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
+pub(pkg) fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
   let executor: BodyExecutor[Unit] = cold_body_executor()
   let (_, products) = execute_module_bodies(headers, (), executor)
   products
@@ -15223,7 +15223,7 @@ fn left(entered: Entered, after: Cx) -> Cx =
   unowned(Cx { ..after,
     syms: tast_positions.symbols(entered.resolver, after.syms, mint_cursor(entered.cx), mint_cursor(after)) })
 
-pub fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
+pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
   var state = initial
   let m = headers.syntax
   # One walk of this module's declarations, the same one the span view on the
@@ -15468,7 +15468,7 @@ test "a typed span cuts the source the declaration actually holds" {
 
 ## No checking or fresh allocation here: descriptor registration and default
 ## synthesis must be identical for freshly checked and reassembled products.
-pub fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
+pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
   var cx1 = products.cx
   var fns_out = products.functions
   # Synthesize the default-value functions (#207 §4.4): one zero-parameter
@@ -17346,7 +17346,7 @@ test "a declared effect crosses a module boundary with its operations" {
 
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
 ## The whole ADT/trait tables ride along — extra entries graft harmlessly.
-pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> ModExports = {
+pub(pkg) fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> ModExports = {
   var fns2: Map[String, Sig] = map.empty()
   var types2: Map[String, Int] = map.empty()
   var aliases2: Map[String, AliasE] = map.empty()

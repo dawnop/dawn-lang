@@ -13,9 +13,12 @@ Roughly two seconds, and it needs nothing but the repo's own toolchain.
 
 The truth is `intrinsics()` in `selfhost/src/check/types.dawn`. `dump/` is an
 ordinary Dawn project with a path dependency on `selfhost`, so it reads that
-table the way any consumer would: import the module, call the function, print
-what it holds. There is no compiler API here and no subcommand of its own,
-because the table needs neither.
+table the way any consumer would: import a module, call a function, print what
+it returns. The function is `builtin_mirror_lines()` in
+`selfhost/src/driver/builtin_mirror.dawn`, which returns the records as
+`List[String]`: reading a signature back needs a checker context, and that
+context is `pub(pkg)`, so the reading happens inside the package and only data
+crosses the boundary. There is no subcommand of its own.
 
 The dump prints four record kinds:
 

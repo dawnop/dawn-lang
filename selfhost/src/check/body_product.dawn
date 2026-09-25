@@ -52,7 +52,7 @@ pub fn apply_changes[K: Eq + Hash, V](current: Map[K, V], writes: List[Change[K,
 
 ## This is still in the producing revision's ID and source coordinate space.
 ## Never install it in another revision before projecting every reference.
-pub type BodyProduct[T] = {
+pub(pkg) type BodyProduct[T] = {
   tree: T,
   # The declaration this body was checked inside, and how many bindings that
   # declaration had minted when it was done. The pair this replaced -- where
@@ -79,8 +79,8 @@ pub type BodyProduct[T] = {
   body_writes: Option[List[write_journal.Key]]
 }
 
-pub alias Product = BodyProduct[TFun]
-pub alias ConstantProduct = BodyProduct[TConst]
+pub(pkg) alias Product = BodyProduct[TFun]
+pub(pkg) alias ConstantProduct = BodyProduct[TConst]
 
 # The Java oracle is a capability, not an equality-comparable value. Capture
 # and replay belong to one owner/lease; that invariant is held by the caller.
@@ -118,11 +118,11 @@ fn environment_unchanged(a: Cx, b: Cx, tracked: Bool) -> Bool =
 
 ## Top-level function/default/method bodies finish their nested frames. This
 ## boundary is not an independently cached expression or suspended lambda.
-pub fn capture(before: Cx, after: Cx, function: TFun) -> Option[Product] = {
+pub(pkg) fn capture(before: Cx, after: Cx, function: TFun) -> Option[Product] = {
   capture_body(before, after, function)
 }
 
-pub fn capture_constant(before: Cx, after: Cx, constant: TConst) -> Option[ConstantProduct] = {
+pub(pkg) fn capture_constant(before: Cx, after: Cx, constant: TConst) -> Option[ConstantProduct] = {
   capture_body(before, after, constant)
 }
 
@@ -132,10 +132,10 @@ fn capture_body[T](before: Cx, after: Cx, tree: T) -> Option[BodyProduct[T]] = {
 
 ## Only the instrumented canonical body producer may use touched-key capture.
 ## The strict extractor above remains an independent completeness oracle.
-pub fn capture_journaled(before: Cx, after: Cx, tree: TFun) -> Option[Product] =
+pub(pkg) fn capture_journaled(before: Cx, after: Cx, tree: TFun) -> Option[Product] =
   capture_with_mode(before, after, tree, true)
 
-pub fn capture_constant_journaled(before: Cx, after: Cx, tree: TConst) -> Option[ConstantProduct] =
+pub(pkg) fn capture_constant_journaled(before: Cx, after: Cx, tree: TConst) -> Option[ConstantProduct] =
   capture_with_mode(before, after, tree, true)
 
 fn touched_changes[K: Eq + Hash, V](before: Map[K, V], after: Map[K, V], keys: List[K],
@@ -229,7 +229,7 @@ fn capture_transition[T](before: Cx, after: Cx, tree: T, tracked: Bool) -> Optio
 ## installing a product in a revision that still has that declaration puts
 ## every row back where it belongs, and a revision that does not have it
 ## failed admission long before this.
-pub fn assemble[T](current: Cx, product: BodyProduct[T]) -> Option[Cx] = {
+pub(pkg) fn assemble[T](current: Cx, product: BodyProduct[T]) -> Option[Cx] = {
   if slots_of(current, product.owner_decl) > product.owner_slots { return None }
   Some(Cx {
     ..current,
@@ -254,13 +254,13 @@ pub opaque type Installation = InstallationData
 ## The recording owner must supply its actual scheduler input here. Neither
 ## an old input nor a separately supplied output can certify a transition.
 ## Capture refusal retains successful assembly; it is not a cold-check request.
-pub fn assemble_captured(current: Cx, product: Product) -> Option[Installation] = {
+pub(pkg) fn assemble_captured(current: Cx, product: Product) -> Option[Installation] = {
   let after = assemble(current, product)?
   Some(InstallationData { cx: after, tree: product.tree,
     captured: capture_transition(current, after, product.tree, true) })
 }
 
-pub fn installation_output(value: Installation) -> (Cx, TFun, Option[Product]) = {
+pub(pkg) fn installation_output(value: Installation) -> (Cx, TFun, Option[Product]) = {
   let data: InstallationData = value
   (data.cx, data.tree, data.captured)
 }
@@ -326,7 +326,7 @@ fn projected_frame(v: View, f: Frame) -> Option[Frame] = {
 ## domains: a key names its declaration, so it is the same key in both
 ## revisions, and what this still does is the source projection and the
 ## admission refusals that go with it.
-pub fn project(v: View, p: Product) -> Option[Product] = {
+pub(pkg) fn project(v: View, p: Product) -> Option[Product] = {
   project_with_source(v, p, (owner, source) => None)
 }
 
@@ -338,7 +338,7 @@ pub fn project(v: View, p: Product) -> Option[Product] = {
 ## in both revisions. The one thing that moves is the source node an alias
 ## read carries, which belongs to another declaration's file and is the
 ## caller's to supply.
-pub fn projected_reads[T](v: View, p: BodyProduct[T],
+pub(pkg) fn projected_reads[T](v: View, p: BodyProduct[T],
   source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Option[List[FunctionRead]]] =
   semantic_reads.project(p.function_reads, source_value)
 
@@ -347,19 +347,19 @@ pub fn projected_reads[T](v: View, p: BodyProduct[T],
 ## than a rebuilt one, which is the coordinate-free answer: every leaf the
 ## rebuild would map is mapped by the comparison, and both refuse on the same
 ## missing mapping, so skipping the rebuild admits nothing extra.
-pub fn project_without_reads(v: View, p: Product) -> Option[Product] =
+pub(pkg) fn project_without_reads(v: View, p: Product) -> Option[Product] =
   project_body(v, p, tree => body_admit.function(v, tree), (owner, source) => None, false)
 
-pub fn project_constant(v: View, p: ConstantProduct) -> Option[ConstantProduct] = {
+pub(pkg) fn project_constant(v: View, p: ConstantProduct) -> Option[ConstantProduct] = {
   project_constant_with_source(v, p, (owner, source) => None)
 }
 
-pub fn project_with_source(v: View, p: Product,
+pub(pkg) fn project_with_source(v: View, p: Product,
   source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[Product] = {
   project_body(v, p, tree => body_admit.function(v, tree), source_value, true)
 }
 
-pub fn project_constant_with_source(v: View, p: ConstantProduct,
+pub(pkg) fn project_constant_with_source(v: View, p: ConstantProduct,
   source_value: fn(String, TypeRef) -> Option[TypeRef]) -> Option[ConstantProduct] = {
   project_body(v, p, tree => body_admit.constant(v, tree), source_value, true)
 }
