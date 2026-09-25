@@ -52,7 +52,7 @@ pub fn tagged(r: Route, tags: List[String]) -> Route =
 
 ## The metadata the server hands middleware for the matched route (no handler,
 ## so it can derive Show and travel inside a Request).
-pub fn route_meta(r: Route) -> RouteMeta =
+pub(pkg) fn route_meta(r: Route) -> RouteMeta =
   RouteMeta { method: r.method, pattern: r.pattern, tags: r.tags }
 
 ## The dispatch decision: the matched route plus captured params, no path match at
@@ -62,7 +62,7 @@ pub fn route_meta(r: Route) -> RouteMeta =
 ##
 ## A capture's value is a *list of path segments*: one for a `{name}` capture,
 ## however many remain for a trailing `{name*}`. See `match_segs`.
-pub type Dispatch =
+pub(pkg) type Dispatch =
   | Found(route: Route, params: Map[String, List[String]])
   | NoPath
   | WrongMethod
@@ -276,7 +276,7 @@ fn covers(earlier: String, later: String) -> Bool = {
 ## captures, and shadowing — an earlier route of the same method that covers a
 ## later one makes the later one unreachable, which at runtime is a silent 404
 ## on the route its author believes exists. `serve_app` panics on `Err`.
-pub fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
+pub(pkg) fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
   var i = 0
   for r in routes {
     match route_problem(r.pattern) {
@@ -309,7 +309,7 @@ fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
 ## HEAD request with no route of its own is served by the GET route (RFC 9110
 ## §9.3.2) — the server writes that route's status and headers and suppresses
 ## the body (see web/server.write_response). An explicit HEAD route still wins.
-pub fn dispatch_segs(routes: List[Route], method: String, xs: List[String]) -> Dispatch = {
+pub(pkg) fn dispatch_segs(routes: List[Route], method: String, xs: List[String]) -> Dispatch = {
   let d = dispatch_from(routes, method, xs, 0, false)
   match d {
     Found(_, _) -> d

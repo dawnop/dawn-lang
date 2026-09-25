@@ -258,6 +258,11 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
   （包名随 v2 换名规则改），dawnop-site 要提 bump；这与 LIB-16（`Response` 可公开构造非法
   状态）应搭同一个 major 窗口，一次迁移而不是两次。
 - 预计：4 行 + manifest 版本/包名 + 下游一提交。
+- **回填（2026-09-25，web5）：已落地。** 四处 `pub` → `pub(pkg)` 与 manifest 改名
+  `web5 / 5.0.0` 同一提交（中间态若公开面已变而名未变，就是一个违反 semver 的 `web4`）。
+  实测与预计一致：router.dawn 4 行，包内调用点（`server.dawn` 的 `dispatch_segs`/
+  `validate_routes`/`route_meta`/`Dispatch`）与 router.dawn 自己的 test 零改动，
+  `playground` 零改动。同一个 major 的其余改动与理由见 [web5-design.md](web5-design.md)。
 
 ## 十、实现回填
 
