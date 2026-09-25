@@ -301,7 +301,7 @@ pub fn load_directory(dir: String) -> LoadResult !Fs !Proc !Env !io =
 ## Provenance, not spelling: this is the directory `--std` actually answered
 ## from, whatever it is named, and a project directory called `std` still gets
 ## the project diagnostics.
-pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !Env = {
+pub(pkg) fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !Env = {
   let none: Option[LoadResult] = None
   if not io.is_dir(target) { return none }
   if not is_std_dir(std, target) { return none }
@@ -314,7 +314,7 @@ pub fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !Fs !En
 
 ## One command-line target, loaded as a file or a project directory, with the
 ## std directory answered by `std_dir_target` instead.
-pub fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !Env !io =
+pub(pkg) fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !Env !io =
   match std_dir_target(std, target) {
     Some(refusal) -> refusal
     None -> if io.is_dir(target) { load_directory(target) } else { load_file(target) }
@@ -789,7 +789,7 @@ fn topo_sort(
 
 # ---- whole-program analysis ----
 
-pub type CheckedMod = {
+pub(pkg) type CheckedMod = {
   mod_path: String,
   class_name: String,
   path: String,
@@ -803,14 +803,14 @@ pub type CheckedMod = {
 ## A diagnostic raised inside a declaration carries an offset from that
 ## declaration, so nothing may render `diags` without this map; `rendered_diags`
 ## is the only reader that puts the two together.
-pub type Program = { modules: List[CheckedMod], diags: List[LocDiag], decl_spans: Map[String, identity.DeclSpans] }
+pub(pkg) type Program = { modules: List[CheckedMod], diags: List[LocDiag], decl_spans: Map[String, identity.DeclSpans] }
 
 ## Every diagnostic of this program in absolute positions of this revision.
 ## Reached from each render site rather than from program assembly on purpose:
 ## a session hands back diagnostics that a reused step produced against an
 ## older layout, and only the program being rendered knows where their
 ## declarations sit now.
-pub fn rendered_diags(prog: Program) -> List[LocDiag] = {
+pub(pkg) fn rendered_diags(prog: Program) -> List[LocDiag] = {
   var out: List[LocDiag] = []
   for ld in prog.diags { out = out ++ [LocDiag { ..ld, d: identity.absolute(prog.decl_spans, ld.d) }] }
   out
@@ -849,7 +849,7 @@ pub type HeaderProvenance = { world: String, modules: Map[String, Option[allocat
 pub type AnalysisStage = AnalyzeModule | AnalyzeCheck | AnalyzeComptime
 pub alias AnalysisObserver = fn(String, AnalysisStage, Bool) -> Unit !io
 
-pub type ModuleStep = {
+pub(pkg) type ModuleStep = {
   input: LoadedModule,
   checked: CheckedMod,
   diags: List[LocDiag],
@@ -873,7 +873,7 @@ pub type ModuleBodyCounts = {
 
 ## Counts are absent when the canonical cold entry was used without recording,
 ## not a claim that no body was checked. A parse failure has no body execution.
-pub type CachedModuleStep = {
+pub(pkg) type CachedModuleStep = {
   step: ModuleStep, cache: Option[ModuleBodyCache], counts: Option[ModuleBodyCounts]
 }
 
@@ -882,7 +882,7 @@ pub fn module_body_cache_size(cache: ModuleBodyCache) -> Int = {
   scalar_replay.admitted_count(data.admitted)
 }
 
-pub fn initial_carry(std: StdCtx) -> AnalysisCarry = {
+pub(pkg) fn initial_carry(std: StdCtx) -> AnalysisCarry = {
   # The bundled library is already checked; its own sources are given a view
   # when one of them is analyzed again as an ordinary module.
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
@@ -890,7 +890,7 @@ pub fn initial_carry(std: StdCtx) -> AnalysisCarry = {
     identities: std.identities, provenance: None, decl_spans: no_spans }
 }
 
-pub fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarry = {
+pub(pkg) fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarry = {
   var modules: Map[String, Option[allocation.Table]] = map.empty()
   for name in map.keys(std.exports) {
     let origin = match map.get(std.header_origins, name) {
@@ -921,7 +921,7 @@ fn analysis_event(
 
 ## One editor analysis plus the source plan captured for project-aware
 ## completion. A truly standalone buffer has no project plan.
-pub type DocumentAnalysis = {
+pub(pkg) type DocumentAnalysis = {
   prog: Program,
   entry: String,
   plan: Option[ProjectPlan]
@@ -962,13 +962,13 @@ fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env =
 
 ## Check a loaded program in dependency order: each module sees the exports of
 ## everything before it (std pre-seeded); comptime runs on clean modules only.
-pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Env !io =
+pub(pkg) fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Env !io =
   analyze_observed(loaded, std, opts, js, None)
 
 ## The cold path remains the production entry. Observation is opt-in and
 ## cannot add diagnostics, change the wire protocol, or turn an error into a
 ## cached success. The caller owns any timing and counter state.
-pub fn analyze_observed(
+pub(pkg) fn analyze_observed(
   loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig,
   observer: Option[AnalysisObserver]
 ) -> Program !Env !io = {
@@ -987,7 +987,7 @@ pub fn analyze_observed(
 ## One exact transition of the original loop. Even a parse failure publishes
 ## its recovered exports and carry. Keep the full impl-table fold: local_impls
 ## alone is not a proven delta for prelude registration or std rechecking.
-pub fn analyze_module_step(
+pub(pkg) fn analyze_module_step(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver]
 ) -> ModuleStep !Env !io =
@@ -996,7 +996,7 @@ pub fn analyze_module_step(
 ## Explicit integration entry while recording cost and cache admission are
 ## under validation. Existing prefix sessions keep their cold-miss cost until
 ## the recorder is efficient enough and a safe replay path actually exists.
-pub fn analyze_module_step_recorded(
+pub(pkg) fn analyze_module_step_recorded(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver]
 ) -> ModuleStep !Env !io =
@@ -1004,7 +1004,7 @@ pub fn analyze_module_step_recorded(
 
 ## Opt-in session transition. Headers, comptime and export/carry publication
 ## always run against this revision; only validated body executions may reuse.
-pub fn analyze_module_step_cached(
+pub(pkg) fn analyze_module_step_cached(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver], previous: Option[ModuleBodyCache]
 ) -> CachedModuleStep !Env !io =
@@ -1012,7 +1012,7 @@ pub fn analyze_module_step_cached(
 
 ## Consume the loader's immutable proof without reparsing. A refused prepared
 ## proof is distinct from legacy input: it must remain refused, not re-created.
-pub fn analyze_module_step_prepared(
+pub(pkg) fn analyze_module_step_prepared(
   prepared: PreparedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver], previous: Option[ModuleBodyCache]
 ) -> CachedModuleStep !Env !io = {
@@ -1354,7 +1354,7 @@ fn entry_name_of(path: String) -> Option[String] = {
 ## Unlike `resolve`, which skips the seed, the buffer is still analysed: the
 ## name is wrong, the contents are still worth checking, and an editor can
 ## show both at once.
-pub fn analyze_standalone(
+pub(pkg) fn analyze_standalone(
   path: String,
   text: String,
   std: StdCtx,
@@ -1405,7 +1405,7 @@ fn prepare_standalone_with_capture(path: String, text: String, capture: Bool) ->
 ## The identity `analyze_standalone` settled on for its one buffer. Callers
 ## used to write the literal "main", which is what that function proposes and
 ## no longer always what comes back.
-pub fn standalone_entry(prog: Program) -> String =
+pub(pkg) fn standalone_entry(prog: Program) -> String =
   if len(prog.modules) == 0 { "main" } else { prog.modules[0].mod_path }
 
 ## Analyze the file behind an editor buffer (the Kotlin `analyzeDocument`):
@@ -1414,7 +1414,7 @@ pub fn standalone_entry(prog: Program) -> String =
 ## Returns the whole program (cross-file definition targets need the other
 ## modules' ASTs) plus the entry's mod_path; the entry's own diagnostics are
 ## the prog.diags rows whose path is the entry file.
-pub fn analyze_document_planned(
+pub(pkg) fn analyze_document_planned(
   path: String,
   text: String,
   std: StdCtx,
@@ -1450,7 +1450,7 @@ pub fn analyze_document_planned(
 }
 
 ## Compatibility entry for callers that do not retain project planning.
-pub fn analyze_document(
+pub(pkg) fn analyze_document(
   path: String,
   text: String,
   std: StdCtx,

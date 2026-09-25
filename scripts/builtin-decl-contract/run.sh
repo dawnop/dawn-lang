@@ -17,8 +17,8 @@
 #      case. Nothing is written: the working tree never holds a mutant.
 #
 # The dump is an ordinary Dawn project (`dump/`) with a path dependency on
-# `selfhost`. The builtin table is a Dawn value in a Dawn module, so reading it
-# needs no compiler API and no subcommand of its own.
+# `selfhost`; it prints what `driver/builtin_mirror.builtin_mirror_lines()`
+# returns, which is data rather than checker state, and needs no subcommand.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

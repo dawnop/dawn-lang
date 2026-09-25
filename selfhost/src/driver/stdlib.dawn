@@ -50,7 +50,7 @@ fn canon(p: String) -> String !Env =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 ## Everything user-module analysis needs from std.
-pub type StdCtx = {
+pub(pkg) type StdCtx = {
   # modPath → exports, seeded into every program's import environment
   exports: Map[String, ModExports],
   # the implicitly-visible surface: the PRELUDE names only
@@ -361,7 +361,7 @@ pub fn std_load_error_text(e: StdLoadError) -> String !Env = {
 }
 
 ## Load, check and comptime-evaluate the bundled std from a directory.
-pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
+pub(pkg) fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
   # modules.txt decides the whole load, so whichever half answers for it is
   # the std being loaded, and that is what the diagnostics below name.
   let (idx_text, idx_from_dir) = match std_read_from(dir, "modules.txt") {
@@ -548,7 +548,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
 ## a std reached through a symlinked directory is not recognised through the
 ## other spelling. That fails closed: the file checks as user code and reports
 ## the std-only names it uses, which is the pre-existing behaviour.
-pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
+pub(pkg) fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
   # an embedded std has no files at all, and canon() costs a cwd read
   if len(map.keys(std.dir_modules)) == 0 {
     let none: Option[String] = None
@@ -569,7 +569,7 @@ pub fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
 ## The answer is per module, not per std: `std_read_from` falls back file by
 ## file, so a directory missing one module loads it from the embedded copy and
 ## every other module still has a file.
-pub fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
+pub(pkg) fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
   for pr in map.entries(std.dir_modules) {
     let (file, mp) = pr
     if mp == mod_path { return Some(file) }
@@ -579,7 +579,7 @@ pub fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
 
 ## Is `dir` the very directory this compiler read its std from? Used to answer
 ## a directory target as what it is instead of as a malformed project.
-pub fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env =
+pub(pkg) fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env =
   match std.dir {
     Some(d) -> d == canon(dir)
     None -> false

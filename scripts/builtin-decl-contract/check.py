@@ -96,7 +96,7 @@ INTERP = "selfhost/src/ir/interp.dawn"
 
 # The signatures P6 does not read back, held here so that adding one is an
 # edit to the checker rather than a line the dump can quietly stop producing.
-# `roundtrip_skips()` in the dump project names the same set and carries the
+# `roundtrip_skips()` in `selfhost/src/driver/builtin_mirror.dawn` names the same set and carries the
 # reason; this is the assertion that it still names only that.
 ROUNDTRIP_SKIPS = ["cast"]
 

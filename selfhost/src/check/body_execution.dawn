@@ -24,24 +24,24 @@ pub type Input =
   | DefaultInput(trait_name: String, syntax: TraitMethod, signature: Sig)
   | TestInput(name: String, body: Expr)
 
-pub type Saved =
+pub(pkg) type Saved =
   | SavedFunction(key: DeclKey, input: Input, product: Product)
   | SavedConstant(key: DeclKey, syntax: ConstView, declared: Ty, visible: Set[String], product: ConstantProduct)
 
 type State = { entries: List[Saved], checked: Int, refused: Int }
-pub type Recorded = { bodies: ModuleBodies, entries: List[Saved], checked: Int, refused: Int }
+pub(pkg) type Recorded = { bodies: ModuleBodies, entries: List[Saved], checked: Int, refused: Int }
 
 ## Visits include replayed bodies; they are not a count of cold checks.
 ## Refusals describe capture, independently of the executor's reuse verdicts.
-pub type Captured = { bodies: ModuleBodies, entries: List[Saved], visited: Int, capture_refused: Int }
+pub(pkg) type Captured = { bodies: ModuleBodies, entries: List[Saved], visited: Int, capture_refused: Int }
 
 ## An installation request carries no context or historical certificate. Only
 ## the recording wrapper may assemble it against the actual scheduler input.
-pub type FunctionDecision[S] =
+pub(pkg) type FunctionDecision[S] =
   | Checked(state: S, cx: Cx, tree: TFun)
   | Install(hit_state: S, fallback_state: S, product: Product)
 
-pub type ReplayDecisions[S] = {
+pub(pkg) type ReplayDecisions[S] = {
   function: fn(S, Cx, FnDecl, Sig) -> FunctionDecision[S] !io,
   inferred_body: fn(S, Cx, FnDecl, Sig) -> FunctionDecision[S] !io,
   after_inferred: fn(S, Cx, Cx, FnDecl, Sig) -> S
@@ -108,7 +108,7 @@ fn method_key(scope: ModuleKey, trait_name: String, subject: TypeRef, d: FnDecl,
   Some(DeclKey { scope: scope, path: [ImplHead(trait_name, identity.type_shape(subject, binders)), Named(MethodDecl, d.name)] })
 }
 
-pub fn record(scope: ModuleKey, headers: ModuleHeaders) -> Recorded !io = {
+pub(pkg) fn record(scope: ModuleKey, headers: ModuleHeaders) -> Recorded !io = {
   let cold: BodyExecutor[Unit] = checker.cold_body_executor()
   let (_, captured) = record_using(scope, headers, (), cold)
   Recorded { bodies: captured.bodies, entries: captured.entries,
@@ -120,14 +120,14 @@ pub fn record(scope: ModuleKey, headers: ModuleHeaders) -> Recorded !io = {
 ## validator for arbitrary callbacks. Capture happens before the scheduler
 ## resolves declaration-relative positions. Failed capture never executes a
 ## callback again or discards its current result.
-pub fn record_using[S](scope: ModuleKey, headers: ModuleHeaders, initial: S,
+pub(pkg) fn record_using[S](scope: ModuleKey, headers: ModuleHeaders, initial: S,
   supplied: BodyExecutor[S]) -> (S, Captured) !io = {
   record_with_decisions(scope, headers, initial, supplied, None)
 }
 
 ## Only renewal candidates use this request seam. Other body categories and
 ## arbitrary executed callbacks retain the independent strict capture path.
-pub fn record_replaying[S](scope: ModuleKey, headers: ModuleHeaders, initial: S,
+pub(pkg) fn record_replaying[S](scope: ModuleKey, headers: ModuleHeaders, initial: S,
   decisions: ReplayDecisions[S], other: BodyExecutor[S]) -> (S, Captured) !io = {
   record_with_decisions(scope, headers, initial, other, Some(decisions))
 }

@@ -64,7 +64,7 @@ use front/suggest
 
 # ---- fresh ids ----
 
-pub fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
+pub(pkg) fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
   let (cx1, id) = fresh(cx)
   (cx1, TyVar(name, id))
 }
@@ -72,16 +72,16 @@ pub fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
 # ---- clashes between a declaration and an import ----
 
 ## Was a top-level name already shadowing an alias / clashing with an import?
-pub fn alias_shadows(cx: Cx, name: String) -> Bool = map.has(cx.module_aliases, name)
+pub(pkg) fn alias_shadows(cx: Cx, name: String) -> Bool = map.has(cx.module_aliases, name)
 
-pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx =
+pub(pkg) fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx =
   match map.get(cx.imported_names, name) {
     None -> cx
     Some(from) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
         from ++ "`", lo, hi, "drop the import or rename this ${kind}")
   }
 
-pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
+pub(pkg) fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
 
 # ---- the function namespace ----
 
@@ -238,7 +238,7 @@ fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) ->
 ##
 ## The `OPrelude` row is why adding a name to the prelude cannot break a
 ## program that checks today: the new name is either unused or shadowed.
-pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) -> Cx =
+pub(pkg) fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) -> Cx =
   match org {
     OPrelude -> bind_raw(cx, name, sig, org)
     OImport(from) -> bind_import(cx, name, sig, from, lo, hi)
@@ -335,7 +335,7 @@ fn atom_accounted(a: String, declared: List[String], bound: List[String]) -> Boo
 ## `pass_effects` has numbered them) and the module's `effect` declarations,
 ## which alias targets are walked before -- `pass_type_shells` runs ahead of
 ## `pass_effects` because an operation's signature needs the type shells.
-pub fn effect_names_in_scope(cx: Cx, m: Module) -> List[String] = {
+pub(pkg) fn effect_names_in_scope(cx: Cx, m: Module) -> List[String] = {
   var out = map.keys(cx.effects)
   for d in module_effects(m) { out = out ++ [d.name] }
   out
@@ -371,7 +371,7 @@ fn list_has_name(names: List[String], n: String) -> Bool = {
 ## "is a type, not an effect") is reported and always was.
 ##
 ## True in the result means the reference was refused.
-pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef, declared: List[String], bound: List[String]) -> (Cx, Bool) =
+pub(pkg) fn refuse_decl_effvar(cx: Cx, ref: TypeRef, declared: List[String], bound: List[String]) -> (Cx, Bool) =
   match stray_eff_atom(ref, declared, bound) {
     Some(t) -> {
       let (name, lo, hi) = t
@@ -504,7 +504,7 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
 
 ## Pass 0 (the top of the Kotlin check()): prelude ADTs with their constructors,
 ## prelude traits with their methods in the fn namespace, prelude Ord impls.
-pub fn seed_prelude(cx: Cx) -> Cx = {
+pub(pkg) fn seed_prelude(cx: Cx) -> Cx = {
   var cx1 = cx
   # Option/Result/ForeignError and their constructors
   var abn = cx1.adts_by_name
@@ -550,7 +550,7 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
 ## (spec §9). A driver that wired no oracle refuses the declaration here, and
 ## that one refusal covers everything downstream: no import resolves, so no
 ## Java type ever enters the module and no other oracle query can be reached.
-pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
+pub(pkg) fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_java_uses(m) {
     let (enabled_cx, enabled) = java_enabled_read(cx1)
@@ -698,7 +698,7 @@ fn refuse_hard_reserved_decl_name(
 
 ## Pass 1: type headers (shells only), so recursive types resolve. Returns one
 ## Option[Shell] per module type declaration, aligned by index.
-pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
+pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
   var cx1 = cx
   var shells: List[Option[Shell]] = []
   for d in module_types(m) {
@@ -897,7 +897,7 @@ fn accepted_slot(sh: Shell, pi: Int) -> Option[Int] = {
 }
 
 ## Pass 2: constructor field types (may reference any type declared above).
-pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !io = {
+pub(pkg) fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !io = {
   var cx1 = cx
   var di = 0
   for d in module_types(m) {
@@ -1106,7 +1106,7 @@ test "redeclaring Array collides in std and nowhere else" {
 
 ## Pass 2.1: resolve every alias target now, so cycles and unknown names are
 ## reported at the declaration even if the alias is never used.
-pub fn pass_resolve_aliases(cx: Cx) -> Cx !io = {
+pub(pkg) fn pass_resolve_aliases(cx: Cx) -> Cx !io = {
   var cx1 = cx
   for name in map.keys(cx.aliases) {
     let al = map.get(cx1.aliases, name).expect("alias listed")
@@ -1205,7 +1205,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
 ##
 ## Runs after aliases resolve (an operation may name any type) and before
 ## function signatures (a signature may name the effect).
-pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
+pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_effects(m) {
     cx1 = enter_decl_owner(cx1, [Named(EffectDecl, d.name)], d.nlo, d.nhi)
@@ -1403,7 +1403,7 @@ fn resolve_ground_row(cx: Cx, atoms: List[String], nlo: Int, nhi: Int) -> (Cx, O
 
 ## Pass 2.3: register trait headers and method signatures; methods enter the
 ## fn namespace (the Kotlin registerTraits).
-pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
+pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_traits(m) {
     cx1 = enter_decl_owner(cx1, [Named(TraitDecl, d.name)], d.nlo, d.nhi)
@@ -1678,7 +1678,7 @@ test "every prelude trait name is refused as a redefinition" {
 ## than on a depth limit.
 ##
 ## Returns the reason it is not allowed, or None.
-pub fn impl_shape_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> Option[String] = {
+pub(pkg) fn impl_shape_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> Option[String] = {
   match head_of(subject) {
     None -> return Some("`" ++ ty_show(cx.adts, subject) ++ "` has no type constructor")
     Some(_) -> ()
@@ -1746,7 +1746,7 @@ fn head_owner(h: Head) -> Option[String] =
 ## coherence, and method signature matching (the Kotlin registerImpls).
 ## Also returns each impl's resolved method signatures (aligned with
 ## module_impls × methods; None where registration failed), for body checking.
-pub fn pass_register_impls(
+pub(pkg) fn pass_register_impls(
   cx: Cx,
   m: Module,
   shells: List[Option[Shell]]
@@ -2410,7 +2410,7 @@ test "impl registration enforces coherence and signature matching" {
 
 ## Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per
 ## parameter (the Kotlin resolveBounds).
-pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[Int]]) = {
+pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[Int]]) = {
   var all_empty = true
   for tp in tparams {
     if len(tp.bounds) > 0 { all_empty = false }
@@ -2454,7 +2454,7 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
 ## Pass 3: function signatures. Returns the per-decl signature list, aligned
 ## with module_fns order. The effect variables each signature introduced ride
 ## in `Sig.eparams`; body checking reads them back from there (`enter_fn`).
-pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
+pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
   var cx1 = cx
   var sigs: List[Sig] = []
   for d in module_fns(m) {
@@ -2743,7 +2743,7 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
 ## signature inference). The Kotlin declareConst.
 ## Also returns each declared type (aligned with module_consts; None where the
 ## name was skipped for alias/import clashes), for initializer checking.
-pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
+pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
   var cx1 = cx
   var decl_tys: List[Option[Ty]] = []
   var all: Set[String] = set.empty()
@@ -2798,7 +2798,7 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
 ## is an ordinary helper (spec §10.5, SPC-04): the language reserves no other
 ## identifier, and the entry is a property of the program, which the loader
 ## settles, not of the spelling.
-pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
+pub(pkg) fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
   if not cx.is_entry_module { return cx }
   var cx1 = cx
   var i = 0
@@ -3460,7 +3460,7 @@ fn surface_impl(
 ##
 ## Declarations are visited in source order, so the diagnostics of a module
 ## come out in the order its author reads it.
-pub fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
+pub(pkg) fn pass_export_surface(cx: Cx, m: Module) -> Cx = {
   let root = module_root_audience(cx)
   var cx1 = cx
   for d in m.decls {
@@ -3544,7 +3544,7 @@ fn substrate_use(path: String) -> String =
 ## Resolve module imports: whole-module `use` decls become aliases; selective
 ## `use m.{...}` decls inject the named pub members (the Kotlin processImports).
 ## `env` maps modPath → exports for every module checked before this one.
-pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
+pub(pkg) fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
   var cx1 = cx
   for u in module_uses(m) {
     if not cx.is_std_module && list.contains(internal_std_modules(), u.path) {

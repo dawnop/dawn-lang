@@ -53,9 +53,9 @@ pub type Stats = {
   retained_total_modules: Int, retained_total_text_units: Int
 }
 
-pub type Update = { session: Session, program: Program, stats: Stats }
+pub(pkg) type Update = { session: Session, program: Program, stats: Stats }
 
-pub fn new(
+pub(pkg) fn new(
   std: StdCtx, opts: CtOpts, js: Jsig, probe: fn(Jsig) -> JsigProbe !io,
   max_modules: Int, max_text_units: Int
 ) -> Session = {
@@ -71,7 +71,7 @@ pub fn new(
 ## Opt in only when the caller owns the entire analysis lifetime. Limits are
 ## shared by prefix entries and body-cache entries, conservatively charging
 ## each retained representation even when they describe the same module/text.
-pub fn new_with_body_cache(
+pub(pkg) fn new_with_body_cache(
   std: StdCtx, opts: CtOpts, js: Jsig, probe: fn(Jsig) -> JsigProbe !io,
   max_modules: Int, max_text_units: Int, max_products: Int
 ) -> Session = {
@@ -116,12 +116,12 @@ fn unambiguous(std: StdCtx, loaded: LoadResult) -> Bool !Env = {
   true
 }
 
-pub fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io =
+pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io =
   analyze_inputs(owner, loaded, None)
 
 ## Both input views come from one immutable loader value. There is no public
 ## API accepting an arbitrary loaded tree beside another revision's proof.
-pub fn analyze_prepared(owner: Session, prepared: PreparedLoad) -> Update !Env !io =
+pub(pkg) fn analyze_prepared(owner: Session, prepared: PreparedLoad) -> Update !Env !io =
   analyze_inputs(owner, prepared_result(prepared), Some(prepared_modules(prepared)))
 
 fn analyze_inputs(owner: Session, loaded: LoadResult, prepared: Option[List[PreparedModule]]) -> Update !Env !io = {

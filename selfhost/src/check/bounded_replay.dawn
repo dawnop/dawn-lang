@@ -57,7 +57,7 @@ fn syntax(e: Expr) -> Bool = match e {
 
 # This is deliberately separate from the ordinary-callee index. The canonical
 # named-function resolver retains local/std lookup precedence and trait identity.
-pub fn callee(cx: Cx, owner: Option[String], name: String, builtin: Bool, trait_id: Option[Int]) -> Option[Sig] = {
+pub(pkg) fn callee(cx: Cx, owner: Option[String], name: String, builtin: Bool, trait_id: Option[Int]) -> Option[Sig] = {
   if builtin { return None }
   let tid = trait_id?
   let found = checker.lookup_fn_sig(cx, name)?
@@ -87,7 +87,7 @@ pub fn read_allowed(read: FunctionRead) -> Bool = match read {
 
 # The recording selects a bounded claim without inventing an old entry Cx.
 # Candidate entry proof checks every slot, symbol and frame before a hit.
-pub fn recorded(d: FnDecl, sig: Sig, product: Product) -> Option[Map[Int, Sym]] = {
+pub(pkg) fn recorded(d: FnDecl, sig: Sig, product: Product) -> Option[Map[Int, Sym]] = {
   if not header(d, sig) || product.tree.name != d.name || product.tree.sig != sig ||
     len(product.diagnostics) != 0 || len(product.signatures) != 0 || len(product.aliases) != 0 ||
     len(product.bounds) != 0 || len(product.tree.ev_syms) != 0 || len(product.tree.dict_syms) == 0 { return None }
@@ -103,7 +103,7 @@ pub fn recorded(d: FnDecl, sig: Sig, product: Product) -> Option[Map[Int, Sym]] 
   Some(symbols)
 }
 
-pub fn expression(cx: Cx, caller: Sig, e: TExpr) -> Bool = match e {
+pub(pkg) fn expression(cx: Cx, caller: Sig, e: TExpr) -> Bool = match e {
   XInt(_, _, _) -> true
   XLocal(id, name, _, _, ty) -> match map.get(cx.syms, id) {
     Some(symbol) -> {
