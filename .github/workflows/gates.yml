@@ -50,12 +50,13 @@ name: gates
 # construction (gatesplan.py takes the plan as `all`), so the release safety
 # surface is exactly what it was.
 #
-# A third answer since 2026-09-25, the evidence tier: when the head commit
-# carries a verified `gates/maintainer` status the plan skips every job, on
-# a pull request or a push alike (the plan job's note has the checks). That
-# does not reopen the release surface: the guard's first source now also
-# refuses a push run with a skipped job, so such a run is never mistaken for
-# a full one, and its second source is the very status the plan accepted.
+# A third answer since 2026-09-25, the evidence tier: when a pull request's
+# head commit carries a verified `gates/maintainer` status the plan skips
+# every job (the plan job's note has the checks). Pull requests only: a push
+# to main is still the whole set by construction, since ci.yml passes no
+# head sha on a push and the plan reads none. The release guard's first
+# source also refuses a push run with a skipped job, as a second line in
+# case that construction is ever lost.
 #
 # What the subset buys is the queue: 39 jobs
 # and ~23,600 job-seconds per pull request against 20 runners made one run
@@ -276,8 +277,8 @@ on:
         required: false
         default: ''
       # The commit the plan's evidence tier asks about: the pull request's
-      # head, or the pushed sha. Not the merge ref, which no external run
-      # ever tested. Empty means no evidence is looked for.
+      # head, not the merge ref, which no external run ever tested. ci.yml
+      # passes it on pull_request only; empty means no evidence is read.
       head:
         type: string
         required: false
@@ -293,7 +294,8 @@ jobs:
   # on it at 40s and answers `all`.
   #
   # The evidence tier (2026-09-25, docs/gates-external-design.md) comes
-  # before all of that. When the head commit carries a `gates/maintainer`
+  # before all of that, on a pull request only (a push is the whole set by
+  # construction). When the head commit carries a `gates/maintainer`
   # status that release_evidence.py --external-only accepts -- written by
   # github-actions[bot] in a successful verify-external.yml run on the
   # default branch, the same checks the release guard makes -- the whole
@@ -349,12 +351,18 @@ jobs:
         id: evidence
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ inputs.event }}
           HEAD_SHA: ${{ inputs.head }}
           REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          if [ "$EVENT" != pull_request ] || [ -z "$HEAD_SHA" ]; then
+            echo "evidence: not a pull request; planning as usual"
+            echo "accepted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "note: no head sha passed ('$HEAD_SHA'); not looking for evidence"
+            echo "note: the head sha is malformed ('$HEAD_SHA'); not looking for evidence"
             echo "accepted=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
