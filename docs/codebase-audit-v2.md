@@ -232,12 +232,16 @@ Bytes、UTF-8 视图收进可失败的 `body_text`，坏体是带 offset 的 400
 | ID | 静态候选 | 当前口径 |
 |---|---|---|
 | `SEM-04` | comptime Cursor 使用 code-point index，JVM 使用 UTF-16 offset，native 使用 UTF-8 byte offset；折叠出的 Cursor 偏移可能跨执行模型失配 | 只记录静态跨后端候选，未验证可达程序；不另计严重度。 |
-| `LIB-18` | 上游 clean truncation 仍可能被当作成功结束：`ResponseBody.Stream` 不携带 expected length，本层没有可比对的东西 | 只记录静态协议候选，未构造网络探针；不另计严重度。**`LIB-18` 本身已 fixed**（fault 与 panic 已三分并各自记录），这里剩的是它当初连带记的另一半。 |
+| `LIB-18` | 上游 clean truncation 仍可能被当作成功结束：`streaming`（不定长）的 `Stream` 不携带 expected length，本层没有可比对的东西 | 只记录静态协议候选，未构造网络探针；不另计严重度。**`LIB-18` 本身已 fixed**（fault 与 panic 已三分并各自记录），这里剩的是它当初连带记的另一半，且自 `web5` 起只剩不定长那一支：`streaming_sized` 发精确 `Content-Length` 并比对泵出的字节数，短了记 `Truncated`。 |
 
 这两项是当前“先记账、暂不验证”的最高风险候选；它们不改变 v0.60 冻结严重度表，也不在
 99 项之外新增 ID。`LIB-18` 那半要真检测，必须给 `Stream` 带上 expected length，而
 `streaming-response-design.md` §六已把「透传上游 Content-Length」判为纯精修并推迟，且它同时
-是包 API 变更与线行为变更（chunked → 定长）。所以这半的去向是下一个 web major，不是本条目。
+是包 API 变更与线行为变更（chunked → 定长）。`web5 / 5.0.0` 做了这件事
+（`Stream(value, length: Option[Int])` 与 `streaming_sized`，[设计](web5-design.md) §3.4）：
+定长流的干净 EOF 截断现在被计数、记日志，连接在承诺的长度之前结束，客户端也看得出来。
+不定长流仍无从比对，这一支留在表里，直到调用方把长度传进来（dawnop-site 的
+`stream_response` 透传七牛 `Content-Length` 是可选的下一步）。
 
 ### 4.2 冻结 v0.60 P0 候选（`SEM-01` 当前已修）
 

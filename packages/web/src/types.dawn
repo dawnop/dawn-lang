@@ -86,17 +86,24 @@ pub type Request = {
 # large media). This replaces the old body/bin/stream field triple whose
 # "stream wins, then bin" rule lived in a comment (WEB-06): the impossible
 # combinations no longer typecheck. The kind also decides the wire framing —
-# Text/Binary get an exact Content-Length, only Stream is chunked (WEB-07, see
+# Text/Binary get an exact Content-Length, a Stream an exact one when it states
+# its length and chunked framing when it does not (WEB-07, see
 # web/server.body_length). An opaque InputStream isn't printable, so neither
 # this nor Response derives Show (docs/streaming-response-design.md §三).
+#
+# `length` is web5's: a stream with no length cannot tell a truncated upstream
+# from a complete one (a clean EOF looks the same either way), so an upstream
+# that says how long it is (an object store's Content-Length) can pass that on
+# and have it checked.
 ## What a Response carries: nothing, text, bytes, or a live upstream stream.
 ## The kind also decides the framing — Text and Binary get an exact
-## Content-Length, only Stream is chunked.
+## Content-Length, a Stream an exact one when `length` is `Some` and chunked
+## framing when it is `None`.
 pub type ResponseBody =
   | Empty
   | Text(value: String)
   | Binary(value: Bytes)
-  | Stream(value: InputStream)
+  | Stream(value: InputStream, length: Option[Int])
 
 # The representation of a Response, package-private: web/server reads it
 # through `response_rep` to write the wire, and nothing outside the package can
@@ -295,9 +302,24 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 ## delivered everything, so a truncated object is served as a complete one. A
 ## failed *read* is caught and logged (web/server.pump_stream); a short but
 ## orderly one cannot be, since telling them apart needs a length to compare
-## against and nothing carries one.
+## against. When the length is known up front, `streaming_sized` carries it.
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
-  build(status, content_type, Stream(stream))
+  build(status, content_type, Stream(stream, None))
+
+## A streaming body of a stated length: the same constant-memory pump, but
+## framed with an exact Content-Length instead of chunked, so the client knows
+## how much is coming (a progress bar, a range it can resume) and can tell a
+## short body from a complete one. The server counts what it pumped: an
+## upstream that ends early is logged as a truncation, and the connection ends
+## short of the promised length, which is how the client learns of it; one that
+## runs long is cut off by the JDK's fixed-length stream and logged as a failed
+## transfer. A negative length panics.
+pub fn streaming_sized(status: Int, content_type: String, stream: InputStream, length: Int) -> Response = {
+  if length < 0 {
+    panic("illegal stream length ${length}: a byte count is not negative")
+  }
+  build(status, content_type, Stream(stream, Some(length)))
+}
 
 # ---- header hygiene ----
 #
@@ -434,7 +456,9 @@ fn framing_problem(r: ResponseRep, name: String, value: String) -> Option[String
         Empty -> None
         Text(s) -> length_mismatch(name, n, bytes.len(bytes.utf8(s)))
         Binary(b) -> length_mismatch(name, n, bytes.len(b))
-        Stream(_) -> Some("header " ++ name ++ " on a stream of unknown length: the server frames it chunked")
+        Stream(_, Some(k)) -> length_mismatch(name, n, k)
+        Stream(_, None) -> Some("header " ++ name ++
+            " on a stream of unknown length: the server frames it chunked (streaming_sized states a length)")
       }
   }
 }
