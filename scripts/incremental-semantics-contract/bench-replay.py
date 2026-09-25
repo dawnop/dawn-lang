@@ -12,7 +12,9 @@ The first rounds are warmup and are dropped before the median: on these subjects
 the first round runs five to fifteen times slower than steady state, and the
 tail only settles after about ten rounds, so the default drops twelve. Peak RSS is the
 whole process, including JVM startup and the subject's own source generation,
-so it is not a measure of retained semantic-cache memory.
+so it is not a measure of retained semantic-cache memory. It is read from the
+kernel's rusage for the reaped child (`os.wait4`), not from `/usr/bin/time`,
+which minimal images such as the cluster's do not ship.
 --smoke bypasses statistical sampling only for correctness checks; its output
 is explicitly marked and must not be used as performance evidence.
 """
@@ -24,7 +26,9 @@ import platform
 import shutil
 import statistics
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from cold import install_probe
@@ -134,14 +138,73 @@ def self_test():
         pass
     else:
         raise AssertionError("accepted duplicate metadata")
-    print("OK: benchmark units, body denominators, and strict round validation")
+    assert peak_rss_kb(2048, "linux") == 2048 and peak_rss_kb(2048 * 1024, "darwin") == 2048
+    for empty, system in [(0, "linux"), (1023, "darwin")]:
+        try:
+            peak_rss_kb(empty, system)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("accepted an empty peak RSS")
+    # A real child through the same runner: it touches 64 MiB, so its peak is
+    # present, positive, and at least that large whatever the interpreter adds.
+    with open(os.devnull, "w") as sink:
+        touched = run_measured([sys.executable, "-c", "b = bytearray(64 << 20); b[::4096] = b'x' * len(b[::4096])"],
+                               ROOT, sink, sink, 60)
+        assert touched >= 64 * 1024, touched
+        try:
+            run_measured([sys.executable, "-c", "raise SystemExit(3)"], ROOT, sink, sink, 60)
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == 3
+        else:
+            raise AssertionError("accepted a failing target")
+        try:
+            run_measured([sys.executable, "-c", "import time; time.sleep(30)"], ROOT, sink, sink, 0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("a target outlived its timeout")
+    print(f"OK: benchmark units, body denominators, strict round validation, "
+          f"peak RSS from wait4 ({touched} KiB for a 64 MiB child)")
 
 
-def peak_rss_kb(path):
-    for line in path.read_text().splitlines():
-        if "Maximum resident set size" in line:
-            return int(line.rsplit(":", 1)[1].strip())
-    raise RuntimeError("no peak RSS in " + str(path))
+def peak_rss_kb(maxrss, system=None):
+    """`ru_maxrss` in KiB, the unit `/usr/bin/time -v` reported. Linux already
+    counts KiB; macOS counts bytes (getrusage(2) on each), so it is divided."""
+    system = sys.platform if system is None else system
+    kib = maxrss // 1024 if system == "darwin" else maxrss
+    if kib <= 0:
+        raise RuntimeError(f"no peak RSS: ru_maxrss={maxrss} on {system}")
+    return kib
+
+
+def run_measured(command, cwd, stdout, stderr, timeout):
+    """Run one target and return its peak RSS in KiB.
+
+    `os.wait4` reaps the child and hands back the rusage of that child alone,
+    which is what `/usr/bin/time` measured around the same command. A timeout
+    kills the child and fails the target, as `subprocess.run` would."""
+    process = subprocess.Popen(command, cwd=cwd, stdout=stdout, stderr=stderr)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        process.kill()
+
+    timer = threading.Timer(timeout, expire)
+    timer.start()
+    try:
+        _, status, usage = os.wait4(process.pid, 0)
+    finally:
+        timer.cancel()
+    code = os.waitstatus_to_exitcode(status)
+    # The child is already reaped; tell Popen so it does not wait a second time.
+    process.returncode = code
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(command, timeout)
+    if code != 0:
+        raise subprocess.CalledProcessError(code, command)
+    return peak_rss_kb(usage.ru_maxrss)
 
 
 def load_average():
@@ -256,17 +319,15 @@ def main():
         summaries = []
         for index, (mode, kind, size) in enumerate(targets):
             name = f"{index:02d}-{mode}-{kind}-{size}"
-            rss = output / (name + ".rss.txt")
             rounds = MEMORY_ROUNDS if mode == "memory" else args.rounds
-            command = ["/usr/bin/time", "-v", "-o", str(rss), str(java), *JVM_FLAGS,
-                       "-jar", str(jar), mode, kind, str(size), str(rounds)]
+            command = [str(java), *JVM_FLAGS, "-jar", str(jar), mode, kind, str(size), str(rounds)]
             with (output / (name + ".tsv")).open("w") as out, \
                  (output / (name + ".stderr")).open("w") as err:
-                subprocess.run(command, cwd=ROOT, stdout=out, stderr=err, check=True, timeout=3600)
+                peak = run_measured(command, ROOT, out, err, 3600)
             meta, rows = parse_rows((output / (name + ".tsv")).read_text())
             warmup = 0 if mode == "memory" else args.warmup
             summary = summarize(meta, rows, mode, kind, size, rounds, warmup)
-            summary.update(raw=name + ".tsv", peak_rss_kb=peak_rss_kb(rss),
+            summary.update(raw=name + ".tsv", peak_rss_kb=peak,
                            smoke_only=args.smoke)
             summaries.append(summary)
             print(f"{name}: " + "  ".join(
