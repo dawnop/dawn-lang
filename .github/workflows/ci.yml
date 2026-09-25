@@ -42,7 +42,10 @@ jobs:
   # the reusable workflow inspects the checked-out tree.
   secrets:
     runs-on: ubuntu-latest
-    # one git log scan; it has never taken more than a few seconds
+    # two scans of the push's commits; neither has taken more than a few
+    # seconds. The gate-total check measured 0.06s locally on a push range
+    # and 4.3s on the no-base fallback (290 commits, each against its
+    # parent), plus 0.6s for its self-test.
     # budget: floor (seconds-scale job)
     timeout-minutes: 10
     steps:
@@ -56,7 +59,11 @@ jobs:
       # or an insistent system prompt slips it back in. commit-msg catches it
       # locally (opt-in hook), this catches it authoritatively. Such trailers once
       # had to be force-pushed out of history; this exists so that cannot recur.
+      #
+      # The range is worked out once, here, and written to the step's output
+      # for the gate-total check below, so the two read the same commits.
       - name: no Claude attribution in commit messages
+        id: range
         run: |
           before='${{ github.event.before }}'
           if [ "${{ github.event_name }}" = pull_request ]; then
@@ -76,7 +83,23 @@ jobs:
             echo "note: $before is unreachable (force-push?) -- scanning all history"
             range="HEAD"
           fi
+          echo "range=$range" >> "$GITHUB_OUTPUT"
           python3 scripts/check-no-claude-trailer.py --range "$range"
+
+      # A push that raises gates.yml's `# push-total:` or tile.yml's
+      # `# path-total:` says so, `Gate-Budget(<total>): <old>s -> <new>s
+      # <why>`, and a push that lowers push-total by losing a steps-lock step
+      # names the family, `Gate-Retire(<family>): <why>`. The tree half (the
+      # claims fit under the line) is check-gate-budgets.py in tree-policy;
+      # this is the half that needs the push's commits, which is why it lives
+      # in this job (scripts/check-gate-budget-trailers.py has the rules). On
+      # the force-push fallback above, the range is `HEAD` and every commit
+      # that touched a total or the lock is held to its own message.
+      - name: raised gate totals and retired gate steps are declared
+        if: ${{ !cancelled() && steps.range.outputs.range != '' }}
+        run: |
+          python3 scripts/check-gate-budget-trailers.py --selftest
+          python3 scripts/check-gate-budget-trailers.py --range '${{ steps.range.outputs.range }}'
 
   # The event and base sha are what gates.yml's `plan` job decides from: a
   # pull request runs the gate jobs that can see its diff, anything else runs
