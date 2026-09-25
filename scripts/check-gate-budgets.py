@@ -83,6 +83,35 @@ not happened) is reported and not refused; its budget line says "planning
 value" for exactly that reason. The default invocation is unchanged: it is
 what CI runs, and it does not read this file.
 
+THE TOTAL. Every rule above is about one job, and one month showed that no
+set of per-job rules holds the sum. Between 2026-08-25 and 2026-09-24 the
+median successful main push went from 7.2k to 21.6k job-seconds (360 ci.yml
+runs read from the Actions API; agent research of 2026-09-25) while every
+claim stayed under 3x its timeout and under the pole, and every gate was
+green. The growth was new jobs, not slower ones: 09-23 alone added five. A
+per-job rule cannot see a new job that is itself small, and on a run whose
+span is set by the queue (gates.yml's header has the arithmetic) the total is
+what the span follows. So two files carry one more file-level line each:
+
+    # push-total: 29319s   (gates.yml: every job a push to main runs)
+    # path-total: 5484s    (tile.yml: the gates behind a `paths:` trigger)
+
+The sum of that file's `3x <N>s` claims may not exceed the figure. Claims and
+not measurements, for the pole's reason: this runs offline, and the nightly
+audit (`--observed`, below) already holds every claim at or above its job's
+worst run, so the claims' sum bounds what a push really costs. Floor claims
+are outside it, as they are outside the pole. The figure only goes down
+without a word; raising it needs a `Gate-Budget(<name>): <old>s -> <new>s
+<why>` line in the push that raises it, which
+scripts/check-gate-budget-trailers.py holds in ci.yml's secrets job, because
+that is the job that can see a push's commits and this one reads a tree.
+editor-grammar.yml carries no total: its only claims are floors.
+
+A total line that is missing, doubled, not a whole number of seconds, placed
+in a file other than the one named above, or placed in a file with no `3x`
+claim to add up is refused, each for the pole line's reason: a cap that has
+quietly stopped being read is a cap that is gone.
+
 Run with --selftest to see each rule refuse a mutated input; a checker whose
 red has never been observed is a checker nobody can rely on.
 """
@@ -102,6 +131,17 @@ RUN_POLE_RE = re.compile(r"^#\s*run-pole:\s*(\d+)s\b")
 
 MULTIPLE = 3
 RUN_POLE_FILE = "gates.yml"
+
+# `# push-total: <N>s` / `# path-total: <N>s`, at the start of a line like the
+# pole. The value is captured loosely so that a malformed one is refused by
+# name instead of making the line invisible.
+TOTAL_RE = re.compile(r"^#\s*(push-total|path-total):\s*(.*?)\s*$")
+TOTAL_VALUE_RE = re.compile(r"^(\d+)s(?:\s|$)")
+# Which file each total governs. The push total is gates.yml's because every
+# job there runs on every push to main; the path total is tile.yml's because
+# its gates run only on the pushes its `paths:` names, so adding it to the
+# push total would count a cost most pushes do not pay.
+TOTAL_FILES = {"push-total": "gates.yml", "path-total": "tile.yml"}
 
 # Not part of the every-push gate run whose length the pole exists to hold, so
 # their claims are checked against the 3x rule and not against the pole. Their
@@ -313,6 +353,108 @@ def check_run_pole(text, name):
     return problems + check_claims_under_pole(text, name, pole)
 
 
+def claim_total(text, name):
+    """The sum of one file's `3x <N>s` claims, and how many there are.
+
+    Read through collect_budgets, the walk the observation audit uses, so the
+    claims this adds up are exactly the ones --observed holds to real runs.
+    """
+    seconds = []
+    for _job, _line, claim, _minutes in collect_budgets(text, name):
+        three_x = THREE_X_RE.match(claim)
+        if three_x:
+            seconds.append(int(three_x.group(1)))
+    return sum(seconds), len(seconds)
+
+
+def total_lines(text):
+    """-> [(line_number, total name, raw value)] for every total line."""
+    found = []
+    for i, line in enumerate(text.splitlines()):
+        total_match = TOTAL_RE.match(line)
+        if total_match:
+            found.append((i + 1, total_match.group(1), total_match.group(2)))
+    return found
+
+
+def read_total(text, name, total):
+    """-> (problems, seconds or None) for the one `# <total>:` line of a file.
+
+    Shared with scripts/check-gate-budget-trailers.py, which reads the same
+    line at the two ends of a push and must not disagree with this about what
+    the line says.
+    """
+    lines = [(n, raw) for n, which, raw in total_lines(text) if which == total]
+    if not lines:
+        return [
+            f"{name}: no `# {total}:` line -- the cap on the sum of this"
+            " file's budget claims is gone"
+        ], None
+    if len(lines) > 1:
+        where = ", ".join(str(n) for n, _raw in lines)
+        return [
+            f"{name}: {len(lines)} `# {total}:` lines (lines {where});"
+            " exactly one may exist"
+        ], None
+    line_number, raw = lines[0]
+    value = TOTAL_VALUE_RE.match(raw)
+    if not value:
+        return [
+            f"{name}:{line_number}: `# {total}: {raw}` is not a whole number"
+            " of seconds (`<N>s`)"
+        ], None
+    return [], int(value.group(1))
+
+
+def check_totals(texts):
+    """Every total rule over {file name: text} of the workflow directory."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        for line_number, which, _raw in total_lines(text):
+            if TOTAL_FILES[which] != name:
+                problems.append(
+                    f"{name}:{line_number}: a `# {which}:` line belongs in"
+                    f" {TOTAL_FILES[which]}, and one anywhere else is a cap"
+                    " nothing reads"
+                )
+    for total, name in sorted(TOTAL_FILES.items()):
+        if name not in texts:
+            problems.append(f"{name} is missing, so its `# {total}:` line is too")
+            continue
+        text = texts[name]
+        found, cap = read_total(text, name, total)
+        problems.extend(found)
+        if cap is None:
+            continue
+        seconds, count = claim_total(text, name)
+        if not count:
+            problems.append(
+                f"{name}: carries `# {total}: {cap}s` and no `3x <N>s` claim"
+                " for it to cap"
+            )
+        elif seconds > cap:
+            problems.append(
+                f"{name}: its {count} budget claims sum to {seconds}s,"
+                f" {seconds - cap}s over the {cap}s {total} -- retire or slim"
+                f" a job, or raise the line with a `Gate-Budget({total}):"
+                f" {cap}s -> {seconds}s <why>` line in the commit message"
+            )
+    return problems
+
+
+def workflow_texts(root):
+    """{file name: text} of every workflow, budget line or not.
+
+    The totals are read from all of them and not only the budgeted ones, so
+    that a total line moved into a file this check otherwise skips is still
+    seen and refused.
+    """
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(workflow_path(root, ".").glob("*.yml"))
+    }
+
+
 def selftest(root):
     """Every rule must be seen refusing something before its silence means pass."""
     good = """
@@ -457,14 +599,81 @@ jobs:
     else:
         print("  reported (not refused): a job with no observation in the window")
 
+    # The totals. The clean tree is two files, each carrying its own line and
+    # claims under it; every mutant moves one thing, and the claim that pushes
+    # the sum over is the one a new job would be.
+    totals_good = {
+        "gates.yml": """\
+# push-total: 1000s
+jobs:
+  long:
+    # budget: 3x 600s worst observed
+    timeout-minutes: 30
+  short:
+    # budget: 3x 400s worst observed
+    timeout-minutes: 20
+  quick:
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 10
+""",
+        "tile.yml": """\
+# path-total: 300s
+jobs:
+  shard:
+    # budget: 3x 300s worst observed
+    timeout-minutes: 15
+""",
+        "ci.yml": """\
+jobs:
+  secrets:
+    # budget: floor (seconds-scale job)
+    timeout-minutes: 10
+""",
+    }
+    new_job = """  added:
+    # budget: 3x 50s worst observed
+    timeout-minutes: 3
+"""
+
+    def moved(name, text):
+        return {**totals_good, name: text}
+
+    totals_mutants = [
+        ("a new claim that takes the push total over its line",
+         moved("gates.yml", totals_good["gates.yml"] + new_job)),
+        ("a claim restated past the path total",
+         moved("tile.yml", totals_good["tile.yml"].replace("3x 300s", "3x 301s"))),
+        ("the push-total line removed",
+         moved("gates.yml", totals_good["gates.yml"].replace("# push-total: 1000s\n", ""))),
+        ("a second push-total line",
+         moved("gates.yml", "# push-total: 2000s\n" + totals_good["gates.yml"])),
+        ("a push-total that is not a number of seconds",
+         moved("gates.yml", totals_good["gates.yml"].replace("1000s", "about 1000s"))),
+        ("a push-total line in a file with no claim to cap",
+         moved("ci.yml", "# push-total: 1000s\n" + totals_good["ci.yml"])),
+        ("the path total's file left with no claim under it",
+         moved("tile.yml", "# path-total: 300s\njobs: {}\n")),
+    ]
+    if check_totals(totals_good):
+        failures.append(
+            "the unmutated totals input was refused: "
+            + "; ".join(check_totals(totals_good))
+        )
+    if claim_total(totals_good["gates.yml"], "gates.yml") != (1000, 2):
+        failures.append("the claim total no longer adds up the 3x claims only")
+    for label, texts in totals_mutants:
+        if not check_totals(texts):
+            failures.append(f"mutant not caught: {label}")
+        else:
+            print(f"  refused: {label}")
+
     if failures:
         for f in failures:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
-    print(
-        f"selftest: {len(mutants) + len(pole_mutants) + len(observed_mutants)}"
-        " mutant(s) refused, clean inputs accepted"
-    )
+    count = (len(mutants) + len(pole_mutants) + len(observed_mutants)
+             + len(totals_mutants))
+    print(f"selftest: {count} mutant(s) refused, clean inputs accepted")
     return 0
 
 
@@ -533,6 +742,8 @@ def main():
     if not checked:
         print("no workflow files found -- this check saw nothing", file=sys.stderr)
         return 1
+    texts = workflow_texts(root)
+    problems.extend(check_totals(texts))
     for note in notes:
         print(f"note: {note}")
     if problems:
@@ -552,6 +763,11 @@ def main():
         f"OK: {checked} workflow file(s) under a {pole}s pole"
         f" ({', '.join(workflows)}), every timeout backed by a budget line"
     )
+    for total, name in sorted(TOTAL_FILES.items()):
+        _found, cap = read_total(texts[name], name, total)
+        seconds, count = claim_total(texts[name], name)
+        print(f"OK: {name}'s {count} claims sum to {seconds}s, within its"
+              f" {cap}s {total} ({cap - seconds}s to spare)")
     return 0
 
 
