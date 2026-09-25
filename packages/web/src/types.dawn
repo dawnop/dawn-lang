@@ -98,16 +98,62 @@ pub type ResponseBody =
   | Binary(value: Bytes)
   | Stream(value: InputStream)
 
-## One response: status, content type, extra headers in emission order, and a
-## body kind. Build it with the constructors below (`text`, `json_ok`, `raw`,
-## `binary`, `streaming`) and add headers with `with_header`.
-pub type Response = {
+# The representation of a Response, package-private: web/server reads it
+# through `response_rep` to write the wire, and nothing outside the package can
+# name it. Every value of it that exists came out of `build` and `with_header`,
+# which is what lets the checks live there and only there.
+pub(pkg) type ResponseRep = {
   status: Int,
   content_type: String,
   # extra response headers in emission order (Location, Content-Disposition, ...)
   headers: List[(String, String)],
   body: ResponseBody,
 }
+
+# Opaque since web5 (LIB-16). As a public record it could be written as a
+# literal, and a literal skips every constructor: the status range, the
+# content type check and the header rules all held only for the responses that
+# happened to be built the intended way, and web3 3.1.0 had to re-check headers
+# at the write boundary to catch the rest. Now a response comes from the
+# constructors or not at all, so the one set of checks is the whole story and
+# the write boundary checks nothing. This is WAI's shape (an abstract Response,
+# a family of constructors, read-only accessors, one header modifier).
+## One response: status, content type, extra headers in emission order, and a
+## body kind. Build it with the constructors below (`text`, `json_ok`, `raw`,
+## `binary`, `streaming`), add headers with `with_header`, and read it with
+## `response_status`, `response_content_type`, `response_headers` and
+## `response_body`. It is opaque: there is no literal, so there is no way to
+## build one that skipped the checks those constructors make.
+pub opaque type Response = ResponseRep
+
+## The status the response will be sent with (200..599).
+pub fn response_status(r: Response) -> Int = {
+  let rep: ResponseRep = r
+  rep.status
+}
+
+## The value the server sends as Content-Type.
+pub fn response_content_type(r: Response) -> String = {
+  let rep: ResponseRep = r
+  rep.content_type
+}
+
+## The extra headers, in the order `with_header` added them.
+pub fn response_headers(r: Response) -> List[(String, String)] = {
+  let rep: ResponseRep = r
+  rep.headers
+}
+
+## The body the server will send, by kind.
+pub fn response_body(r: Response) -> ResponseBody = {
+  let rep: ResponseRep = r
+  rep.body
+}
+
+## The representation, for web/server to write to the wire. Package-private:
+## there is no conversion back, so the checks at construction are the only
+## way a Response comes to exist.
+pub(pkg) fn response_rep(r: Response) -> ResponseRep = r
 
 # `code` is a machine-readable tag for clients that dispatch on more than the
 # status (None when the message is the whole story); `headers` travel onto the
@@ -212,7 +258,7 @@ fn build(status: Int, content_type: String, body: ResponseBody) -> Response = {
     Some(p) -> panic(p)
     None -> ()
   }
-  Response { status: status, content_type: content_type, headers: [], body: body }
+  ResponseRep { status: status, content_type: content_type, headers: [], body: body }
 }
 
 ## A `text/plain; charset=utf-8` response. Every constructor refuses a status
@@ -333,7 +379,7 @@ pub fn escape_field(s: String) -> String = {
 # `to_string` used to stand where `escape_field` does. On a String it is the
 # identity, so it neither quoted nor escaped anything and only made the two
 # arms look like they disagreed about quoting.
-fn header_problem(r: Response, name: String, value: String) -> Option[String] =
+fn header_problem(r: ResponseRep, name: String, value: String) -> Option[String] =
   if not valid_header_name(name) {
     Some("illegal header name: " ++ escape_field(name))
   } else if not valid_header_value(value) {
@@ -368,7 +414,7 @@ fn header_problem(r: Response, name: String, value: String) -> Option[String] =
 #
 # `name` is a token by the time this runs (header_problem checked it), so it
 # is interpolated raw, as the arm above does.
-fn framing_problem(r: Response, name: String, value: String) -> Option[String] = {
+fn framing_problem(r: ResponseRep, name: String, value: String) -> Option[String] = {
   let lower = str.to_lower(name)
   if lower == "transfer-encoding" {
     return Some("header " ++ name ++ " is the server's to set: the body kind decides the framing")
@@ -425,20 +471,27 @@ fn decimal_length(v: String) -> Option[Int] = {
 ## and `Content-Length` must be a decimal byte count equal to the body's length
 ## (any count on a body with no content, which is how a HEAD answer states the
 ## length of what it does not carry; never on a stream of unknown length), once.
-pub fn with_header(r: Response, name: String, value: String) -> Response =
-  match header_problem(r, name, value) {
+pub fn with_header(r: Response, name: String, value: String) -> Response = {
+  let rep: ResponseRep = r
+  match header_problem(rep, name, value) {
     Some(p) -> panic(p)
-    None -> Response { ..r, headers: r.headers ++ [(name, value)] }
+    None -> ResponseRep { ..rep, headers: rep.headers ++ [(name, value)] }
   }
+}
 
 ## `with_header` for a name or value derived from request input: an illegal one
 ## is a 400 the handler can propagate with `?`, not a panic and never a silent
 ## edit of the value.
-pub fn try_with_header(r: Response, name: String, value: String) -> Result[Response, HttpError] =
-  match header_problem(r, name, value) {
+pub fn try_with_header(r: Response, name: String, value: String) -> Result[Response, HttpError] = {
+  let rep: ResponseRep = r
+  match header_problem(rep, name, value) {
     Some(p) -> Err(http_error(400, p))
-    None -> Ok(Response { ..r, headers: r.headers ++ [(name, value)] })
+    None -> {
+      let out: Response = ResponseRep { ..rep, headers: rep.headers ++ [(name, value)] }
+      Ok(out)
+    }
   }
+}
 
 # A redirect carries no content, so its body is `Empty` rather than an empty
 # `Text`. The wire is the same either way (body_length maps both to -1), but
@@ -826,19 +879,19 @@ test "body_text decodes a valid body and refuses a malformed one at its offset" 
 
 test "response header helpers" {
   let r = with_header(json_ok(JStr("hi")), "X-A", "1")
-  assert r.headers == [("X-A", "1")]
+  assert response_headers(r) == [("X-A", "1")]
   let rd = redirect(302, "/here")
-  assert rd.status == 302
-  assert rd.headers == [("Location", "/here")]
+  assert response_status(rd) == 302
+  assert response_headers(rd) == [("Location", "/here")]
   # a redirect carries no content, and says so: it used to be Text("") — the
   # same bytes on the wire, but the kind is what states the intent
-  assert rd.body == Empty
+  assert response_body(rd) == Empty
   match try_redirect(303, "/there") {
-    Ok(r) -> { assert r.body == Empty }
+    Ok(r) -> { assert response_body(r) == Empty }
     Err(_) -> { assert false }
   }
   let at = attachment("text/markdown", "post.md", "# hi")
-  assert at.headers ==
+  assert response_headers(at) ==
     [("Content-Disposition",
       "attachment; filename=\"post.md\"; filename*=UTF-8''post.md")]
 }
@@ -859,7 +912,7 @@ test "a header that cannot travel is refused, not quietly edited" {
   }
   # a legal header is untouched. In particular it is no longer copied
   # character by character, so it is the very string the caller handed over
-  assert with_header(raw(200, "text/plain", ""), "X-A", "a b\tc").headers == [("X-A", "a b\tc")]
+  assert response_headers(with_header(raw(200, "text/plain", ""), "X-A", "a b\tc")) == [("X-A", "a b\tc")]
 }
 
 test "the header predicates say exactly what may travel" {
@@ -948,17 +1001,17 @@ test "a refused header names what it refused without repeating it verbatim" {
 
 test "attachment quotes and encodes the filename" {
   let plain = attachment("text/plain", "report.txt", "")
-  assert plain.headers ==
+  assert response_headers(plain) ==
     [("Content-Disposition",
       "attachment; filename=\"report.txt\"; filename*=UTF-8''report.txt")]
   # a quote used to end the parameter and let a ';' add more
   let evil = attachment("text/plain", "a\";x=\"b", "")
-  assert evil.headers ==
+  assert response_headers(evil) ==
     [("Content-Disposition",
       "attachment; filename=\"a\\\";x=\\\"b\"; filename*=UTF-8''a%22%3Bx%3D%22b")]
   # non-ASCII survives only in filename*, which is what clients read
   let cn = attachment("text/plain", "报告.txt", "")
-  assert cn.headers ==
+  assert response_headers(cn) ==
     [("Content-Disposition",
       "attachment; filename=\".txt\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.txt")]
 }
@@ -970,34 +1023,34 @@ test "redirect targets cannot inject headers either" {
     Ok(_) -> { assert false }
     Err(m) -> { assert str.contains(m.message, "illegal value for header Location") }
   }
-  assert redirect(302, "/here").headers == [("Location", "/here")]
+  assert response_headers(redirect(302, "/here")) == [("Location", "/here")]
 }
 
 test "constructors keep their shapes: status, content type, body kind" {
   let t = text(201, "made")
-  assert t.status == 201
-  assert t.content_type == "text/plain; charset=utf-8"
-  assert t.headers == []
-  match t.body {
+  assert response_status(t) == 201
+  assert response_content_type(t) == "text/plain; charset=utf-8"
+  assert response_headers(t) == []
+  match response_body(t) {
     Text(s) -> { assert s == "made" }
     _ -> { assert false }
   }
   let j = json_ok(JStr("hi"))
-  assert j.status == 200
-  assert j.content_type == "application/json; charset=utf-8"
-  match j.body {
+  assert response_status(j) == 200
+  assert response_content_type(j) == "application/json; charset=utf-8"
+  match response_body(j) {
     Text(s) -> { assert s == "\"hi\"" }
     _ -> { assert false }
   }
   let r = raw(418, "text/csv", "a,b")
-  assert r.content_type == "text/csv"
-  match r.body {
+  assert response_content_type(r) == "text/csv"
+  match response_body(r) {
     Text(s) -> { assert s == "a,b" }
     _ -> { assert false }
   }
   let b = binary(200, "application/octet-stream", bytes.utf8("\u{0}\u{1}"))
-  assert b.status == 200
-  match b.body {
+  assert response_status(b) == 200
+  match response_body(b) {
     Binary(bb) -> { assert bb == bytes.utf8("\u{0}\u{1}") }
     _ -> { assert false }
   }
@@ -1015,23 +1068,23 @@ test "http_error fills the new fields empty; error_response carries error header
     headers: [("WWW-Authenticate", "Basic realm=\"dawn\"")],
   }
   let r = error_response(ch)
-  assert r.status == 401
-  assert r.headers == [("WWW-Authenticate", "Basic realm=\"dawn\"")]
+  assert response_status(r) == 401
+  assert response_headers(r) == [("WWW-Authenticate", "Basic realm=\"dawn\"")]
   # a plain error adds no headers
-  assert error_response(e).headers == []
+  assert response_headers(error_response(e)) == []
 }
 
 test "the error body's key is the default one, and configurable" {
   let e = http_error(404, "nope")
   # default wording: the neutral {"error": ...}
-  assert error_response(e).body == Text("{\"error\":\"nope\"}")
+  assert response_body(error_response(e)) == Text("{\"error\":\"nope\"}")
   # an application whose clients read {"detail": ...} (FastAPI's shape, which
   # this used to be hardcoded to) states it
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail" }
-  assert error_response_with(fastapi, e).body == Text("{\"detail\":\"nope\"}")
+  assert response_body(error_response_with(fastapi, e)) == Text("{\"detail\":\"nope\"}")
   # the configured rendering is otherwise the same response
-  assert error_response_with(fastapi, e).status == 404
-  assert error_response_with(fastapi, e).content_type == "application/json; charset=utf-8"
+  assert response_status(error_response_with(fastapi, e)) == 404
+  assert response_content_type(error_response_with(fastapi, e)) == "application/json; charset=utf-8"
 }
 
 test "the 422 wording separates name from complaint, by configuration" {
@@ -1124,7 +1177,7 @@ test "Transfer-Encoding is the server's, in any spelling" {
 
 test "a Content-Length must be the body's length, where the body has one" {
   # equal to the UTF-8 byte count: accepted, and the header travels as given
-  assert with_header(text(200, "中文"), "Content-Length", "6").headers ==
+  assert response_headers(with_header(text(200, "中文"), "Content-Length", "6")) ==
     [("Content-Length", "6")]
   assert refusal(() => with_header(binary(200, "application/octet-stream", bytes.utf8("abcd")),
     "content-length", "4")) == None
@@ -1162,14 +1215,14 @@ test "an HttpError out of range renders as the neutral 500, headers kept" {
     status: 42, message: "leaks nothing", code: None, headers: [("Vary", "Origin")],
   }
   let r = error_response(bad)
-  assert r.status == 500
-  assert r.body == Text("{\"error\":\"internal server error\"}")
+  assert response_status(r) == 500
+  assert response_body(r) == Text("{\"error\":\"internal server error\"}")
   # the CORS stamp rides on the headers, and an error the page cannot read is
   # what LIB-10 was about
-  assert r.headers == [("Vary", "Origin")]
+  assert response_headers(r) == [("Vary", "Origin")]
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail", internal_message: "oops" }
-  assert error_response_with(fastapi, HttpError { ..bad, status: 1000 }).body ==
+  assert response_body(error_response_with(fastapi, HttpError { ..bad, status: 1000 })) ==
     Text("{\"detail\":\"oops\"}")
   # in range is untouched
-  assert error_response(http_error(418, "teapot")).status == 418
+  assert response_status(error_response(http_error(418, "teapot"))) == 418
 }

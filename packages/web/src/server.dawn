@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, valid_header_name, valid_header_value, escape_field}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -202,68 +202,21 @@ fn pump_stream(s: InputStream, out: OutputStream) -> Unit !io =
     PumpPanicked(m) -> println("stream body panicked: ${m}")
   }
 
-# Everything about to be handed to jdk.httpserver that is a header field,
-# checked against the same predicates `with_header` applies at construction
-# time; None when the response can travel as written.
-#
-# Defense in depth, and not redundant. `with_header`/`try_with_header` guard the
-# headers list, but two things reach the wire around them: a `Response` built as
-# a record literal (nothing stops that, and the framework's own error rendering
-# is one), and `content_type`, which `raw`/`binary`/`streaming` take as a
-# parameter and this function then `set`s as Content-Type without any check at
-# all — the one unvalidated path that needs no record literal to reach.
-#
-# The JDK's own Headers.checkValue is not the same predicate: it permits an
-# obs-fold ("\r\n" followed by SP or HTAB), which RFC 9110 §5.5 deprecated and
-# `valid_header_value` refuses. Values in that gap pass the JDK and would go out
-# folded.
-#
-# Pure, so it can be tested without a server.
-fn response_problem(r: Response) -> Option[String] = {
-  if not valid_header_value(r.content_type) {
-    return Some("illegal Content-Type: " ++ escape_field(r.content_type))
-  }
-  for h in r.headers {
-    let (k, v) = h
-    if not valid_header_name(k) {
-      return Some("illegal header name: " ++ escape_field(k))
-    }
-    if not valid_header_value(v) {
-      return Some("illegal value for header " ++ k ++ ": " ++ escape_field(v))
-    }
-  }
-  None
-}
-
-# What goes out instead of a response that cannot travel. The neutral default
-# wording rather than the application's `ErrorFormat`: this is not the
-# application's error path (that one is rendered inside `serve_through`, under
-# the configured wording, and its headers pass the check above) but a refusal to
-# emit a response the program built wrong.
-fn withheld_response() -> Response =
-  error_response(http_error(500, default_errors().internal_message))
-
 # Write a response. The body kind decides the framing (see body_length). A
 # HEAD request gets the status and headers its GET produced — including the
 # exact Content-Length when the length is known — but no body bytes (RFC 9110
 # §9.3.2). jdk.httpserver's documented way to answer HEAD is to set
 # Content-Length manually and pass -1, which is what the HEAD branch does.
 #
-# A response carrying a header that cannot travel is replaced here, not
-# panicked over: this runs outside `handle`'s isolation barrier, so a panic
-# would reset the connection instead of rendering anything.
+# Nothing here re-checks the response. web3 3.1.0 put a second copy of the
+# header predicates at this boundary (`response_problem`, withholding a
+# response that failed them as a neutral 500), because a record literal could
+# skip every constructor. Response is opaque since web5: the constructors and
+# `with_header` are the only way one comes to exist, and they refuse there, so
+# a second copy of the rule here could only drift from the first.
 fn write_response(ex: HttpExchange, response: Response) -> Unit !io = {
   with x <- bracket(ex, close_exchange)
-  let r = match response_problem(response) {
-    None -> response
-    Some(p) -> {
-      println("response withheld: ${p}")
-      # the rejected response may own an upstream stream, and nothing else
-      # will close it
-      drop_body(response.body)
-      withheld_response()
-    }
-  }
+  let r = response_rep(response)
   let headers = x.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
@@ -1066,74 +1019,30 @@ test "the four no-content status classes carry no body, whatever the handler bui
   assert body_length(305, Text("hello")) == 5
 }
 
-test "response_problem passes what can travel and names what cannot" {
-  assert response_problem(text(200, "ok")) == None
-  assert response_problem(with_header(text(200, "ok"), "X-A", "a b\tc")) == None
-  # content_type is handed to headers.set unchecked here; the constructors
-  # refuse it now, so only a record literal reaches this far
-  match response_problem(Response {
-    status: 200, content_type: "text/plain\r\nX-Evil: 1", headers: [], body: Text(""),
-  }) {
-    Some(p) -> { assert str.contains(p, "illegal Content-Type") }
-    None -> { assert false }
-  }
-  # the gap between the two predicates: the JDK's checkValue permits an
-  # obs-fold ("\r\n" + SP), valid_header_value refuses it
-  match response_problem(Response {
-    status: 200, content_type: "text/plain\r\n x", headers: [], body: Text(""),
-  }) {
-    Some(p) -> { assert str.contains(p, "illegal Content-Type") }
-    None -> { assert false }
-  }
-  # a record literal is how a header gets in without with_header's guard
-  match response_problem(Response {
-    status: 200, content_type: "text/plain", headers: [("X Bad", "1")], body: Empty,
-  }) {
-    Some(p) -> { assert str.contains(p, "illegal header name") }
-    None -> { assert false }
-  }
-  match response_problem(Response {
-    status: 200, content_type: "text/plain", headers: [("X-Note", "a\r\n b")], body: Empty,
-  }) {
-    # the complaint itself stays on one line: a value refused for carrying a
-    # CRLF must not forge a log line on the way to being reported
-    Some(p) -> { assert p == "illegal value for header X-Note: a\\r\\n b" }
-    None -> { assert false }
-  }
-  # only the offending pair is named; the legal ones around it are not a problem
-  assert response_problem(Response {
-    status: 200, content_type: "text/plain",
-    headers: [("X-A", "1"), ("X-B", "2")], body: Empty,
-  }) == None
-}
+# Test-only: handlers that build a response the constructors refuse.
+fn interim_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(100, "x"))
 
-# Test-only: a response built as a record literal, which is how a header value
-# that never went through `with_header` reaches the writer.
-fn folded_header_response() -> Response =
-  Response {
-    status: 200, content_type: "text/plain; charset=utf-8",
-    headers: [("X-Note", "a\r\n b")], body: Text("ok"),
-  }
+fn chunked_claim_handler(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(with_header(text(200, "hello"), "Transfer-Encoding", "chunked"))
 
-test "a response carrying a header that cannot travel is withheld, not written" {
+test "a response the constructors refuse is a 500 inside the handler's isolation" {
+  # web3 3.1.0 caught an illegal header at the write boundary and withheld the
+  # response there. There is nothing left to catch: Response is opaque, the
+  # refusal is a panic where it is built, and that is inside the handler, so
+  # the ordinary per-request isolation renders it
+  let routes = [route_get("/interim", interim_handler), route_get("/te", chunked_claim_handler)]
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  srv.createContext("/folded", ex => write_response(ex, folded_header_response()))
-  srv.createContext("/ctype", ex => write_response(ex, Response {
-    status: 200, content_type: "text/plain\r\n x", headers: [], body: Text("ok"),
-  }))
-  srv.createContext("/ok", ex => write_response(ex, text(200, "ok")))
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
   let port = srv.getAddress()!.getPort()
-  # a 500 instead, and not one byte of the header that could not travel
-  let folded = raw_http(port, get_line("/folded"))
-  assert str.starts_with(folded, "HTTP/1.1 500")
-  assert not str.contains(str.to_lower(folded), "x-note")
-  let ctype = raw_http(port, get_line("/ctype"))
-  assert str.starts_with(ctype, "HTTP/1.1 500")
-  # ...and an ordinary response is untouched
-  let ok = raw_http(port, get_line("/ok"))
-  assert str.starts_with(ok, "HTTP/1.1 200")
-  assert str.contains(ok, "ok")
+  # a final 100 used to reach the wire, and the client waited for ever
+  let interim = raw_http(port, get_line("/interim"))
+  assert str.starts_with(interim, "HTTP/1.1 500")
+  assert str.contains(interim, "{\"error\":\"internal server error\"}")
+  # a Transfer-Encoding next to the JDK's Content-length never goes out
+  let te = raw_http(port, get_line("/te"))
+  assert str.starts_with(te, "HTTP/1.1 500")
+  assert not str.contains(str.to_lower(te), "transfer-encoding")
   srv.stop(0)
 }
 

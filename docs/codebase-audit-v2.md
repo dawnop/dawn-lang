@@ -103,20 +103,19 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（88）
+#### 当前 fixed（89）
 
 - 语法（19）：`SYN-01`–`SYN-19`。
 - 语义（14）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-10`–`SEM-18`。
 - 架构（7）：`ARC-03`–`ARC-06`、`ARC-09`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
-- 库（18）：`LIB-01`–`LIB-15`、`LIB-17`–`LIB-19`。
+- 库（19）：`LIB-01`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
-#### 当前 partial（6）
+#### 当前 partial（5）
 
 - 语义（1）：`SEM-04`。
 - 架构（4）：`ARC-01`、`ARC-02`、`ARC-08`、`ARC-11`。
-- 库（1）：`LIB-16`。
 
 #### 当前 open（3）
 
@@ -127,9 +126,9 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**88 fixed + 6 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
+当前计数自检：**89 fixed + 5 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
 语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **7/4/2/0**、工具链 **17/0/0/0**、
-库 **18/1/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
+库 **19/0/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
@@ -201,6 +200,14 @@ Bytes、UTF-8 视图收进可失败的 `body_text`，坏体是带 offset 的 400
 腿——跨串误用与三种货币——**仍成立**，等维护者裁决，所以是 partial 而不是 fixed。
 顺带推翻两条：`std/cursor.dawn` 那句把错答案写成规格的文档已删；「给 `char`/`next` 补边界
 保险丝」不用做，两个后端本来就一致地钳位/panic，而真正的缺陷落在范围内、保险丝抓不到。
+
+随后 `LIB-16` partial → fixed，搭 `web5 / 5.0.0` major（[设计](web5-design.md)）：`Response`
+成为 `pub(pkg)` 表示上的 `pub opaque type`，只读访问器取代字段，构造器与 `with_header` 是
+唯一产生途径，校验只在那里一份（status 200..599、`content_type`、名值、`Transfer-Encoding`
+与 `Content-Length` 两个帧头），写边界的 `response_problem` 删除。受检
+`HeaderName`/`HeaderValue` 裁定不做，理由写在该条目：opaque 之后 `with_header` 是写入头的
+唯一路径，WAI、Plug、http4s、Ktor 同样是字符串加单点校验。同一个 major 收了 `LIB-13` 的
+残差（四个 seam 改 `pub(pkg)`）。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 

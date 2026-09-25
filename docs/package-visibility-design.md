@@ -263,6 +263,10 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
   实测与预计一致：router.dawn 4 行，包内调用点（`server.dawn` 的 `dispatch_segs`/
   `validate_routes`/`route_meta`/`Dispatch`）与 router.dawn 自己的 test 零改动，
   `playground` 零改动。同一个 major 的其余改动与理由见 [web5-design.md](web5-design.md)。
+  同一个 major 里 LIB-16 用上了 §4.3 表没有现成夹具的一格：`pub opaque type Response` 指向
+  `pub(pkg) type ResponseRep`。实测放行（公开面只查 identity 不查 representation），包外
+  引入表示报 `` `ResponseRep` is package-private to package `web5` ``，读字段报
+  `` `.` field access needs a record value, got Response ``。
 
 ## 十、实现回填
 
