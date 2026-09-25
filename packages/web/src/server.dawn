@@ -801,16 +801,16 @@ pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
   held.server.stop(grace_secs)
 }
 
+# `serve_app_bounded(port, max_body, ...)` sat between these two until web5.
+# It was `serve_app_with` with one field of the config spelled as a parameter,
+# and the only place the `0 = unbounded` reading of a body ceiling was written
+# down as API; a program that wants a ceiling other than the default states it
+# in the config, like everything else it configures.
 ## The old shape, kept: start + join on 127.0.0.1, default body ceiling,
 ## default error wording. Most programs want exactly this.
 pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
-  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
-
-## Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
-## is what this framework did before the ceiling existed).
-pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
   serve_app_with(
-    ServerConfig { host: "127.0.0.1", port: port, max_body: max_body, errors: default_errors() },
+    ServerConfig { host: "127.0.0.1", port: port, max_body: DEFAULT_MAX_BODY, errors: default_errors() },
     routes, middleware)
 
 ## start + announce + join under a config the caller owns — the entry point for
