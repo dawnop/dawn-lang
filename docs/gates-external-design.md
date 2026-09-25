@@ -521,8 +521,8 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 
 - `release_evidence.py --selftest`：`--external-only` 8 例（接受、不查 ci、无 status、个人账户、`target_url` 指向 `ci.yml` 的 run、pending、被 failure 覆盖、API 不可读退出 2）；默认模式加 3 例与一条单独断言（证据档运行不算第 1 条）。
 - `plan.py --selftest`：从 `gates.yml` 取出 plan job 的两步 shell，桩 `gh` 下跑 6 例；接受时规划步的 `GITHUB_OUTPUT` 必须恰为 `all=false\njobs=[]\n`，其余必须落到规划器并在日志里写出原因。`--check-wiring` 新增 4 个变异体：`ci.yml` 不传 `head`、删掉证据步骤、plan job 丢 `statuses: read`、`ci.yml` 的 test job 丢 `actions: read`。
-- `publish.py --selftest`：`--rerun-ci` 5 例加一条顺序断言（verify 失败不重跑；status 被拒不重跑；无 ci 运行只提示；在跑的先取消、等落定、再重跑；只重跑本仓各事件最新一次，不碰 fork 的）。
-- 这两个自测进 tree-policy 的新一步（本地 0.03 s 与 0.3 s），`steps.lock.json` 相应多一条。
+- `publish.py --selftest`（及只跑这一半的 `--selftest-rerun-ci`）：`--rerun-ci` 5 例加一条顺序断言（verify 失败不重跑；status 被拒不重跑；无 ci 运行只提示；在跑的先取消、等落定、再重跑；只重跑本仓各事件最新一次，不碰 fork 的）。
+- `release_evidence.py --selftest` 与 `publish.py --selftest-rerun-ci` 进 tree-policy 的新一步（本地 0.03 s 与 0.13 s），`steps.lock.json` 相应多两条。不放完整的 `publish.py --selftest`：它的签名那一半调 `ssh-keygen`，而外部运行以没有 passwd 条目的 uid 执行（第 3b′ 刀），`ssh-keygen` 在那里报 `No user exists for uid ...` 退出 255；第一次集群全套就是因此 `complete=false`。
 
 ### 不做的（理由）
 

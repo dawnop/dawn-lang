@@ -23,13 +23,37 @@ What it refuses, before anything leaves this machine:
 Steps, in order: verify, sign, `git notes --ref=gates add -f`, `git push
 <remote> refs/notes/gates`, `gh workflow run verify-external.yml -f sha=<sha>`.
 
+With --rerun-ci it then closes the loop the evidence tier opens (gates.yml's
+plan job skips every gate of a commit whose `gates/maintainer` status it
+accepts, docs/gates-external-design.md). ci.yml starts the moment a commit
+is pushed, before any evidence exists, so that first run plans a subset or
+the whole set and holds GitHub's runners for it. --rerun-ci waits for the
+verify-external run it dispatched (`gh run list` for the run, `gh run watch`
+until it ends), and only when that run succeeded and the status it wrote
+passes the same acceptance the plan job will make
+(release_evidence.external_evidence), finds this repository's ci.yml runs of
+the sha (pull_request and push events, never a fork's), cancels any still
+running and re-runs the newest of each event. The re-run plans again, finds
+the status, and skips. A failed verify, a status the plan would refuse, or
+no ci run at all re-runs nothing: the first two because the re-run would
+plan exactly as before, the last because the next push or pull request will
+find the status by itself.
+
     publish.py <sha> --bundle <file> [--key ~/.ssh/dawn-gates-sign]
                [--repo DIR] [--remote origin]
                [--dry-run]            sign and write the note locally; print
                                       the push and the dispatch, run neither
                [--dry-run-dispatch]   push the note; print the dispatch only
+               [--rerun-ci]           after the dispatch, wait for the verify
+                                      run and re-run this sha's ci.yml runs
     publish.py --selftest             the refusals and a push to a scratch
-                                      bare repository, with a throwaway key
+                                      bare repository, with a throwaway key,
+                                      then the --rerun-ci cases
+    publish.py --selftest-rerun-ci    the --rerun-ci cases alone: a stub gh,
+                                      no git, no ssh-keygen (what tree-policy
+                                      runs; ssh-keygen refuses a uid with no
+                                      passwd entry, which is how the external
+                                      runner executes jobs)
 
 --remote takes anything `git push` does, so a local bare repository stands in
 for GitHub in tests. The dispatch always targets the repository `gh` resolves
@@ -42,11 +66,14 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bundle as bundle_mod  # noqa: E402
+import release_evidence  # noqa: E402
 import verify_note  # noqa: E402
 
 DEFAULT_KEY = Path("~/.ssh/dawn-gates-sign")
@@ -118,6 +145,229 @@ def publish(repo, sha, text, remote, push, dispatch, env=None):
     print(f"dispatched: {WORKFLOW} for {sha}; the status context is gates/maintainer")
 
 
+# ------------------------------------------------------------ --rerun-ci
+
+CI_EVENTS = ("pull_request", "push")
+# How far the dispatch's own clock may lead GitHub's when picking the run it
+# started out of `gh run list`; and how long to wait for that run to appear
+# and for a cancelled ci run to settle before re-running it.
+CLOCK_SLACK = timedelta(seconds=60)
+APPEAR_TIMEOUT = 180
+SETTLE_TIMEOUT = 180
+POLL = 10
+
+
+def run_gh(args, cwd):
+    """`gh <args>` in the checkout; its stdout, or Refused."""
+    result = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Refused(f"gh {' '.join(args)} failed ({result.returncode}): "
+                      f"{result.stderr.strip()}")
+    return result.stdout
+
+
+def parse_stamp(stamp):
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def rerun_ci(repo, sha, dispatched_at, gh=run_gh, sleep=time.sleep, clock=time.monotonic,
+             out=sys.stdout):
+    """Wait for the verify run, then re-run this sha's ci.yml runs. -> exit status.
+
+    `gh` is `(args, cwd) -> stdout`, raising Refused; the self-test swaps it.
+    """
+    info = json.loads(gh(["repo", "view", "--json", "nameWithOwner,defaultBranchRef"], repo))
+    nwo, default_branch = info["nameWithOwner"], info["defaultBranchRef"]["name"]
+
+    # The dispatched run. The Actions API does not return a dispatch's inputs,
+    # so it is the newest dispatch run created after this dispatch; the status
+    # check below is what ties the verdict to this sha either way.
+    listing = ["run", "list", "--workflow", WORKFLOW, "--event", "workflow_dispatch",
+               "--limit", "10", "--json", "databaseId,createdAt,status,conclusion"]
+    deadline = clock() + APPEAR_TIMEOUT
+    run_id = None
+    while run_id is None:
+        runs = [r for r in json.loads(gh(listing, repo))
+                if parse_stamp(r["createdAt"]) >= dispatched_at - CLOCK_SLACK]
+        if runs:
+            run_id = max(runs, key=lambda r: r["createdAt"])["databaseId"]
+        elif clock() > deadline:
+            print(f"rerun-ci: no {WORKFLOW} run appeared within {APPEAR_TIMEOUT}s; "
+                  "not re-running ci", file=out)
+            return 1
+        else:
+            sleep(POLL)
+    print(f"rerun-ci: watching {WORKFLOW} run {run_id}", file=out)
+    try:
+        gh(["run", "watch", str(run_id), "--exit-status", "--interval", str(POLL)], repo)
+    except Refused:
+        pass  # --exit-status fails on a failed run; the conclusion below says which
+    view = json.loads(gh(["run", "view", str(run_id), "--json", "status,conclusion"], repo))
+    if view.get("status") != "completed" or view.get("conclusion") != "success":
+        print(f"rerun-ci: {WORKFLOW} run {run_id} is {view.get('status')}/"
+              f"{view.get('conclusion')}; not re-running ci", file=out)
+        return 1
+
+    def api(path):
+        return release_evidence.decode_pages(gh(["api", "--paginate", path], repo), path)
+
+    try:
+        ok, lines = release_evidence.external_evidence(api, nwo, sha, default_branch,
+                                                       "https://github.com")
+    except release_evidence.ApiError as error:
+        print(f"rerun-ci: could not read the status back: {error}; not re-running ci",
+              file=out)
+        return 1
+    for line in lines:
+        print(line, file=out)
+    if not ok:
+        print("rerun-ci: the plan job would not accept this status; not re-running ci",
+              file=out)
+        return 1
+
+    pages = api(f"repos/{nwo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100")
+    runs = [r for page in pages for r in page.get("workflow_runs", [])
+            if r.get("event") in CI_EVENTS
+            and (r.get("repository") or {}).get("full_name") == nwo
+            and (r.get("head_repository") or {}).get("full_name") == nwo]
+    newest = {}
+    for r in runs:
+        if r["event"] not in newest or r["id"] > newest[r["event"]]["id"]:
+            newest[r["event"]] = r
+    if not newest:
+        print(f"rerun-ci: no ci.yml run of this repository on {sha} yet; the next push "
+              "or pull request of it takes the evidence tier by itself", file=out)
+        return 0
+    for event in CI_EVENTS:
+        r = newest.get(event)
+        if r is None:
+            continue
+        rid = str(r["id"])
+        if r.get("status") != "completed":
+            gh(["run", "cancel", rid], repo)
+            print(f"rerun-ci: cancelled ci.yml run {rid} ({event}, {r.get('status')})", file=out)
+            settle = clock() + SETTLE_TIMEOUT
+            while json.loads(gh(["run", "view", rid, "--json", "status"], repo)).get(
+                    "status") != "completed":
+                if clock() > settle:
+                    print(f"rerun-ci: run {rid} did not finish cancelling within "
+                          f"{SETTLE_TIMEOUT}s; re-run it by hand", file=out)
+                    return 1
+                sleep(POLL)
+        gh(["run", "rerun", rid], repo)
+        print(f"rerun-ci: re-running ci.yml run {rid} ({event}); its plan reads the status",
+              file=out)
+    return 0
+
+
+def rerun_selftest():
+    """--rerun-ci against a stub gh: which calls it makes, in which order."""
+    import io
+    nwo, sha = "o/r", "a" * 40
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    stamp = "2026-09-25T12:00:05Z"
+    good_status = {"context": "gates/maintainer", "state": "success", "id": 1,
+                   "created_at": "2026-09-25T12:00:30Z",
+                   "creator": {"login": "github-actions[bot]"},
+                   "target_url": f"https://github.com/{nwo}/actions/runs/7"}
+    verify_run = {"repository": {"full_name": nwo},
+                  "path": ".github/workflows/verify-external.yml",
+                  "event": "workflow_dispatch", "head_branch": "main",
+                  "status": "completed", "conclusion": "success",
+                  "run_started_at": "2026-09-25T12:00:06Z",
+                  "updated_at": "2026-09-25T12:01:00Z"}
+    own = {"repository": {"full_name": nwo}, "head_repository": {"full_name": nwo}}
+    fork = {"repository": {"full_name": nwo}, "head_repository": {"full_name": "f/r"}}
+
+    def stub(conclusion="success", statuses=(good_status,), ci_runs=(), settle_after=1):
+        calls, views = [], {"n": 0}
+
+        def gh(args, cwd):
+            calls.append(args)
+            head = args[:2]
+            if head == ["repo", "view"]:
+                return json.dumps({"nameWithOwner": nwo,
+                                   "defaultBranchRef": {"name": "main"}})
+            if head == ["run", "list"]:
+                return json.dumps([{"databaseId": 7, "createdAt": stamp,
+                                    "status": "in_progress", "conclusion": ""}])
+            if head == ["run", "watch"]:
+                if conclusion != "success":
+                    raise Refused("gh run watch: the run failed")
+                return ""
+            if head == ["run", "view"] and args[2] == "7":
+                return json.dumps({"status": "completed", "conclusion": conclusion})
+            if head == ["run", "view"]:
+                views["n"] += 1
+                done = views["n"] > settle_after
+                return json.dumps({"status": "completed" if done else "in_progress"})
+            if head in (["run", "cancel"], ["run", "rerun"]):
+                return ""
+            if args[0] == "api":
+                path = args[-1]
+                if path.startswith(f"repos/{nwo}/commits/{sha}/statuses"):
+                    return json.dumps(list(statuses))
+                if path.startswith(f"repos/{nwo}/actions/runs/7"):
+                    return json.dumps(verify_run)
+                if path.startswith(f"repos/{nwo}/actions/workflows/ci.yml/runs"):
+                    return json.dumps({"workflow_runs": list(ci_runs)})
+            raise Refused(f"stub gh: unexpected call {args}")
+        return gh, calls
+
+    def verbs(calls):
+        return [" ".join(c[:3]) for c in calls if c[:2] in (["run", "cancel"], ["run", "rerun"])]
+
+    cases = [
+        # (label, stub kwargs, want exit, want cancel/rerun calls, needle)
+        ("verify failed: nothing re-run", dict(conclusion="failure"), 1, [],
+         "not re-running ci"),
+        ("verify green, a person's status: nothing re-run",
+         dict(statuses=[dict(good_status, creator={"login": "someone"})]), 1, [],
+         "refused: written by someone"),
+        ("verify green, no ci run: a hint only", dict(), 0, [], "no ci.yml run"),
+        ("verify green, ci running: cancel, then re-run",
+         dict(ci_runs=[dict(own, id=50, event="pull_request", status="in_progress")]), 0,
+         ["run cancel 50", "run rerun 50"], "cancelled ci.yml run 50"),
+        ("verify green, ci finished: re-run the newest per event, not a fork's",
+         dict(ci_runs=[dict(own, id=40, event="pull_request", status="completed"),
+                       dict(own, id=41, event="pull_request", status="completed"),
+                       dict(fork, id=60, event="pull_request", status="completed"),
+                       dict(own, id=45, event="push", status="completed")]), 0,
+         ["run rerun 41", "run rerun 45"], "re-running ci.yml run 45"),
+    ]
+    failures = []
+    for label, kwargs, want, want_calls, needle in cases:
+        gh, calls = stub(**kwargs)
+        buf = io.StringIO()
+        ticks = iter(range(0, 10_000, 1))
+        got = rerun_ci(Path("."), sha, now, gh=gh, sleep=lambda _s: None,
+                       clock=lambda: next(ticks), out=buf)
+        problems = []
+        if got != want:
+            problems.append(f"exit {got}, want {want}")
+        if verbs(calls) != want_calls:
+            problems.append(f"cancel/rerun calls {verbs(calls)}, want {want_calls}")
+        if needle not in buf.getvalue():
+            problems.append(f"output lacks {needle!r}: {buf.getvalue()!r}")
+        if problems:
+            failures.append(f"{label}: " + "; ".join(problems))
+        else:
+            print(f"  rerun-ci {label}")
+    # The order matters in the running case: a re-run of a run still going
+    # is refused by GitHub, so the cancel must have settled first.
+    gh, calls = stub(ci_runs=[dict(own, id=50, event="pull_request", status="in_progress")],
+                     settle_after=2)
+    rerun_ci(Path("."), sha, now, gh=gh, sleep=lambda _s: None,
+             clock=iter(range(10_000)).__next__, out=io.StringIO())
+    order = [" ".join(c[:3]) for c in calls if c[:2] in (["run", "cancel"], ["run", "rerun"])
+             or (c[:2] == ["run", "view"] and c[2] == "50")]
+    if order != ["run cancel 50", "run view 50", "run view 50", "run view 50", "run rerun 50"]:
+        failures.append(f"cancel, settle, re-run out of order: {order}")
+    else:
+        print("  rerun-ci waits for the cancel to settle before re-running")
+    return failures
+
+
 # ------------------------------------------------------------------ self-test
 
 def selftest():
@@ -179,6 +429,9 @@ def selftest():
         except Refused as error:
             failures.append(f"the complete bundle was refused: {error}")
 
+    rerun_failures = rerun_selftest()
+    shown += 6 - len(rerun_failures)
+    failures += rerun_failures
     for line in failures:
         print(f"FAIL publish selftest: {line}", file=sys.stderr)
     if failures:
@@ -198,13 +451,25 @@ def main():
     parser.add_argument("--allowed-signers", default=str(verify_note.ALLOWED_SIGNERS))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--dry-run-dispatch", action="store_true")
+    parser.add_argument("--rerun-ci", action="store_true")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--selftest-rerun-ci", action="store_true")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
+    if args.selftest_rerun_ci:
+        failures = rerun_selftest()
+        for line in failures:
+            print(f"FAIL publish --rerun-ci selftest: {line}", file=sys.stderr)
+        if failures:
+            return 1
+        print("OK: publish --rerun-ci selftest, 6 cases")
+        return 0
     if not args.sha or not args.bundle:
         parser.error("a sha and --bundle are required")
     dispatch = not (args.dry_run or args.dry_run_dispatch)
+    if args.rerun_ci and not dispatch:
+        parser.error("--rerun-ci waits for the dispatch, so it needs one (drop --dry-run*)")
     if dispatch and args.remote != "origin":
         print("publish: refusing to dispatch after pushing somewhere other than origin; "
               "add --dry-run-dispatch", file=sys.stderr)
@@ -213,7 +478,10 @@ def main():
         bundle = json.loads(Path(args.bundle).read_text())
         sha, text = prepare(args.repo, args.sha, bundle, Path(args.key).expanduser(),
                             args.allowed_signers)
+        dispatched_at = datetime.now(timezone.utc)
         publish(args.repo, sha, text, args.remote, push=not args.dry_run, dispatch=dispatch)
+        if args.rerun_ci:
+            return rerun_ci(args.repo, sha, dispatched_at)
     except Refused as error:
         print(f"publish: refused: {error}", file=sys.stderr)
         return 1
