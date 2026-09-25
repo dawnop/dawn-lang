@@ -16,7 +16,7 @@ from cold import ROOT, edit, run
 def main():
     started = time.monotonic()
     original = (ROOT / 'selfhost/src/check/body_execution.dawn').read_text()
-    start = original.index('pub fn record(')
+    start = original.index('pub(pkg) fn record(')
     end = original.index('\ntest ', start)
     implementation = original[:end]
     variants = [

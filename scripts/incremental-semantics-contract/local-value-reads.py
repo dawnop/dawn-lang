@@ -95,10 +95,10 @@ def main():
     ]
     for function, name, old, new in scoped:
         source = sources['checker']
-        match = re.search(r'(?m)^(?:pub )?fn ' + re.escape(function) + r'\(', source)
+        match = re.search(r'(?m)^(?:pub(?:\(pkg\))? )?fn ' + re.escape(function) + r'\(', source)
         if match is None:
             raise RuntimeError('Missing consumer ' + function)
-        following = re.search(r'(?m)^(?:pub )?fn |^test ', source[match.end():])
+        following = re.search(r'(?m)^(?:pub(?:\(pkg\))? )?fn |^test ', source[match.end():])
         end = len(source) if following is None else match.end() + following.start()
         body = edit(source[match.start():end], old, new)
         subjects.append(('checker', name, source[:match.start()] + body + source[end:]))

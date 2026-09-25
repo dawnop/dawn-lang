@@ -59,7 +59,7 @@ CALL = re.compile(r"\bcerr(_h|_o)?\(")
 LET = re.compile(
     r"^\s*let\s+(\(?[A-Za-z_][A-Za-z0-9_, ]*\)?)\s*(?::[^=]*)?=", re.M
 )
-FN = re.compile(r"^(?:pub )?fn ([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
+FN = re.compile(r"^(?:pub(?:\(pkg\))? )?fn ([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
 IDENT = re.compile(r"\b([a-z_][A-Za-z0-9_]*)\b")
 
 MIN_CHUNK = 8  # shorter chunks match by accident ("` is ", " and ")
@@ -1592,7 +1592,7 @@ def collect_sites(sources=None):
                 if fm.start() >= head:
                     break
                 owner = fm.group(1)
-            if re.match(r"(pub )?fn cerr", text[head:]):
+            if re.match(r"(?:pub(?:\(pkg\))? )?fn cerr", text[head:]):
                 owner = "cerr"
             if owner in ("cerr", "cerr_h", "cerr_o"):
                 continue

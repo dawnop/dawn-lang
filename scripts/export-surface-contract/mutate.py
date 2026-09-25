@@ -314,9 +314,9 @@ EXTRA_EDITS = {
     ),
     "surface-after-bodies": (
         CHECKER,
-        "pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =\n"
+        "pub(pkg) fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io =\n"
         "  assemble_module_bodies(check_module_body_products(headers))\n",
-        "pub fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {\n"
+        "pub(pkg) fn check_module_bodies(headers: ModuleHeaders) -> (Cx, TModule) !io = {\n"
         "  let (cx1, tm) = assemble_module_bodies(check_module_body_products(headers))\n"
         "  (pass_export_surface(cx1, headers.syntax), tm)\n"
         "}\n",

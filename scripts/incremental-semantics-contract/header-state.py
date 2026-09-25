@@ -14,7 +14,10 @@ from cold import ROOT, edit, run
 
 
 def fields(source, name):
-    anchor = "pub type " + name + " = {\n"
+    # Cx is package-private, HeaderProduct is public: take whichever spelling
+    # the declaration has, and still refuse anything but exactly one.
+    anchor = next((head + name + " = {\n" for head in ("pub type ", "pub(pkg) type ")
+                   if head + name + " = {\n" in source), "pub type " + name + " = {\n")
     if source.count(anchor) != 1:
         raise RuntimeError("Header schema anchor drifted: " + name)
     block = source.split(anchor, 1)[1].split("\n}", 1)[0]
@@ -40,7 +43,7 @@ def main():
     cx = (ROOT / "selfhost/src/check/cx.dawn").read_text()
     audit(cx, original)
     for source, product in [
-        (cx.replace("pub type Cx = {\n", "pub type Cx = {\n  unclassified: Int,\n"), original),
+        (cx.replace("pub(pkg) type Cx = {\n", "pub(pkg) type Cx = {\n  unclassified: Int,\n"), original),
         (cx, edit(original, "consts: after.consts", "consts: before.consts")),
         (cx, edit(original, "consts: product.consts", "consts: current.consts")),
     ]:

@@ -54,10 +54,10 @@ def main():
         # binders; and a pool shared by the program puts two modules' unowned
         # bindings on one key.
         ("enter-keeps-the-previous-declaration", "Cx { ..interned_cx, owner_decl: id }", "interned_cx"),
-        ("slots-restart-at-zero", "pub fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = slot_of(cx)",
-         "pub fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = 0"),
-        ("pool-is-one-for-the-program", 'pub fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))',
-         'pub fn module_pool(cx: Cx) -> Int = free_pool("")'),
+        ("slots-restart-at-zero", "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = slot_of(cx)",
+         "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = 0"),
+        ("pool-is-one-for-the-program", 'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))',
+         'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool("")'),
         ("mint-reads-the-source-path",
          'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)',
          'interned(cx, minted(cx.owner_class.unwrap_or("") ++ cx.src_path.unwrap_or(""), kind, name), lo, hi)'),

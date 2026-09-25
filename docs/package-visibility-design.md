@@ -12,6 +12,8 @@ Dawn 的可见性今天只有两档：模块私有（默认）与 `pub`（spec �
 - **ARCH-N05**：`ir/lower.dawn` 的 `subst_subject`/`trait_method_sig` 不是 `pub`，
   `jvm/emit.dawn` 于是各写一份，注释自认「a drift between the two is a VerifyError」。
 - **ARCH-N12**：`Cx`（`check/cx.dawn`）47 字段被 9 个模块直读，只能 `pub type`。
+  **状态（2026-09-25）：可见性层已收**（§10.2，`Cx` 及其闭包改 `pub(pkg)`，白盒探针搬进包内）；
+  包内 9 个模块直读 47 字段的耦合不是可见性问题，另立。
 - **LIB-13 残差**：`packages/web` 的 `dispatch_segs`/`validate_routes`/`route_meta`/`Dispatch`
   是 `server.dawn` 跨模块消费的 seam，web4 major 窗口里想收而收不了
   （`docs/codebase-audit-v2/05-stdlib-and-packages.md` LIB-13「处置」段）。
@@ -65,8 +67,21 @@ pub(pkg) ctl effect Abort { ... }
 | 捆绑标准库 | `PkgStd`：整个 std 是一个包 |
 
 所以 selfhost 是一个包（`selfhost/dawn.toml`），compiler-plan 是另一个；selfhost 用不到
-compiler-plan 的 `pub(pkg)`。`scripts/incremental-semantics-contract/` 等以 `[deps]`
-引用 selfhost 的工程是第三方，同样看不到 selfhost 的 `pub(pkg)`。
+compiler-plan 的 `pub(pkg)`。以 `[deps]` 引用 selfhost 的工程是第三方，看不到 selfhost 的
+`pub(pkg)`。
+
+**白盒契约住在包内。** selfhost 是应用不是库：没有仓外消费者，不进 `api-snapshot`，没有
+semver 承诺。要读检查器内部状态（整个 `Cx`、伪造 `Cx` 输入、重建 `Frame`）的探针与测试，
+是 selfhost 包自己的模块 `selfhost/src/contract/*`，不是第三方：checked-in 的测试模块由
+`dawn test selfhost` 执行；harness 运行时生成的探针写进它私有的 selfhost 副本的
+`contract/<name>.dawn`，夹具工程只剩一个转发 `main` 的入口。`main.dawn`、`nmain.dawn`
+都不导入 `contract/`，两个驱动都不链接它。真正的包外消费者只拿纯数据出口，签名里只有
+std 类型（§10.2）。没有外部工具生态的编译器都这么做：Go `cmd/compile/internal/types2` 的
+同包 `_test.go`、Gleam `compiler-core` 与 Roc `src/check/test` 的同 crate 测试、Swift
+`unittests/Sema` 直接链内部库。整包公开（rustc_private、GHC 的 `ghc` 包、OCaml
+`compiler-libs`）靠的是真实的第三方工具与「无稳定承诺」门控，Dawn 两样都没有；另开一层受限
+诊断 API（Kotlin Analysis API 那样）在这里等于把 `Cx` 换个名字再公开，因为探针要的是逐字段
+比较、伪造输入与重建 `Frame`。
 
 身份由 driver 在建 `Cx` 时决定：`analyze.module_step_with_recording` 已经持有
 `LoadedModule.pkg`（`[deps]` 包）与 `std_identity` 的判定（std），把 `[deps]` 包名写进
@@ -249,6 +264,10 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
   `consts` `adts_by_name` `traits_by_name` `java_classes` `is_std_module` `aliases`，
   `lsp/lspq.dawn:46`、`lsp/lspc.dawn:27`）的查询面仍是调研里的选项 2，与 `pub(pkg)` 无关，另立。
 - 预计：3 行可见性改动 + 两个契约脚本各数行；不动任何读点。
+- **回填（2026-09-25）：预计错了，改法也换了。** 「3 行」漏算了 §4.3 的泄漏规则，闭包实为
+  275 个声明（§10.2）；「改走 `driver/analyze` 的公开入口」不存在，入口自己就在闭包里。
+  落地的是「探针搬进包内」（§4.1 末段），不是「开一层公开检查器 API」。本节第一条说的
+  9 个模块直读 `Cx` 的包内耦合没有动，`pub(pkg)` 本来就管不到它，另立。
 
 ### 9.3 LIB-13 残差：web 包 seam
 
@@ -325,7 +344,8 @@ Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg
   `builtin-decl-contract/dump` 1 个），其中多处读 `slots_of`、`mint_cursor`、`enter_decl_owner`
   等内部件。按裁决「脚本随之红就不改 `Cx`」，`Cx` 保持 `pub`。要收这一条，先要定
   selfhost 对包外暴露的检查器 API 是什么（契约探针要的是内部件，不是公开入口），
-  那是另一个设计问题，不是可见性改写。
+  那是另一个设计问题，不是可见性改写。**后续：已由 §10.2 收掉**，答案是「不对包外暴露，
+  探针搬进包内」。
 - **外部门禁输入包的种子**（`08e6c99c`）。种子推进后集群输入包仍只有 v0.77.0：
   `inputs.py verify` 只拿每一行对 MANIFEST 和锁文件，旧种子的包照样全绿，后端于是不重推，
   每个 toolchain 步骤转去 GitHub 拉 v0.78.0，而集群节点连不上，
@@ -333,3 +353,41 @@ Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg
   `verify` 加 `--seed-tag`，MANIFEST 缺该 tag 的种子或 std 即红；crun 后端从被测提交的
   `scripts/seed-release.txt` 取 tag 传给远端与本地两次 verify；prefix 内的本地后端缺种子时
   直接报缺哪个，不再去碰网络。负控：对未重建的本地包 `verify --seed-tag v0.78.0` 报两项 FAIL。
+
+### 10.2 ARCH-N12 落地：白盒探针搬进包内（2026-09-25，分支 `feat/probes-in-package`）
+
+裁决采调研的候选 A：selfhost 不对包外暴露检查器 API，要读内部状态的探针与测试搬进包内
+（§4.1 末段）。三个提交：
+
+- **声明头**。`Cx`/`Frame`/`LambdaCx` 改 `pub(pkg)` 后按 `dawn check selfhost` 的泄漏诊断
+  迭代收紧：五轮分别 354、66、12、2、0 条，共 **275 个声明、21 个文件**改 `pub(pkg)`
+  （`check/cx` 83、`check/checker` 82、`check/passes` 22、`driver/analyze` 20、
+  `check/body_product` 16，其余 16 个文件各 1 到 8）。闭包到了 `driver/analyze`
+  （`analyze_program`、`load_target`、`CheckedMod`、`Program`）、`driver/stdlib`
+  （`load_std`、`StdCtx`）、`driver/incremental`、`doc`、`c/cdriver`。`body_product` 的两个
+  `pub alias` 在闭包里，随之改 `pub(pkg)`，没有用 alias 绕检查。
+  两个真消费者各得一个纯数据出口：
+  `driver/builtin_mirror.builtin_mirror_lines() -> List[String] !io`
+  （`builtin-decl-contract/dump` 原来自己建 `Cx` 读回签名，整段搬进包内，输出逐字节不变）与
+  `cdriver.compile_to_c(std_dir: String, target: String) -> Result[String, String] !Fs !Proc !Env !io`
+  （`slab-bench` 的 compiler 工作负载）。后者在 main 上本来就检查不过（`emit_once` 漏声明
+  七处 `Fs`/`Proc`/`Env`），一并修好。
+- **探针搬家**。`scripts/incremental-semantics-contract/src/` 的六个测试模块成为
+  `selfhost/src/contract/{cold,prefix,probe,session_bodies,prepared_sessions,cached_module_observer}.dawn`，
+  `dawn test selfhost` 多 16 项（913 → 929）；基准入口的正文成为 `contract/bench.dawn` 的
+  `run`，scripts 里的 `src/main.dawn` 只剩两行。十六个 `.dawn.txt` 模板改为包内写法
+  （去掉 `compiler/` 前缀，除 `main` 外一律 `pub(pkg)`），harness 用 `cold.install_probe`
+  把它们写进私有副本的 `contract/<name>.dawn`；Java 反射预言机按
+  `dawn$pkg$selfhost.contract.<name>` 取类；跑 `dawn test` 的 harness 的模块名从
+  `prefix ::`、`session_bodies ::`、`cached_module_observer ::` 变成 `contract/…`。
+  `gates.yml` 的 `native-diff-2` 删掉 `./bin/dawn test scripts/incremental-semantics-contract`
+  一步；预算沿用主线同日改定的实测值 `3x 638s`（已含该步，不另扣）。
+- **锚点**。字面量锚在改了前缀的声明上的脚本同刀改（`allocation.py`、`header-state.py`、
+  `state-product.py`、`context-revalidation.py`、`body-recording.py`、五个 harness 的
+  `check_fn` 注入正则、`journal-reads/check.py`、`export-surface-contract/mutate.py`）；
+  另有六个脚本用 `(?:pub )?fn` 找函数边界，会把 `pub(pkg) fn` 静默当成非声明
+  （`checker-corpus/coverage.py` 的 `cerr` 豁免因此会失效），一并改成认两种写法。
+  文档里的审计锚点 `assoc_witness_err` 随之改字面量。
+
+可见性是检查期概念，Core golden 与 class 输出不变。此后包外脚本再碰检查器状态会在编译期被
+`pub(pkg)` 拒绝，不需要新门禁。

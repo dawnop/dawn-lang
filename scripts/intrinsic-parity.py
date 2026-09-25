@@ -70,7 +70,7 @@ def body(lines, header, where):
     # there, and no header spells an arm
     out = [lines[start]]
     for line in lines[start + 1 :]:
-        if re.match(r"^(pub )?(fn|type|test|const) ", line) or line.startswith("# ----"):
+        if re.match(r"^(?:pub(?:\(pkg\))? )?(fn|type|test|const) ", line) or line.startswith("# ----"):
             break
         stripped = line.lstrip()
         if stripped.startswith("#"):

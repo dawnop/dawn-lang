@@ -185,10 +185,10 @@ def main():
                           reporter + '(cx, "' + message))
     for function, name, old, new in consumers:
         source = sources['checker']
-        found = re.search(r'(?m)^(?:pub )?fn ' + re.escape(function) + r'\(', source)
+        found = re.search(r'(?m)^(?:pub(?:\(pkg\))? )?fn ' + re.escape(function) + r'\(', source)
         if found is None:
             raise RuntimeError('Missing consumer ' + function)
-        following = re.search(r'(?m)^(?:pub )?fn |^test ', source[found.end():])
+        following = re.search(r'(?m)^(?:pub(?:\(pkg\))? )?fn |^test ', source[found.end():])
         end = len(source) if following is None else found.end() + following.start()
         body = edit(source[found.start():end], old, new)
         subjects.append(('checker', name, source[:found.start()] + body + source[end:]))

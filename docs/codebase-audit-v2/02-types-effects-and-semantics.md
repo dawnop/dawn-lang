@@ -241,7 +241,7 @@
 
 ## SEM-09 — P2 — associated type 不能声明或接收 bound
 
-<!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn assoc_witness_err -->
+<!-- audit-anchor: present selfhost/src/check/checker.dawn | pub(pkg) fn assoc_witness_err -->
 
 > **后续处置（2026-08-09）：open，intentional delayed capability。** 现行 v1 明确延期
 > projection witness/bound evidence；它限制表达力，但不是当前实现漏做已承诺语义。只有关联

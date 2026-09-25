@@ -14,7 +14,7 @@ from cold import ROOT, edit, run
 
 
 def audit_fields(cx_source, product_source):
-    start = "pub type Cx = {\n"
+    start = "pub(pkg) type Cx = {\n"
     if cx_source.count(start) != 1:
         raise RuntimeError("Cx declaration anchor drifted")
     block = cx_source.split(start, 1)[1].split("\n}", 1)[0]
@@ -36,7 +36,7 @@ def main():
     cx_source = (ROOT / "selfhost/src/check/cx.dawn").read_text()
     audit_fields(cx_source, original)
     try:
-        audit_fields(cx_source.replace("pub type Cx = {\n", "pub type Cx = {\n  unclassified: Int,\n"), original)
+        audit_fields(cx_source.replace("pub(pkg) type Cx = {\n", "pub(pkg) type Cx = {\n  unclassified: Int,\n"), original)
     except RuntimeError:
         print("OK: state product field audit rejects an unclassified Cx field", flush=True)
     else:

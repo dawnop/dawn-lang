@@ -81,7 +81,7 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ```
 selfhost/          编译器主体（Dawn 写 Dawn）；消费 compiler-plan，ASM 只属于这里的 JVM 后端
 compiler-plan/     无 Java 的 source/manifest/MVS/fetch 规划包；不是 packages/* 发布包
-selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
+selfhost/src/      分十个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
                    embed/  生成物，不许手改（stdsrc rtsrc unicode_case unicode_class）
                    front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt lexdump astdump）
                    check/  类型与检查（types tast exhaustive jsig cx passes checker）
@@ -91,6 +91,8 @@ selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的�
                    driver/ 模块图与整程序驱动（analyze stdlib checkdump）
                    c/      native 后端（emitc cdriver ctestrun rc）
                    lsp/    语言服务（server lspc lspq）
+                   contract/ 白盒契约探针（probe cold prefix bench 等），读 pub(pkg) 的检查器状态；
+                             不在 main/nmain 的模块图里，由 test 门的 `dawn test selfhost` 跑
                    根：main.dawn nmain.dawn doc.dawn version.dawn
 std/               标准库源（构建 selfhost 时编译进独立 jar 的 stdsrc 模块）
 packages/          可发布/复用源码包（json、web、fspath、sha2、inflate、tea），[deps] 消费

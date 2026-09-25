@@ -2601,7 +2601,7 @@ def interesting_literal(s):
 # and 30 with it, and the pair rule G exists for (analyze.dawn against
 # java-target-classpath-contract) survives both.
 DAWN_SIGNATURE = re.compile(
-    r"^(?:pub )?fn (?P<name>[a-z_][A-Za-z_0-9]*)(?:\[[^\]]*\])?\(", re.M
+    r"^(?:pub(?:\(pkg\))? )?fn (?P<name>[a-z_][A-Za-z_0-9]*)(?:\[[^\]]*\])?\(", re.M
 )
 
 # The same name, anywhere in a gate script. A `sig in blob` test walks a
