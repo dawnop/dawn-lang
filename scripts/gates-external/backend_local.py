@@ -453,6 +453,11 @@ class LocalBackend:
         if self.prefix:
             pairs = [(self.prefix / "inputs/seeds" / tag, tag),
                      (self.prefix / "inputs/std-seeds" / tag, f"std-{tag}")]
+            # inside a prefix the network is not an input: a missing seed is
+            # a stale pack, and fetching it would fail later and less clearly
+            for src, _ in pairs:
+                if not src.is_dir():
+                    return False, f"the prefix has no {src.name} under {src.parent.name}; rebuild it with inputs.py build"
         else:
             pairs = [(Path(self.seed_cache) / name, name) for name in (tag, f"std-{tag}")]
         for src, name in pairs:

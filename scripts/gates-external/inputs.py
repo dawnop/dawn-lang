@@ -76,7 +76,7 @@ Subcommands:
     build   --prefix P [--repo R] [--seed-cache DIR]
     install --prefix P      extract toolchains from inputs/downloads (a shipped
                             pack) and verify
-    verify  --prefix P [--repo R]
+    verify  --prefix P [--repo R] [--seed-tag TAG]
     conda-unpack ...        internal: what build and install run under the
                             prefix's python to unpack the compiler
 """
@@ -752,6 +752,18 @@ def verify(args):
                                          if r["kind"] == "npm-cache"}):
         print(f"FAIL npm-cache  {name} in inputs.lock.json but not in MANIFEST")
         bad += 1
+    # A pack is built for one seed: the tag scripts/seed-release.txt named when
+    # it was built. Every row above can verify and the pack still be one seed
+    # behind the commit under test, and a job then goes to the network for the
+    # seed it lacks -- which a cluster node cannot reach. So the caller that
+    # knows the commit says which seed it needs.
+    tag = getattr(args, "seed_tag", None)
+    if tag:
+        for kind in ("seed", "std-seed"):
+            if not any(r["kind"] == kind and r["version"] == tag for r in manifest["items"]):
+                print(f"FAIL {kind:10} {tag} is the commit's seed but not in MANIFEST "
+                      f"(rebuild the pack: inputs.py build --repo <a checkout at that commit>)")
+                bad += 1
     print(f"inputs verify: {'green' if not bad else f'RED, {bad} item(s)'} "
           f"({time.monotonic() - t0:.1f}s)")
     return 0 if not bad else 1
@@ -771,6 +783,7 @@ def main():
     p = sub.add_parser("verify")
     p.add_argument("--prefix", required=True)
     p.add_argument("--repo")
+    p.add_argument("--seed-tag", help="the seed the commit under test pins; red without it")
     # internal: what extract_conda runs under the prefix's python
     p = sub.add_parser("conda-unpack")
     p.add_argument("--wheel-dir", required=True)
