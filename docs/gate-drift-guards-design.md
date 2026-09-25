@@ -123,6 +123,12 @@ pole 的算术就是这样过期的：09-11 按投影 17,286 job 秒算出排队
    nightly 审计保证声明 ≥ 实测最坏，所以声明之和是实际总量的有效上界，而且不联网也算得出；比值当天是 29,319 / 22,601 = 1.30。
    行缺失、重复、不是 `<N>s`、写错文件、写在没有 `3x` 声明的文件里，都红。求和走 `collect_budgets`，与 `--observed` 读的是同一批声明。
    floor 声明不计入，理由与 pole 相同。editor-grammar.yml 只有 floor，不设上限。
+   声明里的 worst observed 指 nightly 审计的 7 天窗口（nightly.yml 传给 `scripts/gate-observations.py` 的 `--since`；
+   脚本自身不带 `--since` 时读最近 25 次运行，约两天，不是这个窗口）；planning value 只在该 job 在窗口内还没有运行时使用，
+   有了运行就换成观测值。不用 14 天：截至 09-25 的 14 天里，incremental-4/6/8 在 09-13 到 09-14 的运行是 979 / 996 / 1009 s，
+   全部超过 pole，而 09-15 以后三者最坏只有 827 / 742 / 937 s；窗口不能比 job 内容的变化活得更久。
+   同日上限从 29319 s 降到 26149 s：21 条 planning value 比各自 job 的 7 天最坏高出 50 到 450 s，这些余量可以被新 job 不声明地占掉，
+   于是逐条改成最坏观测加一成（取整秒），上限跟着降到新的和。
 2. **升上限要声明**（`scripts/check-gate-budget-trailers.py`，ci.yml `secrets` job）。比较 push 区间两端树上的两个上限：
    升了，区间内的提交信息要有 `Gate-Budget(<push-total|path-total>): <旧>s -> <新>s <理由>`，旧/新数字与两端树一致；
    分几次升可以逐次声明，要求的是从起点到终点有一条声明链。
