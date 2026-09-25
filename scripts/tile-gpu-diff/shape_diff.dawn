@@ -122,40 +122,29 @@ fn blank() -> Trace =
   Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", results: None, note: "" }
 
 # Allocate and fill one buffer per (format, contents) pair, in order.
-# Written as recursion rather than a `for` with `?` in it, as wide_diff's is
-# (dawn-lang issue #68).
-fn alloc_all(bufs: List[(String, List[Float])], i: Int, acc: List[Int]) -> Result[List[Int], ForeignError] !Gpu =
-  if i >= len(bufs) {
-    Ok(acc)
-  } else {
-    let (dt, data) = bufs[i]
-    match gpu.gpu_alloc(dt, len(data)) {
-      Ok(h) -> alloc_all(bufs, i + 1, acc ++ [h])
-      Err(e) -> Err(e)
-    }
+fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for (dt, data) in bufs {
+    hs = hs ++ [gpu.gpu_alloc(dt, len(data))?]
   }
+  Ok(hs)
+}
 
-fn upload_all(hs: List[Int], bufs: List[(String, List[Float])], i: Int) -> Result[Unit, ForeignError] !Gpu =
-  if i >= len(hs) {
-    Ok(())
-  } else {
+fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
+  for i in 0..len(hs) {
     let (_dt, data) = bufs[i]
-    match gpu.gpu_upload(hs[i], data) {
-      Ok(_) -> upload_all(hs, bufs, i + 1)
-      Err(e) -> Err(e)
-    }
+    gpu.gpu_upload(hs[i], data)?
   }
+  Ok(())
+}
 
-fn download_all(hs: List[Int], reads: List[Int], i: Int,
-  acc: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu =
-  if i >= len(reads) {
-    Ok(acc)
-  } else {
-    match gpu.gpu_download(hs[reads[i]]) {
-      Ok(v) -> download_all(hs, reads, i + 1, acc ++ [v])
-      Err(e) -> Err(e)
-    }
+fn download_all(hs: List[Int], reads: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
+  var out: List[List[Float]] = []
+  for r in reads {
+    out = out ++ [gpu.gpu_download(hs[r])?]
   }
+  Ok(out)
+}
 
 fn release(hs: List[Int]) -> Unit !Gpu = {
   for h in hs {
@@ -173,11 +162,11 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 ## format and `Tensor[D]` is one format per handle.
 fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
   reads: List[Int]) -> Trace !Gpu =
-  match alloc_all(bufs, 0, []) {
+  match alloc_all(bufs) {
     Err(e) -> Trace { ..blank(), alloc: e.kind, note: e.message }
     Ok(hs) -> {
       let t0 = Trace { ..blank(), alloc: "ok" }
-      match upload_all(hs, bufs, 0) {
+      match upload_all(hs, bufs) {
         Err(e) -> {
           release(hs)
           Trace { ..t0, upload: e.kind, note: e.message }
@@ -191,7 +180,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = download_all(hs, reads, 0, [])
+              let r = download_all(hs, reads)
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)
