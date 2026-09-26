@@ -270,11 +270,11 @@ elif name == "drop-staticness":
 elif name == "bare-member-calls":
     replace_once(
         "checker",
-        "                Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)",
-        "                Some(_) -> {\n"
-        "                  let no_args: List[Arg] = []\n"
-        "                  check_method_call(field_cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
-        "                }",
+        "            Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)",
+        "            Some(_) -> {\n"
+        "              let no_args: List[Arg] = []\n"
+        "              check_method_call(field_cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
+        "            }",
     )
 elif name == "parser-uppercase-method":
     replace_once(
