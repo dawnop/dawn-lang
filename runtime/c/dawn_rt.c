@@ -3991,6 +3991,19 @@ static bool dawn_has_nul(const dawn_str *s) {
   return s->len > 0 && memchr(s->p, '\0', (size_t)s->len) != NULL;
 }
 
+/* The refusal `dawn_cpath` makes, split out so a caller that converts more
+ * than one string can check every one before the first copy: the refusal is
+ * a fault, a fault longjmps past the caller's frame, and a copy already made
+ * for an earlier argument would be owned by nobody (the rule stated at
+ * `io_read_file`). */
+static void dawn_nul_fault(void) {
+  dawn_fault(DAWN_LIT("path contains an embedded NUL byte"));
+}
+
+static void dawn_reject_nul(const dawn_str *s) {
+  if (dawn_has_nul(s)) dawn_nul_fault();
+}
+
 /* A Dawn string is not NUL-terminated; every path, environment name, or argv
  * entry handed to the C library has to be copied to get the terminator. A C
  * string cannot represent an embedded NUL, so reject one before allocating
@@ -3998,9 +4011,7 @@ static bool dawn_has_nul(const dawn_str *s) {
  * dawn_has_nul first because their public failure values are false and None;
  * operations with a Result/fault channel keep this fail-closed default. */
 static char *dawn_cpath(dawn_str *s) {
-  if (dawn_has_nul(s)) {
-    dawn_fault(DAWN_LIT("path contains an embedded NUL byte"));
-  }
+  dawn_reject_nul(s);
   char *p = (char *)dawn_alloc((size_t)s->len + 1);
   if (s->len > 0) memcpy(p, s->p, (size_t)s->len);
   p[s->len] = '\0';
@@ -4108,7 +4119,11 @@ dawn_str *dawn_io_read_file(dawn_str *path) {
   bool bad = false;
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
+  /* A directory opens under glibc and fails here with EISDIR; std/io's test
+   * "a path that is not there is an Err, and never a panic" reads one, so
+   * LeakSanitizer sees this branch on every native `test --stdlib`. */
   if (bad) {
+    free(buf);
     dawn_fault(DAWN_LIT("io_read_file: read failed"));
   }
   /* The one reader that refuses. `Files.readString` decodes with
@@ -4208,6 +4223,7 @@ dawn_bytes *dawn_io_read_bytes(dawn_str *path) {
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
+    free(buf);
     dawn_fault(DAWN_LIT("io_read_bytes: read failed"));
   }
   return dawn_bytes_of(buf, (int64_t)n);
@@ -4245,6 +4261,8 @@ bool dawn_io_delete(dawn_str *path) {
 }
 
 dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst) {
+  dawn_reject_nul(src);
+  dawn_reject_nul(dst);
   char *a = dawn_cpath(src);
   char *b = dawn_cpath(dst);
   bool bad = rename(a, b) != 0;
@@ -4257,6 +4275,8 @@ dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst) {
 }
 
 dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
+  dawn_reject_nul(parent);
+  dawn_reject_nul(prefix);
   char *pbuf = NULL;
   const char *base;
   if (parent->len == 0) {
@@ -4292,6 +4312,8 @@ dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
  * symlink. A name spelled here and opened afterwards would have a window
  * between the two, which is exactly what an atomic replace must not have. */
 dawn_str *dawn_io_temp_file(dawn_str *parent, dawn_str *prefix) {
+  dawn_reject_nul(parent);
+  dawn_reject_nul(prefix);
   char *pbuf = NULL;
   const char *base;
   if (parent->len == 0) {
@@ -4328,6 +4350,8 @@ dawn_str *dawn_io_temp_file(dawn_str *parent, dawn_str *prefix) {
  * here the way there is on the JVM, because this runtime has no host without
  * st_mode to fall back for. */
 dawn_unit dawn_io_copy_permissions(dawn_str *src, dawn_str *dst) {
+  dawn_reject_nul(src);
+  dawn_reject_nul(dst);
   char *a = dawn_cpath(src);
   char *b = dawn_cpath(dst);
   struct stat st;
@@ -4489,6 +4513,16 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   if (n <= 0) {
     dawn_drop(argv);
     dawn_fault(DAWN_LIT("io_run: argv is empty"));
+  }
+  /* Every string is checked before the first copy, for the reason at
+   * `dawn_cpath`; argv is consumed, so it goes before the raise too. */
+  bool nul = dawn_has_nul(out_path) || dawn_has_nul(err_path);
+  for (int64_t i = 0; i < n && !nul; i++) {
+    nul = dawn_has_nul((dawn_str *)dawn_array_get(argv, i));
+  }
+  if (nul) {
+    dawn_drop(argv);
+    dawn_nul_fault();
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
