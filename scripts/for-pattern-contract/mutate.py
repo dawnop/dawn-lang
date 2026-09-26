@@ -25,18 +25,18 @@ MUTATIONS = {
     "skip-irrefutability": (
         "src/check/checker.dawn",
         ((
-            '''          Some(true) -> {
-            let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
-            cx1 = for_read_cx
-            let (plo, phi) = match refutable {
-              Some(sp) -> sp
-              None -> (pat_lo(pat), pat_hi(pat))
-            }
-            cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
-              "use match or filter before the loop to handle items this pattern does not match")
-          }
+            '''      Some(true) -> {
+        let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
+        cx1 = for_read_cx
+        let (plo, phi) = match refutable {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
+        }
+        cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
+          "use match or filter before the loop to handle items this pattern does not match")
+      }
 ''',
-            "          Some(true) -> ()\n",
+            "      Some(true) -> ()\n",
         ),),
     ),
     "drop-bindings": (
@@ -75,10 +75,10 @@ MUTATIONS = {
     "leak-scope": (
         "src/check/checker.dawn",
         ((
-            '''      cx1 = pop_scope(cx1)
-      (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+            '''  cx1 = pop_scope(cx1)
+  (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
 ''',
-            "      (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))\n",
+            "  (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))\n",
         ),),
     ),
     "skip-LSP-visit": (
@@ -109,8 +109,8 @@ MUTATIONS = {
     "drop-derived-diagnostic-suppression": (
         "src/check/checker.dawn",
         ((
-            "      if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {\n",
-            "      if not is_errorish(loop_t) {\n",
+            "  if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {\n",
+            "  if not is_errorish(loop_t) {\n",
         ),),
     ),
     "repeat-iter-start": (
@@ -197,17 +197,17 @@ MUTATIONS = {
     "drop-complexity-diagnostic": (
         "src/check/checker.dawn",
         ((
-            '''          Some(false) -> ()
-          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-        }
-      }
-      let d = len(cx1.frame.loop_stack)
+            '''      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
+    }
+  }
+  let d = len(cx1.frame.loop_stack)
 ''',
-            '''          Some(false) -> ()
-          None -> ()
-        }
-      }
-      let d = len(cx1.frame.loop_stack)
+            '''      Some(false) -> ()
+      None -> ()
+    }
+  }
+  let d = len(cx1.frame.loop_stack)
 ''',
         ),),
     ),
