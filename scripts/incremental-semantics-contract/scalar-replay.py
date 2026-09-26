@@ -289,8 +289,8 @@ def main():
     # to mutate the scheduler, and the assertion it has to redden is here.
     shared = [
         ('assembly-order', SCHEDULER,
-         '      tfuns = tfuns ++ [Some(tast_positions.function(owner.resolver, tf))]',
-         '      tfuns = [Some(tast_positions.function(owner.resolver, tf))] ++ tfuns'),
+         '      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })]',
+         '      tfuns = [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })] ++ tfuns'),
         ('diagnostic-order', CONTEXT,
          '  Cx { ..cx, diags: cx.diags ++ [raised(cx, msg, lo, hi, "")] }',
          '  Cx { ..cx, diags: [raised(cx, msg, lo, hi, "")] ++ cx.diags }'),

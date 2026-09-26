@@ -433,7 +433,7 @@ test "assembly certified capture matches strict transition and preserves refusal
 test "body product constants project their real tree and share state admission" {
   let before = Cx { ..cx_new(None, None), body_writes: Some([]) }
   let ty = TyVar("T", 1)
-  let constant = TConst { name: "VALUE", ty: ty, init: XLocal(10, "x", 0, 1, ty), lo: 0, hi: 1 }
+  let constant = TConst { name: "VALUE", ty: ty, init: XLocal(10, "x", 0, 1, ty), lo: 0, hi: 1, decl: "" }
   let symbol = Sym { name: "x", ty: ty, mutable: false, dlo: 0, dhi: 1,
     dict_of: None, ev_of: None, cell_of: None }
   let after = Cx { ..before, decl_slots: map.insert(before.decl_slots, before.owner_decl, 1), syms: map.from([(10, symbol)]),
@@ -463,7 +463,7 @@ fn fixture_function(cx: Cx) -> TFun = {
     eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
     owner: cx.owner_class, trait_id: None, op_of: None, inferring: false }
   TFun { name: "fixture", sig: sig, param_syms: [], dict_syms: [], ev_syms: [], defaults: [],
-    body: XUnit(0, 1), is_test: false, impl_of: None, default_of: None }
+    body: XUnit(0, 1), is_test: false, impl_of: None, default_of: None, decl: "" }
 }
 
 test "body product separates alias declaration positions from body positions" {
@@ -490,12 +490,12 @@ test "body product separates alias declaration positions from body positions" {
   let cx = assemble(before, q).expect("assemble owned source")
   assert cx.function_reads == Some([semantic_reads.LocalAliasSource("Alias", "provider", Some(TNamed("Int", [], [], 1000, 2001)))])
   assert project_with_source(view, p, (owner, node) => provider_source("consumer", node)) == None
-  let constant = TConst { name: "VALUE", ty: TyUnit, init: XUnit(0, 1), lo: 0, hi: 1 }
+  let constant = TConst { name: "VALUE", ty: TyUnit, init: XUnit(0, 1), lo: 0, hi: 1, decl: "" }
   let saved_constant = capture_constant(before, after, constant).expect("capture constant source read")
   assert project_constant(view, saved_constant) == None
   let moved_constant = project_constant_with_source(view, saved_constant,
     provider_source).expect("project constant owned source")
-  assert moved_constant.tree == TConst { name: "VALUE", ty: TyUnit, init: XUnit(0, 1), lo: 0, hi: 1 }
+  assert moved_constant.tree == TConst { name: "VALUE", ty: TyUnit, init: XUnit(0, 1), lo: 0, hi: 1, decl: "" }
   let constant_cx = assemble(before, moved_constant).expect("assemble constant owned source")
   assert constant_cx.function_reads == cx.function_reads
 }

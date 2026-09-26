@@ -8,13 +8,19 @@
 # production about nothing; and it has to open them in its own words, or a
 # mutation of the production boundary would move both sides together and this
 # oracle would have nothing to say about it.
-type RefOwned = { context: Cx, positions: tast_positions.Resolver }
+#
+# A typed tree leaves a declaration filed under the path it was opened as
+# (`TFun.decl`/`TConst.decl`, docs/symbol-id-design.md §5, added after the
+# freeze). The reference states that in its own words too: `ref_open` keeps
+# the spelling it opened, and each output site below files the tree under it.
+# The scheduling loop is otherwise untouched.
+type RefOwned = { context: Cx, positions: tast_positions.Resolver, decl: String }
 
 fn ref_open(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> RefOwned = {
   let name = identity.path_text(path)
   match identity.span_at(view, name) {
     None -> RefOwned { context: unowned(cx),
-      positions: tast_positions.unowned(cx.src_path, cx.line_starts) }
+      positions: tast_positions.unowned(cx.src_path, cx.line_starts), decl: name }
     Some(span) -> {
       let measured = match cx.mod_path {
         None -> measured_from(cx, span.lo)
@@ -22,7 +28,7 @@ fn ref_open(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> RefO
       }
       let opened = enter_decl_owner(measured, path, span.lo, span.hi)
       RefOwned { context: opened,
-        positions: tast_positions.owned(span.lo, span.hi, cx.src_path, cx.line_starts) }
+        positions: tast_positions.owned(span.lo, span.hi, cx.src_path, cx.line_starts), decl: name }
     }
   }
 }
@@ -156,7 +162,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
           let owned = ref_open(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
           let (cxe, _, tf) = check_fn_inferred(owned.context, d, sigs[idx])
           cx1 = ref_close(owned, cxe)
-          inferred = map.insert(inferred, idx, tast_positions.function(owned.positions, tf))
+          inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owned.positions, tf), decl: owned.decl })
           done = set.insert(done, d.name)
           progress = true
         } else {
@@ -184,7 +190,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
         let owned = ref_open(cx1, view, [identity.Named(identity.ConstDecl, d.name)])
         let (cxe, tc) = check_const_init(owned.context, d, declared, visible)
         cx1 = ref_close(owned, cxe)
-        tconsts = tconsts ++ [tast_positions.constant(owned.positions, tc)]
+        tconsts = tconsts ++ [TConst { ..tast_positions.constant(owned.positions, tc), decl: owned.decl }]
       }
       None -> ()
     }
@@ -202,7 +208,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
       let owned = ref_open(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
       let (cxe, tf) = check_fn(owned.context, d, sigs[i])
       cx1 = ref_close(owned, cxe)
-      tfuns = tfuns ++ [Some(tast_positions.function(owned.positions, tf))]
+      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owned.positions, tf), decl: owned.decl })]
     } else {
       match map.get(inferred, i) {
         Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
@@ -232,7 +238,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
           let (cxe, tf) = check_fn(owned.context, strip_param_defaults(me), ms)
           cx1 = ref_close(owned, cxe)
           impl_tfuns = impl_tfuns ++
-            [TFun { ..tast_positions.function(owned.positions, tf), impl_of: imp_key }]
+            [TFun { ..tast_positions.function(owned.positions, tf), impl_of: imp_key, decl: owned.decl }]
         }
         None -> ()
       }
@@ -261,7 +267,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
                   let (cxe, tf) = check_trait_default(owned.context, me, s2, b)
                   cx1 = ref_close(owned, cxe)
                   default_tfuns = default_tfuns ++
-                    [TFun { ..tast_positions.function(owned.positions, tf), default_of: Some(t) }]
+                    [TFun { ..tast_positions.function(owned.positions, tf), default_of: Some(t), decl: owned.decl }]
                 }
                 None -> ()
               }
@@ -278,7 +284,7 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
     let owned = ref_open(cx1, view, [identity.Named(identity.TestDecl, t.name)])
     let (cxe, tf) = check_test(owned.context, t.name, t.body)
     cx1 = ref_close(owned, cxe)
-    ttests = ttests ++ [tast_positions.function(owned.positions, tf)]
+    ttests = ttests ++ [TFun { ..tast_positions.function(owned.positions, tf), decl: owned.decl }]
   }
   var fns_out: List[TFun] = []
   for sl in tfuns {
