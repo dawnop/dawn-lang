@@ -11485,63 +11485,9 @@ fn check_ctor_call(
     }
   }
   match key {
-    None -> {
-      # a bare SCREAMING_SNAKE name may be a constant reference; inside a
-      # const initializer only earlier constants are visible (spec §3.2)
-      let (visible_cx, visible) = constant_visible_read(cx1, cname)
-      cx1 = visible_cx
-      var cd: Option[Ty] = None
-      if visible {
-        let (constant_cx, answer) = local_constant_read(cx1, cname)
-        cx1 = constant_cx
-        cd = answer
-      }
-      match cd {
-        Some(ct) -> {
-          if spelled_out || len(cargs) > 0 || has_spread {
-            return (cerr(cx1, "`" ++ cname ++ "` is a constant, not a constructor", cclo, cchi),
-              TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-          }
-          return (cx1, ct, XConstRef("", cname, owner_off(cx, lo), owner_off(cx, hi), ct))
-        }
-        None -> ()
-      }
-      match spread {
-        Some(sp) -> {
-          let (cxa, _, _) = check_expr(cx1, sp, no_expected())
-          cx1 = cxa
-        }
-        None -> ()
-      }
-      for a in cargs {
-        let (cxa, _, _) = check_expr(cx1, a.e, no_expected())
-        cx1 = cxa
-      }
-      let (nominal_cx, nominal) = local_nominal_name_read(cx1, cname)
-      cx1 = nominal_cx
-      let hint: Option[String] = match nominal {
-        Some(aid0) -> {
-          let (names_cx, cnames) = constructor_names_read(cx1, aid0)
-          cx1 = names_cx
-          Some("`" ++ cname ++ "` is a type; build a value with one of its constructors: " ++
-              join(cnames, ", "))
-        }
-        None -> {
-          let (declared_cx, declared) = declared_constant_name_read(cx1, cname)
-          cx1 = declared_cx
-          if declared {
-            Some("const `" ++ cname ++
-                "` is declared later in the file; constants are evaluated top to bottom")
-          } else {
-            let (pool_cx, names) = local_value_candidates_read(cx1, true)
-            cx1 = pool_cx
-            suggest.hint(cname, names)
-          }
-        }
-      }
-      return (cerr_o(cx1, "undefined constructor: ${cname}", cclo, cchi, hint),
-        TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-    }
+    None ->
+      return check_ctor_unresolved(cx, cx1, cname, cargs, spread, spelled_out, has_spread, cclo, cchi, lo,
+        hi)
     Some(_) -> ()
   }
   let (aid, cslot) = key.expect("ctor")
@@ -11642,131 +11588,11 @@ fn check_ctor_call(
     }
     None -> ()
   }
-  # resolve the argument → field mapping (positional prefix, then named) --
-  # types.ctor_slots, the same decision the pattern side makes. What is left
-  # here is the call half: the wording, and that an argument with no field of
-  # its own is checked now, with no expected type, so its own errors are
-  # reported and `atx` holds something for the emitter. An argument that *did*
-  # land on a field is checked in the two rounds below instead, where the
-  # field's type is known.
-  # `idx_of` and `atx` are indexed by argument and the loops below walk the
-  # arguments in order, so both grow by appending. `slots` is indexed by field,
-  # so its pairs are collected here and assembled after the loop (see
-  # check_call: an indexed write rebuilds the whole list).
-  var claimed: List[(Int, Int)] = []
-  var idx_of: List[Int] = []
-  var atx: List[Option[TExpr]] = []
-  var anames: List[Option[String]] = []
-  for a in cargs { anames = anames ++ [a.name] }
-  let trailing = len(cargs) > 0 && cargs[len(cargs) - 1].trailing
-  let picks = ctor_slots(ci.fields, anames, trailing)
-  var args_broken = false
-  var i = 0
-  for a in cargs {
-    var idx = -1
-    match picks[i] {
-      SlotAt(at) -> { idx = at }
-      SlotNoField(an) -> {
-        var fnames: List[String] = []
-        for f in ci.fields { fnames = fnames ++ [f.name] }
-        let h = match suggest.hint(an, fnames) {
-          Some(hh) -> hh
-          None -> {
-            let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
-            cx1 = hint_cx
-            "constructor: " ++ hint_text
-          }
-        }
-        cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
-        args_broken = true
-      }
-      SlotAfterNamed -> {
-        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a.lo, a.hi)
-        args_broken = true
-      }
-      # counted below
-      SlotOverflow -> ()
-      SlotTaken(at) -> {
-        if trailing && i == len(cargs) - 1 {
-          cx1 = cerr(cx1, "the last field `" ++ ci.fields[at].name ++
-              "` is already given; the tail block is what fills it", a.lo, a.hi)
-        } else {
-          cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is given twice", a.lo, a.hi)
-        }
-        args_broken = true
-      }
-    }
-    if idx < 0 {
-      let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
-      cx1 = cxa
-      atx = atx ++ [Some(ax)]
-      idx_of = idx_of ++ [-1]
-    } else {
-      claimed = claimed ++ [(idx, i)]
-      atx = atx ++ [no_texpr()]
-      idx_of = idx_of ++ [idx]
-    }
-    i = i + 1
-  }
-  # ctor_slots hands out each field at most once -- a second argument for it
-  # comes back SlotTaken with no pick -- so one scan per field answers who
-  # claimed it, and a later pair still wins as an indexed write did.
-  var slots: List[Option[Int]] = []
-  var fk = 0
-  for _fk in 0..n {
-    var so: Option[Int] = no_int()
-    for c in claimed {
-      let (cf, ca) = c
-      if cf == fk { so = Some(ca) }
-    }
-    slots = slots ++ [so]
-    fk = fk + 1
-  }
-  # two rounds of checking (see check_call)
-  for round in 0..2 {
-    var atx_next: List[Option[TExpr]] = []
-    var j = 0
-    for a in cargs {
-      let idx = idx_of[j]
-      var atx_j = atx[j]
-      let already = match atx_j {
-        Some(_) -> true
-        None -> false
-      }
-      if idx >= 0 && not already {
-        let skip = if round == 0 {
-          let (next, answer) = needs_expected_read(cx1, a.e)
-          cx1 = next
-          answer
-        } else { false }
-        if not skip {
-          let declared = ci.fields[idx].ty
-          let sub = subst(declared, m, em)
-          let (eligibility_cx, concrete) = is_concrete_read(cx1, sub)
-          cx1 = eligibility_cx
-          let exp2: Option[Ty] = if concrete { Some(sub) } else { None }
-          let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
-          cx1 = cxa
-          atx_j = Some(ax)
-          let (next, m3, em3, ok) = unify_into_read(cx1, declared, at, m, em)
-          cx1 = next
-          m = m3
-          em = em3
-          if not ok {
-            let (declared_cx, declared_text) = type_display_read(cx1, subst(declared, m, em))
-            let (actual_cx, actual_text) = type_display_read(declared_cx, at)
-            let (hint_cx, hint_text) = constructor_display_read(actual_cx, ci)
-            cx1 = cerr_h(hint_cx, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
-                "` is " ++ declared_text ++ ", got " ++ actual_text, e_lo(a.e), e_hi(a.e),
-              "constructor: " ++ hint_text)
-          }
-        }
-      }
-      atx_next = atx_next ++ [atx_j]
-      j = j + 1
-    }
-    atx = atx_next
-  }
+  let (slots_cx, idx_of, atx0, slots, args_broken) = ctor_arg_slots(cx1, ci, cargs)
+  let (rounds_cx, m5, em5, atx) = infer_ctor_args(slots_cx, ci, cargs, idx_of, m, em, atx0)
+  cx1 = rounds_cx
+  m = m5
+  em = em5
   # `em` is final here. A constructor binds no effect variables of its own, so
   # every variable its field types write is the declaration's, and the row it
   # was just instantiated with has to be one nothing has to carry.
@@ -11863,6 +11689,251 @@ fn check_ctor_call(
   }
   let rt = subst(self_ty, m, em)
   (cx1, rt, XCtor(aid, cslot, written, slots, spread_tx, owner_off(cx, lo), owner_off(cx, hi), rt))
+}
+
+## A constructor name that resolved to no constructor: a constant reference,
+## or the undefined-constructor error with its hint.
+##
+## Cut out of `check_ctor_call` because C1 bailed out on the whole method at
+## tier 3 ("out of virtual registers in linear scan", #252). Every exit of
+## this branch was already a `return`, so the branch's value is the call's.
+## `cx` is the entry context, read for the owner offsets as the branch did;
+## `start` is the context after the constructor lookup.
+fn check_ctor_unresolved(
+  cx: Cx,
+  start: Cx,
+  cname: String,
+  cargs: List[Arg],
+  spread: Option[Expr],
+  spelled_out: Bool,
+  has_spread: Bool,
+  cclo: Int,
+  cchi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = start
+  # a bare SCREAMING_SNAKE name may be a constant reference; inside a
+  # const initializer only earlier constants are visible (spec §3.2)
+  let (visible_cx, visible) = constant_visible_read(cx1, cname)
+  cx1 = visible_cx
+  var cd: Option[Ty] = None
+  if visible {
+    let (constant_cx, answer) = local_constant_read(cx1, cname)
+    cx1 = constant_cx
+    cd = answer
+  }
+  match cd {
+    Some(ct) -> {
+      if spelled_out || len(cargs) > 0 || has_spread {
+        return (cerr(cx1, "`" ++ cname ++ "` is a constant, not a constructor", cclo, cchi),
+          TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+      }
+      return (cx1, ct, XConstRef("", cname, owner_off(cx, lo), owner_off(cx, hi), ct))
+    }
+    None -> ()
+  }
+  match spread {
+    Some(sp) -> {
+      let (cxa, _, _) = check_expr(cx1, sp, no_expected())
+      cx1 = cxa
+    }
+    None -> ()
+  }
+  for a in cargs {
+    let (cxa, _, _) = check_expr(cx1, a.e, no_expected())
+    cx1 = cxa
+  }
+  let (nominal_cx, nominal) = local_nominal_name_read(cx1, cname)
+  cx1 = nominal_cx
+  let hint: Option[String] = match nominal {
+    Some(aid0) -> {
+      let (names_cx, cnames) = constructor_names_read(cx1, aid0)
+      cx1 = names_cx
+      Some("`" ++ cname ++ "` is a type; build a value with one of its constructors: " ++
+          join(cnames, ", "))
+    }
+    None -> {
+      let (declared_cx, declared) = declared_constant_name_read(cx1, cname)
+      cx1 = declared_cx
+      if declared {
+        Some("const `" ++ cname ++
+            "` is declared later in the file; constants are evaluated top to bottom")
+      } else {
+        let (pool_cx, names) = local_value_candidates_read(cx1, true)
+        cx1 = pool_cx
+        suggest.hint(cname, names)
+      }
+    }
+  }
+  return (cerr_o(cx1, "undefined constructor: ${cname}", cclo, cchi, hint),
+    TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## Which field each argument of a constructor call fills, and the argument
+## slot list the inference rounds start from.
+##
+## Cut out of `check_ctor_call` for C1's register limit (#252). It reads the
+## constructor's fields and the written arguments and nothing the rounds bind,
+## so it is the natural first phase (the same cut as `call_arg_slots`).
+## Returns the context, the field index of each argument (`-1` for none), the
+## argument slots, which argument fills each field, and whether any argument
+## was refused.
+fn ctor_arg_slots(
+  start: Cx,
+  ci: CtorI,
+  cargs: List[Arg]
+) -> (Cx, List[Int], List[Option[TExpr]], List[Option[Int]], Bool) !io = {
+  var cx1 = start
+  let n = len(ci.fields)
+  # resolve the argument → field mapping (positional prefix, then named) --
+  # types.ctor_slots, the same decision the pattern side makes. What is left
+  # here is the call half: the wording, and that an argument with no field of
+  # its own is checked now, with no expected type, so its own errors are
+  # reported and `atx` holds something for the emitter. An argument that *did*
+  # land on a field is checked in the two rounds below instead, where the
+  # field's type is known.
+  # `idx_of` and `atx` are indexed by argument and the loops below walk the
+  # arguments in order, so both grow by appending. `slots` is indexed by field,
+  # so its pairs are collected here and assembled after the loop (see
+  # check_call: an indexed write rebuilds the whole list).
+  var claimed: List[(Int, Int)] = []
+  var idx_of: List[Int] = []
+  var atx: List[Option[TExpr]] = []
+  var anames: List[Option[String]] = []
+  for a in cargs { anames = anames ++ [a.name] }
+  let trailing = len(cargs) > 0 && cargs[len(cargs) - 1].trailing
+  let picks = ctor_slots(ci.fields, anames, trailing)
+  var args_broken = false
+  var i = 0
+  for a in cargs {
+    var idx = -1
+    match picks[i] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        var fnames: List[String] = []
+        for f in ci.fields { fnames = fnames ++ [f.name] }
+        let h = match suggest.hint(an, fnames) {
+          Some(hh) -> hh
+          None -> {
+            let (hint_cx, hint_text) = constructor_display_read(cx1, ci)
+            cx1 = hint_cx
+            "constructor: " ++ hint_text
+          }
+        }
+        cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
+        args_broken = true
+      }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a.lo, a.hi)
+        args_broken = true
+      }
+      # counted below
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        if trailing && i == len(cargs) - 1 {
+          cx1 = cerr(cx1, "the last field `" ++ ci.fields[at].name ++
+              "` is already given; the tail block is what fills it", a.lo, a.hi)
+        } else {
+          cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is given twice", a.lo, a.hi)
+        }
+        args_broken = true
+      }
+    }
+    if idx < 0 {
+      let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
+      cx1 = cxa
+      atx = atx ++ [Some(ax)]
+      idx_of = idx_of ++ [-1]
+    } else {
+      claimed = claimed ++ [(idx, i)]
+      atx = atx ++ [no_texpr()]
+      idx_of = idx_of ++ [idx]
+    }
+    i = i + 1
+  }
+  # ctor_slots hands out each field at most once -- a second argument for it
+  # comes back SlotTaken with no pick -- so one scan per field answers who
+  # claimed it, and a later pair still wins as an indexed write did.
+  var slots: List[Option[Int]] = []
+  var fk = 0
+  for _fk in 0..n {
+    var so: Option[Int] = no_int()
+    for c in claimed {
+      let (cf, ca) = c
+      if cf == fk { so = Some(ca) }
+    }
+    slots = slots ++ [so]
+    fk = fk + 1
+  }
+  (cx1, idx_of, atx, slots, args_broken)
+}
+
+## The two inference rounds of a constructor call: self-sufficient arguments
+## first, then the inference-needing ones under what the first round learned.
+##
+## Cut out of `check_ctor_call` for C1's register limit (#252), the same cut
+## as `infer_call_args`. Everything the rounds change comes back explicitly:
+## the context, `m`, `em` and the argument slots. Nothing here returns early.
+fn infer_ctor_args(
+  start: Cx,
+  ci: CtorI,
+  cargs: List[Arg],
+  idx_of: List[Int],
+  m0: Map[Int, Ty],
+  em0: Map[Int, Eff],
+  atx0: List[Option[TExpr]]
+) -> (Cx, Map[Int, Ty], Map[Int, Eff], List[Option[TExpr]]) !io = {
+  var cx1 = start
+  var m = m0
+  var em = em0
+  var atx = atx0
+  # two rounds of checking (see check_call)
+  for round in 0..2 {
+    var atx_next: List[Option[TExpr]] = []
+    var j = 0
+    for a in cargs {
+      let idx = idx_of[j]
+      var atx_j = atx[j]
+      let already = match atx_j {
+        Some(_) -> true
+        None -> false
+      }
+      if idx >= 0 && not already {
+        let skip = if round == 0 {
+          let (next, answer) = needs_expected_read(cx1, a.e)
+          cx1 = next
+          answer
+        } else { false }
+        if not skip {
+          let declared = ci.fields[idx].ty
+          let sub = subst(declared, m, em)
+          let (eligibility_cx, concrete) = is_concrete_read(cx1, sub)
+          cx1 = eligibility_cx
+          let exp2: Option[Ty] = if concrete { Some(sub) } else { None }
+          let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
+          cx1 = cxa
+          atx_j = Some(ax)
+          let (next, m3, em3, ok) = unify_into_read(cx1, declared, at, m, em)
+          cx1 = next
+          m = m3
+          em = em3
+          if not ok {
+            let (declared_cx, declared_text) = type_display_read(cx1, subst(declared, m, em))
+            let (actual_cx, actual_text) = type_display_read(declared_cx, at)
+            let (hint_cx, hint_text) = constructor_display_read(actual_cx, ci)
+            cx1 = cerr_h(hint_cx, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
+                "` is " ++ declared_text ++ ", got " ++ actual_text, e_lo(a.e), e_hi(a.e),
+              "constructor: " ++ hint_text)
+          }
+        }
+      }
+      atx_next = atx_next ++ [atx_j]
+      j = j + 1
+    }
+    atx = atx_next
+  }
+  (cx1, m, em, atx)
 }
 
 # ---- Java interop calls (spec §9) ----
