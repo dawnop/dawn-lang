@@ -3,6 +3,7 @@
 > 状态：**current**。裁决 9 的三条（2026-09-24，`agent-handoff/rulings-20260924.md` 与其改裁记录）：
 > 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。三条都已落地，提交见文末。
 > 2026-09-25 追加「总量棘轮」一节（门禁总量调研推荐的 (a1)+(c)，用户同日批准）：push-total / path-total 上限、`Gate-Budget` / `Gate-Retire` 声明、nightly 总量报表。
+> 2026-09-26 追加「棘轮第二轮」一节：nightly 点名的五条欠声明里四条贴 pole，按 #166 的先例拆片（#242）。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -129,6 +130,7 @@ pole 的算术就是这样过期的：09-11 按投影 17,286 job 秒算出排队
    全部超过 pole，而 09-15 以后三者最坏只有 827 / 742 / 937 s；窗口不能比 job 内容的变化活得更久。
    同日上限从 29319 s 降到 26149 s：21 条 planning value 比各自 job 的 7 天最坏高出 50 到 450 s，这些余量可以被新 job 不声明地占掉，
    于是逐条改成最坏观测加一成（取整秒），上限跟着降到新的和。
+   09-26 升到 26617 s（#242，四条贴 pole 的 job 拆片，见文末「棘轮第二轮」）。
 2. **升上限要声明**（`scripts/check-gate-budget-trailers.py`，ci.yml `secrets` job）。比较 push 区间两端树上的两个上限：
    升了，区间内的提交信息要有 `Gate-Budget(<push-total|path-total>): <旧>s -> <新>s <理由>`，旧/新数字与两端树一致；
    分几次升可以逐次声明，要求的是从起点到终点有一条声明链。
@@ -203,4 +205,53 @@ gates.yml 里那段 09-11 的算术保留为记录，后面补了 09-25 的实�
 - 「Require a declaration to raise a gate total or retire a gate step」：`check-gate-budget-trailers.py` 与 ci.yml `secrets` 接线。
 - 「Report job-seconds per push to main nightly」：`gate-observations.py` 输出逐运行记录、`gate-totals.py`、nightly 两步。
 - 「Write down the gate total ratchet」：本节与 CONTRIBUTING 双语。
+
+## 棘轮第二轮（2026-09-26，#242）
+
+nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T07:39Z）点名五条欠声明：`syntax-mutants-1` 914 s、`syntax-mutants-2` 917 s、
+`test` 918 s、`incremental-3` 881 s、`builtin-type-2` 814 s。前四条按最坏加一成重述都会越过 950 s pole，重述没有意义；
+`builtin-type-2` 加一成是 895 s，虽在 pole 之下，但本轮的目标是**每条声明不超过 850 s**（给 pole 留一成），而 `builtin-type-1` 最坏 822 s 同样贴着，
+两片各只有一步，挪不动，所以也拆。拆片照 #166（incremental-7、contracts）的写法：每片 planning value = 搬入部分的最坏观测之和 + 50 s 固定开销
+（job 时长减工作步骤），注释写明「三次 main 运行后按自身最坏重述」。
+
+| 旧 job | 旧声明 | 新 job | 新声明 | timeout | 依据 |
+|---|---|---|---|---|---|
+| syntax-mutants-1 | 902 | syntax-mutants-1 | 718 | 36 | 17 个变异体 596 + 夹具 72 + 50 |
+| syntax-mutants-2 | 897 | syntax-mutants-2 | 680 | 34 | 16 个变异体 557 + 夹具 72 + 50 |
+| | | syntax-mutants-3 | 636 | 32 | 14 个变异体 514 + 夹具 72 + 50 |
+| builtin-type-1 | 889 | builtin-type-1 | 600 | 30 | 9 个变异体 506 + probe 等 43 + 50 |
+| builtin-type-2 | 809 | builtin-type-2 | 598 | 30 | 9 个变异体 505 + 43 + 50 |
+| | | builtin-type-3 | 540 | 27 | 8 个变异体 446 + 43 + 50 |
+| test | 908 | test | 545 | 28 | 编译器自身的 9 步最坏之和 495 + 50 |
+| | | test-programs | 442 | 23 | 跑 Dawn 程序、核对结果的 6 步最坏之和 392 + 50 |
+| incremental-3 | 812 | incremental-3-1 | 521 | 27 | local-value-reads 471 + 50 |
+| | | incremental-3-2 | 405 | 21 | identity + header-state 226、state-product 129，+ 50 |
+
+- **变异体分片的估计**：从窗口内 89 份 syntax 分片日志、87 份 builtin 分片日志里，按相邻 `PASS` 行的时间差取每个变异体的最坏值
+  （pattern-or 约 26 s、for-pattern 37 到 39 s、syntax-small 16 到 18 s，builtin 54 到 57 s；syntax-small 每片第一个变异体多付一次冷启动，记 72 s），
+  按 `position % 3` 求和，再加每片都要跑的夹具（步骤时长减变异体之和的最坏值：syntax 72 s，builtin 43 s）。同一算法套在两片旧分法上得
+  933 / 922 s（实测最坏 914 / 917）与 825 / 820 s（实测 822 / 814），高估 3 到 19 s，是上界。分片仍按 harness 各自轮转，三片数量是 17 / 16 / 14 与 9 / 9 / 8。
+- **test 的切法**：run 36219628503 的步骤时间戳与窗口内 41 次成功运行的逐步最坏。留在 `test` 的是编译器自己的测试与读源码/文法的门
+  （compiler-plan、configured LSP、selfhost tests、comptime trace、fixpoint、grammar corpus、Int.MIN、Emit-Change 解析器、fmt）；
+  搬到 `test-programs` 的是跑 Dawn 程序并核对其计算结果的步骤（`dawn test --stdlib`、narrow、package tests、example tests、example main、effect evidence）。
+  任务单举例的名字是 `test-std`，但这一半还含 examples 与 effect evidence 语料，叫 std 名不副实，所以用 `test-programs`。
+- 两片 `run:` 的并集与拆前逐字相同：`steps_lock.py check` 在 record 之前列出的缺失与多出一一对应（`syntax-mutants` 与 `builtin-type` 只有 `--shard` 参数变化，各多一步）；
+  record 后 177 个 run 步骤、29 个家族（拆前 175、27）。`incremental-3-1/2` 与 `test-programs` 按 steps lock 的家族规则是新家族，所以原家族「少了」步骤；
+  push-total 是升的，不触发 `Gate-Retire`。
+- `mutant-shards-complete` 的 `needs` 与两组结果变量各加第三片；用日志还原的 `position % 3` 三份覆盖记录喂 `scripts/mutant-coverage/check.py`，四个 harness 全覆盖；
+  删掉其中一份，按名报出缺的 9 个变异体。
+
+**push-total 26149 → 26617 s（+468）**：四个新 job 的固定开销 4 × 50 = 200 s；其余 268 s 是新声明按逐步、逐变异体最坏之和构造（是上界），
+其中 116 s 是 #242 点名的旧声明低于各自最坏运行的部分。
+
+**墙钟**：每次 push 的 job 数 39 → 43（加 plan 是 44）。按 gates.yml 头部的算术，span ≥ max(最长 job, 总 job 秒 / 20)，现在绑定的是后一项
+（09-25 的实测排队下限约 1,080 s）。拆片后最长 job 仍是 `incremental-8`（声明 937 s，不在本轮），四个新 job 每个多一次约 44 s 的工具链 setup，
+中位总量约 +180 job 秒，排队下限约 +9 s。所以和首轮结论一样：**拆片只买 pole 余量，不买墙钟**；墙钟略增，量级在运行间噪声之内。
+集群外部门禁全套的 `--jobs` 相应从 39 改为 43。
+
+### 不做的（理由）
+
+- **改分片的发牌方式**（按成本发牌而不是按位置轮转）：三片 syntax 相差 82 s，在上界估计的误差内；改发牌要动 `shard.sh` 与三个 harness 的覆盖语义，不在本轮。
+- **其余高于 850 s 的五条声明**：`incremental-8` 937 s、`native-selfhost-tests` 904 s、`incremental-1` 879 s、`incremental-2` 870 s、`incremental-4` 863 s。
+  它们都不低于各自最坏运行，不在 #242 的点名里；本轮把「≤ 850 s」读成对被拆的四组 job 的要求，这五条留给下一轮（incremental-8 距 pole 只剩 13 s）。
 
