@@ -1,6 +1,6 @@
 # 顶层声明的 symbol ID：按声明身份引用
 
-> 状态：**current**。S0（本文）到 S3 已落，S4 未开始。裁决来源：2026-09-24 裁决 10（V-02 解冻）及同日改裁。
+> 状态：**current**。S0（本文）到 S4 全部已落。裁决来源：2026-09-24 裁决 10（V-02 解冻）及同日改裁。
 > 前置已完成：声明身份 `check/identity`（M0.5 K0 到 K8，2026-09-13 到 09-14）。
 
 ## 一、问题
@@ -223,6 +223,46 @@ S1 的 `infer_order_duplicate` 在 M3、M3′ 下不变：它的两个 `twin` �
 LSP 取函数的类型化树改为按键查，不再线性扫描并比较函数体跨度。
 子表达式的位置并行遍历不在本设计内（需要 checker 建 span 到类型化节点的索引）。
 
+实现（S4）。**写入点**只有调度器：`enter_decl` 把它拼好的 `path_text` 放进 `Entered.decl`（声明被
+`identity` 拒绝命名时也有，键不依赖跨度），树离开声明时由 `execute_module_bodies` 的六处出口写进去：
+推断段（`attempt_inferred_group`）、常量段、注解段、impl 方法段、trait 默认体段、测试段。
+`assemble_module_bodies` 合成的 `f$default$k` 取父声明的键加 `Named(ParameterDefault, 形参名)`，
+即 `identity.located` 给默认值表达式的那条路径。`check_fn_body` 等检查函数本身不知道自己在哪条路径下被调用
+（impl 方法也走 `check_fn`），所以留空串；没有调度器的树（lowering 自己合成的函数、单元测试夹具）也是空串。
+录制与重放都经同一个调度器，所以重放出的树与冷检同样带键；产品里存的是未写键的树，写键在出口。
+`Sig` 不存 id（第六节），JVM 与 C 发射器不读 `decl`。
+
+**查找点**在 `lsp/lspq`：`QCx` 多一个 `typed: TypedTrees`，由 `typed_trees(tm)` 对 `tm.fns ++ tm.tests`
+与 `tm.consts` 各建一张按 `decl` 的 Map，服务端建 `QCx` 时建一次（`lsp/server` 两处）。游标所在声明从手里的
+语法拼路径：顶层函数 `[Named(FunctionDecl, f)]`、impl 方法 `[ImplHead(trait, type_shape(subject, 形参名)),
+Named(MethodDecl, m)]`、trait 默认体 `[Named(TraitDecl, t), Named(MethodDecl, m)]`、测试 `[Named(TestDecl, t)]`、
+常量 `[Named(ConstDecl, c)]`，再 `path_text` 后查表（`tfun_at`；`locals_at` 的两段同样按键）。
+原来的 `tfun_by_body` 删除：它每次查询线性扫全部 `TFun`，在 `locals_at` 里还套在函数循环内。
+
+**重复声明。** 同一路径声明多次时（模块已因 `defined twice` 被拒），键指向第一个实例，与第四节 header 表的
+`first` 同一规则：第二个实例的形参与函数体按第一个实例的类型化树配对。旧的按跨度配对给每个实例各自的树，
+所以这是 S4 唯一的可见行为变化，只出现在已被拒的模块上，`selfhost-lsp-diff.sh` 的会话不含这种程序。
+在被接受的程序里，同一次分析的函数体跨度两两不同，按跨度与按键选中的树逐个相同。
+
+夹具 `scripts/lsp-decl-pairing.py`（`lsp-workspace` job 的一步）起一个真的 `dawn lsp` 会话，断言 16 条 hover 与
+definition：同一 trait 的两个 impl 各有同名方法 `label`、其中一个覆盖 trait 默认体 `twice`、一个与推断函数同名的测试、
+一个注解函数、常量初始化里的局部量；两个函数体文字相同的相邻函数在 `textDocument/formatting` 挪动前后；以及
+重复声明 `twin` 的第二个实例读第一个实例的树。在旧编译器（origin/main）上只有最后一条不同（旧的给 `s: String`，
+新的给 `s: Int`），其余 15 条逐字相同。变异体在拷贝树里一处（或一组）编辑后用分支编译器重建，再跑同一夹具：
+
+| 变异 | 结果 |
+|---|---|
+| M1 查找退回按函数体 `(lo, hi)` 配对（五个调用点换回 `tfun_by_body`） | 1 条红：重复声明的第二个实例拿到自己的树（`s: String`） |
+| M2 写入与查找都用裸名（`decl` 取路径末段的名字） | 5 条红：第二个 impl 的 `c` 读成 `c: Box`（串到第一个 impl 的 `label`），trait 默认体读到覆盖它的 impl 方法的树，测试 `inferred` 读到同名函数的树 |
+| M2′ 只有写入用裸名 | 17 条全红：查找一律落空 |
+| M3 注解段漏写键 | 9 条红：注解函数、相邻两函数、重复声明的 hover 与 definition 都取不到树 |
+
+M1 只在重复声明上变红，这不是夹具的缺口而是上一段的结论：在被接受的程序里两种配对给出同一棵树。
+按键查找真正排除的是「键拼错」一类（M2），那一类按跨度配对根本不会犯，所以需要这份夹具而不是 N−1 会话对拍。
+冻结参考调度器（`reference-body-scheduler.dawn.txt`）用它自己的 `ref_open` 记下打开时的拼写并在六处出口写键，
+与生产各写各的，M3 这类漏写也会让 `body-scheduler.py` 的全产品比较变红；比较检查函数与 `check_module` 的
+契约夹具（`body-probe.dawn.txt`、`typed-projection.dawn.txt`）在它们模拟调度器出口的那一步同样写键。
+
 ## 六、不做的（理由）
 
 - **不把 Core 的函数引用换成整数。** `CDirect(owner, name)` 不含任何计数器，已经跨修订稳定，也是两个后端的符号来源；
@@ -256,4 +296,4 @@ LSP 取函数的类型化树改为按键查，不再线性扫描并比较函数�
 | S1 | 已落（ARC-08 调度半边关闭，审计 ARC-08 转已修） | 本 PR |
 | S2 | 已落（ARC-01 关闭，审计 ARC-01 转已修） | 本 PR |
 | S3 | 已落（ARC-07 checker 半边关闭，审计 ARC-07 转已修；emit 半边维持非目标） | 本 PR |
-| S4 | 未开始 | |
+| S4 | 已落（`TFun`/`TConst` 带声明键，LSP 按键取类型化树；re-audit RC-06 的函数级半边关闭） | 本 PR |

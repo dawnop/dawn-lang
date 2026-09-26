@@ -6,10 +6,15 @@
 # walked in parallel, pairing children positionally. Where the two trees fall
 # out of step (error nodes, desugarings), the walk continues parse-only so
 # spans still resolve.
+#
+# The walk starts at a declaration's typed tree, found by the declaration
+# path the checker filed it under (`TFun.decl`, docs/symbol-id-design.md §5)
+# rather than by scanning for a body with the same span: a key names one
+# declaration, and a span only happens to.
 
 use std/map
 use front/ast.{
-  Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl,
+  Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, TypeParamDecl,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
   HandlerCell, HandlerArm,
   TNamed, TQual, TAssoc, TTuple, TFn,
@@ -30,7 +35,7 @@ use check/tast.{
   XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn,
-  TListElem, TLEExpr, TLESpread, TLEIf,
+  TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
   XComptime, XBinary, XUnary, XIf, XMatch, XBlock,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
@@ -42,6 +47,7 @@ use check/types.{
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
 use check/cx.{ModExports}
+use check/identity
 use driver/analyze.{Program, CheckedMod}
 use driver/stdlib.{StdCtx, std_file_of}
 
@@ -55,7 +61,27 @@ pub(pkg) type QCx = {
   exports_env: Map[String, ModExports],
   # the builtins this document may name -- already filtered, so no consumer
   # has to remember that std sees more than user code does
-  bins: Map[String, Sig]
+  bins: Map[String, Sig],
+  # the entry module's typed trees by declaration path (`typed_trees`)
+  typed: TypedTrees
+}
+
+## The typed trees of one module, keyed by the `identity.path_text` each was
+## filed under. A path declared twice belongs to a module already refused for
+## it; the key names the first instance, as the header table's does
+## (docs/symbol-id-design.md §4), so a repeat reads its twin's tree.
+pub(pkg) type TypedTrees = { fns: Map[String, TFun], consts: Map[String, TConst] }
+
+pub(pkg) fn typed_trees(tm: TModule) -> TypedTrees = {
+  var fns: Map[String, TFun] = map.empty()
+  for tf in tm.fns ++ tm.tests {
+    if tf.decl != "" && not map.has(fns, tf.decl) { fns = map.insert(fns, tf.decl, tf) }
+  }
+  var consts: Map[String, TConst] = map.empty()
+  for tc in tm.consts {
+    if tc.decl != "" && not map.has(consts, tc.decl) { consts = map.insert(consts, tc.decl, tc) }
+  }
+  TypedTrees { fns: fns, consts: consts }
 }
 
 ## What sits under the cursor: hover text plus an optional definition site.
@@ -342,19 +368,17 @@ fn syms_of(qc: QCx) -> Map[Int, Sym] = qc.entry.tm.syms
 
 fn sym_get(qc: QCx, id: Int) -> Option[Sym] = map.get(qc.entry.tm.syms, id)
 
-## The TFun whose body starts where this parse body starts (fns, tests, impl
-## methods and trait defaults all live in tm.fns/tm.tests).
-fn tfun_by_body(qc: QCx, body: Expr) -> Option[TFun] = {
-  let lo = e_lo(body)
-  let hi = e_hi(body)
-  for tf in qc.entry.tm.fns {
-    if x_lo(tf.body) == lo && x_hi(tf.body) == hi { return Some(tf) }
-  }
-  for tf in qc.entry.tm.tests {
-    if x_lo(tf.body) == lo && x_hi(tf.body) == hi { return Some(tf) }
-  }
-  None
-}
+## The typed tree of the declaration at `path`, spelled from the syntax the
+## walk holds: `[Named(FunctionDecl, f)]`, an impl method under its impl head,
+## a trait default under its trait, `[Named(TestDecl, t)]`.
+fn tfun_at(qc: QCx, path: List[identity.Part]) -> Option[TFun] =
+  map.get(qc.typed.fns, identity.path_text(path))
+
+fn impl_head(tparams: List[TypeParamDecl], trait_name: String, subject: TypeRef) -> List[identity.Part] =
+  [identity.ImplHead(trait_name, identity.type_shape(subject, map(tparams, tp => tp.name)))]
+
+fn method_path(head: List[identity.Part], name: String) -> List[identity.Part] =
+  head ++ [identity.Named(identity.MethodDecl, name)]
 
 fn show_ty(qc: QCx, t: Ty) -> String = ty_show(qc.entry.cx.adts, t)
 
@@ -419,10 +443,10 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
   var q = q0
   match d {
     DFn(f) -> {
-      q = visit_fn_decl(qc, q, f)
+      q = visit_fn_decl(qc, q, f, [identity.Named(identity.FunctionDecl, f.name)])
     }
     DTest(name, body, _, _, _, _) -> {
-      let tf = tfun_by_body(qc, body)
+      let tf = tfun_at(qc, [identity.Named(identity.TestDecl, name)])
       q = walk_e(qc, q, body, tf_body(tf))
     }
     DConst(name, _, ann, init, _, _, nlo, nhi) -> {
@@ -493,7 +517,10 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
           None -> ()
         }
         match m.body {
-          Some(b) -> { q = walk_e(qc, q, b, tf_body(tfun_by_body(qc, b))) }
+          Some(b) -> {
+            let tf = tfun_at(qc, [identity.Named(identity.TraitDecl, name), identity.Named(identity.MethodDecl, m.name)])
+            q = walk_e(qc, q, b, tf_body(tf))
+          }
           None -> ()
         }
       }
@@ -509,11 +536,12 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         }
       }
     }
-    DImpl(_, trait_name, tlo, thi, subject, methods, assoc, _, _, _) -> {
+    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, _, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
       q = visit_written_type(q, subject, WtStorage)
       for binding in assoc { q = visit_written_type(q, binding.tref, WtStorage) }
-      for m in methods { q = visit_fn_decl(qc, q, m) }
+      let head = impl_head(tparams, trait_name, subject)
+      for m in methods { q = visit_fn_decl(qc, q, m, method_path(head, m.name)) }
     }
     DType(t) -> {
       match t.alias_target {
@@ -577,14 +605,13 @@ fn tf_body(tf: Option[TFun]) -> Option[TExpr] =
     None -> None
   }
 
-fn tconst_init(qc: QCx, name: String) -> Option[TExpr] = {
-  for tc in qc.entry.tm.consts {
-    if tc.name == name { return Some(tc.init) }
+fn tconst_init(qc: QCx, name: String) -> Option[TExpr] =
+  match map.get(qc.typed.consts, identity.path_text([identity.Named(identity.ConstDecl, name)])) {
+    Some(tc) -> Some(tc.init)
+    None -> None
   }
-  None
-}
 
-fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl) -> Q = {
+fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
   var q = q0
   q = visit_param_types(q, f.params)
   match f.ret {
@@ -595,7 +622,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl) -> Q = {
     Some(s) -> { q = offer(q, f.nlo, f.nhi, render_sig(qc, s), Some((f.nlo, f.nhi)), None) }
     None -> ()
   }
-  let tf = tfun_by_body(qc, f.body)
+  let tf = tfun_at(qc, path)
   match tf {
     Some(t) -> {
       var i = 0
@@ -1806,15 +1833,18 @@ fn sym_detail(qc: QCx, sid: Int) -> Option[String] =
 ## binder introduced textually before it, in the Kotlin collection order.
 pub(pkg) fn locals_at(qc: QCx, pos: Int) -> List[(String, Option[String])] = {
   var out: List[(String, Option[String])] = []
-  var fns = module_fns(qc.entry.m)
+  var fns: List[(FnDecl, List[identity.Part])] = []
+  for f in module_fns(qc.entry.m) { fns = fns ++ [(f, [identity.Named(identity.FunctionDecl, f.name)])] }
   for iv in module_impls(qc.entry.m) {
-    for m2 in iv.methods { fns = fns ++ [m2] }
+    let head = impl_head(iv.tparams, iv.trait_name, iv.subject)
+    for m2 in iv.methods { fns = fns ++ [(m2, method_path(head, m2.name))] }
   }
   var found = false
-  for f in fns {
+  for entry in fns {
+    let (f, path) = entry
     if not found && pos >= f.lo && pos <= f.hi {
       found = true
-      let tf = tfun_by_body(qc, f.body)
+      let tf = tfun_at(qc, path)
       var i = 0
       for p in f.params {
         out = out ++ [(p.name, param_detail(qc, tf, i))]
@@ -1828,7 +1858,7 @@ pub(pkg) fn locals_at(qc: QCx, pos: Int) -> List[(String, Option[String])] = {
       match m2.body {
         Some(b) -> {
           if pos >= m2.lo && pos <= m2.hi {
-            let tf = tfun_by_body(qc, b)
+            let tf = tfun_at(qc, [identity.Named(identity.TraitDecl, tv.name), identity.Named(identity.MethodDecl, m2.name)])
             var i = 0
             for p in m2.params {
               out = out ++ [(p.name, param_detail(qc, tf, i))]

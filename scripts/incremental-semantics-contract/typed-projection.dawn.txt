@@ -51,6 +51,16 @@ fn path_resolver(cx: Cx, m: Module, path: List[Part]) -> tast_positions.Resolver
     None -> tast_positions.unowned(cx.src_path, cx.line_starts)
   }
 
+## The tree half of leaving: the scheduler resolves a typed tree against the
+## declaration and files it under the declaration's path (`TFun.decl`,
+## docs/symbol-id-design.md §5), and a fixture compared with a cold module
+## does both.
+fn placed(r: tast_positions.Resolver, path: List[Part], f: TFun) -> TFun =
+  TFun { ..tast_positions.function(r, f), decl: path_text(path) }
+
+fn placed_constant(r: tast_positions.Resolver, path: List[Part], c: TConst) -> TConst =
+  TConst { ..tast_positions.constant(r, c), decl: path_text(path) }
+
 ## Leave the declaration again: the symbols it minted, resolved beside the
 ## tree that reads them, and no declaration open afterwards.
 fn left_decl(after: Cx, r: tast_positions.Resolver, from: Int, to: Int) -> Cx =
@@ -121,14 +131,15 @@ pub(pkg) fn checked_body(before: Cx, m: Module, d: FnDecl, sig: Sig) -> (Cx, TFu
 
 ## The tree `checked_body` hands back holds spans measured from the
 ## declaration, exactly as the product recorded from it does. The scheduler
-## turns them into positions at the declaration's exit; a fixture comparing
-## one with a cold module has to do the same thing, and this is that step.
+## turns them into positions at the declaration's exit and files the tree
+## under the declaration's path (`TFun.decl`); a fixture comparing one with a
+## cold module has to do the same thing, and this is that step.
 pub(pkg) fn resolved_body(cx: Cx, m: Module, d: FnDecl, f: TFun) -> TFun = {
   let decl = path_text([Named(FunctionDecl, d.name)])
   match span_at(declaration_spans(m), decl) {
-    Some(sp) -> tast_positions.function(
-      tast_positions.owned(sp.lo, sp.hi, cx.src_path, cx.line_starts), f)
-    None -> f
+    Some(sp) -> TFun { ..tast_positions.function(
+      tast_positions.owned(sp.lo, sp.hi, cx.src_path, cx.line_starts), f), decl: decl }
+    None -> TFun { ..f, decl: decl }
   }
 }
 
@@ -620,7 +631,7 @@ fn value_module_sample() -> ModuleTrial !io = {
         let installed = body_product.assemble(owned_path(replayed, next_syntax, key.path), projected)
           .expect("constant replay")
         replayed = left_decl(installed, resolver, mint_cursor(saved.before), mint_cursor(saved.after))
-        moved_constants = moved_constants ++ [tast_positions.constant(resolver, projected.tree)]
+        moved_constants = moved_constants ++ [placed_constant(resolver, key.path, projected.tree)]
       }
       _ -> panic("next constant role")
     }
@@ -644,7 +655,7 @@ fn value_module_sample() -> ModuleTrial !io = {
         let installed = body_product.assemble(owned_path(replayed, next_syntax, key.path), projected)
           .expect("test replay")
         replayed = left_decl(installed, resolver, mint_cursor(saved.before), mint_cursor(saved.after))
-        moved_tests = moved_tests ++ [tast_positions.function(resolver, projected.tree)]
+        moved_tests = moved_tests ++ [placed(resolver, key.path, projected.tree)]
       }
       _ -> panic("next test role")
     }
@@ -739,7 +750,7 @@ fn method_module_sample() -> ModuleTrial !io = {
     let installed = body_product.assemble(owned_path(replayed, next_syntax, key.path), projected)
       .expect("method replay")
     replayed = left_decl(installed, resolver, mint_cursor(body.before), mint_cursor(body.after))
-    let moved_tree = tast_positions.function(resolver, projected.tree)
+    let moved_tree = placed(resolver, key.path, projected.tree)
     match entry {
       function_product.ImplMethod(_, _, _, info) -> {
         impls = impls ++ [TFun { ..moved_tree, impl_of: map.get(tags, key).expect("current impl tag") }]
@@ -814,7 +825,7 @@ fn reordered_module_sample() -> ModuleTrial !io = {
     let installed = body_product.assemble(owned_decl(replayed, next_syntax, entry.syntax), projected)
       .expect("named replay")
     replayed = left_decl(installed, resolver, mint_cursor(body.before), mint_cursor(body.after))
-    functions = functions ++ [tast_positions.function(resolver, projected.tree)]
+    functions = functions ++ [placed(resolver, [Named(FunctionDecl, entry.syntax.name)], projected.tree)]
   }
   let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
     cx: replayed, functions: functions, constants: [], impl_methods: [], trait_defaults: [], tests: [] })
@@ -891,10 +902,10 @@ fn import_sample(kind: Int) -> StateTrial !io = {
     resolver, mint_cursor(entered_old), mint_cursor(after))
   let (cold_inside, raw_cold) = check_fn(entered_new, decl, nsigs[0])
   let cold = left_decl(cold_inside, resolver, mint_cursor(entered_new), mint_cursor(cold_inside))
-  let cold_body = tast_positions.function(resolver, raw_cold)
+  let cold_body = placed(resolver, [Named(FunctionDecl, decl.name)], raw_cold)
   let (_, whole) = check_module(new_base, syntax, new_env)
   if len(after.diags) != 0 || len(cold.diags) != 0 { panic("import consumer body failed") }
-  StateTrial { replayed: replayed, cold: cold, relocated: tast_positions.function(resolver, projected.tree),
+  StateTrial { replayed: replayed, cold: cold, relocated: placed(resolver, [Named(FunctionDecl, decl.name)], projected.tree),
     cold_body: cold_body, module_body: whole.fns[0] }
 }
 
@@ -946,7 +957,7 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
     let sig = default_sig(sigs[0], decl.name, k, sigs[0].param_tys[k])
     let new_sig = default_sig(nsigs[0], decl.name, k, nsigs[0].param_tys[k])
     let fn_value = TFun { name: sig.name, sig: sig, param_syms: [], dict_syms: value.dict_syms,
-      defaults: [], ev_syms: [], body: value.body, is_test: false, impl_of: None, default_of: None }
+      defaults: [], ev_syms: [], body: value.body, is_test: false, impl_of: None, default_of: None, decl: "" }
     let no_evidence: List[Int] = []
     if not allocation.body_relocation(sig, new_sig, no_evidence) { panic("default allocation") }
     let view = View { symbols: after.syms,
@@ -973,13 +984,13 @@ fn default_sample(inferred: Bool, generic: Bool, invalid: Bool) -> ModuleTrial !
   let replayed = shifted_diags(
     left_decl(main_installed, resolver, mint_cursor(entered_old), mint_cursor(old_after)),
     len(next.diags), moved_by)
-  let body = tast_positions.function(resolver, main_projected.tree)
+  let body = placed(resolver, [Named(FunctionDecl, new_decl.name)], main_projected.tree)
   let (cold_inside, raw_cold) = if inferred {
     let (cx, _, value) = check_fn_inferred(entered_new, new_decl, nsigs[0])
     (cx, value)
   } else { check_fn(entered_new, new_decl, nsigs[0]) }
   let cold = left_decl(cold_inside, resolver, mint_cursor(entered_new), mint_cursor(cold_inside))
-  let cold_body = tast_positions.function(resolver, raw_cold)
+  let cold_body = placed(resolver, [Named(FunctionDecl, new_decl.name)], raw_cold)
   let (whole_cx, whole) = check_module(new_base, new_syntax, map.empty())
   let (assembled_cx, assembled) = assemble_module_bodies(ModuleBodies {
     cx: replayed, functions: [body], constants: [], impl_methods: [], trait_defaults: [], tests: [] })
@@ -1037,7 +1048,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
     let (checked_inside, _, raw_cold) =
       check_fn_inferred(entered_cold, new_decls[i], new_sigs[i])
     let checked = left_decl(checked_inside, resolver, mint_cursor(entered_cold), mint_cursor(checked_inside))
-    let cold_body = tast_positions.function(resolver, raw_cold)
+    let cold_body = placed(resolver, [Named(FunctionDecl, new_decls[i].name)], raw_cold)
     if sealed.inferring || map.get(after.fns, old_decls[i].name) != Some(sealed) { panic("inferred signature not sealed") }
     if i == 0 {
       replayed = checked
@@ -1055,7 +1066,7 @@ fn inferred_module_sample() -> ModuleTrial !io = {
       # revision is resolving it against that declaration's position there,
       # which is what the scheduler does on the way out.
       replayed = left_decl(installed, resolver, mint_cursor(before), mint_cursor(after))
-      let moved = tast_positions.function(resolver, projected.tree)
+      let moved = placed(resolver, [Named(FunctionDecl, new_decls[i].name)], projected.tree)
       functions = functions ++ [moved]
       out = out ++ [StateTrial { replayed: replayed, cold: checked, relocated: moved,
         cold_body: cold_body, module_body: whole.fns[i] }]
@@ -1101,14 +1112,14 @@ pub(pkg) fn test_samples() -> List[StateTrial] !io = {
   let resolver = path_resolver(current, new_ast, [Named(TestDecl, n.name)])
   let (cold_inside, raw_cold) = check_test(entered_new, n.name, n.body)
   let cold = left_decl(cold_inside, resolver, mint_cursor(entered_new), mint_cursor(cold_inside))
-  let cold_body = tast_positions.function(resolver, raw_cold)
+  let cold_body = placed(resolver, [Named(TestDecl, n.name)], raw_cold)
   let delta = 0
   # Assembled into the declaration the scheduler would have opened, not into
   # the context outside it: a test block is not visited by the header passes,
   # so opening it is where its own identity is minted.
   let replayed = left_decl(source_state(entered_new, entered_old, after, body, delta), resolver,
     mint_cursor(entered_old), mint_cursor(after))
-  let moved = tast_positions.function(resolver,
+  let moved = placed(resolver, [Named(TestDecl, n.name)],
     admitted_body(local_view(entered_old, after, delta), body))
   [StateTrial { replayed: replayed, cold: cold, relocated: moved, cold_body: cold_body, module_body: whole.tests[1] }]
 }

@@ -14422,7 +14422,8 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
     body: bx,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    decl: ""
   })
 }
 
@@ -14485,7 +14486,8 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
       body: bx,
       is_test: false,
       impl_of: None,
-      default_of: None
+      default_of: None,
+      decl: ""
     })
 }
 
@@ -14527,7 +14529,8 @@ pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> 
     body: bx,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    decl: ""
   })
 }
 
@@ -14594,7 +14597,8 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
     body: bx,
     is_test: true,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    decl: ""
   })
 }
 
@@ -14627,7 +14631,7 @@ pub(pkg) fn check_const_init(
   }
   cx1 = Cx { ..cx1, const_cutoff: None }
   (cx1, TConst { name: d.name, ty: declared, init: bx,
-    lo: owner_off(cx, d.lo), hi: owner_off(cx, d.hi) })
+    lo: owner_off(cx, d.lo), hi: owner_off(cx, d.hi), decl: "" })
 }
 
 test "diagnostic reads retain lambda arity and match diagnostic paths" {
@@ -15210,7 +15214,10 @@ pub(pkg) fn check_module_body_products(headers: ModuleHeaders) -> ModuleBodies !
 ## and the resolver that turns what the body records back into positions.
 ## They come from one lookup because they must agree: what the checker
 ## measured from, the resolver adds back.
-type Entered = { cx: Cx, resolver: tast_positions.Resolver }
+## `decl` is the declaration's `path_text`, what the typed tree it leaves
+## with is filed under (docs/symbol-id-design.md §5). A declaration the view
+## refuses to name still has it: the key does not depend on the span.
+type Entered = { cx: Cx, resolver: tast_positions.Resolver, decl: String }
 
 ## Enter the declaration a body belongs to, so that every diagnostic and every
 ## typed span the body records is measured from the declaration rather than
@@ -15221,7 +15228,7 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
   let decl = identity.path_text(path)
   match identity.span_at(view, decl) {
     None -> Entered { cx: unowned(cx),
-      resolver: tast_positions.unowned(cx.src_path, cx.line_starts) }
+      resolver: tast_positions.unowned(cx.src_path, cx.line_starts), decl: decl }
     Some(sp) -> {
       # A diagnostic names the view it resolves against by module path, which
       # only the driver can supply. The typed tree names nothing: it is
@@ -15235,7 +15242,7 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
       # continues its slots instead of reissuing them. A body whose header was
       # never entered starts at zero, which is still its own numbering.
       Entered { cx: enter_decl_owner(entered, path, sp.lo, sp.hi),
-        resolver: tast_positions.owned(sp.lo, sp.hi, cx.src_path, cx.line_starts) }
+        resolver: tast_positions.owned(sp.lo, sp.hi, cx.src_path, cx.line_starts), decl: decl }
     }
   }
 }
@@ -15551,7 +15558,7 @@ fn attempt_inferred_group[S](entry: S, cx: Cx, done: Map[Int, TFun], settled: Se
       if ordered || not used_unsealed {
         state = next_state
         cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
-        inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
+        inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })
         sealed_some = true
       } else {
         blocked = blocked ++ [idx]
@@ -15650,7 +15657,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
         let (next_state, cxe, tc) = executor.constant(state, owner.cx, d, declared, visible)
         state = next_state
         cx1 = left(owner, cxe)
-        tconsts = tconsts ++ [tast_positions.constant(owner.resolver, tc)]
+        tconsts = tconsts ++ [TConst { ..tast_positions.constant(owner.resolver, tc), decl: owner.decl }]
       }
       _ -> ()
     }
@@ -15668,7 +15675,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       let (next_state, cxe, tf) = executor.function(state, owner.cx, d, sigs[i])
       state = next_state
       cx1 = left(owner, cxe)
-      tfuns = tfuns ++ [Some(tast_positions.function(owner.resolver, tf))]
+      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })]
     } else {
       match map.get(inferred, i) {
         Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
@@ -15700,7 +15707,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
           state = next_state
           cx1 = left(owner, cxe)
           impl_tfuns = impl_tfuns ++
-            [TFun { ..tast_positions.function(owner.resolver, tf), impl_of: imp_key }]
+            [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, impl_of: imp_key }]
         }
         _ -> ()
       }
@@ -15728,7 +15735,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
                   state = next_state
                   cx1 = left(owner, cxe)
                   default_tfuns = default_tfuns ++
-                    [TFun { ..tast_positions.function(owner.resolver, tf), default_of: Some(t) }]
+                    [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, default_of: Some(t) }]
                 }
                 None -> ()
               }
@@ -15746,7 +15753,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
     state = next_state
     cx1 = left(owner, cxe)
-    ttests = ttests ++ [tast_positions.function(owner.resolver, tf)]
+    ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl }]
   }
   var fns_out: List[TFun] = []
   for sl in tfuns {
@@ -15818,7 +15825,10 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
             body: dd.body,
             is_test: false,
             impl_of: None,
-            default_of: None
+            default_of: None,
+            # the parameter default's own path under its parent's, the key
+            # `identity.located` gives the default expression
+            decl: tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])])
           }]
           cx1 = write_signature(cx1, ds.name, ds)
         }

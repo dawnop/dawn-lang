@@ -44,6 +44,12 @@ fn entered_decl(cx: Cx, m: Module, d: FnDecl) -> Cx = {
   }
 }
 
+## The scheduler files a typed tree under its declaration's path as the tree
+## leaves it (`TFun.decl`, docs/symbol-id-design.md §5); the check functions
+## leave it empty. The body compared with `check_module`'s is filed the same
+## way; the shifted and relocated pair are compared with each other, unfiled.
+fn filed(d: FnDecl, f: TFun) -> TFun = TFun { ..f, decl: path_text([Named(FunctionDecl, d.name)]) }
+
 pub(pkg) fn samples() -> List[Trial] !io = {
   let text = fixture_text()
   let (m, diagnostics) = parser.parse_module(text)
@@ -72,7 +78,7 @@ pub(pkg) fn samples() -> List[Trial] !io = {
         panic("body changed an earlier symbol: " ++ d.name)
       }
     }
-    trials = trials ++ [Trial { name: d.name, before: before, after: after, body: body,
+    trials = trials ++ [Trial { name: d.name, before: before, after: after, body: filed(d, body),
       shifted: shifted, shifted_body: shifted_body, module_body: whole.fns[index],
       relocated: relocation.relocate(body, Move {
         start: mint_cursor(before), limit: mint_cursor(after), delta: 0, span: 0 }) }]

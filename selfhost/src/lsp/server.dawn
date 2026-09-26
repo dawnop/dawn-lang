@@ -41,7 +41,7 @@ use check/tast.{TModule}
 use check/scalar_replay
 use check/body_execution
 use check/source_snapshot
-use lsp/lspq.{QCx, Target, find_target}
+use lsp/lspq.{QCx, Target, find_target, typed_trees}
 use lsp/lspc.{completions_at}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
@@ -578,7 +578,8 @@ fn doc_qcx(st: LspState, analysis: Analysis) -> Option[QCx] = {
         prog: analysis.prog,
         std: st.std,
         exports_env: env,
-        bins: visible_bins(st.bins, e.cx)
+        bins: visible_bins(st.bins, e.cx),
+        typed: typed_trees(e.tm)
       })
     }
     None -> None
@@ -2846,7 +2847,7 @@ test "a replayed body's definition points at the candidate revision's position" 
       let no_env: Map[String, ModExports] = map.empty()
       QCx { entry: entry,
         prog: Program { modules: [entry], diags: [], decl_spans: map.empty() },
-        std: std, exports_env: no_env, bins: visible_bins(builtins(), cx) }
+        std: std, exports_env: no_env, bins: visible_bins(builtins(), cx), typed: typed_trees(tm) }
     }
     # Where `lspq` says the local is declared, asked at the read of it.
     fn probe_local(qc: QCx, text: String) -> (Int, Int) = {
