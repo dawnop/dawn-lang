@@ -1418,6 +1418,8 @@ jobs:
     # 92, effect evidence 113 = 392s, plus 50s fixed overhead = 442s. An
     # estimate from observations, not an observation of this job; restate it
     # at its own worst once three main runs of it exist.
+    # 2026-09-26: the method-size gate (#241) measured 2.0s locally; it
+    # fits the planning value's headroom, which is not restated for it.
     # budget: 3x 442s planning value (step worst observations plus 50s fixed overhead)
     timeout-minutes: 23
     steps:
@@ -1496,6 +1498,23 @@ jobs:
         run: |
           ./scripts/effect-evidence-contract/run.sh --self-test
           ./scripts/effect-evidence-contract/run.sh
+
+      # HotSpot never JIT-compiles a method longer than 8000 bytes of
+      # bytecode (HugeMethodLimit), so such a method runs interpreted for the
+      # life of the process; four checker methods did, and cold checking was
+      # 20 to 27% slower for it (#241). This holds every method of the jar
+      # the toolchain step above built to that line, except the generated
+      # embed/ tables, test blocks and the vendored Java packages (the
+      # script's header says why each). It reads code_length straight from
+      # the class files: no JVM, 2.0s for both lines locally over the 43,258
+      # methods of the real jar (1.2s of it the self-test). It sits in the
+      # cheapest job that already builds the jar and is not an incremental-*
+      # job (sweep.sh runs every step of those as a semantic harness and
+      # refuses anything else); no step above writes build/dawn-selfhost.jar.
+      - name: no compiler method over the JIT's huge-method limit
+        run: |
+          python3 scripts/method-size-gate.py --selftest
+          python3 scripts/method-size-gate.py
 
   # What the compiler emits and what std computes, checked against something
   # that is not the compiler: the JVM verifier, a javac-built reference, the
