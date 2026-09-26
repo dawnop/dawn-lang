@@ -277,7 +277,7 @@ def self_test(repo, sha):
 
         # Negative control: a fragment gone from the cluster after its job
         # ended must not come back green.
-        victim = "test"
+        victim = "test-compiler"
         fragment = root / "remote" / "out" / sha / run_id / "fragments" / f"{victim}.json"
         fragment.unlink()
         again = world.run("deleted-fragment", resume=root / "out-killed")

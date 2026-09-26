@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The compiler's own inline tests, on the native backend.
 #
-# `gates.yml`'s `test` job runs `./bin/dawn test selfhost`, which is the JVM
-# and only the JVM, so every inline test in the compiler was read by one
+# `gates.yml`'s `test-compiler` job runs `./bin/dawn test selfhost`, which is
+# the JVM and only the JVM, so every inline test in the compiler was read by one
 # backend. That was tolerable while those tests were about data structures. It
 # stopped being tolerable on 2026-09-04, when `Console` and `Exit` became
 # effects and twenty-four CLI cases moved out of scripts/native-cli-diff.sh
