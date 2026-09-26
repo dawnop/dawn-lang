@@ -1,6 +1,6 @@
 # 顶层声明的 symbol ID：按声明身份引用
 
-> 状态：**current**。S0（本文）、S1 与 S2 已落，S3、S4 未开始。裁决来源：2026-09-24 裁决 10（V-02 解冻）及同日改裁。
+> 状态：**current**。S0（本文）到 S3 已落，S4 未开始。裁决来源：2026-09-24 裁决 10（V-02 解冻）及同日改裁。
 > 前置已完成：声明身份 `check/identity`（M0.5 K0 到 K8，2026-09-13 到 09-14）。
 
 ## 一、问题
@@ -160,6 +160,55 @@ S1 的 40 个随机调用图程序（28 个含重复名）新旧对拍：旧编�
 产物由键找到自己的声明，不再依赖与 AST 的下标对齐；`function_product.headers` 的逐下标名字核对随之删除。
 JVM 发射器里 `TModule`/`LMod` 的位置对齐维持 `arch-split-design.md` 的非目标判决，不在本设计内。
 
+实现（S3）。三张表共用一个容器 `identity.PathTable[V] = { paths, first, repeats }`：`paths` 是声明顺序的
+路径列表，`first` 是按 `identity.path_text` 的 Map。它是容器，不是新的身份：键就是第二节的声明路径，
+`Sig` 不变（第六节「不在 Sig 里存声明 id」）。
+
+| 表 | 生产者 | 键 | 值 |
+|---|---|---|---|
+| `sigs` | `pass_fn_signatures` | `[Named(FunctionDecl, f)]` | `Sig` |
+| `impl_sigs` | `pass_register_impls` | `[ImplHead(trait, type_shape(subject, 形参名)), Named(MethodDecl, m)]` | `Option[Sig]`（注册拒绝了该 impl 或该方法时为 `None`） |
+| `const_tys` | `pass_const_decls` | `[Named(ConstDecl, c)]` | `Option[Ty]`（别名或导入冲突跳过时为 `None`） |
+
+impl 方法的键与 `enter_decl_owner`、`identity.declarations` 用的是同一条路径（生产者把 impl 头算一次，
+进声明与存表共用）。trait 默认体不在这三张表里：它的签名一直从 `TraitI.methods` 取，路径
+`[Named(TraitDecl, t), Named(MethodDecl, m)]` 只用于进入声明，本刀不动。
+
+消费者都从手里的语法拼出路径去查：`execute_module_bodies`（函数、常量、impl 方法三段）、`pass_main_check`、
+`function_product` 的三个视图、`allocation.local_impl_headers`；`driver/analyze.dawn`、`driver/stdlib.dawn`
+的调用点文字不变（参数类型变了）。调度器仍需要按下标的函数签名（S1/S2 的 pending 与轮次以下标为句柄），
+它在同一趟 `fnds` 遍历里逐个查表建出这张局部视图，对齐由构造保证，不再跨阶段。
+
+删掉的核对：`function_product.headers` 的「下标处签名名字等于语法名字」与长度尾检，`values` 的长度首尾检，
+`methods` 的长度首尾检、每个 impl 的「签名个数等于方法个数」与方法名核对，`local_impl_headers` 的表长
+与方法个数核对。换成**键缺失即拒**：视图要的每个声明都必须在表里查到，查不到返回 `None`，从不补占位。
+多出来的键不拒：表由生产者对同一份语法建出，多一个键说明不了任何声明被配错，而配错（同一个值存在别的键下）
+由键本身排除。
+
+**重复声明。** 同一路径被声明多次时（模块已因 `defined twice`、`implemented twice` 或 `duplicate impl` 被拒），
+`first` 里的键指向**第一个**实例，与 §3.1「名字在第一个实例完成时置位」一致；`paths` 按声明顺序保留全部实例。
+其后的实例按顺序排在 `repeats[路径]` 里，消费者按声明顺序第 n 次遇到某条路径就取第 n 个实例
+（`identity.path_table_claim`）。只保留第一个是不够的：错误恢复仍要检查每个重复体，而重复体可以有不同的
+形参个数，拿第一个实例的签名去检查 `fn wider(n: Int, m: Int)` 会在 `function_entry` 按下标取形参类型时越界。
+`repeats` 只在已被拒的模块里非空，它让冷输出在这类模块上也逐字节不变。
+
+夹具与变异体。checker-corpus 夹具 `header_repeats` 同时放了四种重复：形参类型不同的 `twin`、形参个数不同的
+`wider`、类型不同的常量 `LIMIT`、同一 impl 里实现两次的 `size`（第一个体故意写错）。它在 S3 前后的编译器上
+诊断逐字节相同，`run.sh --record` 只新增这一个 `.expected`，其余 162 个不变。变异体都是一处编辑，用分支编译器
+重编整棵编译器后逐个跑全部 163 个夹具：
+
+| 变异 | 结果 |
+|---|---|
+| M1 impl 方法的键写成 `Named(FunctionDecl, m)`（`passes.method_path`） | 3 个夹具红：`assoc_effect_advice`、`assoc_effect_defaults` 各丢了 impl 方法体里的效果诊断，`header_repeats` 丢了 `size` 的返回类型诊断；impl 方法体全被跳过。用它自举时第二级编译器在运行时缺 std 的 impl 方法（`NoSuchMethodError`） |
+| M2 `function_product.headers` 查不到键时借 `Cx.fns` 里的同名签名作占位 | `function_product` 内联测试在「空表必拒」断言上失败（`function-products.py` 的 `signature-key-missing`） |
+| M3 重复路径的键指向最后一个实例（`path_table_add` 覆盖 `first`） | `header_repeats` 红：`size` 的诊断消失，`twin` 与 `LIMIT` 的第一个实例按第二个的 header 检查而多报两条 |
+| M3′ 丢掉 `repeats`，每个实例都读第一个（`path_table_claim` 恒取 `first`） | `header_repeats` 上 checker 崩溃：`index 1 out of bounds for length 1`（`wider` 的第二个实例） |
+
+S1 的 `infer_order_duplicate` 在 M3、M3′ 下不变：它的两个 `twin` 签名相同，取哪个实例都一样，所以需要新夹具。
+
+实测（`java -jar X check selfhost`，各自检查自己的源码树，本机同机交错，首轮预热不计，墙钟中位数，秒）：
+5 轮旧 6.29、新 6.43；再跑 10 轮旧 6.37（6.18 到 6.48）、新 6.39（6.32 到 6.53），差在同格离散之内。
+
 ## 五、TFun 与 LSP
 
 `TFun`、`TConst` 增加 `decl: String`（`path_text`，与 `DiagOwner.decl` 同一拼写）。
@@ -198,5 +247,5 @@ LSP 取函数的类型化树改为按键查，不再线性扫描并比较函数�
 | S0 | 已落（本文；审计 ARC-01/07/08 指向本文） | 本 PR |
 | S1 | 已落（ARC-08 调度半边关闭，审计 ARC-08 转已修） | 本 PR |
 | S2 | 已落（ARC-01 关闭，审计 ARC-01 转已修） | 本 PR |
-| S3 | 未开始 | |
+| S3 | 已落（ARC-07 checker 半边关闭，审计 ARC-07 转已修；emit 半边维持非目标） | 本 PR |
 | S4 | 未开始 | |

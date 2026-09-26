@@ -10,7 +10,8 @@
 - 当前主要风险已经从物理文件大小转为**阶段契约没有类型化**：裸名字构依赖图、平行 List 靠下标对齐、内部 panic 被用户错误通道吞掉。
 - native failure runtime 的三项 P1 已由 #193 收口；`ARC-12` 也已由模块级 `LowerCache`
   收口，`ARC-13` 也已关闭 native RC 错删源码循环目标的问题。当前结构债转为
-  `ARC-01/02/11` 的 partial 边界，以及 `ARC-07/08` 的 typed-product / stable-origin 前置。
+  `ARC-02/11` 的 partial 边界；`ARC-01/07/08` 已由 [symbol ID](../symbol-id-design.md) 线关闭
+  （`ARC-07` 只关 checker 半边，emit 半边是非目标）。
 
 ## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖（已修）
 
@@ -220,12 +221,25 @@
 - **影响：** checker→lower regression 会变成“cannot evaluate at compile time”一类用户诊断，隐藏 compiler bug，也可能让只期待某条诊断的负例假绿。
 - **建议：** 预期拒绝用 `Result[..., LowerRefusal]`；只转换该 variant。阶段不变量失败继续作为内部错误并保留上下文。
 
-## ARC-07 — P2 — 阶段产物靠平行 List 的位置对齐
+## ARC-07 — P2 — 阶段产物靠平行 List 的位置对齐（已修）
 
-<!-- audit-anchor: present selfhost/src/check/checker.dawn | impl_sigs[ii] -->
+<!-- audit-anchor: absent selfhost/src/check/checker.dawn | identity.path_table_claim(headers.impl_sigs, method_seen -->
 
-> **处置去向（2026-09-26）：** checker 半边由 [symbol-id-design.md](../symbol-id-design.md)
-> 的 S3（`ModuleHeaders` 改为声明顺序的路径列表 + 按路径的 Map）关闭；emit 半边维持下文订正里的非目标判决。
+> **已修（2026-09-26，[symbol-id-design.md](../symbol-id-design.md) S3）。** 活账只有 checker 半边
+> （下文订正），它已关闭：`ModuleHeaders` 的 `sigs`、`impl_sigs`、`const_tys` 改为 `identity.PathTable`，
+> 即声明顺序的路径列表加按 `identity.path_text` 的 Map。生产者 `pass_fn_signatures`、`pass_register_impls`、
+> `pass_const_decls` 把每条 header 存在它读自的那条声明的路径下（函数 `[Named(FunctionDecl, f)]`、
+> impl 方法 `[ImplHead(trait, subject), Named(MethodDecl, m)]`、常量 `[Named(ConstDecl, c)]`）；
+> 消费者 `execute_module_bodies`、`pass_main_check`、`function_product`、`allocation.local_impl_headers`
+> 从手里的语法拼出同一条路径去查，任何地方都不再按下标把表与 AST 配对。`impl_sigs[ii]`/`msigs[mi]`
+> 随之消失；`function_product` 的逐下标名字核对与长度尾检删除，改为「键缺失即拒」。
+> 同一路径被重复声明（模块已因重复被拒）时键指向第一个实例，其后的实例排在 `repeats` 里，
+> 按声明序第 n 次遇到该路径就取第 n 个，所以每个重复体仍按自己的 header 检查、冷输出逐字节不变；
+> 夹具 `header_repeats` 与三个变异体钉住它（见设计 §四）。
+>
+> 锚点改为 `absent`：原 `present` 锚点 `impl_sigs[ii]` 是被删掉的那行；新锚点指向修复新增的按路径读取，
+> 修复被撤回时它消失，本项随之重判。emit 半边（`TModule`/`LMod` 位置对齐）保留下文原文与非目标判决，
+> 不因本项转已修而重开。
 
 - **证据：S。** impl registration 返回与 AST 二维 List 位置对齐的 signatures：`selfhost/src/check/passes.dawn:1382`；checker 直接索引 `impl_sigs[ii]`/`msigs[mi]` 并重新解析 trait/subject：`selfhost/src/check/checker.dawn:7402`、`:7405`、`:7414`。
 - JVM emitter 同时接收 `TModule` 与 `LMod`，先按 `fi` 取 `lm.fns[fi]`，之后才比较 name：`selfhost/src/jvm/emit.dawn:1324`、`:1390`、`:1394`。`docs/arch-split-design.md:748` 也记录了该边界。

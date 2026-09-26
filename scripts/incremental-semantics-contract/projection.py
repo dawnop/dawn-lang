@@ -36,8 +36,10 @@ def main():
             ("assembly-default-dictionary", "dict_syms: dd.dict_syms,", "dict_syms: [],"),
         ]),
         ("checker", "check_module: a whole module checks end to end", [
-            ("header-inference-state", "cx: cx1, sigs: sigs, impl_sigs: impl_sigs", "cx: cx1, sigs: map(sigs, s => Sig { ..s, inferring: false }), impl_sigs: impl_sigs"),
-            ("header-const-types", "impl_sigs: impl_sigs, const_tys: const_tys }", "impl_sigs: impl_sigs, const_tys: [] }"),
+            ("header-inference-state", "cx: cx1, sigs: sigs, impl_sigs: impl_sigs",
+             "cx: cx1, sigs: PathTable { ..sigs, first: map.from(map(map.entries(sigs.first), e => {\n"
+             "    let (k, s) = e\n    (k, Sig { ..s, inferring: false })\n  })) }, impl_sigs: impl_sigs"),
+            ("header-const-types", "impl_sigs: impl_sigs, const_tys: const_tys }", "impl_sigs: impl_sigs, const_tys: identity.path_table() }"),
         ]),
         # These two moved here from body-probe.py's typed mutants when nominal
         # and trait ids started deriving from their declarations. Their old

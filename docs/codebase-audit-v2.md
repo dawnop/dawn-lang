@@ -103,11 +103,11 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（91）
+#### 当前 fixed（92）
 
 - 语法（19）：`SYN-01`–`SYN-19`。
 - 语义（14）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-10`–`SEM-18`。
-- 架构（9）：`ARC-01`、`ARC-03`–`ARC-06`、`ARC-08`、`ARC-09`、`ARC-12`、`ARC-13`。
+- 架构（10）：`ARC-01`、`ARC-03`–`ARC-09`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（19）：`LIB-01`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
@@ -117,22 +117,22 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 - 语义（1）：`SEM-04`。
 - 架构（2）：`ARC-02`、`ARC-11`。
 
-#### 当前 open（3）
+#### 当前 open（2）
 
 - 语义（1）：`SEM-09`。
-- 架构（2）：`ARC-07`、`ARC-10`。
+- 架构（1）：`ARC-10`。
 
 #### 当前 retracted（2）
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**91 fixed + 3 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
-语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **9/2/2/0**、工具链 **17/0/0/0**、
+当前计数自检：**92 fixed + 3 partial + 2 open + 2 retracted = 99**。逐专题矩阵：
+语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **10/2/1/0**、工具链 **17/0/0/0**、
 库 **19/0/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
-`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed，`ARC-08` fixed（symbol ID S1）、`ARC-01` fixed（symbol ID S2）。
+`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed，`ARC-08` fixed（symbol ID S1）、`ARC-01` fixed（symbol ID S2）、`ARC-07` fixed（symbol ID S3）。
 2026-08-11 由 `doc-check.py` 的 evidence 检查一次性订正八条：`SEM-07`（`6874f64` 的
 export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点迁移）、
 `LIB-08`（`ce9cd15` 的结构化 `JsonError`）、`LIB-12`（`05db7f2` 的 query/form multimap）、
@@ -436,6 +436,9 @@ comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义�
    （模块级 `LowerCache` + 贯穿的 lifted-lambda 计数器），它给 `ARC-11B` 提供的是
    「同一函数体在整个模块里只有一份」这条身份前提，不是 `ARC-11B` 的全部前置：
    后者还欠 `RC-03` 的 `fold_children`/`visit` 原语，缺它就是第七份手写全树遍历。
+   **2026-09-26 更新：** `ARC-08`（S1）与 `ARC-07` 的 checker 半边（S3）都已由
+   [symbol ID](symbol-id-design.md) 关闭：header 产物按声明路径存取，不再与 AST 按下标对齐。
+   `ARC-07` 的 emit 半边维持非目标判决。
 6. **破坏性 package API：** `json2` / `web3` 两个 major 已带走 `LIB-08`、`LIB-12`、`LIB-14`、
    `LIB-15`、`LIB-17`。此后判据细化了一层：**「要不要开 major」和「开 major 贵不贵」是两件事**。
    `LIB-19` 同样是收窄 pub，却已随 `sha2 / 2.0.0` 关账，因为 sha2 的三个消费者全在仓内、

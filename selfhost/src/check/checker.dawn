@@ -104,7 +104,7 @@ use check/cx.{
   TySpan
 }
 use check/identity
-use check/identity.{minted}
+use check/identity.{minted, PathTable}
 use check/tast_positions
 use check/import_use
 use check/passes.{
@@ -15075,14 +15075,19 @@ fn no_tfun() -> Option[TFun] = None
 pub(pkg) fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io =
   check_module_bodies(check_module_headers(cx, m, env))
 
-## A same-revision stage product. Syntax and positional signature tables travel
+## A same-revision stage product. Syntax and the header tables travel
 ## together; this is not permission to reuse headers in a different environment.
+## Each table files a declaration's header under its path (`identity.PathTable`):
+## a function under `[Named(FunctionDecl, f)]`, an impl method under
+## `[ImplHead(trait, subject), Named(MethodDecl, m)]`, a constant under
+## `[Named(ConstDecl, c)]`. A consumer spells the path from the syntax it
+## walks; nothing pairs a table with the syntax by index (ARC-07).
 pub(pkg) type ModuleHeaders = {
   syntax: Module,
   cx: Cx,
-  sigs: List[Sig],
-  impl_sigs: List[List[Option[Sig]]],
-  const_tys: List[Option[Ty]]
+  sigs: PathTable[Sig],
+  impl_sigs: PathTable[Option[Sig]],
+  const_tys: PathTable[Option[Ty]]
 }
 
 pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
@@ -15252,12 +15257,19 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # can be named.
   let view = identity.declaration_spans(m)
   var cx1 = headers.cx
-  let sigs = headers.sigs
-  let impl_sigs = headers.impl_sigs
-  let const_tys = headers.const_tys
   # 5. inferred functions first, in call-dependency order — every callee's
   # signature is final before any caller is checked; a true cycle must annotate
   let fnds = module_fns(m)
+  # Each function's header, found by its path. The list is the scheduler's own
+  # view, indexed like `fnds` because this walk of `fnds` builds it.
+  var sigs: List[Sig] = []
+  var fn_seen: Map[String, Int] = map.empty()
+  for d in fnds {
+    let (claimed, header) = identity.path_table_claim(headers.sigs, fn_seen,
+      identity.path_text([identity.Named(identity.FunctionDecl, d.name)]))
+    fn_seen = claimed
+    sigs = sigs ++ [header.expect("pass_fn_signatures files every function")]
+  }
   # What the inferred pass produced, keyed by declaration index. It fills
   # scattered positions in dependency order, and writing each result into a
   # list made the pass O(F^2) in the module's function count: a 3200-function
@@ -15560,20 +15572,22 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # earlier consts; that order is also the evaluation order)
   var tconsts: List[TConst] = []
   var visible: Set[String] = set.empty()
-  var ci = 0
+  var const_seen: Map[String, Int] = map.empty()
   for d in module_consts(m) {
-    match const_tys[ci] {
-      Some(declared) -> {
-        let owner = enter_decl(cx1, view, [identity.Named(identity.ConstDecl, d.name)])
+    let path = [identity.Named(identity.ConstDecl, d.name)]
+    let (claimed, header) = identity.path_table_claim(headers.const_tys, const_seen, identity.path_text(path))
+    const_seen = claimed
+    match header {
+      Some(Some(declared)) -> {
+        let owner = enter_decl(cx1, view, path)
         let (next_state, cxe, tc) = executor.constant(state, owner.cx, d, declared, visible)
         state = next_state
         cx1 = left(owner, cxe)
         tconsts = tconsts ++ [tast_positions.constant(owner.resolver, tc)]
       }
-      None -> ()
+      _ -> ()
     }
     visible = set.insert(visible, d.name)
-    ci = ci + 1
   }
   # annotated function bodies. The typed functions are assembled here, in
   # declaration order, taking the inferred pass's result where it has one --
@@ -15598,33 +15612,32 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   }
   # 5.75. impl method bodies and trait default bodies (full signatures, so
   # they check like ordinary annotated functions)
-  var ii = 0
   var impl_tfuns: List[TFun] = []
+  var method_seen: Map[String, Int] = map.empty()
   for imd in module_impls(m) {
-    let msigs = impl_sigs[ii]
     # recover (trait id, subject) for codegen's mangled impl-method names;
     # both lookups re-run what registration already validated, diags discarded
     let imp_key = impl_body_key(cx1, imd.trait_name, imd.subject)
     let impl_head = [identity.ImplHead(imd.trait_name,
       identity.type_shape(imd.subject, map(imd.tparams, tp => tp.name)))]
-    var mi = 0
     for me in imd.methods {
-      match msigs[mi] {
-        Some(ms) -> {
+      let path = impl_head ++ [identity.Named(identity.MethodDecl, me.name)]
+      let (claimed, header) = identity.path_table_claim(headers.impl_sigs, method_seen, identity.path_text(path))
+      method_seen = claimed
+      match header {
+        Some(Some(ms)) -> {
           # registration refused any parameter defaults; strip them so the
           # refusal is not followed by the value's own diagnostics
-          let owner = enter_decl(cx1, view, impl_head ++ [identity.Named(identity.MethodDecl, me.name)])
+          let owner = enter_decl(cx1, view, path)
           let (next_state, cxe, tf) = executor.method(state, owner.cx, imd.trait_name, imd.subject, strip_param_defaults(me), ms)
           state = next_state
           cx1 = left(owner, cxe)
           impl_tfuns = impl_tfuns ++
             [TFun { ..tast_positions.function(owner.resolver, tf), impl_of: imp_key }]
         }
-        None -> ()
+        _ -> ()
       }
-      mi = mi + 1
     }
-    ii = ii + 1
   }
   var default_tfuns: List[TFun] = []
   for td in module_traits(m) {
@@ -15907,11 +15920,13 @@ test "check_module: a whole module checks end to end" {
   let headers = check_module_headers(test_cx(), m, env)
   assert headers.syntax == m
   assert len(headers.cx.diags) == 0
-  assert len(headers.sigs) == 3
-  assert headers.sigs[1].inferring
+  let fn_path = (name: String) => identity.path_text([identity.Named(identity.FunctionDecl, name)])
+  assert headers.sigs.paths == [fn_path("add"), fn_path("twice"), fn_path("main")]
+  assert identity.path_table_get(headers.sigs, fn_path("twice")).expect("header twice").inferring
   assert map.get(headers.cx.fns, "twice").expect("header twice").inferring
-  assert headers.const_tys == [Some(TyInt)]
-  assert headers.impl_sigs == []
+  assert identity.path_table_get(headers.const_tys, identity.path_text([identity.Named(identity.ConstDecl, "K")])) ==
+    Some(Some(TyInt))
+  assert headers.impl_sigs.paths == []
   let (staged, staged_tm) = check_module_bodies(headers)
   let (cx1, tm) = check_module(test_cx(), m, env)
   assert staged_tm == tm

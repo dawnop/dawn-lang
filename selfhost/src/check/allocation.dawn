@@ -17,7 +17,7 @@ use check/cx.{Cx, cx_new}
 use front/parser
 use check/types as builtin_types
 use check/types.{Sig, ImplI, Ty, Eff, TyVar, EffVar, TyUnit, EPure, nev, sig_abi_eff}
-use front/ast.{Module, DType, DImpl, module_impls}
+use front/ast.{Module, DType, DImpl}
 
 ## A body's own allocations are not bindings. They are slots of the
 ## declaration the checker is inside, minted while it checks one body, so they
@@ -305,20 +305,19 @@ pub(pkg) fn local_headers(scope: ModuleKey, syntax: Module, cx: Cx) -> Option[Li
 }
 
 ## Method signatures are the actual pass_register_impls result, not signatures
-## reconstructed from trait declarations. Source ranges locate records only
-## inside this revision; the emitted entries join revisions by declaration key.
+## reconstructed from trait declarations, found by each method's path. Source
+## ranges locate records only inside this revision; the emitted entries join
+## revisions by declaration key.
 pub(pkg) fn local_impl_headers(scope: ModuleKey, syntax: Module, cx: Cx,
-  signatures: List[List[Option[Sig]]]) -> Option[List[Entry]] = {
+  signatures: identity.PathTable[Option[Sig]]) -> Option[List[Entry]] = {
   if cx.owner_class != Some(scope.emission_owner) || not header_source(scope, cx) { return None }
-  let impls = module_impls(syntax)
-  if len(signatures) != len(impls) { return None }
   let declarations = identity.declarations(scope, syntax)
   var out: List[Entry] = []
   for declaration in declarations {
     match declaration.key.path {
       [ImplHead(_, _)] -> {
-        let (trait_name, lo, hi) = match syntax.decls[declaration.declaration] {
-          DImpl(_, name, _, _, _, _, _, _, start, end) -> (name, start, end)
+        let (params, trait_name, methods, lo, hi) = match syntax.decls[declaration.declaration] {
+          DImpl(ps, name, _, _, _, ms, _, _, start, end) -> (ps, name, ms, start, end)
           _ -> return None
         }
         var found: Option[ImplI] = None
@@ -330,30 +329,23 @@ pub(pkg) fn local_impl_headers(scope: ModuleKey, syntax: Module, cx: Cx,
         }
         let info = found?
         if map.get(cx.traits_by_name, trait_name) != Some(info.trait_id) { return None }
-        var index = 0
-        for d in impls {
-          if d.lo == lo && d.hi == hi {
-            if len(d.tparams) != len(info.tparams) || len(d.methods) != len(signatures[index]) { return None }
-            out = out ++ binders(declaration.key, info.tparams, [])?
-            var member = 0
-            for method in d.methods {
-              let key = DeclKey { ..declaration.key, path: declaration.key.path ++ [Named(MethodDecl, method.name)] }
-              var unique = false
-              for candidate in declarations {
-                if candidate.key == key { unique = true }
-              }
-              if unique {
-                let sig = signatures[index][member]?
-                if sig.name != method.name || sig.owner != cx.owner_class || sig.tparams != info.tparams || sig.is_builtin ||
-                  sig.trait_id != None || sig.op_of != None {
-                    return None
-                  }
-                out = out ++ binders(key, [], sig.eparams)?
-              }
-              member = member + 1
-            }
+        if len(params) != len(info.tparams) { return None }
+        out = out ++ binders(declaration.key, info.tparams, [])?
+        for method in methods {
+          let key = DeclKey { ..declaration.key, path: declaration.key.path ++ [Named(MethodDecl, method.name)] }
+          var unique = false
+          for candidate in declarations {
+            if candidate.key == key { unique = true }
           }
-          index = index + 1
+          if unique {
+            let filed = identity.path_table_get(signatures, identity.path_text(key.path))?
+            let sig = filed?
+            if sig.name != method.name || sig.owner != cx.owner_class || sig.tparams != info.tparams || sig.is_builtin ||
+              sig.trait_id != None || sig.op_of != None {
+                return None
+              }
+            out = out ++ binders(key, [], sig.eparams)?
+          }
         }
       }
       _ -> ()
@@ -426,7 +418,7 @@ test "allocation absent source is explicit rather than a wildcard" {
   assert local_headers(scope, empty_syntax, cx) == Some([])
   assert local_headers(ModuleKey { ..scope, source: "example.dawn" }, empty_syntax, cx) == None
   assert local_headers(scope, empty_syntax, Cx { ..cx, src_path: Some("example.dawn") }) == None
-  assert local_impl_headers(scope, empty_syntax, cx, []) == Some([])
+  assert local_impl_headers(scope, empty_syntax, cx, identity.path_table()) == Some([])
 }
 
 test "allocation matches provenance and domains rather than equal integers" {
