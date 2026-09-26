@@ -85,6 +85,22 @@ not happened) is reported and not refused; its budget line says "planning
 value" for exactly that reason. The default invocation is unchanged: it is
 what CI runs, and it does not read this file.
 
+WHICH RUNS A CLAIM IS HELD TO (issue #244). By steps, not by name. A
+gates.yml job's runs are the ones whose steps digest (gate-observations.py
+records it per run, from gates.yml at the run's own commit, through
+scripts/gates-external/steps_lock.py's job_digests) equals the job's digest
+in this tree, whatever the job was called when it ran. Keyed by name, a job
+split in place kept a week of its old, larger shape's runs: round two of the
+ratchet (#242) lowered syntax-mutants-1 from 902s to 718s for a third of the
+mutants, and the audit held that to 914s of the two-shard job until round
+two renamed every split job out of the way. Keyed by steps, the reshard
+starts a fresh window and a rename that keeps the steps keeps its history.
+A run whose digest matches no job in this tree is counted on one summary
+line and compared with nothing. Jobs gatesplan does not model (gates.yml's
+`plan`) and the jobs of other workflows (ci.yml's `secrets`) have no digest
+and are still matched by name. --observed therefore needs PyYAML; the
+default invocation and --selftest do not.
+
 THE TOTAL. Every rule above is about one job, and one month showed that no
 set of per-job rules holds the sum. Between 2026-08-25 and 2026-09-24 the
 median successful main push went from 7.2k to 21.6k job-seconds (360 ci.yml
@@ -288,6 +304,105 @@ def check_observed(records, observations, name):
                 )
             continue
     return problems, notes
+
+
+class ShapedObservations:
+    """The worst run of each job, keyed by steps where a job has them.
+
+    Built from a gate-observations.py report and {job: steps digest} of the
+    jobs this tree's gates.yml defines. `for_file(name)` returns the lookup
+    check_observed reads with `.get(job)`: for gates.yml a modelled job
+    resolves through its digest, and anything else resolves by name among
+    the observations that carry no digest.
+    """
+
+    def __init__(self, report, digests):
+        self.digests = dict(digests)
+        self.by_digest = {}
+        self.by_name = {}
+        self.old_shape = 0
+        self.old_shape_runs = set()
+        self.unreadable = 0
+        self.unreadable_runs = set()
+        self.renamed = {}
+        self.runs = 0
+        today = set(self.digests.values())
+        current_name = {digest: job for job, digest in self.digests.items()}
+        for record in report.get("per_run", []):
+            if "steps" not in record:
+                raise SystemExit(
+                    "the observation report has no per-run steps digests; it was"
+                    " written before issue #244. Regenerate it with the current"
+                    " scripts/gate-observations.py, or attach them with its"
+                    " --restep <report> --out <file>")
+            self.runs += 1
+            steps = record["steps"]
+            for job, seconds in record["jobs"].items():
+                digest = steps.get(job) if steps is not None else None
+                if digest is not None:
+                    if digest not in today:
+                        self.old_shape += 1
+                        self.old_shape_runs.add(record["id"])
+                        continue
+                    if current_name[digest] != job:
+                        self.renamed.setdefault((job, current_name[digest]), 0)
+                        self.renamed[(job, current_name[digest])] += 1
+                    self._keep(self.by_digest, digest, seconds)
+                elif steps is None and job in self.digests:
+                    # gates.yml at that commit could not be read, and this is
+                    # a modelled job today: its shape then is unknown.
+                    self.unreadable += 1
+                    self.unreadable_runs.add(record["id"])
+                else:
+                    self._keep(self.by_name, job, seconds)
+
+    @staticmethod
+    def _keep(table, key, seconds):
+        if seconds > table.get(key, -1):
+            table[key] = seconds
+
+    def for_file(self, name):
+        digests = self.digests if name == RUN_POLE_FILE else {}
+        by_digest, by_name = self.by_digest, self.by_name
+
+        class Lookup:
+            @staticmethod
+            def get(job):
+                if job in digests:
+                    return by_digest.get(digests[job])
+                return by_name.get(job)
+
+        return Lookup()
+
+    def summary(self):
+        """The lines that say what was left out, never one per run."""
+        lines = [
+            f"{self.old_shape} observation(s) in {len(self.old_shape_runs)}"
+            " run(s) carry steps no job in this tree has (an older shape),"
+            " so no claim was compared with them"
+        ]
+        if self.unreadable:
+            lines.append(
+                f"{self.unreadable} observation(s) in {len(self.unreadable_runs)}"
+                " run(s) whose gates.yml gatesplan could not read, so their"
+                " shape is unknown and no claim was compared with them")
+        for (then, now), count in sorted(self.renamed.items()):
+            lines.append(f"{count} run(s) of `{then}` count for `{now}`:"
+                         " the same steps under another name")
+        return lines
+
+
+def current_digests():
+    """{job: steps digest} of this tree's gates.yml, via steps_lock.py.
+
+    The module directory is spelled from this file and not as a join on the
+    repository root: gate-map's rule B reads a root join as this checker
+    reading the whole directory, and the invocation CI runs reads none of it
+    (only --observed imports steps_lock).
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "gates-external"))
+    import steps_lock
+    return steps_lock.current_job_digests()
 
 
 def find_run_pole(text, name):
@@ -601,6 +716,70 @@ jobs:
     else:
         print("  reported (not refused): a job with no observation in the window")
 
+    # Issue #244: runs are held to a claim by steps digest, not by name.
+    # Digests are plain labels here so that this stays free of PyYAML (CI
+    # runs it before the step that provides it); the digest itself is
+    # steps_lock.py's, and its self-test holds a rename to the same digest.
+    shaped_text = observed_good
+    today = {"slow": "slow-3-shards", "quick": "quick-steps"}
+
+    def shaped(*runs):
+        return {"per_run": [
+            {"id": i, "jobs": jobs, "steps": steps}
+            for i, (jobs, steps) in enumerate(runs)]}
+
+    current_run = ({"slow": 550, "quick": 8},
+                   {"slow": "slow-3-shards", "quick": "quick-steps"})
+    old_same_name = ({"slow": 914}, {"slow": "slow-2-shards"})
+    old_other_name = ({"slow-1": 917}, {"slow-1": "slow-2-shards"})
+    renamed_regressed = ({"slow-old-name": 700},
+                         {"slow-old-name": "slow-3-shards"})
+    unreadable = ({"slow": 999}, None)
+    unmodelled = ({"quick": 400}, {})
+
+    def audit(text, report, digests):
+        seen = ShapedObservations(report, digests)
+        found, _notes = check_observed(
+            collect_budgets(text, "shaped.yml"), seen.for_file(RUN_POLE_FILE),
+            RUN_POLE_FILE)
+        return found, seen
+
+    shaped_cases = [
+        # (label, text, report, digests, want red, check on the lookup)
+        ("an older shape's runs under the job's own name and another are"
+         " not held to it",
+         shaped_text, shaped(current_run, old_same_name, old_other_name,
+                             unreadable), today, False,
+         lambda seen: seen.old_shape == 2 and seen.unreadable == 1),
+        ("the same runs are held to it when its steps are that shape",
+         shaped_text, shaped(current_run, old_same_name, old_other_name),
+         {**today, "slow": "slow-2-shards"}, True, None),
+        ("a renamed job with the same steps keeps its history",
+         shaped_text, shaped(current_run, renamed_regressed), today, True,
+         lambda seen: seen.renamed == {("slow-old-name", "slow"): 1}),
+        ("a claim lowered past the job's current-shape run",
+         shaped_text.replace("3x 600s", "3x 500s"), shaped(current_run),
+         today, True, None),
+        ("an unmodelled job is still matched by name",
+         shaped_text, shaped(current_run, unmodelled),
+         {"slow": "slow-3-shards"}, True, None),
+    ]
+    for label, text, report, digests, want_red, extra in shaped_cases:
+        found, seen = audit(text, report, digests)
+        if bool(found) != want_red:
+            failures.append(
+                f"steps-keyed audit: {label}: expected"
+                f" {'red' if want_red else 'green'}, got {found or 'green'}")
+        elif extra is not None and not extra(seen):
+            failures.append(f"steps-keyed audit: {label}: counts are wrong")
+        else:
+            print(f"  {'refused' if want_red else 'accepted'}: {label}")
+    try:
+        ShapedObservations({"per_run": [{"id": 1, "jobs": {"slow": 1}}]}, today)
+        failures.append("a report with no steps digests was read by name")
+    except SystemExit:
+        print("  refused: a report written before steps digests existed")
+
     # The totals. The clean tree is two files, each carrying its own line and
     # claims under it; every mutant moves one thing, and the claim that pushes
     # the sum over is the one a new job would be.
@@ -674,7 +853,8 @@ jobs:
             print(f"SELFTEST FAIL: {f}", file=sys.stderr)
         return 1
     count = (len(mutants) + len(pole_mutants) + len(observed_mutants)
-             + len(totals_mutants))
+             + len(totals_mutants)
+             + sum(1 for case in shaped_cases if case[4]) + 1)
     print(f"selftest: {count} mutant(s) refused, clean inputs accepted")
     return 0
 
@@ -698,12 +878,13 @@ def main():
     observations = None
     if args.observed is not None:
         report = json.loads(args.observed.read_text(encoding="utf-8"))
-        observations = report["jobs"]
+        observations = ShapedObservations(report, current_digests())
         print(
-            f"observations: {len(observations)} job(s) over"
-            f" {len(report.get('runs', []))} run(s)"
+            f"observations: {len(report['jobs'])} job name(s) over"
+            f" {observations.runs} run(s)"
             f" ({report.get('oldest_run_created', '?')}"
-            f" .. {report.get('newest_run_created', '?')})"
+            f" .. {report.get('newest_run_created', '?')}),"
+            f" held to claims by steps digest"
         )
 
     workflows, skipped = budgeted_workflows(root)
@@ -736,7 +917,7 @@ def main():
             problems.extend(check_claims_under_pole(text, name, pole))
         if observations is not None:
             found, said = check_observed(
-                collect_budgets(text, name), observations, name
+                collect_budgets(text, name), observations.for_file(name), name
             )
             problems.extend(found)
             notes.extend(said)
@@ -748,6 +929,9 @@ def main():
     problems.extend(check_totals(texts))
     for note in notes:
         print(f"note: {note}")
+    if observations is not None:
+        for line in observations.summary():
+            print(f"note: {line}")
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)

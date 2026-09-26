@@ -24,6 +24,16 @@ are `incremental`. Within a family a command may move freely between jobs,
 which is what a reshard does; across families it may not, because that is no
 longer a reshard. A job without a numeric suffix is a family of one.
 
+The same multiset, per job rather than per family, is also a job's identity
+for the nightly budget audit (issue #244). `job_digests` hashes each job's
+`run:` texts, sorted, so that scripts/gate-observations.py can record which
+steps a run's job carried at that run's commit and
+scripts/check-gate-budgets.py --observed can hold a budget line only to runs
+of the steps the line is about. It lives here, and not in either of those,
+so that "the same steps" means one thing in the repository: a job whose
+digest changed is a job whose lock entry changed. The digest is of the run
+texts only, as the lock is; a `uses:` or `with:` change alone keeps it.
+
 What it does not re-implement: the parsing. The jobs and their run steps come
 from gatesplan.parse, the same reader the external runner plans with, so a
 gates.yml that reader refuses (an unmodelled construct, or a toolchain
@@ -42,6 +52,7 @@ Modes (paths default to this repository's working tree):
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -60,18 +71,49 @@ def family(job_id):
     return SHARD_SUFFIX.sub("", job_id)
 
 
+def job_steps(gates_text, action_text):
+    """{job id: Counter of run texts} from one gates.yml."""
+    out = {}
+    for job_id, command in gatesplan.run_commands(gatesplan.parse(gates_text, action_text)):
+        out.setdefault(job_id, Counter())[command] += 1
+    return out
+
+
 def families_of(gates_text, action_text):
     """{family: Counter of run texts} from one gates.yml."""
     out = {}
-    for job_id, command in gatesplan.run_commands(gatesplan.parse(gates_text, action_text)):
-        out.setdefault(family(job_id), Counter())[command] += 1
+    for job_id, commands in job_steps(gates_text, action_text).items():
+        out.setdefault(family(job_id), Counter()).update(commands)
     return out
+
+
+def steps_digest(commands):
+    """16 hex digits of sha256 over the sorted run texts of one job.
+
+    Sorted because the lock is a multiset: moving a step within a job is not
+    a new shape. JSON because a run text can hold any character, so plain
+    joining could make two different lists spell the same bytes.
+    """
+    body = json.dumps(sorted(Counter(commands).elements()), ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def job_digests(gates_text, action_text):
+    """{job id: steps digest} for every job gatesplan models (not `plan`)."""
+    return {job_id: steps_digest(commands)
+            for job_id, commands in job_steps(gates_text, action_text).items()}
 
 
 def current():
     gates = (ROOT / gatesplan.GATES_PATH).read_text(encoding="utf-8")
     action = (ROOT / gatesplan.TOOLCHAIN_PATH).read_text(encoding="utf-8")
     return families_of(gates, action)
+
+
+def current_job_digests():
+    """job_digests of this working tree's gates.yml."""
+    return job_digests((ROOT / gatesplan.GATES_PATH).read_text(encoding="utf-8"),
+                       (ROOT / gatesplan.TOOLCHAIN_PATH).read_text(encoding="utf-8"))
 
 
 def to_lock(families):
@@ -135,7 +177,12 @@ def record():
 
 
 def selftest():
-    now = current()
+    gates = (ROOT / gatesplan.GATES_PATH).read_text(encoding="utf-8")
+    action = (ROOT / gatesplan.TOOLCHAIN_PATH).read_text(encoding="utf-8")
+    steps = job_steps(gates, action)
+    now = {}
+    for job_id, commands in steps.items():
+        now.setdefault(family(job_id), Counter()).update(commands)
     locked = from_lock(to_lock(now))
     failures = []
     if differences(locked, now):
@@ -167,11 +214,30 @@ def selftest():
 
     if family("incremental-7-2") != "incremental-7" or family("tree-policy") != "tree-policy":
         failures.append("the family rule changed")
+
+    # The per-job digest the budget audit keys on (issue #244): a rename that
+    # keeps the steps keeps the digest, and a changed run text changes it.
+    digests = {job_id: steps_digest(commands) for job_id, commands in steps.items()}
+    if len(set(digests.values())) != len(digests):
+        failures.append("two jobs share a steps digest, so the audit cannot tell them apart")
+    job = next(j for j in sorted(steps) if re.search(r"-\d+$", j)
+               and any("--shard" in c for c in steps[j]))
+    renamed = job_digests(re.sub(rf"\b{re.escape(job)}\b", "renamed-by-selftest", gates), action)
+    if renamed.get("renamed-by-selftest") != digests[job] or job in renamed:
+        failures.append(f"renaming {job} changed its steps digest")
+    command = next(c for c in sorted(steps[job]) if "--shard" in c)
+    line = command.strip().splitlines()[0]
+    resharded = job_digests(gates.replace(line, line + " --selftest-extra", 1), action)
+    if resharded.get(job) == digests[job]:
+        failures.append(f"changing a run text of {job} kept its steps digest")
+    if steps_digest(["b", "a"]) != steps_digest(["a", "b"]) or steps_digest(["a"]) == steps_digest(["a", "a"]):
+        failures.append("the steps digest is not a digest of the multiset")
     for line in failures:
         print(f"FAIL steps lock self-test: {line}", file=sys.stderr)
     if failures:
         return 1
-    print("OK: steps lock self-test, removed / lock-only / moved steps are each named")
+    print("OK: steps lock self-test, removed / lock-only / moved steps are each named;"
+          " a rename keeps a job's steps digest and a changed run text does not")
     return 0
 
 

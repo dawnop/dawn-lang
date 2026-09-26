@@ -4,6 +4,7 @@
 > 9(a) 锚点恰一次 + 翻面守卫 + 读源码脚本清单，9(b) nightly 预算观测，9(c) 生态语料 pin 推进与陈旧检查。三条都已落地，提交见文末。
 > 2026-09-25 追加「总量棘轮」一节（门禁总量调研推荐的 (a1)+(c)，用户同日批准）：push-total / path-total 上限、`Gate-Budget` / `Gate-Retire` 声明、nightly 总量报表。
 > 2026-09-26 追加「棘轮第二轮」一节：nightly 点名的五条欠声明里四条贴 pole，按 #166 的先例拆片（#242）。
+> 2026-09-26 再追加「审计按 steps 摘要认祖先」一节（#244）：观测按 job 的 `run:` 多重集摘要归属，不按名字；第二轮写进 gates.yml 头注的改名规则随之撤掉。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -260,4 +261,75 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 - **改分片的发牌方式**（按成本发牌而不是按位置轮转）：三片 syntax 相差 82 s，在上界估计的误差内；改发牌要动 `shard.sh` 与三个 harness 的覆盖语义，不在本轮。
 - **其余高于 850 s 的五条声明**：`incremental-8` 937 s、`native-selfhost-tests` 904 s、`incremental-1` 879 s、`incremental-2` 870 s、`incremental-4` 863 s。
   它们都不低于各自最坏运行，不在 #242 的点名里；本轮把「≤ 850 s」读成对被拆的四组 job 的要求，这五条留给下一轮（incremental-8 距 pole 只剩 13 s）。
+
+## 审计按 steps 摘要认祖先（2026-09-26，#244）
+
+### 根因
+
+`gate-observations.py` 按 job 名记最坏值（`jobs[name] = took`），`check-gate-budgets.py --observed` 拿预算行所在 job 的名字去查。
+名字不变、内容变了的 job 会继承旧形态一整周的观测：第二轮把 `syntax-mutants-1` 从二分之一的变异体切到三分之一、声明从 902 s 降到 718 s，
+审计却拿两片时代的 914 s 来比。第二轮的绕法是给拆出来的 job 一律改名（`<family>-<shards>-<i>`），这把审计的局限漏进了 job 名，
+以及引用 job 名的每一处（steps lock、gate map、覆盖并集、文档）。本仓其余按祖先认身份的门禁（tile 台账的 `inputs=`、PR 证据档）
+早已从「按名字/按提交」改为「按内容摘要」，这里补上同一条。
+
+### 算法
+
+- **摘要**：`steps_lock.py` 新增 `job_steps`（每个 job 的 `run:` 文本多重集，经 `gatesplan.parse` 读，与 lock 同一个解析器）
+  与 `steps_digest`（排序后的文本列表 JSON 序列化，sha256 取前 16 位十六进制）、`job_digests`。家族算法 `families_of` 改为由 `job_steps` 合并，
+  所以「同样的 steps」在仓里只有一个定义：摘要变了，就是 lock 里那一家的条目变了。只看 `run:` 文本，与 lock 一样；`uses:`/`with:` 单独变化不改摘要。
+- **记录**：`gate-observations.py` 对每次运行按 `head_sha` 取当时的 gates.yml 与工具链 action（`git rev-parse <sha>:<path>`，
+  按两个 blob 去重后 `git cat-file`，每种内容只解析一次；git 没有的提交退到 contents API，每个提交一次），
+  在 `per_run[i].steps` 记 `{job: 摘要}`。gatesplan 拒绝的 gates.yml 记 `steps: null` 与 `steps_error`。
+  `--restep <旧报告> --out <新报告>` 不读 API，只给已有报告补摘要（本节的实测都用它复现）。
+- **比对**：`check-gate-budgets.py --observed` 用当前树的 `job_digests` 建 `ShapedObservations`：gates.yml 里 gatesplan 建模的 job，
+  只取摘要等于当前摘要的运行（不论当时叫什么名字）；`plan`（gatesplan 不建模）与其他 workflow 的 job（ci.yml 的 `secrets`）没有摘要，照旧按名字。
+  摘要不属于当前任何 job 的观测一律不比，末尾汇总一行计数；同摘要换了名字的，每对名字一行说明；gates.yml 读不了的运行另起一行计数。
+  没有 `steps` 字段的旧报告直接拒绝，提示重新生成或 `--restep`，不静默退回按名字。
+- 默认调用与 `--selftest` 不引入 PyYAML（tree-policy 里 `check-gate-budgets.py` 在 PyYAML 那一步之前跑）；只有 `--observed` 需要。
+
+### 负控（真实数据：`gate-observations.py --since 2026-09-19`，52 次 main 运行，09-19T11:23Z .. 09-26T13:39Z）
+
+- (a) 旧形态不再算到现行 job 头上：run 36167025238 的 `syntax-mutants-1`（914 s，两片时代）摘要 `93827a0d748f14ee`，当前 43 个 job 里没有这个摘要；
+  `syntax-mutants-3-1/3-2/3-3` 按摘要取到的最坏是 706 / 627 / 561 s（各 1 次运行）。先证会红：把 gates.yml 换回改名前（`95e59645^`，拆了片但沿用旧名），
+  旧的按名字审计 rc=1，五条红（syntax-mutants-1 718/914、syntax-mutants-2 680/917、builtin-type-1 600/822、builtin-type-2 598/814、test 545/918）；
+  新审计同一棵树 rc=0，并注明 `1 run(s) of syntax-mutants-3-1 count for syntax-mutants-1` 等七行（同 steps 的新名运行反过来算到旧名上）。
+- (b) 同 steps 改名观测连续：往报告里加一条假运行，job 名 `syntax-mutants-renamed`、摘要取 `syntax-mutants-3-1` 的、800 s：
+  rc=1，`syntax-mutants-3-1: declares 718s but ran 800s`，并注明这次运行是换名算过来的。对照：同一条假运行换成不存在的摘要，rc=0，旧形态计数 638 → 639。
+- (c) 现行 job 真回归仍红：`sed` 把 `incremental-2` 的 `3x 870s` 改成 `3x 869s`（当前形态最坏 870 s），rc=1；复原后 rc=0。
+- 自检：`check-gate-budgets.py --selftest` 加了六例（旧形态同名/异名不算、同一批运行在 steps 相同时照算、换名照算、声明压低仍红、未建模 job 按名字、旧报告被拒），
+  用字符串标签当摘要以保持不依赖 PyYAML；`steps_lock.py selftest` 加了真实 gates.yml 上「改名摘要不变、改一条 run 文本摘要就变、43 个 job 摘要互不相同」。
+  反证：把 `ShapedObservations` 改回按名字，selftest 四例红；把 job 名混进摘要，steps lock 自检红；摘要不看 run 文本，三条红。
+
+### 前后对照（同一份 52 次运行）
+
+按名字（main 现状，靠第二轮改名才全绿）与按摘要都是 0 红。差别在每个 job 取到的运行数与最坏值：
+
+| job | 声明 | 按名字最坏（次数） | 按摘要最坏（次数） | 窗口内形态数 |
+|---|---|---|---|---|
+| tree-policy | 432 | 427 (49) | 325 (8) | 6 |
+| native-diff-2 | 638 | 580 (49) | 519 (7) | 3 |
+| contracts-1 | 485 | 485 (31) | 468 (12) | 3 |
+| lsp-workspace | 790 | 736 (42) | 736 (13) | 3 |
+| incremental-8 | 937 | 937 (43) | 937 (33) | 3 |
+| 其余 38 个 | | | 最坏值不变 | |
+
+汇总行：`638 observation(s) in 49 run(s) carry steps no job in this tree has (an older shape)`。52 次运行里只有 3 次的每个 job 都是当前形态；
+一周里 gates.yml 有 26 种内容，改一个 job 的 `run:` 就让那个 job 的历史清零，别的 job 不受影响。
+
+### 墙钟
+
+- 本机：`gate-observations.py` 全程 177 s（API 读 52 次运行占绝大部分，与改动前同一量级），摘要部分 2.2 s（52 个提交、26 种 gates.yml 各解析一次、0 次 API）；
+  `check-gate-budgets.py --observed` 0.2 s。
+- nightly `budget-observations`：checkout 改为 `fetch-depth: 0`（tree-policy 每次 push 都这么做，run 36245872151 的 checkout 步 5 s），
+  加一步 PyYAML（已装时是一次 import）。审计步窗口上限 150 次运行，最坏估计 150 个提交 × 两次 `rev-parse`（本机约 5 ms 一次）+ 每种 gates.yml 约 65 ms，
+  不超过 10 s；总量报表步 14 天的两次读取同样按 blob 去重，另加约同量。合计 job 墙钟增量约 10 到 20 s，`timeout-minutes: 30` 不动。
+  去重办法：同 sha 只读一次（`by_commit`），同一对 blob 只解析一次（`by_blobs`）；API 退路只在 git 缺提交时走，每个提交一次（本机实测 10.5 s 一次，所以默认走 git）。
+- push 门：`steps_lock.py selftest` 本机 0.11 → 0.27 s（多解析两份改过的 gates.yml），check + selftest 合计 0.38 s，翻倍取整仍在 tree-policy 预算里为 steps lock 记的 1 s 之内，预算行不动。
+
+### 不做的（理由）
+
+- **按子集认祖先**（旧运行的 steps 是当前 steps 的子多重集，就当作下界照算）：能保住 tree-policy 这类每天加一步的 job 的历史（本窗口按子集 23 次、最坏 352 s，按相等 8 次），
+  而且方向上是安全的（少做了事的旧运行只会低估）。但裁决写的是「摘要相等」，子集需要记录多重集而不只是摘要，报告会大一个量级；留给主会话裁。
+- **把 `uses:`/`with:`/`env:` 也算进摘要**：lock 不看它们，这里跟 lock 保持一个定义；工具链 `build: false` 这类变化目前没有在窗口里出现过。
+- **撤掉第二轮起的新名**：名字不再是身份，改回旧名只是再动一遍 steps lock、覆盖并集与文档，没有收益。
 

@@ -99,19 +99,18 @@ name: gates
 # free. `grep -c '^  [a-z0-9-]*:$' .github/workflows/gates.yml` answers the
 # question in the only way that cannot go stale.
 #
-# Job ids after a split. scripts/gate-observations.py and the nightly audit
-# match runs to budget lines by job id, over a seven-day window, and know
-# nothing about what a job ran. So a split never reuses an id that had a
-# different shape inside that window: a shard family is named
-# `<family>-<shards>-<i>` (syntax-mutants-3-1 .. 3-3 since 2026-09-26; the
-# next split of that family is syntax-mutants-4-1 .. 4-4), and a job split by
-# steps gives every half a new name (test became test-compiler and
-# test-programs, incremental-3 became incremental-3-1 and -3-2). Keeping an
-# old id would hold a third of the work to the whole job's old runs for a
-# week, and the audit would be red on runs that no longer exist in that
-# shape. The families that predate this rule (native-diff-1/2,
-# incremental-1 .. 8, contracts-1/2 and the rest) keep their ids until they
-# are next split.
+# Job ids after a split. Since 2026-09-26 (issue #244) a split may keep an
+# id or take a new one; neither changes what the budget audit compares.
+# scripts/gate-observations.py records, for every run, each job's steps
+# digest as of that run's commit (the multiset of its `run:` texts, the same
+# one scripts/gates-external/steps.lock.json holds per family), and
+# check-gate-budgets.py --observed holds a budget line only to runs whose
+# digest equals the job's digest here. A reshard therefore starts its own
+# window whatever it is called, and a rename that keeps the steps keeps its
+# history. Round two of the ratchet renamed its splits (syntax-mutants-3-1 ..
+# 3-3, builtin-type-3-1 .. 3-3, test-compiler) because the audit then matched
+# by id; those names stay, and nothing needs the `<family>-<shards>-<i>`
+# pattern any more.
 #
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
@@ -899,9 +898,10 @@ jobs:
   # Restate each line at its own worst once three main runs of it exist.
   #
   # The jobs were syntax-mutants-1 and -2 until this split, and the new ids
-  # carry the shard count (`<family>-<shards>-<i>`, the header has the rule)
-  # so that the nightly audit, which matches runs by job id, never compares
-  # a third of the matrix with a half of it.
+  # carry the shard count because the nightly audit then matched runs by job
+  # id. It matches by steps digest now (issue #244, the header has it), so a
+  # third of the matrix is never compared with a half of it whatever the
+  # jobs are called.
   syntax-mutants-3-1:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3-1') }}
@@ -1259,8 +1259,9 @@ jobs:
   # The core suite: the compiler's own tests, the self-hosting proof and the
   # gates that read the compiler's source or grammar rather than its products.
   # It was the job `test` until 2026-09-26, when half of it moved to
-  # test-programs; the new id keeps the nightly audit from holding this half
-  # to the whole job's old runs (the header has the naming rule).
+  # test-programs. The new id was taken so that the nightly audit would not
+  # hold this half to the whole job's old runs; since issue #244 the audit
+  # tells them apart by steps digest, and the id is only a name.
   test-compiler:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'test-compiler') }}
