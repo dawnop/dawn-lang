@@ -9369,138 +9369,11 @@ fn check_block(
 
 fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
   match s {
-    SLet(name, mutable, ann, init, lo, hi) -> {
-      var cx1 = cx
-      let ann_t: Option[Ty] = match ann {
-        Some(ref) -> {
-          let (cxa, t) = resolve_type(cx1, ref)
-          cx1 = cxa
-          Some(t)
-        }
-        None -> None
-      }
-      let (cxb, it, ix) = check_expr(cx1, init, ann_t)
-      cx1 = cxb
-      var t = match ann_t {
-        Some(a) -> a
-        None -> it
-      }
-      match ann_t {
-        Some(a) -> {
-          let (compatible_cx, compatible) = assignable_read(cx1, it, a)
-          cx1 = compatible_cx
-          if not compatible {
-            let (declared_cx, declared_text) = type_display_read(cx1, a)
-            let (actual_cx, actual_text) = type_display_read(declared_cx, it)
-            cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
-                " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
-            t = a
-          }
-        }
-        None -> ()
-      }
-      if t == TyNever {
-        cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
-        t = TyError
-      }
-      let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
-      # `_` binds nothing: codegen discards the value (sym None)
-      let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
-      (cxc, TSLet(bind, name, ix, owner_off(cx, lo), owner_off(cx, hi)))
-    }
+    SLet(name, mutable, ann, init, lo, hi) -> check_let(cx, name, mutable, ann, init, lo, hi)
     SLocalFn(name, params, ret, effs, body, nlo, nhi, lo, hi) ->
       check_local_fn(cx, name, params, ret, effs, body, nlo, nhi, lo, hi)
-    SLetPat(pat, mutable, init, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, it0, ix) = check_expr(cx1, init, no_expected())
-      cx1 = cxa
-      var it = it0
-      if it == TyNever {
-        cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
-        it = TyError
-      }
-      let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
-      cx1 = cxb
-      if not is_errorish(it) {
-        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [it])
-        cx1 = useful_cx
-        match useful_answer {
-          Some(true) -> {
-            let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
-            cx1 = let_read_cx
-            let (plo, phi) = match refutable {
-              Some(sp) -> sp
-              None -> (pat_lo(pat), pat_hi(pat))
-            }
-            cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
-              plo, phi, "use match to handle the other cases")
-          }
-          Some(false) -> ()
-          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-        }
-      }
-      (cx1, TSLetPat(tp, ix, owner_off(cx, lo), owner_off(cx, hi)))
-    }
-    SAssign(name, value, nlo, nhi, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, found) = resolve_local(cx1, name, nlo, nhi, true)
-      cx1 = cxa
-      match found {
-        None -> {
-          let (next, pool) = fn_pool_read(cx1)
-          let (hinted, hint) = moved_or_suggest(next, name, local_names(next) ++ pool)
-          cx1 = cerr_o(hinted, "undefined variable: ${name}", nlo, nhi, hint)
-          let (cxb, _, vx) = check_expr(cx1, value, no_expected())
-          (cxb, TSExpr(vx, owner_off(cx, lo), owner_off(cx, hi)))
-        }
-        Some(sid) -> {
-          let sym = sym_of(cx1, sid)
-          match sym.cell_of {
-            # A handler state cell is written through its slot, so this is a
-            # `cell_set` and not a `TSAssign`: the binding itself never
-            # changes, and it is the same write whether it is reached from an
-            # arm, from a nested block, or from the remainder.
-            Some(c) -> {
-              let (hid, ct) = c
-              if cell_take_ok(cx1, hid, name, value) {
-                cx1 = Cx { ..cx1, take_cell: Some(sid) }
-              }
-              let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
-              # cleared unconditionally: a right-hand side that never read the
-              # cell must not leave the mark standing for the next assignment
-              cx1 = Cx { ..cxb, take_cell: None }
-              let (compatible_cx, compatible) = assignable_read(cx1, vt, ct)
-              cx1 = compatible_cx
-              if not compatible {
-                let (declared_cx, declared_text) = type_display_read(cx1, ct)
-                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
-                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
-                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
-              }
-              (cx1, TSExpr(cell_write(cx, sid, name, vx, lo, hi), owner_off(cx, lo), owner_off(cx, hi)))
-            }
-            None -> {
-              if not sym.mutable {
-                cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned",
-                  nlo, nhi,
-                  "declare it as var " ++ name ++ " = ... if it needs to change")
-              }
-              let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
-              cx1 = cxb
-              let (compatible_cx, compatible) = assignable_read(cx1, vt, sym.ty)
-              cx1 = compatible_cx
-              if not compatible {
-                let (declared_cx, declared_text) = type_display_read(cx1, sym.ty)
-                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
-                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
-                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
-              }
-              (cx1, TSAssign(sid, name, vx, owner_off(cx, lo), owner_off(cx, hi)))
-            }
-          }
-        }
-      }
-    }
+    SLetPat(pat, mutable, init, lo, hi) -> check_let_pat(cx, pat, mutable, init, lo, hi)
+    SAssign(name, value, nlo, nhi, lo, hi) -> check_assign(cx, name, value, nlo, nhi, lo, hi)
     SExpr(e, lo, hi) -> {
       let (cx1, t, tx) = check_expr(cx, e, no_expected())
       var cx2 = cx1
@@ -9527,133 +9400,326 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       }
       (cx1, TSAssert(cnx, src, owner_off(cx, lo), owner_off(cx, hi)))
     }
-    SWhile(cond, body, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
+    SWhile(cond, body, lo, hi) -> check_while(cx, cond, body, lo, hi)
+    SFor(pat, from, to_opt, body, lo, hi) -> check_for(cx, pat, from, to_opt, body, lo, hi)
+  }
+
+## The `SLet` arm of `check_stmt`: the annotation, the initializer under it, and
+## the binding, which is declared only after the initializer is checked.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## every statement arm reads only its own fields, so each is cut whole.
+fn check_let(
+  cx: Cx,
+  name: String,
+  mutable: Bool,
+  ann: Option[TypeRef],
+  init: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let ann_t: Option[Ty] = match ann {
+    Some(ref) -> {
+      let (cxa, t) = resolve_type(cx1, ref)
       cx1 = cxa
-      if ct != TyBool && not is_errorish(ct) {
-        let (render_cx, text) = type_display_read(cx1, ct)
-        cx1 = cerr(render_cx, "while condition must be Bool, got " ++ text,
-          e_lo(cond), e_hi(cond))
-      }
-      let d = len(cx1.frame.loop_stack)
-      let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-      cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
-      let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
-      cx1 = cxb
-      let hj = set.has(cx1.loop_jumps, d)
-      cx1 = Cx {
-        ..cx1,
-        frame: Frame {
-          ..cx1.frame,
-          loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-        },
-        loop_jumps: set.remove(cx1.loop_jumps, d)
-      }
-      if bt != TyUnit && not is_errorish(bt) {
-        let (render_cx, text) = type_display_read(cx1, bt)
-        cx1 = cerr_h(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
-          e_lo(body), e_hi(body),
-          "the last statement of a loop body must not be a non-Unit expression")
-      }
-      (cx1, TSWhile(cnx, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+      Some(t)
     }
-    SFor(pat, from, to_opt, body, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
-      cx1 = cxa
-      var loop_t = TyError
-      var tx_to: Option[TExpr] = None
-      var wit: Option[WitRef] = None
-      match to_opt {
-        None -> {
-          # `for x in xs` is a use of the Iter trait: resolve the witness the
-          # way any bound does (rigid parameter forwards the caller's
-          # dictionary, concrete subject devirtualises), and the loop
-          # variable's type is the impl's `Item` -- reduced when the subject
-          # is concrete, a rigid projection when it is not (generic for).
-          if ft == TyNever {
-            loop_t = TyNever
-          } else if ft != TyError {
-            if ft == TyInt {
-              # the common slip deserves the range answer, not "no impl"
-              cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
-                e_lo(from), e_hi(from),
-                "write `for x in a..b`, or iterate a value whose type implements `Iter`")
-            } else {
-              let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
-                "for..in")
-              cx1 = cxw
-              match w {
-                Some(_) -> {
-                  wit = w
-                  let (item_cx, item) = reduce_assoc_read(cx1, TyAssoc(ft, ITER_ID, "Item"))
-                  cx1 = item_cx
-                  loop_t = item
-                }
-                None -> ()
-              }
-            }
-          }
+    None -> None
+  }
+  let (cxb, it, ix) = check_expr(cx1, init, ann_t)
+  cx1 = cxb
+  var t = match ann_t {
+    Some(a) -> a
+    None -> it
+  }
+  match ann_t {
+    Some(a) -> {
+      let (compatible_cx, compatible) = assignable_read(cx1, it, a)
+      cx1 = compatible_cx
+      if not compatible {
+        let (declared_cx, declared_text) = type_display_read(cx1, a)
+        let (actual_cx, actual_text) = type_display_read(declared_cx, it)
+        cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
+            " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
+        t = a
+      }
+    }
+    None -> ()
+  }
+  if t == TyNever {
+    cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
+    t = TyError
+  }
+  let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
+  # `_` binds nothing: codegen discards the value (sym None)
+  let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
+  (cxc, TSLet(bind, name, ix, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SLetPat` arm of `check_stmt`: a destructuring let, whose pattern must be
+## irrefutable against the initializer's type.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+fn check_let_pat(
+  cx: Cx,
+  pat: Pattern,
+  mutable: Bool,
+  init: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, it0, ix) = check_expr(cx1, init, no_expected())
+  cx1 = cxa
+  var it = it0
+  if it == TyNever {
+    cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
+    it = TyError
+  }
+  let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
+  cx1 = cxb
+  if not is_errorish(it) {
+    let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [it])
+    cx1 = useful_cx
+    match useful_answer {
+      Some(true) -> {
+        let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
+        cx1 = let_read_cx
+        let (plo, phi) = match refutable {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
         }
-        Some(te) -> {
-          let (cxb, tt2, tx2) = check_expr(cx1, te, no_expected())
-          cx1 = cxb
-          if (ft != TyInt && not is_errorish(ft)) || (tt2 != TyInt && not is_errorish(tt2)) {
-            let (from_cx, from_text) = type_display_read(cx1, ft)
-            let (to_cx, to_text) = type_display_read(from_cx, tt2)
-            cx1 = cerr(to_cx, "range bounds a..b must be Int (got " ++ from_text ++
-                ".." ++ to_text ++ ")", lo, hi)
-          }
-          loop_t = TyInt
-          tx_to = Some(tx2)
-        }
+        cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
+          plo, phi, "use match to handle the other cases")
       }
-      cx1 = push_scope(cx1)
-      let pat_diag_count = len(cx1.diags)
-      let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
-      cx1 = cxc
-      if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
-        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [loop_t])
-        cx1 = useful_cx
-        match useful_answer {
-          Some(true) -> {
-            let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
-            cx1 = for_read_cx
-            let (plo, phi) = match refutable {
-              Some(sp) -> sp
-              None -> (pat_lo(pat), pat_hi(pat))
-            }
-            cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
-              "use match or filter before the loop to handle items this pattern does not match")
-          }
-          Some(false) -> ()
-          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-        }
-      }
-      let d = len(cx1.frame.loop_stack)
-      let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-      cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
-      let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
-      cx1 = cxd
-      let hj = set.has(cx1.loop_jumps, d)
-      cx1 = Cx {
-        ..cx1,
-        frame: Frame {
-          ..cx1.frame,
-          loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-        },
-        loop_jumps: set.remove(cx1.loop_jumps, d)
-      }
-      if bt != TyUnit && not is_errorish(bt) {
-        let (render_cx, text) = type_display_read(cx1, bt)
-        cx1 = cerr(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
-          e_lo(body), e_hi(body))
-      }
-      cx1 = pop_scope(cx1)
-      (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
     }
   }
+  (cx1, TSLetPat(tp, ix, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SAssign` arm of `check_stmt`: an assignment to a `var`, or a write
+## through a handler state cell's slot.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+## It was the largest statement arm: three outcomes (undefined, cell, var),
+## each with its own compatibility report.
+fn check_assign(
+  cx: Cx,
+  name: String,
+  value: Expr,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, found) = resolve_local(cx1, name, nlo, nhi, true)
+  cx1 = cxa
+  match found {
+    None -> {
+      let (next, pool) = fn_pool_read(cx1)
+      let (hinted, hint) = moved_or_suggest(next, name, local_names(next) ++ pool)
+      cx1 = cerr_o(hinted, "undefined variable: ${name}", nlo, nhi, hint)
+      let (cxb, _, vx) = check_expr(cx1, value, no_expected())
+      (cxb, TSExpr(vx, owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    Some(sid) -> {
+      let sym = sym_of(cx1, sid)
+      match sym.cell_of {
+        # A handler state cell is written through its slot, so this is a
+        # `cell_set` and not a `TSAssign`: the binding itself never
+        # changes, and it is the same write whether it is reached from an
+        # arm, from a nested block, or from the remainder.
+        Some(c) -> {
+          let (hid, ct) = c
+          if cell_take_ok(cx1, hid, name, value) {
+            cx1 = Cx { ..cx1, take_cell: Some(sid) }
+          }
+          let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
+          # cleared unconditionally: a right-hand side that never read the
+          # cell must not leave the mark standing for the next assignment
+          cx1 = Cx { ..cxb, take_cell: None }
+          let (compatible_cx, compatible) = assignable_read(cx1, vt, ct)
+          cx1 = compatible_cx
+          if not compatible {
+            let (declared_cx, declared_text) = type_display_read(cx1, ct)
+            let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+            cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
+          }
+          (cx1, TSExpr(cell_write(cx, sid, name, vx, lo, hi), owner_off(cx, lo), owner_off(cx, hi)))
+        }
+        None -> {
+          if not sym.mutable {
+            cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned",
+              nlo, nhi,
+              "declare it as var " ++ name ++ " = ... if it needs to change")
+          }
+          let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
+          cx1 = cxb
+          let (compatible_cx, compatible) = assignable_read(cx1, vt, sym.ty)
+          cx1 = compatible_cx
+          if not compatible {
+            let (declared_cx, declared_text) = type_display_read(cx1, sym.ty)
+            let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+            cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
+          }
+          (cx1, TSAssign(sid, name, vx, owner_off(cx, lo), owner_off(cx, hi)))
+        }
+      }
+    }
+  }
+}
+
+## The `SWhile` arm of `check_stmt`: the condition, then the body with the loop
+## pushed on the frame's loop stack and popped again.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## the push and the pop are both inside the arm, so the cut keeps them paired.
+fn check_while(cx: Cx, cond: Expr, body: Expr, lo: Int, hi: Int) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
+  cx1 = cxa
+  if ct != TyBool && not is_errorish(ct) {
+    let (render_cx, text) = type_display_read(cx1, ct)
+    cx1 = cerr(render_cx, "while condition must be Bool, got " ++ text,
+      e_lo(cond), e_hi(cond))
+  }
+  let d = len(cx1.frame.loop_stack)
+  let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  cx1 = cxb
+  let hj = set.has(cx1.loop_jumps, d)
+  cx1 = Cx {
+    ..cx1,
+    frame: Frame {
+      ..cx1.frame,
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
+    },
+    loop_jumps: set.remove(cx1.loop_jumps, d)
+  }
+  if bt != TyUnit && not is_errorish(bt) {
+    let (render_cx, text) = type_display_read(cx1, bt)
+    cx1 = cerr_h(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
+      e_lo(body), e_hi(body),
+      "the last statement of a loop body must not be a non-Unit expression")
+  }
+  (cx1, TSWhile(cnx, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SFor` arm of `check_stmt`: a range or an `Iter` witness for the subject,
+## the loop pattern in a scope of its own, then the body as `SWhile` checks it.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## its scope and loop-stack pushes are opened and closed inside the arm.
+fn check_for(
+  cx: Cx,
+  pat: Pattern,
+  from: Expr,
+  to_opt: Option[Expr],
+  body: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
+  cx1 = cxa
+  var loop_t = TyError
+  var tx_to: Option[TExpr] = None
+  var wit: Option[WitRef] = None
+  match to_opt {
+    None -> {
+      # `for x in xs` is a use of the Iter trait: resolve the witness the
+      # way any bound does (rigid parameter forwards the caller's
+      # dictionary, concrete subject devirtualises), and the loop
+      # variable's type is the impl's `Item` -- reduced when the subject
+      # is concrete, a rigid projection when it is not (generic for).
+      if ft == TyNever {
+        loop_t = TyNever
+      } else if ft != TyError {
+        if ft == TyInt {
+          # the common slip deserves the range answer, not "no impl"
+          cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
+            e_lo(from), e_hi(from),
+            "write `for x in a..b`, or iterate a value whose type implements `Iter`")
+        } else {
+          let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
+            "for..in")
+          cx1 = cxw
+          match w {
+            Some(_) -> {
+              wit = w
+              let (item_cx, item) = reduce_assoc_read(cx1, TyAssoc(ft, ITER_ID, "Item"))
+              cx1 = item_cx
+              loop_t = item
+            }
+            None -> ()
+          }
+        }
+      }
+    }
+    Some(te) -> {
+      let (cxb, tt2, tx2) = check_expr(cx1, te, no_expected())
+      cx1 = cxb
+      if (ft != TyInt && not is_errorish(ft)) || (tt2 != TyInt && not is_errorish(tt2)) {
+        let (from_cx, from_text) = type_display_read(cx1, ft)
+        let (to_cx, to_text) = type_display_read(from_cx, tt2)
+        cx1 = cerr(to_cx, "range bounds a..b must be Int (got " ++ from_text ++
+            ".." ++ to_text ++ ")", lo, hi)
+      }
+      loop_t = TyInt
+      tx_to = Some(tx2)
+    }
+  }
+  cx1 = push_scope(cx1)
+  let pat_diag_count = len(cx1.diags)
+  let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
+  cx1 = cxc
+  if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
+    let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [loop_t])
+    cx1 = useful_cx
+    match useful_answer {
+      Some(true) -> {
+        let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
+        cx1 = for_read_cx
+        let (plo, phi) = match refutable {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
+        }
+        cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
+          "use match or filter before the loop to handle items this pattern does not match")
+      }
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
+    }
+  }
+  let d = len(cx1.frame.loop_stack)
+  let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  cx1 = cxd
+  let hj = set.has(cx1.loop_jumps, d)
+  cx1 = Cx {
+    ..cx1,
+    frame: Frame {
+      ..cx1.frame,
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
+    },
+    loop_jumps: set.remove(cx1.loop_jumps, d)
+  }
+  if bt != TyUnit && not is_errorish(bt) {
+    let (render_cx, text) = type_display_read(cx1, bt)
+    cx1 = cerr(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
+      e_lo(body), e_hi(body))
+  }
+  cx1 = pop_scope(cx1)
+  (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+}
 
 ## fn name(params) -> T [!Row] = body, statement form (the Kotlin checkLocalFn).
 ## The name is declared before the body is checked, so the body can call it;

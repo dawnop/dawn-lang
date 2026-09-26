@@ -384,12 +384,12 @@ PY
 
     allow-storage-let)
       replace_once "$mutant/selfhost/src/check/checker.dawn" \
-        '          let (cxa, t) = resolve_type(cx1, ref)' \
-        '          let (cxa, t) = if name == "storage_let_contract" {
-            resolve_return_type(cx1, ref)
-          } else {
-            resolve_type(cx1, ref)
-          }'
+        '      let (cxa, t) = resolve_type(cx1, ref)' \
+        '      let (cxa, t) = if name == "storage_let_contract" {
+        resolve_return_type(cx1, ref)
+      } else {
+        resolve_type(cx1, ref)
+      }'
       build_mutant "$1"
       expect_marker "$1" NEVER_STORAGE_LET
       ;;
