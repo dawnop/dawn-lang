@@ -52,6 +52,30 @@ class PreflightTests(unittest.TestCase):
             p.check(p.ROOT, {target: changed})
         self.assertIn(target, str(raised.exception))
 
+    def test_former_self_once_anchor_drift_is_caught(self):
+        # #249: delete-contract refused a stale anchor only when it ran itself,
+        # so #248's rewrite of dawn_cpath passed this preflight. The contract's
+        # anchors now live in its mutate.py; either side drifting must be red.
+        label = "scripts/delete-contract/mutate.py"
+        source = (p.ROOT / label).read_text()
+        target, old, new = runpy.run_path(str(p.ROOT / label))["MUTATIONS"]["c-cpath-nul"]
+        self.assertEqual(target, "runtime/c/dawn_rt.c")
+        # The spelling of dawn_cpath before #248, which 95e59645's run.sh quoted.
+        stale = old.replace("  dawn_reject_nul(s);\n", "  if (dawn_has_nul(s)) {\n"
+                            "    dawn_fault(DAWN_LIT(\"path contains an embedded NUL byte\"));\n"
+                            "  }\n")
+        self.assertNotEqual(stale, old)
+        self.assertEqual(source.count(old), 1)
+        p.exercise(p.ROOT, source, label, "c-cpath-nul", p.ADAPTERS["delete-contract"])
+        with self.assertRaisesRegex(p.PreflightError, "c-cpath-nul: mutation anchor") as raised:
+            p.exercise(p.ROOT, source.replace(old, stale), label, "c-cpath-nul",
+                       p.ADAPTERS["delete-contract"])
+        self.assertIn(target, str(raised.exception))
+        original = (p.ROOT / target).read_text()
+        with self.assertRaisesRegex(p.PreflightError, "delete-contract/mutate.py:c-cpath-nul"):
+            p.check(p.ROOT, {target: original.replace(old, stale)})
+        self.assertEqual((p.ROOT / target).read_text(), original)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

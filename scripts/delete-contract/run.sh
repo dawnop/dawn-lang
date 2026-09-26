@@ -2,6 +2,12 @@
 # The public delete contract, plus live mutants for the regressions that
 # created LIB-07. Each mutant must compile and run; only its behavior may fail.
 #
+# Every mutation is applied by mutate.py, whose registry holds the anchors; this
+# script only lays out each mutant copy at the repository's relative paths.
+# mutation-anchor-preflight.py exercises the same registry against the checkout
+# before any build, so a runtime/c or rtclasses edit that moves an anchor goes
+# red there instead of on whoever next runs this contract (#249).
+#
 #   ./scripts/delete-contract/run.sh
 #
 # `expected.txt` is hand-written and there is no `--record`. The mutants are
@@ -129,27 +135,13 @@ cmp -s "$work/jvm.out" "$work/native.out" || fail "JVM and native delete outputs
 
 # C path-bridge mutant: remove the embedded-NUL rejection. The old bridge
 # silently terminates at the first zero byte, so delete acts on the prefix.
-mkdir -p "$work/cpath-mutant"
-cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/cpath-mutant/"
-python3 - "$work/cpath-mutant/dawn_rt.c" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''static char *dawn_cpath(dawn_str *s) {
-  dawn_reject_nul(s);
-  char *p = (char *)dawn_alloc((size_t)s->len + 1);'''
-new = '''static char *dawn_cpath(dawn_str *s) {
-  char *p = (char *)dawn_alloc((size_t)s->len + 1);'''
-if text.count(old) != 1:
-    raise SystemExit("C path mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+mkdir -p "$work/cpath-mutant/runtime/c"
+cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/cpath-mutant/runtime/c/"
+python3 "$here/mutate.py" c-cpath-nul "$work/cpath-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/cpath-mutant" \
-    -o "$work/cpath-mutant/probe" "$work/probe.c" "$work/cpath-mutant/dawn_rt.c" -lm \
+    -Wno-unused-parameter -Wno-unused-label -I "$work/cpath-mutant/runtime/c" \
+    -o "$work/cpath-mutant/probe" "$work/probe.c" "$work/cpath-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/cpath-mutant/cc.out" 2>&1; then
   cat "$work/cpath-mutant/cc.out" >&2
   fail "C embedded-NUL mutant did not compile"
@@ -171,28 +163,13 @@ for query_case in \
   IFS='|' read -r query_fn query_label <<< "$query_case"
   query_name="${query_fn#dawn_io_}"
   query_dir="$work/c-query-$query_name-mutant"
-  mkdir -p "$query_dir"
-  cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$query_dir/"
-  python3 - "$query_dir/dawn_rt.c" "$query_fn" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-function = sys.argv[2]
-text = path.read_text()
-old = f'''bool {function}(dawn_str *path) {{
-  if (dawn_has_nul(path)) return false;
-  char *p = dawn_cpath(path);'''
-new = f'''bool {function}(dawn_str *path) {{
-  char *p = dawn_cpath(path);'''
-if text.count(old) != 1:
-    raise SystemExit(f"C {function} NUL-guard mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+  mkdir -p "$query_dir/runtime/c"
+  cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$query_dir/runtime/c/"
+  python3 "$here/mutate.py" "c-query-$query_name" "$query_dir"
   if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
       -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-      -Wno-unused-parameter -Wno-unused-label -I "$query_dir" \
-      -o "$query_dir/probe" "$work/probe.c" "$query_dir/dawn_rt.c" -lm \
+      -Wno-unused-parameter -Wno-unused-label -I "$query_dir/runtime/c" \
+      -o "$query_dir/probe" "$work/probe.c" "$query_dir/runtime/c/dawn_rt.c" -lm \
       > "$query_dir/cc.out" 2>&1; then
     cat "$query_dir/cc.out" >&2
     fail "C $query_name NUL-query mutant did not compile"
@@ -209,28 +186,14 @@ done
 # C Option-query mutant: remove getenv's NUL preflight. The shared bridge must
 # then fault rather than truncate, and catch_fault keeps the mutant executable
 # alive long enough for the same public contract to observe the wrong result.
-mkdir -p "$work/c-getenv-mutant"
-cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-getenv-mutant/"
-python3 - "$work/c-getenv-mutant/dawn_rt.c" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''dawn_adt *dawn_io_getenv(dawn_str *name) {
-  if (dawn_has_nul(name)) return dawn_none();
-  char *p = dawn_cpath(name);'''
-new = '''dawn_adt *dawn_io_getenv(dawn_str *name) {
-  char *p = dawn_cpath(name);'''
-if text.count(old) != 1:
-    raise SystemExit("C getenv NUL-guard mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+mkdir -p "$work/c-getenv-mutant/runtime/c"
+cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-getenv-mutant/runtime/c/"
+python3 "$here/mutate.py" c-getenv-nul "$work/c-getenv-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/c-getenv-mutant" \
+    -Wno-unused-parameter -Wno-unused-label -I "$work/c-getenv-mutant/runtime/c" \
     -o "$work/c-getenv-mutant/probe" "$work/probe.c" \
-    "$work/c-getenv-mutant/dawn_rt.c" -lm \
+    "$work/c-getenv-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/c-getenv-mutant/cc.out" 2>&1; then
   cat "$work/c-getenv-mutant/cc.out" >&2
   fail "C getenv NUL-query mutant did not compile"
@@ -246,38 +209,13 @@ expect_getenv_mutant_red "C getenv NUL-query" "$work/c-getenv-mutant/out"
 # C mutant: restore the old collapse where every remove(3) failure returned
 # false. The exact replacement only prepares the executable; the verdict above
 # is read from the process output, never from this source text.
-mkdir -p "$work/c-mutant"
-cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-mutant/"
-python3 - "$work/c-mutant/dawn_rt.c" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''bool dawn_io_delete(dawn_str *path) {
-  char *p = dawn_cpath(path);
-  int rc = remove(p);
-  int saved_errno = errno;
-  free(p);
-  if (rc == 0) return true;
-  if (saved_errno == ENOENT) return false;
-  dawn_fault(DAWN_LIT("io_delete: cannot delete path"));
-  return false;
-}'''
-new = '''bool dawn_io_delete(dawn_str *path) {
-  char *p = dawn_cpath(path);
-  bool gone = remove(p) == 0;
-  free(p);
-  return gone;
-}'''
-if text.count(old) != 1:
-    raise SystemExit("C delete mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+mkdir -p "$work/c-mutant/runtime/c"
+cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-mutant/runtime/c/"
+python3 "$here/mutate.py" c-delete-collapse "$work/c-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/c-mutant" \
-    -o "$work/c-mutant/probe" "$work/probe.c" "$work/c-mutant/dawn_rt.c" -lm \
+    -Wno-unused-parameter -Wno-unused-label -I "$work/c-mutant/runtime/c" \
+    -o "$work/c-mutant/probe" "$work/probe.c" "$work/c-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/c-mutant/cc.out" 2>&1; then
   cat "$work/c-mutant/cc.out" >&2
   fail "C collapse mutant did not compile"
@@ -297,24 +235,7 @@ mkdir -p "$work/jvm-mutant"
 cp -R "$root/selfhost" "$work/jvm-mutant/selfhost"
 cp -R "$root/compiler-plan" "$work/jvm-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-mutant/packages"
-python3 - "$work/jvm-mutant/selfhost/src/jvm/rtclasses.dawn" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''  push_path(dv, 0)
-  dv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "deleteIfExists",
-    "(Ljava/nio/file/Path;)Z", false)'''
-new = '''  dv.visitTypeInsn(OP_NEW, "java/io/File")
-  dv.visitInsn(OP_DUP)
-  dv.visitVarInsn(OP_ALOAD, 0)
-  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
-  dv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "delete", "()Z", false)'''
-if text.count(old) != 1:
-    raise SystemExit("JVM delete mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+python3 "$here/mutate.py" jvm-file-delete "$work/jvm-mutant"
 if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
     "$work/jvm-mutant/selfhost" -o "$work/jvm-mutant/compiler.jar" \
     --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
@@ -339,19 +260,7 @@ mkdir -p "$work/jvm-query-mutant"
 cp -R "$root/selfhost" "$work/jvm-query-mutant/selfhost"
 cp -R "$root/compiler-plan" "$work/jvm-query-mutant/compiler-plan"
 cp -R "$root/packages" "$work/jvm-query-mutant/packages"
-python3 - "$work/jvm-query-mutant/selfhost/src/jvm/rtclasses.dawn" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''  return_false_if_nul_path(sv, 0)
-  push_path(sv, 0)'''
-new = '''  push_path(sv, 0)'''
-if text.count(old) != 1:
-    raise SystemExit("JVM is_symlink NUL-guard mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+python3 "$here/mutate.py" jvm-is-symlink-nul "$work/jvm-query-mutant"
 if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
     "$work/jvm-query-mutant/selfhost" -o "$work/jvm-query-mutant/compiler.jar" \
     --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
@@ -375,40 +284,7 @@ expect_query_mutant_red "JVM is_symlink NUL-query" "nul is_symlink" \
 # so the empty-path mutation cannot act outside the contract fixture.
 mkdir -p "$work/preflight-mutant"
 cp -R "$root/std" "$work/preflight-mutant/std"
-python3 - "$work/preflight-mutant/std/io.dawn" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-old = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
-  if path == "" {
-    Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not be empty",
-      cause: None
-    })
-  } else if str.ends_with(path, "/") {
-    Err(ForeignError {
-      kind: "io.invalid_delete_path",
-      message: "io.delete: path must not end with '/'",
-      cause: None
-    })
-  } else {
-    match fs_delete(path) {
-      Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
-      Err(e) -> Err(e)
-    }
-  }'''
-new = '''pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
-  match fs_delete(path) {
-    Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
-    Err(e) -> Err(e)
-  }'''
-if text.count(old) != 1:
-    raise SystemExit("delete preflight mutation anchor is not unique")
-path.write_text(text.replace(old, new))
-PY
+python3 "$here/mutate.py" std-delete-preflight "$work/preflight-mutant"
 prepare_cwd "$work/preflight-mutant/jvm-cwd"
 if ! (cd "$work/preflight-mutant/jvm-cwd" &&
     "$root/bin/dawn" run --std "$work/preflight-mutant/std" "$here/probe.dawn") \
