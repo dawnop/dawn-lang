@@ -2,6 +2,7 @@
 
 > 状态：**current**。2026-09-26，issue #241 第 2、3 条（分支 `fix/huge-methods-2`）；第 1 条
 > （`execute_module_bodies`）是刀 1，记在 [symbol-id-design.md](symbol-id-design.md) §3.2 末尾。
+> 「C1 的寄存器墙」一节是 2026-09-27 issue #252（分支 `fix/ctor-call-c1`）。
 
 ## 问题
 
@@ -29,6 +30,7 @@ issue 实测 bench-replay 稳态冷检因此慢 20% 到 27%。
 | `check_call` | `check_local_value_call` `call_arg_slots` `infer_call_args` | 局部函数值分支每条出口本来都是 `return`；参数槽分配只读签名与实参；两轮推断是唯一扩充替换的地方，改动的 `Cx`、`m`、`em`、两张槽表显式返回 |
 | `pass_register_impls` | `register_derived_impls` `impl_member_bindings` `impl_method_sigs` `report_missing_methods` | derive 在前、关联类型/效果绑定、逐方法签名核对（最大的一段，也是唯一按方法循环的一段）、缺方法报告；每个 impl 的头部（作用域、主体、孤儿规则、一致性）连同它的 `continue` 留在原处 |
 | LSP 测试闭包 | 三个局部函数：库修订循环、失败后重试、激活失败与拆除 | 测试闭包被提升为 `lambda$N`，名字只有位置，门禁分不出它是测试代码（见下「门禁规则」），所以同样拆 |
+| `check_ctor_call`（#252） | `check_ctor_unresolved` `ctor_arg_slots` `infer_ctor_args` | 不是为 8000 拆：C1 在 tier 3 对它 bailout（见下「C1 的寄存器墙」）。没解析出构造器的分支每条出口本来都是 `return`；实参定槽与两轮推断照 `call_arg_slots`、`infer_call_args` 的切法 |
 
 拆后各方法字节数见分支提交正文；最大的是 `check_call` 5689，全部低于 6000 的目标（C1 在 6568 字节的
 `check_ctor_call` 上出现过虚拟寄存器 bailout，所以留余量）。
@@ -95,11 +97,57 @@ issue 实测 bench-replay 稳态冷检因此慢 20% 到 27%。
 本机墙钟 15.69 → 14.21 s、CPU 43.81 → 42.89 s，负载 8 到 10，离散大。调研预测「一次性进程也会受益」，墙钟上看到约 4%，
 在离散边缘，不作定论。
 
+## C1 的寄存器墙（#252）
+
+2026-09-27 实测。上面的 8000 字节闸门挡的是所有编译器；C1 另有一堵墙：线性扫描寄存器分配用完虚拟寄存器时放弃
+（`COMPILE SKIPPED: out of virtual registers in linear scan (retry at different tier)`），方法随后留在解释器里，
+直到攒够 profile 直接上 tier 4。调研在 6568 字节的 `check_ctor_call` 上见过一次，#252 要求先量清楚它是不是字节阈值。
+
+**测法。** 不靠工作负载碰运气：用 HotSpot 的 WhiteBox API（`-XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI`，
+自带一个只声明所需 native 的 `jdk.test.whitebox.WhiteBox` 放在 bootclasspath）对 jar 里每个受检方法
+`enqueueMethodForCompilation` 到指定层，`-Xbatch` 同步等编译结束，再读 `isMethodCompiled` 与 `-XX:+PrintCompilation` 的
+bailout 文案。范围是门禁受检方法里 `code_length` ≥ 1000 的全部 380 个，tier 1 与 tier 3 各一个 JVM，
+GraalVM CE 21.0.2（`bin/dawn` 的 JDK）与 Homebrew OpenJDK 21.0.11 各跑一遍；类初始化与否（影响内联时被调方是否已加载）结果相同。
+再用 `check selfhost` 自然跑一遍核对。
+
+**结果。** 两个 JDK 完全一致：
+
+| 层 | 编得动 | bailout |
+|---|---:|---|
+| tier 1（C1 无 profile） | 380 / 380 | 无 |
+| tier 2（有限 profile，仅 GraalVM 测） | 380 / 380 | 无 |
+| tier 3（全 profile，分层下 C1 的常规层） | 378 / 380 | `check/checker.check_ctor_call` 6568、`front/astdump.dump_expr` 5892 |
+
+issue 列的十个方法里只有 `check_ctor_call` 编不动；比它大的七个（最大 `lsp/server.lambda$20` 7171）都编得动，
+比它小的 `dump_expr` 编不动。`max_locals` 也不预测：`main.collect_program` 341 个局部槽编得动，`check_ctor_call` 299 个编不动。
+墙在 C1 自己的 LIR 虚拟寄存器数上；同一方法 tier 1 编得动而 tier 3 不行，推断是 tier 3 的 profile 桩多出来的临时值把它推过线（未拆 C1 内部计数核实）。
+自然跑的 `check selfhost` 里，`check_ctor_call` 在进程第 0.5 s 左右 tier 3 bailout，到第 3.0 到 3.6 s 才上 tier 4，其间解释执行。
+
+**所以没有可以写进门禁的字节阈值。** 能守这堵墙的是上面的 WhiteBox 探针本身（全 jar 约 2 s），但它要起 JVM、依赖诊断旗标，
+是否值得做成门禁留给另一次裁决。
+
+**拆 `check_ctor_call`。** 按阶段拆出三个函数，拆后字节与 C1 结果（两个 JDK、tier 1 与 3 相同）：
+
+| 方法 | 字节 | tier 3 |
+|---|---:|---|
+| `check_ctor_call`（剩余） | 6568 → 3559 | 编得动 |
+| `check_ctor_unresolved` | 852 | 编得动 |
+| `ctor_arg_slots` | 1275 | 编得动 |
+| `infer_ctor_args` | 874 | 编得动 |
+
+自然跑的 `check selfhost` 里四个都在第 0.6 到 0.7 s 进 tier 3。`dump_expr` 是 `dawn` 的 AST 转储，不在检查路径上，没有拆。
+
+性能（本机 16 核，负载 4 到 7，只看方向）：`java -Xss512m -Xmx2g -XX:+UseSerialGC -jar X check selfhost`
+6 轮交错去首轮，逐轮配对比值取中位数：GraalVM 墙钟 0.972、CPU 0.953；OpenJDK 21 墙钟 0.987、CPU 0.947。
+bench-replay 四类 cold（`cold <class> 1000 30`，去前 12 轮取中位数，5 轮配对）：GraalVM calls 1.012、primitive_inferred 0.819、
+generic 1.055、inferred 1.003；OpenJDK calls 1.017、primitive_inferred 0.958、generic 0.986、inferred 0.984，除
+GraalVM 的 primitive_inferred 外都在 ±6% 的轮间离散之内。
+
 ## 不做的（理由）
 
 - **不加 `-XX:-DontCompileHugeMethods`**：见裁决；而且即使加了，C1 也在这几个方法上放弃。
 - **不在 codegen 里自动拆方法**：这些是人写的源码，自动拆会让字节码与源码结构脱节，`Method too large` 的报错定位变差。
-- **不把阈值定成 6000**：C1 的寄存器墙只有一个观测点，没有系统数据；6000 只作拆分目标，不进门禁。
+- **不把阈值定成 6000**：#252 实测 C1 的墙与字节数无关（见「C1 的寄存器墙」），7171 字节的方法编得动、5892 字节的编不动，按字节设的线会同时误报和漏报。
 - **不从门禁里豁免测试闭包**：要识别闭包属于哪个 test 块，得解码字节码找调用点，读取器复杂度翻几倍；
   目前只有一个测试闭包超过，拆掉比豁免便宜。若以后测试闭包频繁撞线再议。
-- **不拆 6000 到 8000 之间的方法**（`lsp/server.lambda$20` 7171、`lsp/lspq.walk_e` 7051 等 10 个）：规则允许，且没有数据说它们热；留作下一批候选。
+- **不拆 6000 到 8000 之间的其余九个方法**（`lsp/server.lambda$20` 7171、`lsp/lspq.walk_e` 7051 等）：#252 实测 C1 在 tier 1、2、3 都编得动它们，拆了没有 JIT 上的收益。
