@@ -308,18 +308,18 @@ PY
 
     reject-impl-return)
       replace_once "$mutant/selfhost/src/check/passes.dawn" \
-'      let (cx4, ret) = match me.ret {
-        Some(r) -> resolve_return_type(cx1, r)
-        None -> (cx1, TyError)
-      }' \
-'      let (cx4, ret) = match me.ret {
-        Some(r) -> if me.name == "impl_return_contract" {
-          resolve_type(cx1, r)
-        } else {
-          resolve_return_type(cx1, r)
-        }
-        None -> (cx1, TyError)
-      }'
+'    let (cx4, ret) = match me.ret {
+      Some(r) -> resolve_return_type(cx1, r)
+      None -> (cx1, TyError)
+    }' \
+'    let (cx4, ret) = match me.ret {
+      Some(r) -> if me.name == "impl_return_contract" {
+        resolve_type(cx1, r)
+      } else {
+        resolve_return_type(cx1, r)
+      }
+      None -> (cx1, TyError)
+    }'
       build_mutant "$1"
       expect_marker "$1" NEVER_IMPL_RETURN
       ;;
@@ -434,8 +434,8 @@ PY
 
     allow-storage-assoc)
       replace_once "$mutant/selfhost/src/check/passes.dawn" \
-        '      let (cxab, bt) = resolve_type(cx1, ab.tref)' \
-        '      let (cxab, bt) = resolve_return_type(cx1, ab.tref)'
+        '    let (cxab, bt) = resolve_type(cx1, ab.tref)' \
+        '    let (cxab, bt) = resolve_return_type(cx1, ab.tref)'
       build_mutant "$1"
       expect_marker "$1" NEVER_STORAGE_ASSOC
       ;;
