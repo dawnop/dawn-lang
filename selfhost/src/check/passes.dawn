@@ -19,7 +19,7 @@ use front/ast.{
   Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
-  Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
+  Param, Expr, Decl, DImpl, ImplView, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
   DEffect, EffectDeclR, AssocBind, ImportName, import_local,
   Vis, VisPrivate, VisPkg, VisPub, vis_exported,
   e_lo, e_hi
@@ -1764,50 +1764,7 @@ pub(pkg) fn pass_register_impls(
     }
   }
   # the derived impls first, so an explicit duplicate reports as the duplicate
-  var di = 0
-  for d in module_types(m) {
-    let sh = match shells[di] {
-      None -> {
-        di = di + 1
-        continue
-      }
-      Some(s) -> s
-    }
-    let info = adt_of(cx1.adts, sh.adt)
-    for dv in derivable_traits() {
-      if not adt_derives(info, dv.trait_id) { continue }
-      let dname = dv.name
-      let tid = dv.trait_id
-      var dlo = d.nlo
-      var dhi = d.nhi
-      for b in d.derives {
-        if b.name == dname {
-          dlo = b.lo
-          dhi = b.hi
-        }
-      }
-      let ii = ImplI {
-        trait_id: tid,
-        subject: TyAdt(sh.adt, info.tparams),
-        tparams: info.tparams,
-        constraints: derive_constraints(info.tparams, tid),
-        lo: dlo,
-        hi: dhi,
-        derived: true,
-        owner: cx1.owner_class,
-        src_path: cx1.src_path,
-        provided: [],
-        assoc_bindings: [],
-        eff_bindings: []
-      }
-      cx1 = Cx {
-        ..cx1,
-        impl_table: insert_impl(cx1.impl_table, ii),
-        local_impls: cx1.local_impls ++ [ii]
-      }
-    }
-    di = di + 1
-  }
+  cx1 = register_derived_impls(cx1, m, shells)
   # explicit impls
   var eq_hash_impls: List[(Int, Ty, Int, Int)] = []
   for d in module_impls(m) {
@@ -1930,100 +1887,8 @@ pub(pkg) fn pass_register_impls(
     if tid == EQ_ID || tid == HASH_ID {
       eq_hash_impls = eq_hash_impls ++ [(tid, subject, d.tlo, d.thi)]
     }
-    # `type Item = X` bindings: each associated type the trait declares,
-    # exactly once. The RHS resolves in the impl's own tparam scope and may
-    # not itself be a projection (assoc-types-design.md D4/D6).
-    var assoc_bindings: List[(String, Ty)] = []
-    var bound_ns: List[String] = []
-    for ab in d.assoc {
-      if hard_reserved_builtin_type_name(ab.name) {
-        cx1 = refuse_hard_reserved_decl_name(cx1, ab.name, "an associated type", ab.nlo, ab.nhi)
-        continue
-      }
-      if not list.contains(tr.assoc, ab.name) {
-        cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated type `" ++
-            ab.name ++ "`", ab.nlo, ab.nhi,
-          if len(tr.assoc) == 0 {
-            "the trait declares no associated types"
-          } else {
-            "it declares: ${join(tr.assoc, ", ")}"
-          })
-        continue
-      }
-      if list.contains(bound_ns, ab.name) {
-        cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` is bound twice in this impl",
-          ab.nlo, ab.nhi)
-        continue
-      }
-      bound_ns = bound_ns ++ [ab.name]
-      let (cxab, bt) = resolve_type(cx1, ab.tref)
-      cx1 = cxab
-      match bt {
-        TyAssoc(_, _, _) -> {
-          cx1 = cerr_h(cx1, "an associated type binding cannot be a projection", ab.nlo, ab.nhi,
-            "bind `" ++ ab.name ++ "` to a concrete type or an impl parameter")
-        }
-        _ -> { assoc_bindings = assoc_bindings ++ [(ab.name, bt)] }
-      }
-    }
-    for an in tr.assoc {
-      if not list.contains(bound_ns, an) {
-        cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
-            "]` is missing `type " ++ an ++ "`", d.tlo, d.thi,
-          "bind it: `type " ++ an ++ " = <type>`")
-      }
-    }
-    # `effect E = !X` bindings: each associated effect the trait declares,
-    # exactly once, to a ground row (`resolve_ground_row` above states the
-    # discipline and polices it for the trait's defaults too).
-    var eff_bindings: List[(String, Eff)] = []
-    var eff_bound_ns: List[String] = []
-    for eb in d.eff_binds {
-      if not list.contains(tr.eff_assoc, eb.name) {
-        cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated effect `" ++
-            eb.name ++ "`", eb.nlo, eb.nhi,
-          if len(tr.eff_assoc) == 0 {
-            "the trait declares no associated effects"
-          } else {
-            "it declares: ${join(tr.eff_assoc, ", ")}"
-          })
-        continue
-      }
-      if list.contains(eff_bound_ns, eb.name) {
-        cx1 = cerr(cx1, "associated effect `" ++ eb.name ++ "` is bound twice in this impl",
-          eb.nlo, eb.nhi)
-        continue
-      }
-      eff_bound_ns = eff_bound_ns ++ [eb.name]
-      let (cxr, ro) = resolve_ground_row(cx1, eb.atoms, eb.nlo, eb.nhi)
-      cx1 = cxr
-      match ro {
-        Some(row) -> { eff_bindings = eff_bindings ++ [(eb.name, row)] }
-        None -> ()
-      }
-    }
-    for an in tr.eff_assoc {
-      if not list.contains(eff_bound_ns, an) {
-        # a member the trait gave a default row (#369) materializes it here,
-        # as the binding this impl chose not to write; from this point on a
-        # defaulted impl and an explicitly bound one are indistinguishable
-        # (reduction, evidence, both backends all read `eff_bindings`). A
-        # member without a default keeps the missing-binding refusal.
-        var dflt: Option[Eff] = None
-        for pr in tr.eff_defaults {
-          let (dn, de) = pr
-          if dn == an { dflt = Some(de) }
-        }
-        match dflt {
-          Some(row) -> { eff_bindings = eff_bindings ++ [(an, row)] }
-          None -> {
-            cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
-                "]` is missing `effect " ++ an ++ "`", d.tlo, d.thi,
-              "bind it: `effect " ++ an ++ " = !<effect>` (or `!io`, or the empty row `!()`)")
-          }
-        }
-      }
-    }
+    let (bindings_cx, assoc_bindings, eff_bindings) = impl_member_bindings(cx1, d, tr, subject)
+    cx1 = bindings_cx
     var inst: Map[Int, Ty] = map.empty()
     var trait_tvid = -1
     match tr.tvar {
@@ -2034,214 +1899,13 @@ pub(pkg) fn pass_register_impls(
       _ -> ()
     }
     let em0: Map[Int, Eff] = map.empty()
-    var provided: List[String] = []
-    for me in d.methods {
-      var ms: Option[MethodSig] = None
-      for entry in tr.methods {
-        let (mname, msig) = entry
-        if mname == me.name { ms = Some(msig) }
-      }
-      let msv = match ms {
-        None -> {
-          var mnames: List[String] = []
-          for entry in tr.methods {
-            let (mname, _) = entry
-            mnames = mnames ++ [mname]
-          }
-          cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
-            me.nlo, me.nhi, suggest.hint(me.name, mnames))
-          impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
-          continue
-        }
-        Some(v) -> v
-      }
-      var already = false
-      for pn in provided {
-        if pn == me.name { already = true }
-      }
-      if already {
-        cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
-          me.nlo, me.nhi)
-        impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
-        continue
-      }
-      let saved_ev = cx1.current_eff_vars
-      let empty_ev2: Map[String, Eff] = map.empty()
-      cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
-      # row first, then parameters, then the return type -- the trait side's
-      # mint order, which the pairing below reads back positionally
-      let (cxef2, eff) = resolve_eff_at(cx1, me.effs, me.nlo, me.nhi)
-      cx1 = cxef2
-      var ptys: List[Ty] = []
-      for p in me.params {
-        # calls dispatch through the trait's signature, which has no
-        # defaults; one here could never be consumed (#207 §4.6)
-        match p.default {
-          Some(de) -> {
-            cx1 = cerr_h(cx1, "impl methods do not take parameter defaults",
-              e_lo(de), e_hi(de), "calls dispatch through the trait's signature")
-          }
-          None -> ()
-        }
-        let (cx3, t) = resolve_type(cx1, p.tref)
-        cx1 = cx3
-        ptys = ptys ++ [t]
-      }
-      let (cx4, ret) = match me.ret {
-        Some(r) -> resolve_return_type(cx1, r)
-        None -> (cx1, TyError)
-      }
-      cx1 = cx4
-      let eparams = eff_params_of(cx1.current_eff_vars)
-      cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
-      let msig = Sig {
-        name: me.name,
-        param_tys: ptys,
-        param_names: map(me.params, p => p.name),
-        param_defaults: [],
-        ret: ret,
-        eff: eff,
-        is_builtin: false,
-        # A conditional impl's method is a generic function: it takes one
-        # dictionary per bound, exactly like a `[T: Eq]` function does, and
-        # everything downstream (descriptors, call sites, `bind_dicts` for
-        # the body) follows from saying so here.
-        tparams: itvars,
-        constraints: iconstraints,
-        eparams: eparams,
-        owner: cx1.owner_class,
-        trait_id: None,
-        op_of: None,
-        inferring: false
-      }
-      # Align the two signatures' effect variables before comparing them. Both
-      # sides minted their own, so the trait's `!e` and the impl's `!e` are
-      # different ids and would never compare equal -- the check below was
-      # vacuous only because both rows used to be forced to `EPure`/`EIo`.
-      #
-      # The pairing is positional over `Sig.eparams`, which is mint order (the
-      # row, then the parameters left to right, then the return type), the same
-      # discipline the type axis already uses: an impl method has no type
-      # parameter list either, and the trait's are substituted by position
-      # through `inst`. Names do not have to agree, so a consistent renaming is
-      # accepted and a permutation of the *positions* is not.
-      #
-      # The substitution runs trait -> impl, so `want`, `want_ret` and the
-      # renders below all speak the impl's spelling. Unequal lengths leave it
-      # empty and are reported on their own, after the shape check: a dropped
-      # variable usually shows up in a parameter type first, and that is the
-      # more useful report.
-      var em: Map[Int, Eff] = em0
-      if len(msv.sig.eparams) == len(msig.eparams) {
-        var epi = 0
-        for tev in msv.sig.eparams {
-          match tev {
-            EffVar(_, tevid) -> { em = map.insert(em, tevid, msig.eparams[epi]) }
-            _ -> ()
-          }
-          epi = epi + 1
-        }
-      }
-      let em2 = em
-      let inst2 = inst
-      let adts2 = cx1.adts
-      # the impl is not in the table yet, so a `C.Item` in the trait's
-      # signature reduces through this impl's own bindings, not impl_at
-      let ab2 = assoc_bindings
-      let eb2 = eff_bindings
-      let tid2 = tid
-      let subject2 = subject
-      let tvid2 = trait_tvid
-      let want = map(msv.sig.param_tys,
-        t => reduce_ty_effs_via_bindings(
-          reduce_via_bindings(subst(t, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2))
-      let want_ret = reduce_ty_effs_via_bindings(
-        reduce_via_bindings(subst(msv.sig.ret, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2)
-      # the trait's row in the impl's variables, its projections rewritten to
-      # this impl's own bound rows (the effect twin of the line above)
-      let want_eff = reduce_eff_via_bindings(subst_eff(msv.sig.eff, em2), tvid2, tid2, eb2)
-      let want_render = "fn " ++ me.name ++ "(" ++
-        join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
-        fn_return_show(cx1.adts, want_ret, want_eff) ++ eff_suffix(want_eff)
-      if ptys != want || ret != want_ret {
-        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
-          me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
-      } else if len(msv.sig.eparams) != len(msig.eparams) {
-        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` binds ${len(msig.eparams)} effect variable(s) " ++
-            "but trait `" ++ tr.name ++ "` binds ${len(msv.sig.eparams)}", me.nlo, me.nhi,
-          "they are paired in the order they are written; trait `" ++ tr.name ++
-            "` declares it as " ++ want_render ++ ", this impl declares " ++
-            "fn " ++ me.name ++ "(" ++ join(map(ptys, t => ty_show(adts2, t)), ", ") ++
-            ") -> " ++ fn_return_show(cx1.adts, ret, eff) ++ eff_suffix(eff))
-      } else if not eff_subsumes(want_eff, eff) {
-        # `want_eff` is the trait's row in the impl's variables. Subsumption in
-        # this direction is what a row means: pure satisfies anything (an impl
-        # that does less than the trait promised is fine), a variable satisfies
-        # itself, and nothing else satisfies a variable -- an impl that is
-        # unconditionally `!io` does more than "whatever the caller's closure
-        # does", which is all the trait's row admits to.
-        let trait_side = if want_eff == EPure { "pure" } else { "!${eff_show(want_eff)}" }
-        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show(eff) ++
-            " but trait `" ++ tr.name ++ "` declares it " ++ trait_side, me.nlo, me.nhi,
-          "drop !" ++ eff_show(eff) ++ " here, or declare the trait method !" ++ eff_show(eff) ++
-            "; " ++ assoc_effect_advice(cx1.adts, tr))
-      } else if eff_labels(want_eff) != eff_labels(eff) {
-        # The base axis is subsumption; the label axis is ABI. Each label is
-        # one hidden evidence parameter, and the devirtualised call spells the
-        # impl method's descriptor from the trait's row after bindings -- so
-        # an impl that quietly drops a label would change its own arity out
-        # from under every call site. Exact match, both directions.
-        var missing2: List[String] = []
-        for l in eff_labels(want_eff) {
-          let (lid, ln) = l
-          if not list.contains(map(eff_labels(eff), x => {
-            let (xid, _) = x
-            xid
-          }), lid) { missing2 = missing2 ++ [ln] }
-        }
-        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` must write the effect(s) `" ++
-            join(missing2, "`, `") ++ "`: the trait's row (after this impl's bindings) " ++
-            "carries them", me.nlo, me.nhi,
-          "each written effect is a hidden evidence parameter, so the labels are part of " ++
-            "the method's shape; declare the method !" ++ eff_show(want_eff))
-      }
-      provided = provided ++ [me.name]
-      impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), Some(msig))
-    }
+    let (sigs_cx, provided, method_sigs) = impl_method_sigs(cx1, d.methods, tr, head, tid,
+      subject, trait_tvid, inst, em0, itvars, iconstraints, assoc_bindings, eff_bindings, impl_sigs)
+    cx1 = sigs_cx
+    impl_sigs = method_sigs
     let no_tp: Map[String, Ty] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: no_tp }
-    var missing: List[MethodSig] = []
-    for entry in tr.methods {
-      let (mname, msig) = entry
-      var have = false
-      for pn in provided {
-        if pn == mname { have = true }
-      }
-      if not msig.has_default && not have { missing = missing ++ [msig] }
-    }
-    if len(missing) > 0 {
-      var names2: List[String] = []
-      var renders: List[String] = []
-      for msig in missing {
-        names2 = names2 ++ ["`" ++ msig.sig.name ++ "`"]
-        var ps: List[String] = []
-        var i = 0
-        for pt in msig.sig.param_tys {
-          let pn = match get(msig.sig.param_names, i) {
-            Some(n) -> n
-            None -> "_"
-          }
-          ps = ps ++ [pn ++ ": " ++ ty_show(cx1.adts, subst(pt, inst, em0))]
-          i = i + 1
-        }
-        renders = renders ++ ["fn " ++ msig.sig.name ++ "(" ++ join(ps, ", ") ++ ") -> " ++
-            fn_return_show(cx1.adts, subst(msig.sig.ret, inst, em0), msig.sig.eff) ++
-            eff_suffix(msig.sig.eff)]
-      }
-      cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
-          "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,
-        "provide: ${join(renders, "; ")}")
-    }
+    cx1 = report_missing_methods(cx1, d, tr, subject, inst, em0, provided)
     let info = ImplI {
       trait_id: tid,
       subject: subject,
@@ -2265,6 +1929,429 @@ pub(pkg) fn pass_register_impls(
   cx1 = check_derived_fields(cx1, m, shells)
   cx1 = check_eq_hash_pairs(cx1, eq_hash_impls)
   (cx1, impl_sigs)
+}
+
+## Pass 2.4's first phase: the impls a type's `derive` list asks for, registered
+## before any explicit impl so that an explicit duplicate reports as the
+## duplicate.
+##
+## Cut out of `pass_register_impls` for HotSpot's 8000-byte HugeMethodLimit
+## (#241). It reads only the module's type declarations and their shells, and
+## what it leaves behind is the impl table, so the context is its whole result.
+fn register_derived_impls(start: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = start
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    for dv in derivable_traits() {
+      if not adt_derives(info, dv.trait_id) { continue }
+      let dname = dv.name
+      let tid = dv.trait_id
+      var dlo = d.nlo
+      var dhi = d.nhi
+      for b in d.derives {
+        if b.name == dname {
+          dlo = b.lo
+          dhi = b.hi
+        }
+      }
+      let ii = ImplI {
+        trait_id: tid,
+        subject: TyAdt(sh.adt, info.tparams),
+        tparams: info.tparams,
+        constraints: derive_constraints(info.tparams, tid),
+        lo: dlo,
+        hi: dhi,
+        derived: true,
+        owner: cx1.owner_class,
+        src_path: cx1.src_path,
+        provided: [],
+        assoc_bindings: [],
+        eff_bindings: []
+      }
+      cx1 = Cx {
+        ..cx1,
+        impl_table: insert_impl(cx1.impl_table, ii),
+        local_impls: cx1.local_impls ++ [ii]
+      }
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+## An impl's `type X = ...` and `effect E = !...` bindings against the trait's
+## declared members: each bound exactly once, an effect member with a default
+## row materialized where the impl did not bind it.
+##
+## Cut out of `pass_register_impls` for HotSpot's 8000-byte HugeMethodLimit
+## (#241). Both halves read the impl, the trait and the resolved subject and
+## produce only the two binding lists (and diagnostics), which the method
+## signatures below are then reduced through.
+fn impl_member_bindings(
+  start: Cx,
+  d: ImplView,
+  tr: TraitI,
+  subject: Ty
+) -> (Cx, List[(String, Ty)], List[(String, Eff)]) !io = {
+  var cx1 = start
+  # `type Item = X` bindings: each associated type the trait declares,
+  # exactly once. The RHS resolves in the impl's own tparam scope and may
+  # not itself be a projection (assoc-types-design.md D4/D6).
+  var assoc_bindings: List[(String, Ty)] = []
+  var bound_ns: List[String] = []
+  for ab in d.assoc {
+    if hard_reserved_builtin_type_name(ab.name) {
+      cx1 = refuse_hard_reserved_decl_name(cx1, ab.name, "an associated type", ab.nlo, ab.nhi)
+      continue
+    }
+    if not list.contains(tr.assoc, ab.name) {
+      cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated type `" ++
+          ab.name ++ "`", ab.nlo, ab.nhi,
+        if len(tr.assoc) == 0 {
+          "the trait declares no associated types"
+        } else {
+          "it declares: ${join(tr.assoc, ", ")}"
+        })
+      continue
+    }
+    if list.contains(bound_ns, ab.name) {
+      cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` is bound twice in this impl",
+        ab.nlo, ab.nhi)
+      continue
+    }
+    bound_ns = bound_ns ++ [ab.name]
+    let (cxab, bt) = resolve_type(cx1, ab.tref)
+    cx1 = cxab
+    match bt {
+      TyAssoc(_, _, _) -> {
+        cx1 = cerr_h(cx1, "an associated type binding cannot be a projection", ab.nlo, ab.nhi,
+          "bind `" ++ ab.name ++ "` to a concrete type or an impl parameter")
+      }
+      _ -> { assoc_bindings = assoc_bindings ++ [(ab.name, bt)] }
+    }
+  }
+  for an in tr.assoc {
+    if not list.contains(bound_ns, an) {
+      cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` is missing `type " ++ an ++ "`", d.tlo, d.thi,
+        "bind it: `type " ++ an ++ " = <type>`")
+    }
+  }
+  # `effect E = !X` bindings: each associated effect the trait declares,
+  # exactly once, to a ground row (`resolve_ground_row` above states the
+  # discipline and polices it for the trait's defaults too).
+  var eff_bindings: List[(String, Eff)] = []
+  var eff_bound_ns: List[String] = []
+  for eb in d.eff_binds {
+    if not list.contains(tr.eff_assoc, eb.name) {
+      cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated effect `" ++
+          eb.name ++ "`", eb.nlo, eb.nhi,
+        if len(tr.eff_assoc) == 0 {
+          "the trait declares no associated effects"
+        } else {
+          "it declares: ${join(tr.eff_assoc, ", ")}"
+        })
+      continue
+    }
+    if list.contains(eff_bound_ns, eb.name) {
+      cx1 = cerr(cx1, "associated effect `" ++ eb.name ++ "` is bound twice in this impl",
+        eb.nlo, eb.nhi)
+      continue
+    }
+    eff_bound_ns = eff_bound_ns ++ [eb.name]
+    let (cxr, ro) = resolve_ground_row(cx1, eb.atoms, eb.nlo, eb.nhi)
+    cx1 = cxr
+    match ro {
+      Some(row) -> { eff_bindings = eff_bindings ++ [(eb.name, row)] }
+      None -> ()
+    }
+  }
+  for an in tr.eff_assoc {
+    if not list.contains(eff_bound_ns, an) {
+      # a member the trait gave a default row (#369) materializes it here,
+      # as the binding this impl chose not to write; from this point on a
+      # defaulted impl and an explicitly bound one are indistinguishable
+      # (reduction, evidence, both backends all read `eff_bindings`). A
+      # member without a default keeps the missing-binding refusal.
+      var dflt: Option[Eff] = None
+      for pr in tr.eff_defaults {
+        let (dn, de) = pr
+        if dn == an { dflt = Some(de) }
+      }
+      match dflt {
+        Some(row) -> { eff_bindings = eff_bindings ++ [(an, row)] }
+        None -> {
+          cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+              "]` is missing `effect " ++ an ++ "`", d.tlo, d.thi,
+            "bind it: `effect " ++ an ++ " = !<effect>` (or `!io`, or the empty row `!()`)")
+        }
+      }
+    }
+  }
+  (cx1, assoc_bindings, eff_bindings)
+}
+
+## Each method an impl writes, resolved and held to the trait's signature
+## after this impl's substitution and bindings: parameter and return types,
+## the pairing of effect variables, subsumption of the row and its labels.
+## Returns the names provided, in order, and the method signatures filed
+## under their paths (None for a refused method).
+##
+## Cut out of `pass_register_impls` for HotSpot's 8000-byte HugeMethodLimit
+## (#241). It is the largest phase, and the one that runs per method rather
+## than per impl; everything it needs from the impl is already settled above
+## it, and its `continue`s are the loop's own.
+fn impl_method_sigs(
+  start: Cx,
+  methods: List[FnDecl],
+  tr: TraitI,
+  head: List[identity.Part],
+  tid: Int,
+  subject: Ty,
+  trait_tvid: Int,
+  inst: Map[Int, Ty],
+  em0: Map[Int, Eff],
+  itvars: List[Ty],
+  iconstraints: List[List[Int]],
+  assoc_bindings: List[(String, Ty)],
+  eff_bindings: List[(String, Eff)],
+  sigs0: PathTable[Option[Sig]]
+) -> (Cx, List[String], PathTable[Option[Sig]]) !io = {
+  var cx1 = start
+  var impl_sigs = sigs0
+  var provided: List[String] = []
+  for me in methods {
+    var ms: Option[MethodSig] = None
+    for entry in tr.methods {
+      let (mname, msig) = entry
+      if mname == me.name { ms = Some(msig) }
+    }
+    let msv = match ms {
+      None -> {
+        var mnames: List[String] = []
+        for entry in tr.methods {
+          let (mname, _) = entry
+          mnames = mnames ++ [mname]
+        }
+        cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
+          me.nlo, me.nhi, suggest.hint(me.name, mnames))
+        impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
+        continue
+      }
+      Some(v) -> v
+    }
+    var already = false
+    for pn in provided {
+      if pn == me.name { already = true }
+    }
+    if already {
+      cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
+        me.nlo, me.nhi)
+      impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
+      continue
+    }
+    let saved_ev = cx1.current_eff_vars
+    let empty_ev2: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
+    # row first, then parameters, then the return type -- the trait side's
+    # mint order, which the pairing below reads back positionally
+    let (cxef2, eff) = resolve_eff_at(cx1, me.effs, me.nlo, me.nhi)
+    cx1 = cxef2
+    var ptys: List[Ty] = []
+    for p in me.params {
+      # calls dispatch through the trait's signature, which has no
+      # defaults; one here could never be consumed (#207 §4.6)
+      match p.default {
+        Some(de) -> {
+          cx1 = cerr_h(cx1, "impl methods do not take parameter defaults",
+            e_lo(de), e_hi(de), "calls dispatch through the trait's signature")
+        }
+        None -> ()
+      }
+      let (cx3, t) = resolve_type(cx1, p.tref)
+      cx1 = cx3
+      ptys = ptys ++ [t]
+    }
+    let (cx4, ret) = match me.ret {
+      Some(r) -> resolve_return_type(cx1, r)
+      None -> (cx1, TyError)
+    }
+    cx1 = cx4
+    let eparams = eff_params_of(cx1.current_eff_vars)
+    cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
+    let msig = Sig {
+      name: me.name,
+      param_tys: ptys,
+      param_names: map(me.params, p => p.name),
+      param_defaults: [],
+      ret: ret,
+      eff: eff,
+      is_builtin: false,
+      # A conditional impl's method is a generic function: it takes one
+      # dictionary per bound, exactly like a `[T: Eq]` function does, and
+      # everything downstream (descriptors, call sites, `bind_dicts` for
+      # the body) follows from saying so here.
+      tparams: itvars,
+      constraints: iconstraints,
+      eparams: eparams,
+      owner: cx1.owner_class,
+      trait_id: None,
+      op_of: None,
+      inferring: false
+    }
+    # Align the two signatures' effect variables before comparing them. Both
+    # sides minted their own, so the trait's `!e` and the impl's `!e` are
+    # different ids and would never compare equal -- the check below was
+    # vacuous only because both rows used to be forced to `EPure`/`EIo`.
+    #
+    # The pairing is positional over `Sig.eparams`, which is mint order (the
+    # row, then the parameters left to right, then the return type), the same
+    # discipline the type axis already uses: an impl method has no type
+    # parameter list either, and the trait's are substituted by position
+    # through `inst`. Names do not have to agree, so a consistent renaming is
+    # accepted and a permutation of the *positions* is not.
+    #
+    # The substitution runs trait -> impl, so `want`, `want_ret` and the
+    # renders below all speak the impl's spelling. Unequal lengths leave it
+    # empty and are reported on their own, after the shape check: a dropped
+    # variable usually shows up in a parameter type first, and that is the
+    # more useful report.
+    var em: Map[Int, Eff] = em0
+    if len(msv.sig.eparams) == len(msig.eparams) {
+      var epi = 0
+      for tev in msv.sig.eparams {
+        match tev {
+          EffVar(_, tevid) -> { em = map.insert(em, tevid, msig.eparams[epi]) }
+          _ -> ()
+        }
+        epi = epi + 1
+      }
+    }
+    let em2 = em
+    let inst2 = inst
+    let adts2 = cx1.adts
+    # the impl is not in the table yet, so a `C.Item` in the trait's
+    # signature reduces through this impl's own bindings, not impl_at
+    let ab2 = assoc_bindings
+    let eb2 = eff_bindings
+    let tid2 = tid
+    let subject2 = subject
+    let tvid2 = trait_tvid
+    let want = map(msv.sig.param_tys,
+      t => reduce_ty_effs_via_bindings(
+        reduce_via_bindings(subst(t, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2))
+    let want_ret = reduce_ty_effs_via_bindings(
+      reduce_via_bindings(subst(msv.sig.ret, inst2, em2), tid2, subject2, ab2), tvid2, tid2, eb2)
+    # the trait's row in the impl's variables, its projections rewritten to
+    # this impl's own bound rows (the effect twin of the line above)
+    let want_eff = reduce_eff_via_bindings(subst_eff(msv.sig.eff, em2), tvid2, tid2, eb2)
+    let want_render = "fn " ++ me.name ++ "(" ++
+      join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
+      fn_return_show(cx1.adts, want_ret, want_eff) ++ eff_suffix(want_eff)
+    if ptys != want || ret != want_ret {
+      cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
+        me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
+    } else if len(msv.sig.eparams) != len(msig.eparams) {
+      cx1 = cerr_h(cx1, "`" ++ me.name ++ "` binds ${len(msig.eparams)} effect variable(s) " ++
+          "but trait `" ++ tr.name ++ "` binds ${len(msv.sig.eparams)}", me.nlo, me.nhi,
+        "they are paired in the order they are written; trait `" ++ tr.name ++
+          "` declares it as " ++ want_render ++ ", this impl declares " ++
+          "fn " ++ me.name ++ "(" ++ join(map(ptys, t => ty_show(adts2, t)), ", ") ++
+          ") -> " ++ fn_return_show(cx1.adts, ret, eff) ++ eff_suffix(eff))
+    } else if not eff_subsumes(want_eff, eff) {
+      # `want_eff` is the trait's row in the impl's variables. Subsumption in
+      # this direction is what a row means: pure satisfies anything (an impl
+      # that does less than the trait promised is fine), a variable satisfies
+      # itself, and nothing else satisfies a variable -- an impl that is
+      # unconditionally `!io` does more than "whatever the caller's closure
+      # does", which is all the trait's row admits to.
+      let trait_side = if want_eff == EPure { "pure" } else { "!${eff_show(want_eff)}" }
+      cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show(eff) ++
+          " but trait `" ++ tr.name ++ "` declares it " ++ trait_side, me.nlo, me.nhi,
+        "drop !" ++ eff_show(eff) ++ " here, or declare the trait method !" ++ eff_show(eff) ++
+          "; " ++ assoc_effect_advice(cx1.adts, tr))
+    } else if eff_labels(want_eff) != eff_labels(eff) {
+      # The base axis is subsumption; the label axis is ABI. Each label is
+      # one hidden evidence parameter, and the devirtualised call spells the
+      # impl method's descriptor from the trait's row after bindings -- so
+      # an impl that quietly drops a label would change its own arity out
+      # from under every call site. Exact match, both directions.
+      var missing2: List[String] = []
+      for l in eff_labels(want_eff) {
+        let (lid, ln) = l
+        if not list.contains(map(eff_labels(eff), x => {
+          let (xid, _) = x
+          xid
+        }), lid) { missing2 = missing2 ++ [ln] }
+      }
+      cx1 = cerr_h(cx1, "`" ++ me.name ++ "` must write the effect(s) `" ++
+          join(missing2, "`, `") ++ "`: the trait's row (after this impl's bindings) " ++
+          "carries them", me.nlo, me.nhi,
+        "each written effect is a hidden evidence parameter, so the labels are part of " ++
+          "the method's shape; declare the method !" ++ eff_show(want_eff))
+    }
+    provided = provided ++ [me.name]
+    impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), Some(msig))
+  }
+  (cx1, provided, impl_sigs)
+}
+
+## The trait methods with no default that an impl did not provide, reported
+## once with a rendering of each signature to copy.
+##
+## Cut out of `pass_register_impls` for HotSpot's 8000-byte HugeMethodLimit
+## (#241): a report only, over what the method phase provided.
+fn report_missing_methods(
+  start: Cx,
+  d: ImplView,
+  tr: TraitI,
+  subject: Ty,
+  inst: Map[Int, Ty],
+  em0: Map[Int, Eff],
+  provided: List[String]
+) -> Cx = {
+  var cx1 = start
+  var missing: List[MethodSig] = []
+  for entry in tr.methods {
+    let (mname, msig) = entry
+    var have = false
+    for pn in provided {
+      if pn == mname { have = true }
+    }
+    if not msig.has_default && not have { missing = missing ++ [msig] }
+  }
+  if len(missing) > 0 {
+    var names2: List[String] = []
+    var renders: List[String] = []
+    for msig in missing {
+      names2 = names2 ++ ["`" ++ msig.sig.name ++ "`"]
+      var ps: List[String] = []
+      var i = 0
+      for pt in msig.sig.param_tys {
+        let pn = match get(msig.sig.param_names, i) {
+          Some(n) -> n
+          None -> "_"
+        }
+        ps = ps ++ [pn ++ ": " ++ ty_show(cx1.adts, subst(pt, inst, em0))]
+        i = i + 1
+      }
+      renders = renders ++ ["fn " ++ msig.sig.name ++ "(" ++ join(ps, ", ") ++ ") -> " ++
+          fn_return_show(cx1.adts, subst(msig.sig.ret, inst, em0), msig.sig.eff) ++
+          eff_suffix(msig.sig.eff)]
+    }
+    cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+        "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,
+      "provide: ${join(renders, "; ")}")
+  }
+  cx1
 }
 
 ## The derived-field checks for `Ord`/`Show`, run once every impl is known --
