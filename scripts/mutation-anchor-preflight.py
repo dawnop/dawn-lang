@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = {
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
     "ctl-live-contract": ("runtime/c",),
+    "delete-contract": (".",),
     "dependency-heap-contract": ("selfhost/src/main.dawn",),
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),
