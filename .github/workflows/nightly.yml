@@ -85,6 +85,15 @@ jobs:
   # locally 2026-09-25, 6m00s for 80 ci.yml runs and 1m00s for 33 tile.yml
   # runs (the local link is slow; the audit's 25 runs took 1m52s on it), and
   # 0.04s to compute. Hence 30 minutes rather than 15, as a runaway stop.
+  #
+  # 2026-09-26 (issue #244): the audit holds a gates.yml claim only to runs
+  # of the job's current steps, so gate-observations.py reads gates.yml at
+  # every run's commit and records each job's steps digest. That is git, not
+  # the API, hence the full-history checkout below (tree-policy does the same
+  # on every push; its checkout step took 5s on run 36245872151) and PyYAML
+  # for the parser. Measured locally: 2.0s for the 52 runs of 09-19 .. 09-26
+  # (26 distinct gates.yml blobs parsed, each once); the totals step's
+  # fourteen days add about as much again. Nothing here changes the timeout.
   budget-observations:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -95,6 +104,17 @@ jobs:
       issues: write     # the report when the claims are wrong
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gate-observations.py reads gates.yml at each observed run's
+          # commit with git to key the run by its steps (issue #244); a
+          # commit git lacks falls back to one contents API call.
+          fetch-depth: 0
+
+      # The steps digest is steps_lock.py's, read through gatesplan.py, which
+      # uses PyYAML. Same line and reason as gates.yml's tree-policy step:
+      # the runner image does not document python3-yaml.
+      - name: PyYAML for the steps digests
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml==6.0.3
 
       - name: every budget claim is at least its worst observed run
         id: audit
