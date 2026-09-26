@@ -278,7 +278,16 @@ pub(pkg) type Cx = {
   # syntax, and `checker.cell_take_ok` is where the conditions are.
   take_cell: Option[Int],
   # Opt-in, partial function namespace observations; not cache admission.
-  function_reads: Option[List[FunctionRead]]
+  function_reads: Option[List[FunctionRead]],
+  # The functions of this module whose return type or effect a call or a
+  # function value was typed from while they were still being inferred
+  # (`Sig.inferring`). Those are placeholders, so a body that used one was
+  # checked against nothing: the scheduler tries the members of a call-graph
+  # cycle one at a time, discards any attempt that used a signature it has
+  # not settled and tries it again once more of the cycle is sealed
+  # (docs/symbol-id-design.md §3.2). The scheduler empties it on every
+  # context it keeps, so no body starts with it set.
+  unsealed_uses: Set[String]
 }
 
 ## One lambda's frame. `sugar` says the parser synthesized this lambda from a
@@ -422,7 +431,8 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     ty_spans: map.empty(),
     record_ty_spans: false,
     take_cell: None,
-    function_reads: None
+    function_reads: None,
+    unsealed_uses: set.empty()
   }
 }
 
