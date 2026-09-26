@@ -9978,75 +9978,8 @@ fn check_call(
     }
   }
   match local {
-    Some(sid) -> {
-      # a local holds a function *value*, and a function type has no parameter
-      # names -- the boundary named arguments stop at (spec §4.3)
-      match first_named(args0) {
-        Some(a) -> {
-          var cxn = cerr_h(cx1, fn_value_named_arg_msg(callee), a.lo, a.hi, named_arg_hint())
-          let (cxa, _) = check_args_plain(cxn, args, pre0)
-          return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        }
-        None -> ()
-      }
-      let sym = sym_of(cx1, sid)
-      let lt = sym.ty
-      if is_errorish(lt) {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      var is_fn = false
-      var lps: List[Ty] = []
-      var lret = TyError
-      var leff = EPure
-      match lt {
-        TyFn(ps, r, ef) -> {
-          is_fn = true
-          lps = ps
-          lret = r
-          leff = ef
-        }
-        _ -> ()
-      }
-      if not is_fn {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        let (render_cx, text) = type_display_read(cxa, lt)
-        return (cerr(render_cx, "`" ++ callee ++ "` is not a function (it is " ++
-            text ++ ")", clo, chi), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      if len(args) != len(lps) {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        let (render_cx, text) = type_display_read(cxa, lt)
-        return (cerr_h(render_cx, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
-            " argument(s), got " ++ to_string(len(args)), lo, hi,
-          "type: " ++ text), lret, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      var txs: List[TExpr] = []
-      var i = 0
-      for a in args {
-        let pt = lps[i]
-        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
-        cx1 = cxa
-        let (compatible_cx, compatible) = assignable_read(cx1, at, pt)
-        cx1 = compatible_cx
-        if not compatible {
-          let (expected_cx, expected_text) = type_display_read(cx1, pt)
-          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
-          let (callable_cx, callable_text) = type_display_read(actual_cx, lt)
-          cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
-              ", got " ++ actual_text, e_lo(a), e_hi(a),
-            "type: " ++ callable_text)
-        }
-        txs = txs ++ [ax]
-        i = i + 1
-      }
-      # the supply point for a call through a local holding a function value;
-      # see `check_apply` for why the row is answered here
-      let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
-      cx1 = cxe
-      cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
-      return (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), lret))
-    }
+    Some(sid) ->
+      return check_local_value_call(cx, cx1, sid, callee, args0, args, pre0, clo, chi, lo, hi)
     None -> ()
   }
   let sig = match resolved_sig {
@@ -10115,169 +10048,13 @@ fn check_call(
   # in order, so each one is grown by appending its own entry rather than
   # written into a prefilled list -- an indexed write costs a rebuild of the
   # whole list (list.take ++ .. ++ list.drop).
-  var at_slots: List[Option[Ty]] = []
-  var tx_slots: List[Option[TExpr]] = []
-  # Which parameter each argument fills: the shared rule (types.arg_slots),
-  # the function-call spelling of the decision constructors make. An
-  # all-positional call of the right arity resolves to the identity mapping
-  # and goes through exactly as before. An argument that landed on no
-  # parameter is checked now, with no expected type, so its own errors are
-  # reported and the rounds below skip it.
-  var pidx: List[Int] = []
-  # (parameter, argument) for the arguments that landed on a parameter;
-  # `slot_of` is built from it after the loop, since it is indexed the other way
-  var filled: List[(Int, Int)] = []
-  var args_broken = false
-  var given: List[Option[String]] = []
-  for a0 in args0 { given = given ++ [a0.name] }
-  let trailing = len(args0) > 0 && args0[len(args0) - 1].trailing
-  let picks = arg_slots(s.param_names, given, trailing)
-  var i0 = 0
-  for a0 in args0 {
-    var idx = -1
-    match picks[i0] {
-      SlotAt(at) -> { idx = at }
-      SlotNoField(an) -> {
-        let h = match suggest.hint(an, s.param_names) {
-          Some(hh) -> hh
-          None -> {
-            let (hint_cx, hint_text) = signature_display_read(cx1, s)
-            cx1 = hint_cx
-            "signature: " ++ hint_text
-          }
-        }
-        cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
-        args_broken = true
-      }
-      SlotAfterNamed -> {
-        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a0.lo, a0.hi)
-        args_broken = true
-      }
-      # counted after the rounds, with the arity wording
-      SlotOverflow -> ()
-      SlotTaken(at) -> {
-        if trailing && i0 == len(args0) - 1 {
-          # the trailing closure and an earlier argument both fill the last
-          # parameter; say which parameter the block is for (spec §4.3)
-          cx1 = cerr(cx1, "the last parameter `" ++ s.param_names[at] ++
-              "` is already given; the tail block is what fills it", a0.lo, a0.hi)
-        } else {
-          cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
-        }
-        args_broken = true
-      }
-    }
-    pidx = pidx ++ [idx]
-    if idx >= 0 {
-      filled = filled ++ [(idx, i0)]
-      at_slots = at_slots ++ [no_expected()]
-      tx_slots = tx_slots ++ [no_texpr()]
-    } else {
-      let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
-      cx1 = cxa
-      at_slots = at_slots ++ [Some(at)]
-      tx_slots = tx_slots ++ [Some(ax)]
-    }
-    i0 = i0 + 1
-  }
-  # arg_slots hands out each parameter at most once -- a second argument for it
-  # comes back SlotTaken with no pick -- so one scan of `filled` per parameter
-  # answers who fills it, and a later pair still wins as an indexed write did.
-  var slot_of: List[Option[Int]] = []
-  var pk = 0
-  for _pt in s.param_tys {
-    var so: Option[Int] = no_int()
-    for f in filled {
-      let (fp, fa) = f
-      if fp == pk { so = Some(fa) }
-    }
-    slot_of = slot_of ++ [so]
-    pk = pk + 1
-  }
-  for round in 0..2 {
-    var at_next: List[Option[Ty]] = []
-    var tx_next: List[Option[TExpr]] = []
-    var i = 0
-    for a in args {
-      var at_i = at_slots[i]
-      var tx_i = tx_slots[i]
-      let done = match at_i {
-        Some(_) -> true
-        None -> false
-      }
-      let skip = if round == 0 {
-        let (next, answer) = needs_expected_read(cx1, a)
-        cx1 = next
-        answer
-      } else { false }
-      if not done && not skip {
-        let pt = s.param_tys[pidx[i]]
-        let (substituted_cx, substd) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
-        cx1 = substituted_cx
-        # lambdas only need their parameter types, and function values unify
-        # piecewise — a partially concrete expected type still helps
-        let (eligibility_cx, concrete) = is_concrete_read(cx1, substd)
-        cx1 = eligibility_cx
-        let accepts = if concrete { true } else {
-          let (next, answer) = accepts_partial_expected_read(cx1, a)
-          cx1 = next
-          answer
-        }
-        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
-        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
-        cx1 = cxa
-        at_i = Some(at)
-        tx_i = Some(ax)
-        # A function value's row is answered here and nowhere else, so this is
-        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
-        # binding is offered to `unify_into` rather than made after it: the
-        # union arm is a containment test over the *substituted* row, so a
-        # binding that arrives late is a binding the test never sees.
-        let (row_cx, em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
-        cx1 = row_cx
-        var m3 = m
-        var em3 = em_sub
-        var ok = true
-        let (inferred_cx, m4, em4, ok4) = unify_into_read(cx1, pt, at, m, em_sub)
-        cx1 = inferred_cx
-        m3 = m4
-        em3 = em4
-        ok = ok4
-        # A subtraction that did not rescue the argument must leave nothing
-        # behind: the argument is an error either way, and a stray binding for
-        # `e` would answer the next argument's row with a row nothing chose.
-        if not ok && subtracted {
-          let (retried_cx, m5, em5, ok5) = unify_into_read(cx1, pt, at, m, em)
-          cx1 = retried_cx
-          m3 = m5
-          em3 = em5
-          ok = ok5
-        }
-        m = m3
-        em = em3
-        if not ok {
-          let h = match why {
-            Some(w) -> w
-            None -> {
-              let (hint_cx, hint_text) = signature_display_read(cx1, s)
-              cx1 = hint_cx
-              "signature: " ++ hint_text
-            }
-          }
-          let (reduced_cx, expected_type) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
-          let (expected_cx, expected_text) = type_display_read(reduced_cx, expected_type)
-          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
-          cx1 = cerr_h(actual_cx, "argument type mismatch: expected " ++
-              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
-        }
-      }
-      at_next = at_next ++ [at_i]
-      tx_next = tx_next ++ [tx_i]
-      i = i + 1
-    }
-    at_slots = at_next
-    tx_slots = tx_next
-  }
+  let (slots_cx, at_args, tx_args, pidx, slot_of, args_broken) =
+    call_arg_slots(cx1, s, callee, args0, pre0)
+  let (rounds_cx, m_rounds, em_rounds, at_slots, tx_slots) =
+    infer_call_args(slots_cx, s, args, pidx, pre0, m, em, at_args, tx_args)
+  cx1 = rounds_cx
+  m = m_rounds
+  em = em_rounds
   # the named-call arity report, after the arguments so their own errors come
   # first (the all-positional path answered arity above and returned)
   if named_present && not args_broken &&
@@ -10588,6 +10365,311 @@ fn check_call(
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }
   (cx1, ret, out)
+}
+
+## The branch of `check_call` where the callee is a local holding a function
+## value: no signature, no inference, just the value's `TyFn` against the
+## arguments, and a dynamic call through the value.
+##
+## Its own function so `check_call` stays under HotSpot's 8000-byte
+## HugeMethodLimit (#241). The branch shares nothing with the signature path
+## below it: every way out of it was a `return`, so it is the call's answer
+## whole. `cx` is the call's entry context, which the node offsets are measured
+## against exactly as in `check_call`; `start` is the context after the local
+## was resolved.
+fn check_local_value_call(
+  cx: Cx,
+  start: Cx,
+  sid: Int,
+  callee: String,
+  args0: List[Arg],
+  args: List[Expr],
+  pre0: Option[(Ty, TExpr)],
+  clo: Int,
+  chi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = start
+  # a local holds a function *value*, and a function type has no parameter
+  # names -- the boundary named arguments stop at (spec §4.3)
+  match first_named(args0) {
+    Some(a) -> {
+      var cxn = cerr_h(cx1, fn_value_named_arg_msg(callee), a.lo, a.hi, named_arg_hint())
+      let (cxa, _) = check_args_plain(cxn, args, pre0)
+      return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    None -> ()
+  }
+  let sym = sym_of(cx1, sid)
+  let lt = sym.ty
+  if is_errorish(lt) {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  var is_fn = false
+  var lps: List[Ty] = []
+  var lret = TyError
+  var leff = EPure
+  match lt {
+    TyFn(ps, r, ef) -> {
+      is_fn = true
+      lps = ps
+      lret = r
+      leff = ef
+    }
+    _ -> ()
+  }
+  if not is_fn {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    let (render_cx, text) = type_display_read(cxa, lt)
+    return (cerr(render_cx, "`" ++ callee ++ "` is not a function (it is " ++
+        text ++ ")", clo, chi), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  if len(args) != len(lps) {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    let (render_cx, text) = type_display_read(cxa, lt)
+    return (cerr_h(render_cx, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
+        " argument(s), got " ++ to_string(len(args)), lo, hi,
+      "type: " ++ text), lret, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  var txs: List[TExpr] = []
+  var i = 0
+  for a in args {
+    let pt = lps[i]
+    let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
+    cx1 = cxa
+    let (compatible_cx, compatible) = assignable_read(cx1, at, pt)
+    cx1 = compatible_cx
+    if not compatible {
+      let (expected_cx, expected_text) = type_display_read(cx1, pt)
+      let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+      let (callable_cx, callable_text) = type_display_read(actual_cx, lt)
+      cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
+          ", got " ++ actual_text, e_lo(a), e_hi(a),
+        "type: " ++ callable_text)
+    }
+    txs = txs ++ [ax]
+    i = i + 1
+  }
+  # the supply point for a call through a local holding a function value;
+  # see `check_apply` for why the row is answered here
+  let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
+  cx1 = cxe
+  cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
+  (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), lret))
+}
+
+## Which parameter each argument of a signature call fills, and the two per-
+## argument slot lists the inference rounds start from: an argument that
+## landed on no parameter is checked here, with no expected type, so its own
+## errors are reported and the rounds skip it.
+##
+## Cut out of `check_call` for HotSpot's 8000-byte HugeMethodLimit (#241). It
+## reads the signature and the written arguments and nothing the rounds bind,
+## so it is the natural first phase. Returns the context, the two slot lists,
+## the parameter index of each argument (`-1` for none), which argument fills
+## each parameter, and whether any argument was refused.
+fn call_arg_slots(
+  start: Cx,
+  s: Sig,
+  callee: String,
+  args0: List[Arg],
+  pre0: Option[(Ty, TExpr)]
+) -> (Cx, List[Option[Ty]], List[Option[TExpr]], List[Int], List[Option[Int]], Bool) !io = {
+  var cx1 = start
+  var at_slots: List[Option[Ty]] = []
+  var tx_slots: List[Option[TExpr]] = []
+  # Which parameter each argument fills: the shared rule (types.arg_slots),
+  # the function-call spelling of the decision constructors make. An
+  # all-positional call of the right arity resolves to the identity mapping
+  # and goes through exactly as before. An argument that landed on no
+  # parameter is checked now, with no expected type, so its own errors are
+  # reported and the rounds below skip it.
+  var pidx: List[Int] = []
+  # (parameter, argument) for the arguments that landed on a parameter;
+  # `slot_of` is built from it after the loop, since it is indexed the other way
+  var filled: List[(Int, Int)] = []
+  var args_broken = false
+  var given: List[Option[String]] = []
+  for a0 in args0 { given = given ++ [a0.name] }
+  let trailing = len(args0) > 0 && args0[len(args0) - 1].trailing
+  let picks = arg_slots(s.param_names, given, trailing)
+  var i0 = 0
+  for a0 in args0 {
+    var idx = -1
+    match picks[i0] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        let h = match suggest.hint(an, s.param_names) {
+          Some(hh) -> hh
+          None -> {
+            let (hint_cx, hint_text) = signature_display_read(cx1, s)
+            cx1 = hint_cx
+            "signature: " ++ hint_text
+          }
+        }
+        cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
+        args_broken = true
+      }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a0.lo, a0.hi)
+        args_broken = true
+      }
+      # counted after the rounds, with the arity wording
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        if trailing && i0 == len(args0) - 1 {
+          # the trailing closure and an earlier argument both fill the last
+          # parameter; say which parameter the block is for (spec §4.3)
+          cx1 = cerr(cx1, "the last parameter `" ++ s.param_names[at] ++
+              "` is already given; the tail block is what fills it", a0.lo, a0.hi)
+        } else {
+          cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
+        }
+        args_broken = true
+      }
+    }
+    pidx = pidx ++ [idx]
+    if idx >= 0 {
+      filled = filled ++ [(idx, i0)]
+      at_slots = at_slots ++ [no_expected()]
+      tx_slots = tx_slots ++ [no_texpr()]
+    } else {
+      let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
+      cx1 = cxa
+      at_slots = at_slots ++ [Some(at)]
+      tx_slots = tx_slots ++ [Some(ax)]
+    }
+    i0 = i0 + 1
+  }
+  # arg_slots hands out each parameter at most once -- a second argument for it
+  # comes back SlotTaken with no pick -- so one scan of `filled` per parameter
+  # answers who fills it, and a later pair still wins as an indexed write did.
+  var slot_of: List[Option[Int]] = []
+  var pk = 0
+  for _pt in s.param_tys {
+    var so: Option[Int] = no_int()
+    for f in filled {
+      let (fp, fa) = f
+      if fp == pk { so = Some(fa) }
+    }
+    slot_of = slot_of ++ [so]
+    pk = pk + 1
+  }
+  (cx1, at_slots, tx_slots, pidx, slot_of, args_broken)
+}
+
+## The two inference rounds of a signature call: self-sufficient arguments
+## first (they bind type variables), then the inference-needing ones (bare
+## `None`, `[]`) under what the first round learned.
+##
+## Cut out of `check_call` for HotSpot's 8000-byte HugeMethodLimit (#241). The
+## rounds are the only place the substitution is grown from the arguments, so
+## everything they change comes back explicitly: the context, `m`, `em` and the
+## two slot lists. Nothing here returns early; the call's own checks resume
+## after it in the order they always ran.
+fn infer_call_args(
+  start: Cx,
+  s: Sig,
+  args: List[Expr],
+  pidx: List[Int],
+  pre0: Option[(Ty, TExpr)],
+  m0: Map[Int, Ty],
+  em0: Map[Int, Eff],
+  at0: List[Option[Ty]],
+  tx0: List[Option[TExpr]]
+) -> (Cx, Map[Int, Ty], Map[Int, Eff], List[Option[Ty]], List[Option[TExpr]]) !io = {
+  var cx1 = start
+  var m = m0
+  var em = em0
+  var at_slots = at0
+  var tx_slots = tx0
+  for round in 0..2 {
+    var at_next: List[Option[Ty]] = []
+    var tx_next: List[Option[TExpr]] = []
+    var i = 0
+    for a in args {
+      var at_i = at_slots[i]
+      var tx_i = tx_slots[i]
+      let done = match at_i {
+        Some(_) -> true
+        None -> false
+      }
+      let skip = if round == 0 {
+        let (next, answer) = needs_expected_read(cx1, a)
+        cx1 = next
+        answer
+      } else { false }
+      if not done && not skip {
+        let pt = s.param_tys[pidx[i]]
+        let (substituted_cx, substd) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
+        cx1 = substituted_cx
+        # lambdas only need their parameter types, and function values unify
+        # piecewise — a partially concrete expected type still helps
+        let (eligibility_cx, concrete) = is_concrete_read(cx1, substd)
+        cx1 = eligibility_cx
+        let accepts = if concrete { true } else {
+          let (next, answer) = accepts_partial_expected_read(cx1, a)
+          cx1 = next
+          answer
+        }
+        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
+        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
+        cx1 = cxa
+        at_i = Some(at)
+        tx_i = Some(ax)
+        # A function value's row is answered here and nowhere else, so this is
+        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
+        # binding is offered to `unify_into` rather than made after it: the
+        # union arm is a containment test over the *substituted* row, so a
+        # binding that arrives late is a binding the test never sees.
+        let (row_cx, em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+        cx1 = row_cx
+        var m3 = m
+        var em3 = em_sub
+        var ok = true
+        let (inferred_cx, m4, em4, ok4) = unify_into_read(cx1, pt, at, m, em_sub)
+        cx1 = inferred_cx
+        m3 = m4
+        em3 = em4
+        ok = ok4
+        # A subtraction that did not rescue the argument must leave nothing
+        # behind: the argument is an error either way, and a stray binding for
+        # `e` would answer the next argument's row with a row nothing chose.
+        if not ok && subtracted {
+          let (retried_cx, m5, em5, ok5) = unify_into_read(cx1, pt, at, m, em)
+          cx1 = retried_cx
+          m3 = m5
+          em3 = em5
+          ok = ok5
+        }
+        m = m3
+        em = em3
+        if not ok {
+          let h = match why {
+            Some(w) -> w
+            None -> {
+              let (hint_cx, hint_text) = signature_display_read(cx1, s)
+              cx1 = hint_cx
+              "signature: " ++ hint_text
+            }
+          }
+          let (reduced_cx, expected_type) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
+          let (expected_cx, expected_text) = type_display_read(reduced_cx, expected_type)
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          cx1 = cerr_h(actual_cx, "argument type mismatch: expected " ++
+              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
+        }
+      }
+      at_next = at_next ++ [at_i]
+      tx_next = tx_next ++ [tx_i]
+      i = i + 1
+    }
+    at_slots = at_next
+    tx_slots = tx_next
+  }
+  (cx1, m, em, at_slots, tx_slots)
 }
 
 ## Instantiate a callee's declared effect at a call site: an unbound effect
