@@ -118,6 +118,14 @@ S1 的拓扑走完后剩下的函数（`stuck`）在只含它们的语法子图�
 调度器在每个保留的上下文上把 `Cx.unsealed_uses` 清空，函数体开始时它恒为空；
 `body_product` 与 `header_product` 的 `environment_unchanged` 都把它列为不可变字段，产品不携带它。
 
+这些原先全写在 `execute_module_bodies` 里，使它的字节码从 5515 涨到 9230 字节（S3 后 9545），越过 HotSpot 的
+`HugeMethodLimit`（8000），整个调度器从此只解释执行；S2 让 primitive_inferred 冷检变成 1.17 倍，其中约七成来自这一条（#241，
+`agent-handoff/g3-inferred-recheck-20260926.md` 的开关实验）。所以按数据流拆成五个顶层函数：
+`inferred_dependencies`（语法边，唯一读 `Cx` 的一步）、`inferred_groups`（S1 分桶，输出分组与 S1 组数）、
+`cycle_components`（Tarjan）、`attempt_inferred_group`（试检一组直到一轮无进展，返回剩下的真环成员）、
+`report_cycles`（统一报错）；`settled` 跨组累积，留在编排里。纯重构：诊断、`TFun`、Core 程序 dump 不变，
+冻结参考调度器原样通过。拆后 `execute_module_bodies` 3353 字节，拆出的最大 1981 字节。
+
 夹具与变异体（checker-corpus；变异体在拷贝树里改 `checker.dawn` 一处后用分支工具链重建）：
 
 | 夹具 | 旧编译器 | 新编译器 |

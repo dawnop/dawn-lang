@@ -28,7 +28,7 @@ def main():
         ("checker", "field-consumer", "field_cx = name_cx", "field_cx = field_cx"),
         ("checker", "message-consumer", "\n          cx = name_cx\n", "\n          cx = cx\n"),
         ("checker", "refusal-consumer", "cerr_h(message_cx, message,", "cerr_h(cx, message,"),
-        ("checker", "enumeration-consumer", "let (names_cx, java_names) = java_class_names_read(cx1)\n    cx1 = names_cx", "let (names_cx, java_names) = java_class_names_read(cx1)\n    cx1 = cx1"),
+        ("checker", "enumeration-consumer", "let (names_cx, java_names) = java_class_names_read(cx1)\n  cx1 = names_cx", "let (names_cx, java_names) = java_class_names_read(cx1)\n  cx1 = cx1"),
         ("checker", "value-consumer", "(java_cx, java_name != None)", "(shadow_cx, java_name != None)"),
         # `enabled-projection`, `find-key-projection`, `find-answer-projection`,
         # `names-projection` and `names-order` stood here and are gone with the
