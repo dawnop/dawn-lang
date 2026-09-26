@@ -238,7 +238,14 @@ name: gates
 # 26,149s: 21 claims were still planning values 50s to 450s over their job's
 # worst run, which was room for a new job to take without a declaration, so
 # each was restated to its observation plus a tenth and the line to the new
-# sum. To add one, retire or slim something
+# sum. On 2026-09-26 it went up to 26,617s (#242): syntax-mutants,
+# builtin-type, test and incremental-3 had reached 881s to 918s, a tenth
+# over that crosses the pole or the 850s this round held claims to, so the
+# four were split into ten jobs where there had been six. The four new jobs'
+# fixed overhead is 200s of the 468s (50s each); the rest is the new lines
+# being built from per-step and per-mutant worst observations, which is
+# what the old lines, 116s under their own worst runs, had not declared.
+# To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
 # which scripts/check-gate-budget-trailers.py holds in ci.yml's secrets job.
@@ -261,7 +268,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 26149s (the most this file's `3x` claims may add up to)
+# push-total: 26617s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -860,6 +867,22 @@ jobs:
   # mutant-shards-complete holds the union of the shards to the matrices,
   # because a shard that skips a slice prints the same PASS lines as one that
   # ran it.
+  #
+  # 2026-09-26, N=2 -> N=3 (#242): 914s and 917s worst (runs 36167025238 and
+  # 36189173648) over the 50 main runs of 09-19T11:23Z .. 09-26T07:39Z, and
+  # a restatement with the usual tenth would have crossed the 950s pole. The
+  # deal is still position % N, per harness, so the three shards hold 17 / 16
+  # / 14 mutants (syntax-small 2/2/1, pattern-or 5/5/4, for-pattern 10/9/9).
+  # Each planning value below is built from the shard logs of that window:
+  # each mutant's worst time between its PASS line and the one before it
+  # (pattern-or 26s, for-pattern 37~39s, syntax-small 16~18s, and 72s for
+  # whichever syntax-small mutant a shard runs first, which pays a cold start
+  # the others do not), summed over the mutants the shard now holds, plus
+  # the fixture contracts every shard runs (worst 72s: the step less its
+  # mutants), plus 50s fixed overhead (job duration less its work steps, the
+  # #166 figure). The same arithmetic over the two-shard deal gives 933s and
+  # 922s against the 914s and 917s observed, a ceiling by 5s to 19s.
+  # Restate each line at its own worst once three main runs of it exist.
   syntax-mutants-1:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-1') }}
@@ -896,17 +919,19 @@ jobs:
     # 09-23T11:35Z .. 09-23T17:27Z, 7s over the 895s claim; found by the
     # observed audit for the #166 shard restatement, not by that split.
     # 48s under the pole.
-    # budget: 3x 902s worst observed (run 35866197071)
-    timeout-minutes: 46
+    # 2026-09-26, N=2 -> N=3 (see the family note): 17 mutants, 596s of them
+    # at their worst, plus 72s of fixtures and 50s of fixed overhead = 718s.
+    # budget: 3x 718s planning value (per-mutant worst observations plus fixtures and 50s fixed overhead)
+    timeout-minutes: 36
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 1 of 2)
+      - name: syntax ownership and recovery contract (shard 1 of 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 1/2
+        run: ./scripts/syntax-small-contract/run.sh --shard 1/3
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -936,21 +961,49 @@ jobs:
     # 2026-09-24, later: 897s (run 35934557545) over the 29 completed main
     # runs of 09-18T18:44Z .. 09-23T23:38Z, 15s over the 882s claim; found
     # by the seven-day audit that nightly.yml now runs. 53s under the pole.
-    # budget: 3x 897s worst observed (run 35934557545)
-    timeout-minutes: 45
+    # 2026-09-26, N=2 -> N=3 (see the family note): 16 mutants, 557s of them
+    # at their worst, plus 72s of fixtures and 50s of fixed overhead = 680s.
+    # budget: 3x 680s planning value (per-mutant worst observations plus fixtures and 50s fixed overhead)
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: syntax ownership and recovery contract (shard 2 of 2)
+      - name: syntax ownership and recovery contract (shard 2 of 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/syntax-small-contract/run.sh --shard 2/2
+        run: ./scripts/syntax-small-contract/run.sh --shard 2/3
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-syntax-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  syntax-mutants-3:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3') }}
+    runs-on: ubuntu-latest
+    # 2026-09-26, the third shard (see the family note above shard 1): 14
+    # mutants, 514s of them at their worst, plus 72s of fixtures and 50s of
+    # fixed overhead = 636s.
+    # budget: 3x 636s planning value (per-mutant worst observations plus fixtures and 50s fixed overhead)
+    timeout-minutes: 32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: syntax ownership and recovery contract (shard 3 of 3)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/syntax-small-contract/run.sh --shard 3/3
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-syntax-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -1012,6 +1065,22 @@ jobs:
   # ask. A split costs one more setup on a run whose span's lower bound is
   # the total, so it buys no wall clock; what it buys is the room to keep
   # every mutant on the push path, which is the only thing worth a setup.
+  #
+  # 2026-09-26, N=2 -> N=3 (#242). Over the 50 main runs of 09-19T11:23Z ..
+  # 09-26T07:39Z the two shards' worst runs were 822s (run 35723844624) and
+  # 814s (run 36172913103). Restated with the usual tenth those are 904s and
+  # 895s: under the pole, but over the 850s this round holds every claim to,
+  # and both halves are equally close, so no step can move from one to the
+  # other (each shard is one step). Three shards hold 9 / 9 / 8 mutants.
+  # Each planning value is built from the shard logs of that window: each
+  # mutant's worst time between its PASS line and the one before it (54~57s;
+  # the costs are as flat as the 2026-09-04 local measurement said), summed
+  # over the mutants the shard now holds, plus probe.py and the rest of the
+  # step (worst 43s: the step less its mutants), plus 50s fixed overhead
+  # (job duration less its work steps, the #166 figure). The same arithmetic
+  # over the two-shard deal gives 825s and 820s against the 822s and 814s
+  # observed. Restate each line at its own worst once three main runs of it
+  # exist.
   builtin-type-1:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-1') }}
@@ -1039,17 +1108,20 @@ jobs:
     # 61s under the 950s pole, which is the pole doing its job rather than a
     # comfortable margin: the next observation over 889s asks for a third
     # shard or for the pole, and a third shard is the cheaper answer.
-    # budget: 3x 889s planning value (two merged shards' worst observations)
-    timeout-minutes: 45
+    # 2026-09-26, N=2 -> N=3 (see the family note): 9 mutants, 506s of them
+    # at their worst, plus 43s for the rest of the step and 50s of fixed
+    # overhead = 600s.
+    # budget: 3x 600s planning value (per-mutant worst observations plus probe and 50s fixed overhead)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 1 of 2)
+      - name: builtin type inventory contract (shard 1 of 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 1/2
+        run: ./scripts/builtin-type-contract/run.sh --shard 1/3
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
@@ -1074,21 +1146,50 @@ jobs:
     # 2026-09-24: 809s (run 35896078409) over the 29 completed main runs of
     # 09-18T18:44Z .. 09-23T23:38Z, 15s over the 794s claim; same audit as
     # syntax-mutants-2.
-    # budget: 3x 809s worst observed (run 35896078409)
-    timeout-minutes: 41
+    # 2026-09-26, N=2 -> N=3 (see the family note above builtin-type-1): 9
+    # mutants, 505s of them at their worst, plus 43s for the rest of the
+    # step and 50s of fixed overhead = 598s.
+    # budget: 3x 598s planning value (per-mutant worst observations plus probe and 50s fixed overhead)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: builtin type inventory contract (shard 2 of 2)
+      - name: builtin type inventory contract (shard 2 of 3)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/builtin-type-contract/run.sh --shard 2/2
+        run: ./scripts/builtin-type-contract/run.sh --shard 2/3
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-builtin-type-2
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  builtin-type-3:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-3') }}
+    runs-on: ubuntu-latest
+    # 2026-09-26, the third shard (see the family note above builtin-type-1):
+    # 8 mutants, 446s of them at their worst, plus 43s for the rest of the
+    # step and 50s of fixed overhead = 540s.
+    # budget: 3x 540s planning value (per-mutant worst observations plus probe and 50s fixed overhead)
+    timeout-minutes: 27
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: builtin type inventory contract (shard 3 of 3)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/builtin-type-contract/run.sh --shard 3/3
+      - name: record which mutants this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-builtin-type-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -1184,8 +1285,26 @@ jobs:
     # Configured standalone LSP: shared fresh-build setup plus this scope's
     # complete matrices/control summed to 118.98s in the local all-suite run.
     # Double rounded headroom: 670 + 2 * 119 = 908s; no job is added.
-    # budget: 3x 908s planning value (prior baseline plus configured standalone LSP)
-    timeout-minutes: 46
+    # 2026-09-26, split in two (#242): 918s worst (run 36219628503) over the
+    # 50 main runs of 09-19T11:23Z .. 09-26T07:39Z, and a restatement with the
+    # usual tenth would have crossed the 950s pole. The steps that run Dawn
+    # programs and compare what they compute (std's own tests, the narrow
+    # oracle, the packages, the examples, the effect evidence corpus) moved to
+    # test-programs below; what stays is the compiler's own suites, the LSP
+    # counts, the fixed point and the gates that read its source or grammar.
+    # Nothing is added or removed: the union of the two jobs' `run:` lines is
+    # exactly this job's before the split.
+    #
+    # The planning value is the sum of the remaining steps' worst observations
+    # in that window plus the worst fixed overhead the split families showed
+    # there (job duration less its work steps: 50s, the #166 figure; this job
+    # showed 50s itself): Planner tests 4, configured LSP 100, selfhost tests
+    # 57, comptime trace 226, fixed point 48, grammar corpus 47, Int.MIN 7,
+    # Emit-Change parser 1, formatting 5 = 495s, plus 50s = 545s. That is a
+    # sum of worst cases from runs that were not the same run, so a ceiling;
+    # restate it at its own worst once three main runs of it exist.
+    # budget: 3x 545s planning value (step worst observations plus 50s fixed overhead)
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
 
@@ -1193,32 +1312,9 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # The bundled standard library's own inline test blocks (`dawn test
-      # --stdlib`). std had none at all until 2026-08-06: the contract scripts
-      # covered dtoa, hamt, pvec, inflate and the Unicode tables, and
-      # everything else in std -- the string affix family, split/replace/pad,
-      # the list quantifiers, max_by's tie rule, the cursor bridge -- was
-      # checked only by whatever the compiler happened to call. `dawn test
-      # std/str.dawn` cannot work (std names intrinsics no user module may,
-      # and its `impl Iter[String]` is an orphan anywhere else), so the runner
-      # learned a flag instead.
-      - name: standard library tests
-        run: ./bin/dawn test --stdlib
-
-      # std/narrow's rounding against an exact rational oracle. Both backends
-      # compile the same Dawn source, so their agreement (native-diff runs the
-      # same corpus entry) cannot see a wrong rounding rule: the generator in
-      # scripts/narrow-contract is the outside opinion, and the corpus is its
-      # output written down as literals. The step checks the corpus is what
-      # the generator generates, runs it on both backends, and then removes
-      # each of the three rounding rules in turn (ties to even, the subnormal
-      # clamp, the overflow threshold) from a copy of std and requires the
-      # section that owns the rule to go red on both backends. 27s locally.
-      - name: narrow float contract (exact oracle, both backends, three mutants)
-        run: ./scripts/narrow-contract/run.sh
-
       # compiler-plan is an internal top-level package, not one of the
-      # publishable packages/* discovered below. Its inline tests own the
+      # publishable packages/* that test-programs' package tests step
+      # discovers. Its inline tests own the
       # manifest/MVS/source-input planning boundary and must run explicitly.
       - name: compiler Planner tests
         run: ./bin/dawn test compiler-plan
@@ -1226,54 +1322,8 @@ jobs:
       - name: configured standalone LSP protocol and parse counts
         run: python3 scripts/incremental-semantics-contract/configured-lsp-contract.py --suite standalone --output "$RUNNER_TEMP/configured-lsp-standalone"
 
-      # source packages (packages/, docs/package-design.md 项目 B): every
-      # package with a suite of its own, plus playground consuming them via
-      # [deps]. sha2 and inflate carry published test vectors -- the ones that
-      # say the implementation is the algorithm and not something that merely
-      # round-trips with itself. The five packages used to be listed here by
-      # hand, which was right about today's tree and blind to tomorrow's; the
-      # script discovers them, for the reason the examples step below gives.
-      - name: package tests
-        run: ./scripts/package-tests.sh
-
-      # examples/ carries inline test blocks and, until K-A8.3, nothing ran
-      # them: the differentials emit calc.dawn and compare bytes,
-      # classfile-verify links those bytes, and neither executes an assertion.
-      # K-A8.3 fixed that for two files by naming them; the script discovers
-      # every example instead, because a hand-kept list is a thing a new
-      # example gets left off. This step tests helpers and assertions, not main.
-      - name: example tests
-        run: ./scripts/example-tests.sh
-
-      # A test block can stay green while the tutorial entry point panics or
-      # prints the wrong thing. Mirror the gallery's unit discovery rule,
-      # require an exact registry bijection, then let `dawn run` be the sole
-      # authority on whether each unit has one usable entry. Every launch owns
-      # a process group, including descendants left after a normal exit.
-      - name: example main contracts
-        run: |
-          python3 scripts/example-main-contract/selftest.py
-          python3 scripts/example-main-contract/run.py
-
       - name: selfhost tests
         run: ./bin/dawn test selfhost
-
-      # An effect's evidence is only wrong at run time: #335, #345 and #346
-      # were all `dawn check` accepting a program that then panicked with
-      # "effect evidence missing", and a checker corpus cannot see that class
-      # because the checker is what said yes. The programs that catch it are
-      # scripts/spike-native/effect_*.dawn, and until now the only job that
-      # ran them was native-diff -- behind a C compiler, a sanitizer and 281s
-      # to 557s of wall clock, for a gate whose subject is backend agreement
-      # rather than the answer. This is the same corpus on the JVM alone, and
-      # it also holds the corpus to a roster, which nothing did (deleting a
-      # case was green). 30s locally: 12s of self-test, 18s of corpus. The
-      # self-test runs first because it is the thing that says the checks
-      # after it can fail at all.
-      - name: effect evidence contract
-        run: |
-          ./scripts/effect-evidence-contract/run.sh --self-test
-          ./scripts/effect-evidence-contract/run.sh
 
       # This reusable gate covers the comptime call chain, actionable hint,
       # default/impl frames, and frame cap through four compiling mutants;
@@ -1330,6 +1380,98 @@ jobs:
       # comptime-trace-contract. Adding a path here is what makes it stick.
       - name: formatting
         run: ./bin/dawn fmt compiler-plan std site selfhost packages examples scripts/tile-gpu-diff --check
+
+  # The half of the core suite that runs Dawn programs and checks what they
+  # compute, split out of `test` on 2026-09-26 (#242) when that job's worst
+  # run reached 918s. The notes on each step are the ones it carried there.
+  test-programs:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'test-programs') }}
+    runs-on: ubuntu-latest
+    # Step worst observations over the 50 main runs of 09-19T11:23Z ..
+    # 09-26T07:39Z (all as steps of `test`): standard library tests 5, narrow
+    # contract 70, package tests 34, example tests 78, example main contracts
+    # 92, effect evidence 113 = 392s, plus 50s fixed overhead = 442s. An
+    # estimate from observations, not an observation of this job; restate it
+    # at its own worst once three main runs of it exist.
+    # budget: 3x 442s planning value (step worst observations plus 50s fixed overhead)
+    timeout-minutes: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The bundled standard library's own inline test blocks (`dawn test
+      # --stdlib`). std had none at all until 2026-08-06: the contract scripts
+      # covered dtoa, hamt, pvec, inflate and the Unicode tables, and
+      # everything else in std -- the string affix family, split/replace/pad,
+      # the list quantifiers, max_by's tie rule, the cursor bridge -- was
+      # checked only by whatever the compiler happened to call. `dawn test
+      # std/str.dawn` cannot work (std names intrinsics no user module may,
+      # and its `impl Iter[String]` is an orphan anywhere else), so the runner
+      # learned a flag instead.
+      - name: standard library tests
+        run: ./bin/dawn test --stdlib
+
+      # std/narrow's rounding against an exact rational oracle. Both backends
+      # compile the same Dawn source, so their agreement (native-diff runs the
+      # same corpus entry) cannot see a wrong rounding rule: the generator in
+      # scripts/narrow-contract is the outside opinion, and the corpus is its
+      # output written down as literals. The step checks the corpus is what
+      # the generator generates, runs it on both backends, and then removes
+      # each of the three rounding rules in turn (ties to even, the subnormal
+      # clamp, the overflow threshold) from a copy of std and requires the
+      # section that owns the rule to go red on both backends. 27s locally.
+      - name: narrow float contract (exact oracle, both backends, three mutants)
+        run: ./scripts/narrow-contract/run.sh
+
+      # source packages (packages/, docs/package-design.md 项目 B): every
+      # package with a suite of its own, plus playground consuming them via
+      # [deps]. sha2 and inflate carry published test vectors -- the ones that
+      # say the implementation is the algorithm and not something that merely
+      # round-trips with itself. The five packages used to be listed here by
+      # hand, which was right about today's tree and blind to tomorrow's; the
+      # script discovers them, for the reason the examples step below gives.
+      - name: package tests
+        run: ./scripts/package-tests.sh
+
+      # examples/ carries inline test blocks and, until K-A8.3, nothing ran
+      # them: the differentials emit calc.dawn and compare bytes,
+      # classfile-verify links those bytes, and neither executes an assertion.
+      # K-A8.3 fixed that for two files by naming them; the script discovers
+      # every example instead, because a hand-kept list is a thing a new
+      # example gets left off. This step tests helpers and assertions, not main.
+      - name: example tests
+        run: ./scripts/example-tests.sh
+
+      # A test block can stay green while the tutorial entry point panics or
+      # prints the wrong thing. Mirror the gallery's unit discovery rule,
+      # require an exact registry bijection, then let `dawn run` be the sole
+      # authority on whether each unit has one usable entry. Every launch owns
+      # a process group, including descendants left after a normal exit.
+      - name: example main contracts
+        run: |
+          python3 scripts/example-main-contract/selftest.py
+          python3 scripts/example-main-contract/run.py
+
+      # An effect's evidence is only wrong at run time: #335, #345 and #346
+      # were all `dawn check` accepting a program that then panicked with
+      # "effect evidence missing", and a checker corpus cannot see that class
+      # because the checker is what said yes. The programs that catch it are
+      # scripts/spike-native/effect_*.dawn, and until now the only job that
+      # ran them was native-diff -- behind a C compiler, a sanitizer and 281s
+      # to 557s of wall clock, for a gate whose subject is backend agreement
+      # rather than the answer. This is the same corpus on the JVM alone, and
+      # it also holds the corpus to a roster, which nothing did (deleting a
+      # case was green). 30s locally: 12s of self-test, 18s of corpus. The
+      # self-test runs first because it is the thing that says the checks
+      # after it can fail at all.
+      - name: effect evidence contract
+        run: |
+          ./scripts/effect-evidence-contract/run.sh --self-test
+          ./scripts/effect-evidence-contract/run.sh
 
   # What the compiler emits and what std computes, checked against something
   # that is not the compiler: the JVM verifier, a javac-built reference, the
@@ -1604,30 +1746,49 @@ jobs:
       - name: Candidate context query revalidation contracts
         run: python3 scripts/incremental-semantics-contract/context-revalidation.py
 
-  incremental-3:
+  # incremental-3 until 2026-09-26, split in two (#242) the way
+  # incremental-7 was: 881s worst (run 36172913103) over the 50 main runs of
+  # 09-19T11:23Z .. 09-26T07:39Z, against an 812s claim, and a restatement
+  # with the usual tenth would have crossed the 950s pole. Its three steps
+  # share nothing but the toolchain. Their worst observations in that window
+  # were local-value-reads 471s, identity plus header-state 226s and
+  # state-product 129s (all three in run 36172913103), so the heaviest one
+  # is alone in -1 and the other two are -2. Nothing is added or removed:
+  # the union of the two jobs' `run:` lines is exactly incremental-3's.
+  #
+  # Each planning value is the sum of its steps' worst observations in that
+  # window plus the worst fixed overhead the split families showed there
+  # (job duration less its work steps: 50s, the #166 figure). That is an
+  # estimate from observations, not an observation of these jobs; restate
+  # both lines at their own worst once three main runs of them exist.
+  #
+  # The ledger incremental-3 carried, kept because it is where each
+  # contract's cost was argued; the budget lines below supersede it.
+  # local-values 367s + state 342s + state-products 125s
+  # = 834s of work, plus one 36s setup = 870s.
+  # 2026-09-12: three new environment-comparison controls increase local
+  # state-product time from 69.04s to 88.97s. Retain the existing baseline
+  # and add twice the rounded 20s delta; do not replace runner history with
+  # a faster local result. New planning total: 870 + 40 = 910s.
+  # One additional header-journal control reserves another 2*5s planning
+  # allowance; the existing 46-minute timeout also covers the 920s total.
+  # 2026-09-14: derived nominal/trait ids add five mutants to identity.py and
+  # two to header-state.py. Measured locally on an idle machine, identity went
+  # 26s to 40s and header-state 34s to 45s, so the existing baseline plus
+  # twice the 25s delta is 970s, which is over the pole. query-runtime.py
+  # (44s locally) moves to incremental-1 to pay for it:
+  # 920 - 2 * 44 + 2 * 25 = 882s.
+  # 2026-09-25, observed on main and now the figure: 738s worst (run
+  # 35882535196) over the nightly audit's seven days, 09-18 .. 09-25. The
+  # 882s planning value above was 144s over it; restated to the
+  # observation plus a tenth, 812s, and the timeout to 3x that.
+  incremental-3-1:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-3') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-3-1') }}
     runs-on: ubuntu-latest
-    # local-values 367s + state 342s + state-products 125s
-    # = 834s of work, plus one 36s setup = 870s.
-    # 2026-09-12: three new environment-comparison controls increase local
-    # state-product time from 69.04s to 88.97s. Retain the existing baseline
-    # and add twice the rounded 20s delta; do not replace runner history with
-    # a faster local result. New planning total: 870 + 40 = 910s.
-    # One additional header-journal control reserves another 2*5s planning
-    # allowance; the existing 46-minute timeout also covers the 920s total.
-    # 2026-09-14: derived nominal/trait ids add five mutants to identity.py and
-    # two to header-state.py. Measured locally on an idle machine, identity went
-    # 26s to 40s and header-state 34s to 45s, so the existing baseline plus
-    # twice the 25s delta is 970s, which is over the pole. query-runtime.py
-    # (44s locally) moves to incremental-1 to pay for it:
-    # 920 - 2 * 44 + 2 * 25 = 882s.
-    # 2026-09-25, observed on main and now the figure: 738s worst (run
-    # 35882535196) over the nightly audit's seven days, 09-18 .. 09-25. The
-    # 882s planning value above was 144s over it; restated to the
-    # observation plus a tenth, 812s, and the timeout to 3x that.
-    # budget: 3x 812s worst observed plus a tenth (run 35882535196)
-    timeout-minutes: 41
+    # local-value-reads.py 471s + 50s fixed overhead = 521s.
+    # budget: 3x 521s planning value (step worst observation plus 50s fixed overhead)
+    timeout-minutes: 27
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1639,6 +1800,20 @@ jobs:
       # Preserve the 660s pole and every existing read contract.
       - name: Local constructor and constant read contracts
         run: python3 scripts/incremental-semantics-contract/local-value-reads.py
+
+  incremental-3-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-3-2') }}
+    runs-on: ubuntu-latest
+    # identity.py and header-state.py 226s + state-product.py 129s
+    # + 50s fixed overhead = 405s.
+    # budget: 3x 405s planning value (step worst observations plus 50s fixed overhead)
+    timeout-minutes: 21
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # was the incremental-state job until 2026-09-11.
       # Independent state-product contract, split from projection once their
@@ -3555,8 +3730,10 @@ jobs:
       - native-diff-2
       - syntax-mutants-1
       - syntax-mutants-2
+      - syntax-mutants-3
       - builtin-type-1
       - builtin-type-2
+      - builtin-type-3
     if: ${{ always() && needs.plan.result == 'success' && (needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'mutant-shards-complete')) }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
@@ -3578,8 +3755,8 @@ jobs:
         id: families
         env:
           NATIVE_DIFF: ${{ needs.native-diff-1.result }} ${{ needs.native-diff-2.result }}
-          SYNTAX: ${{ needs.syntax-mutants-1.result }} ${{ needs.syntax-mutants-2.result }}
-          BUILTIN_TYPE: ${{ needs.builtin-type-1.result }} ${{ needs.builtin-type-2.result }}
+          SYNTAX: ${{ needs.syntax-mutants-1.result }} ${{ needs.syntax-mutants-2.result }} ${{ needs.syntax-mutants-3.result }}
+          BUILTIN_TYPE: ${{ needs.builtin-type-1.result }} ${{ needs.builtin-type-2.result }} ${{ needs.builtin-type-3.result }}
         run: |
           flags="--exclude-harness tile-golden"
           ran=false
