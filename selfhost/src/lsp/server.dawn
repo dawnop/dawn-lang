@@ -2399,30 +2399,44 @@ test "prepared project LSP owners drop conflicts and recreate leases on reopen" 
           WorkspaceMember(identity) -> identity.lookup_key
           _ -> panic("workspace")
         }
-        var round = 0
-        for revision in ["pub fn value() -> Int = 2\n", "pub fn value() -> Bool = true\n",
-          "pub fn value() -> Int = missing\n", "pub fn value() -> Int = 3\n"] {
-          warm = update_doc(warm, lib_uri, revision, round)
-          cold = update_doc(cold, lib_uri, revision, round)
-          println("")
-          let ws = match map.get(warm.workspaces, key).expect("warm") { Ready(ws) -> ws, _ -> panic("ready") }
-          let cs = match map.get(cold.workspaces, key).expect("cold") { Ready(ws) -> ws, _ -> panic("ready") }
-          let a = ws.prog.expect("program")
-          let b = cs.prog.expect("program")
-          assert a.diags == b.diags && a.decl_spans == b.decl_spans
-          assert ws.diag_by_uri == cs.diag_by_uri
-          var index = 0
-          for m in a.modules {
-            assert m.tm == b.modules[index].tm && m.ct == b.modules[index].ct
-            index = index + 1
+        # Each library revision, checked warm and cold side by side. This and
+        # the last two phases are local functions rather than inline: inline,
+        # this closure was 9177 bytes of bytecode, over HotSpot's 8000-byte
+        # HugeMethodLimit, and the method-size gate holds every method outside
+        # `embed/` and test blocks to that line, closures lifted out of a test
+        # included (#241). Each phase only reads what the phases before it
+        # settled, which comes in as a parameter or a capture; this loop
+        # threads both states, so they come in and the warm one goes back out.
+        fn edit_library(warm0: LspState, cold0: LspState) -> LspState !Fs !Proc !Env !Console !io = {
+          var warm = warm0
+          var cold = cold0
+          var round = 0
+          for revision in ["pub fn value() -> Int = 2\n", "pub fn value() -> Bool = true\n",
+            "pub fn value() -> Int = missing\n", "pub fn value() -> Int = 3\n"] {
+            warm = update_doc(warm, lib_uri, revision, round)
+            cold = update_doc(cold, lib_uri, revision, round)
+            println("")
+            let ws = match map.get(warm.workspaces, key).expect("warm") { Ready(ws) -> ws, _ -> panic("ready") }
+            let cs = match map.get(cold.workspaces, key).expect("cold") { Ready(ws) -> ws, _ -> panic("ready") }
+            let a = ws.prog.expect("program")
+            let b = cs.prog.expect("program")
+            assert a.diags == b.diags && a.decl_spans == b.decl_spans
+            assert ws.diag_by_uri == cs.diag_by_uri
+            var index = 0
+            for m in a.modules {
+              assert m.tm == b.modules[index].tm && m.ct == b.modules[index].ct
+              index = index + 1
+            }
+            let stats = ws.analysis_stats.expect("stats")
+            let cold_stats = cs.analysis_stats.expect("cold stats")
+            assert cold_stats.reused_modules == 0 && cold_stats.retained_total_modules == 0
+            if round == 0 { assert stats.checked_bodies == 1 && stats.reused_bodies == 1 }
+            if round == 1 { assert stats.reused_bodies == 0 && a.diags != [] }
+            round = round + 1
           }
-          let stats = ws.analysis_stats.expect("stats")
-          let cold_stats = cs.analysis_stats.expect("cold stats")
-          assert cold_stats.reused_modules == 0 && cold_stats.retained_total_modules == 0
-          if round == 0 { assert stats.checked_bodies == 1 && stats.reused_bodies == 1 }
-          if round == 1 { assert stats.reused_bodies == 0 && a.diags != [] }
-          round = round + 1
+          warm
         }
+        warm = edit_library(warm, cold)
         let duplicate = "file://localhost" ++ path
         warm = open_new_doc(warm, duplicate, text ++ "# conflicting\n", 1)
         println("")
@@ -2446,57 +2460,67 @@ test "prepared project LSP owners drop conflicts and recreate leases on reopen" 
         assert count(created) == 2 && reopened.analysis_stats.expect("counts").checked_bodies == 2
         let stopped = close_all_leases(warm)
         assert count(closed) == 2 && map.len(stopped.docs) == 0
-        # A failed setup owns no Session. Edits do not retry; didSave's explicit
-        # retry path obtains a new lease and starts a new prepared owner.
-        let attempts = counter()
-        let flaky_host = LspLeaseHost { ..host, project: (_plan: source.SourcePlan) => {
-          bump(attempts)
-          if count(attempts) == 1 {
-            Err(LocDiag { path: root ++ "/dawn.toml", d: Diag {
-              msg: "injected Java setup failure", lo: 0, hi: 0, hint: "", owner: None } })
-          } else {
-            bump(created)
-            Ok(JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) })
+        fn retry_after_failed_setup() -> String !Fs !Proc !Env !Console !io = {
+          # A failed setup owns no Session. Edits do not retry; didSave's explicit
+          # retry path obtains a new lease and starts a new prepared owner.
+          let attempts = counter()
+          let flaky_host = LspLeaseHost { ..host, project: (_plan: source.SourcePlan) => {
+            bump(attempts)
+            if count(attempts) == 1 {
+              Err(LocDiag { path: root ++ "/dawn.toml", d: Diag {
+                msg: "injected Java setup failure", lo: 0, hi: 0, hint: "", owner: None } })
+            } else {
+              bump(created)
+              Ok(JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) })
+            }
+          } }
+          var unavailable = open_new_doc(LspState { ..base, host: flaky_host, analysis_config: config }, uri, text, 1)
+          println("")
+          assert match map.get(unavailable.workspaces, key) { Some(Unavailable(_)) -> true, _ -> false }
+          assert match analysis_of(unavailable, map.get(unavailable.docs, uri).expect("unavailable doc")) {
+            None -> true, Some(_) -> false
           }
-        } }
-        var unavailable = open_new_doc(LspState { ..base, host: flaky_host, analysis_config: config }, uri, text, 1)
-        println("")
-        assert match map.get(unavailable.workspaces, key) { Some(Unavailable(_)) -> true, _ -> false }
-        assert match analysis_of(unavailable, map.get(unavailable.docs, uri).expect("unavailable doc")) {
-          None -> true, Some(_) -> false
+          unavailable = update_doc(unavailable, uri, text ++ "# still unavailable\n", 2)
+          println("")
+          assert count(attempts) == 1 && count(created) == 2
+          unavailable = retry_unavailable(unavailable, uri)
+          println("")
+          let retried = match map.get(unavailable.workspaces, key).expect("retried") { Ready(ws) -> ws, _ -> panic("ready") }
+          assert count(attempts) == 2 && count(created) == 3
+          assert retried.analysis_stats.expect("new owner").checked_bodies == 2
+          let retried_stop = close_all_leases(unavailable)
+          assert count(closed) == 3 && map.len(retried_stop.docs) == 0
+          attempts
         }
-        unavailable = update_doc(unavailable, uri, text ++ "# still unavailable\n", 2)
-        println("")
-        assert count(attempts) == 1 && count(created) == 2
-        unavailable = retry_unavailable(unavailable, uri)
-        println("")
-        let retried = match map.get(unavailable.workspaces, key).expect("retried") { Ready(ws) -> ws, _ -> panic("ready") }
-        assert count(attempts) == 2 && count(created) == 3
-        assert retried.analysis_stats.expect("new owner").checked_bodies == 2
-        let retried_stop = close_all_leases(unavailable)
-        assert count(closed) == 3 && map.len(retried_stop.docs) == 0
-        # A new lease must also close if rebuilding panics before installation.
-        let broken_host = LspLeaseHost { ..host, probe: (_js: Jsig) => panic("injected probe failure") }
-        let activation = LspState { ..base, host: broken_host, analysis_config: config,
-          docs: map.from([(uri, map.get(warm.docs, uri).expect("member"))]) }
-        let failed = catch_panic(() => activate_workspace(activation, reopened.plan, map.from([(uri, path)])))
-        assert match failed { Err(_) -> true, Ok(_) -> false }
-        assert count(created) == 4 && count(closed) == 4
-        # Teardown makes all owners unreachable and still closes the remaining
-        # leases when an earlier close raises; another teardown is a no-op.
-        let broken_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => {
-          bump(closed)
-          panic("injected close failure")
-        } }
-        let last_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
-        let platform_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
-        let teardown = LspState { ..base, docs: warm.docs, standalone: Some(platform_lease), workspaces:
-          map.from([("first", Ready(Workspace { ..reopened, lease: broken_lease })),
-            ("second", Ready(Workspace { ..reopened, lease: last_lease }))]) }
-        let cleared = close_all_leases(teardown)
-        assert count(closed) == 7 && map.len(cleared.docs) == 0 && map.len(cleared.workspaces) == 0
-        let _ = close_all_leases(cleared)
-        assert count(closed) == 7
+        let attempts = retry_after_failed_setup()
+        fn close_on_failed_activation_and_teardown(
+          warm: LspState,
+          reopened: Workspace
+        ) -> Unit !Fs !Env !Console !io = {
+          # A new lease must also close if rebuilding panics before installation.
+          let broken_host = LspLeaseHost { ..host, probe: (_js: Jsig) => panic("injected probe failure") }
+          let activation = LspState { ..base, host: broken_host, analysis_config: config,
+            docs: map.from([(uri, map.get(warm.docs, uri).expect("member"))]) }
+          let failed = catch_panic(() => activate_workspace(activation, reopened.plan, map.from([(uri, path)])))
+          assert match failed { Err(_) -> true, Ok(_) -> false }
+          assert count(created) == 4 && count(closed) == 4
+          # Teardown makes all owners unreachable and still closes the remaining
+          # leases when an earlier close raises; another teardown is a no-op.
+          let broken_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => {
+            bump(closed)
+            panic("injected close failure")
+          } }
+          let last_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
+          let platform_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
+          let teardown = LspState { ..base, docs: warm.docs, standalone: Some(platform_lease), workspaces:
+            map.from([("first", Ready(Workspace { ..reopened, lease: broken_lease })),
+              ("second", Ready(Workspace { ..reopened, lease: last_lease }))]) }
+          let cleared = close_all_leases(teardown)
+          assert count(closed) == 7 && map.len(cleared.docs) == 0 && map.len(cleared.workspaces) == 0
+          let _ = close_all_leases(cleared)
+          assert count(closed) == 7
+        }
+        close_on_failed_activation_and_teardown(warm, reopened)
         io.with_fs_real(() => {
           let _ = io.delete(created)
           let _ = io.delete(closed)

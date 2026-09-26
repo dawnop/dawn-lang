@@ -25,7 +25,7 @@ use front/ast.{
   Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList, PatArg,
   MatchArm,
   Arg, pos_arg, arg_exprs, first_named,
-  SPText, SPInterp, EFloat, EStr, EUnit, EBreak, EContinue, pat_lo, pat_hi, e_lo, e_hi,
+  StrPart, SPText, SPInterp, EFloat, EStr, EUnit, EBreak, EContinue, pat_lo, pat_hi, e_lo, e_hi,
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, ERecord, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
@@ -7139,25 +7139,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, owner_off(cx, lo), owner_off(cx, hi)))
     EBool(v, lo, hi) -> (cx, TyBool, XBool(v, owner_off(cx, lo), owner_off(cx, hi)))
     EUnit(lo, hi) -> (cx, TyUnit, XUnit(owner_off(cx, lo), owner_off(cx, hi)))
-    EStr(parts, lo, hi) -> {
-      var cx1 = cx
-      var tparts: List[TStrPart] = []
-      for pt in parts {
-        match pt {
-          SPText(v) -> { tparts = tparts ++ [TSPText(v)] }
-          SPInterp(x) -> {
-            let (cx2, t, tx) = check_expr(cx1, x, no_expected())
-            cx1 = cx2
-            # `${x}` is `show(x)` with the quoting undone at the top level, so
-            # it asks for the same witness `to_string` does
-            let (cx3, w) = resolve_witness(cx1, SHOW_ID, t, e_lo(x), e_hi(x), "interpolation")
-            cx1 = cx3
-            tparts = tparts ++ [TSPInterp(tx, w)]
-          }
-        }
-      }
-      (cx1, TyString, XStr(tparts, owner_off(cx, lo), owner_off(cx, hi)))
-    }
+    EStr(parts, lo, hi) -> check_str_lit(cx, parts, lo, hi)
     EVar(name, lo, hi) -> check_var(cx, name, expected, lo, hi)
     EUnary(op, operand, lo, hi) -> {
       let (cx1, t, tx) = check_expr(cx, operand, no_expected())
@@ -7175,135 +7157,9 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       check_binary_typed(cx2, op, lt, rt, lx, rx,
         e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
     }
-    EIf(cond, thn, els, lo, hi) -> {
-      let (cx1, ct, cndx) = check_expr(cx, cond, no_expected())
-      var cx2 = cx1
-      if ct != TyBool && not is_errorish(ct) {
-        let (render_cx, text) = type_display_read(cx2, ct)
-        cx2 = cerr(render_cx, "if condition must be Bool, got " ++ text,
-          e_lo(cond), e_hi(cond))
-      }
-      let (cx3, tt, thnx) = check_expr(cx2, thn, expected)
-      match els {
-        None -> {
-          # no else: statement position only, branch must be Unit
-          var cx4 = cx3
-          if tt != TyUnit && not is_errorish(tt) {
-            let (render_cx, text) = type_display_read(cx4, tt)
-            cx4 = cerr_h(render_cx, "an if without else is a statement, so its branch must be Unit (got " ++
-                text ++ ")", e_lo(thn), e_hi(thn),
-              "add an else branch to produce a value")
-          }
-          (cx4, TyUnit, XIf(cndx, thnx, None, owner_off(cx, lo), owner_off(cx, hi), TyUnit))
-        }
-        Some(eb) -> {
-          let (cx4, et, ex) = check_expr(cx3, eb, expected)
-          let (cx5, t) = unify_branches(cx4, tt, et, lo, hi, "the if branches")
-          (cx5, t, XIf(cndx, thnx, Some(ex), owner_off(cx, lo), owner_off(cx, hi), t))
-        }
-      }
-    }
-    EListLit(elems, lo, hi) -> {
-      let initial = cx
-      var cx = initial
-      let expected_elem: Option[Ty] = match expected {
-        Some(TyList(el)) -> {
-          let (next, concrete) = is_concrete_read(cx, el)
-          cx = next
-          if concrete { Some(el) } else { None }
-        }
-        _ -> None
-      }
-      if len(elems) == 0 {
-        match expected_elem {
-          Some(el) -> return (cx, TyList(el), XListLit([], owner_off(cx, lo), owner_off(cx, hi), TyList(el)))
-          None -> return (cerr_h(cx, "cannot infer the element type of an empty list", lo, hi,
-            "add a type annotation: let xs: List[Int] = []"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        }
-      }
-      var elem_t = match expected_elem {
-        Some(el) -> el
-        None -> TyNever
-      }
-      # inference-needing elements (bare None, nested []) go last; the typed
-      # nodes must come back in source order. The nodes are collected in check
-      # order and put back in one pass at the end: `order` is two ascending
-      # runs, so a walk over the elements takes from the run that claimed each
-      # position. Assigning into a slot list as the nodes arrive is what this
-      # replaces, and that rebuilt the whole list per element.
-      var defer_at: List[Bool] = []
-      var order: List[Int] = []
-      var i = 0
-      var decision_cx = cx
-      for x in elems {
-        let (next, d) = needs_expected_elem_read(decision_cx, x)
-        decision_cx = next
-        defer_at = defer_at ++ [d]
-        if not d { order = order ++ [i] }
-        i = i + 1
-      }
-      let ready_n = len(order)
-      i = 0
-      for d in defer_at {
-        if d { order = order ++ [i] }
-        i = i + 1
-      }
-      var cx1 = decision_cx
-      var checked: List[TListElem] = []
-      for idx in order {
-        let x = elems[idx]
-        let (cx2, t, tx) = check_list_elem(cx1, x, elem_t)
-        cx1 = cx2
-        let (cx3, unified) =
-          unify_branches(cx1, elem_t, t, le_lo(x), le_hi(x), "the list elements")
-        cx1 = cx3
-        elem_t = unified
-        checked = checked ++ [tx]
-      }
-      var txs: List[TListElem] = []
-      var ri = 0
-      var di = ready_n
-      for d in defer_at {
-        if d {
-          txs = txs ++ [checked[di]]
-          di = di + 1
-        } else {
-          txs = txs ++ [checked[ri]]
-          ri = ri + 1
-        }
-      }
-      (cx1, TyList(elem_t), XListLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyList(elem_t)))
-    }
-    ETupleLit(elems, lo, hi) -> {
-      let exps: Option[List[Ty]] = match expected {
-        Some(TyTuple(ets)) -> Some(ets)
-        _ -> None
-      }
-      var cx1 = cx
-      var tys: List[Ty] = []
-      var txs: List[TExpr] = []
-      var i = 0
-      for x in elems {
-        let el_exp: Option[Ty] = match exps {
-          Some(ets) ->
-            match get(ets, i) {
-              Some(et) -> {
-                let (next, concrete) = is_concrete_read(cx1, et)
-                cx1 = next
-                if concrete { Some(et) } else { None }
-              }
-              None -> None
-            }
-          None -> None
-        }
-        let (cx2, t, tx) = check_expr(cx1, x, el_exp)
-        cx1 = cx2
-        tys = tys ++ [t]
-        txs = txs ++ [tx]
-        i = i + 1
-      }
-      (cx1, TyTuple(tys), XTupleLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyTuple(tys)))
-    }
+    EIf(cond, thn, els, lo, hi) -> check_if(cx, cond, thn, els, expected, lo, hi)
+    EListLit(elems, lo, hi) -> check_list_lit(cx, elems, expected, lo, hi)
+    ETupleLit(elems, lo, hi) -> check_tuple_lit(cx, elems, expected, lo, hi)
     EPropagate(operand, lo, hi) -> {
       let (cx1, ot, ox) = check_expr(cx, operand, no_expected())
       check_propagate_typed(cx1, ot, ox, lo, hi)
@@ -7319,101 +7175,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     # the same impl the witness names -- reduced when the subject is concrete,
     # left as projections when it is a rigid parameter, which is exactly what
     # a projection in a parameter position is for (#119 D6).
-    EIndex(target, index, lo, hi) -> {
-      # `f[T](x)` is how Go spells an explicit instantiation, and Dawn parses
-      # it as indexing the function `f` with the expression `T`. Left to the
-      # general path that is three errors, none of which names the collision
-      # (`f` used as a value, `T` an undefined constructor, and the missing
-      # call-site type arguments last and on the *outer* call). So it is
-      # recognised here, before either side is checked, and said once.
-      match call_site_type_args_read(cx, target, index) {
-        (spc_cx, Some((fname, tn))) ->
-          return (cerr_h(spc_cx, "Dawn has no call-site type arguments: `" ++ fname ++ "[" ++ tn ++
-              "]` reads as indexing the function `" ++ fname ++ "`", lo, hi,
-            "a type parameter is bound only by the arguments and the expected type: call `" ++
-              fname ++ "(...)` and annotate the binding that takes its result, or the one " ++
-              "an argument comes from"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        _ -> ()
-      }
-      let (cx1, tt, tx) = check_expr(cx, target, no_expected())
-      if is_errorish(tt) {
-        let (cx2, _, _) = check_expr(cx1, index, no_expected())
-        return (cx2, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      # A ground subject with no impl keeps its own message. The general one
-      # ("no impl of `Index` for `Bool`") is true but drops the hint that
-      # matters most here -- that absence has an answer, and it is `get`.
-      let (cxi, indexable) = if is_ground(tt) { has_index_impl(cx1, tt) } else { (cx1, true) }
-      if not indexable {
-        let (render_cx, text) = type_display_read(cxi, tt)
-        let cx2 = cerr_h(render_cx,
-          "`[]` needs an `Index` impl for `" ++ text ++ "`", lo, hi,
-          "List and Map have one; when absence is a normal case, " ++
-            "use get(xs, i) / map.get(m, k)")
-        let (cx3, _, _) = check_expr(cx2, index, no_expected())
-        return (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      let (render_cx, text) = type_display_read(cxi, tt)
-      let (cx2, w) = resolve_witness(render_cx, INDEX_ID, tt, lo, hi,
-        "indexing a " ++ text)
-      match w {
-        None -> {
-          let (cx3, _, _) = check_expr(cx2, index, no_expected())
-          (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        }
-        Some(wr) -> {
-          let (index_cx, want_idx) = reduce_assoc_read(cx2, TyAssoc(tt, INDEX_ID, "Idx"))
-          let (result_cx, result) = reduce_assoc_read(index_cx, TyAssoc(tt, INDEX_ID, "Item"))
-          let (cx3, it, ix) = check_expr(result_cx, index, Some(want_idx))
-          if it != want_idx && not is_errorish(it) {
-            let (expected_cx, expected_text) = type_display_read(cx3, want_idx)
-            let (actual_cx, actual_text) = type_display_read(expected_cx, it)
-            (cerr(actual_cx, "this index must be `" ++ expected_text ++
-                "`, got `" ++ actual_text ++ "`",
-              e_lo(index), e_hi(index)), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-          } else {
-            (cx3, result, XIndex(tx, ix, wr, owner_off(cx, lo), owner_off(cx, hi), result))
-          }
-        }
-      }
-    }
-    EReturn(v, lo, hi) -> {
-      let (cx1, target) = return_target(cx, lo, hi)
-      match target {
-        None -> {
-          match v {
-            Some(x) -> {
-              let (cx2, _, _) = check_expr(cx1, x, no_expected())
-              (cx2, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-            }
-            None -> (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-          }
-        }
-        Some(t) -> {
-          let (cx2, vt, vx) = match v {
-            Some(x) -> {
-              let (cxa, xt, xx) = check_expr(cx1, x, Some(t))
-              (cxa, xt, Some(xx))
-            }
-            None -> (cx1, TyUnit, no_texpr())
-          }
-          var cx3 = cx2
-          let (compatible_cx, compatible) = assignable_read(cx3, vt, t)
-          cx3 = compatible_cx
-          if not compatible {
-            let (slo, shi) = match v {
-              Some(x) -> (e_lo(x), e_hi(x))
-              None -> (lo, hi)
-            }
-            let (expected_cx, expected_text) = type_display_read(cx3, t)
-            let (actual_cx, actual_text) = type_display_read(expected_cx, vt)
-            cx3 = cerr(actual_cx, "`return` type mismatch: this function returns " ++
-                expected_text ++ ", got " ++ actual_text, slo, shi)
-          }
-          (cx3, TyNever, XReturn(vx, owner_off(cx, lo), owner_off(cx, hi)))
-        }
-      }
-    }
+    EIndex(target, index, lo, hi) -> check_index(cx, target, index, lo, hi)
+    EReturn(v, lo, hi) -> check_return(cx, v, lo, hi)
     EBreak(lo, hi) -> {
       let (cx1, ok) = check_loop_jump(cx, "break", lo, hi)
       if ok { (cx1, TyNever, XBreak(owner_off(cx, lo), owner_off(cx, hi))) } else { (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
@@ -7425,21 +7188,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EBlock(stmts, tail, lo, hi) -> check_block(cx, stmts, tail, expected, lo, hi)
     EHandle(name, cells, arms, rest, nlo, nhi, lo, hi) ->
       check_handle(cx, name, cells, arms, rest, nlo, nhi, lo, hi, expected)
-    EComptime(body, lo, hi) -> {
-      let (cx1, frame) = enter_isolated(cx)
-      let (cx2, t, bx) = check_expr(cx1, body, expected)
-      let cx3 = leave_isolated(cx2, frame, "comptime blocks", e_lo(body), e_hi(body))
-      let (cx4, serializable) = const_serializable_read(cx3, t)
-      if not serializable && not is_errorish(t) {
-        let (render_cx, text) = type_display_read(cx4, t)
-        (cerr_h(render_cx, "a comptime result must be constant-serializable, got " ++
-            text, lo, hi,
-          "Int/Float/Bool/String/Unit and List/tuple/record/ADT values of them (spec §7.2)"),
-          TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      } else {
-        (cx4, t, XComptime(bx, owner_off(cx, lo), owner_off(cx, hi), t))
-      }
-    }
+    EComptime(body, lo, hi) -> check_comptime(cx, body, expected, lo, hi)
     # the three constructor constructs are three nodes: a bare head here, a
     # record literal, and an EApply over a bare head, which reaches
     # check_ctor_call from check_apply
@@ -7454,84 +7203,433 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
-    EFieldAcc(target, fname, flo, fhi, lo, hi) -> {
-      let (start_cx, answer) = qual_fn_read(cx, target, fname)
-      var field_cx = start_cx
-      match answer {
-        Some(s) -> return check_fn_value(field_cx, fname, s, expected, lo, hi)
-        None -> ()
+    EFieldAcc(target, fname, flo, fhi, lo, hi) ->
+      check_field_expr(cx, target, fname, flo, fhi, expected, lo, hi)
+    EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
+  }
+
+## The `EStr` arm of `check_expr_at`: an interpolated string, each `${x}` checked
+## and given the `Show` witness `to_string` would ask for.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241):
+## the per-part loop with its witness lookup is one of the arms that kept
+## the dispatcher interpreted, and it reads nothing of the node but its parts.
+fn check_str_lit(cx: Cx, parts: List[StrPart], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = cx
+  var tparts: List[TStrPart] = []
+  for pt in parts {
+    match pt {
+      SPText(v) -> { tparts = tparts ++ [TSPText(v)] }
+      SPInterp(x) -> {
+        let (cx2, t, tx) = check_expr(cx1, x, no_expected())
+        cx1 = cx2
+        # `${x}` is `show(x)` with the quoting undone at the top level, so
+        # it asks for the same witness `to_string` does
+        let (cx3, w) = resolve_witness(cx1, SHOW_ID, t, e_lo(x), e_hi(x), "interpolation")
+        cx1 = cx3
+        tparts = tparts ++ [TSPInterp(tx, w)]
       }
-      # `m.NAME` where `m` is a whole-module alias: a qualified constant
-      # (LANG-06 step 3). Checked before the Java and value paths because a
-      # module alias is not a value -- spec 10.3 forbids anything else of that
-      # name being in scope, so there is nothing to be ambiguous with.
-      let (const_cx, constant) = qual_const_read(field_cx, target, fname)
-      field_cx = const_cx
-      match constant {
-        Some(pr) -> {
-          let (mod_path, ct) = pr
-          (field_cx, ct, XConstRef(mod_path, fname, owner_off(cx, lo), owner_off(cx, hi), ct))
+    }
+  }
+  (cx1, TyString, XStr(tparts, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `EIf` arm of `check_expr_at`: the condition, then both branches under the
+## same expectation, unified; with no else the branch must be Unit.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## the arm needs the expectation and nothing else from the dispatcher.
+fn check_if(
+  cx: Cx,
+  cond: Expr,
+  thn: Expr,
+  els: Option[Expr],
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, ct, cndx) = check_expr(cx, cond, no_expected())
+  var cx2 = cx1
+  if ct != TyBool && not is_errorish(ct) {
+    let (render_cx, text) = type_display_read(cx2, ct)
+    cx2 = cerr(render_cx, "if condition must be Bool, got " ++ text,
+      e_lo(cond), e_hi(cond))
+  }
+  let (cx3, tt, thnx) = check_expr(cx2, thn, expected)
+  match els {
+    None -> {
+      # no else: statement position only, branch must be Unit
+      var cx4 = cx3
+      if tt != TyUnit && not is_errorish(tt) {
+        let (render_cx, text) = type_display_read(cx4, tt)
+        cx4 = cerr_h(render_cx, "an if without else is a statement, so its branch must be Unit (got " ++
+            text ++ ")", e_lo(thn), e_hi(thn),
+          "add an else branch to produce a value")
+      }
+      (cx4, TyUnit, XIf(cndx, thnx, None, owner_off(cx, lo), owner_off(cx, hi), TyUnit))
+    }
+    Some(eb) -> {
+      let (cx4, et, ex) = check_expr(cx3, eb, expected)
+      let (cx5, t) = unify_branches(cx4, tt, et, lo, hi, "the if branches")
+      (cx5, t, XIf(cndx, thnx, Some(ex), owner_off(cx, lo), owner_off(cx, hi), t))
+    }
+  }
+}
+
+## The `EListLit` arm of `check_expr_at`: the element type from the expectation,
+## then the elements in two runs (self-sufficient first, inference-needing last)
+## put back in source order.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+## It was the largest arm and carries the most locals (the three run cursors
+## and the slot lists), which is what C1's register allocator gave up on too.
+fn check_list_lit(
+  cx: Cx,
+  elems: List[ListElem],
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  let initial = cx
+  var cx = initial
+  let expected_elem: Option[Ty] = match expected {
+    Some(TyList(el)) -> {
+      let (next, concrete) = is_concrete_read(cx, el)
+      cx = next
+      if concrete { Some(el) } else { None }
+    }
+    _ -> None
+  }
+  if len(elems) == 0 {
+    match expected_elem {
+      Some(el) -> return (cx, TyList(el), XListLit([], owner_off(cx, lo), owner_off(cx, hi), TyList(el)))
+      None -> return (cerr_h(cx, "cannot infer the element type of an empty list", lo, hi,
+        "add a type annotation: let xs: List[Int] = []"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
+  }
+  var elem_t = match expected_elem {
+    Some(el) -> el
+    None -> TyNever
+  }
+  # inference-needing elements (bare None, nested []) go last; the typed
+  # nodes must come back in source order. The nodes are collected in check
+  # order and put back in one pass at the end: `order` is two ascending
+  # runs, so a walk over the elements takes from the run that claimed each
+  # position. Assigning into a slot list as the nodes arrive is what this
+  # replaces, and that rebuilt the whole list per element.
+  var defer_at: List[Bool] = []
+  var order: List[Int] = []
+  var i = 0
+  var decision_cx = cx
+  for x in elems {
+    let (next, d) = needs_expected_elem_read(decision_cx, x)
+    decision_cx = next
+    defer_at = defer_at ++ [d]
+    if not d { order = order ++ [i] }
+    i = i + 1
+  }
+  let ready_n = len(order)
+  i = 0
+  for d in defer_at {
+    if d { order = order ++ [i] }
+    i = i + 1
+  }
+  var cx1 = decision_cx
+  var checked: List[TListElem] = []
+  for idx in order {
+    let x = elems[idx]
+    let (cx2, t, tx) = check_list_elem(cx1, x, elem_t)
+    cx1 = cx2
+    let (cx3, unified) =
+      unify_branches(cx1, elem_t, t, le_lo(x), le_hi(x), "the list elements")
+    cx1 = cx3
+    elem_t = unified
+    checked = checked ++ [tx]
+  }
+  var txs: List[TListElem] = []
+  var ri = 0
+  var di = ready_n
+  for d in defer_at {
+    if d {
+      txs = txs ++ [checked[di]]
+      di = di + 1
+    } else {
+      txs = txs ++ [checked[ri]]
+      ri = ri + 1
+    }
+  }
+  (cx1, TyList(elem_t), XListLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyList(elem_t)))
+}
+
+## The `ETupleLit` arm of `check_expr_at`: each element under the matching
+## component of a concrete expected tuple type.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## a loop with four accumulators, closed over the node's own fields.
+fn check_tuple_lit(
+  cx: Cx,
+  elems: List[Expr],
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  let exps: Option[List[Ty]] = match expected {
+    Some(TyTuple(ets)) -> Some(ets)
+    _ -> None
+  }
+  var cx1 = cx
+  var tys: List[Ty] = []
+  var txs: List[TExpr] = []
+  var i = 0
+  for x in elems {
+    let el_exp: Option[Ty] = match exps {
+      Some(ets) ->
+        match get(ets, i) {
+          Some(et) -> {
+            let (next, concrete) = is_concrete_read(cx1, et)
+            cx1 = next
+            if concrete { Some(et) } else { None }
+          }
+          None -> None
+        }
+      None -> None
+    }
+    let (cx2, t, tx) = check_expr(cx1, x, el_exp)
+    cx1 = cx2
+    tys = tys ++ [t]
+    txs = txs ++ [tx]
+    i = i + 1
+  }
+  (cx1, TyTuple(tys), XTupleLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyTuple(tys)))
+}
+
+## The `EIndex` arm of `check_expr_at`, `c[i]` through the `Index` witness (the
+## comment at the arm says why it is one witness).
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+## Its early returns become this function's returns and mean the same thing:
+## the arm's value is the call's value.
+fn check_index(cx: Cx, target: Expr, index: Expr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  # `f[T](x)` is how Go spells an explicit instantiation, and Dawn parses
+  # it as indexing the function `f` with the expression `T`. Left to the
+  # general path that is three errors, none of which names the collision
+  # (`f` used as a value, `T` an undefined constructor, and the missing
+  # call-site type arguments last and on the *outer* call). So it is
+  # recognised here, before either side is checked, and said once.
+  match call_site_type_args_read(cx, target, index) {
+    (spc_cx, Some((fname, tn))) ->
+      return (cerr_h(spc_cx, "Dawn has no call-site type arguments: `" ++ fname ++ "[" ++ tn ++
+          "]` reads as indexing the function `" ++ fname ++ "`", lo, hi,
+        "a type parameter is bound only by the arguments and the expected type: call `" ++
+          fname ++ "(...)` and annotate the binding that takes its result, or the one " ++
+          "an argument comes from"), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    _ -> ()
+  }
+  let (cx1, tt, tx) = check_expr(cx, target, no_expected())
+  if is_errorish(tt) {
+    let (cx2, _, _) = check_expr(cx1, index, no_expected())
+    return (cx2, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  # A ground subject with no impl keeps its own message. The general one
+  # ("no impl of `Index` for `Bool`") is true but drops the hint that
+  # matters most here -- that absence has an answer, and it is `get`.
+  let (cxi, indexable) = if is_ground(tt) { has_index_impl(cx1, tt) } else { (cx1, true) }
+  if not indexable {
+    let (render_cx, text) = type_display_read(cxi, tt)
+    let cx2 = cerr_h(render_cx,
+      "`[]` needs an `Index` impl for `" ++ text ++ "`", lo, hi,
+      "List and Map have one; when absence is a normal case, " ++
+        "use get(xs, i) / map.get(m, k)")
+    let (cx3, _, _) = check_expr(cx2, index, no_expected())
+    return (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  let (render_cx, text) = type_display_read(cxi, tt)
+  let (cx2, w) = resolve_witness(render_cx, INDEX_ID, tt, lo, hi,
+    "indexing a " ++ text)
+  match w {
+    None -> {
+      let (cx3, _, _) = check_expr(cx2, index, no_expected())
+      (cx3, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    Some(wr) -> {
+      let (index_cx, want_idx) = reduce_assoc_read(cx2, TyAssoc(tt, INDEX_ID, "Idx"))
+      let (result_cx, result) = reduce_assoc_read(index_cx, TyAssoc(tt, INDEX_ID, "Item"))
+      let (cx3, it, ix) = check_expr(result_cx, index, Some(want_idx))
+      if it != want_idx && not is_errorish(it) {
+        let (expected_cx, expected_text) = type_display_read(cx3, want_idx)
+        let (actual_cx, actual_text) = type_display_read(expected_cx, it)
+        (cerr(actual_cx, "this index must be `" ++ expected_text ++
+            "`, got `" ++ actual_text ++ "`",
+          e_lo(index), e_hi(index)), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+      } else {
+        (cx3, result, XIndex(tx, ix, wr, owner_off(cx, lo), owner_off(cx, hi), result))
+      }
+    }
+  }
+}
+
+## The `EReturn` arm of `check_expr_at`: the value under the enclosing function's
+## return type, or an error where there is no function to return from.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## it reads the return target off the context and nothing off the dispatcher.
+fn check_return(cx: Cx, v: Option[Expr], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, target) = return_target(cx, lo, hi)
+  match target {
+    None -> {
+      match v {
+        Some(x) -> {
+          let (cx2, _, _) = check_expr(cx1, x, no_expected())
+          (cx2, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+        }
+        None -> (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+      }
+    }
+    Some(t) -> {
+      let (cx2, vt, vx) = match v {
+        Some(x) -> {
+          let (cxa, xt, xx) = check_expr(cx1, x, Some(t))
+          (cxa, xt, Some(xx))
+        }
+        None -> (cx1, TyUnit, no_texpr())
+      }
+      var cx3 = cx2
+      let (compatible_cx, compatible) = assignable_read(cx3, vt, t)
+      cx3 = compatible_cx
+      if not compatible {
+        let (slo, shi) = match v {
+          Some(x) -> (e_lo(x), e_hi(x))
+          None -> (lo, hi)
+        }
+        let (expected_cx, expected_text) = type_display_read(cx3, t)
+        let (actual_cx, actual_text) = type_display_read(expected_cx, vt)
+        cx3 = cerr(actual_cx, "`return` type mismatch: this function returns " ++
+            expected_text ++ ", got " ++ actual_text, slo, shi)
+      }
+      (cx3, TyNever, XReturn(vx, owner_off(cx, lo), owner_off(cx, hi)))
+    }
+  }
+}
+
+## The `EComptime` arm of `check_expr_at`: the body in an isolated frame, and a
+## result that must be constant-serializable.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## the isolated frame is entered and left inside the arm, so the cut is clean.
+fn check_comptime(
+  cx: Cx,
+  body: Expr,
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, frame) = enter_isolated(cx)
+  let (cx2, t, bx) = check_expr(cx1, body, expected)
+  let cx3 = leave_isolated(cx2, frame, "comptime blocks", e_lo(body), e_hi(body))
+  let (cx4, serializable) = const_serializable_read(cx3, t)
+  if not serializable && not is_errorish(t) {
+    let (render_cx, text) = type_display_read(cx4, t)
+    (cerr_h(render_cx, "a comptime result must be constant-serializable, got " ++
+        text, lo, hi,
+      "Int/Float/Bool/String/Unit and List/tuple/record/ADT values of them (spec §7.2)"),
+      TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  } else {
+    (cx4, t, XComptime(bx, owner_off(cx, lo), owner_off(cx, hi), t))
+  }
+}
+
+## The `EFieldAcc` arm of `check_expr_at`: `x.f` read in order as a qualified
+## function, a qualified constant, a qualified constructor, a Java static field,
+## and only then a field of a value.
+##
+## Its own function so `check_expr_at` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+## Each reading returns as soon as it answers, so the arm is a chain of early
+## returns that is a function in all but name; it was the second largest arm.
+fn check_field_expr(
+  cx: Cx,
+  target: Expr,
+  fname: String,
+  flo: Int,
+  fhi: Int,
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  let (start_cx, answer) = qual_fn_read(cx, target, fname)
+  var field_cx = start_cx
+  match answer {
+    Some(s) -> return check_fn_value(field_cx, fname, s, expected, lo, hi)
+    None -> ()
+  }
+  # `m.NAME` where `m` is a whole-module alias: a qualified constant
+  # (LANG-06 step 3). Checked before the Java and value paths because a
+  # module alias is not a value -- spec 10.3 forbids anything else of that
+  # name being in scope, so there is nothing to be ambiguous with.
+  let (const_cx, constant) = qual_const_read(field_cx, target, fname)
+  field_cx = const_cx
+  match constant {
+    Some(pr) -> {
+      let (mod_path, ct) = pr
+      (field_cx, ct, XConstRef(mod_path, fname, owner_off(cx, lo), owner_off(cx, hi), ct))
+    }
+    None -> {
+      # `m.C` with no arguments: a nullary constructor's value, or -- in a
+      # function-typed position -- the constructor as a function. Decided
+      # by the same code the unqualified spelling goes through, with the
+      # constructor already resolved through the alias.
+      let (ctor_cx, constructor) = qual_ctor_read(field_cx, target, fname)
+      field_cx = ctor_cx
+      match constructor {
+        Some(k) -> {
+          let no_args: List[Arg] = []
+          check_ctor_call(field_cx, fname, no_args, None, CBare, expected, Some(k),
+            flo, fhi, lo, hi)
         }
         None -> {
-          # `m.C` with no arguments: a nullary constructor's value, or -- in a
-          # function-typed position -- the constructor as a function. Decided
-          # by the same code the unqualified spelling goes through, with the
-          # constructor already resolved through the alias.
-          let (ctor_cx, constructor) = qual_ctor_read(field_cx, target, fname)
-          field_cx = ctor_cx
-          match constructor {
-            Some(k) -> {
-              let no_args: List[Arg] = []
-              check_ctor_call(field_cx, fname, no_args, None, CBare, expected, Some(k),
-                flo, fhi, lo, hi)
-            }
+          let (name_cx, java_target) = static_field_target(field_cx, target)
+          field_cx = name_cx
+          match java_target {
+            # Class.FIELD reads a public static field (spec §9.1) — the receiver
+            # is a java class name (a nullary ctor spelling), not an evaluable
+            # expression
+            Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)
             None -> {
-              let (name_cx, java_target) = static_field_target(field_cx, target)
-              field_cx = name_cx
-              match java_target {
-                # Class.FIELD reads a public static field (spec §9.1) — the receiver
-                # is a java class name (a nullary ctor spelling), not an evaluable
-                # expression
-                Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)
-                None -> {
-                  # a bare name that is not a value: the module readings, which
-                  # the value path below can only call an undefined variable
-                  var scope_cx = field_cx
-                  match target {
-                    EVar(q, qlo, qhi) -> {
-                      let (next, found) = resolves_to_value_read(scope_cx, q)
-                      scope_cx = next
-                      if not found {
-                        let (diagnostic_cx, diagnostic) = export_value_diagnostic_read(scope_cx, q, fname)
-                        scope_cx = diagnostic_cx
-                        match diagnostic {
-                          Some(d) ->
-                            return (cerr_o(scope_cx, d.message, flo, fhi, d.hint),
-                              TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-                          None -> {
-                            let (next, path) = module_alias_read(scope_cx, q)
-                            scope_cx = next
-                            if path == None {
-                              return (undefined_qualifier_err(scope_cx, q, qlo, qhi),
-                                TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-                            }
-                          }
+              # a bare name that is not a value: the module readings, which
+              # the value path below can only call an undefined variable
+              var scope_cx = field_cx
+              match target {
+                EVar(q, qlo, qhi) -> {
+                  let (next, found) = resolves_to_value_read(scope_cx, q)
+                  scope_cx = next
+                  if not found {
+                    let (diagnostic_cx, diagnostic) = export_value_diagnostic_read(scope_cx, q, fname)
+                    scope_cx = diagnostic_cx
+                    match diagnostic {
+                      Some(d) ->
+                        return (cerr_o(scope_cx, d.message, flo, fhi, d.hint),
+                          TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+                      None -> {
+                        let (next, path) = module_alias_read(scope_cx, q)
+                        scope_cx = next
+                        if path == None {
+                          return (undefined_qualifier_err(scope_cx, q, qlo, qhi),
+                            TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
                         }
                       }
                     }
-                    _ -> ()
                   }
-                  let (cx1, tt, tx) = check_expr(scope_cx, target, no_expected())
-                  check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
                 }
+                _ -> ()
               }
+              let (cx1, tt, tx) = check_expr(scope_cx, target, no_expected())
+              check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
             }
           }
         }
       }
     }
-    EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
   }
+}
 
 fn no_expected() -> Option[Ty] = None
 
@@ -9271,138 +9369,11 @@ fn check_block(
 
 fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
   match s {
-    SLet(name, mutable, ann, init, lo, hi) -> {
-      var cx1 = cx
-      let ann_t: Option[Ty] = match ann {
-        Some(ref) -> {
-          let (cxa, t) = resolve_type(cx1, ref)
-          cx1 = cxa
-          Some(t)
-        }
-        None -> None
-      }
-      let (cxb, it, ix) = check_expr(cx1, init, ann_t)
-      cx1 = cxb
-      var t = match ann_t {
-        Some(a) -> a
-        None -> it
-      }
-      match ann_t {
-        Some(a) -> {
-          let (compatible_cx, compatible) = assignable_read(cx1, it, a)
-          cx1 = compatible_cx
-          if not compatible {
-            let (declared_cx, declared_text) = type_display_read(cx1, a)
-            let (actual_cx, actual_text) = type_display_read(declared_cx, it)
-            cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
-                " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
-            t = a
-          }
-        }
-        None -> ()
-      }
-      if t == TyNever {
-        cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
-        t = TyError
-      }
-      let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
-      # `_` binds nothing: codegen discards the value (sym None)
-      let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
-      (cxc, TSLet(bind, name, ix, owner_off(cx, lo), owner_off(cx, hi)))
-    }
+    SLet(name, mutable, ann, init, lo, hi) -> check_let(cx, name, mutable, ann, init, lo, hi)
     SLocalFn(name, params, ret, effs, body, nlo, nhi, lo, hi) ->
       check_local_fn(cx, name, params, ret, effs, body, nlo, nhi, lo, hi)
-    SLetPat(pat, mutable, init, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, it0, ix) = check_expr(cx1, init, no_expected())
-      cx1 = cxa
-      var it = it0
-      if it == TyNever {
-        cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
-        it = TyError
-      }
-      let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
-      cx1 = cxb
-      if not is_errorish(it) {
-        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [it])
-        cx1 = useful_cx
-        match useful_answer {
-          Some(true) -> {
-            let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
-            cx1 = let_read_cx
-            let (plo, phi) = match refutable {
-              Some(sp) -> sp
-              None -> (pat_lo(pat), pat_hi(pat))
-            }
-            cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
-              plo, phi, "use match to handle the other cases")
-          }
-          Some(false) -> ()
-          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-        }
-      }
-      (cx1, TSLetPat(tp, ix, owner_off(cx, lo), owner_off(cx, hi)))
-    }
-    SAssign(name, value, nlo, nhi, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, found) = resolve_local(cx1, name, nlo, nhi, true)
-      cx1 = cxa
-      match found {
-        None -> {
-          let (next, pool) = fn_pool_read(cx1)
-          let (hinted, hint) = moved_or_suggest(next, name, local_names(next) ++ pool)
-          cx1 = cerr_o(hinted, "undefined variable: ${name}", nlo, nhi, hint)
-          let (cxb, _, vx) = check_expr(cx1, value, no_expected())
-          (cxb, TSExpr(vx, owner_off(cx, lo), owner_off(cx, hi)))
-        }
-        Some(sid) -> {
-          let sym = sym_of(cx1, sid)
-          match sym.cell_of {
-            # A handler state cell is written through its slot, so this is a
-            # `cell_set` and not a `TSAssign`: the binding itself never
-            # changes, and it is the same write whether it is reached from an
-            # arm, from a nested block, or from the remainder.
-            Some(c) -> {
-              let (hid, ct) = c
-              if cell_take_ok(cx1, hid, name, value) {
-                cx1 = Cx { ..cx1, take_cell: Some(sid) }
-              }
-              let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
-              # cleared unconditionally: a right-hand side that never read the
-              # cell must not leave the mark standing for the next assignment
-              cx1 = Cx { ..cxb, take_cell: None }
-              let (compatible_cx, compatible) = assignable_read(cx1, vt, ct)
-              cx1 = compatible_cx
-              if not compatible {
-                let (declared_cx, declared_text) = type_display_read(cx1, ct)
-                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
-                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
-                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
-              }
-              (cx1, TSExpr(cell_write(cx, sid, name, vx, lo, hi), owner_off(cx, lo), owner_off(cx, hi)))
-            }
-            None -> {
-              if not sym.mutable {
-                cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned",
-                  nlo, nhi,
-                  "declare it as var " ++ name ++ " = ... if it needs to change")
-              }
-              let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
-              cx1 = cxb
-              let (compatible_cx, compatible) = assignable_read(cx1, vt, sym.ty)
-              cx1 = compatible_cx
-              if not compatible {
-                let (declared_cx, declared_text) = type_display_read(cx1, sym.ty)
-                let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
-                cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
-                    ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
-              }
-              (cx1, TSAssign(sid, name, vx, owner_off(cx, lo), owner_off(cx, hi)))
-            }
-          }
-        }
-      }
-    }
+    SLetPat(pat, mutable, init, lo, hi) -> check_let_pat(cx, pat, mutable, init, lo, hi)
+    SAssign(name, value, nlo, nhi, lo, hi) -> check_assign(cx, name, value, nlo, nhi, lo, hi)
     SExpr(e, lo, hi) -> {
       let (cx1, t, tx) = check_expr(cx, e, no_expected())
       var cx2 = cx1
@@ -9429,133 +9400,326 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       }
       (cx1, TSAssert(cnx, src, owner_off(cx, lo), owner_off(cx, hi)))
     }
-    SWhile(cond, body, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
+    SWhile(cond, body, lo, hi) -> check_while(cx, cond, body, lo, hi)
+    SFor(pat, from, to_opt, body, lo, hi) -> check_for(cx, pat, from, to_opt, body, lo, hi)
+  }
+
+## The `SLet` arm of `check_stmt`: the annotation, the initializer under it, and
+## the binding, which is declared only after the initializer is checked.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## every statement arm reads only its own fields, so each is cut whole.
+fn check_let(
+  cx: Cx,
+  name: String,
+  mutable: Bool,
+  ann: Option[TypeRef],
+  init: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let ann_t: Option[Ty] = match ann {
+    Some(ref) -> {
+      let (cxa, t) = resolve_type(cx1, ref)
       cx1 = cxa
-      if ct != TyBool && not is_errorish(ct) {
-        let (render_cx, text) = type_display_read(cx1, ct)
-        cx1 = cerr(render_cx, "while condition must be Bool, got " ++ text,
-          e_lo(cond), e_hi(cond))
-      }
-      let d = len(cx1.frame.loop_stack)
-      let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-      cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
-      let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
-      cx1 = cxb
-      let hj = set.has(cx1.loop_jumps, d)
-      cx1 = Cx {
-        ..cx1,
-        frame: Frame {
-          ..cx1.frame,
-          loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-        },
-        loop_jumps: set.remove(cx1.loop_jumps, d)
-      }
-      if bt != TyUnit && not is_errorish(bt) {
-        let (render_cx, text) = type_display_read(cx1, bt)
-        cx1 = cerr_h(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
-          e_lo(body), e_hi(body),
-          "the last statement of a loop body must not be a non-Unit expression")
-      }
-      (cx1, TSWhile(cnx, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+      Some(t)
     }
-    SFor(pat, from, to_opt, body, lo, hi) -> {
-      var cx1 = cx
-      let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
-      cx1 = cxa
-      var loop_t = TyError
-      var tx_to: Option[TExpr] = None
-      var wit: Option[WitRef] = None
-      match to_opt {
-        None -> {
-          # `for x in xs` is a use of the Iter trait: resolve the witness the
-          # way any bound does (rigid parameter forwards the caller's
-          # dictionary, concrete subject devirtualises), and the loop
-          # variable's type is the impl's `Item` -- reduced when the subject
-          # is concrete, a rigid projection when it is not (generic for).
-          if ft == TyNever {
-            loop_t = TyNever
-          } else if ft != TyError {
-            if ft == TyInt {
-              # the common slip deserves the range answer, not "no impl"
-              cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
-                e_lo(from), e_hi(from),
-                "write `for x in a..b`, or iterate a value whose type implements `Iter`")
-            } else {
-              let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
-                "for..in")
-              cx1 = cxw
-              match w {
-                Some(_) -> {
-                  wit = w
-                  let (item_cx, item) = reduce_assoc_read(cx1, TyAssoc(ft, ITER_ID, "Item"))
-                  cx1 = item_cx
-                  loop_t = item
-                }
-                None -> ()
-              }
-            }
-          }
+    None -> None
+  }
+  let (cxb, it, ix) = check_expr(cx1, init, ann_t)
+  cx1 = cxb
+  var t = match ann_t {
+    Some(a) -> a
+    None -> it
+  }
+  match ann_t {
+    Some(a) -> {
+      let (compatible_cx, compatible) = assignable_read(cx1, it, a)
+      cx1 = compatible_cx
+      if not compatible {
+        let (declared_cx, declared_text) = type_display_read(cx1, a)
+        let (actual_cx, actual_text) = type_display_read(declared_cx, it)
+        cx1 = cerr(actual_cx, "annotated type is " ++ declared_text ++
+            " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
+        t = a
+      }
+    }
+    None -> ()
+  }
+  if t == TyNever {
+    cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
+    t = TyError
+  }
+  let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
+  # `_` binds nothing: codegen discards the value (sym None)
+  let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
+  (cxc, TSLet(bind, name, ix, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SLetPat` arm of `check_stmt`: a destructuring let, whose pattern must be
+## irrefutable against the initializer's type.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+fn check_let_pat(
+  cx: Cx,
+  pat: Pattern,
+  mutable: Bool,
+  init: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, it0, ix) = check_expr(cx1, init, no_expected())
+  cx1 = cxa
+  var it = it0
+  if it == TyNever {
+    cx1 = cerr(cx1, "cannot bind Never (this expression does not return)", e_lo(init), e_hi(init))
+    it = TyError
+  }
+  let (cxb, tp) = check_pattern(cx1, pat, it, mutable)
+  cx1 = cxb
+  if not is_errorish(it) {
+    let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [it])
+    cx1 = useful_cx
+    match useful_answer {
+      Some(true) -> {
+        let (let_read_cx, refutable) = refutable_span_read(cx1, pat)
+        cx1 = let_read_cx
+        let (plo, phi) = match refutable {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
         }
-        Some(te) -> {
-          let (cxb, tt2, tx2) = check_expr(cx1, te, no_expected())
-          cx1 = cxb
-          if (ft != TyInt && not is_errorish(ft)) || (tt2 != TyInt && not is_errorish(tt2)) {
-            let (from_cx, from_text) = type_display_read(cx1, ft)
-            let (to_cx, to_text) = type_display_read(from_cx, tt2)
-            cx1 = cerr(to_cx, "range bounds a..b must be Int (got " ++ from_text ++
-                ".." ++ to_text ++ ")", lo, hi)
-          }
-          loop_t = TyInt
-          tx_to = Some(tx2)
-        }
+        cx1 = cerr_h(cx1, "this pattern does not always match, so it cannot be used in a let",
+          plo, phi, "use match to handle the other cases")
       }
-      cx1 = push_scope(cx1)
-      let pat_diag_count = len(cx1.diags)
-      let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
-      cx1 = cxc
-      if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
-        let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [loop_t])
-        cx1 = useful_cx
-        match useful_answer {
-          Some(true) -> {
-            let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
-            cx1 = for_read_cx
-            let (plo, phi) = match refutable {
-              Some(sp) -> sp
-              None -> (pat_lo(pat), pat_hi(pat))
-            }
-            cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
-              "use match or filter before the loop to handle items this pattern does not match")
-          }
-          Some(false) -> ()
-          None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-        }
-      }
-      let d = len(cx1.frame.loop_stack)
-      let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
-      cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
-      let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
-      cx1 = cxd
-      let hj = set.has(cx1.loop_jumps, d)
-      cx1 = Cx {
-        ..cx1,
-        frame: Frame {
-          ..cx1.frame,
-          loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-        },
-        loop_jumps: set.remove(cx1.loop_jumps, d)
-      }
-      if bt != TyUnit && not is_errorish(bt) {
-        let (render_cx, text) = type_display_read(cx1, bt)
-        cx1 = cerr(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
-          e_lo(body), e_hi(body))
-      }
-      cx1 = pop_scope(cx1)
-      (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
     }
   }
+  (cx1, TSLetPat(tp, ix, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SAssign` arm of `check_stmt`: an assignment to a `var`, or a write
+## through a handler state cell's slot.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241).
+## It was the largest statement arm: three outcomes (undefined, cell, var),
+## each with its own compatibility report.
+fn check_assign(
+  cx: Cx,
+  name: String,
+  value: Expr,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, found) = resolve_local(cx1, name, nlo, nhi, true)
+  cx1 = cxa
+  match found {
+    None -> {
+      let (next, pool) = fn_pool_read(cx1)
+      let (hinted, hint) = moved_or_suggest(next, name, local_names(next) ++ pool)
+      cx1 = cerr_o(hinted, "undefined variable: ${name}", nlo, nhi, hint)
+      let (cxb, _, vx) = check_expr(cx1, value, no_expected())
+      (cxb, TSExpr(vx, owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    Some(sid) -> {
+      let sym = sym_of(cx1, sid)
+      match sym.cell_of {
+        # A handler state cell is written through its slot, so this is a
+        # `cell_set` and not a `TSAssign`: the binding itself never
+        # changes, and it is the same write whether it is reached from an
+        # arm, from a nested block, or from the remainder.
+        Some(c) -> {
+          let (hid, ct) = c
+          if cell_take_ok(cx1, hid, name, value) {
+            cx1 = Cx { ..cx1, take_cell: Some(sid) }
+          }
+          let (cxb, vt, vx) = check_expr(cx1, value, Some(ct))
+          # cleared unconditionally: a right-hand side that never read the
+          # cell must not leave the mark standing for the next assignment
+          cx1 = Cx { ..cxb, take_cell: None }
+          let (compatible_cx, compatible) = assignable_read(cx1, vt, ct)
+          cx1 = compatible_cx
+          if not compatible {
+            let (declared_cx, declared_text) = type_display_read(cx1, ct)
+            let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+            cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
+          }
+          (cx1, TSExpr(cell_write(cx, sid, name, vx, lo, hi), owner_off(cx, lo), owner_off(cx, hi)))
+        }
+        None -> {
+          if not sym.mutable {
+            cx1 = cerr_h(cx1, "`" ++ name ++ "` is a let binding and cannot be assigned",
+              nlo, nhi,
+              "declare it as var " ++ name ++ " = ... if it needs to change")
+          }
+          let (cxb, vt, vx) = check_expr(cx1, value, Some(sym.ty))
+          cx1 = cxb
+          let (compatible_cx, compatible) = assignable_read(cx1, vt, sym.ty)
+          cx1 = compatible_cx
+          if not compatible {
+            let (declared_cx, declared_text) = type_display_read(cx1, sym.ty)
+            let (actual_cx, actual_text) = type_display_read(declared_cx, vt)
+            cx1 = cerr(actual_cx, "`" ++ name ++ "` is " ++ declared_text ++
+                ", cannot assign " ++ actual_text, e_lo(value), e_hi(value))
+          }
+          (cx1, TSAssign(sid, name, vx, owner_off(cx, lo), owner_off(cx, hi)))
+        }
+      }
+    }
+  }
+}
+
+## The `SWhile` arm of `check_stmt`: the condition, then the body with the loop
+## pushed on the frame's loop stack and popped again.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## the push and the pop are both inside the arm, so the cut keeps them paired.
+fn check_while(cx: Cx, cond: Expr, body: Expr, lo: Int, hi: Int) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
+  cx1 = cxa
+  if ct != TyBool && not is_errorish(ct) {
+    let (render_cx, text) = type_display_read(cx1, ct)
+    cx1 = cerr(render_cx, "while condition must be Bool, got " ++ text,
+      e_lo(cond), e_hi(cond))
+  }
+  let d = len(cx1.frame.loop_stack)
+  let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  cx1 = cxb
+  let hj = set.has(cx1.loop_jumps, d)
+  cx1 = Cx {
+    ..cx1,
+    frame: Frame {
+      ..cx1.frame,
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
+    },
+    loop_jumps: set.remove(cx1.loop_jumps, d)
+  }
+  if bt != TyUnit && not is_errorish(bt) {
+    let (render_cx, text) = type_display_read(cx1, bt)
+    cx1 = cerr_h(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
+      e_lo(body), e_hi(body),
+      "the last statement of a loop body must not be a non-Unit expression")
+  }
+  (cx1, TSWhile(cnx, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The `SFor` arm of `check_stmt`: a range or an `Iter` witness for the subject,
+## the loop pattern in a scope of its own, then the body as `SWhile` checks it.
+##
+## Its own function so `check_stmt` stays under HotSpot's 8000-byte HugeMethodLimit (#241);
+## its scope and loop-stack pushes are opened and closed inside the arm.
+fn check_for(
+  cx: Cx,
+  pat: Pattern,
+  from: Expr,
+  to_opt: Option[Expr],
+  body: Expr,
+  lo: Int,
+  hi: Int
+) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
+  cx1 = cxa
+  var loop_t = TyError
+  var tx_to: Option[TExpr] = None
+  var wit: Option[WitRef] = None
+  match to_opt {
+    None -> {
+      # `for x in xs` is a use of the Iter trait: resolve the witness the
+      # way any bound does (rigid parameter forwards the caller's
+      # dictionary, concrete subject devirtualises), and the loop
+      # variable's type is the impl's `Item` -- reduced when the subject
+      # is concrete, a rigid projection when it is not (generic for).
+      if ft == TyNever {
+        loop_t = TyNever
+      } else if ft != TyError {
+        if ft == TyInt {
+          # the common slip deserves the range answer, not "no impl"
+          cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
+            e_lo(from), e_hi(from),
+            "write `for x in a..b`, or iterate a value whose type implements `Iter`")
+        } else {
+          let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
+            "for..in")
+          cx1 = cxw
+          match w {
+            Some(_) -> {
+              wit = w
+              let (item_cx, item) = reduce_assoc_read(cx1, TyAssoc(ft, ITER_ID, "Item"))
+              cx1 = item_cx
+              loop_t = item
+            }
+            None -> ()
+          }
+        }
+      }
+    }
+    Some(te) -> {
+      let (cxb, tt2, tx2) = check_expr(cx1, te, no_expected())
+      cx1 = cxb
+      if (ft != TyInt && not is_errorish(ft)) || (tt2 != TyInt && not is_errorish(tt2)) {
+        let (from_cx, from_text) = type_display_read(cx1, ft)
+        let (to_cx, to_text) = type_display_read(from_cx, tt2)
+        cx1 = cerr(to_cx, "range bounds a..b must be Int (got " ++ from_text ++
+            ".." ++ to_text ++ ")", lo, hi)
+      }
+      loop_t = TyInt
+      tx_to = Some(tx2)
+    }
+  }
+  cx1 = push_scope(cx1)
+  let pat_diag_count = len(cx1.diags)
+  let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
+  cx1 = cxc
+  if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
+    let (useful_cx, useful_answer) = useful_check_read(cx1, [[to_spat(tp)]], [SWild], [loop_t])
+    cx1 = useful_cx
+    match useful_answer {
+      Some(true) -> {
+        let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
+        cx1 = for_read_cx
+        let (plo, phi) = match refutable {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
+        }
+        cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
+          "use match or filter before the loop to handle items this pattern does not match")
+      }
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
+    }
+  }
+  let d = len(cx1.frame.loop_stack)
+  let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
+  let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  cx1 = cxd
+  let hj = set.has(cx1.loop_jumps, d)
+  cx1 = Cx {
+    ..cx1,
+    frame: Frame {
+      ..cx1.frame,
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
+    },
+    loop_jumps: set.remove(cx1.loop_jumps, d)
+  }
+  if bt != TyUnit && not is_errorish(bt) {
+    let (render_cx, text) = type_display_read(cx1, bt)
+    cx1 = cerr(render_cx, "the loop body's value is discarded (" ++ text ++ ")",
+      e_lo(body), e_hi(body))
+  }
+  cx1 = pop_scope(cx1)
+  (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+}
 
 ## fn name(params) -> T [!Row] = body, statement form (the Kotlin checkLocalFn).
 ## The name is declared before the body is checked, so the body can call it;
@@ -9814,75 +9978,8 @@ fn check_call(
     }
   }
   match local {
-    Some(sid) -> {
-      # a local holds a function *value*, and a function type has no parameter
-      # names -- the boundary named arguments stop at (spec §4.3)
-      match first_named(args0) {
-        Some(a) -> {
-          var cxn = cerr_h(cx1, fn_value_named_arg_msg(callee), a.lo, a.hi, named_arg_hint())
-          let (cxa, _) = check_args_plain(cxn, args, pre0)
-          return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        }
-        None -> ()
-      }
-      let sym = sym_of(cx1, sid)
-      let lt = sym.ty
-      if is_errorish(lt) {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      var is_fn = false
-      var lps: List[Ty] = []
-      var lret = TyError
-      var leff = EPure
-      match lt {
-        TyFn(ps, r, ef) -> {
-          is_fn = true
-          lps = ps
-          lret = r
-          leff = ef
-        }
-        _ -> ()
-      }
-      if not is_fn {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        let (render_cx, text) = type_display_read(cxa, lt)
-        return (cerr(render_cx, "`" ++ callee ++ "` is not a function (it is " ++
-            text ++ ")", clo, chi), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      if len(args) != len(lps) {
-        let (cxa, _) = check_args_plain(cx1, args, pre0)
-        let (render_cx, text) = type_display_read(cxa, lt)
-        return (cerr_h(render_cx, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
-            " argument(s), got " ++ to_string(len(args)), lo, hi,
-          "type: " ++ text), lret, XError(owner_off(cx, lo), owner_off(cx, hi)))
-      }
-      var txs: List[TExpr] = []
-      var i = 0
-      for a in args {
-        let pt = lps[i]
-        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
-        cx1 = cxa
-        let (compatible_cx, compatible) = assignable_read(cx1, at, pt)
-        cx1 = compatible_cx
-        if not compatible {
-          let (expected_cx, expected_text) = type_display_read(cx1, pt)
-          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
-          let (callable_cx, callable_text) = type_display_read(actual_cx, lt)
-          cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
-              ", got " ++ actual_text, e_lo(a), e_hi(a),
-            "type: " ++ callable_text)
-        }
-        txs = txs ++ [ax]
-        i = i + 1
-      }
-      # the supply point for a call through a local holding a function value;
-      # see `check_apply` for why the row is answered here
-      let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
-      cx1 = cxe
-      cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
-      return (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), lret))
-    }
+    Some(sid) ->
+      return check_local_value_call(cx, cx1, sid, callee, args0, args, pre0, clo, chi, lo, hi)
     None -> ()
   }
   let sig = match resolved_sig {
@@ -9951,169 +10048,13 @@ fn check_call(
   # in order, so each one is grown by appending its own entry rather than
   # written into a prefilled list -- an indexed write costs a rebuild of the
   # whole list (list.take ++ .. ++ list.drop).
-  var at_slots: List[Option[Ty]] = []
-  var tx_slots: List[Option[TExpr]] = []
-  # Which parameter each argument fills: the shared rule (types.arg_slots),
-  # the function-call spelling of the decision constructors make. An
-  # all-positional call of the right arity resolves to the identity mapping
-  # and goes through exactly as before. An argument that landed on no
-  # parameter is checked now, with no expected type, so its own errors are
-  # reported and the rounds below skip it.
-  var pidx: List[Int] = []
-  # (parameter, argument) for the arguments that landed on a parameter;
-  # `slot_of` is built from it after the loop, since it is indexed the other way
-  var filled: List[(Int, Int)] = []
-  var args_broken = false
-  var given: List[Option[String]] = []
-  for a0 in args0 { given = given ++ [a0.name] }
-  let trailing = len(args0) > 0 && args0[len(args0) - 1].trailing
-  let picks = arg_slots(s.param_names, given, trailing)
-  var i0 = 0
-  for a0 in args0 {
-    var idx = -1
-    match picks[i0] {
-      SlotAt(at) -> { idx = at }
-      SlotNoField(an) -> {
-        let h = match suggest.hint(an, s.param_names) {
-          Some(hh) -> hh
-          None -> {
-            let (hint_cx, hint_text) = signature_display_read(cx1, s)
-            cx1 = hint_cx
-            "signature: " ++ hint_text
-          }
-        }
-        cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
-        args_broken = true
-      }
-      SlotAfterNamed -> {
-        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a0.lo, a0.hi)
-        args_broken = true
-      }
-      # counted after the rounds, with the arity wording
-      SlotOverflow -> ()
-      SlotTaken(at) -> {
-        if trailing && i0 == len(args0) - 1 {
-          # the trailing closure and an earlier argument both fill the last
-          # parameter; say which parameter the block is for (spec §4.3)
-          cx1 = cerr(cx1, "the last parameter `" ++ s.param_names[at] ++
-              "` is already given; the tail block is what fills it", a0.lo, a0.hi)
-        } else {
-          cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
-        }
-        args_broken = true
-      }
-    }
-    pidx = pidx ++ [idx]
-    if idx >= 0 {
-      filled = filled ++ [(idx, i0)]
-      at_slots = at_slots ++ [no_expected()]
-      tx_slots = tx_slots ++ [no_texpr()]
-    } else {
-      let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
-      cx1 = cxa
-      at_slots = at_slots ++ [Some(at)]
-      tx_slots = tx_slots ++ [Some(ax)]
-    }
-    i0 = i0 + 1
-  }
-  # arg_slots hands out each parameter at most once -- a second argument for it
-  # comes back SlotTaken with no pick -- so one scan of `filled` per parameter
-  # answers who fills it, and a later pair still wins as an indexed write did.
-  var slot_of: List[Option[Int]] = []
-  var pk = 0
-  for _pt in s.param_tys {
-    var so: Option[Int] = no_int()
-    for f in filled {
-      let (fp, fa) = f
-      if fp == pk { so = Some(fa) }
-    }
-    slot_of = slot_of ++ [so]
-    pk = pk + 1
-  }
-  for round in 0..2 {
-    var at_next: List[Option[Ty]] = []
-    var tx_next: List[Option[TExpr]] = []
-    var i = 0
-    for a in args {
-      var at_i = at_slots[i]
-      var tx_i = tx_slots[i]
-      let done = match at_i {
-        Some(_) -> true
-        None -> false
-      }
-      let skip = if round == 0 {
-        let (next, answer) = needs_expected_read(cx1, a)
-        cx1 = next
-        answer
-      } else { false }
-      if not done && not skip {
-        let pt = s.param_tys[pidx[i]]
-        let (substituted_cx, substd) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
-        cx1 = substituted_cx
-        # lambdas only need their parameter types, and function values unify
-        # piecewise — a partially concrete expected type still helps
-        let (eligibility_cx, concrete) = is_concrete_read(cx1, substd)
-        cx1 = eligibility_cx
-        let accepts = if concrete { true } else {
-          let (next, answer) = accepts_partial_expected_read(cx1, a)
-          cx1 = next
-          answer
-        }
-        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
-        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
-        cx1 = cxa
-        at_i = Some(at)
-        tx_i = Some(ax)
-        # A function value's row is answered here and nowhere else, so this is
-        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
-        # binding is offered to `unify_into` rather than made after it: the
-        # union arm is a containment test over the *substituted* row, so a
-        # binding that arrives late is a binding the test never sees.
-        let (row_cx, em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
-        cx1 = row_cx
-        var m3 = m
-        var em3 = em_sub
-        var ok = true
-        let (inferred_cx, m4, em4, ok4) = unify_into_read(cx1, pt, at, m, em_sub)
-        cx1 = inferred_cx
-        m3 = m4
-        em3 = em4
-        ok = ok4
-        # A subtraction that did not rescue the argument must leave nothing
-        # behind: the argument is an error either way, and a stray binding for
-        # `e` would answer the next argument's row with a row nothing chose.
-        if not ok && subtracted {
-          let (retried_cx, m5, em5, ok5) = unify_into_read(cx1, pt, at, m, em)
-          cx1 = retried_cx
-          m3 = m5
-          em3 = em5
-          ok = ok5
-        }
-        m = m3
-        em = em3
-        if not ok {
-          let h = match why {
-            Some(w) -> w
-            None -> {
-              let (hint_cx, hint_text) = signature_display_read(cx1, s)
-              cx1 = hint_cx
-              "signature: " ++ hint_text
-            }
-          }
-          let (reduced_cx, expected_type) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
-          let (expected_cx, expected_text) = type_display_read(reduced_cx, expected_type)
-          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
-          cx1 = cerr_h(actual_cx, "argument type mismatch: expected " ++
-              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
-        }
-      }
-      at_next = at_next ++ [at_i]
-      tx_next = tx_next ++ [tx_i]
-      i = i + 1
-    }
-    at_slots = at_next
-    tx_slots = tx_next
-  }
+  let (slots_cx, at_args, tx_args, pidx, slot_of, args_broken) =
+    call_arg_slots(cx1, s, callee, args0, pre0)
+  let (rounds_cx, m_rounds, em_rounds, at_slots, tx_slots) =
+    infer_call_args(slots_cx, s, args, pidx, pre0, m, em, at_args, tx_args)
+  cx1 = rounds_cx
+  m = m_rounds
+  em = em_rounds
   # the named-call arity report, after the arguments so their own errors come
   # first (the all-positional path answered arity above and returned)
   if named_present && not args_broken &&
@@ -10424,6 +10365,311 @@ fn check_call(
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }
   (cx1, ret, out)
+}
+
+## The branch of `check_call` where the callee is a local holding a function
+## value: no signature, no inference, just the value's `TyFn` against the
+## arguments, and a dynamic call through the value.
+##
+## Its own function so `check_call` stays under HotSpot's 8000-byte
+## HugeMethodLimit (#241). The branch shares nothing with the signature path
+## below it: every way out of it was a `return`, so it is the call's answer
+## whole. `cx` is the call's entry context, which the node offsets are measured
+## against exactly as in `check_call`; `start` is the context after the local
+## was resolved.
+fn check_local_value_call(
+  cx: Cx,
+  start: Cx,
+  sid: Int,
+  callee: String,
+  args0: List[Arg],
+  args: List[Expr],
+  pre0: Option[(Ty, TExpr)],
+  clo: Int,
+  chi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = start
+  # a local holds a function *value*, and a function type has no parameter
+  # names -- the boundary named arguments stop at (spec §4.3)
+  match first_named(args0) {
+    Some(a) -> {
+      var cxn = cerr_h(cx1, fn_value_named_arg_msg(callee), a.lo, a.hi, named_arg_hint())
+      let (cxa, _) = check_args_plain(cxn, args, pre0)
+      return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    None -> ()
+  }
+  let sym = sym_of(cx1, sid)
+  let lt = sym.ty
+  if is_errorish(lt) {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    return (cxa, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  var is_fn = false
+  var lps: List[Ty] = []
+  var lret = TyError
+  var leff = EPure
+  match lt {
+    TyFn(ps, r, ef) -> {
+      is_fn = true
+      lps = ps
+      lret = r
+      leff = ef
+    }
+    _ -> ()
+  }
+  if not is_fn {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    let (render_cx, text) = type_display_read(cxa, lt)
+    return (cerr(render_cx, "`" ++ callee ++ "` is not a function (it is " ++
+        text ++ ")", clo, chi), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  if len(args) != len(lps) {
+    let (cxa, _) = check_args_plain(cx1, args, pre0)
+    let (render_cx, text) = type_display_read(cxa, lt)
+    return (cerr_h(render_cx, "`" ++ callee ++ "` takes " ++ to_string(len(lps)) ++
+        " argument(s), got " ++ to_string(len(args)), lo, hi,
+      "type: " ++ text), lret, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  var txs: List[TExpr] = []
+  var i = 0
+  for a in args {
+    let pt = lps[i]
+    let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
+    cx1 = cxa
+    let (compatible_cx, compatible) = assignable_read(cx1, at, pt)
+    cx1 = compatible_cx
+    if not compatible {
+      let (expected_cx, expected_text) = type_display_read(cx1, pt)
+      let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+      let (callable_cx, callable_text) = type_display_read(actual_cx, lt)
+      cx1 = cerr_h(callable_cx, "argument type mismatch: expected " ++ expected_text ++
+          ", got " ++ actual_text, e_lo(a), e_hi(a),
+        "type: " ++ callable_text)
+    }
+    txs = txs ++ [ax]
+    i = i + 1
+  }
+  # the supply point for a call through a local holding a function value;
+  # see `check_apply` for why the row is answered here
+  let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
+  cx1 = cxe
+  cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
+  (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), lret))
+}
+
+## Which parameter each argument of a signature call fills, and the two per-
+## argument slot lists the inference rounds start from: an argument that
+## landed on no parameter is checked here, with no expected type, so its own
+## errors are reported and the rounds skip it.
+##
+## Cut out of `check_call` for HotSpot's 8000-byte HugeMethodLimit (#241). It
+## reads the signature and the written arguments and nothing the rounds bind,
+## so it is the natural first phase. Returns the context, the two slot lists,
+## the parameter index of each argument (`-1` for none), which argument fills
+## each parameter, and whether any argument was refused.
+fn call_arg_slots(
+  start: Cx,
+  s: Sig,
+  callee: String,
+  args0: List[Arg],
+  pre0: Option[(Ty, TExpr)]
+) -> (Cx, List[Option[Ty]], List[Option[TExpr]], List[Int], List[Option[Int]], Bool) !io = {
+  var cx1 = start
+  var at_slots: List[Option[Ty]] = []
+  var tx_slots: List[Option[TExpr]] = []
+  # Which parameter each argument fills: the shared rule (types.arg_slots),
+  # the function-call spelling of the decision constructors make. An
+  # all-positional call of the right arity resolves to the identity mapping
+  # and goes through exactly as before. An argument that landed on no
+  # parameter is checked now, with no expected type, so its own errors are
+  # reported and the rounds below skip it.
+  var pidx: List[Int] = []
+  # (parameter, argument) for the arguments that landed on a parameter;
+  # `slot_of` is built from it after the loop, since it is indexed the other way
+  var filled: List[(Int, Int)] = []
+  var args_broken = false
+  var given: List[Option[String]] = []
+  for a0 in args0 { given = given ++ [a0.name] }
+  let trailing = len(args0) > 0 && args0[len(args0) - 1].trailing
+  let picks = arg_slots(s.param_names, given, trailing)
+  var i0 = 0
+  for a0 in args0 {
+    var idx = -1
+    match picks[i0] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        let h = match suggest.hint(an, s.param_names) {
+          Some(hh) -> hh
+          None -> {
+            let (hint_cx, hint_text) = signature_display_read(cx1, s)
+            cx1 = hint_cx
+            "signature: " ++ hint_text
+          }
+        }
+        cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
+        args_broken = true
+      }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a0.lo, a0.hi)
+        args_broken = true
+      }
+      # counted after the rounds, with the arity wording
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        if trailing && i0 == len(args0) - 1 {
+          # the trailing closure and an earlier argument both fill the last
+          # parameter; say which parameter the block is for (spec §4.3)
+          cx1 = cerr(cx1, "the last parameter `" ++ s.param_names[at] ++
+              "` is already given; the tail block is what fills it", a0.lo, a0.hi)
+        } else {
+          cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
+        }
+        args_broken = true
+      }
+    }
+    pidx = pidx ++ [idx]
+    if idx >= 0 {
+      filled = filled ++ [(idx, i0)]
+      at_slots = at_slots ++ [no_expected()]
+      tx_slots = tx_slots ++ [no_texpr()]
+    } else {
+      let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
+      cx1 = cxa
+      at_slots = at_slots ++ [Some(at)]
+      tx_slots = tx_slots ++ [Some(ax)]
+    }
+    i0 = i0 + 1
+  }
+  # arg_slots hands out each parameter at most once -- a second argument for it
+  # comes back SlotTaken with no pick -- so one scan of `filled` per parameter
+  # answers who fills it, and a later pair still wins as an indexed write did.
+  var slot_of: List[Option[Int]] = []
+  var pk = 0
+  for _pt in s.param_tys {
+    var so: Option[Int] = no_int()
+    for f in filled {
+      let (fp, fa) = f
+      if fp == pk { so = Some(fa) }
+    }
+    slot_of = slot_of ++ [so]
+    pk = pk + 1
+  }
+  (cx1, at_slots, tx_slots, pidx, slot_of, args_broken)
+}
+
+## The two inference rounds of a signature call: self-sufficient arguments
+## first (they bind type variables), then the inference-needing ones (bare
+## `None`, `[]`) under what the first round learned.
+##
+## Cut out of `check_call` for HotSpot's 8000-byte HugeMethodLimit (#241). The
+## rounds are the only place the substitution is grown from the arguments, so
+## everything they change comes back explicitly: the context, `m`, `em` and the
+## two slot lists. Nothing here returns early; the call's own checks resume
+## after it in the order they always ran.
+fn infer_call_args(
+  start: Cx,
+  s: Sig,
+  args: List[Expr],
+  pidx: List[Int],
+  pre0: Option[(Ty, TExpr)],
+  m0: Map[Int, Ty],
+  em0: Map[Int, Eff],
+  at0: List[Option[Ty]],
+  tx0: List[Option[TExpr]]
+) -> (Cx, Map[Int, Ty], Map[Int, Eff], List[Option[Ty]], List[Option[TExpr]]) !io = {
+  var cx1 = start
+  var m = m0
+  var em = em0
+  var at_slots = at0
+  var tx_slots = tx0
+  for round in 0..2 {
+    var at_next: List[Option[Ty]] = []
+    var tx_next: List[Option[TExpr]] = []
+    var i = 0
+    for a in args {
+      var at_i = at_slots[i]
+      var tx_i = tx_slots[i]
+      let done = match at_i {
+        Some(_) -> true
+        None -> false
+      }
+      let skip = if round == 0 {
+        let (next, answer) = needs_expected_read(cx1, a)
+        cx1 = next
+        answer
+      } else { false }
+      if not done && not skip {
+        let pt = s.param_tys[pidx[i]]
+        let (substituted_cx, substd) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
+        cx1 = substituted_cx
+        # lambdas only need their parameter types, and function values unify
+        # piecewise — a partially concrete expected type still helps
+        let (eligibility_cx, concrete) = is_concrete_read(cx1, substd)
+        cx1 = eligibility_cx
+        let accepts = if concrete { true } else {
+          let (next, answer) = accepts_partial_expected_read(cx1, a)
+          cx1 = next
+          answer
+        }
+        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
+        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
+        cx1 = cxa
+        at_i = Some(at)
+        tx_i = Some(ax)
+        # A function value's row is answered here and nowhere else, so this is
+        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
+        # binding is offered to `unify_into` rather than made after it: the
+        # union arm is a containment test over the *substituted* row, so a
+        # binding that arrives late is a binding the test never sees.
+        let (row_cx, em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+        cx1 = row_cx
+        var m3 = m
+        var em3 = em_sub
+        var ok = true
+        let (inferred_cx, m4, em4, ok4) = unify_into_read(cx1, pt, at, m, em_sub)
+        cx1 = inferred_cx
+        m3 = m4
+        em3 = em4
+        ok = ok4
+        # A subtraction that did not rescue the argument must leave nothing
+        # behind: the argument is an error either way, and a stray binding for
+        # `e` would answer the next argument's row with a row nothing chose.
+        if not ok && subtracted {
+          let (retried_cx, m5, em5, ok5) = unify_into_read(cx1, pt, at, m, em)
+          cx1 = retried_cx
+          m3 = m5
+          em3 = em5
+          ok = ok5
+        }
+        m = m3
+        em = em3
+        if not ok {
+          let h = match why {
+            Some(w) -> w
+            None -> {
+              let (hint_cx, hint_text) = signature_display_read(cx1, s)
+              cx1 = hint_cx
+              "signature: " ++ hint_text
+            }
+          }
+          let (reduced_cx, expected_type) = reduce_instantiated_read(cx1, subst(pt, m, em), m)
+          let (expected_cx, expected_text) = type_display_read(reduced_cx, expected_type)
+          let (actual_cx, actual_text) = type_display_read(expected_cx, at)
+          cx1 = cerr_h(actual_cx, "argument type mismatch: expected " ++
+              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
+        }
+      }
+      at_next = at_next ++ [at_i]
+      tx_next = tx_next ++ [tx_i]
+      i = i + 1
+    }
+    at_slots = at_next
+    tx_slots = tx_next
+  }
+  (cx1, m, em, at_slots, tx_slots)
 }
 
 ## Instantiate a callee's declared effect at a call site: an unbound effect
