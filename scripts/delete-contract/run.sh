@@ -138,9 +138,7 @@ import sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 old = '''static char *dawn_cpath(dawn_str *s) {
-  if (dawn_has_nul(s)) {
-    dawn_fault(DAWN_LIT("path contains an embedded NUL byte"));
-  }
+  dawn_reject_nul(s);
   char *p = (char *)dawn_alloc((size_t)s->len + 1);'''
 new = '''static char *dawn_cpath(dawn_str *s) {
   char *p = (char *)dawn_alloc((size_t)s->len + 1);'''
