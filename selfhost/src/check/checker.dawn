@@ -2969,6 +2969,18 @@ pub(pkg) fn lookup_fn_sig_read(cx: Cx, name: String) -> (Cx, Option[Sig]) = {
   (next, answer)
 }
 
+## A call or a function value is about to be typed from `s`'s return type
+## and effect. While `s` is still being inferred both are placeholders, so the
+## use is noted for the scheduler, which discards the whole attempt and checks
+## this body again once `s` is sealed (docs/symbol-id-design.md §3.2). This is
+## the one place a true dependency edge is recorded, and it is here rather than
+## in `lookup_fn_sig_read` because not every lookup uses the answer's type:
+## the fn-field ambiguity check and the generic-arity questions ask only
+## whether a signature exists or how many type parameters it declares, which a
+## header already settles.
+fn used_signature(cx: Cx, s: Sig) -> Cx =
+  if s.inferring { Cx { ..cx, unsealed_uses: set.insert(cx.unsealed_uses, s.name) } } else { cx }
+
 ## The candidate pool for "did you mean" on a function name. Synthesized
 ## names (`f$default$k`) are not in it: no typo can mean one.
 pub(pkg) fn fn_pool(cx: Cx) -> List[String] = {
@@ -5481,8 +5493,8 @@ fn no_pargs() -> List[PatArg] = []
 ## the whole-module aliases, and the `use java` class names. All three answer
 ## the same question — is this spelling an edge to a top-level function of
 ## *this* module, or does it name something else entirely. Walking without them
-## makes `fn a(b: Int) = b` depend on the top-level `b`, and rejects both as
-## mutually recursive (audit ARC-01).
+## makes `fn a(b: Int) = b` depend on the top-level `b`, which puts both on a
+## cycle that only checking their bodies would then take apart (audit ARC-01).
 pub type RefScope = { bound: Set[String], mods: Set[String], javas: Set[String] }
 
 ## The scope a function body starts in: nothing bound yet, the module's aliases
@@ -5559,10 +5571,15 @@ fn rs_java_static(sc: RefScope, target: Expr) -> Bool =
 
 ## Every lowercase name mentioned in call/value position and *not* bound where
 ## it is mentioned — the call-graph over-approximation for return-type
-## inference ordering (Kotlin nameRefs). The over-approximation is deliberate
-## and one-sided: a spurious edge only costs ordering, but a spurious *cycle*
-## rejects a legal program, which is why binders and module aliases are
-## subtracted here rather than filtered downstream.
+## inference ordering (Kotlin nameRefs). It only decides the order bodies are
+## checked in; it cannot make a program fail. A spurious edge costs ordering,
+## and a spurious *cycle* costs one discarded attempt per member: the
+## scheduler settles cycles by what the bodies actually use
+## (`execute_module_bodies`, `used_signature`). What it must never do is miss
+## a real edge, since a caller checked before its callee is sealed reads a
+## placeholder. Binders and module aliases are still subtracted here because
+## an edge they leave out keeps an accepted module on the acyclic path, whose
+## order is the one diagnostics come out in.
 pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
   match e {
     EVar(name, _, _) ->
@@ -5575,12 +5592,15 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       # class name, where `Class.f(..)` is a Java static and no local function
       # is reachable at all.
       #
-      # Nothing else may be subtracted. A Java *instance* call `value.f(..)` is
-      # also never a local function, but telling it apart from UFCS needs the
-      # receiver's type, and this walk runs before any body is checked. And a
-      # builtin or std method name keeps its edge on purpose: name resolution
-      # is local-then-std-then-builtin with whole shadowing (spec §10.6), so
-      # with a top-level `len` in this module `xs.len()` really does call it.
+      # A Java *instance* call `value.f(..)` is also never a local function,
+      # but telling it apart from UFCS needs the receiver's type, and this
+      # walk runs before any body is checked, so its edge stays. When that
+      # edge closes a cycle, checking the bodies shows it is not a use of the
+      # top-level `f` and the cycle is not reported (audit ARC-01). A builtin
+      # or std method name keeps its edge because it can be real: name
+      # resolution is local-then-std-then-builtin with whole shadowing (spec
+      # §10.6), so with a top-level `len` in this module `xs.len()` really
+      # does call it.
       let elsewhere = rs_qualified(sc, target) || rs_java_static(sc, target)
       var o = if elsewhere { out } else { set.insert(out, name) }
       o = name_refs(target, o, sc)
@@ -6141,7 +6161,7 @@ pub(pkg) fn check_fn_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  var cx = initial
+  var cx = used_signature(initial, f)
   # A declared effect used to be refused here: a function value's wrapper is a
   # lambda, a lambda captured its evidence where it was written, and a
   # synthesised wrapper would have captured whatever handler was in scope at
@@ -9884,6 +9904,7 @@ fn check_call(
         TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
   }
+  cx1 = used_signature(cx1, s)
   # Arity first when every argument is positional -- the historical wording,
   # order and early return. A call with names resolves slots first, so its
   # report can name the parameter rather than count to the wrong number
@@ -15235,7 +15256,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   let impl_sigs = headers.impl_sigs
   let const_tys = headers.const_tys
   # 5. inferred functions first, in call-dependency order — every callee's
-  # signature is final before any caller is checked; a cycle must annotate
+  # signature is final before any caller is checked; a true cycle must annotate
   let fnds = module_fns(m)
   # What the inferred pass produced, keyed by declaration index. It fills
   # scattered positions in dependency order, and writing each result into a
@@ -15297,8 +15318,8 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     # pass in topological order of names settles every round. Instances of a
     # duplicated name share its dependency list, as they did in the scan; the
     # name is done at the earliest of their times. A name that depends on
-    # itself, or on a name that is never done, is never done: that is the
-    # cycle reported below.
+    # itself, or on a name that is never done, is never done here: that is
+    # what the component pass below settles.
     var instances: Map[String, List[Int]] = map.empty()
     var waiting: Map[String, Int] = map.empty()
     var dependents: Map[String, List[String]] = map.empty()
@@ -15363,22 +15384,172 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
         None -> { stuck = stuck ++ [idx] }
       }
     }
+    # Each function the pass above ordered is a group of its own, in that
+    # order; the components below follow them.
+    var groups: List[List[Int]] = []
     var k = 1
     while k <= last_round {
-      for idx in map.get(by_round, k).unwrap_or([]) {
-        let d = fnds[idx]
-        # each pending index is completed at most once, so the signature this
-        # reads is still the unsealed one the list held
-        let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
-        let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
-        state = next_state
-        cx1 = left(owner, cxe)
-        inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
-      }
+      for idx in map.get(by_round, k).unwrap_or([]) { groups = groups ++ [[idx]] }
       k = k + 1
     }
-    # what remains is a dependency cycle, or depends on one
+    # What is left never became ready: it sits on a cycle of the syntactic
+    # graph, or depends on one. That graph over-approximates the calls, so a
+    # cycle in it need not be a cycle of calls -- `sb.append(..)` on a Java
+    # receiver is an edge to a top-level `append` although it never calls it
+    # (audit ARC-01). Which edges are real is known only by checking: a body
+    # whose call or function value is typed from a signature still being
+    # inferred has `unsealed_uses` set when it comes back (`used_signature`).
+    #
+    # So the leftover graph is split into strongly connected components,
+    # which come out of Tarjan's walk callees first, and each becomes one
+    # group after those above. The members of a group are tried in index
+    # order, round after round. An attempt that used an unsealed signature is
+    # thrown away whole -- context and executor state are values, so nothing
+    # of it survives -- and tried again next round; one that did not is
+    # final, because everything it read was sealed. A round that seals
+    # nothing leaves a true cycle: its members are settled as errors, so a
+    # function outside the cycle that calls one is still checked, and the
+    # errorish type keeps the cascade quiet.
+    #
+    # A group of one function with no edge to itself has only sealed callees
+    # when it is reached, so its one attempt is final: a module whose
+    # syntactic graph has no cycle, which is every module accepted before
+    # cycles were settled this way, checks each body once in the order above
+    # and keeps what it got.
+    var stuck_names: List[String] = []
+    var is_stuck: Set[String] = set.empty()
     for idx in stuck {
+      let n = fnds[idx].name
+      if not set.has(is_stuck, n) {
+        is_stuck = set.insert(is_stuck, n)
+        stuck_names = stuck_names ++ [n]
+      }
+    }
+    var succ: Map[String, List[String]] = map.empty()
+    for n in stuck_names {
+      var out: List[String] = []
+      for r in map.get(deps, n).expect("dep") {
+        if set.has(is_stuck, r) { out = out ++ [r] }
+      }
+      succ = map.insert(succ, n, out)
+    }
+    # Tarjan, with both stacks held as index-keyed maps so the walk needs no
+    # recursion however long a chain hangs off a cycle.
+    var visit: Map[String, Int] = map.empty()
+    var low: Map[String, Int] = map.empty()
+    var on_stack: Set[String] = set.empty()
+    var tstack: Map[Int, String] = map.empty()
+    var tsize = 0
+    var work: Map[Int, (String, Int)] = map.empty()
+    var wsize = 0
+    var components: List[List[String]] = []
+    for root in stuck_names {
+      if not map.has(visit, root) {
+        visit = map.insert(visit, root, map.len(visit))
+        low = map.insert(low, root, map.get(visit, root).expect("visit"))
+        on_stack = set.insert(on_stack, root)
+        tstack = map.insert(tstack, tsize, root)
+        tsize = tsize + 1
+        work = map.insert(work, wsize, (root, 0))
+        wsize = wsize + 1
+        while wsize > 0 {
+          let (v, pos) = map.get(work, wsize - 1).expect("frame")
+          let next = map.get(succ, v).expect("succ")
+          if pos < len(next) {
+            work = map.insert(work, wsize - 1, (v, pos + 1))
+            let w = next[pos]
+            match map.get(visit, w) {
+              None -> {
+                visit = map.insert(visit, w, map.len(visit))
+                low = map.insert(low, w, map.get(visit, w).expect("visit"))
+                on_stack = set.insert(on_stack, w)
+                tstack = map.insert(tstack, tsize, w)
+                tsize = tsize + 1
+                work = map.insert(work, wsize, (w, 0))
+                wsize = wsize + 1
+              }
+              Some(wi) -> {
+                if set.has(on_stack, w) && wi < map.get(low, v).expect("low") {
+                  low = map.insert(low, v, wi)
+                }
+              }
+            }
+          } else {
+            wsize = wsize - 1
+            let vl = map.get(low, v).expect("low")
+            if vl == map.get(visit, v).expect("visit") {
+              var comp: List[String] = []
+              var popping = true
+              while popping {
+                tsize = tsize - 1
+                let w = map.get(tstack, tsize).expect("stacked")
+                on_stack = set.remove(on_stack, w)
+                comp = [w] ++ comp
+                if w == v { popping = false }
+              }
+              components = components ++ [comp]
+            }
+            if wsize > 0 {
+              let (u, _) = map.get(work, wsize - 1).expect("frame")
+              if vl < map.get(low, u).expect("low") { low = map.insert(low, u, vl) }
+            }
+          }
+        }
+      }
+    }
+    # A true cycle's members keep the placeholder signature, whose return
+    # type is already TyError; `settled` is what stops a use of one from
+    # blocking the functions that depend on it. They are reported once every
+    # component is done, in index order, which is the order the scan before
+    # this reported every leftover function in.
+    var settled: Set[String] = set.empty()
+    var cyclic: List[Int] = []
+    let ordered = len(groups)
+    for comp in components {
+      var members: List[Int] = []
+      for n in comp { members = members ++ map.get(instances, n).expect("instances") }
+      groups = groups ++ [list.sort(members)]
+    }
+    var gi = 0
+    for group in groups {
+      var trying = group
+      var sealed_some = true
+      while sealed_some && len(trying) > 0 {
+        sealed_some = false
+        var blocked: List[Int] = []
+        for idx in trying {
+          let d = fnds[idx]
+          # a completed index is never tried again, so the signature this
+          # reads is still the unsealed one the list held
+          let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
+          let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
+          var used_unsealed = false
+          for u in set.to_list(cxe.unsealed_uses) {
+            if not set.has(settled, u) { used_unsealed = true }
+          }
+          # A body the pass above ordered is final whatever it used, as it
+          # always was. Only a duplicated name can make it use an unsealed
+          # signature -- its instances share the last one's dependency list
+          # -- and such a module is already refused for the duplicate.
+          if gi < ordered || not used_unsealed {
+            state = next_state
+            cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
+            inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
+            sealed_some = true
+          } else {
+            blocked = blocked ++ [idx]
+          }
+        }
+        trying = blocked
+      }
+      # what remains is a true cycle
+      for idx in trying {
+        settled = set.insert(settled, fnds[idx].name)
+        cyclic = cyclic ++ [idx]
+      }
+      gi = gi + 1
+    }
+    for idx in list.sort(cyclic) {
       let d = fnds[idx]
       cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
           "`: it is recursive (directly or mutually)", d.nlo, d.nhi,
@@ -15847,11 +16018,13 @@ test "body executor preserves cycle refusal and diagnostic recovery" {
   assert ds == []
   let headers = check_module_headers(test_cx(), syntax, map.empty())
   let base: BodyExecutor[List[String]] = cold_body_executor()
+  # The cycle's one member is tried and the attempt refused: it used its own
+  # unsealed signature. Nothing the attempt did survives it, the executor
+  # state it returned included, so the trace holds only the annotated bodies.
   let executor = BodyExecutor { ..base,
     inferred_body: (state, cx, d, sig) => {
-      assert false
       let (next, _, tree) = check_fn_inferred(cx, d, sig)
-      (state, next, tree)
+      (state ++ ["tried " ++ d.name], next, tree)
     },
     function: (state, cx, d, sig) => {
       assert len(cx.diags) > 0

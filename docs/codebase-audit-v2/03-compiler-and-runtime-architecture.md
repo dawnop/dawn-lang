@@ -12,14 +12,22 @@
   收口，`ARC-13` 也已关闭 native RC 错删源码循环目标的问题。当前结构债转为
   `ARC-01/02/11` 的 partial 边界，以及 `ARC-07/08` 的 typed-product / stable-origin 前置。
 
-## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖
+## ARC-01 — P1 — 返回类型推断把局部名字当顶层依赖（已修）
 
-<!-- audit-anchor: present selfhost/src/check/checker.dawn | pub fn name_refs -->
+<!-- audit-anchor: absent selfhost/src/check/checker.dawn | fn used_signature(cx: Cx, s: Sig) -> Cx -->
 
-> **处置去向（2026-09-26）：** 余下的实例 Java receiver 伪边由
-> [symbol-id-design.md](../symbol-id-design.md) 的 S2（检查时记录真边、按 SCC 试检）关闭；
-> 那份设计也记下了同源的新误报（真环的非递归依赖者被报成递归）。光把 `name_refs` 的键从名字换成
-> 声明身份关不掉本项，理由见该文 §3.2。
+> **已修（2026-09-26，[symbol-id-design.md](../symbol-id-design.md) S2）。** `name_refs` 的语法图保留，
+> 但只决定检查顺序，不再能造出错误。S1 的拓扑走完后仍没就绪的函数（在语法环上或依赖语法环）
+> 按强连通分量（Tarjan，被调者在先）逐个试检：调用或函数值在定型处用到本模块仍在推断的签名
+> （`Sig.inferring`）时由 `checker.used_signature` 记进 `Cx.unsealed_uses`，这次试检的 `Cx` 与执行器状态
+> 整个丢弃，下一轮再试；一轮无进展时剩下的才是真环，其成员记为已定（返回类型保持占位的 `TyError`），
+> 环外的依赖者照常检查，最后按下标报原文案。实例 Java receiver 的伪环（本项最后的残余）因此通过；同源的新误报
+> （真环的非递归依赖者被报成递归）一并消失。今天被接受的程序语法图无环，走不到这段，冷输出逐字节不变。
+> 夹具 `infer_arc01_java_receiver`、`infer_cycle_dependent`、`infer_self_cycle` 钉住行为，
+> 「保留失败试检的 Cx」「判据换回语法边」「真环成员不记为已定」三个变异体各使至少一个夹具变红。
+>
+> 锚点改为 `absent`：原 `present` 锚点 `pub fn name_refs` 在修复后仍在树上（语法图保留为过近似），
+> 不再能说明本项是否成立；新锚点指向修复新增的真边记录点，修复被撤回时它消失，本项随之重判。
 
 > **后续处置（2026-08-09）：partial。** `RefScope` 现已排除参数、lambda、pattern/local
 > binding 与 module alias，原最小参数重名反例关闭；但非 module receiver 的

@@ -103,19 +103,19 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 | **open** | 发现仍成立；其中可包含 HOLD、延后能力或待 ABI/产品裁决项，执行状态另行注明。 |
 | **retracted** | 逐项复核后认定原发现把已明确、内部一致的设计选择误当成缺陷；不是“通过实现修好”。 |
 
-#### 当前 fixed（90）
+#### 当前 fixed（91）
 
 - 语法（19）：`SYN-01`–`SYN-19`。
 - 语义（14）：`SEM-01`–`SEM-03`、`SEM-06`、`SEM-07`、`SEM-10`–`SEM-18`。
-- 架构（8）：`ARC-03`–`ARC-06`、`ARC-08`、`ARC-09`、`ARC-12`、`ARC-13`。
+- 架构（9）：`ARC-01`、`ARC-03`–`ARC-06`、`ARC-08`、`ARC-09`、`ARC-12`、`ARC-13`。
 - 工具链（17）：`TOOL-01`–`TOOL-17`。
 - 库（19）：`LIB-01`–`LIB-19`。
 - 治理（13）：`GOV-01`–`GOV-13`。
 
-#### 当前 partial（4）
+#### 当前 partial（3）
 
 - 语义（1）：`SEM-04`。
-- 架构（3）：`ARC-01`、`ARC-02`、`ARC-11`。
+- 架构（2）：`ARC-02`、`ARC-11`。
 
 #### 当前 open（3）
 
@@ -126,13 +126,13 @@ corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/ru
 
 - 语义（2）：`SEM-05`、`SEM-08`。
 
-当前计数自检：**90 fixed + 4 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
-语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **8/3/2/0**、工具链 **17/0/0/0**、
+当前计数自检：**91 fixed + 3 partial + 3 open + 2 retracted = 99**。逐专题矩阵：
+语法 **19/0/0/0**、语义 **14/1/1/2**、架构 **9/2/2/0**、工具链 **17/0/0/0**、
 库 **19/0/0/0**、治理 **13/0/0/0**（顺序均为 fixed/partial/open/retracted）。
 状态迁移逐项为：`LIB-07` fixed、`ARC-11` partial、`SEM-06` fixed、`TOOL-08` fixed、
 `TOOL-14` fixed → partial（订正冒称的 fixed，后由 `3e13645` 的 v2 generation 收口回
 fixed）、`SEM-05`/`SEM-08` retracted、`SYN-12`/`SYN-16` fixed，
-`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed，`ARC-08` fixed（symbol ID S1）。
+`TOOL-05`/`TOOL-06`/`GOV-04`/`SYN-11`/`SYN-09` fixed，`ARC-08` fixed（symbol ID S1）、`ARC-01` fixed（symbol ID S2）。
 2026-08-11 由 `doc-check.py` 的 evidence 检查一次性订正八条：`SEM-07`（`6874f64` 的
 export-surface pass）、`TOOL-13`（`3f5d64c` 的 `atomic_write_file` 调用点迁移）、
 `LIB-08`（`ce9cd15` 的结构化 `JsonError`）、`LIB-12`（`05db7f2` 的 query/form multimap）、
@@ -308,7 +308,7 @@ Bytes、UTF-8 视图收进可失败的 `body_text`，坏体是带 offset 的 400
 | `SEM-03` | fixed | opaque `Show` 不再被 String representation shortcut 绕过。 |
 | `SEM-04` | partial | comptime 折叠那条腿已关（`Cursor` 不再是常量可序列化类型）；跨串误用与货币统一仍待裁决。 |
 | `SEM-06` | fixed | Java reference narrowing 只允许显式 checked cast。 |
-| `ARC-01` | partial | lexical binding/module alias 已过滤，非模块 `EMethod` 裸名伪边仍在。 |
+| `ARC-01` | fixed | 语法图只管顺序；环按检查时实际用到的未封签名判定（symbol ID S2），实例 Java receiver 的伪环与真环依赖者的误报都已消失。 |
 | `ARC-02` | partial | 长 String 与 ASM failure 已接住，method/class 超限仍无 source span。 |
 | `ARC-03` | fixed | native failure payload 已对象化且不截断。 |
 | `ARC-04` | fixed | nested failure payload 已按 handler frame 隔离。 |
@@ -332,8 +332,8 @@ Bytes、UTF-8 视图收进可失败的 `body_text`，坏体是带 offset 的 400
 | `LIB-11` | fixed | request-body tempfile 从创建起即有 owner。 |
 | `GOV-01` | fixed | dtoa 独立 oracle 已进入持续门禁。 |
 
-逐行重算结果：**26 fixed / 3 partial / 0 open / 0 retracted = 29**。三项 partial 为
-`ARC-01`、`ARC-02`、`SEM-04`；`SEM-04` 是 2026-08-16 从 open 改判的，它的两条腿里
+逐行重算结果：**27 fixed / 2 partial / 0 open / 0 retracted = 29**。两项 partial 为
+`ARC-02`、`SEM-04`；`SEM-04` 是 2026-08-16 从 open 改判的，它的两条腿里
 comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义册）。
 
 ## 6. 语言设计建议
@@ -419,6 +419,9 @@ comptime 那条已关，剩下的一条仍等维护者裁决（明细见语义�
    `CFun` 加 origin，那与 Core golden 的 identity proof 判据直接冲突（判据 2026-09-14 起
    整个落在逐字节的 `selfhost.sha` 上，归一化伴生 golden 已退役），应随 JVM
    调试信息行号表一起做。**所以这两项不该继续挂在「小刀」队列里等人再推一次。**
+   **2026-09-26 更新：** `ARC-01` 已由 [symbol ID](symbol-id-design.md) 的 S2 关闭。关掉它的
+   不是先给顶层函数造 symbol ID 再构图，而是把「哪条边是真的」交给检查本身：语法图只排顺序，
+   环上的函数逐个试检，用到未封签名的那次试检整个丢弃，一轮无进展才是真环。
 3. **把 `SEM-04` 留给维护者裁决：** Cursor 是携带 owner 的值还是 generative identity，以及
    不同 owner 的 Eq/Ord 是否拒绝；裁决前只保留静态候选，不写 workaround。
    **2026-08-16 更新：** 静态候选已验证，并且验出来是**两条互相独立的腿**。comptime 折叠

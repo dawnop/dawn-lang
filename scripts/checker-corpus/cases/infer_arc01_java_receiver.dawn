@@ -1,0 +1,21 @@
+# Audit ARC-01: `sb.append(..)` is a Java instance call, but before any body
+# is checked it reads like UFCS on the top-level `append`, and with
+# `append -> build` that closes a cycle. Checking the bodies takes it apart:
+# `build` uses no signature still being inferred and is sealed first, then
+# `append`. Each body has an error of its own, so the diagnostics show both
+# were checked, once each, in that order.
+use java "java.lang.StringBuilder"
+
+fn append(x: Int) = {
+  let a: Int = "one"
+  if x > 0 { 1 } else { build() }
+}
+
+fn build() = {
+  let b: Int = "two"
+  let sb = StringBuilder.new()
+  let _ = sb.append("a")!
+  1
+}
+
+pub fn main() -> Unit !io = { let _ = append(1) }
