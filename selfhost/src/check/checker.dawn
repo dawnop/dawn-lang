@@ -15249,6 +15249,333 @@ fn left(entered: Entered, after: Cx) -> Cx =
   unowned(Cx { ..after,
     syms: tast_positions.symbols(entered.resolver, after.syms, mint_cursor(entered.cx), mint_cursor(after)) })
 
+## The syntactic call graph over the inferred functions: for each pending
+## name, the pending names its body mentions. It is its own function because
+## it is the one step of the inferred pass that reads the context (the Java
+## class names and the local values that shadow them), so the scheduler hands
+## it the context and takes back what the reads recorded; everything after
+## it works on names and indices alone. Split out of `execute_module_bodies`
+## to keep that method under HotSpot's 8000-byte HugeMethodLimit (#241).
+fn inferred_dependencies(cx: Cx, fnds: List[FnDecl], pending: List[Int]) -> (Cx, Map[String, List[String]]) = {
+  var cx1 = cx
+  var pending_names: Set[String] = set.empty()
+  for idx in pending { pending_names = set.insert(pending_names, fnds[idx].name) }
+  var deps: Map[String, List[String]] = map.empty()
+  # the aliases are fixed for the module: pass_imports has already run, and a
+  # local declaration may not shadow one (spec §10.3)
+  let mod_alias_names: Set[String] = set.from(map.keys(cx1.module_aliases))
+  # `Class.m(..)` is a Java static call only when neither a constructor nor a
+  # constant claims the name first — that is check_method_call's static arm,
+  # and subtracting the two here keeps rs_java_static a membership test. All
+  # three tables are final: pass_java_uses, the type passes and
+  # pass_const_decls have all run.
+  var java_recv: Set[String] = set.empty()
+  let (names_cx, java_names) = java_class_names_read(cx1)
+  cx1 = names_cx
+  for cn in java_names {
+    let (shadow_cx, shadowed) = local_value_shadow_read(cx1, cn)
+    cx1 = shadow_cx
+    if not shadowed {
+      java_recv = set.insert(java_recv, cn)
+    }
+  }
+  for idx in pending {
+    let d = fnds[idx]
+    var sc = ref_scope(mod_alias_names, java_recv)
+    for p in fnds[idx].params { sc = rs_bind(sc, p.name) }
+    let refs: Set[String] = name_refs(d.body, set.empty(), sc)
+    var dlist: List[String] = []
+    for r in set.to_list(refs) {
+      if set.has(pending_names, r) { dlist = dlist ++ [r] }
+    }
+    deps = map.insert(deps, d.name, dlist)
+  }
+  (cx1, deps)
+}
+
+## The strongly connected components of the syntactic graph restricted to
+## `stuck`, the functions the round order never reached, callees first. Cut
+## here because the walk needs nothing but names and edges, and its two
+## explicit stacks are the largest block of locals in the scheduler: kept
+## inline they pushed `execute_module_bodies` past HugeMethodLimit, so the
+## whole scheduler ran interpreted (#241).
+fn cycle_components(fnds: List[FnDecl], stuck: List[Int], deps: Map[String, List[String]]) -> List[List[String]] = {
+  var stuck_names: List[String] = []
+  var is_stuck: Set[String] = set.empty()
+  for idx in stuck {
+    let n = fnds[idx].name
+    if not set.has(is_stuck, n) {
+      is_stuck = set.insert(is_stuck, n)
+      stuck_names = stuck_names ++ [n]
+    }
+  }
+  var succ: Map[String, List[String]] = map.empty()
+  for n in stuck_names {
+    var out: List[String] = []
+    for r in map.get(deps, n).expect("dep") {
+      if set.has(is_stuck, r) { out = out ++ [r] }
+    }
+    succ = map.insert(succ, n, out)
+  }
+  # Tarjan, with both stacks held as index-keyed maps so the walk needs no
+  # recursion however long a chain hangs off a cycle.
+  var visit: Map[String, Int] = map.empty()
+  var low: Map[String, Int] = map.empty()
+  var on_stack: Set[String] = set.empty()
+  var tstack: Map[Int, String] = map.empty()
+  var tsize = 0
+  var work: Map[Int, (String, Int)] = map.empty()
+  var wsize = 0
+  var components: List[List[String]] = []
+  for root in stuck_names {
+    if not map.has(visit, root) {
+      visit = map.insert(visit, root, map.len(visit))
+      low = map.insert(low, root, map.get(visit, root).expect("visit"))
+      on_stack = set.insert(on_stack, root)
+      tstack = map.insert(tstack, tsize, root)
+      tsize = tsize + 1
+      work = map.insert(work, wsize, (root, 0))
+      wsize = wsize + 1
+      while wsize > 0 {
+        let (v, pos) = map.get(work, wsize - 1).expect("frame")
+        let next = map.get(succ, v).expect("succ")
+        if pos < len(next) {
+          work = map.insert(work, wsize - 1, (v, pos + 1))
+          let w = next[pos]
+          match map.get(visit, w) {
+            None -> {
+              visit = map.insert(visit, w, map.len(visit))
+              low = map.insert(low, w, map.get(visit, w).expect("visit"))
+              on_stack = set.insert(on_stack, w)
+              tstack = map.insert(tstack, tsize, w)
+              tsize = tsize + 1
+              work = map.insert(work, wsize, (w, 0))
+              wsize = wsize + 1
+            }
+            Some(wi) -> {
+              if set.has(on_stack, w) && wi < map.get(low, v).expect("low") {
+                low = map.insert(low, v, wi)
+              }
+            }
+          }
+        } else {
+          wsize = wsize - 1
+          let vl = map.get(low, v).expect("low")
+          if vl == map.get(visit, v).expect("visit") {
+            var comp: List[String] = []
+            var popping = true
+            while popping {
+              tsize = tsize - 1
+              let w = map.get(tstack, tsize).expect("stacked")
+              on_stack = set.remove(on_stack, w)
+              comp = [w] ++ comp
+              if w == v { popping = false }
+            }
+            components = components ++ [comp]
+          }
+          if wsize > 0 {
+            let (u, _) = map.get(work, wsize - 1).expect("frame")
+            if vl < map.get(low, u).expect("low") { low = map.insert(low, u, vl) }
+          }
+        }
+      }
+    }
+  }
+  components
+}
+
+## The order the inferred bodies are tried in, as groups: the functions the
+## round order settles come first, one group each, and each component of
+## what is left follows as one group. The input is the pending indices and
+## the syntactic edges, the output is the groups and how many of them the
+## round order placed (those are final on their first attempt); nothing here
+## checks a body or reads the context, which is why the cut falls here.
+fn inferred_groups(fnds: List[FnDecl], pending: List[Int], deps: Map[String, List[String]]) -> (List[List[Int]], Int) = {
+  # The order is the one a round-by-round scan in declaration order gives:
+  # each round walks the still-pending indices by index and completes every
+  # one whose dependencies are all done, so completion runs in (round,
+  # index) order. It is computed here instead of scanned, because a chain
+  # whose callers come first completes one function per round and the scan
+  # was quadratic in it (ARC-08). The order is load-bearing: diagnostics
+  # come out in checking order, and so do the identifiers bodies mint.
+  #
+  # A name is done at its first completion in that order. An index f waits
+  # for each name r it depends on; if r was done at (k, g), f can complete
+  # in round k when g < f (the scan passes g before f) and in round k + 1
+  # otherwise, and in no earlier round than 1. So f's round is the largest
+  # such bound, which needs only the times its dependencies were done: one
+  # pass in topological order of names settles every round. Instances of a
+  # duplicated name share its dependency list, as they did in the scan; the
+  # name is done at the earliest of their times. A name that depends on
+  # itself, or on a name that is never done, is never done here: that is
+  # what the component pass below settles.
+  var instances: Map[String, List[Int]] = map.empty()
+  var waiting: Map[String, Int] = map.empty()
+  var dependents: Map[String, List[String]] = map.empty()
+  var queue: List[String] = []
+  for idx in pending {
+    let n = fnds[idx].name
+    match map.get(instances, n) {
+      Some(xs) -> { instances = map.insert(instances, n, xs ++ [idx]) }
+      None -> {
+        instances = map.insert(instances, n, [idx])
+        let dlist = map.get(deps, n).expect("dep")
+        waiting = map.insert(waiting, n, len(dlist))
+        for r in dlist {
+          dependents = map.insert(dependents, r, map.get(dependents, r).unwrap_or([]) ++ [n])
+        }
+        if len(dlist) == 0 { queue = queue ++ [n] }
+      }
+    }
+  }
+  var done_round: Map[String, Int] = map.empty()
+  var done_index: Map[String, Int] = map.empty()
+  var round: Map[Int, Int] = map.empty()
+  var qi = 0
+  while qi < len(queue) {
+    let n = queue[qi]
+    qi = qi + 1
+    let dlist = map.get(deps, n).expect("dep")
+    var first_round = 0
+    var first_index = -1
+    for f in map.get(instances, n).expect("instances") {
+      var r = 1
+      for dep in dlist {
+        let dk = map.get(done_round, dep).expect("done")
+        let bound = if map.get(done_index, dep).expect("done") < f { dk } else { dk + 1 }
+        if bound > r { r = bound }
+      }
+      round = map.insert(round, f, r)
+      if first_index < 0 || r < first_round || (r == first_round && f < first_index) {
+        first_round = r
+        first_index = f
+      }
+    }
+    done_round = map.insert(done_round, n, first_round)
+    done_index = map.insert(done_index, n, first_index)
+    for m in map.get(dependents, n).unwrap_or([]) {
+      let left_over = map.get(waiting, m).expect("waiting") - 1
+      waiting = map.insert(waiting, m, left_over)
+      if left_over == 0 { queue = queue ++ [m] }
+    }
+  }
+  # Bucket by round; walking the pending indices in order fills each bucket
+  # in index order, so the buckets read in round order are (round, index).
+  var by_round: Map[Int, List[Int]] = map.empty()
+  var last_round = 0
+  var stuck: List[Int] = []
+  for idx in pending {
+    match map.get(round, idx) {
+      Some(r) -> {
+        by_round = map.insert(by_round, r, map.get(by_round, r).unwrap_or([]) ++ [idx])
+        if r > last_round { last_round = r }
+      }
+      None -> { stuck = stuck ++ [idx] }
+    }
+  }
+  # Each function the pass above ordered is a group of its own, in that
+  # order; the components below follow them.
+  var groups: List[List[Int]] = []
+  var k = 1
+  while k <= last_round {
+    for idx in map.get(by_round, k).unwrap_or([]) { groups = groups ++ [[idx]] }
+    k = k + 1
+  }
+  # What is left never became ready: it sits on a cycle of the syntactic
+  # graph, or depends on one. That graph over-approximates the calls, so a
+  # cycle in it need not be a cycle of calls -- `sb.append(..)` on a Java
+  # receiver is an edge to a top-level `append` although it never calls it
+  # (audit ARC-01). Which edges are real is known only by checking: a body
+  # whose call or function value is typed from a signature still being
+  # inferred has `unsealed_uses` set when it comes back (`used_signature`).
+  #
+  # So the leftover graph is split into strongly connected components,
+  # which come out of Tarjan's walk callees first, and each becomes one
+  # group after those above. The members of a group are tried in index
+  # order, round after round. An attempt that used an unsealed signature is
+  # thrown away whole -- context and executor state are values, so nothing
+  # of it survives -- and tried again next round; one that did not is
+  # final, because everything it read was sealed. A round that seals
+  # nothing leaves a true cycle: its members are settled as errors, so a
+  # function outside the cycle that calls one is still checked, and the
+  # errorish type keeps the cascade quiet.
+  #
+  # A group of one function with no edge to itself has only sealed callees
+  # when it is reached, so its one attempt is final: a module whose
+  # syntactic graph has no cycle, which is every module accepted before
+  # cycles were settled this way, checks each body once in the order above
+  # and keeps what it got.
+  let components = cycle_components(fnds, stuck, deps)
+  let ordered = len(groups)
+  for comp in components {
+    var members: List[Int] = []
+    for n in comp { members = members ++ map.get(instances, n).expect("instances") }
+    groups = groups ++ [list.sort(members)]
+  }
+  (groups, ordered)
+}
+
+## Try one group of inferred bodies until a round seals nothing: the members
+## still blocked then form a true cycle, and are returned for the scheduler
+## to settle. An attempt that used an unsealed signature is thrown away
+## whole; one that did not is final. The group is the unit because that is
+## where the retry loop closes: nothing a group does depends on a later one,
+## and what it leaves behind is the state, the context and the typed
+## functions, which is exactly what this returns. Out of
+## `execute_module_bodies` so that method stays under HugeMethodLimit (#241).
+fn attempt_inferred_group[S](entry: S, cx: Cx, done: Map[Int, TFun], settled: Set[String],
+  executor: BodyExecutor[S], view: identity.DeclSpans, fnds: List[FnDecl], sigs: List[Sig],
+  group: List[Int], ordered: Bool) -> (S, Cx, Map[Int, TFun], List[Int]) !io = {
+  var state = entry
+  var cx1 = cx
+  var inferred = done
+  var trying = group
+  var sealed_some = true
+  while sealed_some && len(trying) > 0 {
+    sealed_some = false
+    var blocked: List[Int] = []
+    for idx in trying {
+      let d = fnds[idx]
+      # a completed index is never tried again, so the signature this
+      # reads is still the unsealed one the list held
+      let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
+      let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
+      var used_unsealed = false
+      for u in set.to_list(cxe.unsealed_uses) {
+        if not set.has(settled, u) { used_unsealed = true }
+      }
+      # A body the pass above ordered is final whatever it used, as it
+      # always was. Only a duplicated name can make it use an unsealed
+      # signature -- its instances share the last one's dependency list
+      # -- and such a module is already refused for the duplicate.
+      if ordered || not used_unsealed {
+        state = next_state
+        cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
+        inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
+        sealed_some = true
+      } else {
+        blocked = blocked ++ [idx]
+      }
+    }
+    trying = blocked
+  }
+  (state, cx1, inferred, trying)
+}
+
+## Report the true cycles once every group is done, in index order, which is
+## the order the scan before components reported every leftover function in.
+## Its own function because it runs after the last group, not per group.
+fn report_cycles(cx: Cx, fnds: List[FnDecl], cyclic: List[Int]) -> Cx = {
+  var cx1 = cx
+  for idx in list.sort(cyclic) {
+    let d = fnds[idx]
+    cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
+        "`: it is recursive (directly or mutually)", d.nlo, d.nhi,
+      "declare it: fn " ++ d.name ++ "(...) -> T = ...")
+  }
+  cx1
+}
+
 pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
   var state = initial
   let m = headers.syntax
@@ -15282,233 +15609,9 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     i = i + 1
   }
   if len(pending) > 0 {
-    var pending_names: Set[String] = set.empty()
-    for idx in pending { pending_names = set.insert(pending_names, fnds[idx].name) }
-    var deps: Map[String, List[String]] = map.empty()
-    # the aliases are fixed for the module: pass_imports has already run, and a
-    # local declaration may not shadow one (spec §10.3)
-    let mod_alias_names: Set[String] = set.from(map.keys(cx1.module_aliases))
-    # `Class.m(..)` is a Java static call only when neither a constructor nor a
-    # constant claims the name first — that is check_method_call's static arm,
-    # and subtracting the two here keeps rs_java_static a membership test. All
-    # three tables are final: pass_java_uses, the type passes and
-    # pass_const_decls have all run.
-    var java_recv: Set[String] = set.empty()
-    let (names_cx, java_names) = java_class_names_read(cx1)
-    cx1 = names_cx
-    for cn in java_names {
-      let (shadow_cx, shadowed) = local_value_shadow_read(cx1, cn)
-      cx1 = shadow_cx
-      if not shadowed {
-        java_recv = set.insert(java_recv, cn)
-      }
-    }
-    for idx in pending {
-      let d = fnds[idx]
-      var sc = ref_scope(mod_alias_names, java_recv)
-      for p in fnds[idx].params { sc = rs_bind(sc, p.name) }
-      let refs: Set[String] = name_refs(d.body, set.empty(), sc)
-      var dlist: List[String] = []
-      for r in set.to_list(refs) {
-        if set.has(pending_names, r) { dlist = dlist ++ [r] }
-      }
-      deps = map.insert(deps, d.name, dlist)
-    }
-    # The order is the one a round-by-round scan in declaration order gives:
-    # each round walks the still-pending indices by index and completes every
-    # one whose dependencies are all done, so completion runs in (round,
-    # index) order. It is computed here instead of scanned, because a chain
-    # whose callers come first completes one function per round and the scan
-    # was quadratic in it (ARC-08). The order is load-bearing: diagnostics
-    # come out in checking order, and so do the identifiers bodies mint.
-    #
-    # A name is done at its first completion in that order. An index f waits
-    # for each name r it depends on; if r was done at (k, g), f can complete
-    # in round k when g < f (the scan passes g before f) and in round k + 1
-    # otherwise, and in no earlier round than 1. So f's round is the largest
-    # such bound, which needs only the times its dependencies were done: one
-    # pass in topological order of names settles every round. Instances of a
-    # duplicated name share its dependency list, as they did in the scan; the
-    # name is done at the earliest of their times. A name that depends on
-    # itself, or on a name that is never done, is never done here: that is
-    # what the component pass below settles.
-    var instances: Map[String, List[Int]] = map.empty()
-    var waiting: Map[String, Int] = map.empty()
-    var dependents: Map[String, List[String]] = map.empty()
-    var queue: List[String] = []
-    for idx in pending {
-      let n = fnds[idx].name
-      match map.get(instances, n) {
-        Some(xs) -> { instances = map.insert(instances, n, xs ++ [idx]) }
-        None -> {
-          instances = map.insert(instances, n, [idx])
-          let dlist = map.get(deps, n).expect("dep")
-          waiting = map.insert(waiting, n, len(dlist))
-          for r in dlist {
-            dependents = map.insert(dependents, r, map.get(dependents, r).unwrap_or([]) ++ [n])
-          }
-          if len(dlist) == 0 { queue = queue ++ [n] }
-        }
-      }
-    }
-    var done_round: Map[String, Int] = map.empty()
-    var done_index: Map[String, Int] = map.empty()
-    var round: Map[Int, Int] = map.empty()
-    var qi = 0
-    while qi < len(queue) {
-      let n = queue[qi]
-      qi = qi + 1
-      let dlist = map.get(deps, n).expect("dep")
-      var first_round = 0
-      var first_index = -1
-      for f in map.get(instances, n).expect("instances") {
-        var r = 1
-        for dep in dlist {
-          let dk = map.get(done_round, dep).expect("done")
-          let bound = if map.get(done_index, dep).expect("done") < f { dk } else { dk + 1 }
-          if bound > r { r = bound }
-        }
-        round = map.insert(round, f, r)
-        if first_index < 0 || r < first_round || (r == first_round && f < first_index) {
-          first_round = r
-          first_index = f
-        }
-      }
-      done_round = map.insert(done_round, n, first_round)
-      done_index = map.insert(done_index, n, first_index)
-      for m in map.get(dependents, n).unwrap_or([]) {
-        let left_over = map.get(waiting, m).expect("waiting") - 1
-        waiting = map.insert(waiting, m, left_over)
-        if left_over == 0 { queue = queue ++ [m] }
-      }
-    }
-    # Bucket by round; walking the pending indices in order fills each bucket
-    # in index order, so the buckets read in round order are (round, index).
-    var by_round: Map[Int, List[Int]] = map.empty()
-    var last_round = 0
-    var stuck: List[Int] = []
-    for idx in pending {
-      match map.get(round, idx) {
-        Some(r) -> {
-          by_round = map.insert(by_round, r, map.get(by_round, r).unwrap_or([]) ++ [idx])
-          if r > last_round { last_round = r }
-        }
-        None -> { stuck = stuck ++ [idx] }
-      }
-    }
-    # Each function the pass above ordered is a group of its own, in that
-    # order; the components below follow them.
-    var groups: List[List[Int]] = []
-    var k = 1
-    while k <= last_round {
-      for idx in map.get(by_round, k).unwrap_or([]) { groups = groups ++ [[idx]] }
-      k = k + 1
-    }
-    # What is left never became ready: it sits on a cycle of the syntactic
-    # graph, or depends on one. That graph over-approximates the calls, so a
-    # cycle in it need not be a cycle of calls -- `sb.append(..)` on a Java
-    # receiver is an edge to a top-level `append` although it never calls it
-    # (audit ARC-01). Which edges are real is known only by checking: a body
-    # whose call or function value is typed from a signature still being
-    # inferred has `unsealed_uses` set when it comes back (`used_signature`).
-    #
-    # So the leftover graph is split into strongly connected components,
-    # which come out of Tarjan's walk callees first, and each becomes one
-    # group after those above. The members of a group are tried in index
-    # order, round after round. An attempt that used an unsealed signature is
-    # thrown away whole -- context and executor state are values, so nothing
-    # of it survives -- and tried again next round; one that did not is
-    # final, because everything it read was sealed. A round that seals
-    # nothing leaves a true cycle: its members are settled as errors, so a
-    # function outside the cycle that calls one is still checked, and the
-    # errorish type keeps the cascade quiet.
-    #
-    # A group of one function with no edge to itself has only sealed callees
-    # when it is reached, so its one attempt is final: a module whose
-    # syntactic graph has no cycle, which is every module accepted before
-    # cycles were settled this way, checks each body once in the order above
-    # and keeps what it got.
-    var stuck_names: List[String] = []
-    var is_stuck: Set[String] = set.empty()
-    for idx in stuck {
-      let n = fnds[idx].name
-      if not set.has(is_stuck, n) {
-        is_stuck = set.insert(is_stuck, n)
-        stuck_names = stuck_names ++ [n]
-      }
-    }
-    var succ: Map[String, List[String]] = map.empty()
-    for n in stuck_names {
-      var out: List[String] = []
-      for r in map.get(deps, n).expect("dep") {
-        if set.has(is_stuck, r) { out = out ++ [r] }
-      }
-      succ = map.insert(succ, n, out)
-    }
-    # Tarjan, with both stacks held as index-keyed maps so the walk needs no
-    # recursion however long a chain hangs off a cycle.
-    var visit: Map[String, Int] = map.empty()
-    var low: Map[String, Int] = map.empty()
-    var on_stack: Set[String] = set.empty()
-    var tstack: Map[Int, String] = map.empty()
-    var tsize = 0
-    var work: Map[Int, (String, Int)] = map.empty()
-    var wsize = 0
-    var components: List[List[String]] = []
-    for root in stuck_names {
-      if not map.has(visit, root) {
-        visit = map.insert(visit, root, map.len(visit))
-        low = map.insert(low, root, map.get(visit, root).expect("visit"))
-        on_stack = set.insert(on_stack, root)
-        tstack = map.insert(tstack, tsize, root)
-        tsize = tsize + 1
-        work = map.insert(work, wsize, (root, 0))
-        wsize = wsize + 1
-        while wsize > 0 {
-          let (v, pos) = map.get(work, wsize - 1).expect("frame")
-          let next = map.get(succ, v).expect("succ")
-          if pos < len(next) {
-            work = map.insert(work, wsize - 1, (v, pos + 1))
-            let w = next[pos]
-            match map.get(visit, w) {
-              None -> {
-                visit = map.insert(visit, w, map.len(visit))
-                low = map.insert(low, w, map.get(visit, w).expect("visit"))
-                on_stack = set.insert(on_stack, w)
-                tstack = map.insert(tstack, tsize, w)
-                tsize = tsize + 1
-                work = map.insert(work, wsize, (w, 0))
-                wsize = wsize + 1
-              }
-              Some(wi) -> {
-                if set.has(on_stack, w) && wi < map.get(low, v).expect("low") {
-                  low = map.insert(low, v, wi)
-                }
-              }
-            }
-          } else {
-            wsize = wsize - 1
-            let vl = map.get(low, v).expect("low")
-            if vl == map.get(visit, v).expect("visit") {
-              var comp: List[String] = []
-              var popping = true
-              while popping {
-                tsize = tsize - 1
-                let w = map.get(tstack, tsize).expect("stacked")
-                on_stack = set.remove(on_stack, w)
-                comp = [w] ++ comp
-                if w == v { popping = false }
-              }
-              components = components ++ [comp]
-            }
-            if wsize > 0 {
-              let (u, _) = map.get(work, wsize - 1).expect("frame")
-              if vl < map.get(low, u).expect("low") { low = map.insert(low, u, vl) }
-            }
-          }
-        }
-      }
-    }
+    let (deps_cx, deps) = inferred_dependencies(cx1, fnds, pending)
+    cx1 = deps_cx
+    let (groups, ordered) = inferred_groups(fnds, pending, deps)
     # A true cycle's members keep the placeholder signature, whose return
     # type is already TyError; `settled` is what stops a use of one from
     # blocking the functions that depend on it. They are reported once every
@@ -15516,57 +15619,21 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     # this reported every leftover function in.
     var settled: Set[String] = set.empty()
     var cyclic: List[Int] = []
-    let ordered = len(groups)
-    for comp in components {
-      var members: List[Int] = []
-      for n in comp { members = members ++ map.get(instances, n).expect("instances") }
-      groups = groups ++ [list.sort(members)]
-    }
     var gi = 0
     for group in groups {
-      var trying = group
-      var sealed_some = true
-      while sealed_some && len(trying) > 0 {
-        sealed_some = false
-        var blocked: List[Int] = []
-        for idx in trying {
-          let d = fnds[idx]
-          # a completed index is never tried again, so the signature this
-          # reads is still the unsealed one the list held
-          let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
-          let (next_state, cxe, tf) = executor.inferred_body(state, owner.cx, d, sigs[idx])
-          var used_unsealed = false
-          for u in set.to_list(cxe.unsealed_uses) {
-            if not set.has(settled, u) { used_unsealed = true }
-          }
-          # A body the pass above ordered is final whatever it used, as it
-          # always was. Only a duplicated name can make it use an unsealed
-          # signature -- its instances share the last one's dependency list
-          # -- and such a module is already refused for the duplicate.
-          if gi < ordered || not used_unsealed {
-            state = next_state
-            cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
-            inferred = map.insert(inferred, idx, tast_positions.function(owner.resolver, tf))
-            sealed_some = true
-          } else {
-            blocked = blocked ++ [idx]
-          }
-        }
-        trying = blocked
-      }
+      let (group_state, group_cx, group_inferred, cycle) = attempt_inferred_group(state, cx1, inferred, settled,
+        executor, view, fnds, sigs, group, gi < ordered)
+      state = group_state
+      cx1 = group_cx
+      inferred = group_inferred
       # what remains is a true cycle
-      for idx in trying {
+      for idx in cycle {
         settled = set.insert(settled, fnds[idx].name)
         cyclic = cyclic ++ [idx]
       }
       gi = gi + 1
     }
-    for idx in list.sort(cyclic) {
-      let d = fnds[idx]
-      cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
-          "`: it is recursive (directly or mutually)", d.nlo, d.nhi,
-        "declare it: fn " ++ d.name ++ "(...) -> T = ...")
-    }
+    cx1 = report_cycles(cx1, fnds, cyclic)
   }
   # 5.5. constant initializers, in declaration order (a const sees only
   # earlier consts; that order is also the evaluation order)

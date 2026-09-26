@@ -32,15 +32,21 @@ def main():
         ('test', 'executor.test_body(state, owner.cx, t.name, t.body)',
          '{ let (next, tree) = check_test(owner.cx, t.name, t.body)\n (state, next, tree) }'),
     ]
+    # The inferred role runs inside attempt_inferred_group, one group at a
+    # time, where the module's initial state and header context are not in
+    # scope and the group's entry state equals the current one for every
+    # group of one. So its reset and its stale context are applied where the
+    # scheduler hands a group its state and context: every group then starts
+    # from the module's initial state, or from the header context rather than
+    # from the context the passes before it left.
+    group_entry = 'attempt_inferred_group(state, cx1, inferred, settled,'
+    resets = {'inferred': (group_entry, group_entry.replace('(state,', '(initial,'))}
     subjects = [('positive', original)]
     for role, call, bypass in calls:
         subjects.append(('bypass-' + role, edit(original, call, bypass)))
-        subjects.append(('reset-state-' + role, edit(original, call, call.replace('(state,', '(initial,'))))
-    # The inferred arm's own declaration boundary, indented apart from the
-    # annotated one: the body is entered from the stale header context rather
-    # than from the context the passes before it left.
-    stale = ('        let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])',
-             '        let owner = enter_decl(headers.cx, view, [identity.Named(identity.FunctionDecl, d.name)])')
+        anchor, reset = resets.get(role, (call, call.replace('(state,', '(initial,')))
+        subjects.append(('reset-state-' + role, edit(original, anchor, reset)))
+    stale = (group_entry, group_entry.replace('cx1,', 'headers.cx,'))
     subjects.append(('stale-inferred-context', edit(original, stale[0], stale[1])))
     with tempfile.TemporaryDirectory(prefix='dawn-body-executor-') as temp:
         root = Path(temp)
