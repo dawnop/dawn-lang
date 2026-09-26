@@ -508,8 +508,8 @@ coverage and actual cache validity remain unfinished.
 header重排案例使用`allocation.local_headers`台账连接生产声明索引的局部ADT、
 opaque/透明alias、trait及方法、效果和函数签名binder，同时反转成对声明，
 直接核对各域ID与方法签名映射，并拒绝来源路径不符的header。另连接
-`local_impl_headers`读取生产header pass的泛型impl方法签名，核对顺序交换后的完整签名，
-并拒绝缺失、错序和metadata不匹配的签名表；再连接
+`local_impl_headers`按方法路径读取生产header pass的泛型impl方法签名，核对顺序交换后的完整签名，
+并拒绝缺失、存到别的方法路径下和metadata不匹配的签名表（S3起签名表按路径存取，错序已不可能）；再连接
 显式intrinsic保留身份。`body_relocation`按旧产物记下的区间做平移，按完整ABI角色置换
 顶层evidence，不从冷body读取目标ID；默认参数仍拒绝，独立产物接线待完成。
 默认参数正例另通过check_param_default分别捕获两个Int默认值，使用纯默认签名
@@ -553,8 +553,8 @@ owner和原函数名查找签名，别名不替代声明身份。另有一个跨
 
 function_product从真实ModuleHeaders构建顶层函数的具名header索引，保持当前语法与entry
 签名配对；重排案例按DeclKey读取旧body，再按当前keys顺序装配。function-products.py
-十五个编译负控守来源、owner、签名错位、多余签名、重复声明、impl分组/参数/角色与trait默认
-元数据。独立Methods视图保留impl/default分组顺序，读取真实注册ImplI和trait MethodSig，
+十五个编译负控守来源、owner、函数/impl方法/常量的键缺失即拒（S3替换了按下标的名字核对与
+两处长度尾检）、重复声明、impl分组/参数/角色与trait默认元数据。独立Methods视图保留impl/default分组顺序，读取真实注册ImplI和trait MethodSig，
 不把同名方法混为一个key。header重排案例已投影两个泛型impl方法及两个效果多态默认
 方法的签名/subject/trait ID。新增整模块案例重放四个泛型impl方法和两个trait默认方法的
 无标签body，再按当前impl组入口计算发射标签、按当前trait登记默认方法标签。

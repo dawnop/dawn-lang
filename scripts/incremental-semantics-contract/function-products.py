@@ -23,11 +23,21 @@ def main():
     mutations = [
         ("source", 'path == "" || scope.source != path', 'path == ""'),
         ("owner", "checked.cx.owner_class != Some(scope.emission_owner)", "false"),
-        ("signature-name", "signature.name != syntax.name ||", "false ||"),
-        ("signature-tail", "if function != len(checked.sigs) { return None }", ""),
+        # A header table is read by key; a key it does not hold must refuse
+        # the set rather than borrow a signature from elsewhere (ARC-07, S3).
+        # These replaced the positional name and tail checks the keyed
+        # tables made void.
+        ("signature-key-missing",
+         "let signature = identity.path_table_get(checked.sigs, identity.path_text(key.path))?",
+         'let signature = identity.path_table_get(checked.sigs, identity.path_text(key.path))'
+         '.unwrap_or(map.get(checked.cx.fns, syntax.name).expect("placeholder signature"))'),
         ("ambiguous-identity", "if map.get(locations, key) != Some((declaration, None)) { return None }", "if false { return None }"),
     ]
     method_mutations = [
+        ("method-key-missing",
+         "let filed = identity.path_table_get(checked.impl_sigs, identity.path_text(key.path))?\n          let sig = filed?",
+         "let sig = match identity.path_table_get(checked.impl_sigs, identity.path_text(key.path)) {\n"
+         "            Some(Some(s)) -> s\n            _ -> continue\n          }"),
         ("impl-groups", "groups = groups ++ [ImplGroup { key: parent_key, trait_name: trait_name, subject: subject, methods: group_keys }]", "groups = groups"),
         ("impl-owner", "info.owner == checked.cx.owner_class", "true"),
         ("impl-parameters", "sig.tparams != info.tparams ||", "false ||"),
@@ -38,7 +48,9 @@ def main():
     ]
     value_mutations = [
         ("constant-type", "if map.get(checked.cx.consts, name) != Some(declared) { return None }", ""),
-        ("constant-tail", "if ci != len(checked.const_tys) { return None }", ""),
+        ("constant-key-missing",
+         "let filed = identity.path_table_get(checked.const_tys, identity.path_text(key.path))?",
+         "let filed = identity.path_table_get(checked.const_tys, identity.path_text(key.path)).unwrap_or(map.get(checked.cx.consts, name))"),
         ("constant-visibility", "ConstantHeader(key, syntax, declared, visible)", "ConstantHeader(key, syntax, declared, set.empty())"),
         ("test-role", "tests = tests ++ [key]", "tests = constants ++ [key]"),
     ]

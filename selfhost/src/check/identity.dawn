@@ -125,6 +125,47 @@ pub fn path_text(path: List[Part]) -> String = {
   out
 }
 
+## A header product addressed by declaration path rather than by where the
+## declaration sits among its siblings (ARC-07). The pass that resolves a
+## header files it under the `path_text` of the declaration it read it off; a
+## consumer finds it again by spelling the same path from the syntax it holds.
+## Nothing pairs two lists by index, so a reorder, a filter or a dropped
+## declaration on either side cannot hand one declaration another's header.
+##
+## `paths` keeps every declaration in the order the pass met it. A path met
+## twice belongs to a module already refused for the repeat; the key names the
+## first of them, as a repeated name is done at its first instance in the
+## inferred-body schedule (docs/symbol-id-design.md §3.1). The later ones
+## queue in `repeats` only so that error recovery still checks each repeat's
+## body against the header written above it: a repeat may take other
+## parameters, and a body read against its twin's would index past them.
+pub type PathTable[V] = { paths: List[String], first: Map[String, V], repeats: Map[String, List[V]] }
+
+pub fn path_table[V]() -> PathTable[V] = PathTable { paths: [], first: map.empty(), repeats: map.empty() }
+
+pub fn path_table_add[V](t: PathTable[V], path: String, v: V) -> PathTable[V] =
+  match map.get(t.first, path) {
+    None -> PathTable { ..t, paths: t.paths ++ [path], first: map.insert(t.first, path, v) }
+    Some(_) -> PathTable { ..t, paths: t.paths ++ [path],
+      repeats: map.insert(t.repeats, path, map.get(t.repeats, path).unwrap_or([]) ++ [v]) }
+  }
+
+## The header of the declaration a path names. Absent is an answer: a caller
+## that needs every declaration's header refuses the set rather than guessing.
+pub fn path_table_get[V](t: PathTable[V], path: String) -> Option[V] = map.get(t.first, path)
+
+## A walk over the syntax in declaration order asks with the paths it meets,
+## counting how often it has met each one in `seen`; the n-th time it meets a
+## path it gets the n-th declaration filed under it. Outside a refused module
+## every path is met once and this is `path_table_get`.
+pub fn path_table_claim[V](t: PathTable[V], seen: Map[String, Int], path: String) -> (Map[String, Int], Option[V]) = {
+  let n = map.get(seen, path).unwrap_or(0)
+  let next = map.insert(seen, path, n + 1)
+  if n == 0 { return (next, map.get(t.first, path)) }
+  let later = map.get(t.repeats, path).unwrap_or([])
+  if n - 1 < len(later) { (next, Some(later[n - 1])) } else { (next, None) }
+}
+
 fn atom(s: String) -> String = to_string(str.len(s)) ++ ":" ++ s
 
 fn part_text(part: Part) -> String =

@@ -110,7 +110,7 @@ def main():
                               'syms: if match product.frame.current_sig { Some(s) -> s.name == "sample\\$default\\$0", None -> false } { current.syms } else { apply_changes(current.syms, product.symbols) }'),
             "impl-owner": ("sig.name != method.name || sig.owner != cx.owner_class", "sig.name != method.name || false"),
             "impl-parameters": ("sig.tparams != info.tparams", "false"),
-            "impl-roles": ("sig.is_builtin ||\n                  sig.trait_id != None || sig.op_of != None", "sig.is_builtin"),
+            "impl-roles": ("sig.is_builtin ||\n              sig.trait_id != None || sig.op_of != None", "sig.is_builtin"),
             "inferred-write": ("fns: apply_changes(current.fns, product.signatures)", "fns: current.fns"),
             "test-state": ("in_test: product.in_test", "in_test: if product.frame.current_sig == None { true } else { product.in_test }"),
         }
@@ -121,10 +121,14 @@ def main():
     (output / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
     checker = output / "selfhost/src/check/checker.dawn"
     source = checker.read_text()
-    checker.write_text(source + "\npub(pkg) fn headers_with_impls_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig], List[List[Option[Sig]]]) !io = {\n"
-                       + "  let headers = check_module_headers(cx, m, env)\n  (headers.cx, headers.sigs, headers.impl_sigs)\n}\n"
-                       + "\npub(pkg) fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
-                       + "  let (next, sigs, _) = headers_with_impls_for_body_probe(cx, m, env)\n  (next, sigs)\n}\n")
+    # The probes index functions by where they sit among the sample's own
+    # functions; the header tables are filed by path, so the adapter looks
+    # each one up by the path its syntax spells (the samples declare no
+    # function twice).
+    checker.write_text(source + "\npub(pkg) fn headers_for_body_probe(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, List[Sig]) !io = {\n"
+                       + "  let headers = check_module_headers(cx, m, env)\n"
+                       + "  (headers.cx, map(module_fns(m), d => identity.path_table_get(headers.sigs,\n"
+                       + "    identity.path_text([identity.Named(identity.FunctionDecl, d.name)])).expect(\"probe function header\")))\n}\n")
     fixture = output / "scripts/body-probe"
     probe = (HERE / "body-probe.dawn.txt").read_text()
     if args.typed:

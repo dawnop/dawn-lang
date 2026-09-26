@@ -18,7 +18,7 @@ use check/body_product
 use check/header_product
 use check/allocation
 use check/identity.{ModuleKey, DeclKey, Part, Named, FunctionDecl, TestDecl, module_key,
-  path_text, declaration_spans, span_at}
+  path_text, declaration_spans, span_at, PathTable, path_table, path_table_get}
 use front/parser
 use front/ast.{Module, FnDecl, module_fns, module_tests}
 
@@ -1145,8 +1145,10 @@ pub(pkg) fn header_sample() -> HeaderTrial !io = {
   if len(before.diags) != 0 || len(next.diags) != 0 { panic("header fixture invalid") }
   let decl = module_fns(old_ast)[1]
   let ndecl = module_fns(new_ast)[1]
-  let (after, saved) = check_fn(before, decl, sigs[1])
-  let (checked, cold) = check_fn(next, ndecl, nsigs[1])
+  let header_of = (table: PathTable[Sig], name: String) =>
+    path_table_get(table, path_text([Named(FunctionDecl, name)])).expect("header fixture function")
+  let (after, saved) = check_fn(before, decl, header_of(sigs, decl.name))
+  let (checked, cold) = check_fn(next, ndecl, header_of(nsigs, ndecl.name))
   if len(after.diags) != 0 || len(checked.diags) != 0 { panic("header body failed") }
   let old_ask = map.get(before.effects, "Ask").expect("old Ask")
   let old_tell = map.get(before.effects, "Tell").expect("old Tell")
@@ -1162,20 +1164,29 @@ pub(pkg) fn header_sample() -> HeaderTrial !io = {
   if allocation.local_headers(ModuleKey { ..scope, source: "foreign.dawn" }, old_ast, before) != None {
     panic("foreign source accepted for local headers")
   }
-  if allocation.local_impl_headers(scope, old_ast, before, []) != None {
+  if allocation.local_impl_headers(scope, old_ast, before, path_table()) != None {
     panic("missing impl signature table accepted")
   }
-  if allocation.local_impl_headers(scope, old_ast, before, [impl_sigs[1], impl_sigs[0]]) != None {
-    panic("reordered impl signature table accepted")
+  # The tables are filed by path (S3), so a reorder cannot misalign them; what
+  # can still go wrong is a header filed under another method's path.
+  let forward_path = impl_sigs.paths[0]
+  let repeat_path = impl_sigs.paths[1]
+  let forward_filed = path_table_get(impl_sigs, forward_path).expect("forward method filed")
+  let repeat_filed = path_table_get(impl_sigs, repeat_path).expect("repeat method filed")
+  let crossed = PathTable { ..impl_sigs,
+    first: map.insert(map.insert(impl_sigs.first, forward_path, repeat_filed), repeat_path, forward_filed) }
+  if allocation.local_impl_headers(scope, old_ast, before, crossed) != None {
+    panic("impl signature filed under another method accepted")
   }
   if allocation.local_impl_headers(scope, old_ast, Cx { ..before, local_impls: [] }, impl_sigs) != None {
     panic("missing impl provenance accepted")
   }
-  let original_impl_sig = impl_sigs[0][0].expect("impl signature guard fixture")
+  let original_impl_sig = forward_filed.expect("impl signature guard fixture")
   for invalid in [Sig { ..original_impl_sig, owner: Some("foreign") },
     Sig { ..original_impl_sig, tparams: [] }, Sig { ..original_impl_sig, is_builtin: true },
     Sig { ..original_impl_sig, trait_id: Some(999) }, Sig { ..original_impl_sig, op_of: Some((999, 0)) }] {
-    if allocation.local_impl_headers(scope, old_ast, before, [[Some(invalid)], impl_sigs[1]]) != None {
+    if allocation.local_impl_headers(scope, old_ast, before,
+      PathTable { ..impl_sigs, first: map.insert(impl_sigs.first, forward_path, Some(invalid)) }) != None {
       panic("invalid impl method metadata accepted")
     }
   }
@@ -1183,7 +1194,7 @@ pub(pkg) fn header_sample() -> HeaderTrial !io = {
   let old_table = allocation.combine([allocation.table(old_entries).expect("old local table"), reserved]).expect("old header table")
   let new_table = allocation.combine([allocation.table(new_entries).expect("new local table"), reserved]).expect("new header table")
   if not allocation.between(old_table, new_table) { panic("header body join refused") }
-  if not allocation.body_relocation(saved.sig, nsigs[1], saved.ev_syms) { panic("body allocation plan") }
+  if not allocation.body_relocation(saved.sig, header_of(nsigs, ndecl.name), saved.ev_syms) { panic("body allocation plan") }
   let old_methods = function_product.methods(scope, old_headers).expect("old named methods")
   let new_methods = function_product.methods(scope, new_headers).expect("new named methods")
   if len(function_product.impl_keys(old_methods)) != 2 || len(function_product.default_keys(old_methods)) != 2 {
@@ -1241,12 +1252,12 @@ pub(pkg) fn header_sample() -> HeaderTrial !io = {
       panic("trait header provenance mismatch")
     }
   }
-  var impl_index = 0
-  while impl_index < len(impl_sigs) {
-    let old_sig = impl_sigs[impl_index][0].expect("old impl method")
-    let new_sig = new_impl_sigs[1 - impl_index][0].expect("new impl method")
+  # The reorder swapped the two impls; each method is found by its path.
+  if len(impl_sigs.paths) != 2 || len(new_impl_sigs.paths) != 2 { panic("impl method headers missing") }
+  for path in impl_sigs.paths {
+    let old_sig = path_table_get(impl_sigs, path).expect("old impl method").expect("old impl signature")
+    let new_sig = path_table_get(new_impl_sigs, path).expect("new impl method").expect("new impl signature")
     if old_sig != new_sig { panic("impl method provenance mismatch") }
-    impl_index = impl_index + 1
   }
   let v = View { symbols: after.syms,
     callee: (owner, name, builtin, tr) => checked_callee(before, owner, name, builtin, tr) }

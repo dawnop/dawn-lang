@@ -30,13 +30,67 @@ fn ref_open(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> RefO
 fn ref_close(owned: RefOwned, after: Cx) -> Cx =
   unowned(Cx { ..after, syms: tast_positions.symbols(owned.positions, after.syms,
     mint_cursor(owned.context), mint_cursor(after)) })
+# The i-th time a walk in declaration order meets a path, it is the i-th
+# declaration filed under that path.
+fn ref_filed[V](table: PathTable[V], met: Map[String, Int], path: String) -> Option[V] = {
+  let times = map.get(met, path).unwrap_or(0)
+  if times == 0 { return map.get(table.first, path) }
+  match map.get(table.repeats, path) {
+    Some(later) -> if times <= len(later) { Some(later[times - 1]) } else { None }
+    None -> None
+  }
+}
+
+fn ref_headers_fns(table: PathTable[Sig], m: Module) -> List[Sig] = {
+  var out: List[Sig] = []
+  var met: Map[String, Int] = map.empty()
+  for d in module_fns(m) {
+    let path = identity.path_text([identity.Named(identity.FunctionDecl, d.name)])
+    out = out ++ [ref_filed(table, met, path).expect("reference function header")]
+    met = map.insert(met, path, map.get(met, path).unwrap_or(0) + 1)
+  }
+  out
+}
+
+fn ref_headers_methods(table: PathTable[Option[Sig]], m: Module) -> List[List[Option[Sig]]] = {
+  var out: List[List[Option[Sig]]] = []
+  var met: Map[String, Int] = map.empty()
+  for imd in module_impls(m) {
+    let head = [identity.ImplHead(imd.trait_name,
+      identity.type_shape(imd.subject, map(imd.tparams, tp => tp.name)))]
+    var row: List[Option[Sig]] = []
+    for me in imd.methods {
+      let path = identity.path_text(head ++ [identity.Named(identity.MethodDecl, me.name)])
+      row = row ++ [ref_filed(table, met, path).unwrap_or(None)]
+      met = map.insert(met, path, map.get(met, path).unwrap_or(0) + 1)
+    }
+    out = out ++ [row]
+  }
+  out
+}
+
+fn ref_headers_consts(table: PathTable[Option[Ty]], m: Module) -> List[Option[Ty]] = {
+  var out: List[Option[Ty]] = []
+  var met: Map[String, Int] = map.empty()
+  for d in module_consts(m) {
+    let path = identity.path_text([identity.Named(identity.ConstDecl, d.name)])
+    out = out ++ [ref_filed(table, met, path).unwrap_or(None)]
+    met = map.insert(met, path, map.get(met, path).unwrap_or(0) + 1)
+  }
+  out
+}
+
 pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodies !io = {
   let m = headers.syntax
   let view = identity.declaration_spans(m)
   var cx1 = headers.cx
-  let sigs = headers.sigs
-  let impl_sigs = headers.impl_sigs
-  let const_tys = headers.const_tys
+  # Since S3 (2026-09-26) the header tables are filed by declaration path.
+  # The loop below still reads one entry per declaration in declaration
+  # order, as it was frozen; `ref_headers_*` rebuild that view in this
+  # oracle's own words, and nothing below them changed.
+  let sigs = ref_headers_fns(headers.sigs, m)
+  let impl_sigs = ref_headers_methods(headers.impl_sigs, m)
+  let const_tys = ref_headers_consts(headers.const_tys, m)
   # 5. inferred functions first, in call-dependency order — every callee's
   # signature is final before any caller is checked; a cycle must annotate
   let fnds = module_fns(m)

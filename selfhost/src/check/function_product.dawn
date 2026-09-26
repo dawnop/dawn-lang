@@ -8,7 +8,7 @@ use check/checker.{ModuleHeaders, check_module_headers}
 use check/cx.{Cx, ModExports, cx_new}
 use check/types.{Sig, Ty, TyInt, TyString, ImplI, TraitI, MethodSig}
 use check/identity
-use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, ConstDecl, TestDecl, module_key}
+use check/identity.{ModuleKey, DeclKey, Named, FunctionDecl, ImplHead, MethodDecl, TraitDecl, ConstDecl, TestDecl, module_key, PathTable}
 use front/ast.{FnDecl, TraitMethod, TypeRef, ConstView, TestView, DFn, DImpl, DTrait, DConst, DTest}
 use front/parser
 
@@ -35,24 +35,22 @@ pub(pkg) fn headers(scope: ModuleKey, checked: ModuleHeaders) -> Option[Headers]
   var entries: Map[DeclKey, Header] = map.empty()
   var order: List[DeclKey] = []
   var declaration = 0
-  var function = 0
   for d in checked.syntax.decls {
     match d {
       DFn(syntax) -> {
-        if function >= len(checked.sigs) { return None }
-        let signature = checked.sigs[function]
-        if signature.name != syntax.name || signature.owner != checked.cx.owner_class { return None }
         let key = DeclKey { scope: scope, path: [Named(FunctionDecl, syntax.name)] }
+        # A declaration with no header is refused, never filled in: the key is
+        # the only thing pairing this syntax with a signature.
+        let signature = identity.path_table_get(checked.sigs, identity.path_text(key.path))?
+        if signature.owner != checked.cx.owner_class { return None }
         if map.get(locations, key) != Some((declaration, None)) { return None }
         entries = map.insert(entries, key, Header { key: key, syntax: syntax, signature: signature })
         order = order ++ [key]
-        function = function + 1
       }
       _ -> ()
     }
     declaration = declaration + 1
   }
-  if function != len(checked.sigs) { return None }
   Some(Data { order: order, entries: entries })
 }
 
@@ -84,14 +82,13 @@ pub(pkg) fn values(scope: ModuleKey, checked: ModuleHeaders) -> Option[Values] =
   var tests: List[DeclKey] = []
   var visible: Set[String] = set.empty()
   var declaration = 0
-  var ci = 0
   for d in checked.syntax.decls {
     match d {
       DConst(name, vis, ann, init, lo, hi, nlo, nhi) -> {
-        if ci >= len(checked.const_tys) { return None }
-        let declared = checked.const_tys[ci]?
-        if map.get(checked.cx.consts, name) != Some(declared) { return None }
         let key = DeclKey { scope: scope, path: [Named(ConstDecl, name)] }
+        let filed = identity.path_table_get(checked.const_tys, identity.path_text(key.path))?
+        let declared = filed?
+        if map.get(checked.cx.consts, name) != Some(declared) { return None }
         let expected: (Int, Option[Int]) = (declaration, None)
         if map.get(locations, key) != Some(expected) { return None }
         let syntax = ConstView { name: name, vis: vis, ann: ann, init: init,
@@ -99,7 +96,6 @@ pub(pkg) fn values(scope: ModuleKey, checked: ModuleHeaders) -> Option[Values] =
         entries = map.insert(entries, key, ConstantHeader(key, syntax, declared, visible))
         constants = constants ++ [key]
         visible = set.insert(visible, name)
-        ci = ci + 1
       }
       DTest(name, body, lo, hi, nlo, nhi) -> {
         let key = DeclKey { scope: scope, path: [Named(TestDecl, name)] }
@@ -113,7 +109,6 @@ pub(pkg) fn values(scope: ModuleKey, checked: ModuleHeaders) -> Option[Values] =
     }
     declaration = declaration + 1
   }
-  if ci != len(checked.const_tys) { return None }
   Some(ValueData { constants: constants, tests: tests, entries: entries })
 }
 
@@ -158,25 +153,23 @@ pub(pkg) fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods]
   var defaults: List[DeclKey] = []
   var groups: List[ImplGroup] = []
   var declaration = 0
-  var impl_index = 0
   for d in checked.syntax.decls {
     match d {
       DImpl(params, trait_name, _, _, subject, members, _, _, lo, hi) -> {
-        if impl_index >= len(checked.impl_sigs) { return None }
-        let sigs = checked.impl_sigs[impl_index]
         let info = map.get(registered, (lo, hi))?
         if map.get(checked.cx.traits_by_name, trait_name) != Some(info.trait_id) ||
-          len(sigs) != len(members) || len(info.tparams) != len(params) { return None }
+          len(info.tparams) != len(params) { return None }
         let parent = ImplHead(trait_name, identity.type_shape(subject, map(params, p => p.name)))
         let parent_key = DeclKey { scope: scope, path: [parent] }
         if map.get(locations, parent_key) != Some((declaration, None)) { return None }
         var group_keys: List[DeclKey] = []
         var member = 0
         for syntax in members {
-          let sig = sigs[member]?
-          if sig.name != syntax.name || sig.owner != checked.cx.owner_class || sig.tparams != info.tparams ||
-            sig.is_builtin || sig.trait_id != None || sig.op_of != None { return None }
           let key = DeclKey { scope: scope, path: [parent, Named(MethodDecl, syntax.name)] }
+          let filed = identity.path_table_get(checked.impl_sigs, identity.path_text(key.path))?
+          let sig = filed?
+          if sig.owner != checked.cx.owner_class || sig.tparams != info.tparams ||
+            sig.is_builtin || sig.trait_id != None || sig.op_of != None { return None }
           if map.get(locations, key) != Some((declaration, Some(member))) { return None }
           entries = map.insert(entries, key, ImplMethod(key, syntax, sig, info))
           impls = impls ++ [key]
@@ -184,7 +177,6 @@ pub(pkg) fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods]
           member = member + 1
         }
         groups = groups ++ [ImplGroup { key: parent_key, trait_name: trait_name, subject: subject, methods: group_keys }]
-        impl_index = impl_index + 1
       }
       DTrait(name, _, _, _, members, _, _, _, _, _, _, _) -> {
         let tid = map.get(checked.cx.traits_by_name, name)?
@@ -219,7 +211,6 @@ pub(pkg) fn methods(scope: ModuleKey, checked: ModuleHeaders) -> Option[Methods]
     }
     declaration = declaration + 1
   }
-  if impl_index != len(checked.impl_sigs) { return None }
   Some(MethodData { impls: impls, defaults: defaults, entries: entries, groups: groups })
 }
 
@@ -238,6 +229,20 @@ pub fn default_keys(methods: Methods) -> List[DeclKey] = { let data: MethodData 
 pub fn method(methods: Methods, key: DeclKey) -> Option[MethodHeader] = { let data: MethodData = methods
   map.get(data.entries, key)
 }
+
+## A header table with one path's header missing, and one with a header filed
+## under a path of another kind -- what a producer that spelled the key wrong
+## would hand over. Both must be refused, never filled in.
+fn missing[V](t: identity.PathTable[V], path: List[identity.Part]) -> identity.PathTable[V] =
+  PathTable { ..t, first: map.remove(t.first, identity.path_text(path)) }
+
+fn refiled[V](t: identity.PathTable[V], path: List[identity.Part], as_path: List[identity.Part]) -> identity.PathTable[V] = {
+  let v = identity.path_table_get(t, identity.path_text(path)).expect("a filed header")
+  PathTable { ..missing(t, path), first: map.insert(missing(t, path).first, identity.path_text(as_path), v) }
+}
+
+fn refile[V](t: identity.PathTable[V], path: List[identity.Part], v: V) -> identity.PathTable[V] =
+  PathTable { ..t, first: map.insert(t.first, identity.path_text(path), v) }
 
 test "function products bind entry signatures to stable current declarations" {
   let scope = module_key("world", "module", "module", "module.dawn")
@@ -261,9 +266,10 @@ test "function products bind entry signatures to stable current declarations" {
   assert get(b, DeclKey { ..ka[0], scope: ModuleKey { ..scope, world: "other" } }) == None
   assert headers(ModuleKey { ..scope, source: "elsewhere.dawn" }, old) == None
   assert headers(ModuleKey { ..scope, emission_owner: "other" }, old) == None
-  assert headers(scope, ModuleHeaders { ..old, sigs: [] }) == None
-  assert headers(scope, ModuleHeaders { ..old, sigs: old.sigs ++ [old.sigs[0]] }) == None
-  assert headers(scope, ModuleHeaders { ..old, sigs: [old.sigs[1], old.sigs[0]] }) == None
+  assert headers(scope, ModuleHeaders { ..old, sigs: identity.path_table() }) == None
+  let second_path = [Named(FunctionDecl, "second")]
+  assert headers(scope, ModuleHeaders { ..old, sigs: missing(old.sigs, second_path) }) == None
+  assert headers(scope, ModuleHeaders { ..old, sigs: refiled(old.sigs, second_path, [Named(TestDecl, "second")]) }) == None
   let (duplicate, _) = parser.parse_module("fn same() -> Int = 1\nfn same() -> Int = 2\n")
   let bad = check_module_headers(initial, duplicate, env)
   assert headers(scope, bad) == None
@@ -304,9 +310,11 @@ test "value products preserve constant visibility and separate test identities" 
   }
   assert values(ModuleKey { ..scope, emission_owner: "foreign" }, old) == None
   assert values(ModuleKey { ..scope, source: "foreign.dawn" }, old) == None
-  assert values(scope, ModuleHeaders { ..old, const_tys: [] }) == None
-  assert values(scope, ModuleHeaders { ..old, const_tys: old.const_tys ++ [Some(TyInt)] }) == None
-  assert values(scope, ModuleHeaders { ..old, const_tys: [Some(TyString), Some(TyInt)] }) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: identity.path_table() }) == None
+  let b_path = [Named(ConstDecl, "B")]
+  assert values(scope, ModuleHeaders { ..old, const_tys: missing(old.const_tys, b_path) }) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: refiled(old.const_tys, b_path, [Named(TestDecl, "B")]) }) == None
+  assert values(scope, ModuleHeaders { ..old, const_tys: refile(old.const_tys, [Named(ConstDecl, "A")], Some(TyString)) }) == None
   let (duplicate, _) = parser.parse_module("test \"same\" {}\ntest \"same\" {}\n")
   let bad = check_module_headers(initial, duplicate, env)
   assert values(scope, ModuleHeaders { ..bad, cx: Cx { ..bad.cx, diags: [] } }) == None
@@ -363,10 +371,15 @@ test "method products preserve impl and default owners across declaration reorde
     }
     _ -> { assert false }
   }
-  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [] }) == None
-  let sig = old.impl_sigs[0][0].expect("registered signature")
-  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [[Some(Sig { ..sig, is_builtin: true })], old.impl_sigs[1]] }) == None
-  assert methods(scope, ModuleHeaders { ..old, impl_sigs: [[Some(Sig { ..sig, tparams: [] })], old.impl_sigs[1]] }) == None
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: identity.path_table() }) == None
+  let forward_path = ai[0].path
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: missing(old.impl_sigs, forward_path) }) == None
+  let fn_kind = [forward_path[0], Named(FunctionDecl, "forward")]
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: refiled(old.impl_sigs, forward_path, fn_kind) }) == None
+  let sig = identity.path_table_get(old.impl_sigs, identity.path_text(forward_path)).expect("registered method")
+    .expect("registered signature")
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: refile(old.impl_sigs, forward_path, Some(Sig { ..sig, is_builtin: true })) }) == None
+  assert methods(scope, ModuleHeaders { ..old, impl_sigs: refile(old.impl_sigs, forward_path, Some(Sig { ..sig, tparams: [] })) }) == None
   let foreign = map(old.cx.local_impls, i => ImplI { ..i, owner: Some("foreign") })
   assert methods(scope, ModuleHeaders { ..old, cx: Cx { ..old.cx, local_impls: foreign } }) == None
   let tid = map.get(old.cx.traits_by_name, "Forward").expect("Forward trait")

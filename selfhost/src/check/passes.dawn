@@ -47,7 +47,8 @@ use check/types.{
 }
 
 use check/identity
-use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, Named, ImplHead}
+use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, MethodDecl, Named, ImplHead,
+  PathTable, path_table, path_table_add, path_table_get, path_table_claim, path_text }
 use check/cx.{
   resolve_named_effect,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
@@ -1744,15 +1745,16 @@ fn head_owner(h: Head) -> Option[String] =
 ## Pass 2.4: register impls — derive Ord first (so an explicit duplicate
 ## reports as the duplicate), then subject rules, the orphan rule, program-wide
 ## coherence, and method signature matching (the Kotlin registerImpls).
-## Also returns each impl's resolved method signatures (aligned with
-## module_impls × methods; None where registration failed), for body checking.
+## Also returns each impl method's resolved signature for body checking, filed
+## under the method's path `[ImplHead(trait, subject), Named(MethodDecl, m)]`;
+## None where registration refused the impl or the method.
 pub(pkg) fn pass_register_impls(
   cx: Cx,
   m: Module,
   shells: List[Option[Shell]]
-) -> (Cx, List[List[Option[Sig]]]) !io = {
+) -> (Cx, PathTable[Option[Sig]]) !io = {
   var cx1 = cx
-  var impl_sigs: List[List[Option[Sig]]] = []
+  var impl_sigs: PathTable[Option[Sig]] = path_table()
   # local ADT ids (for the orphan rule)
   var local_adts: Set[Int] = set.empty()
   for sh in shells {
@@ -1814,8 +1816,8 @@ pub(pkg) fn pass_register_impls(
     # inside whichever declaration the previous pass left open.
     var head_names: List[String] = []
     for tp in d.tparams { head_names = head_names ++ [tp.name] }
-    cx1 = enter_decl_owner(cx1,
-      [ImplHead(d.trait_name, identity.type_shape(d.subject, head_names))], d.tlo, d.thi)
+    let head = [ImplHead(d.trait_name, identity.type_shape(d.subject, head_names))]
+    cx1 = enter_decl_owner(cx1, head, d.tlo, d.thi)
     let tid = match map.get(cx1.traits_by_name, d.trait_name) {
       None -> {
         let pool = map.keys(cx1.traits_by_name)
@@ -1824,7 +1826,7 @@ pub(pkg) fn pass_register_impls(
           None -> "declare `trait " ++ d.trait_name ++ "[T] { ... }` or import it first"
         }
         cx1 = cerr_h(cx1, "unknown trait: ${d.trait_name}", d.tlo, d.thi, hint)
-        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        impl_sigs = refused_methods(impl_sigs, head, d.methods)
         continue
       }
       Some(t) -> t
@@ -1869,7 +1871,7 @@ pub(pkg) fn pass_register_impls(
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
     if subject == TyError {
-      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      impl_sigs = refused_methods(impl_sigs, head, d.methods)
       continue
     }
     match impl_shape_bad(cx1, subject, itvars) {
@@ -1878,7 +1880,7 @@ pub(pkg) fn pass_register_impls(
           t_lo2(d.subject), t_hi2(d.subject),
           why ++ "; a subject is a type constructor applied to this impl's own parameters, " ++
             "as in `impl[T: Eq] Eq[List[T]]`")
-        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        impl_sigs = refused_methods(impl_sigs, head, d.methods)
         continue
       }
       None -> ()
@@ -1902,7 +1904,7 @@ pub(pkg) fn pass_register_impls(
           "]` may not live here", d.tlo, d.thi,
         "an impl belongs to the module that declares `" ++ tr.name ++
           "` or the one that declares `" ++ ty_show(cx1.adts, subject) ++ "`")
-      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      impl_sigs = refused_methods(impl_sigs, head, d.methods)
       continue
     }
     # coherence: at most one impl per (trait, type) in the whole program
@@ -1920,7 +1922,7 @@ pub(pkg) fn pass_register_impls(
         }
         cx1 = cerr_h(cx1, "duplicate impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
             "]` is already implemented" ++ where2, d.tlo, d.thi, hint)
-        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        impl_sigs = refused_methods(impl_sigs, head, d.methods)
         continue
       }
       None -> ()
@@ -2033,7 +2035,6 @@ pub(pkg) fn pass_register_impls(
     }
     let em0: Map[Int, Eff] = map.empty()
     var provided: List[String] = []
-    var msigs: List[Option[Sig]] = []
     for me in d.methods {
       var ms: Option[MethodSig] = None
       for entry in tr.methods {
@@ -2049,7 +2050,7 @@ pub(pkg) fn pass_register_impls(
           }
           cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
             me.nlo, me.nhi, suggest.hint(me.name, mnames))
-          msigs = msigs ++ [no_sig()]
+          impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
           continue
         }
         Some(v) -> v
@@ -2061,7 +2062,7 @@ pub(pkg) fn pass_register_impls(
       if already {
         cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
           me.nlo, me.nhi)
-        msigs = msigs ++ [no_sig()]
+        impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), no_sig())
         continue
       }
       let saved_ev = cx1.current_eff_vars
@@ -2205,7 +2206,7 @@ pub(pkg) fn pass_register_impls(
             "the method's shape; declare the method !" ++ eff_show(want_eff))
       }
       provided = provided ++ [me.name]
-      msigs = msigs ++ [Some(msig)]
+      impl_sigs = path_table_add(impl_sigs, method_path(head, me.name), Some(msig))
     }
     let no_tp: Map[String, Ty] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: no_tp }
@@ -2260,7 +2261,6 @@ pub(pkg) fn pass_register_impls(
       impl_table: insert_impl(cx1.impl_table, info),
       local_impls: cx1.local_impls ++ [info]
     }
-    impl_sigs = impl_sigs ++ [msigs]
   }
   cx1 = check_derived_fields(cx1, m, shells)
   cx1 = check_eq_hash_pairs(cx1, eq_hash_impls)
@@ -2451,12 +2451,13 @@ pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[Li
   (cx1, out)
 }
 
-## Pass 3: function signatures. Returns the per-decl signature list, aligned
-## with module_fns order. The effect variables each signature introduced ride
-## in `Sig.eparams`; body checking reads them back from there (`enter_fn`).
-pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
+## Pass 3: function signatures. Returns each function's signature filed under
+## its path `[Named(FunctionDecl, name)]`. The effect variables each signature
+## introduced ride in `Sig.eparams`; body checking reads them back from there
+## (`enter_fn`).
+pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = {
   var cx1 = cx
-  var sigs: List[Sig] = []
+  var sigs: PathTable[Sig] = path_table()
   for d in module_fns(m) {
     cx1 = enter_decl_owner(cx1, [Named(FunctionDecl, d.name)], d.nlo, d.nhi)
     var tpnames: List[String] = []
@@ -2554,7 +2555,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig]) !io = {
       op_of: None,
       inferring: inferring
     }
-    sigs = sigs ++ [sig]
+    sigs = path_table_add(sigs, path_text([Named(FunctionDecl, d.name)]), sig)
     # a top-level fn may shadow a builtin, a std name, or a prelude trait
     # method (spec §10.6)
     cx1 = bind_fn(cx1, d.name, sig, OLocal("function"), d.nlo, d.nhi)
@@ -2578,6 +2579,9 @@ test "Eq and Hash resolve as bounds like any other trait" {
   assert len(cx2.diags) == 0
   assert bs2[0] == [ORD_ID, EQ_ID]
 }
+
+fn fn_header(t: PathTable[Sig], name: String) -> Sig =
+  path_table_get(t, path_text([Named(FunctionDecl, name)])).expect("a filed function header")
 
 test "fn signatures resolve with bounds and worst-effect inference" {
   # fn f[T: Ord](x: T) -> T   and   fn g(x: Int) = x  (inferring → io placeholder)
@@ -2619,10 +2623,11 @@ test "fn signatures resolve with bounds and worst-effect inference" {
   var cx = seed_prelude(test_cx())
   let (cx1, sigs) = pass_fn_signatures(cx, m)
   assert len(cx1.diags) == 0
-  assert sig_render(cx1.adts, cx1.traits, sigs[0]) == "fn f[T: Ord](x: T) -> T"
-  assert sigs[1].inferring
-  assert sigs[1].eff == EIo
-  assert map.get(cx1.fns, "g") == Some(sigs[1])
+  assert sigs.paths == [path_text([Named(FunctionDecl, "f")]), path_text([Named(FunctionDecl, "g")])]
+  assert sig_render(cx1.adts, cx1.traits, fn_header(sigs, "f")) == "fn f[T: Ord](x: T) -> T"
+  assert fn_header(sigs, "g").inferring
+  assert fn_header(sigs, "g").eff == EIo
+  assert map.get(cx1.fns, "g") == Some(fn_header(sigs, "g"))
 }
 
 test "a signature's effect variables land in eparams once each, in mint order" {
@@ -2656,7 +2661,7 @@ test "a signature's effect variables land in eparams once each, in mint order" {
   # parameter types. Nothing but the ids decides this: the table they come out
   # of is keyed by name.
   var names: List[String] = []
-  for e in sigs[0].eparams {
+  for e in fn_header(sigs, "h").eparams {
     match e {
       EffVar(n, _) -> { names = names ++ [n] }
       _ -> { assert false }
@@ -2712,11 +2717,11 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   var cx = seed_prelude(test_cx())
   let (cx1, sigs) = pass_fn_signatures(cx, m)
   assert len(cx1.diags) == 0
-  assert eparam_names(sigs[0]) == ["c", "a", "b"]
+  assert eparam_names(fn_header(sigs, "h")) == ["c", "a", "b"]
   # and the renderer shows them, in that order, after the type parameters
   # (decision 9): the row already told the reader the effect is there, the
   # parameter table is what tells them where it is bound
-  assert sig_render(cx1.adts, cx1.traits, sigs[0]) ==
+  assert sig_render(cx1.adts, cx1.traits, fn_header(sigs, "h")) ==
     "fn h[!c, !a, !b](f: fn() -> Int !a, g: fn() -> Int !b, k: fn() -> Int !a) -> Int !c"
 
   # A binder mentioned nowhere else in the signature is still a parameter of
@@ -2727,7 +2732,7 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   var cx2 = seed_prelude(test_cx())
   let (cx3, sigs2) = pass_fn_signatures(cx2, m2)
   assert len(cx3.diags) == 0
-  assert eparam_names(sigs2[0]) == ["c", "a", "b", "z"]
+  assert eparam_names(fn_header(sigs2, "h")) == ["c", "a", "b", "z"]
 
   # And the binder list is where the order comes from when the two disagree:
   # minting happens at the binder, before the row.
@@ -2736,16 +2741,17 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   var cx4 = seed_prelude(test_cx())
   let (cx5, sigs3) = pass_fn_signatures(cx4, m3)
   assert len(cx5.diags) == 0
-  assert eparam_names(sigs3[0]) == ["b", "a", "c"]
+  assert eparam_names(fn_header(sigs3, "h")) == ["b", "a", "c"]
 }
 
 ## Pass 3.5: constant declarations — types only (initializers run later, after
 ## signature inference). The Kotlin declareConst.
-## Also returns each declared type (aligned with module_consts; None where the
-## name was skipped for alias/import clashes), for initializer checking.
-pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
+## Also returns each declared type filed under the constant's path
+## `[Named(ConstDecl, name)]` (None where the name was skipped for alias/import
+## clashes), for initializer checking.
+pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, PathTable[Option[Ty]]) !io = {
   var cx1 = cx
-  var decl_tys: List[Option[Ty]] = []
+  var decl_tys: PathTable[Option[Ty]] = path_table()
   var all: Set[String] = set.empty()
   for d in module_consts(m) { all = set.insert(all, d.name) }
   cx1 = Cx { ..cx1, all_const_names: all }
@@ -2753,12 +2759,12 @@ pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = 
     cx1 = enter_decl_owner(cx1, [Named(ConstDecl, d.name)], d.nlo, d.nhi)
     if alias_shadows(cx1, d.name) {
       cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
-      decl_tys = decl_tys ++ [no_ty2()]
+      decl_tys = path_table_add(decl_tys, path_text([Named(ConstDecl, d.name)]), no_ty2())
       continue
     }
     if import_clashes(cx1, d.name) {
       cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "constant")
-      decl_tys = decl_tys ++ [no_ty2()]
+      decl_tys = path_table_add(decl_tys, path_text([Named(ConstDecl, d.name)]), no_ty2())
       continue
     }
     let empty_tp: Map[String, Ty] = map.empty()
@@ -2775,7 +2781,7 @@ pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = 
     }
     # the initializer still checks against the annotation as written (the
     # Kotlin resolvedAnn survives the constType poisoning)
-    decl_tys = decl_tys ++ [Some(declared0)]
+    decl_tys = path_table_add(decl_tys, path_text([Named(ConstDecl, d.name)]), Some(declared0))
     if map.has(cx1.ctors_by_name, d.name) || map.has(cx1.adts_by_name, d.name) ||
       map.has(cx1.traits_by_name, d.name) {
         cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with a type, trait, or constructor name",
@@ -2798,13 +2804,15 @@ pub(pkg) fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = 
 ## is an ordinary helper (spec §10.5, SPC-04): the language reserves no other
 ## identifier, and the entry is a property of the program, which the loader
 ## settles, not of the spelling.
-pub(pkg) fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
+pub(pkg) fn pass_main_check(cx: Cx, m: Module, sigs: PathTable[Sig]) -> Cx = {
   if not cx.is_entry_module { return cx }
   var cx1 = cx
-  var i = 0
+  var seen: Map[String, Int] = map.empty()
   for d in module_fns(m) {
+    let (claimed, header) = path_table_claim(sigs, seen, path_text([Named(FunctionDecl, d.name)]))
+    seen = claimed
     if d.name == "main" {
-      let sig = sigs[i]
+      let sig = header.expect("pass_fn_signatures files every function")
       if len(sig.param_tys) > 0 || sig.ret != TyUnit {
         cx1 = cerr(cx1, "main must have the signature fn main() -> Unit !io", d.nlo, d.nhi)
       }
@@ -2829,7 +2837,6 @@ pub(pkg) fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
           d.nlo, d.nhi, "nothing calls main, so nothing can supply its evidence")
       }
     }
-    i = i + 1
   }
   cx1
 }
@@ -2843,9 +2850,15 @@ test "const declarations register in order with serializability checks" {
     DConst("A", VisPrivate, TNamed("Int", [], [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
   ] }
   var cx = seed_prelude(test_cx())
-  let (cxcd, _) = pass_const_decls(cx, m)
+  let (cxcd, tys) = pass_const_decls(cx, m)
   cx = cxcd
   assert cx.const_order == ["A", "B"]
+  # Each declared type is filed under its constant's path, the repeat too:
+  # the path names the first `A`, and the second waits behind it.
+  let a = path_text([Named(ConstDecl, "A")])
+  assert tys.paths == [a, path_text([Named(ConstDecl, "B")]), a]
+  assert path_table_get(tys, a) == Some(Some(TyInt))
+  assert map.get(tys.repeats, a) == Some([Some(TyInt)])
   assert map.get(cx.consts, "B") == Some(TyError)
   assert len(cx.diags) == 2
   assert str.contains(cx.diags[0].msg, "not a constant-serializable type")
@@ -3795,8 +3808,15 @@ fn no_tref() -> Option[TypeRef] = None
 
 fn no_ty2() -> Option[Ty] = None
 
-fn no_msigs(n: Int) -> List[Option[Sig]] = {
-  var out: List[Option[Sig]] = []
-  for _i in 0..n { out = out ++ [no_sig()] }
+## The key an impl method's header is filed under: the same path
+## `identity.declarations` gives the method, so the scheduler finds it by
+## spelling the path from the syntax it walks.
+fn method_path(head: List[identity.Part], name: String) -> String =
+  path_text(head ++ [Named(MethodDecl, name)])
+
+## An impl registration refused: each of its methods is filed with no header.
+fn refused_methods(t: PathTable[Option[Sig]], head: List[identity.Part], methods: List[FnDecl]) -> PathTable[Option[Sig]] = {
+  var out = t
+  for me in methods { out = path_table_add(out, method_path(head, me.name), no_sig()) }
   out
 }
