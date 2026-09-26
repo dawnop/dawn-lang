@@ -516,7 +516,7 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
 - 只改 `runtime/c/dawn_rt.c`：§4.0 那个 `dawn_failure` + handler 帧持有。
 - `python3 scripts/gen-rtsrc.py` 重生成 `selfhost/src/embed/rtsrc.dawn`
   （忘了这一步会被 `cdriver.dawn:268-287` 的内联陈旧检查当场抓住，
-  它跑在 CI 的 `test` job 里）。
+  它跑在 CI 的 `test-compiler` job 里，09-26 以前叫 `test`）。
 - **oracle**：刀 0 的三个语料转绿并从 `known-red.txt` 删行；
   `spike-native` 全量绿；`rc-contract` 绿；`native-cli-diff` 的长消息腿绿。
 - **Emit-Change**：预测是「`rtsrc.dawn` 变 → `Emit-Change(emit selfhost)` 一行」，

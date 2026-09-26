@@ -99,6 +99,20 @@ name: gates
 # free. `grep -c '^  [a-z0-9-]*:$' .github/workflows/gates.yml` answers the
 # question in the only way that cannot go stale.
 #
+# Job ids after a split. scripts/gate-observations.py and the nightly audit
+# match runs to budget lines by job id, over a seven-day window, and know
+# nothing about what a job ran. So a split never reuses an id that had a
+# different shape inside that window: a shard family is named
+# `<family>-<shards>-<i>` (syntax-mutants-3-1 .. 3-3 since 2026-09-26; the
+# next split of that family is syntax-mutants-4-1 .. 4-4), and a job split by
+# steps gives every half a new name (test became test-compiler and
+# test-programs, incremental-3 became incremental-3-1 and -3-2). Keeping an
+# old id would hold a third of the work to the whole job's old runs for a
+# week, and the audit would be red on runs that no longer exist in that
+# shape. The families that predate this rule (native-diff-1/2,
+# incremental-1 .. 8, contracts-1/2 and the rest) keep their ids until they
+# are next split.
+#
 # The setup they each repeat is ~40s and comes out of
 # .github/actions/dawn-toolchain, which exists so that the copies cannot drift.
 #
@@ -657,7 +671,7 @@ jobs:
     # 748s planning value above was 168s over it; restated to the
     # observation plus a tenth, 638s, and the timeout to 3x that.
     # 2026-09-25: the fixture package's six test modules moved into the
-    # compiler package as contract/*, where the `test` job's
+    # compiler package as contract/*, where the `test-compiler` job's
     # `dawn test selfhost` runs them, so its step here is retired. The
     # observed 638s above still includes that step; it is left as the
     # claim rather than subtracting an unmeasured runner cost.
@@ -883,9 +897,14 @@ jobs:
   # #166 figure). The same arithmetic over the two-shard deal gives 933s and
   # 922s against the 914s and 917s observed, a ceiling by 5s to 19s.
   # Restate each line at its own worst once three main runs of it exist.
-  syntax-mutants-1:
+  #
+  # The jobs were syntax-mutants-1 and -2 until this split, and the new ids
+  # carry the shard count (`<family>-<shards>-<i>`, the header has the rule)
+  # so that the nightly audit, which matches runs by job id, never compares
+  # a third of the matrix with a half of it.
+  syntax-mutants-3-1:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-1') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3-1') }}
     runs-on: ubuntu-latest
     # 47 mutants over three shards at the unsplit step's worst observation
     # (1111s) is ~370s of mutants per shard, plus the fixture contracts
@@ -935,14 +954,14 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-syntax-1
+          name: mutant-coverage-syntax-3-1
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
 
-  syntax-mutants-2:
+  syntax-mutants-3-2:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-2') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3-2') }}
     runs-on: ubuntu-latest
     # 2026-09-03: restated from the Actions API -- the worst of 57
     # completed main runs since 09-02 is 506s (run 33683419900), which the
@@ -977,16 +996,16 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-syntax-2
+          name: mutant-coverage-syntax-3-2
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
 
-  syntax-mutants-3:
+  syntax-mutants-3-3:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'syntax-mutants-3-3') }}
     runs-on: ubuntu-latest
-    # 2026-09-26, the third shard (see the family note above shard 1): 14
+    # 2026-09-26, the third shard (see the family note above syntax-mutants-3-1): 14
     # mutants, 514s of them at their worst, plus 72s of fixtures and 50s of
     # fixed overhead = 636s.
     # budget: 3x 636s planning value (per-mutant worst observations plus fixtures and 50s fixed overhead)
@@ -1003,7 +1022,7 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-syntax-3
+          name: mutant-coverage-syntax-3-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -1080,10 +1099,11 @@ jobs:
   # (job duration less its work steps, the #166 figure). The same arithmetic
   # over the two-shard deal gives 825s and 820s against the 822s and 814s
   # observed. Restate each line at its own worst once three main runs of it
-  # exist.
-  builtin-type-1:
+  # exist. The jobs were builtin-type-1 and -2 until this split; the ids
+  # carry the shard count for the reason given above syntax-mutants-3-1.
+  builtin-type-3-1:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-1') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-3-1') }}
     runs-on: ubuntu-latest
     # The observation this replaces is 585s (run 33853792854, the post-prune
     # window of 09-03T17:42Z .. 09-04T12:10Z), which is what forced the
@@ -1125,17 +1145,17 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-builtin-type-1
+          name: mutant-coverage-builtin-type-3-1
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
 
-  builtin-type-2:
+  builtin-type-3-2:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-2') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-3-2') }}
     runs-on: ubuntu-latest
     # The second shard, on the same matrix and the same arithmetic; the note
-    # above builtin-type-1 carries the measurements and why four rather than
+    # above builtin-type-3-1 carries the measurements and why four rather than
     # three. Each line restates the arithmetic on its own reading, because a
     # budget line has to be readable beside the timeout it bounds.
     # 198 + 70 = 268, doubled is 536s.
@@ -1146,7 +1166,7 @@ jobs:
     # 2026-09-24: 809s (run 35896078409) over the 29 completed main runs of
     # 09-18T18:44Z .. 09-23T23:38Z, 15s over the 794s claim; same audit as
     # syntax-mutants-2.
-    # 2026-09-26, N=2 -> N=3 (see the family note above builtin-type-1): 9
+    # 2026-09-26, N=2 -> N=3 (see the family note above builtin-type-3-1): 9
     # mutants, 505s of them at their worst, plus 43s for the rest of the
     # step and 50s of fixed overhead = 598s.
     # budget: 3x 598s planning value (per-mutant worst observations plus probe and 50s fixed overhead)
@@ -1163,16 +1183,16 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-builtin-type-2
+          name: mutant-coverage-builtin-type-3-2
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
 
-  builtin-type-3:
+  builtin-type-3-3:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-3') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'builtin-type-3-3') }}
     runs-on: ubuntu-latest
-    # 2026-09-26, the third shard (see the family note above builtin-type-1):
+    # 2026-09-26, the third shard (see the family note above builtin-type-3-1):
     # 8 mutants, 446s of them at their worst, plus 43s for the rest of the
     # step and 50s of fixed overhead = 540s.
     # budget: 3x 540s planning value (per-mutant worst observations plus probe and 50s fixed overhead)
@@ -1189,7 +1209,7 @@ jobs:
       - name: record which mutants this shard ran
         uses: actions/upload-artifact@v4
         with:
-          name: mutant-coverage-builtin-type-3
+          name: mutant-coverage-builtin-type-3-3
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -1238,9 +1258,12 @@ jobs:
 
   # The core suite: the compiler's own tests, the self-hosting proof and the
   # gates that read the compiler's source or grammar rather than its products.
-  test:
+  # It was the job `test` until 2026-09-26, when half of it moved to
+  # test-programs; the new id keeps the nightly audit from holding this half
+  # to the whole job's old runs (the header has the naming rule).
+  test-compiler:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'test') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'test-compiler') }}
     runs-on: ubuntu-latest
     # Every timeout in this file is roughly 3x the job's own measured wall
     # clock, re-measured after the 2026-08-10 redistribution (run 31353623211
@@ -1285,12 +1308,12 @@ jobs:
     # Configured standalone LSP: shared fresh-build setup plus this scope's
     # complete matrices/control summed to 118.98s in the local all-suite run.
     # Double rounded headroom: 670 + 2 * 119 = 908s; no job is added.
-    # 2026-09-26, split in two (#242): 918s worst (run 36219628503) over the
-    # 50 main runs of 09-19T11:23Z .. 09-26T07:39Z, and a restatement with the
-    # usual tenth would have crossed the 950s pole. The steps that run Dawn
-    # programs and compare what they compute (std's own tests, the narrow
-    # oracle, the packages, the examples, the effect evidence corpus) moved to
-    # test-programs below; what stays is the compiler's own suites, the LSP
+    # 2026-09-26, split in two (#242), `test` until then: 918s worst (run
+    # 36219628503) over the 50 main runs of 09-19T11:23Z .. 09-26T07:39Z,
+    # and a restatement with the usual tenth would have crossed the 950s
+    # pole. The steps that run Dawn programs and compare what they compute
+    # (std's own tests, the narrow oracle, the packages, the examples, the
+    # effect evidence corpus) moved to test-programs below; what stays is the compiler's own suites, the LSP
     # counts, the fixed point and the gates that read its source or grammar.
     # Nothing is added or removed: the union of the two jobs' `run:` lines is
     # exactly this job's before the split.
@@ -3020,7 +3043,7 @@ jobs:
     # assertion. It buys the ownership property, which was prose until the
     # matrix became the gate. 258s predicted on the runner from
     # export-surface's measured 122s -> 206s ratio for the same kind of work;
-    # the budget takes the worse of the two, as `test` explains. Re-derive from
+    # the budget takes the worse of the two, as `test-compiler` explains. Re-derive from
     # the first run to carry them, the way 30af350 did for export-surface.
     # 2026-09-03: restated from the Actions API -- the worst of 57
     # completed main runs since 09-02 is 284s (run 33727540404), which the
@@ -3066,7 +3089,7 @@ jobs:
     runs-on: ubuntu-latest
     # 300s predicted from java-target-classpath's nine builds (270s there;
     # locally the ten cost 158s, which is not the runner's figure), 292s
-    # measured in the first run to carry it (31364390451); see `test`.
+    # measured in the first run to carry it (31364390451); see `test-compiler`.
     # 2026-09-11: 317s (run 34228544128) over the 25 completed main runs of
     # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
     # 25s over the 292s claim.
@@ -3205,7 +3228,7 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'prev-diff-native') }}
     runs-on: ubuntu-latest
-    # 484s before the move, 475s after; see the note in `test`. The tea-core
+    # 484s before the move, 475s after; see the note in `test-compiler`. The tea-core
     # leg of native-cli-diff.sh (the #9 regression oracle) adds ~6s locally,
     # doubled for the runner.
     # 2026-09-03: restated from the Actions API -- the worst of 57
@@ -3260,7 +3283,7 @@ jobs:
 
   # `dawn test selfhost`, on the other backend.
   #
-  # Why it exists. `test` above runs `./bin/dawn test selfhost`, which is the
+  # Why it exists. `test-compiler` above runs `./bin/dawn test selfhost`, which is the
   # JVM and only the JVM, so every inline test in the compiler was read by one
   # backend. That was tolerable while those tests were about data structures.
   # It stopped being tolerable on 2026-09-04, when `Console` and `Exit` became
@@ -3278,7 +3301,7 @@ jobs:
   # is 768 errors, all of them that refusal, and none of them a bug. The
   # native driver's own module graph is the half of selfhost this backend
   # compiles at all, and it is the half the moved cases' native halves live
-  # in. The JVM half stays covered by `test`'s own step, which is the only
+  # in. The JVM half stays covered by `test-compiler`'s own step, which is the only
   # place `main.dawn`'s parsers can run.
   #
   # Why its own job rather than a step of prev-diff-native, which already has
@@ -3580,7 +3603,7 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'prev-diff') }}
     runs-on: ubuntu-latest
-    # 210s before the move and 210s after it; see the note in `test`.
+    # 210s before the move and 210s after it; see the note in `test-compiler`.
     # 2026-09-03: restated from the Actions API -- the worst of 57
     # completed main runs since 09-02 is 213s (run 33731092049), which the
     # 210s claim was 3s under. scripts/gate-observations.py pulled it;
@@ -3728,12 +3751,12 @@ jobs:
       - plan
       - native-diff-1
       - native-diff-2
-      - syntax-mutants-1
-      - syntax-mutants-2
-      - syntax-mutants-3
-      - builtin-type-1
-      - builtin-type-2
-      - builtin-type-3
+      - syntax-mutants-3-1
+      - syntax-mutants-3-2
+      - syntax-mutants-3-3
+      - builtin-type-3-1
+      - builtin-type-3-2
+      - builtin-type-3-3
     if: ${{ always() && needs.plan.result == 'success' && (needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'mutant-shards-complete')) }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
@@ -3755,8 +3778,8 @@ jobs:
         id: families
         env:
           NATIVE_DIFF: ${{ needs.native-diff-1.result }} ${{ needs.native-diff-2.result }}
-          SYNTAX: ${{ needs.syntax-mutants-1.result }} ${{ needs.syntax-mutants-2.result }} ${{ needs.syntax-mutants-3.result }}
-          BUILTIN_TYPE: ${{ needs.builtin-type-1.result }} ${{ needs.builtin-type-2.result }} ${{ needs.builtin-type-3.result }}
+          SYNTAX: ${{ needs.syntax-mutants-3-1.result }} ${{ needs.syntax-mutants-3-2.result }} ${{ needs.syntax-mutants-3-3.result }}
+          BUILTIN_TYPE: ${{ needs.builtin-type-3-1.result }} ${{ needs.builtin-type-3-2.result }} ${{ needs.builtin-type-3-3.result }}
         run: |
           flags="--exclude-harness tile-golden"
           ran=false

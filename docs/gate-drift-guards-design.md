@@ -216,27 +216,33 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 
 | 旧 job | 旧声明 | 新 job | 新声明 | timeout | 依据 |
 |---|---|---|---|---|---|
-| syntax-mutants-1 | 902 | syntax-mutants-1 | 718 | 36 | 17 个变异体 596 + 夹具 72 + 50 |
-| syntax-mutants-2 | 897 | syntax-mutants-2 | 680 | 34 | 16 个变异体 557 + 夹具 72 + 50 |
-| | | syntax-mutants-3 | 636 | 32 | 14 个变异体 514 + 夹具 72 + 50 |
-| builtin-type-1 | 889 | builtin-type-1 | 600 | 30 | 9 个变异体 506 + probe 等 43 + 50 |
-| builtin-type-2 | 809 | builtin-type-2 | 598 | 30 | 9 个变异体 505 + 43 + 50 |
-| | | builtin-type-3 | 540 | 27 | 8 个变异体 446 + 43 + 50 |
-| test | 908 | test | 545 | 28 | 编译器自身的 9 步最坏之和 495 + 50 |
+| syntax-mutants-1 | 902 | syntax-mutants-3-1 | 718 | 36 | 17 个变异体 596 + 夹具 72 + 50 |
+| syntax-mutants-2 | 897 | syntax-mutants-3-2 | 680 | 34 | 16 个变异体 557 + 夹具 72 + 50 |
+| | | syntax-mutants-3-3 | 636 | 32 | 14 个变异体 514 + 夹具 72 + 50 |
+| builtin-type-1 | 889 | builtin-type-3-1 | 600 | 30 | 9 个变异体 506 + probe 等 43 + 50 |
+| builtin-type-2 | 809 | builtin-type-3-2 | 598 | 30 | 9 个变异体 505 + 43 + 50 |
+| | | builtin-type-3-3 | 540 | 27 | 8 个变异体 446 + 43 + 50 |
+| test | 908 | test-compiler | 545 | 28 | 编译器自身的 9 步最坏之和 495 + 50 |
 | | | test-programs | 442 | 23 | 跑 Dawn 程序、核对结果的 6 步最坏之和 392 + 50 |
 | incremental-3 | 812 | incremental-3-1 | 521 | 27 | local-value-reads 471 + 50 |
 | | | incremental-3-2 | 405 | 21 | identity + header-state 226、state-product 129，+ 50 |
+
+**拆片后的 job 一律换新名。** nightly 审计（`gate-observations.py` + `check-gate-budgets.py --observed`）按 job id 把 7 天窗口里的运行对到预算行上，不知道 job 跑的内容变过。
+沿用旧名的话，三分之一的工作会被拿去和整片的旧运行比，合入后审计连红一周（本分支最初保留旧名时实测：五条红）。
+所以命名规则写进了 gates.yml 头注：分片家族叫 `<family>-<shards>-<i>`（本轮 `syntax-mutants-3-1..3-3`、`builtin-type-3-1..3-3`，下次拆成四片就是 `-4-1..4-4`），
+按步骤拆的每一半都起新名（`test` → `test-compiler` + `test-programs`，`incremental-3` → `incremental-3-1/3-2`）。#166 的先例本来就是这样（incremental-7 → 7-1/7-2、contracts → contracts-1/2）。
+规则之前就存在的家族（native-diff-1/2、incremental-1..8、contracts-1/2 等）下次拆时再改名。按 steps lock 的家族规则，新名意味着新家族（`syntax-mutants-3`、`builtin-type-3`、`test-compiler`），锁随之重录。
 
 - **变异体分片的估计**：从窗口内 89 份 syntax 分片日志、87 份 builtin 分片日志里，按相邻 `PASS` 行的时间差取每个变异体的最坏值
   （pattern-or 约 26 s、for-pattern 37 到 39 s、syntax-small 16 到 18 s，builtin 54 到 57 s；syntax-small 每片第一个变异体多付一次冷启动，记 72 s），
   按 `position % 3` 求和，再加每片都要跑的夹具（步骤时长减变异体之和的最坏值：syntax 72 s，builtin 43 s）。同一算法套在两片旧分法上得
   933 / 922 s（实测最坏 914 / 917）与 825 / 820 s（实测 822 / 814），高估 3 到 19 s，是上界。分片仍按 harness 各自轮转，三片数量是 17 / 16 / 14 与 9 / 9 / 8。
-- **test 的切法**：run 36219628503 的步骤时间戳与窗口内 41 次成功运行的逐步最坏。留在 `test` 的是编译器自己的测试与读源码/文法的门
+- **test 的切法**：run 36219628503 的步骤时间戳与窗口内 41 次成功运行的逐步最坏。留在 `test-compiler` 的是编译器自己的测试与读源码/文法的门
   （compiler-plan、configured LSP、selfhost tests、comptime trace、fixpoint、grammar corpus、Int.MIN、Emit-Change 解析器、fmt）；
   搬到 `test-programs` 的是跑 Dawn 程序并核对其计算结果的步骤（`dawn test --stdlib`、narrow、package tests、example tests、example main、effect evidence）。
   任务单举例的名字是 `test-std`，但这一半还含 examples 与 effect evidence 语料，叫 std 名不副实，所以用 `test-programs`。
 - 两片 `run:` 的并集与拆前逐字相同：`steps_lock.py check` 在 record 之前列出的缺失与多出一一对应（`syntax-mutants` 与 `builtin-type` 只有 `--shard` 参数变化，各多一步）；
-  record 后 177 个 run 步骤、29 个家族（拆前 175、27）。`incremental-3-1/2` 与 `test-programs` 按 steps lock 的家族规则是新家族，所以原家族「少了」步骤；
+  record 后 177 个 run 步骤、29 个家族（拆前 175、27）。新名都是 steps lock 意义上的新家族，所以原家族「少了」步骤；
   push-total 是升的，不触发 `Gate-Retire`。
 - `mutant-shards-complete` 的 `needs` 与两组结果变量各加第三片；用日志还原的 `position % 3` 三份覆盖记录喂 `scripts/mutant-coverage/check.py`，四个 harness 全覆盖；
   删掉其中一份，按名报出缺的 9 个变异体。
@@ -244,7 +250,7 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 **push-total 26149 → 26617 s（+468）**：四个新 job 的固定开销 4 × 50 = 200 s；其余 268 s 是新声明按逐步、逐变异体最坏之和构造（是上界），
 其中 116 s 是 #242 点名的旧声明低于各自最坏运行的部分。
 
-**墙钟**：每次 push 的 job 数 39 → 43（加 plan 是 44）。按 gates.yml 头部的算术，span ≥ max(最长 job, 总 job 秒 / 20)，现在绑定的是后一项
+**墙钟**：每次 push 的 gate job 数 39 → 43（加 plan 是 44）。按 gates.yml 头部的算术，span ≥ max(最长 job, 总 job 秒 / 20)，现在绑定的是后一项
 （09-25 的实测排队下限约 1,080 s）。拆片后最长 job 仍是 `incremental-8`（声明 937 s，不在本轮），四个新 job 每个多一次约 44 s 的工具链 setup，
 中位总量约 +180 job 秒，排队下限约 +9 s。所以和首轮结论一样：**拆片只买 pole 余量，不买墙钟**；墙钟略增，量级在运行间噪声之内。
 集群外部门禁全套的 `--jobs` 相应从 39 改为 43。

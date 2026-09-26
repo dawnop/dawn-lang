@@ -910,7 +910,7 @@ native 驱动的入口（`cmd_*` / `parse_run_tail`）一份。脚本还剩的�
 仍然只有脚本说得出来，它对它留下的每一条用例照旧说。
 
 **native 腿：`scripts/native-selfhost-tests.sh`，`gates.yml` 的第 37 个 job。**
-一条内联测试跑在谁身上，由谁跑 `dawn test` 决定，而 `gates.yml` 的 `test` job 跑的是
+一条内联测试跑在谁身上，由谁跑 `dawn test` 决定，而 `gates.yml` 的 `test-compiler` job（09-26 以前叫 `test`）跑的是
 `./bin/dawn test selfhost`，只有 JVM。不补这条腿，搬一条就少一条 native 覆盖（裁决 14）。
 **这条腿的目标是 `selfhost/src/nmain.dawn` 而不是 `selfhost`**：native 后端拒 `use java`，
 而 `main.dawn`、`jvm/emit`、`jvm/codegen`、`jvm/jreflect` 都建在它上面，实测

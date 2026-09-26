@@ -41,7 +41,7 @@ two-module aggregate parse counts, retained-memory measurement, or default
 activation evidence. Source-attributed project counters remain separate work.
 No existing `/tmp` artifact is accepted by the canonical runner.
 
-CI runs standalone in the existing `test` job and project in
+CI runs standalone in the `test-compiler` job and project in
 `incremental-body-execution-1`. Each suite builds its own independent artifacts;
 the runner self-test checks both invocations and itself appear exactly once.
 No job is added. The measured all-suite command sums, including shared setup
