@@ -81,7 +81,8 @@ LOG_LINE = re.compile(r"^(?:PASS|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s\s*$", re
 # each other (24.3 to 24.4s each, and 122.52s for the five-subject shard 0,
 # measured alone on a 16 core machine at loadavg 3.5 to 4.9 on 2026-09-13), so
 # the 811s divides by subject count: five thirteenths to shard 0, which keeps
-# the positive subject, and four to each of the others.
+# the positive subject, and four to each of the others. body-probe's typed
+# entry left the table on 2026-09-27 with the replay engine it probed.
 STATIC_HINTS = {
     "prefix-shards-3-shard-0": 312,
     "prefix-shards-3-shard-1": 250,
@@ -91,7 +92,6 @@ STATIC_HINTS = {
     "diagnostic-reads-shards-3-shard-2": 623,
     "type-reads": 592,
     "diagnostic-reads-shards-3-shard-1": 561,
-    "body-probe-typed-typed-all": 555,
     "function-reads": 467,
     "java-oracle-reads": 434,
     "java-member-reads": 393,
@@ -329,7 +329,7 @@ def scanned_jobs(text):
 
 
 def discovery_self_test():
-    contract = "python3 scripts/incremental-semantics-contract/scalar-replay.py --suite calls"
+    contract = "python3 scripts/incremental-semantics-contract/function-reads.py --suite observation"
 
     def fixture(job, run, extra_steps=None):
         return yaml.safe_dump({"jobs": {job: {"steps": (extra_steps or []) + [

@@ -33,14 +33,13 @@ def main():
         # `project-name-key`, `project-name-answer` and `project-info-key`
         # stood here and are gone with the read-log projection they mutated
         # (K7b). A Java class fact is carried whole now.
-        ("body_product", "capture-reads", "semantic_reads.capture(before.function_reads, after.function_reads)?", "before.function_reads"),
     ]
     # Six more stood here, one per `JClass` field (`project-info-fqcn`,
     # `-simple`, `-display`, `-is_interface`, `-is_primitive`, `-is_array`).
     # They edited the field the projection copied out of a class fact, and the
     # projection no longer copies fields: the fact is carried whole (K7b).
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
-               for name in ("cx", "checker", "semantic_reads", "body_product")}
+               for name in ("cx", "checker", "semantic_reads")}
     subjects = [(module, "positive", source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-java-reads-") as temp:
@@ -59,7 +58,7 @@ def main():
                     raise RuntimeError("Positive " + module + " failed\n" + output)
             else:
                 prefix = ("java reads" if module in ("cx", "checker") else
-                          "semantic reads preserve plain Java metadata" if module == "semantic_reads" else "body product")
+                          "semantic reads preserve plain Java metadata")
                 if not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?" + prefix + r"[^\n]*\n\s+assertion failed:", output, re.M):
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: Java reads " + module + " " + name, flush=True)

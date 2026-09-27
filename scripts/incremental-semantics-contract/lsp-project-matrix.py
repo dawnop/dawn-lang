@@ -18,20 +18,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/lsp-workspace-contract"))
 from workspace import LspClient, did_open, did_change, did_close, position
 
-COUNT_FIELDS = ("checked_bodies", "reused_bodies", "reused_modules",
-                "cold_rejected_bodies", "unobserved_modules", "retained_body_products")
-EXPECTED_COUNTS = {
-    "provider-body": (1, 3, 0, 0, 0, 4),
-    "provider-signature": (2, 2, 0, 1, 0, 2),
-    "consumer-recovery": (2, 0, 1, 0, 0, 4),
-    "provider-error": (1, 1, 0, 0, 1, 0),
-    "provider-recovery": (4, 0, 0, 0, 0, 4),
-    "provider-move": (0, 4, 0, 0, 0, 4),
-    "close-provider": (2, 2, 0, 1, 0, 2),
-    "reopen-provider": (3, 1, 0, 0, 0, 4),
-}
-
-
 def replace_once(text, old, new):
     if text.count(old) != 1:
         raise ValueError("project edit anchor is missing or ambiguous")
@@ -55,14 +41,6 @@ def artifact_hashes(command):
         elif argument.endswith(".jar") and Path(argument).is_file():
             paths.append(Path(argument))
     return {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(set(paths))}
-
-
-def validate_counts(counts, label):
-    if len(counts) != 1 or not counts[0]["observed"] or counts[0]["scope"] != "project":
-        raise RuntimeError("expected one observed project analysis")
-    actual = tuple(counts[0]["counts"][field] for field in COUNT_FIELDS)
-    if actual != EXPECTED_COUNTS[label]:
-        raise RuntimeError(f"{label}: project counts {actual} != {EXPECTED_COUNTS[label]}")
 
 
 def validate_epoch(publishes, main_uri, main_version, error_uri, error_message):
@@ -124,25 +102,13 @@ def selftest():
         except RuntimeError:
             continue
         raise AssertionError("stale/missing provider publication accepted")
-    for label, expected in EXPECTED_COUNTS.items():
-        good = {"observed": True, "scope": "project", "counts": dict(zip(COUNT_FIELDS, expected))}
-        validate_counts([good], label)
-        for invalid in ([], [good, good], [{**good, "scope": "standalone"}],
-                        [{**good, "counts": {**good["counts"], "checked_bodies": expected[0] + 1}}]):
-            try:
-                validate_counts(invalid, label)
-            except RuntimeError:
-                continue
-            raise AssertionError("invalid project count observation accepted")
-    print("OK: eight exact project censuses and thirty-two rejection cases")
+    print("OK: project version oracle and four rejection cases")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--compare", type=Path)
-    parser.add_argument("--expect-reuse", action="store_true")
-    parser.add_argument("--expect-parse-counts", choices=("prepared", "cold"))
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -224,32 +190,21 @@ def main():
                 raise RuntimeError(f"{label}: clean query target unresolved")
             counts = [decode(line) for line in client.stderr_text()[stderr_mark:].splitlines()
                       if line.startswith("LSP_BODY_STATS\t")]
-            entries = [line.split("\t")[1:] for line in client.stderr_text()[stderr_mark:].splitlines()
-                       if line.startswith("LSP_PARSE_ENTRY\t")]
-            if any(entry not in (["0"], ["1"], ["2"]) for entry in entries):
-                raise RuntimeError("invalid project parser-entry trace")
-            parse_counts = [entries.count([str(index)]) for index in range(3)] if entries else None
-            if args.expect_parse_counts:
-                expected = [2, 2, 2] if args.expect_parse_counts == "prepared" else [2, 0, 0]
-                if parse_counts != expected:
-                    raise RuntimeError(f"{label}: project parse/index/projection counts {parse_counts} != {expected}")
-            if args.expect_reuse:
-                validate_counts(counts, label)
             rows.append({"label": label, "diagnostics": publishes, "replies": replies,
-                         "analysis_counts": counts, "parse_counts": parse_counts})
+                         "analysis_counts": counts})
             (args.output / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")
         client.shutdown_exit()
     finally:
         (args.output / "stderr.txt").write_text(client.stderr_text())
         client.close()
-    semantic = [{key: value for key, value in row.items() if key not in {"analysis_counts", "parse_counts"}} for row in rows]
+    semantic = [{key: value for key, value in row.items() if key != "analysis_counts"} for row in rows]
     (args.output / "semantic.json").write_text(json.dumps(semantic, indent=2) + "\n")
     if args.compare:
         previous = json.loads((args.compare / "metadata.json").read_text())
         if previous["sources"] != fingerprints or previous.get("history") != history:
             raise RuntimeError("project comparison fixture differs")
         if json.loads((args.compare / "semantic.json").read_text()) != semantic:
-            raise RuntimeError("project protocol cold/prepared results differ")
+            raise RuntimeError("project protocol results differ from the comparison run")
     for name, path in paths.items():
         if path.read_text() != texts[name]:
             raise RuntimeError("project benchmark changed a fixture file")

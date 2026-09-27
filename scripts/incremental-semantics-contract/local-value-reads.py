@@ -75,9 +75,8 @@ def main():
         # `header-answer-id`, `header-binder`, `field-answer-id`, `field-type`,
         # `field-name` and `field-slot`. A constructor fact is carried whole
         # now, fields and all.
-        ('body_product', 'capture', 'semantic_reads.capture(before.function_reads, after.function_reads)?', 'before.function_reads'),
     ]
-    modules = ('cx', 'checker', 'semantic_reads', 'body_product', 'exhaustive')
+    modules = ('cx', 'checker', 'semantic_reads', 'exhaustive')
     sources = {module: (ROOT / 'selfhost/src/check' / (module + '.dawn')).read_text() for module in modules}
     subjects = [(module, 'positive', source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
@@ -102,7 +101,7 @@ def main():
         end = len(source) if following is None else match.end() + following.start()
         body = edit(source[match.start():end], old, new)
         subjects.append(('checker', name, source[:match.start()] + body + source[end:]))
-    owning = re.compile(r'^FAIL\s+(?:check/\w+ :: )?(?:local |constructor |exhaustive reads|handler reads|record field reads|pre-resolved constructors|export reads|java namespace reads|semantic reads|body product)[^\n]*\n\s+assertion failed:', re.M)
+    owning = re.compile(r'^FAIL\s+(?:check/\w+ :: )?(?:local |constructor |exhaustive reads|handler reads|record field reads|pre-resolved constructors|export reads|java namespace reads|semantic reads)[^\n]*\n\s+assertion failed:', re.M)
     with tempfile.TemporaryDirectory(prefix='dawn-local-values-') as temp:
         root = Path(temp)
         for directory in ('selfhost', 'compiler-plan'):

@@ -20,11 +20,8 @@ def main():
         # once a binder is `identity.pack` of its declaration and its slot, so
         # a control that replaced the callback with `Some` could not be told
         # from the production code (K5). The alias and constant source
-        # callbacks below still decide something and stay.
-        ("body_product", "alias-source-callback", "semantic_reads.project(p.function_reads, source_value)",
-         "semantic_reads.project(p.function_reads, (owner, source) => Some(source))"),
-        ("body_product", "constant-source-callback", "tree => body_admit.constant(v, tree), source_value, true)",
-         "tree => body_admit.constant(v, tree), (owner, source) => Some(source), true)"),
+        # callbacks went with `body_product` and the replay engine
+        # (2026-09-27); the recording side below is what is left.
         ("cx", "observation", "semantic_reads.observe(cx.function_reads, fact)", "cx.function_reads"),
         ("cx", "alias-header", "semantic_reads.QualifiedAliasHeader(q, name, header_answer)", "semantic_reads.QualifiedAliasHeader(q, name, None)"),
         ("cx", "alias-type-binders", "tparams: al.tparams, eparams: al.eparams,", "tparams: [], eparams: al.eparams,"),
@@ -65,7 +62,7 @@ def main():
         ("semantic_reads", "alias-source-owner", "Some(source_value(owner, source)?)", "Some(source_value(name, source)?)"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
-               for name in ("cx", "semantic_reads", "body_product")}
+               for name in ("cx", "semantic_reads")}
     subjects = [(module, "positive", source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-type-reads-") as temp:
@@ -82,7 +79,7 @@ def main():
             if name == "positive":
                 if status:
                     raise RuntimeError("Positive " + module + " failed\n" + output)
-            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:type reads|semantic reads|body product) [^\n]*\n\s+assertion failed:", output, re.M):
+            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:type reads|semantic reads) [^\n]*\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: type reads " + module + " " + name, flush=True)
     print(f"OK: type reads and {len(variants)} compiling mutants, {time.monotonic() - started:.2f}s")

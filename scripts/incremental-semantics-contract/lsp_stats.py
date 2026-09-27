@@ -2,10 +2,7 @@
 
 FIELDS = (
     "reused_modules", "checked_modules", "comptime_modules", "retained_modules",
-    "retained_text_units", "checked_bodies", "reused_bodies", "cold_unadmitted_bodies",
-    "cold_rejected_bodies", "visited_bodies", "capture_refused", "unobserved_modules",
-    "retained_body_modules", "retained_body_products", "retained_total_modules",
-    "retained_total_text_units",
+    "retained_text_units",
 )
 
 

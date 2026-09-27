@@ -34,14 +34,13 @@ def main():
         # `names-projection` and `names-order` stood here and are gone with the
         # read-log projection they mutated (K7b). A Java namespace fact names
         # nothing the compiler renumbers, so it is carried whole.
-        ("body_product", "capture", "semantic_reads.capture(before.function_reads, after.function_reads)?", "before.function_reads"),
     ]
     for kind in ("effect", "trait"):
         anchor = '    if occupied {\n      cx1 = cerr_h(cx1, "' + kind + ' `'
         variants.append(("passes", kind + "-collision-consumer", anchor,
                          '    cx1 = Cx { ..cx1, function_reads: cx.function_reads }\n' + anchor))
     sources = {m: (ROOT / "selfhost/src/check" / (m + ".dawn")).read_text()
-               for m in ("cx", "passes", "checker", "semantic_reads", "body_product")}
+               for m in ("cx", "passes", "checker", "semantic_reads")}
     subjects = [(m, "positive", s) for m, s in sources.items()]
     subjects += [(m, n, edit(sources[m], a, b)) for m, n, a, b in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-java-namespace-") as temp:
@@ -58,7 +57,7 @@ def main():
             if name == "positive":
                 if status:
                     raise RuntimeError("Positive " + module + " failed\n" + output)
-            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:java (?:import|namespace) reads|java reads|semantic reads preserve plain Java metadata|body product)[^\n]*\n\s+assertion failed:", output, re.M):
+            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:java (?:import|namespace) reads|java reads|semantic reads preserve plain Java metadata)[^\n]*\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: Java namespace " + module + " " + name, flush=True)
     print(f"OK: Java namespace reads and {len(variants)} compiling mutants, {time.monotonic() - started:.2f}s")

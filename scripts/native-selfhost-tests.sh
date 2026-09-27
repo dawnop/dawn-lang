@@ -54,15 +54,7 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 echo "== selfhost tests, native backend =="
 "$DAWNC" test selfhost/src/nmain.dawn
 
-# This foundation is not on the native driver's production graph yet. Test
-# its own closure explicitly instead of claiming nmain covers unused helpers.
-"$DAWNC" test selfhost/src/check/body_admit.dawn
-"$DAWNC" test selfhost/src/check/source_projection.dawn
+# Declaration identity's own tests, run explicitly as they were when it was
+# not yet on the native driver's production graph. The replay modules that
+# stood beside it went with the replay engine (2026-09-27).
 "$DAWNC" test selfhost/src/check/identity.dawn
-"$DAWNC" test selfhost/src/check/body_product.dawn
-"$DAWNC" test selfhost/src/check/allocation.dawn
-"$DAWNC" test selfhost/src/check/function_product.dawn
-"$DAWNC" test selfhost/src/check/query_runtime.dawn
-# The opt-in replay executor is not a production nmain dependency. Include its
-# complete closure explicitly, including recorder and indexed-source tests.
-"$DAWNC" test selfhost/src/check/scalar_replay.dawn
