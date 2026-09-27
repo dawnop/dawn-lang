@@ -17,7 +17,7 @@ use driver/analyze.{
 use driver/stdlib.{load_std, std_load_error_text}
 use front/parser
 use ir/interp.{ct_default}
-use jvm/jreflect.{jsig_for, query_probe}
+use jvm/jreflect.{jsig_for}
 use pkg/maven
 use compiler_plan/source
 use java "java.lang.System"
@@ -73,11 +73,10 @@ pub fn run() -> Unit !io =
           let _ = t.runs.incrementAndGet()
         }
       }
-      let probe = query_probe(js)
       # Alternate the order to avoid always giving cold the second-run advantage.
       let (observed_ns, cold_ns, observed_diags, cold_diags) = if round % 2 == 0 {
         let start = System.nanoTime()
-        let observed = analyze_observed(loaded, std, ct_default(), probe.jsig, Some(observer))
+        let observed = analyze_observed(loaded, std, ct_default(), js, Some(observer))
         let elapsed = System.nanoTime() - start
         let cold_start = System.nanoTime()
         let cold = analyze_program(loaded, std, ct_default(), js)
@@ -87,7 +86,7 @@ pub fn run() -> Unit !io =
         let cold = analyze_program(loaded, std, ct_default(), js)
         let elapsed = System.nanoTime() - start
         let observed_start = System.nanoTime()
-        let observed = analyze_observed(loaded, std, ct_default(), probe.jsig, Some(observer))
+        let observed = analyze_observed(loaded, std, ct_default(), js, Some(observer))
         (System.nanoTime() - observed_start, elapsed, len(observed.diags), len(cold.diags))
       }
       println(join([
@@ -97,7 +96,7 @@ pub fn run() -> Unit !io =
         to_string(module_timer.elapsed.get()), to_string(check_timer.elapsed.get()),
         to_string(ct_timer.elapsed.get()), to_string(cold_ns),
         to_string(check_timer.runs.get()), to_string(ct_timer.runs.get()),
-        to_string(probe.queries()), to_string(observed_diags), to_string(cold_diags),
+        to_string(observed_diags), to_string(cold_diags),
         if round % 2 == 0 { "observed-first" } else { "cold-first" }
       ], "\t"))
       round = round + 1

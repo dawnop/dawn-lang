@@ -353,7 +353,7 @@ def discovery_self_test():
     rejected = [
         "echo setup && " + contract, contract + " | tee result",
         contract + "; echo done", contract + " &", contract + " > result",
-        "env FLAG=1 " + contract, "bash " + CONTRACT_PATH + "/probe.py",
+        "env FLAG=1 " + contract, "bash " + CONTRACT_PATH + "/cold.py",
         "echo setup\n" + contract,
         "cd other\n" + contract,
         "export MODE=changed\n" + contract,
