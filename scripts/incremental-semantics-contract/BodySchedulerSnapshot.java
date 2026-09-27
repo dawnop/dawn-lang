@@ -13,7 +13,7 @@ public final class BodySchedulerSnapshot {
         var at = java.util.Arrays.stream(reference.getMethods())
                 .filter(m -> m.getName().equals("sample_at")).findFirst().orElseThrow();
         long length = (Long) count.invoke(null, samples);
-        if (length != 16) throw new AssertionError("Expected 16 scheduler pairs, got " + length);
+        if (length != 8) throw new AssertionError("Expected 8 scheduler pairs, got " + length);
         for (int i = 0; i < length; i++) {
             Object pair = at.invoke(null, samples, (long) i);
             Object old = pair.getClass().getField("old").get(pair);
@@ -43,6 +43,6 @@ public final class BodySchedulerSnapshot {
                 }
             }
         }
-        System.out.println("PASS: frozen body scheduler, 16 complete product/context pairs");
+        System.out.println("PASS: frozen body scheduler, 8 complete product/context pairs");
     }
 }

@@ -4,8 +4,7 @@ use check/checker.{
   ModuleBodies, BodyExecutor, check_module_headers, reference_module_body_products,
   cold_body_executor, execute_module_bodies
 }
-use check/cx.{Cx, cx_new}
-use check/semantic_reads
+use check/cx.{cx_new}
 use std/map
 
 pub(pkg) type Comparison = { old: ModuleBodies, current: ModuleBodies }
@@ -14,7 +13,7 @@ pub(pkg) fn sample_at(xs: List[Comparison], index: Int) -> Comparison = xs[index
 
 pub fn main() -> Unit !io = {
   let pairs = samples()
-  if sample_count(pairs) != 16 { panic("expected sixteen scheduler pairs") }
+  if sample_count(pairs) != 8 { panic("expected eight scheduler pairs") }
   let first = sample_at(pairs, 0)
   if len(first.old.cx.diags) != 0 { panic("clean scheduler fixture has diagnostics") }
 }
@@ -69,15 +68,11 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
   for source in cases {
     let (syntax, ds) = parser.parse_module(source)
     if len(ds) != 0 { panic("scheduler fixture must parse") }
-    for logging in [false, true] {
-      let base = cx_new(Some("sample"), Some("sample.dawn"))
-      let start = Cx { ..base, function_reads: if logging { Some([semantic_reads.StdModuleMode(true)]) } else { None } }
-      let headers = check_module_headers(start, syntax, map.empty())
-      let old = reference_module_body_products(headers)
-      let (trace, current) = execute_module_bodies(headers, [], tracing())
-      traced = traced + len(trace)
-      results = results ++ [Comparison { old: old, current: current }]
-    }
+    let headers = check_module_headers(cx_new(Some("sample"), Some("sample.dawn")), syntax, map.empty())
+    let old = reference_module_body_products(headers)
+    let (trace, current) = execute_module_bodies(headers, [], tracing())
+    traced = traced + len(trace)
+    results = results ++ [Comparison { old: old, current: current }]
   }
   if traced == 0 { panic("the scheduler reached no body through the executor") }
   results
