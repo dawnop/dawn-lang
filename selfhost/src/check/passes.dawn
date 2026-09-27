@@ -55,7 +55,7 @@ use check/cx.{
   package_of, exports_seen_by, pkg_private, pkg_private_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
   alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
-  label_eff, java_enabled_read, java_find_class_read, java_class_name_read,
+  label_eff,
   resolve_alias_target, resolve_type, resolve_return_type, is_const_serializable,
   const_refusal_hint, no_sig,
   TySpan, ty_span_kid, ty_span_of
@@ -554,16 +554,13 @@ pub(pkg) fn seed_prelude(cx: Cx) -> Cx = {
 pub(pkg) fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_java_uses(m) {
-    let (enabled_cx, enabled) = java_enabled_read(cx1)
-    cx1 = enabled_cx
-    if not enabled {
+    if not cx1.jsig.on {
       cx1 = cerr_h(cx1, "`use java` is not available in this compiler", d.nlo, d.nhi,
         "Java interop needs a JVM host with a class path to resolve `" ++ d.fqcn ++
           "` against; this build has none")
       continue
     }
-    let (found_cx, found) = java_find_class_read(cx1, d.fqcn)
-    cx1 = found_cx
+    let found = cx1.jsig.find_class(d.fqcn)
     match found {
       None -> {
         cx1 = cerr_h(cx1, "Java class not found: ${d.fqcn}", d.nlo, d.nhi,
@@ -571,8 +568,7 @@ pub(pkg) fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
             "dawn.toml or use a classpath option supported by this command")
       }
       Some(j) -> {
-        let (name_cx, previous) = java_class_name_read(cx1, d.simple)
-        cx1 = name_cx
+        let previous = map.get(cx1.java_classes, d.simple)
         if previous != None {
           cx1 = cerr(cx1, "`" ++ d.simple ++ "` is already imported", d.nlo, d.nhi)
         } else {
@@ -704,8 +700,7 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
   var shells: List[Option[Shell]] = []
   for d in module_types(m) {
     cx1 = enter_decl_owner(cx1, [Named(TypeDecl, d.name)], d.nlo, d.nhi)
-    let (name_cx, java_name) = java_class_name_read(cx1, d.name)
-    cx1 = name_cx
+    let java_name = map.get(cx1.java_classes, d.name)
     if java_name != None {
       cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with an imported Java class", d.nlo, d.nhi)
       shells = shells ++ [no_shell()]
@@ -1230,8 +1225,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
     var occupied = map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
       map.has(cx1.traits_by_name, d.name)
     if not occupied {
-      let (name_cx, java_name) = java_class_name_read(cx1, d.name)
-      cx1 = name_cx
+      let java_name = map.get(cx1.java_classes, d.name)
       occupied = java_name != None
     }
     if occupied {
@@ -1427,8 +1421,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     }
     var occupied = map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name)
     if not occupied {
-      let (name_cx, java_name) = java_class_name_read(cx1, d.name)
-      cx1 = name_cx
+      let java_name = map.get(cx1.java_classes, d.name)
       occupied = java_name != None
     }
     if occupied {

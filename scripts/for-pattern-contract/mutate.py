@@ -26,9 +26,7 @@ MUTATIONS = {
         "src/check/checker.dawn",
         ((
             '''      Some(true) -> {
-        let (for_read_cx, refutable) = refutable_span_read(cx1, pat)
-        cx1 = for_read_cx
-        let (plo, phi) = match refutable {
+        let (plo, phi) = match refutable_span(cx1, pat) {
           Some(sp) -> sp
           None -> (pat_lo(pat), pat_hi(pat))
         }

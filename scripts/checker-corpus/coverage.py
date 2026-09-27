@@ -1481,7 +1481,8 @@ def projected_record_patterns(expr, path, fns, env=None, depth=0, seen=()):
 
 
 def option_record_patterns(text, code, scope, site, member, bindings, scope_ends, fns):
-    """Prove a Some binder comes from one immutable tuple result slot."""
+    """Prove a Some binder comes from one immutable binding: the whole value
+    of a single-name `let`, or one slot of a tuple `let`."""
     name, field = member
     matches = list(re.finditer(r"\bmatch\b", code[scope:site]))
     for match in reversed(matches):
@@ -1511,10 +1512,14 @@ def option_record_patterns(text, code, scope, site, member, bindings, scope_ends
                 if not scope <= binding.start() < start < scope_ends[binding.start()]:
                     continue
                 names = binding.group(1).strip()
-                if not names.startswith("(") or not names.endswith(")"):
-                    continue
-                slots = [slot.strip() for slot in names[1:-1].split(",")]
-                if slots.count(subject) != 1:
+                if names.startswith("(") and names.endswith(")"):
+                    slots = [slot.strip() for slot in names[1:-1].split(",")]
+                    if slots.count(subject) != 1:
+                        continue
+                    path = (slots.index(subject), "Some", field)
+                elif names == subject:
+                    path = ("Some", field)
+                else:
                     continue
                 if not re.match(r"\s*let\b", code[binding.start() : binding.end()]):
                     continue
@@ -1525,7 +1530,7 @@ def option_record_patterns(text, code, scope, site, member, bindings, scope_ends
                 call = root_call(value)
                 if call is None or helper_param_is_bound(code[scope:binding.start()], call[0]):
                     return []
-                return projected_record_patterns(value, (slots.index(subject), "Some", field), fns)
+                return projected_record_patterns(value, path, fns)
             return []
     return []
 
@@ -1671,6 +1676,16 @@ def collect_sites(sources=None):
                                 _, pats = scoped_patterns(
                                     value, fns, source_code[scope : binding.start()]
                                 )
+                            else:
+                                # A record a same-file helper returns: its
+                                # field is projected through the helper's
+                                # own returns, unless the helper's name is
+                                # rebound in this scope first.
+                                call = root_call(body)
+                                if call is not None and not helper_param_is_bound(
+                                    source_code[scope : binding.start()], call[0]
+                                ):
+                                    pats = projected_record_patterns(body, (field,), fns)
                     if not pats:
                         pats = option_record_patterns(
                             text, source_code, scope, m.start(), member.groups(),
@@ -1765,8 +1780,17 @@ def self_test():
         ('let diagnostic = ' + record + '\n let callback = (diagnostic) => {\n'
          ' cerr(cx, diagnostic.message, 0, 1)\n }', False),
     ]
-    for body, expected in record_cases:
-        sites = collect_sites([("record-field-control.dawn", 'fn fixture() = {\n ' + body + '\n}')])
+    make = 'fn make() = ' + record + '\n'
+    record_cases += [
+        (make, 'let diagnostic = make()\n cerr(cx, diagnostic.message, 0, 1)', True),
+        (make, 'var diagnostic = make()\n cerr(cx, diagnostic.message, 0, 1)', False),
+        (make, 'let make = opaque\n let diagnostic = make()\n cerr(cx, diagnostic.message, 0, 1)', False),
+        (make, 'let diagnostic = make()\n diagnostic = unknown\n cerr(cx, diagnostic.message, 0, 1)', False),
+        (make, 'let diagnostic = unknown()\n cerr(cx, diagnostic.message, 0, 1)', False),
+    ]
+    for case in record_cases:
+        prelude, body, expected = case if len(case) == 3 else ('',) + case
+        sites = collect_sites([("record-field-control.dawn", prelude + 'fn fixture() = {\n ' + body + '\n}')])
         if len(sites) != 1 or site_reached(sites[0], ["missing exported value"]) != expected:
             print("FAIL: record field provenance control: " + body, file=sys.stderr)
             return 1
@@ -1816,6 +1840,17 @@ fn query(context, name) = {
         (option_prelude.replace('Some(detail(value))', 'Other(detail(value))') + option_body, False),
         (option_prelude.replace('Some(detail(value))', 'Some(detail({ return unknown }))') + option_body, False),
         (option_prelude.replace('(next, answer)', '({ return unknown }, answer)') + option_body, False),
+    ]
+    # The same value bound whole rather than through a tuple slot.
+    plain_body = option_body.replace('let (next, diagnostic) = query(cx, name)',
+                                     'let diagnostic = find(name)').replace('cerr_o(next,', 'cerr_o(cx,')
+    find = 'fn find(name) = match name {\n  None -> None\n  Some(value) -> Some(detail(value))\n}\n'
+    option_cases += [
+        (option_prelude + find + plain_body, True),
+        (option_prelude + find + plain_body.replace('let diagnostic', 'var diagnostic'), False),
+        (option_prelude + find + plain_body.replace('  let diagnostic', '  let find = unknown\n  let diagnostic'), False),
+        (option_prelude + find + plain_body.replace('match diagnostic', 'diagnostic = unknown\n  match diagnostic'), False),
+        (option_prelude + find.replace('Some(detail(value))', 'Some(opaque(detail(value)))') + plain_body, False),
     ]
     for source, expected in option_cases:
         sites = collect_sites([("option-record-control.dawn", source)])
@@ -2603,15 +2638,14 @@ fn query(context, name) = {
         print("FAIL: propagate_msg call sites bypassed helper expansion", file=sys.stderr)
         return 1
     named_arg_sites = [
-        site for site in collect_sites()
-        if site["expr"] == "message" and site["file"] == "selfhost/src/check/checker.dawn"
+        site for site in collect_sites() if site["expr"] == "named_arg_msg(cx, target)"
     ]
     if len(named_arg_sites) != 1 or named_arg_sites[0]["pats"] != [
+        ("`", ".", "` is a Java member; Java methods carry no parameter names"),
         (
             "this callee is a function value, and a function type carries no "
             "parameter names",
         ),
-        ("`", ".", "` is a Java member; Java methods carry no parameter names"),
     ]:
         print("FAIL: named_arg_msg lost a reachable return or tail", file=sys.stderr)
         return 1

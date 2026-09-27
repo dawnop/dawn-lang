@@ -28,8 +28,8 @@ SPREAD_LIST_CHECK = """        _ ->
           if is_errorish(t) {
             (cx1, TyError, TLESpread(tx))
           } else {
-            let (render_cx, text) = type_display_read(cx1, t)
-            (cerr_h(render_cx, "`..` spreads a list, but this is " ++ text, lo, hi,
+            let text = ty_show(cx1.adts, t)
+            (cerr_h(cx1, "`..` spreads a list, but this is " ++ text, lo, hi,
               "drop the `..` to make it one element"), TyError, TLESpread(tx))
           }
 """
@@ -43,29 +43,24 @@ SPREAD_EXPECTATION = """      let list_exp: Option[Ty] = match el_exp {
 
 # a conditional element's body is checked at the element type
 COND_EXPECTATION = """        let body_exp: Option[Ty] =
-          if t != TyNever && { let (next, concrete) = is_concrete_read(cx1, t)
-            cx1 = next
-            concrete } { Some(t) } else { el_exp }
+          if t != TyNever && is_concrete(cx1, t) { Some(t) } else { el_exp }
 """
 
 # a conditional element's condition is a Bool
 COND_BOOL = """        if ct != TyBool && not is_errorish(ct) {
-          let (render_cx, text) = type_display_read(cx1, ct)
-          cx1 = cerr(render_cx, "if condition must be Bool, got " ++ text,
+          let text = ty_show(cx1.adts, ct)
+          cx1 = cerr(cx1, "if condition must be Bool, got " ++ text,
             e_lo(a.cond), e_hi(a.cond))
         }
 """
 
 # an element form that needs an expectation is checked in the second round
-NEEDS_EXPECTED_SPREAD = "    LeSpread(e, _, _) -> needs_expected_read(cx, e)\n"
+NEEDS_EXPECTED_SPREAD = "    LeSpread(e, _, _) -> needs_expected(cx, e)\n"
 NEEDS_EXPECTED_COND = """    LeIf(arms, _, _) -> {
-      var next = cx
       for a in arms {
-        let (observed, answer) = needs_expected_read(next, if_body_value(a.body))
-        next = observed
-        if not answer { return (next, false) }
+        if not needs_expected(cx, if_body_value(a.body)) { return false }
       }
-      (next, true)
+      true
     }
 """
 
@@ -167,13 +162,13 @@ MUTATIONS = {
     "needs-expected-blind-to-spread": (
         CHECKER,
         NEEDS_EXPECTED_SPREAD,
-        "    LeSpread(_e, _, _) -> (cx, false)\n",
+        "    LeSpread(_e, _, _) -> false\n",
     ),
     # 8: the same sentence for a conditional element. See 7.
     "needs-expected-blind-to-cond": (
         CHECKER,
         NEEDS_EXPECTED_COND,
-        """    LeIf(_arms, _, _) -> (cx, false)
+        """    LeIf(_arms, _, _) -> false
 """,
     ),
     # 9: an `else if` chain with no final else is one element form as a whole,
