@@ -23,6 +23,18 @@ at most 8000 bytes, except
     statement of what it copied in and cannot drift from it. (A `SourceFile`
     attribute does not tell them apart: the shaded jsoniter classes inside
     coursierapi carry none, exactly like the classes Dawn emits.)
+A second rule rides on the same read: every checked method takes fewer than
+32 JVM arguments, the receiver included (a long or double is one argument,
+not two). JDK 21's C2 cannot pass that many on the stack (JDK-8325467, fixed
+only in JDK 26): measured on x86_64 it refuses a method from 54 arguments on,
+along with every caller and every method that inlines one, and the JDK 26
+release note puts the limit "greater than 30" in general. The compiler builds
+records wide enough to need such a constructor by copy-and-set instead
+(jvm/codegen.JVM_ARG_LIMIT, issue #257); this rule is what keeps any other
+method from growing into the same wall. The number is written twice, here
+and there, on purpose: lowering the compiler's limit leaves this one
+stricter, and raising it without raising this one reds here.
+
 There is no allow list and no recorded count. A lifted closure is named
 `lambda$N` by position, so its name moves with any unrelated edit above it,
 and a list or count keyed on names would go red on changes that did not touch
@@ -35,13 +47,14 @@ library would go blind exactly where the library is wrong). `code_length` is
 what the JVM compares with HugeMethodLimit (`Method::code_size`). The whole
 jar, about 43,000 methods with the vendored ones, reads in under a second.
 
-    scripts/method-size-gate.py [--jar build/dawn-selfhost.jar] [--limit 8000] [--top N]
+    scripts/method-size-gate.py [--jar build/dawn-selfhost.jar] [--limit 8000]
+                                [--arg-limit 32] [--top N]
     scripts/method-size-gate.py --selftest
 
-The self-test builds class files in memory for each case of the rule and
-requires the expected verdict, then re-runs the real jar with the limit set
-one byte under its largest checked method and requires red: a reader that
-stopped seeing methods would pass every other case.
+The self-test builds class files in memory for each case of both rules and
+requires the expected verdict, then re-runs the real jar with each limit set
+just under its largest checked method and requires red: a reader that
+stopped seeing methods, or descriptors, would pass every other case.
 """
 
 import argparse
@@ -56,6 +69,8 @@ DEFAULT_JAR = ROOT / "build" / "dawn-selfhost.jar"
 RECIPES = [ROOT / "bin" / "dawn", ROOT / "scripts" / "build-release-jar.sh"]
 VENDOR_ARG = re.compile(r"--vendor\s+([A-Za-z0-9_/$.-]+)")
 LIMIT = 8000
+ARG_LIMIT = 32
+ACC_STATIC = 0x0008
 CODE_MAX = 65535
 TEST_BLOCK = re.compile(r"^dawn\$test\$\d+$")
 # a package's classes sit under `dawn$pkg$<name>/`; the module path follows
@@ -69,7 +84,10 @@ FIXED = {
 
 
 def read_class(data):
-    """(class name, source file or None, [(method name + descriptor, code_length)])."""
+    """(class name, source file or None, [(method name + descriptor, code_length)]).
+
+    Static methods are marked by a leading `static ` on the name, which is
+    what `jvm_args` reads the receiver off; every other reader splits on `(`."""
     if len(data) < 10 or data[:4] != b"\xca\xfe\xba\xbe":
         raise ValueError("not a class file")
     count = struct.unpack_from(">H", data, 8)[0]
@@ -104,14 +122,15 @@ def read_class(data):
         off += 2
         out = []
         for _ in range(n):
-            _, name_i, desc_i, attrs = struct.unpack_from(">HHHH", data, off)
+            acc, name_i, desc_i, attrs = struct.unpack_from(">HHHH", data, off)
             off += 8
+            static = "static " if acc & ACC_STATIC else ""
             for _ in range(attrs):
                 attr_i, length = struct.unpack_from(">HI", data, off)
                 if want_code and utf8.get(attr_i) == "Code":
                     # Code: max_stack u2, max_locals u2, code_length u4
                     code_length = struct.unpack_from(">I", data, off + 10)[0]
-                    out.append((utf8[name_i] + utf8[desc_i], code_length))
+                    out.append((static + utf8[name_i] + utf8[desc_i], code_length))
                 off += 6 + length
         return off, out
 
@@ -128,6 +147,24 @@ def read_class(data):
     return name, source, methods
 
 
+def jvm_args(method):
+    """JVM arguments a method takes, the receiver included: one per parameter
+    in the descriptor, whatever its width, plus one unless it is static."""
+    static = method.startswith("static ")
+    desc = method[method.index("("):]
+    n, i, end = 0, 1, desc.index(")")
+    while i < end:
+        while desc[i] == "[":
+            i += 1
+        i = desc.index(";", i) + 1 if desc[i] == "L" else i + 1
+        n += 1
+    return n + (0 if static else 1)
+
+
+def method_name(method):
+    return method.removeprefix("static ").split("(", 1)[0]
+
+
 def vendored_packages():
     """The `--vendor` packages the build recipes copy into the jar."""
     found = set()
@@ -142,7 +179,7 @@ def classify(class_name, method, vendored):
         return "vendored"
     if PKG_PREFIX.sub("", class_name).startswith("embed/"):
         return "embed"
-    if TEST_BLOCK.match(method.split("(", 1)[0]):
+    if TEST_BLOCK.match(method_name(method)):
         return "test"
     return "checked"
 
@@ -168,12 +205,21 @@ def jar_entries(jar):
 
 def shown(row):
     size, cls, method = row
-    return f"{size:>6}  {cls}.{method.split('(', 1)[0]}"
+    return f"{size:>6}  {cls}.{method_name(method)}"
 
 
-def verdict(m, limit, top=0, quiet=False):
-    """Print the report; return 0 when no checked method exceeds `limit`."""
+def widest(m):
+    """The checked method taking the most JVM arguments, as (args, class, method)."""
+    rows = [(jvm_args(meth), cls, meth) for _, cls, meth in m["checked"]]
+    return max(rows) if rows else None
+
+
+def verdict(m, limit, top=0, quiet=False, arg_limit=ARG_LIMIT):
+    """Print the report; return 0 when no checked method exceeds `limit` bytes
+    or takes `arg_limit` JVM arguments or more."""
     over = [r for r in m["checked"] if r[0] > limit]
+    wide = sorted(((jvm_args(meth), cls, meth) for _, cls, meth in m["checked"]
+                   if jvm_args(meth) >= arg_limit), reverse=True)
     say = (lambda *a: None) if quiet else print
     n = sum(len(v) for v in m.values())
     if top:
@@ -182,19 +228,30 @@ def verdict(m, limit, top=0, quiet=False):
             say("  " + shown(r))
     if m["embed"]:
         big = m["embed"][0]
-        say(f"embed/ tables: largest {big[0]} bytes ({big[1]}.{big[2].split('(', 1)[0]}), "
+        say(f"embed/ tables: largest {big[0]} bytes ({big[1]}.{method_name(big[2])}), "
             f"{CODE_MAX - big[0]} under the JVM's {CODE_MAX}-byte Code limit")
-    if over:
+    if over or wide:
         if not quiet:
             for r in over:
                 print(f"METHOD SIZE FAIL {shown(r).strip()} bytes > {limit}", file=sys.stderr)
-            print(f"FAIL: {len(over)} method(s) over {limit} bytes of bytecode, which HotSpot "
-                  f"will never JIT-compile (HugeMethodLimit); split them (issue #241)",
-                  file=sys.stderr)
+            for a, cls, meth in wide:
+                print(f"METHOD ARGS FAIL {a:>6}  {cls}.{method_name(meth)} takes {a} JVM "
+                      f"arguments >= {arg_limit}", file=sys.stderr)
+            if over:
+                print(f"FAIL: {len(over)} method(s) over {limit} bytes of bytecode, which HotSpot "
+                      f"will never JIT-compile (HugeMethodLimit); split them (issue #241)",
+                      file=sys.stderr)
+            if wide:
+                print(f"FAIL: {len(wide)} method(s) take {arg_limit} or more JVM arguments, which "
+                      f"JDK 21's C2 refuses to compile (JDK-8325467); a record constructor this "
+                      f"wide must go through jvm/codegen.wide_ctor (issue #257)", file=sys.stderr)
         return 1
     largest = shown(m["checked"][0]).strip() if m["checked"] else "none"
+    w = widest(m)
+    most = f"{w[0]} ({w[1]}.{method_name(w[2])})" if w else "none"
     say(f"OK: {len(m['checked'])} checked methods of {n} at most {limit} bytes "
-        f"(largest {largest}); skipped {len(m['embed'])} embed/, {len(m['test'])} test-block "
+        f"(largest {largest}) and under {arg_limit} JVM arguments (most {most}); "
+        f"skipped {len(m['embed'])} embed/, {len(m['test'])} test-block "
         f"and {len(m['vendored'])} vendored methods")
     return 0
 
@@ -202,8 +259,11 @@ def verdict(m, limit, top=0, quiet=False):
 # ---- self-test ----
 
 def synth(name, methods, source=None):
-    """A minimal class file: `name`, the given (method, code_length) pairs, and
-    a pool that exercises the two-slot and fixed-width tags the reader skips."""
+    """A minimal class file: `name`, the given methods, and a pool that
+    exercises the two-slot and fixed-width tags the reader skips. A method is
+    (name, code_length), public static `()V`, or (name, code_length,
+    descriptor, access flags)."""
+    methods = [m if len(m) == 4 else (m[0], m[1], "()V", 9) for m in methods]
     pool = []
     seen = {}
 
@@ -228,15 +288,16 @@ def synth(name, methods, source=None):
     slot(b"\x12" + struct.pack(">HH", 0, nat))          # InvokeDynamic
     this = slot(b"\x07" + struct.pack(">H", utf(name)))
     sup = slot(b"\x07" + struct.pack(">H", utf("java/lang/Object")))
-    for s in ["Code", "SourceFile", "Deprecated", "f", "()V"] + [m for m, _ in methods]:
+    for s in ["Code", "SourceFile", "Deprecated", "f", "()V"] + [m for m, _, _, _ in methods] \
+            + [d for _, _, d, _ in methods]:
         utf(s)
     if source is not None:
         utf(source)
     # every entry exists now; the rest only looks indices up
     body = b""
-    for mname, size in methods:
+    for mname, size, desc, acc in methods:
         code = struct.pack(">HHI", 1, 1, size) + b"\x00" * size + struct.pack(">HH", 0, 0)
-        body += struct.pack(">HHHH", 9, utf(mname), utf("()V"), 2)
+        body += struct.pack(">HHHH", acc, utf(mname), utf(desc), 2)
         body += struct.pack(">HI", utf("Deprecated"), 0)
         body += struct.pack(">HI", utf("Code"), len(code)) + code
     cls_attrs = b""
@@ -251,7 +312,15 @@ def synth(name, methods, source=None):
     return out
 
 
+def params(n, kinds="J"):
+    """A descriptor of `n` parameters cycling through `kinds` (J, D, I, an
+    object and an array), for the argument-count cases."""
+    pool = {"J": "J", "D": "D", "I": "I", "L": "Ljava/lang/Object;", "[": "[[J"}
+    return "(" + "".join(pool[kinds[i % len(kinds)]] for i in range(n)) + ")V"
+
+
 def selftest(jar):
+    k = ARG_LIMIT
     cases = [
         ("a method at the limit", [synth("check/a", [("f", LIMIT)])], 0),
         ("one byte over", [synth("check/a", [("f", LIMIT + 1)])], 1),
@@ -269,6 +338,15 @@ def selftest(jar):
          [synth("coursierapix/Y", [("big", 9000)])], 1),
         ("a Java source file exempts nothing", [synth("check/a", [("f", 9000)], "a.java")], 1),
         ("embedded is not a prefix of the module", [synth("check/embed", [("f", 9000)])], 1),
+        # arguments: the receiver counts, a two-slot parameter counts once
+        ("a constructor one argument under",
+         [synth("check/cx$Cx", [("<init>", 10, params(k - 2, "JDL["), 1)])], 0),
+        ("a constructor at the argument limit",
+         [synth("check/cx$Cx", [("<init>", 10, params(k - 1, "JDL["), 1)])], 1),
+        ("a static method one under", [synth("check/a", [("f", 10, params(k - 1), 9)])], 0),
+        ("a static method at the limit", [synth("check/a", [("f", 10, params(k), 9)])], 1),
+        ("longs count once, not twice", [synth("check/a", [("f", 10, params(k - 1, "J"), 9)])], 0),
+        ("a wide vendored method", [synth("org/objectweb/asm/X", [("f", 10, params(k), 9)])], 0),
     ]
     bad = 0
     fake_vendor = ["org/objectweb/asm", "coursierapi"]
@@ -277,8 +355,9 @@ def selftest(jar):
         if got != want:
             print(f"SELFTEST FAIL {label}: exit {got}, wanted {want}", file=sys.stderr)
             bad += 1
-    reread = read_class(synth("check/a", [("f", 1234), ("g", 7)]))
-    if reread[2] != [("f()V", 1234), ("g()V", 7)]:
+    reread = read_class(synth("check/a", [("f", 1234), ("g", 7), ("<init>", 3, "(JLx;[[D)V", 1)]))
+    if reread[2] != [("static f()V", 1234), ("static g()V", 7), ("<init>(JLx;[[D)V", 3)] \
+            or [jvm_args(m) for m, _ in reread[2]] != [0, 0, 4]:
         print(f"SELFTEST FAIL reader: {reread}", file=sys.stderr)
         bad += 1
     vendored = vendored_packages()
@@ -304,12 +383,19 @@ def selftest(jar):
                 print(f"SELFTEST FAIL {jar}: the limit {top - 1} did not red "
                       f"or {top} did not pass", file=sys.stderr)
                 bad += 1
+            # and the argument mutant: a limit equal to the jar's widest method
+            most = widest(m)[0]
+            if verdict(m, LIMIT * 100, quiet=True, arg_limit=most) != 1 \
+                    or verdict(m, LIMIT * 100, quiet=True, arg_limit=most + 1) != 0:
+                print(f"SELFTEST FAIL {jar}: the argument limit {most} did not red "
+                      f"or {most + 1} did not pass", file=sys.stderr)
+                bad += 1
     else:
         print(f"note: {jar} not built, threshold mutant on the real jar skipped")
     if bad:
         return 1
     print(f"OK: method-size gate self-test, {len(cases)} synthetic cases, reader round trip"
-          + (", threshold mutant on the real jar" if jar.is_file() else ""))
+          + (", threshold and argument mutants on the real jar" if jar.is_file() else ""))
     return 0
 
 
@@ -317,6 +403,7 @@ def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--jar", type=Path, default=DEFAULT_JAR)
     ap.add_argument("--limit", type=int, default=LIMIT)
+    ap.add_argument("--arg-limit", type=int, default=ARG_LIMIT)
     ap.add_argument("--top", type=int, default=0, help="list the N largest checked methods")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv[1:])
@@ -325,7 +412,8 @@ def main(argv):
     if not a.jar.is_file():
         print(f"FAIL: {a.jar} not found; build it with ./bin/dawn --version", file=sys.stderr)
         return 2
-    return verdict(measure(jar_entries(a.jar), vendored_packages()), a.limit, a.top)
+    return verdict(measure(jar_entries(a.jar), vendored_packages()), a.limit, a.top,
+                   arg_limit=a.arg_limit)
 
 
 if __name__ == "__main__":

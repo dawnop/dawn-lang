@@ -2,7 +2,8 @@
 
 > 状态：**current**。2026-09-26，issue #241 第 2、3 条（分支 `fix/huge-methods-2`）；第 1 条
 > （`execute_module_bodies`）是刀 1，记在 [symbol-id-design.md](symbol-id-design.md) §3.2 末尾。
-> 「C1 的寄存器墙」一节是 2026-09-27 issue #252（分支 `fix/ctor-call-c1`）。
+> 「C1 的寄存器墙」一节是 2026-09-27 issue #252（分支 `fix/ctor-call-c1`）；「实参数」一节是同日 issue #257
+> （分支 `fix/wide-record-update`）。
 
 ## 问题
 
@@ -142,6 +143,26 @@ issue 列的十个方法里只有 `check_ctor_call` 编不动；比它大的七�
 bench-replay 四类 cold（`cold <class> 1000 30`，去前 12 轮取中位数，5 轮配对）：GraalVM calls 1.012、primitive_inferred 0.819、
 generic 1.055、inferred 1.003；OpenJDK calls 1.017、primitive_inferred 0.958、generic 0.986、inferred 0.984，除
 GraalVM 的 primitive_inferred 外都在 ±6% 的轮间离散之内。
+
+## 实参数（#257）
+
+2026-09-27。字节数之外还有一堵与方法形状有关的墙：JDK 21 的 C2 表示不了太多栈传参（JDK-8325467，只修在 JDK 26），
+x86_64 上 54 个 JVM 实参起拒编被调方（`unsupported incoming calling sequence`），调用方与内联了调用的方法一起拒
+（`unsupported calling sequence`）。`Cx` 的 58 参构造器因此让 21 个热方法留在 C1。修法在编译器里：
+记录更新成了 Core 节点，JVM 后端对构造器实参（字段数 + 接收者）达到 32 的记录不生成全参构造器，改为无参构造加字段写入、
+更新走 `copy$` 加字段写入（[record-update-design.md](record-update-design.md)）。
+
+门禁守的是结果：受检方法（与字节规则同一分类：非 vendored、非 `embed/`、非 test 块）的 JVM 实参数，含接收者，
+必须少于 32。按描述符数参数，long 与 double 各算一个（C2 的限制按参数计，调研实测 long 参数与对象参数阈值相同）；
+静态方法从访问标志读出，不算接收者。32 在 `jvm/codegen.JVM_ARG_LIMIT` 与脚本里各写一次：编译器那边调低，门禁更严；
+调高而门禁不跟，门禁红。
+
+改动前的 jar：`cx$Cx.<init>` 59、`header_product$HeaderProduct.<init>` 34，两条红；改动后最宽的受检方法是
+`ir/lower$LSt.<init>` 21。
+
+`--selftest` 新增六条：构造器 31 个实参过、32 个红，静态方法 31 过、32 红，31 个 long 参数的静态方法过（不按槽数算），
+vendored 包里的宽方法过；读取器往返核对描述符与访问标志；真 jar 上把实参阈值设成最宽方法的实参数必须红、加一必须过。
+墙钟：本机两行各 0.30 s 对 0.31 到 0.36 s，同一遍读 class 文件，增量在 0.1 s 以内，不改 job 预算。
 
 ## 不做的（理由）
 
