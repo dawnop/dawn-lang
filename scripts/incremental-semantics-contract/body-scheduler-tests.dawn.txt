@@ -1,9 +1,10 @@
 # Compiled only with the frozen pre-extraction scheduler in a private checker.
 use front/parser
-use check/checker.{ModuleBodies, check_module_headers, reference_module_body_products}
-use check/body_execution
+use check/checker.{
+  ModuleBodies, BodyExecutor, check_module_headers, reference_module_body_products,
+  cold_body_executor, execute_module_bodies
+}
 use check/cx.{Cx, cx_new}
-use check/identity.{module_key}
 use check/semantic_reads
 use std/map
 
@@ -18,6 +19,40 @@ pub fn main() -> Unit !io = {
   if len(first.old.cx.diags) != 0 { panic("clean scheduler fixture has diagnostics") }
 }
 
+# The production scheduler under an executor that only appends each role it
+# was handed to its state and otherwise does what the cold executor does. The
+# trace is the evidence that every role was reached through the executor seam
+# (`BodyExecutor`), and the products are what the oracle compares.
+fn tracing() -> BodyExecutor[List[String]] = {
+  let cold: BodyExecutor[List[String]] = cold_body_executor()
+  BodyExecutor {
+    function: (state, cx, d, sig) => {
+      let (_, next, tree) = cold.function(state, cx, d, sig)
+      (state ++ ["fn " ++ d.name], next, tree)
+    },
+    inferred_body: (state, cx, d, sig) => {
+      let (_, next, tree) = cold.inferred_body(state, cx, d, sig)
+      (state ++ ["infer " ++ d.name], next, tree)
+    },
+    constant: (state, cx, d, ty, visible) => {
+      let (_, next, tree) = cold.constant(state, cx, d, ty, visible)
+      (state ++ ["const " ++ d.name], next, tree)
+    },
+    method: (state, cx, trait_name, subject, d, sig) => {
+      let (_, next, tree) = cold.method(state, cx, trait_name, subject, d, sig)
+      (state ++ ["method " ++ d.name], next, tree)
+    },
+    default_body: (state, cx, tid, d, sig, body) => {
+      let (_, next, tree) = cold.default_body(state, cx, tid, d, sig, body)
+      (state ++ ["default " ++ d.name], next, tree)
+    },
+    test_body: (state, cx, name, body) => {
+      let (_, next, tree) = cold.test_body(state, cx, name, body)
+      (state ++ ["test " ++ name], next, tree)
+    }
+  }
+}
+
 pub(pkg) fn samples() -> List[Comparison] !io = {
   let cases = [
     "fn caller() = leaf()\nfn leaf() = 2\nconst A: Int = 1\nconst B: Int = A\nfn add(x: Int = 7) -> Int = x + B\ntest \"result\" { assert add() == 8 }\n",
@@ -30,7 +65,7 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
     ""
   ]
   var results: List[Comparison] = []
-  let scope = module_key("scheduler", "sample", "sample", "sample.dawn")
+  var traced = 0
   for source in cases {
     let (syntax, ds) = parser.parse_module(source)
     if len(ds) != 0 { panic("scheduler fixture must parse") }
@@ -39,9 +74,11 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
       let start = Cx { ..base, function_reads: if logging { Some([semantic_reads.StdModuleMode(true)]) } else { None } }
       let headers = check_module_headers(start, syntax, map.empty())
       let old = reference_module_body_products(headers)
-      let current = body_execution.record(scope, headers).bodies
+      let (trace, current) = execute_module_bodies(headers, [], tracing())
+      traced = traced + len(trace)
       results = results ++ [Comparison { old: old, current: current }]
     }
   }
+  if traced == 0 { panic("the scheduler reached no body through the executor") }
   results
 }
