@@ -1,9 +1,6 @@
 """Decode the private observer schema without confusing absence with zero work."""
 
-FIELDS = (
-    "reused_modules", "checked_modules", "comptime_modules", "retained_modules",
-    "retained_text_units",
-)
+FIELDS = ("reused_modules", "checked_modules", "comptime_modules", "retained_modules")
 
 
 def decode(line):

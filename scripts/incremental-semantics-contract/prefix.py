@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Compare warm sessions with the frozen cold loop and prove real cache hits.
 
-Each mutation is built before either owning assertion is evaluated. Runtime
-linkage errors and timeouts never substitute for a cache-contract failure.
+The session reuses a module's step when its input and the carry it enters
+with are unchanged (docs/lsp-module-memo-design.md); the mutants below each
+weaken one half of that rule, the early cutoff that lets an edited module's
+successors keep their steps (and the order its export surface is compared
+in), the position view rebuilt around reused steps, or the export surface the
+carry comparison reads. Each mutation is built
+before either owning assertion is evaluated. Runtime linkage errors and
+timeouts never substitute for a cache-contract failure.
 
-`--shards N --shard I` splits the twelve engine mutants by index modulo N.
+`--shards N --shard I` splits the engine mutants by index modulo N.
 The no-flag invocation is unchanged:
-one positive subject and all twelve mutants, in this file's order.
+one positive subject and all engine mutants, in this file's order.
 """
 import argparse
 import os
@@ -23,7 +29,7 @@ from cold import ROOT, HERE, OWNER, edit, install_probe, run
 
 def owning_assertion(output):
     return bool(re.search(
-        r"^FAIL\s+contract/prefix :: prefix cache [^\n]*\n\s+assertion failed:", output, re.M))
+        r"^FAIL\s+contract/prefix :: module memo [^\n]*\n\s+assertion failed:", output, re.M))
 
 
 def check_cli():
@@ -32,8 +38,8 @@ def check_cli():
         (['--shards', '0'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '-1'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '2'], 2, 'require --shards >= 1'),
-        (['--shards', '13', '--shard', '12'], 2, 'selected shard has no engine mutants'),
-        (['--shards', '13', '--check-shards'], 2, 'every shard must contain engine mutants'),
+        (['--shards', '14', '--shard', '13'], 2, 'selected shard has no engine mutants'),
+        (['--shards', '14', '--check-shards'], 2, 'every shard must contain engine mutants'),
     ]
     for count in [1, 2, 3]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique mutants; disjoint shard sizes'))
@@ -59,20 +65,18 @@ def main():
     if args.shards < 1 or not 0 <= args.shard < args.shards:
         parser.error('require --shards >= 1 and 0 <= --shard < --shards')
     started = time.monotonic()
-    assert owning_assertion("FAIL  contract/prefix :: prefix cache control\n      assertion failed: expected hit\n")
-    assert not owning_assertion("FAIL  contract/prefix :: prefix cache control\n      NoSuchMethodError\n")
-    assert not owning_assertion("FAIL  elsewhere :: prefix cache control\n      assertion failed: x\n")
+    assert owning_assertion("FAIL  contract/prefix :: module memo control\n      assertion failed: expected hit\n")
+    assert not owning_assertion("FAIL  contract/prefix :: module memo control\n      NoSuchMethodError\n")
+    assert not owning_assertion("FAIL  elsewhere :: module memo control\n      assertion failed: x\n")
     reference = (HERE / "reference-tests.dawn.txt").read_text()
     reference = edit(reference, "use std/io\n",
                      "use std/io\nuse driver/incremental\n")
     # both calls below are replaced, and an import nothing uses is an error
     reference = edit(reference, "LocDiag, analyze_program, analyze_reference}",
                      "LocDiag, analyze_reference}")
-    reference = edit(reference, "use check/jsig.{jsig_refused}",
-                     "use check/jsig.{jsig_refused, refused_probe}")
     reference = edit(reference, "    for loaded in cases {\n      for opts in [ct_default(), ct_fuel(0)] {",
                      "    for opts in [ct_default(), ct_fuel(0)] {\n"
-                     "      var owner = incremental.new(std, opts, jsig_refused(), refused_probe, 100, 100000)\n"
+                     "      var owner = incremental.new(std, opts, jsig_refused(), 100)\n"
                      "      for loaded in cases {")
     reference = edit(reference,
                      "        let current = analyze_program(loaded, std, opts, jsig_refused())",
@@ -82,35 +86,49 @@ def main():
                      "        let current = warm.program")
     reference = edit(reference,
                      "    let current = analyze_program(loaded, std, ct_default(), jsig_refused())",
-                     "    let owner = incremental.new(std, ct_default(), jsig_refused(), refused_probe, 100, 100000)\n"
+                     "    let owner = incremental.new(std, ct_default(), jsig_refused(), 100)\n"
                      "    let first = incremental.analyze(owner, loaded)\n"
                      "    let current = incremental.analyze(first.session, loaded).program")
-    original = (ROOT / "selfhost/src/driver/incremental.dawn").read_text()
+    engine = "selfhost/src/driver/incremental.dawn"
+    checker = "selfhost/src/check/checker.dawn"
+    originals = {path: (ROOT / path).read_text() for path in (engine, checker)}
     variants = [
-        ("always-cold", "    let hit = matching &&", "    let hit = false &&"),
-        ("text-only", "a == b", "a.text == b.text"),
-        ("resume-suffix", "      matching = false\n", "      ()\n"),
-        ("cache-errors", "len(computed.diags) != 0 || ", ""),
-        ("cache-java", " || probe.queries() != queries_before", ""),
-        ("ignore-loader", "  var matching = len(loaded.diags) == 0\n", "  var matching = true\n"),
-        # Weaken only prefix retention.
-        ("ignore-eviction", "  State { ..session, prefix: [] }\n}", "  session\n}"),
-        ("ignore-module-budget", "    if retaining && len(prefix) < session.max_modules &&",
-         "    if retaining && true &&"),
-        ("ignore-text-budget", "      units <= session.max_text_units - text_units {\n"
-         "        prefix = prefix ++", "      true {\n        prefix = prefix ++"),
-        ("ignore-std-identity", "identity == session.prefix[index].std_identity", "true"),
-        ("allow-negative-budget",
-         '  if max_modules < 0 || max_text_units < 0 { panic("negative analysis cache limit") }',
-         "  ()"),
+        ("always-cold", engine,
+         "        if carry_is == Some(e.pred) && same_input(raw, e.raw) && identity == e.std_identity {",
+         "        if false {"),
+        # The input half of the rule.
+        ("text-only", engine, "-> Bool = a == b\n", "-> Bool = a.text == b.text\n"),
+        ("ignore-input", engine, "-> Bool = a == b\n", "-> Bool = true\n"),
+        ("ignore-std-identity", engine, "identity == e.std_identity {", "true {"),
+        # The carry half: entered from a different predecessor, or after a
+        # re-checked module that changed what it exports.
+        ("ignore-carry", engine, "        if carry_is == Some(e.pred) && same_input(",
+         "        if same_input("),
+        ("skip-cutoff", engine, "            if carry_is == Some(e.pred) && same_after(",
+         "            if false && same_after("),
+        ("false-cutoff", engine,
+         "if carry_is == Some(e.pred) && same_after(computed.after, e.step.after, computed.checked.mod_path) {",
+         "if carry_is == Some(e.pred) {"),
+        ("unordered-surface", engine, "-> Bool =\n  a == b &&\n", "-> Bool =\n  a == b ||\n"),
+        # The position view around a reused step.
+        ("stale-spans", engine, "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own)",
+         "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own)"),
+        # The export surface the carry comparison reads.
+        ("alias-positions", checker, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
+         "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),
+        # What the owner remembers.
+        ("ignore-eviction", engine, "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo: none }\n}",
+         "  session\n}"),
+        ("ignore-module-budget", engine, "    if retained < session.max_modules {", "    if true {"),
+        ("allow-negative-budget", engine, '  if max_modules < 0 { panic("negative analysis cache limit") }', "  ()"),
     ]
     # Every anchor is applied in every shard, before anything is built. The edits
     # are string replacements and cost nothing, so a shard that builds four
     # mutants still refuses a subject whose anchor has drifted under it, which is
     # the failure this family exists to catch and the one a partial run would
     # otherwise hide until some other shard happened to run.
-    mutants = [(name, edit(original, old, new)) for name, old, new in variants]
-    names = [name for name, _ in mutants]
+    mutants = [(name, path, edit(originals[path], old, new)) for name, path, old, new in variants]
+    names = [name for name, _, _ in mutants]
     if len(set(names)) != len(names):
         raise RuntimeError('Duplicate engine mutant identity')
     if args.check_shards:
@@ -147,7 +165,7 @@ def main():
     # stuck on FAIL. That is a property of the tree and not of the shard: it is
     # established once per run by shard 0, over the same commit, and a run
     # whose oracle is broken goes red there.
-    subjects = ([("positive", original)] if args.shard == 0 else []) + selected
+    subjects = ([("positive", engine, originals[engine])] if args.shard == 0 else []) + selected
     with tempfile.TemporaryDirectory(prefix="dawn-prefix-reference-") as temp:
         root = Path(temp)
         classes = root / "classes"
@@ -163,9 +181,11 @@ def main():
         counts = root / "selfhost/src/contract/prefix.dawn"
         driver = root / "selfhost/src/driver/analyze.dawn"
         driver.write_text(driver.read_text() + "\n" + (HERE / "reference-loop.dawn.txt").read_text())
-        for name, source in subjects:
+        for name, path, source in subjects:
             subject_started = time.monotonic()
-            (root / "selfhost/src/driver/incremental.dawn").write_text(source)
+            for original_path, text in originals.items():
+                (root / original_path).write_text(text)
+            (root / path).write_text(source)
             status, output = run("build", fixture, "-o", root / "subject.jar")
             if status:
                 raise RuntimeError(f"{name} did not compile\n{output}")

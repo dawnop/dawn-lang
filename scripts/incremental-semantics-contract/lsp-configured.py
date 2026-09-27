@@ -129,12 +129,12 @@ def build_native(output, cc_name):
                                     for path in (bootstrap_directory / "scripts").glob("seed-*.txt")}}
 
 
-def configure(text, mode, modules, text_units, observe):
-    if mode not in {"Legacy", "Cold"} or min(modules, text_units) < 0:
+def configure(text, mode, modules, observe):
+    if mode not in {"Legacy", "Cold"} or modules < 0:
         raise ValueError("invalid analysis policy or cache limit")
     text = edit(text, "run_lsp_configured(std_flag, host, legacy_analysis_config())",
                 "run_lsp_configured(std_flag, host, LspAnalysisConfig { "
-                f"mode: {mode}, max_modules: {modules}, max_text_units: {text_units}" + " })")
+                f"mode: {mode}, max_modules: {modules}" + " })")
     if not observe:
         return text
     # Only a project workspace owns a session; a standalone buffer is
@@ -164,17 +164,17 @@ def selftest():
         "      let prog = update.program\n      Workspace {",
     ))
     for mode in ("Legacy", "Cold"):
-        plain = configure(fixture, mode, 1, 2, False)
-        assert f"mode: {mode}, max_modules: 1, max_text_units: 2 }}" in plain
+        plain = configure(fixture, mode, 1, False)
+        assert f"mode: {mode}, max_modules: 1 }}" in plain
         assert "benchmark_analysis_stats" not in plain
-        observed = configure(fixture, mode, 1, 2, True)
+        observed = configure(fixture, mode, 1, True)
         assert observed.count("benchmark_analysis_stats(") == 2
         for field in FIELDS:
             assert observed.count(f"to_string(stats.{field})") == 1
     for source, mode, modules in (("", "Cold", 1), (fixture + fixture, "Cold", 1),
                                   (fixture, "Invalid", 1), (fixture, "Cold", -1)):
         try:
-            configure(source, mode, modules, 2, True)
+            configure(source, mode, modules, True)
         except (ValueError, RuntimeError):
             continue
         raise AssertionError("configuration accepted drifted anchors or invalid policy")
@@ -192,7 +192,6 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--mode", choices=("Legacy", "Cold"), required=True)
     parser.add_argument("--max-modules", type=int, default=128)
-    parser.add_argument("--max-text-units", type=int, default=1048576)
     parser.add_argument("--uninstrumented", action="store_true")
     parser.add_argument("--backend", choices=("jvm", "native"), default="jvm")
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"), help="native C compiler executable")
@@ -200,8 +199,7 @@ def main():
     source = args.source.resolve()
     original = (source / "selfhost/src/lsp/server.dawn").read_text()
     # Validate configuration and exact anchors before creating any output.
-    text = configure(original, args.mode, args.max_modules, args.max_text_units,
-                     not args.uninstrumented)
+    text = configure(original, args.mode, args.max_modules, not args.uninstrumented)
     output = args.output.resolve()
     fingerprints = stage_source(source, output, text, args.backend)
     native = {}
@@ -216,7 +214,7 @@ def main():
                            cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=600)
     (output / "metadata.json").write_text(json.dumps({
         "source": str(source), "sources": fingerprints, "mode": args.mode,
-        "max_modules": args.max_modules, "max_text_units": args.max_text_units,
+        "max_modules": args.max_modules,
         "instrumented": not args.uninstrumented,
         "stats_fields": FIELDS,
         "note": "standalone buffers are analysed cold and report no counts; timing includes optional stderr observation",

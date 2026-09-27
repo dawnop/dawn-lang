@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Prove that the LSP's answers come from the real producers.
 
-The workspace cache mutants show that the prefix owner is the thing the
-server commits and discards; the resolver mutant shows that a query's
+The workspace cache mutants show that the analysis owner is the thing the
+server commits and discards, and the parse mutants that the parses a load
+reuses are the previous load's and only for unchanged text; the resolver
+mutant shows that a query's
 positions are the ones the scheduler resolved against the declaration a body
 was checked in. The owning tests use in-memory Fs/Env and can also run in the
 native suite. Protocol-only comparisons would accept a server that silently
@@ -16,16 +18,23 @@ import time
 
 from cold import ROOT, edit, run
 
-CACHE = "workspace commits prefix cache with its Program and drops it on conflict"
-RESOLVER = "a handler state cell answers at every spelling of it"
+CACHE = ("lsp/server", "workspace commits prefix cache with its Program and drops it on conflict")
+RESOLVER = ("lsp/server", "a handler state cell answers at every spelling of it")
+PARSES = ("driver/analyze", "a reusing load parses only the files whose text changed")
 
 SERVER = "selfhost/src/lsp/server.dawn"
 CHECKER = "selfhost/src/check/checker.dawn"
+ANALYZE = "selfhost/src/driver/analyze.dawn"
+
+
+def owner_line(verdict, owner):
+    module, name = owner
+    return r"^" + verdict + r"\s+" + re.escape(module) + " :: " + re.escape(name)
 
 
 def main():
     start = time.monotonic()
-    paths = (SERVER, CHECKER)
+    paths = (SERVER, CHECKER, ANALYZE)
     originals = {path: (ROOT / path).read_text() for path in paths}
     variants = [
         ("drop-session", CACHE, SERVER, "        cache: update.session,", "        cache: ws0.cache,"),
@@ -33,6 +42,13 @@ def main():
          "incremental.analyze(incremental.evict(ws0.cache), loaded)"),
         ("keep-conflict-cache", CACHE, SERVER, "        cache: incremental.evict(ws0.cache),",
          "        cache: ws0.cache,"),
+        # A load that is handed nothing to reuse still answers correctly, so
+        # only the counts can see it; a load that reuses a parse whose text
+        # changed answers with the old syntax.
+        ("drop-parses", CACHE, SERVER, "        parses: retained_parses(st, reusing.parses),",
+         "        parses: ws0.parses,"),
+        ("stale-parse", PARSES, ANALYZE, "    Some(p) -> if p.text == text { (p, true) }",
+         "    Some(p) -> if true { (p, true) }"),
         # A body is checked with offsets relative to its own declaration, and
         # `tast_positions.symbols` is what adds the declaration's start back
         # on the way out. Its owner here is the LSP reader of those positions;
@@ -61,15 +77,15 @@ def main():
                 raise RuntimeError(f"{name} did not compile\n{output}")
             status, output = run("test", target)
             if name == "positive":
-                if status or not re.search(r"^PASS\s+lsp/server :: " + re.escape(CACHE), output, re.M) \
-                        or not re.search(r"^PASS\s+lsp/server :: " + re.escape(RESOLVER), output, re.M):
+                if status or not all(re.search(owner_line("PASS", each), output, re.M)
+                                     for each in (CACHE, RESOLVER, PARSES)):
                     raise RuntimeError(f"positive failed\n{output}")
             elif not status or not re.search(
-                    r"^FAIL\s+lsp/server :: " + re.escape(owner) + r"\n\s+assertion failed:", output, re.M):
+                    owner_line("FAIL", owner) + r"\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(f"{name} missed the owning assertion\n{output}")
             (root / path).write_text(originals[path])
             print(f"OK: lsp prefix and resolver {name}", flush=True)
-    print(f"OK: {len(variants)} compiling LSP prefix and resolver mutants; elapsed={time.monotonic()-start:.2f}s")
+    print(f"OK: {len(variants)} compiling LSP session, parse and resolver mutants; elapsed={time.monotonic()-start:.2f}s")
 
 
 if __name__ == "__main__":
