@@ -1,6 +1,6 @@
 # LSP 同步延迟刀 1：模块步骤按（输入，进入 carry）记忆
 
-> 状态：**current**：2026-09-28 落地，分支 `feat/lsp-module-memo`，四个实现提交加本文档。
+> 状态：**current**：2026-09-28 落地，分支 `feat/lsp-module-memo`：七个实现提交加本文档（提交以主题引用，合入后的哈希记在进度记录里）。
 > 数据来源是 laziness L0 报告（`agent-handoff/laziness-l0-report-20260927.md`，基线 `b184de6e`）与本文第六节的实测。
 > 上一篇是 [incremental-semantics-removal.md](incremental-semantics-removal.md)：拆掉体级重放之后，生产 LSP 只剩 legacy 前缀复用；本文把它换成一条规则。
 
@@ -54,8 +54,8 @@ selfhost 工作区（打开 `main.dawn` 与另外四个文件，`main` 的闭包
 `Map` 的 `==` 按项比、不看插入顺序（`std/map.dawn` 的 `Eq[Map]`）。carry 自己的三张表只按键查（检查器里没有遍历 `identities` 或 `impl_table` 的地方，
 遍历 impl 表的只有冷路径的代码生成），顺序不是输入，所以 `same_after` 对它们只用 `==`。导出面不同：导入方会遍历它的表，
 例如「did you mean」提示从 `fns` 等表按顺序建候选池，两个同样近的名字取先出现的那个；ADT、trait、效果的 id 表按这个顺序嫁接进导入方自己的表。
-所以被重检模块自己的导出面在 `==` 之外还比各个表的键序（`same_surface`）。`contract/prefix` 的「module memo compares what a module exports in order」守它：
-交换两个 `pub fn`、交换两行 `use`，下游都必须重检；`prefix.py` 的 `unordered-surface` 变异体（只比 `==`）让它红。
+所以被重检模块自己的导出面在 `==` 之外还比各个表的键序（`same_surface`）。`contract/module_memo` 的「module memo compares what a module exports in order」守它：
+交换两个 `pub fn`、交换两行 `use`，下游都必须重检；`module-memo.py` 的 `unordered-surface` 变异体（只比 `==`）让它红。
 第一版也给 carry 的三张表加了键序比较，它的变异体 `unordered-carry`（去掉那层键序）在本机 sweep 里存活，没有任何用例能区分，与上面「只按键查」的读法一致，于是删掉了。
 
 ## 三、为什么删掉两条旧规则
@@ -71,13 +71,14 @@ RSS 基线 1,169 MB、本刀 1,007 MB。记住全部 76 个模块的步骤没有
 
 它的理由是 Java 签名预言机的答案可能变。但 owner 与 lease 同生同灭：`LspLeaseHost.project` 每个工作区给一个 lease，lease 固定 classpath，
 工作区在 plan 或 lease 变化时整个重建 owner（`lsp/server.dawn` 的 `activate_workspace`）。会话内预言机是固定的，查过 Java 的模块与没查过的一样是输入的函数。
-这条规则一走，`JsigProbe` 在会话里就没有用处了，`incremental.new` 与 `LspLeaseHost` 去掉 `probe`。
+这条规则一走，查询计数就不再决定任何事：`incremental.new` 与 `LspLeaseHost` 去掉 `probe`，`JsigProbe`、`observe_queries`、`refused_probe`、
+`query_probe` 连同 `contract/probe`、`probe.py` 与冷基准里的 `java_queries` 一列整个删掉（提交「Delete the Java query probe」，删 299 行）。
 
 ### 3.3 同时去掉的两条
 
 旧实现还有两条保守规则，同样不在新规则里：「模块有诊断即停止保留」与「loader 有诊断即整轮冷检」。诊断是步骤的**输出**，不是输入；
 loader 诊断不是任何一个步骤的输入。步骤里诊断的位置按声明相对记录（`front/token.dawn` 的 `Diag` 注释），渲染时才查位置视图，所以复用带诊断的步骤不会带出旧位置（见第四节）。
-`contract/prefix` 的「module memo reuses modules with diagnostics and bounds what it keeps」逐项对照冷分析。
+`contract/module_memo` 的「module memo reuses modules with diagnostics and bounds what it keeps」逐项对照冷分析。
 
 ## 四、`decl_spans` 必须重拼
 
@@ -89,15 +90,15 @@ loader 诊断不是任何一个步骤的输入。步骤里诊断的位置按声�
 
 守它的判据：
 
-- `contract/prefix` 的「module memo places a reused module's diagnostics and its predecessors' where they are now」：上游模块前插三行、体内有错，下游复用；
-  `rendered_diags` 与冷分析相同。`prefix.py` 的 `stale-spans` 变异体（拼接时用步骤自己的视图代替本轮的）必须让它红。
+- `contract/module_memo` 的「module memo places a reused module's diagnostics and its predecessors' where they are now」：上游模块前插三行、体内有错，下游复用；
+  `rendered_diags` 与冷分析相同。`module-memo.py` 的 `stale-spans` 变异体（拼接时用步骤自己的视图代替本轮的）必须让它红。
 - `lsp-project-matrix.py` 的 `provider-move-error` 修订：LSP 发布的上游诊断必须落在当前文本里 `missing_value` 所在的行。
   去掉重拼的服务端在这一步报 `provider diagnostic on line 4, text puts it on 5`。
 
 definition 与 hover 看不到这个视图：definition 读目标模块的语法树（`lsp/lspq.dawn` 的 `module_ast_by_class`），服务端没有 references 请求。
 所以 LSP 侧唯一的读者是诊断渲染，判据落在诊断上；definition 的位置同样逐修订按当前文本检查，作为「从下游跳到被编辑模块」的正向断言。
 
-## 五、前置小刀：导出面不带源码位置
+## 五、前置小刀：导出面与 carry 不带源码位置
 
 `AliasE.target` 是声明模块里未解析的类型语法（带绝对位置），`nlo`/`nhi` 是名字的位置。两个改法：位置改成相对声明，或导出面不带位置。选后者：
 
@@ -108,6 +109,13 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 相对位置能让比较相等，但会把「导出面携带源码坐标」这件事留下来，下一个读者还得知道它是相对谁的；导出面本来就不该有坐标。
 实现是 `check/checker.dawn` 的 `exported_alias`（`target` 置空、`nlo`/`nhi` 置零），`exports_of` 只导出它。冷输出不变：诊断文案与位置逐字节相同（第七节）。
 
+`ImplI` 是同一类问题：它带 `impl` 或 `derive` 的绝对位置 `lo`/`hi`，并且进 carry 的程序级 impl 表与 `ModExports.impls`，
+所以在某个 `impl`/`derive` 之前插一行，carry 就不等，其后模块全部重检。处理同 alias：读 `lo`/`hi` 的只有声明模块自己遍历 `cx.local_impls` 的三处
+（公开面检查、`impl_at_span`、`impl_method_trait`），导入方按键找 impl、重复 impl 诊断报的是 `src_path`，从不读别人的位置。
+`exported_impl` 在 `exports_of` 与 `analyze_module_step` 的 carry 折叠里把位置置零，声明模块自己的 `local_impls` 不动（提交「Carry and export impls without source positions」）。
+观测：tea-core 工作区打开 `tree`、`diff`、`walk`（`tree` 有 `derive Show`，被另两个导入），在 `tree` 前插一行，修前 reused 0 / checked 3，修后 2 / 1。
+`contract/module_memo` 的「module memo keeps an importer's step across an edit above an impl or a derive」与 `module-memo.py` 的 `impl-positions` 变异体守它。
+
 ## 六、实测
 
 本机 16 核 15 GB，WSL2，GraalVM CE 21.0.2，服务端 `-Xss512m -Xmx2g -XX:+UseSerialGC`，测量期间机器空载（load avg 1.3 到 2.1）。
@@ -115,7 +123,7 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 方法同 L0 的 `lsp_edit.py`：打开 `main` 与 `front/ast`、`check/checker`、`driver/analyze`、`jvm/emit`、`main` 五个被编辑文件，每轮在每个文件某函数体顶部插一行 `let`，
 文件顺序每轮轮转，预热 3 轮、测 7 轮，基线与本分支交错两遍，每格 n = 7。
 
-### 6.1 解析复用（提交 `bc1a2416`）
+### 6.1 解析复用（提交「Reuse unchanged parses across LSP workspace loads」）
 
 | 编辑文件 | 基线 sync 中位数（两遍） | 解析复用 sync 中位数（两遍） | min（解析复用） |
 |---|---|---|---|
@@ -127,7 +135,7 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 
 重检模块数不变（61 或 76），差别全在解析：比 L0 估的 0.6 s 多，因为旧会话还要对新解析出来的树做逐节点的 `LoadedModule` 比较，共享同一棵树后按对象同一性立即返回。
 
-### 6.2 模块记忆（提交 `e36046ab`）
+### 6.2 模块记忆（提交「Reuse a module's step when its input and entering carry are unchanged」）
 
 | 编辑文件 | 基线 sync 中位数（两遍） | 本刀 sync 中位数（两遍） | 本刀 min | 重检模块（基线 → 本刀） |
 |---|---|---|---|---|
@@ -164,7 +172,7 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
   checker-corpus、四个差分、fixpoint 的结果见报告（`agent-handoff/lsp-module-memo-report-20260927.md`）。
 - LSP A/B：`b184de6e` 的服务端（不带观察）对本分支服务端，`lsp-project-matrix.py`（十个修订）与 `lsp-edit-matrix.py --functions 1000`（十个修订）的全部诊断与
   hover/definition/completion 回复逐字相同；本分支带 `--expect-counts`，每次只改上游实现或位置的修订都是「上游重检、下游复用」。
-- `contract/prefix` 的七条测试把每个结果与同一输入的冷分析逐项比较：checkdump、诊断、`decl_spans`（含键序）、渲染后的诊断。
+- `contract/module_memo` 的八条测试把每个结果与同一输入的冷分析逐项比较：checkdump、诊断、`decl_spans`（含键序）、渲染后的诊断。
 
 ## 八、不做的（理由）
 
@@ -173,7 +181,10 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 - **按声明粒度只检被请求的体**：需要 S1/S2 的依赖图、SCC 与跳过体的执行器，是 laziness 的第二步；本刀之后最慢的是 `check/checker` 自身的 0.36 s，
   它才是按声明粒度的动机，但要先有「只检一个体」的正确性论证，不在本刀。
 - **独立缓冲区的解析复用**：文本每次都变，没有可复用的东西；增量解析是另一件事。
-- **`impls` 里的位置**：`ImplI` 带 `lo`/`hi`（绝对位置，显式 impl 与 derive 都有），编辑点在某个 `impl` 或 `derive` 之前时，carry 的 `impls` 不相等，早截断失效。
-  本刀的五个编辑位置都没碰上。它与 alias 是同一类问题（导出面与 carry 携带坐标），但裁决只点了 alias，留给后续按同一办法处理。
-- **删掉 `JsigProbe` 本身**：会话不再用它，但 `contract/bench` 与 `probe.py` 还在用它计数 Java 查询；是否整体删除另议。
 - **给 `max_modules` 换成内存预算**：6.3 说明记忆不增加可测内存，上限只防病态工作区，128 足够。
+
+## 九、契约与门禁的名字
+
+规则不再是前缀，名字跟着改（提交「Name the module memo contracts after the rule they hold」）：`prefix.py` → `module-memo.py`、
+`lsp-prefix.py` → `lsp-module-memo.py`、`contract/prefix` → `contract/module_memo`，job `incremental-prefix-1..3` → `incremental-memo-1..3`，
+预算行照搬，`steps.lock.json` 按 `incremental-memo` 族重录，提交里按族写 `Gate-Retire(incremental-prefix)`。记录旧测量的注释保留当时的名字。

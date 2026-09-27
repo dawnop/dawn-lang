@@ -162,3 +162,5 @@ SCC 和 `BodyExecutor` 这个插口。
 2026-09-28 起，第四节表里的「legacy 前缀复用」换成了一条规则：模块的输入与进入它的 carry 都不变，就原样复用上一轮的步骤。
 它包含前缀复用与早截断，删掉了字符预算与「Java 查询即停止保留」，并加了未变文本的解析复用；selfhost 工作区体内编辑后只重检被编辑的那个模块。
 设计、为什么一条规则够、`decl_spans` 为什么要重拼与实测见 [lsp-module-memo-design.md](lsp-module-memo-design.md)。
+同日第四节表里的 `contract/{cold,prefix,probe,bench}`、`incremental-prefix-1..3` 变成 `contract/{cold,module_memo,bench}`、`incremental-memo-1..3`：
+`contract/probe` 与 Java 查询计数探针随那条规则删掉，其余按新规则改名。
