@@ -18,7 +18,7 @@ import time
 
 from cold import ROOT, edit, run
 
-CACHE = ("lsp/server", "workspace commits prefix cache with its Program and drops it on conflict")
+CACHE = ("lsp/server", "workspace commits its module memo with its Program and drops it on conflict")
 RESOLVER = ("lsp/server", "a handler state cell answers at every spelling of it")
 PARSES = ("driver/analyze", "a reusing load parses only the files whose text changed")
 
@@ -64,7 +64,7 @@ def main():
     ]
     subjects = [("positive", CACHE, SERVER, originals[SERVER])] + [
         (name, owner, path, edit(originals[path], old, new)) for name, owner, path, old, new in variants]
-    with tempfile.TemporaryDirectory(prefix="dawn-lsp-prefix-") as temp:
+    with tempfile.TemporaryDirectory(prefix="dawn-lsp-module-memo-") as temp:
         root = Path(temp)
         for directory in ("selfhost", "compiler-plan"):
             shutil.copytree(ROOT / directory, root / directory, ignore=shutil.ignore_patterns("build", ".dawn"))
@@ -84,7 +84,7 @@ def main():
                     owner_line("FAIL", owner) + r"\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(f"{name} missed the owning assertion\n{output}")
             (root / path).write_text(originals[path])
-            print(f"OK: lsp prefix and resolver {name}", flush=True)
+            print(f"OK: lsp module memo, parses and resolver {name}", flush=True)
     print(f"OK: {len(variants)} compiling LSP session, parse and resolver mutants; elapsed={time.monotonic()-start:.2f}s")
 
 
