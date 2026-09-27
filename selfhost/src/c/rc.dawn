@@ -36,7 +36,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs,
+  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_as_ctor,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
   CMode, COwned, mode_owned,
@@ -232,6 +232,7 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
     }
     CIntrinsic(_, args, _) -> fv_list(args, acc)
     CCtor(_, _, args, _) -> fv_list(args, acc)
+    CUpdate(base, adt, ci, fields, ty) -> fv_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
     CField(t, _, _, _, _) -> fv_expr(t, acc)
     CIsCtor(t, _, _) -> fv_expr(t, acc)
     CTagOf(t, _) -> fv_expr(t, acc)
@@ -383,6 +384,8 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
     }
     CIntrinsic(_, args, _) -> jumps_list(args, lid, brk, cont)
     CCtor(_, _, args, _) -> jumps_list(args, lid, brk, cont)
+    CUpdate(base, adt, ci, fields, ty) ->
+      jumps(update_as_ctor(base, adt, ci, fields, ty), lid, brk, cont)
     CField(t, _, _, _, _) -> jumps(t, lid, brk, cont)
     CIsCtor(t, _, _) -> jumps(t, lid, brk, cont)
     CTagOf(t, _) -> jumps(t, lid, brk, cont)
@@ -955,6 +958,7 @@ type SpreadLift = {
 fn spread_rebuild(e: CExpr, base: Int) -> Option[(Int, Int)] =
   match e {
     CBlock(_, Some(t), _) -> spread_rebuild(t, base)
+    CUpdate(b, adt, ci, fields, ty) -> spread_rebuild(update_as_ctor(b, adt, ci, fields, ty), base)
     CCtor(adt, ci, args, _) -> {
       for a in args {
         match a {
@@ -1055,6 +1059,9 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
       let (st1, as1) = lift_spread_list(st, args)
       (st1, CCtor(adt, ci, as1, ty))
     }
+    # the update is spelled out whole here, so its kept fields are projections
+    # of the base like any other and are lifted with them
+    CUpdate(base, adt, ci, fields, ty) -> lift_spread_expr(st, update_as_ctor(base, adt, ci, fields, ty))
     CField(target, adt, ci, idx, fty) -> {
       match target {
         CLocal(sym, rty) ->
@@ -1198,6 +1205,8 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
     }
     CIntrinsic(_, args, _) -> assigns_spread_list(args, sym)
     CCtor(_, _, args, _) -> assigns_spread_list(args, sym)
+    CUpdate(base, adt, ci, fields, ty) ->
+      assigns_spread_expr(update_as_ctor(base, adt, ci, fields, ty), sym)
     CField(target, _, _, _, _) -> assigns_spread_expr(target, sym)
     CIsCtor(target, _, _) -> assigns_spread_expr(target, sym)
     CTagOf(target, _) -> assigns_spread_expr(target, sym)
@@ -1332,6 +1341,7 @@ fn list_leaf(e: CExpr) -> Bool =
       for el in es { if not list_leaf(el) { return false } }
       true
     }
+    CUpdate(base, adt, ci, fields, ty) -> list_leaf(update_as_ctor(base, adt, ci, fields, ty))
     _ -> false
   }
 
@@ -1456,6 +1466,11 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
       let (st1, lets, args1, temps) = consume_all(st, args, after)
       wrap(st1, lets, CCtor(adt, ci, args1, cty), cty, temps)
     }
+
+    # C builds a record whole: an update is its constructor with the kept
+    # fields read out of the base, which is where the counting happens
+    CUpdate(base, adt, ci, fields, uty) ->
+      rw(st, update_as_ctor(base, adt, ci, fields, uty), consume, after)
 
     CTuple(elems, tty) -> {
       let (st1, lets, es1, temps) = consume_all(st, elems, after)
@@ -2150,6 +2165,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
       c1
     }
     CCtor(_, _, args, _) -> chk_list(c, args, true)
+    CUpdate(base, adt, ci, fields, ty) -> chk_walk(c, update_as_ctor(base, adt, ci, fields, ty), k)
     CTuple(elems, _) -> chk_list(c, elems, true)
     CListLit(elems, _) -> chk_list(c, elems, true)
     CClosure(_, _, caps, _) -> chk_list(c, caps, true)

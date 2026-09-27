@@ -44,7 +44,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs,
+  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_as_ctor,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
@@ -125,6 +125,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
     }
     CIntrinsic(_, args, _) -> clo_list(args, acc)
     CCtor(_, _, args, _) -> clo_list(args, acc)
+    CUpdate(base, adt, ci, fields, ty) -> clo_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
     CField(t, _, _, _, _) -> clo_expr(t, acc)
     CIsCtor(t, _, _) -> clo_expr(t, acc)
     CTagOf(t, _) -> clo_expr(t, acc)
@@ -363,6 +364,9 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     # `proj_demands` matches a projection against, so record it.
     CCtor(adt, _, args, _) ->
       dm_list(Dm { ..d, built_acc: set.insert(d.built_acc, adt) }, args, true),
+    # an update constructs the record whole on this backend (rc.rw), and it
+    # demands what that constructor would, kept-field projections included
+    CUpdate(base, adt, ci, fields, ty) -> dm_expr(d, update_as_ctor(base, adt, ci, fields, ty), k)
     CTuple(elems, _) -> dm_list(d, elems, true)
     CListLit(elems, _) -> dm_list(d, elems, true)
     # captured: the closure keeps it (the Lean rule: pap captures are owned)

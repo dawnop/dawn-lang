@@ -57,7 +57,7 @@ use ir/core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
-  CForeign, CJava, CTagOf, CDup, CComptime, CConstRef,
+  CForeign, CJava, CTagOf, CDup, CComptime, CConstRef, CUpdate, CUpdField, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
@@ -3931,30 +3931,38 @@ fn lower_ctor(
     hoisted = lets
     ws = locs
   }
-  var args: List[CExpr] = []
+  # Field order. A field with no written argument comes from the spread base
+  # and stays at its declared type -- copying erased to erased boxes nothing.
+  var fields: List[CUpdField] = []
   var fi = 0
   for s in slots {
+    let declared = declared_field_ty(st1, adt, ci, fi)
     match s {
       Some(i) -> {
-        let declared = declared_field_ty(st1, adt, ci, fi)
-        args = args ++ [adapt_in(ws[i], tex_ty(written[i]), declared)]
+        fields = fields ++ [CUpdField { ty: declared,
+          value: Some(adapt_in(ws[i], tex_ty(written[i]), declared)) }]
       }
-      # no written argument: the field comes from the spread base, and it
-      # stays at its declared type -- copying erased to erased boxes nothing
-      None ->
-        match base {
-          Some(trip) -> {
-            let (bsym, _bv, bt) = trip
-            args = args ++
-              [CField(CLocal(bsym, bt), adt, ci, fi,
-                declared_field_ty(st1, adt, ci, fi))]
-          }
-          None -> panic("lower: constructor field without an argument")
-        }
+      None -> { fields = fields ++ [CUpdField { ty: declared, value: None }] }
     }
     fi = fi + 1
   }
-  var built = CCtor(adt, ci, args, ty)
+  var built =
+    match base {
+      Some(trip) -> {
+        let (bsym, _bv, bt) = trip
+        CUpdate(CLocal(bsym, bt), adt, ci, fields, ty)
+      }
+      None -> {
+        var args: List[CExpr] = []
+        for f in fields {
+          match f.value {
+            Some(v) -> { args = args ++ [v] }
+            None -> panic("lower: constructor field without an argument")
+          }
+        }
+        CCtor(adt, ci, args, ty)
+      }
+    }
   if len(hoisted) > 0 { built = CBlock(hoisted, Some(built), ty) }
   match base {
     # the base is evaluated once, before any field is read from it -- which is
@@ -4860,6 +4868,7 @@ fn dense_expr(d: Dense, e: CExpr) -> Dense =
     CCall(callee, args, _) -> dense_all(dense_callee(d, callee), args)
     CIntrinsic(_, args, _) -> dense_all(d, args)
     CCtor(_, _, args, _) -> dense_all(d, args)
+    CUpdate(base, _, _, fields, _) -> dense_all(dense_expr(d, base), update_values(fields))
     CField(t, _, _, _, _) -> dense_expr(d, t)
     CIsCtor(t, _, _) -> dense_expr(d, t)
     CTagOf(t, _) -> dense_expr(d, t)
@@ -4957,6 +4966,11 @@ fn moved_expr(d: Dense, e: CExpr) -> CExpr =
     CCall(callee, args, ty) -> CCall(moved_callee(d, callee), moved_all(d, args), ty)
     CIntrinsic(name, args, ty) -> CIntrinsic(name, moved_all(d, args), ty)
     CCtor(adt, ci, args, ty) -> CCtor(adt, ci, moved_all(d, args), ty)
+    CUpdate(base, adt, ci, fields, ty) -> {
+      var out: List[CUpdField] = []
+      for f in fields { out = out ++ [CUpdField { ..f, value: moved_opt(d, f.value) }] }
+      CUpdate(moved_expr(d, base), adt, ci, out, ty)
+    }
     CField(t, adt, ci, idx, ty) -> CField(moved_expr(d, t), adt, ci, idx, ty)
     CIsCtor(t, adt, ci) -> CIsCtor(moved_expr(d, t), adt, ci)
     CTagOf(t, adt) -> CTagOf(moved_expr(d, t), adt)
