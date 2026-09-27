@@ -83,7 +83,11 @@ std 类型（§10.2）。没有外部工具生态的编译器都这么做：Go `
 诊断 API（Kotlin Analysis API 那样）在这里等于把 `Cx` 换个名字再公开，因为探针要的是逐字段
 比较、伪造输入与重建 `Frame`。
 
-身份由 driver 在建 `Cx` 时决定：`analyze.module_step_with_recording` 已经持有
+2026-09-27 起 `contract/` 只剩 `cold`、`prefix`、`probe`、`bench` 四个模块：`session_bodies`、
+`prepared_sessions`、`cached_module_observer` 三个探针随增量引擎的 opt-in 切片拆除（见
+[incremental-semantics-removal.md](incremental-semantics-removal.md)），上面的边界不变。
+
+身份由 driver 在建 `Cx` 时决定：`analyze.analyze_module_step`（落地时叫 `module_step_with_recording`）已经持有
 `LoadedModule.pkg`（`[deps]` 包）与 `std_identity` 的判定（std），把 `[deps]` 包名写进
 `Cx.dep_package`；`cx.package_of(cx)` 由 `is_std_module` 与 `dep_package` 推出
 `PackageId`，不另存一份会与 `is_std_module` 不一致的副本。
@@ -268,6 +272,9 @@ C 符号的链接性都不随之变化。这也是为什么 Core golden 不变�
   275 个声明（§10.2）；「改走 `driver/analyze` 的公开入口」不存在，入口自己就在闭包里。
   落地的是「探针搬进包内」（§4.1 末段），不是「开一层公开检查器 API」。本节第一条说的
   9 个模块直读 `Cx` 的包内耦合没有动，`pub(pkg)` 本来就管不到它，另立。
+- **回填（2026-09-27）**：上面列的包外消费者里，`scripts/incremental-semantics-contract` 的读取族
+  harness 与三个会话/缓存探针已随增量切片拆除；§10.2 搬进包内的六个探针模块剩 `cold`、`prefix`、`probe`
+  三个（加基准入口 `bench`）。
 
 ### 9.3 LIB-13 残差：web 包 seam
 

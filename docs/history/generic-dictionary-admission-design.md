@@ -1,6 +1,9 @@
 # Bounded generic dictionary admission: trace-first slice
 
-> Status: current. Pure explicit bounded trait-call replay and assembly-owned renewal are implemented. The uncached baseline below was slower than cold checking; full G3 acceptance remains separate from these correctness and work-count results. Earlier refusal and entry-only sections are historical evidence.
+> 状态：**historical** —— 已归档：增量引擎的 opt-in 切片于 #259 与 #261 拆除，最后一版树在 tag `incremental-slice-final`，考古看那个 tag；拆除的理由与留下了什么见 [incremental-semantics-removal.md](../incremental-semantics-removal.md)。
+> 下面是归档前的原文，其中的「现状」「当前」「实施中」都指拆除之前。
+>
+> 归档前的状态：Status: current. Pure explicit bounded trait-call replay and assembly-owned renewal are implemented. The uncached baseline below was slower than cold checking; full G3 acceptance remains separate from these correctness and work-count results. Earlier refusal and entry-only sections are historical evidence.
 
 This tracks the M3.3 prerequisites and subsequent bounded admission class, not a completed G3 gate.
 The original workload remains `Scale[T]`: a nominal `Coin` implementation and

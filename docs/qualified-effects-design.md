@@ -25,6 +25,8 @@ An unresolved qualified name never introduces a variable.
   variables, projections, and unions remain forbidden in ground bindings.
 - Record successful and failed qualified queries and diagnostic answers for
   incremental revalidation. Compare incremental analysis with cold analysis.
+  （2026-09-27：读取日志与候选重验已随增量切片拆除，这一条只剩历史意义；见
+  [incremental-semantics-removal.md](incremental-semantics-removal.md)。）
 - Cover formatting, effect-position completion, editor tokenization, grammar,
   and both specification files. Public additions are in English.
 - Verify the existing JVM/native and Core golden contracts; no runtime ABI or

@@ -231,7 +231,7 @@
 > `pass_const_decls` 把每条 header 存在它读自的那条声明的路径下（函数 `[Named(FunctionDecl, f)]`、
 > impl 方法 `[ImplHead(trait, subject), Named(MethodDecl, m)]`、常量 `[Named(ConstDecl, c)]`）；
 > 消费者 `execute_module_bodies`、`pass_main_check`、`function_product`、`allocation.local_impl_headers`
-> 从手里的语法拼出同一条路径去查，任何地方都不再按下标把表与 AST 配对。`impl_sigs[ii]`/`msigs[mi]`
+> （后两者已随增量引擎的 opt-in 切片于 2026-09-27 拆除）从手里的语法拼出同一条路径去查，任何地方都不再按下标把表与 AST 配对。`impl_sigs[ii]`/`msigs[mi]`
 > 随之消失；`function_product` 的逐下标名字核对与长度尾检删除，改为「键缺失即拒」。
 > 同一路径被重复声明（模块已因重复被拒）时键指向第一个实例，其后的实例排在 `repeats` 里，
 > 按声明序第 n 次遇到该路径就取第 n 个，所以每个重复体仍按自己的 header 检查、冷输出逐字节不变；
@@ -308,7 +308,9 @@
 > 一条 `Emit-Change(emit selfhost)` 具名申报；② 「会毁掉 flat dump 那半边唯一完好的
 > 证明」。Core golden 17 个 dump 只动了一个，正是那个 prompt 字面量；③ 「今天没有增量
 > 编译，收益是空的」。收益已经兑现：body product 不再带取号区间，装配不再要求
-> 计数器坐标对齐（`check/body_product.assemble` 原前置条件删除）。
+> 计数器坐标对齐（`check/body_product.assemble` 原前置条件删除）。2026-09-27 body product 连同整个
+> opt-in 切片拆除（[incremental-semantics-removal.md](../incremental-semantics-removal.md)），这条收益随之没有了
+> 消费者；①② 的实测不受影响。
 
 - **证据：S。** 以下两条的行号是审查基线 `86f6a0f63960` 的历史行号；`Cx.next_id` 与它的跨模块 carry 今天已经不在树上，按行号取不到。`Cx.next_id` 同时分配 type var、ADT、effect、trait、local symbol：`selfhost/src/check/cx.dawn:87`、`:313`，以及 `selfhost/src/check/passes.dawn:44`、`:633`、`:1003`、`:1112`、`selfhost/src/check/checker.dawn:109`。
 - 计数器跨模块传递：`selfhost/src/driver/analyze.dawn:1023`、`:1044`、`:1065`；ID 又进入 type key 与 generated symbol：`selfhost/src/ir/core.dawn:349`、`selfhost/src/ir/lower.dawn:735`、`selfhost/src/c/emitc.dawn:1160`。

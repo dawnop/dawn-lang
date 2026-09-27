@@ -1,6 +1,9 @@
 # Session-owned body replay
 
-> Status: current. Opt-in implementation and outstanding production acceptance.
+> 状态：**historical** —— 已归档：增量引擎的 opt-in 切片于 #259 与 #261 拆除，最后一版树在 tag `incremental-slice-final`，考古看那个 tag；拆除的理由与留下了什么见 [incremental-semantics-removal.md](../incremental-semantics-removal.md)。
+> 下面是归档前的原文，其中的「现状」「当前」「实施中」都指拆除之前。
+>
+> 归档前的状态：Status: current. Opt-in implementation and outstanding production acceptance.
 
 This is the production integration work following the opt-in body executor,
 single-pass renewal, and primitive inferred publication. It is not a phase-5

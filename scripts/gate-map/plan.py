@@ -543,7 +543,7 @@ def selftest():
               "forced prefixes, so the unread exemption cannot be exercised",
               file=sys.stderr)
         return 1
-    docs = ["docs/incremental-semantics-design.md", "docs/session-body-replay-design.md"]
+    docs = ["docs/history/incremental-semantics-design.md", "docs/history/session-body-replay-design.md"]
     for d in docs:
         if d not in view.files:
             print(f"SELFTEST FAIL: {d} is gone; repoint the docs case", file=sys.stderr)

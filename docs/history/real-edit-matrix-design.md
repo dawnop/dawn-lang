@@ -1,6 +1,9 @@
 # 真实编辑矩阵：replay 的计数与命中率
 
-> 状态：current。第 5 期计数刀：十种编辑 × 四类工作负载的精确计数预言已落地，本机 n=1000 全部 40 格与预言逐格相等、与冷检查逐体相等；计时、CI 接入不在本刀。
+> 状态：**historical** —— 已归档：增量引擎的 opt-in 切片于 #259 与 #261 拆除，最后一版树在 tag `incremental-slice-final`，考古看那个 tag；拆除的理由与留下了什么见 [incremental-semantics-removal.md](../incremental-semantics-removal.md)。
+> 下面是归档前的原文，其中的「现状」「当前」「实施中」都指拆除之前。
+>
+> 归档前的状态：current。第 5 期计数刀：十种编辑 × 四类工作负载的精确计数预言已落地，本机 n=1000 全部 40 格与预言逐格相等、与冷检查逐体相等；计时、CI 接入不在本刀。
 > 2026-09-26（#165）：体级诊断守卫改为按 body，`body_one_type_error` 正向预言从 R + (n − m) 改为 R+1，见「首次推导错的一格」末尾与 [body-diag-guard-design.md](body-diag-guard-design.md)。
 
 ## 为什么要这张矩阵

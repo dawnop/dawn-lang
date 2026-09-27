@@ -1,6 +1,9 @@
 # 增量语义引擎
 
-> 状态：**current** —— 2026-09-08 实施中的设计与进度，不是七期完成或性能承诺。
+> 状态：**historical** —— 已归档：增量引擎的 opt-in 切片于 #259 与 #261 拆除，最后一版树在 tag `incremental-slice-final`，考古看那个 tag；拆除的理由与留下了什么见 [incremental-semantics-removal.md](../incremental-semantics-removal.md)。
+> 下面是归档前的原文，其中的「现状」「当前」「实施中」都指拆除之前。
+>
+> 归档前的状态：**current** —— 2026-09-08 实施中的设计与进度，不是七期完成或性能承诺。
 > 用户授权按七期持续实施，第2、5、7期验收后分别产出报告。
 
 ## 一、问题与基线
@@ -402,7 +405,7 @@ Product仍记录alias_resolved变化作为显式写集，不声称正常body必�
 | 期 | 交付 | 状态 |
 |---|---|---|
 | 1 | 冷路径对照、阶段基线、Java 观测 | 已验收；证据汇入第2期报告 |
-| 2 | workspace 前缀缓存、生命周期、基本逐出 | #107已合并；[验收报告](history/incremental-semantics-p2-report.md) |
+| 2 | workspace 前缀缓存、生命周期、基本逐出 | #107已合并；[验收报告](incremental-semantics-p2-report.md) |
 | 3 | 稳定身份、具名产物及准入 | 声明/树/状态迁移已分批实现，完整生产接线未完成 |
 | 4 | Query runtime, dependency invalidation, and header integration | Real checker facts are recorded and revalidated; the opt-in body executor shares candidate-local query verdicts. Cross-revision input invalidation and production scheduling remain incomplete. |
 | 5 | 函数 body 增量、standalone/Playground | 部分：opt-in 切片已合并，生产不启用（calls #155、inferred #157、bounded generic #162、session body replay #158、prepared loader 与 LSP 会话 #159/#160/#161）；生产调度未接线，本期报告未写，G3 未达标 |
