@@ -10,7 +10,7 @@ use std/map
 use std/set
 use driver/analyze.{
   LoadedModule, LoadResult, Program, CheckedMod, ModuleStep, AnalysisCarry,
-  initial_carry_with_provenance, analyze_module_step, analyze_module_step_cached,
+  initial_carry, initial_carry_with_provenance, analyze_module_step, analyze_module_step_cached,
   ModuleBodyCache, CachedModuleStep, module_body_cache_size, canon,
   PreparedLoad, PreparedModule, prepared_result, prepared_modules, analyze_module_step_prepared
 }
@@ -64,7 +64,7 @@ pub(pkg) fn new(
     std: std, opts: opts, js: js, probe: probe, prefix: [],
     bodies: map.empty(), body_enabled: false, max_products: 0,
     max_modules: max_modules, max_text_units: max_text_units,
-    baseline: initial_carry_with_provenance(std, "session")
+    baseline: initial_carry(std)
   }
 }
 
@@ -77,7 +77,10 @@ pub(pkg) fn new_with_body_cache(
 ) -> Session = {
   if max_products < 0 { panic("negative analysis body cache limit") }
   let session: State = new(std, opts, js, probe, max_modules, max_text_units)
-  State { ..session, body_enabled: true, max_products: max_products }
+  # Body products are keyed by the provenance the carry names; a legacy
+  # prefix session has no reader for it and starts from the cold carry.
+  State { ..session, body_enabled: true, max_products: max_products,
+    baseline: initial_carry_with_provenance(std, "session") }
 }
 
 ## Eviction drops replay state, not the caller's current query Program.
