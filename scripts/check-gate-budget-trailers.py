@@ -321,6 +321,12 @@ class Scratch:
     def git(self, *args):
         return subprocess.run(
             ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+             # `git commit` hands off to a detached `git maintenance run --auto`
+             # (gc), which can still be writing under objects/ when the
+             # TemporaryDirectory below is being removed: 2026-09-27 main run
+             # 36320126368 died in that rmtree with "Directory not empty:
+             # 'objects'". A throwaway repository has nothing to maintain.
+             "-c", "gc.auto=0", "-c", "maintenance.auto=false",
              *args], cwd=self.dir, env=self.env, capture_output=True, text=True,
             check=True).stdout.strip()
 
@@ -460,7 +466,8 @@ def selftest():
     tmp_root = os.environ.get("TMPDIR") or None
     for label, want_red, build in cases:
         with tempfile.TemporaryDirectory(prefix="gate-budget-trailers-",
-                                         dir=tmp_root) as where:
+                                         dir=tmp_root,
+                                         ignore_cleanup_errors=True) as where:
             scratch = Scratch(where)
             rev_range = build(scratch)
             problems, _notes = check_range(scratch.dir, rev_range)
