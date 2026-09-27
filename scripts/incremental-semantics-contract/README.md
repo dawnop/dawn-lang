@@ -4,7 +4,7 @@
 会话、provenance 表及其 15 个 `check/` 模块）连同守它的契约一起拆了，拆除前的
 整棵树归档在 `incremental-slice-final` tag，考古看 tag。本目录留下的是：模块记忆会话
 （2026-09-28 前是 legacy 前缀会话，见 [docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md)；
-脚本名 `prefix*` 沿用）与它对照的冷参照（`prefix.py`、`cold.py`、`probe.py`、`lsp-prefix.py`）、声明身份
+脚本名 `prefix*` 沿用）与它对照的冷参照（`prefix.py`、`cold.py`、`lsp-prefix.py`）、声明身份
 （`identity.py`）、体调度器与执行器接缝（`body-scheduler.py`、`body-executor.py`）、LSP
 对拍与计量工具（`lsp-*.py`、`bench.py`）。同日稍后，读取插桩（`semantic_reads`、
 `write_journal` 与 `Cx` 的读取记录层）连同守它的十四个读取族 harness 也拆了。
@@ -14,7 +14,7 @@
 检查器状态（`Cx`、`Frame`、`LambdaCx` 及其签名闭包）对 selfhost 包是 `pub(pkg)`，本目录
 这个 `[deps]` 引用 selfhost 的工程看不到它。所以：
 
-- checked-in 的测试模块在 `selfhost/src/contract/`（`cold`、`prefix`、`probe`），由
+- checked-in 的测试模块在 `selfhost/src/contract/`（`cold`、`prefix`），由
   `./bin/dawn test selfhost` 执行；基准正文是 `contract/bench.dawn` 的 `run`，本目录的
   `src/main.dawn` 只转发给它。`main.dawn` 与 `nmain.dawn` 都不导入 `contract/`。
 - `*.dawn.txt` 模板按包内写法书写（`use check/...`，不带 `compiler/`；除 `main` 外一律
@@ -74,10 +74,9 @@ from 79 invocations to 33: 31m14s at 8 jobs with a 9.4 GiB peak, all passing
 多文件 LSP 按模块记忆复用分析步骤、按文本复用解析；CLI 与 standalone 仍走冷分析。
 下列冷路径命令本身不证明缓存命中，命中由模块记忆/工作区执行计数门禁另行验证。
 
-- `python3 scripts/incremental-semantics-contract/probe.py`：八个 Java hook 与
-  refusing guard 的九个可编译负控。
-- `selfhost/src/contract/` 的三个测试模块（由 `./bin/dawn test selfhost` 执行）：query probe
-  集成、冷路径阶段嵌套、错误恢复和 loader 诊断顺序。
+- `selfhost/src/contract/` 的测试模块（由 `./bin/dawn test selfhost` 执行）：冷路径阶段嵌套、
+  错误恢复和 loader 诊断顺序。Java 查询计数探针（`probe.py`、`contract/probe`、`JsigProbe`）
+  2026-09-28 随「Java 查询即停止保留」一起删了：会话内预言机由 owner 固定，查询次数不再决定任何事。
 - `python3 scripts/incremental-semantics-contract/cold.py`：私有源码副本中注入
   冻结旧循环，对照相同 StdCtx、LoadedModule 和 CtOpts；六个变异体只改新路径。
   需 JDK 21+ 的 `java/javac/jar`。

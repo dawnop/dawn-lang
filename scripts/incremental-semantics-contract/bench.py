@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 FIELDS = ["kind", "round", "target", "modules", "parsed_decls", "load_ns",
           "parse_replay_ns", "observed_ns", "module_ns", "check_ns", "comptime_ns",
-          "cold_ns", "check_runs", "comptime_runs", "java_queries",
+          "cold_ns", "check_runs", "comptime_runs",
           "observed_diags", "cold_diags", "order"]
 
 
