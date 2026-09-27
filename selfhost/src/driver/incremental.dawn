@@ -1,133 +1,234 @@
-# One immutable owner fixes the analysis world and retains only a safe prefix.
+# One immutable owner fixes the analysis world and remembers the previous
+# analysis step of every module, keyed by what the step read.
 # No cache crosses an owner boundary.
 # The caller commits its returned session together with the query Program.
 # No global cache or resource lease lives here; abandoning a session releases
-# its replay state, while the caller remains responsible for closing its lease.
+# its remembered steps, while the caller remains responsible for closing its
+# lease.
+#
+# One rule decides reuse (docs/lsp-module-memo-design.md): a module's previous
+# step is taken as it is when the module's input is the same and the carry it
+# enters with is the same. A step is a function of exactly those two and of
+# the world this owner fixes, so the rule needs no special cases. It used to
+# have three: reuse stopped at the first changed module, at a text budget, and
+# at the first module that asked the Java oracle. The first is what the rule
+# says when an edit changes what a module exports, and only then; the budget
+# guarded memory the remembered steps share with the Program the caller keeps
+# anyway; the oracle is fixed for the life of an owner, because the owner is
+# rebuilt whenever its lease is.
 
 use std/io.{Env}
-use std/str
+use std/map
 use driver/analyze.{
   LoadedModule, LoadResult, Program, CheckedMod, ModuleStep, AnalysisCarry,
   initial_carry, analyze_module_step
 }
 use driver/stdlib.{StdCtx, std_module_of}
-use check/cx.{Cx}
-use check/jsig.{Jsig, JsigProbe}
+use check/cx.{ModExports}
+use check/jsig.{Jsig}
 use ir/interp.{CtOpts}
 
-type Entry = { raw: LoadedModule, std_identity: Option[String], step: ModuleStep }
+## One module's step as the previous analysis made it, with what it read:
+## the input, the std identity its path had, and which carry it entered with,
+## named by the module before it in that analysis (None: the first module,
+## which enters with the owner's baseline).
+type Entry = {
+  raw: LoadedModule,
+  std_identity: Option[String],
+  pred: Option[String],
+  step: ModuleStep
+}
+
 type State = {
   std: StdCtx,
   opts: CtOpts,
   js: Jsig,
-  probe: fn(Jsig) -> JsigProbe !io,
-  prefix: List[Entry],
+  # the previous analysis's steps by the loader's module path; only that one
+  # analysis, so a module that left the program is forgotten with it
+  memo: Map[String, Entry],
   max_modules: Int,
-  max_text_units: Int,
   baseline: AnalysisCarry
 }
 
 ## Construct a new owner when std, options, captured plan or lease changes.
-## Keeping the representation private prevents grafting an old prefix into
-## a new world; the host must drop this owner before releasing its Java lease.
+## Keeping the representation private prevents grafting an old step into a
+## new world; the host must drop this owner before releasing its Java lease.
 pub opaque type Session = State
 
 pub type Stats = {
   reused_modules: Int,
   checked_modules: Int,
   comptime_modules: Int,
-  retained_modules: Int,
-  retained_text_units: Int
+  retained_modules: Int
 }
 
 pub(pkg) type Update = { session: Session, program: Program, stats: Stats }
 
-pub(pkg) fn new(
-  std: StdCtx, opts: CtOpts, js: Jsig, probe: fn(Jsig) -> JsigProbe !io,
-  max_modules: Int, max_text_units: Int
-) -> Session = {
-  if max_modules < 0 || max_text_units < 0 { panic("negative analysis cache limit") }
+## `max_modules` bounds how many steps one owner remembers. It is a safety
+## limit rather than a memory budget: a remembered step is the same immutable
+## data the caller's current Program holds, so what remembering adds is the
+## carry snapshots between steps.
+pub(pkg) fn new(std: StdCtx, opts: CtOpts, js: Jsig, max_modules: Int) -> Session = {
+  if max_modules < 0 { panic("negative analysis cache limit") }
+  let none: Map[String, Entry] = map.empty()
   State {
-    std: std, opts: opts, js: js, probe: probe, prefix: [],
-    max_modules: max_modules, max_text_units: max_text_units,
+    std: std, opts: opts, js: js, memo: none,
+    max_modules: max_modules,
     baseline: initial_carry(std)
   }
 }
 
-## Eviction drops replay state, not the caller's current query Program.
+## Eviction drops remembered steps, not the caller's current query Program.
 pub fn evict(owner: Session) -> Session = {
   let session: State = owner
-  State { ..session, prefix: [] }
+  let none: Map[String, Entry] = map.empty()
+  State { ..session, memo: none }
 }
 
 ## A permanent cold switch for this owner; reconstruct an owner to re-enable.
-## Existing query Programs remain valid independently of retained replay state.
+## Existing query Programs remain valid independently of remembered steps.
 pub fn disable_reuse(owner: Session) -> Session = {
   let session: State = owner
-  State { ..session, prefix: [], max_modules: 0, max_text_units: 0 }
+  let none: Map[String, Entry] = map.empty()
+  State { ..session, memo: none, max_modules: 0 }
 }
 
 fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = a == b
 
+## A module's export surface: equal, and every table in the same order.
+## `==` on a map ignores the order entries were inserted in, and an importer
+## observes it: it walks these tables (a "did you mean" hint takes the first
+## of two equally close names from a pool built from `fns` and its siblings,
+## and the id tables are grafted into the importer's own in this order), so
+## two surfaces with the same entries in a different order are not the same
+## input. The carry's own three tables are only ever looked up by key, which
+## is why `same_after` compares them with `==` alone.
+fn same_surface(a: ModExports, b: ModExports) -> Bool =
+  a == b &&
+  map.keys(a.fns) == map.keys(b.fns) &&
+  map.keys(a.types_by_name) == map.keys(b.types_by_name) &&
+  map.keys(a.aliases) == map.keys(b.aliases) &&
+  map.keys(a.alias_resolved) == map.keys(b.alias_resolved) &&
+  map.keys(a.ctors) == map.keys(b.ctors) &&
+  map.keys(a.consts) == map.keys(b.consts) &&
+  map.keys(a.traits_by_name) == map.keys(b.traits_by_name) &&
+  map.keys(a.effects) == map.keys(b.effects) &&
+  map.keys(a.effect_infos) == map.keys(b.effect_infos) &&
+  map.keys(a.adt_infos) == map.keys(b.adt_infos) &&
+  map.keys(a.trait_infos) == map.keys(b.trait_infos)
+
+## Whether a re-checked module left the carry as the previous analysis left
+## it. Only called when the module entered with the previous analysis's own
+## carry, so every other module's surface in `exports` is the same object on
+## both sides and only this module's own needs the closer look. `decl_spans`
+## is not compared: it is where declarations sit, which no later module's
+## step reads (a diagnostic is stored relative to its declaration and placed
+## only when the Program is rendered), and it is rebuilt for every module
+## whatever this answers.
+fn same_after(a: AnalysisCarry, b: AnalysisCarry, module: String) -> Bool = {
+  let own = match map.get(a.exports, module) {
+    Some(x) ->
+      match map.get(b.exports, module) {
+        Some(y) -> same_surface(x, y)
+        None -> false
+      }
+    None -> false
+  }
+  own && a.exports == b.exports && a.impls == b.impls && a.identities == b.identities
+}
+
 pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io = {
   let session: State = owner
-  let probe = session.probe(session.js)
   var carry = session.baseline
+  # Which carry of the previous analysis the current one *is*, object for
+  # object in everything but `decl_spans`: the baseline (Some(None)), or the
+  # one after module p (Some(Some(p))). None once this analysis holds a carry
+  # the previous one did not. The carry only ever grows, so from there on no
+  # later module can enter with a carry the previous analysis gave it, and
+  # nothing needs comparing until the next analysis.
+  var carry_is: Option[Option[String]] = Some(None)
+  var pred: Option[String] = None
   var diags = loaded.diags
   var modules: List[CheckedMod] = []
-  var prefix: List[Entry] = []
-  var matching = len(loaded.diags) == 0
-  var retaining = matching
-  var text_units = 0
+  var memo: Map[String, Entry] = map.empty()
+  var retained = 0
   var reused = 0
   var checked = 0
   var ct_runs = 0
-  var index = 0
   for raw in loaded.modules {
     # std identity depends on canonical paths, including the current Env.
     # Recompute it even for a hit; raw text alone is never a cache key.
     let identity = std_module_of(session.std, raw.path)
-    let hit = matching && index < len(session.prefix) &&
-      same_input(raw, session.prefix[index].raw) &&
-      identity == session.prefix[index].std_identity
-    let step = if hit {
-      reused = reused + 1
-      session.prefix[index].step
-    } else {
-      # Once the prefix differs, never reconnect to an old suffix.
-      matching = false
-      let queries_before = probe.queries()
-      let computed = analyze_module_step(raw, carry, session.std, session.opts, probe.jsig, None)
-      checked = checked + computed.check_runs
-      ct_runs = ct_runs + computed.comptime_runs
-      if len(computed.diags) != 0 || probe.queries() != queries_before { retaining = false }
-      # Tooling must use the original oracle, not keep or mutate this run's
-      # observation counter through a stored checker context.
-      let cx = Cx { ..computed.checked.cx, jsig: session.js }
-      ModuleStep { ..computed, checked: CheckedMod { ..computed.checked, cx: cx } }
+    let previous = map.get(session.memo, raw.mod_path)
+    # The step read its input and the carry it entered with. Entering with
+    # the same carry is decided without comparing it: this analysis's carry
+    # is the previous one's after the same predecessor, the very objects.
+    let reusable: Option[ModuleStep] = match previous {
+      Some(e) ->
+        if carry_is == Some(e.pred) && same_input(raw, e.raw) && identity == e.std_identity {
+          Some(e.step)
+        } else {
+          None
+        }
+      None -> None
     }
-    carry = step.after
+    var step = match reusable {
+      Some(kept) -> {
+        reused = reused + 1
+        carry_is = Some(Some(raw.mod_path))
+        kept
+      }
+      None -> {
+        let computed = analyze_module_step(raw, carry, session.std, session.opts, session.js, None)
+        checked = checked + computed.check_runs
+        ct_runs = ct_runs + computed.comptime_runs
+        # The early cutoff: an edited module whose re-check leaves the carry
+        # as it was lets every module after it keep its step. The previous
+        # carry's objects are kept in place of the equal new ones, which is
+        # what lets the modules after it skip the comparison.
+        let cutoff: Option[AnalysisCarry] = match previous {
+          Some(e) ->
+            if carry_is == Some(e.pred) && same_after(computed.after, e.step.after, computed.checked.mod_path) {
+              Some(e.step.after)
+            } else {
+              None
+            }
+          None -> None
+        }
+        match cutoff {
+          Some(kept) -> {
+            carry_is = Some(Some(raw.mod_path))
+            ModuleStep { ..computed, after: AnalysisCarry { ..kept, decl_spans: computed.after.decl_spans } }
+          }
+          None -> {
+            carry_is = None
+            computed
+          }
+        }
+      }
+    }
+    # The position view is rebuilt for every module: the modules before this
+    # one may have moved even when this one is reused, and a reused step's
+    # view still holds where they were when it ran. This module's own entry
+    # is its step's, which is current, because its text is.
+    let own = map.get(step.after.decl_spans, step.checked.mod_path).expect("the step's own declaration spans")
+    carry = AnalysisCarry { ..step.after, decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own) }
+    step = ModuleStep { ..step, after: carry }
     diags = diags ++ step.diags
     modules = modules ++ [step.checked]
-    let units = str.len(raw.text)
-    if retaining && len(prefix) < session.max_modules &&
-      units <= session.max_text_units - text_units {
-        prefix = prefix ++ [Entry { raw: raw, std_identity: identity, step: step }]
-        text_units = text_units + units
-      } else {
-        retaining = false
-      }
-    index = index + 1
+    if retained < session.max_modules {
+      memo = map.insert(memo, raw.mod_path,
+        Entry { raw: raw, std_identity: identity, pred: pred, step: step })
+      retained = retained + 1
+    }
+    pred = Some(raw.mod_path)
   }
   Update {
-    session: State { ..session, prefix: prefix },
-    # the view of the revision this Update is about, which is the last carry
-    # the loop produced: a reused step contributes the view it was analyzed
-    # with, and a reused step is one whose input text is identical
+    session: State { ..session, memo: memo },
     program: Program { modules: modules, diags: diags, decl_spans: carry.decl_spans },
     stats: Stats {
       reused_modules: reused, checked_modules: checked, comptime_modules: ct_runs,
-      retained_modules: len(prefix), retained_text_units: text_units
+      retained_modules: retained
     }
   }
 }
