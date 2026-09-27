@@ -56,7 +56,7 @@ CUpdField = { ty: Ty, value: Option[CExpr] }
 | `jvm/emit` | 宽记录的更新与整构造走复制再赋值（下节）；窄记录的更新按整构造器发 |
 | `jvm/codegen` | 宽记录的类去掉字段的 `ACC_FINAL`，加无参 `<init>`、私有拷贝构造与 `copy$` |
 | `c/infer` | 各遍历按整构造器形式处理（它要的就是那个形式的需求：保留字段投影在消费位置） |
-| `c/rc` | 更新在这里被整体构造：`rw` 把它展开成整构造器再计数；`spread_rebuild` 直接认 `CUpdate` |
+| `c/rc` | 更新在这里被整体构造：`rw` 把它展开成整构造器再计数；`spread_rebuild` 直接认 `CUpdate`，被调度的更新在提升时展开，嵌套的更新留作节点；认 `CCtor` 的臂只剩手写的整构造器重建（全编译器一处，见 [perceus-design.md](perceus-design.md)） |
 | `c/emitc` | 不会见到它（rc 之后没有 `CUpdate`），见到即 panic |
 
 Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 Core，rc 把 `CUpdate` 展开成整构造器，
