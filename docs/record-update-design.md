@@ -105,7 +105,33 @@ Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 
 
 ## 实测
 
-见分支报告与提交正文；落地后回填。
+2026-09-27，本机 16 核 x86_64，负载 1.6 到 2.9；基线 `0c6dea2f` 与本分支各自 `bin/dawn` 建的 jar，编译同一份源码。
+
+- **C2 拒编**：OpenJDK 21.0.11，`-XX:+PrintCompilation` 下 `check selfhost` 的 `unsupported` 行，基线 20、本分支 0；
+  负控把 `JVM_ARG_LIMIT` 临时改成 1000（宽路径不触发）回到 21。
+- **字节码**：非 vendored 方法的代码总量 2,779,123 → 2,599,010 字节（`check/` 1,263,500 → 1,064,570），
+  ≥ 6000 字节的受检方法 9 → 8；受检方法最多的 JVM 实参 59（`cx$Cx.<init>`）→ 21（`lower$LSt.<init>`）。
+- **输出不变的部分**：`__emitc selfhost/src/nmain.dawn` 与基线逐字节相同（22,871,683 字节）；`__emit` 下 site、playground、
+  `packages/web`、`packages/json` 与五个 examples 与基线零差，只有 `emit selfhost` 的 18 个类变（都是构造或更新 `Cx`/`HeaderProduct` 的模块）。
+  负控把宽度判据临时改成「≥ 5 个字段」，`emit site` 11 个类、`emit playground` 6 个类随之变化。
+  `selfhost-core-diff.sh` 只报源码本身改了的 12 个模块与新增的测试模块，其余 151 份 dump（含三个示例程序）不变；dump 里没有一行 `update`。
+- **性能**（OpenJDK 21.0.11 C2，5 轮交错去首轮，逐轮配对比值取中位数）：
+
+| 负载 | 基线中位 | 本分支中位 | 比值 | 逐轮比值 |
+|---|---:|---:|---:|---|
+| `check selfhost` 墙钟 s | 6.26 | 6.23 | 1.002 | 0.96 0.96 1.00 1.01 1.02 |
+| `check selfhost` CPU s | 17.90 | 19.12 | 1.061 | 0.97 1.01 1.08 1.08 1.06 |
+| `check selfhost` 峰值 RSS MB | 549 | 562 | 1.030 | |
+| `bench.py` 冷阶段 ms（selfhost，轮 3..10 中位） | 1413 | 1335 | 0.986 | 0.99 0.95 0.88 1.01 1.02 |
+| bench-replay cold calls ms/1000 体 | 21.70 | 19.95 | 0.953 | 0.69 0.98 0.95 0.84 1.00 |
+| bench-replay cold generic | 32.22 | 28.57 | 0.893 | 0.73 0.98 0.85 0.89 1.03 |
+| bench-replay cold inferred | 56.56 | 46.88 | 0.863 | 0.67 0.89 0.86 0.79 0.89 |
+| bench-replay cold primitive_inferred | 13.73 | 13.48 | 0.945 | 0.80 0.94 1.04 0.92 1.01 |
+| LSP sync 中位 ms（standalone-large，4 轮交错） | 24.9 | 25.2 | 0.994 | |
+
+  读法：一次性进程墙钟不变，CPU 多约 6%（更多方法进了 C2，与调研里 JDK 26 的模式相同）；长驻进程里检查函数体的负载快 5% 到 14%。
+  playground 的 `/check` 每个请求起一个 `dawn build` 子进程，是一次性进程，不是长驻编译器：小程序（`examples/data/shapes.dawn`）
+  的 `build` 墙钟比值 0.997。以上是本机数，没有集群的同协议复测。
 
 ## 不做的（理由）
 
