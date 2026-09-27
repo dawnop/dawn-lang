@@ -30,7 +30,7 @@ use driver/incremental
 use driver/fsmem
 use compiler_plan/envmem
 use ir/interp.{ct_default}
-use check/jsig.{Jsig, JsigLease, JsigProbe, jsig_refused_lease, refused_probe}
+use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
@@ -414,23 +414,22 @@ fn hex_digit(v: Int) -> Char =
 ## so the server can publish it as an ordinary project diagnostic.
 pub type LspLeaseHost = {
   standalone: fn() -> JsigLease !io,
-  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io,
-  probe: fn(Jsig) -> JsigProbe !io
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
 }
 
 ## Analysis policy is fixed before any lease-backed owner is created. The
-## ordinary entry reuses a safe module prefix; `Cold` re-checks every module,
-## which is the reference a prefix session is compared against.
+## ordinary entry reuses every module step whose input and entering carry are
+## unchanged (driver/incremental), and every parse whose text is; `Cold`
+## re-parses and re-checks every module, which is the reference a reusing
+## session is compared against.
 pub type LspAnalysisMode = Legacy | Cold
-pub type LspAnalysisConfig = {
-  mode: LspAnalysisMode, max_modules: Int, max_text_units: Int
-}
+pub type LspAnalysisConfig = { mode: LspAnalysisMode, max_modules: Int }
 
 pub fn legacy_analysis_config() -> LspAnalysisConfig =
-  LspAnalysisConfig { mode: Legacy, max_modules: 128, max_text_units: 1048576 }
+  LspAnalysisConfig { mode: Legacy, max_modules: 128 }
 
 fn validate_analysis_config(config: LspAnalysisConfig) -> Unit = {
-  if config.max_modules < 0 || config.max_text_units < 0 {
+  if config.max_modules < 0 {
     panic("negative LSP analysis cache limit")
   }
 }
@@ -607,10 +606,8 @@ fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
   let config = st.analysis_config
   validate_analysis_config(config)
   match config.mode {
-    Legacy -> incremental.new(st.std, ct_default(), js, st.host.probe,
-      config.max_modules, config.max_text_units)
-    Cold -> incremental.disable_reuse(incremental.new(st.std, ct_default(), js, st.host.probe,
-      config.max_modules, config.max_text_units))
+    Legacy -> incremental.new(st.std, ct_default(), js, config.max_modules)
+    Cold -> incremental.disable_reuse(incremental.new(st.std, ct_default(), js, config.max_modules))
   }
 }
 
@@ -2143,8 +2140,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       standalone: Some(jsig_refused_lease()),
       host: LspLeaseHost {
         standalone: () => jsig_refused_lease(),
-        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
-        probe: refused_probe
+        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
       },
       analysis_config: legacy_analysis_config(),
       lifecycle: Running
@@ -2238,8 +2234,7 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     standalone: Some(jsig_refused_lease()),
     host: LspLeaseHost {
       standalone: () => jsig_refused_lease(),
-      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
-      probe: refused_probe
+      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
     },
     analysis_config: legacy_analysis_config(),
     lifecycle: Running
@@ -2248,11 +2243,9 @@ fn def_probe_state(std: StdCtx) -> LspState = {
 
 test "LSP analysis configuration keeps legacy defaults and rejects negative limits" {
   let legacy = legacy_analysis_config()
-  assert legacy.mode == Legacy && legacy.max_modules == 128 && legacy.max_text_units == 1048576
-  for config in [LspAnalysisConfig { ..legacy, max_modules: -1 },
-    LspAnalysisConfig { ..legacy, max_text_units: -1 }] {
-    assert match catch_panic(() => validate_analysis_config(config)) { Err(_) -> true, Ok(_) -> false }
-  }
+  assert legacy.mode == Legacy && legacy.max_modules == 128
+  let negative = LspAnalysisConfig { ..legacy, max_modules: -1 }
+  assert match catch_panic(() => validate_analysis_config(negative)) { Err(_) -> true, Ok(_) -> false }
 }
 
 test "workspace commits prefix cache with its Program and drops it on conflict" {
@@ -2283,7 +2276,7 @@ test "workspace commits prefix cache with its Program and drops it on conflict" 
         let empty = Workspace {
           plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
           prog: None, entry_by_uri: map.empty(), lease: lease,
-          cache: incremental.new(std, ct_default(), lease.jsig, refused_probe, 128, 1048576),
+          cache: incremental.new(std, ct_default(), lease.jsig, 128),
           analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty()
         }
         let first = rebuild_workspace(st, empty)
