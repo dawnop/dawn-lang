@@ -14506,6 +14506,30 @@ test "qualified exported functions are values with contextual generic inference"
   assert rejected.diags[0].msg == "module `helper` has no exported value `hidden`"
 }
 
+test "moving a pub alias leaves the export surface equal" {
+  let body = "pub alias Pair = (Int, List[Int])\npub opaque type Meters = Int\n" ++
+    "pub fn meters(n: Int) -> Meters = n\n"
+  let env0: Map[String, ModExports] = map.empty()
+  var surfaces: List[ModExports] = []
+  for prefix in ["", "# a comment that moves every declaration below it\n\n"] {
+    let (m, pdiags) = parser.parse_module(prefix ++ body)
+    assert len(pdiags) == 0
+    let (cx1, _) = check_module(cx_new(Some("lib"), None), m, env0)
+    assert len(cx1.diags) == 0
+    # the declaring module keeps its own coordinates for its own diagnostics
+    let local = map.get(cx1.aliases, "Pair").expect("local alias")
+    assert local.target != None
+    assert local.nlo == str.len(prefix) + 10
+    surfaces = surfaces ++ [exports_of(cx1, m, "lib", "lib")]
+  }
+  assert surfaces[0] == surfaces[1]
+  let exported = map.get(surfaces[0].aliases, "Pair").expect("exported alias")
+  assert exported.target == None
+  assert exported.nlo == 0 && exported.nhi == 0
+  assert map.has(surfaces[0].alias_resolved, "Pair")
+  assert map.has(surfaces[0].aliases, "Meters")
+}
+
 test "a declared effect crosses a module boundary with its operations" {
   let src = "pub effect Ask {\n  fn ask() -> Int\n}\n"
   let (m, pdiags) = parser.parse_module(src)
@@ -14525,6 +14549,24 @@ test "a declared effect crosses a module boundary with its operations" {
   let env = map.from([("eff", exp)])
   let (cx2, _) = check_module(cx_new(Some("use_site"), None), m2, env)
   assert len(cx2.diags) == 0
+}
+
+## An alias as an importer sees it: everything but where it was written.
+##
+## The export surface is what a session compares to decide whether the
+## modules after an edited one may keep their previous analysis
+## (docs/lsp-module-memo-design.md), so it may not change when a declaration
+## merely moves. `target` is the unresolved syntax in the declaring module and
+## carries absolute offsets; no importer reads it, since `bind_import` drops it
+## and a qualified use reads `alias_resolved` instead. `nlo`/`nhi` are offsets
+## into a file the importer is not looking at, and the only reader on the
+## importer's side is `pass_resolve_aliases`, which enters the declaration to
+## locate an identity collision in the importer's own file, where a foreign
+## offset never pointed at anything. A diagnostic about the alias itself is
+## raised in the declaring module, from that module's own table.
+fn exported_alias(al: AliasE) -> AliasE = {
+  let no_target: Option[TypeRef] = None
+  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }
 }
 
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
@@ -14572,7 +14614,7 @@ pub(pkg) fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) 
       }
       match map.get(cx.aliases, d.name) {
         Some(al) -> {
-          aliases2 = map.insert(aliases2, d.name, al)
+          aliases2 = map.insert(aliases2, d.name, exported_alias(al))
           if d.vis == VisPkg && not list.contains(pkg_only, d.name) { pkg_only = pkg_only ++ [d.name] }
           match map.get(cx.alias_resolved, d.name) {
             Some(t) -> { ares2 = map.insert(ares2, d.name, t) }
