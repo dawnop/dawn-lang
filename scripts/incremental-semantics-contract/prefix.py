@@ -38,8 +38,8 @@ def check_cli():
         (['--shards', '0'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '-1'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '2'], 2, 'require --shards >= 1'),
-        (['--shards', '14', '--shard', '13'], 2, 'selected shard has no engine mutants'),
-        (['--shards', '14', '--check-shards'], 2, 'every shard must contain engine mutants'),
+        (['--shards', '15', '--shard', '14'], 2, 'selected shard has no engine mutants'),
+        (['--shards', '15', '--check-shards'], 2, 'every shard must contain engine mutants'),
     ]
     for count in [1, 2, 3]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique mutants; disjoint shard sizes'))
@@ -116,6 +116,8 @@ def main():
         # The export surface the carry comparison reads.
         ("alias-positions", checker, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
          "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),
+        ("impl-positions", checker, "  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n",
+         "  if true { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n"),
         # What the owner remembers.
         ("ignore-eviction", engine, "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo: none }\n}",
          "  session\n}"),

@@ -14506,6 +14506,30 @@ test "qualified exported functions are values with contextual generic inference"
   assert rejected.diags[0].msg == "module `helper` has no exported value `hidden`"
 }
 
+test "moving an impl and a derive leaves the export surface equal" {
+  let body = "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+    "pub type Box = { n: Int } derive Show\n" ++
+    "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n"
+  let env0: Map[String, ModExports] = map.empty()
+  var surfaces: List[ModExports] = []
+  var starts: List[List[Int]] = []
+  for prefix in ["", "# a comment that moves every declaration below it\n\n"] {
+    let (m, pdiags) = parser.parse_module(prefix ++ body)
+    assert len(pdiags) == 0
+    let (cx1, _) = check_module(cx_new(Some("lib"), None), m, env0)
+    assert len(cx1.diags) == 0
+    # the declaring module keeps the coordinates its own checks read
+    var los: List[Int] = []
+    for im in cx1.local_impls { los = los ++ [im.lo] }
+    starts = starts ++ [los]
+    surfaces = surfaces ++ [exports_of(cx1, m, "lib", "lib")]
+  }
+  assert len(starts[0]) == 2
+  assert starts[0] != starts[1]
+  assert surfaces[0] == surfaces[1]
+  for im in surfaces[0].impls { assert im.lo == 0 && im.hi == 0 }
+}
+
 test "moving a pub alias leaves the export surface equal" {
   let body = "pub alias Pair = (Int, List[Int])\npub opaque type Meters = Int\n" ++
     "pub fn meters(n: Int) -> Meters = n\n"
@@ -14568,6 +14592,24 @@ fn exported_alias(al: AliasE) -> AliasE = {
   let no_target: Option[TypeRef] = None
   AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }
 }
+
+fn exported_impls(ims: List[ImplI]) -> List[ImplI] = {
+  var out: List[ImplI] = []
+  for im in ims { out = out ++ [exported_impl(im)] }
+  out
+}
+
+## An impl as every module but its own sees it: everything but where it was
+## written. The same reason as `exported_alias`: the export surface and the
+## program-wide impl table are what a session compares to decide whether the
+## modules after an edited one keep their analysis, and they may not change
+## when an `impl` or a `derive` merely moves. Every reader of an impl's
+## `lo`/`hi` walks `cx.local_impls`, the declaring module's own list (the
+## published-surface check, `impl_at_span`, `impl_method_trait`), and that
+## list keeps its coordinates; an importer finds an impl by its key and names
+## a duplicate by `src_path`, never by a span.
+pub(pkg) fn exported_impl(im: ImplI) -> ImplI =
+  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }
 
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
 ## The whole ADT/trait tables ride along — extra entries graft harmlessly.
@@ -14698,7 +14740,7 @@ pub(pkg) fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) 
     traits_by_name: traits2,
     effects: effects2,
     effect_infos: cx.effect_infos,
-    impls: cx.local_impls,
+    impls: exported_impls(cx.local_impls),
     adt_infos: cx.adts,
     trait_infos: cx.traits,
     package: package_of(cx),

@@ -181,6 +181,31 @@ test "module memo keeps an importer's step across an edit above a pub alias" {
   }))
 }
 
+test "module memo keeps an importer's step across an edit above an impl or a derive" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let text = "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+      "pub type Box = { n: Int } derive Show\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n"
+    let lib = source("lib", text)
+    let app = source("app", "use lib.{Box, sizey}\npub fn size() -> Int = sizey(Box { n: 1 })\n" ++
+        "pub fn same() -> Bool = Box { n: 1 } == Box { n: 2 }\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, app], diags: [] })
+    assert len(warm.program.diags) == 0
+    for moved in ["# moved\n" ++ text,
+      "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n# between\n" ++
+        "pub type Box = { n: Int } derive Show\n# and again\n" ++
+        "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n"] {
+      let input = LoadResult { modules: [source("lib", moved), app], diags: [] }
+      let result = incremental.analyze(warm.session, input)
+      assert result.stats.reused_modules == 1
+      assert result.stats.checked_modules == 1
+      assert agrees_with_cold(result.program, input, std)
+    }
+  }))
+}
+
 test "module memo reuses modules with diagnostics and bounds what it keeps" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = std_ctx()
