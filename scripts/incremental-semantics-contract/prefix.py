@@ -4,8 +4,8 @@
 Each mutation is built before either owning assertion is evaluated. Runtime
 linkage errors and timeouts never substitute for a cache-contract failure.
 
-`--shards N --shard I` splits the twelve engine mutants by index modulo N, the
-same convention diagnostic-reads.py uses. The no-flag invocation is unchanged:
+`--shards N --shard I` splits the twelve engine mutants by index modulo N.
+The no-flag invocation is unchanged:
 one positive subject and all twelve mutants, in this file's order.
 """
 import argparse

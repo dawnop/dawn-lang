@@ -12,8 +12,9 @@ mutation anchors are literal source strings, they drift silently, and a sweep
 that quietly runs a subset is worth less than no sweep at all.
 
 The order is longest-first, because the sweep is tail-bound: at eight-way
-parallelism the slowest harnesses run 665s, 625s, 623s and 592s, so one of them
-starting late is the whole wall clock. Durations come from the previous sweep's
+parallelism the slowest harnesses ran 721s, 584s and 566s in the sweep of
+2026-09-27 (lsp-prefix, prefix shard 0, identity), so one of them starting late
+is the whole wall clock. Durations come from the previous sweep's
 log where there is one, and otherwise from the static table below.
 
 Modes:
@@ -82,19 +83,12 @@ LOG_LINE = re.compile(r"^(?:PASS|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s\s*$", re
 # measured alone on a 16 core machine at loadavg 3.5 to 4.9 on 2026-09-13), so
 # the 811s divides by subject count: five thirteenths to shard 0, which keeps
 # the positive subject, and four to each of the others. body-probe's typed
-# entry left the table on 2026-09-27 with the replay engine it probed.
+# entry left the table on 2026-09-27 with the replay engine it probed, and the
+# eight read-log entries later that day with the read log.
 STATIC_HINTS = {
     "prefix-shards-3-shard-0": 312,
     "prefix-shards-3-shard-1": 250,
     "prefix-shards-3-shard-2": 250,
-    "local-value-reads": 665,
-    "diagnostic-reads-shards-3-shard-0": 625,
-    "diagnostic-reads-shards-3-shard-2": 623,
-    "type-reads": 592,
-    "diagnostic-reads-shards-3-shard-1": 561,
-    "function-reads": 467,
-    "java-oracle-reads": 434,
-    "java-member-reads": 393,
 }
 
 
@@ -112,7 +106,7 @@ def hints(explicit=None):
 
     census is True when the hints came from a sweep log, which lists every
     harness that ran, so a name missing from it is genuinely new. It is False
-    for the static table, where a missing name only means "not one of the ten
+    for the static table, where a missing name only means "not one of the
     longest". That distinction is what unknown names are scheduled by.
     """
     for candidate in (explicit, default_log()):
@@ -135,7 +129,7 @@ def unknown_hint(table, census):
     From a real log, an absent name is one nobody has run yet and could be the
     next tail, so it is scheduled at the median and starts mid-pack rather than
     last. From the static table, an absent name is one the table says is not
-    long, so it goes after the ten that are.
+    long, so it goes after the ones that are.
     """
     if census and table:
         return statistics.median(table.values())
@@ -329,7 +323,7 @@ def scanned_jobs(text):
 
 
 def discovery_self_test():
-    contract = "python3 scripts/incremental-semantics-contract/function-reads.py --suite observation"
+    contract = "python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 0"
 
     def fixture(job, run, extra_steps=None):
         return yaml.safe_dump({"jobs": {job: {"steps": (extra_steps or []) + [
