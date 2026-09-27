@@ -258,6 +258,13 @@ name: gates
 # fixed overhead is 200s of the 468s (50s each); the rest is the new lines
 # being built from per-step and per-mutant worst observations, which is
 # what the old lines, 116s under their own worst runs, had not declared.
+# On 2026-09-27 it went down to 25,375s with the replay engine's removal
+# (the incremental-slice-k1 knife): five jobs left (2,264s of claims),
+# three incremental-prefix jobs took what stayed of theirs (2,360s), and
+# incremental-1, -5, -7-2 and -8, whose steps changed and so have no
+# ancestor run in the window, were restated from the sweep (3,126s ->
+# 1,788s). The seventeen other jobs that lost a step keep their claims
+# until the seven-day window has rolled past their old shape.
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -281,7 +288,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 26617s (the most this file's `3x` claims may add up to)
+# push-total: 25375s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1590,10 +1597,11 @@ jobs:
     # not move.
   # 2026-09-27: the replay engine and its contracts are gone (the
   # incremental-slice-k1 knife; archived at the incremental-slice-final tag).
-  # incremental-7-1 and incremental-bounded-generic-contract went whole, and
-  # the other jobs below lost the steps that exercised the engine; the
-  # read-log contracts stay where they are until their own knife. The
-  # history below is kept as it was written.
+  # incremental-3-2, -7-1, -body-execution-1/-2 and
+  # incremental-bounded-generic-contract went whole; what stays of the prefix
+  # session, identity and scheduler contracts is dealt to
+  # incremental-prefix-1..3 below; the read-log contracts stay where they
+  # are until their own knife. The history below is kept as it was written.
   #
   # The existing incremental-semantics contracts were consolidated into eight
   # jobs on 2026-09-11, from twenty. The new body-execution contracts below
@@ -1677,40 +1685,21 @@ jobs:
     # 35866197071) over the nightly audit's seven days, 09-18 .. 09-25. The
     # 935s planning value above was 136s over it; restated to the
     # observation plus a tenth, 879s, and the timeout to 3x that.
-    # 2026-09-27: function-products.py and query-runtime.py left with the replay engine's removal (the
+    # 2026-09-27: prefix shard 0 (to incremental-prefix-1), function-products.py and
+    # query-runtime.py left with the replay engine's removal (the
     # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 879s worst observed plus a tenth (run 35866197071)
-    timeout-minutes: 44
+    # incremental-slice-final tag). The claim is restated now rather than
+    # after the window: the audit matches runs by steps digest (#247), and
+    # this job's steps changed, so no run in the window is its ancestor.
+    # Sweep hints: java-reads 361.0s + function-reads self-test 0.1s +
+    # revalidation 168.3s = 529.4s; x 0.56 + 50s = 347s.
+    # budget: 3x 347s planning value (sweep hints x 0.56 plus 50s; restate after three main runs)
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # was the incremental-prefix job until 2026-09-11, and one undivided
-      # prefix.py run until 2026-09-13.
-      # Full warm/frozen-cold products plus twelve compiling engine mutants:
-      # 242.59s locally on 2026-09-08; 2*243 + 38 = 524s planning value.
-      # This is a complete engine contract, not a shard of a shared matrix.
-      # 2026-09-11: 533s (run 34484938024) over the 25 completed main runs of
-      # 09-08T00:18Z .. 09-10T13:48Z (the 2026-09-10 CI audit's obs.json),
-      # 9s over the 524s claim.
-      # 2026-09-13: the twelve engine mutants are dealt over three shards by
-      # index modulo 3, one shard to a job (shard 1 in incremental-8, shard 2
-      # in incremental-body-execution). The reason is sweep.sh, where this one
-      # harness was 771s of a 1413s local sweep and the floor under it. No
-      # work is added: the positive subject stays in shard 0 rather than being
-      # rerun in each shard, and prefix.py says beside the partition what that
-      # costs and what still holds the other two shards' oracle up.
-      # --self-test is the shard CLI's own contract, 0.32s locally, run once
-      # here rather than in each of the three jobs.
-      - name: incremental prefix equivalence and execution counts, shard 0
-        run: |
-          python3 scripts/incremental-semantics-contract/prefix.py --self-test
-          python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 0
 
       # was the incremental-java-reads job until 2026-09-11.
       # Class metadata's 21 controls took 109.07s; member candidates'
@@ -1822,44 +1811,6 @@ jobs:
       - name: Local constructor and constant read contracts
         run: python3 scripts/incremental-semantics-contract/local-value-reads.py
 
-  incremental-3-2:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-3-2') }}
-    runs-on: ubuntu-latest
-    # identity.py and header-state.py 226s + state-product.py 129s
-    # + 50s fixed overhead = 405s.
-    # 2026-09-27: header-state.py and state-product.py left with the replay engine's removal (the
-    # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 405s planning value (step worst observations plus 50s fixed overhead)
-    timeout-minutes: 21
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # was the incremental-state job until 2026-09-11.
-      # Independent state-product contract, split from projection once their
-      # combined planning value exceeded the 660s pole. Local 89.67s on
-      # 2026-09-08: double the rounded value and retain 38s setup allowance.
-      # Identity's independent eight mutants move here from allocation (36.38s)
-      # to make room for its growing declaration product contracts.
-      # Header metadata's twelve mutants took 56.21s on the same date.
-      # Header state's nine mutants and field audits took 31.61s.
-      # Query runtime's seventeen mutants took 41.06s.
-      # 2*(90+37+57+32+42)+38=554s; no contract or negative control was removed.
-      # State products now run independently above after measuring 155.55s.
-      # Retain the existing budget for the remaining contracts; none are removed.
-      # 2026-09-14: header-metadata.py went with check/relocate_header (K7).
-      # The declared planning value stays where it is; doing less work breaks
-      # none of check-gate-budgets.py's three rules, and restating it downward
-      # would need a new observation to back it.
-      - name: declaration identity contracts
-        run: python3 scripts/incremental-semantics-contract/identity.py
-
   incremental-4:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-4') }}
@@ -1919,11 +1870,12 @@ jobs:
     # observation plus a tenth, 738s, and the timeout to 3x that.
     # 2026-09-27: projection.py and the typed body-probe step left with the replay engine's removal (the
     # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 738s worst observed plus a tenth (run 35929558799)
-    timeout-minutes: 37
+    # incremental-slice-final tag). The claim is restated now rather than
+    # after the window: the audit matches runs by steps digest (#247), and
+    # this job's steps changed, so no run in the window is its ancestor.
+    # Sweep hints: function-reads observation 775.0s; x 0.56 + 50s = 484s.
+    # budget: 3x 484s planning value (sweep hints x 0.56 plus 50s; restate after three main runs)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2003,11 +1955,13 @@ jobs:
     # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
     # 2026-09-27: allocation.py left with the replay engine's removal (the
     # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 572s worst observed (run 35860976205)
-    timeout-minutes: 29
+    # incremental-slice-final tag). The claim is restated now rather than
+    # after the window: the audit matches runs by steps digest (#247), and
+    # this job's steps changed, so no run in the window is its ancestor.
+    # Sweep hints: diagnostic self-test 5.8s + shard 1 1153.8s = 1159.6s;
+    # x 0.56 + 50s = 700s.
+    # budget: 3x 700s planning value (sweep hints x 0.56 plus 50s; restate after three main runs)
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2041,39 +1995,21 @@ jobs:
     # incremental-4 and -6 at 979s and 996s; none of the three has reached
     # its old figure since 09-15. Those runs are left out rather than
     # restated past the pole, and leave the nightly window on their own.
-    # 2026-09-27: body-probe.py, relocate.py and the configured-LSP self-test left with the replay engine's removal (the
-    # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 937s worst observed (run 36024756336)
-    timeout-minutes: 47
+    # 2026-09-27: the LSP self-tests, probe.py, cold.py and lsp-prefix.py
+    # moved to incremental-prefix-1..3, prefix's shard 1 with them, and
+    # body-probe.py and relocate.py left with the replay engine (the
+    # incremental-slice-k1 knife; archived at the incremental-slice-final
+    # tag). The claim is restated now rather than
+    # after the window: the audit matches runs by steps digest (#247), and
+    # this job's steps changed, so no run in the window is its ancestor.
+    # Sweep hints: witness-revalidation 368.4s; x 0.56 + 50s = 257s.
+    # budget: 3x 257s planning value (sweep hints x 0.56 plus 50s; restate after three main runs)
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # was the incremental-semantics job until 2026-09-11.
-      # Planning update: the original complete suite took 81.07s locally and
-      # the three workspace-owner mutants took 83.97s on 2026-09-08.
-      # Double rounded 82+84s, plus 38s fixed overhead: 370s.
-      # The complete body identity/relocation prototype took 35.66s locally,
-      # then 45.27s and 47.64s under concurrent validation on 2026-09-08.
-      # Add 2*48s: 466s before the typed mapper contract below.
-      # Typed relocation's 23-mutant runs took 78.86s and 65.26s. Add 2*79s:
-      # 624s total. Full tree/source contracts have their own job below so this
-      # job stays within the agreed 660s run pole.
-      # Engine prefix mutants have their own independent owning job below.
-      - name: incremental semantic observation and cold reference
-        run: |
-          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
-          python3 scripts/incremental-semantics-contract/probe.py
-          python3 scripts/incremental-semantics-contract/cold.py
-          python3 scripts/incremental-semantics-contract/lsp-prefix.py
 
       # was the incremental-witness job until 2026-09-11.
       # Two positive modules plus 31 compiling controls took 108.71s on 2026-09-09.
@@ -2082,118 +2018,93 @@ jobs:
       - name: Witness observation and candidate revalidation contracts
         run: python3 scripts/incremental-semantics-contract/witness-revalidation.py
 
-      # prefix's shard 1, dealt here from incremental-1 on 2026-09-13. Four
-      # engine mutants and no positive subject; the arithmetic and the reason
-      # are on the shard 0 step there.
+  # incremental-prefix-1..3 since 2026-09-27. The replay engine went
+  # (the incremental-slice-k1 knife; archived at the incremental-slice-final
+  # tag), and what stays of this family is the legacy prefix session the
+  # language server runs, the cold reference it is held to, declaration
+  # identity, the body scheduler and its executor seam. Those steps came out
+  # of incremental-1, -3-2, -8 and incremental-body-execution-1/-2, and the
+  # jobs that held nothing else went with them. Each job holds one of
+  # prefix.py's three shards, and the rest is dealt by the local sweep's
+  # per-harness durations (sweep.sh --list; the table in each job below).
+  #
+  # Each planning value is an estimate, not an observation: the sweep hint
+  # sum times 0.56 plus 50s fixed overhead, the ratio this repository's
+  # runners showed against the same sweep for incremental-3-1 (849s hint,
+  # 521s claim) and incremental-7-1 (835s, 522s). Restate each line at its
+  # own worst once three main runs of it exist.
+  incremental-prefix-1:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-prefix-1') }}
+    runs-on: ubuntu-latest
+    # sweep hints: prefix-self-test 1.7s + prefix-shards-3-shard-0 583.3s +
+    # identity 565.7s = 1150.7s; x 0.56 + 50s = 695s.
+    # Raised on 2026-09-27 to the job's external cluster run plus a tenth
+    # (789s on the run of 235f1054), above the sweep estimate.
+    # budget: 3x 870s planning value (cluster run plus a tenth; restate after three main runs)
+    timeout-minutes: 44
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: prefix shard CLI contract
+        run: python3 scripts/incremental-semantics-contract/prefix.py --self-test
+      - name: incremental prefix equivalence and execution counts, shard 0
+        run: python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 0
+      - name: declaration identity, minting and carry contracts
+        run: python3 scripts/incremental-semantics-contract/identity.py
+
+  incremental-prefix-2:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-prefix-2') }}
+    runs-on: ubuntu-latest
+    # sweep hints: prefix-shards-3-shard-1 447.6s + lsp-prefix 721.2s =
+    # 1168.8s; x 0.56 + 50s = 705s.
+    # budget: 3x 705s planning value (sweep hints x 0.56 plus 50s; restate after three main runs)
+    timeout-minutes: 36
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: incremental prefix engine mutants shard 1
         run: python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 1
+      - name: LSP prefix cache and position resolver contracts
+        run: python3 scripts/incremental-semantics-contract/lsp-prefix.py
 
-  # incremental-body-execution until 2026-09-23, split in two. Its worst
-  # observation over the 15 completed main runs of 09-19T11:23Z ..
-  # 09-22T18:42Z is 1118s (run 35632425163), past the pole -- but that run,
-  # like every run before 09-22T11:01Z, still carried the "Opt-in body
-  # recording contracts" and "Scalar cross-revision executor contracts"
-  # steps (93s and 430s at worst), which the ledger below moved out on
-  # 2026-09-22. The worst run of the job as it stood at the split is 740s
-  # (run 35768988146; the configured project LSP step is in the last three).
-  # The split is taken anyway: the observation window keeps the 1118s run
-  # under this name until it ages out, and a claim may not sit under its
-  # own worst run, so the name could not carry a line under the pole.
-  #
-  # Steps are dealt whole, by their worst observations in the window:
-  # executor 129 + configured LSP 92 + scheduler 48 + consumers 67 = 336s
-  # in -1; journal 77 + ownership inventory 1 + scalar oracle 52 + prefix
-  # shard 2 232 = 362s in -2. Each adds the 50s worst fixed overhead of the
-  # three split families (see incremental-7-1). Planning values from
-  # observations, not observations of these jobs: restate both lines once
-  # three main runs of them exist. The union of the two jobs' `run:` lines
-  # is exactly this job's.
-  #
-  # The job's ledger until the split, kept for where each term was argued;
-  # its arithmetic is superseded by the two lines below.
-  # New contracts, not a split of the eight existing jobs. Local complete
-  # runs: executor 78.66s, recorder 54.44s, scheduler 30.48s, journal 44.62s
-  # on 2026-09-10/12. Double the rounded totals for runner headroom and add
-  # one 36s setup: 2 * (79 + 55 + 31 + 45) + 36 = 456s. This is a planning
-  # estimate, not a runner observation; replace it after the first CI run.
-  # The expanded nine-control recorder took 52.00s, within its 55s term.
-  # Six actual-consumer controls took 36.57s; the ownership inventory took
-  # under 1s. Add 2 * (37 + 1) = 76s, for a total of 532s.
-  # Scalar replay's six compiling controls took 34.22s on 2026-09-12;
-  # add 2 * 35s to the existing planning total, for 602s.
-  # The prepared-index rerun took 37.80s; add 2 * (38 - 35) = 6s.
-  # Full-product replay oracle and three independent controls took 20.22s;
-  # add 2 * 21s. Total planning value: 602 + 6 + 42 = 650s.
-  # Primitive parameters and immutable locals: the executor's controls grew
-  # from six to ten (58.87s) and the oracle from three to seven over 32
-  # pairs (39.21s), both local on 2026-09-12. Those replace the 35s and 21s
-  # terms above: add 2 * (59 - 35) + 2 * (40 - 21) = 86s, for 736s.
-  # 2026-09-13: prefix's shard 2 lands here, four of its thirteen subjects,
-  # 153s of its 497s observation, for 736 + 153 = 889s.
-  # 2026-09-22: move the complete scalar suite into four existing jobs.
-  # Remove only its documented 2 * 59s term; preserve other headroom.
-  # The expanded recorder moves intact to std-version below. Remove only
-  # its documented 2 * 55s term: 771 - 110 = 661s; retain other headroom.
-  # Configured project LSP: shared fresh-build setup plus this scope's
-  # complete matrices/control summed to 119.11s in the local all-suite run.
-  # Double rounded headroom: 661 + 2 * 120 = 901s; no job is added.
-  incremental-body-execution-1:
+  incremental-prefix-3:
     needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-body-execution-1') }}
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-prefix-3') }}
     runs-on: ubuntu-latest
-    # executor 129 + configured LSP 92 + scheduler 48 + consumers 67 = 336s,
-    # plus 50s fixed overhead = 386s.
-    # 2026-09-24, restated: 385s worst (run 35882535196) over its 5 successful
-    # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
-    # 2026-09-25, restated: 445s worst (run 36013340077) over the
-    # successful main runs of 09-18 .. 09-25 (gate-observations --since
-    # 2026-09-11, cut to the nightly audit's seven days).
-    # 2026-09-27: configured-lsp-contract.py and journal-consumers.py left with the replay engine's removal (the
-    # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 445s worst observed (run 36013340077)
-    timeout-minutes: 23
+    # sweep hints: prefix-shards-3-shard-2 323.9s + body-executor 368.5s +
+    # cold 202.2s + body-scheduler 119.5s + probe 102.8s + lsp-self-tests 0.5s
+    # = 1117.4s; x 0.56 + 50s = 676s.
+    # Raised on 2026-09-27 to the job's external cluster run plus a tenth
+    # (713s on the run of 235f1054), above the sweep estimate.
+    # budget: 3x 785s planning value (cluster run plus a tenth; restate after three main runs)
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Stateful body executor contracts
-        run: python3 scripts/incremental-semantics-contract/body-executor.py
-      - name: Full-product frozen body scheduler oracle
-        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
-
-  incremental-body-execution-2:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'incremental-body-execution-2') }}
-    runs-on: ubuntu-latest
-    # journal 77 + ownership inventory 1 + scalar oracle 52 + prefix shard 2
-    # 232 = 362s, plus 50s fixed overhead = 412s.
-    # 2026-09-24, restated: 429s worst (run 35890458801) over its 4 successful
-    # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
-    # 2026-09-25, restated: 438s worst (run 36048351780) over the
-    # successful main runs of 09-18 .. 09-25 (gate-observations --since
-    # 2026-09-11, cut to the nightly audit's seven days).
-    # 2026-09-27: write-journal.py, journal-coverage.py and scalar-oracle.py left with the replay engine's removal (the
-    # incremental-slice-k1 knife; the engine is archived at the
-    # incremental-slice-final tag). The claim is not restated here: the
-    # seven-day window still holds runs of the old shape, and the line is
-    # restated downwards once it has rolled past them.
-    # budget: 3x 438s worst observed (run 36048351780)
-    timeout-minutes: 22
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/dawn-toolchain
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # prefix's shard 2, dealt here from incremental-1 on 2026-09-13. Four
-      # engine mutants and no positive subject; the arithmetic and the reason
-      # are on the shard 0 step there.
       - name: incremental prefix engine mutants shard 2
         run: python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 2
+      - name: Stateful body executor contracts
+        run: python3 scripts/incremental-semantics-contract/body-executor.py
+      - name: frozen cold transition reference
+        run: python3 scripts/incremental-semantics-contract/cold.py
+      - name: Full-product frozen body scheduler oracle
+        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
+      - name: Java hook counting probe
+        run: python3 scripts/incremental-semantics-contract/probe.py
+      - name: LSP harness self-tests
+        run: |
+          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
 
   # contracts until 2026-09-23, split in two again because it had passed the
   # pole: 966s (run 35632425163) over the 15 completed main runs of
