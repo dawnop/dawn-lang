@@ -56,6 +56,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [method-size-gate-design.md](method-size-gate-design.md) | current | #241：编译器方法不得超过 HotSpot 的 `HugeMethodLimit`（8000 字节）；拆 `check_call`/`check_expr_at`/`check_stmt`/`pass_register_impls` 与一个 LSP 测试闭包，`scripts/method-size-gate.py` 按规则（非 `embed/`、非 test 块、非 vendored 包）读 jar 的 `code_length`，不留名单。 |
 | [recorded-numbers-design.md](recorded-numbers-design.md) | current | 门禁不要求树复述树已决定的数字：Core golden 降为按需的 `selfhost-core-diff.sh --base`，删 README 篇数、`uncovered.txt` 表头计数与 prepared-lifecycle 的硬编码测试总数；译本摘要保留并加 `--fix-translation-digests`。 |
 | [mutation-anchor-preflight-design.md](mutation-anchor-preflight-design.md) | current | Build-free source mutation applicability checks, explicit helper exclusions and anchor-drift controls. |
+| [record-update-design.md](record-update-design.md) | current | #257：记录更新 `{ ..r, f: v }` 是 Core 节点 `CUpdate`，不再降成「构造器 + 投影」由后端认形状；JVM 对 ≥ 31 字段的记录去 final、复制再赋值，jar 里没有 ≥ 32 个实参的方法（JDK 21 C2 的 JDK-8325467），native 由 rc 整体构造。 |
 | [jvm-operand-jump-design.md](jvm-operand-jump-design.md) | current | #80 的 JVM 操作数循环跳转栈纪律：局部暂存保留求值顺序，不改变 native RC。 |
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
