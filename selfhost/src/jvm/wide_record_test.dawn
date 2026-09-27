@@ -1,0 +1,153 @@
+# Runtime tests for records wide enough that the JVM backend builds them without
+# a full-arity constructor (jvm/codegen.wide_ctor, docs/record-update-design.md).
+#
+# Why a module of its own: the thing under test is the bytecode this compiler
+# emits for a wide record, and the one place a test block is compiled by the
+# compiler under test and then run is a test block. The record type has to be
+# declared at the top level of some module, and forty fields of fixture do not
+# belong in jvm/codegen or jvm/emit, which is the shape ir/interp_test and
+# front/parser_test already have.
+#
+# What each test pins is a property the old full-arity constructor gave for
+# free and copy-and-set has to earn: written order, an untouched base, an
+# operand stack that a loop jump or a return out of a written field leaves
+# balanced, the structural relations, and a comptime constant built without
+# the constructor it used to call.
+
+use std/map
+
+type W[T] = {
+  f0: Int,
+  f1: String,
+  f2: List[Int],
+  f3: Bool,
+  f4: T,
+  f5: Int,
+  f6: Int,
+  f7: Int,
+  f8: Int,
+  f9: Int,
+  f10: Int,
+  f11: Int,
+  f12: Int,
+  f13: Int,
+  f14: Int,
+  f15: Int,
+  f16: Int,
+  f17: Int,
+  f18: Int,
+  f19: Int,
+  f20: Int,
+  f21: Int,
+  f22: Int,
+  f23: Int,
+  f24: Int,
+  f25: Int,
+  f26: Int,
+  f27: Int,
+  f28: Int,
+  f29: Int,
+  f30: Int,
+  f31: Int,
+  f32: Int,
+  f33: Int,
+  f34: Int,
+  f35: Int,
+  f36: Int,
+  f37: Int,
+  f38: Int,
+  f39: Int
+} derive Show
+
+## A W whose Int fields hold their own index.
+fn w0[T](x: T) -> W[T] =
+  W {
+    f0: 0, f1: "one", f2: [2], f3: true, f4: x, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10,
+    f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20,
+    f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30,
+    f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39
+  }
+
+const WC: W[Int] =
+  W {
+    f0: 0, f1: "one", f2: [2], f3: true, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10,
+    f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20,
+    f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30,
+    f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39
+  }
+
+## Updates `f7` from the list until an element over 10 leaves the loop from
+## inside the written field, which is where copy-and-set has its copy on the
+## operand stack.
+fn until_big(xs: List[Int], base: W[String]) -> W[String] = {
+  var acc = base
+  for x in xs {
+    acc = W { ..acc, f30: acc.f30 + 1, f7: if x > 10 { break } else { x } }
+  }
+  acc
+}
+
+## The same with `continue`: a skipped element writes nothing.
+fn odd_only(xs: List[Int], base: W[String]) -> W[String] = {
+  var acc = base
+  for x in xs {
+    acc = W { ..acc, f9: if x % 2 == 0 { continue } else { acc.f9 + x } }
+  }
+  acc
+}
+
+## A written field that returns out of the function.
+fn unless_negative(base: W[String], x: Int) -> W[String] =
+  W { ..base, f8: if x < 0 { return base } else { x } }
+
+test "a wide update runs its written fields in written order and leaves the base alone" {
+  var order: List[String] = []
+  let a = w0("four")
+  let b = W {
+    ..a,
+    f39: {
+      order = order ++ ["f39"]
+      390
+    },
+    f1: {
+      order = order ++ ["f1"]
+      "uno"
+    }
+  }
+  assert order == ["f39", "f1"]
+  assert b.f39 == 390 && b.f1 == "uno"
+  assert b.f0 == 0 && b.f2 == [2] && b.f3 && b.f4 == "four" && b.f38 == 38
+  assert a.f39 == 39 && a.f1 == "one"
+  # the generic field goes through the erased slot both ways
+  let c = W { ..b, f4: "vier" }
+  assert c.f4 == "vier" && b.f4 == "four" && c.f39 == 390
+}
+
+test "a wide record's equality, hash, rendering and patterns are the structural ones" {
+  let a = w0("four")
+  let same = W { ..a, f5: 5 }
+  let other = W { ..a, f5: 6 }
+  assert a == same && hash(a) == hash(same) && to_string(a) == to_string(same)
+  assert a != other && to_string(a) != to_string(other)
+  match other {
+    W { f5, f39, f4, ..} -> { assert f5 == 6 && f39 == 39 && f4 == "four" }
+  }
+  let m = map.insert(map.insert(map.empty(), a, 1), other, 2)
+  assert map.get(m, same) == Some(1) && map.get(m, other) == Some(2)
+}
+
+test "a loop jump or a return out of a written field leaves the operand stack balanced" {
+  let base = w0("four")
+  let r = until_big([1, 2, 30, 4], base)
+  assert r.f7 == 2 && r.f30 == 30 + 2
+  let o = odd_only([1, 2, 3, 4], base)
+  assert o.f9 == 9 + 1 + 3
+  assert unless_negative(base, -1) == base
+  assert unless_negative(base, 7).f8 == 7
+}
+
+test "a wide comptime constant is built without a full-arity constructor" {
+  assert WC.f4 == 4 && WC.f39 == 39 && WC.f1 == "one"
+  assert W { ..WC, f4: 44 }.f4 == 44
+  assert WC == w0(4)
+}

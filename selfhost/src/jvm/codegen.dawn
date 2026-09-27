@@ -633,6 +633,25 @@ fn adt_id_of(t: Ty) -> Int =
     _ -> panic("impl subject is not an ADT")
   }
 
+## Every method this backend writes takes fewer JVM arguments than this,
+## receiver included. JDK 21's C2 cannot pass that many on the stack
+## (JDK-8325467, fixed in JDK 26 only): measured on x86_64, a constructor of
+## 53 fields compiles and one of 54 does not, and the refusal spreads to every
+## caller and every method that inlines one. 32 rather than 54 because the
+## limit is per platform -- JDK 26's release note says "greater than 30", and
+## JDK-8342156 records x86_64 at 38 for a while -- and nothing here has been
+## measured off x86_64. scripts/method-size-gate.py holds the jar to it.
+pub const JVM_ARG_LIMIT: Int = 32
+
+## Whether a constructor of `nfields` fields is too wide for a full-arity
+## `<init>`: its fields plus the receiver reach JVM_ARG_LIMIT. Such a class is
+## built through a no-arg constructor and field stores, and updated by
+## copy-and-set (docs/record-update-design.md); every other class keeps its
+## constructor and its bytecode.
+pub fn wide_fields(nfields: Int) -> Bool = nfields + 1 >= JVM_ARG_LIMIT
+
+pub fn wide_ctor(ci: CtorI) -> Bool = wide_fields(len(ci.fields))
+
 ## One ctor class: final subclass of `base` (or the record class itself).
 pub fn gen_ctor_class(
   supers: List[String],
@@ -645,8 +664,12 @@ pub fn gen_ctor_class(
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, sub, base)
   let singleton = len(ci.fields) == 0
+  let wide = wide_ctor(ci)
+  # a field a copy is written into after construction cannot be final: only
+  # the declaring class's <init> may store one (JVMS 6.5 putfield)
+  let facc = if wide { ACC_PUBLIC } else { ACC_PUBLIC + ACC_FINAL }
   for f in ci.fields {
-    Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, f.name, desc_of(adts, f.ty))
+    Asm.fieldOn(cw, facc, f.name, desc_of(adts, f.ty))
   }
   if singleton {
     Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ sub ++ ";")
@@ -660,22 +683,26 @@ pub fn gen_ctor_class(
     cl.visitMaxs(2, 0)
     cl.visitEnd()
   }
-  var ps = ""
-  for f in ci.fields { ps = ps ++ desc_of(adts, f.ty) }
-  let acc = if singleton { ACC_PRIVATE } else { ACC_PUBLIC }
-  let init = Asm.methodOn(cw, acc, "<init>", "(" ++ ps ++ ")V").expect("mv")
-  init.visitCode()
-  init.visitVarInsn(OP_ALOAD, 0)
-  init.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
-  var slot = 1
-  for f in ci.fields {
+  if wide {
+    gen_wide_ctors(cw, adts, base, sub, ci)
+  } else {
+    var ps = ""
+    for f in ci.fields { ps = ps ++ desc_of(adts, f.ty) }
+    let acc = if singleton { ACC_PRIVATE } else { ACC_PUBLIC }
+    let init = Asm.methodOn(cw, acc, "<init>", "(" ++ ps ++ ")V").expect("mv")
+    init.visitCode()
     init.visitVarInsn(OP_ALOAD, 0)
-    load_slot(init, f.ty, slot)
-    init.visitFieldInsn(OP_PUTFIELD, sub, f.name, desc_of(adts, f.ty))
-    slot = slot + slots_of(f.ty)
+    init.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
+    var slot = 1
+    for f in ci.fields {
+      init.visitVarInsn(OP_ALOAD, 0)
+      load_slot(init, f.ty, slot)
+      init.visitFieldInsn(OP_PUTFIELD, sub, f.name, desc_of(adts, f.ty))
+      slot = slot + slots_of(f.ty)
+    }
+    init.visitInsn(OP_RETURN)
+    close_mv(init)
   }
-  init.visitInsn(OP_RETURN)
-  close_mv(init)
   # `equals`/`hashCode` are the JVM's materialisation of the Eq/Hash
   # dictionary: the collections and every derived field comparison reach the
   # relation through them, so an `impl Eq` that only changed `==` would leave
@@ -694,6 +721,44 @@ pub fn gen_ctor_class(
   gen_to_string_method(cw, adts, sub, ci)
   cw.visitEnd()
   class_bytes(() => cw.toByteArray(), sub)
+}
+
+## A wide constructor class's three entry points, none wider than two JVM
+## arguments: `<init>()V`, which leaves every field at its default for the
+## caller to store (public, because the callers are other classes and a V52
+## class file has no nestmates to reach a private one through); a private copy
+## constructor; and `copy$`, which is what an update calls on its base before
+## storing the fields it writes. `$` keeps the name out of Dawn's identifiers.
+fn gen_wide_ctors(cw: ClassWriter, adts: Adts, base: String, sub: String, ci: CtorI) -> Unit !io = {
+  let self_desc = "L" ++ sub ++ ";"
+  let blank = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "()V").expect("mv")
+  blank.visitCode()
+  blank.visitVarInsn(OP_ALOAD, 0)
+  blank.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
+  blank.visitInsn(OP_RETURN)
+  close_mv(blank)
+  let copy_init = Asm.methodOn(cw, ACC_PRIVATE, "<init>", "(" ++ self_desc ++ ")V").expect("mv")
+  copy_init.visitCode()
+  copy_init.visitVarInsn(OP_ALOAD, 0)
+  copy_init.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
+  for f in ci.fields {
+    let d = desc_of(adts, f.ty)
+    copy_init.visitVarInsn(OP_ALOAD, 0)
+    copy_init.visitVarInsn(OP_ALOAD, 1)
+    copy_init.visitFieldInsn(OP_GETFIELD, sub, f.name, d)
+    copy_init.visitFieldInsn(OP_PUTFIELD, sub, f.name, d)
+  }
+  copy_init.visitInsn(OP_RETURN)
+  close_mv(copy_init)
+  let copy = Asm.methodOn(cw, ACC_PUBLIC, "copy\$", "()" ++ self_desc).expect("mv")
+  copy.visitCode()
+  copy.visitTypeInsn(OP_NEW, sub)
+  copy.visitInsn(OP_DUP)
+  copy.visitVarInsn(OP_ALOAD, 0)
+  copy.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ self_desc ++ ")V", false)
+  copy.visitInsn(OP_ARETURN)
+  close_mv(copy)
+  ()
 }
 
 ## The classes of one ADT: (name, bytes) for the base (sums) and each ctor.

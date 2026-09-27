@@ -7,13 +7,14 @@
 
 use std/set
 use check/types.{Ty, TyInt, TyBool, TyUnit, TyNever, TyError, TyVar}
+use jvm/codegen.{wide_fields}
 use ir/core.{
   CExpr, CStmt, CJava, cex_ty, diverges,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign, CDup, CDictRef, CDictApply, CDictArg,
-  CUpdate, update_as_ctor,
+  CUpdate, CUpdField, update_as_ctor, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CAnd, COr, CAdd
 }
@@ -190,7 +191,17 @@ fn visit(e: CExpr, next: Int) -> Prepared =
       }
     CIntrinsic(name, args, ty) -> eager(args, next, ty, xs => CIntrinsic(name, xs, ty))
     CCtor(adt, ci, args, ty) -> eager(args, next, ty, xs => CCtor(adt, ci, xs, ty))
-    CUpdate(base, adt, ci, fields, ty) -> visit(update_as_ctor(base, adt, ci, fields, ty), next)
+    # A narrow update is the whole constructor it denotes, spilled exactly as
+    # that constructor always was. A wide one keeps its node: its operands are
+    # the base and the written values, which the emitter evaluates in that
+    # order around copy-and-set.
+    CUpdate(base, adt, ci, fields, ty) ->
+      if not wide_fields(len(fields)) {
+        visit(update_as_ctor(base, adt, ci, fields, ty), next)
+      } else {
+        eager([base] ++ update_values(fields), next, ty, xs => CUpdate(xs[0], adt, ci,
+          refill(fields, list_tail(xs)), ty))
+      }
     CClosure(name, owner, args, ty) -> eager(args, next, ty, xs => CClosure(name, owner, xs, ty))
     CDictApply(key, args, ty) -> eager(args, next, ty, xs => CDictApply(key, xs, ty))
     CTuple(args, ty) -> eager(args, next, ty, xs => CTuple(xs, ty))
@@ -236,6 +247,22 @@ fn visit(e: CExpr, next: Int) -> Prepared =
       Prepared { expr: CForeign(j2, ty), jumps: jumps, next: n }
     }
   }
+
+## `fields` with its written values replaced, in order, by `vals`.
+fn refill(fields: List[CUpdField], vals: List[CExpr]) -> List[CUpdField] = {
+  var out: List[CUpdField] = []
+  var k = 0
+  for f in fields {
+    match f.value {
+      Some(_) -> {
+        out = out ++ [CUpdField { ..f, value: Some(vals[k]) }]
+        k = k + 1
+      }
+      None -> { out = out ++ [f] }
+    }
+  }
+  out
+}
 
 fn list_tail(es: List[CExpr]) -> List[CExpr] = {
   var out: List[CExpr] = []

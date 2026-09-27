@@ -42,7 +42,7 @@ use jvm/codegen.{
   class_bytes, class_bytes_from, MethodSite, no_sites,
   desc_of, method_desc, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, parameterised_scaffold,
-  dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name
+  dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, wide_ctor
 }
 use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
@@ -63,7 +63,7 @@ use ir/core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign, CDup, CJava, CDictRef, CDictApply, CDictArg,
-  CUpdate, update_as_ctor,
+  CUpdate, CUpdField, update_as_ctor,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
@@ -659,18 +659,27 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
       } else {
         m.visitTypeInsn(OP_NEW, sub)
         m.visitInsn(OP_DUP)
+        # a wide constructor has no full-arity <init> (codegen.wide_ctor)
+        let wide = wide_ctor(ci)
+        if wide { m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "()V", false) }
         var i = 0
         for f in fields {
           let boxed2 = match ci.fields[i].ty {
             TyVar(_, _) -> true
             _ -> false
           }
+          if wide { m.visitInsn(OP_DUP) }
           construct_value(gx, m, f, boxed2)
+          if wide {
+            m.visitFieldInsn(OP_PUTFIELD, sub, ci.fields[i].name, desc_of(gx.adts, ci.fields[i].ty))
+          }
           i = i + 1
         }
-        var ps = ""
-        for fd in ci.fields { ps = ps ++ desc_of(gx.adts, fd.ty) }
-        m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+        if not wide {
+          var ps = ""
+          for fd in ci.fields { ps = ps ++ desc_of(gx.adts, fd.ty) }
+          m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+        }
       }
     }
     _ -> panic("a function value cannot be a constant (checker bug)")
@@ -2474,7 +2483,7 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CBinary(op, l, r, ty) -> gen_cbinary(gx, g, op, l, r, ty)
     CUnary(op, operand, ty) -> gen_cunary(gx, g, op, operand, ty)
     CCtor(adt, ci, args, _) -> gen_cctor(gx, g, adt, ci, args)
-    CUpdate(base, adt, ci, fields, ty) -> gen_cexpr(gx, g, update_as_ctor(base, adt, ci, fields, ty), false)
+    CUpdate(base, adt, ci, fields, ty) -> gen_cupdate(gx, g, base, adt, ci, fields, ty)
     CField(target, adt, ci, idx, _) -> gen_cfield(gx, g, target, adt, ci, idx)
     CIsCtor(target, adt, ci) -> gen_cisctor(gx, g, target, adt, ci)
     CTagOf(target, adt) -> gen_ctagof(gx, g, target, adt)
@@ -2514,11 +2523,67 @@ fn gen_cctor(gx: GenCtx, g: Gen, adt: Int, ci: Int, args: List[CExpr]) -> (Gen, 
   }
   g.mv.visitTypeInsn(OP_NEW, cls)
   g.mv.visitInsn(OP_DUP)
+  if wide_ctor(c) {
+    # no full-arity <init> exists (codegen.wide_ctor): allocate blank, then
+    # store each field in field order, which is the order the values run in
+    g.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "()V", false)
+    var g2 = g
+    var i = 0
+    for a in args {
+      g2.mv.visitInsn(OP_DUP)
+      let (g3, _) = gen_cexpr(gx, g2, a, false)
+      g2 = g3
+      g2.mv.visitFieldInsn(OP_PUTFIELD, cls, c.fields[i].name, desc_of(gx.adts, c.fields[i].ty))
+      i = i + 1
+    }
+    return (g2, true)
+  }
   let g1 = gen_cargs(gx, g, args)
   var desc = "("
   for f in c.fields { desc = desc ++ desc_of(gx.adts, f.ty) }
   g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "${desc})V", false)
   (g1, true)
+}
+
+## A record update. Below the width limit it is the whole constructor it
+## denotes, so its bytecode is the full-arity call it always was. At or above
+## it there is no such constructor to call: copy the base (`copy$`, generated
+## beside the class) and store the written fields into the copy, in field
+## order. Only the written fields cost anything, which for `Cx` is usually one
+## of 58 (docs/record-update-design.md).
+fn gen_cupdate(
+  gx: GenCtx,
+  g: Gen,
+  base: CExpr,
+  adt: Int,
+  ci: Int,
+  fields: List[CUpdField],
+  ty: Ty
+) -> (Gen, Bool) !io = {
+  let c = adt_of(gx.adts, adt).ctors[ci]
+  if not wide_ctor(c) {
+    return gen_cexpr(gx, g, update_as_ctor(base, adt, ci, fields, ty), false)
+  }
+  let cls = ctor_jvm_name(gx.adts, c)
+  let (g1, falls) = gen_cexpr(gx, g, base, false)
+  if not falls { return (g1, false) }
+  g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, cls, "copy\$", "()L" ++ cls ++ ";", false)
+  var g2 = g1
+  var i = 0
+  for f in fields {
+    match f.value {
+      Some(v) -> {
+        g2.mv.visitInsn(OP_DUP)
+        let (g3, _) = gen_cexpr(gx, g2, v, false)
+        g2 = g3
+        g2.mv.visitFieldInsn(OP_PUTFIELD, cls, c.fields[i].name, desc_of(gx.adts, c.fields[i].ty))
+      }
+      None -> ()
+    }
+    i = i + 1
+  }
+  (g2, true)
 }
 
 fn gen_cfield(gx: GenCtx, g: Gen, target: CExpr, adt: Int, ci: Int, idx: Int) -> (Gen, Bool) !io = {
