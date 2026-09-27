@@ -17,7 +17,7 @@ use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
 use check/cx.{ModExports, Cx, cx_new}
-use check/checker.{check_module, exports_of}
+use check/checker.{check_module, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
@@ -1007,10 +1007,12 @@ pub(pkg) fn analyze_module_step(
   }
   var impls = before.impls
   # registration already rejected anything that collided with a key already
-  # in this table, so every row here is either new or the one put there
+  # in this table, so every row here is either new or the one put there. The
+  # carry holds each impl without its source span (`exported_impl`): only the
+  # declaring module reads one, from its own `local_impls`.
   for pr in map.entries(cx.impl_table) {
     let (k, v) = pr
-    impls = map.insert(impls, k, v)
+    impls = map.insert(impls, k, exported_impl(v))
   }
   let exports = map.insert(before.exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
   let checked = CheckedMod {

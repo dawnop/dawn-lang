@@ -1,6 +1,8 @@
 # Frozen from 58ebd4a5 driver/analyze.dawn; only the entry name changed, plus
 # the declaration span view, which is part of the product being compared and so
-# has to be built here too.
+# has to be built here too, and (2026-09-28) the carried impls losing their
+# source spans, which is a deliberate change of what the carry holds
+# (check/checker.exported_impl, docs/lsp-module-memo-design.md).
 # Injected into a private subject, never linked into the production compiler.
 pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Env !io = {
   var diags = loaded.diags
@@ -79,7 +81,7 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
     # in this table, so every row here is either new or the one put there
     for pr in map.entries(cx.impl_table) {
       let (k, v) = pr
-      impls = map.insert(impls, k, v)
+      impls = map.insert(impls, k, exported_impl(v))
     }
     exports = map.insert(exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
     out = out ++ [CheckedMod {
