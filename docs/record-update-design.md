@@ -56,7 +56,7 @@ CUpdField = { ty: Ty, value: Option[CExpr] }
 | `jvm/emit` | 宽记录的更新与整构造走复制再赋值（下节）；窄记录的更新按整构造器发 |
 | `jvm/codegen` | 宽记录的类去掉字段的 `ACC_FINAL`，加无参 `<init>`、私有拷贝构造与 `copy$` |
 | `c/infer` | 各遍历按整构造器形式处理（它要的就是那个形式的需求：保留字段投影在消费位置） |
-| `c/rc` | 更新在这里被整体构造：`rw` 把它展开成整构造器再计数；`spread_rebuild` 直接认 `CUpdate`，被调度的更新在提升时展开，嵌套的更新留作节点；认 `CCtor` 的臂只剩手写的整构造器重建（全编译器一处，见 [perceus-design.md](perceus-design.md)） |
+| `c/rc` | 更新在这里被整体构造：`rw` 把它展开成整构造器再计数；`spread_rebuild` 直接认 `CUpdate`，被调度的更新在提升时展开，嵌套的更新留作节点；认 `CCtor` 形状的臂已删：编译器里两处手写的整构造器重建改写成了 `..` 更新（见 [perceus-design.md](perceus-design.md)） |
 | `c/emitc` | 不会见到它（rc 之后没有 `CUpdate`），见到即 panic |
 
 Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 Core，rc 把 `CUpdate` 展开成整构造器，
@@ -65,13 +65,13 @@ Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 
 ## JVM 的表示
 
 **宽度。** 具名常量 `jvm/codegen.JVM_ARG_LIMIT = 32`：Dawn 发出的方法接收的 JVM 实参（含接收者）必须少于它。
-构造器接收者占一个，所以字段数 + 1 ≥ 32（即 ≥ 31 个字段）的记录是宽记录。取 32 而不是实测的 54，
-是为了覆盖没测过的平台（JDK 26 发布说明「> 30」、APX 期间的 38）；代价只是多纳入 33 字段的 `HeaderProduct`。
+构造器接收者占一个，所以字段数 + 1 ≥ 32（即 ≥ 31 个字段）的记录是宽记录。按实参而不按字段数定义，是为了与门禁同一个量：若以「字段数 ≥ 32」为界，31 个字段的记录会留下一个 32 实参的 `<init>`，正好撞门禁，也正好是 C2 按实参计的那堵墙。取 32 而不是实测的 54，
+是为了覆盖没测过的平台（JDK 26 发布说明「> 30」、APX 期间的 38）；落地时多纳入的只有 33 字段的 `HeaderProduct`，它随后被 #259（K1）整个删掉，今天全仓只有 `Cx` 是宽记录。
 全仓 ≥ 20 字段的记录只有这两个。
 
 **宽记录的类。**
 - 字段 `ACC_PUBLIC`，没有 `ACC_FINAL`（类本身仍是 final）。
-- `public <init>()V`：只调父类构造器。它必须是 public：类文件是 V52，没有 nestmate，别的类（更新点所在的模块类）调不了私有构造器。
+- `public <init>()V`：只调父类构造器。它必须是 public 而不是裁决原文的 private：类文件是 V52，没有 nestmate（JDK 11 起才有），构造与更新都发生在别的类（模块类）里，私有构造器在那里 `invokespecial` 即 `IllegalAccessError`；拷贝构造只被本类的 `copy$` 调，所以仍是 private。
 - `private <init>(L自身;)V`：逐字段 `getfield`/`putfield` 拷贝；`public copy$()L自身;`：`new; dup; aload_0; invokespecial` 拷贝构造。
   `copy$` 带 `$`，Dawn 的标识符里不会出现，不会和字段或方法撞名。
 - 不生成全参构造器。
@@ -112,7 +112,7 @@ Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 
 - **字节码**：非 vendored 方法的代码总量 2,779,123 → 2,599,010 字节（`check/` 1,263,500 → 1,064,570），
   ≥ 6000 字节的受检方法 9 → 8；受检方法最多的 JVM 实参 59（`cx$Cx.<init>`）→ 21（`lower$LSt.<init>`）。
 - **输出不变的部分**：`__emitc selfhost/src/nmain.dawn` 与基线逐字节相同（22,871,683 字节）；`__emit` 下 site、playground、
-  `packages/web`、`packages/json` 与五个 examples 与基线零差，只有 `emit selfhost` 的 18 个类变（都是构造或更新 `Cx`/`HeaderProduct` 的模块）。
+  `packages/web`、`packages/json` 与五个 examples 与基线零差，只有 `emit selfhost` 的 18 个类变（都是构造或更新 `Cx`/`HeaderProduct` 的模块；这组数是在 `0c6dea2f` 上量的，K1 之前）。
   负控把宽度判据临时改成「≥ 5 个字段」，`emit site` 11 个类、`emit playground` 6 个类随之变化。
   `selfhost-core-diff.sh` 只报源码本身改了的 12 个模块与新增的测试模块，其余 151 份 dump（含三个示例程序）不变；dump 里没有一行 `update`。
 - **性能**（OpenJDK 21.0.11 C2，5 轮交错去首轮，逐轮配对比值取中位数）：
@@ -129,7 +129,7 @@ Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 
 | bench-replay cold primitive_inferred | 13.73 | 13.48 | 0.945 | 0.80 0.94 1.04 0.92 1.01 |
 | LSP sync 中位 ms（standalone-large，4 轮交错） | 24.9 | 25.2 | 0.994 | |
 
-  读法：一次性进程墙钟不变，CPU 多约 6%（更多方法进了 C2，与调研里 JDK 26 的模式相同）；长驻进程里检查函数体的负载快 5% 到 14%。
+  读法：一次性进程墙钟不变，CPU 多约 6%。来源是 C2 的编译工作：`-XX:+CITime` 三轮交错（K1 之后的 `e4f2029e` 对本分支），C2 标准编译时间 11.0/9.1/9.4 s 对 13.8/10.3/10.9 s（中位 +1.5 s），C2 编的方法 868/859/855 对 886/879/892，编进 C2 的字节 +4.5%；C1 时间基本不变（2.5/2.4/2.4 对 3.0/2.3/2.4 s）。即以前被拒、留在 C1 的那 20 个方法及内联它们的调用方现在进了 C2，编译线程多花约 1.5 s CPU，一次性进程活不到这份代码的回本点；长驻进程里检查函数体的负载快 5% 到 14%。
   playground 的 `/check` 每个请求起一个 `dawn build` 子进程，是一次性进程，不是长驻编译器：小程序（`examples/data/shapes.dawn`）
   的 `build` 墙钟比值 0.997。以上是本机数，没有集群的同协议复测。
 

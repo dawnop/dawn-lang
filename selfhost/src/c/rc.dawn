@@ -957,30 +957,11 @@ type SpreadLift = {
 # are followed: an update nested inside a written value belongs to a binding
 # of its own. An update that writes every field reads nothing from its base
 # and has nothing to lift.
-#
-# The CCtor arm is not lowering's shape any more; updates arrive as CUpdate.
-# It is a constructor the program wrote out whole that rebuilds a record of the
-# same constructor from a binding in the same block -- `let loaded = ...;
-# LoadResult { modules: loaded.modules, diags: ds ++ loaded.diags }` in
-# driver/analyze.load_directory_planned is the one such site the compiler
-# has, and the #40 scheduling was measured on it. Taking the arm out moves
-# that function's C, so it stays for as long as a program can spell an update
-# without `..`.
 fn spread_rebuild(e: CExpr, base: Int) -> Option[(Int, Int)] =
   match e {
     CBlock(_, Some(t), _) -> spread_rebuild(t, base)
     CUpdate(CLocal(sym, _), adt, ci, fields, _) ->
       if sym == base && update_keeps(fields) { Some((adt, ci)) } else { None },
-    CCtor(adt, ci, args, _) -> {
-      for a in args {
-        match a {
-          CField(CLocal(sym, _), fa, fc, _, _) ->
-            if sym == base && fa == adt && fc == ci { return Some((adt, ci)) },
-          _ -> ()
-        }
-      }
-      None
-    }
     _ -> None
   }
 
@@ -2812,29 +2793,24 @@ test "a reassigned record is not lifted ahead of the assignment" {
   }
 }
 
-test "a constructor written out whole is scheduled like the update it spells" {
-  # `let loaded = load(); R { a: loaded.a, b: g(loaded.b) }` has no `..`, so
-  # it reaches Core as a CCtor, not a CUpdate -- and the old record can still
-  # be released before `g` runs, as for the update (#40 was measured on
-  # driver/analyze.load_directory_planned, which has this shape).
+test "a constructor written out whole is not taken for an update" {
+  # `let loaded = load(); R { a: loaded.a, b: g(loaded.b) }` names no base:
+  # scheduling is keyed on CUpdate, and a program that means an update writes
+  # `..loaded` (driver/analyze.load_directory_planned did, once this was so).
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
   let rebuilt = CCtor(7, 0, [
     CField(CLocal(2, rec), 7, 0, 0, ref),
     CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)
   ], rec)
-  let body = CBlock([CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))], Some(rebuilt), rec)
-  let m = rc_module(one_fn([], rec, body), owned_modes())
-  assert len(rc_check(m, owned_modes())) == 0
-  match m.fns[0].body {
-    CBlock(ss, _, _) -> {
-      match ss[3] {
-        CSDrop(2) -> ()
-        _ -> panic("expected the rebuilt record released before the call")
-      }
-    }
-    _ -> panic("expected the scheduled block")
+  let st = RSt {
+    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
+    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    next_sym: 100, pinned: false
   }
+  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))]
+  let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(rebuilt))
+  assert st1.next_sym == 100 && ss1 == stmts && tail1 == Some(rebuilt)
 }
 
 test "an update nested in a written field keeps its node until its own block" {
