@@ -2,8 +2,9 @@
 
 2026-09-27 起，体级重放引擎（`scalar_replay`、`body_product`、prepared/cached
 会话、provenance 表及其 15 个 `check/` 模块）连同守它的契约一起拆了，拆除前的
-整棵树归档在 `incremental-slice-final` tag，考古看 tag。本目录留下的是：legacy 前缀
-会话与它对照的冷参照（`prefix.py`、`cold.py`、`probe.py`、`lsp-prefix.py`）、声明身份
+整棵树归档在 `incremental-slice-final` tag，考古看 tag。本目录留下的是：模块记忆会话
+（2026-09-28 前是 legacy 前缀会话，见 [docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md)；
+脚本名 `prefix*` 沿用）与它对照的冷参照（`prefix.py`、`cold.py`、`probe.py`、`lsp-prefix.py`）、声明身份
 （`identity.py`）、体调度器与执行器接缝（`body-scheduler.py`、`body-executor.py`）、LSP
 对拍与计量工具（`lsp-*.py`、`bench.py`）。同日稍后，读取插桩（`semantic_reads`、
 `write_journal` 与 `Cx` 的读取记录层）连同守它的十四个读取族 harness 也拆了。
@@ -70,8 +71,8 @@ from 79 invocations to 33: 31m14s at 8 jobs with a 9.4 GiB peak, all passing
 
 ## 冷路径对照
 
-多文件 LSP 已启用保守前缀缓存；CLI 与 standalone 仍走冷分析。
-下列冷路径命令本身不证明缓存命中，命中由前缀/工作区执行计数门禁另行验证。
+多文件 LSP 按模块记忆复用分析步骤、按文本复用解析；CLI 与 standalone 仍走冷分析。
+下列冷路径命令本身不证明缓存命中，命中由模块记忆/工作区执行计数门禁另行验证。
 
 - `python3 scripts/incremental-semantics-contract/probe.py`：八个 Java hook 与
   refusing guard 的九个可编译负控。
@@ -140,15 +141,24 @@ owning 判词是 `driver/analyze` 的「module identity carry」、「渲染读�
 跑（重放引擎在时是录制执行器）。五个能编译的负控必须让 Java 比较器报出差异。
 `body-executor.py` 守 `BodyExecutor` 这个接缝本身。
 
-## 前缀与工作区
+## 模块记忆与工作区
 
-`prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
-std身份变化及构造器的负预算拒绝。`--shards N --shard I` 按 index 取模把这12个负控
-分片，不带旗标时行为不变：正样本加全部12个负控。
+规则只有一条：模块的输入不变、进入它的 carry 不变，就原样复用上一轮的步骤
+（[docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md)）。
+`prefix.py` 对照完整 warm/frozen-cold 产品，覆盖13个可编译负控：规则的输入一半
+（整个关掉复用、只比文本、忽略输入、忽略 std 身份）、carry 一半（忽略 carry、跳过早截断、
+早截断不比较、导出面的比较不看顺序）、复用步骤周围的位置视图（不重拼
+`decl_spans`）、导出面上的 alias 位置（`check/checker` 的 `exported_alias` 回退），以及
+记忆本身（逐出、模块上限、负上限）。owning 判词是 `contract/prefix` 的「module memo」
+七条测试，每条都拿会话的 Program 与同一输入的冷分析逐项比较（含 `decl_spans` 与渲染后的
+诊断位置），并断言复用/重检计数。`--shards N --shard I` 按 index 取模把这13个负控
+分片，不带旗标时行为不变：正样本加全部13个负控。
 正样本只在 shard 0 跑，代价与理由写在 prefix.py 分片处；每个分片仍会先套用全部
-锚点，所以锚点漂移在任何一片都是硬失败。`lsp-prefix.py` 覆盖四个 LSP 负控，要求
+锚点，所以锚点漂移在任何一片都是硬失败。`lsp-prefix.py` 覆盖六个 LSP 负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。三个是工作区接线（会话、绕过
-缓存、冲突后留缓存），第四个换掉 `tast_positions.symbols` 的 resolver：体内偏移是相对
+缓存、冲突后留缓存），两个是解析复用（工作区不把本次的解析交给下一次、文本变了仍复用旧
+解析，后者的 owning 判词是 `driver/analyze` 的「a reusing load parses only the files whose
+text changed」），第六个换掉 `tast_positions.symbols` 的 resolver：体内偏移是相对
 自己声明量的，加不回声明起点，查询就指向错误的位置。它的 owning 判词原是跨修订
 definition 案例，随重放引擎删了，现在是 `lsp/server` 的「handler state cell answers at
 every spelling of it」，同一个 resolver 的同修订读者。工作区计数测试在共享server里，
@@ -174,8 +184,9 @@ also check percentile ordering and reject empty, negative, and nonfinite samples
 
 `lsp-configured.py --source <configured-worktree> --output <new-dir> --mode
 Legacy` builds a private compiler using the real `run_lsp_configured` entry;
-`Cold` selects the other immutable policy, which evicts the prefix before
-every analysis. Cache budgets are explicit arguments. No production CLI flag
+`Cold` selects the other immutable policy, which remembers no module step and
+keeps no parse between analyses. The module bound is an explicit argument
+(`--max-modules`); the character budget went with the prefix rule. No production CLI flag
 or wire method is added. Exact source fingerprints, policy, budgets, observer
 schema, and artifact hash are recorded. Launch the resulting `compiler.jar`
 with the ordinary `lsp` command. The builder also accepts `--backend native`,
@@ -199,9 +210,15 @@ independently selected policies or compilers. Counts are stored separately and
 excluded from semantic equality. `--self-test` checks the revision census.
 
 `lsp-project-matrix.py --output <new-dir> -- <server-command>` uses the tracked
-two-module `project-edit-fixture` without changing its disk files. Eight overlay
+two-module `project-edit-fixture` without changing its disk files. Ten overlay
 revisions cover provider body/signature edits, consumer and provider error
-recovery, moved source, and closing/reopening the provider. It records complete
+recovery, moved source (clean, then with an error in the moved provider),
+and closing/reopening the provider. Every revision checks positions against its
+own text: a provider diagnostic must start on the line the text puts it on, and
+the consumer's definition of `exported` must name the provider's current line.
+`--expect-counts` additionally requires an observed server's reuse counts per
+revision (the provider re-checked on every provider edit, the consumer only
+when its own text or the provider's exports changed). It records complete
 diagnostic publications with consumer versions and hover/definition/completion
 replies; `--compare <prior-output>` checks exact equivalence using the same
 fixture paths, hashes, and generated operation/version/overlay history. Both

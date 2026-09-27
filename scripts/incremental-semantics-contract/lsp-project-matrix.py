@@ -3,6 +3,15 @@
 
 The fixed fixture separates provider implementation and signature changes from
 an unrelated consumer body. This validates protocol behavior, not latency.
+
+Positions are checked against the text of each revision, not only against a
+comparison run: a diagnostic in the provider and the consumer's definition
+reply must name the line the provider's current text puts them on. The
+provider moves while the consumer's step is reused, which is the case where a
+session that kept the reused step's view of its predecessors would answer
+with where they used to be (docs/lsp-module-memo-design.md). With
+`--expect-counts`, an observed server must also have re-checked exactly the
+modules each revision's rule says it must.
 """
 import argparse
 import hashlib
@@ -66,7 +75,89 @@ def validate_versions(publishes, expected):
             raise RuntimeError("open project document publication has stale or absent version")
 
 
+def line_of(text, needle):
+    if text.count(needle) != 1:
+        raise ValueError("position anchor is missing or ambiguous")
+    return text[:text.index(needle)].count("\n")
+
+
+def reply_line(reply):
+    location = reply[0] if isinstance(reply, list) and reply else reply
+    if not isinstance(location, dict) or "range" not in location:
+        raise RuntimeError(f"definition reply has no location: {reply!r}")
+    return location.get("uri"), location["range"]["start"]["line"]
+
+
+def validate_positions(publishes, replies, lib_uri, lib_text, needle):
+    """Every provider diagnostic starts on the needle's line; the definition
+    of `exported` names the line its declaration is on now."""
+    for item in publishes:
+        if item["uri"] != lib_uri:
+            continue
+        for diagnostic in item.get("diagnostics", []):
+            line = diagnostic["range"]["start"]["line"]
+            if needle is None or line != line_of(lib_text, needle):
+                raise RuntimeError(f"provider diagnostic on line {line}, text puts it on "
+                                   f"{None if needle is None else line_of(lib_text, needle)}")
+    uri, line = reply_line(replies["definition"])
+    if uri != lib_uri or line != line_of(lib_text, "pub fn exported"):
+        raise RuntimeError(f"definition names {uri}:{line}, text puts it on line "
+                           f"{line_of(lib_text, 'pub fn exported')}")
+
+
+# (reused, checked) per revision, for a server that reuses by the module rule:
+# the provider is checked again whenever its text changed, and the consumer
+# whenever its own text changed or the provider's exports did.
+EXPECTED_COUNTS = {
+    "provider-body": (1, 1), "provider-signature": (0, 2), "consumer-recovery": (1, 1),
+    "provider-error": (1, 1), "provider-recovery": (1, 1), "provider-move": (1, 1),
+    "provider-move-error": (1, 1), "provider-move-recovery": (1, 1),
+    "close-provider": (0, 2), "reopen-provider": (0, 2),
+}
+
+
+def validate_counts(label, counts):
+    observed = [row["counts"] for row in counts if row["observed"]]
+    if len(observed) != 1:
+        raise RuntimeError(f"{label}: expected one observed analysis, got {counts!r}")
+    got = (observed[0]["reused_modules"], observed[0]["checked_modules"])
+    if got != EXPECTED_COUNTS[label]:
+        raise RuntimeError(f"{label}: reused/checked {got} != {EXPECTED_COUNTS[label]}")
+
+
 def selftest():
+    assert line_of("a\nb\nc", "c") == 2
+    for invalid in ("", "c c"):
+        try:
+            line_of(invalid, "c")
+        except ValueError:
+            continue
+        raise AssertionError("ambiguous position anchor accepted")
+    text = "# moved\npub fn exported(x: Int) -> Bool = nope\n"
+    at = {"uri": "lib", "range": {"start": {"line": 1}}}
+    diag = {"uri": "lib", "diagnostics": [{"range": {"start": {"line": 1}}}]}
+    validate_positions([diag], {"definition": at}, "lib", text, "nope")
+    validate_positions([], {"definition": [at]}, "lib", text, None)
+    stale = {"uri": "lib", "range": {"start": {"line": 0}}}
+    for publishes, definition, needle in (([diag], stale, "nope"),
+                                         ([{**diag, "diagnostics": [{"range": {"start": {"line": 0}}}]}], at, "nope"),
+                                         ([diag], at, None), ([], {**at, "uri": "main"}, None), ([], None, None)):
+        try:
+            validate_positions(publishes, {"definition": definition}, "lib", text, needle)
+        except RuntimeError:
+            continue
+        raise AssertionError("stale position accepted")
+    print("OK: position oracle and five rejection cases")
+    row = {"observed": True, "counts": {"reused_modules": 1, "checked_modules": 1}}
+    validate_counts("provider-body", [row])
+    for label, rows in (("provider-signature", [row]), ("provider-body", [row, row]),
+                        ("provider-body", [{"observed": False, "counts": None}])):
+        try:
+            validate_counts(label, rows)
+        except RuntimeError:
+            continue
+        raise AssertionError("wrong analysis counts accepted")
+    print("OK: count oracle and three rejection cases")
     assert replace_once("a target b", "target", "changed") == "a changed b"
     for invalid in ("absent", "target target"):
         try:
@@ -109,6 +200,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--compare", type=Path)
+    parser.add_argument("--expect-counts", action="store_true",
+                        help="require an observed server's per-revision reuse counts")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -128,19 +221,24 @@ def main():
     }
     boolean_lib = replace_once(texts["lib"], "exported(x: Int) -> Int = x + 1", "exported(x: Int) -> Bool = true")
     boolean_main = replace_once(texts["main"], "probe(x: Int) -> Int", "probe(x: Int) -> Bool")
+    moved_lib = "# moved provider\n\n" + boolean_lib
     steps = [
         ("provider-body", "lib", replace_once(texts["lib"], "x + 1", "x + 9"), None),
         ("provider-signature", "lib", boolean_lib, "main"),
         ("consumer-recovery", "main", boolean_main, None),
         ("provider-error", "lib", replace_once(boolean_lib, "= true", "= missing_value"), "lib"),
         ("provider-recovery", "lib", boolean_lib, None),
-        ("provider-move", "lib", "# moved provider\n\n" + boolean_lib, None),
+        ("provider-move", "lib", moved_lib, None),
+        ("provider-move-error", "lib",
+         "# moved provider\n\n# and moved again\n\n" + replace_once(boolean_lib, "= true", "= missing_value"), "lib"),
+        ("provider-move-recovery", "lib", moved_lib, None),
         ("close-provider", "lib", None, "main"),
         ("reopen-provider", "lib", boolean_lib, None),
     ]
     expected_messages = {
         "provider-signature": "function `probe` declares return type Int but its body is Bool",
         "provider-error": "undefined variable: missing_value",
+        "provider-move-error": "undefined variable: missing_value",
         "close-provider": "function `probe` declares return type Bool but its body is Int",
     }
     history_versions = {name: 1 for name in texts}
@@ -188,8 +286,14 @@ def main():
                 for method in ("hover", "definition", "completion")}
             if error_owner is None and (not replies["hover"] or not replies["definition"]):
                 raise RuntimeError(f"{label}: clean query target unresolved")
+            lib_text = texts["lib"] if text is None and name == "lib" else current["lib"]
+            if replies["definition"]:
+                validate_positions(publishes, replies, uris["lib"], lib_text,
+                                   "missing_value" if "missing_value" in lib_text else None)
             counts = [decode(line) for line in client.stderr_text()[stderr_mark:].splitlines()
                       if line.startswith("LSP_BODY_STATS\t")]
+            if args.expect_counts:
+                validate_counts(label, counts)
             rows.append({"label": label, "diagnostics": publishes, "replies": replies,
                          "analysis_counts": counts})
             (args.output / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")
