@@ -865,9 +865,9 @@ borrowed concat 调用处仍需一次 dup，所以没有新增原地数组写入
 **记录更新进 Core（2026-09-27，#257）。** lowering 不再把 `{ ..r, f: v }` 降成「spread base 的 `let` + 同构造子
 `CCtor` + 投影」，而是产出 `CUpdate` 节点（[record-update-design.md](record-update-design.md)）。`spread_rebuild`
 直接认尾部的 `CUpdate`；被调度的那个更新在提升时展开成整构造器，保留字段照旧成为提升的投影；嵌在写入值里的
-内层更新保持为节点，留给它自己的块去调度（否则内层失去调度，自编译 C 差 14,830 行）。认 `CCtor` 的臂保留给
-程序手写的整构造器重建：全编译器只有 `driver/analyze.load_directory_planned` 一处，即上面 #40 实测的那个函数，
-删掉这臂它的 C 就变。生成的 C 与改动前逐字节相同。
+内层更新保持为节点，留给它自己的块去调度（否则内层失去调度，自编译 C 差 14,830 行）。认 `CCtor` 的臂原本留给程序手写的整构造器重建；编译器里只有两处（`driver/analyze.load_directory_planned`，即上面 #40 实测的那个函数，
+与 `jvm/operand` 的短路臂），都改写成了 `..` 更新，臂随之删掉，调度只认 `CUpdate`。以同一份源码对比，改前改后编译器生成的 C 逐字节相同
+（`nmain`、site、spike-native 语料）。手写的整构造器重建从此不参与这项调度，这是有意的：想要更新就写 `..`。
 
 **#31 已接在 #30 后落地（2026-09-01）。** `std/hamt.node_put` 的 branch descent 现在与
 `std/pvec.push_tail` 用同一个合同：先以 `array_steal(kids, pos)` 暂时清空 slot，把 child 的

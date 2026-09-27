@@ -157,7 +157,7 @@ x86_64 上 54 个 JVM 实参起拒编被调方（`unsupported incoming calling s
 静态方法从访问标志读出，不算接收者。32 在 `jvm/codegen.JVM_ARG_LIMIT` 与脚本里各写一次：编译器那边调低，门禁更严；
 调高而门禁不跟，门禁红。
 
-改动前的 jar：`cx$Cx.<init>` 59、`header_product$HeaderProduct.<init>` 34，两条红；改动后最宽的受检方法是
+改动前的 jar（`0c6dea2f`）：`cx$Cx.<init>` 59、`header_product$HeaderProduct.<init>` 34，两条红（后者随 #259 删除）；改动后最宽的受检方法是
 `ir/lower$LSt.<init>` 21。
 
 `--selftest` 新增六条：构造器 31 个实参过、32 个红，静态方法 31 过、32 红，31 个 long 参数的静态方法过（不按槽数算），
