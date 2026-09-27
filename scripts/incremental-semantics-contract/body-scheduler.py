@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the recording executor with an independently frozen body scheduler.
+"""Compare the production body scheduler with an independently frozen one.
 
 Keep the reference loop unchanged when production scheduling changes. Negative
 controls must compile and differ in the full-product oracle, not merely crash.
