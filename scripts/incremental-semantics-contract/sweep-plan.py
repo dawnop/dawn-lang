@@ -86,9 +86,9 @@ LOG_LINE = re.compile(r"^(?:PASS|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s\s*$", re
 # entry left the table on 2026-09-27 with the replay engine it probed, and the
 # eight read-log entries later that day with the read log.
 STATIC_HINTS = {
-    "prefix-shards-3-shard-0": 312,
-    "prefix-shards-3-shard-1": 250,
-    "prefix-shards-3-shard-2": 250,
+    "module-memo-shards-3-shard-0": 312,
+    "module-memo-shards-3-shard-1": 250,
+    "module-memo-shards-3-shard-2": 250,
 }
 
 
@@ -323,7 +323,7 @@ def scanned_jobs(text):
 
 
 def discovery_self_test():
-    contract = "python3 scripts/incremental-semantics-contract/prefix.py --shards 3 --shard 0"
+    contract = "python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 0"
 
     def fixture(job, run, extra_steps=None):
         return yaml.safe_dump({"jobs": {job: {"steps": (extra_steps or []) + [

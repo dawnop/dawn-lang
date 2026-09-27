@@ -4,7 +4,7 @@
 会话、provenance 表及其 15 个 `check/` 模块）连同守它的契约一起拆了，拆除前的
 整棵树归档在 `incremental-slice-final` tag，考古看 tag。本目录留下的是：模块记忆会话
 （2026-09-28 前是 legacy 前缀会话，见 [docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md)；
-脚本名 `prefix*` 沿用）与它对照的冷参照（`prefix.py`、`cold.py`、`lsp-prefix.py`）、声明身份
+同日 `prefix.py`、`lsp-prefix.py`、`contract/prefix` 与 `incremental-prefix-1..3` 按新规则改名）与它对照的冷参照（`module-memo.py`、`cold.py`、`lsp-module-memo.py`）、声明身份
 （`identity.py`）、体调度器与执行器接缝（`body-scheduler.py`、`body-executor.py`）、LSP
 对拍与计量工具（`lsp-*.py`、`bench.py`）。同日稍后，读取插桩（`semantic_reads`、
 `write_journal` 与 `Cx` 的读取记录层）连同守它的十四个读取族 harness 也拆了。
@@ -14,7 +14,7 @@
 检查器状态（`Cx`、`Frame`、`LambdaCx` 及其签名闭包）对 selfhost 包是 `pub(pkg)`，本目录
 这个 `[deps]` 引用 selfhost 的工程看不到它。所以：
 
-- checked-in 的测试模块在 `selfhost/src/contract/`（`cold`、`prefix`），由
+- checked-in 的测试模块在 `selfhost/src/contract/`（`cold`、`module_memo`），由
   `./bin/dawn test selfhost` 执行；基准正文是 `contract/bench.dawn` 的 `run`，本目录的
   `src/main.dawn` 只转发给它。`main.dawn` 与 `nmain.dawn` 都不导入 `contract/`。
 - `*.dawn.txt` 模板按包内写法书写（`use check/...`，不带 `compiler/`；除 `main` 外一律
@@ -144,16 +144,16 @@ owning 判词是 `driver/analyze` 的「module identity carry」、「渲染读�
 
 规则只有一条：模块的输入不变、进入它的 carry 不变，就原样复用上一轮的步骤
 （[docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md)）。
-`prefix.py` 对照完整 warm/frozen-cold 产品，覆盖14个可编译负控：规则的输入一半
+`module-memo.py` 对照完整 warm/frozen-cold 产品，覆盖14个可编译负控：规则的输入一半
 （整个关掉复用、只比文本、忽略输入、忽略 std 身份）、carry 一半（忽略 carry、跳过早截断、
 早截断不比较、导出面的比较不看顺序）、复用步骤周围的位置视图（不重拼
 `decl_spans`）、导出面与 carry 上的源码位置（`check/checker` 的 `exported_alias`、`exported_impl` 回退），以及
-记忆本身（逐出、模块上限、负上限）。owning 判词是 `contract/prefix` 的「module memo」
+记忆本身（逐出、模块上限、负上限）。owning 判词是 `contract/module_memo` 的「module memo」
 八条测试，每条都拿会话的 Program 与同一输入的冷分析逐项比较（含 `decl_spans` 与渲染后的
 诊断位置），并断言复用/重检计数。`--shards N --shard I` 按 index 取模把这14个负控
 分片，不带旗标时行为不变：正样本加全部14个负控。
-正样本只在 shard 0 跑，代价与理由写在 prefix.py 分片处；每个分片仍会先套用全部
-锚点，所以锚点漂移在任何一片都是硬失败。`lsp-prefix.py` 覆盖六个 LSP 负控，要求
+正样本只在 shard 0 跑，代价与理由写在 module-memo.py 分片处；每个分片仍会先套用全部
+锚点，所以锚点漂移在任何一片都是硬失败。`lsp-module-memo.py` 覆盖六个 LSP 负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。三个是工作区接线（会话、绕过
 缓存、冲突后留缓存），两个是解析复用（工作区不把本次的解析交给下一次、文本变了仍复用旧
 解析，后者的 owning 判词是 `driver/analyze` 的「a reusing load parses only the files whose

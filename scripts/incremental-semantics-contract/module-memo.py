@@ -29,7 +29,7 @@ from cold import ROOT, HERE, OWNER, edit, install_probe, run
 
 def owning_assertion(output):
     return bool(re.search(
-        r"^FAIL\s+contract/prefix :: module memo [^\n]*\n\s+assertion failed:", output, re.M))
+        r"^FAIL\s+contract/module_memo :: module memo [^\n]*\n\s+assertion failed:", output, re.M))
 
 
 def check_cli():
@@ -48,7 +48,7 @@ def check_cli():
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if result.returncode != expected or message not in result.stdout:
             raise RuntimeError(f'CLI contract failed for {args}: {result.stdout}')
-    print(f'OK: prefix shard CLI contracts ({len(cases)} cases)')
+    print(f'OK: module memo shard CLI contracts ({len(cases)} cases)')
 
 
 def main():
@@ -65,8 +65,8 @@ def main():
     if args.shards < 1 or not 0 <= args.shard < args.shards:
         parser.error('require --shards >= 1 and 0 <= --shard < --shards')
     started = time.monotonic()
-    assert owning_assertion("FAIL  contract/prefix :: module memo control\n      assertion failed: expected hit\n")
-    assert not owning_assertion("FAIL  contract/prefix :: module memo control\n      NoSuchMethodError\n")
+    assert owning_assertion("FAIL  contract/module_memo :: module memo control\n      assertion failed: expected hit\n")
+    assert not owning_assertion("FAIL  contract/module_memo :: module memo control\n      NoSuchMethodError\n")
     assert not owning_assertion("FAIL  elsewhere :: module memo control\n      assertion failed: x\n")
     reference = (HERE / "reference-tests.dawn.txt").read_text()
     reference = edit(reference, "use std/io\n",
@@ -168,7 +168,7 @@ def main():
     # established once per run by shard 0, over the same commit, and a run
     # whose oracle is broken goes red there.
     subjects = ([("positive", engine, originals[engine])] if args.shard == 0 else []) + selected
-    with tempfile.TemporaryDirectory(prefix="dawn-prefix-reference-") as temp:
+    with tempfile.TemporaryDirectory(prefix="dawn-module-memo-reference-") as temp:
         root = Path(temp)
         classes = root / "classes"
         classes.mkdir()
@@ -180,7 +180,7 @@ def main():
             shutil.copytree(ROOT / directory, root / directory, ignore=shutil.ignore_patterns("build", ".dawn"))
         (root / "packages").symlink_to(ROOT / "packages", target_is_directory=True)
         fixture = install_probe(root, {"reference": reference})
-        counts = root / "selfhost/src/contract/prefix.dawn"
+        counts = root / "selfhost/src/contract/module_memo.dawn"
         driver = root / "selfhost/src/driver/analyze.dawn"
         driver.write_text(driver.read_text() + "\n" + (HERE / "reference-loop.dawn.txt").read_text())
         for name, path, source in subjects:
@@ -206,11 +206,11 @@ def main():
                     raise RuntimeError(f"positive failed\n{result.stdout}\n{output}")
             elif not semantic_failure and not count_failure:
                 raise RuntimeError(f"{name} missed both owning assertions\n{result.stdout}\n{output}")
-            print(f"OK: prefix {name} {time.monotonic() - subject_started:.1f}s", flush=True)
+            print(f"OK: module memo {name} {time.monotonic() - subject_started:.1f}s", flush=True)
     if args.shards == 1:
         print(f"OK: full-product warm/cold reference and {len(variants)} compiling cache mutants")
         return
-    print(f"OK: prefix {len(selected)} of {len(variants)} compiling cache mutants, "
+    print(f"OK: module memo {len(selected)} of {len(variants)} compiling cache mutants, "
           f"shard {args.shard}/{args.shards}, "
           f"{'with' if args.shard == 0 else 'without'} the warm/cold reference, "
           f"{time.monotonic() - started:.2f}s")
