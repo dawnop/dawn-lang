@@ -375,14 +375,60 @@ pub fn load_entries_over(
   entries: List[String],
   over: Map[String, String]
 ) -> LoadResult !Fs !Env !io =
+  load_entries_reusing(plan, entries, over, no_parses()).loaded
+
+## The parse of one file, and the text it was parsed from.
+pub(pkg) type Parsed = { text: String, m: Module, pdiags: List[Diag] }
+
+## The parses one load made, by canonical path, handed to the next load of
+## the same workspace so that a file whose text has not changed is not parsed
+## again. Parsing is a function of the text alone, so the key is the path and
+## the hit test is text equality; everything the loader does after parsing
+## (package qualification, alias rewrites, identity, entry) still runs on
+## every load, because it depends on more than the file. Only the files the
+## latest load reached are kept, so a file that left the program is dropped.
+## `reused` counts the hits of the load that produced it.
+pub(pkg) type ParseMemo = { by_path: Map[String, Parsed], reused: Int }
+
+pub(pkg) fn no_parses() -> ParseMemo = {
+  let none: Map[String, Parsed] = map.empty()
+  ParseMemo { by_path: none, reused: 0 }
+}
+
+pub(pkg) type ReusingLoad = { loaded: LoadResult, parses: ParseMemo }
+
+## `load_entries_over` for an editor workspace: the same result, with the
+## parses of `previous` reused wherever a file's text is unchanged. On the
+## selfhost workspace the parse is about 0.6 s of every edit's 0.8 to 0.9 s
+## load (docs/lsp-module-memo-design.md).
+pub(pkg) fn load_entries_reusing(
+  plan: ProjectPlan,
+  entries: List[String],
+  over: Map[String, String],
+  previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io =
   resolve(
     plan.source.source_root,
     entries,
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    entry_file(plan)
+    entry_file(plan),
+    previous
   )
+
+## Parse `text` for the file at canonical path `key`, or hand back the parse
+## `previous` made of the same text.
+fn parse_reusing(previous: ParseMemo, key: String, text: String) -> (Parsed, Bool) =
+  match map.get(previous.by_path, key) {
+    Some(p) -> if p.text == text { (p, true) } else { (fresh_parse(text), false) }
+    None -> (fresh_parse(text), false)
+  }
+
+fn fresh_parse(text: String) -> Parsed = {
+  let (m, pdiags) = parser.parse_module(text)
+  Parsed { text: text, m: m, pdiags: pdiags }
+}
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
 ## a command named, or a project's `src/main.dawn`. Canonical, because that
@@ -399,9 +445,12 @@ fn resolve(
   diags0: List[LocDiag],
   pkgs: Map[String, source.PkgR],
   over: Map[String, String],
-  entry: Option[String]
-) -> LoadResult !Fs !Env !io = {
+  entry: Option[String],
+  previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io = {
   var diags = diags0
+  var parses: Map[String, Parsed] = map.empty()
+  var reused = 0
   let root_abs = canon(root)
   var by_canon: Map[String, String] = map.empty()
   var by_path: Map[String, LoadedModule] = map.empty()
@@ -422,14 +471,16 @@ fn resolve(
       }
       match read_over(over, c, f) {
         Ok(text) -> {
-          let (m, pdiags) = parser.parse_module(text)
+          let (parsed, hit) = parse_reusing(previous, c, text)
+          parses = map.insert(parses, c, parsed)
+          if hit { reused = reused + 1 }
           let mf = LoadedModule {
             mod_path: mod_path,
             class_name: mod_path,
             path: f,
             text: text,
-            m: m,
-            pdiags: pdiags,
+            m: parsed.m,
+            pdiags: parsed.pdiags,
             pkg: None,
             entry: entry == Some(c)
           }
@@ -542,7 +593,11 @@ fn resolve(
         } else {
           match read_over(over, dep_canon, dep_file) {
             Ok(text) -> {
-              let (m2p, pdiags2) = parser.parse_module(text)
+              let (parsed, hit) = parse_reusing(previous, dep_canon, text)
+              parses = map.insert(parses, dep_canon, parsed)
+              if hit { reused = reused + 1 }
+              let m2p = parsed.m
+              let pdiags2 = parsed.pdiags
               let (mod_path, cls, m2) = match dep_pkg {
                 Some(p) -> {
                   let internal = module_path_of(p.root, dep_canon)
@@ -634,7 +689,10 @@ fn resolve(
   }
   # topological order + cycle detection over the use graph
   let (ordered, diags2) = topo_sort(order, by_path, diags)
-  LoadResult { modules: ordered, diags: diags2 }
+  ReusingLoad {
+    loaded: LoadResult { modules: ordered, diags: diags2 },
+    parses: ParseMemo { by_path: parses, reused: reused }
+  }
 }
 
 ## Depth-first topological sort; on the first back edge, report the cycle path.
@@ -2152,6 +2210,34 @@ test "the analysis reads the declared tree, and no host behind it" {
   # behind; this one has not been there at all.
   io.with_fs_real(() => {
     assert not io.exists(root)
+  })
+}
+
+test "a reusing load parses only the files whose text changed" {
+  in_mem(() => {
+    let root = "/tmp/dawn-selfhost-analyze/reparse"
+    mkdirs("${root}/src")
+    let main = "${root}/src/main.dawn"
+    let util = "${root}/src/util.dawn"
+    put(main, "use util\npub fn main() -> Unit !io = println(util.tag())\n")
+    put(util, "pub fn tag() -> String = \"t\"\n")
+    let plan = project_plan(source.SourceFile(main))
+    let none: Map[String, String] = map.empty()
+    let first = load_entries_reusing(plan, [main], none, no_parses())
+    assert first.parses.reused == 0
+    assert first.loaded == load_entries_over(plan, [main], none)
+    let again = load_entries_reusing(plan, [main], none, first.parses)
+    assert again.parses.reused == 2
+    assert again.loaded == first.loaded
+    # an overlay is text like any other: the edited file is parsed again, and
+    # what comes back is what a load without the memo would have produced
+    let edited = map.insert(none, canon(util), "pub fn tag() -> String = \"u\"\n\npub fn more() -> Int = 1\n")
+    let changed = load_entries_reusing(plan, [main], edited, again.parses)
+    assert changed.parses.reused == 1
+    assert changed.loaded == load_entries_over(plan, [main], edited)
+    assert changed.loaded != first.loaded
+    # only this load's files are kept for the next one
+    assert len(map.keys(changed.parses.by_path)) == 2
   })
 }
 

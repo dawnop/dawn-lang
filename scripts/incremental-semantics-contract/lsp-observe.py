@@ -34,7 +34,7 @@ def main():
     (output / "packages").symlink_to(source / "packages", target_is_directory=True)
     server = output / "selfhost/src/lsp/server.dawn"
     text = server.read_text()
-    anchor = "      let loaded = load_entries_over(ws0.plan, entries, overlay)"
+    anchor = "      let loaded = reusing.loaded"
     text = edit(text, anchor, anchor + '''
       var trace_paths: List[String] = []
       for input in loaded.modules { trace_paths = trace_paths ++ [input.path] }
