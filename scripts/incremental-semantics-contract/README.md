@@ -5,8 +5,8 @@
 整棵树归档在 `incremental-slice-final` tag，考古看 tag。本目录留下的是：legacy 前缀
 会话与它对照的冷参照（`prefix.py`、`cold.py`、`probe.py`、`lsp-prefix.py`）、声明身份
 （`identity.py`）、体调度器与执行器接缝（`body-scheduler.py`、`body-executor.py`）、LSP
-对拍与计量工具（`lsp-*.py`、`bench.py`），以及读取插桩的契约（`*-reads.py`、
-`*-revalidation.py`，随下一刀删）。
+对拍与计量工具（`lsp-*.py`、`bench.py`）。同日稍后，读取插桩（`semantic_reads`、
+`write_journal` 与 `Cx` 的读取记录层）连同守它的十四个读取族 harness 也拆了。
 
 ## 探针住在编译器包内
 
@@ -68,57 +68,7 @@ from 79 invocations to 33: 31m14s at 8 jobs with a 9.4 GiB peak, all passing
 (sweep.sh's header has the run). The figures above are from before that.
 
 
-## Diagnostic rendering read contracts
-
-### Witness observation and candidate recomputation (acceptance in progress)
-
-`python3 scripts/incremental-semantics-contract/witness-revalidation.py` runs a
-private positive checker subject and compiling negative controls for candidate
-recomputation, nominal recursion context, scope-sensitive concreteness,
-assignment operands, inference outputs and reduction binding inputs. Each
-negative must fail its named assertion owner, not merely fail compilation.
-The projection controls additionally cover all eleven new fact variants,
-separate dictionary/trait/binder domains, inference input/output bindings, and
-missing mappings. Each mutation changes one production expression; checker and
-projection modules are restored between subjects to prevent combined mutations.
-The 31 controls and two positive baselines took 108.71 seconds on 2026-09-09.
-CI runs them in `incremental-witness` with a 256-second planning value and a
-13-minute timeout, preserving the existing run pole. Complete capture coverage
-at all consumers remains pending. Passing this gate
-does not admit a body cache entry or establish complete dependency coverage.
-
-### Candidate context queries
-
-`python3 scripts/incremental-semantics-contract/context-revalidation.py` checks
-twenty two context-owned query dispatches, four acceptance/refusal controls and
-three checker-dispatcher controls.
-Canonical query capture remains unchanged in each private subject; every mutant
-must compile and reach its named assertion owner. Two positives and 29 controls
-took 131.06 seconds locally on 2026-09-15. CI uses a 234-second planning value
-and twelve-minute timeout. The checker dispatcher combines context and witness
-queries, but still refuses unsupported facts. It does not reconstruct body-local
-scope, authorize a cache entry, or enable production body reuse.
-
-### Diagnostic queries
-
-`python3 scripts/incremental-semantics-contract/diagnostic-reads.py` checks four
-positive modules and 124 compiling negative controls. Each negative must reach
-an owning assertion; compilation errors and unrelated failures are rejected.
-These contracts cover query inputs, answers, relocation, and context threading
-through actual diagnostic consumers. They do not prove production cache reuse.
-
-Use `--shards 3 --shard 0` (then indices 1 and 2) to run disjoint partitions.
-Every partition independently runs all four positive modules. All partitions
-must pass to accept the suite. `--check-shards --shards 3` validates current
-mutation anchors, unique identities, and complete nonempty partitions without
-compiling. `--self-test` exercises eight CLI acceptance/refusal cases, including
-invalid indices and empty partitions. The default invocation still runs every
-negative control.
-
-Set `DAWN_BIN` to a frozen compiler when editing the subject concurrently. The
-script snapshots subject sources and checks private copies; never replace that
-compiler while a run is active. Final bootstrap, native and full selfhost gates
-must still use the current production toolchain.
+## 冷路径对照
 
 多文件 LSP 已启用保守前缀缓存；CLI 与 standalone 仍走冷分析。
 下列冷路径命令本身不证明缓存命中，命中由前缀/工作区执行计数门禁另行验证。
@@ -194,7 +144,7 @@ owning 判词是 `driver/analyze` 的「module identity carry」、「渲染读�
 
 `prefix.py` 对照完整 warm/frozen-cold 产品，覆盖12个可编译引擎负控，包括预算、
 std身份变化及构造器的负预算拒绝。`--shards N --shard I` 按 index 取模把这12个负控
-分片（约定同 `diagnostic-reads.py`），不带旗标时行为不变：正样本加全部12个负控。
+分片，不带旗标时行为不变：正样本加全部12个负控。
 正样本只在 shard 0 跑，代价与理由写在 prefix.py 分片处；每个分片仍会先套用全部
 锚点，所以锚点漂移在任何一片都是硬失败。`lsp-prefix.py` 覆盖四个 LSP 负控，要求
 owning FAIL 后是断言失败，不把 JVM 链接错误算作成功。三个是工作区接线（会话、绕过
@@ -273,173 +223,3 @@ needle 为 `value_499(1)`。11轮中的第5轮注入类型错误，第6轮恢复
 实际复用/执行计数，不改变生产协议；`--cold` 只在私有副本里强制每轮先逐出 Session。
 两个模式都可用同一源码、JDK和编辑序列对照，回复必须相同。强制cold仍可能保留本轮
 输出prefix，不能用这两者的RSS差直接估算缓存大小。baseline JSON明确记录样本与限制。
-
-## 读取插桩契约（下一刀删）
-
-下列 harness 守 `semantic_reads` 与 `Cx` 的读取记录层。重放引擎走后它们没有读者，
-随读取插桩一起删；在那之前照常运行。它们曾把 `body_product`（与 `header_product`）
-当正样本或负控主语，那几个负控随模块一起删了，见 K1 报告。
-
-`function-reads.py` runs 33 compiling controls against actual checker reads:
-unqualified answers, diagnostic candidate lists, qualified signatures and module
-alias paths, including misses. Decisions preserve local shadowing, expected-type
-short circuits and argument scheduling. Capture/projection retain all four fact
-variants. The typed oracle additionally compares 62 enabled/disabled observation
-cases against complete cold Cx and module products; its read-state mutant must hit
-the whole-Cx assertion. Recording remains disabled by default and is not complete
-namespace coverage or production body-cache admission.
-
-`export-reads.py` adds 22 compiling controls for qualified constant and constructor
-answers, export presence, and private-name/candidate/type-constructor diagnostics.
-The additional fourteen complete-state oracle cases exercise these expression,
-call, qualified match and let/for refutability paths without stripping anything except the
-intentional observation log. Four controls retain the recursive refutability
-context and its let/for consumers, including the original short circuits.
-Projection separates constant type references from constructor slots and
-diagnostic kinds; the nominal half of that separation retired with the mapper,
-because a derived nominal id relocates to itself and no control can tell the two
-apart any more. Four further controls retain
-qualified pattern presence, constructor and diagnostic answers, including their
-kind. Error recovery preserves nested pattern observations. Type resolution,
-local constructors, ADT/trait/impl and Java dependencies are still incomplete;
-these tests do not authorize cache admission. The incremental-export-reads job
-runs the export controls separately, preserving the unchanged 660s planning pole.
-
-`type-reads.py` adds 44 compiling controls for qualified alias headers and resolved
-targets, local/qualified nominal name/shape reads, type diagnostics, and local
-alias cache/cycle decisions. Eighteen
-further whole-state cases cover transparent/opaque aliases, effect substitution,
-nominal arity errors, missing types/modules and earlier shadowing branches.
-Alias type/effect binders project separately; a
-transparent alias has no nominal ID to relocate. The BodyProduct fixture captures
-and assembles the four reference-bearing type fact forms plus exact local type
-diagnostics, including actual effect-row relocation. One control bypasses only
-that callback; two more corrupt the projected diagnostic message or hint. Each
-must fail its owning read comparison. Cached alias targets retain the distinction
-between no cache entry and a cached error; cycle reads occur only after a cache
-miss with a declaration target. Owning tests preserve those short circuits, and
-the body-product fixture relocates cached targets while retaining cycle answers.
-After a cache miss, declaration source reads retain the alias name, owner and
-optional complete target syntax. Source-aware function and constant projection
-entry points use an explicit owner-aware callback; source-free entry points
-reject present declaration targets. Owning tests map identical original body and
-foreign declaration offsets to different destinations using the production
-header syntax projector, and reject an incorrect owner. Missing targets do not
-require a fabricated source mapping.
-The `incremental-type-reads` CI job runs this suite separately. Local alias lookup
-records both positive headers and misses after the reserved-builtin/type-parameter
-short circuits; uncached expansion records its actual type/effect binder inputs.
-Both header forms share extraction and projection, with independent reference
-domains. Builtin/current-environment dependencies, source-view runtime wiring, associated types/effects and
-Java reflection still need their own observed dependencies and validity boundary.
-
-`associated-reads.py` adds 11 compiling controls for scoped subjects, optional
-ordered bounds, and type/effect member lists. Owning cases retain absent versus
-empty bounds, duplicate-bound owner deduplication, missing members and ambiguity
-on both axes. The four controls that separated the trait axis from the nominal
-one retired with derived ids: both mappers are now the identity, so nothing
-distinguishes them. Six additional
-whole-Cx/module cases compare observed and cold associated resolution, including
-error recovery. These observations do not yet establish complete effect or
-scope dependencies, runtime query wiring, or production cache admission.
-The incremental-effect-reads job runs these controls alongside ordinary effect
-and environment suites, with a 554s planning value below the unchanged 660s pole.
-
-`effect-reads.py` covers declared effect rows and scoped effect-variable answers,
-including negative answers, metadata labels, lookup precedence and repeated reads
-after fresh allocation. Fourteen compiling controls must reach their owning
-assertions. Leaf and BodyProduct tests preserve the effect-row domain: declared
-label IDs and variable IDs relocate independently, including equal input integers
-with different destinations. Six complete Cx/module cases cover ordinary effects,
-variables, aliases and error recovery. Runtime query wiring and complete checker
-dependency coverage remain outstanding; these facts do not enable caching.
-The separate incremental-effect-reads job also runs associated reads,
-with a 424s planning value. Environment controls move intact to the type job,
-which has a 652s planning value; both preserve the unchanged 660s pole.
-
-`environment-reads.py` adds 15 compiling controls for reserved and ordinary
-builtin lookups, current type parameters, and std-module visibility. The checker
-owns the complete ordered sequence, including repeated builtin queries and
-short-circuited parameters, arguments and visibility reads. Builtin metadata
-retains its name, parameter spellings, access policy and build shape; leaf types
-project through the actual type callback. Six complete Cx/module cases cover
-std-only visibility, reserved return types and nominal shadowing. These facts
-do not complete Java/trait/impl dependencies or authorize production caching.
-
-`java-reads.py` exercises the named Java class lookup and the actual plain-data
-class metadata answer. Its 21 compiling controls cover answer keys, answers,
-consumer context threading, every JClass field, and BodyProduct read capture.
-The five metadata consumers include reference returns, static and instance
-dispatch, and SAM/List diagnostics. Projection retains the lookup key separately
-from the returned class name. Four complete Cx/module cases cover these class
-metadata consumers. Other Java query kinds, classpath/lifetime
-validity and production query admission remain required; this is not a complete
-Java dependency cache.
-
-`java-member-reads.py` adds 33 compiling controls for ordered method, constructor
-and static-field answers. Every metadata field, query key, list order and
-consumer context is covered by owning assertions. Lists retain duplicate and
-unused candidates before filtering or sorting, and empty results are recorded.
-The BodyProduct fixture captures and projects all three facts; six additional
-complete Cx/module cases bring the observation oracle to 72 cases. Argument
-errors and instance constructor calls must still short-circuit before metadata
-queries. Assignability, SAM/component and remaining namespace/import queries
-are separate requirements; recording candidates does not authorize cache reuse.
-The Java class and member suites run together in incremental-java-reads with a
-608s planning value (109.07s and 174.12s local measurements, rounded up, doubled,
-plus 38s setup). Adding member controls to the former effect/Java job would
-exceed the unchanged 660s pole. All existing suites and controls are retained.
-
-`java-namespace-reads.py` checks Java import gates, find-class answers and ordered
-namespace enumeration. Its 22 mutations cover answer keys and values, projection,
-body capture and consumer context threading, including value-versus-module-alias
-resolution. Owning assertions retain negative answers, repeated reads and the
-original declaration, syntax and shadowing short circuits. Nine additional
-complete module/Cx cases bring the observation oracle to 81 cases, covering
-successful, missing, disabled and duplicate imports, declaration collisions,
-inferred functions and named-argument refusal. These observations do not yet
-establish classpath lifetime validity or authorize production cache reuse.
-The 22 compiling controls took 149.16s locally on 2026-09-08. They run in a
-separate incremental-java-namespaces job with a 338s planning value
-(2*150+38) and a 17-minute timeout, retaining the 660s pole and existing jobs.
-During namespace acceptance, class/member controls took 184.25/226.97s under
-concurrent load. Conservatively retaining those larger observations requires
-separate class/member jobs: 408s/21min and 492s/25min respectively. No controls
-are removed. The typed 81-case run took 239.16s; its job retains the larger
-244.70s member-batch observation, yielding 528s/27min.
-
-`java-oracle-reads.py` checks directional assignability, optional SAM metadata
-and optional array components. It retains queries from rejected candidates,
-fixed-arity attempts and packed arguments, plus repeated finalization queries.
-The controls cover query keys/answers, all eight SAM method fields, projection,
-body capture, candidate loops and scoring/finalization context propagation.
-Only compiled mutations reaching owning assertions count. Eight additional
-complete module/Cx cases bring the observation oracle to 89 cases; these cover
-static and instance calls, rejected conversions, packed methods/constructors
-and deferred SAM arguments. Classpath lifetime and production admission still
-require separate validation before these facts can authorize cache reuse.
-The 32 compiling controls took 246.67s locally on 2026-09-08. The dedicated
-incremental-java-oracles job uses a 532s planning value (2*247+38) and a
-27-minute timeout, without removing existing controls or raising the 660s pole.
-The class/member/namespace regression controls measured 228.37/281.28/258.25s
-under concurrent load. Their separate jobs conservatively retain those larger
-observations at 496s/25min, 602s/31min and 556s/28min respectively.
-
-`local-value-reads.py` checks constructor/constant identities, visibility,
-constructor counts and field arities, focused headers, selected fields and
-ordered diagnostic candidate pools. Its mutations must compile and reach an
-owning assertion; bootstrap or parse failures do not count. The observation
-oracle now has 101 complete module/Cx cases, covering generic constructors,
-patterns, constants, record fields, and diagnostic refusals. Recursive
-exhaustiveness controls additionally require normalization and recursive
-return state to survive short circuits and diagnostic consumers. Handler
-controls retain declaration metadata and selected evidence fields.
-These observations do not yet establish complete dependency coverage or
-production cache validity. The 49 compiling controls took 222.83s locally on
-2026-09-08. Their independent CI job uses a 484s planning value (2*223+38)
-and a 25-minute timeout, preserving the existing 660s pole and all other
-contracts. Full batch acceptance remains required before publication.
-The preceding complete 95-case/30-mutant typed run took 266.72s; its independent job
-now uses a 572s planning value (2*267+38) and a 29-minute timeout.
-The Java oracle regression took 250.55s, yielding 540s/27min.
-

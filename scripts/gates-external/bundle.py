@@ -24,8 +24,9 @@ handing over, and this file is where both are enforced:
    pairs of every run step must equal the multiset of executed steps, and
    every executed step must have exit code 0. A missing step, an extra step,
    an unexecuted step and a non-zero step each make it false. Skipping is not
-   success. The comparison is a multiset because the same command legitimately
-   appears more than once (diagnostic-reads.py --self-test runs in three jobs).
+   success. The comparison is a multiset because the same command may
+   legitimately appear more than once (until 2026-09-27 diagnostic-reads.py
+   --self-test ran in three jobs).
 
 Modes:
   bundle.py --selftest                  every refusal, proved one by one
