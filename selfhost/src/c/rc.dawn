@@ -36,7 +36,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_as_ctor,
+  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
   CMode, COwned, mode_owned,
@@ -951,14 +951,26 @@ type SpreadLift = {
   lets: List[CStmt]
 }
 
-# Lowering puts any written-order temporaries in blocks around the rebuilt
-# constructor. Follow only those tails: finding an arbitrary nested ctor in
-# an updated field expression would misidentify an ordinary one-let block as
-# a spread update.
+# The update this binding is the base of, if the block's tail is one. Lowering
+# binds the base and then, when written order is not field order, puts the
+# written values' temporaries in blocks around the update, so only block tails
+# are followed: an update nested inside a written value belongs to a binding
+# of its own. An update that writes every field reads nothing from its base
+# and has nothing to lift.
+#
+# The CCtor arm is not lowering's shape any more; updates arrive as CUpdate.
+# It is a constructor the program wrote out whole that rebuilds a record of the
+# same constructor from a binding in the same block -- `let loaded = ...;
+# LoadResult { modules: loaded.modules, diags: ds ++ loaded.diags }` in
+# driver/analyze.load_directory_planned is the one such site the compiler
+# has, and the #40 scheduling was measured on it. Taking the arm out moves
+# that function's C, so it stays for as long as a program can spell an update
+# without `..`.
 fn spread_rebuild(e: CExpr, base: Int) -> Option[(Int, Int)] =
   match e {
     CBlock(_, Some(t), _) -> spread_rebuild(t, base)
-    CUpdate(b, adt, ci, fields, ty) -> spread_rebuild(update_as_ctor(b, adt, ci, fields, ty), base)
+    CUpdate(CLocal(sym, _), adt, ci, fields, _) ->
+      if sym == base && update_keeps(fields) { Some((adt, ci)) } else { None },
     CCtor(adt, ci, args, _) -> {
       for a in args {
         match a {
@@ -1059,9 +1071,34 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
       let (st1, as1) = lift_spread_list(st, args)
       (st1, CCtor(adt, ci, as1, ty))
     }
-    # the update is spelled out whole here, so its kept fields are projections
-    # of the base like any other and are lifted with them
-    CUpdate(base, adt, ci, fields, ty) -> lift_spread_expr(st, update_as_ctor(base, adt, ci, fields, ty))
+    # The update being scheduled is spelled out whole here: its kept fields are
+    # projections of the base like any other and are lifted with them. An
+    # update nested in a written value has a base of its own and stays a node,
+    # so the block it sits in is scheduled for it when the rewrite gets there;
+    # only its operands can name this base.
+    CUpdate(b, adt, ci, fields, ty) -> {
+      match b {
+        CLocal(sym, _) ->
+          if sym == st.base {
+            return lift_spread_expr(st, update_as_ctor(b, adt, ci, fields, ty))
+          },
+        _ -> ()
+      }
+      let (st1, b1) = lift_spread_expr(st, b)
+      var st2 = st1
+      var out: List[CUpdField] = []
+      for f in fields {
+        match f.value {
+          Some(v) -> {
+            let (st3, v1) = lift_spread_expr(st2, v)
+            st2 = st3
+            out = out ++ [CUpdField { ..f, value: Some(v1) }]
+          }
+          None -> { out = out ++ [f] }
+        }
+      }
+      (st2, CUpdate(b1, adt, ci, out, ty))
+    }
     CField(target, adt, ci, idx, fty) -> {
       match target {
         CLocal(sym, rty) ->
@@ -2648,13 +2685,15 @@ test "a record update releases its spread owner before an updated field runs" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
   let p = CParam { sym: 1, ty: rec, mode: COwned }
-  # Lowering's exact shape for `R { ..r, a: g(r.a) }`: the unchanged field
-  # names the synthetic spread binding, while the written expression still
-  # names the source symbol. Both projections must be lifted and canonicalised
-  # before `g`, or either record owner keeps the updated reference shared.
-  let rebuilt = CCtor(7, 0, [
-    CField(CLocal(2, rec), 7, 0, 0, ref),
-    CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref)
+  # Lowering's exact shape for `R { ..r, a: g(r.a) }`: the update's base is
+  # the synthetic spread binding, while the written expression still names
+  # the source symbol. The kept field and that projection must both be lifted
+  # and canonicalised before `g`, or either record owner keeps the updated
+  # reference shared.
+  let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
+    CUpdField { ty: ref, value: None },
+    CUpdField { ty: ref,
+      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref)) }
   ], rec)
   let body = CBlock([CSLet(2, rec, CLocal(1, rec))], Some(rebuilt), rec)
   let m = rc_module(one_fn([p], rec, body), owned_modes())
@@ -2694,9 +2733,10 @@ test "a record update releases its spread owner before an updated field runs" {
 test "a record bound after an earlier statement is released before its update" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
-  let rebuilt = CCtor(7, 0, [
-    CField(CLocal(2, rec), 7, 0, 0, ref),
-    CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)
+  let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
+    CUpdField { ty: ref, value: None },
+    CUpdField { ty: ref,
+      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)) }
   ], rec)
   let body = CBlock(
     [
@@ -2741,7 +2781,7 @@ test "a record bound after an earlier statement is released before its update" {
 test "a reassigned record is not lifted ahead of the assignment" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
-  let rebuilt = CCtor(7, 0, [CField(CLocal(2, rec), 7, 0, 0, ref)], rec)
+  let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [CUpdField { ty: ref, value: None }], rec)
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))]
   # spread_rebuild follows tail blocks, so an assignment in one is just as
   # much "between" the binding and constructor as an outer statement is.
@@ -2767,8 +2807,62 @@ test "a reassigned record is not lifted ahead of the assignment" {
   assert st1.next_sym == 100
   assert len(ss1) == 1
   match tail1 {
-    Some(CBlock(_, Some(CCtor(_, _, [CField(CLocal(2, _), _, _, 0, _)], _)), _)) -> ()
-    _ -> panic("expected the projection to remain after the assignment")
+    Some(CBlock(_, Some(CUpdate(CLocal(2, _), _, _, [CUpdField { ty: _, value: None }], _)), _)) -> ()
+    _ -> panic("expected the update to remain after the assignment")
+  }
+}
+
+test "a constructor written out whole is scheduled like the update it spells" {
+  # `let loaded = load(); R { a: loaded.a, b: g(loaded.b) }` has no `..`, so
+  # it reaches Core as a CCtor, not a CUpdate -- and the old record can still
+  # be released before `g` runs, as for the update (#40 was measured on
+  # driver/analyze.load_directory_planned, which has this shape).
+  let rec = TyAdt(7, [])
+  let ref = TyList(TyInt)
+  let rebuilt = CCtor(7, 0, [
+    CField(CLocal(2, rec), 7, 0, 0, ref),
+    CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)
+  ], rec)
+  let body = CBlock([CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))], Some(rebuilt), rec)
+  let m = rc_module(one_fn([], rec, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[3] {
+        CSDrop(2) -> ()
+        _ -> panic("expected the rebuilt record released before the call")
+      }
+    }
+    _ -> panic("expected the scheduled block")
+  }
+}
+
+test "an update nested in a written field keeps its node until its own block" {
+  # `R { ..r, a: g(R { ..r, b: [] }) }`: while the outer update is scheduled,
+  # the inner one is a written value. It has a base of its own, so lifting
+  # the outer one must leave it an update for its own block to schedule.
+  let rec = TyAdt(7, [])
+  let ref = TyList(TyInt)
+  let inner = CBlock([CSLet(3, rec, CLocal(1, rec))], Some(CUpdate(CLocal(3, rec), 7, 0, [
+    CUpdField { ty: ref, value: None },
+    CUpdField { ty: ref, value: Some(CListLit([], ref)) }
+  ], rec)), rec)
+  let outer = CUpdate(CLocal(2, rec), 7, 0, [
+    CUpdField { ty: ref, value: Some(CField(CCall(CDirect("m", "g"), [inner], rec), 7, 0, 0, ref)) },
+    CUpdField { ty: ref, value: None }
+  ], rec)
+  let st = RSt {
+    scopes: [], dict_syms: set.empty(), modes: owned_modes(),
+    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    next_sym: 100, pinned: false
+  }
+  let (_st1, ss1, tail1) = schedule_record_update(st, [CSLet(2, rec, CLocal(1, rec))], Some(outer))
+  # the outer kept field was lifted, and the outer update became a constructor
+  assert len(ss1) == 2
+  match tail1 {
+    Some(CCtor(_, _, [CField(CCall(_, [CBlock(_, Some(CUpdate(CLocal(3, _), _, _, _, _)), _)], _),
+      _, _, 0, _), CLocal(_, _)], _)) -> ()
+    _ -> panic("expected the inner update left as a node inside the outer constructor")
   }
 }
 
