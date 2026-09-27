@@ -156,3 +156,9 @@ SCC 和 `BodyExecutor` 这个插口。
   <https://rust-analyzer.github.io//blog/2020/07/20/three-architectures-for-responsive-ide.html>、
   <https://matklad.github.io/2026/08/21/rust-glancer.html>、<https://basarat.gitbook.io/typescript/overview/checker>、
   <https://github.com/KirillOsenkov/Bliki/wiki/Roslyn-Immutable-Trees>。
+
+## 八、后续：前缀复用换成模块记忆
+
+2026-09-28 起，第四节表里的「legacy 前缀复用」换成了一条规则：模块的输入与进入它的 carry 都不变，就原样复用上一轮的步骤。
+它包含前缀复用与早截断，删掉了字符预算与「Java 查询即停止保留」，并加了未变文本的解析复用；selfhost 工作区体内编辑后只重检被编辑的那个模块。
+设计、为什么一条规则够、`decl_spans` 为什么要重拼与实测见 [lsp-module-memo-design.md](lsp-module-memo-design.md)。
