@@ -64,9 +64,8 @@ that spells it, and `--only` and `--list` select. Nothing in CI runs this script
 and gates.yml does not know it exists.
 
 On 2026-09-27 the replay engine's contracts left gates.yml, and the sweep went
-from 79 invocations to the count `sweep.sh --list` prints now; the figures
-above are from before that and were not remeasured here (the knife's report
-has the new wall clock).
+from 79 invocations to 33: 31m14s at 8 jobs with a 9.4 GiB peak, all passing
+(sweep.sh's header has the run). The figures above are from before that.
 
 
 ## Diagnostic rendering read contracts

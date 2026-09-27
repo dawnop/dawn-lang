@@ -49,6 +49,12 @@
 # floor is the longest of those, about 312s: the shard that keeps the positive
 # subject. The table above is from before that split and was not remeasured.
 #
+# 2026-09-27, after the replay engine's contracts left gates.yml: 33
+# invocations after dedup (79 before), all passing, 8 jobs longest first,
+# 31m14s wall clock, 9.4 GiB peak in use (2.7 GiB before the sweep). The
+# floor is now diagnostic-reads' three shards (about 1155s each under that
+# load), which leave with the read-log contracts.
+#
 # Usage:
 #   sweep.sh [--jobs N] [--log PATH] [--only NAME[,NAME...]]
 #   sweep.sh --list
