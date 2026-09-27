@@ -75,11 +75,11 @@ def mutate(name, server, main, analyze):
     elif name == "single-overlay":
         server_text = replace_once(
             server_text,
-            "      let loaded = load_entries_over(ws0.plan, entries, overlay)",
+            "      let reusing = load_entries_reusing(ws0.plan, entries, overlay, ws0.parses)",
             """      let last = entries[len(entries) - 1]
       let single: Map[String, String] = map.insert(
         map.empty(), last, map.get(overlay, last).expect("single overlay"))
-      let loaded = load_entries_over(ws0.plan, entries, single)""",
+      let reusing = load_entries_reusing(ws0.plan, entries, single, ws0.parses)""",
             name,
         )
     elif name == "didclose-no-rebuild":

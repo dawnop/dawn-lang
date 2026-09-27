@@ -78,25 +78,30 @@ manifest.write_text(text)
 
 source = Path(sys.argv[2])
 text = source.read_text()
-old = '''pub fn load_entries_over(
+# The loader both entries go through: `load_entries_over` for a command and
+# the editor's `load_entries_reusing`, which reuses unchanged parses.
+old = '''pub(pkg) fn load_entries_reusing(
   plan: ProjectPlan,
   entries: List[String],
-  over: Map[String, String]
-) -> LoadResult !Fs !Env !io =
+  over: Map[String, String],
+  previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io =
   resolve(
     plan.source.source_root,
     entries,
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    entry_file(plan)
+    entry_file(plan),
+    previous
   )
 '''
-new = '''pub fn load_entries_over(
+new = '''pub(pkg) fn load_entries_reusing(
   plan: ProjectPlan,
   entries: List[String],
-  over: Map[String, String]
-) -> LoadResult !Fs !Env !io = {
+  over: Map[String, String],
+  previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io = {
   # `project_plan` is `!Proc` since io.run moved onto the effect, and this row
   # is not; answering it here keeps the mutation to one function. `Env` is on
   # the row already: `resolve` reaches io.cwd whether or not this replans.
@@ -107,7 +112,8 @@ new = '''pub fn load_entries_over(
     planner_diags(fresh.source.diags),
     fresh.source.pkgs,
     over,
-    entry_file(fresh)
+    entry_file(fresh),
+    previous
   )
 }
 '''

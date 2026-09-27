@@ -22,7 +22,8 @@ use driver/analyze.{
   Program, ProjectPlan, LocDiag,
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
-  project_module_path, load_entries_over, canon
+  project_module_path, canon,
+  ParseMemo, no_parses, load_entries_reusing
 }
 use compiler_plan/source
 use driver/incremental
@@ -478,6 +479,10 @@ type Workspace = {
   lease: JsigLease,
   cache: incremental.Session,
   analysis_stats: Option[incremental.Stats],
+  # the parses of the latest load, which the next one reuses for every file
+  # whose text is unchanged. Never evicted: a parse is a function of the text
+  # alone and cannot go stale, and the latest load's files are all it holds.
+  parses: ParseMemo,
   diag_by_uri: Map[String, List[Json]]
 }
 
@@ -608,6 +613,15 @@ fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
       config.max_modules, config.max_text_units))
   }
 }
+
+## What a workspace keeps of a load's parses. `Cold` is the reference the
+## reusing configuration is compared against, so it parses every file again
+## as well.
+fn retained_parses(st: LspState, parses: ParseMemo) -> ParseMemo =
+  match st.analysis_config.mode {
+    Legacy -> parses
+    Cold -> no_parses()
+  }
 
 ## Close one lease without allowing its failure to skip the remaining leases.
 fn close_lease(lease: JsigLease) -> Unit !Console !io =
@@ -1414,7 +1428,8 @@ fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
       }
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
-      let loaded = load_entries_over(ws0.plan, entries, overlay)
+      let reusing = load_entries_reusing(ws0.plan, entries, overlay, ws0.parses)
+      let loaded = reusing.loaded
       let update = incremental.analyze(ws0.cache, loaded)
       let prog = update.program
       Workspace {
@@ -1422,6 +1437,7 @@ fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
         prog: Some(prog),
         cache: update.session,
         analysis_stats: Some(update.stats),
+        parses: retained_parses(st, reusing.parses),
         entry_by_uri: entry_by_uri,
         diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog)
       }
@@ -1461,6 +1477,7 @@ fn activate_workspace(
         lease: lease,
         cache: analysis_session(st, lease.jsig),
         analysis_stats: None,
+        parses: no_parses(),
         diag_by_uri: no_diags
       }
       match catch_panic(() => rebuild_workspace(st, candidate)) {
@@ -2267,14 +2284,16 @@ test "workspace commits prefix cache with its Program and drops it on conflict" 
           plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
           prog: None, entry_by_uri: map.empty(), lease: lease,
           cache: incremental.new(std, ct_default(), lease.jsig, refused_probe, 128, 1048576),
-          analysis_stats: None, diag_by_uri: map.empty()
+          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty()
         }
         let first = rebuild_workspace(st, empty)
         assert len(first.prog.expect("first Program").diags) == 0
         assert first.analysis_stats.expect("first counts").checked_modules == 2
+        assert first.parses.reused == 0
         let warm = rebuild_workspace(st, first)
         assert warm.analysis_stats.expect("warm counts").reused_modules == 2
         assert warm.analysis_stats.expect("warm counts").checked_modules == 0
+        assert warm.parses.reused == 2
         let changed = text ++ "# edit\n"
         let edited = Doc { ..doc, text: changed, view: view_of(changed), ls: line_starts_of(changed), version: 2 }
         let next = LspState { ..st, docs: map.insert(st.docs, uri, edited) }
@@ -2282,6 +2301,8 @@ test "workspace commits prefix cache with its Program and drops it on conflict" 
         assert len(updated.prog.expect("updated Program").diags) == 0
         assert updated.analysis_stats.expect("edited counts").reused_modules == 1
         assert updated.analysis_stats.expect("edited counts").checked_modules == 1
+        # the edited buffer is parsed again and its import is not
+        assert updated.parses.reused == 1
         assert map.get(updated.entry_by_uri, uri) == Some("main")
         let duplicate_uri = "file://" ++ root ++ "/src/./main.dawn"
         let duplicate = Doc { ..doc, uri: duplicate_uri }
