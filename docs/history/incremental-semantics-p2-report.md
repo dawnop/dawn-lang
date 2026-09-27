@@ -1,7 +1,7 @@
 # 增量语义引擎第2期验收报告
 
 > 状态：**historical** —— 2026-09-08，第1–2期交付的验收记录。
-> 不是七期整体完成报告；后续能力以[当前设计](../incremental-semantics-design.md)为准。
+> 不是七期整体完成报告；后续能力以[当时的设计](incremental-semantics-design.md)为准。
 
 ## 结论与准确版本
 

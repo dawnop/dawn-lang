@@ -99,11 +99,12 @@ T(名字) 取这些实例里字典序最小的 `(轮次, 下标)`。名字依赖
 
 实现（S2）。真边只在一处记：`checker.used_signature`，由 `check_call`（签名定下之后、任何返回类型
 或效果被用之前）与 `check_fn_value`（函数当值）调用，签名 `inferring` 时把它的名字记进
-`Cx.unsealed_uses`。不放在 `lookup_fn_sig_read` 咽喉，是因为咽喉的六个调用者里只有这两个用到返回类型
-与效果：`needs_expected_read` 两处与 `call_site_type_args_read` 只问类型参数个数，`resolves_to_value_read`
-与 fn 字段歧义判定只问有没有，这些答案都由 header 定死，不是真边。`scripts/journal-reads` 的台账佐证
-没有别的读取路径：从七个函数体入口可达的 `Cx.fns` 读取只有 `lookup_fn_sig`（经 `lookup_fn_sig_read`）、
-`fn_pool`（只取名字）与 `check_fn_inferred_body` 的封定守卫三处。
+`Cx.unsealed_uses`。不放在 `lookup_fn_sig` 咽喉，是因为咽喉的六个调用者里只有这两个用到返回类型
+与效果：`needs_expected` 两处与 `call_site_type_args` 只问类型参数个数，`resolves_to_value`
+与 fn 字段歧义判定只问有没有，这些答案都由 header 定死，不是真边。当时 `scripts/journal-reads` 的台账佐证
+没有别的读取路径：从七个函数体入口可达的 `Cx.fns` 读取只有 `lookup_fn_sig`、`fn_pool`（只取名字）与
+`check_fn_inferred_body` 的封定守卫三处。（这几个函数当时带 `_read` 后缀、经读取日志记录；日志、包装与
+台账都随增量切片于 2026-09-27 拆除，见 [incremental-semantics-removal.md](incremental-semantics-removal.md)。）
 
 调度只有一个试检循环、一个执行器调用点：S1 排好的函数各自成一组，按 `(round, idx)` 在前；
 S1 的拓扑走完后剩下的函数（`stuck`）在只含它们的语法子图上做 Tarjan（两个栈都用按下标的 Map，不递归，O(V+E)），
@@ -115,8 +116,9 @@ S1 的拓扑走完后剩下的函数（`stuck`）在只含它们的语法子图�
 `TyError`），此后对它们的使用不再阻塞依赖者，依赖者读到的就是错误类型，errorish 抑制吞掉级联。
 全部分量走完后，真环成员按下标统一报原文案，所以只有环、没有依赖者的程序报序与旧调度逐字相同
 （两个交错的环 `a ↔ b`、`x ↔ y` 仍报 a、x、b、y）；冻结参考调度器的两个环样本因此原样通过。
-调度器在每个保留的上下文上把 `Cx.unsealed_uses` 清空，函数体开始时它恒为空；
-`body_product` 与 `header_product` 的 `environment_unchanged` 都把它列为不可变字段，产品不携带它。
+调度器在每个保留的上下文上把 `Cx.unsealed_uses` 清空，函数体开始时它恒为空。
+（拆除前 `body_product` 与 `header_product` 的 `environment_unchanged` 都把它列为不可变字段，产品不携带它；
+两个模块已随增量切片拆除。）
 
 这些原先全写在 `execute_module_bodies` 里，使它的字节码从 5515 涨到 9230 字节（S3 后 9545），越过 HotSpot 的
 `HugeMethodLimit`（8000），整个调度器从此只解释执行；S2 让 primitive_inferred 冷检变成 1.17 倍，其中约七成来自这一条（#241，
@@ -165,7 +167,8 @@ S1 的 40 个随机调用图程序（28 个含重复名）新旧对拍：旧编�
 ## 四、具名 header 产物
 
 `ModuleHeaders` 的 `sigs`、`impl_sigs`、`const_tys` 改为「声明顺序的路径列表 + 按路径的 Map」。
-产物由键找到自己的声明，不再依赖与 AST 的下标对齐；`function_product.headers` 的逐下标名字核对随之删除。
+产物由键找到自己的声明，不再依赖与 AST 的下标对齐；`function_product.headers` 的逐下标名字核对随之删除
+（`function_product` 本身后来随增量切片拆除）。
 JVM 发射器里 `TModule`/`LMod` 的位置对齐维持 `arch-split-design.md` 的非目标判决，不在本设计内。
 
 实现（S3）。三张表共用一个容器 `identity.PathTable[V] = { paths, first, repeats }`：`paths` 是声明顺序的
@@ -182,9 +185,10 @@ impl 方法的键与 `enter_decl_owner`、`identity.declarations` 用的是同�
 进声明与存表共用）。trait 默认体不在这三张表里：它的签名一直从 `TraitI.methods` 取，路径
 `[Named(TraitDecl, t), Named(MethodDecl, m)]` 只用于进入声明，本刀不动。
 
-消费者都从手里的语法拼出路径去查：`execute_module_bodies`（函数、常量、impl 方法三段）、`pass_main_check`、
-`function_product` 的三个视图、`allocation.local_impl_headers`；`driver/analyze.dawn`、`driver/stdlib.dawn`
-的调用点文字不变（参数类型变了）。调度器仍需要按下标的函数签名（S1/S2 的 pending 与轮次以下标为句柄），
+消费者都从手里的语法拼出路径去查：`execute_module_bodies`（函数、常量、impl 方法三段）、`pass_main_check`；
+`driver/analyze.dawn`、`driver/stdlib.dawn` 的调用点文字不变（参数类型变了）。S3 落地时还有 `function_product`
+的三个视图与 `allocation.local_impl_headers` 两个消费者，它们随增量切片于 2026-09-27 拆除，下面「删掉的核对」
+与变异体表的 M2 是当时的记录。调度器仍需要按下标的函数签名（S1/S2 的 pending 与轮次以下标为句柄），
 它在同一趟 `fnds` 遍历里逐个查表建出这张局部视图，对齐由构造保证，不再跨阶段。
 
 删掉的核对：`function_product.headers` 的「下标处签名名字等于语法名字」与长度尾检，`values` 的长度首尾检，
@@ -229,7 +233,8 @@ LSP 取函数的类型化树改为按键查，不再线性扫描并比较函数�
 `assemble_module_bodies` 合成的 `f$default$k` 取父声明的键加 `Named(ParameterDefault, 形参名)`，
 即 `identity.located` 给默认值表达式的那条路径。`check_fn_body` 等检查函数本身不知道自己在哪条路径下被调用
 （impl 方法也走 `check_fn`），所以留空串；没有调度器的树（lowering 自己合成的函数、单元测试夹具）也是空串。
-录制与重放都经同一个调度器，所以重放出的树与冷检同样带键；产品里存的是未写键的树，写键在出口。
+写键在调度器出口，任何 `BodyExecutor` 的树都在那里带上键；S4 落地时的录制与重放执行器也经过同一个出口
+（两者已随增量切片拆除）。
 `Sig` 不存 id（第六节），JVM 与 C 发射器不读 `decl`。
 
 **查找点**在 `lsp/lspq`：`QCx` 多一个 `typed: TypedTrees`，由 `typed_trees(tm)` 对 `tm.fns ++ tm.tests`
@@ -260,15 +265,18 @@ definition：同一 trait 的两个 impl 各有同名方法 `label`、其中一�
 M1 只在重复声明上变红，这不是夹具的缺口而是上一段的结论：在被接受的程序里两种配对给出同一棵树。
 按键查找真正排除的是「键拼错」一类（M2），那一类按跨度配对根本不会犯，所以需要这份夹具而不是 N−1 会话对拍。
 冻结参考调度器（`reference-body-scheduler.dawn.txt`）用它自己的 `ref_open` 记下打开时的拼写并在六处出口写键，
-与生产各写各的，M3 这类漏写也会让 `body-scheduler.py` 的全产品比较变红；比较检查函数与 `check_module` 的
-契约夹具（`body-probe.dawn.txt`、`typed-projection.dawn.txt`）在它们模拟调度器出口的那一步同样写键。
+与生产各写各的，M3 这类漏写也会让 `body-scheduler.py` 的全产品比较变红；当时比较检查函数与 `check_module` 的
+契约夹具（`body-probe.dawn.txt`、`typed-projection.dawn.txt`）在它们模拟调度器出口的那一步同样写键，
+这两个夹具已随增量切片拆除。
 
 ## 六、不做的（理由）
 
 - **不把 Core 的函数引用换成整数。** `CDirect(owner, name)` 不含任何计数器，已经跨修订稳定，也是两个后端的符号来源；
   换成整数只产生 Emit-Change，没有收益。
 - **不改写日志的 `SignatureKey(name)`。** 模块内重复声明整组下毒，名字已是单射；换成路径只换拼写。
+  （写日志连同 `SignatureKey` 已随增量切片于 2026-09-27 拆除，这一条只剩历史意义。）
 - **不改读取事实的名字键。** 「查名字 f 得到什么」是名字查询，新增同名声明应当使它失效，以名字为键才对。
+  （读取日志同上，已拆除。）
 - **不在 Sig 里存声明 id。** Sig 已带 `owner` 与 `name`，id 可派生；Sig 参与结构相等与 memo 键，冗余字段只增加不一致的机会。
 - **不做跨会话驻留表。** 派生值是纯函数，不需要持久化。
 - **不给同名重复声明各自的依赖表。** 重复实例共用最后一个实例的依赖表（S1 起如此），非末实例可能读到未封签名、静默拿到占位类型；

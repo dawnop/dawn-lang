@@ -78,11 +78,15 @@ CI 上 `-D warnings`）、Gleam（`--warnings-as-errors`）见 §9。
 ### 3.1 为什么是语法遍历，而不是在每次查表时打「已用」标记
 
 checker 解析一个名字要查十来张表（函数、类型、构造器、trait、效果、常量、别名、
-模块别名、Java 类），而且**增量引擎重放一个已保存的函数体时，这些查表一次都不会
-发生**（`check/scalar_replay.dawn`、`check/body_execution.dawn`）。查表时写「已用」
+模块别名、Java 类），而且落地时**增量引擎重放一个已保存的函数体，这些查表一次都不会
+发生**（当时的 `check/scalar_replay.dawn`、`check/body_execution.dawn`）。查表时写「已用」
 位，冷检查对、重放错。语法在两条路径上是同一份，而一个拼写能到达哪条 import，在
 `pass_imports` 跑完之后就固定了——所以答案是「模块文本 + import 表」的函数，
 放在 `check/import_use.dawn`，是一趟对 AST 的遍历。
+
+（2026-09-27：重放执行器已随增量切片拆除，见 [incremental-semantics-removal.md](incremental-semantics-removal.md)。
+「重放错」这条理由随之失效，但语法遍历仍是对的：它不依赖检查顺序与执行器，调度器将来换成只检
+打开文件的执行器（laziness）时，没被检查的体里的拼写照样算「用了」。）
 
 这趟遍历**只往一个方向错**：一个恰好与某 import 同名、实际却指向别处的拼写
 （例如 UFCS 名其实落在 Java 实例方法上），只会让 import 看起来「用了」；不存在让
@@ -94,9 +98,10 @@ checker 解析一个名字要查十来张表（函数、类型、构造器、tra
 ### 3.2 在哪里发
 
 `check/checker.dawn` 的 `execute_module_bodies` 末尾，所有函数体、常量、impl、
-trait 默认体与 test 都检查完之后。选这里而不是 `check_module`：冷检查、记录
+trait 默认体与 test 都检查完之后。选这里而不是 `check_module`：落地时冷检查、记录
 （`body_execution.record`）与重放（`scalar_replay`）三条路径都经过
 `execute_module_bodies`，只有这里能让三者走到同一个结尾；`check_module` 只是冷路径。
+记录与重放已随增量切片拆除，今天任何 `BodyExecutor` 仍都在这里收尾。
 此时 `cx` 已离开所有声明（`unowned`），诊断的坐标是文件绝对偏移。
 
 诊断的位置：选择性引入是那个名字；整模块引入是 `as` 后的别名，没有 `as` 时是路径；
