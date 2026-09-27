@@ -114,6 +114,21 @@ pub type CExpr =
 # build a constructor: args are in field order, already reordered from the
 # source's written order and spread base by lowering
   | CCtor(adt: Int, ci: Int, args: List[CExpr], ty: Ty)
+# Copy a record with some fields replaced: `R { ..base, f: v }`. `fields` is
+# every field of constructor `ci` in declaration order, each with its declared
+# type and either the value written to it or None where the base's value is
+# kept; the base is known to be built by `ci`. The base evaluates first, then
+# the written values in field order. Lowering has already bound the base to a
+# local and moved any written value that has to run out of field order into a
+# temporary (spec §4.3), so field order is all a backend has to follow.
+#
+# This used to reach Core as a CCtor whose kept fields were CField reads of the
+# base, and each backend that cared recovered the update from that shape: the
+# native RC pass to release the old record early, and the JVM backend, which
+# cannot pass a record past C2's argument limit to a constructor at all
+# (docs/record-update-design.md). How an update is built is each backend's
+# decision; that it is one is Core's to say.
+  | CUpdate(base: CExpr, adt: Int, ci: Int, fields: List[CUpdField], ty: Ty)
 # read field `idx` of constructor `ci`; the target is known to be that ctor
   | CField(target: CExpr, adt: Int, ci: Int, idx: Int, ty: Ty)
 # discriminant test: is `target` built by constructor `ci`?
@@ -190,6 +205,11 @@ pub type CExpr =
 # a projection, and there is no symbol to name until after the let. Built only
 # by `rc.dawn` (docs/perceus-design.md 5).
   | CDup(inner: CExpr, ty: Ty)
+
+## One field of a CUpdate. The declared type rides on the node for the same
+## reason CField carries one: a backend that spells the kept fields out as
+## projections (the native RC pass) has no ADT table to look them up in.
+pub type CUpdField = { ty: Ty, value: Option[CExpr] }
 
 pub type CStmt =
   | CSLet(sym: Int, ty: Ty, init: CExpr)
@@ -588,6 +608,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CCall(_, _, ty) -> ty
     CIntrinsic(_, _, ty) -> ty
     CCtor(_, _, _, ty) -> ty
+    CUpdate(_, _, _, _, ty) -> ty
     CField(_, _, _, _, ty) -> ty
     CIsCtor(_, _, _) -> TyBool
     CTagOf(_, _) -> TyInt
@@ -612,6 +633,53 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CForeign(_, ty) -> ty
     CDup(_, ty) -> ty
   }
+
+## The written values of an update, in field order: its operands after the
+## base, for a walker that visits subexpressions and nothing else.
+pub fn update_values(fields: List[CUpdField]) -> List[CExpr] = {
+  var out: List[CExpr] = []
+  for f in fields {
+    match f.value {
+      Some(v) -> { out = out ++ [v] }
+      None -> ()
+    }
+  }
+  out
+}
+
+## Whether an update keeps any field of its base. One that writes every field
+## reads nothing from the base; only its evaluation order depends on it.
+pub fn update_keeps(fields: List[CUpdField]) -> Bool = {
+  for f in fields {
+    match f.value {
+      None -> { return true }
+      Some(_) -> ()
+    }
+  }
+  false
+}
+
+## An update as the whole constructor it denotes: each kept field read back
+## out of the base. For a backend that builds a record only whole -- the JVM
+## below its width limit, the native RC pass -- and, by construction, exactly
+## the tree lowering produced before the node existed. The base is read once
+## per kept field, so it has to be a local, which lowering guarantees.
+pub fn update_as_ctor(base: CExpr, adt: Int, ci: Int, fields: List[CUpdField], ty: Ty) -> CExpr = {
+  match base {
+    CLocal(_, _) -> ()
+    _ -> panic("core: a record update's base is not a local")
+  }
+  var args: List[CExpr] = []
+  var i = 0
+  for f in fields {
+    match f.value {
+      Some(v) -> { args = args ++ [v] }
+      None -> { args = args ++ [CField(base, adt, ci, i, f.ty)] }
+    }
+    i = i + 1
+  }
+  CCtor(adt, ci, args, ty)
+}
 
 ## Whether evaluating this expression can transfer control away (return,
 ## break, continue, or a panic that both backends implement as a jump).

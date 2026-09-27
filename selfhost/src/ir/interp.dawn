@@ -54,7 +54,7 @@ use ir/core.{
   CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
-  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
+  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CUpdate, update_values,
   CReturn, CBreak, CContinue, CForeign, CDup, CDictRef, CDictApply, CDictArg, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
@@ -1431,6 +1431,27 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CCtor(adt, ci, args, _) -> {
       let (st1, env1, vals) = eval_all(icx, st, env, args)?
       Ok((st1, env1, VAdt(adt, ci, vals)))
+    }
+    # Copy and overwrite: a value is immutable here, so the copy is the
+    # field list, and the result is the one the whole constructor would build.
+    CUpdate(base, _, _, fields, _) -> {
+      let (st1, env1, bv) = ceval(icx, st, env, base)?
+      let (st2, env2, vals) = eval_all(icx, st1, env1, update_values(fields))?
+      let (aid, ci, kept) = as_adt(bv)
+      var out: List[CValue] = []
+      var i = 0
+      var k = 0
+      for f in fields {
+        match f.value {
+          Some(_) -> {
+            out = out ++ [vals[k]]
+            k = k + 1
+          }
+          None -> { out = out ++ [kept[i]] }
+        }
+        i = i + 1
+      }
+      Ok((st2, env2, VAdt(aid, ci, out)))
     }
     CField(target, _, _, idx, _) -> {
       let (st1, env1, v) = ceval(icx, st, env, target)?

@@ -44,7 +44,7 @@ use ir/core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign, CDup, sam_ev_exprs,
+  CReturn, CBreak, CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CBinOp, CUnOp,
@@ -109,6 +109,7 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CCall(callee, args, _) -> walk_all(walk_callee(a, callee), args)
     CIntrinsic(_, args, _) -> walk_all(a, args)
     CCtor(_, _, args, _) -> walk_all(a, args)
+    CUpdate(base, _, _, fields, _) -> walk_all(walk_expr(a, base), update_values(fields))
     CField(t, _, _, _, _) -> walk_expr(a, t)
     CIsCtor(t, _, _) -> walk_expr(a, t)
     CTagOf(t, _) -> walk_expr(a, t)
@@ -304,6 +305,24 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     CCtor(adt, ci, args, t) ->
       ind(d) ++ "ctor " ++ ctor_at(adts, adt, ci) ++ ty(adts, t) ++ "\n" ++
       exprs(adts, n, d + 1, args)
+    # the base, then one line per field in declaration order: `set` with the
+    # value written to it, or `keep` where the base's value carries over
+    CUpdate(base, adt, ci, fields, t) -> {
+      var out = ind(d) ++ "update " ++ ctor_at(adts, adt, ci) ++ ty(adts, t) ++ "\n" ++
+        expr(adts, n, d + 1, base)
+      var i = 0
+      for f in fields {
+        match f.value {
+          Some(v) -> {
+            out = out ++ ind(d + 1) ++ "set " ++ to_string(i) ++ ty(adts, f.ty) ++ "\n" ++
+              expr(adts, n, d + 2, v)
+          }
+          None -> { out = out ++ ind(d + 1) ++ "keep " ++ to_string(i) ++ ty(adts, f.ty) ++ "\n" }
+        }
+        i = i + 1
+      }
+      out
+    }
     CField(target, adt, ci, idx, t) ->
       ind(d) ++ "field " ++ ctor_at(adts, adt, ci) ++ "." ++
       to_string(idx) ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, target)

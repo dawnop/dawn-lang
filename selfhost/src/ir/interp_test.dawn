@@ -20,7 +20,10 @@ use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
-use ir/core.{CValue, VInt, VBool, VStr, VList, CCall, CDirect, CImpl, CDefault}
+use ir/core.{
+  CValue, VInt, VBool, VStr, VList, VAdt, CCall, CDirect, CImpl, CDefault,
+  CExpr, CBlock, CUpdate, CLocal, CSLet
+}
 use ir/lower
 use ir/interp.{
   eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
@@ -547,6 +550,103 @@ test "const initializers run blocks, local fns, matches and loops" {
   assert map.get(out.consts, "D") == Some(VInt(55))
   assert map.get(out.consts, "G") == Some(VInt(21))
   assert map.get(out.consts, "H") == Some(VInt(7))
+}
+
+## A record type with `n` Int fields `f0`..`f(n-1)`, and a value of it whose
+## field `i` holds `i`: source text for the update tests below.
+fn numbered_record(name: String, n: Int) -> (String, String) = {
+  var decl = "type ${name} = {"
+  var init = "${name} {"
+  for i in 0..n {
+    let sep = if i == 0 { " " } else { ", " }
+    decl = decl ++ sep ++ "f${to_string(i)}: Int"
+    init = init ++ sep ++ "f${to_string(i)}: ${to_string(i)}"
+  }
+  (decl ++ " }\n", init ++ " }")
+}
+
+test "a record update folds at comptime: written fields replaced, the rest kept" {
+  # Wide enough that the JVM backend builds it by copy-and-set; comptime has
+  # its own value model and must agree with both backends either way. The
+  # written order is not field order, so the update's values arrive through
+  # lowering's temporaries.
+  let (decl, init) = numbered_record("W", 40)
+  let src = decl ++
+    "type N = { a: Int, b: String }\n" ++
+    "const BASE: W = " ++ init ++ "\n" ++
+    "const U: W = W { ..BASE, f37: 700, f2: 200 }\n" ++
+    "const S: Int = U.f2 + U.f37 + U.f5 + BASE.f37\n" ++
+    "const M: N = N { ..N { a: 1, b: \"x\" }, b: \"y\" }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "S") == Some(VInt(200 + 700 + 5 + 37))
+  match map.get(out.consts, "U") {
+    Some(VAdt(_, 0, fs)) -> {
+      assert len(fs) == 40
+      assert fs[2] == VInt(200) && fs[37] == VInt(700)
+      assert fs[0] == VInt(0) && fs[36] == VInt(36) && fs[39] == VInt(39)
+    }
+    _ -> panic("expected the updated record")
+  }
+  match map.get(out.consts, "M") {
+    Some(VAdt(_, 0, [VInt(1), VStr("y")])) -> ()
+    _ -> panic("expected the narrow update to keep `a` and replace `b`")
+  }
+}
+
+## The tail a block chain ends in: where lowering puts an update's node.
+fn tail_of(e: CExpr) -> CExpr =
+  match e {
+    CBlock(_, Some(t), _) -> tail_of(t)
+    _ -> e
+  }
+
+test "a record update lowers to one update node over its bound base" {
+  # Field order in the node, the base bound once before it, and each field
+  # either written or kept: what both backends read instead of recovering an
+  # update from a constructor full of projections.
+  let src = "type R = { a: Int, b: Int, c: Int }\n" ++
+    "fn f(r: R, x: Int) -> R = R { ..r, c: x, a: x + 1 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some("m"), Some("m.dawn")), m, env)
+  assert len(cx1.diags) == 0
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let cm = lower.lower_module("m", tm, cx1.traits, cx1.impl_table, cx1.adts,
+    program_sigs(no_owner, tm, "m"))
+  var seen = false
+  for cf in cm.fns {
+    if cf.name == "f" {
+      match cf.body {
+        CBlock([CSLet(b, _, _)], Some(t), _) -> {
+          match tail_of(t) {
+            CUpdate(CLocal(b2, _), _, 0, fields, _) -> {
+              assert b2 == b
+              assert len(fields) == 3
+              assert fields[1].value == None
+              match (fields[0].value, fields[2].value) {
+                (Some(_), Some(_)) -> ()
+                _ -> panic("expected `a` and `c` written")
+              }
+              seen = true
+            }
+            _ -> panic("expected an update node at the tail")
+          }
+        }
+        _ -> panic("expected the base bound first")
+      }
+    }
+  }
+  assert seen
 }
 
 test "a self tail call in a const folds without growing the interpreter stack" {
