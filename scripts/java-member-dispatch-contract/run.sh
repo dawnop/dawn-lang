@@ -189,9 +189,7 @@ def replace_once(key: str, old: str, new: str) -> None:
 
 
 DISPATCH_ARM = """        None -> {
-          let (next, is_alias) = module_alias_receiver_read(cx, recv)
-          cx = next
-          if not is_alias {
+          if not module_alias_receiver(cx, recv) {
             return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
           }
         }"""
@@ -201,14 +199,8 @@ if name == "drop-dispatch":
 elif name == "static-only":
     replace_once(
         "checker",
-        "          if not is_alias {",
-        "          var static_target = false\n"
-        "          if not is_alias {\n"
-        "            let (target_cx, target) = static_field_target(cx, recv)\n"
-        "            cx = target_cx\n"
-        "            static_target = target != None\n"
-        "          }\n"
-        "          if not is_alias && static_target {",
+        "          if not module_alias_receiver(cx, recv) {",
+        "          if not module_alias_receiver(cx, recv) && static_field_target(cx, recv) != None {",
     )
 elif name == "java-first":
     replace_once(
@@ -219,15 +211,15 @@ elif name == "java-first":
     replace_once(
         "checker",
         "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
-        "      let (next, constructor) = qual_ctor_read(cx, recv, fname)",
+        "      match qual_ctor(cx, recv, fname) {",
         "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
         "      return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)\n"
-        "      let (next, constructor) = qual_ctor_read(cx, recv, fname)",
+        "      match qual_ctor(cx, recv, fname) {",
     )
 elif name == "drop-module-guard":
     replace_once(
         "checker",
-        "          if not is_alias {",
+        "          if not module_alias_receiver(cx, recv) {",
         "          if true {",
     )
 elif name == "field-wins":
@@ -235,12 +227,8 @@ elif name == "field-wins":
         "checker",
         DISPATCH_ARM,
         """        None -> {
-          let (next, is_alias) = module_alias_receiver_read(cx, recv)
-          cx = next
           var field_first = false
-          let (target_cx, target) = static_field_target(cx, recv)
-          cx = target_cx
-          match target {
+          match static_field_target(cx, recv) {
             Some(fq) -> {
               for f in cx.jsig.static_fields_of(fq) {
                 if f.name == fname { field_first = true }
@@ -248,7 +236,7 @@ elif name == "field-wins":
             }
             None -> ()
           }
-          if not is_alias && not field_first {
+          if not module_alias_receiver(cx, recv) && not field_first {
             return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
           }
         }""",
@@ -270,10 +258,10 @@ elif name == "drop-staticness":
 elif name == "bare-member-calls":
     replace_once(
         "checker",
-        "            Some(fq) -> check_java_static_field(field_cx, fq, fname, flo, fhi, lo, hi)",
+        "            Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)",
         "            Some(_) -> {\n"
         "              let no_args: List[Arg] = []\n"
-        "              check_method_call(field_cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
+        "              check_method_call(cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
         "            }",
     )
 elif name == "parser-uppercase-method":

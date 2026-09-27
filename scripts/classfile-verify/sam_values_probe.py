@@ -46,13 +46,9 @@ def main():
 def mutants(jar, verifier):
     variants = [
         ("bytes", "check/checker.dawn", [
-            ('    } else if p == "[B" {\n      Some(TyBytes)\n', ''),
+            ('  } else if p == "[B" {\n    Some(TyBytes)\n', ''),
             ('  } else if r == "[B" {\n    Some(TyBytes)\n', ''),
-            ('        TyBytes -> {\n'
-             '          let (next, fits) = java_assignable_read(cx1, j, "[B")\n'
-             '          cx1 = next\n'
-             '          fits\n'
-             '        }\n', ''),
+            ('      TyBytes -> js.is_assignable(j, "[B")\n', ''),
         ], "SAM_BYTES_BUILD"),
         ("narrow", "jvm/emit.dawn", [
             ('    if rc == "byte" { m.visitInsn(OP_I2B) }\n', ''),

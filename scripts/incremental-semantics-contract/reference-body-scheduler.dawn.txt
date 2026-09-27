@@ -13,7 +13,9 @@
 # (`TFun.decl`/`TConst.decl`, docs/symbol-id-design.md §5, added after the
 # freeze). The reference states that in its own words too: `ref_open` keeps
 # the spelling it opened, and each output site below files the tree under it.
-# The scheduling loop is otherwise untouched.
+# The scheduling loop is otherwise untouched, except that the Java receiver
+# census now calls the plain lookups: the logging wrappers it called were
+# removed with the read log, and they answered the same thing.
 type RefOwned = { context: Cx, positions: tast_positions.Resolver, decl: String }
 
 fn ref_open(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> RefOwned = {
@@ -124,12 +126,8 @@ pub(pkg) fn reference_module_body_products(headers: ModuleHeaders) -> ModuleBodi
     # three tables are final: pass_java_uses, the type passes and
     # pass_const_decls have all run.
     var java_recv: Set[String] = set.empty()
-    let (names_cx, java_names) = java_class_names_read(cx1)
-    cx1 = names_cx
-    for cn in java_names {
-      let (shadow_cx, shadowed) = local_value_shadow_read(cx1, cn)
-      cx1 = shadow_cx
-      if not shadowed {
+    for cn in map.keys(cx1.java_classes) {
+      if not local_value_shadow(cx1, cn) {
         java_recv = set.insert(java_recv, cn)
       }
     }
