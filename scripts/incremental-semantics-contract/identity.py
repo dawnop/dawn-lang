@@ -51,8 +51,6 @@ def main():
         ("parent-not-checked", "var depth = 1", "var depth = len(e.entry.key.path)"),
         ("binder-spelling", "return BoundType(i)", "return NamedType(name, [], [])"),
         ("default-ambiguity", "if same == 1 {", "if same >= 1 {"),
-        ("world-erased", "DeclKey { scope: scope, path: path }",
-         'DeclKey { scope: ModuleKey { ..scope, world: "shared" }, path: path }'),
         ("effect-binder-spelling", "return ProjectedEffect(i, parts[1])", "return NamedEffect(name)"),
         ("effect-member-erased", "return ProjectedEffect(i, parts[1])", 'return ProjectedEffect(i, "")'),
         ("effect-binder-slot", "return ProjectedEffect(i, parts[1])", "return ProjectedEffect(0, parts[1])"),
