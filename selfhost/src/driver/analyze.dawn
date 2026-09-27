@@ -17,14 +17,9 @@ use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
 use check/cx.{ModExports, Cx, cx_new}
-use check/checker.{check_module, check_module_headers, check_module_bodies, assemble_module_bodies, exports_of}
-use check/body_execution
-use check/scalar_replay
-use check/source_snapshot
-use check/allocation
-use check/allocation.{TypeParameter, EffectParameter}
+use check/checker.{check_module, exports_of}
 use check/identity
-use check/identity.{module_key, Minted, EffectDecl}
+use check/identity.{Minted, EffectDecl}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
@@ -62,32 +57,6 @@ pub type LoadedModule = {
 pub type LocDiag = { path: String, d: Diag }
 
 pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
-
-type PreparedModuleData = { loaded: LoadedModule, snapshot: Option[source_snapshot.Snapshot] }
-type PreparedLoadData = { result: LoadResult, proofs: Map[String, source_snapshot.Snapshot] }
-type SourceProof = { path: String, text: String, snapshot: source_snapshot.Snapshot }
-
-## Only loader-owned parsing may certify this module's text and resolved tree.
-## Returning the ordinary loaded value does not permit grafting it back here.
-pub opaque type PreparedModule = PreparedModuleData
-pub opaque type PreparedLoad = PreparedLoadData
-
-pub fn prepared_result(prepared: PreparedLoad) -> LoadResult = {
-  let data: PreparedLoadData = prepared
-  data.result
-}
-
-pub fn prepared_modules(prepared: PreparedLoad) -> List[PreparedModule] = {
-  let data: PreparedLoadData = prepared
-  list.map(data.result.modules, raw => PreparedModuleData {
-    loaded: raw, snapshot: map.get(data.proofs, raw.mod_path)
-  })
-}
-
-pub fn prepared_loaded(prepared: PreparedModule) -> LoadedModule = {
-  let data: PreparedModuleData = prepared
-  data.loaded
-}
 
 ## The source files visible from one captured source plan. `project_files`
 ## keeps the caller-facing spellings used by loader diagnostics, including
@@ -136,7 +105,7 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{CValue, VInt}
+use ir/core.{CValue}
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -406,15 +375,14 @@ pub fn load_entries_over(
   entries: List[String],
   over: Map[String, String]
 ) -> LoadResult !Fs !Env !io =
-  prepared_result(resolve(
+  resolve(
     plan.source.source_root,
     entries,
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    false,
     entry_file(plan)
-  ))
+  )
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
 ## a command named, or a project's `src/main.dawn`. Canonical, because that
@@ -425,27 +393,18 @@ fn entry_file(plan: ProjectPlan) -> Option[String] !Env =
     source.ProjectDirectory(dir) -> Some(canon(dir ++ "/src/main.dawn"))
   }
 
-## Opt-in loader capture; cold callers retain their original result API.
-pub fn load_entries_over_prepared(
-  plan: ProjectPlan, entries: List[String], over: Map[String, String]
-) -> PreparedLoad !Fs !Env !io =
-  resolve(plan.source.source_root, entries, planner_diags(plan.source.diags),
-    plan.source.pkgs, over, true, entry_file(plan))
-
 fn resolve(
   root: String,
   seed_files: List[String],
   diags0: List[LocDiag],
   pkgs: Map[String, source.PkgR],
   over: Map[String, String],
-  capture: Bool,
   entry: Option[String]
-) -> PreparedLoad !Fs !Env !io = {
+) -> LoadResult !Fs !Env !io = {
   var diags = diags0
   let root_abs = canon(root)
   var by_canon: Map[String, String] = map.empty()
   var by_path: Map[String, LoadedModule] = map.empty()
-  var proofs: Map[String, SourceProof] = map.empty()
   var order: List[String] = []
   var queue: List[String] = []
   # load seeds
@@ -463,9 +422,7 @@ fn resolve(
       }
       match read_over(over, c, f) {
         Ok(text) -> {
-          let parsed = source_snapshot.parse(text, capture)
-          let m = parsed.syntax
-          let pdiags = parsed.diagnostics
+          let (m, pdiags) = parser.parse_module(text)
           let mf = LoadedModule {
             mod_path: mod_path,
             class_name: mod_path,
@@ -478,10 +435,6 @@ fn resolve(
           }
           by_canon = map.insert(by_canon, c, mod_path)
           by_path = map.insert(by_path, mod_path, mf)
-          proofs = match parsed.snapshot {
-            Some(snapshot) -> map.insert(proofs, mod_path, SourceProof { path: f, text: text, snapshot: snapshot })
-            None -> map.remove(proofs, mod_path)
-          }
           order = order ++ [mod_path]
           queue = queue ++ [mod_path]
         }
@@ -589,9 +542,7 @@ fn resolve(
         } else {
           match read_over(over, dep_canon, dep_file) {
             Ok(text) -> {
-              let parsed = source_snapshot.parse(text, capture)
-              let m2p = parsed.syntax
-              let pdiags2 = parsed.diagnostics
+              let (m2p, pdiags2) = parser.parse_module(text)
               let (mod_path, cls, m2) = match dep_pkg {
                 Some(p) -> {
                   let internal = module_path_of(p.root, dep_canon)
@@ -616,10 +567,6 @@ fn resolve(
               }
               by_canon = map.insert(by_canon, dep_canon, mod_path)
               by_path = map.insert(by_path, mod_path, mf2)
-              proofs = match parsed.snapshot {
-                Some(snapshot) -> map.insert(proofs, mod_path, SourceProof { path: dep_file, text: text, snapshot: snapshot })
-                None -> map.remove(proofs, mod_path)
-              }
               order = order ++ [mod_path]
               queue = queue ++ [mod_path]
             }
@@ -687,26 +634,7 @@ fn resolve(
   }
   # topological order + cycle detection over the use graph
   let (ordered, diags2) = topo_sort(order, by_path, diags)
-  let result = LoadResult { modules: ordered, diags: diags2 }
-  if not capture { return PreparedLoadData { result: result, proofs: map.empty() } }
-  var bound: Map[String, source_snapshot.Snapshot] = map.empty()
-  for raw in ordered {
-    match map.get(proofs, raw.mod_path) {
-      Some(proof) -> {
-        # A dependency can collide with a seed's module name while that seed
-        # is being visited. A final rewrite may restore the earlier loaded
-        # value, so its proof must match the actual source, not just its AST.
-        if proof.path == raw.path && proof.text == raw.text {
-          match source_snapshot.resolved(proof.snapshot, raw.m) {
-            Some(resolved) -> { bound = map.insert(bound, raw.mod_path, resolved) }
-            None -> ()
-          }
-        }
-      }
-      None -> ()
-    }
-  }
-  PreparedLoadData { result: result, proofs: bound }
+  LoadResult { modules: ordered, diags: diags2 }
 }
 
 ## Depth-first topological sort; on the first back edge, report the cycle path.
@@ -829,7 +757,6 @@ pub type AnalysisCarry = {
   # a binder key names the declaration that binds it, so two modules cannot
   # quarrel over one number and nothing has to be carried to keep them apart
   identities: Map[Int, Minted],
-  provenance: Option[HeaderProvenance],
   # The position view lives on the carry rather than on `ModuleStep` because
   # its readers are not the step that produced it: a diagnostic or a lowering
   # resolves an offset owned by some other module, long after that module's
@@ -838,10 +765,6 @@ pub type AnalysisCarry = {
   # reused prefix step carries the views of the modules before it unchanged.
   decl_spans: Map[String, identity.DeclSpans]
 }
-
-## These tables belong to the enclosing analysis owner. A world label is not
-## a process-global identity, and a missing table must never authorize reuse.
-pub type HeaderProvenance = { world: String, modules: Map[String, Option[allocation.Table]], intrinsics: Option[allocation.Table] }
 
 ## The enclosing module interval includes context construction and export
 ## assembly. Check and comptime intervals are nested inside it, never overlap,
@@ -854,32 +777,8 @@ pub(pkg) type ModuleStep = {
   checked: CheckedMod,
   diags: List[LocDiag],
   after: AnalysisCarry,
-  body_records: Option[List[body_execution.Saved]],
   check_runs: Int,
   comptime_runs: Int
-}
-
-type ModuleBodyCacheData = { scope: identity.ModuleKey, admitted: scalar_replay.Admitted }
-
-## Products belong to one analysis world and exact module identity. The owner
-## must replace its cache when its captured plan, options, std or lease changes.
-## No historical checker context or Java oracle is retained in this value.
-pub opaque type ModuleBodyCache = ModuleBodyCacheData
-
-pub type ModuleBodyCounts = {
-  checked: Int, reused: Int, cold_unadmitted: Int, cold_rejected: Int,
-  visited: Int, capture_refused: Int, retained: Int
-}
-
-## Counts are absent when the canonical cold entry was used without recording,
-## not a claim that no body was checked. A parse failure has no body execution.
-pub(pkg) type CachedModuleStep = {
-  step: ModuleStep, cache: Option[ModuleBodyCache], counts: Option[ModuleBodyCounts]
-}
-
-pub fn module_body_cache_size(cache: ModuleBodyCache) -> Int = {
-  let data: ModuleBodyCacheData = cache
-  scalar_replay.admitted_count(data.admitted)
 }
 
 pub(pkg) fn initial_carry(std: StdCtx) -> AnalysisCarry = {
@@ -887,29 +786,8 @@ pub(pkg) fn initial_carry(std: StdCtx) -> AnalysisCarry = {
   # when one of them is analyzed again as an ordinary module.
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
   AnalysisCarry { exports: std.exports, impls: std.impls,
-    identities: std.identities, provenance: None, decl_spans: no_spans }
+    identities: std.identities, decl_spans: no_spans }
 }
-
-pub(pkg) fn initial_carry_with_provenance(std: StdCtx, world: String) -> AnalysisCarry = {
-  var modules: Map[String, Option[allocation.Table]] = map.empty()
-  for name in map.keys(std.exports) {
-    let origin = match map.get(std.header_origins, name) {
-      Some(Some(table)) -> allocation.in_world(table, "std", world)
-      _ -> None
-    }
-    modules = map.insert(modules, name, origin)
-  }
-  AnalysisCarry { ..initial_carry(std), provenance: Some(HeaderProvenance { world: world, modules: modules,
-    intrinsics: allocation.compiler_headers(world) }) }
-}
-
-## Which analysis owner's keys the views on this carry belong to. A session
-## names its world; a cold run has exactly one owner and no name for it.
-fn analysis_world(carry: AnalysisCarry) -> String =
-  match carry.provenance {
-    Some(origin) -> origin.world
-    None -> "cold"
-  }
 
 fn analysis_event(
   observer: Option[AnalysisObserver], name: String, stage: AnalysisStage, entering: Bool
@@ -990,43 +868,7 @@ pub(pkg) fn analyze_observed(
 pub(pkg) fn analyze_module_step(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver]
-) -> ModuleStep !Env !io =
-  module_step_with_recording(mf0, before, std, opts, js, observer, false, false, None, None).step
-
-## Explicit integration entry while recording cost and cache admission are
-## under validation. Existing prefix sessions keep their cold-miss cost until
-## the recorder is efficient enough and a safe replay path actually exists.
-pub(pkg) fn analyze_module_step_recorded(
-  mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
-  js: Jsig, observer: Option[AnalysisObserver]
-) -> ModuleStep !Env !io =
-  module_step_with_recording(mf0, before, std, opts, js, observer, true, false, None, None).step
-
-## Opt-in session transition. Headers, comptime and export/carry publication
-## always run against this revision; only validated body executions may reuse.
-pub(pkg) fn analyze_module_step_cached(
-  mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
-  js: Jsig, observer: Option[AnalysisObserver], previous: Option[ModuleBodyCache]
-) -> CachedModuleStep !Env !io =
-  module_step_with_recording(mf0, before, std, opts, js, observer, false, true, previous, None)
-
-## Consume the loader's immutable proof without reparsing. A refused prepared
-## proof is distinct from legacy input: it must remain refused, not re-created.
-pub(pkg) fn analyze_module_step_prepared(
-  prepared: PreparedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
-  js: Jsig, observer: Option[AnalysisObserver], previous: Option[ModuleBodyCache]
-) -> CachedModuleStep !Env !io = {
-  let data: PreparedModuleData = prepared
-  module_step_with_recording(data.loaded, before, std, opts, js, observer,
-    false, true, previous, Some(data.snapshot))
-}
-
-fn module_step_with_recording(
-  mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
-  js: Jsig, observer: Option[AnalysisObserver], record_bodies: Bool,
-  cache_bodies: Bool, previous: Option[ModuleBodyCache],
-  prepared_snapshot: Option[Option[source_snapshot.Snapshot]]
-) -> CachedModuleStep !Env !io = {
+) -> ModuleStep !Env !io = {
   var diags: List[LocDiag] = []
   # The one place a module's identity is settled, and the reason it is here
   # rather than in the loaders: only this function holds the std, and the
@@ -1088,82 +930,9 @@ fn module_step_with_recording(
   var ct = empty_ctout()
   var check_runs = 0
   var comptime_runs = 0
-  var local_provenance: Option[allocation.Table] = None
-  var body_records: Option[List[body_execution.Saved]] = None
-  var body_cache: Option[ModuleBodyCache] = None
-  var body_counts: Option[ModuleBodyCounts] = None
   if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
-    let (cx1, tm1) = match before.provenance {
-      None -> check_module(cx, mf.m, before.exports)
-      Some(origin) -> {
-        let headers = check_module_headers(cx, mf.m, before.exports)
-        let scope = module_key(origin.world, mf.mod_path, mf.class_name, mf.path)
-        if len(headers.cx.diags) == 0 {
-          match allocation.local_headers(scope, headers.syntax, headers.cx) {
-            Some(entries) -> match allocation.local_impl_headers(scope, headers.syntax, headers.cx, headers.impl_sigs) {
-              Some(methods) -> { local_provenance = allocation.table(entries ++ methods) }
-              None -> ()
-            }
-            None -> ()
-          }
-        }
-        # Binding may alter only loader-resolved import paths. Recovered or
-        # mismatched syntax never lends source coordinates to cached bodies.
-        let snapshot: Option[source_snapshot.Snapshot] = if cache_bodies {
-          match prepared_snapshot {
-            Some(snapshot) -> snapshot
-            None -> match source_snapshot.of(mf.text) {
-              Some(parsed) -> source_snapshot.resolved(parsed, mf.m)
-              None -> None
-            }
-          }
-        } else { None }
-        let prior: Option[scalar_replay.Admitted] = match previous {
-          Some(cache) -> {
-            let data: ModuleBodyCacheData = cache
-            if data.scope == scope { Some(data.admitted) } else { None }
-          }
-          None -> None
-        }
-        match snapshot {
-          Some(revision) -> {
-            let (bodies, admitted, counts) = match prior {
-              Some(old) -> {
-                let renewed = scalar_replay.replay_and_record(old, headers, revision)
-                let pass = renewed.replayed
-                (pass.bodies, renewed.admitted, ModuleBodyCounts {
-                  checked: pass.checked, reused: pass.reused,
-                  cold_unadmitted: pass.cold_unadmitted, cold_rejected: pass.cold_rejected,
-                  visited: renewed.visited, capture_refused: renewed.capture_refused,
-                  retained: scalar_replay.admitted_count(renewed.admitted)
-                })
-              }
-              None -> {
-                let recorded = body_execution.record(scope, headers)
-                let admitted = scalar_replay.admit(scope, headers, revision, recorded)
-                (recorded.bodies, admitted, ModuleBodyCounts {
-                  checked: recorded.checked, reused: 0,
-                  cold_unadmitted: recorded.checked, cold_rejected: 0,
-                  visited: recorded.checked, capture_refused: recorded.refused,
-                  retained: scalar_replay.admitted_count(admitted)
-                })
-              }
-            }
-            body_counts = Some(counts)
-            if counts.retained > 0 {
-              body_cache = Some(ModuleBodyCacheData { scope: scope, admitted: admitted })
-            }
-            assemble_module_bodies(bodies)
-          }
-          None -> if record_bodies {
-            let recorded = body_execution.record(scope, headers)
-            body_records = Some(recorded.entries)
-            assemble_module_bodies(recorded.bodies)
-          } else { check_module_bodies(headers) }
-        }
-      }
-    }
+    let (cx1, tm1) = check_module(cx, mf.m, before.exports)
     check_runs = 1
     analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
     cx = cx1
@@ -1200,27 +969,13 @@ fn module_step_with_recording(
     input: mf,
     checked: checked,
     diags: diags,
-    body_records: body_records,
     after: AnalysisCarry { exports: exports, impls: impls,
       identities: cx.identities,
-      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans),
-      provenance: match before.provenance {
-        None -> None
-        Some(origin) -> Some(HeaderProvenance { ..origin,
-          modules: map.insert(origin.modules, mf.mod_path, local_provenance) })
-      } },
+      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans) },
     check_runs: check_runs,
     comptime_runs: comptime_runs
   }
-  # Error recovery starts from the next real recording, not an older success.
-  if diags != [] {
-    body_cache = None
-    body_counts = match body_counts {
-      Some(counts) -> Some(ModuleBodyCounts { ..counts, retained: 0 })
-      None -> None
-    }
-  }
-  CachedModuleStep { step: step, cache: body_cache, counts: body_counts }
+  step
 }
 
 # ---- single-document analysis (the language server's entry) ----
@@ -1361,16 +1116,7 @@ pub(pkg) fn analyze_standalone(
   opts: CtOpts,
   js: Jsig
 ) -> Program !Env !io = {
-  analyze_program(prepared_result(prepare_standalone_with_capture(path, text, false)), std, opts, js)
-}
-
-## The same filename validation and proposed identity as cold standalone
-## analysis; the module transition still applies the actual std identity.
-pub fn prepare_standalone(path: String, text: String) -> PreparedLoad =
-  prepare_standalone_with_capture(path, text, true)
-
-fn prepare_standalone_with_capture(path: String, text: String, capture: Bool) -> PreparedLoad = {
-  let parsed = source_snapshot.parse(text, capture)
+  let (m, pdiags) = parser.parse_module(text)
   var diags: List[LocDiag] = []
   match entry_name_of(path) {
     Some(nm) -> {
@@ -1389,17 +1135,13 @@ fn prepare_standalone_with_capture(path: String, text: String, capture: Bool) ->
     class_name: "main",
     path: path,
     text: text,
-    m: parsed.syntax,
-    pdiags: parsed.diagnostics,
+    m: m,
+    pdiags: pdiags,
     pkg: None,
     # a single document analysed on its own is its own program's entry
     entry: true
   }
-  let proofs = match parsed.snapshot {
-    Some(snapshot) -> map.from([("main", snapshot)])
-    None -> map.empty()
-  }
-  PreparedLoadData { result: LoadResult { modules: [mf], diags: diags }, proofs: proofs }
+  analyze_program(LoadResult { modules: [mf], diags: diags }, std, opts, js)
 }
 
 ## The identity `analyze_standalone` settled on for its one buffer. Callers
@@ -1552,347 +1294,6 @@ fn put(p: String, text: String) -> Unit !Fs =
     Ok(_) -> ()
     Err(e) -> panic("test setup: ${e.message}")
   }
-
-test "cached module transitions renew bodies and publish the current carry" {
-  in_mem(() => {
-    let std = match load_std(std_dir()) {
-      Ok(value) -> value
-      Err(e) -> panic("std: ${std_load_error_text(e)}")
-    }
-    let baseline = initial_carry_with_provenance(std, "cached-module-test")
-    let original = "fn leaf() = 1\nfn middle() = leaf()\nfn answer() -> Int = middle()\n"
-    let changed = "fn leaf() = 9\nfn middle() = leaf()\nfn answer() -> Int = middle()\n"
-    let moved = "# 🌅\nfn answer() -> Int = middle()\n\nfn leaf() = 9\nfn middle() = leaf()\n"
-    let boolean = "fn leaf() = true\nfn middle() = leaf()\nfn answer() -> Bool = middle()\n"
-    let failed = "fn leaf() = true\nfn middle() = leaf()\nfn answer() -> Int = middle()\n"
-    var cache: Option[ModuleBodyCache] = None
-    for sample in [(original, 0, true), (original, 3, true),
-      (changed, 2, true), (changed, 3, true), (moved, 3, true),
-      (boolean, 0, true), (boolean, 3, true), (failed, 2, false),
-      (original, 0, true), (original, 3, true)] {
-      let (text, hits, clean) = sample
-      let (syntax, pd) = parser.parse_module(text)
-      let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
-      let warm = analyze_module_step_cached(input, baseline, std, ct_default(), jsig_refused(), None, cache)
-      let cold = analyze_module_step(input, baseline, std, ct_default(), jsig_refused(), None)
-      assert warm.step.checked.tm == cold.checked.tm
-      assert warm.step.diags == cold.diags
-      assert warm.step.after == cold.after
-      assert warm.step.checked.ct == cold.checked.ct
-      assert warm.step.checked.cx.fns == cold.checked.cx.fns
-      assert warm.step.checked.cx.syms == cold.checked.cx.syms
-      assert warm.step.check_runs == cold.check_runs
-      assert warm.step.comptime_runs == cold.comptime_runs
-      assert warm.step.body_records == None
-      assert (warm.step.diags == []) == clean
-      let counts = warm.counts.expect("body execution counts")
-      assert counts.reused == hits
-      assert counts.checked + counts.reused == counts.visited
-      assert counts.visited == 3
-      assert counts.checked == counts.cold_unadmitted + counts.cold_rejected
-      if clean {
-        assert module_body_cache_size(warm.cache.expect("retained bodies")) == 3
-      } else {
-        assert warm.cache == None
-        assert counts.retained == 0
-      }
-      cache = warm.cache
-    }
-    let (syntax, pd) = parser.parse_module(original)
-    let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-      text: original, m: syntax, pdiags: pd, pkg: None, entry: false }
-    # Every owner coordinate independently prevents borrowing the old cache.
-    for altered in [LoadedModule { ..input, mod_path: "renamed" },
-      LoadedModule { ..input, class_name: "renamed" },
-      LoadedModule { ..input, path: "/cache/renamed.dawn" }] {
-      let warm = analyze_module_step_cached(altered, baseline, std, ct_default(), jsig_refused(), None, cache)
-      let cold = analyze_module_step(altered, baseline, std, ct_default(), jsig_refused(), None)
-      assert warm.counts.expect("fresh owner counts").reused == 0
-      assert warm.step.checked.tm == cold.checked.tm && warm.step.after == cold.after
-    }
-    let other_world = initial_carry_with_provenance(std, "another-world")
-    let foreign = analyze_module_step_cached(input, other_world, std, ct_default(), jsig_refused(), None, cache)
-    assert foreign.counts.expect("fresh world counts").reused == 0
-    let no_origin = analyze_module_step_cached(input, initial_carry(std), std, ct_default(), jsig_refused(), None, cache)
-    let no_origin_cold = analyze_module_step(input, initial_carry(std), std, ct_default(), jsig_refused(), None)
-    assert no_origin.cache == None && no_origin.counts == None
-    assert no_origin.step.checked.tm == no_origin_cold.checked.tm
-    for text in ["fn broken(", "fn broken(x: Missing) -> Unit = ()\n"] {
-      let (broken, diagnostics) = parser.parse_module(text)
-      let raw = LoadedModule { ..input, text: text, m: broken, pdiags: diagnostics }
-      let warm = analyze_module_step_cached(raw, baseline, std, ct_default(), jsig_refused(), None, cache)
-      let cold = analyze_module_step(raw, baseline, std, ct_default(), jsig_refused(), None)
-      assert warm.cache == None
-      assert warm.step.diags == cold.diags && warm.step.after == cold.after
-      assert warm.step.checked.tm == cold.checked.tm
-    }
-    # Syntax forged beside unrelated text must select cold execution, not a
-    # snapshot that happens to contain a previously admitted function.
-    let forged = LoadedModule { ..input, text: changed }
-    let refused = analyze_module_step_cached(forged, baseline, std, ct_default(), jsig_refused(), None, cache)
-    let oracle = analyze_module_step(forged, baseline, std, ct_default(), jsig_refused(), None)
-    assert refused.cache == None && refused.counts == None
-    assert refused.step.checked.tm == oracle.checked.tm && refused.step.diags == oracle.diags
-  })
-}
-
-test "cached module transitions recompute comptime and recover from evaluation errors" {
-  in_mem(() => {
-    let std = match load_std(std_dir()) {
-      Ok(value) -> value
-      Err(e) -> panic("std: ${std_load_error_text(e)}")
-    }
-    let baseline = initial_carry_with_provenance(std, "cached-comptime-test")
-    var cache: Option[ModuleBodyCache] = None
-    let cases: List[(String, Option[Int], Int)] = [
-      ("1", Some(1), 0), ("1", Some(1), 2), ("9", Some(9), 1),
-      ("1 / 0", None, 1), ("9", Some(9), 0), ("9", Some(9), 2)]
-    for sample in cases {
-      let (expression, expected, hits) = sample
-      let text = "fn leaf() -> Int = ${expression}\nconst RESULT: Int = leaf()\nfn runtime() -> Int = leaf()\n"
-      let (syntax, pd) = parser.parse_module(text)
-      let input = LoadedModule { mod_path: "cached", class_name: "cached", path: "/cache/cached.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
-      let warm = analyze_module_step_cached(input, baseline, std, ct_default(), jsig_refused(), None, cache)
-      let cold = analyze_module_step(input, baseline, std, ct_default(), jsig_refused(), None)
-      assert warm.step.checked.tm == cold.checked.tm
-      assert warm.step.checked.ct == cold.checked.ct
-      assert warm.step.diags == cold.diags && warm.step.after == cold.after
-      assert warm.step.comptime_runs == 1
-      assert warm.counts.expect("observed bodies").reused == hits
-      match expected {
-        Some(value) -> {
-          assert warm.step.diags == []
-          assert map.get(warm.step.checked.ct.consts, "RESULT") == Some(VInt(value))
-          assert warm.cache != None
-        }
-        None -> {
-          assert warm.step.checked.cx.diags == []
-          assert warm.step.checked.ct.diags != []
-          assert warm.cache == None
-          assert warm.counts.expect("failed CT counts").retained == 0
-        }
-      }
-      cache = warm.cache
-    }
-  })
-}
-
-test "cached module transitions follow real package import resolution" {
-  in_mem(() => {
-    let base = "/tmp/dawn-selfhost-analyze/cached-packages"
-    mkdirs("${base}/pkg/library/src")
-    mkdirs("${base}/app/src")
-    put("${base}/pkg/library/dawn.toml", "schema = 1\nname = \"library\"\n")
-    put("${base}/pkg/library/src/bridge.dawn", "use leaf as impl_leaf\npub fn value() -> Int = impl_leaf.value()\n")
-    put("${base}/app/dawn.toml", "schema = 1\nname = \"app\"\n[deps]\nalias_dep = \"../pkg/library\"\n")
-    put("${base}/app/src/main.dawn", "use alias_dep/bridge.{value}\nfn answer() -> Int = value()\n")
-    let std = match load_std(std_dir()) {
-      Ok(value) -> value
-      Err(e) -> panic("std: ${std_load_error_text(e)}")
-    }
-    let baseline = initial_carry_with_provenance(std, "cached-package-test")
-    var caches: Map[String, ModuleBodyCache] = map.empty()
-    for expression in ["1", "1", "9", "9"] {
-      put("${base}/pkg/library/src/leaf.dawn", "pub fn value() -> Int = ${expression}\n")
-      let loaded = load_directory("${base}/app")
-      assert loaded.diags == [] && len(loaded.modules) == 3
-      var warm_carry = baseline
-      var cold_carry = baseline
-      var next_caches: Map[String, ModuleBodyCache] = map.empty()
-      for raw in loaded.modules {
-        let previous = map.get(caches, raw.mod_path)
-        let warm = analyze_module_step_cached(raw, warm_carry, std, ct_default(), jsig_refused(), None, previous)
-        let cold = analyze_module_step(raw, cold_carry, std, ct_default(), jsig_refused(), None)
-        assert warm.step.diags == [] && cold.diags == []
-        assert warm.step.checked.tm == cold.checked.tm && warm.step.checked.ct == cold.checked.ct
-        assert warm.step.after == cold.after
-        let counts = warm.counts.expect("loader resolved source")
-        if previous != None && raw.mod_path != "library/leaf" { assert counts.reused == 1 }
-        assert counts.visited == 1
-        next_caches = map.insert(next_caches, raw.mod_path, warm.cache.expect("package admission"))
-        warm_carry = warm.step.after
-        cold_carry = cold.after
-      }
-      caches = next_caches
-    }
-  })
-}
-
-test "prepared module execution refuses a clean missing proof without reparsing" {
-  in_mem(() => {
-    let std = std_or_die()
-    let baseline = initial_carry_with_provenance(std, "prepared-refusal-test")
-    let text = "fn leaf() -> Int = 1\nfn caller() -> Int = leaf()\n"
-    let without_proof = prepare_standalone_with_capture("/prepared/main.dawn", text, false)
-    let input = prepared_modules(without_proof)[0]
-    let raw = prepared_loaded(input)
-    let data: PreparedModuleData = input
-    assert raw.pdiags == [] && data.snapshot == None
-    let certified = prepared_modules(prepare_standalone("/prepared/main.dawn", text))[0]
-    let admitted = analyze_module_step_prepared(certified, baseline, std, ct_default(), jsig_refused(), None, None)
-    assert admitted.counts.expect("eligible clean bodies").checked == 2
-    assert admitted.cache != None
-    let cold = analyze_module_step(raw, baseline, std, ct_default(), jsig_refused(), None)
-    for previous in [None, admitted.cache] {
-      let refused = analyze_module_step_prepared(input, baseline, std, ct_default(), jsig_refused(), None, previous)
-      assert refused.counts == None && refused.cache == None
-      assert refused.step.diags == [] && refused.step.diags == cold.diags
-      assert refused.step.after == cold.after
-      assert refused.step.checked.tm == cold.checked.tm && refused.step.checked.ct == cold.checked.ct
-      assert refused.step.checked.m == cold.checked.m
-      assert refused.step.checked.cx.syms == cold.checked.cx.syms
-      assert refused.step.checked.cx.fns == cold.checked.cx.fns
-      assert refused.step.check_runs == cold.check_runs && refused.step.comptime_runs == cold.comptime_runs
-    }
-  })
-}
-
-test "prepared standalone loading preserves recovery and filename diagnostics" {
-  for path in ["<lsp>", "/tmp/main.dawn", "/tmp/Bad-Name.dawn"] {
-    for text in ["", "# 🌅 λ\nfn answer() -> Int = 42\n",
-      "fn broken( -> Int = 1\nfn after() -> Int = 2\n",
-      "fn text() -> String = \"unterminated\n"] {
-      let prepared: PreparedLoadData = prepare_standalone(path, text)
-      let cold: PreparedLoadData = prepare_standalone_with_capture(path, text, false)
-      assert prepared.result == cold.result
-      assert map.len(cold.proofs) == 0
-      let entries = prepared_modules(prepared)
-      assert len(entries) == 1
-      let entry: PreparedModuleData = entries[0]
-      assert prepared_loaded(entries[0]) == prepared.result.modules[0]
-      let (syntax, diagnostics) = parser.parse_module(text)
-      assert entry.loaded.m == syntax && entry.loaded.pdiags == diagnostics
-      match entry.snapshot {
-        Some(snapshot) -> {
-          assert diagnostics == []
-          assert source_snapshot.syntax(snapshot) == syntax
-          assert map.len(prepared.proofs) == 1
-        }
-        None -> { assert diagnostics != [] }
-      }
-      # A derived ordinary input can be changed without altering the opaque
-      # source proof that a later prepared consumer will receive.
-      let altered = LoadedModule { ..entry.loaded, text: "fn other() -> Bool = true\n" }
-      assert altered.text != prepared_loaded(entries[0]).text
-    }
-  }
-}
-
-test "prepared project loading binds final imports overlays and recovered sources" {
-  in_mem(() => {
-    let base = "/tmp/dawn-selfhost-analyze/prepared-packages"
-    mkdirs("${base}/pkg/library/src")
-    mkdirs("${base}/app/src")
-    put("${base}/pkg/library/dawn.toml", "schema = 1\nname = \"library\"\n")
-    put("${base}/pkg/library/src/bridge.dawn", "use leaf as impl_leaf\npub fn value() -> Int = impl_leaf.value()\n")
-    put("${base}/pkg/library/src/leaf.dawn", "pub fn value() -> Int = 1\n")
-    put("${base}/app/dawn.toml", "schema = 1\nname = \"app\"\n[deps]\nalias_dep = \"../pkg/library\"\n")
-    let entry = "${base}/app/src/main.dawn"
-    let original = "use alias_dep/bridge.{value}\nfn answer() -> Int = value()\n"
-    put(entry, original)
-    let plan = project_plan(source.SourceFile(entry))
-    for changed in [original, "# λ🌅 overlay\n" ++ original,
-      "use alias_dep/bridge.{value}\nfn broken( -> Int = 0\nfn after() -> Int = value()\n",
-      "use missing\nfn answer() -> Int = 3\n"] {
-      let over = map.from([(canon(entry), changed)])
-      let prepared: PreparedLoadData = load_entries_over_prepared(plan, [entry, entry], over)
-      let cold = load_entries_over(plan, [entry, entry], over)
-      assert prepared_result(prepared) == cold
-      assert len(prepared_modules(prepared)) == len(cold.modules)
-      var index = 0
-      for module in prepared_modules(prepared) {
-        let data: PreparedModuleData = module
-        assert data.loaded == cold.modules[index]
-        match data.snapshot {
-          Some(snapshot) -> {
-            assert data.loaded.pdiags == []
-            assert source_snapshot.syntax(snapshot) == data.loaded.m
-            let parsed = source_snapshot.of(data.loaded.text).expect("clean source")
-            let oracle = source_snapshot.resolved(parsed, data.loaded.m).expect("resolved source")
-            assert source_snapshot.indexed(snapshot) == source_snapshot.indexed(oracle)
-            assert source_snapshot.tokens(snapshot) == source_snapshot.tokens(oracle)
-          }
-          None -> { assert data.loaded.pdiags != [] }
-        }
-        index = index + 1
-      }
-      if changed == original {
-        assert cold.diags == [] && len(cold.modules) == 3
-        assert cold.modules[0].mod_path == "library/leaf"
-        assert cold.modules[1].mod_path == "library/bridge"
-        assert cold.modules[2].mod_path == "main"
-        let std = std_or_die()
-        let baseline = initial_carry_with_provenance(std, "prepared-package-test")
-        var caches: Map[String, ModuleBodyCache] = map.empty()
-        for revision in [0, 1] {
-          var carry = baseline
-          var cold_carry = baseline
-          for module in prepared_modules(prepared) {
-            let raw = prepared_loaded(module)
-            let current = analyze_module_step_prepared(module, carry, std, ct_default(), jsig_refused(), None,
-              map.get(caches, raw.mod_path))
-            let expected = analyze_module_step(raw, cold_carry, std, ct_default(), jsig_refused(), None)
-            assert current.step.diags == [] && current.step.diags == expected.diags
-            assert current.step.after == expected.after
-            assert current.step.checked.tm == expected.checked.tm
-            assert current.step.checked.ct == expected.checked.ct
-            let counts = current.counts.expect("prepared resolved source")
-            assert counts.visited == 1
-            assert counts.reused == revision && counts.checked == 1 - revision
-            caches = map.insert(caches, raw.mod_path, current.cache.expect("prepared admission"))
-            carry = current.step.after
-            cold_carry = expected.after
-          }
-        }
-      }
-    }
-  })
-}
-
-test "prepared loader collisions never certify a replacement file's text" {
-  in_mem(() => {
-    let base = "/tmp/dawn-selfhost-analyze/prepared-collision"
-    mkdirs("${base}/app/src/library")
-    mkdirs("${base}/pkg/library/src")
-    put("${base}/app/dawn.toml", "schema = 1\nname = \"app\"\n[deps]\nalias_dep = \"../pkg/library\"\n")
-    put("${base}/pkg/library/dawn.toml", "schema = 1\nname = \"library\"\n")
-    let entry = "${base}/app/src/library/bridge.dawn"
-    let dependency = "${base}/pkg/library/src/bridge.dawn"
-    # Both sources deliberately have the same AST and all the same spans.
-    # Their equal-width comments distinguish the actual indexed source.
-    let original = "use alias_dep/bridge\n# seed\npub fn value() -> Int = 1\n"
-    let replacement = "use alias_dep/bridge\n# deps\npub fn value() -> Int = 1\n"
-    let original_snapshot = source_snapshot.of(original).expect("seed source")
-    let replacement_snapshot = source_snapshot.of(replacement).expect("dependency source")
-    assert source_snapshot.syntax(original_snapshot) == source_snapshot.syntax(replacement_snapshot)
-    assert source_snapshot.indexed(original_snapshot) != source_snapshot.indexed(replacement_snapshot)
-    put(entry, original)
-    put(dependency, replacement)
-    let plan = project_plan(source.SourceFile(entry))
-    let over: Map[String, String] = map.empty()
-    let prepared = load_entries_over_prepared(plan, [entry], over)
-    let cold = load_entries_over(plan, [entry], over)
-    assert prepared_result(prepared) == cold
-    # The aliased dependency replaces the current module's canonical name.
-    # Final import rewriting restores the seed, so its proof must either be
-    # refused or still describe that seed, even when loading reports a cycle.
-    assert len(cold.modules) == 1 && cold.diags != []
-    assert cold.modules[0].path == entry && cold.modules[0].text == original
-    let module: PreparedModuleData = prepared_modules(prepared)[0]
-    assert module.loaded == cold.modules[0]
-    match module.snapshot {
-      Some(snapshot) -> {
-        let expected = source_snapshot.resolved(original_snapshot, module.loaded.m).expect("seed rewrite")
-        assert source_snapshot.syntax(snapshot) == module.loaded.m
-        assert source_snapshot.indexed(snapshot) == source_snapshot.indexed(expected)
-        assert source_snapshot.tokens(snapshot) == source_snapshot.tokens(expected)
-      }
-      None -> ()
-    }
-  })
-}
 
 test "a two-module project analyzes end to end" {
   in_mem(() => {
@@ -2429,26 +1830,14 @@ test "std identity is where the file came from, not what the module is called" {
   })
 }
 
-test "module provenance carry keeps exporting owners across header reorder" {
+test "module identity carry keeps exporting owners across header reorder" {
   in_mem(() => {
     let std = std_or_die()
-    let initial = initial_carry_with_provenance(std, "provenance-test")
-    assert initial_carry(std).provenance == None
-    let initial_origins = initial.provenance.expect("initial provenance")
-    assert map.len(initial_origins.modules) == map.len(std.exports)
-    var std_tables: List[allocation.Table] = []
-    for (_, origin) in map.entries(initial_origins.modules) {
-      assert origin != None
-      assert allocation.in_world(origin.expect("std origin"), "provenance-test", "other") != None
-      std_tables = std_tables ++ [origin.expect("std table")]
-    }
-    assert initial_origins.intrinsics != None
+    let initial = initial_carry(std)
     # the intern table behind std's derived ids reaches a user module on the
     # carry, which is the only thing left on it that every module shares
     assert initial.identities == std.identities
     assert map.len(initial.identities) > 0
-    assert allocation.combine(std_tables ++ [initial_origins.intrinsics.expect("compiler origins")]) != None
-    var tables: List[allocation.Table] = []
     var ids: List[Int] = []
     var binders: List[Int] = []
     # Each block carries a nominal declaration and a binder one. Reordering
@@ -2463,11 +1852,7 @@ test "module provenance carry keeps exporting owners across header reorder" {
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
         text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
-      let cold = analyze_module_step(input, initial_carry(std), std, ct_default(), jsig_refused(), None)
-      assert len(step.diags) == 0 && step.checked.tm == cold.checked.tm
-      let origins = step.after.provenance.expect("provider provenance")
-      assert map.get(origins.modules, "library") != Some(None)
-      let table = map.get(origins.modules, "library").expect("provider record").expect("provider table")
+      assert len(step.diags) == 0
       let id = map.get(step.checked.cx.adts_by_name, "First").expect("provider ID")
       let binder = match map.get(step.checked.cx.fns, "first_of").expect("provider generic").tparams[0] {
         TyVar(_, v) -> v
@@ -2478,44 +1863,24 @@ test "module provenance carry keeps exporting owners across header reorder" {
       # interns against them rather than starting an empty table
       assert map.get(step.after.identities, id) != None
       assert map.len(step.after.identities) > map.len(initial.identities)
-      assert allocation.published(table, TypeParameter, binder)
-      tables = tables ++ [table]
       ids = ids ++ [id]
       binders = binders ++ [binder]
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
         text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
-      let consumed = analyze_module_step_recorded(consumer, step.after, std, ct_default(), jsig_refused(), None)
+      let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
-      assert len(consumed.body_records.expect("recorded consumer body")) == 1
-      assert match cold.body_records { None -> true, Some(_) -> false }
-      let ordinary = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
-      assert match ordinary.body_records { None -> true, Some(_) -> false }
-      assert consumed.checked.tm == ordinary.checked.tm && consumed.diags == ordinary.diags
       assert map.get(consumed.after.identities, id) != None
-      let carried = consumed.after.provenance.expect("consumer provenance")
-      assert carried.world == initial_origins.world
-      assert map.get(carried.modules, "library") == Some(Some(table))
-      let local = map.get(carried.modules, "consumer").expect("consumer record").expect("consumer table")
-      # The consumer does not publish the provider's binder and does not have
-      # to: it holds the provider's `TyVar` inside the signature it was
-      # handed, and that integer names the provider's declaration and the slot
-      # it binds. There is nothing for a join to look up, which is why the
-      # join went with this knife.
-      assert not allocation.published(local, TypeParameter, binder)
-      assert allocation.between(local, local)
-      assert allocation.between(table, local)
     }
     # The two revisions declare the same two blocks in the opposite order.
     # Nothing in either moved: a nominal id derives from its declaration, and
     # a binder is a slot of the declaration that binds it.
     assert ids[0] == ids[1]
     assert binders[0] == binders[1]
-    assert allocation.between(tables[0], tables[1])
 
     # The same slot under a renamed declaration is a different identity, so
-    # its key is a different integer and the old ledger does not name it.
+    # its key is a different integer.
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
     let (renamed_ast, renamed_pd) = parser.parse_module(renamed_text)
     let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
@@ -2525,18 +1890,6 @@ test "module provenance carry keeps exporting owners across header reorder" {
     assert match map.get(renamed_step.checked.cx.fns, "renamed_of").expect("renamed generic").tparams[0] {
       TyVar(_, v) -> v != binders[0]
       _ -> false
-    }
-    let renamed_table = map.get(renamed_step.after.provenance.expect("renamed provenance").modules, "library")
-      .expect("renamed record").expect("renamed table")
-    assert not allocation.published(renamed_table, TypeParameter, binders[0])
-    assert allocation.between(tables[0], renamed_table)
-    for text in ["fn broken(", "fn broken(x: Missing) -> Unit = ()\n"] {
-      let (syntax, pd) = parser.parse_module(text)
-      let input = LoadedModule { mod_path: "broken", class_name: "broken", path: "/provenance/broken.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
-      let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
-      assert len(step.diags) > 0
-      assert map.get(step.after.provenance.expect("failed module provenance").modules, "broken") == Some(None)
     }
   })
 }
@@ -2549,26 +1902,23 @@ test "a consumer names a provider's effect without minting the provider's identi
     # id the consumer derives from the provider's spelling and could compute
     # without ever being told, and `!e` is a binder of `twice`, a packed key
     # of the provider's declaration that arrives inside the signature the
-    # consumer was handed and that a join is the only way to read.
+    # consumer was handed.
     #
     # Qualified and selective spellings must name the same provider identity.
     let std = std_or_die()
-    let initial = initial_carry_with_provenance(std, "provenance-test")
+    let initial = initial_carry(std)
     let asks = "pub effect Ask { fn ask() -> Int }\n"
     let generic = "pub fn twice[!e](f: fn() -> Int !e) -> Int !e = f() + f()\n"
     # The provider's own declaration spelling, and nothing about the consumer.
     let declared = identity.derive(identity.minted("library", EffectDecl, "Ask"))
     var effect_ids: List[Int] = []
     var binders: List[Int] = []
-    var tables: List[allocation.Table] = []
     for text in [asks ++ generic, generic ++ asks] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn",
         text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
-      let table = map.get(step.after.provenance.expect("provider provenance").modules, "library")
-        .expect("provider record").expect("provider table")
       let effect_id = map.get(step.checked.cx.effects, "Ask").expect("provider effect")
       assert effect_id == declared
       let binder = match map.get(step.checked.cx.fns, "twice").expect("provider generic").eparams[0] {
@@ -2576,11 +1926,8 @@ test "a consumer names a provider's effect without minting the provider's identi
         _ -> { assert false
           0 }
       }
-      assert allocation.published(table, EffectParameter, binder)
-      assert not allocation.published(table, TypeParameter, binder)
       effect_ids = effect_ids ++ [effect_id]
       binders = binders ++ [binder]
-      tables = tables ++ [table]
       # `relay` is the consumer's own effect-parameter binding, and it is
       # here so that the claim about the provider's binder below is a claim
       # about that binder rather than about an empty table.
@@ -2603,29 +1950,19 @@ test "a consumer names a provider's effect without minting the provider's identi
       assert map.get(consumed.checked.cx.effects, "Ask") == Some(declared)
       assert declared != identity.derive(identity.minted("consumer", EffectDecl, "Ask"))
       assert len(consumed.diags) == 0
-      let carried = consumed.after.provenance.expect("consumer provenance")
-      assert map.get(carried.modules, "library") == Some(Some(table))
-      let local = map.get(carried.modules, "consumer").expect("consumer record").expect("consumer table")
-      # The consumer publishes its own binder and neither of the provider's
-      # integers. The effect id is nobody's binding, and the provider's
-      # effect parameter belongs to the provider's declaration.
+      # The consumer binds its own effect parameter, and neither of the
+      # provider's integers is it. The effect id is nobody's binding, and the
+      # provider's effect parameter belongs to the provider's declaration.
       let own = match map.get(consumed.checked.cx.fns, "relay").expect("consumer generic").eparams[0] {
         EffVar(_, v) -> v
         _ -> { assert false
           0 }
       }
-      assert own != binder
-      assert allocation.published(local, EffectParameter, own)
-      assert not allocation.published(local, EffectParameter, binder)
-      assert not allocation.published(local, EffectParameter, declared)
-      assert not allocation.published(local, TypeParameter, declared)
-      assert allocation.between(table, local)
-      assert allocation.between(local, local)
+      assert own != binder && own != declared
     }
     # Reordering the provider's two declarations moves neither integer.
     assert effect_ids[0] == effect_ids[1]
     assert binders[0] == binders[1]
-    assert allocation.between(tables[0], tables[1])
   })
 }
 

@@ -49,7 +49,7 @@ def main():
     if args.shards < 1 or not 0 <= args.shard < args.shards:
         parser.error('require --shards >= 1 and 0 <= --shard < --shards')
     started = time.monotonic()
-    modules = ('cx', 'checker', 'semantic_reads', 'body_product')
+    modules = ('cx', 'checker', 'semantic_reads')
     sources = {module: (ROOT / 'selfhost/src/check' / (module + '.dawn')).read_text() for module in modules}
     variants = [
         ('cx', 'signature-input', 'semantic_reads.RenderedSignature(sig, answer)', 'semantic_reads.RenderedSignature(Sig { ..sig, param_defaults: [] }, answer)'),
@@ -211,7 +211,7 @@ def main():
         parser.error('the selected shard has no negative controls')
     # Every shard independently establishes the same positive baseline.
     subjects = [subject for subject in subjects if subject[1] == 'positive'] + selected
-    owning = re.compile(r'^FAIL\s+(?:check/\w+ :: )?(?:diagnostic reads|semantic reads relocate signature|semantic reads relocate rendered|semantic reads relocate constructor|semantic reads relocate function return|a local function io hint|body product)[^\n]*\n\s+assertion failed:', re.M)
+    owning = re.compile(r'^FAIL\s+(?:check/\w+ :: )?(?:diagnostic reads|semantic reads relocate signature|semantic reads relocate rendered|semantic reads relocate constructor|semantic reads relocate function return|a local function io hint)[^\n]*\n\s+assertion failed:', re.M)
     with tempfile.TemporaryDirectory(prefix='dawn-diagnostic-reads-') as temp:
         root = Path(temp)
         for directory in ('selfhost', 'compiler-plan'):

@@ -2,7 +2,8 @@
 """Exercise real synthetic document revisions; this is not a latency benchmark.
 
 Complete diagnostics and query replies can be compared between independently
-configured servers. Execution counts are kept separately from semantic output.
+configured servers. Any analysis counts a server reports are kept separately
+from semantic output.
 """
 import argparse
 import hashlib
@@ -36,48 +37,26 @@ def revisions(size):
     ]
 
 
-def expected_counts(size):
-    # Each revision is compared to the preceding revision, not the baseline.
-    # main reaches IO and stays cold. Signature edits also reset value_0's body;
-    # reorder restores provider's inferred signature. Errors discard retention.
-    return dict(zip((label for label, _, _ in revisions(size)), (
-        (size + 3, 0, 0, 0), (1, size + 2, 0, 0), (2, size + 1, 0, 0),
-        (4, size - 1, 0, 1), (3, size, 0, 1), (1, size + 1, 0, 0),
-        (3, size + 1, 0, 0), (2, size + 2, 0, 0), (size + 3, 0, 0, 0),
-        (0, 0, 1, 0),
-    )))
-
-
-def validate_counts(counts, expected):
-    if len(counts) != 1 or not counts[0]["observed"] or counts[0]["scope"] != "standalone":
-        raise RuntimeError("expected one observed standalone analysis")
-    actual = tuple(counts[0]["counts"][field] for field in (
-        "checked_bodies", "reused_bodies", "reused_modules", "cold_rejected_bodies"))
-    if actual != expected:
-        raise RuntimeError(f"analysis count mismatch: {actual} != {expected}")
-
-
 def selftest():
-    fields = ("checked_bodies", "reused_bodies", "reused_modules", "cold_rejected_bodies")
-    for expected in expected_counts(20).values():
-        good = {"observed": True, "scope": "standalone", "counts": dict(zip(fields, expected))}
-        validate_counts([good], expected)
-        bad = {**good, "counts": {**good["counts"], "reused_bodies": expected[1] + 1}}
-        for invalid in ([], [good, good], [{**good, "observed": False}], [bad]):
-            try:
-                validate_counts(invalid, expected)
-            except RuntimeError:
-                continue
-            raise AssertionError("count oracle accepted invalid observation")
-    print("OK: ten edit censuses and forty count-oracle rejection cases")
+    cases = revisions(20)
+    labels = [label for label, _, _ in cases]
+    if len(labels) != 10 or len(set(labels)) != 10:
+        raise AssertionError("revision census must name ten distinct revisions")
+    if [label for label, _, error in cases if error] != ["error"]:
+        raise AssertionError("exactly the error revision expects a diagnostic")
+    texts = dict((label, text) for label, text, _ in cases)
+    if texts["recovery"] != texts["initial"] or texts["identical"] != texts["recovery"]:
+        raise AssertionError("recovery and identical revisions must restore the baseline")
+    if any(texts[label] == texts["initial"] for label in labels
+           if label not in ("initial", "recovery", "identical")):
+        raise AssertionError("an edit revision left the baseline unchanged")
+    print("OK: ten edit revisions, one expected error, two baseline restorations")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--functions", type=int, default=1000)
-    parser.add_argument("--expect-reuse", action="store_true")
-    parser.add_argument("--expect-parse-counts", choices=("prepared", "cold"))
     parser.add_argument("--compare", type=Path, help="prior matrix output directory")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -122,25 +101,14 @@ def main():
                     raise RuntimeError(f"{label}: unresolved query target {needle!r}")
             counts = [decode(line) for line in client.stderr_text()[stderr_mark:].splitlines()
                       if line.startswith("LSP_BODY_STATS\t")]
-            entries = [line.split("\t")[1:] for line in client.stderr_text()[stderr_mark:].splitlines()
-                       if line.startswith("LSP_PARSE_ENTRY\t")]
-            if any(entry not in (["0"], ["1"], ["2"]) for entry in entries):
-                raise RuntimeError("invalid parser method-entry trace")
-            parse_counts = [entries.count([str(index)]) for index in range(3)] if entries else None
-            if args.expect_parse_counts:
-                expected = [1, 1, 1] if args.expect_parse_counts == "prepared" else [1, 0, 0]
-                if parse_counts != expected:
-                    raise RuntimeError(f"{label}: parse/index/projection counts {parse_counts} != {expected}")
-            if args.expect_reuse:
-                validate_counts(counts, expected_counts(args.functions)[label])
             rows.append({"label": label, "version": version, "diagnostics": publishes,
-                         "replies": replies, "analysis_counts": counts, "parse_counts": parse_counts})
+                         "replies": replies, "analysis_counts": counts})
             (args.output / "samples.json").write_text(json.dumps(rows, indent=2) + "\n")
         client.shutdown_exit()
     finally:
         (args.output / "stderr.txt").write_text(client.stderr_text())
         client.close()
-    semantic = [{key: value for key, value in row.items() if key not in {"analysis_counts", "parse_counts"}} for row in rows]
+    semantic = [{key: value for key, value in row.items() if key != "analysis_counts"} for row in rows]
     (args.output / "semantic.json").write_text(json.dumps(semantic, indent=2) + "\n")
     if args.compare:
         reference_meta = json.loads((args.compare / "metadata.json").read_text())

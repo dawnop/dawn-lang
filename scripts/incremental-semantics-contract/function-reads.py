@@ -81,7 +81,6 @@ def main():
         ("semantic_reads", "candidate-answer", "Some(entries) -> Some(entries ++ [FunctionCandidates(names)])", "Some(entries) -> Some(entries)"),
         ("semantic_reads", "candidate-order", "Some(entries) -> Some(entries ++ [FunctionCandidates(names)])", "Some(entries) -> Some(entries ++ [FunctionCandidates(list.reverse(names))])"),
         ("semantic_reads", "read-suffix", "Some(Some(list.drop(entries, len(prefix))))", "Some(Some(entries))"),
-        ("header_product", "header-invariant", "a.function_reads == b.function_reads", "true"),
     ]
     revalidation_owner = 'function query revalidation preserves lookup precedence pools and isolation'
     qualified_owner = 'qualified function query revalidation tracks providers aliases and misses'
@@ -103,7 +102,7 @@ def main():
     owners = {name: owner for name, _, _, owner in query_controls}
     variants.extend(('checker', name, old, new) for name, old, new, _ in query_controls)
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
-               for name in ("checker", "semantic_reads", "header_product")}
+               for name in ("checker", "semantic_reads")}
     subjects = [(module, "positive", source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
     subjects = select_subjects(subjects, owners, args.suite)
@@ -128,7 +127,7 @@ def main():
                 if not status or not re.search(failure, output, re.M) or re.search(r'^error:', output, re.M):
                     raise RuntimeError(name + ' did not compile and reach its owning assertion\n' + output)
                 query_seconds += time.monotonic() - subject_started
-            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:function reads|semantic reads|header product) [^\n]*\n\s+assertion failed:", output, re.M):
+            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:function reads|semantic reads) [^\n]*\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: function reads " + module + " " + name, flush=True)
     query_count = sum(name in owners for _, name, _ in subjects)

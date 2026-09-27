@@ -61,7 +61,7 @@ inferred body 参与 signature，comptime 读取 body/value，不能只跟踪导
 语义结果与源码位置视图分别失效，避免空白改动后 definition/diagnostics 使用旧 span。
 
 第3期已完成固定 header 的私有小语料原型，见
-[函数体实验说明](../scripts/incremental-semantics-contract/body-probe.md)。
+函数体实验说明（`scripts/incremental-semantics-contract/body-probe.md`，2026-09-27 随重放引擎删除，存档见 `incremental-slice-final` tag）。
 在前置函数增加局部变量并插入非 BMP 注释后，复用侧仅检查改动函数，其余10个函数
 的 TFun 和逐 body 边界完整 Cx 经纯数据重放后与冷检查一致。源码位置只支持整个
 body 平移；函数 key 只覆盖唯一命名的顶层函数。八个可编译负控覆盖身份歧义、

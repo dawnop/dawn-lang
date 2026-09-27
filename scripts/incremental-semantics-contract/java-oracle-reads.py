@@ -29,7 +29,6 @@ def main():
         # carried whole now.
         ('checker', 'packed-success', '(packed_cx, Some((0, sc)))', '(fixed_cx, Some((0, sc)))'),
         ('checker', 'packed-refusal', '(packed_cx, None)', '(fixed_cx, None)'),
-        ('body_product', 'capture', 'semantic_reads.capture(before.function_reads, after.function_reads)?', 'before.function_reads'),
     ]
     for candidate, indent in [('c', '      '), ('m2', '    ')]:
         anchor = f'let (score_cx, score) = fit_score(cx1, {candidate}.param_cls, {candidate}.is_varargs, ats, arities)\n{indent}cx1 = score_cx'
@@ -40,7 +39,7 @@ def main():
     # `-desc`, `-decl_cls`). They edited the field the projection copied out of
     # a SAM fact, and the projection no longer copies fields: the fact is
     # carried whole (K7b).
-    modules = ('cx', 'checker', 'semantic_reads', 'body_product')
+    modules = ('cx', 'checker', 'semantic_reads')
     sources = {m: (ROOT / 'selfhost/src/check' / (m + '.dawn')).read_text() for m in modules}
     subjects = [(m, 'positive', s) for m, s in sources.items()]
     subjects += [(m, name, edit(sources[m], old, new)) for m, name, old, new in variants]
@@ -75,7 +74,7 @@ def main():
             if name == 'positive':
                 if status:
                     raise RuntimeError('Positive ' + module + ' failed\n' + output)
-            elif not status or not re.search(r'^FAIL\s+(?:check/\w+ :: )?(?:java oracle reads|java reads|semantic reads preserve Java scoring|body product)[^\n]*\n\s+assertion failed:', output, re.M):
+            elif not status or not re.search(r'^FAIL\s+(?:check/\w+ :: )?(?:java oracle reads|java reads|semantic reads preserve Java scoring)[^\n]*\n\s+assertion failed:', output, re.M):
                 raise RuntimeError(name + ' did not reach its owning assertion\n' + output)
             print('OK: Java oracle ' + module + ' ' + name, flush=True)
     print(f'OK: Java oracle reads and {len(variants) + len(scoped)} compiling mutants, {time.monotonic() - started:.2f}s')

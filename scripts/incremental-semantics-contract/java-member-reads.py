@@ -34,10 +34,9 @@ def main():
         ("checker", "methods-consumer", "cx1 = methods_cx", "cx1 = cx1"),
         ("checker", "fields-consumer", "let (cx, fields) = java_static_fields_read(initial, fq)",
          "let (_, fields) = java_static_fields_read(initial, fq)\n  let cx = initial"),
-        ("body_product", "capture", "semantic_reads.capture(before.function_reads, after.function_reads)?", "before.function_reads"),
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
-               for name in ("cx", "checker", "semantic_reads", "body_product")}
+               for name in ("cx", "checker", "semantic_reads")}
     subjects = [(module, "positive", source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-java-member-reads-") as temp:
@@ -56,7 +55,7 @@ def main():
                     raise RuntimeError("Positive " + module + " failed\n" + output)
             else:
                 prefix = ("java member reads" if module in ("cx", "checker") else
-                          "semantic reads preserve ordered Java candidates" if module == "semantic_reads" else "body product")
+                          "semantic reads preserve ordered Java candidates")
                 if not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?" + prefix + r"[^\n]*\n\s+assertion failed:", output, re.M):
                     raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: Java member reads " + module + " " + name, flush=True)

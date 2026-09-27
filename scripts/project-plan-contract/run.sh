@@ -83,15 +83,14 @@ old = '''pub fn load_entries_over(
   entries: List[String],
   over: Map[String, String]
 ) -> LoadResult !Fs !Env !io =
-  prepared_result(resolve(
+  resolve(
     plan.source.source_root,
     entries,
     planner_diags(plan.source.diags),
     plan.source.pkgs,
     over,
-    false,
     entry_file(plan)
-  ))
+  )
 '''
 new = '''pub fn load_entries_over(
   plan: ProjectPlan,
@@ -102,15 +101,14 @@ new = '''pub fn load_entries_over(
   # is not; answering it here keeps the mutation to one function. `Env` is on
   # the row already: `resolve` reaches io.cwd whether or not this replans.
   let fresh = io.with_proc_real(() => project_plan(plan.source.target))
-  prepared_result(resolve(
+  resolve(
     fresh.source.source_root,
     entries,
     planner_diags(fresh.source.diags),
     fresh.source.pkgs,
     over,
-    false,
     entry_file(fresh)
-  ))
+  )
 }
 '''
 if text.count(old) != 1:

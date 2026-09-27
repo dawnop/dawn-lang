@@ -34,7 +34,7 @@ def main():
         # unchanged now, so turning the callback off is the identity (K5).
     ]
     sources = {name: (ROOT / "selfhost/src/check" / (name + ".dawn")).read_text()
-               for name in ("cx", "semantic_reads", "body_product")}
+               for name in ("cx", "semantic_reads")}
     subjects = [(module, "positive", source) for module, source in sources.items()]
     subjects += [(module, name, edit(sources[module], old, new)) for module, name, old, new in variants]
     with tempfile.TemporaryDirectory(prefix="dawn-effect-reads-") as temp:
@@ -51,7 +51,7 @@ def main():
             if name == "positive":
                 if status:
                     raise RuntimeError("Positive " + module + " failed\n" + output)
-            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:effect reads|semantic reads|body product) [^\n]*\n\s+assertion failed:", output, re.M):
+            elif not status or not re.search(r"^FAIL\s+(?:check/\w+ :: )?(?:effect reads|semantic reads) [^\n]*\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: effect reads " + module + " " + name, flush=True)
     print(f"OK: effect reads and {len(variants)} compiling mutants, {time.monotonic() - started:.2f}s")

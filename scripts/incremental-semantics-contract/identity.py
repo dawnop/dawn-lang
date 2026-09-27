@@ -118,7 +118,97 @@ def main():
                     r"^FAIL\s+ir/lower :: lowering numbers [^\n]*\n\s+assertion failed:", output, re.M):
                 raise RuntimeError(name + " did not reach its owning assertion\n" + output)
             print("OK: dense numbering " + name, flush=True)
-    print(f"OK: declaration identity and {len(variants) + len(lower_variants)} compiling mutants, "
+        lower_target.write_text(lower_original)
+        # The minting end of the same identities: `cx.mint` interns a derived
+        # id and refuses a collision, and `enter_decl` opens the declaration
+        # whose slots its bindings take. These controls lived in allocation.py
+        # beside the provenance ledger until that ledger went with the replay
+        # engine (2026-09-27); the code they hold is on every cold check.
+        cx_target = root / "selfhost/src/check/cx.dawn"
+        cx_original = cx_target.read_text()
+        cx_variants = [
+            ("intern-collision-ignored", "Some(other) -> if other != decl {", "Some(other) -> if false {"),
+            ("intern-not-recorded", "(Cx { ..cx, identities: map.insert(cx.identities, id, decl) }, id)", "(cx, id)"),
+            ("mint-takes-a-slot", "(Cx { ..cx, identities: map.insert(cx.identities, id, decl) }, id)",
+             "(Cx { ..cx, decl_slots: map.insert(cx.decl_slots, cx.owner_decl, slot_of(cx) + 1),\n"
+             "    identities: map.insert(cx.identities, id, decl) }, id)"),
+            # A declaration that does not open one numbers its bindings in
+            # whatever declaration the previous pass left open; one that
+            # reissues slot zero puts its body's locals on its signature's
+            # binders; and a pool shared by the program puts two modules'
+            # unowned bindings on one key.
+            ("enter-keeps-the-previous-declaration", "Cx { ..interned_cx, owner_decl: id }", "interned_cx"),
+            ("slots-restart-at-zero", "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = slot_of(cx)",
+             "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = 0"),
+            ("module-pool-is-one-for-the-program",
+             'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))',
+             'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool("")'),
+            ("mint-reads-the-source-path",
+             'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)',
+             'interned(cx, minted(cx.owner_class.unwrap_or("") ++ cx.src_path.unwrap_or(""), kind, name), lo, hi)'),
+            ("mint-ignores-the-kind",
+             'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)',
+             'interned(cx, minted(cx.owner_class.unwrap_or(""), identity.TypeDecl, name), lo, hi)'),
+        ]
+        for name, source in [("positive", cx_original)] + [(n, edit(cx_original, a, b)) for n, a, b in cx_variants]:
+            cx_target.write_text(source)
+            status, output = run("test", cx_target)
+            if name == "positive":
+                if status:
+                    raise RuntimeError("Positive mint subject failed\n" + output)
+            elif not status or not re.search(
+                    r"^FAIL\s+check/cx :: (a minted id|two declarations|identifiers are numbered|the free pool) "
+                    r"[^\n]*\n\s+assertion failed:", output, re.M):
+                raise RuntimeError(name + " did not reach its owning assertion\n" + output)
+            print("OK: derived identity " + name, flush=True)
+        cx_target.write_text(cx_original)
+        # The carry between modules. The intern table travels on it for the
+        # reason the carry exists: a digest collision between two modules is
+        # as fatal as one inside a module, and only a program-wide table can
+        # see it. These controls lived in provenance.py until the provenance
+        # half of the carry went with the replay engine (2026-09-27).
+        carry = "module identity carry keeps exporting owners across header reorder"
+        effects = "a consumer names a provider's effect without minting the provider's identity"
+        spans = "the program a render reads from carries this revision's declaration spans"
+        driver_path = "selfhost/src/driver/analyze.dawn"
+        std_path = "selfhost/src/driver/stdlib.dawn"
+        passes_path = "selfhost/src/check/passes.dawn"
+        carry_originals = {path: (root / path).read_text() for path in (driver_path, std_path, passes_path)}
+        carry_variants = [
+            ("drop-identity-carry", carry, driver_path, "identities: cx.identities,", "identities: before.identities,"),
+            ("drop-std-identity-carry", carry, std_path, "identities: interned,\n    mods: mods,",
+             "identities: map.empty(),\n    mods: mods,"),
+            ("drop-std-identity-step", carry, std_path, "interned = cx1.identities", "interned = interned"),
+            # `identity.absolute` keeps a diagnostic's own offsets when the
+            # revision has no view of its owner, so a program assembled
+            # without the views renders declaration-relative offsets as
+            # absolute and says nothing about it.
+            ("drop-render-view", spans, driver_path,
+             "Program { modules: out, diags: diags, decl_spans: carry.decl_spans }",
+             "Program { modules: out, diags: diags, decl_spans: map.empty() }"),
+            # A module that imports an effect writes the provider's id into its
+            # own table; this has it derive one from the name in the importing
+            # scope instead.
+            ("mint-imported-effect", effects, passes_path,
+             "cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, local, eid) }",
+             "let (own_cx, own) = mint(cx1, EffectDecl, name, lo, hi)\n"
+             "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, local, own),\n"
+             "        effect_infos: map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),
+        ]
+        carry_subjects = [("positive", carry, driver_path, carry_originals[driver_path])] + [
+            (name, owner, path, edit(carry_originals[path], old, new))
+            for name, owner, path, old, new in carry_variants]
+        for name, owner, path, source in carry_subjects:
+            (root / path).write_text(source)
+            status, output = run("test", root / driver_path)
+            (root / path).write_text(carry_originals[path])
+            failure = re.search(r"^FAIL\s+driver/analyze :: " + re.escape(owner) +
+                                r"[^\n]*\n\s+assertion failed:", output, re.M)
+            if (status if name == "positive" else not status or not failure):
+                raise RuntimeError(name + " did not satisfy its owning contract\n" + output)
+            print("OK: identity carry " + name, flush=True)
+    total = len(variants) + len(lower_variants) + len(cx_variants) + len(carry_variants)
+    print(f"OK: declaration identity and {total} compiling mutants, "
           f"{time.monotonic() - started:.2f}s")
 
 

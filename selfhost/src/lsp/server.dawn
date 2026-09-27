@@ -19,35 +19,27 @@ use json/parser
 use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, error_text}
 use json/render.{render}
 use driver/analyze.{
-  Program, ProjectPlan, LocDiag, CheckedMod,
+  Program, ProjectPlan, LocDiag,
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
-  project_module_path, load_entries_over, load_entries_over_prepared, prepare_standalone, canon
+  project_module_path, load_entries_over, canon
 }
 use compiler_plan/source
 use driver/incremental
 use driver/fsmem
 use compiler_plan/envmem
-use ir/interp.{ct_default, CtOut}
+use ir/interp.{ct_default}
 use check/jsig.{Jsig, JsigLease, JsigProbe, jsig_refused_lease, refused_probe}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
-use check/checker.{
-  exports_of, visible_bins,
-  check_module_headers, check_module_body_products, assemble_module_bodies
-}
-use check/cx.{Cx, ModExports, cx_new, package_of, exports_seen_by}
-use check/identity.{module_key}
-use check/tast.{TModule}
-use check/scalar_replay
-use check/body_execution
-use check/source_snapshot
+use check/checker.{exports_of, visible_bins}
+use check/cx.{ModExports, package_of, exports_seen_by}
 use lsp/lspq.{QCx, Target, find_target, typed_trees}
 use lsp/lspc.{completions_at}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render}
 use front/ast.{
-  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
+  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
 use front/token.{Diag}
 use front/fmt
@@ -426,17 +418,18 @@ pub type LspLeaseHost = {
 }
 
 ## Analysis policy is fixed before any lease-backed owner is created. The
-## ordinary entry stays legacy until end-to-end value gates permit activation.
-pub type LspAnalysisMode = Legacy | PreparedBodies | Cold
+## ordinary entry reuses a safe module prefix; `Cold` re-checks every module,
+## which is the reference a prefix session is compared against.
+pub type LspAnalysisMode = Legacy | Cold
 pub type LspAnalysisConfig = {
-  mode: LspAnalysisMode, max_modules: Int, max_text_units: Int, max_products: Int
+  mode: LspAnalysisMode, max_modules: Int, max_text_units: Int
 }
 
 pub fn legacy_analysis_config() -> LspAnalysisConfig =
-  LspAnalysisConfig { mode: Legacy, max_modules: 128, max_text_units: 1048576, max_products: 0 }
+  LspAnalysisConfig { mode: Legacy, max_modules: 128, max_text_units: 1048576 }
 
 fn validate_analysis_config(config: LspAnalysisConfig) -> Unit = {
-  if config.max_modules < 0 || config.max_text_units < 0 || config.max_products < 0 {
+  if config.max_modules < 0 || config.max_text_units < 0 {
     panic("negative LSP analysis cache limit")
   }
 }
@@ -472,8 +465,6 @@ type Doc = {
   text: String,
   view: SourceView,
   ls: List[Int],
-  standalone_cache: Option[incremental.Session],
-  analysis_stats: Option[incremental.Stats],
   analysis: DocAnalysis
 }
 
@@ -611,8 +602,6 @@ fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
   let config = st.analysis_config
   validate_analysis_config(config)
   match config.mode {
-    PreparedBodies -> incremental.new_with_body_cache(st.std, ct_default(), js, st.host.probe,
-      config.max_modules, config.max_text_units, config.max_products)
     Legacy -> incremental.new(st.std, ct_default(), js, st.host.probe,
       config.max_modules, config.max_text_units)
     Cold -> incremental.disable_reuse(incremental.new(st.std, ct_default(), js, st.host.probe,
@@ -1425,14 +1414,8 @@ fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
       }
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
-      let update = if st.analysis_config.mode == PreparedBodies {
-        let prepared = load_entries_over_prepared(ws0.plan, entries, overlay)
-        incremental.analyze_prepared(ws0.cache, prepared)
-      } else {
-        let loaded = load_entries_over(ws0.plan, entries, overlay)
-        let update = incremental.analyze(ws0.cache, loaded)
-        update
-      }
+      let loaded = load_entries_over(ws0.plan, entries, overlay)
+      let update = incremental.analyze(ws0.cache, loaded)
       let prog = update.program
       Workspace {
         ..ws0,
@@ -1579,19 +1562,11 @@ fn install_workspace(
   st
 }
 
-## A document borrows the shared oracle but owns its own immutable cache. A
-## close of another URI cannot replace this owner or dispose that oracle.
-fn standalone_analysis(st: LspState, source_path: String, text: String,
-  previous: Option[incremental.Session]) -> (Program, Option[incremental.Session], Option[incremental.Stats]) !Env !io = {
+## A standalone buffer borrows the shared oracle and is analysed cold on
+## every revision; it owns no session a close of another URI could replace.
+fn standalone_analysis(st: LspState, source_path: String, text: String) -> Program !Env !io = {
   let lease = st.standalone.expect("standalone LSP lease used after shutdown")
-  if st.analysis_config.mode == PreparedBodies {
-    let owner = match previous { Some(owner) -> owner, None -> analysis_session(st, lease.jsig) }
-    let prepared = prepare_standalone(source_path, text)
-    let update = incremental.analyze_prepared(owner, prepared)
-    (update.program, Some(update.session), Some(update.stats))
-  } else {
-    (analyze_standalone(source_path, text, st.std, ct_default(), lease.jsig), None, None)
-  }
+  analyze_standalone(source_path, text, st.std, ct_default(), lease.jsig)
 }
 
 fn standalone_doc(
@@ -1607,7 +1582,7 @@ fn standalone_doc(
     Some(found) -> found
     None -> "<lsp>"
   }
-  let (prog, owner, stats) = standalone_analysis(st, source_path, text, None)
+  let prog = standalone_analysis(st, source_path, text)
   Doc {
     uri: uri,
     version: version,
@@ -1616,8 +1591,6 @@ fn standalone_doc(
     text: text,
     view: view_of(text),
     ls: line_starts_of(text),
-    standalone_cache: owner,
-    analysis_stats: stats,
     analysis: Standalone(prog, standalone_entry(prog), modules)
   }
 }
@@ -1654,8 +1627,6 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
             text: text,
             view: view_of(text),
             ls: line_starts_of(text),
-            standalone_cache: None,
-            analysis_stats: None,
             analysis: WorkspaceMember(identity)
           }
           var st = LspState { ..st0, docs: map.insert(st0.docs, uri, d) }
@@ -1697,7 +1668,7 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
         Some(found) -> found
         None -> "<lsp>"
       }
-      let (prog, owner, stats) = standalone_analysis(st0, source_path, text, old.standalone_cache)
+      let prog = standalone_analysis(st0, source_path, text)
       # re-read rather than carry the old one: the identity is settled by the
       # analysis, and an edit re-runs the analysis
       let d = Doc {
@@ -1706,8 +1677,6 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
         text: text,
         view: view_of(text),
         ls: line_starts_of(text),
-        standalone_cache: owner,
-        analysis_stats: stats,
         analysis: Standalone(prog, standalone_entry(prog), modules)
       }
       let st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
@@ -2171,12 +2140,6 @@ test "a bundled std buffer keeps its std identity through the document seam" {
     let no_modules: Option[Map[String, String]] = None
     let d = standalone_doc(st, "file://${canon(path)}", Some(path), Some(canon(path)),
       text, 0, no_modules)
-    let opt_in = LspState { ..st, analysis_config: LspAnalysisConfig {
-      mode: PreparedBodies, max_modules: 8, max_text_units: 20000, max_products: 100 } }
-    let prepared_doc = standalone_doc(opt_in, d.uri, Some(path), Some(canon(path)), text, 0, no_modules)
-    let prepared_analysis = analysis_of(opt_in, prepared_doc).expect("prepared std analysis")
-    assert prepared_analysis.entry == "std/cursor" && prepared_analysis.prog.diags == []
-    assert prepared_analysis.prog.modules[0].cx.is_std_module
     match d.analysis {
       Standalone(prog, entry, _) -> {
         assert len(prog.diags) == 0
@@ -2266,275 +2229,11 @@ fn def_probe_state(std: StdCtx) -> LspState = {
   }
 }
 
-test "prepared standalone LSP owners preserve queries counts and shared lease lifetime" {
-  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => io.with_console_real(() => {
-    let std = match load_std("std") { Ok(s) -> s, Err(e) -> panic(std_load_error_text(e)) }
-    let base = def_probe_state(std)
-    # Lease callbacks have a closed !io signature; real private files observe
-    # them on both backends without mutable lambda captures or Java counters.
-    fn count(file: String) -> Int !io = io.with_fs_real(() => match io.read_file(file) {
-      Ok(value) -> str.len(value), Err(e) -> panic(e.message)
-    })
-    fn bump(file: String) -> Unit !io = io.with_fs_real(() => {
-      let value = match io.read_file(file) { Ok(value) -> value, Err(e) -> panic(e.message) }
-      match io.write_file(file, value ++ "x") { Ok(_) -> (), Err(e) -> panic(e.message) }
-    })
-    let closed = match io.temp_file("/tmp", "dawn-lsp-standalone-close-") { Ok(file) -> file, Err(e) -> panic(e.message) }
-    let shared = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
-    let configured = LspState { ..base, standalone: Some(shared), analysis_config:
-      LspAnalysisConfig { mode: PreparedBodies, max_modules: 8, max_text_units: 20000, max_products: 20 } }
-    let cold_base = LspState { ..base, analysis_config: LspAnalysisConfig { ..legacy_analysis_config(), mode: Cold } }
-    let uri = "untitled:prepared-first"
-    let second_uri = "untitled:prepared-second"
-    let first = "fn leaf() -> Int = 1\nfn caller() -> Int = leaf()\n"
-    let edited = "fn leaf() -> Int = 2\nfn caller() -> Int = leaf()\n"
-    var warm = open_new_doc(configured, uri, first, 10)
-    var cold = open_new_doc(cold_base, uri, first, 10)
-    println("")
-    assert map.get(warm.docs, uri).expect("first").analysis_stats.expect("counts").checked_bodies == 2
-    warm = open_new_doc(warm, second_uri, first, 1)
-    println("")
-    assert map.get(warm.docs, second_uri).expect("second").analysis_stats.expect("counts").checked_bodies == 2
-    var round = 0
-    for text in [first, edited, "# λ🌅 shifted\n" ++ edited,
-      "fn leaf() -> Bool = true\nfn caller() -> Bool = leaf()\n",
-      "fn broken( -> Int = 0\n", "fn leaf() -> Int = missing\n", edited] {
-      # Lower versions retain the server's current synchronous update policy.
-      warm = update_doc(warm, uri, text, round)
-      cold = update_doc(cold, uri, text, round)
-      println("")
-      let d = map.get(warm.docs, uri).expect("warm document")
-      let c = map.get(cold.docs, uri).expect("cold document")
-      let a = analysis_of(warm, d).expect("warm analysis")
-      let b = analysis_of(cold, c).expect("cold analysis")
-      assert d.version == round && d.text == text && d.view == c.view && d.ls == c.ls
-      assert a.entry == b.entry && a.prog.diags == b.prog.diags && a.prog.decl_spans == b.prog.decl_spans
-      assert a.prog.modules[0].tm == b.prog.modules[0].tm && a.prog.modules[0].ct == b.prog.modules[0].ct
-      assert diagnostics_for_uri(warm, uri) == diagnostics_for_uri(cold, uri)
-      assert match c.standalone_cache { None -> true, Some(_) -> false }
-      assert c.analysis_stats == None
-      let stats = d.analysis_stats.expect("prepared counts")
-      if round == 0 { assert stats.reused_modules == 1 && stats.visited_bodies == 0 }
-      if round == 1 { assert stats.checked_bodies == 1 && stats.reused_bodies == 1 }
-      if round == 2 { assert stats.checked_bodies == 0 && stats.reused_bodies == 2 }
-      if a.prog.diags == [] {
-        let offset = str.index_of(text, "= leaf()").expect("call") + 2
-        let (line, ch) = lsp_position(d.view, d.ls, offset)
-        let params = jobj([("textDocument", jobj([("uri", JStr(uri))])), ("position", jpos(line, ch))])
-        assert handle_hover(warm, params) != JNull
-        assert handle_hover(warm, params) == handle_hover(cold, params)
-        assert handle_definition(warm, params) == handle_definition(cold, params)
-        assert handle_completion(warm, params) == handle_completion(cold, params)
-      }
-      round = round + 1
-    }
-    warm = close_doc(warm, uri)
-    println("")
-    assert count(closed) == 0 && not map.has(warm.docs, uri)
-    warm = update_doc(warm, second_uri, first, 2)
-    println("")
-    assert map.get(warm.docs, second_uri).expect("other still live").analysis_stats.expect("counts").reused_modules == 1
-    warm = open_new_doc(warm, uri, first, 11)
-    println("")
-    assert map.get(warm.docs, uri).expect("reopened").analysis_stats.expect("counts").checked_bodies == 2
-    let stopped = close_all_leases(warm)
-    assert count(closed) == 1 && map.len(stopped.docs) == 0 && map.len(stopped.workspaces) == 0
-    assert match stopped.standalone { None -> true, Some(_) -> false }
-    let stopped_again = close_all_leases(stopped)
-    assert count(closed) == 1 && map.len(stopped_again.docs) == 0
-    let legacy = standalone_doc(base, "untitled:legacy", None, None, first, 1, None)
-    assert match legacy.standalone_cache { None -> true, Some(_) -> false }
-    assert legacy.analysis_stats == None
-    let limited = LspState { ..base, analysis_config: LspAnalysisConfig {
-      mode: PreparedBodies, max_modules: 0, max_text_units: 0, max_products: 0 } }
-    let one = standalone_doc(limited, "untitled:limited", None, None, first, 1, None)
-    let limited_state = LspState { ..limited, docs: map.from([("untitled:limited", one)]) }
-    let two = update_existing_doc(limited_state, one, first, 2)
-    println("")
-    let counts = map.get(two.docs, "untitled:limited").expect("limited").analysis_stats.expect("counts")
-    assert counts.retained_total_modules == 0 && counts.retained_body_products == 0 && counts.unobserved_modules == 1
-    let _ = io.delete(closed)
-  }))))
-}
-
-test "prepared project LSP owners drop conflicts and recreate leases on reopen" {
-  let root = fsmem.MEM_BASE ++ "/prepared-project"
-  let path = root ++ "/src/main.dawn"
-  let library = root ++ "/src/lib.dawn"
-  let uri = "file://" ++ path
-  let lib_uri = "file://" ++ library
-  let text = "use lib\nfn answer() -> Int = lib.value()\n"
-  var files = fsmem.mem_std(fsmem.MEM_BASE)
-  files = fsmem.mem_put(files, root ++ "/dawn.toml", "schema = 1\nname = \"prepared_project\"\n")
-  files = fsmem.mem_put(files, library, "pub fn value() -> Int = 1\n")
-  files = fsmem.mem_put(files, path, text)
-  let _ = fsmem.with_fs_mem(files, () => io.with_proc_real(() =>
-      envmem.with_env_table(fsmem.MEM_BASE, [], () => io.with_console_real(() => {
-        let std = match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) { Ok(s) -> s, Err(e) -> panic(std_load_error_text(e)) }
-        let base = def_probe_state(std)
-        fn count(file: String) -> Int !io = io.with_fs_real(() => match io.read_file(file) {
-          Ok(value) -> str.len(value), Err(e) -> panic(e.message)
-        })
-        fn bump(file: String) -> Unit !io = io.with_fs_real(() => {
-          let value = match io.read_file(file) { Ok(value) -> value, Err(e) -> panic(e.message) }
-          match io.write_file(file, value ++ "x") { Ok(_) -> (), Err(e) -> panic(e.message) }
-        })
-        fn counter() -> String !io = io.with_fs_real(() => match io.temp_file("/tmp", "dawn-lsp-project-lease-") {
-          Ok(file) -> file, Err(e) -> panic(e.message)
-        })
-        let created = counter()
-        let closed = counter()
-        let host = LspLeaseHost { ..base.host, project: (_plan: source.SourcePlan) => {
-          bump(created)
-          Ok(JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) })
-        } }
-        let config = LspAnalysisConfig { mode: PreparedBodies, max_modules: 12, max_text_units: 20000, max_products: 20 }
-        var warm = open_new_doc(LspState { ..base, host: host, analysis_config: config }, uri, text, 1)
-        var cold = open_new_doc(LspState { ..base, analysis_config: LspAnalysisConfig { ..config, mode: Cold } }, uri, text, 1)
-        warm = open_new_doc(warm, lib_uri, "pub fn value() -> Int = 1\n", 1)
-        cold = open_new_doc(cold, lib_uri, "pub fn value() -> Int = 1\n", 1)
-        println("")
-        assert count(created) == 1 && count(closed) == 0
-        let key = match map.get(warm.docs, uri).expect("member").analysis {
-          WorkspaceMember(identity) -> identity.lookup_key
-          _ -> panic("workspace")
-        }
-        # Each library revision, checked warm and cold side by side. This and
-        # the last two phases are local functions rather than inline: inline,
-        # this closure was 9177 bytes of bytecode, over HotSpot's 8000-byte
-        # HugeMethodLimit, and the method-size gate holds every method outside
-        # `embed/` and test blocks to that line, closures lifted out of a test
-        # included (#241). Each phase only reads what the phases before it
-        # settled, which comes in as a parameter or a capture; this loop
-        # threads both states, so they come in and the warm one goes back out.
-        fn edit_library(warm0: LspState, cold0: LspState) -> LspState !Fs !Proc !Env !Console !io = {
-          var warm = warm0
-          var cold = cold0
-          var round = 0
-          for revision in ["pub fn value() -> Int = 2\n", "pub fn value() -> Bool = true\n",
-            "pub fn value() -> Int = missing\n", "pub fn value() -> Int = 3\n"] {
-            warm = update_doc(warm, lib_uri, revision, round)
-            cold = update_doc(cold, lib_uri, revision, round)
-            println("")
-            let ws = match map.get(warm.workspaces, key).expect("warm") { Ready(ws) -> ws, _ -> panic("ready") }
-            let cs = match map.get(cold.workspaces, key).expect("cold") { Ready(ws) -> ws, _ -> panic("ready") }
-            let a = ws.prog.expect("program")
-            let b = cs.prog.expect("program")
-            assert a.diags == b.diags && a.decl_spans == b.decl_spans
-            assert ws.diag_by_uri == cs.diag_by_uri
-            var index = 0
-            for m in a.modules {
-              assert m.tm == b.modules[index].tm && m.ct == b.modules[index].ct
-              index = index + 1
-            }
-            let stats = ws.analysis_stats.expect("stats")
-            let cold_stats = cs.analysis_stats.expect("cold stats")
-            assert cold_stats.reused_modules == 0 && cold_stats.retained_total_modules == 0
-            if round == 0 { assert stats.checked_bodies == 1 && stats.reused_bodies == 1 }
-            if round == 1 { assert stats.reused_bodies == 0 && a.diags != [] }
-            round = round + 1
-          }
-          warm
-        }
-        warm = edit_library(warm, cold)
-        let duplicate = "file://localhost" ++ path
-        warm = open_new_doc(warm, duplicate, text ++ "# conflicting\n", 1)
-        println("")
-        let conflict = match map.get(warm.workspaces, key).expect("conflict") { Ready(ws) -> ws, _ -> panic("ready") }
-        assert match conflict.prog { None -> true, Some(_) -> false }
-        assert conflict.analysis_stats == None
-        warm = close_doc(warm, duplicate)
-        println("")
-        let recovered = match map.get(warm.workspaces, key).expect("recovered") { Ready(ws) -> ws, _ -> panic("ready") }
-        assert recovered.analysis_stats.expect("counts").reused_bodies == 0
-        assert recovered.analysis_stats.expect("counts").checked_bodies == 2
-        warm = close_doc(warm, lib_uri)
-        println("")
-        assert count(closed) == 0
-        warm = close_doc(warm, uri)
-        println("")
-        assert count(closed) == 1 && map.len(warm.workspaces) == 0
-        warm = open_new_doc(warm, uri, text, 10)
-        println("")
-        let reopened = match map.get(warm.workspaces, key).expect("reopened") { Ready(ws) -> ws, _ -> panic("ready") }
-        assert count(created) == 2 && reopened.analysis_stats.expect("counts").checked_bodies == 2
-        let stopped = close_all_leases(warm)
-        assert count(closed) == 2 && map.len(stopped.docs) == 0
-        fn retry_after_failed_setup() -> String !Fs !Proc !Env !Console !io = {
-          # A failed setup owns no Session. Edits do not retry; didSave's explicit
-          # retry path obtains a new lease and starts a new prepared owner.
-          let attempts = counter()
-          let flaky_host = LspLeaseHost { ..host, project: (_plan: source.SourcePlan) => {
-            bump(attempts)
-            if count(attempts) == 1 {
-              Err(LocDiag { path: root ++ "/dawn.toml", d: Diag {
-                msg: "injected Java setup failure", lo: 0, hi: 0, hint: "", owner: None } })
-            } else {
-              bump(created)
-              Ok(JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) })
-            }
-          } }
-          var unavailable = open_new_doc(LspState { ..base, host: flaky_host, analysis_config: config }, uri, text, 1)
-          println("")
-          assert match map.get(unavailable.workspaces, key) { Some(Unavailable(_)) -> true, _ -> false }
-          assert match analysis_of(unavailable, map.get(unavailable.docs, uri).expect("unavailable doc")) {
-            None -> true, Some(_) -> false
-          }
-          unavailable = update_doc(unavailable, uri, text ++ "# still unavailable\n", 2)
-          println("")
-          assert count(attempts) == 1 && count(created) == 2
-          unavailable = retry_unavailable(unavailable, uri)
-          println("")
-          let retried = match map.get(unavailable.workspaces, key).expect("retried") { Ready(ws) -> ws, _ -> panic("ready") }
-          assert count(attempts) == 2 && count(created) == 3
-          assert retried.analysis_stats.expect("new owner").checked_bodies == 2
-          let retried_stop = close_all_leases(unavailable)
-          assert count(closed) == 3 && map.len(retried_stop.docs) == 0
-          attempts
-        }
-        let attempts = retry_after_failed_setup()
-        fn close_on_failed_activation_and_teardown(
-          warm: LspState,
-          reopened: Workspace
-        ) -> Unit !Fs !Env !Console !io = {
-          # A new lease must also close if rebuilding panics before installation.
-          let broken_host = LspLeaseHost { ..host, probe: (_js: Jsig) => panic("injected probe failure") }
-          let activation = LspState { ..base, host: broken_host, analysis_config: config,
-            docs: map.from([(uri, map.get(warm.docs, uri).expect("member"))]) }
-          let failed = catch_panic(() => activate_workspace(activation, reopened.plan, map.from([(uri, path)])))
-          assert match failed { Err(_) -> true, Ok(_) -> false }
-          assert count(created) == 4 && count(closed) == 4
-          # Teardown makes all owners unreachable and still closes the remaining
-          # leases when an earlier close raises; another teardown is a no-op.
-          let broken_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => {
-            bump(closed)
-            panic("injected close failure")
-          } }
-          let last_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
-          let platform_lease = JsigLease { jsig: base.standalone.expect("lease").jsig, close: () => bump(closed) }
-          let teardown = LspState { ..base, docs: warm.docs, standalone: Some(platform_lease), workspaces:
-            map.from([("first", Ready(Workspace { ..reopened, lease: broken_lease })),
-              ("second", Ready(Workspace { ..reopened, lease: last_lease }))]) }
-          let cleared = close_all_leases(teardown)
-          assert count(closed) == 7 && map.len(cleared.docs) == 0 && map.len(cleared.workspaces) == 0
-          let _ = close_all_leases(cleared)
-          assert count(closed) == 7
-        }
-        close_on_failed_activation_and_teardown(warm, reopened)
-        io.with_fs_real(() => {
-          let _ = io.delete(created)
-          let _ = io.delete(closed)
-          let _ = io.delete(attempts)
-        })
-      }))))
-}
-
 test "LSP analysis configuration keeps legacy defaults and rejects negative limits" {
   let legacy = legacy_analysis_config()
   assert legacy.mode == Legacy && legacy.max_modules == 128 && legacy.max_text_units == 1048576
-  assert legacy.max_products == 0
   for config in [LspAnalysisConfig { ..legacy, max_modules: -1 },
-    LspAnalysisConfig { ..legacy, max_text_units: -1 }, LspAnalysisConfig { ..legacy, max_products: -1 }] {
+    LspAnalysisConfig { ..legacy, max_text_units: -1 }] {
     assert match catch_panic(() => validate_analysis_config(config)) { Err(_) -> true, Ok(_) -> false }
   }
 }
@@ -2559,7 +2258,6 @@ test "workspace commits prefix cache with its Program and drops it on conflict" 
         let doc = Doc {
           uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
           text: text, view: view_of(text), ls: line_starts_of(text),
-          standalone_cache: None, analysis_stats: None,
           analysis: WorkspaceMember(identity)
         }
         let base = def_probe_state(std)
@@ -2832,108 +2530,6 @@ test "a local definition still resolves against the requesting document" {
       }
       None -> panic("a definition in the requesting document must resolve")
     }
-  }))
-}
-
-test "a replayed body's definition points at the candidate revision's position" {
-  # P3's third sentence on the definition half. A body product carries the
-  # positions its own declaration measured, so a declaration that only moved
-  # is reused with offsets that are still relative to it; `checker.left`
-  # resolves them against the candidate revision's span view on the way out.
-  # Drop that and the jump lands where the declaration used to be, which is a
-  # confidently wrong location rather than a missing one, and every gate stays
-  # green because the replayed and cold products still agree about every
-  # integer that is not a position.
-  #
-  # The fixture and its probes are local to the test on purpose: a module
-  # function here would be part of `lsp.server`'s Core, and nothing about
-  # this belongs in the compiler the golden records.
-  io.with_fs_real(() => io.with_env_real(() => {
-    # The two revisions. `moved` is spelled identically in both; the candidate
-    # adds a blank line and a comment above it and changes nothing else, so
-    # its body product is reusable and its position is not the recorded one.
-    fn revision(head: List[String]) -> String =
-      join(head ++ [
-        "fn moved() -> Int = {",
-        "  let value = 42",
-        "  value",
-        "}",
-        ""
-      ], "\n")
-    # A query context over one module checked without a program around it:
-    # the probe needs the module's own typed tree and nothing else, and
-    # building it here is what lets the test hand `lspq` a revision whose
-    # bodies were replayed rather than checked.
-    fn probe_qcx(std: StdCtx, m: Module, cx: Cx, tm: TModule) -> QCx = {
-      let entry = CheckedMod { mod_path: "sample", class_name: "sample", path: "sample.dawn",
-        m: m, cx: cx, tm: tm,
-        ct: CtOut { diags: [], consts: map.empty(), blocks: map.empty() } }
-      let no_env: Map[String, ModExports] = map.empty()
-      QCx { entry: entry,
-        prog: Program { modules: [entry], diags: [], decl_spans: map.empty() },
-        std: std, exports_env: no_env, bins: visible_bins(builtins(), cx), typed: typed_trees(tm) }
-    }
-    # Where `lspq` says the local is declared, asked at the read of it.
-    fn probe_local(qc: QCx, text: String) -> (Int, Int) = {
-      let read = match str.index_of(text, "  value\n}") {
-        Some(i) -> i + 2
-        None -> panic("the probe text has no read of `value`")
-      }
-      match find_target(qc, read) {
-        Some(t) -> match t.def {
-          Some(sp) -> sp
-          None -> panic("no definition offered for the local read")
-        }
-        None -> panic("nothing under the cursor at the local read")
-      }
-    }
-    # Where the local is declared, which for a `let` binding is the statement
-    # that binds it rather than the name inside it.
-    fn declared_at(text: String) -> (Int, Int) = {
-      let binding = "let value = 42"
-      match str.index_of(text, binding) {
-        Some(i) -> (i, i + str.len(binding))
-        None -> panic("the probe text has no declaration of `value`")
-      }
-    }
-
-    let std = match load_std("std") {
-      Ok(sc) -> sc
-      Err(e) -> panic("std: ${std_load_error_text(e)}")
-    }
-    let before = revision(["fn other(x: Int) -> Int = x"])
-    let after = revision(["fn other(x: Int) -> Int = x", "",
-      "# a comment, and the blank line above it"])
-    let scope = module_key("lsp-definition", "sample", "sample", "sample.dawn")
-    let old_snapshot = source_snapshot.of(before).expect("recorded snapshot")
-    let next_snapshot = source_snapshot.of(after).expect("candidate snapshot")
-    let next_syntax = source_snapshot.syntax(next_snapshot)
-    let base = cx_new(Some("sample"), Some("sample.dawn"))
-    let no_env: Map[String, ModExports] = map.empty()
-    let old = check_module_headers(base, source_snapshot.syntax(old_snapshot), no_env)
-    let next = check_module_headers(base, next_syntax, no_env)
-    let saved = body_execution.record(scope, old)
-    assert saved.refused == 0
-    let replayed = scalar_replay.replay(scalar_replay.admit(scope, old, old_snapshot, saved),
-      next, next_snapshot)
-    # Both bodies were reused. Without this the test would be asking a cold
-    # check where the declaration is, which it has never got wrong.
-    assert replayed.reused == 2 && replayed.checked == 0
-    let (replayed_cx, replayed_tm) = assemble_module_bodies(replayed.bodies)
-    let replayed_def = probe_local(probe_qcx(std, next_syntax, replayed_cx, replayed_tm), after)
-
-    # The candidate revision's position, and not the recorded one.
-    assert replayed_def == declared_at(after)
-    assert declared_at(after) != declared_at(before)
-    assert replayed_def != declared_at(before)
-    let (dlo, dhi) = replayed_def
-    assert str.slice(after, dlo, dhi) == "let value = 42"
-
-    # And the same position a cold check of the candidate revision gives,
-    # which is the standard the reused product has to meet rather than a
-    # second spelling of the line above.
-    let (cold_cx, cold_tm) = assemble_module_bodies(check_module_body_products(next))
-    assert probe_local(probe_qcx(std, next_syntax, cold_cx, cold_tm), after) == replayed_def
   }))
 }
 

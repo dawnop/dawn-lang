@@ -93,13 +93,11 @@ def main():
         ("cache-errors", "len(computed.diags) != 0 || ", ""),
         ("cache-java", " || probe.queries() != queries_before", ""),
         ("ignore-loader", "  var matching = len(loaded.diags) == 0\n", "  var matching = true\n"),
-        # Weaken only prefix retention; the new body-map safeguards remain
-        # intact. These fixtures deliberately use the prefix-only owner.
-        ("ignore-eviction", "  State { ..session, prefix: [], bodies: map.empty() }",
-         "  State { ..session, bodies: map.empty() }"),
-        ("ignore-module-budget", "    if retaining && len(prefix) + map.len(bodies) < session.max_modules &&",
+        # Weaken only prefix retention.
+        ("ignore-eviction", "  State { ..session, prefix: [] }\n}", "  session\n}"),
+        ("ignore-module-budget", "    if retaining && len(prefix) < session.max_modules &&",
          "    if retaining && true &&"),
-        ("ignore-text-budget", "      units <= session.max_text_units - text_units - body_text_units {\n"
+        ("ignore-text-budget", "      units <= session.max_text_units - text_units {\n"
          "        prefix = prefix ++", "      true {\n        prefix = prefix ++"),
         ("ignore-std-identity", "identity == session.prefix[index].std_identity", "true"),
         ("allow-negative-budget",
