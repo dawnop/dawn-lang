@@ -5048,7 +5048,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       check_lambda(cx, params, body, sugar, false, false, None, None, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
-      check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
+      check_method_call(cx, target, name, args, expected, false, nlo, nhi, lo, hi)
     EFieldAcc(target, fname, flo, fhi, lo, hi) ->
       check_field_expr(cx, target, fname, flo, fhi, expected, lo, hi)
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
@@ -6889,9 +6889,15 @@ fn check_apply(
         # A module alias is excluded rather than delegated: `m.CONST(1)` and
         # `m.missing(1)` have Dawn answers (a constant that is not callable, an
         # unexported name) that a Java lookup would overwrite with a worse one.
+        #
+        # This is the value-application spelling -- `(r.f)(x)`, `x |> r.f`,
+        # `with x <- r.f` -- not the method form `r.f(x)`, which the parser
+        # builds as EMethod. Its callee is a field read, so it goes in as
+        # `value_form` and a fn-typed field wins over a function of the same
+        # name (spec §2.4).
         None -> {
           if not module_alias_receiver(cx, recv) {
-            return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
+            return check_method_call(cx, recv, fname, args0, expected, true, flo, fhi, lo, hi)
           }
         }
       }
@@ -10347,12 +10353,18 @@ fn check_module_call(
 
 ## x.f(a): module-qualified (alias.f), Java static (Class.m), Java instance
 ## (value.m), a fn-typed record field, or UFCS f(x, a) — the Kotlin checkMethodCall.
+##
+## `value_form` says the call was not spelled `x.f(a)` but applies the value
+## `x.f` -- `(x.f)(a)`, `a |> x.f`, `with v <- x.f` all reach here from
+## check_apply. For those a fn-typed field `f` is the callee even when a
+## function `f` is also in scope; only the method spelling is ambiguous.
 fn check_method_call(
   cx: Cx,
   target: Expr,
   name: String,
   args0: List[Arg],
   expected: Option[Ty],
+  value_form: Bool,
   nlo: Int,
   nhi: Int,
   lo: Int,
@@ -10441,7 +10453,8 @@ fn check_method_call(
     return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
   }
   # a record field holding a function: r.f(a) calls the field value. When a
-  # function `f` is ALSO in scope the call is ambiguous and errors out (spec §2.4)
+  # function `f` is ALSO in scope the method spelling is ambiguous and errors
+  # out; the value spellings (`value_form`) read the field (spec §2.4)
   match tt {
     TyAdt(aid, targs) -> {
       let ad = adt_of(cx1.adts, aid)
@@ -10481,7 +10494,9 @@ fn check_method_call(
                 }
                 None -> ()
               }
-              let fn_in_scope = if lookup(cx1, name) != None { true } else {
+              let fn_in_scope = if value_form { false } else if lookup(cx1, name) != None {
+                true
+              } else {
                 let answer = lookup_fn_sig(cx1, name)
                 answer != None
               }
@@ -10493,8 +10508,9 @@ fn check_method_call(
                 return (cerr_h(cx1, "`" ++ name ++
                     "` is both a function in scope and a fn-typed field of `" ++ ad.name ++
                     "` — ambiguous call", nlo, nhi,
-                  "for the field, bind it first: `let g = <recv>." ++ name ++ "` then `g(...)`; " ++
-                    "for the function, call it directly: `" ++ name ++ "(<recv>, ...)`"),
+                  "to call the function stored in the field, surround the field access with " ++
+                    "parentheses: `(<recv>." ++ name ++ ")(...)`; to call the function `" ++ name ++
+                    "`, call it directly: `" ++ name ++ "(<recv>, ...)`"),
                   TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
               }
               let fx = XField(tx, fidx, owner_off(cx, e_lo(target)), owner_off(cx, nhi), ftype)
