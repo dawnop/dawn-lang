@@ -2636,7 +2636,8 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 > 这个内建到 v0.30.0 为止叫 `java_try`，v0.31.0 改名。它拦的是 **fault**——外部世界
 > 造成的失败——而这个分类自 native 有了失败种类之后就是两个后端共用的
 > （[`native-backend-plan.md`](native-backend-plan.md) §14.9），和 Java 无关了；名字比理由多活了一阵。
-> 用旧名字会得到「`java_try` is not a builtin; renamed to `catch_fault`」。
+> 旧名字的迁移提示按 `std/moved.txt` 的到期规则已于 v0.41.0 到期删除（[`std-moved-design.md`](std-moved-design.md)），
+> 今天写 `java_try` 得到的是普通的未定义函数诊断。
 
 Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
 但**预期中的外部失败**（网络断开、SQL 约束冲突、解析失败）在 Java 世界以异常表达，
