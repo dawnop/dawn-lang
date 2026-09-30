@@ -2216,6 +2216,24 @@ fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   Ok((st1, ECtor(name.text, name.lo, name.hi)))
 }
 
+## Whether `k`, standing right after a complete item of a comma-separated
+## list and on the same line, can only be the next item with its comma
+## missing. Narrower than `starts_expr` on purpose: `(`, `[`, `{` and `-` after
+## an expression are a postfix or a binary operator, so reaching here means
+## another rule already refused them, and calling that a missing comma would
+## make up a second error.
+fn starts_next_item(k: TokKind) -> Bool =
+  k == INT || k == CHAR || k == FLOAT || k == STRING || k == IDENT || k == TYPEIDENT ||
+  k == TRUE || k == FALSE || k == NOT
+
+## Report a missing comma at the cursor and carry on as if it were there (#190).
+## The item after it is parsed normally, so later errors in the same
+## declaration are still found, and the literal still ends at its own closer.
+fn missing_comma(p: P, st: St, close: String, items: String) -> St =
+  St { ..st, diags: st.diags ++ [perr_h(p, st,
+    "expected `,` or " ++ close ++ ", found `" ++ cur(p, st).text ++ "`",
+    "a comma is missing between two " ++ items)] }
+
 ## `( arg, ... )` — the EBNF `call_args`, shared by the application postfix and
 ## by the dot call. `st` is at the `(`. An argument may be written `name: expr`
 ## anywhere (SYN-03); only constructors accept that, and saying so is the
@@ -2235,8 +2253,15 @@ fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
       args = args ++ [pos_arg(value)]
       st1 = st2
     }
+    let broke_line = at_kind(p, st1, NEWLINE)
     st1 = skip_nl(p, st1)
-    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+    if at_kind(p, st1, COMMA) {
+      st1 = skip_nl(p, adv1(p, st1))
+    } else if not broke_line && starts_next_item(kind_of(p, st1)) {
+      st1 = missing_comma(p, st1, "`)`", "arguments")
+    } else {
+      break
+    }
   }
   let (st5, close) = want(p, st1, RPAREN, "`)`")?
   Ok((st5, args, close))
@@ -2282,10 +2307,25 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
       st1 = st2
     }
     st1 = skip_nl(p, st1)
-    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+    # A newline does not separate fields, so a field start on the next line is
+    # a missing comma too, not only one on the same line.
+    if at_kind(p, st1, COMMA) {
+      st1 = skip_nl(p, adv1(p, st1))
+    } else if starts_field(p, st1) {
+      st1 = missing_comma(p, st1, "`}`", "fields")
+    } else {
+      break
+    }
   }
   let (st5, close) = want(p, st1, RBRACE, "`}`")?
   Ok((st5, ERecord(name.text, args, spread, name.lo, name.hi, name.lo, close.hi)))
+}
+
+## A record-literal field starts here: a name followed by `:`, or a shorthand
+## name followed by `,` or `}`.
+fn starts_field(p: P, st: St) -> Bool = {
+  let next = kind_ahead(p, st, 1)
+  at_kind(p, st, IDENT) && (next == COLON || next == COMMA || next == RBRACE)
 }
 
 ## Parse the segments of a STRING token: text stays text, each interpolation is
@@ -2475,7 +2515,13 @@ fn list_lit(p: P, st: St) -> PR[Expr] = {
     let broke_line = at_kind(p, st3, NEWLINE)
     st2 = skip_nl(p, st3)
     if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) }
-    else if not broke_line { break }
+    else if not broke_line {
+      if starts_next_item(kind_of(p, st2)) {
+        st2 = missing_comma(p, st2, "`]`", "elements")
+      } else {
+        break
+      }
+    }
   }
   let (st4, close) = want(p, st2, RBRACKET, "`]`")?
   Ok((st4, EListLit(elems, open.lo, close.hi)))
@@ -2547,22 +2593,32 @@ fn paren_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   }
   let st3 = skip_nl(p, st1)
   let (st4, first) = expression(p, st3, false)?
+  var broke_line = at_kind(p, st4, NEWLINE)
   let st5 = skip_nl(p, st4)
-  if not at_kind(p, st5, COMMA) {
+  let juxtaposed = not broke_line && starts_next_item(kind_of(p, st5))
+  if not at_kind(p, st5, COMMA) && not juxtaposed {
     let (st6, _) = want(p, st5, RPAREN, "`)`")?
     return Ok((st6, first))
   }
   var elems = [first]
   var st7 = st5
-  while at_kind(p, st7, COMMA) {
-    let st8 = skip_nl(p, adv1(p, st7))
-    if at_kind(p, st8, RPAREN) {
-      # allow a trailing comma
+  while true {
+    if at_kind(p, st7, COMMA) {
+      let st8 = skip_nl(p, adv1(p, st7))
+      if at_kind(p, st8, RPAREN) {
+        # allow a trailing comma
+        st7 = st8
+        break
+      }
       st7 = st8
+    } else if not broke_line && starts_next_item(kind_of(p, st7)) {
+      st7 = missing_comma(p, st7, "`)`", "tuple elements")
+    } else {
       break
     }
-    let (st9, e) = expression(p, st8, false)?
+    let (st9, e) = expression(p, st7, false)?
     elems = elems ++ [e]
+    broke_line = at_kind(p, st9, NEWLINE)
     st7 = skip_nl(p, st9)
   }
   let (st10, close) = want(p, st7, RPAREN, "`)`")?
@@ -2626,7 +2682,7 @@ fn block_body(
         }
         Err(fe) -> {
           let (st2, d) = fe
-          st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+          st1 = sync_stmt(p, st1, St { ..st2, diags: st2.diags ++ [d] })
         }
       }
     } else {
@@ -2638,7 +2694,7 @@ fn block_body(
         }
         Err(fe) -> {
           let (st2, d) = fe
-          st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+          st1 = sync_stmt(p, st1, St { ..st2, diags: st2.diags ++ [d] })
         }
       }
     }
@@ -2901,8 +2957,54 @@ fn stmt_and_sep(p: P, st: St) -> PR[Stmt] = {
   Ok((st2, s))
 }
 
-## After a broken statement: skip to the next line (or block end) and continue.
-fn sync_stmt(p: P, st: St) -> St = {
+## After a broken statement: resume at the next statement of the same block.
+##
+## The scan starts at the statement's first token, not at the token that
+## failed, and counts `()`, `[]` and `{}` on the way (the approach `sync_arm`
+## takes for match arms). Starting from the failure point is what used to turn
+## `let p = P { x: 1 y: 2 }` into a false "only declarations ... at module top
+## level": the first `}` after the failure is the literal's own, the block took
+## it for its end, and every later statement of the body fell out to the top
+## level (#190).
+##
+## A top-level newline ends the statement only once the scan has passed the
+## failure point, because a statement can legally cross one (`x =>` skips the
+## newline before a lambda body) and stopping short would re-parse tokens the
+## broken statement already read. An unmatched `}` always ends it: that brace
+## is the enclosing block's. A scan that runs into EOF falls back to the old
+## rule, so one really unclosed `{` does not swallow the rest of the file.
+fn sync_stmt(p: P, start: St, failed: St) -> St = {
+  var s = St { pos: start.pos, diags: failed.diags }
+  var parens = 0
+  var brackets = 0
+  var braces = 0
+  while not at_kind(p, s, EOF) {
+    let k = cur(p, s).kind
+    let top = parens == 0 && brackets == 0 && braces == 0
+    if top && k == NEWLINE && s.pos >= failed.pos { break }
+    if k == RBRACE && braces == 0 { break }
+    if k == LPAREN {
+      parens = parens + 1
+    } else if k == RPAREN && parens > 0 {
+      parens = parens - 1
+    } else if k == LBRACKET {
+      brackets = brackets + 1
+    } else if k == RBRACKET && brackets > 0 {
+      brackets = brackets - 1
+    } else if k == LBRACE {
+      braces = braces + 1
+    } else if k == RBRACE {
+      braces = braces - 1
+    }
+    s = adv1(p, s)
+  }
+  if at_kind(p, s, EOF) { return sync_line(p, failed) }
+  skip_nl(p, s)
+}
+
+## The pre-#190 statement resync: from the failure point to the next line or
+## block end. Kept as the fallback when the depth-aware scan reaches EOF.
+fn sync_line(p: P, st: St) -> St = {
   var s = st
   while not at_kind(p, s, NEWLINE) && not at_kind(p, s, RBRACE) && not at_kind(p, s, EOF) {
     s = adv1(p, s)
