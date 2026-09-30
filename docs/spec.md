@@ -3038,6 +3038,12 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 （合法特殊拼写恰是 `to_string` 能输出的三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等
 非 ASCII 数字（宿主的 `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
 
+接受语言属于函数本身，与调用方式无关：`let f = parse_float` 之后 `f(s)` 与 `parse_float(s)`
+是同一个函数，`parse_int` / `parse_int_radix` 同理。v0.79.0 及以前经函数值调用会绕过这段
+EBNF（`f("1.5d")` 答 `Some(1.5)`），`parse_int` 取作函数值则编译期 panic；这是实现缺陷，
+按 bug 修正而非语言变更（issue #283，
+[builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md)）。
+
 **大小写映射。** `str.to_lower`/`str.to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点
 进、一个码点出，无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度
 会变的（`ß` → `SS`）、locale 相关的（土耳其语的 `i`）、上下文相关的（希腊语词尾 sigma）。

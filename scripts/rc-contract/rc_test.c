@@ -366,7 +366,7 @@ static void test_adt0_singleton(void) {
   dawn_drop(far);
 }
 
-/* The runtime builds `None` for `parse_float`, `io_getenv` and every
+/* The runtime builds `None` for `float_of_decimal`, `io_getenv` and every
  * `ForeignError` cause, and it goes through the same shared object emitted
  * code takes: field-less is field-less whoever builds it. */
 static void test_none_is_shared(void) {

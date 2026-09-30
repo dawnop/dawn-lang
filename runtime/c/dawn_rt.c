@@ -3742,15 +3742,16 @@ dawn_str *dawn_str_upper(dawn_str *s) { return dawn_case(s, true); }
  * The accepted language of `parse_int`/`parse_float`/`parse_int_radix` is an
  * EBNF in spec 11, and the scanner that enforces it is Dawn source
  * (std/fmt, audit RP-05) -- the integer parsers never reach this runtime at
- * all. What remains here is one conversion: fmt.atod hands over a string its
- * scanner already validated and trimmed, and asks for the IEEE 754
+ * all. What remains here is one conversion, `float_of_decimal`: fmt.atod
+ * hands over a string its scanner already validated and trimmed, and asks
+ * for the IEEE 754
  * round-to-nearest-even reading of it. On that subset strtod and Java's
  * Double.parseDouble are the same function (correct rounding is required of
  * both), so delegating cannot reintroduce host grammar skew; every input the
  * two hosts ever disagreed on (hex floats, "1.5f", "inf", Unicode digits) is
  * refused by the scanner before either host can see it. */
 
-dawn_adt *dawn_parse_float(dawn_str *s) {
+dawn_adt *dawn_float_of_decimal(dawn_str *s) {
   if (s->len == 0) return dawn_none();
   char *buf = (char *)dawn_alloc((size_t)s->len + 1);
   memcpy(buf, s->p, (size_t)s->len);

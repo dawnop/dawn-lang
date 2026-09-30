@@ -22,7 +22,7 @@ use check/tast.{TExpr, TFun, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
 use ir/core.{
   CValue, VInt, VBool, VStr, VList, VAdt, CCall, CDirect, CImpl, CDefault,
-  CExpr, CBlock, CUpdate, CLocal, CSLet
+  CExpr, CBlock, CUpdate, CLocal, CSLet, CIntrinsic, CFun
 }
 use ir/lower
 use ir/interp.{
@@ -647,6 +647,55 @@ test "a record update lowers to one update node over its bound base" {
     }
   }
   assert seen
+}
+
+## One checked module, lowered: its functions by name. The owner is the
+## caller's, because what lowers to what depends on whether a module is std.
+fn lowered_fns(owner: String, src: String) -> Map[String, CFun] !io = {
+  let (m, pdiags) = parser.parse_module(src)
+  if len(pdiags) != 0 { panic("fixture does not parse: " ++ pdiags[0].msg) }
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some(owner), Some("m.dawn")), m, env)
+  if len(cx1.diags) != 0 { panic("fixture does not check: " ++ cx1.diags[0].msg) }
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let cm = lower.lower_module(owner, tm, cx1.traits, cx1.impl_table, cx1.adts,
+    program_sigs(no_owner, tm, owner))
+  var out: Map[String, CFun] = map.empty()
+  for cf in cm.fns { out = map.insert(out, cf.name, cf) }
+  out
+}
+
+## The call a function's body ends in, by the name it calls.
+fn called(fns: Map[String, CFun], name: String) -> String =
+  match tail_of(map.get(fns, name).expect("lowered").body) {
+    CIntrinsic(n, _, _) -> "intrinsic " ++ n
+    CCall(CDirect(o, n), _, _) -> o ++ "." ++ n
+    _ -> "another shape"
+  }
+
+test "parse_float lowers to std/fmt.atod everywhere, and atod's raw call is its own name" {
+  # #186: the raw conversion used to be spelled `parse_float` as well, and
+  # lowering kept it an intrinsic by asking whether the caller sat in a module
+  # called "std/fmt". It is `float_of_decimal` now, marked where atod writes it,
+  # so the builtin is rewritten with no exception -- inside std/fmt too.
+  let fmt = lowered_fns("std/fmt",
+    "fn atod(s: String) -> Option[Float] = float_of_decimal(s)\n" ++
+      "fn inner(s: String) -> Option[Float] = parse_float(s)\n")
+  assert called(fmt, "atod") == "intrinsic float_of_decimal"
+  assert called(fmt, "inner") == "std/fmt.atod"
+  let app = lowered_fns("app", "fn user(s: String) -> Option[Float] = parse_float(s)\n")
+  assert called(app, "user") == "std/fmt.atod"
+
+  # and the mistake the old rule would have made silently -- a parser whose
+  # raw call is the builtin it implements -- is refused by name rather than
+  # compiled into a function that calls itself
+  match catch_panic(() => lowered_fns("std/fmt",
+    "fn atod(s: String) -> Option[Float] = parse_float(s)\n")) {
+    Ok(_) -> panic("std/fmt.atod calling parse_float lowered without complaint")
+    Err(e) -> {
+      assert str.contains(e.message, "std/fmt.atod calls `parse_float`, which lowers to std/fmt.atod itself")
+    }
+  }
 }
 
 test "a self tail call in a const folds without growing the interpreter stack" {

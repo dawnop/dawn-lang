@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 73b164b20af8f670 -->
+<!-- doc-check: translation-of docs/spec.md @ 5651f279ffbf15d9 -->
 
 # Dawn Language Specification
 
@@ -3798,6 +3798,14 @@ the `f/F/d/D` suffixes, lower-case variants such as `inf`/`nan`, a signed `NaN` 
 the round-trip closure in §4.3), and non-ASCII digits such as the full-width and
 Arabic-Indic ones (the host's `Character.digit` accepts them; Dawn's digit set is closed
 over ASCII).
+
+The accepted language belongs to the function, not to how it is called: after
+`let f = parse_float`, `f(s)` and `parse_float(s)` are the same function, and likewise for
+`parse_int` / `parse_int_radix`. Up to v0.79.0 a call through a function value bypassed
+this EBNF (`f("1.5d")` answered `Some(1.5)`), and taking `parse_int` as a value panicked at
+compile time; that was an implementation defect, fixed as a bug rather than as a language
+change (issue #283,
+[builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md)).
 
 **Case mapping.** `str.to_lower`/`str.to_upper` are the **Unicode simple (1:1) case
 mappings**: one code point in, one code point out, no locale, no context, so **the code

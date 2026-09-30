@@ -775,7 +775,7 @@ fn interp_arms() -> List[String] = [
   "code_points", "from_code_points",
   "char_is_letter", "char_is_digit", "char_is_alnum", "char_is_upper",
   "char_is_lower", "char_is_space",
-  "str_lower", "str_upper", "parse_float"
+  "str_lower", "str_upper", "float_of_decimal"
 ]
 
 ## Every intrinsic a comptime run refuses, and why it is a group rather than an
@@ -1272,7 +1272,11 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     Ok((st, env, VStr(str.to_lower(as_str(args[0])))))
   } else if name == "str_upper" {
     Ok((st, env, VStr(str.to_upper(as_str(args[0])))))
-  } else if name == "parse_float" {
+  } else if name == "float_of_decimal" {
+    # std/fmt.atod's raw conversion, reached through the program's own std
+    # Core after atod's scanner accepted and trimmed the text. The host's
+    # `parse_float` is the same function on that subset -- it is atod over the
+    # compiler's own std -- so the fold and the backends agree.
     match parse_float(as_str(args[0])) {
       Some(f) -> Ok((st, env, some_v(VFloat(f))))
       None -> Ok((st, env, none_v()))

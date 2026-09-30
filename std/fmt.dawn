@@ -1058,8 +1058,11 @@ fn float_shape(t: String) -> Bool = {
 ## can emit — `Infinity`, `-Infinity`, `NaN` (no `+Infinity`, no signed NaN,
 ## no lowercase variants), so parse(to_string(x)) always closes.
 ##
-## A validated string is handed to the backend's `parse_float` primitive for
-## the decimal-to-binary conversion only. That delegation cannot reintroduce
+## A validated string is handed to the backend's `float_of_decimal` primitive
+## for the decimal-to-binary conversion only. That call is the raw one, and it
+## is marked by its name: lowering rewrites every `parse_float` into a call on
+## this function, here included, so writing `parse_float` below would make
+## atod call itself (lowering refuses that by name). That delegation cannot reintroduce
 ## host grammar skew: on this subset both hosts implement the same function —
 ## IEEE 754 round-to-nearest-even of a decimal literal, which the Java spec
 ## requires of `Double.parseDouble` and C's `strtod` implements on every
@@ -1080,7 +1083,7 @@ fn atod(s: String) -> Option[Float] = {
   if not float_shape(t) {
     return None
   }
-  parse_float(t)
+  float_of_decimal(t)
 }
 
 # The three parsers below had no test of their own. `dtoa` is pinned byte for

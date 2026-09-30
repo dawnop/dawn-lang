@@ -3045,6 +3045,14 @@ pub fn builtins() -> Map[String, Sig] = {
     # parse_int in a base other than 10; None when the text is not a numeral in
     # that base, so a caller needs no exception bridge to read one.
     bsig("parse_int_radix", [TyString, TyInt], ["s", "radix"], opt_ty(TyInt)),
+    # The decimal-to-binary conversion std/fmt.atod hands a string to once its
+    # §11 scanner has accepted and trimmed it: IEEE 754 round-to-nearest-even,
+    # the one piece of `parse_float` a backend still owns. Internal, because
+    # it is not `parse_float` -- it accepts whatever the host's parser accepts
+    # -- and a separate name, because the raw call has to be marked where it
+    # is written. It used to be spelled `parse_float` too, and lowering told
+    # the two apart by asking whether the caller's module was "std/fmt" (#186).
+    bsig("float_of_decimal", [TyString], ["s"], opt_ty(TyFloat)),
     # bytes_* intrinsics: the byte primitives std/bytes writes over. Bytes is a
     # JVM byte[] (crosses FFI both ways), so the JVM backend emits these into
     # dawn/rt/Bytes; an out-of-range read comes back as the sentinel -1, which
@@ -3564,11 +3572,13 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # strings: the Unicode tables, plus the cursor walk they and std/str rest on.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
-  # Of the three numeric parsers only `parse_float` still owns a runtime
-  # method: the decimal-to-binary conversion std/fmt.atod delegates after its
-  # EBNF validation (audit RP-05). `parse_int`/`parse_int_radix` lower to
-  # std/fmt source and never reach a backend.
-  rt_of = map.insert(rt_of, "parse_float", RtStrings)
+  # None of the three numeric parsers owns a runtime method: each lowers to
+  # std/fmt source and never reaches a backend (audit RP-05). What a runtime
+  # still owns is `float_of_decimal`, the decimal-to-binary conversion
+  # std/fmt.atod delegates after its EBNF validation -- std-only, since it
+  # takes the host's grammar.
+  rt_of = map.insert(rt_of, "float_of_decimal", RtStrings)
+  internal = set.insert(internal, "float_of_decimal")
   for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
     rt_of = map.insert(rt_of, "char_is_${op}", RtStrings)
   }
@@ -4326,7 +4336,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 110
+  assert map_size2(bs) == 111
 }
 
 test "the reclaim's failure is a value, under the one name left" {

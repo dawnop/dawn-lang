@@ -218,7 +218,7 @@ static inline dawn_adt *dawn_adt0(int32_t tag) {
   return dawn_adt_new(tag, 0, 0);
 }
 
-/* The prelude ADTs the runtime itself has to build: `parse_float` and
+/* The prelude ADTs the runtime itself has to build: `float_of_decimal` and
  * `io_getenv` return an Option, `catch_fault` a Result. A constructor's tag is
  * its index in the declaration order, and these four numbers are the one place
  * that order is written down outside the compiler -- emitc's test "the C
@@ -885,7 +885,7 @@ dawn_str *dawn_str_lower(dawn_str *s);
 dawn_str *dawn_str_upper(dawn_str *s);
 /* the one parse primitive left: fmt.atod's decimal-to-binary conversion on a
  * pre-validated, pre-trimmed string (std/fmt owns the accepted language) */
-dawn_adt *dawn_parse_float(dawn_str *s);                  /* Option[Float] */
+dawn_adt *dawn_float_of_decimal(dawn_str *s);             /* Option[Float] */
 dawn_array *dawn_code_points(dawn_str *s);                /* boxed Int elements */
 /* These two CONSUME their array: it is the emitter's list-to-Array crossing
  * temp (`to_host`), which no Core node owns, so the reader frees it. */
