@@ -97,8 +97,9 @@ def main():
          "        if carry_is == Some(e.pred) && same_input(raw, e.raw) && identity == e.std_identity {",
          "        if false {"),
         # The input half of the rule.
-        ("text-only", engine, "-> Bool = a == b\n", "-> Bool = a.text == b.text\n"),
-        ("ignore-input", engine, "-> Bool = a == b\n", "-> Bool = true\n"),
+        ("text-only", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n",
+         "-> Bool = a.text == b.text\n"),
+        ("ignore-input", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n", "-> Bool = true\n"),
         ("ignore-std-identity", engine, "identity == e.std_identity {", "true {"),
         # The carry half: entered from a different predecessor, or after a
         # re-checked module that changed what it exports.

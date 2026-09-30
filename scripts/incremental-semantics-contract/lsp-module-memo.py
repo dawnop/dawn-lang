@@ -3,7 +3,8 @@
 
 The workspace cache mutants show that the analysis owner is the thing the
 server commits and discards, and the parse mutants that the parses a load
-reuses are the previous load's and only for unchanged text; the resolver
+reuses (and the line starts that ride on them) are the previous load's and
+only for unchanged text; the resolver
 mutant shows that a query's
 positions are the ones the scheduler resolved against the declaration a body
 was checked in. The owning tests use in-memory Fs/Env and can also run in the
@@ -49,6 +50,11 @@ def main():
          "        parses: ws0.parses,"),
         ("stale-parse", PARSES, ANALYZE, "    Some(p) -> if p.text == text { (p, true) }",
          "    Some(p) -> if true { (p, true) }"),
+        # The line starts ride on the parse: a file parsed again has to get
+        # its own, not the ones the previous parse of the path held.
+        ("stale-line-starts", PARSES, ANALYZE,
+         "else { (fresh_parse(text), false) }",
+         "else { (Parsed { ..fresh_parse(text), line_starts: p.line_starts }, false) }"),
         # A body is checked with offsets relative to its own declaration, and
         # `tast_positions.symbols` is what adds the declaration's start back
         # on the way out. Its owner here is the LSP reader of those positions;
