@@ -32,6 +32,7 @@ ADAPTERS = {
     "for-pattern-contract": ("selfhost",),
     "inflate-contract": (".",),
     "list-elems-contract": (".",),
+    "narrow-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),
     "pipe-contract": (".",),
