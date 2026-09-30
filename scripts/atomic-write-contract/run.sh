@@ -98,24 +98,18 @@ prepare_inject_readonly() { # dir -- unwritable directory, writable file
 # and `--std` is how a compile is pointed at it.
 fork_std() { # dst
   rm -rf "$1"
+  mkdir -p "$(dirname "$1")"
   cp -r "$root/std" "$1"
 }
 
-# Rewrite exactly one anchor in a forked std, or fail. An anchor that no longer
-# matches is the way a mutant quietly stops mutating, so it is an error and not
-# a no-op (scripts/intrinsic-parity.py's note says the same thing about greps).
-patch_std() { # stddir, label, old, new
-  python3 - "$1/io.dawn" "$2" "$3" "$4" <<'PY'
-import pathlib
-import sys
-
-path, label, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-p = pathlib.Path(path)
-text = p.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"{label}: anchor is not unique in std/io.dawn ({text.count(old)} matches)")
-p.write_text(text.replace(old, new))
-PY
+# Apply one registered mutation to a private tree (its std at <tree>/std), or
+# fail. An anchor that no longer matches is the way a mutant quietly stops
+# mutating, so it is an error and not a no-op (scripts/intrinsic-parity.py's
+# note says the same thing about greps). The anchors live in mutate.py, where
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this contract runs.
+mutate() { # mutation, tree-root
+  python3 "$here/mutate.py" "$1" "$2"
 }
 
 append_std() { # stddir, text
@@ -216,13 +210,11 @@ expect_inject "create (unwritable directory)" io.atomic_write_staging_failed old
   "$work/inj-create.out"
 
 # 2. write
-fork_std "$work/std-inj-write"
-patch_std "$work/std-inj-write" "inject write" \
-  '  match write_file(tmp, content) {' \
-  '  match inject_fault("write") {'
-append_std "$work/std-inj-write" "$inject_helper"
+fork_std "$work/tree-inj-write/std"
+mutate inject-write "$work/tree-inj-write"
+append_std "$work/tree-inj-write/std" "$inject_helper"
 prepare_inject "$work/inj-write"
-run_jvm "$work/std-inj-write" "$work/inj-write" "$here/inject_probe.dawn" "$work/inj-write.out" ||
+run_jvm "$work/tree-inj-write/std" "$work/inj-write" "$here/inject_probe.dawn" "$work/inj-write.out" ||
   { cat "$work/inj-write.out.err" >&2; fail "write injection did not compile and run"; }
 expect_inject write inject.write old "$work/inj-write.out"
 
@@ -231,26 +223,10 @@ expect_inject write inject.write old "$work/inj-write.out"
 #    after the bytes are already on disk. Native only, and that is the honest
 #    coverage: on the JVM the same failure comes back from `Files.write` as the
 #    IOException the write injection above already stands for.
-mkdir -p "$work/rt-close"
-cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/rt-close/"
-python3 - "$work/rt-close/dawn_rt.c" <<'PY'
-import pathlib
-import sys
-
-p = pathlib.Path(sys.argv[1])
-text = p.read_text()
-old = '''  if (fclose(f) != 0) bad = true;
-  if (bad) {
-    dawn_fault(DAWN_LIT("io_write_file: write failed"));'''
-new = '''  if (fclose(f) != 0) bad = true;
-  bad = true; /* injected: the close step reports failure */
-  if (bad) {
-    dawn_fault(DAWN_LIT("io_write_file: write failed"));'''
-if text.count(old) != 1:
-    raise SystemExit("close-injection anchor is not unique in dawn_rt.c")
-p.write_text(text.replace(old, new))
-PY
-build_native "$root/std" "$work/rt-close" "$here/inject_probe.dawn" "$work/inj-close-bin"
+mkdir -p "$work/tree-inj-close/runtime/c"
+cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/tree-inj-close/runtime/c/"
+mutate inject-close "$work/tree-inj-close"
+build_native "$root/std" "$work/tree-inj-close/runtime/c" "$here/inject_probe.dawn" "$work/inj-close-bin"
 prepare_inject "$work/inj-close"
 ( cd "$work/inj-close" && "$work/inj-close-bin" ) > "$work/inj-close.out" 2>&1 ||
   { cat "$work/inj-close.out" >&2; fail "close injection did not run"; }
@@ -258,13 +234,11 @@ expect_inject "close (native runtime)" err old "$work/inj-close.out"
 
 # 4. read-back, both halves: the read itself failing, and the read succeeding
 #    with bytes that are not the ones asked for.
-fork_std "$work/std-inj-readback"
-patch_std "$work/std-inj-readback" "inject readback" \
-  '      match read_bytes(tmp) {' \
-  '      match inject_bytes_fault("readback") {'
-append_std "$work/std-inj-readback" "$inject_helper"
+fork_std "$work/tree-inj-readback/std"
+mutate inject-readback "$work/tree-inj-readback"
+append_std "$work/tree-inj-readback/std" "$inject_helper"
 prepare_inject "$work/inj-readback"
-run_jvm "$work/std-inj-readback" "$work/inj-readback" "$here/inject_probe.dawn" \
+run_jvm "$work/tree-inj-readback/std" "$work/inj-readback" "$here/inject_probe.dawn" \
   "$work/inj-readback.out" ||
   { cat "$work/inj-readback.out.err" >&2; fail "readback injection did not compile and run"; }
 expect_inject read-back inject.readback old "$work/inj-readback.out"
@@ -272,28 +246,21 @@ expect_inject read-back inject.readback old "$work/inj-readback.out"
 # The corrupting writer. This is the only injection whose expected result is a
 # kind std mints rather than one it was handed: the write reported success and
 # the check is what caught it. Mutant 3 is this same std with the check removed.
-corrupt_std() { # dst
-  fork_std "$1"
-  patch_std "$1" "inject corrupt write" \
-    '  match write_file(tmp, content) {' \
-    '  match write_file(tmp, content ++ "corrupt") {'
-}
-corrupt_std "$work/std-inj-corrupt"
+fork_std "$work/tree-inj-corrupt/std"
+mutate inject-corrupt-write "$work/tree-inj-corrupt"
 prepare_inject "$work/inj-corrupt"
-run_jvm "$work/std-inj-corrupt" "$work/inj-corrupt" "$here/inject_probe.dawn" \
+run_jvm "$work/tree-inj-corrupt/std" "$work/inj-corrupt" "$here/inject_probe.dawn" \
   "$work/inj-corrupt.out" ||
   { cat "$work/inj-corrupt.out.err" >&2; fail "corrupt-write injection did not compile and run"; }
 expect_inject "read-back validate (corrupting writer)" io.atomic_write_verify_failed old \
   "$work/inj-corrupt.out"
 
 # 5. permission
-fork_std "$work/std-inj-perm"
-patch_std "$work/std-inj-perm" "inject permission" \
-  '  if exists(path) { copy_permissions(path, tmp) } else { Ok(()) }' \
-  '  if exists(path) { inject_fault("permission") } else { Ok(()) }'
-append_std "$work/std-inj-perm" "$inject_helper"
+fork_std "$work/tree-inj-perm/std"
+mutate inject-permission "$work/tree-inj-perm"
+append_std "$work/tree-inj-perm/std" "$inject_helper"
 prepare_inject "$work/inj-perm"
-run_jvm "$work/std-inj-perm" "$work/inj-perm" "$here/inject_probe.dawn" "$work/inj-perm.out" ||
+run_jvm "$work/tree-inj-perm/std" "$work/inj-perm" "$here/inject_probe.dawn" "$work/inj-perm.out" ||
   { cat "$work/inj-perm.out.err" >&2; fail "permission injection did not compile and run"; }
 expect_inject permission inject.permission old "$work/inj-perm.out"
 
@@ -362,40 +329,27 @@ mutant_run() { # name, stddir
 # 1. the rejected option B: fall back to writing the destination directly when
 #    staging fails. Only visible where staging can fail and a direct write
 #    cannot, which is the unwritable directory holding a writable file.
-fork_std "$work/std-m1"
-patch_std "$work/std-m1" "mutant direct-fallback" \
-  '      Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: "io.atomic_write_file: cannot create a staging file in "
-          ++ parent_dir(path),
-        cause: Some(e.kind ++ ": " ++ e.message)
-      })
-      Ok(tmp) -> stage_replace(path, content, tmp)' \
-  '      Err(_) -> write_file(path, content)
-      Ok(tmp) -> stage_replace(path, content, tmp)'
-mutant_run m1 "$work/std-m1"
+fork_std "$work/tree-m1/std"
+mutate direct-fallback "$work/tree-m1"
+mutant_run m1 "$work/tree-m1/std"
 expect_red "direct-write fallback" "$work/mutant-m1.out" 'readonly dir content = old'
 
 # 2. a staging name spelled here instead of claimed from the host. Visible
 #    because something is already sitting on that name.
-fork_std "$work/std-m2"
-patch_std "$work/std-m2" "mutant fixed-temp-name" \
-  '    match temp_file(parent_dir(path), ".dawn-atomic-") {' \
-  '    match fixed_temp(parent_dir(path)) {'
-append_std "$work/std-m2" '## Injected by scripts/atomic-write-contract.
+fork_std "$work/tree-m2/std"
+mutate fixed-temp-name "$work/tree-m2"
+append_std "$work/tree-m2/std" '## Injected by scripts/atomic-write-contract.
 fn fixed_temp(dir: String) -> Result[String, ForeignError] !Fs = Ok(dir ++ "/.dawn-atomic.tmp")'
-mutant_run m2 "$work/std-m2"
+mutant_run m2 "$work/tree-m2/std"
 expect_red "fixed staging name" "$work/mutant-m2.out" 'squat content = new'
 
 # 3. the read-back check removed. Layered on the corrupting writer, because a
 #    check for something that never happens is invisible either way -- which is
 #    itself the reason the injection above exists.
-corrupt_std "$work/std-m3"
-patch_std "$work/std-m3" "mutant skip-verify" \
-  '          if seen != bytes_utf8(content) {' \
-  '          if false {'
+fork_std "$work/tree-m3/std"
+mutate skip-verify "$work/tree-m3"
 prepare_inject "$work/cwd-m3"
-run_jvm "$work/std-m3" "$work/cwd-m3" "$here/inject_probe.dawn" "$work/mutant-m3.out" ||
+run_jvm "$work/tree-m3/std" "$work/cwd-m3" "$here/inject_probe.dawn" "$work/mutant-m3.out" ||
   { cat "$work/mutant-m3.out.err" >&2; fail "skip-verify mutant did not compile and run"; }
 if grep -qx 'result = io.atomic_write_verify_failed' "$work/mutant-m3.out"; then
   fail "skip-verify mutant stayed green"
@@ -409,47 +363,33 @@ echo "PASS  mutant: skipped read-back (owning assertion 'result = io.atomic_writ
 # 4. delete the destination before renaming over it. The window is only
 #    observable when the rename that follows fails, so the destination here is a
 #    directory: refused by rename, but removable by delete.
-fork_std "$work/std-m4"
-patch_std "$work/std-m4" "mutant delete-before-rename" \
-  '                match rename(tmp, path) {' \
-  '                match rename_after_delete(tmp, path) {'
-append_std "$work/std-m4" '## Injected by scripts/atomic-write-contract.
+fork_std "$work/tree-m4/std"
+mutate delete-before-rename "$work/tree-m4"
+append_std "$work/tree-m4/std" '## Injected by scripts/atomic-write-contract.
 fn rename_after_delete(tmp: String, path: String) -> Result[Unit, ForeignError] !Fs = {
   let _ = delete(path)
   rename(tmp, path)
 }'
-mutant_run m4 "$work/std-m4"
+mutant_run m4 "$work/tree-m4/std"
 expect_red "delete before rename" "$work/mutant-m4.out" 'dir target is dir = true'
 
 # 5. follow the symlink instead of refusing it.
-fork_std "$work/std-m5"
-patch_std "$work/std-m5" "mutant follow-symlink" \
-  '  } else if is_symlink(path) {' \
-  '  } else if false {'
-mutant_run m5 "$work/std-m5"
+fork_std "$work/tree-m5/std"
+mutate follow-symlink "$work/tree-m5"
+mutant_run m5 "$work/tree-m5/std"
 expect_red "followed symlink" "$work/mutant-m5.out" 'symlink still link = true'
 
 # 6. leave the staging file behind on failure.
-fork_std "$work/std-m6"
-patch_std "$work/std-m6" "mutant no-cleanup" \
-  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
-  let _ = delete(tmp)
-  Err(e)
-}' \
-  'fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
-  let _ = tmp
-  Err(e)
-}'
-mutant_run m6 "$work/std-m6"
+fork_std "$work/tree-m6/std"
+mutate no-cleanup "$work/tree-m6"
+mutant_run m6 "$work/tree-m6/std"
 expect_red "staging file not cleaned up" "$work/mutant-m6.out" 'dir target entries = \["target.toml"\]'
 
 # 7. do not carry the destination's permissions over. The probe cannot see this
 #    at all -- the witness is `stat`, from outside.
-fork_std "$work/std-m7"
-patch_std "$work/std-m7" "mutant no-permission-copy" \
-  '  if exists(path) { copy_permissions(path, tmp) } else { Ok(()) }' \
-  '  if false { copy_permissions(path, tmp) } else { Ok(()) }'
-mutant_run m7 "$work/std-m7"
+fork_std "$work/tree-m7/std"
+mutate no-permission-copy "$work/tree-m7"
+mutant_run m7 "$work/tree-m7/std"
 cmp -s "$here/expected.txt" "$work/mutant-m7.out" ||
   fail "no-permission-copy mutant changed the probe's output, so the stat witness is not what caught it"
 after="$(stat -c '%a' "$work/cwd-m7/a/target.toml")"
@@ -463,20 +403,9 @@ echo "PASS  mutant: permissions not carried over (owning assertion 'stat a/targe
 #    Its witness is the message and not the kind: a mutant that renamed the kind
 #    but still leaked the staging path would be caught by the line above it, and
 #    an assertion two mutants can redden is owned by neither.
-fork_std "$work/std-m8"
-patch_std "$work/std-m8" "mutant staging-message-passthrough" \
-  '      Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: "io.atomic_write_file: cannot create a staging file in "
-          ++ parent_dir(path),
-        cause: Some(e.kind ++ ": " ++ e.message)
-      })' \
-  '      Err(e) -> Err(ForeignError {
-        kind: "io.atomic_write_staging_failed",
-        message: e.message,
-        cause: None
-      })'
-mutant_run m8 "$work/std-m8"
+fork_std "$work/tree-m8/std"
+mutate staging-message-passthrough "$work/tree-m8"
+mutant_run m8 "$work/tree-m8/std"
 expect_red "staging message passed through" "$work/mutant-m8.out" \
   'readonly dir names staging = no'
 
@@ -614,26 +543,15 @@ command -v "$JAVA_BIN" > /dev/null || JAVA_BIN=java
 # A private compiler built from a copy of selfhost, optionally with one call
 # site put back the way it was. The baseline is built the same way as the
 # mutants so that the only difference between the two runs is the mutation.
-cs_build() { # name, sed-target-or-empty
-  local name="$1" mutate="$2"
+cs_build() { # name: baseline, or a registered call-site mutation
+  local name="$1"
   local dir="$cs/build-$name"
   rm -rf "$dir"
   mkdir -p "$dir"
   cp -R "$root/selfhost" "$dir/selfhost"
   cp -R "$root/compiler-plan" "$dir/compiler-plan"
   ln -s "$root/packages" "$dir/packages"
-  if [ -n "$mutate" ]; then
-    python3 - "$dir/selfhost/src/$mutate" <<'PY'
-import pathlib
-import sys
-
-p = pathlib.Path(sys.argv[1])
-text = p.read_text()
-if text.count("io.atomic_write_file(") != 1:
-    raise SystemExit(f"{p}: expected exactly one atomic write call site")
-p.write_text(text.replace("io.atomic_write_file(", "io.write_file("))
-PY
-  fi
+  [ "$name" = baseline ] || mutate "$name" "$dir"
   if ! DAWN_SELFHOST_CP="" "$root/bin/dawn" build "$dir/selfhost" -o "$dir/compiler.jar" \
       --std "$root/std" --vendor org/objectweb/asm --vendor coursierapi \
       > "$dir/build.out" 2> "$dir/build.err"; then
@@ -643,7 +561,7 @@ PY
   CS_JAR="$dir/compiler.jar"
 }
 
-cs_build baseline ""
+cs_build baseline
 cs_probe "$CS_JAR" "$work/callsites.out"
 cmp -s "$here/callsites-expected.txt" "$work/callsites.out" || {
   diff -u "$here/callsites-expected.txt" "$work/callsites.out" >&2 || true
@@ -671,12 +589,12 @@ cs_expect_red() { # label, out, assertion, untouched-prefix
   echo "PASS  mutant: $1 (owning assertion '$3' turned red; $moved line(s) moved)"
 }
 
-cs_build add-plain-write pkg/add.dawn
+cs_build add-plain-write
 cs_probe "$CS_JAR" "$work/callsites-m-add.out"
 cs_expect_red "dawn add back to io.write_file" "$work/callsites-m-add.out" \
   'add readonly manifest = old' 'lock '
 
-cs_build lock-plain-write main.dawn
+cs_build lock-plain-write
 cs_probe "$CS_JAR" "$work/callsites-m-lock.out"
 cs_expect_red "dawn lock back to io.write_file" "$work/callsites-m-lock.out" \
   'lock readonly lockfile = old' 'add '

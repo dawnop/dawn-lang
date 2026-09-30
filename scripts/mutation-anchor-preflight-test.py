@@ -186,6 +186,26 @@ class PreflightTests(unittest.TestCase):
                                           "        let child = array_steal(kids, pos) \n")
         self.assert_stale_registry_is_red("map-reuse-contract", "get-hamt-child-again", 0)
 
+    def test_atomic_write_anchor_drift_is_caught(self):
+        # #254: these anchors were arguments to run.sh's patch_std helper and
+        # two heredocs, checked only when the contract ran. Three subjects:
+        # std, the C runtime and compiler source.
+        self.assert_registry_drift_is_red("atomic-write-contract", "follow-symlink",
+                                          "std/io.dawn", "  } else if is_symlink(path) {",
+                                          "  } else if is_symlink(path) == true {")
+        # The second edit of the layered mutant is reached and held too.
+        self.assert_registry_drift_is_red("atomic-write-contract", "skip-verify",
+                                          "std/io.dawn", "          if seen != bytes_utf8(content) {",
+                                          "          if bytes_utf8(content) != seen {")
+        self.assert_registry_drift_is_red("atomic-write-contract", "inject-close",
+                                          "runtime/c/dawn_rt.c",
+                                          'DAWN_LIT("io_write_file: write failed")',
+                                          'DAWN_LIT("io_write_file: write error")')
+        self.assert_registry_drift_is_red("atomic-write-contract", "add-plain-write",
+                                          "selfhost/src/pkg/add.dawn", "io.atomic_write_file(",
+                                          "io.atomic_write_file (")
+        self.assert_stale_registry_is_red("atomic-write-contract", "follow-symlink", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
