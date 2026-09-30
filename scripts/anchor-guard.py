@@ -218,7 +218,9 @@ def preflight_covered(root: pathlib.Path) -> set[str]:
     spec.loader.exec_module(module)
     covered = {f"scripts/{name}/mutate.py" for name in module.ADAPTERS}
     covered |= {f"scripts/{name}/run.sh" for name in module.SHELL_ADAPTERS}
-    # Called by name in check(), outside the three tables.
+    # Harnesses that apply a preflighted registry's anchors themselves.
+    covered |= {f"scripts/{reader}" for reader in module.REGISTRY_READERS}
+    # Called by name in check(), outside the tables.
     covered |= {"scripts/gate-map/gatemap.py", "scripts/builtin-decl-contract/check.py"}
     return covered
 
