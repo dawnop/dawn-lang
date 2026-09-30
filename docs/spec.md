@@ -658,13 +658,14 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   用户 trait 不能 derive：derive 要编译器知道该 trait 的结构规则，Dawn 没有让库陈述它的
   编译期元编程（Haskell 2010 的 deriving 同样只收 Prelude 的封闭集合）。
 - **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
-  `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur
-  fn iter_done(c: C, k: C.Cur) -> Bool  fn iter_next(c: C, k: C.Cur) -> C.Cur
-  fn iter_get(c: C, k: C.Cur) -> C.Item }`——游标式四方法而非返回配对的 `next`，
+  `trait Iter[C] { type Cur  type Item  fn iter_start(it: C) -> C.Cur
+  fn iter_done(it: C, c: C.Cur) -> Bool  fn iter_next(it: C, c: C.Cur) -> C.Cur
+  fn iter_get(it: C, c: C.Cur) -> C.Item }`——游标式四方法而非返回配对的 `next`，
   一步不强制任何分配（游标形状由 impl 定）。std 为 `List`/`String`/`Bytes`/
   `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
   `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
   注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
+  形参名取自这份声明（具名实参，§4.3）：接收者 `it`、游标 `c`，所以写 `xs.iter_done(c: k)`。
 - **`Index`** 声明两个关联类型与一个方法：
   `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`。
   语言为 `List`（`Idx = Int`）与 `Map`（`Idx = 键类型`）提供 impl；用户类型实现

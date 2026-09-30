@@ -272,6 +272,12 @@ impl 比对只看类型列表与返回类型（`passes.dawn:1656`）加效果 su
 - **代价必须写下来**：`bytes.iter_done(c: 3)` 里的 `c` 指的是 trait 的第 1 个形参
   （即接收者），不是 impl 的第 2 个。这会误导。缓解只能靠 §6.4 的一次性 API 审计。
 
+**2026-10-01 回填（#210 刀 a）**：`Iter` 的声明改成接收者 `it`、游标 `c`
+（`types.dawn` 的 prelude `Iter`），与五个 std impl 对游标的叫法一致，
+`xs.iter_done(c: k)` 从此照字面意思成立；上面两句代价描述是改名前的状态。
+形式上是破坏性变更（曾写 `k:` 的调用者要改成 `c:`），实扫仓内与 backend-dawn 为 0 处。
+仍不引入位置专用标记（裁决 2）；std 其余形参名的审计与冻结门是刀 b，另立一批、单独发版。
+
 ### 3.6 Java FFI：明确不做
 
 Java 反射拿的是 `getParameterTypes()` 不是 `getParameters()`（`jvm/jreflect.dawn:147`），

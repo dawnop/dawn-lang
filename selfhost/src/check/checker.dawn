@@ -11133,6 +11133,28 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   }
 }
 
+test "the prelude Iter names its cursor `c`, which is what a caller writes" {
+  # A named argument takes its name from the trait declaration, not from the
+  # impl (docs/named-args-design.md 3.5), so the declaration's names are what
+  # a caller has to spell. Every std impl calls the cursor `c`; the trait used
+  # to call the *receiver* `c`, and this call was refused as given twice (#210).
+  let src = "type Two = { a: Int, b: Int }\n" ++
+    "impl Iter[Two] {\n" ++
+    "  type Cur = Int\n" ++
+    "  type Item = Int\n" ++
+    "  fn iter_start(t: Two) -> Int = 0\n" ++
+    "  fn iter_done(t: Two, i: Int) -> Bool = i >= 2\n" ++
+    "  fn iter_next(t: Two, i: Int) -> Int = i + 1\n" ++
+    "  fn iter_get(t: Two, i: Int) -> Int = if i == 0 { t.a } else { t.b }\n" ++
+    "}\n" ++
+    "fn first(t: Two) -> Int = {\n" ++
+    "  let k = t.iter_start()\n" ++
+    "  if t.iter_done(c: k) { 0 } else { t.iter_get(c: t.iter_next(c: k)) }\n" ++
+    "}\n" ++
+    "fn any_left[C: Iter](xs: C) -> Bool = not xs.iter_done(c: xs.iter_start())\n"
+  assert msgs_of(src) == []
+}
+
 test "the same call, four callees, four kinds of typed node" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)

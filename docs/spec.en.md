@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5651f279ffbf15d9 -->
+<!-- doc-check: translation-of docs/spec.md @ 79341232e4574cb4 -->
 
 # Dawn Language Specification
 
@@ -812,15 +812,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   accepts a closed set from the Prelude).
 - **`Iter`** declares two associated types and four methods (associated types are covered further
   down this section):
-  `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur
-  fn iter_done(c: C, k: C.Cur) -> Bool  fn iter_next(c: C, k: C.Cur) -> C.Cur
-  fn iter_get(c: C, k: C.Cur) -> C.Item }` — four cursor methods rather than a `next` that
+  `trait Iter[C] { type Cur  type Item  fn iter_start(it: C) -> C.Cur
+  fn iter_done(it: C, c: C.Cur) -> Bool  fn iter_next(it: C, c: C.Cur) -> C.Cur
+  fn iter_get(it: C, c: C.Cur) -> C.Item }` — four cursor methods rather than a `next` that
   returns a pair, so that one step forces no allocation (the shape of the cursor is up to the
   impl). std provides one impl each for `List`/`String`/`Bytes`/`Map`/`Set` (the elements are
   `T` / a single-character `String` / an `Int` byte / `(K, V)` / `T` respectively); a user type
   that implements `Iter` can be iterated by `for`. The four method names are injected into the
   function namespace along with the prelude, and get the same treatment as the rest of the
   prelude names — **they can be shadowed by a declaration in this module** (§10.3).
+  The parameter names come from this declaration (named arguments, §4.3): the receiver is `it`
+  and the cursor is `c`, so a caller writes `xs.iter_done(c: k)`.
 - **`Index`** declares two associated types and one method:
   `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`.
   The language provides impls for `List` (`Idx = Int`) and `Map` (`Idx = key type`); a user type
