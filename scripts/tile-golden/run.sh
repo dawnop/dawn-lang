@@ -354,11 +354,13 @@
 # down what it ran and scripts/mutant-coverage/check.py holds the union to
 # matrix.txt.
 #
-# The anchor each mutant rewrites must match exactly once, so a refactor that
-# moves it fails here instead of silently un-mutating (scripts/narrow-contract
-# is the precedent for the whole shape). Without tileiras the three writer
-# mutants still assert their byte-level halves and print SKIP for the verdict.
-# shellcheck disable=SC2016  # the mutant anchors and the refusal are Dawn source, quoted verbatim on purpose
+# The anchor each mutant rewrites is its entry in mutate.py and must match
+# exactly once, so a refactor that moves it fails before any build instead of
+# silently un-mutating: mutation-anchor-preflight.py checks every entry on
+# every push, and mutate.py checks the one it applies here. Without tileiras
+# the three writer mutants still assert their byte-level halves and print
+# SKIP for the verdict.
+# shellcheck disable=SC2016  # the refusals are Dawn source, quoted verbatim on purpose
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -630,21 +632,6 @@ fork_pkg() { # dst
   cp -r "$root/packages/tileir" "$1"
 }
 
-# Rewrite exactly one anchor in a forked package module, or fail.
-patch_pkg() { # pkgdir, module, label, old, new
-  python3 - "$1/src/$2" "$3" "$4" "$5" <<'PY'
-import pathlib
-import sys
-
-path, label, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-p = pathlib.Path(path)
-text = p.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"{label}: anchor is not unique in {p.name} ({text.count(old)} matches)")
-p.write_text(text.replace(old, new))
-PY
-}
-
 run_jvm() { # project, out, args... ; returns the program's exit code
   local project="$1" out="$2"
   shift 2
@@ -871,15 +858,22 @@ done
 # ---------------------------------------------------------------- mutants
 
 # A mutant is a forked package with one anchor rewritten, built into its own
-# project on both backends.
-mutant_project() { # name, module, old, new
-  local name="$1" module="$2" old="$3" new="$4"
-  local pkg="$work/pkg-$name"
+# project on both backends. The anchor is mutate.py's entry under the
+# mutant's name (where mutation-anchor-preflight.py checks it before any
+# build); the package is forked into a repository-shaped tree so that the
+# registry's paths resolve in it as they do in the checkout. <module> names
+# the file the entry edits, for the md5 line, and is held to it.
+mutant_project() { # name, module
+  local name="$1" module="$2"
+  local tree="$work/tree-$name"
+  local pkg="$tree/packages/tileir"
+  mkdir -p "$tree/packages"
   fork_pkg "$pkg"
   local before after
   before=$(digest "$pkg/src/$module")
-  patch_pkg "$pkg" "$module" "mutant $name" "$old" "$new"
+  python3 "$here/mutate.py" "$name" "$tree"
   after=$(digest "$pkg/src/$module")
+  [ "$before" != "$after" ] || fail "mutant $name: mutate.py left packages/tileir/src/$module as it was"
   echo "      $name: packages/tileir/src/$module md5 $before -> $after"
   project "$work/m-$name" "$pkg"
   build_native "$work/m-$name" "$work/m-$name.bin"
@@ -915,9 +909,7 @@ mutant_run_bytecode() { # name, kernel
 #    anchor unique is the `, ${ty(val_ty)}` after the pointer type, which
 #    only a store has.
 if run_item drop-store-token; then
-  mutant_project drop-store-token render.dawn \
-    ' token=${name(tok_in)}${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token' \
-    '${hints_attr(hints)} : ${ty(ptr_ty)}, ${ty(val_ty)}${opt_ty(mask, mask_ty)} -> token'
+  mutant_project drop-store-token render.dawn
   mutant_run drop-store-token vadd
   for backend in jvm native; do
     out="$work/m-drop-store-token.vadd.$backend"
@@ -936,9 +928,7 @@ fi
 #    trace_kernel refuses it: non-zero exit, the refusal on stderr, nothing
 #    rendered. vadd, whose parameters are f64, is untouched on both backends.
 if run_item load-dtype-f64; then
-  mutant_project load-dtype-f64 dev.dawn \
-    't_load(position(p), param_dtype(p), i, shape, strides, none, none, [])' \
-    't_load(position(p), "f64", i, shape, strides, none, none, [])'
+  mutant_project load-dtype-f64 dev.dawn
   mutant_run load-dtype-f64 vadd_f32
   mutant_run load-dtype-f64 vadd
   refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
@@ -1076,9 +1066,7 @@ refused_mutant_checks() { # name, kernel, fragment
 # 3. The writer encodes make_token with iota's opcode. Same length, one byte
 #    differs, and the verifier behind the reader says a token is not a tile.
 if run_item make-token-as-iota; then
-  mutant_project make-token-as-iota bytecode.dawn \
-    'const OP_MAKE_TOKEN: Int = 0x44' \
-    'const OP_MAKE_TOKEN: Int = 0x3A'
+  mutant_project make-token-as-iota bytecode.dawn
   writer_mutant_checks make-token-as-iota vadd same-size \
     "'cuda_tile.iota' op result #0 must be tile of"
 fi
@@ -1090,9 +1078,7 @@ fi
 #    takes the next byte, `return`'s opcode 0x5C, for the token's value index
 #    and refuses it: 92 is past the 27 values (3 parameters, 24 results).
 if run_item store-token-unwritten; then
-  mutant_project store-token-unwritten bytecode.dawn \
-    'emit_ref(emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask), tok_in)' \
-    'emit_opt_ref(emit_ref(emit_ref(w1, ptrs), value), mask)'
+  mutant_project store-token-unwritten bytecode.dawn
   writer_mutant_checks store-token-unwritten vadd func-one-short \
     "operand index 92 out of bounds (size=27) for token segment"
 fi
@@ -1100,9 +1086,7 @@ fi
 # 5. The writer's type table gives f64 the i64 tag. Same length, the type
 #    section differs, and the verifier refuses addf over an integer tile.
 if run_item f64-tag-as-i64; then
-  mutant_project f64-tag-as-i64 bytecode.dawn \
-    '  "f64" -> 9' \
-    '  "f64" -> 4'
+  mutant_project f64-tag-as-i64 bytecode.dawn
   writer_mutant_checks f64-tag-as-i64 vadd same-size \
     "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'"
 fi
@@ -1114,11 +1098,7 @@ fi
 #    ends, refuses it by name. Nothing is rendered; the text golden never
 #    sees a file.
 if run_item loop-token-not-carried; then
-  mutant_project loop-token-not-carried prog.dawn \
-    '        tok = last(results)
-' \
-    '        ()
-'
+  mutant_project loop-token-not-carried prog.dawn
   refused_mutant_checks loop-token-not-carried sum \
     'tileir: `store token` refers to handle 17, which a loop body defined and which is not visible after the loop'
 fi
@@ -1129,9 +1109,7 @@ fi
 #    body's own index arithmetic, over the induction variable, which
 #    nothing outside the loop has defined.
 if run_item region-stack-pop; then
-  mutant_project region-stack-pop prog.dawn \
-    'let (outer, inner) = (saved, ops)' \
-    'let (outer, inner) = (ops, saved)'
+  mutant_project region-stack-pop prog.dawn
   refused_mutant_checks region-stack-pop sum \
     'tileir: `index mul lhs` refers to handle 11, which no earlier operation defined'
 fi
@@ -1145,9 +1123,7 @@ fi
 #    knows 25 (2 parameters, 20 values before the loop, its 2 results and
 #    the constant after it).
 if run_item for-results-not-rolled-back; then
-  mutant_project for-results-not-rolled-back bytecode.dawn \
-    'fn roll_back(before: W, after: W) -> W = W { ..after, index: before.index, nvals: before.nvals }' \
-    'fn roll_back(before: W, after: W) -> W = after'
+  mutant_project for-results-not-rolled-back bytecode.dawn
   writer_mutant_checks for-results-not-rolled-back sum same-size \
     "operand index 39 out of bounds (size=25) for operand 1"
 fi
@@ -1158,9 +1134,7 @@ fi
 #    still renders (exit 0) and differs from its golden in the addf line
 #    and nowhere else, on both backends.
 if run_item addf-no-rounding; then
-  mutant_project addf-no-rounding render.dawn \
-    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> " rounding<nearest_even>"' \
-    '  "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> ""'
+  mutant_project addf-no-rounding render.dawn
   mutant_run addf-no-rounding vadd_bf16
   for backend in jvm native; do
     out="$work/m-addf-no-rounding.vadd_bf16.$backend"
@@ -1178,9 +1152,7 @@ fi
 #     section differs, and the verifier refuses addf over an integer tile:
 #     the bf16 twin of f64-tag-as-i64.
 if run_item bf16-tag-as-i16; then
-  mutant_project bf16-tag-as-i16 bytecode.dawn \
-    '  "bf16" -> 6' \
-    '  "bf16" -> 2'
+  mutant_project bf16-tag-as-i16 bytecode.dawn
   writer_mutant_checks bf16-tag-as-i16 vadd_bf16 same-size \
     "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi16>'"
 fi
@@ -1194,9 +1166,7 @@ fi
 #     not the flag) and the file is the same length: a flag bit is a flag
 #     bit either way. Only layer 1 sees it.
 if run_item load-pad-flag-as-token; then
-  mutant_project load-pad-flag-as-token bytecode.dawn \
-    'const LOAD_FLAG_PAD: Int = 8' \
-    'const LOAD_FLAG_PAD: Int = 16'
+  mutant_project load-pad-flag-as-token bytecode.dawn
   writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
     "failed to get result type 0 for"
 fi
@@ -1215,9 +1185,7 @@ fi
 #     conversion mutant that does reach layer 2 is
 #     scripts/tile-gpu-diff's exti-sign-extends.
 if run_item ftoi-rounds-instead-of-truncates; then
-  mutant_project ftoi-rounds-instead-of-truncates bytecode.dawn \
-    '  "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]' \
-    '  "ftoi" -> [SIGNED, ROUND_NEAREST_EVEN]'
+  mutant_project ftoi-rounds-instead-of-truncates bytecode.dawn
   writer_mutant_checks ftoi-rounds-instead-of-truncates int_ops same-size \
     "'cuda_tile.ftoi' op invalid rounding mode specified. Only 'nearest_int_to_zero' is supported"
 fi
@@ -1234,11 +1202,7 @@ fi
 #     `lower_scan` keeps every dimension. Nothing under layer 1 knows which
 #     is right -- the renderer prints the types it was handed either way.
 if run_item scan-result-drops-the-dim; then
-  mutant_project scan-result-drops-the-dim bytecode.dawn \
-    '    let w1 = emit(emit(w0, OP_SCAN), len(tys))
-    let w2 = list.fold(tys, w1, (w, t) => {' \
-    '    let w1 = emit(emit(w0, OP_SCAN), len(tys))
-    let w2 = list.fold(list.map(tys, rank0_of), w1, (w, t) => {'
+  mutant_project scan-result-drops-the-dim bytecode.dawn
   writer_mutant_checks scan-result-drops-the-dim prefix_sum same-size \
     "'cuda_tile.scan' op expect same type for operand at index: 0 and result at index: 0"
 fi
@@ -1249,9 +1213,7 @@ fi
 #     another -- and the verifier names the attribute: the atomics take
 #     every ordering but that one.
 if run_item atomic-rmw-claims-weak-ordering; then
-  mutant_project atomic-rmw-claims-weak-ordering bytecode.dawn \
-    '  _ -> (mode, ORDER_RELAXED, SCOPE_DEVICE)' \
-    '  _ -> (mode, ORDER_WEAK, SCOPE_DEVICE)'
+  mutant_project atomic-rmw-claims-weak-ordering bytecode.dawn
   writer_mutant_checks atomic-rmw-claims-weak-ordering histogram same-size \
     "'cuda_tile.atomic_rmw_tko' op memory ordering semantics must be one of: relaxed, acquire, release, acq_rel"
 fi
@@ -1262,11 +1224,7 @@ fi
 #     of step. The text cannot see it and the byte golden would be
 #     re-recorded over it.
 if run_item atomic-cas-writes-an-rmw-mode; then
-  mutant_project atomic-cas-writes-an-rmw-mode bytecode.dawn \
-    '    let w3 = emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE)
-    emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)' \
-    '    let w3 = emit(emit(emit(emit(emit(w2, tok), flags), ORDER_RELAXED), SCOPE_DEVICE), rmw_mode_value("add"))
-    emit_ref(emit_opt_ref(emit_ref(emit_ref(emit_ref(w3, ptrs), cmp), val), mask), tok_in)'
+  mutant_project atomic-cas-writes-an-rmw-mode bytecode.dawn
   writer_mutant_checks atomic-cas-writes-an-rmw-mode cas_swap func-one-long \
     "failed to parse function body for function 'cas_swap'"
 fi
@@ -1295,9 +1253,7 @@ fi
 #     is the same shape as the measurement `exp`'s doc comment records
 #     (`failed to get result type 0 for CmpIOp`).
 if run_item trig-extra-flags; then
-  mutant_project trig-extra-flags bytecode.dawn \
-    '    "sin", "cos", "tan", "sinh", "cosh", "atan2", "remf"]))' \
-    '    "cos", "tan", "sinh", "cosh", "atan2", "remf"]))'
+  mutant_project trig-extra-flags bytecode.dawn
   writer_mutant_checks trig-extra-flags trig_sweep func-one-long \
     "error at offset 112: failed to get result type 0 for DivIOp"
 fi
@@ -1312,9 +1268,7 @@ fi
 #     without being a type error: every token is a token, so a joined set
 #     that is too large or too small is caught here and nowhere below.
 if run_item join-tokens-operand-count-wrong; then
-  mutant_project join-tokens-operand-count-wrong bytecode.dawn \
-    'let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks))' \
-    'let w1 = emit(emit_op_counted(w0, OP_JOIN_TOKENS, Token), len(toks) + 1)'
+  mutant_project join-tokens-operand-count-wrong bytecode.dawn
   writer_mutant_checks join-tokens-operand-count-wrong token_join same-size \
     "operand index 91 out of bounds (size=40) for operand 2"
 fi
@@ -1329,9 +1283,7 @@ fi
 #     cat-operands-swapped in scripts/tile-gpu-diff, which keeps the shape
 #     and moves the answer.
 if run_item cat-dim-swapped; then
-  mutant_project cat-dim-swapped bytecode.dawn \
-    'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), dim), lhs), rhs)' \
-    'emit_ref(emit_ref(emit(emit_op(w0, OP_CAT, to), 1 - dim), lhs), rhs)'
+  mutant_project cat-dim-swapped bytecode.dawn
   writer_mutant_checks cat-dim-swapped shape_ops same-size \
     "'cuda_tile.cat' op invalid concat at position 1, expected: 8 but got: 4"
 fi
@@ -1351,25 +1303,19 @@ fi
 #     bit pattern itself); these three say that the byte written is the
 #     byte meant.
 if run_item int-to-ptr-as-ptr-to-int; then
-  mutant_project int-to-ptr-as-ptr-to-int bytecode.dawn \
-    'IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)' \
-    'IntToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)'
+  mutant_project int-to-ptr-as-ptr-to-int bytecode.dawn
   writer_mutant_checks int-to-ptr-as-ptr-to-int ptr_roundtrip same-size \
     "'cuda_tile.ptr_to_int' op operand #0 must be tile of Pointer type values"
 fi
 
 if run_item ptr-to-int-as-int-to-ptr; then
-  mutant_project ptr-to-int-as-int-to-ptr bytecode.dawn \
-    'PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_INT, to), src)' \
-    'PtrToIntTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_INT_TO_PTR, to), src)'
+  mutant_project ptr-to-int-as-int-to-ptr bytecode.dawn
   writer_mutant_checks ptr-to-int-as-int-to-ptr ptr_roundtrip same-size \
     "'cuda_tile.int_to_ptr' op operand #0 must be tile of i64 values"
 fi
 
 if run_item ptr-to-ptr-as-bitcast; then
-  mutant_project ptr-to-ptr-as-bitcast bytecode.dawn \
-    'PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_PTR_TO_PTR, to), src)' \
-    'PtrToPtrTile(_dst, src, _from, to) -> emit_ref(emit_op(w0, OP_BITCAST, to), src)'
+  mutant_project ptr-to-ptr-as-bitcast bytecode.dawn
   writer_mutant_checks ptr-to-ptr-as-bitcast ptr_recast same-size \
     "'cuda_tile.bitcast' op operand #0 must be tile of i1"
 fi
@@ -1381,11 +1327,7 @@ fi
 #     why it is the one taken: the twin of f64-tag-as-i64 (eight bytes for
 #     eight) and bf16-tag-as-i16 (two for two).
 if run_item i16-tag-as-bf16; then
-  mutant_project i16-tag-as-bf16 bytecode.dawn \
-    '  "i16" -> 2
-' \
-    '  "i16" -> 6
-'
+  mutant_project i16-tag-as-bf16 bytecode.dawn
   writer_mutant_checks i16-tag-as-bf16 dtype_i16 same-size \
     "'cuda_tile.addi' op operand #0 must be tile of i1 or i8 or i16 or i32 or i64 values, but got '!cuda_tile.tile<128xbf16>'"
 fi
@@ -1398,9 +1340,7 @@ fi
 #     here with a constant of this width (2^32, which needs five bytes),
 #     and it is in that kernel for this mutant.
 if run_item i64-payload-four-bytes; then
-  mutant_project i64-payload-four-bytes bytecode.dawn \
-    '  "i64" -> bytes.freeze(put_le(bytes.buf(), value, 8))' \
-    '  "i64" -> bytes.freeze(put_le(bytes.buf(), value, 4))'
+  mutant_project i64-payload-four-bytes bytecode.dawn
   writer_mutant_checks i64-payload-four-bytes dtype_i64 file-shorter \
     "error at offset 5: failed to validate buffer size and format"
 fi
@@ -1417,11 +1357,7 @@ fi
 #     refuses both. What this mutant shows is that the fp8 tags are
 #     load-bearing at all.
 if run_item e4m3-tag-as-i8; then
-  mutant_project e4m3-tag-as-i8 bytecode.dawn \
-    '  "f8E4M3FN" -> 10
-' \
-    '  "f8E4M3FN" -> 1
-'
+  mutant_project e4m3-tag-as-i8 bytecode.dawn
   writer_mutant_checks e4m3-tag-as-i8 dtype_e4m3 same-size \
     "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<128xi8>'"
 fi
@@ -1433,9 +1369,7 @@ fi
 #     length, one enum value for another, and the verifier names both the
 #     format and the two modes it does take.
 if run_item e8m0-rounding-as-nearest-even; then
-  mutant_project e8m0-rounding-as-nearest-even bytecode.dawn \
-    '  if to == "f8E8M0FNU" { ROUND_ZERO } else { ROUND_NEAREST_EVEN }' \
-    '  ROUND_NEAREST_EVEN'
+  mutant_project e8m0-rounding-as-nearest-even bytecode.dawn
   writer_mutant_checks e8m0-rounding-as-nearest-even dtype_e8m0 same-size \
     "'cuda_tile.ftof' op invalid rounding mode specified for conversion to f8E8M0FNU. Only 'zero' and 'positive_inf' are supported"
 fi
@@ -1448,11 +1382,7 @@ fi
 #     other says it has to be `nearest_even` EVERYWHERE ELSE, and either
 #     alone would leave a writer that hard-codes the other mode green.
 if run_item e8m0-tag-as-f8e5m2; then
-  mutant_project e8m0-tag-as-f8e5m2 bytecode.dawn \
-    '  "f8E8M0FNU" -> 18
-' \
-    '  "f8E8M0FNU" -> 11
-'
+  mutant_project e8m0-tag-as-f8e5m2 bytecode.dawn
   writer_mutant_checks e8m0-tag-as-f8e5m2 dtype_e8m0 same-size \
     "'cuda_tile.ftof' op invalid rounding mode specified. Only 'nearest_even' is supported"
 fi
@@ -1462,9 +1392,7 @@ fi
 #     is the CALL in the loop arm, because the two regions are written by
 #     two arms of the same match and only one of them is `for`'s.
 if run_item loop-carried-not-rolled-back; then
-  mutant_project loop-carried-not-rolled-back bytecode.dawn \
-    '    roll_back(w_block, w_body)' \
-    '    w_body'
+  mutant_project loop-carried-not-rolled-back bytecode.dawn
   writer_mutant_checks loop-carried-not-rolled-back loop_count same-size \
     "operand index 37 out of bounds (size=19) for operand 0"
 fi
@@ -1475,9 +1403,7 @@ fi
 #     operand indices come out of the Func section and the alignment
 #     padding after it takes the same two bytes back.
 if run_item break-values-missing; then
-  mutant_project break-values-missing bytecode.dawn \
-    '  BreakVals(values, _tys) -> list.fold(values, emit(emit(emit(w0, OP_BREAK), 0), len(values)), emit_ref)' \
-    '  BreakVals(_values, _tys) -> emit(emit(emit(w0, OP_BREAK), 0), 0)'
+  mutant_project break-values-missing bytecode.dawn
   writer_mutant_checks break-values-missing loop_count same-size \
     "'cuda_tile.break' op operand types must correspond to the parent loop result types"
 fi
@@ -1496,13 +1422,7 @@ fi
 #     scripts/tileir-features/attrs.txt records the three at layer 1 with
 #     that reason spelled out.
 if run_item overflow-attr-not-written; then
-  mutant_project overflow-attr-not-written bytecode.dawn \
-    '  "addi_nsw" -> [OVERFLOW_NSW]
-  "subi_nuw" -> [OVERFLOW_NUW]
-  "muli_nw" -> [OVERFLOW_NW]' \
-    '  "addi_nsw" -> []
-  "subi_nuw" -> []
-  "muli_nw" -> []'
+  mutant_project overflow-attr-not-written bytecode.dawn
   writer_mutant_checks overflow-attr-not-written attr_overflow func-three-short \
     "error at offset 72: invalid integer value for enum type: 18"
 fi
@@ -1520,13 +1440,7 @@ fi
 #     a judgement about the ordering itself would need two blocks racing
 #     and a comparison shape this repository does not have.
 if run_item atomic-memory-attrs-swapped; then
-  mutant_project atomic-memory-attrs-swapped bytecode.dawn \
-    '  "add_acquire_tl_blk" -> ("add", ORDER_ACQUIRE, SCOPE_TL_BLK)
-  "add_release_sys" -> ("add", ORDER_RELEASE, SCOPE_SYS)
-  "add_acq_rel_device" -> ("add", ORDER_ACQ_REL, SCOPE_DEVICE)' \
-    '  "add_acquire_tl_blk" -> ("add", SCOPE_TL_BLK, ORDER_ACQUIRE)
-  "add_release_sys" -> ("add", SCOPE_SYS, ORDER_RELEASE)
-  "add_acq_rel_device" -> ("add", SCOPE_DEVICE, ORDER_ACQ_REL)'
+  mutant_project atomic-memory-attrs-swapped bytecode.dawn
   writer_mutant_checks atomic-memory-attrs-swapped attr_memsem same-size \
     "error at offset 109: invalid integer value for enum type: 3"
 fi
@@ -1540,9 +1454,7 @@ fi
 #     tile is not a wrong answer, it is a program the assembler will not
 #     build.
 if run_item rmw-addf-as-add; then
-  mutant_project rmw-addf-as-add bytecode.dawn \
-    '  "addf" -> 4' \
-    '  "addf" -> 3'
+  mutant_project rmw-addf-as-add bytecode.dawn
   writer_mutant_checks rmw-addf-as-add attr_addf same-size \
     "'cuda_tile.atomic_rmw_tko' op 'add' works only with integers i32 and i64"
 fi
@@ -1556,9 +1468,7 @@ fi
 #     This is the mutant that makes "tag 5 is never emitted here" a claim
 #     rather than an omission.
 if run_item assert-message-tagged; then
-  mutant_project assert-message-tagged bytecode.dawn \
-    '    emit_ref(emit(emit(w1, OP_ASSERT), si), cond)' \
-    '    emit_ref(emit(emit(emit(w1, OP_ASSERT), 5), si), cond)'
+  mutant_project assert-message-tagged bytecode.dawn
   writer_mutant_checks assert-message-tagged assert_pass func-one-long \
     "failed to parse attribute 'message'"
 fi
@@ -1569,9 +1479,7 @@ fi
 #     and then nothing follows. The reader takes the next byte of the
 #     stream for the token's value index.
 if run_item print-tko-token-unwritten; then
-  mutant_project print-tko-token-unwritten bytecode.dawn \
-    '    emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)' \
-    '    list.fold(args, emit(emit(w2, si), len(args)), emit_ref)'
+  mutant_project print-tko-token-unwritten bytecode.dawn
   writer_mutant_checks print-tko-token-unwritten print_tile func-one-short \
     "operand index 91 out of bounds (size=19) for token segment, element 0"
 fi
@@ -1582,9 +1490,7 @@ fi
 #     element count and runs off the end of the section. This is the first
 #     of three that make the three predicate tags load-bearing.
 if run_item assume-divby-tag-as-same-elements; then
-  mutant_project assume-divby-tag-as-same-elements bytecode.dawn \
-    'const ATTR_DIV_BY: Int = 8' \
-    'const ATTR_DIV_BY: Int = 9'
+  mutant_project assume-divby-tag-as-same-elements bytecode.dawn
   writer_mutant_checks assume-divby-tag-as-same-elements assume_divby same-size \
     "failed to read DenseI64ArrayAttr for SameElementsAttr"
 fi
@@ -1598,9 +1504,7 @@ fi
 #     length; what the reader then reads for the operand is four bytes of
 #     the next instruction.
 if run_item assume-same-elements-payload-four-bytes; then
-  mutant_project assume-same-elements-payload-four-bytes bytecode.dawn \
-    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 8)) }' \
-    '  W { ..w, body: list.fold(xs, put_varint(w.body, len(xs)), (b, x) => put_le(b, x, 4)) }'
+  mutant_project assume-same-elements-payload-four-bytes bytecode.dawn
   writer_mutant_checks assume-same-elements-payload-four-bytes assume_same same-size \
     "operand index 78 out of bounds (size=17) for operand 0"
 fi
@@ -1613,9 +1517,7 @@ fi
 #     the flag byte in declaration order and nothing in the stream labels
 #     them.
 if run_item assume-bounded-bounds-swapped; then
-  mutant_project assume-bounded-bounds-swapped bytecode.dawn \
-    '    emit_opt_signed(emit_opt_signed(w1, lb), ub)' \
-    '    emit_opt_signed(emit_opt_signed(w1, ub), lb)'
+  mutant_project assume-bounded-bounds-swapped bytecode.dawn
   writer_mutant_checks assume-bounded-bounds-swapped assume_bounded same-size \
     "'cuda_tile.bounded' expects lower bound to be less than or equal to upper bound"
 fi
@@ -1630,9 +1532,7 @@ fi
 #     the three varints would be followed by nothing and the trailing byte
 #     the reader never looks at would hide the mutant.
 if run_item global-record-alignment-dropped; then
-  mutant_project global-record-alignment-dropped bytecode.dawn \
-    '    let b4 = put_varint(put_varint(put_varint(put_varint(b, si), ti), ci), g.align)' \
-    '    let b4 = put_varint(put_varint(put_varint(b, si), ti), ci)'
+  mutant_project global-record-alignment-dropped bytecode.dawn
   writer_mutant_checks global-record-alignment-dropped global_table same-size \
     "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 10 bytes"
 fi
@@ -1652,9 +1552,7 @@ fi
 #     above: the shortfall has to land inside a record the reader still
 #     wants to parse.
 if run_item global-visibility-omitted-at-13-3; then
-  mutant_project global-visibility-omitted-at-13-3 bytecode.dawn \
-    '      put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
-    '      b4'
+  mutant_project global-visibility-omitted-at-13-3 bytecode.dawn
   writer_mutant_checks global-visibility-omitted-at-13-3 global_table same-size \
     "number of globals (2) exceeds the maximum of 1 that can fit in the remaining payload of 9 bytes"
 fi
@@ -1664,11 +1562,7 @@ fi
 #     next byte of the instruction stream for the symbol: 91, which is
 #     `reshape`'s opcode 0x5B, and the string table has three entries.
 if run_item get-global-symbol-not-written; then
-  mutant_project get-global-symbol-not-written bytecode.dawn \
-    '    let (w2, si) = str_of(w1, sym)
-    emit(w2, si)' \
-    '    let (w2, _si) = str_of(w1, sym)
-    w2'
+  mutant_project get-global-symbol-not-written bytecode.dawn
   writer_mutant_checks get-global-symbol-not-written global_table same-size \
     "failed to read string for FlatSymbolRefAttr"
 fi
@@ -1690,9 +1584,7 @@ fi
 #      therefore the ceiling for these two values, and the exemption in
 #      scripts/tileir-features/attrs.txt says so by name.
 if run_item visibility-private-written-as-public; then
-  mutant_project visibility-private-written-as-public bytecode.dawn \
-    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
-    'put_varint(put_varint(b4, VIS_PUBLIC), if g.constant { 1 } else { 0 })'
+  mutant_project visibility-private-written-as-public bytecode.dawn
   mutant_run visibility-private-written-as-public global_syms
   mutant_run_bytecode visibility-private-written-as-public global_syms
   for backend in jvm native; do
@@ -1745,9 +1637,7 @@ fi
 #      block goes red and the exemption gets revisited instead of quietly
 #      staying wrong.
 if run_item constant-flag-as-mutable; then
-  mutant_project constant-flag-as-mutable bytecode.dawn \
-    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), if g.constant { 1 } else { 0 })' \
-    'put_varint(put_varint(b4, if g.is_private { VIS_PRIVATE } else { VIS_PUBLIC }), 0)'
+  mutant_project constant-flag-as-mutable bytecode.dawn
   mutant_run constant-flag-as-mutable global_syms
   mutant_run_bytecode constant-flag-as-mutable global_syms
   for backend in jvm native; do
@@ -1800,9 +1690,7 @@ fi
 #     Only the SHAPE is load-bearing, and these four mutants are its four
 #     seams.
 if run_item hint-dictionary-count-wrong; then
-  mutant_project hint-dictionary-count-wrong bytecode.dawn \
-    'ATTR_DICTIONARY), len(under))' \
-    'ATTR_DICTIONARY), len(under) + 1)'
+  mutant_project hint-dictionary-count-wrong bytecode.dawn
   writer_mutant_checks hint-dictionary-count-wrong hint_memory same-size \
     "failed to read key for DictionaryAttr element 1"
 fi
@@ -1816,9 +1704,7 @@ fi
 #     OptimizationHintsAttr and holds a DictionaryAttr. This is the mutant
 #     that makes tag 11 a claim rather than a spelling.
 if run_item hint-tag-as-dictionary; then
-  mutant_project hint-tag-as-dictionary bytecode.dawn \
-    'const ATTR_OPTIMIZATION_HINTS: Int = 11' \
-    'const ATTR_OPTIMIZATION_HINTS: Int = 10'
+  mutant_project hint-tag-as-dictionary bytecode.dawn
   writer_mutant_checks hint-tag-as-dictionary hint_entry same-size \
     "invalid optimization hints attribute for function 'hint_entry'"
 fi
@@ -1832,9 +1718,7 @@ fi
 #     stream: it takes the outer dictionary's count for a memory scope
 #     enum and every operand after it is one place out of step.
 if run_item hint-flag-bit-misplaced; then
-  mutant_project hint-flag-bit-misplaced bytecode.dawn \
-    'const LOAD_FLAG_HINTS: Int = 2' \
-    'const LOAD_FLAG_HINTS: Int = 1'
+  mutant_project hint-flag-bit-misplaced bytecode.dawn
   writer_mutant_checks hint-flag-bit-misplaced hint_memory same-size \
     "operand index 91 out of bounds (size=19) for operand 1"
 fi
@@ -1851,9 +1735,7 @@ fi
 #     `len(k.hints)`, which is what a reader of that function should be able
 #     to see, and this mutant is what says the two are joined on purpose.
 if run_item hint-entry-flag-dropped; then
-  mutant_project hint-entry-flag-dropped bytecode.dawn \
-    'const FLAG_HAS_HINTS: Int = 0x04' \
-    'const FLAG_HAS_HINTS: Int = 0x00'
+  mutant_project hint-entry-flag-dropped bytecode.dawn
   writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
     "operand index 10 out of bounds (size=4) for operand 0"
 fi
@@ -1867,11 +1749,7 @@ fi
 #     have been invisible without layer 1: `exp` renders the same text at
 #     both versions, because `full` is the default the printer omits.
 if run_item exp-rounding-unwritten; then
-  mutant_project exp-rounding-unwritten bytecode.dawn \
-    '  } else if op == "exp" && exp_has_rounding() {
-    Some(ROUND_FULL)' \
-    '  } else if op == "exp" && false {
-    Some(ROUND_FULL)'
+  mutant_project exp-rounding-unwritten bytecode.dawn
   writer_mutant_checks exp-rounding-unwritten sigmoid func-one-short \
     "failed to parse attribute 'rounding_mode'"
 fi
@@ -1885,9 +1763,7 @@ fi
 #     one operand short. `mmai`, which has no optional field at any version,
 #     writes no such word and is untouched.
 if run_item mmaf-flags-unwritten; then
-  mutant_project mmaf-flags-unwritten bytecode.dawn \
-    '    let w2 = if mmaf_has_flags() { emit(w1, MMAF_FLAG_FAST_ACC_UNSET) } else { w1 }' \
-    '    let w2 = w1'
+  mutant_project mmaf-flags-unwritten bytecode.dawn
   writer_mutant_checks mmaf-flags-unwritten matmul func-one-short \
     "block is expected to have a terminator operation, but the last operation 'cuda_tile.absf' is not a terminator"
 fi
@@ -1904,9 +1780,7 @@ fi
 #     `global_has_extended_fields`, so lowering it would produce an honest
 #     13.2 file rather than the disagreement this is about.
 if run_item header-minor-still-2; then
-  mutant_project header-minor-still-2 bytecode.dawn \
-    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR)' \
-    'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 2)'
+  mutant_project header-minor-still-2 bytecode.dawn
   writer_mutant_checks header-minor-still-2 global_table same-size \
     "expect Cuda Tile integer or float type but got: '<<NULL TYPE>>'"
 fi
@@ -1922,9 +1796,7 @@ fi
 #     knife T8 wrote down: section padding absorbs a byte, so the file size
 #     is not this family's judgement.
 if run_item alloca-flags-unwritten; then
-  mutant_project alloca-flags-unwritten bytecode.dawn \
-    '    let w1 = emit(emit_op(w0, OP_ALLOCA, t), if shared { ALLOCA_FLAG_GLOBAL } else { 0 })' \
-    '    let w1 = emit_op(w0, OP_ALLOCA, t)'
+  mutant_project alloca-flags-unwritten bytecode.dawn
   writer_mutant_checks alloca-flags-unwritten alloca_scratch func-one-short \
     "failed to get result type 0 for BitcastOp"
 fi
@@ -1940,9 +1812,7 @@ fi
 #     192 is a two-byte varint and 8 is one, so the Func section is one
 #     byte LONGER here while the file is again the same length.
 if run_item alloca-alignment-as-num-elem; then
-  mutant_project alloca-alignment-as-num-elem bytecode.dawn \
-    '    emit(emit(w1, num_elem), align)' \
-    '    emit(emit(w1, num_elem), num_elem)'
+  mutant_project alloca-alignment-as-num-elem bytecode.dawn
   writer_mutant_checks alloca-alignment-as-num-elem alloca_scratch func-one-long \
     "'cuda_tile.alloca' op 'alignment' must be power of two"
 fi
@@ -1955,9 +1825,7 @@ fi
 #     caught it: the arity is the operation's identity and nothing in the
 #     stream repeats it.
 if run_item mmaf-scaled-scale-operand-missing; then
-  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn \
-    '    emit_ref(emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale), rhs_scale)' \
-    '    emit_ref(emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc), lhs_scale)'
+  mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn
   writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short \
     "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
 fi
@@ -1974,9 +1842,7 @@ fi
 #     Same file length, Func one byte longer, and the same kind of
 #     evidence as trig-extra-flags.
 if run_item mmaf-scaled-writes-a-flags-word; then
-  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn \
-    '    let w1 = emit_op(w0, OP_MMAF_SCALED, t)' \
-    '    let w1 = emit(emit_op(w0, OP_MMAF_SCALED, t), 0)'
+  mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn
   writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long \
     "operand index 91 out of bounds (size=77) for operand 2"
 fi
@@ -1989,9 +1855,7 @@ fi
 #     the reader refuses the first `unpack`: its source and its result are
 #     both eight bits wide, and `bitcast` is the operation for that.
 if run_item i4-tag-as-i8; then
-  mutant_project i4-tag-as-i8 bytecode.dawn \
-    '  "i4" -> 22' \
-    '  "i4" -> 1'
+  mutant_project i4-tag-as-i8 bytecode.dawn
   writer_mutant_checks i4-tag-as-i8 dtype_i4 file-shorter \
     "'cuda_tile.unpack' op expects source and result to have different element type widths"
 fi
@@ -2004,9 +1868,7 @@ fi
 #     take the type. dtype_e2m1 is assembled for sm_100 (kernel_arch), so
 #     this mutant is too.
 if run_item e2m1-tag-as-i4; then
-  mutant_project e2m1-tag-as-i4 bytecode.dawn \
-    '  "f4E2M1FN" -> 19' \
-    '  "f4E2M1FN" -> 22'
+  mutant_project e2m1-tag-as-i4 bytecode.dawn
   writer_mutant_checks e2m1-tag-as-i4 dtype_e2m1 same-size \
     "'cuda_tile.ftof' op operand #0 must be tile of"
 fi
@@ -2018,9 +1880,7 @@ fi
 #     and the reader refuses it by TYPE: a `pack` answers an i8 tile and
 #     this one answers nibbles.
 if run_item unpack-as-pack; then
-  mutant_project unpack-as-pack bytecode.dawn \
-    'const OP_UNPACK: Int = 0x70' \
-    'const OP_UNPACK: Int = 0x6F'
+  mutant_project unpack-as-pack bytecode.dawn
   writer_mutant_checks unpack-as-pack pack_roundtrip same-size \
     "'cuda_tile.pack' op result #0 must be tile of i8 values, but got '!cuda_tile.tile<256xi4>'"
 fi
@@ -2037,9 +1897,7 @@ fi
 #     The anchor is in prog.dawn because that is where a recorded `Repack`
 #     gets its second shape; lower.dawn and the writer only carry it.
 if run_item pack-result-shape-unhalved; then
-  mutant_project pack-result-shape-unhalved prog.dawn \
-    '  [bits / dtype_bits(to)]' \
-    '  [lanes_of(shape)]'
+  mutant_project pack-result-shape-unhalved prog.dawn
   mutant_run pack-result-shape-unhalved dtype_i4
   mutant_run_bytecode pack-result-shape-unhalved dtype_i4
   for backend in jvm native; do
@@ -2085,9 +1943,7 @@ fi
 #     the view family's tag mutant, the shape of every `<x>-tag-as-<y>`
 #     above.
 if run_item tensor-view-tag-as-ptr; then
-  mutant_project tensor-view-tag-as-ptr bytecode.dawn \
-    'bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)' \
-    'bytes.put(bytes.buf(), TAG_PTR), ei)'
+  mutant_project tensor-view-tag-as-ptr bytecode.dawn
   writer_mutant_checks tensor-view-tag-as-ptr view_transpose same-size \
     "expected ::mlir::cuda_tile::TensorViewType but got '!cuda_tile.ptr<f64>'"
 fi
@@ -2109,9 +1965,7 @@ fi
 #     rather than only the one it needs: without the pre-13.3 arm there
 #     would be nothing here to get wrong.
 if run_item partition-view-padding-inline-flag-at-13-3; then
-  mutant_project partition-view-padding-inline-flag-at-13-3 bytecode.dawn \
-    'fn partition_view_has_bitfield() -> Bool = at_least(13, 3)' \
-    'fn partition_view_has_bitfield() -> Bool = at_least(13, 4)'
+  mutant_project partition-view-padding-inline-flag-at-13-3 bytecode.dawn
   writer_mutant_checks partition-view-padding-inline-flag-at-13-3 view_transpose same-size \
     "failed to read tile_shape data"
 fi
@@ -2128,9 +1982,7 @@ fi
 #     the diagnostic in cuda-tile's test/ finds nothing), so this is the
 #     only place either side of the fence exercises it.
 if run_item padding-nan-on-integer-elements; then
-  mutant_project padding-nan-on-integer-elements bytecode.dawn \
-    '  PadZero -> Some(PAD_ZERO)' \
-    '  PadZero -> Some(PAD_NAN)'
+  mutant_project padding-nan-on-integer-elements bytecode.dawn
   writer_mutant_checks padding-nan-on-integer-elements view_pad_i32 same-size \
     "padding_value nan can only be used with floating point element types, got 'i32'"
 fi
@@ -2146,9 +1998,7 @@ fi
 #     is INT64_MIN, and the two ways of getting it wrong (a static extent,
 #     or a shifted minus one) are both the same length as the right answer.
 if run_item dynamic-dim-written-static; then
-  mutant_project dynamic-dim-written-static bytecode.dawn \
-    'if d == DYN_DIM { bytes.put(put_le(b, 0, 7), 0x80) } else { put_le(b, d, 8) }' \
-    'if d == DYN_DIM { put_le(b, 4096, 8) } else { put_le(b, d, 8) }'
+  mutant_project dynamic-dim-written-static bytecode.dawn
   writer_mutant_checks dynamic-dim-written-static view_dyn_transpose same-size \
     "'cuda_tile.make_tensor_view' op expected 0 dynamic shape operands, got 2"
 fi
@@ -2160,9 +2010,7 @@ fi
 #     company: `get_index_space_shape` takes a TileView, which is a
 #     partition, strided or gather view and NOT a tensor view.
 if run_item tensor-shape-as-index-space-shape; then
-  mutant_project tensor-shape-as-index-space-shape bytecode.dawn \
-    'emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)' \
-    'emit_shape_query(w0, OP_GET_INDEX_SPACE_SHAPE, len(dsts), res_ty, src)'
+  mutant_project tensor-shape-as-index-space-shape bytecode.dawn
   writer_mutant_checks tensor-shape-as-index-space-shape view_tensor_shape same-size \
     "'cuda_tile.get_index_space_shape' op operand #0 must be TileView instance, but got '!cuda_tile.tensor_view<?x?xf64, strides=[?,?]>'"
 fi
@@ -2172,9 +2020,7 @@ fi
 #     `TensorViewType` exactly, and what it is handed here is a partition
 #     view.
 if run_item index-space-shape-as-tensor-shape; then
-  mutant_project index-space-shape-as-tensor-shape bytecode.dawn \
-    'emit_shape_query(w0, OP_GET_INDEX_SPACE_SHAPE, len(dsts), res_ty, src)' \
-    'emit_shape_query(w0, OP_GET_TENSOR_SHAPE, len(dsts), res_ty, src)'
+  mutant_project index-space-shape-as-tensor-shape bytecode.dawn
   writer_mutant_checks index-space-shape-as-tensor-shape view_index_space same-size \
     "'cuda_tile.get_tensor_shape' op operand #0 must be tensor view type, but got '!cuda_tile.partition_view<tile=(16x16), padding_value = zero, tensor_view<?x?xf64, strides=[?,?]>>'"
 fi
@@ -2186,9 +2032,7 @@ fi
 #     operation's own result constraint, which is `PartitionViewType`
 #     exactly and not the strided view the type table holds.
 if run_item make-strided-view-as-partition-view; then
-  mutant_project make-strided-view-as-partition-view bytecode.dawn \
-    'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)' \
-    'emit_ref(emit_op(w0, OP_MAKE_PARTITION_VIEW, t), src)'
+  mutant_project make-strided-view-as-partition-view bytecode.dawn
   writer_mutant_checks make-strided-view-as-partition-view view_conv1d same-size \
     "'cuda_tile.make_partition_view' op result #0 must be partition view type"
 fi
@@ -2198,9 +2042,7 @@ fi
 #     different refusal: the result type this one is handed is a gather
 #     view, and a strided view is what the operation wants.
 if run_item make-gather-view-as-strided-view; then
-  mutant_project make-gather-view-as-strided-view bytecode.dawn \
-    'emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)' \
-    'emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)'
+  mutant_project make-gather-view-as-strided-view bytecode.dawn
   writer_mutant_checks make-gather-view-as-strided-view view_token_embed same-size \
     "'cuda_tile.make_strided_view' op result #0 must be strided view type"
 fi
@@ -2213,9 +2055,7 @@ fi
 #     to its tensor, and it is what says the two fields are not
 #     interchangeable.
 if run_item gather-sparse-dim-and-tensor-view-swapped; then
-  mutant_project gather-sparse-dim-and-tensor-view-swapped bytecode.dawn \
-    'let b2 = put_varint(put_varint(b1, tvi), sparse_dim)' \
-    'let b2 = put_varint(put_varint(b1, sparse_dim), tvi)'
+  mutant_project gather-sparse-dim-and-tensor-view-swapped bytecode.dawn
   writer_mutant_checks gather-sparse-dim-and-tensor-view-swapped view_token_embed same-size \
     "expected ::mlir::cuda_tile::TensorViewType but got 'i32'"
 fi
@@ -2226,9 +2066,7 @@ fi
 #     or 2 and the modes run to 8, so the first reduction whose mode is
 #     above two is a scope the dialect has no name for.
 if run_item atomic-red-scope-and-mode-swapped; then
-  mutant_project atomic-red-scope-and-mode-swapped bytecode.dawn \
-    'emit(emit(emit(w2, ORDER_RELAXED), scope_value(scope)), red_mode_value(mode))' \
-    'emit(emit(emit(w2, ORDER_RELAXED), red_mode_value(mode)), scope_value(scope))'
+  mutant_project atomic-red-scope-and-mode-swapped bytecode.dawn
   writer_mutant_checks atomic-red-scope-and-mode-swapped view_atomic same-size \
     "invalid integer value for enum type: 3"
 fi
@@ -2239,9 +2077,7 @@ fi
 #     is not a tile of the view's element format, which is the whole of
 #     what the operand ORDER of this operation says.
 if run_item atomic-red-value-and-token-swapped; then
-  mutant_project atomic-red-value-and-token-swapped bytecode.dawn \
-    'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)' \
-    'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), tok_in), value)'
+  mutant_project atomic-red-value-and-token-swapped bytecode.dawn
   writer_mutant_checks atomic-red-value-and-token-swapped view_atomic same-size \
     "'cuda_tile.atomic_red_view_tko' op operand #2 must be Tile type, but got '!cuda_tile.token'"
 fi
