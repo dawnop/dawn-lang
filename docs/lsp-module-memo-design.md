@@ -3,6 +3,7 @@
 > 状态：**current**：2026-09-28 落地，分支 `feat/lsp-module-memo`：七个实现提交加本文档（提交以主题引用，合入后的哈希记在进度记录里）。
 > 数据来源是 laziness L0 报告（`agent-handoff/laziness-l0-report-20260927.md`，基线 `b184de6e`）与本文第六节的实测。
 > 上一篇是 [incremental-semantics-removal.md](incremental-semantics-removal.md)：拆掉体级重放之后，生产 LSP 只剩 legacy 前缀复用；本文把它换成一条规则。
+> 刀 2（2026-09-30，分支 `feat/lsp-memo-by-imports`）：行起点跟着解析复用，复用条件从「进入时整条 carry 相同」收窄为「这一步读到的那部分 carry 相同」，见第十节。
 
 ## 一、问题
 
@@ -20,7 +21,9 @@ selfhost 工作区（打开 `main.dawn` 与另外四个文件，`main` 的闭包
 
 `driver/incremental.analyze` 按拓扑序走模块。对每个模块：
 
-> 若它的**输入**与上一轮相同，且它**进入时的 carry** 与上一轮相同，原样复用上一轮的步骤；否则重检。
+> 若它的**输入**与上一轮相同，且它从进入时的 carry 里**读到的那部分**与上一轮相同，原样复用上一轮的步骤；否则重检。
+
+（刀 1 的原文是「进入时的 carry 相同」；刀 2 按步骤实际读了什么收窄，读了什么、怎么判定、复用后的 carry 怎么拼，见第十节。本节其余部分是刀 1 的推导，2.2 的比较方式已由第十节的逐表跟踪取代。）
 
 - 输入：整个 `LoadedModule`（文本、loader 改写后的 AST、路径、包、入口标记）按结构 `==` 比，外加按当前 `Env` 重算的 std 身份（`incremental.dawn` 的 `same_input` 与 `identity == e.std_identity`）。
 - carry：`exports`、`impls`、`identities` 三个字段按结构比，**不比 `decl_spans`**。
@@ -188,3 +191,92 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 规则不再是前缀，名字跟着改（提交「Name the module memo contracts after the rule they hold」）：`prefix.py` → `module-memo.py`、
 `lsp-prefix.py` → `lsp-module-memo.py`、`contract/prefix` → `contract/module_memo`，job `incremental-prefix-1..3` → `incremental-memo-1..3`，
 预算行照搬，`steps.lock.json` 按 `incremental-memo` 族重录，提交里按族写 `Gate-Retire(incremental-prefix)`。记录旧测量的注释保留当时的名字。
+
+## 十、刀 2：行起点记忆与按导入键控的复用（2026-09-30）
+
+数据与动机来自 L1 再评报告（`agent-handoff/research-laziness-l1-reeval-20260930.md` §一）：selfhost 工作区里改 `check/types` 一个 `pub fn` 的签名（场景 (b)），
+刀 1 的规则让它之后的 75 个模块全部重检，而其中只有 29 个导入它；75 次重检里 `lexer.line_starts_of` 一项共约 179 ms，而这些文件的文本都没变。
+两刀都不改变任何 LSP 可见的输出。
+
+### 10.1 行起点跟着解析走
+
+`LoadedModule` 多一个字段 `line_starts`，由 loader 从解析得来：`ParseMemo` 里的 `Parsed` 带着它，文本相同的文件连同解析一起复用（`driver/analyze.dawn` 的 `fresh_parse`、`parse_reusing`）。
+`analyze_module_step` 不再自己算。冷路径是同一个函数在 load 时算一次，值相同；它唯一的读者是 `expr!` 的 `at file:line`（`check/tast_positions.dawn` 的 `site`）。
+`incremental.same_input` 比较 `LoadedModule` 时不再逐项比 `line_starts`（它是文本的函数，文本已经比了）：第一版逐项比，(a) 体内编辑的 sync 中位数比同批基线高约 11 ms（69 对 80，交错 4 遍）；改后高约 5 ms（72 对 77），在噪声内。
+
+判据：`driver/analyze`「a reusing load parses only the files whose text changed」（复用加载与冷加载的 `LoadedModule` 相等，行起点在内）；
+`contract/module_memo`「module memo checks an unchanged file again with the line starts its reused parse holds」：经真实 loader，文本未变、因导入变了而重检的模块，comptime 报告里仍是 `app.dawn:5`，文本上移三行后是 `app.dawn:8`，并逐项对冷。
+变异体 `stale-line-starts`（`lsp-module-memo.py`：未命中时沿用旧解析的行起点）让这两条都红。
+
+### 10.2 一个步骤读 carry 的哪些部分
+
+`analyze_module_step(input, before, world)` 读 `before` 的四个字段，读法各不相同：
+
+| 字段 | 谁读、怎么读 | 复用条件 |
+|---|---|---|
+| `exports` | 只有 `check_module_headers` → `pass_imports`，按每行 `use` 的路径 `map.get`；唯一的例外是 std 路径找不到时，诊断列出表里全部 `std/` 键 | 每行 `use` 找到的面不变；有找不到的 std 路径时另比 `std/` 键列表 |
+| `impls` | 整张表是 `impl_table` 的起点：impl 在全程序生效，不由 `use` 打开 | 行相同 |
+| `identities` | intern 表的起点，只在 `cx.interned` 里判定撞车；步骤之后的表 = 进入的表 ∪ 本模块自己的声明行 | 见 10.4 |
+| `decl_spans` | 不读，只插入自己那一项 | 无（照旧每模块重拼，第四节） |
+
+**「re-export 可达」由导出面自己承担。** Dawn 没有 re-export 语句；间接可达的类型信息是这样流动的：`exports_of` 把模块从自己的导入嫁接来的整张 ADT、trait、效果表放进导出面
+（`adt_infos: cx.adts` 等，注释是「extra entries graft harmlessly」）。所以 `use a` 的模块读到的 `b` 的类型，就在 `a` 的导出面里；`b` 的类型一变，`a` 重检，`a` 的导出面（嫁接的那几张表）不等，
+`a` 的导入者随之重检。读集合因此只需直接 `use` 的路径，不必展开闭包；代价落在 `same_surface` 必须比较整个导出面（含嫁接表），不能只比模块自己的名字表。
+`contract/module_memo`「module memo checks an importer again when a surface changes only in what it imported」守它：`b` 改字段名，`a` 的签名不变，只 `use a` 的 `d` 必须重检并报出与冷检相同的错。
+变异体 `reexport-blind`（`same_surface` 不看三张嫁接表）让它红。
+
+### 10.3 判定怎么做才不贵
+
+`Map` 的 `==` 先把一侧的行列出并排序，没有对象同一的捷径（本机实测：两万行的表自比一次约 4.6 ms，记录套着表也一样），所以逐模块逐导入做结构比较不可行。实现只在「被重检的模块」处比较，其余靠记账：
+
+- **导出面**：每条 `Entry` 记它每行 `use` 在哪里找到了面（`NotFound`、`InBaseline`、`InStep`）。本轮维护两个集合：`seen`（本轮已放进 carry 的模块）与 `fresh`（其中本轮重检、且导出面与上一轮它自己的不等的模块）。
+  `InStep` 的面不变 ⟺ 该模块本轮已在 `seen` 里且不在 `fresh` 里；`InBaseline` ⟺ 不在 `seen` 里且表里有；`NotFound` ⟺ 表里没有（`reads_hold`，不做任何比较）。
+  归纳：一个模块本轮若被复用，放进 carry 的就是上一轮它自己的面对象；若被重检且 `same_surface` 相等，也换回上一轮的对象；否则进 `fresh`。上一轮步骤记下的 `InStep` 读到的正是上一轮该模块的面（记录时它在前面；复用时条件成立），所以「不在 `fresh`」就是「与它读到的相同」。
+- **impl 表**：`impls_is` 记当前表是否就是上一轮某模块之后的那个对象（刀 1 的 `carry_is` 拆出来的一张），是则免比；否则 `same_rows` 比一次行（按 trie 顺序遍历，不排序）。
+  重检的模块在进入时同步、且新表与上一轮的行相同时换回旧对象，后面的模块继续免比。
+- **intern 表**：`ids_is` 同理；不同步时走 10.4 的合并。
+
+比较代价：每个被重检模块一次 `same_surface`，同步时各一次 `same_rows`；复用的模块 O(读的 `use` 行数)。
+
+### 10.4 identities：只影响撞车诊断
+
+裁决要求 identities 不再参与复用判定。论证：
+
+1. `cx.interned` 是唯一读 `identities` 的地方（`check/cx.dawn`），它只做两件事：表里没有这个 id 就插入；有且是别的声明就报撞车诊断、不改表。返回的 id 是 `identity.derive(decl)`，与表无关。所以表只影响**诊断**和**之后的表**。
+2. 一个模块只 intern 它自己的声明：`mint` 与 `enter_decl_owner` 都以 `cx.owner_class` 为 owner。所以步骤新增的行（`minted_by`）都属于它自己，别的步骤不会产生这些行。
+3. 于是，若当前表不是它上一轮进入时的那张：只要它上一轮**没有诊断**（没有撞车），且它新增的行在当前表里一行也不在，冷检就会无撞车地插入同样的行，诊断相同，之后的表 = 当前表 ∪ 这些行。
+   这正是复用时做的（`kept` 的合并分支）；复用步骤的 `CheckedMod.cx.identities` 也换成这张表，与冷检逐项相同。
+4. 有诊断的步骤在表变了时重检：它的某条诊断可能是撞车，而撞车的另一方可能已不在当前表里。「撞车诊断在复用步骤的诊断里已经带着」只在表相同时成立，表变了就不一定，这里是裁决原话需要补的一个条件。
+   新行已被占（上游新加了一个撞车的声明）同样重检。两种情况在 selfhost 上都不发生（全仓无诊断、无撞车），不影响 (b) 的收益。
+
+撞车以前被认为写不出测试（`check/cx.dawn` 的测试注释「the real thing is not reachable by writing a test module」）。这次用一个 C 程序在 2^25 × 2^26 个函数名里找 47 位碰撞，
+约 28 s 找到三对，其中 `p.a20228599` 与 `q.b9013596` 用在 `contract/module_memo`「module memo reports a digest collision with a module it does not import as the cold path does」：
+测试先断言两个 id 相等（哈希若变，测试会指出），再覆盖三种情况：上游表变、`p` 复用、`q` 重检仍撞到 `p` 的行（变异体 `drop-identities`：复用不合并新行）；
+上游新加撞车声明、不导入它的 `q` 必须重检报出撞车（`skip-collision`：不查新行是否被占）；撞车声明删掉、`q` 必须重检、诊断消失（`keep-diagnosed`：有诊断也复用）。三者都逐项对冷。
+
+### 10.5 复用后的 carry
+
+复用步骤 `e` 之后：`exports` 插入上一轮它自己的面对象；`impls` 取 `e` 之后的那张（条件保证行相同）；`identities` 同步时取 `e` 之后的那张，否则取 10.4 的合并表；
+`decl_spans` 照第四节重拼。合并按步骤原来 intern 的顺序插入（`minted_by` 取 `map.entries` 的插入序），不是按 trie 顺序：表不只是它的行，还带插入序号，
+按同样顺序插进同一张表才得到冷检那张表本身。第一版按 trie 顺序合并，`checkdump` 与诊断都看不出来，是 `module-memo.py` 的全产品冷参照（`SemanticSnapshot` 逐字段比较）在 `Cx.identities` 的 `NLeaf.seq` 上红出来的。
+impl 表在不同步、行相同时取上一轮的对象，与冷检行相同、插入历史可能不同；它只按键查（2.3），LSP 侧没有读者，全产品冷参照在它的样本上相同。上一轮到这一轮，`Entry` 的 `reads` 与 `std_names` 原样沿用（条件成立即仍然正确），`impls_in`、`ids_in`、`pred` 换成本轮进入时的，`minted` 缓存算过一次的新增行。
+
+### 10.6 实测
+
+方法同 L1 再评报告 §一（`lsp_l1.py`，工作区是 `09851075` 的干净快照，打开 `main` 与 `front/ast`、`check/checker`、`check/types`、`driver/analyze`、`jvm/emit`；
+每轮三次编辑：(a) `driver/analyze` 体内、(b) `check/types` 的 `pub fn eff_suffix` 在加减一个带默认值的参数之间切换、(c) 第 0 个模块 `front/ast` 体内；预热 3 轮、测 7 轮）。
+基线、刀 2 的 M1、M1+M2 三个服务端交错 4 遍（每遍顺序轮换），每格 n = 28，服务端 `-Xss512m -Xmx2g -XX:+UseSerialGC`，测量期间 load avg 1.9 到 2.5。
+
+| 编辑 | 基线 sync 中位数 / min | M1 | M1+M2 | 重检模块（基线 → M1+M2） |
+|---|---|---|---|---|
+| (a) 体内 | 72 / 48 ms | 77 / 48 ms | 69 / 47 ms | 1 → 1 |
+| (b) `check/types` pub 签名 | 773 / 705 ms | 647 / 579 ms | **518 / 490 ms** | 75 → 30（复用 1 → 46） |
+| (c) 第 0 模块体内 | 28 / 25 ms | 30 / 27 ms | 32 / 25 ms | 1 → 1 |
+| 首次打开（六次 didOpen，四遍） | 5.7 到 6.0 s | 5.4 到 5.7 s | 3.8 到 4.1 s | |
+
+四遍各自的中位数：(b) 基线 778 / 905 / 765 / 747，M1 925 / 620 / 634 / 639，M1+M2 518 / 512 / 531 / 509。
+M1 在 (b) 上省约 126 ms（验收线 120）；M2 再省约 129 ms，**未达到验收线 150 ms**：再评报告估的「非导入者的模块区间约 235 ms」里含这些模块各自的 `line_starts_of`（约 46/75 × 179 ≈ 110 ms），这部分已被 M1 拿走。两项估计（179 ms 与 235 ms）重叠约 110 ms，去重后约 300 ms；实测两刀合计省 255 ms（773 → 518）。
+重检数 30 = `check/types` 自己 + 工作区里 29 个导入者。首次打开变快是同一件事：六次 didOpen 各一次重建，后几次只重检真正受影响的模块。
+
+LSP A/B（`09851075` 不带观察的服务端对本刀带观察的服务端）：`lsp-project-matrix.py --expect-counts --compare` 十个修订、`lsp-edit-matrix.py --functions 1000 --compare` 十个修订，全部回复与诊断逐字相同，刀 1 的 `provider-move-error` 位置判据仍过。
+
