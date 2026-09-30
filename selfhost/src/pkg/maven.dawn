@@ -12,6 +12,7 @@ use std/io
 use std/io.{Fs}
 use compiler_plan/manifestv.{MCoord, mcoord_show}
 use compiler_plan/pkgfetch
+use compiler_plan/source
 use sha2/sha256
 use java "java.lang.System"
 use java "coursierapi.Fetch"
@@ -23,13 +24,19 @@ use java "java.io.File"
 ## Resolve to absolute jar paths, newest-wins across the transitive graph.
 ## Empty input returns empty without touching the network.
 pub fn fetch(coords: List[MCoord]) -> Result[List[String], String] !io = {
-  if len(coords) == 0 {
-    let empty: List[String] = []
-    return Ok(empty)
-  }
   let mirror: Option[String] = match System.getenv("DAWN_MAVEN_MIRROR") {
     Some(v) -> if str.trim(v) == "" { None } else { Some(str.trim(v)) }
     None -> None
+  }
+  fetch_from(coords, mirror)
+}
+
+## `fetch` with the mirror decided by the caller, which is how the tests
+## below reach a repository of their own without a process environment.
+fn fetch_from(coords: List[MCoord], mirror: Option[String]) -> Result[List[String], String] !io = {
+  if len(coords) == 0 {
+    let empty: List[String] = []
+    return Ok(empty)
   }
   let fetched = catch_fault(() => {
     let f = Fetch.create().expect("fetch")
@@ -312,13 +319,22 @@ pub type FetchCheckedError = { path: String, message: String }
 ## present beside its manifest, verify the resolved bytes before exposing any
 ## jar. A present but unreadable lock is an error, not another spelling of no
 ## lock. The original Coursier order is retained for classloader precedence.
+## A resolution failure is located at the manifest that declared the failing
+## coordinate (`SourcePlan.java_coord_origin`).
 pub fn fetch_checked_report(
+  plan: source.SourcePlan
+) -> Result[List[String], FetchCheckedError] !Fs !io =
+  fetch_checked_from(plan.project, plan.java_coords, plan.java_coord_origin, cs => fetch(cs))
+
+fn fetch_checked_from(
   project: String,
-  coords: List[MCoord]
+  coords: List[MCoord],
+  origin: Map[String, String],
+  resolve: fn(List[MCoord]) -> Result[List[String], String] !io
 ) -> Result[List[String], FetchCheckedError] !Fs !io = {
-  let jars = match fetch(coords) {
+  let jars = match resolve(coords) {
     Ok(found) -> found
-    Err(e) -> return Err(FetchCheckedError { path: "${project}/dawn.toml", message: e })
+    Err(e) -> return Err(fetch_failure(project, coords, origin, resolve, e))
   }
   let path = lock_path(project)
   if not io.exists(path) { return Ok(jars) }
@@ -343,12 +359,59 @@ pub fn fetch_checked_report(
   }
 }
 
-## CLI-compatible projection of the structured dependency setup result.
+## Where a failed resolution belongs. Coursier resolves the whole set at once
+## and says which coordinate failed only in prose, so the failing coordinate
+## is found by resolving each one alone, in order; the first that fails alone
+## names the manifest. The extra resolutions happen only on a path that has
+## already failed, and only when some coordinate came from a dependency's
+## manifest -- with every coordinate in the root's, the root is the answer
+## without asking. When none fails alone the set conflicts with itself; that
+## stays at the root, with every coordinate's manifest listed (cargo's
+## "required by package" chain is the same idea).
+fn fetch_failure(
+  project: String,
+  coords: List[MCoord],
+  origin: Map[String, String],
+  resolve: fn(List[MCoord]) -> Result[List[String], String] !io,
+  message: String
+) -> FetchCheckedError !io = {
+  let root = "${project}/dawn.toml"
+  var elsewhere = false
+  for c in coords {
+    if coord_origin(origin, c, root) != root { elsewhere = true }
+  }
+  if not elsewhere { return FetchCheckedError { path: root, message: message } }
+  for c in coords {
+    match resolve([c]) {
+      Err(alone) -> {
+        let path = coord_origin(origin, c, root)
+        let declared = if path == root { "" } else { "\n  declared in " ++ path }
+        return FetchCheckedError { path: path, message: alone ++ declared }
+      }
+      Ok(_) -> ()
+    }
+  }
+  var requested = ""
+  for c in coords {
+    requested = requested ++ "\n    " ++ mcoord_show(c) ++ " (" ++ coord_origin(origin, c, root) ++ ")"
+  }
+  FetchCheckedError { path: root, message: message ++ "\n  requested by:" ++ requested }
+}
+
+fn coord_origin(origin: Map[String, String], c: MCoord, root: String) -> String =
+  match map.get(origin, mcoord_show(c)) {
+    Some(path) -> path
+    None -> root
+  }
+
+## CLI-compatible projection of the structured dependency setup result. The
+## CLI prints the message and no location, and its callers hold only the
+## coordinates, so every failure keeps the root's text.
 pub fn fetch_checked(
   project: String,
   coords: List[MCoord]
 ) -> Result[List[String], String] !Fs !io =
-  match fetch_checked_report(project, coords) {
+  match fetch_checked_from(project, coords, map.empty(), cs => fetch(cs)) {
     Ok(jars) -> Ok(jars)
     Err(e) -> Err(e.message)
   }
@@ -486,4 +549,62 @@ test "explain names the single coordinate and the mirror" {
   assert str.contains(m, "the mirror in \$DAWN_MAVEN_MIRROR may not carry it")
   let m2 = explain("artifact not found: x", [c], None)
   assert str.contains(m2, "check the coordinate in dawn.toml")
+}
+
+## A coordinate no repository has, declared by a path dependency and, in a
+## second project, by the root itself. The mirror is an empty directory of the
+## test's own, so nothing leaves the machine and the failure is certain.
+test "a failing coordinate is reported at the manifest that declared it" {
+  io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {
+    let root = match io.temp_dir("", "dawn-coord-origin-") {
+      Ok(d) -> d
+      Err(e) -> panic("temp dir: ${e.message}")
+    }
+    with r <- bracket(root, rmtree)
+    let absent = "[java-deps]\nabsent = \"dawn.test:absent:1\"\n"
+    let files = [
+      ("lib/dawn.toml", "schema = 1\nname = \"lib\"\n\n" ++ absent),
+      ("lib/src/util.dawn", "pub fn one() -> Int = 1\n"),
+      ("app/dawn.toml", "schema = 1\nname = \"app\"\n\n[deps]\nlib = \"../lib\"\n"),
+      ("app/src/main.dawn", "pub fn main() -> Unit = ()\n"),
+      ("own/dawn.toml", "schema = 1\nname = \"own\"\n\n" ++ absent),
+      ("own/src/main.dawn", "pub fn main() -> Unit = ()\n")
+    ]
+    let _ = io.mkdirs("${r}/mirror")
+    for f in files {
+      let (name, text) = f
+      let path = "${r}/${name}"
+      let _ = io.mkdirs(str.take(path, str.last_index_of(path, "/").expect("parent")))
+      match io.write_file(path, text) {
+        Ok(_) -> ()
+        Err(e) -> panic("test setup: ${e.message}")
+      }
+    }
+    let mirror = Some("file://${r}/mirror")
+    let resolve = (cs: List[MCoord]) => fetch_from(cs, mirror)
+
+    # declared by the dependency: the dependency's manifest, and the CLI
+    # message says so too, since the CLI prints no location
+    let app = source.source_plan(source.ProjectDirectory("${r}/app"))
+    assert len(app.diags) == 0
+    match fetch_checked_from(app.project, app.java_coords, app.java_coord_origin, resolve) {
+      Err(e) -> {
+        assert str.ends_with(e.path, "/lib/dawn.toml")
+        assert str.contains(e.message, "dawn.test:absent:1")
+        assert str.contains(e.message, "declared in ") && str.ends_with(e.message, "/lib/dawn.toml")
+      }
+      Ok(_) -> { assert false }
+    }
+
+    # declared by the root: the root's manifest and the root's text, unchanged
+    let own = source.source_plan(source.ProjectDirectory("${r}/own"))
+    assert len(own.diags) == 0
+    match fetch_checked_from(own.project, own.java_coords, own.java_coord_origin, resolve) {
+      Err(e) -> {
+        assert e.path == "${own.project}/dawn.toml"
+        assert not str.contains(e.message, "declared in")
+      }
+      Ok(_) -> { assert false }
+    }
+  })))
 }

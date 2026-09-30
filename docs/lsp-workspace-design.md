@@ -334,8 +334,13 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
   消费方 manifest。补上它需要 planner 把「试读过但不存在」的 manifest 目录也交出来。
 - **standalone buffer 不随 manifest 刷新。** 它们的 module 候选表取自打开时的 plan；
   refresh 只作用于 workspace。
-- **传递 Java 坐标来源。** manifest 语法合法、但 resolver 在传递 Maven coordinate 上失败时，
-  setup diagnostic 仍可能只定位根 `dawn.toml`，尚不能精确指出贡献该坐标的 dependency manifest。
+- **Java 坐标失败只定位到文件，不定位到行（#209）。** `SourcePlan.java_coord_origin` 记下每个
+  坐标首个声明者的 manifest；Coursier 整体解析失败时，只在这条已失败的路径上逐个坐标单独再解析
+  一次，第一个单独失败的坐标决定 `FetchCheckedError.path`，消息附「declared in <manifest>」；
+  没有单独失败者（坐标之间冲突）时退回根 manifest，并列出每个坐标的来源。坐标全部来自根
+  manifest 时不做额外解析，文案与之前逐字相同。CLI 的 `fetch_checked` 只拿到坐标、不打印位置，
+  保持根文案。行号不做：`MCoord` 不带 span，要带就得让 manifest 验证把条目 span 一路传进
+  plan，这一步留给需要它的诊断（#195 的次级 span）一起做。
 - **已安装 workspace 的 unexpected panic。** 新 lease 在安装前 rebuild panic 会显式关闭；若
   已安装 workspace 的后续 rebuild 遇到 compiler invariant panic，当前依赖进程退出后的宿主资源
   回收，未建立可恢复的逐 workspace unwind 协议。
