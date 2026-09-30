@@ -545,6 +545,28 @@ emitc 把实参拼成 C 表达式，gcc 实际从右往左跑：`show_go(dup(x),
 显著大于零且内存下降」，不是一个抄来的百分数——这一格本来就是 native 相对 JVM
 多出来的，JVM 上没有可比的数。
 
+**owned 口子的契约（#212，2026-10-01 回填）。** 哪些 intrinsic 的哪几个实参是「消费」而非借用，
+答案在 `types.intr_owned_args`：`array_with` 的 0、2，`list_push` 的 0，`cell_new` 的 0，`cell_set` 的 1。
+rc、借用推断与 emitc 共四处读它；答错一格就是 native 产物的 UAF 或泄漏，而且只有恰好跑到那个原语的
+ASan/LSan 语料才看得见。它原来是一条按名字的 if 链，没有任何东西把它和 intrinsic 表绑在一起。
+
+**不挪进 `Intr`**（issue 原验收第一条已撤回）。理由有二：四个名字里三个是 lowering 内部 intrinsic
+（`ir/lower.internal_intrinsics`），`intrinsics()` 里根本没有它们的条目可挂字段；rc pass 在每个 intrinsic
+节点都问一次，答案不能每问一次建一张表。现在它是 `types.dawn` 里的一个常量表（只建一次），
+`intr_owned_args` 线性扫它，另导出 `intr_owned_table` 供契约枚举。契约是三条，全写在声明处，
+与 Lean 4 的 `@&`、Koka 的 `^`、Swift SE-0377 的 `borrowing`/`consuming` 同一思路（所有权是签名的一部分）：
+
+1. 内联测试：每个位置小于所指 intrinsic 的 `sig.param_tys` 长度、升序、每名一条（`check/types.dawn`）；
+   每个名字要么在 `intrinsics()` 里，要么是 lowering 内部名（`driver/builtin_mirror.dawn`，那里两张表都看得见）。
+2. 镜像 `selfhost/builtins.dawn`：`array_with` 行尾标 `# owned: 0, 2`；另三个名字镜像按规矩不声明，
+   记成 `# owned: <名字> <位置>` 注释记录。`scripts/builtin-decl-contract` 的 P7 双向对账。
+3. C 运行时：真正消费参数的原语在 `runtime/c/dawn_rt.h` 的原型尾部标空宏 `DAWN_CONSUMES(...)`
+   （`dawn_array_with`、`dawn_cell_new`、`dawn_cell_set`），同一脚本的 P8 抓出来与表对账，并核位置不越原型的形参数。
+   这是「新写一个消费型原语却忘了登记」的唯一防线；`list_push` 落到 `std/pvec.push`（Dawn 函数），没有 C 原语，只归 P7 管。
+
+`dawn_array_push_own` 与 `dawn_unbox_*` 也消费实参，但没有 intrinsic 名字指向它们，由 emitc 自己写转移，
+表从不问，所以不标宏，仍用散文注释。生成代码不变。
+
 ### 6.1 落地后的形状：一个运行时分支，四件「早放」
 
 运行时那半很小：`dawn_array_with` 改为**消费**它的数组和元素（`types.intr_owned_args`

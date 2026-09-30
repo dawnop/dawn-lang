@@ -17,6 +17,21 @@
 typedef unsigned char dawn_unit;
 #define DAWN_UNIT ((dawn_unit)0)
 
+/* The argument positions (0-based) a primitive behind an intrinsic CONSUMES
+ * rather than borrows. It expands to nothing: it is a declaration the reader
+ * and one checker read, not an attribute the C compiler sees. Every primitive
+ * below borrows unless it says otherwise (the calling-convention note further
+ * down), and this is how it says so where the rc pass has to agree:
+ * `types.intr_owned_args` in the compiler lists the same positions, and
+ * scripts/builtin-decl-contract holds the two equal in both directions. So a
+ * new consuming primitive written without its intrinsic registered, or
+ * registered without the mark here, is red before any corpus runs (#212).
+ *
+ * Only on `dawn_<intrinsic>`. The emitter's own consumers that no intrinsic
+ * names (`dawn_array_push_own`, the `dawn_unbox_*` family) say so in prose:
+ * the emitter writes their transfers itself and the table never asks. */
+#define DAWN_CONSUMES(...)
+
 /* ---- the reference-count header (docs/perceus-design.md) ----------------
  *
  * Every heap object starts with one, at offset 0, so `dawn_drop` can ask an
@@ -296,7 +311,7 @@ dawn_array *dawn_array_push(dawn_array *a, void *x);
  * header and the element reference are the loop's to give up. */
 dawn_array *dawn_array_push_own(dawn_array *a, void *x);
 /* Consumes `a` and `x` -- see the calling convention note below. */
-dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x);
+dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) DAWN_CONSUMES(0, 2);
 /* Borrows `a`, answers an owned reference to slot `i`. Alone (array and
  * buffer both unique) the slot's own reference is transferred out and the
  * slot left NULL, so the caller MUST overwrite slot `i` -- or drop the whole
@@ -612,7 +627,8 @@ void dawn_immortal(void *p);
  * it means the first version dropped frees a buffer the others still hold.
  *
  * THE EXCEPTIONS CONSUME AND SAY SO: `dawn_array_with` consumes its array
- * and its element (perceus-design.md 6, mirrored by `types.intr_owned_args`)
+ * and its element (perceus-design.md 6, `DAWN_CONSUMES` on its prototype,
+ * mirrored by `types.intr_owned_args`)
  * -- a borrowed array keeps the caller's count on it and `rc == 1` could
  * never mean "no one can observe a write". `dawn_array_push_own` consumes for
  * accumulation loops, and the `dawn_unbox_*` family consumes the box it
@@ -1027,9 +1043,9 @@ void *dawn_ev_append(void *front, void *back);
 #define DAWN_TAG_CELL 0 /* one constructor, so index 0 -- emitc pins it */
 #define DAWN_CELL_FIELDS 1
 #define DAWN_CELL_MASK 1 /* the one field holds a reference */
-void *dawn_cell_new(void *x);
+void *dawn_cell_new(void *x) DAWN_CONSUMES(0);
 void *dawn_cell_get(void *c);
-void dawn_cell_set(void *c, void *x);
+void dawn_cell_set(void *c, void *x) DAWN_CONSUMES(1);
 /* Empties the slot, so the caller MUST store into it -- or drop the cell --
  * before anything reads it again. `dawn_array_steal` carries the same
  * obligation for the same reason: a plain get would pin a second count on the

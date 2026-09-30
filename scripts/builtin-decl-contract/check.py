@@ -28,6 +28,12 @@ stale mirror of an API is worse than no mirror, because a reader believes it.
         comptime interpreter refuses
     P6  every signature, parsed back as the declaration it claims to be and
         rendered again, comes out the same string
+    P7  the `# owned:` markers (and, for the lowering-internal names the
+        mirror does not declare, its `# owned: <name> ...` comment records)
+        are exactly the table's owned argument positions
+    P8  the `DAWN_CONSUMES(...)` marks in runtime/c/dawn_rt.h are exactly the
+        table's owned positions for every intrinsic whose primitive is
+        declared there, and each names a parameter the prototype has
 
 P1 and P2 are separate judgements over the same two sets, and are deliberately
 not written as one equality. "The sets differ" names neither side; a mirror
@@ -67,6 +73,8 @@ something that is not the comparison:
         re-derives from source. The names a `const` still cannot use after
         lowering (`comptime_refused_after_lowering`) are lowered names.
     M2  the mirror parses to at least one declaration
+    M3  the owned-argument table is not empty and names only intrinsics
+        (the table's own names, or lowering's internal ones)
 
 M1 does two jobs. It is the emptiness guard on the dump side: a truncated or
 absent dump cannot satisfy an equality against a list of 110 names. And it is
@@ -97,6 +105,21 @@ Map and Set are lowered too, and a `const` still cannot use them -- lowering
 routes them to std/hamt, whose Core the interpreter refuses -- so P5's
 "refused at comptime" is `comptime_rejects` plus that second list.
 
+## The owned-argument positions, and why they are three places (#212)
+
+`types.intr_owned_args` answers which argument positions of an intrinsic
+the native runtime consumes rather than borrows; the rc pass asks it at every
+intrinsic node, and a wrong answer is a use-after-free or a leak that only a
+sanitizer run over the right corpus program would see. It stays a name-keyed
+constant rather than an `Intr` field: three of its four names are
+lowering-internal and have no `Intr`. So it is held to the two other places
+that state ownership, each at a declaration: the mirror line (P7) and the C
+prototype of the primitive (P8). P8 is the one that sees a new consuming
+primitive whose intrinsic nobody registered -- the mark goes on the
+prototype, where the author writing it is looking. `list_push` has no C
+primitive (it lowers to `std/pvec.push`, a Dawn function), so P8 has nothing
+to ask about it and P7 is its check.
+
 ## Usage
 
     check.py --dump DUMP.tsv [--root REPO_ROOT]
@@ -110,6 +133,7 @@ import re
 import sys
 
 MIRROR = "selfhost/builtins.dawn"
+HEADER = "runtime/c/dawn_rt.h"
 INTERP = "selfhost/src/ir/interp.dawn"
 LOWER = "selfhost/src/ir/lower.dawn"
 
@@ -121,6 +145,13 @@ ROUNDTRIP_SKIPS = ["cast"]
 
 SIG_LINE = re.compile(r"^(pub )?fn [a-z_][A-Za-z0-9_]*[\[(]")
 MARKER = " # comptime: rejected"
+POSITIONS = r"(\d+(?:, \d+)*)"
+OWNED_MARKER = re.compile(r" # owned: " + POSITIONS + r"$")
+OWNED_RECORD = re.compile(r"^# owned: ([a-z_][a-z0-9_]*) " + POSITIONS + r"$")
+
+
+def _positions(text):
+    return tuple(int(p) for p in re.split(r",\s*", text))
 
 
 # --- the mirror ------------------------------------------------------------
@@ -152,6 +183,14 @@ def parse_mirror(text, where=MIRROR):
                 )
             line = line[: -len(MARKER)]
             rejected = True
+        if " # owned:" in line:
+            m = OWNED_MARKER.search(line)
+            if not m:
+                raise SystemExit(
+                    f"{where}:{lineno}: an owned marker is ` # owned: 0, 2` at "
+                    f"the end of the declaration, before any comptime marker: {raw!r}"
+                )
+            line = line[: m.start()]
         if not SIG_LINE.match(line):
             raise SystemExit(
                 f"{where}:{lineno}: neither a comment nor a declaration: {raw!r}"
@@ -166,20 +205,99 @@ def parse_mirror(text, where=MIRROR):
     return out, order
 
 
+def parse_mirror_owned(text, where=MIRROR):
+    """name -> (positions, declared): every owned marker, and every
+    `# owned: <name> ...` comment record. `declared` says which of the two
+    it came from, because a record for a name the file also declares is the
+    fact in the wrong place."""
+    out = {}
+    for lineno, raw in enumerate(text.split("\n"), start=1):
+        line = raw.rstrip("\n")
+        if line.startswith("# owned:"):
+            m = OWNED_RECORD.match(line)
+            if not m:
+                raise SystemExit(
+                    f"{where}:{lineno}: an owned record is `# owned: <name> 0, 2`: {raw!r}"
+                )
+            name, declared, positions = m.group(1), False, _positions(m.group(2))
+        elif " # owned:" in line and SIG_LINE.match(line):
+            sig = line[: -len(MARKER)] if line.endswith(MARKER) else line
+            m = OWNED_MARKER.search(sig)
+            if not m:
+                raise SystemExit(f"{where}:{lineno}: unreadable owned marker: {raw!r}")
+            head = sig[4:] if sig.startswith("pub ") else sig
+            name = head[len("fn ") :].split("[")[0].split("(")[0]
+            declared, positions = True, _positions(m.group(1))
+        else:
+            continue
+        if name in out:
+            raise SystemExit(f"{where}:{lineno}: `{name}` is marked owned twice")
+        out[name] = (positions, declared)
+    return out
+
+
+# --- runtime/c/dawn_rt.h, read as source -------------------------------------
+
+CONSUMES_DEFINE = "#define DAWN_CONSUMES(...)"
+CONSUMES_DECL = re.compile(
+    r"^[A-Za-z_][^;(]*\bdawn_([a-z0-9_]+)\(([^()]*)\) DAWN_CONSUMES\(" + POSITIONS + r"\);$"
+)
+PROTOTYPE = re.compile(r"^[A-Za-z_][^;(]*\bdawn_([a-z0-9_]+)\(")
+
+
+def read_runtime_consumes(text, where=HEADER):
+    """(marks, prototypes): `dawn_<name>` -> (positions, arity) for every
+    prototype carrying `DAWN_CONSUMES(...)`, and the set of names every
+    top-level prototype in the header declares.
+
+    A mark anywhere other than at the end of a one-line prototype stops the
+    run: a reader that skipped a mark it could not parse would leave P8 green
+    about exactly the primitive it was written for. The `#define` must be
+    there once, so a read of the wrong file is red rather than empty."""
+    if text.count(CONSUMES_DEFINE) != 1:
+        raise SystemExit(f"{where}: `{CONSUMES_DEFINE}` is not defined exactly once")
+    marks = {}
+    prototypes = set()
+    for lineno, raw in enumerate(text.split("\n"), start=1):
+        line = raw.rstrip()
+        p = PROTOTYPE.match(line)
+        if p:
+            prototypes.add(p.group(1))
+        if "DAWN_CONSUMES" not in line or line.startswith(CONSUMES_DEFINE):
+            continue
+        if line.lstrip().startswith(("*", "/*", "//")):
+            continue
+        m = CONSUMES_DECL.match(line)
+        if not m:
+            raise SystemExit(
+                f"{where}:{lineno}: DAWN_CONSUMES goes at the end of a one-line "
+                f"prototype, `T dawn_name(params) DAWN_CONSUMES(0, 2);`: {raw!r}"
+            )
+        name, params = m.group(1), m.group(2).strip()
+        arity = 0 if params in ("", "void") else len(params.split(","))
+        if name in marks:
+            raise SystemExit(f"{where}:{lineno}: `dawn_{name}` is marked twice")
+        marks[name] = (_positions(m.group(3)), arity)
+    if not marks:
+        raise SystemExit(f"{where}: no prototype carries DAWN_CONSUMES")
+    return marks, prototypes
+
+
 # --- the dump --------------------------------------------------------------
 
 
 def parse_dump(text, where="the dump"):
     """The four record kinds.
 
-    Returns (builtins, lowering, roundtrips, skips): name -> (is_pub,
-    signature), the plain lowering names, name -> (rendered, re-rendered), and
-    the names the dump declined to read back.
+    Returns (builtins, lowering, roundtrips, skips, owned): name -> (is_pub,
+    signature), the plain lowering names, name -> (rendered, re-rendered), the
+    names the dump declined to read back, and name -> owned positions.
     """
     builtins = {}
     lowering = []
     roundtrips = {}
     skips = []
+    owned = {}
     for lineno, raw in enumerate(text.split("\n"), start=1):
         if not raw.strip():
             continue
@@ -211,9 +329,15 @@ def parse_dump(text, where="the dump"):
             if len(fields) != 2:
                 raise SystemExit(f"{where}:{lineno}: expected 2 fields: {raw!r}")
             lowering.append(fields[1])
+        elif kind == "owned":
+            if len(fields) != 3 or not re.fullmatch(r"\d+(,\d+)*", fields[2]):
+                raise SystemExit(f"{where}:{lineno}: expected owned<TAB>name<TAB>0,2: {raw!r}")
+            if fields[1] in owned:
+                raise SystemExit(f"{where}:{lineno}: `{fields[1]}` owned twice")
+            owned[fields[1]] = _positions(fields[2])
         else:
             raise SystemExit(f"{where}:{lineno}: unknown record kind {kind!r}")
-    return builtins, lowering, roundtrips, skips
+    return builtins, lowering, roundtrips, skips, owned
 
 
 # --- ir/interp.dawn, read as source ---------------------------------------
@@ -378,13 +502,15 @@ def _loop_prefix(tail, where=INTERP):
 # --- the judgements --------------------------------------------------------
 
 
-def judge(mirror_text, dump_text, interp_text, lower_text, skips_expected=None):
+def judge(mirror_text, dump_text, interp_text, lower_text, header_text, skips_expected=None):
     """Every failure, as a list of lines. Empty means green."""
     if skips_expected is None:
         skips_expected = ROUNDTRIP_SKIPS
     bad = []
     mirror, _ = parse_mirror(mirror_text)
-    builtins, lowering, roundtrips, skips = parse_dump(dump_text)
+    mirror_owned = parse_mirror_owned(mirror_text)
+    builtins, lowering, roundtrips, skips, owned = parse_dump(dump_text)
+    marks, prototypes = read_runtime_consumes(header_text)
     arms = read_interp_arms(interp_text)
     rejects = read_comptime_rejects(interp_text)
     after = read_refused_after_lowering(interp_text)
@@ -427,6 +553,67 @@ def judge(mirror_text, dump_text, interp_text, lower_text, skips_expected=None):
     # M2 -- the mirror was really read
     if not mirror:
         bad.append(f"M2 {MIRROR} declares nothing at all")
+
+    # M3 -- the owned table was really dumped, and names intrinsics
+    if not owned:
+        bad.append("M3 the dump carries no owned-argument record at all")
+    for name in sorted(set(owned) - set(builtins) - set(lowering)):
+        bad.append(
+            f"M3 the owned-argument table (types.intr_owned_args) names "
+            f"`{name}`, which is no intrinsic"
+        )
+
+    # P7 -- the mirror states the same ownership, both directions
+    def said(ps):
+        return ", ".join(str(p) for p in ps)
+
+    for name in sorted(set(mirror_owned) - set(owned)):
+        bad.append(
+            f"P7 {MIRROR} marks `{name}` owned at {said(mirror_owned[name][0])}, "
+            f"and the table (types.intr_owned_args) says it borrows every argument"
+        )
+    for name in sorted(set(owned) - set(mirror_owned)):
+        bad.append(
+            f"P7 the table (types.intr_owned_args) says `{name}` consumes "
+            f"argument(s) {said(owned[name])}, and {MIRROR} does not say so"
+        )
+    for name in sorted(set(owned) & set(mirror_owned)):
+        positions, declared = mirror_owned[name]
+        if positions != owned[name]:
+            bad.append(
+                f"P7 `{name}` is owned at {said(positions)} in {MIRROR} and at "
+                f"{said(owned[name])} in the table"
+            )
+        if not declared and name in mirror:
+            bad.append(
+                f"P7 `{name}` is declared in {MIRROR}, so its ownership is a "
+                f"marker on that line, not a comment record"
+            )
+
+    # P8 -- the runtime's prototypes state the same ownership
+    for name in sorted(set(marks) - set(owned)):
+        bad.append(
+            f"P8 {HEADER} marks `dawn_{name}` DAWN_CONSUMES({said(marks[name][0])}), "
+            f"and the table (types.intr_owned_args) says `{name}` borrows every argument"
+        )
+    for name in sorted((set(owned) & prototypes) - set(marks)):
+        bad.append(
+            f"P8 the table says `{name}` consumes argument(s) {said(owned[name])}, "
+            f"and `dawn_{name}` in {HEADER} carries no DAWN_CONSUMES"
+        )
+    for name in sorted(set(owned) & set(marks)):
+        positions, arity = marks[name]
+        if positions != owned[name]:
+            bad.append(
+                f"P8 `dawn_{name}` is DAWN_CONSUMES({said(positions)}) and the "
+                f"table says {said(owned[name])}"
+            )
+        for p in positions:
+            if p >= arity:
+                bad.append(
+                    f"P8 `dawn_{name}` takes {arity} parameter(s) and "
+                    f"DAWN_CONSUMES names position {p}"
+                )
 
     # P1 / P2 -- the two directions, separately
     for name in sorted(set(mirror) - set(builtins)):
@@ -543,8 +730,17 @@ GOOD_DUMP = "\n".join(
         "builtin\ttrie_b\tinternal\tfn trie_b() -> Unit",
         "roundtrip\ttrie_b\tfn trie_b() -> Unit\tfn trie_b() -> Unit",
         "lowering\tfold_me",
+        "owned\tkeep\t0",
+        "owned\tfold_me\t1",
     ]
 )
+
+GOOD_HEADER = """/* a header */
+#define DAWN_CONSUMES(...)
+int64_t dawn_keep(int64_t x) DAWN_CONSUMES(0);
+void dawn_fold_me(void *a, void *b) DAWN_CONSUMES(1);
+void dawn_gone(void *s);
+"""
 
 # The synthetic table's own skip set. P6 holds the dump's skips against a
 # recorded list, and the list the real dump answers to is `cast`, which this
@@ -554,7 +750,9 @@ GOOD_DUMP = "\n".join(
 GOOD_SKIPS = ["late"]
 
 GOOD_MIRROR = """# a header
-pub fn keep(x: Int) -> Int
+#
+# owned: fold_me 1
+pub fn keep(x: Int) -> Int # owned: 0
 pub fn refuse() -> Unit !io # comptime: rejected
 fn fam_a() -> Unit # comptime: rejected
 fn fam_b() -> Unit # comptime: rejected
@@ -662,11 +860,47 @@ SELF_TESTS = [
         GOOD_INTERP,
     ),
     ("M2", "# nothing but a header\n", GOOD_DUMP, GOOD_INTERP),
+    # the owned positions, against the mirror (P7) ...
+    ("P7", GOOD_MIRROR.replace(" # owned: 0\n", "\n"), GOOD_DUMP, GOOD_INTERP),
+    ("P7", GOOD_MIRROR.replace("# owned: fold_me 1\n", ""), GOOD_DUMP, GOOD_INTERP),
+    ("P7", GOOD_MIRROR.replace("# owned: fold_me 1", "# owned: fold_me 0"), GOOD_DUMP, GOOD_INTERP),
+    # a declared name's ownership written as a comment record, not a marker
+    ("P7", GOOD_MIRROR.replace(" # owned: 0\n", "\n") + "# owned: keep 0\n", GOOD_DUMP, GOOD_INTERP),
+    # ... against the runtime's prototypes (P8) ...
+    (
+        "P8",
+        GOOD_MIRROR,
+        GOOD_DUMP,
+        GOOD_INTERP,
+        GOOD_HEADER.replace("void dawn_gone(void *s);", "void dawn_gone(void *s) DAWN_CONSUMES(0);"),
+    ),
+    ("P8", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER.replace("(int64_t x) DAWN_CONSUMES(0);", "(int64_t x);")),
+    (
+        "P8",
+        GOOD_MIRROR.replace("# owned: fold_me 1", "# owned: fold_me 2"),
+        GOOD_DUMP.replace("owned\tfold_me\t1", "owned\tfold_me\t2"),
+        GOOD_INTERP,
+        GOOD_HEADER.replace("DAWN_CONSUMES(1)", "DAWN_CONSUMES(2)"),
+    ),
+    # ... and the table names something that is no intrinsic (M3)
+    (
+        "M3",
+        GOOD_MIRROR + "# owned: nobody 0\n",
+        GOOD_DUMP + "\nowned\tnobody\t0",
+        GOOD_INTERP,
+    ),
+    (
+        "M3",
+        GOOD_MIRROR.replace(" # owned: 0\n", "\n").replace("# owned: fold_me 1\n", ""),
+        GOOD_DUMP.replace("\nowned\tkeep\t0\nowned\tfold_me\t1", ""),
+        GOOD_INTERP,
+        GOOD_HEADER.replace(" DAWN_CONSUMES(0);", ";"),
+    ),
 ]
 
 
 def self_test():
-    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_LOWER, GOOD_SKIPS)
+    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_LOWER, GOOD_HEADER, GOOD_SKIPS)
     if bad:
         print("SELF-TEST FAIL: the clean synthetic table is not green:")
         for line in bad:
@@ -674,8 +908,10 @@ def self_test():
         return 1
     print("OK   the clean synthetic table is green (the positive control)")
     rc = 0
-    for label, mirror, dump, interp in SELF_TESTS:
-        found = judge(mirror, dump, interp, GOOD_LOWER, GOOD_SKIPS)
+    for case in SELF_TESTS:
+        label, mirror, dump, interp = case[:4]
+        header = case[4] if len(case) > 4 else GOOD_HEADER
+        found = judge(mirror, dump, interp, GOOD_LOWER, header, GOOD_SKIPS)
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"SELF-TEST FAIL: the {label} perturbation stayed green")
@@ -697,36 +933,37 @@ def self_test():
 # written: the working tree never holds a mutant.
 
 
-def mutate_p1_add(mirror, dump, interp, lower):
-    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp, lower
+def mutate_p1_add(mirror, dump, interp, lower, header):
+    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp, lower, header
 
 
-def mutate_p2_drop_popcount(mirror, dump, interp, lower):
-    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp, lower
+def mutate_p2_drop_popcount(mirror, dump, interp, lower, header):
+    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp, lower, header
 
 
-def mutate_p3_param_name(mirror, dump, interp, lower):
-    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp, lower
+def mutate_p3_param_name(mirror, dump, interp, lower, header):
+    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp, lower, header
 
 
-def mutate_p3_return_type(mirror, dump, interp, lower):
+def mutate_p3_return_type(mirror, dump, interp, lower, header):
     return (
         _sub(mirror, "fn parse_int(s: String) -> Option[Int]", "fn parse_int(s: String) -> Int"),
         dump,
         interp,
         lower,
+        header,
     )
 
 
-def mutate_p4_add_pub(mirror, dump, interp, lower):
-    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp, lower
+def mutate_p4_add_pub(mirror, dump, interp, lower, header):
+    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp, lower, header
 
 
-def mutate_p4_drop_pub(mirror, dump, interp, lower):
-    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower
+def mutate_p4_drop_pub(mirror, dump, interp, lower, header):
+    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower, header
 
 
-def mutate_p5_move_marker(mirror, dump, interp, lower):
+def mutate_p5_move_marker(mirror, dump, interp, lower, header):
     """Take the marker off a name that is refused and put it on one that is
     not: one edit, both directions of P5."""
     lines = mirror.split("\n")
@@ -734,17 +971,17 @@ def mutate_p5_move_marker(mirror, dump, interp, lower):
     on = _index_of(lines, "pub fn parse_int(s: String) -> Option[Int]")
     lines[off] = lines[off][: -len(MARKER)]
     lines[on] = lines[on] + MARKER
-    return "\n".join(lines), dump, interp, lower
+    return "\n".join(lines), dump, interp, lower, header
 
 
-def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower):
+def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower, header):
     """Give `parse_int` its interpreter arm back: the dead arm #185 removed.
     Lowering rewrites every call to it, so the name is in the lowered group
     and an arm for it is in two groups at once."""
-    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower
+    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower, header
 
 
-def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower):
+def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower, header):
     """Put back the marker #185 took off: `parse_int_radix` folds through
     std/fmt's Core, so a mirror saying a `const` cannot use it is wrong."""
     return (
@@ -756,6 +993,7 @@ def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower):
         dump,
         interp,
         lower,
+        header,
     )
 
 
@@ -763,7 +1001,7 @@ SORT_BY_BOUND = "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List
 SORT_BY_UNBOUND = "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
 
 
-def mutate_p6_unbind_sort_by(mirror, dump, interp, lower):
+def mutate_p6_unbind_sort_by(mirror, dump, interp, lower, header):
     """The table before this judgement existed: `sort_by` raises `!e` and does
     not record that it bound it (`eff1` rather than `effp1` in
     `check/types.dawn`), so the binder is missing from what it renders.
@@ -779,10 +1017,10 @@ def mutate_p6_unbind_sort_by(mirror, dump, interp, lower):
     lines[at] = "builtin\tsort_by\tpub\t" + SORT_BY_UNBOUND
     rt = _index_of(lines, "roundtrip\tsort_by\t" + SORT_BY_BOUND + "\t" + SORT_BY_BOUND)
     lines[rt] = "roundtrip\tsort_by\t" + SORT_BY_UNBOUND + "\t" + SORT_BY_BOUND
-    return mirror, "\n".join(lines), interp, lower
+    return mirror, "\n".join(lines), interp, lower, header
 
 
-def mutate_p6_skip_popcount(mirror, dump, interp, lower):
+def mutate_p6_skip_popcount(mirror, dump, interp, lower, header):
     """Declare a signature unreadable that reads back fine. This is how P6
     would erode: not by going red, but by the dump quietly excusing whatever
     stopped agreeing with itself. The skip list is held to what is recorded,
@@ -792,7 +1030,63 @@ def mutate_p6_skip_popcount(mirror, dump, interp, lower):
         lines, "roundtrip\tpopcount\tfn popcount(n: Int) -> Int\tfn popcount(n: Int) -> Int"
     )
     lines[at] = "roundtrip-skip\tpopcount"
-    return mirror, "\n".join(lines), interp, lower
+    return mirror, "\n".join(lines), interp, lower, header
+
+
+def mutate_p7_drop_list_push(mirror, dump, interp, lower, header):
+    """The issue's negative control, in memory: `list_push` loses its `[0]` in
+    the table, and nothing else moves. The mirror still says it consumes its
+    list, and P7 is what says the two parted -- `list_push` has no C
+    primitive, so P8 has nothing to say about it."""
+    return mirror, _drop_line(dump, "owned\tlist_push\t0"), interp, lower, header
+
+
+def mutate_p7_drop_array_with_marker(mirror, dump, interp, lower, header):
+    return (
+        _sub(mirror, "-> Array[T] # owned: 0, 2 # comptime: rejected", "-> Array[T] # comptime: rejected"),
+        dump,
+        interp,
+        lower,
+        header,
+    )
+
+
+def mutate_p8_consume_where_the_table_borrows(mirror, dump, interp, lower, header):
+    """A primitive declared as consuming whose intrinsic nobody registered:
+    the failure P8 exists for. `array_push` borrows; say otherwise in C."""
+    return (
+        mirror,
+        dump,
+        interp,
+        lower,
+        _sub(
+            header,
+            "dawn_array *dawn_array_push(dawn_array *a, void *x);",
+            "dawn_array *dawn_array_push(dawn_array *a, void *x) DAWN_CONSUMES(0);",
+        ),
+    )
+
+
+def mutate_p8_drop_cell_set_mark(mirror, dump, interp, lower, header):
+    return (
+        mirror,
+        dump,
+        interp,
+        lower,
+        _sub(header, "void dawn_cell_set(void *c, void *x) DAWN_CONSUMES(1);", "void dawn_cell_set(void *c, void *x);"),
+    )
+
+
+def mutate_m3_owned_names_no_intrinsic(mirror, dump, interp, lower, header):
+    """A table entry spelling no intrinsic, and the mirror dutifully agreeing:
+    P7 is green about it, and M3 is what reads the name."""
+    return (
+        mirror + "\n# owned: no_such_intrinsic 0\n",
+        dump + "\nowned\tno_such_intrinsic\t0",
+        interp,
+        lower,
+        header,
+    )
 
 
 MUTANTS = [
@@ -807,6 +1101,11 @@ MUTANTS = [
     ("p5-mark-parse_int_radix", mutate_p5_mark_parse_int_radix, "P5"),
     ("p6-drop-sort_by-s-effect-binder", mutate_p6_unbind_sort_by, "P6"),
     ("p6-skip-a-signature-that-reads-back", mutate_p6_skip_popcount, "P6"),
+    ("p7-drop-list_push-s-owned-position", mutate_p7_drop_list_push, "P7"),
+    ("p7-drop-array_with-s-owned-marker", mutate_p7_drop_array_with_marker, "P7"),
+    ("p8-consume-where-the-table-borrows", mutate_p8_consume_where_the_table_borrows, "P8"),
+    ("p8-drop-cell_set-s-consumes-mark", mutate_p8_drop_cell_set_mark, "P8"),
+    ("m3-owned-names-no-intrinsic", mutate_m3_owned_names_no_intrinsic, "M3"),
 ]
 
 
@@ -829,9 +1128,9 @@ def _index_of(lines, exact):
     return hits[0]
 
 
-def run_mutants(mirror, dump, interp, lower):
+def run_mutants(mirror, dump, interp, lower, header):
     rc = 0
-    clean = judge(mirror, dump, interp, lower)
+    clean = judge(mirror, dump, interp, lower, header)
     if clean:
         print("MUTANT FAIL: the real inputs are not green to begin with:")
         for line in clean:
@@ -839,7 +1138,7 @@ def run_mutants(mirror, dump, interp, lower):
         return 1
     print("OK   the real mirror is green (the positive control)")
     for name, fn, label in MUTANTS:
-        found = judge(*fn(mirror, dump, interp, lower))
+        found = judge(*fn(mirror, dump, interp, lower, header))
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"MUTANT FAIL: {name} stayed green")
@@ -867,20 +1166,27 @@ def main():
     dump = pathlib.Path(args.dump).read_text(encoding="utf-8")
     interp = (root / INTERP).read_text(encoding="utf-8")
     lower = (root / LOWER).read_text(encoding="utf-8")
+    header = (root / HEADER).read_text(encoding="utf-8")
 
     if args.mutants:
-        return run_mutants(mirror, dump, interp, lower)
+        return run_mutants(mirror, dump, interp, lower, header)
 
-    bad = judge(mirror, dump, interp, lower)
+    bad = judge(mirror, dump, interp, lower, header)
     if bad:
         print(f"FAIL: {MIRROR} and the builtin table disagree")
         for line in bad:
             print("  " + line)
         print()
         print(f"  the table in selfhost/src/check/types.dawn is the truth; edit {MIRROR}")
+        if any(line.startswith(("P7", "P8", "M3")) for line in bad):
+            print(
+                f"  (P7, P8, M3: an owned position is a fact about the runtime, "
+                f"so the wrong side may be the table, {MIRROR} or {HEADER})"
+            )
         return 1
     mirror_decls, _ = parse_mirror(mirror)
-    builtins, lowering, roundtrips, skips = parse_dump(dump)
+    builtins, lowering, roundtrips, skips, owned = parse_dump(dump)
+    marks, _ = read_runtime_consumes(header)
     pub = sum(1 for is_pub, _, _ in mirror_decls.values() if is_pub)
     rejected = sum(1 for _, _, r in mirror_decls.values() if r)
     print(
@@ -890,7 +1196,8 @@ def main():
         f"names is partitioned three ways by ir/interp.dawn and ir/lower.dawn, "
         f"and {len(roundtrips)} of the "
         f"signatures read back as themselves ({len(skips)} named as spellings "
-        f"the parser is not offered)"
+        f"the parser is not offered); {len(owned)} intrinsics consume an "
+        f"argument, and the mirror and {len(marks)} runtime prototypes say which"
     )
     return 0
 

@@ -40,6 +40,11 @@
 #     and names about a quarter of it. A name lowering rewrites into ordinary std
 #     source carries no marker: `parse_int_radix` folds through std/fmt's Core
 #     like any other call.
+#   * ` # owned: 0, 2` lists the argument positions (0-based) the native
+#     runtime consumes rather than borrows -- `intr_owned_args` in
+#     `src/check/types.dawn`, which the rc pass reads. Every other argument
+#     of every builtin is borrowed. It comes before the comptime marker when
+#     a line carries both.
 #   * one declaration per line, never wrapped. A signature is what is being
 #     compared, and a comparison of something reflowed is a comparison of the
 #     reflowing.
@@ -81,6 +86,15 @@
 # `src/ir/lower.dawn`, 19 names) are deliberately absent. No source file may
 # write them under any visibility -- they exist between lowering and the
 # emitters -- so a declaration would be a promise this file cannot keep.
+#
+# Three of them consume an argument all the same, and which one is part of the
+# backend contract rather than of any spelling, so it is recorded here as a
+# comment the contract reads: the one place this file states a fact about a
+# name it does not declare. Same form as the marker, name first.
+#
+# owned: cell_new 0
+# owned: cell_set 1
+# owned: list_push 0
 
 # ---- control -- diverging, and the two barriers plus the release primitive ----
 #
@@ -338,7 +352,7 @@ fn array_get[T](a: Array[T], i: Int) -> T # comptime: rejected
 fn array_push[T](a: Array[T], x: T) -> Array[T] # comptime: rejected
 
 ## the array with one slot overwritten; the array goes in owned, so a unique one is written in place
-fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T] # comptime: rejected
+fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T] # owned: 0, 2 # comptime: rejected
 
 ## array_get for a caller about to overwrite the slot: a unique array transfers the slot's own reference out
 fn array_steal[T](a: Array[T], i: Int) -> T # comptime: rejected
