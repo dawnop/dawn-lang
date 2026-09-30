@@ -76,7 +76,6 @@ use ir/reach.{Live}
 use ir/lower
 use c/rc
 use c/infer
-use c/emitc
 use c/cdriver
 use jvm/jreflect.{jsig_real, jsig_for}
 use check/jsig.{JsigLease}
@@ -476,10 +475,6 @@ fn collect_program(
       cmods = cmods ++ [lower.emitted_core(l)]
       reach_roots = reach_roots ++ [l.m.owner]
     }
-    var list_roots: List[(String, String)] = []
-    for n in emitc.emitter_named_pvec_fns() {
-      list_roots = list_roots ++ [("std/pvec", n)]
-    }
     # Ordinary ADTs and trait interfaces are emitted even with no live
     # constructor/call. Their descriptors can name Java classes or evidence
     # records, so those types are roots of the same freight walk as bodies.
@@ -500,7 +495,7 @@ fn collect_program(
           TyFn([], TyUnit, sig_abi_eff(ms.sig))]
       }
     }
-    live = Some(reach.live_set(cmods, reach_roots, list_roots, extra_types))
+    live = Some(reach.live_set(cmods, reach_roots, reach.list_roots(), extra_types))
   }
   let tuse =
     match live {
