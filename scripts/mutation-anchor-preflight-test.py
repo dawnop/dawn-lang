@@ -298,6 +298,17 @@ class PreflightTests(unittest.TestCase):
         self.assert_stale_mutator_is_red("rc-contract", "revert-adt0-to-fresh-allocation",
                                          "    dawn_adt0_hits++;\n")
 
+    def test_range_bound_order_anchor_drift_is_caught(self):
+        # #277: range-bound-order-contract/run.sh is not-anchor because its
+        # one mutant comes from this mutator; the harness greps only the
+        # observed red set.
+        self.assert_registry_drift_is_red("range-bound-order-contract", "restore-upper-first",
+                                          "selfhost/src/ir/lower.dawn",
+                                          "            CSLet(isym, item_ty, lo_v),\n",
+                                          "            CSLet(isym, item_ty, lo_v) ,\n")
+        self.assert_stale_mutator_is_red("range-bound-order-contract", "restore-upper-first",
+                                         "CSLet(bsym, TyInt, hi_v),")
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
