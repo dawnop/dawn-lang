@@ -20,13 +20,14 @@ it returns. The function is `builtin_mirror_lines()` in
 context is `pub(pkg)`, so the reading happens inside the package and only data
 crosses the boundary. There is no subcommand of its own.
 
-The dump prints four record kinds:
+The dump prints five record kinds:
 
 ```
 builtin<TAB>name<TAB>pub|internal<TAB>signature
 roundtrip<TAB>name<TAB>rendered<TAB>rendered-again
 roundtrip-skip<TAB>name
 lowering<TAB>name
+owned<TAB>name<TAB>0,2
 ```
 
 Signatures are rendered by `sig_render_fqn`, which differs from the
@@ -44,6 +45,8 @@ that identifies the type; a hover needs the one that reads.
 | P4 | `pub fn` in the mirror ⇔ the table says the name is not internal |
 | P5 | the `# comptime: rejected` markers are exactly the names a `const` cannot use: the ones the comptime interpreter refuses by name, and the Map/Set names lowering routes to std/hamt, whose Core it refuses |
 | P6 | every signature, parsed back as the declaration it claims to be and rendered again, is the same string |
+| P7 | the `# owned: 0, 2` markers, plus the `# owned: <name> 0` comment records for the lowering-internal names the mirror does not declare, are exactly the table's owned argument positions (`types.intr_owned_args`) |
+| P8 | the `DAWN_CONSUMES(...)` marks on the prototypes in `runtime/c/dawn_rt.h` are exactly the table's owned positions for every intrinsic whose `dawn_<name>` is declared there, and each names a parameter the prototype has |
 
 P1 and P2 are two judgements over the same two sets rather than one equality,
 because "the sets differ" names neither side, and a mirror carrying a name the
@@ -78,6 +81,20 @@ Two meta-judgements, because a comparison of two empty sets passes:
 |---|---|
 | M1 | the dumped names plus lowering's internal intrinsics are exactly three pairwise-disjoint lists: `interp_arms` and `comptime_rejects` in `src/ir/interp.dawn`, and `lowered_intrinsics` in `src/ir/lower.dawn` |
 | M2 | the mirror parses to at least one declaration |
+| M3 | the owned-argument table is not empty, and names only intrinsics: the table's own, or lowering's internal ones |
+
+## Owned argument positions (#212)
+
+Which argument positions the native runtime consumes rather than borrows is
+the one per-intrinsic fact the table does not hold: it is a name-keyed constant
+in `types.dawn`, because three of its four names are lowering-internal and
+have no table entry to carry a field. P7 and P8 hold it to the two places that
+state ownership at a declaration -- the mirror line and the C prototype -- so
+dropping `list_push`'s position, or marking a C primitive as consuming without
+registering its intrinsic, is red before any sanitizer corpus runs.
+`list_push` has no C primitive (it lowers to `std/pvec.push`), so P7 is its
+only check. The header is read as source text by `read_runtime_consumes`,
+which `scripts/mutation-anchor-preflight.py` also runs before any build.
 
 ## Where P5's other input comes from
 
@@ -102,7 +119,8 @@ cannot satisfy an equality against 110 names.
 The mirror covers the 95 builtins and nothing else. `internal_intrinsics()` in
 `src/ir/lower.dawn` -- 15 names lowering emits between itself and the emitters
 -- has no declaration in the mirror, because no source file may write one under
-any visibility. Those names reach this directory only as M1's second input.
+any visibility. Those names reach this directory as M1's second input,
+and the three that consume an argument as P7's comment records.
 
 The partition assertion in `src/ir/interp.dawn` keeps reading both sources
 directly. It is that module's own test, about that module's own tables, and
@@ -110,9 +128,12 @@ nothing here replaces it.
 
 ## The mutants
 
-`matrix.txt`, eleven of them, one for each judgement plus a second for P3,
-P4 and P6, and the two #185 was about: `parse_int`'s interpreter arm put back
-(M1), and `parse_int_radix`'s marker put back (P5). Each perturbs the real mirror in memory and asserts its own judgement goes
+`matrix.txt`, sixteen of them, one for each judgement plus a second for P3,
+P4, P6, P7 and P8, and the two #185 was about: `parse_int`'s interpreter arm put back
+(M1), and `parse_int_radix`'s marker put back (P5). The P7 pair is #212's
+negative control (`list_push` loses its position) and a mirror marker dropped;
+the P8 pair is a mark on a primitive the table says borrows, and a mark
+dropped from `dawn_cell_set`. Each perturbs the real mirror in memory and asserts its own judgement goes
 red; the working tree never holds a mutant, and no compiler is rebuilt.
 
 They exist because `--self-test` is not enough. The self-test runs the

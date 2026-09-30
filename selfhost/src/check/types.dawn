@@ -3739,27 +3739,44 @@ pub fn internal_builtins() -> Set[String] = {
 ## uniqueness reason: it compiles to `std/pvec.push`, an ordinary Dawn
 ## function that releases what it is handed, and a compensating dup at the
 ## call site would pin the accumulator's count at >= 2 -- which forecloses
-## in-place reuse down the whole trie descent. A function rather than an
-## `Intr` field: the rc pass asks at every intrinsic node, and this answer
-## must not cost a table.
+## in-place reuse down the whole trie descent.
 ##
 ## The two cell writers are here for a plainer reason than uniqueness: the
 ## slot keeps what it is given, so the value has to arrive owned or the cell
 ## would hold a reference nobody counted. `cell_get` and `cell_take` take
 ## only the cell, and they borrow it -- the installation owns the cell for as
 ## long as the handler is installed, which is longer than either call.
-pub fn intr_owned_args(name: String) -> List[Int] =
-  if name == "array_with" {
-    [0, 2]
-  } else if name == "list_push" {
-    [0]
-  } else if name == "cell_new" {
-    [0]
-  } else if name == "cell_set" {
-    [1]
-  } else {
-    []
+##
+## Keyed by name rather than an `Intr` field (#212): three of the four are
+## lowering-internal intrinsics (`ir/lower.internal_intrinsics`), which have no
+## entry in `intrinsics()` to carry a field, and the rc pass asks at every
+## intrinsic node, so the answer must not cost a table built per question. A
+## constant is built once. What ties it to the rest is three checks rather
+## than one home: the test below (every position is a parameter of a real
+## intrinsic), the `# owned:` markers in `selfhost/builtins.dawn`, and the
+## `DAWN_CONSUMES` marks on the C runtime's declarations -- the last two
+## reconciled against this list both ways by `scripts/builtin-decl-contract`.
+const OWNED_ARGS: List[(String, List[Int])] = [
+  ("array_with", [0, 2]),
+  ("list_push", [0]),
+  ("cell_new", [0]),
+  ("cell_set", [1])
+]
+
+## Every intrinsic with an owned position, and those positions, ascending.
+## The list the contract dumps; the rc pass asks `intr_owned_args` instead.
+pub fn intr_owned_table() -> List[(String, List[Int])] = OWNED_ARGS
+
+## The positions of `name`'s arguments the callee consumes. Empty -- every
+## argument borrowed -- for every other intrinsic.
+pub fn intr_owned_args(name: String) -> List[Int] = {
+  for (n, ps) in OWNED_ARGS {
+    if n == name {
+      return ps
+    }
   }
+  []
+}
 
 # ---- tests ----
 
@@ -3792,6 +3809,44 @@ test "every intrinsic property is declared against a real intrinsic" {
   assert intr_at("map_get").expect("map_get").erased
   assert intr_at("array_push").expect("array_push").erased
   assert not intr_at("str_upper").expect("str_upper").erased
+}
+
+test "every owned argument position is a parameter of the intrinsic it names" {
+  # The half of the owned-argument contract this module can see: positions in
+  # range of a declared signature, ascending, one entry per name. Whether a
+  # name outside `intrinsics()` is a lowering-internal intrinsic is asked in
+  # driver/builtin_mirror, which can see ir/lower's list; check/ cannot.
+  let it = intrinsics()
+  var seen: List[String] = []
+  var declared = 0
+  for (name, ps) in intr_owned_table() {
+    assert not list.contains(seen, name)
+    seen = seen ++ [name]
+    assert len(ps) > 0
+    assert intr_owned_args(name) == ps
+    var prev = -1
+    for p in ps {
+      assert p > prev
+      prev = p
+    }
+    match map.get(it, name) {
+      Some(i) -> {
+        declared = declared + 1
+        for p in ps {
+          assert p < len(i.sig.param_tys)
+        }
+      }
+      None -> ()
+    }
+  }
+  # the one table entry `intrinsics()` declares, so the range check above is
+  # known to have run at least once
+  assert declared >= 1
+  assert intr_owned_args("array_with") == [0, 2]
+  # everything else borrows
+  assert intr_owned_args("array_push") == []
+  assert intr_owned_args("cell_get") == []
+  assert intr_owned_args("no_such_intrinsic") == []
 }
 
 test "the reactor root primitive is std-only, erased, and io" {

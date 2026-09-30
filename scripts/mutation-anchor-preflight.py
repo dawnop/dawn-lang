@@ -242,7 +242,12 @@ def check(root, overrides=None):
             reader[fn](tree.read(path))
         except (Exception, SystemExit) as error:
             raise PreflightError(f"scripts/builtin-decl-contract/check.py:{fn} [{path}]: {error}") from error
-    return count + 4
+    path = reader["HEADER"]
+    try:
+        reader["read_runtime_consumes"](tree.read(path))
+    except (Exception, SystemExit) as error:
+        raise PreflightError(f"scripts/builtin-decl-contract/check.py:read_runtime_consumes [{path}]: {error}") from error
+    return count + 5
 
 
 def main():

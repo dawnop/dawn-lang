@@ -18,6 +18,7 @@
 #     roundtrip\t<name>\t<signature>\t<signature read back and rendered again>
 #     roundtrip-skip\t<name>
 #     lowering\t<name>
+#     owned\t<name>\t<position>[,<position>...]
 #
 # The signature is rendered with `sig_render_fqn`, not `sig_render`: the mirror
 # must be readable as Dawn source, and `cast`'s parameter is only a type any
@@ -30,7 +31,7 @@ use std/str
 use check/cx.{Cx, cx_new}
 use check/identity.{path_table_get}
 use check/passes.{pass_fn_signatures, seed_prelude}
-use check/types.{intrinsics, prelude_adts, prelude_traits, sig_render_fqn}
+use check/types.{intrinsics, intr_owned_table, prelude_adts, prelude_traits, sig_render_fqn}
 use front/parser.{parse_module}
 use ir/lower.{internal_intrinsics}
 
@@ -48,8 +49,9 @@ use ir/lower.{internal_intrinsics}
 fn roundtrip_skips() -> List[String] = ["cast"]
 
 ## Every entry of `intrinsics()`, each followed by its read-back record, then
-## lowering's internal names. Sorted by name, so the output is a function of
-## the table and not of map order.
+## lowering's internal names, then the owned-argument table
+## (`types.intr_owned_table`, #212). Sorted by name, so the output is a
+## function of the tables and not of map or declaration order.
 pub fn builtin_mirror_lines() -> List[String] !io = {
   let adts = prelude_adts()
   let traits = prelude_traits()
@@ -82,7 +84,11 @@ pub fn builtin_mirror_lines() -> List[String] !io = {
   for name in list.sort(internal_intrinsics()) {
     out = out ++ ["lowering\t" ++ name]
   }
-  out
+  var owned: List[String] = []
+  for (name, ps) in intr_owned_table() {
+    owned = owned ++ ["owned\t" ++ name ++ "\t" ++ join(list.map(ps, p => to_string(p)), ",")]
+  }
+  out ++ list.sort(owned)
 }
 
 ## A rendering, read back as the declaration it claims to be, and rendered
@@ -111,4 +117,16 @@ fn reread(base: Cx, sig: String) -> String !io = {
     return "<parsed " ++ to_string(len(sigs.paths)) ++ " declarations>"
   }
   sig_render_fqn(cx1.adts, cx1.traits, path_table_get(sigs, sigs.paths[0]).expect("the declaration's own header"))
+}
+
+test "every owned-argument entry names an intrinsic" {
+  # check/types holds each position to the signature it can see; this is the
+  # half it cannot ask. Three of the entries are lowering-internal intrinsics,
+  # which have no signature in the table, and ir/ sits above check/.
+  let it = intrinsics()
+  let lowered = internal_intrinsics()
+  assert len(intr_owned_table()) > 0
+  for (name, _) in intr_owned_table() {
+    assert map.has(it, name) || list.contains(lowered, name)
+  }
 }
