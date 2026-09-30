@@ -62,6 +62,7 @@ REGISTRY_READERS = {
     "dict-owner-contract/shapes.py": "dict-owner-contract",
     "export-surface-contract/run.sh": "export-surface-contract",
     "incremental-semantics-contract/cold.py": "incremental-semantics-contract",
+    "incremental-semantics-contract/lsp-configured.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-observe.py": "incremental-semantics-contract",
 }
 SHELL_ADAPTERS = {
