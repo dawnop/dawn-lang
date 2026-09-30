@@ -333,3 +333,44 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 - **把 `uses:`/`with:`/`env:` 也算进摘要**：lock 不看它们，这里跟 lock 保持一个定义；工具链 `build: false` 这类变化目前没有在窗口里出现过。
 - **撤掉第二轮起的新名**：名字不再是身份，改回旧名只是再动一遍 steps lock、覆盖并集与文档，没有收益。
 
+
+## tile.yml 按 git tree 去重（2026-09-30，#231）
+
+09-29 的 nightly 报表（#231）两条都红：中位总量 +20.7%，tile.yml 本周 57 次 push 跑了 19 次（33%）。归因与方案比较在
+`agent-handoff/research-nightly-231-20260930.md`（本机调研报告，不进仓）；本节只记落地的做法与数字。
+
+### 为什么是 tree
+
+19 次触发里 **17 次**跑的 git tree 与约半小时前某次 PR 上已经跑绿的 tile.yml 运行逐字节相同：rebase 合入改 SHA、不改 tree。
+19 次全部通过，窗口里 tile golden 一次都没变。三种键的回放（分母 57 次 push）：
+
+| 键 | 触发 | 问题 |
+|---|---|---|
+| 现状 paths | 19（33%） | 编译器侧改动（driver / ir / c）一碰就跑 |
+| 收窄 paths（激进版） | 13（23%） | 仍超 20%，且丢掉 driver 耦合 |
+| 工具链 jar 摘要 | 31 次 push 改了 jar 输入 | 比 paths 还勤 |
+| tile 专属输入摘要（`inputs.py` 口径） | 6（11%） | 不含编译器，丢掉 emit 侧耦合（tile.yml 头注释点名的缺口） |
+| **git tree** | **2（3.5%）** | 只剩环境漂移看不见 |
+
+每周省约 17 × 4,827 ≈ **82,000 tile job 秒**。
+
+### 做法
+
+- tile.yml 加 `dedupe` job（不装工具链，`# budget: floor`，timeout 5 分钟）：`git rev-parse HEAD^{tree}` 取 tree，
+  `scripts/tile-verified.py lookup` 查名为 `tile-verified-v1-<tree>` 的 artifact。命中则六个分片与 `tile-shards-complete` 跳过，
+  step summary 写 `tile: tree <tree> already verified by run <id> (<event>, <branch>)`。
+- 记录由 `tile-shards-complete` 在六片全部 success、并集检查通过后上传，保留 90 天。PR 运行检出的是 merge ref，记的就是合并后的 tree。
+- **只有 push 去重**。pull_request、schedule、workflow_dispatch 一律全跑：全集在 PR 与每日 schedule 上，main push 上不再是按构造的全集。
+  这是主会话裁定接受的覆盖形状；release 不读 tile.yml，不受影响。
+- 一条记录要算数，须同时满足：名字是本 tree 加本前缀；未过期；artifact 的 `workflow_run.repository_id` 与 `head_repository_id` 都是本仓
+  （fork 的 PR 运行跑的是 fork 那份 tile.yml，不认）；产生它的运行是 `.github/workflows/tile.yml`、`head_repository` 是本仓、结论 success
+  （artifact 在运行结束前上传，仍在跑或之后被取消的都不认）。查询出错一律 `skip=false`，分片的 `if:` 在 dedupe 没跑完时也照跑，所以跳过的唯一途径是一条通过全部规则的记录。
+- 前缀里的 `v1-` 是**环境版本号**：tree 看不见 runner 镜像与浮动的 `@v4` 标签。换镜像（ubuntu-latest 10-19 起迁 Ubuntu 26）这类可能改判词的变化，手动改 `TILE_VERIFIED_PREFIX`，所有 tree 重跑。
+- 不用 actions/cache：PR 上建的 cache 属于 `refs/pull/N/merge`，main 读不到，7 天不访问会被逐出。
+- `path-total` 不变（5484 s）：dedupe 是 floor，不计入 `3x` 之和。
+
+### 不做的（理由）
+
+- **schedule 也去重**：09-15..09-18 连续四次 schedule 跑的是同一个 tree，去重能省，但 schedule 的职责就是兜住 tree 看不见的环境漂移。
+- **收窄 paths 作为主方案**：见上表，效果不够；温和版可以另做，本刀不碰 paths 与 gatemap 的超集约定。
+- **把记录提交进仓**：回写改变 tree（自指），且 CI 不宜往线性历史的 main 提交。
