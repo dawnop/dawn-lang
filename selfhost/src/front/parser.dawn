@@ -2213,8 +2213,49 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
 fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
   if at_kind(p, st1, LBRACE) && not nb { return record_lit(p, st1, name) }
+  if at_kind(p, st1, LBRACE) && braces_hold_fields(p, st1) {
+    return header_record_lit(p, st1, name)
+  }
   Ok((st1, ECtor(name.text, name.lo, name.hi)))
 }
+
+## Whether the `{` at `st` opens something that can only be a record literal's
+## fields: `name:` or a `..base` spread. Neither can begin a statement, so in a
+## header this is never a body. The shorthand `{ x }` is left alone:
+## `if a == B { x }` is a constructor value followed by a body.
+fn braces_hold_fields(p: P, st: St) -> Bool = {
+  let inner = skip_nl(p, adv1(p, st))
+  at_kind(p, inner, DOTDOT) || (at_kind(p, inner, IDENT) && kind_ahead(p, inner, 1) == COLON)
+}
+
+## A record literal in an `if`/`while`/`for` header or a `match` scrutinee
+## (#192). The rule stands -- there the braces after an expression open the
+## body (spec §4.3) -- but braces that hold fields cannot be a body, so the
+## literal is reported for what it is and parsed as one, which keeps the
+## arrow, arm and top-level errors that used to follow from appearing. The
+## diagnostic goes ahead of any the literal itself produces, since it explains
+## them. Modelled on rustc's "struct literals are not allowed here".
+fn header_record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
+  let before = len(st.diags)
+  let brace = cur(p, st)
+  let hint = "in an `if`, `while`, `for` or `match` header a `{` after an expression opens " ++
+    "the body; write `(" ++ name.text ++ " { ... })`"
+  match record_lit(p, st, name) {
+    Ok(r) -> {
+      let (st2, e) = r
+      let d = pd_h("a record literal here needs parentheses", name.lo, e_hi(e), hint)
+      Ok((St { ..st2, diags: insert_diag(st2.diags, before, d) }, e))
+    }
+    Err(fe) -> {
+      let (st2, d0) = fe
+      let d = pd_h("a record literal here needs parentheses", name.lo, brace.hi, hint)
+      Err((St { ..st2, diags: insert_diag(st2.diags, before, d) }, d0))
+    }
+  }
+}
+
+fn insert_diag(ds: List[Diag], at: Int, d: Diag) -> List[Diag] =
+  list.take(ds, at) ++ [d] ++ list.drop(ds, at)
 
 ## Whether `k`, standing right after a complete item of a comma-separated
 ## list and on the same line, can only be the next item with its comma
