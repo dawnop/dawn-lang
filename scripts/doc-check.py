@@ -2104,10 +2104,12 @@ ANALYZE_ENV_SOURCE = "selfhost/src/driver/analyze.dawn"
 ANALYZE_ENV_ROW = "body: fn() -> T !Fs !Proc !Env !io"
 ANALYZE_ENV_WRAPPERS = ("in_mem", "in_mem_env", "in_mem_proc")
 # Every `with_env_real` the file is allowed to spell, and what each is for.
-# Anything else is a test that went back to the host.
+# Anything else is a test that went back to the host. The file has no
+# production install point: the real handlers enter at `main.main`,
+# `nmain.main` and `lsp/server.handle`, and `driver/analyze` runs under
+# whichever one its caller installed. (It used to carry a fourth, in
+# `analyze_document`, which had no caller and was deleted with its row here.)
 ANALYZE_ENV_REAL_ANCHORS = (
-    ("io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() => {",
-     "the production install point in analyze_document"),
     ("io.with_fs_real(() => io.with_env_real(() => {",
      "the deliberate host query that says the declared directory is not this one"),
 )
@@ -2157,7 +2159,7 @@ def analyze_env_table_problems(source: str, doc: str) -> tuple[list[str], int]:
     mentions = len(re.findall(r"`with_env_real`", source))
     if spelled != accounted + mentions:
         bad.append(f"{ANALYZE_ENV_SOURCE}: spells `with_env_real` {spelled} times, "
-                   f"but only {accounted} production install(s) and {mentions} "
+                   f"but only {accounted} registered spelling(s) and {mentions} "
                    f"prose mention(s) are registered. A test that installs the real "
                    f"handler answers the environment from the machine it runs on, "
                    f"which is the thing the tables exist to stop")
@@ -2208,8 +2210,8 @@ def check_analyze_env_table_selftest() -> tuple[list[str], int]:
         return ["analyze env-table self-test: a test that reinstalled "
                 "`with_env_real` stayed green"], 0
 
-    # The production install point disappearing is the opposite failure: the
-    # tests would be fine and the compiler would answer `Env` nowhere.
+    # A registered spelling disappearing is the opposite failure: the row
+    # would vouch for a query the file no longer makes.
     for literal, why in ANALYZE_ENV_REAL_ANCHORS:
         gone = source.replace(literal, "HANDLER_REMOVED", 1)
         bad, _ = analyze_env_table_problems(gone, doc)

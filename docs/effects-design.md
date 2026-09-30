@@ -484,6 +484,8 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 
 安装点四个，全部是 `with_fs_real` 已在的边界，各在里面套一层 `with_proc_real`：
 `main.main`、`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`；
+（后记：`analyze_document` 全仓没有调用者，2026-09-30 随 #184 删除；此后生产安装点只有前三处，
+`driver/analyze` 跑在调用者装好的 handler 下面，自己不装。）
 测试侧另有 `driver/analyze.in_mem`（表答 `Fs`，真 handler 答 `Proc`，本组测试没有一条会让它开火）。
 里外顺序不是设置：`with_fs_real` 的 body 行是闭合的，只能在最外层，`with_proc_real` 的是 `!e`。
 
@@ -521,7 +523,7 @@ Core golden 只动了两个模块里三个闭包类型上印出来的效果行�
 
 安装点四个，不是预研数的三个，且四个全部是 `with_fs_real` / `with_proc_real` 已在的边界，
 各在 `with_proc_real` 里面再套一层 `with_env_real`：`main.main`、`nmain.main`、
-`lsp/server.handle`、`driver/analyze.analyze_document`。预研把 `lsp/server.handle` 划掉了，
+`lsp/server.handle`、`driver/analyze.analyze_document`（第四处后来因无调用者删除，见上文后记）。预研把 `lsp/server.handle` 划掉了，
 理由是「`run_lsp` 已经在 `main` 的动态范围里」——对一半：`run_lsp` 确实不用单独装，但
 `handle` 自己就装着 `with_fs_real`，而 `with_fs_real` 的 body 行是闭合的 `!(Fs|io)`，
 `Env` 穿不过去。所以边界数是「已有 `Fs` 边界的个数」，不是「`Env` 可达根的个数」，
@@ -659,9 +661,10 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 「the five real wrappers nest」的 test。
 
 **刀 1（消费者迁移，下一轮种子之后）**：`io.exit` 的体改调 `exit_now`，四个打印函数的体改调
-四个 `console_*`；可达的签名各加一个原子；handler 装在**既有的 `Fs` 边界**上，也就是今天
+四个 `console_*`；可达的签名各加一个原子；handler 装在**既有的 `Fs` 边界**上，也就是当时
 `with_fs_real` / `with_proc_real` / `with_env_real` 已经站着的那四处（`main.main`、
-`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`），加上 `scripts/` 下
+`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`；今天只剩前三处，
+`analyze_document` 无调用者已删除），加上 `scripts/` 下
 那五个探针程序。**边界数是「已有 `Fs` 边界的个数」，不是「可达根的个数」**，这是 `Env` 刀 1b
 留下的教训（上面那段：预研把 `lsp/server.handle` 划掉了，而 `with_fs_real` 的闭合行让 `Env`
 穿不过去），这一族按同一条规则数。`Console` 与前三族有一点不同要先记下：它是第一个在 `std`
@@ -691,7 +694,7 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 
 **「安装点数 = 已有 `Fs` 边界数」这条规则在这一族只对了一半。** 预研按它数出四处
 （`main.main`、`nmain.main`、`lsp/server.handle`、`driver/analyze.analyze_document`），
-实测只有前两处要装：`analyze_document` 底下没有任何东西调 `io.exit`，而 `lsp/server` 里那次
+实测只有前两处要装（`analyze_document` 后来因无调用者删除）：`analyze_document` 底下没有任何东西调 `io.exit`，而 `lsp/server` 里那次
 `io.exit` 在 `run_lsp` 里，行一路涨到 `main.dispatch`，由 `main` 的那一层接住。规则数出的是
 上界，不是答案；真正的判据仍是「行涨到哪里为止」。
 
