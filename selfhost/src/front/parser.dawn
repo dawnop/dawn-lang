@@ -226,7 +226,165 @@ pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List
     }
     st = skip_nl(p, st)
   }
-  (Module { decls: decls }, st.diags, cps, toks)
+  # A clean parse has nothing to relocate, so it never pays for the scan.
+  let diags = if len(st.diags) == 0 { st.diags } else { place_unclosed(toks, cps, st.diags) }
+  (Module { decls: decls }, diags, cps, toks)
+}
+
+# ---- unclosed delimiters (#195) ----
+
+## A matched opener/closer pair, as token indices.
+type DelimPair = { open: Int, close: Int }
+
+fn closer_of(k: TokKind) -> Option[TokKind] =
+  if k == LPAREN { Some(RPAREN) }
+  else if k == LBRACKET { Some(RBRACKET) }
+  else if k == LBRACE { Some(RBRACE) }
+  else { None }
+
+fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
+
+## The column of the first non-blank character on the line holding `off`.
+fn indent_at(cps: List[Char], off: Int) -> Int = {
+  var i = if off < len(cps) { off } else { len(cps) }
+  while i > 0 && cps[i - 1] != '\n' { i = i - 1 }
+  var n = 0
+  while i + n < len(cps) && (cps[i + n] == ' ' || cps[i + n] == '\t') { n = n + 1 }
+  n
+}
+
+fn line_at(cps: List[Char], off: Int) -> Int = {
+  var line = 1
+  var i = 0
+  while i < off && i < len(cps) {
+    if cps[i] == '\n' { line = line + 1 }
+    i = i + 1
+  }
+  line
+}
+
+fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
+  var i = a
+  while i < b && i < len(cps) {
+    if cps[i] == '\n' { return false }
+    i = i + 1
+  }
+  true
+}
+
+## Move the report of a delimiter left open at end of file to the opener.
+##
+## The parser only notices a missing closer when it runs out of tokens, so the
+## error used to land on the empty last line, and the opener it names in its
+## own view is often not the author's: in
+##
+##     fn main() = {
+##       if a > 0 {
+##         g()
+##     }
+##
+## the `if` block takes the last `}` and the function body is what stays
+## open. This rescans the token stream for brackets. When it ends with an
+## opener still open, and no closer was ever mismatched (then the stream says
+## nothing trustworthy about pairing and the diagnostics stay as they are),
+## the suspect is picked with rustc's indentation heuristic
+## (`report_suspicious_mismatch_block` in rustc_parse/lexer/diagnostics.rs):
+## among the pairs whose opening and closing lines are indented differently,
+## drop those enclosed by a pair that is indented alike, and take the one
+## that opens last. Unlike rustc, only pairs after the outermost unclosed
+## opener count, since a pair before it cannot have taken its closer. With no
+## suspect the innermost unclosed opener is named.
+##
+## The diagnostics the parser left at end of file ("found `<eof>`") are the
+## same fact seen from the wrong end, so they are replaced rather than kept
+## beside the new one; where parsing ran out is written into the hint. There
+## is no secondary span to carry both (#195 step 2).
+fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Diag] = {
+  var stack: List[Int] = []
+  var pairs: List[DelimPair] = []
+  var i = 0
+  while i < len(toks) {
+    let k = toks[i].kind
+    if closer_of(k) != None {
+      stack = stack ++ [i]
+    } else if is_closer(k) {
+      if len(stack) == 0 { return ds }
+      let top = stack[len(stack) - 1]
+      if closer_of(toks[top].kind) != Some(k) { return ds }
+      pairs = pairs ++ [DelimPair { open: top, close: i }]
+      stack = list.take(stack, len(stack) - 1)
+    }
+    i = i + 1
+  }
+  if len(stack) == 0 { return ds }
+  let eof = toks[len(toks) - 1]
+  let outer = toks[stack[0]].lo
+  var suspect: Option[DelimPair] = None
+  for m in pairs {
+    let mo = toks[m.open].lo
+    let mc = toks[m.close].lo
+    if mo > outer && not same_line(cps, mo, mc) && indent_at(cps, mo) != indent_at(cps, mc) {
+      var enclosed = false
+      for w in pairs {
+        let wo = toks[w.open].lo
+        let wc = toks[w.close].lo
+        if wo > outer && wo < mo && wc > mc && indent_at(cps, wo) == indent_at(cps, wc) {
+          enclosed = true
+        }
+      }
+      let later = match suspect {
+        Some(best) -> mo > toks[best.open].lo
+        None -> true
+      }
+      if not enclosed && later { suspect = Some(m) }
+    }
+  }
+  let end_line = line_at(cps, eof.lo)
+  let d = match suspect {
+    Some(m) -> {
+      let o = toks[m.open]
+      let c = toks[m.close]
+      pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
+        "the file ends at line ${end_line} with a delimiter still open; the `" ++ c.text ++
+          "` on line ${line_at(cps, c.lo)} closes this `" ++ o.text ++
+          "` but is indented differently, so it probably belongs to an outer one and this `" ++
+          o.text ++ "` is missing its own")
+    }
+    None -> {
+      let o = toks[stack[len(stack) - 1]]
+      pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
+        "the file ends at line ${end_line} before this `" ++ o.text ++ "` is closed")
+    }
+  }
+  # Without a report at end of file, parsing recovered on its own. If it
+  # already stopped on the opener's line, that report is about the same
+  # mistake and the author is looking at the right line (`fn f( = 0`), so
+  # nothing is added. Only an opener whose line has no report yet -- the
+  # parse ran on past it, as through the newlines inside an unclosed `[` --
+  # gets one.
+  let reaches_eof = list.any(ds, x => x.lo >= eof.lo && str.contains(x.msg, "found `<eof>`"))
+  if not reaches_eof && list.any(ds, x => x.lo >= d.lo && same_line(cps, d.lo, x.lo)) {
+    return ds
+  }
+  var out: List[Diag] = []
+  var placed = false
+  for x in ds {
+    let at_eof = x.lo >= eof.lo && str.contains(x.msg, "found `<eof>`")
+    if at_eof {
+      if not placed {
+        out = out ++ [d]
+        placed = true
+      }
+    } else {
+      if not placed && x.lo > d.lo {
+        out = out ++ [d]
+        placed = true
+      }
+      out = out ++ [x]
+    }
+  }
+  if not placed { out = out ++ [d] }
+  out
 }
 
 fn classify_top_decl(p: P, st: St) -> Option[TopDeclHead] = {
