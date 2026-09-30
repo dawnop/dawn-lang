@@ -31,7 +31,7 @@ type Rel = {
   peels_opaque,       # Show 为 false
   ground_is_final,    # Show 为 false
   fallback,           # foreign_eq / no_ordering(panic) / foreign_hash / show_erased
-  fold,               # 一个 arm 的各部分怎么合起来
+  fold_arm,           # 一个 arm 的各部分怎么合起来（叫 fold 会和 list 的 fold 撞名，checker 判歧义）
   skips_bare,         # Hash 为 true
   union               # 多构造器链的首尾：链的初值、链前链后要不要再包一层
 }
@@ -59,9 +59,9 @@ ADT 每个构造器一个 arm（`(ci, [(idx, ft)])`，`ft` 经 `concrete_field_t
 
 ### 四种 fold 与多构造器链
 
-`rel_body` 是结构函数体：只有一个 arm（元组、单构造器）时 `rel.fold(.., None)`；
+`rel_body` 是结构函数体：只有一个 arm（元组、单构造器）时 `rel.fold_arm(.., None)`；
 多个 arm 时交给 `rel.union`，它拿到一个 `chain(st, init)` 回调，回调从最后一个构造器往前，
-对每个 arm 先 `arm_parts` 再 `rel.fold(.., Some(init))`，用 `CIf(CIsCtor(x0, aid, ci), 这一臂, 其余)`
+对每个 arm 先 `arm_parts` 再 `rel.fold_arm(.., Some(init))`，用 `CIf(CIsCtor(x0, aid, ci), 这一臂, 其余)`
 接成链，最后的 `else` 是 `init`。
 
 | 关系 | fold（唯一 arm） | fold（链中一臂） | union |

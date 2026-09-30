@@ -1951,20 +1951,8 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
       }
   }
 
-fn conj(acc: Option[CExpr], c: CExpr) -> CExpr =
-  match acc {
-    None -> c
-    Some(e) -> CBinary(CAnd, e, c, TyBool)
-  }
-
-fn conj_or_true(acc: Option[CExpr]) -> CExpr =
-  match acc {
-    Some(e) -> e
-    None -> CBool(true)
-  }
-
 ## The type an equality is really taken at: an opaque type with no `impl Eq`
-## of its own is its target (spec §2.7), which is the peel `eq_at` does below.
+## of its own is its target (spec §2.7), which is the peel `rel_at` does for Eq.
 fn eq_subject(st: LSt, t: Ty) -> Ty =
   match t {
     TyOpaque(_, _, _, _, tgt) ->
@@ -2014,7 +2002,16 @@ type Rel = {
   # what is left when the language has no definition: the host's relation on
   # a foreign value, or a compiler bug the checker should have refused
   fallback: fn(List[CExpr], Ty) -> CExpr,
-  body: fn(LSt, List[CExpr], Ty) -> (LSt, CExpr)
+  # How one arm's related parts combine, given the operands, the composite
+  # type, the constructor (-1 for a tuple) and the parts. The last argument
+  # is None when the arm is the whole value, and the chain's `init` when it is
+  # one of a union's arms.
+  fold_arm: fn(LSt, List[CExpr], Ty, Int, List[CExpr], Option[CExpr]) -> (LSt, CExpr),
+  # a union's arms with no fields answer `init` already and get no test
+  skips_bare: Bool,
+  # A union: `chain(st, init)` builds the arms, last constructor first, with
+  # `init` as the final `else`; the relation picks `init` and wraps the result.
+  union: fn(LSt, List[CExpr], Ty, fn(LSt, CExpr) -> (LSt, CExpr)) -> (LSt, CExpr)
 }
 
 ## A relation at one type, as Core. **Every** producer of one goes through
@@ -2147,7 +2144,7 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
     default_of: None
   }
   let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
-  let (st3, body) = rel.body(st2, xs, t)
+  let (st3, body) = rel_body(st2, rel, xs, t)
   var out: List[CFun] = []
   for f in st3.lifted {
     if f.name == name {
@@ -2224,7 +2221,45 @@ fn arm_parts(st: LSt, rel: Rel, xs: List[CExpr], sc: Ty, arm: Arm) -> (LSt, List
   (st1, out)
 }
 
-# ---- structural equality (docs/semantics-closure-design.md 3) ----
+## The body of a structural function: the only arm's parts folded, or a
+## union's arms chained on the constructor.
+fn rel_body(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let arms = components(st, t)
+  if len(arms) == 1 {
+    let (st1, parts) = arm_parts(st, rel, xs, t, arms[0])
+    return rel.fold_arm(st1, xs, t, arms[0].ci, parts, None)
+  }
+  rel.union(st, xs, t, (s, init) => rel_chain(s, rel, xs, t, arms, init))
+}
+
+## A union's arms, built back to front so the last `else` is `init`: `x0` is
+## tested against each constructor, and the arm it is in answers.
+fn rel_chain(
+  st: LSt,
+  rel: Rel,
+  xs: List[CExpr],
+  t: Ty,
+  arms: List[Arm],
+  init: CExpr
+) -> (LSt, CExpr) = {
+  let aid = adt_id(t)
+  var st1 = st
+  var chain = init
+  var k = len(arms) - 1
+  while k >= 0 {
+    let arm = arms[k]
+    if not (rel.skips_bare && len(arm.parts) == 0) {
+      let (st2, parts) = arm_parts(st1, rel, xs, t, arm)
+      let (st3, fe) = rel.fold_arm(st2, xs, t, arm.ci, parts, Some(init))
+      st1 = st3
+      chain = CIf(CIsCtor(xs[0], aid, arm.ci), fe, Some(chain), rel.ret)
+    }
+    k = k - 1
+  }
+  (st1, chain)
+}
+
+# ---- equality's record ----
 
 fn eq_rel() -> Rel =
   Rel {
@@ -2239,7 +2274,10 @@ fn eq_rel() -> Rel =
     peels_opaque: true,
     ground_is_final: true,
     fallback: foreign_eq,
-    body: struct_eq_body
+    fold_arm: eq_fold,
+    skips_bare: false,
+    # several arms: the last `else` is the honest `false`
+    union: (st, xs, t, chain) => chain(st, CBool(false))
   }
 
 fn eq_scalar(xs: List[CExpr], t: Ty) -> CExpr = CBinary(CEq, xs[0], xs[1], TyBool)
@@ -2263,39 +2301,33 @@ fn foreign_eq(xs: List[CExpr], t: Ty) -> CExpr =
         "`; the checker should have refused it")
   }
 
+## The parts' conjunction, left to right; `true` when there are none.
 fn conj_all(parts: List[CExpr]) -> CExpr = {
-  var acc: Option[CExpr] = None
-  for c in parts { acc = Some(conj(acc, c)) }
-  conj_or_true(acc)
+  if len(parts) == 0 { return CBool(true) }
+  var acc = parts[0]
+  for c in list.drop(parts, 1) { acc = CBinary(CAnd, acc, c, TyBool) }
+  acc
 }
 
-fn struct_eq_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
-  let arms = components(st, t)
-  # one arm: there is no discriminant to disagree about
-  if len(arms) == 1 {
-    let (st1, parts) = arm_parts(st, eq_rel(), xs, t, arms[0])
-    return (st1, conj_all(parts))
+## One arm: `a` and `b` agree on every part. In a union `a` picked the arm,
+## and `b` has to be in the same one.
+fn eq_fold(
+  st: LSt,
+  xs: List[CExpr],
+  t: Ty,
+  ci: Int,
+  parts: List[CExpr],
+  init: Option[CExpr]
+) -> (LSt, CExpr) =
+  match init {
+    None -> (st, conj_all(parts))
+    Some(_) ->
+      if len(parts) == 0 {
+        (st, CIsCtor(xs[1], adt_id(t), ci))
+      } else {
+        (st, CBinary(CAnd, CIsCtor(xs[1], adt_id(t), ci), conj_all(parts), TyBool))
+      }
   }
-  # several: `a` picks the arm and `b` has to be in the same one. Built back
-  # to front so the last `else` is the honest `false`.
-  let aid = adt_id(t)
-  var st1 = st
-  var chain: CExpr = CBool(false)
-  var k = len(arms) - 1
-  while k >= 0 {
-    let arm = arms[k]
-    let (st2, parts) = arm_parts(st1, eq_rel(), xs, t, arm)
-    st1 = st2
-    let same = if len(parts) == 0 {
-      CIsCtor(xs[1], aid, arm.ci)
-    } else {
-      CBinary(CAnd, CIsCtor(xs[1], aid, arm.ci), conj_all(parts), TyBool)
-    }
-    chain = CIf(CIsCtor(xs[0], aid, arm.ci), same, Some(chain), TyBool)
-    k = k - 1
-  }
-  (st1, chain)
-}
 
 # ---- structural ordering (docs/trait-v2-design.md 3.6) ----
 #
@@ -2323,7 +2355,10 @@ fn cmp_rel() -> Rel =
     peels_opaque: true,
     ground_is_final: true,
     fallback: no_ordering,
-    body: struct_cmp_body
+    # one arm or one of several: nothing to disagree about but the fields
+    fold_arm: (st, xs, t, ci, parts, init) => lexicographic(st, parts, 0),
+    skips_bare: false,
+    union: cmp_union
   }
 
 fn cmp_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("cmp", xs, TyInt)
@@ -2338,41 +2373,30 @@ fn no_ordering(xs: List[CExpr], t: Ty) -> CExpr = panic("lower: no ordering for 
 ## derived comparison.
 fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, cmp_rel(), [a, b], t)
 
-fn struct_cmp_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
-  let arms = components(st, t)
-  # one arm: nothing to disagree about but the fields
-  if len(arms) == 1 {
-    let (st1, parts) = arm_parts(st, cmp_rel(), xs, t, arms[0])
-    return lexicographic(st1, parts, 0)
-  }
-  # Constructor order first, declaration order being the order. Built back to
-  # front so the last `else` is unreachable-but-honest: `a` is one of them,
-  # and the tags already agreed.
+## Constructor order first, declaration order being the order. The chain's
+## last `else` is unreachable-but-honest: `a` is one of the arms, and the tags
+## already agreed.
+fn cmp_union(
+  st: LSt,
+  xs: List[CExpr],
+  t: Ty,
+  chain: fn(LSt, CExpr) -> (LSt, CExpr)
+) -> (LSt, CExpr) = {
   let aid = adt_id(t)
-  var st1 = st
-  var chain: CExpr = CInt(0)
-  var k = len(arms) - 1
-  while k >= 0 {
-    let arm = arms[k]
-    let (st2, parts) = arm_parts(st1, cmp_rel(), xs, t, arm)
-    let (st3, fe) = lexicographic(st2, parts, 0)
-    st1 = st3
-    chain = CIf(CIsCtor(xs[0], aid, arm.ci), fe, Some(chain), TyInt)
-    k = k - 1
-  }
-  let (st4, ta) = fresh_sym(st1)
-  let (st5, tb) = fresh_sym(st4)
+  let (st1, arms) = chain(st, CInt(0))
+  let (st2, ta) = fresh_sym(st1)
+  let (st3, tb) = fresh_sym(st2)
   # Disagreeing tags answer -1/1, not the tag difference: `cmp` contracts the
   # sign only (spec 3.5), and the raw subtraction leaked how far apart the
   # constructors were declared.
-  (st5, CBlock(
+  (st3, CBlock(
     [CSLet(ta, TyInt, CTagOf(xs[0], aid)), CSLet(tb, TyInt, CTagOf(xs[1], aid))],
     Some(CIf(
       CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
       CIf(
         CBinary(CLt, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
         CInt(-1), Some(CInt(1)), TyInt),
-      Some(chain), TyInt)),
+      Some(arms), TyInt)),
     TyInt))
 }
 
@@ -2437,7 +2461,16 @@ fn hash_rel() -> Rel =
     peels_opaque: true,
     ground_is_final: true,
     fallback: foreign_hash,
-    body: struct_hash_body
+    fold_arm: hash_fold,
+    # A constructor with no fields has nothing to fold, so its answer *is* the
+    # seed -- which is what the chain's final `else` says. Only the ones with
+    # fields need an arm, and a union of bare tags needs no test at all: `Ty`
+    # and `Head` in this compiler are exactly that shape, and asking them
+    # thirteen times which one they are to arrive at the same expression is
+    # the sort of thing a structural expansion writes if nobody looks at what
+    # it wrote.
+    skips_bare: true,
+    union: hash_union
   }
 
 fn hash_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("hash", xs, TyInt)
@@ -2482,37 +2515,32 @@ fn narrow32(e: CExpr) -> CExpr =
     CBinary(CBxor, CBinary(CBand, e, CInt(0xFFFFFFFF), TyInt), CInt(0x80000000), TyInt),
     CInt(0x80000000), TyInt)
 
-fn struct_hash_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
-  let arms = components(st, t)
-  # one arm: there is no tag to tell anything apart with
-  if len(arms) == 1 {
-    let (st1, parts) = arm_parts(st, hash_rel(), xs, t, arms[0])
-    return (st1, narrow32(mix_all(CInt(1), parts)))
+## One arm: its parts mixed into the seed. The only arm has no tag to tell
+## anything apart with, so it starts from 1 and narrows here; a union's arm
+## starts from the tag seed, and the union narrows once for all of them.
+fn hash_fold(
+  st: LSt,
+  xs: List[CExpr],
+  t: Ty,
+  ci: Int,
+  parts: List[CExpr],
+  init: Option[CExpr]
+) -> (LSt, CExpr) =
+  match init {
+    None -> (st, narrow32(mix_all(CInt(1), parts)))
+    Some(seed) -> (st, mix_all(seed, parts))
   }
-  # several: the tag folds in first, then that arm's fields.
-  #
-  # A constructor with no fields has nothing to fold, so its answer *is* the
-  # seed -- which is what the final `else` says. Only the ones with fields
-  # need an arm, and a union of bare tags needs no test at all: `Ty` and
-  # `Head` in this compiler are exactly that shape, and asking them thirteen
-  # times which one they are to arrive at the same expression is the sort of
-  # thing a structural expansion writes if nobody looks at what it wrote.
-  let aid = adt_id(t)
+
+## Several arms: the tag folds in first, then that arm's fields.
+fn hash_union(
+  st: LSt,
+  xs: List[CExpr],
+  t: Ty,
+  chain: fn(LSt, CExpr) -> (LSt, CExpr)
+) -> (LSt, CExpr) = {
   let (st1, tsym) = fresh_sym(st)
-  let seed = mix(CInt(1), CLocal(tsym, TyInt))
-  var stx = st1
-  var chain: CExpr = seed
-  var k = len(arms) - 1
-  while k >= 0 {
-    let arm = arms[k]
-    if len(arm.parts) > 0 {
-      let (st2, parts) = arm_parts(stx, hash_rel(), xs, t, arm)
-      stx = st2
-      chain = CIf(CIsCtor(xs[0], aid, arm.ci), mix_all(seed, parts), Some(chain), TyInt)
-    }
-    k = k - 1
-  }
-  (stx, CBlock([CSLet(tsym, TyInt, CTagOf(xs[0], aid))], Some(narrow32(chain)), TyInt))
+  let (st2, arms) = chain(st1, mix(CInt(1), CLocal(tsym, TyInt)))
+  (st2, CBlock([CSLet(tsym, TyInt, CTagOf(xs[0], adt_id(t)))], Some(narrow32(arms)), TyInt))
 }
 
 # ---- rendering (docs/semantics-closure-design.md 6) ----
@@ -2542,7 +2570,10 @@ fn show_rel() -> Rel =
     peels_opaque: false,
     ground_is_final: false,
     fallback: show_erased,
-    body: struct_show_body
+    fold_arm: (st, xs, t, ci, parts, init) => (st, render_arm(st, t, ci, parts)),
+    skips_bare: false,
+    # the last `else` is unreachable-but-honest: `x` is one of the arms
+    union: (st, xs, t, chain) => chain(st, CStr(""))
   }
 
 ## The show scalars (types.dawn's `show_scalars`) past Unit, each with its own
@@ -2600,30 +2631,6 @@ fn show_erased(xs: List[CExpr], t: Ty) -> CExpr = {
 ## language has drawn that line since its first day (Rust draws it as Display
 ## vs Debug); what changes here is only that both sides now come from Core.
 fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, show_rel(), [x], t)
-
-fn struct_show_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
-  let arms = components(st, t)
-  # one arm: there is no tag to test
-  if len(arms) == 1 {
-    let (st1, parts) = arm_parts(st, show_rel(), xs, t, arms[0])
-    return (st1, render_arm(st1, t, arms[0].ci, parts))
-  }
-  # Built back to front, so the last `else` is unreachable-but-honest: `x` is
-  # one of them.
-  let aid = adt_id(t)
-  var st1 = st
-  var chain: CExpr = CStr("")
-  var k = len(arms) - 1
-  while k >= 0 {
-    let arm = arms[k]
-    let (st2, parts) = arm_parts(st1, show_rel(), xs, t, arm)
-    st1 = st2
-    chain = CIf(CIsCtor(xs[0], aid, arm.ci), render_arm(st1, t, arm.ci, parts), Some(chain),
-      TyString)
-    k = k - 1
-  }
-  (st1, chain)
-}
 
 ## `(v0, v1)` for a tuple; `Name`, `Name(v0, v1)`, or `Name { f0: v0, f1: v1 }`
 ## for a constructor -- the shape the JVM emitter wrote by hand, kept to the
