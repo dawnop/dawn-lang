@@ -43,6 +43,12 @@ What a record must be to count, each one a test in --self-test:
   `success`. The artifact is uploaded before its run concludes, so a run
   still in progress or later cancelled does not count.
 
+The trust boundary is write access to this repository. A same-repository
+branch can upload an artifact under any name, so it could record a tree it
+never verified, but a branch with write access can already edit this
+workflow or push to main, so the record claims nothing that access does not
+already grant. What it keeps out is a fork, by the head repository tests.
+
 Not actions/cache: a cache written on a pull request belongs to
 refs/pull/N/merge, which main cannot read, and an unread entry is evicted in
 seven days (GitHub's dependency caching reference).

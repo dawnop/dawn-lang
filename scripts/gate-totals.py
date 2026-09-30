@@ -62,6 +62,10 @@ which all six tile-golden shards concluded success; a deduplicated run is
 counted in its own row and not in the rate. The 20% limit is kept and now
 reads "the share of pushes that still run the shards".
 
+A cut to the declared push total that the measured cost does not follow
+turns the ratio-rise check red, by design: a claim lowered below what the
+pushes still cost is the drift this report exists to show.
+
 Why these and not a hard cap: a report is what this is, and the hard cap is
 the push total, which a push cannot get past without saying so. The
 thresholds are constants below, not flags, so changing one is a diff
@@ -74,8 +78,9 @@ classfile-never-mutants and the shard-union check); the native differential
 everything else, `plan` and ci.yml's `secrets` included.
 
     gate-totals.py --ci ci.json --tile tile.json    the table, exit 1 on drift
-    gate-totals.py --selftest                       fixture weeks, each drift
+    gate-totals.py --self-test                      fixture weeks, each drift
                                                     required to go red
+                                                    (--selftest is the same)
 
 No network here and no token: the fetching is gate-observations.py's. The
 push total at each run's commit is read with git (the nightly checkout has
@@ -577,7 +582,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ci", type=Path, help="gate-observations.py report of ci.yml")
     ap.add_argument("--tile", type=Path, help="gate-observations.py report of tile.yml")
-    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--self-test", "--selftest", dest="selftest",
+                    action="store_true")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
