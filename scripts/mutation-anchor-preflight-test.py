@@ -119,6 +119,19 @@ class PreflightTests(unittest.TestCase):
                                           "syms: tast_positions.symbols(entered.resolver,  after.syms, ")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-module-memo/drop-parses", 0)
 
+    def test_body_executor_anchor_drift_is_caught(self):
+        # #277: body-executor.py derived its thirteen controls from six calls
+        # in its main and refused a stale one only when incremental-memo-3
+        # ran it. The group entry is shared by two derived controls.
+        checker = "selfhost/src/check/checker.dawn"
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "body-executor/bypass-constant",
+                                          checker, "executor.constant(state, owner.cx, d, declared, visible)",
+                                          "executor.constant(state, owner.cx, d, declared,  visible)")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "body-executor/reset-state-inferred",
+                                          checker, "attempt_inferred_group(state, cx1, inferred, settled,",
+                                          "attempt_inferred_group(state, cx1, inferred,  settled,")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "body-executor/bypass-test", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.

@@ -33,6 +33,42 @@ COLD_ANALYZE = "incremental.analyze(incremental.evict(ws0.cache), loaded)"
 LOADED = "      let loaded = reusing.loaded"
 PREFIX_ANALYZE = "      let update = " + WARM_ANALYZE
 
+# body-executor.py: each role's executor call, and a body that bypasses the
+# executor, returning the state it was handed.
+BODY_CALLS = {
+    "inferred": ("executor.inferred_body(state, owner.cx, d, sigs[idx])",
+                 "{ let (next, _, tree) = check_fn_inferred(owner.cx, d, sigs[idx])\n (state, next, tree) }"),
+    "constant": ("executor.constant(state, owner.cx, d, declared, visible)",
+                 "{ let (next, tree) = check_const_init(owner.cx, d, declared, visible)\n (state, next, tree) }"),
+    "function": ("executor.function(state, owner.cx, d, sigs[i])",
+                 "{ let (next, tree) = check_fn(owner.cx, d, sigs[i])\n (state, next, tree) }"),
+    "method": ("executor.method(state, owner.cx, imd.trait_name, imd.subject, strip_param_defaults(me), ms)",
+               "{ let (next, tree) = check_fn(owner.cx, strip_param_defaults(me), ms)\n (state, next, tree) }"),
+    "default": ("executor.default_body(state, owner.cx, t, me, s2, b)",
+                "{ let (next, tree) = check_trait_default(owner.cx, me, s2, b)\n (state, next, tree) }"),
+    "test": ("executor.test_body(state, owner.cx, t.name, t.body)",
+             "{ let (next, tree) = check_test(owner.cx, t.name, t.body)\n (state, next, tree) }"),
+}
+# The inferred role runs inside attempt_inferred_group, one group at a
+# time, where the module's initial state and header context are not in
+# scope and the group's entry state equals the current one for every
+# group of one. So its reset and its stale context are applied where the
+# scheduler hands a group its state and context: every group then starts
+# from the module's initial state, or from the header context rather than
+# from the context the passes before it left.
+GROUP_ENTRY = "attempt_inferred_group(state, cx1, inferred, settled,"
+
+
+def bypass(role):
+    call, body = BODY_CALLS[role]
+    return ((CHECKER, call, body),)
+
+
+def reset_state(role):
+    anchor = GROUP_ENTRY if role == "inferred" else BODY_CALLS[role][0]
+    return ((CHECKER, anchor, anchor.replace("(state,", "(initial,")),)
+
+
 MUTATIONS = {
     # The step starts from an empty intern table instead of the one before it.
     "cold/intern-table": ((ANALYZE, "    identities: before.identities,", "    identities: map.empty(),"),),
@@ -104,6 +140,24 @@ MUTATIONS = {
         "mint_cursor(entered.cx), mint_cursor(after))",
         "syms: tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts), "
         "after.syms, mint_cursor(entered.cx), mint_cursor(after))"),),
+
+    # body-executor.py: the scheduler consumes every role's executor result.
+    # Each role is bypassed, and each role starts from the module's initial
+    # state instead of the current one; the keys are spelled out because the
+    # preflight reads them as literals.
+    "body-executor/bypass-inferred": bypass("inferred"),
+    "body-executor/reset-state-inferred": reset_state("inferred"),
+    "body-executor/bypass-constant": bypass("constant"),
+    "body-executor/reset-state-constant": reset_state("constant"),
+    "body-executor/bypass-function": bypass("function"),
+    "body-executor/reset-state-function": reset_state("function"),
+    "body-executor/bypass-method": bypass("method"),
+    "body-executor/reset-state-method": reset_state("method"),
+    "body-executor/bypass-default": bypass("default"),
+    "body-executor/reset-state-default": reset_state("default"),
+    "body-executor/bypass-test": bypass("test"),
+    "body-executor/reset-state-test": reset_state("test"),
+    "body-executor/stale-inferred-context": ((CHECKER, GROUP_ENTRY, GROUP_ENTRY.replace("cx1,", "headers.cx,")),),
 }
 
 
