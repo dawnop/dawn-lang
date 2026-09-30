@@ -49,6 +49,15 @@ ADAPTERS = {
 EXCLUSIONS = {
     "tile-gpu-diff": "generic replacement helper; all anchor text is supplied by callers",
 }
+# Harnesses that read their anchors out of one of the registries above and
+# apply them under their own exactly-once test, instead of calling the
+# registry's main. check() exercises the registry, which proves the reader's
+# anchors in the same run; all it asks of the reader is that it still names the
+# registry, so an entry cannot outlive the reading it vouches for.
+# anchor-guard.py counts these as preflighted.
+REGISTRY_READERS = {
+    "export-surface-contract/run.sh": "export-surface-contract",
+}
 SHELL_ADAPTERS = {
     "java-target-classpath-contract": ("selfhost/src/main.dawn",
         "selfhost/src/driver/analyze.dawn", "selfhost/src/jvm/jreflect.dawn"),
@@ -159,6 +168,14 @@ def check(root, overrides=None):
         for mode in modes(source, label):
             exercise(root, source, label, mode, arguments, overrides)
             count += 1
+    for reader, registry in REGISTRY_READERS.items():
+        rel = f"scripts/{reader}"
+        text = (overrides or {}).get(rel)
+        if text is None:
+            text = (root / rel).read_text() if (root / rel).is_file() else ""
+        if registry not in ADAPTERS or "mutate.py" not in text:
+            raise PreflightError(f"{rel}: listed in REGISTRY_READERS, but it no longer reads "
+                                 f"scripts/{registry}/mutate.py")
     for name, arguments in SHELL_ADAPTERS.items():
         label = f"scripts/{name}/run.sh"
         source = shell_source((root / label).read_text(), label)

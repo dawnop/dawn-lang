@@ -42,6 +42,18 @@ class PreflightTests(unittest.TestCase):
             p.exercise(p.ROOT, (p.ROOT / label).read_text(), label,
                        "surface-after-bodies", (".",), {target: original.replace(old, "")})
 
+    def test_registry_reader_must_still_read_its_registry(self):
+        # #254: export-surface's run.sh takes its self-test anchor from
+        # mutate.py, so the registry's run is its proof. A reader that stops
+        # naming the registry loses that proof and must drop out of the table.
+        for reader in p.REGISTRY_READERS:
+            rel = f"scripts/{reader}"
+            original = (p.ROOT / rel).read_text()
+            self.assertIn("mutate.py", original)
+            with self.assertRaisesRegex(p.PreflightError, f"{rel}: listed in REGISTRY_READERS"):
+                p.check(p.ROOT, {rel: original.replace("mutate.py", "registry.py")})
+            self.assertEqual((p.ROOT / rel).read_text(), original)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
