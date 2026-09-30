@@ -458,6 +458,19 @@ class PreflightTests(unittest.TestCase):
                                           "          Ok(value) -> value\n")
         self.assert_stale_registry_is_red("wasm-dom-contract", "drop-retained-state", 0)
 
+    def test_wasm_dom_flags_anchor_drift_is_caught(self):
+        # #277: flags.sh applied these as sed programs and counted a mutant
+        # applied when the file changed at all, and only once node and
+        # bin/dawn had run both clean legs.
+        self.assert_registry_drift_is_red("wasm-dom-contract", "mount-drops-the-flags",
+                                          "packages/tea-dom/js/app.mjs",
+                                          "settle(reactor.init(flags));",
+                                          "settle(reactor.init(flags ));")
+        self.assert_registry_drift_is_red("wasm-dom-contract", "flags-never-decoded",
+                                          "packages/tea-dom/src/wire.dawn",
+                                          'field(entries, "flags")', 'field(entries,  "flags")')
+        self.assert_stale_registry_is_red("wasm-dom-contract", "flags-ignored-at-the-turn", 0)
+
     def assert_stale_mutator_is_red(self, name, mode, literal):
         # For a mutate.py whose anchors are not a MUTATIONS table of edit
         # tuples: respell the first copy of one anchor line inside the

@@ -49,23 +49,17 @@ fail=0
 holes=0
 killed=0
 
-# `name @ file @ sed program`, applied to a copy of the tree and required to
-# turn its leg red. The edit is checked for having applied: a sed that matched
-# nothing would report a clean tree as a killed mutant, which is how a mutant
-# harness goes quietly blind.
-try_mutant() { # <plant fn> <check fn> <name> <file> <sed program>
-  local plant="$1" check="$2" name="$3" file="$4" prog="$5" target before
+# A mutant is a name in mutate.py, applied to a copy of the tree and required
+# to turn its leg red. The edit is checked for having applied: an edit that
+# matched nothing would report a clean tree as a killed mutant, which is how a
+# mutant harness goes quietly blind. mutate.py refuses an anchor that does not
+# match exactly once, and mutation-anchor-preflight.py proves each one before
+# any build, not only when this script reaches it.
+try_mutant() { # <plant fn> <check fn> <name>
+  local plant="$1" check="$2" name="$3" reason
   "$plant" "$work/tree"
-  target="$work/tree/$file"
-  if [ ! -f "$target" ]; then
-    echo "NOT APPLIED: $name (the tree has no $file)"
-    holes=$((holes + 1))
-    return
-  fi
-  before="$(md5sum "$target")"
-  sed -i "$prog" "$target"
-  if [ "$before" = "$(md5sum "$target")" ]; then
-    echo "NOT APPLIED: $name (the sed matched nothing; the mutant is vacuous)"
+  if ! reason="$(python3 "$here/mutate.py" "$name" "$work/tree" 2>&1)"; then
+    echo "NOT APPLIED: $name ($reason; the mutant is vacuous)"
     holes=$((holes + 1))
     return
   fi
@@ -103,16 +97,12 @@ fi
 # would send `""`, and an application that reads `Some("")` was told the page
 # said something. Assigning `undefined` instead would not be a mutant at all --
 # `JSON.stringify` drops such a key, so the line on the wire is the same one.
-try_mutant plant_host check_host absent-flag-becomes-empty \
-  packages/tea-dom/js/reactor.mjs \
-  's#if (flags !== undefined) request.flags = flags;#request.flags = flags === undefined ? "" : flags;#'
+try_mutant plant_host check_host absent-flag-becomes-empty
 
 # The page's option never reaches the wire. Nothing raises and every later
 # turn is unaffected, because flags are read once: the application simply
 # starts from the model it would have had if the page had said nothing.
-try_mutant plant_host check_host mount-drops-the-flags \
-  packages/tea-dom/js/app.mjs \
-  's#settle(reactor.init(flags));#settle(reactor.init());#'
+try_mutant plant_host check_host mount-drops-the-flags
 
 # ---- the guest half -------------------------------------------------------
 
@@ -165,17 +155,13 @@ fi
 # exists for: nothing about the wire moves, the decoder still reads the field,
 # and the application is simply started from the model a page with nothing to
 # say would have got.
-try_mutant plant_guest check_guest flags-ignored-at-the-turn \
-  packages/tea-dom/src/reactor.dawn \
-  's#      let m0 = init(flags)#      let m0 = init(None)#'
+try_mutant plant_guest check_guest flags-ignored-at-the-turn
 
 # The decoder stops reading the field, one level earlier: `Init` always
 # carries `None`, so every entry point above it is honest about a string that
 # was never there. Held separately because the two are one substitution apart
 # and an assertion that saw only the first would leave the wire uncovered.
-try_mutant plant_guest check_guest flags-never-decoded \
-  packages/tea-dom/src/wire.dawn \
-  's#match as_opt_string(field(entries, "flags")) {#match as_opt_string(field(entries, "nope")) {#'
+try_mutant plant_guest check_guest flags-never-decoded
 
 if [ "$holes" -ne 0 ]; then
   echo "FAIL: $holes of $((holes + killed)) flag mutant(s) unaccounted for" >&2
