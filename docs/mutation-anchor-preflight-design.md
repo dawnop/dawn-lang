@@ -28,9 +28,25 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 `runtime/c/dawn_rt.c` 里的 `dawn_cpath`，本预飞报 OK，delete 契约在第一次本机运行时才红。
 出路是把 harness 的锚点搬进一个 `mutate.py` 登记表，由 harness 与本预飞共同消费，而不是把字面量复制进适配器。
 `scripts/delete-contract/mutate.py` 是第一个；在引入它的那棵树上本机实测：应用次数 204 到 213，墙钟 12.9 s 到 13.2 s。
-#254 依次迁了 classfile-verify（17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数）
-与 syntax-small（5 个变异体、6 条锚点，原先是 `run.sh` 里的 5 段 Python heredoc）。
-其余 `self-once` harness 在同样迁移之前仍不在覆盖之内。
+#254 至今迁了八条契约，每条一个提交：
+
+- classfile-verify：17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数；
+- syntax-small：5 个变异体、6 条锚点，原先是 `run.sh` 里的 5 段 Python heredoc；
+- inflate：6 个变异体、6 条锚点，原先是 `run.sh` 里 `mutate` 的参数；主题是 `packages/inflate/src/gzip.dawn`
+  （#254 的表里写的 `dawn_rt.c` 与 `check/types.dawn` 分别是链接输入和语料输入，不是锚点主题）；
+- narrow：3 个变异体、3 条锚点，原先是 `patch_std` 的参数，主题 `std/narrow.dawn`；
+- java-narrowing：2 个变异体、4 条锚点，原先是 2 段 heredoc，主题 `check/checker.dawn` 与 `jvm/help.dawn`，
+  路径相对 selfhost 根（适配器给 `selfhost`）；
+- map-reuse：2 个变异体、2 条锚点，原先是 2 段 heredoc，主题 `c/rc.dawn` 与 `std/hamt.dawn`；
+- atomic-write：15 个变异、16 条编辑，原先是 12 处 `patch_std`、1 段改 `runtime/c/dawn_rt.c` 的 heredoc、
+  1 段改两处编译器调用点的 heredoc，主题 `std/io.dawn`、`dawn_rt.c`、`pkg/add.dawn`、`main.dawn`；
+- wasm-dom 的 retained：2 个变异体、3 条锚点，原先是 `apply_exact_mutant` 的参数，主题 `std/reactor.dawn`。
+
+登记表路径一律写仓库相对路径（java-narrowing 除外），harness 把私有树布局成同样的形状（例如 `<tree>/std`），
+所以同一登记表既能作用于检出、也能作用于私有拷贝。迁完之后 `scripts/anchor-readers.txt` 是
+20 条 `preflight`、5 条 `self-once`。迁移后仍命中读者规则的 harness（例如只为检查形状而读源码的
+java-narrowing 形状门与 retained 的 seam 门）不持有变异锚点，记为 `not-anchor` 并写明理由。
+其余 5 条 `self-once` harness 在同样迁移之前仍不在覆盖之内。
 
 CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、次级编辑、
 shell 锚点、未知变异器、顺序插桩，以及拒绝启动构建或直接写盘。每个测试之后检出必须保持不变。
