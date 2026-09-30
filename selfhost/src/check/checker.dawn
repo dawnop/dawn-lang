@@ -1828,6 +1828,45 @@ pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[
   }
 }
 
+## How a binary operator is written, for a diagnostic that has to name it.
+fn bin_op_spelling(op: BinOp) -> String =
+  match op {
+    OpAdd -> "+"
+    OpSub -> "-"
+    OpMul -> "*"
+    OpDiv -> "/"
+    OpMod -> "%"
+    OpConcat -> "++"
+    OpEq -> "=="
+    OpNeq -> "!="
+    OpLt -> "<"
+    OpLe -> "<="
+    OpGt -> ">"
+    OpGe -> ">="
+    OpAnd -> "&&"
+    OpOr -> "||"
+    OpBand -> "&"
+    OpBor -> "|"
+    OpBxor -> "^"
+    OpShl -> "<<"
+    OpShr -> ">>"
+    OpUshr -> ">>>"
+  }
+
+## The hint for an operator whose right operand is Unit. No operator accepts a
+## Unit there, and the usual source is not a Unit expression written on
+## purpose but a stray operator at the end of a line: it continues the line
+## (spec §1.7), and the next statement -- a `println(...)`, say -- becomes the
+## operand (#198). The checker holds no source text, so the hint says "if"
+## instead of claiming the operator ended its line.
+fn unit_operand_hint(op: BinOp, rt: Ty) -> Option[String] =
+  if rt == TyUnit {
+    let o = bin_op_spelling(op)
+    Some("the right operand is Unit; a line that ends in `" ++ o ++ "` continues onto the " ++
+        "next line (spec §1.7), so if this `" ++ o ++ "` ends its line, the next statement " ++
+        "became its right operand")
+  } else { None }
+
 ## Binary operators over already-checked operand types (the Kotlin checkBinary
 ## after both sides are typed; short-circuit evaluation order is the caller's
 ## job since it must thread Cx through left then right).
@@ -1878,7 +1917,7 @@ pub(pkg) fn check_binary_typed(
         let hint: Option[String] = if is_numeric(rt) {
           Some("there are no implicit conversions; use to_float() or unify the literal types")
         } else {
-          None
+          unit_operand_hint(op, rt)
         }
         let left_text = ty_show(cx.adts, lt)
         let right_text = ty_show(cx.adts, rt)
@@ -1895,8 +1934,8 @@ pub(pkg) fn check_binary_typed(
       }
       if rt != TyInt {
         let text = ty_show(cx.adts, rt)
-        return (cerr(cx, "bitwise operators expect Int, right side is " ++ text,
-          rlo, rhi), TyError, node(no_wit(), TyError))
+        return (cerr_o(cx, "bitwise operators expect Int, right side is " ++ text,
+          rlo, rhi, unit_operand_hint(op, rt)), TyError, node(no_wit(), TyError))
       }
       (cx, TyInt, node(no_wit(), TyInt))
     }
@@ -1923,17 +1962,19 @@ pub(pkg) fn check_binary_typed(
       }
       let left_text = ty_show(cx.adts, lt)
       let right_text = ty_show(cx.adts, rt)
+      let hint = match unit_operand_hint(op, rt) {
+        Some(h) -> h
+        None -> "use + for numbers; interpolation \"\${x}\${y}\" also builds strings"
+      }
       (cerr_h(cx, "`++` concatenates Strings, Bytes or Lists, got " ++ left_text ++
-          " ++ " ++ right_text, olo, ohi,
-        "use + for numbers; interpolation \"\${x}\${y}\" also builds strings"), TyError,
-        node(no_wit(), TyError))
+          " ++ " ++ right_text, olo, ohi, hint), TyError, node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
       if lt != rt {
         let left_text = ty_show(cx.adts, lt)
         let right_text = ty_show(cx.adts, rt)
-        return (cerr(cx, "== requires both sides to have the same type: " ++
-            left_text ++ " vs " ++ right_text, olo, ohi), TyError,
+        return (cerr_o(cx, "== requires both sides to have the same type: " ++
+            left_text ++ " vs " ++ right_text, olo, ohi, unit_operand_hint(op, rt)), TyError,
           node(no_wit(), TyError))
       }
       # One pipeline. `==` used to ask `resolve_eq_witness`, a second solver
@@ -1948,8 +1989,8 @@ pub(pkg) fn check_binary_typed(
       if lt != rt {
         let left_text = ty_show(cx.adts, lt)
         let right_text = ty_show(cx.adts, rt)
-        return (cerr(cx, "comparison requires both sides to have the same type: " ++
-            left_text ++ " vs " ++ right_text, olo, ohi), TyError,
+        return (cerr_o(cx, "comparison requires both sides to have the same type: " ++
+            left_text ++ " vs " ++ right_text, olo, ohi, unit_operand_hint(op, rt)), TyError,
           node(no_wit(), TyError))
       }
       # Native fast path, and an opaque type over one of these takes it too:
@@ -1976,8 +2017,8 @@ pub(pkg) fn check_binary_typed(
       }
       if rt != TyBool {
         let text = ty_show(cx.adts, rt)
-        return (cerr(cx, "logical operators expect Bool, right side is " ++ text,
-          rlo, rhi), TyError, node(no_wit(), TyError))
+        return (cerr_o(cx, "logical operators expect Bool, right side is " ++ text,
+          rlo, rhi, unit_operand_hint(op, rt)), TyError, node(no_wit(), TyError))
       }
       (cx, TyBool, node(no_wit(), TyBool))
     }
@@ -5736,6 +5777,18 @@ fn bound_locally(cx: Cx, name: String) -> Bool = {
   false
 }
 
+## A name that resolves to nothing while its own `let`/`var` initializer is
+## being checked (`Cx.initializing`). Reported as what it is rather than as an
+## unknown name, after Swift's "variable used within its own initial value":
+## the usual way to get here is not a recursive definition but a stray
+## trailing operator, which continues the `let` onto the next line, so the
+## next statement becomes its right operand (spec §1.7, #198).
+fn own_initializer_err(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "`" ++ name ++ "` is used in its own initializer", lo, hi,
+    "a binding is not in scope in its own right-hand side (a recursive function is a " ++
+      "local `fn`); if a line of this `let` ends with an operator, that operator continued " ++
+      "it onto the next line (spec §1.7)")
+
 fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   let (cx1, found) = resolve_local(cx, name, lo, hi, false)
   match found {
@@ -5760,10 +5813,12 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
       match lookup_fn_sig(cx1, name) {
         Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
         None -> {
-          let pool = fn_pool(cx1)
-          let hint = moved_or_suggest(cx1, name, local_names(cx1) ++ pool)
-          (cerr_o(cx1, "undefined variable: ${name}", lo, hi, hint),
-            TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+          let cx2 = if set.has(cx1.initializing, name) { own_initializer_err(cx1, name, lo, hi) } else {
+            let pool = fn_pool(cx1)
+            let hint = moved_or_suggest(cx1, name, local_names(cx1) ++ pool)
+            cerr_o(cx1, "undefined variable: ${name}", lo, hi, hint)
+          }
+          (cx2, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
         }
       }
     }
@@ -7149,8 +7204,10 @@ fn check_let(
     }
     None -> None
   }
+  let outer_initializing = cx1.initializing
+  cx1 = Cx { ..cx1, initializing: set.insert(outer_initializing, name) }
   let (cxb, it, ix) = check_expr(cx1, init, ann_t)
-  cx1 = cxb
+  cx1 = Cx { ..cxb, initializing: outer_initializing }
   var t = match ann_t {
     Some(a) -> a
     None -> it
@@ -7697,6 +7754,10 @@ fn check_call(
     None -> {
       # still check the arguments so their subtrees get types/symbols
       let (cxa, _) = check_args_plain(cx1, args, pre0)
+      if set.has(cxa.initializing, callee) {
+        return (own_initializer_err(cxa, callee, clo, chi), TyError,
+          XError(owner_off(cx, lo), owner_off(cx, hi)))
+      }
       let pool = fn_pool(cxa)
       let hint = moved_or_suggest(cxa, callee, pool)
       return (cerr_o(cxa, "undefined function: ${callee}", clo, chi, hint),

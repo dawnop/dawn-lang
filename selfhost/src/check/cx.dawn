@@ -273,6 +273,15 @@ pub(pkg) type Cx = {
   # one read: the decision is made before the side is checked, from the
   # syntax, and `checker.cell_take_ok` is where the conditions are.
   take_cell: Option[Int],
+  # the names whose `let`/`var` initializer is being checked right now. A
+  # binding is not in scope in its own right-hand side, so a use of one of
+  # these that resolves to nothing is reported as a use in its own
+  # initializer rather than as an unknown name -- most often it is a line
+  # ending in an operator that carried the `let` onto the next statement
+  # (spec §1.7, #198). `checker.check_let` adds the name for the length of
+  # the initializer and puts the previous set back, so outside an
+  # initializer it is empty.
+  initializing: Set[String],
   # The functions of this module whose return type or effect a call or a
   # function value was typed from while they were still being inferred
   # (`Sig.inferring`). Those are placeholders, so a body that used one was
@@ -424,6 +433,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     ty_spans: map.empty(),
     record_ty_spans: false,
     take_cell: None,
+    initializing: set.empty(),
     unsealed_uses: set.empty()
   }
 }
