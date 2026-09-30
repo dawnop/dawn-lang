@@ -37,7 +37,12 @@ the mutators, doc-check.py (`anchor_present_once`) for the audit anchors.
                    mutation-anchor-preflight.py before any build (checked
                    against that script's own inventory)
        self-once   it refuses a literal that does not match exactly once
-                   itself (checked: the file must contain such a test)
+                   itself (checked: the file must contain such a test), and
+                   the line says why the preflight cannot hold it instead
+                   (checked: the reason must contain `kept because`). #254
+                   moved every other self-once harness into a registry the
+                   preflight exercises; this kind is the written exception,
+                   not a place to park a harness nobody migrated.
        unproven    it reads source text by spelling and nothing proves its
                    literals unique. The ledger is the debt, in the open.
        not-anchor  the rule matches, but it does not locate code by a
@@ -80,6 +85,9 @@ MATCH_OP = re.compile(
 SELF_ONCE = re.compile(
     r"count\([^()]*(?:\([^()]*\))?[^()]*\)\s*!=\s*1|!= 1\b.*match"
     r"|not unique|expected (?:exactly )?(?:one|1) match|matches, expected 1")
+# What a self-once line has to say besides that: why the preflight is not the
+# place its anchors are proven.
+SELF_ONCE_REASON = re.compile(r"\bkept because \S")
 
 ANCHOR_CHANGE_LINE = re.compile(r"^\s*Anchor-Change\b")
 ANCHOR_CHANGE = re.compile(r"^\s*Anchor-Change\(([A-Z]+-\d{2})\):\s*(\S.*)$")
@@ -252,6 +260,12 @@ def inventory_problems(files: dict[str, str], ledger_text: str,
         elif kind == "self-once" and not SELF_ONCE.search(files[rel]):
             bad.append(f"{LEDGER}: {rel} is marked self-once, but contains no "
                        f"exactly-once test [self_once_is_real]")
+        elif kind == "self-once" and not SELF_ONCE_REASON.search(_why):
+            bad.append(f"{LEDGER}: {rel} is marked self-once without saying "
+                       f"why the preflight cannot hold its anchors. Move them "
+                       f"into a registry mutation-anchor-preflight.py "
+                       f"exercises, or write `kept because <reason>` on the "
+                       f"line [self_once_has_reason]")
     return bad
 
 
@@ -319,7 +333,8 @@ def selftest() -> tuple[list[str], int]:
     covered = {"scripts/a/mutate.py"}
     ledger = ("scripts/a/mutate.py  preflight: exercised\n"
               "scripts/b.py  unproven: debt\n"
-              "scripts/c.py  self-once: refuses a second match\n")
+              "scripts/c.py  self-once: refuses a second match; kept because "
+              "it runs where the preflight cannot\n")
     expect("control-ledger", inventory_problems(files, ledger, covered), set())
     expect("new-reader", inventory_problems(
         dict(files, **{"scripts/d.py": reader}), ledger, covered), {"reader_registered"})
@@ -335,8 +350,15 @@ def selftest() -> tuple[list[str], int]:
         files, ledger.replace("mutate.py  preflight", "mutate.py  unproven"), covered),
         {"preflight_is_real"})
     expect("self-once-claimed", inventory_problems(
-        files, ledger.replace("b.py  unproven", "b.py  self-once"), covered),
+        files, ledger.replace("b.py  unproven: debt",
+                              "b.py  self-once: debt; kept because of x"), covered),
         {"self_once_is_real"})
+    expect("self-once-without-reason", inventory_problems(
+        files, ledger.replace("; kept because it runs where the preflight cannot", ""),
+        covered), {"self_once_has_reason"})
+    expect("self-once-reason-empty", inventory_problems(
+        files, ledger.replace("kept because it runs where the preflight cannot",
+                              "kept because"), covered), {"self_once_has_reason"})
     expect("bad-kind", inventory_problems(
         files, ledger.replace("b.py  unproven", "b.py  maybe"), covered),
         {"ledger_parses", "reader_registered"})

@@ -37,6 +37,8 @@
    既有源码路径（`selfhost/src`、`compiler-plan/src`、`std`、`runtime/c`、`packages/*/src` 下的 `.dawn/.c/.h`）又有按拼写匹配的操作
    （`.count(`、`.replace(`、`grep -F`、`sed -i` 等），就必须在账本里有一行，写明四类之一：
    `preflight`（与 preflight 自己的适配表对账）、`self-once`（文件里必须有恰一次检查）、`unproven`（公开的欠账）、`not-anchor`（写理由）。
+   #254 之后 `self-once` 还必须在理由里写 `kept because <理由>`，说明为什么不能由预飞持有，否则红（`self_once_has_reason`）；
+   迁完时只剩 `tile-gpu-diff/run.sh` 一行（见 `docs/mutation-anchor-preflight-design.md`）。
    双向：未登记即红，脚本删了或不再命中规则而账本还留着也红（`scripts/gate-map/unseen.txt` 的形状）。
    规则故意宽：多一行账本的代价是一行，漏一个读者就是这条要堵的静默缺口。
 
