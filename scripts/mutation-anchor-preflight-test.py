@@ -184,6 +184,18 @@ class PreflightTests(unittest.TestCase):
                                           "param_dtype(p), i, shape, strides, none, none, [ ])")
         self.assert_stale_registry_is_red("tile-golden", "region-stack-pop", 0)
 
+    def test_lsp_lifecycle_anchor_drift_is_caught(self):
+        # #277: these anchors were a heredoc in run.sh, checked only when
+        # lsp-workspace built that mutant's compiler.
+        server = "selfhost/src/lsp/server.dawn"
+        self.assert_registry_drift_is_red("lsp-lifecycle-contract", "early-exit-zero", server,
+                                          "const ABNORMAL_EXIT_STATUS: Int = 1",
+                                          "const ABNORMAL_EXIT_STATUS: Int = 2")
+        self.assert_registry_drift_is_red("lsp-lifecycle-contract", "shutdown-flushes", server,
+                                          "            LgBeginShutdown -> {\n              pending = None\n",
+                                          "            LgBeginShutdown -> {\n              pending = none\n")
+        self.assert_stale_registry_is_red("lsp-lifecycle-contract", "repeat-initialize", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()

@@ -13,81 +13,11 @@ fail() {
   exit 1
 }
 
+# The anchors live in mutate.py, one registered mutation per mutant name, so
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this script reaches that mutant.
 mutate() {
-  local name=$1 source=$2
-  python3 - "$name" "$source" <<'PY'
-from pathlib import Path
-import sys
-
-name, source = sys.argv[1:]
-path = Path(source)
-text = path.read_text()
-
-def replace_once(old, new):
-    global text
-    count = text.count(old)
-    if count != 1:
-        raise SystemExit(f"mutation anchor occurs {count} times: {old!r}")
-    text = text.replace(old, new)
-
-if name == "gate-after-update":
-    replace_once(
-        "          let gate = lifecycle_gate(st.lifecycle, msg)\n",
-        """          match update_of(msg) {
-            Some(update) -> { pending = Some(update) }
-            None -> ()
-          }
-          let gate = lifecycle_gate(st.lifecycle, msg)
-""",
-    )
-elif name == "early-exit-zero":
-    replace_once(
-        "const ABNORMAL_EXIT_STATUS: Int = 1",
-        "const ABNORMAL_EXIT_STATUS: Int = 0",
-    )
-elif name == "shutdown-continues":
-    replace_once(
-        """    Shutdown -> {
-      if method == \"exit\" && not request {
-        LgExit(0)
-      } else if request {
-        LgReject(-32600, \"Invalid Request\")
-      } else {
-        LgIgnore
-      }
-    }""",
-        """    Shutdown -> {
-      if method == \"exit\" && not request {
-        LgExit(0)
-      } else if request {
-        LgDispatch
-      } else {
-        LgIgnore
-      }
-    }""",
-    )
-elif name == "shutdown-flushes":
-    replace_once(
-        """            LgBeginShutdown -> {
-              pending = None
-              st = LspState { ..st, lifecycle: Shutdown }""",
-        """            LgBeginShutdown -> {
-              st = flush(st, pending)
-              pending = None
-              st = LspState { ..st, lifecycle: Shutdown }""",
-    )
-elif name == "repeat-initialize":
-    replace_once(
-        """      } else if method == \"initialize\" {
-        if request { LgReject(-32600, \"Invalid Request\") } else { LgIgnore }""",
-        """      } else if method == \"initialize\" {
-        if request { LgDispatch } else { LgIgnore }""",
-    )
-else:
-    raise SystemExit(f"unknown mutation: {name}")
-
-path.write_text(text)
-PY
+  python3 "$root/scripts/lsp-lifecycle-contract/mutate.py" "$1" "$2"
 }
 
 expect_mutant_red() {
@@ -97,7 +27,7 @@ expect_mutant_red() {
   cp -R "$root/selfhost" "$mutant/selfhost"
   cp -R "$root/compiler-plan" "$mutant/compiler-plan"
   ln -s "$root/packages" "$mutant/packages"
-  mutate "$name" "$mutant/selfhost/src/lsp/server.dawn"
+  mutate "$name" "$mutant"
   if ! java -Xss512m -Xmx2g -jar "$root/build/dawn-selfhost.jar" build \
       "$mutant/selfhost" -o "$mutant/compiler.jar" --std "$root/std" \
       --vendor org/objectweb/asm --vendor coursierapi \
