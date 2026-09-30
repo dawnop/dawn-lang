@@ -270,6 +270,34 @@ class PreflightTests(unittest.TestCase):
                                           "          Ok(value) -> value\n")
         self.assert_stale_registry_is_red("wasm-dom-contract", "drop-retained-state", 0)
 
+    def assert_stale_mutator_is_red(self, name, mode, literal):
+        # For a mutate.py whose anchors are not a MUTATIONS table of edit
+        # tuples: respell the first copy of one anchor line inside the
+        # mutator, and the untouched mutator must still apply.
+        label = f"scripts/{name}/mutate.py"
+        source = (p.ROOT / label).read_text()
+        stale = literal[::-1].replace(" ", "  ", 1)[::-1]
+        self.assertNotEqual(stale, literal)
+        self.assertIn(literal, source)
+        p.exercise(p.ROOT, source, label, mode, p.ADAPTERS[name])
+        with self.assertRaisesRegex(p.PreflightError, f"{label}:{mode}"):
+            p.exercise(p.ROOT, source.replace(literal, stale, 1), label, mode, p.ADAPTERS[name])
+
+    def test_rc_anchor_drift_is_caught(self):
+        # #277: rc-contract/run.sh is not-anchor because its mutants all come
+        # from this registry; its own source reads are the bare-free() count,
+        # an assertion that is red on a match. Both subjects are held.
+        self.assert_registry_drift_is_red("rc-contract", "revert-adt0-to-fresh-allocation",
+                                          "runtime/c/dawn_rt.h",
+                                          "    dawn_adt0_hits++;\n", "    dawn_adt0_hits += 1;\n")
+        # Two mutants quote this line; the preflight names the first in order.
+        self.assert_registry_drift_is_red("rc-contract", "slab-forgets-to-poison",
+                                          "runtime/c/dawn_rt.c",
+                                          "    s->used--; /* the current slab",
+                                          "    s->used -= 1; /* the current slab")
+        self.assert_stale_mutator_is_red("rc-contract", "revert-adt0-to-fresh-allocation",
+                                         "    dawn_adt0_hits++;\n")
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
