@@ -398,6 +398,17 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 本机真数据（09-16..09-30 的 68 次 ci.yml 与 35 次 tile.yml 运行）：本周比值 0.80，当前 35 job 形态本周 3 次、上周 0 次不判，tile 17/52 = 33% 红（去重还没上线）；
 旧判据在同一份数据上是 +18.7% 红。`gate-totals.py` 0.24 s（旧版 0.03 s，多出来的是按 sha 读 gates.yml）。
 
+### nightly-issue.sh：REST 查找与「判词变了才评论」
+
+- 09-29 那次 `gh issue list --search`（GraphQL 搜索索引）回 500，#231 缺了当晚的评论。查找改走 REST：`gh api repos/<repo>/issues?state=open&per_page=100`，
+  jq 按标题精确匹配并去掉 PR；每次 API 读取最多 3 次，退避 5 s、15 s。
+- 同一份红报告连发七晚评论本身就是噪声。正文带一行 `<!-- verdict: <keys> -->`：`gate-totals.py` 写红的理由集合（`ratio`、`ratio-rise`、`shape-growth`、`tile`），
+  不写幅度；没有这行的正文（预算审计、pin 检查）由脚本补一行 `digest-<去掉 Run: 链接后正文的 sha256 前 16 位>`。
+  与该 issue 最新一条评论（没有评论时是 issue 正文）的标记相同就不评论，只写 step summary。
+- 自测 `scripts/nightly-issue.sh --self-test`：PATH 上放一个桩 `gh`，10 个用例（新建、同判词静默、异判词评论、无评论时比 issue 正文、长标题与 PR 不算、列表失败两次后成功、失败三次红、无标记按摘要）。
+  它不在任何门里跑（`scripts/gate-map/unseen.txt` 的 no-gate 理由不变）。
+- #231 现有评论都没有标记，所以合入后第一晚若仍红会再评论一次（`(none) -> tile`），之后判词不变就不再评论。
+
 ### 不做的（理由）
 
 - **「对上一个 7 天绿窗口」做基线**：治不了薄基线，也治不了形态跳变。

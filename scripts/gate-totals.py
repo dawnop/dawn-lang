@@ -241,24 +241,28 @@ def shape_changes(ci_runs, declared):
 
 
 def judge(this, last):
-    """-> (reasons to open an issue, notes that are only reported)."""
-    reasons, notes = [], []
+    """-> (reasons to open an issue, notes that are only reported, and the
+    reasons' stable keys for the verdict line the nightly issue step
+    compares)."""
+    reasons, notes, keys = [], [], []
     if len(this["full"]) < MIN_SAMPLE or len(last["full"]) < MIN_SAMPLE:
         notes.append(
             f"insufficient sample: {len(this['full'])} successful pushes this"
             f" week and {len(last['full'])} last week, at least {MIN_SAMPLE}"
             " each; reported, not judged")
-        return reasons, notes
+        return reasons, notes, keys
     if this["ratio_n"] < MIN_SAMPLE:
         notes.append(f"insufficient sample for the declared ratio:"
                      f" {this['ratio_n']} pushes with a push total this week")
     else:
         if this["ratio"] > RATIO_LIMIT:
+            keys.append("ratio")
             reasons.append(
                 f"the median successful push cost {this['ratio']:.2f} of the"
                 f" declared push total this week, over {RATIO_LIMIT:.2f}")
         if last["ratio_n"] >= MIN_SAMPLE and (
                 this["ratio"] - last["ratio"] > RATIO_RISE_LIMIT):
+            keys.append("ratio-rise")
             reasons.append(
                 f"the median measured / declared ratio rose from"
                 f" {last['ratio']:.2f} to {this['ratio']:.2f}, more than"
@@ -274,17 +278,19 @@ def judge(this, last):
         last_median = median([sum(run["jobs"].values()) for run in before])
         growth = this_median / last_median - 1
         if growth > GROWTH_LIMIT:
+            keys.append("shape-growth")
             reasons.append(
                 f"the {len(current)}-job shape cost {this_median:,.0f}"
                 f" job-seconds a successful push this week against"
                 f" {last_median:,.0f} last week, {growth:+.1%}, over the"
                 f" {GROWTH_LIMIT:.0%} limit")
     if this["tile_rate"] is not None and this["tile_rate"] > TILE_RATE_LIMIT:
+        keys.append("tile")
         reasons.append(
             f"tile.yml ran its shards on {this['tile']} of {this['pushes']}"
             f" pushes to main this week ({this['tile_rate']:.0%}), over the"
             f" {TILE_RATE_LIMIT:.0%} it left the push path on the premise of")
-    return reasons, notes
+    return reasons, notes, keys
 
 
 def number(value, unit=""):
@@ -352,7 +358,7 @@ def report(ci, tile, now=None, declared=None):
                      week_of(tile_runs, now - WEEK, now), declared)
     last = summarise(week_of(ci_runs, start, now - WEEK),
                      week_of(tile_runs, start, now - WEEK), declared)
-    reasons, notes = judge(this, last)
+    reasons, notes, keys = judge(this, last)
     text = "## Gate job-seconds per push to main\n\n" + table(this, last, start, now)
     changes = shape_changes(week_of(ci_runs, start, now), declared)
     if changes:
@@ -362,6 +368,9 @@ def report(ci, tile, now=None, declared=None):
         text += "\n\n**Not judged:**\n\n" + "\n".join(f"- {n}" for n in notes)
     if reasons:
         text += "\n\n**Over a limit:**\n\n" + "\n".join(f"- {r}" for r in reasons)
+        # Which limits, not by how much: the nightly issue step comments
+        # again only when this line differs from the last comment's.
+        text += f"\n\n<!-- verdict: {','.join(keys)} -->"
     return text + "\n", reasons
 
 
@@ -528,6 +537,11 @@ def selftest():
     else:
         print("  accepted: the 09-29 week with 12 last week: shape and ratio"
               f" not judged, tile still red ({len(reasons)} reason)")
+    if "<!-- verdict: shape-growth -->" not in texts["same-shape growth of 15%"]:
+        failures.append("the verdict line does not name the one limit crossed:\n"
+                        + texts["same-shape growth of 15%"])
+    if "<!-- verdict:" in texts["a steady week"]:
+        failures.append("a green report carries a verdict line")
     text = texts["a new shape, +16.6%, with its push total raised"]
     if "35->40 jobs, declared 20,516->24,000" not in text:
         failures.append(f"the shape change is not printed:\n{text}")
