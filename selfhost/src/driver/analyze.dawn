@@ -141,6 +141,15 @@ pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !E
 }
 
 ## Everything .dawn under `dir`, recursively, full display paths.
+##
+## A link to a directory is an entry of its parent and is not descended into,
+## the default of Go's `filepath.WalkDir` and Rust's `walkdir` (#297). Following
+## one walked `src/loop -> .` until the kernel's link limit stopped it, listing
+## every module once per level, and two such links did not finish at all. A
+## directory reachable only through a link is therefore not part of the
+## project; a tree that wants one names it as a path dependency, which is
+## resolved on purpose rather than found by walking. A link to a file is still
+## a file here: nothing about it can loop.
 fn walk_dawn(dir: String) -> List[String] !Fs = {
   var out: List[String] = []
   let names = match io.list_dir(dir) {
@@ -150,7 +159,7 @@ fn walk_dawn(dir: String) -> List[String] !Fs = {
   for n in names {
     let p = dir ++ "/" ++ n
     if io.is_dir(p) {
-      out = out ++ walk_dawn(p)
+      if not io.is_symlink(p) { out = out ++ walk_dawn(p) }
     } else if str.ends_with(n, ".dawn") {
       out = out ++ [p]
     }
@@ -2261,5 +2270,55 @@ test "a relative target resolves against the declared working directory" {
   # makes the paths above an assertion about the declaration
   io.with_fs_real(() => io.with_env_real(() => {
     assert io.cwd() != fsmem.MEM_BASE
+  }))
+}
+
+## A scratch tree on the real disk holding the links #297 is about, and the
+## project directory inside it. The table cannot hold a link (`fsmem` answers
+## `fs_is_symlink` with `false`), so this test is on the host: the links are
+## made by `ln`, which is also the one way a user makes them.
+fn linked_tree() -> (String, String) !Fs !Proc = {
+  let root = match io.temp_dir("", "dawn-walk-links-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: ${e.message}")
+  }
+  let proj = "${root}/proj"
+  for (path, text) in [
+    ("${proj}/src/main.dawn", "use sub/util\npub fn main() -> Unit !io = println(util.tag())\n"),
+    ("${proj}/src/sub/util.dawn", "pub fn tag() -> String = \"t\"\n"),
+    ("${root}/outside/extra.dawn", "pub fn more() -> Int = 1\n")
+  ] {
+    let _ = io.mkdirs(match str.last_index_of(path, "/") {
+      Some(i) -> str.take(path, i)
+      None -> path
+    })
+    match io.write_file(path, text) {
+      Ok(_) -> ()
+      Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+    }
+  }
+  # a link back to its own directory, a link out of the tree, and a link to a
+  # file inside it
+  for (target, at) in [(".", "loop"), ("../../outside", "ext"), ("sub/util.dawn", "alias.dawn")] {
+    match io.run(["ln", "-s", target, "${proj}/src/${at}"], "", "") {
+      Ok(0) -> ()
+      _ -> panic("ln -s " ++ target ++ " " ++ at ++ " failed")
+    }
+  }
+  (root, proj)
+}
+
+test "the source walk visits a link to a directory but does not descend (#297)" {
+  io.with_fs_real(() => io.with_proc_real(() => {
+    let (root, proj) = linked_tree()
+    let src = "${proj}/src"
+    # the self-loop is not walked, so every module is listed once; the tree
+    # behind `ext` is not the project's; the link to a file is a file
+    assert walk_dawn(src) == ["${src}/alias.dawn", "${src}/main.dawn", "${src}/sub/util.dawn"]
+    let (plan, _) = envmem.with_env_table(root, [], () =>
+        project_plan(source.ProjectDirectory(proj)))
+    assert list.sort(map.keys(plan.modules.by_use)) == ["alias", "main", "sub/util"]
+    pkgfetch.delete_tree(root)
+    assert not io.exists(root)
   }))
 }
