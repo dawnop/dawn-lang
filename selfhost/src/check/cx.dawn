@@ -151,6 +151,7 @@ pub(pkg) type Frame = {
 
 ## The checker state: every mutable member of the Kotlin Checker class.
 pub(pkg) type Cx = {
+  # frame-triage: an output: what the isolated body reports must outlive it
   diags: List[Diag],
   # The declaration whose bindings are being minted, and how many each
   # declaration has minted so far. Together they are what `next_id` used to
@@ -165,7 +166,9 @@ pub(pkg) type Cx = {
   # continue where the first stopped rather than reissue its slots. Nothing
   # reads the table to find the *next* declaration -- it is keyed by identity,
   # not ordered -- and a declaration absent from it has minted nothing.
+  # frame-triage: the body's bindings belong to the enclosing declaration, so they mint under it
   owner_decl: Int,
+  # frame-triage: a counter; restoring it would reissue the body's slots to the next bindings
   decl_slots: Map[Int, Int],
   # Every id this program has derived from a declaration, and the declaration
   # each one was derived from. A derived id is a pure function of that
@@ -176,34 +179,51 @@ pub(pkg) type Cx = {
   # no nominal id, one row of `decl_slots` and so one set of binder keys. It
   # spans the whole program, which is why it travels with the carry
   # (`driver/stdlib.dawn`, `driver/analyze.dawn`).
+  # frame-triage: program-wide, carried across modules; no body owns it
   identities: Map[Int, Minted],
+  # frame-triage: module scope, which an isolated body sees like any other expression
   adts: Adts,
+  # frame-triage: module scope, which an isolated body sees like any other expression
   traits: Traits,
   # name-keyed views of the current module's scope
+  # frame-triage: module scope: a comptime block may call this module's functions
   fns: Map[String, Sig],
   # where each `fns` entry came from, maintained in step with it by bind_fn --
   # the precedence rule reads this and nothing else (design §4.1)
+  # frame-triage: module scope, kept in step with `fns`
   fn_origin: Map[String, Origin],
   # the bundled std's implicit surface (PRELUDE names); local decls shadow it
+  # frame-triage: module scope: the std prelude is visible everywhere
   std_fns: Map[String, Sig],
   # the builtin signature table, and the subset of it no user module may name.
   # Constant for the life of a Cx and built once by cx_new: both used to be
   # rebuilt inside the resolver, so every name a module mentions paid for a
   # 90-entry map -- twice, because the hidden set is derived from the
   # intrinsic table, which is itself derived from the builtin one.
+  # frame-triage: constant for the life of the Cx
   bins: Map[String, Sig],
+  # frame-triage: constant for the life of the Cx
   hidden_bins: Set[String],
   # the compiler-owned type inventory, keyed by name, for the same reason: it
   # is a list literal, so resolve_named rebuilt all twelve records for every
   # named type a module mentions
+  # frame-triage: constant for the life of the Cx
   btypes: Map[String, BuiltinTypeI],
+  # frame-triage: module scope, which an isolated body sees like any other expression
   adts_by_name: Map[String, Int],
+  # frame-triage: module scope, which an isolated body sees like any other expression
   aliases: Map[String, AliasE],
+  # frame-triage: a module-wide cache of alias expansions; valid in any body
   alias_resolved: Map[String, Ty],
+  # frame-triage: in flight only inside one alias resolution, which never checks a body
   alias_resolving: Set[String],
+  # frame-triage: module scope, which an isolated body sees like any other expression
   ctors_by_name: Map[String, (Int, Int)],
+  # frame-triage: module scope, which an isolated body sees like any other expression
   traits_by_name: Map[String, Int],
+  # frame-triage: module declarations, filled by the header passes
   local_traits: List[String],
+  # frame-triage: module declarations, filled by the header passes
   local_impls: List[ImplI],
   # the subset of `local_impls` the public surface validator decided is
   # observable to this module's own audience (docs/public-surface-design.md
@@ -212,61 +232,87 @@ pub(pkg) type Cx = {
   # consumer that decided that for itself would be a second copy of the rule,
   # free to drift from the one the checker enforced. Empty until
   # pass_export_surface runs.
+  # frame-triage: a module-level product of pass_export_surface
   observable_impls: List[ImplI],
+  # frame-triage: module scope: impl resolution inside comptime sees every impl
   impl_table: Impls,
+  # frame-triage: module scope: imports are visible in every body
   module_aliases: Map[String, String],
   # (alias, fn name) → the imported module's signature (for qualified calls)
+  # frame-triage: module scope: imports are visible in every body
   module_fn_sigs: Map[(String, String), Sig],
+  # frame-triage: module scope: imports are visible in every body
   imported_names: Map[String, String],
   # local name → declared name, for each selective-import entry written
   # `Name as Local` (spec §10.2). A function's signature already carries its
   # declared name; this is what the constant lookup after checking
   # (`cdriver.merged_consts`) needs, because a constant's table row is its
   # type alone.
+  # frame-triage: module scope: imports are visible in every body
   import_renames: Map[String, String],
   # constants: declared type by name, in declaration order
+  # frame-triage: module scope: an initializer names earlier constants (const_cutoff filters them)
   consts: Map[String, Ty],
+  # frame-triage: module declarations, in order; no body writes it
   const_order: List[String],
+  # frame-triage: module declarations; no body writes it
   all_const_names: Set[String],
+  # frame-triage: set by check_const_init around its isolated body, which is where it must be read
   const_cutoff: Option[Set[String]],
   # `use java` imports: simple name → fqcn
+  # frame-triage: module scope: `use java` imports
   java_classes: Map[String, String],
   # the host's Java signature oracle; jsig_refused() unless the driver wires
   # jreflect's (the native form of `use java` is a refusal, plan §14.10)
+  # frame-triage: the host's oracle, wired once by the driver
   jsig: Jsig,
   # the save/restore set of an isolated body, in one box (see Frame)
+  # frame-triage: the frame itself: enter_isolated replaces it whole and leave_isolated restores it
   frame: Frame,
   # symbol table: id → symbol
+  # frame-triage: an output: the body's typed tree refers to the symbols it minted here
   syms: Map[Int, Sym],
   # declared effects visible here: name -> effect id, which is also the id of
   # the synthesised evidence record (docs/effects-design.md §5.1)
+  # frame-triage: module scope: declared effects are visible to every body
   effects: Map[String, Int],
+  # frame-triage: module scope: declared effects are visible to every body
   effect_infos: Effects,
+  # frame-triage: declaration-scoped; enter_fn rewrites it inside a body (see Frame)
   current_eff_vars: Map[String, Eff],
+  # frame-triage: declaration-scoped; enter_fn rewrites it inside a body (see Frame)
   current_tparams: Map[String, Ty],
   # bounds of the type parameters in scope, keyed by the TyVar's id (not its
   # name: fresh ids are never reused, so a stale entry can never be reached
   # through a fresh current_tparams and no save/restore is needed). Feeds
   # `T.Item` resolution (assoc-types-design.md D2).
+  # frame-triage: keyed by fresh TyVar ids, so a stale entry is unreachable (see above)
   current_tparam_bounds: Map[Int, List[Int]],
+  # frame-triage: declaration-scoped: a comptime block inside a test block is still in a test
   in_test: Bool,
+  # frame-triage: module identity
   is_std_module: Bool,
   # whether this module is the program's entry, the only one whose `main` is
   # the entry point (spec §10.5). Set by the loader; false for std, for a
   # dependency and for any module checked outside a program.
+  # frame-triage: module identity
   is_entry_module: Bool,
   # the `[deps]` package this module was loaded from, by its manifest's real
   # name; None for the project being checked and for the bundled std. Set by
   # the driver, which is the only place that knows (`LoadedModule.pkg`).
   # `package_of` reads it together with `is_std_module` rather than a stored
   # `PackageId`, so the std half has one source of truth and not two.
+  # frame-triage: module identity
   dep_package: Option[String],
+  # frame-triage: module identity
   owner_class: Option[String],
+  # frame-triage: module identity
   src_path: Option[String],
   # the resolved module path this context is checking, which is how a
   # diagnostic names the view its owner is looked up in. Only the driver can
   # answer it, and a context built by hand has no module to be part of, so it
   # enters no declaration and every diagnostic it raises stays absolute.
+  # frame-triage: module identity
   mod_path: Option[String],
   # the declaration whose interior is being checked, and where it starts.
   # `cerr` subtracts that start, so a diagnostic raised inside a declaration
@@ -274,23 +320,30 @@ pub(pkg) type Cx = {
   # Both are unset outside a declaration this module's span view can name,
   # and a diagnostic raised there keeps absolute positions rather than being
   # measured from a base nothing can recover.
+  # frame-triage: spans are relative to the declaration the isolated body is part of
   owner: Option[DiagOwner],
+  # frame-triage: spans are relative to the declaration the isolated body is part of
   owner_lo: Int,
   # code-point offsets of line starts in the current source (set by the driver)
+  # frame-triage: an input of the whole source file
   line_starts: List[Int],
   # removed-name → where-it-went hints (populated by the std loader)
+  # frame-triage: an input of the std loader, the same for every body
   moved: Map[String, String],
   # whole-module imports: alias → the exporter's surface (for call diagnostics)
+  # frame-triage: module scope: imports are visible in every body
   module_exports: Map[String, ModExports],
   # the source span of every `TypeRef` this module has resolved, keyed by that
   # ref's own `(lo, hi)` — which is a unique identity, since two type
   # references cannot occupy the same offsets. SEM-07 reads it to put a
   # diagnostic on the innermost token the author wrote (design §八).
+  # frame-triage: a module-level product of the header passes; bodies never write it
   ty_spans: Map[(Int, Int), TySpan],
   # is `resolve_type` filling `ty_spans`? True for the header passes, whose
   # results the public surface validator reads, and false afterwards: a body's
   # type annotations have no public surface, so recording them would be a map
   # insert per annotation that nothing ever looks up.
+  # frame-triage: false for every body, isolated or not, so there is nothing to reset
   record_ty_spans: Bool,
   # the one handler state cell whose *next* read is to be a `cell_take` rather
   # than a `cell_get` (docs/handler-state-design.md). Set by
@@ -298,6 +351,7 @@ pub(pkg) type Cx = {
   # side, cleared by the read that consumes it, and never set for more than
   # one read: the decision is made before the side is checked, from the
   # syntax, and `checker.cell_take_ok` is where the conditions are.
+  # frame-triage: unobservable in an isolated body: see the argument beside checker.enter_isolated
   take_cell: Option[Int],
   # The functions of this module whose return type or effect a call or a
   # function value was typed from while they were still being inferred
@@ -307,6 +361,7 @@ pub(pkg) type Cx = {
   # not settled and tries it again once more of the cycle is sealed
   # (docs/symbol-id-design.md §3.2). The scheduler empties it on every
   # context it keeps, so no body starts with it set.
+  # frame-triage: per body attempt, and an isolated body is part of the attempt that contains it
   unsealed_uses: Set[String]
 }
 

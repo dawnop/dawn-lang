@@ -21,6 +21,12 @@ here=scripts/checker-corpus
 mode=check
 [ "${1:-}" = "--record" ] && mode=record
 
+# Every Cx field says why it is not frame state (#204). The isolated_* cases
+# below hold the fields that are; this holds the rest to having an answer.
+# No build needed, so it runs first.
+./scripts/checker-corpus/frame-triage.py --selftest
+./scripts/checker-corpus/frame-triage.py
+
 ./bin/dawn --version > /dev/null
 
 TMP=${TMPDIR:-/tmp}/checker-corpus.$$
