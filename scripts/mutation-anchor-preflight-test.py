@@ -221,6 +221,40 @@ class PreflightTests(unittest.TestCase):
                                           "probe => probe.lease.close()", "p => p.lease.close()")
         self.assert_stale_registry_is_red("jsig-lease-contract", "drop-close", 0)
 
+    def test_builtin_type_anchor_drift_is_caught(self):
+        # #277: these anchors were replace_once arguments and heredocs in
+        # run.sh, checked only when the builtin-type shard holding that
+        # mutant built its compiler.
+        self.assert_registry_drift_is_red("builtin-type-contract", "reject-local-return",
+                                          "selfhost/src/check/checker.dawn",
+                                          "  let (cxb, ret) = resolve_return_type(cx1, ret_ref)",
+                                          "  let (cxb, ret) = resolve_return_type(cx1, ret_ref )")
+        # The second edit of a two-file mutant, in the embedded std source.
+        self.assert_registry_drift_is_red("builtin-type-contract", "make-io-exit-bottom",
+                                          "selfhost/src/embed/stdsrc.dawn",
+                                          "pub fn exit(code: Int) -> Unit !Exit = exit_now(code)",
+                                          "pub fn exit(code: Int) -> Unit !Exit = exit_now (code)")
+        self.assert_stale_registry_is_red("builtin-type-contract", "allow-storage-tuple", 0)
+
+    def test_declared_match_count_is_held_both_ways(self):
+        # stale-checker-consumer renames both calls of public_builtin_type_names()
+        # in cx.dawn. The registry declares the two, and a third call or a lost
+        # one is as red as a respelled anchor, not quietly renamed or skipped.
+        cx = "selfhost/src/check/cx.dawn"
+        label = "scripts/builtin-type-contract/mutate.py"
+        edit = runpy.run_path(str(p.ROOT / label))["MUTATIONS"]["stale-checker-consumer"][0]
+        self.assertEqual(edit[0], cx)
+        self.assertEqual(edit[3], 2)
+        original = (p.ROOT / cx).read_text()
+        self.assertEqual(original.count(edit[1]), 2)
+        third = original + "\nfn third_call() -> List[String] = " + edit[1] + "\n"
+        lost = original.replace(edit[1], "public_builtin_type_list()", 1)
+        for changed, count in ((third, 3), (lost, 1)):
+            with self.assertRaisesRegex(p.PreflightError, "builtin-type-contract/mutate.py:"
+                                        f"stale-checker-consumer .*matches {count} times, expected 2"):
+                p.check(p.ROOT, {cx: changed})
+        self.assertEqual((p.ROOT / cx).read_text(), original)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
