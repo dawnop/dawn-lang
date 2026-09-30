@@ -3324,8 +3324,8 @@ fi
 #     this mutant completely, which is knife 10's shri-always-logical
 #     lesson at another width.
 std_u8="$(mutant_std u8-reads-signed \
-  '  "u8" -> unpack_u8(raw)' \
-  '  "u8" -> unpack_i8(raw)')"
+  '  "u8" -> unpack_u8(b)' \
+  '  "u8" -> unpack_i8(b)')"
 build_native "$std_u8" "$work/m-u8-signed.bin" "$here/wide_diff.dawn"
 rc=0
 "$work/m-u8-signed.bin" "${wide_cubins[@]}" > "$work/m-u8-signed.out" 2>&1 || rc=$?
