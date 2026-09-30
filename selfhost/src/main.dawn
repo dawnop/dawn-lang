@@ -2198,12 +2198,22 @@ fn lower_size(m: CModule) -> Int = {
   n + len(m.dicts)
 }
 
-## Trait/impl/ADT/signature tables unioned over std and user modules, as
-## collect_program builds them for the JVM path: ids are unique program-wide.
-## The Phase -1 native seam spike (docs/native-backend-plan.md): emit C for
-## the trivial subset instead of class files. Hidden and unsupported --
-## `emitc.dawn` panics on anything outside that subset, and both are
-## superseded once Core IR lands.
+## `dawn __emitc`: the C backend hosted on the JVM toolchain. It emits the
+## same C translation unit `dawnc emitc` does, from the same Core IR and the
+## same `c/cdriver.c_text`; the two entries differ only in the driver around
+## them and in the `Jsig` they check with (this one resolves `use java`, the
+## native one refuses it, and the C backend rejects a foreign call either way).
+##
+## Neither is redundant. This one is the seed of the native bootstrap:
+## `scripts/native-fixpoint.sh` runs it on `nmain.dawn` to produce generation
+## A, because before that there is no native compiler to run. `dawnc emitc` is
+## the same emitter after it has compiled itself, and the fixpoint requires
+## the two to emit byte-identical C (A == B, then B == C). `dawnc emitc` is
+## the canonical user-facing entry; this one stays because the chain starts
+## on the JVM. The `__` prefix only keeps it out of `dawn --help`: it is a
+## supported entry that the fixpoint and dozens of gates call, and renaming it
+## would buy nothing for those call sites. `scripts/doc-check.py` holds the
+## fixpoint script to the entry named here.
 fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_dir = "std"
   var out = ""

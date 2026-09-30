@@ -2235,6 +2235,85 @@ def check_analyze_env_table_selftest() -> tuple[list[str], int]:
     return [], 4 + len(ANALYZE_ENV_REAL_ANCHORS) + len(ANALYZE_ENV_DOC_CLAUSES)
 
 
+# --- the native fixpoint's entry points -------------------------------------
+# `run_emitc`'s doc comment in the JVM driver says `dawn __emitc` seeds the
+# native bootstrap and `dawnc emitc` is the same emitter after it compiled
+# itself. That comment used to call the entry a hidden spike superseded by
+# Core IR while the fixpoint depended on it (#203), which is the rot this
+# check exists to stop: the names the comment gives must be the names the
+# drivers dispatch on and the names `scripts/native-fixpoint.sh` invokes.
+EMITC_DRIVER = "selfhost/src/main.dawn"
+EMITC_NATIVE_DRIVER = "selfhost/src/nmain.dawn"
+EMITC_FIXPOINT = "scripts/native-fixpoint.sh"
+# (who, the file that holds it, what that file must spell)
+EMITC_ENTRY_SPELLINGS = (
+    ("the JVM driver's comment naming its entry", EMITC_DRIVER,
+     "## `dawn __emitc`: the C backend hosted on the JVM toolchain."),
+    ("the JVM driver's comment naming the native entry", EMITC_DRIVER,
+     "It emits the\n## same C translation unit `dawnc emitc` does"),
+    ("the JVM driver's dispatch to run_emitc", EMITC_DRIVER,
+     'mode == "__emitc" {\n        run_emitc(rest)'),
+    ("the native driver's dispatch to cmd_emitc", EMITC_NATIVE_DRIVER,
+     'mode == "emitc" {\n        cmd_emitc(rest)'),
+    ("generation A through the JVM entry", EMITC_FIXPOINT,
+     'dawn-selfhost.jar" __emitc \\\n  "$root/selfhost/src/nmain.dawn"'),
+    ("generation B through the native entry", EMITC_FIXPOINT,
+     '"$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn"'),
+)
+
+
+def emitc_entry_problems(texts: dict[str, str]) -> tuple[list[str], int]:
+    bad: list[str] = []
+    seen = 0
+    for who, path, literal in EMITC_ENTRY_SPELLINGS:
+        count = texts[path].count(literal)
+        if count != 1:
+            bad.append(f"{path}: expected exactly one spelling of {who} "
+                       f"({literal!r}), found {count}. `run_emitc`'s comment "
+                       f"names the entries the native fixpoint runs; rename "
+                       f"one and the comment, both drivers and "
+                       f"{EMITC_FIXPOINT} move together")
+        else:
+            seen += 1
+    return bad, seen
+
+
+def read_emitc_entry_inputs() -> dict[str, str]:
+    return {path: (ROOT / path).read_text(encoding="utf-8")
+            for path in (EMITC_DRIVER, EMITC_NATIVE_DRIVER, EMITC_FIXPOINT)}
+
+
+def check_emitc_entries() -> tuple[list[str], int]:
+    return emitc_entry_problems(read_emitc_entry_inputs())
+
+
+def check_emitc_entries_selftest() -> tuple[list[str], int]:
+    texts = read_emitc_entry_inputs()
+    baseline, _ = emitc_entry_problems(texts)
+    if baseline:
+        return [f"emitc entry self-test baseline is invalid: {baseline[0]}"], 0
+    # Renaming the JVM entry in the driver without touching the script, and
+    # the script moving to another entry without touching the comment, are
+    # the two drifts #203 is about; each spelling going missing must redden.
+    renamed = dict(texts)
+    renamed[EMITC_DRIVER] = texts[EMITC_DRIVER].replace(
+        'mode == "__emitc"', 'mode == "__emit_c"', 1)
+    bad, _ = emitc_entry_problems(renamed)
+    if not any("dispatch to run_emitc" in problem for problem in bad):
+        return ["emitc entry self-test: renaming the JVM entry stayed green"], 0
+    for _, path, literal in EMITC_ENTRY_SPELLINGS:
+        gone = dict(texts)
+        gone[path] = texts[path].replace(literal, "ENTRY_REMOVED", 1)
+        bad, _ = emitc_entry_problems(gone)
+        if not any("expected exactly one" in problem for problem in bad):
+            return [f"emitc entry self-test: losing {literal!r} from {path} "
+                    "stayed green"], 0
+    bad, _ = emitc_entry_problems(texts)
+    if bad:
+        return [f"emitc entry self-test: the unedited files went red: {bad[0]}"], 0
+    return [], 2 + len(EMITC_ENTRY_SPELLINGS)
+
+
 REPOSITORY_POLICY_FILES = (
     ".editorconfig",
     ".github/workflows/release.yml",
@@ -4496,6 +4575,12 @@ def main() -> None:
     problems += bad
     policies_seen += n
     bad, n = check_analyze_env_table_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_emitc_entries()
+    problems += bad
+    policies_seen += n
+    bad, n = check_emitc_entries_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_markdown_section_selftest()
