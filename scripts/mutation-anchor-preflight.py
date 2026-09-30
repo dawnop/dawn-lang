@@ -44,6 +44,7 @@ ADAPTERS = {
     "selfhost-bench-contract": ("scripts/selfhost-bench.py",),
     "source-loop-label-contract": (".",),
     "syntax-small-contract": (".",),
+    "wasm-dom-contract": (".",),
 }
 EXCLUSIONS = {
     "tile-gpu-diff": "generic replacement helper; all anchor text is supplied by callers",

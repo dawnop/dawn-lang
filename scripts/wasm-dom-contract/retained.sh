@@ -8,8 +8,8 @@
 # replacing it, and a decoder refusal that likewise leaves it untouched.
 #
 # A source-seam gate holds the retained-root intrinsics to std/reactor, the
-# compiler/runtime implementations and this contract's direct C ownership
-# probe. A copy-only count mutant adds one allowed-file occurrence; an
+# compiler/runtime implementations, this contract's direct C ownership
+# probe and the registry its production mutants are declared in. A copy-only count mutant adds one allowed-file occurrence; an
 # independent source mutant adds a call to an unrelated std module. Each must
 # make its own half of the seam gate fail. Two production mutants then
 # independently drop the installed root and commit a provisional root before a
@@ -64,11 +64,13 @@ project="$here/retained"
 
 # Keep this list literal: adding a new call site is a review event, not an
 # automatically accepted consequence of adding a file. Embedded std/runtime
-# sources and backend tables are compiler implementations of the same seam.
+# sources and backend tables are compiler implementations of the same seam;
+# mutate.py quotes the seam because its production mutants rewrite it.
 seam_expected() {
   cat <<'EOF'
 ./runtime/c/dawn_rt.c
 ./runtime/c/dawn_rt.h
+./scripts/wasm-dom-contract/mutate.py
 ./scripts/wasm-dom-contract/retained-rc.c
 ./selfhost/builtins.dawn
 ./selfhost/src/check/checker.dawn
@@ -260,19 +262,11 @@ prepare_mutant() { # <name>
   cp "$here/retained.mjs" "$mutant_tree/scripts/wasm-dom-contract/retained.mjs"
 }
 
-apply_exact_mutant() { # <file> <old> <new>
-  python3 - "$1" "$2" "$3" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-old = sys.argv[2]
-new = sys.argv[3]
-source = path.read_text()
-if source.count(old) != 1:
-    raise SystemExit(f"expected exactly one mutant target in {path}, found {source.count(old)}")
-path.write_text(source.replace(old, new))
-PY
+# The anchors live in mutate.py, one registered mutation per mutant name, so
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this script reaches its mutants.
+apply_exact_mutant() { # <name> <tree-root>
+  python3 "$here/mutate.py" "$1" "$2"
 }
 
 run_mutant() { # <name> <tree-root> <oracle: any|line-five>
@@ -330,9 +324,7 @@ run_mutant() { # <name> <tree-root> <oracle: any|line-five>
 }
 
 prepare_mutant drop-retained-state
-apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
-  '        if reactor_state_has() { Some(reactor_state_get()) } else { None }' \
-  '        None'
+apply_exact_mutant drop-retained-state "$mutant_tree"
 run_mutant drop-retained-state "$mutant_tree" any
 
 # Wrong on purpose: publish an uninitialised Root before calling `step`, then
@@ -342,12 +334,7 @@ run_mutant drop-retained-state "$mutant_tree" any
 # pure `advance` closure: that placement needed `unsafe_pure`, which is gone
 # (docs/effects-window-design.md 6), and the observable is the same.
 prepare_mutant commit-before-success
-apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
-  $'      let attempted = catch_panic(() =>\n' \
-  $'      match current {\n        Some(_) -> reactor_state_set(Root(advance: next_line => first(step, next_line)))\n        None -> ()\n      }\n      let attempted = catch_panic(() =>\n'
-apply_exact_mutant "$mutant_tree/std/reactor.dawn" \
-  $'          Ok(answer) -> answer\n' \
-  $'          Ok(answer) -> {\n            match current {\n              Some(root) -> reactor_state_set(root)\n              None -> ()\n            }\n            answer\n          }\n'
+apply_exact_mutant commit-before-success "$mutant_tree"
 run_mutant commit-before-success "$mutant_tree" line-five
 
 echo "retained state ok (JVM process + wasm instance, 2 seam mutants + 2/2 production mutants killed)"
