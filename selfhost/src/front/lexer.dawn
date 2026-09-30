@@ -492,11 +492,6 @@ fn with_no_diags(r: Result[(Int, Token), (Int, Diag)]) -> Result[(Int, Token, Li
 
 fn no_diags() -> List[Diag] = []
 
-## The message of the `$name` refusal. The formatter reads it to tell this
-## diagnostic from every other: it is the one lexer diagnostic the formatter
-## repairs rather than refuses (fmt.migrate_dollar_names).
-pub fn is_dollar_name(d: Diag) -> Bool = str.starts_with(d.msg, "`$` followed by a name")
-
 ## Interpolation is `${expr}` and nothing else (spec §1.6). A `$` followed by
 ## what could start a name is refused rather than read: the short form `$name`
 ## was removed in the syntax window (docs/syntax-window-design.md §2), and
@@ -1093,7 +1088,7 @@ test "a dollar before a name is refused and names both repairs" {
   assert ds[0].msg == "`\$` followed by a name is not an interpolation: `\$a`"
   assert ds[0].hint == "write `\${a}` to interpolate it, or `\\\$a` for a literal dollar sign"
   assert ds[0].lo == 1 && ds[0].hi == 3
-  assert is_dollar_name(ds[0]) && is_dollar_name(ds[1])
+  assert ds[1].msg == "`\$` followed by a name is not an interpolation: `\$_x`"
   # the literal is still one token, so the rest of the file lexes
   assert toks[0].kind == STRING
   assert toks[0].segs == [SText("\$a.b \$_x \$5")]

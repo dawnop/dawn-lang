@@ -161,8 +161,8 @@ println("got ${n} items, first = ${list.get(0)}")
 美元号（`"$5"` 无需转义）；要在 `{` 前写字面 `$` 用 `\$`。
 （v0.78.0 之前还有 `$name` 短形，以词法最长匹配吞名字，`"$obj_x"` 与 `"$obj.name"` 会静默取到
 作者没写的值；它被删除而不是改读成字面，是因为改读会让按旧写法写的程序静默输出另一段文本，
-报错才能让每一处都被看见。v0.78.0 的 `dawn fmt` 把 `$name` 改写成 `${name}`，见
-[`syntax-window-design.md`](syntax-window-design.md) §2。）
+报错才能让每一处都被看见。v0.78.0 到 v0.79.0 间的 `dawn fmt` 曾把 `$name` 改写成 `${name}`，
+v0.80.0 起只报错，见 [`syntax-window-design.md`](syntax-window-design.md) §2。）
 插值内的表达式效果并入整个字符串表达式的效果。
 
 `${...}` **必须写在一行内**（跨行报 `interpolation cannot span lines`）——这条限制对

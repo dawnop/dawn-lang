@@ -111,6 +111,7 @@ error: `$` followed by a name is not an interpolation: `$a`
   外层收集（parser 重新词法插值代码时会报，避免重复）。
 - AST 不变（插值仍是 `SPInterp(expr)`）。
 - `lexer.is_dollar_name(d)` 按消息前缀认出这一类诊断，fmt 靠它区分「可修复」与「必须拒绝」。
+  （2026-09-30 随 §2.3 的迁移一并删除：它唯一的读者就是那条迁移。）
 
 ### 2.3 fmt 迁移规则（本窗口）
 
@@ -122,6 +123,21 @@ error: `$` followed by a name is not an interpolation: `$a`
 因为 `$name` 从此恒是错误，这条迁移不会改变任何能编译的程序的含义。它仍按协调方要求**只在本窗口
 存在**：v0.78.0 发布、下游用 v0.78.0 的 `dawn fmt` 迁完之后，第一个版本删除它，fmt 恢复「只改空白与
 单行首竖线」的承诺。
+
+**已删除（2026-09-30，分支 `chore/delete-dollar-migration` 的提交「Delete the `$name` migration from
+dawn fmt」，随 v0.80.0 发布）。** 删除条件已满足：v0.79.0 已发布并成为种子（`scripts/seed-release.txt`），
+即 v0.78.0 成为种子之后的第一个 release 已经出了；dawnop-site 在 v0.78.0 上迁完（`ec8186ce`，即生产
+部署的树；它的升钉提交 `62a6bd75` 本身还带 307 处 `$name`，迁移在其后的提交里）。
+`migrate_dollar_names` 与 `mig_*` 辅助函数、调用点、对应 test 块、`lexer.is_dollar_name` 一并删掉；
+`format` 回到「有任何词法诊断就拒绝」，`$name` 与其它词法错误一样原样拒绝，诊断与提示文案就是
+`lex_dollar` 的那一条，不变，并有一个 test 钉住。fmt 由此恢复「只改空白与单行首竖线」的承诺。
+能编译的程序没有 `$name`，所以对能编译的输入 fmt 输出不变。唯一的差异在拒绝语料
+`scripts/grammar-corpus/reject/dollar_name.dawn`（fmt-diff 的语料是全部已跟踪 `.dawn`）：v0.79.0 把它
+改写成 `${a}`、`${obj_x}` 且一声不吭，HEAD 原样拒绝并报两条 lexer 诊断。这正是预期的行为变化，
+提交里写 `Emit-Change(fmt)` 声明；为此 `selfhost-fmt-diff.sh` 的「两边说的话必须一致」那一步改为同样
+经 `emit_gate "fmt"` 裁决，此前它先于声明检查直接判红，拒绝集合的任何变化都无法声明。
+`selfhost-prev-diff.sh --corpus site` 的 `fmt backend-dawn` 语料钉在迁完的 `ec8186ce`，实测全绿
+（若仍钉在 `62a6bd75`，这一刀会让那条门红，因为 N−1 会改写而 HEAD 拒绝）。
 
 ### 2.4 全仓迁移
 
