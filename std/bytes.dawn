@@ -200,20 +200,20 @@ pub fn at(b: Bytes, i: Int) -> Int = {
   if v < 0 { panic("bytes.at: index out of range") } else { v }
 }
 
-## The bytes in `[start, end)`. Both ends are clamped into range and
-## `start > end` yields empty, so this never panics.
-pub fn slice(b: Bytes, start: Int, end: Int) -> Bytes = bytes_slice(b, start, end)
+## The bytes in `[from, to)`. Both ends are clamped into range and
+## `from > to` yields empty, so this never panics.
+pub fn slice(b: Bytes, from: Int, to: Int) -> Bytes = bytes_slice(b, from, to)
 
-## Where the first occurrence of `needle` at or after `from` begins, or `None`.
+## Where the first occurrence of `sub` at or after `from` begins, or `None`.
 ##
 ## A *position* in `[0, len]` counted in bytes, not the index of an element: an
 ## empty needle matches at the start when that position exists, and `len(b)` is
 ## a legal answer though no byte lives there. A negative `from` is clamped to
 ## zero; a `from` past `len(b)` is a miss, including for an empty needle. Pure
 ## Dawn over bytes_len/bytes_at — the search loop is not an intrinsic.
-pub fn index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
+pub fn index_of(b: Bytes, sub: Bytes, from: Int) -> Option[Int] = {
   let hlen = bytes_len(b)
-  let nlen = bytes_len(needle)
+  let nlen = bytes_len(sub)
   let start = if from < 0 { 0 } else { from }
   let last_start: Int = if nlen == 0 {
     hlen
@@ -223,27 +223,27 @@ pub fn index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
     let remaining: Int = hlen - start
     if nlen > remaining { 0 - 1 } else { hlen - nlen }
   }
-  index_scan(b, needle, nlen, start, last_start)
+  index_scan(b, sub, nlen, start, last_start)
 }
 
-fn index_scan(b: Bytes, needle: Bytes, nlen: Int, start: Int, last_start: Int) -> Option[Int] = {
+fn index_scan(b: Bytes, sub: Bytes, nlen: Int, start: Int, last_start: Int) -> Option[Int] = {
   if start > last_start { return None }
   var i: Int = start
   while true {
-    if matches_at(b, needle, nlen, i) { return Some(i) }
+    if matches_at(b, sub, nlen, i) { return Some(i) }
     if i >= last_start { return None }
     i = i + 1
   }
   None
 }
 
-fn matches_at(b: Bytes, needle: Bytes, nlen: Int, start: Int) -> Bool = {
+fn matches_at(b: Bytes, sub: Bytes, nlen: Int, start: Int) -> Bool = {
   var hay_index: Int = start
-  var needle_index: Int = 0
-  while needle_index < nlen {
-    if bytes_at(b, hay_index) != bytes_at(needle, needle_index) { return false }
-    needle_index = needle_index + 1
-    if needle_index < nlen { hay_index = hay_index + 1 }
+  var sub_index: Int = 0
+  while sub_index < nlen {
+    if bytes_at(b, hay_index) != bytes_at(sub, sub_index) { return false }
+    sub_index = sub_index + 1
+    if sub_index < nlen { hay_index = hay_index + 1 }
   }
   true
 }
