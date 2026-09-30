@@ -20,7 +20,7 @@ use driver/analyze.{Program, CheckedMod}
 use check/cx.{Cx}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/tast.{TModule}
-use ir/interp.{CtOut}
+use ir/interp.{CtOut, comptime_refuses}
 use check/types.{
   Adts, Traits, AdtI, adt_of, trait_of, ty_show, sig_render,
   prelude_traits, prelude_trait_ids, builtins, internal_builtins,
@@ -604,10 +604,25 @@ fn internal_builtins_json(w0: W, adts: Adts, traits: Traits) -> W = {
     w = open_obj(w)
     w = w_field(w, "name", name)
     w = w_field(w, "sig", sig_render(adts, traits, sig))
+    w = w_field(w, "comptime", comptime_field(name))
     w = close_obj(w)
   }
   w
 }
+
+## The `comptime` field a builtin's entry carries: whether a `const` may call
+## it, which spec §7.2 sends a reader here for rather than listing the names.
+## Read from the interpreter's own lists (`interp.comptime_refuses`), the ones
+## its gate test measures, not from a copy kept here.
+##
+## Only a builtin gets the field. The hand-written groups also resolve names
+## the prelude implements in std, and a std function folds or not according to
+## which builtins its body reaches -- a property of the body, not of the table
+## -- so for those an "ok" would be a guess and a "refused" a second analysis.
+## scripts/builtin-decl-contract holds the field, on every builtin and on
+## nothing else, to the mirror's `# comptime: rejected` markers.
+fn comptime_field(name: String) -> String =
+  if comptime_refuses(name) { "refused" } else { "ok" }
 
 ## The hand-written groups, resolved against the builtin table (falling back to
 ## the std prelude, where functions migrate). Shared by both output modes so
@@ -624,17 +639,18 @@ fn builtin_groups_json(w0: W, std: StdCtx, traits: Traits) -> W = {
     w = open_arr(w)
     for pr in fns {
       let (fname, fdoc) = pr
-      let sig = match map.get(bi, fname) {
-        Some(s) -> s
+      let (sig, is_builtin) = match map.get(bi, fname) {
+        Some(s) -> (s, true)
         None ->
           match map.get(std.std_fns, fname) {
-            Some(s) -> s
+            Some(s) -> (s, false)
             None -> panic("the builtin reference names an unknown function: ${fname}")
           }
       }
       w = open_obj(w)
       w = w_field(w, "name", fname)
       w = w_field(w, "sig", sig_render(std.adts, traits, sig))
+      if is_builtin { w = w_field(w, "comptime", comptime_field(fname)) }
       w = w_field(w, "doc", fdoc)
       w = close_obj(w)
     }
