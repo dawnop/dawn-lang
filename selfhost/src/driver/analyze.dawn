@@ -16,6 +16,7 @@ use compiler_plan/pkgfetch
 use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
+use compiler_plan/source.{canon}
 use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of, exported_impl}
 use check/identity
@@ -30,7 +31,6 @@ use check/tast.{TModule}
 use check/types.{Sym, Impls, TyVar, EffVar}
 use front/parser
 use front/lexer
-use fspath/fspath
 
 ## One loaded module: dotted path, JVM class name, display path, source text,
 ## parsed AST; lex/parse diagnostics ride along. `pkg` = the `[deps]` source
@@ -78,22 +78,6 @@ pub type ProjectPlan = {
   source: source.SourcePlan,
   modules: ModuleIndex
 }
-
-## A path in the one spelling the compiler compares module identities by:
-## absolute and normalized. The language server needs the same answer, and
-## used to reach it through its own copy of this line.
-##
-## A path that is already absolute is normalized without asking the host where
-## it is. `absolute` ignores its base for such a path, but an argument is
-## evaluated whether or not the callee reads it, so the eager `io.cwd()` this
-## used to pass was one system call per path for an answer nobody looked at.
-##
-## The body is one of three byte-identical copies: `driver/stdlib.dawn` is
-## below this file in the layering and cannot import it, and
-## `compiler-plan/src/source.dawn` is in another package that does not depend
-## on the compiler at all. A change to the spelling is a change to all three.
-pub fn canon(p: String) -> String !Env =
-  if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
 fn seg_ok(s: String) -> Bool = {
   if s == "" { return false }
