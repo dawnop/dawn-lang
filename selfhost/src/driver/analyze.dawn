@@ -41,6 +41,11 @@ pub type LoadedModule = {
   class_name: String,
   path: String,
   text: String,
+  # where each line of `text` starts, for the checker's `at file:line`
+  # renderings. Taken from the parse, which a workspace load reuses for text
+  # that has not changed, so an editor pays for it once per revision of a
+  # file rather than once per check of it (docs/lsp-module-memo-design.md).
+  line_starts: List[Int],
   m: Module,
   pdiags: List[Diag],
   pkg: Option[source.PkgR],
@@ -377,8 +382,11 @@ pub fn load_entries_over(
 ) -> LoadResult !Fs !Env !io =
   load_entries_reusing(plan, entries, over, no_parses()).loaded
 
-## The parse of one file, and the text it was parsed from.
-pub(pkg) type Parsed = { text: String, m: Module, pdiags: List[Diag] }
+## The parse of one file, and the text it was parsed from. The line starts
+## are the text's too: on the selfhost workspace, recomputing them for every
+## re-checked module was about 0.18 s of a 1 s edit that changed a widely
+## imported signature (agent-handoff/research-laziness-l1-reeval-20260930.md).
+pub(pkg) type Parsed = { text: String, line_starts: List[Int], m: Module, pdiags: List[Diag] }
 
 ## The parses one load made, by canonical path, handed to the next load of
 ## the same workspace so that a file whose text has not changed is not parsed
@@ -427,7 +435,7 @@ fn parse_reusing(previous: ParseMemo, key: String, text: String) -> (Parsed, Boo
 
 fn fresh_parse(text: String) -> Parsed = {
   let (m, pdiags) = parser.parse_module(text)
-  Parsed { text: text, m: m, pdiags: pdiags }
+  Parsed { text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags }
 }
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
@@ -479,6 +487,7 @@ fn resolve(
             class_name: mod_path,
             path: f,
             text: text,
+            line_starts: parsed.line_starts,
             m: parsed.m,
             pdiags: parsed.pdiags,
             pkg: None,
@@ -615,6 +624,7 @@ fn resolve(
                 class_name: cls,
                 path: dep_file,
                 text: text,
+                line_starts: parsed.line_starts,
                 m: m2,
                 pdiags: pdiags2,
                 pkg: dep_pkg,
@@ -973,7 +983,7 @@ pub(pkg) fn analyze_module_step(
     },
     std_fns: std.std_fns,
     moved: std.moved,
-    line_starts: lexer.line_starts_of(mf.text),
+    line_starts: mf.line_starts,
     # names the span view a diagnostic raised in this module resolves against
     mod_path: Some(mf.mod_path),
     identities: before.identities,
@@ -1195,6 +1205,7 @@ pub(pkg) fn analyze_standalone(
     class_name: "main",
     path: path,
     text: text,
+    line_starts: lexer.line_starts_of(text),
     m: m,
     pdiags: pdiags,
     pkg: None,
@@ -1910,7 +1921,7 @@ test "module identity carry keeps exporting owners across header reorder" {
     for text in [first ++ second, second ++ first] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
+        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let id = map.get(step.checked.cx.adts_by_name, "First").expect("provider ID")
@@ -1928,7 +1939,7 @@ test "module identity carry keeps exporting owners across header reorder" {
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
-        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
+        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
       assert map.get(consumed.after.identities, id) != None
@@ -1944,7 +1955,7 @@ test "module identity carry keeps exporting owners across header reorder" {
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
     let (renamed_ast, renamed_pd) = parser.parse_module(renamed_text)
     let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
-      text: renamed_text, m: renamed_ast, pdiags: renamed_pd, pkg: None, entry: false }
+      text: renamed_text, line_starts: lexer.line_starts_of(renamed_text), m: renamed_ast, pdiags: renamed_pd, pkg: None, entry: false }
     let renamed_step = analyze_module_step(renamed_input, initial, std, ct_default(), jsig_refused(), None)
     assert len(renamed_step.diags) == 0
     assert match map.get(renamed_step.checked.cx.fns, "renamed_of").expect("renamed generic").tparams[0] {
@@ -1976,7 +1987,7 @@ test "a consumer names a provider's effect without minting the provider's identi
     for text in [asks ++ generic, generic ++ asks] {
       let (syntax, pd) = parser.parse_module(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn",
-        text: text, m: syntax, pdiags: pd, pkg: None, entry: false }
+        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let effect_id = map.get(step.checked.cx.effects, "Ask").expect("provider effect")
@@ -1999,7 +2010,7 @@ test "a consumer names a provider's effect without minting the provider's identi
         "fn relay[!f](g: fn() -> Int !f) -> Int !f = dep.twice(g)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
-        text: consumer_text, m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
+        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       # The effect the consumer resolved is the provider's declaration, by
       # value and by derivation: a second mint in the consumer's owner would

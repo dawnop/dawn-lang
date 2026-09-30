@@ -18,12 +18,19 @@ use std/io
 use std/io.{Fs, Env}
 use std/map
 use driver/incremental
-use driver/analyze.{LoadedModule, LoadResult, LocDiag, Program, analyze_program, rendered_diags}
+use driver/analyze.{
+  LoadedModule, LoadResult, LocDiag, Program, analyze_program, rendered_diags,
+  load_entries_reusing, no_parses, project_plan
+}
+use driver/fsmem
+use compiler_plan/source.{SourceFile}
+use std/str
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
 use check/jsig.{jsig_refused}
 use ir/interp.{ct_default}
 use front/parser
+use front/lexer
 use jvm/jreflect.{jsig_real}
 use compiler_plan/envmem
 
@@ -31,7 +38,7 @@ fn source(name: String, text: String) -> LoadedModule = {
   let (m, pdiags) = parser.parse_module(text)
   LoadedModule {
     mod_path: name, class_name: name, path: name ++ ".dawn",
-    text: text, m: m, pdiags: pdiags, pkg: None, entry: false
+    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, pkg: None, entry: false
   }
 }
 
@@ -128,6 +135,61 @@ test "module memo places a reused module's diagnostics and its predecessors' whe
     let cold = analyze_program(loaded, std, ct_default(), jsig_refused())
     assert rendered_diags(result.program) != rendered_diags(cold)
   }))
+}
+
+## The one message of `prog` that comptime raised in `module`'s file.
+fn comptime_message(prog: Program, file: String) -> String = {
+  var found = ""
+  for ld in rendered_diags(prog) {
+    if ld.path == file && str.contains(ld.d.msg, "unwrapped None") { found = ld.d.msg }
+  }
+  found
+}
+
+test "module memo checks an unchanged file again with the line starts its reused parse holds" {
+  # The line starts are the parse's: a workspace load that reuses a file's
+  # parse reuses them, and a module checked again because what it imports
+  # changed still says `at file:line` against its own, unchanged text. An
+  # `expr!` in a constant is where a checker product renders a line.
+  let root = fsmem.MEM_BASE ++ "/line-starts"
+  let main = root ++ "/src/main.dawn"
+  let app = root ++ "/src/app.dawn"
+  let lib = root ++ "/src/lib.dawn"
+  let app_text = "use lib\n\nfn pick() -> Option[Int] = None\n\npub const C: Int = pick()!\n" ++
+    "pub fn answer() -> Int = lib.value()\n"
+  var files = fsmem.mem_std(fsmem.MEM_BASE)
+  files = fsmem.mem_put(files, main, "use app\npub fn main() -> Unit !io = println(to_string(app.answer()))\n")
+  files = fsmem.mem_put(files, app, app_text)
+  files = fsmem.mem_put(files, lib, "pub fn value() -> Int = 41\n")
+  let _ = fsmem.with_fs_mem(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(fsmem.MEM_BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let plan = project_plan(SourceFile(main))
+        let none: Map[String, String] = map.empty()
+        let first = load_entries_reusing(plan, [main], none, no_parses())
+        let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), first.loaded)
+        assert str.ends_with(comptime_message(warm.program, app), "app.dawn:5")
+        # lib's signature changes and moves down two lines; app's text does not,
+        # so its parse and line starts are the first load's, and it is checked
+        # again because what it imports changed
+        let signature = map.insert(none, lib, "# two\n# lines\npub fn value(k: Int = 0) -> Int = 41 + k\n")
+        let second = load_entries_reusing(plan, [main], signature, first.parses)
+        assert second.parses.reused == 2
+        let result = incremental.analyze(warm.session, second.loaded)
+        assert result.stats.checked_modules == 3
+        assert str.ends_with(comptime_message(result.program, app), "app.dawn:5")
+        assert agrees_with_cold(result.program, second.loaded, std)
+        # and app's own text moving is a new parse with new line starts
+        let moved = map.insert(signature, app, "# three\n# lines\n# down\n" ++ app_text)
+        let third = load_entries_reusing(plan, [main], moved, second.parses)
+        assert third.parses.reused == 2
+        let again = incremental.analyze(result.session, third.loaded)
+        assert str.ends_with(comptime_message(again.program, app), "app.dawn:8")
+        assert agrees_with_cold(again.program, third.loaded, std)
+      })))
 }
 
 test "module memo compares what a module exports in order, not only as a set" {
