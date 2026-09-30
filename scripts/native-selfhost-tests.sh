@@ -54,7 +54,8 @@ case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 echo "== selfhost tests, native backend =="
 "$DAWNC" test selfhost/src/nmain.dawn
 
-# Declaration identity's own tests, run explicitly as they were when it was
-# not yet on the native driver's production graph. The replay modules that
-# stood beside it went with the replay engine (2026-09-27).
-"$DAWNC" test selfhost/src/check/identity.dawn
+# check/identity.dawn used to get a second `dawnc test` of its own, from when
+# it was not yet on the native driver's production graph. It is now, and all
+# 55 tests that target ran (front/lexer, front/effect_name, check/identity)
+# appear with the same labels among nmain's, so the second target only paid
+# another emitc and cc for tests already run (2026-09-30).
