@@ -5,10 +5,16 @@ Run the actual lowering test in private subjects. A missing dictionary suffix
 and a missing slot suffix are separate defects: the former mislinks the
 constructor, while the latter can reuse code that reads another class's fields.
 Compilation failures do not count as detecting either defect.
+
+The mutation anchors live in mutate.py beside this script, where
+mutation-anchor-preflight.py proves them exactly-once before any build; this
+script reads them from there and applies them in memory, still refusing a
+drifted one before it copies or builds anything.
 """
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -23,20 +29,15 @@ OWNER = 'dictionary constructors and slots keep their argument shape in either r
 def main():
     started = time.monotonic()
     original = (ROOT / SUBJECT).read_text()
-    variants = [
-        ('dictionary-shape', 'let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)',
-         'let key = dict_key(tid, subject)'),
-        ('constructor-arity', 'nargs: nargs,', 'nargs: 0,'),
-    ]
-    for kind in ('bridge', 'prim'):
-        old = ('let name = "' + kind + '$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method ++\n'
-               '    dict_shape_suffix(if param { len(goals) } else { 0 })')
-        variants.append((kind + '-shape', old, old.split(' ++\n')[0]))
+    variants = runpy.run_path(str(Path(__file__).with_name('mutate.py')))['MUTATIONS']
     subjects = [('positive', original)]
-    for name, old, new in variants:
-        if original.count(old) != 1:
-            raise RuntimeError(f'{name}: expected one mutation anchor in {SUBJECT}')
-        subjects.append((name, original.replace(old, new)))
+    for name, edits in variants.items():
+        source = original
+        for rel, old, new in edits:
+            if rel != SUBJECT or source.count(old) != 1:
+                raise RuntimeError(f'{name}: expected one mutation anchor in {SUBJECT}')
+            source = source.replace(old, new)
+        subjects.append((name, source))
     with tempfile.TemporaryDirectory(prefix='dawn-dictionary-shapes-') as temp:
         root = Path(temp)
         for directory in ('selfhost', 'compiler-plan'):

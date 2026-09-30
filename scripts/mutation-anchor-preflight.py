@@ -27,6 +27,7 @@ ADAPTERS = {
     "classfile-verify": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
+    "dict-owner-contract": (".",),
     "dependency-heap-contract": ("selfhost/src/main.dawn",),
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),
@@ -56,6 +57,7 @@ EXCLUSIONS = {
 # registry, so an entry cannot outlive the reading it vouches for.
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
+    "dict-owner-contract/shapes.py": "dict-owner-contract",
     "export-surface-contract/run.sh": "export-surface-contract",
 }
 SHELL_ADAPTERS = {
