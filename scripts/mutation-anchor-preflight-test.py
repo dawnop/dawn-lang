@@ -132,6 +132,22 @@ class PreflightTests(unittest.TestCase):
                                           "attempt_inferred_group(state, cx1, inferred,  settled,")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "body-executor/bypass-test", 0)
 
+    def test_module_memo_anchor_drift_is_caught(self):
+        # #277: module-memo.py applied every anchor in every shard, but only
+        # once incremental-memo-1..3 ran; its --self-test builds nothing and
+        # reads no anchor. Two anchors here are shared by two mutants each.
+        engine = "selfhost/src/driver/incremental.dawn"
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "module-memo/always-cold", engine,
+                                          "identity == e.std_identity) { return None }",
+                                          "e.std_identity == identity) { return None }")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "module-memo/false-cutoff", engine,
+                                          "              Some(before) -> if same_surface(own, before) {",
+                                          "              Some(prior) -> if same_surface(own, prior) {")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "module-memo/impl-positions",
+                                          "selfhost/src/check/checker.dawn",
+                                          "  if im.lo == 0 && im.hi == 0 { im }", "  if im.hi == 0 && im.lo == 0 { im }")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "module-memo/stale-spans", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.

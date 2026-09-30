@@ -14,19 +14,20 @@ timeouts never substitute for a cache-contract failure.
 
 `--shards N --shard I` splits the engine mutants by index modulo N.
 The no-flag invocation is unchanged:
-one positive subject and all engine mutants, in this file's order.
+one positive subject and all engine mutants, in the order of its group in mutate.py.
 """
 import argparse
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
-from cold import ROOT, HERE, OWNER, edit, install_probe, run
+from cold import ROOT, HERE, OWNER, apply, edit, install_probe, owned, run
 
 
 def owning_assertion(output):
@@ -94,55 +95,17 @@ def main():
     engine = "selfhost/src/driver/incremental.dawn"
     checker = "selfhost/src/check/checker.dawn"
     originals = {path: (ROOT / path).read_text() for path in (engine, checker)}
-    variants = [
-        ("always-cold", engine,
-         "  if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }",
-         "  if true || not (same_input(raw, e.raw) && identity == e.std_identity) { return None }"),
-        # The input half of the rule.
-        ("text-only", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n",
-         "-> Bool = a.text == b.text\n"),
-        ("ignore-input", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n", "-> Bool = true\n"),
-        ("ignore-std-identity", engine, "same_input(raw, e.raw) && identity == e.std_identity)",
-         "same_input(raw, e.raw) && true)"),
-        # What the step read of the carry: the surfaces its `use` lines name,
-        # including what those surfaces grafted from their own imports, the
-        # program-wide impl table, and the intern table for collisions.
-        ("ignore-reads", engine, "  if not reads_hold(e, carry.exports, seen, fresh) { return None }\n", ""),
-        ("reexport-blind", engine, "-> Bool =\n  a == b &&\n",
-         "-> Bool =\n  ModExports { ..a, adt_infos: b.adt_infos, trait_infos: b.trait_infos, "
-         "effect_infos: b.effect_infos } == b &&\n"),
-        ("ignore-impls", engine,
-         "  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }\n", ""),
-        ("drop-identities", engine, "  Some(Kept { identities: ids, minted: Some(rows) })",
-         "  Some(Kept { identities: carry.identities, minted: Some(rows) })"),
-        ("skip-collision", engine, "      Some(other) -> if other != v { return None }", "      Some(other) -> ()"),
-        ("keep-diagnosed", engine, "  if len(e.step.diags) > 0 { return None }\n", ""),
-        # The early cutoff: a re-checked module whose surface comes out as it was.
-        ("skip-cutoff", engine, "              Some(before) -> if same_surface(own, before) {",
-         "              Some(before) -> if false && same_surface(own, before) {"),
-        ("false-cutoff", engine, "              Some(before) -> if same_surface(own, before) {",
-         "              Some(before) -> if true {"),
-        ("unordered-surface", engine, "-> Bool =\n  a == b &&\n", "-> Bool =\n  a == b ||\n"),
-        # The position view around a reused step.
-        ("stale-spans", engine, "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans)",
-         "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own_spans)"),
-        # The export surface the carry comparison reads.
-        ("alias-positions", checker, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
-         "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),
-        ("impl-positions", checker, "  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n",
-         "  if true { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n"),
-        # What the owner remembers.
-        ("ignore-eviction", engine, "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo: none }\n}",
-         "  session\n}"),
-        ("ignore-module-budget", engine, "    if retained < session.max_modules {", "    if true {"),
-        ("allow-negative-budget", engine, '  if max_modules < 0 { panic("negative analysis cache limit") }', "  ()"),
-    ]
+    # The engine mutants are the module-memo group of mutate.py, where the
+    # preflight proves their anchors before any build; their order there is
+    # the shard assignment below.
+    group = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "module-memo")
+    variants = [(name, edits[0][0], edits) for name, edits in group.items()]
     # Every anchor is applied in every shard, before anything is built. The edits
     # are string replacements and cost nothing, so a shard that builds four
     # mutants still refuses a subject whose anchor has drifted under it, which is
     # the failure this family exists to catch and the one a partial run would
     # otherwise hide until some other shard happened to run.
-    mutants = [(name, path, edit(originals[path], old, new)) for name, path, old, new in variants]
+    mutants = [(name, path, apply(originals[path], edits, path)) for name, path, edits in variants]
     names = [name for name, _, _ in mutants]
     if len(set(names)) != len(names):
         raise RuntimeError('Duplicate engine mutant identity')

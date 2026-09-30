@@ -65,6 +65,7 @@ REGISTRY_READERS = {
     "incremental-semantics-contract/cold.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-configured.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-module-memo.py": "incremental-semantics-contract",
+    "incremental-semantics-contract/module-memo.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-observe.py": "incremental-semantics-contract",
 }
 SHELL_ADAPTERS = {
