@@ -40,6 +40,18 @@ if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   JAVA="$JAVA_HOME/bin/java"
 fi
 
+# Print the JVM chosen above and stop, for scripts that run a jar outside this
+# launcher (seedjar.sh seed_java). The differentials run the seed's jar next to
+# this launcher's toolchain; when they took `java` off PATH instead, a PATH
+# java of another major version put the two sides on different JDKs and the
+# diff reported the JDK's difference as the toolchain's (issue #267: a JDK 26
+# on PATH against the JDK 21 found here). Asking this launcher, rather than
+# repeating its probe, is what keeps the two answers from drifting apart.
+if [ -n "${DAWN_LAUNCHER_PRINT_JAVA:-}" ]; then
+  printf '%s\n' "$JAVA"
+  exit 0
+fi
+
 SJAR="$ROOT/build/dawn-selfhost.jar"
 STD="$ROOT/std"
 
