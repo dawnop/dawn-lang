@@ -4,14 +4,20 @@
 Each target is a fresh JVM; paired analyses alternate order within that JVM.
 Parse replay is separate from loader timing. Peak RSS includes JVM startup,
 stdlib loading and all rounds, so it is not retained semantic-cache memory.
+It is read from the kernel's rusage for the reaped child (`os.wait4`), as
+bench-replay.py does, not from `/usr/bin/time`, which minimal images do not
+ship; `<index>.rss.txt` keeps the one line of `time -v` output it used to hold.
 """
 import argparse
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import statistics
 import subprocess
+import sys
+import threading
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -19,6 +25,47 @@ FIELDS = ["kind", "round", "target", "modules", "parsed_decls", "load_ns",
           "parse_replay_ns", "observed_ns", "module_ns", "check_ns", "comptime_ns",
           "cold_ns", "check_runs", "comptime_runs",
           "observed_diags", "cold_diags", "order"]
+# Every numeric column: all but the leading kind/round/target and the trailing order.
+NUMERIC = FIELDS[3:-1]
+
+
+def peak_rss_kb(maxrss, system=None):
+    """`ru_maxrss` in KiB, the unit `/usr/bin/time -v` reported. Linux already
+    counts KiB; macOS counts bytes (getrusage(2) on each), so it is divided."""
+    system = sys.platform if system is None else system
+    kib = maxrss // 1024 if system == "darwin" else maxrss
+    if kib <= 0:
+        raise RuntimeError(f"no peak RSS: ru_maxrss={maxrss} on {system}")
+    return kib
+
+
+def run_measured(command, cwd, stdout, stderr, timeout):
+    """Run one target and return its peak RSS in KiB.
+
+    `os.wait4` reaps the child and hands back the rusage of that child alone,
+    which is what `/usr/bin/time` measured around the same command. A timeout
+    kills the child and fails the target, as `subprocess.run` would."""
+    process = subprocess.Popen(command, cwd=cwd, stdout=stdout, stderr=stderr)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        process.kill()
+
+    timer = threading.Timer(timeout, expire)
+    timer.start()
+    try:
+        _, status, usage = os.wait4(process.pid, 0)
+    finally:
+        timer.cancel()
+    code = os.waitstatus_to_exitcode(status)
+    # The child is already reaped; tell Popen so it does not wait a second time.
+    process.returncode = code
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(command, timeout)
+    if code != 0:
+        raise subprocess.CalledProcessError(code, command)
+    return peak_rss_kb(usage.ru_maxrss)
 
 
 def main():
@@ -56,10 +103,10 @@ def main():
                        cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=600)
     summaries = []
     for index, target in enumerate(args.targets):
-        command = ["/usr/bin/time", "-v", "-o", str(output / f"{index}.rss.txt"),
-                   str(java), *metadata["jvm_flags"], "-jar", str(output / "bench.jar"), target]
+        command = [str(java), *metadata["jvm_flags"], "-jar", str(output / "bench.jar"), target]
         with (output / f"{index}.tsv").open("w") as stdout, (output / f"{index}.stderr").open("w") as stderr:
-            subprocess.run(command, cwd=ROOT, stdout=stdout, stderr=stderr, check=True, timeout=600)
+            peak = run_measured(command, ROOT, stdout, stderr, 600)
+        (output / f"{index}.rss.txt").write_text(f"\tMaximum resident set size (kbytes): {peak}\n")
         rows = []
         for line in (output / f"{index}.tsv").read_text().splitlines():
             values = line.split("\t")
@@ -68,7 +115,7 @@ def main():
             if len(values) != len(FIELDS) or values[0] != "round":
                 raise RuntimeError(f"invalid benchmark row: {line}")
             row = dict(zip(FIELDS, values))
-            for field in FIELDS[3:17] + ["round"]:
+            for field in NUMERIC + ["round"]:
                 row[field] = int(row[field])
             if row["target"] != target or row["observed_diags"] or row["cold_diags"]:
                 raise RuntimeError(f"invalid analysis: {row}")
