@@ -4387,3 +4387,107 @@ test "the native runtime words an Array bounds panic the way this one does" {
   # the old native wording carried neither the index nor the length
   assert not str.contains(c, "dawn_panic(DAWN_LIT(\"Array index out of bounds\"))")
 }
+
+# ---- the static methods the emitters call by hand ----
+#
+# The JVM emitter reaches these classes two ways. A primitive whose
+# `types.intrinsics()` row names a runtime module is called by the table: the
+# class from the module, the method from the primitive's name, the descriptor
+# from its signature (`emit.rt_intrinsic_ref`). Everything else is written by
+# hand at the call site, and those calls are this list. Each call site takes
+# its method from here, so the list is the whole hand-written set, and a test
+# in emit.dawn reads both halves against the classes the generators above
+# write. The C side's equivalent is emitc's tests against `dawn_rt.h`; the
+# JVM had only the classfile-verify corpora, which see a call only if some
+# program in them reaches it (#205).
+
+## A static method of one of the runtime classes, as an emitter calls it.
+pub type RtMethod = {
+  cls: String,
+  name: String,
+  desc: String
+}
+
+## The call, `INVOKESTATIC` on a runtime class.
+pub fn invoke_rt(m: MethodVisitor, r: RtMethod) -> Unit !io = {
+  m.visitMethodInsn(OP_INVOKESTATIC, r.cls, r.name, r.desc, false)
+  ()
+}
+
+fn rt(cls: String, name: String, desc: String) -> RtMethod =
+  RtMethod { cls: cls, name: name, desc: desc }
+
+fn jlist_desc() -> String = "Ljava/util/List;"
+
+fn string_desc() -> String = "Ljava/lang/String;"
+
+fn array_desc() -> String = "L" ++ ARRAY_CLASS ++ ";"
+
+pub fn rt_strings_cmp() -> RtMethod =
+  rt(STRINGS_CLASS, "cmp", "(" ++ string_desc() ++ string_desc() ++ ")I")
+
+pub fn rt_strings_join() -> RtMethod =
+  rt(STRINGS_CLASS, "join", "(" ++ jlist_desc() ++ string_desc() ++ ")" ++ string_desc())
+
+pub fn rt_strings_from_code_points() -> RtMethod =
+  rt(STRINGS_CLASS, "from_code_points", "(" ++ jlist_desc() ++ ")" ++ string_desc())
+
+pub fn rt_strings_code_points() -> RtMethod =
+  rt(STRINGS_CLASS, "code_points", "(" ++ string_desc() ++ ")" ++ jlist_desc())
+
+pub fn rt_strings_cursor_slice() -> RtMethod =
+  rt(STRINGS_CLASS, "cursor_slice", "(" ++ string_desc() ++ "JJ)" ++ string_desc())
+
+pub fn rt_show_show() -> RtMethod =
+  rt(SHOW_CLASS, "show", "(Ljava/lang/Object;)" ++ string_desc())
+
+pub fn rt_show_quote() -> RtMethod =
+  rt(SHOW_CLASS, "quote", "(" ++ string_desc() ++ ")" ++ string_desc())
+
+pub fn rt_bytes_concat() -> RtMethod = rt(BYTES_CLASS, "concat", "([B[B)[B")
+
+pub fn rt_array_new() -> RtMethod = rt(ARRAY_CLASS, "array_new", "()" ++ array_desc())
+
+pub fn rt_array_push() -> RtMethod =
+  rt(ARRAY_CLASS, "array_push", "(" ++ array_desc() ++ "Ljava/lang/Object;)" ++ array_desc())
+
+pub fn rt_array_to_java() -> RtMethod =
+  rt(ARRAY_CLASS, "array_to_java", "(" ++ array_desc() ++ ")" ++ jlist_desc())
+
+pub fn rt_array_of_java() -> RtMethod =
+  rt(ARRAY_CLASS, "array_of_java", "(" ++ jlist_desc() ++ ")" ++ array_desc())
+
+pub fn rt_io_list_names() -> RtMethod =
+  rt(IO_CLASS, "io_list_names", "(" ++ string_desc() ++ ")" ++ jlist_desc())
+
+pub fn rt_io_run() -> RtMethod =
+  rt(IO_CLASS, "io_run", "(" ++ jlist_desc() ++ string_desc() ++ string_desc() ++ ")J")
+
+pub fn rt_io_cast() -> RtMethod = rt(IO_CLASS, "cast", "(Ljava/lang/Object;Ljava/lang/Class;)LResult;")
+
+pub fn rt_ctl_enter() -> RtMethod = rt(CTL_CLASS, "enter", ctl_enter_desc())
+
+pub fn rt_ctl_yield() -> RtMethod = rt(CTL_CLASS, "yield", ctl_yield_desc())
+
+## Every hand-written runtime call, for the test that reads them against the
+## generated classes. A new `rt_*` above that is not added here is caught by
+## scripts/intrinsic-parity.py, which reads both.
+pub fn emitter_rt_methods() -> List[RtMethod] = [
+  rt_strings_cmp(),
+  rt_strings_join(),
+  rt_strings_from_code_points(),
+  rt_strings_code_points(),
+  rt_strings_cursor_slice(),
+  rt_show_show(),
+  rt_show_quote(),
+  rt_bytes_concat(),
+  rt_array_new(),
+  rt_array_push(),
+  rt_array_to_java(),
+  rt_array_of_java(),
+  rt_io_list_names(),
+  rt_io_run(),
+  rt_io_cast(),
+  rt_ctl_enter(),
+  rt_ctl_yield()
+]

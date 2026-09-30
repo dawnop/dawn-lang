@@ -16,7 +16,7 @@ use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes}
 use check/tast.{TBinOp, BEq, BNeq, BLt, BLe, BGt}
 use ir/core.{ty_key}
 use jvm/codegen.{jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of, is_ref}
-use jvm/rtclasses.{obj, PANIC_CLASS, STRINGS_CLASS}
+use jvm/rtclasses.{obj, PANIC_CLASS, invoke_rt, rt_strings_cmp}
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "org.objectweb.asm.Type"
@@ -224,8 +224,7 @@ fn emit_scalar_cmp_at(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyString -> {
       # code point order, sign only -- not String.compareTo, which is UTF-16
       # code unit order and hands back a unit difference (spec 3.5, RP-06)
-      m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
-        "(Ljava/lang/String;Ljava/lang/String;)I", false)
+      invoke_rt(m, rt_strings_cmp())
     }
     # opacity hides a representation from other modules, not from the language:
     # the value on the stack is the target, so its order is the target's
@@ -318,8 +317,7 @@ pub fn gen_ordering(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
   } else if t == TyString {
     # `<` and `cmp` are the same comparison on String (spec 4.3): code point
     # order, via the runtime's cmp rather than compareTo's UTF-16 unit order
-    m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
-      "(Ljava/lang/String;Ljava/lang/String;)I", false)
+    invoke_rt(m, rt_strings_cmp())
   } else if t == TyBool {
     # two ints 0/1: their difference is already the comparison
     m.visitInsn(OP_ISUB)
