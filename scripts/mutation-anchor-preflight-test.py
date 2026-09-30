@@ -76,6 +76,46 @@ class PreflightTests(unittest.TestCase):
             p.check(p.ROOT, {target: original.replace(old, stale)})
         self.assertEqual((p.ROOT / target).read_text(), original)
 
+    def assert_registry_drift_is_red(self, name, mode, target, before, after):
+        # A rewrite of the subject that leaves one registered anchor stale must
+        # redden the whole-tree preflight, naming the registry and the mode.
+        original = (p.ROOT / target).read_text()
+        self.assertEqual(original.count(before), 1)
+        with self.assertRaisesRegex(p.PreflightError, f"{name}/mutate.py:{mode}") as raised:
+            p.check(p.ROOT, {target: original.replace(before, after)})
+        self.assertIn(target, str(raised.exception))
+        self.assertEqual((p.ROOT / target).read_text(), original)
+
+    def assert_stale_registry_is_red(self, name, mode, index):
+        # The other direction: a registry entry spelled differently from the
+        # subject it quotes is refused, and the untouched registry is not.
+        label = f"scripts/{name}/mutate.py"
+        source = (p.ROOT / label).read_text()
+        _target, old, _new = runpy.run_path(str(p.ROOT / label))["MUTATIONS"][mode][index]
+        literal = old.rstrip("\n").split("\n")[-1]
+        stale = literal.replace("(", "( ", 1)
+        self.assertNotEqual(stale, literal)
+        self.assertEqual(source.count(literal), 1)
+        p.exercise(p.ROOT, source, label, mode, p.ADAPTERS[name])
+        with self.assertRaisesRegex(p.PreflightError, f"{mode}: mutation anchor"):
+            p.exercise(p.ROOT, source.replace(literal, stale), label, mode, p.ADAPTERS[name])
+
+    def test_classfile_verify_anchor_drift_is_caught(self):
+        # #254: these anchors were replace_never_once arguments in run.sh,
+        # checked only when the contract built its seventeen mutant compilers.
+        emit = "selfhost/src/jvm/emit.dawn"
+        self.assert_registry_drift_is_red("classfile-verify", "omit-closure-bottom", emit,
+                                          "  if is_bottom(b.fret) {", "  if is_bottom(b.ret) {")
+        # The second edit of a two-edit mutant is reached and held too.
+        self.assert_registry_drift_is_red("classfile-verify", "use-pop-for-wide-bottom", emit,
+                                          "OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD",
+                                          "OP_NEW, OP_POP2, OP_POP, OP_PUTFIELD")
+        self.assert_registry_drift_is_red("classfile-verify", "reject-wide-sam-bottom",
+                                          "selfhost/src/check/checker.dawn",
+                                          "    r == TyInt || r == TyNever",
+                                          "    r == TyNever || r == TyInt")
+        self.assert_stale_registry_is_red("classfile-verify", "omit-closure-bottom", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

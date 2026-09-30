@@ -17,8 +17,9 @@ gate-map 的编辑应用在它自己的基线文本上，不逐个运行变异�
 bundled-module 表达式按恰好一次检查。builtin-declaration 读取器检查真实的 `comptime_rejects`
 循环拼写，不产出编译器制品。
 
-有两个助手不持有检出源码的锚点：classfile-verify 变异的是生成的字节码，tile-gpu-diff
-的替换文本全部由调用方提供。二者的排除是显式的并会打印出来，不会被默默当作源码覆盖。
+tile-gpu-diff 不持有检出源码的锚点：它的替换文本全部由调用方提供。这条排除是显式的并会打印出来，
+不会被默默当作源码覆盖。classfile-verify 改生成字节码的两个变异器叫 `athrow.py` 与 `privatise.py`，
+不占 `mutate.py` 这个名字，所以不进清单；它的 `mutate.py` 是源码锚点登记表（见下）。
 issue 点名范围之外的内联变异 harness 与文档引文不在本检查覆盖之内。现有的可执行语义契约仍然必须跑：
 能落地不等于变异体能编译、也不等于它能检出所针对的缺陷。
 
@@ -26,8 +27,9 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 对构建很重的契约来说，这等于只有有人去跑它时才会发现。issue #249 就是这种情况：#248 改写了
 `runtime/c/dawn_rt.c` 里的 `dawn_cpath`，本预飞报 OK，delete 契约在第一次本机运行时才红。
 出路是把 harness 的锚点搬进一个 `mutate.py` 登记表，由 harness 与本预飞共同消费，而不是把字面量复制进适配器。
-`scripts/delete-contract/mutate.py` 是第一个；其余 `self-once` harness 在同样迁移之前仍不在覆盖之内。
-在引入它的那棵树上本机实测：应用次数 204 到 213，墙钟 12.9 s 到 13.2 s。
+`scripts/delete-contract/mutate.py` 是第一个；在引入它的那棵树上本机实测：应用次数 204 到 213，墙钟 12.9 s 到 13.2 s。
+#254 依次迁了 classfile-verify（17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数）。
+其余 `self-once` harness 在同样迁移之前仍不在覆盖之内。
 
 CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、次级编辑、
 shell 锚点、未知变异器、顺序插桩，以及拒绝启动构建或直接写盘。每个测试之后检出必须保持不变。

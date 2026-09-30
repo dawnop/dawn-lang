@@ -23,6 +23,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = {
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
+    "classfile-verify": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
     "dependency-heap-contract": ("selfhost/src/main.dawn",),
@@ -39,7 +40,6 @@ ADAPTERS = {
     "source-loop-label-contract": (".",),
 }
 EXCLUSIONS = {
-    "classfile-verify": "mutates generated classfile bytes, not source anchors",
     "tile-gpu-diff": "generic replacement helper; all anchor text is supplied by callers",
 }
 SHELL_ADAPTERS = {
