@@ -3856,7 +3856,19 @@ fn no_lparams() -> List[LambdaParam] = []
 ## Enter a comptime-style isolated context: fresh scope, no enclosing function,
 ## empty effect record (the Kotlin checkComptimeBody's prologue). What comes
 ## back is the whole outgoing frame, which is what makes the restore in
-## leave_isolated one write instead of eight.
+## leave_isolated one write instead of one per field.
+##
+## Everything outside `Frame` reaches the body through `..cx`, and each such
+## field says why that is right with a `# frame-triage:` line in cx.dawn. The
+## one that most needs the argument is `take_cell`, which the assignment arm
+## sets for the length of a right-hand side that may itself be a comptime
+## block (#204). The body cannot observe it: the mark is a symbol id, it is
+## consumed only by a read that resolves to that id, and the body's scope chain
+## is the fresh one below, so no name in it resolves to the enclosing cell --
+## `acc = comptime { acc }` reports `acc` as undefined rather than reading the
+## slot. The arm then clears the mark unconditionally after `check_expr`, so
+## nothing the body left can reach the next assignment either. The test
+## "a comptime block cannot read a handler cell" is the control.
 pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let empty_d: Map[(Int, Int), Int] = map.empty()
@@ -3873,7 +3885,11 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
       dict_syms: empty_d,
       lambda_stack: [],
       loop_stack: [],
-      isolated: true
+      isolated: true,
+      # no enclosing local is in scope, so none is being initialized here:
+      # carried over, `let x = comptime { x }` under an outer `x` would blame
+      # the initializer for what is comptime not seeing locals (#204)
+      initializing: set.empty()
     }
   }, cx.frame)
 }
@@ -3896,7 +3912,7 @@ pub(pkg) fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: In
   Cx { ..cx1, frame: frame }
 }
 
-test "an isolated context reports its own effects, then restores all eight fields" {
+test "an isolated context reports its own effects, then restores all nine fields" {
   var cx = test_cx()
   # The outer frame this enters an isolated context from. Every field differs
   # from what `enter_isolated` installs, including the ones the body then
@@ -3910,6 +3926,7 @@ test "an isolated context reports its own effects, then restores all eight field
   let outer_wit: Map[Eff, (Int, Int, String)] =
     map.insert(map.empty(), EIo, (1, 2, "outer_io"))
   let outer_dicts: Map[(Int, Int), Int] = map.insert(map.empty(), (900, EQ_ID), 77)
+  let outer_init: Set[String] = set.insert(set.empty(), "outer_let")
   cx = Cx {
     ..cx,
     frame: Frame {
@@ -3931,7 +3948,9 @@ test "an isolated context reports its own effects, then restores all eight field
         ctl: false, local_fn: None, handler_of: None
       }],
       loop_stack: [7],
-      isolated: false
+      isolated: false,
+      # the outer `let` whose initializer holds the isolated body
+      initializing: outer_init
     }
   }
   let (cx1, frame) = enter_isolated(cx)
@@ -3945,14 +3964,15 @@ test "an isolated context reports its own effects, then restores all eight field
   assert len(cx1.frame.lambda_stack) == 0
   assert len(cx1.frame.loop_stack) == 0
   assert cx1.frame.isolated
+  assert not set.has(cx1.frame.initializing, "outer_let")
   # the body records io of its own, at its own span, and that is what is reported
   let cx2 = record_effect(cx1, EIo, 5, 8, "println")
   let cx3 = leave_isolated(cx2, frame, "const initializers", 0, 10)
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
   assert cx3.diags[0].lo == 5
-  # ... and every one of the eight fields comes back as the outer context left
-  # it. It was nine: `handle_evs` mapped a `with handle`'s evidence symbol to
+  # ... and every one of the nine fields comes back as the outer context left
+  # it. It was nine before, too: `handle_evs` mapped a `with handle`'s evidence symbol to
   # its arms' effects, which settlement read to decide whether a closure could
   # drop the label. Nothing settles, so the map has no reader and no field.
   assert map.get(cx3.frame.scopes[0], "outer") == Some(61)
@@ -3968,6 +3988,25 @@ test "an isolated context reports its own effects, then restores all eight field
   assert cx3.frame.lambda_stack[0].boundary == 3
   assert cx3.frame.loop_stack == [7]
   assert not cx3.frame.isolated
+  assert set.has(cx3.frame.initializing, "outer_let")
+}
+
+test "a comptime block cannot read a handler cell" {
+  # The written argument for `take_cell` beside `enter_isolated`, run. The
+  # assignment arm marks `acc` for a take and then checks a right-hand side
+  # that is a comptime block naming `acc`. The block starts from a fresh scope,
+  # so the name is undefined there: neither a read of the slot nor a take of
+  # it, whatever the mark says.
+  let src = "effect Emit {\n  fn emit(n: Int) -> Unit\n}\n" ++
+    "pub fn collect() -> List[Int] = {\n" ++
+    "  with handle Emit {\n" ++
+    "    var acc: List[Int] = []\n" ++
+    "    emit(n) => { acc = comptime { acc ++ [1] } }\n" ++
+    "  }\n" ++
+    "  emit(1)\n" ++
+    "  acc\n" ++
+    "}\n"
+  assert msgs_of(src) == ["undefined variable: acc"]
 }
 
 ## Does this expression need an expected type to check at all? (drives the
@@ -5778,7 +5817,7 @@ fn bound_locally(cx: Cx, name: String) -> Bool = {
 }
 
 ## A name that resolves to nothing while its own `let`/`var` initializer is
-## being checked (`Cx.initializing`). Reported as what it is rather than as an
+## being checked (`Frame.initializing`). Reported as what it is rather than as an
 ## unknown name, after Swift's "variable used within its own initial value":
 ## the usual way to get here is not a recursive definition but a stray
 ## trailing operator, which continues the `let` onto the next line, so the
@@ -5813,7 +5852,7 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
       match lookup_fn_sig(cx1, name) {
         Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
         None -> {
-          let cx2 = if set.has(cx1.initializing, name) { own_initializer_err(cx1, name, lo, hi) } else {
+          let cx2 = if set.has(cx1.frame.initializing, name) { own_initializer_err(cx1, name, lo, hi) } else {
             let pool = fn_pool(cx1)
             let hint = moved_or_suggest(cx1, name, local_names(cx1) ++ pool)
             cerr_o(cx1, "undefined variable: ${name}", lo, hi, hint)
@@ -7204,10 +7243,10 @@ fn check_let(
     }
     None -> None
   }
-  let outer_initializing = cx1.initializing
-  cx1 = Cx { ..cx1, initializing: set.insert(outer_initializing, name) }
+  let outer_initializing = cx1.frame.initializing
+  cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, initializing: set.insert(outer_initializing, name) } }
   let (cxb, it, ix) = check_expr(cx1, init, ann_t)
-  cx1 = Cx { ..cxb, initializing: outer_initializing }
+  cx1 = Cx { ..cxb, frame: Frame { ..cxb.frame, initializing: outer_initializing } }
   var t = match ann_t {
     Some(a) -> a
     None -> it
@@ -7754,7 +7793,7 @@ fn check_call(
     None -> {
       # still check the arguments so their subtrees get types/symbols
       let (cxa, _) = check_args_plain(cx1, args, pre0)
-      if set.has(cxa.initializing, callee) {
+      if set.has(cxa.frame.initializing, callee) {
         return (own_initializer_err(cxa, callee, clo, chi), TyError,
           XError(owner_off(cx, lo), owner_off(cx, hi)))
       }

@@ -92,19 +92,26 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## back and `leave_isolated` puts it back with one field write, where both used
 ## to copy eight fields by hand through a twin record called EffFrame.
 ##
-## These nine are exactly the ones that twin listed: the
-## type is the restore set, so a tenth field added here silently widens what an
-## isolated body restores, and that change is invisible to every byte-level
-## gate in the tree (docs/arch-split-design.md D9 and §5.4). What does see it is
-## the eight `isolated_*` cases in scripts/checker-corpus/ plus the inline test
-## beside `leave_isolated`; the acceptance rule for both is the drop-restore
-## matrix in §5.4 -- drop one field from the restore and at least one of them
-## must go red.
+## The first eight are exactly the ones that twin listed; the ninth,
+## `initializing`, joined for #204. The type is the restore set, so a field
+## added here silently widens what an isolated body restores, and that change
+## is invisible to every byte-level gate in the tree (docs/arch-split-design.md
+## D9 and §5.4). What does see it is the `isolated_*` cases in
+## scripts/checker-corpus/ plus the inline test beside `leave_isolated`; the
+## acceptance rule for both is the drop-restore matrix in §5.4 -- drop one
+## field from the restore and at least one of them must go red.
 ## Fields that look like they belong --
 ## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `loop_jumps`,
 ## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
 ## writes the first three from inside an isolated body whenever it holds a
 ## local fn.
+##
+## The opposite mistake is the one that has happened: a field that *is* frame
+## state added to `Cx`, where the `..cx` in `enter_isolated` carries it into the
+## isolated body unasked. `initializing` sat on `Cx` for that reason until #204.
+## So every `Cx` field carries a `# frame-triage:` line saying why it is not
+## frame state, and scripts/checker-corpus/frame-triage.py fails the corpus
+## gate on a field without one.
 pub(pkg) type Frame = {
   # lexical scopes, innermost last; each maps name → symbol id
   scopes: List[Map[String, Int]],
@@ -118,7 +125,22 @@ pub(pkg) type Frame = {
   loop_stack: List[Int],
   # inside a comptime block or a const initializer: no effect of any kind may
   # cross, and v1 refuses declared effects there outright (design §4.5)
-  isolated: Bool
+  isolated: Bool,
+  # the names whose `let`/`var` initializer is being checked right now. A
+  # binding is not in scope in its own right-hand side, so a use of one of
+  # these that resolves to nothing is reported as a use in its own
+  # initializer rather than as an unknown name -- most often it is a line
+  # ending in an operator that carried the `let` onto the next statement
+  # (spec §1.7, #198). `checker.check_let` adds the name for the length of
+  # the initializer and puts the previous set back, so outside an
+  # initializer it is empty.
+  #
+  # It is frame state because it describes the lexical position, as `scopes`
+  # does: an isolated body sees none of the enclosing locals, so none of them
+  # can be the one "being initialized" there. On `Cx` it leaked through
+  # `enter_isolated`'s spread, and `let x = comptime { x + 1 }` under an outer
+  # `x` blamed the initializer for what is comptime not seeing locals (#204).
+  initializing: Set[String]
 }
 
 ## The checker state: every mutable member of the Kotlin Checker class.
@@ -273,15 +295,6 @@ pub(pkg) type Cx = {
   # one read: the decision is made before the side is checked, from the
   # syntax, and `checker.cell_take_ok` is where the conditions are.
   take_cell: Option[Int],
-  # the names whose `let`/`var` initializer is being checked right now. A
-  # binding is not in scope in its own right-hand side, so a use of one of
-  # these that resolves to nothing is reported as a use in its own
-  # initializer rather than as an unknown name -- most often it is a line
-  # ending in an operator that carried the `let` onto the next statement
-  # (spec §1.7, #198). `checker.check_let` adds the name for the length of
-  # the initializer and puts the previous set back, so outside an
-  # initializer it is empty.
-  initializing: Set[String],
   # The functions of this module whose return type or effect a call or a
   # function value was typed from while they were still being inferred
   # (`Sig.inferring`). Those are placeholders, so a body that used one was
@@ -411,7 +424,8 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
       dict_syms: map.empty(),
       lambda_stack: [],
       loop_stack: [],
-      isolated: false
+      isolated: false,
+      initializing: set.empty()
     },
     syms: map.empty(),
     current_eff_vars: map.empty(),
@@ -433,7 +447,6 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     ty_spans: map.empty(),
     record_ty_spans: false,
     take_cell: None,
-    initializing: set.empty(),
     unsealed_uses: set.empty()
   }
 }

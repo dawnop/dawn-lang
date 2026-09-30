@@ -1,0 +1,19 @@
+# checker.dawn: entering a comptime block empties the set of names being
+# initialized (Frame.initializing), and leaving it puts the set back (#204).
+# In `inner` the block cannot see the outer `x`, and that is what the
+# diagnostic must say -- not that `x` is used in its own initializer, which a
+# set carried into the block claimed. In `after` the block sits inside `y`'s
+# own initializer, and `y` named after it is still a use in that initializer.
+pub fn inner() -> Int = {
+  let x = 1
+  let y = {
+    let x = comptime { x + 1 }
+    x
+  }
+  y
+}
+
+pub fn after() -> Int = {
+  let y = comptime { 1 } + y
+  y
+}
