@@ -43,11 +43,15 @@ build_fixture b
 mkdir -p "$work/host/classes"
 javac -d "$work/host/classes" "$here/fixtures/host/src/host/Leak.java"
 
-prepare_case() {
+# A case's subject and app are assembled from <tree>, which holds the two
+# files a mutant may edit at the paths they have in the checkout: the
+# checkout itself for the positive case, a mutated copy for a mutant.
+prepare_case() { # <case-dir> <tree>
   local case_dir=$1
+  local tree=$2
   mkdir -p "$case_dir/subject/src/check" "$case_dir/subject/src/jvm" "$case_dir/app/src"
   cp "$root/selfhost/src/check/jsig.dawn" "$case_dir/subject/src/check/jsig.dawn"
-  cp "$root/selfhost/src/jvm/jreflect.dawn" "$case_dir/subject/src/jvm/jreflect.dawn"
+  cp "$tree/selfhost/src/jvm/jreflect.dawn" "$case_dir/subject/src/jvm/jreflect.dawn"
   printf '\n' >> "$case_dir/subject/src/jvm/jreflect.dawn"
   cat "$here/resource-probe.dawn" >> "$case_dir/subject/src/jvm/jreflect.dawn"
   cat > "$case_dir/subject/dawn.toml" <<'EOF'
@@ -61,78 +65,19 @@ name = "jsig_lease_probe"
 [deps]
 compiler = "$case_dir/subject"
 EOF
-  cp "$here/probe.dawn" "$case_dir/app/src/main.dawn"
+  cp "$tree/scripts/jsig-lease-contract/probe.dawn" "$case_dir/app/src/main.dawn"
 }
 
-mutate_case() {
+# The anchors live in mutate.py, one registered mutation per mutant name, so
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this script reaches that mutant.
+mutate_tree() { # <name> <tree>
   local name=$1
-  local case_dir=$2
-  python3 - "$name" "$case_dir/subject/src/jvm/jreflect.dawn" \
-      "$case_dir/app/src/main.dawn" "$work/a.jar" "$work/b.jar" <<'PY'
-from pathlib import Path
-import json
-import sys
-
-name, reflect_name, probe_name, first_jar, second_jar = sys.argv[1:]
-reflect_path = Path(reflect_name)
-probe_path = Path(probe_name)
-reflect = reflect_path.read_text()
-probe = probe_path.read_text()
-
-def replace_once(text, old, new):
-    count = text.count(old)
-    if count != 1:
-        raise SystemExit(f"mutation anchor occurs {count} times: {old!r}")
-    return text.replace(old, new)
-
-if name == "queries-use-system":
-    reflect = replace_once(
-        reflect,
-        """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
-  let loader = loader_for(jars)
-  lease_with(loader, target_has_asm(loader.base))
-}""",
-        """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
-  let loader = loader_for(jars)
-  JsigLease { jsig: jsig_real(), close: () => loader.closeable.close() }
-}""",
-    )
-elif name == "parent-is-system":
-    reflect = replace_once(
-        reflect,
-        'let parent = ClassLoader.getPlatformClassLoader().expect("platform loader")',
-        'let parent = ClassLoader.getSystemClassLoader().expect("system loader")',
-    )
-elif name == "merge-loaders":
-    reflect = replace_once(
-        reflect,
-        """pub fn jsig_for(jars: List[String]) -> JsigLease !io = {
-  let loader = loader_for(jars)
-  lease_with(loader, target_has_asm(loader.base))
-}""",
-        f"""pub fn jsig_for(jars: List[String]) -> JsigLease !io = {{
-  let loader = loader_for([{json.dumps(first_jar)}, {json.dumps(second_jar)}])
-  lease_with(loader, target_has_asm(loader.base))
-}}""",
-    )
-elif name == "drop-close":
-    reflect = replace_once(
-        reflect,
-        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => loader.closeable.close() }",
-        "JsigLease { jsig: jsig_with(loader.base, asm_bridge), close: () => () }",
-    )
-elif name == "bypass-bracket":
-    probe = replace_once(
-        probe,
-        "bracket(guarded, probe => probe.lease.close(), fail_after_load)",
-        "fail_after_load(guarded)",
-    )
-else:
-    raise SystemExit(f"unknown mutation: {name}")
-
-reflect_path.write_text(reflect)
-probe_path.write_text(probe)
-PY
+  local tree=$2
+  mkdir -p "$tree/selfhost/src/jvm" "$tree/scripts/jsig-lease-contract"
+  cp "$root/selfhost/src/jvm/jreflect.dawn" "$tree/selfhost/src/jvm/jreflect.dawn"
+  cp "$here/probe.dawn" "$tree/scripts/jsig-lease-contract/probe.dawn"
+  python3 "$here/mutate.py" "$name" "$tree" "$work/a.jar" "$work/b.jar"
 }
 
 build_case() {
@@ -152,7 +97,7 @@ run_case() {
 }
 
 positive="$work/positive"
-prepare_case "$positive"
+prepare_case "$positive" "$root"
 build_case positive "$positive"
 if ! run_case "$positive" > "$positive/run.out" 2>&1; then
   cat "$positive/run.out" >&2
@@ -165,8 +110,8 @@ expect_mutant_red() {
   local name=$1
   local expected=$2
   local mutant="$work/mutant-$name"
-  prepare_case "$mutant"
-  mutate_case "$name" "$mutant"
+  mutate_tree "$name" "$mutant/tree"
+  prepare_case "$mutant" "$mutant/tree"
   build_case "$name mutant" "$mutant"
   if run_case "$mutant" > "$mutant/run.out" 2>&1; then
     fail "$name mutant stayed green"

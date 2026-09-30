@@ -35,6 +35,8 @@ ADAPTERS = {
     "incremental-semantics-contract": (".",),
     "inflate-contract": (".",),
     "java-narrowing-contract": ("selfhost",),
+    # The two jar arguments only fill merge-loaders' replacement.
+    "jsig-lease-contract": (".", "fixture-a.jar", "fixture-b.jar"),
     "list-elems-contract": (".",),
     "lsp-lifecycle-contract": (".",),
     "map-reuse-contract": (".",),
