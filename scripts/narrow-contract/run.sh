@@ -32,8 +32,10 @@
 #   emax-off-by-one    bf16's emax is 128 instead of 127       bf16 round overflow
 #
 # `--std` points a compile at the edited copy, as scripts/atomic-write-contract
-# does for std/io; the anchor each mutant rewrites must match exactly once, so
-# a refactor that moves it fails here instead of silently un-mutating.
+# does for std/io. The anchors live in mutate.py, where
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, so a refactor that moves one fails there instead of silently
+# un-mutating here.
 #
 # `no-subnormal-clamp`'s anchor carries the two comment lines above the
 # statement it rewrites, and that is not decoration: knife T4 added a
@@ -80,21 +82,6 @@ rt_obj="$work/dawn_rt.o"
 fork_std() { # dst
   rm -rf "$1"
   cp -r "$root/std" "$1"
-}
-
-# Rewrite exactly one anchor in a forked std/narrow.dawn, or fail.
-patch_std() { # stddir, label, old, new
-  python3 - "$1/narrow.dawn" "$2" "$3" "$4" <<'PY'
-import pathlib
-import sys
-
-path, label, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-p = pathlib.Path(path)
-text = p.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"{label}: anchor is not unique in std/narrow.dawn ({text.count(old)} matches)")
-p.write_text(text.replace(old, new))
-PY
 }
 
 run_jvm() { # stddir, out
@@ -144,13 +131,15 @@ expect_red() { # name, owner, jvm-out, native-out
   echo "PASS  mutant: $name ('$owner' turned red on both backends; $moved section(s) moved)"
 }
 
-mutant() { # name, owner, old, new
-  local name="$1" owner="$2" old="$3" new="$4"
-  local stddir="$work/std-$name"
+mutant() { # name, owner
+  local name="$1" owner="$2"
+  local stddir="$work/$name/std"
+  mkdir -p "$work/$name"
   fork_std "$stddir"
   local before after
   before=$(digest "$stddir/narrow.dawn")
-  patch_std "$stddir" "mutant $name" "$old" "$new"
+  # Rewrite the registered anchor in the forked std, or fail.
+  python3 "$here/mutate.py" "$name" "$work/$name"
   after=$(digest "$stddir/narrow.dawn")
   echo "      $name: std/narrow.dawn md5 $before -> $after"
   run_jvm "$stddir" "$work/$name.jvm" || { cat "$work/$name.jvm.err" >&2; fail "$name mutant did not compile and run on the JVM"; }
@@ -160,25 +149,15 @@ mutant() { # name, owner, old, new
 
 # 1. Ties away from zero instead of to even. A midpoint with an even
 #    significand below it now goes up.
-mutant ties-away "bf16 round ties" \
-  'let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if fl % 2 == 0 { fl } else { fl + 1 }' \
-  'let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else { fl + 1 }'
+mutant ties-away "bf16 round ties"
 
 # 2. No subnormal clamp: below emin the quantum keeps shrinking with the
 #    exponent, so a tiny value keeps all p bits instead of landing on the
 #    grid.
-mutant no-subnormal-clamp "bf16 round subnormal" \
-  '      # the quantum: one unit in the last place at this exponent, clamped
-      # to the subnormal grid below emin
-      let qe = (if e < emin { emin } else { e }) - p + 1' \
-  '      # the quantum: one unit in the last place at this exponent, clamped
-      # to the subnormal grid below emin
-      let qe = e - p + 1'
+mutant no-subnormal-clamp "bf16 round subnormal"
 
 # 3. The overflow threshold one binade too high: a value that should round
 #    to infinity rounds to 2^128 instead.
-mutant emax-off-by-one "bf16 round overflow" \
-  'pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)' \
-  'pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 128)'
+mutant emax-off-by-one "bf16 round overflow"
 
 echo "narrow contract ok"

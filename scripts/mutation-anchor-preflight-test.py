@@ -144,6 +144,21 @@ class PreflightTests(unittest.TestCase):
                                           "while cursor < n {", "while n > cursor {")
         self.assert_stale_registry_is_red("inflate-contract", "member-loop", 0)
 
+    def test_narrow_anchor_drift_is_caught(self):
+        # #254: these anchors were arguments to run.sh's patch_std helper,
+        # checked only after a JVM and a native build per mutant. The subject
+        # is std source, laid out repository-relative in the registry.
+        narrow = "std/narrow.dawn"
+        self.assert_registry_drift_is_red("narrow-contract", "emax-off-by-one", narrow,
+                                          "round_binary(x, 8, -126, 127)",
+                                          "round_binary(x, 8, -126, 127 )")
+        # The comment lines are part of the anchor: they keep it off the
+        # DIRECTED neighbour, so rewording them must be caught too.
+        self.assert_registry_drift_is_red("narrow-contract", "no-subnormal-clamp", narrow,
+                                          "      # to the subnormal grid below emin\n      let qe = (",
+                                          "      # to the subnormal grid under emin\n      let qe = (")
+        self.assert_stale_registry_is_red("narrow-contract", "emax-off-by-one", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
