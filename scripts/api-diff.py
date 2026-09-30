@@ -43,6 +43,19 @@ Two signatures agreeing on both are reported as no change at all, and the
 count of such pairs is printed in the summary so that "renderer moved" is
 visible as a number rather than as silence.
 
+## Parameter renames are their own section
+
+Since named arguments (#207) a parameter name is something a caller writes,
+so `fn slice(b: Bytes, start: Int, end: Int)` becoming `(b: Bytes, from: Int,
+to: Int)` breaks `bytes.slice(b, start: 0, end: 4)` and nothing else. Two
+shapes that differ only in their parameter names are therefore reported
+under "Parameter renames" rather than as "signature changed": it is a
+different fix for the reader (rename the argument label, not rework the
+call), and a release that renames on purpose, as v0.80.0 did, lists them
+together. They count as breaking in the summary. The gate that holds them
+between releases is scripts/param-change.py; this report is where they are
+listed for the people reading a release.
+
 ## Known limitations, restated in every report header
 
   * It sees signatures, not semantics. A behavior change under an unchanged
@@ -67,9 +80,10 @@ import sys
 
 SCHEMA = 1
 
-BREAK, ADD, NARROW = "break", "addition", "narrowing"
+BREAK, RENAME, ADD, NARROW = "break", "rename", "addition", "narrowing"
 SECTIONS = (
     (BREAK, "Breaking"),
+    (RENAME, "Parameter renames"),
     (ADD, "Additions"),
     (NARROW, "Narrowings"),
 )
@@ -117,6 +131,23 @@ def shape_of(sig: str) -> str:
     return s.strip()
 
 
+# A parameter's name and its colon, where a parameter can stand: after the
+# opening parenthesis of a parameter list or after a comma. Type positions
+# never carry a lowercase name followed by `: ` in a rendered signature (type
+# parameter bounds are `T: Ord`, capitalised), so deleting these leaves the
+# shape a positional caller sees.
+PARAM_NAME = re.compile(r"(?<=[(,] )[a-z_][A-Za-z0-9_]*: |(?<=\()[a-z_][A-Za-z0-9_]*: ")
+
+
+def unnamed(shape: str) -> str:
+    """A shape with every parameter name removed."""
+    return PARAM_NAME.sub("", shape)
+
+
+def names_in(shape: str) -> list:
+    return [m.group(0)[:-2] for m in PARAM_NAME.finditer(shape)]
+
+
 class Event:
     def __init__(self, severity: str, where: str, what: str, detail=()):
         self.severity = severity
@@ -156,7 +187,13 @@ class Diff:
                 note += " and narrowed (-" + ", ".join("!" + m for m in lost) + ")"
             self.add(BREAK, where, f"{what} {note}", was_now(old, new))
         elif shape_of(old) != shape_of(new):
-            self.add(BREAK, where, f"{what} signature changed", was_now(old, new))
+            if unnamed(shape_of(old)) == unnamed(shape_of(new)):
+                was = ", ".join(names_in(shape_of(old)))
+                now = ", ".join(names_in(shape_of(new)))
+                self.add(RENAME, where, f"{what} parameters renamed: `{was}` -> `{now}`",
+                         was_now(old, new))
+            else:
+                self.add(BREAK, where, f"{what} signature changed", was_now(old, new))
         elif lost:
             note = "effect row narrowed (-" + ", ".join("!" + m for m in lost) + ")"
             self.add(NARROW, where, f"{what} {note}", was_now(old, new))
@@ -437,6 +474,8 @@ def report(old, new) -> str:
     counts = {sev: sum(1 for e in d.events if e.severity == sev) for sev, _ in SECTIONS}
     out.append("## Summary\n")
     out.append(f"- breaking: {counts[BREAK]}\n"
+               f"- parameter renames (breaking for callers naming them): "
+               f"{counts[RENAME]}\n"
                f"- additions: {counts[ADD]}\n"
                f"- narrowings: {counts[NARROW]}\n"
                f"- rendering-only signature differences (not reported): "
@@ -517,6 +556,49 @@ GOLDEN = (
          "- `u` `m`: `fn put` signature changed",
          "    - was: `fn put(k: String, v: Int) -> Unit`",
          "    - now: `fn put(k: String, v: Int64) -> Unit`"],
+    ),
+    (
+        # #210: a rename is a break for named-argument callers only, so it
+        # is listed apart from the changes that break positional ones.
+        "param renamed",
+        _one(_mod("m", fns=[_fn("slice", "fn slice(b: Bytes, start: Int, end: Int) -> Bytes")])),
+        _one(_mod("m", fns=[_fn("slice", "fn slice(b: Bytes, from: Int, to: Int) -> Bytes")])),
+        ["## Parameter renames (1)", "",
+         "- `u` `m`: `fn slice` parameters renamed: `b, start, end` -> `b, from, to`",
+         "    - was: `fn slice(b: Bytes, start: Int, end: Int) -> Bytes`",
+         "    - now: `fn slice(b: Bytes, from: Int, to: Int) -> Bytes`"],
+    ),
+    (
+        # Two same-typed parameters trading names: the positional shape is
+        # unchanged, which is exactly why a named caller is the one hurt.
+        "same-typed params swapped",
+        _one(_mod("m", fns=[_fn("atan2", "fn atan2(a: Float, b: Float) -> Float")])),
+        _one(_mod("m", fns=[_fn("atan2", "fn atan2(b: Float, a: Float) -> Float")])),
+        ["## Parameter renames (1)", "",
+         "- `u` `m`: `fn atan2` parameters renamed: `a, b` -> `b, a`",
+         "    - was: `fn atan2(a: Float, b: Float) -> Float`",
+         "    - now: `fn atan2(b: Float, a: Float) -> Float`"],
+    ),
+    (
+        # A name AND a type moved: that is a signature change, not a rename.
+        "param renamed and retyped",
+        _one(_mod("m", fns=[_fn("put", "fn put(k: String, v: Int) -> Unit")])),
+        _one(_mod("m", fns=[_fn("put", "fn put(k: String, n: Int64) -> Unit")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn put` signature changed",
+         "    - was: `fn put(k: String, v: Int) -> Unit`",
+         "    - now: `fn put(k: String, n: Int64) -> Unit`"],
+    ),
+    (
+        # Names inside a function-typed parameter's own parameter list do
+        # not exist (`fn(T) -> U`), and a type-parameter bound is capitalised.
+        "generic param renamed",
+        _one(_mod("m", fns=[_fn("find", "fn find[T, !e](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e")])),
+        _one(_mod("m", fns=[_fn("find", "fn find[T, !e](xs: List[T], f: fn(T) -> Bool !e) -> Option[T] !e")])),
+        ["## Parameter renames (1)", "",
+         "- `u` `m`: `fn find` parameters renamed: `xs, pred` -> `xs, f`",
+         "    - was: `fn find[T, !e](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e`",
+         "    - now: `fn find[T, !e](xs: List[T], f: fn(T) -> Bool !e) -> Option[T] !e`"],
     ),
     (
         "ctor field added",

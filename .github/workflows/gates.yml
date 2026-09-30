@@ -3233,6 +3233,11 @@ jobs:
     # whose steps digest is this job's (gate-observations --since
     # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
     # 5s, 285s (572s before), and the timeout to 3x that.
+    # 2026-10-01: a fifth step, the std parameter-name freeze (#210). It
+    # measured 3.3s locally with the toolchain already built (three runs,
+    # 3.31-3.33s: two `doc --stdlib`, the seed's canary and the compare);
+    # doubled for a two-core runner and rounded up to 5s, 10s. 255s + 10s
+    # is inside the 285s claim, so the claim and push-total stand.
     # budget: 3x 285s worst observed plus a tenth (run 36672813147)
     timeout-minutes: 15
     steps:
@@ -3259,6 +3264,13 @@ jobs:
 
       - name: lsp transcript vs N-1
         run: ./scripts/selfhost-lsp-diff.sh
+
+      # #210: std parameter names are API since named arguments, so a
+      # rename has to carry `Param-Change(<item>): <old> -> <new>`. Reads the
+      # seed's `doc --stdlib` on the seed's own std against HEAD's; the
+      # toolchain run-diff built is reused.
+      - name: std parameter names vs N-1
+        run: ./scripts/selfhost-param-diff.sh
 
   # SEM-07: a public declaration may only name identities its audience can
   # name. The evidence is 24 mutant compilers -- one per rule -- and a mutant
