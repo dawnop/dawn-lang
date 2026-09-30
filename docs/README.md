@@ -57,7 +57,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [mutation-anchor-preflight-design.md](mutation-anchor-preflight-design.md) | current | Build-free source mutation applicability checks, explicit helper exclusions and anchor-drift controls. |
 | [record-update-design.md](record-update-design.md) | current | #257：记录更新 `{ ..r, f: v }` 是 Core 节点 `CUpdate`，不再降成「构造器 + 投影」由后端认形状；JVM 对 ≥ 31 字段的记录去 final、复制再赋值，jar 里没有 ≥ 32 个实参的方法（JDK 21 C2 的 JDK-8325467），native 由 rc 整体构造。 |
 | [jvm-operand-jump-design.md](jvm-operand-jump-design.md) | current | #80 的 JVM 操作数循环跳转栈纪律：局部暂存保留求值顺序，不改变 native RC。 |
-| [parser-recovery-design.md](parser-recovery-design.md) | proposed | 诊断批 P1（#190 #192 #193 #195 第 1 步）：语句同步按括号深度、字面量缺逗号就地恢复、头部记录字面量要括号、`=`/`..` 专门诊断、未闭合括号按缩进启发报在开括号。只改无效输入的诊断。 |
+| [parser-recovery-design.md](parser-recovery-design.md) | current | 诊断批 P1（#190 #192 #193 #195 第 1 步）：语句同步按括号深度、字面量缺逗号就地恢复、头部记录字面量要括号、`=`/`..` 专门诊断、未闭合括号按缩进启发报在开括号。只改无效输入的诊断。 |
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |

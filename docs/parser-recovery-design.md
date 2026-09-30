@@ -1,7 +1,7 @@
 # parser 恢复：语句同步、就地补逗号、头部记录字面量与未闭合括号
 
-> 状态：**proposed**。2026-09-30，诊断批 P1，issue #190 #192 #193 #195（第 1 步），分支 `fix/diag-parser-recovery`。
-> 裁决与其它语言实例见调研报告 `research-diagnostics-issues-20260930.md` §3 §5 §6 §7（不在仓内）；本文记做法、取舍与负控。
+> 状态：**current**。2026-09-30，诊断批 P1，issue #190 #192 #193 #195（第 1 步），分支 `fix/diag-parser-recovery`。
+> 裁决与其它语言实例见调研报告 `research-diagnostics-issues-20260930.md` §3 §5 §6 §7（不在仓内）；本文记做法、取舍与负控；四刀均已实现（提交见文末）。
 
 只动 `selfhost/src/front/parser.dawn` 与 `scripts/grammar-corpus/`。只改**无效输入**的诊断：
 每条新分支都长在今天已经报错的路径上，合法程序的 AST、诊断与输出不变，spec 不改。
@@ -64,7 +64,12 @@ EOF 处仍有未闭合的开括号、且全程没有错配的闭括号时：
    另加一条 rustc 没有的限制：只看最外层未闭合开括号之后的对（之前的对不可能吞掉它的闭括号）。
 2. 没有嫌疑对时取最内层未闭合者。
 3. 主 span 放在嫌疑开括号：``unclosed `{` ``，hint 写出 EOF 的行号与配错的那个闭括号的行号。
-4. 原来落在 EOF 的诊断（``expected `}`, found `<eof>` ``）**删除**，新诊断放在它的位置；没有 EOF 诊断时按源码位置插入。
+4. 原来落在 EOF 的诊断（``expected `}`, found `<eof>` ``）**删除**，新诊断按源码位置插入（排在第一条位于开括号之后的诊断前面）。
+5. 没有 EOF 诊断时，说明解析自己恢复了（`sync_decl`）。若开括号所在行已经有诊断（`fn f( = 0`），
+   那条讲的是同一个错、作者也已经看着对的行，不加；只有解析越过了开括号所在行、错报在别处时
+   （未闭合的 `[` 里换行不算分隔，下一条声明被当元素读）才补这一条。这条限制是实测逼出来的：
+   不加它，`declaration_recovery_opaque`、`unterminated_param_list` 两个 reject 例和 parser_test 的三条
+   opaque 恢复测试各多一条「unclosed `(`」噪声。
 
 EOF 诊断选择删除而不是叠加：`Diag` 只有一个 span，两条诊断讲同一个原因只是噪声；它唯一的信息
 「解析读到了文件尾」已经写进 hint。次级 span（`Diag.notes`、渲染 `note:` 行、LSP `relatedInformation`）
@@ -82,3 +87,12 @@ grammar-corpus 每个 issue ≥2 个 reject 用例，钉诊断序列；负控是
 - **`f(0..3)` 这类实参位的 `..`**：走 `want` 的 ``expected `)` ``，与 #193 的语句位同源但不在验收里，
   且要在 `want` 里加上下文分支；留给真遇到的人。
 - **List 的单元素更新 API**：#193 的 hint 只能指向重建或改用 Map；补 API 是 std 的事，另开 issue。
+
+## 落地
+
+| issue | 提交 | 负控（去掉即红的 reject 例） |
+|---|---|---|
+| #190 | `Resync a broken statement by bracket depth and recover missing commas` | `sync_stmt` 直通旧规则：`stmt_recovery_nested_brace` 红（假顶层错回来）；关掉补逗号：三个新例全红 |
+| #192 | `Report a record literal in a header and parse it as one` | `braces_hold_fields` 恒假：两个 `header_record_literal_*` 红（箭头/臂、分隔符/尾块连带回来） |
+| #193 | `Name index assignment and a stray range instead of asking for a newline` | 两个新分支加 `false &&`：`assign_index_or_field`、`range_as_expression` 红（回到通用分隔符文案） |
+| #195 | `Report an unclosed delimiter at its opener` | 跳过重定位：三个 `unclosed_*` 红（回到 `found <eof>`，或 `[` 那条消失）；关掉缩进启发：两个缩进例红（改点名最内层未闭合者） |
