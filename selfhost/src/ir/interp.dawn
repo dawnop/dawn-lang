@@ -782,11 +782,11 @@ fn interp_arms() -> List[String] = [
 ## oversight.
 ##
 ## Read it, with `comptime_refused_after_lowering` below, as the real answer to
-## "what can a `const` do". Spec §7.2.2 answers in prose, and the prose is short
-## by an order of magnitude: it names Map and Set, which are the 18 names of
-## that second list, against the 68 here (audit RP-11). The lists are measured
-## -- the gate test calls each name and checks it really is refused -- and
-## rewriting the spec against them is a separate job.
+## "what can a `const` do". The lists are measured -- the gate test calls each
+## name and checks it really is refused -- and they are what users read too:
+## spec §7.2 names the groups and sends a reader to the `comptime` field of
+## `dawn doc --builtins` for the names (`comptime_refuses`), instead of a prose
+## copy that was short of them by an order of magnitude (audit RP-11, #213).
 fn comptime_rejects() -> List[String] = {
   # `cmp`/`hash` are the prelude relation collapsed at a scalar and `java_hash`
   # is the host's; a const that needs an ordering says so as a trait call,
@@ -903,6 +903,14 @@ fn comptime_refused_after_lowering() -> List[String] = {
   }
   out
 }
+
+## Whether a `const` cannot use the builtin `name`: the union of the two lists
+## above, the same set the mirror's `# comptime: rejected` markers are held to.
+## `dawn doc --builtins` prints it per builtin, so the published answer is these
+## lists rather than a third copy of them, and scripts/builtin-decl-contract
+## holds that export to the markers as well.
+pub(pkg) fn comptime_refuses(name: String) -> Bool =
+  has_name(comptime_rejects(), name) || has_name(comptime_refused_after_lowering(), name)
 
 fn has_name(xs: List[String], n: String) -> Bool = {
   for x in xs {

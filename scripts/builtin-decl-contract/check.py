@@ -34,6 +34,9 @@ stale mirror of an API is worse than no mirror, because a reader believes it.
     P8  the `DAWN_CONSUMES(...)` marks in runtime/c/dawn_rt.h are exactly the
         table's owned positions for every intrinsic whose primitive is
         declared there, and each names a parameter the prototype has
+    P9  the `"comptime"` field `dawn doc --builtins` publishes is on every
+        builtin's entry and on nothing else, and says "refused" exactly where
+        the mirror carries `# comptime: rejected`
 
 P1 and P2 are separate judgements over the same two sets, and are deliberately
 not written as one equality. "The sets differ" names neither side; a mirror
@@ -105,6 +108,21 @@ Map and Set are lowered too, and a `const` still cannot use them -- lowering
 routes them to std/hamt, whose Core the interpreter refuses -- so P5's
 "refused at comptime" is `comptime_rejects` plus that second list.
 
+## The published comptime flag, and why P9 reads the export itself (#213)
+
+Spec §7.2 does not list the builtins a `const` cannot call; it sends the
+reader to the `comptime` field of `dawn doc --builtins`. That field is
+computed from the same two interpreter lists P5 holds the markers to
+(`interp.comptime_refuses`), so P5 and P9 together make the markers, the
+interpreter and the published flag one answer. P9 reads what the command
+prints rather than what `doc.dawn` would compute: a field computed right and
+written against the wrong entry, or dropped from one of the two places a
+builtin can appear (a hand-written group or `internal`), is a failure only
+the output shows. The field is on builtins alone -- a std function's
+foldability is a property of its body, not of this table -- so an entry that
+is no builtin and carries it is red too, including a std module's function
+that shares a builtin's name (`std/bytes.len` and `len`).
+
 ## The owned-argument positions, and why they are three places (#212)
 
 `types.intr_owned_args` answers which argument positions of an intrinsic
@@ -122,12 +140,13 @@ to ask about it and P7 is its check.
 
 ## Usage
 
-    check.py --dump DUMP.tsv [--root REPO_ROOT]
+    check.py --dump DUMP.tsv --export BUILTINS.json [--root REPO_ROOT]
     check.py --self-test        # synthetic tables; every judgement must red
     check.py --mutants          # the real inputs, perturbed in memory
 """
 
 import argparse
+import json
 import pathlib
 import re
 import sys
@@ -499,10 +518,45 @@ def _loop_prefix(tail, where=INTERP):
     return m.group(1)
 
 
+# --- the `dawn doc --builtins` export ---------------------------------------
+
+COMPTIME_VALUES = ("ok", "refused")
+
+
+def read_export(text, where="dawn doc --builtins"):
+    """(flags, stray): every entry of the export that is a place a builtin can
+    appear -- a hand-written group or `internal` -- as `(name, flag or None)`,
+    and every std module function (a `std/...` group) that carries a flag at
+    all, as `(module, name)`.
+
+    A shape this reader does not recognise stops the run instead of reading
+    as zero entries, which would leave P9 comparing against nothing."""
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{where}: not JSON: {exc}")
+    if not isinstance(doc, dict) or "groups" not in doc or "internal" not in doc:
+        raise SystemExit(f"{where}: no `groups` and `internal` keys")
+    flags = []
+    stray = []
+    for group in doc["groups"]:
+        gname = group["name"]
+        for fn in group["fns"]:
+            if gname.startswith("std/"):
+                if "comptime" in fn:
+                    stray.append((gname, fn["name"]))
+            else:
+                flags.append((fn["name"], fn.get("comptime")))
+    for fn in doc["internal"]:
+        flags.append((fn["name"], fn.get("comptime")))
+    return flags, stray
+
+
 # --- the judgements --------------------------------------------------------
 
 
-def judge(mirror_text, dump_text, interp_text, lower_text, header_text, skips_expected=None):
+def judge(mirror_text, dump_text, interp_text, lower_text, header_text, export_text,
+          skips_expected=None):
     """Every failure, as a list of lines. Empty means green."""
     if skips_expected is None:
         skips_expected = ROUNDTRIP_SKIPS
@@ -640,6 +694,45 @@ def judge(mirror_text, dump_text, interp_text, lower_text, header_text, skips_ex
             else:
                 bad.append(f"P5 `{name}` is marked comptime-rejected and is not")
 
+    # P9 -- the published comptime flag says what the markers say, on every
+    # builtin and on nothing else
+    flags, stray = read_export(export_text)
+    for module, name in stray:
+        bad.append(
+            f"P9 `{module}.{name}` is a std function and carries a comptime flag; "
+            f"the flag is a fact about builtins only"
+        )
+    seen = {}
+    for name, flag in flags:
+        if name not in builtins:
+            if flag is not None:
+                bad.append(f"P9 `{name}` is no builtin and the export flags it comptime {flag!r}")
+            continue
+        if flag is None:
+            bad.append(f"P9 the builtin `{name}` is exported without a comptime flag")
+            continue
+        if flag not in COMPTIME_VALUES:
+            bad.append(f"P9 `{name}` is exported comptime {flag!r}, which is neither \"ok\" nor \"refused\"")
+            continue
+        if name in seen:
+            bad.append(f"P9 the builtin `{name}` is exported twice")
+            continue
+        seen[name] = flag
+    for name in sorted(set(builtins) - {n for n, _ in flags}):
+        bad.append(f"P9 the builtin `{name}` is missing from the export")
+    for name in sorted(set(seen) & set(mirror)):
+        marked = mirror[name][2]
+        if seen[name] == "refused" and not marked:
+            bad.append(
+                f"P9 the export says `{name}` is refused at comptime, and {MIRROR} "
+                f"carries no marker for it"
+            )
+        if seen[name] == "ok" and marked:
+            bad.append(
+                f"P9 the export says a `const` may call `{name}`, and {MIRROR} "
+                f"marks it comptime-rejected"
+            )
+
     # P6 -- a rendering is a spelling of the signature, not a picture of it
     #
     # Three things, and the first two are what keep the third from being
@@ -764,6 +857,50 @@ fn trie_a() -> Unit # comptime: rejected
 fn trie_b() -> Unit
 """
 
+# The export in the shape `dawn doc --builtins` prints, cut to what P9 reads:
+# the builtins across a hand-written group and `internal`, a group entry the
+# prelude implements in std (`wrapped`, no flag), and a std module function
+# sharing a builtin's name (`std/k.keep`, no flag).
+GOOD_EXPORT_DOC = {
+    "types": [],
+    "groups": [
+        {"name": "misc", "fns": [
+            {"name": "keep", "sig": "fn keep(x: Int) -> Int", "comptime": "ok", "doc": ""},
+            {"name": "refuse", "sig": "fn refuse() -> Unit !io", "comptime": "refused", "doc": ""},
+            {"name": "gone", "sig": "fn gone(s: String) -> Int", "comptime": "ok", "doc": ""},
+            {"name": "wrapped", "sig": "fn wrapped() -> Int", "doc": ""},
+        ]},
+        {"name": "std/k", "fns": [{"name": "keep", "sig": "fn keep() -> Int", "doc": ""}],
+         "effects": []},
+    ],
+    "internal": [
+        {"name": n, "sig": f"fn {n}() -> Unit", "comptime": "refused"}
+        for n in ("fam_a", "fam_b", "wide_c", "wide_d", "late", "trie_a")
+    ] + [{"name": "trie_b", "sig": "fn trie_b() -> Unit", "comptime": "ok"}],
+}
+
+
+def export_with(edit, doc=None):
+    """The export as text after `edit` changed a deep copy of it in place."""
+    doc = json.loads(json.dumps(GOOD_EXPORT_DOC if doc is None else doc))
+    edit(doc)
+    return json.dumps(doc, indent=2)
+
+
+GOOD_EXPORT = export_with(lambda d: None)
+
+
+def _entry(doc, group, name):
+    fns = doc["internal"] if group is None else next(
+        g["fns"] for g in doc["groups"] if g["name"] == group
+    )
+    hits = [f for f in fns if f["name"] == name]
+    if len(hits) != 1:
+        raise SystemExit(f"mutation anchor drifted: `{name}` in {group or 'internal'} "
+                         f"occurs {len(hits)} times")
+    return hits[0]
+
+
 SELF_TESTS = [
     (
         "P1",
@@ -882,6 +1019,22 @@ SELF_TESTS = [
         GOOD_INTERP,
         GOOD_HEADER.replace("DAWN_CONSUMES(1)", "DAWN_CONSUMES(2)"),
     ),
+    # ... the published comptime flag (P9): flipped either way, missing on a
+    # builtin, on a std function or a prelude-in-std name, absent, or unreadable
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, "misc", "refuse").update({"comptime": "ok"}))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, None, "trie_b").update({"comptime": "refused"}))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, "misc", "keep").pop("comptime"))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, "std/k", "keep").update({"comptime": "ok"}))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, "misc", "wrapped").update({"comptime": "ok"}))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: d["internal"].remove(_entry(d, None, "late")))),
+    ("P9", GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_HEADER,
+     export_with(lambda d: _entry(d, None, "late").update({"comptime": "maybe"}))),
     # ... and the table names something that is no intrinsic (M3)
     (
         "M3",
@@ -900,7 +1053,7 @@ SELF_TESTS = [
 
 
 def self_test():
-    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_LOWER, GOOD_HEADER, GOOD_SKIPS)
+    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_LOWER, GOOD_HEADER, GOOD_EXPORT, GOOD_SKIPS)
     if bad:
         print("SELF-TEST FAIL: the clean synthetic table is not green:")
         for line in bad:
@@ -911,7 +1064,8 @@ def self_test():
     for case in SELF_TESTS:
         label, mirror, dump, interp = case[:4]
         header = case[4] if len(case) > 4 else GOOD_HEADER
-        found = judge(mirror, dump, interp, GOOD_LOWER, header, GOOD_SKIPS)
+        export = case[5] if len(case) > 5 else GOOD_EXPORT
+        found = judge(mirror, dump, interp, GOOD_LOWER, header, export, GOOD_SKIPS)
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"SELF-TEST FAIL: the {label} perturbation stayed green")
@@ -933,37 +1087,38 @@ def self_test():
 # written: the working tree never holds a mutant.
 
 
-def mutate_p1_add(mirror, dump, interp, lower, header):
-    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp, lower, header
+def mutate_p1_add(mirror, dump, interp, lower, header, export):
+    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp, lower, header, export
 
 
-def mutate_p2_drop_popcount(mirror, dump, interp, lower, header):
-    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp, lower, header
+def mutate_p2_drop_popcount(mirror, dump, interp, lower, header, export):
+    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp, lower, header, export
 
 
-def mutate_p3_param_name(mirror, dump, interp, lower, header):
-    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp, lower, header
+def mutate_p3_param_name(mirror, dump, interp, lower, header, export):
+    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp, lower, header, export
 
 
-def mutate_p3_return_type(mirror, dump, interp, lower, header):
+def mutate_p3_return_type(mirror, dump, interp, lower, header, export):
     return (
         _sub(mirror, "fn parse_int(s: String) -> Option[Int]", "fn parse_int(s: String) -> Int"),
         dump,
         interp,
         lower,
         header,
+        export,
     )
 
 
-def mutate_p4_add_pub(mirror, dump, interp, lower, header):
-    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp, lower, header
+def mutate_p4_add_pub(mirror, dump, interp, lower, header, export):
+    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp, lower, header, export
 
 
-def mutate_p4_drop_pub(mirror, dump, interp, lower, header):
-    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower, header
+def mutate_p4_drop_pub(mirror, dump, interp, lower, header, export):
+    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower, header, export
 
 
-def mutate_p5_move_marker(mirror, dump, interp, lower, header):
+def mutate_p5_move_marker(mirror, dump, interp, lower, header, export):
     """Take the marker off a name that is refused and put it on one that is
     not: one edit, both directions of P5."""
     lines = mirror.split("\n")
@@ -971,17 +1126,17 @@ def mutate_p5_move_marker(mirror, dump, interp, lower, header):
     on = _index_of(lines, "pub fn parse_int(s: String) -> Option[Int]")
     lines[off] = lines[off][: -len(MARKER)]
     lines[on] = lines[on] + MARKER
-    return "\n".join(lines), dump, interp, lower, header
+    return "\n".join(lines), dump, interp, lower, header, export
 
 
-def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower, header):
+def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower, header, export):
     """Give `parse_int` its interpreter arm back: the dead arm #185 removed.
     Lowering rewrites every call to it, so the name is in the lowered group
     and an arm for it is in two groups at once."""
-    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower, header
+    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower, header, export
 
 
-def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower, header):
+def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower, header, export):
     """Put back the marker #185 took off: `parse_int_radix` folds through
     std/fmt's Core, so a mirror saying a `const` cannot use it is wrong."""
     return (
@@ -994,6 +1149,7 @@ def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower, header):
         interp,
         lower,
         header,
+        export,
     )
 
 
@@ -1001,7 +1157,7 @@ SORT_BY_BOUND = "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List
 SORT_BY_UNBOUND = "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
 
 
-def mutate_p6_unbind_sort_by(mirror, dump, interp, lower, header):
+def mutate_p6_unbind_sort_by(mirror, dump, interp, lower, header, export):
     """The table before this judgement existed: `sort_by` raises `!e` and does
     not record that it bound it (`eff1` rather than `effp1` in
     `check/types.dawn`), so the binder is missing from what it renders.
@@ -1017,10 +1173,10 @@ def mutate_p6_unbind_sort_by(mirror, dump, interp, lower, header):
     lines[at] = "builtin\tsort_by\tpub\t" + SORT_BY_UNBOUND
     rt = _index_of(lines, "roundtrip\tsort_by\t" + SORT_BY_BOUND + "\t" + SORT_BY_BOUND)
     lines[rt] = "roundtrip\tsort_by\t" + SORT_BY_UNBOUND + "\t" + SORT_BY_BOUND
-    return mirror, "\n".join(lines), interp, lower, header
+    return mirror, "\n".join(lines), interp, lower, header, export
 
 
-def mutate_p6_skip_popcount(mirror, dump, interp, lower, header):
+def mutate_p6_skip_popcount(mirror, dump, interp, lower, header, export):
     """Declare a signature unreadable that reads back fine. This is how P6
     would erode: not by going red, but by the dump quietly excusing whatever
     stopped agreeing with itself. The skip list is held to what is recorded,
@@ -1030,28 +1186,29 @@ def mutate_p6_skip_popcount(mirror, dump, interp, lower, header):
         lines, "roundtrip\tpopcount\tfn popcount(n: Int) -> Int\tfn popcount(n: Int) -> Int"
     )
     lines[at] = "roundtrip-skip\tpopcount"
-    return mirror, "\n".join(lines), interp, lower, header
+    return mirror, "\n".join(lines), interp, lower, header, export
 
 
-def mutate_p7_drop_list_push(mirror, dump, interp, lower, header):
+def mutate_p7_drop_list_push(mirror, dump, interp, lower, header, export):
     """The issue's negative control, in memory: `list_push` loses its `[0]` in
     the table, and nothing else moves. The mirror still says it consumes its
     list, and P7 is what says the two parted -- `list_push` has no C
     primitive, so P8 has nothing to say about it."""
-    return mirror, _drop_line(dump, "owned\tlist_push\t0"), interp, lower, header
+    return mirror, _drop_line(dump, "owned\tlist_push\t0"), interp, lower, header, export
 
 
-def mutate_p7_drop_array_with_marker(mirror, dump, interp, lower, header):
+def mutate_p7_drop_array_with_marker(mirror, dump, interp, lower, header, export):
     return (
         _sub(mirror, "-> Array[T] # owned: 0, 2 # comptime: rejected", "-> Array[T] # comptime: rejected"),
         dump,
         interp,
         lower,
         header,
+        export,
     )
 
 
-def mutate_p8_consume_where_the_table_borrows(mirror, dump, interp, lower, header):
+def mutate_p8_consume_where_the_table_borrows(mirror, dump, interp, lower, header, export):
     """A primitive declared as consuming whose intrinsic nobody registered:
     the failure P8 exists for. `array_push` borrows; say otherwise in C."""
     return (
@@ -1064,20 +1221,22 @@ def mutate_p8_consume_where_the_table_borrows(mirror, dump, interp, lower, heade
             "dawn_array *dawn_array_push(dawn_array *a, void *x);",
             "dawn_array *dawn_array_push(dawn_array *a, void *x) DAWN_CONSUMES(0);",
         ),
+        export,
     )
 
 
-def mutate_p8_drop_cell_set_mark(mirror, dump, interp, lower, header):
+def mutate_p8_drop_cell_set_mark(mirror, dump, interp, lower, header, export):
     return (
         mirror,
         dump,
         interp,
         lower,
         _sub(header, "void dawn_cell_set(void *c, void *x) DAWN_CONSUMES(1);", "void dawn_cell_set(void *c, void *x);"),
+        export,
     )
 
 
-def mutate_m3_owned_names_no_intrinsic(mirror, dump, interp, lower, header):
+def mutate_m3_owned_names_no_intrinsic(mirror, dump, interp, lower, header, export):
     """A table entry spelling no intrinsic, and the mirror dutifully agreeing:
     P7 is green about it, and M3 is what reads the name."""
     return (
@@ -1086,7 +1245,36 @@ def mutate_m3_owned_names_no_intrinsic(mirror, dump, interp, lower, header):
         interp,
         lower,
         header,
+        export,
     )
+
+
+def _flip_export(export, group, name, flag):
+    doc = json.loads(export)
+    entry = _entry(doc, group, name)
+    if flag is None:
+        entry.pop("comptime")
+    else:
+        entry["comptime"] = flag
+    return json.dumps(doc, indent=2)
+
+
+def mutate_p9_flip_bytes_utf8(mirror, dump, interp, lower, header, export):
+    """The issue's negative control, in memory: the export says a `const` may
+    call `bytes_utf8`, and nothing else moves. P5 is green -- the marker and
+    the interpreter still agree -- so P9 is the only judgement that reads it."""
+    return mirror, dump, interp, lower, header, _flip_export(export, None, "bytes_utf8", "ok")
+
+
+def mutate_p9_drop_len_s_flag(mirror, dump, interp, lower, header, export):
+    return mirror, dump, interp, lower, header, _flip_export(export, "list", "len", None)
+
+
+def mutate_p9_flag_std_bytes_len(mirror, dump, interp, lower, header, export):
+    """`std/bytes.len` is a Dawn function sharing the builtin `len`'s name. A
+    flag keyed on the name alone would put it there; P9 keys on where the
+    entry sits."""
+    return mirror, dump, interp, lower, header, _flip_export(export, "std/bytes", "len", "ok")
 
 
 MUTANTS = [
@@ -1106,6 +1294,9 @@ MUTANTS = [
     ("p8-consume-where-the-table-borrows", mutate_p8_consume_where_the_table_borrows, "P8"),
     ("p8-drop-cell_set-s-consumes-mark", mutate_p8_drop_cell_set_mark, "P8"),
     ("m3-owned-names-no-intrinsic", mutate_m3_owned_names_no_intrinsic, "M3"),
+    ("p9-flip-bytes_utf8-in-the-export", mutate_p9_flip_bytes_utf8, "P9"),
+    ("p9-drop-len-s-flag", mutate_p9_drop_len_s_flag, "P9"),
+    ("p9-flag-std-bytes-len", mutate_p9_flag_std_bytes_len, "P9"),
 ]
 
 
@@ -1128,9 +1319,9 @@ def _index_of(lines, exact):
     return hits[0]
 
 
-def run_mutants(mirror, dump, interp, lower, header):
+def run_mutants(mirror, dump, interp, lower, header, export):
     rc = 0
-    clean = judge(mirror, dump, interp, lower, header)
+    clean = judge(mirror, dump, interp, lower, header, export)
     if clean:
         print("MUTANT FAIL: the real inputs are not green to begin with:")
         for line in clean:
@@ -1138,7 +1329,7 @@ def run_mutants(mirror, dump, interp, lower, header):
         return 1
     print("OK   the real mirror is green (the positive control)")
     for name, fn, label in MUTANTS:
-        found = judge(*fn(mirror, dump, interp, lower, header))
+        found = judge(*fn(mirror, dump, interp, lower, header, export))
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"MUTANT FAIL: {name} stayed green")
@@ -1151,6 +1342,7 @@ def run_mutants(mirror, dump, interp, lower, header):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dump", help="the dump project's output")
+    ap.add_argument("--export", help="what `dawn doc --builtins` printed")
     ap.add_argument("--root", default=None)
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--mutants", action="store_true")
@@ -1162,22 +1354,30 @@ def main():
     root = pathlib.Path(args.root) if args.root else pathlib.Path(__file__).resolve().parents[2]
     if not args.dump:
         ap.error("--dump is required (scripts/builtin-decl-contract/run.sh produces it)")
+    if not args.export:
+        ap.error("--export is required (scripts/builtin-decl-contract/run.sh produces it)")
     mirror = (root / MIRROR).read_text(encoding="utf-8")
     dump = pathlib.Path(args.dump).read_text(encoding="utf-8")
     interp = (root / INTERP).read_text(encoding="utf-8")
     lower = (root / LOWER).read_text(encoding="utf-8")
     header = (root / HEADER).read_text(encoding="utf-8")
+    export = pathlib.Path(args.export).read_text(encoding="utf-8")
 
     if args.mutants:
-        return run_mutants(mirror, dump, interp, lower, header)
+        return run_mutants(mirror, dump, interp, lower, header, export)
 
-    bad = judge(mirror, dump, interp, lower, header)
+    bad = judge(mirror, dump, interp, lower, header, export)
     if bad:
         print(f"FAIL: {MIRROR} and the builtin table disagree")
         for line in bad:
             print("  " + line)
         print()
         print(f"  the table in selfhost/src/check/types.dawn is the truth; edit {MIRROR}")
+        if any(line.startswith("P9") for line in bad):
+            print(
+                f"  (P9: the export is selfhost/src/doc.dawn's `comptime_field`, which "
+                f"reads ir/interp.dawn's lists; if P5 is green the wrong side is the export)"
+            )
         if any(line.startswith(("P7", "P8", "M3")) for line in bad):
             print(
                 f"  (P7, P8, M3: an owned position is a fact about the runtime, "
@@ -1187,6 +1387,7 @@ def main():
     mirror_decls, _ = parse_mirror(mirror)
     builtins, lowering, roundtrips, skips, owned = parse_dump(dump)
     marks, _ = read_runtime_consumes(header)
+    flagged = sum(1 for _, flag in read_export(export)[0] if flag == "refused")
     pub = sum(1 for is_pub, _, _ in mirror_decls.values() if is_pub)
     rejected = sum(1 for _, _, r in mirror_decls.values() if r)
     print(
@@ -1197,7 +1398,9 @@ def main():
         f"and {len(roundtrips)} of the "
         f"signatures read back as themselves ({len(skips)} named as spellings "
         f"the parser is not offered); {len(owned)} intrinsics consume an "
-        f"argument, and the mirror and {len(marks)} runtime prototypes say which"
+        f"argument, and the mirror and {len(marks)} runtime prototypes say which; "
+        f"`dawn doc --builtins` flags {flagged} of its {len(builtins)} builtins "
+        f"refused at comptime, the same ones"
     )
     return 0
 

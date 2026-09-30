@@ -9,8 +9,9 @@
 #   1. the checker's own judgements are made to fail, against a synthetic
 #      table (`--self-test`). A judgement whose red has never been observed is
 #      a judgement nobody can rely on.
-#   2. the real comparison: dump the table out of the compiler and compare.
-#   3. sixteen mutants (matrix.txt), each a perturbation of the real inputs held
+#   2. the real comparison: dump the table out of the compiler, take what
+#      `dawn doc --builtins` publishes, and compare.
+#   3. nineteen mutants (matrix.txt), each a perturbation of the real inputs held
 #      in memory. The self-test proves the judgements *can* be red; these
 #      prove they are red about this repository, which a synthetic table
 #      cannot show -- a checker reading the wrong file passes every synthetic
@@ -57,8 +58,11 @@ python3 "$here/check.py" --self-test
 
 "$dawn" --version > /dev/null
 "$dawn" run "$here/dump" > "$work/dump.tsv"
+# P9 reads the published comptime flag as the command prints it, not as
+# doc.dawn would compute it: the export is the thing spec 7.2 points at.
+"$dawn" doc --builtins > "$work/builtins.json"
 
-python3 "$here/check.py" --dump "$work/dump.tsv" --root "$root"
-python3 "$here/check.py" --dump "$work/dump.tsv" --root "$root" --mutants
+python3 "$here/check.py" --dump "$work/dump.tsv" --export "$work/builtins.json" --root "$root"
+python3 "$here/check.py" --dump "$work/dump.tsv" --export "$work/builtins.json" --root "$root" --mutants
 
 echo "PASS  the builtin mirror and the builtin table say the same thing"

@@ -29,6 +29,11 @@ What goes in, and why the shape is ours rather than `dawn doc`'s:
   * doc comments are dropped. This is an API snapshot, not a documentation
     archive: prose churns every release, it would dominate both the file size
     and any diff of two files, and `api-diff.py` deliberately never reads it.
+  * a builtin's `comptime` flag ("ok" / "refused") is kept. Whether a `const`
+    may call a builtin is part of what a program can rely on, and spec 7.2
+    sends readers to that flag rather than listing the names, so it is surface
+    in the same sense a signature is. Only builtins carry it (doc.dawn,
+    `comptime_field`); `api-diff.py` compares signatures and does not read it.
 
 Unknown keys are an error, not a silent drop. If `dawn doc` grows a field --
 another kind of declaration, another attribute on a signature -- a snapshot
@@ -59,7 +64,7 @@ SCHEMA = 1
 DOC_KEYS = {"modules", "groups", "traits"}
 MODULE_KEYS = {"path", "doc", "fns", "types", "consts", "traits", "effects", "impls"}
 ENTRY_KEYS = {
-    "fns": {"name", "sig", "doc"},
+    "fns": {"name", "sig", "comptime", "doc"},
     "consts": {"name", "type", "doc"},
     "types": {"name", "record", "typeParams", "ctors", "doc"},
     "traits": {"name", "typeParam", "assoc", "effectAssoc", "methods", "doc"},
@@ -252,7 +257,9 @@ CLEAN_DOC = {
         "fns": [{"name": "g", "sig": "fn g() -> Int"}],
     }],
     "groups": [{"name": "io", "fns": [{"name": "println",
-                                       "sig": "fn println(s: String) -> Unit !io"}]}],
+                                       "sig": "fn println(s: String) -> Unit !io"},
+                                      {"name": "args", "sig": "fn args() -> List[String] !io",
+                                       "comptime": "refused", "doc": "prose"}]}],
     "traits": [{"name": "Eq", "typeParam": "T", "assoc": ["Item"],
                 "methods": [{"name": "eq", "sig": "fn eq[T: Eq](a: T, b: T) -> Bool",
                              "hasDefault": False}]}],
@@ -276,6 +283,7 @@ def self_test(verbose: bool = True) -> int:
         ("dep/mod" not in paths, "a dependency's module was not filtered out"),
         (modules[2]["traits"][0]["assoc"] == ["It"], "the object assoc form was not flattened"),
         (modules[1]["traits"][0]["assoc"] == ["Item"], "the string assoc form was not kept"),
+        (modules[0]["fns"][1].get("comptime") == "refused", "a builtin's comptime flag was not kept"),
     ):
         if not want:
             failures.append(why)
