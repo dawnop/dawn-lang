@@ -391,6 +391,8 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
    形态切换打印 `shape changed at <sha>: N->M jobs, declared X->Y`，不判红。
 3. **tile 触发**只数六个分片全部 success 的运行（去重后那种只有 dedupe 一个 job 的运行单列一行，不算触发）；`tile_median` 同理。限值 20% 保留，含义变成「去重后仍要跑的比例」。
 
+只降声明、实测不跟着降，比值上升那条会红：这是有意的，声明低于 push 实际成本正是这张报表要显示的漂移（主会话 09-30 裁定）。
+
 **最少样本**：两边各至少 10 次成功 push，同形态那条要求同形态的运行两边各至少 10 次，不够就在 summary 写 `insufficient sample`，退出 0，不开 issue。
 
 用报告 §一 的数字造的夹具（`gate-totals.py --selftest`）：09-29 那份（本周 46 次成功、上周 6 次）判为 insufficient sample，只报告；
@@ -406,7 +408,8 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
   不写幅度；没有这行的正文（预算审计、pin 检查）由脚本补一行 `digest-<去掉 Run: 链接后正文的 sha256 前 16 位>`。
   与该 issue 最新一条评论（没有评论时是 issue 正文）的标记相同就不评论，只写 step summary。
 - 自测 `scripts/nightly-issue.sh --self-test`：PATH 上放一个桩 `gh`，10 个用例（新建、同判词静默、异判词评论、无评论时比 issue 正文、长标题与 PR 不算、列表失败两次后成功、失败三次红、无标记按摘要）。
-  它不在任何门里跑（`scripts/gate-map/unseen.txt` 的 no-gate 理由不变）。
+  它与 `gate-totals.py --self-test` 一起在 gates.yml 的 tree-policy 里每次 push 跑（本机 0.22 s 与 0.04 s），`scripts/gate-map/unseen.txt` 里它的 no-gate 条目随之删除。
+  tree-policy 的 432 s 声明不重述：09-24 以来最坏 352 s。
 - #231 现有评论都没有标记，所以合入后第一晚若仍红会再评论一次（`(none) -> tile`），之后判词不变就不再评论。
 
 ### 不做的（理由）

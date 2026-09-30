@@ -799,6 +799,17 @@ jobs:
       - name: every gate job is wired to the pull-request plan
         run: python3 scripts/gate-map/plan.py --check-wiring --selftest
 
+      # The nightly totals report and its issue step run only on a schedule,
+      # where a broken rule is found a day late and only if it fires. Their
+      # self-tests need no network and no token (nightly-issue.sh drives a
+      # stub gh), so they are held here on every push. Measured locally
+      # 2026-09-30: 0.04s and 0.22s. The 432s claim above is not restated:
+      # this job's worst run since 09-24 is 352s.
+      - name: the nightly totals report and its issue step keep their rules
+        run: |
+          python3 scripts/gate-totals.py --self-test
+          scripts/nightly-issue.sh --self-test
+
       # The evidence tier (the plan job's first step) and release.yml's guard
       # read one module, release_evidence.py, and publish.py --rerun-ci is
       # what re-runs ci once a status lands. Their refusals are the whole of
