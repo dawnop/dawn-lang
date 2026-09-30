@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 79341232e4574cb4 -->
+<!-- doc-check: translation-of docs/spec.md @ 926cd523e0bfc090 -->
 
 # Dawn Language Specification
 
@@ -3272,8 +3272,9 @@ into Dawn values (§9.6); passing null for an `Option` argument is unsupported (
 > intercepts is a **fault** — a failure caused by the outside world — and ever since
 > native grew failure kinds that classification has been shared by both backends
 > ([`native-backend-plan.md`](native-backend-plan.md) §14.9) and has nothing to do with Java; the name outlived its
-> reason by a while. The old name gets you "`java_try` is not a builtin; renamed to
-> `catch_fault`".
+> reason by a while. The old name's migration hint expired at v0.41.0 under the
+> expiry rule of `std/moved.txt` ([`std-moved-design.md`](std-moved-design.md)), so
+> writing `java_try` today gets the ordinary undefined-function diagnostic.
 
 Dawn has no exceptions: an exception thrown by a Java call passes through unchanged by
 default and terminates the program (panic semantics). But **an expected foreign failure**

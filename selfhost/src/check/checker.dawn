@@ -5793,10 +5793,10 @@ pub(pkg) fn resolve_local(
   (cx, None)
 }
 
-## The hint for a name that used to exist: where it moved (the v0.5.0 flat
-## spellings, populated by the std loader, plus the intrinsics std has since
-## taken over), else did-you-mean. No version in the message -- the names in
-## that map left at different times.
+## The hint for a bare name that is not a builtin: where it lives (a std
+## export's qualified spelling, or a `builtin` entry of std/moved.txt, both put
+## in `cx.moved` by the std loader), else did-you-mean. No version in the
+## message -- the names in that map left at different times.
 pub(pkg) fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> Option[String] =
   match map.get(cx.moved, name) {
     Some(w) -> Some("`" ++ name ++ "` is not a builtin; " ++ w)
@@ -10418,38 +10418,14 @@ fn check_java_static_field(
 
 # ---- method calls (x.f(a)) ----
 
-## The std names that stopped being exported, and how to write them now.
+## The `cx.moved` key of a module-qualified entry of std/moved.txt: the module
+## path, a dot, the name that left (docs/std-moved-design.md §1).
 ##
-## `cx.moved` cannot answer this. That table is keyed by the FLAT builtin
-## spelling (`str_len`, `map_insert`) and is read only where a bare name fails
-## to resolve; a module-qualified call is looked up by (alias, name) and, when
-## that misses, reports "no exported function" without ever consulting it.
-##
-## Both halves measured by deleting the entries again (2026-08-06): without
-## this table `str.substring` answers with an empty hint -- `suggest.hint` does
-## not reach `slice` from `substring` -- and `fmt.atoi`, which is still there
-## and merely no longer pub, answers "add `pub` to its declaration in std/fmt",
-## which is advice to edit the standard library. That second one is also why
-## the lookup goes *before* the private branch rather than after it.
-##
+## Flat entries are keyed by the bare name, which never contains a `/`, so the
+## two kinds share one table without colliding and `Cx` needs no second one.
 ## Keyed by module path rather than alias: `use std/str as s` renames the
 ## alias, not the module, and the hint is about the module.
-fn renamed_std_fn(mod_path: String, name: String) -> Option[String] =
-  if mod_path == "std/str" && name == "substring" {
-    Some("renamed in v0.55.0: write `str.slice(s, from, to)`")
-  } else if mod_path == "std/cursor" && name == "at" {
-    Some("renamed in v0.55.0: write `cursor.seek(s, i)`")
-  } else if mod_path == "std/bytes" && name == "get" {
-    Some("renamed in v0.55.0: write `bytes.buf_at(b, i)`")
-  } else if mod_path == "std/fmt" && name == "atoi" {
-    Some("std-internal since v0.55.0: write the builtin `parse_int(s)`")
-  } else if mod_path == "std/fmt" && name == "atoi_radix" {
-    Some("std-internal since v0.55.0: write the builtin `parse_int_radix(s, radix)`")
-  } else if mod_path == "std/fmt" && name == "atod" {
-    Some("std-internal since v0.55.0: write the builtin `parse_float(s)`")
-  } else {
-    None
-  }
+pub(pkg) fn moved_module_key(mod_path: String, name: String) -> String = mod_path ++ "." ++ name
 
 ## alias.fn(args): a call to a pub function of an imported module (spec §10.3).
 fn check_module_call(
@@ -10477,9 +10453,12 @@ fn check_module_call(
         Some(p) -> p
         None -> al
       }
-      # before the "private" and "did you mean" branches below, both of which
-      # would answer a rename with something worse than silence
-      match renamed_std_fn(mod_path, name) {
+      # A name std/moved.txt says left this module. Asked before the
+      # "private" and "did you mean" branches below, both of which would
+      # answer a rename with something worse than silence: `suggest.hint`
+      # does not reach `slice` from `substring`, and a name std still
+      # declares but stopped exporting would be told to add `pub` to std.
+      match map.get(cx1.moved, moved_module_key(mod_path, name)) {
         Some(h) ->
           return (cerr_h(cx1, "module `" ++ mod_path ++ "` has no exported function `" ++
               name ++ "`", nlo, nhi, h), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
