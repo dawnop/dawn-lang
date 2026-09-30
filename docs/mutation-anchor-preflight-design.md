@@ -28,7 +28,8 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 `runtime/c/dawn_rt.c` 里的 `dawn_cpath`，本预飞报 OK，delete 契约在第一次本机运行时才红。
 出路是把 harness 的锚点搬进一个 `mutate.py` 登记表，由 harness 与本预飞共同消费，而不是把字面量复制进适配器。
 `scripts/delete-contract/mutate.py` 是第一个；在引入它的那棵树上本机实测：应用次数 204 到 213，墙钟 12.9 s 到 13.2 s。
-#254 依次迁了 classfile-verify（17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数）。
+#254 依次迁了 classfile-verify（17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数）
+与 syntax-small（5 个变异体、6 条锚点，原先是 `run.sh` 里的 5 段 Python heredoc）。
 其余 `self-once` harness 在同样迁移之前仍不在覆盖之内。
 
 CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、次级编辑、
