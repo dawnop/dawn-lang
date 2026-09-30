@@ -3,15 +3,19 @@
 
 Production has no additional wire method or logging switch. The source root
 may be a frozen cold worktree or the candidate; both get the same input trace.
+The probes are the lsp-observe group of mutate.py, where the preflight proves
+their anchors against HEAD; a frozen tree without an incremental workspace
+still skips the prefix-stats probe, as it always did.
 """
 import argparse
 import hashlib
 import json
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
 
-from cold import DAWN, ROOT, edit
+from cold import DAWN, HERE, ROOT, apply, owned
 
 
 def main():
@@ -32,21 +36,15 @@ def main():
             if path.is_file() and path.suffix in (".dawn", ".toml", ".lock"):
                 fingerprints[str(path.relative_to(source))] = hashlib.sha256(path.read_bytes()).hexdigest()
     (output / "packages").symlink_to(source / "packages", target_is_directory=True)
-    server = output / "selfhost/src/lsp/server.dawn"
-    text = server.read_text()
-    anchor = "      let loaded = reusing.loaded"
-    text = edit(text, anchor, anchor + '''
-      var trace_paths: List[String] = []
-      for input in loaded.modules { trace_paths = trace_paths ++ [input.path] }
-      io.eprintln("LSP_INPUTS\\t" ++ join(trace_paths, "\\t"))''')
-    incremental = "      let update = incremental.analyze(ws0.cache, loaded)"
+    probes = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "lsp-observe")
+    rel = "selfhost/src/lsp/server.dawn"
+    server = output / rel
+    text = apply(server.read_text(), probes["inputs"], rel)
+    (_, incremental, _), = probes["prefix-stats"]
     if incremental in text:
-        text = edit(text, incremental, incremental + '''
-      io.eprintln("LSP_PREFIX_STATS\\t" ++ to_string(update.stats.reused_modules) ++ "\\t" ++
-        to_string(update.stats.checked_modules) ++ "\\t" ++ to_string(update.stats.retained_modules))''')
+        text = apply(text, probes["prefix-stats"], rel)
         if args.cold:
-            text = edit(text, "incremental.analyze(ws0.cache, loaded)",
-                        "incremental.analyze(incremental.evict(ws0.cache), loaded)")
+            text = apply(text, probes["cold"], rel)
     elif args.cold:
         raise RuntimeError("--cold requires a candidate with an incremental workspace")
     server.write_text(text)

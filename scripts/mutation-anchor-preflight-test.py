@@ -78,6 +78,19 @@ class PreflightTests(unittest.TestCase):
                                           "      Some(prior) -> { base_impls = prior }")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "cold/skip-comptime", 0)
 
+    def test_lsp_observe_anchor_drift_is_caught(self):
+        # #277: lsp-observe.py spelled its probes in its own main; the
+        # prefix-stats one sat behind `if ... in text`, so a drifted anchor
+        # dropped LSP_PREFIX_STATS from the trace without a word.
+        server = "selfhost/src/lsp/server.dawn"
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-observe/inputs", server,
+                                          "      let loaded = reusing.loaded\n",
+                                          "      let loaded  = reusing.loaded\n")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-observe/prefix-stats", server,
+                                          "      let update = incremental.analyze(",
+                                          "      let update  = incremental.analyze(")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-observe/inputs", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.

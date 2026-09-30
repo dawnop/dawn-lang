@@ -72,6 +72,15 @@ def owned(mutations, owner):
     return group
 
 
+def apply(text, edits, rel):
+    """Apply one registry mutation's edits, all of them to `rel`, to its text."""
+    for path, old, new in edits:
+        if path != rel:
+            raise RuntimeError(f"a mutation applied to {rel} edits {path}")
+        text = edit(text, old, new)
+    return text
+
+
 def main():
     started = time.monotonic()
     original = (ROOT / "selfhost/src/driver/analyze.dawn").read_text()

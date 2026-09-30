@@ -24,6 +24,13 @@ from pathlib import Path
 import sys
 
 ANALYZE = "selfhost/src/driver/analyze.dawn"
+SERVER = "selfhost/src/lsp/server.dawn"
+
+# Anchors two groups quote, spelled once.
+WARM_ANALYZE = "incremental.analyze(ws0.cache, loaded)"
+COLD_ANALYZE = "incremental.analyze(incremental.evict(ws0.cache), loaded)"
+LOADED = "      let loaded = reusing.loaded"
+PREFIX_ANALYZE = "      let update = " + WARM_ANALYZE
 
 MUTATIONS = {
     # The step starts from an empty intern table instead of the one before it.
@@ -38,6 +45,22 @@ MUTATIONS = {
     "cold/skip-comptime": ((ANALYZE, "    if len(cx.diags) == 0 {\n", "    if false {\n"),),
     # The std baseline's impls are not taken over.
     "cold/std-baseline": ((ANALYZE, "      Some(before) -> { base_impls = before }", "      Some(before) -> ()"),),
+
+    # lsp-observe.py, a tool run by hand: not mutants but the probes of a
+    # private LSP. It applies inputs always, prefix-stats only when the
+    # source has an incremental workspace (it may point at a frozen older
+    # tree), and cold on --cold.
+    # Each module's path, in the order the load hands them to the analysis.
+    "lsp-observe/inputs": ((SERVER, LOADED, LOADED + '''
+      var trace_paths: List[String] = []
+      for input in loaded.modules { trace_paths = trace_paths ++ [input.path] }
+      io.eprintln("LSP_INPUTS\\t" ++ join(trace_paths, "\\t"))'''),),
+    # How many modules the session reused, checked and retained.
+    "lsp-observe/prefix-stats": ((SERVER, PREFIX_ANALYZE, PREFIX_ANALYZE + '''
+      io.eprintln("LSP_PREFIX_STATS\\t" ++ to_string(update.stats.reused_modules) ++ "\\t" ++
+        to_string(update.stats.checked_modules) ++ "\\t" ++ to_string(update.stats.retained_modules))'''),),
+    # Every analysis starts from an evicted session.
+    "lsp-observe/cold": ((SERVER, WARM_ANALYZE, COLD_ANALYZE),),
 }
 
 
