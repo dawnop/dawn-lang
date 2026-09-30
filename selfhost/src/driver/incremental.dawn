@@ -7,15 +7,24 @@
 # lease.
 #
 # One rule decides reuse (docs/lsp-module-memo-design.md): a module's previous
-# step is taken as it is when the module's input is the same and the carry it
-# enters with is the same. A step is a function of exactly those two and of
-# the world this owner fixes, so the rule needs no special cases. It used to
-# have three: reuse stopped at the first changed module, at a text budget, and
-# at the first module that asked the Java oracle. The first is what the rule
-# says when an edit changes what a module exports, and only then; the budget
-# guarded memory the remembered steps share with the Program the caller keeps
-# anyway; the oracle is fixed for the life of an owner, because the owner is
-# rebuilt whenever its lease is.
+# step is taken as it is when the module's input is the same and what the
+# step read of the carry it entered with is the same. A step is a function of
+# exactly those and of the world this owner fixes, so the rule needs no
+# special cases. It used to have three: reuse stopped at the first changed
+# module, at a text budget, and at the first module that asked the Java
+# oracle. The first is what the rule says when an edit changes what a module
+# exports, and only for the modules that import it; the budget guarded memory
+# the remembered steps share with the Program the caller keeps anyway; the
+# oracle is fixed for the life of an owner, because the owner is rebuilt
+# whenever its lease is.
+#
+# What a step reads of the carry is narrower than the carry: the export
+# surfaces its `use` lines name (each is self-contained, because a surface
+# carries the id tables its module grafted from its own imports), the
+# program-wide impl table, and the intern table only to report a digest
+# collision. Until 2026-09-30 the whole carry was compared, so an edit that
+# changed one module's exports re-checked every module after it, importer or
+# not.
 
 use std/io.{Env}
 use std/map
@@ -24,18 +33,38 @@ use driver/analyze.{
   initial_carry, analyze_module_step
 }
 use driver/stdlib.{StdCtx, std_module_of}
-use check/cx.{ModExports}
+use check/cx.{ModExports, Cx}
+use check/identity.{Minted}
+use check/types.{Impls}
 use check/jsig.{Jsig}
+use front/ast.{Module, module_uses}
+use std/set
+use std/str
 use ir/interp.{CtOpts}
 
+## Where one `use` of a step found the export surface it read: nowhere, in
+## the owner's baseline (the bundled library), or from the step of a module
+## analyzed before it in the same analysis.
+type Found = NotFound | InBaseline | InStep
+
 ## One module's step as the previous analysis made it, with what it read:
-## the input, the std identity its path had, and which carry it entered with,
-## named by the module before it in that analysis (None: the first module,
-## which enters with the owner's baseline).
+## the input, the std identity its path had, the surface each of its `use`
+## lines found, the impl table and the intern table it entered with, and
+## which module came before it (None: the first module, which enters with the
+## owner's baseline). `minted` caches the rows the step added to the intern
+## table once something has asked for them.
 type Entry = {
   raw: LoadedModule,
   std_identity: Option[String],
   pred: Option[String],
+  reads: List[(String, Found)],
+  # the bundled module names the carry held, recorded only when a `use` of a
+  # std path found nothing: the checker then lists them in its diagnostic,
+  # the one place a step reads the carry's key set rather than a surface
+  std_names: Option[List[String]],
+  impls_in: Impls,
+  ids_in: Map[Int, Minted],
+  minted: Option[List[(Int, Minted)]],
   step: ModuleStep
 }
 
@@ -105,8 +134,8 @@ fn same_input(a: LoadedModule, b: LoadedModule) -> Bool = LoadedModule { ..a, li
 ## of two equally close names from a pool built from `fns` and its siblings,
 ## and the id tables are grafted into the importer's own in this order), so
 ## two surfaces with the same entries in a different order are not the same
-## input. The carry's own three tables are only ever looked up by key, which
-## is why `same_after` compares them with `==` alone.
+## input. The carry's impl and intern tables are only ever looked up by key,
+## which is why they are compared by their rows alone (`same_rows`).
 fn same_surface(a: ModExports, b: ModExports) -> Bool =
   a == b &&
   map.keys(a.fns) == map.keys(b.fns) &&
@@ -121,36 +150,133 @@ fn same_surface(a: ModExports, b: ModExports) -> Bool =
   map.keys(a.adt_infos) == map.keys(b.adt_infos) &&
   map.keys(a.trait_infos) == map.keys(b.trait_infos)
 
-## Whether a re-checked module left the carry as the previous analysis left
-## it. Only called when the module entered with the previous analysis's own
-## carry, so every other module's surface in `exports` is the same object on
-## both sides and only this module's own needs the closer look. `decl_spans`
-## is not compared: it is where declarations sit, which no later module's
-## step reads (a diagnostic is stored relative to its declaration and placed
-## only when the Program is rendered), and it is rebuilt for every module
-## whatever this answers.
-fn same_after(a: AnalysisCarry, b: AnalysisCarry, module: String) -> Bool = {
-  let own = match map.get(a.exports, module) {
-    Some(x) ->
-      match map.get(b.exports, module) {
-        Some(y) -> same_surface(x, y)
-        None -> false
-      }
-    None -> false
+## Two tables with the same rows. A table's own `==` lists and sorts one
+## side's rows first; the carry's tables are only ever looked up by key, so a
+## walk in the trie's own order answers the same question for less.
+fn same_rows[K: Eq + Hash, V: Eq](a: Map[K, V], b: Map[K, V]) -> Bool =
+  map.len(a) == map.len(b) && map.fold(a, true, (ok, k, v) => ok && map.get(b, k) == Some(v))
+
+## The bundled modules' names in a carry's export table, in its order.
+fn std_names_of(exports: Map[String, ModExports]) -> List[String] = {
+  var out: List[String] = []
+  for k in map.keys(exports) {
+    if str.starts_with(k, "std/") { out = out ++ [k] }
   }
-  own && a.exports == b.exports && a.impls == b.impls && a.identities == b.identities
+  out
+}
+
+## What `check/passes.pass_imports` will read of `exports` for a module with
+## this syntax: the surface each `use` names, and where it is found. `seen`
+## holds the modules this analysis has already placed in the carry.
+fn reads_of(m: Module, exports: Map[String, ModExports], seen: Set[String]) -> (List[(String, Found)], Option[List[String]]) = {
+  var reads: List[(String, Found)] = []
+  var lists_std = false
+  for u in module_uses(m) {
+    let found = if set.has(seen, u.path) {
+      InStep
+    } else {
+      if map.has(exports, u.path) { InBaseline } else { NotFound }
+    }
+    match found {
+      NotFound -> if len(u.segs) > 0 && u.segs[0] == "std" { lists_std = true }
+      _ -> ()
+    }
+    reads = reads ++ [(u.path, found)]
+  }
+  (reads, if lists_std { Some(std_names_of(exports)) } else { None })
+}
+
+## Whether every surface `e` read is the one it would read now. A surface
+## found in a step is the same when that module is placed again in this
+## analysis and its surface is not `fresh`: either its step was reused, or it
+## was checked again and came out equal to the previous analysis's, in which
+## case the previous object is what the carry holds. Nothing is compared here.
+fn reads_hold(e: Entry, exports: Map[String, ModExports], seen: Set[String], fresh: Set[String]) -> Bool = {
+  for r in e.reads {
+    let (path, found) = r
+    let holds = match found {
+      InStep -> set.has(seen, path) && not set.has(fresh, path)
+      InBaseline -> not set.has(seen, path) && map.has(exports, path)
+      NotFound -> not map.has(exports, path)
+    }
+    if not holds { return false }
+  }
+  match e.std_names {
+    Some(names) -> std_names_of(exports) == names
+    None -> true
+  }
+}
+
+## The rows a step added to the intern table, in the order it interned
+## them. Each is a declaration of the step's own module: a module interns only
+## what it declares (`cx.mint`, `cx.enter_decl_owner`), so no other step can
+## have put one of them there. The order is kept because a table is more than
+## its rows: inserting the same rows in the order the cold step did is what
+## makes the merged table the cold one, not merely an equal one.
+fn minted_by(e: Entry) -> List[(Int, Minted)] =
+  match e.minted {
+    Some(rows) -> rows
+    None -> {
+      var rows: List[(Int, Minted)] = []
+      for row in map.entries(e.step.after.identities) {
+        let (k, _) = row
+        if not map.has(e.ids_in, k) { rows = rows ++ [row] }
+      }
+      rows
+    }
+  }
+
+## A reused step's contribution to the carry, as the cold path would leave it.
+type Kept = { identities: Map[Int, Minted], minted: Option[List[(Int, Minted)]] }
+
+## `e` as it stands, when the rule licenses it: the same input and std
+## identity, every surface it read unchanged, and the impl table it entered
+## with, which is program-wide rather than turned on by a `use`.
+##
+## The intern table is read only to report two declarations whose ids
+## collide. When it is the very table `e` entered with, `e`'s own is exact.
+## When it is not, `e` still holds if it reported nothing and none of the
+## rows it added is taken in the current table: then the cold step would
+## intern the same rows without a collision, and its table is this one plus
+## them. A step with diagnostics is checked again, because one of them may
+## be a collision the current table no longer produces.
+fn kept(
+  e: Entry, raw: LoadedModule, identity: Option[String], carry: AnalysisCarry,
+  seen: Set[String], fresh: Set[String],
+  impls_is: Option[Option[String]], ids_is: Option[Option[String]]
+) -> Option[Kept] = {
+  if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }
+  if not reads_hold(e, carry.exports, seen, fresh) { return None }
+  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }
+  if ids_is == Some(e.pred) { return Some(Kept { identities: e.step.after.identities, minted: e.minted }) }
+  if len(e.step.diags) > 0 { return None }
+  let rows = minted_by(e)
+  var ids = carry.identities
+  for row in rows {
+    let (k, v) = row
+    match map.get(ids, k) {
+      Some(other) -> if other != v { return None }
+      None -> { ids = map.insert(ids, k, v) }
+    }
+  }
+  Some(Kept { identities: ids, minted: Some(rows) })
 }
 
 pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io = {
   let session: State = owner
   var carry = session.baseline
-  # Which carry of the previous analysis the current one *is*, object for
-  # object in everything but `decl_spans`: the baseline (Some(None)), or the
-  # one after module p (Some(Some(p))). None once this analysis holds a carry
-  # the previous one did not. The carry only ever grows, so from there on no
-  # later module can enter with a carry the previous analysis gave it, and
-  # nothing needs comparing until the next analysis.
-  var carry_is: Option[Option[String]] = Some(None)
+  # Which of the previous analysis's tables the current impl and intern
+  # tables *are*, object for object: the baseline's (Some(None)) or the one
+  # left after module p (Some(Some(p))); None once this analysis holds one the
+  # previous did not. They spare the common case a comparison, and nothing
+  # else depends on them.
+  var impls_is: Option[Option[String]] = Some(None)
+  var ids_is: Option[Option[String]] = Some(None)
+  # The modules this analysis has placed in the carry, by the path their
+  # surface is filed under, and those among them whose surface is not the
+  # one the previous analysis gave them.
+  var seen: Set[String] = set.empty()
+  var fresh: Set[String] = set.empty()
   var pred: Option[String] = None
   var diags = loaded.diags
   var modules: List[CheckedMod] = []
@@ -164,65 +290,98 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Env !io = {
     # Recompute it even for a hit; raw text alone is never a cache key.
     let identity = std_module_of(session.std, raw.path)
     let previous = map.get(session.memo, raw.mod_path)
-    # The step read its input and the carry it entered with. Entering with
-    # the same carry is decided without comparing it: this analysis's carry
-    # is the previous one's after the same predecessor, the very objects.
-    let reusable: Option[ModuleStep] = match previous {
+    let reuse: Option[(Entry, Kept)] = match previous {
       Some(e) ->
-        if carry_is == Some(e.pred) && same_input(raw, e.raw) && identity == e.std_identity {
-          Some(e.step)
-        } else {
-          None
+        match kept(e, raw, identity, carry, seen, fresh, impls_is, ids_is) {
+          Some(k) -> Some((e, k))
+          None -> None
         }
       None -> None
     }
-    var step = match reusable {
-      Some(kept) -> {
+    let ids_in = carry.identities
+    let impls_in = carry.impls
+    var entry = match reuse {
+      Some(pair) -> {
+        let (e, k) = pair
         reused = reused + 1
-        carry_is = Some(Some(raw.mod_path))
-        kept
+        let path = e.step.checked.mod_path
+        let own = map.get(e.step.after.exports, path).expect("the step's own export surface")
+        carry = AnalysisCarry { ..carry,
+          exports: map.insert(carry.exports, path, own),
+          impls: e.step.after.impls,
+          identities: k.identities }
+        # the cold step's context ends on the table the carry now holds
+        let cx: Cx = e.step.checked.cx
+        let checked_mod = if ids_is == Some(e.pred) { e.step.checked } else {
+          CheckedMod { ..e.step.checked, cx: Cx { ..cx, identities: k.identities } }
+        }
+        ids_is = if ids_is == Some(e.pred) { Some(Some(raw.mod_path)) } else { None }
+        impls_is = Some(Some(raw.mod_path))
+        Entry { ..e, pred: pred, impls_in: impls_in, ids_in: ids_in, minted: k.minted,
+          step: ModuleStep { ..e.step, checked: checked_mod } }
       }
       None -> {
+        let (reads, std_names) = reads_of(raw.m, carry.exports, seen)
         let computed = analyze_module_step(raw, carry, session.std, session.opts, session.js, None)
         checked = checked + computed.check_runs
         ct_runs = ct_runs + computed.comptime_runs
-        # The early cutoff: an edited module whose re-check leaves the carry
-        # as it was lets every module after it keep its step. The previous
-        # carry's objects are kept in place of the equal new ones, which is
-        # what lets the modules after it skip the comparison.
-        let cutoff: Option[AnalysisCarry] = match previous {
-          Some(e) ->
-            if carry_is == Some(e.pred) && same_after(computed.after, e.step.after, computed.checked.mod_path) {
-              Some(e.step.after)
-            } else {
-              None
+        let path = computed.checked.mod_path
+        var own = map.get(computed.after.exports, path).expect("the step's own export surface")
+        var impls = computed.after.impls
+        var ids = computed.after.identities
+        var next_impls: Option[Option[String]] = None
+        var next_ids: Option[Option[String]] = None
+        # The early cutoff, one table at a time: a re-checked module whose
+        # surface or tables come out as the previous analysis's own puts the
+        # previous objects in the carry, which is what lets the modules after
+        # it hold without comparing anything.
+        var same_own = false
+        match previous {
+          Some(e) -> {
+            match map.get(e.step.after.exports, path) {
+              Some(before) -> if same_surface(own, before) {
+                own = before
+                same_own = true
+              }
+              None -> ()
             }
-          None -> None
+            if impls_is == Some(e.pred) && same_rows(impls, e.step.after.impls) {
+              impls = e.step.after.impls
+              next_impls = Some(Some(raw.mod_path))
+            }
+            if ids_is == Some(e.pred) && same_rows(ids, e.step.after.identities) {
+              ids = e.step.after.identities
+              next_ids = Some(Some(raw.mod_path))
+            }
+          }
+          None -> ()
         }
-        match cutoff {
-          Some(kept) -> {
-            carry_is = Some(Some(raw.mod_path))
-            ModuleStep { ..computed, after: AnalysisCarry { ..kept, decl_spans: computed.after.decl_spans } }
-          }
-          None -> {
-            carry_is = None
-            computed
-          }
+        if not same_own { fresh = set.insert(fresh, path) }
+        impls_is = next_impls
+        ids_is = next_ids
+        carry = AnalysisCarry { ..carry,
+          exports: map.insert(carry.exports, path, own),
+          impls: impls,
+          identities: ids }
+        Entry {
+          raw: raw, std_identity: identity, pred: pred, reads: reads, std_names: std_names,
+          impls_in: impls_in, ids_in: ids_in, minted: None, step: computed
         }
       }
     }
+    let step = entry.step
     # The position view is rebuilt for every module: the modules before this
     # one may have moved even when this one is reused, and a reused step's
     # view still holds where they were when it ran. This module's own entry
     # is its step's, which is current, because its text is.
-    let own = map.get(step.after.decl_spans, step.checked.mod_path).expect("the step's own declaration spans")
-    carry = AnalysisCarry { ..step.after, decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own) }
-    step = ModuleStep { ..step, after: carry }
+    let own_spans = map.get(step.after.decl_spans, step.checked.mod_path).expect("the step's own declaration spans")
+    carry = AnalysisCarry { ..carry, decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans) }
+    entry = Entry { ..entry, step: ModuleStep { ..step, after: carry } }
+    seen = set.insert(seen, step.checked.mod_path)
     diags = diags ++ step.diags
-    modules = modules ++ [step.checked]
+    modules = modules ++ [entry.step.checked]
     if retained < session.max_modules {
-      memo = map.insert(memo, raw.mod_path,
-        Entry { raw: raw, std_identity: identity, pred: pred, step: step })
+      memo = map.insert(memo, raw.mod_path, entry)
       retained = retained + 1
     }
     pred = Some(raw.mod_path)

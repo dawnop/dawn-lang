@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Compare warm sessions with the frozen cold loop and prove real cache hits.
 
-The session reuses a module's step when its input and the carry it enters
-with are unchanged (docs/lsp-module-memo-design.md); the mutants below each
-weaken one half of that rule, the early cutoff that lets an edited module's
-successors keep their steps (and the order its export surface is compared
-in), the position view rebuilt around reused steps, or the export surface the
-carry comparison reads. Each mutation is built
+The session reuses a module's step when its input and what it read of the
+carry it enters with are unchanged (docs/lsp-module-memo-design.md): the
+surfaces its `use` lines name, the program-wide impl table, and the intern
+table for digest collisions. The mutants below each weaken one part of that
+rule, the early cutoff that lets an edited module's importers keep their steps
+(and the order and grafted tables its export surface is compared by), the
+position view rebuilt around reused steps, or the export surface the
+comparison reads. Each mutation is built
 before either owning assertion is evaluated. Runtime linkage errors and
 timeouts never substitute for a cache-contract failure.
 
@@ -38,8 +40,8 @@ def check_cli():
         (['--shards', '0'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '-1'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '2'], 2, 'require --shards >= 1'),
-        (['--shards', '15', '--shard', '14'], 2, 'selected shard has no engine mutants'),
-        (['--shards', '15', '--check-shards'], 2, 'every shard must contain engine mutants'),
+        (['--shards', '20', '--shard', '19'], 2, 'selected shard has no engine mutants'),
+        (['--shards', '20', '--check-shards'], 2, 'every shard must contain engine mutants'),
     ]
     for count in [1, 2, 3]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique mutants; disjoint shard sizes'))
@@ -94,26 +96,36 @@ def main():
     originals = {path: (ROOT / path).read_text() for path in (engine, checker)}
     variants = [
         ("always-cold", engine,
-         "        if carry_is == Some(e.pred) && same_input(raw, e.raw) && identity == e.std_identity {",
-         "        if false {"),
+         "  if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }",
+         "  if true || not (same_input(raw, e.raw) && identity == e.std_identity) { return None }"),
         # The input half of the rule.
         ("text-only", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n",
          "-> Bool = a.text == b.text\n"),
         ("ignore-input", engine, "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n", "-> Bool = true\n"),
-        ("ignore-std-identity", engine, "identity == e.std_identity {", "true {"),
-        # The carry half: entered from a different predecessor, or after a
-        # re-checked module that changed what it exports.
-        ("ignore-carry", engine, "        if carry_is == Some(e.pred) && same_input(",
-         "        if same_input("),
-        ("skip-cutoff", engine, "            if carry_is == Some(e.pred) && same_after(",
-         "            if false && same_after("),
-        ("false-cutoff", engine,
-         "if carry_is == Some(e.pred) && same_after(computed.after, e.step.after, computed.checked.mod_path) {",
-         "if carry_is == Some(e.pred) {"),
+        ("ignore-std-identity", engine, "same_input(raw, e.raw) && identity == e.std_identity)",
+         "same_input(raw, e.raw) && true)"),
+        # What the step read of the carry: the surfaces its `use` lines name,
+        # including what those surfaces grafted from their own imports, the
+        # program-wide impl table, and the intern table for collisions.
+        ("ignore-reads", engine, "  if not reads_hold(e, carry.exports, seen, fresh) { return None }\n", ""),
+        ("reexport-blind", engine, "-> Bool =\n  a == b &&\n",
+         "-> Bool =\n  ModExports { ..a, adt_infos: b.adt_infos, trait_infos: b.trait_infos, "
+         "effect_infos: b.effect_infos } == b &&\n"),
+        ("ignore-impls", engine,
+         "  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }\n", ""),
+        ("drop-identities", engine, "  Some(Kept { identities: ids, minted: Some(rows) })",
+         "  Some(Kept { identities: carry.identities, minted: Some(rows) })"),
+        ("skip-collision", engine, "      Some(other) -> if other != v { return None }", "      Some(other) -> ()"),
+        ("keep-diagnosed", engine, "  if len(e.step.diags) > 0 { return None }\n", ""),
+        # The early cutoff: a re-checked module whose surface comes out as it was.
+        ("skip-cutoff", engine, "              Some(before) -> if same_surface(own, before) {",
+         "              Some(before) -> if false && same_surface(own, before) {"),
+        ("false-cutoff", engine, "              Some(before) -> if same_surface(own, before) {",
+         "              Some(before) -> if true {"),
         ("unordered-surface", engine, "-> Bool =\n  a == b &&\n", "-> Bool =\n  a == b ||\n"),
         # The position view around a reused step.
-        ("stale-spans", engine, "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own)",
-         "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own)"),
+        ("stale-spans", engine, "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans)",
+         "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own_spans)"),
         # The export surface the carry comparison reads.
         ("alias-positions", checker, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
          "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),
