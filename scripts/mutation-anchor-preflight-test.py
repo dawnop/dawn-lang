@@ -54,6 +54,18 @@ class PreflightTests(unittest.TestCase):
                 p.check(p.ROOT, {rel: original.replace("mutate.py", "registry.py")})
             self.assertEqual((p.ROOT / rel).read_text(), original)
 
+    def test_dict_owner_anchor_drift_is_caught(self):
+        # #254: shapes.py built these anchors inline and refused a stale one
+        # only when contracts-1 ran it.
+        lower = "selfhost/src/ir/lower.dawn"
+        self.assert_registry_drift_is_red("dict-owner-contract", "constructor-arity", lower,
+                                          "nargs: nargs,", "nargs: nargs ,")
+        # The two-line anchor the bridge and prim mutants share a shape with.
+        self.assert_registry_drift_is_red("dict-owner-contract", "bridge-shape", lower,
+                                          'let name = "bridge$" ++ to_string(tid)',
+                                          'let name = "bridge$" ++ show(tid)')
+        self.assert_stale_registry_is_red("dict-owner-contract", "dictionary-shape", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
