@@ -173,6 +173,19 @@ class PreflightTests(unittest.TestCase):
                                           "    m.visitInsn(OP_D2F)\n  }\n  unit()")
         self.assert_stale_registry_is_red("java-narrowing-contract", "backend-checkcast", 1)
 
+    def test_map_reuse_anchor_drift_is_caught(self):
+        # #254: these anchors were two Python heredocs in run.sh, one behind a
+        # private compiler build. One subject is compiler source, the other std.
+        self.assert_registry_drift_is_red("map-reuse-contract", "keep-record-spread-source",
+                                          "selfhost/src/c/rc.dawn",
+                                          "schedule_record_update(st, stmts, tail)",
+                                          "schedule_record_update(st, stmts,  tail)")
+        self.assert_registry_drift_is_red("map-reuse-contract", "get-hamt-child-again",
+                                          "std/hamt.dawn",
+                                          "        let child = array_steal(kids, pos)\n",
+                                          "        let child = array_steal(kids, pos) \n")
+        self.assert_stale_registry_is_red("map-reuse-contract", "get-hamt-child-again", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -33,6 +33,7 @@ ADAPTERS = {
     "inflate-contract": (".",),
     "java-narrowing-contract": ("selfhost",),
     "list-elems-contract": (".",),
+    "map-reuse-contract": (".",),
     "narrow-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),

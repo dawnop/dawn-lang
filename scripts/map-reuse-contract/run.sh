@@ -225,18 +225,9 @@ mkdir -p "$mdir"
 cp -R "$root/selfhost" "$mdir/selfhost"
 cp -R "$root/compiler-plan" "$mdir/compiler-plan"
 ln -s "$root/packages" "$mdir/packages"
-python3 - "$mdir/selfhost/src/c/rc.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = "let (st0, stmts0, tail0) = schedule_record_update(st, stmts, tail)"
-new = "let (st0, stmts0, tail0) = (st, stmts, tail)"
-if text.count(old) != 1:
-    raise SystemExit("keep-record-spread-source: mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
+# The anchor lives in mutate.py, so mutation-anchor-preflight.py proves it
+# matches exactly once before any build, not only when this contract runs.
+python3 "$here/mutate.py" "$mutation" "$mdir"
 if ! "$root/bin/dawn" build "$mdir/selfhost" -o "$mdir/compiler.jar" \
     > "$mdir/build.out" 2>&1; then
   cat "$mdir/build.out" >&2
@@ -255,22 +246,10 @@ cmp -s "$work/clean/record/record.c" "$work/$mutation/record/record.c" &&
 # one source line whose ownership contract the new assertion names.
 mutation=get-hamt-child-again
 echo "  $mutation"
-sdir="$work/$mutation/source"
+sdir="$work/$mutation/std"
 mkdir -p "$work/$mutation"
 cp -R "$root/std" "$sdir"
-python3 - "$sdir/hamt.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = """        let child = array_steal(kids, pos)
-        let sub = node_put(child, shift + BITS, h, k, v, seq)"""
-new = """        let sub = node_put(array_get(kids, pos), shift + BITS, h, k, v, seq)"""
-if text.count(old) != 1:
-    raise SystemExit("get-hamt-child-again: mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
+python3 "$here/mutate.py" "$mutation" "$work/$mutation"
 run_leg "$mutation" "" "$root/bin/dawn" "$sdir"
 run_record_leg "$mutation" "" "$root/bin/dawn" "$sdir"
 cmp -s "$work/clean/direct/insert.c" "$work/$mutation/direct/insert.c" &&
