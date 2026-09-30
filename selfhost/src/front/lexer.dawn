@@ -509,8 +509,13 @@ fn lex_dollar(
 ) -> Result[(Int, List[Seg], List[Char], List[Diag]), (Int, Diag)] = {
   let next = cp_at(s, at + 1)
   if next == '{' {
-    let (j, sg) = lex_brace_interp(s, at)?
-    Ok((j, flush(segs, buf) ++ [sg], no_cps(), no_diags()))
+    let (j, sg, d) = lex_brace_interp(s, at)?
+    match sg {
+      Some(g) -> Ok((j, flush(segs, buf) ++ [g], no_cps(), d))
+      # the interpolation never closed and its text is dropped; `j` is the
+      # quote that ends the literal, so the caller closes the string there
+      None -> Ok((j, segs, buf, d))
+    }
   } else if char_is_letter(next) || next == '_' {
     var i = at + 1
     while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
@@ -544,11 +549,22 @@ fn flush(segs: List[Seg], buf: List[Char]) -> List[Seg] =
 ## string literal and reported it unterminated. A form added to the main loop
 ## now reaches this scanner for free.
 ##
+## The one place that agreement misleads is a missing `}`: in `"a ${x"` the
+## closing quote of the string is read as the start of a nested literal, which
+## then runs to the end of the line. When a nested `"` literal fails that way the
+## interpolation cannot have closed either -- its `}`, if the line has one, lies
+## past the quote and was swallowed by the nested literal -- so the error is the
+## unclosed `${`, never the unterminated string (#191). The quote is taken as the
+## string's own close, as the writer meant: the result is `Ok` with no segment
+## and one diagnostic, the position is that quote, and the caller ends the
+## literal there. The string stays one token, so the `)` after it survives and
+## the file keeps lexing without a cascade.
+##
 ## Line comments are deliberately *not* skipped: interpolation is single-line
 ## (below), so a `#` that swallowed the rest of the line could only ever turn
 ## into "interpolation cannot span lines". Leaving `#` an ordinary character
 ## keeps `"${ x # }"` meaning what it means today.
-fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
+fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]), (Int, Diag)] = {
   let code_start = dollar + 2
   var i = code_start
   var depth = 1
@@ -571,8 +587,24 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
       } else {
         with_no_diags(lex_char(s, i))
       }
-      let (j, _, _) = r?
-      i = j
+      match r {
+        Ok((j, _, _)) -> { i = j }
+        Err((fi, d)) -> {
+          # the nested literal's own "unterminated" error is the one anchored
+          # at its opening quote and raised at the end of the line; an error
+          # from inside it (a bad escape, a nested interpolation) is anchored
+          # elsewhere and still propagates as it is
+          let ran_off = fi >= s.n || s.cps[fi] == '\n'
+          if c == '"' && ran_off && d.lo == off(s, i) {
+            return Ok((i, None, [unmatched_interp(
+              s,
+              dollar,
+              "the `\"` after it was read as the start of a string inside the interpolation; close the interpolation with `}` before that quote"
+            )]))
+          }
+          return Err((fi, d))
+        }
+      }
     } else if c == '\n' {
       return Err((i, mk_diag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
     } else {
@@ -580,14 +612,19 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
     }
   }
   if depth != 0 {
-    return Err((i, mk_diag("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 1)))
+    # only the end of the file gets here: a newline stops the loop above
+    return Err((i, unmatched_interp(s, dollar, "close it with `}` before the end of the string")))
   }
   let code = text_of(s, code_start, i)
   if is_blank(code) {
     return Err((i, mk_diag("empty interpolation", off(s, dollar), off(s, i) + 1)))
   }
-  Ok((i + 1, SCode(code, off(s, code_start))))
+  Ok((i + 1, Some(SCode(code, off(s, code_start))), no_diags()))
 }
+
+## Anchored at the `${` itself: that is the token the writer has to finish.
+fn unmatched_interp(s: Src, dollar: Int, hint: String) -> Diag =
+  diag_h("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 2, hint)
 
 ## On entry `at` is the backslash; returns (position after the escape, character).
 fn lex_escape(s: Src, at: Int) -> Result[(Int, Char), (Int, Diag)] = {
@@ -1141,6 +1178,35 @@ test "unterminated string recovers at end of line" {
   let (toks, ds) = lex("\"abc\nx")
   assert ds[0].msg == "unterminated string"
   assert kinds("\"abc\nx") == ["IDENT", "NEWLINE", "EOF"]
+}
+
+test "an interpolation missing its brace is the error, not the string (#191)" {
+  # the closing quote used to start a nested literal that ran to the end of
+  # the line: "unterminated string" at the wrong column, and the `)` after it
+  # lost with the rest of the line
+  let src = "f(\"v = \${x\")\ng()"
+  let (toks, ds) = lex(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "unmatched \${ in interpolation"
+  assert ds[0].lo == 7 && ds[0].hi == 9
+  assert str.starts_with(ds[0].hint, "the `\"` after it was read as the start of a string")
+  # the quote closed the string, so the call and the next line lex as written
+  assert kinds(src) == [
+    "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "IDENT", "LPAREN", "RPAREN", "NEWLINE", "EOF"
+  ]
+  assert toks[2].text == "\"v = \${x\""
+  assert toks[2].segs == [SText("v = ")]
+  # a nested literal that is bad for a reason of its own still reports it
+  let (_, esc) = lex("\"\${ f(\"\\q\") }\"")
+  assert len(esc) == 1
+  assert esc[0].msg == "unknown escape: \\q"
+  # an interpolation still open at a newline, with no quote to misread
+  let (_, eol) = lex("\"\${ x \ny")
+  assert eol[0].msg == "interpolation cannot span lines"
+  # and at the very end of the file
+  let (_, eof) = lex("\"\${ x ")
+  assert len(eof) == 1
+  assert eof[0].msg == "unmatched \${ in interpolation"
 }
 
 test "unknown escape" {
