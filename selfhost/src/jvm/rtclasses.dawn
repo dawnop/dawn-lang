@@ -2392,7 +2392,7 @@ fn gen_array_with(cw: ClassWriter) -> Unit !io = {
   close_mv(wv)
 }
 
-## The one parse primitive left on this backend: `parse_float`, the
+## The one parse primitive left on this backend: `float_of_decimal`, the
 ## decimal-to-binary conversion std/fmt.atod delegates after validating and
 ## trimming (audit RP-05 -- the accepted *language* is fmt's EBNF, never
 ## Double.parseDouble's grammar; on the validated subset parseDouble is pure
@@ -2401,8 +2401,8 @@ fn gen_array_with(cw: ClassWriter) -> Unit !io = {
 ## space table. The exception net stays as a safety net, though a validated
 ## string cannot trip it. `parse_int`/`parse_int_radix` are gone entirely --
 ## fmt.atoi is pure Dawn source and never reaches a runtime method.
-fn gen_parse_float_method(cw: ClassWriter) -> Unit !io = {
-  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "parse_float",
+fn gen_float_of_decimal_method(cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "float_of_decimal",
     "(Ljava/lang/String;)LOption;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -2444,7 +2444,7 @@ const CLASS_LOWER: String = "CLASS_LOWER"
 
 const CLASS_SPACE: String = "CLASS_SPACE"
 
-## dawn/rt/Strings: the string runtime — join, cmp, parse_float,
+## dawn/rt/Strings: the string runtime — join, cmp, float_of_decimal,
 ## code_points/from_code_points, the cursor family, the Unicode classifiers and
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
@@ -2494,7 +2494,7 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   jn.visitInsn(OP_ARETURN)
   close_mv(jn)
 
-  gen_parse_float_method(cw)
+  gen_float_of_decimal_method(cw)
 
   # code_points(String) -> List[Int]: one Long-boxed code point per element
   let cp = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "code_points",

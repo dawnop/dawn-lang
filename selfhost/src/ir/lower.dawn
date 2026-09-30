@@ -1220,9 +1220,10 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## else, so an arm for one of these is dead code rather than an implementation.
 ##
 ## Map and Set become calls on the Dawn trie in std/hamt
-## (collections-dejava-research §5.1); `parse_int`/`parse_int_radix` become
-## calls on std/fmt, which is why `parse_float` is the only numeric parser
-## left with a runtime method (audit RP-05).
+## (collections-dejava-research §5.1); the three numeric parsers become calls
+## on std/fmt (audit RP-05). The runtime method `parse_float` used to name is
+## `float_of_decimal` now, the raw conversion std/fmt.atod calls by that name,
+## so `parse_float` is rewritten everywhere, std/fmt included (#186).
 ##
 ## Written down because "nobody owes this" and "one backend is short" are
 ## indistinguishable from inside an emitter: both are `rt == None` with no
@@ -1232,7 +1233,7 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## representation is `Int`, so the bridge is the identity and lowering drops
 ## it. A backend never learns the name.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_int", "parse_int_radix", "char_unchecked"]
+  var out = ["parse_int", "parse_int_radix", "parse_float", "char_unchecked"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
     out = out ++ ["map_${op}"]
@@ -1312,10 +1313,10 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   #    answers for the same list in the same paragraph.
   assert len(inline) == 38
   assert len(host) == 2
-  assert len(gone) == 21
+  assert len(gone) == 22
   assert len(staged) == 0
-  # and the five groups account for all 128 names, with none left over
-  assert len(map.keys(it)) == 110
+  # and the five groups account for all 132 names, with none left over
+  assert len(map.keys(it)) == 111
   assert len(internal) == 21
 }
 
@@ -3666,17 +3667,26 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       }
       # The numeric parsers are Dawn source too (std/fmt, audit RP-05): the
       # accepted language is spec §11's EBNF, checked by fmt's own scanner,
-      # so neither backend's host grammar is the definition any more. The one
-      # exception is `parse_float` *inside* std/fmt itself: fmt.atod hands a
-      # validated, trimmed string to the raw backend primitive for the
-      # decimal-to-binary conversion, and that call must stay an intrinsic or
-      # it would loop.
+      # so neither backend's host grammar is the definition any more. No
+      # exception, std/fmt included: the raw conversion fmt.atod delegates to
+      # after validating is its own intrinsic, `float_of_decimal`, marked where
+      # it is called. It used to be `parse_float` too, told apart from the
+      # builtin by `st.owner != "std/fmt"` -- a rule keyed on where a call sits
+      # rather than on what it says, which a rename of the module would have
+      # turned into a parser calling itself (#186).
+      #
+      # That failure is refused here by name instead: a parser whose own body
+      # calls the builtin it implements would lower to a call on itself.
       match parser_impl(name) {
-        Some(fname) ->
-          if name != "parse_float" || st.owner != "std/fmt" {
-            let (st1, vs) = lower_all(st, args)
-            return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
+        Some(fname) -> {
+          if is_self_fn(st, "std/fmt", fname) {
+            panic("lower: std/fmt." ++ fname ++ " calls `" ++ name ++ "`, which lowers to " ++
+                "std/fmt." ++ fname ++ " itself; the raw conversion a parser delegates to " ++
+                "is its own intrinsic (`float_of_decimal`), never the builtin it implements")
           }
+          let (st1, vs) = lower_all(st, args)
+          return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
+        }
         None -> ()
       }
       match hamt_fn(name) {
