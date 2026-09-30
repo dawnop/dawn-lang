@@ -209,6 +209,18 @@ class PreflightTests(unittest.TestCase):
                                           "completions_at(qc, analysis.modules ,")
         self.assert_stale_registry_is_red("project-plan-contract", "fresh-completion", 0)
 
+    def test_jsig_lease_anchor_drift_is_caught(self):
+        # #277: these anchors were a heredoc in run.sh, checked only when
+        # java-target-classpath reached that mutant after building fixtures.
+        self.assert_registry_drift_is_red("jsig-lease-contract", "parent-is-system",
+                                          "selfhost/src/jvm/jreflect.dawn",
+                                          'expect("platform loader")', 'expect("platform class loader")')
+        # The probe fixture is a subject too, at its checkout path.
+        self.assert_registry_drift_is_red("jsig-lease-contract", "bypass-bracket",
+                                          "scripts/jsig-lease-contract/probe.dawn",
+                                          "probe => probe.lease.close()", "p => p.lease.close()")
+        self.assert_stale_registry_is_red("jsig-lease-contract", "drop-close", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
