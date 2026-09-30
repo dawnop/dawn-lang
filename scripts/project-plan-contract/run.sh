@@ -15,6 +15,13 @@ fail() {
   exit 1
 }
 
+# The anchors live in mutate.py, one registered mutation per mutant name, so
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this script reaches that mutant.
+mutate() { # <mutation> <tree-root>
+  python3 "$here/mutate.py" "$1" "$2"
+}
+
 setup_captured_fixture() {
   local fixture=$1
   mkdir -p "$fixture/app/src" "$fixture/a/src" "$fixture/b/src"
@@ -64,66 +71,15 @@ mkdir -p "$loader_mutant"
 cp -R "$root/selfhost" "$loader_mutant/selfhost"
 cp -R "$root/compiler-plan" "$loader_mutant/compiler-plan"
 ln -s "$root/packages" "$loader_mutant/packages"
-cp -R "$here/captured-probe" "$loader_mutant/probe"
-python3 - "$loader_mutant/probe/dawn.toml" \
-  "$loader_mutant/selfhost/src/driver/analyze.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-manifest = Path(sys.argv[1])
-text = manifest.read_text()
-text = text.replace('../../../selfhost', '../selfhost')
-text = text.replace('../../../compiler-plan', '../compiler-plan')
-manifest.write_text(text)
-
-source = Path(sys.argv[2])
-text = source.read_text()
-# The loader both entries go through: `load_entries_over` for a command and
-# the editor's `load_entries_reusing`, which reuses unchanged parses.
-old = '''pub(pkg) fn load_entries_reusing(
-  plan: ProjectPlan,
-  entries: List[String],
-  over: Map[String, String],
-  previous: ParseMemo
-) -> ReusingLoad !Fs !Env !io =
-  resolve(
-    plan.source.source_root,
-    entries,
-    planner_diags(plan.source.diags),
-    plan.source.pkgs,
-    over,
-    entry_file(plan),
-    previous
-  )
-'''
-new = '''pub(pkg) fn load_entries_reusing(
-  plan: ProjectPlan,
-  entries: List[String],
-  over: Map[String, String],
-  previous: ParseMemo
-) -> ReusingLoad !Fs !Env !io = {
-  # `project_plan` is `!Proc` since io.run moved onto the effect, and this row
-  # is not; answering it here keeps the mutation to one function. `Env` is on
-  # the row already: `resolve` reaches io.cwd whether or not this replans.
-  let fresh = io.with_proc_real(() => project_plan(plan.source.target))
-  resolve(
-    fresh.source.source_root,
-    entries,
-    planner_diags(fresh.source.diags),
-    fresh.source.pkgs,
-    over,
-    entry_file(fresh),
-    previous
-  )
-}
-'''
-if text.count(old) != 1:
-    raise SystemExit('loader mutation anchor moved')
-source.write_text(text.replace(old, new))
-PY
+# The probe keeps the path it has in the checkout, so its manifest's
+# `../../../selfhost` resolves to this mutant's compiler as written.
+loader_probe="$loader_mutant/scripts/project-plan-contract/captured-probe"
+mkdir -p "$(dirname "$loader_probe")"
+cp -R "$here/captured-probe" "$loader_probe"
+mutate fresh-replan-loader "$loader_mutant"
 
 setup_captured_fixture "$work/captured-loader-mutant"
-if ! "$dawn" build "$loader_mutant/probe" -o "$work/loader-mutant.jar" \
+if ! "$dawn" build "$loader_probe" -o "$work/loader-mutant.jar" \
     --std "$root/std" > "$work/loader-mutant-build.out" 2>&1; then
   cat "$work/loader-mutant-build.out" >&2
   fail "fresh-replan loader mutant did not compile"
@@ -144,18 +100,7 @@ mkdir -p "$completion_mutant"
 cp -R "$root/selfhost" "$completion_mutant/selfhost"
 cp -R "$root/compiler-plan" "$completion_mutant/compiler-plan"
 ln -s "$root/packages" "$completion_mutant/packages"
-python3 - "$completion_mutant/selfhost/src/lsp/server.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-source = Path(sys.argv[1])
-text = source.read_text()
-old = 'completions_at(qc, analysis.modules, d.text, pos_offset(d, params))'
-new = 'completions_at(qc, None, d.text, pos_offset(d, params))'
-if text.count(old) != 1:
-    raise SystemExit('completion mutation anchor moved')
-source.write_text(text.replace(old, new))
-PY
+mutate fresh-completion "$completion_mutant"
 if ! "$dawn" build "$completion_mutant/selfhost" -o "$work/completion-mutant.jar" \
     --std "$root/std" > "$work/completion-mutant-build.out" 2>&1; then
   cat "$work/completion-mutant-build.out" >&2
