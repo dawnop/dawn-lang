@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = {
+    "atomic-write-contract": (".",),
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
     "classfile-verify": (".",),
     "ctl-live-contract": ("runtime/c",),
