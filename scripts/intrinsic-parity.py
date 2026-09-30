@@ -40,6 +40,14 @@ The second half of this file holds the rest of that bargain: every
 around the helper is a function pruning may have dropped, and it would only
 show up as a NoSuchMethodError in a user's program, so it is refused here by
 spelling: no `"std/pvec"` literal and no `LIST_MOD` outside those helpers.
+
+The third part does the same for the `dawn/rt/*` runtime classes (#205).
+A test in emit.dawn reads every static method the JVM emitter can call there
+against the classes `rtclasses` generates; it can only see calls that go
+through `rtclasses.invoke_rt` with a method from `emitter_rt_methods()`, or
+the table-driven `rt_intrinsic_ref`. So a raw `INVOKESTATIC` on a runtime
+class constant is refused here, an `RtMethod` may be built only by those two,
+and every `rt_*` method rtclasses defines has to be on the list.
 """
 
 import re
@@ -250,6 +258,65 @@ def pvec_spellings():
             )
 
 
+RT_CALL_FILES = ["jvm/emit.dawn", "jvm/help.dawn", "jvm/codegen.dawn"]
+
+
+def rt_classes():
+    """The runtime class constants rtclasses declares (`dawn/rt/...`)."""
+    return set(
+        names(
+            read("jvm/rtclasses.dawn"),
+            r'(?m)^pub const ([A-Z_]+): String = "dawn/rt/',
+            "rtclasses.dawn",
+            "runtime class constants",
+        )
+    )
+
+
+def rt_spellings():
+    consts = rt_classes()
+    raw = re.compile(r"visitMethodInsn\(OP_INVOKESTATIC,\s*(\w+|\"dawn/rt/)")
+    for name in RT_CALL_FILES:
+        for no, line, header in code_lines(read(name)):
+            if header.startswith("use "):
+                continue
+            m = raw.search(line)
+            if m and (m.group(1) in consts or m.group(1).startswith('"dawn/rt/')):
+                fail(
+                    f"{name}:{no}: INVOKESTATIC on a runtime class written by hand. "
+                    f"Call it with rtclasses.invoke_rt and an rt_* method on "
+                    f"emitter_rt_methods(), so emit.dawn's test can see it."
+                )
+            if "RtMethod {" in line and not (
+                name == "jvm/emit.dawn" and header.startswith("fn rt_intrinsic_ref(")
+            ):
+                fail(
+                    f"{name}:{no}: an RtMethod built outside rt_intrinsic_ref. "
+                    f"A hand-written runtime call belongs on "
+                    f"rtclasses.emitter_rt_methods(), where the test reads it."
+                )
+    rt = read("jvm/rtclasses.dawn")
+    defined = set(
+        names(rt, r"(?m)^pub fn (rt_\w+)\(\) -> RtMethod", "rtclasses.dawn", "rt_* methods")
+    )
+    listed = set(
+        names(
+            body(rt, "pub fn emitter_rt_methods()", "rtclasses.dawn"),
+            r"\b(rt_\w+)\(\)",
+            "rtclasses.dawn",
+            "entries of emitter_rt_methods()",
+        )
+    )
+    for n in sorted(defined - listed):
+        fail(
+            f"rtclasses.dawn: `{n}` is not on emitter_rt_methods(), so the "
+            f"test that reads the emitter's calls against the generated "
+            f"classes never sees it."
+        )
+    for n in sorted(listed - defined):
+        fail(f"rtclasses.dawn: emitter_rt_methods() lists `{n}`, which is not an rt_* method.")
+
+
 def check(backend, arms, owed):
     for n in sorted(owed - arms):
         fail(
@@ -274,11 +341,13 @@ def main():
     check("emit.dawn (JVM)", jvm_arms(), both | host)
     check("emitc.dawn (native)", c_arms(), both)
     pvec_spellings()
+    rt_spellings()
     report()
     print(
         f"PASS  both backends implement the {len(both)} inline primitives, "
         f"and the JVM the {len(host)} it owes alone; every std/pvec call "
-        f"goes through the helper that checks it against reach's list roots"
+        f"goes through the helper that checks it against reach's list roots, "
+        f"and every runtime-class call through the list emit.dawn's test reads"
     )
 
 

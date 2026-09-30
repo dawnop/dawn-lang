@@ -1,0 +1,94 @@
+# The smallest class file reader that answers one question: which methods a
+# class declares, by name, descriptor and access flags. It exists so a test
+# can hold the JVM emitter's runtime calls to the `dawn/rt/*` classes
+# `rtclasses` writes, the way emitc's tests hold its calls to `dawn_rt.h`
+# (#205), without building a corpus.
+#
+# Written here rather than borrowed from ASM: selfhost vendors
+# `org.ow2.asm:asm` only, and reading with it means subclassing
+# `ClassVisitor`, which Dawn cannot do. Nor with `javap` over a built jar:
+# that needs a JDK tool and a program to build, and the point is a check that
+# runs as an inline test. The format part needed is small and frozen (JVMS
+# §4.1, §4.4, §4.6): walk the constant pool for the UTF-8 entries, skip the
+# fields, read the methods, skip every attribute by its length.
+
+use std/bytes
+use std/map
+
+## One `method_info`: its access flags, name and descriptor, resolved.
+pub type ClassMethod = {
+  access: Int,
+  name: String,
+  desc: String
+}
+
+fn u1(b: Bytes, at: Int) -> Int = bytes.at(b, at)
+
+fn u2(b: Bytes, at: Int) -> Int = bytes.at(b, at) * 256 + bytes.at(b, at + 1)
+
+fn u4(b: Bytes, at: Int) -> Int = u2(b, at) * 65536 + u2(b, at + 2)
+
+fn utf8_at(pool: Map[Int, String], i: Int) -> String =
+  match map.get(pool, i) {
+    Some(s) -> s
+    None -> panic("classread: constant #" ++ to_string(i) ++ " is not a UTF-8 entry")
+  }
+
+## The size of a non-UTF-8 constant pool entry after its tag byte (JVMS §4.4).
+fn cp_width(tag: Int) -> Int =
+  match tag {
+    3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 -> 4
+    5 | 6 -> 8
+    7 | 8 | 16 | 19 | 20 -> 2
+    15 -> 3
+    _ -> panic("classread: unknown constant pool tag " ++ to_string(tag))
+  }
+
+## Past one `attribute_info` list starting at `at`.
+fn skip_attributes(b: Bytes, at0: Int) -> Int = {
+  var at = at0 + 2
+  for _i in 0..u2(b, at0) { at = at + 6 + u4(b, at + 2) }
+  at
+}
+
+## Every method the class declares, in declaration order. Panics on bytes that
+## are not a class file this reader understands rather than answering from a
+## misread pool: an empty answer would read as "the method is missing".
+pub fn class_methods(b: Bytes) -> List[ClassMethod] = {
+  if u4(b, 0) != 0xCAFEBABE { panic("classread: not a class file") }
+  let count = u2(b, 8)
+  var pool: Map[Int, String] = map.empty()
+  var at = 10
+  var i = 1
+  while i < count {
+    let tag = u1(b, at)
+    if tag == 1 {
+      let n = u2(b, at + 1)
+      pool = map.insert(pool, i, bytes.decode_utf8_lossy(bytes.slice(b, at + 3, at + 3 + n)))
+      at = at + 3 + n
+    } else {
+      at = at + 1 + cp_width(tag)
+      # a long or a double takes two pool slots (JVMS §4.4.5)
+      if tag == 5 || tag == 6 { i = i + 1 }
+    }
+    i = i + 1
+  }
+  # access, this, super, then the interfaces
+  at = at + 6
+  at = at + 2 + 2 * u2(b, at)
+  let fields = u2(b, at)
+  at = at + 2
+  for _f in 0..fields { at = skip_attributes(b, at + 6) }
+  let methods = u2(b, at)
+  at = at + 2
+  var out: List[ClassMethod] = []
+  for _m in 0..methods {
+    out = out ++ [ClassMethod {
+      access: u2(b, at),
+      name: utf8_at(pool, u2(b, at + 2)),
+      desc: utf8_at(pool, u2(b, at + 4))
+    }]
+    at = skip_attributes(b, at + 6)
+  }
+  out
+}

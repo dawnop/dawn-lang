@@ -46,10 +46,15 @@ use jvm/codegen.{
 }
 use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
-  PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
+  PANIC_CLASS, UNIT_CLASS, SB, BYTES_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
   HAMT_CLASS,
   PVEC_CLASS, ARRAY_CLASS,
-  CTL_CLASS, ctl_enter_desc, ctl_yield_desc
+  SHOW_CLASS, CTL_CLASS, supers_of, gen_show_class, gen_strings_class, gen_bytes_class,
+  gen_array_class, gen_io_class, gen_gpu_class, gen_ctl_class, emitter_rt_methods,
+  RtMethod, invoke_rt, rt_array_new, rt_array_push, rt_array_to_java, rt_array_of_java,
+  rt_bytes_concat, rt_ctl_enter, rt_ctl_yield, rt_io_cast, rt_io_list_names, rt_io_run,
+  rt_show_quote, rt_show_show, rt_strings_code_points, rt_strings_cursor_slice,
+  rt_strings_from_code_points, rt_strings_join
 }
 use jvm/help.{
   ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
@@ -73,6 +78,7 @@ use ir/lower.{LMod, subst_subject, trait_method_sig}
 use ir/reach
 use ir/reach.{Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use jvm/jreflect
+use jvm/classread
 use jvm/operand as operands
 use java "dawn.rt.Asm"
 use java "dawn.rt.AsmWriter"
@@ -630,12 +636,10 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
     VList(elems) -> {
       # a comptime list is materialised the way a list literal is: pushed
       # onto an `Array` and handed to the vector
-      m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
-        "()L" ++ ARRAY_CLASS ++ ";", false)
+      invoke_rt(m, rt_array_new())
       for el in elems {
         construct_value(gx, m, el, true)
-        m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
-          "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
+        invoke_rt(m, rt_array_push())
       }
       call_pvec(gx, m, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
     }
@@ -754,8 +758,8 @@ fn rt_class(o: Rt) -> String =
 ## name. The name is not a lookup -- a runtime method is spelled exactly as the
 ## intrinsic is, which is why `gen_strings_class` and friends read like the
 ## table does.
-fn rt_intrinsic_class(gx: GenCtx, name: String) -> Option[String] =
-  match map.get(gx.intrs, name) {
+fn rt_intrinsic_class(intrs: Map[String, Intr], name: String) -> Option[String] =
+  match map.get(intrs, name) {
     Some(i) ->
       match i.rt {
         Some(o) -> Some(rt_class(o))
@@ -2729,15 +2733,13 @@ fn gen_ctupleget(gx: GenCtx, g: Gen, target: CExpr, idx: Int, ty: Ty) -> (Gen, B
 ## for the other backend, and a stale arm that quietly built a java.util.List
 ## would be worse than one that is never taken.
 fn gen_clistlit(gx: GenCtx, g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
-  g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
-    "()L" ++ ARRAY_CLASS ++ ";", false)
+  invoke_rt(g.mv, rt_array_new())
   var g1 = g
   for el in elems {
     let (g2, falls) = gen_cexpr(gx, g1, el, false)
     g1 = g2
     if not falls { return (g1, false) }
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
-      "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
+    invoke_rt(g1.mv, rt_array_push())
   }
   call_pvec(gx, g1.mv, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
   (g1, true)
@@ -2810,7 +2812,7 @@ fn gen_cbinary(gx: GenCtx, g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (G
     CConcat ->
       match t {
         TyBytes -> {
-          g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
+          invoke_rt(g1.mv, rt_bytes_concat())
         }
         TyList(_) -> {
           call_pvec(gx, g1.mv, LIST_CONCAT,
@@ -2941,8 +2943,7 @@ fn call_pvec(gx: GenCtx, m: MethodVisitor, name: String, desc: String) -> Unit !
 ## unmodifiable: `array_to_java` copies the window and wraps it.
 fn list_to_host(gx: GenCtx, m: MethodVisitor) -> Unit !io = {
   call_pvec(gx, m, LIST_TO_ARRAY, "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";")
-  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
-    "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
+  invoke_rt(m, rt_array_to_java())
   ()
 }
 
@@ -3024,8 +3025,7 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
 
   ## A host list on the stack becomes a Dawn list.
   fn of_host(m: MethodVisitor) -> Unit !io = {
-    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_of_java",
-      "(" ++ jl ++ ")" ++ arr, false)
+    invoke_rt(m, rt_array_of_java())
     call_pvec(gx, m, LIST_FROM_ARRAY, "(" ++ arr ++ ")" ++ vec)
     ()
   }
@@ -3034,28 +3034,24 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
     var g1 = gen_cargs(gx, g, [args[0]])
     to_host(g1.mv)
     g1 = gen_cargs(gx, g1, [args[1]])
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "join",
-      "(" ++ jl ++ "Ljava/lang/String;)Ljava/lang/String;", false)
+    invoke_rt(g1.mv, rt_strings_join())
     return Some((g1, true))
   }
   if name == "from_code_points" {
     let g1 = gen_cargs(gx, g, args)
     to_host(g1.mv)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "from_code_points",
-      "(" ++ jl ++ ")Ljava/lang/String;", false)
+    invoke_rt(g1.mv, rt_strings_from_code_points())
     return Some((g1, true))
   }
   if name == "code_points" {
     let g1 = gen_cargs(gx, g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "code_points",
-      "(Ljava/lang/String;)${jl}", false)
+    invoke_rt(g1.mv, rt_strings_code_points())
     of_host(g1.mv)
     return Some((g1, true))
   }
   if name == "io_list_names" {
     let g1 = gen_cargs(gx, g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_list_names",
-      "(Ljava/lang/String;)${jl}", false)
+    invoke_rt(g1.mv, rt_io_list_names())
     of_host(g1.mv)
     return Some((g1, true))
   }
@@ -3063,8 +3059,7 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
     var g1 = gen_cargs(gx, g, [args[0]])
     to_host(g1.mv)
     g1 = gen_cargs(gx, g1, [args[1], args[2]])
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_run",
-      "(" ++ jl ++ "Ljava/lang/String;Ljava/lang/String;)J", false)
+    invoke_rt(g1.mv, rt_io_run())
     return Some((g1, true))
   }
   if name == "args" {
@@ -3339,7 +3334,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     # checker builds an ordinary `XApply` and this arm is never reached, which
     # is what keeps the tail-resumptive form byte-identical.
     let g1 = gen_cargs(gx, g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "enter", ctl_enter_desc(), false)
+    invoke_rt(g1.mv, rt_ctl_enter())
     return (g1, true)
   }
   if name == "ctl_yield" {
@@ -3361,7 +3356,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
       g1.mv.visitInsn(OP_AASTORE)
       i = i + 1
     }
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, CTL_CLASS, "yield", ctl_yield_desc(), false)
+    invoke_rt(g1.mv, rt_ctl_yield())
     return (g1, true)
   }
   if name == "java_eq" {
@@ -3447,8 +3442,7 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
   }
   if name == "cursor_slice" {
     let g1 = gen_cargs(gx, g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursor_slice",
-      "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+    invoke_rt(g1.mv, rt_strings_cursor_slice())
     let ok = Label.new()
     g1.mv.visitInsn(OP_DUP)
     g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
@@ -3486,47 +3480,108 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     # is where it landed either way. Naming the operand's type changed which
     # emitter can compile it (native could not read a type off an erased slot)
     # without changing a byte of what this one emits.
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
-      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    invoke_rt(g1.mv, rt_show_show())
   } else if name == "quote" {
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
-      "(Ljava/lang/String;)Ljava/lang/String;", false)
+    invoke_rt(g1.mv, rt_show_quote())
   } else if name == "cast" {
     # The check moves off this stack and into a method (codegen.gen_cast says
     # why), with the target passed along as the `Class` the CHECKCAST would
     # have named.
     ldc_class(g1.mv, unerase_class(gx.adts, cast_target(ty)))
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast",
-      "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)
+    invoke_rt(g1.mv, rt_io_cast())
   } else {
-    match rt_intrinsic_class(gx, name) {
-      Some(cls) -> {
-        let sig = builtin_sig(gx, name)
-        # the written parameters, then one erased slot per atom of the
-        # primitive's own row -- rule 丁 at a shim, the same count
-        # `lower.builtin_evidence` appends and the same one `sig_desc_with_dicts`
-        # spells for a Dawn callee. `bracket` is the only entry of the table
-        # this is worth anything at (every other row is pure or `!io`, and
-        # `types.nev` gives neither a slot), and a shim reached through a
-        # descriptor one word short is a `NoSuchMethodError` rather than a
-        # verifier complaint.
-        var ps = ""
-        for p in sig.param_tys { ps = ps ++ desc_of(gx.adts, p) }
-        ps = ps ++ erased_ev_slots(nev(sig_abi_eff(sig)))
-        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
-          "(" ++ ps ++ ")" ++ desc_of(gx.adts, sig.ret), false)
-      }
+    match rt_intrinsic_ref(gx.adts, gx.intrs, name) {
+      Some(r) -> invoke_rt(g1.mv, r)
       None -> panic("codegen: Core intrinsic without a JVM mapping: ${name}")
     }
   }
   (g1, true)
 }
 
-fn builtin_sig(gx: GenCtx, name: String) -> Sig =
-  match map.get(gx.intrs, name) {
-    Some(i) -> i.sig
-    None -> panic("codegen: no signature for intrinsic ${name}")
+## The runtime method a primitive with a runtime module is called as, when no
+## arm above spells the call by hand: its module's class, its own name, and a
+## descriptor read off its signature. None for a primitive no runtime module
+## owns.
+fn rt_intrinsic_ref(adts: Adts, intrs: Map[String, Intr], name: String) -> Option[RtMethod] =
+  match rt_intrinsic_class(intrs, name) {
+    Some(cls) -> {
+      let sig =
+        match map.get(intrs, name) {
+          Some(i) -> i.sig
+          None -> panic("codegen: no signature for intrinsic ${name}")
+        }
+      # the written parameters, then one erased slot per atom of the
+      # primitive's own row -- rule 丁 at a shim, the same count
+      # `lower.builtin_evidence` appends and the same one `sig_desc_with_dicts`
+      # spells for a Dawn callee. `bracket` is the only entry of the table
+      # this is worth anything at (every other row is pure or `!io`, and
+      # `types.nev` gives neither a slot), and a shim reached through a
+      # descriptor one word short is a `NoSuchMethodError` rather than a
+      # verifier complaint.
+      var ps = ""
+      for p in sig.param_tys { ps = ps ++ desc_of(adts, p) }
+      ps = ps ++ erased_ev_slots(nev(sig_abi_eff(sig)))
+      Some(RtMethod { cls: cls, name: name, desc: "(" ++ ps ++ ")" ++ desc_of(adts, sig.ret) })
+    }
+    None -> None
   }
+
+## The static methods the generated runtime classes declare, as
+## `class.name desc`, read back out of the bytes `rtclasses` writes.
+fn generated_rt_statics() -> List[String] !io = {
+  let adts = prelude_adts()
+  let sup = supers_of(adts, map.keys(adts))
+  let classes = [
+    (SHOW_CLASS, gen_show_class(sup)),
+    (STRINGS_CLASS, gen_strings_class(sup, reach.all_tables())),
+    (BYTES_CLASS, gen_bytes_class(sup)),
+    (ARRAY_CLASS, gen_array_class(sup)),
+    (IO_CLASS, gen_io_class(sup)),
+    (GPU_CLASS, gen_gpu_class(sup)),
+    (CTL_CLASS, gen_ctl_class(sup))
+  ]
+  var out: List[String] = []
+  for pr in classes {
+    let (cls, b) = pr
+    for m in classread.class_methods(b) {
+      if (m.access & ACC_STATIC) != 0 { out = out ++ [cls ++ "." ++ m.name ++ " " ++ m.desc] }
+    }
+  }
+  out
+}
+
+## Every runtime method this emitter can call: the hand-written calls
+## (`rtclasses.emitter_rt_methods`) and, for each primitive with a runtime
+## module, the call the table-driven arm of `gen_cintrinsic` would write.
+fn emitter_rt_refs() -> List[RtMethod] = {
+  let adts = prelude_adts()
+  let intrs = intrinsics()
+  var out = emitter_rt_methods()
+  # every primitive with a runtime module. The ones an arm spells by hand
+  # have none (`types.intrinsics` says why for each), so this is exactly the
+  # set that reaches the table-driven call
+  for n in list.sort(map.keys(intrs)) {
+    match rt_intrinsic_ref(adts, intrs, n) {
+      Some(r) -> { out = out ++ [r] }
+      None -> ()
+    }
+  }
+  out
+}
+
+test "every runtime method the JVM emitter can call is one rtclasses generates" {
+  let have = generated_rt_statics()
+  # both halves are there: the table-driven one is not empty by accident
+  assert len(emitter_rt_refs()) > len(emitter_rt_methods()) + 20
+  var missing: List[String] = []
+  for r in emitter_rt_refs() {
+    let key = r.cls ++ "." ++ r.name ++ " " ++ r.desc
+    if not list.contains(have, key) { missing = missing ++ [key] }
+  }
+  if missing != [] {
+    panic("emitted calls with no generated static method: " ++ join(missing, ", "))
+  }
+}
 
 ## The JVM-only node (core.CJava). A `use java` site dispatches three ways --
 ## a static field read, a constructor, or a method invoke. The native backend
