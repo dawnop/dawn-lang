@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = {
     "atomic-write-contract": (".",),
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
+    "builtin-type-contract": (".",),
     "classfile-verify": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
