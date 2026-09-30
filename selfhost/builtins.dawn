@@ -31,10 +31,15 @@
 #   * a bare `fn` is std-only: it is the backend contract behind a `std`
 #     module, the checker hides it from every other module, and the module
 #     that wraps it is named in the line above.
-#   * ` # comptime: rejected` marks a builtin a `const` may not fold through
-#     (`comptime_rejects` in `src/ir/interp.dawn`). 67 of the 98 carry it,
-#     which is the real answer to "what can a const do" -- spec 7.2.2 answers
-#     in prose and names about a quarter of them.
+#   * ` # comptime: rejected` marks a builtin a `const` may not fold through:
+#     one the comptime interpreter refuses by name (`comptime_rejects` in
+#     `src/ir/interp.dawn`), or one lowering turns into a call on std/hamt,
+#     whose Core the interpreter refuses (`comptime_refused_after_lowering`,
+#     the Map and Set families). Most lines carry it, and the marked set is
+#     the real answer to "what can a const do" -- spec 7.2.2 answers in prose
+#     and names about a quarter of it. A name lowering rewrites into ordinary std
+#     source carries no marker: `parse_int_radix` folds through std/fmt's Core
+#     like any other call.
 #   * one declaration per line, never wrapped. A signature is what is being
 #     compared, and a comparison of something reflowed is a comparison of the
 #     reflowing.
@@ -154,7 +159,7 @@ pub fn parse_int(s: String) -> Option[Int]
 pub fn parse_float(s: String) -> Option[Float]
 
 ## parse an integer in base 2 through 36; None on malformed input
-pub fn parse_int_radix(s: String, radix: Int) -> Option[Int] # comptime: rejected
+pub fn parse_int_radix(s: String, radix: Int) -> Option[Int]
 
 ## the Unicode case table applied downwards; `str.to_lower` is the spelling user code writes
 fn str_lower(s: String) -> String
@@ -192,7 +197,7 @@ pub fn char_is_lower(c: Char) -> Bool
 pub fn char_is_space(c: Char) -> Bool
 
 ## an Int taken as a Char with no range check; lowering rewrites the call to its argument
-fn char_unchecked(n: Int) -> Char # comptime: rejected
+fn char_unchecked(n: Int) -> Char
 
 # ---- cursor -- the string walk std/str is written over ----
 #
@@ -251,7 +256,9 @@ fn bytes_from_array(a: Array[Int]) -> Bytes # comptime: rejected
 #
 # Std-only, and erased on both sides: lowering turns each of these into a call
 # on the Dawn HAMT in `std/hamt`, so a backend implements `Array` and nothing
-# else.
+# else. The comptime markers on this family and the next are real, but the
+# refusal is not the interpreter's intrinsic chain -- no name here reaches it --
+# it is `call_named` refusing std/hamt's Core.
 
 ## the empty map
 fn map_empty[K, V]() -> Map[K, V] # comptime: rejected

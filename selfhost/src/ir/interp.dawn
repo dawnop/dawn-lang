@@ -738,14 +738,23 @@ fn call_named(
 # Both directions had drifted -- three arms below had no producer left, and
 # `str_of_bytes` had to be added by hand when RP-02 introduced it (audit RP-12).
 #
-# The two lists below close that. Together they partition
+# Three groups close that. Together they partition
 # `types.intrinsics()` + `lower.internal_intrinsics()`: every intrinsic in the
-# program is either interpreted here or deliberately refused, the gate test at
-# the bottom of this file checks the partition is total and disjoint, and it
-# probes each name to check the lists say what the chain does.
+# program is interpreted here, removed by lowering before this evaluator could
+# see it (`lower.lowered_intrinsics()`, read rather than copied), or
+# deliberately refused. The gate test at the bottom of this file checks the
+# partition is total and pairwise disjoint, and it probes each name to check
+# the lists say what the chain does.
+#
+# The middle group is the one this file lacked until 2026-09-30 (#185). With
+# only "arm" and "refused" to choose from, a name lowering removes had to be
+# put in one of them: `parse_int` got an arm no producer could reach, and
+# `parse_int_radix` got a refusal the mirror in selfhost/builtins.dawn then
+# published as "a `const` cannot use this" -- while `const Z = parse_int_radix
+# ("ff", 16)` folds to `Some(255)`, through std/fmt's Core like any other call.
 
-## Every name the chain below has an arm for -- 43 of them, 12 emitted by
-## lowering and 31 writable by a user.
+## Every name the chain below has an arm for -- 42 of them, 12 emitted by
+## lowering and 30 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
 ## not a second copy: a name missing from here can never reach an arm, which
@@ -766,17 +775,18 @@ fn interp_arms() -> List[String] = [
   "code_points", "from_code_points",
   "char_is_letter", "char_is_digit", "char_is_alnum", "char_is_upper",
   "char_is_lower", "char_is_space",
-  "str_lower", "str_upper", "parse_int", "parse_float"
+  "str_lower", "str_upper", "parse_float"
 ]
 
 ## Every intrinsic a comptime run refuses, and why it is a group rather than an
 ## oversight.
 ##
-## Read it as the real answer to "what can a `const` do". Spec §7.2.2 answers
-## in prose, and the prose is short by an order of magnitude: it names Map and
-## Set, which is 18 of the 87 names below (audit RP-11). The list is measured
-## here -- the gate test calls each one and checks it really is refused -- and
-## rewriting the spec against it is a separate job.
+## Read it, with `comptime_refused_after_lowering` below, as the real answer to
+## "what can a `const` do". Spec §7.2.2 answers in prose, and the prose is short
+## by an order of magnitude: it names Map and Set, which are the 18 names of
+## that second list, against the 68 here (audit RP-11). The lists are measured
+## -- the gate test calls each name and checks it really is refused -- and
+## rewriting the spec against them is a separate job.
 fn comptime_rejects() -> List[String] = {
   # `cmp`/`hash` are the prelude relation collapsed at a scalar and `java_hash`
   # is the host's; a const that needs an ordering says so as a trait call,
@@ -828,22 +838,10 @@ fn comptime_rejects() -> List[String] = {
   # that: there is still no host object to reclaim, and an `Err` here would be
   # a fabricated answer rather than a fold.
   out = out ++ ["cast"]
-  # `char_unchecked` never gets here at all: lowering rewrites the call to its
-  # argument (lower.lowered_intrinsics), because `Char`'s representation is
-  # `Int`. It is listed as refused rather than given an arm for the reason
-  # check 2 below exists -- an arm no producer can reach is the dead code that
-  # rotted in this table before.
-  out = out ++ ["char_unchecked"]
-  # Map/Set/Array: `CValue` has no representation for any of the three, so
-  # `const M = map.from([...])` does not fold. This is the group spec §7.2.2
-  # names, and it is the smaller half of what is actually refused.
-  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
-    "entries", "fold"] {
-    out = out ++ ["map_" ++ op]
-  }
-  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
-    out = out ++ ["set_" ++ op]
-  }
+  # Array: `CValue` has no representation for it. Map and Set are refused too
+  # -- the group spec §7.2.2 names -- but not here: lowering turns them into
+  # calls on std/hamt before this evaluator sees a name, and the refusal is
+  # `call_named`'s (`comptime_refused_after_lowering` below).
   for op in ["new", "len", "get", "push", "with", "steal"] { out = out ++ ["array_" ++ op] }
   # a bitmap operation on the array representation, so it is refused with it
   out = out ++ ["popcount"]
@@ -879,10 +877,30 @@ fn comptime_rejects() -> List[String] = {
   # initialiser cannot produce one, and a value that is not a continuation is
   # a run-time panic rather than a fold.
   out = out ++ ["discard"]
-  # no arm, and no reason beyond that: `parse_int` folds and this one does not.
-  # Left refused rather than quietly added, because a new arm is a new answer
-  # the two backends then have to agree with.
-  out = out ++ ["parse_int_radix"]
+  out
+}
+
+## The names lowering removes that a `const` still cannot use: Map and Set.
+##
+## Refused, but not by the chain -- no name here ever reaches it. Lowering
+## turns each into a call on the Dawn trie in std/hamt (`lower.hamt_fn`), and
+## `call_named` refuses that module's Core, because `CValue` has no
+## representation for a trie. So these are in the lowered group of the
+## partition and in no list the chain reads; this list exists for the one
+## reader that has to know the refusal is real all the same, the
+## `# comptime: rejected` markers in selfhost/builtins.dawn
+## (scripts/builtin-decl-contract, P5). The gate test holds it equal to the
+## lowered names `hamt_fn` routes, in both directions, and checks the refusal
+## itself.
+fn comptime_refused_after_lowering() -> List[String] = {
+  var out: List[String] = []
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
+    "entries", "fold"] {
+    out = out ++ ["map_" ++ op]
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    out = out ++ ["set_" ++ op]
+  }
   out
 }
 
@@ -1254,17 +1272,6 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     Ok((st, env, VStr(str.to_lower(as_str(args[0])))))
   } else if name == "str_upper" {
     Ok((st, env, VStr(str.to_upper(as_str(args[0])))))
-  } else if name == "parse_int" {
-    # The builtin spelling, which lowering routes to std/fmt.atoi -- so this
-    # arm interprets the program's own std Core rather than a host grammar
-    # (audit RP-05; same bootstrap rule as `stringify`'s Float arm). It said
-    # `fmt.atoi` until v0.55.0, back when the builtin still had a host
-    # primitive behind it in the seed; since RP-05 there is one route and the
-    # two spellings emit the same call, and `atoi` is no longer pub.
-    match parse_int(as_str(args[0])) {
-      Some(n) -> Ok((st, env, some_v(VInt(n))))
-      None -> Ok((st, env, none_v()))
-    }
   } else if name == "parse_float" {
     match parse_float(as_str(args[0])) {
       Some(f) -> Ok((st, env, some_v(VFloat(f))))
@@ -2271,48 +2278,97 @@ fn probe_builtin(icx: ICx, name: String) -> String !io = {
   }
 }
 
-test "the comptime interpreter covers every intrinsic, or refuses it by name" {
+## What a comptime call on std/hamt answers: the refusal's text, or `"folded"`
+## if it did not refuse. The Map/Set group is refused here and not in the
+## chain, so this is the probe that says the refusal is real.
+fn probe_hamt(icx: ICx, name: String) -> String !io = {
+  let env: Env = map.empty()
+  let no_args: List[CValue] = []
+  match call_named(icx, fresh_st(1000), env, "std/hamt", name, no_args) {
+    Ok(_) -> "folded"
+    Err(t) -> {
+      let (_, _, ctl) = t
+      match ctl {
+        KErr(failure) -> failure.msg
+        _ -> "folded"
+      }
+    }
+  }
+}
+
+test "the comptime interpreter covers every intrinsic, removes it in lowering, or refuses it" {
   let arms = interp_arms()
   let rejects = comptime_rejects()
+  # the third group is lowering's own list, read rather than copied: a name
+  # lowering removes is one this evaluator never sees, and the list that says
+  # which names those are is the one lowering acts on
+  let lowered = lower.lowered_intrinsics()
   # the two tables that between them name every intrinsic in the program:
   # what a user may write, and what lowering emits on top of that
   let user = map.keys(intrinsics())
   let internal = lower.internal_intrinsics()
   let icx = probe_icx()
 
-  # 1. the lists partition the tables. This is the check that makes a new
-  #    primitive impossible to forget: added to `types.intrinsics()` and to
-  #    neither list here, it lands in no group and this fails.
+  # 1. the three groups partition the tables. This is the check that makes a
+  #    new primitive impossible to forget: added to `types.intrinsics()` and to
+  #    no group here, it lands nowhere and this fails.
   for n in user ++ internal {
-    let a = has_name(arms, n)
-    let r = has_name(rejects, n)
-    assert a || r
-    assert not (a && r)
+    var groups = 0
+    if has_name(arms, n) { groups = groups + 1 }
+    if has_name(lowered, n) { groups = groups + 1 }
+    if has_name(rejects, n) { groups = groups + 1 }
+    if groups != 1 {
+      panic("`" ++ n ++ "` is in " ++ to_string(groups) ++ " of the three comptime " ++
+          "groups (interp_arms, lower.lowered_intrinsics, comptime_rejects); " ++
+          "every intrinsic belongs to exactly one")
+    }
+  }
+  #    The pair #185 was about, named on its own: an arm for a name lowering
+  #    removes has no producer, which is how `parse_int`'s arm outlived its
+  #    reason. The loop above already refuses it; this says which rule broke.
+  for n in arms {
+    if has_name(lowered, n) {
+      panic("`" ++ n ++ "` has an arm here, but lowering removes every call to it " ++
+          "(lower.lowered_intrinsics), so no Core the interpreter runs can name it")
+    }
   }
 
-  # 2. nothing on either list is outside the tables. This is the direction
-  #    that had rotted: `map_index`, `chars` and `split` had arms here long
-  #    after their producers went away (`m[k]` became a `std/hamt.index` call,
-  #    the other two moved into std/str), and nothing said so.
+  # 2. nothing on a list is outside the tables. This is the direction that had
+  #    rotted: `map_index`, `chars` and `split` had arms here long after their
+  #    producers went away (`m[k]` became a `std/hamt.index` call, the other
+  #    two moved into std/str), and nothing said so.
   for n in arms ++ rejects {
     assert has_name(user, n) || has_name(internal, n)
   }
 
   # 3. the lists say what the chain does. Without this the lists would be a
   #    second copy of the chain, free to drift from it the way the chain drifted
-  #    from `types.intrinsics()`.
+  #    from `types.intrinsics()`. A lowered name has no arm either: were one to
+  #    reach the chain, it would be refused rather than half-implemented.
   for n in arms { assert probe_builtin(icx, n) == "arm" }
-  for n in rejects { assert probe_builtin(icx, n) == "refused" }
+  for n in rejects ++ lowered { assert probe_builtin(icx, n) == "refused" }
   # and a name that is no intrinsic at all gets the same refusal, which is
   # what the probe reads as "no arm"
   assert probe_builtin(icx, "no_such_primitive") == "refused"
 
-  # 4. the sizes the comments above quote. A count written in prose is what
+  # 4. the lowered names a `const` still cannot use are exactly the ones
+  #    lowering routes to std/hamt, and std/hamt really is refused. Both
+  #    directions, because the list is what the builtins mirror's markers are
+  #    held to (scripts/builtin-decl-contract, P5).
+  let after = comptime_refused_after_lowering()
+  for n in lowered {
+    assert has_name(after, n) == (lower.hamt_fn(n) != None)
+  }
+  for n in after { assert has_name(lowered, n) }
+  assert probe_hamt(icx, "empty") == "Map and Set operations are not available at comptime"
+
+  # 5. the sizes the comments above quote. A count written in prose is what
   #    went wrong in the list this gate replaces -- lowering's own said
-  #    "thirteen more" and "all twelve" in the same paragraph -- so the two
+  #    "thirteen more" and "all twelve" in the same paragraph -- so the
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 43
-  assert len(rejects) == 88
+  assert len(arms) == 42
+  assert len(rejects) == 68
+  assert len(after) == 18
 }
 
 fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
