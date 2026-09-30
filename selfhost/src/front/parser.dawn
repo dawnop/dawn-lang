@@ -2994,8 +2994,42 @@ fn attach_trailing(callee: Expr, lam: Expr) -> Expr =
 
 fn stmt_and_sep(p: P, st: St) -> PR[Stmt] = {
   let (st1, s) = statement(p, st)?
+  if at_kind(p, st1, EQ) {
+    match s {
+      SExpr(e, _, _) -> return Err((st1, assign_target_error(p, st1, e)))
+      _ -> ()
+    }
+  }
+  if at_kind(p, st1, DOTDOT) {
+    # `let r = 0..3`: a range is a for-header form, never a value (spec §4.7).
+    return Err((st1, perr_h(p, st1, "`..` is not an expression operator",
+      "a range `a..b` only appears in a `for` header: `for i in a..b { ... }`")))
+  }
   let st2 = want_sep(p, st1)?
   Ok((st2, s))
+}
+
+## `xs[0] = 9`, `r.f = 2`: only `IDENT =` is an assignment (`assign_stmt`),
+## so any other left side stops at the `=` and would otherwise get the generic
+## "one statement per line" (#193). The hint says how the update is spelled
+## instead, because both rules are deliberate (spec §4.8, §2.4).
+fn assign_target_error(p: P, st: St, target: Expr) -> Diag = {
+  let msg = "only a variable can be assigned"
+  match target {
+    EIndex(_, _, _, _) -> perr_h(p, st, msg,
+      "Dawn has no index assignment; build the updated value and reassign the variable, " ++
+        "e.g. `m = map.insert(m, k, v)`")
+    EFieldAcc(recv, field, _, _, _, _) -> {
+      let r = match recv {
+        EVar(n, _, _) -> n
+        _ -> "r"
+      }
+      perr_h(p, st, msg,
+        "record fields are immutable; rebuild the record and reassign the variable: `" ++
+          r ++ " = T { .." ++ r ++ ", " ++ field ++ ": v }`, with `T` its type")
+    }
+    _ -> perr_h(p, st, msg, "the left side of `=` must be a name declared with `var`")
+  }
 }
 
 ## After a broken statement: resume at the next statement of the same block.
