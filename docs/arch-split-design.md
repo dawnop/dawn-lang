@@ -762,7 +762,8 @@ sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/check/checker.dawn \
   `selfhost-codegen.md:210-213` 明确记着发射序影响字节。非目标。
   （顺路发现，**本批不修**：`:1485` 的 `lm.fns[fi]` 在长度检查**之前**取下标——
   若 `lm.fns` 短于 `tm.fns`，得到的是越界而不是那句 panic。改它会改 panic 文本
-  = 改 CLI 输出，单独立案。）
+  = 改 CLI 输出，单独立案。**后记**：#182 已修，`emit_module` 在取下标之前由
+  `check_lowered_pairing` 先比长度、再逐位比名字，三向测试在 `emit.dawn` 里。）
 - **不抽 `consts`/`blocks` 到跨后端共享模块**：见 §2.2 末。
 - **#122 不进这批**（P6）：`nid` 从 2 变 6 会让 std 起的整条 id 链平移 +4，波及
   `scripts/core-golden/std.*.core` 十份全文 golden 与 `calc/eqhash/traits.core` 里的

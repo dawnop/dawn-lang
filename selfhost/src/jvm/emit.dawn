@@ -1776,6 +1776,51 @@ test "the site table is keyed by the name a method is emitted under" {
   }
 }
 
+## The checked functions and the lowered ones are this module's, in source
+## order, and `emit_module` pairs them by position. Both halves of that pairing
+## are checked here, before anything is indexed: a length mismatch used to
+## surface as a generic index panic (lowered list shorter) or not at all
+## (longer, the extras silently dropped), and neither names the broken
+## invariant. Either way the two lists were built from different modules.
+fn check_lowered_pairing(module: String, declared: List[String], lowered: List[String]) -> Unit = {
+  if len(lowered) != len(declared) {
+    panic("codegen: module `" ++ module ++ "` declares " ++ to_string(len(declared)) ++
+        " functions but lowering produced " ++ to_string(len(lowered)))
+  }
+  var i = 0
+  for name in declared {
+    if lowered[i] != name {
+      panic("codegen: module `" ++ module ++ "` lowered `" ++ lowered[i] ++ "` where `" ++
+          name ++ "` was declared")
+    }
+    i = i + 1
+  }
+}
+
+## The pairing panic's message, or "" when the two lists pair up.
+fn pairing_panic(declared: List[String], lowered: List[String]) -> String =
+  match catch_panic(() => check_lowered_pairing("app/M", declared, lowered)) {
+    Ok(_) -> ""
+    Err(e) -> e.message
+  }
+
+test "a lowered list shorter than the declared one is the pairing invariant" {
+  assert pairing_panic(["a", "b"], ["a", "b"]) == ""
+  # not an index out of range from reading past the lowered list
+  assert pairing_panic(["a", "b"], ["a"]) ==
+    "codegen: module `app/M` declares 2 functions but lowering produced 1"
+}
+
+test "a lowered list longer than the declared one is reported, not dropped" {
+  assert pairing_panic(["a"], ["a", "b"]) ==
+    "codegen: module `app/M` declares 1 functions but lowering produced 2"
+}
+
+test "a lowered name out of place at equal length is the pairing invariant" {
+  assert pairing_panic(["a", "b"], ["a", "c"]) ==
+    "codegen: module `app/M` lowered `c` where `b` was declared"
+}
+
 ## dictionaries and the class of statics.
 ##
 ## `impl_table` is still a parameter, but it no longer says anything about
@@ -1884,15 +1929,18 @@ pub fn emit_module(
   }
   var sites = decl_sites(src, decls)
   var has_main = false
+  var declared: List[String] = []
+  for f in tm.fns { declared = declared ++ [f.name] }
+  var lowered: List[String] = []
+  for pr in lm.fns {
+    let (cf, _) = pr
+    lowered = lowered ++ [cf.name]
+  }
+  check_lowered_pairing(class_name, declared, lowered)
   var fi = 0
   for f in tm.fns {
     let (cf, lifts) = lm.fns[fi]
     fi = fi + 1
-    # the lowered functions are this module's, in source order; a mismatch
-    # means the two lists were built from different modules
-    if cf.name != f.name {
-      panic("codegen: lowered `" ++ cf.name ++ "` where `" ++ f.name ++ "` was declared")
-    }
     match f.impl_of {
       Some(pair) -> {
         let (tid, subject) = pair
