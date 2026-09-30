@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3a0e23da85b66179 -->
+<!-- doc-check: translation-of docs/spec.md @ 711d50e0e4c2db37 -->
 
 # Dawn Language Specification
 
@@ -36,6 +36,17 @@ Wording of this specification: **must** (violating it is a compile error), **gua
 # Line comment, to end of line
 ## Doc comment, attached to the declaration that immediately follows (extracted by the toolchain)
 ```
+
+**There are no block comments.** The only comment is the one that starts with `#` and runs to the end
+of the line; to comment out a stretch of code, put `#` on each line.
+`/*` is a lexical error (``Dawn has no block comments; use `#` on each line``), reported at the `/*`;
+the text after it up to `*/` (or to the end of the file if there is none) is skipped as a whole, so it
+raises nothing further.
+Rationale: Dawn's line structure carries meaning (§1.7: a newline separates statements, and the
+line's last token decides whether it continues), and interpolation is single-line (§1.6). Without
+block comments every line can be tokenized on its own, "what is the last token of this line" never
+depends on earlier text, and `dawn fmt` needs no indentation rule for comments that span lines.
+Gleam and Zig likewise have only line comments.
 
 ### 1.3 Identifiers and naming conventions
 
