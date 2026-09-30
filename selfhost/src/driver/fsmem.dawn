@@ -6,10 +6,18 @@
 # offer: the analysis can see nothing the test did not put there, and what the
 # analysis wrote is a value the test can compare.
 #
-# It lives in selfhost rather than in std on purpose. The bootstrap seed
-# compiles HEAD selfhost against the std the seed shipped with, so a std
-# function added in this release cannot be called from selfhost until the next
-# one; a table handler in std would be unusable here for a whole release.
+# It lives in selfhost for one more release, and then it does not. The
+# bootstrap seed compiles HEAD selfhost against the std the seed shipped with,
+# so a std function added in this release cannot be called from selfhost until
+# the next one. That is also why `Fs` cannot gain an operation while this file
+# spells its own `with handle Fs`: a handler answers exactly the declared ops,
+# and this one is checked against the seed's op set and HEAD's in one build.
+# So the table and its arms were copied into `std/memfs` (#207, R1 in
+# docs/fs-real-path-design.md); once a seed carries that module, this file
+# becomes a thin wrapper over `memfs.with_fs` and keeps only what needs the
+# compiler (`mem_std`, which reads `embed/stdsrc`). Until then the two copies
+# are one text: `check_memfs_twin` in scripts/doc-check.py compares the arms,
+# the record and every private function above the tests. Change both.
 #
 # Directories are implied by the paths in the table, so `is_dir`, `exists` and
 # `list_names` answer what the real file system would answer for the same tree.

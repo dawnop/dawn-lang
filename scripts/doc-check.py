@@ -2235,6 +2235,169 @@ def check_analyze_env_table_selftest() -> tuple[list[str], int]:
     return [], 4 + len(ANALYZE_ENV_REAL_ANCHORS) + len(ANALYZE_ENV_DOC_CLAUSES)
 
 
+# --- the memory file system's two copies (#207 R1) ---------------------------
+# `std/memfs` is the table handler the compiler's `driver/fsmem` moves onto one
+# seed later (docs/fs-real-path-design.md). Until then selfhost cannot call it
+# (the seed's std does not have it), so both files spell the same handler, and
+# nothing but this check keeps them the same handler: the checker holds each
+# file's `with handle Fs` to the op set of the std it is compiled against, but
+# nothing compares an arm body or a helper across the two.
+#
+# What is compared, all of it inventory rather than anchors: the ops `pub effect
+# Fs` declares, the arm names of each `with handle Fs` block (same names, same
+# order), the `MemFs` record, the handler block's text, and every non-public
+# function fsmem defines above its tests, which std/memfs has to define with
+# the same text. MEMFS_SPELLINGS are the only differences allowed, each with
+# its reason; a spelling that no longer occurs in fsmem is itself red, so the
+# list cannot keep an exemption the files stopped needing.
+MEMFS_EFFECT = "std/io.dawn"
+MEMFS_STD = "std/memfs.dawn"
+MEMFS_SELFHOST = "selfhost/src/driver/fsmem.dawn"
+MEMFS_SPELLINGS = (
+    (r"fspath\.absolute\(", "path_absolute(",
+     "std cannot import the fspath package, so memfs carries a private copy"),
+    (r"fspath\.parent\(", "path_parent(",
+     "std cannot import the fspath package, so memfs carries a private copy"),
+    (r"(?<![.\w])sort\(", "list.sort(",
+     "the prelude's `sort` is std/list's, and std spells it qualified"),
+    (r"with handle Fs \{", "with handle io.Fs {",
+     "std/memfs names the effect qualified; its header says why"),
+)
+
+
+def memfs_ops(io_text: str) -> list[str] | None:
+    decl = re.search(r"(?ms)^pub effect Fs \{\n(.*?)^\}", io_text)
+    if decl is None:
+        return None
+    return re.findall(r"(?m)^\s+fn (\w+)\(", decl.group(1))
+
+
+def memfs_handler(text: str) -> tuple[str, list[str]] | None:
+    block = re.search(r"(?ms)^  with handle (?:io\.)?Fs \{\n.*?^  \}\n", text)
+    if block is None:
+        return None
+    return block.group(0), re.findall(r"(?m)^    (fs_\w+)\(", block.group(0))
+
+
+def memfs_private_fns(text: str) -> dict[str, str]:
+    head = text.split("\n# ---- tests ----", 1)[0]
+    return {m.group(1): m.group(0)
+            for m in re.finditer(r"(?ms)^fn (\w+)\b.*?(?=\n\n|\Z)", head)}
+
+
+def memfs_record(text: str) -> str | None:
+    rec = re.search(r"(?ms)^pub type MemFs = \{\n.*?^\}", text)
+    return rec.group(0) if rec else None
+
+
+def memfs_twin_problems(io_text: str, std_text: str,
+                        self_text: str) -> tuple[list[str], int]:
+    bad: list[str] = []
+    seen = 0
+    translated = self_text
+    for pattern, spelled, why in MEMFS_SPELLINGS:
+        translated, n = re.subn(pattern, spelled, translated)
+        if n == 0:
+            bad.append(f"{MEMFS_SELFHOST}: MEMFS_SPELLINGS allows {pattern!r} to "
+                       f"read {spelled!r} in {MEMFS_STD} ({why}), but fsmem no "
+                       f"longer spells it; drop the exemption")
+        else:
+            seen += 1
+
+    ops = memfs_ops(io_text)
+    if ops is None:
+        return bad + [f"{MEMFS_EFFECT}: no `pub effect Fs` declaration to hold "
+                      f"the two table handlers to"], seen
+    handlers = {MEMFS_STD: memfs_handler(std_text),
+                MEMFS_SELFHOST: memfs_handler(translated)}
+    for rel, found in handlers.items():
+        if found is None:
+            bad.append(f"{rel}: no `with handle Fs` block; the table handler "
+                       f"moved and this check has to move with it")
+            continue
+        arms = found[1]
+        if arms != ops:
+            missing = [o for o in ops if o not in arms]
+            extra = [a for a in arms if a not in ops]
+            bad.append(f"{rel}: the table handler's arms {arms} are not the ops "
+                       f"`Fs` declares in {MEMFS_EFFECT}, in order (missing "
+                       f"{missing}, not declared {extra})")
+        else:
+            seen += 1
+    if all(handlers.values()):
+        if handlers[MEMFS_STD][0] != handlers[MEMFS_SELFHOST][0]:
+            bad.append(f"{MEMFS_STD} and {MEMFS_SELFHOST}: the two `with handle "
+                       f"Fs` blocks differ; change both, or finish the switch "
+                       f"that retires fsmem's copy")
+        else:
+            seen += 1
+
+    if memfs_record(std_text) != memfs_record(translated) or memfs_record(std_text) is None:
+        bad.append(f"{MEMFS_STD} and {MEMFS_SELFHOST}: the `MemFs` records differ")
+    else:
+        seen += 1
+
+    std_fns = memfs_private_fns(std_text)
+    self_fns = memfs_private_fns(translated)
+    if not self_fns:
+        bad.append(f"{MEMFS_SELFHOST}: no private functions above the tests; "
+                   f"the table moved and this check has to move with it")
+    for name, body in sorted(self_fns.items()):
+        if name not in std_fns:
+            bad.append(f"{MEMFS_STD}: fsmem's `{name}` has no twin here")
+        elif std_fns[name] != body:
+            bad.append(f"{MEMFS_STD} and {MEMFS_SELFHOST}: `{name}` differs "
+                       f"between the two copies; change both")
+        else:
+            seen += 1
+    return bad, seen
+
+
+def read_memfs_twin_inputs() -> tuple[str, str, str]:
+    return tuple((ROOT / rel).read_text(encoding="utf-8")
+                 for rel in (MEMFS_EFFECT, MEMFS_STD, MEMFS_SELFHOST))
+
+
+def check_memfs_twin() -> tuple[list[str], int]:
+    return memfs_twin_problems(*read_memfs_twin_inputs())
+
+
+def check_memfs_twin_selftest() -> tuple[list[str], int]:
+    io_text, std_text, self_text = read_memfs_twin_inputs()
+    baseline, _ = memfs_twin_problems(io_text, std_text, self_text)
+    if baseline:
+        return [f"memfs twin self-test baseline is invalid: {baseline[0]}"], 0
+
+    def red(case: str, needle: str, texts: tuple[str, str, str]) -> list[str]:
+        bad, _ = memfs_twin_problems(*texts)
+        if not any(needle in problem for problem in bad):
+            return [f"memfs twin self-test: {case} stayed green"]
+        return []
+
+    arm = "    fs_list_names(path) => mem_list(st, path)\n"
+    out: list[str] = []
+    # an arm gone from std's copy: its checker would say so too, but only
+    # against the std it is compiled with
+    out += red("an arm dropped from std/memfs", "are not the ops",
+               (io_text, std_text.replace(arm, "", 1), self_text))
+    # an op declared that neither copy answers, which is R2's whole point
+    grown = io_text.replace("  fn fs_list_names(",
+                            "  fn fs_real_path(path: String) -> "
+                            "Result[String, ForeignError]\n  fn fs_list_names(", 1)
+    out += red("an op added to Fs", "are not the ops", (grown, std_text, self_text))
+    # a helper edited in one copy only
+    out += red("a helper edited in fsmem alone", "`mem_temp` differs",
+               (io_text, std_text, self_text.replace('{ "/tmp" }', '{ "/var/tmp" }', 1)))
+    # an arm body edited in one copy only
+    out += red("an arm body edited in std/memfs alone", "blocks differ",
+               (io_text, std_text.replace("fs_is_symlink(_path) => false",
+                                          "fs_is_symlink(path) => mem_present(st, path)", 1),
+                self_text))
+    if out:
+        return out, 0
+    return [], 4
+
+
 # --- the native fixpoint's entry points -------------------------------------
 # `run_emitc`'s doc comment in the JVM driver says `dawn __emitc` seeds the
 # native bootstrap and `dawnc emitc` is the same emitter after it compiled
@@ -4575,6 +4738,12 @@ def main() -> None:
     problems += bad
     policies_seen += n
     bad, n = check_analyze_env_table_selftest()
+    problems += bad
+    selftests_seen += n
+    bad, n = check_memfs_twin()
+    problems += bad
+    policies_seen += n
+    bad, n = check_memfs_twin_selftest()
     problems += bad
     selftests_seen += n
     bad, n = check_emitc_entries()
