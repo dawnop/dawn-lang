@@ -33,7 +33,7 @@ use check/types.{
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
-  is_eq_scalar, is_ord_scalar, is_hash_scalar, Impls, impl_at, has_impl_at,
+  is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
 use check/identity
@@ -602,7 +602,7 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
         match wit {
           Some(w) -> {
             let (st1, d) = witness_value(st, w)
-            show_through_dict(st1, d, e, t)
+            rel_through_dict(st1, show_rel(), d, [e], t)
           }
           None -> show_at(st, e, t)
         }
@@ -1963,12 +1963,6 @@ fn conj_or_true(acc: Option[CExpr]) -> CExpr =
     None -> CBool(true)
   }
 
-## `a == b` at one type, as Core. **Every** producer of a Dawn equality goes
-## through here: the `==` operator, a `[T: Eq]` bound instantiated at a
-## concrete type, and each field inside a synthesised comparison. Before this
-## the first two were separate pipelines from the language's first day -- the
-## operator never consulted a witness at all -- which is the first cause of
-## the relation having had several definitions.
 ## The type an equality is really taken at: an opaque type with no `impl Eq`
 ## of its own is its target (spec §2.7), which is the peel `eq_at` does below.
 fn eq_subject(st: LSt, t: Ty) -> Ty =
@@ -1989,83 +1983,110 @@ fn unit_relation(operands: List[CExpr], answer: CExpr, ty: Ty) -> CExpr = {
   CBlock(discards, Some(answer), ty)
 }
 
-fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
-  if t == TyUnit { return (st, unit_relation([a, b], CBool(true), TyBool)) }
-  # the scalars a backend compares natively. From here on `CBinary(CEq, ..)`
-  # means this and nothing else.
-  if is_eq_scalar(t) { return (st, CBinary(CEq, a, b, TyBool)) }
-  # an explicit `impl Eq` wins over structure, exactly as it does when the
-  # same comparison arrives through a bound
-  if has_impl_at(st.impls, EQ_ID, t) {
-    let imp = impl_for(st, EQ_ID, t)
-    if provides(imp, "eq") {
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, EQ_ID, t))
+# ---- one walk for the four relations (docs/derive-walker-design.md) ----
+#
+# Eq, Ord, Hash and Show used to be four copies of the same dispatch and the
+# same walk over a tuple or a union, differing only in the leaf and in how the
+# parts were combined, so a change to the shape of the walk had to be made four
+# times and nothing checked that the copies agreed. What differs is now data:
+# one `Rel` per relation, read by one `rel_at`.
+
+## Everything that tells one language-defined relation from another.
+##
+## `peels_opaque` is false for Show alone: an opaque type with no `impl Show`
+## of its own has no rendering (it used to render as its target, which printed
+## the very representation the type hides), and the checker refuses it before
+## lowering. `ground_is_final` is false for Show alone too: a ground subject
+## with no structure goes straight to the fallback for the other three, while
+## Show asks the dictionaries in scope first, as it always has.
+type Rel = {
+  tid: Int,
+  method: String,
+  arity: Int,
+  ret: Ty,
+  # the answer at Unit, and the placeholder body of a structural function
+  # while its real body is being built
+  unit_answer: CExpr,
+  is_scalar: fn(Ty) -> Bool,
+  scalar_op: fn(List[CExpr], Ty) -> CExpr,
+  peels_opaque: Bool,
+  ground_is_final: Bool,
+  # what is left when the language has no definition: the host's relation on
+  # a foreign value, or a compiler bug the checker should have refused
+  fallback: fn(List[CExpr], Ty) -> CExpr,
+  body: fn(LSt, List[CExpr], Ty) -> (LSt, CExpr)
+}
+
+## A relation at one type, as Core. **Every** producer of one goes through
+## here: the operator or method, a bound instantiated at a concrete type, and
+## each part inside a synthesised body. Before this the first two were
+## separate pipelines from the language's first day -- the `==` operator never
+## consulted a witness at all -- which is the first cause of a relation having
+## had several definitions.
+fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  if t == TyUnit { return (st, unit_relation(xs, rel.unit_answer, rel.ret)) }
+  # the scalars a backend implements natively
+  if rel.is_scalar(t) { return (st, rel.scalar_op(xs, t)) }
+  # an explicit impl wins over structure, exactly as it does when the same
+  # relation arrives through a bound
+  if has_impl_at(st.impls, rel.tid, t) {
+    let imp = impl_for(st, rel.tid, t)
+    if provides(imp, rel.method) {
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
       return (st1, CCall(
-        CImpl(owner_or(imp.owner, st1.owner), EQ_ID, t, "eq"), [a, b] ++ ds, TyBool))
+        CImpl(owner_or(imp.owner, st1.owner), rel.tid, t, rel.method), xs ++ ds, rel.ret))
     }
   }
-  # An opaque type with no `impl Eq` of its own compares as its target: the
-  # value behind the barrier *is* that target (spec 2.7). After the impl
-  # check, for the reason show_at gives -- an `impl Eq[Id]` is the point of
-  # declaring one -- and before `is_ground`, which would send it to
-  # `foreign_eq` and panic.
-  match t {
-    TyOpaque(_, _, _, _, tgt) -> return eq_at(st, a, b, tgt)
-    _ -> ()
+  # An opaque type with no impl of its own relates as its target: the value
+  # behind the barrier *is* that target (spec 2.7). After the impl check -- an
+  # `impl Eq[Id]` is the point of declaring one -- and before `is_ground`,
+  # which would send it to the fallback and panic.
+  if rel.peels_opaque {
+    match t {
+      TyOpaque(_, _, _, _, tgt) -> return rel_at(st, rel, xs, tgt)
+      _ -> ()
+    }
   }
   if is_ground(t) {
     if expandable(t) {
-      let (st1, name) = struct_eq_fn(st, t)
-      return (st1, CCall(CDirect(st1.owner, name), [a, b], TyBool))
+      let (st1, name) = struct_rel_fn(st, rel, t)
+      return (st1, CCall(CDirect(st1.owner, name), xs, rel.ret))
     }
-    return (st, foreign_eq(a, b, t))
+    if rel.ground_is_final { return (st, rel.fallback(xs, t)) }
   }
-  # Not ground: what this compares depends on a type only the caller knows.
+  # Not ground: what this relates depends on a type only the caller knows.
   # If a dictionary for the whole is in scope, that dictionary *is* the
   # answer -- go through it rather than guessing at the structure behind it.
-  match map.get(st.dict_env, dict_key(EQ_ID, t)) {
-    Some(d) -> return eq_through_dict(st, d, a, b, t)
+  match map.get(st.dict_env, dict_key(rel.tid, t)) {
+    Some(d) -> return rel_through_dict(st, rel, d, xs, t)
     None -> ()
   }
   # Otherwise spell the whole out over its parts, passing each part's
   # dictionary down. That is the same expansion the ground case gets, minus
   # the luxury of knowing what the parts are.
-  if expandable(t) && goals_available(st, sub_goals(st.impls, EQ_ID, t)) {
-    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, EQ_ID, t))
-    let (st2, name) = struct_eq_fn(st1, t)
-    return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyBool))
+  if expandable(t) && goals_available(st, sub_goals(st.impls, rel.tid, t)) {
+    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
+    let (st2, name) = struct_rel_fn(st1, rel, t)
+    return (st2, CCall(CDirect(st2.owner, name), xs ++ ds, rel.ret))
   }
-  (st, foreign_eq(a, b, t))
+  (st, rel.fallback(xs, t))
 }
 
-## The one equality Dawn does not define: a value that came from the host.
-##
-## This used to be `struct_eq`, a runtime structural walk reached by anything
-## lowering could not spell out -- a Unit, a rigid variable, a composite over
-## one. The checker closes all of those now (`structural_gap`,
-## `solved_structurally`), so the only value left with no Dawn definition is a
-## foreign object, and its equality belongs to the runtime it came from. A
-## backend with no Java has nothing to implement here, which is why native
-## stopped owing an implementation of the walk.
-fn foreign_eq(a: CExpr, b: CExpr, t: Ty) -> CExpr =
-  match t {
-    TyJava(_, _) -> CIntrinsic("java_eq", [a, b], TyBool)
-    _ -> panic("lower: no equality for `" ++ ty_key_inst(t) ++
-        "`; the checker should have refused it")
-  }
-
-## Compare through a dictionary: the only shape available where the type is a
+## Relate through a dictionary: the only shape available where the type is a
 ## rigid variable, since there is no structure to walk and no impl to name.
 ## The slot has the trait's own erased signature, so the operands are boxed
 ## exactly as they are for any other dictionary call.
-fn eq_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
-  let tr = trait_of(st.traits, EQ_ID)
-  let sg = trait_method_sig(tr, "eq")
-  let idx = method_index(tr, "eq")
-  (st, adapt_out(
-    CCall(CMethod(d, EQ_ID, "eq", idx, 0),
-      [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
-    sg.ret, TyBool))
+fn rel_through_dict(st: LSt, rel: Rel, d: CExpr, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, rel.tid)
+  let sg = trait_method_sig(tr, rel.method)
+  let idx = method_index(tr, rel.method)
+  var args: List[CExpr] = []
+  var i = 0
+  for x in xs {
+    args = args ++ [adapt_in(x, t, sg.param_tys[i])]
+    i = i + 1
+  }
+  (st, adapt_out(CCall(CMethod(d, rel.tid, rel.method, idx, 0), args, sg.ret), sg.ret, rel.ret))
 }
 
 ## The relation the compiler writes for one composite type, as an ordinary
@@ -2081,22 +2102,8 @@ fn eq_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr)
 ## than one per instantiation: Dawn passes dictionaries instead of
 ## monomorphising, and this is that decision reaching the relations the
 ## compiler writes for itself.
-##
-## Equality and ordering share this scaffold because they are the same
-## construction over the same structure. They used to share nothing: equality
-## was lowered here and ordering was written directly as JVM bytecode, which
-## is why the C backend emitted calls to a derived `cmp` it never defined.
-fn struct_rel_fn(
-  st: LSt,
-  t: Ty,
-  prefix: String,
-  tid: Int,
-  arity: Int,
-  ret: Ty,
-  zero: CExpr,
-  body_of: fn(LSt, List[CExpr], Ty) -> (LSt, CExpr)
-) -> (LSt, String) = {
-  let name = prefix ++ ty_key_inst(t)
+fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
+  let name = "struct" ++ rel.method ++ "\$" ++ ty_key_inst(t)
   for f in st.lifted {
     if f.name == name { return (st, name) }
   }
@@ -2104,7 +2111,7 @@ fn struct_rel_fn(
   var ps: List[CParam] = []
   var xs: List[CExpr] = []
   var k = 0
-  while k < arity {
+  while k < rel.arity {
     let (stA, sym) = fresh_sym(st1)
     st1 = stA
     ps = ps ++ [CParam { sym: sym, ty: t, mode: COwned }]
@@ -2112,7 +2119,7 @@ fn struct_rel_fn(
     k = k + 1
   }
   let no_goals: List[(Int, Ty)] = []
-  let goals = if is_ground(t) { no_goals } else { sub_goals(st.impls, tid, t) }
+  let goals = if is_ground(t) { no_goals } else { sub_goals(st.impls, rel.tid, t) }
   var stD = st1
   var dps: List[CParam] = []
   var env: Map[String, CExpr] = map.empty()
@@ -2133,14 +2140,14 @@ fn struct_rel_fn(
     params: ps,
     dicts: dps,
     evs: [],
-    ret: ret,
-    body: zero,
+    ret: rel.ret,
+    body: rel.unit_answer,
     is_test: false,
     impl_of: None,
     default_of: None
   }
   let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
-  let (st3, body) = body_of(st2, xs, t)
+  let (st3, body) = rel.body(st2, xs, t)
   var out: List[CFun] = []
   for f in st3.lifted {
     if f.name == name {
@@ -2152,66 +2159,142 @@ fn struct_rel_fn(
   (LSt { ..st3, lifted: out, dict_env: st.dict_env }, name)
 }
 
-fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structeq\$", EQ_ID, 2, TyBool, CBool(true),
-    (s, xs, ty) => struct_eq_body(s, xs[0], xs[1], ty))
+## One arm of a composite type as the relations see it: the constructor it is
+## (-1 for a tuple, which has none) and each component's position and type.
+type Arm = { ci: Int, parts: List[(Int, Ty)] }
 
-fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
+## The structure of `t`, once: a tuple is one arm of its elements, a union one
+## arm per constructor, in declaration order, with each field at the type the
+## union's arguments give it.
+fn components(st: LSt, t: Ty) -> List[Arm] =
   match t {
     TyTuple(elems) -> {
-      var st1 = st
-      var acc: Option[CExpr] = None
+      var parts: List[(Int, Ty)] = []
       var i = 0
       for et in elems {
-        let (st2, c) = eq_at(st1, CTupleGet(a, i, et), CTupleGet(b, i, et), et)
-        st1 = st2
-        acc = Some(conj(acc, c))
+        parts = parts ++ [(i, et)]
         i = i + 1
       }
-      (st1, conj_or_true(acc))
+      [Arm { ci: -1, parts: parts }]
     }
     TyAdt(aid, _) -> {
-      let info = adt_of(st.adts, aid)
-      # one constructor: there is no discriminant to disagree about
-      if len(info.ctors) == 1 {
-        return ctor_fields_eq(st, a, b, t, aid, 0)
-      }
-      # several: `a` picks the arm and `b` has to be in the same one. Built
-      # back to front so the last `else` is the honest `false`.
-      var st1 = st
-      var chain: CExpr = CBool(false)
-      var ci = len(info.ctors) - 1
-      while ci >= 0 {
-        let (st2, fe) = ctor_fields_eq(st1, a, b, t, aid, ci)
-        st1 = st2
-        let same = if len(info.ctors[ci].fields) == 0 {
-          CIsCtor(b, aid, ci)
-        } else {
-          CBinary(CAnd, CIsCtor(b, aid, ci), fe, TyBool)
+      var arms: List[Arm] = []
+      var ci = 0
+      for c in adt_of(st.adts, aid).ctors {
+        var parts: List[(Int, Ty)] = []
+        var idx = 0
+        while idx < len(c.fields) {
+          parts = parts ++ [(idx, concrete_field_ty(st, t, aid, ci, idx))]
+          idx = idx + 1
         }
-        chain = CIf(CIsCtor(a, aid, ci), same, Some(chain), TyBool)
-        ci = ci - 1
+        arms = arms ++ [Arm { ci: ci, parts: parts }]
+        ci = ci + 1
       }
-      (st1, chain)
+      arms
     }
-    _ -> panic("lower: struct_eq_body on a type with no structure to compare")
+    _ -> panic("lower: a relation walked a type with no structure")
   }
 
-fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
-  let c = adt_of(st.adts, aid).ctors[ci]
-  var st1 = st
-  var acc: Option[CExpr] = None
-  var idx = 0
-  while idx < len(c.fields) {
-    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
-    let (st2, e) = eq_at(st1,
-      read_field(st1, a, sc, aid, ci, idx),
-      read_field(st1, b, sc, aid, ci, idx), ft)
-    st1 = st2
-    acc = Some(conj(acc, e))
-    idx = idx + 1
+fn adt_id(t: Ty) -> Int =
+  match t {
+    TyAdt(aid, _) -> aid
+    _ -> panic("lower: a relation asked a tuple for its constructor")
   }
-  (st1, conj_or_true(acc))
+
+## The relation at each component of one arm, left to right, every operand
+## read at the same position.
+fn arm_parts(st: LSt, rel: Rel, xs: List[CExpr], sc: Ty, arm: Arm) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for p in arm.parts {
+    let (idx, pt) = p
+    var ys: List[CExpr] = []
+    for x in xs {
+      let y = if arm.ci < 0 {
+        CTupleGet(x, idx, pt)
+      } else {
+        read_field(st1, x, sc, adt_id(sc), arm.ci, idx)
+      }
+      ys = ys ++ [y]
+    }
+    let (st2, e) = rel_at(st1, rel, ys, pt)
+    st1 = st2
+    out = out ++ [e]
+  }
+  (st1, out)
+}
+
+# ---- structural equality (docs/semantics-closure-design.md 3) ----
+
+fn eq_rel() -> Rel =
+  Rel {
+    tid: EQ_ID,
+    method: "eq",
+    arity: 2,
+    ret: TyBool,
+    unit_answer: CBool(true),
+    is_scalar: is_eq_scalar,
+    # From here on `CBinary(CEq, ..)` means this and nothing else.
+    scalar_op: eq_scalar,
+    peels_opaque: true,
+    ground_is_final: true,
+    fallback: foreign_eq,
+    body: struct_eq_body
+  }
+
+fn eq_scalar(xs: List[CExpr], t: Ty) -> CExpr = CBinary(CEq, xs[0], xs[1], TyBool)
+
+## `a == b` at one type, as Core (see `rel_at`).
+fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, eq_rel(), [a, b], t)
+
+## The one equality Dawn does not define: a value that came from the host.
+##
+## This used to be `struct_eq`, a runtime structural walk reached by anything
+## lowering could not spell out -- a Unit, a rigid variable, a composite over
+## one. The checker closes all of those now (`structural_gap`,
+## `solved_structurally`), so the only value left with no Dawn definition is a
+## foreign object, and its equality belongs to the runtime it came from. A
+## backend with no Java has nothing to implement here, which is why native
+## stopped owing an implementation of the walk.
+fn foreign_eq(xs: List[CExpr], t: Ty) -> CExpr =
+  match t {
+    TyJava(_, _) -> CIntrinsic("java_eq", xs, TyBool)
+    _ -> panic("lower: no equality for `" ++ ty_key_inst(t) ++
+        "`; the checker should have refused it")
+  }
+
+fn conj_all(parts: List[CExpr]) -> CExpr = {
+  var acc: Option[CExpr] = None
+  for c in parts { acc = Some(conj(acc, c)) }
+  conj_or_true(acc)
+}
+
+fn struct_eq_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let arms = components(st, t)
+  # one arm: there is no discriminant to disagree about
+  if len(arms) == 1 {
+    let (st1, parts) = arm_parts(st, eq_rel(), xs, t, arms[0])
+    return (st1, conj_all(parts))
+  }
+  # several: `a` picks the arm and `b` has to be in the same one. Built back
+  # to front so the last `else` is the honest `false`.
+  let aid = adt_id(t)
+  var st1 = st
+  var chain: CExpr = CBool(false)
+  var k = len(arms) - 1
+  while k >= 0 {
+    let arm = arms[k]
+    let (st2, parts) = arm_parts(st1, eq_rel(), xs, t, arm)
+    st1 = st2
+    let same = if len(parts) == 0 {
+      CIsCtor(xs[1], aid, arm.ci)
+    } else {
+      CBinary(CAnd, CIsCtor(xs[1], aid, arm.ci), conj_all(parts), TyBool)
+    }
+    chain = CIf(CIsCtor(xs[0], aid, arm.ci), same, Some(chain), TyBool)
+    k = k - 1
+  }
+  (st1, chain)
 }
 
 # ---- structural ordering (docs/trait-v2-design.md 3.6) ----
@@ -2228,128 +2311,69 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
 # something a lowered function can take and a hand-written bytecode body
 # cannot.
 
-## `cmp(a, b)` at one type, as Core. The Ord counterpart of `eq_at`, and every
-## producer of an ordering goes through it: `cmp`, the comparison operators,
-## a `[T: Ord]` bound instantiated at a concrete type, and each field inside a
+fn cmp_rel() -> Rel =
+  Rel {
+    tid: ORD_ID,
+    method: "cmp",
+    arity: 2,
+    ret: TyInt,
+    unit_answer: CInt(0),
+    is_scalar: is_ord_scalar,
+    scalar_op: cmp_scalar,
+    peels_opaque: true,
+    ground_is_final: true,
+    fallback: no_ordering,
+    body: struct_cmp_body
+  }
+
+fn cmp_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("cmp", xs, TyInt)
+
+## There is no fallback. Unlike equality, ordering is not defined for every
+## type -- the checker refuses `Ord` where no impl and no derive supply it --
+## so reaching the end of `rel_at` here is a compiler bug rather than a gap.
+fn no_ordering(xs: List[CExpr], t: Ty) -> CExpr = panic("lower: no ordering for ${ty_key_inst(t)}")
+
+## `cmp(a, b)` at one type, as Core: `cmp`, the comparison operators, a
+## `[T: Ord]` bound instantiated at a concrete type, and each field inside a
 ## derived comparison.
-##
-## There is no fallback branch. Unlike equality, ordering is not defined for
-## every type -- the checker refuses `Ord` where no impl and no derive supply
-## it -- so reaching the end here is a compiler bug rather than a gap.
-fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
-  if t == TyUnit { return (st, unit_relation([a, b], CInt(0), TyInt)) }
-  if is_ord_scalar(t) { return (st, CIntrinsic("cmp", [a, b], TyInt)) }
-  if has_impl_at(st.impls, ORD_ID, t) {
-    let imp = impl_for(st, ORD_ID, t)
-    if provides(imp, "cmp") {
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, ORD_ID, t))
-      return (st1, CCall(
-        CImpl(owner_or(imp.owner, st1.owner), ORD_ID, t, "cmp"), [a, b] ++ ds, TyInt))
-    }
-  }
-  # as in eq_at: the target's ordering, once the impl has had its chance
-  match t {
-    TyOpaque(_, _, _, _, tgt) -> return cmp_at(st, a, b, tgt)
-    _ -> ()
-  }
-  if is_ground(t) {
-    if expandable(t) {
-      let (st1, name) = struct_cmp_fn(st, t)
-      return (st1, CCall(CDirect(st1.owner, name), [a, b], TyInt))
-    }
-    panic("lower: no ordering for ${ty_key_inst(t)}")
-  }
-  match map.get(st.dict_env, dict_key(ORD_ID, t)) {
-    Some(d) -> return cmp_through_dict(st, d, a, b, t)
-    None -> ()
-  }
-  if expandable(t) && goals_available(st, sub_goals(st.impls, ORD_ID, t)) {
-    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, ORD_ID, t))
-    let (st2, name) = struct_cmp_fn(st1, t)
-    return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyInt))
-  }
-  panic("lower: no ordering for ${ty_key_inst(t)}")
-}
+fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, cmp_rel(), [a, b], t)
 
-fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
-  let tr = trait_of(st.traits, ORD_ID)
-  let sg = trait_method_sig(tr, "cmp")
-  let idx = method_index(tr, "cmp")
-  (st, adapt_out(
-    CCall(CMethod(d, ORD_ID, "cmp", idx, 0),
-      [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
-    sg.ret, TyInt))
-}
-
-fn struct_cmp_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structcmp$", ORD_ID, 2, TyInt, CInt(0),
-    (s, xs, ty) => struct_cmp_body(s, xs[0], xs[1], ty))
-
-fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
-  match t {
-    TyTuple(elems) -> {
-      var st1 = st
-      var parts: List[CExpr] = []
-      var i = 0
-      for et in elems {
-        let (st2, c) = cmp_at(st1, CTupleGet(a, i, et), CTupleGet(b, i, et), et)
-        st1 = st2
-        parts = parts ++ [c]
-        i = i + 1
-      }
-      lexicographic(st1, parts, 0)
-    }
-    TyAdt(aid, _) -> {
-      let info = adt_of(st.adts, aid)
-      # one constructor: nothing to disagree about but the fields
-      if len(info.ctors) == 1 {
-        return ctor_fields_cmp(st, a, b, t, aid, 0)
-      }
-      # Constructor order first, declaration order being the order. Built back
-      # to front so the last `else` is unreachable-but-honest: `a` is one of
-      # them, and the tags already agreed.
-      var st1 = st
-      var chain: CExpr = CInt(0)
-      var ci = len(info.ctors) - 1
-      while ci >= 0 {
-        let (st2, fe) = ctor_fields_cmp(st1, a, b, t, aid, ci)
-        st1 = st2
-        chain = CIf(CIsCtor(a, aid, ci), fe, Some(chain), TyInt)
-        ci = ci - 1
-      }
-      let (st3, ta) = fresh_sym(st1)
-      let (st4, tb) = fresh_sym(st3)
-      # Disagreeing tags answer -1/1, not the tag difference: `cmp` contracts
-      # the sign only (spec 3.5), and the raw subtraction leaked how far apart
-      # the constructors were declared.
-      (st4, CBlock(
-        [CSLet(ta, TyInt, CTagOf(a, aid)), CSLet(tb, TyInt, CTagOf(b, aid))],
-        Some(CIf(
-          CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
-          CIf(
-            CBinary(CLt, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
-            CInt(-1), Some(CInt(1)), TyInt),
-          Some(chain), TyInt)),
-        TyInt))
-    }
-    _ -> panic("lower: struct_cmp_body on a type with no structure to order")
+fn struct_cmp_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let arms = components(st, t)
+  # one arm: nothing to disagree about but the fields
+  if len(arms) == 1 {
+    let (st1, parts) = arm_parts(st, cmp_rel(), xs, t, arms[0])
+    return lexicographic(st1, parts, 0)
   }
-
-fn ctor_fields_cmp(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
-  let c = adt_of(st.adts, aid).ctors[ci]
+  # Constructor order first, declaration order being the order. Built back to
+  # front so the last `else` is unreachable-but-honest: `a` is one of them,
+  # and the tags already agreed.
+  let aid = adt_id(t)
   var st1 = st
-  var parts: List[CExpr] = []
-  var idx = 0
-  while idx < len(c.fields) {
-    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
-    let (st2, e) = cmp_at(st1,
-      read_field(st1, a, sc, aid, ci, idx),
-      read_field(st1, b, sc, aid, ci, idx), ft)
-    st1 = st2
-    parts = parts ++ [e]
-    idx = idx + 1
+  var chain: CExpr = CInt(0)
+  var k = len(arms) - 1
+  while k >= 0 {
+    let arm = arms[k]
+    let (st2, parts) = arm_parts(st1, cmp_rel(), xs, t, arm)
+    let (st3, fe) = lexicographic(st2, parts, 0)
+    st1 = st3
+    chain = CIf(CIsCtor(xs[0], aid, arm.ci), fe, Some(chain), TyInt)
+    k = k - 1
   }
-  lexicographic(st1, parts, 0)
+  let (st4, ta) = fresh_sym(st1)
+  let (st5, tb) = fresh_sym(st4)
+  # Disagreeing tags answer -1/1, not the tag difference: `cmp` contracts the
+  # sign only (spec 3.5), and the raw subtraction leaked how far apart the
+  # constructors were declared.
+  (st5, CBlock(
+    [CSLet(ta, TyInt, CTagOf(xs[0], aid)), CSLet(tb, TyInt, CTagOf(xs[1], aid))],
+    Some(CIf(
+      CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
+      CIf(
+        CBinary(CLt, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
+        CInt(-1), Some(CInt(1)), TyInt),
+      Some(chain), TyInt)),
+    TyInt))
 }
 
 ## Fold field comparisons into one: the first non-zero wins, and each is
@@ -2397,9 +2421,50 @@ fn lexicographic(st: LSt, parts: List[CExpr], i: Int) -> (LSt, CExpr) = {
 # left to right, which is what the emitted `hashCode` did and what
 # `java.util.Arrays.hashCode` does.
 
+fn hash_rel() -> Rel =
+  Rel {
+    tid: HASH_ID,
+    method: "hash",
+    arity: 1,
+    ret: TyInt,
+    # Unit's is the structural seed (spec 3.5): a value with no parts folds
+    # nothing into it.
+    unit_answer: CInt(1),
+    # Float is deliberately not among the scalars (types.hash_scalars): no
+    # hash can agree with an equality where -0.0 == 0.0.
+    is_scalar: is_hash_scalar,
+    scalar_op: hash_scalar,
+    peels_opaque: true,
+    ground_is_final: true,
+    fallback: foreign_hash,
+    body: struct_hash_body
+  }
+
+fn hash_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("hash", xs, TyInt)
+
+## `hash(x)` at one type, as Core: the `hash` method, a `[K: Eq + Hash]` bound
+## at a concrete key type, and each field inside a synthesised hash.
+fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, hash_rel(), [x], t)
+
+## The one hash Dawn does not define, and `foreign_eq`'s twin: a value that
+## came from the host hashes the way the host hashes it, or the two would stop
+## agreeing inside the same Map. A backend with no Java owes nothing here.
+fn foreign_hash(xs: List[CExpr], t: Ty) -> CExpr =
+  match t {
+    TyJava(_, _) -> CIntrinsic("java_hash", xs, TyInt)
+    _ -> panic("lower: no hash for `" ++ ty_key_inst(t) ++
+        "`; the checker should have refused it")
+  }
+
 ## One step of the fold.
 fn mix(h: CExpr, part: CExpr) -> CExpr =
   CBinary(CAdd, CBinary(CMul, h, CInt(31), TyInt), part, TyInt)
+
+fn mix_all(seed: CExpr, parts: List[CExpr]) -> CExpr = {
+  var acc = seed
+  for p in parts { acc = mix(acc, p) }
+  acc
+}
 
 ## Sign-extend the low 32 bits back into Dawn's 64-bit Int.
 ##
@@ -2417,141 +2482,37 @@ fn narrow32(e: CExpr) -> CExpr =
     CBinary(CBxor, CBinary(CBand, e, CInt(0xFFFFFFFF), TyInt), CInt(0x80000000), TyInt),
     CInt(0x80000000), TyInt)
 
-## `hash(x)` at one type, as Core. The Hash counterpart of `eq_at`, and every
-## producer goes through it: the `hash` method, a `[K: Eq + Hash]` bound at a
-## concrete key type, and each field inside a synthesised hash.
-fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
-  # the scalars a backend hashes itself. Float is deliberately not among them
-  # (types.hash_scalars): no hash can agree with an equality where -0.0 == 0.0.
-  # Unit's is the structural seed (spec 3.5): a value with no parts folds
-  # nothing into it.
-  if t == TyUnit { return (st, unit_relation([x], CInt(1), TyInt)) }
-  if is_hash_scalar(t) { return (st, CIntrinsic("hash", [x], TyInt)) }
-  if has_impl_at(st.impls, HASH_ID, t) {
-    let imp = impl_for(st, HASH_ID, t)
-    if provides(imp, "hash") {
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, HASH_ID, t))
-      return (st1, CCall(
-        CImpl(owner_or(imp.owner, st1.owner), HASH_ID, t, "hash"), [x] ++ ds, TyInt))
+fn struct_hash_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let arms = components(st, t)
+  # one arm: there is no tag to tell anything apart with
+  if len(arms) == 1 {
+    let (st1, parts) = arm_parts(st, hash_rel(), xs, t, arms[0])
+    return (st1, narrow32(mix_all(CInt(1), parts)))
+  }
+  # several: the tag folds in first, then that arm's fields.
+  #
+  # A constructor with no fields has nothing to fold, so its answer *is* the
+  # seed -- which is what the final `else` says. Only the ones with fields
+  # need an arm, and a union of bare tags needs no test at all: `Ty` and
+  # `Head` in this compiler are exactly that shape, and asking them thirteen
+  # times which one they are to arrive at the same expression is the sort of
+  # thing a structural expansion writes if nobody looks at what it wrote.
+  let aid = adt_id(t)
+  let (st1, tsym) = fresh_sym(st)
+  let seed = mix(CInt(1), CLocal(tsym, TyInt))
+  var stx = st1
+  var chain: CExpr = seed
+  var k = len(arms) - 1
+  while k >= 0 {
+    let arm = arms[k]
+    if len(arm.parts) > 0 {
+      let (st2, parts) = arm_parts(stx, hash_rel(), xs, t, arm)
+      stx = st2
+      chain = CIf(CIsCtor(xs[0], aid, arm.ci), mix_all(seed, parts), Some(chain), TyInt)
     }
+    k = k - 1
   }
-  # as in eq_at: an opaque type hashes as its target, once its own impl has
-  # had its chance
-  match t {
-    TyOpaque(_, _, _, _, tgt) -> return hash_at(st, x, tgt)
-    _ -> ()
-  }
-  if is_ground(t) {
-    if expandable(t) {
-      let (st1, name) = struct_hash_fn(st, t)
-      return (st1, CCall(CDirect(st1.owner, name), [x], TyInt))
-    }
-    return (st, foreign_hash(x, t))
-  }
-  match map.get(st.dict_env, dict_key(HASH_ID, t)) {
-    Some(d) -> return hash_through_dict(st, d, x, t)
-    None -> ()
-  }
-  if expandable(t) && goals_available(st, sub_goals(st.impls, HASH_ID, t)) {
-    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, HASH_ID, t))
-    let (st2, name) = struct_hash_fn(st1, t)
-    return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyInt))
-  }
-  (st, foreign_hash(x, t))
-}
-
-## The one hash Dawn does not define, and `foreign_eq`'s twin: a value that
-## came from the host hashes the way the host hashes it, or the two would stop
-## agreeing inside the same Map. A backend with no Java owes nothing here.
-fn foreign_hash(x: CExpr, t: Ty) -> CExpr =
-  match t {
-    TyJava(_, _) -> CIntrinsic("java_hash", [x], TyInt)
-    _ -> panic("lower: no hash for `" ++ ty_key_inst(t) ++
-        "`; the checker should have refused it")
-  }
-
-fn hash_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
-  let tr = trait_of(st.traits, HASH_ID)
-  let sg = trait_method_sig(tr, "hash")
-  let idx = method_index(tr, "hash")
-  (st, adapt_out(
-    CCall(CMethod(d, HASH_ID, "hash", idx, 0), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
-    sg.ret, TyInt))
-}
-
-fn struct_hash_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structhash\$", HASH_ID, 1, TyInt, CInt(1),
-    (s, xs, ty) => struct_hash_body(s, xs[0], ty))
-
-fn struct_hash_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
-  match t {
-    TyTuple(elems) -> {
-      var st1 = st
-      var acc: CExpr = CInt(1)
-      var i = 0
-      for et in elems {
-        let (st2, hp) = hash_at(st1, CTupleGet(x, i, et), et)
-        st1 = st2
-        acc = mix(acc, hp)
-        i = i + 1
-      }
-      (st1, narrow32(acc))
-    }
-    TyAdt(aid, _) -> {
-      let info = adt_of(st.adts, aid)
-      # one constructor: there is no tag to tell anything apart with
-      if len(info.ctors) == 1 {
-        let (st1, e) = ctor_fields_hash(st, x, t, aid, 0, CInt(1))
-        return (st1, narrow32(e))
-      }
-      # several: the tag folds in first, then that arm's fields.
-      #
-      # A constructor with no fields has nothing to fold, so its answer *is*
-      # the seed -- which is what the final `else` says. Only the ones with
-      # fields need an arm, and a union of bare tags needs no test at all:
-      # `Ty` and `Head` in this compiler are exactly that shape, and asking
-      # them thirteen times which one they are to arrive at the same
-      # expression is the sort of thing a structural expansion writes if
-      # nobody looks at what it wrote.
-      let (st1, tsym) = fresh_sym(st)
-      let seed = mix(CInt(1), CLocal(tsym, TyInt))
-      var stx = st1
-      var chain: CExpr = seed
-      var ci = len(info.ctors) - 1
-      while ci >= 0 {
-        if len(info.ctors[ci].fields) > 0 {
-          let (st2, fe) = ctor_fields_hash(stx, x, t, aid, ci, seed)
-          stx = st2
-          chain = CIf(CIsCtor(x, aid, ci), fe, Some(chain), TyInt)
-        }
-        ci = ci - 1
-      }
-      (stx, CBlock(
-        [CSLet(tsym, TyInt, CTagOf(x, aid))], Some(narrow32(chain)), TyInt))
-    }
-    _ -> panic("lower: struct_hash_body on a type with no structure to walk")
-  }
-
-fn ctor_fields_hash(
-  st: LSt,
-  x: CExpr,
-  sc: Ty,
-  aid: Int,
-  ci: Int,
-  seed: CExpr
-) -> (LSt, CExpr) = {
-  let c = adt_of(st.adts, aid).ctors[ci]
-  var st1 = st
-  var acc = seed
-  var idx = 0
-  while idx < len(c.fields) {
-    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
-    let (st2, hp) = hash_at(st1, read_field(st1, x, sc, aid, ci, idx), ft)
-    st1 = st2
-    acc = mix(acc, hp)
-    idx = idx + 1
-  }
-  (st1, acc)
+  (stx, CBlock([CSLet(tsym, TyInt, CTagOf(xs[0], aid))], Some(narrow32(chain)), TyInt))
 }
 
 # ---- rendering (docs/semantics-closure-design.md 6) ----
@@ -2568,6 +2529,69 @@ fn ctor_fields_hash(
 
 fn cat(a: CExpr, b: CExpr) -> CExpr = CBinary(CConcat, a, b, TyString)
 
+fn show_rel() -> Rel =
+  Rel {
+    tid: SHOW_ID,
+    method: "show",
+    arity: 1,
+    ret: TyString,
+    # the scalar no backend renders: the spelling of its one value
+    unit_answer: CStr("()"),
+    is_scalar: is_show_scalar,
+    scalar_op: show_scalar,
+    peels_opaque: false,
+    ground_is_final: false,
+    fallback: show_erased,
+    body: struct_show_body
+  }
+
+## The show scalars (types.dawn's `show_scalars`) past Unit, each with its own
+## named, unerased leaf.
+fn show_scalar(xs: List[CExpr], t: Ty) -> CExpr =
+  if t == TyInt {
+    CIntrinsic("str_of_int", xs, TyString)
+  } else if t == TyFloat {
+    # Float is the one scalar whose rendering is not a backend intrinsic: the
+    # shortest-round-trip algorithm is Dawn source (std/fmt.dtoa, audit
+    # RP-01), and both backends compile that one definition. std/fmt itself
+    # must never render a Float through `to_string`/interpolation -- this
+    # rewrite would make it a self-call.
+    CCall(CDirect("std/fmt", "dtoa"), xs, TyString)
+  } else if t == TyBool {
+    CIntrinsic("str_of_bool", xs, TyString)
+  } else if t == TyString {
+    CIntrinsic("quote", xs, TyString)
+  } else if t == TyBytes {
+    # It has no structure to walk -- the language renders it as a summary of
+    # its length, not as its contents -- so it belongs with the others: named,
+    # unerased, one arm per backend. Erased, it was unimplementable on native,
+    # where a `void*` and a kind tag are all there is to identify a value by.
+    CIntrinsic("str_of_bytes", xs, TyString)
+  } else {
+    panic("lower: `" ++ ty_key_inst(t) ++ "` is a show scalar with no rendering")
+  }
+
+## The last resort: hand the value over erased and let a runtime identify it.
+##
+## This used to carry Bytes and the builtin containers. S3 made the
+## containers ordinary Dawn types with `impl[T: Show] Show[List[T]]` in std,
+## and Bytes is a scalar, so nothing known reaches this arm any more -- every
+## type the checker gives a Show witness to is answered before here.
+##
+## It stays rather than becoming the panic below, and the reason is a cost
+## asymmetry rather than a producer. What the JVM does with an erased value
+## (`dawn/rt/Show.show`, an instanceof chain ending in `String.valueOf`) is a
+## real best-effort answer; native has none and cannot have one, so its
+## emitter refuses and says which type it refused. Deleting the arm would
+## turn a type this list has not foreseen into a compiler panic on *both*
+## backends, which is worse than the JVM keeping an answer native declines.
+fn show_erased(xs: List[CExpr], t: Ty) -> CExpr = {
+  if not expandable(t) {
+    return CIntrinsic("show", [adapt_in(xs[0], t, TyVar("T", 0))], TyString)
+  }
+  panic("lower: no rendering for ${ty_key_inst(t)}")
+}
+
 ## `show(x)` at one type, as Core.
 ##
 ## This is the *nested* rendering -- the trait method -- so a String is
@@ -2575,142 +2599,59 @@ fn cat(a: CExpr, b: CExpr) -> CExpr = CBinary(CConcat, a, b, TyString)
 ## field inside a record renders as `"a"`. One trait cannot be both, and the
 ## language has drawn that line since its first day (Rust draws it as Display
 ## vs Debug); what changes here is only that both sides now come from Core.
-fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
-  if t == TyInt { return (st, CIntrinsic("str_of_int", [x], TyString)) }
-  # Float is the one scalar whose rendering is not a backend intrinsic: the
-  # shortest-round-trip algorithm is Dawn source (std/fmt.dtoa, audit RP-01),
-  # and both backends compile that one definition. std/fmt itself must never
-  # render a Float through `to_string`/interpolation -- this rewrite would
-  # make it a self-call.
-  if t == TyFloat { return (st, CCall(CDirect("std/fmt", "dtoa"), [x], TyString)) }
-  if t == TyBool { return (st, CIntrinsic("str_of_bool", [x], TyString)) }
-  if t == TyString { return (st, CIntrinsic("quote", [x], TyString)) }
-  # The fifth show scalar (types.dawn's `show_scalars`), and the only one that
-  # used to fall off the end of this function into the erased `show` below.
-  # It has no structure to walk -- the language renders it as a summary of its
-  # length, not as its contents -- so it belongs with the other four: named,
-  # unerased, one arm per backend. Erased, it was unimplementable on native,
-  # where a `void*` and a kind tag are all there is to identify a value by.
-  if t == TyBytes { return (st, CIntrinsic("str_of_bytes", [x], TyString)) }
-  # the sixth, and the one no backend renders: the spelling of its one value
-  if t == TyUnit { return (st, unit_relation([x], CStr("()"), TyString)) }
-  if has_impl_at(st.impls, SHOW_ID, t) {
-    let imp = impl_for(st, SHOW_ID, t)
-    if provides(imp, "show") {
-      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, SHOW_ID, t))
-      return (st1, CCall(
-        CImpl(owner_or(imp.owner, st1.owner), SHOW_ID, t, "show"), [x] ++ ds, TyString))
-    }
-  }
-  # No opaque arm: an opaque type with no `impl Show` of its own has no
-  # rendering (it used to render as its target, which printed the very
-  # representation the type hides), and the checker refuses it before here.
-  if is_ground(t) && expandable(t) {
-    let (st1, name) = struct_show_fn(st, t)
-    return (st1, CCall(CDirect(st1.owner, name), [x], TyString))
-  }
-  match map.get(st.dict_env, dict_key(SHOW_ID, t)) {
-    Some(d) -> return show_through_dict(st, d, x, t)
-    None -> ()
-  }
-  if expandable(t) {
-    let goals = sub_goals(st.impls, SHOW_ID, t)
-    if goals_available(st, goals) {
-      let (st1, ds) = goal_dicts(st, goals)
-      let (st2, name) = struct_show_fn(st1, t)
-      return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyString))
-    }
-  }
-  # The last resort: hand the value over erased and let a runtime identify it.
-  #
-  # This used to carry Bytes and the builtin containers. S3 made the
-  # containers ordinary Dawn types with `impl[T: Show] Show[List[T]]` in std,
-  # and Bytes is named above, so nothing known reaches this arm any more --
-  # every type the checker gives a Show witness to is answered before here.
-  #
-  # It stays rather than becoming the panic below, and the reason is a cost
-  # asymmetry rather than a producer. What the JVM does with an erased value
-  # (`dawn/rt/Show.show`, an instanceof chain ending in `String.valueOf`) is a
-  # real best-effort answer; native has none and cannot have one, so its
-  # emitter refuses and says which type it refused. Deleting the arm would
-  # turn a type this list has not foreseen into a compiler panic on *both*
-  # backends, which is worse than the JVM keeping an answer native declines.
-  if not expandable(t) {
-    return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
-  }
-  panic("lower: no rendering for ${ty_key_inst(t)}")
-}
+fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, show_rel(), [x], t)
 
-fn show_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
-  let tr = trait_of(st.traits, SHOW_ID)
-  let sg = trait_method_sig(tr, "show")
-  let idx = method_index(tr, "show")
-  (st, adapt_out(
-    CCall(CMethod(d, SHOW_ID, "show", idx, 0), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
-    sg.ret, TyString))
-}
-
-fn struct_show_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structshow$", SHOW_ID, 1, TyString, CStr(""),
-    (s, xs, ty) => struct_show_body(s, xs[0], ty))
-
-fn struct_show_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
-  match t {
-    TyTuple(elems) -> {
-      var st1 = st
-      var acc: CExpr = CStr("(")
-      var i = 0
-      for et in elems {
-        if i > 0 { acc = cat(acc, CStr(", ")) }
-        let (st2, s) = show_at(st1, CTupleGet(x, i, et), et)
-        st1 = st2
-        acc = cat(acc, s)
-        i = i + 1
-      }
-      (st1, cat(acc, CStr(")")))
-    }
-    TyAdt(aid, _) -> {
-      let info = adt_of(st.adts, aid)
-      # one constructor: there is no tag to test
-      if len(info.ctors) == 1 {
-        return ctor_show(st, x, t, aid, 0)
-      }
-      # Built back to front, so the last `else` is unreachable-but-honest:
-      # `x` is one of them.
-      var st1 = st
-      var chain: CExpr = CStr("")
-      var ci = len(info.ctors) - 1
-      while ci >= 0 {
-        let (st2, r) = ctor_show(st1, x, t, aid, ci)
-        st1 = st2
-        chain = CIf(CIsCtor(x, aid, ci), r, Some(chain), TyString)
-        ci = ci - 1
-      }
-      (st1, chain)
-    }
-    _ -> panic("lower: struct_show_body on a type with no structure to render")
+fn struct_show_body(st: LSt, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
+  let arms = components(st, t)
+  # one arm: there is no tag to test
+  if len(arms) == 1 {
+    let (st1, parts) = arm_parts(st, show_rel(), xs, t, arms[0])
+    return (st1, render_arm(st1, t, arms[0].ci, parts))
   }
-
-## `Name`, `Name(v0, v1)`, or `Name { f0: v0, f1: v1 }` -- the shape the JVM
-## emitter wrote by hand, kept to the character so no program's output moves.
-fn ctor_show(st: LSt, x: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
-  let info = adt_of(st.adts, aid)
-  let c = info.ctors[ci]
-  if len(c.fields) == 0 { return (st, CStr(c.name)) }
-  let open = if info.is_record { " { " } else { "(" }
+  # Built back to front, so the last `else` is unreachable-but-honest: `x` is
+  # one of them.
+  let aid = adt_id(t)
   var st1 = st
+  var chain: CExpr = CStr("")
+  var k = len(arms) - 1
+  while k >= 0 {
+    let arm = arms[k]
+    let (st2, parts) = arm_parts(st1, show_rel(), xs, t, arm)
+    st1 = st2
+    chain = CIf(CIsCtor(xs[0], aid, arm.ci), render_arm(st1, t, arm.ci, parts), Some(chain),
+      TyString)
+    k = k - 1
+  }
+  (st1, chain)
+}
+
+## `(v0, v1)` for a tuple; `Name`, `Name(v0, v1)`, or `Name { f0: v0, f1: v1 }`
+## for a constructor -- the shape the JVM emitter wrote by hand, kept to the
+## character so no program's output moves.
+fn render_arm(st: LSt, t: Ty, ci: Int, parts: List[CExpr]) -> CExpr = {
+  if ci < 0 {
+    var acc: CExpr = CStr("(")
+    var i = 0
+    for s in parts {
+      if i > 0 { acc = cat(acc, CStr(", ")) }
+      acc = cat(acc, s)
+      i = i + 1
+    }
+    return cat(acc, CStr(")"))
+  }
+  let info = adt_of(st.adts, adt_id(t))
+  let c = info.ctors[ci]
+  if len(c.fields) == 0 { return CStr(c.name) }
+  let open = if info.is_record { " { " } else { "(" }
   var acc: CExpr = CStr(c.name ++ open)
   var idx = 0
-  while idx < len(c.fields) {
+  for s in parts {
     if idx > 0 { acc = cat(acc, CStr(", ")) }
     if info.is_record { acc = cat(acc, CStr("${c.fields[idx].name}: ")) }
-    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
-    let (st2, s) = show_at(st1, read_field(st1, x, sc, aid, ci, idx), ft)
-    st1 = st2
     acc = cat(acc, s)
     idx = idx + 1
   }
-  (st1, cat(acc, CStr(if info.is_record { " }" } else { ")" })))
+  cat(acc, CStr(if info.is_record { " }" } else { ")" }))
 }
 
 ## Does this witness stand for a relation the language defines itself, rather
