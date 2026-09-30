@@ -63,6 +63,7 @@ REGISTRY_READERS = {
     "export-surface-contract/run.sh": "export-surface-contract",
     "incremental-semantics-contract/cold.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-configured.py": "incremental-semantics-contract",
+    "incremental-semantics-contract/lsp-module-memo.py": "incremental-semantics-contract",
     "incremental-semantics-contract/lsp-observe.py": "incremental-semantics-contract",
 }
 SHELL_ADAPTERS = {

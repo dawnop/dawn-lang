@@ -103,6 +103,22 @@ class PreflightTests(unittest.TestCase):
                                           "      let prog = update.program\n      Workspace  {")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-configured/policy", 0)
 
+    def test_lsp_module_memo_anchor_drift_is_caught(self):
+        # #277: lsp-module-memo.py spelled its seven mutants in its main and
+        # refused a stale one only when incremental-memo-2 ran it.
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-module-memo/drop-session",
+                                          "selfhost/src/lsp/server.dawn",
+                                          "        cache: update.session,", "        cache: update.session ,")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-module-memo/stale-parse",
+                                          "selfhost/src/driver/analyze.dawn",
+                                          "if p.text == text { (p, true) }", "if text == p.text { (p, true) }")
+        self.assert_registry_drift_is_red("incremental-semantics-contract",
+                                          "lsp-module-memo/resolver-drops-the-declaration",
+                                          "selfhost/src/check/checker.dawn",
+                                          "syms: tast_positions.symbols(entered.resolver, after.syms, ",
+                                          "syms: tast_positions.symbols(entered.resolver,  after.syms, ")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-module-memo/drop-parses", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.

@@ -24,6 +24,7 @@ from pathlib import Path
 import sys
 
 ANALYZE = "selfhost/src/driver/analyze.dawn"
+CHECKER = "selfhost/src/check/checker.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 # Anchors two groups quote, spelled once.
@@ -72,6 +73,37 @@ MUTATIONS = {
     "lsp-configured/observe": ((SERVER, "      let prog = update.program\n      Workspace {",
                                 '      benchmark_analysis_stats("project", Some(update.stats))\n'
                                 "      let prog = update.program\n      Workspace {"),),
+
+    # lsp-module-memo.py: the owner of the analysis is what the server
+    # commits and discards, and a load reuses only unchanged parses.
+    "lsp-module-memo/drop-session": ((SERVER, "        cache: update.session,", "        cache: ws0.cache,"),),
+    "lsp-module-memo/bypass-cache": ((SERVER, WARM_ANALYZE, COLD_ANALYZE),),
+    "lsp-module-memo/keep-conflict-cache": ((SERVER, "        cache: incremental.evict(ws0.cache),",
+                                             "        cache: ws0.cache,"),),
+    # A load that is handed nothing to reuse still answers correctly, so
+    # only the counts can see it; a load that reuses a parse whose text
+    # changed answers with the old syntax.
+    "lsp-module-memo/drop-parses": ((SERVER, "        parses: retained_parses(st, reusing.parses),",
+                                     "        parses: ws0.parses,"),),
+    "lsp-module-memo/stale-parse": ((ANALYZE, "    Some(p) -> if p.text == text { (p, true) }",
+                                     "    Some(p) -> if true { (p, true) }"),),
+    # The line starts ride on the parse: a file parsed again has to get
+    # its own, not the ones the previous parse of the path held.
+    "lsp-module-memo/stale-line-starts": ((ANALYZE, "else { (fresh_parse(text), false) }",
+                                           "else { (Parsed { ..fresh_parse(text), line_starts: p.line_starts }, false) }"),),
+    # A body is checked with offsets relative to its own declaration, and
+    # `tast_positions.symbols` is what adds the declaration's start back
+    # on the way out. Its owner here is the LSP reader of those positions;
+    # `a typed span cuts the source the declaration actually holds` in
+    # check/checker is the same resolver's checker-side reader. Until
+    # 2026-09-27 the owner was a replayed body's definition, which went
+    # with the replay engine.
+    "lsp-module-memo/resolver-drops-the-declaration": ((
+        CHECKER,
+        "syms: tast_positions.symbols(entered.resolver, after.syms, "
+        "mint_cursor(entered.cx), mint_cursor(after))",
+        "syms: tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts), "
+        "after.syms, mint_cursor(entered.cx), mint_cursor(after))"),),
 }
 
 
