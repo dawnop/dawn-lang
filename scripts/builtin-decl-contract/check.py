@@ -59,25 +59,43 @@ A comparison of two empty sets passes. Both sides are therefore held to
 something that is not the comparison:
 
     M1  the dump's names, plus lowering's internal intrinsic names, are
-        exactly the two lists in `ir/interp.dawn` -- every intrinsic in the
-        program is either interpreted at comptime or refused by name, which
-        that module's own test asserts and this re-derives from its source
+        exactly three pairwise-disjoint lists: `interp_arms` and
+        `comptime_rejects` in `ir/interp.dawn`, and `lowered_intrinsics` in
+        `ir/lower.dawn` -- every intrinsic in the program is interpreted at
+        comptime, removed by lowering before the interpreter could see it, or
+        refused by name, which `ir/interp.dawn`'s own test asserts and this
+        re-derives from source. The names a `const` still cannot use after
+        lowering (`comptime_refused_after_lowering`) are lowered names.
     M2  the mirror parses to at least one declaration
 
 M1 does two jobs. It is the emptiness guard on the dump side: a truncated or
 absent dump cannot satisfy an equality against a list of 110 names. And it is
-what makes P5 trustworthy, because P5's other input is `comptime_rejects()`
-read out of `ir/interp.dawn` as *source text*. That reading is a small
-evaluator for the three shapes that function is written in, and an evaluator
-of source text can be wrong quietly. It cannot be wrong quietly here: an
-under-read drops names from one side of M1's equality and an over-read adds
-them, and either way M1 names the difference.
+what makes P5 trustworthy, because P5's other inputs are `comptime_rejects()`
+and `comptime_refused_after_lowering()` read out of `ir/interp.dawn` as
+*source text*. That reading is a small evaluator for the three shapes those
+functions are written in, and an evaluator of source text can be wrong
+quietly. It cannot be wrong quietly here: an under-read drops names from one
+side of M1's equality and an over-read adds them, and either way M1 names the
+difference.
 
-Reading the list from source at all is a compromise, and the reason is
+Reading the lists from source at all is a compromise, and the reason is
 visible: `interp_arms` and `comptime_rejects` are private to `ir/interp.dawn`.
 The alternative was to publish them, which widens the compiler's export
 surface to serve a gate -- a worse trade than a parser the gate's own
-meta-judgement audits.
+meta-judgement audits. `lowered_intrinsics` is public, but the dump is a
+table of builtins and this is lowering's classification; it is read from
+`ir/lower.dawn` by the same evaluator rather than added to the dump.
+
+## The third group, and why P5 is two lists
+
+Until 2026-09-30 the partition was two lists, and a name lowering removes had
+to be put in one of them: `parse_int` got an interpreter arm nothing could
+reach, and `parse_int_radix` got a refusal this mirror then published as a
+marker, while `const Z = parse_int_radix("ff", 16)` folds to `Some(255)`
+through std/fmt's Core (#185). The lowered names are a group of their own now.
+Map and Set are lowered too, and a `const` still cannot use them -- lowering
+routes them to std/hamt, whose Core the interpreter refuses -- so P5's
+"refused at comptime" is `comptime_rejects` plus that second list.
 
 ## Usage
 
@@ -93,6 +111,7 @@ import sys
 
 MIRROR = "selfhost/builtins.dawn"
 INTERP = "selfhost/src/ir/interp.dawn"
+LOWER = "selfhost/src/ir/lower.dawn"
 
 # The signatures P6 does not read back, held here so that adding one is an
 # edit to the checker rather than a line the dump can quietly stop producing.
@@ -217,18 +236,20 @@ def _strip_comment(line):
     return head
 
 
-def _fn_body(text, name):
-    start = text.find(f"\nfn {name}() -> List[String] =")
-    if start < 0:
-        raise SystemExit(f"{INTERP}: no `fn {name}() -> List[String] =` to read")
-    if text.find(f"\nfn {name}() -> List[String] =", start + 1) >= 0:
-        raise SystemExit(f"{INTERP}: `{name}` is declared more than once")
+def _fn_body(text, name, where=INTERP):
+    heads = [f"\nfn {name}() -> List[String] =", f"\npub fn {name}() -> List[String] ="]
+    found = [(text.find(h), h) for h in heads if text.find(h) >= 0]
+    if not found:
+        raise SystemExit(f"{where}: no `fn {name}() -> List[String] =` to read")
+    if len(found) > 1 or text.find(found[0][1], found[0][0] + 1) >= 0:
+        raise SystemExit(f"{where}: `{name}` is declared more than once")
+    start = found[0][0]
     end = text.find("\n}\n", start)
     stop = text.find("\n]\n", start)
     if end < 0 or (0 <= stop < end):
         end = stop
     if end < 0:
-        raise SystemExit(f"{INTERP}: `{name}` has no closing line")
+        raise SystemExit(f"{where}: `{name}` has no closing line")
     return text[start:end]
 
 
@@ -252,13 +273,30 @@ def read_interp_arms(text):
 
 
 def read_comptime_rejects(text):
-    """`fn comptime_rejects() -> List[String] = { ... }`, in three shapes.
+    """`fn comptime_rejects() -> List[String] = { ... }`: see read_name_list."""
+    return read_name_list(text, "comptime_rejects", INTERP)
+
+
+def read_refused_after_lowering(text):
+    """`fn comptime_refused_after_lowering()` in `ir/interp.dawn`."""
+    return read_name_list(text, "comptime_refused_after_lowering", INTERP)
+
+
+def read_lowered(text):
+    """`pub fn lowered_intrinsics()` in `ir/lower.dawn`."""
+    return read_name_list(text, "lowered_intrinsics", LOWER)
+
+
+def read_name_list(text, name, where):
+    """`fn <name>() -> List[String] = { ... }`, in three shapes.
 
     Only three, and anything else stops the run:
 
         var out = ["a", "b"]                       a seed list
+        var out: List[String] = []                 (the same, empty)
         out = out ++ ["a", "b"]                    an append of literals
         for op in ["x", "y"] { out = out ++ ["p_" ++ op] }   a family
+        for op in ["x", "y"] { out = out ++ ["p_${op}"] }    (the same)
 
     The families are the point: `io_*` is 25 names written as one loop over
     25 suffixes, and a reader that took the loop's literals for names would
@@ -266,7 +304,7 @@ def read_comptime_rejects(text):
     suffix list and its body over as many lines as it likes, so the reader is
     a three-state machine rather than a line-at-a-time match.
     """
-    body = _fn_body(text, "comptime_rejects")
+    body = _fn_body(text, name, where)
     body = body[body.index("= {") + 3 :]
     out = []
     state = "idle"
@@ -285,11 +323,11 @@ def read_comptime_rejects(text):
                 continue
         if state == "close":
             if line != "}":
-                raise SystemExit(f"{INTERP}: a `for` body is followed by {line!r}")
+                raise SystemExit(f"{where}: a `for` body is followed by {line!r}")
             state = "idle"
             continue
         if state == "body":
-            out += [_loop_prefix(line) + s for s in suffixes]
+            out += [_loop_prefix(line, where) + s for s in suffixes]
             suffixes = []
             state = "idle" if line.endswith("}") else "close"
             continue
@@ -301,42 +339,46 @@ def read_comptime_rejects(text):
                 tail = head[head.index("] {") + 3 :].strip()
                 state = "body"
                 if tail:
-                    out += [_loop_prefix(tail) + s for s in suffixes]
+                    out += [_loop_prefix(tail, where) + s for s in suffixes]
                     suffixes = []
                     state = "idle" if tail.endswith("}") else "close"
             else:
                 suffixes = STRINGS.findall(head)
             continue
-        if line.startswith("var out = [") or line.startswith("out = out ++ ["):
-            literal = line[line.index("[") :]
+        seeds = ("var out = [", "var out: List[String] = [", "out = out ++ [")
+        if line.startswith(seeds):
+            literal = line[line.index("= [") + 2 :] if line.startswith("var") else line[line.index("[") :]
             if not literal.endswith("]"):
-                raise SystemExit(f"{INTERP}: unterminated list: {line!r}")
+                raise SystemExit(f"{where}: unterminated list: {line!r}")
             rest = STRINGS.sub("", literal).strip("[]").replace(",", "").strip()
             if rest:
-                raise SystemExit(f"{INTERP}: {line!r} is not a list of names")
+                raise SystemExit(f"{where}: {line!r} is not a list of names")
             out += STRINGS.findall(literal)
             continue
         raise SystemExit(
-            f"{INTERP}: comptime_rejects is written in a shape this reader "
+            f"{where}: {name} is written in a shape this reader "
             f"does not know: {line!r}"
         )
     if state != "idle":
-        raise SystemExit(f"{INTERP}: a `for` in comptime_rejects never closes")
+        raise SystemExit(f"{where}: a `for` in {name} never closes")
     return out
 
 
-def _loop_prefix(tail):
-    """`out = out ++ ["io_" ++ op] }` -> `io_`."""
-    m = re.match(r'^out = out \+\+ \["([^"]*)" \+\+ op\]\s*\}?$', tail.strip())
+def _loop_prefix(tail, where=INTERP):
+    """`out = out ++ ["io_" ++ op] }` or `out = out ++ ["io_${op}"]` -> `io_`."""
+    tail = tail.strip()
+    m = re.match(r'^out = out \+\+ \["([^"$]*)" \+\+ op\]\s*\}?$', tail)
     if not m:
-        raise SystemExit(f"{INTERP}: unreadable loop body: {tail!r}")
+        m = re.match(r'^out = out \+\+ \["([^"$]*)\$\{op\}"\]\s*\}?$', tail)
+    if not m:
+        raise SystemExit(f"{where}: unreadable loop body: {tail!r}")
     return m.group(1)
 
 
 # --- the judgements --------------------------------------------------------
 
 
-def judge(mirror_text, dump_text, interp_text, skips_expected=None):
+def judge(mirror_text, dump_text, interp_text, lower_text, skips_expected=None):
     """Every failure, as a list of lines. Empty means green."""
     if skips_expected is None:
         skips_expected = ROUNDTRIP_SKIPS
@@ -345,27 +387,41 @@ def judge(mirror_text, dump_text, interp_text, skips_expected=None):
     builtins, lowering, roundtrips, skips = parse_dump(dump_text)
     arms = read_interp_arms(interp_text)
     rejects = read_comptime_rejects(interp_text)
+    after = read_refused_after_lowering(interp_text)
+    lowered = read_lowered(lower_text)
 
-    # M1 -- the dump is whole, and the source reading of interp.dawn is right
-    partition = sorted(set(arms) | set(rejects))
-    if len(set(arms) & set(rejects)) != 0:
+    # M1 -- the dump is whole, and the source readings of interp.dawn and
+    # lower.dawn are right: three groups, pairwise disjoint, covering it
+    groups = [
+        ("interpreted (interp_arms)", arms),
+        ("removed by lowering (lowered_intrinsics)", lowered),
+        ("refused (comptime_rejects)", rejects),
+    ]
+    for i, (a_name, a) in enumerate(groups):
+        for b_name, b in groups[i + 1 :]:
+            both = sorted(set(a) & set(b))
+            if both:
+                bad.append(f"M1 listed as both {a_name} and {b_name}: " + ", ".join(both))
+    stray = sorted(set(after) - set(lowered))
+    if stray:
         bad.append(
-            "M1 ir/interp.dawn lists as both interpreted and refused: "
-            + ", ".join(sorted(set(arms) & set(rejects)))
+            "M1 comptime_refused_after_lowering names what lowering does not "
+            "remove: " + ", ".join(stray)
         )
+    partition = sorted(set(arms) | set(rejects) | set(lowered))
     universe = sorted(set(builtins) | set(lowering))
     if universe != partition:
         missing = sorted(set(partition) - set(universe))
         extra = sorted(set(universe) - set(partition))
         if missing:
             bad.append(
-                "M1 named by ir/interp.dawn but absent from the dumped "
-                "intrinsic universe: " + ", ".join(missing)
+                "M1 named by ir/interp.dawn or ir/lower.dawn but absent from the "
+                "dumped intrinsic universe: " + ", ".join(missing)
             )
         if extra:
             bad.append(
-                "M1 dumped as an intrinsic but named by neither list in "
-                "ir/interp.dawn: " + ", ".join(extra)
+                "M1 dumped as an intrinsic but in none of the three comptime "
+                "groups: " + ", ".join(extra)
             )
 
     # M2 -- the mirror was really read
@@ -390,7 +446,7 @@ def judge(mirror_text, dump_text, interp_text, skips_expected=None):
             means = "public" if want_pub else "std-only (internal)"
             bad.append(f"P4 `{name}` is declared `{said}`, and the table says it is {means}")
         # P5
-        want_rejected = name in rejects
+        want_rejected = name in rejects or name in after
         if rejected != want_rejected:
             if want_rejected:
                 bad.append(f"P5 `{name}` is refused at comptime and carries no marker")
@@ -445,6 +501,23 @@ fn comptime_rejects() -> List[String] = {
   out = out ++ ["late"]
   out
 }
+
+fn comptime_refused_after_lowering() -> List[String] = {
+  var out: List[String] = []
+  for op in ["a"] { out = out ++ ["trie_" ++ op] }
+  out
+}
+'''
+
+GOOD_LOWER = '''
+pub fn lowered_intrinsics() -> List[String] = {
+  var out = ["gone"]
+  for op in ["a",
+    "b"] {
+    out = out ++ ["trie_${op}"]
+  }
+  out
+}
 '''
 
 GOOD_DUMP = "\n".join(
@@ -463,6 +536,12 @@ GOOD_DUMP = "\n".join(
         "roundtrip\twide_d\tfn wide_d() -> Unit\tfn wide_d() -> Unit",
         "builtin\tlate\tinternal\tfn late() -> Unit",
         "roundtrip-skip\tlate",
+        "builtin\tgone\tpub\tfn gone(s: String) -> Int",
+        "roundtrip\tgone\tfn gone(s: String) -> Int\tfn gone(s: String) -> Int",
+        "builtin\ttrie_a\tinternal\tfn trie_a() -> Unit",
+        "roundtrip\ttrie_a\tfn trie_a() -> Unit\tfn trie_a() -> Unit",
+        "builtin\ttrie_b\tinternal\tfn trie_b() -> Unit",
+        "roundtrip\ttrie_b\tfn trie_b() -> Unit\tfn trie_b() -> Unit",
         "lowering\tfold_me",
     ]
 )
@@ -482,6 +561,9 @@ fn fam_b() -> Unit # comptime: rejected
 fn wide_c() -> Unit # comptime: rejected
 fn wide_d() -> Unit # comptime: rejected
 fn late() -> Unit # comptime: rejected
+pub fn gone(s: String) -> Int
+fn trie_a() -> Unit # comptime: rejected
+fn trie_b() -> Unit
 """
 
 SELF_TESTS = [
@@ -549,12 +631,42 @@ SELF_TESTS = [
         ).replace("\nbuiltin\tlate\tinternal\tfn late() -> Unit\nroundtrip-skip\tlate", ""),
         GOOD_INTERP,
     ),
+    (
+        # an arm for a name lowering removes: the dead `parse_int` arm (#185)
+        "M1",
+        GOOD_MIRROR,
+        GOOD_DUMP,
+        GOOD_INTERP.replace('"keep", "fold_me"', '"keep", "fold_me", "gone"'),
+    ),
+    (
+        # a name refused after lowering that lowering does not remove
+        "M1",
+        GOOD_MIRROR,
+        GOOD_DUMP,
+        GOOD_INTERP.replace('["trie_" ++ op]', '["tree_" ++ op]'),
+    ),
+    (
+        # a Map/Set-style name loses its marker: refused after lowering is
+        # refused all the same
+        "P5",
+        GOOD_MIRROR.replace("fn trie_a() -> Unit # comptime: rejected", "fn trie_a() -> Unit"),
+        GOOD_DUMP,
+        GOOD_INTERP,
+    ),
+    (
+        # a lowered name that folds is marked anyway: the #185 marker on
+        # `parse_int_radix`
+        "P5",
+        GOOD_MIRROR.replace("pub fn gone(s: String) -> Int", "pub fn gone(s: String) -> Int # comptime: rejected"),
+        GOOD_DUMP,
+        GOOD_INTERP,
+    ),
     ("M2", "# nothing but a header\n", GOOD_DUMP, GOOD_INTERP),
 ]
 
 
 def self_test():
-    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_SKIPS)
+    bad = judge(GOOD_MIRROR, GOOD_DUMP, GOOD_INTERP, GOOD_LOWER, GOOD_SKIPS)
     if bad:
         print("SELF-TEST FAIL: the clean synthetic table is not green:")
         for line in bad:
@@ -563,7 +675,7 @@ def self_test():
     print("OK   the clean synthetic table is green (the positive control)")
     rc = 0
     for label, mirror, dump, interp in SELF_TESTS:
-        found = judge(mirror, dump, interp, GOOD_SKIPS)
+        found = judge(mirror, dump, interp, GOOD_LOWER, GOOD_SKIPS)
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"SELF-TEST FAIL: the {label} perturbation stayed green")
@@ -585,35 +697,36 @@ def self_test():
 # written: the working tree never holds a mutant.
 
 
-def mutate_p1_add(mirror, dump, interp):
-    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp
+def mutate_p1_add(mirror, dump, interp, lower):
+    return mirror + "\nfn totally_invented(x: Int) -> Int\n", dump, interp, lower
 
 
-def mutate_p2_drop_popcount(mirror, dump, interp):
-    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp
+def mutate_p2_drop_popcount(mirror, dump, interp, lower):
+    return _drop_line(mirror, "fn popcount(n: Int) -> Int" + MARKER), dump, interp, lower
 
 
-def mutate_p3_param_name(mirror, dump, interp):
-    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp
+def mutate_p3_param_name(mirror, dump, interp, lower):
+    return _sub(mirror, "fn popcount(n: Int) -> Int", "fn popcount(x: Int) -> Int"), dump, interp, lower
 
 
-def mutate_p3_return_type(mirror, dump, interp):
+def mutate_p3_return_type(mirror, dump, interp, lower):
     return (
         _sub(mirror, "fn parse_int(s: String) -> Option[Int]", "fn parse_int(s: String) -> Int"),
         dump,
         interp,
+        lower,
     )
 
 
-def mutate_p4_add_pub(mirror, dump, interp):
-    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp
+def mutate_p4_add_pub(mirror, dump, interp, lower):
+    return _sub(mirror, "\nfn str_lower(", "\npub fn str_lower("), dump, interp, lower
 
 
-def mutate_p4_drop_pub(mirror, dump, interp):
-    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp
+def mutate_p4_drop_pub(mirror, dump, interp, lower):
+    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower
 
 
-def mutate_p5_move_marker(mirror, dump, interp):
+def mutate_p5_move_marker(mirror, dump, interp, lower):
     """Take the marker off a name that is refused and put it on one that is
     not: one edit, both directions of P5."""
     lines = mirror.split("\n")
@@ -621,14 +734,36 @@ def mutate_p5_move_marker(mirror, dump, interp):
     on = _index_of(lines, "pub fn parse_int(s: String) -> Option[Int]")
     lines[off] = lines[off][: -len(MARKER)]
     lines[on] = lines[on] + MARKER
-    return "\n".join(lines), dump, interp
+    return "\n".join(lines), dump, interp, lower
+
+
+def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower):
+    """Give `parse_int` its interpreter arm back: the dead arm #185 removed.
+    Lowering rewrites every call to it, so the name is in the lowered group
+    and an arm for it is in two groups at once."""
+    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower
+
+
+def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower):
+    """Put back the marker #185 took off: `parse_int_radix` folds through
+    std/fmt's Core, so a mirror saying a `const` cannot use it is wrong."""
+    return (
+        _sub(
+            mirror,
+            "pub fn parse_int_radix(s: String, radix: Int) -> Option[Int]\n",
+            "pub fn parse_int_radix(s: String, radix: Int) -> Option[Int]" + MARKER + "\n",
+        ),
+        dump,
+        interp,
+        lower,
+    )
 
 
 SORT_BY_BOUND = "fn sort_by[T, !e](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
 SORT_BY_UNBOUND = "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
 
 
-def mutate_p6_unbind_sort_by(mirror, dump, interp):
+def mutate_p6_unbind_sort_by(mirror, dump, interp, lower):
     """The table before this judgement existed: `sort_by` raises `!e` and does
     not record that it bound it (`eff1` rather than `effp1` in
     `check/types.dawn`), so the binder is missing from what it renders.
@@ -644,10 +779,10 @@ def mutate_p6_unbind_sort_by(mirror, dump, interp):
     lines[at] = "builtin\tsort_by\tpub\t" + SORT_BY_UNBOUND
     rt = _index_of(lines, "roundtrip\tsort_by\t" + SORT_BY_BOUND + "\t" + SORT_BY_BOUND)
     lines[rt] = "roundtrip\tsort_by\t" + SORT_BY_UNBOUND + "\t" + SORT_BY_BOUND
-    return mirror, "\n".join(lines), interp
+    return mirror, "\n".join(lines), interp, lower
 
 
-def mutate_p6_skip_popcount(mirror, dump, interp):
+def mutate_p6_skip_popcount(mirror, dump, interp, lower):
     """Declare a signature unreadable that reads back fine. This is how P6
     would erode: not by going red, but by the dump quietly excusing whatever
     stopped agreeing with itself. The skip list is held to what is recorded,
@@ -657,7 +792,7 @@ def mutate_p6_skip_popcount(mirror, dump, interp):
         lines, "roundtrip\tpopcount\tfn popcount(n: Int) -> Int\tfn popcount(n: Int) -> Int"
     )
     lines[at] = "roundtrip-skip\tpopcount"
-    return mirror, "\n".join(lines), interp
+    return mirror, "\n".join(lines), interp, lower
 
 
 MUTANTS = [
@@ -668,6 +803,8 @@ MUTANTS = [
     ("p4-publish-str_lower", mutate_p4_add_pub, "P4"),
     ("p4-hide-parse_int_radix", mutate_p4_drop_pub, "P4"),
     ("p5-move-a-comptime-marker", mutate_p5_move_marker, "P5"),
+    ("m1-arm-for-parse_int", mutate_m1_arm_for_parse_int, "M1"),
+    ("p5-mark-parse_int_radix", mutate_p5_mark_parse_int_radix, "P5"),
     ("p6-drop-sort_by-s-effect-binder", mutate_p6_unbind_sort_by, "P6"),
     ("p6-skip-a-signature-that-reads-back", mutate_p6_skip_popcount, "P6"),
 ]
@@ -692,9 +829,9 @@ def _index_of(lines, exact):
     return hits[0]
 
 
-def run_mutants(mirror, dump, interp):
+def run_mutants(mirror, dump, interp, lower):
     rc = 0
-    clean = judge(mirror, dump, interp)
+    clean = judge(mirror, dump, interp, lower)
     if clean:
         print("MUTANT FAIL: the real inputs are not green to begin with:")
         for line in clean:
@@ -702,7 +839,7 @@ def run_mutants(mirror, dump, interp):
         return 1
     print("OK   the real mirror is green (the positive control)")
     for name, fn, label in MUTANTS:
-        found = judge(*fn(mirror, dump, interp))
+        found = judge(*fn(mirror, dump, interp, lower))
         owned = [line for line in found if line.startswith(label)]
         if not owned:
             print(f"MUTANT FAIL: {name} stayed green")
@@ -729,11 +866,12 @@ def main():
     mirror = (root / MIRROR).read_text(encoding="utf-8")
     dump = pathlib.Path(args.dump).read_text(encoding="utf-8")
     interp = (root / INTERP).read_text(encoding="utf-8")
+    lower = (root / LOWER).read_text(encoding="utf-8")
 
     if args.mutants:
-        return run_mutants(mirror, dump, interp)
+        return run_mutants(mirror, dump, interp, lower)
 
-    bad = judge(mirror, dump, interp)
+    bad = judge(mirror, dump, interp, lower)
     if bad:
         print(f"FAIL: {MIRROR} and the builtin table disagree")
         for line in bad:
@@ -749,7 +887,8 @@ def main():
         f"OK: {MIRROR} mirrors all {len(builtins)} builtins "
         f"({pub} public, {len(builtins) - pub} std-only, {rejected} refused at "
         f"comptime), the intrinsic universe of {len(builtins) + len(lowering)} "
-        f"names is partitioned by ir/interp.dawn, and {len(roundtrips)} of the "
+        f"names is partitioned three ways by ir/interp.dawn and ir/lower.dawn, "
+        f"and {len(roundtrips)} of the "
         f"signatures read back as themselves ({len(skips)} named as spellings "
         f"the parser is not offered)"
     )

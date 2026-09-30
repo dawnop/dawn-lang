@@ -221,12 +221,16 @@ def check(root, overrides=None):
     if hits != 1:
         raise PreflightError(f"scripts/gate-map/gatemap.py:BUNDLED_MODULE_EXPRESSION [{path}]: {hits} matches, expected 1")
     reader = runpy.run_path(str(root / "scripts/builtin-decl-contract/check.py"))
-    path = "selfhost/src/ir/interp.dawn"
-    try:
-        reader["read_comptime_rejects"](tree.read(path))
-    except (Exception, SystemExit) as error:
-        raise PreflightError(f"scripts/builtin-decl-contract/check.py:comptime_rejects [{path}]: {error}") from error
-    return count + 2
+    for fn, path in (
+        ("read_comptime_rejects", "selfhost/src/ir/interp.dawn"),
+        ("read_refused_after_lowering", "selfhost/src/ir/interp.dawn"),
+        ("read_lowered", "selfhost/src/ir/lower.dawn"),
+    ):
+        try:
+            reader[fn](tree.read(path))
+        except (Exception, SystemExit) as error:
+            raise PreflightError(f"scripts/builtin-decl-contract/check.py:{fn} [{path}]: {error}") from error
+    return count + 4
 
 
 def main():

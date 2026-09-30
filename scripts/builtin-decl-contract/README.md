@@ -42,7 +42,7 @@ that identifies the type; a hover needs the one that reads.
 | P2 | every name in the table is in the mirror |
 | P3 | the signatures are equal character for character |
 | P4 | `pub fn` in the mirror ⇔ the table says the name is not internal |
-| P5 | the `# comptime: rejected` markers are exactly the names the comptime interpreter refuses |
+| P5 | the `# comptime: rejected` markers are exactly the names a `const` cannot use: the ones the comptime interpreter refuses by name, and the Map/Set names lowering routes to std/hamt, whose Core it refuses |
 | P6 | every signature, parsed back as the declaration it claims to be and rendered again, is the same string |
 
 P1 and P2 are two judgements over the same two sets rather than one equality,
@@ -76,18 +76,21 @@ Two meta-judgements, because a comparison of two empty sets passes:
 
 | | |
 |---|---|
-| M1 | the dumped names plus lowering's internal intrinsics are exactly the two lists in `src/ir/interp.dawn` |
+| M1 | the dumped names plus lowering's internal intrinsics are exactly three pairwise-disjoint lists: `interp_arms` and `comptime_rejects` in `src/ir/interp.dawn`, and `lowered_intrinsics` in `src/ir/lower.dawn` |
 | M2 | the mirror parses to at least one declaration |
 
 ## Where P5's other input comes from
 
-`interp_arms()` and `comptime_rejects()` are private to `src/ir/interp.dawn`,
-so `check.py` reads them out of the source text with a small evaluator for the
-three shapes they are written in. Publishing them instead would widen the
+`interp_arms()`, `comptime_rejects()` and `comptime_refused_after_lowering()`
+are private to `src/ir/interp.dawn`, so `check.py` reads them out of the source
+text with a small evaluator for the three shapes they are written in. The
+third group of the partition, `lowered_intrinsics()` in `src/ir/lower.dawn`,
+is read the same way: it is lowering's classification rather than a table of
+builtins, so it does not belong in the dump. Publishing them instead would widen the
 compiler's export surface to serve a gate, which is the worse trade -- but a
 source-text reader can be wrong quietly, so it is audited rather than trusted.
 
-That audit is M1. Those two lists between them name every intrinsic in the
+That audit is M1. Those three lists between them name every intrinsic in the
 program, which `interp.dawn`'s own test asserts; M1 re-derives the same
 equality from the parse. An under-read drops names from one side of it and an
 over-read adds them, so a parser that has gone wrong is named rather than
@@ -107,8 +110,9 @@ nothing here replaces it.
 
 ## The mutants
 
-`matrix.txt`, nine of them, one for each judgement plus a second for P3, P4
-and P6. Each perturbs the real mirror in memory and asserts its own judgement goes
+`matrix.txt`, eleven of them, one for each judgement plus a second for P3,
+P4 and P6, and the two #185 was about: `parse_int`'s interpreter arm put back
+(M1), and `parse_int_radix`'s marker put back (P5). Each perturbs the real mirror in memory and asserts its own judgement goes
 red; the working tree never holds a mutant, and no compiler is rebuilt.
 
 They exist because `--self-test` is not enough. The self-test runs the

@@ -9,8 +9,21 @@
 # the way: `f("1.5d")` answered `Some(1.5)` where `parse_float("1.5d")` answers
 # `None`. Each line below prints the direct call and the call through a value
 # side by side, so a wrapper that disagrees shows up as a line that does not.
+#
+# The `const` section is the other half of the same confusion (#185): the
+# builtins mirror marked `parse_int_radix` as refused in a `const`, but every
+# numeric parser folds, through std/fmt's Core like any other call. Each const
+# is printed beside the same call made at run time.
 
 use std/list
+
+const C_INT: Option[Int] = parse_int("42")
+
+const C_RADIX: Option[Int] = parse_int_radix("ff", 16)
+
+const C_FLOAT: Option[Float] = parse_float("1.5d")
+
+const C_FLOAT_OK: Option[Float] = parse_float("2.5e1")
 
 fn show_both[T: Show](direct: T, through: T) -> String = "${direct} ${through}"
 
@@ -30,6 +43,11 @@ pub fn main() -> Unit !io = {
   for s in ["1.5", "-0.25e2", "1.5d", "1.5f", "0x1p3", "inf", "Infinity", "NaN", ""] {
     println(show_both(parse_float(s), pf(s)))
   }
+  println("-- in a const --")
+  println(show_both(C_INT, parse_int("42")))
+  println(show_both(C_RADIX, parse_int_radix("ff", 16)))
+  println(show_both(C_FLOAT, parse_float("1.5d")))
+  println(show_both(C_FLOAT_OK, parse_float("2.5e1")))
   println("-- through a higher-order call --")
   println("${list.map(["3", "4.5", "4.5d"], pf)}")
   let sorted: fn(List[Int], fn(Int, Int) -> Int) -> List[Int] = sort_by
