@@ -980,6 +980,32 @@ fn lex_symbol(s: Src, at: Int) -> (Int, Option[Token], Option[Diag]) = {
       ))
     )
   }
+  # Dawn has no block comments (spec §1.2): every comment is a `#` line, so each
+  # line can be lexed without knowing what came before it. `/*` can never begin
+  # valid code -- there is no prefix `*` -- so it is read as the comment it was
+  # meant to be: one error at the `/*`, and the text up to the closing `*/` (or
+  # the end of the file) is skipped, so what the comment held does not cascade
+  # into operator and expression errors.
+  if c == '/' && cp_at(s, at + 1) == '*' {
+    var i = at + 2
+    while i < s.n && not (s.cps[i] == '*' && cp_at(s, i + 1) == '/') { i = i + 1 }
+    let closed = i < s.n
+    let skipped = if closed {
+      "the text up to the closing `*/` was skipped"
+    } else {
+      "nothing closes it, so the rest of the file was skipped"
+    }
+    return (
+      if closed { i + 2 } else { i },
+      None,
+      Some(diag_h(
+        "Dawn has no block comments; use `#` on each line",
+        off(s, at),
+        off(s, at) + 2,
+        skipped
+      ))
+    )
+  }
   # `>>>` must be probed before the two-char pairs (the only three-char operator)
   if at + 2 < s.n && c == '>' && s.cps[at + 1] == '>' && s.cps[at + 2] == '>' {
     return (at + 3, Some(tok(USHR, ">>>", off(s, at), off(s, at) + 3)), None)
@@ -1249,6 +1275,23 @@ test "a surrogate half is not a code point, in a string or in a char literal" {
   # and the code points on either side of the hole still lex
   let (t4, d4) = lex("\"\\u{D7FF}\\u{E000}\"")
   assert len(d4) == 0
+}
+
+test "a block comment is one error and its text is skipped (#196)" {
+  let src = "a = 1 /* note\n  more */\nb = 2"
+  let (toks, ds) = lex(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "Dawn has no block comments; use `#` on each line"
+  assert ds[0].hint == "the text up to the closing `*/` was skipped"
+  assert ds[0].lo == 6 && ds[0].hi == 8
+  assert kinds(src) == ["IDENT", "EQ", "INT", "NEWLINE", "IDENT", "EQ", "INT", "NEWLINE", "EOF"]
+  # with nothing to close it, the rest of the file goes
+  let (_, unclosed) = lex("a /* b\nc")
+  assert len(unclosed) == 1
+  assert unclosed[0].hint == "nothing closes it, so the rest of the file was skipped"
+  assert kinds("a /* b\nc") == ["IDENT", "NEWLINE", "EOF"]
+  # division and multiplication are untouched
+  assert kinds("a / b * c") == ["IDENT", "SLASH", "IDENT", "STAR", "IDENT", "NEWLINE", "EOF"]
 }
 
 test "unrecognized character" {
