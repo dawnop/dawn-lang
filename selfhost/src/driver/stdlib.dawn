@@ -1289,3 +1289,31 @@ test "moved.txt lines are parsed or refused one field at a time" {
   assert release_before((0, 9, 0), (0, 10, 0))
   assert not release_before((1, 0, 0), (0, 99, 0))
 }
+
+test "no std/moved.txt entry has outlived its until" {
+  # The expiry rule (docs/std-moved-design.md §2): once VERSION reaches an
+  # entry's `until`, the entry is deleted or its `until` is moved, and either
+  # way somebody decided. The embedded copy is read because it is what ships;
+  # the round-trip test above holds it to std/ on disk.
+  let text = match stdsrc.source("moved.txt") {
+    Some(t) -> t
+    None -> panic("std/moved.txt is not embedded (run python3 scripts/gen-stdsrc.py)")
+  }
+  let now = release_key(VERSION).expect("VERSION is X.Y.Z")
+  let entries = match parse_moved(text) {
+    Ok(es) -> es
+    Err(bad) -> {
+      let (n, w) = bad
+      panic("std/moved.txt line ${n}: ${w}")
+    }
+  }
+  var expired = 0
+  for e in entries {
+    let until = release_key(e.until).expect("parse_moved checked it")
+    if not release_before(now, until) {
+      println("std/moved.txt: `${e.old}` of `${e.scope}` expired at ${e.until}; this is ${VERSION}")
+      expired = expired + 1
+    }
+  }
+  assert expired == 0
+}
