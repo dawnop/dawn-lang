@@ -129,4 +129,24 @@ tag 变量、Hash 的 tag 变量都从它取号；`st.lifted` 的追加顺序也
 
 ## 落地
 
-（实现后回填：提交、净减行数、Core 比较结果、负控输出。）
+2026-10-01，四个提交（基线 origin/main `e65887ab`）：本文；`Route the four derived relations through one
+dispatch and one walk`（`Rel`、`rel_at`、`rel_through_dict`、`components`/`arm_parts`，#200 随之解决）；
+`Build the four structural bodies from one walk and a per-relation fold`（`rel_body`/`rel_chain` 与
+`fold_arm`/`skips_bare`/`union`）；`Pin each derived relation on a twin that differs only in its last part`
+（`ir/lower` 里四条测试）。提交哈希见 PR。
+
+- **行数**：`lower.dawn` 的重构两刀合计 +465 / −517，净减 52 行；关系段非注释行 508 → 434，注释行
+  203 → 234（新形状的字段与钩子各自写了为什么）。四条测试另加 32 行。调研估的「净减 150–250」没有
+  达到：原来四份里重复的是派发与遍历（这两样现在各一份），但参数化本身有成本，`Rel` 类型、四个
+  `X_rel()` 记录与 fold/union 钩子合计约 130 行，而原有注释一条没删。
+- **Core**：`selfhost-core-diff.sh --base origin/main` 比较 145 份 dump，只有 `ir.lower` 变。更宽的语料
+  （41 个目标、893 份 dump）在两刀之后各比一次，也只有 `selfhost/ir.lower.core` 变。`__emit` 同目录对照
+  （prev-diff 里被 v0.79.0 以来的声明遮住的 10 个标签）：9 个目标 class 目录逐字节相同，selfhost 只有
+  `ir/lower*` 的 class 变。
+- **负控**：`components` 对元组少给最后一个分量。用种子从该树建出的 stage1 跑 `test selfhost`：
+  四条新测试全红（78/726 失败）；同一办法建出的未变异 stage1 726 条全过。同一变异下 selfhost 的 Core
+  有 20 个模块变。没有这四条测试之前，`dawn test selfhost` 在这个变异下也红，但红在 candidate 被自己
+  编坏、加载 std 就失败，说不出是哪个关系坏了；`selfhost-core-diff.sh` 的三个程序里则一个元组关系都
+  没有，这个变异下它们的 Core 不动。
+- **耗时**：同一台机器上交替跑 `__lower --dump selfhost` 各四次，head 5.17–5.34 s，基线 5.22–5.38 s，
+  看不出差别。
