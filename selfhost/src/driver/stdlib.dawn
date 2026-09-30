@@ -1,8 +1,10 @@
 # The bundled standard library: std sources are read from a directory
-# (`--std <dir>`, default std), falling back to the embedded copy in
-# `stdsrc.dawn` when the directory is absent — generated string constants
-# compiled into the toolchain like any other module, so a standalone build
-# works outside the repo on every backend with no host resource API.
+# (`--std <dir>`, default std), or from the embedded copy in `stdsrc.dawn` --
+# generated string constants compiled into the toolchain like any other
+# module, so a standalone build works outside the repo on every backend with
+# no host resource API. Whichever of the two answers for modules.txt supplies
+# every module, never a mix: a directory that has modules.txt must be
+# complete, and one that has none is not read at all (#206).
 # Each module is parsed and checked once in modules.txt order, its pub
 # surface handed to every user module. std is checked with no std of its
 # own in scope — only the prelude, the builtins and explicit `use` edges —
@@ -38,6 +40,7 @@ use ir/lower.{parser_impl}
 use version.{VERSION}
 use compiler_plan/envmem
 use compiler_plan/source.{canon}
+use driver/fsmem
 
 ## Everything user-module analysis needs from std.
 pub(pkg) type StdCtx = {
@@ -201,10 +204,12 @@ pub type StdOrigin =
 ## driver can render them apart instead of concatenating them all onto one
 ## sentence. `StdVersionSkew` is the directory declaring a release this
 ## toolchain is not; `StdFileMissing` is a name in modules.txt that is in
-## neither the directory nor the embedded copy.
+## neither the directory nor the embedded copy; `StdModulesMissing` is every
+## module modules.txt lists that the half which answered for it does not have.
 pub type StdFail =
   | StdVersionSkew
   | StdFileMissing(file: String, why: String)
+  | StdModulesMissing(files: List[String])
   | StdModuleParse(mod_path: String, diag: String)
   | StdModuleCheck(mod_path: String, diag: String)
   | StdModuleEval(mod_path: String, diag: String)
@@ -219,8 +224,14 @@ pub type StdLoadError = {
   why: StdFail
 }
 
-## A std source file: the directory first (repo development edits win), then
-## the embedded copy `stdsrc.dawn` carries. The flag says which one answered.
+## A std file: the directory first, then the embedded copy `stdsrc.dawn`
+## carries. The flag says which one answered.
+##
+## Only modules.txt is read this way, because that read is what decides which
+## half the std is. Module sources go through `std_module_text`, which asks
+## that half alone: a per-file fallback here is what let a directory missing
+## `map.dawn` borrow the embedded one, and a stray `std/str.dawn` under the
+## working directory replace the embedded one, both without a word (#206).
 fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !Fs =
   match io.read_file(dir ++ "/" ++ name) {
     Ok(t) -> Ok((t, true))
@@ -229,6 +240,18 @@ fn std_read_from(dir: String, name: String) -> Result[(String, Bool), String] !F
         Some(t) -> Ok((t, false))
         None -> Err(e.message)
       }
+  }
+
+## A std module's source, from the half that answered for modules.txt and from
+## nowhere else. `None` when that half has no such file.
+fn std_module_text(dir: String, from_dir: Bool, name: String) -> Option[String] !Fs =
+  if from_dir {
+    match io.read_file(dir ++ "/" ++ name) {
+      Ok(t) -> Some(t)
+      Err(_) -> None
+    }
+  } else {
+    stdsrc.source(name)
   }
 
 fn std_read(dir: String, name: String) -> Result[String, String] !Fs = {
@@ -289,6 +312,12 @@ fn why_text(w: StdFail) -> String =
   match w {
     StdVersionSkew -> ""
     StdFileMissing(f, m) -> "`" ++ f ++ "` is in neither the directory nor the embedded copy: " ++ m
+    StdModulesMissing(fs) -> {
+      var named: List[String] = []
+      for f in fs { named = named ++ ["`" ++ f ++ "`"] }
+      "modules.txt lists modules this std has no file for: " ++ join(named, ", ") ++
+        "\n  a std is read whole from where its modules.txt is; nothing is filled in from elsewhere"
+    }
     StdModuleParse(mp, d) -> "module `" ++ mp ++ "` does not parse: " ++ d
     StdModuleCheck(mp, d) -> "module `" ++ mp ++ "` does not check: " ++ d
     StdModuleEval(mp, d) -> "module `" ++ mp ++ "` does not evaluate: " ++ d
@@ -372,6 +401,20 @@ pub(pkg) fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
     None -> ()
   }
   let names = index_names(idx_text)
+  # Every module's text before any is parsed, from the half that answered for
+  # modules.txt alone, so a directory short of several modules is told about
+  # all of them at once rather than one per run.
+  var texts: List[(String, String)] = []
+  var missing: List[String] = []
+  for n in names {
+    match std_module_text(dir, idx_from_dir, "${n}.dawn") {
+      Some(t) -> { texts = texts ++ [(n, t)] }
+      None -> { missing = missing ++ ["${n}.dawn"] }
+    }
+  }
+  if len(missing) > 0 {
+    return Err(StdLoadError { origin: origin, declared: declared, why: StdModulesMissing(missing) })
+  }
   var exports: Map[String, ModExports] = map.empty()
   var std_fns: Map[String, Sig] = map.empty()
   var moved: Map[String, String] = map.empty()
@@ -391,21 +434,14 @@ pub(pkg) fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
   var srcs: List[(String, String, Module)] = []
   var dir_modules: Map[String, String] = map.empty()
   var impls_before: Map[String, Impls] = map.empty()
-  for n in names {
+  for entry in texts {
+    let (n, text) = entry
     let mod_path = "std/${n}"
-    let file = dir ++ "/" ++ n ++ ".dawn"
-    let text = match std_read_from(dir, "${n}.dawn") {
-      Ok(pair) -> {
-        let (t, from_dir) = pair
-        # only the modules the directory itself answered for: a name the
-        # embedded copy filled in has no file on disk, and claiming one would
-        # hand std identity to whatever happens to sit at that path
-        if from_dir { dir_modules = map.insert(dir_modules, canon(file), mod_path) }
-        t
-      }
-      Err(m) -> return Err(StdLoadError {
-        origin: origin, declared: declared, why: StdFileMissing("${n}.dawn", m)
-      })
+    # only a std the directory answered for has files: an embedded one has
+    # none, and claiming `<dir>/<n>.dawn` for it would hand std identity to
+    # whatever happens to sit at that path
+    if idx_from_dir {
+      dir_modules = map.insert(dir_modules, canon(dir ++ "/" ++ n ++ ".dawn"), mod_path)
     }
     let (m, pdiags) = parser.parse_module(text)
     if len(pdiags) > 0 {
@@ -538,9 +574,10 @@ pub(pkg) fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
 ## answer it for a module the embedded copy supplied, naming a file that either
 ## does not exist or is somebody else's.
 ##
-## The answer is per module, not per std: `std_read_from` falls back file by
-## file, so a directory missing one module loads it from the embedded copy and
-## every other module still has a file.
+## Today the answer is the same for every module of one std: a directory that
+## answered for modules.txt supplied all of them, and the embedded copy none
+## (#206). It stays a per-module question because that is the question every
+## caller is holding.
 pub(pkg) fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
   for pr in map.entries(std.dir_modules) {
     let (file, mp) = pr
@@ -920,6 +957,108 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
       }
     }
   }))
+}
+
+## `body` over an in-memory tree, with no host environment behind it either:
+## what the loader reads is exactly what the test put there.
+fn in_table[T](fs: fsmem.MemFs, body: fn() -> T !Env !Fs !io) -> T !io = {
+  let (out, _) = fsmem.with_fs_mem(fs, () => no_host(body))
+  out
+}
+
+## std/str as the embedded copy has it, except that `to_upper` lowers. A file
+## that parses and checks, so the only way to tell it was read is what it
+## computes.
+fn lowering_str() -> String = {
+  let real = match stdsrc.source("str.dawn") {
+    Some(t) -> t
+    None -> panic("the embedded std carries no str.dawn")
+  }
+  let line = "pub fn to_upper(s: String) -> String = str_upper(s)"
+  if not str.contains(real, line) { panic("std/str.to_upper no longer reads: " ++ line) }
+  str.replace(real, line, "pub fn to_upper(s: String) -> String = str_lower(s)")
+}
+
+test "a std directory missing modules it lists is refused, naming every one" {
+  # #206. The directory answered for modules.txt, so it is the std being
+  # loaded; a module it lacks used to be read from the embedded copy instead,
+  # silently, and the program ran against a std assembled from two places.
+  let root = fsmem.mem_std_dir(fsmem.MEM_BASE)
+  let got = in_table(fsmem.mem_std(fsmem.MEM_BASE), () => {
+    let _ = io.delete("${root}/map.dawn")
+    let _ = io.delete("${root}/set.dawn")
+    match load_std(root) {
+      Ok(_) -> None
+      Err(e) -> Some((e, std_load_error_text(e)))
+    }
+  })
+  match got {
+    None -> {
+      println("a std directory without map.dawn and set.dawn loaded anyway")
+      assert false
+    }
+    Some(pair) -> {
+      let (e, text) = pair
+      # all of them at once, in modules.txt order, before anything was parsed
+      assert e.why == StdModulesMissing(["map.dawn", "set.dawn"])
+      assert e.origin == StdFromDir(root)
+      # the user's directory, not the compiler
+      assert not std_load_is_bug(e)
+      assert str.contains(text, "`map.dawn`")
+      assert str.contains(text, "`set.dawn`")
+      assert str.contains(text, root)
+    }
+  }
+}
+
+test "a std directory with no modules.txt is not read at all" {
+  # #206. The embedded copy answered for modules.txt, so every module is the
+  # embedded one; a lone `str.dawn` in the directory used to replace it and be
+  # recorded as std's file for `std/str`.
+  let st = fsmem.mem_put(fsmem.mem_empty(fsmem.MEM_BASE), "std/str.dawn", lowering_str())
+  let std = in_table(st, () => match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+    Ok(s) -> s
+    Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+  })
+  let absent: Option[String] = None
+  assert std_file_of(std, "std/str") == absent
+  assert std.dir == absent
+  assert len(map.keys(std.dir_modules)) == 0
+  var text = ""
+  for s in std.srcs {
+    let (mp, t, _) = s
+    if mp == "std/str" { text = t }
+  }
+  assert Some(text) == stdsrc.source("str.dawn")
+}
+
+test "a stray std/str.dawn under the working directory changes no program" {
+  # #206, end to end through load, check and comptime evaluation. The command
+  # line's default `--std` is the relative `std`, resolved here against the
+  # table's base: the working directory of this test. That directory holds a
+  # std/str.dawn whose `to_upper` lowers and no modules.txt. Before the fix the
+  # same source answered `hello` from that directory and `HELLO` from any
+  # other.
+  let st = fsmem.mem_put(fsmem.mem_empty(fsmem.MEM_BASE), "std/str.dawn", lowering_str())
+  let got = in_table(st, () => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+    }
+    let src = "use std/str\n" ++
+      "const U: String = comptime { str.to_upper(\"Hello\") }\n"
+    let (m, pdiags) = parser.parse_module(src)
+    assert len(pdiags) == 0
+    var cx = cx_new(None, None)
+    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls }
+    let (cx1, tm) = check_module(cx, m, std.exports)
+    assert len(cx1.diags) == 0
+    let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
+      std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
+    assert len(ct.diags) == 0
+    map.get(ct.consts, "U")
+  })
+  assert got == Some(VStr("HELLO"))
 }
 
 test "a std module's file is only known when a directory supplied it" {
