@@ -46,6 +46,11 @@ pub type SourcePlan = {
   source_root: String,
   pkgs: Map[String, PkgR],
   java_coords: List[MCoord],
+  # `mcoord_show` of each Java coordinate -> the dawn.toml that declared it
+  # first, in the same order `java_coords` is deduplicated in. A resolution
+  # failure is reported against this file rather than the root's, which may
+  # not contain the coordinate at all.
+  java_coord_origin: Map[String, String],
   diags: List[LocDiag]
 }
 
@@ -99,57 +104,59 @@ fn mf_get(
   }
 }
 
-fn append_java_coord(
-  out: List[MCoord],
-  seen: Set[String],
-  coord: MCoord
-) -> (List[MCoord], Set[String]) = {
+## Coordinates in resolution order, each paired with the manifest that
+## declared it first; `seen` holds the coordinates already taken.
+type JavaCoords = { coords: List[MCoord], origin: Map[String, String], seen: Set[String] }
+
+fn append_java_coord(acc: JavaCoords, coord: MCoord, manifest: String) -> JavaCoords = {
   let key = mcoord_show(coord)
-  if set.has(seen, key) { (out, seen) } else { (out ++ [coord], set.insert(seen, key)) }
+  if set.has(acc.seen, key) {
+    acc
+  } else {
+    JavaCoords {
+      coords: acc.coords ++ [coord],
+      origin: map.insert(acc.origin, key, manifest),
+      seen: set.insert(acc.seen, key)
+    }
+  }
 }
+
+## The manifest a resolved package was read from: its root is `<dir>/src`.
+fn pkg_manifest(pkg: PkgR) -> String = proj_of_root(pkg.root) ++ "/dawn.toml"
 
 fn collect_pkg_java_coords(
   pkg: PkgR,
-  out0: List[MCoord],
-  seen_coords0: Set[String],
+  acc0: JavaCoords,
   seen_roots0: Set[String]
-) -> (List[MCoord], Set[String], Set[String]) = {
-  if set.has(seen_roots0, pkg.root) { return (out0, seen_coords0, seen_roots0) }
-  var out = out0
-  var seen_coords = seen_coords0
+) -> (JavaCoords, Set[String]) = {
+  if set.has(seen_roots0, pkg.root) { return (acc0, seen_roots0) }
+  var acc = acc0
   var seen_roots = set.insert(seen_roots0, pkg.root)
   for key in map.keys(pkg.deps) {
     let child = map.get(pkg.deps, key).expect("resolved package")
-    let (out1, coords1, roots1) = collect_pkg_java_coords(child, out, seen_coords, seen_roots)
-    out = out1
-    seen_coords = coords1
+    let (acc1, roots1) = collect_pkg_java_coords(child, acc, seen_roots)
+    acc = acc1
     seen_roots = roots1
   }
-  for coord in pkg.java_deps {
-    let (out1, coords1) = append_java_coord(out, seen_coords, coord)
-    out = out1
-    seen_coords = coords1
-  }
-  (out, seen_coords, seen_roots)
+  for coord in pkg.java_deps { acc = append_java_coord(acc, coord, pkg_manifest(pkg)) }
+  (acc, seen_roots)
 }
 
-fn collect_java_coords(root_coords: List[MCoord], pkgs: Map[String, PkgR]) -> List[MCoord] = {
-  var out: List[MCoord] = []
-  var seen_coords: Set[String] = set.empty()
-  for coord in root_coords {
-    let (out1, coords1) = append_java_coord(out, seen_coords, coord)
-    out = out1
-    seen_coords = coords1
-  }
+fn collect_java_coords(
+  root_manifest: String,
+  root_coords: List[MCoord],
+  pkgs: Map[String, PkgR]
+) -> JavaCoords = {
+  var acc = JavaCoords { coords: [], origin: map.empty(), seen: set.empty() }
+  for coord in root_coords { acc = append_java_coord(acc, coord, root_manifest) }
   var seen_roots: Set[String] = set.empty()
   for key in map.keys(pkgs) {
     let pkg = map.get(pkgs, key).expect("resolved package")
-    let (out1, coords1, roots1) = collect_pkg_java_coords(pkg, out, seen_coords, seen_roots)
-    out = out1
-    seen_coords = coords1
+    let (acc1, roots1) = collect_pkg_java_coords(pkg, acc, seen_roots)
+    acc = acc1
     seen_roots = roots1
   }
-  out
+  acc
 }
 
 # Compute the project and source root together so no consumer has to rediscover
@@ -179,12 +186,14 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env = {
     Some(m) -> m.java_deps
     None -> []
   }
+  let java = collect_java_coords("${project}/dawn.toml", root_coords, pkgs)
   SourcePlan {
     target: target,
     project: project,
     source_root: source_root,
     pkgs: pkgs,
-    java_coords: collect_java_coords(root_coords, pkgs),
+    java_coords: java.coords,
+    java_coord_origin: java.origin,
     diags: sdiags ++ mdiags ++ rdiags
   }
 }
@@ -832,6 +841,7 @@ test "bootstrap source inputs reject file plans before inspecting the base" {
       source_root: "/tmp/dawn-planner-file/src",
       pkgs: no_pkgs,
       java_coords: [],
+      java_coord_origin: map.empty(),
       diags: no_diags
     }
     match bootstrap_source_input_manifest(plan, "") {
@@ -877,8 +887,9 @@ test "Java coordinates follow the final source graph order once" {
   var roots: Map[String, PkgR] = map.empty()
   roots = map.insert(roots, "z_first", child_a)
   roots = map.insert(roots, "a_second", child_b)
+  let java = collect_java_coords("/canonical/app/dawn.toml", [root_1, root_2], roots)
   var got: List[String] = []
-  for coord in collect_java_coords([root_1, root_2], roots) {
+  for coord in java.coords {
     got = got ++ [mcoord_show(coord)]
   }
   assert got == [
@@ -888,6 +899,20 @@ test "Java coordinates follow the final source graph order once" {
     "g:child-a:1",
     "g:child-b:1"
   ]
+  # each coordinate names the manifest that declared it first: child_a also
+  # declares root-1, and the grand package's second copy is never read
+  var origins: List[String] = []
+  for coord in java.coords {
+    origins = origins ++ [map.get(java.origin, mcoord_show(coord)).expect("origin")]
+  }
+  assert origins == [
+    "/canonical/app/dawn.toml",
+    "/canonical/app/dawn.toml",
+    "/canonical/grand/dawn.toml",
+    "/canonical/child-a/dawn.toml",
+    "/canonical/child-b/dawn.toml"
+  ]
+  assert len(map.keys(java.origin)) == len(java.coords)
 }
 
 test "mixed manifest declaration order reaches SourcePlan Java coordinates" {
@@ -926,7 +951,7 @@ test "mixed manifest declaration order reaches SourcePlan Java coordinates" {
     }
   }
   var got: List[String] = []
-  for coord in collect_java_coords([root_coord], url_first_pkgs) {
+  for coord in collect_java_coords("/p/dawn.toml", [root_coord], url_first_pkgs).coords {
     got = got ++ [mcoord_show(coord)]
   }
   assert got == ["g:root:1", "g:url:1", "g:path:1"]
@@ -950,7 +975,7 @@ test "mixed manifest declaration order reaches SourcePlan Java coordinates" {
     }
   }
   got = []
-  for coord in collect_java_coords([root_coord], path_first_pkgs) {
+  for coord in collect_java_coords("/p/dawn.toml", [root_coord], path_first_pkgs).coords {
     got = got ++ [mcoord_show(coord)]
   }
   assert got == ["g:root:1", "g:path:1", "g:url:1"]
