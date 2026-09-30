@@ -57,6 +57,42 @@ name: tile
 # main pushes from 09-12 to 09-24), so the nightly budget report in
 # nightly.yml counts it, and says so when it passes one push in five.
 #
+# ON A PUSH, A TREE ALREADY VERIFIED IS NOT RUN AGAIN (2026-09-30). The
+# `dedupe` job below asks scripts/tile-verified.py whether this commit's git
+# tree (`git rev-parse HEAD^{tree}`) already has a green run of this
+# workflow, recorded as an artifact named `tile-verified-v1-<tree>` that
+# tile-shards-complete uploads once all six shards and the union check are
+# green (kept 90 days). If it has, the six shards and tile-shards-complete
+# are skipped and the step summary names the run that verified it. Only a
+# push is deduplicated: pull_request, schedule and workflow_dispatch always
+# run every shard, so the whole set runs on the pull request and every day,
+# and the schedule stays the backstop for drift the tree cannot see.
+#
+# Why the tree and not the paths or a digest. In the week of 09-22 .. 09-29
+# this file fired on 19 of 57 pushes to main, and 17 of those 19 ran on a
+# tree a pull_request run had verified green about half an hour before: a
+# rebase merge changes the SHA and not the tree. None of the 19 changed a
+# tile golden. Narrowing the paths removes at most 6 of the 19 and drops the
+# driver coupling named above. A digest of the toolchain jar changed on 31
+# of the 57 pushes, more often than the paths fire. A digest of the tile
+# inputs alone leaves out the compiler, which is the emit-side coupling this
+# header exists to name. The tree carries the compiler, the goldens, this
+# file, the tileiras pin and .github/actions at once. Replayed on that week,
+# the push re-runs drop from 19 to 2 (about 82,000 job-seconds a week).
+# scripts/tile-verified.py has the rules a record must meet (made in this
+# repository, by a run whose head repository is this one too, of this file,
+# concluded success, not expired) and the measurements behind this paragraph.
+#
+# The `v1-` in the name is an environment version, not a format version:
+# the tree cannot see the runner image or a floating `@v4` tag. When one of
+# those moves in a way that could change a verdict (ubuntu-latest becomes
+# Ubuntu 26 from 2026-10-19), change TILE_VERIFIED_PREFIX below by hand and
+# every tree runs again. Not actions/cache: a cache saved on a pull request
+# belongs to its merge ref, which main cannot read.
+#
+# nightly.yml's totals report counts a tile trigger only when the six
+# shards all ran green, so a deduplicated push is not counted as one.
+#
 # path-total: 5484s (the most this file's `3x` claims may add up to)
 on:
   push:
@@ -111,6 +147,11 @@ concurrency:
   group: tile-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The environment version of the verified-tree record; the header says
+  # when to change it.
+  TILE_VERIFIED_PREFIX: tile-verified-v1-
+
 jobs:
   # SIX round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
   # 184 kernels, then the 67 mutants, in run order), eleven until 2026-09-11.
@@ -161,7 +202,37 @@ jobs:
   # together by run.sh. The wheels are 150 MB and nothing outside this file
   # needs them, which is a second reason these are jobs of their own.
 
+  # The push-only duplicate check; the header has the reasoning and
+  # scripts/tile-verified.py the rules. No toolchain: a checkout, the lookup's
+  # self-test and two Actions API reads. A failed lookup is `skip=false`, and
+  # the shards' `if:` also runs them when this job did not finish, so the one
+  # way to skip is a record that passed every rule.
+  dedupe:
+    runs-on: ubuntu-latest
+    # Listed in full: a `permissions:` block sets everything it omits to none.
+    permissions:
+      actions: read     # the artifact listing and the run that made it
+      contents: read    # the checkout
+    outputs:
+      skip: ${{ steps.lookup.outputs.skip }}
+    # budget: floor (seconds-scale job: checkout and two Actions API reads, no toolchain)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: the verified-tree lookup refuses what it should
+        run: python3 scripts/tile-verified.py --self-test
+      - name: has this tree already passed tile.yml?
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/tile-verified.py lookup --repo "$GITHUB_REPOSITORY" \
+            --repo-id "$GITHUB_REPOSITORY_ID" --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --prefix "$TILE_VERIFIED_PREFIX" --event "$GITHUB_EVENT_NAME"
+
   tile-golden-1:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; the note above has the
     # arithmetic. Shard 1 also carries the two ledger gates and the wheel
@@ -226,6 +297,8 @@ jobs:
           python3 scripts/leetgpu-diff/check.py --self-test
 
   tile-golden-2:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
     # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
@@ -263,6 +336,8 @@ jobs:
           retention-days: 1
 
   tile-golden-3:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
     # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
@@ -300,6 +375,8 @@ jobs:
           retention-days: 1
 
   tile-golden-4:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
     # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
@@ -337,6 +414,8 @@ jobs:
           retention-days: 1
 
   tile-golden-5:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
     # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
@@ -374,6 +453,8 @@ jobs:
           retention-days: 1
 
   tile-golden-6:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
     # budget: 3x 914s planning value (the eleven shards' observed work, six ways)
@@ -426,16 +507,22 @@ jobs:
   #
   # `if: always()` so a red shard cannot swallow the completeness verdict; the
   # two failures stay separately attributable. The self-test runs first because
-  # a guard whose red has never been observed is not a guard.
+  # a guard whose red has never been observed is not a guard. The job is
+  # skipped with the shards when the dedupe job found this tree verified.
+  #
+  # Its last two steps write the verified-tree record the dedupe job reads,
+  # and only when all six shards concluded success and the union held. The
+  # artifact's name is the whole key; the small JSON inside is for a person.
   tile-shards-complete:
     needs:
+      - dedupe
       - tile-golden-1
       - tile-golden-2
       - tile-golden-3
       - tile-golden-4
       - tile-golden-5
       - tile-golden-6
-    if: ${{ always() }}
+    if: ${{ always() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
     timeout-minutes: 5
@@ -452,3 +539,32 @@ jobs:
         run: |
           python3 scripts/mutant-coverage/check.py \
             --coverage-dir coverage --only-harness tile-golden
+
+      - name: this tree's verified record
+        if: >-
+          ${{ success()
+          && needs.tile-golden-1.result == 'success'
+          && needs.tile-golden-2.result == 'success'
+          && needs.tile-golden-3.result == 'success'
+          && needs.tile-golden-4.result == 'success'
+          && needs.tile-golden-5.result == 'success'
+          && needs.tile-golden-6.result == 'success' }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "TILE_TREE=$tree" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/tile-verified"
+          printf '{"tree": "%s", "sha": "%s", "run": %s, "event": "%s", "ref": "%s"}\n' \
+            "$tree" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$GITHUB_REF" \
+            > "$RUNNER_TEMP/tile-verified/record.json"
+          cat "$RUNNER_TEMP/tile-verified/record.json"
+
+      - name: upload the verified record
+        if: ${{ success() && env.TILE_TREE != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TILE_VERIFIED_PREFIX }}${{ env.TILE_TREE }}
+          path: ${{ runner.temp }}/tile-verified/record.json
+          if-no-files-found: error
+          retention-days: 90
+          # a re-run attempt of the same run records the same tree again
+          overwrite: true
