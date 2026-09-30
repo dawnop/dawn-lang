@@ -322,6 +322,65 @@ class PreflightTests(unittest.TestCase):
                                          "drop-terminal-loop-jump-guard",
                                          "not jumps(x, lid, true, true)")
 
+    def test_ctl_live_anchor_drift_is_caught(self):
+        # #277: ctl-live-contract/run.sh is not-anchor because its mutants all
+        # come from this registry; the harness copies runtime/c and greps only
+        # the probe's stderr.
+        rt = "runtime/c/dawn_rt.c"
+        self.assert_registry_drift_is_red("ctl-live-contract", "ctl-discard-skips-cleanups", rt,
+                                          "  dawn_ctl_discard_walking = run_releases;\n"
+                                          "  dawn_unwind_to(h);",
+                                          "  dawn_ctl_discard_walking = run_releases;\n"
+                                          "  dawn_unwind_to(h );")
+        self.assert_registry_drift_is_red("ctl-live-contract", "ctl-signals-one-waiter", rt,
+                                          "  c->turn = 1;\n  pthread_cond_broadcast(&c->cv);",
+                                          "  c->turn = 1;\n  pthread_cond_broadcast(&c->cv );")
+        self.assert_stale_mutator_is_red("ctl-live-contract", "ctl-never-reclaims",
+                                         "c->die = true;")
+
+    def test_display_layering_anchor_drift_is_caught(self):
+        # #277: display-layering-contract/run.sh is not-anchor because both
+        # mutants come from this mutator; the harness greps only the observed
+        # red set.
+        lower = "selfhost/src/ir/lower.dawn"
+        self.assert_registry_drift_is_red("display-layering-contract", "drop-display-question",
+                                          lower,
+                                          "    display_at(st, e, t)\n  } else if t == TyString {\n",
+                                          "    display_at(st, e,  t)\n  } else if t == TyString {\n")
+        self.assert_registry_drift_is_red("display-layering-contract", "inherit-display", lower,
+                                          "      TyVar(_, _) ->\n        match wit {",
+                                          "      TyVar(_,  _) ->\n        match wit {")
+        self.assert_stale_mutator_is_red("display-layering-contract", "drop-display-question",
+                                         "display_at(st, e, t)")
+
+    def test_dependency_heap_anchor_drift_is_caught(self):
+        # #277: dependency-heap-contract/run.py is not-anchor because its one
+        # mutant comes from this registry; the harness's replaces edit its
+        # matrix in a self-test.
+        self.assert_registry_drift_is_red("dependency-heap-contract", "drop-inherited-max-heap",
+                                          "selfhost/src/main.dawn",
+                                          '"-Xss512m", own_xmx(), ',
+                                          '"-Xss512m", own_xmx() , ')
+        self.assert_stale_mutator_is_red("dependency-heap-contract", "drop-inherited-max-heap",
+                                         '"-Xss512m", own_xmx(), ')
+
+    def test_bootstrap_input_manifest_anchor_drift_is_caught(self):
+        # #277: bootstrap-input-manifest-contract/run.sh is not-anchor because
+        # its mutants all come from this mutator; the harness's count and
+        # replace fill its own manifest fixture.
+        source = "compiler-plan/src/source.dawn"
+        self.assert_registry_drift_is_red("bootstrap-input-manifest-contract",
+                                          "drop-package-manifest", source,
+                                          '    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },\n',
+                                          '    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" } ,\n')
+        self.assert_registry_drift_is_red("bootstrap-input-manifest-contract",
+                                          "persist-internal-absolute", source,
+                                          '        ("R", str.drop(input.path, str.len(prefix)))\n',
+                                          '        ("R", str.drop(input.path, str.len(prefix) ))\n')
+        self.assert_stale_mutator_is_red("bootstrap-input-manifest-contract",
+                                         "drop-package-manifest",
+                                         'SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },')
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
