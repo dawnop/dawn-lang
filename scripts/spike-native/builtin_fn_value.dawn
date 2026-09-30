@@ -1,0 +1,37 @@
+# A builtin taken as a function value is the same function as the builtin
+# called directly (issue #283).
+#
+# `lower.lift_fn_value` used to write the wrapper's body as the bare intrinsic,
+# skipping the rewrites a direct call goes through. `parse_int` and
+# `parse_int_radix` then reached both emitters as names no backend implements
+# (lowering always routes them to std/fmt) and the compile panicked, while
+# `parse_float` reached the host's grammar with std/fmt's §11 scanner out of
+# the way: `f("1.5d")` answered `Some(1.5)` where `parse_float("1.5d")` answers
+# `None`. Each line below prints the direct call and the call through a value
+# side by side, so a wrapper that disagrees shows up as a line that does not.
+
+use std/list
+
+fn show_both[T: Show](direct: T, through: T) -> String = "${direct} ${through}"
+
+pub fn main() -> Unit !io = {
+  let pi = parse_int
+  let pr = parse_int_radix
+  let pf = parse_float
+  println("-- parse_int --")
+  for s in ["42", "-7", " 12 ", "1_000", "0x10", "", "x"] {
+    println(show_both(parse_int(s), pi(s)))
+  }
+  println("-- parse_int_radix --")
+  println(show_both(parse_int_radix("ff", 16), pr("ff", 16)))
+  println(show_both(parse_int_radix("-101", 2), pr("-101", 2)))
+  println(show_both(parse_int_radix("z", 10), pr("z", 10)))
+  println("-- parse_float --")
+  for s in ["1.5", "-0.25e2", "1.5d", "1.5f", "0x1p3", "inf", "Infinity", "NaN", ""] {
+    println(show_both(parse_float(s), pf(s)))
+  }
+  println("-- through a higher-order call --")
+  println("${list.map(["3", "4.5", "4.5d"], pf)}")
+  let sorted: fn(List[Int], fn(Int, Int) -> Int) -> List[Int] = sort_by
+  println("${sorted([3, 1, 2], (a, b) => a - b)}")
+}
