@@ -179,10 +179,13 @@ definition 与 hover 看不到这个视图：definition 读目标模块的语法
 
 ## 八、不做的（理由）
 
-- **L1（关闭文件只跑 header）**：L0 估它端到端只省 0.24 到 0.32 s，还会让关闭文件的体内诊断、未用导入与 comptime 诊断不再推送，改变 LSP 可见行为。
-  本刀之后体内编辑只重检 1 个模块，关闭模块本来就全部复用，L1 能省的只剩「被编辑模块改了导出之后」那一段，届时再评。
-- **按声明粒度只检被请求的体**：需要 S1/S2 的依赖图、SCC 与跳过体的执行器，是 laziness 的第二步；本刀之后最慢的是 `check/checker` 自身的 0.36 s，
-  它才是按声明粒度的动机，但要先有「只检一个体」的正确性论证，不在本刀。
+- **L1（关闭文件只跑 header）**：2026-09-30 复评（`agent-handoff/research-laziness-l1-reeval-20260930.md`）。体内编辑只重检 1 个模块，L1 收益为 0；
+  上游 `pub` 签名改动时 `check/types` 之后 75 个模块全部重检，L1 实测省约 0.43 s（sync 1.04 → 0.61 s）。但其中约 0.18 s 是每次重算的 `line_starts_of`，
+  约 0.24 s 是不导入被改模块却因 carry 是一条线而重检的模块，两者都能在不改变诊断的前提下拿回（第十节，同批实测两刀合计 773 → 518 ms）；
+  L1 还会让这个场景里最有用的诊断（关闭的调用者被改坏）消失，而 Dawn 没有 rust-analyzer 的 flycheck 或 Roslyn 的全解决方案分析那样的全量旁路。
+  所以先做行起点记忆与按导入键控的复用，L1 只在「关闭的导入者的体与 comptime」仍超过约 0.15 s 且有用户诉求时，以默认关的开关、配保存或空闲时补跑关闭模块的旁路再评。
+- **按声明粒度只检被请求的体（L2）**：产物侧（`TFun.decl`、相对位置）已就绪；输入侧缺体间 `Cx` 的独立性与跨模块读集合（今天的读集合是模块粒度的，第十节），
+  体级复用已于 09-27 因证明成本高于重算被拆除（[incremental-semantics-removal.md](incremental-semantics-removal.md)）。
 - **独立缓冲区的解析复用**：文本每次都变，没有可复用的东西；增量解析是另一件事。
 - **给 `max_modules` 换成内存预算**：6.3 说明记忆不增加可测内存，上限只防病态工作区，128 足够。
 
@@ -280,3 +283,10 @@ M1 在 (b) 上省约 126 ms（验收线 120）；M2 再省约 129 ms，**未达�
 
 LSP A/B（`09851075` 不带观察的服务端对本刀带观察的服务端）：`lsp-project-matrix.py --expect-counts --compare` 十个修订、`lsp-edit-matrix.py --functions 1000 --compare` 十个修订，全部回复与诊断逐字相同，刀 1 的 `provider-move-error` 位置判据仍过。
 
+
+### 10.7 本刀不做的（理由）
+
+- **读集合展开成 `use` 闭包**：导出面自带嫁接表（10.2），展开闭包只会让一个上游的无关改动多使一批模块重检。
+- **identities 仍按相等比较**：(b) 的签名改动加了一个默认参数，驻留一条 `ParameterDefault` 路径，表就不等；按相等比较会让 `check/types` 之后的模块照旧全部重检，M2 的收益归零。10.4 的两个附加条件代价为零且保持冷检一致。
+- **把 impl 表也按读集合键控**：impl 在全程序生效（孤儿规则只限制写在哪里，不限制谁用），`contract/module_memo`「module memo checks a module again when the impl table changes, whatever it imports」就是不导入 `p` 却用 `p` 的 impl 的例子。
+- **体级或声明级复用、关闭文件跳过体**：见第八节。
