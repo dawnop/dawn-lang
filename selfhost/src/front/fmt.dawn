@@ -27,9 +27,9 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, FOR, TRUE, FALSE, NOT, IMPL, EFFECT, TYPE, PUB,
+  USE, ELSE, FN, FOR, TRUE, FALSE, IMPL, EFFECT, TYPE, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
-  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
   AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
@@ -661,20 +661,32 @@ fn is_callable_before_paren(k: TokKind) -> Bool =
   k == IDENT || k == TYPEIDENT || k == RPAREN || k == RBRACKET || k == QUESTION ||
   k == FN || k == BANG || k == RBRACE
 
-# BANG is absent for the same reason as in the lexer's continues_line: a line
-# ending in `!` is a postfix unwrap, and the next line starts a new statement.
-#
-# PIPE is present, as it is in continues_line: since the syntax window a
-# line-leading `|` belongs to patterns alone, so a bitwise or wraps with its
-# `|` at the end of the line, and that line has to read as continued. It used
-# to be missing here while the lexer continued it (SYN-N10): `let a = 6 |` then
-# `1` parsed as one statement and printed as two.
-fn is_cont_ender(k: TokKind) -> Bool =
-  k == PLUS || k == MINUS || k == STAR || k == SLASH || k == PERCENT ||
-  k == PLUSPLUS || k == PIPEGT || k == PIPE || k == AMPAMP || k == PIPEPIPE ||
-  k == AMP || k == CARET || k == SHL || k == SHR || k == USHR ||
-  k == EQEQ || k == NEQ || k == LT || k == LE || k == GT || k == GE ||
-  k == ARROW || k == LARROW || k == FATARROW || k == EQ || k == DOT || k == NOT
+## Whether a line ending in `k` continues onto the next one, so the next line
+## is indented one level further. The set is the lexer's (lexer.continues_line,
+## spec §1.7) minus `fmt_exempt`, not a list of its own: it used to be a second
+## hand-written copy, and the two drifted -- a trailing `|` (SYN-N10), then a
+## trailing `:` (`let a:` then `Int = 6` parsed as one statement and printed as
+## two, #188). Derived, a token the lexer starts continuing is indented here
+## without anyone remembering to add it.
+fn is_cont_ender(k: TokKind) -> Bool = lexer.continues_line(k) && not fmt_exempt(k)
+
+## The tokens the lexer continues a line after but the formatter does not add a
+## continuation level for, each for its own reason.
+fn fmt_exempt(k: TokKind) -> Bool =
+  match k {
+    # the bracket stack (`openers` in reflow) already indents the lines inside
+    # an opener one level in; a continuation level on top would double it
+    LPAREN | LBRACKET | LBRACE -> true
+    # a comma separates the items of the bracket it sits in, and those items
+    # line up at that bracket's content indent rather than stepping in
+    COMMA -> true
+    # never the last code token of a line: reflow's stream drops NEWLINE
+    NEWLINE -> true
+    # no production uses `@` (#194); if that ruling removes the token, this
+    # arm goes with it
+    AT -> true
+    _ -> false
+  }
 
 fn is_cont_starter(k: TokKind) -> Bool =
   k == PIPEGT || k == DOT || k == PIPE || k == PLUS || k == MINUS || k == STAR ||
@@ -813,6 +825,45 @@ test "a multi-line or-pattern lines its bars up with the arm" {
   let wrap = "fn f() -> Int = {\n  let a = 6 |\n    1\n  a\n}\n"
   assert fmt_of("fn f() -> Int = {\n  let a = 6 |\n  1\n  a\n}\n") == wrap
   assert fmt_of(wrap) == wrap
+}
+
+test "a trailing colon continues the line, as the lexer reads it" {
+  # `let a:` then `Int = 6` is one statement to the lexer and the parser (the
+  # annotation sits outside any bracket), so the type line is a continuation
+  # and steps in (#188). It used to print at statement indentation, as if it
+  # were a second statement.
+  let want = "fn f() -> Int = {\n  let a:\n    Int = 6\n  a\n}\n"
+  assert fmt_of("fn f() -> Int = {\n  let a:\n  Int = 6\n  a\n}\n") == want
+  assert fmt_of(want) == want
+  # inside a bracket, a value on the line after its field name is the name's
+  # continuation too, one level in from the field
+  let field = "fn g() -> P =\n  P(\n    reason:\n      \"r\",\n    code: 1\n  )\n"
+  assert fmt_of("fn g() -> P =\n  P(\n    reason:\n    \"r\",\n    code: 1\n  )\n") == field
+}
+
+test "a trailing binary operator indents the line it continues" {
+  # the pin for the derivation: every non-exempt token of the lexer's set is
+  # a continuation here, so exempting one (say `+`) reds this
+  let want = "fn f() -> Int = {\n  let a = 1 +\n    2\n  a\n}\n"
+  assert fmt_of("fn f() -> Int = {\n  let a = 1 +\n  2\n  a\n}\n") == want
+  assert fmt_of(want) == want
+}
+
+test "the formatter's continuation set is the lexer's minus its exemptions" {
+  # every token kind the lexer produces from punctuation, plus NEWLINE
+  let (toks, _) = lexer.lex(
+    "+ - * / % ++ |> | && || & ^ << >> >>> == != < <= > >= , ( ) [ ] { } " ++
+      "-> <- => = : . .. ? ! ~ @ not\nx"
+  )
+  assert len(toks) > 40
+  for t in toks {
+    let k = t.kind
+    # derived, not a second list: disagreeing with the lexer needs an entry
+    # in fmt_exempt
+    assert is_cont_ender(k) == (lexer.continues_line(k) && not fmt_exempt(k))
+    # and no exemption is stale: each names a token the lexer continues
+    assert not fmt_exempt(k) || lexer.continues_line(k)
+  }
 }
 
 test "a comment between the arrow and the body is transparent" {

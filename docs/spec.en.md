@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 711d50e0e4c2db37 -->
+<!-- doc-check: translation-of docs/spec.md @ 73b164b20af8f670 -->
 
 # Dawn Language Specification
 
@@ -233,6 +233,9 @@ boolean or arithmetic, the idiomatic spelling — a Java builder chain
 negation (is `x\n  - y` the expression `x - y`, or a new statement `-y`? there is no way to tell),
 so that pair of arithmetic operators does not continue a line from the start of one. By convention,
 one statement per line; `dawn fmt` makes it uniform.
+A line ending in `=`, `->`/`<-`/`=>`, `.`, `not` or `:` continues as well (`let a:` with the type
+on the next line is one statement); the set is written once, in the lexer (`continues_line`), and
+`dawn fmt` derives its continuation indent from it, so the two cannot disagree.
 
 A newline doubles as a **separator** in two places: between match arms (§5) and between the
 elements of a list literal (§4.11). Both parse the expression by the rules above first, and the
