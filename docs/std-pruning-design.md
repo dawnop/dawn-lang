@@ -35,16 +35,24 @@ JVM 那边同理：一个只 `println` 的程序带走 268 个 class。
 
 * 用户程序每个模块的**每一个**函数（测试块在内，按后端跟随它嵌入的东西：JVM 传
   `lower.emitted_core`，native 传 `named_tests` 改过名的 Core）。所以**只有 std 会掉东西**；
-* `c/emitc.emitter_named_pvec_fns()` 的十个名字，配上 `std/pvec`，**但只在这份程序里
+* `reach.list_roots()` 的十个名字，配上 `std/pvec`，**但只在这份程序里
   可能出现一个 List 时才加**（下面「List 的判据」）。列表字面量、`++`、七个 list 原语与
   Array 宿主边界都是**发射器自己拼出来的调用**，Core 里没有对应的节点，走图到不了。
-  两个后端拼的是同一批十个名字（JVM 侧在 `gen_list_intrinsic` 的 `target` 表与 `PVEC_MOD`
-  的四处直呼），`emitc.dawn` 里 `emitter_named_pvec_fns` 旁边的测试把这份名单钉在发射器的
-  实际拼法上。
+
+  **根表归属**（#181）：这张表住在 `ir/reach`，不在任何一个后端里。它首先是走图的事实
+  （Core 里没有边、只能被告知要留的函数），两个发射器和两个驱动本来就都 import reach，
+  而 reach 在两个后端之下，谁也不拥有谁的拼法。原先它是 `c/emitc.emitter_named_pvec_fns`，
+  只对 C 侧校验，JVM 驱动为读它 `use c/emitc`，JVM 发射器另有一份自己的原语→函数映射。
+  现在原语→函数的映射是 `reach.list_primitive_table()`，两个发射器都按它派发，各自只保留
+  描述符（JVM 的 `list_primitive_desc`）；每一处 `std/pvec` 调用都经一个检查名字属于
+  `reach.list_root_names()` 的 helper（`emit.call_pvec`、`emitc.pvec_call`），
+  `scripts/intrinsic-parity.py` 按拼写拒绝绕过 helper 的调用。
 
 **List 的判据**（`reach.mentions_list`）：走图读到的每一个类型（表达式的、签名的、
 发射器无条件保留的描述符的），只要里面有一个 `TyList`，这十个根就进队列，`Live.lists`
-记下这个答案，两个后端读的是同一份，不各判一次。判据落在类型上而不是节点形状上：那十个
+记下这个答案，剪枝读的是同一份，不各判一次；JVM 发射器在每一处 `std/pvec` 调用上读它
+（`call_pvec`：剪过的程序里 `lists` 为假却要发一个 pvec 调用，就是被剪掉的方法，编译期
+panic，而不是用户运行期的 NoSuchMethodError）。判据落在类型上而不是节点形状上：那十个
 发射点每一个都收或吐一个 vector，所以产生它的 Core 节点自己的类型、或它某个实参的类型里
 必有 `TyList`；而节点形状是发射器的事，会随发射器改，「这份程序里有没有 List」不会。
 

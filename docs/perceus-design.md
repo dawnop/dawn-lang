@@ -657,8 +657,8 @@ callee 半翻 = LSan direct leak）。
 
 - **管辖 pin**：调用点不读表的函数，参数必须全 owned，体内怎么用都不看——
   emitc 直呼其名的 `std/pvec` 面（`xs[i]` 是 Core intrinsic `list_index`，
-  只在 emitc 映到 `std/pvec.index`，字面量/`++`/host 边界同理；名单
-  `emitc.emitter_named_pvec_fns`）、字典槽指名的函数（`CSlotFn`，`CMethod`
+  只由 `reach.list_primitive_table` 映到 `std/pvec.index`，字面量/`++`/host 边界
+  同理；名单 `reach.list_roots()`）、字典槽指名的函数（`CSlotFn`，`CMethod`
   按裸函数指针全 owned 调）、`CClosure` 指名的函数（函数值经 `CDynamic` 全
   owned 调；具名函数作值有 `lift_fn_value` 包一层，pin 落在包装 lambda 上，
   里面的直呼调用照常读表）、impl/default/带捕获的函数（`CFun.name` 与普通

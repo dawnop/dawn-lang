@@ -28,6 +28,18 @@ declared).
 The complementary half is a real test, in lower.dawn: that the groups
 partition `types.builtins()` + `lower.internal_intrinsics()`, so a primitive
 added and classified nowhere is caught there.
+
+The list primitives are the one group neither emitter spells for itself:
+which `std/pvec` function each one calls is `reach.list_primitive_table()`,
+and both emitters dispatch on that table (#181). So their arms are read from
+there, and the JVM's descriptor table is held to the same keys both ways.
+The second half of this file holds the rest of that bargain: every
+`std/pvec` call either emitter writes goes through its one checked helper
+(`emit.call_pvec`, `emitc.pvec_call`), which refuses a name outside
+`reach.list_root_names()`, the functions pruning keeps. A call written
+around the helper is a function pruning may have dropped, and it would only
+show up as a NoSuchMethodError in a user's program, so it is refused here by
+spelling: no `"std/pvec"` literal and no `LIST_MOD` outside those helpers.
 """
 
 import re
@@ -107,15 +119,44 @@ def declared():
     return set(inline), set(host)
 
 
+def list_primitives():
+    """`reach.list_primitive_table()`: primitive -> std/pvec function."""
+    found = names(
+        body(read("ir/reach.dawn"), "pub fn list_primitive_table()", "reach.dawn"),
+        r'\("([A-Za-z_0-9]+)", "([A-Za-z_0-9]+)"\)',
+        "reach.dawn",
+        "rows in list_primitive_table()",
+    )
+    return {prim for prim, _ in found}
+
+
 def jvm_arms():
     lines = read("jvm/emit.dawn")
-    # `gen_list_intrinsic` dispatches twice: an inner `target` table for the
-    # primitives that are a plain std/pvec call, then a chain for the ones
-    # that need a List<->Array conversion around them.
+    # `gen_list_intrinsic` dispatches twice: on reach's table for the
+    # primitives that are a plain std/pvec call, typed by
+    # `list_primitive_desc`, then a chain for the ones that need a
+    # List<->Array conversion around them.
     lst = body(lines, "fn gen_list_intrinsic(", "emit.dawn")
-    arms = set(
-        names(lst, r'(?m)^\s+"([A-Za-z_0-9]+)" -> Some\(', "emit.dawn", "std/pvec targets")
+    if "reach.list_primitive_fn(name)" not in "\n".join(lst):
+        fail(
+            "emit.dawn: gen_list_intrinsic no longer dispatches on "
+            "reach.list_primitive_fn(name); the list primitives' arms are read "
+            "from reach's table on that premise."
+        )
+    table = list_primitives()
+    descs = set(
+        names(
+            body(lines, "fn list_primitive_desc(", "emit.dawn"),
+            r'(?m)^\s+"([A-Za-z_0-9]+)" ->',
+            "emit.dawn",
+            "list primitive descriptors",
+        )
     )
+    for n in sorted(table - descs):
+        fail(f"emit.dawn: list primitive `{n}` is in reach's table but has no JVM descriptor.")
+    for n in sorted(descs - table):
+        fail(f"emit.dawn: a JVM descriptor for `{n}`, which reach's table does not list.")
+    arms = set(table)
     arms |= set(names(lst, r'name == "([A-Za-z_0-9]+)"', "emit.dawn", "list-crossing arms"))
     arms |= set(
         names(
@@ -138,17 +179,75 @@ def c_arms():
             "arms in emit_intrinsic",
         )
     )
-    # the C side's copy of the std/pvec table, kept as a predicate so the
-    # `else if` chain above it stays flat
-    arms |= set(
-        names(
-            body(lines, "fn is_list_primitive(", "emitc.dawn"),
-            r'n == "([A-Za-z_0-9]+)"',
-            "emitc.dawn",
-            "std/pvec targets",
+    # the list primitives: emit_intrinsic's `is_list_primitive` arm reads
+    # reach's table, so every row of it is an arm here
+    if "reach.list_primitive_fn(n)" not in "\n".join(body(lines, "fn is_list_primitive(", "emitc.dawn")):
+        fail(
+            "emitc.dawn: is_list_primitive no longer reads reach.list_primitive_fn; "
+            "the list primitives' arms are read from reach's table on that premise."
         )
-    )
+    arms |= list_primitives()
     return arms
+
+
+# Where a `std/pvec` call may be spelled: the helper that checks the name
+# against reach.list_root_names(), and nothing else. rc.dawn builds one Core
+# call to from_array (a list literal it rewrites), by constant.
+PVEC_FILES = ["jvm/emit.dawn", "jvm/help.dawn", "jvm/codegen.dawn", "c/emitc.dawn", "c/rc.dawn"]
+PVEC_HELPERS = {"jvm/emit.dawn": "fn call_pvec(", "c/emitc.dawn": "fn pvec_call("}
+
+
+def code_lines(lines):
+    """(line number, text, enclosing top-level header) of non-comment code.
+
+    Test blocks are skipped: a fixture may name std/pvec by string.
+    """
+    header = ""
+    for i, line in enumerate(lines, 1):
+        # a declaration starts in column 0; `}` and `)` there close one
+        if line and not line[0].isspace() and line[0] not in "})#":
+            header = line
+        if header.startswith("test "):
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        yield i, line, header
+
+
+def pvec_spellings():
+    seen_helper = set()
+    for name in PVEC_FILES:
+        for no, line, header in code_lines(read(name)):
+            where = f"{name}:{no}"
+            if header.startswith("use "):
+                continue
+            if '"std/pvec"' in line or "PVEC_MOD" in line:
+                fail(
+                    f"{where}: names std/pvec by spelling. A std/pvec call goes "
+                    f"through the checked helper with a reach.LIST_* name, so "
+                    f"pruning is known to keep what it calls."
+                )
+            if "LIST_MOD" in line:
+                helper = PVEC_HELPERS.get(name)
+                if helper and header.startswith(helper):
+                    seen_helper.add(name)
+                elif name == "c/rc.dawn" and re.search(
+                    r"CDirect\(LIST_MOD, LIST_(FROM_ARRAY|TO_ARRAY|CONCAT)\)", line
+                ):
+                    pass
+                else:
+                    fail(
+                        f"{where}: LIST_MOD outside {helper or 'a checked helper'}. "
+                        f"A std/pvec call written around the helper skips its "
+                        f"check against reach.list_root_names()."
+                    )
+    for name, helper in PVEC_HELPERS.items():
+        if name not in seen_helper:
+            fail(
+                f"{name}: `{helper}` no longer spells LIST_MOD. This gate "
+                f"reads that helper as the one place a std/pvec call is "
+                f"written; the rename has to come here too."
+            )
 
 
 def check(backend, arms, owed):
@@ -174,10 +273,12 @@ def main():
     both = inline
     check("emit.dawn (JVM)", jvm_arms(), both | host)
     check("emitc.dawn (native)", c_arms(), both)
+    pvec_spellings()
     report()
     print(
         f"PASS  both backends implement the {len(both)} inline primitives, "
-        f"and the JVM the {len(host)} it owes alone"
+        f"and the JVM the {len(host)} it owes alone; every std/pvec call "
+        f"goes through the helper that checks it against reach's list roots"
     )
 
 

@@ -16,7 +16,7 @@ use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes}
 use check/tast.{TBinOp, BEq, BNeq, BLt, BLe, BGt}
 use ir/core.{ty_key}
 use jvm/codegen.{jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of, is_ref}
-use jvm/rtclasses.{obj, PANIC_CLASS, STRINGS_CLASS, PVEC_CLASS, ARRAY_CLASS}
+use jvm/rtclasses.{obj, PANIC_CLASS, STRINGS_CLASS}
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "org.objectweb.asm.Type"
@@ -365,17 +365,5 @@ pub fn new_array(m: MethodVisitor, component: String) -> Unit !io = {
   } else {
     m.visitTypeInsn(OP_ANEWARRAY, internal_of(component))
   }
-  ()
-}
-
-## A Dawn List handed to Java (spec §9.6). Since S3 a List is a Dawn vector,
-## which Java has no name for, so it crosses as `Array` -- the backend's own
-## type, and the only shape both sides can talk about. The result is still
-## unmodifiable: `array_to_java` copies the window and wraps it.
-pub fn emit_list_bridge(m: MethodVisitor) -> Unit !io = {
-  m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "to_array",
-    "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";", false)
-  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
-    "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
   ()
 }

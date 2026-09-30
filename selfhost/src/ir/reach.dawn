@@ -165,7 +165,9 @@ pub type Live = {
   ## A live one-shot operation/handler needs the control driving loop.
   ctl: Bool,
   ## A live `List` anywhere means the emitters can spell a `std/pvec` call.
-  ## Both backends read this one answer rather than each deciding again.
+  ## The JVM emitter reads it at every such call (`emit.call_pvec`): a call
+  ## written into a program this says has no List is a pruned method, so it
+  ## stops the compile there rather than at the user's run time.
   lists: Bool
 }
 
@@ -648,10 +650,9 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
 ## `list_roots` is the seam the walk cannot see from Core: a call an emitter
 ## spells directly. Both backends do it for the same ten `std/pvec` functions
 ## -- a list literal, `++`, the list primitives and the Array host boundary
-## are emitted as calls rather than lowered into CDirect -- and
-## `emitc.emitter_named_pvec_fns` is the one list of them, held to the
-## emitter's actual spellings by a test beside it. Passing them in rather than
-## naming std here keeps this module ignorant of which functions std has.
+## are emitted as calls rather than lowered into CDirect -- and `list_roots()`
+## below is the one list of them, the same table both emitters take their
+## spellings from. The drivers pass it in; the tests pass smaller ones.
 ##
 ## They are roots only for a program that has a List in it (`mentions_list`).
 ## They used to be unconditional, which made every program carry `std/pvec`'s
@@ -739,6 +740,82 @@ pub fn live_set(
 ## it did before pruning existed and the tests below stay the tests they were.
 pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse =
   live_set(mods, roots, []).tables
+
+# ---- the std/pvec functions the emitters spell ----
+#
+# The table lives here, rather than in either emitter, because it is a fact
+# about this walk before it is a fact about either backend: these are the
+# calls no chain in Core reaches, so pruning keeps them only because this
+# module is told to. Both emitters and both drivers already import this
+# module, and it sits below both backends, so neither owns the other's
+# spellings. It used to be `c/emitc.emitter_named_pvec_fns`, checked only
+# against the C spellings, with the JVM driver importing the C backend to
+# read it and the JVM emitter keeping its own second copy of the mapping
+# (#181). The descriptors stay with each backend; the names are here.
+
+## The module the vector lives in.
+pub const LIST_MOD: String = "std/pvec"
+
+## `Array` to vector: a list literal, a folded List constant, and a host list
+## coming back in.
+pub const LIST_FROM_ARRAY: String = "from_array"
+
+## Vector to `Array`: a List crossing to the host.
+pub const LIST_TO_ARRAY: String = "to_array"
+
+## `++` on two lists.
+pub const LIST_CONCAT: String = "concat"
+
+## The list primitives (Core intrinsics both emitters translate rather than
+## calls lowering wrote) and the `std/pvec` function each one is.
+pub fn list_primitive_table() -> List[(String, String)] = [
+  ("len", "count"),
+  ("get", "get"),
+  ("range", "range"),
+  ("sort_by", "sort_by"),
+  ("list_index", "index"),
+  ("list_slice", "slice"),
+  # `xs ++ [x]` after lowering's one-element rewrite
+  ("list_push", "push")
+]
+
+## The `std/pvec` function a list primitive calls, or None for a name that is
+## not a list primitive.
+pub fn list_primitive_fn(n: String) -> Option[String] = {
+  for pr in list_primitive_table() {
+    let (prim, target) = pr
+    if prim == n { return Some(target) }
+  }
+  None
+}
+
+## Every `std/pvec` function an emitter may name directly: the primitives'
+## targets and the three boundary spellings. Each one is a call site that
+## never reads the parameter-mode table either, so `c/infer` pins them owned
+## for the same reason they are roots here.
+pub fn list_root_names() -> List[String] = {
+  var out: List[String] = []
+  for pr in list_primitive_table() {
+    let (_, target) = pr
+    out = out ++ [target]
+  }
+  out ++ [LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT]
+}
+
+## Whether an emitter may spell a call to `std/pvec.<n>`.
+pub fn is_list_root(n: String) -> Bool = {
+  for r in list_root_names() {
+    if r == n { return true }
+  }
+  false
+}
+
+## `list_root_names` as `live_set`'s `list_roots`.
+pub fn list_roots() -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for n in list_root_names() { out = out ++ [(LIST_MOD, n)] }
+  out
+}
 
 # ---- tests ----
 
@@ -937,6 +1014,29 @@ test "the emitter's pvec roots ride only when the program has a List" {
   let dead = tmod("std/thing", [CFun { ..tfn("std/thing", "dead", CUnit),
     ret: TyList(TyInt) }])
   assert not live_set([hello, dead, pvec], ["app"], roots).lists
+}
+
+test "the list roots are the primitives' targets and the three boundary names" {
+  assert list_root_names() == ["count", "get", "range", "sort_by", "index", "slice", "push",
+    "from_array", "to_array", "concat"]
+  # ten distinct names: two primitives on one function would be a table typo
+  var i = 0
+  for a in list_root_names() {
+    var j = 0
+    for b in list_root_names() {
+      if i != j { assert a != b }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  assert list_primitive_fn("list_index") == Some("index")
+  assert list_primitive_fn("index") == None
+  assert is_list_root("concat")
+  assert not is_list_root("len")
+  for pr in list_roots() {
+    let (owner, _) = pr
+    assert owner == LIST_MOD
+  }
 }
 
 test "the list criterion reads through containers but not through a record" {

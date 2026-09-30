@@ -51,7 +51,7 @@ use ir/core.{
   CMode, COwned, CBorrowed, mode_owned
 }
 use check/types.{Ty, TyFn, TyOpaque, TyInt, TyList, EPure, is_ref_ty, intr_owned_args}
-use c/emitc
+use ir/reach
 
 # ---- eligibility ----
 
@@ -75,8 +75,9 @@ fn eligible(p: CParam) -> Bool = is_ref_ty(p.ty) && not fn_typed(p.ty)
 ##
 ##   * the `std/pvec` functions the C emitter names directly -- the list
 ##     primitives (`xs[i]` is the Core intrinsic `list_index`, mapped to
-##     `std/pvec.index` only in emitc) plus the literal/concat lowering
-##     targets. Their executed call sites never consult the table;
+##     `std/pvec.index` only by `reach.list_primitive_table`) plus the
+##     literal/concat lowering targets, all of `reach.list_roots()`. Their
+##     executed call sites never consult the table;
 ##     scripts/rc-mode-contract's known-red entry is the measured leak.
 ##   * every function a dictionary slot names: a `CMethod` call reads the
 ##     slot as a bare function pointer and hands arguments over owned.
@@ -87,9 +88,7 @@ fn eligible(p: CParam) -> Bool = is_ref_ty(p.ty) && not fn_typed(p.ty)
 ##     direct call inside.)
 fn pinned(ms: List[CModule]) -> Set[(String, String)] = {
   var out: Set[(String, String)] = set.empty()
-  for n in emitc.emitter_named_pvec_fns() {
-    out = set.insert(out, ("std/pvec", n))
-  }
+  for pr in reach.list_roots() { out = set.insert(out, pr) }
   for m in ms {
     for d in m.dicts {
       for s in d.slots {

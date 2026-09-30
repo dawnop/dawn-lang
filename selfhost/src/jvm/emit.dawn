@@ -48,13 +48,12 @@ use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
   HAMT_CLASS,
-  PVEC_CLASS, PVEC_MOD, ARRAY_CLASS,
+  PVEC_CLASS, ARRAY_CLASS,
   CTL_CLASS, ctl_enter_desc, ctl_yield_desc
 }
 use jvm/help.{
   ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
-  emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array,
-  emit_list_bridge
+  emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array
 }
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
@@ -72,7 +71,7 @@ use ir/core.{
 }
 use ir/lower.{LMod, subst_subject, trait_method_sig}
 use ir/reach
-use ir/reach.{Live}
+use ir/reach.{Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use jvm/jreflect
 use jvm/operand as operands
 use java "dawn.rt.Asm"
@@ -638,8 +637,7 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
         m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
           "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
       }
-      m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "from_array",
-        "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+      call_pvec(gx, m, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
     }
     VTuple(elems) -> {
       let cls = tuple_class(len(elems))
@@ -946,7 +944,7 @@ fn adapt_one_java_arg(gx: GenCtx, g: Gen, jc: CJava, i: Int, aty: Ty, param: Str
     Some(conv) -> emit_sam_conversion(gx, g, conv, aty, sam_ev_at(jc, i))
     None -> {
       if is_list_bridge(call, i) {
-        emit_list_bridge(g.mv)
+        list_to_host(gx, g.mv)
       } else {
         adapt_java_arg(g.mv, aty, param)
       }
@@ -2741,8 +2739,7 @@ fn gen_clistlit(gx: GenCtx, g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
       "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
   }
-  g1.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "from_array",
-    "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+  call_pvec(gx, g1.mv, LIST_FROM_ARRAY, "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
   (g1, true)
 }
 
@@ -2816,8 +2813,8 @@ fn gen_cbinary(gx: GenCtx, g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (G
           g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
         }
         TyList(_) -> {
-          g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "concat",
-            "(L" ++ PVEC_CLASS ++ ";L" ++ PVEC_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+          call_pvec(gx, g1.mv, LIST_CONCAT,
+            "(L" ++ PVEC_CLASS ++ ";L" ++ PVEC_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";")
         }
         # String is the only other thing `++` joins. Spelled as a wildcard
         # rather than `TyString ->` since S0.3
@@ -2914,6 +2911,75 @@ fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> (Gen, Bool) !io =
     CSDrop(_) -> (g, true)
   }
 
+## Every `std/pvec` call this emitter writes, and the one place that writes
+## one. The name has to be one of `reach.list_root_names()`, the functions
+## pruning keeps for a program with a List in it: anything else is a method
+## pruning may have dropped, a `NoSuchMethodError` at the user's run time.
+## And when the program was pruned, reach has to have said it has a List
+## (`Live.lists`); a call written into a program reach judged List-free is the
+## same missing method, caught here, at compile time, instead.
+fn call_pvec(gx: GenCtx, m: MethodVisitor, name: String, desc: String) -> Unit !io = {
+  if not reach.is_list_root(name) {
+    panic("codegen: `" ++ LIST_MOD ++ "." ++ name ++
+        "` is not in reach.list_root_names(), so pruning does not keep it")
+  }
+  match gx.live {
+    Some(l) -> {
+      if not l.lists {
+        panic("codegen: a call to `" ++ LIST_MOD ++ "." ++ name ++
+            "` in a program reach found no List in, so pruning dropped it")
+      }
+    }
+    None -> ()
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, LIST_MOD, name, desc, false)
+}
+
+## A Dawn List handed to Java (spec §9.6). Since S3 a List is a Dawn vector,
+## which Java has no name for, so it crosses as `Array` -- the backend's own
+## type, and the only shape both sides can talk about. The result is still
+## unmodifiable: `array_to_java` copies the window and wraps it.
+fn list_to_host(gx: GenCtx, m: MethodVisitor) -> Unit !io = {
+  call_pvec(gx, m, LIST_TO_ARRAY, "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";")
+  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+    "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
+  ()
+}
+
+## The descriptor of the `std/pvec` function a list primitive calls. Which
+## function that is belongs to `reach.list_primitive_table`; this backend owns
+## only how the call is typed. `sort_by`'s comparator and evidence slots are
+## read off the call rather than written down.
+fn list_primitive_desc(n: String, cmp_desc: String, ev_descs: String) -> String = {
+  let vec = "L" ++ PVEC_CLASS ++ ";"
+  let obj = "Ljava/lang/Object;"
+  match n {
+    "len" -> "(" ++ vec ++ ")J"
+    "get" -> "(" ++ vec ++ "J)LOption;"
+    "range" -> "(JJ)${vec}"
+    # `sort_by` is std/pvec's own function, compiled by the ordinary rules:
+    # its comparator is a `dawn/rt/Fn` of the function-value arity and it
+    # takes rule 丁's evidence slot behind it. Both are read off the call
+    # rather than written down, so this table cannot state a second count.
+    "sort_by" -> "(" ++ vec ++ cmp_desc ++ ev_descs ++ ")" ++ vec
+    "list_index" -> "(" ++ vec ++ "J)" ++ obj
+    "list_slice" -> "(" ++ vec ++ "JJ)" ++ vec
+    # `xs ++ [x]` after lowering's one-element rewrite; the element is
+    # already in its erased slot, so it crosses as a bare Object
+    "list_push" -> "(" ++ vec ++ obj ++ ")" ++ vec
+    _ -> panic("codegen: no JVM descriptor for list primitive `" ++ n ++ "`")
+  }
+}
+
+test "every list primitive in reach's table has a JVM descriptor" {
+  # the names come from the shared table; a primitive added there and not
+  # typed here would panic at its first call site, so it is caught here first
+  for pr in reach.list_primitive_table() {
+    let (prim, _) = pr
+    assert str.starts_with(list_primitive_desc(prim, "", ""), "(")
+  }
+}
+
 ## The list primitives, implemented by calling the Dawn vector in std/pvec.
 ##
 ## These stay Core intrinsics rather than becoming calls in lowering, which is
@@ -2941,49 +3007,26 @@ fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Op
     acc
   }
 
-  ## The vector call for a primitive, as (function, descriptor). One table,
-  ## so a primitive and its callee cannot drift apart silently.
-  fn target(n: String) -> Option[(String, String)] =
-    match n {
-      "len" -> Some(("count", "(" ++ vec ++ ")J"))
-      "get" -> Some(("get", "(" ++ vec ++ "J)LOption;"))
-      "range" -> Some(("range", "(JJ)${vec}"))
-      # `sort_by` is std/pvec's own function, compiled by the ordinary rules:
-      # its comparator is a `dawn/rt/Fn` of the function-value arity and it
-      # takes rule 丁's evidence slot behind it. Both are read off the call
-      # rather than written down, so this table cannot state a second count.
-      "sort_by" -> Some(("sort_by", "(" ++ vec ++ cmp_desc ++ ev_descs ++ ")" ++ vec))
-      "list_index" -> Some(("index", "(" ++ vec ++ "J)" ++ obj))
-      "list_slice" -> Some(("slice", "(" ++ vec ++ "JJ)" ++ vec))
-      # `xs ++ [x]` after lowering's one-element rewrite; the element is
-      # already in its erased slot, so it crosses as a bare Object
-      "list_push" -> Some(("push", "(" ++ vec ++ obj ++ ")" ++ vec))
-      _ -> None
-    }
-
-  match target(name) {
-    Some(t) -> {
-      let (fname, desc) = t
+  # Which `std/pvec` function a primitive is comes from
+  # `reach.list_primitive_table`, the table the C emitter reads too; only the
+  # descriptor is this backend's.
+  match reach.list_primitive_fn(name) {
+    Some(fname) -> {
       let g1 = gen_cargs(gx, g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, fname, desc, false)
+      call_pvec(gx, g1.mv, fname, list_primitive_desc(name, cmp_desc, ev_descs))
       return Some((g1, true))
     }
     None -> ()
   }
 
   ## A Dawn list on the stack becomes a host list.
-  fn to_host(m: MethodVisitor) -> Unit !io = {
-    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "to_array", "(" ++ vec ++ ")" ++ arr, false)
-    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
-      "(" ++ arr ++ ")" ++ jl, false)
-    ()
-  }
+  fn to_host(m: MethodVisitor) -> Unit !io = list_to_host(gx, m)
 
   ## A host list on the stack becomes a Dawn list.
   fn of_host(m: MethodVisitor) -> Unit !io = {
     m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_of_java",
       "(" ++ jl ++ ")" ++ arr, false)
-    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "from_array", "(" ++ arr ++ ")" ++ vec, false)
+    call_pvec(gx, m, LIST_FROM_ARRAY, "(" ++ arr ++ ")" ++ vec)
     ()
   }
 

@@ -33,7 +33,7 @@ use check/types.{
   ev_pack_adt, EV_MISS_MSG
 }
 use ir/reach
-use ir/reach.{TableUse, Live}
+use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
@@ -594,7 +594,7 @@ fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
         st1 = line(st2,
           tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ cv_box(ev, el) ++ ");")
       }
-      (st1, mangle("std/pvec", "from_array") ++ "(" ++ tmp ++ ")")
+      (st1, pvec_call(LIST_FROM_ARRAY) ++ "(" ++ tmp ++ ")")
     }
     # A tuple erases every element, exactly as `emit_alloc(erased = true)`
     # does: `Tuple2` holds two Objects on the JVM whatever it was built from,
@@ -941,7 +941,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
         st1 = line(st2,
           tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
       }
-      (st1, mangle("std/pvec", "from_array") ++ "(" ++ tmp ++ ")")
+      (st1, pvec_call(LIST_FROM_ARRAY) ++ "(" ++ tmp ++ ")")
     }
     CForeign(_, _) ->
       # Not a gap: `use java` is the half of FFI that does not port, and
@@ -1112,7 +1112,7 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
       # `std/pvec.concat` is a Dawn function and takes both sides owned; the
       # other two are runtime primitives and borrow. See `own_args`.
       TyList(_) ->
-        (st2, mangle("std/pvec", "concat") ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
+        (st2, pvec_call(LIST_CONCAT) ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
             dup_expr(rv, lt) ++ ")")
       TyBytes -> (st2, "dawn_bytes_concat(" ++ lv ++ ", " ++ rv ++ ")")
       _ -> (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
@@ -1544,49 +1544,48 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
 fn no_rt(what: String, t: Ty) -> String =
   panic("emitc: `" ++ what ++ "` not implemented for native on " ++ ty_key(t))
 
-## The list primitive → `std/pvec` function table, the C side's copy of the
-## one `gen_list_intrinsic` keeps. Kept as two functions rather than an
-## Option-returning pair so the `else if` chain above stays flat.
-fn is_list_primitive(n: String) -> Bool =
-  n == "len" || n == "get" || n == "range" || n == "sort_by" ||
-  n == "list_index" || n == "list_slice" || n == "list_push"
-
-fn pvec_target(n: String) -> String =
-  if n == "len" {
-    "count"
-  } else if n == "list_index" {
-    "index"
-  } else if n == "list_slice" {
-    "slice"
-  } else if n == "list_push" {
-    "push"
+## The C function for a `std/pvec` call this emitter spells rather than
+## Core. The name must be one of `reach.list_root_names()`: those are the
+## functions pruning keeps for a program with a List in it, and a call to any
+## other one names a function pruning may have dropped. These call sites come
+## from Core intrinsics and lowering shapes, not `CDirect`, so they never read
+## the parameter-mode table either; `c/infer` pins the same names owned.
+fn pvec_call(name: String) -> String =
+  if reach.is_list_root(name) {
+    mangle(LIST_MOD, name)
   } else {
-    n
+    panic("emitc: `" ++ LIST_MOD ++ "." ++ name ++
+        "` is not in reach.list_root_names(), so pruning does not keep it")
   }
 
-## Every `std/pvec` function this emitter names directly -- the
-## `pvec_target` range plus the literal (`from_array`), `++` (`concat`) and
-## host-boundary (`to_array`, `of_host`/`to_host`) spellings. These call
-## sites come from Core intrinsics and lowering shapes, not `CDirect`, so
-## they never read the parameter-mode table and always speak the all-owned
-## convention. They are handed to `reach.live_set` as its list roots, which
-## keeps them only for a program a List can appear in; this list is the names,
-## not the condition. The borrowed inference (`c/infer`) pins each of them owned
-## for exactly that reason; scripts/rc-mode-contract's known-red entry is
-## the measured leak behind the pin. A test below holds this list to the
-## emitter's actual spellings.
-pub fn emitter_named_pvec_fns() -> List[String] =
-  ["count", "get", "range", "sort_by", "index", "slice", "push",
-    "from_array", "to_array", "concat"]
-
-test "the emitter-named pvec list covers every list-primitive target" {
-  for n in ["len", "get", "range", "sort_by", "list_index", "list_slice", "list_push"] {
-    assert is_list_primitive(n)
-    assert list.contains(emitter_named_pvec_fns(), pvec_target(n))
+## The list primitive's `std/pvec` call, or None when `n` is not one. The
+## mapping is `reach.list_primitive_table`, the one the JVM emitter reads too.
+fn list_primitive_call(n: String) -> Option[String] =
+  match reach.list_primitive_fn(n) {
+    Some(target) -> Some(pvec_call(target))
+    None -> None
   }
-  # the non-intrinsic spellings: literals, `++`, and the host boundary
-  for n in ["from_array", "to_array", "concat"] {
-    assert list.contains(emitter_named_pvec_fns(), n)
+
+fn is_list_primitive(n: String) -> Bool =
+  match reach.list_primitive_fn(n) {
+    Some(_) -> true
+    None -> false
+  }
+
+test "every list primitive is the std/pvec call reach's table names" {
+  for pr in reach.list_primitive_table() {
+    let (prim, target) = pr
+    assert is_list_primitive(prim)
+    assert list_primitive_call(prim) == Some(mangle(LIST_MOD, target))
+  }
+  assert list_primitive_call("join") == None
+  # the boundary spellings go through the same gate
+  for n in [LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT] {
+    assert pvec_call(n) == mangle(LIST_MOD, n)
+  }
+  match catch_panic(() => pvec_call("eleventh")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "not in reach.list_root_names()") }
   }
 }
 
@@ -1623,9 +1622,9 @@ fn rt_symbol(intrs: Map[String, Intr], name: String) -> Option[String] =
 ## The four primitives that traffic in lists cross through Array for the same
 ## reason the JVM backend does: it is the shape both sides can name, and it
 ## keeps the list's representation std's business (collections-dejava §5.1).
-fn to_host(v: String) -> String = mangle("std/pvec", "to_array") ++ "(" ++ v ++ ")"
+fn to_host(v: String) -> String = pvec_call(LIST_TO_ARRAY) ++ "(" ++ v ++ ")"
 
-fn of_host(v: String) -> String = mangle("std/pvec", "from_array") ++ "(" ++ v ++ ")"
+fn of_host(v: String) -> String = pvec_call(LIST_FROM_ARRAY) ++ "(" ++ v ++ ")"
 
 ## Arguments for a Dawn function this emitter calls where Core wrote something
 ## else -- the list operations live in `std/pvec`, and `++` on a list is one of
@@ -1838,7 +1837,12 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # own value representation (see gen_list_intrinsic's note on the JVM
     # side). So each backend translates them, and both translate to the same
     # `std/pvec` function -- one definition, compiled twice.
-    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(own_args(args, cargs, owned), ", ") ++ ")")
+    let callee =
+      match list_primitive_call(name) {
+        Some(c) -> c
+        None -> panic("emitc: `" ++ name ++ "` is a list primitive with no std/pvec call")
+      }
+    (st1, callee ++ "(" ++ join(own_args(args, cargs, owned), ", ") ++ ")")
   } else if name == "join" {
     (st1, "dawn_join(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
   } else if name == "from_code_points" {
