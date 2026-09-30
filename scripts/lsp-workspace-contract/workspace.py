@@ -216,11 +216,11 @@ class LspClient:
             raise ContractFailure(f"HARNESS_PROTOCOL: {method} returned {response['error']!r}")
         return response.get("result")
 
-    def initialize(self):
+    def initialize(self, capabilities=None):
         result = self.result("initialize", {
             "processId": None,
             "rootUri": None,
-            "capabilities": {},
+            "capabilities": capabilities or {},
         })
         require(isinstance(result, dict) and isinstance(result.get("capabilities"), dict),
                 "HARNESS_PROTOCOL", f"invalid initialize result {result!r}")
@@ -404,12 +404,12 @@ class Contract:
         self.command = command
         self.repo = repo
 
-    def client(self, extra_environment=None):
+    def client(self, extra_environment=None, capabilities=None):
         environment = self.fixture.environment()
         if extra_environment:
             environment.update(extra_environment)
         client = LspClient(self.command, self.repo, environment)
-        client.initialize()
+        client.initialize(capabilities)
         return client
 
     def close_client(self, client):
@@ -1035,6 +1035,128 @@ class Contract:
         finally:
             self.close_client(client)
 
+    def manifest_refresh(self):
+        base = self.fixture.case("manifest-refresh")
+        root = self.fixture.java_project(base / "app", "a")
+        helper = project(base / "helper", "helper")
+        write(helper / "src/lib.dawn", "pub fn helper_value() -> Int = 7\n")
+        source = root / "src/main.dawn"
+        manifest = root / "dawn.toml"
+        lock_file = root / "dawn.lock"
+        valid_lock = lock_file.read_text(encoding="utf-8")
+        uri = path_uri(source)
+        manifest_uri = path_uri(manifest)
+        lock_uri = path_uri(lock_file)
+        text = (
+            'use java "fixture.Shared"\n'
+            "use helper/lib.{helper_value}\n\n"
+            "pub fn call_a() -> Int !io = Shared.onlyA() + helper_value()\n"
+        )
+        watching = {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}
+        client = self.client(capabilities=watching)
+        try:
+            # The registration is a server-to-client request sent on
+            # `initialized`; the client's reply must not be answered.
+            registered = client.barrier(0)
+            requests = [item for item in registered
+                        if item.get("method") == "client/registerCapability"]
+            require(len(requests) == 1, "MANIFEST_WATCH_NOT_REGISTERED",
+                    f"expected one registration request, got {requests!r}")
+            registrations = requests[0].get("params", {}).get("registrations", [])
+            globs = sorted(
+                watcher.get("globPattern")
+                for registration in registrations
+                if registration.get("method") == "workspace/didChangeWatchedFiles"
+                for watcher in registration.get("registerOptions", {}).get("watchers", [])
+            )
+            require(globs == ["**/dawn.lock", "**/dawn.toml"], "MANIFEST_WATCH_NOT_REGISTERED",
+                    f"registration does not watch both manifests: {registrations!r}")
+            registration_id = requests[0].get("id")
+            mark = client.mark()
+            client.send({"jsonrpc": "2.0", "id": registration_id, "result": None})
+            answered = client.barrier(mark)
+            require(not any(item.get("id") == registration_id for item in answered),
+                    "MANIFEST_WATCH_NOT_REGISTERED",
+                    f"server answered the client's reply: {answered!r}")
+
+            mark = client.mark()
+            client.send(did_open(uri, text))
+            opened = client.barrier(mark)
+            require(latest_diagnostics(opened, uri, "MANIFEST_REFRESH_MISSING"),
+                    "MANIFEST_REFRESH_MISSING",
+                    "a module of an undeclared dependency resolved before the manifest changed")
+            after_open = client.lease_events()
+            require(after_open == [("create", 0), ("create", 1)], "MANIFEST_REFRESH_MISSING",
+                    f"project lease creation mismatch: {after_open!r}")
+
+            # Add the dependency on disk and report it twice in one
+            # notification, as VS Code does when its own watcher and the
+            # dynamic registration both see the save.
+            project(root, "java_a", deps={"helper": "../helper"},
+                    java_deps={"api": "fixture:api-a:1"})
+            change = {"uri": manifest_uri, "type": 2}
+            mark = client.mark()
+            client.note("workspace/didChangeWatchedFiles", {"changes": [change, change]})
+            refreshed = client.barrier(mark)
+            require(latest_diagnostics(refreshed, uri, "MANIFEST_REFRESH_MISSING") == [],
+                    "MANIFEST_REFRESH_MISSING",
+                    f"manifest change did not re-plan the open workspace: {messages(latest_diagnostics(refreshed, uri, 'MANIFEST_REFRESH_MISSING'))!r}")
+            hover = client.result("textDocument/hover", {
+                "textDocument": {"uri": uri},
+                "position": position(text, "helper_value", occurrence=2),
+            })
+            hover_text = hover.get("contents", {}).get("value", "") if isinstance(hover, dict) else ""
+            require("fn helper_value() -> Int" in hover_text, "MANIFEST_REFRESH_MISSING",
+                    f"open document does not see the new dependency: {hover!r}")
+            after_refresh = client.lease_events()
+            require(after_refresh == after_open + [("create", 1), ("close", 1)],
+                    "MANIFEST_REFRESH_LEASE_ORDER",
+                    f"refresh must build the new lease once before closing the old: {after_refresh!r}")
+
+            # A refresh whose setup fails keeps the workspace that works and
+            # reports the failure where it happened.
+            write(lock_file, "schema 1\ncoord broken\n")
+            mark = client.mark()
+            client.note("workspace/didChangeWatchedFiles",
+                        {"changes": [{"uri": lock_uri, "type": 2}]})
+            failed = client.barrier(mark)
+            require(latest_diagnostics(failed, lock_uri, "MANIFEST_REFRESH_FAILURE_REPLACED"),
+                    "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    "failed refresh did not report at dawn.lock")
+            require(latest_diagnostics(failed, uri, "MANIFEST_REFRESH_FAILURE_REPLACED") == [],
+                    "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    "failed refresh disturbed the document's analysis")
+            require(client.lease_events() == after_refresh, "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    f"failed refresh touched the installed lease: {client.lease_events()!r}")
+            kept = client.result("textDocument/hover", {
+                "textDocument": {"uri": uri},
+                "position": position(text, "helper_value", occurrence=2),
+            })
+            require(isinstance(kept, dict), "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    f"failed refresh left no semantic analysis: {kept!r}")
+
+            # An edit in between must not drop the reported failure.
+            mark = client.mark()
+            client.send(did_change(uri, text + "\n", 2))
+            edited = client.barrier(mark)
+            require(latest_diagnostics(edited, lock_uri, "MANIFEST_REFRESH_FAILURE_REPLACED"),
+                    "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    "an edit erased the failed refresh's diagnostic")
+
+            write(lock_file, valid_lock)
+            mark = client.mark()
+            client.note("workspace/didChangeWatchedFiles",
+                        {"changes": [{"uri": lock_uri, "type": 2}]})
+            recovered = client.barrier(mark)
+            require(latest_diagnostics(recovered, lock_uri, "MANIFEST_REFRESH_FAILURE_REPLACED") == [],
+                    "MANIFEST_REFRESH_FAILURE_REPLACED",
+                    "successful refresh did not clear the lock diagnostic")
+            require(client.lease_events() == after_refresh + [("create", 1), ("close", 1)],
+                    "MANIFEST_REFRESH_LEASE_ORDER",
+                    f"recovery did not replace the lease once: {client.lease_events()!r}")
+        finally:
+            self.close_client(client)
+
     def external_diagnostics(self):
         base = self.fixture.case("external")
 
@@ -1188,6 +1310,7 @@ CASES = {
     "lease-cleanup": Contract.lease_cleanup,
     "close-failure": Contract.close_failure,
     "unavailable-retry": Contract.unavailable_retry,
+    "manifest-refresh": Contract.manifest_refresh,
     "external-diagnostics": Contract.external_diagnostics,
     "standalone": Contract.standalone,
 }
