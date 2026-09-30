@@ -190,7 +190,7 @@ def replace_once(key: str, old: str, new: str) -> None:
 
 DISPATCH_ARM = """        None -> {
           if not module_alias_receiver(cx, recv) {
-            return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
+            return check_method_call(cx, recv, fname, args0, expected, true, flo, fhi, lo, hi)
           }
         }"""
 
@@ -213,7 +213,7 @@ elif name == "java-first":
         "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
         "      match qual_ctor(cx, recv, fname) {",
         "    EFieldAcc(recv, fname, flo, fhi, _, _) -> {\n"
-        "      return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)\n"
+        "      return check_method_call(cx, recv, fname, args0, expected, true, flo, fhi, lo, hi)\n"
         "      match qual_ctor(cx, recv, fname) {",
     )
 elif name == "drop-module-guard":
@@ -237,7 +237,7 @@ elif name == "field-wins":
             None -> ()
           }
           if not module_alias_receiver(cx, recv) && not field_first {
-            return check_method_call(cx, recv, fname, args0, expected, flo, fhi, lo, hi)
+            return check_method_call(cx, recv, fname, args0, expected, true, flo, fhi, lo, hi)
           }
         }""",
     )
@@ -261,7 +261,7 @@ elif name == "bare-member-calls":
         "            Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)",
         "            Some(_) -> {\n"
         "              let no_args: List[Arg] = []\n"
-        "              check_method_call(cx, target, fname, no_args, expected, flo, fhi, lo, hi)\n"
+        "              check_method_call(cx, target, fname, no_args, expected, false, flo, fhi, lo, hi)\n"
         "            }",
     )
 elif name == "parser-uppercase-method":

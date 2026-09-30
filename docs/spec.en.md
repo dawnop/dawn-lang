@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e51269ddcd36328d -->
+<!-- doc-check: translation-of docs/spec.md @ 3a0e23da85b66179 -->
 
 # Dawn Language Specification
 
@@ -428,11 +428,21 @@ and is reported as not callable.
 
 **A field of fn type can be called directly**: `r.f(x)` calls the function value stored in the
 field, equivalent to `let g = r.f` followed by `g(x)`; the field's effects are unioned into the
-caller as usual. When a function named `f` **also exists** in scope, `r.f(x)` is a **compile error**
-(ambiguity) — a silent precedence would let a new function of the same name, added somewhere far
-away, quietly change the meaning of an existing call (§10.3 already rejected the same kind of
-ambiguity for module aliases of the same name; the rule here is the same). Disambiguation: to take
-the field, bind it first with `let g = r.f`; to call the function, name it directly as `f(r, x)`.
+caller as usual. When a function named `f` **also exists** in scope, the method spelling `r.f(x)`
+is a **compile error** (ambiguity) — a silent precedence would let a new function of the same name,
+added somewhere far away, quietly change the meaning of an existing call (§10.3 already rejected the
+same kind of ambiguity for module aliases of the same name; the rule here is the same).
+Disambiguation: to take the field, write `(r.f)(x)` (or bind it first with `let g = r.f`); to call
+the function, name it directly as `f(r, x)`.
+
+The ambiguity belongs to the one **spelling** `r.f(x)`: it is the syntactic form of a method call
+(§4.3). The other spellings that apply `r.f` as a value — parentheses `(r.f)(x)`, the pipe
+`x |> r.f` (§4.4: when the right side is not a call, it is applied to the left value as a whole),
+and `with v <- r.f` — have a field read as their callee, so when the record has a fn-typed field
+`f` they always take the field, whether or not a function of that name is in scope; a new function
+of the same name cannot change their meaning, so the reason above does not apply. (When the record
+has no field `f`, these spellings still call the function `f` by UFCS today; whether to tighten
+that is a separate question.)
 
 ### 2.5 Generics
 
