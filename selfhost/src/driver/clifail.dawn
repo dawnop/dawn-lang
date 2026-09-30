@@ -1,0 +1,60 @@
+# The compile-failure exit both CLI drivers share.
+#
+# `main` (JVM) and `nmain` (native) each used to carry a byte-identical copy
+# of `fail_compile`. The rendering, the count line and the exit status are
+# part of the CLI contract, and two copies are how the exit codes drifted
+# apart once before; `scripts/native-cli-diff.sh` only notices drift on the
+# cases it happens to run. Unlike the argument handling `nmain`'s header
+# keeps doubled on purpose, this is not plumbing a differential can check
+# against itself: it is the work, so there is one of it.
+#
+# Why here and not next to the renderer in `front/diag`: the input is
+# `LocDiag`, which is a `driver/analyze` type, and `front/` cannot depend
+# upward on `driver/`. Why not inside `driver/analyze` itself: that module is
+# the analysis layer, it installs no process-level effect and ends no
+# process, and `scripts/doc-check.py` audits the handlers it spells. A module
+# of its own keeps `!Exit !Console` out of it.
+
+use std/io
+use std/io.{Fs, Exit, Console}
+use front/diag
+use front/token.{Diag}
+use driver/analyze.{LocDiag}
+
+## Render compile diagnostics, the count line, and exit 1 (the Kotlin
+## compileProject failure shape).
+pub(pkg) fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
+  var pairs: List[(String, Diag)] = []
+  for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
+  console_eprint(diag.render_all(pairs))
+  console_eprintln(diag.count_line(len(diags)))
+  let _ = io.exit(1)
+  ()
+}
+
+# ---- tests ----
+
+use driver/fsmem
+use compiler_plan/consolemem
+use compiler_plan/exitmem
+
+test "fail_compile renders every diagnostic, counts them, and exits 1" {
+  # Both drivers call this one function, so this is the status and the text
+  # `dawn` and `dawnc` both end a failed compile with.
+  let src = "fn f() = 1\nfn g() = 2\n"
+  let fs = fsmem.mem_put(fsmem.mem_empty("/w"), "/w/a.dawn", src)
+  let ds = [
+    LocDiag { path: "/w/a.dawn", d: Diag { msg: "first", lo: 3, hi: 4, hint: "", owner: None } },
+    LocDiag { path: "/w/a.dawn", d: Diag { msg: "second", lo: 14, hi: 15, hint: "try g", owner: None } }
+  ]
+  let ((status, log), _) = fsmem.with_fs_mem(fs, () =>
+      consolemem.with_console_table(() =>
+          exitmem.with_exit_capture(() => fail_compile(ds))))
+  assert status == Some(1)
+  assert consolemem.out_text(log) == ""
+  assert consolemem.err_text(log) ==
+    "error: first\n  --> /w/a.dawn:1:4\n  |\n1 | fn f() = 1\n  |    ^\n" ++
+    "error: second\n  --> /w/a.dawn:2:4\n  |\n2 | fn g() = 2\n  |    ^\n" ++
+    "  = hint: try g\n" ++
+    "2 errors\n"
+}
