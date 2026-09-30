@@ -206,6 +206,21 @@ class PreflightTests(unittest.TestCase):
                                           "io.atomic_write_file (")
         self.assert_stale_registry_is_red("atomic-write-contract", "follow-symlink", 0)
 
+    def test_wasm_dom_retained_anchor_drift_is_caught(self):
+        # #254: these anchors were arguments to retained.sh's
+        # apply_exact_mutant helper, reached only after the native driver,
+        # node and a wasm toolchain had run the clean sessions. The literals
+        # here avoid the intrinsic names: retained.sh's seam gate pins every
+        # file that spells them.
+        reactor = "std/reactor.dawn"
+        self.assert_registry_drift_is_red("wasm-dom-contract", "drop-retained-state", reactor,
+                                          "() { Some(", "() {  Some(")
+        # The second edit of the two-edit mutant is reached and held too.
+        self.assert_registry_drift_is_red("wasm-dom-contract", "commit-before-success", reactor,
+                                          "          Ok(answer) -> answer\n",
+                                          "          Ok(value) -> value\n")
+        self.assert_stale_registry_is_red("wasm-dom-contract", "drop-retained-state", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
