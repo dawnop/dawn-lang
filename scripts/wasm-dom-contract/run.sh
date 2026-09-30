@@ -218,9 +218,12 @@ check_transcript todo "$todo_expected" "$work/todo-actual.txt"
 
 # ---- mutants --------------------------------------------------------------
 # Each one edits a copy of the tree, rebuilds what needs rebuilding, and must
-# fail the transcript. The edit is checked for having applied: a sed that
+# fail the transcript. The edit is checked for having applied: an edit that
 # matched nothing would otherwise report a clean tree as a killed mutant,
-# which is the way a mutant harness goes quietly blind.
+# which is the way a mutant harness goes quietly blind. The edits live in
+# mutate.py, one registered mutation per mutant name, each a literal that must
+# match exactly once, so mutation-anchor-preflight.py proves them before any
+# build, not only when this script reaches them.
 mutant_tree="$work/tree"
 
 reset_tree() {
@@ -287,9 +290,9 @@ run_mutant() { # <name> <needs-rebuild: yes|no> <what it breaks>
   fi
 }
 
-edited() { # <file> -- the sed above must have changed something
-  if cmp -s "$root/${1#"$mutant_tree"/}" "$1"; then
-    echo "FAIL: a mutant is stale -- its edit matched nothing in ${1#"$mutant_tree"/}" >&2
+mutate() { # <name> -- apply mutate.py's edit to the mutant tree
+  if ! python3 "$here/mutate.py" "$1" "$mutant_tree" 2>"$work/$1.mutate-err"; then
+    echo "FAIL: a mutant is stale -- $(cat "$work/$1.mutate-err")" >&2
     fail=1
     return 1
   fi
@@ -299,9 +302,7 @@ edited() { # <file> -- the sed above must have changed something
 # child too many, which no crash and no exception reports: the document is
 # simply not the one the model describes, and only the tree line says so.
 reset_tree
-sed -i 's/while (el.childNodes.length > p.keep)/while (el.childNodes.length > p.keep + 1)/' \
-  "$mutant_tree/packages/tea-dom/js/dom.mjs"
-edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+mutate truncate-off-by-one &&
   run_mutant truncate-off-by-one no "truncate keeps one child too many"
 
 # A2: the patch interpreter loses one op kind outright. `set-self` becomes a
@@ -309,27 +310,21 @@ edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
 # would do: every element under the address rebuilt, every listener and every
 # piece of element state thrown away.
 reset_tree
-sed -i "s/'set-self': (host, p) => host.setSelf(host.at(p.path), p.node),/'set-self': (host, p) => host.replaceAt(p.path, p.node),/" \
-  "$mutant_tree/packages/tea-dom/js/dom.mjs"
-edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+mutate patch-kind &&
   run_mutant patch-kind no "set-self interpreted as replace"
 
 # B: the patch interpreter reorders. `diff` emits patches in an order that
 # applies without index fixups, and reversing that order is the mutant the
 # "in-order application" paragraph of tea_core/diff.dawn is about.
 reset_tree
-sed -i 's/    for (const patch of patches) {/    for (const patch of patches.slice().reverse()) {/' \
-  "$mutant_tree/packages/tea-dom/js/dom.mjs"
-edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+mutate patch-order &&
   run_mutant patch-order no "patches applied in reverse"
 
 # C: events routed to the wrong handler. The address walk pushes instead of
 # unshifting, so a click reports its path root-last: the wrong element, and
 # for a nested button an address that resolves to nothing at all.
 reset_tree
-sed -i 's/      path.unshift(i);/      path.push(i);/' \
-  "$mutant_tree/packages/tea-dom/js/dom.mjs"
-edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+mutate event-address &&
   run_mutant event-address no "the recovered address is reversed"
 
 # D: the wire stops honouring locality. `set-self` ships the whole subtree
@@ -337,9 +332,7 @@ edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
 # bridge ignores what it is not supposed to read -- so only the reply line
 # moves, which is exactly why the reply lines are in the transcript.
 reset_tree
-sed -i 's|        ("node", enc_self(w)),|        ("node", enc_node(w)),|' \
-  "$mutant_tree/packages/tea-dom/src/wire.dawn"
-edited "$mutant_tree/packages/tea-dom/src/wire.dawn" &&
+mutate setself-payload &&
   run_mutant setself-payload yes "set-self ships its children"
 
 # E: the host stops honouring the kind the guest declared and reads a value
@@ -349,9 +342,7 @@ edited "$mutant_tree/packages/tea-dom/src/wire.dawn" &&
 # makes the refusal visible here instead of at the first application that
 # declares a payload for one listener and gets it on all of them.
 reset_tree
-sed -i 's#if (kind === null || kind === undefined) return undefined;#if (false) return undefined;#' \
-  "$mutant_tree/packages/tea-dom/js/dom.mjs"
-edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
+mutate payload-ignores-kind &&
   run_mutant payload-ignores-kind no "the host sends a value whatever the listener asked for"
 
 # F: the failure landing is taken away. `serve` calls `turn` directly, so the
@@ -360,22 +351,7 @@ edited "$mutant_tree/packages/tea-dom/js/dom.mjs" &&
 # run-level mutant, and the one that says knife 3's failure runtime is what
 # the `boom` line depends on.
 reset_tree
-python3 - "$mutant_tree/packages/tea-dom/src/reactor.dawn" <<'MUTANT_F'
-import sys
-
-path = sys.argv[1]
-lines = open(path).read().split("\n")
-start = next(
-    i for i, l in enumerate(lines) if l.strip().startswith("match catch_panic(() => turn(")
-)
-indent = " " * (len(lines[start]) - len(lines[start].lstrip()))
-end = next(i for i in range(start + 1, len(lines)) if lines[i] == indent + "}")
-lines[start : end + 1] = [
-    indent + "io.println(turn(line, init, encode, decode, update, view))"
-]
-open(path, "w").write("\n".join(lines))
-MUTANT_F
-edited "$mutant_tree/packages/tea-dom/src/reactor.dawn" &&
+mutate no-catch &&
   run_mutant no-catch yes "the panic catch at the boundary is removed"
 
 # ---- mutants for the todo case -------------------------------------------
@@ -399,18 +375,14 @@ case_of todo
 # gate anything here: the two listeners are equal, so the patch stream is
 # unmoved, and what reds is the model and the document.
 reset_tree
-sed -i 's/value: m.edit, on: \[on_value("input", SetEdit)\]/value: m.edit, on: [on_value("input", SetDraft)]/' \
-  "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
-edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
+mutate todo-msg &&
   run_mutant todo-msg yes "a payload lands in the wrong field"
 
 # H: the filter stops filtering. `done` shows every row, so the list the
 # reconciler is handed is the wrong length and the turn that empties it never
 # empties it.
 reset_tree
-sed -i 's/    Done -> list.filter(m.todos, t => t.done)/    Done -> m.todos/' \
-  "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn"
-edited "$mutant_tree/examples/projects/tea_dom_todo/src/todo.dawn" &&
+mutate todo-filter &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi

@@ -471,6 +471,26 @@ class PreflightTests(unittest.TestCase):
                                           'field(entries, "flags")', 'field(entries,  "flags")')
         self.assert_stale_registry_is_red("wasm-dom-contract", "flags-ignored-at-the-turn", 0)
 
+    def test_wasm_dom_run_anchor_drift_is_caught(self):
+        # #277: run.sh applied these as sed programs checked only for having
+        # changed the file, and located no-catch's block by the shape of its
+        # first line; all after building the native driver and both reactors.
+        self.assert_registry_drift_is_red("wasm-dom-contract", "patch-order",
+                                          "packages/tea-dom/js/dom.mjs",
+                                          "    for (const patch of patches) {",
+                                          "    for (const p of patches) {")
+        self.assert_registry_drift_is_red("wasm-dom-contract", "todo-filter",
+                                          "examples/projects/tea_dom_todo/src/todo.dawn",
+                                          "    Done -> list.filter(m.todos, t => t.done)",
+                                          "    Done -> list.filter(m.todos, (t) => t.done)")
+        # The block literal that replaced the structural locator: a line
+        # inside it, here its comment, is part of the anchor too.
+        self.assert_registry_drift_is_red("wasm-dom-contract", "no-catch",
+                                          "packages/tea-dom/src/reactor.dawn",
+                                          "The message is passed through verbatim.",
+                                          "The message passes through verbatim.")
+        self.assert_stale_registry_is_red("wasm-dom-contract", "event-address", 0)
+
     def assert_stale_mutator_is_red(self, name, mode, literal):
         # For a mutate.py whose anchors are not a MUTATIONS table of edit
         # tuples: respell the first copy of one anchor line inside the
