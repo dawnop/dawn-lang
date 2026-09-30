@@ -148,6 +148,29 @@ class PreflightTests(unittest.TestCase):
                                           "  if im.lo == 0 && im.hi == 0 { im }", "  if im.hi == 0 && im.lo == 0 { im }")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "module-memo/stale-spans", 0)
 
+    def test_identity_anchor_drift_is_caught(self):
+        # #277: identity.py spelled its thirty-three mutants over six files in
+        # its main and refused a stale one only when incremental-memo-1 ran it,
+        # section by section, after building the sections before it.
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/default-ambiguity",
+                                          "selfhost/src/check/identity.dawn", "if same == 1 {", "if 1 == same {")
+        self.assert_registry_drift_is_red("incremental-semantics-contract",
+                                          "identity/symbol-table-carries-what-the-module-never-names",
+                                          "selfhost/src/ir/lower.dawn",
+                                          "moved_syms = map.insert(moved_syms, next, s) }\n      None -> ()",
+                                          "moved_syms = map.insert(moved_syms, next, s) }\n      None -> {}")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/enter-keeps-the-previous-declaration",
+                                          "selfhost/src/check/cx.dawn", "Cx { ..interned_cx, owner_decl: id }",
+                                          "Cx { ..interned_cx, owner_decl: id  }")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/drop-std-identity-step",
+                                          "selfhost/src/driver/stdlib.dawn", "interned = cx1.identities",
+                                          "interned =  cx1.identities")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "identity/mint-imported-effect",
+                                          "selfhost/src/check/passes.dawn",
+                                          "effects: map.insert(cx1.effects, local, eid) }",
+                                          "effects: map.insert(cx1.effects, local, eid)  }")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "identity/binder-spelling", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.
