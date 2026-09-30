@@ -44,7 +44,7 @@ done
 
 mkdir -p "$work/athrow"
 cp -r "$work/legal/." "$work/athrow/"
-"$here/mutate.py" "$work/athrow/pkgB/Caller.class"
+"$here/athrow.py" "$work/athrow/pkgB/Caller.class"
 
 fail=0
 

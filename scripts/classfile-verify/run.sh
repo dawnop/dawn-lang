@@ -119,6 +119,10 @@ new_never_mutant() {
   cp -R "$root/selfhost" "$never_mutant/selfhost"
   cp -R "$root/compiler-plan" "$never_mutant/compiler-plan"
   ln -s "$root/packages" "$never_mutant/packages"
+  # Every mutant compiler is one registered mutation of the same name. The
+  # anchors live in mutate.py so mutation-anchor-preflight.py proves each one
+  # matches exactly once before any build, not only when this contract runs.
+  python3 scripts/classfile-verify/mutate.py "$1" "$never_mutant"
 }
 
 build_never_mutant() {
@@ -132,21 +136,6 @@ build_never_mutant() {
     cat "$never_mutant/version.out" >&2
     never_die "$1 mutant jar did not answer --version"
   fi
-}
-
-replace_never_once() {
-  python3 - "$1" "$2" "$3" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-old = sys.argv[2]
-new = sys.argv[3]
-text = path.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"mutation anchor drifted in {path}: expected one, found {text.count(old)}")
-path.write_text(text.replace(old, new))
-PY
 }
 
 expect_never_marker() {
@@ -172,9 +161,6 @@ python3 "$never_probe" "$root/build/dawn-selfhost.jar" "$work"
 
 python3 scripts/classfile-verify/statement_probe.py "$root/build/dawn-selfhost.jar" "$work"
 new_never_mutant omit-statement-fallthrough
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '        if not stmt_falls { return (g1, false) }' \
-  '        if false { return (g1, false) }'
 build_never_mutant omit-statement-fallthrough
 if python3 scripts/classfile-verify/statement_probe.py "$never_mutant/compiler.jar" "$work" \
     > "$never_mutant/probe.out" 2>&1; then
@@ -187,144 +173,55 @@ fi
 echo "PASS  statement fallthrough mutant compiles, then fails NEVER_STATEMENT_FLOW"
 
 new_never_mutant reject-wide-sam-bottom
-replace_never_once "$never_mutant/selfhost/src/check/checker.dawn" \
-  '    r == TyInt || r == TyNever' \
-  '    r == TyInt'
 build_never_mutant reject-wide-sam-bottom
 expect_never_marker reject-wide-sam-bottom NEVER_WIDE_SAM_ACCEPTANCE
 
 new_never_mutant use-pop-for-wide-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '    CallTwo -> { m.visitInsn(OP_POP2) }' \
-  '    CallTwo -> { m.visitInsn(OP_POP) }'
-# OP_POP2's import goes with its only use: an unused import is an error
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'OP_NEW, OP_POP, OP_POP2, OP_PUTFIELD' \
-  'OP_NEW, OP_POP, OP_PUTFIELD'
 build_never_mutant use-pop-for-wide-bottom
 expect_never_marker use-pop-for-wide-bottom NEVER_WIDE_SAM_ADAPTER_TERMINATION
 
 new_never_mutant omit-direct-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
-      finish_call(g1, ty, call_result_of_desc(d))' \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
-      (g1, true)'
 build_never_mutant omit-direct-bottom
 expect_never_marker omit-direct-bottom NEVER_DIRECT_CALL_TERMINATION
 
 new_never_mutant omit-dynamic-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '  if is_bottom(ret_static) {' \
-  '  if false {'
 build_never_mutant omit-dynamic-bottom
 expect_never_marker omit-dynamic-bottom NEVER_DYNAMIC_CALL_TERMINATION
 
 new_never_mutant omit-impl-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, tr.name, subject, method), d, false)
-      finish_call(g1, ty, call_result_of_desc(d))' \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, tr.name, subject, method), d, false)
-      (g1, true)'
 build_never_mutant omit-impl-bottom
 expect_never_marker omit-impl-bottom NEVER_IMPL_CALL_TERMINATION
 
 new_never_mutant omit-default-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        default_method_name(tr.name, method), d, false)
-      finish_call(g1, ty, call_result_of_desc(d))' \
-'      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        default_method_name(tr.name, method), d, false)
-      (g1, true)'
 build_never_mutant omit-default-bottom
 expect_never_marker omit-default-bottom NEVER_DEFAULT_CALL_TERMINATION
 
 new_never_mutant omit-trait-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
-        d, true)
-      finish_call(g1, ty, call_result_of_desc(d))' \
-'      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
-        d, true)
-      (g1, true)'
 build_never_mutant omit-trait-bottom
 expect_never_marker omit-trait-bottom NEVER_TRAIT_CALL_TERMINATION
 
 new_never_mutant omit-dictionary-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '    if is_bottom(ms.sig.ret) {' \
-  '    if false {'
 build_never_mutant omit-dictionary-bottom
 expect_never_marker omit-dictionary-bottom NEVER_DICTIONARY_TERMINATION
 
 new_never_mutant omit-closure-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '  if is_bottom(b.fret) {' \
-  '  if false {'
 build_never_mutant omit-closure-bottom
 expect_never_marker omit-closure-bottom NEVER_CLOSURE_TERMINATION
 
 new_never_mutant omit-sam-bridge-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '  if b.bottom {' \
-  '  if false {'
 build_never_mutant omit-sam-bridge-bottom
 expect_never_marker omit-sam-bridge-bottom NEVER_SAM_BRIDGE_TERMINATION
 
 new_never_mutant omit-sam-adapter-bottom
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  '  if s.bottom {' \
-  '  if s.bottom && s.sam_ret != "java.lang.Object" {'
 build_never_mutant omit-sam-adapter-bottom
 expect_never_marker omit-sam-adapter-bottom NEVER_SAM_ADAPTER_TERMINATION
 
 new_never_mutant return-from-object-sam-adapter
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'  if s.bottom {
-    terminate_bottom(m, call_result_of_desc(rd))
-  } else {' \
-'  if s.bottom {
-    if s.sam_ret == "java.lang.Object" {
-      let terminate = Label.new()
-      m.visitInsn(OP_POP)
-      m.visitInsn(OP_ICONST_1)
-      m.visitJumpInsn(OP_IFEQ, terminate)
-      m.visitInsn(OP_ACONST_NULL)
-      m.visitInsn(OP_ARETURN)
-      m.visitLabel(terminate)
-      m.visitInsn(OP_ACONST_NULL)
-      m.visitInsn(OP_ATHROW)
-    } else {
-      terminate_bottom(m, call_result_of_desc(rd))
-    }
-  } else {'
 build_never_mutant return-from-object-sam-adapter
 expect_never_marker return-from-object-sam-adapter \
   NEVER_SAM_ADAPTER_TERMINATION --verified-mutant
 
 new_never_mutant return-from-wide-sam-adapter
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-'  if s.bottom {
-    terminate_bottom(m, call_result_of_desc(rd))
-  } else {' \
-'  if s.bottom {
-    if s.sam_ret == "long" {
-      let terminate = Label.new()
-      m.visitInsn(OP_POP2)
-      m.visitInsn(OP_ICONST_1)
-      m.visitJumpInsn(OP_IFEQ, terminate)
-      ldc_long(m, 0)
-      m.visitInsn(OP_LRETURN)
-      m.visitLabel(terminate)
-      m.visitInsn(OP_ACONST_NULL)
-      m.visitInsn(OP_ATHROW)
-    } else {
-      terminate_bottom(m, call_result_of_desc(rd))
-    }
-  } else {'
 build_never_mutant return-from-wide-sam-adapter
 expect_never_marker return-from-wide-sam-adapter \
   NEVER_WIDE_SAM_ADAPTER_TERMINATION --verified-mutant
@@ -501,8 +398,6 @@ build_operand_mutant() {
   echo "TIME: $1 compiler build $(( $(date +%s) - operand_started ))s"
 }
 new_never_mutant unspilled-loop-operands
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'operands.prepare(cf.body, gx.next_sym)' 'cf.body'
 build_operand_mutant unspilled-loop-operands
 
 expect_operand_frame_failure() {
@@ -523,10 +418,6 @@ expect_operand_frame_failure "$loop_operand_fixture"
 # The Java path is a separate obligation: keep Core preparation enabled so
 # the pure-call snapshot test cannot be what turns this mutant red.
 new_never_mutant unspilled-java-operands
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'if operands.foreign_jumps(jc) {' 'if false {'
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'let spill = operands.foreign_jumps(jc)' 'let spill = false'
 build_operand_mutant unspilled-java-operands
 expect_operand_frame_failure "$loop_operand_java_fixture"
 echo "OK: LOOP_OPERAND_STACK mutant reproduces the original ASM frame failure"
@@ -547,13 +438,6 @@ diff -u scripts/classfile-verify/constructor_init_control.expect "$work/init-con
 diff -u scripts/classfile-verify/constructor_init.expect "$work/init-jumps.out"
 
 new_never_mutant late-java-constructor-init
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'g.mv.visitTypeInsn(OP_NEW, owner)
-    let (g0, receiver) = spill_java_value(g, "Ljava/lang/Object;")' \
-  'g.mv.visitInsn(OP_ACONST_NULL)
-    let (g0, receiver) = spill_java_value(g, "Ljava/lang/Object;")'
-replace_never_once "$never_mutant/selfhost/src/jvm/emit.dawn" \
-  'reload_java_values(g1, [receiver])' 'g1.mv.visitTypeInsn(OP_NEW, owner)'
 build_operand_mutant late-java-constructor-init
 java -Xss512m -jar "$never_mutant/compiler.jar" run --cp "$work/operand-probe.jar" \
   "$init_fixture" > "$work/init-mutant.out"
