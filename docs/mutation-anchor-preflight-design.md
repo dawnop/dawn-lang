@@ -28,7 +28,7 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 `runtime/c/dawn_rt.c` 里的 `dawn_cpath`，本预飞报 OK，delete 契约在第一次本机运行时才红。
 出路是把 harness 的锚点搬进一个 `mutate.py` 登记表，由 harness 与本预飞共同消费，而不是把字面量复制进适配器。
 `scripts/delete-contract/mutate.py` 是第一个；在引入它的那棵树上本机实测：应用次数 204 到 213，墙钟 12.9 s 到 13.2 s。
-#254 至今迁了八条契约，每条一个提交：
+#254 把十一条 `self-once` 契约全部迁完，每条一个提交：
 
 - classfile-verify：17 个变异体、20 条锚点，原先是 `run.sh` 里 `replace_never_once` 的参数；
 - syntax-small：5 个变异体、6 条锚点，原先是 `run.sh` 里的 5 段 Python heredoc；
@@ -40,13 +40,35 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 - map-reuse：2 个变异体、2 条锚点，原先是 2 段 heredoc，主题 `c/rc.dawn` 与 `std/hamt.dawn`；
 - atomic-write：15 个变异、16 条编辑，原先是 12 处 `patch_std`、1 段改 `runtime/c/dawn_rt.c` 的 heredoc、
   1 段改两处编译器调用点的 heredoc，主题 `std/io.dawn`、`dawn_rt.c`、`pkg/add.dawn`、`main.dawn`；
-- wasm-dom 的 retained：2 个变异体、3 条锚点，原先是 `apply_exact_mutant` 的参数，主题 `std/reactor.dawn`。
+- wasm-dom 的 retained：2 个变异体、3 条锚点，原先是 `apply_exact_mutant` 的参数，主题 `std/reactor.dawn`；
+- dict-owner：4 个变异体、4 条锚点，原先在 `shapes.py` 里内联构造，主题 `ir/lower.dawn`；
+- incremental 的冷参照 `cold.py`：6 个变异体、6 条锚点，原先写在它的 `main` 里，主题 `driver/analyze.dawn`；
+  登记表在 `main` 里按路径加载而不是顶层 import，因为另有七个 harness 从 `cold.py` 导入 `edit` 等函数，
+  gate-map 把被导入模块的顶层算作导入者的输入，顶层 import 会让登记表变成三个 incremental-memo 作业全部步骤的输入；
+- tile-golden：67 个变异体、67 条锚点，原先是 `mutant_project` 的参数、由一段 `patch_pkg` heredoc 应用，
+  主题 `packages/tileir/src/{bytecode,prog,render,dev}.dawn`；harness 把包拷到 `<tree>/packages/tileir`，
+  使登记表路径在私有树里与检出里一致。注意 `scripts/tile-golden` 整个目录在 `tile-gpu-diff/inputs.py`
+  的输入摘要里，所以这一刀改变了摘要，需要在 GPU 宿主上重跑 `tile-gpu-diff/run.sh` 追加台账行，
+  `tile-golden-1` 里的 `run.sh --check` 才会重新变绿。
 
 登记表路径一律写仓库相对路径（java-narrowing 除外），harness 把私有树布局成同样的形状（例如 `<tree>/std`），
-所以同一登记表既能作用于检出、也能作用于私有拷贝。迁完之后 `scripts/anchor-readers.txt` 是
-20 条 `preflight`、5 条 `self-once`。迁移后仍命中读者规则的 harness（例如只为检查形状而读源码的
-java-narrowing 形状门与 retained 的 seam 门）不持有变异锚点，记为 `not-anchor` 并写明理由。
-其余 5 条 `self-once` harness 在同样迁移之前仍不在覆盖之内。
+所以同一登记表既能作用于检出、也能作用于私有拷贝。迁移后仍命中读者规则、但不持有变异锚点的 harness
+（例如只为检查形状而读源码的 java-narrowing 形状门与 retained 的 seam 门，或只把源码当构建输入的 run.sh）
+记为 `not-anchor` 并写明理由。
+
+有的 harness 不调用登记表的 `main`，而是自己读出登记表里的锚点、在自己的恰好一次检查下应用：
+`dict-owner-contract/shapes.py` 与 `cold.py` 在内存里应用，好在任何构建之前就拒绝漂移的锚点；
+`export-surface-contract/run.sh` 的自测从 `EXTRA_EDITS` 取锚点。它们登记在预飞的 `REGISTRY_READERS` 表里。
+预飞运行登记表本身，就证明了这些读者用的锚点；它对读者只要求一件事：文件里仍然提到 `mutate.py`，且对应登记表在适配表中，
+否则红。`anchor-guard.py` 把这张表里的读者算作 `preflight`。export-surface 的台账行原先保守地记为 `self-once`，
+就是因为 `preflight_is_real` 只认适配表；现在它经这张表记为 `preflight`，没有靠写理由绕过。
+
+迁完之后 `scripts/anchor-readers.txt` 是 26 条 `preflight`、1 条 `self-once`、34 条 `unproven`、16 条 `not-anchor`。
+`self-once` 没有删除，而是改成必须附理由的种类：台账行里要写 `kept because <理由>`，说明为什么不能由预飞持有，
+否则 `anchor-guard.py` 报 `self_once_has_reason`。唯一剩下的是 `tile-gpu-diff/run.sh`：它只在有 GPU 的宿主上跑，
+锚点全部是调用方传给通用替换助手（`mutate.py <file> <label> <old> <new>`）的参数，预飞按设计把它排除；
+它在宿主上构建每个变异体之前自己检查一次锚点。把这些锚点搬进登记表可以做，但它们的主题分布在
+临时拷贝的包、内核源码与 runtime 片段上，且每次改动都要一轮 GPU 重跑才能留证，不在 #254 的范围内。
 
 CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、次级编辑、
 shell 锚点、未知变异器、顺序插桩，以及拒绝启动构建或直接写盘。每个测试之后检出必须保持不变。
