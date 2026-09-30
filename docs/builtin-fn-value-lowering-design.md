@@ -78,6 +78,9 @@
   `std/hamt` 的拒绝，所以镜像上这 18 个名字的 `# comptime: rejected` 保留，是真的。
 - 镜像的 P5 于是是：标记 ⇔ 名字在 `comptime_rejects` 或 `comptime_refused_after_lowering` 里。
   `parse_int_radix` 的标记去掉；`char_unchecked` 的标记同理去掉（它在 `const` 里就是恒等）。
+- `builtin-decl-contract/check.py` 从 `lower.dawn` 源码读 `lowered_intrinsics`（与读解释器名单同一个
+  读法，多认 `"p_${op}"` 与带类型注解的空种子两种写法），M1 查三组两两不交且为全集，P5 按上面的定义；
+  新增两个变异体把 #185 删掉的东西放回去（`parse_int` 的臂、`parse_int_radix` 的标记）。
 
 ### 数值解析原语：声明，而不是路径
 
@@ -87,6 +90,8 @@
 - `std/fmt.atod` 校验后调 `float_of_decimal`。
 - `parse_float` 进 `lowered_intrinsics`，失去 `rt`；lowering 对它无条件改写成 `std/fmt.atod`，
   `st.owner != "std/fmt"` 删除。
+- 这条规则删掉后，「atod 里又写回 `parse_float`」会把 atod 降成调用自己。lowering 在改写处按名拒绝：
+  改写目标恰是正在降的函数时 panic，文案点名规则（见实测）。
 - 后端：JVM `dawn/rt/Strings.parse_float` 改名 `float_of_decimal`，C `dawn_parse_float` 改名
   `dawn_float_of_decimal`；两个发射器按约定从 intrinsic 名派生符号，不需要改。解释器的臂同样改名。
 - 自举：种子阶段用种子自己的 std（`bin/dawn`、`build-release-jar.sh` 都给种子传种子 std），
@@ -98,26 +103,49 @@
 `let f = parse_float; f(s)` 的接受集变窄：`f("1.5d")`、`f("0x1p3")` 从 `Some` 变 `None`。
 spec §11 定义的接受语言从来就是那段 EBNF，直接调用一直照它办；函数值给出别的答案是实现缺陷，
 所以按 bug 修，不走破坏性变更流程。spec §11 加一句写明「经函数值调用与直接调用是同一个函数」。
-仓库没有 CHANGELOG 文件，版本说明在发版时写，这一句由发版人带上。
+spec.en.md 同步一句。任务单要求的 CHANGELOG 在仓库里不存在（`git log --all` 里也从未有过），
+版本说明在发版时写，这一句由发版人带上；本刀不新建 CHANGELOG。
 
 `let f = parse_int` / `parse_int_radix` 从编译期 panic 变成能跑，不影响任何能编过的程序。
 
-## 门禁与负控
+## 测试、门禁与负控
 
-- `lower.dawn` 测试：对 `lowered_intrinsics()` 里每个有公开签名的名字构造函数值并 lower，断言输出里
-  没有同名 `CIntrinsic`；`parse_float` 在 std/fmt 外降成 `std/fmt.atod` 调用，atod 内层降成
-  `CIntrinsic("float_of_decimal")`。
-- 端到端回归：`scripts/spike-native/` 语料加 `let f = parse_int`、`let f = parse_float` 与 `"1.5d"`，
-  JVM 与 native 两个后端对同一份 `.expect`。
-- 解释器三分测试；`builtin-decl-contract` 的 M1 接受三组，P5 按上面的定义。
-- 负控：`parse_int` 加回 `interp_arms` → 三分测试红；撤掉 `lift_fn_value` 的改动 → 回归测试红；
-  atod 改回调 `parse_float` → 编 std 时检查器报 parse_float 不可在 std/fmt 内作原语（见实测）。
+- `ir/lower.dawn` 测试「a builtin taken as a value lowers as the call it wraps」：对 `lowered_intrinsics()`
+  的每个名字构造函数值并 lower，断言包装体不是 `CIntrinsic`（剥一层 `CUnbox`），解析器名降成
+  `std/fmt.<parser_impl>` 调用。
+- `ir/interp_test.dawn` 测试「parse_float lowers to std/fmt.atod everywhere, and atod's raw call is its own
+  name」：以 `std/fmt` 为 owner 检查并 lower 一个小模块，`float_of_decimal` 留作 intrinsic，
+  `parse_float` 在 std/fmt 内外都降成 `std/fmt.atod`；`atod` 体写 `parse_float` 时 lowering panic。
+- `ir/interp.dawn` 的分区测试改为三分，含 Map/Set 一组对 `lower.hamt_fn` 的双向对账与一次真实拒绝探测。
+- 端到端：`scripts/spike-native/builtin_fn_value.dawn`，每行并排打印直接调用与经函数值调用，外加
+  `const` 折叠一节，JVM 与 native 对同一份手写 `.expect`。
+- 负控（命令与输出见交付报告）：
+  - 撤掉 `lift_fn_value` 改动、保留新测试 → lower 测试红（`` `parse_int` taken as a value lowered to the
+    intrinsic `parse_int` ``），语料在两个后端都 panic；
+  - `parse_int` 加回 `interp_arms` → 分区测试红（`` `parse_int` is in 2 of the three comptime groups ``）；
+    `builtin-decl-contract` 的同名变异体 M1 红；
+  - atod 改回 `parse_float(t)` 并重生成 stdsrc → stage1 编 candidate 时 panic
+    `lower: std/fmt.atod calls `parse_float`, which lowers to std/fmt.atod itself`。
+
+## 实测（2026-09-30，本机）
+
+- `scripts/selfhost-fixpoint.sh`：B == C，40 s。std 在同一刀里改调新 intrinsic 没有卡住种子阶段，
+  不需要拆成两步。`scripts/native-fixpoint.sh`：B == C，176 s。
+- `selfhost-core-diff.sh --base origin/main`：Core 变动的模块恰是本刀碰的 8 个（`check.types`、
+  `embed.rtsrc`、`embed.stdsrc`、`ir.interp`、`ir.interp_test`、`ir.lower`、`jvm.rtclasses`、`std.fmt`）；
+  程序侧只有 `std.fmt` 动，内容是 atod 里那一个 `intrinsic parse_float` 变成 `intrinsic float_of_decimal`。
+- `selfhost-prev-diff.sh`：十个 emit 语料全部不同，原因是 `dawn/rt/Strings` 的方法改名（每个程序都带
+  这个类；以 `examples/text/chars.dawn` 为例，对 v0.79.0 只有 `dawn/rt/Strings.class` 不同）与 std/fmt。
+  `selfhost-run-diff.sh`：只有 `doc --builtins` 不同，多了 `float_of_decimal` 一条。两者都按 label 声明。
+- 本机全量 spike-native 语料 430 s 绿，含 ASan。
 
 ## 不做的（理由）
 
 - **intrinsic-parity 不读解释器。** 它读的是发射器的 `name == "..."` 链，那是测试够不到的一半；
   解释器的自测已经比它强：它不只对名单，还实际调用每个名字，确认「有臂」「拒绝」与表一致。
   在 intrinsic-parity 里再读一次解释器源码，只是多一个从源码文本解析的读者。
+- **Core golden 不重录。** 它自 2026-09-25 起是按需的 `selfhost-core-diff.sh --base`，不在树里
+  （[recorded-numbers-design.md](recorded-numbers-design.md)）；本刀跑了一次，结果记在交付报告。
 - **不在 `atod` 上加声明级标记**（#186 验收给的另一选项）。标记要 lowering 去读一个函数的属性，
   是一个新的语言面；一个 internal intrinsic 是已有机制（`char_unchecked`、`str_lower` 先例），
   调用点本身就写明了它是原语。
