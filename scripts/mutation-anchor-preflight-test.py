@@ -135,6 +135,15 @@ class PreflightTests(unittest.TestCase):
                                           "len(c.fields) == 0 && len(d.ctors) == 1\n")
         self.assert_stale_registry_is_red("syntax-small-contract", "drop-rbracket-return-boundary", 0)
 
+    def test_inflate_anchor_drift_is_caught(self):
+        # #254: these anchors were arguments to run.sh's mutate helper, checked
+        # only when the contract ran its six mutant packages. The subject is
+        # package source, laid out repository-relative in the registry.
+        self.assert_registry_drift_is_red("inflate-contract", "member-loop",
+                                          "packages/inflate/src/gzip.dawn",
+                                          "while cursor < n {", "while n > cursor {")
+        self.assert_stale_registry_is_red("inflate-contract", "member-loop", 0)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -30,6 +30,7 @@ ADAPTERS = {
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),
     "for-pattern-contract": ("selfhost",),
+    "inflate-contract": (".",),
     "list-elems-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),
