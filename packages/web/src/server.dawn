@@ -37,6 +37,7 @@ use java "java.io.ByteArrayInputStream"
 use java "java.io.ByteArrayOutputStream"
 use java "java.io.FileInputStream"
 use java "java.util.ArrayList"
+use java "java.lang.System"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -987,6 +988,15 @@ fn raw_http(port: Int, request: String) -> String !io = {
   resp
 }
 
+# Test-only: the feature release of the running JVM (21, 26, ...), for the one
+# test whose wire bytes depend on jdk.httpserver's version. The property is
+# always set on a JVM; 0 stands for a value this cannot read.
+fn jdk_feature() -> Int !io =
+  match System.getProperty("java.specification.version") {
+    Some(v) -> unwrap_or(parse_int(v), 0)
+    None -> 0
+  }
+
 fn get_line(path: String) -> String =
   "GET " ++ path ++ " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
 
@@ -1291,13 +1301,28 @@ test "a sized stream goes out with its exact Content-Length, and a short one end
   assert whole.getHeaderField("Content-Length") == Some("8")
   assert whole.getHeaderField("Transfer-encoding") == None
   assert whole.getInputStream()!.readAllBytes()! == bytes.utf8("streamed")
-  # the promise is on the wire before the upstream runs dry, and the connection
-  # then ends three bytes into ten: the client can see it was cut short, which a
-  # chunked stream ending the same way would have hidden behind its last chunk
+  # The short stream promises ten bytes and has three. Either way the client
+  # can see it was cut short, which a chunked stream ending the same way would
+  # have hidden behind its last chunk; what it sees depends on the JDK.
+  #
+  # Through JDK 22, sendResponseHeaders flushed the headers and the body went
+  # to the socket unbuffered, so the promise is on the wire before the upstream
+  # runs dry and the connection ends three bytes into ten. JDK 23 (JDK-6968351,
+  # "HttpServer No Longer Immediately Sends Response Headers") buffers headers
+  # and a small body together, and the JDK's fixed-length stream, closed short,
+  # closes the connection without flushing that buffer: the client gets no
+  # bytes at all, a connection that ends before any response. Both are the
+  # truncation made visible; neither is a complete response, which is what
+  # this test forbids. The branch is on the running JDK so that each side still
+  # pins one exact outcome rather than accepting either.
   let short = raw_http(port, get_line("/short"))
-  assert str.starts_with(short, "HTTP/1.1 200")
-  assert str.contains(str.to_lower(short), "content-length: 10")
-  assert str.ends_with(short, "\r\n\r\nabc")
+  if jdk_feature() >= 23 {
+    assert short == ""
+  } else {
+    assert str.starts_with(short, "HTTP/1.1 200")
+    assert str.contains(str.to_lower(short), "content-length: 10")
+    assert str.ends_with(short, "\r\n\r\nabc")
+  }
   srv.stop(0)
 }
 
