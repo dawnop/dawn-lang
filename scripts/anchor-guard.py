@@ -31,7 +31,7 @@ the mutators, doc-check.py (`anchor_present_once`) for the audit anchors.
    mutate.py; this extends the same idea to every script. A tracked script
    under scripts/ that names a source file (selfhost/src, compiler-plan/src,
    std, runtime/c, packages) and contains a text-matching operation must be
-   listed in scripts/anchor-readers.txt with what it is:
+   listed in scripts/anchor-readers.txt with one of three kinds:
 
        preflight   its anchors are proven exactly-once by
                    mutation-anchor-preflight.py before any build (checked
@@ -43,10 +43,13 @@ the mutators, doc-check.py (`anchor_present_once`) for the audit anchors.
                    moved every other self-once harness into a registry the
                    preflight exercises; this kind is the written exception,
                    not a place to park a harness nobody migrated.
-       unproven    it reads source text by spelling and nothing proves its
-                   literals unique. The ledger is the debt, in the open.
        not-anchor  the rule matches, but it does not locate code by a
                    literal; the reason says why
+
+   There was a fourth, `unproven`: a reader nothing proved exactly-once,
+   recorded as open debt. #277 proved or relabelled every such line, and the
+   kind is retired rather than left as a place to park the next one: a
+   ledger line that says `unproven` is red [unproven_retired].
 
    The rule over-approximates on purpose: a false entry costs one ledger line,
    a missed reader is the silent gap this exists to close. It fails both ways,
@@ -68,7 +71,10 @@ sys.dont_write_bytecode = True
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LEDGER = "scripts/anchor-readers.txt"
-KINDS = ("preflight", "self-once", "unproven", "not-anchor")
+KINDS = ("preflight", "self-once", "not-anchor")
+# Retired by #277 once the last such line was proven; spelled here only to
+# refuse it with a reason instead of as an unknown kind.
+RETIRED = "unproven"
 
 # A source file named by path. `packages/<name>/src/` is where package code
 # lives; the other four roots are the compiler, the planner, std and the C
@@ -207,6 +213,15 @@ def parse_ledger(text: str) -> tuple[dict[str, tuple[str, str]], list[str]]:
         if not line.strip() or line.startswith("#"):
             continue
         m = re.match(r"^(\S+)\s+([a-z-]+):\s*(\S.*)$", line)
+        if m is not None and m.group(2) == RETIRED:
+            bad.append(f"{LEDGER}:{n}: {m.group(1)} is marked `{RETIRED}`, a "
+                       f"kind #277 retired: nothing may read source by "
+                       f"spelling without a proof. Move its anchors into a "
+                       f"mutate.py registry the preflight exercises, or say "
+                       f"why it is not-anchor, or self-once with `kept "
+                       f"because <reason>` [unproven_retired]")
+            entries.setdefault(m.group(1), (m.group(2), m.group(3)))
+            continue
         if m is None or m.group(2) not in KINDS:
             bad.append(f"{LEDGER}:{n}: not `<path>  <kind>: <why>` with kind in "
                        f"{', '.join(KINDS)} [ledger_parses]")
@@ -238,10 +253,12 @@ def inventory_problems(files: dict[str, str], ledger_text: str,
     entries, bad = parse_ledger(ledger_text)
     found = detect(files)
     for rel in sorted(found - entries.keys()):
-        kind = "preflight" if rel in covered else "unproven"
+        kind = "preflight" if rel in covered else "<kind>"
         bad.append(f"{rel}: names a source file and matches text, and "
                    f"{LEDGER} does not say what it is. Add "
-                   f"`{rel}  {kind}: <why>` (kinds: {', '.join(KINDS)}) "
+                   f"`{rel}  {kind}: <why>` (kinds: {', '.join(KINDS)}; a "
+                   f"reader whose anchors are unproven moves them into a "
+                   f"mutate.py registry the preflight exercises) "
                    f"[reader_registered]")
     for rel in sorted(entries.keys() - found):
         why = "is not a tracked script" if rel not in files else \
@@ -332,7 +349,7 @@ def selftest() -> tuple[list[str], int]:
              "scripts/c.py": once, "scripts/quiet.py": "print('selfhost/src/x.dawn')"}
     covered = {"scripts/a/mutate.py"}
     ledger = ("scripts/a/mutate.py  preflight: exercised\n"
-              "scripts/b.py  unproven: debt\n"
+              "scripts/b.py  not-anchor: an inventory\n"
               "scripts/c.py  self-once: refuses a second match; kept because "
               "it runs where the preflight cannot\n")
     expect("control-ledger", inventory_problems(files, ledger, covered), set())
@@ -344,13 +361,13 @@ def selftest() -> tuple[list[str], int]:
     expect("reader-stopped-matching", inventory_problems(
         dict(files, **{"scripts/b.py": "print(1)"}), ledger, covered), {"reader_stale"})
     expect("preflight-claimed", inventory_problems(
-        files, ledger.replace("b.py  unproven", "b.py  preflight"), covered),
+        files, ledger.replace("b.py  not-anchor", "b.py  preflight"), covered),
         {"preflight_is_real"})
     expect("preflight-unclaimed", inventory_problems(
-        files, ledger.replace("mutate.py  preflight", "mutate.py  unproven"), covered),
+        files, ledger.replace("mutate.py  preflight", "mutate.py  not-anchor"), covered),
         {"preflight_is_real"})
     expect("self-once-claimed", inventory_problems(
-        files, ledger.replace("b.py  unproven: debt",
+        files, ledger.replace("b.py  not-anchor: an inventory",
                               "b.py  self-once: debt; kept because of x"), covered),
         {"self_once_is_real"})
     expect("self-once-without-reason", inventory_problems(
@@ -360,8 +377,16 @@ def selftest() -> tuple[list[str], int]:
         files, ledger.replace("kept because it runs where the preflight cannot",
                               "kept because"), covered), {"self_once_has_reason"})
     expect("bad-kind", inventory_problems(
-        files, ledger.replace("b.py  unproven", "b.py  maybe"), covered),
+        files, ledger.replace("b.py  not-anchor", "b.py  maybe"), covered),
         {"ledger_parses", "reader_registered"})
+    # #277 retired `unproven`: a line of that kind is red, whether it is an
+    # old line put back or a new reader parked there, and it is the only red.
+    expect("unproven-retired", inventory_problems(
+        files, ledger.replace("b.py  not-anchor: an inventory", "b.py  unproven: debt"),
+        covered), {"unproven_retired"})
+    expect("new-reader-parked-as-unproven", inventory_problems(
+        dict(files, **{"scripts/d.py": reader}),
+        ledger + "scripts/d.py  unproven: later\n", covered), {"unproven_retired"})
     return fail, len(ran)
 
 

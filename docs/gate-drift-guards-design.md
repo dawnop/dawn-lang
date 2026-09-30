@@ -37,6 +37,7 @@
    既有源码路径（`selfhost/src`、`compiler-plan/src`、`std`、`runtime/c`、`packages/*/src` 下的 `.dawn/.c/.h`）又有按拼写匹配的操作
    （`.count(`、`.replace(`、`grep -F`、`sed -i` 等），就必须在账本里有一行，写明四类之一：
    `preflight`（与 preflight 自己的适配表对账）、`self-once`（文件里必须有恰一次检查）、`unproven`（公开的欠账）、`not-anchor`（写理由）。
+   #277 把 `unproven` 清零后这个种类退役，台账里再出现 `unproven` 行即红（`unproven_retired`），现在只有三类。
    #254 之后 `self-once` 还必须在理由里写 `kept because <理由>`，说明为什么不能由预飞持有，否则红（`self_once_has_reason`）；
    迁完时只剩 `tile-gpu-diff/run.sh` 一行（见 `docs/mutation-anchor-preflight-design.md`）。
    双向：未登记即红，脚本删了或不再命中规则而账本还留着也红（`scripts/gate-map/unseen.txt` 的形状）。
@@ -90,7 +91,7 @@ job 显式列权限 `actions: read`（读运行记录）、`contents: read`、`i
 ## 不做的（理由）
 
 - **gatemap 的 31 个字面常量逐个过恰一次**：调研建议之一，本批任务单没列；`BUNDLED_MODULE_EXPRESSION` 已经过了。留给下一刀。
-- **把 `unproven` 的 60 个脚本逐个改成恰一次**：账本就是欠账表，逐个修是按脚本的小刀，不在本批。
+- **把 `unproven` 的 60 个脚本逐个改成恰一次**：账本就是欠账表，逐个修是按脚本的小刀，不在本批。（后由 #254 与 #277 做完，见 `docs/mutation-anchor-preflight-design.md`。）
 - **从语法树或编译器产物定位变异点**（cargo-mutants、Stryker、PIT 的方向）：长期方向，恰一次是过渡。
 - **翻面守卫覆盖 `mutate.py` 与 gatemap 的锚点**：它们没有 kind，改动本来就会让变异体打不上而红；翻面只存在于有 present/absent 两面的审计锚点。
 - **nightly 记录「上次成功观测时间」**：调研的第 4 点。cron 被丢时 Actions 页面本身可见；等真出现连续丢跑再加。
