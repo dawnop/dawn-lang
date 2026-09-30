@@ -1295,16 +1295,16 @@ fn atan_small(t: Float) -> Float = {
   sum
 }
 
-## The arc tangent of `t`, in `[-pi/2, pi/2]`. Two reductions bring the
-## argument inside `2 - sqrt(3)`: `atan(t) = pi/2 - atan(1/t)` for `|t| > 1`
-## and `atan(t) = pi/6 + atan((t sqrt3 - 1) / (t + sqrt3))` for what is left
+## The arc tangent of `x`, in `[-pi/2, pi/2]`. Two reductions bring the
+## argument inside `2 - sqrt(3)`: `atan(x) = pi/2 - atan(1/x)` for `|x| > 1`
+## and `atan(x) = pi/6 + atan((x sqrt3 - 1) / (x + sqrt3))` for what is left
 ## above the pivot.
-pub fn ref_atan(t: Float) -> Float =
-  if t != t {
-    t
+pub fn ref_atan(x: Float) -> Float =
+  if x != x {
+    x
   } else {
-    let s = if t < 0.0 { 0.0 - 1.0 } else { 1.0 }
-    let a = if t < 0.0 { 0.0 - t } else { t }
+    let s = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let a = if x < 0.0 { 0.0 - x } else { x }
     let m = if a > 1.0e300 {
       PI * 0.5
     } else if a > 1.0 {
@@ -1324,35 +1324,37 @@ fn atan_reduced(a: Float) -> Float =
     atan_small(a)
   }
 
-## The `atan2` of `a` over `b`, with the quadrant taken from the signs of
+## The `atan2` of `y` over `x`, with the quadrant taken from the signs of
 ## both. THE NUMERATOR IS FIRST, which is the order
-## `packages/tileir/src/dev.atan2` takes and the order the dialect's own
+## `packages/tileir/src/dev.atan2` takes, the order the dialect's own
 ## sentence gives ("the arc tangent of the ratio of first and second input
-## arguments x / y"); it is C's `atan2(y, x)` with the names swapped.
+## arguments x / y", its names swapped) and C's `atan2(y, x)`. The
+## parameters were `(a, b)` until 2026-10-01 (#210), which hid that order
+## from a caller naming them.
 ##
 ## The axes are the special cases and they are where a corpus earns its
-## keep: `b < 0` moves the answer by a whole `pi` and a reference that
+## keep: `x < 0` moves the answer by a whole `pi` and a reference that
 ## forgot it would agree with the device on the right half plane and
 ## nowhere else. Signed zeros are not distinguished here: `0.0` is read as
 ## `+0.0`, so `atan2(0, -1)` is `pi` and not `-pi`, and the corpus in
 ## scripts/tile-gpu-diff carries no negative zero.
-pub fn ref_atan2(a: Float, b: Float) -> Float =
-  if a != a || b != b {
+pub fn ref_atan2(y: Float, x: Float) -> Float =
+  if y != y || x != x {
     0.0 / 0.0
-  } else if b == 0.0 {
-    if a > 0.0 {
+  } else if x == 0.0 {
+    if y > 0.0 {
       PI * 0.5
-    } else if a < 0.0 {
+    } else if y < 0.0 {
       0.0 - PI * 0.5
     } else {
       0.0
     }
-  } else if b > 0.0 {
-    ref_atan(a / b)
-  } else if a >= 0.0 {
-    ref_atan(a / b) + PI
+  } else if x > 0.0 {
+    ref_atan(y / x)
+  } else if y >= 0.0 {
+    ref_atan(y / x) + PI
   } else {
-    ref_atan(a / b) - PI
+    ref_atan(y / x) - PI
   }
 
 ## The floating-point remainder of `a` by `b` under TRUNCATED division:
@@ -1678,7 +1680,7 @@ pub fn gather_pad_ref(rows: Int, cols: Int, gcols: Int, pad: Float, ids: List[Fl
 ## carries eight significand bits, whole numbers up to 256 are exact in it,
 ## and scripts/tile-gpu-diff/arch_diff.dawn holds the largest bin count
 ## below that.
-pub fn view_atomic_bf16_ref(n: Int, bins: Int, tile: Int, _dtypes: List[String],
+pub fn view_atomic_bf16_ref(n: Int, bins: Int, tile: Int, dtypes: List[String],
   ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let blocks = n / tile + 1
@@ -1689,7 +1691,7 @@ pub fn view_atomic_bf16_ref(n: Int, bins: Int, tile: Int, _dtypes: List[String],
   list.map(range(0, len(ins[1])), k => if k < bins { to_float(sums[k]) } else { ins[1][k] })
 }
 
-pub fn view_atomic_ref(n: Int, bins: Int, tile: Int, bias: Int, _dtypes: List[String],
+pub fn view_atomic_ref(n: Int, bins: Int, tile: Int, bias: Int, dtypes: List[String],
   ins: List[List[Float]]) -> List[(Int, List[Float])] = {
   let x = ins[0]
   let blocks = n / tile + 1
@@ -4311,7 +4313,7 @@ fn segments(old: List[Float], n: Int, segs: Int, f: fn(Int, Int) -> Float) -> Li
 ## The round trip is the IDENTITY and is here for that reason: every i16 is
 ## a binary64 exactly, so widening and truncating back cannot lose anything,
 ## and a segment that is not the input is a conversion at the wrong width.
-pub fn dtype_i16_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn dtype_i16_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let xa = ins[0]
   let xb = ins[1]
   segments(ins[2], n, 5, (seg, i) => {
@@ -4341,7 +4343,7 @@ pub fn dtype_i16_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> L
 ## at 2^64 and this cannot follow it there, so the corpus stays inside
 ## +/-2^52 (`dtype_diff.dawn` counts the products that leave the i32 range,
 ## which is what makes the width itself visible).
-pub fn dtype_i64_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn dtype_i64_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let xa = ins[0]
   let xb = ins[1]
   segments(ins[2], n, 5, (seg, i) => {
@@ -4373,7 +4375,7 @@ pub fn dtype_i64_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> L
 ## differ on exactly the lanes whose top bit is set. Nothing else here can
 ## see the difference: + - * agree modulo 16 whichever widening produced
 ## the operands, which is why the kernel carries a shift at all.
-pub fn dtype_i4_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn dtype_i4_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let xa = ins[0]
   let xb = ins[1]
   segments(ins[2], n, 5, (seg, i) => {
@@ -4408,7 +4410,7 @@ pub fn dtype_i4_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> Li
 ## the CONTROL for pack-halves-swapped: a round trip through a format is
 ## blind to the order the lanes were laid down in, because it lays them
 ## back the same way. The kernel is the identity and so is this.
-pub fn pack_roundtrip_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn pack_roundtrip_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let xa = ins[0]
   segments(ins[1], n, 2, (_seg, i) => xa[i])
 }
@@ -4427,7 +4429,7 @@ pub fn pack_roundtrip_ref(n: Int, _dtypes: List[String], ins: List[List[Float]])
 ## `ftof` from f64 straight into that format kills tileiras 13.3.36, so
 ## scripts/tile-golden's kernel detours and this rounds twice to match. For
 ## the other three it is one rounding.
-pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn dtype_convert_ref(n: Int, dtype: String, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let y = ins[1]
   segments(ins[2], n, 2, (seg, i) =>
@@ -4458,7 +4460,7 @@ pub fn dtype_convert_ref(n: Int, dtype: String, _dtypes: List[String], ins: List
 ## Segment 1 is one rounding, as it is for f8E4M3FN and f8E5M2: `round_to`
 ## dispatches to `narrow.round_f4e2m1`, and the widening back to f64 is
 ## exact.
-pub fn dtype_e2m1_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+pub fn dtype_e2m1_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
   let x = ins[0]
   let y = ins[1]
   segments(ins[2], n, 2, (seg, i) =>
@@ -4498,7 +4500,7 @@ pub fn dtype_e2m1_ref(n: Int, _dtypes: List[String], ins: List[List[Float]]) -> 
 ## every partial sum a whole number well inside 2^24, where f32 addition is
 ## exact and therefore associative. What is left for the device to be wrong
 ## about is the scaling itself.
-pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, _dtypes: List[String],
+pub fn mmaf_scaled_ref(m: Int, k: Int, n: Int, v: Int, dtypes: List[String],
   ins: List[List[Float]]) -> List[Float] = {
   let a = ins[0]
   let b = ins[1]
@@ -5078,7 +5080,7 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
 
 # ---- the real device ----
 
-## `data` as the bytes a buffer of the named format holds: `pack_bf16`,
+## `xs` as the bytes a buffer of the named format holds: `pack_bf16`,
 ## `pack_f16`, `pack_i32`, `pack_i8` or `pack_u8`. `f64` is not here, and
 ## the caller must not ask: an f64 buffer crosses as an `Array[Float]` the
 ## runtime copies double for double, and there is no byte packing for it.
@@ -5086,35 +5088,35 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
 ## The pairing with `unpack_from` is what makes a format's round trip a
 ## property of one line rather than of the handler; the handler asks by
 ## name and never spells a format twice.
-pub fn pack_to(dtype: String, data: List[Float]) -> Bytes = match dtype {
-  "bf16" -> pack_bf16(data)
-  "f16" -> pack_f16(data)
-  "tf32" -> pack_tf32(data)
-  "f8E4M3FN" -> pack_f8e4m3fn(data)
-  "f8E5M2" -> pack_f8e5m2(data)
-  "f8E8M0FNU" -> pack_f8e8m0(data)
-  "i32" -> pack_i32(data)
-  "i16" -> pack_i16(data)
-  "i64" -> pack_i64(data)
-  "i8" -> pack_i8(data)
-  "u8" -> pack_u8(data)
+pub fn pack_to(dtype: String, xs: List[Float]) -> Bytes = match dtype {
+  "bf16" -> pack_bf16(xs)
+  "f16" -> pack_f16(xs)
+  "tf32" -> pack_tf32(xs)
+  "f8E4M3FN" -> pack_f8e4m3fn(xs)
+  "f8E5M2" -> pack_f8e5m2(xs)
+  "f8E8M0FNU" -> pack_f8e8m0(xs)
+  "i32" -> pack_i32(xs)
+  "i16" -> pack_i16(xs)
+  "i64" -> pack_i64(xs)
+  "i8" -> pack_i8(xs)
+  "u8" -> pack_u8(xs)
   _ -> panic("gpu.pack_to: `${dtype}` has no byte packing")
 }
 
 ## The values a buffer of the named format holds, from its bytes: the
 ## inverse of `pack_to` on every value the format can hold.
-pub fn unpack_from(dtype: String, raw: Bytes) -> List[Float] = match dtype {
-  "bf16" -> unpack_bf16(raw)
-  "f16" -> unpack_f16(raw)
-  "tf32" -> unpack_tf32(raw)
-  "f8E4M3FN" -> unpack_f8e4m3fn(raw)
-  "f8E5M2" -> unpack_f8e5m2(raw)
-  "f8E8M0FNU" -> unpack_f8e8m0(raw)
-  "i32" -> unpack_i32(raw)
-  "i16" -> unpack_i16(raw)
-  "i64" -> unpack_i64(raw)
-  "i8" -> unpack_i8(raw)
-  "u8" -> unpack_u8(raw)
+pub fn unpack_from(dtype: String, b: Bytes) -> List[Float] = match dtype {
+  "bf16" -> unpack_bf16(b)
+  "f16" -> unpack_f16(b)
+  "tf32" -> unpack_tf32(b)
+  "f8E4M3FN" -> unpack_f8e4m3fn(b)
+  "f8E5M2" -> unpack_f8e5m2(b)
+  "f8E8M0FNU" -> unpack_f8e8m0(b)
+  "i32" -> unpack_i32(b)
+  "i16" -> unpack_i16(b)
+  "i64" -> unpack_i64(b)
+  "i8" -> unpack_i8(b)
+  "u8" -> unpack_u8(b)
   _ -> panic("gpu.unpack_from: `${dtype}` has no byte packing")
 }
 
