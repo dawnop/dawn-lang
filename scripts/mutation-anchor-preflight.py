@@ -31,6 +31,7 @@ ADAPTERS = {
     "export-surface-contract": (".",),
     "for-pattern-contract": ("selfhost",),
     "inflate-contract": (".",),
+    "java-narrowing-contract": ("selfhost",),
     "list-elems-contract": (".",),
     "narrow-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
