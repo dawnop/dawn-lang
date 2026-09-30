@@ -143,6 +143,7 @@ unset DAWN_LSP_MUTANT_MERGED_CP
 
 expect_mutant_red last-close-retains-lease lease-lifecycle LAST_CLOSE_LEASE_RETAINED
 expect_mutant_red retry-unavailable-on-change unavailable-retry UNAVAILABLE_DIDCHANGE_RETRIED
+expect_mutant_red refresh-skips-replan manifest-refresh MANIFEST_REFRESH_MISSING
 expect_mutant_red exit-bypasses-cleanup lease-cleanup EXIT_CLEANUP_BYPASSED
 expect_mutant_red close-uncaught close-failure CLOSE_FAILURE_SKIPPED_REMAINING
 expect_mutant_red external-owner-clears external-diagnostics EXTERNAL_DIAGNOSTIC_AGGREGATION_MISMATCH

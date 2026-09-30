@@ -483,7 +483,12 @@ type Workspace = {
   # whose text is unchanged. Never evicted: a parse is a function of the text
   # alone and cannot go stale, and the latest load's files are all it holds.
   parses: ParseMemo,
-  diag_by_uri: Map[String, List[Json]]
+  diag_by_uri: Map[String, List[Json]],
+  # the setup failure of the latest manifest refresh, which left this
+  # workspace in place (its plan and lease are the ones that last succeeded).
+  # Kept beside the program rather than in `diag_by_uri` because every
+  # rebuild recomputes that map; cleared by the next refresh that succeeds.
+  refresh_problem: Option[LocDiag]
 }
 
 ## Maven, lock or loader setup failed before a usable workspace existed. Open
@@ -600,7 +605,11 @@ type LspState = {
   standalone: Option[JsigLease],
   host: LspLeaseHost,
   analysis_config: LspAnalysisConfig,
-  lifecycle: Lifecycle
+  lifecycle: Lifecycle,
+  # whether the client said at `initialize` that it accepts a dynamic
+  # `workspace/didChangeWatchedFiles` registration (LSP 3.17 forbids sending
+  # one otherwise); read once at `initialized`
+  watch_manifests: Bool
 }
 
 fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
@@ -656,9 +665,27 @@ fn has_request_id(msg: Json) -> Bool =
     None -> false
   }
 
+fn is_response(msg: Json) -> Bool =
+  match oget(msg, "method") {
+    Some(_) -> false
+    None ->
+      match oget(msg, "result") {
+        Some(_) -> true
+        None ->
+          match oget(msg, "error") {
+            Some(_) -> true
+            None -> false
+          }
+      }
+  }
+
 const ABNORMAL_EXIT_STATUS: Int = 1
 
 fn lifecycle_gate(lifecycle: Lifecycle, msg: Json) -> LifecycleGate = {
+  # A message with a result or an error and no method answers a request this
+  # server sent (the watcher registration). It is not a request, and answering
+  # it with MethodNotFound would be a reply to a reply.
+  if is_response(msg) { return LgIgnore }
   let method = ostr(msg, "method")
   let request = has_request_id(msg)
   match lifecycle {
@@ -770,7 +797,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     standalone: Some(standalone),
     host: host,
     analysis_config: config,
-    lifecycle: PreInit
+    lifecycle: PreInit,
+    watch_manifests: false
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -1210,6 +1238,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     None -> JNull
   }
   if method == "initialize" {
+    st = LspState { ..st, watch_manifests: client_watches_files(params) }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
       ("hoverProvider", JBool(true)),
@@ -1223,7 +1252,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("codeActionProvider", JBool(true))
     ]))]))
   } else if method == "initialized" {
-    ()
+    if st.watch_manifests { send(manifest_watch_registration()) }
   } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {
     # `update_of` claimed every sync notification that carried a document, so
     # what reaches here is one that carried none — nothing to analyse, which
@@ -1235,7 +1264,15 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     st = close_doc(st, uri)
   } else if method == "textDocument/didSave" {
     let td = get_or_null(params, "textDocument")
-    st = retry_unavailable(st, ostr(td, "uri"))
+    let uri = ostr(td, "uri")
+    # a client whose selector covers dawn.toml saves it as a document, and
+    # that save is the same event a file watcher would have reported
+    st = match manifest_path_of(uri) {
+      Some(path) -> refresh_manifests(st, set.from([path]))
+      None -> retry_unavailable(st, uri)
+    }
+  } else if method == "workspace/didChangeWatchedFiles" {
+    st = refresh_manifests(st, watched_manifests(params))
   } else if method == "textDocument/completion" {
     respond(id, handle_completion(st, params))
   } else if method == "textDocument/hover" {
@@ -1409,9 +1446,37 @@ fn conflict_diagnostics(
   out
 }
 
-## Rebuild one coherent workspace snapshot. Conflict detection happens before the
-## overlay map can overwrite either live text, and discards the old program.
-fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
+## Rebuild one coherent workspace snapshot, then lay a failed manifest
+## refresh's setup diagnostic over it: the snapshot's own map is recomputed on
+## every rebuild, and the failure has to outlive edits until a refresh clears it.
+fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io = {
+  let ws = rebuild_snapshot(st, ws0)
+  match ws.refresh_problem {
+    Some(problem) -> Workspace {
+      ..ws,
+      diag_by_uri: merge_diagnostics(ws.diag_by_uri,
+        diagnostics_of_problem(st, ws.path_by_uri, problem))
+    }
+    None -> ws
+  }
+}
+
+fn merge_diagnostics(
+  base: Map[String, List[Json]],
+  extra: Map[String, List[Json]]
+) -> Map[String, List[Json]] = {
+  var out = base
+  for uri in sort(map.keys(extra)) {
+    for value in map.get(extra, uri).expect("diagnostics") {
+      out = append_diagnostic(out, uri, value)
+    }
+  }
+  out
+}
+
+## Conflict detection happens before the overlay map can overwrite either live
+## text, and discards the old program.
+fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
   match workspace_inputs(st, ws0.plan, ws0.path_by_uri) {
     InputsConflict(paths) -> {
       let no_entries: Map[String, String] = map.empty()
@@ -1476,7 +1541,8 @@ fn activate_workspace(
         cache: analysis_session(st, lease.jsig),
         analysis_stats: None,
         parses: no_parses(),
-        diag_by_uri: no_diags
+        diag_by_uri: no_diags,
+        refresh_problem: None
       }
       match catch_panic(() => rebuild_workspace(st, candidate)) {
         Ok(workspace) -> Ready(workspace)
@@ -1744,6 +1810,176 @@ fn retry_unavailable(st: LspState, uri: String) -> LspState !Fs !Env !Console !i
       }
     None -> st
   }
+
+# ---- manifest refresh ----
+#
+# A workspace keeps the plan it captured at open (§3.1); a changed dawn.toml
+# or dawn.lock is the one event that replaces it. The client reports the
+# change through `workspace/didChangeWatchedFiles`, from the registration sent
+# at `initialized` or from its own watcher (editors/vscode registers one for
+# clients that cannot take a dynamic registration).
+
+## The dynamic registration of both manifest names (LSP 3.17
+## `client/registerCapability`). The
+## registration is per name, not per project: which projects a change touches
+## is the server's question (`slot_manifest_dirs`), answered on arrival.
+fn manifest_watch_registration() -> Json =
+  jobj([
+    ("jsonrpc", JStr("2.0")),
+    ("id", JStr("dawn/registerManifestWatchers")),
+    ("method", JStr("client/registerCapability")),
+    ("params", jobj([("registrations", JArr([jobj([
+      ("id", JStr("dawn/manifests")),
+      ("method", JStr("workspace/didChangeWatchedFiles")),
+      ("registerOptions", jobj([("watchers", JArr([
+        jobj([("globPattern", JStr("**/dawn.toml"))]),
+        jobj([("globPattern", JStr("**/dawn.lock"))])
+      ]))]))
+    ])]))]))
+  ])
+
+fn client_watches_files(params: Json) -> Bool = {
+  let workspace = get_or_null(get_or_null(params, "capabilities"), "workspace")
+  match oget(get_or_null(workspace, "didChangeWatchedFiles"), "dynamicRegistration") {
+    Some(JBool(b)) -> b
+    _ -> false
+  }
+}
+
+## A changed file a plan may have read, as a canonical path: a dawn.toml or a
+## dawn.lock. Anything else a notification names is not ours to act on.
+fn manifest_path_of(uri: String) -> Option[String] !Env =
+  match uri_to_path(uri) {
+    Some(path) -> {
+      let target = canon(path)
+      if str.ends_with(target, "/dawn.toml") || str.ends_with(target, "/dawn.lock") {
+        Some(target)
+      } else {
+        None
+      }
+    }
+    None -> None
+  }
+
+fn watched_manifests(params: Json) -> Set[String] !Env = {
+  var out: Set[String] = set.empty()
+  match oget(params, "changes") {
+    Some(JArr(changes)) -> {
+      for change in changes {
+        match manifest_path_of(ostr(change, "uri")) {
+          Some(path) -> { out = set.insert(out, path) }
+          None -> ()
+        }
+      }
+    }
+    _ -> ()
+  }
+  out
+}
+
+fn parent_dir(path: String) -> String =
+  match str.last_index_of(path, "/") {
+    Some(i) -> str.take(path, i)
+    None -> path
+  }
+
+fn slot_plan(slot: WorkspaceSlot) -> ProjectPlan =
+  match slot {
+    Ready(ws) -> ws.plan
+    Unavailable(ws) -> ws.plan
+  }
+
+## The directory of every manifest a package graph was planned from. A
+## package root is its canonical `<dir>/src`.
+fn pkg_manifest_dirs(pkg: source.PkgR, dirs0: Set[String]) -> Set[String] = {
+  let dir = parent_dir(pkg.root)
+  if set.has(dirs0, dir) { return dirs0 }
+  var dirs = set.insert(dirs0, dir)
+  for dep in sort(map.keys(pkg.deps)) {
+    dirs = pkg_manifest_dirs(map.get(pkg.deps, dep).expect("resolved package"), dirs)
+  }
+  dirs
+}
+
+## Where a change can alter what this slot was planned from: the project's own
+## manifest directory, each resolved package's (the set
+## `bootstrap_source_input_manifest` records as inputs), and every directory a
+## planner or setup diagnostic points into, so that fixing a broken manifest is
+## itself noticed.
+fn slot_manifest_dirs(slot: WorkspaceSlot) -> Set[String] !Env = {
+  let plan = slot_plan(slot)
+  var dirs = set.from([canon(plan.source.project)])
+  for dep in sort(map.keys(plan.source.pkgs)) {
+    dirs = pkg_manifest_dirs(map.get(plan.source.pkgs, dep).expect("resolved package"), dirs)
+  }
+  for ld in plan.source.diags { dirs = set.insert(dirs, parent_dir(canon(ld.path))) }
+  let problem = match slot {
+    Ready(ws) -> ws.refresh_problem
+    Unavailable(ws) -> Some(ws.problem)
+  }
+  match problem {
+    Some(ld) -> { dirs = set.insert(dirs, parent_dir(canon(ld.path))) }
+    None -> ()
+  }
+  dirs
+}
+
+## Re-plan every workspace one of `changed` belongs to, each at most once per
+## notification: VS Code's own watcher and the dynamic registration report
+## the same save, and the client batches both into one notification.
+fn refresh_manifests(st0: LspState, changed: Set[String]) -> LspState !Fs !Proc !Env !Console !io = {
+  var st = st0
+  for key in sort(map.keys(st0.workspaces)) {
+    let slot = map.get(st.workspaces, key).expect("workspace")
+    let dirs = slot_manifest_dirs(slot)
+    var touched = false
+    for path in set.to_list(changed) {
+      if set.has(dirs, parent_dir(path)) { touched = true }
+    }
+    if touched { st = refresh_workspace(st, key, slot) }
+  }
+  st
+}
+
+## Build the new plan and lease completely, install, and only then close the
+## old lease (docs/lsp-workspace-design.md §3.2). A setup failure keeps the
+## old workspace serving and hangs the failure on the manifest it names; an
+## unavailable workspace has nothing to keep and takes the new state.
+fn refresh_workspace(
+  st: LspState,
+  key: String,
+  slot: WorkspaceSlot
+) -> LspState !Fs !Proc !Env !Console !io = {
+  let fresh = project_plan(slot_plan(slot).source.target)
+  let identity = workspace_identity(fresh)
+  # The identity is arithmetic on the target path alone (`source_roots`), and
+  # a refresh re-plans the same target, so no manifest can move it and no
+  # member needs to migrate. Should a manifest ever gain a say in the source
+  # root, this is where the members would have to move; failing here keeps
+  # that from happening silently.
+  if identity.lookup_key != key {
+    panic("lsp manifest refresh moved a workspace identity")
+  }
+  let affected = slot_uris(slot)
+  match activate_workspace(st, fresh, slot_paths(slot)) {
+    Ready(ws) -> {
+      let next = install_workspace(st, identity, Ready(ws), affected)
+      match slot {
+        Ready(old) -> close_lease(old.lease)
+        Unavailable(_) -> ()
+      }
+      next
+    }
+    Unavailable(failed) ->
+      match slot {
+        Ready(old) -> {
+          let kept = Workspace { ..old, refresh_problem: Some(failed.problem) }
+          install_workspace(st, identity, Ready(rebuild_workspace(st, kept)), affected)
+        }
+        Unavailable(_) -> install_workspace(st, identity, Unavailable(failed), affected)
+      }
+  }
+}
 
 fn close_doc(st0: LspState, uri: String) -> LspState !Fs !Env !Console !io =
   match map.get(st0.docs, uri) {
@@ -2144,7 +2380,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
         project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
       },
       analysis_config: legacy_analysis_config(),
-      lifecycle: Running
+      lifecycle: Running,
+      watch_manifests: false
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -2238,7 +2475,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
       project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
     },
     analysis_config: legacy_analysis_config(),
-    lifecycle: Running
+    lifecycle: Running,
+    watch_manifests: false
   }
 }
 
@@ -2278,7 +2516,8 @@ test "workspace commits its module memo with its Program and drops it on conflic
           plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
           prog: None, entry_by_uri: map.empty(), lease: lease,
           cache: incremental.new(std, ct_default(), lease.jsig, 128),
-          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty()
+          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
+          refresh_problem: None
         }
         let first = rebuild_workspace(st, empty)
         assert len(first.prog.expect("first Program").diags) == 0

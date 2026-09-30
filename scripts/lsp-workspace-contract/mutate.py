@@ -300,6 +300,13 @@ def mutate(name, server, main, analyze):
           activate_workspace(snapshot, ws.plan, ws.path_by_uri))
       }"""
         server_text = replace_once(server_text, old, new, name)
+    elif name == "refresh-skips-replan":
+        server_text = replace_once(
+            server_text,
+            "  let fresh = project_plan(slot_plan(slot).source.target)",
+            "  let fresh = slot_plan(slot)",
+            name,
+        )
     elif name == "exit-bypasses-cleanup":
         old = """            LgExit(code) -> {
               pending = None

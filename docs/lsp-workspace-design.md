@@ -269,14 +269,14 @@ shutdown request、正常/异常 `exit`、EOF 与 fatal framing 都执行 `close
 `lease.close` 由 `catch_panic` 隔离并记录错误，不能阻止其他 workspace 或 standalone lease
 继续关闭；state 随后清空所有 lease ownership，shutdown 后再 exit 不会重复关闭。
 
-## 9. 18 例 × 20 mutant 行为合同
+## 9. 19 例 × 21 mutant 行为合同
 
-`scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 18 个真实 JSON-RPC 正例，并为
-每个边界编译一个 mutant，共 20 个：`diagnostics-current` 与 `did-close` 各拥有两个，其余一
+`scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 19 个真实 JSON-RPC 正例，并为
+每个边界编译一个 mutant，共 21 个：`diagnostics-current` 与 `did-close` 各拥有两个，其余一
 例一个。每个 mutant 必须先编译成功，再只运行 owning case；只有出现该 case 唯一的 failure
 label 才算负控见红，build failure、timeout、协议错误或无关 assertion 都不算。
 
-18 个正例覆盖：
+19 个正例覆盖：
 
 - 全 live overlay、未落盘模块、当前模块 completion 自排除；
 - extensionless 本地 buffer 保持 standalone；
@@ -287,7 +287,12 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
 - 同 FQCN Java target 按两种打开顺序隔离；
 - standalone classpath 隔离；
 - last close、shutdown、running exit、EOF、fatal framing 与 injected close failure 的 cleanup；
-- Unavailable 在 `didChange` 不重试、在 `didSave` 才重试。
+- Unavailable 在 `didChange` 不重试、在 `didSave` 才重试；
+- manifest refresh：动态注册两个 glob 且不回应客户端的 reply；给打开的项目加一个路径依赖后
+  发 `didChangeWatchedFiles`（同一变更重复两次），不关任何文档，新模块即可解析，新 lease 恰好
+  构造一次且先于旧 lease 关闭；随后坏掉的 lock 让 refresh 失败，旧 workspace 继续服务、失败
+  挂在 `dawn.lock` 上并在编辑后仍在，lock 修好后清除。mutant `refresh-skips-replan` 让通知臂
+  沿用 captured plan，由 `MANIFEST_REFRESH_MISSING` 打红。
 
 对应的 compiling mutants 包括退化为 project-only identity。该 mutant 由
 `source-root-identity` case 的唯一 `SOURCE_ROOT_WORKSPACE_MERGED` assertion 定向打红；合同不只
