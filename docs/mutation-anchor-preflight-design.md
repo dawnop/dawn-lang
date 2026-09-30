@@ -63,12 +63,64 @@ issue 点名范围之外的内联变异 harness 与文档引文不在本检查�
 否则红。`anchor-guard.py` 把这张表里的读者算作 `preflight`。export-surface 的台账行原先保守地记为 `self-once`，
 就是因为 `preflight_is_real` 只认适配表；现在它经这张表记为 `preflight`，没有靠写理由绕过。
 
-迁完之后 `scripts/anchor-readers.txt` 是 26 条 `preflight`、1 条 `self-once`、34 条 `unproven`、16 条 `not-anchor`。
+#254 迁完时 `scripts/anchor-readers.txt` 是 26 条 `preflight`、1 条 `self-once`、34 条 `unproven`、16 条 `not-anchor`；
+`unproven` 此后由 #277 清零，见下一节。
 `self-once` 没有删除，而是改成必须附理由的种类：台账行里要写 `kept because <理由>`，说明为什么不能由预飞持有，
 否则 `anchor-guard.py` 报 `self_once_has_reason`。唯一剩下的是 `tile-gpu-diff/run.sh`：它只在有 GPU 的宿主上跑，
 锚点全部是调用方传给通用替换助手（`mutate.py <file> <label> <old> <new>`）的参数，预飞按设计把它排除；
 它在宿主上构建每个变异体之前自己检查一次锚点。把这些锚点搬进登记表可以做，但它们的主题分布在
 临时拷贝的包、内核源码与 runtime 片段上，且每次改动都要一轮 GPU 重跑才能留证，不在 #254 的范围内。
 
-CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、次级编辑、
+## #277：`unproven` 清零
+
+#254 迁完时台账里还有 34 条 `unproven`：按拼写读源码、却没有任何东西证明字面量恰好匹配一次的脚本。
+#277 分四批把它们全部改判或迁走，每条一个提交：
+
+- #278（6 条）与 #284（15 条）：规则误命中。这些脚本的变异已经来自预飞过的 `mutate.py`，
+  或者它们对源码的读取就是断言本身（清单双向比较、`pub fn` 存在性、缺失即红），不定位要改的代码，
+  记为 `not-anchor` 并写明理由。#284 顺带给 ctl-live、display-layering、dependency-heap、
+  bootstrap-input-manifest 四个已预飞、但没有专项负控的登记表补了漂移测试。
+- #286（6 条）：incremental-semantics 的六个 harness（lsp-observe、lsp-configured、lsp-module-memo、
+  body-executor、module-memo、identity）改从 #273 为 `cold.py` 建的登记表读锚点。一个目录一个 `mutate.py`，
+  所以键带归属前缀（`identity/...`），每个 harness 只取自己那一组；六者进 `REGISTRY_READERS`。
+  预飞应用次数 342 到 419。
+- 最后一批（7 条）：七个 shell 契约各建或扩一个 `mutate.py`，harness 按名字调用，输出逐字不变：
+  - lsp-lifecycle：5 个变异体、5 条锚点，原先是 `run.sh` 的一段 heredoc，主题 `lsp/server.dawn`；
+  - project-plan：2 个变异体、2 条锚点，原先是两段 heredoc，主题 `driver/analyze.dawn` 与 `lsp/server.dawn`。
+    原 heredoc 还用两处没有检查的 `.replace` 改写拷贝出去的探针 `dawn.toml`（`../../../selfhost` 改成 `../selfhost`），
+    只因为探针被拷到 `<tree>/probe`。现在探针拷到它在检出里的路径 `<tree>/scripts/project-plan-contract/captured-probe`，
+    清单原样就指向变异树的 selfhost 与 compiler-plan，这次改写连同它需要的锚点一起消失了，而不是登记；
+  - jsig-lease：5 个变异体、5 条编辑（4 条锚点），主题 `jvm/jreflect.dawn` 与本目录的 `probe.dawn`，都写检出路径。
+    原先变异的是拼好的用例（`jreflect.dawn` 已接上 `resource-probe.dawn`，`probe.dawn` 已改名 `main.dawn`），
+    现在先变异一棵只含这两个文件的树、再从它拼用例。`merge-loaders` 的替换文本要写夹具 jar 的路径，
+    这些路径要等 `run.sh` 建好 jar 才有，所以登记表写占位符，由 `mutate.py` 的两个 jar 参数以 JSON 字符串填入；
+    适配器给两个替身路径，预飞只证锚点；
+  - builtin-type：26 个变异体、32 条编辑，原先是 24 处 `replace_once` 参数与 5 段 heredoc，主题 check/{cx,passes,checker,types}、
+    lsp/{lspc,lspq}、`doc.dawn` 与 `embed/stdsrc.dawn`；
+  - tea-reconciler：30 个变异体、30 条编辑（28 条锚点），原先是 `mutants.sh` 里的 `sed` 程序，主题 tea-core 的 `diff`/`walk`、
+    tea-term 的 `widget`、tea-dom 的 `node`；
+  - wasm-dom 的 flags（4 个）与 run.sh（9 个）：并入 retained 已有的 `mutate.py`，主题 tea-dom 的 js 与 src、
+    `examples/projects/tea_dom_todo`。
+
+后三者原先的判据是「文件变了」（`sed -i` 之后比 md5 或 `cmp`），不是恰一次：模式若匹配到两行，`sed` 两行都改，照样算应用成功。
+改成字面量之后，这是这一批唯一一处语义收紧：第二份拷贝现在是预飞的红，不再是一个更宽的变异体。
+转换规则是 sed 模式去掉方括号转义；这些模式里的 `.` 从来只代表它自己，唯一带 `\n` 的替换写成真换行。
+wasm-dom 的 F 变异体（`no-catch`）原先按结构定位：以 `match catch_panic(() => turn(` 开头的那行到同缩进的 `}`，取第一处；
+现在登记的是这一整块的字面量，包括块内注释。改了注释也会让预飞红，这是有意的：锚点就是被替换的那段文本。
+
+**声明的命中数。** builtin-type 的 `stale-checker-consumer` 要把 `cx.dawn` 里 `public_builtin_type_names()`
+的两处调用全部改名。它的登记项写成 `(path, old, new, 2)`：第四项是声明的命中数，`mutate.py` 要求实际命中数
+与声明相等，不是放宽成「至少一处」。多出第三处或少了一处都和改拼写一样红
+（`test_declared_match_count_is_held_both_ways` 两个方向各证一次）。没有第四项的编辑仍然要求恰好一次。
+这是登记表的写法，不是预飞的例外：预飞照常执行登记表的 `main`，检查在登记表自己手里。
+
+本批每条迁移的等价性证据是同一种形状：旧 harness 的变异代码与新登记表分别作用于同一份文件拷贝，结果逐字节相同；
+再在本机把新旧 harness 各完整跑一次，日志相同（mktemp 目录名除外）。
+
+迁完之后预飞应用次数 500，台账 76 行：37 条 `preflight`、1 条 `self-once`、38 条 `not-anchor`，`unproven` 为 0。
+`unproven` 这个种类随之退役：`anchor-guard.py` 的 `KINDS` 里不再有它，台账里出现 `unproven` 行报 `unproven_retired`，
+新出现的未登记读者报 `reader_registered` 时，提示也只给剩下三种。欠账表空了，就不再留一个可以停放新欠账的种类；
+新的读者要么进登记表，要么写清楚为什么不是锚点，要么按 `self-once` 写 `kept because`。
+
+CI 在 tree-policy 中运行预飞及其负控，不需要 JDK。负控覆盖：纯拼写漂移、重复锚点、声明命中数的两个方向、次级编辑、
 shell 锚点、未知变异器、顺序插桩，以及拒绝启动构建或直接写盘。每个测试之后检出必须保持不变。
