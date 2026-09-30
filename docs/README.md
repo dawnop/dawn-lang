@@ -62,6 +62,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
 | [builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md) | current | #283 #185 #186：builtin 取作函数值时按直接调用的同一条 lowering 走（包装体是一次 `XCallBuiltin`）；comptime 解释器按 lowering 的三分对齐（有臂 / lowering 已改写 / 拒绝）；`parse_float` 的原语改为 internal intrinsic `float_of_decimal`，不再按模块路径认。 |
+| [std-dir-loading-design.md](std-dir-loading-design.md) | current | #206：谁回答了 `modules.txt` 谁决定整次 std 加载。带 `modules.txt` 的 `--std` 目录缺模块时一次报错并列出全部缺失模块，不再逐文件退内嵌；没有 `modules.txt` 的目录（含 cwd 下零散的 `std/*.dawn`）一个文件都不读。不改 cwd 缺省（另开 issue）。 |
 | [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | 运行时 intrinsic 契约——每个 primitive 归哪个运行时模块。**表已从 `emit.dawn` 的 `(class, method)` 收成 `types.dawn` 的 `Rt`/`Intr`（文中的 `rt_intrinsic_target` 是旧名，已不存在）；§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
 | [core-move2-design.md](core-move2-design.md) | historical | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地；残余 `CSProtect`（error-model 的 C2）已于 2026-07-31 裁决**关档不做**。`bracket` + `with` + 当时的 `fn` 尾闭包随 v0.39.0/v0.40.0 发布；尾闭包拼写后来由 #206 尾块取代。 |
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
