@@ -78,6 +78,19 @@ class PreflightTests(unittest.TestCase):
                                           "      Some(prior) -> { base_impls = prior }")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "skip-comptime", 0)
 
+    def test_tile_golden_anchor_drift_is_caught(self):
+        # #254: these anchors were mutant_project arguments in run.sh, checked
+        # only when the tile-golden shard holding that mutant next ran.
+        self.assert_registry_drift_is_red("tile-golden", "make-token-as-iota",
+                                          "packages/tileir/src/bytecode.dawn",
+                                          "const OP_MAKE_TOKEN: Int = 0x44",
+                                          "const OP_MAKE_TOKEN: Int = 68")
+        self.assert_registry_drift_is_red("tile-golden", "load-dtype-f64",
+                                          "packages/tileir/src/dev.dawn",
+                                          "param_dtype(p), i, shape, strides, none, none, [])",
+                                          "param_dtype(p), i, shape, strides, none, none, [ ])")
+        self.assert_stale_registry_is_red("tile-golden", "region-stack-pop", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()

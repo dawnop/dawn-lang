@@ -46,6 +46,7 @@ ADAPTERS = {
     "selfhost-bench-contract": ("scripts/selfhost-bench.py",),
     "source-loop-label-contract": (".",),
     "syntax-small-contract": (".",),
+    "tile-golden": (".",),
     "wasm-dom-contract": (".",),
 }
 EXCLUSIONS = {
