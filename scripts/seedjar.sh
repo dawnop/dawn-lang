@@ -114,6 +114,15 @@ seed_verify() {
   fi
 }
 
+## The java that runs a seed jar: the one bin/dawn runs its own toolchain on.
+## A differential that puts the seed on PATH's java and the head on
+## bin/dawn's JDK compares two JDKs as well as two compilers, and a JDK
+## difference then reads as a toolchain one (issue #267). bin/dawn owns the
+## probe; this asks it rather than keeping a second copy that could drift.
+seed_java() {
+  DAWN_LAUNCHER_PRINT_JAVA=1 "$ROOT/bin/dawn"
+}
+
 seed_jar() {
   # An explicitly pointed-at jar is the debugging escape hatch: it is not the
   # pinned release, so there is nothing to check it against. Say so rather than

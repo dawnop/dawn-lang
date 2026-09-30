@@ -18,11 +18,13 @@ trap 'rm -rf "$OUT"' EXIT
 # released std (seedjar.sh), because subcommands read `std` off the cwd and
 # today's std may be one generation ahead of the seed's checker. Relative
 # targets resolve through the symlinks unchanged.
+# It runs on bin/dawn's JDK, not PATH's (seedjar.sh seed_java).
 SEEDJAR="$(seed_jar)"
+SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
 printf '#!/bin/sh
-cd "%s" && exec java -Xss512m -jar "%s" "$@"
-' "$OUT/seed-root" "$SEEDJAR" > "$OUT/seed-cli"
+cd "%s" && exec "%s" -Xss512m -jar "%s" "$@"
+' "$OUT/seed-root" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
 SH=(./bin/dawn)

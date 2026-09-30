@@ -30,9 +30,10 @@ mkdir -p "$OUT/proj/src"
 # own released std (seedjar.sh). Session documents are absolute paths under
 # $OUT, unaffected by the cwd move.
 SEEDJAR="$(seed_jar)"
+SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
-printf '#!/bin/sh\ncd "%s" && exec java -Xss512m -jar "%s" "$@"\n' \
-  "$OUT/seed-root" "$SEEDJAR" > "$OUT/seed-cli"
+printf '#!/bin/sh\ncd "%s" && exec "%s" -Xss512m -jar "%s" "$@"\n' \
+  "$OUT/seed-root" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 REF=${DAWN_BIN:-"$OUT/seed-cli"}
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi

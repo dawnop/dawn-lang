@@ -29,7 +29,8 @@ mkdir -p "$OUT/k" "$OUT/d"
 trap 'rm -rf "$OUT"' EXIT
 
 SEEDJAR="$(seed_jar)"
-printf '#!/bin/sh\nexec java -Xss512m -jar "%s" "$@"\n' "$SEEDJAR" > "$OUT/seed-cli"
+SEEDJAVA="$(seed_java)"
+printf '#!/bin/sh\nexec "%s" -Xss512m -jar "%s" "$@"\n' "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
 SELF=${DAWN_SELF:-./bin/dawn}
