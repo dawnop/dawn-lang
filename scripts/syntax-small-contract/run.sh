@@ -200,31 +200,12 @@ expect_owning_test_red() {
 
 run_syntax_mutant() {
   new_syntax_mutant "$1"
+  # The anchors live in mutate.py, one registered mutation per mutant name, so
+  # mutation-anchor-preflight.py proves each one matches exactly once before
+  # any build, not only when a shard of this contract builds that mutant.
+  python3 "$root/scripts/syntax-small-contract/mutate.py" "$1" "$mdir"
   case "$1" in
     drop-opaque-anchor)
-      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = """    Some(head) -> match head.kind {
-      HBadOpaque -> false
-      HBadCtl -> false
-      _ -> true
-    }
-"""
-new = """    Some(head) -> match head.kind {
-      HBadOpaque -> false
-      HBadCtl -> false
-      HOpaqueType -> false
-      _ -> true
-    }
-"""
-if text.count(old) != 1:
-    raise SystemExit("drop-opaque-anchor mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
       build_syntax_mutant "$1"
       expect_owning_test_red "$1" \
         'FAIL  front/parser_test :: declaration recovery anchors at contextual opaque type'
@@ -232,18 +213,6 @@ PY
       ;;
 
     drop-rbracket-return-boundary)
-      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = "  k == NEWLINE || k == RBRACE || k == RPAREN || k == RBRACKET || k == COMMA || k == EOF\n"
-new = "  k == NEWLINE || k == RBRACE || k == RPAREN || k == COMMA || k == EOF\n"
-if text.count(old) != 1:
-    raise SystemExit("drop-rbracket-return-boundary mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
       build_syntax_mutant "$1"
       expect_owning_test_red "$1" \
         'FAIL  front/parser_test :: bare return stops at every delimiter boundary'
@@ -251,32 +220,6 @@ PY
       ;;
 
     restore-parser-builtin-branch)
-      python3 - "$mdir/selfhost/src/front/parser.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-type_decl = "fn type_decl(p: P, st: St, vis: Vis) -> PR[Decl] = {\n"
-builtin_table = """fn is_builtin_scalar(name: String) -> Bool =
-  match name {
-    "Int" | "Float" | "Bool" | "String" | "Unit" -> true
-    _ -> false
-  }
-
-"""
-old = """  let aliasish = at_kind(p, st4, FN) || at_kind(p, st4, LPAREN) ||
-    (at_kind(p, st4, TYPEIDENT) && kind_ahead(p, st4, 1) == LBRACKET)
-"""
-new = """  let builtin_scalar = at_kind(p, st4, TYPEIDENT) && is_builtin_scalar(cur(p, st4).text) &&
-    kind_ahead(p, st4, 1) != LPAREN
-  let aliasish = at_kind(p, st4, FN) || at_kind(p, st4, LPAREN) ||
-    (at_kind(p, st4, TYPEIDENT) && kind_ahead(p, st4, 1) == LBRACKET) || builtin_scalar
-"""
-if text.count(type_decl) != 1 or text.count(old) != 1:
-    raise SystemExit("restore-parser-builtin-branch mutation anchor drifted")
-path.write_text(text.replace(type_decl, builtin_table + type_decl).replace(old, new))
-PY
       build_syntax_mutant "$1"
       java -Xss512m -Xmx2g -jar "$mdir/compiler.jar" __parse "$builtin_hint_fixture" \
         > "$mdir/parser.out"
@@ -299,20 +242,6 @@ PY
       ;;
 
     narrow-checker-builtin-hint)
-      python3 - "$mdir/selfhost/src/check/passes.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = "        let builtin_alias = len(d.ctors) == 1 && len(c.fields) == 0\n"
-new = """        let builtin_alias = len(d.ctors) == 1 && len(c.fields) == 0 &&
-          c.name != "Char" && c.name != "Bytes"
-"""
-if text.count(old) != 1:
-    raise SystemExit("narrow-checker-builtin-hint mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
       build_syntax_mutant "$1"
       capture_checker_jar "$mdir/compiler.jar" "$builtin_boundary_fixture" \
         "$mdir/boundary.out"
@@ -336,18 +265,6 @@ PY
       ;;
 
     drop-builtin-alias-boundary)
-      python3 - "$mdir/selfhost/src/check/passes.dawn" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = "        let builtin_alias = len(d.ctors) == 1 && len(c.fields) == 0\n"
-new = "        let builtin_alias = true\n"
-if text.count(old) != 1:
-    raise SystemExit("drop-builtin-alias-boundary mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
       build_syntax_mutant "$1"
       capture_checker_jar "$mdir/compiler.jar" "$builtin_hint_fixture" \
         "$mdir/hint.out"

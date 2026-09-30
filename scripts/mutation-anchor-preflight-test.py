@@ -93,7 +93,7 @@ class PreflightTests(unittest.TestCase):
         source = (p.ROOT / label).read_text()
         _target, old, _new = runpy.run_path(str(p.ROOT / label))["MUTATIONS"][mode][index]
         literal = old.rstrip("\n").split("\n")[-1]
-        stale = literal.replace("(", "( ", 1)
+        stale = literal[::-1].replace(" ", "  ", 1)[::-1]
         self.assertNotEqual(stale, literal)
         self.assertEqual(source.count(literal), 1)
         p.exercise(p.ROOT, source, label, mode, p.ADAPTERS[name])
@@ -115,6 +115,25 @@ class PreflightTests(unittest.TestCase):
                                           "    r == TyInt || r == TyNever",
                                           "    r == TyNever || r == TyInt")
         self.assert_stale_registry_is_red("classfile-verify", "omit-closure-bottom", 0)
+
+    def test_syntax_small_anchor_drift_is_caught(self):
+        # #254: these anchors were five Python heredocs in run.sh, checked only
+        # when a syntax shard built the mutant that quotes them.
+        parser = "selfhost/src/front/parser.dawn"
+        self.assert_registry_drift_is_red("syntax-small-contract", "drop-rbracket-return-boundary",
+                                          parser, "k == RBRACKET || k == COMMA || k == EOF\n",
+                                          "k == COMMA || k == RBRACKET || k == EOF\n")
+        # The second edit, reached only after the first inserted its table.
+        self.assert_registry_drift_is_red("syntax-small-contract", "restore-parser-builtin-branch",
+                                          parser, "  let aliasish = at_kind(p, st4, FN) ||",
+                                          "  let aliasish = at_kind(p, st4, LPAREN) ||")
+        # Two mutants share this anchor; the preflight reports the first in
+        # its sorted order.
+        self.assert_registry_drift_is_red("syntax-small-contract", "drop-builtin-alias-boundary",
+                                          "selfhost/src/check/passes.dawn",
+                                          "len(d.ctors) == 1 && len(c.fields) == 0\n",
+                                          "len(c.fields) == 0 && len(d.ctors) == 1\n")
+        self.assert_stale_registry_is_red("syntax-small-contract", "drop-rbracket-return-boundary", 0)
 
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
