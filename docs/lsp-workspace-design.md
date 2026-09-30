@@ -138,10 +138,34 @@ type UnavailableWorkspace = {
 只重建语义快照；Unavailable workspace 只更新 buffer/view 和诊断映射，保持 fail closed，避免每次
 按键触发网络重试。
 
-`didSave` 是 Unavailable 的显式 setup 重试点，但它仍使用 captured plan。保存可以重试 lock 或
-瞬态 Maven/loader failure；它**不会**读取新的 `dawn.toml` 并替换 source graph。修改 manifest 后，
-必须关闭该 identity/source root 的全部文档，再 reopen 一个文档，才会 fresh plan。未来若增加
-显式 refresh，也必须先完整构造新 plan/lease，再原子替换，最后关闭旧 lease。
+成员文档的 `didSave` 是 Unavailable 的显式 setup 重试点，它仍使用 captured plan，只重试 lock
+或瞬态 Maven/loader failure。
+
+**manifest refresh（#208）。** 替换 captured plan 的唯一事件是 `dawn.toml` 或 `dawn.lock` 变了：
+
+- **通知来源。** 客户端在 `initialize` 声明 `workspace.didChangeWatchedFiles.dynamicRegistration`
+  时，server 在 `initialized` 里发 `client/registerCapability`，glob 为 `**/dawn.toml` 与
+  `**/dawn.lock`（LSP 3.17 不允许向未声明的客户端动态注册，所以没声明就不发）。VS Code 扩展
+  另外用 `createFileSystemWatcher` + `synchronize.fileEvents` 自己监视这两个名字：它的
+  `documentSelector` 只有 `language: 'dawn'`，保存 `dawn.toml` 本来不会产生任何消息。两路事件
+  由 vscode-languageclient 在 250 ms 窗口内合并成一条 `workspace/didChangeWatchedFiles`，
+  server 按 workspace 去重，一条通知对每个 workspace 至多 refresh 一次。客户端若把
+  `dawn.toml` 当文档打开并保存，那条 `didSave` 按同一规则处理。server 对自己那条请求的回应
+  （只有 `result`/`error`、没有 `method` 的消息）一律忽略，不回 MethodNotFound。
+- **受影响的 workspace。** 变更文件所在目录属于该 slot 规划时读过的 manifest 目录：项目自身、
+  每个已解析 package 的目录（即 `bootstrap_source_input_manifest` 记为输入的那一组），以及
+  planner/setup 诊断指向的目录（这样修好一个坏 manifest 本身也会触发）。
+- **顺序。** 对每个受影响的 workspace：以同一 target 重新 `project_plan`，**先**用
+  `activate_workspace` 完整构造新 plan、新 lease 与首次 rebuild；成功则 `install_workspace`
+  原子替换并发布诊断，**最后**关闭旧 lease。失败（Maven/lock/loader）时 Ready 的旧 workspace
+  原样保留（旧 plan、旧 lease、旧 program），失败的 `LocDiag` 记在 `refresh_problem` 上，
+  每次 rebuild 都叠加到 `diag_by_uri`，直到下一次成功的 refresh 清除；Unavailable 没有可保留的
+  东西，直接换成新的失败状态。manifest 语法错误不算 setup failure：它是 planner diagnostic，
+  照常以零 jar lease 安装并发布，与首次打开一致。
+- **identity 不迁移。** identity 是 target 路径的纯函数（`source_roots` 只对路径做算术，
+  不读 manifest），refresh 重规划的是同一 target，所以 key 不会变，成员文档不需要迁到新 key。
+  若将来 manifest 能决定 source root，迁移必须落在这里；在那之前 key 变了按 invariant
+  失败 panic，而不是静默装进旧 key。
 
 ### 3.3 Duplicate canonical path conflict
 
@@ -263,7 +287,8 @@ pub type LspLeaseHost = {
 - 还有成员时，以剩余 `Doc.text` 重建；被关闭 buffer 不再进入 overlay，依赖读取其磁盘版本，
   未落盘文件则正常产生缺失模块诊断；
 - 最后一个成员关闭时，先从 state 删除 workspace 并发布聚合后的清空/剩余诊断，再关闭 lease；
-- Unavailable 没有 lease，关闭只撤销其诊断贡献；全部关闭后 reopen 会 fresh plan。
+- Unavailable 没有 lease，关闭只撤销其诊断贡献；全部关闭后 reopen 会 fresh plan（manifest
+  变更不必再走这条路，见 §3.2）。
 
 shutdown request、正常/异常 `exit`、EOF 与 fatal framing 都执行 `close_all_leases`。单个
 `lease.close` 由 `catch_panic` 隔离并记录错误，不能阻止其他 workspace 或 standalone lease
@@ -304,8 +329,11 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
 
 - **symlink/case-fold identity。** 当前 `canon` 只做绝对化与词法 `.`/`..` 归一，不解析 symlink，
   也不做平台 case-fold；duplicate conflict 只能覆盖当前 canonical 定义识别出的同一路径。
-- **manifest refresh。** `didSave` 只重试 captured plan 的 lock/瞬态 setup；修改 `dawn.toml` 后
-  必须关闭该 root identity 的全部文档再 reopen，才会 fresh plan。
+- **未解析依赖的目录不在监视范围内。** 一个 `[deps]` 指向还没有 `dawn.toml` 的目录时，诊断
+  记在消费方 manifest 上；之后在那个目录里新建 `dawn.toml` 不会触发 refresh，要再保存一次
+  消费方 manifest。补上它需要 planner 把「试读过但不存在」的 manifest 目录也交出来。
+- **standalone buffer 不随 manifest 刷新。** 它们的 module 候选表取自打开时的 plan；
+  refresh 只作用于 workspace。
 - **传递 Java 坐标来源。** manifest 语法合法、但 resolver 在传递 Maven coordinate 上失败时，
   setup diagnostic 仍可能只定位根 `dawn.toml`，尚不能精确指出贡献该坐标的 dependency manifest。
 - **已安装 workspace 的 unexpected panic。** 新 lease 在安装前 rebuild panic 会显式关闭；若
@@ -315,8 +343,8 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
   复用；Slice D 接受每次 settled update 的全 workspace 重分析成本。
 - **不删除 build/run/test re-exec。** emitter 与 comptime FFI 仍查 system loader；跨进程
   plan snapshot 与 TOCTOU 另案处理。
-- **不改 framing/lifecycle、增量 text sync、文件 watcher 或并发 cancellation。** 这些边界与
-  本轮 workspace 正确性独立。
+- **不改 framing、增量 text sync 或并发 cancellation。** 这些边界与本轮 workspace 正确性独立。
+  lifecycle 只多了一条：没有 `method` 的回应消息不作答（§3.2）。
 
 截至 `18fb3d6`，A-D 的实现、18×18 行为负控、clean-checkout 重建与远端 11/11 CI 已共同关闭
 TOOL-05/06。
