@@ -2345,7 +2345,8 @@ pub(pkg) fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) 
       lo, hi, "a lambda is its own function: use `return` to exit it, or restructure the loop"),
       false)
   }
-  (Cx { ..cx, loop_jumps: set.insert(cx.loop_jumps, len(cx.frame.loop_stack) - 1) }, true)
+  let jumps = set.insert(cx.frame.loop_jumps, len(cx.frame.loop_stack) - 1)
+  (Cx { ..cx, frame: Frame { ..cx.frame, loop_jumps: jumps } }, true)
 }
 
 ## What `?` is judged against, in the reader's terms.
@@ -3889,7 +3890,10 @@ pub(pkg) fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
       # no enclosing local is in scope, so none is being initialized here:
       # carried over, `let x = comptime { x }` under an outer `x` would blame
       # the initializer for what is comptime not seeing locals (#204)
-      initializing: set.empty()
+      initializing: set.empty(),
+      # keyed by depth in `loop_stack`, which starts again at zero here, so an
+      # outer loop's mark would be read as the first inner loop's (#204)
+      loop_jumps: set.empty()
     }
   }, cx.frame)
 }
@@ -3912,7 +3916,7 @@ pub(pkg) fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: In
   Cx { ..cx1, frame: frame }
 }
 
-test "an isolated context reports its own effects, then restores all nine fields" {
+test "an isolated context reports its own effects, then restores all ten fields" {
   var cx = test_cx()
   # The outer frame this enters an isolated context from. Every field differs
   # from what `enter_isolated` installs, including the ones the body then
@@ -3950,7 +3954,9 @@ test "an isolated context reports its own effects, then restores all nine fields
       loop_stack: [7],
       isolated: false,
       # the outer `let` whose initializer holds the isolated body
-      initializing: outer_init
+      initializing: outer_init,
+      # a `break` already seen in the outer loop at depth 0
+      loop_jumps: set.insert(set.empty(), 0)
     }
   }
   let (cx1, frame) = enter_isolated(cx)
@@ -3965,14 +3971,15 @@ test "an isolated context reports its own effects, then restores all nine fields
   assert len(cx1.frame.loop_stack) == 0
   assert cx1.frame.isolated
   assert not set.has(cx1.frame.initializing, "outer_let")
+  assert not set.has(cx1.frame.loop_jumps, 0)
   # the body records io of its own, at its own span, and that is what is reported
   let cx2 = record_effect(cx1, EIo, 5, 8, "println")
   let cx3 = leave_isolated(cx2, frame, "const initializers", 0, 10)
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
   assert cx3.diags[0].lo == 5
-  # ... and every one of the nine fields comes back as the outer context left
-  # it. It was nine before, too: `handle_evs` mapped a `with handle`'s evidence symbol to
+  # ... and every one of the ten fields comes back as the outer context left
+  # it. There were nine before #204 added two: `handle_evs` mapped a `with handle`'s evidence symbol to
   # its arms' effects, which settlement read to decide whether a closure could
   # drop the label. Nothing settles, so the map has no reader and no field.
   assert map.get(cx3.frame.scopes[0], "outer") == Some(61)
@@ -3989,6 +3996,46 @@ test "an isolated context reports its own effects, then restores all nine fields
   assert cx3.frame.loop_stack == [7]
   assert not cx3.frame.isolated
   assert set.has(cx3.frame.initializing, "outer_let")
+  assert set.has(cx3.frame.loop_jumps, 0)
+}
+
+test "a loop inside a comptime block does not answer for the loop around it" {
+  # `loop_jumps` is keyed by depth in the loop stack, and an isolated body
+  # starts that stack again at zero. On `Cx` the set carried through, so the
+  # comptime loop at depth 0 read the outer loop's `break` as its own and then
+  # removed it, and the outer loop came out with no jumps.
+  let src = "pub fn f() -> Int = {\n" ++
+    "  var i = 0\n" ++
+    "  while true {\n" ++
+    "    i = i + 1\n" ++
+    "    if i > 2 { break }\n" ++
+    "    let v = comptime {\n" ++
+    "      var j = 0\n" ++
+    "      while j < 1 {\n" ++
+    "        j = j + 1\n" ++
+    "      }\n" ++
+    "      j\n" ++
+    "    }\n" ++
+    "  }\n" ++
+    "  i\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+  assert len(cx.diags) == 0
+  var outer_jumps: Option[Bool] = None
+  for tf in tm.fns {
+    match tf.body {
+      XBlock(stmts, ..) ->
+        match stmts[1] {
+          TSWhile(_, _, hj, _, _) -> { outer_jumps = Some(hj) }
+          _ -> ()
+        }
+      _ -> ()
+    }
+  }
+  assert outer_jumps == Some(true)
 }
 
 test "a comptime block cannot read a handler cell" {
@@ -7403,14 +7450,14 @@ fn check_while(cx: Cx, cond: Expr, body: Expr, lo: Int, hi: Int) -> (Cx, TStmt) 
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
   let (cxb, bt, bx) = check_expr(cx1, body, Some(TyUnit))
   cx1 = cxb
-  let hj = set.has(cx1.loop_jumps, d)
+  let hj = set.has(cx1.frame.loop_jumps, d)
   cx1 = Cx {
     ..cx1,
     frame: Frame {
       ..cx1.frame,
-      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-    },
-    loop_jumps: set.remove(cx1.loop_jumps, d)
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
+      loop_jumps: set.remove(cx1.frame.loop_jumps, d)
+    }
   }
   if bt != TyUnit && not is_errorish(bt) {
     let text = ty_show(cx1.adts, bt)
@@ -7507,14 +7554,14 @@ fn check_for(
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
   let (cxd, bt, bx) = check_expr(cx1, body, Some(TyUnit))
   cx1 = cxd
-  let hj = set.has(cx1.loop_jumps, d)
+  let hj = set.has(cx1.frame.loop_jumps, d)
   cx1 = Cx {
     ..cx1,
     frame: Frame {
       ..cx1.frame,
-      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1)
-    },
-    loop_jumps: set.remove(cx1.loop_jumps, d)
+      loop_stack: list.take(cx1.frame.loop_stack, len(cx1.frame.loop_stack) - 1),
+      loop_jumps: set.remove(cx1.frame.loop_jumps, d)
+    }
   }
   if bt != TyUnit && not is_errorish(bt) {
     let text = ty_show(cx1.adts, bt)

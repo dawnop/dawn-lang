@@ -92,8 +92,8 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## back and `leave_isolated` puts it back with one field write, where both used
 ## to copy eight fields by hand through a twin record called EffFrame.
 ##
-## The first eight are exactly the ones that twin listed; the ninth,
-## `initializing`, joined for #204. The type is the restore set, so a field
+## The first eight are exactly the ones that twin listed; `initializing` and
+## `loop_jumps` joined for #204. The type is the restore set, so a field
 ## added here silently widens what an isolated body restores, and that change
 ## is invisible to every byte-level gate in the tree (docs/arch-split-design.md
 ## D9 and §5.4). What does see it is the `isolated_*` cases in
@@ -101,14 +101,14 @@ pub fn ty_span_kid(sp: TySpan, i: Int) -> TySpan =
 ## acceptance rule for both is the drop-restore matrix in §5.4 -- drop one
 ## field from the restore and at least one of them must go red.
 ## Fields that look like they belong --
-## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `loop_jumps`,
-## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
-## writes the first three from inside an isolated body whenever it holds a
-## local fn.
+## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `in_test` --
+## stay on `Cx` because today they are not restored, and `enter_fn` writes the
+## first three from inside an isolated body whenever it holds a local fn.
 ##
 ## The opposite mistake is the one that has happened: a field that *is* frame
 ## state added to `Cx`, where the `..cx` in `enter_isolated` carries it into the
-## isolated body unasked. `initializing` sat on `Cx` for that reason until #204.
+## isolated body unasked. `initializing` and `loop_jumps` sat on `Cx` that way
+## until #204.
 ## So every `Cx` field carries a `# frame-triage:` line saying why it is not
 ## frame state, and scripts/checker-corpus/frame-triage.py fails the corpus
 ## gate on a field without one.
@@ -140,7 +140,13 @@ pub(pkg) type Frame = {
   # can be the one "being initialized" there. On `Cx` it leaked through
   # `enter_isolated`'s spread, and `let x = comptime { x + 1 }` under an outer
   # `x` blamed the initializer for what is comptime not seeing locals (#204).
-  initializing: Set[String]
+  initializing: Set[String],
+  # loop-stack indices that saw a break/continue (drives TSWhile/TSFor
+  # has_jumps). Frame state because it is keyed by depth in `loop_stack`, which
+  # an isolated body starts again at zero: on `Cx`, a loop inside a comptime
+  # block read the enclosing loop's mark as its own and removed it (#204).
+  # Nothing downstream reads has_jumps today, so the wrong answer was silent.
+  loop_jumps: Set[Int]
 }
 
 ## The checker state: every mutable member of the Kotlin Checker class.
@@ -276,8 +282,6 @@ pub(pkg) type Cx = {
   moved: Map[String, String],
   # whole-module imports: alias → the exporter's surface (for call diagnostics)
   module_exports: Map[String, ModExports],
-  # loop-stack indices that saw a break/continue (drives TSWhile/TSFor has_jumps)
-  loop_jumps: Set[Int],
   # the source span of every `TypeRef` this module has resolved, keyed by that
   # ref's own `(lo, hi)` — which is a unique identity, since two type
   # references cannot occupy the same offsets. SEM-07 reads it to put a
@@ -425,7 +429,8 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
       lambda_stack: [],
       loop_stack: [],
       isolated: false,
-      initializing: set.empty()
+      initializing: set.empty(),
+      loop_jumps: set.empty()
     },
     syms: map.empty(),
     current_eff_vars: map.empty(),
@@ -443,7 +448,6 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     line_starts: [],
     moved: map.empty(),
     module_exports: map.empty(),
-    loop_jumps: set.empty(),
     ty_spans: map.empty(),
     record_ty_spans: false,
     take_cell: None,
