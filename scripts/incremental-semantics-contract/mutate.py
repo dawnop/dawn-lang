@@ -10,8 +10,11 @@ so drift surfaced as a red shard long after the edit (#254, after #249 found the
 here, in the registry shape mutation-anchor-preflight.py discovers, they are
 proven exactly-once before any build, and cold.py reads them from here.
 
-Only cold.py's own mutants are here. The harnesses that import `edit` from
-cold.py quote their own anchors, and their ledger lines say what holds them.
+Every harness of this directory reads the one registry, so each key carries
+its owner as a prefix (`cold/intern-table`): a harness takes its own group
+with cold.owned, which strips the prefix, and never iterates the others'.
+The preflight runs every key, whatever its owner. One file rather than one per
+harness because mutation-anchor-preflight.py keys its adapters by directory.
 
 A mutation is an ordered tuple of edits, each applied to the text the previous
 one left, with paths relative to the tree root.
@@ -24,17 +27,17 @@ ANALYZE = "selfhost/src/driver/analyze.dawn"
 
 MUTATIONS = {
     # The step starts from an empty intern table instead of the one before it.
-    "intern-table": ((ANALYZE, "    identities: before.identities,", "    identities: map.empty(),"),),
+    "cold/intern-table": ((ANALYZE, "    identities: before.identities,", "    identities: map.empty(),"),),
     # Impls are carried from the std baseline, not from the module before.
-    "impl-carry": ((ANALYZE, "  var base_impls = before.impls\n", "  var base_impls = std.impls\n"),),
+    "cold/impl-carry": ((ANALYZE, "  var base_impls = before.impls\n", "  var base_impls = std.impls\n"),),
     # A module's diagnostics are prepended instead of appended.
-    "diagnostic-order": ((ANALYZE, "    diags = diags ++ step.diags\n", "    diags = step.diags ++ diags\n"),),
+    "cold/diagnostic-order": ((ANALYZE, "    diags = diags ++ step.diags\n", "    diags = step.diags ++ diags\n"),),
     # The checker never runs.
-    "skip-check": ((ANALYZE, "  if not parse_failed {\n", "  if false {\n"),),
+    "cold/skip-check": ((ANALYZE, "  if not parse_failed {\n", "  if false {\n"),),
     # Comptime evaluation never runs.
-    "skip-comptime": ((ANALYZE, "    if len(cx.diags) == 0 {\n", "    if false {\n"),),
+    "cold/skip-comptime": ((ANALYZE, "    if len(cx.diags) == 0 {\n", "    if false {\n"),),
     # The std baseline's impls are not taken over.
-    "std-baseline": ((ANALYZE, "      Some(before) -> { base_impls = before }", "      Some(before) -> ()"),),
+    "cold/std-baseline": ((ANALYZE, "      Some(before) -> { base_impls = before }", "      Some(before) -> ()"),),
 }
 
 
