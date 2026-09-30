@@ -53,73 +53,11 @@ PY
 check_backend_shape "$root/selfhost/src/jvm/help.dawn"
 echo "PASS  Object narrowing is rejected; checked cast and safe bridges run"
 
-mutate_checker() {
-  python3 - "$1" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-old = '''          } else if cx.jsig.is_assignable(p, fq) {
-            Some(1)
-          } else {
-            None
-          }'''
-new = '''          } else if cx.jsig.is_assignable(p, fq) {
-            Some(1)
-          } else if fq == "java.lang.Object" && not is_prim_name(p) {
-            Some(1)
-          } else {
-            None
-          }'''
-if text.count(old) != 1:
-    raise SystemExit("checker mutation anchor drifted")
-path.write_text(text.replace(old, new))
-PY
-}
-
-mutate_backend() {
-  python3 - "$1" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-
-def replace_once(old: str, new: str) -> None:
-    global text
-    if text.count(old) != 1:
-        raise SystemExit(f"backend mutation anchor drifted: {old!r}")
-    text = text.replace(old, new)
-
-replace_once(
-    "use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes}",
-    "use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyJava}",
-)
-replace_once(
-    "OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_D2F",
-    "OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_CHECKCAST, OP_D2F",
-)
-replace_once(
-    '''  } else if dawn_ty == TyFloat && param_cls == "float" {
-    m.visitInsn(OP_D2F)
-  }
-  ()''',
-    '''  } else if dawn_ty == TyFloat && param_cls == "float" {
-    m.visitInsn(OP_D2F)
-  } else {
-    match dawn_ty {
-      TyJava(fqcn, _) ->
-        if fqcn == "java.lang.Object" && not is_prim_name(param_cls) {
-          m.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
-        }
-      _ -> ()
-    }
-  }
-  ()''',
-)
-path.write_text(text)
-PY
+# The anchors live in mutate.py, one registered mutation per private copy, so
+# mutation-anchor-preflight.py proves each one matches exactly once before any
+# build, not only when this contract runs.
+mutate() { # mutation, selfhost-copy
+  python3 "$here/mutate.py" "$1" "$2"
 }
 
 ln -s "$root/packages" "$work/packages"
@@ -127,7 +65,7 @@ cp -R "$root/compiler-plan" "$work/compiler-plan"
 
 checker_mutant="$work/checker-mutant"
 cp -R "$root/selfhost" "$checker_mutant"
-mutate_checker "$checker_mutant/src/check/checker.dawn"
+mutate object-scorer-exception "$checker_mutant"
 if "$dawn" test "$checker_mutant" > "$work/checker-mutant.out" 2>&1; then
   fail "restored Object scorer exception stayed green"
 fi
@@ -139,7 +77,7 @@ echo "PASS  restored Object scorer exception turns its unit test red"
 
 backend_mutant="$work/backend-mutant"
 cp -R "$root/selfhost" "$backend_mutant"
-mutate_backend "$backend_mutant/src/jvm/help.dawn"
+mutate backend-checkcast "$backend_mutant"
 if ! "$dawn" test "$backend_mutant" > "$work/backend-mutant.out" 2>&1; then
   cat "$work/backend-mutant.out" >&2
   fail "backend CHECKCAST mutant did not compile and run"

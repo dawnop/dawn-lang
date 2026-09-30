@@ -159,6 +159,20 @@ class PreflightTests(unittest.TestCase):
                                           "      # to the subnormal grid under emin\n      let qe = (")
         self.assert_stale_registry_is_red("narrow-contract", "emax-off-by-one", 0)
 
+    def test_java_narrowing_anchor_drift_is_caught(self):
+        # #254: these anchors were two Python heredocs in run.sh, checked only
+        # when the contract tested two private selfhost copies.
+        self.assert_registry_drift_is_red("java-narrowing-contract", "object-scorer-exception",
+                                          "selfhost/src/check/checker.dawn",
+                                          "} else if cx.jsig.is_assignable(p, fq) {",
+                                          "} else if cx.jsig.is_assignable(p, fq) == true {")
+        # The last of the backend mutant's three edits is reached and held too.
+        self.assert_registry_drift_is_red("java-narrowing-contract", "backend-checkcast",
+                                          "selfhost/src/jvm/help.dawn",
+                                          "    m.visitInsn(OP_D2F)\n  }\n  ()",
+                                          "    m.visitInsn(OP_D2F)\n  }\n  unit()")
+        self.assert_stale_registry_is_red("java-narrowing-contract", "backend-checkcast", 1)
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
