@@ -948,7 +948,8 @@ harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。�
   而 `path` 是这个编译器里十几个函数的形参名。这是语言的一处人体工学缺口,不是模块的问题,先绕开。
   (它当初落在 `std/fspath`;审计 RD-09 判它不该在 std,本节落地时 `packages/fspath`
   与 compiler-local 子集仍并存。当前 `compiler-plan` 与 `selfhost` 已直接共享
-  `packages/fspath`,旧子集删除。)
+  `packages/fspath`,旧子集删除。2026-09-30 起 `canon` 本身也只剩一份:`compiler-plan/src/source.dawn`
+  的 `pub fn canon`,`driver/analyze`、`driver/stdlib`、`lsp/server` 都从那里 import,见 #207。)
 - **`fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
   在文档注释里**声明了一处与 Java 的偏离**——`..` 爬过根目录——跑完发现 **Java 也是这么做的**,
   于是那三个用例从「声明的偏离」变成普通的一致性用例,注释改成记录这件事本身。
