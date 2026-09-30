@@ -4,10 +4,16 @@
 Both receive the same loaded inputs and StdCtx in a private subject. The
 reference shares unchanged low-level checker/stdlib helpers, but never calls
 ModuleStep or the observed fold. Each mutant changes only the new path.
+
+The mutants' anchors live in mutate.py beside this script, where
+mutation-anchor-preflight.py proves them exactly-once before any build; main
+reads them from there and applies them with `edit`, as before, so a drifted
+one still stops this script before it compiles anything.
 """
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -59,15 +65,15 @@ def main():
     started = time.monotonic()
     original = (ROOT / "selfhost/src/driver/analyze.dawn").read_text()
     reference = (HERE / "reference-loop.dawn.txt").read_text()
-    variants = [
-        ("intern-table", "    identities: before.identities,", "    identities: map.empty(),"),
-        ("impl-carry", "  var base_impls = before.impls\n", "  var base_impls = std.impls\n"),
-        ("diagnostic-order", "    diags = diags ++ step.diags\n", "    diags = step.diags ++ diags\n"),
-        ("skip-check", "  if not parse_failed {\n", "  if false {\n"),
-        ("skip-comptime", "    if len(cx.diags) == 0 {\n", "    if false {\n"),
-        ("std-baseline", "      Some(before) -> { base_impls = before }", "      Some(before) -> ()"),
-    ]
-    subjects = [("positive", original)] + [(name, edit(original, old, new)) for name, old, new in variants]
+    variants = runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"]
+    subjects = [("positive", original)]
+    for name, edits in variants.items():
+        source = original
+        for rel, old, new in edits:
+            if rel != "selfhost/src/driver/analyze.dawn":
+                raise RuntimeError(f"{name}: cold mutates driver/analyze.dawn only, not {rel}")
+            source = edit(source, old, new)
+        subjects.append((name, source))
     with tempfile.TemporaryDirectory(prefix="dawn-cold-reference-") as temp:
         root = Path(temp)
         classes = root / "classes"
@@ -97,7 +103,7 @@ def main():
             elif not status or not re.search(r"^FAIL\s+.*" + re.escape(OWNER), output, re.M):
                 raise RuntimeError(f"{name} missed the frozen-loop assertion\n{output}")
             print(f"OK: frozen-loop {name}", flush=True)
-    print(f"OK: full-product cold reference, 6 compiling mutants; elapsed={time.monotonic()-started:.2f}s")
+    print(f"OK: full-product cold reference, {len(variants)} compiling mutants; elapsed={time.monotonic()-started:.2f}s")
 
 
 if __name__ == "__main__":

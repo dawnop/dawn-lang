@@ -32,6 +32,7 @@ ADAPTERS = {
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),
     "for-pattern-contract": ("selfhost",),
+    "incremental-semantics-contract": (".",),
     "inflate-contract": (".",),
     "java-narrowing-contract": ("selfhost",),
     "list-elems-contract": (".",),
@@ -59,6 +60,7 @@ EXCLUSIONS = {
 REGISTRY_READERS = {
     "dict-owner-contract/shapes.py": "dict-owner-contract",
     "export-surface-contract/run.sh": "export-surface-contract",
+    "incremental-semantics-contract/cold.py": "incremental-semantics-contract",
 }
 SHELL_ADAPTERS = {
     "java-target-classpath-contract": ("selfhost/src/main.dawn",

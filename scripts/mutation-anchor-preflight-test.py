@@ -66,6 +66,18 @@ class PreflightTests(unittest.TestCase):
                                           'let name = "bridge$" ++ show(tid)')
         self.assert_stale_registry_is_red("dict-owner-contract", "dictionary-shape", 0)
 
+    def test_cold_reference_anchor_drift_is_caught(self):
+        # #254: cold.py spelled these driver/analyze.dawn anchors in its main
+        # and refused a stale one only when incremental-memo-3 ran it.
+        analyze = "selfhost/src/driver/analyze.dawn"
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "intern-table", analyze,
+                                          "    identities: before.identities,",
+                                          "    identities: before.identities ,")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "std-baseline", analyze,
+                                          "      Some(before) -> { base_impls = before }",
+                                          "      Some(prior) -> { base_impls = prior }")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "skip-comptime", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
