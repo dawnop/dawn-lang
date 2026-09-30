@@ -723,6 +723,45 @@ sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/check/checker.dawn \
 > 事后都被证明看不见。要么去实测，要么就写成「不知道有没有东西看得见」。
 > 除这条路径之外的诊断变化，上面那句仍然成立。
 
+> **★ #204（2026-10-01）：反方向的错，已经发生过两次。** 上面守的是「`Frame` 多装了字段」；
+> 实际出事的是另一头：**本该是帧状态的字段加在了 `Cx` 上**，经 `enter_isolated` 的
+> `Cx { ..cx, frame: ... }` 原样流进隔离体。`Frame` 字面量逐字段写出只管得住 `Frame`，
+> `Cx` 上新增的字段没有任何东西问它「是不是帧状态」。拆分收尾时 `Cx` 40 个字段，
+> 到 #204 时 57 个，`Frame` 一直是 8 个。
+>
+> **实例一：`initializing`**（#198 为「在自己的初始化式里用了自己」加的集合）。
+> 外层 `let x = 1` 之后写 `let x = comptime { x + 1 }`，报的是
+> `` `x` is used in its own initializer ``，hint 还在讲行尾运算符续行；真实原因是
+> comptime 看不见局部变量（去掉 `let x =` 报 `undefined variable: x`，去掉 `comptime`
+> 程序合法、输出 2）。**实例二：`loop_jumps`**（分诊时查出来的）。它以 `loop_stack`
+> 的深度为键，而隔离体把 `loop_stack` 从零开始，于是 comptime 里的循环把外层循环的
+> `break` 标记当成自己的，读完还删掉，外层循环的 `has_jumps` 变成 false。今天
+> `has_jumps` 在检查器之后没有读者（lower、interp、LSP 都忽略它），所以没有任何程序或
+> 诊断变化，语料看不见，只有内联 test 看得见。
+>
+> **修法**：两个字段都挪进 `Frame`，`enter_isolated` 置空、`leave_isolated` 随整帧恢复。
+> `Frame` 现为 10 个字段。drop-restore 矩阵照旧适用，新增两行都实跑过、都红：
+> 漏恢复 `initializing` 让 `isolated_initializing` 语料（`after` 函数那条诊断）与
+> `leave_isolated` 旁的内联 test 变红；漏恢复 `loop_jumps` 让同一内联 test 与
+> 「a loop inside a comptime block does not answer for the loop around it」变红。
+> 进入时不清空 `initializing`（即 #204 之前的行为）让 `isolated_initializing` 的
+> `inner` 那条诊断变红。
+>
+> **分诊门**：`Cx` 的每个字段上方注释块里必须有一行 `# frame-triage: <理由>`，
+> 说明它为什么可以经 `..cx` 进入隔离体；`scripts/checker-corpus/frame-triage.py`
+> 由 `checker-corpus/run.sh` 最先调用，缺一行即红（负控：加一个无注释字段，红）。
+> 它只查「有理由」，不查理由对不对；对不对仍靠上面的语料与内联 test。
+> 选脚本而不是 cx.dawn 里的内联 test：Dawn test 读自己的源码要依赖 `dawn test` 的
+> 工作目录，JVM 与 native 两个 runner 都没钉住它，selfhost 里也没有读仓库文件的 test。
+>
+> **`take_cell` 的论证**（#204 原文点名的那个字段，留在 `Cx`）：赋值臂只在一个右侧
+> 表达式期间置位，标记是符号 id，只被解析到该 id 的读取消费；隔离体的作用域链是
+> `enter_isolated` 新装的 `[fresh_scope]`，其中没有名字能解析到外层 cell，所以
+> `acc = comptime { acc }` 报 `undefined variable: acc`，不是 cell 读；赋值臂在
+> `check_expr` 之后无条件清零，隔离体留下的任何东西也到不了下一次赋值。论证写在
+> `enter_isolated` 的注释里，内联 test「a comptime block cannot read a handler cell」
+> 是它的控制（负控：让隔离体沿用外层 `scopes`，该 test 变红）。
+
 ## 6. 不做的（记录理由）
 
 ### 6.1 `lowered-ir-design.md` §3.2 的六组件——退役
