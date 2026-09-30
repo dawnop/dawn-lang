@@ -73,31 +73,14 @@ echo "PASS  gzip member boundaries agree on JVM and native"
 # Every rule below has a live behavioral mutant. A mutant must compile and run;
 # only the named contract failure counts as a red gate, so a stale replacement
 # or an unrelated compiler error cannot masquerade as discrimination.
-mutate() { # file, old, new
-  python3 - "$1" "$2" "$3" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-old, new = sys.argv[2], sys.argv[3]
-text = path.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"mutation anchor occurs {text.count(old)} times in {path}: {old!r}")
-path.write_text(text.replace(old, new))
-PY
-}
-
-expect_mutant_red() { # name, source file, old, new, expected failure label
-  local name source old new expected safe mutant
+expect_mutant_red() { # name, expected failure label
+  local name expected safe mutant
   name=$1
-  source=$2
-  old=$3
-  new=$4
-  expected=$5
+  expected=$2
   safe=${name//-/_}
   mutant="$work/mutant-$name"
-  mkdir -p "$mutant/inflate" "$mutant/project/src"
-  cp -R "$root/packages/inflate/." "$mutant/inflate/"
+  mkdir -p "$mutant/packages/inflate" "$mutant/project/src"
+  cp -R "$root/packages/inflate/." "$mutant/packages/inflate/"
   cp "$here/native.dawn" "$mutant/project/src/main.dawn"
   cp "$here/gzip_cases.dawn" "$mutant/project/src/gzip_cases.dawn"
   cat > "$mutant/project/dawn.toml" <<TOML
@@ -105,9 +88,12 @@ schema = 1
 name = "inflate_mutant_$safe"
 
 [deps]
-inflate = "$mutant/inflate"
+inflate = "$mutant/packages/inflate"
 TOML
-  mutate "$mutant/inflate/src/$source" "$old" "$new"
+  # The anchors live in mutate.py, one registered mutation per mutant name, so
+  # mutation-anchor-preflight.py proves each one matches exactly once before
+  # any build, not only when this contract runs.
+  python3 "$here/mutate.py" "$name" "$mutant"
   if ! "$root/bin/dawn" run "$mutant/project" > "$mutant/out" 2> "$mutant/err"; then
     cat "$mutant/err" >&2
     echo "FAIL: $name mutant did not compile and run" >&2
@@ -125,18 +111,12 @@ TOML
   echo "PASS  $name mutant turns the gzip contract red"
 }
 
-expect_mutant_red member-loop gzip.dawn \
-  'while cursor < n {' 'if cursor < n {' 'concatenated members'
-expect_mutant_red final-trailer gzip.dawn \
-  'let trailer = deflate_end' 'let trailer = bytes.len(src) - 8' 'concatenated members'
-expect_mutant_red aggregate-cap gzip.dawn \
-  'Some(lim - bytes.size(out))' 'Some(lim)' 'aggregate cap is not reset'
-expect_mutant_red reserved-flags gzip.dawn \
-  'if flags & RESERVED != 0 {' 'if false {' 'reserved flags in later member'
-expect_mutant_red fhcrc gzip.dawn \
-  'if got != want {' 'if false {' 'bad FHCRC in second member'
-expect_mutant_red fhcrc-origin gzip.dawn \
-  'bytes.slice(src, start, i)' 'bytes.slice(src, 0, i)' 'valid FHCRC in second member'
+expect_mutant_red member-loop 'concatenated members'
+expect_mutant_red final-trailer 'concatenated members'
+expect_mutant_red aggregate-cap 'aggregate cap is not reset'
+expect_mutant_red reserved-flags 'reserved flags in later member'
+expect_mutant_red fhcrc 'bad FHCRC in second member'
+expect_mutant_red fhcrc-origin 'valid FHCRC in second member'
 
 # The compression bomb, in a heap far smaller than the expansion.
 #
