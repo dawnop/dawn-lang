@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 926cd523e0bfc090 -->
+<!-- doc-check: translation-of docs/spec.md @ 4684a75d299c9062 -->
 
 # Dawn Language Specification
 
@@ -2822,10 +2822,27 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    `Map`/`Set` are not allowed for now: they are HAMTs over `Array`, and the comptime
    interpreter has no `Array` primitive; `List` works because the interpreter carries its
    own list representation, not because it can run `std/pvec`.
+   `Bytes` is not allowed either, for the same kind of reason: the interpreter's value type
+   has no byte-string case, so a `Bytes` value has nowhere to live at compile time, and the
+   `std/bytes` primitives are refused at comptime across the board. That `Bytes` has
+   `Eq`/`Hash`/`Show` does not change this; whether a type can be a constant asks whether the
+   interpreter can hold it, not which traits it supports. To prepare byte data at compile
+   time, compute a `List[Int]` or a `String` and turn it into `Bytes` where it is used.
 3. Evaluation has a step budget (10⁸ steps by default, tunable with `--comptime-fuel`);
    exceeding it is an error — which guarantees compilation always terminates.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).
+5. Pure does not mean foldable: some pure builtins are refused at comptime too, because the
+   values they operate on are ones the interpreter cannot represent (the `Array`, `Bytes`
+   and `Map`/`Set` mentioned above), or because the answer they would fold belongs to the
+   build rather than to the program. Which ones is looked up per function, not enumerated
+   here: `dawn doc --builtins` gives every compiler builtin's entry a `"comptime"` field
+   whose value is `"ok"` or `"refused"`. The flag is taken from the list the interpreter
+   actually refuses, and a gate holds it, in both directions, equal to the interpreter and
+   to the `# comptime: rejected` markers in `selfhost/builtins.dawn`. A std function written
+   in Dawn carries no such field: whether it folds depends on which builtins its body
+   reaches, and when a constant fails to evaluate the error names the refused one along the
+   call chain (`dawn check` shows it).
 
 ### 7.3 Explicitly out of scope
 

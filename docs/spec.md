@@ -2278,9 +2278,20 @@ fn lookup(d: Int) -> Float =
    等游标统一度量后这条例外撤销。
    `Map`/`Set` 暂不可以：它们是 `Array` 之上的 HAMT，而 comptime 解释器没有 `Array`
    原语；`List` 能行是因为解释器自带列表表示，不是因为它跑得动 `std/pvec`。
+   `Bytes` 也不可以，理由同源：解释器的值类型里没有字节串这一种，一个 `Bytes` 值在编译期
+   无处存放，于是 `std/bytes` 的原语在 comptime 一律被拒绝。它有 `Eq`/`Hash`/`Show`
+   不改变这一点；能不能作常量问的是解释器能不能持有它，不是它支持哪些 trait。
+   要在编译期准备字节数据，就算出 `List[Int]` 或 `String`，在用它的地方再转成 `Bytes`。
 3. 求值有步数预算（默认 10⁸ 步，`--comptime-fuel` 调整），超限报错——
    保证编译必然终止。
 4. comptime 里没有 Java 互操作、没有 io（由约束 1 自动保证）。
+5. 纯不等于能折叠：有些纯的 builtin 在 comptime 同样被拒绝，因为它们操作的值解释器表示
+   不了（上面提到的 `Array`、`Bytes`、`Map`/`Set`），或者折出来的答案属于构建而不属于程序。
+   哪些被拒绝逐函数查，不在这里枚举：`dawn doc --builtins` 给每个编译器 builtin 的条目
+   带一个 `"comptime"` 字段，值是 `"ok"` 或 `"refused"`。这份标记取自解释器实际拒绝的
+   名单，门禁双向核对它与解释器、与 `selfhost/builtins.dawn` 的 `# comptime: rejected`
+   标记一致。用 Dawn 写成的 std 函数没有这个字段：它能不能折叠取决于函数体走到哪些
+   builtin，常量求值失败时报错会沿调用链指出是哪一个（`dawn check` 即可看到）。
 
 ### 7.3 明确不做
 
