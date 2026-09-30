@@ -25,6 +25,7 @@ import sys
 
 ANALYZE = "selfhost/src/driver/analyze.dawn"
 CHECKER = "selfhost/src/check/checker.dawn"
+ENGINE = "selfhost/src/driver/incremental.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 # Anchors two groups quote, spelled once.
@@ -32,6 +33,9 @@ WARM_ANALYZE = "incremental.analyze(ws0.cache, loaded)"
 COLD_ANALYZE = "incremental.analyze(incremental.evict(ws0.cache), loaded)"
 LOADED = "      let loaded = reusing.loaded"
 PREFIX_ANALYZE = "      let update = " + WARM_ANALYZE
+SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n"
+SAME_SURFACE = "-> Bool =\n  a == b &&\n"
+CUTOFF = "              Some(before) -> if same_surface(own, before) {"
 
 # body-executor.py: each role's executor call, and a body that bypasses the
 # executor, returning the state it was handed.
@@ -158,6 +162,54 @@ MUTATIONS = {
     "body-executor/bypass-test": bypass("test"),
     "body-executor/reset-state-test": reset_state("test"),
     "body-executor/stale-inferred-context": ((CHECKER, GROUP_ENTRY, GROUP_ENTRY.replace("cx1,", "headers.cx,")),),
+
+    # module-memo.py: each weakens one part of the session's reuse rule
+    # (docs/lsp-module-memo-design.md). module-memo.py deals them to its
+    # shards by index, so their order here is its shard assignment.
+    "module-memo/always-cold": ((ENGINE,
+        "  if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }",
+        "  if true || not (same_input(raw, e.raw) && identity == e.std_identity) { return None }"),),
+    # The input half of the rule.
+    "module-memo/text-only": ((ENGINE, SAME_INPUT, "-> Bool = a.text == b.text\n"),),
+    "module-memo/ignore-input": ((ENGINE, SAME_INPUT, "-> Bool = true\n"),),
+    "module-memo/ignore-std-identity": ((ENGINE, "same_input(raw, e.raw) && identity == e.std_identity)",
+                                         "same_input(raw, e.raw) && true)"),),
+    # What the step read of the carry: the surfaces its `use` lines name,
+    # including what those surfaces grafted from their own imports, the
+    # program-wide impl table, and the intern table for collisions.
+    "module-memo/ignore-reads": ((ENGINE, "  if not reads_hold(e, carry.exports, seen, fresh) { return None }\n", ""),),
+    "module-memo/reexport-blind": ((ENGINE, SAME_SURFACE,
+        "-> Bool =\n  ModExports { ..a, adt_infos: b.adt_infos, trait_infos: b.trait_infos, "
+        "effect_infos: b.effect_infos } == b &&\n"),),
+    "module-memo/ignore-impls": ((ENGINE,
+        "  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }\n", ""),),
+    "module-memo/drop-identities": ((ENGINE, "  Some(Kept { identities: ids, minted: Some(rows) })",
+                                     "  Some(Kept { identities: carry.identities, minted: Some(rows) })"),),
+    "module-memo/skip-collision": ((ENGINE, "      Some(other) -> if other != v { return None }",
+                                    "      Some(other) -> ()"),),
+    "module-memo/keep-diagnosed": ((ENGINE, "  if len(e.step.diags) > 0 { return None }\n", ""),),
+    # The early cutoff: a re-checked module whose surface comes out as it was.
+    "module-memo/skip-cutoff": ((ENGINE, CUTOFF,
+                                 "              Some(before) -> if false && same_surface(own, before) {"),),
+    "module-memo/false-cutoff": ((ENGINE, CUTOFF, "              Some(before) -> if true {"),),
+    "module-memo/unordered-surface": ((ENGINE, SAME_SURFACE, "-> Bool =\n  a == b ||\n"),),
+    # The position view around a reused step.
+    "module-memo/stale-spans": ((ENGINE,
+        "decl_spans: map.insert(carry.decl_spans, step.checked.mod_path, own_spans)",
+        "decl_spans: map.insert(step.after.decl_spans, step.checked.mod_path, own_spans)"),),
+    # The export surface the carry comparison reads.
+    "module-memo/alias-positions": ((CHECKER, "  AliasE { ..al, target: no_target, nlo: 0, nhi: 0 }\n",
+        "  if true { al } else { AliasE { ..al, target: no_target, nlo: 0, nhi: 0 } }\n"),),
+    "module-memo/impl-positions": ((CHECKER,
+        "  if im.lo == 0 && im.hi == 0 { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n",
+        "  if true { im } else { ImplI { ..im, lo: 0, hi: 0 } }\n"),),
+    # What the owner remembers.
+    "module-memo/ignore-eviction": ((ENGINE,
+        "  let none: Map[String, Entry] = map.empty()\n  State { ..session, memo: none }\n}",
+        "  session\n}"),),
+    "module-memo/ignore-module-budget": ((ENGINE, "    if retained < session.max_modules {", "    if true {"),),
+    "module-memo/allow-negative-budget": ((ENGINE,
+        '  if max_modules < 0 { panic("negative analysis cache limit") }', "  ()"),),
 }
 
 
