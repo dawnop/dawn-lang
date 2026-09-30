@@ -309,6 +309,19 @@ class PreflightTests(unittest.TestCase):
         self.assert_stale_mutator_is_red("range-bound-order-contract", "restore-upper-first",
                                          "CSLet(bsym, TyInt, hi_v),")
 
+    def test_source_loop_label_anchor_drift_is_caught(self):
+        # #277: source-loop-label-contract/run.sh is not-anchor because its
+        # one mutant comes from this mutator; the harness greps only a Core
+        # dump and the observed red set.
+        self.assert_registry_drift_is_red("source-loop-label-contract",
+                                          "drop-terminal-loop-jump-guard",
+                                          "selfhost/src/c/rc.dawn",
+                                          "not yields(x) && not jumps(x, lid, true, true)",
+                                          "not yields(x) && not jumps(x, lid, true,true)")
+        self.assert_stale_mutator_is_red("source-loop-label-contract",
+                                         "drop-terminal-loop-jump-guard",
+                                         "not jumps(x, lid, true, true)")
+
     def test_unknown_mutator_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
