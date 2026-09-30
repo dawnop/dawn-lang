@@ -153,7 +153,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [unwrap-design.md](unwrap-design.md) | historical | 互操作 Option 解包，后缀 `!`；权威条文在 spec §8.2。 |
 | [varargs-design.md](varargs-design.md) | historical | 传可变实参；权威条文在 spec §9.3。 |
 | [builtins-to-stdlib.md](builtins-to-stdlib.md) | historical | 「为什么有这么多 builtin」的回答与迁移路线。**文中的 builtin 计数别当现状**，这条曲线此后被 intrinsic 契约掉了头。 |
-| [stdlib-naming.md](stdlib-naming.md) | historical | 平铺名破坏性重组为模块限定式（v0.4.0 双拼写、v0.5.0 删平铺名）；§五另记第二批改名的沿革。 |
+| [stdlib-naming.md](stdlib-naming.md) | historical | 平铺名破坏性重组为模块限定式（v0.4.0 双拼写、v0.5.0 删平铺名）；§五另记第二批改名的沿革，§六是第三批：std 形参名审计、20 处改名与 `Param-Change` 冻结门（v0.80.0，#210）。 |
 | [trait-v2-design.md](trait-v2-design.md) | historical | 八刀，`==` 走 `Eq` bound；权威描述在 spec §3.5 与 trait.md。 |
 | [semantics-closure-design.md](semantics-closure-design.md) | **current** | S1：把一件事的 N 份定义收成一份。§9 那张表的步 1–5 已落地，**步 6 只做了一半**；§10–§12 是这条线的尾款。 |
 | [assoc-types-design.md](assoc-types-design.md) | **current** | `type Item` 与投影 `T.Item`，两刀均于 2026-08-02 落地；运算符 trait 的前置。 |

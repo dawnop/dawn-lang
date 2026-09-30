@@ -528,6 +528,8 @@ std 有几百个 pub 函数，形参名从没按「会被调用方写出来」�
 这是一笔真实的、必须单独排的活（§8 刀 4），**不能塞进落地那一刀**：它是 API 面变更，
 要单独发布（裁决 4），而且 CONTRIBUTING §七的「命名族准入判据」正是给它用的尺子。
 
+（2026-10-01：已付，见 §8 刀 4 的回填。）
+
 ---
 
 ## 7. 破坏面、期数与种子纪律
@@ -656,6 +658,14 @@ Dogfood（编译器自身、std、backend-dawn 用上具名实参与默认值）
 
 按 §6.4。对着 CONTRIBUTING §七的准入判据过一遍 std 的 pub 函数形参名，改名是破坏性变更，
 必须单独发一版并在 release note 里列全。
+
+**2026-10-01 回填（#210 刀 b）**：已落地，随 v0.80.0 发布（刀 a 的 `Iter` 同版）。
+审了 394 个 top-level pub fn、997 个槽位与 prelude trait，改 20 个槽位、18 个函数；
+判据与逐条改名表在 [stdlib-naming.md](stdlib-naming.md) §六。本仓与 backend-dawn
+按名传实参调用 std 的地方实扫为 0 处。同批上了冻结门：prev-diff job 里
+`scripts/selfhost-param-diff.sh` 拿种子与 HEAD 的 `doc --stdlib` 按位置比形参名，
+未在提交信息里写 `Param-Change(<item>): <old> -> <new>` 的变化判红。
+所以 §6.4 那笔「一次性代价」付清之后，形参名从此按 API 冻结。
 
 ### 刀 5（另立，另发布）—— dogfood
 
