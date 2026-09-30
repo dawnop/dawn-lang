@@ -91,6 +91,18 @@ class PreflightTests(unittest.TestCase):
                                           "      let update  = incremental.analyze(")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-observe/inputs", 0)
 
+    def test_lsp_configured_anchor_drift_is_caught(self):
+        # #277: lsp-configured.py spelled both anchors in configure, and CI
+        # runs only its --self-test, whose fixture was a copy of them; a
+        # drifted server anchor surfaced when someone next ran the benchmark.
+        server = "selfhost/src/lsp/server.dawn"
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-configured/policy", server,
+                                          "legacy_analysis_config())", "legacy_analysis_config() )")
+        self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-configured/observe", server,
+                                          "      let prog = update.program\n      Workspace {",
+                                          "      let prog = update.program\n      Workspace  {")
+        self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-configured/policy", 0)
+
     def test_tile_golden_anchor_drift_is_caught(self):
         # #254: these anchors were mutant_project arguments in run.sh, checked
         # only when the tile-golden shard holding that mutant next ran.

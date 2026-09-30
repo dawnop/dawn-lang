@@ -3,20 +3,23 @@
 
 Configuration and optional stderr observation are confined to a copied source
 tree. Uninstrumented builds provide the same policy without measurement hooks;
-neither variant adds a production command-line flag or protocol method.
+neither variant adds a production command-line flag or protocol method. The
+two anchors are the lsp-configured group of mutate.py, where the preflight
+proves them against HEAD; the self-test's fixture is made of the same two.
 """
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import signal
 import subprocess
 import sys
 import time
 
-from cold import DAWN, ROOT, edit
+from cold import DAWN, HERE, ROOT, edit, owned
 from lsp_stats import FIELDS
 
 NATIVE_FLAGS = ("-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread")
@@ -129,19 +132,27 @@ def build_native(output, cc_name):
                                     for path in (bootstrap_directory / "scripts").glob("seed-*.txt")}}
 
 
+def anchors():
+    """The policy entry's anchor and the observation edit, from mutate.py.
+    The registry's policy edit is the default form; configure must make it."""
+    group = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "lsp-configured")
+    (_, entry, default), = group["policy"]
+    (_, point, observed), = group["observe"]
+    return entry, point, observed, default
+
+
 def configure(text, mode, modules, observe):
     if mode not in {"Legacy", "Cold"} or modules < 0:
         raise ValueError("invalid analysis policy or cache limit")
-    text = edit(text, "run_lsp_configured(std_flag, host, legacy_analysis_config())",
+    entry, point, observed, _ = anchors()
+    text = edit(text, entry,
                 "run_lsp_configured(std_flag, host, LspAnalysisConfig { "
                 f"mode: {mode}, max_modules: {modules}" + " })")
     if not observe:
         return text
     # Only a project workspace owns a session; a standalone buffer is
     # analysed cold and has no counts to report.
-    text = edit(text, "      let prog = update.program\n      Workspace {",
-                '      benchmark_analysis_stats("project", Some(update.stats))\n'
-                "      let prog = update.program\n      Workspace {")
+    text = edit(text, point, observed)
     values = ',\n        '.join(f"to_string(stats.{field})" for field in FIELDS)
     text += '''
 
@@ -159,10 +170,9 @@ fn benchmark_analysis_stats(scope: String, value: Option[incremental.Stats]) -> 
 
 
 def selftest():
-    fixture = "\n".join((
-        "run_lsp_configured(std_flag, host, legacy_analysis_config())",
-        "      let prog = update.program\n      Workspace {",
-    ))
+    entry, point, _, default = anchors()
+    fixture = "\n".join((entry, point))
+    assert configure(entry, "Legacy", 128, False) == default
     for mode in ("Legacy", "Cold"):
         plain = configure(fixture, mode, 1, False)
         assert f"mode: {mode}, max_modules: 1 }}" in plain

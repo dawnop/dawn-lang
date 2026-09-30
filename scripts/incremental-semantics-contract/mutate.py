@@ -61,6 +61,17 @@ MUTATIONS = {
         to_string(update.stats.checked_modules) ++ "\\t" ++ to_string(update.stats.retained_modules))'''),),
     # Every analysis starts from an evicted session.
     "lsp-observe/cold": ((SERVER, WARM_ANALYZE, COLD_ANALYZE),),
+
+    # lsp-configured.py, a benchmark builder: the policy entry takes the mode
+    # and cache limit it is given, so its `new` here is the default form
+    # (Legacy, 128) and the builder formats its own; the observation point
+    # is applied as written.
+    "lsp-configured/policy": ((SERVER, "run_lsp_configured(std_flag, host, legacy_analysis_config())",
+                               "run_lsp_configured(std_flag, host, "
+                               "LspAnalysisConfig { mode: Legacy, max_modules: 128 })"),),
+    "lsp-configured/observe": ((SERVER, "      let prog = update.program\n      Workspace {",
+                                '      benchmark_analysis_stats("project", Some(update.stats))\n'
+                                "      let prog = update.program\n      Workspace {"),),
 }
 
 
