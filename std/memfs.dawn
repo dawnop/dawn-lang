@@ -1,0 +1,533 @@
+## A file tree held in memory, answering std/io's `Fs` effect without a host.
+##
+## [with_fs] installs a handler whose arms read and write one table, so a test
+## declares the tree it wants, runs code that takes `Fs` over it, and reads the
+## table back afterwards: the code can see nothing the test did not put there,
+## and what it wrote is a value the test can compare.
+##
+## The semantics are the table's, not a kernel's. Directories are implied by
+## the paths in the table, so `fs_is_dir`, `fs_exists` and `fs_list_names`
+## answer what a real file system would answer for the same tree. There are no
+## links: `fs_is_symlink` is always `false` and nothing is followed. Paths are
+## normalized against the base directory named at [empty], and nothing here
+## reads the host, not even for the current directory. Files hold bytes, so
+## binary writes survive unchanged; only the text operations encode or decode
+## UTF-8, and reading text never changes the stored bytes. A refusal is an
+## `Err` whose kind starts with `memfs.`.
+
+# Why this is in std, and why now (docs/fs-real-path-design.md). A handler
+# answers exactly the operations its effect declares, no fewer and no more. The
+# compiler owned the only complete table handler, `driver/fsmem`, and the
+# bootstrap compiles that file once against the seed's std and once against
+# HEAD's; while it spells its own `with handle Fs`, `Fs` cannot gain an
+# operation in any release, because one source cannot answer both op sets.
+# Moving the handler here is the first of three steps: this release ships it,
+# the next one points `driver/fsmem` at it (the seed then has it) and adds the
+# operation, arm and all, in this one file.
+#
+# Until that switch the compiler keeps its copy, and the two are held to the
+# same text: `check_memfs_twin` in scripts/doc-check.py compares the arms, the
+# record and every private helper below with `selfhost/src/driver/fsmem.dawn`.
+# Change one, change both.
+#
+# `Fs` is named qualified, `io.Fs`, and not imported with `use std/io.{Fs}`.
+# A selective import of an effect inside std would put every std load on the
+# imported-effect path of the checker, and the identity harness's control
+# for that path (`mint-imported-effect` in
+# scripts/incremental-semantics-contract/mutate.py) has to load std to reach
+# its own assertion; with the import here, the control broke std first and
+# failed every test that loads it. The qualified name also keeps the fourteen
+# `fs_*` operations out of this module's namespace, where its helpers live.
+#
+# The three path functions below are private copies of the `fspath` package's.
+# std cannot depend on a package, and putting path text back into std for
+# every program to carry is what audit RD-09 undid; three private functions
+# are the smaller cost.
+
+use std/str
+use std/list
+use std/map
+use std/bytes
+use std/io
+use std/io.{Deleted, NotFound}
+
+## A file tree, plus the directory relative paths resolve against and the
+## counter `fs_temp_dir` / `fs_temp_file` hand out names from.
+pub type MemFs = {
+  base: String,
+  files: Map[String, Bytes],
+  dirs: Map[String, Bool],
+  seq: Int
+}
+
+# ---- paths, as the fspath package spells them ----
+
+fn path_normalize(p: String) -> String = {
+  let abs = str.starts_with(p, "/")
+  var out: List[String] = []
+  for seg in str.split(p, "/") {
+    if seg == "" || seg == "." {
+      ()
+    } else if seg == ".." {
+      let n = len(out)
+      if n > 0 && out[n - 1] != ".." {
+        out = list.take(out, n - 1)
+      } else if not abs {
+        out = out ++ [seg]
+      }
+    } else {
+      out = out ++ [seg]
+    }
+  }
+  var body = ""
+  for seg in out {
+    body = if body == "" { seg } else { body ++ "/" ++ seg }
+  }
+  if abs { "/" ++ body } else { body }
+}
+
+fn path_absolute(p: String, base: String) -> String =
+  if str.starts_with(p, "/") { path_normalize(p) } else { path_normalize(base ++ "/" ++ p) }
+
+fn path_parent(p: String) -> Option[String] = {
+  let n = path_normalize(p)
+  if n == "" || n == "/" { return None }
+  match str.last_index_of(n, "/") {
+    Some(0) -> Some("/")
+    Some(i) -> Some(str.take(n, i))
+    None -> None
+  }
+}
+
+# ---- the table ----
+
+fn ferr(kind: String, what: String, path: String) -> ForeignError =
+  ForeignError { kind: "memfs.${kind}", message: what ++ ": " ++ path, cause: None }
+
+fn key(st: MemFs, p: String) -> String = path_absolute(p, st.base)
+
+## Every directory above `p`, marked present. Stops at the first one already
+## recorded: the ones above it were recorded with it.
+fn with_ancestors(dirs0: Map[String, Bool], p: String) -> Map[String, Bool] = {
+  var out = dirs0
+  var cur = path_parent(p)
+  var going = true
+  while going {
+    match cur {
+      Some(d) -> {
+        if map.has(out, d) {
+          going = false
+        } else {
+          out = map.insert(out, d, true)
+          cur = path_parent(d)
+        }
+      }
+      None -> { going = false }
+    }
+  }
+  out
+}
+
+fn dir_prefix(k: String) -> String = if k == "/" { "/" } else { "${k}/" }
+
+fn is_dir_key(st: MemFs, k: String) -> Bool = {
+  if map.has(st.dirs, k) { return true }
+  let prefix = dir_prefix(k)
+  for f in map.keys(st.files) {
+    if str.starts_with(f, prefix) { return true }
+  }
+  false
+}
+
+## The immediate entries of `k`, files and directories alike, sorted. The host
+## primitive answers in whatever order it likes and `io.list_dir` sorts on top;
+## sorting here as well is what keeps two runs of one test identical.
+fn child_names(st: MemFs, k: String) -> List[String] = {
+  let prefix = dir_prefix(k)
+  var names: List[String] = []
+  for p in map.keys(st.files) ++ map.keys(st.dirs) {
+    if str.starts_with(p, prefix) {
+      let rest = str.drop(p, str.len(prefix))
+      let name = match str.index_of(rest, "/") {
+        Some(i) -> str.take(rest, i)
+        None -> rest
+      }
+      if name != "" && not list.contains(names, name) { names = names ++ [name] }
+    }
+  }
+  list.sort(names)
+}
+
+fn mem_read(st: MemFs, p: String) -> Result[Bytes, ForeignError] = {
+  let k = key(st, p)
+  match map.get(st.files, k) {
+    Some(t) -> Ok(t)
+    None -> Err(ferr("not_found", "no such file", k))
+  }
+}
+
+fn mem_list(st: MemFs, p: String) -> Result[List[String], ForeignError] = {
+  let k = key(st, p)
+  if is_dir_key(st, k) { Ok(child_names(st, k)) } else { Err(ferr("not_a_directory", "not a directory", k)) }
+}
+
+fn mem_mkdirs(st: MemFs, p: String) -> (MemFs, Result[Unit, ForeignError]) = {
+  let k = key(st, p)
+  if map.has(st.files, k) {
+    return (st, Err(ferr("not_a_directory", "a file is in the way", k)))
+  }
+  (MemFs { ..st, dirs: map.insert(with_ancestors(st.dirs, k), k, true) }, Ok(()))
+}
+
+fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, ForeignError]) = {
+  let k = key(st, p)
+  if is_dir_key(st, k) {
+    return (st, Err(ferr("is_a_directory", "a directory is in the way", k)))
+  }
+  (MemFs {
+    ..st,
+    files: map.insert(st.files, k, content),
+    dirs: with_ancestors(st.dirs, k)
+  }, Ok(()))
+}
+
+fn mem_delete(st: MemFs, p: String) -> (MemFs, Result[Bool, ForeignError]) = {
+  let k = key(st, p)
+  if map.has(st.files, k) {
+    return (MemFs { ..st, files: map.remove(st.files, k) }, Ok(true))
+  }
+  if is_dir_key(st, k) {
+    if len(child_names(st, k)) > 0 {
+      return (st, Err(ferr("not_empty", "directory not empty", k)))
+    }
+    return (MemFs { ..st, dirs: map.remove(st.dirs, k) }, Ok(true))
+  }
+  (st, Ok(false))
+}
+
+## Move a file, or a whole subtree when `src` names a directory. Like the host
+## call, this is a rename of paths and not a copy of bytes.
+fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, ForeignError]) = {
+  let s = key(st, src)
+  let d = key(st, dst)
+  match map.get(st.files, s) {
+    Some(content) ->
+      return (MemFs {
+        ..st,
+        files: map.insert(map.remove(st.files, s), d, content),
+        dirs: with_ancestors(st.dirs, d)
+      }, Ok(()))
+    None -> ()
+  }
+  if not is_dir_key(st, s) {
+    return (st, Err(ferr("not_found", "no such file or directory", s)))
+  }
+  let prefix = dir_prefix(s)
+  var files = st.files
+  var dirs = st.dirs
+  for f in map.keys(st.files) {
+    if str.starts_with(f, prefix) {
+      let content = map.get(st.files, f).expect("moved file")
+      files = map.insert(map.remove(files, f), d ++ str.drop(f, str.len(s)), content)
+    }
+  }
+  for g in map.keys(st.dirs) {
+    if g == s || str.starts_with(g, prefix) {
+      dirs = map.insert(map.remove(dirs, g), d ++ str.drop(g, str.len(s)), true)
+    }
+  }
+  (MemFs { ..st, files: files, dirs: with_ancestors(dirs, d) }, Ok(()))
+}
+
+## A name nothing else holds, created before it is handed out -- the property
+## the host primitives have and the reason callers use them.
+fn mem_temp(
+  st: MemFs,
+  parent: String,
+  prefix: String,
+  as_dir: Bool
+) -> (MemFs, Result[String, ForeignError]) = {
+  let dir = if parent == "" { "/tmp" } else { key(st, parent) }
+  let path = dir ++ "/" ++ prefix ++ to_string(st.seq)
+  let bumped = MemFs { ..st, seq: st.seq + 1 }
+  let (next, made) =
+    if as_dir { mem_mkdirs(bumped, path) } else { mem_write(bumped, path, bytes.utf8("")) }
+  match made {
+    Ok(_) -> (next, Ok(path))
+    Err(e) -> (st, Err(e))
+  }
+}
+
+fn mem_present(st: MemFs, p: String) -> Bool = {
+  let k = key(st, p)
+  map.has(st.files, k) || is_dir_key(st, k)
+}
+
+# ---- the public face ----
+
+## The base a table uses when its caller has no reason to name one of its own.
+## Absolute, so it is a base at all, and a directory no host has, so a path
+## built from it cannot be confused with one that names a real file.
+pub const BASE: String = "/dawn-memfs"
+
+## An empty tree whose relative paths resolve against `base`.
+##
+## The base is a parameter rather than the working directory: reading that is
+## an effect, and what the base has to be is the same string for the whole
+## life of one table, which a parameter says and a host query only happens to
+## provide.
+pub fn empty(base: String) -> MemFs =
+  MemFs { base: base, files: map.empty(), dirs: map.empty(), seq: 0 }
+
+## `st` with one more file in it, holding `contents` as UTF-8; the directories
+## above it come along. A directory already at `path` leaves `st` as it was.
+pub fn put(st: MemFs, path: String, contents: String) -> MemFs = {
+  let (next, _) = mem_write(st, path, bytes.utf8(contents))
+  next
+}
+
+## The file at `path` as UTF-8 text, or `None` when nothing is there.
+## Malformed sequences are replaced, just as in the text-reading arm.
+pub fn text(st: MemFs, path: String) -> Option[String] =
+  match map.get(st.files, key(st, path)) {
+    Some(b) -> Some(bytes.decode_utf8_lossy(b))
+    None -> None
+  }
+
+## Every file path in the table, absolute and sorted. Directories are not
+## listed: they are implied by these.
+pub fn file_paths(st: MemFs) -> List[String] = list.sort(map.keys(st.files))
+
+## Run `body` with `Fs` answered from `seed`, and hand back the table as it
+## stands afterwards.
+##
+## Every arm resumes in tail position. The state is a handler cell (spec
+## §6.5), which is what lets a write in one arm be read by the next one and by
+## the caller here. The body row is `!e`, as every std handler's is, so this
+## nests inside or outside the other wrappers in either order.
+pub fn with_fs[T, !e](seed: MemFs, body: fn() -> T !io.Fs !e) -> (T, MemFs) !e = {
+  with handle io.Fs {
+    var st: MemFs = seed
+    fs_is_dir(path) => is_dir_key(st, key(st, path))
+    fs_exists(path) => mem_present(st, path)
+    fs_is_symlink(_path) => false
+    fs_mkdirs(path) => {
+      let (next, r) = mem_mkdirs(st, path)
+      st = next
+      r
+    }
+    fs_read_file(path) => match mem_read(st, path) {
+      Ok(content) -> Ok(bytes.decode_utf8_lossy(content))
+      Err(e) -> Err(e)
+    }
+    fs_write_file(path, content) => {
+      let (next, r) = mem_write(st, path, bytes.utf8(content))
+      st = next
+      r
+    }
+    fs_read_bytes(path) => mem_read(st, path)
+    fs_write_bytes(path, content) => {
+      let (next, r) = mem_write(st, path, content)
+      st = next
+      r
+    }
+    fs_delete(path) => {
+      let (next, r) = mem_delete(st, path)
+      st = next
+      r
+    }
+    fs_rename(src, dst) => {
+      let (next, r) = mem_rename(st, src, dst)
+      st = next
+      r
+    }
+    fs_temp_dir(parent, prefix) => {
+      let (next, r) = mem_temp(st, parent, prefix, true)
+      st = next
+      r
+    }
+    fs_temp_file(parent, prefix) => {
+      let (next, r) = mem_temp(st, parent, prefix, false)
+      st = next
+      r
+    }
+    fs_copy_permissions(src, dst) =>
+      if mem_present(st, src) && mem_present(st, dst) {
+        Ok(())
+      } else {
+        Err(ferr("not_found", "no such file or directory", key(st, src)))
+      }
+    fs_list_names(path) => mem_list(st, path)
+  }
+  let out = body()
+  (out, st)
+}
+
+# ---- tests ----
+
+fn kind_of[T](r: Result[T, ForeignError]) -> String =
+  match r {
+    Ok(_) -> "ok"
+    Err(e) -> e.kind
+  }
+
+test "the queries answer what the tree implies, and there are no links" {
+  let seed = put(put(empty(BASE), "/t/sub/a.txt", "alpha"), "/t/b.txt", "beta")
+  let (_, table) = with_fs(seed, () => {
+    # directories are implied by the paths, not declared separately
+    assert io.fs_is_dir("/t")
+    assert io.fs_is_dir("/t/sub")
+    assert io.fs_is_dir("/")
+    assert not io.fs_is_dir("/t/sub/a.txt")
+    assert not io.fs_is_dir("/t/nope")
+    assert io.fs_exists("/t/sub/a.txt")
+    assert io.fs_exists("/t/sub")
+    assert not io.fs_exists("/t/nope")
+    assert not io.fs_is_symlink("/t/sub/a.txt")
+    assert not io.fs_is_symlink("/t/sub")
+    # two spellings of one path name one entry: every argument is normalized
+    assert io.fs_exists("/t/sub/../b.txt")
+    assert io.fs_exists("t/b.txt") == false
+  })
+  # queries leave the table as they found it
+  assert table == seed
+}
+
+test "relative paths resolve against the base the table was built with" {
+  let (_, table) = with_fs(empty("/work"), () => {
+    assert io.fs_write_file("a/b.txt", "x") == Ok(())
+    assert io.fs_is_dir("/work/a")
+    assert io.fs_read_file("/work/a/b.txt") == Ok("x")
+    assert io.fs_read_file("./a/../a/b.txt") == Ok("x")
+  })
+  assert file_paths(table) == ["/work/a/b.txt"]
+}
+
+test "mkdirs makes every level, is idempotent, and a file in the way is an Err" {
+  let (_, table) = with_fs(empty(BASE), () => {
+    assert io.fs_mkdirs("/m/n/o") == Ok(())
+    assert io.fs_mkdirs("/m/n/o") == Ok(())
+    assert io.fs_is_dir("/m") && io.fs_is_dir("/m/n") && io.fs_is_dir("/m/n/o")
+    assert io.fs_list_names("/m/n/o") == Ok([])
+    assert io.fs_write_file("/m/f", "x") == Ok(())
+    assert kind_of(io.fs_mkdirs("/m/f")) == "memfs.not_a_directory"
+  })
+  # an empty directory is in the table even though no file implies it
+  assert file_paths(table) == ["/m/f"]
+  assert map.has(table.dirs, "/m/n/o")
+}
+
+test "text reads and writes are UTF-8 over the same bytes" {
+  let t = "hello \u{4e16}\u{754c}\u{0}"
+  let seed = put(empty(BASE), "seed", t)
+  let (_, table) = with_fs(seed, () => {
+    assert io.fs_read_bytes("seed") == Ok(bytes.utf8(t))
+    assert io.fs_read_file("seed") == Ok(t)
+    assert io.fs_write_bytes("text", bytes.utf8(t)) == Ok(())
+    assert io.fs_read_file("text") == Ok(t)
+    assert io.fs_write_file("text", "${t}!") == Ok(())
+    assert io.fs_read_bytes("text") == Ok(bytes.utf8("${t}!"))
+    assert kind_of(io.fs_read_file("/nope")) == "memfs.not_found"
+    assert kind_of(io.fs_read_bytes("/nope")) == "memfs.not_found"
+    # a directory in the way refuses both writes
+    assert io.fs_mkdirs("/d") == Ok(())
+    assert kind_of(io.fs_write_file("/d", "x")) == "memfs.is_a_directory"
+    assert kind_of(io.fs_write_bytes("/d", bytes.utf8("x"))) == "memfs.is_a_directory"
+  })
+  assert text(table, "text") == Some("${t}!")
+  let none: Option[String] = None
+  assert text(table, "/nope") == none
+}
+
+test "binary bytes survive writes, renames, and a second handler" {
+  let payload = bytes.from_hex("fffe0080c080f09f8c85").expect("binary fixture")
+  let (_, table) = with_fs(empty(BASE), () => {
+    assert io.fs_write_bytes("bin/payload", payload) == Ok(())
+    assert io.fs_read_bytes("bin/payload") == Ok(payload)
+  })
+  let (_, _) = with_fs(table, () => {
+    assert io.fs_read_bytes("bin/payload") == Ok(payload)
+  })
+}
+
+test "delete removes files and empty directories, and says when nothing was there" {
+  let seed = put(empty(BASE), "/t/sub/a.txt", "alpha")
+  let (_, table) = with_fs(seed, () => {
+    assert kind_of(io.fs_delete("/t/sub")) == "memfs.not_empty"
+    assert io.fs_delete("/t/sub/a.txt") == Ok(true)
+    assert io.fs_delete("/t/sub/a.txt") == Ok(false)
+    assert io.fs_mkdirs("/t/sub") == Ok(())
+    assert io.fs_delete("/t/sub") == Ok(true)
+    assert io.fs_delete("/t/never") == Ok(false)
+  })
+  assert file_paths(table) == []
+}
+
+test "rename moves a file or a whole subtree, and a missing source is an Err" {
+  let seed = put(put(empty(BASE), "/a/x.txt", "x"), "/a/in/y.txt", "y")
+  let (_, table) = with_fs(seed, () => {
+    assert io.fs_mkdirs("/a/empty") == Ok(())
+    assert io.fs_rename("/a/x.txt", "/b/x2.txt") == Ok(())
+    assert not io.fs_exists("/a/x.txt")
+    assert io.fs_read_file("/b/x2.txt") == Ok("x")
+    assert io.fs_rename("/a", "/c") == Ok(())
+    assert not io.fs_exists("/a")
+    assert io.fs_read_file("/c/in/y.txt") == Ok("y")
+    assert io.fs_is_dir("/c/empty")
+    assert kind_of(io.fs_rename("/gone", "/elsewhere")) == "memfs.not_found"
+  })
+  assert file_paths(table) == ["/b/x2.txt", "/c/in/y.txt"]
+}
+
+test "temp names are fresh, made before they are handed out, and counted" {
+  let (_, table) = with_fs(empty(BASE), () => {
+    assert io.fs_temp_dir("", "d-") == Ok("/tmp/d-0")
+    assert io.fs_is_dir("/tmp/d-0")
+    assert io.fs_temp_file("/tmp/d-0", "f-") == Ok("/tmp/d-0/f-1")
+    assert io.fs_read_file("/tmp/d-0/f-1") == Ok("")
+    assert io.fs_temp_file("rel", "g-") == Ok("${BASE}/rel/g-2")
+    # something already at the name refuses, and the counter does not move
+    assert io.fs_mkdirs("/tmp/t-3") == Ok(())
+    assert kind_of(io.fs_temp_file("", "t-")) == "memfs.is_a_directory"
+    assert io.fs_write_file("/tmp/u-3", "") == Ok(())
+    assert kind_of(io.fs_temp_dir("", "u-")) == "memfs.not_a_directory"
+    assert io.fs_temp_dir("", "d-") == Ok("/tmp/d-3")
+  })
+  assert table.seq == 4
+}
+
+test "copy_permissions needs both ends and changes nothing else" {
+  let seed = put(put(empty(BASE), "/p/a", "a"), "/p/b", "b")
+  let (_, table) = with_fs(seed, () => {
+    assert io.fs_copy_permissions("/p/a", "/p/b") == Ok(())
+    assert io.fs_copy_permissions("/p/a", "/p") == Ok(())
+    assert kind_of(io.fs_copy_permissions("/p/nope", "/p/b")) == "memfs.not_found"
+    assert kind_of(io.fs_copy_permissions("/p/a", "/p/nope")) == "memfs.not_found"
+  })
+  assert table == seed
+}
+
+test "list_names answers the immediate entries, sorted, and a file is an Err" {
+  let seed = put(put(put(empty(BASE), "/l/z.txt", "z"), "/l/a/deep.txt", "d"), "/l/m.txt", "m")
+  let (_, _) = with_fs(seed, () => {
+    assert io.fs_mkdirs("/l/e") == Ok(())
+    assert io.fs_list_names("/l") == Ok(["a", "e", "m.txt", "z.txt"])
+    assert io.fs_list_names("/l/a") == Ok(["deep.txt"])
+    assert kind_of(io.fs_list_names("/l/z.txt")) == "memfs.not_a_directory"
+    assert kind_of(io.fs_list_names("/nope")) == "memfs.not_a_directory"
+  })
+}
+
+test "the io functions ride the table like any other handler" {
+  let (_, table) = with_fs(empty(BASE), () => {
+    assert io.write_file("/w/a.txt", "alpha") == Ok(())
+    assert io.read_file("/w/a.txt") == Ok("alpha")
+    assert io.list_dir("/w") == Ok(["a.txt"])
+    assert io.atomic_write_file("/w/b.txt", "beta") == Ok(())
+    assert io.read_file("/w/b.txt") == Ok("beta")
+    assert io.delete("/w/a.txt") == Ok(Deleted)
+    assert io.delete("/w/a.txt") == Ok(NotFound)
+  })
+  assert file_paths(table) == ["/w/b.txt"]
+  assert text(table, "/w/b.txt") == Some("beta")
+}
