@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7d7ca381aaed7fb6 -->
+<!-- doc-check: translation-of docs/spec.md @ e51269ddcd36328d -->
 
 # Dawn Language Specification
 
@@ -188,8 +188,9 @@ literal dollar sign (`"$5"` needs no escaping); to write a literal `$` before `{
 (Before v0.78.0 there was a short form `$name` that took the longest identifier, so `"$obj_x"` and
 `"$obj.name"` silently read a value the author did not write. It was removed rather than re-read as
 a literal because re-reading it would make every program written the old way silently print other
-text; an error makes every occurrence visible. The v0.78.0 `dawn fmt` rewrites `$name` to
-`${name}`, see [`syntax-window-design.md`](syntax-window-design.md) §2.) The effects of the expressions inside an interpolation
+text; an error makes every occurrence visible. `dawn fmt` from v0.78.0 through v0.79.0 rewrote
+`$name` to `${name}`; from v0.80.0 it only reports the error, see
+[`syntax-window-design.md`](syntax-window-design.md) §2.) The effects of the expressions inside an interpolation
 are unioned into the effects of the whole string expression.
 
 A `${...}` **must fit on one line** (spanning lines reports `interpolation cannot span lines`), and

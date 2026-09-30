@@ -96,22 +96,36 @@ fi
 # and trailing-`|` rules did) could never be declared: this check ran first
 # and failed without consulting the declaration. Diagnostics and every other
 # line stay strict.
+#
+# Strict, but declarable: a change to what the formatter refuses moves the
+# diagnostics, and until this answered to `Emit-Change(fmt)` such a change
+# could only land by turning the gate red for a whole seed window. Deleting
+# the `$name` migration was the first: N-1 rewrote the reject corpus's
+# `$name` file and said nothing, HEAD refuses it with the lexer's diagnostic.
+. scripts/emitchange.sh
+emitchange_load
+logs_differ=0
 sed "s|$OUT/k/|<corpus>/|g" "$OUT/k.log" | grep -v '^formatted <corpus>/' > "$OUT/k.log.norm" || true
 sed "s|$OUT/d/|<corpus>/|g" "$OUT/d.log" | grep -v '^formatted <corpus>/' > "$OUT/d.log.norm" || true
 if ! diff "$OUT/k.log.norm" "$OUT/d.log.norm" > "$OUT/log-diff.txt"; then
-  echo "FAIL: $TAG and $SELF disagree on what they say about the corpus" >&2
-  head -40 "$OUT/log-diff.txt" >&2
-  exit 1
+  logs_differ=1
+  emit_gate "fmt" 1 "diagnostics" || {
+    echo "FAIL: $TAG and $SELF disagree on what they say about the corpus" >&2
+    head -40 "$OUT/log-diff.txt" >&2
+    exit 1
+  }
 fi
 
-. scripts/emitchange.sh
-emitchange_load
 if diff -r "$OUT/k" "$OUT/d" > "$OUT/diff.txt" 2>&1; then
   emit_gate "fmt" 0
 else
   emit_gate "fmt" 1 || { head -40 "$OUT/diff.txt"; exit 1; }
 fi
 refused=$(grep -c '^error: ' "$OUT/k.log" || true)
+said="the same $refused diagnostic(s)"
+if [ "$logs_differ" = 1 ]; then
+  said="$refused vs $(grep -c '^error: ' "$OUT/d.log" || true) declared diagnostic(s)"
+fi
 echo "OK: $SELF agrees with $TAG over $i shared live files (plus mangled copies; \
-both exited $k_status with the same $refused diagnostic(s); $current_only HEAD-only \
+both exited $k_status with $said; $current_only HEAD-only \
 and $previous_only N-1-only path(s) reported outside the differential domain)"
