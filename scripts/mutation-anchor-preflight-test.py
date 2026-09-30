@@ -255,6 +255,30 @@ class PreflightTests(unittest.TestCase):
                 p.check(p.ROOT, {cx: changed})
         self.assertEqual((p.ROOT / cx).read_text(), original)
 
+    def test_tea_reconciler_anchor_drift_is_caught(self):
+        # #277: these were sed programs in mutants.sh, which counted a mutant
+        # applied when the file changed at all, and noticed a respelled line
+        # only when contracts-2 reached it.
+        self.assert_registry_drift_is_red("tea-reconciler-contract", "walk-path-not-extended",
+                                          "packages/tea-core/src/walk.dawn",
+                                          "go(ks[i], path ++ [i], acc, f)",
+                                          "go(ks[i], path ++ [i], acc,  f)")
+        self.assert_registry_drift_is_red("tea-reconciler-contract", "relate-ignores-the-key",
+                                          "packages/tea-dom/src/node.dawn",
+                                          "if t1 != t2 || k1 != k2 {", "if k1 != k2 || t1 != t2 {")
+        self.assert_stale_registry_is_red("tea-reconciler-contract", "relate-descends-into-a-leaf", 0)
+
+    def test_tea_reconciler_second_copy_is_red(self):
+        # The sed it replaced mutated every copy and passed on any change; a
+        # second copy of an anchor is now a red preflight, not a wider mutant.
+        target = "packages/tea-core/src/diff.dawn"
+        literal = "op: Replace(w: new)"
+        original = (p.ROOT / target).read_text()
+        self.assertEqual(original.count(literal), 1)
+        with self.assertRaisesRegex(p.PreflightError,
+                                    "tea-reconciler-contract/mutate.py:unrelated-becomes-inplace"):
+            p.check(p.ROOT, {target: original + "\n# " + literal + "\n"})
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
