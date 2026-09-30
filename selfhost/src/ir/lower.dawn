@@ -2661,6 +2661,38 @@ fn render_arm(st: LSt, t: Ty, ci: Int, parts: List[CExpr]) -> CExpr = {
   cat(acc, CStr(if info.is_record { " }" } else { ")" }))
 }
 
+# The four relations share `components` and `arm_parts`, so one slip in the
+# walk (a component skipped, a field read from the wrong arm) is meant to show
+# in all four at once. Each pin differs from its twin in the last component
+# only, which is the component a walk that stops one short never reads.
+
+test "Eq reads every component of a tuple and of a constructor" {
+  assert (1, 2, 3) == (1, 2, 3)
+  assert (1, 2, 3) != (1, 2, 4)
+  assert Some((1, 2)) != Some((1, 3))
+  let none: Option[(Int, Int)] = None
+  assert none != Some((1, 2))
+}
+
+test "Ord decides on the last component when the others tie" {
+  assert cmp((1, 2, 3), (1, 2, 3)) == 0
+  assert cmp((1, 2, 3), (1, 2, 4)) < 0
+  assert cmp((1, 2, 4), (1, 2, 3)) > 0
+}
+
+test "Hash folds in every component and the constructor's tag" {
+  assert hash((1, 2, 3)) == hash((1, 2, 3))
+  assert hash((1, 2, 3)) != hash((1, 2, 4))
+  let ok: Result[Int, Int] = Ok(1)
+  let err: Result[Int, Int] = Err(1)
+  assert hash(ok) != hash(err)
+}
+
+test "Show renders every component" {
+  assert show((1, "a", true)) == "(1, \"a\", true)"
+  assert show(Some((1, 2))) == "Some((1, 2))"
+}
+
 ## Does this witness stand for a relation the language defines itself, rather
 ## than for an impl body to call?
 ##
