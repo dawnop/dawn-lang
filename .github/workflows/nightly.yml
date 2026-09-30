@@ -94,6 +94,17 @@ jobs:
   # for the parser. Measured locally: 2.0s for the 52 runs of 09-19 .. 09-26
   # (26 distinct gates.yml blobs parsed, each once); the totals step's
   # fourteen days add about as much again. Nothing here changes the timeout.
+  #
+  # 2026-09-30 (issue #231): the week-on-week median jumped with every change
+  # of job shape, so the totals judge two other things instead: the median
+  # of job-seconds over the push total declared at each run's commit (over
+  # 0.85, or up more than 10 points), and the week-on-week median among runs
+  # of the newest job shape only. A shape change is printed, not judged, and
+  # a week with fewer than 10 successful pushes on either side is reported
+  # and not judged. A tile trigger is a run in which all six shards ran green:
+  # tile.yml skips them on a push whose tree already passed (its header).
+  # The push totals are read with git from the full-history checkout above;
+  # measured locally, 0.24s for the 68 runs of 09-16 .. 09-30.
   budget-observations:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -191,8 +202,10 @@ jobs:
           set -euo pipefail
           {
             echo "The nightly gate totals report crossed a limit (median job-seconds"
-            echo "per successful push up more than 10% on the week before, or"
-            echo "tile.yml on more than one push in five), or could not read the runs."
+            echo "per successful push over 0.85 of the declared push total or up more"
+            echo "than 10 points on it, the same job shape up more than 10% on the"
+            echo "week before, or tile.yml running its shards on more than one push"
+            echo "in five), or could not read the runs."
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
             echo "The push total in gates.yml caps the claims; this is the measured"
