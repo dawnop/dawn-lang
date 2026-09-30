@@ -237,24 +237,97 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
   var i = 0
   while i < len(raw) {
     if raw[i].kind == BANG {
-      # `effect E = !()` (刀 5; a trait default spells it too since #369): the
-      # empty row is only spellable after an `effect NAME =` prefix -- an
-      # impl's binding or a trait member's default, one classification --
-      # anywhere else `!()` stays the postfix unwrap plus a call, as it was.
-      let empty_row_bind =
-        i >= 3 && raw[i - 1].kind == EQ && raw[i - 2].kind == TYPEIDENT &&
-        raw[i - 3].kind == EFFECT &&
-        i + 2 < len(raw) && raw[i + 1].kind == LPAREN && raw[i + 2].kind == RPAREN
+      # `!()` is the empty row wherever a row is spellable (spec §6.6): after
+      # an `effect NAME =` prefix -- an impl's binding or a trait member's
+      # default (刀 5, #369), one classification -- and after the result type
+      # of a signature or a function type (#187). Everywhere else it is the
+      # postfix unwrap plus an empty call (`o!()`, `opts[0]!()`), and the two
+      # spellings are the same three tokens, so only the left context can say.
+      let empty_row =
+        i + 2 < len(raw) && raw[i + 1].kind == LPAREN && raw[i + 2].kind == RPAREN &&
+        ((i >= 3 && raw[i - 1].kind == EQ && raw[i - 2].kind == TYPEIDENT &&
+            raw[i - 3].kind == EFFECT) || after_result_type(raw, i))
       let names_effect =
         i + 1 < len(raw) &&
         (is_effect_name(raw[i + 1].kind) ||
             (raw[i + 1].kind == LPAREN && is_effect_union(raw, i + 2)) ||
-            empty_row_bind)
+            empty_row)
       if not names_effect { out = set.insert(out, raw[i].lo) }
     }
     i = i + 1
   }
   out
+}
+
+## Whether the `!` at `bang` directly follows the result type of a signature or
+## a function type, where a row belongs (`fn f() -> Int !()`,
+## `h: fn(Int) -> Int !()`). Walks left over the result type at bracket depth 0
+## to its `->`, then asks whether that arrow is a signature's: the `)` before it
+## closes a parameter list, whose `(` follows the function's name, `fn` (a
+## function type) or `]` (a type parameter list).
+##
+## A type is spelled with TYPEIDENT, `m.` qualifiers, brackets, commas, `fn`,
+## arrows and rows, so anything else on the way (`=`, a lowercase call
+## `f(a)`) ends the walk with no. A match arm's `->` fails the arrow test:
+## its left side is a pattern, and a `)` there closes a constructor pattern
+## (`Some(x) ->`), whose `(` follows a TYPEIDENT. The residue is an arm whose
+## guard ends in a lowercase call and whose body is exactly `C!()`
+## (`P if ok(x) -> None!()`), which reads as a row; it only moves a space.
+fn after_result_type(raw: List[Token], bang: Int) -> Bool = {
+  if bang < 1 { return false }
+  let last = raw[bang - 1].kind
+  if last != TYPEIDENT && last != RBRACKET && last != RPAREN { return false }
+  var j = bang - 1
+  var depth = 0
+  while j >= 0 {
+    let k = raw[j].kind
+    if k == ARROW && depth == 0 { return is_signature_arrow(raw, j) }
+    if k == RPAREN || k == RBRACKET {
+      depth = depth + 1
+    } else if k == LPAREN || k == LBRACKET {
+      if depth == 0 { return false }
+      depth = depth - 1
+    } else if k == NEWLINE {
+      if depth == 0 { return false }
+    } else if k == IDENT {
+      # a qualifier (`m.T`) anywhere; a bare name only inside brackets (an
+      # effect name in a nested row, `fn() -> Int !(io | e)`)
+      let qualifier = j + 1 < len(raw) && raw[j + 1].kind == DOT
+      if depth == 0 && not qualifier { return false }
+    } else if not is_type_token(k) {
+      return false
+    }
+    j = j - 1
+  }
+  false
+}
+
+## The remaining tokens a type or a row inside one is spelled with.
+fn is_type_token(k: TokKind) -> Bool =
+  k == TYPEIDENT || k == DOT || k == COMMA || k == FN || k == ARROW || k == BANG || k == PIPE
+
+## Whether the `->` at `arrow` is a signature's or a function type's: the token
+## before it is the `)` of a parameter list whose `(` follows a name, `fn` or
+## the `]` of a type parameter list.
+fn is_signature_arrow(raw: List[Token], arrow: Int) -> Bool = {
+  if arrow < 1 || raw[arrow - 1].kind != RPAREN { return false }
+  var j = arrow - 1
+  var depth = 0
+  while j >= 0 {
+    let k = raw[j].kind
+    if k == RPAREN || k == RBRACKET || k == RBRACE {
+      depth = depth + 1
+    } else if k == LPAREN || k == LBRACKET || k == LBRACE {
+      depth = depth - 1
+      if depth == 0 {
+        if k != LPAREN || j < 1 { return false }
+        let before = raw[j - 1].kind
+        return before == IDENT || before == FN || before == RBRACKET
+      }
+    }
+    j = j - 1
+  }
+  false
 }
 
 ## `!io`, `!e`, `!Ask`. A declared effect is spelled with its own (uppercase)
@@ -927,6 +1000,55 @@ test "the with statement and tail blocks keep their spelling" {
 ## Both callees below type-check (`dawn check` on each is `ok`), so the space
 ## the formatter used to insert was not a hint that the code was wrong -- it
 ## was the formatter still believing the pre-application-node grammar.
+test "an empty row after a signature's result type keeps its space" {
+  # spec §6.6: `!()` is spellable wherever `!io` is (#187). It printed
+  # `Int!()`, which reads as the postfix unwrap `Int!` and a call.
+  let want = "fn f() -> Int !() = 1\n"
+  assert fmt_of("fn f() -> Int!() = 1\n") == want
+  assert fmt_of(want) == want
+  # a type parameter list, a qualified and a generic result type
+  let gen = "pub fn g[T](x: T) -> m.Box[T] !() = m.box(x)\n"
+  assert fmt_of("pub fn g[T](x: T) -> m.Box[T]!() = m.box(x)\n") == gen
+  let tup = "fn t() -> (Int, Int) !() = (1, 2)\n"
+  assert fmt_of("fn t() -> (Int, Int)!() = (1, 2)\n") == tup
+}
+
+test "an empty row in a function type keeps its space" {
+  let param = "fn k(h: fn(Int) -> Int !()) -> Int = h(1)\n"
+  assert fmt_of("fn k(h: fn(Int) -> Int!()) -> Int = h(1)\n") == param
+  assert fmt_of(param) == param
+  # nested in a type argument, and a function type returning a function type
+  let nest = "fn n(o: Option[fn() -> Int !()], f: fn() -> fn() -> Int !()) -> Int = 1\n"
+  assert fmt_of("fn n(o: Option[fn() -> Int!()], f: fn() -> fn() -> Int!()) -> Int = 1\n") == nest
+}
+
+test "an empty row in a record field's function type keeps its space" {
+  let want = "type T = { g: fn() -> Int !(), h: fn(Int) -> Unit !io }\n"
+  assert fmt_of("type T = { g: fn() -> Int!(), h: fn(Int) -> Unit !io }\n") == want
+  assert fmt_of(want) == want
+}
+
+test "an empty row in trait and impl members keeps its space" {
+  let tr = "trait P[T] {\n  effect E = !()\n  fn run(x: T) -> Int !()\n}\n"
+  assert fmt_of("trait P[T] {\n  effect E = !()\n  fn run(x: T) -> Int!()\n}\n") == tr
+  let im = "impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int !() = x.v\n}\n"
+  assert fmt_of("impl P[A] {\n  effect E = !()\n  fn run(x: A) -> Int!() = x.v\n}\n") == im
+}
+
+test "a postfix unwrap followed by an empty call stays tight" {
+  # the same three tokens `! ( )` after a value: the left context is not a
+  # result type, so these are the unwrap and a call, and stay `x!()`
+  for src in [
+    "fn u(o: Option[fn() -> Int]) -> Int = o!()\n",
+    "fn u(opts: List[Option[fn() -> Int]]) -> Int = opts[0]!()\n",
+    "fn u(f: fn() -> Option[fn() -> Int]) -> Int = f()!()\n",
+    "fn u() -> Option[Int] = None!()\n",
+    "fn u(o: Option[Int]) -> Int =\n  match o {\n    Some(x) -> None!()\n    _ -> Z!()\n  }\n",
+  ] {
+    assert fmt_of(src) == src
+  }
+}
+
 test "a call hugs its callee even when the callee is not a name" {
   # postfix unwrap, then call. The effect marker keeps the other spelling:
   # `!(e1 | e2)` is tight on the left of `!`, and that is the branch above.
