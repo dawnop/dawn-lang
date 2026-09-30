@@ -42,6 +42,7 @@ ADAPTERS = {
     "lsp-workspace-contract": ("selfhost",),
     "pattern-or-contract": ("selfhost",),
     "pipe-contract": (".",),
+    "project-plan-contract": (".",),
     "range-bound-order-contract": (".",),
     "rc-contract": ("runtime/c",),
     "selfhost-bench-contract": ("scripts/selfhost-bench.py",),

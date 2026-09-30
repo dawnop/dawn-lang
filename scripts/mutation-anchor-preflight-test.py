@@ -196,6 +196,19 @@ class PreflightTests(unittest.TestCase):
                                           "            LgBeginShutdown -> {\n              pending = none\n")
         self.assert_stale_registry_is_red("lsp-lifecycle-contract", "repeat-initialize", 0)
 
+    def test_project_plan_anchor_drift_is_caught(self):
+        # #277: these anchors were heredocs in run.sh, checked only when
+        # lsp-workspace reached that mutant after building the probe.
+        self.assert_registry_drift_is_red("project-plan-contract", "fresh-replan-loader",
+                                          "selfhost/src/driver/analyze.dawn",
+                                          "    entry_file(plan),\n    previous\n  )\n",
+                                          "    entry_file(plan), previous\n  )\n")
+        self.assert_registry_drift_is_red("project-plan-contract", "fresh-completion",
+                                          "selfhost/src/lsp/server.dawn",
+                                          "completions_at(qc, analysis.modules,",
+                                          "completions_at(qc, analysis.modules ,")
+        self.assert_stale_registry_is_red("project-plan-contract", "fresh-completion", 0)
+
     def test_gate_map_record_anchors_are_not_skipped(self):
         target = "scripts/gate-map/unseen.txt"
         original = (p.ROOT / target).read_text()
