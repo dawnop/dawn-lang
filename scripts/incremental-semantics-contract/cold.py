@@ -7,8 +7,8 @@ ModuleStep or the observed fold. Each mutant changes only the new path.
 
 The mutants' anchors live in mutate.py beside this script, where
 mutation-anchor-preflight.py proves them exactly-once before any build; main
-reads them from there and applies them with `edit`, as before, so a drifted
-one still stops this script before it compiles anything.
+reads its own group of them from there and applies them with `edit`, as
+before, so a drifted one still stops this script before it compiles anything.
 """
 import os
 from pathlib import Path
@@ -61,11 +61,22 @@ def edit(text, old, new):
     return text.replace(old, new)
 
 
+def owned(mutations, owner):
+    """One harness's group of mutate.py's MUTATIONS, in registry order, keyed by
+    the name without its `<owner>/` prefix."""
+    prefix = owner + "/"
+    group = {name[len(prefix):]: edits for name, edits in mutations.items()
+             if name.startswith(prefix)}
+    if not group:
+        raise RuntimeError(f"mutate.py has no mutations owned by {owner}")
+    return group
+
+
 def main():
     started = time.monotonic()
     original = (ROOT / "selfhost/src/driver/analyze.dawn").read_text()
     reference = (HERE / "reference-loop.dawn.txt").read_text()
-    variants = runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"]
+    variants = owned(runpy.run_path(str(HERE / "mutate.py"))["MUTATIONS"], "cold")
     subjects = [("positive", original)]
     for name, edits in variants.items():
         source = original
