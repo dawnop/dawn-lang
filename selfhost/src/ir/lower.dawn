@@ -28,7 +28,8 @@ use check/types.{
   Sym, Sig, Eff, EPure, Traits, TraitI, ImplI, MethodSig,
   eff_labels, eff_vars, eff_assocs, nev, atom_keys, sig_abi_eff,
   reduce_eff_via_bindings, reduce_ty_effs_via_bindings, erased_ev_ty, erased_cell_ty, erased_ctl_ty,
-  EV_PACK_ID, key_is_label, key_effect_id, label_key,
+  EV_PACK_ID, key_is_label, key_effect_id, label_key, var_key, assoc_key,
+  LabelSlot, VariableSlot, AssociatedSlot,
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID,
@@ -3220,6 +3221,7 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
 ## A top-level function used as a value becomes a closure over a wrapper
 ## with no captures, so that every function value has one representation.
 fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty) -> (LSt, CExpr) = {
+  if is_builtin { return lift_builtin_value(st, name, ty) }
   let (st1, lam) = fresh_lam(st)
   refuse_evidence_captures(st1, "a function value's wrapper", [])
   # **The erasure crossing.** This wrapper's slots are sized by the
@@ -3231,11 +3233,8 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   #
   # It is the same crossing `lower_args_to` and `adapt_out` make at an
   # ordinary call to the same function, and the one `lift_ctor_value` makes
-  # against a constructor's declared field types. A non-erased intrinsic keeps
-  # `None` here on purpose: its backend handler reads the Core node's own type
-  # rather than a declared one, which is the split `erased_builtin_sig` names.
-  let callee: Option[Sig] =
-    if is_builtin { erased_builtin_sig(st1, name) } else { sig_of(st1, owner, name) }
+  # against a constructor's declared field types.
+  let callee: Option[Sig] = sig_of(st1, owner, name)
   let decl_pts = match callee {
     Some(sg) -> sg.param_tys
     None -> []
@@ -3268,27 +3267,9 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
   # type, because they are different numbers on purpose: outside, one pack
   # whatever the row (`types.fn_arity`); inside, one slot per atom
   # (`types.nev`).
-  #
-  # A *builtin* is unpacked the same way, and used not to be: this branch
-  # emitted `CIntrinsic(name, args)` with no evidence at all, which is a wrong
-  # count and not merely wrong evidence. `let f = sort_by` was a
-  # `NoSuchMethodError` on the JVM before this line existed, on a program that
-  # checks clean; `bracket` reached through a value was `ev_get`'s panic. The
-  # row is read off the intrinsic table rather than off `callee`, because
-  # `callee` is `None` for every primitive that is not declared `erased` and
-  # erasure has nothing to do with how many evidence slots a row is worth.
   let (st5, evps) = fn_value_evs(st2)
-  let ev_sig: Option[Sig] =
-    if is_builtin {
-      match map.get(st1.intrs, name) {
-        Some(i) -> Some(i.sig)
-        None -> None
-      }
-    } else {
-      callee
-    }
   var inner_evs: List[CExpr] = []
-  match ev_sig {
+  match callee {
     Some(sg) -> {
       let pack = match evps {
         [pp] -> CLocal(pp.sym, pp.ty)
@@ -3315,18 +3296,167 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     dicts: [],
     evs: evps,
     ret: ret,
-    body: adapt_out(
-      if is_builtin {
-        CIntrinsic(name, args ++ inner_evs, decl_ret)
-      } else {
-        CCall(CDirect(owner, name), args ++ inner_evs, decl_ret)
-      },
-      decl_ret, ret),
+    body: adapt_out(CCall(CDirect(owner, name), args ++ inner_evs, decl_ret), decl_ret, ret),
     is_test: false,
     impl_of: None,
     default_of: None
   }
   (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
+}
+
+## A builtin used as a value: a wrapper whose body is the call `name(p1, ..)`,
+## lowered by `lower_expr` exactly as that call would be where it was written.
+##
+## It used to write `CIntrinsic(name, ..)` itself, and so skipped every rewrite
+## the `XCallBuiltin` arm makes -- `parser_impl`, `char_unchecked`,
+## `to_string`, the std/hamt routing. `let f = parse_int` checked clean and then
+## panicked in both emitters, which have no arm for a name lowering always
+## removes (`lowered_intrinsics`), and `let f = parse_float` reached the host's
+## grammar without std/fmt's §11 scanner in front of it: `f("1.5d")` was
+## `Some(1.5)` while `parse_float("1.5d")` was `None` (issue #283). Building the
+## call node and handing it over keeps every one of those special cases in the
+## one place a direct call already goes through, rather than in a second copy
+## here that the next special case would miss.
+##
+## The erasure crossing and the evidence unpacking fall out of the same move.
+## The `XCallBuiltin` arm crosses erased slots against `erased_builtin_sig`,
+## which is the pair `adapt_in`/`adapt_out` this function used to spell out.
+## Evidence arrives as the wrapper's one pack and the primitive's own row wants
+## a slot per atom (`types.nev`); an `XEvRead` per atom, lowered in a frame
+## whose own slot is that pack (`ev_own`, the frame shape `lift_lambda` gives a
+## lambda body), is answered by `ev_slot` with the same `ev_from_pack` walk this
+## used to write by hand. Only `sort_by` and `bracket` have a row to unpack.
+##
+## No witnesses: a builtin with bounds is eta-expanded by the checker
+## (`eta_bounded_fn_value`) into a lambda around an ordinary call, and never
+## reaches here.
+fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
+  let (st1, lam) = fresh_lam(st)
+  refuse_evidence_captures(st1, "a function value's wrapper", [])
+  var ps: List[CParam] = []
+  var args: List[TExpr] = []
+  var st2 = st1
+  for pt in params_of_fn_ty(ty) {
+    let (st3, sym) = fresh_sym(st2)
+    st2 = st3
+    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    args = args ++ [XLocal(sym, "", 0, 0, pt)]
+  }
+  let (st4, evps) = fn_value_evs(st2)
+  let own: Option[CExpr] =
+    match evps {
+      [p] -> Some(CLocal(p.sym, p.ty))
+      _ -> None
+    }
+  let evid: List[TExpr] = match map.get(st4.intrs, name) {
+    Some(i) -> atom_reads(sig_abi_eff(i.sig))
+    None -> []
+  }
+  let ret = ret_of_fn_ty(ty)
+  let no_wits: List[WitRef] = []
+  let (st5, body) = lower_expr(LSt {
+    ..st4,
+    ret_ty: ret,
+    self_ctx: None,
+    tail: false,
+    self_tail: false,
+    ev_env: [],
+    ev_own: own
+  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, ret))
+  let f = CFun {
+    name: lam,
+    owner: st5.owner,
+    captures: [],
+    params: ps,
+    dicts: [],
+    evs: evps,
+    ret: ret,
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  (LSt {
+    ..st5,
+    lifted: st5.lifted ++ [f],
+    ret_ty: st.ret_ty,
+    self_ctx: st.self_ctx,
+    tail: st.tail,
+    self_tail: st.self_tail,
+    ev_env: st.ev_env,
+    ev_own: st.ev_own
+  }, CClosure(lam, st5.owner, [], ty))
+}
+
+## One `XEvRead` per atom of a row, in `atom_keys` order and at the type that
+## atom's slot is declared with: a label's slot carries its effect's record,
+## anything else carries a pack. `lift_builtin_value`'s evidence, written the
+## way the checker writes a read of evidence a lambda does not hold itself.
+fn atom_reads(e: Eff) -> List[TExpr] = {
+  var out: List[TExpr] = []
+  for l in eff_labels(e) {
+    let (eid, _) = l
+    out = out ++ [XEvRead(label_key(eid), LabelSlot(eid), 0, 0, TyAdt(eid, []))]
+  }
+  for v in eff_vars(e) {
+    let (vid, _) = v
+    out = out ++ [XEvRead(var_key(vid), VariableSlot(vid), 0, 0, erased_ev_ty())]
+  }
+  for a in eff_assocs(e) {
+    let (_, sv, tid, member) = a
+    out = out ++ [XEvRead(assoc_key(tid), AssociatedSlot(sv, tid, member), 0, 0, erased_ev_ty())]
+  }
+  out
+}
+
+test "a builtin taken as a value lowers as the call it wraps" {
+  # issue #283: the wrapper wrote `CIntrinsic(name, ..)` itself, so a name
+  # lowering always removes reached the emitters through a function value.
+  # Every such name is taken as a value here and the wrapper's body is held to
+  # what the direct call lowers to. std/hamt's signatures are the primitives'
+  # own under the trie's names: enough for `hamt_call` to find a callee, which
+  # is all this asks of them.
+  let it = intrinsics()
+  var fns: Map[(String, String), Sig] = map.empty()
+  for n in lowered_intrinsics() {
+    match hamt_fn(n) {
+      Some(f) -> { fns = map.insert(fns, ("std/hamt", f), map.get(it, n).expect("intrinsic").sig) }
+      None -> ()
+    }
+  }
+  let initial = LSt {
+    next_sym: 0, next_loop: 0, owner: "app", cur_loop: -1,
+    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
+    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
+    prog_fns: fns, intrs: it, dicts: [], dict_env: map.empty(),
+    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None
+  }
+  for n in lowered_intrinsics() {
+    let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
+    let (st1, clo) = lift_fn_value(initial, "app", n, true, TyFn(sg.param_tys, sg.ret, sg.eff))
+    match clo {
+      CClosure(_, _, _, _) -> ()
+      _ -> panic("`" ++ n ++ "` taken as a value is not a closure")
+    }
+    let body = st1.lifted[len(st1.lifted) - 1].body
+    match body {
+      CIntrinsic(got, _, _) ->
+        panic("`" ++ n ++ "` taken as a value lowered to the intrinsic `" ++ got ++
+            "`, which lowering removes from every direct call (lowered_intrinsics)")
+      CUnbox(CIntrinsic(got, _, _), _) ->
+        panic("`" ++ n ++ "` taken as a value lowered to the intrinsic `" ++ got ++
+            "`, which lowering removes from every direct call (lowered_intrinsics)")
+      _ -> ()
+    }
+    match parser_impl(n) {
+      Some(f) ->
+        match body {
+          CCall(CDirect(o, g), _, _) -> { assert o == "std/fmt" && g == f }
+          _ -> panic("`" ++ n ++ "` taken as a value is not a call on std/fmt." ++ f)
+        }
+      None -> ()
+    }
+  }
 }
 
 # ---- expressions ----
