@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Apply one of cold.py's driver mutations to a copy of the repository tree.
+"""Apply one of this directory's source mutations to a copy of the repository tree.
 
     scripts/incremental-semantics-contract/mutate.py <mutation> <tree-root>
 
-cold.py used to spell these six driver/analyze.dawn anchors in its own main
-and refuse a stale one only when it ran, which is one incremental-memo
-shard; driver/analyze.dawn is rewritten by most incremental-engine changes,
-so drift surfaced as a red shard long after the edit (#254, after #249 found the same gap in delete-contract). Declared
-here, in the registry shape mutation-anchor-preflight.py discovers, they are
-proven exactly-once before any build, and cold.py reads them from here.
+cold.py, identity.py, module-memo.py, lsp-module-memo.py and body-executor.py
+used to spell their mutant anchors in their own mains, and lsp-observe.py and
+lsp-configured.py their probe anchors, each refusing a stale one only when it
+ran: an incremental-memo shard, or a hand-run build. The files they edit are
+rewritten by most incremental-engine changes, so drift surfaced as a red
+shard long after the edit (#254 for cold.py, after #249 found the same gap in
+delete-contract; #277 for the rest). Declared here, in the registry shape
+mutation-anchor-preflight.py discovers, they are proven exactly-once before
+any build, and each harness reads them from here.
 
 Every harness of this directory reads the one registry, so each key carries
 its owner as a prefix (`cold/intern-table`): a harness takes its own group
@@ -26,6 +29,11 @@ import sys
 ANALYZE = "selfhost/src/driver/analyze.dawn"
 CHECKER = "selfhost/src/check/checker.dawn"
 ENGINE = "selfhost/src/driver/incremental.dawn"
+IDENTITY = "selfhost/src/check/identity.dawn"
+LOWER = "selfhost/src/ir/lower.dawn"
+CX = "selfhost/src/check/cx.dawn"
+STDLIB = "selfhost/src/driver/stdlib.dawn"
+PASSES = "selfhost/src/check/passes.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 # Anchors two groups quote, spelled once.
@@ -36,6 +44,12 @@ PREFIX_ANALYZE = "      let update = " + WARM_ANALYZE
 SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n"
 SAME_SURFACE = "-> Bool =\n  a == b &&\n"
 CUTOFF = "              Some(before) -> if same_surface(own, before) {"
+PROJECTED = "return ProjectedEffect(i, parts[1])"
+DENSIFY = ("  dense_expr(dense_params(dense_params(dense_params(dense_params(d, f.captures),\n"
+           "    f.params), f.dicts), f.evs), f.body)")
+MOVED = "      Some(next) -> { moved_syms = map.insert(moved_syms, next, s) }"
+INTERN = "(Cx { ..cx, identities: map.insert(cx.identities, id, decl) }, id)"
+MINT = 'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)'
 
 # body-executor.py: each role's executor call, and a body that bypasses the
 # executor, returning the state it was handed.
@@ -210,6 +224,101 @@ MUTATIONS = {
     "module-memo/ignore-module-budget": ((ENGINE, "    if retained < session.max_modules {", "    if true {"),),
     "module-memo/allow-negative-budget": ((ENGINE,
         '  if max_modules < 0 { panic("negative analysis cache limit") }', "  ()"),),
+
+    # identity.py: production identity admission, check/identity.dawn.
+    "identity/duplicate-parent": ((IDENTITY, "if unique { out = out ++ [e] }", "out = out ++ [e]"),),
+    # The derived id: what it is a function of, and what it must not be a
+    # function of. The spelling is the whole input, so dropping the kind
+    # letter or the owner from it merges two declarations, and skipping
+    # the finalizer leaves the low bits -- the only ones a 47-bit band
+    # keeps, and the only ones `Map[Int, _]` buckets on -- correlated
+    # across two names that differ in one character.
+    "identity/spelling-drops-kind": ((IDENTITY, 'Named(kind, name) -> "N" ++ kind_text(kind) ++ atom(name)',
+                                      'Named(kind, name) -> "N" ++ atom(name)'),),
+    "identity/spelling-drops-owner": ((IDENTITY,
+        "pub fn minted_text(m: Minted) -> String = atom(m.owner) ++ path_text",
+        "pub fn minted_text(m: Minted) -> String = atom(\"\") ++ path_text"),),
+    "identity/derive-skips-finalizer": ((IDENTITY,
+        "derived_floor() + (fmix64(fnv1a64(spelling)) & derived_width())",
+        "derived_floor() + (fnv1a64(spelling) & derived_width())"),),
+    "identity/derive-leaves-the-band": ((IDENTITY, "pub fn derived_floor() -> Int = 4294967296",
+                                         "pub fn derived_floor() -> Int = 7"),),
+    "identity/derive-overflows-the-label-key": ((IDENTITY, "pub fn derived_width() -> Int = 140737488355327",
+                                                 "pub fn derived_width() -> Int = 9223372036854775807"),),
+    # The packed key: what it is made of, what it refuses, and the two
+    # things it has to stay clear of. A slot outside the span folded back
+    # into the key is two bindings of one declaration sharing a row; a
+    # pool shared by the whole program is two modules sharing one; and a
+    # temporary floor inside the packed band is lowering numbering over a
+    # binding the checker minted.
+    "identity/pack-truncates-the-slot": ((IDENTITY, "if slot < 0 || slot >= slot_span() { return None }",
+                                          "if slot < 0 { return None }"),),
+    "identity/pack-drops-the-declaration": ((IDENTITY, "Some(declaration * slot_span() + slot)", "Some(slot)"),),
+    "identity/pool-is-one-for-the-program": ((IDENTITY,
+        'pub fn free_pool(owner: String) -> Int = derive_text(atom(owner) ++ "P")',
+        'pub fn free_pool(owner: String) -> Int = derive_text("P")'),),
+    "identity/temporary-floor-inside-the-band": ((IDENTITY,
+        "pub fn temporary_floor() -> Int = (derived_floor() + derived_width() + 1) * slot_span()",
+        "pub fn temporary_floor() -> Int = derived_floor()"),),
+    "identity/parent-not-checked": ((IDENTITY, "var depth = 1", "var depth = len(e.entry.key.path)"),),
+    "identity/binder-spelling": ((IDENTITY, "return BoundType(i)", "return NamedType(name, [], [])"),),
+    "identity/default-ambiguity": ((IDENTITY, "if same == 1 {", "if same >= 1 {"),),
+    "identity/effect-binder-spelling": ((IDENTITY, PROJECTED, "return NamedEffect(name)"),),
+    "identity/effect-member-erased": ((IDENTITY, PROJECTED, 'return ProjectedEffect(i, "")'),),
+    "identity/effect-binder-slot": ((IDENTITY, PROJECTED, "return ProjectedEffect(0, parts[1])"),),
+    # identity.py: lowering's dense renumbering of the packed keys, the
+    # other end of the same numbering (ir/lower.dawn).
+    "identity/densify-skips-the-captures": ((LOWER, DENSIFY,
+        "  dense_expr(dense_params(dense_params(dense_params(d,\n"
+        "    f.params), f.dicts), f.evs), f.body)"),),
+    "identity/densify-numbers-the-captures-last": ((LOWER, DENSIFY,
+        "  dense_expr(dense_params(dense_params(dense_params(dense_params(d,\n"
+        "    f.params), f.dicts), f.evs), f.captures), f.body)"),),
+    "identity/symbol-table-keeps-the-packed-keys": ((LOWER, MOVED,
+        "      Some(next) -> { moved_syms = map.insert(moved_syms, id, s) }"),),
+    "identity/symbol-table-carries-what-the-module-never-names": ((LOWER, MOVED + "\n      None -> ()",
+        MOVED + "\n      None -> { moved_syms = map.insert(moved_syms, id, s) }"),),
+    # identity.py: the minting end, `cx.mint` and `enter_decl` (check/cx.dawn).
+    "identity/intern-collision-ignored": ((CX, "Some(other) -> if other != decl {", "Some(other) -> if false {"),),
+    "identity/intern-not-recorded": ((CX, INTERN, "(cx, id)"),),
+    "identity/mint-takes-a-slot": ((CX, INTERN,
+        "(Cx { ..cx, decl_slots: map.insert(cx.decl_slots, cx.owner_decl, slot_of(cx) + 1),\n"
+        "    identities: map.insert(cx.identities, id, decl) }, id)"),),
+    # A declaration that does not open one numbers its bindings in
+    # whatever declaration the previous pass left open; one that
+    # reissues slot zero puts its body's locals on its signature's
+    # binders; and a pool shared by the program puts two modules'
+    # unowned bindings on one key.
+    "identity/enter-keeps-the-previous-declaration": ((CX, "Cx { ..interned_cx, owner_decl: id }", "interned_cx"),),
+    "identity/slots-restart-at-zero": ((CX, "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = slot_of(cx)",
+                                        "pub(pkg) fn fresh(cx: Cx) -> (Cx, Int) = {\n  let slot = 0"),),
+    "identity/module-pool-is-one-for-the-program": ((CX,
+        'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool(cx.owner_class.unwrap_or(""))',
+        'pub(pkg) fn module_pool(cx: Cx) -> Int = free_pool("")'),),
+    "identity/mint-reads-the-source-path": ((CX, MINT,
+        'interned(cx, minted(cx.owner_class.unwrap_or("") ++ cx.src_path.unwrap_or(""), kind, name), lo, hi)'),),
+    "identity/mint-ignores-the-kind": ((CX, MINT,
+        'interned(cx, minted(cx.owner_class.unwrap_or(""), identity.TypeDecl, name), lo, hi)'),),
+    # identity.py: the intern table on the carry between modules.
+    "identity/drop-identity-carry": ((ANALYZE, "identities: cx.identities,", "identities: before.identities,"),),
+    "identity/drop-std-identity-carry": ((STDLIB, "identities: interned,\n    mods: mods,",
+                                          "identities: map.empty(),\n    mods: mods,"),),
+    "identity/drop-std-identity-step": ((STDLIB, "interned = cx1.identities", "interned = interned"),),
+    # `identity.absolute` keeps a diagnostic's own offsets when the
+    # revision has no view of its owner, so a program assembled
+    # without the views renders declaration-relative offsets as
+    # absolute and says nothing about it.
+    "identity/drop-render-view": ((ANALYZE,
+        "Program { modules: out, diags: diags, decl_spans: carry.decl_spans }",
+        "Program { modules: out, diags: diags, decl_spans: map.empty() }"),),
+    # A module that imports an effect writes the provider's id into its
+    # own table; this has it derive one from the name in the importing
+    # scope instead.
+    "identity/mint-imported-effect": ((PASSES,
+        "cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, local, eid) }",
+        "let (own_cx, own) = mint(cx1, EffectDecl, name, lo, hi)\n"
+        "      cx1 = Cx { ..own_cx, effects: map.insert(own_cx.effects, local, own),\n"
+        "        effect_infos: map.insert(own_cx.effect_infos, own, effect_of(own_cx, eid)) }"),),
 }
 
 
