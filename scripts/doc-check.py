@@ -491,6 +491,19 @@ SPEC_BUILTIN_LIST_MARKER = "<!-- doc-check: builtin-list -->"
 PUBLIC_BUILTIN_DECL = re.compile(r"(?m)^pub fn\s+([a-z][A-Za-z0-9_]*)\b")
 BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
 
+# The bundled-module list in spec §10.6 is held to std/modules.txt, the file
+# the compiler build reads to decide which std/<name>.dawn resources ship. The
+# list drifted once already: four modules were bundled and the spec named none
+# of them (#358). The marked region runs to the next blank line, and every
+# line in it is either a `- `std/<name>`` item or the indented continuation of
+# one, so the check reads the module of each item rather than every `std/...`
+# span: a gloss may mention another module without counting as a claim. The
+# comparison is a set plus a duplicate check, not an order: the file is in
+# dependency order for the build, and nothing in the spec promises that.
+SPEC_BUNDLED_MODULES_MARKER = "<!-- doc-check: bundled-modules -->"
+STD_MODULES_PATH = ROOT / "std/modules.txt"
+SPEC_BUNDLED_MODULE_ITEM = re.compile(r"^- `std/([a-z][a-z0-9_]*)`")
+
 HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
 
 HISTORICAL_AUDIT_HEADING = "冻结后的历史状态层（截至 `76491bb`）"
@@ -1694,6 +1707,68 @@ def builtin_list_contract_problems(
     return bad, seen
 
 
+def bundled_std_modules() -> list[str]:
+    """The module names std/modules.txt ships, comments and blank lines skipped."""
+    return [line.strip() for line in
+            STD_MODULES_PATH.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+def bundled_module_list_problems(
+        texts: dict[pathlib.Path, str],
+        bundled: list[str] | None = None) -> tuple[list[str], int]:
+    """Hold each spec's §10.6 bundled-module list to std/modules.txt exactly."""
+    if bundled is None:
+        bundled = bundled_std_modules()
+    rel_modules = str(STD_MODULES_PATH.relative_to(ROOT))
+    if not bundled:
+        return [f"{rel_modules}: no bundled modules found"], 0
+    shipped = set(bundled)
+
+    bad: list[str] = []
+    seen = 0
+    for path in sorted(SPEC_PATHS):
+        rel = str(path.relative_to(ROOT))
+        text = texts.get(path)
+        if text is None:
+            bad.append(f"{rel}: cannot check the bundled-module list; document missing")
+            continue
+        marker_count = text.count(SPEC_BUNDLED_MODULES_MARKER)
+        if marker_count != 1:
+            bad.append(f"{rel}: expected one {SPEC_BUNDLED_MODULES_MARKER}, "
+                       f"found {marker_count}")
+            continue
+        start = text.index(SPEC_BUNDLED_MODULES_MARKER) + len(SPEC_BUNDLED_MODULES_MARKER)
+        region = active_markdown(text[start:].split("\n\n", 1)[0])
+        names: list[str] = []
+        for line in region.splitlines():
+            if not line.strip() or line.startswith("  "):
+                continue
+            item = SPEC_BUNDLED_MODULE_ITEM.match(line)
+            if item is None:
+                bad.append(f"{rel}: bundled-module list line is not a "
+                           f"`- `std/<name>`` item: {line.strip()!r}")
+                continue
+            names.append(item.group(1))
+        if not names:
+            bad.append(f"{rel}: bundled-module list names no modules")
+            continue
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            bad.append(f"{rel}: bundled-module list repeats module(s): "
+                       f"{', '.join(duplicates)}")
+        unknown = sorted(set(names) - shipped)
+        if unknown:
+            bad.append(f"{rel}: bundled-module list names module(s) absent from "
+                       f"{rel_modules}: {', '.join(unknown)}")
+        missing = sorted(shipped - set(names))
+        if missing:
+            bad.append(f"{rel}: bundled-module list omits module(s) in "
+                       f"{rel_modules}: {', '.join(missing)}")
+        seen += len(names)
+    return bad, seen
+
+
 def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], int]:
     normalized = {path: normalize_prose(text) for path, text in texts.items()}
     bad: list[str] = []
@@ -1727,6 +1802,9 @@ def spec_contract_problems(texts: dict[pathlib.Path, str]) -> tuple[list[str], i
         bad += problems
         seen += count
     problems, count = builtin_list_contract_problems(texts)
+    bad += problems
+    seen += count
+    problems, count = bundled_module_list_problems(texts)
     bad += problems
     seen += count
     return bad, seen
@@ -1780,6 +1858,37 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
                for problem in bad):
         return ["spec contract self-test: a duplicate builtin passed the inventory"], 0
 
+    # Bundled modules, both directions and both languages: an item dropped
+    # from the spec, an item the build does not ship, and a module the build
+    # ships that neither spec names (std/modules.txt gaining a line).
+    en = ROOT / "docs/spec.en.md"
+    for path, item in ((zh, "- `std/memfs`："), (en, "- `std/memfs`: ")):
+        rel = str(path.relative_to(ROOT))
+        omitted = dict(texts)
+        if item not in omitted[path]:
+            return [f"spec contract self-test: {rel} bundled-module fixture is absent"], 0
+        # Demoted to a continuation of the line above: the item is gone, the
+        # text is not, so only the list check can tell.
+        omitted[path] = omitted[path].replace(item, "  ", 1)
+        bad, _ = spec_contract_problems(omitted)
+        if not any(problem.startswith(rel + ":")
+                   and "bundled-module list omits module(s) in std/modules.txt: memfs"
+                   in problem for problem in bad):
+            return [f"spec contract self-test: {rel} omitted a bundled module and stayed green"], 0
+        minted = dict(texts)
+        minted[path] = minted[path].replace(
+            SPEC_BUNDLED_MODULES_MARKER,
+            SPEC_BUNDLED_MODULES_MARKER + "\n- `std/sqrt`", 1)
+        bad, _ = spec_contract_problems(minted)
+        if not any(problem.startswith(rel + ":")
+                   and "names module(s) absent from std/modules.txt: sqrt" in problem
+                   for problem in bad):
+            return [f"spec contract self-test: {rel} named an unbundled module and stayed green"], 0
+    bad, _ = bundled_module_list_problems(texts, bundled_std_modules() + ["sqrt"])
+    if sum("omits module(s) in std/modules.txt: sqrt" in problem for problem in bad) != 2:
+        return ["spec contract self-test: a module added to std/modules.txt "
+                "did not redden both spec lists"], 0
+
     fixtures = (
         (ROOT / "docs/spec.md", "3.1 函数",
          "同时省略返回类型和全部效果注记", "只省略全部效果注记",
@@ -1829,7 +1938,7 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         if not any(problem.startswith(rel + ":")
                    and "expression-level Option/Result propagation" in problem for problem in bad):
             return [f"spec contract self-test: {rel} accepted obsolete ? semantics"], 0
-    return [], 10
+    return [], 15
 
 
 def check_effect_inference_probe() -> tuple[list[str], int]:

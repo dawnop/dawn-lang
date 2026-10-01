@@ -2989,10 +2989,29 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 ### 10.6 捆绑标准库与 prelude
 
-标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
-`std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`、
-`std/char`。
-另有两个**内部模块** `std/hamt` 与 `std/pvec`——`Map`/`Set`/`List` 的表示（§11）。它们随
+标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）。
+捆绑的模块恰好是下面这些，与编译器的清单 `std/modules.txt` 逐一对应（`scripts/doc-check.py`
+对账，多一个少一个都红）：
+
+<!-- doc-check: bundled-modules -->
+- `std/cursor`：`String` 中的位置（游标）
+- `std/str`：字符串
+- `std/char`：字符 `Char`
+- `std/fmt`：数字的渲染与解析（见下）
+- `std/narrow`：窄二进制浮点 bf16、binary16、binary32，逐运算正确舍入（§11「数学内建」）
+- `std/list`：`List` 的函数与 `Iter` 实例
+- `std/bytes`：字节串，及 UTF-8、hex、base64 编解码
+- `std/io`：控制台、文件、环境与子进程（`Fs`/`Proc`/`Env` 等效果）
+- `std/reactor`：状态跨调用存活的同步行协议，wasm reactor 模块的那个根（§12.5）
+- `std/map`：`Map`
+- `std/set`：`Set`
+- `std/hamt`：内部模块，`Map`/`Set` 的表示
+- `std/pvec`：内部模块，`List` 的表示
+- `std/gpu`：GPU 的宿主层，`Gpu` 效果与张量（§12.6）
+- `std/memfs`：内存中的 `Fs` handler，供测试用；本规范别处不再讲它，设计见
+  [`fs-real-path-design.md`](fs-real-path-design.md)
+
+`std/hamt` 与 `std/pvec` 是**内部模块**——`Map`/`Set`/`List` 的表示（§11）。它们随
 std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
 错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
 （`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3）；三个

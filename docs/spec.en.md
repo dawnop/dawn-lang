@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ dfacf3bad63dbb9c -->
+<!-- doc-check: translation-of docs/spec.md @ 0b1f6f230bd24160 -->
 
 # Dawn Language Specification
 
@@ -3740,9 +3740,32 @@ package → error (`` `seam` is package-private to package `web` ``).
 ### 10.6 The bundled standard library and the prelude
 
 The standard library is **Dawn source bundled with the compiler**, organised as real
-modules ([`stdlib-naming.md`](stdlib-naming.md)): `std/str`, `std/fmt`, `std/bytes`,
-`std/io`, `std/list`, `std/map`, `std/set`, `std/cursor`, `std/char`.
-There are two further **internal modules**, `std/hamt` and `std/pvec` — the representations
+modules ([`stdlib-naming.md`](stdlib-naming.md)). The bundled modules are exactly these,
+one for one with the compiler's own list `std/modules.txt` (`scripts/doc-check.py` holds the
+two together; one module too many or too few fails it):
+
+<!-- doc-check: bundled-modules -->
+- `std/cursor`: positions (cursors) in a `String`
+- `std/str`: strings
+- `std/char`: the character type `Char`
+- `std/fmt`: rendering and parsing numbers (see below)
+- `std/narrow`: the narrow binary floats bf16, binary16 and binary32, correctly rounded
+  per operation (§11 "Math builtins")
+- `std/list`: `List` functions and the `Iter` instance
+- `std/bytes`: byte strings, with UTF-8, hex and base64 encoding
+- `std/io`: console, files, environment and subprocesses (the `Fs`/`Proc`/`Env` effects
+  and others)
+- `std/reactor`: a synchronous line protocol whose state survives calls, the root a wasm
+  reactor module keeps (§12.5)
+- `std/map`: `Map`
+- `std/set`: `Set`
+- `std/hamt`: internal module, the representation of `Map`/`Set`
+- `std/pvec`: internal module, the representation of `List`
+- `std/gpu`: the host side of a GPU, the `Gpu` effect and tensors (§12.6)
+- `std/memfs`: an in-memory `Fs` handler for tests; the rest of this specification does
+  not discuss it, and its design is in [`fs-real-path-design.md`](fs-real-path-design.md)
+
+`std/hamt` and `std/pvec` are **internal modules** — the representations
 of `Map`/`Set`/`List` (§11). They are bundled along with std and reference each other
 inside std, but **`use std/hamt` / `use std/pvec` outside std is a compile error**: the
 representation has to be replaceable wholesale, and being replaceable requires that no
