@@ -86,17 +86,21 @@ fn declared_length(ex: HttpExchange) -> Int !io =
 # a number doubling as a switch, and the same number was the public ceiling, so
 # a config of 0 silently meant no ceiling at all. The public ceiling is a
 # positive number now (`start` refuses anything else) and the switch is a type.
-fn read_body(ex: HttpExchange, limit: Option[Int]) -> Result[Bytes, HttpError] !io = {
+#
+# The 413 is worded by `fmt.body_too_large`, as are the other two 413 sites
+# (`spill_body`, `copy_bounded`): the refusal is the framework's, the words are
+# the application's, and one route must not answer in two languages.
+fn read_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[Bytes, HttpError] !io = {
   let stream = ex.getRequestBody()!
   match limit {
     None -> Ok(stream.readAllBytes()!)
     Some(n) ->
       if declared_length(ex) > n {
-        Err(http_error(413, "request body exceeds ${n} bytes"))
+        Err(http_error(413, fmt.body_too_large(n)))
       } else {
         let raw = stream.readNBytes(n + 1)!
         if bytes.len(raw) > n {
-          Err(http_error(413, "request body exceeds ${n} bytes"))
+          Err(http_error(413, fmt.body_too_large(n)))
         } else {
           Ok(raw)
         }
@@ -540,7 +544,7 @@ fn build_request(
   # check that lives in the handler runs after both, which on a "stream-body"
   # route meant an anonymous PUT was written to disk in full before its 401.
   run_guard(guard, base, errors)?
-  let body = if streaming { bytes.utf8("") } else { read_body(ex, limit)? }
+  let body = if streaming { bytes.utf8("") } else { read_body(errors, ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(errors, ex, own)?) } else { None }
   Ok(Request { ..base, body: body, body_file: bf })
 }
@@ -605,11 +609,11 @@ fn spill_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[
   match limit {
     Some(n) ->
       if declared_length(ex) > n {
-        return Err(http_error(413, "request body exceeds ${n} bytes"))
+        return Err(http_error(413, fmt.body_too_large(n)))
       }
     None -> ()
   }
-  spill_with(fmt, () => File.createTempFile("dawn-put-", ".tmp")!, out => copy_bounded(ex.getRequestBody()!, out, limit))
+  spill_with(fmt, () => File.createTempFile("dawn-put-", ".tmp")!, out => copy_bounded(fmt, ex.getRequestBody()!, out, limit))
 }
 
 # The spill's read size: the buffer transferTo used, kept so a large PUT costs
@@ -618,7 +622,7 @@ const SPILL_CHUNK: Int = 8192
 
 # Copy `stream` to `out` a chunk at a time, counting. Past `limit` it stops
 # before writing the chunk that crossed it and answers 413.
-fn copy_bounded(stream: InputStream, out: FileOutputStream, limit: Option[Int]) -> Result[Unit, HttpError] !io = {
+fn copy_bounded(fmt: ErrorFormat, stream: InputStream, out: FileOutputStream, limit: Option[Int]) -> Result[Unit, HttpError] !io = {
   var total = 0
   var more = true
   while more {
@@ -631,7 +635,7 @@ fn copy_bounded(stream: InputStream, out: FileOutputStream, limit: Option[Int]) 
       match limit {
         Some(n) ->
           if total > n {
-            return Err(http_error(413, "request body exceeds ${n} bytes"))
+            return Err(http_error(413, fmt.body_too_large(n)))
           }
         None -> ()
       }
@@ -678,10 +682,12 @@ fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
 # Execute an already-computed dispatch decision, itself shaped like a handler so
 # middleware can wrap it — a logging middleware sees 404s and 405s too. The
 # matched route's captures are injected as a fresh Request (records are immutable).
-fn run_dispatch(d: Dispatch, req: Request) -> Result[Response, HttpError] !io =
+# The 404 and 405 are worded by the application's ErrorFormat like every other
+# refusal the framework decides on its own.
+fn run_dispatch(errors: ErrorFormat, d: Dispatch, req: Request) -> Result[Response, HttpError] !io =
   match d {
-    NoPath -> Err(http_error(404, "Not Found"))
-    WrongMethod -> Err(http_error(405, "Method Not Allowed"))
+    NoPath -> Err(http_error(404, errors.not_found))
+    WrongMethod -> Err(http_error(405, errors.method_not_allowed))
     Found(route, params) -> {
       route.handler(Request { ..req, params: params })
     }
@@ -761,7 +767,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
       # run, but no handler has: the decision is only read for its tags.
       if has_dot_segment(raw_path) {
         println("${ex.getRequestMethod()!} ${raw_path} -> 400 (dot segment)")
-        Err(http_error(400, "path contains a dot segment"))
+        Err(http_error(400, errors.dot_segment))
       } else {
         # a guard's refusal and an oversized body are both answered before the
         # body is read, which is the whole value of refusing; a spill that went
@@ -786,7 +792,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
         # and this taking it; build_request itself deletes the file on every
         # path where it fails.
         with held <- bracket(req, drop_body_file)
-        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(d, rq))
+        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(errors, d, rq))
       }
     }
   })
@@ -1697,7 +1703,7 @@ test "a panic is a 500 the application words: default, then configured" {
   # configured: the bytes this framework used to emit unconditionally, which
   # one application's frontend reads (FastAPI's key, its own 500 text)
   let fastapi = ErrorFormat {
-    detail_key: "detail", internal_message: "服务器内部错误", param_separator: "：",
+    ..default_errors(), detail_key: "detail", internal_message: "服务器内部错误", param_separator: "：",
   }
   let b = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   b.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, fastapi, ex))
@@ -1852,7 +1858,7 @@ test "a counted spill stops past the ceiling with a 413 and deletes its file" {
   let path = String.valueOf(tmp.getPath()!)!
   # more than one chunk, so the count crosses the ceiling mid-stream
   let over = bytes.utf8(str.repeat("x", 20000))
-  match spill_with(default_errors(), () => tmp, out => copy_bounded(test_stream_of(over), out, Some(10000))) {
+  match spill_with(default_errors(), () => tmp, out => copy_bounded(default_errors(), test_stream_of(over), out, Some(10000))) {
     Ok(_) -> { assert false }
     Err(e) -> {
       assert e.status == 413
@@ -1863,7 +1869,7 @@ test "a counted spill stops past the ceiling with a 413 and deletes its file" {
   # exactly the ceiling is accepted, byte for byte
   let tmp2 = a_temp_file()
   let exact = bytes.utf8(str.repeat("y", 10000))
-  match spill_with(default_errors(), () => tmp2, out => copy_bounded(test_stream_of(exact), out, Some(10000))) {
+  match spill_with(default_errors(), () => tmp2, out => copy_bounded(default_errors(), test_stream_of(exact), out, Some(10000))) {
     Err(_) -> { assert false }
     Ok(p) -> {
       assert File.new(p).length() == 10000
@@ -1966,5 +1972,67 @@ test "an in-memory route's body_limit replaces max_body, in both directions" {
   assert str.starts_with(send_sized(port, "POST", "/raw", "", "twelve bytes"), "HTTP/1.1 200")
   # and a route with neither keeps the server's ceiling
   assert str.starts_with(send_sized(port, "POST", "/plain", "", "twelve bytes"), "HTTP/1.1 413")
+  srv.stop(0)
+}
+
+# One wording for every refusal the framework decides itself, all of them
+# visibly not the defaults, so a test can tell which source a body came from.
+fn custom_errors() -> ErrorFormat =
+  ErrorFormat {
+    ..default_errors(),
+    body_too_large: n => "too big, limit ${n}",
+    not_found: "no such page",
+    method_not_allowed: "wrong verb",
+    dot_segment: "no dots",
+  }
+
+test "a custom ErrorFormat words all three 413 sites" {
+  let routes = [
+    body_limit(route_post("/mem", echo_body_text), 4),
+    body_limit(tagged(route_put("/up", spilled_size), ["raw-body", "stream-body"]), 10),
+  ]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, custom_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let before = spill_files()
+  # in memory, refused on the declared length before anything is read
+  let early = send_sized(port, "POST", "/mem", "", "hello")
+  assert str.starts_with(early, "HTTP/1.1 413")
+  assert str.contains(early, "too big, limit 4")
+  assert not str.contains(early, "request body exceeds")
+  # in memory, no length declared, so the read itself finds the overrun
+  let read = send_chunked(port, "POST", "/mem", "", "hello")
+  assert str.starts_with(read, "HTTP/1.1 413")
+  assert str.contains(read, "too big, limit 4")
+  # stream body, refused on Content-Length before the temp file exists
+  let pre = send_sized(port, "PUT", "/up", "", "0123456789A")
+  assert str.starts_with(pre, "HTTP/1.1 413")
+  assert str.contains(pre, "too big, limit 10")
+  assert not str.contains(pre, "request body exceeds")
+  # stream body, no length declared, counted during the spill
+  let counted = send_chunked(port, "PUT", "/up", "", "0123456789A")
+  assert str.starts_with(counted, "HTTP/1.1 413")
+  assert str.contains(counted, "too big, limit 10")
+  assert not str.contains(counted, "request body exceeds")
+  srv.stop(0)
+  assert new_since(before, spill_files()) == []
+}
+
+test "a custom ErrorFormat words the 404, the 405 and the dot-segment 400" {
+  let routes = [route_get("/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, custom_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let r404 = raw_http(port, get_line("/nope"))
+  assert str.starts_with(r404, "HTTP/1.1 404")
+  assert str.contains(r404, "{\"error\":\"no such page\"}")
+  let r405 = send_sized(port, "POST", "/b", "", "")
+  assert str.starts_with(r405, "HTTP/1.1 405")
+  assert str.contains(r405, "{\"error\":\"wrong verb\"}")
+  let r400 = raw_http(port, get_line("/a/../b"))
+  assert str.starts_with(r400, "HTTP/1.1 400")
+  assert str.contains(r400, "{\"error\":\"no dots\"}")
   srv.stop(0)
 }

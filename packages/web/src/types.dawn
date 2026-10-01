@@ -622,24 +622,46 @@ pub fn attachment(content_type: String, filename: String, body: String) -> Respo
 # invisible from the outside — the module header above has always claimed the
 # key was "error". So they are configuration now, with neutral English
 # defaults, and an application that wants the old bytes states them.
+#
+# The last four fields (web5 5.2) are the other refusals the framework decides
+# by itself: a body over its ceiling, an unrouted path, a wrong method, a dot
+# segment. They were fixed English strings in server.dawn, so an application
+# that worded its own errors in another language still answered in English on
+# exactly those four, sometimes on the same route as its own 401. The 413 takes
+# the ceiling that was in force because the default wording names it. A
+# function field cannot be printed, so this type no longer derives Show;
+# nothing printed one.
 ## How the framework words the errors it renders itself. `detail_key` is the
 ## JSON object key its error body uses ({"error": message}); `internal_message`
 ## is the body of the 500 it renders when a handler panics; `param_separator`
 ## goes between a parameter's name and the complaint in a 422 from
-## `query_int_bounded`.
+## `query_int_bounded`. `body_too_large` words the 413 for a request body over
+## its ceiling and is given that ceiling in bytes; `not_found` and
+## `method_not_allowed` are the 404 and 405 bodies for a request no route takes;
+## `dot_segment` is the 400 for a path with a "." or ".." segment.
 pub type ErrorFormat = {
   detail_key: String,
   internal_message: String,
   param_separator: String,
-} derive Show
+  body_too_large: fn(Int) -> String,
+  not_found: String,
+  method_not_allowed: String,
+  dot_segment: String,
+}
 
 ## The neutral defaults: {"error": ...} bodies, "internal server error" for a
-## panic, and "name: Input should be ..." for a rejected query parameter.
+## panic, "name: Input should be ..." for a rejected query parameter, and the
+## framework's own refusals in plain English ("request body exceeds N bytes",
+## "Not Found", "Method Not Allowed", "path contains a dot segment").
 pub fn default_errors() -> ErrorFormat =
   ErrorFormat {
     detail_key: "error",
     internal_message: "internal server error",
     param_separator: ": ",
+    body_too_large: n => "request body exceeds ${n} bytes",
+    not_found: "Not Found",
+    method_not_allowed: "Method Not Allowed",
+    dot_segment: "path contains a dot segment",
   }
 
 # An HttpError is a public record and stays one (a test builds them, and the
