@@ -7,13 +7,10 @@
 # `build` shells out to the system C compiler: emitting C *is* this
 # backend's codegen, and cc is its assembler. Subcommands are a subset of
 # the JVM driver's on purpose; what is missing is what needs a JVM
-# (`build`-to-jar, `lock`, `--vendor`), plus `cache` and `__pkghash`.
-# TODO(follow-up to #201): those two need no JVM. `pkg/pkgcmd`'s `run_cache`
-# and `run_pkghash` use only `compiler_plan/pkgfetch`, but that module also
-# holds `lock` and so imports `maven` and `use java`, which this backend
-# refuses; opening them means moving the two out first, and it changes this
-# driver's CLI surface. Until then the usage text below files `cache` under
-# the JVM.
+# (`build`-to-jar, `lock`, `--vendor`). `cache verify` and the hidden
+# `__pkghash` need none, and are the same `pkg/cachecmd` calls as on the JVM
+# driver (#304); that module was split out of `pkg/pkgcmd` so that importing
+# it here pulls in no `use java`.
 #
 # `fmt`, `doc` and `add` are wired here as second implementations of the JVM
 # driver's argument handling rather than as calls into a shared one, and that
@@ -48,6 +45,7 @@ use version.{VERSION}
 use front/fmt
 use doc
 use pkg/add
+use pkg/cachecmd
 use lsp/server.{LspLeaseHost, run_lsp, lsp_std_flag}
 use compiler_plan/pkgfetch
 use compiler_plan/procmem
@@ -87,6 +85,7 @@ fn usage() -> String =
     "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
     "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
     "                                              add a dependency to dawn.toml",
+    "  dawnc cache verify                          check every cached package's hash",
     "  dawnc lsp   [--std <dir>]                   speak LSP over stdin/stdout",
     "  dawnc version                               print the version",
     "",
@@ -97,7 +96,7 @@ fn usage() -> String =
     "is ignored and the std compiled into this toolchain is used.",
     "`use java` programs are rejected: Java interop needs the JVM toolchain, so",
     "compile those with `dawn` (adding --native if you want one file out of it).",
-    "Packaging a jar, `lock` and `cache` need a JVM too and are not subcommands here."
+    "Packaging a jar and `lock` need a JVM too and are not subcommands here."
   ], "\n") ++ "\n"
 
 fn fail_usage() -> Unit !Exit !Console !io = {
@@ -979,6 +978,10 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
           Ok(s) -> console_println(s)
           Err(e) -> cli_error(e)
         }
+      } else if mode == "cache" {
+        cachecmd.run_cache(rest)
+      } else if mode == "__pkghash" {
+        cachecmd.run_pkghash(rest)
       } else if mode == "lsp" {
         run_lsp(lsp_std_flag(rest), LspLeaseHost {
           standalone: native_lsp_standalone_lease,
@@ -1009,6 +1012,13 @@ test "a subcommand's help is that subcommand's lines out of the usage block" {
 
   # a command with no entry gets nothing, rather than the whole block
   assert subcommand_help("nosuch") == "\n"
+}
+
+test "`cache verify` is a subcommand here and no longer filed under the JVM" {
+  assert subcommand_help("cache") == "  dawnc cache verify                          check every cached package's hash\n"
+  assert not str.contains(usage(), "`cache` need")
+  # `__pkghash` stays hidden, as on the JVM driver
+  assert not str.contains(usage(), "__pkghash")
 }
 
 test "--help is recognised anywhere in a subcommand's tail" {
