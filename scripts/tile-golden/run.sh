@@ -1359,10 +1359,14 @@ fi
 #     same type, and layer 2 for either is unreachable here since sm_86
 #     refuses both. What this mutant shows is that the fp8 tags are
 #     load-bearing at all.
+#
+#     The sentence spells the verifier's whole list of float types, so it
+#     moves with the assembler: 13.4.92 appended `fnv8E5M3FNU` (its own
+#     spelling of the dialect's f8E5M3FNU) to the list 13.3.36 printed.
 if run_item e4m3-tag-as-i8; then
   mutant_project e4m3-tag-as-i8 bytecode.dawn
   writer_mutant_checks e4m3-tag-as-i8 dtype_e4m3 same-size \
-    "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<128xi8>'"
+    "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32 or f8E4M3FN or f8E5M2 or f8E8M0FNU or f4E2M1FN or fnv8E5M3FNU values, but got '!cuda_tile.tile<128xi8>'"
 fi
 
 # 25. The writer stops keying `ftof`'s rounding mode on its target and
@@ -1384,10 +1388,12 @@ fi
 #     ftof_rounding a claim: one says the mode has to be `zero` HERE, the
 #     other says it has to be `nearest_even` EVERYWHERE ELSE, and either
 #     alone would leave a writer that hard-codes the other mode green.
+#     13.4.92 inserts `for conversion to low-precision type` into the
+#     sentence 13.3.36 printed; the refusal is the same.
 if run_item e8m0-tag-as-f8e5m2; then
   mutant_project e8m0-tag-as-f8e5m2 bytecode.dawn
   writer_mutant_checks e8m0-tag-as-f8e5m2 dtype_e8m0 same-size \
-    "'cuda_tile.ftof' op invalid rounding mode specified. Only 'nearest_even' is supported"
+    "'cuda_tile.ftof' op invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported"
 fi
 
 # 27. The `loop` region's own rollback. `for`'s is a mutant of the shared
@@ -1492,10 +1498,13 @@ fi
 #     the OTHER attribute would have: it takes the divisor (32) for an
 #     element count and runs off the end of the section. This is the first
 #     of three that make the three predicate tags load-bearing.
+#     tileiras 13.3.36 named the attribute (`failed to read DenseI64ArrayAttr
+#     for SameElementsAttr`); 13.4.92 refuses at the same offset and says
+#     `failed to read values data`, so the pin moved with the assembler.
 if run_item assume-divby-tag-as-same-elements; then
   mutant_project assume-divby-tag-as-same-elements bytecode.dawn
   writer_mutant_checks assume-divby-tag-as-same-elements assume_divby same-size \
-    "failed to read DenseI64ArrayAttr for SameElementsAttr"
+    "error at offset 72: failed to read values data"
 fi
 
 # 35. `same_elements`'s values laid down four bytes wide instead of eight.
@@ -1826,11 +1835,12 @@ fi
 #     and hands the operation a tile of the wrong element type, which the
 #     verifier names. Nothing is variadic here, so no count would have
 #     caught it: the arity is the operation's identity and nothing in the
-#     stream repeats it.
+#     stream repeats it. The scale types are the verifier's list, which
+#     13.4.92 extended with `fnv8E5M3FNU`, so the pin is the 13.4.92 text.
 if run_item mmaf-scaled-scale-operand-missing; then
   mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn
   writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short \
-    "operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU values"
+    "'cuda_tile.mmaf_scaled' op operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU or fnv8E5M3FNU values, but got '!cuda_tile.tile<32x2xi32>'"
 fi
 
 # 50. `mmaf_scaled` writes a flags varint. This is the sibling comparison

@@ -4,9 +4,12 @@
 #
 #   bytecode   the version packages/tileir/src/bytecode.dawn writes into the
 #              header (BYTECODE_MAJOR.BYTECODE_MINOR); run.sh fails if the
-#              program disagrees with this line. tileiras 13.3.36 accepts
-#              13.1, 13.2 and 13.3, and 13.3 is its own current version
-#              (Version.cpp's kCurrentVersion). Knife T8 moved this line from
+#              program disagrees with this line. tileiras 13.4.92 accepts
+#              13.1 to 13.4 (`--list-versions`); this line stays at 13.3
+#              across the assembler upgrade on purpose, so that the knife
+#              which changes the assembler changes no golden and the knife
+#              which changes the bytecode changes no cubin (knives U1 and
+#              U2 are two commits for that reason). Knife T8 moved this line from
 #              13.2 to 13.3 and measured what the move costs: for every
 #              kernel in this directory the sm_86 cubin assembled from the
 #              13.3 bytes is byte for byte the one assembled from the 13.2
@@ -19,6 +22,13 @@
 #              lines below carry.
 #   tileiras   the assembler's own version, as `tileiras --version` prints it
 #              after `V`; run.sh fails if the binary it was given is another.
+#              Moving it moves device code even when no golden moves: knife
+#              U1 assembled the same 185 13.3 goldens with 13.3.36 and
+#              13.4.92 and no cubin is byte for byte the same, 137 of them
+#              differ in their SASS and 48 only in the ELF around it (13.4
+#              runs a Tile IR level canonicalize/CSE/LICM pipeline before
+#              codegen). So an assembler upgrade re-records every ledger,
+#              not just this file's line.
 #   gpu-name   the --gpu-name the goldens are assembled for (the one GPU of
 #              the ledger, 6.4).
 #   wheel      the PyPI wheels install-tileiras.sh downloads, each with the
@@ -29,7 +39,13 @@
 #              in turn: without either it prints `failed to compile Tile IR
 #              program` on every input, including an empty module. The third
 #              wheel it declares, nvidia-nvjitlink, is not needed and not
-#              installed.
+#              installed. Measured again for 13.4.92 (knife U1): a tree of
+#              exactly three files, bin/tileiras, bin/ptxas and
+#              lib/libnvvm.so.4, assembles all 185 goldens to the cubins the
+#              full install writes, and removing either of the last two
+#              brings back the same refusal. That tree is what gets carried
+#              to a machine without pip. The 13.4 tileiras wheel also carries
+#              bin/tileirdisasm, which nothing here uses yet.
 #   driver     the driver version scripts/tile-gpu-diff/run.sh last ran
 #              against, as nvidia-smi reports it. run.sh refuses to append a
 #              ledger line while this disagrees with the machine, and
@@ -38,9 +54,9 @@
 #              the run that records it. 560.94 is below the r580 Tile IR
 #              needs: the ledger records how far that driver gets.
 bytecode 13.3
-tileiras 13.3.36
+tileiras 13.4.92
 gpu-name sm_86
-wheel nvidia-cuda-tileiras==13.3.36 sha256=9221618a3f6422efcb9ae38225d1db7bf0f4ca211f8fdc98a3cd6a81a8f00eca
-wheel nvidia-nvvm==13.3.73 sha256=0e28e0858a3475e11ac67d35301cd5bf82666a1c0dc4ec4e80ceaf3a5fd1dea8
-wheel nvidia-cuda-nvcc==13.3.73 sha256=f483af83166c4fa356a21606076d553b0b4ceaebbd9912e537545080db695bdd
+wheel nvidia-cuda-tileiras==13.4.92 sha256=c7ff33b56466f27258fdb6404d654686a391854dc922ff2d2aedac56dde35624
+wheel nvidia-nvvm==13.4.92 sha256=e4c81cb321dd9743bcf871c5e7e8fecd7f05dea607944426e102bdda8d49e137
+wheel nvidia-cuda-nvcc==13.4.92 sha256=a1f3bfb27299e060b444d5df1f4bcd762501326cf0fd3141ed61756816ab9a0e
 driver 616.56
