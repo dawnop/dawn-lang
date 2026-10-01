@@ -1,31 +1,9 @@
-# Dawn 设计文档
+# 早期设计决定（M0–M7）
 
 *[English](design.en.md) —— 本文是正本；英文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
-> 状态：**historical**。本文是 M0–M7 时期（截至 2026-07-22）的决策记录，M7 之后不再更新；
-> 逐条保留是为了「当时为什么这么选」有据可查。**其中若干前提已被后续里程碑推翻**，
-> 正文照原样保留，读时以下面这张表为准：
->
-> - 「编译器预算 6–8 千行（Kotlin）」「实现语言 = Kotlin」（§1、D7）：Kotlin 实现已随
->   `kotlin-final` tag 归档，main 上只有自举的 `selfhost/`，87,586 行 Dawn
->   （口径：`selfhost/src` 下全部 `.dawn`，不含生成物 `embed/`；2026-10-01 实测），
->   见 [m8-selfhost-only.md](history/m8-selfhost-only.md)。
-> - 「唯一后端是 JVM 字节码，native 由 GraalVM native-image 得到」（§1、D1）：C 后端
->   （Core IR 到 C，交给 `cc`）自 2026-07-30 起与 JVM 后端平级并已自举，另有把 kernel
->   送上 NVIDIA GPU 的 cuTile 后端；GraalVM 那条路仍在，只是不再是唯一的 native，
->   见 [native-backend-plan.md](native-backend-plan.md)。
-> - 「效果系统只有两级：pure 与 io」（D2）：今天还有用户声明的具名效果（`effect` +
->   `with handle`，可带 `ctl` 控制臂与 handler 状态），标签随签名传播、在 handler 处扣除，
->   见 spec.md §6.5 与 [effects-design.md](effects-design.md)。
-> - 非目标表里「自定义 GC / 内存模型：JVM 的 GC 就是我们的 GC」：native 后端没有 GC，
->   用 Perceus 引用计数管理内存，见 [perceus-design.md](perceus-design.md)。
-> - M7 一节「日常工具链（run/test/fmt/doc/LSP）仍是 Kotlin 版」：M8 起全部工具链都由
->   selfhost 提供，Kotlin 版只留在 `kotlin-final` tag 里，见 [m8-selfhost-only.md](history/m8-selfhost-only.md)。
-> - 「unsafe 逃生门不向用户代码开放」（D5）：`unsafe_pure` 后来一度成为用户可写的普通语法，
->   2026-09-24 又连同关键字整个删除；「一个宿主调用撑一个纯函数」今天由编译器的 intrinsic
->   契约在声明侧承担，见 spec.md §6.4 与 §11。
-> - 「无中间 IR」（D6）：论证在小编译器阶段成立；后来引入了 Core IR（`selfhost/src/ir/`），
->   C 后端就从它出发，见 codebase-audit.md 的 ARCH-04。
+> 状态：**historical**。本文是 M0–M7 时期（截至 2026-07-22）的决策记录，正文照原样保留、M7 之后不再更新；
+> 其中哪些决定已被推翻、被什么取代、在何时，见 [history.zh-CN.md](history.zh-CN.md) 末尾的「被推翻的决定」表。
 >
 > 语法与语义的权威定义在 [spec.md](spec.md)（那篇是 normative）。本文只讲"为什么"。
 
@@ -263,12 +241,12 @@ builtin/std 函数名改为 Rust 式合法**（解析序本就是本模块声明
     `alias.fn` 调用与 `use` 行条目都能跳到定义所在文件）。
   - **坑**：`\r` 不是 Dawn 转义（用 13）；（字符串里 `{` 恒是插值的旧坑已随 `$` 插值改版消失）
     `assert`/赋值是语句不能作 match 臂；`map_empty()` 靠 needsExpected 推迟到兄弟实参定型后再推导。
-- **M5 语言网站**：文档、教程、spec 渲染、examples 陈列、`dawn doc` 生成 API 文档。
+- **M5 语言网站**（完成，2026-07-12；勘误补记：站点由 Dawn 写的生成器产出、JVM 与 native 产物逐字节一致，提交 `8340c516`；Playground 后端与实时诊断同日，提交 `0af36ae5`、`78227b7f`）：文档、教程、spec 渲染、examples 陈列、`dawn doc` 生成 API 文档。
   - 静态生成器用 Dawn 写（dogfood M4），产物 nginx 托管、零后端；
   - playground 在线试玩做二期（编译服务 + 沙箱限时）。
   - 验收：站点上线，且生成它的程序是 Dawn 写的。
 - **M6 博客后端重写**（代码实现完成，2026-07-14；十三刀，backend-dawn ~4000 行 Dawn、
-  46 单测全绿；仅剩生产切流的运维执行 + 7 天观察，见 dawnop-site 仓库 `backend-dawn/`）：
+  46 单测全绿；仅剩生产切流的运维执行 + 7 天观察，见 dawnop-site 仓库 `backend-dawn/`；勘误补记：生产全量切流 2026-07-15 执行、uvicorn 2026-07-16 退役，M6 完成，见 dawnop-site 仓库提交 `ab170d9`、`703886f` 与 [history/m6.md](history/m6.md) 文件头）：
   真实生产 dogfood，故意排在自举前——真实项目会把 stdlib 与报错的痛点全逼出来，
   趁语言未冻结修起来便宜。**验收结论：整个博客后端（公开站 + 全套后台内容管理 + 搜索 +
   认证 + 文件管理 + 监控）在 Dawn 上跑通，与 FastAPI 参照实现逐字段对拍一致，路由表

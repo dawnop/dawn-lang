@@ -27,12 +27,17 @@ independent: the runtime-intrinsics contract
 ([`docs/runtime-intrinsics-design.md`](docs/runtime-intrinsics-design.md))
 pushes `java.*` behind backend-owned intrinsics so the standard library stops
 assuming a JVM underneath. Memory management on the native side is Perceus
-reference counting with a slab allocator; that line is largely landed and its
-remaining measured gap is recorded below under "good starting points".
+reference counting with a slab allocator; that line is largely landed, and
+[`docs/perceus-design.md`](docs/perceus-design.md) and
+[`docs/slab-residency-design.md`](docs/slab-residency-design.md) record what was
+measured.
 
-**Tooling.** The LSP serves whole-workspace diagnostics today; a real LSP for
-the online playground is deferred but wanted. `dawn fmt`, `dawn doc` and the
-gate scripts are living surfaces and small sharp fixes to them are welcome.
+**Tooling.** The LSP serves whole-workspace diagnostics today, and since
+2026-08-30 the online playground runs a real one: each browser buffer talks to
+its own isolated native LSP process
+([`docs/playground-lsp-design.md`](docs/playground-lsp-design.md)).
+`dawn fmt`, `dawn doc` and the gate scripts are living surfaces and small sharp
+fixes to them are welcome.
 
 ## Closed lines
 
