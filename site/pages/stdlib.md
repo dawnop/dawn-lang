@@ -32,8 +32,8 @@ How to read it:
   When to assert, when to ask and when to clamp is decided in
   [spec §4.8](spec.html#s4-8).
 
-The specification those links lead to is **written in Chinese**. This page,
-the tutorial and the examples come in both languages.
+The specification comes in both languages: the Chinese text is the original
+and the English text, which these links lead to, is its translation.
 
 ## Built-in types
 

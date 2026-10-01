@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/stdlib.md @ ee51d711c8e15868 -->
+<!-- doc-check: translation-of site/pages/stdlib.md @ ad9b9fbb78e0a125 -->
 <!-- 本文是 stdlib.md 的译本，stdlib.md 是正本：改文案先改英文，再改这里。
      上面那行标记记着正本的摘要，英文动了而这里没跟，scripts/doc-check.py 会红。 -->
 
@@ -24,7 +24,7 @@
 - 会失败的操作回 `Result`，可能没有答案的回 `Option`；何时断言、何时问询、何时钳位，
   判据在[规范 §4.8](spec.html#s4-8)。
 
-上面链到的规范**只有中文**。本页、教程与示例则中英两版都有。
+规范中英两版都有：中文是正本，英文是它的译本。
 
 ## 内建类型
 
