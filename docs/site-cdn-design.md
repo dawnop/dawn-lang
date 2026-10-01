@@ -66,6 +66,11 @@ bundle 增量：`playground.js` 原始 +262 B，gzip -9 +91 B（143,680 → 143,
 
 两个默认值都不在本次改动里变；切换那天由部署侧设置变量或改默认值。
 
+2026-10-02 切换后已改默认值：`play-live-check.py` 的 runner 检查默认打
+`https://play.dawnop.com/api`（不再由 `PLAY_BASE_URL` 推出），`redeploy.sh` 的提示默认
+`https://play.dawnop.com/api/health`。`site/redeploy.sh` 在 rsync 之后经同一个 ssh 目标调用
+部署机上的刷新脚本清 HTML 缓存（凭据不离开那台机器），`SITE_CDN_PURGE=0` 跳过，失败只告警。
+
 ## 五、源站要满足的契约
 
 本节只写仓库代码依赖的行为，不写具体的 vhost、域名、证书与地址，那些在私有部署仓库。
@@ -106,6 +111,8 @@ API origin 上线并通过 `PLAY_API_URL=<API origin>/api scripts/play-live-chec
 
 - **不把 API 的域名写进仓库。** 默认值保持现状，新 origin 只在构建与部署时以变量给出；
   仓库里除站点公开地址外不出现任何部署域名、IP 或登录名，部署细节归私有部署仓库。
+  （2026-10-02 修订：切换后 `play.dawnop.com` 已是公开的 API 地址，监控与提示的默认值
+  直接写它；IP、登录名与 CDN 凭据仍不进仓库。）
 - **不给 check、health、lsp 各开一个属性。** 理由见第二节，一个属性不会自相矛盾。
 - **不在前端加运行期的 origin 配置**（例如读 `<meta>` 或全局变量）。端点是构建产物的一部分，
   `site-dist-diff` 两条腿看到的是同一个值；运行期配置会让同一份 dist 在不同地方行为不同。
