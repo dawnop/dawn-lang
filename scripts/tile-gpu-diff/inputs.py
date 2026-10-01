@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TILE_PATHS = ["packages/tileir", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
+TILE_PATHS = ["packages/tileir", "packages/tileref", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
               "scripts/tile-gpu-diff"]
 LEDGER = re.compile(r"^scripts/tile-gpu-diff/ledger(-[^/]*)?\.txt$")
 BEGIN, END = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="

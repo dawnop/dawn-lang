@@ -550,7 +550,7 @@ ledger, toolchain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 # Every ledger is excluded and not only this gate's own: the cluster's
 # ledger-sm100.txt and ledger-sm90.txt are records of other machines, and a
 # line appended to one of them is not a change to what this machine ran.
-TILE_PATHS = ["packages/tileir", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
+TILE_PATHS = ["packages/tileir", "packages/tileref", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
               "scripts/tile-gpu-diff", ":(exclude)scripts/tile-gpu-diff/ledger.txt",
               ":(exclude)scripts/tile-gpu-diff/ledger-*.txt"]
 BEGIN, END = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="
@@ -1149,9 +1149,27 @@ rt_obj="$work/dawn_rt.o"
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
+# Each program is built as a one-file project whose only dependency is
+# packages/tileref, the host references it holds the device to (they left
+# std/gpu in 0.82.0, docs/tile-backend-design.md 5.3), the way
+# scripts/tile-golden/run.sh builds kernels.dawn against packages/tileir.
+# `--std` still names the std the program sees, so every mutant_std below
+# reaches the device model it mutates and nothing else: none of them touches
+# a reference.
 build_native() { # std-dir, bin, program (default vadd_diff.dawn)
   local program="${3:-$here/vadd_diff.dawn}"
-  "$root/bin/dawn" __emitc --std "$1" "$program" -o "$2.c" > "$2.emit" 2>&1 ||
+  local proj="$2.proj"
+  rm -rf "$proj"
+  mkdir -p "$proj/src"
+  cp "$program" "$proj/src/main.dawn"
+  cat > "$proj/dawn.toml" <<TOML
+schema = 1
+name = "tile_gpu_diff"
+
+[deps]
+tileref = "$root/packages/tileref"
+TOML
+  "$root/bin/dawn" __emitc --std "$1" "$proj" -o "$2.c" > "$2.emit" 2>&1 ||
     { cat "$2.emit" >&2; fail "native emit failed for $program against $1"; }
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
@@ -2602,6 +2620,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$mutant_pkg"
+tileref = "$root/packages/tileref"
 TOML
 mutant_cubins=()
 for k in "${masked[@]}"; do
@@ -2684,6 +2703,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$pkg"
+tileref = "$root/packages/tileref"
 TOML
   local k
   for k in "$@"; do
@@ -2757,6 +2777,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
 "$root/bin/dawn" run "$work/proj-softmax" -- softmax --bytecode "$work/softmax-nomax.tilebc" > "$work/proj-softmax.log" 2>&1 ||
   { cat "$work/proj-softmax.log" >&2; fail "softmax-no-max-subtract: softmax did not encode"; }
@@ -2865,6 +2886,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
 "$root/bin/dawn" run "$work/proj-mma" -- matmul --bytecode "$work/matmul-noacc.tilebc" > "$work/proj-mma.log" 2>&1 ||
   { cat "$work/proj-mma.log" >&2; fail "mma-acc-not-carried: matmul did not encode"; }
@@ -2923,6 +2945,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
 "$root/bin/dawn" run "$work/proj-transpose" -- transpose_tail --bytecode "$work/tt-swapped.tilebc" \
   > "$work/proj-transpose.log" 2>&1 ||
@@ -3063,6 +3086,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
 "$root/bin/dawn" run "$work/proj-blur" -- gaussian_blur --bytecode "$work/blur-short.tilebc" > "$work/proj-blur.log" 2>&1 ||
   { cat "$work/proj-blur.log" >&2; fail "halo-one-lane-short: gaussian_blur did not encode"; }
@@ -3434,6 +3458,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
   "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
     { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
@@ -3511,6 +3536,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
   "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
     { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
@@ -3709,6 +3735,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
   "$root/bin/dawn" run "$work/proj-$name" -- "$k" --bytecode "$work/$name.tilebc" > "$work/proj-$name.log" 2>&1 ||
     { cat "$work/proj-$name.log" >&2; fail "$name: $k did not encode"; }
@@ -4497,6 +4524,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$root/packages/tileir"
+tileref = "$root/packages/tileref"
 TOML
 }
 
@@ -5204,7 +5232,7 @@ if [ "$append" = no ]; then
 fi
 [ "$pinned_driver" = "$driver" ] ||
   fail "toolchain.txt says driver $pinned_driver and nvidia-smi says $driver: set the driver line to $driver, commit, and run again (the three numbers move together; the ledger commit adds a line and nothing else)"
-dirty="$(git status --porcelain -- packages/tileir std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
+dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn std/narrow.dawn runtime/c/dawn_rt.c \
   scripts/tile-golden scripts/tile-gpu-diff/run.sh scripts/tile-gpu-diff/vadd_diff.dawn \
   scripts/tile-gpu-diff/mask_diff.dawn scripts/tile-gpu-diff/red_diff.dawn scripts/tile-gpu-diff/mm_diff.dawn \
   scripts/tile-gpu-diff/stride_diff.dawn scripts/tile-gpu-diff/int_diff.dawn scripts/tile-gpu-diff/wide_diff.dawn \

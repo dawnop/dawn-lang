@@ -614,7 +614,9 @@ rt_obj="$work/dawn_rt.o"
   -I "$root/runtime/c" -c -o "$rt_obj" "$root/runtime/c/dawn_rt.c" ||
   fail "the C runtime does not compile"
 
-# A project whose only dependency is a copy of (or the real) packages/tileir.
+# A project over a copy of (or the real) packages/tileir, and the real
+# packages/tileref: kernels.dawn takes the static global tables the T7 and TG
+# kernels bake in from the same functions the host references answer with.
 project() { # dir, package-dir
   mkdir -p "$1/src"
   cp "$here/kernels.dawn" "$1/src/main.dawn"
@@ -624,6 +626,7 @@ name = "tile_golden"
 
 [deps]
 tileir = "$2"
+tileref = "$root/packages/tileref"
 TOML
 }
 
