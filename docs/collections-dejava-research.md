@@ -5,6 +5,11 @@
 > `DawnList`/`DawnMap`/`DawnSet` 三个手写 Java 类全部退役，`dawn/rt/Lists`、`dawn/rt/Maps`
 > 两个生成类一并消失。手写 Java 4→1（只剩 `AdtClassWriter` 这个 ASM shim，属并列的后端依赖）。**
 > 实测代价见 §9.6：**D2 +0.7%、D3 +11.7%，合计自举 +12.5%**。
+> FFI 边界随 D3 从零拷贝视图变成**拷贝**（2026-10-02 核实，issue #335）：`List[T]` 交给
+> `java.util.List`/`Collection`/`Iterable` 形参时先 `std/pvec.to_array` 拷进 `Array`，再由
+> `dawn/rt/Array.array_to_java` 拷进新 `ArrayList` 并套 `Collections.unmodifiableList`
+> （`selfhost/src/jvm/emit.dawn` 的 `list_to_host`、`selfhost/src/jvm/rtclasses.dawn` 的 `gen_array_java`）。
+> 每次跨界 O(n)，实测约 8 ns/元素（10⁶ 元素约 8.4 ms）；规范条文见 [spec.md](spec.md) §9.6。
 >
 > 原状态：A/B/C 调研完成；C 已作为过渡态落地（`vendor.dawn` 指路牌）；本文改写计划，主推 D。
 > 这是 de-Java 契约的最后一块（[runtime-intrinsics-design.md](runtime-intrinsics-design.md) §7）。
