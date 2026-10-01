@@ -33,12 +33,16 @@
 # An array has one order and it is the one written here. `href` is relative to
 # the SITE ROOT; the page supplies its own distance from it when it mounts.
 #
-# The four groups are the panel's, and the panel is what rejects an unknown
-# one -- an entry whose group is not one of those four is simply never drawn.
+# The five groups are the panel's, and the panel is what rejects an unknown
+# one -- an entry whose group is not one of those five is simply never drawn.
 # The test below is what keeps this file honest about that.
+#
+# The panel splits what it searches into words by a rule this file restates
+# ([tokens]); see the words section below for why there are two copies.
 
 use std/str
 use std/list
+use std/char
 use std/io
 use std/io.{Fs}
 use json/parser.{parse}
@@ -56,26 +60,62 @@ use gen/examples.{gallery_examples, must_describe}
 pub type Row = { group: String, title: String, detail: String, note: String, href: String }
 
 ## How much of a doc comment rides along. A note is a hint under a name, not
-## the documentation: long enough to tell two similar names apart, short
-## enough that the index stays a few tens of kilobytes.
-fn note_len() -> Int = 110
+## the documentation: long enough to hold the first sentence of most doc
+## comments in std (the median is about 60 characters, nine in ten are under
+## 140), short enough that the index stays a few tens of kilobytes.
+fn note_len() -> Int = 160
 
-## The first line of a doc comment, cut to [note_len].
+## The first sentence of a doc comment, cut to [note_len].
 ##
-## The first line and not the first paragraph: this is the one-line summary
-## that goes under a name in the panel, and a Markdown paragraph in this
-## repository is regularly five lines of prose.
+## The first sentence and not the first line: doc comments in this repository
+## are wrapped at a fixed width, so the first line ends wherever the wrap fell
+## -- regularly in the middle of a clause -- and a note that stops at "a
+## handler answers," reads as a broken page. The sentence is looked for in the
+## first paragraph only (up to the first blank line), with its lines joined.
+## It ends at a full stop followed by a blank or by the end of the paragraph,
+## or at an ideographic full stop.
 pub fn note_of(doc: String) -> String = {
-  var first = ""
+  var para: List[String] = []
+  var done = false
   for line in str.split(doc, "\n") {
-    if first == "" && str.trim(line) != "" {
-      first = str.trim(line)
+    let t = str.trim(line)
+    if not done && t != "" {
+      para = para ++ [t]
+    } else if t == "" && len(para) > 0 {
+      done = true
     }
   }
-  if len(code_points(first)) <= note_len() {
-    first
+  bounded(first_sentence(join(para, " ")))
+}
+
+fn first_sentence(p: String) -> String = {
+  let cs = code_points(p)
+  var end = len(cs)
+  var i = 0
+  while i < len(cs) && end == len(cs) {
+    let c = cs[i]
+    if c == '。' || (c == '.' && (i + 1 == len(cs) || char.is_space(cs[i + 1]))) {
+      end = i + 1
+    }
+    i = i + 1
+  }
+  from_code_points(list.take(cs, end))
+}
+
+## `s` when it fits in [note_len], or cut at the last blank that does and
+## marked as cut. A run with no blank in it (Chinese, a long identifier) is cut
+## where the bound falls.
+fn bounded(s: String) -> String = {
+  let cs = code_points(s)
+  if len(cs) <= note_len() {
+    s
   } else {
-    from_code_points(list.take(code_points(first), note_len())) ++ "..."
+    var at = note_len()
+    while at > 0 && not char.is_space(cs[at]) {
+      at = at - 1
+    }
+    let keep = if at == 0 { note_len() } else { at }
+    from_code_points(list.take(cs, keep)) ++ "..."
   }
 }
 
@@ -104,14 +144,14 @@ fn api_index(api: Json, lang: Lang) -> List[Row] = {
 ## the page, so the fragments cannot drift from the anchors: a heading counter
 ## that moved would move both at once. The URL mapper is the identity because
 ## nothing here reads the rendered html -- only the table of contents.
-fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs = {
+fn doc_index(src: String, group: String, page: String, detail: String) -> List[Row] !Fs = {
   let blocks =
     match parser.parse(must_read(src)) {
       Ok(bs) -> bs
       Err(e) -> panic("${src}: ${e}")
     }
   list.map(render_doc(blocks, u => u).toc, e =>
-      Row { group: "spec", title: e.text, detail: detail, note: "", href: "${page}#${e.id}" })
+      Row { group: group, title: e.text, detail: detail, note: "", href: "${page}#${e.id}" })
 }
 
 ## The tutorial, one row per chapter page and one per `###` section in it.
@@ -180,11 +220,11 @@ fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
 # the only thing that tells `6.5 Named effects` on the spec from a chapter of
 # the tutorial in a list.
 #
-# The design notes' rows are in the "spec" group, because the panel draws four
-# groups and no other (see the head of this file), and their detail says
-# History, as the nav does: the document is frozen at M7, and a result that
-# said Design beside the spec's would read as the current design. One table, both languages on adjacent lines, for the
-# reason gen/stdlib's chrome gives.
+# The design notes' rows are a group of their own, "history", and their detail
+# says History, as the nav does: the document is frozen at M7, and a result
+# that sat beside the spec's under one heading read as the current design. One
+# table, both languages on adjacent lines, for the reason gen/stdlib's chrome
+# gives.
 
 type Words = {
   spec: String,
@@ -225,6 +265,91 @@ pub fn sources(lang: Lang) -> (String, String, String) =
     Zh -> ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
   }
 
+# ---- the words a reader can search by -------------------------------------
+#
+# The panel splits every row into words, once, when it mounts, and matches a
+# query word by word. The rule is restated here, in a program that cannot
+# share a line of code with that one, so that the two are held to the same
+# samples by a pair of tests that name each other (see the tests below and
+# examples/projects/tea_dom_search/src/search.dawn). The generator holds it
+# to the rows it writes: a row whose title has no words in it could be found
+# only by typing its punctuation.
+#
+#   lowercase; split on every character that is not an ASCII letter or digit,
+#   `_`, `!`, `.`, or a letter or digit beyond ASCII; strip the dots off both
+#   ends of a run; then a run made of pieces joined by `.`, `_` or `!` yields
+#   each piece and then the run itself, so `io.read_file` is `io`, `read`,
+#   `file` and `io.read_file`, and `!Fs` is `fs` and `!fs`.
+
+## Whether `c` can sit inside a run.
+fn is_run_char(c: Char) -> Bool =
+  (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '!' || c == '.'
+  || (char.code(c) > 127 && char.is_alnum(c))
+
+## Whether `c` joins two pieces of one run.
+fn is_joint(c: Char) -> Bool = c == '.' || c == '_' || c == '!'
+
+## The maximal runs of [is_run_char] in `s`, lowercased, with the dots off
+## both ends.
+fn runs(s: String) -> List[String] = {
+  var out: List[String] = []
+  var cur: List[Char] = []
+  for c in code_points(str.to_lower(s)) ++ [' '] {
+    if is_run_char(c) {
+      cur = cur ++ [c]
+    } else if len(cur) > 0 {
+      out = out ++ [trim_dots(cur)]
+      cur = []
+    }
+  }
+  out
+}
+
+fn trim_dots(cs: List[Char]) -> String = {
+  var from = 0
+  while from < len(cs) && cs[from] == '.' {
+    from = from + 1
+  }
+  var to = len(cs)
+  while to > from && cs[to - 1] == '.' {
+    to = to - 1
+  }
+  from_code_points(list.slice(cs, from, to))
+}
+
+## The pieces of a run, split at every [is_joint], empty ones dropped.
+fn pieces(run: String) -> List[String] =
+  list.filter(list.map(runs_split(code_points(run)), cs => from_code_points(cs)), p => p != "")
+
+fn runs_split(cs: List[Char]) -> List[List[Char]] = {
+  var out: List[List[Char]] = []
+  var cur: List[Char] = []
+  for c in cs {
+    if is_joint(c) {
+      out = out ++ [cur]
+      cur = []
+    } else {
+      cur = cur ++ [c]
+    }
+  }
+  out ++ [cur]
+}
+
+## The words of `s`, by the rule above.
+pub fn tokens(s: String) -> List[String] = {
+  var out: List[String] = []
+  for whole in runs(s) {
+    let ps = pieces(whole)
+    if len(ps) > 0 {
+      out = out ++ ps
+      if not (len(ps) == 1 && ps[0] == whole) {
+        out = out ++ [whole]
+      }
+    }
+  }
+  out
+}
+
 # ---- the asset -------------------------------------------------------------
 
 fn quoted(s: String) -> String = render(JStr(value: s))
@@ -238,8 +363,8 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
   let w = words(lang)
   let (spec_src, design_src, tut_src) = sources(lang)
   api_index(api, lang)
-    ++ doc_index(spec_src, lang_path(lang, "spec.html"), w.spec)
-    ++ doc_index(design_src, lang_path(lang, "design.html"), w.design)
+    ++ doc_index(spec_src, "spec", lang_path(lang, "spec.html"), w.spec)
+    ++ doc_index(design_src, "history", lang_path(lang, "design.html"), w.design)
     ++ tutorial_index(tut_src, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
 }
@@ -317,29 +442,67 @@ fn probe_api() -> Json =
     Err(e) -> panic("the probe document must parse: " ++ error_text(e))
   }
 
-## Only the four groups the panel draws. A fifth would be scored, matched and
-## then dropped without a word, so it is refused here instead.
-test "every row lands in one of the four groups the panel draws" {
+## Only the five groups the panel draws. A sixth would be scored, matched and
+## then dropped without a word, so it is refused here instead. And every title
+## has a word in it, by the panel's own rule, or the row could be reached only
+## by typing its punctuation.
+test "every row lands in one of the five groups the panel draws" {
   io.with_fs_real(() => {
-    let drawn = ["stdlib", "spec", "tutorial", "examples"]
+    let drawn = ["stdlib", "spec", "tutorial", "examples", "history"]
     for lang in [En, Zh] {
       for r in index_rows(probe_api(), lang) {
         assert list.contains(drawn, r.group)
         assert r.title != ""
         assert r.href != ""
+        assert len(tokens(r.title)) > 0
       }
     }
   })
 }
 
-## A note is one line and is bounded. The bound is what keeps the asset a few
-## tens of kilobytes instead of a few hundred: doc comments in this repository
-## regularly run to twenty lines.
-test "a note is the first line of a doc comment, cut to a bound" {
+## The words of a string, by the rule in the words section. These samples are
+## the contract between two programs that cannot share a line of code; the same
+## list is pinned in examples/projects/tea_dom_search/src/search.dawn's own
+## test, and the two tests name each other so that a change to either is a
+## change to both.
+test "an index's words and a query's words split the same way" {
+  let samples: List[(String, List[String])] = [
+    ("io.read_file", ["io", "read", "file", "io.read_file"]),
+    ("fn read_file(path: String) -> Unit !Fs", ["fn", "read", "file", "read_file", "path",
+      "string", "unit", "fs", "!fs"]),
+    ("6.5 Named effects", ["6", "5", "6.5", "named", "effects"]),
+    ("Remove surrounding whitespace.", ["remove", "surrounding", "whitespace"]),
+    ("str.", ["str"]),
+    ("`with handle` 命名效果，处理器", ["with", "handle", "命名效果", "处理器"]),
+    ("... ! -> ()", []),
+  ]
+  for sample in samples {
+    let (s, words) = sample
+    assert tokens(s) == words
+  }
+}
+
+## A note is one sentence and is bounded. The bound is what keeps the asset a
+## few tens of kilobytes instead of a few hundred: doc comments in this
+## repository regularly run to twenty lines.
+test "a note is the first sentence of a doc comment, cut to a bound" {
   assert note_of("Remove surrounding whitespace.\n\nThe long reasoning follows.")
     == "Remove surrounding whitespace."
   assert note_of("\n\n  Leading blanks do not count.  ") == "Leading blanks do not count."
   assert note_of("") == ""
+  # a sentence wrapped over three lines is one sentence, and the next one is
+  # not part of it
+  assert note_of("Run `body` and answer everything\nit emitted, in the order it\nemitted it. The rest.")
+    == "Run `body` and answer everything it emitted, in the order it emitted it."
+  # a dot inside a word is not the end of a sentence, and the first paragraph
+  # is as far as the search goes
+  assert note_of("Calls io.read_file and stops\n\nHere. Not here.") == "Calls io.read_file and stops"
+  assert note_of("读取文件。然后关闭。") == "读取文件。"
+  # too long: cut at a blank, marked as cut
+  let words = str.repeat("word ", 50)
+  let cut = note_of(words)
+  assert str.ends_with(cut, "word...")
+  assert len(code_points(cut)) <= note_len() + 3
   let long = str.repeat("x", 200)
   assert len(code_points(note_of(long))) == note_len() + 3
   assert str.ends_with(note_of(long), "...")
@@ -366,15 +529,15 @@ test "each language indexes its own documents" {
   assert sources(Zh) == ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
 }
 
-## The whole asset, on the real inputs: the four sources are all in it, the
-## hrefs are relative to the site root rather than to a page, and the Chinese
-## one is the Chinese one.
-test "the index carries all four sources and addresses them from the site root" {
+## The whole asset, on the real inputs: every group is in it, the hrefs are
+## relative to the site root rather than to a page, and the Chinese one is the
+## Chinese one.
+test "the index carries every group and addresses them from the site root" {
   io.with_fs_real(() => {
     let api = probe_api()
     let en = index_rows(api, En)
     let zh = index_rows(api, Zh)
-    for group in ["stdlib", "spec", "tutorial", "examples"] {
+    for group in ["stdlib", "spec", "tutorial", "examples", "history"] {
       assert len(list.filter(en, r => r.group == group)) > 0
       assert len(list.filter(zh, r => r.group == group)) > 0
     }
@@ -393,5 +556,12 @@ test "the index carries all four sources and addresses them from the site root" 
     # the stdlib rows are anchored into the stdlib page, in each language's tree
     assert list.filter(en, r => r.group == "stdlib")[0].href == "stdlib.html#g-io"
     assert list.filter(zh, r => r.group == "stdlib")[0].href == "zh/stdlib.html#g-io"
+    # the design notes are History, and the spec is the spec
+    for r in list.filter(en, r => r.group == "history") {
+      assert str.starts_with(r.href, "design.html#")
+    }
+    for r in list.filter(en, r => r.group == "spec") {
+      assert str.starts_with(r.href, "spec.html#")
+    }
   })
 }
