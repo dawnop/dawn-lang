@@ -1,22 +1,42 @@
-<!-- doc-check: translation-of docs/design.md @ d8c51a531aef4bae -->
+<!-- doc-check: translation-of docs/design.md @ d0d5740a429dc06f -->
 
 # Dawn Design Notes
 
 *[中文](design.md) — the Chinese text is the original; this is its translation, and `scripts/doc-check.py` watches the two for drift.*
 
-> Status: **historical**. This is the record of the decisions taken during M0–M4, kept
-> item by item so that "why was it chosen this way at the time" has evidence behind it.
-> **Several of its premises have since been overturned by later milestones**, the three
-> that matter most:
+> Status: **historical**. This is the record of the decisions taken during M0–M7 (up to
+> 2026-07-22), and it has not been updated since M7; it is kept item by item so that "why was
+> it chosen this way at the time" has evidence behind it. **Several of its premises have since
+> been overturned by later milestones.** The body is kept as it was written; where it
+> disagrees with the list below, the list wins:
 >
-> - "compiler budget 6–8 thousand lines (Kotlin)" and "implementation language = Kotlin" —
->   the Kotlin implementation has been archived at the `kotlin-final` tag, and main holds
->   only the self-hosted `selfhost/` (some 35,000 lines of Dawn); see
+> - "compiler budget 6–8 thousand lines (Kotlin)" and "implementation language = Kotlin"
+>   (§1, D7): the Kotlin implementation has been archived at the `kotlin-final` tag, and main
+>   holds only the self-hosted `selfhost/`, 87,586 lines of Dawn (counted as every `.dawn`
+>   file under `selfhost/src` except the generated `embed/`; measured 2026-10-01); see
 >   [m8-selfhost-only.md](history/m8-selfhost-only.md).
-> - "the unsafe escape hatch is not open to user code" — `unsafe_pure` is ordinary syntax
->   now and users can write it; see spec.en.md §6.4 and LANG-01 in codebase-audit.md.
-> - "no IR" — the argument held while the compiler was small; checker + emit are past ten
->   thousand lines now, see ARCH-04 in codebase-audit.md.
+> - "the only backend is JVM bytecode, and native comes out of GraalVM native-image" (§1, D1):
+>   since 2026-07-30 the C backend (Core IR to C, handed on to `cc`) has been a self-hosting
+>   peer of the JVM backend, and a cuTile backend takes kernels to NVIDIA GPUs. The GraalVM
+>   road is still there; it is just no longer the only native one. See
+>   [native-backend-plan.md](native-backend-plan.md).
+> - "the effect system has only two levels: pure and io" (D2): there are now named effects
+>   that users declare (`effect` + `with handle`, optionally with a `ctl` control arm and
+>   handler state); the label travels along signatures and is subtracted at the handler. See
+>   spec.en.md §6.5 and [effects-design.md](effects-design.md).
+> - "custom GC / memory model: the JVM's GC is our GC", in the non-goals table: the native
+>   backend has no GC and manages memory with Perceus reference counting; see
+>   [perceus-design.md](perceus-design.md).
+> - "the everyday toolchain (run/test/fmt/doc/LSP) is still the Kotlin version", in the M7
+>   entry: from M8 on the whole toolchain comes from selfhost, and the Kotlin version survives
+>   only at the `kotlin-final` tag; see [m8-selfhost-only.md](history/m8-selfhost-only.md).
+> - "the unsafe escape hatch is not open to user code" (D5): `unsafe_pure` later became
+>   ordinary syntax that users could write, and on 2026-09-24 it was deleted together with
+>   its keyword; "one host call backing one pure function" is carried today by the compiler's
+>   intrinsic contract, on the declaration side. See spec.en.md §6.4 and §11.
+> - "no intermediate IR" (D6): the argument held while the compiler was small; Core IR
+>   (`selfhost/src/ir/`) was introduced later, and the C backend starts from it. See ARCH-04
+>   in codebase-audit.md.
 >
 > The authoritative definition of the syntax and semantics is [spec.en.md](spec.en.md)
 > (that one is normative). This document is only about the "why".
