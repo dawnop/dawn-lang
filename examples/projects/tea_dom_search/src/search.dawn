@@ -54,6 +54,17 @@
 # the selected row scrolled into view -- the guest cannot reach, and
 # site/assets/search.js does it.
 #
+# Before anything is typed the list is not empty: it holds the reader's own
+# recent queries and three places the site suggests starting from, and the
+# arrows, Enter and the pointer move through those exactly as through
+# results. The recent queries live in the page's localStorage, which the
+# guest cannot reach; they arrive as flags, read-only, and the guest never
+# writes them. Its delete and Clear buttons carry the query in a `data-`
+# attribute instead of a listener, and the page script does the forgetting
+# and starts the panel again from the new list (site/assets/search.js says
+# why that and not a message back in). A shared `?q=` link arrives the same
+# way: the query is a flag, and init answers its hits in the first turn.
+#
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
 # (site/src/gen/pages.dawn) keeps its two languages in one table for the same
@@ -110,11 +121,22 @@ pub type Key = {
 ## What init retains in the guest. There is deliberately no update that returns
 ## this type: the index, root and language belong to one successful init and a
 ## later successful init is the only operation that may replace them.
+##
+## `mod_key` is what the reader's keyboard calls the modifier that opens a
+## result in a new tab (`⌘` or `Ctrl`), a fact about the machine that only
+## the page can see. `start` is the index's own list of suggested entries, as
+## ids into `entries`: the generator picks them, so their titles and hrefs are
+## the language's and gen/links has checked every one. `recent` is the
+## reader's recent queries, newest first; the page keeps them and the guest
+## only shows them, which is why they are here and not in the model.
 pub type State = {
   root: String,
   lang: String,
+  mod_key: String,
   entries: List[Entry],
   keys: List[Key],
+  start: List[Int],
+  recent: List[String],
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
@@ -225,9 +247,6 @@ fn scope_line(code: String) -> String =
 ## panel shows goes through here, so the two languages of one label are on one
 ## line and neither can be forgotten without the other.
 fn say(code: String, en: String, zh: String) -> String = if code == "zh-CN" { zh } else { en }
-
-fn empty_line(code: String) -> String =
-  if code == "zh-CN" { "没有匹配。" } else { "No matches." }
 
 fn prompt_line(code: String) -> String =
   if code == "zh-CN" { "输入以搜索。" } else { "Type to search." }
@@ -669,16 +688,19 @@ fn row(h: Hit, chosen: Bool, ts: List[Term]) -> Node[Msg] !Ctx = {
       span(e.detail, class: "search-detail"),
     ]),
   ]
-  let props: List[(String, String)] = [
-    ("id", option_id(at)),
-    ("role", "option"),
-    ("aria-selected", if chosen { "true" } else { "false" }),
-  ]
-  let hover: On[Msg] = On { event: "mouseenter", payload: NoData, to_msg: _p => Hovered(at: at) }
   let link_kids = head ++ note_kids(e, ts)
-  el("li", props, class: if chosen { "search-row is-selected" } else { "search-row" }, on: [hover],
-    kids: [el("a", [("href", link(e.href)), ("tabindex", "-1")], kids: link_kids)])
+  el("li", option_props(at, chosen), class: if chosen { "search-row is-selected" } else { "search-row" },
+    on: [hover_on(at)], kids: [el("a", [("href", link(e.href)), ("tabindex", "-1")], kids: link_kids)])
 }
+
+## What makes an `<li>` the option with ordinal `at`.
+fn option_props(at: Int, chosen: Bool) -> List[(String, String)] = [
+  ("id", option_id(at)),
+  ("role", "option"),
+  ("aria-selected", if chosen { "true" } else { "false" }),
+]
+
+fn hover_on(at: Int) -> On[Msg] = On { event: "mouseenter", payload: NoData, to_msg: _p => Hovered(at: at) }
 
 ## The one-line note, when there is one. A row with no note has no element for
 ## it rather than an empty one, which is the same rule the sections follow.
@@ -869,30 +891,208 @@ fn goto_kids(m: Model) -> List[Node[Msg]] !Ctx =
 
 ## What the list area holds when there is nothing to list: a reason, not a
 ## blank. The two reasons are different -- an empty query has not been asked
-## anything yet, a query with no hits has.
+## anything yet (and says so only when there is no recent query and no
+## suggestion to show instead), a query with no hits has.
 ##
 ## The region is there whether or not it says anything, because a live region
 ## that is inserted along with its text is one a screen reader may never
 ## announce; one that already exists and changes is announced.
 fn status(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+  let q = str.trim(m.query)
   let say_it: List[Node[Msg]] =
     if shown {
       []
-    } else if str.trim(m.query) == "" {
+    } else if q == "" {
       [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
     } else {
-      [el("p", class: "search-status", kids: [text(empty_line(lang()))])]
+      [el("div", class: "search-nothing", kids: nothing(lang(), q))]
     }
   el("div", [("role", "status")], class: "search-none", kids: say_it)
+}
+
+## A query nothing answered: what was asked, and three ways to ask again.
+##
+## Each tip names its examples in `<code>`, because what a reader types next
+## is the example, letter for letter. The tips are about the panel as it is --
+## a title and API-name index that splits on words -- and offer no guessed
+## correction: that needs an edit distance the panel does not compute yet.
+##
+## The picture is a small sunrise over the horizon line, drawn by the
+## stylesheet: the element is empty and hidden from assistive technology, and
+## an `<svg>` built here would not render, because tea_dom creates every
+## element in the HTML namespace.
+fn nothing(code: String, q: String) -> List[Node[Msg]] = [
+  el("div", [("aria-hidden", "true")], class: "search-none-art"),
+  el("p", class: "search-none-title",
+    kids: [text(say(code, "Nothing matches “${q}”.", "没有与“${q}”匹配的结果。"))]),
+  el("ul", class: "search-tips", kids: [
+    tip(if code == "zh-CN" {
+      ["用 API 的英文名：", "read_file", "，不要写成 ", "读文件", "。"]
+    } else {
+      ["Try the English name of an API: ", "read_file", ", not ", "读文件", "."]
+    }),
+    tip(if code == "zh-CN" {
+      ["去掉符号，或整体保留：", "!io", "、", "with handle", "。"]
+    } else {
+      ["Drop symbols, or keep them whole: ", "!io", ", ", "with handle", "."]
+    }),
+    tip(if code == "zh-CN" {
+      ["搜标题：", "效果系统", "、", "教程 17", "。"]
+    } else {
+      ["Search a title: ", "Effect system", ", ", "Tutorial 17", "."]
+    }),
+  ]),
+]
+
+## One tip: prose and examples taking turns, the examples as code.
+fn tip(parts: List[String]) -> Node[Msg] = {
+  var kids: List[Node[Msg]] = []
+  var i = 0
+  for p in parts {
+    let k: Node[Msg] = if i % 2 == 1 { el("code", kids: [text(p)]) } else { text(p) }
+    kids = kids ++ [k]
+    i = i + 1
+  }
+  el("li", kids: kids)
+}
+
+# ---- before anything is asked ----------------------------------------------
+
+## Whether the field asks nothing, so the list shows the idle rows.
+fn idle(m: Model) -> Bool = str.trim(m.query) == ""
+
+## The suggested entries the index names, in its order. An id that names no
+## entry, or an entry in a group the panel does not draw, is passed over: the
+## index is a file the page fetched, and the guest trusts no more of it than
+## it can check.
+fn starts(state: State) -> List[Entry] = {
+  var out: List[Entry] = []
+  for id in state.start {
+    match get(state.entries, id) {
+      Some(e) -> {
+        if group_index(e.group) >= 0 {
+          out = out ++ [e]
+        }
+      }
+      None -> ()
+    }
+  }
+  out
+}
+
+## How many rows the list shows: the hits for a query, or the recent queries
+## and the suggestions before one. The arrows, Home, End and the pointer are
+## all bounded by this.
+fn shown_rows(state: State, m: Model) -> Int =
+  if idle(m) { len(state.recent) + len(starts(state)) } else { len(m.hits) }
+
+## What Enter does on an idle row: a recent query is asked again, which is the
+## field taking that text, and a suggestion is opened like a result.
+fn idle_choice(state: State, sel: Int) -> Cmd[Msg] = {
+  let n = len(state.recent)
+  if sel >= 0 && sel < n {
+    SendMsg(msg: Typed(text: state.recent[sel]))
+  } else {
+    match get(starts(state), sel - n) {
+      Some(e) -> SendMsg(msg: Chose(href: e.href))
+      None -> NoCmd
+    }
+  }
+}
+
+## The idle list: Recent, then Start here, either one absent when it has no
+## rows. The ordinals run across both, recent queries first, so one `sel`
+## moves through the two groups as it moves through result groups.
+fn idle_sections(state: State, sel: Int) -> List[Node[Msg]] !Ctx = {
+  let code = lang()
+  var recent_rows: List[Node[Msg]] = []
+  var at = 0
+  for q in state.recent {
+    recent_rows = recent_rows ++ [recent_row(q, at, at == sel)]
+    at = at + 1
+  }
+  var start_rows: List[Node[Msg]] = []
+  for e in starts(state) {
+    start_rows = start_rows ++ [start_row(e, at, at == sel)]
+    at = at + 1
+  }
+  let clear: Node[Msg] =
+    el("button", [("type", "button"), ("data-forget-all", "1")], class: "search-clear",
+      kids: [text(say(code, "Clear", "清空"))])
+  let recent: List[Node[Msg]] =
+    if len(recent_rows) == 0 {
+      []
+    } else {
+      [idle_group("recent", say(code, "Recent", "最近"), [clear], recent_rows)]
+    }
+  let start: List[Node[Msg]] =
+    if len(start_rows) == 0 {
+      []
+    } else {
+      [idle_group("start", say(code, "Start here", "从这里开始"), [], start_rows)]
+    }
+  recent ++ start
+}
+
+## An idle group, built like a result group: a heading, then the rows as an
+## ARIA group named by it. `extra` is what the heading carries after its name.
+fn idle_group(id: String, name: String, extra: List[Node[Msg]], rows: List[Node[Msg]]) -> Node[Msg] = {
+  let head_id = "dawn-search-g-${id}"
+  let named: List[Node[Msg]] = [text(name)]
+  el("li", [("role", "presentation")], class: "search-group search-group-${id}", kids: [
+    el("div", [("id", head_id)], class: "search-group-name", kids: named ++ extra),
+    el("ul", [("role", "group"), ("aria-labelledby", head_id)], class: "search-group-rows",
+      kids: rows),
+  ])
+}
+
+## A recent query. Clicking it, or Enter on it, asks it again.
+##
+## The delete button is a sibling of the clickable part and not inside it, so
+## a click on it is not also a click on the query; and it has no listener. It
+## names the query in `data-forget`, and the page script, which owns the
+## stored list, removes it there and starts the panel again.
+fn recent_row(q: String, at: Int, chosen: Bool) -> Node[Msg] !Ctx = {
+  let code = lang()
+  el("li", option_props(at, chosen),
+    class: if chosen { "search-row search-recent is-selected" } else { "search-row search-recent" },
+    on: [hover_on(at)], kids: [
+      el("span", class: "search-recall", on: [on_click(Typed(text: q))], kids: [
+        el("span", [("aria-hidden", "true")], class: "search-icon search-icon-clock"),
+        span(q, class: "search-title"),
+      ]),
+      el("button", [
+        ("type", "button"),
+        ("data-forget", q),
+        ("aria-label", say(code, "Remove “${q}” from recent searches", "从最近搜索中删除“${q}”")),
+      ], class: "search-forget"),
+    ])
+}
+
+## A suggested entry: a link like a result's, with an arrow in its group's hue
+## where a result has nothing.
+fn start_row(e: Entry, at: Int, chosen: Bool) -> Node[Msg] !Ctx = {
+  let hue = group_index(e.group) % 3 + 1
+  el("li", option_props(at, chosen),
+    class: if chosen { "search-row search-start hue-${hue} is-selected" } else { "search-row search-start hue-${hue}" },
+    on: [hover_on(at)], kids: [
+      el("a", [("href", link(e.href)), ("tabindex", "-1")], kids: [
+        el("span", [("aria-hidden", "true")], class: "search-icon search-icon-go"),
+        el("span", class: "search-head", kids: [
+          span(e.title, class: "search-title"),
+          span(e.detail, class: "search-detail"),
+        ]),
+      ]),
+    ])
 }
 
 ## The field: a combobox in the WAI-ARIA sense, whose popup is the result list
 ## and whose active option is the selection. Focus never leaves it while the
 ## arrows move; `aria-activedescendant` is how the selection is announced.
-fn field(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+fn field(m: Model, shown: Int) -> Node[Msg] !Ctx = {
   let code = lang()
   let active: List[(String, String)] =
-    if shown && m.sel >= 0 && m.sel < len(m.hits) {
+    if m.sel >= 0 && m.sel < shown {
       [("aria-activedescendant", option_id(m.sel))]
     } else {
       []
@@ -902,7 +1102,7 @@ fn field(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
     ("type", "text"),
     ("role", "combobox"),
     ("aria-label", say(code, "Search the site", "搜索本站")),
-    ("aria-expanded", if shown { "true" } else { "false" }),
+    ("aria-expanded", if shown > 0 { "true" } else { "false" }),
     ("aria-controls", list_id()),
     ("aria-autocomplete", "list"),
   ] ++ active ++ [
@@ -916,7 +1116,7 @@ fn field(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
 ## The input bar: the field, then the way out. A keyboard reader is shown the
 ## key; a phone, which has none, gets a button, and the stylesheet decides
 ## which of the two is on screen.
-fn bar(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+fn bar(m: Model, shown: Int) -> Node[Msg] !Ctx = {
   let code = lang()
   el("div", class: "search-bar", kids: [
     field(m, shown),
@@ -939,12 +1139,13 @@ fn hint(keys: List[String], does: String) -> Node[Msg] = {
 
 ## The foot of the panel: the keys, for a reader who has them, and what the
 ## panel searches, for every reader.
-fn foot() -> Node[Msg] !Ctx = {
+fn foot(mod_key: String) -> Node[Msg] !Ctx = {
   let code = lang()
   el("div", class: "search-foot", kids: [
     el("span", [("aria-hidden", "true")], class: "search-keys", kids: [
       hint(["↵"], say(code, "open", "打开")),
       hint(["↑", "↓"], say(code, "move", "移动")),
+      hint([mod_key, "↵"], say(code, "new tab", "新标签页")),
       hint(["esc"], say(code, "close", "关闭")),
     ]),
     el("p", class: "search-scope", kids: [text(scope_line(code))]),
@@ -952,20 +1153,26 @@ fn foot() -> Node[Msg] !Ctx = {
 }
 
 fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
-  let s = scan(state, m.hits, m.sel)
-  let found: List[Node[Msg]] = sections(s.hits, m.sel, terms(m.query))
-  let shown = len(found) > 0
+  let code = lang()
+  let found: List[Node[Msg]] =
+    if idle(m) {
+      idle_sections(state, m.sel)
+    } else {
+      sections(scan(state, m.hits, m.sel).hits, m.sel, terms(m.query))
+    }
+  let label =
+    if idle(m) { say(code, "Recent searches and suggestions", "最近搜索与推荐") } else { say(code, "Results", "结果") }
   el("div", [
     ("role", "dialog"),
     ("aria-modal", "true"),
-    ("aria-label", say(lang(), "Search", "搜索")),
+    ("aria-label", say(code, "Search", "搜索")),
   ], class: "search-panel", kids: [
-    bar(m, shown),
+    bar(m, if len(found) > 0 { shown_rows(state, m) } else { 0 }),
     el("div", [("aria-hidden", "true")], class: "search-line"),
-    el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", say(lang(), "Results", "结果"))],
-      class: "search-results", kids: found),
-    status(m, shown),
-    foot(),
+    el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", label)], class: "search-results",
+      kids: found),
+    status(m, len(found) > 0),
+    foot(state.mod_key),
   ] ++ goto_kids(m))
 }
 
@@ -987,18 +1194,44 @@ pub fn init(flags: Option[String]) -> (State, Model) =
         Ok(j) -> {
           let index = jget(j, "index")
           let entries = entries_of(jget(index, "items"))
-          (State {
+          let state = State {
             root: jstr_or(jget(j, "root"), "."),
             lang: jstr_or(jget(index, "lang"), "en"),
+            mod_key: jstr_or(jget(j, "mod"), "⌘"),
             entries: entries,
             keys: list.map(entries, e => key_of(e)),
-          }, blank())
+            start: list.map(jarr(jget(index, "start")), s => jint_or(s, -1)),
+            recent: recent_of(jget(j, "recent")),
+          }
+          # A shared link's query is answered in the first turn, so the
+          # panel opens on its results rather than on an empty field.
+          let q = jstr_or(jget(j, "q"), "")
+          (state, if q == "" { blank() } else { Model { ..blank(), query: q, hits: search(state, q) } })
         }
         Err(_) -> (blank_state(), blank())
       }
   }
 
-fn blank_state() -> State = State { root: ".", lang: "en", entries: [], keys: [] }
+fn blank_state() -> State =
+  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [] }
+
+## How many recent queries the panel shows. The page keeps no more than this
+## either; the bound is restated here because flags are text a page may hand
+## over with anything in it.
+fn recent_cap() -> Int = 5
+
+## The recent queries out of the flags: strings only, blank ones dropped, at
+## most [recent_cap], in the order the page keeps them (newest first).
+fn recent_of(j: Json) -> List[String] = {
+  var out: List[String] = []
+  for item in jarr(j) {
+    let q = str.trim(jstr_or(item, ""))
+    if q != "" && len(out) < recent_cap() {
+      out = out ++ [q]
+    }
+  }
+  out
+}
 
 ## Everything a keystroke would otherwise derive from `e` again.
 pub fn key_of(e: Entry) -> Key = {
@@ -1034,7 +1267,7 @@ pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     # The pointer selects what it rests on. Resting on the row that is already
     # selected changes nothing, so the turn answers no patches.
     Hovered(at) ->
-      if at >= 0 && at < len(m.hits) && at != m.sel {
+      if at >= 0 && at < shown_rows(state, m) && at != m.sel {
         (Model { ..m, sel: at, goto: "" }, NoCmd)
       } else {
         (m, NoCmd)
@@ -1061,11 +1294,17 @@ pub fn view(state: State, m: Model) -> Node[Msg] = {
 ## half that keeps typing cheap: an ordinary character is an `input` event and
 ## a `keydown` this ignores, and ignoring it answers with no patches at all.
 fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
-  let last = len(m.hits) - 1
+  let last = shown_rows(state, m) - 1
   if key == "ArrowDown" {
     (Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }, NoCmd)
   } else if key == "ArrowUp" {
     (Model { ..m, sel: if m.sel > 0 { m.sel - 1 } else { 0 }, goto: "" }, NoCmd)
+  } else if key == "Home" {
+    (Model { ..m, sel: 0, goto: "" }, NoCmd)
+  } else if key == "End" {
+    (Model { ..m, sel: if last > 0 { last } else { 0 }, goto: "" }, NoCmd)
+  } else if key == "Enter" && idle(m) {
+    (m, idle_choice(state, m.sel))
   } else if key == "Enter" {
     # Nothing about the model changes here. Where the selection points is a
     # question `scan` answers, and what to do about it is the command.
@@ -1199,7 +1438,7 @@ fn probe_index() -> List[Entry] = [
 ]
 
 fn state_of(entries: List[Entry]) -> State =
-  State { root: ".", lang: "en", entries: entries, keys: list.map(entries, e => key_of(e)) }
+  State { ..blank_state(), entries: entries, keys: list.map(entries, e => key_of(e)) }
 
 fn probe_state() -> State = state_of(probe_index())
 
@@ -1396,7 +1635,7 @@ test "a group with no hits emits no section at all" {
   # nothing matched at all: no sections, and a reason in their place
   let no_hits = view(state, typed(state, "nothing here"))
   assert count_class(no_hits, "search-group") == 0
-  assert count_class(no_hits, "search-status") == 1
+  assert count_class(no_hits, "search-nothing") == 1
 }
 
 ## The reader effect, end to end: the root and the language reach the leaves.
@@ -1771,3 +2010,141 @@ fn prop_of(w: Node[Msg], name: String) -> String =
       found
     }
   }
+
+## A shared `?q=` link is a query in the flags, and the first turn is already
+## its answer. The recent queries ride in the same flags, and init keeps the
+## ones it can use.
+test "flags carry a shared query and the recent ones, and init answers both" {
+  let flags = "{\"root\":\".\",\"mod\":\"Ctrl\",\"q\":\"str.\","
+    ++ "\"recent\":[\"with handle\",\"  \",7,\"!io\",\"a\",\"b\",\"c\",\"d\"],"
+    ++ "\"index\":{\"v\":1,\"lang\":\"en\",\"start\":[1,99],\"items\":["
+    ++ "[\"stdlib\",\"str.trim\",\"fn trim(s: String) -> String\",\"\",\"stdlib.html#std-str-trim\"],"
+    ++ "[\"stdlib\",\"str.split\",\"fn split()\",\"\",\"stdlib.html#std-str-split\"]]}}"
+  let (state, m) = init(Some(flags))
+  assert m.query == "str."
+  assert m.hits == [0, 1]
+  assert m.sel == 0
+  assert m.open
+  # blank and non-string entries are dropped, and no more than five are kept
+  assert state.recent == ["with handle", "!io", "a", "b", "c"]
+  assert state.mod_key == "Ctrl"
+  assert state.start == [1, 99]
+  # an id that names no entry is not a suggestion
+  assert list.map(starts(state), e => e.title) == ["str.split"]
+  # no query in the flags is the blank model, recent queries or not
+  let (_, plain) = init(Some("{\"recent\":[\"x\"],\"index\":{\"items\":[]}}"))
+  assert plain == blank()
+}
+
+fn idle_state() -> State = State { ..probe_state(), recent: ["with handle", "!io"], start: [4, 3, 0] }
+
+## Before anything is typed the list holds the reader's recent queries and
+## then the suggested entries, as one listbox with one run of ordinals.
+test "an empty query lists the recent queries, then where to start" {
+  let state = idle_state()
+  let v = view(state, blank())
+  assert kid_classes(v, "search-results") == ["search-group search-group-recent", "search-group search-group-start"]
+  let rows = all_with_class(v, "search-row")
+  assert list.map(rows, r => prop_of(r, "id"))
+    == ["dawn-search-opt-0", "dawn-search-opt-1", "dawn-search-opt-2", "dawn-search-opt-3", "dawn-search-opt-4"]
+  assert list.map(rows, r => prop_of(r, "role")) == ["option", "option", "option", "option", "option"]
+  assert selected_titles(v) == ["with handle"]
+  let field = all_with_class(v, "search-input")[0]
+  assert prop_of(field, "aria-expanded") == "true"
+  assert prop_of(field, "aria-activedescendant") == "dawn-search-opt-0"
+  # each recent query names itself for the page to forget, and so does Clear
+  let forget = all_with_class(v, "search-forget")
+  assert list.map(forget, b => prop_of(b, "data-forget")) == ["with handle", "!io"]
+  assert prop_of(forget[0], "aria-label") == "Remove “with handle” from recent searches"
+  assert prop_of(all_with_class(v, "search-clear")[0], "data-forget-all") == "1"
+  # the suggestions are links, in the index's order, under the page's root
+  assert list.map(all_with_class(v, "search-start"), r => text_of(all_with_class(r, "search-title")[0]))
+    == ["Effects", "6.5 Named effects", "str.trim"]
+  assert list.take(hrefs(v), 3) == ["./tutorial/09.html", "./spec.html#s6-5", "./stdlib.html#std-str-trim"]
+  # and with rows to show there is no prompt
+  assert count_class(v, "search-status") == 0
+  # no recent queries: no Recent group, and the suggestions number from 0
+  let fresh = view(State { ..state, recent: [] }, blank())
+  assert kid_classes(fresh, "search-results") == ["search-group search-group-start"]
+  assert prop_of(all_with_class(fresh, "search-row")[0], "id") == "dawn-search-opt-0"
+  # nothing at all to show: the prompt, as before
+  let bare = view(probe_state(), blank())
+  assert count_class(bare, "search-group") == 0
+  assert count_class(bare, "search-status") == 1
+  assert prop_of(all_with_class(bare, "search-input")[0], "aria-expanded") == "false"
+}
+
+## The idle rows answer the same keys as results: Enter on a recent query
+## asks it again, Enter on a suggestion opens it.
+test "the keys move through the idle rows, and enter asks again or opens" {
+  let state = idle_state()
+  let m = blank()
+  assert turn(state, m, Pressed(key: "End")).sel == 4
+  assert turn(state, turn(state, m, Pressed(key: "End")), Pressed(key: "ArrowDown")).sel == 4
+  assert turn(state, turn(state, m, Pressed(key: "End")), Pressed(key: "Home")).sel == 0
+  let second = turn(state, m, Pressed(key: "ArrowDown"))
+  assert second.sel == 1
+  # a recent query is typed again, and answered
+  let asked = turn(state, second, Pressed(key: "Enter"))
+  assert asked.query == "!io"
+  assert asked.hits == search(state, "!io")
+  assert asked.goto == ""
+  # a suggestion is a destination, like a result
+  let third = turn(state, second, Pressed(key: "ArrowDown"))
+  assert turn(state, third, Pressed(key: "Enter")).goto == "tutorial/09.html"
+  # the pointer is bounded by the rows the list shows
+  assert turn(state, m, Hovered(at: 4)).sel == 4
+  assert turn(state, m, Hovered(at: 5)) == m
+  # a click on the query is the same as Enter on it
+  let (clicked, _) = update(state, m, Typed(text: "with handle"))
+  assert clicked.query == "with handle"
+}
+
+## Home and End are the ends of the result list, wherever the selection is.
+test "home and end jump to the first and the last result" {
+  let state = probe_state()
+  let m = typed(state, "str.")
+  let last = turn(state, m, Pressed(key: "End"))
+  assert last.sel == 1
+  assert last.hits == m.hits
+  assert turn(state, last, Pressed(key: "Home")).sel == 0
+  # with no hits there is nowhere to go
+  let none = typed(state, "nothing here")
+  assert turn(state, none, Pressed(key: "End")).sel == 0
+}
+
+## A query with no hits says what was asked and offers three ways to ask
+## again, in the page's language, and guesses at nothing.
+test "a query nothing answers says so, with three tips" {
+  let en = probe_state()
+  let v = view(en, typed(en, "  handel "))
+  let block = all_with_class(v, "search-nothing")
+  assert len(block) == 1
+  assert text_of(all_with_class(v, "search-none-title")[0]) == "Nothing matches “handel”."
+  assert count_class(v, "search-none-art") == 1
+  let tips = kids_of(all_with_class(v, "search-tips")[0])
+  assert len(tips) == 3
+  assert text_of(tips[0]) == "Try the English name of an API: read_file, not 读文件."
+  # the examples are code, letter for letter what a reader would type
+  let io_code: Node[Msg] = el("code", kids: [text("!io")])
+  let handle_code: Node[Msg] = el("code", kids: [text("with handle")])
+  assert kids_of(tips[1])[1] == io_code
+  assert kids_of(tips[1])[3] == handle_code
+  assert not str.contains(show_tree(v), "Did you mean")
+  let zh = State { ..en, lang: "zh-CN" }
+  let zv = view(zh, typed(zh, "handel"))
+  assert text_of(all_with_class(zv, "search-none-title")[0]) == "没有与“handel”匹配的结果。"
+  assert text_of(kids_of(all_with_class(zv, "search-tips")[0])[2]) == "搜标题：效果系统、教程 17。"
+  # the region that says it is the live one
+  assert prop_of(all_with_class(v, "search-none")[0], "role") == "status"
+}
+
+## The foot names the modifier the reader's own keyboard has.
+test "the new-tab hint uses the modifier the page names" {
+  let ctrl = State { ..probe_state(), mod_key: "Ctrl" }
+  let text_ctrl = show_tree(view(ctrl, blank()))
+  assert str.contains(text_ctrl, "Ctrl")
+  assert str.contains(text_ctrl, "new tab")
+  assert str.contains(show_tree(view(probe_state(), blank())), "⌘")
+  assert str.contains(show_tree(view(State { ..ctrl, lang: "zh-CN" }, blank())), "新标签页")
+}
