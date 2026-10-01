@@ -220,14 +220,16 @@ fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
 # the only thing that tells `6.5 Named effects` on the spec from a chapter of
 # the tutorial in a list.
 #
-# The design notes' rows are a group of their own, "history", and their detail
-# says History, as the nav does: the document is frozen at M7, and a result
-# that sat beside the spec's under one heading read as the current design. One
-# table, both languages on adjacent lines, for the reason gen/stdlib's chrome
-# gives.
+# The history's rows are a group of their own, "history": the timeline's
+# sections, whose detail says History as the nav does, and the early design
+# notes' sections, whose detail says Early decisions -- the notes are frozen
+# at M7, and a result that sat beside the spec's under one heading read as
+# the current design. One table, both languages on adjacent lines, for the
+# reason gen/stdlib's chrome gives.
 
 type Words = {
   spec: String,
+  history: String,
   design: String,
   tutorial: String,
   gallery: String,
@@ -238,14 +240,16 @@ fn words(lang: Lang) -> Words =
   match lang {
     En -> Words {
       spec: "Spec",
-      design: "History",
+      history: "History",
+      design: "Early decisions",
       tutorial: "Tutorial",
       gallery: "Site",
       home: "Home",
     }
     Zh -> Words {
       spec: "规范",
-      design: "设计史",
+      history: "历史",
+      design: "早期设计决定",
       tutorial: "教程",
       gallery: "站点",
       home: "首页",
@@ -263,6 +267,14 @@ pub fn sources(lang: Lang) -> (String, String, String) =
   match lang {
     En -> ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
     Zh -> ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
+  }
+
+## The timeline, which gen/pages renders as history.html. Its own function
+## because it pairs the other way round: the English is the original.
+pub fn history_source(lang: Lang) -> String =
+  match lang {
+    En -> "docs/history.md"
+    Zh -> "docs/history.zh-CN.md"
   }
 
 # ---- the words a reader can search by -------------------------------------
@@ -364,6 +376,7 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
   let (spec_src, design_src, tut_src) = sources(lang)
   api_index(api, lang)
     ++ doc_index(spec_src, "spec", lang_path(lang, "spec.html"), w.spec)
+    ++ doc_index(history_source(lang), "history", lang_path(lang, "history.html"), w.history)
     ++ doc_index(design_src, "history", lang_path(lang, "design.html"), w.design)
     ++ tutorial_index(tut_src, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
@@ -527,6 +540,8 @@ test "the tutorial's sections are indexed with their chapter as the note" {
 test "each language indexes its own documents" {
   assert sources(En) == ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
   assert sources(Zh) == ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
+  assert history_source(En) == "docs/history.md"
+  assert history_source(Zh) == "docs/history.zh-CN.md"
 }
 
 ## The whole asset, on the real inputs: every group is in it, the hrefs are
@@ -556,10 +571,14 @@ test "the index carries every group and addresses them from the site root" {
     # the stdlib rows are anchored into the stdlib page, in each language's tree
     assert list.filter(en, r => r.group == "stdlib")[0].href == "stdlib.html#g-io"
     assert list.filter(zh, r => r.group == "stdlib")[0].href == "zh/stdlib.html#g-io"
-    # the design notes are History, and the spec is the spec
-    for r in list.filter(en, r => r.group == "history") {
-      assert str.starts_with(r.href, "design.html#")
+    # the timeline and the early design notes are History, and the spec is the spec
+    let hist = list.filter(en, r => r.group == "history")
+    for r in hist {
+      assert str.starts_with(r.href, "history.html#") || str.starts_with(r.href, "design.html#")
     }
+    assert len(list.filter(hist, r => str.starts_with(r.href, "history.html#") && r.detail == "History")) > 0
+    assert len(list.filter(hist, r => str.starts_with(r.href, "design.html#") && r.detail == "Early decisions")) > 0
+    assert len(list.filter(zh, r => r.group == "history" && str.starts_with(r.href, "zh/history.html#"))) > 0
     for r in list.filter(en, r => r.group == "spec") {
       assert str.starts_with(r.href, "spec.html#")
     }
