@@ -107,6 +107,11 @@ W8 触及的两行（`main.dawn:93` 的 `max_body: DEFAULT_MAX_BODY` 与 `:97` �
 - **写边界纵深防御**：见 §3.1。留着它就是同一条规则两份。
 - **`Option[Int]` 的 body 上限**：一个永远有上限的服务器更简单；要「不限」的路由有
   `raw-body`/`stream-body` 两个标签（它们由 nginx 或磁盘兜底），全局不限没有正当用途。
+  5.1（#310）加的逐路由 `Route.body_limit: Option[Int]` 不推翻这条：`None` 不是新的「不限」开关，
+  内存路由上它沿用服务器的 `max_body`，`raw-body`/`stream-body` 路由上它保持原样（本来就不限），
+  `body_limit(r, n)` 照样只收正数。`stream-body` 落盘在 handler 之前、
+  没有逐路由上限是 #310 的根因；`max-body:<bytes>` 这种塞进 tag 字符串的形状否决（tag 是不透明
+  标签，数字进字符串要人人解析、拼错无声），guard 同理是类型化字段 `Route.guard`。
 - **拆 4.1.0 先发 W3/W4/W9**：拆开的尾巴会一直等下去（LIB-13 残差挂了一个多月）。
 
 ## 七、实现回填
