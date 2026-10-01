@@ -49,7 +49,7 @@ use html/render.{render_doc}
 use html/page.{Lang, En, Zh, lang_path, nav_items}
 use gen/common.{must_read, pad2}
 use gen/stdlib.{api_rows}
-use gen/tutorial.{chapter_titles}
+use gen/tutorial.{chapter_titles, chapter_sections}
 use gen/examples.{collect_examples, must_describe}
 
 ## One row of the index.
@@ -114,14 +114,31 @@ fn doc_index(src: String, page: String, detail: String) -> List[Row] !Fs = {
       Row { group: "spec", title: e.text, detail: detail, note: "", href: "${page}#${e.id}" })
 }
 
-## The tutorial, one row per chapter page.
+## The tutorial, one row per chapter page and one per `###` section in it.
+##
+## The sections are the half that used to be missing: chapters 16 and 17 have
+## seven between them (`Sorting: Ord and the comparison operators`, `Handler
+## state: a var in the arm table`, ...), and a reader searching for one of
+## those found nothing. A section's note is its chapter's title, which is what
+## tells two sections with similar names apart.
 fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs = {
   var rows: List[Row] = []
   let titles = chapter_titles(src)
+  let sections = chapter_sections(src)
   for i in range(0, len(titles)) {
     let page = lang_path(lang, "tutorial/${pad2(i + 1)}.html")
     rows = rows
       ++ [Row { group: "tutorial", title: titles[i], detail: detail, note: "", href: page }]
+    for e in sections[i] {
+      rows = rows
+        ++ [Row {
+          group: "tutorial",
+          title: e.text,
+          detail: detail,
+          note: titles[i],
+          href: "${page}#${e.id}",
+        }]
+    }
   }
   rows
 }
@@ -161,7 +178,12 @@ fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
 #
 # The `detail` of a section row is the name of the document it is in, which is
 # the only thing that tells `6.5 Named effects` on the spec from a chapter of
-# the tutorial in a list. One table, both languages on adjacent lines, for the
+# the tutorial in a list.
+#
+# The design notes' rows are in the "spec" group, because the panel draws four
+# groups and no other (see the head of this file), and their detail says
+# History, as the nav does: the document is frozen at M7, and a result that
+# said Design beside the spec's would read as the current design. One table, both languages on adjacent lines, for the
 # reason gen/stdlib's chrome gives.
 
 type Words = {
@@ -176,14 +198,14 @@ fn words(lang: Lang) -> Words =
   match lang {
     En -> Words {
       spec: "Spec",
-      design: "Design",
+      design: "History",
       tutorial: "Tutorial",
       gallery: "Site",
       home: "Home",
     }
     Zh -> Words {
       spec: "规范",
-      design: "设计",
+      design: "设计史",
       tutorial: "教程",
       gallery: "站点",
       home: "首页",
@@ -321,6 +343,19 @@ test "a note is the first line of a doc comment, cut to a bound" {
   let long = str.repeat("x", 200)
   assert len(code_points(note_of(long))) == note_len() + 3
   assert str.ends_with(note_of(long), "...")
+}
+
+## The sections a chapter page anchors are searchable, under their chapter.
+test "the tutorial's sections are indexed with their chapter as the note" {
+  io.with_fs_real(() => {
+    let rows = list.filter(index_rows(probe_api(), En), r => r.group == "tutorial")
+    let sections = list.filter(rows, r => str.contains(r.href, "#"))
+    assert len(sections) > 0
+    for r in sections {
+      assert r.note != ""
+      assert str.starts_with(r.href, "tutorial/")
+    }
+  })
 }
 
 ## Each language reads its own half of every paired document. Building the
