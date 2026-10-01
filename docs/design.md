@@ -2,16 +2,30 @@
 
 *[English](design.en.md) —— 本文是正本；英文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
-> 状态：**historical**。本文是 M0–M4 时期的决策记录，逐条保留是为了「当时为什么这么选」
-> 有据可查。**其中若干前提已被后续里程碑推翻**，最要紧的三条：
+> 状态：**historical**。本文是 M0–M7 时期（截至 2026-07-22）的决策记录，M7 之后不再更新；
+> 逐条保留是为了「当时为什么这么选」有据可查。**其中若干前提已被后续里程碑推翻**，
+> 正文照原样保留，读时以下面这张表为准：
 >
-> - 「编译器预算 6–8 千行（Kotlin）」「实现语言 = Kotlin」——Kotlin 实现已随
->   `kotlin-final` tag 归档，main 上只有自举的 `selfhost/`（约 3.5 万行 Dawn），
+> - 「编译器预算 6–8 千行（Kotlin）」「实现语言 = Kotlin」（§1、D7）：Kotlin 实现已随
+>   `kotlin-final` tag 归档，main 上只有自举的 `selfhost/`，87,586 行 Dawn
+>   （口径：`selfhost/src` 下全部 `.dawn`，不含生成物 `embed/`；2026-10-01 实测），
 >   见 [m8-selfhost-only.md](history/m8-selfhost-only.md)。
-> - 「unsafe 逃生门不向用户代码开放」——`unsafe_pure` 现在是普通语法，用户可写，
->   见 spec.md §6.4 与 codebase-audit.md 的 LANG-01。
-> - 「不引入 IR」——论证在小编译器阶段成立，现在 checker + emit 已过一万行，
->   见 codebase-audit.md 的 ARCH-04。
+> - 「唯一后端是 JVM 字节码，native 由 GraalVM native-image 得到」（§1、D1）：C 后端
+>   （Core IR 到 C，交给 `cc`）自 2026-07-30 起与 JVM 后端平级并已自举，另有把 kernel
+>   送上 NVIDIA GPU 的 cuTile 后端；GraalVM 那条路仍在，只是不再是唯一的 native，
+>   见 [native-backend-plan.md](native-backend-plan.md)。
+> - 「效果系统只有两级：pure 与 io」（D2）：今天还有用户声明的具名效果（`effect` +
+>   `with handle`，可带 `ctl` 控制臂与 handler 状态），标签随签名传播、在 handler 处扣除，
+>   见 spec.md §6.5 与 [effects-design.md](effects-design.md)。
+> - 非目标表里「自定义 GC / 内存模型：JVM 的 GC 就是我们的 GC」：native 后端没有 GC，
+>   用 Perceus 引用计数管理内存，见 [perceus-design.md](perceus-design.md)。
+> - M7 一节「日常工具链（run/test/fmt/doc/LSP）仍是 Kotlin 版」：M8 起全部工具链都由
+>   selfhost 提供，Kotlin 版只留在 `kotlin-final` tag 里，见 [m8-selfhost-only.md](history/m8-selfhost-only.md)。
+> - 「unsafe 逃生门不向用户代码开放」（D5）：`unsafe_pure` 后来一度成为用户可写的普通语法，
+>   2026-09-24 又连同关键字整个删除；「一个宿主调用撑一个纯函数」今天由编译器的 intrinsic
+>   契约在声明侧承担，见 spec.md §6.4 与 §11。
+> - 「无中间 IR」（D6）：论证在小编译器阶段成立；后来引入了 Core IR（`selfhost/src/ir/`），
+>   C 后端就从它出发，见 codebase-audit.md 的 ARCH-04。
 >
 > 语法与语义的权威定义在 [spec.md](spec.md)（那篇是 normative）。本文只讲"为什么"。
 
