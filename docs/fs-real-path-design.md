@@ -1,7 +1,7 @@
 # 身份路径解析 symlink：`fs_real_path` 与三步桥
 
-> 状态：**current**。2026-10-01，issue #207 刀 2：R1（分支 `feat/std-memfs`，顺带 #297）与
-> R2（分支 `feat/fs-real-path`）已写，R3 等下一个种子再补节。
+> 状态：**current**。2026-10-01，issue #207 刀 2：R1（分支 `feat/std-memfs`，顺带 #297）、
+> R2（分支 `feat/fs-real-path`）与 R3（分支 `fix/canon-identity`，种子 v0.81.0 之后）都已写。
 > 调研与裁决见 `research-207-symlink-20261001`（agent-handoff，未入库）与 #207 上 10-01 的裁决评论。
 
 ## 问题
@@ -218,9 +218,98 @@ op 一加，`with_fs_real` 就得有一臂，原语不在的话这一臂只能�
   卡在环测试上。
 - 负控 6：删掉 `real_path` 的相对路径检查，std 测试两条红（宿主测试与表 handler 测试都断言 `io.relative_path`）。
 
-## R3（待补）
+## R3：`canon_identity` 与身份点
 
-`canon_identity` 的形状与身份点清单（调研 §3）。
+种子 v0.81.0 的 std 带着 `io.real_path`，compiler-plan 从这一版起可以调用它。
+
+### 形状
+
+`compiler-plan/src/source.dawn`，紧挨 `canon`：
+
+```dawn
+pub fn canon_identity(p: String) -> String !Fs !Env = {
+  let abs = if fspath.is_absolute(p) { p } else { io.cwd() ++ "/" ++ p }
+  match io.real_path(abs) {
+    Ok(resolved) -> resolved
+    Err(_) -> canon(abs)
+  }
+}
+```
+
+- 交给宿主的是**绝对但未做词法归一**的路径。`home/app -> ../work/app` 时 `home/app/../lib`
+  是 `work/lib`；先词法折叠成 `home/lib` 再问宿主，宿主答不存在，退路又交回这个错的目录，
+  场景 B 原样不修。所以次序就是要点，有一条内联测试与一个负控专门守它（下文）。
+- 解析不了（路径不存在、wasi 上原语一律失败）就退回 `canon(abs)`：词法拼写。退路用已经拼好的
+  绝对路径，相对路径因此只问一次工作目录（内联测试断言了 `Env` 日志）。
+- `canon` 本身不动，仍是纯词法 `!Env`。它的注释改成「路径**写的**是什么」，`canon_identity`
+  是「路径**是**什么」。
+
+### 身份点（改成 `canon_identity`）
+
+| 处 | 作用 |
+|---|---|
+| `source.dawn` `mf_get` 的缓存键 | 同一目录的两个拼写只读一次 manifest |
+| `source.dawn` `select_url_deps` 的 `seen` | url 依赖遍历的目录去重 |
+| `source.dawn` `resolve_src_deps` 的 `dcanon` | 包缓存与「一名一份」占用键（场景 A 的出处） |
+| `source.dawn` `PkgR.root` | 包源根（场景 B 的出处） |
+| `analyze.dawn` `entry_file`、`resolve` 的模块键与 overlay 键、`analyze_document_planned` | 入口匹配、模块去重、活文本匹配 |
+| `stdlib.dawn` `dir_modules` 的键、`dir`、`std_module_of`、`is_std_dir` | std 来源判定（场景 C） |
+| `server.dawn` `workspace_identity`、`Doc.canonical_path`、`add_loc_diag`、`standalone_diagnostics`、`location_of` | workspace 查表、重复冲突、诊断与跳转的比较（E1/E2） |
+| `server.dawn` `manifest_path_of`、`slot_manifest_dirs` | 监视的 manifest 目录与通知里的路径两边同一个函数 |
+
+保持词法 `canon` 的：bootstrap source-input manifest（封闭输入契约，`source_input_path_ok` 本就拒绝经过链接的路径）、
+`nearest_src_root`（项目根保留用户的拼写）、`index_files`（补全索引是显示用途）、
+`resolve_src_deps` 里给消费方看的两条诊断（「has no src/ folder」「has no dawn.toml」仍写消费方写的目录）。
+
+### 与调研和裁决不同的五处，各有理由
+
+1. **依赖目录解析一次，之后按解析后的拼写读。** 裁决只改 `dcanon` 与 `PkgR.root` 两个键；落地让
+   `resolve_src_deps` 从 `dcanon` 起读 manifest、`src/` 并递归。宿主上这只改「读哪个名字」不改「读到什么」
+   （内核对两个拼写答同一个目录）；但 `std/memfs` 的读臂不跟随链接，不这样做内存测试根本走不到身份那一步。
+   这也是 cargo 维护者在 #17204 说的「在入口归一一次，内部假定干净」。副作用：依赖包自己的 manifest 诊断
+   路径从 `app/../lib/dawn.toml` 这类拼写变成 `lib/dawn.toml`。
+2. **模块路径保持词法，loader 的模块键是（文件身份，模块路径）二元组。** 只按文件身份去重，
+   会让 `src/ali -> sub` 下的 `use ali/x` 被折进 `sub/x`、别名 `ali/x` 不再装载：实测
+   `undefined variable or module alias: y`，而种子 v0.81.0 打印 `14`。这是 spec §10 的语义（模块身份是模块路径，
+   调研 D 场景已裁不改），身份解析不能顺手改掉它。所以模块路径由 `module_path_at` 先按词法求，
+   只在文件拼写根本不在根的拼写之下时（编辑器经另一个拼写打开同一个根里的文件）才按两边的身份求；
+   包内模块路径同样按词法（包根已是身份）。负控：键里去掉模块路径，#297 链接树上的新测试红（`queued module`）。
+3. **`project_module_path` 也走 `module_path_at`。** 调研把它列为保持词法；但 workspace 成员的路径
+   （`Doc.canonical_path`）现在是身份，而 plan 的根是第一个成员打开时的拼写，两边拼写不同时纯词法
+   会退化成文件名。它因此多了 `!Fs`；lsp-workspace 合约 `extensionless-project-member` mutant 的替换体同步改写。
+4. **manifest 刷新的 key 守卫不再 panic。** `refresh_workspace` 原来断言重新规划后 key 不变（key 只是
+   target 路径的算术）。身份解析链接之后，服务运行期间链接被改指或根被删，key 就会变；成员文档按旧 key 登记，
+   所以 slot 留在旧 key 下，不迁移，之后新打开的文档拿新答案。lsp-workspace-design §3.2 同步改写。
+5. **manifest 通知按目录身份匹配。** 监视集里的包根已是身份，通知里的路径若仍按词法，两边永远对不上。
+   解析的是目录不是文件，所以删掉的 `dawn.toml` 仍能指认它所在的目录。
+
+### 效果行
+
+`std_module_of` 与 `is_std_dir` 要问宿主，于是 `analyze_program`、`analyze_observed`、`analyze_module_step`、
+`analyze_standalone`、`incremental.analyze` 与 LSP 一侧的十来个函数加了 `!Fs`。调用者全都已持有 `Fs`
+（`main`、`nmain` 的命令函数、合约与测试的 memfs 包装），没有一处需要新装 handler。
+一次 load 里每个依赖拼写只解析一次（`resolve` 的局部表），不是每条 `use` 边一次。
+
+### 可见的输出变化
+
+- 依赖包（经链接到达时）的诊断路径、LSP 对**未打开文件**的跳转 URI 与诊断 URI 变成物理路径。
+  这与 Node 的模块缓存键、TypeScript 的默认 realpath 同款（调研 §6），TypeScript 用户抱怨「跳进
+  `node_modules/.pnpm` 的真实路径」，`preserveSymlinks` 就是为此设的；本仓不设这个开关。
+- 已打开的文件经 `path_by_uri` 回到编辑器打开时的 URI，不受影响。
+- 依赖包自己 manifest 的诊断路径不再带 `../`（上文第 1 条）。
+- 仓内差分语料不含链接，四个差分与 `native-cli-diff` 的结果见本批报告。
+
+### 测试与负控（命令输出在本批报告）
+
+- compiler-plan 内联测试三条：菱形依赖一边走链接是一个包（A）、链接后的 `..` 退到目标的父目录（B）、
+  `canon_identity` 对存在与不存在路径的逐例答案（含相对路径只问一次工作目录）。
+- analyze 内联测试四条：项目经链接进入时 `../lib` 依赖可装载、编辑器经链接打开的 buffer 是项目入口（B、B-LSP）；
+  std 经链接目录在两种拼写下都是 std（C）；`src/` 内的文件链接仍是两个模块（第 2 条）。
+- lsp-workspace 合约新 case `symlink-identity`（真磁盘链接，Python `os.symlink`）：main 经链接、库经实路径打开，
+  main 看到库的活文本、跳转落到库的实 URI（E1）；再经链接以不同文本打开库，两个 URI 都收到重复冲突诊断（E2）。
+  mutant `lexical-identity` 把 `canon_identity` 改回 `canon`，红在 `SYMLINK_IDENTITY_SPLIT`。
+- 负控：形状变异（交给宿主前先 `canon`）红在 B 的两条测试与 `canon_identity` 的逐例测试；撤回 `dcanon`
+  红在 A 与 B；`std_module_of` 改回词法红在 C；模块键去掉模块路径红在第 2 条的测试。
 
 ## 附：#297 源码遍历不跟随目录链接
 
@@ -247,6 +336,18 @@ op 一加，`with_fs_real` 就得有一臂，原语不在的话这一臂只能�
 - `check_memfs_twin` 与其自测。
 
 ## 不做的（理由）
+
+R3：
+
+- **不改 `canon`，不改 bootstrap 输入清单、`nearest_src_root`、`index_files`。** 见上文「身份点」末段。
+- **不做 case-fold。** 调研「不做的」同一条：两个后端的目标平台都区分大小写，`realpath` 在 macOS 上也不折叠大小写。
+- **不对不存在的路径做部分解析（soft canonicalize）。** 只存在于编辑器里的新文件经链接打开时，它的身份退回词法拼写，
+  与实路径那一侧不合并；模块路径由 `module_path_at` 按与根相同的拼写求，仍然正确。真要合并，得解析「最长的存在前缀」，
+  那是 Rust 社区 `soft_canonicalize` 的做法，等有人碰到再做。
+- **不加 `preserveSymlinks` 式的开关。** 依赖与未打开文件显示物理路径是身份解析的代价，Node 与 TypeScript 的开关
+  都是为了绕开工具链对链接布局的假设；本仓没有这样的布局需求。
+- **不迁移 workspace。** 链接在服务运行中被改指时成员留在旧 key 下（上文第 4 条），重开文档即得新答案；
+  自动迁移要定义成员按什么顺序换 key、诊断怎么清，不值得为这个罕见事件写。
 
 R2：
 

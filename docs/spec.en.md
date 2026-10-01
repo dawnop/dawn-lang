@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7f5e0997c6e448d6 -->
+<!-- doc-check: translation-of docs/spec.md @ 85b19d3f75bac0b3 -->
 
 # Dawn Language Specification
 
@@ -3574,6 +3574,13 @@ solving and one-name-one-copy across the whole program all go by the real name, 
 aliased import is normalised to the real name at load time. `dawn add <coordinate|url|path>`
 can write these entries for you (fetching the archive and computing the hash, preserving
 hand-written formatting).
+
+One-name-one-copy compares directories: a path dependency reached through a symbolic link and
+through its real path is one directory, and so one package (directories are compared by their
+physical path with links resolved, falling back to the lexical spelling for a path that does
+not exist), and a `..` steps to the physical parent, as the kernel does. Module paths are not
+affected and stay the spelling below the module root: a link inside `src/` gives one file two
+module paths, and those are two modules.
 
 `dawn check|doc|run|test|build` fetches `[java-deps]` (including those declared by each
 dependency package — the union) for compile-time `use java` resolution. Each target of
