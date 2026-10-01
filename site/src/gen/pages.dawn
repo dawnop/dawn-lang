@@ -4,14 +4,15 @@ use std/str
 use std/io
 use std/io.{Fs, Env, getenv}
 use std/bytes
-use md/ast.{Block}
+use md/ast.{Block, Para, Text}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path, plain_assets}
+use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path, plain_assets, playground_label}
+use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
-use gen/copy.{Copy, load_copy, line, body}
+use gen/copy.{Copy, load_copy, line, line_opt, body}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 
@@ -231,30 +232,91 @@ fn card_output(base: String) -> String !Fs =
   `<pre class="output"><code>` ++ escape_html(str.trim(must_read("${base}.out"))) ++
   "</code></pre>"
 
+## The two buttons under the lede, and the install line under them.
+##
+## With a `cta-playground` section in the copy the buttons are Playground and
+## Tutorial: trying the language in the browser is the one thing a first
+## visitor can do in a click, and the Playground was otherwise only the sixth
+## item of the nav. `cta-secondary` (the gallery) then goes unread; the
+## Examples nav item is still one click away. Without that section the row is
+## the older Tutorial and Examples, so the page builds from copy written
+## before or after the change (see gen/copy.line_opt).
+fn cta_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String = {
+  # every button stays in the language of the page it is on
+  let tut = lang_path(lang, "tutorial/index.html")
+  let cta_tut = line(c, "cta-primary", mu)
+  let buttons =
+    match line_opt(c, "cta-playground", mu) {
+      Some(cta_play) -> {
+        let play = lang_path(lang, "playground.html")
+        """<a class="btn btn-primary" href="${root}/${play}">${cta_play}</a>""" ++ "\n"
+          ++ """<a class="btn btn-ghost" href="${root}/${tut}">${cta_tut}</a>"""
+      }
+      None -> {
+        let exs = lang_path(lang, "examples/index.html")
+        """<a class="btn btn-primary" href="${root}/${tut}">${cta_tut}</a>""" ++ "\n"
+          ++ """<a class="btn btn-ghost" href="${root}/${exs}">""" ++ line(c, "cta-secondary", mu)
+          ++ "</a>"
+      }
+    }
+  let install =
+    match line_opt(c, "install", mu) {
+      Some(text) -> "\n" ++ `<p class="install">` ++ text ++ "</p>"
+      None -> ""
+    }
+  `<div class="cta-row">` ++ "\n" ++ buttons ++ "\n</div>" ++ install
+}
+
+fn copy_of(entries: List[(String, String)]) -> Copy =
+  Copy {
+    path: "test",
+    sections: map(entries, e => {
+      let (k, v) = e
+      (k, [Para([Text(v)])])
+    }),
+  }
+
+## Both shapes of the row, so that the copy can land before or after this.
+test "the hero offers the playground first when the copy has the section" {
+  let older = copy_of([("cta-primary", "Tutorial"), ("cta-secondary", "Examples")])
+  let o = cta_html(older, u => u, En, ".")
+  assert str.contains(o, `<a class="btn btn-primary" href="./tutorial/index.html">Tutorial</a>`)
+  assert str.contains(o, `<a class="btn btn-ghost" href="./examples/index.html">Examples</a>`)
+  assert not str.contains(o, "install")
+  let newer = copy_of([("cta-playground", "Try"), ("cta-primary", "Tutorial"),
+    ("cta-secondary", "Examples"), ("install", "Get it")])
+  let n = cta_html(newer, u => u, Zh, "..")
+  assert str.contains(n, `<a class="btn btn-primary" href="../zh/playground.html">Try</a>`)
+  assert str.contains(n, `<a class="btn btn-ghost" href="../zh/tutorial/index.html">Tutorial</a>`)
+  assert not str.contains(n, "examples/index.html")
+  assert str.ends_with(n, `</div>` ++ "\n" ++ `<p class="install">Get it</p>`)
+}
+
 fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
-  let hl = card_source("site/pages/hero")
+  let src = str.trim(must_read("site/pages/hero.dawn"))
   let out = card_output("site/pages/hero")
   let eyebrow = line(c, "eyebrow", mu)
   let lede = line(c, "lede", mu)
-  let cta1 = line(c, "cta-primary", mu)
-  let cta2 = line(c, "cta-secondary", mu)
-  # both buttons stay in the language of the page they are on
-  let tut = lang_path(lang, "tutorial/index.html")
-  let exs = lang_path(lang, "examples/index.html")
+  # The program in the window opens in the Playground the way a tutorial
+  # block does, through the same link (html/play.dawn), so the fragment is the
+  # one gen/links already knows how to check.
+  let play = Play {
+    href: "${root}/" ++ lang_path(lang, "playground.html"),
+    label: playground_label(lang),
+  }
+  let code = play_block(play, `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>",
+    src)
   """
 <section class="hero">
 <div class="hero-copy">
 <p class="eyebrow">${eyebrow}</p>
 <h1 class="wordmark">Dawn</h1>
 <p class="lede">${lede}</p>
-<div class="cta-row">
-<a class="btn btn-primary" href="${root}/${tut}">${cta1}</a>
-<a class="btn btn-ghost" href="${root}/${exs}">${cta2}</a>
-</div>
+${cta_html(c, mu, lang, root)}
 </div>
 <figure class="code-window">
 <figcaption class="code-window__bar"><span class="fname">main.dawn</span><span class="run">dawn run</span></figcaption>
-<pre class="dawn"><code>${hl}</code></pre>
+${code}
 ${out}
 </figure>
 </section>
