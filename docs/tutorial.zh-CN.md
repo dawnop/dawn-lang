@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ a03a3d015d38ae8e -->
+<!-- doc-check: translation-of docs/tutorial.md @ 70596883e9095124 -->
 
 # Dawn 教程
 
@@ -846,8 +846,10 @@ true
 `List` 有，异构的 `Map` 键没有。这条线为什么落在这里、Dawn 为什么不做 trait 对象，
 见 [trait.md](trait.md) §10。
 
-v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`/`Bool`/`String`
-（没有条件 impl，`List[T]` 不能做主体）；comptime 里不能用 trait 约束的调用。
+impl 的主体可以是泛型的：`impl[T: Eq] Eq[List[T]]` 是一条**条件 impl**，泛型类型上的
+`derive` 写出的也是一条（`type Box[T] = { v: T } derive Ord` 得到
+`impl[T: Ord] Ord[Box[T]]`）。v1 的边界：主体的实参必须是这个 impl 自己的、互不相同的
+类型参数（`impl Eq[List[Int]]` 被拒绝）；comptime 里不能用 trait 约束的调用。
 完整设计见 [trait.md](trait.md)。
 
 ### 关联类型，以及 `[]` 与 `for` 背后的 trait
@@ -1239,10 +1241,6 @@ rejected: too large
 
 ### v1 的边界
 
-- **尾恢复**臂就是一次普通调用、返回值即结果。声明为 `ctl` 的效果还可以带**控制臂**
-  （`op(...) resume k => ...`）：臂绑住这次操作的延续而不恢复它，臂的值就是整个
-  `with handle` 的值，`k` 是个普通函数值，可以存下来以后再恢复。只能一次：「恢复两次」
-  不在这一档里；永远不会恢复的那一个用 `discard` 丢弃，它会跑掉挂起帧的释放。
 - 「操作不返回调用点」的用法通常走既有的失败机制：`Result` + `?`、
   `catch_fault`/`catch_panic`/`bracket`。
 - 效果不带类型参数（没有 `effect Yield[T]`）。

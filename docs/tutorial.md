@@ -900,10 +900,12 @@ is exactly what throws that fact away. So a heterogeneous `List` is available an
 heterogeneous `Map` key is not. Why the line falls there, and why Dawn does not add
 trait objects, is in [trait.md](trait.md) §10, in Chinese.
 
-The v1 boundary: an impl's subject can only be a **non-generic** named type or
-`Int`/`Float`/`Bool`/`String` (there are no conditional impls, and `List[T]` cannot be a
-subject); and a call under a trait constraint is not available in comptime. The full
-design is in [trait.md](trait.md), in Chinese.
+An impl's subject may be generic: `impl[T: Eq] Eq[List[T]]` is a **conditional impl**,
+and `derive` on a generic type writes one (`type Box[T] = { v: T } derive Ord` gives
+`impl[T: Ord] Ord[Box[T]]`). The v1 boundary: the subject's arguments must be the impl's
+own, distinct type parameters (`impl Eq[List[Int]]` is rejected); and a call under a
+trait constraint is not available in comptime. The full design is in
+[trait.md](trait.md), in Chinese.
 
 ### Associated types, and the traits behind `[]` and `for`
 
@@ -1324,13 +1326,6 @@ production arm ends the process.
 
 ### The v1 boundary
 
-- A **tail-resumptive** arm is one ordinary call and its return value is the result.
-  An effect declared `ctl` may also carry **control arms**
-  (`op(...) resume k => ...`), which bind the continuation instead of resuming: the
-  arm's value becomes the value of the whole `with handle`, and `k` is an ordinary
-  function value that may be stored and resumed later. Once only: resuming twice is not
-  in this tier, and one that will never be resumed is abandoned with `discard`, which
-  is what runs the suspended frames' releases.
 - For "the operation does not come back to the call site" the failure machinery is
   usually the answer: `Result` + `?`, `catch_fault`/`catch_panic`/`bracket`.
 - An effect takes no type parameters (there is no `effect Yield[T]`).
