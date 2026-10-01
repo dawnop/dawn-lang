@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 70596883e9095124 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 075afa588adb57e0 -->
 
 # Dawn 教程
 
@@ -1414,8 +1414,9 @@ subdir = "packages/json"      # 包在归档里的位置
 一直跑到结束。
 
 浏览器里的页面要的是另一种形状：一个一直活着、每来一个事件就被调一次的模块，`--reactor`
-编的就是它。这种模块没有 `_start`，只导出一个函数 `dawn_turn`，宿主每来一条消息就调它
-一次，每次调用跑一遍 `main`。把状态从这一轮带到下一轮的是 `std/reactor` 的 `serve`：它读
+编的就是它。这种模块没有 `_start`，导出的恰好是三项：`memory`、`_initialize` 和 `dawn_turn`。
+宿主实例化模块之后先调一次 `_initialize`，之后每来一条消息就调一次 `dawn_turn`，每次调用
+跑一遍 `main`（[spec.md](spec.md) §12.5）。把状态从这一轮带到下一轮的是 `std/reactor` 的 `serve`：它读
 一行，连同到目前为止的状态一起交给你的 step 函数，再留下 step 返回的状态。站点的
 [演示](https://dawn-lang.dawnop.com/zh/tea.html)页就是三个这样的 reactor（一个计数器、
 一个待办列表和站内搜索），各自用 `dawnc build --target wasm --reactor` 编出，由
