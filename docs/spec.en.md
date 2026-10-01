@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d9e8a49d23f66475 -->
+<!-- doc-check: translation-of docs/spec.md @ dfacf3bad63dbb9c -->
 
 # Dawn Language Specification
 
@@ -4097,6 +4097,7 @@ release; it needs neither a JVM nor this repository):
 | `dawnc check <target>...` | Type checking only, aggregates diagnostics from every target |
 | `dawnc emitc <target> [-o out.c]` | A C translation unit (compiled together with the runtime in `runtime/c/`) |
 | `dawnc build <target> [-o out]` | The previous step + a call to `cc` (`$CC` overrides it), a standalone executable |
+| `dawnc build --target wasm [--reactor] <target> [-o out]` | The same C handed to clang, a WebAssembly module (§12.5) |
 | `dawnc run [--std <dir>] <target> [-- <program-args>...]` | The same, and runs it as soon as it is compiled |
 | `dawnc test <target>` | Compiles the variant that includes the test blocks and runs it |
 | `dawnc fmt` / `doc` / `add` / `lsp` | Output is **byte-for-byte identical** to `dawn`'s subcommands of the same name (`scripts/native-cli-diff.sh` pins these four to the JVM's bytes) |
@@ -4252,6 +4253,259 @@ grow) — for top-level functions and for **local named functions** (§3.1) alik
 recursive tail calls are not guaranteed. The rule: a call to the function itself
 inside its body sits in tail position (return position, the tail position of a match/if
 branch, the last expression of a block).
+
+### 12.5 Build targets
+
+There are three build targets. Choosing a target means choosing a driver and a command;
+`jvm` and `native` are this section's names for them, not spellings you can write.
+
+| Target | Command | Output |
+|------|------|------|
+| `jvm` | `dawn build <target> -o app.jar` (with `--native`, then handed to GraalVM `native-image`, §12.3) | An executable jar |
+| `native` | `dawnc build <target> [-o out]` | An executable compiled by `cc` |
+| `wasm` | `dawnc build --target wasm [--reactor] <target> [-o out]` | A WebAssembly module (WASI preview 1) |
+
+Only `dawnc build` accepts `--target`, and its only value is `wasm`; any other value is a
+usage error (exit 2). `dawn build` has no `--target`, and writing one exits 2 as well.
+`--reactor` **must** come with `--target wasm`; otherwise the build exits 2.
+
+**wasm and native are one backend**: the same emitted C and the same runtime
+`runtime/c/dawn_rt.c`, which swaps out what the target does not have under `__wasi__`
+conditional compilation. The compiler is clang: `DAWN_WASM_CC` overrides it, the default is
+`clang`, and `CC` is not read. The triple is whichever one the compiler in hand has a
+sysroot for, `wasm32-wasip1` first and `wasm32-wasi` otherwise. Without `-o`, the output is
+named after native's default with `.wasm` appended. `use java` is refused, as on native
+(§12.1).
+
+**A command module** (no `--reactor`) exports `_start` and `memory`. The host calls
+`_start` once and the program ends when `main` does, with the same meaning as a native
+process.
+
+**Reactor mode** (`--reactor`) links without a `_start`, and the module's exports are
+**exactly** three: `memory`, `_initialize` and `dawn_turn`.
+
+- The host **must** call `_initialize` (wasi-libc's constructors) once, after instantiation
+  and before the first `dawn_turn`.
+- `dawn_turn` takes no arguments and answers an `i32`. One call is one turn: it calls the
+  program's `main` with an empty argv (`args()` is `[]`), flushes the buffers of standard
+  output and standard error once `main` returns, and answers 0.
+- Every turn enters `main` from the top, and no Dawn stack survives a turn boundary. The
+  only thing that lives across turns within one instance is the root `std/reactor`'s `serve`
+  installed; beyond that, this specification promises no value survives from one turn to
+  the next. `serve`'s contract (one state type per instance; a failing or panicking `step`
+  keeps the previous state) is in its documentation.
+- **A reactor has no io handler of its own**: the mode adds no effect, handler or io
+  primitive. The program's `!io` is still std's: `io.read_line` reads WASI fd 0, `println`
+  writes fd 1, and standard error is fd 2; the host supplies and collects each turn's bytes,
+  and the end of the input the host supplied is end of input. The module imports only
+  `wasi_snapshot_preview1` functions; which ones is decided by the linked wasi-libc from
+  what the program uses, and is not part of this specification. What an import the host
+  does not implement answers is up to the host.
+- What a bridge sees is exactly the above: three exports, and bytes on stdio. The message
+  format, one JSON line in and one JSON line out, is `packages/tea-dom`'s contract
+  (`tea_dom/wire`), not the language's; the design and its reasons are in
+  [`dom-bridge-design.md`](dom-bridge-design.md) (in Chinese).
+- When the program exits through `Exit`, or a panic goes uncaught, the guest calls
+  `proc_exit` and the instance cannot be used again. To keep an instance answering after an
+  application panic, catch it inside the turn with `catch_panic`, which is what `serve` does.
+
+**The standard library on wasm** (the same in both modes): every bundled std module compiles
+for wasm, and every difference is in the runtime. Each row below is an explicit refusal by
+the runtime, not an emulation; outside the table, behaviour matches the native output (§12.1's
+guarantee extends to wasm).
+
+| Capability | On wasm |
+|------|-----------|
+| File io (`Fs`) | Through WASI preopens; which directories are visible is the host's decision |
+| `io.run` (`Proc`) | `Err` (a fault, `io_run: no processes on wasi`) |
+| `io.real_path` | `Err` (a fault): wasm32-wasi has no absolute paths to resolve (§11) |
+| `io.temp_dir` / `io.temp_file` | `Err` (a fault) |
+| `io.copy_permissions` | Succeeds whenever `src` exists, but changes nothing: the target has no file modes |
+| One-shot continuations (control arms, `discard`, §6.5) | Panic: `dawn: one-shot resumption is not available on wasm` |
+| `std/gpu`'s `with_gpu_real` | Every operation that reaches the device answers `gpu.unsupported_backend` (§12.6) |
+| Threads, a large stack | None; the recursion depth limit depends on the engine's call stack and is **undefined** |
+
+Checked by machine: `scripts/wasm-contract/run.sh` builds one corpus both natively and as
+wasm (command modules), runs the wasm under node's WASI, and requires stdout to equal the
+native run byte for byte, the runtime's ledger of object births and deaths to balance to
+zero, and an uncaught panic to exit 1 on both targets; `scripts/wasm-dom-contract/run.sh`
+runs the reactor and the DOM bridge against a recording document stub and compares the
+transcripts byte for byte. Both run in CI's `wasm-target` job.
+
+### 12.6 The device backend: GPUs
+
+The device backend is **not** a third backend of the compiler. Neither driver knows what a
+kernel, Tile IR or a GPU is, and neither calls any device toolchain. It is two layers of
+library:
+
+- The host layer, `std/gpu` (bundled with std): the `Gpu` effect, `Tensor[D]`, the format
+  markers and `Dtype`, and the two handlers.
+- The device layer, `packages/tileir` (a source package brought in through `[deps]`, not part
+  of std): the `Dev` effect, the recording handler, `TileProg`, the Tile IR text renderer and
+  the bytecode writer. The host reference implementations of kernels are in
+  `packages/tileref`.
+
+The reasons, the roadmap and the measurements are in
+[`tile-backend-design.md`](tile-backend-design.md) §4–§6 (in Chinese).
+
+**A kernel body** is an ordinary Dawn function whose effect row is `Dev` alone, of the shape
+`fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`.
+
+- It does not execute on the device, and it computes no number on the host. Every `Dev`
+  operation produces or consumes **handles**: opaque types such as `Tile[D]`, `Idx`,
+  `Scalar[D]` and `Param[D]`, whose phantom parameter `D` is a format marker (§2.7). Handles
+  are issued by the handler; using one kind of handle as another, or a host `Int` as a
+  handle, is a type error.
+- **Recording**: `tileir/prog`'s `trace_kernel(name, params, body)` runs `body` exactly once,
+  **at host run time**, under the recording handler, and answers a `TileProg` (an ADT in SSA
+  form). `params` is the format name of each entry parameter, by position. A body that issues
+  the same operations in the same order records equal programs.
+- Ordinary Dawn control flow in the body (`if`, `for`, recursion) is evaluated by the host
+  while recording: a branch that depends only on what the host knows is unrolled, and a host
+  `Int` / `Float` becomes a constant when it enters the record. Control flow that depends on
+  a tile value **must** go through `tileir/dev`'s structured functions (`d_for`, `d_loop`,
+  `d_if`, `d_reduce` and so on), which become regions in the record.
+- Memory operations are ordered only by the token chain the recording handler keeps; program
+  order gives them no order at all.
+- The following panic while recording (they are not an `Err`): `param(d, pos)` disagreeing
+  with `params` (a position out of range or a different format); a tile dimension that is
+  not a power of two; loops nested deeper than `MAX_LOOP_DEPTH` (16); one recording issuing
+  more than `MAX_HANDLES` (65536) handles; a region left open, or closed with the wrong
+  number of values.
+- Outputs: `tileir/render`'s `render(prog)` gives text in the `cuda_tile` dialect, and
+  `tileir/bytecode`'s `encode(prog)` gives `cuda-tile` bytecode whose version is pinned in
+  `BYTECODE_MAJOR` / `BYTECODE_MINOR`. One `TileProg` is one module holding one
+  `entry @<name>`, where `name` is `trace_kernel`'s first argument; every entry parameter is a
+  pointer to its format. Turning the bytecode into a device image (a cubin) is done by
+  NVIDIA's `tileiras`, outside the Dawn toolchain; this specification does not say who calls
+  it or when.
+
+**The `Gpu` effect** has seven operations (`gpu_alloc`, `gpu_upload`, `gpu_download`,
+`gpu_launch`, `gpu_module_global`, `gpu_free`, `gpu_sync`), monomorphic and handle-level; a
+program uses the typed functions over them: `alloc`, `upload`, `download`, `free`, `launch`,
+`launch3`, `module_global` and `sync`.
+
+- Every operation answers `Result[_, ForeignError]`. Above the operations std mints three
+  refusals of its own, byte-identical under every handler: `gpu.bad_length` (`alloc`'s length
+  below 1), `gpu.length_mismatch` (`upload`'s data length is not `size(t)`) and
+  `gpu.bad_grid` (an axis of the grid below 1). All three are minted before any handler is
+  asked. Every other answer is the raw outcome of the device the handler stands for: the
+  seam sits below the error surface.
+- **`launch` names a kernel by a string**: `launch(kernel, grid, args)` is
+  `launch3(kernel, grid, 1, 1, args)`; the grid counts tile blocks; `args` are buffer handles
+  (`handle_of(t)`), in the order of the entry parameters. The binding from names to kernels
+  is the table the handler is installed with, and a name not in it answers `gpu.no_kernel`
+  under both handlers. The language checks neither that this name is the one `trace_kernel`
+  was given nor that `args` agree with the entry signature in number and format: that is the
+  program's responsibility.
+- `launch` returning is not the kernel having run. Only a `download` after `sync` is
+  guaranteed to see the writes of the launches before it.
+- `module_global(d, kernel, name)` answers a `Tensor[D]` over one exported global of the
+  module that defines the kernel, sharing the module's storage; two lookups of one symbol
+  answer the same handle, and `free` on it is accepted and does nothing.
+
+**The two handlers**:
+
+```dawn
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T
+pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e) -> T !io
+```
+
+- **The fake device `with_gpu_fake` is pure**: it works on every backend and in every test
+  block, with no device, no driver and no `!io`, and two installations share nothing. It
+  cannot be used at comptime: its table is a `Map` (§7.2) and its handler has state cells
+  (`var`), and the comptime interpreter can represent neither.
+- The fake device **never runs a kernel body**. Its table maps a name to (a number of buffers,
+  a host reference implementation). `launch` checks the arguments first: none at all answers
+  `gpu.no_arguments`, a count different from the entry's answers `gpu.bad_arity`, and a handle
+  never issued or already freed answers `gpu.no_such_buffer`; then it hands the reference the
+  format name and the contents of every argument buffer, in order. The reference answers
+  `[(argument position, contents)]`, and each pair is rounded to the format of **that** buffer
+  (`round_to`) and written back; a position out of range answers `gpu.bad_write_back` and
+  writes nothing. Every input is read before any write-back. The grid is not read.
+- A buffer holds what memory of its format would hold: `upload` and write-back both round to
+  the buffer's format, and `download` answers what is held unchanged.
+- **The real device `with_gpu_real` is implemented on the native target only**. The runtime
+  `dlopen`s `libcuda.so.1` at the first operation that needs the device and opens one context
+  on device 0; when `body` returns it releases the context and the library, and with them
+  every buffer the program did not `free`. A kernel's cubin is loaded the first time it is
+  launched (or queried by `module_global`) and reused for the rest of the installation.
+- A driver's refusal is passed on unchanged, with kind `cuda.<CUresult name>`; no libcuda to
+  load answers `gpu.no_driver`; a driver that cannot load the ELF ABI the cubin uses answers
+  `gpu.driver_too_old`, and the cubin is not handed to the loader.
+- **The JVM and wasm have no device runtime**: every operation that reaches the device answers
+  `gpu.unsupported_backend`, and the handler passes it on unchanged. The real handler does not
+  check that the arguments agree with the kernel's entry in number and format.
+
+**The contract between the two handlers**:
+
+- The same `!Gpu` function runs under both handlers without a word changed.
+- A refusal that does not reach the device has the same kind under both handlers:
+  `gpu.unsupported_dtype`, `gpu.no_such_buffer`, `gpu.no_kernel`, `gpu.no_arguments`. On the
+  real side these answers are the same on every backend, with or without a driver.
+- For a kernel K and the reference implementation R registered under its name in the fake
+  device's table: the values the fake device answers **must** equal what the real device
+  answers running K. An **exact-tier** kernel is equal bit for bit over the whole buffer (telling
+  `-0.0` from `0.0`); a **tolerance-tier** kernel satisfies `|got - want| <= atol + rtol * |want|`
+  element by element, with `atol = rtol = 1e-5`. The tier is a property of the kernel,
+  declared by the layer-2 diff program; the criteria are in
+  [`tile-backend-design.md`](tile-backend-design.md) §6.6. The obligation falls on whoever
+  writes the pair K, R: neither the compiler nor std checks it, and layer 2 below does.
+
+**Types that cross the boundary**: only buffers cross between host and device.
+
+- `Tensor[D]` is an opaque type whose representation is (handle, element count); `D` is a
+  format marker, so `Tensor[F64]` and `Tensor[BF16]` are two types and passing the wrong format
+  is a type error rather than a launch failure. A handle is an opaque integer issued by the
+  handler, and a program never invents one.
+- There are 15 format markers, each implementing `Dtype` (`dtype_name`, `dtype_bytes`), and no
+  other type implements it: `F64`, `F32`, `BF16`, `I32`, `F16`, `I8`, `U8`, `I16`, `I64`,
+  `TF32`, `F8E4M3FN`, `F8E5M2`, `F8E8M0FNU`, `I4`, `F4E2M1FN`.
+- The formats a buffer can be allocated in are exactly the 12 `element_bytes` knows: `f64`,
+  `i64`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
+  Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written
+  in a type but not allocated. `I4` and `F4E2M1FN` are tile formats only, and no buffer of
+  either exists.
+- Values go in and out as `List[Float]`, under every format: `upload` rounds to the buffer's
+  format, or truncates and wraps (`round_to`), and `download` answers what the buffer holds
+  exactly. The channel is lossless for `i32`, `i16`, `i8` and `u8`, and exact for `i64` only
+  within ±2^53.
+- **No scalar crosses**: a launch's arguments are buffer handles only (every entry parameter
+  is a pointer). A host number reaches a kernel only as a constant written into the program
+  at recording time, or in a buffer.
+
+**Checked by machine** (where, and what):
+
+| Layer | What is checked | Where | When |
+|----|--------|------|------|
+| 0 | Every kernel is recorded twice and the records are equal; text goldens (`*.mlir`) and bytecode goldens (`*.tilebc`), byte for byte on both backends | `scripts/tile-golden/run.sh` | CI `tile.yml` |
+| 1 | The pinned `tileiras --gpu-name sm_86` accepts every bytecode golden: exit 0, no `error:` in its output, and `GLOBAL FUNC <kernel>` in the cubin's symbol table | the assemble step of `scripts/tile-golden/run.sh` | CI `tile.yml` |
+| 2 | One set of `!Gpu` programs runs under both handlers and agrees bit for bit or within tolerance, by the kernel's tier; on the JVM the real handler answers `gpu.unsupported_backend` at the first operation | `scripts/tile-gpu-diff/run.sh`, which appends its result to a ledger | By hand, on a machine with a driver |
+
+- Layer 2's ledger `scripts/tile-gpu-diff/ledger.txt` (sm_86) is read by CI's `run.sh --check`:
+  the last line parses, its `inputs=` digest equals the digest of the tile paths at HEAD, its
+  result is `pass` or `blocked:...`, and the toolchain file's `driver` and `tileiras` lines
+  agree with it. `ledger-sm90.txt` and `ledger-sm100.txt` are the records of two other
+  machines, and no gate reads them.
+- `scripts/tileir-features/check.py` (CI) holds three coverage ledgers, of opcodes, type tags
+  and attribute values, against the writer's opcode table in both directions.
+- `dawn test --stdlib` runs `std/gpu`'s test blocks: the fake device's behaviour, and the real
+  handler's refusals that do not reach the device.
+
+**Not promised**:
+
+- That the fake device agrees with a kernel. The fake device runs only the reference; the
+  agreement between reference and kernel is shown only by layer 2, on the machines its ledgers
+  record, and there is no evidence for any architecture, driver or `tileiras` version outside
+  them.
+- `--check` accepts a ledger whose last line is `blocked:...`: it shows that somebody ran
+  layer 2 at this tree and what the driver said, not that the device's answer reached CI.
+- The fold order of reductions and scans: Tile IR does not fix the tree shape, and the bitwise
+  result of a tolerance-tier kernel is **undefined**.
+- The real device's behaviour when the arguments disagree with the kernel's entry in number or
+  format: **undefined**.
+- The round trip through the `List[Float]` channel of values beyond ±2^53 in an `i64` buffer.
+- Recording, encoding or running a kernel at comptime.
 
 ---
 
