@@ -2658,26 +2658,36 @@ fi
 #    answer is wrong. This is the claim of knife 7b, and the reason a
 #    reduction knife needs a device.
 #
-#    Nine of the fourteen kernels hold a sum reduction, and SIX of those
-#    nine go red. `reduce_sum`, `monte_carlo` and knife 19's `agent_step`
-#    do not, and that is a measurement rather than an oversight: with a
-#    wrong identity they still answer exactly what the clean kernels
-#    answer, so on this assembler their reduction never folds the identity
-#    in at all.
+#    Nine of the fourteen kernels hold a sum reduction, and EIGHT of those
+#    nine go red. Knife 19's `agent_step` does not, and that is a
+#    measurement rather than an oversight: with a wrong identity it still
+#    answers exactly what the clean kernel answers, so on this assembler its
+#    reduction never folds the identity in at all.
+#
+#    Under tileiras 13.3.36 it was SIX of nine: `reduce_sum` and
+#    `monte_carlo` were green beside `agent_step`. Knife U1 moved the pin to
+#    13.4.92, which runs a Tile IR canonicalize/CSE/LICM pipeline before
+#    codegen, and those two now fold the identity in and go red. That is
+#    the case the last paragraph below was written for, observed: the
+#    assembler changed which kernels fold it in, this line went red on the
+#    old lists (`exactly 6 kernels saying differ:result, got ... 8
+#    differing`), and the lists were restated from the run.
 #
 #    Knife 18's reading of this table was that the six that move are the
 #    six whose reduction operand is a COMPUTED tile and the two that do not
 #    are the two that reduce the loaded tile itself. `agent_step` REFUTES
 #    that: all three of its sums fold a `select`, which is as computed as a
-#    product, and it is green. What still separates it from the six is the
+#    product, and it is green. What still separates it from the reds is the
 #    tile's WIDTH -- every red reduces 1024 lanes and its reductions are 64
-#    -- and that is an observation and not a mechanism. So the gate names
-#    the six and nothing else does; the standing claim is only that a
+#    -- and that is an observation and not a mechanism; 13.4.92 left it the
+#    only green sum, which is consistent with it and proves nothing more.
+#    So the gate names the red ones and nothing else does; the standing
+#    claim is only that a
 #    semantically wrong identity is invisible on some kernels even at layer
 #    2, which is worth knowing before anyone reads "layer 2 catches it" as
 #    "layer 2 catches it everywhere".
 #
-#    So the gate names the six, and requires the other seven to be
+#    So the gate names the eight, and requires the other six to be
 #    untouched. A tileiras upgrade that changes which kernels fold the
 #    identity in will red this line, and that is the point: the evidence
 #    would have moved.
@@ -2728,8 +2738,8 @@ for k in "${reduced[@]}"; do id_cubins+=("$work/reduce-identity-wrong-$k.cubin")
 rc=0
 device "$work/reduced.bin" "${id_cubins[@]}" > "$work/m-reduce-identity-wrong.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-reduce-identity-wrong.out")"
-identity_red=(softmax dot mse rms_norm ppo_loss dpo_loss)
-identity_green=(reduce_sum monte_carlo silu sigmoid mathops foldif argmax agent_step)
+identity_red=(reduce_sum softmax dot mse monte_carlo rms_norm ppo_loss dpo_loss)
+identity_green=(silu sigmoid mathops foldif argmax agent_step)
 if [ "$reduced_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-reduce-identity-wrong.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#identity_red[@]}" ]; then
