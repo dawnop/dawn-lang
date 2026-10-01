@@ -96,6 +96,10 @@ fn with_fs_table[T](files: List[(String, String)], body: fn() -> T !Fs) -> T = {
     fs_temp_dir(parent, _prefix) => Err(read_only("temp_dir", parent))
     fs_temp_file(parent, _prefix) => Err(read_only("temp_file", parent))
     fs_copy_permissions(src, _dst) => Err(read_only("copy_permissions", src))
+    # the table has no links, so a path that is there is already its own
+    # resolution
+    fs_real_path(path) =>
+      if is_dir_in(files, path) || has_file(files, path) { Ok(path) } else { Err(missing(path)) }
   }
   body()
 }
