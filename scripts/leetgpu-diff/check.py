@@ -328,6 +328,11 @@ def self_test():
          "has no .mlir golden"),
         ("a reference that does not exist", good + "\n99 | Nope | relu | std/gpu.no_such_ref | mask_diff:relu | exact\n",
          "has no public function"),
+        # 0.82.0 moved every reference but vadd_ref and sum_ref out of std:
+        # a row still naming the old home names nothing
+        ("a reference left pointing at its old home in std/gpu",
+         good.replace("| tileref/ref.relu_ref |", "| std/gpu.relu_ref |"),
+         "std/gpu.dawn has no public function relu_ref"),
         ("a corpus case the layer-2 program does not run",
          good + "\n99 | Nope | relu | tileref/ref.relu_ref | mask_diff:ghost | exact\n", "has no case named ghost"),
         ("a row claiming a tier the layer-2 program does not compare under",
