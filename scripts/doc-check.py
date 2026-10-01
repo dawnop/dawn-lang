@@ -68,12 +68,14 @@ exemption is unbounded is a gate with no lower bound on its coverage.
                      records what it printed. The criterion is mechanical and
                      the obligation runs one way -- a block that CAN be a
                      whole program MUST be one, and MUST record its output.
-                     29 of the tutorial's 31 dawn fences are this.
+                     33 of the tutorial's 38 dawn fences are this.
   ```dawn skip-check A block that cannot be a whole program for a reason in
-                     the language rather than in the author's effort. Both of
-                     today's two are one file of a two-file project, shown
-                     because §13 explains `use` and a module example needs two
-                     files to be an example at all. The reason is written in a
+                     the language rather than in the author's effort. Each of
+                     today's five is one file of a multi-file example: two
+                     from §13, which explains `use`, and three from §18, whose
+                     package only means something beside the project that
+                     depends on it. A module example needs more than one file
+                     to be an example at all. The reason is written in a
                      `<!-- doc-check: skip-check ... -->` marker above the
                      fence: the exemption costs a sentence, and the whole set
                      of exemptions can be audited by reading the markers.
