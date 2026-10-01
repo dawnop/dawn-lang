@@ -3,7 +3,7 @@
 # module knows nothing about the site's layout.
 
 use std/str
-use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
+use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
 use html/escape.{escape_html, escape_attr}
 use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
@@ -98,6 +98,8 @@ fn block_html(b: Block, map_url: fn(String) -> String, play: Option[Play]) -> St
     Heading(lvl, items) -> heading_html(lvl, "", items, map_url)
     Para(items) -> "<p>" ++ inlines_html(items, map_url) ++ "</p>"
     CodeBlock(lang, body) -> code_html(lang, body, play)
+    # highlighted like any other block, never offered: see md/ast.Fragment
+    Fragment(lang, body) -> code_html(lang, body, None)
     UList(items) -> "<ul>\n" ++ items_html(items, map_url, play) ++ "\n</ul>"
     OList(items) -> "<ol>\n" ++ items_html(items, map_url, play) ++ "\n</ol>"
     Table(header, rows) -> table_html(header, rows, map_url)
@@ -225,6 +227,17 @@ test "the playground offer reaches nested dawn blocks and nothing else" {
   assert str.contains(nested.html, `href="../playground.html#bGV0IHkgPSAy"`)
   # the output fence is prose about a program, not a program
   assert str.contains(nested.html, `<pre class="output"><code>1</code></pre>`)
+}
+
+## A `skip-check` fragment is not a program on its own, so a link to run it
+## would be a link that always fails. Highlighted all the same.
+test "a fragment is highlighted and never offered to the playground" {
+  let p = Some(Play { href: "../playground.html", label: "Open in playground" })
+  let doc = render_doc_play([Fragment("dawn", "let x = 1"), UList([[Fragment("dawn", "let y = 2")]])],
+    keep_url, p)
+  assert str.contains(doc.html, `<span class="k">let</span>`)
+  assert not str.contains(doc.html, "play-open")
+  assert not str.contains(doc.html, "playable")
 }
 
 test "tables render thead and tbody" {
