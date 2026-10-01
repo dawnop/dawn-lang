@@ -3,7 +3,7 @@
 use std/str
 use md/ast.{Inline, Block, Heading, CodeBlock}
 use md/parser.{parse}
-use html/render.{render_doc, render_doc_play, inline_text}
+use html/render.{render_doc, render_doc_play, inline_text, TocEntry}
 use html/play.{Play, play_decode}
 use html/page.{Assets, Lang, En, Zh, page, contents_label, lang_path, playground_label}
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
@@ -94,6 +94,23 @@ pub fn chapter_titles(src: String) -> List[String] !Fs = {
     }
   let (_, chapters) = split_chapters(blocks)
   map(chapters, c => inline_text(c.title))
+}
+
+## Each chapter's `###` sections, as the chapter page anchors them.
+##
+## The ids come out of `render_doc` over the same blocks [gen_tutorial] renders
+## the page from, chapter title as the `#` heading first, so they are the ids
+## the page carries (`s0-1`, `s0-2`, ...: a chapter page has no `##` of its
+## own). The search index reads this; gen/links holds every fragment in it to
+## the written page.
+pub fn chapter_sections(src: String) -> List[List[TocEntry]] !Fs = {
+  let blocks =
+    match parse(must_read(src)) {
+      Ok(bs) -> bs
+      Err(e) -> panic("${src}: ${e}")
+    }
+  let (_, chapters) = split_chapters(blocks)
+  map(chapters, c => render_doc([Heading(1, c.title)] ++ c.body, u => u).toc)
 }
 
 ## Which file this language's tutorial is written in, where its pages go, and
