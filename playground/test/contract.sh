@@ -77,9 +77,11 @@ done
 
 pass=0
 fail=0
+# The assertion sees the parsed body as `d` and the bytes as `raw`: a JSON
+# parser reads 0 and 0.0 as equal, so the integer fields are checked on `raw`.
 check() { # name, curl-data, python-assertion, [endpoint (default: run)]
   body=$(curl -s --noproxy '*' -X POST --data "$2" "http://127.0.0.1:$PORT/${4:-run}")
-  if printf '%s' "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert ($3), d" 2>/dev/null; then
+  if printf '%s' "$body" | python3 -c "import sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); assert ($3), d" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
     fail=$((fail + 1)); echo "FAIL  $1"; echo "        $body"
@@ -91,6 +93,10 @@ echo "health: $(curl -s --noproxy '*' "http://127.0.0.1:$PORT/health")"
 check "hello runs, exit 0" \
   '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
   'd["ok"] and d["phase"]=="run" and d["exit"]==0 and d["output"]=="hi\n"'
+
+check "exit and ms are JSON integers" \
+  '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
+  '"\"exit\":0" in raw and "\"exit\":0." not in raw and re.search(r"\"ms\":[0-9]+[,}]", raw)'
 
 check "compile error, path sanitized" \
   '{"code":"pub fn main() -> Unit !io = println(nope)"}' \
@@ -106,7 +112,7 @@ check "infinite loop times out" \
 
 check "/check on good code -> all-clear, no run" \
   '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
-  'd["ok"] and d["phase"]=="check" and "output" not in d' \
+  'd["ok"] and d["phase"]=="check" and "output" not in d and re.search(r"\"ms\":[0-9]+[,}]", raw)' \
   check
 
 check "/check on bad code -> compile diagnostics" \
