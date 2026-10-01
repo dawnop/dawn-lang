@@ -2,14 +2,14 @@
 # Run via site/build.sh (which feeds it dawn doc --stdlib output), or
 # directly from the repo root: dawn run site
 
-use gen/pages.{gen_assets, gen_index, gen_spec, gen_design, gen_playground, gen_tea}
+use gen/pages.{build_stamp, gen_assets, gen_index, gen_spec, gen_design, gen_playground, gen_tea}
 use html/page.{En, Zh}
 use gen/tutorial.{gen_tutorial}
 use gen/examples.{gen_examples}
 use gen/stdlib.{gen_stdlib}
 use gen/links.{check_links}
 use gen/assets.{check_assets}
-use std/io.{with_fs_real}
+use std/io.{with_fs_real, with_env_real}
 
 pub fn main() -> Unit !io = {
   with_fs_real(() => {
@@ -17,7 +17,8 @@ pub fn main() -> Unit !io = {
     # The names the assets got: content-hashed, so that the one-year
     # `immutable` header /assets/ is served with stops holding a returning
     # visitor on a stale copy. Every page below links to what this hands back.
-    let assets = gen_assets(out)
+    # The release and commit the footer prints; see gen/pages.build_stamp.
+    let assets = gen_assets(out, with_env_real(() => build_stamp()))
     # English is the site's default and lives at `/`; the Chinese front page
     # is at `/zh/`. Everything below this pair is Chinese and unpaired.
     gen_index(out, assets, En)

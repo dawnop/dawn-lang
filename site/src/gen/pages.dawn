@@ -2,7 +2,7 @@
 
 use std/str
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Env, getenv}
 use std/bytes
 use md/ast.{Block}
 use md/parser.{parse}
@@ -72,7 +72,27 @@ fn emit_asset(out: String, name: String, content: Bytes) -> String !Fs !io = {
 fn emit_text(out: String, name: String, text: String) -> String !Fs !io =
   emit_asset(out, name, bytes.utf8(text ++ "\n"))
 
-pub fn gen_assets(out: String) -> Assets !Fs !io = {
+## The release and commit this build was made from, as the footer prints it,
+## or "" when the build did not say.
+##
+## Read from the environment, which site/build.sh sets (DAWN_SITE_VERSION from
+## selfhost/src/version.dawn, DAWN_SITE_COMMIT from git), rather than from
+## those files: scripts/site-dist-diff.sh runs this generator over a snapshot
+## that holds neither selfhost/ nor .git, and both of its legs inherit the
+## same environment, so the two backends still write the same bytes.
+pub fn build_stamp() -> String !Env = {
+  let version = unwrap_or(getenv("DAWN_SITE_VERSION"), "")
+  let commit = unwrap_or(getenv("DAWN_SITE_COMMIT"), "")
+  if version == "" {
+    ""
+  } else if commit == "" {
+    version
+  } else {
+    "${version} (${commit})"
+  }
+}
+
+pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
   # Read once, used twice: the two search indexes are built from the same
   # `dawn doc --stdlib` document gen/stdlib later renders into the page,
   # and an index built from a second read would be an index of a document
@@ -133,6 +153,7 @@ pub fn gen_assets(out: String) -> Assets !Fs !io = {
     search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
     search_en: emit_text(out, "search-en.json", search_index(api, En)),
     search_zh: emit_text(out, "search-zh.json", search_index(api, Zh)),
+    build: build,
   }
 }
 

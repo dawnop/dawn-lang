@@ -52,6 +52,11 @@ pub type Assets = {
   search_wasm: String,
   search_en: String,
   search_zh: String,
+  # Not a file: the release and commit this site was built from, as the
+  # footer prints them ("0.81.0 (1a2b3c4d)"), or "" when the build was not
+  # told. It rides here because this is the one record every shell is handed
+  # by the one function that reads the build's inputs (gen/pages.gen_assets).
+  build: String,
 }
 
 ## The names the files have in site/assets, before any hashing. What the tests
@@ -72,6 +77,7 @@ pub fn plain_assets() -> Assets =
     search_wasm: "tea-search.wasm",
     search_en: "search-en.json",
     search_zh: "search-zh.json",
+    build: "",
   }
 
 ## The `lang` attribute for <html>.
@@ -229,6 +235,35 @@ fn lang_switch(lang: Lang, root: String, pair: String) -> String =
     """<a class="lang" href="${href}" hreflang="${lang_code(other(lang))}">${lang_switch_label(lang)}</a>"""
   }
 
+## The footer, in the page's language.
+##
+## It printed the same English line on both trees until 2026-10-01, the one
+## piece of chrome that never went through `Lang`. The build line is new at
+## the same time: the live site once sat three weeks behind main, teaching a
+## syntax the current compiler rejects, and nothing on the page said which
+## compiler it had been built from. `build` is [Assets]'s field of that name;
+## an empty one prints no line rather than a blank version.
+fn footer_html(lang: Lang, build: String) -> String = {
+  let gh = `<a href="https://github.com/dawnop/dawn-lang">GitHub</a>`
+  let (about, made) =
+    match lang {
+      En -> ("Dawn, a small, elegant functional language", "Built by a generator written in Dawn")
+      Zh -> ("Dawn：一门小而优雅的函数式语言", "由 Dawn 写的生成器构建")
+    }
+  let stamp =
+    if build == "" {
+      ""
+    } else {
+      match lang {
+        En -> " · version ${escape_html(build)}"
+        Zh -> " · 版本 ${escape_html(build)}"
+      }
+    }
+  """<footer class="site-footer">
+<div class="inner">${about} · ${gh} · ${made}${stamp}</div>
+</footer>"""
+}
+
 ## The full page around an already-rendered <main>/<div> body. `pair` is this
 ## page's path in the default layout when the page has a twin in the other
 ## language -- "index.html", "tutorial/01.html" -- and "" when it has none.
@@ -324,9 +359,7 @@ ${search_button(a, lang, root)}
 </header>
 <div id="dawn-search" class="search-host" hidden></div>
 ${body}
-<footer class="site-footer">
-<div class="inner">Dawn — a small, elegant functional language · <a href="https://github.com/dawnop/dawn-lang">GitHub</a> · Built by a generator written in Dawn</div>
-</footer>
+${footer_html(lang, a.build)}
 </body>
 </html>
 """
@@ -482,13 +515,26 @@ test "shell carries title, css root, body" {
   assert str.contains(p, "<title>测试页 — Dawn</title>")
   assert str.contains(p, `href="./assets/style.css"`)
   assert str.contains(p, `<main class="content">`)
-  assert str.contains(p, "Built by a generator written in Dawn")
+  assert str.contains(p, "由 Dawn 写的生成器构建")
 }
 
 test "a quote in a title stays inside og:title's attribute" {
   let p = page(plain_assets(), En, "", `Say "hi" & go`, ".", "", "")
   assert str.contains(p, `<title>Say "hi" &amp; go</title>`)
   assert str.contains(p, `<meta property="og:title" content="Say &quot;hi&quot; &amp; go">`)
+}
+
+test "the footer follows the page's language and prints the build it was given" {
+  let built = Assets { ..plain_assets(), build: "0.81.0 (1a2b3c4d)" }
+  let en = shell(built, En, "", "t", ".", "", "")
+  let zh = shell(built, Zh, "", "t", "..", "", "")
+  assert str.contains(en, "Built by a generator written in Dawn · version 0.81.0 (1a2b3c4d)</div>")
+  assert str.contains(zh, "由 Dawn 写的生成器构建 · 版本 0.81.0 (1a2b3c4d)</div>")
+  assert not str.contains(zh, "Built by a generator")
+  # a build that was not told prints no version at all
+  let bare = shell(plain_assets(), En, "", "t", ".", "", "")
+  assert str.contains(bare, "Built by a generator written in Dawn</div>")
+  assert not str.contains(bare, "version")
 }
 
 test "only a page with a twin advertises one" {

@@ -97,6 +97,20 @@ else
   echo "  (or point DAWN_WASM_CC at a wasi-sdk clang)" >&2
 fi
 
+# What the footer prints as the build (gen/pages.build_stamp): the source
+# tree's VERSION and its commit, "-dirty" when the tree has changes git can
+# see. Passed as environment rather than read by the generator, because
+# scripts/site-dist-diff.sh runs it over a snapshot with neither selfhost/ nor
+# .git in it. Either one blank, and the footer prints less or nothing.
+DAWN_SITE_VERSION="${DAWN_SITE_VERSION:-$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn)}"
+if [ -z "${DAWN_SITE_COMMIT:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+  DAWN_SITE_COMMIT="$(git rev-parse --short=8 HEAD)"
+  if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT}-dirty"
+  fi
+fi
+export DAWN_SITE_VERSION DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT:-}"
+
 rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
