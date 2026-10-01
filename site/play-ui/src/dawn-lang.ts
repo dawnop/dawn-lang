@@ -12,11 +12,13 @@ import {
 import { Tag, tags } from '@lezer/highlight'
 import {
   autocompletion,
+  type Completion,
   type CompletionContext,
   type CompletionResult,
   type CompletionSource,
 } from '@codemirror/autocomplete'
-import { BUILTINS } from './builtins.generated'
+import { BUILTINS, type Builtin } from './builtins.generated'
+import type { EditorView } from '@codemirror/view'
 
 const KEYWORDS = new Set([
   'fn', 'let', 'var', 'type', 'const', 'use', 'java', 'pub', 'match', 'if',
@@ -280,11 +282,70 @@ function docDecls(doc: string, skipFrom: number) {
   return out
 }
 
+// A module function is reachable only as `alias.name` after `use <module>`,
+// where the alias is the module path's last segment. Prelude
+// functions are in scope everywhere and complete bare.
+const moduleAlias = (module: string) => module.slice(module.lastIndexOf('/') + 1)
+const PRELUDE = BUILTINS.filter((b) => !b.module)
+const MODULE_FNS = BUILTINS.filter((b) => b.module)
+const MODULES_BY_ALIAS = new Map<string, Builtin[]>()
+for (const b of MODULE_FNS) {
+  const alias = moduleAlias(b.module!)
+  MODULES_BY_ALIAS.set(alias, [...(MODULES_BY_ALIAS.get(alias) ?? []), b])
+}
+
+// Where `use <module>` goes when a completion needs it: after the last
+// top-level `use` line, or at the top of the file when there is none. Answers
+// null when the buffer already imports the module.
+export function importEdit(doc: string, module: string): { from: number; insert: string } | null {
+  const escaped = module.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  if (new RegExp(`^\\s*(?:pub\\s+)?use\\s+${escaped}(?![\\w/])`, 'm').test(doc)) return null
+  let at = -1
+  for (const m of doc.matchAll(/^(?:pub\s+)?use\b[^\n]*(?:\n|$)/gm)) at = m.index! + m[0].length
+  if (at < 0) return { from: 0, insert: `use ${module}\n\n` }
+  const needsBreak = at > 0 && doc[at - 1] !== '\n'
+  return { from: at, insert: `${needsBreak ? '\n' : ''}use ${module}\n` }
+}
+
+// Insert `label` over [from, to) and, if the buffer lacks it, the module's
+// `use` line, so a picked module function compiles as inserted.
+function applyWithImport(module: string) {
+  return (view: EditorView, completion: Completion, from: number, to: number) => {
+    const changes = [{ from, to, insert: completion.label }]
+    const imp = importEdit(view.state.doc.toString(), module)
+    if (imp) changes.push({ from: imp.from, to: imp.from, insert: imp.insert })
+    const shift = imp && imp.from <= from ? imp.insert.length : 0
+    view.dispatch({ changes, selection: { anchor: from + completion.label.length + shift } })
+  }
+}
+
+function builtinOption(b: Builtin, label: string): Completion {
+  return {
+    label,
+    type: 'function',
+    detail: b.sig.replace(/^fn\s+/, ''),
+    info: b.module ? `${b.doc}\n\nNeeds \`use ${b.module}\`.`.trim() : b.doc,
+    boost: b.module ? 0 : 1,
+    ...(b.module ? { apply: applyWithImport(b.module) } : {}),
+  }
+}
+
+// The static half of completion, used before the LSP connects and whenever it
+// is down. Prelude functions are offered bare; module functions as
+// `str.trim`, never bare (a bare `trim` does not compile).
+export function staticCompletionLabels(): { prelude: string[]; module: string[] } {
+  return {
+    prelude: PRELUDE.map((b) => b.name),
+    module: MODULE_FNS.map((b) => `${moduleAlias(b.module!)}.${b.name}`),
+  }
+}
+
 // Completion: builtins (with signature + doc), keywords, prelude constructors,
 // and declarations scanned from the buffer. Suppressed where a suggestion can
 // only be noise: inside strings and comments, while naming a fresh binding
 // (after fn/let/var/const/type/for/derive), on `use` lines (module paths), and
-// right after `.` (Java members) or `!` (effect rows).
+// right after `.` (Java members, record fields) or `!` (effect rows) -- except
+// after `alias.` for a std module alias, where the module's functions follow.
 export function dawnCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
   const inside = lexContext(context.state.sliceDoc(0, context.pos), context.pos)
@@ -307,21 +368,27 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
       validFor: /^\w*$/,
     }
   }
-  if (!word && !context.explicit) return null
   if (/(?:^|[^\w])(?:fn|let|var|const|type|for|derive|trait)\s+$/.test(before)) return null
   if (/^\s*(?:pub\s+)?use\b/.test(before)) return null
-  if (before.endsWith('.')) return null
+  if (before.endsWith('.')) {
+    // `str.` (not `x.str.`): the members of that std module, named bare after
+    // the dot, as the LSP names them, so the two sources merge by label.
+    const qualifier = /(?:^|[^\w.])([a-z_]\w*)\.$/.exec(before)
+    const members = qualifier ? MODULES_BY_ALIAS.get(qualifier[1]) : undefined
+    if (!members) return null
+    return {
+      from,
+      options: members.map((b) => builtinOption(b, b.name)),
+      validFor: /^[A-Za-z0-9_]*$/,
+    }
+  }
+  if (!word && !context.explicit) return null
 
   const locals = docDecls(context.state.doc.toString(), from)
   const options = [
     ...locals,
-    ...BUILTINS.map((b) => ({
-      label: b.name,
-      type: 'function',
-      detail: b.sig.replace(/^fn\s+/, ''),
-      info: b.doc,
-      boost: 1,
-    })),
+    ...PRELUDE.map((b) => builtinOption(b, b.name)),
+    ...MODULE_FNS.map((b) => builtinOption(b, `${moduleAlias(b.module!)}.${b.name}`)),
     ...TYPES.map((t) => ({ label: t, type: 'type' })),
     ...CTORS.map((c) => ({ label: c, type: 'type' })),
     ...[...KEYWORDS].map((k) => ({ label: k, type: 'keyword' })),
