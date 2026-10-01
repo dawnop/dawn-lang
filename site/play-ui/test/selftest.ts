@@ -1,4 +1,5 @@
-import { dawn, dawnCompletions } from '../src/dawn-lang'
+import { dawn, dawnCompletions, importEdit, staticCompletionLabels } from '../src/dawn-lang'
+import { BUILTINS } from '../src/builtins.generated'
 import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
 import { ensureSyntaxTree, matchBrackets } from '@codemirror/language'
@@ -141,6 +142,46 @@ const un = completeAt('pub fn main() -> Uni‸')
 expect('builtin type Unit completes', un!.options.some((o) => o.label === 'Unit'), true)
 const self = completeAt('fn solo() -> Int = so‸')
 expect('recursive self-reference completes', self!.options.some((o) => o.label === 'solo'), true)
+
+// ---- static completion never offers a module function bare (#320) ----
+// A bare `trim` does not compile; only `str.trim` after `use std/str` does.
+// The check runs over the generated table, so a regenerated table that loses
+// the prelude/module split fails here, not in a reader's editor.
+const moduleOnly = new Set(BUILTINS.filter((b) => b.module).map((b) => b.name))
+for (const b of BUILTINS) if (!b.module) moduleOnly.delete(b.name)
+const anywhere = completeAt('pub fn main() -> Unit !io = tri‸')!
+const bareModuleLabels = anywhere.options.map((o) => o.label).filter((l) => moduleOnly.has(l))
+expect('no static label is a bare module function', bareModuleLabels, [])
+expect('module functions complete qualified', anywhere.options.some((o) => o.label === 'str.trim'), true)
+expect('prelude completes bare', anywhere.options.some((o) => o.label === 'println'), true)
+const labels = staticCompletionLabels()
+expect('every module label is qualified', labels.module.every((l) => /^[a-z_]\w*\.\w+$/.test(l)), true)
+expect('prelude and module halves are both present', [labels.prelude.length > 0, labels.module.length > 0], [true, true])
+const member = completeAt('use std/str\npub fn main() -> Unit !io = println(str.tr‸)')!
+expect('after a module alias: its members, bare after the dot',
+  [member.options.some((o) => o.label === 'trim'), member.options.every((o) => !o.label.includes('.'))], [true, true])
+expect('after a module alias: replaces only the member', member.from, 'use std/str\npub fn main() -> Unit !io = println(str.'.length)
+expect('after an unknown qualifier: none', completeAt('fn f() -> Unit = x.str.tr‸'), null)
+// Picking `str.trim` inserts it and the `use`, so the result compiles.
+function pick(doc: string, label: string) {
+  const pos = doc.indexOf('‸')
+  let state = EditorState.create({ doc: doc.replace('‸', ''), extensions: [dawn()] })
+  const result = dawnCompletions(new CompletionContext(state, pos, true))!
+  const option = result.options.find((o) => o.label === label)!
+  const fakeView = { state, dispatch: (spec: Parameters<EditorState['update']>[0]) => { state = state.update(spec).state } }
+  ;(option.apply as (v: unknown, c: unknown, f: number, t: number) => void)(fakeView, option, result.from, pos)
+  return [state.doc.toString(), state.selection.main.head]
+}
+const picked = pick('pub fn main() -> Unit !io = println(tri‸)', 'str.trim')
+expect('picking a module function adds its use', picked,
+  ['use std/str\n\npub fn main() -> Unit !io = println(str.trim)', 'use std/str\n\npub fn main() -> Unit !io = println(str.trim'.length])
+const pickedMember = pick('use std/str\npub fn main() -> Unit !io = println(str.tr‸)', 'trim')
+expect('picking a member keeps an existing use', pickedMember,
+  ['use std/str\npub fn main() -> Unit !io = println(str.trim)', 'use std/str\npub fn main() -> Unit !io = println(str.trim'.length])
+expect('import goes on top without uses', importEdit('pub fn main() -> Unit !io = {}', 'std/str'), { from: 0, insert: 'use std/str\n\n' })
+expect('import goes after the last use', importEdit('use std/list\nfn f() -> Int = 1', 'std/str'), { from: 13, insert: 'use std/str\n' })
+expect('existing import is kept', importEdit('use std/str\nfn f() -> Int = 1', 'std/str'), null)
+expect('a longer path is not the import', importEdit('use std/strx\n', 'std/str'), { from: 13, insert: 'use std/str\n' })
 
 // ---- browser/LSP adapter: UTF-16 ranges and safe result shaping ----
 const unicode = 'α😀z\nnext'
