@@ -95,6 +95,7 @@ use compiler_plan/envmem
 use compiler_plan/exitmem
 use pkg/maven
 use pkg/add
+use pkg/pkgcmd
 
 ## ADT ids declared by `cls` (and not yet emitted), in id order.
 fn own_adts_of(adts: Adts, cls: String, seen: Set[String]) -> List[Int] = {
@@ -913,6 +914,11 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   out
 }
 
+## Planner diagnostics end the command the way any compile failure does.
+## `pkg/pkgcmd` takes this as a parameter because it sits below the driver.
+fn fail_planner(ds: List[source.LocDiag]) -> Unit !Fs !Exit !Console !io =
+  fail_compile(planner_diags(ds))
+
 ## Render the lexer diagnostics that made `fmt` refuse a file, say plainly that
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
 ## last line is the whole point: the user asked for a rewrite and did not get
@@ -987,52 +993,6 @@ fn fail_std(e: StdLoadError) -> StdCtx !Env !Exit !Console !io = {
   panic(text)
 }
 
-## `dawn cache verify` — re-hash every entry in the package cache and compare
-## it with the hash its directory name claims (PKG-02's companion command:
-## the per-use check catches the entry a build touches, this sweeps them all).
-fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
-  if len(rest) != 1 || rest[0] != "verify" {
-    return cli_error("usage: dawn cache verify")
-  }
-  let root = pkgfetch.cache_root()
-  let names = match io.list_dir(root) {
-    Ok(ns) -> ns
-    Err(_) -> {
-      console_println("cache is empty (" ++ root ++ ")")
-      return ()
-    }
-  }
-  var checked = 0
-  var bad = 0
-  for n in sort(names) {
-    if str.starts_with(n, "d1-") {
-      let hash = str.replace(n, "d1-", "d1:")
-      checked = checked + 1
-      match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
-        Ok(_) -> console_println("ok   ${n}")
-        Err(e) -> {
-          console_println("BAD  ${n}")
-          console_eprintln(e)
-          bad = bad + 1
-        }
-      }
-    }
-  }
-  console_println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
-      " checked, " ++ to_string(bad) ++ " bad")
-  if bad > 0 { let _ = io.exit(1) }
-}
-
-## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
-fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
-  let dir = if len(rest) > 0 { rest[0] } else { "." }
-  if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
-  match pkgfetch.tree_hash(dir) {
-    Ok(h) -> console_println(h)
-    Err(e) -> cli_error(e)
-  }
-}
-
 fn run_source_inputs(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if len(rest) != 3 || rest[0] != "--base" {
     return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
@@ -1085,30 +1045,6 @@ fn peek_target(rest: List[String]) -> String = {
     }
   }
   ""
-}
-
-## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
-fn resolve_java_deps(target: String) -> List[String] !Fs !Proc !Env !Exit !Console !io = {
-  let none: List[String] = []
-  if not io.exists(target) { return none }
-  if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
-  let planner_target =
-    if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
-  let plan = source.source_plan(planner_target)
-  let pdiags = planner_diags(plan.diags)
-  if len(pdiags) > 0 { fail_compile(pdiags) }
-  let coords = plan.java_coords
-  if len(coords) > 0 {
-    console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
-        plan.project ++ "/dawn.toml...")
-  }
-  match maven.fetch_checked(plan.project, coords) {
-    Ok(js) -> js
-    Err(e) -> {
-      cli_error(e)
-      none
-    }
-  }
 }
 
 fn source_target(target: String) -> source.SourceTarget !Fs =
@@ -1176,87 +1112,6 @@ fn lsp_target_lease_fs(plan: source.SourcePlan) -> Result[JsigLease, LocDiag] !F
 
 fn lsp_standalone_lease() -> JsigLease !io = jsig_for([])
 
-## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
-## closure. This is the only command that rewrites dawn.lock; every other one
-## only refuses to disagree with it.
-fn run_lock(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var check_only = false
-  var target = "."
-  var seen_target = false
-  for a in rest {
-    if a == "--check" {
-      check_only = true
-    } else if not seen_target {
-      target = a
-      seen_target = true
-    } else {
-      return cli_error("usage: dawn lock [--check] [<project-dir>]")
-    }
-  }
-  if not io.is_dir(target) { return cli_error("not a directory: ${target}") }
-  let plan = source.source_plan(source.ProjectDirectory(target))
-  let pdiags = planner_diags(plan.diags)
-  if len(pdiags) > 0 { fail_compile(pdiags) }
-  let path = maven.lock_path(plan.project)
-  let coords = plan.java_coords
-  if len(coords) == 0 {
-    if io.exists(path) {
-      return cli_error(path ++ " exists but " ++ plan.project ++
-          "/dawn.toml declares no [java-deps]\n  delete the lock, or add the dependency back")
-    }
-    console_println("no [java-deps] to lock")
-    return ()
-  }
-  console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps...")
-  let jars = match maven.fetch(coords) {
-    Ok(js) -> js
-    Err(e) -> {
-      cli_error(e)
-      return ()
-    }
-  }
-  let fresh = match maven.lock_of(coords, jars) {
-    Ok(l) -> l
-    Err(e) -> {
-      cli_error(e)
-      return ()
-    }
-  }
-  if check_only {
-    match io.read_file(path) {
-      Err(_) -> cli_error("${path} does not exist -- run `dawn lock`")
-      Ok(text) ->
-        match maven.parse_lock(text) {
-          Err(e) -> cli_error(path ++ ": " ++ e)
-          Ok(locked) ->
-            match maven.check_lock(locked, fresh) {
-              Err(e) -> cli_error(e)
-              Ok(_) -> console_println(path ++ " is up to date (" ++
-                  to_string(len(fresh.arts)) ++ " artifacts)")
-            }
-        }
-    }
-  } else {
-    # Same reason as the manifest in pkg/add: this is the only writer of
-    # dawn.lock and every other command refuses to disagree with it, so a
-    # half-written lock would fail all of them rather than just this one.
-    match io.atomic_write_file(path, maven.render_lock(fresh)) {
-      Ok(_) -> console_println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
-          " artifacts from " ++ to_string(len(coords)) ++ " direct)")
-      Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e.message)
-    }
-  }
-}
-
-## Jar paths the parent invocation resolved, carried across the re-exec.
-fn deps_from_env() -> List[String] !Env !io = {
-  let none: List[String] = []
-  match io.getenv("DAWN_SELFHOST_CP") {
-    Some(s) -> if s == "" { none } else { str.split(s, path_sep()) }
-    None -> none
-  }
-}
-
 ## Re-exec one invocation after its target and explicit classpath have already
 ## been identified. `rest` remains the caller's original list: in particular,
 ## a run separator, empty strings and option-looking program arguments are not
@@ -1273,7 +1128,7 @@ fn maybe_with_known_deps(
   }
   if target == "" && len(cpjars) == 0 { return }
   let no_jars: List[String] = []
-  let jars = if target == "" { no_jars } else { resolve_java_deps(target) }
+  let jars = if target == "" { no_jars } else { pkgcmd.resolve_java_deps(target, fail_planner) }
   if len(jars) == 0 && len(cpjars) == 0 { return }
   var cp = host_classpath()
   for j in jars { cp = cp ++ path_sep() ++ j }
@@ -1875,7 +1730,7 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       }
     }
   }
-  let deps = deps_from_env()
+  let deps = pkgcmd.deps_from_env()
   # native-image inlines everything, so it reads the jars where they already
   # live; a plain jar needs them at a stable path next to itself, and --cp
   # jars stay where the user put them (relative when under the jar's dir)
@@ -2404,13 +2259,13 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
           project: lsp_target_lease
         })
       } else if mode == "lock" {
-        run_lock(rest)
+        pkgcmd.run_lock(rest, fail_planner)
       } else if mode == "cache" {
-        run_cache(rest)
+        pkgcmd.run_cache(rest)
       } else if mode == "__source-inputs" {
         run_source_inputs(rest)
       } else if mode == "__pkghash" {
-        run_pkghash(rest)
+        pkgcmd.run_pkghash(rest)
       } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {
         for pth in rest {
           console_println("== " ++ pth ++ " ==")
