@@ -11,7 +11,15 @@ that is a claim; this turns each row into things a machine can look up:
     (so layer 0 pins its spelling and layer 1 has handed it to `tileiras`);
   * scripts/tile-golden/run.sh runs it, and kernels.dawn traces it (so the
     goldens are not files nobody compares);
-  * the reference exists in the module the row names, and is public;
+  * the reference exists in the module the row names, and is public. A
+    module is `std/<m>` (std/<m>.dawn) or `<package>/<m>`
+    (packages/<package>/src/<m>.dawn): since 0.82.0 every reference but
+    `vadd_ref` and `sum_ref` is packages/tileref's, not std/gpu's;
+  * a package holding a reference does not depend on packages/tileir. The
+    reference is the second opinion on a kernel, so it may not reach the
+    kernel's own code path; this reads the package's dawn.toml, and
+    packages/tileref's is read whether or not a row names it, so the rule
+    holds before the first row and after the last;
   * the layer-2 program names the kernel as one of its cases (so the GPU
     computed it against that reference), and classifies it under the tier
     the row claims (the program's own `tolerance_tier()` list is the
@@ -50,6 +58,51 @@ TABLE = ROOT / "scripts" / "leetgpu-diff" / "problems.txt"
 GOLDEN = ROOT / "scripts" / "tile-golden"
 LEDGER = ROOT / "scripts" / "tile-gpu-diff" / "ledger.txt"
 TIERS = ("exact", "tolerance")
+# The packages that may never be a reference package's dependency, and the
+# reference package the rule is held on even when no row names it.
+KERNEL_PACKAGES = ("tileir",)
+REFERENCE_PACKAGES = ("tileref",)
+
+
+def module_path(module):
+    """The source file a `<module>` of a reference names, or None.
+
+    `std/<m>` is std's own file; any other `<package>/<m>` is a source
+    package's module under packages/<package>/src.
+    """
+    parts = module.split("/")
+    if len(parts) < 2 or not all(parts):
+        return None
+    if parts[0] == "std":
+        return module + ".dawn"
+    return f"packages/{parts[0]}/src/{'/'.join(parts[1:])}.dawn"
+
+
+def manifest_deps(text):
+    """The dependency names a dawn.toml declares.
+
+    Both spellings: a key under `[deps]`, and a `[deps.<name>]` table. Read
+    as text rather than with tomllib so the checker runs on any python3 the
+    runners have; a manifest is a few lines and the two shapes are the
+    whole grammar it uses for dependencies.
+    """
+    names = set()
+    section = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.match(r"^\[([^\]]+)\]$", line)
+        if m:
+            section = m.group(1).strip()
+            if section.startswith("deps."):
+                names.add(section[len("deps."):].strip().strip(chr(34)))
+            continue
+        if section == "deps":
+            key = line.split("=", 1)[0].strip().strip(chr(34))
+            if key:
+                names.add(key)
+    return names
 
 
 def tolerance_tier(program_text):
@@ -108,6 +161,7 @@ def check(table_text, files, ledger_text):
     problems = []
     seen = {}
     listed = []
+    reference_packages = set(REFERENCE_PACKAGES)
     for n, fields in rows(table_text):
         if len(fields) != 6:
             problems.append(f"line {n}: {len(fields)} fields, not 6")
@@ -153,11 +207,16 @@ def check(table_text, files, ledger_text):
                 problems.append(f"line {n}: reference {one!r} is not <module>.<function>")
                 continue
             module, fn = one.rsplit(".", 1)
-            path = module.replace(".", "/") + ".dawn"
-            if path not in files:
+            path = module_path(module)
+            if path is None:
+                problems.append(f"line {n}: reference module {module!r} is not std/<m> or <package>/<m>")
+            elif path not in files:
                 problems.append(f"line {n}: reference module {path} does not exist")
             elif not re.search(rf"^pub fn {re.escape(fn)}\b", files[path], re.M):
                 problems.append(f"line {n}: {path} has no public function {fn}")
+            else:
+                if not module.startswith("std/"):
+                    reference_packages.add(module.split("/", 1)[0])
 
         if ":" not in corpus:
             problems.append(f"line {n}: corpus {corpus!r} is not <program>:<case>")
@@ -182,6 +241,16 @@ def check(table_text, files, ledger_text):
 
     if not listed:
         problems.append("the table lists no problems at all")
+
+    for pkg in sorted(reference_packages):
+        manifest = f"packages/{pkg}/dawn.toml"
+        if manifest not in files:
+            problems.append(f"{manifest} does not exist: a reference package needs a manifest to be checked")
+            continue
+        for bad in sorted(manifest_deps(files[manifest]) & set(KERNEL_PACKAGES)):
+            problems.append(
+                f"{manifest} depends on {bad}: a host reference is the second opinion on a kernel and "
+                f"may not reach the kernel's code path")
 
     # The header's own count. One line, matched literally, so a table without
     # it is a table that makes no claim rather than one that fails.
@@ -209,6 +278,8 @@ def gather():
         "scripts/tile-golden/run.sh",
         "scripts/tile-golden/kernels.dawn",
         "std/gpu.dawn",
+        "packages/tileref/src/ref.dawn",
+        "packages/tileref/dawn.toml",
         "scripts/tile-gpu-diff/mask_diff.dawn",
         "scripts/tile-gpu-diff/vadd_diff.dawn",
         "scripts/tile-gpu-diff/red_diff.dawn",
@@ -223,7 +294,10 @@ def gather():
         "scripts/tile-gpu-diff/trig_diff.dawn",
         "scripts/tile-gpu-diff/seq_diff.dawn",
     ]:
-        files[path] = read(ROOT / path)
+        # Only what exists: a missing file is a finding the checks name
+        # ("does not exist"), not an empty one they would read as clean.
+        if (ROOT / path).exists():
+            files[path] = read(ROOT / path)
     for golden in GOLDEN.glob("*"):
         if golden.suffix in (".mlir", ".tilebc"):
             files[f"scripts/tile-golden/{golden.name}"] = ""
@@ -244,18 +318,18 @@ def self_test():
 
     cases = [
         ("a row with too few fields", good + "\n99 | Nope | k | m.f\n", "fields, not 6"),
-        ("a problem id that is not a number", good + "\nxx | Nope | relu | std/gpu.relu_ref | mask_diff:relu | exact\n",
+        ("a problem id that is not a number", good + "\nxx | Nope | relu | tileref/ref.relu_ref | mask_diff:relu | exact\n",
          "is not a number"),
-        ("the same problem twice", good + "\n1 | Vector Addition | vadd_tail | std/gpu.masked_vadd_ref"
+        ("the same problem twice", good + "\n1 | Vector Addition | vadd_tail | tileref/ref.masked_vadd_ref"
          " | mask_diff:vadd_tail | exact\n", "is already listed"),
-        ("a tier nobody defined", good + "\n99 | Nope | relu | std/gpu.relu_ref | mask_diff:relu | eyeball\n",
+        ("a tier nobody defined", good + "\n99 | Nope | relu | tileref/ref.relu_ref | mask_diff:relu | eyeball\n",
          "is not one of"),
-        ("a kernel with no golden", good + "\n99 | Nope | ghost | std/gpu.relu_ref | mask_diff:relu | exact\n",
+        ("a kernel with no golden", good + "\n99 | Nope | ghost | tileref/ref.relu_ref | mask_diff:relu | exact\n",
          "has no .mlir golden"),
         ("a reference that does not exist", good + "\n99 | Nope | relu | std/gpu.no_such_ref | mask_diff:relu | exact\n",
          "has no public function"),
         ("a corpus case the layer-2 program does not run",
-         good + "\n99 | Nope | relu | std/gpu.relu_ref | mask_diff:ghost | exact\n", "has no case named ghost"),
+         good + "\n99 | Nope | relu | tileref/ref.relu_ref | mask_diff:ghost | exact\n", "has no case named ghost"),
         ("a row claiming a tier the layer-2 program does not compare under",
          good.replace("| red_diff:softmax | tolerance", "| red_diff:softmax | exact"),
          "compares softmax under 'tolerance'"),
@@ -264,18 +338,18 @@ def self_test():
         ("a multi-launch row naming a kernel its sequence does not run",
          good.replace("| swiglu_proj+swiglu_act+swiglu_down |",
                       "| swiglu_proj+swiglu_act+swiglu_down+relu |")
-             .replace("| std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref |",
-                      "| std/gpu.matmul_ref+std/gpu.swiglu_act_ref+std/gpu.matmul_ref"
-                      "+std/gpu.relu_ref |"),
+             .replace("| tileref/ref.matmul_ref+tileref/ref.swiglu_act_ref+tileref/ref.matmul_ref |",
+                      "| tileref/ref.matmul_ref+tileref/ref.swiglu_act_ref+tileref/ref.matmul_ref"
+                      "+tileref/ref.relu_ref |"),
          "the corpus runs swiglu_act+swiglu_down+swiglu_proj but the row names"),
         ("a multi-launch row leaving out one of its sequence's kernels",
          good.replace("| lora_base+lora_hidden+lora_out |", "| lora_base+lora_out |")
-             .replace("| std/gpu.matmul_bt_ref+std/gpu.matmul_bt_ref+std/gpu.lora_out_ref |",
-                      "| std/gpu.matmul_bt_ref+std/gpu.lora_out_ref |"),
+             .replace("| tileref/ref.matmul_bt_ref+tileref/ref.matmul_bt_ref+tileref/ref.lora_out_ref |",
+                      "| tileref/ref.matmul_bt_ref+tileref/ref.lora_out_ref |"),
          "the corpus runs lora_base+lora_hidden+lora_out but the row names"),
         ("a multi-launch row with one reference for three launches",
-         good.replace("| std/gpu.matmul_bt_ref+std/gpu.row_softmax_ref+std/gpu.matmul_ref |",
-                      "| std/gpu.matmul_bt_ref |"),
+         good.replace("| tileref/ref.matmul_bt_ref+tileref/ref.row_softmax_ref+tileref/ref.matmul_ref |",
+                      "| tileref/ref.matmul_bt_ref |"),
          "3 kernel(s) and 1 reference(s)"),
         ("a header count that is not the number of rows",
          good.replace("# 86 of the 97 reachable problems", "# 73 of the 97 reachable problems"),
@@ -290,6 +364,45 @@ def self_test():
         else:
             print(f"FAIL  self-test: {name} was accepted (wanted {want!r}, got {found})")
             bad += 1
+
+    # The reference packages' half: a module path that names neither std nor
+    # a package, a package that is not there, and a reference package whose
+    # manifest reaches the kernel's package, in both spellings TOML has.
+    for name, table in [
+        ("a reference module that is neither std/<m> nor <package>/<m>",
+         good + "\n99 | Nope | relu | gpu.relu_ref | mask_diff:relu | exact\n"),
+        ("a reference in a package that does not exist",
+         good + "\n99 | Nope | relu | nopkg/ref.relu_ref | mask_diff:relu | exact\n"),
+    ]:
+        want = "is not std/<m> or <package>/<m>" if name.startswith("a reference module") else "does not exist"
+        _listed, found = check(table, files, ledger)
+        if any(want in p for p in found):
+            print(f"PASS  self-test: {name}")
+        else:
+            print(f"FAIL  self-test: {name} was accepted (wanted {want!r}, got {found})")
+            bad += 1
+    manifest = "packages/tileref/dawn.toml"
+    for name, extra in [
+        ("a reference package that depends on tileir under [deps]",
+         '\n[deps]\ntileir = "../tileir"\n'),
+        ("a reference package that depends on tileir as a [deps.tileir] table",
+         '\n[deps.tileir]\nurl = "https://example.invalid/tileir.tar.gz"\n'),
+    ]:
+        mutated = dict(files)
+        mutated[manifest] = files.get(manifest, "") + extra
+        _listed, found = check(good, mutated, ledger)
+        if any("depends on tileir" in p for p in found):
+            print(f"PASS  self-test: {name}")
+        else:
+            print(f"FAIL  self-test: {name} was accepted (got {found})")
+            bad += 1
+    missing = {k: v for k, v in files.items() if k != manifest}
+    _listed, found = check(good, missing, ledger)
+    if any(f"{manifest} does not exist" in p for p in found):
+        print("PASS  self-test: a reference package with no manifest")
+    else:
+        print(f"FAIL  self-test: a reference package with no manifest was accepted (got {found})")
+        bad += 1
 
     for name, text, want in [
         ("an empty layer-2 ledger", "# only a comment\n", "has no entry"),
