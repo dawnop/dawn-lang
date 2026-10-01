@@ -51,14 +51,6 @@ Try in Playground →
 
 Start the tutorial
 
-## theme-to-dark
-
-Switch to dark theme
-
-## theme-to-light
-
-Switch to light theme
-
 ## phase-ideas
 
 **−12°** nautical twilight · three ideas

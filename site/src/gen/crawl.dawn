@@ -21,7 +21,7 @@ use std/str
 use std/io
 use std/io.{Fs}
 use html/escape.{escape_html}
-use html/page.{Assets, En, page, plain_assets, site_origin}
+use html/page.{Assets, En, PageHead, shell, plain_assets, site_origin}
 use gen/common.{must_list, write_page}
 
 ## Every `.html` under `dir`, relative to `out`, in no particular order.
@@ -61,15 +61,32 @@ pub fn robots() -> String = "User-agent: *\nAllow: /\nSitemap: ${site_origin()}s
 ## Chinese front page: a missed URL says nothing about which language its
 ## visitor reads. `root` is "" so that every link the shell writes starts with
 ## `/` and resolves the same from any depth nginx serves it at.
-fn not_found(a: Assets) -> String =
-  page(a, En, "", "Page not found · Dawn", "", "",
-    "<h1>Page not found</h1>\n"
-      ++ "<p>There is no page at this address. It may have moved; the "
+##
+## All of it is in the band, centred, over a sun that has not come up: its top
+## edge shows above the horizon line and the rest is under it. The body is
+## an empty column that keeps the footer near the bottom of the screen.
+fn not_found(a: Assets) -> String = {
+  let sun = `<svg class="nf-scene" viewBox="0 0 320 44" aria-hidden="true">`
+    ++ `<defs><linearGradient id="nf-sun" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f46e5"/>`
+    ++ `<stop offset=".5" stop-color="#7c3aed"/><stop offset="1" stop-color="#db2777"/></linearGradient>`
+    ++ `<radialGradient id="nf-glow" cx=".5" cy="1" r=".5"><stop offset="0" stop-color="#db2777" stop-opacity=".22"/>`
+    ++ `<stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient></defs>`
+    ++ `<ellipse cx="160" cy="44" rx="150" ry="40" fill="url(#nf-glow)"/>`
+    ++ `<circle cx="160" cy="58" r="34" fill="url(#nf-sun)"/></svg>`
+  let head = PageHead {
+    eyebrow: "404",
+    title: "Page not found",
+    lede: "There is no page at this address. It may have moved; the "
       ++ """<a href="/index.html">front page</a>, the """
       ++ """<a href="/tutorial/index.html">tutorial</a> and the Search button above """
-      ++ "reach everything on this site.</p>\n"
-      ++ """<p lang="zh-CN">这个地址没有页面。可以从<a href="/zh/index.html">中文首页</a>"""
-      ++ "开始，或者用上面的搜索。</p>")
+      ++ "reach everything on this site.",
+    twin: "",
+    extra: """<p class="lede" lang="zh-CN">这个地址没有页面。可以从<a href="/zh/index.html">中文首页</a>"""
+      ++ "开始，或者用上面的搜索。</p>\n" ++ sun,
+    cls: "nf",
+  }
+  shell(a, En, "", "Page not found · Dawn", "", "", head, `<main class="nf-body"></main>`)
+}
 
 ## Write all four. Called after every page is written, since the sitemap is
 ## read off the disk, and before the link check, which then checks the 404
@@ -106,4 +123,8 @@ test "the 404 page links from the site root" {
   assert str.contains(p, `href="/assets/style.css"`)
   assert str.contains(p, `<a href="/index.html">front page</a>`)
   assert str.contains(p, `<a href="/zh/index.html">中文首页</a>`)
+  # all of it in the band, over the sun that has not come up
+  assert str.contains(p, `<div class="page-head nf">`)
+  assert str.contains(p, `<svg class="nf-scene"`)
+  assert str.contains(p, `<main class="nf-body"></main>`)
 }

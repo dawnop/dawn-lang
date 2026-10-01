@@ -1,11 +1,13 @@
 # docs/tutorial.md -> tutorial/index.html + one page per ## chapter.
 
 use std/str
-use md/ast.{Inline, Block, Heading, CodeBlock}
+use md/ast.{Inline, Text, Block, Heading, Para, CodeBlock}
 use md/parser.{parse}
-use html/render.{render_doc, render_doc_play, inline_text, TocEntry}
+use html/render.{render_doc, render_doc_play, inline_text, inline_run, split_head, split_number, TocEntry}
 use html/play.{Play, play_decode}
-use html/page.{Assets, Lang, En, Zh, page, contents_label, lang_path, playground_label}
+use html/escape.{escape_html}
+use html/page.{Assets, Lang, En, Zh, PageHead, page, page_with_toc, rail_html, sep, contents_label,
+  lang_path, playground_label }
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 use std/io.{Fs}
 
@@ -63,21 +65,109 @@ fn chapter_title(chapters: List[Chapter], i: Int) -> String =
     None -> ""
   }
 
+## The two cards under a chapter: the one before it and the one after, each
+## with a small label saying which way it goes. The first chapter's "before"
+## is the table of contents.
 fn chapter_nav(chapters: List[Chapter], i: Int, lang: Lang) -> String = {
   let n = len(chapters)
+  let (back, prev_word, next_word) =
+    match lang {
+      En -> ("← tutorial", "← previous", "next →")
+      Zh -> ("← 教程", "← 上一章", "下一章 →")
+    }
+  let card = (cls: String, href: String, dir: String, title: String) =>
+    """<a class="${cls}" href="${href}"><span class="dir">${dir}</span><span class="ttl">""" ++ escape_html(title)
+    ++ "</span></a>"
   let prev =
     if i > 0 {
-      """<a class="prev" href="${pad2(i)}.html">← ${chapter_title(chapters, i - 1)}</a>"""
+      card("prev", "${pad2(i)}.html", prev_word, chapter_title(chapters, i - 1))
     } else {
-      """<a class="prev" href="index.html">← ${contents_label(lang)}</a>"""
+      card("prev", "index.html", back, contents_label(lang))
     }
   let next =
     if i + 1 < n {
-      """<a class="next" href="${pad2(i + 2)}.html">${chapter_title(chapters, i + 1)} →</a>"""
+      "\n" ++ card("next", "${pad2(i + 2)}.html", next_word, chapter_title(chapters, i + 1))
     } else {
       ""
     }
-  `<nav class="chapter-nav">` ++ "\n" ++ prev ++ "\n" ++ next ++ "\n</nav>"
+  """<nav class="chapter-nav" aria-label="${rail_label(lang)}">""" ++ "\n" ++ prev ++ next ++ "\n</nav>"
+}
+
+## What the chapter rail and the chapter cards are called: the tutorial, as
+## the nav calls it.
+fn rail_label(lang: Lang) -> String =
+  match lang {
+    En -> "Tutorial"
+    Zh -> "教程"
+  }
+
+## A count in Chinese numerals, as the band writes them (第八章，共十七章).
+## Up to 99, which is more chapters than a tutorial should have.
+pub fn zh_count(n: Int) -> String = {
+  let digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+  if n < 10 {
+    digits[n]
+  } else {
+    let tens = if n / 10 == 1 { "十" } else { digits[n / 10] ++ "十" }
+    if n % 10 == 0 { tens } else { tens ++ digits[n % 10] }
+  }
+}
+
+## The band's line over the tutorial's pages: what it is and how long, and
+## over a chapter, which one. The chapter's "tutorial" goes back to the index.
+fn tutorial_eyebrow(lang: Lang, n: Int, chapter: Int) -> String =
+  match lang {
+    En ->
+      if chapter == 0 {
+        "tutorial" ++ sep() ++ "${n} chapters"
+      } else {
+        `<a href="index.html">tutorial</a>` ++ sep() ++ "chapter ${chapter} of ${n}"
+      }
+    Zh ->
+      if chapter == 0 {
+        "教程" ++ sep() ++ "共${zh_count(n)}章"
+      } else {
+        `<a href="index.html">教程</a>` ++ sep() ++ "第${zh_count(chapter)}章，共${zh_count(n)}章"
+      }
+  }
+
+## The chapter's printed number and its title: `8. Lambdas` -> ("8", "Lambdas").
+## A title that prints none keeps its whole text and an empty number.
+fn numbered(title: String) -> (String, String) = {
+  let (num, rest) = split_number(title)
+  (unwrap_or(str.strip_suffix(num, "."), num), rest)
+}
+
+## The chapters as a rail beside a chapter, the one being read marked.
+fn chapter_rail(chapters: List[Chapter], current: Int, lang: Lang) -> String = {
+  var items: List[String] = []
+  for i in range(0, len(chapters)) {
+    let (num, rest) = numbered(chapter_title(chapters, i))
+    let cls = if i == current { ` class="has-n cur" aria-current="page"` } else { ` class="has-n"` }
+    items = items
+      ++ ["""<li><a${cls} href="${pad2(i + 1)}.html"><span class="tn">${escape_html(num)}</span><span>"""
+          ++ escape_html(rest) ++ "</span></a></li>"]
+  }
+  rail_html(rail_label(lang), "<ul>\n" ++ join(items, "\n") ++ "\n</ul>")
+}
+
+## The index's chapter list as a road: each chapter's number, zero-padded, in
+## a disc whose colour is mixed from indigo to magenta by `--p`, the chapter's
+## place along the road from 0 to 1 (three decimals, written as integers so
+## that both backends print the same bytes).
+fn chapter_road(chapters: List[Chapter]) -> String = {
+  let n = len(chapters)
+  var items: List[String] = []
+  for i in range(0, n) {
+    let (num, rest) = numbered(chapter_title(chapters, i))
+    let shown = if num == "" { pad2(i + 1) } else { str.pad_start(num, 2, "0") }
+    let milli = if n < 2 { 0 } else { i * 1000 / (n - 1) }
+    let p = "${milli / 1000}." ++ str.pad_start("${milli % 1000}", 3, "0")
+    items = items
+      ++ ["""<li style="--p:${p}"><a href="${pad2(i + 1)}.html"><span class="cn">${escape_html(shown)}</span>"""
+          ++ """<span class="ct">${escape_html(rest)}</span><span class="ca" aria-hidden="true">→</span></a></li>"""]
+  }
+  `<ol class="chapters">` ++ "\n" ++ join(items, "\n") ++ "\n</ol>"
 }
 
 ## The chapter titles, in the order the tutorial has them.
@@ -159,17 +249,26 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   # every dawn block on these pages carries its own source to the editor
   let play = Some(tutorial_play(root, lang))
 
-  # chapter pages
+  let mu = (u: String) => map_doc_url(root, docs, u)
+
+  # chapter pages: the chapter's title in the band, the chapters in the rail
   for i in range(0, n) {
     match get(chapters, i) {
       Some(c) -> {
-        let doc =
-          render_doc_play([Heading(1, c.title)] ++ c.body, u => map_doc_url(root, docs, u), play)
-        let html = doc.html ++ chapter_nav(chapters, i, lang)
+        let doc = render_doc_play(c.body, mu, play)
+        let head = PageHead {
+          eyebrow: tutorial_eyebrow(lang, n, i + 1),
+          title: inline_run(c.title, mu),
+          lede: "",
+          twin: "",
+          extra: "",
+          cls: "toc-aligned",
+        }
         let title = inline_text(c.title)
         write_page("${dir}/${pad2(i + 1)}.html",
-          page(a, lang, "tutorial/${pad2(i + 1)}.html",
-            "${title} — ${tutorial_name(lang)}", root, "tutorial", html))
+          page_with_toc(a, lang, "tutorial/${pad2(i + 1)}.html",
+            "${title} — ${tutorial_name(lang)}", root, "tutorial", head,
+            chapter_rail(chapters, i, lang), doc.html ++ "\n" ++ chapter_nav(chapters, i, lang)))
       }
       None -> {
         panic("unreachable chapter index")
@@ -177,18 +276,62 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     }
   }
 
-  # index: the intro plus a chapter list
-  let intro_doc = render_doc_play(intro, u => map_doc_url(root, docs, u), play)
-  var items = ""
-  for i in range(0, n) {
-    items = items ++ "\n" ++
-      """<li><a href="${pad2(i + 1)}.html">${chapter_title(chapters, i)}</a></li>"""
+  # index: the title, the translation note and the opening paragraph in the
+  # band; below it, the chapters. The rule that ends the intro in the source
+  # separates it from chapter one there and has nothing to separate here.
+  let parts = split_head(intro)
+  let (lede, rest) =
+    match parts.body {
+      [Para(items), ..] -> (inline_run(items, mu), drop_trailing_rule(drop_one(parts.body)))
+      _ -> ("", drop_trailing_rule(parts.body))
+    }
+  let rest_html = render_doc_play(rest, mu, play).html
+  let head = PageHead {
+    eyebrow: tutorial_eyebrow(lang, n, 0),
+    title: inline_run(parts.title, mu),
+    lede: lede,
+    twin: inline_run(parts.twin, mu),
+    extra: "",
+    cls: "col",
   }
-  let listing = "<ul class=\"chapter-list\">" ++ items ++ "\n</ul>"
   write_page("${dir}/index.html",
-    page(a, lang, "tutorial/index.html", tutorial_name(lang), root, "tutorial",
-      intro_doc.html ++ listing))
+    page(a, lang, "tutorial/index.html", tutorial_name(lang), root, "tutorial", head,
+      rest_html ++ chapter_road(chapters)))
 }
+
+fn drop_one(bs: List[Block]) -> List[Block] = map(range(1, len(bs)), i => bs[i])
+
+test "chapter counts read in Chinese numerals" {
+  assert zh_count(8) == "八"
+  assert zh_count(10) == "十"
+  assert zh_count(17) == "十七"
+  assert zh_count(20) == "二十"
+  assert zh_count(42) == "四十二"
+}
+
+test "the road numbers its chapters with zero-padded discs, placed from 0 to 1" {
+  let cs = [
+    Chapter { title: [md_text("1. First")], body: [] },
+    Chapter { title: [md_text("2. Second")], body: [] },
+    Chapter { title: [md_text("3. Third")], body: [] },
+  ]
+  let road = chapter_road(cs)
+  assert str.contains(road, `<li style="--p:0.000"><a href="01.html"><span class="cn">01</span><span class="ct">First</span>`)
+  assert str.contains(road, `<li style="--p:0.500"><a href="02.html">`)
+  assert str.contains(road, `<li style="--p:1.000"><a href="03.html"><span class="cn">03</span>`)
+  # the rail beside chapter two marks it, unpadded
+  let rail = chapter_rail(cs, 1, En)
+  assert str.contains(rail, `<a class="has-n cur" aria-current="page" href="02.html"><span class="tn">2</span><span>Second</span></a>`)
+  # the cards: back to the contents from the first, both ways from the middle
+  assert str.contains(chapter_nav(cs, 0, En),
+    `<a class="prev" href="index.html"><span class="dir">← tutorial</span><span class="ttl">Contents</span></a>`)
+  let mid = chapter_nav(cs, 1, Zh)
+  assert str.contains(mid, `<span class="dir">← 上一章</span><span class="ttl">1. First</span>`)
+  assert str.contains(mid, `<a class="next" href="03.html"><span class="dir">下一章 →</span>`)
+  assert not str.contains(chapter_nav(cs, 2, En), `class="next"`)
+}
+
+fn md_text(s: String) -> Inline = Text(s)
 
 test "each language's tutorial reads its own file and lands in its own place" {
   assert tutorial_source("d", En) == ("docs/tutorial.md", "d/tutorial", "..")

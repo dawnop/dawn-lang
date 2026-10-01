@@ -28,7 +28,7 @@ use std/str
 use std/list
 use std/io.{Fs, Env, getenv, with_fs_real}
 use md/ast.{Block}
-use html/page.{Assets, Lang, En, Zh, head_html, header_html, footer_html, lang_path,
+use html/page.{Assets, Lang, En, Zh, head_html, nav_bar, footer_html, lang_path,
   plain_assets, playground_label }
 use html/play.{play_hash}
 use hl/dawn.{highlight_dawn}
@@ -198,16 +198,6 @@ fn stars() -> String =
 <circle class="tw" cx="560" cy="40" r="1.1"/><circle class="tw tw2" cx="1180" cy="110" r="1"/><circle class="tw tw3" cx="60" cy="220" r="1"/>
 </g>
 </svg>`
-
-## The theme toggle. `hidden` in the markup: without the script it could do
-## nothing, and a button that does nothing is worse than none. The two labels
-## are attributes so that home.js, which both language trees load, carries no
-## words of either (gen/assets.dawn holds shared bundles to that).
-fn toggle(c: Copy) -> String = {
-  let dark = escape_attr(plain(c, "theme-to-dark"))
-  let light = escape_attr(plain(c, "theme-to-light"))
-  """<button class="theme-toggle" type="button" id="theme-toggle" hidden aria-pressed="false" aria-label="${dark}" data-label-dark="${dark}" data-label-light="${light}"><svg viewBox="0 0 20 20" aria-hidden="true"><g class="ico-sun" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="3.4"/><path d="M10 2.2v1.9M10 15.9v1.9M2.2 10h1.9M15.9 10h1.9M4.5 4.5l1.3 1.3M14.2 14.2l1.3 1.3M4.5 15.5l1.3-1.3M14.2 5.8l1.3-1.3"/></g><path class="ico-moon" fill="currentColor" d="M15.6 12.6A6.4 6.4 0 0 1 7.4 4.4a6.4 6.4 0 1 0 8.2 8.2z"/></svg></button>"""
-}
 
 fn hero(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
   let src = str.trim(must_read("site/pages/hero.dawn"))
@@ -627,13 +617,13 @@ fn home_page(a: Assets, lang: Lang, figs: Figures, docs: List[String]) -> String
     ++ `<div class="progress" aria-hidden="true"></div>` ++ "\n"
     ++ `<div class="sky">` ++ "\n" ++ stars() ++ "\n"
     ++ `<div class="wrap">` ++ "\n"
-    ++ header_html(a, lang, "index.html", root, "", toggle(c)) ++ "\n"
+    ++ nav_bar(a, lang, "index.html", root, "") ++ "\n"
     ++ hero(c, mu, lang, root) ++ "\n</div>\n" ++ horizon(logo) ++ "\n</div>\n"
     ++ `<div id="dawn-search" class="search-host" hidden></div>` ++ "\n"
     ++ `<div class="wrap">` ++ "\n"
     ++ ideas(c, mu) ++ "\n" ++ peers(c, mu, figs) ++ "\n" ++ gpu(c, mu) ++ "\n"
     ++ install(c, mu) ++ "\n</div>\n"
-    ++ footer_html(lang, a.build) ++ "\n</body>\n</html>"
+    ++ footer_html(a, lang, root) ++ "\n</body>\n</html>"
 }
 
 ## The front page, in one language. English is the site's default and is

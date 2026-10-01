@@ -1,20 +1,27 @@
 /* VS Code-style full-viewport IDE: explorer sidebar (samples as files) +
    editor column (toolbar, line-numbered editor, console panel).
-   Variables (--mono, --accent, …) resolve from the site's :root in style.css;
-   fallbacks keep the dev harness usable standalone. */
+   Variables (--mono, --accent, …) resolve from the site's :root in style.css,
+   which defines them for both themes; fallbacks keep the dev harness usable
+   standalone.
+
+   The chrome (sidebar, toolbar, console) follows the site's theme. The editor
+   pane does not: it is held light below, because the syntax colours are
+   written into dawn-lang.ts (HighlightStyle.define) as light-theme hex values
+   that no CSS variable reaches, and on a dark pane its strings and numbers
+   would be dark blue on near-black (docs/site-pages-design.md). */
 
 /* This stylesheet only loads on the playground page: turn the page into an
    app shell — the body becomes a flex column, the IDE takes every pixel under
-   the site header, and the footer goes away. */
+   the sky band that holds the site's nav, and the footer goes away. */
 body {
   display: flex;
   flex-direction: column;
   height: 100dvh;
-  box-sizing: border-box; /* the site's gradient border-top counts into 100dvh */
+  box-sizing: border-box;
   margin: 0;
   overflow: hidden;
 }
-body > .site-header { flex: none; }
+body > .sky { flex: none; }
 body > .site-footer { display: none; }
 
 .dp-page {
@@ -38,7 +45,7 @@ body > .site-footer { display: none; }
   display: flex;
   min-width: 0;
   min-height: 0;
-  background: #fff;
+  background: var(--surface, #fff);
 }
 
 /* ---- explorer sidebar ---- */
@@ -76,9 +83,9 @@ body > .site-footer { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dp-file:hover { background: rgb(31 35 40 / 0.04); color: var(--text, #1f2328); }
+.dp-file:hover { background: color-mix(in srgb, var(--text, #1f2328) 5%, transparent); color: var(--text, #1f2328); }
 .dp-file.active {
-  background: rgb(124 58 237 / 0.08);
+  background: color-mix(in srgb, var(--accent, #7c3aed) 10%, transparent);
   color: var(--accent, #7c3aed);
   box-shadow: inset 2px 0 0 var(--accent, #7c3aed);
 }
@@ -126,7 +133,7 @@ body > .site-footer { display: none; }
   padding: 0.26rem 0.7rem;
   border: 1px solid var(--border, #d0d7de);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface, #fff);
   color: var(--muted, #57606a);
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
@@ -140,7 +147,9 @@ body > .site-footer { display: none; }
   border: 0;
   border-radius: 6px;
   background: var(--accent, #7c3aed);
-  color: #fff;
+  /* the page's own background as ink: white on the day's violet, the night
+     on the night's lighter violet, legible either way */
+  color: var(--bg, #fff);
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -152,12 +161,24 @@ body > .site-footer { display: none; }
   margin-left: 0.15rem;
 }
 
-/* ---- editor ---- */
+/* ---- editor ----
+   Held light in either theme (see the top of this file): the light values of
+   the tokens the pane and its gutter, hover card and lens read, set here so
+   that a dark page does not reach in. */
 .dp-editor {
   flex: 1;
   min-height: 0;
   display: flex;
+  color-scheme: light;
+  --text: #1f2328;
+  --muted: #57606a;
+  --faint: #656d76;
+  --border: #d0d7de;
+  --border-soft: #e9ecf1;
+  --code-bg: #f6f8fa;
+  --code-bg-soft: #fafbfc;
   background: #fff;
+  color: var(--text);
 }
 .dp-editor .cm-editor {
   flex: 1;
@@ -293,12 +314,12 @@ body > .site-footer { display: none; }
 .dp-outpanel[data-phase='compile'] .dp-console,
 .dp-outpanel[data-phase='timeout'] .dp-console,
 .dp-outpanel[data-phase='error'] .dp-console {
-  color: #b42318;
+  color: var(--danger, #b42318);
 }
 .dp-outpanel[data-phase='compile'] .dp-outmeta,
 .dp-outpanel[data-phase='timeout'] .dp-outmeta,
 .dp-outpanel[data-phase='error'] .dp-outmeta {
-  color: #b42318;
+  color: var(--danger, #b42318);
 }
 
 /* ---- narrow screens: sidebar becomes a horizontal file strip ---- */

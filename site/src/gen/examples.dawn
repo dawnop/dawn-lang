@@ -17,8 +17,8 @@ use json/parser.{parse}
 use json/value.{Json, JInt, JStr, JArr, JObj, error_text}
 use html/escape.{escape_html}
 use hl/dawn.{highlight_dawn}
-use html/page.{Assets, Lang, En, Zh, page, lang_path, playground_label}
-use html/play.{Play, play_block}
+use html/page.{Assets, Lang, En, Zh, PageHead, page, lang_path, playground_label, sep}
+use html/play.{Play, play_block, code_window, win_bar}
 use gen/common.{must_read, must_list, write_page}
 
 ## One example: its slug (the page's name), its group (the directory under
@@ -35,6 +35,8 @@ pub type Example = { slug: String, group: String, files: List[String], target: S
 type Chrome = {
   heading: String,
   lede: String,
+  eyebrow: String,
+  section: String,
   suffix: String,
   run: String,
   run_note: String,
@@ -49,6 +51,8 @@ fn chrome(lang: Lang) -> Chrome =
       heading: "Examples",
       lede: "CI runs every entry with its registered arguments and checks stdout and stderr " ++
         "byte-for-byte; a multi-module project takes its directory.",
+      eyebrow: "run by CI, byte for byte",
+      section: "examples",
       suffix: "Dawn Examples",
       run: "Running it",
       run_note: "What CI runs and the output it checks, byte for byte.",
@@ -59,6 +63,8 @@ fn chrome(lang: Lang) -> Chrome =
     Zh -> Chrome {
       heading: "示例",
       lede: "CI 用登记参数运行每个入口，并逐字节核对 stdout 与 stderr；多模块项目给目录。",
+      eyebrow: "CI 逐字节核对",
+      section: "示例",
       suffix: "Dawn 示例",
       run: "运行",
       run_note: "CI 运行的命令，以及它逐字节核对的输出。",
@@ -389,7 +395,8 @@ fn shell_word(s: String) -> String = {
   if plain { s } else { "'" ++ str.replace(s, "'", "'\\''") ++ "'" }
 }
 
-## One case: the command line, the stdin it was fed if any, and the output.
+## One case, as a terminal window: the command line after a `$`, the stdin it
+## was fed if any, and the output.
 fn case_html(c: Chrome, target: String, k: Case) -> String = {
   let cmd = join(["dawn", "run", target] ++ map(k.argv, a => shell_word(a)), " ")
   let exit = if k.exit == 0 { "" } else { " (${c.exit} ${k.exit})" }
@@ -413,8 +420,9 @@ fn case_html(c: Chrome, target: String, k: Case) -> String = {
     } else {
       `<pre class="output"><code>` ++ escape_html(str.trim_end(k.stdout)) ++ "</code></pre>\n"
     }
-  `<p class="example-run"><code>` ++ escape_html(cmd) ++ "</code>" ++ escape_html(exit) ++ "</p>\n"
-    ++ stdin ++ stdout ++ stderr
+  `<figure class="win run">` ++ "\n" ++ win_bar("sh", "") ++ "\n"
+    ++ `<p class="runline example-run"><code>` ++ escape_html(cmd) ++ "</code>" ++ escape_html(exit) ++ "</p>\n"
+    ++ stdin ++ stdout ++ stderr ++ "</figure>\n"
 }
 
 fn run_section(c: Chrome, ex: Example, cases: List[Case]) -> String =
@@ -435,18 +443,57 @@ fn file_section(path: String, play: Option[Play]) -> String !Fs = {
   "<h2><code>" ++ escape_html(path) ++ "</code></h2>\n" ++
     match play {
       Some(p) -> play_block(p, last_segment(path), pre, src, "")
-      None -> pre
+      None -> code_window(last_segment(path), pre)
     }
 }
 
-fn example_page(c: Chrome, ex: Example, cases: List[Case], play: Play) -> String !Fs = {
+## An example's page, as the band's head and the body under it: its name as
+## the title and its description as the lede, then how CI runs it and its
+## files.
+fn example_page(
+  c: Chrome,
+  lang: Lang,
+  ex: Example,
+  cases: List[Case],
+  play: Play,
+) -> (PageHead, String) !Fs = {
   let offer: Option[Play] = if len(ex.files) == 1 && ex.target == ex.files[0] { Some(play) } else { None }
   var sections = ""
   for f in ex.files {
     sections = sections ++ "\n" ++ file_section(f, offer)
   }
-  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(must_describe(ex)) ++ "</p>"
-    ++ run_section(c, ex, cases) ++ sections
+  let group = unwrap_or(get(filter(groups(), g => g.id == ex.group), 0), Group { id: ex.group, en: ex.group, zh: ex.group })
+  let head = PageHead {
+    eyebrow: `<a href="index.html">` ++ escape_html(c.section) ++ "</a>" ++ sep()
+      ++ escape_html(str.to_lower(group_title(group, lang))),
+    title: "<code>${ex.slug}</code>",
+    lede: desc_html(must_describe(ex)),
+    twin: "",
+    extra: "",
+    cls: "col",
+  }
+  (head, run_section(c, ex, cases) ++ sections)
+}
+
+## A description as markup: escaped, with each `quoted` span set as code. The
+## descriptions are the first sentence of a header comment, which spells code
+## the Markdown way; the gallery printed the backticks until 2026-10-02. An
+## odd backtick out has no partner and stays as written.
+pub fn desc_html(text: String) -> String = {
+  let parts = str.split(text, "`")
+  if len(parts) % 2 == 0 {
+    escape_html(text)
+  } else {
+    var out = ""
+    for i in range(0, len(parts)) {
+      if i % 2 == 1 {
+        out = out ++ "<code>" ++ escape_html(parts[i]) ++ "</code>"
+      } else {
+        out = out ++ escape_html(parts[i])
+      }
+    }
+    out
+  }
 }
 
 ## Where this language's gallery goes and how far it is from the site root.
@@ -484,28 +531,44 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let registry = read_registry()
   let play = Play { href: "${root}/" ++ lang_path(lang, "playground.html"), label: playground_label(lang) }
   for ex in units {
+    let (head, body) = example_page(c, lang, ex, cases_of(registry, ex.target), play)
     write_page("${dir}/${ex.slug}.html",
       page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
-        example_page(c, ex, cases_of(registry, ex.target), play)))
+        head, body))
   }
 
+  let head = PageHead {
+    eyebrow: escape_html(c.section) ++ sep() ++ escape_html(c.eyebrow),
+    title: c.heading,
+    lede: c.lede,
+    twin: "",
+    extra: "",
+    cls: "col",
+  }
   write_page("${dir}/index.html",
-    page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples",
+    page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", head,
       index_body(c, lang, gallery_examples())))
 }
 
-## The index page's body: one list per group, of the examples given.
+## The index page's body: one section per group, in one of the three dawn
+## hues by turn, its heading carrying how many examples it lists; each
+## example a row of its name and its description.
 fn index_body(c: Chrome, lang: Lang, units: List[Example]) -> String !Fs = {
-  var body = "<h1>${c.heading}</h1>\n<p>${c.lede}</p>"
+  var body = ""
+  var k = 0
   for g in groups() {
+    let shown = filter(units, u => u.group == g.id)
     var items = ""
-    for ex in filter(units, u => u.group == g.id) {
+    for ex in shown {
       items = items ++ "\n" ++
-        """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++
-        escape_html(must_describe(ex)) ++ "</li>"
+        """<li><a class="ex-name" href="${ex.slug}.html"><code>${ex.slug}</code></a>""" ++
+        """<p class="ex-desc">""" ++ desc_html(must_describe(ex)) ++ "</p></li>"
     }
-    body = body ++ "\n<h2>${escape_html(group_title(g, lang))}</h2>\n" ++
-      "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
+    let hue = k % 3 + 1
+    k = k + 1
+    body = body ++ "\n" ++ """<section class="ex-group hue-${hue}">""" ++ "\n<h2>"
+      ++ escape_html(group_title(g, lang)) ++ """<span class="ex-count">${len(shown)}</span></h2>""" ++ "\n"
+      ++ "<ul class=\"ex-list\">" ++ items ++ "\n</ul>\n</section>"
   }
   body
 }
@@ -538,7 +601,8 @@ test "a case shows its command, its stdin and its output, escaped" {
   let k = Case { argv: ["2+3*4"], stdin: "a<b\n", stdout: "14\n", stderr: "", exit: 1 }
   let html = case_html(c, "examples/projects/calc.dawn", k)
   assert str.contains(html,
-    `<p class="example-run"><code>dawn run examples/projects/calc.dawn '2+3*4'</code> (exit status 1)</p>`)
+    `<p class="runline example-run"><code>dawn run examples/projects/calc.dawn '2+3*4'</code> (exit status 1)</p>`)
+  assert str.starts_with(html, `<figure class="win run">`)
   assert str.contains(html, "<pre><code>a&lt;b</code></pre>")
   assert str.contains(html, `<pre class="output"><code>14</code></pre>`)
   assert not str.contains(html, "on stderr")
@@ -574,6 +638,12 @@ test "a project is described by the file it is named after before its main" {
       }
     }
   })
+}
+
+test "a description's backticks are code, and an odd one out stays" {
+  assert desc_html("Uses `for` over a <list>.") == "Uses <code>for</code> over a &lt;list&gt;."
+  assert desc_html("a ` b") == "a ` b"
+  assert desc_html("plain") == "plain"
 }
 
 test "a file that opens with code has no description at all" {
@@ -613,7 +683,7 @@ test "every hidden slug is an example, and a dead row says which" {
 test "the index lists eight whole programs and no gate fixture" {
   io.with_fs_real(() => {
     let body = index_body(chrome(En), En, gallery_examples())
-    let parts = str.split(body, "<h2>Whole programs</h2>")
+    let parts = str.split(body, "<h2>Whole programs<span class=\"ex-count\">8</span></h2>")
     assert len(parts) == 2
     let section = str.split(parts[1], "</ul>")[0]
     assert len(str.split(section, "<li>")) - 1 == 8
