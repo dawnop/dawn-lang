@@ -1,12 +1,18 @@
-# Page shells: <head>, top navigation, footer. Triple-quoted templates keep
-# the attribute quotes unescaped; $-interpolation fills the holes.
+# Page shells: <head>, the sky band with the navigation and the page's head,
+# the footer. Triple-quoted templates keep the attribute quotes unescaped;
+# $-interpolation fills the holes.
+#
+# Every page but the front one is laid out the same way (docs/site-pages-
+# design.md): a short sky that holds the nav and the page's title and ends on
+# the site's gradient line, then the page. The nav is one piece of markup the
+# front page uses too, set into its own, taller sky (gen/home.dawn).
 #
 # Every shell takes its language explicitly. There is no defaulted overload on
 # purpose: every page exists in both languages, so a wrapper that quietly
 # picked one would be wrong on half of the pages whichever one it picked.
 
 use std/str
-use html/render.{TocEntry}
+use html/render.{TocEntry, split_number}
 use html/escape.{escape_html, escape_attr}
 
 ## Which language a page is written in. English is the site's default and
@@ -64,11 +70,14 @@ pub type Assets = {
   # Every page's theme script: the saved theme put on <html> before the first
   # paint, the toggle, and the contents fold (docs/site-pages-design.md).
   theme_js: String,
-  # Not a file: the release and commit this site was built from, as the
-  # footer prints them ("0.81.0 (1a2b3c4d)"), or "" when the build was not
-  # told. It rides here because this is the one record every shell is handed
-  # by the one function that reads the build's inputs (gen/pages.gen_assets).
-  build: String,
+  # Not files: the release and the commit this site was built from, as the
+  # footer prints them ("version 0.81.0 (1a2b3c4d)"), each "" when the build
+  # was not told. They ride here because this is the one record every shell
+  # is handed by the one function that reads the build's inputs
+  # (gen/pages.gen_assets). The release is also what the spec's eyebrow
+  # names as the version it applies to.
+  version: String,
+  commit: String,
 }
 
 ## The names the files have in site/assets, before any hashing. What the tests
@@ -93,7 +102,8 @@ pub fn plain_assets() -> Assets =
     home_js: "home.js",
     mono_font: "JetBrainsMono-Regular.woff2",
     theme_js: "theme.js",
-    build: "",
+    version: "",
+    commit: "",
   }
 
 ## The `lang` attribute for <html>.
@@ -199,7 +209,7 @@ pub fn nav_items(lang: Lang) -> List[(String, String, String)] =
 
 fn nav_link(root: String, active: String, item: (String, String, String)) -> String = {
   let (key, label, path) = item
-  let cls = if key == active { ` class="active"` } else { "" }
+  let cls = if key == active { ` class="active" aria-current="page"` } else { "" }
   """<a${cls} href="${root}/${path}">${label}</a>"""
 }
 
@@ -299,34 +309,77 @@ fn lang_switch(lang: Lang, root: String, pair: String) -> String =
     """<a class="lang" href="${href}" hreflang="${lang_code(other(lang))}">${lang_switch_label(lang)}</a>"""
   }
 
-## The footer, in the page's language.
+## The footer, in the page's language: the mark, a line about the site, and
+## the build it was made from.
 ##
 ## It printed the same English line on both trees until 2026-10-01, the one
 ## piece of chrome that never went through `Lang`. The build line is new at
 ## the same time: the live site once sat three weeks behind main, teaching a
 ## syntax the current compiler rejects, and nothing on the page said which
-## compiler it had been built from. `build` is [Assets]'s field of that name;
-## an empty one prints no line rather than a blank version.
-pub fn footer_html(lang: Lang, build: String) -> String = {
+## compiler it had been built from. An empty version prints no build at all
+## rather than a blank one; an empty commit prints the version alone.
+pub fn footer_html(a: Assets, lang: Lang, root: String) -> String = {
   let gh = `<a href="https://github.com/dawnop/dawn-lang">GitHub</a>`
-  let (about, made) =
+  let (about, made, word) =
     match lang {
-      En -> ("Dawn, a small, elegant functional language", "Built by a generator written in Dawn")
-      Zh -> ("Dawn：一门小而优雅的函数式语言", "由 Dawn 写的生成器构建")
+      En -> ("Dawn, a small, elegant functional language", "Built by a generator written in Dawn", "version")
+      Zh -> ("Dawn：一门小而优雅的函数式语言", "由 Dawn 写的生成器构建", "版本")
     }
-  let stamp =
-    if build == "" {
+  let commit = if a.commit == "" { "" } else { " (${escape_html(a.commit)})" }
+  let ver =
+    if a.version == "" {
       ""
     } else {
-      match lang {
-        En -> " · version ${escape_html(build)}"
-        Zh -> " · 版本 ${escape_html(build)}"
-      }
+      "\n" ++ """<span class="ver">${word} <b>${escape_html(a.version)}</b>${commit}</span>"""
     }
+  let logo = a.logo
   """<footer class="site-footer">
-<div class="inner">${about} · ${gh} · ${made}${stamp}</div>
+<div class="wrap">
+<div class="row">
+<span class="mark"><img class="mark-logo" src="${root}/assets/${logo}" alt=""><span>${about} · ${gh} · ${made}</span></span>${ver}
+</div>
+</div>
 </footer>"""
 }
+
+## What a page says in the sky band, above its body: a monospace line of
+## facts (the eyebrow), the title, a lede and the translation note, and
+## `extra`, markup set after them (the 404 page's second line and its sun).
+## All are markup the caller has already escaped, any of them "" to leave it
+## out; `cls` places the block (`col` over a single column, `toc-aligned` over
+## the column beside the contents rail, `nf` centred for the 404 page).
+##
+## Taken out of the body on purpose: the title and the translation note used
+## to be the first two lines of the article, and they are what a reader sees
+## first, so they belong to the page's head. Which facts a page's eyebrow
+## states is the page generator's to say; this shell guesses none.
+pub type PageHead = {
+  eyebrow: String,
+  title: String,
+  lede: String,
+  twin: String,
+  extra: String,
+  cls: String,
+}
+
+## A page with no head in the band: the Playground, whose editor is the page.
+pub fn no_head() -> PageHead =
+  PageHead { eyebrow: "", title: "", lede: "", twin: "", extra: "", cls: "" }
+
+fn page_head_html(h: PageHead) -> String =
+  if h.title == "" && h.eyebrow == "" {
+    ""
+  } else {
+    let eyebrow = if h.eyebrow == "" { "" } else { """<p class="eyebrow">${h.eyebrow}</p>""" ++ "\n" }
+    let title = if h.title == "" { "" } else { "<h1>${h.title}</h1>\n" }
+    let lede = if h.lede == "" { "" } else { """<p class="lede">${h.lede}</p>""" ++ "\n" }
+    let twin = if h.twin == "" { "" } else { """<p class="twin">${h.twin}</p>""" ++ "\n" }
+    let extra = if h.extra == "" { "" } else { h.extra ++ "\n" }
+    """<div class="page-head ${h.cls}">""" ++ "\n" ++ eyebrow ++ title ++ lede ++ twin ++ extra ++ "</div>"
+  }
+
+## The eyebrow's separator, as the band draws it.
+pub fn sep() -> String = `<span class="sep">·</span>`
 
 ## The full page around an already-rendered <main>/<div> body. `pair` is this
 ## page's path in the default layout when the page has a twin in the other
@@ -339,9 +392,10 @@ pub fn shell(
   title: String,
   root: String,
   active: String,
+  head: PageHead,
   body: String,
 ) -> String =
-  shell_ext(a, lang, pair, title, root, active, "", body)
+  shell_ext(a, lang, pair, title, root, active, "", head, body)
 
 ## The header's search button, and the three URLs the panel needs.
 ##
@@ -368,6 +422,10 @@ fn search_button(a: Assets, lang: Lang, root: String) -> String = {
 
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
 ## page's stylesheet + module script).
+##
+## The body: the reading-progress line, the sky band (stars that only the
+## night shows, a low glow, the nav and the page's head), the search panel's
+## mount point, the page, the footer.
 pub fn shell_ext(
   a: Assets,
   lang: Lang,
@@ -376,12 +434,28 @@ pub fn shell_ext(
   root: String,
   active: String,
   head_extra: String,
+  head: PageHead,
   body: String,
-) -> String =
+) -> String = {
+  let ph = page_head_html(head)
+  let ph_line = if ph == "" { "" } else { ph ++ "\n" }
   head_html(a, lang, pair, title, root, head_extra) ++ "\n<body>\n"
-  ++ header_html(a, lang, pair, root, active, "") ++ "\n"
-  ++ `<div id="dawn-search" class="search-host" hidden></div>` ++ "\n" ++ body ++ "\n"
-  ++ footer_html(lang, a.build) ++ "\n</body>\n</html>"
+    ++ `<div class="progress" aria-hidden="true"></div>` ++ "\n"
+    ++ `<header class="sky">` ++ "\n" ++ band_stars() ++ "\n"
+    ++ `<div class="glow" aria-hidden="true"></div>` ++ "\n"
+    ++ `<div class="wrap">` ++ "\n" ++ nav_bar(a, lang, pair, root, active) ++ "\n" ++ ph_line
+    ++ "</div>\n</header>\n"
+    ++ `<div id="dawn-search" class="search-host" hidden></div>` ++ "\n" ++ body ++ "\n"
+    ++ footer_html(a, lang, root) ++ "\n</body>\n</html>"
+}
+
+## Seven faint stars for the band. White on the day sky, so they are drawn at
+## the night's opacity (`--star-op`, 0 by day).
+fn band_stars() -> String =
+  `<svg class="stars" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><g fill="#fff">
+<circle cx="130" cy="70" r=".9" opacity=".35"/><circle cx="410" cy="34" r=".8" opacity=".3"/><circle cx="660" cy="96" r="1" opacity=".3"/>
+<circle cx="880" cy="44" r=".9" opacity=".35"/><circle cx="1090" cy="110" r=".8" opacity=".25"/><circle cx="300" cy="170" r=".7" opacity=".2"/>
+<circle cx="980" cy="200" r=".7" opacity=".18"/></g></svg>`
 
 ## Everything up to and including `</head>`, shared by [shell_ext] and the
 ## front page's own shell (gen/home.dawn), which differ only in what comes
@@ -427,41 +501,55 @@ ${head_extra}
 """
 }
 
-## The site header: the brand, the nav, the language switch, search and
-## GitHub, then `extra` -- markup only the front page adds (its theme toggle),
-## "" everywhere else, which leaves every other page's header as it was.
-pub fn header_html(
-  a: Assets,
-  lang: Lang,
-  pair: String,
-  root: String,
-  active: String,
-  extra: String,
-) -> String = {
+## The theme toggle: a sun and a moon, one shown at a time. `hidden` in the
+## markup: without theme.js it could do nothing, and a button that does
+## nothing is worse than none. The two labels are attributes, in the page's
+## language, so that theme.js, which both language trees load, carries no
+## words of either (gen/assets.dawn holds shared bundles to that); written
+## here once, for the front page as for every other.
+pub fn theme_toggle(lang: Lang) -> String = {
+  let (dark, light) =
+    match lang {
+      En -> ("Switch to dark theme", "Switch to light theme")
+      Zh -> ("切换到深色主题", "切换到浅色主题")
+    }
+  """<button class="theme-toggle" type="button" id="theme-toggle" hidden aria-pressed="false" aria-label="${dark}" data-label-dark="${dark}" data-label-light="${light}"><svg viewBox="0 0 20 20" aria-hidden="true"><g class="ico-sun" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="3.4"/><path d="M10 2.2v1.9M10 15.9v1.9M2.2 10h1.9M15.9 10h1.9M4.5 4.5l1.3 1.3M14.2 14.2l1.3 1.3M4.5 15.5l1.3-1.3M14.2 5.8l1.3-1.3"/></g><path class="ico-moon" fill="currentColor" d="M15.6 12.6A6.4 6.4 0 0 1 7.4 4.4a6.4 6.4 0 1 0 8.2 8.2z"/></svg></button>"""
+}
+
+## The site's navigation, the same markup on every page, the front page's
+## included: the brand, then the sections, the language switch, search and
+## GitHub in `.links`, then the theme toggle. The toggle sits after `.links`
+## rather than in it so that on a phone it can share the first row with the
+## brand while the sections wrap onto the second (site/assets/style.css).
+pub fn nav_bar(a: Assets, lang: Lang, pair: String, root: String, active: String) -> String = {
   let nav = nav_html(lang, root, active)
   # the brand mark goes to this language's front page, not to the English one:
   # a reader on /zh/ who clicks the logo is not asking to change language
   let home = lang_path(lang, "index.html")
   let switch = lang_switch(lang, root, pair)
+  let switch_line = if switch == "" { "" } else { switch ++ "\n" }
   let logo = a.logo
-  let tail = if extra == "" { "" } else { "\n" ++ extra }
-  """<header class="site-header">
-<nav>
+  let label =
+    match lang {
+      En -> "Site"
+      Zh -> "站点"
+    }
+  """<nav class="site-nav" aria-label="${label}">
 <a class="brand" href="${root}/${home}"><img class="brand-logo" src="${root}/assets/${logo}" alt="">Dawn</a>
+<div class="links">
 ${nav}
-${switch}
-${search_button(a, lang, root)}
-<a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>${tail}
-</nav>
-</header>"""
+${switch_line}${search_button(a, lang, root)}
+<a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
+</div>
+${theme_toggle(lang)}
+</nav>"""
 }
 
-## A plain content page. `pair` as in [shell]: a paired page passes its own
-## path in the default layout, and a page with no twin passes "". The parameter
-## is here rather than hard-coded, which is what made translating the spec and
-## the design notes an edit at their own call site instead of a change to this
-## shell -- there is no page left that passes "", and the branch stays for the
-## next one that has no twin.
+## A plain content page: one reading column. `pair` as in [shell]: a paired
+## page passes its own path in the default layout, and a page with no twin
+## passes "". The parameter is here rather than hard-coded, which is what made
+## translating the spec and the design notes an edit at their own call site
+## instead of a change to this shell.
 pub fn page(
   a: Assets,
   lang: Lang,
@@ -469,21 +557,16 @@ pub fn page(
   title: String,
   root: String,
   active: String,
+  head: PageHead,
   inner: String,
 ) -> String =
-  shell(a, lang, pair, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+  shell(a, lang, pair, title, root, active, head,
+    `<main class="wrap page">` ++ "\n" ++ `<article class="col prose">` ++ "\n" ++ inner
+      ++ "\n</article>\n</main>")
 
-## A page with the sticky TOC sidebar (the spec and design pages). `pair` as in
-## [shell].
-##
-## The list sits in a `<details>`, open in the markup and closed by the script
-## right after it when the screen is narrow. Below 60rem the sidebar stacks
-## above the article, and the spec's 75 entries were a whole screen of links a
-## phone reader had to scroll past before the first heading. Open in the
-## markup so that a reader without scripts loses nothing, and closed by an
-## inline script rather than by site/assets/search.js so that it is closed
-## before the first paint rather than after it. On a wide screen the summary
-## is the old "Contents" heading and cannot be clicked (site/assets/style.css).
+## A page with a contents rail beside its article: the spec, the history
+## pages, the standard library, a tutorial chapter. `rail` is the rail's
+## markup ([toc_rail], or a chapter list); `pair` as in [shell].
 pub fn page_with_toc(
   a: Assets,
   lang: Lang,
@@ -491,35 +574,41 @@ pub fn page_with_toc(
   title: String,
   root: String,
   active: String,
-  toc: List[TocEntry],
+  head: PageHead,
+  rail: String,
   article: String,
-) -> String = {
-  let heading =
-    match lang {
-      En -> "Contents"
-      Zh -> "目录"
-    }
-  let side = "<aside class=\"toc\">\n<nav>\n" ++ `<details class="toc-fold" open>` ++ "\n"
-    ++ `<summary class="toc-title">` ++ heading ++ "</summary>\n" ++ toc_list(toc)
-    ++ "\n</details>\n" ++ toc_fold_script() ++ "\n</nav>\n</aside>"
-  let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
-    `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
-  shell(a, lang, pair, title, root, active, body)
-}
+) -> String =
+  shell(a, lang, pair, title, root, active, head,
+    `<main class="wrap page with-toc">` ++ "\n" ++ rail ++ "\n" ++ `<article class="prose">` ++ "\n"
+      ++ article ++ "\n</article>\n</main>")
 
-## Closes the TOC fold on a narrow screen and keeps it in step with the
-## width. The breakpoint is the stylesheet's, where the sidebar stops being a
-## sidebar; the two must move together.
-fn toc_fold_script() -> String =
-  """<script>
-(function () {
-  var fold = document.currentScript.previousElementSibling;
-  var narrow = window.matchMedia('(max-width: 60rem)');
-  function fit() { fold.open = !narrow.matches; }
-  fit();
-  if (narrow.addEventListener) narrow.addEventListener('change', fit);
-})();
-</script>"""
+## The rail: a `<details>` that is a sidebar on a wide screen and a fold at
+## the top of the page on a narrow one. Open in the markup, so that a reader
+## without scripts loses nothing; theme.js closes it below the stylesheet's
+## breakpoint, and the stylesheet holds it shut until then so it does not show
+## open for a frame. Below that width the sidebar stacks above the article,
+## and the spec's 75 entries were a whole screen of links a phone reader had
+## to scroll past before the first heading. On a wide screen the summary is
+## only a heading and cannot be clicked (site/assets/style.css).
+pub fn rail_html(heading: String, list: String) -> String =
+  "<aside class=\"toc\">\n<nav>\n" ++ `<details class="toc-fold" open>` ++ "\n"
+  ++ `<summary class="toc-title">` ++ escape_html(heading) ++ "</summary>\n" ++ list
+  ++ "\n</details>\n</nav>\n</aside>"
+
+## A document's contents rail, titled "Contents" in the page's language.
+pub fn toc_rail(lang: Lang, toc: List[TocEntry]) -> String = rail_html(contents_label(lang), toc_list(toc))
+
+## One rail link, with the entry's printed section number (if any) set apart
+## so the numbers line up in a column of their own.
+fn toc_link(e: TocEntry) -> String = {
+  let (num, rest) = split_number(e.text)
+  if num == "" {
+    """<a href="#${e.id}">""" ++ escape_html(e.text) ++ "</a>"
+  } else {
+    """<a class="has-n" href="#${e.id}"><span class="tn">""" ++ escape_html(num) ++ "</span><span>"
+      ++ escape_html(rest) ++ "</span></a>"
+  }
+}
 
 ## Nested <ul> for h2/h3 toc entries.
 pub fn toc_list(entries: List[TocEntry]) -> String = {
@@ -531,13 +620,13 @@ pub fn toc_list(entries: List[TocEntry]) -> String = {
         out = out ++ "</ul></li>"
         open3 = false
       }
-      out = out ++ "\n" ++ """<li><a href="#${e.id}">""" ++ escape_html(e.text) ++ "</a>"
+      out = out ++ "\n<li>" ++ toc_link(e)
     } else {
       if not open3 {
         out = out ++ "\n<ul>"
         open3 = true
       }
-      out = out ++ "\n" ++ """<li><a href="#${e.id}">""" ++ escape_html(e.text) ++ "</a></li>"
+      out = out ++ "\n<li>" ++ toc_link(e) ++ "</li>"
     }
   }
   if open3 {
@@ -550,7 +639,7 @@ pub fn toc_list(entries: List[TocEntry]) -> String = {
 
 test "nav marks the active page and roots the links" {
   let n = nav_html(Zh, "..", "spec")
-  assert str.contains(n, `<a class="active" href="../zh/spec.html">规范</a>`)
+  assert str.contains(n, `<a class="active" aria-current="page" href="../zh/spec.html">规范</a>`)
   assert str.contains(n, `<a href="../zh/tutorial/index.html">教程</a>`)
 }
 
@@ -579,8 +668,8 @@ test "each language's nav points at that language's pages" {
 
 ## Clicking the logo is not a request to change language.
 test "the brand mark leads to this page's own front page" {
-  assert str.contains(shell(plain_assets(), En, "", "t", ".", "", ""), `class="brand" href="./index.html"`)
-  assert str.contains(shell(plain_assets(), Zh, "", "t", "..", "", ""), `class="brand" href="../zh/index.html"`)
+  assert str.contains(shell(plain_assets(), En, "", "t", ".", "", no_head(), ""), `class="brand" href="./index.html"`)
+  assert str.contains(shell(plain_assets(), Zh, "", "t", "..", "", no_head(), ""), `class="brand" href="../zh/index.html"`)
 }
 
 ## The header draws the mark itself, not the icon iOS was sent. Those were one
@@ -589,7 +678,7 @@ test "the brand mark leads to this page's own front page" {
 ## be given different croppings even though one of them wants padding for a
 ## home screen and the other does not.
 test "the header brand is the vector mark" {
-  let h = shell(plain_assets(), En, "", "t", ".", "", "")
+  let h = shell(plain_assets(), En, "", "t", ".", "", no_head(), "")
   assert str.contains(h, `<img class="brand-logo" src="./assets/logo.svg" alt="">`)
   assert str.contains(h, `<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">`)
 }
@@ -599,7 +688,7 @@ test "the header brand is the vector mark" {
 ## wherever they are. The three URLs are attributes so that gen/links checks
 ## them; this is the assertion that says they are there to be checked.
 test "every page carries the search button, its mount point and its script" {
-  let p = shell(plain_assets(), En, "", "t", "..", "", "<p>x</p>")
+  let p = shell(plain_assets(), En, "", "t", "..", "", no_head(), "<p>x</p>")
   assert str.contains(p, `<button class="search-open" type="button"`)
   assert str.contains(p, `data-search-app="../assets/tea-app.mjs"`)
   assert str.contains(p, `data-search-wasm="../assets/tea-search.wasm"`)
@@ -607,6 +696,8 @@ test "every page carries the search button, its mount point and its script" {
   assert str.contains(p, `data-search-root=".."`)
   assert str.contains(p, `<div id="dawn-search" class="search-host" hidden></div>`)
   assert str.contains(p, `<script src="../assets/search.js" defer></script>`)
+  # and the theme script, blocking, before it: it has to run before the first paint
+  assert str.contains(p, `<script src="../assets/theme.js"></script>` ++ "\n" ++ `<script src="../assets/search.js" defer>`)
 }
 
 ## The panel is a piece of chrome, so it follows the page's language in both
@@ -615,8 +706,8 @@ test "every page carries the search button, its mount point and its script" {
 ## hrefs that all resolve, which is the failure a shared index would have made
 ## unnoticeable.
 test "the search button is labelled and indexed in the page's own language" {
-  let en = shell(plain_assets(), En, "", "t", ".", "", "")
-  let zh = shell(plain_assets(), Zh, "", "t", "..", "", "")
+  let en = shell(plain_assets(), En, "", "t", ".", "", no_head(), "")
+  let zh = shell(plain_assets(), Zh, "", "t", "..", "", no_head(), "")
   assert str.contains(en, `data-search-index="./assets/search-en.json"`)
   assert str.contains(en, ">Search<kbd>")
   assert str.contains(zh, `data-search-index="../assets/search-zh.json"`)
@@ -626,58 +717,65 @@ test "the search button is labelled and indexed in the page's own language" {
 }
 
 test "shell carries title, css root, body" {
-  let p = page(plain_assets(), Zh, "", "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
+  let p = page(plain_assets(), Zh, "", "测试页 — Dawn", ".", "stdlib", no_head(), "<p>x</p>")
   assert str.contains(p, "<title>测试页 — Dawn</title>")
   assert str.contains(p, `href="./assets/style.css"`)
-  assert str.contains(p, `<main class="content">`)
+  assert str.contains(p, `<main class="wrap page">`)
   assert str.contains(p, "由 Dawn 写的生成器构建")
 }
 
 test "a quote in a title stays inside og:title's attribute" {
-  let p = page(plain_assets(), En, "", `Say "hi" & go`, ".", "", "")
+  let p = page(plain_assets(), En, "", `Say "hi" & go`, ".", "", no_head(), "")
   assert str.contains(p, `<title>Say "hi" &amp; go</title>`)
   assert str.contains(p, `<meta property="og:title" content="Say &quot;hi&quot; &amp; go">`)
 }
 
 test "the footer follows the page's language and prints the build it was given" {
-  let built = Assets { ..plain_assets(), build: "0.81.0 (1a2b3c4d)" }
-  let en = shell(built, En, "", "t", ".", "", "")
-  let zh = shell(built, Zh, "", "t", "..", "", "")
-  assert str.contains(en, "Built by a generator written in Dawn · version 0.81.0 (1a2b3c4d)</div>")
-  assert str.contains(zh, "由 Dawn 写的生成器构建 · 版本 0.81.0 (1a2b3c4d)</div>")
+  let built = Assets { ..plain_assets(), version: "0.81.0", commit: "1a2b3c4d" }
+  let en = shell(built, En, "", "t", ".", "", no_head(), "")
+  let zh = shell(built, Zh, "", "t", "..", "", no_head(), "")
+  assert str.contains(en, "Built by a generator written in Dawn</span></span>\n"
+      ++ `<span class="ver">version <b>0.81.0</b> (1a2b3c4d)</span>`)
+  assert str.contains(zh, `由 Dawn 写的生成器构建</span></span>` ++ "\n"
+      ++ `<span class="ver">版本 <b>0.81.0</b> (1a2b3c4d)</span>`)
   assert not str.contains(zh, "Built by a generator")
+  # the mark is the same file the header shows, from wherever the page sits
+  assert str.contains(zh, `<img class="mark-logo" src="../assets/logo.svg" alt="">`)
   # a build that was not told prints no version at all
-  let bare = shell(plain_assets(), En, "", "t", ".", "", "")
-  assert str.contains(bare, "Built by a generator written in Dawn</div>")
+  let bare = shell(plain_assets(), En, "", "t", ".", "", no_head(), "")
+  assert str.contains(bare, "Built by a generator written in Dawn</span></span>\n</div>")
   assert not str.contains(bare, "version")
+  # and a version with no commit prints the version alone
+  let tagged = shell(Assets { ..plain_assets(), version: "0.81.0" }, En, "", "t", ".", "", no_head(), "")
+  assert str.contains(tagged, `<span class="ver">version <b>0.81.0</b></span>`)
 }
 
 test "a page says what it is and where it lives, in its own language" {
-  let en = page(plain_assets(), En, "tutorial/03.html", "t", "..", "tutorial", "")
+  let en = page(plain_assets(), En, "tutorial/03.html", "t", "..", "tutorial", no_head(), "")
   assert str.contains(en, `<meta name="description" content="Dawn is a small, elegant`)
   assert str.contains(en, `<meta property="og:description" content="Dawn is a small, elegant`)
   assert str.contains(en, `<meta property="og:type" content="website">`)
   assert str.contains(en, `<link rel="canonical" href="https://dawn-lang.dawnop.com/tutorial/03.html">`)
   assert str.contains(en, `<meta property="og:url" content="https://dawn-lang.dawnop.com/tutorial/03.html">`)
-  let zh = page(plain_assets(), Zh, "index.html", "t", "..", "", "")
+  let zh = page(plain_assets(), Zh, "index.html", "t", "..", "", no_head(), "")
   assert str.contains(zh, `<meta name="description" content="Dawn 是一门`)
   assert str.contains(zh, `<link rel="canonical" href="https://dawn-lang.dawnop.com/zh/">`)
   # no pair, no URL to name
-  assert not str.contains(page(plain_assets(), En, "", "t", ".", "", ""), "canonical")
+  assert not str.contains(page(plain_assets(), En, "", "t", ".", "", no_head(), ""), "canonical")
 }
 
 test "only a page with a twin advertises one" {
   # the English front page: lang=en, a switch to the Chinese one, hreflang pair
-  let home = shell(plain_assets(), En, "index.html", "Dawn", ".", "", "<p>x</p>")
+  let home = shell(plain_assets(), En, "index.html", "Dawn", ".", "", no_head(), "<p>x</p>")
   assert str.contains(home, `<html lang="en">`)
   assert str.contains(home, `<a class="lang" href="./zh/index.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(home, `hreflang="x-default" href="https://dawn-lang.dawnop.com/"`)
   # the Chinese one points back, and says so in the language it leads to
-  let zh = shell(plain_assets(), Zh, "index.html", "Dawn", "..", "", "<p>x</p>")
+  let zh = shell(plain_assets(), Zh, "index.html", "Dawn", "..", "", no_head(), "<p>x</p>")
   assert str.contains(zh, `<html lang="zh-CN">`)
   assert str.contains(zh, `<a class="lang" href="../index.html" hreflang="en">English</a>`)
   # a document page has no twin: no switch, no alternates
-  let doc = page(plain_assets(), Zh, "", "规范 — Dawn", ".", "spec", "<p>x</p>")
+  let doc = page(plain_assets(), Zh, "", "规范 — Dawn", ".", "spec", no_head(), "<p>x</p>")
   assert not str.contains(doc, `class="lang"`)
   assert not str.contains(doc, "hreflang")
 }
@@ -687,31 +785,32 @@ test "only a page with a twin advertises one" {
 ## same three URLs, and the constants that used to stand here passed either
 ## reading. A tutorial chapter tells them apart.
 test "a paired page names its own twin, not the home page" {
-  let en = page(plain_assets(), En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", "<p>x</p>")
+  let en = page(plain_assets(), En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", no_head(), "<p>x</p>")
   assert str.contains(en, `<a class="lang" href="../zh/tutorial/03.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(en,
     `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
   assert str.contains(en,
     `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/03.html"`)
   # the twin, two directories deeper, points back at the same pair
-  let zh = page(plain_assets(), Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", "<p>x</p>")
+  let zh = page(plain_assets(), Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", no_head(), "<p>x</p>")
   assert str.contains(zh, `<a class="lang" href="../../tutorial/03.html" hreflang="en">English</a>`)
   assert str.contains(zh,
     `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
   # an index is advertised as its directory, so the front page stays / and /zh/
-  assert str.contains(page(plain_assets(), En, "tutorial/index.html", "t", "..", "tutorial", ""),
+  assert str.contains(page(plain_assets(), En, "tutorial/index.html", "t", "..", "tutorial", no_head(), ""),
     `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/"`)
 }
 
-test "the toc is a fold, open in the markup, with its closing script after it" {
-  let p = page_with_toc(plain_assets(), Zh, "", "t", "..", "spec",
-    [TocEntry { level: 2, id: "s1", text: "一" }], "<p>x</p>")
+test "the toc is a fold, open in the markup, with no script of its own" {
+  let p = page_with_toc(plain_assets(), Zh, "", "t", "..", "spec", no_head(),
+    toc_rail(Zh, [TocEntry { level: 2, id: "s1", text: "一" }]), "<p>x</p>")
   assert str.contains(p, `<details class="toc-fold" open>` ++ "\n" ++ `<summary class="toc-title">目录</summary>`)
-  assert str.contains(p, "</details>\n<script>\n(function () {\n  var fold = document.currentScript.previousElementSibling;")
-  assert str.contains(p, "matchMedia('(max-width: 60rem)')")
+  # theme.js folds it; there is no inline script on the page
+  assert not str.contains(p, "<script>")
+  assert str.contains(p, `<main class="wrap page with-toc">` ++ "\n" ++ `<aside class="toc">`)
 }
 
-test "toc nests h3 under its h2" {
+test "toc nests h3 under its h2, with printed numbers set apart" {
   let t = toc_list([
     TocEntry { level: 2, id: "s1", text: "一" },
     TocEntry { level: 3, id: "s1-1", text: "一点一" },
@@ -719,4 +818,33 @@ test "toc nests h3 under its h2" {
   ])
   assert str.contains(t, `<li><a href="#s1">一</a>` ++ "\n<ul>\n" ++ `<li><a href="#s1-1">一点一</a></li>` ++ "</ul></li>")
   assert str.contains(t, `<li><a href="#s2">二</a></li>`)
+  let n = toc_list([TocEntry { level: 2, id: "s3", text: "3. Types" }])
+  assert str.contains(n, `<a class="has-n" href="#s3"><span class="tn">3.</span><span>Types</span></a>`)
+}
+
+## The band: the nav and the page's head in one header, the head only when
+## the page has one, and the toggle hidden until theme.js shows it.
+test "a page's head is set in the sky band above its body" {
+  let h = PageHead { eyebrow: "spec" ++ sep() ++ "0.81.0", title: "Dawn <code>x</code>", lede: "", twin: "<em>t</em>", extra: "", cls: "toc-aligned" }
+  let p = page(plain_assets(), En, "spec.html", "t", ".", "spec", h, "<p>body</p>")
+  assert str.contains(p, `<header class="sky">`)
+  assert str.contains(p, `<div class="page-head toc-aligned">` ++ "\n"
+      ++ `<p class="eyebrow">spec<span class="sep">·</span>0.81.0</p>` ++ "\n"
+      ++ "<h1>Dawn <code>x</code></h1>\n" ++ `<p class="twin"><em>t</em></p>` ++ "\n</div>\n</div>\n</header>")
+  assert str.contains(p, `<article class="col prose">` ++ "\n<p>body</p>")
+  # no lede given, none written
+  assert not str.contains(p, `class="lede"`)
+  # a page with no head has the nav alone in its band
+  let bare = page(plain_assets(), En, "", "t", ".", "", no_head(), "")
+  assert not str.contains(bare, "page-head")
+  assert str.contains(p, `id="theme-toggle" hidden`)
+}
+
+test "the toggle is labelled in the page's language, for theme.js to read" {
+  assert str.contains(theme_toggle(En), `aria-label="Switch to dark theme" data-label-dark="Switch to dark theme" data-label-light="Switch to light theme"`)
+  assert str.contains(theme_toggle(Zh), `data-label-dark="切换到深色主题" data-label-light="切换到浅色主题"`)
+  # after .links, so a phone can put it on the brand's row
+  let n = nav_bar(plain_assets(), En, "", ".", "")
+  assert str.contains(n, "</div>\n" ++ `<button class="theme-toggle"`)
+  assert str.contains(n, `<nav class="site-nav" aria-label="Site">`)
 }

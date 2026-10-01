@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 2645ceef329b9f4c -->
+<!-- doc-check: translation-of site/pages/home.md @ 85d0ec146935b934 -->
 
 # 首页文案 —— 中文译本
 
@@ -39,14 +39,6 @@ cuTile 上 NVIDIA GPU
 ## cta-primary
 
 开始教程
-
-## theme-to-dark
-
-切换到深色主题
-
-## theme-to-light
-
-切换到浅色主题
 
 ## phase-ideas
 

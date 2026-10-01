@@ -1,5 +1,10 @@
 # The single-document pages: spec, design, playground, the demo, plus assets.
 # The front page is gen/home.dawn's.
+#
+# Each page states its own head (html/page.PageHead): the title and the
+# translation note come off the front of its document (html/render.split_head)
+# and the eyebrow says only what the page already holds -- what kind of
+# document it is, its status, the release the spec applies to.
 
 use std/str
 use std/io
@@ -7,8 +12,10 @@ use std/io.{Fs, Env, getenv}
 use std/bytes
 use md/ast.{Block}
 use md/parser.{parse}
-use html/render.{render_doc}
-use html/page.{Assets, Lang, En, Zh, page_with_toc, shell_ext, lang_path, plain_assets}
+use html/render.{render_doc, split_head, inline_run, inline_text}
+use html/page.{Assets, Lang, En, Zh, PageHead, page_with_toc, shell_ext, lang_path, plain_assets,
+  no_head, sep, toc_rail }
+use html/play.{win_bar}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
@@ -72,27 +79,19 @@ fn emit_asset(out: String, name: String, content: Bytes) -> String !Fs !io = {
 fn emit_text(out: String, name: String, text: String) -> String !Fs !io =
   emit_asset(out, name, bytes.utf8(text ++ "\n"))
 
-## The release and commit this build was made from, as the footer prints it,
-## or "" when the build did not say.
+## The release and the commit this build was made from, as the footer prints
+## them, each "" when the build did not say.
 ##
 ## Read from the environment, which site/build.sh sets (DAWN_SITE_VERSION from
 ## selfhost/src/version.dawn, DAWN_SITE_COMMIT from git), rather than from
 ## those files: scripts/site-dist-diff.sh runs this generator over a snapshot
 ## that holds neither selfhost/ nor .git, and both of its legs inherit the
 ## same environment, so the two backends still write the same bytes.
-pub fn build_stamp() -> String !Env = {
-  let version = unwrap_or(getenv("DAWN_SITE_VERSION"), "")
-  let commit = unwrap_or(getenv("DAWN_SITE_COMMIT"), "")
-  if version == "" {
-    ""
-  } else if commit == "" {
-    version
-  } else {
-    "${version} (${commit})"
-  }
-}
+pub fn build_stamp() -> (String, String) !Env =
+  (unwrap_or(getenv("DAWN_SITE_VERSION"), ""), unwrap_or(getenv("DAWN_SITE_COMMIT"), ""))
 
-pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
+pub fn gen_assets(out: String, build: (String, String)) -> Assets !Fs !io = {
+  let (version, commit) = build
   # Read once, used twice: the two search indexes are built from the same
   # `dawn doc --stdlib` document gen/stdlib later renders into the page,
   # and an index built from a second read would be an index of a document
@@ -169,7 +168,8 @@ pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
     home_js: emit_text(out, "home.js", str.trim(must_read("site/assets/home.js"))),
     theme_js: emit_text(out, "theme.js", str.trim(must_read("site/assets/theme.js"))),
     mono_font: mono,
-    build: build,
+    version: version,
+    commit: commit,
   }
 }
 
@@ -264,12 +264,56 @@ fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String)
     Zh -> ("docs/${base}.md", "${out}/zh/${base}.html", "..")
   }
 
+## What the band above a document says about it, in the page's language:
+## the kind of document, its status, and for the spec the release it applies
+## to (`version`, from the build, left out when the build did not say).
+fn doc_eyebrow(base: String, lang: Lang, version: String) -> String = {
+  let v = if version == "" { "" } else { sep() ++ escape_html(version) }
+  match lang {
+    En ->
+      if base == "spec" {
+        "specification" ++ sep() ++ "normative" ++ v
+      } else {
+        "history" ++ sep() ++ "decisions of M0–M7" ++ sep() ++ "historical"
+      }
+    Zh ->
+      if base == "spec" {
+        "规范" ++ sep() ++ "权威" ++ v
+      } else {
+        "历史" ++ sep() ++ "M0–M7 的决策记录" ++ sep() ++ "历史文档"
+      }
+  }
+}
+
+## One document as a page with a contents rail. Its title and translation
+## note are set in the band above it; the rest is the article.
+fn doc_page(
+  a: Assets,
+  lang: Lang,
+  base: String,
+  root: String,
+  blocks: List[Block],
+  docs: List[String],
+) -> String = {
+  let mu = (u: String) => map_doc_url(root, docs, u)
+  let parts = split_head(blocks)
+  let doc = render_doc(parts.body, mu)
+  let head = PageHead {
+    eyebrow: doc_eyebrow(base, lang, a.version),
+    title: inline_run(parts.title, mu),
+    lede: "",
+    twin: inline_run(parts.twin, mu),
+    extra: "",
+    cls: "toc-aligned",
+  }
+  page_with_toc(a, lang, "${base}.html", "${inline_text(parts.title)} — Dawn", root, base, head,
+    toc_rail(lang, doc.toc), doc.html)
+}
+
 fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !Fs !io = {
   let docs = doc_files()
   let (src, dst, root) = doc_source(base, out, lang)
-  let doc = render_doc(parsed(src), u => map_doc_url(root, docs, u))
-  write_page(dst,
-    page_with_toc(a, lang, "${base}.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
+  write_page(dst, doc_page(a, lang, base, root, parsed(src), docs))
 }
 
 pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
@@ -298,7 +342,8 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       Zh -> ("${out}/zh/playground.html", "..")
     }
   # full-width IDE page: the editor frame IS the page (no heading, no reading
-  # column) — .dp-page/.dp-ide layout comes with the editor bundle's css
+  # column, nothing in the band but the nav) — .dp-page/.dp-ide layout comes
+  # with the editor bundle's css
   let mount = `<div id="dawn-playground" data-endpoint="/api/run"></div>`
   let mount_body = `<main class="dp-page">` ++ "\n" ++ mount ++ "\n</main>"
   # the editor bundle (built from site/play-ui, copied into assets by build.sh);
@@ -309,7 +354,7 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     """<script type="module" src="${root}/assets/${pjs}"></script>"""
   write_page(dst,
     shell_ext(a, lang, "playground.html", "Playground — Dawn", root, "playground", head,
-      mount_body))
+      no_head(), mount_body))
 }
 
 ## Everything the demo page says, in one language. A record rather than two
@@ -425,6 +470,11 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
 ## The placeholder is a sibling of the mount point and not its content: the
 ## bridge owns everything inside `.tea-mount`, and the watchdog reads an empty
 ## one as "nothing mounted yet".
+##
+## The frame sits in a window whose bar names the mount point, in one of the
+## dawn hues (`hue`: 1 indigo, 3 magenta). The window is drawn around the
+## frame and never inside it: what is inside is what the reactor draws, and
+## nothing here pretends to have drawn it first.
 fn tea_frame(
   id: String,
   wasm: String,
@@ -432,14 +482,18 @@ fn tea_frame(
   note: String,
   loading: String,
   source: String,
+  hue: Int,
 ) -> String =
   """
 <h2>${heading}</h2>
+<figure class="win tea-win hue-${hue}">
+${win_bar("#${id} · wasm reactor", "")}
 <div class="tea-frame">
 <div class="tea-mount" id="${id}" data-wasm="${escape_attr(wasm)}"></div>
 <p class="tea-status">${escape_html(loading)}</p>
 <p class="tea-error"></p>
 </div>
+</figure>
 <p class="tea-note">${note}</p>
 ${source}
 """
@@ -501,15 +555,22 @@ fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs = {
   let slow = escape_attr(c.slow)
   let failed = escape_attr(c.failed)
   let body =
-    """<main class="content tea-demo" data-slow="${slow}" data-failed="${failed}">""" ++ "\n"
-    ++ "<h1>${c.title}</h1>\n<p>${c.lede}</p>\n<p>${c.aside}</p>\n"
+    `<main class="wrap page">` ++ "\n"
+    ++ """<article class="col prose tea-demo" data-slow="${slow}" data-failed="${failed}">""" ++ "\n"
+    ++ "<p>${c.aside}</p>\n"
     ++ tea_frame("tea-counter", "${root}/assets/${a.tea_counter}", c.counter, c.counter_note,
-      c.loading, tea_source(c.counter_src, counter_source_path()))
+      c.loading, tea_source(c.counter_src, counter_source_path()), 1)
     ++ tea_frame("tea-todo", "${root}/assets/${a.tea_todo}", c.todo, c.todo_note,
-      c.loading, tea_source(c.todo_src, todo_source_path()))
-    ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</main>\n"
+      c.loading, tea_source(c.todo_src, todo_source_path()), 3)
+    ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</article>\n</main>\n"
     ++ tea_watchdog() ++ "\n" ++ tea_mount_script(root, app)
-  shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body)
+  let eyebrow =
+    match lang {
+      En -> "demo" ++ sep() ++ "two wasm reactors"
+      Zh -> "演示" ++ sep() ++ "两个 wasm reactor"
+    }
+  let ph = PageHead { eyebrow: eyebrow, title: c.title, lede: c.lede, twin: "", extra: "", cls: "col" }
+  shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, ph, body)
 }
 
 ## The search glue's data attributes are page-relative, and search.js itself
@@ -567,6 +628,24 @@ test "the todo demo shows todo.dawn, keyed call included" {
     # stays green on every assertion above and ships broken HTML. todo.dawn's
     # comments spell `<ul>`, so the page must carry it entity-escaped.
     assert str.contains(p, "&lt;ul&gt;")
+  })
+}
+
+## The window goes around the frame and nothing goes in it: the mount point
+## is empty in the markup, because what fills it is what the reactor draws,
+## and the watchdog reads an empty one as "nothing mounted yet". The loading
+## line stays under it until the demo mounts.
+test "each demo's frame sits in a window and its mount point stays empty" {
+  io.with_fs_real(() => {
+    let p = tea_page(plain_assets(), En, ".")
+    assert str.contains(p, `<figure class="win tea-win hue-1">` ++ "\n"
+        ++ `<div class="win-bar"><i></i><i></i><i></i><span class="lbl">#tea-counter · wasm reactor</span></div>`)
+    assert str.contains(p, `<div class="tea-mount" id="tea-counter" data-wasm="./assets/tea-counter.wasm"></div>` ++ "\n"
+        ++ `<p class="tea-status">Loading the demo…</p>`)
+    assert str.contains(p, `<figure class="win tea-win hue-3">`)
+    # the title and the lede are in the band; the scripts still find the page
+    assert str.contains(p, `<p class="eyebrow">demo<span class="sep">·</span>two wasm reactors</p>`)
+    assert str.contains(p, `<article class="col prose tea-demo" data-slow=`)
   })
 }
 
