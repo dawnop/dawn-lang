@@ -324,18 +324,22 @@ The rest is in [docs/native-driver-plan.md](docs/native-driver-plan.md).
 
 Everything the website renders comes in both languages: this README (`README.md` is the
 original, [README.zh-CN.md](README.zh-CN.md) the translation), the front page, the
-tutorial, the standard library reference, the specification and the design notes. The
-last two are the pair whose original is the Chinese one — every change to the language
-edits them, in Chinese, so that is where the text is written and the English half is
-registered against it. The rest of `docs/` is design notes, plans and landing logs and is
+tutorial, the standard library reference, the specification, the history and the early
+design notes. The specification and the early design notes are the pair whose original is
+the Chinese one — every change to the language edits them, in Chinese, so that is where
+the text is written and the English half is registered against it. The rest of `docs/` is design notes, plans and landing logs and is
 **written in Chinese**, deliberately and for the time being: its reader is the author,
 and prose that has to be translated before it can be written is prose that does not get
 written.
 
 - [docs/tutorial.md](docs/tutorial.md) — the tutorial (also in
   [Chinese](docs/tutorial.zh-CN.md))
-- [docs/design.en.md](docs/design.en.md) — design goals and decision records: why this
-  and not that (translated from [docs/design.md](docs/design.md))
+- [docs/history.md](docs/history.md) — the history: a timeline from the first commit to
+  today, one entry per line of work, ending with the decisions that were later reversed
+  (also in [Chinese](docs/history.zh-CN.md))
+- [docs/design.en.md](docs/design.en.md) — the early design decisions (M0–M7): goals and
+  decision records, why this and not that as it was decided then (translated from
+  [docs/design.md](docs/design.md))
 - [docs/spec.en.md](docs/spec.en.md) — the language specification, the authoritative
   definition (translated from [docs/spec.md](docs/spec.md))
 - [docs/bootstrap.md](docs/bootstrap.md) — the bootstrap chain and the seed-advance
@@ -349,7 +353,8 @@ Current toolchain 0.82.0, M0–M8 implemented. <!-- doc-check: version --> The l
 work since then — the C backend and native bootstrap, Perceus, trait v2, effect
 handlers, package management, and the
 [cuTile device backend](docs/tile-backend-design.md) — are recorded in their own
-design documents under `docs/`.
+design documents under `docs/`, and [docs/history.md](docs/history.md) lists them in
+order, one entry each.
 
 ## Roadmap and contributing
 
