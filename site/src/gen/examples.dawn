@@ -156,6 +156,42 @@ pub fn collect_examples() -> List[Example] !Fs = {
   units
 }
 
+## Projects that keep their page but leave the index and the search: the slug
+## and the reason, which is written down so that hiding is a decision someone
+## can read rather than an absence someone has to explain.
+##
+## The gallery used to list every unit the walk found, and examples/ holds
+## more than examples: gate fixtures and one-line variants live there because
+## CI runs them, not because a reader needs them. Seven of twelve whole
+## programs were tea variants, and five of those opened with the same
+## sentence. The fix sits here and not in examples/ because what CI runs and
+## what the gallery shows are two different lists, and the gates own the
+## first. A hidden project still gets its page, so a link or a bookmark to it
+## keeps working.
+type Hidden = { slug: String, why: String }
+
+fn hidden() -> List[Hidden] = [
+  Hidden { slug: "tea_dom_counter_contract", why: "gate fixture, not for readers" },
+  Hidden { slug: "tea_dom_flags", why: "a one-line variant of the counter" },
+  Hidden { slug: "tea_dom_search", why: "the site's own search panel, see it in the header" },
+  Hidden { slug: "tea_dom_todo", why: "the keyed todo is the one the Demo page shows" },
+]
+
+fn hidden_slugs() -> List[String] = map(hidden(), h => h.slug)
+
+## Rows of the hidden table that name no example. A rename in examples/ would
+## otherwise leave a dead row behind and the renamed project back on the index
+## without anyone deciding that.
+fn dead_hidden_rows(table: List[String], slugs: List[String]) -> List[String] =
+  map(filter(table, h => not has(slugs, h)), h =>
+      "the hidden table of site/src/gen/examples.dawn names `${h}`, but no example has that slug")
+
+## The examples the index page and the search list, in gallery order.
+pub fn gallery_examples() -> List[Example] !Fs = {
+  let hide = hidden_slugs()
+  filter(collect_examples(), ex => not has(hide, ex.slug))
+}
+
 ## The two ways the table and the tree can disagree, both named rather than
 ## counted: a directory nobody registered, and a row that matched nothing.
 fn registration_gaps(table: List[String], found: List[String]) -> List[String] = {
@@ -441,15 +477,29 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     panic("two examples both want the slug `${dup}`, so one page would overwrite the other")
   }
 
+  for dead in dead_hidden_rows(hidden_slugs(), map(units, u => u.slug)) {
+    panic(dead)
+  }
+
   let registry = read_registry()
   let play = Play { href: "${root}/" ++ lang_path(lang, "playground.html"), label: playground_label(lang) }
+  for ex in units {
+    write_page("${dir}/${ex.slug}.html",
+      page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
+        example_page(c, ex, cases_of(registry, ex.target), play)))
+  }
+
+  write_page("${dir}/index.html",
+    page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples",
+      index_body(c, lang, gallery_examples())))
+}
+
+## The index page's body: one list per group, of the examples given.
+fn index_body(c: Chrome, lang: Lang, units: List[Example]) -> String !Fs = {
   var body = "<h1>${c.heading}</h1>\n<p>${c.lede}</p>"
   for g in groups() {
     var items = ""
     for ex in filter(units, u => u.group == g.id) {
-      write_page("${dir}/${ex.slug}.html",
-        page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
-          example_page(c, ex, cases_of(registry, ex.target), play)))
       items = items ++ "\n" ++
         """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++
         escape_html(must_describe(ex)) ++ "</li>"
@@ -457,9 +507,7 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     body = body ++ "\n<h2>${escape_html(group_title(g, lang))}</h2>\n" ++
       "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
   }
-
-  write_page("${dir}/index.html",
-    page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
+  body
 }
 
 test "each language's gallery lands in its own place" {
@@ -550,4 +598,28 @@ test "the table and the tree have to agree, and the gap says which way" {
 test "two examples cannot share one URL" {
   assert duplicate_slugs(["a", "b", "c"]) == []
   assert duplicate_slugs(["a", "b", "a", "a"]) == ["a"]
+}
+
+test "every hidden slug is an example, and a dead row says which" {
+  io.with_fs_real(() => {
+    assert dead_hidden_rows(hidden_slugs(), map(collect_examples(), ex => ex.slug)) == []
+  })
+  assert dead_hidden_rows(["a", "gone"], ["a", "b"]) ==
+    ["the hidden table of site/src/gen/examples.dawn names `gone`, but no example has that slug"]
+}
+
+## The count is pinned on purpose: a new project under examples/projects has to
+## be either shown, which moves this number, or hidden with a reason.
+test "the index lists eight whole programs and no gate fixture" {
+  io.with_fs_real(() => {
+    let body = index_body(chrome(En), En, gallery_examples())
+    let parts = str.split(body, "<h2>Whole programs</h2>")
+    assert len(parts) == 2
+    let section = str.split(parts[1], "</ul>")[0]
+    assert len(str.split(section, "<li>")) - 1 == 8
+    assert not str.contains(body, "tea_dom_counter_contract")
+    for h in hidden_slugs() {
+      assert not str.contains(body, "<code>${h}</code>")
+    }
+  })
 }
