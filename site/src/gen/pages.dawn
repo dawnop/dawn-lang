@@ -395,9 +395,9 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "(<code>dawn build --target wasm --reactor</code>), and both run from a "
         ++ "shell too, as a session you can type JSON at.",
       counter: "Counter",
-      counter_note: "Press <code>boom</code> to make the guest's <code>update</code> "
-        ++ "panic. The failure lands inside wasm, the reply carries no patches, the "
-        ++ "page keeps the document it has, and the next press works.",
+      counter_note: "Each press is one message into the guest's <code>update</code>. "
+        ++ "What comes back is one patch for the one text node that changed, and the "
+        ++ "bridge edits that node and nothing else.",
       counter_src: "View the source · counter.dawn",
       todo: "Todo list",
       todo_note: "Click a title to edit it. Then open a row, leave the caret in the "
@@ -429,8 +429,8 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "（<code>dawn build --target wasm --reactor</code>），"
         ++ "也都能从 shell 跑起来，成为一个可以手敲 JSON 的会话。",
       counter: "计数器",
-      counter_note: "按 <code>boom</code> 让 guest 的 <code>update</code> 故意 panic。"
-        ++ "失败落在 wasm 内部，回包不带补丁，页面保留手里的文档，下一次点击照常工作。",
+      counter_note: "每按一次就是送进 guest 的 <code>update</code> 的一条消息。"
+        ++ "回来的是一个补丁，只针对变了的那个文本节点，桥也只改那一个节点。",
       counter_src: "查看源码 · counter.dawn",
       todo: "待办列表",
       todo_note: "点标题即可编辑。然后打开一行、把光标留在文字中间，再删掉它上面的一行："
@@ -490,7 +490,9 @@ fn tea_source(summary: String, path: String) -> String !Fs = {
 ## Where each demo's pure half is. Named, because the whole promise of reading
 ## them is that these two paths are the ones the reactors were built from
 ## (site/build.sh builds `examples/projects/tea_dom_counter` and
-## `examples/projects/tea_dom_todo_keyed`).
+## `examples/projects/tea_dom_todo_keyed`). The counter is the plain one, not
+## `tea_dom_counter_contract`: the page shows the application, and the gates'
+## fixtures are not part of it.
 fn counter_source_path() -> String = "examples/projects/tea_dom_counter/src/counter.dawn"
 
 fn todo_source_path() -> String = "examples/projects/tea_dom_todo_keyed/src/todo.dawn"
@@ -550,20 +552,25 @@ test "the search glue resolves every resource against the document, not itself" 
   })
 }
 
-## The counter's section is the counter's file. The mutation this is against
-## is a one-word one: `main.dawn` sits next to `counter.dawn` in the same
+## The counter's section is the counter's file. The mutations this is against
+## are one-word ones: `main.dawn` sits next to `counter.dawn` in the same
 ## project, reads as a source file, highlights fine, and would put host wiring
-## under a demo whose whole claim is that the application is pure.
-test "the counter demo shows counter.dawn and not the host wiring next to it" {
+## under a demo whose whole claim is that the application is pure; and
+## `tea_dom_counter_contract` holds a counter.dawn too, whose gate fixtures
+## are what the split into two projects took off this page.
+test "the counter demo shows the plain counter.dawn and not its neighbours" {
   io.with_fs_real(() => {
     let p = tea_page(plain_assets(), En, ".")
     assert str.contains(p, `<details class="tea-src">`)
-    # `update`'s deliberate panic, spelled the way counter.dawn spells it and no
-    # other file in either project does.
-    assert str.contains(p, "boom: update failed on purpose at n=")
-    # main.dawn's opening line and its one call, neither of which belongs here.
+    # A doc comment of the plain counter.dawn's `encode`, which no other file in
+    # either project spells.
+    assert str.contains(p, "The host carries it untouched between turns")
+    # main.dawn's opening lines, neither of which belongs here.
     assert not str.contains(p, "The whole io surface of the demo")
-    assert not str.contains(p, "decode, upd, vw")
+    assert not str.contains(p, "The same binary answers a")
+    # The contract counter's root class and deliberate panic.
+    assert not str.contains(p, "counter below-zero")
+    assert not str.contains(p, "boom: update failed on purpose at n=")
   })
 }
 

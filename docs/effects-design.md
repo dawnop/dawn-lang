@@ -1054,7 +1054,7 @@ Core golden 是另一回事：**测试块不进这份 dump**（实测 `main.core
 backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`backend-dawn/src/util/http.dawn`）两个，且它们在生产路径上真的嵌套：
 `svc/monitor.lighthouse_start` 的行是 `!Upstream !io`，体内就地装 `Clock`，而调用它的
-`api/api_monitor` 已经把 `with_upstream` 装在外面；本仓 `examples/projects/tea_dom_counter`
+`api/api_monitor` 已经把 `with_upstream` 装在外面；本仓 `examples/projects/tea_dom_counter_contract`
 的 `effect Emit` 仍是单效果单 handler。
 
 **顺序这件事在本仓已经有一条机器判词了，虽然它答的不是难的那一半。** wrapper 的 body 行

@@ -33,7 +33,7 @@ import { Reactor } from '../../packages/tea-dom/js/reactor.mjs';
 const WARM = 200;
 const RUN = 2000;
 
-// tea_dom_counter's document: [3, 1] is `+`, [3, 0] is `-`, [3, 2] is
+// tea_dom_counter_contract's document: [3, 1] is `+`, [3, 0] is `-`, [3, 2] is
 // `reset`. A payload on a listener that declared none is a bad request.
 const shapes = {
   flip: (i) =>

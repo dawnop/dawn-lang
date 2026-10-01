@@ -13,13 +13,14 @@ Elm 架构在这个仓库里已经有两半：`packages/tea-core` 是与词汇�
 两边要商量出一个边界。这份文档记录那个边界的形状，以及三个决定的理由：为什么是 reactor、
 为什么只传消息、为什么不用 `externref`。
 
-实现分布在四个地方：
+实现分布在这几个地方：
 
 | 位置 | 是什么 |
 |---|---|
 | `packages/tea-dom/src` | DOM 词汇、路由、线格式、reactor 的一轮 |
 | `packages/tea-dom/js` | 宿主侧：WASI 垫片、reactor 驱动、patch 解释器 |
-| `examples/projects/tea_dom_counter` | 跑通整条环路的最小应用 |
+| `examples/projects/tea_dom_counter` | 跑通整条环路的最小应用，站点 tea 页展示的就是它；不带任何门禁夹具 |
+| `examples/projects/tea_dom_counter_contract` | 门禁用的计数器：在上面那个之上加 `Boom`（故意 panic）、长度随模型变的 `bar` 与补丁级测试。两者原是同一份文件，夹具淹没了核心逻辑，故拆开 |
 | `examples/projects/tea_dom_todo` | 第二个应用：带身份的列表、草稿、模式。§6 的两笔账在它身上是数字 |
 | `scripts/wasm-dom-contract` | 无浏览器的确定性转录门禁（两套转录，各带自己的变异体） |
 

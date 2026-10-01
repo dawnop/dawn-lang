@@ -3,7 +3,7 @@
 #
 # `dawnc build --target wasm --reactor` produces a reactor: no `_start`, one
 # exported `dawn_turn` the host calls per message. This script builds
-# examples/projects/tea_dom_counter that way, drives it through a scripted
+# examples/projects/tea_dom_counter_contract that way, drives it through a scripted
 # session against a recording document stub
 # (scripts/wasm-dom-contract/domstub.mjs), and holds the whole transcript --
 # what crossed the boundary, which patches came back, what the bridge did to
@@ -116,7 +116,7 @@ record=0
 "$(dirname "${BASH_SOURCE[0]}")/flags.sh"
 
 fail=0
-demo="$root/examples/projects/tea_dom_counter"
+demo="$root/examples/projects/tea_dom_counter_contract"
 expected="$here/expected.txt"
 todo_demo="$root/examples/projects/tea_dom_todo"
 todo_expected="$here/expected-todo.txt"
@@ -238,7 +238,7 @@ reset_tree() {
 # Which case the mutants below are held to. `case_of` switches all four at
 # once, because a mutant driven with one case's wasm and another case's
 # transcript reds for the wrong reason and reports a covered assertion.
-case_project="examples/projects/tea_dom_counter"
+case_project="examples/projects/tea_dom_counter_contract"
 case_script="transcript.mjs"
 case_expected="$expected"
 case_wasm="$work/counter.wasm"
@@ -246,7 +246,7 @@ case_wasm="$work/counter.wasm"
 case_of() { # <counter|todo>
   case "$1" in
     counter)
-      case_project="examples/projects/tea_dom_counter"
+      case_project="examples/projects/tea_dom_counter_contract"
       case_script="transcript.mjs"
       case_expected="$expected"
       case_wasm="$work/counter.wasm"

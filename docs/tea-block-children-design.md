@@ -612,7 +612,7 @@ fn row(m: Model, t: Todo) -> Unit !Emit =
 | `packages/tea-dom/src/dsl.dawn` | 207 行 | 8 个节点构造器改形状或配孪生（§3.7） |
 | `packages/tea-term/src/dsl.dawn` | 104 行 | 跟不跟，另裁 |
 | `examples/projects/tea_dom_todo{,_keyed}/src/todo.dawn` | 各 472 行，视图段约 115 行 | 视图段重写，测试加收集器一层 |
-| `examples/projects/tea_dom_counter/src/counter.dawn` | 149 行 | 同上，量小 |
+| `examples/projects/tea_dom_counter_contract/src/counter.dawn`（当时叫 `tea_dom_counter`） | 149 行 | 同上，量小 |
 | `examples/projects/tea_todo/src/todo.dawn` | 视图段约 30 行 | 只在终端词汇跟着分叉时 |
 | `packages/tea-dom/src/node.dawn` / `wire.dawn` / `route.dawn` / `reactor.dawn` | 0 | 不动 |
 | `scripts/wasm-dom-contract` 的转录 | 0 | 期望逐字节不变，这是验收判据 |
