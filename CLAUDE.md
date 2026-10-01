@@ -175,6 +175,10 @@ bind 会报 "Address already in use"，而 `ss` 看着是空的。
 `./scripts/advance-seed.sh v0.9.0`，由它从 GitHub Release 获取 JAR、从远端 tag archive
 获取 std，再依次推进 `seed-checksums.txt`、`seed-std-checksums.txt`、
 `seed-release.txt`，不得手改其中之一。
+**部署随发版**：advance-seed 之后，在该 tag 的检出上先部署 Playground、再部署站点：
+`playground/deploy/redeploy.sh` → `DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
+站点与 Playground 以 tag 为准，不以 main 为准；顺序反了，侧栏样例会交给拒绝它的旧 runner
+（见 `playground/deploy/DEPLOY.md`），漏带 `DAWN_WASM_CC` 则 Demo 与全站搜索的 wasm 是占位。
 `selfhost/src` 只准用当前种子已支持的语言特性（机器强制：种子编不动 HEAD 就红）——
 种子推进协议见 [docs/bootstrap.md](docs/bootstrap.md)，M8（淘汰 Kotlin）的
 决策与落地记录见 [docs/m8-selfhost-only.md](docs/history/m8-selfhost-only.md)。
