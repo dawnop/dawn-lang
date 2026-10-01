@@ -22,6 +22,7 @@ site/
 │   ├── gen/copy.dawn  # 首页文案（`## key` 分节的 Markdown），不再是 Dawn 里的字符串字面量
 │   ├── gen/assets.dawn  # 共用资产的语言检查：CSS `content:` 注入的字，两棵树各一份
 │   ├── gen/fingerprint.dawn  # 资产文件名里的内容哈希（sha2），配 /assets/ 的 immutable 头
+│   ├── gen/crawl.dawn  # sitemap.xml、robots.txt、404.html、根目录 favicon.ico
 │   ├── md/         # Markdown 子集解析器
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
@@ -42,7 +43,10 @@ site/
 
 **站点默认语言是英文**：`/` 出英文，同一路径的中文版在 `/zh/`，两页互挂 `hreflang`
 （`x-default` 指英文）、导航条上有互跳入口。**每一页都成对**：首页、教程、示例、标准库、
-规范、设计、Playground。
+规范、设计史（导航标签 History / 设计史，2026-10-01 起；文档冻结在 M7）、Playground、
+Demo。唯一不成对的是 404 页：它在任何一个找不到的地址上被返回，链接一律从站点根写起。
+页脚也按语言出，并印出构建用的 `VERSION` 与短 commit（`site/build.sh` 经环境变量
+`DAWN_SITE_VERSION`/`DAWN_SITE_COMMIT` 传给生成器；不设就不印）。
 
 多数对子里英文是正本，方向是刻意反过来的：**派生的那一份才会腐烂**，而对外那一层的读者
 大多不读中文。让英文当派生物，等于把腐烂藏在最多人看、最没人校对的那一面。反过来腐烂落在
@@ -100,16 +104,17 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
 | `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.en.md` |
 | `/zh/spec.html` | 同上（中文正本） | `docs/spec.md` |
-| `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.en.md` |
+| `/design.html` | 设计史（D1–D7 决策 + 里程碑，冻结在 M7） | `docs/design.en.md` |
 | `/zh/design.html` | 同上（中文正本） | `docs/design.md` |
 | `/examples/index.html` | 示例陈列页：按 `examples/<组>/` 分组，每例一句描述（取自文件头注释的第一段） | `examples/**` + `gen/examples.dawn` 的分组表 |
-| `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
-| `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
+| `/examples/{name}.html` | 每例一页：CI 跑的命令与它逐字节核对的输出、高亮源码（多文件项目按模块列出；单文件示例带 Playground 链接）。项目的描述依次取 `README.md` 首段、与项目同名的文件、`main.dawn` | 同上 + `scripts/example-main-contract/registry.json` |
+| `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl，模块按字母序；`std/gpu` 的 149 个 `*_ref` 参考 kernel 折进一个默认收起的组，锚点与搜索照旧），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
 | `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |
 | `/tea.html` | **浏览器 demo**：两个 wasm reactor（计数器 + 键控待办）挂在页面上跑 | `examples/projects/tea_dom_{counter,todo_keyed}`（`site/build.sh` 编译成 wasm）+ `packages/tea-dom/js/*.mjs`（桥），二者都由 `gen_assets` 搬进 `dist/assets` |
 | `/zh/tea.html` | 同上（中文译本；两个应用本身画的是英文） | 同上 |
-| `/assets/search-{en,zh}.json` | **搜索索引**（每语言一份，340 条：186 条 stdlib API + 模块/分组标题、规范与设计的 h2/h3、教程 17 章、示例与站内页面） | `dawn doc --stdlib` + `docs/spec*.md` / `design*.md` / `tutorial*.md` + `examples/**` + 导航表，全部由 `gen/search.dawn` 派生 |
+| `/assets/search-{en,zh}.json` | **搜索索引**（每语言一份：stdlib API + 模块/分组标题、规范与设计史的 h2/h3、教程 17 章及其 `###` 小节、示例与站内页面） | `dawn doc --stdlib` + `docs/spec*.md` / `design*.md` / `tutorial*.md` + `examples/**` + 导航表，全部由 `gen/search.dawn` 派生 |
 | `/assets/tea-search.wasm` | 搜索面板本体（wasm reactor），每页页头按钮首次触发才 fetch | `examples/projects/tea_dom_search`（`site/build.sh` 编成 wasm）|
+| `/sitemap.xml`、`/robots.txt`、`/404.html`、`/favicon.ico` | 给爬虫与输错地址的人：sitemap 从写好的页面读回、排序；404 页需服务器配 `error_page 404 /404.html`（配置在仓库外） | `gen/crawl.dawn` |
 
 ## 站内搜索
 
@@ -143,8 +148,11 @@ JSON 渲染器的键序是哈希的事实，而 `site-dist-diff.sh` 对这份文
     有序列表、表格、引用、`---` hr。
   - 行内：`` `code` ``、`**bold**`、`*em*`、`[text](url)`。行内码优先于表格分列
     （单元格里的 `|` 在反引号内不作分隔）。
-- **围栏语言**：`dawn` → 构建期高亮；`dawn skip-check` → 同 `dawn`（剥掉标记）；
-  `output` → 输出块（CSS 加「输出」角标）；其余（`bash`、裸块）→ 只转义不高亮。
+- **围栏语言**：`dawn` → 构建期高亮，教程里另挂 Playground 链接；`dawn skip-check` →
+  解析成 `Fragment`，同样高亮但**不挂** Playground 链接（它不是能单独跑的程序，链过去
+  必然失败）；`output` → 输出块（CSS 加角标，英文页 Output、中文页「输出」）；其余
+  （`bash`、裸块）→ 只转义不高亮。
+- **转义**：文本位置用 `escape_html`（`&<>`），属性值一律用 `escape_attr`（再加 `"`，#316）。
 - **锚点**：标题用编号 id（`#s2-3` = 第 2 节第 3 小节），不做中文 slug。
 - **高亮类名**（GitHub Light 配色）：`k` 关键字、`t` 类型/构造器（大写首字母）、
   `f` 定义名（`fn` 后的标识符）、`s` 字符串、`i` 字符串内 `$` 插值、`n` 数字/布尔、
@@ -191,4 +199,8 @@ DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
 
 站点的内容源是 `docs/**` 与 `examples/**`：**改了它们的提交一合进 main，就得跑一次
 `site/redeploy.sh`**——CI 只重建 `dist/` 用来对拍，不发布。2026-08-07 漏了这一步，
-线上的规范页旧了两天。
+线上的规范页旧了两天；2026-09 又落后了三周，页脚现在印着构建版本，落后一眼可见。
+
+`redeploy.sh` 默认 `DAWN_WASM_CC=clang-20`，并且三个 reactor 只要有一个缺失、是占位
+文本、或不是本次构建新编出来的，就拒绝 rsync（#319）。`build.sh` 本身仍然只警告——
+CI 没有 wasm 工具链，其余页面照样要建出来。
