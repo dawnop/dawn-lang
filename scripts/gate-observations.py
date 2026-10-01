@@ -240,15 +240,83 @@ def parse_since(text):
     return when
 
 
+def list_runs(repo, branch, workflow, limit, since, fetch=None):
+    """The workflow's runs on a branch, newest first, read page by page.
+
+    WHY NOT `gh run list` (issue #231, 2026-10-01). The totals step asked it
+    for `--limit 800` over fourteen days, and on the nightly runs of 09-30
+    and 10-01 the listing it got back held 2 and 13 runs where the API held
+    75 and 111: the table read "0 successful pushes this week" while six
+    green pushes sat in that week. The audit step, same token and same
+    workflow, asked for 300 and got all 79. The short reading could not be
+    reproduced locally (gh 2.97 and 2.101, both limits, all 111), so the
+    reader no longer trusts a long walk over the unfiltered history. With
+    --since the window is passed to the API as `created>=`, which keeps the
+    walk to one or two pages, and every page's `total_count` is compared
+    with the distinct runs read: a listing that comes back short or with a
+    run twice is refused, loudly, instead of becoming a sample. The runs
+    are sorted here rather than assumed sorted, so the oldest and newest
+    stamps the report prints are true of what was read.
+    """
+    fetch = fetch or gh_json
+    query = f"branch={branch}&per_page=100"
+    if since:
+        query += "&created=%3E%3D" + since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    problem = None
+    for _attempt in range(LIST_ATTEMPTS):
+        listed, problem = _list_once(fetch, repo, branch, workflow, limit,
+                                     since, query)
+        if problem is None:
+            return listed
+    raise SystemExit(problem)
+
+
+# A run created while the pages are walked shifts the next page by one and
+# reads as a duplicate; that is a race, not a short listing, so the walk is
+# repeated before it is refused.
+LIST_ATTEMPTS = 3
+
+
+def _list_once(fetch, repo, branch, workflow, limit, since, query):
+    """-> (runs newest first, None) or (None, why the listing is refused)."""
+    seen = {}
+    read = 0
+    total = None
+    page = 1
+    while True:
+        payload = fetch([
+            "gh", "api",
+            f"repos/{repo}/actions/workflows/{workflow}/runs?{query}&page={page}",
+        ])
+        batch = payload.get("workflow_runs", [])
+        total = payload.get("total_count", total)
+        for run in batch:
+            read += 1
+            seen[run["id"]] = {
+                "databaseId": run["id"],
+                "status": run.get("status"),
+                "conclusion": run.get("conclusion"),
+                "createdAt": run["created_at"],
+                "headSha": run.get("head_sha"),
+                "event": run.get("event"),
+            }
+        if len(batch) < 100 or (not since and read >= limit):
+            break
+        page += 1
+    if since and (read != len(seen) or total != len(seen)):
+        return None, (
+            f"the {workflow} runs on {branch} since {since.isoformat()} did not"
+            f" list cleanly in {LIST_ATTEMPTS} attempts: the API reports"
+            f" {total}, {read} came back over {page} page(s), {len(seen)} of"
+            " them distinct. A short sample would be reported as if it were"
+            " the window, so nothing is written.")
+    listed = sorted(seen.values(), key=lambda run: parse_time(run["createdAt"]),
+                    reverse=True)
+    return (listed if since else listed[:limit]), None
+
+
 def collect(repo, branch, workflow, runs, since, allow_empty=False):
-    listed = gh_json([
-        "gh", "run", "list",
-        "--repo", repo,
-        "--workflow", workflow,
-        "--branch", branch,
-        "--limit", str(max(runs * 2, runs)),
-        "--json", "databaseId,status,conclusion,createdAt,headSha,event",
-    ])
+    listed = list_runs(repo, branch, workflow, max(runs * 2, runs), since)
     picked = []
     for run in listed:
         if run["status"] != "completed":
