@@ -35,7 +35,8 @@
 #    so at the emit step instead of the claim rotting again.
 #
 # What is snapshotted and what is not: the generator's *data* -- docs/,
-# examples/, site/, packages/ -- is copied. The toolchain (bin/dawn,
+# examples/, site/, packages/, and the example registry under scripts/ whose
+# pinned stdout the gallery renders -- is copied. The toolchain (bin/dawn,
 # selfhost/src, std/, runtime/c) cannot be, because the JVM leg runs through
 # `bin/dawn`, which rebuilds itself from the recursive Planner source closure on
 # demand. So the toolchain is fingerprinted instead, before and after; a change there aborts
@@ -81,7 +82,8 @@ mkdir -p "$SNAP"
 # site/dist is the product, not an input; node_modules is npm's, and the
 # generator only ever reads site/play-ui/dist.
 tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
-  docs examples site packages | tar -xf - -C "$SNAP"
+  docs examples site packages scripts/example-main-contract/registry.json \
+  | tar -xf - -C "$SNAP"
 # site/build/stdlib.json is generated, not tracked (site/build.sh makes it).
 # Regenerating it into the snapshot keeps the run self-contained and keeps this
 # script from writing anything into the working tree.
