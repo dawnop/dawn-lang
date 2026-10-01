@@ -91,6 +91,8 @@ pub fn main() -> Unit !io = {
 Dawn was born in 2026
 ```
 
+See also: [spec.en.md](spec.en.md) §12.1
+
 ---
 
 ## 2. Values, types and functions
@@ -130,6 +132,38 @@ pub fn main() -> Unit !io =
 11
 ```
 
+### Named arguments and default values
+
+A parameter may carry a default, written `name: Type = expr`, and a call may then leave
+that argument out. Any argument may also be passed by name: the positional ones fill the
+slots from the left, a named one takes the slot it names, and names may come in any
+order.
+
+```dawn run
+fn greet(name: String, greeting: String = "Hello", punct: String = "!") -> String =
+  "${greeting}, ${name}${punct}"
+
+pub fn main() -> Unit !io = {
+  println(greet("Dawn"))
+  println(greet("Dawn", punct: "?"))
+  println(greet(punct: ".", name: "reader", greeting: "Welcome"))
+}
+```
+```output
+Hello, Dawn!
+Hello, Dawn?
+Welcome, reader.
+```
+
+A default is evaluated afresh on every call that leaves it out, and it has to be pure:
+if it could do io, whether a call did io would depend on whether the caller passed that
+argument. Arguments run in the order they are written, whichever slots they land in.
+The names belong to the signature, so a function value has none: after `let g = greet`,
+`g(name: "x")` is an error and `g` wants all three arguments. Constructors take names the
+same way, their field names standing in for parameter names (`Rect(w: 3.0, h: 4.0)`).
+
+See also: [spec.en.md](spec.en.md) §2.1, §3.1, §4.3, §4.4
+
 ---
 
 ## 3. match and exhaustiveness
@@ -156,6 +190,8 @@ zero
 positive
 negative
 ```
+
+See also: [spec.en.md](spec.en.md) §5
 
 ---
 
@@ -224,6 +260,8 @@ pub fn main() -> Unit !io = {
 (4, 2)
 ```
 
+See also: [spec.en.md](spec.en.md) §2.3, §2.4, §2.6
+
 ---
 
 ## 5. Lists, tuples and destructuring
@@ -266,6 +304,8 @@ pub fn main() -> Unit !io = {
 3 remainder 2
 ```
 
+See also: [spec.en.md](spec.en.md) §2.2, §4.11, §5.1
+
 ---
 
 ## 6. Loops: while, for, break and continue
@@ -297,6 +337,8 @@ pub fn main() -> Unit !io = {
 6
 ```
 
+See also: [spec.en.md](spec.en.md) §4.7
+
 ---
 
 ## 7. Error handling: Result and `?`
@@ -323,6 +365,8 @@ pub fn main() -> Unit !io =
 ```output
 got 5
 ```
+
+See also: [spec.en.md](spec.en.md) §8
 
 ---
 
@@ -366,6 +410,45 @@ pub fn main() -> Unit !io = {
 ```output
 22
 ```
+
+### A block as the last argument
+
+When a call's last argument is a function, it can follow the call as a bare block on the
+same line: `f(a) { e }` is `f(a, () => e)`. A block that takes parameters names them
+before a `=>`, as a lambda does, one bare name or a parenthesised list:
+
+```dawn run
+fn twice(body: fn() -> Unit !e) -> Unit !e = {
+  body()
+  body()
+}
+
+pub fn main() -> Unit !io = {
+  twice {
+    println("hi")
+  }
+  let total = fold([1, 2, 3], 0) { (acc, x) => acc + x * x }
+  println("${total}")
+  let loud = map(["a", "b"]) { s => s ++ "!" }
+  println("${loud}")
+}
+```
+```output
+hi
+hi
+14
+["a!", "b!"]
+```
+
+The block fills the **last** parameter whatever came before it, which is why
+`fold(xs, 0) { ... }` reads as "fold from 0, with this". It has to open on the same line
+as the call; a `{` on the next line is a block statement of its own. In an `if`, `while`
+or `for` header, and after `match`, the braces are the body and not an argument, so
+parenthesise the call there: `if (f(x) { ... }) { ... }`. With named arguments and
+defaults, it is how a function with many options and a body reads at the call site:
+`column(gap: 12) { ... }`.
+
+See also: [spec.en.md](spec.en.md) §4.3, §4.5, §6
 
 ---
 
@@ -430,6 +513,8 @@ pub fn main() -> Unit !io = {
 -1
 ```
 
+See also: [spec.en.md](spec.en.md) §1.6, §10.6, §11
+
 ---
 
 ## 10. comptime and const
@@ -450,6 +535,8 @@ pub fn main() -> Unit !io =
 ```output
 55
 ```
+
+See also: [spec.en.md](spec.en.md) §7
 
 ---
 
@@ -475,6 +562,8 @@ pub fn main() -> Unit !io = {
 7
 ```
 
+See also: [spec.en.md](spec.en.md) §9
+
 ---
 
 ## 12. test blocks and dawn fmt
@@ -499,6 +588,8 @@ ok
 And finally: `dawn fmt` settles the code style (2-space indent, regular spacing), and
 `dawn fmt --check` is the form CI wants. Get into the habit of running `dawn fmt` before
 you commit, and code review never has to argue about whitespace again.
+
+See also: [spec.en.md](spec.en.md) §3.4, §1.8
 
 ---
 
@@ -553,6 +644,8 @@ jar. Single-file `dawn run foo.dawn` still works. A `use` cycle is a compile err
 so is a name that collides with an imported module's alias — the two share one
 namespace.
 
+See also: [spec.en.md](spec.en.md) §10.1, §10.2, §10.3
+
 ---
 
 ## 14. Map and Set
@@ -588,6 +681,8 @@ true
 A key may be of any type with structural equality (`Int`/`String`/tuples/ADTs/records).
 `map.get` returns an `Option[V]` — a miss is `None`, not an exception. Equality ignores
 order: two `Map`s with the same keys and values are equal.
+
+See also: [spec.en.md](spec.en.md) §2.2, §11
 
 ---
 
@@ -654,6 +749,8 @@ One step is one character: an emoji's surrogate pair is never split down the mid
 `-1` — a sentinel that is not a character has no home in a type where every value is one
 (spec §4.8). `cursor.find(s, sub, from)` returns an `Option[Cursor]`, and
 `cursor.skip(s, c, sub)` steps over a literal already known to occur there.
+
+See also: [spec.en.md](spec.en.md) §1.5, §2.7, §11
 
 ---
 
@@ -807,6 +904,101 @@ The v1 boundary: an impl's subject can only be a **non-generic** named type or
 `Int`/`Float`/`Bool`/`String` (there are no conditional impls, and `List[T]` cannot be a
 subject); and a call under a trait constraint is not available in comptime. The full
 design is in [trait.md](trait.md), in Chinese.
+
+### Associated types, and the traits behind `[]` and `for`
+
+A trait can declare a type of its own that each impl fills in: `type Item` in the trait,
+`type Item = String` in the impl. A signature reaches it through the type parameter, as
+`C.Item`, so a generic function can talk about "whatever this container holds" without
+being told what that is:
+
+```dawn run
+trait Store[C] {
+  type Key
+  type Item
+  fn fetch(c: C, k: C.Key) -> Option[C.Item]
+}
+
+type Shelf = { names: List[String] }
+
+impl Store[Shelf] {
+  type Key = Int
+  type Item = String
+  fn fetch(c: Shelf, k: Int) -> Option[String] = get(c.names, k)
+}
+
+# a generic consumer: whatever the store's key and item are, it uses them as they are
+fn fetch_or[C: Store](c: C, k: C.Key, fallback: C.Item) -> C.Item =
+  match fetch(c, k) {
+    Some(x) -> x
+    None -> fallback
+  }
+
+pub fn main() -> Unit !io = {
+  let s = Shelf { names: ["tea", "rice"] }
+  println(fetch_or(s, 1, "nothing"))
+  println(fetch_or(s, 5, "nothing"))
+}
+```
+```output
+rice
+nothing
+```
+
+`fetch_or` is checked once, against the trait, and at each call `C.Item` becomes the
+impl's binding, so `fetch_or(s, 1, "nothing")` takes and returns a `String`. An impl
+binds each associated type exactly once; leaving one out, or binding a name the trait
+does not declare, is an error.
+
+Two of the built-in traits are written this way, and they are the ones the language's
+own syntax goes through. `Index[C]` has `type Idx`, `type Item` and one method, `index`,
+and it is what `c[i]` calls: `List` (indexed by `Int`) and `Map` (by its key) come with
+impls, and one impl gives a type of your own `[]`. `Iter[C]` has `type Cur`, `type Item`
+and four cursor methods, and it is what `for x in c` walks:
+
+```dawn run
+type Grid = { w: Int, cells: List[Int] }
+
+impl Index[Grid] {
+  type Idx = (Int, Int)
+  type Item = Int
+  fn index(g: Grid, p: (Int, Int)) -> Int = {
+    let (x, y) = p
+    g.cells[y * g.w + x]
+  }
+}
+
+type Countdown = { from: Int }
+
+impl Iter[Countdown] {
+  type Cur = Int
+  type Item = Int
+  fn iter_start(it: Countdown) -> Int = it.from
+  fn iter_done(it: Countdown, c: Int) -> Bool = c == 0
+  fn iter_next(it: Countdown, c: Int) -> Int = c - 1
+  fn iter_get(it: Countdown, c: Int) -> Int = c
+}
+
+pub fn main() -> Unit !io = {
+  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  println("${g[(2, 1)]}")
+  let launch = Countdown { from: 3 }
+  for n in launch {
+    print("${n} ")
+  }
+  println("liftoff")
+}
+```
+```output
+6
+3 2 1 liftoff
+```
+
+Both traits are in the prelude, so neither impl needs a `use`. `[]` is read-only (there
+is no `c[i] = v`), and a type has exactly one index type. `index` itself cannot be
+called by name, because `[]` is its spelling; the four `Iter` methods can.
+
+See also: [spec.en.md](spec.en.md) §3.5, §4.8
 
 ## 17. Effects of your own: `effect` and `with handle`
 
@@ -1001,6 +1193,135 @@ Two rules keep a cell apart from an ordinary `var`:
 Each installation gets its own cells. A nested `with handle` for the same effect keeps a
 separate set, and what the inner one accumulates does not reach the outer one.
 
+### The standard library's effects, and a file system that is a table
+
+`std/io` declares effects of the kind this chapter has been writing for the parts of the
+outside world a program usually just calls: `Fs` (files), `Env` (the working directory
+and environment variables), `Proc` (running another program), `Exit` (ending the process)
+and `Console` (writing to stdout and stderr). `io.read_file` and the rest of the file
+functions are `!Fs`, `io.getenv` and `io.cwd` are `!Env`, `io.run` is `!Proc`. So a
+signature says which part of the world a function touches, and a test can answer that
+effect with a fake.
+
+std ships one fake ready-made: `std/memfs` answers `Fs` from a table in memory.
+`memfs.with_fs(tree, body)` runs `body` against `tree` and hands back the result together
+with the tree as `body` left it. `Env` has two operations, and a fake for it is a
+`with handle` of two lines:
+
+```dawn run
+use std/io
+use std/io.{Fs, Env}
+use std/memfs
+use std/str
+
+# The signature says it all: this touches files and nothing else.
+fn archive(path: String) -> Result[Int, ForeignError] !Fs = {
+  let text = io.read_file(path)?
+  io.write_file(path ++ ".bak", text)?
+  Ok(len(str.split(text, "\n")))
+}
+
+# And this reads the environment, and nothing else.
+fn greeting() -> String !Env =
+  match io.getenv("USER") {
+    Some(name) -> "hello, ${name}"
+    None -> "hello, stranger"
+  }
+
+pub fn main() -> Unit !io = {
+  let tree = memfs.put(memfs.empty(memfs.BASE), "notes.txt", "one\ntwo\nthree")
+  let (lines, after) = memfs.with_fs(tree, () => archive("notes.txt"))
+  println("${lines}")
+  println("${memfs.file_paths(after)}")
+  println("${memfs.text(after, "notes.txt.bak")}")
+
+  with handle Env {
+    env_cwd() => "/home/ada"
+    env_get(name) => if name == "USER" { Some("ada") } else { None }
+  }
+  println(greeting())
+}
+```
+```output
+Ok(3)
+["/dawn-memfs/notes.txt", "/dawn-memfs/notes.txt.bak"]
+Some("one\ntwo\nthree")
+hello, ada
+```
+
+`archive` read one file and wrote another, and nothing touched a disk. `memfs.with_fs` is
+pure, so the same lines work in a `test` block with no temporary directory to make or
+clean up. A program meets the real world by installing the production handlers once, at
+the top: `io.with_fs_real(() => ...)`, and likewise `with_env_real`, `with_proc_real`,
+`with_exit_real` and `with_console_real`, each of them `!io`. (`println` itself is still
+plain `!io`; `Console` is there for code whose output a test wants to read back.)
+
+### Control arms: `ctl`, `resume k` and `discard`
+
+Every arm so far answers its operation and lets the caller carry on. An effect declared
+`ctl` may also have **control arms**, which take hold of the rest of the computation
+instead: `op(args) resume k => ...` binds `k`, a function that resumes the code after the
+operation with the value you pass it. The arm's value is the value of the whole
+`with handle` block, so an arm that does not call `k` ends the block early, with an
+answer of its own.
+
+```dawn run
+ctl effect Check {
+  fn check(ok: Bool, why: String) -> Unit
+}
+
+fn validate(age: Int) -> String !Check = {
+  check(age >= 0, "negative")
+  check(age < 150, "too large")
+  "age ${age}"
+}
+
+fn close(name: String) -> Unit !io = println("closed ${name}")
+
+fn admit(age: Int) -> String !io = {
+  with handle Check {
+    check(ok, why) resume k =>
+      if ok {
+        k(())
+      } else {
+        discard(k)
+        "rejected: ${why}"
+      }
+  }
+  with log <- bracket("log", close)
+  "${log}: ${validate(age)}"
+}
+
+pub fn main() -> Unit !io = {
+  println(admit(30))
+  println(admit(-1))
+  println(admit(200))
+}
+```
+```output
+closed log
+log: age 30
+closed log
+rejected: negative
+closed log
+rejected: too large
+```
+
+For `admit(-1)`, `validate` asks `check(false, "negative")`, and the arm does not resume:
+the second `check` and the `"age ..."` line never run, and `"rejected: negative"` is the
+answer of `admit`'s whole block. For `admit(30)` the arm calls `k(())` at each check, and
+what the rest of the block finally produces comes back out of `k` as the arm's value.
+
+A continuation is one-shot: resuming it twice is a panic. One you will never resume is
+abandoned with `discard(k)`, and that is what runs the cleanups between the operation and
+the handler; here it is the `bracket` that prints `closed log`, which ran on all three
+paths. Just dropping `k` runs nothing, on purpose: a cleanup that ran whenever a
+collector got round to it would behave differently on the two backends. `k` is an
+ordinary function value, so it may also be stored and resumed later. `std/io`'s `Exit`
+is a `ctl` effect for the reason this section starts from: a test answers `io.exit(1)`
+with an arm that does not resume and hands the status back as a value, where the
+production arm ends the process.
+
 ### The v1 boundary
 
 - A **tail-resumptive** arm is one ordinary call and its return value is the result.
@@ -1025,6 +1346,8 @@ separate set, and what the inner one accumulates does not reach the outer one.
 
 The full rules are in [spec.en.md](spec.en.md) §6.5 and the design trade-offs in
 [effects-design.md](effects-design.md).
+
+See also: [spec.en.md](spec.en.md) §6.5, §11
 
 ---
 
