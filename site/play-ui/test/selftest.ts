@@ -17,6 +17,7 @@ import {
   offsetToLspPosition,
   type LspSocket,
 } from '../src/lsp'
+import { playEndpoints } from '../src/endpoints'
 
 let fails = 0
 function expect(name: string, got: unknown, want: unknown) {
@@ -199,6 +200,25 @@ expect(
   [1, 3, 'warning'],
 )
 expect('HTTPS endpoint becomes WSS', lspWebSocketUrl('/api/lsp', 'https://example.test/play'), 'wss://example.test/api/lsp')
+// The page and the service on one origin (the default build) and on two
+// (DAWN_SITE_PLAY_ORIGIN set): every sibling stays on the run URL's origin,
+// never the page's, and the LSP scheme follows the service's.
+expect('relative endpoint stays on the page origin', playEndpoints('/api/run', 'https://site.example.test/zh/playground.html'), {
+  run: 'https://site.example.test/api/run',
+  check: 'https://site.example.test/api/check',
+  health: 'https://site.example.test/api/health',
+  lsp: 'wss://site.example.test/api/lsp',
+})
+expect('absolute endpoint moves every service to its origin', playEndpoints('https://play.example.test/api/run', 'https://site.example.test/playground.html'), {
+  run: 'https://play.example.test/api/run',
+  check: 'https://play.example.test/api/check',
+  health: 'https://play.example.test/api/health',
+  lsp: 'wss://play.example.test/api/lsp',
+})
+expect('plain http service gets plain ws', playEndpoints('http://127.0.0.1:18097/api/run', 'http://127.0.0.1:8000/playground.html').lsp, 'ws://127.0.0.1:18097/api/lsp')
+let badEndpoint = ''
+try { playEndpoints('https://play.example.test/api/', 'https://site.example.test/') } catch (e) { badEndpoint = String(e) }
+expect('an endpoint that is not a run URL is refused', badEndpoint.includes('does not end in /run'), true)
 expect('markdown hover fence is plain text', hoverText('```dawn\nfn f() -> Int\n```'), 'fn f() -> Int')
 const merged = mergeCompletionResults(
   [{ label: 'same', detail: 'server' }, { label: 'semantic' }],

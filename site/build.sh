@@ -111,6 +111,15 @@ if [ -z "${DAWN_SITE_COMMIT:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; th
 fi
 export DAWN_SITE_VERSION DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT:-}"
 
+# Where the Playground's API lives (gen/pages.play_origin): empty, the default,
+# keeps the page's relative `/api/run`; set to a bare origin such as
+# `https://play.example.test`, the page hands the editor absolute URLs on it.
+# This is what lets the pages sit behind a CDN that carries no WebSocket while
+# `/api/lsp` stays on a host that does (docs/site-cdn-design.md). Environment
+# again, so scripts/site-dist-diff.sh's two legs both see whatever the caller
+# set.
+export DAWN_SITE_PLAY_ORIGIN="${DAWN_SITE_PLAY_ORIGIN:-}"
+
 # The front page's figures (scripts/site-figures.sh), as DAWN_SITE_FIG_<KEY>.
 # Environment for the reason the two lines above are: the differential runs the
 # generator where neither selfhost/ nor .git exists. Passed through as they

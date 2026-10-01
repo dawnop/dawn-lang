@@ -121,6 +121,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 | [site-home-design.md](site-home-design.md) | current | 首页「Horizon」落到站点生成器：一片天的结构、仅首页的亮暗两套 token 与切换、动效清单（reduced motion 与无脚本的终态）、每个数字的生产者（`scripts/site-figures.sh` 经环境变量注入，空则构建红）、GPU 源码从 `examples/projects/gpu_fake` 切出、JetBrains Mono 自托管、唯一外部脚本 `home.js`；偏离定稿与不做的。 |
 | [site-pages-design.md](site-pages-design.md) | current | 首页以外的页面落到「Horizon」：短天空带与页头（eyebrow、标题、导语、译本说明）、亮暗 token 收进 `style.css` 全站共用、`theme.js` 与内页的 view transition 圆形展开（首页保留日月轮转）、渲染器的节号/锚点/表格容器/状态框/删除线/时间线列表、可运行代码窗、`/history.html` 由时间线文档生成；不做的。 |
+| [site-cdn-design.md](site-cdn-design.md) | current | 整站走 CDN 的仓库侧前置：CDN 不做 WebSocket，所以 Playground 的四个 `/api/*` 端点搬到独立 origin；构建变量 `DAWN_SITE_PLAY_ORIGIN`（空则挂载点逐字节不变，设则绝对端点、非法 origin 构建红）、前端由 run 的 URL 推出 check/health/lsp、源站须满足的 CORS 契约、`play-live-check` 与 `redeploy.sh` 的可配置健康 URL；不做的。 |
 
 ## 旧审查设计材料（`docs/audit/`）
 

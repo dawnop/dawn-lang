@@ -113,4 +113,8 @@ echo "=== restarting service ==="
 ssh "$HOST" "$REMOTE_RESTART"
 
 echo "=== done ==="
-echo "verify: curl https://dawn-lang.dawnop.com/api/health"
+# Where the public health endpoint is: the site's own `/api` while the pages
+# and the service share an origin, the service's origin once the pages sit
+# behind a CDN (docs/site-cdn-design.md). Overridable rather than edited so the
+# switch is one variable on the day it happens.
+echo "verify: curl ${PLAY_HEALTH_URL:-https://dawn-lang.dawnop.com/api/health}"

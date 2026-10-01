@@ -98,6 +98,11 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 # why). The generator refuses to build without them.
 . scripts/site-figures-env.sh
 
+# DAWN_SITE_PLAY_ORIGIN (site/build.sh) is not set here and needs nothing: the
+# two legs are children of this shell, so a caller who sets it compares both
+# backends on the absolute Playground endpoint, and one who does not compares
+# them on the relative one. Either way they see the same value.
+
 # ---- leg 1: the JVM backend ----
 echo "== JVM =="
 (cd "$SNAP" && "$ROOT/bin/dawn" run site) > "$OUT/jvm.log" 2>&1 || {
