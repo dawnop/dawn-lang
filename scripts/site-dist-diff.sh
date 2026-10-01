@@ -92,6 +92,12 @@ mkdir -p "$SNAP/site/build"
 
 echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 
+# The front page's figures come from selfhost/ and scripts/, which the snapshot
+# does not hold, so they are computed here from the working tree and handed to
+# both legs through the environment they share (scripts/site-figures.sh says
+# why). The generator refuses to build without them.
+. scripts/site-figures-env.sh
+
 # ---- leg 1: the JVM backend ----
 echo "== JVM =="
 (cd "$SNAP" && "$ROOT/bin/dawn" run site) > "$OUT/jvm.log" 2>&1 || {

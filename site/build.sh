@@ -111,6 +111,14 @@ if [ -z "${DAWN_SITE_COMMIT:-}" ] && git rev-parse --git-dir >/dev/null 2>&1; th
 fi
 export DAWN_SITE_VERSION DAWN_SITE_COMMIT="${DAWN_SITE_COMMIT:-}"
 
+# The front page's figures (scripts/site-figures.sh), as DAWN_SITE_FIG_<KEY>.
+# Environment for the reason the two lines above are: the differential runs the
+# generator where neither selfhost/ nor .git exists. Passed through as they
+# come, empty ones included -- refusing an empty figure is the generator's job
+# (gen/home.read_figure), and a check here would be a second guard nobody
+# could tell apart from the first.
+. scripts/site-figures-env.sh
+
 rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
