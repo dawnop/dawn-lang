@@ -254,30 +254,52 @@ back for carrying a `CR` must not carry it into the log line the panic becomes,
 or into the `400` body. What that escapes is exactly what `valid_header_value`
 refuses, so `SP` and `HTAB` come through untouched.
 
-## Error wording (2.1)
+## Error wording (2.1, 5.2)
 
-The framework renders three strings of its own: the JSON key of an error body,
-the `500` it writes for a failure of its own (a handler panic, a request body it
-could not spill to disk), and the separator between a parameter's name and the
-complaint in `query_int_bounded`'s `422`. They are
+Every error body the framework writes on its own is worded by one value,
 `ErrorFormat`, defaulting to neutral English:
 
-```
-{"error": "..."}      "internal server error"      "size: Input should be ..."
-```
+| field | used for | default |
+|---|---|---|
+| `detail_key` | the JSON key of every error body | `{"error": "..."}` |
+| `internal_message` | the `500` for a failure of its own (a handler panic, a request body it could not spill to disk) | `"internal server error"` |
+| `param_separator` | between a parameter's name and the complaint in `query_int_bounded`'s `422` | `"size: Input should be ..."` |
+| `body_too_large` | the `413` for a request body over its ceiling, given that ceiling in bytes | `"request body exceeds N bytes"` |
+| `not_found` | the `404` for a path no route matches | `"Not Found"` |
+| `method_not_allowed` | the `405` for a path matched under another method | `"Method Not Allowed"` |
+| `dot_segment` | the `400` for a path with a `.` or `..` segment | `"path contains a dot segment"` |
 
-An application that must reproduce another server's bytes states them once:
+The `413` wording applies wherever the ceiling is enforced: an in-memory body
+refused on its `Content-Length` or found too long while reading, a
+`stream-body` route refused on its `Content-Length`, and a spill that counted
+past the ceiling.
+
+An application states the fields it changes and takes the rest from
+`default_errors()`:
 
 ```dawn
-let fastapi = ErrorFormat {
-  detail_key: "detail", internal_message: "...", param_separator: "：",
+let site = ErrorFormat {
+  ..default_errors(),
+  detail_key: "detail",
+  internal_message: "...",
+  param_separator: "：",
+  body_too_large: n => "upload limit is ${n} bytes",
+  not_found: "...",
 }
-serve_app_with(ServerConfig { host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: fastapi },
+serve_app_with(ServerConfig { host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: site },
   routes, middleware)
 ```
 
 and passes the same value to `error_response_with` / `query_int_bounded_with`
-where it renders errors itself. Before 2.1 those three strings were hardcoded to
-what one consumer (dawnop-site, whose frontend was written against FastAPI)
-needed — including a Chinese `500` message and pydantic's fullwidth colon — and
-`ServerConfig` had no `errors` field.
+where it renders errors itself. Since 5.2 `ErrorFormat` no longer derives
+`Show`, because a function field cannot be printed. Code that calls
+`default_errors()` or builds the value with `..default_errors()` is unaffected
+by 5.2; a record literal that names every field has to add the four new ones.
+
+Before 2.1 the first three strings were hardcoded to what one consumer
+(dawnop-site, whose frontend was written against FastAPI) needed, including a
+Chinese `500` message and pydantic's fullwidth colon, and `ServerConfig` had no
+`errors` field. Before 5.2 the other four were fixed English strings in the
+server, so an application that worded its own errors in another language still
+answered in English for an oversized body, an unknown path, a wrong method or
+a dot segment, sometimes on the same route as its own `401`.
