@@ -6,10 +6,9 @@
 import {
   StreamLanguage,
   LanguageSupport,
-  HighlightStyle,
   syntaxHighlighting,
 } from '@codemirror/language'
-import { Tag, tags } from '@lezer/highlight'
+import { Tag, tags, tagHighlighter } from '@lezer/highlight'
 import {
   autocompletion,
   type Completion,
@@ -183,16 +182,24 @@ const dawnMode = StreamLanguage.define<State>({
   },
 })
 
-// Colors lifted verbatim from site/assets/style.css (.k/.t/.f/.s/.i/.n/.c).
-const dawnHighlight = HighlightStyle.define([
-  { tag: tags.keyword, color: '#cf222e' },
-  { tag: tags.typeName, color: '#9333ea' },
-  { tag: defTag, color: '#7c3aed' },
-  { tag: tags.string, color: '#0a3069' },
-  { tag: interpTag, color: '#0550ae' },
-  { tag: tags.number, color: '#0550ae' },
-  { tag: tags.lineComment, color: '#6e7781', fontStyle: 'italic' },
-  { tag: tags.variableName, color: 'inherit' },
+// Token classes, not colours. A HighlightStyle bakes its colours into
+// generated class names that no stylesheet can reach, which held the editor
+// pane light in the site's dark theme (issue #342). These names are stable, so
+// playground.css colours them from the site's code tokens (--k, --t, --f, --s,
+// --n, --c in site/assets/style.css), and the theme switch recolours them like
+// every other code block on the site. The classes mirror the build-time
+// highlighter's .k/.t/.f/.s/.i/.n/.c. Plain identifiers keep a class that no
+// rule colours: they take the pane's text colour, but stay in their own span,
+// as they were under the HighlightStyle, so text runs are cut where they were.
+const dawnHighlight = tagHighlighter([
+  { tag: tags.keyword, class: 'tok-keyword' },
+  { tag: tags.typeName, class: 'tok-typeName' },
+  { tag: defTag, class: 'tok-def' },
+  { tag: tags.string, class: 'tok-string' },
+  { tag: interpTag, class: 'tok-interp' },
+  { tag: tags.number, class: 'tok-number' },
+  { tag: tags.lineComment, class: 'tok-comment' },
+  { tag: tags.variableName, class: 'tok-variableName' },
 ])
 
 // Constructors of the prelude ADTs — completable like builtins.
