@@ -30,7 +30,7 @@ use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
-  analyze_program, rendered_diags
+  analyze_program, rendered_diags, dawn_files_under
 }
 use driver/clifail.{fail_compile}
 use compiler_plan/source
@@ -1755,25 +1755,6 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
         abs_parent(jar_path) ++ "/lib (run it with: java -jar " ++ jar_path ++
         "; keep lib/ next to the jar)")
   }
-}
-
-## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
-fn dawn_files_under(dir: String) -> List[String] !Fs = {
-  var out: List[String] = []
-  match io.list_dir(dir) {
-    Ok(files) -> {
-      for f in files {
-        let p = dir ++ "/" ++ f
-        if io.is_dir(p) {
-          out = out ++ dawn_files_under(p)
-        } else if str.ends_with(f, ".dawn") {
-          out = out ++ [p]
-        }
-      }
-    }
-    Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e.message)
-  }
-  out
 }
 
 ## `selfhost fmt [--check] <file.dawn | dir>...` — mirror of `dawn fmt`:

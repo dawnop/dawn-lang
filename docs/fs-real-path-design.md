@@ -164,4 +164,6 @@ fsmem 换用 `memfs.with_fs`；`Fs` 加 `fs_real_path`；两后端 intrinsic；`
 - **不把 `fspath` 放回 std。** 见上文「与 fsmem 不同的四处」第 1 条。
 - **#297 不改其它遍历。** `stdlib` 的 std 目录只按 `modules.txt` 读，不遍历；`dawn fmt` 的目录模式
   （`main.dawn` 与 `nmain.dawn` 各一份 `dawn_files_under`）有同样的跟随，但它不是项目加载、不进 LSP，
-  #297 的验收也没点它；本批不扩范围，交给后续 issue。
+  #297 的验收也没点它；本批不扩范围，交给后续 issue。（2026-10-01 由 #302 收掉：两个驱动删掉各自的副本，
+  改用 `driver/analyze.dawn` 的 `pub fn dawn_files_under`，它与 `walk_dawn` 共用一个遍历 `walk_sources`；
+  唯一的差别是列不出的目录，加载器跳过，格式化器报 `cannot list` 停下，以免 `fmt --check` 漏查一片还判绿。）
