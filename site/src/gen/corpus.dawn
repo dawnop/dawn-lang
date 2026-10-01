@@ -1,0 +1,73 @@
+# The four documents the site renders and searches, parsed once per language.
+#
+# The spec, the timeline, the early design notes and the tutorial each feed
+# three products: their pages (gen/pages, gen/tutorial), the title index
+# (gen/search) and the body index (gen/search_body). Until 2026-10-02 every
+# one of those read and parsed the Markdown itself -- the tutorial four times
+# per language -- and the only thing holding the search's anchors to the
+# pages' ids was that every reader happened to make the same calls on the
+# same file. Reading once and handing the blocks to all three makes "the same
+# input" a fact rather than a coincidence, and takes the repeated parses out
+# of a build that scripts/site-dist-diff.sh runs twice.
+#
+# Which file is which language is said here and only here. The pairs do not
+# all run the same way: the spec and the early design notes are originally
+# Chinese (`<base>.md`, English `<base>.en.md`, registered in
+# scripts/doc-check.py), while the timeline and the tutorial are originally
+# English, as the outward-facing documents are.
+
+use md/ast.{Block}
+use md/parser.{parse}
+use html/page.{Lang, En, Zh}
+use gen/common.{must_read}
+use std/io.{Fs}
+
+## One language's four documents, as parsed blocks.
+pub type Corpus = {
+  spec: List[Block],
+  design: List[Block],
+  history: List[Block],
+  tutorial: List[Block],
+}
+
+## The Markdown file `base` ("spec", "design", "history" or "tutorial") is
+## written in for `lang`.
+pub fn corpus_path(base: String, lang: Lang) -> String = {
+  let chinese_original = base == "spec" || base == "design"
+  match lang {
+    En -> if chinese_original { "docs/${base}.en.md" } else { "docs/${base}.md" }
+    Zh -> if chinese_original { "docs/${base}.md" } else { "docs/${base}.zh-CN.md" }
+  }
+}
+
+fn parsed(path: String) -> List[Block] !Fs =
+  match parse(must_read(path)) {
+    Ok(bs) -> bs
+    Err(e) -> panic("${path}: ${e}")
+  }
+
+## Read and parse `lang`'s four documents. A file that does not parse stops
+## the build: the parser rejects Markdown outside the subset the renderer
+## knows, which is the docs lint site/README.md describes.
+pub fn read_corpus(lang: Lang) -> Corpus !Fs =
+  Corpus {
+    spec: parsed(corpus_path("spec", lang)),
+    design: parsed(corpus_path("design", lang)),
+    history: parsed(corpus_path("history", lang)),
+    tutorial: parsed(corpus_path("tutorial", lang)),
+  }
+
+## Each language reads its own half of every pair. A page built from the
+## wrong half would be one language's text under the other language's chrome,
+## and every link on it would still resolve.
+test "each language reads its own half of every document" {
+  assert corpus_path("spec", En) == "docs/spec.en.md"
+  assert corpus_path("spec", Zh) == "docs/spec.md"
+  assert corpus_path("design", En) == "docs/design.en.md"
+  assert corpus_path("design", Zh) == "docs/design.md"
+  # the timeline and the tutorial are English originals
+  assert corpus_path("history", En) == "docs/history.md"
+  assert corpus_path("history", Zh) == "docs/history.zh-CN.md"
+  assert corpus_path("tutorial", En) == "docs/tutorial.md"
+  assert corpus_path("tutorial", Zh) == "docs/tutorial.zh-CN.md"
+}

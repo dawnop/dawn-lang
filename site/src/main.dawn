@@ -11,16 +11,23 @@ use gen/stdlib.{gen_stdlib}
 use gen/links.{check_links}
 use gen/assets.{check_assets}
 use gen/crawl.{gen_crawl}
+use gen/corpus.{read_corpus}
 use std/io.{with_fs_real, with_env_real}
 
 pub fn main() -> Unit !io = {
   with_fs_real(() => {
     let out = "site/dist"
+    # The spec, the timeline, the early design notes and the tutorial, each
+    # parsed once per language and handed both to the search indexes (inside
+    # gen_assets) and to the pages, so that the anchors the search writes are
+    # counted over the very blocks the pages render (gen/corpus.dawn).
+    let en = read_corpus(En)
+    let zh = read_corpus(Zh)
     # The names the assets got: content-hashed, so that the one-year
     # `immutable` header /assets/ is served with stops holding a returning
     # visitor on a stale copy. Every page below links to what this hands back.
     # The release and commit the footer prints; see gen/pages.build_stamp.
-    let assets = gen_assets(out, with_env_real(() => build_stamp()))
+    let assets = gen_assets(out, with_env_real(() => build_stamp()), en, zh)
     # The front page's figures, from scripts/site-figures.sh by way of the
     # environment site/build.sh sets. Read before anything is written: a build
     # without them stops here (gen/home.read_figure) rather than half way
@@ -36,8 +43,8 @@ pub fn main() -> Unit !io = {
     gen_index(out, assets, Zh, figs)
     # The tutorial is the second paired document: English at /tutorial/, its
     # translation at /zh/tutorial/, each page linked to its twin.
-    gen_tutorial(out, assets, En)
-    gen_tutorial(out, assets, Zh)
+    gen_tutorial(out, assets, En, en.tutorial)
+    gen_tutorial(out, assets, Zh, zh.tutorial)
     # And the rest of the paired ones. The standard library reference is a
     # translated intro over entries that are English in both runs -- the doc
     # comments are the compiler's own text; the gallery and the Playground are a
@@ -58,15 +65,15 @@ pub fn main() -> Unit !io = {
     # Chinese by every language batch, and the English is registered against
     # them in scripts/doc-check.py. The layout does not care which way that
     # runs: English at `/`, Chinese at `/zh/`, same as everything above.
-    gen_spec(out, assets, En)
-    gen_spec(out, assets, Zh)
-    gen_design(out, assets, En)
-    gen_design(out, assets, Zh)
+    gen_spec(out, assets, En, en)
+    gen_spec(out, assets, Zh, zh)
+    gen_design(out, assets, En, en)
+    gen_design(out, assets, Zh, zh)
     # The history: a timeline whose original is the English one, the way the
     # outward-facing documents run. The design notes above are its early
     # chapter and keep their own URL.
-    gen_history(out, assets, En)
-    gen_history(out, assets, Zh)
+    gen_history(out, assets, En, en)
+    gen_history(out, assets, Zh, zh)
     # robots.txt, the sitemap, the 404 page and the root favicon: last,
     # because the sitemap is read back off the pages above.
     gen_crawl(out, assets)

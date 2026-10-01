@@ -2,16 +2,18 @@
 
 use std/str
 use md/ast.{Inline, Text, Block, Heading, Para, CodeBlock}
-use md/parser.{parse}
 use html/render.{render_doc, render_doc_play, inline_text, inline_run, split_head, split_number, TocEntry}
 use html/play.{Play, play_decode}
 use html/escape.{escape_html}
 use html/page.{Assets, Lang, En, Zh, PageHead, page, page_with_toc, rail_html, sep, contents_label,
   lang_path, playground_label }
-use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
+use gen/common.{write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 use std/io.{Fs}
 
-type Chapter = { title: List[Inline], body: List[Block] }
+## One `##` chapter: its title and the blocks under it, as its page renders
+## them. Public because the body index (gen/search_body) cuts the same
+## chapters into sections, and a second split could disagree with this one.
+pub type Chapter = { title: List[Inline], body: List[Block] }
 
 ## What the tutorial is called on its own pages: the index's <title>, and the
 ## suffix each chapter's <title> carries. One entry, because they are one name.
@@ -21,7 +23,7 @@ fn tutorial_name(lang: Lang) -> String =
     Zh -> "Dawn 教程"
   }
 
-fn split_chapters(blocks: List[Block]) -> (List[Block], List[Chapter]) = {
+pub fn split_chapters(blocks: List[Block]) -> (List[Block], List[Chapter]) = {
   var intro: List[Block] = []
   var chapters: List[Chapter] = []
   var cur: List[Block] = []
@@ -176,12 +178,7 @@ fn chapter_road(chapters: List[Chapter]) -> String = {
 ## own (`tutorial/01.html` and up), so its title is a page title and the index
 ## has nowhere to put a fragment. Numbering is the caller's -- the page names
 ## are `pad2(i + 1)`, exactly as [gen_tutorial] writes them.
-pub fn chapter_titles(src: String) -> List[String] !Fs = {
-  let blocks =
-    match parse(must_read(src)) {
-      Ok(bs) -> bs
-      Err(e) -> panic("${src}: ${e}")
-    }
+pub fn chapter_titles(blocks: List[Block]) -> List[String] = {
   let (_, chapters) = split_chapters(blocks)
   map(chapters, c => inline_text(c.title))
 }
@@ -193,24 +190,19 @@ pub fn chapter_titles(src: String) -> List[String] !Fs = {
 ## the page carries (`s0-1`, `s0-2`, ...: a chapter page has no `##` of its
 ## own). The search index reads this; gen/links holds every fragment in it to
 ## the written page.
-pub fn chapter_sections(src: String) -> List[List[TocEntry]] !Fs = {
-  let blocks =
-    match parse(must_read(src)) {
-      Ok(bs) -> bs
-      Err(e) -> panic("${src}: ${e}")
-    }
+pub fn chapter_sections(blocks: List[Block]) -> List[List[TocEntry]] = {
   let (_, chapters) = split_chapters(blocks)
   map(chapters, c => render_doc([Heading(1, c.title)] ++ c.body, u => u).toc)
 }
 
-## Which file this language's tutorial is written in, where its pages go, and
-## how far it is from the site root. English is the original and takes the
-## default layout; the translation sits under `/zh/`, the same place the
-## Chinese front page does.
-pub fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
+## Where this language's tutorial pages go, and how far they are from the
+## site root. English is the original and takes the default layout; the
+## translation sits under `/zh/`, the same place the Chinese front page does.
+## Which file each is written in is gen/corpus's.
+pub fn tutorial_source(out: String, lang: Lang) -> (String, String) =
   match lang {
-    En -> ("docs/tutorial.md", "${out}/tutorial", "..")
-    Zh -> ("docs/tutorial.zh-CN.md", "${out}/zh/tutorial", "../..")
+    En -> ("${out}/tutorial", "..")
+    Zh -> ("${out}/zh/tutorial", "../..")
   }
 
 ## Where this language's tutorial sends its prefilled Playground links, from a
@@ -232,17 +224,14 @@ fn tutorial_play(root: String, lang: Lang) -> Play =
 ## directory and the depth every relative link is written from -- so the two
 ## runs land beside each other instead of on top of each other.
 ##
+## `blocks` is the parsed document, from gen/corpus.
+##
 ## Every page here is paired, and the pair is named by its path in the default
 ## layout (`tutorial/03.html`) rather than by a pair of hrefs; html/page.dawn's
 ## [site_url] turns that into the switch link and the hreflang URLs, which
 ## differ between the two runs only in `root`.
-pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
-  let (src, dir, root) = tutorial_source(out, lang)
-  let blocks =
-    match parse(must_read(src)) {
-      Ok(bs) -> bs
-      Err(e) -> panic("${src}: ${e}")
-    }
+pub fn gen_tutorial(out: String, a: Assets, lang: Lang, blocks: List[Block]) -> Unit !Fs !io = {
+  let (dir, root) = tutorial_source(out, lang)
   let (intro, chapters) = split_chapters(blocks)
   let n = len(chapters)
   let docs = doc_files()
@@ -333,9 +322,9 @@ test "the road numbers its chapters with zero-padded discs, placed from 0 to 1" 
 
 fn md_text(s: String) -> Inline = Text(s)
 
-test "each language's tutorial reads its own file and lands in its own place" {
-  assert tutorial_source("d", En) == ("docs/tutorial.md", "d/tutorial", "..")
-  assert tutorial_source("d", Zh) == ("docs/tutorial.zh-CN.md", "d/zh/tutorial", "../..")
+test "each language's tutorial lands in its own place" {
+  assert tutorial_source("d", En) == ("d/tutorial", "..")
+  assert tutorial_source("d", Zh) == ("d/zh/tutorial", "../..")
 }
 
 ## The href a chapter's `#`-carrying link is written from. `..` and `../..` are

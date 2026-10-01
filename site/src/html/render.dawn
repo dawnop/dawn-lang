@@ -18,7 +18,13 @@ use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
 
 ## One rendered document: body HTML, its TOC, and the first h1's plain text.
-pub type Doc = { html: String, toc: List[TocEntry], title: String } derive Show
+##
+## `heads` is every heading that got an id, h2 to h4, in document order -- the
+## TOC plus the h4s it leaves out. The site search's body index
+## (gen/search_body) cuts a page into sections at exactly these headings and
+## takes their ids from here, so the fragment it writes is the id this call
+## wrote, counted by the same counter.
+pub type Doc = { html: String, toc: List[TocEntry], heads: List[TocEntry], title: String } derive Show
 
 pub type TocEntry = { level: Int, id: String, text: String } derive Show
 
@@ -308,6 +314,7 @@ pub fn render_doc_play(
 ) -> Doc = {
   var chunks: List[String] = []
   var toc: List[TocEntry] = []
+  var heads: List[TocEntry] = []
   var title = ""
   var h2 = 0
   var h3 = 0
@@ -329,16 +336,19 @@ pub fn render_doc_play(
           h4 = 0
           let id = "s${h2}"
           toc = toc ++ [TocEntry { level: 2, id: id, text: inline_text(items) }]
+          heads = heads ++ [TocEntry { level: 2, id: id, text: inline_text(items) }]
           chunks = chunks ++ [heading_html(2, id, items, map_url) ++ "\n"]
         } else if lvl == 3 {
           h3 = h3 + 1
           h4 = 0
           let id = "s${h2}-${h3}"
           toc = toc ++ [TocEntry { level: 3, id: id, text: inline_text(items) }]
+          heads = heads ++ [TocEntry { level: 3, id: id, text: inline_text(items) }]
           chunks = chunks ++ [heading_html(3, id, items, map_url) ++ "\n"]
         } else {
           h4 = h4 + 1
           let id = "s${h2}-${h3}-${h4}"
+          heads = heads ++ [TocEntry { level: 4, id: id, text: inline_text(items) }]
           chunks = chunks ++ [heading_html(4, id, items, map_url) ++ "\n"]
         }
       }
@@ -361,7 +371,7 @@ pub fn render_doc_play(
     }
     i = i + step
   }
-  Doc { html: join(chunks, ""), toc: toc, title: title }
+  Doc { html: join(chunks, ""), toc: toc, heads: heads, title: title }
 }
 
 fn keep_url(u: String) -> String = u
@@ -394,6 +404,23 @@ test "headings number their anchors and fill the toc" {
   ]
   assert str.contains(doc.html, `<h2 id="s1">一<a class="anchor" href="#s1" aria-hidden="true" tabindex="-1">#</a></h2>`)
   assert str.contains(doc.html, `<h3 id="s1-1">一点一<a class="anchor" href="#s1-1"`)
+}
+
+## The h4s the TOC leaves out are still anchored, and `heads` is where they
+## are handed over: every id the page carries, in order, and nothing else.
+test "heads lists every anchored heading, h4 included" {
+  let doc = render_doc([
+    Heading(2, [Text("a")]),
+    Heading(4, [Text("a-0-1")]),
+    Heading(3, [Text("b")]),
+    Heading(4, [Text("c")]),
+    UList([[Heading(3, [Text("nested")])]]),
+  ], keep_url)
+  assert map(doc.heads, e => e.id) == ["s1", "s1-0-1", "s1-1", "s1-1-1"]
+  assert map(doc.toc, e => e.id) == ["s1", "s1-1"]
+  for e in doc.heads {
+    assert str.contains(doc.html, " id=\"${e.id}\"")
+  }
 }
 
 ## The number a heading prints is set apart, so the eye can run down the

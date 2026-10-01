@@ -132,3 +132,20 @@ rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
 ./bin/dawn run site
+
+# The search body indexes' size, raw and gzipped, against the budget in
+# docs/site-search-design.md 2.6. The generator prints the raw count itself but
+# has no compressor, and the budget is what a reader downloads, so the gzip
+# count is taken here. Over budget is reported, not fatal: the remedy (a
+# shorter excerpt) is a design change, not something a build should guess.
+for search_body in en:100 zh:130; do
+  search_lang="${search_body%%:*}"
+  search_budget_kb="${search_body##*:}"
+  search_file="site/dist/assets/search-body-$search_lang.json"
+  search_raw=$(wc -c < "$search_file")
+  search_gz=$(gzip -9c "$search_file" | wc -c)
+  echo "  search body $search_lang: $search_raw bytes raw, $search_gz bytes gzip (budget ${search_budget_kb} KB)"
+  if [ "$search_gz" -gt $((search_budget_kb * 1024)) ]; then
+    echo "warning: $search_file is over its ${search_budget_kb} KB gzip budget (docs/site-search-design.md 2.6)" >&2
+  fi
+done

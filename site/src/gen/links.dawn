@@ -41,7 +41,7 @@ use std/io.{Fs}
 use std/set
 use std/map
 use json/parser.{parse}
-use json/value.{Json, JArr, JStr, JObj, error_text}
+use json/value.{Json, JArr, JStr, JInt, JObj, error_text}
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
 use gen/fingerprint.{is_fingerprinted}
@@ -129,12 +129,16 @@ fn attr_values(html: String, opener: String) -> List[String] = {
 ## fetches. Same reasoning as `data-wasm`, one page later -- they are on every
 ## page of the site rather than on one, so a name that stopped existing would
 ## be 92 dead fetches instead of two.
+##
+## `data-search-body` is the fourth (html/page.search_host): the body index
+## the panel fetches once a reader types, named on the panel's mount point.
 fn hrefs_of(html: String) -> List[String] =
   attr_values(html, "href=\"") ++ attr_values(html, "src=\"")
   ++ attr_values(html, "data-wasm=\"")
   ++ attr_values(html, "data-search-app=\"")
   ++ attr_values(html, "data-search-wasm=\"")
   ++ attr_values(html, "data-search-index=\"")
+  ++ attr_values(html, "data-search-body=\"")
 
 ## Every id this page offers as a link target. The opener carries its leading
 ## space so that `data-id="` and friends cannot be mistaken for an id.
@@ -306,9 +310,15 @@ fn dir_of(rel: String) -> String = {
 }
 
 ## Which assets are search indexes: `search-<code>.json`, under the plain name
-## rather than the fingerprinted alias, so that each one is read once.
+## rather than the fingerprinted alias, so that each one is read once. The
+## body indexes (`search-body-<code>.json`) match that pattern too and are a
+## different shape, so they are told apart here and read by [body_hrefs].
 fn is_search_index(name: String) -> Bool =
   str.starts_with(name, "search-") && str.ends_with(name, ".json")
+  && not is_fingerprinted(name) && not is_search_body(name)
+
+fn is_search_body(name: String) -> Bool =
+  str.starts_with(name, "search-body-") && str.ends_with(name, ".json")
   && not is_fingerprinted(name)
 
 ## Every href a search index carries, in the order it carries them.
@@ -341,6 +351,48 @@ fn index_hrefs(name: String, text: String) -> List[String] = {
         }
       }
     }
+    Err(e) -> panic("assets/${name} is not JSON: " ++ error_text(e))
+  }
+  out
+}
+
+## Every href a body index carries: the second field of each entry of its
+## section table (docs/site-search-design.md 2.1). Same reasoning as
+## [index_hrefs], and more of them -- every anchored heading of four documents
+## -- so a renderer that moved its ids would show up here in hundreds.
+##
+## The shape around the hrefs is checked as far as reading them needs: the
+## asset is an array whose first field is the version the panel knows (1)
+## and whose second is the section table of three-string rows. Anything else
+## is a generator that changed the format without bumping the version, and is
+## reported rather than skipped.
+fn body_hrefs(name: String, text: String) -> List[String] = {
+  var out: List[String] = []
+  match parse(text) {
+    Ok(JArr(fields)) -> {
+      match get(fields, 0) {
+        Some(JInt(v)) -> {
+          if v != 1 {
+            panic("assets/${name}: body index version ${v}, and the panel reads 1")
+          }
+        }
+        _ -> panic("assets/${name}: a body index opens with its version number")
+      }
+      match get(fields, 1) {
+        Some(JArr(sections)) -> {
+          for sec in sections {
+            match sec {
+              JArr([JStr(_), JStr(href), JStr(_)]) -> {
+                out = out ++ [href]
+              }
+              _ -> panic("assets/${name}: a body section is not three strings")
+            }
+          }
+        }
+        _ -> panic("assets/${name}: a body index's second field is its section table")
+      }
+    }
+    Ok(_) -> panic("assets/${name}: a body index is an array")
     Err(e) -> panic("assets/${name} is not JSON: " ++ error_text(e))
   }
   out
@@ -452,13 +504,21 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       }
     }
   }
-  # The search indexes, whose hrefs are in an asset rather than in a page.
+  # The search indexes, whose hrefs are in an asset rather than in a page: the
+  # title indexes and the body indexes, checked alike.
   var indexes = 0
+  var bodies = 0
   var index_links = 0
   for name in must_list("${out}/assets") {
-    if is_search_index(name) {
-      indexes = indexes + 1
-      let hrefs = index_hrefs(name, must_read("${out}/assets/${name}"))
+    let is_body = is_search_body(name)
+    if is_search_index(name) || is_body {
+      let text = must_read("${out}/assets/${name}")
+      let hrefs = if is_body { body_hrefs(name, text) } else { index_hrefs(name, text) }
+      if is_body {
+        bodies = bodies + 1
+      } else {
+        indexes = indexes + 1
+      }
       if len(hrefs) == 0 {
         broken = broken
           ++ ["assets/${name}: the search index is empty, so the panel can find nothing"]
@@ -485,6 +545,10 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       ++ ["assets/: no search index was written, so every page's search button "
           ++ "fetches a file that is not there"]
   }
+  if bodies == 0 {
+    broken = broken
+      ++ ["assets/: no search body index was written, so the panel can search titles only"]
+  }
   if len(broken) > 0 {
     for b in broken {
       println("BROKEN LINK: ${b}")
@@ -495,7 +559,8 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
     "  link check: ${checked} internal href/src(s), ${anchors} #fragment(s) and ${numbered} numbered "
       ++ "heading id(s) across ${pages} pages, all resolve; ${assets} of them reach assets/ "
       ++ "and every one is content-hashed; ${payloads} prefilled Playground fragment(s) decode; "
-      ++ "${index_links} search-index href(s) in ${indexes} index(es) resolve, fragments included")
+      ++ "${index_links} search-index href(s) in ${indexes} title and ${bodies} body index(es) "
+      ++ "resolve, fragments included")
 }
 
 test "resolution normalizes relative segments" {
@@ -533,6 +598,19 @@ test "the playground's service endpoint is not a link into the site" {
   assert hrefs_of(`<div id="dawn-playground" data-endpoint="https://play.example.test/api/run"></div>`)
     == []
   assert is_external("https://play.example.test/api/run")
+}
+
+## The title index and the body index share a prefix and not a shape; each is
+## read by the reader that knows its shape.
+test "a body index is told apart from a title index and read for its hrefs" {
+  assert is_search_index("search-en.json")
+  assert not is_search_index("search-body-en.json")
+  assert is_search_body("search-body-zh.json")
+  assert not is_search_body("search-body-zh.0123abcd.json")
+  assert hrefs_of(`<div id="dawn-search" data-search-body="../assets/search-body-en.ab12cd34.json" hidden>`)
+    == ["../assets/search-body-en.ab12cd34.json"]
+  let text = "[1,[[\"spec\",\"spec.html\",\"Spec\"],[\"spec\",\"spec.html#s1\",\"One\"]],[],[],[]]"
+  assert body_hrefs("search-body-en.json", text) == ["spec.html", "spec.html#s1"]
 }
 
 test "id extraction" {

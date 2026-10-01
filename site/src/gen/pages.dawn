@@ -11,7 +11,6 @@ use std/io
 use std/io.{Fs, Env, getenv}
 use std/bytes
 use md/ast.{Block}
-use md/parser.{parse}
 use html/render.{render_doc, split_head, inline_run, inline_text}
 use html/page.{Assets, Lang, En, Zh, PageHead, page_with_toc, shell_ext, lang_path, plain_assets,
   no_head, sep, toc_rail }
@@ -21,12 +20,8 @@ use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
-
-fn parsed(path: String) -> List[Block] !Fs =
-  match parse(must_read(path)) {
-    Ok(bs) -> bs
-    Err(e) -> panic("${path}: ${e}")
-  }
+use gen/search_body.{search_body}
+use gen/corpus.{Corpus}
 
 # Byte IO for the assets. read_file/write_file are UTF-8 string APIs and would
 # corrupt PNG/ICO bytes; the text assets go through here too, because what gets
@@ -90,7 +85,7 @@ fn emit_text(out: String, name: String, text: String) -> String !Fs !io =
 pub fn build_stamp() -> (String, String) !Env =
   (unwrap_or(getenv("DAWN_SITE_VERSION"), ""), unwrap_or(getenv("DAWN_SITE_COMMIT"), ""))
 
-pub fn gen_assets(out: String, build: (String, String)) -> Assets !Fs !io = {
+pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) -> Assets !Fs !io = {
   let (version, commit) = build
   # Read once, used twice: the two search indexes are built from the same
   # `dawn doc --stdlib` document gen/stdlib later renders into the page,
@@ -162,8 +157,14 @@ pub fn gen_assets(out: String, build: (String, String)) -> Assets !Fs !io = {
     # gen/search.dawn is the whole of that.
     search_js: emit_text(out, "search.js", str.trim(must_read("site/assets/search.js"))),
     search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
-    search_en: emit_text(out, "search-en.json", search_index(api, En)),
-    search_zh: emit_text(out, "search-zh.json", search_index(api, Zh)),
+    search_en: emit_text(out, "search-en.json", search_index(api, En, en)),
+    search_zh: emit_text(out, "search-zh.json", search_index(api, Zh, zh)),
+    # The second half of the search: the documents' paragraphs, inverted
+    # (gen/search_body.dawn, contract in docs/site-search-design.md). Fetched
+    # by the panel only once a reader has typed something, so a reader who
+    # only looks up a title never pays for it.
+    search_body_en: emit_body(out, "search-body-en.json", search_body(en, En)),
+    search_body_zh: emit_body(out, "search-body-zh.json", search_body(zh, Zh)),
     home_css: home_css,
     home_js: emit_text(out, "home.js", str.trim(must_read("site/assets/home.js"))),
     theme_js: emit_text(out, "theme.js", str.trim(must_read("site/assets/theme.js"))),
@@ -189,6 +190,17 @@ fn emit_bridge(out: String) -> String !Fs !io = {
   let dom = emit_text(out, "tea-dom.mjs", bridge_src("dom.mjs"))
   emit_text(out, "tea-app.mjs",
     repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
+}
+
+## A body index, written like any text asset, with its size said in the build
+## log. The budget is in gzip bytes and this generator has no compressor, so
+## the raw count is all it can say; site/build.sh prints the gzip count beside
+## it.
+fn emit_body(out: String, name: String, text: String) -> String !Fs !io = {
+  let fp = emit_text(out, name, text)
+  let size = bytes.len(bytes.utf8(text)) + 1
+  println("  ${name}: ${size} bytes")
+  fp
 }
 
 fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom/js/${name}"))
@@ -259,20 +271,16 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
 ## `history.zh-CN.md` its translation. So the pairing is said per document
 ## rather than assumed.
 ##
-## `lang` picks which of the two files is read AND where the page lands, in one
-## `match`, so a page cannot be written in one language and filed under the
-## other. The default layout is the English site, the Chinese twin sits under
-## `/zh/` -- the same rule the front page, the tutorial and the rest follow.
-fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String) = {
-  let english_original = base == "history"
+## Which file each language reads is gen/corpus's (corpus_path), which reads
+## it once for the pages and the search alike; what is left here is where the
+## page lands. The default layout is the English site, the Chinese twin sits
+## under `/zh/` -- the same rule the front page, the tutorial and the rest
+## follow.
+fn doc_source(base: String, out: String, lang: Lang) -> (String, String) =
   match lang {
-    En ->
-      (if english_original { "docs/${base}.md" } else { "docs/${base}.en.md" }, "${out}/${base}.html", ".")
-    Zh ->
-      (if english_original { "docs/${base}.zh-CN.md" } else { "docs/${base}.md" }, "${out}/zh/${base}.html",
-        "..")
+    En -> ("${out}/${base}.html", ".")
+    Zh -> ("${out}/zh/${base}.html", "..")
   }
-}
 
 ## What the band above a document says about it, in the page's language:
 ## the kind of document, its status, and for the spec the release it applies
@@ -330,33 +338,31 @@ fn doc_page(
     toc_rail(lang, doc.toc), doc.html)
 }
 
-fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !Fs !io = {
+fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String, blocks: List[Block]) -> Unit !Fs !io = {
   let docs = doc_files()
-  let (src, dst, root) = doc_source(base, out, lang)
-  write_page(dst, doc_page(a, lang, base, root, parsed(src), docs))
+  let (dst, root) = doc_source(base, out, lang)
+  write_page(dst, doc_page(a, lang, base, root, blocks, docs))
 }
 
-pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
-  gen_doc_page(out, a, lang, "spec")
+pub fn gen_spec(out: String, a: Assets, lang: Lang, c: Corpus) -> Unit !Fs !io =
+  gen_doc_page(out, a, lang, "spec", c.spec)
 
-pub fn gen_design(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
-  gen_doc_page(out, a, lang, "design")
+pub fn gen_design(out: String, a: Assets, lang: Lang, c: Corpus) -> Unit !Fs !io =
+  gen_doc_page(out, a, lang, "design", c.design)
 
 ## The history: the timeline from the first commit to today (docs/history.md),
 ## what the nav's History opens. The early design notes stay at their own
 ## URL, which links and search engines already have, and are reached from
 ## here.
-pub fn gen_history(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
-  gen_doc_page(out, a, lang, "history")
+pub fn gen_history(out: String, a: Assets, lang: Lang, c: Corpus) -> Unit !Fs !io =
+  gen_doc_page(out, a, lang, "history", c.history)
 
-test "each language's document is read from its own file and lands in its own place" {
-  assert doc_source("spec", "d", En) == ("docs/spec.en.md", "d/spec.html", ".")
-  assert doc_source("spec", "d", Zh) == ("docs/spec.md", "d/zh/spec.html", "..")
-  assert doc_source("design", "d", En) == ("docs/design.en.md", "d/design.html", ".")
-  assert doc_source("design", "d", Zh) == ("docs/design.md", "d/zh/design.html", "..")
-  # the history's original is the English one
-  assert doc_source("history", "d", En) == ("docs/history.md", "d/history.html", ".")
-  assert doc_source("history", "d", Zh) == ("docs/history.zh-CN.md", "d/zh/history.html", "..")
+## Which file each language reads is gen/corpus's test; this is the other half.
+test "each language's document lands in its own place" {
+  assert doc_source("spec", "d", En) == ("d/spec.html", ".")
+  assert doc_source("spec", "d", Zh) == ("d/zh/spec.html", "..")
+  assert doc_source("design", "d", Zh) == ("d/zh/design.html", "..")
+  assert doc_source("history", "d", En) == ("d/history.html", ".")
 }
 
 ## Unset, the mount is what it was before the variable existed, to the byte;
