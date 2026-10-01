@@ -43,7 +43,7 @@ use check/types.{Sig, builtins, sig_render}
 use front/ast.{
   Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
-use front/token.{Diag, mk_diag}
+use front/token.{Diag, Note, mk_diag}
 use front/fmt
 use front/parser as source_parser
 use check/import_use
@@ -609,7 +609,11 @@ type LspState = {
   # whether the client said at `initialize` that it accepts a dynamic
   # `workspace/didChangeWatchedFiles` registration (LSP 3.17 forbids sending
   # one otherwise); read once at `initialized`
-  watch_manifests: Bool
+  watch_manifests: Bool,
+  # whether the client said at `initialize` that it reads
+  # `relatedInformation` on a published diagnostic; without it a diagnostic's
+  # notes are folded into its message instead (`diagnostic_json`)
+  related_information: Bool
 }
 
 fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
@@ -798,7 +802,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     host: host,
     analysis_config: config,
     lifecycle: PreInit,
-    watch_manifests: false
+    watch_manifests: false,
+    related_information: false
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -1238,7 +1243,11 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     None -> JNull
   }
   if method == "initialize" {
-    st = LspState { ..st, watch_manifests: client_watches_files(params) }
+    st = LspState {
+      ..st,
+      watch_manifests: client_watches_files(params),
+      related_information: client_relates_diagnostics(params)
+    }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
       ("hoverProvider", JBool(true)),
@@ -1316,14 +1325,40 @@ type WorkspaceInputs =
   )
   | InputsConflict(paths: Set[String])
 
-fn diagnostic_json(view: SourceView, ls: List[Int], dg: Diag) -> Json = {
-  let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
-  jobj([
+## One published diagnostic. Its notes are in the same file, so each one's
+## location is `uri` again. A client that declared
+## `publishDiagnostics.relatedInformation` gets them as related locations it
+## can jump to; any other client may not read that field (LSP 3.17 makes it a
+## client capability), so it gets them folded into the message instead, one
+## `note:` line each with the line it points at, in the order the CLI prints
+## them (docs/diag-notes-design.md §4). A diagnostic without notes is the
+## same JSON either way.
+fn diagnostic_json(view: SourceView, ls: List[Int], uri: String, related: Bool, dg: Diag) -> Json = {
+  var message = dg.msg
+  if not related {
+    for n in dg.notes {
+      let (line, _) = lsp_position(view, ls, n.lo)
+      message = message ++ "\nnote: " ++ n.msg ++ " (line ${to_string(line + 1)})"
+    }
+  }
+  if dg.hint != "" { message = message ++ "\nhint: " ++ dg.hint }
+  var fields = [
     ("range", jrange(view, ls, dg.lo, dg.hi)),
     ("severity", JInt(1)),
     ("source", JStr("dawn")),
     ("message", JStr(message))
-  ])
+  ]
+  if related && len(dg.notes) > 0 {
+    var infos: List[Json] = []
+    for n in dg.notes {
+      infos = infos ++ [jobj([
+        ("location", jobj([("uri", JStr(uri)), ("range", jrange(view, ls, n.lo, n.hi))])),
+        ("message", JStr(n.msg))
+      ])]
+    }
+    fields = fields ++ [("relatedInformation", JArr(infos))]
+  }
+  jobj(fields)
 }
 
 fn append_diagnostic(
@@ -1351,7 +1386,8 @@ fn add_loc_diag(
     if map.get(path_by_uri, uri).expect("workspace path") == target {
       match map.get(st.docs, uri) {
         Some(d) -> {
-          out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, ld.d))
+          out = append_diagnostic(out, uri,
+            diagnostic_json(d.view, d.ls, uri, st.related_information, ld.d))
           matched = true
         }
         None -> ()
@@ -1363,8 +1399,9 @@ fn add_loc_diag(
       Ok(found) -> found
       Err(_) -> ""
     }
-    out = append_diagnostic(out, path_to_uri(target),
-      diagnostic_json(view_of(text), line_starts_of(text), ld.d))
+    let uri = path_to_uri(target)
+    out = append_diagnostic(out, uri,
+      diagnostic_json(view_of(text), line_starts_of(text), uri, st.related_information, ld.d))
   }
   out
 }
@@ -1439,7 +1476,7 @@ fn conflict_diagnostics(
     let path = map.get(path_by_uri, uri).expect("workspace path")
     if set.has(paths, path) {
       let d = map.get(st.docs, uri).expect("workspace document")
-      out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, dg))
+      out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, uri, st.related_information, dg))
     }
   }
   out
@@ -1578,14 +1615,14 @@ fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
   add_uris(out, map.keys(slot_diagnostics(slot)))
 }
 
-fn standalone_diagnostics(d: Doc, prog: Program) -> List[Json] !Env = {
+fn standalone_diagnostics(d: Doc, prog: Program, related: Bool) -> List[Json] !Env = {
   var out: List[Json] = []
   for ld in rendered_diags(prog) {
     let own = match d.canonical_path {
       Some(path) -> canon(ld.path) == path
       None -> true
     }
-    if own { out = out ++ [diagnostic_json(d.view, d.ls, ld.d)] }
+    if own { out = out ++ [diagnostic_json(d.view, d.ls, d.uri, related, ld.d)] }
   }
   out
 }
@@ -1605,7 +1642,7 @@ fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env = {
   match map.get(st.docs, uri) {
     Some(d) ->
       match d.analysis {
-        Standalone(prog, _, _) -> { out = out ++ standalone_diagnostics(d, prog) }
+        Standalone(prog, _, _) -> { out = out ++ standalone_diagnostics(d, prog, st.related_information) }
         WorkspaceMember(_) -> ()
       }
     None -> ()
@@ -1836,6 +1873,61 @@ fn manifest_watch_registration() -> Json =
       ]))]))
     ])]))]))
   ])
+
+test "a diagnostic's notes are related locations only for a client that reads them" {
+  let text = "fn f() = {\n  g()\n"
+  let v = view_of(text)
+  let ls = line_starts_of(text)
+  let d = Diag {
+    ..mk_diag("unclosed `{`", 9, 10, "add the missing `}`"),
+    notes: [Note { msg: "the file ends here", lo: 17, hi: 17 }]
+  }
+  let uri = "file:///w/a.dawn"
+  let related = render(diagnostic_json(v, ls, uri, true, d))
+  assert related == render(jobj([
+    ("range", jrange(v, ls, 9, 10)),
+    ("severity", JInt(1)),
+    ("source", JStr("dawn")),
+    ("message", JStr("unclosed `{`\nhint: add the missing `}`")),
+    ("relatedInformation", JArr([jobj([
+      ("location", jobj([("uri", JStr(uri)), ("range", jrange(v, ls, 17, 17))])),
+      ("message", JStr("the file ends here"))
+    ])]))
+  ]))
+  # a client that did not declare the capability may not read the field, so
+  # the note travels in the message, in the order the CLI prints it
+  let folded = render(diagnostic_json(v, ls, uri, false, d))
+  assert folded == render(jobj([
+    ("range", jrange(v, ls, 9, 10)),
+    ("severity", JInt(1)),
+    ("source", JStr("dawn")),
+    ("message", JStr("unclosed `{`\nnote: the file ends here (line 3)\nhint: add the missing `}`"))
+  ]))
+  # without notes the capability changes nothing
+  let plain = mk_diag("unclosed `{`", 9, 10, "")
+  assert render(diagnostic_json(v, ls, uri, true, plain)) == render(diagnostic_json(v, ls, uri, false, plain))
+}
+
+test "the related-information capability is read from publishDiagnostics" {
+  let declared = jobj([("capabilities", jobj([("textDocument", jobj([
+    ("publishDiagnostics", jobj([("relatedInformation", JBool(true))]))
+  ]))]))])
+  assert client_relates_diagnostics(declared)
+  let refused = jobj([("capabilities", jobj([("textDocument", jobj([
+    ("publishDiagnostics", jobj([("relatedInformation", JBool(false))]))
+  ]))]))])
+  assert not client_relates_diagnostics(refused)
+  assert not client_relates_diagnostics(jobj([("capabilities", jobj([]))]))
+  assert not client_relates_diagnostics(JNull)
+}
+
+fn client_relates_diagnostics(params: Json) -> Bool = {
+  let td = get_or_null(get_or_null(params, "capabilities"), "textDocument")
+  match oget(get_or_null(td, "publishDiagnostics"), "relatedInformation") {
+    Some(JBool(b)) -> b
+    _ -> false
+  }
+}
 
 fn client_watches_files(params: Json) -> Bool = {
   let workspace = get_or_null(get_or_null(params, "capabilities"), "workspace")
@@ -2380,7 +2472,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       },
       analysis_config: legacy_analysis_config(),
       lifecycle: Running,
-      watch_manifests: false
+      watch_manifests: false,
+      related_information: false
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -2475,7 +2568,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     },
     analysis_config: legacy_analysis_config(),
     lifecycle: Running,
-    watch_manifests: false
+    watch_manifests: false,
+    related_information: false
   }
 }
 

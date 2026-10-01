@@ -163,13 +163,15 @@ def mutate(name, server, main, analyze):
         server_text = replace_once(server_text, old, new, name)
     elif name == "wrong-source-view":
         old = """        Some(d) -> {
-          out = append_diagnostic(out, uri, diagnostic_json(d.view, d.ls, ld.d))
+          out = append_diagnostic(out, uri,
+            diagnostic_json(d.view, d.ls, uri, st.related_information, ld.d))
           matched = true
         }"""
         new = """        Some(_) -> {
           let wrong_uri = sort(map.keys(st.docs))[0]
           let wrong = map.get(st.docs, wrong_uri).expect("wrong diagnostic document")
-          out = append_diagnostic(out, uri, diagnostic_json(wrong.view, wrong.ls, ld.d))
+          out = append_diagnostic(out, uri,
+            diagnostic_json(wrong.view, wrong.ls, uri, st.related_information, ld.d))
           matched = true
         }"""
         server_text = replace_once(server_text, old, new, name)

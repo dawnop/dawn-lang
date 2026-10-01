@@ -7,7 +7,7 @@ use std/list
 use std/str
 use std/bytes
 use front/parser
-use front/token.{Diag, mk_diag, DiagOwner}
+use front/token.{Diag, Note, mk_diag, DiagOwner}
 use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava, e_lo, e_hi }
 
@@ -549,7 +549,8 @@ pub fn span_of(view: DeclSpans, key: DeclKey) -> Option[Span] = span_at(view, pa
 
 pub fn span_at(view: DeclSpans, decl: String) -> Option[Span] = map.get(view.by_path, decl)
 
-## The one place a diagnostic's `lo`/`hi` become positions in a revision.
+## The one place a diagnostic's `lo`/`hi`, and its notes', become positions in
+## a revision. Notes are in the diagnostic's frame, so they move by the same base.
 ## An owner names its module and its declaration; the views are this
 ## revision's, so a declaration that moved answers with where it moved to.
 ## A diagnostic with no owner is already absolute, and so is one whose owner
@@ -562,10 +563,22 @@ pub fn absolute(views: Map[String, DeclSpans], d: Diag) -> Diag =
       None -> d
       Some(view) -> match span_at(view, owner.decl) {
         None -> d
-        Some(sp) -> Diag { ..d, lo: sp.lo + d.lo, hi: sp.lo + d.hi, owner: None }
+        Some(sp) -> Diag {
+          ..d,
+          lo: sp.lo + d.lo,
+          hi: sp.lo + d.hi,
+          owner: None,
+          notes: shift_notes(d.notes, sp.lo)
+        }
       }
     }
   }
+
+fn shift_notes(ns: List[Note], base: Int) -> List[Note] = {
+  var out: List[Note] = []
+  for n in ns { out = out ++ [Note { ..n, lo: base + n.lo, hi: base + n.hi }] }
+  out
+}
 
 test "identity removes positions and normalizes impl type binders" {
   let a = TNamed("List", [TNamed("T", [], [], 5, 6)], [], 0, 7)
@@ -766,6 +779,7 @@ test "a diagnostic resolves against the revision being rendered" {
   let moved = "# a comment above everything else\n" ++ source
   let owner = DiagOwner { module: "pkg/m", decl: path_text([Named(FunctionDecl, "g")]) }
   let raised = Diag { ..mk_diag("type mismatch", 16, 20, ""), owner: Some(owner) }
+  let noted = Diag { ..raised, notes: [Note { msg: "declared here", lo: 10, hi: 13 }] }
   let here = absolute(map.from([("pkg/m", fixture_spans(source))]), raised)
   let there = absolute(map.from([("pkg/m", fixture_spans(moved))]), raised)
   let g_here = str.index_of(source, "fn g").expect("g is in the source")
@@ -773,6 +787,10 @@ test "a diagnostic resolves against the revision being rendered" {
   assert g_here != g_there
   assert here == mk_diag("type mismatch", g_here + 16, g_here + 20, "")
   assert there == Diag { ..here, lo: g_there + 16, hi: g_there + 20 }
+  # a note is in the diagnostic's frame and moves with it, by the same base
+  let noted_there = absolute(map.from([("pkg/m", fixture_spans(moved))]), noted)
+  assert noted_there.notes == [Note { msg: "declared here", lo: g_there + 10, hi: g_there + 13 }]
+  assert noted_there.lo == g_there + 16
   # an owner this revision cannot place keeps the positions it came with
   # rather than inventing a base for them, and so does a diagnostic that
   # never had an owner

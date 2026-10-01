@@ -1,6 +1,6 @@
 # 诊断的次级位置：`Diag.notes`
 
-> 状态：**current**。2026-10-01，批 B6，issue #195（第 2 步），分支 `feat/diag-notes`。
+> 状态：**current**。2026-10-01，批 B6，issue #195（第 2 步），分支 `feat/diag-notes`；已实现（提交见文末）。
 > 前置：第 1 步（主 span 放在嫌疑开括号）已由 #280 合入，见 [parser-recovery-design.md](parser-recovery-design.md) §5。
 > 裁决出处：调研报告 `research-diagnostics-issues-20260930.md` §7、`research-issue-severity-20261001.md` §#195（不在仓内）。
 
@@ -45,17 +45,17 @@ error: unclosed `{`
   |
 3 |   if a > 0 {
   |            ^
-note: this `}` closes it, but it is indented like an outer block
+note: this `}` closes it but is indented differently, so it probably belongs to an outer `{`
   --> n19.dawn:6:1
   |
 6 | }
   | ^
-note: the file ends here, with this `{` still open
+note: expected `}` before the end of the file
   --> n19.dawn:7:1
   |
-7 |
+7 | 
   | ^
-  = hint: ...
+  = hint: this `{` is probably missing its own `}`
 ```
 
 - rustc 里 `= note:` 是**无 span** 的脚注，挂在主 snippet 下面；带 span 的子诊断才是 `note:` + 自己的 `-->`。
@@ -98,11 +98,13 @@ note: the file ends here, with this `{` still open
 `front/parser.dawn` 的 `place_unclosed`：
 
 - 主 span 不变（嫌疑开括号或最内层未闭合者）。
-- 总有一条 note 落在 EOF token：``the file ends here, with this `{` still open``。
+- 总有一条 note 落在 EOF token：``expected `}` before the end of the file``，闭括号取 EOF 时最内层仍开着的那个
+  开括号的配对（解析器最先等的就是它）。
 - 缩进启发命中时再加一条 note 落在那个配错的闭括号上：
-  ``this `}` closes it, but it is indented like an outer block``，排在 EOF note 之前（按源码顺序）。
-- hint 去掉已经变成 note 的行号，只留结论：命中启发时 ``this `{` probably needs its own `}` ``，
-  未命中时 ``add the missing `}` ``。
+  ``this `}` closes it but is indented differently, so it probably belongs to an outer `{` ``，
+  排在 EOF note 之前（按源码顺序）。
+- hint 去掉已经变成 note 的行号，只留结论：命中启发时 ``this `{` is probably missing its own `}` ``，
+  未命中时 ``add the `]` this `[` is missing``（括号按实际种类）。
 
 这改变了无效输入的渲染（`run (compile errors render)` 等 label 只在其语料含未闭合括号时才红，以实跑为准），
 按红的 label 逐行 `Emit-Change`。#198 第 3 点（续行运算符）不在本批：它要 parser 记下「右运算数跨行」
@@ -125,3 +127,11 @@ note: the file ends here, with this `{` still open
 - **跨文件 note**：`LocDiag` 一个路径；跨文件要把 note 的路径也走一遍 canon 与 LSP URI 映射，没有使用者。
 - **compiler-plan 的 `Diag` 加 notes**：manifest 诊断没有次级位置；加了也只是在转换处传空表。
 - **#198 第 3 点**：见 §6。
+
+## 落地
+
+| 内容 | 提交 | 负控 |
+|---|---|---|
+| 设计 | `Design secondary locations on diagnostics` | — |
+| 构造收口 | `Build every diagnostic through one constructor` | 与真父提交的冻结工具链对拍：fmt/lsp/run 三差分与十个 emit 目标逐字节相同 |
+| `notes` 字段、渲染、`relatedInformation`、未闭合括号的 note | `Point a diagnostic at secondary locations with notes` | 去掉 `diagnostic_json` 的能力判断：LSP 内联测试红；`place_unclosed` 不挂 note：三个 `unclosed_*` 例红 |
