@@ -744,6 +744,60 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   `src/bytecode/{writer,encodings,types}.jl` 是同一格式的独立实现，用作对照；它总写 debug section、
   并把 i1 / i32 预注册在类型表 0 / 1 位，本实现按首用序注册且不写 debug section，两种形态 reader
   都收。
+#### 参考实现迁出 `std/gpu`：`packages/tileref`（R2，2026-10-01 裁决）
+
+**裁决**：除 `vadd_ref` / `sum_ref` 外的 147 个 `*_ref`、22 个只为它们服务的公开辅助
+（`ref_exp` 等 13 个标量函数、`rainbow_round`、`elu_plus_one`、`f32_flush`、`print_tile_sum/max`、
+`global_table_a/b`、`global_syms_c`、`global_syms_tables`）、4 个常量（`LN2`、`PI`、
+`TWO_OVER_SQRT_PI`、`INV_SQRT2`）与私有 helper，从 `std/gpu` 迁到源码包 `packages/tileref`
+（模块 `tileref/ref`），0.82.0 起生效。`std/gpu` 只留设备模型：`Gpu` 效果、格式与线格式、两个 handler、
+`RefFn` / `WideRefFn` / `last_out` / `reference_kernels` 及其两个表项。
+
+**判据**就是本节上文给 `packages/tileir` 的那条：不需要 intrinsic 的不进 std。参考实现全是
+`List[Float]` 上的纯函数，一个 intrinsic 也不名。它们落在 std 里只是路径依赖（层 2 对拍程序是单文件，
+单文件只能 `use std/...`），从刀 7a 起的进度记录没有一处论证过为什么放 std；代价却是真的：每次编译多检查
+约 3000 行没有程序可达的代码，题解语料背上 std 的 API 纪律（`std/moved.txt`、`Param-Change`、
+`stdlib-naming.md` §六那种「与 134 个兄弟一致」的改名）。外部生态的分法一致：库公开「怎么比」，
+「拿什么比」放在测试、样例或独立仓库（CUDA samples、cuTile 的 `torch` 对照、`triton.testing`、
+`jax.test_util`、Rust `dev-dependencies`）。
+
+**「第二意见不走 kernel 代码路径」从约定变成机检**：`packages/tileref/dawn.toml` 的 `[deps]` 不得含
+`tileir`，`scripts/leetgpu-diff/check.py` 读这份清单（`[deps]` 键与 `[deps.tileir]` 表两种拼法），
+含则红；`problems.txt` 的参考列按 `<package>/<m>` 解析到 `packages/<package>/src/<m>.dawn`。
+
+**两刀**：刀 1 建包并复制，消费者全部切到包（层 2 的 `build_native` 改成「临时 project +
+`[deps] tileref`」，仿 `tile-golden` 的 `project()`；`--std` 照传，8 个 `mutant_std` 变异体只打设备模型，
+不受影响；`kernels.dawn` 的三张全局表从包取；`inputs.py` 与 `run.sh --check` 两份 `TILE_PATHS`、
+台账的 dirty 检查、`tile.yml` 两份 paths 都加了 `packages/tileref`），并做了一次不入库的逐位核对：
+一个与包同名的垫片包把每个参考实现同时交给 std 与包算、按文本比较、不同即 panic，挂在层 2 的全部
+对拍程序与变异体下在 3080 上跑完，零差异。刀 2 从 `std/gpu.dawn` 删除，`std/moved.txt` 每个消失的
+顶格 `pub fn` 一行（169 行，`until` 0.92.0）。std 自己的假设备 handler 测试（多缓冲写回、mask 尾巴、
+模块全局）不搬：它们测的是 handler，改用测试区内联的最小替身参考，`dawn test --stdlib` 不依赖包。
+随手修了三处文档挂载：`view_atomic_ref` 的说明被 `view_atomic_bf16_ref` 插在中间、渲染成后者文档的前半；
+`global_table_b` 与 `a` 共用一段；`with_gpu_fake` 的 `##` 与 `pub fn` 之间夹了一段 `#` 注释。
+
+**实测**（本机，WSL2）：
+
+| 量 | 前 | 后 |
+|---|---|---|
+| `std/gpu` 公开函数（`dawn doc --stdlib`） | 221（其中无文档 3） | 52（无文档 0） |
+| `std/gpu.dawn` | 288,316 B，6,808 行 | 90,300 B |
+| 内嵌 `selfhost/src/embed/stdsrc.dawn` | 708,426 B | 528,235 B（−25%） |
+| `dawn check --std <dir> hello.dawn`，前后交替 8 轮中位数 | 1266.5 / 1256.5 ms | 1138 / 1101 ms（两次测量，约 −10%） |
+| `dawn test --stdlib` | 193 个 test | 167 个（26 个随参考实现进了包） |
+
+调研的基线是 2176 ms（去掉整个 `gpu` 模块 1943 ms），绝对值与本次不同机况；比值一致：迁走的部分
+约占「整个 gpu 模块」检查开销的一半多。hello 的 C 输出不受影响（gpu 对 hello 本来不可达）。
+
+**不做的（理由）**：
+
+- 不做 `@internal` / doc-hidden 之类语言特性：为一个搬家就能解决的问题造特性。
+- 不做 `std/gpu/ref` 子模块：仍是 std 公开面、仍内嵌进编译器、仍每次编译检查。
+- 不把 `vadd_ref` / `sum_ref` 也搬走：它们是 `reference_kernels` 的表项，`dawn test --stdlib`
+  要有一张能用的假设备表，而 std 不能依赖包。
+- 不把 `examples/projects/gpu_fake` 里用到的 6 个参考实现内联进 example：example 演示的是
+  「宿主程序 + 包」的关系，与它已有的 `[deps] tileir` 同形。
+
 ### 5.4 子集编译（期权，只记录）
 
 子集 = 「`eff == EPure` 或只含 `!Dev`、一阶、单态、标量只有 Int / Float / Bool、容器只有

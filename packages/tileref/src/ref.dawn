@@ -829,22 +829,6 @@ pub fn gather_pad_ref(rows: Int, cols: Int, gcols: Int, pad: Float, ids: List[Fl
         if c < cols { x[to_int(ids[k / gcols]) * cols + c] } else { pad }
       })
 
-## The nine reductions `atomic_red_view_tko` can make, each over the SAME
-## per-block contribution: scripts/tile-gpu-diff's view_atomic (knife T13).
-## `ins` is `[x, and the nine output buffers as the launch found them]` and
-## the answer rewrites positions 1 to 9.
-##
-## The contribution of block `b` to bin `j` is how many of its `tile` lanes
-## hold the value `j`, counting only lanes below `n`. Summed over the blocks
-## that is exactly `histogram_ref`, which is why the `add` output can share
-## that reference; the other eight fold the same counts LESS `bias`, and the
-## bias is what puts negative numbers in so that `umax` and `umin` are not
-## `max` and `min` spelled twice.
-##
-## Every fold here is exact whatever order the blocks arrive in, which is
-## the whole point of an atomic reduction: the eight integer modes are
-## associative and commutative over i32, and the ninth adds small integers
-## in binary64.
 ## The bin counts `view_atomic_bf16` reduces into a BF16 view (knife TA).
 ## `ins` is `[x, out]` and the answer rewrites the second buffer's first
 ## `bins` lanes, leaving the rest of it alone.
@@ -872,6 +856,22 @@ pub fn view_atomic_bf16_ref(n: Int, bins: Int, tile: Int, dtypes: List[String],
   list.map(range(0, len(ins[1])), k => if k < bins { to_float(sums[k]) } else { ins[1][k] })
 }
 
+## The nine reductions `atomic_red_view_tko` can make, each over the SAME
+## per-block contribution: scripts/tile-gpu-diff's view_atomic (knife T13).
+## `ins` is `[x, and the nine output buffers as the launch found them]` and
+## the answer rewrites positions 1 to 9.
+##
+## The contribution of block `b` to bin `j` is how many of its `tile` lanes
+## hold the value `j`, counting only lanes below `n`. Summed over the blocks
+## that is exactly `histogram_ref`, which is why the `add` output can share
+## that reference; the other eight fold the same counts LESS `bias`, and the
+## bias is what puts negative numbers in so that `umax` and `umin` are not
+## `max` and `min` spelled twice.
+##
+## Every fold here is exact whatever order the blocks arrive in, which is
+## the whole point of an atomic reduction: the eight integer modes are
+## associative and commutative over i32, and the ninth adds small integers
+## in binary64.
 pub fn view_atomic_ref(n: Int, bins: Int, tile: Int, bias: Int, dtypes: List[String],
   ins: List[List[Float]]) -> List[(Int, List[Float])] = {
   let x = ins[0]
@@ -3897,6 +3897,9 @@ pub fn print_tile_max(x: List[Float], n: Int) -> Int =
 pub fn global_table_a(n: Int) -> List[Float] =
   list.map(range(0, n), i => to_float(i) * 0.5 + 1.0)
 
+## The second of `global_table`'s two tables, declared with an alignment:
+## `-(i * i) - 0.25` at lane `i`, negative everywhere and falling, so it
+## disagrees with `global_table_a` on every lane.
 pub fn global_table_b(n: Int) -> List[Float] =
   list.map(range(0, n), i => 0.0 - to_float(i * i) - 0.25)
 
