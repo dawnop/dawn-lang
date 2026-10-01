@@ -3360,6 +3360,13 @@ pub fn builtins() -> Map[String, Sig] = {
     # attach to a file.
     eff1(bsig("io_copy_permissions", [TyString, TyString], ["src", "dst"], TyUnit), EIo),
     eff1(bsig("io_is_symlink", [TyString], ["path"], TyBool), EIo),
+    # The path with every link followed and every `.` and `..` resolved by the
+    # host, `realpath(3)` on native and `Path.toRealPath()` on the JVM. The
+    # path has to exist, and a failure throws like read_file's, for std/io to
+    # turn into an `Err`. std only ever hands it an absolute path: a relative
+    # one would be resolved against the working directory, which is `Env`'s
+    # to answer and not `Fs`'s (docs/fs-real-path-design.md, R2).
+    eff1(bsig("io_real_path", [TyString], ["path"], TyString), EIo),
     # Exactly `n` bytes, short only at end of input -- so a short read *is* the
     # EOF signal. stdin is a channel like stderr, and for the same reason it
     # cannot be reached through the interop: `System.in` is a static field.
@@ -3615,8 +3622,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
-    "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "read_stdin",
-    "stdin_ready"]
+    "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "real_path",
+    "read_stdin", "stdin_ready"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_${op}", RtIo)
   }
@@ -4399,7 +4406,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 111
+  assert map_size2(bs) == 112
 }
 
 test "the reclaim's failure is a value, under the one name left" {
