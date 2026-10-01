@@ -5,7 +5,7 @@
 // kind and the bridge decides three things from it: what to read off the
 // event, whether to cancel the event, and whether a listener already attached
 // is still the right one. Neither demo application reaches most of that:
-// `tea_dom_counter` declares no payload at all, `tea_dom_todo` declares
+// `tea_dom_counter_contract` declares no payload at all, `tea_dom_todo` declares
 // `value` on two `<input>`s and nothing else, so `key`, a checkbox, a
 // listener whose kind changed and the `preventDefault` decision are all
 // unreachable from a transcript. This is the same argument keyed-ops.mjs

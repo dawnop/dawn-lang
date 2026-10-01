@@ -284,10 +284,11 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 interpreter that turns the seven ops into DOM mutations. Zero dependencies, one
 `<script type="module">`. `js/README.md` is its entry point.
 
-`examples/projects/tea_dom_counter` is a complete app over this package and
-`examples/projects/tea_dom_todo` is the one a tier above it (rows with
-identity, a draft, a mode). `scripts/wasm-dom-contract` drives both end to
-end without a browser.
+`examples/projects/tea_dom_counter` is the smallest complete app over this
+package and `examples/projects/tea_dom_todo` is the one a tier above it (rows
+with identity, a draft, a mode). `scripts/wasm-dom-contract` drives the todo
+and `examples/projects/tea_dom_counter_contract`, the counter with the
+fixtures the gate needs, end to end without a browser.
 
 ## What the reconciler contract does not have for a DOM host
 

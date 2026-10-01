@@ -1,198 +1,59 @@
-# The pure half of the demo: a model, four messages, `update` and `view`, and
-# the two functions that turn a model into opaque text and back. No io, no
-# wire format, no host -- everything here is testable with `==`, which is the
-# point of the vocabulary carrying messages rather than callbacks.
+# The whole application: a model, three messages, `update` and `view`, plus
+# the text form of the model the wire carries between turns. No io and no
+# host; `main.dawn` is the one call that connects it to one.
 #
-# The view is shaped to make the reconciler visible rather than to look good.
-# Three things change independently:
-#
-#   the count text       every message: one `replace` deep in the tree
-#   the root's class     only when the sign of the count changes: one
-#                        `set-self` at the root, whose payload must not carry
-#                        the document underneath it
-#   nothing else         the heading and the four buttons are the same nodes
-#                        in every frame and no patch may ever mention them
-#
-# `Boom` is a message whose `update` panics on purpose. A demo does not need
-# one; the boundary does, because a guest that cannot survive a failing
-# application is a guest that loses the model on the first bug. It is what
-# scripts/wasm-dom-contract points at the wasm failure runtime.
+# `update` and `view` are top-level functions rather than an `impl App`, so
+# that `main` can hand them to `serve` by name (issue #317 is why a trait
+# method cannot be passed that way yet). The gates' fixtures live in
+# examples/projects/tea_dom_counter_contract, not here.
 
-use tea_core/app.{App, update, view}
-use tea_core/cmd.{Cmd, NoCmd, fold_msg}
-use tea_core/diff.{Patch, Replace, AppendKids, TruncateKids, diff}
-use tea_dom/node.{Node, Text, Elem}
+use tea_core/cmd.{Cmd, NoCmd}
+use tea_dom/node.{Node}
 use tea_dom/dsl.{button, div, el, text}
 
 ## The whole model: how many times the user has pressed something, net.
 pub type Counter = { n: Int }
 
-## What the four buttons mean.
+## What the three buttons mean.
 pub type Msg =
   | Inc
   | Dec
   | Reset
-  | Boom
-derive Show
 
 ## The model a fresh page starts from.
 pub fn init() -> Counter = Counter { n: 0 }
 
-impl App[Counter] {
-  type Msg = Msg
-  type View = Node[Msg]
-
-  # Every arm answers `NoCmd`: a counter has nothing to ask the driver for
-  # beyond the model it just returned.
-  fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
-    match msg {
-      Inc -> (Counter { n: m.n + 1 }, NoCmd)
-      Dec -> (Counter { n: m.n - 1 }, NoCmd)
-      Reset -> (init(), NoCmd)
-      # Deliberate, and the only unhandled failure in this tree. `tea_dom`'s
-      # `serve` catches it at the boundary and answers with an error reply;
-      # on wasm that landing is the A1 shadow stack.
-      Boom -> panic("boom: update failed on purpose at n=" ++ to_string(m.n))
-    }
-
-  fn view(m: Counter) -> Node[Msg] = {
-    let heading: Node[Msg] = el("h1", kids: [text("dawn counter")])
-    let count: Node[Msg] = el("p", class: "count", kids: [text(to_string(m.n))])
-    let bar: Node[Msg] = div(class: "bar", kids: ticks(m.n))
-    let controls: Node[Msg] =
-      div(class: "row", kids: [
-        button("-", Dec),
-        button("+", Inc),
-        button("reset", Reset),
-        button("boom", Boom),
-      ])
-    div(class: if m.n < 0 { "counter below-zero" } else { "counter" },
-      kids: [heading, count, bar, controls])
+pub fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
+  match msg {
+    Inc -> (Counter { n: m.n + 1 }, NoCmd)
+    Dec -> (Counter { n: m.n - 1 }, NoCmd)
+    Reset -> (init(), NoCmd)
   }
-}
 
-## One child, in the order the body wants it.
-##
-## The collector vocabulary lives in this module rather than in
-## `packages/tea-dom`, which is where a DSL word belongs until the shape has
-## been through a release: the package ships constructors, and a way of
-## *building* a child list is a second thing.
-effect Emit {
-  fn emit(w: Node[Msg]) -> Unit
-}
+pub fn view(m: Counter) -> Node[Msg] =
+  div(class: "counter", kids: [
+    el("h1", kids: [text("dawn counter")]),
+    el("p", class: "count", kids: [text(to_string(m.n))]),
+    div(class: "row", kids: [button("-", Dec), button("+", Inc), button("reset", Reset)]),
+  ])
 
-## Run `body` and answer everything it emitted, in the order it emitted it.
-##
-## The cell is the collector. It is reachable from the arm that writes it and
-## from the line below that reads it, and from nowhere else, so `collect` is a
-## pure function whose row says nothing about `Emit`: the handler is what
-## takes the label off (spec §6.5).
-fn collect(body: fn() -> Unit !Emit) -> List[Node[Msg]] = {
-  with handle Emit {
-    var acc: List[Node[Msg]] = []
-    emit(w) => { acc = acc ++ [w] }
-  }
-  body()
-  acc
-}
-
-## One `span` per unit of a positive count, and none at all below zero.
-##
-## This is the part of the view whose *child list length* depends on the
-## model, and it is here for the reconciler rather than for the user: without
-## it the app only ever produces `replace` and `set-self`, and the two tail
-## ops (`append`, `truncate`) would never cross the boundary in a running
-## program. Counting up appends one span, counting down truncates one, and
-## the spans already on screen are never mentioned.
-##
-## Written as a loop that emits, which is what the accumulator recursion this
-## used to be was standing in for. A negative count is an empty range rather
-## than a base case, so "none at all below zero" is the loop not running.
-fn ticks(n: Int) -> List[Node[Msg]] =
-  collect(() => {
-    for _i in 0..n {
-      emit(tick())
-    }
-  })
-
-fn tick() -> Node[Msg] = el("span", class: "tick")
-
-## A model as text, and back. Opaque to everything but this module: the wire
-## carries it as a JSON string and the host hands it back untouched.
+## A model as text, and back. The host carries it untouched between turns.
 pub fn encode(m: Counter) -> String = to_string(m.n)
 
-## Total, because a host may hand back anything: an unreadable model reads as
-## the initial one rather than as a panic, which keeps a corrupted page
-## recoverable by clicking.
+## Total, because a host may hand back anything: unreadable text reads as the
+## initial model rather than as a panic.
 pub fn decode(s: String) -> Counter =
   match parse_int(s) {
     Some(n) -> Counter { n: n }
     None -> init()
   }
 
-# One turn as a driver commits it: `update` plus whatever its command asked
-# for. The assertions below are written on this rather than on the pair,
-# because the pair's first half is not what the page ends up holding.
-fn turn(m: Counter, msg: Msg) -> Counter = fold_msg(m, msg, (a, x) => update(a, x))
-
-test "update folds messages and the model round-trips through its text" {
-  let m = turn(turn(init(), Inc), Inc)
-  assert m == Counter { n: 2 }
-  assert turn(m, Dec) == Counter { n: 1 }
-  assert turn(m, Reset) == init()
-  assert decode(encode(m)) == m
-  assert decode(encode(Counter { n: -17 })) == Counter { n: -17 }
-  assert decode("not a number") == init()
-}
-
-test "this application commands nothing, so a turn is exactly its update" {
-  let (m, c) = update(init(), Inc)
-  assert m == Counter { n: 1 }
-  let nothing: Cmd[Msg] = NoCmd
-  assert c == nothing
-}
-
 test "the view is a value, so a frame is one assertion" {
   let want: Node[Msg] =
     div(class: "counter", kids: [
       el("h1", kids: [text("dawn counter")]),
       el("p", class: "count", kids: [text("0")]),
-      div(class: "bar"),
-      div(class: "row", kids: [
-        button("-", Dec),
-        button("+", Inc),
-        button("reset", Reset),
-        button("boom", Boom),
-      ]),
+      div(class: "row", kids: [button("-", Dec), button("+", Inc), button("reset", Reset)]),
     ])
   assert view(init()) == want
-}
-
-test "the bar is the only child list whose length the model decides" {
-  # The two tail ops exist because of this: counting up is one `append` at
-  # the bar and one `replace` at the count, and the spans already there are
-  # not mentioned. Below zero the bar is empty rather than negative.
-  let none: List[Node[Msg]] = []
-  assert ticks(0) == none
-  assert ticks(-3) == none
-  assert len(ticks(3)) == 3
-  assert ticks(3) == [tick(), tick(), tick()]
-  let two: List[Patch[Node[Msg]]] = diff(view(Counter { n: 1 }), view(Counter { n: 2 }))
-  assert len(two) == 2
-  assert two[0] == Patch { path: [1, 0], op: Replace(w: text("2")) }
-  assert two[1] == Patch { path: [2], op: AppendKids(ws: [tick()]) }
-  let back: List[Patch[Node[Msg]]] = diff(view(Counter { n: 2 }), view(Counter { n: 1 }))
-  assert back[1] == Patch { path: [2], op: TruncateKids(keep: 1) }
-}
-
-test "the root's class is the only thing the sign of the count changes" {
-  let below = view(Counter { n: -1 })
-  match below {
-    Text(_) -> { assert false }
-    Elem(_, props, ..) -> { assert props == [("class", "counter below-zero")] }
-  }
-  match view(Counter { n: 0 }) {
-    Text(_) -> { assert false }
-    Elem(_, props, ..) -> { assert props == [("class", "counter")] }
-  }
 }
