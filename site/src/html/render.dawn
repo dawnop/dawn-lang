@@ -4,7 +4,7 @@
 
 use std/str
 use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
-use html/escape.{escape_html}
+use html/escape.{escape_html, escape_attr}
 use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
 
@@ -31,7 +31,7 @@ fn inline_html(it: Inline, map_url: fn(String) -> String) -> String =
     Bold(xs) -> "<strong>" ++ inlines_html(xs, map_url) ++ "</strong>"
     Em(xs) -> "<em>" ++ inlines_html(xs, map_url) ++ "</em>"
     Link(label, url) ->
-      `<a href="` ++ escape_html(map_url(url)) ++ `">` ++ escape_html(label) ++ "</a>"
+      `<a href="` ++ escape_attr(map_url(url)) ++ `">` ++ escape_html(label) ++ "</a>"
   }
 
 fn inlines_html(items: List[Inline], map_url: fn(String) -> String) -> String =
@@ -171,6 +171,12 @@ test "inline rendering escapes and maps links" {
     "a &lt; b <code>x&gt;y</code>"
   assert inline_html(Link("规范", "spec.md"), u => "mapped/" ++ u) ==
     `<a href="mapped/spec.md">规范</a>`
+}
+
+## #316: the href is an attribute value, so a `"` in a URL must not end it.
+test "a link's url is escaped for its attribute, its label for text" {
+  let html = inline_html(Link("a \"b\" & c", "x.html?q=\"1\"&r=2"), keep_url)
+  assert html == `<a href="x.html?q=&quot;1&quot;&amp;r=2">a "b" &amp; c</a>`
 }
 
 test "headings number their anchors and fill the toc" {

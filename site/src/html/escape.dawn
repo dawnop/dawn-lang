@@ -1,6 +1,17 @@
 # HTML escaping shared by the whole generator. Splices around the rare
 # special characters instead of appending per code point.
 #
+# Two sets, because HTML has two contexts. Text needs `&`, `<` and `>`; a
+# double-quoted attribute value additionally ends at the first `"`, so a URL
+# or a title carrying one would close the attribute early and spill the rest
+# into the tag (#316). `escape_attr` is the text set plus `"`, and every value
+# this generator writes inside `="..."` goes through it. Text keeps the
+# smaller set rather than sharing the larger one so that the bytes of every
+# page body stay what they were: a `"` in prose is legal and common, and
+# turning each one into `&quot;` would change hundreds of pages to fix none.
+# The `to_html` renderer planned for packages/tea-dom uses the same two-set
+# rule, and the two should agree.
+#
 # The spliced pieces are collected and joined once rather than concatenated
 # into a growing string: a code-heavy paragraph has hundreds of them, and
 # `acc = acc ++ piece` recopies the whole prefix on every one.
@@ -9,10 +20,18 @@ use std/str
 use md/text.{cp_at}
 
 fn entity(c: Char) -> String =
-  if c == '&' { "&amp;" } else if c == '<' { "&lt;" } else { "&gt;" }
+  if c == '&' {
+    "&amp;"
+  } else if c == '<' {
+    "&lt;"
+  } else if c == '>' {
+    "&gt;"
+  } else {
+    "&quot;"
+  }
 
-## Escape &, <, > for HTML text and attribute positions.
-pub fn escape_html(s: String) -> String = {
+## The one splicing loop both sets share; `quote` says whether `"` is in it.
+fn escape_set(s: String, quote: Bool) -> String = {
   let cs = code_points(s)
   let n = len(cs)
   var parts: List[String] = []
@@ -20,7 +39,7 @@ pub fn escape_html(s: String) -> String = {
   var i = 0
   while i < n {
     let c = cp_at(cs, i)
-    if c == '&' || c == '<' || c == '>' {
+    if c == '&' || c == '<' || c == '>' || (quote && c == '"') {
       parts = parts ++ [str.slice(s, start, i) ++ entity(c)]
       start = i + 1
     }
@@ -29,7 +48,20 @@ pub fn escape_html(s: String) -> String = {
   if len(parts) == 0 { s } else { join(parts ++ [str.slice(s, start, n)], "") }
 }
 
+## Escape &, <, > for HTML text. Not for an attribute value: see [escape_attr].
+pub fn escape_html(s: String) -> String = escape_set(s, false)
+
+## Escape &, <, > and `"` for a double-quoted attribute value.
+pub fn escape_attr(s: String) -> String = escape_set(s, true)
+
 test "escapes only what html needs" {
   assert escape_html("a < b && c > d") == "a &lt; b &amp;&amp; c &gt; d"
   assert escape_html("plain 中文") == "plain 中文"
+  # text keeps its quotes: they are legal there and common in prose
+  assert escape_html("say \"hi\"") == "say \"hi\""
+}
+
+test "an attribute value cannot be closed by what it carries" {
+  assert escape_attr("a\"b&c<d>") == "a&quot;b&amp;c&lt;d&gt;"
+  assert escape_attr("plain 中文") == "plain 中文"
 }
