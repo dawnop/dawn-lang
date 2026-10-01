@@ -2,7 +2,8 @@
 # the subset is a hard Err, so the site generator doubles as a docs lint.
 
 use std/str
-use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
+use std/list
+use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
 use md/inline.{parse_inlines}
 use md/text.{cp_at, indent_of, strip_indent}
 
@@ -224,15 +225,23 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
 }
 
 ## ``` fenced code. The info string's first word is the language; any further
-## words are markers for doc-check ("dawn run", "dawn skip-check") and are not
-## the renderer's business. Matching the whole string was the bug: only
-## "dawn skip-check" was special-cased, so the tutorial's 29 "dawn run" blocks
-## -- every example a newcomer reads -- fell through to the unhighlighted
-## branch, while the 2 exempted fragments were highlighted. Exactly backwards.
+## words are markers for doc-check ("dawn run", "dawn skip-check"). Matching
+## the whole string was the bug: only "dawn skip-check" was special-cased, so
+## the tutorial's 29 "dawn run" blocks -- every example a newcomer reads --
+## fell through to the unhighlighted branch, while the 2 exempted fragments
+## were highlighted. Exactly backwards.
+##
+## One marker is the renderer's business after all: `skip-check` says the
+## block is not a program on its own, and a Playground link on it would open
+## an editor on something that cannot run (2026-10-01). So it comes out as a
+## [Fragment] instead of a [CodeBlock]; the language is still the first word
+## and the highlighting is the same.
 fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let first = line_at(lines, start)
   let raw = str.trim(str.drop(first, 3))
-  let lang = match str.split(raw, " ") { [w, ..] -> w, _ -> raw }
+  let words = str.split(raw, " ")
+  let lang = match words { [w, ..] -> w, _ -> raw }
+  let fragment = list.contains(words, "skip-check")
   let n = len(lines)
   var body: List[String] = []
   var i = start + 1
@@ -247,7 +256,8 @@ fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] =
     i = i + 1
   }
   if closed {
-    Ok((CodeBlock(lang, join(body, "\n")), i))
+    let code = join(body, "\n")
+    Ok((if fragment { Fragment(lang, code) } else { CodeBlock(lang, code) }, i))
   } else {
     Err("unclosed code fence: ${first}")
   }
@@ -414,7 +424,8 @@ test "multi-line paragraphs join with a newline" {
 test "fenced code keeps its body verbatim" {
   assert parse("```dawn\nfn main() -> Unit\n```\n") ==
     Ok([CodeBlock("dawn", "fn main() -> Unit")])
-  assert parse("```dawn skip-check\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
+  assert parse("```dawn skip-check\nx\n```\n") == Ok([Fragment("dawn", "x")])
+  assert parse("```dawn run\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
   # the tutorial's 29 examples are all "dawn run"; a whole-string match sent
   # every one of them to the unhighlighted branch
   assert parse("```dawn run\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
