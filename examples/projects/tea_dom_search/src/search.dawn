@@ -65,6 +65,14 @@
 # why that and not a message back in). A shared `?q=` link arrives the same
 # way: the query is a flag, and init answers its hits in the first turn.
 #
+# The documents' text is a second index, fetched the first time the reader
+# types (search-body-<lang>.json, docs/site-search-design.md). It reaches the
+# guest the way everything else read-only does: the page starts the panel
+# again with it in the flags, and init keeps it beside the titles. A section
+# whose text answers is one more row in its document's group, under every
+# title that answered, with the paragraph that answered best as its excerpt;
+# the hit is still one integer in the model ([body_base]).
+#
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
 # (site/src/gen/pages.dawn) keeps its two languages in one table for the same
@@ -101,7 +109,10 @@ pub type Entry = {
 ## A match, and its ordinal among all the matches in display order. The
 ## ordinal is what the arrow keys move and what a row compares itself with to
 ## know whether it is the selected one.
-pub type Hit = { entry: Entry, at: Int }
+##
+## `text` is whether the row is a section of the documents' text rather than
+## a title row, which decides one class and nothing else.
+pub type Hit = { entry: Entry, at: Int, text: Bool }
 
 ## Everything a scan of the index answers: the matches, and the href the
 ## current selection resolves to.
@@ -129,6 +140,11 @@ pub type Key = {
 ## the language's and gen/links has checked every one. `recent` is the
 ## reader's recent queries, newest first; the page keeps them and the guest
 ## only shows them, which is why they are here and not in the model.
+##
+## `body` is the documents' text, once the page has fetched it and started
+## the panel again with it ([body_of]); until then, and for an asset in a
+## format this panel does not read, the panel searches titles only and says
+## so in its foot.
 pub type State = {
   root: String,
   lang: String,
@@ -137,6 +153,7 @@ pub type State = {
   keys: List[Key],
   start: List[Int],
   recent: List[String],
+  body: Option[Body],
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
@@ -151,7 +168,10 @@ pub type State = {
 ##
 ## `hits` is what [search] answered for `query`: ids into the index, in the
 ## order the panel shows them, at most [cap] of them. Only `Typed` and
-## `Scoped` write it.
+## `Scoped` write it. An id from [body_base] up is a paragraph of the body
+## index rather than a title row: the row is its section, and the paragraph
+## is the excerpt it shows. One list rather than two, because the order of
+## the rows is one order, across both kinds.
 ##
 ## `scope` is the group the reader has narrowed the list to, by its place in
 ## [groups], or -1 for all of them; `counts` is how many entries of each group
@@ -186,19 +206,21 @@ pub type Msg =
   | Scoped(group: Int)
 derive Show
 
-## Where the page is and what language it is in, asked for at the leaves.
+## Where the page is, what language it is in, and whether the documents'
+## text is searched as well as the titles, asked for at the leaves.
 ##
-## Both are `String` because an effect operation cannot take a type parameter
-## (spec §6.5) and neither needs one: a root is a relative path and a language
-## is its `lang` attribute.
+## None takes a type parameter because an effect operation cannot (spec
+## §6.5) and none needs one: a root is a relative path, a language is its
+## `lang` attribute, and the third is a yes or a no that two labels read.
 pub effect Ctx {
   fn root() -> String
   fn lang() -> String
+  fn full_text() -> Bool
 }
 
 ## One matched entry, in the order the body found it.
 pub effect Found {
-  fn found(e: Entry) -> Unit
+  fn found(e: Entry, text: Bool) -> Unit
 }
 
 ## One child, in the order the body wants it. The same shape
@@ -246,21 +268,30 @@ fn group_label(g: Group, code: String) -> String =
   if code == "zh-CN" { g.zh } else { g.en }
 
 ## What the panel says it searches. The expectation this manages is the one
-## the whole design rests on: this is a title and API-name index, not full
-## text, so a reader who types a word out of the middle of a paragraph gets
-## nothing and has to be told why rather than left to conclude the search is
-## broken.
-fn scope_line(code: String) -> String =
-  if code == "zh-CN" {
-    "只搜标题与 API 名，不搜正文。"
+## the whole design rests on: until the documents' text has arrived this is
+## a title and API-name index, so a reader who types a word out of the middle
+## of a paragraph gets nothing and has to be told why rather than left to
+## conclude the search is broken. The line changes when the text is in, and
+## stays as it is when the page could not give it (a fetch that failed, an
+## asset in a format this panel does not read).
+fn scope_line(code: String, full: Bool) -> String =
+  if full {
+    say(code, "Searches titles, API names and the documents' text.", "搜标题、API 名与文档正文。")
   } else {
-    "Searches titles and API names, not body text."
+    say(code, "Searches titles and API names, not body text.", "只搜标题与 API 名，不搜正文。")
   }
 
 ## `en` on an English page and `zh` on a Chinese one. Every other string the
 ## panel shows goes through here, so the two languages of one label are on one
 ## line and neither can be forgotten without the other.
 fn say(code: String, en: String, zh: String) -> String = if code == "zh-CN" { zh } else { en }
+
+fn placeholder(code: String, full: Bool) -> String =
+  if full {
+    say(code, "Search titles, API names and text", "搜索标题、API 名与正文")
+  } else {
+    say(code, "Search titles and API names", "搜索标题与 API 名")
+  }
 
 fn prompt_line(code: String) -> String =
   if code == "zh-CN" { "输入以搜索。" } else { "Type to search." }
@@ -425,6 +456,39 @@ fn trim_dots(w: String, both: Bool) -> String = {
   s
 }
 
+## The words of a paragraph of the documents' text, and of a query for it
+## (docs/site-search-design.md 2.3): every Han character becomes a blank and
+## the rest goes through [tokens]; then each Han character is a word of its
+## own, in the order they occur.
+##
+## site/src/gen/search.dawn writes the body index with its own copy of this,
+## and the two are held to the table in 3.2 of that document by a test on
+## each side. Single characters because Chinese has no blanks to split on;
+## the blanks first because the text joins inline code straight onto the
+## Chinese after it, and `Fs效果` has to give `fs`.
+pub fn body_terms(s: String) -> List[String] = {
+  var rest: List[Char] = []
+  var han: List[String] = []
+  for c in code_points(s) {
+    if is_han(c) {
+      rest = rest ++ [' ']
+      han = han ++ [str.from_char(c)]
+    } else {
+      rest = rest ++ [c]
+    }
+  }
+  tokens(from_code_points(rest)) ++ han
+}
+
+## Whether `c` is a Han character: the CJK unified ideographs, extension A,
+## the compatibility block and the supplementary planes' extensions. Kana,
+## Hangul and full-width punctuation are not.
+pub fn is_han(c: Char) -> Bool = {
+  let n = char.code(c)
+  (n >= 0x3400 && n <= 0x4DBF) || (n >= 0x4E00 && n <= 0x9FFF) || (n >= 0xF900 && n <= 0xFAFF)
+    || (n >= 0x20000 && n <= 0x2FA1F)
+}
+
 ## How one word of a query has to meet a word of an entry.
 ##
 ## `Whole` for every word but the last, which is `Start` because the reader is
@@ -480,6 +544,619 @@ fn fits(t: Term, word: String) -> Bool =
 fn all_fit(ts: List[Term], words: List[String]) -> Bool =
   len(ts) > 0 && list.all(ts, t => list.any(words, w => fits(t, w)))
 
+# ---- the documents' text ---------------------------------------------------
+#
+# The second index is the documents split into sections and paragraphs, with
+# an inverted index from words to paragraph numbers. Its format, and the five
+# constraints it puts on this side, are docs/site-search-design.md 2.1-2.5;
+# its words are [body_terms], pinned to the generator's copy by the table in
+# 3.2 of the same file.
+#
+# A query is answered with binary search and merges, never with a walk of the
+# text: every word but the last is looked up whole, the last as a prefix (the
+# union of a range of the sorted words), each Han character whole, and the
+# paragraph lists are intersected. Chinese is indexed one character at a time,
+# so a phrase of two or more characters is then checked against the few
+# candidates' excerpts. The paragraphs fall into sections, and a section is
+# one row.
+
+## Where the ids of body rows begin in the model's `hits`: an id `body_base()
+## + p` is paragraph `p` of the body index. A decimal offset rather than a
+## second list, so that one list keeps the panel's one order, and rather than
+## a bit, so that a transcript says `1000412` and a reader sees paragraph 412.
+## The title index has a few hundred rows.
+pub fn body_base() -> Int = 1000000
+
+## One section of a document, as the body index's section table names it,
+## and two things init derives from it so that a keystroke does not have to:
+## the group of the panel it is drawn in (-1 for none), and the title row with
+## the same href (-1 for none), which is the row that stands for it when both
+## answer.
+pub type Sec = { doc: String, href: String, title: String, group: Int, entry: Int }
+
+## One paragraph: its section, and its text as the excerpt shows it -- cut at
+## about 120 code points and ending in `…` when it was cut.
+pub type Para = { sec: Int, text: String }
+
+## The body index, read. `posts[i]` is the paragraph numbers `terms[i]` occurs
+## in, ascending: the asset writes the gaps between them, and init adds them
+## up once rather than every keystroke.
+pub type Body = {
+  secs: List[Sec],
+  terms: List[String],
+  posts: List[List[Int]],
+  paras: List[Para],
+}
+
+fn has_body(state: State) -> Bool =
+  match state.body {
+    Some(_) -> true
+    None -> false
+  }
+
+## The body index out of its asset, or `None` for anything but format 1.
+##
+## A version this panel does not know is not read at all, rather than read as
+## far as it happens to agree: the version is the format's whole promise, and
+## a panel without the text is a working panel that says it searches titles.
+## Inside format 1 the asset is a file the page fetched, and every lookup
+## below is total: a field of the wrong kind reads as empty and a number that
+## names nothing is passed over.
+pub fn body_of(j: Json, entries: List[Entry]) -> Option[Body] = {
+  let fs = jarr(j)
+  if len(fs) != 5 || jint_or(fs[0], 0) != 1 {
+    None
+  } else {
+    let by_href = hrefs_of(entries)
+    let terms = list.map(jarr(fs[2]), t => jstr_or(t, ""))
+    let posts = list.map(jarr(fs[3]), g => sums(jarr(g)))
+    if len(posts) != len(terms) {
+      None
+    } else {
+      Some(Body {
+        secs: list.map(jarr(fs[1]), s => sec_of(jarr(s), by_href)),
+        terms: terms,
+        posts: posts,
+        paras: list.map(jarr(fs[4]), p => para_of(jarr(p))),
+      })
+    }
+  }
+}
+
+## Each title row's href, to its id; the first row wins a shared href.
+fn hrefs_of(entries: List[Entry]) -> Map[String, Int] = {
+  var out: Map[String, Int] = map.empty()
+  var id = 0
+  for e in entries {
+    if not map.has(out, e.href) {
+      out = map.insert(out, e.href, id)
+    }
+    id = id + 1
+  }
+  out
+}
+
+fn sec_of(fs: List[Json], by_href: Map[String, Int]) -> Sec = {
+  let doc = if len(fs) == 3 { jstr_or(fs[0], "") } else { "" }
+  let href = if len(fs) == 3 { jstr_or(fs[1], "") } else { "" }
+  Sec {
+    doc: doc,
+    href: href,
+    title: if len(fs) == 3 { jstr_or(fs[2], "") } else { "" },
+    group: doc_group(doc),
+    entry: unwrap_or(map.get(by_href, href), -1),
+  }
+}
+
+fn para_of(fs: List[Json]) -> Para =
+  if len(fs) == 2 {
+    Para { sec: jint_or(fs[0], -1), text: jstr_or(fs[1], "") }
+  } else {
+    Para { sec: -1, text: "" }
+  }
+
+## The group a document's sections are drawn in. The early design decisions
+## are history, as they are in the title index; the body index keeps the two
+## apart only so that a row can say which page it is on.
+fn doc_group(doc: String) -> Int =
+  if doc == "design" { group_index("history") } else if doc == "stdlib" || doc == "examples" { -1 } else { group_index(doc) }
+
+## Gaps back into the numbers they separate.
+fn sums(gaps: List[Json]) -> List[Int] = {
+  var out: List[Int] = []
+  var at = 0
+  for g in gaps {
+    at = at + jint_or(g, 0)
+    out = out ++ [at]
+  }
+  out
+}
+
+## How `a` and `b` compare by code point: negative, zero or positive. This is
+## the order the asset sorts its words in (docs/site-search-design.md 2.3), and
+## it is spelled out here rather than left to `<` on strings, whose order is a
+## backend's business.
+fn order(a: String, b: String) -> Int = {
+  var i = cursor.start(a)
+  var j = cursor.start(b)
+  var out = 0
+  var go = true
+  while go {
+    let ea = cursor.done(a, i)
+    let eb = cursor.done(b, j)
+    if ea || eb {
+      out = if ea && eb { 0 } else if ea { -1 } else { 1 }
+      go = false
+    } else {
+      let d = cursor.char(a, i) - cursor.char(b, j)
+      if d != 0 {
+        out = d
+        go = false
+      } else {
+        i = cursor.next(a, i)
+        j = cursor.next(b, j)
+      }
+    }
+  }
+  out
+}
+
+## The first word at or after `w`.
+fn lower_bound(terms: List[String], w: String) -> Int = {
+  var lo = 0
+  var hi = len(terms)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if order(terms[mid], w) < 0 {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  lo
+}
+
+## The first word from `from` on that does not start with `w`. The words that
+## do are one run there, because the list is sorted and `from` is where `w`
+## itself would stand.
+fn past_prefix(terms: List[String], w: String, from: Int) -> Int = {
+  var lo = from
+  var hi = len(terms)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if str.starts_with(terms[mid], w) {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  lo
+}
+
+## A word of a query, and whether it may be the start of a word rather than
+## all of one.
+pub type BodyTerm = { word: String, prefix: Bool }
+
+## A query's words for the body index: [body_terms] of it, once each, and the
+## ones the query ends with are prefixes because the reader is still typing
+## them -- the last piece of the last run and that run itself, so `io.read_fi`
+## looks for `io` and `read` whole and for `fi…` and `io.read_fi…`. A query
+## that ends in a Han character or a blank has no prefix: a Han character is
+## a whole word by construction.
+##
+## A prefix of one letter is looked up whole. `s…` is a few hundred words and
+## most of the paragraphs, and merging them was the one step of a keystroke
+## that cost more than the titles did (8 ms of wasm, measured); a reader who
+## has typed one letter is answered by the titles, and by the text a letter
+## later.
+pub fn body_query(q: String) -> List[BodyTerm] = {
+  let low = str.to_lower(str.trim(q))
+  let tail = last_run(low)
+  list.map(list.unique(body_terms(low)), w =>
+      BodyTerm { word: w, prefix: tail != "" && str.ends_with(tail, w) && not han_word(w) && str.len(w) >= 2 })
+}
+
+fn han_word(w: String) -> Bool = list.any(code_points(w), c => is_han(c))
+
+## The query's last run, without its dots, when the query ends with it, and
+## empty otherwise.
+fn last_run(low: String) -> String = {
+  let rs = runs(from_code_points(list.map(code_points(low), c => if is_han(c) { ' ' } else { c })))
+  if len(rs) == 0 {
+    ""
+  } else {
+    let r = rs[len(rs) - 1]
+    if str.ends_with(low, r) { trim_dots(r, true) } else { "" }
+  }
+}
+
+## The query's phrases of two or more Han characters in a row, which the
+## single-character index cannot answer for by itself.
+pub fn han_runs(q: String) -> List[String] = {
+  var out: List[String] = []
+  var run: List[Char] = []
+  for c in code_points(q) ++ [' '] {
+    if is_han(c) {
+      run = run ++ [c]
+    } else {
+      if len(run) >= 2 {
+        out = out ++ [from_code_points(run)]
+      }
+      run = []
+    }
+  }
+  out
+}
+
+## `s` without the blanks that stand between two Han characters. A Chinese
+## paragraph's source lines are joined with a blank (the browser does the
+## same), so a phrase that crossed a line in the source has one inside it.
+fn squash(s: String) -> String = {
+  let cs = code_points(s)
+  var out: List[Char] = []
+  var i = 0
+  for c in cs {
+    let gap = char.is_space(c) && i > 0 && i + 1 < len(cs) && is_han(cs[i - 1]) && is_han(cs[i + 1])
+    if not gap {
+      out = out ++ [c]
+    }
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+## The paragraphs one word is in.
+fn postings(b: Body, t: BodyTerm) -> List[Int] = {
+  let lo = lower_bound(b.terms, t.word)
+  if t.prefix {
+    union(list.slice(b.posts, lo, past_prefix(b.terms, t.word, lo)))
+  } else if lo < len(b.terms) && b.terms[lo] == t.word {
+    b.posts[lo]
+  } else {
+    []
+  }
+}
+
+## Every number in any of the ascending lists, ascending, once. Halves rather
+## than one list at a time, so a short prefix that covers hundreds of words
+## costs a merge per level and not a merge per word.
+fn union(ls: List[List[Int]]) -> List[Int] =
+  if len(ls) == 0 {
+    []
+  } else if len(ls) == 1 {
+    ls[0]
+  } else {
+    let half = len(ls) / 2
+    either(union(list.take(ls, half)), union(list.drop(ls, half)))
+  }
+
+fn either(a: List[Int], b: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  var j = 0
+  let na = len(a)
+  let nb = len(b)
+  while i < na || j < nb {
+    if j >= nb || (i < na && a[i] < b[j]) {
+      out = out ++ [a[i]]
+      i = i + 1
+    } else if i >= na || b[j] < a[i] {
+      out = out ++ [b[j]]
+      j = j + 1
+    } else {
+      out = out ++ [a[i]]
+      i = i + 1
+      j = j + 1
+    }
+  }
+  out
+}
+
+fn both(a: List[Int], b: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  var j = 0
+  while i < len(a) && j < len(b) {
+    if a[i] < b[j] {
+      i = i + 1
+    } else if b[j] < a[i] {
+      j = j + 1
+    } else {
+      out = out ++ [a[i]]
+      i = i + 1
+      j = j + 1
+    }
+  }
+  out
+}
+
+## The numbers in every list, shortest list first so that the running answer
+## is never longer than the rarest word's.
+fn every(ls: List[List[Int]]) -> List[Int] = {
+  let by_size = sort_by(ls, (a, b) => len(a) - len(b))
+  var out: List[Int] = if len(by_size) > 0 { by_size[0] } else { [] }
+  for l in list.drop(by_size, 1) {
+    if len(out) > 0 {
+      out = both(out, l)
+    }
+  }
+  out
+}
+
+## A section the text answers. `paras` are the paragraphs that answered in it,
+## of which its row shows one ([shown_para]); `rank` is its tier in
+## [answer]'s table and `weight` orders the sections of one tier.
+pub type BodyHit = { sec: Int, paras: List[Int], rank: Int, weight: Int }
+
+## Every section of the body index that answers `q` (lowercased and trimmed),
+## in section order. Nothing at all without the body index.
+pub fn body_hits(state: State, q: String) -> List[BodyHit] =
+  match state.body {
+    None -> []
+    Some(b) -> {
+      let ts = body_query(q)
+      let lists = list.map(ts, t => postings(b, t))
+      let all = every(lists)
+      if len(ts) == 0 {
+        []
+      } else if len(all) > 0 {
+        checked(b, all, han_runs(q))
+      } else if len(ts) >= 3 && not han_word(q) {
+        most(b, lists)
+      } else {
+        []
+      }
+    }
+  }
+
+## The candidates, checked for the query's Chinese phrases and gathered into
+## sections. Paragraph numbers ascend with section numbers (design 2.1), so a
+## section's paragraphs are one run of the candidates.
+##
+## A candidate whose excerpt has every phrase is sure. One whose excerpt does
+## not, but was cut, may have it in the part that was cut, and is kept a tier
+## lower (design 2.5); one that was not cut does not have it, and goes.
+fn checked(b: Body, ps: List[Int], phrases: List[String]) -> List[BodyHit] = {
+  var out: List[BodyHit] = []
+  var sec = -1
+  var sure: List[Int] = []
+  var maybe: List[Int] = []
+  for p in ps {
+    match get(b.paras, p) {
+      Some(para) -> {
+        let v = verdict(para.text, phrases)
+        if v > 0 {
+          if para.sec != sec {
+            out = out ++ section_hit(sec, sure, maybe)
+            sec = para.sec
+            sure = []
+            maybe = []
+          }
+          if v == 2 {
+            sure = sure ++ [p]
+          } else {
+            maybe = maybe ++ [p]
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  out ++ section_hit(sec, sure, maybe)
+}
+
+## 2 when the excerpt has every phrase, 1 when it may, 0 when it does not.
+fn verdict(text: String, phrases: List[String]) -> Int =
+  if len(phrases) == 0 {
+    2
+  } else {
+    let flat = squash(text)
+    if list.all(phrases, ph => str.contains(flat, ph)) {
+      2
+    } else if str.ends_with(text, "…") {
+      1
+    } else {
+      0
+    }
+  }
+
+fn section_hit(sec: Int, sure: List[Int], maybe: List[Int]) -> List[BodyHit] =
+  if sec < 0 {
+    []
+  } else if len(sure) > 0 {
+    [BodyHit { sec: sec, paras: sure, rank: 0, weight: len(sure) }]
+  } else if len(maybe) > 0 {
+    [BodyHit { sec: sec, paras: maybe, rank: -1, weight: len(maybe) }]
+  } else {
+    []
+  }
+
+## When no paragraph has every word of a longer query: the paragraphs that
+## have most of them.
+##
+## A question typed as a sentence (`where does the spec say handle`) has words
+## no paragraph shares all of, and an intersection answers nothing. So for a
+## query of three words or more that nothing answers whole, a paragraph is
+## kept when it has at least half of the words, and weighed by how rare the
+## ones it has are: `say` and `handle` count for more than `the` and `does`.
+## These rows are the lowest tier there is. Not for Chinese: one character is
+## too common a word for "most of them" to mean anything.
+fn most(b: Body, lists: List[List[Int]]) -> List[BodyHit] = {
+  let n = len(b.paras)
+  var acc = Tally { paras: [], scores: [], counts: [] }
+  for ps in lists {
+    acc = tally(acc, ps, rarity(n, len(ps)))
+  }
+  let need = (len(lists) + 1) / 2
+  var out: List[BodyHit] = []
+  for i in range(0, len(acc.paras)) {
+    if acc.counts[i] >= need {
+      out = keep_most(b, out, acc.paras[i], acc.scores[i])
+    }
+  }
+  out
+}
+
+## Paragraphs, ascending, each with the sum of the rarities of the words it
+## has and how many words that is. Three lists rather than a list of records,
+## so that a merge appends integers.
+type Tally = { paras: List[Int], scores: List[Int], counts: List[Int] }
+
+## `t` with one more word, whose paragraphs are `ps` and whose rarity is `w`:
+## one merge of two ascending lists, rather than a sort of every (paragraph,
+## word) pair.
+fn tally(t: Tally, ps: List[Int], w: Int) -> Tally = {
+  var paras: List[Int] = []
+  var scores: List[Int] = []
+  var counts: List[Int] = []
+  var i = 0
+  var j = 0
+  let na = len(t.paras)
+  let nb = len(ps)
+  while i < na || j < nb {
+    if j >= nb || (i < na && t.paras[i] < ps[j]) {
+      paras = paras ++ [t.paras[i]]
+      scores = scores ++ [t.scores[i]]
+      counts = counts ++ [t.counts[i]]
+      i = i + 1
+    } else if i >= na || ps[j] < t.paras[i] {
+      paras = paras ++ [ps[j]]
+      scores = scores ++ [w]
+      counts = counts ++ [1]
+      j = j + 1
+    } else {
+      paras = paras ++ [ps[j]]
+      scores = scores ++ [t.scores[i] + w]
+      counts = counts ++ [t.counts[i] + 1]
+      i = i + 1
+      j = j + 1
+    }
+  }
+  Tally { paras: paras, scores: scores, counts: counts }
+}
+
+## Paragraph `p`, with `score`, added to the sections found so far: to the last
+## one when it is in the same section, as a new one otherwise. A section's
+## weight is its best paragraph's score, and only the paragraphs with that
+## score are kept. Which of those it shows is still [shown_para]'s choice:
+## the score may be in words an excerpt has cut. Keeping the rest made that
+## choice the dearest step of a sentence-long query (3 ms of wasm, measured).
+fn keep_most(b: Body, out: List[BodyHit], p: Int, score: Int) -> List[BodyHit] =
+  match get(b.paras, p) {
+    None -> out
+    Some(para) -> {
+      let n = len(out)
+      if n > 0 && out[n - 1].sec == para.sec {
+        let h = out[n - 1]
+        if score > h.weight {
+          list.take(out, n - 1) ++ [BodyHit { ..h, paras: [p], weight: score }]
+        } else if score == h.weight {
+          list.take(out, n - 1) ++ [BodyHit { ..h, paras: h.paras ++ [p] }]
+        } else {
+          out
+        }
+      } else {
+        out ++ [BodyHit { sec: para.sec, paras: [p], rank: -2, weight: score }]
+      }
+    }
+  }
+
+## How much one word says about a paragraph, by how few paragraphs have it:
+## the number of bits in `8n / df`, so a word in every paragraph counts 4 and
+## a word in one of a thousand counts 13.
+fn rarity(n: Int, df: Int) -> Int = {
+  var x = if df > 0 { n * 8 / df } else { 0 }
+  var bits = 0
+  while x > 0 {
+    x = x / 2
+    bits = bits + 1
+  }
+  bits
+}
+
+## The paragraph a section's row shows: the one where the query's words are
+## densest in the excerpt the reader will see, the first of equals. mdBook's
+## teaser picked the section's first paragraph, which is often not where the
+## words are (research report §4); a paragraph that answered is not enough
+## either, when its words were cut out of its excerpt.
+fn shown_para(b: Body, h: BodyHit, ts: List[Term]) -> Int = {
+  var best = -1
+  var best_score = -1
+  for p in h.paras {
+    let s = match get(b.paras, p) {
+      Some(para) -> density(para.text, ts)
+      None -> -1
+    }
+    if s > best_score {
+      best = p
+      best_score = s
+    }
+  }
+  best
+}
+
+## How many places the words are found in `text`, per thousand code points.
+fn density(text: String, ts: List[Term]) -> Int = {
+  let low = str.to_lower(text)
+  let found = list.fold(ts, 0, (acc, t) => acc + len(places(low, t)))
+  found * 1000 / (str.len(low) + 1)
+}
+
+## The sorted `ids` hold `x`.
+fn has_sorted(ids: List[Int], x: Int) -> Bool = {
+  var lo = 0
+  var hi = len(ids)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if ids[mid] < x {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  lo < len(ids) && ids[lo] == x
+}
+
+## The line under a section's title that says where it is: the document, and
+## the section's number in the spec or the chapter in the tutorial.
+fn crumb(s: Sec, code: String) -> String = {
+  let doc = if s.doc == "spec" {
+    say(code, "Spec", "规范")
+  } else if s.doc == "tutorial" {
+    say(code, "Tutorial", "教程")
+  } else if s.doc == "design" {
+    say(code, "Early decisions", "早期设计决定")
+  } else {
+    say(code, "History", "历史")
+  }
+  let (path, anchor) = unwrap_or(str.split_once(s.href, "#"), (s.href, ""))
+  let at = if s.doc == "spec" && str.starts_with(anchor, "s") {
+    "§" ++ str.replace(str.drop(anchor, 1), "-", ".")
+  } else if s.doc == "tutorial" {
+    chapter(path, code)
+  } else {
+    ""
+  }
+  if at == "" { doc } else { "${doc} › ${at}" }
+}
+
+## "Chapter 9" for `tutorial/09.html`, or nothing for a path that is not one.
+fn chapter(path: String, code: String) -> String = {
+  let parts = str.split(path, "/")
+  let file = parts[len(parts) - 1]
+  let num = unwrap_or(str.strip_suffix(file, ".html"), "")
+  let digits = list.all(code_points(num), c => char.is_digit(c))
+  if num == "" || not digits {
+    ""
+  } else {
+    var n = num
+    while len(code_points(n)) > 1 && str.starts_with(n, "0") {
+      n = str.drop(n, 1)
+    }
+    say(code, "Chapter ${n}", "第 ${n} 章")
+  }
+}
+
 # ---- scoring --------------------------------------------------------------
 
 ## How many rows the panel will show. A cap rather than a scroll: the panel is
@@ -518,7 +1195,11 @@ pub fn score(k: Key, q: String, ts: List[Term]) -> Int =
   }
 
 ## One match before it has a place in the list.
-type Scored = { id: Int, group: Int, rank: Int }
+##
+## `rank` is the tier, from [score] for a title row and from the table at
+## [answer] for a section of the text; `weight` orders the rows of one tier
+## (0 for every title row, whose ties are broken by index order).
+type Scored = { id: Int, group: Int, rank: Int, weight: Int }
 
 ## The ids of the entries a query answers, in the order the panel shows them.
 ##
@@ -536,18 +1217,81 @@ pub fn search(state: State, query: String) -> List[Int] = answer(state, query, -
 ## says why.
 pub type Answer = { hits: List[Int], counts: List[Int], scope: Int }
 
+##
+## The tiers, best first. A title row is above every section of the text,
+## because a title that answers is the reader's destination named, and a
+## paragraph is somewhere inside one (the field weighting MiniSearch and
+## DocSearch use: title over body):
+##
+##   5..1  a title row, by [score]
+##   0     a section with a paragraph that has every word of the query (and,
+##         for Chinese, every phrase of it in the paragraph's excerpt)
+##   -1    a section whose paragraphs have every character of a Chinese
+##         phrase, but whose excerpts were cut before it could be found
+##   -2    a query of three words or more that no paragraph has all of: a
+##         section with a paragraph that has at least half of them ([most])
+##
+## A section whose title row answered too is not a second row: the title row
+## stands for it. The text's sections count in the scope pills like any row.
 pub fn answer(state: State, query: String, scope: Int) -> Answer = {
   let q = str.to_lower(str.trim(query))
   if q == "" {
     Answer { hits: [], counts: [], scope: -1 }
   } else {
-    let found = matches(state.keys, q, terms(q))
+    let ts = terms(q)
+    let titles = matches(state.keys, q, ts)
+    let bodies = text_rows(state, q, titles)
+    let found = titles ++ text_scored(state, bodies)
     let counts = list.map(range(0, len(groups())), g => len(list.filter(found, s => s.group == g)))
     let kept = if scope >= 0 && scope < len(counts) && counts[scope] > 0 { scope } else { -1 }
     let narrowed = if kept >= 0 { list.filter(found, s => s.group == kept) } else { found }
-    Answer { hits: arrange(narrowed), counts: counts, scope: kept }
+    Answer { hits: list.map(arrange(narrowed), id => shown_id(state, bodies, id, ts)), counts: counts, scope: kept }
   }
 }
+
+## The sections of the text as matches: the `i`th is id `body_base() + i`
+## until [shown_id] knows which of its paragraphs it shows.
+fn text_scored(state: State, bodies: List[BodyHit]) -> List[Scored] = {
+  var out: List[Scored] = []
+  var i = 0
+  for h in bodies {
+    out = out ++ [Scored { id: body_base() + i, group: sec_group(state, h.sec), rank: h.rank, weight: h.weight }]
+    i = i + 1
+  }
+  out
+}
+
+## The sections of the text that answer and are not already a title row that
+## answered, in a group the panel draws.
+fn text_rows(state: State, q: String, titles: List[Scored]) -> List[BodyHit] = {
+  let ids = list.map(titles, s => s.id)
+  list.filter(body_hits(state, q), h => {
+    let s = sec_at(state, h.sec)
+    s.group >= 0 && not (s.entry >= 0 && has_sorted(ids, s.entry))
+  })
+}
+
+fn sec_at(state: State, sec: Int) -> Sec =
+  match state.body {
+    Some(b) -> unwrap_or(get(b.secs, sec), Sec { doc: "", href: "", title: "", group: -1, entry: -1 })
+    None -> Sec { doc: "", href: "", title: "", group: -1, entry: -1 }
+  }
+
+fn sec_group(state: State, sec: Int) -> Int = sec_at(state, sec).group
+
+## The id the model keeps for a row [arrange] placed: a title row's own, and
+## for the `i`th section of the text, the paragraph its row shows. Choosing
+## that paragraph waits until here, so it is done for the rows on screen and
+## not for every section that answered.
+fn shown_id(state: State, bodies: List[BodyHit], id: Int, ts: List[Term]) -> Int =
+  if id < body_base() {
+    id
+  } else {
+    match state.body {
+      Some(b) -> body_base() + shown_para(b, bodies[id - body_base()], ts)
+      None -> -1
+    }
+  }
 
 ## Every entry that answers, in index order.
 ##
@@ -560,7 +1304,7 @@ fn matches(keys: List[Key], q: String, ts: List[Term]) -> List[Scored] = {
   for k in keys {
     let r = score(k, q, ts)
     if r > 0 && k.group >= 0 {
-      out = out ++ [Scored { id: id, group: k.group, rank: r }]
+      out = out ++ [Scored { id: id, group: k.group, rank: r, weight: 0 }]
     }
     id = id + 1
   }
@@ -572,9 +1316,9 @@ fn matches(keys: List[Key], q: String, ts: List[Term]) -> List[Scored] = {
 ## A group's place is its best rank, with the panel's own order breaking ties,
 ## so a query whose best answer is a section of the spec shows the spec first
 ## even though the standard library is listed first. Within a group the order
-## is rank, then index order: `sort_by` is stable.
+## is rank, then weight, then index order: `sort_by` is stable.
 fn arrange(found: List[Scored]) -> List[Int] = {
-  let best_first = sort_by(found, (a, b) => b.rank - a.rank)
+  let best_first = sort_by(found, (a, b) => if a.rank != b.rank { b.rank - a.rank } else { b.weight - a.weight })
   var per: List[List[Scored]] = []
   for g in range(0, len(groups())) {
     let mine = list.filter(best_first, s => s.group == g)
@@ -643,28 +1387,61 @@ pub fn scan(state: State, ids: List[Int], sel: Int) -> Scan = {
   with handle Found {
     var hits: List[Hit] = []
     var chosen: String = ""
-    found(e) => {
+    found(e, text) => {
       if len(hits) == sel {
         chosen = e.href
       }
-      hits = hits ++ [Hit { entry: e, at: len(hits) }]
+      hits = hits ++ [Hit { entry: e, at: len(hits), text: text }]
     }
   }
-  probe(state.entries, ids)
+  probe(state, ids)
   Scan { hits: hits, chosen: chosen }
 }
 
 ## Perform `found` once per id, in the model's order. An id that names no
 ## entry is passed over: a model is text the page hands back, and a page may
 ## hand back anything.
-fn probe(entries: List[Entry], ids: List[Int]) -> Unit !Found = {
+fn probe(state: State, ids: List[Int]) -> Unit !Found = {
   for id in ids {
-    match get(entries, id) {
-      Some(e) -> found(e)
+    match entry_at(state, id) {
+      Some(e) -> found(e, id >= body_base())
       None -> ()
     }
   }
 }
+
+## What a row of the model's hits shows: a title row as the index has it, and
+## a paragraph of the text as its section, with the paragraph as the note.
+## The section's title takes the title's place and where it is takes the
+## signature's, so a row of the text is drawn by the same [row] as any other.
+fn entry_at(state: State, id: Int) -> Option[Entry] =
+  if id < body_base() {
+    get(state.entries, id)
+  } else {
+    match state.body {
+      None -> None
+      Some(b) ->
+        match get(b.paras, id - body_base()) {
+          None -> None
+          Some(p) ->
+            match get(b.secs, p.sec) {
+              None -> None
+              Some(s) ->
+                if s.group < 0 {
+                  None
+                } else {
+                  Some(Entry {
+                    group: groups()[s.group].id,
+                    title: s.title,
+                    detail: crumb(s, state.lang),
+                    note: p.text,
+                    href: s.href,
+                  })
+                }
+            }
+        }
+    }
+  }
 
 # ---- the view: a collector inside a collector ------------------------------
 
@@ -722,7 +1499,8 @@ fn row(h: Hit, chosen: Bool, ts: List[Term]) -> Node[Msg] !Ctx = {
     ]),
   ]
   let link_kids = head ++ note_kids(e, ts)
-  el("li", option_props(at, chosen), class: if chosen { "search-row is-selected" } else { "search-row" },
+  let kind = if h.text { "search-row search-text" } else { "search-row" }
+  el("li", option_props(at, chosen), class: if chosen { "${kind} is-selected" } else { kind },
     on: [hover_on(at)], kids: [el("a", [("href", link(e.href)), ("tabindex", "-1")], kids: link_kids)])
 }
 
@@ -770,10 +1548,12 @@ fn marked_runs(note: String, ts: List[Term]) -> List[Node[Msg]] = {
 ## `<mark>`.
 ##
 ## Where a word counts as found follows [fits] loosely: an ASCII word where a
-## word of `s` begins (so `read` marks `io.read_file` but not `bread`), a word
-## beyond ASCII anywhere, since a Chinese run has no word starts inside it. The
-## mark is for the eye and decides nothing; a row that matched through its
-## signature alone simply has nothing marked.
+## word of `s` begins (so `read` marks `io.read_file` but not `bread`), and
+## where one ends too unless it is the word still being typed (so `the` marks
+## `the` and not the start of `then`), a word beyond ASCII anywhere, since a
+## Chinese run has no word starts inside it. The mark is for the eye and
+## decides nothing; a row that matched through its signature alone simply has
+## nothing marked.
 ##
 ## Positions are code points of the lowercased text, laid over the original.
 ## A string whose lowercase has a different number of code points is left
@@ -843,7 +1623,9 @@ fn places(low: String, t: Term) -> List[(Int, Int)] = {
     match str.index_of(str.drop(low, from), w) {
       Some(i) -> {
         let p = from + i
-        if t.fit == Within || p == 0 || kind_of(char.code(str.at(low, p - 1))) != 3 {
+        let starts = p == 0 || kind_of(char.code(str.at(low, p - 1))) != 3
+        let ends = t.fit != Whole || p + wl >= str.len(low) || kind_of(char.code(str.at(low, p + wl))) != 3
+        if t.fit == Within || (starts && ends) {
           out = out ++ [(p, p + wl)]
         }
         from = p + 1
@@ -1176,7 +1958,7 @@ fn field(m: Model, shown: Int) -> Node[Msg] !Ctx = {
     ("aria-controls", list_id()),
     ("aria-autocomplete", "list"),
   ] ++ active ++ [
-    ("placeholder", say(code, "Search titles and API names", "搜索标题与 API 名")),
+    ("placeholder", placeholder(code, full_text())),
     ("autocomplete", "off"),
     ("spellcheck", "false"),
     ("enterkeyhint", "go"),
@@ -1218,7 +2000,7 @@ fn foot(mod_key: String) -> Node[Msg] !Ctx = {
       hint([mod_key, "↵"], say(code, "new tab", "新标签页")),
       hint(["esc"], say(code, "close", "关闭")),
     ]),
-    el("p", class: "search-scope", kids: [text(scope_line(code))]),
+    el("p", class: "search-scope", kids: [text(scope_line(code, full_text()))]),
   ])
 }
 
@@ -1273,6 +2055,7 @@ pub fn init(flags: Option[String]) -> (State, Model) =
             keys: list.map(entries, e => key_of(e)),
             start: list.map(jarr(jget(index, "start")), s => jint_or(s, -1)),
             recent: recent_of(jget(j, "recent")),
+            body: body_of(jget(j, "body"), entries),
           }
           # A shared link's query is answered in the first turn, so the
           # panel opens on its results rather than on an empty field.
@@ -1284,7 +2067,7 @@ pub fn init(flags: Option[String]) -> (State, Model) =
   }
 
 fn blank_state() -> State =
-  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [] }
+  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [], body: None }
 
 ## How many recent queries the panel shows. The page keeps no more than this
 ## either; the bound is restated here because flags are text a page may hand
@@ -1368,6 +2151,7 @@ pub fn view(state: State, m: Model) -> Node[Msg] = {
   with handle Ctx {
     root() => state.root
     lang() => state.lang
+    full_text() => has_body(state)
   }
   if m.open { panel(state, m) } else { div(class: "search-panel is-closed") }
 }
@@ -2082,6 +2866,9 @@ test "the query's words are marked where they begin a word" {
     el("code", kids: [el("mark", kids: [text("path")])]),
   ]
   assert marked_runs("The file at `path`", terms("path")) == m6
+  # a word that is not the last is whole: `the` is not the start of `then`
+  let m7: List[Node[Msg]] = [text("then "), el("mark", kids: [text("the")])]
+  assert marked("then the", terms("the y")) == m7
 }
 
 fn prop_of(w: Node[Msg], name: String) -> String =
@@ -2297,3 +3084,291 @@ test "narrowing deals the whole cap to the one group" {
   assert len(lib.hits) == cap()
   assert list.all(lib.hits, id => id < 45)
 }
+
+# ---- the documents' text ---------------------------------------------------
+
+## The words of a paragraph, by the table in docs/site-search-design.md 3.2.
+## That table is the contract with the generator that writes the body index
+## (site/src/gen/search.dawn, whose test of the same name copies the same
+## rows), so a change to either side is a change to the table.
+test "a body's words split by the table in docs/site-search-design.md 3.2" {
+  let samples: List[(String, List[String])] = [
+    ("io.read_file", ["io", "read", "file", "io.read_file"]),
+    ("!io 效果", ["io", "!io", "效", "果"]),
+    ("!Fs", ["fs", "!fs"]),
+    ("命名效果，处理器", ["命", "名", "效", "果", "处", "理", "器"]),
+    ("Fs效果的 handler", ["fs", "handler", "效", "果", "的"]),
+    ("str.trim 去掉空白", ["str", "trim", "str.trim", "去", "掉", "空", "白"]),
+    ("6.5 具名效果", ["6", "5", "6.5", "具", "名", "效", "果"]),
+    ("café λx", ["café", "λx"]),
+    ("全角，标点。", ["全", "角", "标", "点"]),
+    ("... ! -> ()", []),
+  ]
+  for sample in samples {
+    let (s, words) = sample
+    assert body_terms(s) == words
+  }
+}
+
+## A body index in the asset's format (docs/site-search-design.md 2.1), built
+## from sections and paragraphs with this file's [body_terms] the way the
+## generator builds it with its own: words in code-point order, each with the
+## gaps between the paragraphs it is in.
+fn body_asset(version: Int, secs: List[List[String]], paras: List[(Int, String)]) -> String = {
+  var table: Map[String, List[Int]] = map.empty()
+  var p = 0
+  for para in paras {
+    let (_, text) = para
+    for w in list.unique(body_terms(text)) {
+      table = map.insert(table, w, unwrap_or(map.get(table, w), []) ++ [p])
+    }
+    p = p + 1
+  }
+  let t = table
+  let words = sort_by(map.keys(t), (a, b) => order(a, b))
+  let gaps = list.map(words, w => JArr(items: list.map(gaps_of(unwrap_or(map.get(t, w), [])), g => JInt(value: g))))
+  render(JArr(items: [
+    JInt(value: version),
+    JArr(items: list.map(secs, s => JArr(items: list.map(s, f => JStr(value: f))))),
+    JArr(items: list.map(words, w => JStr(value: w))),
+    JArr(items: gaps),
+    JArr(items: list.map(paras, x => {
+      let (sec, text) = x
+      JArr(items: [JInt(value: sec), JStr(value: text)])
+    })),
+  ]))
+}
+
+fn gaps_of(ps: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var last = 0
+  for p in ps {
+    out = out ++ [p - last]
+    last = p
+  }
+  out
+}
+
+fn en_secs() -> List[List[String]] = [
+  ["spec", "spec.html", "Dawn Language Specification"],
+  ["spec", "spec.html#s6-5", "6.5 Named effects"],
+  ["spec", "spec.html#s6-5-4", "with handle"],
+  ["tutorial", "tutorial/09.html#s0-2", "Handlers keep state"],
+  ["design", "design.html#s2", "2. Non-goals"],
+]
+
+fn en_paras() -> List[(Int, String)] = [
+  (0, "Status: normative."),
+  (1, "Users declare effects and handle them."),
+  (2, "with handle E { arms } installs a handler for the rest of the block."),
+  (2, "Handler-local state: a handler keeps its cells, and the handler's arms read them."),
+  (3, "A handler can keep state between operations."),
+  (4, "Full algebraic effects with multiple resumption are out of scope."),
+]
+
+## The probe index, with the text of five sections beside it.
+fn text_state() -> State = {
+  let titles = probe_state()
+  let j = json_of(body_asset(1, en_secs(), en_paras()))
+  State { ..titles, body: body_of(j, titles.entries) }
+}
+
+fn sections_of(hs: List[BodyHit]) -> List[(Int, Int)] = list.map(hs, h => (h.sec, h.rank))
+
+test "the body index is read in format 1 only, and its gaps are added up" {
+  let titles = probe_state()
+  let asset = body_asset(1, en_secs(), en_paras())
+  match body_of(json_of(asset), titles.entries) {
+    Some(b) -> {
+      assert len(b.secs) == 5
+      assert len(b.paras) == 6
+      # `handler` is in paragraphs 2, 3 and 4, written as the gaps 2, 1, 1
+      let i = lower_bound(b.terms, "handler")
+      assert b.terms[i] == "handler"
+      assert b.posts[i] == [2, 3, 4]
+      # the words are in code-point order
+      assert list.all(range(1, len(b.terms)), k => order(b.terms[k - 1], b.terms[k]) < 0)
+      # the section the title index also has knows its row, and the
+      # design notes are drawn with history
+      assert b.secs[1].entry == 3
+      assert b.secs[2].entry == -1
+      assert b.secs[4].group == group_index("history")
+    }
+    None -> panic("a format 1 body index must be read")
+  }
+  # another version, or something that is not one, is no body at all
+  let other = json_of(body_asset(2, en_secs(), en_paras()))
+  assert not has_body(State { ..titles, body: body_of(other, titles.entries) })
+  assert not has_body(State { ..titles, body: body_of(JNull, titles.entries) })
+  match parse("[1,[],[\"a\"],[],[]]") {
+    Ok(j) -> {
+      assert not has_body(State { ..titles, body: body_of(j, titles.entries) })
+    }
+    Err(e) -> panic("the literal must parse: ${e}")
+  }
+}
+
+## It arrives in the flags, and the foot says what is searched either way.
+test "the flags carry the body index, and the foot says whether it is in" {
+  let index = "\"index\":{\"v\":1,\"lang\":\"en\",\"items\":[]}"
+  let (with_body, _) = init(Some("{${index},\"body\":${body_asset(1, en_secs(), en_paras())}}"))
+  assert has_body(with_body)
+  let (old_body, _) = init(Some("{${index},\"body\":${body_asset(2, en_secs(), en_paras())}}"))
+  assert not has_body(old_body)
+  let (none, _) = init(Some("{${index}}"))
+  assert not has_body(none)
+  assert str.contains(show_tree(view(with_body, blank())), "Searches titles, API names and the documents' text.")
+  assert str.contains(show_tree(view(old_body, blank())), "Searches titles and API names, not body text.")
+  let zh = State { ..with_body, lang: "zh-CN" }
+  assert str.contains(show_tree(view(zh, blank())), "搜标题、API 名与文档正文。")
+  assert prop_of(all_with_class(view(with_body, blank()), "search-input")[0], "placeholder")
+    == "Search titles, API names and text"
+}
+
+## Every word whole but the ones the query ends with, which are the start of
+## a word; a Han character is always whole.
+test "a query's words for the text, the ones it ends with as prefixes" {
+  assert body_query("io.read_fi") == [
+    BodyTerm { word: "io", prefix: false },
+    BodyTerm { word: "read", prefix: false },
+    BodyTerm { word: "fi", prefix: true },
+    BodyTerm { word: "io.read_fi", prefix: true },
+  ]
+  assert body_query("Keep sta") == [BodyTerm { word: "keep", prefix: false }, BodyTerm { word: "sta", prefix: true }]
+  assert body_query("fs 效果") == [
+    BodyTerm { word: "fs", prefix: false },
+    BodyTerm { word: "效", prefix: false },
+    BodyTerm { word: "果", prefix: false },
+  ]
+  assert han_runs("效果 处理 x 效") == ["效果", "处理"]
+  # one letter is not yet a prefix
+  assert body_query("handle s") == [BodyTerm { word: "handle", prefix: false }, BodyTerm { word: "s", prefix: false }]
+}
+
+## A paragraph has to have every word, and the sections are the rows.
+test "the text answers with the sections whose paragraphs have every word" {
+  let state = text_state()
+  # `keep` is whole: the paragraph with `keeps` does not have it
+  assert sections_of(body_hits(state, "keep sta")) == [(3, 0)]
+  # `handl` is the start of `handle`, `handler` and `handler's`
+  assert sections_of(body_hits(state, "handl")) == [(1, 0), (2, 0), (3, 0)]
+  let none: List[(Int, Int)] = []
+  assert sections_of(body_hits(state, "keep effects")) == none
+  # and no text at all before the page has given it
+  assert sections_of(body_hits(probe_state(), "handl")) == none
+}
+
+## One row per section, and its excerpt is the paragraph where the words are
+## densest, not the section's first: paragraph 3 says `handler` three times.
+test "a section's row shows the paragraph where the words are densest" {
+  let state = text_state()
+  let m = typed(state, "handler")
+  assert list.filter(m.hits, id => id >= body_base()) == [body_base() + 3, body_base() + 4]
+  let v = view(state, m)
+  let rows = all_with_class(v, "search-row")
+  assert list.map(rows, r => text_of(all_with_class(r, "search-title")[0])) == ["with handle", "Handlers keep state"]
+  assert list.map(rows, r => text_of(all_with_class(r, "search-detail")[0]))
+    == ["Spec › §6.5.4", "Tutorial › Chapter 9"]
+  # the words are marked in the excerpt, where they begin a word
+  let note = all_with_class(rows[0], "search-note")[0]
+  assert list.map(all_with_tag(note, "mark"), k => text_of(k)) == ["Handler", "handler", "handler"]
+  # the row goes to the section
+  assert hrefs(v) == ["./spec.html#s6-5-4", "./tutorial/09.html#s0-2"]
+  assert turn(state, m, Pressed(key: "Enter")).goto == "spec.html#s6-5-4"
+  # the model carries the paragraph, and reads back the same
+  assert decode(encode(m)) == m
+  assert str.contains(encode(m), "\"hits\":[1000003,1000004]")
+}
+
+## A title row is above every section of the text, and a section a title row
+## already answered for is that row and not a second one.
+test "the text ranks below the titles and never repeats a title row" {
+  let state = text_state()
+  let m = typed(state, "effects")
+  # `Effects` is a title, `6.5 Named effects` has the word in its title and
+  # its text, and the design notes have it only in their text
+  assert m.hits == [4, 3, body_base() + 5]
+  assert m.counts == [0, 1, 1, 0, 1]
+  let v = view(state, m)
+  assert kid_classes(v, "search-results") == ["search-group hue-3", "search-group hue-2", "search-group hue-2"]
+  assert text_of(all_with_class(v, "search-detail")[2]) == "Early decisions"
+  # and only the section of the text is marked as one
+  assert list.map(all_with_class(v, "search-row"), r => has_class(r, "search-text")) == [false, false, true]
+  # the history pill narrows to the text's row
+  let hist = turn(state, m, Scoped(group: 4))
+  assert hist.hits == [body_base() + 5]
+  # without the text the same query has the two title rows only
+  assert typed(probe_state(), "effects").hits == [4, 3]
+  assert typed(probe_state(), "effects").counts == [0, 1, 1, 0, 0]
+}
+
+## A question typed as a sentence has words no paragraph has all of. When
+## that is so for three words or more, the paragraphs with at least half of
+## them answer, weighed by how rare their words are, below every other row.
+test "a longer query nothing answers whole is answered by most of its words" {
+  let state = text_state()
+  assert sections_of(body_hits(state, "where does the block handle")) == [(2, -2)]
+  let none: List[(Int, Int)] = []
+  # two words are not a sentence: both, or nothing
+  assert sections_of(body_hits(state, "where handle")) == none
+  # and a query that does have an answer whole is not loosened
+  assert sections_of(body_hits(state, "the handler arms")) == [(2, 0)]
+}
+
+fn zh_secs() -> List[List[String]] = [
+  ["spec", "zh/spec.html#s6-5", "6.5 命名效果"],
+  ["tutorial", "zh/tutorial/09.html", "9. 效果"],
+  ["history", "zh/history.html#s1", "历史"],
+]
+
+fn zh_paras() -> List[(Int, String)] = [
+  (0, "用户声明效果，并在别处处理它们。"),
+  (0, "效用与结果，处置与理由，各说各的。"),
+  (1, "处在开头的理由，效与果分开出现，这一段被截断…"),
+  (1, "`Fs`效 果的处理在这里：源文件里这一行折了。"),
+  (2, "处于理想，效率结果都要，这一段同样被截断…"),
+]
+
+## Chinese is indexed by character, so a phrase is checked in the excerpts of
+## the paragraphs that have its characters: found is sure, cut before it could
+## be found is kept a tier lower, and not found in a whole paragraph is gone.
+test "a Chinese phrase is checked in the candidates' excerpts" {
+  let j = json_of(body_asset(1, zh_secs(), zh_paras()))
+  let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+  # paragraph 1 has every character and neither phrase; paragraph 3 has
+  # `效果` across a folded line; paragraph 4 is cut
+  assert sections_of(body_hits(state, "效果 处理")) == [(0, 0), (1, 0), (2, -1)]
+  let hs = body_hits(state, "效果 处理")
+  assert hs[0].paras == [0]
+  assert hs[1].paras == [3]
+  assert hs[2].paras == [4]
+  # one character is a word, and there is no phrase to check
+  assert sections_of(body_hits(state, "效")) == [(0, 0), (1, 0), (2, 0)]
+  let m = typed(state, "效果 处理")
+  let v = view(state, m)
+  assert list.map(all_with_class(v, "search-detail"), d => text_of(d)) == ["规范 › §6.5", "教程 › 第 9 章", "历史"]
+  # the phrase is marked in the excerpt
+  assert list.map(all_with_tag(all_with_class(v, "search-note")[0], "mark"), k => text_of(k)) == ["效果", "处理"]
+}
+
+fn all_with_tag(w: Node[Msg], tag: String) -> List[Node[Msg]] = {
+  var out: List[Node[Msg]] = []
+  match w {
+    Text(_) -> ()
+    Elem(t, ..) -> {
+      if t == tag {
+        out = out ++ [w]
+      }
+    }
+  }
+  for k in kids_of(w) {
+    out = out ++ all_with_tag(k, tag)
+  }
+  out
+}
+
+fn json_of(s: String) -> Json =
+  match parse(s) {
+    Ok(j) -> j
+    Err(_) -> JNull
+  }

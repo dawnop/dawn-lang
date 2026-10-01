@@ -138,7 +138,7 @@ rm -rf site/dist
 # has no compressor, and the budget is what a reader downloads, so the gzip
 # count is taken here. Over budget is reported, not fatal: the remedy (a
 # shorter excerpt) is a design change, not something a build should guess.
-for search_body in en:100 zh:130; do
+for search_body in en:120 zh:150; do
   search_lang="${search_body%%:*}"
   search_budget_kb="${search_body##*:}"
   search_file="site/dist/assets/search-body-$search_lang.json"

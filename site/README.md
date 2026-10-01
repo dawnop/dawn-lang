@@ -154,6 +154,12 @@ fragment 一律是锚点），最近搜索在 localStorage 的 `dawn-search-rece
 （行号数组，由 `gen/search.dawn` 按行的身份挑出，缺一条就构建失败），所以标题与 href 都是
 那一行自己的、已被 `gen/links` 查过的。
 
+正文是第二份索引 `search-body-{en,zh}.json`（格式见 `docs/site-search-design.md`），挂载点
+`#dawn-search` 的 `data-search-body` 指向它。它比面板更懒：输入框**第一次出现非空查询**时
+才 fetch，每页至多一次；版本号是 1 才收下，然后 `search.js` 带着它重新 init 一次 guest
+（保留输入框的文字、焦点与光标），正文从此和标题一样是 guest 的只读状态，不过线。
+fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「只搜标题与 API 名，不搜正文」。
+
 ## 渲染约定
 
 - **Markdown 子集**（docs 实际用量驱动，遇到解析不了的语法**报错退出**，
