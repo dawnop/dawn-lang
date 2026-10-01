@@ -1,0 +1,802 @@
+# The front page, "Horizon": one sky read top to bottom, from night over the
+# hero to sunrise over the install section (docs/site-home-design.md).
+#
+# Its own module rather than more of gen/pages.dawn because it is the one page
+# with its own shell. Every other page is `html/page.shell` around a body; this
+# one puts the site header inside its sky, links a stylesheet and a script no
+# other page loads (the dark theme and the motion are this page's alone for
+# now), and carries figures read from the build's environment.
+#
+# Three rules shape everything below, and each is why some piece of text is
+# read from a file instead of written here:
+#
+#   - every program on the page is a file a gate runs. The listings are
+#     `site/pages/<stem>.dawn`, or the project a `<stem>.project` names, and
+#     what is shown under each is `<stem>.out`, which scripts/doc-check.py
+#     holds to a real `dawn run` byte for byte. A listing cut from a project
+#     (the GPU section's two functions) is cut from the file that runs, and a
+#     line of output picked from a run is picked from that run's `.out`, so
+#     nothing on the page is a transcription;
+#   - every figure comes from scripts/site-figures.sh through the environment,
+#     and a missing or empty one stops the build rather than printing a guess;
+#   - every word is in the page's language, from site/pages/home.md or its
+#     translation. What is written here is markup, code-words that read the
+#     same in both languages (`effect`, `!Dev`, file names), and the install
+#     commands, which are shell.
+
+use std/str
+use std/list
+use std/io.{Fs, Env, getenv, with_fs_real}
+use md/ast.{Block}
+use html/page.{Assets, Lang, En, Zh, head_html, header_html, footer_html, lang_path,
+  plain_assets, playground_label }
+use html/play.{play_hash}
+use hl/dawn.{highlight_dawn}
+use html/escape.{escape_html, escape_attr}
+use gen/common.{must_read, write_page, map_doc_url, doc_files}
+use gen/copy.{Copy, load_copy, line, plain}
+
+# ---- the figures ----
+
+## The numbers the page prints, each produced by scripts/site-figures.sh.
+pub type Figures = { selfhost_lines: Int, native_corpus: Int } derive Show
+
+## One figure out of the environment: a positive decimal integer, or why not.
+##
+## Absent and empty are both errors, and so is anything that is not digits or
+## is zero: each is what a broken producer prints (a renamed file under
+## `find`, a `grep` that matched nothing), and a page saying "0 programs" is
+## the failure this exists to stop. There is no default, on purpose; a default
+## is a number nobody measured.
+pub fn read_figure(key: String, raw: Option[String]) -> Result[Int, String] = {
+  let name = "DAWN_SITE_FIG_${key}"
+  match raw {
+    None -> Err("${name} is not set (site/build.sh exports it from scripts/site-figures.sh)")
+    Some(v) -> {
+      var digits = str.len(v) > 0
+      for ch in code_points(v) {
+        if ch < '0' || ch > '9' {
+          digits = false
+        }
+      }
+      if v == "" {
+        Err("${name} is empty")
+      } else if not digits {
+        Err("${name} is \"${v}\", not a count")
+      } else {
+        match parse_int(v) {
+          Some(n) -> if n > 0 { Ok(n) } else { Err("${name} is 0, which no producer means") }
+          None -> Err("${name} is \"${v}\", not a count")
+        }
+      }
+    }
+  }
+}
+
+fn figure(key: String) -> Int !Env =
+  match read_figure(key, getenv("DAWN_SITE_FIG_${key}")) {
+    Ok(n) -> n
+    Err(e) -> panic("front page figure: ${e}")
+  }
+
+## The figures this build was given. Read once, in site/src/main.dawn, the way
+## gen/pages.build_stamp is.
+pub fn site_figures() -> Figures !Env =
+  Figures {
+    selfhost_lines: figure("SELFHOST_LINES"),
+    native_corpus: figure("NATIVE_CORPUS"),
+  }
+
+## A count with thousands separators, the way both languages of the page print
+## it (and the way home.js prints it while counting up).
+fn grouped(n: Int) -> String = {
+  let s = "${n}"
+  let k = str.len(s)
+  var out = ""
+  var i = 0
+  for ch in str.chars(s) {
+    if i > 0 && (k - i) % 3 == 0 {
+      out = out ++ ","
+    }
+    out = out ++ ch
+    i = i + 1
+  }
+  out
+}
+
+# ---- the programs ----
+
+## A listing's recorded stdout, trimmed of the final newline.
+fn recorded(stem: String) -> String !Fs = str.trim(must_read("site/pages/${stem}.out"))
+
+## The project a `<stem>.project` names: one line, a directory under the root.
+## scripts/doc-check.py reads the same line to know what to run.
+fn project_of(stem: String) -> String !Fs = str.trim(must_read("site/pages/${stem}.project"))
+
+## One top-level function, cut out of a source file: from its `fn <name>(`
+## line through the first line that is a lone `}`. A function that moved,
+## changed shape or was renamed stops the build; showing the wrong lines, or
+## none, is the alternative.
+pub fn fn_source(src: String, name: String) -> String = {
+  let head = "fn ${name}("
+  var out: List[String] = []
+  var on = false
+  var done = false
+  for l in str.split(src, "\n") {
+    if not done {
+      if not on && str.starts_with(l, head) {
+        on = true
+      }
+      if on {
+        out = out ++ [l]
+        if l == "}" {
+          done = true
+        }
+      }
+    }
+  }
+  if not done {
+    panic("no `${head}...` closed by a lone `}` to show on the front page")
+  }
+  join(out, "\n")
+}
+
+## The one line of a recorded output that contains `needle`, trimmed. None or
+## several stops the build: the strip under a listing shows a line the run
+## printed, and which line is only well defined if it is exactly one.
+pub fn line_with(out: String, needle: String) -> String = {
+  let hits = list.filter(str.split(out, "\n"), l => str.contains(l, needle))
+  if len(hits) != 1 {
+    panic("expected exactly one line containing `${needle}` in a recorded output, found ${len(hits)}")
+  }
+  str.trim(hits[0])
+}
+
+# ---- markup helpers ----
+
+fn hl_pre(src: String) -> String = "<pre><code>" ++ highlight_dawn(src) ++ "</code></pre>"
+
+## The sun's cat and the moon's: the mark's own cat, read out of
+## site/assets/logo.svg rather than copied, so there is one drawing of it.
+## Awake, it is the whole path, eyes cut out by the even-odd rule; asleep, it
+## is the first subpath alone, the outline with no eyes in it.
+pub fn cat_path(logo: String) -> String = {
+  let marker = `fill-rule="evenodd"`
+  match str.index_of(logo, marker) {
+    None -> panic("site/assets/logo.svg: no even-odd path, so no cat to put in the sun")
+    Some(i) -> {
+      let rest = str.drop(logo, i)
+      match str.index_of(rest, ` d="`) {
+        None -> panic("site/assets/logo.svg: the cat path has no d attribute")
+        Some(j) -> {
+          let from = str.drop(rest, j + 4)
+          match str.index_of(from, `"`) {
+            Some(k) -> str.take(from, k)
+            None -> panic("site/assets/logo.svg: the cat path's d attribute never closes")
+          }
+        }
+      }
+    }
+  }
+}
+
+fn cat_outline(path: String) -> String =
+  match str.index_of(path, " Z") {
+    Some(i) -> str.take(path, i + 2)
+    None -> panic("site/assets/logo.svg: the cat path has no closed first subpath")
+  }
+
+# ---- the sky ----
+
+fn stars() -> String =
+  `<svg class="stars" viewBox="0 0 1200 600" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+<g fill="#fff">
+<circle cx="130" cy="120" r=".9" opacity=".35"/><circle cx="410" cy="60" r=".8" opacity=".3"/>
+<circle cx="660" cy="150" r="1" opacity=".3"/><circle cx="880" cy="70" r=".9" opacity=".35"/>
+<circle cx="1090" cy="170" r=".8" opacity=".25"/><circle cx="300" cy="260" r=".7" opacity=".2"/>
+<circle cx="980" cy="300" r=".7" opacity=".18"/>
+<circle class="tw" cx="560" cy="40" r="1.1"/><circle class="tw tw2" cx="1180" cy="110" r="1"/><circle class="tw tw3" cx="60" cy="220" r="1"/>
+</g>
+</svg>`
+
+## The theme toggle. `hidden` in the markup: without the script it could do
+## nothing, and a button that does nothing is worse than none. The two labels
+## are attributes so that home.js, which both language trees load, carries no
+## words of either (gen/assets.dawn holds shared bundles to that).
+fn toggle(c: Copy) -> String = {
+  let dark = escape_attr(plain(c, "theme-to-dark"))
+  let light = escape_attr(plain(c, "theme-to-light"))
+  """<button class="theme-toggle" type="button" id="theme-toggle" hidden aria-pressed="false" aria-label="${dark}" data-label-dark="${dark}" data-label-light="${light}"><svg viewBox="0 0 20 20" aria-hidden="true"><g class="ico-sun" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="3.4"/><path d="M10 2.2v1.9M10 15.9v1.9M2.2 10h1.9M15.9 10h1.9M4.5 4.5l1.3 1.3M14.2 14.2l1.3 1.3M4.5 15.5l1.3-1.3M14.2 5.8l1.3-1.3"/></g><path class="ico-moon" fill="currentColor" d="M15.6 12.6A6.4 6.4 0 0 1 7.4 4.4a6.4 6.4 0 1 0 8.2 8.2z"/></svg></button>"""
+}
+
+fn hero(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
+  let src = str.trim(must_read("site/pages/hero.dawn"))
+  let play = "${root}/" ++ lang_path(lang, "playground.html")
+  let tut = "${root}/" ++ lang_path(lang, "tutorial/index.html")
+  let open = escape_attr(play ++ "#" ++ play_hash(src))
+  let label = escape_html(playground_label(lang))
+  let t = (k: String) => line(c, k, mu)
+  """<main class="hero" id="top">
+<div class="hero-copy">
+<p class="phase">${t("phase-hero")}</p>
+<p class="eyebrow">${t("eyebrow")}</p>
+<h1 class="wordmark" data-text="Dawn">Dawn</h1>
+<p class="lede">${t("lede")}</p>
+<ul class="facts-row">
+<li><span class="fr-dot" aria-hidden="true"></span>${t("fact-selfhost")}</li>
+<li><span class="fr-dot" aria-hidden="true"></span>${t("fact-backends")}</li>
+<li><span class="fr-dot" aria-hidden="true"></span>${t("fact-gpu")}</li>
+</ul>
+<div class="cta">
+<a class="btn btn-sun" href="${play}">${t("cta-playground")}</a>
+<a class="btn btn-ghost" href="${tut}">${t("cta-primary")}</a>
+</div>
+</div>
+<figure class="editor">
+<figcaption class="editor-bar"><i></i><i></i><i></i><span class="fname">main.dawn</span><a class="play-open" href="${open}">${label} ↗</a></figcaption>
+${hl_pre(src)}
+<div class="term"><div><span class="cmd">dawn run main.dawn</span></div><div class="res">${escape_html(recorded("hero"))}<span class="caret-h" aria-hidden="true"></span></div></div>
+</figure>
+</main>"""
+}
+
+fn horizon(logo: String) -> String = {
+  let cat = cat_path(logo)
+  let asleep = cat_outline(cat)
+  `<div class="horizon" aria-hidden="true">
+<svg class="glow" viewBox="0 0 900 140" preserveAspectRatio="xMidYMax meet">
+<defs><radialGradient id="glow" cx="50%" cy="100%" r="45%"><stop offset="0" stop-color="#7c3aed" stop-opacity=".22"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient></defs>
+<rect x="0" y="0" width="900" height="140" fill="url(#glow)"/>
+</svg>
+<div class="orbit" id="orbit">
+<svg class="sun-body" viewBox="-42 -42 84 84">
+<defs><linearGradient id="sun" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#db2777"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+<circle r="40" fill="url(#sun)" opacity=".9"/>
+<path transform="scale(1.3) translate(-80.02,-101.5)" fill-rule="evenodd" fill="#ffffff" fill-opacity=".92" d="` ++ cat ++ `"/>
+</svg>
+<svg class="moon-body" viewBox="-38 -38 76 76">
+<circle r="36" fill="#e4e5f7"/>
+<circle cx="-25" cy="9" r="4" fill="#c9cbe6" opacity=".7"/>
+<circle cx="14" cy="23" r="3.2" fill="#c9cbe6" opacity=".6"/>
+<g transform="scale(1.12) translate(-80.02,-101.5)">
+<path fill="#2b2e5c" d="` ++ asleep ++ `"/>
+<g fill="none" stroke="#e4e5f7" stroke-width="1.3" stroke-linecap="round"><path d="M86.4 102.2 q2.4 2.2 4.9 0.2"/><path d="M71.4 105.2 q2.4 2.2 4.9 0.2"/></g>
+</g>
+<text x="16" y="-13" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" fill="#2b2e5c" opacity=".55">z</text>
+<text x="22" y="-20" font-family="ui-sans-serif, system-ui, sans-serif" font-size="6.5" font-weight="700" fill="#2b2e5c" opacity=".4">z</text>
+</svg>
+</div>
+</div>`
+}
+
+# ---- three ideas ----
+
+fn icon_effect() -> String =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h2"/><path d="M17 4h2a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-2"/><path d="M9 9.5h4.5a2.5 2.5 0 0 1 0 5H9"/><path d="M11 12.5 9 14.5l2 2"/></svg>`
+
+fn icon_comptime() -> String =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h10M7 21h10"/><path d="M8 3c0 5 8 5 8 9s-8 4-8 9"/><path d="M16 3c0 5-8 5-8 9s8 4 8 9"/><path d="M10 18.5h4"/></svg>`
+
+fn icon_match() -> String =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><path d="M7 12h3"/><path d="M10 12c3 0 3-6 7-6M10 12h7M10 12c3 0 3 6 7 6"/><circle cx="19" cy="6" r="1.6"/><circle cx="19" cy="12" r="1.6"/><circle cx="19" cy="18" r="1.6"/></svg>`
+
+## One concept card: a site/pages program with its recorded output. `word` and
+## `bar` are code-words, the same in both languages.
+fn idea(
+  c: Copy,
+  mu: fn(String) -> String,
+  stem: String,
+  num: String,
+  word: String,
+  bar: String,
+  icon: String,
+) -> String !Fs = {
+  let src = str.trim(must_read("site/pages/${stem}.dawn"))
+  let t = (k: String) => line(c, k, mu)
+  let key = str.drop(stem, 5)
+  """<article class="idea">
+<div class="idea-top"><span class="idea-icon" aria-hidden="true">${icon}</span><span class="num"><b>${num}</b> · ${word}</span></div>
+<h3>${t("idea-${key}-title")}</h3>
+<p>${t("idea-${key}-body")}</p>
+<pre data-bar="${bar}"><code>${highlight_dawn(src)}</code></pre>
+<div class="out">${escape_html(recorded(stem))}</div>
+</article>"""
+}
+
+fn ideas(c: Copy, mu: fn(String) -> String) -> String !Fs = {
+  let t = (k: String) => line(c, k, mu)
+  """<section class="band" aria-labelledby="ideas-h">
+<div class="band-head">
+<p class="phase">${t("phase-ideas")}</p>
+<h2 id="ideas-h">${t("ideas-title")}</h2>
+<p>${t("ideas-lede")}</p>
+</div>
+<div class="ideas">
+${idea(c, mu, "feat_effects", "01", "effect", "effect · with handle", icon_effect())}
+${idea(c, mu, "feat_comptime", "02", "comptime", "comptime · constant pool", icon_comptime())}
+${idea(c, mu, "feat_data", "03", "match", "match · exhaustive", icon_match())}
+</div>
+</section>"""
+}
+
+# ---- two backends ----
+
+## The fork: one source, two roads, two runs, one comparison. Every word in it
+## is the page's; the colours are CSS variables, so it follows the theme.
+fn fork(c: Copy) -> String = {
+  let p = (k: String) => escape_html(plain(c, k))
+  let term = `<rect width="140" height="78" rx="10" class="fk-term"/>
+<circle cx="12" cy="11" r="2.2" class="fk-dot"/><circle cx="20" cy="11" r="2.2" class="fk-dot"/><circle cx="28" cy="11" r="2.2" class="fk-dot"/>
+<text x="12" y="34" class="fk-key">out</text><rect x="40" y="29" width="22" height="5" rx="2.5" class="fk-b1"/><rect x="66" y="29" width="10" height="5" rx="2.5" class="fk-b1"/><rect x="80" y="29" width="30" height="5" rx="2.5" class="fk-b1"/><rect x="114" y="29" width="14" height="5" rx="2.5" class="fk-b1"/>
+<text x="12" y="51" class="fk-key">err</text><rect x="40" y="46" width="16" height="5" rx="2.5" class="fk-b2"/><rect x="60" y="46" width="8" height="5" rx="2.5" class="fk-b2"/>
+<text x="12" y="68" class="fk-key">exit</text><rect x="40" y="63" width="8" height="5" rx="2.5" class="fk-b3"/>`
+  """<svg class="fork" viewBox="0 0 480 384" role="img" aria-labelledby="fork-t fork-d">
+<title id="fork-t">${p("fork-title")}</title>
+<desc id="fork-d">${p("fork-desc")}</desc>
+<defs>
+<linearGradient id="fk-l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+<linearGradient id="fk-r" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c3aed"/><stop offset="1" stop-color="#db2777"/></linearGradient>
+<radialGradient id="fk-glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#7c3aed" stop-opacity=".22"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient>
+<path id="fk-pl" d="M240 62 C240 96 120 88 120 122 L120 226"/>
+<path id="fk-pr" d="M240 62 C240 96 360 88 360 122 L360 226"/>
+</defs>
+<g fill="none" stroke-linecap="round">
+<use href="#fk-pl" class="fk-track"/><use href="#fk-pr" class="fk-track"/>
+<use href="#fk-pl" stroke="url(#fk-l)" stroke-width="2.4"/>
+<use href="#fk-pr" stroke="url(#fk-r)" stroke-width="2.4"/>
+</g>
+<g class="fk-flow">
+<circle r="4" fill="#6366f1"><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;1" keySplines="0.45 0 0.35 1"><mpath href="#fk-pl"/></animateMotion></circle>
+<circle r="4" fill="#db2777"><animateMotion dur="3.2s" repeatCount="indefinite" calcMode="spline" keyTimes="0;1" keySplines="0.45 0 0.35 1"><mpath href="#fk-pr"/></animateMotion></circle>
+</g>
+<g transform="translate(176 14)">
+<path d="M10 0 H114 L128 14 V38 a10 10 0 0 1 -10 10 H10 a10 10 0 0 1 -10 -10 V10 a10 10 0 0 1 10 -10z" class="fk-card"/>
+<path d="M114 0 V10 a4 4 0 0 0 4 4 H128" class="fk-fold"/>
+<text x="64" y="30" class="fk-name" text-anchor="middle">main.dawn</text>
+</g>
+<g transform="translate(30 122)">
+<rect width="180" height="56" rx="12" class="fk-card"/>
+<rect x="0" y="14" width="3" height="28" rx="1.5" fill="#4f46e5"/>
+<text x="90" y="25" class="fk-name" text-anchor="middle">JVM bytecode</text>
+<text x="90" y="43" class="fk-sub" text-anchor="middle">${p("fork-jvm")}</text>
+</g>
+<g transform="translate(270 122)">
+<rect width="180" height="56" rx="12" class="fk-card"/>
+<rect x="177" y="14" width="3" height="28" rx="1.5" fill="#db2777"/>
+<text x="90" y="25" class="fk-name" text-anchor="middle">C → cc</text>
+<text x="90" y="43" class="fk-sub" text-anchor="middle">${p("fork-c")}</text>
+</g>
+<g transform="translate(50 226)">
+${term}
+</g>
+<g transform="translate(290 226)">
+${term}
+</g>
+<circle cx="240" cy="265" r="34" fill="url(#fk-glow)" class="fk-pulse"/>
+<path d="M190 265 H218 M262 265 H290" class="fk-link"/>
+<circle cx="240" cy="265" r="19" class="fk-eq-bg"/>
+<path d="M232 260.5 H248 M232 269.5 H248" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+<text x="240" y="330" class="fk-sub" text-anchor="middle">${p("fork-compare")}</text>
+<g transform="translate(240 356)">
+<rect x="-120" y="-14" width="240" height="28" rx="14" class="fk-pill"/>
+<circle cx="-102" cy="0" r="3.5" fill="#cf222e"/>
+<text x="9" y="4" class="fk-pilltext" text-anchor="middle">${p("fork-red")}</text>
+</g>
+</svg>"""
+}
+
+## A counted figure: the final number is in the markup, so the page is right
+## with no script, and `data-count` is what home.js counts up to.
+fn fig(n: Int, caption: String, cls: String) -> String =
+  """<div class="${cls}"><strong data-count="${n}">${grouped(n)}</strong><span>${caption}</span></div>"""
+
+fn peers(c: Copy, mu: fn(String) -> String, figs: Figures) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  """<section class="band" aria-labelledby="peers-h">
+<div class="band-head">
+<p class="phase">${t("phase-peers")}</p>
+<h2 id="peers-h">${t("peers-title")}</h2>
+</div>
+<div class="peers">
+${fork(c)}
+<div class="peers-text">
+<p>${t("peers-body")}</p>
+<div class="figs">
+${fig(figs.native_corpus, t("fig-native-corpus"), "fig")}
+<div class="fig"><strong>${t("fig-push-value")}</strong><span>${t("fig-push")}</span></div>
+${fig(figs.selfhost_lines, t("fig-selfhost-lines"), "fig fig-wide")}
+</div>
+</div>
+</div>
+</section>"""
+}
+
+# ---- the GPU ----
+
+fn chip(name: String, sub: String, cls: String, i: Int) -> String = {
+  let style = if i > 0 { " style=\"--i:${i}\"" } else { "" }
+  """<span class="${cls}"${style}><b>${name}</b><small>${sub}</small></span>"""
+}
+
+fn pipe(c: Copy, mu: fn(String) -> String) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  let fork_chips = """<span class="fork2">${chip("with_gpu_real", t("step-real"), "chip", 5)}${chip("with_gpu_fake", t("step-fake"), "chip", 6)}</span>"""
+  """<div class="pipe" role="group" aria-label="${escape_attr(plain(c, "gpu-pipe"))}">
+<div class="lane">
+<span class="lane-name">${t("lane-device")}</span>
+<ol class="steps">
+<li>${chip("vadd", t("step-kernel") ++ ", !Dev", "chip hot", 0)}</li>
+<li>${chip("record", t("step-record"), "chip", 1)}</li>
+<li>${chip("Tile IR", t("step-tileir"), "chip", 2)}</li>
+<li>${chip("tileiras", t("step-tileiras"), "chip", 3)}</li>
+</ol>
+</div>
+<div class="lane">
+<span class="lane-name">${t("lane-host")}</span>
+<ol class="steps">
+<li>${chip("run", t("step-kernel") ++ ", !Gpu", "chip hot", 0)}</li>
+<li>${chip("launch(\"vadd\")", t("step-launch"), "chip", 4)}</li>
+<li>${fork_chips}</li>
+</ol>
+</div>
+</div>"""
+}
+
+fn fact(title: String, text: String) -> String = "<li><b>${title}</b>${text}</li>"
+
+fn gpu(c: Copy, mu: fn(String) -> String) -> String !Fs = {
+  let t = (k: String) => line(c, k, mu)
+  let project = project_of("gpu_fake")
+  let src = must_read("${project}/src/main.dawn")
+  let out = recorded("gpu_fake")
+  let kernel = fn_source(src, "vadd")
+  let host = fn_source(src, "run")
+  """<section class="band" aria-labelledby="gpu-h">
+<div class="band-head">
+<p class="phase">${t("phase-gpu")}</p>
+<h2 id="gpu-h">${t("gpu-title")}</h2>
+<p>${t("gpu-lede")}</p>
+</div>
+${pipe(c, mu)}
+<div class="gpu">
+<article class="krow">
+<div class="kcode">
+<div class="kbar" aria-hidden="true"><i></i><i></i><i></i><span>vadd</span><em>!Dev</em></div>
+${hl_pre(kernel)}
+<div class="kout"><small>${t("kernel-out")}</small>${escape_html(line_with(out, "= addf "))}</div>
+</div>
+<div class="kside">
+<span class="num">${t("lane-device")} · <code>!Dev</code></span>
+<h3>${t("kernel-title")}</h3>
+<p>${t("kernel-body")}</p>
+<ul class="kfacts">
+${fact(t("kernel-fact-title"), t("kernel-fact-body"))}
+</ul>
+</div>
+</article>
+<article class="krow">
+<div class="kcode">
+<div class="kbar" aria-hidden="true"><i></i><i></i><i></i><span>run</span><em>!Gpu</em></div>
+${hl_pre(host)}
+<div class="kout"><small>${t("host-out")}</small>${escape_html(line_with(out, "vadd on the fake device: "))}</div>
+</div>
+<div class="kside">
+<span class="num">${t("lane-host")} · <code>!Gpu</code></span>
+<h3>${t("host-title")}</h3>
+<p>${t("host-body")}</p>
+<ul class="kfacts">
+${fact(t("host-fact-native-title"), t("host-fact-native-body"))}
+${fact(t("host-fact-pure-title"), t("host-fact-pure-body"))}
+</ul>
+</div>
+</article>
+</div>
+</section>"""
+}
+
+# ---- install ----
+
+## Where the install commands download from. README's install block uses the
+## same base and the same `$base/<name>` spelling, and the test below holds
+## every name fetched here to the list release.yml publishes.
+fn release_base() -> String = "https://github.com/dawnop/dawn-lang/releases/latest/download"
+
+## The `printf` that writes hello.dawn, made from site/pages/hello.dawn itself,
+## whose output doc-check.py holds to hello.out. The program is put between
+## single quotes for the shell and through printf's format, so a quote, a
+## backslash or a percent sign in it would change what the command writes;
+## those stop the build instead.
+pub fn hello_printf(src: String) -> String = {
+  for bad in ["'", "\\", "%", "\n"] {
+    if str.contains(src, bad) {
+      panic("site/pages/hello.dawn: a ${bad} cannot go through the install line's printf as written")
+    }
+  }
+  "printf '" ++ src ++ "\\n' \\\n  > hello.dawn"
+}
+
+## The two command blocks, as shell text before highlighting.
+pub fn install_commands(hello: String) -> (String, String) = {
+  let base = "base=" ++ release_base()
+  let native = [
+    base,
+    `curl -fsSLO $base/dawnc-linux-x86_64`,
+    `curl -fsSLO $base/dawnc-linux-x86_64.sha256`,
+    "sha256sum -c dawnc-linux-x86_64.sha256",
+    "chmod +x dawnc-linux-x86_64",
+    "sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc",
+    "",
+    hello_printf(hello),
+    "dawnc run hello.dawn",
+  ]
+  let jvm = [
+    base,
+    `curl -fsSLO $base/dawn-selfhost.jar`,
+    `curl -fsSLO $base/dawn-selfhost.jar.sha256`,
+    "# macOS: shasum -a 256 -c",
+    "sha256sum -c dawn-selfhost.jar.sha256",
+    "",
+    hello_printf(hello),
+    "java -jar dawn-selfhost.jar run hello.dawn",
+  ]
+  (join(native, "\n"), join(jvm, "\n"))
+}
+
+## A command block: shell comments dimmed, everything else as typed, and the
+## program's recorded answer under it.
+fn shell_pre(cmds: String, answer: String) -> String = {
+  let lines = map(str.split(cmds, "\n"), l =>
+      if str.starts_with(l, "#") {
+        `<span class="c">` ++ escape_html(l) ++ "</span>"
+      } else {
+        escape_html(l)
+      })
+  "<pre><code>" ++ join(lines, "\n") ++ "\n" ++ `<span class="hello">` ++ escape_html(answer)
+    ++ `</span><span class="caret" aria-hidden="true"></span></code></pre>`
+}
+
+fn tags(text: String) -> String =
+  `<ul class="tags">` ++ join(map(str.split(text, " · "), x => "<li>${escape_html(x)}</li>"), "")
+  ++ "</ul>"
+
+fn icon_chip() -> String =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg>`
+
+fn icon_box() -> String =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg>`
+
+fn road(title: String, file: String, tag_text: String, bar: String, icon: String, pre: String) -> String =
+  """<article class="road">
+<header>
+<span class="road-icon" aria-hidden="true">${icon}</span>
+<div>
+<h3>${title}</h3>
+<p><code>${file}</code></p>
+</div>
+${tags(tag_text)}
+</header>
+<div class="tbar" aria-hidden="true"><i></i><i></i><i></i><span>${bar}</span></div>
+${pre}
+</article>"""
+
+fn install(c: Copy, mu: fn(String) -> String) -> String !Fs = {
+  let t = (k: String) => line(c, k, mu)
+  let (native, jvm) = install_commands(str.trim(must_read("site/pages/hello.dawn")))
+  let answer = recorded("hello")
+  """<section class="band" aria-labelledby="install-h">
+<div class="band-head">
+<p class="phase">${t("phase-install")}</p>
+<h2 id="install-h">${t("install-title")}</h2>
+<p>${t("install-lede")}</p>
+</div>
+<div class="install">
+${road(t("road-native"), "dawnc-linux-x86_64", plain(c, "road-native-tags"), "linux-x86_64", icon_chip(), shell_pre(native, answer))}
+${road(t("road-jvm"), "dawn-selfhost.jar", plain(c, "road-jvm-tags"), "JDK 21", icon_box(), shell_pre(jvm, answer))}
+</div>
+<p class="install-foot">${t("install-foot")}</p>
+</section>"""
+}
+
+# ---- the page ----
+
+## The front page as markup, in one language, without writing it: what the
+## tests read, so that they check the document a browser gets.
+fn home_page(a: Assets, lang: Lang, figs: Figures, docs: List[String]) -> String !Fs = {
+  let (src, root, title) =
+    match lang {
+      En -> ("site/pages/home.md", ".", "Dawn — a small, elegant functional language")
+      Zh -> ("site/pages/home.zh.md", "..", "Dawn 语言")
+    }
+  let c = load_copy(src)
+  let mu = (u: String) => map_doc_url(root, docs, u)
+  let css = a.home_css
+  let js = a.home_js
+  let font = a.mono_font
+  # The stylesheet after the shared one, so that its rules win the ties. The
+  # script is a plain, blocking one, and that is deliberate: it is the only
+  # thing that can put a saved theme on <html> before the first paint, and it
+  # is small. It cannot be inline (docs/site-home-design.md says why), so it is
+  # this; everything in it that touches the body waits for DOMContentLoaded.
+  let head = """<link rel="stylesheet" href="${root}/assets/${css}">""" ++ "\n"
+    ++ """<link rel="preload" href="${root}/assets/${font}" as="font" type="font/woff2" crossorigin>"""
+    ++ "\n" ++ """<script src="${root}/assets/${js}"></script>"""
+  let logo = must_read("site/assets/logo.svg")
+  head_html(a, lang, "index.html", title, root, head) ++ "\n"
+    ++ `<body class="home-page">` ++ "\n"
+    ++ `<div class="progress" aria-hidden="true"></div>` ++ "\n"
+    ++ `<div class="sky">` ++ "\n" ++ stars() ++ "\n"
+    ++ `<div class="wrap">` ++ "\n"
+    ++ header_html(a, lang, "index.html", root, "", toggle(c)) ++ "\n"
+    ++ hero(c, mu, lang, root) ++ "\n</div>\n" ++ horizon(logo) ++ "\n</div>\n"
+    ++ `<div id="dawn-search" class="search-host" hidden></div>` ++ "\n"
+    ++ `<div class="wrap">` ++ "\n"
+    ++ ideas(c, mu) ++ "\n" ++ peers(c, mu, figs) ++ "\n" ++ gpu(c, mu) ++ "\n"
+    ++ install(c, mu) ++ "\n</div>\n"
+    ++ footer_html(lang, a.build) ++ "\n</body>\n</html>"
+}
+
+## The front page, in one language. English is the site's default and is
+## written first: it is at `/`, and the Chinese translation is at `/zh/`.
+##
+## The direction is the point. Whichever version is derived is the one that
+## goes stale, and the outward-facing page is read mostly by people who cannot
+## read the other one -- so making English the derivative would put the rot on
+## the face that everybody sees and nobody proofreads. This way it lands on
+## the Chinese text, whose reader is the author, and doc-check.py's
+## translation digest says when it has.
+pub fn gen_index(out: String, a: Assets, lang: Lang, figs: Figures) -> Unit !Fs !io = {
+  let dst =
+    match lang {
+      En -> "${out}/index.html"
+      Zh -> "${out}/zh/index.html"
+    }
+  write_page(dst, home_page(a, lang, figs, doc_files()))
+}
+
+# ---- tests ----
+
+fn test_figures() -> Figures = Figures { selfhost_lines: 87586, native_corpus: 140 }
+
+test "a figure is a positive count or the build says why not" {
+  assert read_figure("X", Some("87586")) == Ok(87586)
+  match read_figure("X", None) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "DAWN_SITE_FIG_X is not set") }
+  }
+  match read_figure("X", Some("")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "DAWN_SITE_FIG_X is empty") }
+  }
+  for bad in ["0", "12a", "-3", " 5", "1,000"] {
+    match read_figure("X", Some(bad)) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+  }
+}
+
+test "counts are grouped by thousands" {
+  assert grouped(7) == "7"
+  assert grouped(140) == "140"
+  assert grouped(1000) == "1,000"
+  assert grouped(87586) == "87,586"
+  assert grouped(1234567) == "1,234,567"
+}
+
+## The GPU listings are cut from the project that runs, so a reader sees what
+## doc-check.py ran. The mutation this is against is a cut that drifts: the doc
+## comment above the function, or the function after it, coming along.
+test "a listing is one whole function cut from its file" {
+  with_fs_real(() => {
+    let src = must_read(project_of("gpu_fake") ++ "/src/main.dawn")
+    let k = fn_source(src, "vadd")
+    assert str.starts_with(k, "fn vadd(")
+    assert str.ends_with(k, "\n}")
+    assert not str.contains(k, "##")
+    assert not str.contains(k, "vadd_hinted")
+    let h = fn_source(src, "run")
+    assert str.starts_with(h, "fn run(")
+    assert str.contains(h, "launch(\"vadd\"")
+    assert not str.contains(h, "fn blocks(")
+  })
+}
+
+test "a strip under a listing is one line its run printed" {
+  with_fs_real(() => {
+    let out = recorded("gpu_fake")
+    assert str.contains(line_with(out, "= addf "), "tile<128xf64>")
+    assert line_with(out, "vadd on the fake device: ")
+      == "vadd on the fake device: [11.0, 22.0, 33.0, 44.0]"
+  })
+}
+
+## The commands fetch each of the four assets once, from the release base.
+## Whether those are the names a release publishes is doc-check.py's to say
+## (SITE_INSTALL_SOURCES): a test here that read .github/ would fail under the
+## previous release's toolchain, which runs `dawn test site` from a root
+## holding only the source directories.
+test "the install commands fetch four assets from the release base" {
+  let (native, jvm) = install_commands("pub fn main() -> Unit !io = println(\"x\")")
+  var fetched: List[String] = []
+  for l in str.split(native ++ "\n" ++ jvm, "\n") {
+    match str.index_of(l, `$base/`) {
+      Some(i) -> {
+        fetched = fetched ++ [str.drop(l, i + 6)]
+      }
+      None -> ()
+    }
+  }
+  assert fetched == ["dawnc-linux-x86_64", "dawnc-linux-x86_64.sha256", "dawn-selfhost.jar",
+    "dawn-selfhost.jar.sha256"]
+  assert str.contains(native, "base=" ++ release_base())
+  assert str.contains(jvm, "base=" ++ release_base())
+}
+
+test "the install line writes hello.dawn as the file holds it" {
+  with_fs_real(() => {
+    let src = str.trim(must_read("site/pages/hello.dawn"))
+    assert hello_printf(src)
+      == "printf 'pub fn main() -> Unit !io = println(\"hello, dawn\")\\n' \\\n  > hello.dawn"
+  })
+}
+
+test "the sun's cat is the mark's, and the moon's has no eyes" {
+  with_fs_real(() => {
+    let cat = cat_path(must_read("site/assets/logo.svg"))
+    assert str.starts_with(cat, "M89.23 88.17")
+    assert len(str.split(cat, " M")) == 3
+    let asleep = cat_outline(cat)
+    assert str.ends_with(asleep, " Z")
+    assert not str.contains(asleep, " M")
+  })
+}
+
+## The page itself, both languages: figures and programs are where the
+## generator put them, the page asks nobody else for anything, and it carries
+## no script of its own beyond the one file.
+test "the front page carries its figures, its programs and no inline script" {
+  with_fs_real(() => {
+    for lang in [En, Zh] {
+      let p = home_page(plain_assets(), lang, test_figures(), [])
+      assert str.contains(p, `<strong data-count="87586">87,586</strong>`)
+      assert str.contains(p, `<strong data-count="140">140</strong>`)
+      assert str.contains(p, `<span class="k">effect</span> <span class="t">Ask</span>`)
+      assert str.contains(p, `<div class="out">circle 1.0` ++ "\na point</div>")
+      assert str.contains(p, "vadd on the fake device: [11.0, 22.0, 33.0, 44.0]")
+      assert str.contains(p, `<span class="hello">hello, dawn</span>`)
+      assert str.contains(p, `href="./assets/home.css"`) || str.contains(p, `href="../assets/home.css"`)
+      assert not str.contains(p, "googleapis")
+      assert not str.contains(p, "gstatic")
+      # every <script> has a src: the page's behaviour is home.js and search.js
+      assert len(str.split(p, "<script>")) == 1
+      assert len(str.split(p, "<script ")) == 3
+      # the toggle is hidden until the script that drives it is there
+      assert str.contains(p, `id="theme-toggle" hidden`)
+    }
+    let zh = home_page(plain_assets(), Zh, test_figures(), [])
+    assert str.contains(zh, `<html lang="zh-CN">`)
+    assert str.contains(zh, `data-label-dark="切换到深色主题"`)
+    assert not str.contains(zh, "Switch to dark theme")
+  })
+}
+
+## The same page with the copy file emptied of one section is not a page.
+## Pinned here because a generator that started reading copy through a
+## lenient lookup would still pass every assertion above.
+test "every section the page reads is in both copy files" {
+  with_fs_real(() => {
+    let en = load_copy("site/pages/home.md")
+    let zh = load_copy("site/pages/home.zh.md")
+    let keys = (sections: List[(String, List[Block])]) => map(sections, e => {
+      let (k, _) = e
+      k
+    })
+    assert keys(en.sections) == keys(zh.sections)
+  })
+}
+
+test "markup helpers keep their shape" {
+  assert tags("a · b") == `<ul class="tags"><li>a</li><li>b</li></ul>`
+  assert chip("x", "y", "chip", 0) == `<span class="chip"><b>x</b><small>y</small></span>`
+  assert chip("x", "y", "chip", 2) == `<span class="chip" style="--i:2"><b>x</b><small>y</small></span>`
+}

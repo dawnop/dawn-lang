@@ -1,0 +1,693 @@
+/* The front page, "Horizon" (docs/site-home-design.md). Loaded by that page
+   alone, after style.css, so its rules win the ties; every other page keeps
+   the shared sheet's light theme and its stillness.
+
+   Design plan:
+   1. Palette: Ink #1f2328, Muted #57606a, Border #d0d7de, Code #f6f8fa, Paper
+      #ffffff, Accent #7c3aed; sky Day #faf9ff / #f3f0ff / #fbe9f3, Night
+      #0d1020 to Dusk #1d2040, Moon #e4e5f7; gradient #4f46e5 / #7c3aed /
+      #db2777 on the horizon line, the sun, the logo and the wordmark, and
+      split into its three hues for the section accents.
+   2. Type: system sans for body and headings, JetBrains Mono (self-hosted,
+      ui-monospace fallbacks) for code, labels and the eyebrow; the one
+      flourish is the wordmark.
+   3. Layout: the page is one sky read top to bottom; each section carries a
+      quiet solar-depression label (-18 / -12 / -6 / -3 / 0 degrees), the hero
+      follows the theme, and below the horizon it is plain page.
+   4. Motion: the theme toggle turns a sun-and-moon orbit centred under the
+      horizon; around it the page moves in small ways, all of it off under
+      reduced motion and every animation ending where the static rules already
+      are, so the page is whole at rest and without script.
+
+   Three theme states, as in the design: no attribute follows the system,
+   data-theme="light" or "dark" overrides it (home.js sets it from the toggle
+   and from what the toggle saved). */
+
+/* The two faces this page uses, served from /assets/ like everything else:
+   the site makes no request to anybody but itself. The names are rewritten
+   to the hashed ones when the generator writes this file (gen/pages
+   .repoint_url), and resolve next to it. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("JetBrainsMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* the sky: day is a pale dawn, night is the indigo of before it */
+  --day-top: #faf9ff;
+  --day-mid: #f3f0ff;
+  --day-low: #fbe9f3;
+  --night: #0d1020;
+  --dusk: #1d2040;
+  --dawn-1: #4f46e5;
+  --dawn-2: #7c3aed;
+  --dawn-3: #db2777;
+  --dawn-grad: linear-gradient(90deg, var(--dawn-1) 0%, var(--dawn-2) 50%, var(--dawn-3) 100%);
+  --night-op: 0; --star-op: 0; --phase: 0%;
+
+  /* the day: the current site's tokens */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --text: #1f2328;
+  --muted: #57606a;
+  --faint: #656d76;
+  --line: #d0d7de;
+  --line-soft: #e9ecf1;
+  --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+  --code-bg: #f6f8fa;
+  --out-bg: #fbfcfd;
+
+  /* GitHub-light code colours, as on the current site */
+  --k: #cf222e; --t: #9333ea; --f: #7c3aed; --s: #0a3069; --n: #0550ae; --c: #6e7781;
+  --hue-1: #4f46e5; --hue-2: #7c3aed; --hue-3: #db2777;
+
+  /* the shared stylesheet's names for the same things, so its rules (the
+     search panel, the footer) follow the theme here too */
+  --border: var(--line); --border-soft: var(--line-soft); --output-bg: var(--out-bg);
+  --code-bg-soft: var(--surface);
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --max: 66rem;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1117;
+    --surface: #0f1117;
+    --text: #e6edf3;
+    --muted: #9198a1;
+    --faint: #8b949e;
+    --line: #30363d;
+    --line-soft: #21262d;
+    --accent: #a78bfa;
+    --accent-hover: #c4b5fd;
+    --code-bg: #161b22;
+    --out-bg: #12161d;
+    --k: #ff7b72; --t: #d2a8ff; --f: #c4b5fd; --s: #a5d6ff; --n: #79c0ff; --c: #8b949e;
+    --night-op: 1; --star-op: 1; --phase: 50%;
+    --hue-1: #818cf8; --hue-2: #a78bfa; --hue-3: #f472b6;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1117;
+  --surface: #0f1117;
+  --text: #e6edf3;
+  --muted: #9198a1;
+  --faint: #8b949e;
+  --line: #30363d;
+  --line-soft: #21262d;
+  --accent: #a78bfa;
+  --accent-hover: #c4b5fd;
+  --code-bg: #161b22;
+  --out-bg: #12161d;
+  --k: #ff7b72; --t: #d2a8ff; --f: #c4b5fd; --s: #a5d6ff; --n: #79c0ff; --c: #8b949e;
+  --night-op: 1; --star-op: 1; --phase: 50%;
+  --hue-1: #818cf8; --hue-2: #a78bfa; --hue-3: #f472b6;
+  color-scheme: dark;
+}
+
+/* The hero's own colours. They follow data-sky, not data-theme: the toggle
+   flips data-theme at once (the page below and the night fade start then)
+   and data-sky about a third of the way through the fade, so the hero's
+   colours ease across the fade's middle, where both inks still read. Without script
+   data-sky is never set and the hero simply follows the theme. */
+:root {
+  --sky-text: #1f2328; --sky-muted: #57606a; --sky-faint: #6e7781; --sky-strong: #1f2328;
+  --sky-line: rgba(31, 35, 40, 0.12); --sky-hover: rgba(31, 35, 40, 0.05);
+  --h-text: #1f2328; --h-muted: #57606a; --h-faint: #656d76; --h-line: #d0d7de;
+  --h-surface: #ffffff; --h-code-bg: #f6f8fa; --h-out-bg: #fbfcfd; --h-accent: #7c3aed;
+  --h-k: #cf222e; --h-t: #9333ea; --h-f: #7c3aed; --h-s: #0a3069; --h-n: #0550ae; --h-c: #6e7781; --wm-night: 0;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-sky]) {
+    --sky-text: #e6e8f0; --sky-muted: #9ea3b8; --sky-faint: #7d829a; --sky-strong: #ffffff;
+    --sky-line: rgba(230, 232, 240, 0.12); --sky-hover: rgba(255, 255, 255, 0.06);
+    --h-text: #e6edf3; --h-muted: #9198a1; --h-faint: #8b949e; --h-line: #30363d;
+    --h-surface: #0f1117; --h-code-bg: #161b22; --h-out-bg: #12161d; --h-accent: #a78bfa;
+    --h-k: #ff7b72; --h-t: #d2a8ff; --h-f: #c4b5fd; --h-s: #a5d6ff; --h-n: #79c0ff; --h-c: #8b949e; --wm-night: 1;
+  }
+}
+:root[data-theme="dark"]:not([data-sky]), :root[data-sky="dark"] {
+  --sky-text: #e6e8f0; --sky-muted: #9ea3b8; --sky-faint: #7d829a; --sky-strong: #ffffff;
+  --sky-line: rgba(230, 232, 240, 0.12); --sky-hover: rgba(255, 255, 255, 0.06);
+  --h-text: #e6edf3; --h-muted: #9198a1; --h-faint: #8b949e; --h-line: #30363d;
+  --h-surface: #0f1117; --h-code-bg: #161b22; --h-out-bg: #12161d; --h-accent: #a78bfa;
+  --h-k: #ff7b72; --h-t: #d2a8ff; --h-f: #c4b5fd; --h-s: #a5d6ff; --h-n: #79c0ff; --h-c: #8b949e; --wm-night: 1;
+}
+:root[data-sky="light"] {
+  --sky-text: #1f2328; --sky-muted: #57606a; --sky-faint: #6e7781; --sky-strong: #1f2328;
+  --sky-line: rgba(31, 35, 40, 0.12); --sky-hover: rgba(31, 35, 40, 0.05);
+  --h-text: #1f2328; --h-muted: #57606a; --h-faint: #656d76; --h-line: #d0d7de;
+  --h-surface: #ffffff; --h-code-bg: #f6f8fa; --h-out-bg: #fbfcfd; --h-accent: #7c3aed;
+  --h-k: #cf222e; --h-t: #9333ea; --h-f: #7c3aed; --h-s: #0a3069; --h-n: #0550ae; --h-c: #6e7781; --wm-night: 0;
+}
+
+body.home-page {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.75 var(--sans);
+  overflow-x: hidden;
+  /* the shared sheet's 3px dawn line at the top: here it is the progress bar */
+  border-top: 0;
+  border-image: none;
+}
+code, pre, kbd { font-family: var(--mono); font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+.wrap { max-width: var(--max); margin: 0 auto; padding: 0 16px; }
+@media (min-width: 720px) { .wrap { padding: 0 2rem; } }
+
+/* ---------- the sky (header + hero) ---------- */
+.sky {
+  position: relative;
+  color: var(--sky-text);
+  background: linear-gradient(180deg, var(--day-top) 0%, var(--day-mid) 62%, var(--day-low) 100%);
+  overflow: hidden;
+}
+/* the night is a layer over the day, so the toggle can fade one into the other */
+.sky::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(180deg, var(--night) 0%, var(--dusk) 100%);
+  opacity: var(--night-op);
+}
+.sky > .wrap { position: relative; }
+.sky {
+  --text: var(--h-text); --muted: var(--h-muted); --faint: var(--h-faint); --line: var(--h-line);
+  --surface: var(--h-surface); --code-bg: var(--h-code-bg); --out-bg: var(--h-out-bg); --accent: var(--h-accent);
+  --k: var(--h-k); --t: var(--h-t); --f: var(--h-f); --s: var(--h-s); --n: var(--h-n); --c: var(--h-c);
+}
+.stars { opacity: var(--star-op); }
+.sky a { color: var(--sky-text); }
+.stars { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+/* The site header, the same markup every page has (html/page.header_html),
+   set into the sky: the brand to the left, everything else to the right. */
+.sky .site-header { position: relative; border-bottom: 1px solid var(--sky-line); }
+.sky .site-header nav {
+  max-width: none;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem 1rem;
+  padding: 0.95rem 0;
+  font-size: 0.95rem;
+}
+.sky .site-header .brand {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-weight: 700; font-size: 1.05rem; letter-spacing: -0.01em;
+  margin-right: auto;
+  color: var(--sky-strong);
+}
+.sky .site-header .brand:hover { text-decoration: none; color: var(--sky-strong); }
+.sky .brand-logo { width: 1.4em; height: 1.4em; margin: 0; vertical-align: middle; }
+.sky .site-header a { color: var(--sky-muted); }
+.sky .site-header a:hover { color: var(--sky-text); text-decoration: none; }
+.sky .site-header a.lang {
+  border: 1px solid var(--sky-line); border-radius: 999px; padding: 0.05rem 0.6rem; font-size: 0.85rem;
+}
+.sky .site-header button {
+  font: 0.85rem var(--sans);
+  color: var(--sky-muted);
+  background: transparent;
+  border: 1px solid var(--sky-line);
+  border-radius: 6px;
+  padding: 0.12rem 0.55rem;
+  cursor: pointer;
+}
+.sky .site-header button:hover { color: var(--sky-text); background: var(--sky-hover); }
+.sky .site-header .search-open kbd { font-size: 0.75rem; margin-left: 0.05rem; opacity: 0.75; color: inherit; }
+.sky .site-header button[hidden] { display: none; }
+
+.hero {
+  position: relative;
+  display: grid;
+  gap: 2.25rem;
+  padding-top: 2.75rem;
+}
+@media (min-width: 960px) {
+  .hero { grid-template-columns: minmax(0, 1fr) minmax(0, 31rem); gap: 3.5rem; padding-top: 4rem; align-items: center; }
+}
+.phase {
+  font: 0.75rem/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  margin: 0 0 0.9rem;
+}
+.phase strong { font-weight: 400; color: var(--muted); }
+.sky .phase, .sky .phase strong { color: var(--sky-faint); }
+.eyebrow { font: 0.82rem var(--mono); letter-spacing: 0.02em; color: var(--sky-muted); margin: 0 0 0.6rem; }
+/* The wordmark is the one loud thing on the page: the dawn gradient through
+   the letters, cut low down by three widening horizon bands, the way a sun
+   sits behind slats of cloud. By night a pale moonlit gradient lies over the
+   same glyphs and fades in when the sky turns. */
+.wordmark {
+  position: relative;
+  display: inline-block;
+  font-weight: 860;
+  font-size: clamp(4.6rem, 20vw, 7rem);
+  line-height: 1;
+  letter-spacing: -0.055em;
+  margin: 0 0 1.4rem;
+  padding: 0 0.06em 0.04em 0;
+  color: transparent;
+  background: linear-gradient(100deg, #4f46e5 0%, #7c3aed 42%, #c026d3 70%, #db2777 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-mask-image: linear-gradient(180deg, #000 0 54%, transparent 54% 56.5%, #000 56.5% 62%, transparent 62% 65.5%, #000 65.5% 70%, transparent 70% 74.5%, #000 74.5%);
+  mask-image: linear-gradient(180deg, #000 0 54%, transparent 54% 56.5%, #000 56.5% 62%, transparent 62% 65.5%, #000 65.5% 70%, transparent 70% 74.5%, #000 74.5%);
+}
+.wordmark::after {
+  content: attr(data-text);
+  content: attr(data-text) / "";
+  position: absolute; inset: 0;
+  padding: inherit;
+  background: linear-gradient(100deg, #c7d2fe 0%, #ddd6fe 40%, #f5d0fe 70%, #fbcfe8 100%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  opacity: var(--wm-night);
+}
+.lede { font-size: 1.15rem; line-height: 1.65; color: var(--sky-text); margin: 0 0 1.1rem; max-width: 30rem; }
+.lede-2 { color: var(--sky-muted); margin: 0 0 1.75rem; max-width: 34rem; }
+.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.facts-row { list-style: none; margin: 0 0 1.6rem; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; font: 0.8rem/1.4 var(--mono); color: var(--sky-muted); }
+.facts-row li { margin: 0; display: inline-flex; align-items: center; gap: 0.45rem; }
+.fr-dot { width: 6px; height: 6px; border-radius: 50%; background: linear-gradient(135deg, #7c3aed, #db2777); }
+.term .cmd { display: inline-block; white-space: nowrap; overflow: hidden; vertical-align: bottom; }
+.term .res .caret-h { display: inline-block; width: 0.55em; height: 1.05em; margin-left: 0.3em; vertical-align: -0.18em; background: var(--faint); opacity: 0.6; }
+.btn {
+  display: inline-block;
+  font-weight: 600; font-size: 0.95rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: 8px;
+  border: 1px solid var(--sky-line);
+}
+.btn:hover { text-decoration: none; }
+.btn-sun { background: #7c3aed; border-color: #7c3aed; color: #fff !important; }
+.btn-sun:hover { background: #6d28d9; }
+.btn-ghost:hover { background: var(--sky-hover); }
+
+/* the program: a code window in the page's own code colours, light by day, dark by night */
+.editor {
+  margin: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px -32px rgba(13, 16, 32, 0.45);
+  overflow: hidden;
+  min-width: 0;
+}
+.editor-bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font: 0.78rem var(--mono); color: var(--faint);
+}
+.editor-bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
+.editor-bar .fname { margin-left: 0.4rem; color: var(--text); }
+.sky .editor-bar a.play-open {
+  display: inline; margin-left: auto; padding: 0; border: 0; border-radius: 0; background: none;
+  font: inherit; color: var(--faint); text-align: right;
+}
+.sky .editor-bar a.play-open:hover { color: var(--text); text-decoration: none; }
+.editor pre { margin: 0; border: 0; border-radius: 0; background: none; padding: 1rem 1.1rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.6; color: var(--text); }
+.term {
+  border-top: 1px solid var(--line);
+  padding: 0.75rem 1.1rem 0.85rem;
+  font: 0.84rem/1.6 var(--mono);
+  background: var(--out-bg);
+}
+.term .cmd { color: var(--muted); }
+.term .cmd::before { content: "$ "; color: var(--faint); }
+.term .res { color: var(--text); white-space: pre-wrap; }
+
+/* the horizon: the site's 3px gradient line, now the edge of the earth */
+.horizon { position: relative; height: 130px; margin-top: 2rem; overflow: hidden; }
+.horizon::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--dawn-grad); z-index: 1; }
+.horizon .glow { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: max(100%, 900px); height: 130px; }
+/* the wheel: sun and moon ride one flat elliptical orbit, half a lap apart, its
+   centre just under the horizon. Each toggle moves both half a lap, always the
+   same way round, so one sets at the right as the other rises at the left. */
+.orbit { position: absolute; left: 50%; bottom: 3px; width: 0; height: 0; }
+.orbit svg {
+  position: absolute; left: 0; top: 0;
+  offset-path: path("M 0 -60 A 170 70 0 1 1 0 80 A 170 70 0 1 1 0 -60 Z");
+  offset-rotate: 0deg;
+  offset-anchor: 50% 50%;
+}
+@media (min-width: 720px) {
+  .orbit svg { offset-path: path("M 0 -60 A 420 70 0 1 1 0 80 A 420 70 0 1 1 0 -60 Z"); }
+}
+.orbit .sun-body { width: 84px; height: 84px; offset-distance: var(--phase); }
+.orbit .moon-body { width: 76px; height: 76px; offset-distance: calc(var(--phase) + 50%); }
+
+/* ---------- the day ---------- */
+section.band { padding: 4rem 0 0.5rem; }
+section.band + section.band { border-top: 1px solid var(--line-soft); margin-top: 3.5rem; }
+.band-head { margin-bottom: 2rem; max-width: 44rem; }
+.band-head h2 {
+  font-weight: 700;
+  font-size: clamp(1.7rem, 5vw, 2.2rem); line-height: 1.2; letter-spacing: -0.025em;
+  margin: 0;
+}
+.band-head p { margin: 0.6rem 0 0; color: var(--muted); }
+
+.ideas { display: grid; gap: 1.25rem; }
+/* Each card carries one third of the dawn gradient: indigo, violet, magenta,
+   left to right, in its top edge, its icon tile and its code bar's mark. */
+.idea {
+  --hue: var(--hue-1);
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto auto auto 1fr auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.35rem 1.35rem 0;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04), 0 8px 24px -18px rgba(31, 35, 40, 0.25);
+}
+.idea:nth-child(2) { --hue: var(--hue-2); }
+.idea:nth-child(3) { --hue: var(--hue-3); }
+.idea::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--hue); opacity: 0.85; }
+.idea-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.idea-icon {
+  width: 2.25rem; height: 2.25rem; border-radius: 9px; display: grid; place-items: center;
+  color: var(--hue);
+  background: color-mix(in srgb, var(--hue) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 22%, transparent);
+}
+.idea-icon svg { width: 1.2rem; height: 1.2rem; }
+@media (prefers-reduced-motion: no-preference) {
+  .idea { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+  .idea:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--hue) 35%, var(--line)); box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04), 0 16px 32px -20px color-mix(in srgb, var(--hue) 45%, transparent); }
+}
+@media (min-width: 1024px) {
+  .ideas { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(5, auto); column-gap: 1.25rem; row-gap: 0; }
+  /* subgrid: label, heading, prose, code and output sit on shared rows, so all three cards line up */
+  .idea { grid-row: span 5; grid-template-rows: subgrid; }
+}
+.idea .num { font: 0.72rem/1.4 var(--mono); color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.6rem; }
+.idea .num b { font-weight: 500; color: var(--text); }
+.idea h3 { font-weight: 700; font-size: 1.16rem; line-height: 1.3; letter-spacing: -0.02em; margin: 1rem 0 0.45rem; }
+.idea p { margin: 0 0 1.1rem; color: var(--muted); font-size: 0.94rem; line-height: 1.7; }
+.idea p code { font-size: 0.86em; color: var(--text); background: var(--code-bg); padding: 0.05em 0.3em; border-radius: 4px; }
+.idea pre {
+  margin: 0 -1.35rem; padding: 0 1.35rem 0.85rem;
+  background: var(--code-bg);
+  border-top: 1px solid var(--line);
+  overflow-x: auto; font-size: 0.74rem; line-height: 1.6;
+}
+/* a slim editor bar inside the code block: three dots, then the feature's own word */
+.idea pre::before {
+  content: attr(data-bar);
+  display: block;
+  margin: 0 -1.35rem 0.8rem; padding: 0.4rem 1.35rem 0.4rem 3.3rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.68rem; color: var(--faint);
+  background:
+    radial-gradient(circle at 1.6rem 50%, var(--hue) 0 3px, transparent 3.5px),
+    radial-gradient(circle at 2.15rem 50%, var(--line) 0 3px, transparent 3.5px),
+    radial-gradient(circle at 2.7rem 50%, var(--line) 0 3px, transparent 3.5px);
+}
+.idea .out {
+  white-space: pre-wrap;
+  margin: 0 -1.35rem;
+  border-top: 1px solid var(--line);
+  background: var(--out-bg);
+  padding: 0.55rem 1.35rem 0.6rem 2.5rem; text-indent: -1.15rem;
+  font: 0.74rem/1.6 var(--mono);
+}
+.idea .out::before { content: "→"; color: var(--hue); margin-right: 0.6rem; }
+.k { color: var(--k); } .t { color: var(--t); } .f { color: var(--f); } .s { color: var(--s); } .i { color: var(--n); } .n { color: var(--n); } .c { color: var(--c); }
+
+/* two backends */
+.peers { display: grid; gap: 2rem; align-items: center; }
+@media (min-width: 960px) { .peers { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 3.5rem; } }
+.fork { width: 100%; max-width: 32rem; height: auto; display: block; margin: 0 auto; }
+.fork text { font-family: var(--mono); }
+.fk-track { stroke: var(--line); stroke-width: 6; opacity: 0.55; }
+.fk-card { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.fk-fold { fill: var(--code-bg); stroke: var(--line); stroke-width: 1.2; }
+.fk-name { fill: var(--text); font-size: 15px; font-weight: 500; }
+.fk-sub { fill: var(--faint); font-size: 11.5px; }
+.fk-term { fill: var(--code-bg); stroke: var(--line); stroke-width: 1.2; }
+.fk-dot { fill: var(--line); }
+.fk-key { fill: var(--faint); font-size: 10.5px; }
+.fk-b1 { fill: var(--accent); opacity: 0.55; }
+.fk-b2 { fill: var(--faint); opacity: 0.45; }
+.fk-b3 { fill: var(--text); opacity: 0.5; }
+.fk-link { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 3 3; fill: none; }
+.fk-eq-bg { fill: var(--accent); }
+.fk-pill { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.fk-pilltext { fill: var(--muted); font-size: 11.5px; }
+@media (prefers-reduced-motion: reduce) { .fk-flow { display: none; } }
+.figs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); margin: 1.25rem 0; }
+.fig { padding: 0.9rem 0.25rem 0.9rem 0; border-bottom: 1px solid var(--line); }
+.fig:nth-child(odd) { padding-right: 1rem; border-right: 1px solid var(--line); }
+.fig:nth-child(even) { padding-left: 1rem; }
+.fig strong { display: block; font-weight: 750; font-size: clamp(1.5rem, 4.5vw, 1.9rem); line-height: 1.15; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.fig.fig-wide { grid-column: 1 / -1; padding-left: 0; padding-right: 0; border-right: 0; }
+.fig span { font-size: 0.86rem; color: var(--muted); line-height: 1.5; display: block; margin-top: 0.2rem; }
+.peers-text p { color: var(--muted); margin: 0; }
+.peers-text p strong { color: var(--text); font-weight: 600; }
+.peers-text p code { font-size: 0.88em; color: var(--text); }
+/* the GPU: two rows, not two columns, and no cards. Each listing keeps its
+   natural height in its own code block and sits beside what it means; a
+   short kernel next to a long explanation leaves page, not an empty code
+   pane. The output strip hangs under the code it came from. */
+.gpu { display: grid; gap: 0; }
+.krow { min-width: 0; display: grid; gap: 1rem; padding: 1.6rem 0; border-top: 1px solid var(--line-soft); }
+.krow:first-child { border-top: 0; padding-top: 0.25rem; }
+.kcode { order: 2; min-width: 0; align-self: start; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.kcode pre { margin: 0; padding: 0.95rem 1rem; background: var(--code-bg); overflow-x: auto; font-size: 0.7rem; line-height: 1.65; }
+.kout { border-top: 1px solid var(--line); background: var(--out-bg); padding: 0.5rem 1rem 0.55rem; font: 0.74rem/1.6 var(--mono); overflow-wrap: anywhere; }
+.kout small { display: block; font: 0.72rem/1.5 var(--sans); color: var(--faint); margin-bottom: 0.1rem; }
+.kside { order: 1; display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.kside .num { font: 0.75rem/1.4 var(--mono); color: var(--faint); }
+.kside h3 { margin: 0; font-weight: 680; font-size: 1.08rem; letter-spacing: -0.015em; }
+.kside > p { margin: 0; color: var(--muted); font-size: 0.94rem; line-height: 1.7; }
+.kside code { color: var(--text); font-size: 0.88em; }
+.kfacts { list-style: none; margin: 0.4rem 0 0; padding: 0; border-top: 1px solid var(--line); }
+.kfacts li { margin: 0; padding: 0.65rem 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
+.kfacts b { display: block; color: var(--text); font-weight: 650; }
+.kfacts li { position: relative; padding-left: 1.1rem; }
+.kfacts li::before { content: ""; position: absolute; left: 0; top: 1.15rem; width: 6px; height: 6px; border-radius: 50%; background: var(--hue); }
+.krow { --hue: var(--hue-1); }
+.krow + .krow { --hue: var(--hue-3); }
+.kcode { box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04), 0 10px 28px -20px rgba(31, 35, 40, 0.3); border-radius: 12px; }
+.kbar { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 1rem; border-bottom: 1px solid var(--line); background: var(--surface); font: 0.7rem var(--mono); color: var(--faint); }
+.kbar i { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.kbar i:first-child { background: var(--hue); }
+.kbar span { margin-left: 0.4rem; color: var(--text); }
+.kbar em { margin-left: auto; font-style: normal; color: var(--hue); border: 1px solid color-mix(in srgb, var(--hue) 35%, transparent); background: color-mix(in srgb, var(--hue) 8%, transparent); border-radius: 999px; padding: 0.05rem 0.5rem; }
+.kside .num { display: inline-flex; align-items: center; gap: 0.45rem; align-self: flex-start; }
+.kside .num::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--hue); }
+.kside h3 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.02em; }
+@media (min-width: 720px) { .kbar { padding: 0.45rem 1.25rem; } }
+
+/* the pipeline: two lanes, what happens to the kernel and what happens to the host */
+.pipe { margin: 0 0 2rem; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, var(--surface), var(--code-bg)); padding: 1rem 1.1rem; display: grid; gap: 0.9rem; }
+.lane { display: grid; gap: 0.5rem; }
+.lane-name { font: 0.7rem/1.3 var(--mono); color: var(--faint); display: flex; align-items: center; gap: 0.4rem; }
+.lane-name::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--hue); }
+.lane { --hue: var(--hue-1); } .lane + .lane { --hue: var(--hue-3); }
+/* on a phone the steps run down the lane with a short connector between
+   them, so no arrow is ever left dangling at the start of a wrapped line */
+.steps { list-style: none; margin: 0; padding: 0 0 0 0.2rem; display: grid; gap: 0; }
+.steps > li { margin: 0; display: grid; }
+.steps > li + li::before { content: ""; width: 1px; height: 0.7rem; margin-left: 0.9rem; background: var(--line); }
+.fork2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 720px) {
+  .steps { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; padding: 0; }
+  .steps > li { display: flex; align-items: center; gap: 0.4rem; }
+  .steps > li + li::before { content: "→"; width: auto; height: auto; margin: 0; background: none; color: var(--faint); font: 0.8rem var(--mono); }
+  .fork2 { grid-template-columns: none; }
+}
+.chip { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 0.3rem 0.6rem; line-height: 1.3; }
+.chip b { display: block; font: 500 0.76rem var(--mono); color: var(--text); }
+.chip small { display: block; font-size: 0.72rem; color: var(--faint); }
+.chip.hot { border-color: color-mix(in srgb, var(--hue) 45%, var(--line)); box-shadow: inset 3px 0 0 var(--hue); }
+.fork2 { display: grid; gap: 0.35rem; }
+.chip { min-width: 0; }
+@media (min-width: 900px) { .pipe { padding: 1.1rem 1.3rem; } .lane { grid-template-columns: 4.5rem minmax(0, 1fr); align-items: center; } }
+@media (min-width: 720px) { .kcode pre { padding: 1.1rem 1.25rem; font-size: 0.76rem; } .kout { padding: 0.55rem 1.25rem 0.6rem; } }
+@media (min-width: 900px) {
+  /* the listings are cut from the file that runs and keep its line lengths,
+     so the code takes the wider column; a line longer than it scrolls */
+  .krow { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 2.5rem; align-items: start; }
+  .kcode { order: 1; }
+  .kside { order: 2; padding-top: 0.2rem; }
+}
+
+/* install at sunrise */
+.install { display: grid; gap: 1.25rem; }
+.road { --hue: var(--hue-1); min-width: 0; display: grid; grid-template-rows: auto auto 1fr; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04), 0 10px 28px -20px rgba(31, 35, 40, 0.3); }
+.road + .road { --hue: var(--hue-3); }
+.road header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 0.8rem; row-gap: 0.7rem; padding: 1.1rem 1.2rem 1rem; }
+.road-icon { width: 2.4rem; height: 2.4rem; border-radius: 10px; display: grid; place-items: center; color: var(--hue); background: color-mix(in srgb, var(--hue) 10%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 22%, transparent); }
+.road-icon svg { width: 1.3rem; height: 1.3rem; }
+.road h3 { margin: 0; font-weight: 700; font-size: 1.12rem; letter-spacing: -0.02em; }
+.road header p { margin: 0; font-size: 0.85rem; }
+.tags { grid-column: 1 / -1; list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.tags li { margin: 0; font: 0.7rem/1.4 var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0.12rem 0.55rem; }
+.tbar { display: flex; align-items: center; gap: 0.4rem; padding: 0.45rem 1rem; border-top: 1px solid var(--line); background: var(--code-bg); font: 0.7rem var(--mono); color: var(--faint); }
+.tbar i { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.tbar i:first-child { background: var(--hue); }
+.tbar span { margin-left: auto; }
+.hello { color: var(--hue); }
+.hello::before { content: "✓ "; }
+.caret { display: inline-block; width: 0.55em; height: 1.05em; margin-left: 0.25em; vertical-align: -0.18em; background: var(--hue); opacity: 0.7; }
+/* subgrid: both headers share a row and both command blocks share a row, so
+   the two grey blocks start on the same line and are the same height */
+@media (min-width: 860px) {
+  .install { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto auto auto; row-gap: 0; }
+  .road { grid-row: span 3; grid-template-rows: subgrid; }
+}
+.road header code { color: var(--text); font-size: 0.88em; }
+.road pre { margin: 0; padding: 0.2rem 1rem 1rem; background: var(--code-bg); overflow-x: auto; font-size: 0.72rem; line-height: 1.7; color: var(--text); }
+.install-foot { margin: 1.4rem 0 0; color: var(--muted); font-size: 0.92rem; }
+
+footer.site-footer { margin-top: 4.5rem; border-top: 1px solid var(--line-soft); }
+footer.site-footer .inner { max-width: var(--max); padding: 1.75rem 16px 2.75rem; font-size: 0.9rem; color: var(--muted); }
+@media (min-width: 720px) { footer.site-footer .inner { padding-left: 2rem; padding-right: 2rem; } }
+footer.site-footer a { color: var(--muted); }
+footer.site-footer a:hover { color: var(--accent); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn, .site-header button, .site-header a { transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+}
+/* theme toggle: sun and moon cross-fade with a quarter turn */
+.sky .site-header .theme-toggle { display: inline-grid; place-items: center; width: 2rem; height: 1.6rem; padding: 0; border-radius: 999px; }
+.theme-toggle svg { width: 15px; height: 15px; overflow: visible; }
+.theme-toggle .ico-sun, .theme-toggle .ico-moon { transform-box: fill-box; transform-origin: center; }
+.theme-toggle .ico-moon { opacity: 0; transform: rotate(-90deg) scale(0.6); }
+:root[data-theme="dark"] .theme-toggle .ico-sun { opacity: 0; transform: rotate(90deg) scale(0.6); }
+:root[data-theme="dark"] .theme-toggle .ico-moon { opacity: 1; transform: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle .ico-sun { opacity: 0; transform: rotate(90deg) scale(0.6); }
+  :root:not([data-theme="light"]) .theme-toggle .ico-moon { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .theme-toggle .ico-sun, .theme-toggle .ico-moon { transition: opacity 0.3s ease, transform 0.3s ease; }
+  /* only while the toggle is used, so a saved theme never animates on load */
+  :root.theme-anim body,
+  :root.theme-anim .band, :root.theme-anim .band *,
+  :root.theme-anim footer, :root.theme-anim footer * {
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, fill 0.3s ease, stroke 0.3s ease;
+  }
+  /* code inside a pre only inherits its colour; giving it a transition of its
+     own makes it restart on every frame of its parent's, which reads as a flicker */
+  :root.theme-anim pre > code { transition: none; }
+  /* The hero's colours change when data-sky does, half way into the night
+     fade, and then ease over 0.4 s rather than cutting: short enough that the
+     grey-on-grey middle of the tween passes before the eye settles on it.
+     Only elements that set a colour themselves are listed, so nothing that
+     merely inherits restarts the tween a frame late. */
+  :root.theme-anim :is(.sky .brand, .sky .site-header a, .sky .site-header button, .sky .phase, .sky .phase strong,
+    .eyebrow, .wordmark, .lede, .facts-row, .btn-ghost, .editor-bar .fname, .sky .editor-bar a) {
+    transition: color 0.4s ease, border-color 0.4s ease, background-color 0.4s ease;
+  }
+  :root.theme-anim .wordmark::after { transition: opacity 0.6s ease; }
+  :root.theme-anim :is(.editor, .editor-bar, .editor-bar i, .term, .sky .site-header) {
+    transition: background-color 0.4s ease, border-color 0.4s ease;
+  }
+  /* The code cannot tween its colours: a colour transition on the pre
+     restarts the transition of every token span inside it on each frame, so
+     the tokens would trail the plain text. The code dims for a moment instead,
+     and its colours change at the bottom of the dip. */
+  @keyframes code-dip { 0%, 100% { opacity: 1; } 50% { opacity: 0.12; } }
+  :root.code-dip :is(.editor pre, .term) { animation: code-dip 0.46s ease-in-out; }
+
+  /* the hero turns with the toggle: the wheel carries the sun down and the moon up
+     (or back), while night fades in over the day and the stars come out */
+  :root.theme-anim .orbit svg { transition: offset-distance 1.4s cubic-bezier(0.45, 0, 0.25, 1); }
+  :root.theme-anim .sky::before { transition: opacity 1.2s ease; }
+  :root.theme-anim .sky .stars { transition: opacity 1.2s ease; }
+}
+/* ---------- motion. Everything below is decoration over a page that is
+   complete at rest: each animation ends in the state the plain CSS already
+   draws, and none of it runs under prefers-reduced-motion. ---------- */
+.progress { position: fixed; z-index: 10; top: 0; left: 0; right: 0; height: 3px; background: var(--dawn-grad); transform-origin: 0 50%; pointer-events: none; }
+.tw { opacity: 0.5; }
+@media (prefers-reduced-motion: no-preference) {
+  /* the site's gradient line becomes a reading-progress bar where the browser can drive it from scroll */
+  @supports (animation-timeline: scroll()) {
+    .progress { animation: progress-grow linear both; animation-timeline: scroll(root); }
+    @keyframes progress-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  }
+  /* the hero arrives once: copy rises in, the window follows, the command types, the answer lands */
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  .hero > div > * { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .hero > div > :nth-child(2) { animation-delay: 0.06s; }
+  .hero > div > :nth-child(3) { animation-delay: 0.12s; }
+  .hero > div > :nth-child(4) { animation-delay: 0.2s; }
+  .hero > div > :nth-child(5) { animation-delay: 0.28s; }
+  .hero > div > :nth-child(6) { animation-delay: 0.36s; }
+  .editor { animation: rise 0.8s 0.25s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  @keyframes type { from { max-width: 0; } to { max-width: 22ch; } }
+  .term .cmd { animation: type 0.9s 1s steps(17, end) both; }
+  @keyframes land { from { opacity: 0; transform: translateY(4px); } }
+  .term .res { animation: land 0.35s 2.05s ease-out both; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .caret, .caret-h { animation: blink 1.1s steps(1) infinite; }
+  /* the wordmark's light drifts slowly across the letters */
+  @keyframes drift { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+  .wordmark, .wordmark::after { background-size: 200% 100%; animation: drift 9s ease-in-out infinite alternate; }
+  .hero > div > .wordmark { animation: rise 0.7s 0.12s cubic-bezier(0.2, 0.7, 0.2, 1) both, drift 9s ease-in-out infinite alternate; }
+  /* a few stars breathe; the sun's glow breathes with them */
+  @keyframes twinkle { 0%, 100% { opacity: 0.15; } 50% { opacity: 0.9; } }
+  .tw { animation: twinkle 4.5s ease-in-out infinite; }
+  .tw2 { animation-delay: -1.5s; } .tw3 { animation-delay: -3s; }
+  @keyframes breathe { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+  .horizon .glow { animation: breathe 6s ease-in-out infinite; }
+  /* idea icons answer a hover */
+  @keyframes nudge { 0%, 100% { transform: none; } 30% { transform: rotate(-12deg) scale(1.08); } 65% { transform: rotate(8deg) scale(1.04); } }
+  .idea:hover .idea-icon svg { animation: nudge 0.6s ease; }
+  .idea:nth-child(2):hover .idea-icon svg { animation: flip 0.7s ease; }
+  @keyframes flip { to { transform: rotate(180deg); } }
+  /* the GPU pipeline: a light runs along each lane, chip by chip */
+  @keyframes pass { 0%, 18%, 100% { box-shadow: inset 0 0 0 0 transparent; border-color: var(--line); } 6% { border-color: color-mix(in srgb, var(--hue) 70%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 16%, transparent); } }
+  .steps .chip:not(.hot) { animation: pass 4.8s ease-in-out infinite; animation-delay: calc(var(--i, 0) * 0.45s); }
+  /* the "=" glows as the two packets arrive (same 3.2 s period as their SMIL paths) */
+  @keyframes fk-arrive { 0%, 84%, 100% { r: 30px; opacity: 0.8; } 92% { r: 44px; opacity: 1; } }
+  .fk-pulse { animation: fk-arrive 3.2s ease-in-out infinite; }
+  /* the install terminals: the answer pulses once in a while */
+  @keyframes glow-text { 0%, 85%, 100% { text-shadow: none; } 92% { text-shadow: 0 0 12px color-mix(in srgb, var(--hue) 60%, transparent); } }
+  .hello { animation: glow-text 5s ease-in-out infinite; }
+  .road + .road .hello { animation-delay: -2.5s; }
+}
+
+/* ---------- where the shared sheet has to be undone on this page ---------- */
+/* Code: the shared sheet frames every pre and pads every code; here each
+   block draws its own frame, and code inside a pre takes the pre's size. */
+.home-page pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
+.home-page .kcode pre, .home-page .road pre { border: 0; border-radius: 0; }
+.home-page .idea pre { border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+/* The search panel is drawn on white by the shared sheet; here it takes the
+   page's surface, so it stays readable in the dark theme. */
+.home-page .search-panel, .home-page .search-input { background: var(--surface); color: var(--text); }
+/* Reduced motion means nothing moves: the shared sheet's own link-colour
+   transition included, which the theme toggle would otherwise set off on
+   every nav link. The SVG packets are SMIL, which CSS cannot pause, and are
+   hidden by the rule beside them instead. */
+@media (prefers-reduced-motion: reduce) {
+  .home-page *, .home-page *::before, .home-page *::after { transition: none !important; animation: none !important; }
+}

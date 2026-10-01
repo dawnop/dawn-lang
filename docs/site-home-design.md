@@ -132,7 +132,7 @@ GPU 源码按文件原样显示，不再像定稿那样为卡宽改换行：`run
 
 页上代码一律由 `site/src/hl` 高亮；定稿里手工标的 `<span class="k">` 没有搬进来。
 安装命令（shell）不经 Dawn 高亮器，只把 `#` 开头的注释行变暗；命令里下载的每个
-`$base/<name>` 由 `gen/home` 的测试对照 `release.yml` 的 `INSTALL_ASSETS`。
+`$base/<name>` 由 `doc-check.py` 对照 `release.yml` 的 `INSTALL_ASSETS`（`SITE_INSTALL_SOURCES`，与 README 同一条检查）。不放在 site 测试里：读 `.github/` 的测试在上一 release 的工具链下会失败（它从只含源码目录的根跑 `dawn test site`），`selfhost-run-diff.sh` 的 `test site` 一腿因此红过（PR #336）。
 
 ## 七、字体与脚本
 
