@@ -4374,6 +4374,35 @@ bool dawn_io_is_symlink(dawn_str *path) {
   return yes;
 }
 
+/* realpath(3) with a NULL buffer: the C library allocates one as long as the
+ * answer needs, so there is no PATH_MAX guess here. Every link is followed and
+ * the path has to exist; anything else is a fault, which std/io's barrier turns
+ * into an `Err`. The NUL check comes first so the refusal is a fault rather
+ * than a lookup of the prefix.
+ *
+ * wasi-libc leaves realpath out of its headers on purpose ("WASI has no
+ * absolute paths": a path is relative to a preopen, and there is no root to
+ * resolve against). So on that target every call is the same fault, and the
+ * caller sees the `Err` a path it could not resolve gives anywhere; what to do
+ * then is the caller's policy (docs/fs-real-path-design.md, R2). */
+dawn_str *dawn_io_real_path(dawn_str *path) {
+  dawn_reject_nul(path);
+#ifdef __wasi__
+  dawn_fault(DAWN_LIT("io_real_path: wasm32-wasi has no absolute paths to resolve"));
+  return dawn_str_empty; /* not reached: dawn_fault does not return */
+#else
+  char *p = dawn_cpath(path);
+  char *r = realpath(p, NULL);
+  free(p);
+  if (r == NULL) {
+    dawn_fault(DAWN_LIT("io_real_path: cannot resolve the path"));
+  }
+  dawn_str *s = dawn_str_from_os(r, (int64_t)strlen(r));
+  free(r);
+  return s;
+#endif
+}
+
 /* Exactly `n` bytes, short only at end of input. See the note on
  * `dawn_io_read_line` for why this is `read(2)` and not `fread`. */
 dawn_bytes *dawn_io_read_stdin(int64_t n) {

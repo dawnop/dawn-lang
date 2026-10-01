@@ -1576,7 +1576,8 @@ fn push_empty_options(m: MethodVisitor, cls: String) -> Unit !io = {
   m.visitTypeInsn(OP_ANEWARRAY, cls)
 }
 
-## The binary halves of read_file/write_file, plus delete/rename/temp_dir/is_symlink.
+## The binary halves of read_file/write_file, plus delete/rename/temp_dir/is_symlink
+## and real_path.
 fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
   # io_read_bytes(path) = Files.readAllBytes(path) — throws on failure
   let rv = open_static(cw, "io_read_bytes", "(Ljava/lang/String;)[B")
@@ -1678,6 +1679,19 @@ fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
     "(Ljava/nio/file/Path;)Z", false)
   sv.visitInsn(OP_IRETURN)
   close_mv(sv)
+
+  # io_real_path(path) = Path.toRealPath() with no LinkOption, so every link is
+  # followed; it throws for a path that does not exist, and an embedded NUL
+  # already throws in `push_path` (InvalidPathException), for catch_fault
+  let pv = open_static(cw, "io_real_path", "(Ljava/lang/String;)Ljava/lang/String;")
+  push_path(pv, 0)
+  push_empty_options(pv, "java/nio/file/LinkOption")
+  pv.visitMethodInsn(OP_INVOKEINTERFACE, "java/nio/file/Path", "toRealPath",
+    "([Ljava/nio/file/LinkOption;)Ljava/nio/file/Path;", true)
+  pv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Object", "toString",
+    "()Ljava/lang/String;", false)
+  pv.visitInsn(OP_ARETURN)
+  close_mv(pv)
 }
 
 ## io_temp_file(parent, prefix) = Files.createTempFile — the file half of
