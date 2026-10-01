@@ -1,0 +1,364 @@
+# The third reader of `Node[M]`: the same tree `diff`/`apply` reconcile and
+# `wire` encodes, written out as HTML text. Nothing about the tree changes for
+# it, so a view that already runs in the browser can also be printed into a
+# static page or asserted on as one string.
+#
+# The one invariant worth promising is that the string parses to the DOM the
+# bridge (`js/dom.mjs`) builds from the same tree on its first frame. Every rule
+# below that is not plain HTML serialisation is that invariant read closely:
+#
+#   - Listeners and keys are dropped, as `wire` drops the message and the key.
+#     A button printed here is dead until the bridge attaches to a live tree;
+#     there is no `data-` encoding of an event because nothing would read it.
+#   - A repeated prop renders once, at its first position with its last value.
+#     The bridge builds `new Map(node.props)`, which keeps exactly that, while a
+#     browser parsing two attributes of one name keeps the first. Printing every
+#     pair would make the string and the bridge disagree on the same tree.
+#   - `checked` on a form control is the bridge's `writeProperty` rule: `""`
+#     and `"false"` mean unchecked and print nothing, anything else prints the
+#     bare attribute. Printing `checked="false"` would check the box.
+#   - `value` on a `textarea` is its content, not an attribute: the bridge sets
+#     the property, and the HTML spelling of a textarea's initial value is its
+#     text. It replaces the kids, since the property is what the user sees.
+#     On every other element `value` is an ordinary attribute.
+#
+# Two escapes, not one. Text escapes `& < >`; an attribute value is always
+# double-quoted and escapes `& < > "`. The attribute set includes `< >` because
+# the WHATWG serialisation algorithm has since May 2025 (whatwg/html#6362, as
+# shipped in Chrome 138, Firefox 140 and Safari 26): a `<` left in an attribute
+# value is the raw material of mutation XSS. `'` is not escaped because no value
+# is ever single-quoted, and U+00A0 is not because it changes no meaning.
+#
+# `script` and `style` hold raw text, so their text children are written as
+# they are; escaping them would turn CSS's `a > b` into `a &gt; b` and break
+# it, which is what lustre, kotlinx.html and scalatags do and leptos does not.
+# The one thing raw text cannot hold is its own end tag, so `</script` or
+# `</style` inside one (in any case) is a panic rather than a page whose
+# remainder becomes markup.
+#
+# Tag and prop names are checked, because `el` takes any `String` and a name
+# is written unescaped: there is no escaping for a name, only a refusal. The
+# rejected set is scalatags' `validAttrName` reading of the HTML attribute-name
+# production: whitespace, `" ' > / =` and control characters, plus the empty
+# name. A bad name is a bug in the view, not data, so it panics.
+#
+# Void elements are the 13 in HTML 13.1.2, written `<br>` and not `<br/>`
+# (the slash is "unnecessary and has no effect"). A void element given kids
+# prints none of them: the tree is a legal value and the tag is what is wrong,
+# and the parser would have hoisted them out of the element anyway.
+#
+# Output is compact and byte-deterministic, like the wire, so a view test can
+# be one `==`. There is no pretty mode: whitespace between tags is a text node,
+# a text node is a child, and a child index is a wire address.
+
+use std/list
+use std/str
+use std/char
+use node.{Node, Text, Elem, with_key}
+use dsl.{text, el, div, button, input, foreign, on_click, on_value}
+
+## `w` as HTML: no whitespace added, no doctype, the same bytes every time.
+## Listeners and keys do not appear; see the file head for the other rules.
+pub fn to_html[M](w: Node[M]) -> String = node_html(w, "")
+
+## `w` as a whole document: `<!DOCTYPE html>` and then `to_html(w)`. Nothing is
+## wrapped around the tree. A root that is not `html` is still a document, the
+## parser supplies `html`, `head` and `body` itself, and a page that wants them
+## spelled says `el("html", kids: [..])`.
+pub fn to_document[M](w: Node[M]) -> String = "<!DOCTYPE html>" ++ to_html(w)
+
+# `parent` is the enclosing element's lower-cased tag, which is all a text node
+# needs to know: whether it sits in raw text.
+fn node_html[M](w: Node[M], parent: String) -> String =
+  match w {
+    Text(s) -> if parent == "script" || parent == "style" { raw_text(s, parent) } else { esc_text(s) }
+    Elem(tag, props, _, kids, _) -> elem_html(tag, props, kids)
+  }
+
+fn elem_html[M](tag: String, props: List[(String, String)], kids: List[Node[M]]) -> String = {
+  check_name("tag", tag)
+  let low = str.to_lower(tag)
+  let settled = settle(props)
+  var attrs = ""
+  for kv in settled {
+    attrs = attrs ++ attr_html(low, kv)
+  }
+  let open = "<" ++ tag ++ attrs ++ ">"
+  if is_void(low) {
+    open
+  } else {
+    var body = ""
+    match textarea_value(low, settled) {
+      Some(v) -> { body = esc_text(v) }
+      None -> {
+        for k in kids {
+          body = body ++ node_html(k, low)
+        }
+      }
+    }
+    open ++ body ++ "</" ++ tag ++ ">"
+  }
+}
+
+# One prop as the bytes it contributes to the start tag, the leading space
+# included, or nothing for the props the file head says print nothing.
+fn attr_html(tag: String, kv: (String, String)) -> String = {
+  let (name, value) = kv
+  check_name("prop", name)
+  if name == "checked" && is_control(tag) {
+    if value == "" || value == "false" { "" } else { " checked" }
+  } else if name == "value" && tag == "textarea" {
+    ""
+  } else {
+    " " ++ name ++ "=\"" ++ esc_attr(value) ++ "\""
+  }
+}
+
+fn textarea_value(tag: String, props: List[(String, String)]) -> Option[String] =
+  if tag != "textarea" {
+    None
+  } else {
+    match list.find(props, kv => name_of(kv) == "value") {
+      Some(kv) -> Some(value_of(kv))
+      None -> None
+    }
+  }
+
+# `props` as `new Map(props)` sees it: each name once, at the position it first
+# appeared, carrying the value it last had. Quadratic in the prop count, which
+# is a handful.
+fn settle(props: List[(String, String)]) -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for kv in props {
+    let name = name_of(kv)
+    if not list.any(out, seen => name_of(seen) == name) {
+      out = out ++ [(name, last_value(props, name, value_of(kv)))]
+    }
+  }
+  out
+}
+
+fn last_value(props: List[(String, String)], name: String, first: String) -> String = {
+  var v = first
+  for kv in props {
+    if name_of(kv) == name { v = value_of(kv) }
+  }
+  v
+}
+
+fn name_of(kv: (String, String)) -> String = {
+  let (n, _) = kv
+  n
+}
+
+fn value_of(kv: (String, String)) -> String = {
+  let (_, v) = kv
+  v
+}
+
+# The text escape. `&` goes first, or the entities written after it would be
+# escaped a second time.
+fn esc_text(s: String) -> String = {
+  let a = str.replace(s, "&", "&amp;")
+  let b = str.replace(a, "<", "&lt;")
+  str.replace(b, ">", "&gt;")
+}
+
+# The attribute escape: the text escape plus the quote that delimits the value.
+fn esc_attr(s: String) -> String = {
+  let t = esc_text(s)
+  str.replace(t, "\"", "&quot;")
+}
+
+fn raw_text(s: String, tag: String) -> String =
+  if str.contains(str.to_lower(s), "</" ++ tag) {
+    panic("tea_dom/render: a <" ++ tag ++ "> holds text containing its own end tag")
+  } else {
+    s
+  }
+
+fn check_name(what: String, name: String) -> Unit =
+  if name == "" || list.any(code_points(name), bad_name_char) {
+    panic("tea_dom/render: not a valid " ++ what ++ " name: \"" ++ name ++ "\"")
+  } else {
+    ()
+  }
+
+# Whitespace, `"`, `'`, `/`, `=`, `>`, and the C0 and C1 controls with DEL.
+fn bad_name_char(c: Char) -> Bool = {
+  let n = char.code(c)
+  n < 0x20 || (n >= 0x7F && n <= 0x9F) || char.is_space(c) || n == 0x22 || n == 0x27
+    || n == 0x2F || n == 0x3D || n == 0x3E
+}
+
+# HTML 13.1.2, all 13 of them.
+fn is_void(tag: String) -> Bool =
+  list.contains(
+    [
+      "area",
+      "base",
+      "br",
+      "col",
+      "embed",
+      "hr",
+      "img",
+      "input",
+      "link",
+      "meta",
+      "source",
+      "track",
+      "wbr",
+    ],
+    tag,
+  )
+
+# The tags `js/dom.mjs` writes `value` and `checked` to as properties
+# (`CONTROL_TAGS`); everywhere else they are attributes like any other prop.
+fn is_control(tag: String) -> Bool = tag == "input" || tag == "textarea" || tag == "select"
+
+# A message type for the test blocks below; real apps bring their own.
+type ProbeMsg =
+  | Inc
+  | Dec
+  | Reset
+  | Boom
+  | Said(what: String)
+
+test "text escapes the three characters that can open markup" {
+  let w: Node[ProbeMsg] = text("<b> & </b>")
+  assert to_html(w) == "&lt;b&gt; &amp; &lt;/b&gt;"
+  # A quote in text is just a quote.
+  let q: Node[ProbeMsg] = el("p", kids: [text("say \"hi\" & 'bye'")])
+  assert to_html(q) == "<p>say \"hi\" &amp; 'bye'</p>"
+}
+
+test "an attribute value is double-quoted and escapes the quote as well" {
+  let w: Node[ProbeMsg] = el("a", [("href", "x?a=1&b=\"q\"<>")])
+  assert to_html(w) == "<a href=\"x?a=1&amp;b=&quot;q&quot;&lt;&gt;\"></a>"
+  # The single quote is left alone: no value is ever single-quoted.
+  let s: Node[ProbeMsg] = el("a", [("title", "it's")])
+  assert to_html(s) == "<a title=\"it's\"></a>"
+}
+
+test "a void element has no end tag, no slash, and prints no kids" {
+  let br: Node[ProbeMsg] = el("br")
+  assert to_html(br) == "<br>"
+  let field: Node[ProbeMsg] = input(value: "x")
+  assert to_html(field) == "<input value=\"x\">"
+  # A kid given to a void element is a legal tree with the wrong tag; it is
+  # dropped rather than printed inside an element that cannot hold it.
+  let stuffed: Node[ProbeMsg] = el("hr", [("id", "h")], kids: [text("lost"), el("b")])
+  assert to_html(stuffed) == "<hr id=\"h\">"
+  # An ordinary empty element keeps its end tag.
+  let empty: Node[ProbeMsg] = div()
+  assert to_html(empty) == "<div></div>"
+}
+
+test "props and kids print in tree order, the class sugar first" {
+  let w: Node[ProbeMsg] =
+    el("ul", [("id", "list"), ("data-n", "2")], class: "rows", kids: [
+      el("li", kids: [text("a")]),
+      el("li", [("title", "b")], kids: [text("b"), el("i", kids: [text("!")])]),
+    ])
+  assert to_html(w)
+    == "<ul class=\"rows\" id=\"list\" data-n=\"2\"><li>a</li><li title=\"b\">b<i>!</i></li></ul>"
+}
+
+test "a foreign element prints its props and an end tag, nothing inside" {
+  let w: Node[ProbeMsg] = foreign("x-editor", [("doc", "v1")], [on_value("change", Said)])
+  assert to_html(w) == "<x-editor doc=\"v1\"></x-editor>"
+}
+
+test "listeners and keys never reach the string" {
+  let live: Node[ProbeMsg] =
+    with_key(el("li", [("class", "row")], [on_click(Inc), on_value("input", Said)], [text("go")]), "k1")
+  let bare: Node[ProbeMsg] = el("li", [("class", "row")], kids: [text("go")])
+  assert to_html(live) == to_html(bare)
+  assert to_html(live) == "<li class=\"row\">go</li>"
+}
+
+test "checked on a control follows the bridge, and so does value on a textarea" {
+  let off: Node[ProbeMsg] = el("input", [("type", "checkbox"), ("checked", "false")])
+  assert to_html(off) == "<input type=\"checkbox\">"
+  let blank: Node[ProbeMsg] = el("input", [("type", "checkbox"), ("checked", "")])
+  assert to_html(blank) == "<input type=\"checkbox\">"
+  let on: Node[ProbeMsg] = el("input", [("type", "checkbox"), ("checked", "true")])
+  assert to_html(on) == "<input type=\"checkbox\" checked>"
+  # Off a form control `checked` is an attribute like any other, as the bridge
+  # writes it there.
+  let custom: Node[ProbeMsg] = foreign("x-toggle", [("checked", "false")])
+  assert to_html(custom) == "<x-toggle checked=\"false\"></x-toggle>"
+  # A textarea's value is its escaped content and replaces the kids.
+  let area: Node[ProbeMsg] = el("textarea", [("rows", "2"), ("value", "a < b")], kids: [text("old")])
+  assert to_html(area) == "<textarea rows=\"2\">a &lt; b</textarea>"
+}
+
+test "a repeated prop prints once, where it first was, with its last value" {
+  let w: Node[ProbeMsg] = el("p", [("class", "b"), ("id", "x")], class: "a")
+  assert to_html(w) == "<p class=\"b\" id=\"x\"></p>"
+}
+
+test "script and style hold raw text, and refuse their own end tag" {
+  let css: Node[ProbeMsg] = el("style", kids: [text("a > b { color: red }")])
+  assert to_html(css) == "<style>a > b { color: red }</style>"
+  let js: Node[ProbeMsg] = el("script", kids: [text("if (a < b && c) {}")])
+  assert to_html(js) == "<script>if (a < b && c) {}</script>"
+  let bad: Node[ProbeMsg] = el("script", kids: [text("x = '</SCRIPT>'")])
+  match catch_panic(() => to_html(bad)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.message == "tea_dom/render: a <script> holds text containing its own end tag"
+    }
+  }
+  let bad_css: Node[ProbeMsg] = el("style", kids: [text("</style")])
+  match catch_panic(() => to_html(bad_css)) {
+    Ok(_) -> { assert false }
+    Err(_) -> { }
+  }
+}
+
+test "a name that would break the markup is refused" {
+  let spaced: Node[ProbeMsg] = el("p", [("on click", "x")])
+  match catch_panic(() => to_html(spaced)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "tea_dom/render: not a valid prop name: \"on click\"" }
+  }
+  let tagged: Node[ProbeMsg] = el("p><script")
+  match catch_panic(() => to_html(tagged)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "tea_dom/render: not a valid tag name: \"p><script\"" }
+  }
+  let empty: Node[ProbeMsg] = el("p", [("", "x")])
+  match catch_panic(() => to_html(empty)) {
+    Ok(_) -> { assert false }
+    Err(_) -> { }
+  }
+  let custom: Node[ProbeMsg] = el("x-y", [("data-a_b", "1"), ("aria-label", "z")])
+  assert to_html(custom) == "<x-y data-a_b=\"1\" aria-label=\"z\"></x-y>"
+}
+
+# The counter example's view, restated so this package does not depend on an
+# example: the frame `view(init())` prints is the bytes below.
+fn counter_view(n: Int) -> Node[ProbeMsg] = {
+  let heading: Node[ProbeMsg] = el("h1", kids: [text("dawn counter")])
+  let count: Node[ProbeMsg] = el("p", class: "count", kids: [text(to_string(n))])
+  let bar: Node[ProbeMsg] = div(class: "bar")
+  let controls: Node[ProbeMsg] =
+    div(class: "row", kids: [
+      button("-", Dec),
+      button("+", Inc),
+      button("reset", Reset),
+      button("boom", Boom),
+    ])
+  div(class: "counter", kids: [heading, count, bar, controls])
+}
+
+test "a whole frame is one string" {
+  assert to_html(counter_view(0))
+    == "<div class=\"counter\"><h1>dawn counter</h1><p class=\"count\">0</p><div class=\"bar\"></div><div class=\"row\"><button>-</button><button>+</button><button>reset</button><button>boom</button></div></div>"
+  assert to_document(counter_view(0)) == "<!DOCTYPE html>" ++ to_html(counter_view(0))
+  let page: Node[ProbeMsg] =
+    el("a", [("href", "x?a=1&b=\"q\"<")], kids: [text("<b> & </b>"), input(value: "v\"")])
+  assert to_html(page)
+    == "<a href=\"x?a=1&amp;b=&quot;q&quot;&lt;\">&lt;b&gt; &amp; &lt;/b&gt;<input value=\"v&quot;\"></a>"
+}

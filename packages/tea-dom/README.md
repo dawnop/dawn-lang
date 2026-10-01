@@ -225,6 +225,45 @@ has the full argument; the three properties worth repeating:
   untouched by it too. An io command, whose answer would arrive after the
   reply, needs an op this protocol does not have and is not here yet.
 
+## A third reader: HTML
+
+`render.to_html(w)` prints a tree as HTML, and `render.to_document(w)` is the
+same string after `<!DOCTYPE html>`. It reads the `Node[M]` that `diff` and
+`wire` read, so a view that runs in the browser can also be printed into a
+static page or asserted on as one string:
+
+```dawn
+assert to_html(el("p", class: "count", kids: [text("0")])) == "<p class=\"count\">0</p>"
+```
+
+The output is compact and byte-deterministic. The one promise it makes is that
+the string parses to the DOM the bridge builds from the same tree on its first
+frame, and the rules that are not plain HTML serialisation follow from that:
+
+- **Listeners and keys are dropped**, as on the wire. A printed button is dead;
+  only the bridge attaches events.
+- **Text escapes `& < >`; an attribute value is double-quoted and escapes
+  `& < > "`.** The `< >` in attributes is the WHATWG serialisation rule since
+  May 2025. `script` and `style` text is written raw, and text holding the
+  element's own end tag panics.
+- **`checked` on `input`, `textarea` and `select` follows the bridge**: `""` and
+  `"false"` print nothing, anything else prints a bare `checked`.
+  **`value` on a `textarea` is its content**, escaped, in place of the kids.
+  `value` on a `select` is printed as an attribute and selects nothing; the HTML
+  spelling is `selected` on an `option`, which the tree has to say itself.
+- **A repeated prop prints once, at its first position with its last value.**
+  That is what the bridge's `new Map(node.props)` keeps, while a parser keeps
+  the first of two attributes; printing both pairs would make the two readers
+  disagree about one tree.
+- **Void elements** are the 13 of HTML 13.1.2, printed as `<br>`; kids given to
+  one are dropped. A tag or prop name containing whitespace, a control
+  character or one of `" ' > / =` panics, since a name has no escaping.
+
+Not done: a raw HTML node (it would be a third constructor every `match` over
+`Node` has to learn), a pretty mode (whitespace between tags is a text node,
+and a child index is a wire address), and hydration (the bridge mounts by
+appending, so taking over printed DOM is a change to the bridge, not to this).
+
 ## Flags
 
 An application whose initial model depends on what the page already knew
@@ -276,6 +315,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 | `dsl` | lowercase wrappers over the constructors, `tea_term/dsl`'s counterpart |
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
+| `render` | the tree as HTML text: `to_html`, `to_document` |
 | `reactor` | `turn` (pure), `serve` (the package's only `!io`), and the `_with_flags` / `_with_state` pairs of each |
 
 ## The host half
