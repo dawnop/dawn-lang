@@ -58,6 +58,11 @@ pub type Assets = {
   search_wasm: String,
   search_en: String,
   search_zh: String,
+  # The body index, one per language for the same reason (gen/search_body,
+  # docs/site-search-design.md). Named on the panel's mount point rather than
+  # on the button, because it is the panel's second fetch, not the first.
+  search_body_en: String,
+  search_body_zh: String,
   # The front page's own stylesheet and script, and the monospace face. Only
   # the front page links the first two (gen/home.dawn): its sky, its sections
   # and its orbit are that page's alone. The face is every page's -- the
@@ -98,6 +103,8 @@ pub fn plain_assets() -> Assets =
     search_wasm: "tea-search.wasm",
     search_en: "search-en.json",
     search_zh: "search-zh.json",
+    search_body_en: "search-body-en.json",
+    search_body_zh: "search-body-zh.json",
     home_css: "home.css",
     home_js: "home.js",
     mono_font: "JetBrainsMono-Regular.woff2",
@@ -161,6 +168,21 @@ pub fn search_index_name(a: Assets, lang: Lang) -> String =
     En -> a.search_en
     Zh -> a.search_zh
   }
+
+## Which body index a page of this language names, by the rule
+## [search_index_name] gives.
+pub fn search_body_name(a: Assets, lang: Lang) -> String =
+  match lang {
+    En -> a.search_body_en
+    Zh -> a.search_body_zh
+  }
+
+## The search panel's mount point. It carries the body index's URL, relative
+## to the page like the button's three, so that gen/links checks it as a
+## fetched URL; the panel fetches it only once a reader has typed something.
+## The front page lays out its own body (gen/home) and calls this too.
+pub fn search_host(a: Assets, lang: Lang, root: String) -> String =
+  """<div id="dawn-search" class="search-host" data-search-body="${root}/assets/${search_body_name(a, lang)}" hidden></div>"""
 
 ## Where a page lives in `lang`'s layout, given its path in the default one.
 ## The default layout is the English site; the Chinese twin of any paired page
@@ -447,7 +469,7 @@ pub fn shell_ext(
     ++ `<div class="glow" aria-hidden="true"></div>` ++ "\n"
     ++ `<div class="wrap">` ++ "\n" ++ nav_bar(a, lang, pair, root, active) ++ "\n" ++ ph_line
     ++ "</div>\n</header>\n"
-    ++ `<div id="dawn-search" class="search-host" hidden></div>` ++ "\n" ++ body ++ "\n"
+    ++ search_host(a, lang, root) ++ "\n" ++ body ++ "\n"
     ++ footer_html(a, lang, root) ++ "\n</body>\n</html>"
 }
 
@@ -698,7 +720,7 @@ test "every page carries the search button, its mount point and its script" {
   assert str.contains(p, `data-search-wasm="../assets/tea-search.wasm"`)
   assert str.contains(p, `data-search-index="../assets/search-en.json"`)
   assert str.contains(p, `data-search-root=".."`)
-  assert str.contains(p, `<div id="dawn-search" class="search-host" hidden></div>`)
+  assert str.contains(p, `<div id="dawn-search" class="search-host" data-search-body="../assets/search-body-en.json" hidden></div>`)
   assert str.contains(p, `<script src="../assets/search.js" defer></script>`)
   # and the theme script, blocking, before it: it has to run before the first paint
   assert str.contains(p, `<script src="../assets/theme.js"></script>` ++ "\n" ++ `<script src="../assets/search.js" defer>`)
@@ -718,6 +740,8 @@ test "the search button is labelled and indexed in the page's own language" {
   assert str.contains(zh, ">搜索<kbd>")
   assert search_index_name(plain_assets(), En) == "search-en.json"
   assert search_index_name(plain_assets(), Zh) == "search-zh.json"
+  assert str.contains(en, `data-search-body="./assets/search-body-en.json"`)
+  assert str.contains(zh, `data-search-body="../assets/search-body-zh.json"`)
 }
 
 test "shell carries title, css root, body" {

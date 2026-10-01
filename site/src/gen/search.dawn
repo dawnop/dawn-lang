@@ -48,10 +48,11 @@ use std/io.{Fs}
 use json/parser.{parse}
 use json/value.{Json, JStr, error_text}
 use json/render.{render}
-use md/parser
+use md/ast.{Block}
 use html/render.{render_doc}
 use html/page.{Lang, En, Zh, lang_path, nav_items}
-use gen/common.{must_read, pad2}
+use gen/common.{pad2}
+use gen/corpus.{Corpus, read_corpus}
 use gen/stdlib.{api_rows}
 use gen/tutorial.{chapter_titles, chapter_sections}
 use gen/examples.{gallery_examples, must_describe}
@@ -141,15 +142,11 @@ fn api_index(api: Json, lang: Lang) -> List[Row] = {
 ## One rendered document's headings, as rows.
 ##
 ## The ids are `render_doc`'s, which is the same call gen/pages makes to write
-## the page, so the fragments cannot drift from the anchors: a heading counter
-## that moved would move both at once. The URL mapper is the identity because
-## nothing here reads the rendered html -- only the table of contents.
-fn doc_index(src: String, group: String, page: String, detail: String) -> List[Row] !Fs = {
-  let blocks =
-    match parser.parse(must_read(src)) {
-      Ok(bs) -> bs
-      Err(e) -> panic("${src}: ${e}")
-    }
+## the page, over the same parsed blocks (gen/corpus), so the fragments cannot
+## drift from the anchors: a heading counter that moved would move both at
+## once. The URL mapper is the identity because nothing here reads the
+## rendered html -- only the table of contents.
+fn doc_index(blocks: List[Block], group: String, page: String, detail: String) -> List[Row] = {
   list.map(render_doc(blocks, u => u).toc, e =>
       Row { group: group, title: e.text, detail: detail, note: "", href: "${page}#${e.id}" })
 }
@@ -161,10 +158,10 @@ fn doc_index(src: String, group: String, page: String, detail: String) -> List[R
 ## state: a var in the arm table`, ...), and a reader searching for one of
 ## those found nothing. A section's note is its chapter's title, which is what
 ## tells two sections with similar names apart.
-fn tutorial_index(src: String, lang: Lang, detail: String) -> List[Row] !Fs = {
+fn tutorial_index(blocks: List[Block], lang: Lang, detail: String) -> List[Row] = {
   var rows: List[Row] = []
-  let titles = chapter_titles(src)
-  let sections = chapter_sections(src)
+  let titles = chapter_titles(blocks)
+  let sections = chapter_sections(blocks)
   for i in range(0, len(titles)) {
     let page = lang_path(lang, "tutorial/${pad2(i + 1)}.html")
     rows = rows
@@ -256,27 +253,6 @@ fn words(lang: Lang) -> Words =
     }
   }
 
-## Which document each language reads its sections and chapters out of.
-##
-## The same pairing gen/pages.doc_source and gen/tutorial.tutorial_source
-## make, restated here because this reads the sources and writes no page: the
-## English site renders `docs/spec.en.md`, the Chinese one `docs/spec.md`, and
-## an index built from the wrong half would list one language's headings under
-## the other language's hrefs.
-pub fn sources(lang: Lang) -> (String, String, String) =
-  match lang {
-    En -> ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
-    Zh -> ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
-  }
-
-## The timeline, which gen/pages renders as history.html. Its own function
-## because it pairs the other way round: the English is the original.
-pub fn history_source(lang: Lang) -> String =
-  match lang {
-    En -> "docs/history.md"
-    Zh -> "docs/history.zh-CN.md"
-  }
-
 # ---- the words a reader can search by -------------------------------------
 #
 # The panel splits every row into words, once, when it mounts, and matches a
@@ -362,6 +338,42 @@ pub fn tokens(s: String) -> List[String] = {
   out
 }
 
+## The words of a paragraph of body text, for the body index
+## (gen/search_body, docs/site-search-design.md 2.3): every Han character
+## becomes a blank and the rest goes through [tokens]; then each Han character
+## is a word of its own, in the order they occur.
+##
+## Single characters because Chinese has no blanks: [tokens] would make every
+## run of Han text between two punctuation marks one word, and a query could
+## only find it by scanning every paragraph. A query's characters each find
+## their paragraphs by binary search instead, and the panel checks the few
+## candidates for the whole string. The blanks first because `inline_text`
+## joins inline code to the prose around it, and the Chinese documents put
+## an identifier straight against the Han text after it all the time: left as
+## one run, `Fs` followed by a Chinese word would not give `fs` as a word.
+pub fn body_terms(s: String) -> List[String] = {
+  var rest: List[Char] = []
+  var han: List[String] = []
+  for c in code_points(s) {
+    if is_han(c) {
+      rest = rest ++ [' ']
+      han = han ++ [str.from_char(c)]
+    } else {
+      rest = rest ++ [c]
+    }
+  }
+  tokens(from_code_points(rest)) ++ han
+}
+
+## Whether `c` is a Han character: the CJK unified ideographs, extension A,
+## the compatibility block and the supplementary planes' extensions. Kana,
+## Hangul and full-width punctuation are not.
+pub fn is_han(c: Char) -> Bool = {
+  let n = char.code(c)
+  (n >= 0x3400 && n <= 0x4DBF) || (n >= 0x4E00 && n <= 0x9FFF) || (n >= 0xF900 && n <= 0xFAFF)
+    || (n >= 0x20000 && n <= 0x2FA1F)
+}
+
 # ---- the asset -------------------------------------------------------------
 
 fn quoted(s: String) -> String = render(JStr(value: s))
@@ -371,14 +383,15 @@ fn row_json(r: Row) -> String =
     quoted(r.href)], ",") ++ "]"
 
 ## Every row of one language's index, in the order the file will carry them.
-pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
+## `c` is the same language's documents, as gen/corpus parsed them for the
+## pages.
+pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
   let w = words(lang)
-  let (spec_src, design_src, tut_src) = sources(lang)
   api_index(api, lang)
-    ++ doc_index(spec_src, "spec", lang_path(lang, "spec.html"), w.spec)
-    ++ doc_index(history_source(lang), "history", lang_path(lang, "history.html"), w.history)
-    ++ doc_index(design_src, "history", lang_path(lang, "design.html"), w.design)
-    ++ tutorial_index(tut_src, lang, w.tutorial)
+    ++ doc_index(c.spec, "spec", lang_path(lang, "spec.html"), w.spec)
+    ++ doc_index(c.history, "history", lang_path(lang, "history.html"), w.history)
+    ++ doc_index(c.design, "history", lang_path(lang, "design.html"), w.design)
+    ++ tutorial_index(c.tutorial, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
 }
 
@@ -393,8 +406,8 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
 ## in `items`. Positions and not a second copy of the rows, so a suggestion's
 ## title and href are the row's own -- in this language, and checked by
 ## gen/links with every other href in the file.
-pub fn search_index(api: Json, lang: Lang) -> String !Fs = {
-  let rows = index_rows(api, lang)
+pub fn search_index(api: Json, lang: Lang, c: Corpus) -> String !Fs = {
+  let rows = index_rows(api, lang, c)
   "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
     ++ ",\"start\":[" ++ join(list.map(start_ids(rows, lang), i => to_string(i)), ",") ++ "]"
     ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
@@ -499,7 +512,7 @@ test "every row lands in one of the five groups the panel draws" {
   io.with_fs_real(() => {
     let drawn = ["stdlib", "spec", "tutorial", "examples", "history"]
     for lang in [En, Zh] {
-      for r in index_rows(probe_api(), lang) {
+      for r in index_rows(probe_api(), lang, read_corpus(lang)) {
         assert list.contains(drawn, r.group)
         assert r.title != ""
         assert r.href != ""
@@ -528,6 +541,29 @@ test "an index's words and a query's words split the same way" {
   for sample in samples {
     let (s, words) = sample
     assert tokens(s) == words
+  }
+}
+
+## The body index's words, by the table in docs/site-search-design.md 3.2.
+## That table is the contract with the panel that will query the body index
+## (examples/projects/tea_dom_search); its test copies the same rows and names
+## the same section, so a change to either side is a change to the table.
+test "a body's words split by the table in docs/site-search-design.md 3.2" {
+  let samples: List[(String, List[String])] = [
+    ("io.read_file", ["io", "read", "file", "io.read_file"]),
+    ("!io 效果", ["io", "!io", "效", "果"]),
+    ("!Fs", ["fs", "!fs"]),
+    ("命名效果，处理器", ["命", "名", "效", "果", "处", "理", "器"]),
+    ("Fs效果的 handler", ["fs", "handler", "效", "果", "的"]),
+    ("str.trim 去掉空白", ["str", "trim", "str.trim", "去", "掉", "空", "白"]),
+    ("6.5 具名效果", ["6", "5", "6.5", "具", "名", "效", "果"]),
+    ("café λx", ["café", "λx"]),
+    ("全角，标点。", ["全", "角", "标", "点"]),
+    ("... ! -> ()", []),
+  ]
+  for sample in samples {
+    let (s, words) = sample
+    assert body_terms(s) == words
   }
 }
 
@@ -560,7 +596,7 @@ test "a note is the first sentence of a doc comment, cut to a bound" {
 ## The sections a chapter page anchors are searchable, under their chapter.
 test "the tutorial's sections are indexed with their chapter as the note" {
   io.with_fs_real(() => {
-    let rows = list.filter(index_rows(probe_api(), En), r => r.group == "tutorial")
+    let rows = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.group == "tutorial")
     let sections = list.filter(rows, r => str.contains(r.href, "#"))
     assert len(sections) > 0
     for r in sections {
@@ -570,24 +606,14 @@ test "the tutorial's sections are indexed with their chapter as the note" {
   })
 }
 
-## Each language reads its own half of every paired document. Building the
-## English index from the Chinese spec would produce rows whose titles are
-## Chinese and whose hrefs are English, and every one of them would resolve.
-test "each language indexes its own documents" {
-  assert sources(En) == ("docs/spec.en.md", "docs/design.en.md", "docs/tutorial.md")
-  assert sources(Zh) == ("docs/spec.md", "docs/design.md", "docs/tutorial.zh-CN.md")
-  assert history_source(En) == "docs/history.md"
-  assert history_source(Zh) == "docs/history.zh-CN.md"
-}
-
 ## The whole asset, on the real inputs: every group is in it, the hrefs are
 ## relative to the site root rather than to a page, and the Chinese one is the
 ## Chinese one.
 test "the index carries every group and addresses them from the site root" {
   io.with_fs_real(() => {
     let api = probe_api()
-    let en = index_rows(api, En)
-    let zh = index_rows(api, Zh)
+    let en = index_rows(api, En, read_corpus(En))
+    let zh = index_rows(api, Zh, read_corpus(Zh))
     for group in ["stdlib", "spec", "tutorial", "examples", "history"] {
       assert len(list.filter(en, r => r.group == group)) > 0
       assert len(list.filter(zh, r => r.group == group)) > 0
@@ -627,14 +653,15 @@ test "the suggested starting points are rows of the index, in each language" {
   io.with_fs_real(() => {
     let api = probe_api()
     for lang in [En, Zh] {
-      let rows = index_rows(api, lang)
+      let rows = index_rows(api, lang, read_corpus(lang))
       let picked = list.map(start_ids(rows, lang), i => rows[i])
       assert list.map(picked, r => r.group) == ["tutorial", "spec", "stdlib"]
       assert picked[0].href == lang_path(lang, "tutorial/01.html")
       assert str.starts_with(picked[1].title, "6. ")
       assert picked[2].title == "std/str"
     }
-    let en = list.map(start_ids(index_rows(api, En), En), i => index_rows(api, En)[i].href)
+    let en_rows = index_rows(api, En, read_corpus(En))
+    let en = list.map(start_ids(en_rows, En), i => en_rows[i].href)
     assert en == ["tutorial/01.html", "spec.html#s6", "stdlib.html#m-std-str"]
   })
 }
