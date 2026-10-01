@@ -3,6 +3,11 @@
 // reactor built from examples/projects/tea_dom_search; nothing here knows what
 // a result is.
 //
+// What is here is what a dialog owes the document around it, which the guest
+// cannot reach: the scrim, focus (kept inside while open, handed back to the
+// button on close), and the scroll position that keeps the selected row in
+// view. None of it says a word to the reader, so none of it needs a language.
+//
 // A classic script and not a module, so that it runs on every page without a
 // second network request and without `type=module`'s deferred-only semantics
 // mattering. The bridge it loads IS a module, reached with a dynamic import
@@ -122,14 +127,64 @@
     mounted.then(focusInput);
   }
 
+  // Focus goes back where it came from: the button that opened the panel.
   function close() {
     host.hidden = true;
+    host.classList.remove('is-keying');
     btn.setAttribute('aria-expanded', 'false');
+    btn.focus({ preventScroll: true });
+  }
+
+  // Whether the guest has left: it answers an empty tree for the second
+  // Escape and for its Cancel button, and the page follows by hiding the
+  // host. No panel at all is a mount that failed or has not finished, which
+  // Escape also closes.
+  function guestLeft() {
+    var panel = host.querySelector('.search-panel');
+    return !panel || panel.classList.contains('is-closed');
+  }
+
+  // The selected row, kept in view. The guest owns which row that is; where
+  // the list is scrolled to is a fact about this document.
+  function follow() {
+    var row = host.querySelector('.search-row.is-selected');
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }
+
+  // What Tab can reach inside the panel: the field, and the Cancel button
+  // where it is shown. The rows are out of the tab order on purpose (the
+  // arrows move through them), and a hidden element has no client rects.
+  function focusables() {
+    return Array.prototype.filter.call(
+      host.querySelectorAll('input, button, a[href]:not([tabindex="-1"])'),
+      function (el) { return el.getClientRects().length > 0; }
+    );
   }
 
   btn.addEventListener('click', function () {
     if (host.hidden) open();
     else close();
+  });
+
+  // The host is the scrim. A click on it, outside the panel, closes; a click
+  // inside has already been heard by the guest, and if that was Cancel the
+  // guest has left. A row is a link and the browser follows it; the panel
+  // closes so that a link into this same page does not leave it open.
+  host.addEventListener('click', function (ev) {
+    var row = ev.target.closest && ev.target.closest('.search-row a');
+    if (ev.target === host || guestLeft() || row) close();
+  });
+
+  host.addEventListener('mousemove', function () {
+    host.classList.remove('is-keying');
+  });
+
+  host.addEventListener('input', follow);
+
+  // The panel is modal: focus that lands outside it while it is open is
+  // brought back to the field.
+  document.addEventListener('focusin', function (ev) {
+    if (!host.hidden && !host.contains(ev.target)) focusInput();
   });
 
   document.addEventListener('keydown', function (ev) {
@@ -150,6 +205,32 @@
       window.location.assign(go.href);
       return;
     }
-    if (ev.key === 'Escape') close();
+    if (ev.key === 'Escape') {
+      // The guest hears Escape only in its field, and there the first press
+      // empties the query and leaves the panel open.
+      var heard = ev.target && ev.target.classList && ev.target.classList.contains('search-input');
+      if (!heard || guestLeft()) close();
+      return;
+    }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      // Not the caret's move to either end of the field: the arrows are the
+      // list's while the panel is open.
+      ev.preventDefault();
+      host.classList.add('is-keying');
+      follow();
+      return;
+    }
+    if (ev.key === 'Tab') {
+      var f = focusables();
+      if (!f.length) return;
+      var i = f.indexOf(document.activeElement);
+      if (ev.shiftKey && i <= 0) {
+        ev.preventDefault();
+        f[f.length - 1].focus();
+      } else if (!ev.shiftKey && (i === -1 || i === f.length - 1)) {
+        ev.preventDefault();
+        f[0].focus();
+      }
+    }
   });
 })();

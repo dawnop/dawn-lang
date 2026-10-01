@@ -31,6 +31,17 @@
     "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", sans-serif;
 
+  /* The front page's Horizon names (home.css), in their light values, so
+     the search panel can be written once in them: home.css redefines all of
+     these, with its dark theme, on the one page that has one. */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --line: var(--border);
+  --line-soft: var(--border-soft);
+  --hue-1: #4f46e5;
+  --hue-2: #7c3aed;
+  --hue-3: #db2777;
+
   --max: 46rem;      /* 阅读宽度 */
   --max-wide: 64rem; /* 首页 */
 }
@@ -569,8 +580,8 @@ a:focus-visible, .btn:focus-visible {
 
 /* ---- 搜索面板 ---- */
 /* 页头按钮 + 一个懒挂载的 wasm reactor（examples/projects/tea_dom_search）。
-   面板内部的一切由 guest 画，这里只负责壳与状态类；没有一条 content: 规则，
-   面板里的每个字都跟着页面语言从 guest 出来（gen/assets.dawn 的三条规矩）。 */
+   面板内部的一切由 guest 画，这里只负责壳与状态类；content: 只放空串（图标与色点
+   靠背景和 mask 画），面板里的每个字都跟着页面语言从 guest 出来（gen/assets.dawn 的三条规矩）。 */
 
 .site-header .search-open {
   border: 1px solid var(--border-soft);
@@ -594,101 +605,349 @@ a:focus-visible, .btn:focus-visible {
   color: var(--faint);
 }
 
-/* 面板本体。`hidden` 是页面脚本的开关，空树是 guest 的：两个都成立时面板不占位。 */
+/* The panel, in the front page's Horizon tokens. Every colour below is a
+   token or a mix of one, so the panel follows home.css's dark theme on the
+   front page and the shared light theme everywhere else without a rule of
+   its own for either. The few literal colours are shadow inks, and those go
+   through light-dark(), which reads the page's color-scheme: home.css sets
+   it, the other pages leave it light.
+
+   `hidden` on the host is the page script's switch and the empty tree is the
+   guest's; when both hold, the panel takes no room. The host is also the
+   scrim, so a click that lands on the host and not inside the panel is a
+   click outside it (search.js closes on that). */
 .search-host {
   position: fixed;
   inset: 0;
   z-index: 30;
-  background: rgba(31, 35, 40, 0.35);
   padding: 8vh 1rem 1rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .search-host { background: color-mix(in srgb, var(--bg) 78%, transparent); }
 }
 
 .search-host[hidden] { display: none; }
 
+/* The arrows scroll the list under a pointer that has not moved, and a row
+   arriving under it would otherwise take the selection back (mouseenter).
+   search.js sets this on an arrow key and clears it on the next mousemove. */
+.search-host.is-keying .search-row { pointer-events: none; }
+
 .search-panel {
+  display: flex;
+  flex-direction: column;
   max-width: 42rem;
+  max-height: min(37rem, 84vh);
   margin: 0 auto;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(31, 35, 40, 0.18);
-  padding: 0.75rem;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(13, 16, 32, 0.05), 0 28px 70px -24px rgba(13, 16, 32, 0.38);
+  /* dark: a hairline and a faint glow of the accent, where a drop shadow
+     would not show against the night */
+  box-shadow:
+    0 0 0 1px light-dark(transparent, color-mix(in srgb, var(--accent) 6%, transparent)),
+    0 0 48px -12px light-dark(transparent, color-mix(in srgb, var(--accent) 18%, transparent)),
+    0 1px 2px light-dark(rgba(13, 16, 32, 0.05), transparent),
+    0 28px 70px -24px light-dark(rgba(13, 16, 32, 0.38), rgba(0, 0, 0, 0.7));
 }
 
-/* Escape 之后 guest 交回的空树。没有子节点，所以只要不给它内边距就不留痕。 */
+/* The empty tree the guest answers once it is left. It has no children, so
+   with no padding it leaves no trace. */
 .search-panel.is-closed { display: none; }
+
+.search-panel kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.45rem;
+  height: 1.35rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--muted);
+  font: 0.68rem/1 var(--mono);
+}
+
+.search-bar {
+  flex: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.9rem 1.1rem;
+}
+
+/* The magnifier, as a mask so it takes the accent in either theme. */
+.search-bar::before {
+  content: "";
+  width: 1.2rem;
+  height: 1.2rem;
+  background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='6.5'/%3E%3Cpath d='m16 16 4.5 4.5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='6.5'/%3E%3Cpath d='m16 16 4.5 4.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 
 .search-input {
   width: 100%;
-  box-sizing: border-box;
-  padding: 0.5rem 0.65rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
   font: inherit;
-  font-size: 1rem;
-  color: inherit;
-  background: #fff;
+  font-size: 1.05rem;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-input::placeholder { color: var(--faint); }
+/* The field is where focus lives the whole time the panel is open, and the
+   caret already says so; home.css's ring for every :focus-visible would
+   frame it for good. */
+.search-bar .search-input:focus-visible { outline: none; }
+
+/* Shown in place of the esc key where there is no keyboard; see the phone
+   rules below. */
+.search-cancel {
+  display: none;
+  padding: 0.2rem 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: 500 1rem var(--sans);
+  cursor: pointer;
 }
 
-.search-input:focus { outline: none; border-color: var(--accent); }
+/* The one brand mark inside the panel: the dawn hairline under the field. */
+.search-line {
+  flex: none;
+  height: 1px;
+  background: var(--dawn-grad);
+  opacity: 0.9;
+}
 
 .search-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0.35rem 0 0.6rem;
   list-style: none;
-  margin: 0.6rem 0 0;
-  padding: 0;
-  max-height: 60vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
+.search-results:empty { display: none; }
 
-.search-group + .search-group { margin-top: 0.6rem; }
+.search-group + .search-group { margin-top: 0.35rem; }
+.search-group.hue-1 { --g: var(--hue-1); }
+.search-group.hue-2 { --g: var(--hue-2); }
+.search-group.hue-3 { --g: var(--hue-3); }
 
 .search-group-name {
-  margin: 0 0 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.1rem 0.3rem;
   color: var(--faint);
+  font: 500 0.66rem/1.4 var(--mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.search-group-name::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--g);
+}
+.search-group-count { display: inline-flex; align-items: center; gap: 0.5rem; opacity: 0.8; }
+/* the dot between the name and the count, drawn: a glyph here would be text
+   in a stylesheet, which gen/assets keeps to the guest */
+.search-group-count::before {
+  content: "";
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
-.search-group-rows { list-style: none; margin: 0; padding: 0; }
+.search-group-rows { margin: 0; padding: 0; list-style: none; }
 
 .search-row a {
+  position: relative;
   display: block;
-  padding: 0.3rem 0.45rem;
-  border-radius: 6px;
-  text-decoration: none;
+  margin: 0 0.45rem;
+  padding: 0.5rem 2.2rem 0.55rem 0.75rem;
+  border-radius: 8px;
   color: inherit;
+  text-decoration: none;
 }
 
-.search-row.is-selected a { background: var(--code-bg); }
+/* The selection: a 2px accent bar and a tint of the ink, which is a shade
+   darker on white and a shade lighter on the night, so it shows in both. */
+.search-row.is-selected a {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* the return key on the selected row, as an icon for the same reason */
+.search-row.is-selected a::after {
+  content: "";
+  position: absolute;
+  top: 0.7rem;
+  right: 0.85rem;
+  width: 0.8rem;
+  height: 0.8rem;
+  background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M13 3v5.5a2 2 0 0 1-2 2H3.5'/%3E%3Cpath d='m6 7.5-3 3 3 3'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M13 3v5.5a2 2 0 0 1-2 2H3.5'/%3E%3Cpath d='m6 7.5-3 3 3 3'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 
-.search-title { font-family: var(--mono); font-size: 0.9rem; }
+.search-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.search-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 500 0.85rem/1.45 var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 .search-detail {
-  font-family: var(--mono);
-  font-size: 0.8rem;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
   color: var(--faint);
-  margin-left: 0.5rem;
+  font: 0.7rem/1.45 var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-title, .search-detail, .search-group-name, .search-panel kbd {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
 }
 
 .search-note {
-  display: block;
-  font-size: 0.82rem;
+  display: -webkit-box;
+  margin-top: 0.15rem;
+  overflow: hidden;
   color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.search-note code {
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font-size: 0.86em;
 }
 
-.search-status, .search-scope {
-  margin: 0.5rem 0 0;
-  font-size: 0.82rem;
+.search-panel mark {
+  padding: 0 0.08em;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+}
+.search-title mark { box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* The live region is always there and is empty while there are rows. */
+.search-none:empty { display: none; }
+.search-status {
+  margin: 0;
+  padding: 1.4rem 1.1rem 1.5rem;
   color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
 }
 
-.search-none { list-style: none; }
+.search-foot {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 1rem;
+  padding: 0.6rem 1.1rem;
+  border-top: 1px solid var(--line-soft);
+  background: var(--code-bg);
+  color: var(--faint);
+  font-size: 0.74rem;
+}
+.search-keys { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; }
+.search-hint { display: inline-flex; align-items: center; gap: 0.25rem; }
+.search-foot kbd { min-width: 1.3rem; height: 1.2rem; font-size: 0.64rem; background: var(--surface); }
+.search-scope { margin: 0 0 0 auto; font-size: 0.72rem; }
 
-/* Enter 留下的那一条指令。页面脚本读到它就跳走，所以读者永远看不见它。 */
+/* What Enter left behind. The page script reads it and leaves, so no reader
+   ever sees it. */
 .search-goto { display: none; }
+
+/* A phone: the panel is the whole screen. No scrim, no corners, the field
+   at 16px so that focusing it does not zoom the page, a Cancel button where
+   there is no Escape key, and no key hints where there are no keys (the line
+   saying what is searched stays). */
+@media (max-width: 40rem) {
+  .search-host {
+    padding: 0;
+    background: var(--surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .search-panel {
+    position: fixed;
+    inset: 0;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .search-bar { padding: 0.75rem 16px; }
+  .search-input { font-size: 16px; }
+  .search-panel .search-esc, .search-keys { display: none; }
+  .search-cancel { display: inline-block; }
+  .search-group-name { padding-left: 16px; padding-right: 16px; }
+  .search-row a { margin: 0 8px; }
+  .search-head { flex-wrap: wrap; row-gap: 0; }
+  .search-title, .search-detail { flex: 1 1 100%; }
+  .search-detail { margin-left: 0; }
+  .search-foot { margin-top: auto; padding: 0.5rem 16px; }
+  .search-scope { margin-left: 0; }
+}
+
+/* The panel drops in and the scrim fades; on a phone the sheet rises. None
+   of it under reduced motion, and none of it holds a fill, so a panel at
+   rest has no animation attached. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes search-fade { from { opacity: 0; } }
+  @keyframes search-drop { from { opacity: 0; transform: translateY(-10px) scale(0.985); } }
+  @keyframes search-rise { from { opacity: 0; transform: translateY(24px); } }
+  .search-host { animation: search-fade 0.25s ease; }
+  .search-panel { animation: search-drop 0.28s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .search-row a { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
+  @media (max-width: 40rem) {
+    .search-host { animation: none; }
+    .search-panel { animation-name: search-rise; animation-duration: 0.3s; }
+  }
+}
 
 /* ---- print ---- */
 /* A printed page is the document: the header, the search panel, the footer,
