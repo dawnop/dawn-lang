@@ -68,7 +68,7 @@ exemption is unbounded is a gate with no lower bound on its coverage.
                      records what it printed. The criterion is mechanical and
                      the obligation runs one way -- a block that CAN be a
                      whole program MUST be one, and MUST record its output.
-                     33 of the tutorial's 38 dawn fences are this.
+                     39 of the tutorial's 44 dawn fences are this.
   ```dawn skip-check A block that cannot be a whole program for a reason in
                      the language rather than in the author's effort. Each of
                      today's five is one file of a multi-file example: two
