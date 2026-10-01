@@ -133,9 +133,9 @@ done
 #                            outer one instead of the section that holds them.
 #                            The rows are all still there, in order, with the
 #                            right classes -- there are simply no sections.
-#   every-entry-emitted      the filter stops filtering: `probe` performs
-#                            `found` for an entry that scored zero, so a query
-#                            answers with the whole index in index order.
+#   every-entry-emitted      the filter stops filtering: `matches` keeps an
+#                            entry that scored zero, so a query answers with
+#                            every entry the panel draws, ranked last.
 #   selection-cell-crosstalk the two cells in one handler stop agreeing: the
 #                            ordinal `chosen` is decided by is one past the
 #                            one the rows are numbered with, so Enter goes to
@@ -165,7 +165,7 @@ fi
 
 prod=(
   'groups-leak-into-outer|s|        emit(section(g, rows))|        for w in rows { emit(w) }|'
-  'every-entry-emitted|s|        if s == rank \&\& e.group == g.id \&\& shown < cap() {|        if true {|'
+  'every-entry-emitted|s|    if r > 0 \&\& k.group >= 0 {|    if k.group >= 0 {|'
   'selection-cell-crosstalk|s|      if len(hits) == sel {|      if len(hits) == sel + 1 {|'
 )
 
