@@ -10,7 +10,7 @@ use std/str
 use std/list
 use std/map
 use std/set
-use front/token.{Diag}
+use front/token.{Diag, mk_diag}
 use front/ast.{Module, Decl, DUseModule, module_uses}
 use compiler_plan/pkgfetch
 use compiler_plan/envmem
@@ -168,7 +168,7 @@ fn walk_dawn(dir: String) -> List[String] !Fs = {
 }
 
 fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
-  LocDiag { path: path, d: Diag { msg: msg, lo: 0, hi: 0, hint: hint, owner: None } }
+  LocDiag { path: path, d: mk_diag(msg, 0, 0, hint) }
 
 # Planner diagnostics use a package-local record to keep this frontend out of
 # compiler_plan's dependency graph. Convert only where loading adopts them.
@@ -177,7 +177,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   for ld in ds {
     out = out ++ [LocDiag {
       path: ld.path,
-      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint, owner: None }
+      d: mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
     }]
   }
   out
@@ -512,13 +512,12 @@ fn resolve(
         }
         match bad {
           Some(b) -> {
-            diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-              msg: "invalid module path segment `" ++ b ++ "`",
-              lo: u.nlo,
-              hi: u.nhi,
-              hint: "path segments are lowercase identifiers: [a-z_][a-z0-9_]*",
-              owner: None
-            } }]
+            diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+              "invalid module path segment `" ++ b ++ "`",
+              u.nlo,
+              u.nhi,
+              "path segments are lowercase identifiers: [a-z_][a-z0-9_]*"
+            ) }]
             continue
           }
           None -> ()
@@ -557,23 +556,21 @@ fn resolve(
                   Err(_) -> false
                 }
                 if local_hit {
-                  diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-                    msg: "`" ++ u.path ++ "` is ambiguous: `" ++ u.segs[0] ++
+                  diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+                    "`" ++ u.path ++ "` is ambiguous: `" ++ u.segs[0] ++
                       "` is both a [deps] package and a local module path",
-                    lo: u.nlo,
-                    hi: u.nhi,
-                    hint: "rename the src/" ++ u.segs[0] ++ "/ directory or the dependency alias",
-                    owner: None
-                  } }]
+                    u.nlo,
+                    u.nhi,
+                    "rename the src/" ++ u.segs[0] ++ "/ directory or the dependency alias"
+                  ) }]
                   edge_ok = false
                 } else if len(u.segs) == 1 {
-                  diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-                    msg: "cannot import the package `" ++ u.segs[0] ++ "` itself",
-                    lo: u.nlo,
-                    hi: u.nhi,
-                    hint: "import one of its modules: `use " ++ u.segs[0] ++ "/<module>`",
-                    owner: None
-                  } }]
+                  diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+                    "cannot import the package `" ++ u.segs[0] ++ "` itself",
+                    u.nlo,
+                    u.nhi,
+                    "import one of its modules: `use " ++ u.segs[0] ++ "/<module>`"
+                  ) }]
                   edge_ok = false
                 } else {
                   if info.name != u.segs[0] {
@@ -629,13 +626,12 @@ fn resolve(
               queue = queue ++ [mod_path]
             }
             Err(_) -> {
-              diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-                msg: "cannot find module `" ++ u.path ++ "`",
-                lo: u.nlo,
-                hi: u.nhi,
-                hint: "expected a file at ${dep_file}",
-                owner: None
-              } }]
+              diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+                "cannot find module `" ++ u.path ++ "`",
+                u.nlo,
+                u.nhi,
+                "expected a file at ${dep_file}"
+              ) }]
             }
           }
         }
@@ -650,13 +646,12 @@ fn resolve(
   for mp in order {
     if mp == "std" || str.starts_with(mp, "std/") {
       let mf = map.get(by_path, mp).expect("module")
-      diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-        msg: "the module path `" ++ mp ++ "` is reserved for the bundled standard library",
-        lo: 0,
-        hi: 0,
-        hint: "move the file out of src/std",
-        owner: None
-      } }]
+      diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+        "the module path `" ++ mp ++ "` is reserved for the bundled standard library",
+        0,
+        0,
+        "move the file out of src/std"
+      ) }]
     }
   }
   # duplicate-import detection (same module, same *kind*, twice in one file).
@@ -678,13 +673,12 @@ fn resolve(
           None -> false
         }
         if set.has(seen, (u.path, sel)) {
-          diags = diags ++ [LocDiag { path: mf.path, d: Diag {
-            msg: "module `" ++ u.path ++ "` is imported more than once",
-            lo: u.nlo,
-            hi: u.nhi,
-            hint: "",
-            owner: None
-          } }]
+          diags = diags ++ [LocDiag { path: mf.path, d: mk_diag(
+            "module `" ++ u.path ++ "` is imported more than once",
+            u.nlo,
+            u.nhi,
+            ""
+          ) }]
         }
         seen = set.insert(seen, (u.path, sel))
       }
@@ -756,13 +750,12 @@ fn topo_sort(
                   uhi = u.nhi
                 }
               }
-              diags = diags ++ [LocDiag { path: head.path, d: Diag {
-                msg: "circular module dependency: ${join(names, " → ")}",
-                lo: ulo,
-                hi: uhi,
-                hint: "modules must form a directed acyclic graph (spec §10.5)",
-                owner: None
-              } }]
+              diags = diags ++ [LocDiag { path: head.path, d: mk_diag(
+                "circular module dependency: ${join(names, " → ")}",
+                ulo,
+                uhi,
+                "modules must form a directed acyclic graph (spec §10.5)"
+              ) }]
             }
           }
           None -> {

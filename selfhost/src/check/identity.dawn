@@ -7,7 +7,7 @@ use std/list
 use std/str
 use std/bytes
 use front/parser
-use front/token.{Diag, DiagOwner}
+use front/token.{Diag, mk_diag, DiagOwner}
 use front/ast.{Module, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   DFn, DType, DTrait, DEffect, DConst, DImpl, DTest, DUseModule, DUseJava, e_lo, e_hi }
 
@@ -765,13 +765,13 @@ test "a diagnostic resolves against the revision being rendered" {
   let source = "fn f() -> Int = 1\nfn g() -> Int = true\n"
   let moved = "# a comment above everything else\n" ++ source
   let owner = DiagOwner { module: "pkg/m", decl: path_text([Named(FunctionDecl, "g")]) }
-  let raised = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "", owner: Some(owner) }
+  let raised = Diag { ..mk_diag("type mismatch", 16, 20, ""), owner: Some(owner) }
   let here = absolute(map.from([("pkg/m", fixture_spans(source))]), raised)
   let there = absolute(map.from([("pkg/m", fixture_spans(moved))]), raised)
   let g_here = str.index_of(source, "fn g").expect("g is in the source")
   let g_there = str.index_of(moved, "fn g").expect("g is in the moved source")
   assert g_here != g_there
-  assert here == Diag { msg: "type mismatch", lo: g_here + 16, hi: g_here + 20, hint: "", owner: None }
+  assert here == mk_diag("type mismatch", g_here + 16, g_here + 20, "")
   assert there == Diag { ..here, lo: g_there + 16, hi: g_there + 20 }
   # an owner this revision cannot place keeps the positions it came with
   # rather than inventing a base for them, and so does a diagnostic that

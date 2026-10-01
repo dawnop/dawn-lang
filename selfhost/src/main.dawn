@@ -87,7 +87,7 @@ use java "java.util.Map"
 use fspath/fspath
 use version.{VERSION}
 use front/diag
-use front/token.{Diag}
+use front/token.{Diag, mk_diag}
 use compiler_plan/pkgfetch
 use compiler_plan/consolemem
 use compiler_plan/procmem
@@ -908,7 +908,7 @@ fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   for ld in ds {
     out = out ++ [LocDiag {
       path: ld.path,
-      d: Diag { msg: ld.d.msg, lo: ld.d.lo, hi: ld.d.hi, hint: ld.d.hint, owner: None }
+      d: mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
     }]
   }
   out
@@ -1080,13 +1080,12 @@ fn analyze_target_scoped(
 }
 
 fn lsp_lease_problem(path: String, message: String) -> LocDiag =
-  LocDiag { path: path, d: Diag {
-    msg: message,
-    lo: 0,
-    hi: 0,
-    hint: "saving dawn.toml or dawn.lock re-plans this project; saving one of its documents retries a transient setup failure",
-    owner: None
-  } }
+  LocDiag { path: path, d: mk_diag(
+    message,
+    0,
+    0,
+    "saving dawn.toml or dawn.lock re-plans this project; saving one of its documents retries a transient setup failure"
+  ) }
 
 ## The lease is taken from a frame that does not otherwise touch the file
 ## system, so the handler is installed here rather than threaded through it.

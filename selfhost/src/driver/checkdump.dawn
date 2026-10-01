@@ -12,7 +12,7 @@ use check/identity
 use check/identity.{Named, FunctionDecl}
 use driver/analyze.{Program, LocDiag, rendered_diags}
 use front/parser
-use front/token.{Diag, DiagOwner}
+use front/token.{Diag, mk_diag, DiagOwner}
 use front/ast.{module_fns, module_consts, vis_exported}
 use front/lexdump
 
@@ -87,7 +87,7 @@ test "the dump prints where a diagnostic sits in the revision it dumps" {
   let (m, pd) = parser.parse_module(source)
   assert len(pd) == 0
   let owner = DiagOwner { module: "g", decl: identity.path_text([Named(FunctionDecl, "g")]) }
-  let raised = Diag { msg: "m", lo: 16, hi: 20, hint: "", owner: Some(owner) }
+  let raised = Diag { ..mk_diag("m", 16, 20, ""), owner: Some(owner) }
   let prog = Program { modules: [], diags: [LocDiag { path: "g.dawn", d: raised }],
     decl_spans: map.from([("g", identity.declaration_spans(m))]) }
   let start = str.index_of(source, "fn g").expect("g is in the source")

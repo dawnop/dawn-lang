@@ -15,7 +15,7 @@ use std/io.{Fs}
 use std/char
 use std/map
 use front/lexer.{line_starts_of, view_of, slice_cp, SourceView}
-use front/token.{Diag}
+use front/token.{Diag, mk_diag}
 
 ## UTF-16 length of `s` (surrogate pairs count as two units).
 pub fn utf16_len(s: String) -> Int = {
@@ -119,7 +119,7 @@ pub fn render_all(diags: List[(String, Diag)]) -> String !Fs = {
 
 test "renders the arrow, source line, caret and hint" {
   let text = "fn f() -> Int = true\n"
-  let d = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "return an Int", owner: None }
+  let d = mk_diag("type mismatch", 16, 20, "return an Int")
   let r = render("a.dawn", text, d)
   assert r ==
     "error: type mismatch\n" ++
@@ -133,7 +133,7 @@ test "renders the arrow, source line, caret and hint" {
 test "caret clamps to the line and to one unit minimum" {
   let text = "ab\ncd\n"
   # zero-width span at end of line 2 -> single caret past the text
-  let d = Diag { msg: "m", lo: 5, hi: 5, hint: "", owner: None }
+  let d = mk_diag("m", 5, 5, "")
   let r = render("x", text, d)
   assert r == "error: m\n  --> x:2:3\n  |\n2 | cd\n  |   ^\n"
 }
@@ -146,7 +146,7 @@ test "count line pluralizes" {
 test "columns count code points, not utf-16 units" {
   # 🎈 is one code point (two UTF-16 units); `b` is at code-point column 3, so
   # the arrow reads :1:3 (a UTF-16 renderer would wrongly say :1:4).
-  let d = Diag { msg: "here", lo: 2, hi: 3, hint: "", owner: None }
+  let d = mk_diag("here", 2, 3, "")
   let r = render("a.dawn", "a🎈b", d)
   assert str.contains(r, "--> a.dawn:1:3")
   assert str.contains(r, "a🎈b")
