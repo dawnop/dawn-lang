@@ -1514,9 +1514,10 @@ another, such as wasi-sdk's). The result is an ordinary WASI command module: a r
 calls its `_start` once and the program runs to the end.
 
 A page in a browser wants the other shape, a module that stays alive and is called once
-per event, and `--reactor` builds that. The module has no `_start`; it exports one
-function, `dawn_turn`, which the host calls with each message, and each call runs `main`
-once. `std/reactor`'s `serve` is what carries state from one turn to the next: it reads a
+per event, and `--reactor` builds that. The module has no `_start`; it exports exactly
+three things: `memory`, `_initialize` and `dawn_turn`. The host calls `_initialize` once,
+after instantiating the module and before anything else, then calls `dawn_turn` with each
+message, and each call runs `main` once ([spec.en.md](spec.en.md) §12.5). `std/reactor`'s `serve` is what carries state from one turn to the next: it reads a
 line, hands it to your step function together with the state so far, and keeps the state
 the step returns. The site's [Demo](https://dawn-lang.dawnop.com/tea.html) page is three
 of these (a counter, a to-do list and the site search), each built with
