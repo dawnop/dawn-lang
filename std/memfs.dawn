@@ -7,28 +7,32 @@
 ##
 ## The semantics are the table's, not a kernel's. Directories are implied by
 ## the paths in the table, so `fs_is_dir`, `fs_exists` and `fs_list_names`
-## answer what a real file system would answer for the same tree. There are no
-## links: `fs_is_symlink` is always `false` and nothing is followed. Paths are
-## normalized against the base directory named at [empty], and nothing here
-## reads the host, not even for the current directory. Files hold bytes, so
+## answer what a real file system would answer for the same tree. A symbolic
+## link is an entry of its own, made by [link], and only two operations know it
+## is there: `fs_is_symlink` answers whether a path is one, and `fs_real_path`
+## follows every one on the way, as `realpath(3)` does. The other operations do
+## not follow links and do not see them. Paths are normalized against the base
+## directory named at [empty], and nothing here reads the host, not even for
+## the current directory. Files hold bytes, so
 ## binary writes survive unchanged; only the text operations encode or decode
 ## UTF-8, and reading text never changes the stored bytes. A refusal is an
 ## `Err` whose kind starts with `memfs.`.
 
-# Why this is in std, and why now (docs/fs-real-path-design.md). A handler
-# answers exactly the operations its effect declares, no fewer and no more. The
-# compiler owned the only complete table handler, `driver/fsmem`, and the
-# bootstrap compiles that file once against the seed's std and once against
-# HEAD's; while it spells its own `with handle Fs`, `Fs` cannot gain an
-# operation in any release, because one source cannot answer both op sets.
-# Moving the handler here is the first of three steps: this release ships it,
-# the next one points `driver/fsmem` at it (the seed then has it) and adds the
-# operation, arm and all, in this one file.
+# Why this is in std (docs/fs-real-path-design.md). A handler answers exactly
+# the operations its effect declares, no fewer and no more. The compiler used
+# to own the only complete table handler, `driver/fsmem`, and the bootstrap
+# compiles that file once against the seed's std and once against HEAD's; while
+# it spelled its own `with handle Fs`, `Fs` could not gain an operation in any
+# release, because one source cannot answer both op sets. Here the arms always
+# sit in the same std as the declaration they answer, so an operation is added
+# in this one file, arm and all, as `fs_real_path` was.
 #
-# Until that switch the compiler keeps its copy, and the two are held to the
-# same text: `check_memfs_twin` in scripts/doc-check.py compares the arms, the
-# record and every private helper below with `selfhost/src/driver/fsmem.dawn`.
-# Change one, change both.
+# Links are modelled only as far as path identity needs them. `fs_real_path`
+# is the operation a compiler resolves a project's identity with, and the case
+# that matters is a `..` after a link, which leaves the link's target rather
+# than the directory the link sits in; that is the walk below. Making every
+# other arm follow links as well would be a second file system semantics to
+# keep level with the kernel's, for tests that do not need it.
 #
 # `Fs` is named qualified, `io.Fs`, and not imported with `use std/io.{Fs}`.
 # A selective import of an effect inside std would put every std load on the
@@ -36,7 +40,7 @@
 # for that path (`mint-imported-effect` in
 # scripts/incremental-semantics-contract/mutate.py) has to load std to reach
 # its own assertion; with the import here, the control broke std first and
-# failed every test that loads it. The qualified name also keeps the fourteen
+# failed every test that loads it. The qualified name also keeps the fifteen
 # `fs_*` operations out of this module's namespace, where its helpers live.
 #
 # The three path functions below are private copies of the `fspath` package's.
@@ -52,11 +56,13 @@ use std/io
 use std/io.{Deleted, NotFound}
 
 ## A file tree, plus the directory relative paths resolve against and the
-## counter `fs_temp_dir` / `fs_temp_file` hand out names from.
+## counter `fs_temp_dir` / `fs_temp_file` hand out names from. `links` maps a
+## link's absolute path to its target, spelled as it was given.
 pub type MemFs = {
   base: String,
   files: Map[String, Bytes],
   dirs: Map[String, Bool],
+  links: Map[String, String],
   seq: Int
 }
 
@@ -263,6 +269,62 @@ fn mem_present(st: MemFs, p: String) -> Bool = {
   map.has(st.files, k) || is_dir_key(st, k)
 }
 
+## How many links one resolution may follow before it is a loop. Forty is the
+## Linux kernel's limit (`ELOOP`), so a tree that resolves on a host resolves
+## here, and a cycle ends in an `Err` instead of a walk that never returns.
+const MAX_LINK_HOPS: Int = 40
+
+fn segments(p: String) -> List[String] = list.filter(str.split(p, "/"), (s) => s != "" && s != ".")
+
+fn join_seg(dir: String, seg: String) -> String = if dir == "/" { "/" ++ seg } else { "${dir}/${seg}" }
+
+## `p` with every link followed, one component at a time, the way the kernel
+## walks a path. A link's target replaces the link's own component: an
+## absolute one restarts at the root, a relative one continues from the
+## directory the link sits in. A `..` steps to the parent of the directory
+## reached so far, which after a link is the parent of its target and not of
+## the link. Every component before the last has to be a directory, and the
+## last has to exist.
+fn mem_real(st: MemFs, p: String) -> Result[String, ForeignError] = {
+  let start = if str.starts_with(p, "/") { p } else { "${st.base}/${p}" }
+  var todo = segments(start)
+  var at = "/"
+  var hops = 0
+  while len(todo) > 0 {
+    let seg = todo[0]
+    todo = list.drop(todo, 1)
+    if seg == ".." {
+      at = match path_parent(at) {
+        Some(up) -> up
+        None -> "/"
+      }
+    } else {
+      let next = join_seg(at, seg)
+      match map.get(st.links, next) {
+        Some(target) -> {
+          hops = hops + 1
+          if hops > MAX_LINK_HOPS {
+            return Err(ferr("loop", "too many levels of symbolic links", start))
+          }
+          if str.starts_with(target, "/") { at = "/" }
+          todo = segments(target) ++ todo
+        }
+        None -> {
+          if map.has(st.files, next) {
+            if len(todo) > 0 {
+              return Err(ferr("not_a_directory", "not a directory", next))
+            }
+          } else if not is_dir_key(st, next) {
+            return Err(ferr("not_found", "no such file or directory", next))
+          }
+          at = next
+        }
+      }
+    }
+  }
+  Ok(at)
+}
+
 # ---- the public face ----
 
 ## The base a table uses when its caller has no reason to name one of its own.
@@ -277,13 +339,25 @@ pub const BASE: String = "/dawn-memfs"
 ## life of one table, which a parameter says and a host query only happens to
 ## provide.
 pub fn empty(base: String) -> MemFs =
-  MemFs { base: base, files: map.empty(), dirs: map.empty(), seq: 0 }
+  MemFs { base: base, files: map.empty(), dirs: map.empty(), links: map.empty(), seq: 0 }
 
 ## `st` with one more file in it, holding `contents` as UTF-8; the directories
 ## above it come along. A directory already at `path` leaves `st` as it was.
 pub fn put(st: MemFs, path: String, contents: String) -> MemFs = {
   let (next, _) = mem_write(st, path, bytes.utf8(contents))
   next
+}
+
+## `st` with a symbolic link at `at` pointing to `target`; the directories
+## above `at` come along. The target is kept as spelled and is not required to
+## exist, as `ln -s` does not require it: a relative one is read from the
+## directory `at` sits in when something resolves through the link. Only
+## `fs_is_symlink` and `fs_real_path` see the link (the note at the top).
+## A file or a directory already at `at` leaves `st` as it was.
+pub fn link(st: MemFs, at: String, target: String) -> MemFs = {
+  let k = key(st, at)
+  if map.has(st.files, k) || is_dir_key(st, k) { return st }
+  MemFs { ..st, links: map.insert(st.links, k, target), dirs: with_ancestors(st.dirs, k) }
 }
 
 ## The file at `path` as UTF-8 text, or `None` when nothing is there.
@@ -310,7 +384,7 @@ pub fn with_fs[T, !e](seed: MemFs, body: fn() -> T !io.Fs !e) -> (T, MemFs) !e =
     var st: MemFs = seed
     fs_is_dir(path) => is_dir_key(st, key(st, path))
     fs_exists(path) => mem_present(st, path)
-    fs_is_symlink(_path) => false
+    fs_is_symlink(path) => map.has(st.links, key(st, path))
     fs_mkdirs(path) => {
       let (next, r) = mem_mkdirs(st, path)
       st = next
@@ -358,6 +432,7 @@ pub fn with_fs[T, !e](seed: MemFs, body: fn() -> T !io.Fs !e) -> (T, MemFs) !e =
         Err(ferr("not_found", "no such file or directory", key(st, src)))
       }
     fs_list_names(path) => mem_list(st, path)
+    fs_real_path(path) => mem_real(st, path)
   }
   let out = body()
   (out, st)
@@ -371,7 +446,7 @@ fn kind_of[T](r: Result[T, ForeignError]) -> String =
     Err(e) -> e.kind
   }
 
-test "the queries answer what the tree implies, and there are no links" {
+test "the queries answer what the tree implies" {
   let seed = put(put(empty(BASE), "/t/sub/a.txt", "alpha"), "/t/b.txt", "beta")
   let (_, table) = with_fs(seed, () => {
     # directories are implied by the paths, not declared separately
@@ -530,4 +605,69 @@ test "the io functions ride the table like any other handler" {
   })
   assert file_paths(table) == ["/w/b.txt"]
   assert text(table, "/w/b.txt") == Some("beta")
+}
+
+test "a link is seen by is_symlink and followed by real_path, and by nothing else" {
+  let files = put(put(empty(BASE), "/work/app/src/main.dawn", "m"), "/work/lib/x", "l")
+  let seed = link(link(files, "/home/app", "../work/app"), "/home/abs", "/work/lib")
+  let (_, table) = with_fs(seed, () => {
+    assert io.fs_is_symlink("/home/app")
+    assert io.fs_is_symlink("/home/./abs")
+    assert not io.fs_is_symlink("/work/app")
+    assert not io.fs_is_symlink("/home")
+    # a relative target is read from the directory the link sits in
+    assert io.fs_real_path("/home/app") == Ok("/work/app")
+    assert io.fs_real_path("/home/app/src/main.dawn") == Ok("/work/app/src/main.dawn")
+    assert io.fs_real_path("/home/abs/x") == Ok("/work/lib/x")
+    assert io.real_path("/home/app/./src/../src/main.dawn") == Ok("/work/app/src/main.dawn")
+    # a path with no link on it is itself, and the root is the root
+    assert io.fs_real_path("/work/lib/x") == Ok("/work/lib/x")
+    assert io.fs_real_path("/") == Ok("/")
+    # the directory a link sits in is a directory like any other
+    assert io.fs_is_dir("/home")
+    # the other operations do not follow
+    assert not io.fs_exists("/home/app/src/main.dawn")
+    assert kind_of(io.fs_read_file("/home/app/src/main.dawn")) == "memfs.not_found"
+  })
+  assert table == seed
+}
+
+test "a `..` after a link leaves the link's target, not the link's directory" {
+  let files = put(put(empty(BASE), "/work/app/src/main.dawn", "m"), "/work/lib/util.dawn", "u")
+  let seed = link(files, "/home/app", "../work/app")
+  let (_, _) = with_fs(seed, () => {
+    assert io.real_path("/home/app/../lib/util.dawn") == Ok("/work/lib/util.dawn")
+    assert io.real_path("/home/app/src/../../lib") == Ok("/work/lib")
+    # folding the text first names a directory that is not there
+    assert kind_of(io.real_path("/home/lib/util.dawn")) == "memfs.not_found"
+  })
+}
+
+test "a cycle of links is an Err, and forty links in a row are not one" {
+  var seed = link(link(link(empty(BASE), "/l/self", "self"), "/l/a", "b"), "/l/b", "/l/a")
+  # /c/0 -> 1 -> ... -> 40, a file: forty links followed
+  seed = put(seed, "/c/40", "end")
+  for n in 0..40 {
+    seed = link(seed, "/c/${to_string(n)}", to_string(n + 1))
+  }
+  seed = link(seed, "/c/start", "0")
+  let (_, _) = with_fs(seed, () => {
+    assert kind_of(io.fs_real_path("/l/self")) == "memfs.loop"
+    assert kind_of(io.fs_real_path("/l/a/x")) == "memfs.loop"
+    assert io.fs_real_path("/c/0") == Ok("/c/40")
+    # one more is forty-one, which is a loop by the kernel's count as well
+    assert kind_of(io.fs_real_path("/c/start")) == "memfs.loop"
+  })
+}
+
+test "a missing component, a file used as a directory, and a dangling link are an Err" {
+  let seed = link(put(empty(BASE), "/f/file", "x"), "/f/dangle", "/nowhere")
+  let (_, _) = with_fs(seed, () => {
+    assert kind_of(io.fs_real_path("/f/nope")) == "memfs.not_found"
+    assert kind_of(io.fs_real_path("/f/nope/../file")) == "memfs.not_found"
+    assert kind_of(io.fs_real_path("/f/file/..")) == "memfs.not_a_directory"
+    assert kind_of(io.fs_real_path("/f/dangle")) == "memfs.not_found"
+    # a link onto something already there is not made
+    assert link(seed, "/f/file", "/f") == seed
+  })
 }

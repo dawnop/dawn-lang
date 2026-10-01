@@ -167,6 +167,31 @@ pub fn copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError] 
 ## path spellings, including an embedded NUL, answer `false`.
 pub fn is_symlink(path: String) -> Bool !Fs = fs_is_symlink(path)
 
+## `path` with every symbolic link followed and every `.` and `..` resolved by
+## the host, as `realpath(3)` resolves them: a `..` after a link leaves the
+## link's target, not the directory the link sits in, which is the case a
+## textual normalization gets wrong.
+##
+## `path` has to be absolute and has to exist. A relative one is
+## `"io.relative_path"`, another failure kind std mints itself, and for
+## `list_dir`'s reason: the check happens first, so it never reaches a backend
+## and every backend words it the same. It is refused rather than resolved
+## because resolving it would read the working directory, which is `Env`'s
+## answer and not `Fs`'s; a caller that wants a relative path resolved joins
+## it to `cwd()` itself and owes `!Env` where it does. A path that does not
+## exist, or that the host cannot spell (an embedded NUL), is the `Err` the
+## backend raised.
+pub fn real_path(path: String) -> Result[String, ForeignError] !Fs =
+  if str.starts_with(path, "/") {
+    fs_real_path(path)
+  } else {
+    Err(ForeignError {
+      kind: "io.relative_path",
+      message: "io.real_path: not an absolute path: " ++ path,
+      cause: None
+    })
+  }
+
 ## Write `content` to `path` so that a reader ever only sees the old file or
 ## the new one, never a half-written one and never nothing at all.
 ##
@@ -404,7 +429,7 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 # a finished outcome, so `delete`'s spelling checks and its `DeleteOutcome`,
 # `list_dir`'s sort and its `io.not_a_directory`, and the whole staging
 # protocol of `atomic_write_file` stay the code under test when a fake
-# answers. That is also why there are fourteen operations and not fifteen:
+# answers. That is also why there are fifteen operations and not sixteen:
 # `atomic_write_file` is composed of the others and has no primitive of its own.
 #
 # No operation declares effects of its own (spec §6.5): what an arm does is
@@ -441,6 +466,7 @@ pub effect Fs {
   fn fs_temp_file(parent: String, prefix: String) -> Result[String, ForeignError]
   fn fs_copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError]
   fn fs_list_names(path: String) -> Result[List[String], ForeignError]
+  fn fs_real_path(path: String) -> Result[String, ForeignError]
 }
 
 ## Run `body` against the real file system. Every arm is the host primitive
@@ -466,6 +492,7 @@ pub fn with_fs_real[T, !e](body: fn() -> T !Fs !e) -> T !io = {
     fs_temp_file(parent, prefix) => catch_fault(() => io_temp_file(parent, prefix))
     fs_copy_permissions(src, dst) => catch_fault(() => io_copy_permissions(src, dst))
     fs_list_names(path) => catch_fault(() => io_list_names(path))
+    fs_real_path(path) => catch_fault(() => io_real_path(path))
   }
   body()
 }
@@ -1149,6 +1176,58 @@ test "with_fs_real answers every operation from the host" {
   })
 }
 
+test "real_path resolves links on the host, and refuses what it cannot resolve" {
+  with_fs_real(() => with_proc_real(() => {
+    let made = match temp_dir("", "dawn-std-real-") {
+      Ok(p) -> p
+      Err(e) -> panic("temp dir: ${e.message}")
+    }
+    # the temp directory may itself sit under a link, so an existing path is
+    # held to its own resolution rather than to the spelling it was made with
+    let d = match real_path(made) {
+      Ok(p) -> p
+      Err(e) -> panic("real_path: ${e.message}")
+    }
+    assert real_path(d) == Ok(d)
+    assert real_path("/") == Ok("/")
+    assert write_file(d ++ "/a.txt", "x") == Ok(())
+    assert real_path(d ++ "/./a.txt") == Ok(d ++ "/a.txt")
+    # a link, made the way a user makes one, with a target relative to the
+    # directory it sits in
+    assert mkdirs(d ++ "/work/app") == Ok(())
+    assert mkdirs(d ++ "/work/lib") == Ok(())
+    assert mkdirs(d ++ "/home") == Ok(())
+    assert run(["ln", "-s", "../work/app", d ++ "/home/app"], "", "") == Ok(0)
+    assert real_path(d ++ "/home/app") == Ok(d ++ "/work/app")
+    # a `..` after the link climbs out of its target; folding the text first
+    # would answer `home/lib`, which does not exist
+    assert real_path(d ++ "/home/app/../lib") == Ok(d ++ "/work/lib")
+    # a path that is not there, and one the host cannot spell, are an Err
+    match real_path(d ++ "/nope") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match real_path(d ++ "/a.txt\u{0}suffix") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # a relative path never reaches the host: std refuses it, with its own kind
+    for rel in ["a.txt", "", "./a.txt"] {
+      match real_path(rel) {
+        Ok(_) -> { assert false }
+        Err(e) -> { assert e.kind == "io.relative_path" }
+      }
+    }
+    assert delete(d ++ "/home/app") == Ok(Deleted)
+    assert delete(d ++ "/home") == Ok(Deleted)
+    assert delete(d ++ "/work/lib") == Ok(Deleted)
+    assert delete(d ++ "/work/app") == Ok(Deleted)
+    assert delete(d ++ "/work") == Ok(Deleted)
+    assert delete(d ++ "/a.txt") == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  }))
+}
+
 test "a handler over a table answers Fs without a host" {
   let absent = (p: String) => ForeignError {
     kind: "test.absent",
@@ -1174,6 +1253,7 @@ test "a handler over a table answers Fs without a host" {
     fs_temp_file(parent, prefix) => Ok(parent ++ "/" ++ prefix ++ "0")
     fs_copy_permissions(_src, _dst) => Ok(())
     fs_list_names(path) => if path == "/virt" { Ok(["b", "a"]) } else { Err(absent(path)) }
+    fs_real_path(path) => if path == "/virt/a.txt" { Ok(path) } else { Err(absent(path)) }
   }
   assert fs_is_dir("/virt")
   assert not fs_is_dir("/virt/a.txt")
@@ -1195,6 +1275,12 @@ test "a handler over a table answers Fs without a host" {
   assert not exists("/virt/nothing")
   assert read_file("/virt/a.txt") == Ok("alpha")
   assert list_dir("/virt") == Ok(["a", "b"])
+  assert real_path("/virt/a.txt") == Ok("/virt/a.txt")
+  # a relative path is refused above the handler, which never hears of it
+  match real_path("virt/a.txt") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "io.relative_path" }
+  }
   assert delete("/virt/a.txt") == Ok(Deleted)
   assert delete("/virt/gone") == Ok(NotFound)
 }
