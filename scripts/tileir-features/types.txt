@@ -12,13 +12,16 @@
 # what a piece of evidence looks like.
 #
 # The authority for the name, the tag and the version is
-# NVIDIA/cuda-tile@be0889cd,
-# include/cuda_tile/Dialect/CudaTile/IR/BytecodeTypeOpcodes.td: twenty-three
-# tags, 0 to 22, with NO gaps (unlike the opcode table, which has two frozen
-# ones). Fifteen of them are scalar formats and eight are constructors.
+# NVIDIA/cuda-tile@7e8e2e68 (v13.4.0; knife U2 moved it from be0889cd),
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeTypeOpcodes.td: twenty-four
+# tags, 0 to 22 with NO gaps (unlike the opcode table, which has two frozen
+# ones) and 130, which 13.4 gave f8E5M3FNU. A tag is a varint on the wire, so
+# 130 is two bytes (82 01) and every older tag one. Fifteen of them are scalar formats and eight are constructors.
 # Knife T9 finished the scalar half and knife T13 the constructor half: all
-# twenty-three are implemented, and every row still short of the bar carries
-# a named exemption. The
+# twenty-three of v13.3.4 are implemented, and every row still short of the
+# bar carries a named exemption. The twenty-fourth, f8E5M3FNU, is planned for
+# knife T20; only sm_107 accepts it, and 13.4.92 prints it `fnv8E5M3FNU`
+# (which spelling this row keeps is T20's to settle against tileirdisasm). The
 # authority for what is IMPLEMENTED is packages/tileir/src/bytecode.dawn:
 # `num_tag`'s arms for the scalar formats and the `TAG_` constants for the
 # constructors. check.py holds this file to that table in both directions.
@@ -30,7 +33,7 @@
 #               a constructor that has no textual spelling here
 #   tag         its frozen type tag, in decimal (the bytecode writes one
 #               byte, and BytecodeTypeOpcodes.td gives them in decimal)
-#   since       the bytecode version it entered: 13.1, 13.2 or 13.3
+#   since       the bytecode version it entered: 13.1, 13.2, 13.3 or 13.4
 #   status      implemented | unimplemented | deferred. `structural` is a
 #               status features.txt needs and this table does not: every tag
 #               the writer emits goes into the Type section, so there is no
@@ -130,7 +133,7 @@ tf32               |  8 | 13.1 | implemented   | T3  | 3 | golden:dtype_tf32,dev
 f64                |  9 | 13.1 | implemented   | 2   | 3 | golden:vadd,device:vadd,mutant:f64-tag-as-i64                        | -
 f8E4M3FN           | 10 | 13.1 | implemented   | T3  | 3 | golden:dtype_e4m3,device@sm90:dtype_e4m3,mutant:e4m3-tag-as-i8       | -
 f8E5M2             | 11 | 13.1 | implemented   | T3  | 2 | golden:dtype_e5m2,device@sm90:dtype_e5m2                             | -
-ptr                | 12 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:elem_ty                               | -
+ptr                | 12 | 13.1 | implemented   | 3   | 3 | golden:vadd,device:vadd,writer:elem_ty,mutant:ptr-flags-unwritten    | -
 tile               | 13 | 13.1 | implemented   | 3   | 2 | golden:vadd,device:vadd,writer:ty                                    | -
 TensorViewType     | 14 | 13.1 | implemented   | T11 | 3 | writer:ty,device:view_transpose,device:view_dyn_transpose,mutant:tensor-view-tag-as-ptr,mutant:view-strides-swapped,mutant:dynamic-dim-written-static | -
 PartitionViewType  | 15 | 13.1 | implemented   | T11 | 3 | writer:ty,device:view_transpose,mutant:partition-view-padding-inline-flag-at-13-3,mutant:partition-dim-map-reversed             | -
@@ -141,3 +144,4 @@ f4E2M1FN           | 19 | 13.3 | implemented   | T9  | 3 | golden:dtype_e2m1,dev
 GatherScatterViewType | 20 | 13.3 | implemented   | T13 | 3 | writer:ty,device:view_token_embed,device:view_gather_pad,mutant:gather-sparse-dim-and-tensor-view-swapped,mutant:view-padding-bitfield-cleared | -
 StridedViewType    | 21 | 13.3 | implemented   | T13 | 3 | writer:ty,device:view_conv1d,device:view_stride_pad,mutant:strided-traversal-as-one,mutant:view-padding-bitfield-cleared | -
 i4                 | 22 | 13.3 | implemented   | T9  | 3 | golden:dtype_i4,device:dtype_i4,mutant:i4-tag-as-i8                  | -
+f8E5M3FNU          | 130 | 13.4 | unimplemented | T20 | 0 | -                                                                   | architecture-sm107-no-card

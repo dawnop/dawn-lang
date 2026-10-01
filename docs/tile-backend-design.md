@@ -141,7 +141,8 @@ launch」，逐条对下来三句都要改：
 3. **`assert` 与 `print_tko` 的两种新判词形状要建**（「这次 launch 应当失败」与「这次
    launch 应当打印这些字节」），放在 T6 那一刀内部完成，不提前立项。
 4. **Debug 段挂起**，等 CUDA 13.4 的 wheel 带上 `tileirdisasm` 能做文本对拍再做。今天
-   写出来只能被「`tileiras` 仍然接受」验证，那是层 1。
+   写出来只能被「`tileiras` 仍然接受」验证，那是层 1。（**2026-10-02 解封**：13.4.92 的
+   tileiras wheel 自带 `tileirdisasm`，刀 U1 / U2 把钉子挪到了 13.4，前提成立；T14 另派，见 §6.18。）
 5. **CI**：特性语料照常进 `scripts/tile-golden` 的分片，接受片数从四涨到五或六；每一刀的
    报告必须写「不分片跑一次」的墙钟数字与分片后各片的数字。
 6. **立第二本账**：`scripts/tileir-features/features.txt` 逐操作码记「实现于哪一刀、覆盖到
@@ -172,7 +173,7 @@ leetgpu 题」，`features.txt` 说的是「这个后端实现了 Tile IR 的哪
 | T10 | 13.3 其余：`alloca` `mmaf_scaled` | 2 |
 | T15 | `OptimizationHints`（属性标签 11 加 Dictionary 10） | 0 |
 
-T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起。
+T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起（裁决 2 已于 2026-09-06 撤销；裁决 4 的前提随刀 U1 / U2 升钉 13.4 成立，2026-10-02 解封，T14 另派）。
 leetgpu 刀 21 照常收尾，之后不再派 leetgpu 刀，剩余题目只作副产品记录。
 
 **版本墙（T8）比想象的便宜，这条预研独立复核过，刀 T8 落地时又逐处重量了一遍。**
@@ -829,8 +830,8 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   不是律师的；若日后不许，层 1 退回本机，见 §8。
 - `cuda-tile-translate` 仍不在 pip、未构建。刀 3 不再需要它做 round-trip：`tileiras` 内含
   `cuda-tile` 的 bytecode reader 与 MLIR verifier，拒绝时给出字节偏移与 op 名（§6.2 的变异体
-  报文），比一个只会打印文本的翻译器说得更多。CUDA 13.4 起 wheel 旁会有 `tileirdisasm`
-  （cuTile.jl 已接），升钉时可把它接进 run.sh 做文本对拍。
+  报文），比一个只会打印文本的翻译器说得更多。CUDA 13.4 的 tileiras wheel 自带 `tileirdisasm`
+  （cuTile.jl 已接）；刀 U1 / U2 升钉之后它就在钉住的工具链里，接进 run.sh 做文本对拍是 T14 的事（§6.18）。
 
 ### 6.2 三层门
 
@@ -3612,6 +3613,148 @@ af2ffa0ac167 2026-09-07 580.95.05 13.3.36 sm_90 pass
 字段都是脚本写的。
 
 
+### 6.18 版本墙：13.3 到 13.4（刀 U1、U2）
+
+CUDA 13.4 带来 `tileiras` 13.4.92 与 Tile IR 字节码 13.4。升钉拆成两刀两个提交：U1 只换汇编器、
+字节码仍写 13.3；U2 只把 `BYTECODE_MINOR` 从 3 挪到 4。拆开是为了让证据单义：U1 的判据是
+「golden 一个不动、只有台账与报文动」，U2 的判据是「golden 全动、cubin 一个不动」。合成一刀的话，
+「cubin 变了」就分不清是哪一半的事，而下面一的数字说明它确实变了。
+
+**一、换汇编器动设备代码（U1）。** 同一份仓库 golden（185 个，13.3 字节）分别交给 13.3.36 与
+13.4.92 汇编（fp8 / fp4 / `mmaf_scaled` 照旧 `sm_100`，`view_atomic_bf16` 照旧 `sm_89`，其余
+`sm_86`），**185 个 cubin 没有一个逐字节相同**：137 个 `.text` 段（SASS）不同，48 个只有 ELF 外围
+不同（`.nv.global.init` 变成 NOBITS 的 `.nv.global`，注记与符号表跟着动）。NVIDIA 在 13.4 的发布说明
+里写了原因：`tileiras` 在代码生成之前加了一条 Tile IR 级的 canonicalize / CSE / LICM 管线。所以
+§6.11 第四条那句「版本墙不改设备答案」对 13.2 到 13.3 成立，是因为那次汇编器没换；这次要拆成两句：
+换字节码版本不动设备（下面四），换汇编器动设备（本条）。三份台账都要重录，本机这份随 U1 与 U2
+各录一行，两份集群台账在所有者的集群窗口重录，在那之前它们的末行仍写 13.3.36，说的是旧汇编器的
+cubin。
+
+本机台账的重录给了这条一个答案，也给了一条变异体一个新的读数。干净运行在 13.4.92 的 cubin 上
+**全部 pass**，而且末行注记里的每一个数（容差档的误差、折叠与扫描次序的探针、属性计数、多 launch 的
+序列）都与 13.3.36 那一行逐字相同，只有输入摘要变了：SASS 变了，答案没变。变的是
+`reduce-identity-wrong`（求和的 identity 写成 1.0）的红名单。它在 13.3.36 上点名「九个求和 kernel 里
+六个红」，`reduce_sum`、`monte_carlo`、`agent_step` 三个因为归约从不把 identity 折进去而绿；13.4.92
+上 `reduce_sum` 与 `monte_carlo` 也折进去了，**八个红**，只剩 64 lane 的 `agent_step` 绿。旧名单先红
+（`expected verdict fail (exit 1) with exactly 6 kernels saying differ:result, got fail (exit 1, 8
+differing)`），名单按这次运行重述后绿。这条变异体的注释早就写着「换汇编器改了哪些 kernel 折
+identity，这一行就会红，而这正是要点」，这次是它第一次被观察到。
+
+13.4.92 照收 13.1 到 13.4（`--list-versions`），照收仓库现有的 185 个 13.3 golden；13.3.36 拒绝
+U2 写出的全部 185 个 13.4 文件（`unsupported Tile IR bytecode version: 13.4`）。wheel 的依赖与
+13.3 时一样，移除实验重做了一遍：只放 `bin/tileiras`、`bin/ptxas`、`lib/libnvvm.so.4` 三个文件的
+目录汇编 185 个 golden，cubin 与完整安装逐字节相同；拿掉后两者任一，vadd 与空模块都答
+`failed to compile Tile IR program`；`nvidia-nvjitlink` 仍然不要。13.4 的 tileiras wheel 自带
+`tileirdisasm`，这是 §2.4 裁决 4 等的那个前提。
+
+**二、四条变异体的判词是报文原文，所以随汇编器动。** 只换汇编器时 67 条变异体里 63 条照旧绿，
+四条因为 13.4.92 改了措辞而红，拒绝本身都还在。先在 13.4.92 下跑旧判词，四条都红
+（`tileiras refused the bytecode for something other than: ...`），改成 13.4.92 的原文后四条都绿：
+
+| 变异体 | 13.3.36 的原话 | 13.4.92 的原话 |
+|--------|----------------|----------------|
+| `assume-divby-tag-as-same-elements` | `failed to read DenseI64ArrayAttr for SameElementsAttr` | `error at offset 72: failed to read values data` |
+| `e4m3-tag-as-i8` | `... f8E8M0FNU or f4E2M1FN values, but got '!cuda_tile.tile<128xi8>'` | 类型清单末尾多了 `or fnv8E5M3FNU` |
+| `e8m0-tag-as-f8e5m2` | `invalid rounding mode specified. Only 'nearest_even' is supported` | `invalid rounding mode specified for conversion to low-precision type. Only 'nearest_even' is supported` |
+| `mmaf-scaled-scale-operand-missing` | `... scale tile type of f8E4M3FN or f8E8M0FNU values` | 清单多了 `or fnv8E5M3FNU`，并钉上 `but got '!cuda_tile.tile<32x2xi32>'` |
+
+其中两句是因为新类型进了 verifier 的类型清单。13.4.92 把它印成 **`fnv8E5M3FNU`**，与 `Ops.td`
+和 cuTile Python 的 `f8E5M3FNU` 不同；`types.txt` 先用方言的拼写记这一行，`tileirdisasm` 接进来
+之后（T14 / T20）以反汇编为准再定。顺带一条旧债：刀 T3 记的「`ftof` f64 → f8E8M0FNU 让
+`tileiras` SIGILL」在 13.4.92 上已修（13.3.36 退出码 132，13.4.92 退出 0，sm_100 上的一个
+单 kernel 模块重测过），`dtype_e8m0` 的 f32 绕道留给集群重录那一刀或 T17 拆，U1 不动它，免得
+golden 动。
+
+**三、清单是枚举出来的，而且一处都不在发布说明里（U2）。** 照 §6.11 的办法，在
+`NVIDIA/cuda-tile@7e8e2e68`（v13.4.0，与 13.4.92 同批）上把写入器里每一处 13.4 版本分支列出来：
+`Ops.td` / `Types.td` 的每一条 `"13.4"`、`BytecodeTypeCodeGen.cpp` 的统一位域、`BytecodeGen.cpp`
+的 flags 与必需属性两支、`BytecodeWriter.cpp` 的手写分支。对本仓**会动的是四处**：
+
+| 位置 | 机制 | 本仓谓词 | 对 185 个 kernel |
+|------|------|----------|------------------|
+| 文件头第 10 字节 | minor | `BYTECODE_MINOR` | 全动 |
+| `PointerType` 与 `TensorViewType` | 13.1 的类型在 13.4 长出第一个可选参数 `ptr_attr`，于是写统一位域 varint（本仓写 0） | `ptr_has_flags` | 每个 kernel 都有 `ptr<...>`，全动；带 tensor view 的 14 个多一处 |
+| `ftoi` | 13.1 的操作在 13.4 长出第一个可选字段 `saturating`，于是写 flags varint（本仓写 0） | `ftoi_has_flags` | 5 个 kernel、6 条 |
+| `load_view_tko` / `store_view_tko` | 13.4 的**必需**属性 `inbounds`（DenseBoolArrayAttr），内联在内存序之后：计数加每维一字节（本仓全写 false） | `view_has_inbounds` | 11 个 kernel |
+
+**对本仓恰好为空的三处**：13.4 起上游把 i1 常量一律按位打包（本仓本来就按位打包，读者两种长度都收）；
+13.4 起读者拒绝函数表 flag 字节里的未知位（本仓只设 kernel 与 hints 两位）；Producer 段（本仓不设
+`producer`）。三个谓词与既有的共用 `at_least`，下一次挪钉子改的仍是常量。cuTile Python 1.6.0 的纯
+Python 写入器是独立的第二意见，四处在同一版本、同一形状。另外两件不改字节的事随 U2 落地：`num_ty`
+改写 varint（今天所有标签都小于 128，一字节不变；13.4 的 f8E5M3FNU 标签是 130，要两字节），
+0x54 改名 `fpowf`（`OP_POW` → `OP_FPOWF`，`render.dawn` 拼 `fpowf`，字节不变，文本 golden 只动
+`mathops.mlir` 一行）。
+
+**四、三个 185/185。** 与 §6.11 一样，两个方向各量一次，再加设备那一次：
+
+- **正向是账**：每个 kernel 拆段比 13.3 golden 与 13.4 字节。预测全从旧文件与 `.mlir` 上来：头只有
+  第 10 字节 3 → 4；Func 段涨「`ftoi` 条数 + Σ(1 + 秩)（每条 view 读写）」；Type 段里每个标签为 ptr
+  （0x0c）或 tensor view（0x0e）的条目恰好在标签后多一个 0 字节、其余条目逐字节不变；其余段逐字节相同。
+  **185 / 185 全部对上**，Func 段合计涨 110 字节，Type 段合计涨 238 字节。文件总长这一格另说：
+  119 个不变（对齐吃掉），58 个长 4 字节，1 个长 8、4 个长 12、2 个长 16、1 个长 36。所以「同长」
+  仍然不是判据，段长才是。
+- **反向是复现**：把这棵树的 `BYTECODE_MINOR` 改回 3（三个新谓词随之全假），重新生成的 185 个
+  `.tilebc` 与 U1 那一代的 golden **逐字节相同，185 / 185**；文本除 `mathops.mlir` 的 `fpowf` 一行
+  外也全同。
+- **设备**：13.4 字节与 13.3 字节都交给 13.4.92，**185 个 cubin 逐字节相同，185 / 185**。所以字节码
+  这一半不改设备答案；本条与一合起来，才是「升到 13.4 改了什么」的完整回答。
+
+**五、头里的版本号仍然约束读者，但不是在每个 kernel 上。** `header-minor-still-3` 让头写 13.3、
+正文照 13.4 的形状写。在 vadd 上这句谎话**被收下**：13.3 的读者把指针的位域字（0）当成 pointee，
+而 vadd 里 f64 恰好就是 0 号类型，读错的那一个条目读成了对的答案。所以这条变异体落在
+`view_transpose` 上：tensor view 的位域字被读成元素类型，后面的形状对不上，`tileiras` 答
+`expected shape and stride to be of same rank but got shape of rank 0 and stride of rank 2`。
+`header-minor-still-2`（头写 13.2）在 13.4 正文上照旧红，报文与 T8 时一字不差。
+
+**六、层 1 变异体：新加四条，既有两条换锚。** 新加的四条，判词都是 13.4.92 的原文：
+
+| 变异体 | 改哪 | kernel / 形状 | `tileiras` 的原话 |
+|--------|------|---------------|-------------------|
+| `ptr-flags-unwritten` | 指针类型不写位域字 | vadd / 同长（Type 段短 1 字节，对齐吃掉） | `error at offset 1: failed to get pointeeType type` |
+| `ftoi-flags-unwritten` | `ftoi` 不写 flags | int_ops / Func 段短 1 字节 | `error at offset 160: invalid integer value for enum type: 6`（6 是 `nearest_int_to_zero`，被读成了 signedness） |
+| `view-inbounds-unwritten` | view 读写不写 `inbounds` | view_transpose / Func 段短 6 字节 | `error at offset 56: operand index 16 out of bounds (size=16) for index segment, element 1` |
+| `header-minor-still-3` | 头写 13.3、正文 13.4 | view_transpose / 同长 | 见五 |
+
+`writer_mutant_checks` 的段长形状因此多一个 `func-six-short`。既有 67 条在 13.4 字节上全量跑过：
+65 条原样绿，两条要改的都是锚，判词一字未动。`tensor-view-tag-as-ptr` 的锚是
+`bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)`，位域字插进来以后那段文本不在了，锚改成带括号的新形状，
+报文照旧（`expected ::mlir::cuda_tile::TensorViewType but got '!cuda_tile.ptr<f64>'`）。
+`partition-view-padding-inline-flag-at-13-3` 原来把 `partition_view_has_bitfield` 改成
+`at_least(13, 4)`，在 13.4 上这一改**什么都没改**，`run.sh` 答 `mutant stayed green ... still matches`；
+替换改成 `false`（「在 13.3 及以上的文件里写 13.3 之前的形状」，与版本号无关），报文照旧
+（`failed to read tile_shape data`）。这正是「锚写成版本比较、钉子一挪就悄悄失效」的那一类，
+负控是它自己先红了。
+
+**七、`inbounds` 不进 attrs.txt（裁决）。** 它是 DenseBoolArrayAttr：值是逐维的一串布尔，不是枚举的
+一个取值，也不是 UnitAttr 的一个 flag 位，`attrs.txt` 的八列放不下它，硬放就要发明新形状。所以它记在
+`features.txt` 的 `load_view_tko` / `store_view_tko` 两行：证据加 `writer:inbounds` 与
+`mutant:view-inbounds-unwritten`。写 true 是 T18 的事，那时再看要不要给它开行。写 true 的代价量过：
+把 `inbounds` 全写 true，13 个 view kernel 里 2 个（只有 `atomic_red_view_tko` 的）字节不变，
+`view_conv1d` / `view_token_embed` / `view_gather_pad` 三个收下且 cubin 变，其余八个在 sm_86 上
+一律 `rc=5 error: failed to compile Tile IR program`。这八个的形状都不能被 tile 整除（「承诺在界内」
+是假话），方言说违约是 UB，汇编器实际上在编译期就失败，而且报文不点名。所以 T18 的负控是「不能整除
+也写 true → 汇编器拒」，但它的判词只能是这一句不点名的话。
+
+**八、三本账换钉 v13.4.0。** `features.txt` 105 行（0x00 到 0x7A），新增五行 `insert` 0x76、
+`gdc_launch_dependents_tko` 0x77、`gdc_wait_tko` 0x78、`fpowi` 0x79、`memory_fence_alias_tko` 0x7A，
+全部 `unimplemented`（T16 / T19），`pow` 行改名 `fpowf`；`types.txt` 24 行，加 `f8E5M3FNU`（标签 130，
+`unimplemented`，T20，豁免 `architecture-sm107-no-card`：只有 sm_107 收它，本仓与集群都没有
+那块卡）；`attrs.txt` 加 `rounding.nearest_away`（T17）、`unit.saturating`（T17）、`ptr_attr.none`
+（T18）三行。`check.py` 的期望集与版本集合跟着扩，类型标签的正则放宽到三位；自测里两处拿 0x76 当
+「不存在的编码」的锚搬到 0x7B（0x76 已经是 `insert`），另加三条阴性对照：130 缺行即红、四位数标签即红、
+13.4 的操作码写成 13.3 即红。`ptr` 类型行因 `ptr-flags-unwritten` 从层 2 升到层 3，`ftoi` 加一条变异体。
+
+**九、CI 墙钟。** 本机实测：wheel 缓存命中、新建 venv 的安装 3.08–3.09 s（13.3）对 3.15–3.22 s（13.4），
+带下载的冷装 9.0 s；185 个 golden 串行汇编 14.0 s 对 15.0–15.1 s（+7%），13.4 字节 16.8 s（与机器负载
+同量级的波动）。`tile.yml` 的 wheel 缓存键是 `toolchain.txt` 的哈希，换钉那一轮六片各冷下载一次。
+U2 加的四条变异体是新的工作项：一次不分片全量本机实测各 24.1–24.3 s，其余 67 条均值 24.1 s，
+是普通变异体；按 `tile.yml` 记的每条约 21 s 计，84 s 工作量分到六片是每片 14 s，六条预算行的规划值
+从 914 s 重述到 928 s（离 950 s 的 pole 还有 22 s），`timeout-minutes` 按 3x 规则 46 → 47，
+path-total 6394 s → 6478 s（提交里有 `Gate-Budget(path-total)` 行）。不分片全量：U1 那一轮 252 项
+3397 s，U2 这一轮 256 项 2912 s（机器同时在跑别的任务，两数之差是负载不是变化）。本机台账两轮：
+U1 一轮 1008 s，U2 一轮见下行台账提交。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -3667,6 +3810,8 @@ af2ffa0ac167 2026-09-07 580.95.05 13.3.36 sm_90 pass
 | **T12 view 族的动态一半，加两条形状查询**（已落地，view 族第二刀） | 「一个 kernel 处理的张量**多大**不写在程序里：extent 与 stride 是 `make_tensor_view` 的操作数，kernel 从缓冲区里读它们，两条形状查询再把设备算出的数答回来当掩码边界和循环边界用；判词是**同一个 cubin 在两个不同形状的张量上都对**，而它与静态拼法在同一份语料上逐位相同」（今天写不出：T11 的每一个 extent 都烘在类型里，一个 cubin 对应一个张量；`get_tensor_shape` 与 `get_index_space_shape` 两行台账是 `deferred / ruling 2`，一个字节也发不出去） | `bytecode.dawn`：`OP_GET_TENSOR_SHAPE`(0x2F) / `OP_GET_INDEX_SPACE_SHAPE`(0x2D) 两个操作码，`put_dim`（`ShapedType::kDynamic` 的八个字节，位模式直接拼而不是移位得来）、`emit_group`（一个变长操作数组的计数加操作数）与 `emit_shape_query`，`ty` 的 tensor view 臂改走 `put_dim`，`encode_instr` 两条新臂加 `MakeTensorView` 那条填上两个组。`lower.dawn`：`Instr` 两条新构造子、`MakeTensorView` 多三个字段，`is_idx_ty` 与 `shape_query`（发整条指令、绑第 `dim` 个结果，与 `BlockId` 同形），`TensorViewOf` 加「每个动态操作数都是 rank-0 i32 tile」的检查。`prog.dawn`：`TileOp` 两条、handler 两臂，`TensorViewOf` 多两个字段，动态维放行非正 extent 但把「操作数个数等于问号个数」钉死。`dev.dawn`：`DYN_DIM` 标记与 `Dim` 三件套、`t_tensor_view` 多两个形参、`t_tensor_shape` / `t_index_space_shape` 两个效果操作，公开面 `tensor_view_dyn` / `tensor_dim` / `index_space_dim` / `idx_of` / `idx_as_scalar`。`render.dawn`：`extent` 印 `?`、`mixed` 把操作数名字填回 shape 与 strides、两条查询的指令行。`std/gpu.dawn`：`masked_double_ref` 与 `view_grid_sum_ref`。kernel 三个：`view_dyn_transpose`（`view_transpose` 的动态拼法，共用 `transpose_ref` 与同一份语料）、`view_tensor_shape`（查询答的数当掩码边界，并把答案写进 i32 缓冲区）、`view_index_space`（查询答的数当两重循环边界，一个 block 走完整张网格）。新族 `scripts/tile-gpu-diff/dyn_diff.dawn`，它的用例单位是 **(kernel, 张量形状)**：七个用例、五种形状，最后一个是静态的 `view_transpose`。台账两张动：`features.txt` 两行从 `deferred` 改成 `implemented` 且到层 3（操作码实现 92 → **94**、层 3 从 40 到 **42**），`make_tensor_view` 与 `types.txt` 的 `TensorViewType` 各补一条证据，`check.py` 的 `LANDED_KNIVES` 加 `T12`，头注多写下第三处判断（三处自测锚点落在 `make_strided_view` / `StridedViewType` / `rmw.xchg` 上，本刀一处也没碰） | 层 1：三个新 golden 在 `--gpu-name sm_86` 上**一次通过**（cubin 8736 / 11536 / 15776 字节），没有架构豁免。层 2：`dyn_diff` 七个用例在本机 3080 上全部 `identical:exact`，`twin=same`（动态与静态两个 cubin 在同一进程里逐 lane 相同）。四张台账 `check.py` 与 `--self-test` 全绿 | 层 1 三条、层 2 两条，红集在 §6.15 七：`dynamic-dim-written-static`（`?` 写成静态常量，**同长** → `'cuda_tile.make_tensor_view' op expected 0 dynamic shape operands, got 2`）、`tensor-shape-as-index-space-shape`（0x2F 写成 0x2D，两条记录同形所以读者读得完，**同长** → `'cuda_tile.get_index_space_shape' op operand #0 must be TileView instance, but got '!cuda_tile.tensor_view<?x?xf64, strides=[?,?]>'`）、`index-space-shape-as-tensor-shape`（反过来，**不是**同一条报文倒过来读 → `'cuda_tile.get_tensor_shape' op operand #0 must be tensor view type, but got '!cuda_tile.partition_view<...>'`）；`dynamic-shape-and-stride-operands-swapped`（两个变长组对调，两组都是二长所以计数仍对得上 → 三个动态 kernel 的六个用例全红，静态 `view_transpose` 绿）、`shape-query-dim-reversed`（锚点在 `lower.dawn`：绑第 `rank-1-dim` 个结果而不是第 `dim` 个 → `view_tensor_shape` 与 `view_index_space` 的四个用例红，**`view_dyn_transpose` 连 `.tilebc` 都不动**，它一条查询也不发）。另有两条给验收者的自轴负控。设备那一侧：把 `scripts/tile-gpu-diff/dyn_diff.dawn:370` 的 `[to_float(blocks(rows, VD_SUM_TILE)), to_float(blocks(cols, VD_SUM_TILE))]` 改成 `[to_float(rows), to_float(cols)]`（宿主改成期待张量的 extent 而不是网格的），**什么都不用重录**，`tile-gpu-diff` 上只有 `view_index_space` 的两个用例红（第四个缓冲区的前两个 lane），其余五个绿。golden 那一侧：把 `scripts/tile-golden/kernels.dawn:4720` 的 `idx_const(2)` 改成 `idx_const(1)`，**别重录 golden**，三个动态 kernel 的文本与字节 golden 全红（`unit` 读到 `cols` 那一格），而 `view_transpose` 等静态 kernel 一个字节不动 | 1（实报 1；`dawn test packages/tileir` **126** 全绿、`dawn test --stdlib` **175** 全绿（本刀加四个包测试与一个 std 测试）；矩阵 235 项长到 **241 项**（179 kernel、62 变异体），`tile-golden` 在最终树上不分片 **2183 s**（36:23，241 项全跑退出 0；rebase 之前那一轮是 2285 s）；**十片装不下了，分第十一片**：最终树那一轮十片的 planning value 是 666 / 627 / 635 / 634 / 628 / 628 / 628 / 625 / 628 / 651s，第一片越过 660s 的 pole 而 `check-gate-budgets.py` 当场拒绝，十一片是 575 到 608s；十条旧行按这一轮重述、第十一条新写，`action.yml` 的两个计数同批改，见 §6.5 与 gates.yml 的 `tile-golden-11` 注；`tile-gpu-diff/run.sh` 见 §6.4 的台账行。**本刀碰了 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录） |
 | **T13 view 族的收官刀**（已落地，view 族第三刀，本族清零） | 「一个 kernel 取址的方式不再只有『等大的格子』：**步长视图**的遍历步长与 tile 宽度是两个数，所以一个下标可以是一个**重叠的窗口**（卷积）或者一个**跳着走的格子**（下采样）；**聚散视图**在一个维度上收的是**运行期读出来的行号**而不是格子下标，所以一次 load 收集哪几行由数据决定；而 `atomic_red_view_tko` 把**一整块 tile** 原子地归约进视图的一格并且**什么都不答**，于是八个 tile block 往同一格里写而彼此之间没有顺序。三者的答案分别与指针梯子版的 `conv1d`、`token_embed` 与 `histogram` **共用同一份宿主参考**」（今天写不出：`make_strided_view` / `make_gather_scatter_view` / `atomic_red_view_tko` 三行台账是 `deferred / ruling 2`，`StridedViewType` / `GatherScatterViewType` 两行同样，一个字节也发不出去；八个原子模式在 `attrs.txt` 上挂着 `no-client-kernel`） | `bytecode.dawn`：`OP_MAKE_GATHER_SCATTER_VIEW`(0x73) / `OP_MAKE_STRIDED_VIEW`(0x74) / `OP_ATOMIC_RED_VIEW_TKO`(0x75) 三个操作码，`TAG_GATHER_SCATTER_VIEW`(20) / `TAG_STRIDED_VIEW`(21) 两个标签，`ATOMIC_RED_FLAG_TOKEN`、`view_bitfield`（13.3 原生类型的**无条件**位域）/ `put_padding` / `put_i32_array` 三个共用写法、`scope_value` 与 `red_mode_value`（`xchg` 点名拒绝），`ty` 两条新臂与 `encode_instr` 三条新臂。`lower.dawn`：`Ty` 长出 `StridedView` 与 `GatherScatterView`（同样是**扁的**），`view_tile_shape` / `view_index_tys` / `view_padding_of` / `view_source_checks` 四个共用函数，`Instr` 三条新构造子且 `LoadViewTile` / `StoreViewTile` 的 `idx_ty: Ty` 改成 `idx_tys: List[Ty]`（聚散视图的下标不同型），`view_operands` 多一条「每个下标是这个视图在那一位要的类型」。`prog.dawn`：`TileOp` 三条与记录 handler 三臂，`check_view_record` 把三个视图共有的记录级规则收成一处。`dev.dawn`：`PartitionView[D]` 更名 `GridView[D]`（`partition_view` 与 `strided_view` 两个构造子答同一个句柄，它们在 kernel 里做的事一模一样）、新 opaque `GatherScatterView[D]`、`GatherIdx` 两值 ADT、`padding_present`、三个新效果操作与 `strided_view` / `gather_scatter_view` / `load_gather` / `store_gather` / `atomic_red_view` / `strided_grid` 六个公开函数，外加 `d_reduce_dim_i`。`render.dawn`：两个类型的文本形状、三条指令行、`pad_clause` 与 `index_types`（`printIndexTypes` 的 splat 规则，聚散视图是树上第一个不走 splat 的）。`std/gpu.dawn`：`strided_pad_ref` / `gather_pad_ref` / `view_atomic_ref`。kernel 五个：`view_conv1d`（重叠窗口，共用 `conv1d_ref`）、`view_token_embed`（共用 `token_embed_ref`）、`view_atomic`（九种模式一个 kernel，`add` 那一格与 `histogram_ref` 对账）、`view_stride_pad` 与 `view_gather_pad`（f32 元素跑在 i32 缓冲区上，宿主比位模式）。新族 `scripts/tile-gpu-diff/gsview_diff.dawn`（六个 case，最后一个是指针梯子的 `conv1d`）。台账三张全动：`features.txt` 三行、`types.txt` 两行、`attrs.txt` 七行从 `deferred` 改成 `implemented` 且全到层 3（操作码实现 94 → **97**，`deferred` 与 `unimplemented` 双双归零；类型 21 → **23** 全实现；属性 42 → **49**，只剩 `rmw.xchg` 一行 `deferred`），`check.py` 的 `LANDED_KNIVES` 加 `T13`、`CONSTRUCTOR_SPELLING` 加两个标签，并把落在这些行上的**十四处**自测锚点搬走（十一处搬到已实现或结构性的行上，三处从 `T13` 换成 `T14`，逐处的理由写在 `check.py` 的注释里；`attrs.txt` 那两处落在 `rmw.xchg` 上的锚点原地不动，因为那一行仍然 `deferred`） | 层 1：五个新 golden 在 `--gpu-name sm_86` 上**一次通过**（cubin 8448 到 12960 字节，`FUNC GLOBAL` 齐全），**没有架构豁免**；唯一有架构门的是 `addf` 配 bf16，逐档量出 sm_80/86/87 拒、sm_89/90/100 收（方言散文说「Hopper 起」，实测早一代，见 §6.16 四）。层 2：`gsview_diff` 六个 case 在本机 3080 上全部 `identical:exact`，其中三份宿主参考是别处那三个指针梯子 kernel 用的同一份，`histogram=same` 是第四份对账。三张台账 `check.py` 与 `--self-test` 全绿 | 层 1 五条、层 2 三条，每条都有具名红集（表在 §6.16 六）：`make-strided-view-as-partition-view` / `make-gather-view-as-strided-view`（操作码互换，**同长** → 结果类型不对）、`gather-sparse-dim-and-tensor-view-swapped`（`sparse_dim` 与张量视图下标对调，**同长** → `expected 'tensor_view' type`）、`atomic-red-scope-and-mode-swapped`（范围与模式对调 → 模式值 3 以上落在只有三个取值的范围域上）、`atomic-red-value-and-token-swapped`（值与 token 对调 → token 不是 tile）；`strided-traversal-as-one`（所有遍历步长写成 1，下标空间只会变大所以没有未定义行为 → **只有 `view_stride_pad` 红**，`view_conv1d` 与 `view_atomic` 字节动而答案不动，因为它们那两个视图只在下标 0 上读）、`view-padding-bitfield-cleared`（13.3 位域 bit 0 清零 → 两个 padded kernel 红）、`atomic-red-mode-rotated`（七种模式各转一格、`add` 与 `addf` 留在原地 → `view_atomic` 红）。另有两条给验收者的自轴负控。设备那一侧：把 `scripts/tile-gpu-diff/gsview_diff.dawn:140` 的 `pos_inf_bits` 从 `0x7F800000` 改成 `0x7FC00000`（宿主改成期待聚散视图的 padding 是个 NaN），**什么都不用重录**，`tile-gpu-diff` 上只有 `view_gather_pad` 红（每行的第 6、7 列），其余五个 case 全绿。golden 那一侧：把 `scripts/tile-golden/kernels.dawn:4932` 的 `const VE_TRAV: Int = 8` 改成 `4`，**别重录 golden**，只有 `view_stride_pad` 的文本与字节 golden 红（遍历步长从跳着走变成刚好铺满），其余 250 项一个字节不动 | 1（实报 1；`dawn test packages/tileir` **132** 全绿、`dawn test --stdlib` **176** 全绿（本刀加六个包测试与一个 std 测试）；矩阵 241 项长到 **251 项**（184 kernel、67 变异体），`tile-golden` 在最终树上不分片 **2821 s**（47:01，251 项全跑退出 0，跑的时候机器上还有 native-diff 与另外几道门在跑）；ITEM_TIMES 那一轮是更干净的一次，机器上只有它自己（负载 3.5 到 5.0），245 项一次跑完 2259 s、另有六项在改对一条变异体的期望报文之后单独补跑，合计 **2320 s 的 item**，**十一片仍装得下、十一条预算行一条也没动**（新的十一路分账是 558 到 587 s 的规划值，逐片都低于它已经背着的那条线，账写在 `gates.yml` 的 `tile-golden-11` 注里）；`tile-gpu-diff/run.sh` 见 §6.4 的台账行。**本刀碰了 `std/gpu.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录） |
 | **TA 双台账：一台机器一份台账**（已落地，T 序收官后的第二笔尾款；本刀不加操作码、不加类型标签） | 「本仓的卡装不下的 cubin，别的卡装得下，而这句话要能写进树里让人查：`scripts/tile-gpu-diff/run.sh` 加一个 `--toolchain <file>` 选台账，GPU 集群的 B200（sm_100）与 H200（sm_90）各记一份，四个窄浮点类型与 `mmaf_scaled` 的 `architecture` 豁免、`attrs.txt` 的 bf16 那条一起退休；而这四个类型的架构门逐档量下来，**fp8 不是一堵墙是两堵**」（今天写不出：`toolchain.txt` 钉死 `gpu-name sm_86` 与本机驱动，台账只有一份，`arch_diff` 那一族的五个 kernel 在 `tile-gpu-diff` 的语料里一个也没有，`dtype_e2m1_ref` 与 `mmaf_scaled_ref` 两个宿主参考不存在） | `scripts/tile-gpu-diff/run.sh`：`--toolchain <file>`（台账名由 toolchain 名推出、两者绑在一处，`--check` 拒绝它）、与 `toolchain.txt` 逐行对账 `bytecode` / `tileiras` 并拒 `wheel` 行、`nvidia-smi --query-gpu=compute_cap` 与 `gpu-name` 的对账（整个数不是主版本号，sm_103 是另一个目标）、`TILE_PATHS` 排除**每一份**台账、arch 族的可跑集合与 `arch=ran=... skipped=...@<gpu-name>` 台账字段。新族 `scripts/tile-gpu-diff/arch_diff.dawn`（第二十五支，也是唯一一支命令行收「名字与 cubin 成对」的，因为它跑几个由卡决定）。新文件四个：`toolchain-sm100.txt` / `toolchain-sm90.txt` 与 `ledger-sm100.txt` / `ledger-sm90.txt`；**`toolchain.txt` 与 `ledger.txt` 一字未动，`gates.yml` 零改动**。`std/gpu.dawn`：`round_to` 的 `f4E2M1FN` 臂、`dtype_e2m1_ref`（半字节的编码，不是 `dtype_convert_ref` 换名字）、`mmaf_scaled_ref`（`Ops.td` 的 `MmaFScaledOp` 公式照抄，`v` 是两个形状的商）、`view_atomic_bf16_ref`。kernel 一个：`view_atomic_bf16`（`view_atomic` 的最后一次归约换成 bf16 视图，按下限 sm_89 汇编）。台账：`types.txt` 四行、`features.txt` 一行退休 `architecture`，`attrs.txt` 的 `rmw.addf` 一行加 `device@sm100:` 证据与头注改写；`check.py` 认第五种证据前缀 `device@<台账>:<kernel>` 并**真去读那份台账末行**（末行要 `pass`、kernel 要在 `arch=ran=` 里），`LANDED_KNIVES` 加 `TA` | **层 1**：`view_atomic_bf16` 在 `--gpu-name sm_89` 上一次通过（cubin 10912 字节，`FUNC GLOBAL`）。**层 2 在两台集群卡上**：B200（sm_100，驱动 580.159.04）六个 kernel 全部 `identical:exact`，H200（sm_90，驱动 580.95.05）三个 `identical:exact` 三个具名 skip。本机 sm_86 台账那一行的 44 族逐字未动，只多出一个 `arch=ran=- skipped=<五个>@sm_86` 字段。**架构门逐档实测改了前三把刀的记录**：T3 / T9 / T10 试的是 sm_86 / sm_89 / sm_100，中间那一档没试过，而 `f8E4M3FN` 与 `f8E5M2` 在 sm_90 就收，只有 `f8E8M0FNU`、`f4E2M1FN` 与跟着 scale 走的 `mmaf_scaled` 要 sm_100；`addf` 配 bf16 的下限是 sm_89，与 T13 逐档量的一致。**层 2 一跑就推翻了 `std/narrow` 的三处「量不出来的选择」**：`ftof` 进三个八位窄浮点格式一律**饱和**（480 进 f8E4M3FN 是 448、1e30 进 f8E5M2 是 57344 而不是无穷、f8E8M0FNU 取绝对值再钳进范围因而只有 NaN 答 NaN），三个函数改成实测值，而 `f8e5m2_bits` / `f8e5m2_of_bits` 不动（无穷是这个格式的一个**值**，只是转换从不产生它）。台账计数：`features` 层 1 归零（实现 97，层 2 五十四、层 3 四十六），`types` 层 1 只剩 `f32` 的「没有宿主通道」（层 2 九、层 3 十三） | **负控三条**。(a) `--toolchain` 指着 `toolchain-sm100.txt` 在本机 sm_86 上跑，原文 `FAIL: toolchain-sm100.txt says gpu-name sm_100 and nvidia-smi reports compute_cap 8.6, which is sm_86: this is another machine’s toolchain file`，退出 1，一个 kernel 也没汇编。(b) **skip 不是绿**：把 `std/gpu.mmaf_scaled_ref` 的 `kk / v` 改成 `kk`（scale 按元素而不是按块广播），**别重录 golden**，B200 上只有 `mmaf_scaled_e4m3` 红、另外五个绿；同一份改动在本机 sm_86 上 `tile-gpu-diff` **全绿**，因为这一族一个 kernel 也没跑，而台账行的 `skipped=` 字段就是让读者看见这件事的地方。(c) 本机 sm_86 台账在本刀前后的两行逐字段比对，44 个既有族的 pass 集合一字不差 | 1（实报 1；`dawn test --stdlib` **177** 全绿（本刀加一个 std 测试）、`dawn test packages/tileir` **132** 未动、`narrow-contract` 全绿（它盖的是 bf16/fp16/f32/tf32，本刀改的三个 fp8 舍入不在它的语料里）；矩阵 251 项长到 **252 项**（185 kernel、67 变异体），`tile-golden` 在最终树上不分片 **2329 s**（38:49，252 项全跑退出 0），十一片的分账不动、**`gates.yml` 一行没改**；三份 `tile-gpu-diff` 见 §6.17 的台账行。**本刀碰了 `std/gpu.dawn` 与 `std/narrow.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录；prev-diff 的八条 `Emit-Change` 是**量出来的**（同一个 HEAD 工具链、两份 `--std` 对拍），`examples/interop` 与 `examples/text/chars` 不动，与 T13 那次重录同一个划分） |
+| **U1 换汇编器：`tileiras` 13.4.92，字节码仍 13.3**（已落地，升钉第一刀） | 「同一份 13.3 字节换一个汇编器，设备代码变了多少、答案变没变，是量出来的：185 个 cubin 全不同（137 个 SASS 不同、48 个只差 ELF 外围），而本机台账每个 kernel 照旧 pass、注记里每个数与 13.3.36 那行逐字相同」 | `toolchain.txt` 三行 wheel 与 `tileiras` 行，两份集群 toolchain 的 `tileiras` 行；`tile-golden/run.sh` 四句判词换 13.4.92 原文；`tile-gpu-diff/run.sh` 的 `reduce-identity-wrong` 红名单从六个重述成八个 | golden 一个字节不动，不分片全量 252 项 3397 s 绿；台账末行 `13.4.92 sm_86 pass`；三文件移除实验重做 | 四句旧判词在 13.4.92 下先红后绿；`reduce-identity-wrong` 旧名单先红（`exactly 6 ... got ... 8 differing`）；台账旧末行 `--check` 红两句（摘要与 `tileiras`） | 1 |
+| **U2 字节码 13.4**（已落地，升钉第二刀，§6.11 的翻版） | 「写 13.4 改了哪些字节、没改哪些，是量出来的：正向段账 185/185、把 minor 改回 3 逐字节复现 185/185、13.4 字节与 13.3 字节过 13.4.92 的 cubin 185/185 相同」 | `bytecode.dawn`：`BYTECODE_MINOR` 4，`ptr_has_flags` / `ftoi_has_flags` / `view_has_inbounds` 三个谓词，`num_ty` 写 varint，`OP_FPOWF`；`render.dawn` 拼 `fpowf`；185 个 `.tilebc` 与 `mathops.mlir` 重录；三本账换钉 v13.4.0（105 / 24 / 53 行）与 `check.py`；`tile.yml` 六条预算行 914 → 928 s | 不分片全量 256 项 2912 s 绿；`check.py --self-test` 绿；本机台账重录 | 新变异体四条：`ptr-flags-unwritten`、`ftoi-flags-unwritten`、`view-inbounds-unwritten`、`header-minor-still-3`（vadd 上它被收下，所以落在 view_transpose）；既有两条换锚：`partition-view-padding-inline-flag-at-13-3` 在 13.4 上 `stayed green`、`tensor-view-tag-as-ptr` 锚失配，改后绿 | 1.5 |
 
 ## 8. 风险
 

@@ -10,9 +10,10 @@
 # not two views of one. Neither replaces the other.
 #
 # The authority for the name, the code and the version is
-# NVIDIA/cuda-tile@be0889cd,
-# include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td (100 public
-# opcodes, 0x00 to 0x75 with the two frozen gaps 0x19-0x24 and 0x34-0x39) and
+# NVIDIA/cuda-tile@7e8e2e68 (v13.4.0, the release beside tileiras 13.4.92;
+# knife U2 moved it from be0889cd, v13.3.4),
+# include/cuda_tile/Dialect/CudaTile/IR/BytecodeOpcodes.td (105 public
+# opcodes, 0x00 to 0x7A with the two frozen gaps 0x19-0x24 and 0x34-0x39) and
 # Ops.td's second string argument for the version. The authority for what is
 # IMPLEMENTED is the OP_ table in packages/tileir/src/bytecode.dawn: check.py
 # holds this file to it in both directions, so a knife that adds an opcode
@@ -23,10 +24,10 @@
 #
 #   name        the dialect's mnemonic
 #   code        its frozen opcode
-#   since       the bytecode version it entered: 13.1, 13.2 or 13.3
+#   since       the bytecode version it entered: 13.1, 13.2, 13.3 or 13.4
 #   status      implemented | unimplemented | deferred | structural
 #   knife       the knife that implemented it, or the knife the prestudy
-#               plans it for (T1 to T10, T15). A `T` prefix names a knife of
+#               plans it for (T1 to T20). A `T` prefix names a knife of
 #               the coverage plan rather than one of the leetgpu knives; it
 #               no longer means "not yet", because those knives have started
 #               landing. Which of them have is check.py's LANDED_KNIVES, and
@@ -131,8 +132,12 @@
 # GatherScatterViewType, StridedViewType). All nine opcodes and all four
 # type tags are implemented and at layer 3.
 #
-# THIS TABLE HAS NO `deferred` AND NO `unimplemented` ROW LEFT: the hundred
-# rows are 97 `implemented` and 3 `structural`. That is what closed several
+# THIS TABLE HAD NO `deferred` AND NO `unimplemented` ROW LEFT after knife
+# T13: the hundred rows were 97 `implemented` and 3 `structural`. The
+# move to v13.4.0 (knife U2) added five opcodes, 0x76 to 0x7A, all
+# `unimplemented` under the knives docs/tile-backend-design.md 6.18 plans
+# (T16 `insert` and `fpowi`, T19 the fence and the two `gdc_*`), and
+# renamed 0x54 from `pow` to `fpowf` without changing its bytes. That is what closed several
 # of check.py's self-test anchors onto implemented rows, which its comments
 # say where.
 #
@@ -176,7 +181,7 @@ floor                    | 0x27 | 13.1 | implemented   | 7b  | 2 | golden:mathop
 fma                      | 0x28 | 13.1 | implemented   | 7a  | 2 | golden:linrec,golden:erf_sweep                                                                                            | -
 for                      | 0x29 | 13.1 | implemented   | 5   | 3 | golden:foldif,golden:lora_hidden,mutant:for-results-not-rolled-back,mutant:loop-token-not-carried,mutant:region-stack-pop | -
 ftof                     | 0x2A | 13.1 | implemented   | 11  | 2 | golden:dot_f16                                                                                                            | -
-ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates                                                   | -
+ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates,mutant:ftoi-flags-unwritten                       | -
 get_global               | 0x2C | 13.1 | implemented   | T7  | 3 | golden:global_table,mutant:get-global-symbol-not-written,mutant:get-global-wrong-symbol                                   | -
 get_index_space_shape    | 0x2D | 13.1 | implemented   | T12 | 3 | golden:view_index_space,mutant:index-space-shape-as-tensor-shape,mutant:shape-query-dim-reversed                          | -
 get_num_tile_blocks      | 0x2E | 13.1 | implemented   | T2  | 3 | golden:grid_stride,mutant:num-tile-blocks-as-block-id                                                                     | -
@@ -189,7 +194,7 @@ iota                     | 0x3A | 13.1 | implemented   | 3   | 2 | golden:ols_be
 itof                     | 0x3B | 13.1 | implemented   | 10  | 2 | golden:seg_scan,golden:int_ops                                                                                            | -
 join_tokens              | 0x3C | 13.1 | implemented   | T2  | 3 | golden:token_join,mutant:join-tokens-operand-count-wrong                                                                  | -
 load_ptr_tko             | 0x3D | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:load-dtype-f64,mutant:load-pad-flag-as-token,mutant:gather-mask-dropped              | -
-load_view_tko            | 0x3E | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:padding-value-bit-cleared                                                                    | -
+load_view_tko            | 0x3E | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:padding-value-bit-cleared,writer:inbounds,mutant:view-inbounds-unwritten                     | -
 log                      | 0x3F | 13.1 | implemented   | 7b  | 2 | golden:mathops,golden:cce_row                                                                                             | -
 log2                     | 0x40 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
 loop                     | 0x41 | 13.1 | implemented   | T5  | 3 | golden:loop_count,golden:loop_until,golden:loop_none,mutant:loop-carried-not-rolled-back                                  | -
@@ -211,7 +216,7 @@ negi                     | 0x50 | 13.1 | implemented   | 10  | 2 | golden:int_op
 offset                   | 0x51 | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
 ori                      | 0x52 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
 permute                  | 0x53 | 13.1 | implemented   | T2  | 3 | golden:shape_ops,mutant:permute-identity                                                                                  | -
-pow                      | 0x54 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
+fpowf                    | 0x54 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
 print_tko                | 0x55 | 13.1 | implemented   | T6  | 3 | golden:print_tile,mutant:print-tko-token-unwritten,mutant:print-format-wrong                                              | -
 ptr_to_int               | 0x56 | 13.1 | implemented   | T2  | 3 | golden:ptr_roundtrip,mutant:ptr-to-int-as-int-to-ptr                                                                      | -
 ptr_to_ptr               | 0x57 | 13.1 | implemented   | T2  | 3 | golden:ptr_recast,mutant:ptr-to-ptr-as-bitcast                                                                            | -
@@ -229,7 +234,7 @@ sin                      | 0x62 | 13.1 | implemented   | T1  | 3 | golden:trig_s
 sinh                     | 0x63 | 13.1 | implemented   | T1  | 2 | golden:trig_sweep                                                                                                         | -
 sqrt                     | 0x64 | 13.1 | implemented   | 7b  | 2 | golden:rms_norm,golden:grpo_adv                                                                                           | -
 store_ptr_tko            | 0x65 | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,mutant:drop-store-token,mutant:store-token-unwritten                                        | -
-store_view_tko           | 0x66 | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:view-strides-swapped                                                                         | -
+store_view_tko           | 0x66 | 13.1 | implemented   | T11 | 3 | golden:view_transpose,mutant:view-strides-swapped,writer:inbounds,mutant:view-inbounds-unwritten                          | -
 subf                     | 0x67 | 13.1 | implemented   | 7a  | 2 | golden:attn_softmax,golden:f16_ops                                                                                        | -
 subi                     | 0x68 | 13.1 | implemented   | 10  | 2 | golden:invert,golden:compact                                                                                              | -
 tan                      | 0x69 | 13.1 | implemented   | T1  | 2 | golden:trig_sweep                                                                                                         | -
@@ -245,3 +250,8 @@ mmaf_scaled              | 0x72 | 13.3 | implemented   | T10 | 3 | golden:mmaf_s
 make_gather_scatter_view | 0x73 | 13.3 | implemented   | T13 | 3 | golden:view_token_embed,golden:view_gather_pad,mutant:make-gather-view-as-strided-view,mutant:gather-sparse-dim-and-tensor-view-swapped | -
 make_strided_view        | 0x74 | 13.3 | implemented   | T13 | 3 | golden:view_conv1d,golden:view_stride_pad,mutant:make-strided-view-as-partition-view,mutant:strided-traversal-as-one       | -
 atomic_red_view_tko      | 0x75 | 13.3 | implemented   | T13 | 3 | golden:view_atomic,mutant:atomic-red-scope-and-mode-swapped,mutant:atomic-red-value-and-token-swapped,mutant:atomic-red-mode-rotated | -
+insert                   | 0x76 | 13.4 | unimplemented | T16 | 0 | -                                                                                                                         | -
+gdc_launch_dependents_tko | 0x77 | 13.4 | unimplemented | T19 | 0 | -                                                                                                                         | -
+gdc_wait_tko             | 0x78 | 13.4 | unimplemented | T19 | 0 | -                                                                                                                         | -
+fpowi                    | 0x79 | 13.4 | unimplemented | T16 | 0 | -                                                                                                                         | -
+memory_fence_alias_tko   | 0x7A | 13.4 | unimplemented | T19 | 0 | -                                                                                                                         | -

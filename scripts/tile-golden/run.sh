@@ -336,6 +336,35 @@
 #                            longer and every operand after the word is
 #                            read one place out of step
 #
+#     ptr-flags-unwritten    the pointer type stops writing the bitfield
+#                            word it has from 13.4 on (its optional
+#                            `ptr_attr`) -> vadd's text is untouched, its
+#                            Type section is one byte short and the file
+#                            the same length, and the reader takes the
+#                            pointee's index for the bitfield and runs out
+#                            of entry before the pointee
+#     ftoi-flags-unwritten   `ftoi` stops writing the flags varint it has
+#                            from 13.4 on (its `saturating` bit) ->
+#                            int_ops's text is untouched, its Func section
+#                            is one byte short, and the reader takes the
+#                            rounding mode (6) for the signedness
+#     view-inbounds-unwritten
+#                            `load_view_tko` and `store_view_tko` stop
+#                            writing the `inbounds` array that is required
+#                            from 13.4 on -> view_transpose's text is
+#                            untouched, its Func section is six bytes short
+#                            (two operations, a count and two elements
+#                            each), and the reader takes the view for the
+#                            count and loses the operand stream
+#     header-minor-still-3   the header says 13.3 while the body is written
+#                            in the 13.4 shapes -> view_transpose's text is
+#                            untouched, its bytes differ in the tenth byte
+#                            only, and the reader takes the tensor view's
+#                            bitfield word for its element type. On vadd the
+#                            same lie is ACCEPTED: a 13.3 reader takes the
+#                            pointer's bitfield word (0) for the pointee,
+#                            which is f64 at index 0 there anyway
+#
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
 # 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
@@ -516,6 +545,10 @@ mutants=(
   gather-sparse-dim-and-tensor-view-swapped
   atomic-red-scope-and-mode-swapped
   atomic-red-value-and-token-swapped
+  ptr-flags-unwritten
+  ftoi-flags-unwritten
+  view-inbounds-unwritten
+  header-minor-still-3
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1014,6 +1047,7 @@ writer_mutant_checks() { # name, kernel, shape, fragment
           one) delta=1 ;;
           two) delta=2 ;;
           three) delta=3 ;;
+          six) delta=6 ;;
           *) fail "writer_mutant_checks: unknown byte count $delta in shape $shape" ;;
         esac
         case "$shape" in
@@ -1972,6 +2006,11 @@ fi
 #     out of step -- the reader takes the tile shape's count from what is
 #     now the tile shape's first element.
 #
+#     The edit makes `partition_view_has_bitfield` answer false outright.
+#     It used to move the predicate to `at_least(13, 4)`, which stopped
+#     being a mutation the day knife U2 moved the pin to 13.4: run.sh said
+#     `mutant stayed green ... still matches`, which is how that was found.
+#
 #     This is knife T8's version wall seen from a THIRD place: the Global
 #     section's two 13.3 fields are the operation side of it and this is
 #     the type side. It is also the reason bytecode.dawn writes both forms
@@ -2093,6 +2132,57 @@ if run_item atomic-red-value-and-token-swapped; then
   mutant_project atomic-red-value-and-token-swapped bytecode.dawn
   writer_mutant_checks atomic-red-value-and-token-swapped view_atomic same-size \
     "'cuda_tile.atomic_red_view_tko' op operand #2 must be Tile type, but got '!cuda_tile.token'"
+fi
+
+# 66. The pointer type stops writing its 13.4 bitfield word. PointerType is
+#     13.1 and grew its first optional parameter (`ptr_attr`) at 13.4, and a
+#     type with an optional parameter writes the unified bitfield between
+#     its tag and its first parameter, so a 13.4 reader takes the pointee's
+#     index for the bitfield and then finds no pointee. Knife U2 measured
+#     the shape out of cuda-tile v13.4.0 (no release note names it), and
+#     cuTile Python 1.6.0's `pointer()` writes the same word at the same
+#     version. vadd's Type section is one byte short and the file is the
+#     same length: the section padding absorbs it.
+if run_item ptr-flags-unwritten; then
+  mutant_project ptr-flags-unwritten bytecode.dawn
+  writer_mutant_checks ptr-flags-unwritten vadd same-size \
+    "error at offset 1: failed to get pointeeType type"
+fi
+
+# 67. `ftoi` stops writing its 13.4 flags varint. The operation is 13.1 and
+#     its first optional field, the UnitAttr `saturating`, is 13.4, so the
+#     word exists from 13.4 on (the `mmaf_has_flags` case one version
+#     later). Without it the reader takes the signedness byte for the flags
+#     and the rounding mode, 6 (`nearest_int_to_zero`), for the signedness.
+if run_item ftoi-flags-unwritten; then
+  mutant_project ftoi-flags-unwritten bytecode.dawn
+  writer_mutant_checks ftoi-flags-unwritten int_ops func-one-short \
+    "error at offset 160: invalid integer value for enum type: 6"
+fi
+
+# 68. The view load and store stop writing `inbounds`, the DenseBoolArrayAttr
+#     13.4 made REQUIRED: inline after the memory ordering, a count and a
+#     byte an index. view_transpose has one load and one store over two
+#     indices, so its Func section is six bytes short, and the reader takes
+#     the view for the count and the operand stream is lost.
+if run_item view-inbounds-unwritten; then
+  mutant_project view-inbounds-unwritten bytecode.dawn
+  writer_mutant_checks view-inbounds-unwritten view_transpose func-six-short \
+    "error at offset 56: operand index 16 out of bounds (size=16) for index segment, element 1"
+fi
+
+# 69. The header says 13.3 while the body is written in the 13.4 shapes:
+#     header-minor-still-2 one version on. The kernel is NOT vadd, and that
+#     is measured: on vadd this lie assembles, because a 13.3 reader takes
+#     the pointer's bitfield word (0) for the pointee and f64 is type 0
+#     there anyway, so the one entry it misreads it misreads into the right
+#     answer. view_transpose has a tensor view, whose bitfield word the
+#     reader takes for its element type, and the shape that follows no
+#     longer adds up.
+if run_item header-minor-still-3; then
+  mutant_project header-minor-still-3 bytecode.dawn
+  writer_mutant_checks header-minor-still-3 view_transpose same-size \
+    "expected shape and stride to be of same rank but got shape of rank 0 and stride of rank 2"
 fi
 
 _item_tick ""
