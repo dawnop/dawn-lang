@@ -15,15 +15,18 @@ Usage:
     scripts/play-live-check.py                  # the public deployment
     PLAY_BASE_URL=http://127.0.0.1:18087 scripts/play-live-check.py --runner-only
 
-`PLAY_BASE_URL` points at the site root (`/api/run` is appended); a bare runner
+`PLAY_BASE_URL` points at the site root, for the static checks; a bare runner
 with no nginx in front wants `--runner-only`, which skips the static checks and
-drops the `/api` prefix. Exit status is 0 only when every check passed.
+talks to `PLAY_BASE_URL` with no `/api` prefix. Exit status is 0 only when
+every check passed.
 
-`PLAY_API_URL` moves the runner checks to another origin while the static
-checks stay on `PLAY_BASE_URL`. It is the `/api` base itself (no trailing
-`/run`), for a site whose pages are on a CDN and whose Playground service is
-not (docs/site-cdn-design.md). Unset, it is `PLAY_BASE_URL` plus `/api`, which
-is the same-origin deployment.
+`PLAY_API_URL` is where the runner checks go, while the static checks stay on
+`PLAY_BASE_URL`. It is the `/api` base itself (no trailing `/run`). The public
+pages are on a CDN and the Playground service is not (docs/site-cdn-design.md),
+so it defaults to the service's own origin, `https://play.dawnop.com/api`,
+whatever `PLAY_BASE_URL` says. Pointing `PLAY_BASE_URL` somewhere else (a local
+static site, a staging origin) does not move the runner checks; set both. With
+`--runner-only` the default is `PLAY_BASE_URL` itself, the bare runner.
 
 No server identity here: the public hostname is public, the ssh login is not
 (see scripts/check-no-server-identity.py) -- this script never needs to log in.
@@ -43,6 +46,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "site" / "play-ui" / "samples"
 VERSION_DAWN = ROOT / "selfhost" / "src" / "version.dawn"
 DEFAULT_BASE = "https://dawn-lang.dawnop.com"
+DEFAULT_API = "https://play.dawnop.com/api"
 
 # Never route through a dev proxy: this box has http_proxy set, and urllib
 # honours it, which turns a localhost check into a 502 from somebody else.
@@ -263,7 +267,7 @@ def main():
     args = ap.parse_args()
 
     base = os.environ.get("PLAY_BASE_URL", DEFAULT_BASE).rstrip("/")
-    api = base if args.runner_only else base + "/api"
+    api = base if args.runner_only else DEFAULT_API
     api = os.environ.get("PLAY_API_URL", api).rstrip("/")
 
     # A bare runner has no nginx in front of it, so nothing to pace for.

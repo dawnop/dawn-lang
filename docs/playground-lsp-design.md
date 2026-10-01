@@ -98,7 +98,8 @@ RSS、启动时间与诊断延迟仍须按第 7 节实测；过不了预算就�
 ## 5. Transport：一条 WebSocket 只桥接一个 stdio
 
 公网路径固定为 `wss://dawn-lang.dawnop.com/api/lsp`，开发环境仍用同源 `/api/lsp` 交给
-Vite proxy。浏览器与 gateway 之间用 WebSocket；WebSocket 的一条 text message 承载一个**不带
+Vite proxy。（2026-10-02 起站点走 CDN，公网路径改为 `wss://play.dawnop.com/api/lsp`，页面跨域
+连接；页面 origin 仍是站点，所以网关的 Origin 校验不变，见 [site-cdn-design.md](site-cdn-design.md)。）浏览器与 gateway 之间用 WebSocket；WebSocket 的一条 text message 承载一个**不带
 `Content-Length` 的 JSON-RPC body**。gateway 往子进程写时补标准 LSP frame，从子进程读时
 按标准 frame 拆开再发一条 text message。首版只收 text message，关闭 `permessage-deflate`；
 fragment 由所选 WebSocket 实现重组，完整 message 仍受同一个 byte cap。

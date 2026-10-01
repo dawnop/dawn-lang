@@ -61,5 +61,23 @@ fi
 echo "=== deploying to dawn-lang.dawnop.com ==="
 rsync -avz --delete site/dist/ "$HOST:/var/www/dawnlang/dist/"
 
+# The pages sit behind a CDN that caches HTML for ten minutes
+# (docs/site-cdn-design.md), so without a purge a deploy is invisible for up
+# to that long. Assets need none: their names carry a content hash. The purge
+# runs on the deploy host because the CDN credentials live there and never
+# leave it; this side only knows the script's path. A failed purge does not
+# fail the deploy: the files are already live at the origin and the cache
+# expires on its own, so the worst case is the ten-minute wait we had anyway.
+# SITE_CDN_PURGE=0 skips it (e.g. a deploy to an origin not behind the CDN).
+if [ "${SITE_CDN_PURGE:-1}" != 0 ]; then
+  echo "=== purging the CDN page cache ==="
+  if purge_out="$(ssh "$HOST" 'python3 ~/qiniu-cdn-domain.py refresh-dirs https://dawn-lang.dawnop.com/' 2>&1)"; then
+    echo "$purge_out"
+  else
+    echo "warning: CDN purge failed; pages refresh when the cache expires (ten minutes)" >&2
+    [ -n "$purge_out" ] && echo "$purge_out" >&2
+  fi
+fi
+
 echo "=== done ==="
 echo "https://dawn-lang.dawnop.com"

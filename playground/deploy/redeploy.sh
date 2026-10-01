@@ -113,8 +113,8 @@ echo "=== restarting service ==="
 ssh "$HOST" "$REMOTE_RESTART"
 
 echo "=== done ==="
-# Where the public health endpoint is: the site's own `/api` while the pages
-# and the service share an origin, the service's origin once the pages sit
-# behind a CDN (docs/site-cdn-design.md). Overridable rather than edited so the
-# switch is one variable on the day it happens.
-echo "verify: curl ${PLAY_HEALTH_URL:-https://dawn-lang.dawnop.com/api/health}"
+# The public health endpoint is on the service's own origin: the pages sit
+# behind a CDN that cannot carry the LSP WebSocket, so the four `/api/*`
+# endpoints moved off the site's origin (docs/site-cdn-design.md).
+# Overridable for a deployment elsewhere.
+echo "verify: curl ${PLAY_HEALTH_URL:-https://play.dawnop.com/api/health}"
