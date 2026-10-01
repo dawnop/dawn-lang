@@ -24,6 +24,18 @@
 // attributes on the button, because gen/links.dawn checks markup and cannot
 // read a string inside a program.
 //
+// The documents' text is a second index (search-body-<lang>.json, named by
+// `data-search-body` on the panel's host), about a hundred kilobytes gzipped,
+// and it is lazier still: it is fetched the first time the field holds a
+// query, not when the panel opens. Not on an idle timer after opening either,
+// because a reader who opens the panel to pick a recent search or a
+// suggestion, or to close it again, never needs the text, and the first
+// characters of a query are answered from the titles while the text is on
+// its way. Once it is here and says it is format 1, the guest is started
+// again with it in the flags (see restart below for why that and not a
+// message); a fetch that fails or an asset of another format leaves the
+// panel searching titles, which its foot says.
+//
 // Two pieces of state outlive one opening of the panel, and both are the
 // page's because the guest can reach neither. The query is in the address as
 // `?q=` while the panel is open (replaceState, so typing is not history), and a
@@ -78,6 +90,18 @@
   var mounted = null; // the promise, so a second press does not mount twice
   var app = null; // { reactor, host, dispatch }
   var index = null; // the index text, kept to build flags again on reopen
+  var body = null; // the body index text, once fetched and found to be format 1
+  var bodyAsked = false; // so the body index is fetched once per page
+  var guestHasBody = false; // whether the running guest was started with it
+
+  // The data attributes are page-relative ("./assets/..." or "../assets/...").
+  // fetch() resolves those against the document, but dynamic import() resolves
+  // against THIS module's URL, which already lives under /assets/ -- the raw
+  // attribute would load /assets/assets/... (the first production failure of
+  // this panel, 2026-08-31). Resolve every one against the document instead.
+  function abs(u) {
+    return new URL(u, document.baseURI).href;
+  }
 
   function fail(message) {
     host.textContent = message;
@@ -165,29 +189,79 @@
       + ',"mod":' + JSON.stringify(isMac ? '\u2318' : 'Ctrl')
       + ',"q":' + JSON.stringify(q || '')
       + ',"recent":' + JSON.stringify(readRecent())
-      + ',"index":' + index + '}';
+      + ',"index":' + index
+      + (body ? ',"body":' + body : '') + '}';
   }
 
   // A fresh guest from new flags: one turn, no refetch.
+  //
+  // This is also how the body index gets in. There is no message that could
+  // carry it: a message reaches the guest only through a listener in its own
+  // tree, and a message's data would be part of the model, which crosses the
+  // wire on every keystroke -- three hundred kilobytes each way. Flags are
+  // read once, by init, into the guest's retained state, which never crosses.
+  // The price is one init that parses both indexes again; it is measured in
+  // docs/site-search-design.md.
   function restart(q) {
+    guestHasBody = !!body;
     var reply = app.reactor.init(flagsFor(q));
     if (reply.ok) app.host.apply(reply.patches);
   }
 
+  // The body index has arrived while the reader is typing: the guest is
+  // started again on the field as it is now, and the field keeps its focus
+  // and caret, since init draws a new one. The selection goes back to the
+  // first row, which is where typing leaves it anyway.
+  function takeBody() {
+    if (!app || host.hidden || guestHasBody) return;
+    var f = field();
+    var q = f ? f.value : '';
+    var focused = f && document.activeElement === f;
+    var from = f ? f.selectionStart : 0;
+    var to = f ? f.selectionEnd : 0;
+    restart(q);
+    var g = field();
+    if (g && focused) {
+      g.focus({ preventScroll: true });
+      try {
+        g.setSelectionRange(from, to);
+      } catch (e) {
+        // a field that takes no selection keeps the caret where focus put it
+      }
+    }
+    follow();
+  }
+
+  // Fetch the body index, once. Anything short of a format 1 asset leaves
+  // `body` empty and the guest as it is.
+  function wantBody() {
+    if (bodyAsked) return;
+    bodyAsked = true;
+    var url = host.dataset.searchBody;
+    if (!url) return;
+    fetch(abs(url))
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (text) {
+        if (!text) return;
+        var v = JSON.parse(text);
+        if (!Array.isArray(v) || v[0] !== 1) return;
+        body = text;
+        if (mounted) mounted.then(takeBody);
+      })
+      .catch(function () {
+        // no text index: the panel goes on searching titles and says so
+      });
+  }
+
   async function boot(q) {
     var d = btn.dataset;
-    // The data attributes are page-relative ("./assets/..." or "../assets/...").
-    // fetch() resolves those against the document, but dynamic import() resolves
-    // against THIS module's URL, which already lives under /assets/ -- the raw
-    // attribute would load /assets/assets/... (the first production failure of
-    // this panel, 2026-08-31). Resolve all three against the document instead.
-    var abs = function (u) { return new URL(u, document.baseURI).href; };
     var bridge = await import(abs(d.searchApp));
     var responses = await Promise.all([fetch(abs(d.searchWasm)), fetch(abs(d.searchIndex))]);
     if (!responses[0].ok || !responses[1].ok) {
       throw new Error('search: the reactor or the index could not be fetched');
     }
     index = await responses[1].text();
+    guestHasBody = !!body;
     app = await bridge.mount(responses[0], host, {
       flags: flagsFor(q),
       onError: function (reply) {
@@ -206,6 +280,7 @@
   function open(q) {
     host.hidden = false;
     btn.setAttribute('aria-expanded', 'true');
+    if (q && q.trim()) wantBody();
     if (!mounted) {
       mounted = boot(q).catch(function (e) {
         fail(String(e));
@@ -332,6 +407,8 @@
   host.addEventListener('input', function () {
     follow();
     syncQuery();
+    var f = field();
+    if (f && f.value.trim()) wantBody();
   });
 
   // The panel is modal: focus that lands outside it while it is open is
