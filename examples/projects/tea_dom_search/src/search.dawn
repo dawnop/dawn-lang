@@ -47,6 +47,13 @@
 # not at all. The index is lowercased and split into words once, at init, for
 # the same reason.
 #
+# The tree is a WAI-ARIA combobox: the field controls a listbox of groups of
+# options, and an option's id is its ordinal, so `aria-activedescendant` is a
+# function of the model and needs no lookup in the tree. What a dialog owes
+# the rest of the document -- the scrim, focus kept inside and handed back,
+# the selected row scrolled into view -- the guest cannot reach, and
+# site/assets/search.js does it.
+#
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
 # (site/src/gen/pages.dawn) keeps its two languages in one table for the same
@@ -62,8 +69,8 @@ use json/parser.{parse}
 use json/render.{render}
 use std/map
 use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
-use tea_dom/node.{Node}
-use tea_dom/dsl.{el, div, span, text, input, on_value, on_key}
+use tea_dom/node.{Node, On, NoData}
+use tea_dom/dsl.{el, div, span, text, on_value, on_key, on_click}
 
 ## One thing a reader can go to: which part of the site it belongs to, what it
 ## is called, the one line under the name, and where it lives.
@@ -130,7 +137,10 @@ pub type Model = {
   hits: List[Int],
 }
 
-## What the two listeners mean, plus the one message no listener produces.
+## What the listeners mean, plus the one message no listener produces.
+##
+## `Hovered` is the pointer resting on the row with that ordinal, and
+## `Dismissed` the Cancel button a phone shows in place of the Escape key.
 ##
 ## `Chose` cannot arrive from the page: a message reaches this application
 ## only through the `to_msg` of a listener `route.at` found in the tree, and no
@@ -138,6 +148,8 @@ pub type Model = {
 pub type Msg =
   | Typed(text: String)
   | Pressed(key: String)
+  | Hovered(at: Int)
+  | Dismissed
   | Chose(href: String)
 derive Show
 
@@ -208,6 +220,11 @@ fn scope_line(code: String) -> String =
   } else {
     "Searches titles and API names, not body text."
   }
+
+## `en` on an English page and `zh` on a Chinese one. Every other string the
+## panel shows goes through here, so the two languages of one label are on one
+## line and neither can be forgotten without the other.
+fn say(code: String, en: String, zh: String) -> String = if code == "zh-CN" { zh } else { en }
 
 fn empty_line(code: String) -> String =
   if code == "zh-CN" { "没有匹配。" } else { "No matches." }
@@ -617,58 +634,181 @@ fn collect(body: fn() -> Unit !Emit !Ctx) -> List[Node[Msg]] !Ctx = {
 ## An href on this page, given one relative to the site root.
 fn link(href: String) -> String !Ctx = "${root()}/${href}"
 
-## One result row. `chosen` decides one class and nothing else, so moving the
-## selection is one `set-self` per row that changed and no rebuild.
-fn row(h: Hit, chosen: Bool) -> Node[Msg] !Ctx = {
+## The ids the combobox pattern ties together. There is one panel per page,
+## so a fixed prefix is unique, and an option's id is its ordinal: the same
+## number the arrow keys move, which is what lets `aria-activedescendant` be
+## computed from the model rather than looked up in the tree.
+fn list_id() -> String = "dawn-search-list"
+
+fn option_id(at: Int) -> String = "dawn-search-opt-${at}"
+
+fn group_id(g: Group) -> String = "dawn-search-g-${g.id}"
+
+## Which of the three section hues a group's dot takes. By the group's place in
+## [groups] rather than on screen, so a group keeps its colour while the
+## ranking moves it up and down the panel.
+fn hue_of(g: Group) -> Int = group_index(g.id) % 3 + 1
+
+## One result row. `chosen` decides the class and `aria-selected` and nothing
+## else, so moving the selection is one `set-self` per row that changed and no
+## rebuild.
+##
+## The anchor is out of the tab order: the field owns the keyboard and the
+## rows are reached with the arrows, the combobox pattern's rule. It stays an
+## anchor so that a click (or a middle click) is the browser's own navigation.
+## The pointer moves the selection too, through `mouseenter`, so the row the
+## mouse is on and the row Enter opens are never two different rows.
+fn row(h: Hit, chosen: Bool, ts: List[Term]) -> Node[Msg] !Ctx = {
   let e = h.entry
+  let at = h.at
+  # the name and its signature share a line and shrink together; the note
+  # takes the line below
   let head: List[Node[Msg]] = [
-    span(e.title, class: "search-title"),
-    span(e.detail, class: "search-detail"),
+    el("span", class: "search-head", kids: [
+      el("span", class: "search-title", kids: marked(e.title, ts)),
+      span(e.detail, class: "search-detail"),
+    ]),
   ]
-  el("li", class: if chosen { "search-row is-selected" } else { "search-row" }, kids: [
-    el("a", [("href", link(e.href))], kids: head ++ note_kids(e)),
-  ])
+  let props: List[(String, String)] = [
+    ("id", option_id(at)),
+    ("role", "option"),
+    ("aria-selected", if chosen { "true" } else { "false" }),
+  ]
+  let hover: On[Msg] = On { event: "mouseenter", payload: NoData, to_msg: _p => Hovered(at: at) }
+  let link_kids = head ++ note_kids(e, ts)
+  el("li", props, class: if chosen { "search-row is-selected" } else { "search-row" }, on: [hover],
+    kids: [el("a", [("href", link(e.href)), ("tabindex", "-1")], kids: link_kids)])
 }
 
 ## The one-line note, when there is one. A row with no note has no element for
 ## it rather than an empty one, which is the same rule the sections follow.
-fn note_kids(e: Entry) -> List[Node[Msg]] =
-  if e.note == "" { [] } else { [el("span", class: "search-note", kids: note_runs(e.note))] }
+fn note_kids(e: Entry, ts: List[Term]) -> List[Node[Msg]] =
+  if e.note == "" { [] } else { [el("span", class: "search-note", kids: marked_runs(e.note, ts))] }
 
 ## A note's text, with each backticked span as a `<code>`.
 ##
 ## Doc comments in this repository write code between backticks, and a note
 ## is the first sentence of one. A backtick with no partner -- a note cut
 ## inside a span -- is shown as the character it is.
-pub fn note_runs(note: String) -> List[Node[Msg]] = {
+pub fn note_runs(note: String) -> List[Node[Msg]] = marked_runs(note, [])
+
+## [note_runs], with the query's words marked inside both kinds of run.
+fn marked_runs(note: String, ts: List[Term]) -> List[Node[Msg]] = {
   let parts = str.split(note, "`")
   let unpaired = len(parts) % 2 == 0
   var out: List[Node[Msg]] = []
   var i = 0
   for p in parts {
     if unpaired && i == len(parts) - 1 {
-      out = out ++ [note_run("`" ++ p, false)]
+      out = out ++ marked("`" ++ p, ts)
     } else if i % 2 == 1 {
-      out = out ++ [note_run(p, true)]
+      out = out ++ [el("code", kids: marked(p, ts))]
     } else if p != "" {
-      out = out ++ [note_run(p, false)]
+      out = out ++ marked(p, ts)
     }
     i = i + 1
   }
   out
 }
 
-fn note_run(s: String, code: Bool) -> Node[Msg] =
-  if code { el("code", kids: [text(s)]) } else { text(s) }
+## `s` as text, with every place a word of the query is found wrapped in a
+## `<mark>`.
+##
+## Where a word counts as found follows [fits] loosely: an ASCII word where a
+## word of `s` begins (so `read` marks `io.read_file` but not `bread`), a word
+## beyond ASCII anywhere, since a Chinese run has no word starts inside it. The
+## mark is for the eye and decides nothing; a row that matched through its
+## signature alone simply has nothing marked.
+##
+## Positions are code points of the lowercased text, laid over the original.
+## A string whose lowercase has a different number of code points is left
+## unmarked rather than marked in the wrong place.
+pub fn marked(s: String, ts: List[Term]) -> List[Node[Msg]] = {
+  let low = str.to_lower(s)
+  let n = str.len(s)
+  if s == "" {
+    []
+  } else if len(ts) == 0 || str.len(low) != n {
+    [text(s)]
+  } else {
+    var spans: List[(Int, Int)] = []
+    for t in ts {
+      spans = spans ++ places(low, t)
+    }
+    let sorted = sort_by(spans, (a, b) => {
+      let (x, _) = a
+      let (y, _) = b
+      x - y
+    })
+    var out: List[Node[Msg]] = []
+    var pos = 0
+    var open_at = -1
+    var open_to = -1
+    for sp in sorted {
+      let (a, b) = sp
+      if open_at >= 0 && a <= open_to {
+        if b > open_to {
+          open_to = b
+        }
+      } else {
+        if open_at >= 0 {
+          out = out ++ plain_then_mark(s, pos, open_at, open_to)
+          pos = open_to
+        }
+        open_at = a
+        open_to = b
+      }
+    }
+    if open_at >= 0 {
+      out = out ++ plain_then_mark(s, pos, open_at, open_to)
+      pos = open_to
+    }
+    if pos < n {
+      let tail: Node[Msg] = text(str.slice(s, pos, n))
+      out = out ++ [tail]
+    }
+    out
+  }
+}
+
+fn plain_then_mark(s: String, pos: Int, a: Int, b: Int) -> List[Node[Msg]] = {
+  let lead: List[Node[Msg]] = if a > pos { [text(str.slice(s, pos, a))] } else { [] }
+  let hit: Node[Msg] = el("mark", kids: [text(str.slice(s, a, b))])
+  lead ++ [hit]
+}
+
+## Where `t` is found in `low`, as code-point spans.
+fn places(low: String, t: Term) -> List[(Int, Int)] = {
+  let w = t.word
+  let wl = str.len(w)
+  var out: List[(Int, Int)] = []
+  var from = 0
+  var go = wl > 0
+  while go {
+    match str.index_of(str.drop(low, from), w) {
+      Some(i) -> {
+        let p = from + i
+        if t.fit == Within || p == 0 || kind_of(char.code(str.at(low, p - 1))) != 3 {
+          out = out ++ [(p, p + wl)]
+        }
+        from = p + 1
+      }
+      None -> {
+        go = false
+      }
+    }
+  }
+  out
+}
 
 ## The rows of one group. The inner collector: its installation shadows the
 ## outer one for the length of the body, so these `emit`s land here and the
 ## sections collector never sees them.
-fn rows_of(hits: List[Hit], g: Group, sel: Int) -> List[Node[Msg]] !Ctx =
+fn rows_of(hits: List[Hit], g: Group, sel: Int, ts: List[Term]) -> List[Node[Msg]] !Ctx =
   collect(() => {
     for h in hits {
       if h.entry.group == g.id {
-        emit(row(h, h.at == sel))
+        emit(row(h, h.at == sel, ts))
       }
     }
   })
@@ -678,10 +818,10 @@ fn rows_of(hits: List[Hit], g: Group, sel: Int) -> List[Node[Msg]] !Ctx =
 ## The outer collector. A group with no rows emits nothing -- not an empty
 ## section, not a placeholder -- which is why the answer's length is the
 ## number of groups that matched rather than five.
-fn sections(hits: List[Hit], sel: Int) -> List[Node[Msg]] !Ctx =
+fn sections(hits: List[Hit], sel: Int, ts: List[Term]) -> List[Node[Msg]] !Ctx =
   collect(() => {
     for g in panel_order(hits) {
-      let rows: List[Node[Msg]] = rows_of(hits, g, sel)
+      let rows: List[Node[Msg]] = rows_of(hits, g, sel, ts)
       if len(rows) > 0 {
         emit(section(g, rows))
       }
@@ -703,10 +843,17 @@ fn first_at(hits: List[Hit], id: String) -> Int =
     None -> len(hits)
   }
 
+## A group: its heading, then its rows as an ARIA group named by the heading.
+## The `<li>` itself is presentation, so a screen reader walking the listbox
+## meets groups and options and nothing else.
 fn section(g: Group, rows: List[Node[Msg]]) -> Node[Msg] !Ctx =
-  el("li", class: "search-group", kids: [
-    el("h2", class: "search-group-name", kids: [text(group_label(g, lang()))]),
-    el("ul", class: "search-group-rows", kids: rows),
+  el("li", [("role", "presentation")], class: "search-group hue-${hue_of(g)}", kids: [
+    el("div", [("id", group_id(g))], class: "search-group-name", kids: [
+      text(group_label(g, lang())),
+      span("${len(rows)}", class: "search-group-count"),
+    ]),
+    el("ul", [("role", "group"), ("aria-labelledby", group_id(g))], class: "search-group-rows",
+      kids: rows),
   ])
 
 ## The link Enter chose, for the page's script to follow. It carries
@@ -723,25 +870,102 @@ fn goto_kids(m: Model) -> List[Node[Msg]] !Ctx =
 ## What the list area holds when there is nothing to list: a reason, not a
 ## blank. The two reasons are different -- an empty query has not been asked
 ## anything yet, a query with no hits has.
-fn status(m: Model) -> List[Node[Msg]] !Ctx =
-  if str.trim(m.query) == "" {
-    [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
-  } else {
-    [el("p", class: "search-status", kids: [text(empty_line(lang()))])]
+##
+## The region is there whether or not it says anything, because a live region
+## that is inserted along with its text is one a screen reader may never
+## announce; one that already exists and changes is announced.
+fn status(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+  let say_it: List[Node[Msg]] =
+    if shown {
+      []
+    } else if str.trim(m.query) == "" {
+      [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
+    } else {
+      [el("p", class: "search-status", kids: [text(empty_line(lang()))])]
+    }
+  el("div", [("role", "status")], class: "search-none", kids: say_it)
+}
+
+## The field: a combobox in the WAI-ARIA sense, whose popup is the result list
+## and whose active option is the selection. Focus never leaves it while the
+## arrows move; `aria-activedescendant` is how the selection is announced.
+fn field(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+  let code = lang()
+  let active: List[(String, String)] =
+    if shown && m.sel >= 0 && m.sel < len(m.hits) {
+      [("aria-activedescendant", option_id(m.sel))]
+    } else {
+      []
+    }
+  el("input", [
+    ("value", m.query),
+    ("type", "text"),
+    ("role", "combobox"),
+    ("aria-label", say(code, "Search the site", "搜索本站")),
+    ("aria-expanded", if shown { "true" } else { "false" }),
+    ("aria-controls", list_id()),
+    ("aria-autocomplete", "list"),
+  ] ++ active ++ [
+    ("placeholder", say(code, "Search titles and API names", "搜索标题与 API 名")),
+    ("autocomplete", "off"),
+    ("spellcheck", "false"),
+    ("enterkeyhint", "go"),
+  ], class: "search-input", on: [on_value("input", Typed), on_key("keydown", Pressed)])
+}
+
+## The input bar: the field, then the way out. A keyboard reader is shown the
+## key; a phone, which has none, gets a button, and the stylesheet decides
+## which of the two is on screen.
+fn bar(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
+  let code = lang()
+  el("div", class: "search-bar", kids: [
+    field(m, shown),
+    el("kbd", [("aria-hidden", "true")], class: "search-esc", kids: [text("esc")]),
+    el("button", [("type", "button")], class: "search-cancel", on: [on_click(Dismissed)],
+      kids: [text(say(code, "Cancel", "取消"))]),
+  ])
+}
+
+## One key hint: the keys, then what they do.
+fn hint(keys: List[String], does: String) -> Node[Msg] = {
+  var kids: List[Node[Msg]] = []
+  for k in keys {
+    let cap: Node[Msg] = el("kbd", kids: [text(k)])
+    kids = kids ++ [cap]
   }
+  let what: Node[Msg] = text(does)
+  el("span", class: "search-hint", kids: kids ++ [what])
+}
+
+## The foot of the panel: the keys, for a reader who has them, and what the
+## panel searches, for every reader.
+fn foot() -> Node[Msg] !Ctx = {
+  let code = lang()
+  el("div", class: "search-foot", kids: [
+    el("span", [("aria-hidden", "true")], class: "search-keys", kids: [
+      hint(["↵"], say(code, "open", "打开")),
+      hint(["↑", "↓"], say(code, "move", "移动")),
+      hint(["esc"], say(code, "close", "关闭")),
+    ]),
+    el("p", class: "search-scope", kids: [text(scope_line(code))]),
+  ])
+}
 
 fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
   let s = scan(state, m.hits, m.sel)
-  let found: List[Node[Msg]] = sections(s.hits, m.sel)
-  let box: Node[Msg] =
-    input(class: "search-input", value: m.query,
-      on: [on_value("input", Typed), on_key("keydown", Pressed)])
-  let list_kids: List[Node[Msg]] =
-    if len(found) > 0 { found } else { [el("li", class: "search-none", kids: status(m))] }
-  div(class: "search-panel", kids: [
-    box,
-    el("ul", class: "search-results", kids: list_kids),
-    el("p", class: "search-scope", kids: [text(scope_line(lang()))]),
+  let found: List[Node[Msg]] = sections(s.hits, m.sel, terms(m.query))
+  let shown = len(found) > 0
+  el("div", [
+    ("role", "dialog"),
+    ("aria-modal", "true"),
+    ("aria-label", say(lang(), "Search", "搜索")),
+  ], class: "search-panel", kids: [
+    bar(m, shown),
+    el("div", [("aria-hidden", "true")], class: "search-line"),
+    el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", say(lang(), "Results", "结果"))],
+      class: "search-results", kids: found),
+    status(m, shown),
+    foot(),
   ] ++ goto_kids(m))
 }
 
@@ -787,6 +1011,10 @@ pub fn key_of(e: Entry) -> Key = {
   }
 }
 
+## The model of a panel that has been left: closed, and holding nothing a
+## reopening could mistake for its own.
+fn closed(m: Model) -> Model = Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [] }
+
 fn blank() -> Model =
   Model {
     query: "",
@@ -803,6 +1031,15 @@ pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     # The one arm that searches. Everything else reads `hits`.
     Typed(text) -> (Model { ..m, query: text, sel: 0, goto: "", hits: search(state, text) }, NoCmd)
     Pressed(key) -> pressed(state, m, key)
+    # The pointer selects what it rests on. Resting on the row that is already
+    # selected changes nothing, so the turn answers no patches.
+    Hovered(at) ->
+      if at >= 0 && at < len(m.hits) && at != m.sel {
+        (Model { ..m, sel: at, goto: "" }, NoCmd)
+      } else {
+        (m, NoCmd)
+      }
+    Dismissed -> (closed(m), NoCmd)
     # The whole of the navigation instruction, in one place. It overwrites
     # `goto` rather than reading it, so the arm that commands it does not have
     # to clear the field first.
@@ -834,7 +1071,14 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     # question `scan` answers, and what to do about it is the command.
     (m, SendMsg(msg: Chose(href: scan(state, m.hits, m.sel).chosen)))
   } else if key == "Escape" {
-    (Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [] }, NoCmd)
+    # Escape takes back one step: a query first, then the panel. A reader who
+    # typed the wrong thing gets an empty field and not a closed panel, and
+    # the second press is the one that leaves.
+    if m.query == "" {
+      (closed(m), NoCmd)
+    } else {
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [] }, NoCmd)
+    }
   } else {
     (m, NoCmd)
   }
@@ -1136,8 +1380,9 @@ test "each group's rows stay inside that group's section" {
   assert count_class(v, "search-group") == 2
   assert count_class(v, "search-row") == 2
   # and the rows are underneath the sections rather than beside them: the
-  # results list holds two sections and no row, and each section holds one row
-  assert kid_classes(v, "search-results") == ["search-group", "search-group"]
+  # results list holds two sections and no row, and each section holds one row;
+  # each section's dot takes its group's hue, not its place on screen
+  assert kid_classes(v, "search-results") == ["search-group hue-3", "search-group hue-2"]
   assert list.map(all_with_class(v, "search-group-rows"), n => len(kids_of(n))) == [1, 1]
 }
 
@@ -1219,7 +1464,8 @@ test "typing replaces the query and the hits and puts the selection back at the 
 }
 
 ## Enter is the one message that leaves an instruction in the tree, and Escape
-## is the one that empties it.
+## is the one that empties it: the first press takes the query back, the
+## second closes the panel.
 test "enter marks a destination and escape renders nothing at all" {
   let state = probe_state()
   let m = Model { ..typed(state, "str."), sel: 1 }
@@ -1228,7 +1474,12 @@ test "enter marks a destination and escape renders nothing at all" {
   assert str.contains(show_tree(view(state, go)), "data-goto")
   # the next message clears it, so one Enter is one navigation
   assert turn(state, go, Typed(text: "str.")).goto == ""
-  let shut = turn(state, go, Pressed(key: "Escape"))
+  let cleared = turn(state, go, Pressed(key: "Escape"))
+  assert cleared.open
+  assert cleared.query == ""
+  assert cleared.goto == ""
+  assert cleared.hits == blank().hits
+  let shut = turn(state, cleared, Pressed(key: "Escape"))
   assert not shut.open
   assert shut.query == ""
   assert shut.hits == blank().hits
@@ -1290,7 +1541,8 @@ test "only the mutable model round-trips through its text" {
   assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1]}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
-  assert decode(encode(turn(state, m, Pressed(key: "Escape")))).open == false
+  let shut = turn(state, turn(state, m, Pressed(key: "Escape")), Pressed(key: "Escape"))
+  assert decode(encode(shut)).open == false
   assert decode("not json at all") == blank()
   assert decode("[1,2]") == blank()
   # an object missing every field is the blank model, field by field
@@ -1318,15 +1570,8 @@ fn kid_classes(w: Node[Msg], cls: String) -> List[String] =
 fn selected_titles(w: Node[Msg]) -> List[String] = {
   var out: List[String] = []
   for row in all_with_class(w, "is-selected") {
-    match get(kids_of(row), 0) {
-      Some(anchor) ->
-        match get(kids_of(anchor), 0) {
-          Some(title) -> {
-            out = out ++ [text_of(title)]
-          }
-          None -> ()
-        }
-      None -> ()
+    for title in all_with_class(row, "search-title") {
+      out = out ++ [text_of(title)]
     }
   }
   out
@@ -1411,3 +1656,118 @@ test "enter commands the navigation instead of writing it" {
   # The whole turn is what a driver commits, and it is what it always was.
   assert turn(state, m, Pressed(key: "Enter")) == Model { ..m, goto: "stdlib.html#std-str-split" }
 }
+
+## The pointer and the arrows move one selection: the row the mouse rests on
+## is the row Enter opens, and resting on an ordinal the hits do not have
+## moves nothing.
+test "hovering a row selects it" {
+  let state = probe_state()
+  let m = typed(state, "str.")
+  let on_second = turn(state, m, Hovered(at: 1))
+  assert on_second.sel == 1
+  assert selected_titles(view(state, on_second)) == ["str.split"]
+  assert turn(state, on_second, Pressed(key: "Enter")).goto == "stdlib.html#std-str-split"
+  # the row that is already selected, and rows that do not exist, change nothing
+  assert turn(state, on_second, Hovered(at: 1)) == on_second
+  assert turn(state, m, Hovered(at: 2)) == m
+  assert turn(state, m, Hovered(at: -1)) == m
+}
+
+## A phone has no Escape key; its Cancel button leaves in one press, query or
+## no query.
+test "cancel closes the panel at once" {
+  let state = probe_state()
+  let shut = turn(state, typed(state, "str."), Dismissed)
+  assert not shut.open
+  assert shut.query == ""
+  let closed_kids: List[Node[Msg]] = []
+  assert view(state, shut) == div(class: "search-panel is-closed", kids: closed_kids)
+}
+
+## The combobox pattern, as attributes: the field names the list it controls
+## and the option that is active, the list is a listbox of groups of options,
+## and the ids are the ordinals.
+test "the field, the list and the rows carry the combobox roles" {
+  let state = probe_state()
+  let m = turn(state, typed(state, "str."), Pressed(key: "ArrowDown"))
+  let v = view(state, m)
+  let field = all_with_class(v, "search-input")[0]
+  assert prop_of(field, "role") == "combobox"
+  assert prop_of(field, "aria-expanded") == "true"
+  assert prop_of(field, "aria-controls") == "dawn-search-list"
+  assert prop_of(field, "aria-activedescendant") == "dawn-search-opt-1"
+  assert prop_of(field, "aria-label") == "Search the site"
+  let results = all_with_class(v, "search-results")[0]
+  assert prop_of(results, "id") == "dawn-search-list"
+  assert prop_of(results, "role") == "listbox"
+  let rows = all_with_class(v, "search-row")
+  assert list.map(rows, r => prop_of(r, "id")) == ["dawn-search-opt-0", "dawn-search-opt-1"]
+  assert list.map(rows, r => prop_of(r, "role")) == ["option", "option"]
+  assert list.map(rows, r => prop_of(r, "aria-selected")) == ["false", "true"]
+  let rows_box = all_with_class(v, "search-group-rows")[0]
+  assert prop_of(rows_box, "role") == "group"
+  assert prop_of(rows_box, "aria-labelledby") == "dawn-search-g-stdlib"
+  # with nothing listed the popup is collapsed and nothing is active
+  let empty = all_with_class(view(state, typed(state, "nothing here")), "search-input")[0]
+  assert prop_of(empty, "aria-expanded") == "false"
+  assert prop_of(empty, "aria-activedescendant") == ""
+}
+
+## Every label the panel adds is in the page's language.
+test "the panel's own words follow the page's language" {
+  let en = probe_state()
+  let zh = State { ..en, lang: "zh-CN" }
+  let m = typed(en, "str.")
+  let en_text = show_tree(view(en, m))
+  let zh_text = show_tree(view(zh, m))
+  assert str.contains(en_text, "Cancel")
+  assert str.contains(zh_text, "取消")
+  assert not str.contains(zh_text, "Cancel")
+  assert str.contains(en_text, "open")
+  assert str.contains(zh_text, "打开")
+  assert prop_of(all_with_class(view(zh, m), "search-input")[0], "aria-label") == "搜索本站"
+}
+
+## The mark is where a word of the query begins a word of the text, or
+## anywhere for a word beyond ASCII; overlapping places are one mark.
+test "the query's words are marked where they begin a word" {
+  let m1: List[Node[Msg]] = [
+    text("io."),
+    el("mark", kids: [text("read")]),
+    text("_file"),
+  ]
+  assert marked("io.read_file", terms("read")) == m1
+  # not inside a word
+  let m2: List[Node[Msg]] = [text("bread")]
+  assert marked("bread", terms("read")) == m2
+  # case is the text's own, and two words that overlap are one mark
+  let m3: List[Node[Msg]] = [el("mark", kids: [text("Handler")]), text(" state")]
+  assert marked("Handler state", terms("hand handler")) == m3
+  # a Chinese word is found inside a run
+  let m4: List[Node[Msg]] = [text("6.5 命名"), el("mark", kids: [text("效果")])]
+  assert marked("6.5 命名效果", terms("效果")) == m4
+  # no query, no marks
+  let m5: List[Node[Msg]] = [text("str.trim")]
+  assert marked("str.trim", terms("")) == m5
+  # and inside a note's code
+  let m6: List[Node[Msg]] = [
+    text("The file at "),
+    el("code", kids: [el("mark", kids: [text("path")])]),
+  ]
+  assert marked_runs("The file at `path`", terms("path")) == m6
+}
+
+fn prop_of(w: Node[Msg], name: String) -> String =
+  match w {
+    Text(_) -> ""
+    Elem(_, props, ..) -> {
+      var found = ""
+      for p in props {
+        let (k, v) = p
+        if k == name {
+          found = v
+        }
+      }
+      found
+    }
+  }
