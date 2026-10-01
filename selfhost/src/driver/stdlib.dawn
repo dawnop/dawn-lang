@@ -1,5 +1,5 @@
 # The bundled standard library: std sources are read from a directory
-# (`--std <dir>`, default std), or from the embedded copy in `stdsrc.dawn` --
+# (`--std <dir>`, else DAWN_STD), or from the embedded copy in `stdsrc.dawn` --
 # generated string constants compiled into the toolchain like any other
 # module, so a standalone build works outside the repo on every backend with
 # no host resource API. Whichever of the two answers for modules.txt supplies
@@ -11,9 +11,8 @@
 # keeping the bootstrap acyclic.
 #
 # A std that fails to load is a compiler bug only when it is the embedded one.
-# The directory can be any release, and `std` relative to the working
-# directory is the default, so a toolchain run inside somebody else's checkout
-# loads their std without being asked to. `StdLoadError` carries which half
+# The directory can be any release: whoever names one, by flag or by
+# DAWN_STD, may name somebody else's checkout. `StdLoadError` carries which half
 # answered and what the directory stamps itself with, so the two cases can be
 # told apart in words instead of both saying "bundled std is broken".
 
@@ -32,7 +31,7 @@ use check/cx.{ModExports, cx_new, Cx, moved_module_key}
 use check/checker.{check_module, exports_of}
 use check/identity.{Minted}
 use ir/interp.{eval_comptime, note_direct_fn, note_trait_fn, CtOut, ct_default}
-use ir/core.{VStr, VBool}
+use ir/core.{VStr, VBool, CValue}
 use front/parser
 use front/lexer
 use front/token.{Diag}
@@ -356,8 +355,8 @@ pub fn read_index(dir: String) -> Result[List[String], String] !Fs = {
 }
 
 ## The directory as a reader can act on it: a relative one is resolved against
-## the working directory it was resolved against, because `std` on its own does
-## not say which `std`, and the default `--std` is exactly that spelling.
+## the working directory it was resolved against, because `--std std` on its
+## own does not say which `std`.
 fn located(dir: String) -> String !Env =
   if str.starts_with(dir, "/") {
     dir
@@ -413,8 +412,8 @@ fn advice(e: StdLoadError) -> String =
           join([
             "  That directory carries no VERSION stamp, so it is either older than " ++
               VERSION ++ " or assembled by hand.",
-            "  Name a " ++ VERSION ++ " std with `--std <dir>`, or run where no `std`" ++
-              " directory shadows the one compiled in."
+            "  Name a " ++ VERSION ++ " std with `--std <dir>` or DAWN_STD, or name" ++
+              " neither to use the one compiled in."
           ], "\n")
       }
   }
@@ -440,11 +439,76 @@ pub fn std_load_error_text(e: StdLoadError) -> String !Env = {
   }
 }
 
+## Where a command's std comes from (#291): the directory `--std` names when
+## the command line gives one, else DAWN_STD when it is set and not empty, else
+## the copy compiled into this toolchain, which is `None` here.
+##
+## Never the working directory. The default used to be `std` relative to it,
+## so which std a program compiled against was a property of where the shell
+## stood: inside any checkout with a complete `std/`, that directory was loaded
+## instead of the std this toolchain was released with, edits and all, or
+## refused for a version nobody asked about. The answer belongs to the
+## toolchain or to the command line. rustc finds its sysroot from its own
+## location or `--sysroot`, Go its library under GOROOT; neither looks at the
+## cwd. `bin/dawn` exports DAWN_STD from its own location when a std directory
+## sits there, which is how a checkout's own commands keep compiling against
+## the checkout; an installed release has none and gets the embedded copy, the
+## std it was built with.
+##
+## An empty DAWN_STD names no directory, the way an empty PATH entry is not a
+## directory either: `DAWN_STD= dawn ...` is how a shell says "unset" for one
+## command, and reading it as the relative path "" would put the cwd back.
+pub fn std_choice(flag: Option[String], from_env: Option[String]) -> Option[String] =
+  match flag {
+    Some(d) -> Some(d)
+    None ->
+      match from_env {
+        Some(d) -> if d == "" { None } else { Some(d) }
+        None -> None
+      }
+  }
+
+## `std_choice` with this process's DAWN_STD: what every subcommand of both
+## drivers, and the language server, loads.
+pub fn cli_std_choice(flag: Option[String]) -> Option[String] !Env =
+  std_choice(flag, io.getenv("DAWN_STD"))
+
 ## Load, check and comptime-evaluate the bundled std from a directory.
-pub(pkg) fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
+pub(pkg) fn load_std(dir: String) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
+  load_chosen_std(Some(dir))
+
+## modules.txt from the embedded copy alone, for a load no directory was named
+## for.
+fn embedded_index() -> Result[(String, Bool), String] =
+  match stdsrc.source("modules.txt") {
+    Some(t) -> Ok((t, false))
+    None -> Err("the embedded copy carries no modules.txt")
+  }
+
+## A chosen std in words, for a sentence about it: the directory as named, or
+## the copy compiled in.
+pub fn std_choice_text(choice: Option[String]) -> String =
+  match choice {
+    Some(d) -> d
+    None -> "the std compiled into this toolchain"
+  }
+
+## Load a chosen std: the directory, or with `None` the embedded copy without
+## asking any directory at all. What `std_choice` answered goes straight here.
+pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
+  # never read when the embedded copy answers below: every use is behind
+  # `idx_from_dir`
+  let dir = match chosen {
+    Some(d) -> d
+    None -> ""
+  }
   # modules.txt decides the whole load, so whichever half answers for it is
   # the std being loaded, and that is what the diagnostics below name.
-  let (idx_text, idx_from_dir) = match std_read_from(dir, "modules.txt") {
+  let index = match chosen {
+    Some(d) -> std_read_from(d, "modules.txt")
+    None -> embedded_index()
+  }
+  let (idx_text, idx_from_dir) = match index {
     Ok(pair) -> pair
     Err(m) -> return Err(StdLoadError {
       origin: StdEmbedded,
@@ -1114,10 +1178,29 @@ test "a std directory with no modules.txt is not read at all" {
   assert Some(text) == stdsrc.source("str.dawn")
 }
 
+## What a user module's `str.to_upper("Hello")` folds to against `std`, through
+## check and comptime evaluation: the one observation that tells a lowering
+## std/str from the real one by what it computes.
+fn upper_of_hello(std: StdCtx) -> Option[CValue] !io = {
+  let src = "use std/str\n" ++
+    "const U: String = comptime { str.to_upper(\"Hello\") }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  if len(pdiags) > 0 { panic("the probe does not parse: ${pdiags[0].msg}") }
+  var cx = cx_new(None, None)
+  cx = Cx { ..cx, identities: std.identities, impl_table: std.impls }
+  let (cx1, tm) = check_module(cx, m, std.exports)
+  if len(cx1.diags) > 0 { panic("the probe does not check: ${cx1.diags[0].msg}") }
+  let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
+    std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
+  if len(ct.diags) > 0 { panic("the probe does not fold: ${ct.diags[0].msg}") }
+  map.get(ct.consts, "U")
+}
+
 test "a stray std/str.dawn under the working directory changes no program" {
-  # #206, end to end through load, check and comptime evaluation. The command
-  # line's default `--std` is the relative `std`, resolved here against the
-  # table's base: the working directory of this test. That directory holds a
+  # #206, end to end through load, check and comptime evaluation. `--std std`
+  # names the relative `std`, resolved here against the table's base: the
+  # working directory of this test. (The command line's default stopped being
+  # that spelling in #291; a relative --std still is.) That directory holds a
   # std/str.dawn whose `to_upper` lowers and no modules.txt. Before the fix the
   # same source answered `hello` from that directory and `HELLO` from any
   # other.
@@ -1127,20 +1210,75 @@ test "a stray std/str.dawn under the working directory changes no program" {
       Ok(s) -> s
       Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
     }
-    let src = "use std/str\n" ++
-      "const U: String = comptime { str.to_upper(\"Hello\") }\n"
-    let (m, pdiags) = parser.parse_module(src)
-    assert len(pdiags) == 0
-    var cx = cx_new(None, None)
-    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls }
-    let (cx1, tm) = check_module(cx, m, std.exports)
-    assert len(cx1.diags) == 0
-    let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
-      std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
-    assert len(ct.diags) == 0
-    map.get(ct.consts, "U")
+    upper_of_hello(std)
   })
   assert got == Some(VStr("HELLO"))
+}
+
+test "a command's std is --std, then DAWN_STD, then the embedded copy" {
+  # #291. The order, as a function of its two inputs.
+  let none: Option[String] = None
+  # the command line speaks first
+  assert std_choice(Some("/asked/std"), Some("/env/std")) == Some("/asked/std")
+  assert std_choice(Some("/asked/std"), none) == Some("/asked/std")
+  # then the environment, which bin/dawn fills from its own location
+  assert std_choice(none, Some("/env/std")) == Some("/env/std")
+  # an empty DAWN_STD is unset, not the relative path "" (the cwd again)
+  assert std_choice(none, Some("")) == none
+  # and with neither, no directory at all: the embedded copy, never `std`
+  # under the working directory, which is what this answered before
+  assert std_choice(none, none) == none
+
+  # `cli_std_choice` reads DAWN_STD and nothing else from the environment; in
+  # particular it does not ask where it is standing
+  let (from_env, log) = envmem.with_env_table(envmem.TABLE_CWD,
+    [("DAWN_STD", "/env/std")], () => cli_std_choice(none))
+  assert from_env == Some("/env/std")
+  assert envmem.asked_names(log) == ["DAWN_STD"]
+  assert len(log) == 1
+  let (flagged, _) = envmem.with_env_table(envmem.TABLE_CWD,
+    [("DAWN_STD", "/env/std")], () => cli_std_choice(Some("/asked/std")))
+  assert flagged == Some("/asked/std")
+  let (unset, _) = envmem.with_env_table(envmem.TABLE_CWD, [], () => cli_std_choice(none))
+  assert unset == none
+}
+
+## `body` over an in-memory tree whose working directory is the tree's base,
+## with `vars` for the environment.
+fn in_table_env[T](fs: memfs.MemFs, vars: List[(String, String)],
+  body: fn() -> T !Env !Fs !io) -> T !io = {
+  let (out, _) = memfs.with_fs(fs, () => {
+    let (o, _) = envmem.with_env_table(memfs.BASE, vars, body)
+    o
+  })
+  out
+}
+
+test "a complete std under the working directory is not the default" {
+  # #291, through the loader, the checker and comptime. The working directory
+  # holds a whole std -- modules.txt, this release's VERSION, every module --
+  # whose `to_upper` lowers. #206 left exactly this case: nothing about the
+  # directory is refused, so before #291 a command run here compiled against
+  # it without being asked to, and printed `hello`.
+  let st = memfs.put(fsmem.mem_std(memfs.BASE), "std/str.dawn", lowering_str())
+  let none: Option[String] = None
+  let absent: Option[String] = None
+  let (dir0, plain) = in_table_env(st, [], () => match load_chosen_std(cli_std_choice(none)) {
+    Ok(s) -> (s.dir, upper_of_hello(s))
+    Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+  })
+  assert dir0 == absent
+  assert plain == Some(VStr("HELLO"))
+
+  # named through DAWN_STD, the same directory is the std, wholesale
+  let named = fsmem.mem_std_dir(memfs.BASE)
+  let (dir1, asked) = in_table_env(st, [("DAWN_STD", named)],
+    () => match load_chosen_std(cli_std_choice(none)) {
+      Ok(s) -> (s.dir, upper_of_hello(s))
+      Err(e) -> panic("DAWN_STD std: ${std_load_error_text(e)}")
+    })
+  assert dir1 == Some(named)
+  assert asked == Some(VStr("hello"))
 }
 
 test "a std module's file is only known when a directory supplied it" {

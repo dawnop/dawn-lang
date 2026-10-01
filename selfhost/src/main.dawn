@@ -26,7 +26,10 @@ use front/lexdump
 use front/astdump
 use driver/checkdump
 use ir/coredump
-use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
+use driver/stdlib.{
+  StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
+  std_load_is_bug
+}
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
@@ -258,7 +261,7 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !Fs
 ## std modules are lowered without them, exactly as before.
 fn collect_program(
   target: String,
-  std_dir: String,
+  std_flag: Option[String],
   opts: CtOpts,
   closure: Bool,
   std_tests: Bool
@@ -276,7 +279,7 @@ fn collect_program(
         cli_error("source files must end in .dawn: ${target}")
       }
     }
-    let std = match load_std(std_dir) {
+    let std = match load_chosen_std(cli_std_choice(std_flag)) {
       Ok(sc) -> sc
       Err(e) -> fail_std(e)
     }
@@ -729,16 +732,20 @@ fn usage() -> String = join([
   "                                       anything dawn.toml's [java-deps] resolves to.",
   "",
   "the standard library (check/run/test/build/doc):",
-  "  --std <dir>                          compile against the std in <dir> (default: `std`",
-  "                                       under the working directory). A directory with a",
-  "                                       modules.txt must hold every module it lists, or the",
-  "                                       compile stops and names the missing ones; a directory",
-  "                                       without modules.txt is ignored and the std compiled",
-  "                                       into this toolchain is used.",
+  "  --std <dir>                          compile against the std in <dir>. Without it,",
+  "                                       DAWN_STD names one if set and not empty, and",
+  "                                       otherwise the std compiled into this toolchain is",
+  "                                       used; the working directory is never searched. A",
+  "                                       directory with a modules.txt must hold every module",
+  "                                       it lists, or the compile stops and names the missing",
+  "                                       ones; a directory without modules.txt is ignored and",
+  "                                       the std compiled in is used.",
   "",
   "environment:",
   "  DAWN_MAVEN_MIRROR                    Maven repository to fetch [java-deps] from",
   "                                       (default: Maven Central)",
+  "  DAWN_STD                             the std directory when no --std is given",
+  "                                       (bin/dawn sets it to its own checkout's std/)",
   "",
   "the other compiler:",
   "  dawnc                                the C backend: Dawn to C to cc, and Dawn to wasm,",
@@ -817,7 +824,7 @@ type RunArgs = {
   cpjars: List[String],
   opts: CtOpts,
   closure: Bool,
-  std_dir: String,
+  std_flag: Option[String],
   target: String,
   program_args: List[String]
 }
@@ -830,7 +837,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
   var cpjars: List[String] = []
   var fuel = DEFAULT_FUEL
   var closure = false
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var target = ""
   var seen_target = false
   var program_args: List[String] = []
@@ -863,7 +870,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
       i = i + 1
     } else if a == "--std" {
       if i + 1 >= len(rest) { cli_error(run_usage()) }
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if a == "--" {
       cli_error(run_usage())
@@ -895,7 +902,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
     cpjars: cpjars,
     opts: CtOpts { fuel: fuel },
     closure: closure,
-    std_dir: std_dir,
+    std_flag: std_flag,
     target: target,
     program_args: program_args
   }
@@ -1233,7 +1240,7 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
 ## along so `use java` third-party classes stay visible).
 fn run_run(run: RunArgs) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (classes, entry, _) =
-    collect_program(run.target, run.std_dir, run.opts, run.closure, false)
+    collect_program(run.target, run.std_flag, run.opts, run.closure, false)
   if entry == "" {
     return cli_error("${run.target} has no pub fn main() -> Unit !io, nothing to run")
   }
@@ -1257,11 +1264,11 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (closure2, restc) = extract_flag(restb, "--closure")
   let (std_tests, rest) = extract_flag(restc, "--stdlib")
   var target = ""
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else {
       refuse_second_target("dawn test", target, rest[i])
@@ -1275,9 +1282,9 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
-  let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2, std_tests)
+  let (classes, _, tests_info) = collect_program(target, std_flag, opts, closure2, std_tests)
   if len(tests_info) == 0 {
-    return cli_error(if std_tests { "${std_dir} has no test blocks" }
+    return cli_error(if std_tests { "${std_choice_text(cli_std_choice(std_flag))} has no test blocks" }
     else { "${target} has no test blocks" })
   }
   var runner_tests: List[(String, Int, String)] = []
@@ -1302,14 +1309,14 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var out = ""
   var target = ""
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var i = 0
   while i < len(rest) {
     if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
       i = i + 2
     } else if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else {
       refuse_second_target("dawn __emit", target, rest[i])
@@ -1320,7 +1327,7 @@ fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_dir, ct_default(), false, false)
+  let (classes, _, _) = collect_program(target, std_flag, ct_default(), false, false)
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
@@ -1669,7 +1676,7 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (closure, rest) = extract_flag(restb, "--closure")
   var out = ""
   var target = ""
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var vendor_pkgs: List[String] = []
   var native = false
   var i = 0
@@ -1678,7 +1685,7 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       out = rest[i + 1]
       i = i + 2
     } else if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--vendor" && i + 1 < len(rest) {
       vendor_pkgs = vendor_pkgs ++ [rest[i + 1]]
@@ -1706,7 +1713,7 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     "${stem}.jar"
   }
-  let (classes, entry, _) = collect_program(target, std_dir, opts, closure, false)
+  let (classes, entry, _) = collect_program(target, std_flag, opts, closure, false)
   if entry == "" {
     return cli_error("${target} has no pub fn main() -> Unit !io to use as an entry point")
   }
@@ -1824,14 +1831,14 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
 fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var builtins_mode = false
   var stdlib_mode = false
   var target = ""
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--builtins" {
       builtins_mode = true
@@ -1855,7 +1862,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       (if stdlib_mode { 1 } else { 0 }) +
       (if builtins_mode { 1 } else { 0 })
   )
-  let std = match load_std(std_dir) {
+  let std = match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -1897,13 +1904,13 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
 fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var dump_dir = ""
   var targets: List[String] = []
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--dump" && i + 1 < len(rest) {
       dump_dir = rest[i + 1]
@@ -1916,7 +1923,7 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if len(targets) != 1 {
     cli_error("__lower takes exactly one target")
   }
-  let std = match load_std(std_dir) {
+  let std = match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -2053,13 +2060,13 @@ fn lower_size(m: CModule) -> Int = {
 ## would buy nothing for those call sites. `scripts/doc-check.py` holds the
 ## fixpoint script to the entry named here.
 fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
@@ -2073,7 +2080,7 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if target == "" {
     cli_error("usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]")
   }
-  let std = match load_std(std_dir) {
+  let std = match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -2096,24 +2103,24 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 }
 
 ## `[--std <dir>] <target>...`, shared by `check` and `__check`.
-fn check_args(rest: List[String]) -> (String, List[String]) = {
-  var std_dir = "std"
+fn check_args(rest: List[String]) -> (Option[String], List[String]) = {
+  var std_flag: Option[String] = None
   var targets: List[String] = []
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else {
       targets = targets ++ [rest[i]]
       i = i + 1
     }
   }
-  (std_dir, targets)
+  (std_flag, targets)
 }
 
-fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
-  match load_std(std_dir) {
+fn check_std(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
+  match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -2130,7 +2137,7 @@ fn check_std(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
 fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  let (std_dir, targets) = check_args(rest)
+  let (std_flag, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
   }
@@ -2142,7 +2149,7 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("source files must end in .dawn: ${t}")
     }
   }
-  let std = check_std(std_dir)
+  let std = check_std(std_flag)
   var all: List[LocDiag] = []
   for t in targets {
     # this command plans its own load rather than going through `load_target`,
@@ -2171,8 +2178,8 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
 ## N vs N-1 differential.
 fn run_checkdump(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  let (std_dir, targets) = check_args(rest)
-  let std = check_std(std_dir)
+  let (std_flag, targets) = check_args(rest)
+  let std = check_std(std_flag)
   for t in targets {
     console_println("== " ++ t ++ " ==")
     let loaded = load_target(std, t)

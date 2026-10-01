@@ -8,8 +8,9 @@ the embedded copy -- so a source file of the very checkout being edited was no
 longer recognised as std, and the editor showed hundreds of phantom "undefined
 function" diagnostics on files `dawn check` calls clean.
 
-The unit rule (flag, then the toolchain's std, then the cwd-relative literal)
-is pinned by an inline test on `lsp_std_dir` in selfhost/src/lsp/server.dawn.
+The unit rule (flag, then DAWN_STD, then the embedded copy; never the cwd, for
+every subcommand since #291) is pinned by inline tests on `std_choice` in
+selfhost/src/driver/stdlib.dawn and selfhost/src/lsp/server.dawn.
 This gate covers the two halves that test cannot reach:
 
   wiring    the CLI dispatch actually passes the parsed `--std` into `run_lsp`.

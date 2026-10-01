@@ -33,7 +33,7 @@ use std/memfs
 use compiler_plan/envmem
 use ir/interp.{ct_default}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
-use driver/stdlib.{StdCtx, load_std, std_load_error_text}
+use driver/stdlib.{StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
 use lsp/lspq.{QCx, Target, find_target, typed_trees}
@@ -747,37 +747,6 @@ pub fn lsp_std_flag(rest: List[String]) -> Option[String] = {
   None
 }
 
-## Where a language server loads std from. Explicit flag first, then the std
-## belonging to this toolchain, and only then the cwd-relative literal.
-##
-## Not the process cwd, which is what this used to be. Every other subcommand
-## is run by someone who chose the directory they are standing in and can pass
-## `--std`; a language server is spawned by an editor, whose cwd nobody chose
-## and which is routinely not the checkout. The literal `"std"` then missed,
-## `load_std` fell back to the embedded copy, and a source file of the very
-## checkout being edited was no longer recognised as std: 281 phantom
-## "undefined function" diagnostics on files that `dawn check` calls clean.
-##
-## A toolchain only ever checked the std it was released with, so the answer
-## belongs to the toolchain. `bin/dawn` resolves its own location -- it already
-## follows symlinks hop by hop to find the real checkout -- and exports
-## DAWN_STD when a std directory is actually sitting there. An installed
-## release has none, exports nothing, and falls through to the copy embedded
-## in the jar, which is the std that release was built with and so is still the
-## right answer. The launcher never names a directory that does not exist.
-##
-## The last resort stays cwd-relative rather than becoming an error: running
-## the jar directly from a checkout is a real workflow, and it worked before.
-pub fn lsp_std_dir(flag: Option[String], from_env: Option[String]) -> String =
-  match flag {
-    Some(d) -> d
-    None ->
-      match from_env {
-        Some(d) -> d
-        None -> "std"
-      }
-  }
-
 ## The driver supplies resource factories rather than one process-global Java
 ## oracle. The JVM host creates a platform-only standalone lease and one lease
 ## per target; the native host creates lifecycle-compatible refusals.
@@ -788,8 +757,13 @@ pub fn run_lsp(std_flag: Option[String], host: LspLeaseHost) -> Unit !Fs !Proc !
 pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
   config: LspAnalysisConfig) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   validate_analysis_config(config)
-  let std_dir = lsp_std_dir(std_flag, io.getenv("DAWN_STD"))
-  let std = match load_std(std_dir) {
+  # The same order as every other subcommand (driver/stdlib `std_choice`):
+  # the flag, then DAWN_STD, then the embedded copy. An editor spawns the
+  # server with a cwd nobody chose, which is why this one stopped reading the
+  # cwd first; the rest of the CLI followed in #291. `bin/dawn` exports
+  # DAWN_STD from its own location, so a checkout's server still knows its own
+  # std files as std.
+  let std = match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> panic(std_load_error_text(e))
   }
@@ -2527,21 +2501,22 @@ test "the language server's std is the toolchain's, not the client's cwd" {
   # whatever directory the editor happened to spawn the server in. Same binary,
   # same file, cwd one level above the checkout: 0 diagnostics became 7, all of
   # them "undefined function" on a std source that `dawn check` calls clean.
-  # The rule this pins is the order, and the middle entry is the fix.
+  # The rule this pins is the order, and the middle entry is the fix. It is
+  # every subcommand's order since #291 (driver/stdlib `std_choice`, pinned
+  # there as well); this is the server's half of that contract.
   let none: Option[String] = None
 
   # an explicit --std is the client speaking and wins over everything
-  assert lsp_std_dir(Some("/asked/for/std"), Some("/toolchain/std")) == "/asked/for/std"
-  assert lsp_std_dir(Some("/asked/for/std"), none) == "/asked/for/std"
+  assert std_choice(Some("/asked/for/std"), Some("/toolchain/std")) == Some("/asked/for/std")
+  assert std_choice(Some("/asked/for/std"), none) == Some("/asked/for/std")
 
   # otherwise the std belonging to this toolchain, handed down by the launcher
-  assert lsp_std_dir(none, Some("/toolchain/std")) == "/toolchain/std"
+  assert std_choice(none, Some("/toolchain/std")) == Some("/toolchain/std")
 
-  # and only with nothing to go on does the cwd-relative literal answer. This
-  # is the last resort, not the default: running the jar straight out of a
-  # checkout still works, and an installed release has no directory either way,
-  # so `load_std` falls through to the embedded copy.
-  assert lsp_std_dir(none, none) == "std"
+  # and with nothing to go on, the embedded copy: no directory, and in
+  # particular not `std` under the cwd, which is what answered here before
+  # #291. An installed release has no directory either way.
+  assert std_choice(none, none) == none
 
   # the flag itself, which `lsp` did not parse at all before
   assert lsp_std_flag(["--std", "/x"]) == Some("/x")
