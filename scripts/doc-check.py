@@ -580,10 +580,12 @@ VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
 
 # The whole programs the website ships, each with the stdout recorded beside it.
 #
-#   site/pages/          one program per front-page card. site/src/gen/pages.dawn
-#                        reads both halves, so the pairing is not a convention
-#                        this script invented -- a card without a recorded
-#                        output fails the site build too.
+#   site/pages/          one program per front-page listing, as `<stem>.dawn`
+#                        or as a `<stem>.project` pointer to a project
+#                        directory. site/src/gen/home.dawn reads both halves,
+#                        so the pairing is not a convention this script
+#                        invented -- a listing without a recorded output fails
+#                        the site build too.
 #   site/play-ui/samples/ the Playground sidebar's starter files, inlined into
 #                        the editor bundle by samples.ts via Vite's `?raw`.
 #                        Here the pairing IS this script's: nothing in the npm
@@ -4439,11 +4441,22 @@ def check_site_pages() -> tuple[list[str], int]:
     """The website's whole programs, run and held to the output recorded beside
     them.
 
-    Nine of them: the hero and three feature cards a reader meets on the front
-    page, and the five starter files the Playground opens with. They are the
-    first Dawn anybody sees, and until 2026-08-05 nothing in this repository
-    compiled any of them -- the Playground's `traits` sample had been rejected
-    by the compiler since v0.43.0 without one gate noticing.
+    The front page's hero, its three concept cards and its install line, the
+    GPU section's project, and the five starter files the Playground opens
+    with. They are the first Dawn anybody sees, and until 2026-08-05 nothing
+    in this repository compiled any of them -- the Playground's `traits`
+    sample had been rejected by the compiler since v0.43.0 without one gate
+    noticing.
+
+    A program is a `<stem>.dawn` beside its `<stem>.out`, or a
+    `<stem>.project` beside its `<stem>.out`: one line naming a project
+    directory, for a program that needs a package and so cannot be one file
+    (the GPU section's, which is `examples/projects/gpu_fake` and depends on
+    packages/tileir). The pointer is the one the generator reads too
+    (site/src/gen/home.dawn), so the code on the page, the program run here
+    and the output compared are all named by the same line. An `.out` with
+    neither beside it is red: it would be output the site can show and
+    nothing runs.
 
     `dawn run` alone would only be half the check: these programs print their
     result, and one that still compiles while quietly answering something else
@@ -4456,10 +4469,28 @@ def check_site_pages() -> tuple[list[str], int]:
     bad: list[str] = []
     seen = 0
     for directory in SITE_PROGRAMS:
+        programs = []
         for src in sorted(directory.glob("*.dawn")):
+            programs.append((src, src))
+        for pointer in sorted(directory.glob("*.project")):
+            target = pointer.read_text(encoding="utf-8").strip()
+            project = ROOT / target
+            if not target or "\n" in target or not (project / "dawn.toml").is_file():
+                bad.append(f"{pointer.relative_to(ROOT)}: names {target!r}, which is "
+                           f"not one project directory (a dawn.toml under the "
+                           f"repository root)")
+                continue
+            programs.append((pointer, project))
+        stems = {named.with_suffix("") for named, _ in programs}
+        for out in sorted(directory.glob("*.out")):
+            if out.with_suffix("") not in stems:
+                bad.append(f"{out.relative_to(ROOT)}: no {out.stem}.dawn or "
+                           f"{out.stem}.project beside it, so nothing runs to "
+                           f"produce what it records")
+        for named, src in programs:
             seen += 1
-            rel = src.relative_to(ROOT)
-            expected_file = src.with_suffix(".out")
+            rel = named.relative_to(ROOT)
+            expected_file = named.with_suffix(".out")
             if not expected_file.exists():
                 bad.append(f"{rel}: no {expected_file.name} beside it (a program "
                            f"the website ships records the output it prints)")
