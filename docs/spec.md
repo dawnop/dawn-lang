@@ -2622,16 +2622,22 @@ fn slurp(p: String) -> String !io = {
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
 Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iterable` 时，
-实参可传 Dawn `List[T]`。**零拷贝**：桥接处套一层不可变视图
-（`Collections.unmodifiableList`），Java 侧的变异方法抛
-`UnsupportedOperationException`——同 Scala `asJava` / Clojure 持久集合的约定。
+实参可传 Dawn `List[T]`。**桥接是拷贝，不是视图**：Dawn `List` 是纯 Dawn 的持久向量
+（`std/pvec`），Java 侧无从命名，所以每次跨界都按序把元素拷进一个新的 `java.util.ArrayList`，
+再套一层不可变包装（`Collections.unmodifiableList`）交给 Java。Java 侧的变异方法抛
+`UnsupportedOperationException`；Java 保留这个引用也看不到 Dawn 侧此后的任何新版本。
 
+- **代价**：每次跨界 O(n) 时间与 O(n) 分配，与元素个数成正比，不随调用次数摊销：
+  同一个 Dawn 列表传两次就拷两次。JVM 上实测约 8 ns/元素（10⁶ 元素约 8.4 ms 一次）。
+  在循环里反复把同一个大列表交给 Java 时，应在 Java 侧持有一次桥接的结果再复用。
 - 元素类型 `T` 限：`Int` / `Float` / `Bool` / `String` / 已导入或不透明的引用类。
-  元素是 `List`/`Map`/`Set`/ADT/元组/record/函数值时拒绝（编译错误）——嵌套容器
-  零拷贝会泄漏内层可变性；当前不做深包装。
+  元素是 `List`/`Map`/`Set`/ADT/元组/record/函数值时拒绝（编译错误）。拷贝只转最外层，
+  内层值在 Java 侧仍是 Dawn 自己的表示（如 `std/pvec` 的向量节点），Java 无从读取；
+  当前不做深转换。
 - 元素按 §9.2 的装箱表示直达（`Int` → `java.lang.Long`）。泛型擦除意味着期待
   `List<Integer>` 的 API 会在取用时 `ClassCastException`；当前不额外修复，选 API 时留意。
-- 方向仅 Dawn → Java；Java 返回的集合仍是不透明引用 + `Option`（§9.2），可链式调用。
+- 方向仅 Dawn → Java；Java 返回的集合仍是不透明引用 + `Option`（§9.2），可链式调用，
+  但不会转换回 Dawn `List`（把它标注成 `List[T]` 是类型错误）。
   `Map`/`Set` 桥接当前未提供。
 
 ### 9.7 限制

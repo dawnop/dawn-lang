@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 85b19d3f75bac0b3 -->
+<!-- doc-check: translation-of docs/spec.md @ d9e8a49d23f66475 -->
 
 # Dawn Language Specification
 
@@ -3257,20 +3257,29 @@ when a real use case needs one, the surface must first gain a writable target ty
 ### 9.6 The List bridge: a Dawn `List` reaches a collection parameter directly
 
 When a Java parameter is declared `java.util.List` / `java.util.Collection` /
-`java.lang.Iterable`, the argument may be a Dawn `List[T]`. **Zero-copy**: the bridge
-wraps it in an unmodifiable view (`Collections.unmodifiableList`), and the mutating
-methods on the Java side throw `UnsupportedOperationException` — the same convention as
-Scala's `asJava` and Clojure's persistent collections.
+`java.lang.Iterable`, the argument may be a Dawn `List[T]`. **The bridge is a copy, not a
+view**: a Dawn `List` is a pure-Dawn persistent vector (`std/pvec`) that Java has no name
+for, so every crossing copies the elements, in order, into a fresh `java.util.ArrayList`
+and hands Java that list wrapped in an unmodifiable view (`Collections.unmodifiableList`).
+The mutating methods on the Java side throw `UnsupportedOperationException`; a reference
+Java keeps sees none of the versions the Dawn side makes afterwards.
 
+- **Cost**: each crossing is O(n) time and O(n) allocation in the number of elements, and
+  it is not amortised across calls: passing the same Dawn list twice copies it twice.
+  Measured on the JVM: about 8 ns per element (about 8.4 ms per crossing at 10⁶
+  elements). When the same large list goes to Java repeatedly in a loop, hold the bridged
+  result once on the Java side and reuse it.
 - The element type `T` is limited to: `Int` / `Float` / `Bool` / `String` / an imported
   or opaque reference class. An element that is a `List`/`Map`/`Set`/ADT/tuple/record/
-  function value is rejected (a compile error) — zero-copy on a nested container would
-  leak the inner mutability; there is currently no deep wrapping.
+  function value is rejected (a compile error). The copy converts only the outer level,
+  so an inner value would reach Java in Dawn's own representation (such as a `std/pvec`
+  vector node), which Java cannot read; there is currently no deep conversion.
 - Elements arrive in the boxed representation of §9.2 (`Int` → `java.lang.Long`). Generic
   erasure means an API expecting `List<Integer>` will `ClassCastException` when it reads
   them; the current bridge does not repair that, so pick your APIs with care.
 - The direction is Dawn → Java only; a collection returned by Java is still an opaque
-  reference plus `Option` (§9.2), and can be chained on. A `Map`/`Set` bridge is not
+  reference plus `Option` (§9.2), and can be chained on, but it is not converted back to a
+  Dawn `List` (annotating it as `List[T]` is a type error). A `Map`/`Set` bridge is not
   currently provided.
 
 ### 9.7 Limits
