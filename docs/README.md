@@ -191,7 +191,9 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 
 ## 历史：里程碑与自举过程
 
-[design.md](design.md)（M0–M4 的决策记录；**「实现语言 = Kotlin」等条目已过期**，见文首状态标注）·
+[history.md](history.md)（**current**，从第一个提交到今天的时间线，英文正本；末尾「Decisions that were reversed」表列出早期决定里已被推翻的条目）·
+[history.zh-CN.md](history.zh-CN.md)（上面那篇的中文译本）·
+[design.md](design.md)（早期设计决定，M0–M7 的决策记录；**「实现语言 = Kotlin」等条目已过期**，见 history.md 的被推翻决定表）·
 [design.en.md](design.en.md)（上面那篇的英文译本，中文是正本）·
 [selfhost-gaps.md](selfhost-gaps.md) ·
 [selfhost-ast.md](selfhost-ast.md) ·

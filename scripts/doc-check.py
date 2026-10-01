@@ -339,6 +339,7 @@ TRANSLATIONS = {
     "docs/tutorial.zh-CN.md": "docs/tutorial.md",
     "docs/spec.en.md": "docs/spec.md",
     "docs/design.en.md": "docs/design.md",
+    "docs/history.zh-CN.md": "docs/history.md",
     "site/pages/home.zh.md": "site/pages/home.md",
     "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
 }
