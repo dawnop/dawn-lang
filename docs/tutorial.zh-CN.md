@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 5c63d7f87e9ad402 -->
+<!-- doc-check: translation-of docs/tutorial.md @ a03a3d015d38ae8e -->
 
 # Dawn 教程
 
@@ -16,7 +16,8 @@
 -->
 
 一门刻意小的静态类型语言，有两个平级后端：编译到 JVM 字节码，或经 C 编成 native
-可执行文件。本教程共十七章，从第一个程序一直讲到自己声明的效果与它们的 handler。
+可执行文件。本教程共十九章，从第一个程序一直讲到自己声明的效果与它们的 handler，
+再讲到包，以及程序可以编译到的目标。
 
 ---
 
@@ -86,6 +87,8 @@ pub fn main() -> Unit !io = {
 Dawn 诞生于 2026
 ```
 
+另见：[spec.md](spec.md) §12.1
+
 ---
 
 ## 2. 值、类型与函数
@@ -123,6 +126,34 @@ pub fn main() -> Unit !io =
 11
 ```
 
+### 具名实参与默认值
+
+形参可以带默认值，写作 `name: Type = expr`，调用时就可以省掉这个实参。任何实参也都可以
+按名字传：位置实参从左往右占位，具名实参占它点名的那一格，名字之间的先后随意。
+
+```dawn run
+fn greet(name: String, greeting: String = "Hello", punct: String = "!") -> String =
+  "${greeting}, ${name}${punct}"
+
+pub fn main() -> Unit !io = {
+  println(greet("Dawn"))
+  println(greet("Dawn", punct: "?"))
+  println(greet(punct: ".", name: "reader", greeting: "Welcome"))
+}
+```
+```output
+Hello, Dawn!
+Hello, Dawn?
+Welcome, reader.
+```
+
+默认值在每次省掉它的调用里重新求值，而且必须是纯的：要是它能做 io，一次调用做不做 io
+就取决于调用方传没传这个实参。实参按书写顺序求值，不管它们落在哪一格。名字属于签名，
+所以函数值没有名字：`let g = greet` 之后，`g(name: "x")` 是错误，`g` 要求三个实参一个
+不少。构造器也一样收名字，字段名就是它的形参名（`Rect(w: 3.0, h: 4.0)`）。
+
+另见：[spec.md](spec.md) §2.1、§3.1、§4.3、§4.4
+
 ---
 
 ## 3. match 与穷尽性
@@ -148,6 +179,8 @@ zero
 positive
 negative
 ```
+
+另见：[spec.md](spec.md) §5
 
 ---
 
@@ -215,6 +248,8 @@ pub fn main() -> Unit !io = {
 (4, 2)
 ```
 
+另见：[spec.md](spec.md) §2.3、§2.4、§2.6
+
 ---
 
 ## 5. 列表、元组与模式解构
@@ -255,6 +290,8 @@ pub fn main() -> Unit !io = {
 3 余 2
 ```
 
+另见：[spec.md](spec.md) §2.2、§4.11、§5.1
+
 ---
 
 ## 6. 循环：while、for、break 与 continue
@@ -285,6 +322,8 @@ pub fn main() -> Unit !io = {
 6
 ```
 
+另见：[spec.md](spec.md) §4.7
+
 ---
 
 ## 7. 错误处理：Result 与 `?`
@@ -310,6 +349,8 @@ pub fn main() -> Unit !io =
 ```output
 得到 5
 ```
+
+另见：[spec.md](spec.md) §8
 
 ---
 
@@ -349,6 +390,43 @@ pub fn main() -> Unit !io = {
 ```output
 22
 ```
+
+### 块作为最后一个实参
+
+调用的最后一个实参是函数时，可以写成紧跟在调用后面、同一行上的一个裸块：
+`f(a) { e }` 就是 `f(a, () => e)`。带参数的块像 lambda 那样在 `=>` 前写出参数，
+一个裸名字，或者一个带括号的列表：
+
+```dawn run
+fn twice(body: fn() -> Unit !e) -> Unit !e = {
+  body()
+  body()
+}
+
+pub fn main() -> Unit !io = {
+  twice {
+    println("hi")
+  }
+  let total = fold([1, 2, 3], 0) { (acc, x) => acc + x * x }
+  println("${total}")
+  let loud = map(["a", "b"]) { s => s ++ "!" }
+  println("${loud}")
+}
+```
+```output
+hi
+hi
+14
+["a!", "b!"]
+```
+
+不管前面传了什么，块填的都是**最后一个**形参，所以 `fold(xs, 0) { ... }` 读起来就是
+「从 0 开始 fold，用这个」。块必须和调用在同一行开头；下一行的 `{` 是另一条块语句。
+在 `if`、`while`、`for` 的头部以及 `match` 后面，花括号是语句体而不是实参，那里要给
+调用加括号：`if (f(x) { ... }) { ... }`。配上具名实参与默认值，一个选项很多、又带一段
+主体的函数在调用点就读作 `column(gap: 12) { ... }`。
+
+另见：[spec.md](spec.md) §4.3、§4.5、§6
 
 ---
 
@@ -407,6 +485,8 @@ pub fn main() -> Unit !io = {
 -1
 ```
 
+另见：[spec.md](spec.md) §1.6、§10.6、§11
+
 ---
 
 ## 10. comptime 与 const
@@ -426,6 +506,8 @@ pub fn main() -> Unit !io =
 ```output
 55
 ```
+
+另见：[spec.md](spec.md) §7
 
 ---
 
@@ -448,6 +530,8 @@ pub fn main() -> Unit !io = {
 ```output
 7
 ```
+
+另见：[spec.md](spec.md) §9
 
 ---
 
@@ -472,6 +556,8 @@ ok
 
 最后：`dawn fmt` 统一代码风格（2 空格缩进、规整间距），`dawn fmt --check` 供 CI
 校验。养成提交前 `dawn fmt` 的习惯，代码评审就不必再争空格。
+
+另见：[spec.md](spec.md) §3.4、§1.8
 
 ---
 
@@ -521,6 +607,8 @@ pub fn main() -> Unit !io = {
 test 块，`dawn build myapp` 打成一个 jar。单文件的 `dawn run foo.dawn` 依然可用。
 循环 `use` 是编译错误；一个名字与被引入模块的别名相同也会报错——它们共享一个命名空间。
 
+另见：[spec.md](spec.md) §10.1、§10.2、§10.3
+
 ---
 
 ## 14. Map 与 Set
@@ -554,6 +642,8 @@ true
 
 键可以是任何具结构相等的类型（`Int`/`String`/元组/ADT/record）。`map.get` 返回
 `Option[V]`——查不到是 `None`，不是异常。相等与顺序无关：键值相同的两个 `Map` 相等。
+
+另见：[spec.md](spec.md) §2.2、§11
 
 ---
 
@@ -615,6 +705,8 @@ pub fn main() -> Unit !io = {
 `Char`，因为它到尾要答 `-1`——一个不是字符的哨兵住不进「每个值都是字符」的类型里
 （spec §4.8）。`cursor.find(s, sub, from)` 返回
 `Option[Cursor]`，`cursor.skip(s, c, sub)` 跳过一段已知出现的字面量。
+
+另见：[spec.md](spec.md) §1.5、§2.7、§11
 
 ---
 
@@ -757,6 +849,98 @@ true
 v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`/`Bool`/`String`
 （没有条件 impl，`List[T]` 不能做主体）；comptime 里不能用 trait 约束的调用。
 完整设计见 [trait.md](trait.md)。
+
+### 关联类型，以及 `[]` 与 `for` 背后的 trait
+
+trait 可以声明一个属于自己、由每个 impl 填上的类型：trait 里写 `type Item`，impl 里写
+`type Item = String`。签名经由类型参数够到它，写作 `C.Item`，于是泛型函数可以谈论
+「这个容器装的东西」，而不必知道那是什么：
+
+```dawn run
+trait Store[C] {
+  type Key
+  type Item
+  fn fetch(c: C, k: C.Key) -> Option[C.Item]
+}
+
+type Shelf = { names: List[String] }
+
+impl Store[Shelf] {
+  type Key = Int
+  type Item = String
+  fn fetch(c: Shelf, k: Int) -> Option[String] = get(c.names, k)
+}
+
+# 泛型的使用方：不管 store 的键和元素是什么，照原样用
+fn fetch_or[C: Store](c: C, k: C.Key, fallback: C.Item) -> C.Item =
+  match fetch(c, k) {
+    Some(x) -> x
+    None -> fallback
+  }
+
+pub fn main() -> Unit !io = {
+  let s = Shelf { names: ["tea", "rice"] }
+  println(fetch_or(s, 1, "nothing"))
+  println(fetch_or(s, 5, "nothing"))
+}
+```
+```output
+rice
+nothing
+```
+
+`fetch_or` 只对着 trait 检查一次；每个调用点上 `C.Item` 变成该 impl 绑定的类型，所以
+`fetch_or(s, 1, "nothing")` 收一个 `String`、也返回 `String`。impl 对每个关联类型恰好
+绑定一次；漏绑，或者绑了 trait 没声明的名字，都是错误。
+
+有两个内置 trait 就是这么写的，语言自己的语法正是经过它们。`Index[C]` 有 `type Idx`、
+`type Item` 和一个方法 `index`，`c[i]` 调的就是它：`List`（以 `Int` 为下标）和 `Map`
+（以键为下标）自带 impl，给自己的类型写一个 impl 就有了 `[]`。`Iter[C]` 有 `type Cur`、
+`type Item` 和四个游标方法，`for x in c` 走的就是它：
+
+```dawn run
+type Grid = { w: Int, cells: List[Int] }
+
+impl Index[Grid] {
+  type Idx = (Int, Int)
+  type Item = Int
+  fn index(g: Grid, p: (Int, Int)) -> Int = {
+    let (x, y) = p
+    g.cells[y * g.w + x]
+  }
+}
+
+type Countdown = { from: Int }
+
+impl Iter[Countdown] {
+  type Cur = Int
+  type Item = Int
+  fn iter_start(it: Countdown) -> Int = it.from
+  fn iter_done(it: Countdown, c: Int) -> Bool = c == 0
+  fn iter_next(it: Countdown, c: Int) -> Int = c - 1
+  fn iter_get(it: Countdown, c: Int) -> Int = c
+}
+
+pub fn main() -> Unit !io = {
+  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  println("${g[(2, 1)]}")
+  let launch = Countdown { from: 3 }
+  for n in launch {
+    print("${n} ")
+  }
+  println("liftoff")
+}
+```
+```output
+6
+3 2 1 liftoff
+```
+
+两个 trait 都在 prelude 里，所以两个 impl 都不需要 `use`。`[]` 只读（没有 `c[i] = v`），
+一个类型也只有一种下标类型。`index` 本身不能按名字调用，因为 `[]` 就是它的写法；
+`Iter` 的四个方法可以。
+
+另见：[spec.md](spec.md) §3.5、§4.8
 
 ## 17. 自己的效果：`effect` 与 `with handle`
 
@@ -933,6 +1117,126 @@ pub fn main() -> Unit !io = {
 
 每次安装各有各的格子。同一个效果再嵌套装一次，格子是另一套，内层攒的东西不会跑到外层去。
 
+### 标准库的效果，以及一张表做的文件系统
+
+程序平常直接调用的那几块外部世界，`std/io` 用本章一直在写的那种效果声明出来：`Fs`
+（文件）、`Env`（工作目录与环境变量）、`Proc`（运行另一个程序）、`Exit`（结束进程）和
+`Console`（写 stdout 与 stderr）。`io.read_file` 等文件函数是 `!Fs`，`io.getenv` 和
+`io.cwd` 是 `!Env`，`io.run` 是 `!Proc`。于是签名说出了函数碰的是世界的哪一块，测试也
+可以用一个假的 handler 来应答那个效果。
+
+std 自带一个现成的假实现：`std/memfs` 用内存里的一张表应答 `Fs`。
+`memfs.with_fs(tree, body)` 在 `tree` 上跑 `body`，把结果连同 `body` 跑完后的那棵树一起
+交回来。`Env` 只有两个操作，给它写个假的就是两行 `with handle`：
+
+```dawn run
+use std/io
+use std/io.{Fs, Env}
+use std/memfs
+use std/str
+
+# 签名把话说完了：它碰文件，别的什么都不碰。
+fn archive(path: String) -> Result[Int, ForeignError] !Fs = {
+  let text = io.read_file(path)?
+  io.write_file(path ++ ".bak", text)?
+  Ok(len(str.split(text, "\n")))
+}
+
+# 这个读环境，别的什么都不碰。
+fn greeting() -> String !Env =
+  match io.getenv("USER") {
+    Some(name) -> "hello, ${name}"
+    None -> "hello, stranger"
+  }
+
+pub fn main() -> Unit !io = {
+  let tree = memfs.put(memfs.empty(memfs.BASE), "notes.txt", "one\ntwo\nthree")
+  let (lines, after) = memfs.with_fs(tree, () => archive("notes.txt"))
+  println("${lines}")
+  println("${memfs.file_paths(after)}")
+  println("${memfs.text(after, "notes.txt.bak")}")
+
+  with handle Env {
+    env_cwd() => "/home/ada"
+    env_get(name) => if name == "USER" { Some("ada") } else { None }
+  }
+  println(greeting())
+}
+```
+```output
+Ok(3)
+["/dawn-memfs/notes.txt", "/dawn-memfs/notes.txt.bak"]
+Some("one\ntwo\nthree")
+hello, ada
+```
+
+`archive` 读了一个文件、写了另一个，自始至终没碰磁盘。`memfs.with_fs` 是纯的，所以同样
+几行放进 `test` 块也能用，不用建临时目录，也不用收拾。程序要接触真实世界，就在最外层
+装一次生产 handler：`io.with_fs_real(() => ...)`，以及同样形状的 `with_env_real`、
+`with_proc_real`、`with_exit_real` 和 `with_console_real`，它们都是 `!io`。（`println`
+本身目前仍是普通的 `!io`；`Console` 是给那些想让测试读回输出的代码准备的。）
+
+### 控制臂：`ctl`、`resume k` 与 `discard`
+
+到目前为止，每条臂都是应答操作，然后让调用方接着往下走。声明为 `ctl` 的效果还可以带
+**控制臂**，它拿到的是剩下的那段计算：`op(args) resume k => ...` 绑定 `k`，一个函数，
+用你传给它的值从操作之后接着往下跑。臂的值就是整个 `with handle` 块的值，所以不调用
+`k` 的臂会提前结束这个块，答案由它自己给。
+
+```dawn run
+ctl effect Check {
+  fn check(ok: Bool, why: String) -> Unit
+}
+
+fn validate(age: Int) -> String !Check = {
+  check(age >= 0, "negative")
+  check(age < 150, "too large")
+  "age ${age}"
+}
+
+fn close(name: String) -> Unit !io = println("closed ${name}")
+
+fn admit(age: Int) -> String !io = {
+  with handle Check {
+    check(ok, why) resume k =>
+      if ok {
+        k(())
+      } else {
+        discard(k)
+        "rejected: ${why}"
+      }
+  }
+  with log <- bracket("log", close)
+  "${log}: ${validate(age)}"
+}
+
+pub fn main() -> Unit !io = {
+  println(admit(30))
+  println(admit(-1))
+  println(admit(200))
+}
+```
+```output
+closed log
+log: age 30
+closed log
+rejected: negative
+closed log
+rejected: too large
+```
+
+`admit(-1)` 里，`validate` 发出 `check(false, "negative")`，臂不恢复：第二个 `check` 和
+`"age ..."` 那一行都不会跑，`"rejected: negative"` 就是 `admit` 整个块的答案。
+`admit(30)` 里臂在每次 check 都调用 `k(())`，块的其余部分最后算出的值从 `k` 里返回，
+成为臂的值。
+
+续延只能用一次：恢复两次是 panic。确定不再恢复的续延用 `discard(k)` 放弃，操作与 handler
+之间的清理靠它来跑；这里就是打印 `closed log` 的那个 `bracket`，三条路径上它都跑了。
+只是把 `k` 扔掉则什么都不跑，这是有意的：要是清理在回收器哪天轮到它时才跑，两个后端上的
+行为就会不一样。`k` 是普通函数值，也可以存起来以后再恢复。`std/io` 的 `Exit` 是 `ctl`
+效果，理由正是本节开头那一条：测试用一条不恢复的臂应答 `io.exit(1)`，把退出码当作值交回来，
+而生产环境的臂结束进程。
+
 ### v1 的边界
 
 - **尾恢复**臂就是一次普通调用、返回值即结果。声明为 `ctl` 的效果还可以带**控制臂**
@@ -952,6 +1256,238 @@ pub fn main() -> Unit !io = {
 
 完整规则见 [spec.md](spec.md) §6.5，设计取舍见
 [effects-design.md](effects-design.md)。
+
+另见：[spec.md](spec.md) §6.5、§11
+
+---
+
+## 18. 包与项目
+
+第 13 章的项目只要一个目录就够了。一旦它依赖别处的代码，就会多一个 `dawn.toml`：一份
+可选的清单，装目录约定说不出的东西，也就是项目的身份和它的依赖。目录结构、入口、模块路径
+仍归目录管；没有这个文件的项目，行为和以前完全一样。
+
+```toml
+schema = 1        # 永远是第一个键
+name = "myapp"    # 项目的身份，[a-z_][a-z0-9_]*
+```
+
+### 依赖是源码包
+
+包本身也是一个项目，有自己的 `dawn.toml` 和自己的 `src/`。下面是一个小包 `greet`，
+就放在 `myapp` 旁边：
+
+```
+greet/
+├── dawn.toml          # schema = 1, name = "greet", version = "1.0.0"
+└── src/
+    ├── hello.dawn
+    └── style.dawn
+myapp/
+├── dawn.toml
+└── src/
+    └── main.dawn
+```
+
+`greet/src/style.dawn`：
+
+<!-- doc-check: skip-check 包里的一个模块：没有 main，它的 pub(pkg) 也只在所属的包里才有意义 -->
+```dawn skip-check
+# greet 包的每个模块都看得见，包外一概看不见
+pub(pkg) fn shout(s: String) -> String = s ++ "!"
+```
+
+`greet/src/hello.dawn`：
+
+<!-- doc-check: skip-check 包的公开模块：它的 use style 要求上面那个文件在场，而包没有 main -->
+```dawn skip-check
+use style.{shout}
+
+pub fn hello(name: String) -> String = shout("hello, ${name}")
+```
+
+包内的模块按它在包自己的 `src/` 下的路径互相引入，和第 13 章一样。`dawn add` 把依赖写进
+`myapp` 的清单：
+
+```text
+$ dawn add ../greet --dir myapp
+Added greet as `greet` (path myapp/../greet)
+```
+
+```toml
+schema = 1
+name = "myapp"
+
+[deps]
+greet = "../greet"
+```
+
+`[deps]` 下的键是 `myapp` 对这个包的称呼：它就是 `use` 行的第一段。
+
+`myapp/src/main.dawn`：
+
+<!-- doc-check: skip-check 两项目示例里的使用方那一半：use greet/hello 只能经由 myapp 的 dawn.toml 解析 -->
+```dawn skip-check
+use greet/hello.{hello}
+
+pub fn main() -> Unit !io = println(hello("Dawn"))
+```
+
+`dawn run myapp` 打印 `hello, Dawn!`。
+
+### `pub(pkg)`：包内共享，包外不可见
+
+在模块私有（什么都不写）和 `pub` 之间还有第三级。`pub(pkg)` 声明对它所在包（一份
+`dawn.toml` 描述的那个单元）的每个模块可见，对包外一概不可见。`shout` 是 `greet` 的各个
+模块共用的辅助函数，`myapp` 够不着它：
+
+```text
+$ dawn run myapp      # main.dawn 里又加了一行：use greet/style.{shout}
+error: `shout` is package-private to package `greet`
+  --> myapp/src/main.dawn:2:18
+  |
+2 | use greet/style.{shout}
+  |                  ^^^^^
+  = hint: only modules of package `greet` may name it
+```
+
+`pub` 声明的签名里不许出现 `pub(pkg)` 类型，和不许模块私有类型出现在公开签名里是同一条
+规则；`dawn doc` 也只列 `pub` 的条目。没有 `dawn.toml` 的项目是一个包，打包附带的标准库
+整体也是一个包。
+
+### 远程包、版本与 MVS
+
+路径依赖适合放在你旁边的代码。发布出来的包是某个 URL 上的一个归档，用解包后内容的哈希
+钉住：
+
+```toml
+[deps.json]
+url = "https://github.com/dawnop/dawn-lang/archive/refs/tags/v0.7.0.zip"
+version = "1.0.0"
+hash = "d1:<sha256>"          # 解包后文件树的内容哈希
+subdir = "packages/json"      # 包在归档里的位置
+```
+
+这个哈希没人手算。`dawn add <url>` 会抓取归档、算哈希、读包自己的清单拿到名字和版本，
+再把条目写进去，文件其余部分的注释和排版原样保留；`--subdir` 指明包在归档里的位置，
+`--as` 换一个键。对同一个包再 add 一次会就地更新它的条目，升版本就是这么升的。
+
+一个程序里的两个包以不同版本依赖同一个第三方包时，程序只得到它的**一份**：所要求的各个
+最低版本里最高的那个。这就是最小版本选择（MVS），Go 用的那套算法；要求永远只是一个最低
+版本，没有上界，也没有排除。对 Dawn 来说只有一份不是图省事。每个「trait × 类型」在整个
+程序里恰有一个 impl（第 16 章），一个包有两份，它的每个类型就有两份，各带两个 impl。包的
+身份是它自己清单里的 `name`，不是你给它起的键，所以一个改了名的大版本（`json2`）只要保留
+旧键，照样可以写作 `use json/...`。
+
+第三张表 `[java-deps]` 列的是给第 11 章 `use java` 用的 Maven 坐标
+（`sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"`，只收精确版本）。JVM 工具链负责解析和
+下载；`dawnc` 拒绝 `use java`，也就用不上它们。设计与理由见
+[package-design.md](package-design.md) 和
+[package-visibility-design.md](package-visibility-design.md)。
+
+另见：[spec.md](spec.md) §10.1、§10.4
+
+---
+
+## 19. 后端与目标
+
+同一份源码有两种编法，第 1 章已经见过这两个驱动。`dawn` 是 JVM 后端：`dawn run` 编成
+字节码再起一个 JVM，`dawn build app -o app.jar` 写出可执行 jar，能跟着第 11 章走进
+`use java` 的也只有它。`dawnc` 是 C 后端：它发出 C 交给 `cc`，所以 `dawnc build app -o app`
+是一个哪里都没有 JVM 的 native 可执行文件，`dawnc run` 则是编出来马上运行。`check`、
+`test`、`fmt`、`doc`、`add`、`lsp` 两边都有。
+
+其中有两条都叫 native，它们是两条不同的路：
+
+| 命令 | 得到什么 | `use java` |
+|---|---|---|
+| `dawn build app -o app.jar` | 装在 jar 里的 JVM 字节码 | 可以 |
+| `dawn build app --native -o app` | 上面那个 jar，由 GraalVM `native-image` 预先编译 | 可以 |
+| `dawnc build app -o app` | 由 `cc` 编译的 C，全程没有 JVM | 不行 |
+
+不调用 Java 的程序在两边打印出相同的字节。这是验过的，不是指望：仓库让语料走两个后端，
+逐字节比对输出，而且 C 后端编得动编译器自己。
+
+### WebAssembly 与 reactor
+
+`dawnc` 还有一个目标。`dawnc build --target wasm app -o app.wasm` 用 clang 把同一份 C
+编到 `wasm32-wasip1`（要一个带 WASI sysroot 的 clang；`DAWN_WASM_CC` 可以指定别的，
+比如 wasi-sdk 的）。产物是一个普通的 WASI 命令模块：运行时调一次它的 `_start`，程序
+一直跑到结束。
+
+浏览器里的页面要的是另一种形状：一个一直活着、每来一个事件就被调一次的模块，`--reactor`
+编的就是它。这种模块没有 `_start`，只导出一个函数 `dawn_turn`，宿主每来一条消息就调它
+一次，每次调用跑一遍 `main`。把状态从这一轮带到下一轮的是 `std/reactor` 的 `serve`：它读
+一行，连同到目前为止的状态一起交给你的 step 函数，再留下 step 返回的状态。站点的
+[演示](https://dawn-lang.dawnop.com/zh/tea.html)页就是三个这样的 reactor（一个计数器、
+一个待办列表和站内搜索），各自用 `dawnc build --target wasm --reactor` 编出，由
+`packages/tea-dom` 从 JavaScript 驱动。wasm 这边只读写消息，从不碰 DOM 节点；同一个程序
+在 shell 里也能应答：`echo '{"op":"init"}' | dawn run examples/projects/tea_dom_counter`。
+设计见 [dom-bridge-design.md](dom-bridge-design.md)。
+
+### GPU：设备是一个效果
+
+`std/gpu` 给 GPU 程序的宿主一侧套上第 17 章一直在搭的那个形状：一个 `Gpu` 效果，它的操作
+分配缓冲区、往里上传、按名字启动 kernel、等待、再下载。驱动设备的函数写 `!Gpu`，由哪台
+设备应答取决于装 handler 的人。`with_gpu_fake` 用宿主内存里的一张表应答，启动 kernel 就是
+调用登记在这个名字下的宿主参考函数。它是纯的，所以下面这段在哪儿都能跑，不要 GPU、不要
+驱动，也不要 `!io`：
+
+```dawn run
+use std/gpu.{Gpu, F64, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake,
+  reference_kernels}
+
+# GPU 程序的宿主一半：分配、上传、启动、等待、读回。
+# 它唯一的效果是 `!Gpu`；由哪台设备应答，是调用方的选择。
+fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, ys)?
+  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  sync()?
+  let got = download(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+fn unknown_kernel() -> Result[Unit, ForeignError] !Gpu = {
+  let h = alloc(F64, 1)?
+  launch("vmul", 1, [handle_of(h)])
+}
+
+pub fn main() -> Unit !io = {
+  # 假设备：宿主内存里的一张表，所以在哪儿都能跑，而且是纯的
+  let sum = with_gpu_fake(reference_kernels(), () => vector_add([1.0, 2.0, 3.0], [10.0, 20.0, 30.0]))
+  println("${sum}")
+  # 设备不认识的 kernel 会被拒绝，而不是瞎猜
+  match with_gpu_fake(reference_kernels(), () => unknown_kernel()) {
+    Ok(_) -> println("ran")
+    Err(e) -> println("refused: ${e.kind}")
+  }
+}
+```
+```output
+Ok([11.0, 22.0, 33.0])
+refused: gpu.no_kernel
+```
+
+`reference_kernels()` 是假设备自带的表（`vadd`、`vadd_bf16` 和 `sum`）。同一个
+`vector_add` 一字不改，就能在真卡上跑在 `with_gpu_real(kernels, body)` 底下：它用 CUDA
+驱动应答同样的操作，`kernels` 把每个名字映到编译好的模块。这个 handler 需要 C 后端
+（在 JVM 上每个操作都答 `gpu.unsupported_backend`），还需要一台装了 NVIDIA 驱动的机器。
+
+kernel 本身也是 Dawn，对着 `packages/tileir` 写：它的 `Dev` 效果把 kernel 执行的操作记录
+下来，记录再编码成 NVIDIA 的 Tile IR 字节码，由 `tileiras` 汇编成 `with_gpu_real` 装载的
+模块。`examples/projects/gpu_fake` 是一个完整程序，九个这样的 kernel 加上它们的宿主一侧，
+在假设备上由 `packages/tileref` 里的参考实现应答。设计，以及设备一侧今天走到了哪一步，
+见 [tile-backend-design.md](tile-backend-design.md)。
+
+另见：[spec.md](spec.md) §12.1、§12.3
 
 ---
 
