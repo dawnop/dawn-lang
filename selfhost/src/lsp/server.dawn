@@ -43,7 +43,7 @@ use check/types.{Sig, builtins, sig_render}
 use front/ast.{
   Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
-use front/token.{Diag}
+use front/token.{Diag, mk_diag}
 use front/fmt
 use front/parser as source_parser
 use check/import_use
@@ -1429,13 +1429,12 @@ fn conflict_diagnostics(
   paths: Set[String]
 ) -> Map[String, List[Json]] = {
   var out: Map[String, List[Json]] = map.empty()
-  let dg = Diag {
-    msg: "multiple open documents resolve to the same file with different text",
-    lo: 0,
-    hi: 0,
-    hint: "close one duplicate URI or make their contents identical",
-    owner: None
-  }
+  let dg = mk_diag(
+    "multiple open documents resolve to the same file with different text",
+    0,
+    0,
+    "close one duplicate URI or make their contents identical"
+  )
   for uri in sort(map.keys(path_by_uri)) {
     let path = map.get(path_by_uri, uri).expect("workspace path")
     if set.has(paths, path) {

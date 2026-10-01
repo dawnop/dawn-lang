@@ -11,7 +11,7 @@ use std/io.{Fs, Proc, Env}
 use std/str
 use std/map
 use std/set
-use diagnostic.{Diag}
+use diagnostic.{Diag, diag}
 use envmem
 use manifestv.{
   ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate,
@@ -455,12 +455,12 @@ fn url_pkg_root(
     match pkgfetch.check_origin(r.url, r.hash) {
       Ok(_) -> return (Some(root), [], failed0, true)
       Err(e) -> {
-        let d = [LocDiag { path: r.mf_path, d: Diag {
-          msg: "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
-          lo: 0,
-          hi: 0,
-          hint: ""
-        } }]
+        let d = [LocDiag { path: r.mf_path, d: diag(
+          "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
+          0,
+          0,
+          ""
+        ) }]
         return (None, d, remember_mirror_failure(failed0, r.hash, r.url), false)
       }
     }
@@ -468,22 +468,22 @@ fn url_pkg_root(
   match pkgfetch.ensure_cached(r.url, r.hash) {
     Ok(_) -> {
       if io.is_dir(root) { return (Some(root), [], failed0, true) }
-      let d = [LocDiag { path: r.mf_path, d: Diag {
-        msg: "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": subdir `" ++ r.subdir ++
+      let d = [LocDiag { path: r.mf_path, d: diag(
+        "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": subdir `" ++ r.subdir ++
           "` does not exist in the archive",
-        lo: 0,
-        hi: 0,
-        hint: "the archive fetched and verified, but the `subdir` points nowhere inside it"
-      } }]
+        0,
+        0,
+        "the archive fetched and verified, but the `subdir` points nowhere inside it"
+      ) }]
       (None, d, remember_subdir_failure(failed0, r.hash, r.subdir), true)
     }
     Err(e) -> {
-      let d = [LocDiag { path: r.mf_path, d: Diag {
-        msg: "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
-        lo: 0,
-        hi: 0,
-        hint: ""
-      } }]
+      let d = [LocDiag { path: r.mf_path, d: diag(
+        "package `" ++ name ++ "` " ++ semv_show(r.version) ++ ": " ++ e,
+        0,
+        0,
+        ""
+      ) }]
       (None, d, remember_mirror_failure(failed0, r.hash, r.url), false)
     }
   }
@@ -577,13 +577,13 @@ fn select_url_deps(
     var conflict = false
     for r in rlist { if r.version == win.version && r.hash != win.hash { conflict = true } }
     if conflict {
-      diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
-        msg: "package `" ++ name ++ "` version " ++ semv_show(win.version) ++
+      diags = diags ++ [LocDiag { path: win.mf_path, d: diag(
+        "package `" ++ name ++ "` version " ++ semv_show(win.version) ++
           " is required under different hashes",
-        lo: 0,
-        hi: 0,
-        hint: "the same version must mean the same content everywhere; align the `hash` values"
-      } }]
+        0,
+        0,
+        "the same version must mean the same content everywhere; align the `hash` values"
+      ) }]
       resolved = map.insert(resolved, name, None)
       continue
     }
@@ -619,13 +619,13 @@ fn select_url_deps(
           resolved = map.insert(resolved, name, None)
         } else if declared_differs {
           let declared_version = declared.expect("different declared version")
-          diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
-            msg: "package `" ++ name ++ "` declares version " ++ semv_show(declared_version) ++
+          diags = diags ++ [LocDiag { path: win.mf_path, d: diag(
+            "package `" ++ name ++ "` declares version " ++ semv_show(declared_version) ++
               " but " ++ semv_show(win.version) ++ " was selected",
-            lo: 0,
-            hi: 0,
-            hint: "the archive's dawn.toml disagrees with the requirement; fix the version or the url"
-          } }]
+            0,
+            0,
+            "the archive's dawn.toml disagrees with the requirement; fix the version or the url"
+          ) }]
           resolved = map.insert(resolved, name, None)
         } else {
           resolved = map.insert(resolved, name, Some(rt))
@@ -703,12 +703,12 @@ fn resolve_src_deps(
           continue
         }
         if set.has(visiting, dcanon) {
-          diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-            msg: "package dependency cycle through `" ++ aname ++ "`",
-            lo: 0,
-            hi: 0,
-            hint: "a package cannot depend on itself, directly or through its dependencies"
-          } }]
+          diags = diags ++ [LocDiag { path: mf_path, d: diag(
+            "package dependency cycle through `" ++ aname ++ "`",
+            0,
+            0,
+            "a package cannot depend on itself, directly or through its dependencies"
+          ) }]
           continue
         }
         let (dmo, dmds, mfcb) = mf_get(mfc, ddir)
@@ -718,21 +718,21 @@ fn resolve_src_deps(
           Some(dm) ->
             if map.get(names, dm.name).unwrap_or(dcanon) != dcanon {
               let claimed = map.get(names, dm.name).expect("claim")
-              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-                msg: "package `" ++ dm.name ++ "` is linked from two different directories",
-                lo: 0,
-                hi: 0,
-                hint: "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
+              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+                "package `" ++ dm.name ++ "` is linked from two different directories",
+                0,
+                0,
+                "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
                   "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
-              } }]
+              ) }]
             } else if not io.is_dir(ddir ++ "/src") {
-              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-                msg: "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
+              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+                "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
                   ddir ++ "/src)",
-                lo: 0,
-                hi: 0,
-                hint: ""
-              } }]
+                0,
+                0,
+                ""
+              ) }]
               cache = map.insert(cache, dcanon, None)
             } else {
               let (tdeps, tdiags, cache1, names1, mfc1) =
@@ -753,14 +753,14 @@ fn resolve_src_deps(
               out = map.insert(out, aname, info)
             }
           None -> {
-            diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-              msg: "dependency `" ++ aname ++ "` has no dawn.toml (looked in " ++
+            diags = diags ++ [LocDiag { path: mf_path, d: diag(
+              "dependency `" ++ aname ++ "` has no dawn.toml (looked in " ++
                 ddir ++ ")",
-              lo: 0,
-              hi: 0,
-              hint: "a Dawn source package is a directory with dawn.toml (name = \"" ++
+              0,
+              0,
+              "a Dawn source package is a directory with dawn.toml (name = \"" ++
                 aname ++ "\") and src/"
-            } }]
+            ) }]
             cache = map.insert(cache, dcanon, None)
           }
         }

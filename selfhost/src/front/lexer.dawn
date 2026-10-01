@@ -14,7 +14,7 @@ use std/char
 use std/str
 use std/list
 use front/token.{
-  TokKind, Token, Seg, SText, SCode, Diag, keyword, kind_name,
+  TokKind, Token, Seg, SText, SCode, Diag, mk_diag, keyword, kind_name,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
@@ -69,11 +69,7 @@ fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
 
 fn min_or(a: Int, b: Int) -> Int = if a == -1 || b < a { b } else { a }
 
-fn mk_diag(msg: String, lo: Int, hi: Int) -> Diag =
-  Diag { msg: msg, lo: lo, hi: hi, hint: "", owner: None }
-
-fn diag_h(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
-  Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None }
+fn ldiag(msg: String, lo: Int, hi: Int) -> Diag = mk_diag(msg, lo, hi, "")
 
 fn no_segs() -> List[Seg] = []
 
@@ -378,12 +374,12 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
       MagInvalid -> (
         i,
         int_tok(text, off(s, start), off(s, i), 0),
-        [mk_diag("invalid integer literal: ${text}", off(s, start), off(s, i))]
+        [ldiag("invalid integer literal: ${text}", off(s, start), off(s, i))]
       )
       MagOverflow -> (
         i,
         int_tok(text, off(s, start), off(s, i), 0),
-        [mk_diag("integer literal out of 64-bit range: ${text}", off(s, start), off(s, i))]
+        [ldiag("integer literal out of 64-bit range: ${text}", off(s, start), off(s, i))]
       )
     }
   } else {
@@ -427,7 +423,7 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
         None -> (
           i,
           float_tok(text, off(s, start), off(s, i), 0.0),
-          [mk_diag("invalid float literal: ${text}", off(s, start), off(s, i))]
+          [ldiag("invalid float literal: ${text}", off(s, start), off(s, i))]
         )
       }
     } else {
@@ -437,12 +433,12 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
         MagInvalid -> (
           i,
           int_tok(text, off(s, start), off(s, i), 0),
-          [mk_diag("invalid integer literal: ${text}", off(s, start), off(s, i))]
+          [ldiag("invalid integer literal: ${text}", off(s, start), off(s, i))]
         )
         MagOverflow -> (
           i,
           int_tok(text, off(s, start), off(s, i), 0),
-          [mk_diag("integer literal out of 64-bit range: ${text}", off(s, start), off(s, i))]
+          [ldiag("integer literal out of 64-bit range: ${text}", off(s, start), off(s, i))]
         )
       }
     }
@@ -464,7 +460,7 @@ fn lex_string(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag
     var soft: List[Diag] = []
     while true {
       if i >= s.n || s.cps[i] == '\n' {
-        return Err((i, mk_diag("unterminated string", off(s, start), off(s, i))))
+        return Err((i, ldiag("unterminated string", off(s, start), off(s, i))))
       }
       let c = s.cps[i]
       if c == '"' {
@@ -524,7 +520,7 @@ fn lex_dollar(
     var i = at + 1
     while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
     let name = text_of(s, at + 1, i)
-    let d = diag_h("`$` followed by a name is not an interpolation: `$" ++ name ++ "`",
+    let d = mk_diag("`$` followed by a name is not an interpolation: `$" ++ name ++ "`",
       off(s, at), off(s, i),
       "write `\${" ++ name ++ "}` to interpolate it, or `\\$" ++ name ++ "` for a literal dollar sign")
     var lit = buf
@@ -610,7 +606,7 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]
         }
       }
     } else if c == '\n' {
-      return Err((i, mk_diag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
+      return Err((i, ldiag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
     } else {
       i = i + 1
     }
@@ -621,14 +617,14 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]
   }
   let code = text_of(s, code_start, i)
   if is_blank(code) {
-    return Err((i, mk_diag("empty interpolation", off(s, dollar), off(s, i) + 1)))
+    return Err((i, ldiag("empty interpolation", off(s, dollar), off(s, i) + 1)))
   }
   Ok((i + 1, Some(SCode(code, off(s, code_start))), no_diags()))
 }
 
 ## Anchored at the `${` itself: that is the token the writer has to finish.
 fn unmatched_interp(s: Src, dollar: Int, hint: String) -> Diag =
-  diag_h("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 2, hint)
+  mk_diag("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 2, hint)
 
 ## On entry `at` is the backslash; returns (position after the escape, character).
 fn lex_escape(s: Src, at: Int) -> Result[(Int, Char), (Int, Diag)] = {
@@ -653,24 +649,24 @@ fn lex_escape(s: Src, at: Int) -> Result[(Int, Char), (Int, Diag)] = {
   } else if e == 'u' {
     lex_unicode(s, i)
   } else {
-    Err((i, mk_diag("unknown escape: \\${str.from_char(e)}", off(s, at), off(s, at) + 2)))
+    Err((i, ldiag("unknown escape: \\${str.from_char(e)}", off(s, at), off(s, at) + 2)))
   }
 }
 
 ## On entry `u` is the `u` of `\u{...}`; returns (position past the `}`, character).
 fn lex_unicode(s: Src, u: Int) -> Result[(Int, Char), (Int, Diag)] = {
   if cp_at(s, u + 1) != '{' {
-    return Err((u, mk_diag("\\u must be followed by {codepoint}", off(s, u), off(s, u) + 2)))
+    return Err((u, ldiag("\\u must be followed by {codepoint}", off(s, u), off(s, u) + 2)))
   }
   var i = u + 2
   let hex_start = i
   while i < s.n && s.cps[i] != '}' { i = i + 1 }
   if i >= s.n {
-    return Err((i, mk_diag("unterminated \\u{...}", off(s, i), off(s, i) + 1)))
+    return Err((i, ldiag("unterminated \\u{...}", off(s, i), off(s, i) + 1)))
   }
   let hex = text_of(s, hex_start, i)
   let hlen = off(s, i) - off(s, hex_start)
-  let bad = mk_diag("invalid unicode codepoint: ${hex}", off(s, i) - hlen, off(s, i))
+  let bad = ldiag("invalid unicode codepoint: ${hex}", off(s, i) - hlen, off(s, i))
   match parse_int_radix(hex, 16) {
     None -> Err((i, bad))
     Some(code) ->
@@ -691,13 +687,13 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
   var i = start + 1
   var cp = ' '
   if i >= s.n || s.cps[i] == '\n' {
-    return Err((i, mk_diag(
+    return Err((i, ldiag(
       "unterminated character literal",
       off(s, start),
       off(s, start) + max2(off(s, i) - off(s, start), 1)
     )))
   } else if s.cps[i] == '\'' {
-    return Err((i, diag_h(
+    return Err((i, mk_diag(
       "empty character literal",
       off(s, start),
       off(s, i) + 1,
@@ -712,7 +708,7 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
     i = i + 1
   }
   if i >= s.n || s.cps[i] != '\'' {
-    return Err((i, diag_h(
+    return Err((i, mk_diag(
       "character literal must contain exactly one code point",
       off(s, start),
       off(s, start) + max2(off(s, i) - off(s, start), 1),
@@ -742,7 +738,7 @@ fn lex_triple(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag
   var soft: List[Diag] = []
   while true {
     if i >= s.n {
-      return Err((i, mk_diag("unterminated \"\"\" string", off(s, start), off(s, start) + 3)))
+      return Err((i, ldiag("unterminated \"\"\" string", off(s, start), off(s, start) + 3)))
     }
     if s.cps[i] == '"' && cp_at(s, i + 1) == '"' && cp_at(s, i + 2) == '"' {
       i = i + 3
@@ -773,7 +769,7 @@ fn lex_raw(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
   let content_start = i
   while i < s.n && s.cps[i] != '`' { i = i + 1 }
   if i >= s.n {
-    return Err((i, diag_h(
+    return Err((i, mk_diag(
       "unterminated raw string",
       off(s, start),
       off(s, start) + 1,
@@ -976,7 +972,7 @@ fn lex_symbol(s: Src, at: Int) -> (Int, Option[Token], Option[Diag]) = {
     return (
       at + 1,
       Some(tok(NEWLINE, "\\n", off(s, at), off(s, at) + 1)),
-      Some(diag_h(
+      Some(mk_diag(
         "Dawn has no `;` — statements are separated by newlines",
         off(s, at),
         off(s, at) + 1,
@@ -1002,7 +998,7 @@ fn lex_symbol(s: Src, at: Int) -> (Int, Option[Token], Option[Diag]) = {
     return (
       if closed { i + 2 } else { i },
       None,
-      Some(diag_h(
+      Some(mk_diag(
         "Dawn has no block comments; use `#` on each line",
         off(s, at),
         off(s, at) + 2,
@@ -1030,7 +1026,7 @@ fn lex_symbol(s: Src, at: Int) -> (Int, Option[Token], Option[Diag]) = {
         None -> (
           at + 1,
           None,
-          Some(mk_diag(
+          Some(ldiag(
             "unrecognized character: ${str.from_char(c)}",
             off(s, at),
             off(s, at) + 1
