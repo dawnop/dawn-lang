@@ -1,17 +1,15 @@
-# The package-management commands of the JVM driver: `dawn cache verify`,
-# `dawn __pkghash`, `dawn lock`, the target's `[java-deps]` resolution that
-# build, run and test re-exec under, and the jar list that re-exec
-# carries across. They lived in `main.dawn` (#201), where nothing but that
-# entry file could reach them and anyone looking for package behaviour had to
-# know to look there.
+# The package-management commands of the JVM driver: `dawn lock`, the
+# target's `[java-deps]` resolution that build, run and test re-exec under, and
+# the jar list that re-exec carries across. They lived in `main.dawn` (#201),
+# where nothing but that entry file could reach them and anyone looking for
+# package behaviour had to know to look there.
 #
 # Why `pkg/` and not `compiler_plan`: `run_lock` and `resolve_java_deps` call
 # `maven`, which is Coursier through `use java`, so they belong with the JVM
-# side of package handling next to `maven` and `vendor`. `run_cache` and
-# `run_pkghash` need only `compiler_plan/pkgfetch` and could live there, but
-# splitting five commands over two packages for the sake of two of them buys
-# nothing a reader would notice except a second place to look -- until a
-# driver that refuses `use java` wants them, which is the one reason to split.
+# side of package handling next to `maven` and `vendor`. `dawn cache verify`
+# and `dawn __pkghash` moved in here with them and moved out again to
+# `pkg/cachecmd` (#304): they need no JVM, the native driver opens them too,
+# and that driver cannot import a module whose closure says `use java`.
 #
 # Two things the driver used to lend these functions are not imported here,
 # because `pkg/` sits below `driver/` and `main` in the module order:
@@ -23,12 +21,9 @@
 #   renderer at all.
 # - `cli_error` and `path_sep` are one-liners whose output is CLI contract
 #   (`error: ` on stderr, exit 2; the host's class-path separator). Each is
-#   copied here rather than shared, as `nmain` copies `cli_error`; the
-#   in-process tests below and `scripts/selfhost-run-diff.sh` pin the bytes.
-#
-# The native driver does not open `cache` or `__pkghash` yet, although neither
-# needs a JVM: this module's `use java` keeps `nmain` from importing it, so
-# that follow-up to #201 starts by moving those two out (see `nmain.dawn`).
+#   copied here rather than shared, as `nmain` and `pkg/cachecmd` copy
+#   `cli_error`; the in-process tests below and `scripts/selfhost-run-diff.sh`
+#   pin the bytes.
 
 use std/str
 use std/io
@@ -46,52 +41,6 @@ fn cli_error(msg: String) -> Unit !Exit !Console !io = {
 }
 
 fn path_sep() -> String !io = File.pathSeparator!
-
-## `dawn cache verify` — re-hash every entry in the package cache and compare
-## it with the hash its directory name claims (PKG-02's companion command:
-## the per-use check catches the entry a build touches, this sweeps them all).
-pub fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
-  if len(rest) != 1 || rest[0] != "verify" {
-    return cli_error("usage: dawn cache verify")
-  }
-  let root = pkgfetch.cache_root()
-  let names = match io.list_dir(root) {
-    Ok(ns) -> ns
-    Err(_) -> {
-      console_println("cache is empty (" ++ root ++ ")")
-      return ()
-    }
-  }
-  var checked = 0
-  var bad = 0
-  for n in sort(names) {
-    if str.starts_with(n, "d1-") {
-      let hash = str.replace(n, "d1-", "d1:")
-      checked = checked + 1
-      match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
-        Ok(_) -> console_println("ok   ${n}")
-        Err(e) -> {
-          console_println("BAD  ${n}")
-          console_eprintln(e)
-          bad = bad + 1
-        }
-      }
-    }
-  }
-  console_println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
-      " checked, " ++ to_string(bad) ++ " bad")
-  if bad > 0 { let _ = io.exit(1) }
-}
-
-## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
-pub fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
-  let dir = if len(rest) > 0 { rest[0] } else { "." }
-  if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
-  match pkgfetch.tree_hash(dir) {
-    Ok(h) -> console_println(h)
-    Err(e) -> cli_error(e)
-  }
-}
 
 ## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
 pub fn resolve_java_deps(
@@ -306,13 +255,4 @@ test "the re-exec's jar list reads DAWN_SELFHOST_CP, and empty is none" {
   assert len(read([])) == 0
   assert len(read([("DAWN_SELFHOST_CP", "")])) == 0
   assert read([("DAWN_SELFHOST_CP", "/a.jar" ++ path_sep() ++ "/b.jar")]) == ["/a.jar", "/b.jar"]
-}
-
-test "`dawn cache` and `__pkghash` refuse what they cannot use" {
-  assert pkg_read([], () => run_cache([]))
-    == (Some(2), "error: usage: dawn cache verify\n", "")
-  assert pkg_read([("DAWN_PKG_CACHE", NO_SUCH)], () => run_cache(["verify"]))
-    == (None, "", "cache is empty (${NO_SUCH})\n")
-  assert pkg_read([], () => run_pkghash([NO_SUCH]))
-    == (Some(2), "error: not a directory: ${NO_SUCH}\n", "")
 }

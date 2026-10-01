@@ -1,0 +1,173 @@
+# `dawn cache verify` and `dawn __pkghash`, the two package commands both CLI
+# drivers open. They came out of `pkg/pkgcmd` (#304), where they had landed
+# with the rest of `main.dawn`'s package handling (#201), for one reason: the
+# native driver refuses `use java` (the `CForeign` branch of `c/emitc`, and
+# `jsig_refused` at check time), and `pkgcmd` cannot be imported without it.
+# Its `run_lock` and `resolve_java_deps` call `maven`, which is Coursier, and
+# its `path_sep` asks `java.io.File`. Neither command here needs anything but
+# `compiler_plan/pkgfetch` and `std/io`, so this module's import closure is
+# free of `use java`, and `nmain.dawn` importing it is what keeps it that way:
+# a `use java` anywhere under here stops the native driver from building
+# (`scripts/native-fixpoint.sh`, `scripts/native-cli-diff.sh`).
+#
+# Nothing here needs `path_sep`. The cache paths are joined with `/`, as
+# `pkgfetch` joins them; a Windows host is not a target of either driver.
+#
+# One driver-shaped thing is copied rather than shared: `cli_error`, whose
+# output (`error: ` on stderr, exit 2) is CLI contract, as `nmain` and `pkgcmd`
+# each keep theirs. Both drivers call these functions with the raw argv tail,
+# so the argument handling exists once and `scripts/native-cli-diff.sh` holds
+# the two binaries to the same bytes over it. The usage line says `dawn` on
+# both drivers for that reason, as every other shared refusal does.
+
+use std/str
+use std/io
+use std/io.{Fs, Env, Exit, Console}
+use compiler_plan/pkgfetch
+
+## The CLI error shape both drivers share: `error: <msg>` on stderr, exit 2.
+fn cli_error(msg: String) -> Unit !Exit !Console !io = {
+  console_eprintln("error: ${msg}")
+  let _ = io.exit(2)
+  ()
+}
+
+## `dawn cache verify` — re-hash every entry in the package cache and compare
+## it with the hash its directory name claims (PKG-02's companion command:
+## the per-use check catches the entry a build touches, this sweeps them all).
+pub fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
+  if len(rest) != 1 || rest[0] != "verify" {
+    return cli_error("usage: dawn cache verify")
+  }
+  let root = pkgfetch.cache_root()
+  let names = match io.list_dir(root) {
+    Ok(ns) -> ns
+    Err(_) -> {
+      console_println("cache is empty (" ++ root ++ ")")
+      return ()
+    }
+  }
+  var checked = 0
+  var bad = 0
+  for n in sort(names) {
+    if str.starts_with(n, "d1-") {
+      let hash = str.replace(n, "d1-", "d1:")
+      checked = checked + 1
+      match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
+        Ok(_) -> console_println("ok   ${n}")
+        Err(e) -> {
+          console_println("BAD  ${n}")
+          console_eprintln(e)
+          bad = bad + 1
+        }
+      }
+    }
+  }
+  console_println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
+      " checked, " ++ to_string(bad) ++ " bad")
+  if bad > 0 { let _ = io.exit(1) }
+}
+
+## `dawn __pkghash <dir>` — the d1 canonical tree hash.
+pub fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
+  let dir = if len(rest) > 0 { rest[0] } else { "." }
+  if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
+  match pkgfetch.tree_hash(dir) {
+    Ok(h) -> console_println(h)
+    Err(e) -> cli_error(e)
+  }
+}
+
+# ---- tests ----
+#
+# These run twice: under the JVM in `dawn test selfhost`, and under the native
+# binary in `dawnc test selfhost/src/nmain.dawn`, since nmain imports this
+# module. The cache is a real temporary directory; only the environment, the
+# console and the exit status are answered from tables.
+
+use compiler_plan/consolemem
+use compiler_plan/envmem
+use compiler_plan/exitmem
+
+## A path no case below creates.
+const NO_SUCH: String = "no-such-target-for-cachecmd"
+
+## Run one command with the console, the exit status and the environment
+## answered from tables. The answer is the status (`None`: ran to the end),
+## stderr and stdout.
+fn cache_read(
+  vars: List[(String, String)],
+  entry: fn() -> Unit !Fs !Env !Exit !Console !io
+) -> (Option[Int], String, String) !io = {
+  let ((status, log), _) = io.with_fs_real(() =>
+      envmem.with_env_table("/", vars, () =>
+          consolemem.with_console_table(() =>
+              exitmem.with_exit_capture(entry))))
+  (status, consolemem.err_text(log), consolemem.out_text(log))
+}
+
+fn scratch() -> String !Fs =
+  match io.temp_dir("", "dawn-cachecmd-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: ${e.message}")
+  }
+
+test "`dawn cache` takes exactly `verify`" {
+  let usage = (Some(2), "error: usage: dawn cache verify\n", "")
+  assert cache_read([], () => run_cache([])) == usage
+  assert cache_read([], () => run_cache(["check"])) == usage
+  assert cache_read([], () => run_cache(["verify", "extra"])) == usage
+}
+
+test "`dawn cache verify` on a cache that does not exist says so and succeeds" {
+  assert cache_read([("DAWN_PKG_CACHE", NO_SUCH)], () => run_cache(["verify"]))
+    == (None, "", "cache is empty (${NO_SUCH})\n")
+}
+
+test "`dawn cache verify` passes an entry its name matches and fails one it does not" {
+  let root = io.with_fs_real(() => scratch())
+  let pkg = "${root}/src"
+  let _ = io.with_fs_real(() => io.mkdirs("${pkg}/src"))
+  let _ = io.with_fs_real(() => io.write_file("${pkg}/src/hello.dawn", "pub fn hi() -> Int = 1\n"))
+  let hash = match io.with_fs_real(() => pkgfetch.tree_hash(pkg)) {
+    Ok(h) -> h
+    Err(e) -> panic("tree hash: ${e}")
+  }
+  let cache = "${root}/cache"
+  let good = str.replace(hash, "d1:", "d1-")
+  let _ = io.with_fs_real(() => io.mkdirs("${cache}/${good}"))
+  let _ = io.with_fs_real(() => io.write_file("${cache}/${good}/hello.dawn", "pub fn hi() -> Int = 1\n"))
+  let _ = io.with_fs_real(() => io.mkdirs("${cache}/not-an-entry"))
+  let vars = [("DAWN_PKG_CACHE", cache)]
+  # the entry holds `hello.dawn` at its root, the source tree held it under
+  # `src/`, so the two hash differently: the name is a lie
+  let (status, err, out) = cache_read(vars, () => run_cache(["verify"]))
+  assert status == Some(1)
+  assert out == "BAD  ${good}\n1 entry checked, 1 bad\n"
+  assert str.contains(err, " does not match its own name\n  named:     ${hash}\n")
+
+  # filed the way the hash was taken, the entry passes, and the directory that
+  # is not named `d1-...` is not counted
+  io.with_fs_real(() => pkgfetch.delete_tree("${cache}/${good}"))
+  let _ = io.with_fs_real(() => io.mkdirs("${cache}/${good}/src"))
+  let _ = io.with_fs_real(() => io.write_file("${cache}/${good}/src/hello.dawn", "pub fn hi() -> Int = 1\n"))
+  assert cache_read(vars, () => run_cache(["verify"]))
+    == (None, "", "ok   ${good}\n1 entry checked, 0 bad\n")
+  io.with_fs_real(() => pkgfetch.delete_tree(root))
+}
+
+test "`dawn __pkghash` prints the d1 tree hash of a directory, and refuses anything else" {
+  assert cache_read([], () => run_pkghash([NO_SUCH]))
+    == (Some(2), "error: not a directory: ${NO_SUCH}\n", "")
+  let root = io.with_fs_real(() => scratch())
+  let _ = io.with_fs_real(() => io.write_file("${root}/a.txt", "a\n"))
+  let file = (Some(2), "error: not a directory: ${root}/a.txt\n", "")
+  assert cache_read([], () => run_pkghash(["${root}/a.txt"])) == file
+  let hash = match io.with_fs_real(() => pkgfetch.tree_hash(root)) {
+    Ok(h) -> h
+    Err(e) -> panic("tree hash: ${e}")
+  }
+  assert str.starts_with(hash, "d1:")
+  assert cache_read([], () => run_pkghash([root])) == (None, "", "${hash}\n")
+  io.with_fs_real(() => pkgfetch.delete_tree(root))
+}
