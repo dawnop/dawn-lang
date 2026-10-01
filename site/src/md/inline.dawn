@@ -1,7 +1,7 @@
-# Inline markup: `code`, **bold**, *em*, [label](url), backslash escapes.
+# Inline markup: `code`, **bold**, *em*, ~~struck~~, [label](url), backslash escapes.
 # Unclosed markers degrade to literal text, so inline parsing never fails.
 
-use md/ast.{Inline, Text, Code, Bold, Em, Link}
+use md/ast.{Inline, Text, Code, Bold, Em, Del, Link}
 use md/text.{cp_at, seg}
 
 fn find_cp(cs: List[Char], from: Int, c: Char) -> Int = {
@@ -100,6 +100,19 @@ pub fn parse_inlines(s: String) -> List[Inline] = {
         out = out ++ [Code(code_span(cs, i + open, close))]
         i = close + open
       }
+    } else if c == '~' && cp_at(cs, i + 1) == '~' {
+      let close = find_pair(cs, i + 2, '~', '~')
+      if close < 0 {
+        run = run ++ [c]
+        i = i + 1
+      } else {
+        if len(run) > 0 {
+          out = out ++ [Text(from_code_points(run))]
+          run = []
+        }
+        out = out ++ [Del(parse_inlines(seg(cs, i + 2, close)))]
+        i = close + 2
+      }
     } else if c == '*' && cp_at(cs, i + 1) == '*' {
       let close = find_pair(cs, i + 2, '*', '*')
       if close < 0 {
@@ -170,6 +183,13 @@ test "links and escapes" {
     [Text("see "), Link("spec", "spec.md"), Text(".")]
   assert parse_inlines("just [brackets]") == [Text("just [brackets]")]
   assert parse_inlines("\\*literal\\*") == [Text("*literal*")]
+}
+
+test "struck text, and a lone tilde pair that stays literal" {
+  assert parse_inlines("~~gone~~ kept") == [Del([Text("gone")]), Text(" kept")]
+  assert parse_inlines("~~**a** b~~") == [Del([Bold([Text("a")]), Text(" b")])]
+  assert parse_inlines("~~open") == [Text("~~open")]
+  assert parse_inlines("a ~ b") == [Text("a ~ b")]
 }
 
 test "bold containing code" {
