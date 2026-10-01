@@ -1866,8 +1866,8 @@ pub fn main() -> Unit !io = infers_io()
 
 
 # --- the named-effect tier's status ----------------------------------------
-# The README and the front page both say, in both languages, who the
-# named-effect tier's internal consumers are. For a long time the answer was
+# The README says, in both languages, who the named-effect tier's internal
+# consumers are. For a long time the answer was
 # "nobody", and that is exactly the shape of sentence that stops being true
 # without anybody noticing; today the answer is a list, `std/io` with `Fs` and
 # `Proc` and `std/gpu` with `Gpu`, and a list is the same shape of sentence
@@ -1890,11 +1890,15 @@ pub fn main() -> Unit !io = infers_io()
 NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?(?:ctl\s+)?effect\s+[A-Za-z_]")
 NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
+#
+# The front page carried the same paragraph until 2026-10-02, when its effects
+# card shrank to one sentence that names no consumer at all
+# (docs/site-home-design.md). A page that makes no claim has nothing to hold,
+# so it left this list rather than keeping a sentence for the check's sake;
+# if the card ever says who uses the tier again, it comes back here.
 NAMED_EFFECT_STATUS = (
     ("README.md", "the tier's internal consumers are in this repository"),
     ("README.zh-CN.md", "内部使用者就在本仓"),
-    ("site/pages/home.md", "the tier's internal consumers are in this repository"),
-    ("site/pages/home.zh.md", "内部使用者就在本仓"),
 )
 # Sentences the documents used to carry, each with what it was true about.
 # Half an edit leaves the old phrase in the paragraph beside the new one, and
@@ -1940,7 +1944,7 @@ def named_effect_status_problems(sources: dict[str, str],
             bad.append(f"{rel}: listed in NAMED_EFFECT_EXPECTED as a named-effect "
                        f"declarer, but declares no effect. Either the declaration "
                        f"moved (list its new file) or the tier lost its consumer "
-                       f"(say so in the four outward documents)")
+                       f"(say so in the outward documents)")
         else:
             seen += 1
     for rel in sorted(users - set(expected)):
@@ -1957,9 +1961,9 @@ def named_effect_status_problems(sources: dict[str, str],
         if stale:
             phrase, why = stale[0]
             bad.append(f"{rel}: still says {phrase!r}, which was true when "
-                       f"{why}. It is not true today; the paragraph the four "
+                       f"{why}. It is not true today; the paragraph the "
                        f"outward documents carry has to be rewritten in all "
-                       f"four, not half-edited.")
+                       f"of them, not half-edited.")
         elif fragment not in text:
             bad.append(f"{rel}: {', '.join(expected)} declares the named-effect "
                        f"tier's internal consumer, so this document has to say so; "
@@ -2043,9 +2047,9 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
         return ["named-effect status self-test: a listed file that does not exist "
                 "stayed green"], 0
 
-    # And the documents. Four copies of one paragraph is four chances to edit
-    # three of them, so each copy is dropped in turn rather than only the
-    # README's: a control that names one file measures one file.
+    # And the documents. Several copies of one paragraph are as many chances to
+    # edit all but one of them, so each copy is dropped in turn rather than only
+    # the README's: a control that names one file measures one file.
     for rel, fragment in NAMED_EFFECT_STATUS:
         silent = dict(docs)
         silent[rel] = silent[rel].replace(fragment, "a consumer somewhere", 1)
@@ -2060,7 +2064,7 @@ def check_named_effect_status_selftest() -> tuple[list[str], int]:
     # revert, a bad merge or a copy from an older paragraph puts one back
     # while the new sentence stays in place and satisfies the fragment above.
     # Each is planted in each copy, because the stale list is shared and a
-    # phrase that only reddened README.md would leave the other three open.
+    # phrase that only reddened README.md would leave the other copies open.
     for phrase, _why in NAMED_EFFECT_STALE:
         for rel, _fragment in NAMED_EFFECT_STATUS:
             regressed = dict(docs)
@@ -2328,6 +2332,7 @@ REPOSITORY_POLICY_FILES = (
     "docs/spec.en.md",
     "site/pages/home.md",
     "site/pages/home.zh.md",
+    "site/src/gen/home.dawn",
 )
 
 # Exact corpus and artifact sizes in outward copy decay without changing any
@@ -2390,6 +2395,15 @@ RELEASE_ASSET_DECL = re.compile(r"INSTALL_ASSETS=\(\s*(.*?)\)", re.S)
 RELEASE_REPORT_DECL = re.compile(r"REPORT_ASSETS=\(\s*(.*?)\)", re.S)
 RELEASE_ASSET_UNION = 'EXPECTED_ASSETS=("${INSTALL_ASSETS[@]}" "${REPORT_ASSETS[@]}")'
 INSTALL_DOCS = ("README.md", "README.zh-CN.md")
+# The front page's install commands. They are not in site/pages/home.md: the
+# copy carries words, and shell commands read the same in both languages, so
+# the generator writes them (gen/home.install_commands, `$base/<name>` like
+# README's). They answer to the fetch comparison only; the report assets are
+# README's to name. Held here rather than by a site test because a test that
+# reads .github/ fails under the previous release's toolchain, which runs
+# `dawn test site` from a root holding only the source directories
+# (selfhost-run-diff.sh's `test site` leg went red on exactly that).
+SITE_INSTALL_SOURCES = ("site/src/gen/home.dawn",)
 
 
 def release_assets(workflow: str) -> list[str]:
@@ -2431,7 +2445,7 @@ def repository_contract_problems(files: dict[str, str]) -> tuple[list[str], int]
         bad.append(".github/workflows/release.yml: no INSTALL_ASSETS list to "
                    "check the install instructions against")
     else:
-        for rel in INSTALL_DOCS:
+        for rel in INSTALL_DOCS + SITE_INSTALL_SOURCES:
             text = files[rel]
             if RELEASE_ASSET_BASE not in text:
                 bad.append(f"{rel}: install instructions do not point at "
@@ -2957,6 +2971,17 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
         return ["repository policy self-test: dropping a checksum download from "
                 "the install instructions stayed green"], 0
 
+    site_renamed = dict(files)
+    rel = SITE_INSTALL_SOURCES[0]
+    site_renamed[rel] = site_renamed[rel].replace(
+        "$base/dawnc-linux-x86_64.sha256", "$base/dawnc-linux-amd64.sha256", 1)
+    if site_renamed[rel] == files[rel]:
+        return ["repository policy self-test: front-page install fixture was not mutated"], 0
+    bad, _ = repository_contract_problems(site_renamed)
+    if not any(problem.startswith(f"{rel}: install instructions fetch") for problem in bad):
+        return ["repository policy self-test: renaming an asset in the front page's "
+                "install commands stayed green"], 0
+
     report_renamed = dict(files)
     report_renamed[".github/workflows/release.yml"] = \
         report_renamed[".github/workflows/release.yml"].replace(
@@ -3069,7 +3094,7 @@ def check_repository_contracts_selftest() -> tuple[list[str], int]:
     bad, _ = repository_contract_problems(historical)
     if bad:
         return [f"repository policy self-test: scoped historical prose was rejected: {bad[0]}"], 0
-    return [], 12
+    return [], 13
 
 
 def read_audit_details() -> dict[str, str]:

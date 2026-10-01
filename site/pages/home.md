@@ -1,20 +1,27 @@
 # Front-page copy — English, the original
 
 Everything the front page says, in the order it says it. The generator reads
-these sections by name (`site/src/gen/copy.dawn`), so a section that is missing
+these sections by name (`site/src/gen/home.dawn`), so a section that is missing
 or renamed fails the build instead of rendering an empty page.
 
-Why the copy is here and not in `site/src/gen/pages.dawn`, where it used to
-live as string literals: the front page has a second language now, and two
-languages of prose interleaved with HTML in a source file is where a
-translation quietly stops matching. As content files they get the same
-treatment every other translated document gets — `home.zh.md` carries a digest
-of this file and `scripts/doc-check.py` goes red when the two part company.
+Why the copy is here and not in the generator, where it used to live as
+string literals: the front page has a second language, and two languages of
+prose interleaved with HTML in a source file is where a translation quietly
+stops matching. As content files they get the same treatment every other
+translated document gets — `home.zh.md` carries a digest of this file and
+`scripts/doc-check.py` goes red when the two part company.
 
 **This file is the original.** Change it first, then `home.zh.md`.
 
-`cta-playground` and `install` are written ahead of the generator change that
-places them on the page; until that lands, the generator does not read them.
+What is not here, on purpose: the programs and their output (`site/pages/*.dawn`
+and `*.out`, run by `doc-check.py`), the figures (`scripts/site-figures.sh`,
+injected at build time), and words that are code (`effect`, `comptime`,
+`match`, `!Dev`, file names), which read the same in both languages and live
+in the generator.
+
+## phase-hero
+
+**−18°** astronomical twilight
 
 ## eyebrow
 
@@ -22,7 +29,19 @@ type · match · effect · !io
 
 ## lede
 
-A small, elegant functional language: immutable data, algebraic data types with exhaustive pattern matching, effects written into the type signature. The compiler is self-hosted, and its two peer backends, JVM bytecode and C, give the same answer on the same source; a cuTile device backend takes kernels to NVIDIA GPUs, and a pure fake device gives that same answer where there is no GPU. That is checked by machine, not promised: on every push the same programs run on both backends, and a difference in their output fails the build.
+A small, elegant functional language: immutable data, algebraic data types with exhaustive matching, effects in the type signature.
+
+## fact-selfhost
+
+self-hosted compiler
+
+## fact-backends
+
+JVM and C, one answer
+
+## fact-gpu
+
+cuTile for NVIDIA GPUs
 
 ## cta-playground
 
@@ -30,46 +49,232 @@ Try in Playground →
 
 ## cta-primary
 
-Start the tutorial →
+Start the tutorial
 
-## cta-secondary
+## theme-to-dark
 
-See examples
+Switch to dark theme
 
-## install
+## theme-to-light
 
-Install: download `dawnc` (one static binary, no JVM) or `dawn-selfhost.jar` (JDK 21) from the [latest release](https://github.com/dawnop/dawn-lang/releases/latest); [chapter 1 of the tutorial](tutorial/01.html) walks through it.
+Switch to light theme
 
-## features-title
+## phase-ideas
 
-Core features
+**−12°** nautical twilight · three ideas
 
-## feature-effects-title
+## ideas-title
+
+What the signature tells you.
+
+## ideas-lede
+
+What a function touches, computes ahead of time and matches on, checked by the compiler.
+
+## idea-effects-title
 
 Effects in the type
 
-## feature-effects-body
+## idea-effects-body
 
-Functions are pure by default; touching IO requires `!io` on the signature, which tells you whether it reaches outside. A second axis is **named effects you declare**: `effect` declares the operations, `with handle` answers them, and the label travels along signatures, subtracted at the handler. A `ctl` effect may also carry a control arm, which binds the continuation instead of resuming it, once at most. Both backends implement it, and **the tier's internal consumers are in this repository**: `std/io` declares `Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, with production handlers beside the declarations and fakes in the tests. The compiler runs on the tier: its `main` is wrapped in `Fs` and `Exit` handlers, so every file it reads and every exit status goes through an effect.
+Pure by default: touching IO needs `!io`, and effects you declare are answered by `with handle`.
 
-## feature-comptime-title
+## idea-comptime-title
 
-Compile-time evaluation: comptime
+Compile-time evaluation
 
-## feature-comptime-body
+## idea-comptime-body
 
-`comptime { ... }` is executed at compile time by the interpreter and the result is burned into the constant pool. There is no macro system, and none is needed — an ordinary function already runs at compile time.
+`comptime { ... }` runs an ordinary function at compile time and burns the result into the constant pool.
 
-## feature-parity-title
+## idea-data-title
 
-Two backends, one answer
+Data and exhaustive matching
 
-## feature-parity-body
+## idea-data-body
 
-JVM bytecode and C (handed on to `cc`) are **peer** roads. Wherever divergence would be easiest, the language owns the thing itself: `Float` rendering is Schubfach in pure Dawn, the Unicode case tables belong to the compiler, `Map` iteration order is pinned to insertion. The differential corpus is compiled and run on both sides on every push, comparing stdout, stderr and exit code — a divergence is a red build.
+Immutable algebraic data, and a `match` that misses a case does not compile.
 
-## closing
+## phase-peers
 
-Start with the [tutorial](tutorial/index.html); the authoritative definition of the language is the [specification](spec.html); every [example](examples/index.html) runs as it stands under `dawn run`; the standard library API reference is [here](stdlib.html); and the [design history](design.html) is the record of the early design decisions, frozen at M7.
+**−6°** civil twilight · two backends
 
-Every page of this site comes in both languages. For the specification and the design history the Chinese text is the original and the English text is its translation; everywhere else English is the original. The code, the compiler's diagnostics and the standard library's doc comments are English throughout, including the entries on the standard library page, which are the compiler's own text.
+## peers-title
+
+Two roads, one answer.
+
+## peers-body
+
+JVM bytecode and C are **peer** backends. On every push the differential corpus runs on both, and any difference in output fails the build.
+
+## fig-native-corpus
+
+programs in the differential corpus, each run on both backends
+
+## fig-push-value
+
+every push
+
+## fig-push
+
+a difference in stdout, stderr or exit code is a red build
+
+## fig-selfhost-lines
+
+lines of Dawn in the self-hosted compiler
+
+## fork-title
+
+One source, two backends, one answer
+
+## fork-desc
+
+main.dawn is compiled to JVM bytecode and, separately, to C handed on to cc. Both programs run, and their stdout, stderr and exit code must be byte-identical; a difference is a red build.
+
+## fork-jvm
+
+runs on JDK 21
+
+## fork-c
+
+a native binary
+
+## fork-compare
+
+stdout · stderr · exit code, byte for byte
+
+## fork-red
+
+a difference is a red build
+
+## phase-gpu
+
+**−3°** first light · the GPU
+
+## gpu-title
+
+A kernel is a Dawn function too.
+
+## gpu-lede
+
+A cuTile kernel is an ordinary Dawn function under a named effect, lowered to CUDA Tile IR. A pure fake device gives the same answer with no GPU.
+
+## gpu-pipe
+
+What happens to each side
+
+## lane-device
+
+device
+
+## lane-host
+
+host
+
+## step-kernel
+
+a Dawn fn
+
+## step-record
+
+the ops it raises
+
+## step-tileir
+
+text or bytecode
+
+## step-tileiras
+
+assembles a cubin
+
+## step-launch
+
+answered by a handler
+
+## step-real
+
+the CUDA driver, native only
+
+## step-fake
+
+the host reference, pure
+
+## kernel-title
+
+The kernel
+
+## kernel-body
+
+Running it records the operations it raises; the record becomes Tile IR, and `tileiras` assembles a cubin.
+
+## kernel-out
+
+the add, in the Tile IR `dawn run` prints for it
+
+## kernel-fact-title
+
+Checked on real hardware
+
+## kernel-fact-body
+
+`tile-gpu-diff` holds each kernel against a host reference; CI reds what its ledger does not cover.
+
+## host-title
+
+The host program
+
+## host-body
+
+`with_gpu_real` answers from the CUDA driver, `with_gpu_fake` from host memory.
+
+## host-out
+
+what the same `dawn run` prints for it, under `with_gpu_fake`
+
+## host-fact-native-title
+
+Native talks to the GPU
+
+## host-fact-native-body
+
+Only native reaches `libcuda`; on the JVM a real launch is refused.
+
+## host-fact-pure-title
+
+The fake device is pure
+
+## host-fact-pure-body
+
+So a `!Gpu` program runs in its tests and at comptime.
+
+## phase-install
+
+**0°** sunrise · install
+
+## install-title
+
+Pick a road and run it.
+
+## install-lede
+
+Two toolchains on every release, each with its SHA-256.
+
+## road-native
+
+Without a JVM
+
+## road-native-tags
+
+static · C backend · std inside
+
+## road-jvm
+
+With JDK 21
+
+## road-jvm-tags
+
+any platform · JVM backend · std inside
+
+## install-foot
+
+[Latest release](https://github.com/dawnop/dawn-lang/releases/latest) · [Tutorial, chapter 1](tutorial/01.html) · [Specification](spec.html) · [Examples](examples/index.html)

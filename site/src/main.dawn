@@ -2,7 +2,8 @@
 # Run via site/build.sh (which feeds it dawn doc --stdlib output), or
 # directly from the repo root: dawn run site
 
-use gen/pages.{build_stamp, gen_assets, gen_index, gen_spec, gen_design, gen_playground, gen_tea}
+use gen/pages.{build_stamp, gen_assets, gen_spec, gen_design, gen_playground, gen_tea}
+use gen/home.{gen_index, site_figures}
 use html/page.{En, Zh}
 use gen/tutorial.{gen_tutorial}
 use gen/examples.{gen_examples}
@@ -20,10 +21,15 @@ pub fn main() -> Unit !io = {
     # visitor on a stale copy. Every page below links to what this hands back.
     # The release and commit the footer prints; see gen/pages.build_stamp.
     let assets = gen_assets(out, with_env_real(() => build_stamp()))
+    # The front page's figures, from scripts/site-figures.sh by way of the
+    # environment site/build.sh sets. Read before anything is written: a build
+    # without them stops here (gen/home.read_figure) rather than half way
+    # through the site.
+    let figs = with_env_real(() => site_figures())
     # English is the site's default and lives at `/`; the Chinese front page
     # is at `/zh/`. Every page below is paired the same way.
-    gen_index(out, assets, En)
-    gen_index(out, assets, Zh)
+    gen_index(out, assets, En, figs)
+    gen_index(out, assets, Zh, figs)
     # The tutorial is the second paired document: English at /tutorial/, its
     # translation at /zh/tutorial/, each page linked to its twin.
     gen_tutorial(out, assets, En)

@@ -1,18 +1,17 @@
-# The single-document pages: index, spec, design, playground, plus assets.
+# The single-document pages: spec, design, playground, the demo, plus assets.
+# The front page is gen/home.dawn's.
 
 use std/str
 use std/io
 use std/io.{Fs, Env, getenv}
 use std/bytes
-use md/ast.{Block, Para, Text}
+use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path, plain_assets, playground_label}
-use html/play.{Play, play_block}
+use html/page.{Assets, Lang, En, Zh, page_with_toc, shell_ext, lang_path, plain_assets}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
-use gen/copy.{Copy, load_copy, line, line_opt, body}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 
@@ -100,6 +99,17 @@ pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
   # nobody had checked was the same one.
   let api = read_api()
   let style = emit_text(out, "style.css", str.trim(must_read("site/assets/style.css")))
+  # The front page's monospace face, self-hosted so the site makes no request
+  # to anybody else (docs/site-home-design.md). Written before the stylesheet
+  # that names them, because that stylesheet names them by the hashed name
+  # they get here.
+  let mono = emit_asset(out, "JetBrainsMono-Regular.woff2",
+    read_bin("site/assets/fonts/JetBrainsMono-Regular.woff2"))
+  let mono_medium = emit_asset(out, "JetBrainsMono-Medium.woff2",
+    read_bin("site/assets/fonts/JetBrainsMono-Medium.woff2"))
+  let home_css = emit_text(out, "home.css",
+    repoint_url(repoint_url(str.trim(must_read("site/assets/home.css")),
+      "JetBrainsMono-Regular.woff2", mono), "JetBrainsMono-Medium.woff2", mono_medium))
   # The bracket-cat mark, in the four shapes the places it appears will take.
   # The SVG is the mark; the three rasters are the same drawing rendered for
   # formats that cannot hold a vector, and scripts/render-brand.py is what
@@ -154,6 +164,9 @@ pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
     search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
     search_en: emit_text(out, "search-en.json", search_index(api, En)),
     search_zh: emit_text(out, "search-zh.json", search_index(api, Zh)),
+    home_css: home_css,
+    home_js: emit_text(out, "home.js", str.trim(must_read("site/assets/home.js"))),
+    mono_font: mono,
     build: build,
   }
 }
@@ -196,6 +209,22 @@ fn repoint(text: String, spec: String, name: String) -> String !io = {
   }
 }
 
+## Point a `url("<name>")` in a stylesheet at the name the file really got.
+##
+## Relative, so the stylesheet resolves it next to itself in /assets/ and its
+## bytes do not depend on where a page sits. A stylesheet that stopped naming
+## the file would otherwise keep fetching the plain-name alias, whose URL does
+## not change when its bytes do, so a miss stops the build like [repoint].
+fn repoint_url(css: String, name: String, hashed: String) -> String !io = {
+  let quoted = `url("` ++ name ++ `")`
+  if str.contains(css, quoted) {
+    str.replace(css, quoted, `url("` ++ hashed ++ `")`)
+  } else {
+    panic("site/assets/home.css has no `url(\"${name}\")` to point at the hashed font; "
+        ++ "the face would be fetched under a name the cache cannot see change")
+  }
+}
+
 ## One demo reactor, or a placeholder that says so. The wasm is a build product
 ## (site/build.sh), not a tracked file, so a checkout that has never had a wasm
 ## toolchain still builds the whole site; the demo page then fails to compile
@@ -218,169 +247,6 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
       emit_text(out, name, stub)
     }
   }
-
-# A front-page program: its source, highlighted, and the stdout it really
-# produces. `<stem>.out` is not decoration -- scripts/doc-check.py runs
-# `<stem>.dawn` and holds it to these exact bytes, so a snippet that stopped
-# compiling, or one that still compiles and now prints something else, turns
-# the gate red. Reading it with must_read is the other half: a card cannot be
-# added without an expectation, because the build dies without the file.
-fn card_source(base: String) -> String !Fs =
-  highlight_dawn(str.trim(must_read("${base}.dawn")))
-
-fn card_output(base: String) -> String !Fs =
-  `<pre class="output"><code>` ++ escape_html(str.trim(must_read("${base}.out"))) ++
-  "</code></pre>"
-
-## The two buttons under the lede, and the install line under them.
-##
-## With a `cta-playground` section in the copy the buttons are Playground and
-## Tutorial: trying the language in the browser is the one thing a first
-## visitor can do in a click, and the Playground was otherwise only the sixth
-## item of the nav. `cta-secondary` (the gallery) then goes unread; the
-## Examples nav item is still one click away. Without that section the row is
-## the older Tutorial and Examples, so the page builds from copy written
-## before or after the change (see gen/copy.line_opt).
-fn cta_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String = {
-  # every button stays in the language of the page it is on
-  let tut = lang_path(lang, "tutorial/index.html")
-  let cta_tut = line(c, "cta-primary", mu)
-  let buttons =
-    match line_opt(c, "cta-playground", mu) {
-      Some(cta_play) -> {
-        let play = lang_path(lang, "playground.html")
-        """<a class="btn btn-primary" href="${root}/${play}">${cta_play}</a>""" ++ "\n"
-          ++ """<a class="btn btn-ghost" href="${root}/${tut}">${cta_tut}</a>"""
-      }
-      None -> {
-        let exs = lang_path(lang, "examples/index.html")
-        """<a class="btn btn-primary" href="${root}/${tut}">${cta_tut}</a>""" ++ "\n"
-          ++ """<a class="btn btn-ghost" href="${root}/${exs}">""" ++ line(c, "cta-secondary", mu)
-          ++ "</a>"
-      }
-    }
-  let install =
-    match line_opt(c, "install", mu) {
-      Some(text) -> "\n" ++ `<p class="install">` ++ text ++ "</p>"
-      None -> ""
-    }
-  `<div class="cta-row">` ++ "\n" ++ buttons ++ "\n</div>" ++ install
-}
-
-fn copy_of(entries: List[(String, String)]) -> Copy =
-  Copy {
-    path: "test",
-    sections: map(entries, e => {
-      let (k, v) = e
-      (k, [Para([Text(v)])])
-    }),
-  }
-
-## Both shapes of the row, so that the copy can land before or after this.
-test "the hero offers the playground first when the copy has the section" {
-  let older = copy_of([("cta-primary", "Tutorial"), ("cta-secondary", "Examples")])
-  let o = cta_html(older, u => u, En, ".")
-  assert str.contains(o, `<a class="btn btn-primary" href="./tutorial/index.html">Tutorial</a>`)
-  assert str.contains(o, `<a class="btn btn-ghost" href="./examples/index.html">Examples</a>`)
-  assert not str.contains(o, "install")
-  let newer = copy_of([("cta-playground", "Try"), ("cta-primary", "Tutorial"),
-    ("cta-secondary", "Examples"), ("install", "Get it")])
-  let n = cta_html(newer, u => u, Zh, "..")
-  assert str.contains(n, `<a class="btn btn-primary" href="../zh/playground.html">Try</a>`)
-  assert str.contains(n, `<a class="btn btn-ghost" href="../zh/tutorial/index.html">Tutorial</a>`)
-  assert not str.contains(n, "examples/index.html")
-  assert str.ends_with(n, `</div>` ++ "\n" ++ `<p class="install">Get it</p>`)
-}
-
-fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !Fs = {
-  let src = str.trim(must_read("site/pages/hero.dawn"))
-  let out = card_output("site/pages/hero")
-  let eyebrow = line(c, "eyebrow", mu)
-  let lede = line(c, "lede", mu)
-  # The program in the window opens in the Playground the way a tutorial
-  # block does, through the same link (html/play.dawn), so the fragment is the
-  # one gen/links already knows how to check.
-  let play = Play {
-    href: "${root}/" ++ lang_path(lang, "playground.html"),
-    label: playground_label(lang),
-  }
-  let code = play_block(play, `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>",
-    src)
-  """
-<section class="hero">
-<div class="hero-copy">
-<p class="eyebrow">${eyebrow}</p>
-<h1 class="wordmark">Dawn</h1>
-<p class="lede">${lede}</p>
-${cta_html(c, mu, lang, root)}
-</div>
-<figure class="code-window">
-<figcaption class="code-window__bar"><span class="fname">main.dawn</span><span class="run">dawn run</span></figcaption>
-${code}
-${out}
-</figure>
-</section>
-"""
-}
-
-fn feature_block(title: String, desc: String, base: String) -> String !Fs = {
-  let hl = card_source(base)
-  let out = card_output(base)
-  """
-<article class="feature">
-<div class="feature-text">
-<h3>${title}</h3>
-<p>${desc}</p>
-</div>
-<div class="feature-code"><pre class="dawn"><code>${hl}</code></pre>
-${out}</div>
-</article>
-"""
-}
-
-## The three feature cards. The copy comes from the page's copy file; the
-## programs beside it do not -- they are the same four programs in both
-## languages, because their comments are English like the rest of the code in
-## this repository, and doc-check.py holds every one of them to the output
-## printed next to it.
-fn feature_section(c: Copy, mu: fn(String) -> String) -> String !Fs = {
-  let f1 = feature_block(line(c, "feature-effects-title", mu),
-    line(c, "feature-effects-body", mu), "site/pages/feat_effects")
-  let f2 = feature_block(line(c, "feature-comptime-title", mu),
-    line(c, "feature-comptime-body", mu), "site/pages/feat_comptime")
-  let f3 = feature_block(line(c, "feature-parity-title", mu),
-    line(c, "feature-parity-body", mu), "site/pages/feat_parity")
-  "<h2>" ++ line(c, "features-title", mu) ++ "</h2>\n" ++
-    `<div class="feature-list">` ++ "\n" ++ f1 ++ f2 ++ f3 ++ "</div>"
-}
-
-## The front page, in one language. English is the site's default and is
-## written first: it is at `/`, and the Chinese translation is at `/zh/`.
-##
-## The direction is the point. Whichever version is derived is the one that
-## goes stale, and the outward-facing page is read mostly by people who cannot
-## read the other one -- so making English the derivative would put the rot on
-## the face that everybody sees and nobody proofreads. This way it lands on
-## the Chinese text, whose reader is the author, and doc-check.py's
-## translation digest says when it has.
-pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
-  let docs = doc_files()
-  let (src, dst, root, title) =
-    match lang {
-      En -> ("site/pages/home.md", "${out}/index.html", ".",
-        "Dawn — a small, elegant functional language")
-      Zh -> ("site/pages/home.zh.md", "${out}/zh/index.html", "..", "Dawn 语言")
-    }
-  let c = load_copy(src)
-  let mu = (u: String) => map_doc_url(root, docs, u)
-  let page_body = `<main class="home">` ++ "\n" ++ hero_html(c, mu, lang, root) ++ "\n</main>\n" ++
-    `<section class="features">` ++ "\n" ++ feature_section(c, mu) ++ "\n" ++
-    body(c, "closing", mu) ++ "\n</section>"
-  # `index.html` is the pair's path in the default layout; the shell derives
-  # both the switch link and the hreflang URLs from it, so neither branch above
-  # has to spell out where the other one lives.
-  write_page(dst, shell(a, lang, "index.html", title, root, "", page_body))
-}
 
 ## The spec and the design notes, each one document rendered whole, and each
 ## one a pair since 2026-08-07: the Chinese is the original and the English is

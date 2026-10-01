@@ -3,6 +3,8 @@
 静态站点，**生成器用 Dawn 写**（dogfood M4 的模块系统 / Map / 字符串 API）。
 产物是 HTML + CSS（代码高亮在构建期完成，内容页零 JS）；nginx 托管。唯一的例外是
 Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`/api/check`。
+首页另有自己的 `home.css` 与 `home.js`（主题切换、日月轮转、计数），只有首页加载，
+无脚本时首页照样完整可读；设计与取舍见 [docs/site-home-design.md](../docs/site-home-design.md)。
 
 - 域名：`https://dawn-lang.dawnop.com`（与 GitHub 仓库名一致）
 - 验收：站点上线，且生成它的程序是 Dawn 写的；生成器 JVM 与 native 跑出的
@@ -19,6 +21,7 @@ Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`
 site/
 ├── src/            # 生成器（纯 Dawn，dawn run site 直接跑）
 │   ├── main.dawn   # 组装：读 docs/ + examples/ → 写 dist/
+│   ├── gen/home.dawn  # 首页「Horizon」：自己的壳、页上程序、数字（DAWN_SITE_FIG_*）
 │   ├── gen/copy.dawn  # 首页文案（`## key` 分节的 Markdown），不再是 Dawn 里的字符串字面量
 │   ├── gen/assets.dawn  # 共用资产的语言检查：CSS `content:` 注入的字，两棵树各一份
 │   ├── gen/fingerprint.dawn  # 资产文件名里的内容哈希（sha2），配 /assets/ 的 immutable 头
@@ -27,7 +30,9 @@ site/
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
 ├── assets/         # style.css 等文本资产（内容不变，名字带哈希后拷入 dist/assets/）
-├── pages/          # 站点专属内容（home.md 正本 / home.zh.md 译本；首页样例与特性卡的 .dawn + 实测输出 .out）
+│   └── fonts/      # 首页的 JetBrains Mono（Regular/Medium woff2 + OFL），自托管
+├── pages/          # 站点专属内容（home.md 正本 / home.zh.md 译本；首页每段程序的 .dawn
+│                   # 或指向项目的 .project，加实测输出 .out，doc-check 逐字节对拍）
 ├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
 │   └── samples/    # 侧边栏的起手程序：真 .dawn + 实测 .out，由 samples.ts 用
 │                   # Vite `?raw` 内联。以前是 TS 模板字符串里的代码，任何按 .dawn
@@ -98,7 +103,7 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `/` | **首页（英文，正本）**：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/home.md` + `hero/feat_*.dawn` 与同名 `.out` |
+| `/` | **首页（英文，正本）**：hero、三个概念、两个后端（数字来自 `scripts/site-figures.sh`）、GPU、安装 | `site/pages/home.md` + `hero`/`feat_*`/`hello.dawn`、`gpu_fake.project` 与同名 `.out` |
 | `/zh/index.html` | 首页（中文译本）：内容同上 | `site/pages/home.zh.md` + 同一批 `.dawn`/`.out` |
 | `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |

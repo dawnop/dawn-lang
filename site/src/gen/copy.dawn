@@ -15,7 +15,9 @@
 #
 # Missing sections are fatal rather than empty. A front page that renders with
 # a blank lede is the failure this file's whole shape exists to avoid: it looks
-# like a page.
+# like a page. There is no optional section: `line_opt` let the hero build from
+# copy written before or after one generator change, and it went when the
+# front page was redrawn (2026-10-02) and nothing read it any more.
 
 use std/str
 use md/ast.{Block, Heading, Para}
@@ -88,19 +90,13 @@ pub fn line(c: Copy, key: String, map_url: fn(String) -> String) -> String =
     _ -> panic("${c.path}: `## ${key}` must be exactly one paragraph")
   }
 
-## [line] for a section the page can do without: `None` when the file has no
-## such section, and the same stop as [line] when it has one of the wrong
-## shape.
-##
-## The one exception to "missing is fatal", and a deliberate one. The copy
-## and the generator are edited in separate changes, so for as long as one of
-## them has landed and the other has not, the front page has to build from
-## either side: the new hero sections (`cta-playground`, `install`) are read
-## through this, and the page keeps its older shape without them.
-pub fn line_opt(c: Copy, key: String, map_url: fn(String) -> String) -> Option[String] =
-  match find_section(c, key) {
-    Some(_) -> Some(line(c, key, map_url))
-    None -> None
+## A one-paragraph section as plain text, markup dropped and nothing escaped:
+## for the places HTML cannot go, an attribute value or an SVG `<text>`, whose
+## caller escapes it for the context it lands in.
+pub fn plain(c: Copy, key: String) -> String =
+  match section(c, key) {
+    [Para(items)] -> inline_text(items)
+    _ -> panic("${c.path}: `## ${key}` must be exactly one paragraph")
   }
 
 ## A section as block HTML: prose that keeps its own `<p>`, lists and links.
@@ -115,16 +111,19 @@ test "sections split on ## and prose above the first one is dropped" {
     assert line(c, "eyebrow", keep_url) == "type · match · effect · !io"
     assert str.contains(line(c, "cta-primary", keep_url), "tutorial")
     # inline code in the copy becomes markup, which is why the copy is Markdown
-    assert str.contains(line(c, "feature-effects-body", keep_url), "<code>!io</code>")
-    # a multi-paragraph section keeps its own <p>
-    assert str.contains(body(c, "closing", keep_url), "<p>")
+    assert str.contains(line(c, "idea-effects-body", keep_url), "<code>!io</code>")
+    # and strong emphasis, which the depression labels use for their angle
+    assert str.starts_with(line(c, "phase-hero", keep_url), "<strong>")
+    # a section rendered as blocks keeps its own <p>
+    assert str.contains(body(c, "lede", keep_url), "<p>")
   })
 }
 
-test "an optional section is None when absent and the same line when present" {
+test "a plain section drops the markup and escapes nothing" {
   with_fs_real(() => {
     let c = load_copy("site/pages/home.md")
-    assert line_opt(c, "no-such-section", keep_url) == None
-    assert line_opt(c, "eyebrow", keep_url) == Some(line(c, "eyebrow", keep_url))
+    assert plain(c, "idea-effects-body") ==
+      "Pure by default: touching IO needs !io, and effects you declare are answered by with handle."
+    assert plain(c, "phase-hero") == "−18° astronomical twilight"
   })
 }
