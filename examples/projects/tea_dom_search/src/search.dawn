@@ -17,12 +17,11 @@
 #
 #   two state cells     [scan] carries `hits` and `chosen` in one
 #                       `with handle`. They are not the same quantity: the
-#                       first is every match in display order, the second is
-#                       the href the selection lands on, and it is decided by
-#                       comparing the running ordinal with the selection at
-#                       the moment the match is found. Nothing outside the
-#                       arm can see the ordinal, and nothing but a second pass
-#                       could recover `chosen` from `hits`.
+#                       first is every match in display order, numbered, the
+#                       second is the href the selection lands on, and it is
+#                       decided by comparing the running ordinal with the
+#                       selection at the moment the match is found. Nothing
+#                       outside the arm can see the ordinal.
 #
 #   a reader effect     Every link this view builds needs the page's distance
 #                       from the site root, and every label needs its
@@ -34,9 +33,19 @@
 #
 # The index arrives as flags -- one string the page has and the guest does not
 # -- and is split from the mutable model at init. `serve_with_state` roots that
-# read-only value inside the guest, so only query/selection/open/navigation
-# cross the wire on a keystroke. A wasm call enters main afresh, but the root's
-# lifetime is the module instance rather than that one call.
+# read-only value inside the guest, so only query/selection/open/navigation and
+# the ids of the current hits cross the wire on a keystroke. A wasm call enters
+# main afresh, but the root's lifetime is the module instance rather than that
+# one call.
+#
+# The ranking runs in `update`, once per change of the query, and its answer is
+# a field of the model. A turn computes `view` twice (the old tree to route the
+# event, the new one to diff against), and a typed character is two turns, its
+# `keydown` and its `input`: when the ranking lived in `view` (and `pressed`
+# ranked again to find the last row), a character walked the whole index five
+# times and an arrow key three. Now a character walks it once and an arrow key
+# not at all. The index is lowercased and split into words once, at init, for
+# the same reason.
 #
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
@@ -46,6 +55,8 @@
 
 use std/str
 use std/list
+use std/char
+use std/cursor
 use json/value.{Json, JNull, JBool, JInt, JStr, JArr, JObj}
 use json/parser.{parse}
 use json/render.{render}
@@ -58,7 +69,7 @@ use tea_dom/dsl.{el, div, span, text, input, on_value, on_key}
 ## is called, the one line under the name, and where it lives.
 ##
 ## `detail` is a signature for an API entry and the document's name for a
-## section; `note` is the first line of a doc comment, or empty. `href` is
+## section; `note` is the first sentence of a doc comment, or empty. `href` is
 ## relative to the SITE root, not to the page the panel is open on -- the page
 ## supplies its own distance and [link] joins the two.
 pub type Entry = {
@@ -78,6 +89,17 @@ pub type Hit = { entry: Entry, at: Int }
 ## current selection resolves to.
 pub type Scan = { hits: List[Hit], chosen: String }
 
+## What init derives from one entry so that a keystroke does not have to: the
+## position of its group in the panel's order (-1 for a group the panel does
+## not draw), its title lowercased, the words of its title, and the words of
+## its title, signature and note together.
+pub type Key = {
+  group: Int,
+  title: String,
+  heads: List[String],
+  words: List[String],
+}
+
 ## What init retains in the guest. There is deliberately no update that returns
 ## this type: the index, root and language belong to one successful init and a
 ## later successful init is the only operation that may replace them.
@@ -85,6 +107,7 @@ pub type State = {
   root: String,
   lang: String,
   entries: List[Entry],
+  keys: List[Key],
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
@@ -96,11 +119,15 @@ pub type State = {
 ## an instruction dressed as a state change. Enter answers
 ## `SendMsg(Chose(href))` instead, and `Chose` is the only arm that writes
 ## `goto`. The model the turn ends with is the same one, byte for byte.
+##
+## `hits` is what [search] answered for `query`: ids into the index, in the
+## order the panel shows them, at most [cap] of them. Only `Typed` writes it.
 pub type Model = {
   query: String,
   sel: Int,
   open: Bool,
   goto: String,
+  hits: List[Int],
 }
 
 ## What the two listeners mean, plus the one message no listener produces.
@@ -137,20 +164,35 @@ pub effect Emit {
   fn emit(w: Node[Msg]) -> Unit
 }
 
-# ---- the four groups ------------------------------------------------------
+# ---- the five groups ------------------------------------------------------
 
-## A group of results, in the order the panel shows them. The id is what an
-## index entry's `group` field carries, so this table is also the registration:
-## an entry whose group is not one of these four is never shown at all, and
-## the test below is what says the index agrees.
+## A group of results. The id is what an index entry's `group` field carries,
+## so this table is also the registration: an entry whose group is not one of
+## these five is never shown at all, and the test below is what says the index
+## agrees. The order here breaks ties only; a group's place in the panel is
+## its best match ([arrange]).
 type Group = { id: String, en: String, zh: String }
 
 fn groups() -> List[Group] = [
   Group { id: "stdlib", en: "Standard library", zh: "标准库" },
-  Group { id: "spec", en: "Spec and design", zh: "规范与设计" },
+  Group { id: "spec", en: "Spec", zh: "规范" },
   Group { id: "tutorial", en: "Tutorial", zh: "教程" },
   Group { id: "examples", en: "Examples and pages", zh: "示例与页面" },
+  Group { id: "history", en: "History", zh: "设计史" },
 ]
+
+## Where `id` stands in [groups], or -1 when the panel does not draw it.
+fn group_index(id: String) -> Int = {
+  var at = -1
+  var i = 0
+  for g in groups() {
+    if at < 0 && g.id == id {
+      at = i
+    }
+    i = i + 1
+  }
+  at
+}
 
 fn group_label(g: Group, code: String) -> String =
   if code == "zh-CN" { g.zh } else { g.en }
@@ -173,73 +215,362 @@ fn empty_line(code: String) -> String =
 fn prompt_line(code: String) -> String =
   if code == "zh-CN" { "输入以搜索。" } else { "Type to search." }
 
-# ---- scoring --------------------------------------------------------------
+# ---- words ----------------------------------------------------------------
+#
+# The tokenizer is written twice, here and in site/src/gen/search.dawn,
+# because the two are separate programs that cannot share a line of code. The
+# rule is short enough to state in full, and a pair of tests that name each
+# other pins both copies to the same samples:
+#
+#   lowercase; split on every character that is not an ASCII letter or digit,
+#   `_`, `!`, `.`, or a letter or digit beyond ASCII; strip the dots off both
+#   ends of a run; then a run made of pieces joined by `.`, `_` or `!` yields
+#   each piece and then the run itself, so `io.read_file` is `io`, `read`,
+#   `file` and `io.read_file`, and `!Fs` is `fs` and `!fs`.
+#
+# Letters beyond ASCII are kept because the Chinese index is searched in
+# Chinese. They are not split any further: Chinese has no spaces to split on,
+# and the panel reaches inside such a run with a substring test instead
+# ([Fit]).
 
-## The ranks a match can have, best first. A list rather than a range because
-## it is read as an order and not as arithmetic, and because [probe] walks it.
-fn ranks() -> List[Int] = [5, 4, 3, 2, 1]
+## What a code point is to the tokenizer: 0 between runs, 1 a dot, 2 one of
+## the other two joints, 3 a character of a piece.
+fn kind_of(k: Int) -> Int =
+  if (k >= 97 && k <= 122) || (k >= 48 && k <= 57) {
+    3
+  } else if k == 46 {
+    1
+  } else if k == 95 || k == 33 {
+    2
+  } else if k > 127 && is_wide_alnum(k) {
+    3
+  } else {
+    0
+  }
+
+fn is_wide_alnum(k: Int) -> Bool =
+  match char.of(k) {
+    Some(c) -> char.is_alnum(c)
+    None -> false
+  }
+
+## The words of `s`, by the rule at the head of this section.
+##
+## One walk with a cursor, and one slice per word. Init runs this over every
+## title, signature and note in the index and it is most of what init costs,
+## which is why it is a state machine rather than the three passes the rule
+## reads as: over the live index the passes took 42 ms and this takes 3
+## (wasm, Node 26). site/src/gen/search.dawn keeps the three-pass reading; the
+## pair of tests is what says the two agree.
+##
+## Not deduplicated across runs: a word that occurs twice is two entries, and
+## matching does not care.
+pub fn tokens(s: String) -> List[String] = {
+  let t = str.to_lower(s)
+  var out: List[String] = []
+  var at = cursor.start(t)
+  # where the run began, where its current piece began, and just past its last
+  # character that is not a dot -- the end of the run once the dots are off
+  var run_from = at
+  var piece_from = at
+  var last_end = at
+  var in_run = false
+  var in_piece = false
+  var pieces = 0
+  # whether a joint stands inside the run, and whether a dot has been seen
+  # that only counts as inside once another piece follows it
+  var joined = false
+  var pending = false
+  var go = true
+  while go {
+    let fin = cursor.done(t, at)
+    let cls = if fin { 0 } else { kind_of(cursor.char(t, at)) }
+    let nx = cursor.next(t, at)
+    if cls == 3 {
+      if not in_run {
+        in_run = true
+        run_from = at
+        pieces = 0
+        joined = false
+        pending = false
+      }
+      if not in_piece {
+        in_piece = true
+        piece_from = at
+        if pending {
+          joined = true
+          pending = false
+        }
+      }
+      last_end = nx
+    } else {
+      if in_piece {
+        out = out ++ [cursor.slice(t, piece_from, at)]
+        pieces = pieces + 1
+        in_piece = false
+      }
+      if cls == 2 {
+        if not in_run {
+          in_run = true
+          run_from = at
+          pieces = 0
+          pending = false
+        }
+        joined = true
+        last_end = nx
+      } else if cls == 1 {
+        if in_run {
+          pending = true
+        }
+      } else {
+        if in_run && pieces > 0 && joined {
+          out = out ++ [cursor.slice(t, run_from, last_end)]
+        }
+        in_run = false
+        go = not fin
+      }
+    }
+    at = nx
+  }
+  out
+}
+
+## The runs of `s`, lowercased, dots and all.
+fn runs(s: String) -> List[String] = {
+  let t = str.to_lower(s)
+  var out: List[String] = []
+  var at = cursor.start(t)
+  var from = at
+  var in_run = false
+  var go = true
+  while go {
+    let fin = cursor.done(t, at)
+    let cls = if fin { 0 } else { kind_of(cursor.char(t, at)) }
+    if cls != 0 {
+      if not in_run {
+        in_run = true
+        from = at
+      }
+    } else {
+      if in_run {
+        out = out ++ [cursor.slice(t, from, at)]
+      }
+      in_run = false
+      go = not fin
+    }
+    at = cursor.next(t, at)
+  }
+  out
+}
+
+## `w` without the dots at its start, and at its end too when `both`.
+fn trim_dots(w: String, both: Bool) -> String = {
+  var s = w
+  while str.starts_with(s, ".") {
+    s = str.drop(s, 1)
+  }
+  while both && str.ends_with(s, ".") {
+    s = str.take(s, str.len(s) - 1)
+  }
+  s
+}
+
+## How one word of a query has to meet a word of an entry.
+##
+## `Whole` for every word but the last, which is `Start` because the reader is
+## still typing it. `Within` for a word beyond ASCII, wherever it stands: a
+## Chinese run is a whole phrase, and a reader looking for `效果` means the one
+## inside `命名效果` too.
+pub type Fit =
+  | Whole
+  | Start
+  | Within
+derive Show
+
+pub type Term = { word: String, fit: Fit }
+
+## A query's words, each with how it has to fit.
+##
+## The runs of the same rule, but not its pieces: a query word is matched
+## against an entry's pieces *and* runs, so `fs` finds `!Fs` and `str.tr`
+## finds `str.trim` without the query having to be split. The last word keeps
+## its trailing dot, which is the difference between `str.` (a module's
+## members) and `str` (everything that starts with it).
+pub fn terms(q: String) -> List[Term] = {
+  let rs = runs(q)
+  var out: List[Term] = []
+  var i = 0
+  for r in rs {
+    let last = i == len(rs) - 1
+    let w = trim_dots(r, not last)
+    let ks = code_points(w)
+    if list.any(ks, c => kind_of(char.code(c)) == 3) {
+      let fit = if list.any(ks, c => char.code(c) > 127) {
+        Within
+      } else if last {
+        Start
+      } else {
+        Whole
+      }
+      out = out ++ [Term { word: w, fit: fit }]
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn fits(t: Term, word: String) -> Bool =
+  match t.fit {
+    Whole -> word == t.word
+    Start -> str.starts_with(word, t.word)
+    Within -> str.contains(word, t.word)
+  }
+
+## Whether every term fits some word of `words`.
+fn all_fit(ts: List[Term], words: List[String]) -> Bool =
+  len(ts) > 0 && list.all(ts, t => list.any(words, w => fits(t, w)))
+
+# ---- scoring --------------------------------------------------------------
 
 ## How many rows the panel will show. A cap rather than a scroll: the panel is
 ## a keyboard target, and a list nobody can reach the bottom of by pressing
 ## down is not a list.
 fn cap() -> Int = 40
 
-## Where a name can be split for the purpose of "starts a word": the module
-## separator, the path separator, the hyphen and the space.
-fn is_break(c: Char) -> Bool = c == '.' || c == '/' || c == '-' || c == ' '
-
-## Whether `hay` has `needle` at the start of one of its words.
-fn has_word_prefix(hay: String, needle: String) -> Bool = {
-  let cs = code_points(hay)
-  var found = false
-  var i = 0
-  while i < len(cs) {
-    if i > 0 && is_break(cs[i - 1]) && str.starts_with(str.drop(hay, i), needle) {
-      found = true
-    }
-    i = i + 1
-  }
-  found
-}
-
 ## How well an entry answers a query, 0 for not at all.
 ##
-## Deterministic and total: the same pair always scores the same, and the
-## order the panel shows is (group, rank, index order), so nothing here has to
-## sort and no two runs can disagree about ties.
+## Deterministic and total: the same pair always scores the same, and ties are
+## broken by index order, so no two runs can disagree about the order.
 ##
-## `q` arrives already lowercased, once per scan rather than once per entry.
-pub fn score(e: Entry, q: String) -> Int = {
-  let title = str.to_lower(e.title)
+## `q` arrives lowercased and trimmed and `ts` are its terms, both once per
+## keystroke; `k` was lowercased and tokenized once per init.
+##
+##   5  the title is the query
+##   4  the title starts with it
+##   3  every word of the query is a word of the title
+##   2  the title contains it
+##   1  every word of the query is a word of the title, signature or note
+pub fn score(k: Key, q: String, ts: List[Term]) -> Int =
   if q == "" {
     0
-  } else if title == q {
+  } else if k.title == q {
     5
-  } else if str.starts_with(title, q) {
+  } else if str.starts_with(k.title, q) {
     4
-  } else if has_word_prefix(title, q) {
+  } else if all_fit(ts, k.heads) {
     3
-  } else if str.contains(title, q) {
+  } else if str.contains(k.title, q) {
     2
-  } else if str.contains(str.to_lower(e.detail), q) || str.contains(str.to_lower(e.note), q) {
+  } else if all_fit(ts, k.words) {
     1
   } else {
     0
   }
+
+## One match before it has a place in the list.
+type Scored = { id: Int, group: Int, rank: Int }
+
+## The ids of the entries a query answers, in the order the panel shows them.
+##
+## This is the whole cost of a keystroke, and it is paid once: [update] runs it
+## when the query changes and keeps the answer in the model, and neither view
+## nor a key that only moves the selection runs it again.
+pub fn search(state: State, query: String) -> List[Int] = {
+  let q = str.to_lower(str.trim(query))
+  if q == "" { [] } else { arrange(matches(state.keys, q, terms(q))) }
 }
+
+## Every entry that answers, in index order.
+##
+## The conditional is the whole of the filter: an entry that does not match is
+## not kept at all, rather than kept with a zero score for somebody further on
+## to drop. An entry whose group the panel does not draw is not kept either.
+fn matches(keys: List[Key], q: String, ts: List[Term]) -> List[Scored] = {
+  var out: List[Scored] = []
+  var id = 0
+  for k in keys {
+    let r = score(k, q, ts)
+    if r > 0 && k.group >= 0 {
+      out = out ++ [Scored { id: id, group: k.group, rank: r }]
+    }
+    id = id + 1
+  }
+  out
+}
+
+## The matches, grouped, best group first and best first within a group.
+##
+## A group's place is its best rank, with the panel's own order breaking ties,
+## so a query whose best answer is a section of the spec shows the spec first
+## even though the standard library is listed first. Within a group the order
+## is rank, then index order: `sort_by` is stable.
+fn arrange(found: List[Scored]) -> List[Int] = {
+  let best_first = sort_by(found, (a, b) => b.rank - a.rank)
+  var per: List[List[Scored]] = []
+  for g in range(0, len(groups())) {
+    let mine = list.filter(best_first, s => s.group == g)
+    if len(mine) > 0 {
+      per = per ++ [mine]
+    }
+  }
+  let order = sort_by(per, (a, b) => b[0].rank - a[0].rank)
+  let quota = shares(list.map(order, xs => len(xs)), cap())
+  var out: List[Int] = []
+  for i in range(0, len(order)) {
+    for s in list.take(order[i], quota[i]) {
+      out = out ++ [s.id]
+    }
+  }
+  out
+}
+
+## How many rows each group shows when `limit` are dealt one per group per
+## round, in order, until they run out.
+##
+## Round-robin rather than first come: with a shared cap, a broad query whose
+## best group has forty matches would show that group alone, and the one
+## tutorial chapter that answered it as well would never be on screen.
+pub fn shares(sizes: List[Int], limit: Int) -> List[Int] = {
+  var rounds = 0
+  while rounds < limit && one_more(sizes, rounds, limit) {
+    rounds = rounds + 1
+  }
+  var left = limit - dealt(sizes, rounds)
+  var out: List[Int] = []
+  for n in sizes {
+    if n > rounds && left > 0 {
+      out = out ++ [rounds + 1]
+      left = left - 1
+    } else {
+      out = out ++ [if n < rounds { n } else { rounds }]
+    }
+  }
+  out
+}
+
+## Whether a round after `r` deals anything, and stays within `limit`.
+fn one_more(sizes: List[Int], r: Int, limit: Int) -> Bool =
+  dealt(sizes, r + 1) <= limit && dealt(sizes, r + 1) > dealt(sizes, r)
+
+## How many rows `r` full rounds deal.
+fn dealt(sizes: List[Int], r: Int) -> Int =
+  list.fold(sizes, 0, (acc, n) => acc + (if n < r { n } else { r }))
 
 # ---- the scan: two cells in one handler ------------------------------------
 
-## Every match, numbered, and the href the selection lands on.
+## The model's hits, numbered, and the href the selection lands on.
 ##
 ## The two cells are the reason this is a handler and not a fold. `hits` is
 ## the accumulation; `chosen` is decided by comparing the running ordinal --
 ## which is `len(hits)` at the moment the arm runs, and which nothing outside
 ## the arm can see -- against the selection the model carries. A fold could
-## carry both in a pair, at the cost of threading that pair through [probe]
-## and everything it calls; the point of the cells is that [probe]'s signature
-## says `!Found` and says nothing about what is being accumulated.
-pub fn scan(entries: List[Entry], query: String, sel: Int) -> Scan = {
+## carry both in a pair, at the cost of threading that pair through [probe];
+## the point of the cells is that [probe]'s signature says `!Found` and says
+## nothing about what is being accumulated.
+##
+## It walks at most [cap] ids, not the index: the ranking is [search]'s, and
+## happened when the query last changed.
+pub fn scan(state: State, ids: List[Int], sel: Int) -> Scan = {
   with handle Found {
     var hits: List[Hit] = []
     var chosen: String = ""
@@ -250,29 +581,18 @@ pub fn scan(entries: List[Entry], query: String, sel: Int) -> Scan = {
       hits = hits ++ [Hit { entry: e, at: len(hits) }]
     }
   }
-  probe(entries, str.to_lower(query))
+  probe(state.entries, ids)
   Scan { hits: hits, chosen: chosen }
 }
 
-## Perform `found` once per matching entry, in display order.
-##
-## The conditional is the whole of the filter: an entry that does not match
-## is not emitted at all, rather than emitted with a zero score for somebody
-## further on to drop. Scores are computed once per entry and then bucketed,
-## because the walk below visits every entry twenty times and computing a
-## score is the expensive half.
-fn probe(entries: List[Entry], q: String) -> Unit !Found = {
-  let scored = list.map(entries, e => (e, score(e, q)))
-  var shown = 0
-  for g in groups() {
-    for rank in ranks() {
-      for pair in scored {
-        let (e, s) = pair
-        if s == rank && e.group == g.id && shown < cap() {
-          shown = shown + 1
-          found(e)
-        }
-      }
+## Perform `found` once per id, in the model's order. An id that names no
+## entry is passed over: a model is text the page hands back, and a page may
+## hand back anything.
+fn probe(entries: List[Entry], ids: List[Int]) -> Unit !Found = {
+  for id in ids {
+    match get(entries, id) {
+      Some(e) -> found(e)
+      None -> ()
     }
   }
 }
@@ -313,7 +633,33 @@ fn row(h: Hit, chosen: Bool) -> Node[Msg] !Ctx = {
 ## The one-line note, when there is one. A row with no note has no element for
 ## it rather than an empty one, which is the same rule the sections follow.
 fn note_kids(e: Entry) -> List[Node[Msg]] =
-  if e.note == "" { [] } else { [span(e.note, class: "search-note")] }
+  if e.note == "" { [] } else { [el("span", class: "search-note", kids: note_runs(e.note))] }
+
+## A note's text, with each backticked span as a `<code>`.
+##
+## Doc comments in this repository write code between backticks, and a note
+## is the first sentence of one. A backtick with no partner -- a note cut
+## inside a span -- is shown as the character it is.
+pub fn note_runs(note: String) -> List[Node[Msg]] = {
+  let parts = str.split(note, "`")
+  let unpaired = len(parts) % 2 == 0
+  var out: List[Node[Msg]] = []
+  var i = 0
+  for p in parts {
+    if unpaired && i == len(parts) - 1 {
+      out = out ++ [note_run("`" ++ p, false)]
+    } else if i % 2 == 1 {
+      out = out ++ [note_run(p, true)]
+    } else if p != "" {
+      out = out ++ [note_run(p, false)]
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn note_run(s: String, code: Bool) -> Node[Msg] =
+  if code { el("code", kids: [text(s)]) } else { text(s) }
 
 ## The rows of one group. The inner collector: its installation shadows the
 ## outer one for the length of the body, so these `emit`s land here and the
@@ -327,20 +673,35 @@ fn rows_of(hits: List[Hit], g: Group, sel: Int) -> List[Node[Msg]] !Ctx =
     }
   })
 
-## Every group that has something to show, in the panel's order.
+## Every group that has something to show, in the order the hits name them.
 ##
 ## The outer collector. A group with no rows emits nothing -- not an empty
 ## section, not a placeholder -- which is why the answer's length is the
-## number of groups that matched rather than four.
+## number of groups that matched rather than five.
 fn sections(hits: List[Hit], sel: Int) -> List[Node[Msg]] !Ctx =
   collect(() => {
-    for g in groups() {
+    for g in panel_order(hits) {
       let rows: List[Node[Msg]] = rows_of(hits, g, sel)
       if len(rows) > 0 {
         emit(section(g, rows))
       }
     }
   })
+
+## The groups in the order their first hit comes in, the rest after them.
+## [search] keeps a group's hits together, so this is the order it ranked the
+## groups in.
+fn panel_order(hits: List[Hit]) -> List[Group] = {
+  let gs = groups()
+  sort_by(gs, (a, b) => first_at(hits, a.id) - first_at(hits, b.id))
+}
+
+## The ordinal of the first hit in group `id`, or one past the last hit.
+fn first_at(hits: List[Hit], id: String) -> Int =
+  match list.find(hits, h => h.entry.group == id) {
+    Some(h) -> h.at
+    None -> len(hits)
+  }
 
 fn section(g: Group, rows: List[Node[Msg]]) -> Node[Msg] !Ctx =
   el("li", class: "search-group", kids: [
@@ -370,7 +731,7 @@ fn status(m: Model) -> List[Node[Msg]] !Ctx =
   }
 
 fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
-  let s = scan(state.entries, m.query, m.sel)
+  let s = scan(state, m.hits, m.sel)
   let found: List[Node[Msg]] = sections(s.hits, m.sel)
   let box: Node[Msg] =
     input(class: "search-input", value: m.query,
@@ -401,17 +762,30 @@ pub fn init(flags: Option[String]) -> (State, Model) =
       match parse(text) {
         Ok(j) -> {
           let index = jget(j, "index")
+          let entries = entries_of(jget(index, "items"))
           (State {
             root: jstr_or(jget(j, "root"), "."),
             lang: jstr_or(jget(index, "lang"), "en"),
-            entries: entries_of(jget(index, "items")),
+            entries: entries,
+            keys: list.map(entries, e => key_of(e)),
           }, blank())
         }
         Err(_) -> (blank_state(), blank())
       }
   }
 
-fn blank_state() -> State = State { root: ".", lang: "en", entries: [] }
+fn blank_state() -> State = State { root: ".", lang: "en", entries: [], keys: [] }
+
+## Everything a keystroke would otherwise derive from `e` again.
+pub fn key_of(e: Entry) -> Key = {
+  let heads = tokens(e.title)
+  Key {
+    group: group_index(e.group),
+    title: str.to_lower(e.title),
+    heads: heads,
+    words: heads ++ tokens(e.detail) ++ tokens(e.note),
+  }
+}
 
 fn blank() -> Model =
   Model {
@@ -419,13 +793,15 @@ fn blank() -> Model =
     sel: 0,
     open: true,
     goto: "",
+    hits: [],
   }
 
 ## One turn: the model the message leaves behind, and what the panel asks the
 ## driver for next.
 pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
-    Typed(text) -> (Model { ..m, query: text, sel: 0, goto: "" }, NoCmd)
+    # The one arm that searches. Everything else reads `hits`.
+    Typed(text) -> (Model { ..m, query: text, sel: 0, goto: "", hits: search(state, text) }, NoCmd)
     Pressed(key) -> pressed(state, m, key)
     # The whole of the navigation instruction, in one place. It overwrites
     # `goto` rather than reading it, so the arm that commands it does not have
@@ -448,19 +824,17 @@ pub fn view(state: State, m: Model) -> Node[Msg] = {
 ## half that keeps typing cheap: an ordinary character is an `input` event and
 ## a `keydown` this ignores, and ignoring it answers with no patches at all.
 fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
-  let s = scan(state.entries, m.query, m.sel)
-  let last = len(s.hits) - 1
+  let last = len(m.hits) - 1
   if key == "ArrowDown" {
     (Model { ..m, sel: if m.sel < last { m.sel + 1 } else { m.sel }, goto: "" }, NoCmd)
   } else if key == "ArrowUp" {
     (Model { ..m, sel: if m.sel > 0 { m.sel - 1 } else { 0 }, goto: "" }, NoCmd)
   } else if key == "Enter" {
     # Nothing about the model changes here. Where the selection points is a
-    # question `scan` has already answered, and what to do about it is the
-    # command.
-    (m, SendMsg(msg: Chose(href: s.chosen)))
+    # question `scan` answers, and what to do about it is the command.
+    (m, SendMsg(msg: Chose(href: scan(state, m.hits, m.sel).chosen)))
   } else if key == "Escape" {
-    (Model { ..m, open: false, query: "", sel: 0, goto: "" }, NoCmd)
+    (Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [] }, NoCmd)
   } else {
     (m, NoCmd)
   }
@@ -529,11 +903,13 @@ fn quoted(s: String) -> String = render(JStr(value: s))
 ## scripts/example-main-contract/registry.json. Field order here is the field
 ## order there. The retained state is intentionally absent: encoding root,
 ## language or index here would put the large static half back on the wire.
+## The hits are ids into it, at most [cap] small integers.
 pub fn encode(m: Model) -> String =
   "{\"q\":" ++ quoted(m.query)
   ++ ",\"sel\":" ++ to_string(m.sel)
   ++ ",\"open\":" ++ (if m.open { "true" } else { "false" })
   ++ ",\"goto\":" ++ quoted(m.goto)
+  ++ ",\"hits\":[" ++ join(list.map(m.hits, h => to_string(h)), ",") ++ "]"
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -549,6 +925,7 @@ pub fn decode(s: String) -> Model =
             sel: jint_or(jget(j, "sel"), 0),
             open: jbool_or(jget(j, "open"), true),
             goto: jstr_or(jget(j, "goto"), ""),
+            hits: list.map(jarr(jget(j, "hits")), h => jint_or(h, -1)),
           }
         _ -> blank()
       }
@@ -563,6 +940,9 @@ pub fn decode(s: String) -> Model =
 fn turn(state: State, m: Model, msg: Msg) -> Model =
   fold_msg(m, msg, (acc, x) => update(state, acc, x))
 
+## The model a reader leaves behind by typing `q` into a fresh panel.
+fn typed(state: State, q: String) -> Model = turn(state, blank(), Typed(text: q))
+
 fn probe_entry(group: String, title: String, note: String, href: String) -> Entry =
   Entry { group: group, title: title, detail: "fn ${title}()", note: note, href: href }
 
@@ -574,41 +954,140 @@ fn probe_index() -> List[Entry] = [
   probe_entry("tutorial", "Effects", "", "tutorial/09.html"),
 ]
 
-fn probe_state() -> State = State { root: ".", lang: "en", entries: probe_index() }
+fn state_of(entries: List[Entry]) -> State =
+  State { root: ".", lang: "en", entries: entries, keys: list.map(entries, e => key_of(e)) }
 
-fn shown(state: State, m: Model) -> List[String] = {
-  let s = scan(state.entries, m.query, m.sel)
-  list.map(s.hits, h => h.entry.title)
-}
+fn probe_state() -> State = state_of(probe_index())
+
+fn shown(state: State, q: String) -> List[String] =
+  list.map(scan(state, search(state, q), 0).hits, h => h.entry.title)
 
 test "a query answers the entries that match it, best rank first" {
   let state = probe_state()
-  let m = blank()
   # an exact title beats a prefix beats a word prefix beats a substring
-  assert shown(state, Model { ..m, query: "str.trim" }) == ["str.trim"]
-  assert shown(state, Model { ..m, query: "str." }) == ["str.trim", "str.split"]
+  assert shown(state, "str.trim") == ["str.trim"]
+  assert shown(state, "str.") == ["str.trim", "str.split"]
   # `map` is a word of `list.map` and a substring of nothing else here
-  assert shown(state, Model { ..m, query: "map" }) == ["list.map"]
+  assert shown(state, "map") == ["list.map"]
   # the note is the last resort, and only when nothing in a title matched
-  assert shown(state, Model { ..m, query: "whitespace" }) == ["str.trim"]
+  assert shown(state, "whitespace") == ["str.trim"]
+  # case and surrounding blanks are not part of the question
+  assert shown(state, "  STR.Trim ") == ["str.trim"]
   # an empty query asks nothing, so nothing answers
   let none: List[String] = []
-  assert shown(state, Model { ..m, query: "" }) == none
-  assert shown(state, Model { ..m, query: "nothing here" }) == none
+  assert shown(state, "") == none
+  assert shown(state, "nothing here") == none
 }
 
-## The group order is the panel's order, not the index's: a query that matches
-## in three groups shows them in the order [groups] lists, whatever order the
-## index happened to be built in.
-test "hits are grouped in the panel's order and numbered across the groups" {
-  # `eff` starts a word of the spec section and the whole of the tutorial
-  # chapter, and appears nowhere in the three stdlib rows -- so the index's
-  # own order (stdlib first) is not the order the panel shows.
+## Every word has to be found, the last one as a prefix and the others whole,
+## and a word may be found in any of the three fields.
+test "a query of several words answers only the entries that have all of them" {
+  let state = state_of([
+    Entry {
+      group: "stdlib",
+      title: "io.read_file",
+      detail: "fn read_file(path: String) -> Result[String, IoError] !Fs",
+      note: "The file at `path` as UTF-8 text.",
+      href: "stdlib.html#std-io-read_file",
+    },
+    Entry {
+      group: "stdlib",
+      title: "io.write_file",
+      detail: "fn write_file(path: String, text: String) -> Result[Unit, IoError] !Fs",
+      note: "",
+      href: "stdlib.html#std-io-write_file",
+    },
+    probe_entry("spec", "6.5 Named effects", "", "spec.html#s6-5"),
+  ])
+  # `fs` is the `!Fs` of both signatures, `read` begins only one of the names
+  assert shown(state, "fs read") == ["io.read_file"]
+  assert shown(state, "fs") == ["io.read_file", "io.write_file"]
+  assert shown(state, "!fs") == ["io.read_file", "io.write_file"]
+  # a word that is not last has to be whole: `rea` is not a word of either
+  let none: List[String] = []
+  assert shown(state, "rea fs") == none
+  # the order of the words does not matter, and the note is searched too
+  assert shown(state, "text read") == ["io.read_file"]
+  # a dotted query is one word, matched against the dotted name
+  assert shown(state, "io.read") == ["io.read_file"]
+  assert shown(state, "6.5") == ["6.5 Named effects"]
+}
+
+## A Chinese title is one run with no spaces in it, so a Chinese word is looked
+## for inside the words rather than at their start.
+test "a word beyond ASCII is found inside a run" {
+  let state = state_of([
+    probe_entry("spec", "6.5 命名效果", "", "zh/spec.html#s6-5"),
+    probe_entry("tutorial", "效果与处理器", "", "zh/tutorial/09.html"),
+  ])
+  assert shown(state, "效果") == ["效果与处理器", "6.5 命名效果"]
+  assert shown(state, "命名效果") == ["6.5 命名效果"]
+}
+
+## The words of a string, by the rule at the head of the words section. These
+## samples are the contract between two programs that cannot share a line of
+## code; the same list is pinned in site/src/gen/search.dawn's own test, and
+## the two tests name each other so that a change to either is a change to
+## both.
+test "an index's words and a query's words split the same way" {
+  let samples: List[(String, List[String])] = [
+    ("io.read_file", ["io", "read", "file", "io.read_file"]),
+    ("fn read_file(path: String) -> Unit !Fs", ["fn", "read", "file", "read_file", "path",
+      "string", "unit", "fs", "!fs"]),
+    ("6.5 Named effects", ["6", "5", "6.5", "named", "effects"]),
+    ("Remove surrounding whitespace.", ["remove", "surrounding", "whitespace"]),
+    ("str.", ["str"]),
+    ("`with handle` 命名效果，处理器", ["with", "handle", "命名效果", "处理器"]),
+    ("... ! -> ()", []),
+  ]
+  for sample in samples {
+    let (s, words) = sample
+    assert tokens(s) == words
+  }
+}
+
+test "a query's terms say how each word has to fit" {
+  assert terms("fs read") == [Term { word: "fs", fit: Whole }, Term { word: "read", fit: Start }]
+  # the last word keeps its trailing dot, an earlier one does not
+  assert terms("str. list.") == [Term { word: "str", fit: Whole }, Term { word: "list.", fit: Start }]
+  assert terms("效果 x") == [Term { word: "效果", fit: Within }, Term { word: "x", fit: Start }]
+  let none: List[Term] = []
+  assert terms("  !! ") == none
+}
+
+## A group's place is its best match, not its place in the table: `eff` begins
+## the whole of the tutorial chapter's title and only a word of the spec
+## section's, so the tutorial comes first although [groups] lists the spec
+## first -- and the standard library, listed before both, matches nothing.
+test "groups come in the order of their best hit and are numbered across" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "eff" }
-  let s = scan(state.entries, m.query, m.sel)
-  assert list.map(s.hits, h => h.entry.group) == ["spec", "tutorial"]
+  let s = scan(state, search(state, "eff"), 0)
+  assert list.map(s.hits, h => h.entry.group) == ["tutorial", "spec"]
   assert list.map(s.hits, h => h.at) == [0, 1]
+}
+
+## Within a group the order is rank and then index order, and every group that
+## matched keeps a place when the cap is reached.
+test "the cap is dealt out one row per group per round" {
+  assert shares([50, 3, 1], 40) == [36, 3, 1]
+  assert shares([30, 30], 40) == [20, 20]
+  assert shares([30, 30, 30], 40) == [14, 13, 13]
+  assert shares([2, 1], 40) == [2, 1]
+  let none: List[Int] = []
+  assert shares(none, 40) == none
+  # on an index, too: sixty stdlib rows and one tutorial row, all rank 1
+  var many: List[Entry] = []
+  for i in range(0, 60) {
+    many = many ++ [probe_entry("stdlib", "f${i}", "tick", "stdlib.html#f${i}")]
+  }
+  let state = state_of(many ++ [probe_entry("tutorial", "Clocks", "tick", "tutorial/20.html")])
+  let hits = scan(state, search(state, "tick"), 0).hits
+  assert len(hits) == cap()
+  assert list.map(list.filter(hits, h => h.entry.group == "tutorial"), h => h.entry.title)
+    == ["Clocks"]
+  # and the stdlib rows that made it are the first ones, in index order
+  assert hits[0].entry.title == "f0"
+  assert hits[38].entry.title == "f38"
 }
 
 ## The second cell. `chosen` is not a function of `hits` alone -- it is the
@@ -616,12 +1095,14 @@ test "hits are grouped in the panel's order and numbered across the groups" {
 ## the ordinal still exists.
 test "the selection resolves to one href, and out of range resolves to none" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "str." }
-  assert scan(state.entries, m.query, 0).chosen == "stdlib.html#std-str-trim"
-  assert scan(state.entries, m.query, 1).chosen == "stdlib.html#std-str-split"
-  assert scan(state.entries, m.query, 7).chosen == ""
+  let ids = search(state, "str.")
+  assert scan(state, ids, 0).chosen == "stdlib.html#std-str-trim"
+  assert scan(state, ids, 1).chosen == "stdlib.html#std-str-split"
+  assert scan(state, ids, 7).chosen == ""
   # and with nothing matched there is nothing to choose
-  assert scan(state.entries, "nothing here", 0).chosen == ""
+  assert scan(state, search(state, "nothing here"), 0).chosen == ""
+  # an id the index does not have is passed over rather than trusted
+  assert len(scan(state, [99, 0, -1], 0).hits) == 1
 }
 
 ## Every group an index entry can name is a group the panel draws. An entry in
@@ -629,7 +1110,7 @@ test "the selection resolves to one href, and out of range resolves to none" {
 ## by [rows_of].
 test "the registered groups are the ones an index may name" {
   let ids = list.map(groups(), g => g.id)
-  assert ids == ["stdlib", "spec", "tutorial", "examples"]
+  assert ids == ["stdlib", "spec", "tutorial", "examples", "history"]
   for e in probe_index() {
     assert list.contains(ids, e.group)
   }
@@ -638,6 +1119,10 @@ test "the registered groups are the ones an index may name" {
     assert group_label(g, "zh-CN") != ""
     assert group_label(g, "en") != group_label(g, "zh-CN")
   }
+  # and an entry in a group nobody registered is never a hit
+  let stray = state_of([probe_entry("blog", "str.trim", "", "blog.html")])
+  let none: List[Int] = []
+  assert search(stray, "str.trim") == none
 }
 
 ## The nesting rule, on the tree rather than on the collector: what crosses
@@ -646,8 +1131,7 @@ test "the registered groups are the ones an index may name" {
 ## produce the same rows in the same order under no section at all.
 test "each group's rows stay inside that group's section" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "eff" }
-  let v = view(state, m)
+  let v = view(state, typed(state, "eff"))
   # two groups matched, so the results list has exactly two children
   assert count_class(v, "search-group") == 2
   assert count_class(v, "search-row") == 2
@@ -661,12 +1145,11 @@ test "each group's rows stay inside that group's section" {
 ## empty. With one group matched there is one section and no second heading.
 test "a group with no hits emits no section at all" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "map" }
-  let v = view(state, m)
+  let v = view(state, typed(state, "map"))
   assert count_class(v, "search-group") == 1
   assert count_class(v, "search-row") == 1
   # nothing matched at all: no sections, and a reason in their place
-  let no_hits = view(state, Model { ..m, query: "nothing here" })
+  let no_hits = view(state, typed(state, "nothing here"))
   assert count_class(no_hits, "search-group") == 0
   assert count_class(no_hits, "search-status") == 1
 }
@@ -677,7 +1160,7 @@ test "a group with no hits emits no section at all" {
 ## the leaf mentions.
 test "the page's root and language reach the leaves through the handler" {
   let en_state = State { ..probe_state(), root: ".." }
-  let m = Model { ..blank(), query: "str.trim" }
+  let m = typed(en_state, "str.trim")
   assert hrefs(view(en_state, m)) == ["../stdlib.html#std-str-trim"]
   assert str.contains(show_tree(view(en_state, m)), "Standard library")
   let zh_state = State { ..en_state, lang: "zh-CN", root: "../.." }
@@ -688,12 +1171,34 @@ test "the page's root and language reach the leaves through the handler" {
   assert str.contains(show_tree(view(zh_state, m)), "只搜标题与 API 名")
 }
 
+test "a note's backticks are code, and an unpaired one is a backtick" {
+  let plain: List[Node[Msg]] = [text("Remove surrounding whitespace.")]
+  assert note_runs("Remove surrounding whitespace.") == plain
+  let coded: List[Node[Msg]] = [
+    text("The file at "),
+    el("code", kids: [text("path")]),
+    text(" as text."),
+  ]
+  assert note_runs("The file at `path` as text.") == coded
+  let lead: List[Node[Msg]] = [el("code", kids: [text("n")]), text(" items")]
+  assert note_runs("`n` items") == lead
+  let cut: List[Node[Msg]] = [
+    text("a "),
+    el("code", kids: [text("b")]),
+    text(" c "),
+    text("`d e..."),
+  ]
+  assert note_runs("a `b` c `d e...") == cut
+}
+
 test "arrows move the selection and stop at both ends" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "str." }
+  let m = typed(state, "str.")
   assert turn(state, m, Pressed(key: "ArrowUp")).sel == 0
   let down = turn(state, m, Pressed(key: "ArrowDown"))
   assert down.sel == 1
+  # moving the selection is not a search: the hits are the ones typing left
+  assert down.hits == m.hits
   # two hits, so the second is the last one
   assert turn(state, down, Pressed(key: "ArrowDown")).sel == 1
   assert turn(state, down, Pressed(key: "ArrowUp")).sel == 0
@@ -703,20 +1208,21 @@ test "arrows move the selection and stop at both ends" {
   assert turn(state, down, Pressed(key: "x")) == down
 }
 
-test "typing replaces the query and puts the selection back at the top" {
+test "typing replaces the query and the hits and puts the selection back at the top" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "str.", sel: 1 }
-  let typed = turn(state, m, Typed(text: "list"))
-  assert typed.query == "list"
-  assert typed.sel == 0
-  assert typed.goto == ""
+  let m = Model { ..typed(state, "str."), sel: 1 }
+  let again = turn(state, m, Typed(text: "list"))
+  assert again.query == "list"
+  assert again.sel == 0
+  assert again.goto == ""
+  assert again.hits == [2]
 }
 
 ## Enter is the one message that leaves an instruction in the tree, and Escape
 ## is the one that empties it.
 test "enter marks a destination and escape renders nothing at all" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "str.", sel: 1 }
+  let m = Model { ..typed(state, "str."), sel: 1 }
   let go = turn(state, m, Pressed(key: "Enter"))
   assert go.goto == "stdlib.html#std-str-split"
   assert str.contains(show_tree(view(state, go)), "data-goto")
@@ -725,6 +1231,7 @@ test "enter marks a destination and escape renders nothing at all" {
   let shut = turn(state, go, Pressed(key: "Escape"))
   assert not shut.open
   assert shut.query == ""
+  assert shut.hits == blank().hits
   let closed: List[Node[Msg]] = []
   assert view(state, shut) == div(class: "search-panel is-closed", kids: closed)
 }
@@ -744,6 +1251,10 @@ test "flags carry the index, and every way of not having them is an empty one" {
     note: "Remove surrounding whitespace.",
     href: "zh/stdlib.html#std-str-trim",
   }
+  # and the words of it, once, at init
+  assert state.keys == [key_of(state.entries[0])]
+  assert state.keys[0].title == "str.trim"
+  assert state.keys[0].heads == ["str", "trim", "str.trim"]
   assert m == blank()
   let none: Option[String] = None
   assert init(none) == (blank_state(), blank())
@@ -774,9 +1285,9 @@ test "an index row is five strings, in this order" {
 
 test "only the mutable model round-trips through its text" {
   let state = probe_state()
-  let m = turn(state, blank(), Typed(text: "str."))
+  let m = typed(state, "str.")
   assert decode(encode(m)) == m
-  assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\"}"
+  assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1]}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
   assert decode(encode(turn(state, m, Pressed(key: "Escape")))).open == false
@@ -886,7 +1397,7 @@ fn all_with_class(w: Node[Msg], cls: String) -> List[Node[Msg]] = {
 ## and the two halves are now separable.
 test "enter commands the navigation instead of writing it" {
   let state = probe_state()
-  let m = Model { ..blank(), query: "str.", sel: 1 }
+  let m = Model { ..typed(state, "str."), sel: 1 }
   # `update` alone moves nothing. Without the fold the panel would answer with
   # no patches at all and the page would never see a destination.
   let (kept, c) = update(state, m, Pressed(key: "Enter"))
