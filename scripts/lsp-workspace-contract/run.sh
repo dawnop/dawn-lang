@@ -130,6 +130,7 @@ expect_mutant_red unopened-version-zero did-close UNOPENED_URI_VERSION_PUBLISHED
 expect_mutant_red skip-empty-diagnostics diagnostics-empty EMPTY_DIAGNOSTIC_CLEAR_MISSING
 expect_mutant_red wrong-source-view diagnostics-source-view DIAGNOSTIC_SOURCE_VIEW_MISMATCH
 expect_mutant_red duplicate-last-wins duplicate-canonical DUPLICATE_CANONICAL_LAST_WINS
+expect_mutant_red lexical-identity symlink-identity SYMLINK_IDENTITY_SPLIT
 expect_mutant_red ignore-unsaved-module unsaved-module UNSAVED_MODULE_IGNORED
 expect_mutant_red current-module-self current-module-completion CURRENT_MODULE_SELF_SUGGESTED
 expect_mutant_red extensionless-project-member extensionless-standalone EXTENSIONLESS_JOINED_PROJECT

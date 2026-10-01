@@ -66,7 +66,7 @@ def instrument(jreflect):
     jreflect.write_text(text, encoding="utf-8")
 
 
-def mutate(name, server, main, analyze):
+def mutate(name, server, main, analyze, plan_source):
     server_text = server.read_text(encoding="utf-8")
     main_text = main.read_text(encoding="utf-8")
 
@@ -228,6 +228,17 @@ def mutate(name, server, main, analyze):
             name,
         )
         analyze.write_text(analyze_text, encoding="utf-8")
+    elif name == "lexical-identity":
+        # identity back to the lexical spelling, which is what #207 removed
+        plan_text = plan_source.read_text(encoding="utf-8")
+        plan_text = replace_section(
+            plan_text,
+            "pub fn canon_identity(p: String) -> String !Fs !Env = {",
+            "## The manifest beside `dir`'s dawn.toml",
+            "pub fn canon_identity(p: String) -> String !Fs !Env = canon(p)",
+            name,
+        )
+        plan_source.write_text(plan_text, encoding="utf-8")
     elif name == "project-only-identity":
         server_text = replace_once(
             server_text,
@@ -365,8 +376,10 @@ def main_entry():
     main = root / "src/main.dawn"
     jreflect = root / "src/jvm/jreflect.dawn"
     analyze = root / "src/driver/analyze.dawn"
+    # the private compiler-plan copy run.sh places beside the selfhost copy
+    plan_source = root.parent / "compiler-plan/src/source.dawn"
     instrument(jreflect)
-    mutate(name, server, main, analyze)
+    mutate(name, server, main, analyze, plan_source)
 
 
 if __name__ == "__main__":

@@ -815,6 +815,60 @@ class Contract:
         finally:
             self.close_client(client)
 
+    def symlink_identity(self):
+        # One project reached through a directory link and through its real
+        # path (#207). Identity resolves links, so a main file opened through
+        # the link and a library opened through the real path are one
+        # workspace: the caller sees the library's live text and jumps to the
+        # library's real URI. Opening the library a second time through the
+        # link with other text is the duplicate-path conflict, delivered to
+        # both URIs, which lexical identity would have split into two
+        # workspaces without a word. The link is made on disk because that is
+        # the only place an editor meets one.
+        base = Path(self.fixture.case("symlink-identity")).resolve()
+        root = project(base / "real" / "app", "symlink_identity")
+        os.symlink(root, base / "link_app", target_is_directory=True)
+        lib_path = root / "src/lib.dawn"
+        main_path = root / "src/main.dawn"
+        write(lib_path, "pub fn disk_value() -> Int = 1\n")
+        write(main_path, "pub fn placeholder() -> Int = 0\n")
+        lib_uri = path_uri(lib_path)
+        # spelled through the link: `path_uri` would resolve it away
+        main_link_uri = (base / "link_app/src/main.dawn").as_uri()
+        lib_link_uri = (base / "link_app/src/lib.dawn").as_uri()
+        require(main_link_uri != path_uri(main_path), "SYMLINK_IDENTITY_SPLIT",
+                "fixture precondition: the link URI is not a second spelling")
+        live_lib = "pub fn live_value() -> Int = 2\n"
+        other_lib = "pub fn other_value() -> Int = 3\n"
+        live_main = "use lib.{live_value}\n\npub fn probe() -> Int = live_value()\n"
+        label = "SYMLINK_IDENTITY_SPLIT"
+        client = self.client()
+        try:
+            mark = client.mark()
+            client.send(did_open(lib_uri, live_lib))
+            client.send(did_open(main_link_uri, live_main))
+            epoch = client.barrier(mark)
+            got = latest_diagnostics(epoch, main_link_uri, label)
+            require(got == [], label,
+                    f"main opened through the link did not see the live library: {messages(got)!r}")
+            definition = client.result("textDocument/definition", {
+                "textDocument": {"uri": main_link_uri},
+                "position": position(live_main, "live_value", occurrence=2),
+            })
+            require(isinstance(definition, list) and len(definition) == 1 and
+                    definition[0].get("uri") == lib_uri,
+                    label, f"definition did not reach the open library: {definition!r}")
+
+            mark = client.mark()
+            client.send(did_open(lib_link_uri, other_lib))
+            conflict = client.barrier(mark)
+            require(latest_diagnostics(conflict, lib_uri, label), label,
+                    "the real URI did not receive the duplicate-path conflict")
+            require(latest_diagnostics(conflict, lib_link_uri, label), label,
+                    "the link URI did not receive the duplicate-path conflict")
+        finally:
+            self.close_client(client)
+
     def definition_root(self):
         base = self.fixture.case("definition-root")
         shared = project(base / "shared", "shared_pkg")
@@ -1304,6 +1358,7 @@ CASES = {
     "diagnostics-empty": Contract.diagnostics_empty,
     "diagnostics-source-view": Contract.diagnostics_source_view,
     "duplicate-canonical": Contract.duplicate_canonical,
+    "symlink-identity": Contract.symlink_identity,
     "definition-root": Contract.definition_root,
     "java-roots": Contract.java_roots,
     "lease-lifecycle": Contract.lease_lifecycle,
