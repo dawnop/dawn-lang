@@ -150,19 +150,29 @@ pub type State = {
 ## `goto`. The model the turn ends with is the same one, byte for byte.
 ##
 ## `hits` is what [search] answered for `query`: ids into the index, in the
-## order the panel shows them, at most [cap] of them. Only `Typed` writes it.
+## order the panel shows them, at most [cap] of them. Only `Typed` and
+## `Scoped` write it.
+##
+## `scope` is the group the reader has narrowed the list to, by its place in
+## [groups], or -1 for all of them; `counts` is how many entries of each group
+## the query matched before any narrowing or cap, which is what the scope
+## pills show. Both are a view over the same ranking, not a second index: a
+## pill filters the matches, and the cap then applies inside the one group.
 pub type Model = {
   query: String,
   sel: Int,
   open: Bool,
   goto: String,
   hits: List[Int],
+  scope: Int,
+  counts: List[Int],
 }
 
 ## What the listeners mean, plus the one message no listener produces.
 ##
 ## `Hovered` is the pointer resting on the row with that ordinal, and
 ## `Dismissed` the Cancel button a phone shows in place of the Escape key.
+## `Scoped` is a scope pill: the group it narrows to, or -1 for All.
 ##
 ## `Chose` cannot arrive from the page: a message reaches this application
 ## only through the `to_msg` of a listener `route.at` found in the tree, and no
@@ -173,6 +183,7 @@ pub type Msg =
   | Hovered(at: Int)
   | Dismissed
   | Chose(href: String)
+  | Scoped(group: Int)
 derive Show
 
 ## Where the page is and what language it is in, asked for at the leaves.
@@ -205,14 +216,17 @@ pub effect Emit {
 ## these five is never shown at all, and the test below is what says the index
 ## agrees. The order here breaks ties only; a group's place in the panel is
 ## its best match ([arrange]).
-type Group = { id: String, en: String, zh: String }
+##
+## `pill_en` and `pill_zh` are the group's name on its scope pill, where a
+## row of six has to fit a phone.
+type Group = { id: String, en: String, zh: String, pill_en: String, pill_zh: String }
 
 fn groups() -> List[Group] = [
-  Group { id: "stdlib", en: "Standard library", zh: "标准库" },
-  Group { id: "spec", en: "Spec", zh: "规范" },
-  Group { id: "tutorial", en: "Tutorial", zh: "教程" },
-  Group { id: "examples", en: "Examples and pages", zh: "示例与页面" },
-  Group { id: "history", en: "History", zh: "设计史" },
+  Group { id: "stdlib", en: "Standard library", zh: "标准库", pill_en: "Stdlib", pill_zh: "标准库" },
+  Group { id: "spec", en: "Spec", zh: "规范", pill_en: "Spec", pill_zh: "规范" },
+  Group { id: "tutorial", en: "Tutorial", zh: "教程", pill_en: "Tutorial", pill_zh: "教程" },
+  Group { id: "examples", en: "Examples and pages", zh: "示例与页面", pill_en: "Examples", pill_zh: "示例" },
+  Group { id: "history", en: "History", zh: "设计史", pill_en: "History", pill_zh: "历史" },
 ]
 
 ## Where `id` stands in [groups], or -1 when the panel does not draw it.
@@ -511,9 +525,28 @@ type Scored = { id: Int, group: Int, rank: Int }
 ## This is the whole cost of a keystroke, and it is paid once: [update] runs it
 ## when the query changes and keeps the answer in the model, and neither view
 ## nor a key that only moves the selection runs it again.
-pub fn search(state: State, query: String) -> List[Int] = {
+pub fn search(state: State, query: String) -> List[Int] = answer(state, query, -1).hits
+
+## What one walk of the index answers for a query narrowed to `scope`.
+##
+## `scope` is the scope that was actually applied: a group the query matched
+## nothing in is not kept, and the answer falls back to all of them, so a
+## reader who narrowed to Spec and then typed a word only the standard
+## library has sees its results rather than an empty list beside a pill that
+## says why.
+pub type Answer = { hits: List[Int], counts: List[Int], scope: Int }
+
+pub fn answer(state: State, query: String, scope: Int) -> Answer = {
   let q = str.to_lower(str.trim(query))
-  if q == "" { [] } else { arrange(matches(state.keys, q, terms(q))) }
+  if q == "" {
+    Answer { hits: [], counts: [], scope: -1 }
+  } else {
+    let found = matches(state.keys, q, terms(q))
+    let counts = list.map(range(0, len(groups())), g => len(list.filter(found, s => s.group == g)))
+    let kept = if scope >= 0 && scope < len(counts) && counts[scope] > 0 { scope } else { -1 }
+    let narrowed = if kept >= 0 { list.filter(found, s => s.group == kept) } else { found }
+    Answer { hits: arrange(narrowed), counts: counts, scope: kept }
+  }
 }
 
 ## Every entry that answers, in index order.
@@ -956,6 +989,43 @@ fn tip(parts: List[String]) -> Node[Msg] = {
   el("li", kids: kids)
 }
 
+# ---- the scope pills --------------------------------------------------------
+
+## The row of scope pills: All, then each group, each with how many entries
+## the query matched there. A filter over the matches the model already has,
+## so a pill is one walk of the index like a keystroke, and nothing at all
+## when the query has no matches or is not a query yet.
+##
+## The row is there either way, empty when it has nothing to say, so that
+## the list after it keeps its place in the tree from one turn to the next.
+## A pill with nothing in it is disabled rather than hidden: the row reads
+## the same for every query, and a zero is an answer too.
+fn pills(m: Model) -> Node[Msg] !Ctx = {
+  let code = lang()
+  let total = list.fold(m.counts, 0, (a, c) => a + c)
+  var kids: List[Node[Msg]] = []
+  if total > 0 && not idle(m) {
+    kids = kids ++ [pill(say(code, "All", "全部"), total, -1, m.scope == -1)]
+    var i = 0
+    for g in groups() {
+      let n = unwrap_or(get(m.counts, i), 0)
+      kids = kids ++ [pill(if code == "zh-CN" { g.pill_zh } else { g.pill_en }, n, i, m.scope == i)]
+      i = i + 1
+    }
+  }
+  el("div", [("role", "group"), ("aria-label", say(code, "Narrow to", "范围"))], class: "search-pills",
+    kids: kids)
+}
+
+fn pill(name: String, n: Int, scope: Int, on: Bool) -> Node[Msg] = {
+  let off: List[(String, String)] = if n == 0 { [("disabled", "")] } else { [] }
+  let state_props: List[(String, String)] =
+    [("type", "button"), ("aria-pressed", if on { "true" } else { "false" })] ++ off
+  let cls = if on { "search-pill is-on" } else if n == 0 { "search-pill is-zero" } else { "search-pill" }
+  el("button", state_props, class: cls, on: [on_click(Scoped(group: scope))],
+    kids: [text(name), span("${n}", class: "search-pill-count")])
+}
+
 # ---- before anything is asked ----------------------------------------------
 
 ## Whether the field asks nothing, so the list shows the idle rows.
@@ -1169,6 +1239,7 @@ fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
   ], class: "search-panel", kids: [
     bar(m, if len(found) > 0 { shown_rows(state, m) } else { 0 }),
     el("div", [("aria-hidden", "true")], class: "search-line"),
+    pills(m),
     el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", label)], class: "search-results",
       kids: found),
     status(m, len(found) > 0),
@@ -1206,7 +1277,7 @@ pub fn init(flags: Option[String]) -> (State, Model) =
           # A shared link's query is answered in the first turn, so the
           # panel opens on its results rather than on an empty field.
           let q = jstr_or(jget(j, "q"), "")
-          (state, if q == "" { blank() } else { Model { ..blank(), query: q, hits: search(state, q) } })
+          (state, if q == "" { blank() } else { asked(state, blank(), q, -1) })
         }
         Err(_) -> (blank_state(), blank())
       }
@@ -1246,7 +1317,8 @@ pub fn key_of(e: Entry) -> Key = {
 
 ## The model of a panel that has been left: closed, and holding nothing a
 ## reopening could mistake for its own.
-fn closed(m: Model) -> Model = Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [] }
+fn closed(m: Model) -> Model =
+  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [] }
 
 fn blank() -> Model =
   Model {
@@ -1255,14 +1327,24 @@ fn blank() -> Model =
     open: true,
     goto: "",
     hits: [],
+    scope: -1,
+    counts: [],
   }
+
+## The model after asking `text` within `scope`, selection at the top.
+fn asked(state: State, m: Model, text: String, scope: Int) -> Model = {
+  let a = answer(state, text, scope)
+  Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts }
+}
 
 ## One turn: the model the message leaves behind, and what the panel asks the
 ## driver for next.
 pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
-    # The one arm that searches. Everything else reads `hits`.
-    Typed(text) -> (Model { ..m, query: text, sel: 0, goto: "", hits: search(state, text) }, NoCmd)
+    # The two arms that search. Everything else reads `hits`.
+    Typed(text) -> (asked(state, m, text, m.scope), NoCmd)
+    # A pill that is already on changes nothing.
+    Scoped(g) -> if g == m.scope { (m, NoCmd) } else { (asked(state, m, m.query, g), NoCmd) }
     Pressed(key) -> pressed(state, m, key)
     # The pointer selects what it rests on. Resting on the row that is already
     # selected changes nothing, so the turn answers no patches.
@@ -1316,7 +1398,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     if m.query == "" {
       (closed(m), NoCmd)
     } else {
-      (Model { ..m, query: "", sel: 0, goto: "", hits: [] }, NoCmd)
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [] }, NoCmd)
     }
   } else {
     (m, NoCmd)
@@ -1393,6 +1475,8 @@ pub fn encode(m: Model) -> String =
   ++ ",\"open\":" ++ (if m.open { "true" } else { "false" })
   ++ ",\"goto\":" ++ quoted(m.goto)
   ++ ",\"hits\":[" ++ join(list.map(m.hits, h => to_string(h)), ",") ++ "]"
+  ++ ",\"scope\":" ++ to_string(m.scope)
+  ++ ",\"counts\":[" ++ join(list.map(m.counts, c => to_string(c)), ",") ++ "]"
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -1409,6 +1493,8 @@ pub fn decode(s: String) -> Model =
             open: jbool_or(jget(j, "open"), true),
             goto: jstr_or(jget(j, "goto"), ""),
             hits: list.map(jarr(jget(j, "hits")), h => jint_or(h, -1)),
+            scope: jint_or(jget(j, "scope"), -1),
+            counts: list.map(jarr(jget(j, "counts")), c => jint_or(c, 0)),
           }
         _ -> blank()
       }
@@ -1777,7 +1863,9 @@ test "only the mutable model round-trips through its text" {
   let state = probe_state()
   let m = typed(state, "str.")
   assert decode(encode(m)) == m
-  assert encode(m) == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1]}"
+  assert encode(m)
+    == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1],"
+    ++ "\"scope\":-1,\"counts\":[2,0,0,0,0]}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
   let shut = turn(state, turn(state, m, Pressed(key: "Escape")), Pressed(key: "Escape"))
@@ -2147,4 +2235,65 @@ test "the new-tab hint uses the modifier the page names" {
   assert str.contains(text_ctrl, "new tab")
   assert str.contains(show_tree(view(probe_state(), blank())), "⌘")
   assert str.contains(show_tree(view(State { ..ctrl, lang: "zh-CN" }, blank())), "新标签页")
+}
+
+## The pills narrow the matches the query already has: All and each group,
+## with how many entries matched there, and the cap applies inside the one
+## group a pill picks.
+test "a scope pill narrows the list to one group and counts every group" {
+  let state = probe_state()
+  let m = typed(state, "e")
+  # `e` begins a word of `6.5 Named effects` and of `Effects`, and of nothing else
+  assert m.counts == [0, 1, 1, 0, 0]
+  assert m.scope == -1
+  let v = view(state, m)
+  let ps = all_with_class(v, "search-pill")
+  assert list.map(ps, p => text_of(p)) == ["All2", "Stdlib0", "Spec1", "Tutorial1", "Examples0", "History0"]
+  assert list.map(ps, p => prop_of(p, "aria-pressed")) == ["true", "false", "false", "false", "false", "false"]
+  # a group with nothing in it cannot be picked
+  assert prop_of(ps[1], "disabled") == ""
+  assert has_class(ps[1], "is-zero")
+  assert not has_class(ps[2], "is-zero")
+  # narrowing to Spec keeps the spec row only, and the counts
+  let spec = turn(state, Model { ..m, sel: 1 }, Scoped(group: 1))
+  assert spec.scope == 1
+  assert spec.sel == 0
+  assert list.map(scan(state, spec.hits, 0).hits, h => h.entry.title) == ["6.5 Named effects"]
+  assert spec.counts == m.counts
+  assert prop_of(all_with_class(view(state, spec), "search-pill")[2], "aria-pressed") == "true"
+  # the pill that is on changes nothing, and All undoes it
+  assert turn(state, spec, Scoped(group: 1)) == spec
+  assert turn(state, spec, Scoped(group: -1)).hits == m.hits
+  # the scope survives typing while the group still has matches ...
+  let more = turn(state, spec, Typed(text: "effects"))
+  assert more.scope == 1
+  assert list.map(scan(state, more.hits, 0).hits, h => h.entry.title) == ["6.5 Named effects"]
+  # ... and falls back to All once it has none
+  let other = turn(state, spec, Typed(text: "str."))
+  assert other.scope == -1
+  assert len(other.hits) == 2
+  # no query, or nothing matched: the row is there and empty
+  assert kids_of(all_with_class(view(state, blank()), "search-pills")[0]) == []
+  assert kids_of(all_with_class(view(state, typed(state, "nothing here")), "search-pills")[0]) == []
+  # escape takes the scope back with the query
+  let cleared = turn(state, spec, Pressed(key: "Escape"))
+  assert cleared.scope == -1
+  assert cleared.counts == []
+}
+
+## The cap is per list, so narrowing to a group shows up to the cap of that
+## group even when All had dealt it only a share.
+test "narrowing deals the whole cap to the one group" {
+  var es: List[Entry] = []
+  for i in range(0, 45) {
+    es = es ++ [probe_entry("stdlib", "fn${i} x", "", "stdlib.html#f${i}")]
+  }
+  es = es ++ [probe_entry("spec", "x spec", "", "spec.html#s1")]
+  let state = state_of(es)
+  let all = typed(state, "x")
+  assert all.counts == [45, 1, 0, 0, 0]
+  assert len(all.hits) == cap()
+  let lib = turn(state, all, Scoped(group: 0))
+  assert len(lib.hits) == cap()
+  assert list.all(lib.hits, id => id < 45)
 }

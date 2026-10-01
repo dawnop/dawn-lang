@@ -318,6 +318,13 @@
     else syncQuery();
   });
 
+  // A scope pill is a button, and a pressed button takes focus; the field
+  // has to keep it, or the arrows and Enter stop reaching the guest after a
+  // click. The click itself still happens.
+  host.addEventListener('mousedown', function (ev) {
+    if (ev.target.closest && ev.target.closest('.search-pill')) ev.preventDefault();
+  });
+
   host.addEventListener('mousemove', function () {
     host.classList.remove('is-keying');
   });
