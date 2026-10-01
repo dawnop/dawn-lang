@@ -613,10 +613,11 @@ fn home_page(a: Assets, lang: Lang, figs: Figures, docs: List[String]) -> String
   let js = a.home_js
   let font = a.mono_font
   # The stylesheet after the shared one, so that its rules win the ties. The
-  # script is a plain, blocking one, and that is deliberate: it is the only
-  # thing that can put a saved theme on <html> before the first paint, and it
-  # is small. It cannot be inline (docs/site-home-design.md says why), so it is
-  # this; everything in it that touches the body waits for DOMContentLoaded.
+  # script is a plain, blocking one after the shared theme.js (head_html),
+  # and that is deliberate: it has to register the front page's own switch
+  # before the toggle can be clicked and set data-sky before the first paint.
+  # It cannot be inline (docs/site-home-design.md says why), so it is this;
+  # everything in it that touches the body waits for DOMContentLoaded.
   let head = """<link rel="stylesheet" href="${root}/assets/${css}">""" ++ "\n"
     ++ """<link rel="preload" href="${root}/assets/${font}" as="font" type="font/woff2" crossorigin>"""
     ++ "\n" ++ """<script src="${root}/assets/${js}"></script>"""
@@ -767,9 +768,10 @@ test "the front page carries its figures, its programs and no inline script" {
       assert str.contains(p, `href="./assets/home.css"`) || str.contains(p, `href="../assets/home.css"`)
       assert not str.contains(p, "googleapis")
       assert not str.contains(p, "gstatic")
-      # every <script> has a src: the page's behaviour is home.js and search.js
+      # every <script> has a src: the page's behaviour is theme.js, home.js
+      # and search.js
       assert len(str.split(p, "<script>")) == 1
-      assert len(str.split(p, "<script ")) == 3
+      assert len(str.split(p, "<script ")) == 4
       # the toggle is hidden until the script that drives it is there
       assert str.contains(p, `id="theme-toggle" hidden`)
     }
