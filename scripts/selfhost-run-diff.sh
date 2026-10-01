@@ -15,16 +15,18 @@ trap 'rm -rf "$OUT"' EXIT
 
 # the reference CLI = the previous release's jar, wrapped as one executable.
 # It runs from a seed_root: the repo with std/ swapped for the seed's own
-# released std (seedjar.sh), because subcommands read `std` off the cwd and
-# today's std may be one generation ahead of the seed's checker. Relative
-# targets resolve through the symlinks unchanged.
+# released std (seedjar.sh), because today's std may be one generation ahead
+# of the seed's checker. Relative targets resolve through the symlinks
+# unchanged. Seeds before #291 find that std off the cwd; a seed from #291 on
+# never reads the cwd and takes DAWN_STD instead, so the wrapper names the
+# same directory there too, and does not inherit the caller's.
 # It runs on bin/dawn's JDK, not PATH's (seedjar.sh seed_java).
 SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
 printf '#!/bin/sh
-cd "%s" && exec "%s" -Xss512m -jar "%s" "$@"
-' "$OUT/seed-root" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
+cd "%s" && DAWN_STD="%s" exec "%s" -Xss512m -jar "%s" "$@"
+' "$OUT/seed-root" "$OUT/seed-root/std" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
 SH=(./bin/dawn)

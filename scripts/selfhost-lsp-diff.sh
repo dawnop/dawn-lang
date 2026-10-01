@@ -25,15 +25,22 @@ ROOT=$(pwd)
 SELF=${DAWN_SELF:-./bin/dawn}
 OUT=${TMPDIR:-/tmp}/selfhost-lsp-diff.$$
 mkdir -p "$OUT/proj/src"
-# the seed's lsp reads `std` off the cwd and takes no --std flag, so the
-# wrapper runs from a seed_root: the repo with std/ swapped for the seed's
-# own released std (seedjar.sh). Session documents are absolute paths under
-# $OUT, unaffected by the cwd move.
+# The wrapper runs from a seed_root: the repo with std/ swapped for the
+# seed's own released std (seedjar.sh). Session documents are absolute paths
+# under $OUT, unaffected by the cwd move.
+#
+# And it names that std in DAWN_STD, the spelling the cwd-relative `std`
+# resolved to. Older seeds found it off the cwd; a seed from #291 on never
+# reads the cwd, and with no DAWN_STD would answer from its embedded copy,
+# whose definitions name no file -- every definition into std would then
+# differ from the subject's for a reason that is not the subject's. Set in the
+# wrapper, not inherited, because the caller's DAWN_STD (native-cli-diff
+# exports the checkout's) is HEAD's std, which a seed cannot check.
 SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
 seed_root "$OUT/seed-root"
-printf '#!/bin/sh\ncd "%s" && exec "%s" -Xss512m -jar "%s" "$@"\n' \
-  "$OUT/seed-root" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
+printf '#!/bin/sh\ncd "%s" && DAWN_STD="%s" exec "%s" -Xss512m -jar "%s" "$@"\n' \
+  "$OUT/seed-root" "$OUT/seed-root/std" "$SEEDJAVA" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 REF=${DAWN_BIN:-"$OUT/seed-cli"}
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
@@ -270,7 +277,10 @@ PYEOF
 }
 
 run_session "$REF" lsp > "$OUT/kotlin.txt"
-run_session "$SELF" lsp > "$OUT/self.txt"
+# The subject on the checkout's std. ./bin/dawn exports exactly this itself;
+# a subject without a launcher (DAWN_SELF=dawnc) never reads the cwd's `std`
+# (#291), so it is told here, unless the caller already chose one.
+DAWN_STD="${DAWN_STD:-$ROOT/std}" run_session "$SELF" lsp > "$OUT/self.txt"
 
 # Definition answers can point into a server's own std tree, and the two
 # servers run from different roots (the reference from its seed_root, the
