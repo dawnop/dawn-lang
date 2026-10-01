@@ -71,8 +71,13 @@ pub type ProjectPlan = {
 打开顺序决定两个文档共享哪张图。因此最终 workspace identity 是 canonical：
 
 ```text
-(canon(plan.source.project), canon(plan.source.source_root))
+(canon_identity(plan.source.project), canon_identity(plan.source.source_root))
 ```
+
+`canon_identity`（`compiler-plan/src/source.dawn`）解析 symlink：路径存在时取 realpath，
+不存在时退回词法 `canon`（#207，[fs-real-path-design.md](fs-real-path-design.md) R3）。
+所以经链接打开的文件与经实路径打开的同一文件属于同一个 workspace；`Doc` 的 canonical path、
+诊断与 definition 目标的比较用的也是它。
 
 两部分分别用“十进制长度 + `:` + 原值”编码后连接，形成无碰撞的 opaque `lookup_key`。
 `lookup_key` 只用于 `LspState.workspaces` 查表，**绝不解释为文件路径**。真实 canonical
@@ -162,10 +167,11 @@ type UnavailableWorkspace = {
   每次 rebuild 都叠加到 `diag_by_uri`，直到下一次成功的 refresh 清除；Unavailable 没有可保留的
   东西，直接换成新的失败状态。manifest 语法错误不算 setup failure：它是 planner diagnostic，
   照常以零 jar lease 安装并发布，与首次打开一致。
-- **identity 不迁移。** identity 是 target 路径的纯函数（`source_roots` 只对路径做算术，
-  不读 manifest），refresh 重规划的是同一 target，所以 key 不会变，成员文档不需要迁到新 key。
-  若将来 manifest 能决定 source root，迁移必须落在这里；在那之前 key 变了按 invariant
-  失败 panic，而不是静默装进旧 key。
+- **identity 不迁移。** identity 由 target 路径决定（`source_roots` 只对路径做算术，
+  不读 manifest），refresh 重规划的是同一 target，manifest 改不动 key。但 identity 解析
+  symlink 之后，文件系统改得动它：服务运行期间链接被改指或根目录被删，重新解析的答案就变了。
+  成员文档是按打开时的 key 登记的，所以 refresh 把 slot 留在原 key 下，不迁移、也不再 panic
+  （此前这里按 invariant panic）；之后新打开的文档拿到新答案。
 
 ### 3.3 Duplicate canonical path conflict
 
@@ -294,19 +300,22 @@ shutdown request、正常/异常 `exit`、EOF 与 fatal framing 都执行 `close
 `lease.close` 由 `catch_panic` 隔离并记录错误，不能阻止其他 workspace 或 standalone lease
 继续关闭；state 随后清空所有 lease ownership，shutdown 后再 exit 不会重复关闭。
 
-## 9. 19 例 × 21 mutant 行为合同
+## 9. 20 例 × 22 mutant 行为合同
 
-`scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 19 个真实 JSON-RPC 正例，并为
-每个边界编译一个 mutant，共 21 个：`diagnostics-current` 与 `did-close` 各拥有两个，其余一
+`scripts/lsp-workspace-contract/` 在私有 selfhost 副本上运行 20 个真实 JSON-RPC 正例，并为
+每个边界编译一个 mutant，共 22 个：`diagnostics-current` 与 `did-close` 各拥有两个，其余一
 例一个。每个 mutant 必须先编译成功，再只运行 owning case；只有出现该 case 唯一的 failure
 label 才算负控见红，build failure、timeout、协议错误或无关 assertion 都不算。
 
-19 个正例覆盖：
+20 个正例覆盖：
 
 - 全 live overlay、未落盘模块、当前模块 completion 自排除；
 - extensionless 本地 buffer 保持 standalone；
 - 同一 project 的不同 source root 按两种打开顺序隔离，definition/module resolution 均不串；
 - close rollback、duplicate canonical path conflict、root-scoped definition；
+- symlink identity：真磁盘上的目录链接，main 经链接、库经实路径打开，main 看到库的 live text、
+  definition 落到库的实 URI；再经链接以不同文本打开库，两个 URI 都收到重复冲突诊断。mutant
+  `lexical-identity` 把 `canon_identity` 改回 `canon`，由 `SYMLINK_IDENTITY_SPLIT` 打红；
 - 当前 URI、空数组与各自 live source view 的全量 diagnostics；
 - 多 root external-diagnostic aggregation；
 - 同 FQCN Java target 按两种打开顺序隔离；
@@ -327,8 +336,9 @@ label 才算负控见红，build failure、timeout、协议错误或无关 asser
 
 下列边界不把 TOOL-05/06 重新标成 open：
 
-- **symlink/case-fold identity。** 当前 `canon` 只做绝对化与词法 `.`/`..` 归一，不解析 symlink，
-  也不做平台 case-fold；duplicate conflict 只能覆盖当前 canonical 定义识别出的同一路径。
+- **case-fold identity。** symlink 已由 `canon_identity` 解析（#207，见 §2.3）；平台 case-fold
+  仍不做，大小写不同的两个拼写在大小写不敏感的文件系统上仍是两个 identity。未落盘的文件解析不了，
+  退回词法拼写，所以一个只存在于编辑器里的 buffer 若经链接打开，与实路径那一侧不会合并。
 - **未解析依赖的目录不在监视范围内。** 一个 `[deps]` 指向还没有 `dawn.toml` 的目录时，诊断
   记在消费方 manifest 上；之后在那个目录里新建 `dawn.toml` 不会触发 refresh，要再保存一次
   消费方 manifest。补上它需要 planner 把「试读过但不存在」的 manifest 目录也交出来。

@@ -7,9 +7,10 @@ the contract contains no timing sleeps. `run.sh` builds both Java fixtures from
 tracked sources into a private `file://` Maven repository and compiles private
 selfhost copies for the positive server and every mutant.
 
-The eighteen cases cover full live overlays, unsaved modules, on-disk module
+The cases cover full live overlays, unsaved modules, on-disk module
 self-exclusion, extensionless local buffers, same-project source-root isolation
-in both open orders, close rollback, duplicate canonical paths, root-scoped
+in both open orders, close rollback, duplicate canonical paths, one file
+opened through a directory link and through its real path, root-scoped
 definitions, all-URI diagnostics and source views, external-diagnostic
 aggregation, same-FQCN Java isolation in both open orders, standalone classpath
 isolation, and lease cleanup on last close, shutdown, running exit, EOF, fatal
