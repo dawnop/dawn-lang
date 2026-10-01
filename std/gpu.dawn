@@ -19,10 +19,13 @@
 # under every handler.
 #
 # Two handlers. `with_gpu_fake` is pure, which is what lets it run inside
-# `dawn test --stdlib` and at comptime; `with_gpu_real` is `!io` and stands on
-# the `gpu_*_host` intrinsics (tile-backend-design §4.2, §4.4), which only the
-# native runtime implements: on the JVM every one of them answers
-# `gpu.unsupported_backend`, and the handler passes that on unchanged.
+# `dawn test --stdlib` on any backend. It does not run at comptime: its
+# kernel table is a `Map` and its handler keeps `var` cells, and the comptime
+# interpreter represents neither (spec §12.6). `with_gpu_real` is `!io` and
+# stands on the `gpu_*_host` intrinsics (tile-backend-design §4.2, §4.4),
+# which only the native runtime implements: on the JVM every one of them
+# answers `gpu.unsupported_backend`, and the handler passes that on
+# unchanged.
 use std/bytes
 use std/list
 use std/map
@@ -273,8 +276,10 @@ impl Dtype[F4E2M1FN] {
 }
 
 ## The bytes one element of the named format occupies in a device buffer, or
-## `None` for a format this release's handlers do not move: `f64` (8),
-## `i32` (4), `bf16` and `f16` (2), `i8` and `u8` (1). Both handlers consult
+## `None` for a format this release's handlers do not move: `f64` and `i64`
+## (8), `i32` and `tf32` (4), `bf16`, `f16` and `i16` (2), `i8`, `u8`,
+## `f8E4M3FN`, `f8E5M2` and `f8E8M0FNU` (1). `f32` is not among them, nor
+## are the sub-byte tile formats `i4` and `f4E2M1FN`. Both handlers consult
 ## this and nothing else to accept a `gpu_alloc`, so they refuse the same
 ## formats with `gpu.unsupported_dtype`.
 pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
@@ -313,11 +318,16 @@ pub fn element_bits(dtype: String) -> Option[Int] = match dtype {
   }
 }
 
-## `x` as a buffer of the named format holds it: rounded to bfloat16 for
-## `bf16`, to binary32 for `f32`, truncated toward zero and wrapped into the
-## 32-bit range for `i32`, unchanged for `f64`. What a store into such a
-## buffer does to a value, and what a reference implementation does after
-## every operation whose result the device would keep at that width.
+## `x` as a buffer or tile of the named format holds it. The float formats
+## round through std/narrow's function for that format: `bf16`, `f16`,
+## `f32`, `tf32`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU` and `f4E2M1FN` (the fp8
+## and fp4 ones saturate, and `f8E8M0FNU` rounds toward zero to a power of
+## two, as std/narrow documents). The integer formats truncate toward zero
+## and wrap into their range: `i32`, `i16` and `i8` as two's complement,
+## `u8` into [0, 255]; `i64` truncates and does not wrap. Any other name,
+## `f64` among them, answers `x` unchanged. What a store into such a buffer
+## does to a value, and what a reference implementation does after every
+## operation whose result the device would keep at that width.
 ##
 ## The `i32` arm is the whole of what "a 32-bit buffer holds" means here:
 ## `to_int` truncates toward zero (spec: `to_int(-2.7) == -2`, which is the
@@ -911,12 +921,16 @@ fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width:
 ## (`gpu.unsupported_dtype` otherwise); a handle that was never issued or
 ## was freed answers `gpu.no_such_buffer`. `gpu_launch` looks `kernel` up in
 ## `kernels`, hands the reference implementation the format and the contents
-## of every argument buffer in order, and stores what it returns as the
-## contents of the LAST argument. Before the body is called, its entry's
-## arity must equal the number of buffers (`gpu.bad_arity` otherwise); the
-## grid is not consulted, a reference implementation computes the whole
-## buffer at once; an unknown name answers `gpu.no_kernel`. A buffer holds what memory
-## of its format would: what
+## of every argument buffer in order, and stores each `(position, contents)`
+## pair it returns (`WideRefFn`) as the contents of the argument at that
+## position; a position outside the arguments answers `gpu.bad_write_back`
+## and nothing is written. Every input is read before any write-back, so an
+## in-place kernel sees what its loads would. A `RefFn` that answers only
+## the last argument is wrapped with `last_out`. Before the body is called,
+## its entry's arity must equal the number of buffers (`gpu.bad_arity`
+## otherwise); the grid is not consulted, a reference implementation
+## computes the whole buffer at once; an unknown name answers
+## `gpu.no_kernel`. A buffer holds what memory of its format would: what
 ## `gpu_upload` stores and what a launch writes is rounded to the buffer's
 ## format (`round_to`), which for `f64` is the data as given. The length
 ## check is `upload`'s, above the operation, and is the same code under
@@ -1083,9 +1097,12 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
 
 # ---- the real device ----
 
-## `xs` as the bytes a buffer of the named format holds: `pack_bf16`,
-## `pack_f16`, `pack_i32`, `pack_i8` or `pack_u8`. `f64` is not here, and
-## the caller must not ask: an f64 buffer crosses as an `Array[Float]` the
+## `xs` as the bytes a buffer of the named format holds, through that
+## format's packer: `pack_bf16`, `pack_f16`, `pack_tf32`, `pack_f8e4m3fn`,
+## `pack_f8e5m2`, `pack_f8e8m0`, `pack_i32`, `pack_i16`, `pack_i64`,
+## `pack_i8` or `pack_u8`, one for each format `element_bytes` accepts
+## except `f64`, and any other name panics. `f64` is not here, and the
+## caller must not ask: an f64 buffer crosses as an `Array[Float]` the
 ## runtime copies double for double, and there is no byte packing for it.
 ##
 ## The pairing with `unpack_from` is what makes a format's round trip a
@@ -1165,8 +1182,12 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## crosses to the runtime as an `Array[Float]` the runtime copies double for
 ## double; EVERY OTHER format crosses as `Bytes`, packed here (`pack_to`)
 ## and unpacked here (`unpack_from`), so the runtime copies bytes and knows
-## nothing about the format. Two of those packings ROUND (`bf16`, `f16`) and
-## three are exact in both directions (`i32`, `i8`, `u8`).
+## nothing about the format. Six of those packings ROUND (`bf16`, `f16`,
+## `tf32`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`); four are exact in both
+## directions for the values the format holds (`i32`, `i16`, `i8`, `u8`,
+## each truncating and wrapping on the way in as `round_to` does); and
+## `i64` is exact only within +/-2^53, since the `List[Float]` channel cannot
+## carry the top of its range.
 ## `gpu_launch` looks the name up first (`gpu.no_kernel`), then the
 ## arguments (`gpu.no_arguments`, `gpu.no_such_buffer`), and only then
 ## touches the device: the cubin is handed to the driver the first time its
