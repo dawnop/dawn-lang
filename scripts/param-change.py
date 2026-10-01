@@ -55,7 +55,7 @@ resets it.
 
 What is not shared is the label registry. Emit-Change labels are a fixed set
 of checks listed in scripts/emit-labels.txt; the set of items here is the N-1
-snapshot itself (about 480 callees, different every release), so listing them
+snapshot itself (a few hundred callees, different every release), so listing them
 there would mean editing a registry for every std function added, and that
 registry exists precisely because its set is fixed. The meaning differs as
 well: Emit-Change says "this label's difference is intended" and checks no
@@ -69,9 +69,14 @@ the way `Gate-Budget(push-total): <old>s -> <new>s` is
     param-change.py compare --old SEED.json --new HEAD.json --messages FILE
     param-change.py --self-test
 
-`compare` also refuses an N-1 dump with fewer than --min-callees callees
-(default 400): a dump that parsed to almost nothing is a broken oracle, not a
-std with nothing to check. The shell around it, scripts/selfhost-param-diff.sh,
+`compare` also refuses an N-1 dump with fewer callees than half of HEAD's,
+or fewer than an absolute floor of 100 (--min-callees replaces that floor when
+given): a dump that parsed to almost nothing is a broken oracle, not a std
+with nothing to check. The floor used to be a fixed 400, set when std had
+about 480 callees; when #332 moved 169 GPU references out of std/gpu into
+packages/tileref, the whole std of v0.82.0 had 321, and a real release was
+refused as broken. A count of today's std is a pin on std's size, which is
+not what the check is for, so the floor now follows HEAD's own dump. The shell around it, scripts/selfhost-param-diff.sh,
 is what proves the N-1 dump came from the seed's own std; its header says how.
 Every `compare` run ends with the self-test, as api-diff.py does, because this
 script's normal output is "nothing changed", and so is a broken one's.
@@ -102,7 +107,9 @@ PSEUDO = ("prelude", "builtins")
 # for an undeclared change to one of them: a std item says which file moved by
 # its module name, and these two would otherwise send the reader to std/.
 PSEUDO_SOURCE = "selfhost/src/check/types.dawn"
-MIN_CALLEES = 400
+# The absolute floor: below it a dump parsed to almost nothing, whatever HEAD
+# has. The relative half-of-HEAD rule is what scales with std.
+MIN_CALLEES = 100
 
 
 class ParamError(Exception):
@@ -320,11 +327,20 @@ def compare(old, new, decls):
     return fails, notes, changes
 
 
+def check_whole(name, n_old, n_new, floor=MIN_CALLEES):
+    """Refuse an N-1 dump too small to be a whole std. Pure: the self-test
+    drives it."""
+    if n_old < floor:
+        raise ParamError(f"{name}: {n_old} callees, fewer than {floor};"
+                         " the N-1 dump is not a whole std")
+    if 2 * n_old < n_new:
+        raise ParamError(f"{name}: {n_old} callees, fewer than half of HEAD's"
+                         f" {n_new}; the N-1 dump is not a whole std")
+
+
 def run_compare(args):
     old, new = load(args.old), load(args.new)
-    if len(old) < args.min_callees:
-        raise ParamError(f"{args.old}: {len(old)} callees, fewer than {args.min_callees};"
-                         " the N-1 dump is not a whole std")
+    check_whole(args.old, len(old), len(new), args.min_callees)
     if args.messages:
         lines = Path(args.messages).read_text(encoding="utf-8").splitlines()
     else:
@@ -442,6 +458,16 @@ MUTANTS = (
     ("a callee listed twice", _doc(fns=[_SPLIT, _SPLIT])),
 )
 
+# The whole-std check: (label, N-1 callees, HEAD callees, the refusal's
+# wording or None for accepted). The floor case has HEAD as small as N-1, so
+# only the absolute floor can refuse it.
+SIZES = (
+    ("an N-1 dump under half of HEAD's", 160, 321, "fewer than half of HEAD's 321"),
+    ("an N-1 dump at exactly half of HEAD's", 160, 320, None),
+    ("an N-1 dump under the absolute floor", 99, 99, "fewer than 100;"),
+    ("an N-1 dump at the absolute floor", 100, 150, None),
+)
+
 
 def self_test(verbose=True):
     failures = []
@@ -464,12 +490,26 @@ def self_test(verbose=True):
                 print(f"  refused: {label}")
         else:
             failures.append(f"malformed input accepted: {label}")
+    for label, n_old, n_new, want in SIZES:
+        try:
+            check_whole("seed.json", n_old, n_new)
+        except ParamError as exc:
+            got = True
+            if want and (want not in str(exc)
+                         or "the N-1 dump is not a whole std" not in str(exc)):
+                failures.append(f"{label}: refused with the wrong message: {exc}")
+        else:
+            got = False
+        if got != bool(want):
+            failures.append(f"{label}: expected {'refused' if want else 'accepted'}")
+        elif verbose:
+            print(f"  {'refused' if want else 'accepted'}: {label}")
     for failure in failures:
         print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
     if failures:
         return 1
     print(f"selftest: {len(CASES)} case(s) as expected, {len(MUTANTS)} malformed"
-          " input(s) refused")
+          f" input(s) refused, {len(SIZES)} whole-std size(s) as expected")
     return 0
 
 
