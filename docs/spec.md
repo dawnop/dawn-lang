@@ -3162,7 +3162,8 @@ url/文件名安全字母表且
 - `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的
   `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的。path 不是目录时
   `Err`，`kind` 是 `"io.not_a_directory"`——它与 `io.run` 的 `"io.no_program"`、
-  `io.delete` 的 `"io.invalid_delete_path"` 是 std 自己铸的三个 kind，其余都是后端给的
+  `io.delete` 的 `"io.invalid_delete_path"`、`io.real_path` 的 `"io.relative_path"` 是 std
+  自己铸的四个 kind，其余都是后端给的
 - `io.delete(path)` 回 `Result[DeleteOutcome, ForeignError]`：删掉文件或空目录是
   `Ok(Deleted)`，路径不存在是 `Ok(NotFound)`；非空目录、权限等其他 host refusal 一律
   是 `Err`，且从不递归删除。空串与以 `/` 结尾的 path 在 std 层直接拒绝，`kind` 为
@@ -3171,6 +3172,11 @@ url/文件名安全字母表且
 - `io.exists(path)`、`io.is_dir(path)`、`io.is_symlink(path)` 都是 Bool 查询：路径不存在、
   类型不匹配或 host path 无效都回 `false`。特别地，含 U+0000 的 path 不得 fault，也不得把
   NUL 前缀拿去查询；三者都直接回 `false`
+- `io.real_path(path)` 回跟随全部符号链接、由宿主消去 `.` 与 `..` 之后的路径（`realpath(3)`
+  语义）：链接之后的 `..` 退到的是链接**目标**的父目录，不是链接所在的目录。`path` 必须是
+  绝对路径且必须存在。相对路径在 std 层直接拒绝，`kind` 为 `"io.relative_path"`，不交给
+  后端——解析它要读工作目录，那是 `Env` 的应答而不是 `Fs` 的；不存在、或含 U+0000 的 path
+  是后端给的 `Err`。wasm32-wasi 没有绝对路径可解析，在那里一律是 `Err`
 - `io.getenv(name)` 在变量未设置或 name 不能由 host 环境 API 表示时回 `None`。特别地，含
   U+0000 的 name 不得 fault，也不得查询 NUL 前缀；它直接回 `None`
 - `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。

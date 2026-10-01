@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 50ada1822db0b5e6 -->
+<!-- doc-check: translation-of docs/spec.md @ a49b56494acfe6dd -->
 
 # Dawn Language Specification
 
@@ -3979,9 +3979,9 @@ behaviours are:
   done in the std layer (`list.sort` goes through the language's own `Ord[String]`), and
   the `io_list_names` primitive promises no order — the backends no longer each sort their
   own way. When path is not a directory it is an `Err` whose `kind` is
-  `"io.not_a_directory"` — that one, `io.run`'s `"io.no_program"`, and `io.delete`'s
-  `"io.invalid_delete_path"` are the three kinds std mints itself; all the others come from
-  the backend
+  `"io.not_a_directory"` — that one, `io.run`'s `"io.no_program"`, `io.delete`'s
+  `"io.invalid_delete_path"`, and `io.real_path`'s `"io.relative_path"` are the four kinds std
+  mints itself; all the others come from the backend
 - `io.delete(path)` returns `Result[DeleteOutcome, ForeignError]`: deleting a file or empty
   directory is `Ok(Deleted)`, an absent path is `Ok(NotFound)`, and every other host refusal
   (including a non-empty directory) is an `Err`. It never deletes recursively. The std layer
@@ -3992,6 +3992,13 @@ behaviours are:
   path, a type mismatch, or an invalid host path returns `false`. In particular, a path
   containing U+0000 must neither fault nor query the prefix before the NUL; all three return
   `false` directly
+- `io.real_path(path)` returns the path with every symbolic link followed and `.` and `..`
+  resolved by the host (`realpath(3)` semantics): a `..` after a link goes to the parent of the
+  link's **target**, not of the directory the link sits in. `path` must be absolute and must
+  exist. A relative path is rejected in the std layer with kind `"io.relative_path"` and never
+  reaches a backend — resolving it would read the working directory, which is `Env`'s answer
+  and not `Fs`'s; a path that does not exist, or that contains U+0000, is the backend's `Err`.
+  wasm32-wasi has no absolute paths to resolve, so there it is always an `Err`
 - `io.getenv(name)` returns `None` when the variable is unset or when the name cannot be
   represented by the host environment API. In particular, a name containing U+0000 must
   neither fault nor query the prefix before the NUL; it returns `None` directly

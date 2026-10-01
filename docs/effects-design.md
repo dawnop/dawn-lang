@@ -443,7 +443,7 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
 3. **反向的一笔一起记。** 吸收禁令（[spec.md](spec.md) §6.2 规则 7）让一条行只增不减，
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
-第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十四个操作，生产 handler
+第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十五个操作，生产 handler
 `with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共六条 `effect` 声明，落在两个文件里：
 `std/io` 的 `Fs`、`Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
 `with_proc_real`）、`Env`（进程环境的两个操作 `env_cwd` / `env_get`，生产 handler
