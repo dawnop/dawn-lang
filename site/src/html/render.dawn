@@ -1,9 +1,18 @@
 # Markdown AST -> HTML. Top-level headings get numbered anchors (#s2, #s2-3)
 # and feed the TOC; link URLs go through a caller-supplied mapper so this
 # module knows nothing about the site's layout.
+#
+# What it knows about the page's look (docs/site-pages-design.md) it knows
+# from the document's structure, never from where a block happens to sit in
+# one particular file: a heading's printed section number is the run of
+# digits and dots (or `D3`, `M5`) before its first space; the status note is
+# the first block of the body; a timeline is a list whose every item opens
+# with a milestone or a date in bold. The alternative, matching the HTML
+# afterwards ("the first ul after id=s5"), breaks the day a section moves.
 
 use std/str
-use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
+use md/ast.{Inline, Text, Code, Bold, Em, Del, Link, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
+use md/text.{seg}
 use html/escape.{escape_html, escape_attr}
 use html/play.{Play, play_block}
 use hl/dawn.{highlight_dawn}
@@ -21,6 +30,7 @@ pub fn inline_text(items: List[Inline]) -> String =
         Code(s) -> s
         Bold(xs) -> inline_text(xs)
         Em(xs) -> inline_text(xs)
+        Del(xs) -> inline_text(xs)
         Link(label, _) -> label
       }), "")
 
@@ -30,6 +40,7 @@ fn inline_html(it: Inline, map_url: fn(String) -> String) -> String =
     Code(s) -> "<code>" ++ escape_html(s) ++ "</code>"
     Bold(xs) -> "<strong>" ++ inlines_html(xs, map_url) ++ "</strong>"
     Em(xs) -> "<em>" ++ inlines_html(xs, map_url) ++ "</em>"
+    Del(xs) -> "<del>" ++ inlines_html(xs, map_url) ++ "</del>"
     Link(label, url) ->
       `<a href="` ++ escape_attr(map_url(url)) ++ `">` ++ escape_html(label) ++ "</a>"
   }
@@ -44,20 +55,49 @@ pub fn inline_run(items: List[Inline], map_url: fn(String) -> String) -> String 
   inlines_html(items, map_url)
 
 ## `play` is the offer a `dawn` block makes: given one, the block comes out
-## wrapped with a link that carries its own source to the Playground. Only the
-## tutorial passes it -- the spec quotes three lines of a match, and a link
-## from there would open an editor on something that was never a program.
-fn code_html(lang: String, body: String, play: Option[Play]) -> String =
+## as a window with a link that carries its own source to the Playground.
+## Only the tutorial and the gallery pass it -- the spec quotes three lines of
+## a match, and a link from there would open an editor on something that was
+## never a program. `out` is the `output` fence that followed the block, or
+## "" (see [offered_pair]).
+fn code_html(lang: String, body: String, play: Option[Play], out: String) -> String =
   if lang == "dawn" {
     let pre = `<pre class="dawn"><code>` ++ highlight_dawn(body) ++ "</code></pre>"
     match play {
-      Some(p) -> play_block(p, pre, body)
+      Some(p) -> play_block(p, "dawn", pre, body, out)
       None -> pre
     }
   } else if lang == "output" {
-    `<pre class="output"><code>` ++ escape_html(body) ++ "</code></pre>"
+    output_html(body)
   } else {
     "<pre><code>" ++ escape_html(body) ++ "</code></pre>"
+  }
+
+fn output_html(body: String) -> String =
+  `<pre class="output"><code>` ++ escape_html(body) ++ "</code></pre>"
+
+## When block `i` is a `dawn` block the page offers to the Playground and
+## block `i + 1` is the `output` fence the tutorial writes under it, the two as
+## one window. The pair is made here, from the blocks, rather than by
+## matching the markup afterwards: they are siblings in the source and the
+## window is one element.
+fn offered_pair(bs: List[Block], i: Int, play: Option[Play]) -> Option[String] =
+  match play {
+    Some(_) ->
+      match get(bs, i) {
+        Some(CodeBlock(lang, body)) ->
+          if lang == "dawn" {
+            match get(bs, i + 1) {
+              Some(CodeBlock(next, out)) ->
+                if next == "output" { Some(code_html(lang, body, play, output_html(out))) } else { None }
+              _ -> None
+            }
+          } else {
+            None
+          }
+        _ -> None
+      }
+    None -> None
   }
 
 ## A list item body: a lone paragraph renders tight (no <p>).
@@ -77,6 +117,8 @@ fn items_html(
 fn cell_html(tag: String, cells: List[List[Inline]], map_url: fn(String) -> String) -> String =
   join(map(cells, c => "<${tag}>" ++ inlines_html(c, map_url) ++ "</${tag}>"), "")
 
+## A table in a scrolling frame: on a phone a wide table scrolls inside the
+## frame instead of widening the page.
 fn table_html(
   header: List[List[Inline]],
   rows: List[List[List[Inline]]],
@@ -84,31 +126,165 @@ fn table_html(
 ) -> String = {
   let head = "<thead>\n<tr>" ++ cell_html("th", header, map_url) ++ "</tr>\n</thead>"
   let body = join(map(rows, r => "<tr>" ++ cell_html("td", r, map_url) ++ "</tr>"), "\n")
-  "<table>\n" ++ head ++ "\n<tbody>\n" ++ body ++ "\n</tbody>\n</table>"
+  `<div class="table-wrap">` ++ "\n<table>\n" ++ head ++ "\n<tbody>\n" ++ body ++ "\n</tbody>\n</table>\n</div>"
 }
 
-fn heading_html(lvl: Int, id: String, items: List[Inline], map_url: fn(String) -> String) -> String = {
-  let attr = if id == "" { "" } else { ` id="` ++ id ++ `"` }
-  "<h${lvl}${attr}>" ++ inlines_html(items, map_url) ++ "</h${lvl}>"
+fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
+
+## The section number a heading prints and the rest of its text: `2.1 Foo`
+## -> ("2.1", "Foo"), `6. Effects` -> ("6.", "Effects"), `D3 comptime` ->
+## ("D3", "comptime"), `M5 the site` -> ("M5", "the site"). A heading that
+## does not open with one, or whose number is not followed by a space
+## (`M0–M7: from nothing`), is all text: ("", s).
+pub fn split_number(s: String) -> (String, String) = {
+  let cs = code_points(s)
+  let n = len(cs)
+  var i = 0
+  var ok = false
+  if n > 0 && (cs[0] == 'D' || cs[0] == 'M') {
+    i = 1
+    while i < n && is_digit(cs[i]) {
+      i = i + 1
+    }
+    ok = i > 1
+  } else if n > 0 && is_digit(cs[0]) {
+    while i < n && (is_digit(cs[i]) || cs[i] == '.') {
+      i = i + 1
+    }
+    ok = true
+  }
+  if ok && i < n && cs[i] == ' ' {
+    (seg(cs, 0, i), str.trim_start(seg(cs, i, n)))
+  } else {
+    ("", s)
+  }
 }
+
+## A heading's inner markup. With an id, its printed number (if any) is set
+## apart in `span.hn` -- gen/links reads it from there to hold it to the id --
+## and a `#` link to the heading follows the text, for a reader who wants the
+## address of the section in front of them.
+fn heading_html(lvl: Int, id: String, items: List[Inline], map_url: fn(String) -> String) -> String =
+  if id == "" {
+    "<h${lvl}>" ++ inlines_html(items, map_url) ++ "</h${lvl}>"
+  } else {
+    let inner =
+      match items {
+        [Text(first), ..] -> {
+          let (num, rest) = split_number(first)
+          if num == "" {
+            inlines_html(items, map_url)
+          } else {
+            `<span class="hn">` ++ escape_html(num) ++ "</span>"
+              ++ inlines_html([Text(rest)] ++ drop_first(items), map_url)
+          }
+        }
+        _ -> inlines_html(items, map_url)
+      }
+    let anchor = """<a class="anchor" href="#${id}" aria-hidden="true" tabindex="-1">#</a>"""
+    """<h${lvl} id="${id}">""" ++ inner ++ anchor ++ "</h${lvl}>"
+  }
+
+fn drop_first(items: List[Inline]) -> List[Inline] = map(range(1, len(items)), i => items[i])
+
+## What a timeline item opens with: a milestone (`M5 …`) or a date
+## (`2026-07-11.`), in bold.
+fn is_stamp(t: String) -> Bool = {
+  let cs = code_points(t)
+  let n = len(cs)
+  let milestone = n >= 2 && cs[0] == 'M' && is_digit(cs[1])
+  let date = n >= 5 && is_digit(cs[0]) && is_digit(cs[1]) && is_digit(cs[2]) && is_digit(cs[3])
+    && cs[4] == '-'
+  milestone || date
+}
+
+fn opens_with_stamp(bs: List[Block]) -> Bool =
+  match bs {
+    [Para(items), ..] ->
+      match items {
+        [Bold(xs), ..] -> is_stamp(inline_text(xs))
+        _ -> false
+      }
+    _ -> false
+  }
+
+## A list whose every item opens with a milestone or a date in bold: the
+## early design notes' milestones and each period of the history page. Drawn
+## as a timeline.
+fn is_timeline(items: List[List[Block]]) -> Bool =
+  len(items) > 0 && len(filter(items, bs => not opens_with_stamp(bs))) == 0
 
 ## One block outside the numbered top level (list items, quotes): no anchors.
+## `out` as in [code_html].
 fn block_html(b: Block, map_url: fn(String) -> String, play: Option[Play]) -> String =
   match b {
     Heading(lvl, items) -> heading_html(lvl, "", items, map_url)
     Para(items) -> "<p>" ++ inlines_html(items, map_url) ++ "</p>"
-    CodeBlock(lang, body) -> code_html(lang, body, play)
+    CodeBlock(lang, body) -> code_html(lang, body, play, "")
     # highlighted like any other block, never offered: see md/ast.Fragment
-    Fragment(lang, body) -> code_html(lang, body, None)
-    UList(items) -> "<ul>\n" ++ items_html(items, map_url, play) ++ "\n</ul>"
+    Fragment(lang, body) -> code_html(lang, body, None, "")
+    UList(items) -> {
+      let open = if is_timeline(items) { `<ul class="timeline">` } else { "<ul>" }
+      open ++ "\n" ++ items_html(items, map_url, play) ++ "\n</ul>"
+    }
     OList(items) -> "<ol>\n" ++ items_html(items, map_url, play) ++ "\n</ol>"
     Table(header, rows) -> table_html(header, rows, map_url)
     Quote(bs) -> "<blockquote>\n" ++ blocks_html(bs, map_url, play) ++ "\n</blockquote>"
     Rule -> "<hr>"
   }
 
-fn blocks_html(bs: List[Block], map_url: fn(String) -> String, play: Option[Play]) -> String =
-  join(map(bs, b => block_html(b, map_url, play)), "\n")
+## A run of blocks, with a dawn block and the output under it paired into one
+## window where the page offers the Playground.
+fn blocks_html(bs: List[Block], map_url: fn(String) -> String, play: Option[Play]) -> String = {
+  var chunks: List[String] = []
+  var i = 0
+  while i < len(bs) {
+    match offered_pair(bs, i, play) {
+      Some(win) -> {
+        chunks = chunks ++ [win]
+        i = i + 2
+      }
+      None -> {
+        chunks = chunks ++ [block_html(bs[i], map_url, play)]
+        i = i + 1
+      }
+    }
+  }
+  join(chunks, "\n")
+}
+
+## A page's head, taken off the front of its document: the `#` title, and the
+## translation note that follows it when the document has one (a paragraph
+## that is nothing but one `*…*`, such as "*[中文](spec.md) — the Chinese text is
+## the original…*"). The page shell sets both in the sky band above the
+## article; `body` is everything after them. Either is empty when the
+## document does not have it.
+pub type Parts = { title: List[Inline], twin: List[Inline], body: List[Block] } derive Show
+
+pub fn split_head(blocks: List[Block]) -> Parts = {
+  var title: List[Inline] = []
+  var twin: List[Inline] = []
+  var from = 0
+  match get(blocks, 0) {
+    Some(Heading(lvl, items)) -> {
+      if lvl == 1 {
+        title = items
+        from = 1
+      }
+    }
+    _ -> ()
+  }
+  match get(blocks, from) {
+    Some(Para([Em(xs)])) -> {
+      if from == 1 {
+        twin = [Em(xs)]
+        from = from + 1
+      }
+    }
+    _ -> ()
+  }
+  Parts { title: title, twin: twin, body: map(range(from, len(blocks)), i => blocks[i]) }
+}
 
 ## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
 ## h1 becomes the title. h4 gets a numbered id too but stays OUT of the TOC —
@@ -120,6 +296,11 @@ pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc =
 ## `code_html`. Two entry points rather than one with a defaulted argument, so
 ## that every page which does NOT hand out links says so by calling the short
 ## name instead of by omitting something.
+##
+## A quote that is the document's first block is its status note (`> Status:
+## normative …`) and is marked so; a caller that took the title and the
+## translation note off with [split_head] hands the body here, and the note is
+## then its first block.
 pub fn render_doc_play(
   blocks: List[Block],
   map_url: fn(String) -> String,
@@ -131,7 +312,10 @@ pub fn render_doc_play(
   var h2 = 0
   var h3 = 0
   var h4 = 0
-  for b in blocks {
+  var i = 0
+  while i < len(blocks) {
+    let b = blocks[i]
+    var step = 1
     match b {
       Heading(lvl, items) -> {
         if lvl == 1 {
@@ -158,10 +342,24 @@ pub fn render_doc_play(
           chunks = chunks ++ [heading_html(4, id, items, map_url) ++ "\n"]
         }
       }
+      Quote(bs) -> {
+        let cls = if i == 0 { ` class="status"` } else { "" }
+        chunks = chunks
+          ++ ["<blockquote${cls}>\n" ++ blocks_html(bs, map_url, play) ++ "\n</blockquote>\n"]
+      }
       _ -> {
-        chunks = chunks ++ [block_html(b, map_url, play) ++ "\n"]
+        match offered_pair(blocks, i, play) {
+          Some(win) -> {
+            chunks = chunks ++ [win ++ "\n"]
+            step = 2
+          }
+          None -> {
+            chunks = chunks ++ [block_html(b, map_url, play) ++ "\n"]
+          }
+        }
       }
     }
+    i = i + step
   }
   Doc { html: join(chunks, ""), toc: toc, title: title }
 }
@@ -194,8 +392,67 @@ test "headings number their anchors and fill the toc" {
     TocEntry { level: 3, id: "s1-1", text: "一点一" },
     TocEntry { level: 2, id: "s2", text: "二" },
   ]
-  assert str.contains(doc.html, `<h2 id="s1">一</h2>`)
-  assert str.contains(doc.html, `<h3 id="s1-1">一点一</h3>`)
+  assert str.contains(doc.html, `<h2 id="s1">一<a class="anchor" href="#s1" aria-hidden="true" tabindex="-1">#</a></h2>`)
+  assert str.contains(doc.html, `<h3 id="s1-1">一点一<a class="anchor" href="#s1-1"`)
+}
+
+## The number a heading prints is set apart, so the eye can run down the
+## numbers and gen/links can hold each one to its id.
+test "a heading's printed number is split off into span.hn" {
+  assert split_number("2.1 Foo") == ("2.1", "Foo")
+  assert split_number("6. 效果系统") == ("6.", "效果系统")
+  assert split_number("D3 comptime rather than macros") == ("D3", "comptime rather than macros")
+  assert split_number("M5 the site") == ("M5", "the site")
+  # a number with no space after it is part of the text
+  assert split_number("M0–M7: from nothing") == ("", "M0–M7: from nothing")
+  assert split_number("Decisions") == ("", "Decisions")
+  assert split_number("D is for Dawn") == ("", "D is for Dawn")
+  let doc = render_doc([Heading(2, [Text("2. Types "), Code("Int")])], keep_url)
+  assert str.contains(doc.html,
+    `<h2 id="s1"><span class="hn">2.</span>Types <code>Int</code><a class="anchor" href="#s1"`)
+  # the toc keeps the whole text; html/page splits it there
+  assert doc.toc == [TocEntry { level: 2, id: "s1", text: "2. Types Int" }]
+}
+
+test "the title and the translation note come off the front of a document" {
+  let parts = split_head([
+    Heading(1, [Text("Spec")]),
+    Para([Em([Link("中文", "spec.md"), Text(" — the original")])]),
+    Quote([Para([Text("Status: normative")])]),
+    Para([Text("body")]),
+  ])
+  assert parts.title == [Text("Spec")]
+  assert parts.twin == [Em([Link("中文", "spec.md"), Text(" — the original")])]
+  assert len(parts.body) == 2
+  # the status note is now the body's first block, and is marked
+  let doc = render_doc(parts.body, keep_url)
+  assert str.starts_with(doc.html, "<blockquote class=\"status\">")
+  # a quote further down is an ordinary quote
+  let later = render_doc([Para([Text("x")]), Quote([Para([Text("y")])])], keep_url)
+  assert str.contains(later.html, "<blockquote>\n<p>y</p>")
+  # a document with no note keeps its first paragraph
+  let plain = split_head([Heading(1, [Text("T")]), Para([Text("lede")])])
+  assert plain.twin == []
+  assert plain.body == [Para([Text("lede")])]
+}
+
+test "a list of milestones or dates in bold is a timeline, any other list is not" {
+  let ms = render_doc([UList([
+    [Para([Bold([Text("M0 end to end")]), Text(" (done)")])],
+    [Para([Bold([Text("M1 looks like a language")])])],
+  ])], keep_url)
+  assert str.contains(ms.html, `<ul class="timeline">`)
+  let dates = render_doc([UList([[Para([Bold([Text("2026-07-11.")]), Text(" M0")])]])], keep_url)
+  assert str.contains(dates.html, `<ul class="timeline">`)
+  let mixed = render_doc([UList([
+    [Para([Bold([Text("M0 end to end")])])],
+    [Para([Bold([Text("Note")]), Text(" not a milestone")])],
+  ])], keep_url)
+  assert not str.contains(mixed.html, "timeline")
+}
+
+test "struck text renders as del" {
+  assert inlines_html([Del([Text("a < b")])], keep_url) == "<del>a &lt; b</del>"
 }
 
 test "tight and loose list items" {
@@ -218,6 +475,10 @@ test "dawn code blocks come out highlighted" {
 ## that has one everywhere else.
 test "the playground offer reaches nested dawn blocks and nothing else" {
   let p = Some(Play { href: "../playground.html", label: "Open in playground" })
+  let paired = render_doc_play([CodeBlock("dawn", "let x = 1"), CodeBlock("output", "1")], keep_url, p)
+  # the output under a program goes into its window, after the code
+  assert str.contains(paired.html, "</code></pre>\n" ++ `<pre class="output"><code>1</code></pre>` ++ "\n</figure>")
+  assert len(str.split(paired.html, "<figure")) == 2
   let nested = render_doc_play([
     UList([[CodeBlock("dawn", "let x = 1")]]),
     Quote([CodeBlock("dawn", "let y = 2")]),
@@ -240,8 +501,9 @@ test "a fragment is highlighted and never offered to the playground" {
   assert not str.contains(doc.html, "playable")
 }
 
-test "tables render thead and tbody" {
+test "tables render thead and tbody, inside a scrolling frame" {
   let doc = render_doc([Table([[Text("列")]], [[[Code("v")]]])], keep_url)
+  assert str.starts_with(doc.html, `<div class="table-wrap">` ++ "\n<table>")
   assert str.contains(doc.html, "<thead>\n<tr><th>列</th></tr>\n</thead>")
   assert str.contains(doc.html, "<tbody>\n<tr><td><code>v</code></td></tr>\n</tbody>")
 }

@@ -72,10 +72,27 @@ pub fn play_link(p: Play, code: String) -> String = {
   """<a class="play-open" href="${href}">${escape_html(p.label)}</a>"""
 }
 
-## A `<pre>` and its link as one unit, so the two can be styled as one panel
-## rather than as a code block with something floating under it.
-pub fn play_block(p: Play, pre: String, code: String) -> String =
-  `<div class="playable">` ++ "\n" ++ pre ++ "\n" ++ play_link(p, code) ++ "\n</div>"
+## The bar along the top of a code window: three dots, a label (`dawn`, a
+## file name, a mount point), and whatever the caller puts at its right end.
+pub fn win_bar(label: String, tail: String) -> String =
+  `<div class="win-bar"><i></i><i></i><i></i><span class="lbl">` ++ escape_html(label) ++ "</span>"
+  ++ tail ++ "</div>"
+
+## A program in a window: the bar with its Playground link, the `<pre>`, and
+## the output it prints (`out`, already rendered, or "") under it in the same
+## frame. One element, so that what reads as one thing is one thing; the
+## program and its output are siblings in the source, and html/render.dawn
+## pairs them before they get here.
+pub fn play_block(p: Play, label: String, pre: String, code: String, out: String) -> String = {
+  let tail = if out == "" { "" } else { "\n" ++ out }
+  `<figure class="win playable">` ++ "\n" ++ win_bar(label, play_link(p, code)) ++ "\n" ++ pre ++ tail
+    ++ "\n</figure>"
+}
+
+## A file in a window with no link: a module of a project, which the
+## Playground could not run on its own.
+pub fn code_window(label: String, pre: String) -> String =
+  `<figure class="win">` ++ "\n" ++ win_bar(label, "") ++ "\n" ++ pre ++ "\n</figure>"
 
 ## The wire format, pinned to a literal rather than to itself. This is the
 ## assertion a round trip cannot make: `play_hash` and `play_decode` agreeing
@@ -109,10 +126,13 @@ test "the link carries the program in its fragment and its label in the markup" 
   let p = Play { href: "../playground.html", label: "Open in playground" }
   assert play_link(p, "let x = 1")
     == `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a>`
-  assert play_block(p, "<pre>P</pre>", "let x = 1")
-    == `<div class="playable">` ++ "\n<pre>P</pre>\n"
-    ++ `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a>`
-    ++ "\n</div>"
+  assert play_block(p, "dawn", "<pre>P</pre>", "let x = 1", "")
+    == `<figure class="win playable">` ++ "\n"
+    ++ `<div class="win-bar"><i></i><i></i><i></i><span class="lbl">dawn</span>`
+    ++ `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a></div>`
+    ++ "\n<pre>P</pre>\n</figure>"
+  assert str.ends_with(play_block(p, "a.dawn", "<pre>P</pre>", "x", "<pre>O</pre>"),
+    "<pre>P</pre>\n<pre>O</pre>\n</figure>")
   # the page half of the href is an attribute value like any other
   let q = Play { href: "a\"b&c.html", label: "x" }
   assert str.contains(play_link(q, ""), `href="a&quot;b&amp;c.html#"`)

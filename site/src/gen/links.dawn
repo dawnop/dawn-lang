@@ -143,6 +143,12 @@ fn ids_of(html: String) -> List[String] = attr_values(html, " id=\"")
 ## Each `<hN id="...">text...` on the page, as (id, text-before-any-markup).
 ## The text stops at the first tag, which is enough: what this is read for is
 ## the section number, and that is always the first thing in a heading.
+##
+## Since 2026-10-02 the renderer sets that number apart in `<span class="hn">`
+## (html/render.heading_html), so the first thing in a numbered heading is a
+## tag. Read as before, every numbered heading would print "" and be skipped
+## as unnumbered, and this whole check would pass by checking nothing; so the
+## span is stepped into, and the number is its text.
 fn headings_at(html: String, lvl: Int) -> List[(String, String)] = {
   let cs = code_points(html)
   let open = code_points("<h${lvl} id=\"")
@@ -163,15 +169,34 @@ fn headings_at(html: String, lvl: Int) -> List[(String, String)] = {
       while t < len(cs) && cp_at(cs, t) != '>' {
         t = t + 1
       }
-      var te = t + 1
+      var from = t + 1
+      if starts_at(cs, from, hn_open()) {
+        from = from + len(hn_open())
+      }
+      var te = from
       while te < len(cs) && cp_at(cs, te) != '<' {
         te = te + 1
       }
-      out = out ++ [(seg(cs, s, e), seg(cs, t + 1, te))]
+      out = out ++ [(seg(cs, s, e), seg(cs, from, te))]
       i = te
     }
   }
   out
+}
+
+fn hn_open() -> List[Char] = code_points(`<span class="hn">`)
+
+## Whether `pat` sits in `cs` at exactly `at`.
+fn starts_at(cs: List[Char], at: Int, pat: List[Char]) -> Bool = {
+  var k = 0
+  var ok = at + len(pat) <= len(cs)
+  while ok && k < len(pat) {
+    if cp_at(cs, at + k) != cp_at(pat, k) {
+      ok = false
+    }
+    k = k + 1
+  }
+  ok
 }
 
 fn headings_of(html: String) -> List[(String, String)] =
@@ -552,4 +577,9 @@ test "a heading's printed number is read off its text" {
 test "headings pair their id with their text" {
   let html = `<h2 id="s6">6. 效果系统</h2><h3 id="s6-5">6.5 具名效果与 <code>with</code></h3>`
   assert headings_of(html) == [("s6", "6. 效果系统"), ("s6-5", "6.5 具名效果与 ")]
+  # the number set apart by the renderer is still the number this reads
+  let split = `<h2 id="s6"><span class="hn">6.</span>效果系统<a class="anchor" href="#s6">#</a></h2>`
+    ++ `<h3 id="s6-5"><span class="hn">6.5</span>具名效果</h3><h3 id="s7-1">无节号</h3>`
+  assert headings_of(split) == [("s6", "6."), ("s6-5", "6.5"), ("s7-1", "无节号")]
+  assert leading_number("6.") == "6"
 }
