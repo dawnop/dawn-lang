@@ -7,7 +7,7 @@ The anchors used to be arguments to run.sh's `patch_std` shell helper, one
 close-injection heredoc and one call-site heredoc, each refusing a non-unique
 match. That made them self-once: correct, but checked only when this contract
 ran, which builds three private compilers and a dozen probes first. They quote
-std/io.dawn, runtime/c/dawn_rt.c, pkg/add.dawn and main.dawn. Declared here,
+std/io.dawn, runtime/c/dawn_rt.c, pkg/add.dawn and pkg/pkgcmd.dawn. Declared here,
 in the registry shape mutation-anchor-preflight.py already discovers, the same
 anchors have two consumers: run.sh applies one mutation per private tree, and
 the preflight proves every one of them exactly-once before any build (#254).
@@ -95,7 +95,7 @@ MUTATIONS = {
     ),),
     # Call sites: one compiler writer put back to a plain overwrite.
     "add-plain-write": (("selfhost/src/pkg/add.dawn", *ATOMIC_CALL),),
-    "lock-plain-write": (("selfhost/src/main.dawn", *ATOMIC_CALL),),
+    "lock-plain-write": (("selfhost/src/pkg/pkgcmd.dawn", *ATOMIC_CALL),),
 }
 
 

@@ -1,0 +1,318 @@
+# The package-management commands of the JVM driver: `dawn cache verify`,
+# `dawn __pkghash`, `dawn lock`, the target's `[java-deps]` resolution that
+# build, run and test re-exec under, and the jar list that re-exec
+# carries across. They lived in `main.dawn` (#201), where nothing but that
+# entry file could reach them and anyone looking for package behaviour had to
+# know to look there.
+#
+# Why `pkg/` and not `compiler_plan`: `run_lock` and `resolve_java_deps` call
+# `maven`, which is Coursier through `use java`, so they belong with the JVM
+# side of package handling next to `maven` and `vendor`. `run_cache` and
+# `run_pkghash` need only `compiler_plan/pkgfetch` and could live there, but
+# splitting five commands over two packages for the sake of two of them buys
+# nothing a reader would notice except a second place to look -- until a
+# driver that refuses `use java` wants them, which is the one reason to split.
+#
+# Two things the driver used to lend these functions are not imported here,
+# because `pkg/` sits below `driver/` and `main` in the module order:
+#
+# - Planner diagnostics are rendered by `driver/clifail`'s `fail_compile`,
+#   over `driver/analyze`'s `LocDiag`. `run_lock` and `resolve_java_deps` take
+#   that step as a `fail_plan` parameter instead, so the one renderer both CLI
+#   drivers share stays the only one, and a test can watch the step without a
+#   renderer at all.
+# - `cli_error` and `path_sep` are one-liners whose output is CLI contract
+#   (`error: ` on stderr, exit 2; the host's class-path separator). Each is
+#   copied here rather than shared, as `nmain` copies `cli_error`; the
+#   in-process tests below and `scripts/selfhost-run-diff.sh` pin the bytes.
+#
+# The native driver does not open `cache` or `__pkghash` yet, although neither
+# needs a JVM: this module's `use java` keeps `nmain` from importing it, so
+# that follow-up to #201 starts by moving those two out (see `nmain.dawn`).
+
+use std/str
+use std/io
+use std/io.{Fs, Proc, Env, Exit, Console}
+use compiler_plan/source
+use compiler_plan/pkgfetch
+use pkg/maven
+use java "java.io.File"
+
+## The JVM driver's CLI error shape: `error: <msg>` on stderr, exit 2.
+fn cli_error(msg: String) -> Unit !Exit !Console !io = {
+  console_eprintln("error: ${msg}")
+  let _ = io.exit(2)
+  ()
+}
+
+fn path_sep() -> String !io = File.pathSeparator!
+
+## `dawn cache verify` — re-hash every entry in the package cache and compare
+## it with the hash its directory name claims (PKG-02's companion command:
+## the per-use check catches the entry a build touches, this sweeps them all).
+pub fn run_cache(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
+  if len(rest) != 1 || rest[0] != "verify" {
+    return cli_error("usage: dawn cache verify")
+  }
+  let root = pkgfetch.cache_root()
+  let names = match io.list_dir(root) {
+    Ok(ns) -> ns
+    Err(_) -> {
+      console_println("cache is empty (" ++ root ++ ")")
+      return ()
+    }
+  }
+  var checked = 0
+  var bad = 0
+  for n in sort(names) {
+    if str.starts_with(n, "d1-") {
+      let hash = str.replace(n, "d1-", "d1:")
+      checked = checked + 1
+      match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
+        Ok(_) -> console_println("ok   ${n}")
+        Err(e) -> {
+          console_println("BAD  ${n}")
+          console_eprintln(e)
+          bad = bad + 1
+        }
+      }
+    }
+  }
+  console_println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
+      " checked, " ++ to_string(bad) ++ " bad")
+  if bad > 0 { let _ = io.exit(1) }
+}
+
+## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
+pub fn run_pkghash(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
+  let dir = if len(rest) > 0 { rest[0] } else { "." }
+  if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
+  match pkgfetch.tree_hash(dir) {
+    Ok(h) -> console_println(h)
+    Err(e) -> cli_error(e)
+  }
+}
+
+## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
+pub fn resolve_java_deps(
+  target: String,
+  fail_plan: fn(List[source.LocDiag]) -> Unit !Fs !Exit !Console !io
+) -> List[String] !Fs !Proc !Env !Exit !Console !io = {
+  let none: List[String] = []
+  if not io.exists(target) { return none }
+  if not io.is_dir(target) && not str.ends_with(target, ".dawn") { return none }
+  let planner_target =
+    if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+  let plan = source.source_plan(planner_target)
+  if len(plan.diags) > 0 { fail_plan(plan.diags) }
+  let coords = plan.java_coords
+  if len(coords) > 0 {
+    console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
+        plan.project ++ "/dawn.toml...")
+  }
+  match maven.fetch_checked(plan.project, coords) {
+    Ok(js) -> js
+    Err(e) -> {
+      cli_error(e)
+      none
+    }
+  }
+}
+
+## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
+## closure. This is the only command that rewrites dawn.lock; every other one
+## only refuses to disagree with it.
+pub fn run_lock(
+  rest: List[String],
+  fail_plan: fn(List[source.LocDiag]) -> Unit !Fs !Exit !Console !io
+) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  var check_only = false
+  var target = "."
+  var seen_target = false
+  for a in rest {
+    if a == "--check" {
+      check_only = true
+    } else if not seen_target {
+      target = a
+      seen_target = true
+    } else {
+      return cli_error("usage: dawn lock [--check] [<project-dir>]")
+    }
+  }
+  if not io.is_dir(target) { return cli_error("not a directory: ${target}") }
+  let plan = source.source_plan(source.ProjectDirectory(target))
+  if len(plan.diags) > 0 { fail_plan(plan.diags) }
+  let path = maven.lock_path(plan.project)
+  let coords = plan.java_coords
+  if len(coords) == 0 {
+    if io.exists(path) {
+      return cli_error(path ++ " exists but " ++ plan.project ++
+          "/dawn.toml declares no [java-deps]\n  delete the lock, or add the dependency back")
+    }
+    console_println("no [java-deps] to lock")
+    return ()
+  }
+  console_eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps...")
+  let jars = match maven.fetch(coords) {
+    Ok(js) -> js
+    Err(e) -> {
+      cli_error(e)
+      return ()
+    }
+  }
+  let fresh = match maven.lock_of(coords, jars) {
+    Ok(l) -> l
+    Err(e) -> {
+      cli_error(e)
+      return ()
+    }
+  }
+  if check_only {
+    match io.read_file(path) {
+      Err(_) -> cli_error("${path} does not exist -- run `dawn lock`")
+      Ok(text) ->
+        match maven.parse_lock(text) {
+          Err(e) -> cli_error(path ++ ": " ++ e)
+          Ok(locked) ->
+            match maven.check_lock(locked, fresh) {
+              Err(e) -> cli_error(e)
+              Ok(_) -> console_println(path ++ " is up to date (" ++
+                  to_string(len(fresh.arts)) ++ " artifacts)")
+            }
+        }
+    }
+  } else {
+    # Same reason as the manifest in pkg/add: this is the only writer of
+    # dawn.lock and every other command refuses to disagree with it, so a
+    # half-written lock would fail all of them rather than just this one.
+    match io.atomic_write_file(path, maven.render_lock(fresh)) {
+      Ok(_) -> console_println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
+          " artifacts from " ++ to_string(len(coords)) ++ " direct)")
+      Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e.message)
+    }
+  }
+}
+
+## Jar paths the parent invocation resolved, carried across the re-exec.
+pub fn deps_from_env() -> List[String] !Env !io = {
+  let none: List[String] = []
+  match io.getenv("DAWN_SELFHOST_CP") {
+    Some(s) -> if s == "" { none } else { str.split(s, path_sep()) }
+    None -> none
+  }
+}
+
+# ---- tests ----
+
+use compiler_plan/consolemem
+use compiler_plan/envmem
+use compiler_plan/exitmem
+use compiler_plan/procmem
+
+## A path no case below creates.
+const NO_SUCH: String = "no-such-target-for-pkgcmd"
+
+## Run one command with the console, the exit status and the environment
+## answered from tables, and an empty process script so that a spawn panics.
+## The answer is the status (`None`: ran to the end), stderr and stdout.
+fn pkg_read(
+  vars: List[(String, String)],
+  entry: fn() -> Unit !Fs !Proc !Env !Exit !Console !io
+) -> (Option[Int], String, String) !io = {
+  let (((status, log), _), _) = io.with_fs_real(() =>
+      procmem.with_proc_table([], () =>
+          envmem.with_env_table("/", vars, () =>
+              consolemem.with_console_table(() =>
+                  exitmem.with_exit_capture(entry)))))
+  (status, consolemem.err_text(log), consolemem.out_text(log))
+}
+
+## A planner failure must never be reached by these cases.
+fn no_plan_failure(ds: List[source.LocDiag]) -> Unit !Fs !Exit !Console !io =
+  panic("planner diagnostics: " ++ to_string(len(ds)))
+
+## A project of the test's own with no `[java-deps]`; the caller deletes it.
+fn bare_project() -> String !Fs = {
+  let dir = match io.temp_dir("", "dawn-pkgcmd-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: ${e.message}")
+  }
+  let _ = io.mkdirs("${dir}/src")
+  let _ = io.write_file("${dir}/dawn.toml", "schema = 1\nname = \"bare\"\n")
+  let _ = io.write_file("${dir}/src/main.dawn", "pub fn main() -> Unit = ()\n")
+  dir
+}
+
+test "`dawn lock` takes one optional directory and --check anywhere" {
+  let usage = "error: usage: dawn lock [--check] [<project-dir>]\n"
+  assert pkg_read([], () => run_lock(["a", "b"], no_plan_failure)) == (Some(2), usage, "")
+  assert pkg_read([], () => run_lock(["--check", "a", "b"], no_plan_failure))
+    == (Some(2), usage, "")
+  let missing = (Some(2), "error: not a directory: ${NO_SUCH}\n", "")
+  assert pkg_read([], () => run_lock([NO_SUCH], no_plan_failure)) == missing
+  assert pkg_read([], () => run_lock(["--check", NO_SUCH], no_plan_failure)) == missing
+  assert pkg_read([], () => run_lock([NO_SUCH, "--check"], no_plan_failure)) == missing
+}
+
+test "`dawn lock` on a project without [java-deps] writes nothing, or refuses a stale lock" {
+  let dir = io.with_fs_real(() => bare_project())
+  assert pkg_read([], () => run_lock([dir], no_plan_failure))
+    == (None, "", "no [java-deps] to lock\n")
+  let _ = io.with_fs_real(() => io.write_file("${dir}/dawn.lock", "schema 1\n"))
+  let (status, err, _) = pkg_read([], () => run_lock(["--check", dir], no_plan_failure))
+  assert status == Some(2)
+  assert str.contains(err, "/dawn.toml declares no [java-deps]\n")
+  io.with_fs_real(() => pkgfetch.delete_tree(dir))
+}
+
+test "java-deps resolution answers nothing for a target that is not one" {
+  let dir = io.with_fs_real(() => bare_project())
+  let _ = io.with_fs_real(() => io.write_file("${dir}/plain.txt", "hello\n"))
+  for t in [NO_SUCH, "${dir}/plain.txt", dir, "${dir}/src/main.dawn"] {
+    assert pkg_read([], () => {
+      let jars = resolve_java_deps(t, no_plan_failure)
+      assert len(jars) == 0
+    }) == (None, "", "")
+  }
+  io.with_fs_real(() => pkgfetch.delete_tree(dir))
+}
+
+## Stands in for the driver's `fail_compile`: says how many, and exits 1.
+fn plan_exits(ds: List[source.LocDiag]) -> Unit !Fs !Exit !Console !io = {
+  console_eprintln("planner diagnostics: " ++ to_string(len(ds)))
+  let _ = io.exit(1)
+  ()
+}
+
+test "a manifest the planner refuses ends lock and resolution through fail_plan" {
+  let dir = io.with_fs_real(() => bare_project())
+  let _ = io.with_fs_real(() => io.write_file("${dir}/dawn.toml", "schema = \n"))
+  let (lock_status, lock_err, lock_out) = pkg_read([], () => run_lock([dir], plan_exits))
+  assert lock_status == Some(1) && lock_out == ""
+  assert str.starts_with(lock_err, "planner diagnostics: ")
+  let (deps_status, deps_err, _) = pkg_read([], () => {
+    let _ = resolve_java_deps(dir, plan_exits)
+    ()
+  })
+  assert deps_status == Some(1) && deps_err == lock_err
+  io.with_fs_real(() => pkgfetch.delete_tree(dir))
+}
+
+test "the re-exec's jar list reads DAWN_SELFHOST_CP, and empty is none" {
+  let read = (vars: List[(String, String)]) => {
+    let (jars, _) = envmem.with_env_table("/", vars, () => deps_from_env())
+    jars
+  }
+  assert len(read([])) == 0
+  assert len(read([("DAWN_SELFHOST_CP", "")])) == 0
+  assert read([("DAWN_SELFHOST_CP", "/a.jar" ++ path_sep() ++ "/b.jar")]) == ["/a.jar", "/b.jar"]
+}
+
+test "`dawn cache` and `__pkghash` refuse what they cannot use" {
+  assert pkg_read([], () => run_cache([]))
+    == (Some(2), "error: usage: dawn cache verify\n", "")
+  assert pkg_read([("DAWN_PKG_CACHE", NO_SUCH)], () => run_cache(["verify"]))
+    == (None, "", "cache is empty (${NO_SUCH})\n")
+  assert pkg_read([], () => run_pkghash([NO_SUCH]))
+    == (Some(2), "error: not a directory: ${NO_SUCH}\n", "")
+}
