@@ -83,6 +83,15 @@ name: tile
 # repository, by a run whose head repository is this one too, of this file,
 # concluded success, not expired) and the measurements behind this paragraph.
 #
+# A push can also be merged before its pull request's run has finished, and
+# then asks for a record that does not exist yet: on 09-30 .. 10-01 four of
+# the eight pushes that still ran the shards were that race, the record
+# arriving 5.5 to 9.5 minutes after the push asked. So when no record counts,
+# dedupe finds the merged pull request (`commits/<sha>/pulls`), waits up to
+# 15 minutes for its tile run still in progress, and asks again. Replayed on
+# those days, the eight drop to four; the other four are pushes whose tree no
+# run ever verified (main moved under the pull request), and they still run.
+#
 # The `v1-` in the name is an environment version, not a format version:
 # the tree cannot see the runner image or a floating `@v4` tag. When one of
 # those moves in a way that could change a verdict (ubuntu-latest becomes
@@ -93,7 +102,7 @@ name: tile
 # nightly.yml's totals report counts a tile trigger only when the six
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 5484s (the most this file's `3x` claims may add up to)
+# path-total: 6394s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -211,12 +220,19 @@ jobs:
     runs-on: ubuntu-latest
     # Listed in full: a `permissions:` block sets everything it omits to none.
     permissions:
-      actions: read     # the artifact listing and the run that made it
-      contents: read    # the checkout
+      actions: read        # the artifact listing, the run that made it, the pull request's run
+      contents: read       # the checkout
+      pull-requests: read  # commits/<sha>/pulls, the pull request a push merged
     outputs:
       skip: ${{ steps.lookup.outputs.skip }}
-    # budget: floor (seconds-scale job: checkout and two Actions API reads, no toolchain)
-    timeout-minutes: 5
+    # Seconds when a record exists or no pull request run is in progress (7
+    # to 9 s observed). Waiting is what it costs otherwise: the four races of
+    # 09-30 .. 10-01 replay to 210, 330, 480 and 570 s of waiting plus the
+    # job's own 9 s. The claim is the worst case, not those: the script
+    # stops waiting at 900 s, and 900 s plus the job's 7 to 9 s, rounded up
+    # to 5 s, is 910 s, under the 950 s run pole.
+    # budget: 3x 910s the 900s wait cap plus the job itself
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       - name: the verified-tree lookup refuses what it should
@@ -228,7 +244,8 @@ jobs:
         run: |
           python3 scripts/tile-verified.py lookup --repo "$GITHUB_REPOSITORY" \
             --repo-id "$GITHUB_REPOSITORY_ID" --tree "$(git rev-parse 'HEAD^{tree}')" \
-            --prefix "$TILE_VERIFIED_PREFIX" --event "$GITHUB_EVENT_NAME"
+            --prefix "$TILE_VERIFIED_PREFIX" --event "$GITHUB_EVENT_NAME" \
+            --sha "$GITHUB_SHA"
 
   tile-golden-1:
     needs: dedupe

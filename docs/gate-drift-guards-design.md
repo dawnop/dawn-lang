@@ -380,6 +380,32 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 - **收窄 paths 作为主方案**：见上表，效果不够；温和版可以另做，本刀不碰 paths 与 gatemap 的超集约定。
 - **把记录提交进仓**：回写改变 tree（自指），且 CI 不宜往线性历史的 main 提交。
 
+### 等待在途的 PR 运行（2026-10-01）
+
+上线后第一周（09-30T06:48Z .. 10-01T11:44Z）tile.yml 在 main 上触发 22 次，dedupe 跳过 14 次、跑了 8 次；
+连同其余 19 次没碰路径的推送，41 次推送跑 8 次（19.5%），贴着 20% 线。8 次里 tile 输入（`inputs.py` 口径）一次都没变，根因两半各 4 次
+（调研报告 `agent-handoff/research-tile-trigger-rate-20261001.md`，本机，不进仓）：
+
+- **竞速**（#290 #292 #293 #306）：PR 合入时它自己的 tile 运行还没跑完，main 推送的 dedupe 查不到记录，
+  5.5 到 9.5 分钟后同一棵 tree 的 PR 运行才绿并上传记录。main 没有 required status checks，合入不等 tile；
+  路径触发的 required check 又会让不碰路径的 PR 卡在 "Expected"，所以只能由 dedupe 等。纯重复。
+- **基线移动**（#287 #299 #305 #308）：PR 的最后一次运行验的是旧 main 上的 merge tree，之后 main 又进了提交，
+  rebase 合入得到一棵没人验过的 tree。其中 3 次中间那个提交也碰了触发路径，main 上这一跑是两个编译器改动组合后唯一的验证，保留。
+
+做法：首查没有算数的记录、且推送给了 `--sha` 时，`tile-verified.py` 用 `commits/<sha>/pulls` 找合入它的本仓 PR，
+用 `actions/workflows/tile.yml/runs?event=pull_request&head_sha=<PR 头>` 找仍在 queued / in_progress 的运行，每 30 s 轮询，
+最多 15 分钟（PR 运行全长约 25 分钟；15 分钟让满额等待加 job 本身仍在 950 s 的 run-pole 之下，声明能覆盖最坏情况），之后按原规则重查一次记录：绿记录则跳过，step summary 写等了几秒、哪条运行验过；否则照跑。
+找 PR 或轮询时任何 API 错误都照跑。去重键仍是整棵 tree，不收窄。dedupe 从 `floor` / 5 分钟改为 `3x 910s` / 46 分钟（900 s 等待上限加 job 自身 7–9 s，取整到 5 s），
+`path-total` 5484 s → 6394 s（`Gate-Budget(path-total)` 行在提交里）；job 要 `pull-requests: read`。
+
+回放：用本周真实 API 数据（运行、artifact 的创建时刻与运行结束时刻按 dedupe 查询那一刻冻结，sleep 推进时钟）调用改后的 `lookup`，
+22 次里 1f261244、ef4fb551、63863770、6e8e4dee 由跑变跳（分别等 480、330、570、210 s），25b892b6、b0e216dc、064124a0、24559be5 仍跑
+（查询时 PR 运行早已结束，没有可等的），其余 14 次判定不变：8/41 → 4/41（约 10%）。
+
+墙钟：没有在途 PR 运行时只多一到两次 API 读；最坏是一个空等 15 分钟后照跑六片的 dedupe job（这时 main 推送晚 15 分钟出结果）。
+本周 4 次竞速共 18,661 job 秒，等待合计 1,590 s，每周净省约 17,000 job 秒。gates.yml 的 push-total 不动。
+等待中的运行会被下一次 main 推送按 concurrency 组取消，与之前行为相同。
+
 ## nightly 报表改口径（2026-09-30，#231）
 
 09-29 报表的 +20.7% 几乎全部来自 09-22 寄放进既有小 job 的约 35 个增量语义切片契约步骤（每次 push 平均 2,828 job 秒，占增量 2,857 的 99%），

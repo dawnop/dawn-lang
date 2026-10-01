@@ -14,6 +14,7 @@ The record is an artifact named `<prefix><tree>` (tile.yml sets the prefix,
 shards and the union check are green. This script is the question:
 
     tile-verified.py lookup --repo R --repo-id N --tree T --prefix P --event E
+                            [--sha S]
 
 prints one line for the step summary and, under GITHUB_OUTPUT, writes
 `skip=true|false` and `run=<id>`. It is fail-open: any API error, and any
@@ -58,6 +59,37 @@ runs on the pull request and on the daily schedule, and the schedule is the
 backstop for environment drift that the tree cannot see. Only the push
 re-run is the duplicate.
 
+WAITING FOR THE PULL REQUEST'S OWN RUN (2026-10-01). A push is often merged
+before its pull request's tile run has finished: nothing makes a merge wait
+for tile.yml (main has no required status checks, and a path-triggered
+required check would leave every pull request that misses the paths stuck at
+"Expected"). On 09-30 .. 10-01 four of the eight pushes that still ran the
+shards were exactly that: the pull_request run on the same tree concluded
+success 5.5 to 9.5 minutes after the push asked, and the push had already
+spent about 4,700 job-seconds verifying it again. So when the first lookup
+finds no record that counts, and the push names its commit (`--sha`):
+
+* `commits/<sha>/pulls` gives the merged pull requests of this repository
+  that carry the commit, and `actions/workflows/tile.yml/runs` gives their
+  pull_request runs at each head SHA;
+* while any of those runs is queued or in progress, the lookup polls it every
+  30 seconds, for at most 15 minutes (a tile pull_request run takes about 25
+  minutes end to end, and the four races had 5.5 to 9.5 left; 15 keeps a
+  full wait plus the job itself under the 950s run pole, so tile.yml's budget
+  line can claim the worst case rather than a typical one);
+* then it asks for the record again, under every rule above. A green record
+  skips the shards and the summary names the run and the seconds waited;
+  anything else runs them.
+
+A pull request whose last run verified another tree (main moved while it
+ran, and the rebase made a tree nobody verified) waits for nothing useful,
+and its push runs the shards: that run is the only verification of the
+combined tree, and the other four of those eight pushes were that. The
+waiting is fail-open like the rest: an API error while finding the pull
+request or polling its run means the shards run. A newer push to main
+cancels this run while it waits (tile.yml's concurrency group), which is what
+it did before the wait too.
+
     tile-verified.py --self-test     the rules above against JSON fixtures,
                                      no network
 """
@@ -67,10 +99,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 WORKFLOW_PATH = ".github/workflows/tile.yml"
 DEDUPED_EVENTS = ("push",)
+WAIT_LIMIT = 15 * 60   # seconds a push waits for its pull request's run
+WAIT_POLL = 30         # seconds between two polls of that run
+UNFINISHED = ("queued", "in_progress", "waiting", "requested", "pending")
 
 
 def gh_json(path):
@@ -131,22 +167,79 @@ def find(fetch, repo, repo_id, name, now):
     return None, "; ".join(refusals) or "no record"
 
 
-def lookup(fetch, repo, repo_id, tree, prefix, event, now):
-    """-> (skip, run id or None, the step summary line)."""
+def unfinished_runs(fetch, repo, repo_id, sha):
+    """-> ids of the tile.yml pull_request runs, still running, of the merged
+    pull requests of this repository that carry `sha`."""
+    pending = []
+    for pull in fetch(f"repos/{repo}/commits/{sha}/pulls"):
+        head = pull.get("head") or {}
+        if (not pull.get("merged_at")
+                or ((head.get("repo") or {}).get("id")) != repo_id):
+            continue
+        listing = fetch(f"repos/{repo}/actions/workflows/tile.yml/runs"
+                        f"?event=pull_request&head_sha={head.get('sha')}"
+                        "&per_page=100")
+        for run in listing.get("workflow_runs", []):
+            if (run.get("status") in UNFINISHED
+                    and run.get("path") == WORKFLOW_PATH
+                    and (run.get("head_repository") or {}).get("id") == repo_id):
+                pending.append(run["id"])
+    return pending
+
+
+def wait_for(fetch, repo, pending, sleep, clock, limit, poll):
+    """Poll each run in `pending` until none is unfinished or `limit` seconds
+    have passed. -> the seconds waited."""
+    start = clock()
+    while pending and clock() - start < limit:
+        sleep(min(poll, max(0, limit - (clock() - start))))
+        pending = [ident for ident in pending
+                   if fetch(f"repos/{repo}/actions/runs/{ident}").get("status")
+                   in UNFINISHED]
+    return int(clock() - start)
+
+
+def lookup(fetch, repo, repo_id, tree, prefix, event, now, sha=None,
+           sleep=time.sleep, clock=time.monotonic, limit=WAIT_LIMIT,
+           poll=WAIT_POLL):
+    """-> (skip, run id or None, the step summary line).
+
+    `now` is a function returning the current UTC time; `sleep` and `clock`
+    are time.sleep and time.monotonic outside the self-test.
+    """
     if event not in DEDUPED_EVENTS:
         return False, None, (f"tile: {event} runs every shard; tree {tree}"
                              " is not looked up")
     name = f"{prefix}{tree}"
     try:
-        run, why = find(fetch, repo, repo_id, name, now)
+        run, why = find(fetch, repo, repo_id, name, now())
     except (RuntimeError, ValueError, KeyError, TypeError) as error:
         return False, None, (f"tile: tree {tree} not looked up ({error});"
                              " running every shard")
-    if run is None:
+    if run is not None:
+        return True, run["id"], (f"tile: tree {tree} already verified by run"
+                                 f" {run['id']} ({run.get('event')},"
+                                 f" {run.get('head_branch')})")
+    if sha is None:
         return False, None, f"tile: tree {tree} not verified yet ({why})"
-    return True, run["id"], (f"tile: tree {tree} already verified by run"
-                             f" {run['id']} ({run.get('event')},"
-                             f" {run.get('head_branch')})")
+    try:
+        pending = unfinished_runs(fetch, repo, repo_id, sha)
+        if not pending:
+            return False, None, (f"tile: tree {tree} not verified yet ({why});"
+                                 " no pull request run of it in progress")
+        waited = wait_for(fetch, repo, pending, sleep, clock, limit, poll)
+        run, why = find(fetch, repo, repo_id, name, now())
+    except (RuntimeError, ValueError, KeyError, TypeError) as error:
+        return False, None, (f"tile: tree {tree} not verified yet ({why});"
+                             f" waiting for its pull request run failed"
+                             f" ({error}); running every shard")
+    runs = ", ".join(str(ident) for ident in pending)
+    if run is None:
+        return False, None, (f"tile: tree {tree} not verified after waiting"
+                             f" {waited}s for pull request run {runs} ({why})")
+    return True, run["id"], (f"tile: tree {tree} verified by run {run['id']}"
+                             f" ({run.get('event')}, {run.get('head_branch')})"
+                             f" after waiting {waited}s for it")
 
 
 # --- self-test -------------------------------------------------------------
@@ -229,22 +322,127 @@ def selftest():
     failures = []
     for label, artifacts, runs, tree, event, want in cases:
         skip, run, line = lookup(_fetcher(artifacts, runs), REPO, REPO_ID, tree,
-                                 PREFIX, event, NOW)
+                                 PREFIX, event, lambda: NOW)
         if skip != want:
             failures.append(f"{label}: expected skip={want}, got {skip} ({line})")
         else:
             print(f"  {'skipped' if want else 'runs'}: {label}")
     _, _, line = lookup(_fetcher([_artifact(10, 1)], good_runs), REPO, REPO_ID,
-                        TREE, PREFIX, "push", NOW)
+                        TREE, PREFIX, "push", lambda: NOW)
     wanted = f"tile: tree {TREE} already verified by run 1 (pull_request, ci/topic)"
     if line != wanted:
         failures.append(f"summary line is {line!r}, not {wanted!r}")
+    waits = wait_selftest(failures)
     for failure in failures:
         print(f"SELF-TEST FAIL: {failure}", file=sys.stderr)
     if failures:
         return 1
-    print(f"self-test: {len(cases)} records judged as documented")
+    print(f"self-test: {len(cases)} records and {waits} waits judged as"
+          " documented")
     return 0
+
+
+SHA = "c" * 40
+PR_HEAD = "d" * 40
+
+
+class _Timeline:
+    """A clock, a sleep that moves it, and an API whose answers depend on it.
+
+    `pr_runs` is {id: (finishes at second, conclusion, tree it verified)}.
+    Each run uploads its record a minute before it concludes, as tile.yml's
+    tile-shards-complete does, and only when it is going to conclude success.
+    `pulls` is the commits/<sha>/pulls answer, or an exception to raise.
+    """
+
+    def __init__(self, pulls, pr_runs):
+        self.t = 0
+        self.slept = 0
+        self.pulls = pulls
+        self.pr_runs = pr_runs
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+        self.slept += seconds
+
+    def run(self, ident):
+        finish, conclusion, _ = self.pr_runs[ident]
+        done = self.t >= finish
+        return dict(_run(ident, conclusion if done else None),
+                    status="completed" if done else "in_progress",
+                    head_sha=PR_HEAD)
+
+    def fetch(self, path):
+        if path == f"repos/{REPO}/commits/{SHA}/pulls":
+            if isinstance(self.pulls, Exception):
+                raise self.pulls
+            return self.pulls
+        if path.startswith(f"repos/{REPO}/actions/workflows/tile.yml/runs?"):
+            assert f"head_sha={PR_HEAD}" in path and "event=pull_request" in path
+            return {"workflow_runs": [self.run(i) for i in self.pr_runs]}
+        if path.startswith(f"repos/{REPO}/actions/artifacts?name="):
+            name = path.split("name=", 1)[1].split("&", 1)[0]
+            made = [_artifact(100 + i, i, tree=tree)
+                    for i, (finish, conclusion, tree) in self.pr_runs.items()
+                    if conclusion == "success" and self.t >= finish - 60]
+            return {"artifacts": [a for a in made if a["name"] == name]}
+        if path.startswith(f"repos/{REPO}/actions/runs/"):
+            return self.run(int(path.rsplit("/", 1)[1]))
+        raise RuntimeError(f"unexpected path {path}")
+
+
+def _pull(merged=True, head_id=REPO_ID):
+    return {"number": 290, "merged_at": "2026-09-30T20:05:53Z" if merged else None,
+            "head": {"sha": PR_HEAD, "repo": {"id": head_id}}}
+
+
+def wait_selftest(failures):
+    """The push that waits for its pull request's run. -> cases judged."""
+    cases = [
+        # (label, pulls, pr runs, want skip, want seconds slept)
+        ("the pull request's run is in progress and turns green",
+         [_pull()], {7: (300, "success", TREE)}, True, 300),
+        ("the pull request's run is in progress and turns red",
+         [_pull()], {7: (300, "failure", TREE)}, False, 300),
+        ("the pull request's run is in progress and is cancelled",
+         [_pull()], {7: (300, "cancelled", TREE)}, False, 300),
+        ("the pull request's run outlasts the 15 minute limit",
+         [_pull()], {7: (WAIT_LIMIT + 300, "success", TREE)}, False, WAIT_LIMIT),
+        ("no pull request carries the commit", [], {}, False, 0),
+        ("the pull request lookup fails",
+         RuntimeError("gh api commits/pulls failed (1): HTTP 502"),
+         {7: (300, "success", TREE)}, False, 0),
+        ("the pull request's run turns green on another tree",
+         [_pull()], {7: (300, "success", OTHER)}, False, 300),
+        ("the pull request's run already finished red, nothing to wait for",
+         [_pull()], {7: (-60, "failure", TREE)}, False, 0),
+        ("the pull request came from a fork", [_pull(head_id=FORK_ID)],
+         {7: (300, "success", TREE)}, False, 0),
+    ]
+    for label, pulls, pr_runs, want, want_slept in cases:
+        timeline = _Timeline(pulls, pr_runs)
+        skip, _, line = lookup(timeline.fetch, REPO, REPO_ID, TREE, PREFIX,
+                               "push", lambda: NOW, sha=SHA,
+                               sleep=timeline.sleep, clock=timeline.clock)
+        if skip != want or timeline.slept != want_slept:
+            failures.append(f"{label}: expected skip={want} after"
+                            f" {want_slept}s, got {skip} after"
+                            f" {timeline.slept}s ({line})")
+        else:
+            print(f"  {'skipped' if want else 'runs'} after {want_slept}s:"
+                  f" {label}")
+    timeline = _Timeline([_pull()], {7: (300, "success", TREE)})
+    _, _, line = lookup(timeline.fetch, REPO, REPO_ID, TREE, PREFIX, "push",
+                        lambda: NOW, sha=SHA, sleep=timeline.sleep,
+                        clock=timeline.clock)
+    wanted = (f"tile: tree {TREE} verified by run 7 (pull_request, ci/topic)"
+              " after waiting 300s for it")
+    if line != wanted:
+        failures.append(f"waited summary line is {line!r}, not {wanted!r}")
+    return len(cases)
 
 
 def main():
@@ -258,13 +456,16 @@ def main():
     lk.add_argument("--tree", required=True)
     lk.add_argument("--prefix", required=True)
     lk.add_argument("--event", required=True)
+    lk.add_argument("--sha", help="the pushed commit; with it, a push waits for"
+                    " its pull request's tile run still in progress")
     args = ap.parse_args()
     if args.self_test:
         return selftest()
     if args.command != "lookup":
         ap.error("give --self-test or lookup")
     skip, run, line = lookup(gh_json, args.repo, args.repo_id, args.tree,
-                             args.prefix, args.event, datetime.now(timezone.utc))
+                             args.prefix, args.event,
+                             lambda: datetime.now(timezone.utc), sha=args.sha)
     print(line)
     for name in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"):
         target = os.environ.get(name)
