@@ -133,8 +133,9 @@ runner having sat thirteen days behind the tree with each half self-consistent.
 `play-live-check.py` is the check that would have caught it: it runs every
 sample against the deployed `/api/run`, compares stdout byte-for-byte with the
 `.out` beside it, asserts the compiler version in both directions (the retired
-`fn(c) =>` lambda rejected *and* the bare arrow accepted), and confirms the
-bundle nginx serves carries the current spelling. Health checks cannot see any
+`fn(c) =>` lambda rejected *and* the bare arrow accepted), checks that the
+`version` in `/health` is the tree's `VERSION`, and confirms the bundle nginx
+serves carries the current spelling. Health checks cannot see any
 of that — the old runner answered `/health` with `ok` the whole time.
 
 ## Rollback

@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.error
@@ -34,6 +35,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "site" / "play-ui" / "samples"
+VERSION_DAWN = ROOT / "selfhost" / "src" / "version.dawn"
 DEFAULT_BASE = "https://dawn-lang.dawnop.com"
 
 # Never route through a dev proxy: this box has http_proxy set, and urllib
@@ -109,11 +111,59 @@ def get(url, timeout=30):
         return e.code, e.read(), url
 
 
+def tree_version():
+    """The `VERSION` constant of the local tree's compiler, e.g. "0.81.0"."""
+    text = VERSION_DAWN.read_text()
+    m = re.search(r'^pub const VERSION: String = "([^"]*)"', text, re.M)
+    if not m:
+        sys.exit(f"cannot find VERSION in {VERSION_DAWN}")
+    return m.group(1)
+
+
+def check_health(api, r):
+    """/health answers {"ok": true, "version": "<release>"}, and the release is
+    the one in the tree.
+
+    The lambda pair below only proves the runner is newer than v0.43; the
+    version field pins it to the release this tree is about to ship, which is
+    the comparison the samples already assume.
+    """
+    status, body, _ = get(f"{api}/health")
+    if status == 200 and body.strip() == b"ok":
+        r.check(
+            False,
+            "/health -> {ok: true, version}",
+            "got bare `ok`: the runner predates the versioned health (PR #328), redeploy it",
+        )
+        return
+    try:
+        health = json.loads(body)
+    except ValueError:
+        health = None
+    if not isinstance(health, dict):
+        health = {}
+    version = health.get("version")
+    shaped = (
+        status == 200
+        and health.get("ok") is True
+        and isinstance(version, str)
+        and version != ""
+    )
+    r.check(shaped, "/health -> {ok: true, version}", f"{status} {body!r}")
+    if not shaped:
+        return
+    want = tree_version()
+    r.check(
+        version == want,
+        f"/health version is the tree's VERSION ({want})",
+        f"runner reports {version!r}, selfhost/src/version.dawn says {want!r}",
+    )
+
+
 def check_runner(api, r, pace):
     print(f"== runner: {api} ==")
 
-    status, body, _ = get(f"{api}/health")
-    r.check(status == 200 and body.strip() == b"ok", "/health -> ok", f"{status} {body!r}")
+    check_health(api, r)
 
     # The samples, byte for byte. `output` is the runner's captured stdout
     # (stderr is merged into it by redirectErrorStream), and the .out files are
