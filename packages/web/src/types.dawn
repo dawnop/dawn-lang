@@ -15,10 +15,13 @@ use java "java.io.InputStream"
 ## The matched route's metadata, handed to middleware so they can dispatch on
 ## `tags` instead of hardcoding paths. `None` on a Request means no route
 ## matched (404/405) — middleware treats an absent route as "no tags".
+## `body_limit` is the route's own body ceiling (see `router.body_limit`),
+## `None` when the route inherits the server's.
 pub type RouteMeta = {
   method: String,
   pattern: String,
   tags: List[String],
+  body_limit: Option[Int],
 } derive Show
 
 ## One request, as the server parsed it off the wire. Read it with the
@@ -180,6 +183,16 @@ pub type HttpError = {
 ## What every route's function is: a request in, a response or an HttpError
 ## out. Aliases are transparent — this is documentation, not a new type.
 pub alias Handler = fn(Request) -> Result[Response, HttpError] !io
+
+# A guard is the check a route wants made before its body is read: it gets the
+# Request without the body (method, path, captures, query, headers, route) and
+# either lets the request through or names the error to answer with. It exists
+# because a handler runs only after the body has been read, and on a
+# "stream-body" route that means after the whole upload is on disk; a
+# credential check inside the handler is too late to stop anything.
+## A pre-body check (see `router.guarded`): `Ok(())` lets the body be read and
+## the handler run; `Err(e)` answers `e` without reading a byte of the body.
+pub alias Guard = fn(Request) -> Result[Unit, HttpError] !io
 
 ## A handler transformer. `serve_app` composes a list of them with the first
 ## element outermost.
