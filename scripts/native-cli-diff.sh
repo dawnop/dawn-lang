@@ -900,5 +900,65 @@ sys.exit(bad)
 PYEOF
 then :; else fail=1; fi
 
+# ---- leg 9: cache verify and __pkghash, against absolute contracts ----
+# Both drivers call the same pkg/cachecmd functions with the raw argv tail
+# (#304), so what this leg holds apart is the backend: the C build of that
+# module against the JVM one, on a real cache and a real tree. The cases that
+# can carry an oracle of their own do; the d1 hash is recomputed here in
+# Python from its definition (pkgfetch.tree_hash), so a bug both backends
+# share in the hash cannot pass as agreement.
+echo "== cache verify and __pkghash, JVM and native =="
+CACHE_USAGE=$'error: usage: dawn cache verify\n'
+pair_expect_error "$CACHE_USAGE" "cache (no argument)" cache
+pair_expect_error "$CACHE_USAGE" "cache (wrong argument)" cache check
+
+CACHE_NONE="$OUT/pkgcache-none"
+CACHE_EMPTY="$OUT/pkgcache-empty"
+mkdir -p "$CACHE_EMPTY"
+DAWN_PKG_CACHE="$CACHE_NONE" run_expect 0 "cache is empty ($CACHE_NONE)"$'\n' "" \
+  "cache verify (no cache directory)" cache verify
+DAWN_PKG_CACHE="$CACHE_EMPTY" run_expect 0 $'0 entries checked, 0 bad\n' "" \
+  "cache verify (empty cache directory)" cache verify
+
+# The cache leg 3's url dep filled, copied so that neither add_pair cache is
+# touched, plus a copy of its entry filed under a name it does not hash to.
+CACHE_FULL="$OUT/pkgcache-verify"
+cp -r "$OUT/pkgcache-j" "$CACHE_FULL"
+GOOD_ENTRY=$(cd "$CACHE_FULL" && ls -d d1-* 2>/dev/null | head -1)
+if [ -z "$GOOD_ENTRY" ]; then
+  echo "FAIL: leg 3 left no d1 entry in $OUT/pkgcache-j to verify"
+  fail=1
+else
+  BAD_ENTRY=d1-0000000000000000000000000000000000000000000000000000000000000000
+  cp -r "$CACHE_FULL/$GOOD_ENTRY" "$CACHE_FULL/$BAD_ENTRY"
+  DAWN_PKG_CACHE="$CACHE_FULL" pair_expect_exit 1 "cache verify (populated, one entry bad)" cache verify
+  if ! grep -qx "ok   $GOOD_ENTRY" "$OUT/j.txt" || ! grep -qx "BAD  $BAD_ENTRY" "$OUT/j.txt" ||
+    ! grep -qx "2 entries checked, 1 bad" "$OUT/j.txt"; then
+    echo "FAIL: cache verify (populated) did not report one ok, one BAD, two checked"
+    head -20 "$OUT/j.txt"
+    fail=1
+  fi
+fi
+
+D1_ORACLE=$(python3 - "$PKG" <<'PYEOF'
+import hashlib, os, sys
+root = sys.argv[1]
+files = []
+for dirpath, _, names in os.walk(root):
+    for n in names:
+        files.append(os.path.relpath(os.path.join(dirpath, n), root))
+h = hashlib.sha256()
+for rel in sorted(files):
+    data = open(os.path.join(root, rel), "rb").read()
+    h.update(rel.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+print("d1:" + h.hexdigest())
+PYEOF
+)
+run_expect 0 "$D1_ORACLE"$'\n' "" "__pkghash (fixture directory)" __pkghash "$PKG"
+
+PKGHASH_MISSING="$OUT/no-such-package"
+pair_expect_error "error: not a directory: $PKGHASH_MISSING"$'\n' \
+  "__pkghash (missing path)" __pkghash "$PKGHASH_MISSING"
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, and the test reports account for themselves"
+echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, and the test reports account for themselves"
