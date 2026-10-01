@@ -73,6 +73,12 @@
 # title that answered, with the paragraph that answered best as its excerpt;
 # the hit is still one integer in the model ([body_base]).
 #
+# A query neither index answers is looked at once more for slips of the
+# fingers ([suggest]): the words it lacks are measured against the words the
+# indexes have that begin with the same letter, and the first query so made
+# that answers is offered, with its count, as one line of the empty state.
+# The query typed is still the query searched.
+#
 # The bilingual strings below are data, not prose: this application draws
 # itself on an English page and on a Chinese one, and the site's own generator
 # (site/src/gen/pages.dawn) keeps its two languages in one table for the same
@@ -178,6 +184,10 @@ pub type State = {
 ## the query matched before any narrowing or cap, which is what the scope
 ## pills show. Both are a view over the same ranking, not a second index: a
 ## pill filters the matches, and the cap then applies inside the one group.
+##
+## `fix` is the one query the panel suggests when nothing answered this one
+## ([suggest]), and `fix_hits` how many rows that query answers; `""` and 0
+## whenever something did answer. Written with `hits`, by the same arms.
 pub type Model = {
   query: String,
   sel: Int,
@@ -186,6 +196,8 @@ pub type Model = {
   hits: List[Int],
   scope: Int,
   counts: List[Int],
+  fix: String,
+  fix_hits: Int,
 }
 
 ## What the listeners mean, plus the one message no listener produces.
@@ -1369,6 +1381,321 @@ fn one_more(sizes: List[Int], r: Int, limit: Int) -> Bool =
 fn dealt(sizes: List[Int], r: Int) -> Int =
   list.fold(sizes, 0, (acc, n) => acc + (if n < r { n } else { r }))
 
+# ---- near misses -----------------------------------------------------------
+#
+# When nothing answers a query, a word of it may be a slip of the fingers:
+# `handel` for `handle`, `efect` for `effect`. The panel then looks for the
+# words the index does have that are a small edit away, asks the query again
+# with them, and offers the first such query that has answers, with how many
+# -- one line in the empty state, never a correction of its own. What the
+# reader typed is what was searched; the suggestion is a button.
+#
+# All of this runs only when the titles and the text both answered nothing
+# ([asked]), so a keystroke that finds something pays none of it.
+
+## How many edits a query word of `n` code points may be from a word it is
+## taken for: none under three code points, where one edit reaches too many
+## words to mean anything, one up to four, two from five on.
+pub fn allowed(n: Int) -> Int = if n >= 5 { 2 } else if n >= 3 { 1 } else { 0 }
+
+## The edit distance from `a` to `b`, counting an insertion, a deletion, a
+## substitution and a swap of two neighbours as one edit each (the optimal
+## string alignment distance), or `limit + 1` as soon as it is known to be
+## more than `limit`.
+##
+## The swap is one edit because it is the commonest slip there is, and plain
+## Levenshtein would count it as two: `handel` would then be as far from
+## `handle` as from `hand`, and `wiht`, four letters, would not reach `with`
+## at all.
+pub fn distance(a: String, b: String, limit: Int) -> Int = {
+  let xs0 = code_points(a)
+  let ys0 = code_points(b)
+  if len(xs0) - len(ys0) > limit || len(ys0) - len(xs0) > limit {
+    limit + 1
+  } else {
+    # What the two share at either end costs nothing, and most pairs that
+    # are near at all share most of themselves: `sturct` and `struct` leave
+    # `ur` and `ru` to the table.
+    var lead = 0
+    while lead < len(xs0) && lead < len(ys0) && xs0[lead] == ys0[lead] {
+      lead = lead + 1
+    }
+    var tail = 0
+    while tail < len(xs0) - lead && tail < len(ys0) - lead && xs0[len(xs0) - 1 - tail] == ys0[len(ys0) - 1 - tail] {
+      tail = tail + 1
+    }
+    let xs = list.slice(xs0, lead, len(xs0) - tail)
+    let ys = list.slice(ys0, lead, len(ys0) - tail)
+    let d = table(xs, ys, limit)
+    if d > limit { limit + 1 } else { d }
+  }
+}
+
+## The distance table, one row at a time, given up on as soon as a whole row
+## is past `limit`. Only the cells within `limit` of the diagonal are worked
+## out; the rest cannot lead anywhere within reach and stand at `limit + 1`.
+fn table(xs: List[Char], ys: List[Char], limit: Int) -> Int = {
+  let n = len(xs)
+  let m = len(ys)
+  let far = limit + 1
+  var before: List[Int] = []
+  var prev: List[Int] = list.map(range(0, m + 1), j => if j > limit { far } else { j })
+  var over = false
+  var i = 1
+  while i <= n && not over {
+    var cur: List[Int] = [if i > limit { far } else { i }]
+    var least = cur[0]
+    for j in range(1, m + 1) {
+      var d = far
+      if j - i <= limit && i - j <= limit {
+        let same = xs[i - 1] == ys[j - 1]
+        d = prev[j - 1] + (if same { 0 } else { 1 })
+        if prev[j] + 1 < d {
+          d = prev[j] + 1
+        }
+        if cur[j - 1] + 1 < d {
+          d = cur[j - 1] + 1
+        }
+        if i > 1 && j > 1 && xs[i - 1] == ys[j - 2] && xs[i - 2] == ys[j - 1] && before[j - 2] + 1 < d {
+          d = before[j - 2] + 1
+        }
+        if d > far {
+          d = far
+        }
+      }
+      cur = cur ++ [d]
+      if d < least {
+        least = d
+      }
+    }
+    over = least > limit
+    before = prev
+    prev = cur
+    i = i + 1
+  }
+  if over { far } else { prev[m] }
+}
+
+## A word of the index a query word may have meant: how many edits away it
+## is, and how many entries and paragraphs have it.
+pub type Near = { word: String, dist: Int, freq: Int }
+
+## The words of the index a query word `w` may have meant, and whether the
+## index has `w` itself, so that it is no slip: whole, or as the start of a
+## word when it is the query's last, which the reader may still be typing.
+##
+## `words` are the words that begin with the letter `w` begins with and are
+## within `limit` code points of its length, each with how many title rows
+## and paragraphs have it. The bucket is the first letter. Every word of the
+## text that begins with it is one run of the sorted word list (two binary
+## searches); the titles' words are not sorted anywhere, and rather than sort
+## them at every init for a branch most keystrokes never take, they are
+## walked here, which is one comparison of a first letter per word. A slip in
+## the first letter is not looked for: it would mean a distance against every
+## word of the index, which is what the research measured at 12.5 ms of wasm
+## (report 1.8), and the first letter is the one a reader is least likely to
+## get wrong. Search engines that tolerate typos make the same trade
+## (Elasticsearch's fuzzy `prefix_length`).
+type Pool = { known: Bool, words: Map[String, Int] }
+
+fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
+  let first = str.take(w, 1)
+  let n = str.len(w)
+  var known = false
+  var out: Map[String, Int] = map.empty()
+  for k in state.keys {
+    if k.group >= 0 && not known {
+      for x in k.words {
+        if str.starts_with(x, first) {
+          if x == w || (last && str.starts_with(x, w)) {
+            known = true
+          }
+          let xn = str.len(x)
+          if xn - n <= limit && n - xn <= limit {
+            out = map.insert(out, x, unwrap_or(map.get(out, x), 0) + 1)
+          }
+        }
+      }
+    }
+  }
+  match state.body {
+    None -> ()
+    Some(b) -> {
+      let at = lower_bound(b.terms, w)
+      if at < len(b.terms) && (b.terms[at] == w || (last && str.starts_with(b.terms[at], w))) {
+        known = true
+      }
+      if not known {
+        let lo = lower_bound(b.terms, first)
+        for i in range(lo, past_prefix(b.terms, first, lo)) {
+          let x = b.terms[i]
+          let xn = str.len(x)
+          if xn - n <= limit && n - xn <= limit {
+            out = map.insert(out, x, unwrap_or(map.get(out, x), 0) + len(b.posts[i]))
+          }
+        }
+      }
+    }
+  }
+  Pool { known: known, words: out }
+}
+
+## What a query word may have meant: nothing when the index has it, and
+## otherwise the words of its bucket within [allowed] edits, nearest first,
+## then commonest, then in code-point order. Only ASCII words are looked at:
+## Chinese is searched one character at a time and a character either is in
+## the index or is not, and an edit distance between two letters of another
+## alphabet says nothing a reader would recognise.
+pub fn near_words(state: State, w: String, last: Bool) -> List[Near] = reach(state, w, last).near
+
+## [near_words], and whether the word is one the index lacks with nothing near
+## it either: a word no query made from this one can find.
+type Reach = { dead: Bool, near: List[Near] }
+
+fn reach(state: State, w: String, last: Bool) -> Reach = {
+  let limit = allowed(str.len(w))
+  let ascii = list.all(code_points(w), c => char.code(c) < 128)
+  if limit == 0 || not ascii {
+    Reach { dead: false, near: [] }
+  } else {
+    let pool = bucket(state, w, last, limit)
+    if pool.known {
+      Reach { dead: false, near: [] }
+    } else {
+      let seen = letters(w)
+      var out: List[Near] = []
+      for e in map.entries(pool.words) {
+        let (x, freq) = e
+        if strangers(x, seen, limit) <= limit {
+          let d = distance(w, x, limit)
+          if d > 0 && d <= limit {
+            out = out ++ [Near { word: x, dist: d, freq: freq }]
+          }
+        }
+      }
+      Reach {
+        dead: len(out) == 0,
+        near: sort_by(out, (a, b) =>
+            if a.dist != b.dist { a.dist - b.dist } else if a.freq != b.freq { b.freq - a.freq } else { order(a.word, b.word) }),
+      }
+    }
+  }
+}
+
+## Which of the 128 ASCII code points `w` has.
+fn letters(w: String) -> List[Bool] = {
+  let ks = list.map(code_points(w), c => char.code(c))
+  list.map(range(0, 128), k => list.contains(ks, k))
+}
+
+## How many characters of `x` are not among `seen`, counted up to one past
+## `limit`. Each of them is an edit on its own -- a swap brings no character
+## in -- so a word with more of them than the limit is out of reach, and the
+## table is not drawn for it. Most of a bucket goes here: `sturct` has no
+## `o`, `p` or `e`, and `scope` is three edits away before anything is
+## compared.
+fn strangers(x: String, seen: List[Bool], limit: Int) -> Int = {
+  var at = cursor.start(x)
+  var n = 0
+  while n <= limit && not cursor.done(x, at) {
+    let k = cursor.char(x, at)
+    if k >= 128 || not seen[k] {
+      n = n + 1
+    }
+    at = cursor.next(x, at)
+  }
+  n
+}
+
+## How many words each query word may become while the panel looks for a
+## query that answers, and how many such queries it asks before it gives up.
+## Each one asked is a search of both indexes, about 2 ms of wasm; two is
+## what keeps a query of three slips nothing answers under the budget
+## (docs/site-search-design.md 10.3).
+fn near_cap() -> Int = 3
+
+fn tries_cap() -> Int = 2
+
+## One query the panel may suggest: its words, and how many edits they are
+## from the reader's, in all.
+type Guess = { words: List[String], dist: Int }
+
+## A query like `q` that answers, and how many rows it answers with: `("",
+## 0)` when no word of `q` has a near miss, or none of the queries made from
+## them answers.
+##
+## Every word the index lacks is replaced by one of its nearest words, the
+## others kept, and the queries so made are asked fewest edits first -- at
+## most [tries_cap] of them. The count is what the suggested query answers
+## when asked ([tally_of]), which is the number the reader gets by taking it.
+pub fn suggest(state: State, q: String) -> (String, Int) = {
+  let ts = terms(str.to_lower(str.trim(q)))
+  var guesses: List[Guess] = [Guess { words: [], dist: 0 }]
+  var changed = false
+  var dead = 0
+  var i = 0
+  for t in ts {
+    let r = reach(state, t.word, i == len(ts) - 1)
+    let near = r.near
+    if r.dead {
+      dead = dead + 1
+    }
+    # past nine queries in hand, a word adds its nearest only, so that a long
+    # query of slips does not multiply into hundreds
+    let options =
+      if len(near) == 0 {
+        [Near { word: t.word, dist: 0, freq: 0 }]
+      } else {
+        list.take(near, if len(guesses) >= 9 { 1 } else { near_cap() })
+      }
+    if len(near) > 0 {
+      changed = true
+    }
+    var next: List[Guess] = []
+    for g in guesses {
+      for o in options {
+        next = next ++ [Guess { words: g.words ++ [o.word], dist: g.dist + o.dist }]
+      }
+    }
+    guesses = next
+    i = i + 1
+  }
+  # Under three words every word has to be found (the sentence tier of
+  # [most] starts at three), so a word nothing is near sinks every query
+  # made from this one, and none is asked.
+  if not changed || (dead > 0 && len(ts) < 3) {
+    ("", 0)
+  } else {
+    var found = ""
+    var count = 0
+    var tried = 0
+    for g in sort_by(guesses, (a, b) => a.dist - b.dist) {
+      if found == "" && tried < tries_cap() {
+        let fix = join(g.words, " ")
+        let n = tally_of(state, fix)
+        if n > 0 {
+          found = fix
+          count = n
+        }
+        tried = tried + 1
+      }
+    }
+    (found, count)
+  }
+}
+
+## How many rows `query` answers in all, before any narrowing or cap: the sum
+## of its scope pills' counts, without arranging or excerpting anything.
+pub fn tally_of(state: State, query: String) -> Int = {
+  let q = str.to_lower(str.trim(query))
+  if q == "" {
+    0
+  } else {
+    let titles = matches(state.keys, q, terms(q))
+    len(titles) + len(text_rows(state, q, titles))
+  }
+}
+
 # ---- the scan: two cells in one handler ------------------------------------
 
 ## The model's hits, numbered, and the href the selection lands on.
@@ -1720,26 +2047,33 @@ fn status(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
     } else if q == "" {
       [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
     } else {
-      [el("div", class: "search-nothing", kids: nothing(lang(), q))]
+      [el("div", class: "search-nothing", kids: nothing(lang(), q, m.fix, m.fix_hits))]
     }
   el("div", [("role", "status")], class: "search-none", kids: say_it)
 }
 
-## A query nothing answered: what was asked, and three ways to ask again.
+## A query nothing answered: what was asked, the query the panel guesses was
+## meant when it has one ([fix_line]), and three ways to ask again.
 ##
 ## Each tip names its examples in `<code>`, because what a reader types next
 ## is the example, letter for letter. The tips are about the panel as it is --
-## a title and API-name index that splits on words -- and offer no guessed
-## correction: that needs an edit distance the panel does not compute yet.
+## a title and API-name index that splits on words.
 ##
 ## The picture is a small sunrise over the horizon line, drawn by the
 ## stylesheet: the element is empty and hidden from assistive technology, and
 ## an `<svg>` built here would not render, because tea_dom creates every
 ## element in the HTML namespace.
-fn nothing(code: String, q: String) -> List[Node[Msg]] = [
-  el("div", [("aria-hidden", "true")], class: "search-none-art"),
-  el("p", class: "search-none-title",
-    kids: [text(say(code, "Nothing matches “${q}”.", "没有与“${q}”匹配的结果。"))]),
+fn nothing(code: String, q: String, fix: String, fix_hits: Int) -> List[Node[Msg]] = {
+  let head: List[Node[Msg]] = [
+    el("div", [("aria-hidden", "true")], class: "search-none-art"),
+    el("p", class: "search-none-title",
+      kids: [text(say(code, "Nothing matches “${q}”.", "没有与“${q}”匹配的结果。"))]),
+  ]
+  head ++ fix_line(code, fix, fix_hits) ++ tips(code)
+}
+
+## The three tips under a query nothing answered.
+fn tips(code: String) -> List[Node[Msg]] = [
   el("ul", class: "search-tips", kids: [
     tip(if code == "zh-CN" {
       ["用 API 的英文名：", "read_file", "，不要写成 ", "读文件", "。"]
@@ -1758,6 +2092,26 @@ fn nothing(code: String, q: String) -> List[Node[Msg]] = [
     }),
   ]),
 ]
+
+## "Did you mean `handle`? 9 results": the suggested query as a button that
+## asks it, and how many rows it answers. Nothing when there is no suggestion.
+##
+## A button and not a link, though it is drawn as one: it goes nowhere, it
+## fills the field and asks, with the same `Typed` a recent query sends.
+## Enter in the field does the same ([pressed]).
+fn fix_line(code: String, fix: String, n: Int) -> List[Node[Msg]] =
+  if fix == "" {
+    []
+  } else {
+    let found = if code == "zh-CN" { "${n} 条结果" } else if n == 1 { "1 result" } else { "${n} results" }
+    [el("p", class: "search-fix", kids: [
+      text(say(code, "Did you mean ", "你是想找 ")),
+      el("button", [("type", "button")], class: "search-fix-term", on: [on_click(Typed(text: fix))],
+        kids: [text(fix)]),
+      text(say(code, "? ", "？")),
+      span(found, class: "search-fix-count"),
+    ])]
+  }
 
 ## One tip: prose and examples taking turns, the examples as code.
 fn tip(parts: List[String]) -> Node[Msg] = {
@@ -2101,7 +2455,7 @@ pub fn key_of(e: Entry) -> Key = {
 ## The model of a panel that has been left: closed, and holding nothing a
 ## reopening could mistake for its own.
 fn closed(m: Model) -> Model =
-  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [] }
+  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0 }
 
 fn blank() -> Model =
   Model {
@@ -2112,12 +2466,19 @@ fn blank() -> Model =
     hits: [],
     scope: -1,
     counts: [],
+    fix: "",
+    fix_hits: 0,
   }
 
 ## The model after asking `text` within `scope`, selection at the top.
+##
+## A suggestion is looked for only here, and only when neither index answered
+## anything: that is the whole of the trigger, and the reason a keystroke that
+## finds something never pays for it.
 fn asked(state: State, m: Model, text: String, scope: Int) -> Model = {
   let a = answer(state, text, scope)
-  Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts }
+  let (fix, n) = if len(a.hits) == 0 { suggest(state, text) } else { ("", 0) }
+  Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n }
 }
 
 ## One turn: the model the message leaves behind, and what the panel asks the
@@ -2171,6 +2532,10 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     (Model { ..m, sel: if last > 0 { last } else { 0 }, goto: "" }, NoCmd)
   } else if key == "Enter" && idle(m) {
     (m, idle_choice(state, m.sel))
+  } else if key == "Enter" && len(m.hits) == 0 && m.fix != "" {
+    # Nothing to open, and a query that has answers on offer: Enter takes it,
+    # the way it takes a recent query.
+    (m, SendMsg(msg: Typed(text: m.fix)))
   } else if key == "Enter" {
     # Nothing about the model changes here. Where the selection points is a
     # question `scan` answers, and what to do about it is the command.
@@ -2182,7 +2547,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     if m.query == "" {
       (closed(m), NoCmd)
     } else {
-      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [] }, NoCmd)
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0 }, NoCmd)
     }
   } else {
     (m, NoCmd)
@@ -2261,6 +2626,8 @@ pub fn encode(m: Model) -> String =
   ++ ",\"hits\":[" ++ join(list.map(m.hits, h => to_string(h)), ",") ++ "]"
   ++ ",\"scope\":" ++ to_string(m.scope)
   ++ ",\"counts\":[" ++ join(list.map(m.counts, c => to_string(c)), ",") ++ "]"
+  ++ ",\"fix\":" ++ quoted(m.fix)
+  ++ ",\"fix_hits\":" ++ to_string(m.fix_hits)
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -2279,6 +2646,8 @@ pub fn decode(s: String) -> Model =
             hits: list.map(jarr(jget(j, "hits")), h => jint_or(h, -1)),
             scope: jint_or(jget(j, "scope"), -1),
             counts: list.map(jarr(jget(j, "counts")), c => jint_or(c, 0)),
+            fix: jstr_or(jget(j, "fix"), ""),
+            fix_hits: jint_or(jget(j, "fix_hits"), 0),
           }
         _ -> blank()
       }
@@ -2649,7 +3018,7 @@ test "only the mutable model round-trips through its text" {
   assert decode(encode(m)) == m
   assert encode(m)
     == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1],"
-    ++ "\"scope\":-1,\"counts\":[2,0,0,0,0]}"
+    ++ "\"scope\":-1,\"counts\":[2,0,0,0,0],\"fix\":\"\",\"fix_hits\":0}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
   let shut = turn(state, turn(state, m, Pressed(key: "Escape")), Pressed(key: "Escape"))
@@ -2989,7 +3358,7 @@ test "home and end jump to the first and the last result" {
 }
 
 ## A query with no hits says what was asked and offers three ways to ask
-## again, in the page's language, and guesses at nothing.
+## again, in the page's language.
 test "a query nothing answers says so, with three tips" {
   let en = probe_state()
   let v = view(en, typed(en, "  handel "))
@@ -3005,6 +3374,7 @@ test "a query nothing answers says so, with three tips" {
   let handle_code: Node[Msg] = el("code", kids: [text("with handle")])
   assert kids_of(tips[1])[1] == io_code
   assert kids_of(tips[1])[3] == handle_code
+  # the probe index has no word near `handel`, so there is nothing to offer
   assert not str.contains(show_tree(v), "Did you mean")
   let zh = State { ..en, lang: "zh-CN" }
   let zv = view(zh, typed(zh, "handel"))
@@ -3349,6 +3719,171 @@ test "a Chinese phrase is checked in the candidates' excerpts" {
   assert list.map(all_with_class(v, "search-detail"), d => text_of(d)) == ["规范 › §6.5", "教程 › 第 9 章", "历史"]
   # the phrase is marked in the excerpt
   assert list.map(all_with_tag(all_with_class(v, "search-note")[0], "mark"), k => text_of(k)) == ["效果", "处理"]
+}
+
+# ---- near misses ----
+
+## The distance, on the samples that decide what it is: a swap of two
+## neighbours is one edit, two edits are two, and past the limit the answer
+## is the limit plus one however far it really is.
+test "the edit distance counts a swap as one edit and stops at its limit" {
+  assert distance("handel", "handle", 2) == 1
+  assert distance("efect", "effect", 2) == 1
+  assert distance("hahsmap", "hashmap", 2) == 1
+  assert distance("wiht", "with", 1) == 1
+  assert distance("hendl", "handle", 2) == 2
+  assert distance("handle", "handle", 2) == 0
+  assert distance("kitten", "sitting", 3) == 3
+  # the swap is of neighbours that stay swapped: `ca` to `abc` is three, not
+  # the two of the unrestricted distance
+  assert distance("ca", "abc", 3) == 3
+  # beyond the limit, by length or by edits
+  assert distance("ab", "abcd", 1) == 2
+  assert distance("hadl", "handle", 1) == 2
+  assert distance("handle", "zzzzzz", 2) == 3
+  # the limit follows the length of the query word: none under three code
+  # points, one up to four, two from five on
+  assert list.map(range(1, 8), n => allowed(n)) == [0, 0, 1, 1, 2, 2, 2]
+}
+
+## The length rule, through the whole suggestion: `hendl` has five letters and
+## may be two edits from `handle`; `hadl` has four and may not.
+test "a word of five letters may be two edits off, a shorter one only one" {
+  let state = text_state()
+  let (fix, _) = suggest(state, "hendl")
+  assert fix == "handle"
+  assert suggest(state, "hadl") == ("", 0)
+  # one edit under five letters, and none under three
+  assert list.map(near_words(state, "wiht", false), x => x.word) == ["with"]
+  assert near_words(state, "ha", false) == []
+}
+
+## Every word of the index that begins with the query word's letter and is
+## within reach is a candidate: the same answer as measuring every word of
+## both indexes and keeping those. The letters chosen sit at both ends of the
+## sorted words (`a`, `w`) and in the middle, with words from the titles and
+## from the text in one bucket.
+test "the first-letter bucket misses no word that a walk of the whole index finds" {
+  let state = text_state()
+  var vocab: List[String] = []
+  for k in state.keys {
+    vocab = vocab ++ k.words
+  }
+  match state.body {
+    Some(b) -> {
+      vocab = vocab ++ b.terms
+    }
+    None -> panic("the text state has a body")
+  }
+  let every_word = list.unique(vocab)
+  for w in ["arns", "wiht", "thet", "hendl", "handel", "efects", "stae", "remve", "spilt"] {
+    let limit = allowed(str.len(w))
+    let walked = sort_by(list.filter(every_word, x => str.starts_with(x, str.take(w, 1)) && x != w && distance(w, x, limit) <= limit),
+      (a, b) => order(a, b))
+    let bucketed = sort_by(list.map(near_words(state, w, false), x => x.word), (a, b) => order(a, b))
+    assert bucketed == walked
+  }
+  # and the bucket holds both indexes: `spilt` reaches a title's word,
+  # `stae` the text's
+  assert list.map(near_words(state, "spilt", false), x => x.word) == ["split"]
+  assert list.map(near_words(state, "stae", false), x => x.word) == ["state"]
+}
+
+## A word the index has is not a slip, whole or, when the query ends with it,
+## as the start of a word; and a Chinese word is never measured.
+test "only a word the index lacks has near misses" {
+  let state = text_state()
+  assert near_words(state, "handle", false) == []
+  assert near_words(state, "handl", true) == []
+  assert list.map(near_words(state, "handl", false), x => x.word) == ["handle", "handler"]
+  assert near_words(state, "效课", false) == []
+  assert suggest(state, "效课") == ("", 0)
+}
+
+## Only a query that nothing answers is given a suggestion. This one has a
+## slip in it and still answers, through the most of its words (the
+## sentence tier), so it is shown what it found and nothing else.
+test "a suggestion is looked for only when neither index answers" {
+  let state = text_state()
+  let m = typed(state, "the block handel installs")
+  assert len(m.hits) > 0
+  assert m.fix == ""
+  assert m.fix_hits == 0
+  # the same slip on its own answers nothing, and is offered the word
+  let alone = typed(state, "handel")
+  assert alone.hits == []
+  assert alone.fix == "handle"
+  # and the titles alone know no word near it
+  assert typed(probe_state(), "handel").fix == ""
+}
+
+## Each word the index lacks is replaced; the ones it has are kept. The
+## queries so made are asked nearest first, and the first that answers is the
+## one offered, which need not be the one made of each word's nearest:
+## `the` is commoner than `them`, but only `them` is in a paragraph with
+## `declare`.
+test "every slip of a longer query is replaced, and the query offered answers" {
+  let state = text_state()
+  assert suggest(state, "wiht handel") == ("with handle", 1)
+  assert list.map(near_words(state, "thet", false), x => x.word) == ["the", "them"]
+  let (fix, n) = suggest(state, "thet declare")
+  assert fix == "them declare"
+  assert n == 1
+  # the count is what the suggested query answers, counted the way the
+  # scope pills count it
+  let (one, one_n) = suggest(state, "hendl")
+  let taken = typed(state, one)
+  assert one_n == list.fold(taken.counts, 0, (a, c) => a + c)
+  assert one_n == 3
+  # a word with nothing near it sinks a two-word query, whatever the other
+  # becomes
+  assert suggest(state, "wiht zzzzzz") == ("", 0)
+}
+
+## The suggestion is a line in the empty state, in the page's language, with
+## the count; the button and Enter both ask the suggested query through
+## `Typed`, the message a recent query sends.
+test "did you mean names the query and asks it on a click or on enter" {
+  let state = text_state()
+  let m = typed(state, "  Handel ")
+  assert m.fix == "handle"
+  assert m.fix_hits == 3
+  let v = view(state, m)
+  let line = all_with_class(v, "search-fix")
+  assert len(line) == 1
+  assert text_of(line[0]) == "Did you mean handle? 3 results"
+  assert text_of(all_with_class(v, "search-none-title")[0]) == "Nothing matches “Handel”."
+  # it sits between what was asked and the tips
+  assert list.map(kids_of(all_with_class(v, "search-nothing")[0]), k => class_of(k))
+    == ["search-none-art", "search-none-title", "search-fix", "search-tips"]
+  let button = all_with_class(v, "search-fix-term")[0]
+  assert prop_of(button, "type") == "button"
+  match button {
+    Elem(_, _, on, ..) -> {
+      assert len(on) == 1
+      assert on[0].event == "click"
+      assert to_string(on[0].to_msg("")) == to_string(Typed(text: "handle"))
+    }
+    Text(_) -> panic("the suggestion is an element")
+  }
+  # Enter in the field asks it too, and the panel then has its rows
+  let (kept, c) = update(state, m, Pressed(key: "Enter"))
+  assert kept == m
+  assert c == SendMsg(msg: Typed(text: "handle"))
+  let taken = turn(state, m, Pressed(key: "Enter"))
+  assert taken.query == "handle"
+  assert len(taken.hits) == 3
+  assert taken.fix == ""
+  assert count_class(view(state, taken), "search-fix") == 0
+  # one result is one
+  assert text_of(all_with_class(view(state, typed(state, "wiht handel")), "search-fix-count")[0]) == "1 result"
+  # the Chinese page says it in Chinese
+  let zh = State { ..state, lang: "zh-CN" }
+  assert text_of(all_with_class(view(zh, typed(zh, "handel")), "search-fix")[0]) == "你是想找 handle？3 条结果"
+  # Escape takes the suggestion with the query, and the model carries it
+  assert turn(state, m, Pressed(key: "Escape")).fix == ""
+  assert decode(encode(m)) == m
+  assert str.contains(encode(m), "\"fix\":\"handle\",\"fix_hits\":3")
 }
 
 fn all_with_tag(w: Node[Msg], tag: String) -> List[Node[Msg]] = {

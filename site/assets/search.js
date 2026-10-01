@@ -391,13 +391,17 @@
     }
     if (ev.target === host || guestLeft() || row) close();
     else syncQuery();
+    // The suggested query, taken from the keyboard: the button that had focus
+    // is gone with the empty state it was in, so focus goes back to the field
+    // that now holds the query.
+    if (ev.target.closest && ev.target.closest('.search-fix-term')) focusInput();
   });
 
-  // A scope pill is a button, and a pressed button takes focus; the field
-  // has to keep it, or the arrows and Enter stop reaching the guest after a
-  // click. The click itself still happens.
+  // A scope pill is a button, and so is a suggested query; a pressed button
+  // takes focus, and the field has to keep it, or the arrows and Enter stop
+  // reaching the guest after a click. The click itself still happens.
   host.addEventListener('mousedown', function (ev) {
-    if (ev.target.closest && ev.target.closest('.search-pill')) ev.preventDefault();
+    if (ev.target.closest && ev.target.closest('.search-pill, .search-fix-term')) ev.preventDefault();
   });
 
   host.addEventListener('mousemove', function () {
