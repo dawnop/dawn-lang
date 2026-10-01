@@ -23,6 +23,7 @@ use driver/analyze.{
   load_entries_reusing, no_parses, project_plan
 }
 use driver/fsmem
+use std/memfs
 use compiler_plan/source.{SourceFile}
 use std/str
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
@@ -155,19 +156,19 @@ test "module memo checks an unchanged file again with the line starts its reused
   # parse reuses them, and a module checked again because what it imports
   # changed still says `at file:line` against its own, unchanged text. An
   # `expr!` in a constant is where a checker product renders a line.
-  let root = fsmem.MEM_BASE ++ "/line-starts"
+  let root = memfs.BASE ++ "/line-starts"
   let main = root ++ "/src/main.dawn"
   let app = root ++ "/src/app.dawn"
   let lib = root ++ "/src/lib.dawn"
   let app_text = "use lib\n\nfn pick() -> Option[Int] = None\n\npub const C: Int = pick()!\n" ++
     "pub fn answer() -> Int = lib.value()\n"
-  var files = fsmem.mem_std(fsmem.MEM_BASE)
-  files = fsmem.mem_put(files, main, "use app\npub fn main() -> Unit !io = println(to_string(app.answer()))\n")
-  files = fsmem.mem_put(files, app, app_text)
-  files = fsmem.mem_put(files, lib, "pub fn value() -> Int = 41\n")
-  let _ = fsmem.with_fs_mem(files, () => io.with_proc_real(() =>
-      envmem.with_env_table(fsmem.MEM_BASE, [], () => {
-        let std = match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, main, "use app\npub fn main() -> Unit !io = println(to_string(app.answer()))\n")
+  files = memfs.put(files, app, app_text)
+  files = memfs.put(files, lib, "pub fn value() -> Int = 41\n")
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
           Ok(s) -> s
           Err(e) -> panic(std_load_error_text(e))
         }

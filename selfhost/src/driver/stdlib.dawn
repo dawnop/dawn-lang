@@ -42,6 +42,7 @@ use version.{VERSION}
 use compiler_plan/envmem
 use compiler_plan/source.{canon}
 use driver/fsmem
+use std/memfs
 
 ## Everything user-module analysis needs from std.
 pub(pkg) type StdCtx = {
@@ -1042,8 +1043,8 @@ test "a std directory with no modules.txt falls back to the embedded copy" {
 
 ## `body` over an in-memory tree, with no host environment behind it either:
 ## what the loader reads is exactly what the test put there.
-fn in_table[T](fs: fsmem.MemFs, body: fn() -> T !Env !Fs !io) -> T !io = {
-  let (out, _) = fsmem.with_fs_mem(fs, () => no_host(body))
+fn in_table[T](fs: memfs.MemFs, body: fn() -> T !Env !Fs !io) -> T !io = {
+  let (out, _) = memfs.with_fs(fs, () => no_host(body))
   out
 }
 
@@ -1064,8 +1065,8 @@ test "a std directory missing modules it lists is refused, naming every one" {
   # #206. The directory answered for modules.txt, so it is the std being
   # loaded; a module it lacks used to be read from the embedded copy instead,
   # silently, and the program ran against a std assembled from two places.
-  let root = fsmem.mem_std_dir(fsmem.MEM_BASE)
-  let got = in_table(fsmem.mem_std(fsmem.MEM_BASE), () => {
+  let root = fsmem.mem_std_dir(memfs.BASE)
+  let got = in_table(fsmem.mem_std(memfs.BASE), () => {
     let _ = io.delete("${root}/map.dawn")
     let _ = io.delete("${root}/set.dawn")
     match load_std(root) {
@@ -1096,8 +1097,8 @@ test "a std directory with no modules.txt is not read at all" {
   # #206. The embedded copy answered for modules.txt, so every module is the
   # embedded one; a lone `str.dawn` in the directory used to replace it and be
   # recorded as std's file for `std/str`.
-  let st = fsmem.mem_put(fsmem.mem_empty(fsmem.MEM_BASE), "std/str.dawn", lowering_str())
-  let std = in_table(st, () => match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+  let st = memfs.put(memfs.empty(memfs.BASE), "std/str.dawn", lowering_str())
+  let std = in_table(st, () => match load_std(fsmem.mem_std_dir(memfs.BASE)) {
     Ok(s) -> s
     Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
   })
@@ -1120,7 +1121,7 @@ test "a stray std/str.dawn under the working directory changes no program" {
   # std/str.dawn whose `to_upper` lowers and no modules.txt. Before the fix the
   # same source answered `hello` from that directory and `HELLO` from any
   # other.
-  let st = fsmem.mem_put(fsmem.mem_empty(fsmem.MEM_BASE), "std/str.dawn", lowering_str())
+  let st = memfs.put(memfs.empty(memfs.BASE), "std/str.dawn", lowering_str())
   let got = in_table(st, () => {
     let std = match load_std("std") {
       Ok(s) -> s

@@ -1,244 +1,24 @@
-# A file tree held in memory, answering std/io's `Fs` effect without a host.
+# The bundled std, mounted in a `std/memfs` table.
 #
-# Test support. `with_fs_mem` installs a handler whose arms read and write one
-# table, so a test declares the tree it wants, runs an analysis over it, and
-# reads the table back afterwards -- the two things a real-disk setup cannot
-# offer: the analysis can see nothing the test did not put there, and what the
-# analysis wrote is a value the test can compare.
+# Test support. The table itself, and the `Fs` handler over it, are std's
+# (`std/memfs`); this file keeps only the one thing std cannot say, which is
+# what the std it ships with looks like on disk: `mem_std` reads the copy the
+# compiler embeds (`embed/stdsrc`).
 #
-# It lives in selfhost for one more release, and then it does not. The
-# bootstrap seed compiles HEAD selfhost against the std the seed shipped with,
-# so a std function added in this release cannot be called from selfhost until
-# the next one. That is also why `Fs` cannot gain an operation while this file
-# spells its own `with handle Fs`: a handler answers exactly the declared ops,
-# and this one is checked against the seed's op set and HEAD's in one build.
-# So the table and its arms were copied into `std/memfs` (#207, R1 in
-# docs/fs-real-path-design.md); once a seed carries that module, this file
-# becomes a thin wrapper over `memfs.with_fs` and keeps only what needs the
-# compiler (`mem_std`, which reads `embed/stdsrc`). Until then the two copies
-# are one text: `check_memfs_twin` in scripts/doc-check.py compares the arms,
-# the record and every private function above the tests. Change both.
-#
-# Directories are implied by the paths in the table, so `is_dir`, `exists` and
-# `list_names` answer what the real file system would answer for the same tree.
-# Paths are normalized against the base directory the caller names at
-# construction: nothing here reads the host, not even for the current directory.
-# Files hold bytes so binary writes survive unchanged. Only text-facing
-# operations encode or decode UTF-8; reading text never changes the stored bytes.
+# The handler used to live here, and that is the reason it does not any more
+# (#207, R2 in docs/fs-real-path-design.md). The bootstrap compiles this file
+# once against the seed's std and once against HEAD's, and a handler answers
+# exactly the operations its effect declares; a `with handle Fs` spelled here
+# had to match two op sets at once, so `Fs` could not gain an operation in any
+# release. Calling `memfs.with_fs` instead puts the arms in the same std as the
+# declaration they answer, on both sides of the bootstrap. Nothing in selfhost
+# may spell `with handle Fs` again for that reason.
 
 use std/io
-use std/io.{Fs, Deleted, NotFound}
 use std/str
-use std/list
-use std/map
-use std/bytes
+use std/memfs
 use embed/stdsrc
 use version.{VERSION}
-use fspath/fspath
-
-## A file tree, plus the directory relative paths resolve against and the
-## counter `temp_dir` / `temp_file` hand out names from.
-pub type MemFs = {
-  base: String,
-  files: Map[String, Bytes],
-  dirs: Map[String, Bool],
-  seq: Int
-}
-
-fn ferr(kind: String, what: String, path: String) -> ForeignError =
-  ForeignError { kind: "memfs.${kind}", message: what ++ ": " ++ path, cause: None }
-
-fn key(st: MemFs, p: String) -> String = fspath.absolute(p, st.base)
-
-## Every directory above `p`, marked present. Stops at the first one already
-## recorded: the ones above it were recorded with it.
-fn with_ancestors(dirs0: Map[String, Bool], p: String) -> Map[String, Bool] = {
-  var out = dirs0
-  var cur = fspath.parent(p)
-  var going = true
-  while going {
-    match cur {
-      Some(d) -> {
-        if map.has(out, d) {
-          going = false
-        } else {
-          out = map.insert(out, d, true)
-          cur = fspath.parent(d)
-        }
-      }
-      None -> { going = false }
-    }
-  }
-  out
-}
-
-fn dir_prefix(k: String) -> String = if k == "/" { "/" } else { "${k}/" }
-
-fn is_dir_key(st: MemFs, k: String) -> Bool = {
-  if map.has(st.dirs, k) { return true }
-  let prefix = dir_prefix(k)
-  for f in map.keys(st.files) {
-    if str.starts_with(f, prefix) { return true }
-  }
-  false
-}
-
-## The immediate entries of `k`, files and directories alike, sorted. The host
-## primitive answers in whatever order it likes and `io.list_dir` sorts on top;
-## sorting here as well is what keeps two runs of one test identical.
-fn child_names(st: MemFs, k: String) -> List[String] = {
-  let prefix = dir_prefix(k)
-  var names: List[String] = []
-  for p in map.keys(st.files) ++ map.keys(st.dirs) {
-    if str.starts_with(p, prefix) {
-      let rest = str.drop(p, str.len(prefix))
-      let name = match str.index_of(rest, "/") {
-        Some(i) -> str.take(rest, i)
-        None -> rest
-      }
-      if name != "" && not list.contains(names, name) { names = names ++ [name] }
-    }
-  }
-  sort(names)
-}
-
-fn mem_read(st: MemFs, p: String) -> Result[Bytes, ForeignError] = {
-  let k = key(st, p)
-  match map.get(st.files, k) {
-    Some(t) -> Ok(t)
-    None -> Err(ferr("not_found", "no such file", k))
-  }
-}
-
-fn mem_list(st: MemFs, p: String) -> Result[List[String], ForeignError] = {
-  let k = key(st, p)
-  if is_dir_key(st, k) { Ok(child_names(st, k)) } else { Err(ferr("not_a_directory", "not a directory", k)) }
-}
-
-fn mem_mkdirs(st: MemFs, p: String) -> (MemFs, Result[Unit, ForeignError]) = {
-  let k = key(st, p)
-  if map.has(st.files, k) {
-    return (st, Err(ferr("not_a_directory", "a file is in the way", k)))
-  }
-  (MemFs { ..st, dirs: map.insert(with_ancestors(st.dirs, k), k, true) }, Ok(()))
-}
-
-fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, ForeignError]) = {
-  let k = key(st, p)
-  if is_dir_key(st, k) {
-    return (st, Err(ferr("is_a_directory", "a directory is in the way", k)))
-  }
-  (MemFs {
-    ..st,
-    files: map.insert(st.files, k, content),
-    dirs: with_ancestors(st.dirs, k)
-  }, Ok(()))
-}
-
-fn mem_delete(st: MemFs, p: String) -> (MemFs, Result[Bool, ForeignError]) = {
-  let k = key(st, p)
-  if map.has(st.files, k) {
-    return (MemFs { ..st, files: map.remove(st.files, k) }, Ok(true))
-  }
-  if is_dir_key(st, k) {
-    if len(child_names(st, k)) > 0 {
-      return (st, Err(ferr("not_empty", "directory not empty", k)))
-    }
-    return (MemFs { ..st, dirs: map.remove(st.dirs, k) }, Ok(true))
-  }
-  (st, Ok(false))
-}
-
-## Move a file, or a whole subtree when `src` names a directory. Like the host
-## call, this is a rename of paths and not a copy of bytes.
-fn mem_rename(st: MemFs, src: String, dst: String) -> (MemFs, Result[Unit, ForeignError]) = {
-  let s = key(st, src)
-  let d = key(st, dst)
-  match map.get(st.files, s) {
-    Some(content) ->
-      return (MemFs {
-        ..st,
-        files: map.insert(map.remove(st.files, s), d, content),
-        dirs: with_ancestors(st.dirs, d)
-      }, Ok(()))
-    None -> ()
-  }
-  if not is_dir_key(st, s) {
-    return (st, Err(ferr("not_found", "no such file or directory", s)))
-  }
-  let prefix = dir_prefix(s)
-  var files = st.files
-  var dirs = st.dirs
-  for f in map.keys(st.files) {
-    if str.starts_with(f, prefix) {
-      let content = map.get(st.files, f).expect("moved file")
-      files = map.insert(map.remove(files, f), d ++ str.drop(f, str.len(s)), content)
-    }
-  }
-  for g in map.keys(st.dirs) {
-    if g == s || str.starts_with(g, prefix) {
-      dirs = map.insert(map.remove(dirs, g), d ++ str.drop(g, str.len(s)), true)
-    }
-  }
-  (MemFs { ..st, files: files, dirs: with_ancestors(dirs, d) }, Ok(()))
-}
-
-## A name nothing else holds, created before it is handed out -- the property
-## the host primitives have and the reason callers use them.
-fn mem_temp(
-  st: MemFs,
-  parent: String,
-  prefix: String,
-  as_dir: Bool
-) -> (MemFs, Result[String, ForeignError]) = {
-  let dir = if parent == "" { "/tmp" } else { key(st, parent) }
-  let path = dir ++ "/" ++ prefix ++ to_string(st.seq)
-  let bumped = MemFs { ..st, seq: st.seq + 1 }
-  let (next, made) =
-    if as_dir { mem_mkdirs(bumped, path) } else { mem_write(bumped, path, bytes.utf8("")) }
-  match made {
-    Ok(_) -> (next, Ok(path))
-    Err(e) -> (st, Err(e))
-  }
-}
-
-fn mem_present(st: MemFs, p: String) -> Bool = {
-  let k = key(st, p)
-  map.has(st.files, k) || is_dir_key(st, k)
-}
-
-## The base a table uses when its caller has no reason to name one of its own.
-## Absolute, so it is a base at all, and a directory no host has, so a path
-## built from it cannot be confused with one that names a real file.
-pub const MEM_BASE: String = "/dawn-memfs"
-
-## An empty tree whose relative paths resolve against `base`.
-##
-## The base is a parameter rather than `io.cwd()`, which is what it used to be:
-## reading it made this function `!io`, and with it every test built on the
-## table, for a value not one of them depended on. What the base has to be is
-## the same string for the whole life of one table, which a parameter says and
-## a host query only happened to provide.
-pub fn mem_empty(base: String) -> MemFs =
-  MemFs { base: base, files: map.empty(), dirs: map.empty(), seq: 0 }
-
-## `st` with one more file in it; the directories above it come along.
-pub fn mem_put(st: MemFs, path: String, content: String) -> MemFs = {
-  let (next, _) = mem_write(st, path, bytes.utf8(content))
-  next
-}
-
-## The file at `path` as UTF-8 text, or `None` when nothing is there.
-## Malformed sequences are replaced, just as in the text-reading handler arm.
-pub fn mem_content(st: MemFs, path: String) -> Option[String] =
-  match map.get(st.files, key(st, path)) {
-    Some(content) -> Some(bytes.decode_utf8_lossy(content))
-    None -> None
-  }
-
-## Every file path in the table, sorted. Directories are not listed: they are
-## implied by these.
-pub fn mem_files(st: MemFs) -> List[String] = sort(map.keys(st.files))
 
 ## Where `mem_std` mounts the bundled std in a table based at `base`.
 ##
@@ -255,13 +35,13 @@ pub fn mem_std_dir(base: String) -> String = "${base}/std"
 ## The text is the embedded copy (`embed/stdsrc`), which `driver/stdlib`'s own
 ## round-trip test holds equal to `std/` on disk: what a test reads here is
 ## what the directory would have answered with.
-pub fn mem_std(base: String) -> MemFs = {
+pub fn mem_std(base: String) -> memfs.MemFs = {
   let index = match stdsrc.source("modules.txt") {
     Some(t) -> t
     None -> panic("the embedded std carries no modules.txt")
   }
-  var st = mem_put(mem_empty(base), "std/modules.txt", index)
-  st = mem_put(st, "std/VERSION", "${VERSION}\n")
+  var st = memfs.put(memfs.empty(base), "std/modules.txt", index)
+  st = memfs.put(st, "std/VERSION", "${VERSION}\n")
   for line in str.split(index, "\n") {
     let cut = match str.index_of(line, "#") {
       Some(i) -> str.take(line, i)
@@ -270,7 +50,7 @@ pub fn mem_std(base: String) -> MemFs = {
     let n = str.trim(cut)
     if n != "" {
       match stdsrc.source("${n}.dawn") {
-        Some(t) -> { st = mem_put(st, "std/" ++ n ++ ".dawn", t) }
+        Some(t) -> { st = memfs.put(st, "std/" ++ n ++ ".dawn", t) }
         None -> panic("the embedded std is missing " ++ n ++ ".dawn")
       }
     }
@@ -278,167 +58,21 @@ pub fn mem_std(base: String) -> MemFs = {
   st
 }
 
-## Run `body` with `Fs` answered from `seed`, and hand back the table as it
-## stands afterwards.
-##
-## Every arm resumes in tail position. The state is a handler cell (spec §6.5),
-## which is what lets a write in one arm be read by the next one and by the
-## caller here.
-pub fn with_fs_mem[T](seed: MemFs, body: fn() -> T !Fs !io) -> (T, MemFs) !io = {
-  with handle Fs {
-    var st: MemFs = seed
-    fs_is_dir(path) => is_dir_key(st, key(st, path))
-    fs_exists(path) => mem_present(st, path)
-    fs_is_symlink(_path) => false
-    fs_mkdirs(path) => {
-      let (next, r) = mem_mkdirs(st, path)
-      st = next
-      r
-    }
-    fs_read_file(path) => match mem_read(st, path) {
-      Ok(content) -> Ok(bytes.decode_utf8_lossy(content))
-      Err(e) -> Err(e)
-    }
-    fs_write_file(path, content) => {
-      let (next, r) = mem_write(st, path, bytes.utf8(content))
-      st = next
-      r
-    }
-    fs_read_bytes(path) => mem_read(st, path)
-    fs_write_bytes(path, content) => {
-      let (next, r) = mem_write(st, path, content)
-      st = next
-      r
-    }
-    fs_delete(path) => {
-      let (next, r) = mem_delete(st, path)
-      st = next
-      r
-    }
-    fs_rename(src, dst) => {
-      let (next, r) = mem_rename(st, src, dst)
-      st = next
-      r
-    }
-    fs_temp_dir(parent, prefix) => {
-      let (next, r) = mem_temp(st, parent, prefix, true)
-      st = next
-      r
-    }
-    fs_temp_file(parent, prefix) => {
-      let (next, r) = mem_temp(st, parent, prefix, false)
-      st = next
-      r
-    }
-    fs_copy_permissions(src, dst) =>
-      if mem_present(st, src) && mem_present(st, dst) {
-        Ok(())
-      } else {
-        Err(ferr("not_found", "no such file or directory", key(st, src)))
-      }
-    fs_list_names(path) => mem_list(st, path)
-  }
-  let out = body()
-  (out, st)
-}
-
 # ---- tests ----
-fn ok(r: Result[Unit, ForeignError]) -> Bool =
-  match r {
-    Ok(_) -> true
-    Err(_) -> false
-  }
-
-test "the table answers the operations the way the tree implies" {
-  let (_, table) = with_fs_mem(mem_empty(MEM_BASE), () => {
-    assert ok(io.mkdirs("/t/sub"))
-    assert ok(io.write_file("/t/sub/a.txt", "alpha"))
-    assert ok(io.write_file("/t/b.txt", "beta"))
-    # directories are implied by the paths, not declared separately
-    assert io.is_dir("/t")
-    assert io.is_dir("/t/sub")
-    assert not io.is_dir("/t/sub/a.txt")
-    assert io.exists("/t/sub/a.txt")
-    assert not io.exists("/t/nope")
-    assert not io.is_symlink("/t/sub/a.txt")
-    assert io.read_file("/t/sub/a.txt") == Ok("alpha")
-    match io.read_file("/t/nope") {
-      Ok(_) -> { assert false }
-      Err(e) -> { assert e.kind == "memfs.not_found" }
-    }
-    assert io.list_dir("/t") == Ok(["b.txt", "sub"])
-    match io.list_dir("/t/b.txt") {
-      Ok(_) -> { assert false }
-      Err(_) -> ()
-    }
-    assert io.read_bytes("/t/b.txt") == Ok(bytes.utf8("beta"))
-    # two spellings of one path name one entry: every argument is normalized
-    assert ok(io.write_file("/t/sub/../c.txt", "gamma"))
-    assert io.read_file("/t/c.txt") == Ok("gamma")
-    assert ok(io.rename("/t/c.txt", "/t/sub/d.txt"))
-    assert not io.exists("/t/c.txt")
-    assert io.read_file("/t/sub/d.txt") == Ok("gamma")
-    match io.delete("/t/sub/d.txt") {
-      Ok(Deleted) -> ()
-      _ -> { assert false }
-    }
-    match io.delete("/t/sub/d.txt") {
-      Ok(NotFound) -> ()
-      _ -> { assert false }
-    }
-    # a directory with something in it is not deleted
-    match io.delete("/t/sub") {
-      Ok(_) -> { assert false }
-      Err(e) -> { assert e.kind == "memfs.not_empty" }
-    }
-  })
-  # the table is readable after the run, which is the point of the seam
-  assert mem_files(table) == ["/t/b.txt", "/t/sub/a.txt"]
-  assert mem_content(table, "/t/sub/a.txt") == Some("alpha")
-  let gone: Option[String] = None
-  assert mem_content(table, "/t/c.txt") == gone
-}
-
-test "binary files survive writes, renames, and a new handler" {
-  let payload = bytes.from_hex("fffe0080c080f09f8c85").expect("binary fixture")
-  let (_, table) = with_fs_mem(mem_empty(MEM_BASE), () => {
-    assert ok(io.write_bytes("bin/payload", payload))
-    assert io.read_bytes("bin/payload") == Ok(payload)
-    assert ok(io.rename("bin/payload", "bin/moved"))
-    assert ok(io.rename("bin", "archive"))
-    assert io.read_bytes("archive/moved") == Ok(payload)
-  })
-  let (_, _) = with_fs_mem(table, () => {
-    assert io.read_bytes("archive/moved") == Ok(payload)
-  })
-}
-
-test "text and byte operations share one UTF-8 file" {
-  let text = "hello \u{4e16}\u{754c}\u{0}"
-  let seed = mem_put(mem_empty(MEM_BASE), "seed", text)
-  let (_, table) = with_fs_mem(seed, () => {
-    assert io.read_bytes("seed") == Ok(bytes.utf8(text))
-    assert ok(io.write_bytes("text", bytes.utf8(text)))
-    assert io.read_file("text") == Ok(text)
-    assert ok(io.write_file("text", "${text}!"))
-    assert io.read_bytes("text") == Ok(bytes.utf8("${text}!"))
-  })
-  assert mem_content(table, "text") == Some("${text}!")
-}
 
 test "the mounted std is the embedded std, and nothing else is there" {
-  let (_, table) = with_fs_mem(mem_std(MEM_BASE), () => {
+  let (_, table) = memfs.with_fs(mem_std(memfs.BASE), () => {
     assert io.is_dir("std")
     # and the mount point `mem_std_dir` names is the one the text is at
-    assert io.is_dir(mem_std_dir(MEM_BASE))
+    assert io.is_dir(mem_std_dir(memfs.BASE))
     assert io.read_file("std/VERSION") == Ok("${VERSION}\n")
-    assert io.read_file("${mem_std_dir(MEM_BASE)}/VERSION") == Ok("${VERSION}\n")
+    assert io.read_file("${mem_std_dir(memfs.BASE)}/VERSION") == Ok("${VERSION}\n")
     assert io.read_file("std/io.dawn") == Ok(stdsrc.source("io.dawn").expect("embedded io"))
     # nothing above the mount point, and no host tree behind it
     assert not io.exists("/usr")
     assert not io.exists("std/nope.dawn")
   })
-  for f in mem_files(table) {
-    assert str.starts_with(f, "${key(table, "std")}/")
+  for f in memfs.file_paths(table) {
+    assert str.starts_with(f, "${mem_std_dir(memfs.BASE)}/")
   }
 }
