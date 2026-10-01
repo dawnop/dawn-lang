@@ -4,11 +4,19 @@
    which defines them for both themes; fallbacks keep the dev harness usable
    standalone.
 
-   The chrome (sidebar, toolbar, console) follows the site's theme. The editor
-   pane does not: it is held light below, because the syntax colours are
-   written into dawn-lang.ts (HighlightStyle.define) as light-theme hex values
-   that no CSS variable reaches, and on a dark pane its strings and numbers
-   would be dark blue on near-black (docs/site-pages-design.md). */
+   The whole IDE follows the site's theme, the editor pane included. The pane
+   was once held light, because its syntax colours were hex values inside a
+   CodeMirror HighlightStyle that no stylesheet could reach (issue #342); the
+   highlighter now emits stable tok-* classes, coloured below from the same
+   code tokens as every other code block on the site.
+
+   Where CodeMirror's own base theme paints something (caret, tooltips, the
+   completion list, the active lint range), it only knows the light values,
+   because the editor is never told it is dark: the site's theme is three-state
+   and lives in CSS. Those rules are restated here with light-dark(), whose
+   first value is CodeMirror's own light value, so the light theme renders
+   exactly as before, and whose second value is drawn from the site's tokens.
+   light-dark() reads color-scheme, which style.css sets in each theme. */
 
 /* This stylesheet only loads on the playground page: turn the page into an
    app shell — the body becomes a flex column, the IDE takes every pixel under
@@ -167,23 +175,16 @@ body > .site-footer { display: none; }
 }
 
 /* ---- editor ----
-   Held light in either theme (see the top of this file): the light values of
-   the tokens the pane and its gutter, hover card and lens read, set here so
-   that a dark page does not reach in. */
+   White in the light theme, as it always was; --code-bg in the dark one, the
+   ground of every code block on the site. (A browser without light-dark()
+   drops the declaration and shows the IDE's surface through, which follows
+   the theme too.) */
 .dp-editor {
   flex: 1;
   min-height: 0;
   display: flex;
-  color-scheme: light;
-  --text: #1f2328;
-  --muted: #57606a;
-  --faint: #656d76;
-  --border: #d0d7de;
-  --border-soft: #e9ecf1;
-  --code-bg: #f6f8fa;
-  --code-bg-soft: #fafbfc;
-  background: #fff;
-  color: var(--text);
+  background: light-dark(#fff, var(--code-bg));
+  color: var(--text, #1f2328);
 }
 .dp-editor .cm-editor {
   flex: 1;
@@ -198,6 +199,7 @@ body > .site-footer { display: none; }
 }
 .dp-editor .cm-content {
   padding: 0.75rem 0;
+  caret-color: light-dark(black, var(--text));
 }
 .dp-editor .cm-gutters {
   background: var(--code-bg-soft, #fafbfc);
@@ -209,11 +211,44 @@ body > .site-footer { display: none; }
   padding: 0 0.6em 0 0.9em;
 }
 .dp-editor .cm-activeLine {
-  background: rgb(124 58 237 / 0.045);
+  background: light-dark(rgb(124 58 237 / 0.045), color-mix(in srgb, var(--accent) 7%, transparent));
 }
 .dp-editor .cm-activeLineGutter {
-  background: rgb(124 58 237 / 0.07);
+  background: light-dark(rgb(124 58 237 / 0.07), color-mix(in srgb, var(--accent) 12%, transparent));
   color: var(--muted, #57606a);
+}
+
+/* Syntax colours: the site's code tokens, as in site/assets/style.css's
+   .k/.t/.f/.s/.i/.n/.c (the fallbacks are their light values).
+   .tok-variableName is left uncoloured on purpose: plain identifiers take the
+   pane's text colour. */
+.dp-editor .tok-keyword { color: var(--k, #cf222e); }
+.dp-editor .tok-typeName { color: var(--t, #9333ea); }
+.dp-editor .tok-def { color: var(--f, #7c3aed); }
+.dp-editor .tok-string { color: var(--s, #0a3069); }
+.dp-editor .tok-interp,
+.dp-editor .tok-number { color: var(--n, #0550ae); }
+.dp-editor .tok-comment { color: var(--c, #6e7781); font-style: italic; }
+
+/* CodeMirror's light-only paint, restated for both themes (see the top of
+   this file). The extra .cm-editor in each selector outranks the base theme's
+   scoped rule instead of relying on which sheet loads last. */
+.dp-editor .cm-editor .cm-tooltip {
+  background-color: light-dark(#f5f5f5, var(--code-bg));
+  border-color: light-dark(#bbb, var(--line));
+}
+.dp-editor .cm-editor .cm-tooltip-section:not(:first-child) {
+  border-top-color: light-dark(#ddd, var(--line-soft));
+}
+.dp-editor .cm-editor .cm-tooltip-autocomplete ul li[aria-selected] {
+  background: light-dark(#17c, color-mix(in srgb, var(--accent) 32%, var(--code-bg)));
+  color: white;
+}
+.dp-editor .cm-editor .cm-tooltip-autocomplete-disabled ul li[aria-selected] {
+  background: light-dark(#777, var(--line));
+}
+.dp-editor .cm-editor .cm-lintRange-active {
+  background-color: light-dark(#ffdd9980, #86714a80);
 }
 
 /* error-lens inline messages, after the code on the diagnostic's line */
@@ -227,12 +262,12 @@ body > .site-footer { display: none; }
   pointer-events: none;
 }
 .dp-lens-error {
-  color: #b42318;
-  background: rgb(180 35 24 / 0.07);
+  color: light-dark(#b42318, var(--danger));
+  background: light-dark(rgb(180 35 24 / 0.07), color-mix(in srgb, var(--danger) 10%, transparent));
 }
 .dp-lens-warning {
-  color: #9a6700;
-  background: rgb(154 103 0 / 0.08);
+  color: light-dark(#9a6700, #d29922);
+  background: light-dark(rgb(154 103 0 / 0.08), rgb(210 153 34 / 0.1));
 }
 
 .dp-hover {
@@ -242,7 +277,7 @@ body > .site-footer { display: none; }
   border-radius: 5px;
   color: var(--text, #24292f);
   background: var(--code-bg, #fff);
-  box-shadow: 0 4px 14px rgb(31 35 40 / 0.12);
+  box-shadow: 0 4px 14px light-dark(rgb(31 35 40 / 0.12), rgb(0 0 0 / 0.5));
   font: 0.82rem/1.45 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   white-space: pre-wrap;
 }
