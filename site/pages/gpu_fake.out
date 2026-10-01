@@ -1,0 +1,36 @@
+cuda_tile.module @m {
+  entry @vadd(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {
+    %0 = make_token : token
+    %1, %2, %3 = get_tile_block_id : tile<i32>
+    %4 = constant <i32: 128> : tile<i32>
+    %5 = muli %1, %4 : tile<i32>
+    %6 = reshape %5 : tile<i32> -> tile<1xi32>
+    %7 = broadcast %6 : tile<1xi32> -> tile<128xi32>
+    %8 = iota : tile<128xi32>
+    %9 = addi %7, %8 : tile<128xi32>
+    %10 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
+    %11 = broadcast %10 : tile<1xptr<f64>> -> tile<128xptr<f64>>
+    %12 = offset %11, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
+    %13, %14 = load_ptr_tko weak %12 token=%0 : tile<128xptr<f64>> -> tile<128xf64>, token
+    %15 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
+    %16 = broadcast %15 : tile<1xptr<f64>> -> tile<128xptr<f64>>
+    %17 = offset %16, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
+    %18, %19 = load_ptr_tko weak %17 token=%14 : tile<128xptr<f64>> -> tile<128xf64>, token
+    %20 = addf %13, %18 rounding<nearest_even> : tile<128xf64>
+    %21 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
+    %22 = broadcast %21 : tile<1xptr<f64>> -> tile<128xptr<f64>>
+    %23 = offset %22, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
+    %24 = store_ptr_tko weak %23, %20 token=%19 : tile<128xptr<f64>>, tile<128xf64> -> token
+    return
+  }
+}
+vadd on the fake device: [11.0, 22.0, 33.0, 44.0]
+T2  shapes    extract, cat, permute: 192 lanes, first four [64.0, 65.0, 66.0, 67.0]
+T3  narrowed  f8E4M3FN storage and conversion: 16 lanes, first four [1.125, 0.3125, 2.0, 6.0]
+T4  interval  addf towards each infinity: 16 lanes, first four [1.0, 1.0, 1.0, 1.0000001192092896]
+T5  collatz   a loop the data stops: 16 lanes, first four [0.0, 1.0, 7.0, 2.0]
+T6  guarded   assert and print_tko: 8 lanes, first four [11.0, 21.0, 31.0, 41.0]
+T7  table     two globals nobody uploaded: 16 lanes, first four [11.0, 11.5, 12.0, 12.5]
+T10 scratch   alloca, written and read back: 8 lanes, first four [3.0, 6.0, 9.0, 12.0]
+T15 hinted    vadd with optimization_hints: 4 lanes, first four [11.0, 22.0, 33.0, 44.0]
+TG  symbols   a module global the host looks up: @tbl_a holds [1.0, 1.5, 2.0, 2.5], an undeclared name says gpu.no_module_symbol
