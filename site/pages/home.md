@@ -13,13 +13,20 @@ of this file and `scripts/doc-check.py` goes red when the two part company.
 
 **This file is the original.** Change it first, then `home.zh.md`.
 
+`cta-playground` and `install` are written ahead of the generator change that
+places them on the page; until that lands, the generator does not read them.
+
 ## eyebrow
 
 type · match · effect · !io
 
 ## lede
 
-A small, elegant functional language: immutable data, algebraic data types with exhaustive pattern matching, effects written into the type signature. The compiler is self-hosted, and its two peer backends — JVM bytecode and C — give the same answer on the same source; a cuTile device backend takes kernels to NVIDIA GPUs, and a pure fake device gives that same answer where there is no GPU. A gate keeps that true, not a promise.
+A small, elegant functional language: immutable data, algebraic data types with exhaustive pattern matching, effects written into the type signature. The compiler is self-hosted, and its two peer backends, JVM bytecode and C, give the same answer on the same source; a cuTile device backend takes kernels to NVIDIA GPUs, and a pure fake device gives that same answer where there is no GPU. That is checked by machine, not promised: on every push the same programs run on both backends, and a difference in their output fails the build.
+
+## cta-playground
+
+Try in Playground →
 
 ## cta-primary
 
@@ -28,6 +35,10 @@ Start the tutorial →
 ## cta-secondary
 
 See examples
+
+## install
+
+Install: download `dawnc` (one static binary, no JVM) or `dawn-selfhost.jar` (JDK 21) from the [latest release](https://github.com/dawnop/dawn-lang/releases/latest); [chapter 1 of the tutorial](tutorial/01.html) walks through it.
 
 ## features-title
 
@@ -59,6 +70,6 @@ JVM bytecode and C (handed on to `cc`) are **peer** roads. Wherever divergence w
 
 ## closing
 
-Start with the [tutorial](tutorial/index.html); the authoritative definition of the language is the [specification](spec.html); every [example](examples/index.html) runs as it stands under `dawn run`; the standard library API reference is [here](stdlib.html); and the "why" behind each design decision is in the [design notes](design.html).
+Start with the [tutorial](tutorial/index.html); the authoritative definition of the language is the [specification](spec.html); every [example](examples/index.html) runs as it stands under `dawn run`; the standard library API reference is [here](stdlib.html); and the [design history](design.html) is the record of the early design decisions, frozen at M7.
 
-Every page of this site comes in both languages. The specification and the design notes are the one pair written in Chinese first and translated: they are living documents, edited in Chinese by every change to the language, so the Chinese half is the original and the English half is registered against it — `scripts/doc-check.py` goes red when the two drift apart. The rest of `docs/` is design notes and plans whose reader is the author, and it stays monolingual. The code, the compiler's diagnostics and the standard library's doc comments are English throughout — including the entries on the standard library page, which are the compiler's own text.
+Every page of this site comes in both languages. For the specification and the design history the Chinese text is the original and the English text is its translation; everywhere else English is the original. The code, the compiler's diagnostics and the standard library's doc comments are English throughout, including the entries on the standard library page, which are the compiler's own text.

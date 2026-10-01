@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ b155ace308dd0a12 -->
+<!-- doc-check: translation-of site/pages/home.md @ 94f11ff7f0ed7ff0 -->
 
 # 首页文案 —— 中文译本
 
@@ -14,7 +14,11 @@ type · match · effect · !io
 
 ## lede
 
-一门小而优雅的函数式语言：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进类型签名。编译器已自举，两个平级后端——JVM 字节码与 C——在同一份源码上给出同一个答案；cuTile 设备后端把 kernel 带上 NVIDIA GPU，没有 GPU 的机器上由纯的假设备给出同一个答案。这件事由门禁管着，不是一句承诺。
+一门小而优雅的函数式语言：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进类型签名。编译器已自举，两个平级后端（JVM 字节码与 C）在同一份源码上给出同一个答案；cuTile 设备后端把 kernel 带上 NVIDIA GPU，没有 GPU 的机器上由纯的假设备给出同一个答案。这一点由机器检查，不是一句承诺：每次 push 都让同一批程序在两个后端上各跑一遍，输出有一处不同就构建失败。
+
+## cta-playground
+
+在 Playground 里试试 →
 
 ## cta-primary
 
@@ -23,6 +27,10 @@ type · match · effect · !io
 ## cta-secondary
 
 看示例
+
+## install
+
+安装：从[最新 release](https://github.com/dawnop/dawn-lang/releases/latest) 下载 `dawnc`（一个静态二进制，不需要 JVM）或 `dawn-selfhost.jar`（需要 JDK 21）；[教程第 1 章](zh/tutorial/01.html)有完整步骤。
 
 ## features-title
 
@@ -54,6 +62,6 @@ JVM 字节码与 C（再交给 `cc`）是**平级**的两条路。最容易分�
 
 ## closing
 
-从[教程](zh/tutorial/index.html)开始上手；语言细节的权威定义在[规范](zh/spec.html)；[示例](zh/examples/index.html)都能直接 `dawn run`；标准库 API 参考见[标准库](zh/stdlib.html)；每个设计取舍的「为什么」写在[设计笔记](zh/design.html)。
+从[教程](zh/tutorial/index.html)开始上手；语言细节的权威定义在[规范](zh/spec.html)；[示例](zh/examples/index.html)都能直接 `dawn run`；标准库 API 参考见[标准库](zh/stdlib.html)；[设计史](zh/design.html)是早期设计决定的历史记录，M7 时冻结。
 
-本站每一页都有中英两版。规范与设计笔记是其中唯一**先写中文再翻译**的一对：它们是活文档，每次改语言都在中文里改，所以中文是正本、英文按它登记——两者一脱节 `scripts/doc-check.py` 就红。`docs/` 其余部分是设计方案与计划，读者是作者本人，仍然只有一种语言。代码、编译器诊断与标准库文档注释则一律英文——标准库页上那些条目正文也在其内，它们是编译器自己的文本。
+本站每一页都有中英两版。规范与设计史以中文为正本、英文为译本；其余页面以英文为正本。代码、编译器诊断与标准库文档注释一律英文，标准库页上那些条目正文也在其内，它们是编译器自己的文本。
