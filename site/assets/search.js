@@ -21,6 +21,33 @@
 (function () {
   'use strict';
 
+  // Not the panel, but where the panel's results land. An entry inside a
+  // closed <details> (the stdlib page folds std/gpu's reference kernels into
+  // one) stays hidden when a link or a search result names it, in every
+  // browser that does not reveal such a target itself. So every <details>
+  // around the target is opened first, and the target is scrolled to once it
+  // has a box to scroll to.
+  function reveal() {
+    var id;
+    try {
+      id = decodeURIComponent(location.hash.slice(1));
+    } catch (e) {
+      return;
+    }
+    var el = id && document.getElementById(id);
+    if (!el) return;
+    var opened = false;
+    for (var d = el.parentElement; d; d = d.parentElement) {
+      if (d.tagName === 'DETAILS' && !d.open) {
+        d.open = true;
+        opened = true;
+      }
+    }
+    if (opened) el.scrollIntoView();
+  }
+  window.addEventListener('hashchange', reveal);
+  reveal();
+
   var btn = document.querySelector('.search-open');
   var host = document.getElementById('dawn-search');
   if (!btn || !host) return;

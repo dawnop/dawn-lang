@@ -27,7 +27,7 @@ use gen/common.{must_read, write_page, map_doc_url, doc_files}
 
 # ---- the page's own words ----
 #
-# Everything on this page except these eight strings and site/pages/stdlib.md
+# Everything on this page except these ten strings and site/pages/stdlib.md
 # is generated from `dawn doc --stdlib`, so the two of them together are the
 # whole of what a translator has to touch. The strings live in one record
 # rather than as literals down in the code that emits them: a table has the
@@ -48,6 +48,8 @@ type Chrome = {
   traits_intro: String,
   modules_title: String,
   modules_intro: String,
+  refs_pre: String,
+  refs_post: String,
 }
 
 fn chrome(lang: Lang, root: String) -> Chrome =
@@ -71,6 +73,8 @@ fn chrome(lang: Lang, root: String) -> Chrome =
       modules_intro: "<p>Brought in with <code>use std/x</code> and then called " ++
         "qualified; single names can be imported on their own " ++
         "(<code>use std/str.{trim}</code>).</p>\n",
+      refs_pre: "Reference kernels: ",
+      refs_post: " host-side answers the GPU backend's tests compare against",
     }
     Zh -> Chrome {
       impls_lead: "本模块登记的 impl（全程序可见，不必 use）：",
@@ -86,6 +90,8 @@ fn chrome(lang: Lang, root: String) -> Chrome =
       modules_title: "模块",
       modules_intro: "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
         "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n",
+      refs_pre: "参考 kernel：",
+      refs_post: " 个主机端参考答案，供 GPU 后端的测试对照",
     }
   }
 
@@ -262,10 +268,47 @@ fn traits_html(docs: List[String], root: Json) -> String = {
   join(html, "")
 }
 
+## The modules in the order the page shows them: alphabetical by path, with
+## `std/prelude` first should there ever be one.
+##
+## `dawn doc --stdlib` lists them in std/modules.txt's order, which is the
+## order they have to be compiled in (cursor, str, char, fmt, ...). That is a
+## fact about the compiler and means nothing to a reader looking for `std/io`.
+## One function for the page and for [api_rows], so the search index walks the
+## entries in the order the page shows them.
+fn modules_in_order(api: Json) -> List[Json] =
+  sort_by(jarr(jget(api, "modules")), (a, b) => cmp(module_key(a), module_key(b)))
+
+fn module_key(m: Json) -> String = {
+  let path = field(m, "path")
+  if path == "std/prelude" { "" } else { path }
+}
+
+## Whether a function is one of a module's reference kernels: the host-side
+## answer a GPU kernel's test compares against, named `<kernel>_ref`.
+##
+## std/gpu has 149 of them beside 72 functions a caller uses, and listed
+## inline they were more than half of this page. Whether they belong to the
+## module's public surface at all is a question about std, not about this
+## page, and is open; until it is answered the page keeps every one of them,
+## anchored and searchable, inside a group that starts closed. Only std/gpu is
+## read this way: `_ref` is that module's naming convention, not a rule a
+## suffix can be trusted with anywhere else.
+fn is_reference_kernel(path: String, name: String) -> Bool =
+  path == "std/gpu" && str.ends_with(name, "_ref")
+
+## The functions a caller uses, then the reference kernels, as [modules_html]
+## lays them out.
+fn fns_in_order(path: String, m: Json) -> (List[Json], List[Json]) = {
+  let fns = jarr(jget(m, "fns"))
+  (filter(fns, f => not is_reference_kernel(path, field(f, "name"))),
+    filter(fns, f => is_reference_kernel(path, field(f, "name"))))
+}
+
 fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocEntry]) = {
   var html: List[String] = []
   var toc: List[TocEntry] = []
-  for m in jarr(jget(root, "modules")) {
+  for m in modules_in_order(root) {
     let path = field(m, "path")
     let id = "m-" ++ slug(path)
     # the call-site alias is the file's own name: `use std/str` binds `str`
@@ -284,8 +327,19 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
     for e in jarr(jget(m, "effects")) {
       html = html ++ [effect_entry(docs, slug(path), e) ++ "\n"]
     }
-    for f in jarr(jget(m, "fns")) {
+    let (used, refs) = fns_in_order(path, m)
+    for f in used {
       html = html ++ [fn_entry(docs, qual, slug(path), f) ++ "\n"]
+    }
+    if len(refs) > 0 {
+      # Closed, and opened by site/assets/search.js when a search result or
+      # a link lands on an entry inside it.
+      html = html ++ [`<details class="api-refs">` ++ "\n<summary>" ++ c.refs_pre
+          ++ "${len(refs)}" ++ c.refs_post ++ "</summary>\n"]
+      for f in refs {
+        html = html ++ [fn_entry(docs, qual, slug(path), f) ++ "\n"]
+      }
+      html = html ++ ["</details>\n"]
     }
   }
   (join(html, ""), toc)
@@ -331,7 +385,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
   for t in jarr(jget(api, "traits")) {
     rows = rows ++ [trait_row("prelude", t)]
   }
-  for m in jarr(jget(api, "modules")) {
+  for m in modules_in_order(api) {
     let path = field(m, "path")
     let base = slug(path)
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
@@ -355,7 +409,8 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
         ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), field(e, "doc"),
           "${base}-effect-" ++ field(e, "name"))]
     }
-    for f in jarr(jget(m, "fns")) {
+    let (used, refs) = fns_in_order(path, m)
+    for f in used ++ refs {
       let name = field(f, "name")
       rows = rows
         ++ [api_row(qualify(qual, name), field(f, "sig"), field(f, "doc"), "${base}-${name}")]
@@ -507,6 +562,49 @@ test "every index anchor is an id the page carries, and there are as many of eac
   ]
   assert map(rows, r => r.title) == [
     "io", "println", "Show", "std/str", "Case", "Split", "str.WIDTH", "Ask", "str.trim",
+  ]
+}
+
+fn fn_json(name: String) -> Json =
+  jobj([("name", JStr(name)), ("sig", JStr("fn ${name}() -> Unit")), ("doc", JStr("D."))])
+
+fn module_json(path: String, fns: List[String]) -> Json =
+  jobj([("path", JStr(path)), ("doc", JStr("")), ("impls", JArr([])), ("types", JArr([])),
+    ("traits", JArr([])), ("consts", JArr([])), ("effects", JArr([])),
+    ("fns", JArr(map(fns, n => fn_json(n))))])
+
+test "modules are listed alphabetically, not in compile order" {
+  let api = jobj([("groups", JArr([])), ("traits", JArr([])),
+    ("modules", JArr([module_json("std/str", []), module_json("std/char", []),
+      module_json("std/prelude", []), module_json("std/bytes", [])]))])
+  assert map(modules_in_order(api), m => field(m, "path"))
+    == ["std/prelude", "std/bytes", "std/char", "std/str"]
+  # the index walks them in the same order as the page
+  assert map(api_rows(api), r => r.anchor)
+    == ["m-std-prelude", "m-std-bytes", "m-std-char", "m-std-str"]
+}
+
+test "std/gpu's reference kernels sit in a closed group, still anchored and indexed" {
+  let api = jobj([("groups", JArr([])), ("traits", JArr([])),
+    ("modules", JArr([module_json("std/gpu", ["vadd_ref", "alloc", "sum_ref"]),
+      module_json("std/str", ["trim_ref"])]))])
+  let (html, _) = modules_html(chrome(En, "."), [], api)
+  # the function a caller uses comes first, outside the group
+  let parts = str.split(html, `<details class="api-refs">`)
+  assert len(parts) == 2
+  assert str.contains(parts[0], `id="std-gpu-alloc"`)
+  assert str.contains(parts[1], "<summary>Reference kernels: 2 host-side answers")
+  assert str.contains(parts[1], `id="std-gpu-vadd_ref"`)
+  assert str.contains(parts[1], `id="std-gpu-sum_ref"`)
+  # closed, and only std/gpu reads the suffix this way
+  assert not str.contains(html, "<details class=\"api-refs\" open")
+  let inside = str.split(parts[1], "</details>")[0]
+  assert not str.contains(inside, `id="std-str-trim_ref"`)
+  assert str.contains(html, `id="std-str-trim_ref"`)
+  # the index still reaches every entry, in the page's order
+  assert map(api_rows(api), r => r.anchor) == [
+    "m-std-gpu", "std-gpu-alloc", "std-gpu-vadd_ref", "std-gpu-sum_ref", "m-std-str",
+    "std-str-trim_ref",
   ]
 }
 
