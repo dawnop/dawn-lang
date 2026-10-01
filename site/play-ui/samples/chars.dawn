@@ -1,0 +1,52 @@
+# Strings and characters: code points, a slug, initials, and how a Char prints.
+#
+# A `Char` is one Unicode scalar value and `'a'` is a literal of that type.
+# A string's characters come out of `code_points`; none of this is bytes or
+# UTF-16 units, which is why the balloon below counts as one character.
+
+use std/char
+use std/str
+
+## Lower case, letters and digits kept, every other run one hyphen.
+## `char.is_alnum` answers Unicode's question, so Greek letters survive.
+fn slug(title: String) -> String = {
+  var out: List[Char] = []
+  var gap = false
+  for c in code_points(str.to_lower(title)) {
+    if char.is_alnum(c) {
+      if gap && len(out) > 0 { out = out ++ ['-'] }
+      out = out ++ [c]
+      gap = false
+    } else {
+      gap = true
+    }
+  }
+  from_code_points(out)
+}
+
+## The first character of each word, upper-cased. Case mapping lives on
+## `String`, because it is not one character for one character in general.
+fn initials(name: String) -> String = {
+  var out = ""
+  for word in str.split(name, " ") {
+    if not str.is_empty(word) {
+      out = out ++ str.to_upper(str.from_char(str.at(word, 0)))
+    }
+  }
+  out
+}
+
+pub fn main() -> Unit !io = {
+  for title in ["Hello, World!", "Dawn v0.57 released", "Καλημέρα κόσμε 🎈"] {
+    println("${title} -> ${slug(title)}")
+  }
+
+  println(initials("ada lovelace"))
+
+  # `"${c}"` is the character; inside a list it keeps its quotes
+  println("'a' interpolates as ${'a'}, and inside a list as ${to_string(['a'])}")
+
+  let third = str.at("a🎈b", 2)
+  println("\"a🎈b\" is ${str.len("a🎈b")} characters, the third being ${str.from_char(third)}")
+  println("code of 'a': ${char.code('a')}, next char: ${char.of(char.code('a') + 1)}")
+}

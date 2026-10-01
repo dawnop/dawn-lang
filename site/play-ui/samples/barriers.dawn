@@ -1,0 +1,65 @@
+# Failure as a value: `Result` with `?`, `bracket` for cleanup, `catch_panic`.
+#
+# An expected failure travels in a `Result`, and `?` hands an `Err` straight to
+# the caller. Giving a resource back is a different question: `bracket`
+# catches nothing, it only promises that `release` runs on every way out. A
+# panic is a bug, not a value, and only `catch_panic` stops one.
+
+use std/str
+
+type Server = { host: String, port: Int }
+
+const CONFIG: String = "host = db.internal\nport = 5432\n"
+
+fn field(text: String, key: String) -> Result[String, String] = {
+  for line in str.split(text, "\n") {
+    match str.split_once(line, "=") {
+      Some((name, value)) ->
+        if str.trim(name) == key {
+          return Ok(str.trim(value))
+        }
+      None -> ()
+    }
+  }
+  Err("no `${key}` in the config")
+}
+
+## `parse_int` answers with an Option; turning it into an error is four lines.
+fn as_int(what: String, s: String) -> Result[Int, String] =
+  match parse_int(s) {
+    Some(n) -> Ok(n)
+    None -> Err("${what} is not a number: ${s}")
+  }
+
+fn open(text: String) -> String !io = {
+  println("  open")
+  text
+}
+
+fn close(_text: String) -> Unit !io = println("  close")
+
+## `with` hands the rest of the block to `bracket`, so `close` runs whether
+## this returns `Ok` or leaves early through `?`.
+fn load(text: String) -> Result[Server, String] !io = {
+  with t <- bracket(open(text), close)
+  let host = field(t, "host")?
+  let port = as_int("port", field(t, "port")?)?
+  Ok(Server { host: host, port: port })
+}
+
+fn always_panics(_text: String) -> Int !io = panic("boom")
+
+pub fn main() -> Unit !io = {
+  for text in [CONFIG, "host = db.internal\n", "host = db.internal\nport = eight\n"] {
+    match load(text) {
+      Ok(s) -> println("  ok: ${s.host}:${s.port}")
+      Err(m) -> println("  error: ${m}")
+    }
+  }
+
+  println("a panic inside bracket:")
+  match catch_panic(() => bracket(open(""), close, always_panics)) {
+    Ok(_) -> println("  unreachable")
+    Err(e) -> println("  caught: ${e.message}")
+  }
+}
