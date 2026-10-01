@@ -26,7 +26,7 @@ use driver/analyze.{
   ParseMemo, no_parses, load_entries_reusing
 }
 use compiler_plan/source
-use compiler_plan/source.{canon}
+use compiler_plan/source.{canon, canon_identity}
 use driver/incremental
 use driver/fsmem
 use std/memfs
@@ -446,9 +446,12 @@ type WorkspaceIdentity = {
 fn workspace_key_part(value: String) -> String =
   to_string(str.len(value)) ++ ":" ++ value
 
-fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Env = {
-  let project = canon(plan.source.project)
-  let source_root = canon(plan.source.source_root)
+## Both halves are identities (`canon_identity`), so a file an editor opens
+## through a link and one it opens through the real path are members of one
+## workspace and meet the duplicate-text rule there (#207).
+fn workspace_identity(plan: ProjectPlan) -> WorkspaceIdentity !Fs !Env = {
+  let project = canon_identity(plan.source.project)
+  let source_root = canon_identity(plan.source.source_root)
   WorkspaceIdentity {
     source_root: source_root,
     lookup_key: workspace_key_part(project) ++ workspace_key_part(source_root)
@@ -1355,7 +1358,7 @@ fn add_loc_diag(
   ld: LocDiag
 ) -> Map[String, List[Json]] !Fs !Env = {
   var out = out0
-  let target = canon(ld.path)
+  let target = canon_identity(ld.path)
   var matched = false
   for uri in sort(map.keys(path_by_uri)) {
     if map.get(path_by_uri, uri).expect("workspace path") == target {
@@ -1590,11 +1593,11 @@ fn slot_uris(slot: WorkspaceSlot) -> Set[String] = {
   add_uris(out, map.keys(slot_diagnostics(slot)))
 }
 
-fn standalone_diagnostics(d: Doc, prog: Program, related: Bool) -> List[Json] !Env = {
+fn standalone_diagnostics(d: Doc, prog: Program, related: Bool) -> List[Json] !Fs !Env = {
   var out: List[Json] = []
   for ld in rendered_diags(prog) {
     let own = match d.canonical_path {
-      Some(path) -> canon(ld.path) == path
+      Some(path) -> canon_identity(ld.path) == path
       None -> true
     }
     if own { out = out ++ [diagnostic_json(d.view, d.ls, d.uri, related, ld.d)] }
@@ -1605,7 +1608,7 @@ fn standalone_diagnostics(d: Doc, prog: Program, related: Bool) -> List[Json] !E
 ## Aggregate every root's contribution before publishing one URI. This is the
 ## clearing rule that prevents one root from erasing another root's diagnostic
 ## when both point at the same manifest, lock or dependency file.
-fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env = {
+fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Fs !Env = {
   var out: List[Json] = []
   for workspace_key in sort(map.keys(st.workspaces)) {
     let slot = map.get(st.workspaces, workspace_key).expect("workspace")
@@ -1625,7 +1628,7 @@ fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Env = {
   out
 }
 
-fn publish_uris(st: LspState, uris: Set[String]) -> Unit !Env !io = {
+fn publish_uris(st: LspState, uris: Set[String]) -> Unit !Fs !Env !io = {
   for uri in sort(set.to_list(uris)) {
     var fields: List[(String, Json)] = [
       ("uri", JStr(uri)),
@@ -1644,7 +1647,7 @@ fn install_workspace(
   identity: WorkspaceIdentity,
   slot: WorkspaceSlot,
   affected0: Set[String]
-) -> LspState !Env !io = {
+) -> LspState !Fs !Env !io = {
   var affected = add_uris(affected0, set.to_list(slot_uris(slot)))
   let st = LspState {
     ..st0,
@@ -1698,7 +1701,7 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
       st
     }
     Some(path) -> {
-      let canonical_path = canon(path)
+      let canonical_path = canon_identity(path)
       let plan = project_plan(source.SourceFile(path))
       match project_module_path(plan, path) {
         None -> {
@@ -1912,14 +1915,18 @@ fn client_watches_files(params: Json) -> Bool = {
   }
 }
 
-## A changed file a plan may have read, as a canonical path: a dawn.toml or a
-## dawn.lock. Anything else a notification names is not ours to act on.
-fn manifest_path_of(uri: String) -> Option[String] !Env =
+## A changed file a plan may have read: a dawn.toml or a dawn.lock, in its
+## directory's identity, which is how `slot_manifest_dirs` spells the
+## directories it watches. The directory and not the file is resolved, so a
+## deleted manifest still names the directory it was deleted from. Anything
+## else a notification names is not ours to act on.
+fn manifest_path_of(uri: String) -> Option[String] !Fs !Env =
   match uri_to_path(uri) {
     Some(path) -> {
       let target = canon(path)
       if str.ends_with(target, "/dawn.toml") || str.ends_with(target, "/dawn.lock") {
-        Some(target)
+        let name = str.drop(target, str.len(parent_dir(target)))
+        Some(canon_identity(parent_dir(target)) ++ name)
       } else {
         None
       }
@@ -1927,7 +1934,7 @@ fn manifest_path_of(uri: String) -> Option[String] !Env =
     None -> None
   }
 
-fn watched_manifests(params: Json) -> Set[String] !Env = {
+fn watched_manifests(params: Json) -> Set[String] !Fs !Env = {
   var out: Set[String] = set.empty()
   match oget(params, "changes") {
     Some(JArr(changes)) -> {
@@ -1971,20 +1978,22 @@ fn pkg_manifest_dirs(pkg: source.PkgR, dirs0: Set[String]) -> Set[String] = {
 ## manifest directory, each resolved package's (the set
 ## `bootstrap_source_input_manifest` records as inputs), and every directory a
 ## planner or setup diagnostic points into, so that fixing a broken manifest is
-## itself noticed.
-fn slot_manifest_dirs(slot: WorkspaceSlot) -> Set[String] !Env = {
+## itself noticed. All as identities, as a package root already is.
+fn slot_manifest_dirs(slot: WorkspaceSlot) -> Set[String] !Fs !Env = {
   let plan = slot_plan(slot)
-  var dirs = set.from([canon(plan.source.project)])
+  var dirs = set.from([canon_identity(plan.source.project)])
   for dep in sort(map.keys(plan.source.pkgs)) {
     dirs = pkg_manifest_dirs(map.get(plan.source.pkgs, dep).expect("resolved package"), dirs)
   }
-  for ld in plan.source.diags { dirs = set.insert(dirs, parent_dir(canon(ld.path))) }
+  for ld in plan.source.diags {
+    dirs = set.insert(dirs, canon_identity(parent_dir(canon(ld.path))))
+  }
   let problem = match slot {
     Ready(ws) -> ws.refresh_problem
     Unavailable(ws) -> Some(ws.problem)
   }
   match problem {
-    Some(ld) -> { dirs = set.insert(dirs, parent_dir(canon(ld.path))) }
+    Some(ld) -> { dirs = set.insert(dirs, canon_identity(parent_dir(canon(ld.path)))) }
     None -> ()
   }
   dirs
@@ -2017,15 +2026,15 @@ fn refresh_workspace(
   slot: WorkspaceSlot
 ) -> LspState !Fs !Proc !Env !Console !io = {
   let fresh = project_plan(slot_plan(slot).source.target)
-  let identity = workspace_identity(fresh)
-  # The identity is arithmetic on the target path alone (`source_roots`), and
-  # a refresh re-plans the same target, so no manifest can move it and no
-  # member needs to migrate. Should a manifest ever gain a say in the source
-  # root, this is where the members would have to move; failing here keeps
-  # that from happening silently.
-  if identity.lookup_key != key {
-    panic("lsp manifest refresh moved a workspace identity")
-  }
+  let planned = workspace_identity(fresh)
+  # The identity is the target path resolved (`source_roots`, then
+  # `canon_identity`), and a refresh re-plans the same target, so no manifest
+  # can move it. The file system can: a link retargeted or a root removed
+  # while the server runs resolves differently now. The members were filed
+  # under `key` when they were opened, so the slot stays there rather than
+  # leaving them pointing at nothing; a document opened afterwards gets the
+  # new answer. `install_workspace` reads the key alone.
+  let identity = WorkspaceIdentity { ..planned, lookup_key: key }
   let affected = slot_uris(slot)
   match activate_workspace(st, fresh, slot_paths(slot)) {
     Ready(ws) -> {
@@ -2222,7 +2231,7 @@ fn location_of(
     None -> true
     Some(dp) ->
       match d.canonical_path {
-        Some(p) -> canon(dp) == p
+        Some(p) -> canon_identity(dp) == p
         None -> false
       }
   }
@@ -2233,7 +2242,7 @@ fn location_of(
     Some(p) -> p
     None -> return None
   }
-  let dc = canon(dp)
+  let dc = canon_identity(dp)
   let slot = match workspace_key {
     Some(key) -> map.get(st.workspaces, key)
     None -> None
@@ -2456,7 +2465,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       Err(e) -> panic("std/cursor.dawn: ${e.message}")
     }
     let no_modules: Option[Map[String, String]] = None
-    let d = standalone_doc(st, "file://${canon(path)}", Some(path), Some(canon(path)),
+    let d = standalone_doc(st, "file://${canon_identity(path)}", Some(path), Some(canon_identity(path)),
       text, 0, no_modules)
     match d.analysis {
       Standalone(prog, entry, _) -> {
@@ -2485,7 +2494,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       Err(e) -> panic("test setup: ${e.message}")
     }
     let d2 = standalone_doc(st, "file://${elsewhere}", Some(elsewhere),
-      Some(canon(elsewhere)), text, 0, no_modules)
+      Some(canon_identity(elsewhere)), text, 0, no_modules)
     match d2.analysis {
       Standalone(prog2, entry2, _) -> {
         assert entry2 == "main"
@@ -2653,7 +2662,7 @@ fn def_probe_doc_named(st: LspState, name: String, text: String) -> Doc !Fs !Env
   let _ = io.mkdirs(dir)
   def_probe_put(path, text)
   let no_modules: Option[Map[String, String]] = None
-  standalone_doc(st, path_to_uri(canon(path)), Some(path), Some(canon(path)), text,
+  standalone_doc(st, path_to_uri(canon_identity(path)), Some(path), Some(canon_identity(path)), text,
     0, no_modules)
 }
 
@@ -2707,7 +2716,7 @@ test "a definition in std names std's file and points at the declaration" {
       Some(p) -> p
       None -> panic("a definition in std must name std's file")
     }
-    assert dp == canon("std/list.dawn")
+    assert dp == canon_identity("std/list.dawn")
 
     # The span is std's, so it only means anything read against std's own text.
     # Slicing the file is what tells a right answer from a plausible one: the
@@ -2723,7 +2732,7 @@ test "a definition in std names std's file and points at the declaration" {
     let nokey: Option[String] = None
     match location_of(st, d, nokey, nokey, t.def_path, lo, hi) {
       Some(loc) -> {
-        assert ostr(loc, "uri") == path_to_uri(canon("std/list.dawn"))
+        assert ostr(loc, "uri") == path_to_uri(canon_identity("std/list.dawn"))
         assert ostr(loc, "uri") != d.uri
       }
       None -> panic("a std file that exists must resolve to a Location")
@@ -2733,7 +2742,7 @@ test "a definition in std names std's file and points at the declaration" {
     # ModExports.src_path -- and std modules are checked with no src_path on
     # purpose, so the bundle's own record is the only thing that can answer.
     let u = def_probe_at(st, d, text, "std/list", 0)
-    assert u.def_path == Some(canon("std/list.dawn"))
+    assert u.def_path == Some(canon_identity("std/list.dawn"))
   }))
 }
 
@@ -2805,7 +2814,7 @@ test "a definition of a std constant names std's file too" {
       Some(p) -> p
       None -> panic("a std constant must name std's file")
     }
-    assert dp == canon("${root}/constprobe.dawn")
+    assert dp == canon_identity("${root}/constprobe.dawn")
     let (lo, hi) = def_probe_span(t, "PROBE_LIMIT")
     let src = match io.read_file(dp) {
       Ok(s) -> s
