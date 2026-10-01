@@ -16,10 +16,16 @@
 // the source differed by an escape that only the sample with string
 // interpolation ever needed.
 import hello from '../samples/hello.dawn?raw'
+import fizzbuzz from '../samples/fizzbuzz.dawn?raw'
+import records from '../samples/records.dawn?raw'
 import shapes from '../samples/shapes.dawn?raw'
-import comptime from '../samples/comptime.dawn?raw'
-import effects from '../samples/effects.dawn?raw'
+import generics from '../samples/generics.dawn?raw'
+import narrow from '../samples/narrow.dawn?raw'
+import chars from '../samples/chars.dawn?raw'
 import traits from '../samples/traits.dawn?raw'
+import effects from '../samples/effects.dawn?raw'
+import barriers from '../samples/barriers.dawn?raw'
+import comptime from '../samples/comptime.dawn?raw'
 
 export interface Sample {
   label: string
@@ -27,10 +33,19 @@ export interface Sample {
   code: string
 }
 
+// Shallow to deep: the sidebar is a reading order, so the first few programs
+// need nothing but loops, records and pattern matching, and the ones that
+// lean on traits, effects and compile-time evaluation come last.
 export const SAMPLES: Sample[] = [
   { label: 'Hello', file: 'hello.dawn', code: hello },
+  { label: 'FizzBuzz', file: 'fizzbuzz.dawn', code: fizzbuzz },
+  { label: 'records', file: 'records.dawn', code: records },
   { label: 'ADT + match', file: 'shapes.dawn', code: shapes },
-  { label: 'comptime', file: 'comptime.dawn', code: comptime },
-  { label: 'effects', file: 'effects.dawn', code: effects },
+  { label: 'generics', file: 'generics.dawn', code: generics },
+  { label: 'narrow floats', file: 'narrow.dawn', code: narrow },
+  { label: 'strings + chars', file: 'chars.dawn', code: chars },
   { label: 'traits', file: 'traits.dawn', code: traits },
+  { label: 'effects', file: 'effects.dawn', code: effects },
+  { label: 'Result + bracket', file: 'barriers.dawn', code: barriers },
+  { label: 'comptime', file: 'comptime.dawn', code: comptime },
 ]

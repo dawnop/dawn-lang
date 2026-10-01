@@ -1,0 +1,50 @@
+# Generics: a type parameter on a data type and on functions, Option and Result.
+
+type Tree[T] =
+  | Leaf
+  | Node(left: Tree[T], value: T, right: Tree[T])
+
+fn insert(t: Tree[Int], v: Int) -> Tree[Int] =
+  match t {
+    Leaf -> Node(Leaf, v, Leaf)
+    Node(l, x, r) ->
+      if v < x { Node(insert(l, v), x, r) }
+      else { Node(l, x, insert(r, v)) }
+  }
+
+fn total(t: Tree[Int]) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> total(l) + v + total(r)
+  }
+
+## One function for every element type: `T` is inferred from the arguments.
+fn or_default[T](o: Option[T], d: T) -> T =
+  match o {
+    Some(v) -> v
+    None -> d
+  }
+
+fn safe_div(a: Int, b: Int) -> Result[Int, String] =
+  if b == 0 { Err("division by zero") } else { Ok(a / b) }
+
+pub fn main() -> Unit !io = {
+  let e: Tree[Int] = Leaf
+  let t = insert(insert(insert(e, 5), 2), 8)
+  println("tree total: ${total(t)}")
+
+  println("or_default(None, 7) = ${or_default(None, 7)}")
+  println(or_default(Some("hello"), "fallback"))
+
+  for d in [5, 0] {
+    match safe_div(10, d) {
+      Ok(v) -> println("10 / ${d} = ${v}")
+      Err(m) -> println("10 / ${d}: ${m}")
+    }
+  }
+
+  let xs = range(1, 5) ++ [10, 20]
+  println("len = ${len(xs)}")
+  println("get(xs, 4) = ${or_default(get(xs, 4), -1)}")
+  println("get(xs, 9) = ${or_default(get(xs, 9), -1)}")
+}
