@@ -721,6 +721,49 @@ pub fn pkg_private_export(exp: ModExports, name: String) -> ExportDiagnostic =
 pub(pkg) fn pkg_private_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi: Int) -> Cx =
   cerr_h(cx, pkg_private_msg(exp, name), lo, hi, pkg_private_hint(exp))
 
+## The miss diagnostic for a name `exp` declares without `pub`, which the
+## module and selective-import paths both raise.
+##
+## In the user's own modules adding `pub` is the fix, so the hint says so. std
+## is not theirs to edit: a private std name is reported as outside std's
+## public API, with the std/moved.txt hint where the name has one and no hint
+## otherwise (#296). A std module naming another's private function still gets
+## the `pub` hint, because there it is the fix.
+pub(pkg) fn private_name_diagnostic(cx: Cx, exp: ModExports, name: String) -> ExportDiagnostic = {
+  let from_std = match exp.package {
+    PkgStd -> match package_of(cx) {
+      PkgStd -> false
+      _ -> true
+    }
+    _ -> false
+  }
+  if from_std {
+    ExportDiagnostic {
+      message: "`" ++ name ++ "` is not part of std's public API (`" ++ exp.mod_path ++
+        "` declares it privately)",
+      hint: map.get(cx.moved, moved_module_key(exp.mod_path, name))
+    }
+  } else {
+    ExportDiagnostic { message: "`" ++ name ++ "` is private to module `" ++ exp.mod_path ++ "`",
+      hint: Some("add `pub` to its declaration in ${exp.mod_path}") }
+  }
+}
+
+## ...and raised, for the selective-import path.
+pub(pkg) fn private_name_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi: Int) -> Cx = {
+  let d = private_name_diagnostic(cx, exp, name)
+  cerr_o(cx, d.message, lo, hi, d.hint)
+}
+
+## The `cx.moved` key of a module-qualified entry of std/moved.txt: the module
+## path, a dot, the name that left (docs/std-moved-design.md §1).
+##
+## Flat entries are keyed by the bare name, which never contains a `/`, so the
+## two kinds share one table without colliding and `Cx` needs no second one.
+## Keyed by module path rather than alias: `use std/str as s` renames the
+## alias, not the module, and the hint is about the module.
+pub(pkg) fn moved_module_key(mod_path: String, name: String) -> String = mod_path ++ "." ++ name
+
 ## A fresh state for the tests that live beside the checker.
 pub(pkg) fn test_cx() -> Cx = cx_new(None, None)
 

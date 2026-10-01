@@ -120,7 +120,10 @@ Dawn 没有属性语法，而被删的名字恰恰已经没有声明可挂。std
   Frame 分诊（#204），为一张只读的小表不值得。
 - **不修私有 std 函数的「add `pub` to its declaration in std/…」**。`fmt.atoi` 这类名字在 std 里仍存在、
   只是不再 pub，删掉 v0.55.0 那条后它会落到这个分支。这句建议对任何私有 std 函数都一直存在，
-  与本表无关，另行处理。
+  与本表无关，另行处理。（2026-10-01 已由 #296 处理：std 的私有名报
+  `` `atoi` is not part of std's public API (`std/fmt` declares it privately) ``，无 hint，
+  本表有条目时以条目为 hint；限定调用与选择性引入共用 `cx.dawn` 的 `private_name_diagnostic`，
+  `moved_module_key` 随之从 checker 挪进 `cx.dawn`。std 模块之间仍给「加 `pub`」，那里它就是修法。）
 - **不把门并进 `api-diff.py`**，理由见 §3。
 - **不对 `types`、`consts`、`traits` 等其它 pub 种类设门**。issue 与裁决只要求函数；提示路径
   （`check_module_call`、`moved_or_suggest`）也只服务函数调用。

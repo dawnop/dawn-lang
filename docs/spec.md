@@ -2939,6 +2939,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`/`trait`/`effect`
 （`pub type` 连带构造器与字段，见 §3.3）。
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
+标准库的非 `pub` 项例外：std 不归用户改，报它不属于 std 的公开 API（`` `atoi` is not part of std's public API (`std/fmt` declares it privately) ``），不给「加 `pub`」的 hint；`std/moved.txt` 有该名字的条目时以那条为 hint（#296）。
 导出的声明内部也不得泄漏模块外无法命名的私有 type / trait / effect；transparent alias、opaque
 边界、公开 trait/effect 与可达 impl 的完整判定在 §3.3，错误报在声明处而不是使用处。
 

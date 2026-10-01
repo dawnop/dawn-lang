@@ -28,8 +28,8 @@ use check/types.{
   OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID
 }
 use check/tast.{TFun, TModule}
-use check/cx.{ModExports, cx_new, Cx}
-use check/checker.{check_module, exports_of, moved_module_key}
+use check/cx.{ModExports, cx_new, Cx, moved_module_key}
+use check/checker.{check_module, exports_of}
 use check/identity.{Minted}
 use ir/interp.{eval_comptime, note_direct_fn, note_trait_fn, CtOut, ct_default}
 use ir/core.{VStr, VBool}
@@ -1230,8 +1230,8 @@ test "a std/moved.txt entry answers both kinds of call with its hint" {
       Some(d) -> { assert d.hint == "renamed: write `mv.fresh()`" }
       None -> panic("no diagnostic for mv.stale()")
     }
-    # asked before the private branch: a name std still declares is not told
-    # to add `pub` to std
+    # asked before the private branch: a name std still declares is answered
+    # as one that left, with the hint
     match diag_with(cx1.diags, "module `std/mv` has no exported function `kept`") {
       Some(d) -> { assert d.hint == "std-internal now: write `fresh()`" }
       None -> panic("no diagnostic for mv.kept()")
@@ -1240,6 +1240,51 @@ test "a std/moved.txt entry answers both kinds of call with its hint" {
     match diag_with(cx1.diags, "undefined function: old_flat") {
       Some(d) -> { assert d.hint == "`old_flat` is not a builtin; use std/mv, then mv.fresh()" }
       None -> panic("no diagnostic for old_flat()")
+    }
+  }))
+}
+
+test "a private std function is outside std's public API, not a missing `pub` (#296)" {
+  io.with_fs_real(() => no_host(() => {
+    let root = "/tmp/dawn-selfhost-stdlib/private"
+    let _ = io.mkdirs(root)
+    put("${root}/modules.txt", "pv\n")
+    put("${root}/pv.dawn", join([
+      "pub fn open() -> Int = inner() + moved_away()",
+      "fn inner() -> Int = 1",
+      "fn moved_away() -> Int = 2",
+      ""
+    ], "\n"))
+    put("${root}/moved.txt", "std/pv moved_away pv.open 0.80.0 0.90.0 std-internal now: write `pv.open()`\n")
+    let std = match load_std(root) {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let check = (src: String) => {
+      let (m, pdiags) = parser.parse_module(src)
+      assert len(pdiags) == 0
+      var cx = cx_new(None, None)
+      cx = Cx { ..cx, identities: std.identities, impl_table: std.impls, moved: std.moved }
+      let (cx1, _) = check_module(cx, m, std.exports)
+      cx1.diags
+    }
+    # the qualified call and the selective import say the same thing, and
+    # neither tells the user to edit std
+    let qualified = check("use std/pv\npub fn a() -> Int = pv.inner()\n")
+    match diag_with(qualified, "`inner` is not part of std's public API (`std/pv` declares it privately)") {
+      Some(d) -> { assert d.hint == "" }
+      None -> panic("no diagnostic for pv.inner()")
+    }
+    let selective = check("use std/pv.{inner}\npub fn a() -> Int = inner()\n")
+    match diag_with(selective, "`inner` is not part of std's public API (`std/pv` declares it privately)") {
+      Some(d) -> { assert d.hint == "" }
+      None -> panic("no diagnostic for use std/pv.{inner}")
+    }
+    # a std/moved.txt entry is the hint on the import path too
+    let moved = check("use std/pv.{moved_away}\npub fn a() -> Int = moved_away()\n")
+    match diag_with(moved, "`moved_away` is not part of std's public API (`std/pv` declares it privately)") {
+      Some(d) -> { assert d.hint == "std-internal now: write `pv.open()`" }
+      None -> panic("no diagnostic for use std/pv.{moved_away}")
     }
   }))
 }
