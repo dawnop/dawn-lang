@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4684a75d299c9062 -->
+<!-- doc-check: translation-of docs/spec.md @ 50ada1822db0b5e6 -->
 
 # Dawn Language Specification
 
@@ -3667,7 +3667,10 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
 All declarations are module-private by default; `pub` exports `fn`/`type`/`alias`/`const`/`trait`/`effect`
 (`pub type` brings the constructors and fields with it, see §3.3). Accessing or importing a
 non-`pub` item → error (`` `parse` is private to module json/parser ``, with a hint: add
-`pub`). An exported declaration must not leak a private type, trait or effect that cannot be named
+`pub`). A non-`pub` item of the standard library is the exception: std is not the
+user's to edit, so the error says the item is not part of std's public API (`` `atoi` is not part
+of std's public API (`std/fmt` declares it privately) ``) with no "add `pub`" hint, and where
+`std/moved.txt` has an entry for the name, that entry is the hint (#296). An exported declaration must not leak a private type, trait or effect that cannot be named
 outside the module either; the full rules for transparent aliases, the opaque boundary, public
 traits/effects and reachable impls are in §3.3, and the error is reported at the declaration rather
 than at the use site.

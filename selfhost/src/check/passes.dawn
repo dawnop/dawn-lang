@@ -52,7 +52,7 @@ use check/identity.{TypeDecl, TraitDecl, EffectDecl, FunctionDecl, ConstDecl, Me
 use check/cx.{
   resolve_named_effect,
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
-  package_of, exports_seen_by, pkg_private, pkg_private_err,
+  package_of, exports_seen_by, pkg_private, pkg_private_err, private_name_err,
   cerr_h, cerr_o, fresh, fresh_effvar, mint, enter_decl_owner, leave_decl_owner,
   alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
   label_eff,
@@ -3772,8 +3772,7 @@ fn inject_selective(
       if n == name { known = true }
     }
     if known {
-      return cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ from_path ++ "`",
-        lo, hi, "add `pub` to its declaration in ${from_path}")
+      return private_name_err(cx1, exp, name, lo, hi)
     }
     let pool = map.keys(exp.fns) ++ map.keys(exp.types_by_name) ++ map.keys(exp.consts) ++
       map.keys(exp.ctors) ++ map.keys(exp.traits_by_name) ++ map.keys(exp.effects)

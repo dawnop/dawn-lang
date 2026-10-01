@@ -84,7 +84,7 @@ use check/cx.{
   ExportDiagnostic,
   write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, LocalFn, ModExports, package_of, pkg_private, pkg_private_export,
-  pkg_private_err,
+  pkg_private_err, private_name_diagnostic, moved_module_key,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
@@ -489,7 +489,7 @@ fn export_value_diagnostic(exp: ModExports, fname: String) -> ExportDiagnostic =
 
 ## The same for `m.f(...)` where `m` is an alias and `f` none of its public
 ## functions: private, package-private or absent.
-fn export_function_diagnostic(exp: ModExports, name: String) -> ExportDiagnostic = {
+fn export_function_diagnostic(cx: Cx, exp: ModExports, name: String) -> ExportDiagnostic = {
   # all_names includes private declarations, so the privacy answer comes
   # before any suggestion from the public functions.
   var in_all = false
@@ -497,8 +497,7 @@ fn export_function_diagnostic(exp: ModExports, name: String) -> ExportDiagnostic
   if pkg_private(exp, name) {
     pkg_private_export(exp, name)
   } else if in_all {
-    ExportDiagnostic { message: "`" ++ name ++ "` is private to module `" ++ exp.mod_path ++ "`",
-      hint: Some("add `pub` to its declaration in ${exp.mod_path}") }
+    private_name_diagnostic(cx, exp, name)
   } else {
     ExportDiagnostic { message: "module `" ++ exp.mod_path ++ "` has no exported function `" ++ name ++ "`",
       hint: suggest.hint(name, map.keys(exp.fns)) }
@@ -10418,15 +10417,6 @@ fn check_java_static_field(
 
 # ---- method calls (x.f(a)) ----
 
-## The `cx.moved` key of a module-qualified entry of std/moved.txt: the module
-## path, a dot, the name that left (docs/std-moved-design.md §1).
-##
-## Flat entries are keyed by the bare name, which never contains a `/`, so the
-## two kinds share one table without colliding and `Cx` needs no second one.
-## Keyed by module path rather than alias: `use std/str as s` renames the
-## alias, not the module, and the hint is about the module.
-pub(pkg) fn moved_module_key(mod_path: String, name: String) -> String = mod_path ++ "." ++ name
-
 ## alias.fn(args): a call to a pub function of an imported module (spec §10.3).
 fn check_module_call(
   cx: Cx,
@@ -10454,10 +10444,11 @@ fn check_module_call(
         None -> al
       }
       # A name std/moved.txt says left this module. Asked before the
-      # "private" and "did you mean" branches below, both of which would
-      # answer a rename with something worse than silence: `suggest.hint`
-      # does not reach `slice` from `substring`, and a name std still
-      # declares but stopped exporting would be told to add `pub` to std.
+      # "private" and "did you mean" branches below: `suggest.hint` does not
+      # reach `slice` from `substring`, and the hint reads as an answer to
+      # "where did it go", which is the question the message asks. The private
+      # branch carries the same hint (#296), for the selective-import path
+      # that has no such lookup ahead of it.
       match map.get(cx1.moved, moved_module_key(mod_path, name)) {
         Some(h) ->
           return (cerr_h(cx1, "module `" ++ mod_path ++ "` has no exported function `" ++
@@ -10466,7 +10457,7 @@ fn check_module_call(
       }
       match map.get(cx1.module_exports, al) {
         Some(exp) -> {
-          let d = export_function_diagnostic(exp, name)
+          let d = export_function_diagnostic(cx1, exp, name)
           (cerr_o(cx1, d.message, nlo, nhi, d.hint), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
         }
         None ->
