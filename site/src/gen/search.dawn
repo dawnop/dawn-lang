@@ -388,10 +388,46 @@ pub fn index_rows(api: Json, lang: Lang) -> List[Row] !Fs = {
 ## anyway: the asset is fetched by a wasm module built from a different source
 ## tree at a different time, and the day the two disagree the version is the
 ## only place the disagreement can be seen.
+##
+## `start` is what the panel suggests before anything is typed, as positions
+## in `items`. Positions and not a second copy of the rows, so a suggestion's
+## title and href are the row's own -- in this language, and checked by
+## gen/links with every other href in the file.
 pub fn search_index(api: Json, lang: Lang) -> String !Fs = {
   let rows = index_rows(api, lang)
   "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
+    ++ ",\"start\":[" ++ join(list.map(start_ids(rows, lang), i => to_string(i)), ",") ++ "]"
     ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
+}
+
+## Where a reader new to the site starts: the tutorial's first chapter, the
+## spec's chapter on effects (the thing Dawn has that most languages do not),
+## and the string module, which is the first API most programs reach for.
+## Each is found among the rows by what it is rather than by position, and a
+## build where one is missing stops: an empty "Start here" would ship
+## silently otherwise.
+pub fn start_ids(rows: List[Row], lang: Lang) -> List[Int] = {
+  let first_chapter = lang_path(lang, "tutorial/01.html")
+  [
+    must_find(rows, "tutorial chapter 1", r => r.group == "tutorial" && r.href == first_chapter),
+    must_find(rows, "spec chapter 6", r => r.group == "spec" && str.starts_with(r.title, "6. ")),
+    must_find(rows, "std/str", r => r.group == "stdlib" && r.title == "std/str"),
+  ]
+}
+
+fn must_find(rows: List[Row], what: String, p: fn(Row) -> Bool) -> Int = {
+  var at = -1
+  var i = 0
+  for r in rows {
+    if at < 0 && p(r) {
+      at = i
+    }
+    i = i + 1
+  }
+  if at < 0 {
+    panic("search index: no row for the suggested ${what}")
+  }
+  at
 }
 
 # The `lang` field is the page's own `lang` attribute, so that the panel can
@@ -582,5 +618,23 @@ test "the index carries every group and addresses them from the site root" {
     for r in list.filter(en, r => r.group == "spec") {
       assert str.starts_with(r.href, "spec.html#")
     }
+  })
+}
+
+## The suggestions are rows of the same index, so a reader who picks one lands
+## where a search for it would have sent them, in their own language.
+test "the suggested starting points are rows of the index, in each language" {
+  io.with_fs_real(() => {
+    let api = probe_api()
+    for lang in [En, Zh] {
+      let rows = index_rows(api, lang)
+      let picked = list.map(start_ids(rows, lang), i => rows[i])
+      assert list.map(picked, r => r.group) == ["tutorial", "spec", "stdlib"]
+      assert picked[0].href == lang_path(lang, "tutorial/01.html")
+      assert str.starts_with(picked[1].title, "6. ")
+      assert picked[2].title == "std/str"
+    }
+    let en = list.map(start_ids(index_rows(api, En), En), i => index_rows(api, En)[i].href)
+    assert en == ["tutorial/01.html", "spec.html#s6", "stdlib.html#m-std-str"]
   })
 }

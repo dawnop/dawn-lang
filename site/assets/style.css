@@ -778,7 +778,7 @@ footer.site-footer .mark { display: inline-flex; align-items: center; gap: 0.5re
 
 .search-group-rows { margin: 0; padding: 0; list-style: none; }
 
-.search-row a {
+.search-row a, .search-recall {
   position: relative;
   display: block;
   margin: 0 0.45rem;
@@ -790,7 +790,7 @@ footer.site-footer .mark { display: inline-flex; align-items: center; gap: 0.5re
 
 /* The selection: a 2px accent bar and a tint of the ink, which is a shade
    darker on white and a shade lighter on the night, so it shows in both. */
-.search-row.is-selected a {
+.search-row.is-selected a, .search-row.is-selected .search-recall {
   background: color-mix(in srgb, var(--text) 6%, transparent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -865,6 +865,138 @@ footer.site-footer .mark { display: inline-flex; align-items: center; gap: 0.5re
 }
 .search-title mark { box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent) 55%, transparent); }
 
+/* ---- before anything is typed: Recent, then Start here ----
+   The rows are result rows with an icon in front: a clock on a recent query,
+   an arrow in its group's hue on a suggestion. The icons are masks, like the
+   magnifier, so they take a colour from the theme and carry no text. */
+.search-group-recent { --g: var(--faint); }
+.search-group-start { --g: var(--accent); }
+.search-start.hue-1 { --g: var(--hue-1); }
+.search-start.hue-2 { --g: var(--hue-2); }
+.search-start.hue-3 { --g: var(--hue-3); }
+
+.search-recent { position: relative; }
+.search-recall, .search-start a {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.45rem;
+  padding-bottom: 0.45rem;
+  cursor: pointer;
+}
+.search-recall .search-title, .search-start .search-head { flex: 1 1 auto; }
+
+.search-icon {
+  position: relative;
+  flex: none;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 7px;
+  color: var(--faint);
+  background: var(--code-bg);
+}
+.search-icon::before {
+  content: "";
+  position: absolute;
+  inset: 0.32rem;
+  background: currentColor;
+}
+.search-icon-clock::before {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Cpath d='M12 7.5V12l3 2'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Cpath d='M12 7.5V12l3 2'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.search-icon-go { color: var(--g); background: color-mix(in srgb, var(--g) 10%, transparent); }
+.search-icon-go::before {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h13M13 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h13M13 6l6 6-6 6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+/* Delete one recent query: a cross at the row's right end, faint until the
+   row is under the pointer or the button has focus. */
+.search-forget {
+  position: absolute;
+  top: 50%;
+  right: 1rem;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0.6;
+  transform: translateY(-50%);
+}
+.search-forget::before {
+  content: "";
+  width: 0.85rem;
+  height: 0.85rem;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M7 7l10 10M17 7 7 17'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M7 7l10 10M17 7 7 17'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.search-row:hover .search-forget, .search-forget:focus-visible { opacity: 1; }
+.search-forget:hover { background: var(--line-soft); color: var(--text); }
+
+/* Clear, at the right end of the Recent heading. */
+.search-clear {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font: 0.68rem var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+.search-clear:hover { color: var(--accent); }
+
+/* ---- a query nothing answers ----
+   A small sunrise over the horizon line, the query, and three tips. The
+   picture is the stylesheet's: the guest's element for it is empty, because
+   tea_dom builds every element in the HTML namespace and an <svg> from the
+   guest would not draw. It is the same in both themes, as the brand's
+   gradient is. */
+.search-nothing { padding: 1.4rem 1.4rem 1.6rem; text-align: center; }
+.search-none-art {
+  width: 7.5rem;
+  height: 4rem;
+  margin: 0 auto;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 64'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='1' x2='0' y2='0'%3E%3Cstop offset='0' stop-color='%23db2777'/%3E%3Cstop offset='1' stop-color='%237c3aed'/%3E%3C/linearGradient%3E%3ClinearGradient id='l' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%234f46e5' stop-opacity='0'/%3E%3Cstop offset='.3' stop-color='%234f46e5'/%3E%3Cstop offset='.5' stop-color='%237c3aed'/%3E%3Cstop offset='.7' stop-color='%23db2777'/%3E%3Cstop offset='1' stop-color='%23db2777' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M42 58a18 18 0 0 1 36 0z' fill='url(%23s)' opacity='.85'/%3E%3Crect x='0' y='57' width='120' height='2' fill='url(%23l)'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.search-none-title { margin: 0.4rem 0 1.1rem; color: var(--text); font-weight: 650; overflow-wrap: anywhere; }
+.search-tips {
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 0.9rem 0 0;
+  border-top: 1px solid var(--line-soft);
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.86rem;
+  text-align: left;
+}
+.search-tips li { position: relative; margin: 0.35rem 0; padding-left: 1rem; }
+.search-tips li::before {
+  content: "";
+  position: absolute;
+  top: 0.62em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--line);
+}
+.search-tips code {
+  padding: 0.02em 0.3em;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--text);
+  font-size: 0.86em;
+}
+
 /* The live region is always there and is empty while there are rows. */
 .search-none:empty { display: none; }
 .search-status {
@@ -921,7 +1053,8 @@ footer.site-footer .mark { display: inline-flex; align-items: center; gap: 0.5re
   .search-panel .search-esc, .search-keys { display: none; }
   .search-cancel { display: inline-block; }
   .search-group-name { padding-left: 16px; padding-right: 16px; }
-  .search-row a { margin: 0 8px; }
+  .search-row a, .search-recall { margin: 0 8px; }
+  .search-forget { right: calc(8px + 0.55rem); }
   .search-head { flex-wrap: wrap; row-gap: 0; }
   .search-title, .search-detail { flex: 1 1 100%; }
   .search-detail { margin-left: 0; }
@@ -938,7 +1071,7 @@ footer.site-footer .mark { display: inline-flex; align-items: center; gap: 0.5re
   @keyframes search-rise { from { opacity: 0; transform: translateY(24px); } }
   .search-host { animation: search-fade 0.25s ease; }
   .search-panel { animation: search-drop 0.28s cubic-bezier(0.2, 0.7, 0.2, 1); }
-  .search-row a { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
+  .search-row a, .search-recall { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
   @media (max-width: 40rem) {
     .search-host { animation: none; }
     .search-panel { animation-name: search-rise; animation-duration: 0.3s; }
