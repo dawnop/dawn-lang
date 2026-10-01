@@ -180,3 +180,58 @@ pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
   cleanup(dir)
   outcome
 })
+
+# The compiler release this runner compiles with, for /health and so for the
+# version the editor shows: "0.81.0" out of `dawn --version`'s
+# "dawn 0.81.0 (selfhost)". Asked once at startup, not per request, because
+# the answer only changes with a redeploy, which restarts this process.
+#
+# The probe runs before the socket opens and redeploy.sh gives the whole
+# restart 28 seconds of health checks, so it has a 5-second budget of its
+# own instead of the compile budget. A probe that fails or times out answers
+# "", and /health still says ok: the version is a label, not a liveness test.
+# Unsandboxed: it runs the operator's own binary with a fixed argv.
+pub fn compiler_version() -> String !io = with_fs_real(() => {
+  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
+  let out = "${temp_root()}/dawn-play-version-${id}.txt"
+  let p = ProcessBuilder.new([dawn_bin(), "--version"])
+  p.redirectErrorStream(true)
+  p.redirectOutput(File.new(out))
+  let version = match p.start() {
+    None -> ""
+    Some(proc) -> {
+      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
+      if proc.waitFor(5, secs) {
+        version_of(slurp(out))
+      } else {
+        proc.destroyForcibly()
+        proc.waitFor()
+        ""
+      }
+    }
+  }
+  cleanup(out)
+  version
+})
+
+# The second word of the first `dawn <version> ...` line. bin/dawn may print
+# toolchain chatter ("resolving 2 java-deps ...") before it.
+fn version_of(text: String) -> String = {
+  var found = ""
+  for line in str.split(text, "\n") {
+    if found == "" {
+      let rest = str.strip_prefix(line, "dawn ").unwrap_or("")
+      found = match str.split_once(rest, " ") {
+        Some((v, _)) -> v
+        None -> rest
+      }
+    }
+  }
+  str.trim(found)
+}
+
+test "version_of skips launcher chatter" {
+  assert version_of("resolving 2 java-deps from x\ndawn 0.81.0 (selfhost)\n") == "0.81.0"
+  assert version_of("dawn 0.81.0") == "0.81.0"
+  assert version_of("no such file\n") == ""
+}

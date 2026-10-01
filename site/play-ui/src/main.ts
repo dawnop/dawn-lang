@@ -2,6 +2,11 @@
 // full-viewport IDE: an explorer sidebar listing the sample programs as files,
 // and an editor column (toolbar, line-numbered CodeMirror, console panel that
 // slides in under the editor after a run).
+//
+// Edits survive a reload through localStorage, not the URL: the hash is only
+// written on Run and Share, so it cannot be the draft store, and a draft is a
+// fact about this browser, not something to put in a link. A shared link still
+// wins over the draft, since following one is asking for that code.
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -44,6 +49,43 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
+// The run service's limits, as playground/src/play/config.dawn and main.dawn
+// set them (run and compile budgets, MAX_BODY, OUTPUT_LIMIT, MAX_CONCURRENT).
+// Copied rather than fetched: they change with a deploy of that service, and a
+// stale line here costs a reader less than another request on every load.
+const LIMITS =
+  'Limits: 10 s to run, 30 s to compile, 64 KiB of source and of output, ' +
+  '2 programs at a time. Runs on the JVM; there is no stdin.'
+
+// On anything but a Mac the shortcut is Ctrl. Same test as the site's search
+// button (site/assets/search.js), copied so this bundle has no dependency on
+// that file.
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+
+const DRAFT_KEY = 'dawn-playground-draft'
+interface Draft { file: number; code: string; base: string }
+
+// Storage can be missing or throw (private windows, blocked site data), and a
+// draft is a convenience: every failure reads as "no draft".
+function loadDraft(): Draft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY)
+    if (!raw) return null
+    const d = JSON.parse(raw) as Partial<Draft>
+    if (typeof d.code !== 'string' || typeof d.file !== 'number') return null
+    return { file: d.file, code: d.code, base: typeof d.base === 'string' ? d.base : '' }
+  } catch {
+    return null
+  }
+}
+function saveDraft(d: Draft) {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(d))
+  } catch {
+    // quota or blocked storage: the editor keeps working without a draft
+  }
+}
+
 interface RunResponse {
   ok: boolean
   phase: 'run' | 'compile' | 'timeout' | 'error'
@@ -76,13 +118,18 @@ function mount(root: HTMLElement) {
 
   const bar = el('div', 'dp-bar')
   const fname = el('span', 'dp-fname')
+  const checking = el('span', 'dp-checking', 'Checking…')
+  checking.hidden = true
   const spacer = el('div', 'dp-spacer')
+  const version = el('span', 'dp-version')
+  version.title = 'The compiler release the run service uses'
   const shareBtn = el('button', 'dp-share', 'Share')
   shareBtn.type = 'button'
   const runBtn = el('button', 'dp-run')
   runBtn.type = 'button'
-  runBtn.innerHTML = 'Run <kbd>⌘⏎</kbd>'
-  bar.append(fname, spacer, shareBtn, runBtn)
+  runBtn.append('Run ', el('kbd', undefined, isMac ? '⌘⏎' : 'Ctrl ⏎'))
+  runBtn.title = isMac ? 'Run (⌘ Enter)' : 'Run (Ctrl Enter)'
+  bar.append(fname, checking, spacer, version, shareBtn, runBtn)
 
   const editorHost = el('div', 'dp-editor')
 
@@ -96,19 +143,33 @@ function mount(root: HTMLElement) {
   outClose.title = 'Close output'
   outHead.append(outTitle, outMeta, outClose)
   const output = el('pre', 'dp-console')
-  outPanel.append(outHead, output)
+  outPanel.append(outHead, output, el('div', 'dp-limits', LIMITS))
 
   main.append(bar, editorHost, outPanel)
   ide.append(side, main)
   root.appendChild(ide)
 
   // ---- current "file" state ----
-  // A shared link opens as its own scratch file; otherwise the first sample.
+  // A shared link opens as its own scratch file; otherwise the draft this
+  // browser left behind; otherwise the first sample. `scratch` is what an
+  // unnamed file (current = -1) counts as clean against.
   const fromHash = location.hash.length > 1 ? decodeShare(location.hash.slice(1)) : null
-  let current = fromHash != null ? -1 : 0
-  const baseline = () => (current >= 0 ? SAMPLES[current].code : fromHash ?? '')
-  const initialCode = fromHash ?? SAMPLES[0].code
+  const draft = fromHash == null ? loadDraft() : null
+  let current = 0
+  let scratch = ''
+  let initialCode = SAMPLES[0].code
+  if (fromHash != null) {
+    current = -1
+    scratch = fromHash
+    initialCode = fromHash
+  } else if (draft) {
+    current = draft.file >= 0 && draft.file < SAMPLES.length ? draft.file : -1
+    scratch = draft.base
+    initialCode = draft.code
+  }
+  const baseline = () => (current >= 0 ? SAMPLES[current].code : scratch)
   const checkEndpoint = endpoint.replace(/\/run$/, '/check')
+  const healthEndpoint = endpoint.replace(/\/run$/, '/health')
   const lspEndpoint = endpoint.replace(/\/run$/, '/lsp')
   const lsp = new DawnLspClient(lspWebSocketUrl(lspEndpoint, location.href))
 
@@ -119,7 +180,20 @@ function mount(root: HTMLElement) {
     fileBtns.forEach((b, i) => b.classList.toggle('active', i === current))
   }
 
+  function isDirty() {
+    return view.state.doc.toString() !== baseline()
+  }
+
+  // Opening a sample replaces the buffer, so unsaved edits get a chance to
+  // stay. Clicking the open sample again is a revert, and asks the same way.
   function openSample(i: number) {
+    if (isDirty()) {
+      const name = current >= 0 ? SAMPLES[current].file : 'shared.dawn'
+      const ask = i === current
+        ? `Revert ${name} to the original sample? Your edits will be lost.`
+        : `Open ${SAMPLES[i].file}? Your edits to ${name} will be lost.`
+      if (!confirm(ask)) return
+    }
     current = i
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: SAMPLES[i].code } })
     outPanel.hidden = true
@@ -137,7 +211,7 @@ function mount(root: HTMLElement) {
         highlightActiveLineGutter(),
         highlightActiveLine(),
         dawn(lspCompletionSource(lsp, dawnCompletions)),
-        dawnDiagnostics(checkEndpoint, lsp),
+        dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
         lspHover(lsp),
         lspDefinition(lsp),
         errorLens,
@@ -160,6 +234,7 @@ function mount(root: HTMLElement) {
           if (u.docChanged) {
             lsp.update(u.state.doc.toString())
             refreshChrome()
+            scheduleDraft()
           }
         }),
       ],
@@ -168,6 +243,33 @@ function mount(root: HTMLElement) {
   })
   lsp.start(initialCode)
   refreshChrome()
+
+  // ---- draft: debounced, so typing does not write storage per keystroke ----
+  let draftTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleDraft() {
+    if (draftTimer != null) clearTimeout(draftTimer)
+    draftTimer = setTimeout(() => {
+      draftTimer = null
+      saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch })
+    }, 500)
+  }
+  // A pending write must not be lost to closing the tab inside the debounce.
+  addEventListener('pagehide', () => {
+    if (draftTimer == null) return
+    clearTimeout(draftTimer)
+    draftTimer = null
+    saveDraft({ file: current, code: view.state.doc.toString(), base: current >= 0 ? '' : scratch })
+  })
+
+  // ---- compiler version, from the run service's /health ----
+  fetch(healthEndpoint)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((h: { version?: unknown } | null) => {
+      if (h && typeof h.version === 'string' && h.version) version.textContent = `Dawn ${h.version}`
+    })
+    .catch(() => {
+      // An older runner answers plain "ok", and an unreachable one says so on Run.
+    })
 
   const currentCode = () => view.state.doc.toString()
 

@@ -88,7 +88,14 @@ check() { # name, curl-data, python-assertion, [endpoint (default: run)]
   fi
 }
 
-echo "health: $(curl -s --noproxy '*' "http://127.0.0.1:$PORT/health")"
+health=$(curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" || true)
+echo "health: $health"
+# The editor's toolbar shows this version; a release always has three parts.
+if printf '%s' "$health" | python3 -c "import sys,json,re; d=json.load(sys.stdin); assert d['ok'] is True and re.fullmatch(r'[0-9]+[.][0-9]+[.][0-9]+', d['version']), d" 2>/dev/null; then
+  pass=$((pass + 1)); echo "  ok  health carries the compiler version"
+else
+  fail=$((fail + 1)); echo "FAIL  health carries the compiler version"
+fi
 
 check "hello runs, exit 0" \
   '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \

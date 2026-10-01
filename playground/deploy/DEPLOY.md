@@ -69,7 +69,7 @@ by hand, with the server reachable.
      /etc/systemd/system/dawn-play-lsp.slice
    systemctl daemon-reload
    systemctl enable --now dawn-play dawn-play-lsp
-   curl -s http://127.0.0.1:8087/health   # -> ok
+   curl -s http://127.0.0.1:8087/health   # -> {"ok":true,"version":"<release>"}
    systemctl is-active dawn-play-lsp       # -> active
    ```
 
