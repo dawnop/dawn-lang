@@ -1,8 +1,8 @@
 # 身份路径解析 symlink：`fs_real_path` 与三步桥
 
-> 状态：**current**。2026-10-01，issue #207 刀 2 的第一步 R1（分支 `feat/std-memfs`），顺带 #297。
-> 调研与裁决见 `research-207-symlink-20261001`（agent-handoff，未入库）与 #207 上 10-01 的裁决评论；
-> 本文先只写 R1，R2、R3 在各自批次补节。
+> 状态：**current**。2026-10-01，issue #207 刀 2：R1（分支 `feat/std-memfs`，顺带 #297）与
+> R2（分支 `feat/fs-real-path`）已写，R3 等下一个种子再补节。
+> 调研与裁决见 `research-207-symlink-20261001`（agent-handoff，未入库）与 #207 上 10-01 的裁决评论。
 
 ## 问题
 
@@ -99,7 +99,7 @@ error: `fs_real_path` is not an operation of effect `Fs`
 语义不变：表语义，目录由路径隐含，不跟随链接（`fs_is_symlink` 恒 `false`），相对路径按构造时给的
 base 解析，文件存字节，只有文本臂做 UTF-8 编解码，错误的 `kind` 都以 `memfs.` 开头。
 
-### 对账：R2 之前两份不许漂
+### 对账：R2 之前两份不许漂（R2 已随副本一起删除）
 
 R1 到 R2 之间同一个 handler 有两份文本。检查器只保证各自的臂集等于**各自编译时那份 std** 的 `Fs`，
 不比较臂体与辅助函数。所以 `scripts/doc-check.py` 加 `check_memfs_twin`：
@@ -122,10 +122,101 @@ selfhost **本批不调用 `std/memfs`**。种子 v0.79.0 的 std 没有这个�
 可见的输出变化：`no bundled std module` 的提示列出全部内嵌模块，多了 `std/memfs`
 （`scripts/checker-corpus/cases/imports.expected` 一行）；`dawn doc --stdlib` 多一个模块。
 
-## R2（待补）
+## R2：换用 `std/memfs`、`fs_real_path`、`io_real_path` 与链接模型
 
-fsmem 换用 `memfs.with_fs`；`Fs` 加 `fs_real_path`；两后端 intrinsic；`std/memfs` 的链接模型
-（`links` 表、逐分量解析、跳数上限 40）。
+种子 v0.80.0 的 std 带着 `std/memfs`，selfhost 从这一版起可以调用它。四个提交，顺序与裁决略有出入，见下文「提交顺序」。
+
+### 换用，以及对账退役
+
+`driver/fsmem` 只剩 `mem_std` 与 `mem_std_dir`：它们读编译器内嵌的 std（`embed/stdsrc`），是编译器自己的事。
+表、handler 与测试辅助一律直接用 `std/memfs`：`memfs.with_fs`、`memfs.empty`、`memfs.put`、`memfs.text`、
+`memfs.file_paths`、`memfs.BASE`、`memfs.MemFs`，调用点在 `driver/analyze`、`driver/stdlib`、`driver/clifail`、
+`contract/module_memo`、`lsp/server` 的测试段。
+
+**不留旧名的转发函数。** R1 设计时写的是「fsmem 改成 `memfs.with_fs` 的薄包装」；落地时没有包，因为
+`fsmem.mem_put` 与 `memfs.put` 两个名字指一张表，正是这一步要消掉的那种孪生，只是从文本孪生换成了名字孪生。
+改调用点是机械替换（约 40 处），一次付清。
+
+selfhost 里从此**没有任何 `with handle Fs`**（`grep -rn "with handle" selfhost/src` 不含 `Fs`）。
+`scripts/doc-check.py` 的 `check_memfs_twin` 与它的自测随之删除：只剩一份，没有东西可比，留一个空规则只会让人以为它还在守什么。
+fsmem 原有的三条 handler 测试随 handler 一起走，`std/memfs` 自己的测试覆盖每一臂。
+
+### `Fs.fs_real_path` 与 `io.real_path`
+
+`Fs` 的第十五个 op 放在声明末尾：`fn fs_real_path(path: String) -> Result[String, ForeignError]`。
+std 的公开面是 `io.real_path(path) -> Result[String, ForeignError] !Fs`：
+
+- 先查绝对路径，判据是 `str.starts_with(path, "/")`，与 `fspath.is_absolute` 同一条（std 不能依赖包，见 R1 第 1 条）。
+  不是绝对路径就回 `Err(kind: "io.relative_path")`，**不进 handler**，与 `list_dir`、`run` 的先例同形；
+  `io.relative_path` 成为 std 自己铸的第四个 kind（spec 的 IO 小节已同步，中英两版）。
+- 拒绝而不是替调用者绝对化：绝对化要读工作目录，那是 `Env` 的应答。R3 的 `canon_identity` 自己拿 `io.cwd()`，`!Env` 记在它那里。
+- 仓内全部 `with handle Fs` 补臂，共五处：`std/io` 的 `with_fs_real`（调原语）与它测试里的表 handler、
+  `std/memfs`、`examples/effects/files.dawn`（表里没有链接，存在的路径就是它自己的解析结果）、
+  `scripts/spike-native/effect_fs_seam.dawn`。
+- `std/io` 头注释里「fourteen operations and not fifteen」与 `docs/effects-design.md` 的「十四个操作」改成十五。
+
+### 原语 `io_real_path`
+
+| 处 | 内容 |
+|---|---|
+| `check/types.dawn` | `eff1(bsig("io_real_path", [TyString], ["path"], TyString), EIo)`，进 `io_in_rt`（同时决定归 `RtIo` 与 std-only） |
+| `ir/interp.dawn` | comptime 拒绝名单加 `real_path` |
+| `selfhost/builtins.dawn` | 镜像行 `fn io_real_path(path: String) -> String !io # comptime: rejected` |
+| 计数测试 | `types` 的表大小 111→112、`lower` 的分组总数 111→112、`interp` 的拒绝数 68→69 |
+| JVM `rtclasses.dawn` | `new File(path).toPath().toRealPath(new LinkOption[0]).toString()`，约 10 行 ASM；NUL 在 `toPath` 抛 `InvalidPathException` |
+| C `dawn_rt.c` / `.h` | `dawn_reject_nul` → `realpath(p, NULL)` → `dawn_str_from_os` → `free`；失败 `dawn_fault("io_real_path: cannot resolve the path")`；`embed/rtsrc.dawn` 重生成 |
+
+调研写的「comptime 拒绝名单三处（types、interp、`driver/stdlib.dawn:161`）」在本基线只有两处：
+`stdlib.dawn` 里没有这张表，io 原语的全部名单就是 `types.dawn` 的 `io_in_rt` 与 interp 的拒绝表。
+
+**wasm32-wasi。** 调研以为 wasi-libc 带着 musl 的 `realpath`、只是多层 preopen 下会失败。实测不是：
+wasi-libc 的 `stdlib.h` 把 `realpath` 包在 `__wasilibc_unmodified_upstream` 里，注释是「WASI has no absolute paths」，
+第一版实现在 `scripts/wasm-contract/run.sh` 里编不过（implicit declaration）。所以 `__wasi__` 下这个原语**一律 fault**，
+调用者拿到的是与「解析不了的路径」同一种 `Err`；退路是调用者的策略（R3 的 `canon_identity` 退回 `canon`）。不在 wasi 上模拟 realpath。
+
+Windows 不在范围（两个后端的目标平台都没有它）。
+
+两后端对同一棵真实目录树（`home/app -> ../work/app`、自环 `loop -> self`）逐例对拍，结果除 `Err` 的 `kind`
+（`kind` 本来就是后端给的：JVM 是异常类名，native 是 `fault`）外逐字相同，见本批报告。
+std 的宿主测试也用 `io.run(["ln", "-s", ...])` 造真链接，`native-cli-diff.sh` 的 `test (the bundled std)` 一对
+让同一组断言在两个后端各跑一遍。
+
+### `std/memfs` 的链接模型
+
+- `MemFs` 加 `links: Map[String, String]`（链接的绝对路径 → 原样目标）；构造函数 `memfs.link(st, at, target)`，
+  `at` 的祖先目录随之记入；`at` 上已有文件或目录则原样返回，与 `put` 遇到目录时同一规则。目标不要求存在（`ln -s` 也不要求）。
+- `fs_is_symlink` 答 `map.has(links, key)`。
+- `fs_real_path` 逐分量走，同内核的走法：遇到链接，目标替换该分量（绝对目标从根重来，相对目标接着从链接所在目录走）；
+  `..` 退到「已走到的目录」的父目录，所以链接之后的 `..` 退出的是目标而不是链接所在目录（场景 B 的根）；
+  中间分量必须是目录（文件后面还有分量是 `memfs.not_a_directory`），每个分量必须存在（`memfs.not_found`），
+  悬空链接也是 `memfs.not_found`；跳数上限 40（Linux 的 `ELOOP`），超了是 `memfs.loop`。
+- **其它臂不跟随链接，也看不见链接**：`fs_exists`、`fs_read_file`、`fs_list_names` 只认文件与目录表。
+  这是有意的窄：身份解析只需要 `fs_real_path`，让每一臂都跟随链接等于再维护一套与内核对齐的文件系统语义。
+  #297 的遍历测试因此仍在真磁盘上（遍历要求链接作为目录项列出）。
+
+测试四条：链接只被 `is_symlink` 与 `real_path` 看见；链接后的 `..` 按物理父目录退，而词法折叠出的 `/home/lib` 是 `memfs.not_found`；
+自环、互环是 `memfs.loop`，恰好 40 跳的链能解析、41 跳是 `memfs.loop`；缺分量、文件当目录、悬空链接各是 `Err`。
+
+### 输出变化
+
+加一个效果 op 是**签名原子的变化**，不是行为变化，但它挪动字节：`std/io` 的 handler 臂 lambda 类重新编号、
+`std/memfs$MemFs` 多一个字段、`dawn/rt/Io` 多一个方法。十个 emit 语料全部 MOVED，`doc --builtins` 多一条；
+提交信息逐 label 写了 `Emit-Change`。fmt、lsp 差分零差。
+
+### 提交顺序
+
+裁决给的顺序是「切换 → op + 补臂 + 链接模型 → 原语 → 文档」。落地把原语提到 op 之前：
+op 一加，`with_fs_real` 就得有一臂，原语不在的话这一臂只能是一个答错的占位（例如恒 `Err`），
+而裁决要求每个提交都能过两个 fixpoint 与测试，占位能过却不该进历史。原语先进来没有调用者，本身不改任何行为。
+
+### 验证（命令输出在本批报告）
+
+- 负控 4（桥是必要条件）：fsmem 里重新写一个 14 臂的 `with handle Fs`，`selfhost-fixpoint.sh` 在 stage B 红
+  （`handler for Fs does not answer fs_real_path`，stage A 用种子 std 编过）；写成 15 臂，stage A 就红
+  （`fs_real_path is not an operation of effect Fs`）。两头都堵死，selfhost 里不能再有 `Fs` handler。
+- 负控 5：`MAX_LINK_HOPS` 改成 `Int` 最大值、重生成内嵌 std，`timeout 180 dawn test --stdlib` 到点（exit 124），
+  卡在环测试上。
+- 负控 6：删掉 `real_path` 的相对路径检查，std 测试两条红（宿主测试与表 handler 测试都断言 `io.relative_path`）。
 
 ## R3（待补）
 
@@ -156,6 +247,16 @@ fsmem 换用 `memfs.with_fs`；`Fs` 加 `fs_real_path`；两后端 intrinsic；`
 - `check_memfs_twin` 与其自测。
 
 ## 不做的（理由）
+
+R2：
+
+- **不做 `canon_identity`，不改身份点。** 那是 R3，要等 v0.81.0 种子带着 `io.real_path` 才能在 compiler-plan 里调用。
+- **不改 `canon`，不加 `fs_read_link`，op 里不做 soft 语义，不做 case-fold。** 理由同调研 §2 与下文 R1 各条。
+- **memfs 的其它臂不跟随链接。** 见上文「链接模型」；真要模拟完整的链接语义，等有测试需要它的时候。
+- **wasi 上不模拟 realpath。** wasi-libc 明说没有绝对路径；在 preopen 之上自己拼一套，是在替运行时发明语义。
+- **不给 fsmem 的旧名留转发函数。** 见上文「换用」。
+
+R1：
 
 - **R1 不给 `Fs` 加 op。** 加了 stage A 就红，这正是三步的来由。
 - **R1 不改 `canon`。** 它保持纯词法 `!Env`；身份语义是 R3 的 `canon_identity`，而且 bootstrap 输入清单那几处必须不解析链接（调研「不做的」第 1 条）。
