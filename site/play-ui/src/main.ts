@@ -21,8 +21,8 @@ import {
   lspCompletionSource,
   lspDefinition,
   lspHover,
-  lspWebSocketUrl,
 } from './lsp'
+import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
 import './playground.css'
 
@@ -96,7 +96,12 @@ interface RunResponse {
 }
 
 function mount(root: HTMLElement) {
-  const endpoint = root.dataset.endpoint || '/api/run'
+  // The service URL is the page's to say (gen/pages.play_endpoint), relative
+  // or on another origin; the bundle has no default of its own to drift.
+  const runUrl = root.dataset.endpoint
+  if (!runUrl) throw new Error('#dawn-playground has no data-endpoint')
+  const endpoints = playEndpoints(runUrl, location.href)
+  const endpoint = endpoints.run
 
   const ide = el('div', 'dp-ide')
 
@@ -168,10 +173,9 @@ function mount(root: HTMLElement) {
     initialCode = draft.code
   }
   const baseline = () => (current >= 0 ? SAMPLES[current].code : scratch)
-  const checkEndpoint = endpoint.replace(/\/run$/, '/check')
-  const healthEndpoint = endpoint.replace(/\/run$/, '/health')
-  const lspEndpoint = endpoint.replace(/\/run$/, '/lsp')
-  const lsp = new DawnLspClient(lspWebSocketUrl(lspEndpoint, location.href))
+  const checkEndpoint = endpoints.check
+  const healthEndpoint = endpoints.health
+  const lsp = new DawnLspClient(endpoints.lsp)
 
   function refreshChrome() {
     const name = current >= 0 ? SAMPLES[current].file : 'shared.dawn'

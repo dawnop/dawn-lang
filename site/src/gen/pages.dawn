@@ -359,6 +359,29 @@ test "each language's document is read from its own file and lands in its own pl
   assert doc_source("history", "d", Zh) == ("docs/history.zh-CN.md", "d/zh/history.html", "..")
 }
 
+## Unset, the mount is what it was before the variable existed, to the byte;
+## site/build.sh's default build ships the same playground.html.
+test "with no play origin the endpoint stays relative" {
+  assert play_endpoint("") == Ok("/api/run")
+  assert play_mount("/api/run") == `<div id="dawn-playground" data-endpoint="/api/run"></div>`
+}
+
+## Set, the endpoint is absolute on that origin, and anything that is not a
+## bare origin stops the build instead of reaching the attribute.
+test "a play origin makes the endpoint absolute" {
+  assert play_endpoint("https://play.example.test") == Ok("https://play.example.test/api/run")
+  assert play_endpoint("http://127.0.0.1:18097") == Ok("http://127.0.0.1:18097/api/run")
+  assert play_mount("https://play.example.test/api/run")
+    == `<div id="dawn-playground" data-endpoint="https://play.example.test/api/run"></div>`
+  for bad in ["https://play.example.test/", "https://play.example.test/api", "play.example.test",
+    "https://", "ftp://play.example.test", "https://play.example.test\"><script>"] {
+    match play_endpoint(bad) {
+      Ok(e) -> panic("accepted ${bad} as ${e}")
+      Err(e) -> { assert str.contains(e, "not an origin") }
+    }
+  }
+}
+
 ## History lights up for both of its pages, and the early design notes say
 ## whose page they are.
 test "the early design notes are a page of the history" {
@@ -371,13 +394,77 @@ test "the early design notes are a page of the history" {
   assert not str.contains(doc_eyebrow("spec", En, ""), "0.82")
 }
 
+## Where the Playground's API lives, as site/build.sh hands it over in
+## DAWN_SITE_PLAY_ORIGIN: "" when the variable is unset or empty, which is the
+## same-origin deployment this site has always had.
+##
+## The variable exists because the pages and the API can no longer be assumed
+## to share an origin. The static site is meant to sit behind a CDN that does
+## not carry WebSocket upgrades, and `/api/lsp` is one, so the four `/api/*`
+## endpoints move to an origin of their own while the pages stay where they
+## are (docs/site-cdn-design.md). Read from the environment for the reason
+## build_stamp is, and read once, in site/src/main.dawn, before any page is
+## written.
+pub fn play_origin() -> String !Env = unwrap_or(getenv("DAWN_SITE_PLAY_ORIGIN"), "")
+
+## The run endpoint the Playground's mount point hands the editor, or why the
+## origin it was built from is not an origin.
+##
+## Empty stays the relative `/api/run`, byte for byte what the page carried
+## before the variable existed, so a build that does not set it ships the same
+## site. Set, it must be a bare origin: `http(s)://` and a host, an optional
+## port, and nothing after. No path and no trailing slash, because the editor
+## derives `/check`, `/health` and `/lsp` by replacing the final `/run`
+## (site/play-ui/src/endpoints.ts) and a path in front of `/api` would be a
+## second, unwritten convention. The host is held to the characters a host
+## and port can have, which is also what makes the value safe to drop into an
+## attribute without escaping: nothing outside that set reaches the page.
+pub fn play_endpoint(origin: String) -> Result[String, String] = {
+  if origin == "" {
+    Ok("/api/run")
+  } else {
+    let rest =
+      match str.strip_prefix(origin, "https://") {
+        Some(r) -> r
+        None -> unwrap_or(str.strip_prefix(origin, "http://"), "")
+      }
+    var host_only = rest != ""
+    for ch in code_points(rest) {
+      let ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+        || ch == '.' || ch == '-' || ch == ':'
+      if not ok {
+        host_only = false
+      }
+    }
+    if host_only {
+      Ok("${origin}/api/run")
+    } else {
+      Err("DAWN_SITE_PLAY_ORIGIN is \"${origin}\", not an origin: want http(s)://host[:port] "
+          ++ "with no path and no trailing slash")
+    }
+  }
+}
+
+## play_endpoint for this build, stopping the build when the origin is bad.
+pub fn play_run_endpoint() -> String !Env =
+  match play_endpoint(play_origin()) {
+    Ok(e) -> e
+    Err(e) -> panic("Playground endpoint: ${e}")
+  }
+
+## The Playground's mount point: the one element the page body holds.
+pub fn play_mount(endpoint: String) -> String =
+  `<div id="dawn-playground" data-endpoint="` ++ endpoint ++ `"></div>`
+
 ## The Playground, in one language. The page itself has no prose at all -- the
 ## body is a mount point and everything a reader sees inside it is drawn by the
 ## editor bundle, whose own strings are English on both sides. So the twin is
 ## the shell around it: nav, footer and the language switch, which is the whole
 ## reason it is paired. Translating the editor is a job in site/play-ui and has
 ## nothing to do with this generator.
-pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+##
+## `endpoint` is play_run_endpoint's answer, relative or absolute.
+pub fn gen_playground(out: String, a: Assets, lang: Lang, endpoint: String) -> Unit !Fs !io = {
   let (dst, root) =
     match lang {
       En -> ("${out}/playground.html", ".")
@@ -386,7 +473,7 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   # full-width IDE page: the editor frame IS the page (no heading, no reading
   # column, nothing in the band but the nav) — .dp-page/.dp-ide layout comes
   # with the editor bundle's css
-  let mount = `<div id="dawn-playground" data-endpoint="/api/run"></div>`
+  let mount = play_mount(endpoint)
   let mount_body = `<main class="dp-page">` ++ "\n" ++ mount ++ "\n</main>"
   # the editor bundle (built from site/play-ui, copied into assets by build.sh);
   # one copy, reached from wherever the page sits

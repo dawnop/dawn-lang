@@ -19,6 +19,12 @@ Usage:
 with no nginx in front wants `--runner-only`, which skips the static checks and
 drops the `/api` prefix. Exit status is 0 only when every check passed.
 
+`PLAY_API_URL` moves the runner checks to another origin while the static
+checks stay on `PLAY_BASE_URL`. It is the `/api` base itself (no trailing
+`/run`), for a site whose pages are on a CDN and whose Playground service is
+not (docs/site-cdn-design.md). Unset, it is `PLAY_BASE_URL` plus `/api`, which
+is the same-origin deployment.
+
 No server identity here: the public hostname is public, the ssh login is not
 (see scripts/check-no-server-identity.py) -- this script never needs to log in.
 """
@@ -258,6 +264,7 @@ def main():
 
     base = os.environ.get("PLAY_BASE_URL", DEFAULT_BASE).rstrip("/")
     api = base if args.runner_only else base + "/api"
+    api = os.environ.get("PLAY_API_URL", api).rstrip("/")
 
     # A bare runner has no nginx in front of it, so nothing to pace for.
     r = Results()

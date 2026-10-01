@@ -2,7 +2,7 @@
 # Run via site/build.sh (which feeds it dawn doc --stdlib output), or
 # directly from the repo root: dawn run site
 
-use gen/pages.{build_stamp, gen_assets, gen_spec, gen_design, gen_history, gen_playground, gen_tea}
+use gen/pages.{build_stamp, play_run_endpoint, gen_assets, gen_spec, gen_design, gen_history, gen_playground, gen_tea}
 use gen/home.{gen_index, site_figures}
 use html/page.{En, Zh}
 use gen/tutorial.{gen_tutorial}
@@ -26,6 +26,10 @@ pub fn main() -> Unit !io = {
     # without them stops here (gen/home.read_figure) rather than half way
     # through the site.
     let figs = with_env_real(() => site_figures())
+    # Where the Playground's API lives (DAWN_SITE_PLAY_ORIGIN, see
+    # gen/pages.play_origin): relative when unset, absolute on that origin
+    # when set. Read here for the same reason as the figures.
+    let play = with_env_real(() => play_run_endpoint())
     # English is the site's default and lives at `/`; the Chinese front page
     # is at `/zh/`. Every page below is paired the same way.
     gen_index(out, assets, En, figs)
@@ -42,8 +46,8 @@ pub fn main() -> Unit !io = {
     gen_examples(out, assets, Zh)
     gen_stdlib(out, assets, En)
     gen_stdlib(out, assets, Zh)
-    gen_playground(out, assets, En)
-    gen_playground(out, assets, Zh)
+    gen_playground(out, assets, En, play)
+    gen_playground(out, assets, Zh, play)
     # The browser demo: two wasm reactors built by site/build.sh, mounted by the
     # bridge vendored alongside them. Translated shell and translated prose over
     # two applications that draw the same English either way.
