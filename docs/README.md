@@ -119,6 +119,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [run-argv-boundary-design.md](run-argv-boundary-design.md) | current | TOOL-03 的定稿契约：`run` 只在 target 前解析 compiler option，以 `--` 开启逐字透传的 program argv；JVM 一次顺序解析且 dependency re-exec 保留原始 rest，两端独立 parser 由绝对 oracle 约束。 |
 | [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
+| [site-home-design.md](site-home-design.md) | current | 首页「Horizon」落到站点生成器：一片天的结构、仅首页的亮暗两套 token 与切换、动效清单（reduced motion 与无脚本的终态）、每个数字的生产者（`scripts/site-figures.sh` 经环境变量注入，空则构建红）、GPU 源码从 `examples/projects/gpu_fake` 切出、JetBrains Mono 自托管、唯一外部脚本 `home.js`；偏离定稿与不做的。 |
 
 ## 旧审查设计材料（`docs/audit/`）
 
