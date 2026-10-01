@@ -8,7 +8,7 @@
 
 use std/str
 use html/render.{TocEntry}
-use html/escape.{escape_html}
+use html/escape.{escape_html, escape_attr}
 
 ## Which language a page is written in. English is the site's default and
 ## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Every
@@ -274,7 +274,10 @@ pub fn shell_ext(
   head_extra: String,
   body: String,
 ) -> String = {
+  # one title, two contexts: the <title> element is text, og:title's
+  # `content` is an attribute value and must not be closed by a `"` (#316)
   let esc_title = escape_html(title)
+  let attr_title = escape_attr(title)
   let nav = nav_html(lang, root, active)
   # the brand mark goes to this language's front page, not to the English one:
   # a reader on /zh/ who clicks the logo is not asking to change language
@@ -297,7 +300,7 @@ pub fn shell_ext(
 <title>${esc_title}</title>
 <link rel="icon" href="${root}/assets/${ico}" sizes="32x32">
 <link rel="apple-touch-icon" href="${root}/assets/${touch}">
-<meta property="og:title" content="${esc_title}">
+<meta property="og:title" content="${attr_title}">
 <meta property="og:image" content="https://dawn-lang.dawnop.com/assets/${og}">
 <link rel="stylesheet" href="${root}/assets/${css}">
 <script src="${root}/assets/${sjs}" defer></script>
@@ -474,6 +477,12 @@ test "shell carries title, css root, body" {
   assert str.contains(p, `href="./assets/style.css"`)
   assert str.contains(p, `<main class="content">`)
   assert str.contains(p, "Built by a generator written in Dawn")
+}
+
+test "a quote in a title stays inside og:title's attribute" {
+  let p = page(plain_assets(), En, "", `Say "hi" & go`, ".", "", "")
+  assert str.contains(p, `<title>Say "hi" &amp; go</title>`)
+  assert str.contains(p, `<meta property="og:title" content="Say &quot;hi&quot; &amp; go">`)
 }
 
 test "only a page with a twin advertises one" {

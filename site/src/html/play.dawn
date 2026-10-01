@@ -28,7 +28,8 @@
 # a reasonable thing to open in one.
 
 use std/bytes
-use html/escape.{escape_html}
+use std/str
+use html/escape.{escape_html, escape_attr}
 
 ## Where a page's prefilled links go, and what they say there. Both halves are
 ## the caller's because both depend on the page's language, which this module
@@ -59,10 +60,11 @@ pub fn play_decode(hash: String) -> Option[String] =
 
 ## The link itself, labelled in the page's language. No escaping is needed for
 ## the fragment -- the standard Base64 alphabet holds nothing HTML reserves --
-## but it goes through `escape_html` anyway, because "this string happens to
-## contain no `&`" is not a property a reader of the markup can check.
+## but it goes through `escape_attr` anyway, because "this string happens to
+## contain no `&` or `"`" is not a property a reader of the markup can check,
+## and the page half of the href is the caller's.
 pub fn play_link(p: Play, code: String) -> String = {
-  let href = escape_html(p.href ++ "#" ++ play_hash(code))
+  let href = escape_attr(p.href ++ "#" ++ play_hash(code))
   """<a class="play-open" href="${href}">${escape_html(p.label)}</a>"""
 }
 
@@ -107,4 +109,7 @@ test "the link carries the program in its fragment and its label in the markup" 
     == `<div class="playable">` ++ "\n<pre>P</pre>\n"
     ++ `<a class="play-open" href="../playground.html#bGV0IHggPSAx">Open in playground</a>`
     ++ "\n</div>"
+  # the page half of the href is an attribute value like any other
+  let q = Play { href: "a\"b&c.html", label: "x" }
+  assert str.contains(play_link(q, ""), `href="a&quot;b&amp;c.html#"`)
 }
