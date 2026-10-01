@@ -3253,6 +3253,7 @@ url/文件名安全字母表且
 | `dawnc check <target>...` | 只做类型检查，聚合全部 target 的诊断 |
 | `dawnc emitc <target> [-o out.c]` | C 翻译单元（配 `runtime/c/` 的运行时一起编） |
 | `dawnc build <target> [-o out]` | 前一步 + 调 `cc`（`$CC` 可覆盖），独立可执行文件 |
+| `dawnc build --target wasm [--reactor] <target> [-o out]` | 同一份 C 交给 clang，WebAssembly 模块（§12.5） |
 | `dawnc run [--std <dir>] <target> [-- <program-args>...]` | 同上，编完直接执行 |
 | `dawnc test <target>` | 编译含 test 块的变体并执行 |
 | `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
@@ -3376,6 +3377,200 @@ JNI（Java 互操作走普通 invoke）。因此 `--native` 构建不需要 reac
 **自递归尾调用保证**编译为循环（不长栈）——顶层函数与**局部命名函数**（§3.1）皆然。
 互递归尾调用不保证。判定规则：函数体内对自身的调用处于尾位置（返回位置、
 match/if 分支的尾位置、块的末表达式）。
+
+### 12.5 构建目标
+
+构建目标有三个。选目标就是选驱动与命令；`jvm`、`native` 是本节的称呼，不是可写的拼写。
+
+| 目标 | 命令 | 产物 |
+|------|------|------|
+| `jvm` | `dawn build <target> -o app.jar`（加 `--native` 再交 GraalVM `native-image`，§12.3） | 可执行 jar |
+| `native` | `dawnc build <target> [-o out]` | `cc` 编出的可执行文件 |
+| `wasm` | `dawnc build --target wasm [--reactor] <target> [-o out]` | WebAssembly 模块（WASI preview 1） |
+
+`--target` 只有 `dawnc build` 接受，唯一取值是 `wasm`，其它取值是用法错误（退出 2）。
+`dawn build` 没有 `--target`，写出来同样退出 2。`--reactor` 必须与 `--target wasm` 同时给出，
+否则退出 2。
+
+**wasm 与 native 是同一个后端**：同一份发出的 C、同一份运行时 `runtime/c/dawn_rt.c`，
+后者以 `__wasi__` 条件编译换掉目标没有的部分。编译器是 clang：`DAWN_WASM_CC` 覆盖，缺省
+`clang`，`CC` 不被读取。三元组取编译器手上有 sysroot 的那一个，先 `wasm32-wasip1`，
+否则 `wasm32-wasi`。不给 `-o` 时产物名是 native 的缺省名加 `.wasm`。`use java` 被拒绝，
+与 native 相同（§12.1）。
+
+**命令模块**（不加 `--reactor`）：导出 `_start` 与 `memory`。宿主调一次 `_start`，`main`
+跑完即结束，语义与 native 进程相同。
+
+**reactor 模式**（`--reactor`）：链接时没有 `_start`，模块的导出**恰好**是 `memory`、
+`_initialize`、`dawn_turn` 三项。
+
+- 宿主**必须**在实例化之后、第一次 `dawn_turn` 之前调一次 `_initialize`（wasi-libc 的构造器）。
+- `dawn_turn` 无参、答 `i32`。一次调用是一轮：以空 argv 调程序的 `main`（`args()` 为 `[]`），
+  `main` 返回后冲刷标准输出与标准错误的缓冲，答 0。
+- 每一轮从头进入 `main`，轮边界上不保留任何 Dawn 栈。同一实例内跨轮存活的只有
+  `std/reactor` 的 `serve` 装下的那个根；除此之外，本规范不承诺任何值跨轮存活。
+  `serve` 的契约（一个实例只用一种状态类型；`step` 失败或 panic 时保留原状态）写在它的文档里。
+- **reactor 没有自己的 io 处理器**：这个模式不新增任何效果、handler 或 io 原语。程序的 `!io`
+  仍是 std 的那一份，`io.read_line` 读 WASI fd 0，`println` 写 fd 1，标准错误是 fd 2；
+  每轮的字节由宿主供给与收取，宿主给的输入读完即是输入结束。模块只导入
+  `wasi_snapshot_preview1` 的函数；导入哪几个由所链接的 wasi-libc 按程序用到的东西决定，
+  不属于本规范。宿主没有实现的导入答什么，由宿主决定。
+- 桥看到的就是上面这些：三个导出，和 stdio 上的字节。一行 JSON 进、一行 JSON 出的消息格式
+  是 `packages/tea-dom` 的契约（`tea_dom/wire`），不是语言的；设计与理由见
+  [`dom-bridge-design.md`](dom-bridge-design.md)。
+- 程序经 `Exit` 退出，或有 panic 没被接住时，guest 调 `proc_exit`，这个实例从此不可再用。
+  要让实例在应用 panic 之后继续应答，就在轮内用 `catch_panic` 接住它，`serve` 就是这么做的。
+
+**wasm 上的标准库**（两种模式相同）：捆绑 std 的每个模块都能为 wasm 编译，差别全在运行时。
+下表各项是运行时的明确拒绝，不是模拟；表外的行为与 native 产物一致（§12.1 的保证延及 wasm）。
+
+| 能力 | 在 wasm 上 |
+|------|-----------|
+| 文件 io（`Fs`） | 经 WASI preopen；能看见哪些目录由宿主决定 |
+| `io.run`（`Proc`） | `Err`（fault，`io_run: no processes on wasi`） |
+| `io.real_path` | `Err`（fault）：wasm32-wasi 没有绝对路径可解析（§11） |
+| `io.temp_dir` / `io.temp_file` | `Err`（fault） |
+| `io.copy_permissions` | `src` 存在即成功，但什么也不改：目标没有文件模式 |
+| 一次性续延（控制臂、`discard`，§6.5） | panic：`dawn: one-shot resumption is not available on wasm` |
+| `std/gpu` 的 `with_gpu_real` | 凡碰设备的操作答 `gpu.unsupported_backend`（§12.6） |
+| 线程、大栈 | 没有；递归深度的上限取决于引擎的调用栈，**未定义** |
+
+机器核对：`scripts/wasm-contract/run.sh` 把一组语料同时编成 native 与 wasm（命令模块），
+在 node 的 WASI 下运行，要求 stdout 与 native 逐字节相同、运行时的对象生死账归零、未接住的
+panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 reactor 与 DOM 桥跑在
+一个记录型 document 桩上，逐字节比对转录。两者都在 CI 的 `wasm-target` job 里。
+
+### 12.6 设备后端：GPU
+
+设备后端**不是**编译器的第三个后端。两个驱动都不认识 kernel、Tile IR 或 GPU，也不调用任何
+设备工具链。它是两层库：
+
+- 宿主层 `std/gpu`（随 std 捆绑）：`Gpu` 效果、`Tensor[D]`、格式标记与 `Dtype`、两个 handler。
+- 设备层 `packages/tileir`（源码包，经 `[deps]` 引入，不在 std 里）：`Dev` 效果、记录
+  handler、`TileProg`、Tile IR 文本渲染器与字节码写入器。kernel 的宿主参考实现在
+  `packages/tileref`。
+
+理由、路线与实测见 [`tile-backend-design.md`](tile-backend-design.md) §4–§6。
+
+**kernel 体**是效果行只有 `Dev` 的普通 Dawn 函数，形如
+`fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`。
+
+- 它不在设备上执行，也不在宿主上计算任何数值。`Dev` 的每个操作产生或消费**句柄**：
+  `Tile[D]`、`Idx`、`Scalar[D]`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式标记（§2.7）。
+  句柄由 handler 签发；把一种句柄当另一种用，或把宿主的 `Int` 当句柄用，是类型错误。
+- **记录**：`tileir/prog` 的 `trace_kernel(name, params, body)` 在**宿主运行期**、在记录
+  handler 下把 `body` 跑恰好一次，答一个 `TileProg`（SSA 形式的 ADT）。`params` 是入口各参数
+  的格式名，按位置。同一个体按同一顺序发同样的操作，得到的记录相等。
+- 体里普通的 Dawn 控制流（`if`、`for`、递归）在记录时由宿主求值：只依赖宿主已知量的分支被
+  展开，宿主的 `Int` / `Float` 进入记录时成为常量。依赖 tile 值的控制流**必须**走 `tileir/dev`
+  的结构化函数（`d_for`、`d_loop`、`d_if`、`d_reduce` 等），它们在记录里成为区域。
+- 内存操作之间的顺序只由记录 handler 维护的 token 链给出，程序序不给出任何顺序。
+- 下列情形在记录时 panic（不是 `Err`）：`param(d, pos)` 与 `params` 不符（位置越界或格式不同）；
+  tile 的某一维不是 2 的幂；循环嵌套深于 `MAX_LOOP_DEPTH`（16）；一次记录签发的句柄超过
+  `MAX_HANDLES`（65536）；区域没有闭合，或闭合时的值个数不对。
+- 产物：`tileir/render` 的 `render(prog)` 给 `cuda_tile` 方言的文本，`tileir/bytecode` 的
+  `encode(prog)` 给 `cuda-tile` 字节码，版本钉在 `BYTECODE_MAJOR` / `BYTECODE_MINOR`。一个
+  `TileProg` 是一个模块，含一个 `entry @<name>`，`name` 即 `trace_kernel` 的第一个实参；每个
+  入口参数都是其格式的指针。字节码变成设备映像（cubin）由 NVIDIA 的 `tileiras` 完成，在 Dawn
+  工具链之外；本规范不规定由谁、在何时调用它。
+
+**`Gpu` 效果**有七个操作（`gpu_alloc`、`gpu_upload`、`gpu_download`、`gpu_launch`、
+`gpu_module_global`、`gpu_free`、`gpu_sync`），单态、句柄级；程序用的是其上的类型化函数
+`alloc`、`upload`、`download`、`free`、`launch`、`launch3`、`module_global`、`sync`。
+
+- 每个操作答 `Result[_, ForeignError]`。std 在操作之上自己发三种拒绝，在每个 handler 下字节相同：
+  `gpu.bad_length`（`alloc` 的长度小于 1）、`gpu.length_mismatch`（`upload` 的数据长度不等于
+  `size(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
+  handler 所代表的设备的原样结果：接缝在错误面之下。
+- **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args)` 是 `launch3(kernel, grid, 1, 1, args)`；
+  grid 计 tile block 的个数；`args` 是缓冲句柄（`handle_of(t)`），按入口参数的顺序。
+  名字到 kernel 的绑定是安装 handler 时交给它的表，名字不在表里，两个 handler 都答
+  `gpu.no_kernel`。语言不检查这个名字与 `trace_kernel` 用的名字一致，也不检查 `args` 的个数与
+  格式与入口签名一致：那是程序的责任。
+- `launch` 返回不等于 kernel 已经跑完。`sync` 之后的 `download` 才保证看到此前各次 launch 的写入。
+- `module_global(d, kernel, name)` 答一个覆盖该 kernel 所在模块中一个导出全局的 `Tensor[D]`，
+  与模块共享存储；同一符号查两次答同一个句柄；对它 `free` 被接受且什么也不做。
+
+**两个 handler**：
+
+```dawn
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T
+pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e) -> T !io
+```
+
+- **假设备 `with_gpu_fake` 是纯的**：在任何后端、任何 test 块里都能用，不需要设备、驱动或
+  `!io`；两次安装互不共享。它不能在 comptime 用：它的表是 `Map`（§7.2），它的 handler 带状态格
+  （`var`），comptime 解释器两样都表示不了。
+- 假设备**从不运行 kernel 体**。表把名字映到（缓冲个数，宿主参考实现）。`launch` 先查实参：
+  一个都没有答 `gpu.no_arguments`，个数与表项不等答 `gpu.bad_arity`，句柄未签发或已释放答
+  `gpu.no_such_buffer`；然后把每个实参缓冲的格式名与内容按序交给参考实现。参考实现答
+  `[(实参位置, 内容)]`，每一对按**该**缓冲的格式舍入（`round_to`）后写回；有位置越界则答
+  `gpu.bad_write_back`，什么也不写。所有输入在任何一次写回之前读完。grid 不被读取。
+- 缓冲持有它的格式的内存会持有的值：`upload` 与写回都按缓冲格式舍入，`download` 原样答出。
+- **真设备 `with_gpu_real` 只在 native 目标上有实现**。运行时在第一个需要设备的操作时
+  `dlopen("libcuda.so.1")` 并在 device 0 上开一个上下文；`body` 返回后释放上下文与库，程序
+  没有 `free` 的缓冲随之释放。一个 kernel 的 cubin 在它第一次被 launch（或被 `module_global`
+  查询）时装载，本次安装内复用。
+- 驱动的拒绝原样交出，kind 是 `cuda.<CUresult 名>`；没有 libcuda 可装载答 `gpu.no_driver`；
+  驱动装不了 cubin 所用的 ELF ABI 时答 `gpu.driver_too_old`，cubin 不交给装载器。
+- **JVM 与 wasm 上没有设备运行时**：凡碰设备的操作答 `gpu.unsupported_backend`，handler 原样
+  交出。真设备 handler 不检查实参的个数与格式是否与 kernel 入口相符。
+
+**两个 handler 之间的契约**：
+
+- 同一个 `!Gpu` 函数不改一个字，在两个 handler 下都能运行。
+- 不碰设备的拒绝在两个 handler 下 kind 相同：`gpu.unsupported_dtype`、`gpu.no_such_buffer`、
+  `gpu.no_kernel`、`gpu.no_arguments`。在真设备一侧，这些答案在任何后端、有没有驱动都一样。
+- 对一个 kernel K 与登记在假设备表里、与它同名的参考实现 R：假设备答的值**必须**等于真设备
+  运行 K 答的值。**逐位档**的 kernel 整段缓冲逐位相等（分得清 `-0.0` 与 `0.0`）；**容差档**的
+  kernel 逐元素满足 `|got - want| <= atol + rtol * |want|`，`atol = rtol = 1e-5`。档位是 kernel
+  的属性，由层 2 的对拍程序声明，判据见 [`tile-backend-design.md`](tile-backend-design.md) §6.6。
+  这条义务落在写这一对 K、R 的人身上：编译器与 std 都不检查它，下面的层 2 检查它。
+
+**跨界的类型**：宿主与设备之间只过缓冲。
+
+- `Tensor[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式标记，`Tensor[F64]` 与
+  `Tensor[BF16]` 是两个类型，传错格式是类型错误而不是 launch 失败。句柄是 handler 签发的
+  不透明整数，程序从不编造它。
+- 格式标记有 15 个，各实现 `Dtype`（`dtype_name`、`dtype_bytes`），别的类型不实现它：
+  `F64`、`F32`、`BF16`、`I32`、`F16`、`I8`、`U8`、`I16`、`I64`、`TF32`、`F8E4M3FN`、`F8E5M2`、
+  `F8E8M0FNU`、`I4`、`F4E2M1FN`。
+- 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
+  `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
+  `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN` 只是 tile
+  的格式，没有这种缓冲。
+- 值以 `List[Float]` 进出，每种格式都是如此：`upload` 按缓冲格式舍入，或截断再回绕
+  （`round_to`），`download` 精确答出缓冲持有的值。这条通道对 `i32`、`i16`、`i8`、`u8` 无损，
+  对 `i64` 只在 ±2^53 之内精确。
+- **标量不过界**：launch 的实参只有缓冲句柄（每个入口参数都是指针）。宿主的数要进 kernel，
+  只能在记录时作为常量写进程序，或者放进缓冲。
+
+**机器核对**（在哪、核什么）：
+
+| 层 | 核什么 | 在哪 | 何时 |
+|----|--------|------|------|
+| 0 | 每个 kernel 记两次，记录相等；文本 golden（`*.mlir`）与字节码 golden（`*.tilebc`），两个后端逐字节 | `scripts/tile-golden/run.sh` | CI `tile.yml` |
+| 1 | 钉版本的 `tileiras --gpu-name sm_86` 接受每个字节码 golden：退出 0、输出里没有 `error:`、cubin 的符号表有 `GLOBAL FUNC <kernel>` | `scripts/tile-golden/run.sh` 的 assemble 步 | CI `tile.yml` |
+| 2 | 同一组 `!Gpu` 程序在两个 handler 下运行，按 kernel 的档位逐位或在容差内相等；JVM 上真设备 handler 在第一个操作答 `gpu.unsupported_backend` | `scripts/tile-gpu-diff/run.sh`，结果追加进台账 | 装有驱动的机器上，手动 |
+
+- 层 2 的台账 `scripts/tile-gpu-diff/ledger.txt`（sm_86）由 CI 的 `run.sh --check` 读取：末行
+  能解析，`inputs=` 摘要等于 HEAD 上 tile 路径的摘要，结果是 `pass` 或 `blocked:...`，工具链
+  文件的 `driver` 与 `tileiras` 行与它一致。`ledger-sm90.txt`、`ledger-sm100.txt` 是另两台
+  机器的记录，没有门读它们。
+- `scripts/tileir-features/check.py`（CI）把 opcode、类型 tag、属性值三张覆盖台账与写入器的
+  操作码表双向对账。
+- `dawn test --stdlib` 跑 `std/gpu` 的 test 块：假设备的行为，以及真设备 handler 不碰设备的拒绝。
+
+**不承诺的**：
+
+- 假设备与 kernel 一致。假设备只运行参考实现；参考与 kernel 的一致只由层 2 在台账记下的机器上
+  证明，台账之外的架构、驱动与 `tileiras` 版本没有证据。
+- `--check` 接受末行为 `blocked:...` 的台账：它证明有人在这棵树上跑过层 2、驱动答了什么，
+  不证明设备的答案到达了 CI。
+- 归约与扫描的折叠顺序：Tile IR 不规定树形，容差档 kernel 的逐位结果**未定义**。
+- 实参个数或格式与 kernel 入口不符时真设备的行为：**未定义**。
+- `i64` 缓冲中超出 ±2^53 的值经 `List[Float]` 通道往返。
+- 在 comptime 记录、编码或运行 kernel。
 
 ---
 
