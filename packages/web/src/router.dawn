@@ -6,9 +6,15 @@
 # just a different string. `tags` are opaque labels a route carries for
 # middleware to read (see `tagged`); patterns are literal segments plus `{name}`
 # captures, matched segment-exact.
+#
+# A route's body ceiling and its pre-body guard are typed fields set by
+# `body_limit` and `guarded`, not tags. Tags stay opaque labels: a
+# `max-body:<bytes>` tag would put a number in a string every reader has to
+# parse and every typo silently ignores, and a guard is a function, which no
+# string can carry.
 use std/str
 use std/map
-use types.{Request, Response, HttpError, Handler, RouteMeta, text, valid_header_name, escape_field}
+use types.{Request, Response, HttpError, Handler, Guard, RouteMeta, text, valid_header_name, escape_field}
 
 ## One route in a table: the HTTP method it answers, the path pattern it matches
 ## (literal segments plus `{name}` / trailing `{name*}` captures), the tags
@@ -21,39 +27,66 @@ pub type Route = {
   # (skip the JSON body limit) or "no-cors" (don't stamp Access-Control-*).
   tags: List[String],
   handler: Handler,
+  # this route's body ceiling in bytes; None inherits the server's (see
+  # `body_limit` below for what it means per body mode)
+  body_limit: Option[Int],
+  # the check run before the body is read; None runs none
+  guard: Option[Guard],
 }
 
-## A GET route for `pattern`, with no tags.
+## A GET route for `pattern`, with no tags, no body ceiling of its own and no
+## guard (the same holds for the constructors below).
 pub fn route_get(pattern: String, handler: Handler) -> Route =
-  Route { method: "GET", pattern: pattern, tags: [], handler: handler }
+  Route { method: "GET", pattern: pattern, tags: [], handler: handler, body_limit: None, guard: None }
 
 ## A POST route for `pattern`, with no tags.
 pub fn route_post(pattern: String, handler: Handler) -> Route =
-  Route { method: "POST", pattern: pattern, tags: [], handler: handler }
+  Route { method: "POST", pattern: pattern, tags: [], handler: handler, body_limit: None, guard: None }
 
 ## A PUT route for `pattern`, with no tags.
 pub fn route_put(pattern: String, handler: Handler) -> Route =
-  Route { method: "PUT", pattern: pattern, tags: [], handler: handler }
+  Route { method: "PUT", pattern: pattern, tags: [], handler: handler, body_limit: None, guard: None }
 
 ## A DELETE route for `pattern`, with no tags.
 pub fn route_delete(pattern: String, handler: Handler) -> Route =
-  Route { method: "DELETE", pattern: pattern, tags: [], handler: handler }
+  Route { method: "DELETE", pattern: pattern, tags: [], handler: handler, body_limit: None, guard: None }
 
 ## A route for any HTTP verb (OPTIONS/PROPFIND/MKCOL/MOVE/COPY/LOCK/... for
 ## WebDAV), with no tags. The verb is compared uppercase-exact, same as the
 ## sugar constructors above.
 pub fn route_method_of(verb: String, pattern: String, handler: Handler) -> Route =
-  Route { method: verb, pattern: pattern, tags: [], handler: handler }
+  Route { method: verb, pattern: pattern, tags: [], handler: handler, body_limit: None, guard: None }
 
 ## Attach tags to a route (records are immutable — returns a new Route). Tags
 ## accumulate, so `tagged(tagged(r, ["a"]), ["b"])` carries both.
 pub fn tagged(r: Route, tags: List[String]) -> Route =
   Route { ..r, tags: r.tags ++ tags }
 
-## The metadata the server hands middleware for the matched route (no handler,
-## so it can derive Show and travel inside a Request).
+## Give a route its own body ceiling, `n` bytes (a positive count; anything
+## else panics, as `start` does for `max_body`). On a route read into memory it
+## replaces the server's `max_body`, in either direction; on a "raw-body" route
+## it bounds what was otherwise unbounded; on a "stream-body" route the spill is
+## counted and stopped one byte past `n`. Over the ceiling is a 413, and a
+## spilled body's temp file is deleted.
+pub fn body_limit(r: Route, n: Int) -> Route =
+  if n > 0 {
+    Route { ..r, body_limit: Some(n) }
+  } else {
+    panic("route ${r.method} ${r.pattern}: body_limit must be a positive byte count, got ${n}")
+  }
+
+## Run `g` before this route's body is read. It sees the Request without the
+## body (captures, query and headers included); `Err(e)` is answered as `e`,
+## through the middleware chain, with no byte of the body read and no temp file
+## made. A later `guarded` replaces an earlier one: one route, one guard, and a
+## guard that wants two checks makes both.
+pub fn guarded(r: Route, g: Guard) -> Route =
+  Route { ..r, guard: Some(g) }
+
+## The metadata the server hands middleware for the matched route (no handler
+## and no guard, so it can derive Show and travel inside a Request).
 pub(pkg) fn route_meta(r: Route) -> RouteMeta =
-  RouteMeta { method: r.method, pattern: r.pattern, tags: r.tags }
+  RouteMeta { method: r.method, pattern: r.pattern, tags: r.tags, body_limit: r.body_limit }
 
 ## The dispatch decision: the matched route plus captured params, no path match at
 ## all, or a path that exists but not under this method (404 vs 405). Found carries
@@ -562,5 +595,26 @@ test "tags ride along on the matched route and reach RouteMeta" {
   match dispatch([r], "POST", "/api/fm/upload") {
     Found(route, _) -> { assert route.tags == ["raw-body"] }
     _ -> { assert false }
+  }
+}
+
+test "body_limit and guarded are typed fields; the ceiling reaches RouteMeta" {
+  let plain = route_put("/up", dummy)
+  assert plain.body_limit == None
+  assert route_meta(plain).body_limit == None
+  let r = guarded(body_limit(tagged(plain, ["stream-body"]), 1024), _rq => Ok(()))
+  assert r.body_limit == Some(1024)
+  assert r.tags == ["stream-body"]
+  assert route_meta(r).body_limit == Some(1024)
+  match r.guard {
+    Some(_) -> { assert true }
+    None -> { assert false }
+  }
+  # a ceiling is a positive byte count, as max_body is
+  for bad in [0, -1] {
+    match catch_panic(() => body_limit(plain, bad)) {
+      Ok(_) -> { assert false }
+      Err(m) -> { assert str.contains(m.message, "body_limit must be a positive byte count") }
+    }
   }
 }

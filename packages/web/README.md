@@ -153,6 +153,43 @@ The router's dispatch machinery (`dispatch_segs`, `validate_routes`,
 `route_meta`, `Dispatch`) is package-private since 5.0: `start` is what runs
 it.
 
+## Per-route body ceiling and pre-body guard (5.1)
+
+Two typed fields on `Route`, set with builders in the style of `tagged`:
+
+```dawn
+let put = guarded(
+  body_limit(tagged(route_put("/dav/{rest*}", put_file), ["raw-body", "no-cors", "stream-body"]), 4294967296),
+  check_credentials,
+)
+```
+
+`guarded(route, g)` runs `g: fn(Request) -> Result[Unit, HttpError] !io` (the
+`Guard` alias) before the body is read, on every route whatever its body mode.
+The guard sees the Request without its body: method, path, captures, query,
+headers and route metadata are all there. `Err(e)` is answered as `e`, through
+the middleware chain like the early `400` and `413`, and no byte of the body is
+read and no temp file is made. A guard that panics is the application's `500`.
+
+`body_limit(route, n)` is the route's own ceiling, a positive byte count
+(anything else panics, as `max_body` does at `start`). On a route read into
+memory it replaces the server's `max_body`, upward or downward. On a `raw-body`
+route it bounds what is otherwise unbounded; without it a `raw-body` route is
+unbounded as before. On a `stream-body` route a `Content-Length` over it is
+refused before the temp file exists, and the spill counts as it writes, stops
+before the chunk that crosses the ceiling, deletes the partial file and answers
+`413`. `RouteMeta.body_limit` carries the value to middleware; the guard is a
+function and stays out of `RouteMeta`.
+
+Until 5.1 a `stream-body` route spilled the whole body to disk before any
+handler code ran, with no ceiling of its own. A handler that checked
+credentials did so after the upload was already written, so an anonymous
+client could fill the temp directory one `401` at a time, and only a reverse
+proxy in front bounded the size. Both shapes are fields rather than tags on
+purpose: a `max-body:<bytes>` tag is a number inside a string that every reader
+has to parse and every typo silently ignores, and a guard is a function, which
+no tag can carry.
+
 ## CORS and OPTIONS (2.1)
 
 `with_cors` answers a **preflight** itself and lets everything else through to

@@ -6,7 +6,7 @@ use std/str
 use std/bytes
 use std/list
 use std/map
-use std/io.{delete, Deleted, NotFound, with_fs_real}
+use std/io.{delete, Deleted, NotFound, with_fs_real, list_dir}
 use java "com.sun.net.httpserver.HttpServer"
 use java "com.sun.net.httpserver.HttpExchange"
 use java "com.sun.net.httpserver.Headers"
@@ -19,8 +19,8 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, streaming_sized, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, tagged}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, streaming_sized, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
@@ -38,6 +38,7 @@ use java "java.io.ByteArrayOutputStream"
 use java "java.io.FileInputStream"
 use java "java.util.ArrayList"
 use java "java.lang.System"
+use java "java.lang.Long"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -480,13 +481,54 @@ fn bodyless_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = 
   }
 }
 
-fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, errors: ErrorFormat) -> Result[Request, HttpError] !io = {
+# The route's guard, if it has one, as the server calls it: on the bodyless
+# Request with the matched captures filled in, since a check on a path-shaped
+# route (WebDAV's `/dav/{rest*}`) is usually a check on the path.
+fn guard_of(d: Dispatch) -> Option[Guard] =
+  match d {
+    Found(route, params) ->
+      match route.guard {
+        Some(g) -> Some((rq: Request) => g(Request { ..rq, params: params }))
+        None -> None
+      }
+    NoPath -> None
+    WrongMethod -> None
+  }
+
+# Run the guard. A guard that panics is a bug, answered the way a panicking
+# handler is: the application's own 500 wording, and the reason in the log.
+fn run_guard(guard: Option[Guard], req: Request, fmt: ErrorFormat) -> Result[Unit, HttpError] !io =
+  match guard {
+    None -> Ok(())
+    Some(g) ->
+      match catch_panic(() => g(req)) {
+        Ok(r) -> r
+        Err(m) -> {
+          println("route guard panicked: ${m.message}")
+          Err(http_error(500, fmt.internal_message))
+        }
+      }
+  }
+
+fn build_request(
+  ex: HttpExchange,
+  meta: Option[RouteMeta],
+  guard: Option[Guard],
+  max_body: Int,
+  errors: ErrorFormat,
+) -> Result[Request, HttpError] !io = {
   # A "stream-body" route never sees the body in memory: it goes to a temp file
-  # and the handler gets the path. Everything else reads as before, under the
-  # ceiling — except routes tagged "raw-body" (uploads bounded by nginx's
-  # client_max_body_size instead), which opt out of it.
+  # and the handler gets the path, bounded by the route's own `body_limit` when
+  # it has one and unbounded when it does not. Everything else reads into
+  # memory under a ceiling: the route's `body_limit` when it has one, else the
+  # server's `max_body`, except that a route tagged "raw-body" (uploads bounded
+  # by nginx's client_max_body_size instead) has no ceiling unless it sets one.
   let streaming = meta_has_tag(meta, "stream-body")
-  let limit: Option[Int] = if meta_has_tag(meta, "raw-body") { None } else { Some(max_body) }
+  let own: Option[Int] = match meta {
+    Some(m) -> m.body_limit
+    None -> None
+  }
+  let limit: Option[Int] = if meta_has_tag(meta, "raw-body") { own } else { Some(unwrap_or(own, max_body)) }
   # Every other field is read off the exchange *before* the spill, on purpose:
   # the spill is the only step that leaves something on disk, so once it has
   # succeeded nothing between it and the returned Request may fail. All that is
@@ -494,8 +536,12 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
   # inside the record literal, after the spill — a malformed request line
   # faulting there left the temp file with no owner.)
   let base = bodyless_request(ex, meta)
+  # The guard goes first, before anything reads the body or makes a file. A
+  # check that lives in the handler runs after both, which on a "stream-body"
+  # route meant an anonymous PUT was written to disk in full before its 401.
+  run_guard(guard, base, errors)?
   let body = if streaming { bytes.utf8("") } else { read_body(ex, limit)? }
-  let bf: Option[String] = if streaming { Some(spill_body(errors, ex)?) } else { None }
+  let bf: Option[String] = if streaming { Some(spill_body(errors, ex, own)?) } else { None }
   Ok(Request { ..base, body: body, body_file: bf })
 }
 
@@ -511,10 +557,18 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, error
 # and left the file on disk forever — interrupted uploads accumulated until the
 # temp directory filled.
 #
-# The failure the client is told about is the application's own 500 wording
-# (ErrorFormat.internal_message), not a fourth string this framework renders on
-# its own; what actually went wrong goes to the log, where it belongs.
-fn spill_with(fmt: ErrorFormat, make: fn() -> File !io, fill: fn(FileOutputStream) -> Unit !io) -> Result[String, HttpError] !io = {
+# `fill` has two ways to fail and they are different answers. An `Err` is a
+# refusal it decided on (the body ran past the route's ceiling), and goes out as
+# that error, a 413 and not a 500. A panic or a Java exception is a spill that
+# broke (the client hung up, the disk filled), and for that the client is told
+# the application's own 500 wording (ErrorFormat.internal_message), not a fourth
+# string this framework renders on its own; what actually went wrong goes to
+# the log, where it belongs. The file is deleted on both.
+fn spill_with(
+  fmt: ErrorFormat,
+  make: fn() -> File !io,
+  fill: fn(FileOutputStream) -> Result[Unit, HttpError] !io,
+) -> Result[String, HttpError] !io = {
   let tmp = make()
   let path = String.valueOf(tmp.getPath()!)!
   let filled = catch_panic(() => {
@@ -522,7 +576,11 @@ fn spill_with(fmt: ErrorFormat, make: fn() -> File !io, fill: fn(FileOutputStrea
     fill(out)
   })
   match filled {
-    Ok(_) -> Ok(path)
+    Ok(Ok(_)) -> Ok(path)
+    Ok(Err(e)) -> {
+      delete_quietly(path)
+      Err(e)
+    }
     Err(m) -> {
       println("request body spill failed: ${m.message}")
       delete_quietly(path)
@@ -531,16 +589,57 @@ fn spill_with(fmt: ErrorFormat, make: fn() -> File !io, fill: fn(FileOutputStrea
   }
 }
 
-# Stream the request body to a temp file, 8KB at a time (transferTo's buffer), and
-# return its path. Constant memory whatever the file's size — the point of the
-# whole exercise. The Request owns the path from here on; `drop_body_file`
-# deletes it once the handler is done.
-fn spill_body(fmt: ErrorFormat, ex: HttpExchange) -> Result[String, HttpError] !io =
-  spill_with(fmt, () => File.createTempFile("dawn-put-", ".tmp")!, out => {
-    let stream = ex.getRequestBody()!
-    let _n = stream.transferTo(out)
-    ()
-  })
+# Stream the request body to a temp file, 8KB at a time, and return its path.
+# Constant memory whatever the file's size, the point of the whole exercise.
+# The Request owns the path from here on; `drop_body_file` deletes it once the
+# handler is done.
+#
+# `limit` is the route's own ceiling. A Content-Length over it is refused
+# before the temp file exists; a body that runs over it anyway (no length, or a
+# length that lied) is stopped one chunk past the ceiling at most, never
+# written past it, and the partial file is deleted by `spill_with`. This used
+# to be a single `transferTo`, which cannot be stopped partway and does not
+# count until it is done, so a stream-body route had no ceiling at all and
+# only a reverse proxy in front stood between a client and the disk.
+fn spill_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[String, HttpError] !io = {
+  match limit {
+    Some(n) ->
+      if declared_length(ex) > n {
+        return Err(http_error(413, "request body exceeds ${n} bytes"))
+      }
+    None -> ()
+  }
+  spill_with(fmt, () => File.createTempFile("dawn-put-", ".tmp")!, out => copy_bounded(ex.getRequestBody()!, out, limit))
+}
+
+# The spill's read size: the buffer transferTo used, kept so a large PUT costs
+# what it did before.
+const SPILL_CHUNK: Int = 8192
+
+# Copy `stream` to `out` a chunk at a time, counting. Past `limit` it stops
+# before writing the chunk that crossed it and answers 413.
+fn copy_bounded(stream: InputStream, out: FileOutputStream, limit: Option[Int]) -> Result[Unit, HttpError] !io = {
+  var total = 0
+  var more = true
+  while more {
+    let chunk = stream.readNBytes(SPILL_CHUNK)!
+    let k = bytes.len(chunk)
+    if k == 0 {
+      more = false
+    } else {
+      total = total + k
+      match limit {
+        Some(n) ->
+          if total > n {
+            return Err(http_error(413, "request body exceeds ${n} bytes"))
+          }
+        None -> ()
+      }
+      out.write(chunk)
+    }
+  }
+  Ok(())
+}
 
 fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 
@@ -636,8 +735,9 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
     # segment instead of minting a route boundary.
     let d = dispatch_segs(routes, ex.getRequestMethod()!, map(raw_segs(raw_path), s => decode_path_seg(s)))
     let meta = meta_of(d)
-    # The two refusals below happen before the body is read, and used to happen
-    # before the middleware chain as well, on the grounds that there was no
+    # The refusals below (a dot segment, the route's guard, a body over its
+    # ceiling) happen before the body is read. The first and the last used to
+    # happen before the middleware chain as well, on the grounds that there was no
     # Request to hand it. There is: everything a Request holds apart from the
     # body comes off the request line and the headers, and `bodyless_request`
     # reads exactly that. So they go through the chain like every other answer,
@@ -645,7 +745,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
     # without which a browser refuses to let the page read the error body, the
     # one case where reading it matters most (LIB-10).
     #
-    # What the middleware sees on these two paths is honest but partial: `raw`
+    # What the middleware sees on these paths is honest but partial: `raw`
     # and `body` are empty, because not reading the body is the entire point of
     # refusing this early. A middleware that inspects the body sees an empty one
     # here; one that inspects the method, path, headers or route tags sees the
@@ -663,9 +763,11 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
         println("${ex.getRequestMethod()!} ${raw_path} -> 400 (dot segment)")
         Err(http_error(400, "path contains a dot segment"))
       } else {
-        # an oversized body is refused before it is read, which is the whole
-        # value of the refusal; a spill that failed is a 500 the same way
-        match build_request(ex, meta, max_body, errors) {
+        # a guard's refusal and an oversized body are both answered before the
+        # body is read, which is the whole value of refusing; a spill that went
+        # over the route's ceiling is a 413 and one that failed is a 500, the
+        # same way
+        match build_request(ex, meta, guard_of(d), max_body, errors) {
           Err(e) -> {
             println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
             Err(e)
@@ -1673,7 +1775,10 @@ test "an interrupted spill deletes its temp file instead of leaking it" {
 test "a completed spill hands its path over, and the Request is what drops it" {
   let tmp = a_temp_file()
   let path = String.valueOf(tmp.getPath()!)!
-  match spill_with(default_errors(), () => tmp, out => out.write(bytes.utf8("hello"))) {
+  match spill_with(default_errors(), () => tmp, out => {
+    out.write(bytes.utf8("hello"))
+    Ok(())
+  }) {
     Err(_) -> { assert false }
     Ok(p) -> {
       # ownership transferred: the file is still there, and it is the caller's
@@ -1688,4 +1793,178 @@ test "a completed spill hands its path over, and the Request is what drops it" {
       assert file_exists(p) == false
     }
   }
+}
+
+# ---- per-route body ceiling and pre-body guard (5.1) ----
+
+# Test-only: the names of the spill files in the JVM's temp directory right
+# now. A spill that left something behind shows up as a name in the second
+# snapshot that the first one lacks.
+fn spill_files() -> List[String] !io = {
+  let dir = unwrap_or(System.getProperty("java.io.tmpdir"), "/tmp")
+  match with_fs_real(() => list_dir(dir)) {
+    Ok(names) -> filter(names, n => str.starts_with(n, "dawn-put-"))
+    Err(e) -> panic("spill_files: " ++ e.message)
+  }
+}
+
+fn new_since(before: List[String], after: List[String]) -> List[String] =
+  filter(after, n => list.find(before, b => b == n) == None)
+
+# Test-only: a request whose body goes out chunked, with no Content-Length, so
+# the server cannot refuse it on the declared length and has to count.
+fn send_chunked(port: Int, method: String, path: String, extra: String, body: String) -> String !io = {
+  let n = bytes.len(bytes.utf8(body))
+  raw_http(port,
+    method ++ " " ++ path ++ " HTTP/1.1\r\nHost: t\r\n" ++ extra ++
+      "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
+      String.valueOf(Long.toHexString(n)!)! ++ "\r\n" ++ body ++ "\r\n0\r\n\r\n")
+}
+
+# Test-only: a request with an exact Content-Length.
+fn send_sized(port: Int, method: String, path: String, extra: String, body: String) -> String !io =
+  raw_http(port,
+    method ++ " " ++ path ++ " HTTP/1.1\r\nHost: t\r\n" ++ extra ++
+      "Content-Length: ${to_string(bytes.len(bytes.utf8(body)))}\r\nConnection: close\r\n\r\n" ++ body)
+
+# A stream-body handler that reports how much landed on disk.
+fn spilled_size(req: Request) -> Result[Response, HttpError] !io =
+  match req.body_file {
+    Some(p) -> Ok(text(200, "size=${to_string(File.new(p).length())}"))
+    None -> Ok(text(500, "no body file"))
+  }
+
+# The guard shape a WebDAV PUT wants: credentials first, and the path is read
+# off the captures the server filled in.
+fn need_token(req: Request) -> Result[Unit, HttpError] !io =
+  if header(req, "Authorization") != Some("Bearer ok") {
+    Err(HttpError { ..http_error(401, "unauthorized"), headers: [("WWW-Authenticate", "Bearer")] })
+  } else if param_segs(req, "rest") == ["locked"] {
+    Err(http_error(403, "locked"))
+  } else {
+    Ok(())
+  }
+
+fn panicking_guard(_req: Request) -> Result[Unit, HttpError] !io = panic("guard bug")
+
+test "a counted spill stops past the ceiling with a 413 and deletes its file" {
+  let tmp = a_temp_file()
+  let path = String.valueOf(tmp.getPath()!)!
+  # more than one chunk, so the count crosses the ceiling mid-stream
+  let over = bytes.utf8(str.repeat("x", 20000))
+  match spill_with(default_errors(), () => tmp, out => copy_bounded(test_stream_of(over), out, Some(10000))) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.status == 413
+      assert e.message == "request body exceeds 10000 bytes"
+    }
+  }
+  assert file_exists(path) == false
+  # exactly the ceiling is accepted, byte for byte
+  let tmp2 = a_temp_file()
+  let exact = bytes.utf8(str.repeat("y", 10000))
+  match spill_with(default_errors(), () => tmp2, out => copy_bounded(test_stream_of(exact), out, Some(10000))) {
+    Err(_) -> { assert false }
+    Ok(p) -> {
+      assert File.new(p).length() == 10000
+      delete_quietly(p)
+    }
+  }
+}
+
+test "a stream-body route's body_limit is a 413 that leaves no temp file" {
+  let routes = [
+    body_limit(tagged(route_put("/up", spilled_size), ["raw-body", "stream-body"]), 10),
+    tagged(route_put("/free", spilled_size), ["raw-body", "stream-body"]),
+  ]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [stamping], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let before = spill_files()
+  # exactly the ceiling reaches the handler, all of it on disk
+  let ok = send_chunked(port, "PUT", "/up", "", "0123456789")
+  assert str.starts_with(ok, "HTTP/1.1 200")
+  assert str.contains(ok, "size=10")
+  # one byte over with no Content-Length: counted during the spill
+  let counted = send_chunked(port, "PUT", "/up", "", "0123456789A")
+  assert str.starts_with(counted, "HTTP/1.1 413")
+  assert str.contains(counted, "request body exceeds 10 bytes")
+  assert str.contains(str.to_lower(counted), "x-stamped: 1")
+  # far over, across several spill chunks
+  assert str.starts_with(send_chunked(port, "PUT", "/up", "", str.repeat("z", 20000)), "HTTP/1.1 413")
+  # one byte over by Content-Length: refused before the temp file exists
+  assert str.starts_with(send_sized(port, "PUT", "/up", "", "0123456789A"), "HTTP/1.1 413")
+  # a stream-body route with no ceiling of its own is unbounded, as before
+  assert str.contains(send_chunked(port, "PUT", "/free", "", "0123456789A"), "size=11")
+  srv.stop(0)
+  assert new_since(before, spill_files()) == []
+}
+
+test "a guard's refusal is answered before the body is read, through the middleware" {
+  let routes = [
+    guarded(body_limit(tagged(route_put("/dav/{rest*}", spilled_size), ["raw-body", "stream-body"]), 10), need_token),
+    guarded(route_post("/p", hello_handler), need_token),
+    guarded(route_post("/bug", hello_handler), panicking_guard),
+  ]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  # max_body 4, so the five-byte POST below is over the server's ceiling too
+  srv.createContext("/", ex => handle(routes, [stamping], 4, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let before = spill_files()
+  # anonymous and over the route's ceiling: the guard's 401 wins over the 413,
+  # which is only possible if the guard ran before anything counted the body
+  let anon = send_sized(port, "PUT", "/dav/a.txt", "", "0123456789A")
+  assert str.starts_with(anon, "HTTP/1.1 401")
+  assert str.contains(str.to_lower(anon), "www-authenticate: bearer")
+  assert str.contains(str.to_lower(anon), "x-stamped: 1")
+  let anon_chunked = send_chunked(port, "PUT", "/dav/a.txt", "", str.repeat("z", 20000))
+  assert str.starts_with(anon_chunked, "HTTP/1.1 401")
+  # the guard sees the captures
+  let locked = send_sized(port, "PUT", "/dav/locked", "Authorization: Bearer ok\r\n", "abc")
+  assert str.starts_with(locked, "HTTP/1.1 403")
+  # with credentials the body is spilled and the handler runs
+  let ok = send_sized(port, "PUT", "/dav/a.txt", "Authorization: Bearer ok\r\n", "hello")
+  assert str.starts_with(ok, "HTTP/1.1 200")
+  assert str.contains(ok, "size=5")
+  # an in-memory route: 401 rather than the 413 its five bytes would earn
+  let mem = send_sized(port, "POST", "/p", "", "hello")
+  assert str.starts_with(mem, "HTTP/1.1 401")
+  assert str.contains(str.to_lower(mem), "x-stamped: 1")
+  # a guard that panics is the application's 500, still through the chain
+  let bug = send_sized(port, "POST", "/bug", "", "")
+  assert str.starts_with(bug, "HTTP/1.1 500")
+  assert str.contains(str.to_lower(bug), "x-stamped: 1")
+  srv.stop(0)
+  assert new_since(before, spill_files()) == []
+}
+
+test "an in-memory route's body_limit replaces max_body, in both directions" {
+  let routes = [
+    body_limit(route_post("/raised", echo_body_text), 16),
+    body_limit(route_post("/lowered", echo_body_text), 4),
+    body_limit(tagged(route_post("/raw-capped", echo_body_text), ["raw-body"]), 4),
+    tagged(route_post("/raw", echo_body_text), ["raw-body"]),
+    route_post("/plain", echo_body_text),
+  ]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], 8, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # raised: twelve bytes are over the server's 8 and under the route's 16
+  assert str.starts_with(send_sized(port, "POST", "/raised", "", "twelve bytes"), "HTTP/1.1 200")
+  assert str.starts_with(send_sized(port, "POST", "/raised", "", str.repeat("r", 17)), "HTTP/1.1 413")
+  # lowered: five bytes are under the server's 8 and over the route's 4
+  let low = send_sized(port, "POST", "/lowered", "", "hello")
+  assert str.starts_with(low, "HTTP/1.1 413")
+  assert str.contains(low, "request body exceeds 4 bytes")
+  assert str.starts_with(send_chunked(port, "POST", "/lowered", "", "hello"), "HTTP/1.1 413")
+  assert str.starts_with(send_sized(port, "POST", "/lowered", "", "four"), "HTTP/1.1 200")
+  # a raw-body route is unbounded unless it sets a ceiling
+  assert str.starts_with(send_sized(port, "POST", "/raw-capped", "", "hello"), "HTTP/1.1 413")
+  assert str.starts_with(send_sized(port, "POST", "/raw", "", "twelve bytes"), "HTTP/1.1 200")
+  # and a route with neither keeps the server's ceiling
+  assert str.starts_with(send_sized(port, "POST", "/plain", "", "twelve bytes"), "HTTP/1.1 413")
+  srv.stop(0)
 }
