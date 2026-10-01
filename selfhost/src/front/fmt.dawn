@@ -33,7 +33,7 @@ use front/token.{
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
   AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
-  BANG, AT
+  BANG
 }
 
 ## Reformat `source`, or report the lexer diagnostics that make reformatting
@@ -603,7 +603,6 @@ fn space(prev: Token, cur: Token, marks: Marks, on_use_line: Bool) -> Bool = {
   if p == BANG && not set.has(postfix, prev.lo) { return false }
   # `~` is always prefix bitwise-not; it hugs its operand like unary `-`
   if p == TILDE { return false }
-  if p == AT { return false }
   # calls / indexing / generics: name(..), name[..], no space before the bracket
   if c == LPAREN && is_callable_before_paren(p) { return false }
   if c == LBRACKET && is_value_end(p) { return false }
@@ -682,9 +681,6 @@ fn fmt_exempt(k: TokKind) -> Bool =
     COMMA -> true
     # never the last code token of a line: reflow's stream drops NEWLINE
     NEWLINE -> true
-    # no production uses `@` (#194); if that ruling removes the token, this
-    # arm goes with it
-    AT -> true
     _ -> false
   }
 
@@ -853,7 +849,7 @@ test "the formatter's continuation set is the lexer's minus its exemptions" {
   # every token kind the lexer produces from punctuation, plus NEWLINE
   let (toks, _) = lexer.lex(
     "+ - * / % ++ |> | && || & ^ << >> >>> == != < <= > >= , ( ) [ ] { } " ++
-      "-> <- => = : . .. ? ! ~ @ not\nx"
+      "-> <- => = : . .. ? ! ~ not\nx"
   )
   assert len(toks) > 40
   for t in toks {

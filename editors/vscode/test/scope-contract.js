@@ -68,7 +68,7 @@ function compilerOperators() {
   const kinds = [...tokenSource.slice(typeStart, typeEnd).matchAll(/^\s*\|\s+([A-Z][A-Z0-9_]*)\s*$/gm)]
     .map(match => match[1]);
   const first = kinds.indexOf("DOTDOT");
-  const last = kinds.indexOf("AT");
+  const last = kinds.indexOf("BANG");
   assert.ok(first >= 0 && last >= first, "operator TokKind range is missing");
   const operatorKinds = kinds.slice(first, last + 1).filter(kind => kind !== "UNDERSCORE");
 

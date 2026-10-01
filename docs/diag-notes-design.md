@@ -1,6 +1,6 @@
 # 诊断的次级位置：`Diag.notes`
 
-> 状态：**current**。2026-10-01，批 B6，issue #195（第 2 步），分支 `feat/diag-notes`；已实现（提交见文末）。
+> 状态：**current**。2026-10-01，批 B6，issue #195（第 2 步）与尾刀 #194，分支 `feat/diag-notes`；已实现（提交见文末）。
 > 前置：第 1 步（主 span 放在嫌疑开括号）已由 #280 合入，见 [parser-recovery-design.md](parser-recovery-design.md) §5。
 > 裁决出处：调研报告 `research-diagnostics-issues-20260930.md` §7、`research-issue-severity-20261001.md` §#195（不在仓内）。
 
@@ -135,3 +135,4 @@ note: expected `}` before the end of the file
 | 设计 | `Design secondary locations on diagnostics` | — |
 | 构造收口 | `Build every diagnostic through one constructor` | 与真父提交的冻结工具链对拍：fmt/lsp/run 三差分与十个 emit 目标逐字节相同 |
 | `notes` 字段、渲染、`relatedInformation`、未闭合括号的 note | `Point a diagnostic at secondary locations with notes` | 去掉 `diagnostic_json` 的能力判断：LSP 内联测试红；`place_unclosed` 不挂 note：三个 `unclosed_*` 例红 |
+| #194 删 `@` | `Remove the @ token, which no production ever used` | 恢复 `AT` 与 lexer 表项：lexer 测试 `` `@` is not a token `` 红；只在 tmLanguage 里留 `@`：scope contract 红 |
