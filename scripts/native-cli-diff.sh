@@ -90,6 +90,17 @@ fi
 # a relative one would resolve against the wrong place if that ever changes
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 
+# Both drivers on the same std. Neither reads the working directory's `std`
+# any more (#291): with no `--std` a command takes DAWN_STD, then the copy
+# compiled in. ./bin/dawn exports DAWN_STD=$ROOT/std for the JVM side; dawnc
+# has no launcher, so without this line it would answer every pair below from
+# its embedded copy while the JVM answered from the checkout. The two hold the
+# same text, but not the same provenance: a definition into std names a file
+# only when a directory supplied it, and leg 4's session asks for exactly that.
+# The leg that tests the resolution itself sets the variable per command.
+DAWN_STD="$ROOT/std"
+export DAWN_STD
+
 fail=0
 PAIR_J=0
 PAIR_N=0
@@ -332,6 +343,95 @@ run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
 if [ "${NATIVE_CLI_RUN_ONLY:-}" = 1 ]; then
   [ "$fail" = 0 ] || { echo "FAIL: run argv boundary contract"; exit 1; }
   echo "OK: run argv boundary matches the absolute contract on both backends"
+  exit 0
+fi
+
+# ---- leg 0c: where a command's std comes from, both drivers ----
+# #291: `--std <dir>`, else DAWN_STD (non-empty), else the copy compiled into
+# the toolchain; never the working directory. The inline test on
+# `std_choice` in selfhost/src/driver/stdlib.dawn pins the order; this leg
+# pins that both drivers' command lines reach it, on real processes and real
+# directories.
+#
+# The probe tells the stds apart by what they compute, not by a message: a
+# complete std (modules.txt and this release's VERSION, so nothing about it is
+# refused) whose `str.to_upper` lowers. It sits under the working directory as
+# `std/`, the exact shape that used to be loaded without being asked for.
+#
+# The JVM side runs the jar directly, not ./bin/dawn: the launcher exports
+# DAWN_STD from its own location, so "neither" cannot be said through it.
+# `env -u` takes away the DAWN_STD this script exported above.
+echo "== std resolution, JVM and native vs absolute contracts =="
+STDRES="$OUT/stdres"
+mkdir -p "$STDRES/cwd" "$STDRES/elsewhere"
+cp -R "$ROOT/std" "$STDRES/cwd/std"
+STDRES_LINE='pub fn to_upper(s: String) -> String = str_upper(s)'
+if [ "$(grep -cxF "$STDRES_LINE" "$STDRES/cwd/std/str.dawn")" != 1 ]; then
+  echo "FAIL: std/str.dawn no longer defines to_upper as: $STDRES_LINE"
+  exit 1
+fi
+sed -i 's/^pub fn to_upper(s: String) -> String = str_upper(s)$/pub fn to_upper(s: String) -> String = str_lower(s)/' \
+  "$STDRES/cwd/std/str.dawn"
+LOWERING_STD="$STDRES/cwd/std"
+cat > "$STDRES/cwd/up.dawn" <<'EOF'
+use std/str
+
+pub fn main() -> Unit !io = println(str.to_upper("Hello"))
+EOF
+STDRES_JAVA=$(DAWN_LAUNCHER_PRINT_JAVA=1 ./bin/dawn)
+
+## Run one argv from directory `dir`, through the jar and through dawnc, each
+## with the environment given; both must print exactly `want`.
+std_expect() { # want label dir env-args -- dawn-args...
+  local want=$1
+  local label=$2
+  local dir=$3
+  shift 3
+  local envs=()
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  (cd "$dir" && env "${envs[@]}" "$STDRES_JAVA" -Xss512m -Xmx2g \
+    -jar "$ROOT/build/dawn-selfhost.jar" "$@") > "$OUT/j.out" 2> "$OUT/j.err" \
+    && PAIR_J=0 || PAIR_J=$?
+  (cd "$dir" && env "${envs[@]}" "$DAWNC" "$@") > "$OUT/n.out" 2> "$OUT/n.err" \
+    && PAIR_N=0 || PAIR_N=$?
+  printf '%s\n' "$want" > "$OUT/expected.out"
+  if [ "$PAIR_J" != 0 ] || [ "$PAIR_N" != 0 ] ||
+    ! cmp -s "$OUT/j.out" "$OUT/expected.out" ||
+    ! cmp -s "$OUT/n.out" "$OUT/expected.out" ||
+    [ -s "$OUT/j.err" ] || [ -s "$OUT/n.err" ]
+  then
+    echo "FAIL: $label did not print $want on both backends (exits jvm=$PAIR_J native=$PAIR_N)"
+    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | head -10 || true
+    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | head -10 || true
+    echo "--- JVM stderr"; head -10 "$OUT/j.err"
+    echo "--- native stderr"; head -10 "$OUT/n.err"
+    fail=1
+  else
+    echo "OK   $label ($want on both, stderr empty, exit 0)"
+  fi
+}
+
+UP="$STDRES/cwd/up.dawn"
+# the #291 acceptance: a complete std under the working directory changes nothing
+std_expect HELLO "std (neither: the embedded copy, not ./std)" "$STDRES/cwd" \
+  -u DAWN_STD -- run "$UP"
+# an empty DAWN_STD names no directory
+std_expect HELLO "std (empty DAWN_STD: the embedded copy)" "$STDRES/cwd" \
+  DAWN_STD= -- run "$UP"
+# DAWN_STD selects that directory, from a cwd with no std/ of its own, so the
+# answer can only have come from the variable
+std_expect hello "std (DAWN_STD selects its directory)" "$STDRES/elsewhere" \
+  DAWN_STD="$LOWERING_STD" -- run "$UP"
+# and --std overrides it, in both directions
+std_expect HELLO "std (--std overrides DAWN_STD)" "$STDRES/elsewhere" \
+  DAWN_STD="$LOWERING_STD" -- run --std "$ROOT/std" "$UP"
+std_expect hello "std (--std overrides DAWN_STD, the other way)" "$STDRES/elsewhere" \
+  DAWN_STD="$ROOT/std" -- run --std "$LOWERING_STD" "$UP"
+
+if [ "${NATIVE_CLI_STD_ONLY:-}" = 1 ]; then
+  [ "$fail" = 0 ] || { echo "FAIL: std resolution contract"; exit 1; }
+  echo "OK: std resolution agrees across both backends and matches the absolute contract"
   exit 0
 fi
 
