@@ -1,0 +1,109 @@
+# The files a site has for visitors that are not readers: crawlers, link
+# checkers, and anyone who mistypes a URL.
+#
+# The live site answered 404 for /robots.txt, /sitemap.xml and /favicon.ico,
+# and its 404 page was nginx's own, which names the server and its version.
+# All four are written here, from the pages this generator has already
+# written, so that none of them is a hand-kept list that can go stale:
+#
+# - sitemap.xml lists every page in site/dist, read back from the disk after
+#   the pages are written, sorted so both backends write the same bytes;
+# - robots.txt allows everything and names the sitemap;
+# - 404.html is a page of the site like any other, with every link spelled
+#   from the site root, because nginx serves it at whatever path was missed
+#   (`error_page 404 /404.html`, in the server configuration, which lives
+#   outside this repository);
+# - favicon.ico at the root is the same bytes as the fingerprinted copy the
+#   pages link to, for the clients that ask for /favicon.ico without reading
+#   a page first.
+
+use std/str
+use std/io
+use std/io.{Fs}
+use html/escape.{escape_html}
+use html/page.{Assets, En, page, plain_assets, site_origin}
+use gen/common.{must_list, write_page}
+
+## Every `.html` under `dir`, relative to `out`, in no particular order.
+fn pages_under(out: String, rel: String) -> List[String] !Fs = {
+  let path = if rel == "" { out } else { "${out}/${rel}" }
+  var found: List[String] = []
+  for name in must_list(path) {
+    let child = if rel == "" { name } else { "${rel}/${name}" }
+    if io.is_dir("${out}/${child}") {
+      if child != "assets" {
+        found = found ++ pages_under(out, child)
+      }
+    } else if str.ends_with(name, ".html") {
+      found = found ++ [child]
+    }
+  }
+  found
+}
+
+## A written page's public URL: an `index.html` is advertised as its
+## directory, as the hreflang links do (html/page.site_url).
+pub fn page_url(rel: String) -> String =
+  site_origin() ++ str.strip_suffix(rel, "index.html").unwrap_or(rel)
+
+## The sitemap over `pages`, which the caller has already sorted.
+pub fn sitemap(pages: List[String]) -> String = {
+  let urls = map(filter(pages, p => p != "404.html"), p =>
+      "<url><loc>" ++ escape_html(page_url(p)) ++ "</loc></url>")
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    ++ "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" ++ join(urls, "\n")
+    ++ "\n</urlset>"
+}
+
+pub fn robots() -> String = "User-agent: *\nAllow: /\nSitemap: ${site_origin()}sitemap.xml"
+
+## The not-found page. English, with one line in Chinese pointing at the
+## Chinese front page: a missed URL says nothing about which language its
+## visitor reads. `root` is "" so that every link the shell writes starts with
+## `/` and resolves the same from any depth nginx serves it at.
+fn not_found(a: Assets) -> String =
+  page(a, En, "", "Page not found · Dawn", "", "",
+    "<h1>Page not found</h1>\n"
+      ++ "<p>There is no page at this address. It may have moved; the "
+      ++ """<a href="/index.html">front page</a>, the """
+      ++ """<a href="/tutorial/index.html">tutorial</a> and the Search button above """
+      ++ "reach everything on this site.</p>\n"
+      ++ """<p lang="zh-CN">这个地址没有页面。可以从<a href="/zh/index.html">中文首页</a>"""
+      ++ "开始，或者用上面的搜索。</p>")
+
+## Write all four. Called after every page is written, since the sitemap is
+## read off the disk, and before the link check, which then checks the 404
+## page like any other.
+pub fn gen_crawl(out: String, a: Assets) -> Unit !Fs !io = {
+  write_page("${out}/404.html", not_found(a))
+  write_page("${out}/sitemap.xml", sitemap(sort(pages_under(out, ""))))
+  write_page("${out}/robots.txt", robots())
+  match io.read_bytes("site/assets/favicon.ico") {
+    Ok(b) ->
+      match io.write_bytes("${out}/favicon.ico", b) {
+        Ok(_) -> println("  wrote ${out}/favicon.ico")
+        Err(e) -> panic("cannot write ${out}/favicon.ico: ${e}")
+      }
+    Err(e) -> panic("cannot read site/assets/favicon.ico: ${e}")
+  }
+}
+
+test "a sitemap names every page but the 404, index pages as their directory" {
+  let m = sitemap(["404.html", "index.html", "tutorial/03.html", "zh/index.html"])
+  assert str.contains(m, "<loc>https://dawn-lang.dawnop.com/</loc>")
+  assert str.contains(m, "<loc>https://dawn-lang.dawnop.com/tutorial/03.html</loc>")
+  assert str.contains(m, "<loc>https://dawn-lang.dawnop.com/zh/</loc>")
+  assert not str.contains(m, "404")
+  assert str.starts_with(m, "<?xml")
+}
+
+test "robots.txt allows everything and names the sitemap" {
+  assert robots() == "User-agent: *\nAllow: /\nSitemap: https://dawn-lang.dawnop.com/sitemap.xml"
+}
+
+test "the 404 page links from the site root" {
+  let p = not_found(plain_assets())
+  assert str.contains(p, `href="/assets/style.css"`)
+  assert str.contains(p, `<a href="/index.html">front page</a>`)
+  assert str.contains(p, `<a href="/zh/index.html">中文首页</a>`)
+}

@@ -198,7 +198,55 @@ fn nav_html(lang: Lang, root: String, active: String) -> String =
 ## the front page keeps advertising itself as `/` and `/zh/`.
 fn site_url(prefix: String, pair: String) -> String = {
   let clean = str.strip_suffix(pair, "index.html").unwrap_or(pair)
-  "https://dawn-lang.dawnop.com/" ++ prefix ++ clean
+  site_origin() ++ prefix ++ clean
+}
+
+## Where the site is served from, with the trailing slash. The one absolute
+## URL every other one is built on: hreflang, canonical, og:url, the sitemap.
+pub fn site_origin() -> String = "https://dawn-lang.dawnop.com/"
+
+## A page's own absolute URL, as `site_url` spells it for `lang`'s half of
+## the pair: what `rel=canonical` and `og:url` say. "" for a page with no
+## pair, which has no URL this shell can name.
+fn own_url(lang: Lang, pair: String) -> String =
+  if pair == "" {
+    ""
+  } else {
+    match lang {
+      En -> site_url("", pair)
+      Zh -> site_url("zh/", pair)
+    }
+  }
+
+## What a search engine or a link preview shows under the title. One sentence
+## per language for the whole site rather than one per page: every page is
+## either the language or a document about it, and a per-page summary would be
+## one more piece of prose per page to keep true.
+pub fn site_description(lang: Lang) -> String =
+  match lang {
+    En -> "Dawn is a small, elegant functional language: immutable data, algebraic data "
+      ++ "types with exhaustive matching, and effects in the type signature, compiled to "
+      ++ "JVM bytecode and C."
+    Zh -> "Dawn 是一门小而优雅的函数式语言：不可变数据、代数数据类型与穷尽匹配、写进类型签名的效果，"
+      ++ "编译到 JVM 字节码与 C。"
+  }
+
+## The <head> lines that say what the page is to something other than a
+## browser: the description, the page's own URL as canonical and as og:url,
+## and og:type. The URL lines are left out for a page with no pair.
+fn meta_html(lang: Lang, pair: String) -> String = {
+  let desc = escape_attr(site_description(lang))
+  let url = own_url(lang, pair)
+  let urls =
+    if url == "" {
+      ""
+    } else {
+      "\n" ++ """<link rel="canonical" href="${escape_attr(url)}">""" ++ "\n"
+        ++ """<meta property="og:url" content="${escape_attr(url)}">"""
+    }
+  """<meta name="description" content="${desc}">""" ++ "\n"
+    ++ """<meta property="og:description" content="${desc}">""" ++ "\n"
+    ++ """<meta property="og:type" content="website">""" ++ urls
 }
 
 ## The alternate-language <link>s, emitted only on the pages that really have
@@ -341,6 +389,7 @@ pub fn shell_ext(
 <link rel="icon" href="${root}/assets/${ico}" sizes="32x32">
 <link rel="apple-touch-icon" href="${root}/assets/${touch}">
 <meta property="og:title" content="${attr_title}">
+${meta_html(lang, pair)}
 <meta property="og:image" content="https://dawn-lang.dawnop.com/assets/${og}">
 <link rel="stylesheet" href="${root}/assets/${css}">
 <script src="${root}/assets/${sjs}" defer></script>
@@ -559,6 +608,20 @@ test "the footer follows the page's language and prints the build it was given" 
   let bare = shell(plain_assets(), En, "", "t", ".", "", "")
   assert str.contains(bare, "Built by a generator written in Dawn</div>")
   assert not str.contains(bare, "version")
+}
+
+test "a page says what it is and where it lives, in its own language" {
+  let en = page(plain_assets(), En, "tutorial/03.html", "t", "..", "tutorial", "")
+  assert str.contains(en, `<meta name="description" content="Dawn is a small, elegant`)
+  assert str.contains(en, `<meta property="og:description" content="Dawn is a small, elegant`)
+  assert str.contains(en, `<meta property="og:type" content="website">`)
+  assert str.contains(en, `<link rel="canonical" href="https://dawn-lang.dawnop.com/tutorial/03.html">`)
+  assert str.contains(en, `<meta property="og:url" content="https://dawn-lang.dawnop.com/tutorial/03.html">`)
+  let zh = page(plain_assets(), Zh, "index.html", "t", "..", "", "")
+  assert str.contains(zh, `<meta name="description" content="Dawn 是一门`)
+  assert str.contains(zh, `<link rel="canonical" href="https://dawn-lang.dawnop.com/zh/">`)
+  # no pair, no URL to name
+  assert not str.contains(page(plain_assets(), En, "", "t", ".", "", ""), "canonical")
 }
 
 test "only a page with a twin advertises one" {
