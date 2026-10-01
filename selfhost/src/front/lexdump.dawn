@@ -2,9 +2,23 @@
 # LexDump.kt, archived at kotlin-final). Byte-stable against the previous
 # release, which is what the differential checks. One line per token:
 #   TYPE<TAB>start<TAB>end<TAB>escaped-text[<TAB>extra...]
-# then one line per diagnostic: !<TAB>start<TAB>end<TAB>message<TAB>hint.
+# then one line per diagnostic: !<TAB>start<TAB>end<TAB>message<TAB>hint, and
+# per note <TAB>note<TAB>start<TAB>end<TAB>message.
 
 use front/token.{Token, Seg, SText, SCode, Diag, mk_diag, INT, FLOAT, STRING, kind_name}
+
+## A diagnostic's notes as trailing fields of its dump line,
+## `<TAB>note<TAB>start<TAB>end<TAB>message` each; nothing when it has none, so
+## a diagnostic without notes dumps as it always did. Fields rather than lines
+## of their own: the grammar corpus counts `!` lines as diagnostics, and a note
+## is not one.
+pub fn note_fields(d: Diag) -> String = {
+  var out = ""
+  for n in d.notes {
+    out = out ++ "\tnote\t" ++ to_string(n.lo) ++ "\t" ++ to_string(n.hi) ++ "\t" ++ esc(n.msg)
+  }
+  out
+}
 
 ## Escape for the dump line formats: backslash, newline, tab, CR.
 pub fn esc(v: String) -> String = {
@@ -49,7 +63,8 @@ pub fn render(toks: List[Token], diags: List[Diag]) -> String = {
   }
   for d in diags {
     lines = lines ++ [
-      "!\t" ++ to_string(d.lo) ++ "\t" ++ to_string(d.hi) ++ "\t" ++ esc(d.msg) ++ "\t" ++ esc(d.hint)
+      "!\t" ++ to_string(d.lo) ++ "\t" ++ to_string(d.hi) ++ "\t" ++ esc(d.msg) ++ "\t" ++
+        esc(d.hint) ++ note_fields(d)
     ]
   }
   join(lines, "\n")

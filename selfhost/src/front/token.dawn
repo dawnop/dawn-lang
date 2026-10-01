@@ -105,7 +105,16 @@ pub type Token = {
 ## checker that owns those keys.
 pub type DiagOwner = { module: String, decl: String }
 
-## One diagnostic. `hint` is empty when there is none.
+## A second place a diagnostic points at, with what to see there: the end
+## of file an unclosed `{` ran into, the line that took its closer. It lives
+## in the diagnostic's own file and is measured exactly like the diagnostic's
+## own `lo`/`hi` (see `Diag`), so the one function that resolves those
+## resolves these with the same base, and a reused diagnostic moves with all
+## its notes or with none of them.
+pub type Note = { msg: String, lo: Int, hi: Int }
+
+## One diagnostic. `hint` is empty when there is none; `notes` are its
+## secondary locations in source order, empty when there are none.
 ##
 ## `lo` and `hi` are absolute code-point offsets while `owner` is None, and
 ## offsets from the owning declaration's start once it is Some. A diagnostic
@@ -114,14 +123,22 @@ pub type DiagOwner = { module: String, decl: String }
 ## product keep its diagnostics rather than reprojecting them. Exactly one
 ## function turns the pair back into positions in the revision being rendered
 ## (`check/identity.absolute`); no other reader may read `lo`/`hi` without it.
-pub type Diag = { msg: String, lo: Int, hi: Int, hint: String, owner: Option[DiagOwner] }
+pub type Diag = {
+  msg: String,
+  lo: Int,
+  hi: Int,
+  hint: String,
+  owner: Option[DiagOwner],
+  notes: List[Note]
+}
 
-## The constructor every diagnostic goes through: absolute offsets, no owner.
+## The constructor every diagnostic goes through: absolute offsets, no owner,
+## no notes.
 ## Writing the record out at each site would make every new field a sweep
 ## over all of them; the checker's owner-relative diagnostics start from this
 ## one too (`check/cx.raised`) and set the owner on the copy.
 pub fn mk_diag(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
-  Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None }
+  Diag { msg: msg, lo: lo, hi: hi, hint: hint, owner: None, notes: [] }
 
 ## The Kotlin TokenType enum spelling, the vocabulary of the golden lex dump.
 pub fn kind_name(k: TokKind) -> String =

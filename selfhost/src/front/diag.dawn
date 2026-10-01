@@ -1,6 +1,8 @@
 # Human diagnostic rendering: `error: msg`, a `--> path:line:col` arrow, the
-# offending source line with a caret run under the span, and an optional
-# `= hint:` line. All offsets are **code-point indices** (the span currency of
+# offending source line with a caret run under the span, then one `note: msg`
+# block per secondary location (the same arrow, line and caret, rustc's form
+# for a sub-diagnostic that has a span; docs/diag-notes-design.md §3), and an
+# optional `= hint:` line. All offsets are **code-point indices** (the span currency of
 # the whole front end, see ast.dawn) — so the caret run lands under the
 # characters a reader counts, not under UTF-16 units.
 #
@@ -15,7 +17,7 @@ use std/io.{Fs}
 use std/char
 use std/map
 use front/lexer.{line_starts_of, view_of, slice_cp, SourceView}
-use front/token.{Diag, mk_diag}
+use front/token.{Diag, Note, mk_diag}
 
 ## UTF-16 length of `s` (surrogate pairs count as two units).
 pub fn utf16_len(s: String) -> Int = {
@@ -56,26 +58,33 @@ pub fn render(path: String, text: String, d: Diag) -> String =
 ## both walk the whole file, so callers with several diagnostics for one file
 ## prepare them once instead of once per diagnostic.
 fn render_at(path: String, v: SourceView, starts: List[Int], d: Diag) -> String = {
+  var out = "error: " ++ d.msg ++ "\n" ++ snippet(path, v, starts, d.lo, d.hi)
+  for n in d.notes { out = out ++ "note: " ++ n.msg ++ "\n" ++ snippet(path, v, starts, n.lo, n.hi) }
+  if d.hint != "" { out = out ++ "  = hint: " ++ d.hint ++ "\n" }
+  out
+}
+
+## The arrow, the source line and the caret run under `lo..hi`. A note's
+## block is drawn by the same function as the error's, so the two can never
+## disagree about columns or about where a run is clipped.
+fn snippet(path: String, v: SourceView, starts: List[Int], lo: Int, hi: Int) -> String = {
   let total = len(v.cps)
-  let li = line_index(starts, d.lo)
+  let li = line_index(starts, lo)
   let line = li + 1
   let line_start = starts[li]
   # column and caret run are counted in code points (one column per code point),
-  # the same currency as `d.lo` and the line starts.
-  let col = d.lo - line_start + 1
+  # the same currency as `lo` and the line starts.
+  let col = lo - line_start + 1
   let line_end = if li + 1 < len(starts) { starts[li + 1] - 1 } else { total }
   let src = slice_cp(v, line_start, line_end)
   let src_len = line_end - line_start
-  var out = "error: " ++ d.msg ++ "\n"
-  out = out ++ "  --> " ++ path ++ ":" ++ to_string(line) ++ ":" ++ to_string(col) ++ "\n"
+  var out = "  --> " ++ path ++ ":" ++ to_string(line) ++ ":" ++ to_string(col) ++ "\n"
   let line_no = to_string(line)
   let gutter = str.repeat(" ", str.len(line_no) + 1)
   out = out ++ gutter ++ "|\n"
   out = out ++ line_no ++ " | " ++ src ++ "\n"
-  let caret_len = min2(max2(d.hi - d.lo, 1), max2(src_len - (col - 1), 1))
-  out = out ++ gutter ++ "| " ++ str.repeat(" ", col - 1) ++ str.repeat("^", caret_len) ++ "\n"
-  if d.hint != "" { out = out ++ "  = hint: " ++ d.hint ++ "\n" }
-  out
+  let caret_len = min2(max2(hi - lo, 1), max2(src_len - (col - 1), 1))
+  out ++ gutter ++ "| " ++ str.repeat(" ", col - 1) ++ str.repeat("^", caret_len) ++ "\n"
 }
 
 ## `1 error` / `N errors` — the count line compile failures end with.
@@ -128,6 +137,27 @@ test "renders the arrow, source line, caret and hint" {
     "1 | fn f() -> Int = true\n" ++
     "  |                 ^^^^\n" ++
     "  = hint: return an Int\n"
+}
+
+test "a note renders its own block between the error and the hint" {
+  let text = "fn f() = {\n  g()\n"
+  let d = Diag {
+    ..mk_diag("unclosed `{`", 9, 10, "add the missing `}`"),
+    notes: [Note { msg: "the file ends here", lo: 17, hi: 17 }]
+  }
+  let r = render("a.dawn", text, d)
+  assert r ==
+    "error: unclosed `{`\n" ++
+    "  --> a.dawn:1:10\n" ++
+    "  |\n" ++
+    "1 | fn f() = {\n" ++
+    "  |          ^\n" ++
+    "note: the file ends here\n" ++
+    "  --> a.dawn:3:1\n" ++
+    "  |\n" ++
+    "3 | \n" ++
+    "  | ^\n" ++
+    "  = hint: add the missing `}`\n"
 }
 
 test "caret clamps to the line and to one unit minimum" {

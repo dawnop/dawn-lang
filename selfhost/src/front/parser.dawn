@@ -16,7 +16,7 @@
 use std/str
 use std/list
 use front/token.{
-  Token, TokKind, Seg, SText, SCode, Diag, mk_diag,
+  Token, TokKind, Seg, SText, SCode, Diag, Note, mk_diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
   FN, LET, VAR, TYPE, ALIAS, CONST, USE, PUB, TRAIT, IMPL, EFFECT,
   MATCH, IF, ELSE, FOR, WHILE, RETURN, BREAK, CONTINUE,
@@ -241,6 +241,19 @@ fn closer_of(k: TokKind) -> Option[TokKind] =
   else if k == LBRACE { Some(RBRACE) }
   else { None }
 
+fn closer_text(k: TokKind) -> String =
+  if k == LPAREN { ")" } else if k == LBRACKET { "]" } else { "}" }
+
+## Where the parse ran out, as a note on the unclosed-delimiter report: the
+## closer the parser was still waiting for when the file ended. `last_open` is
+## the innermost opener still open, whose closer is the one expected first.
+fn eof_note(last_open: Token, eof: Token) -> Note =
+  Note {
+    msg: "expected `" ++ closer_text(last_open.kind) ++ "` before the end of the file",
+    lo: eof.lo,
+    hi: eof.hi
+  }
+
 fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
 
 ## The column of the first non-blank character on the line holding `off`.
@@ -250,16 +263,6 @@ fn indent_at(cps: List[Char], off: Int) -> Int = {
   var n = 0
   while i + n < len(cps) && (cps[i + n] == ' ' || cps[i + n] == '\t') { n = n + 1 }
   n
-}
-
-fn line_at(cps: List[Char], off: Int) -> Int = {
-  var line = 1
-  var i = 0
-  while i < off && i < len(cps) {
-    if cps[i] == '\n' { line = line + 1 }
-    i = i + 1
-  }
-  line
 }
 
 fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
@@ -296,8 +299,9 @@ fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
 ##
 ## The diagnostics the parser left at end of file ("found `<eof>`") are the
 ## same fact seen from the wrong end, so they are replaced rather than kept
-## beside the new one; where parsing ran out is written into the hint. There
-## is no secondary span to carry both (#195 step 2).
+## beside the new one. Where parsing ran out becomes a note on it, and so does
+## the misindented closer when the heuristic named one
+## (docs/diag-notes-design.md §6).
 fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Diag] = {
   var stack: List[Int] = []
   var pairs: List[DelimPair] = []
@@ -338,21 +342,31 @@ fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Di
       if not enclosed && later { suspect = Some(m) }
     }
   }
-  let end_line = line_at(cps, eof.lo)
   let d = match suspect {
     Some(m) -> {
       let o = toks[m.open]
       let c = toks[m.close]
-      pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
-        "the file ends at line ${end_line} with a delimiter still open; the `" ++ c.text ++
-          "` on line ${line_at(cps, c.lo)} closes this `" ++ o.text ++
-          "` but is indented differently, so it probably belongs to an outer one and this `" ++
-          o.text ++ "` is missing its own")
+      Diag {
+        ..pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
+          "this `" ++ o.text ++ "` is probably missing its own `" ++ c.text ++ "`"),
+        notes: [
+          Note {
+            msg: "this `" ++ c.text ++ "` closes it but is indented differently, " ++
+              "so it probably belongs to an outer `" ++ o.text ++ "`",
+            lo: c.lo,
+            hi: c.hi
+          },
+          eof_note(toks[stack[len(stack) - 1]], eof)
+        ]
+      }
     }
     None -> {
       let o = toks[stack[len(stack) - 1]]
-      pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
-        "the file ends at line ${end_line} before this `" ++ o.text ++ "` is closed")
+      Diag {
+        ..pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
+          "add the `" ++ closer_text(o.kind) ++ "` this `" ++ o.text ++ "` is missing"),
+        notes: [eof_note(o, eof)]
+      }
     }
   }
   # Without a report at end of file, parsing recovered on its own. If it
