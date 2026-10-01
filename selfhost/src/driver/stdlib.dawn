@@ -39,7 +39,7 @@ use embed/stdsrc
 use ir/lower.{parser_impl}
 use version.{VERSION}
 use compiler_plan/envmem
-use compiler_plan/source.{canon}
+use compiler_plan/source.{canon_identity}
 use driver/fsmem
 use std/memfs
 
@@ -585,7 +585,7 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
     # none, and claiming `<dir>/<n>.dawn` for it would hand std identity to
     # whatever happens to sit at that path
     if idx_from_dir {
-      dir_modules = map.insert(dir_modules, canon(dir ++ "/" ++ n ++ ".dawn"), mod_path)
+      dir_modules = map.insert(dir_modules, canon_identity(dir ++ "/" ++ n ++ ".dawn"), mod_path)
     }
     let (m, pdiags) = parser.parse_module(text)
     if len(pdiags) > 0 {
@@ -679,7 +679,7 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
     mods: mods,
     srcs: srcs,
     dir: match origin {
-      StdFromDir(d) -> Some(canon(d))
+      StdFromDir(d) -> Some(canon_identity(d))
       StdEmbedded -> None
     },
     dir_modules: dir_modules,
@@ -696,17 +696,15 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
 ## checkout `--std` pointed at is std, and `src/std/list.dawn` in somebody's
 ## project is not, however the module path reads.
 ##
-## Comparison is lexical (`canon` normalizes, it does not resolve symlinks), so
-## a std reached through a symlinked directory is not recognised through the
-## other spelling. That fails closed: the file checks as user code and reports
-## the std-only names it uses, which is the pre-existing behaviour.
-pub(pkg) fn std_module_of(std: StdCtx, path: String) -> Option[String] !Env = {
-  # an embedded std has no files at all, and canon() costs a cwd read
+## Comparison is by identity (`canon_identity`), so a std reached through a
+## linked directory is recognised through the other spelling too (#207).
+pub(pkg) fn std_module_of(std: StdCtx, path: String) -> Option[String] !Fs !Env = {
+  # an embedded std has no files at all, and the identity costs a host query
   if len(map.keys(std.dir_modules)) == 0 {
     let none: Option[String] = None
     return none
   }
-  map.get(std.dir_modules, canon(path))
+  map.get(std.dir_modules, canon_identity(path))
 }
 
 ## The file this compiler read the std module `mod_path` from, or `None` when
@@ -732,9 +730,9 @@ pub(pkg) fn std_file_of(std: StdCtx, mod_path: String) -> Option[String] = {
 
 ## Is `dir` the very directory this compiler read its std from? Used to answer
 ## a directory target as what it is instead of as a malformed project.
-pub(pkg) fn is_std_dir(std: StdCtx, dir: String) -> Bool !Env =
+pub(pkg) fn is_std_dir(std: StdCtx, dir: String) -> Bool !Fs !Env =
   match std.dir {
-    Some(d) -> d == canon(dir)
+    Some(d) -> d == canon_identity(dir)
     None -> false
   }
 

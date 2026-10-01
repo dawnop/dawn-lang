@@ -16,7 +16,7 @@ use compiler_plan/pkgfetch
 use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
-use compiler_plan/source.{canon}
+use compiler_plan/source.{canon, canon_identity}
 use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of, exported_impl}
 use check/identity
@@ -132,12 +132,34 @@ fn module_path_of(root_abs: String, file_abs: String) -> String = {
   str.strip_suffix(rel, ".dawn").unwrap_or(rel)
 }
 
+## The module path of `file` under a source root, given lexically (`canon`)
+## and as an identity (`canon_identity`), with the file's identity beside it.
+##
+## Lexical first, because a module path is the path as written below the
+## root (spec §10): `src/ali -> sub` makes `ali/x` and `sub/x` two modules,
+## and resolving the link here would fold the first into the second. The
+## identities answer only when the spelling is not under the root's at all,
+## which is a file that arrives under another spelling of the same root: an
+## editor opens one file through a link and another through the real path,
+## both are members of one workspace, and the root is spelled the way its
+## first member was. When neither agrees the file name is all there is, as it
+## was before.
+fn module_path_at(root_abs: String, root_id: String, file: String, file_id: String) -> String !Env = {
+  let file_abs = canon(file)
+  if str.starts_with(file_abs, "${root_abs}/") || not str.starts_with(file_id, "${root_id}/") {
+    module_path_of(root_abs, file_abs)
+  } else {
+    module_path_of(root_id, file_id)
+  }
+}
+
 ## The legal module path `file` has inside one captured project plan. LSP
 ## workspace membership uses the same derivation and rejection as the loader,
 ## including unsaved files that are not present in the captured tree walk.
-pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Env = {
+pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !Fs !Env = {
   if not str.ends_with(file, ".dawn") { return None }
-  let mod_path = module_path_of(canon(plan.source.source_root), canon(file))
+  let root = plan.source.source_root
+  let mod_path = module_path_at(canon(root), canon_identity(root), file, canon_identity(file))
   if len(bad_segments(mod_path)) == 0 { Some(mod_path) } else { None }
 }
 
@@ -444,12 +466,12 @@ fn fresh_parse(text: String) -> Parsed = {
 }
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
-## a command named, or a project's `src/main.dawn`. Canonical, because that
+## a command named, or a project's `src/main.dawn`. An identity, because that
 ## is how the loader compares the files it reads.
-fn entry_file(plan: ProjectPlan) -> Option[String] !Env =
+fn entry_file(plan: ProjectPlan) -> Option[String] !Fs !Env =
   match plan.source.target {
-    source.SourceFile(file) -> Some(canon(file))
-    source.ProjectDirectory(dir) -> Some(canon(dir ++ "/src/main.dawn"))
+    source.SourceFile(file) -> Some(canon_identity(file))
+    source.ProjectDirectory(dir) -> Some(canon_identity(dir ++ "/src/main.dawn"))
   }
 
 fn resolve(
@@ -464,16 +486,25 @@ fn resolve(
   var diags = diags0
   var parses: Map[String, Parsed] = map.empty()
   var reused = 0
+  # A module is loaded once per (file identity, module path). The identity
+  # (`canon_identity`) is what makes one file reached through two spellings of
+  # its root one module, and it is also the key of the overlay an editor hands
+  # in and of the parse memo. The module path is in the key as well because
+  # it is what a module *is* (spec §10): a file reached under two module
+  # paths, through a link inside src/, is two modules, as it was before
+  # identities resolved links.
   let root_abs = canon(root)
-  var by_canon: Map[String, String] = map.empty()
+  let root_id = canon_identity(root)
+  var loaded_as: Set[(String, String)] = set.empty()
+  var identities: Map[String, String] = map.empty()
   var by_path: Map[String, LoadedModule] = map.empty()
   var order: List[String] = []
   var queue: List[String] = []
   # load seeds
   for f in seed_files {
-    let c = canon(f)
-    if not map.has(by_canon, c) {
-      let mod_path = module_path_of(root_abs, c)
+    let c = canon_identity(f)
+    let mod_path = module_path_at(root_abs, root_id, f, c)
+    if not set.has(loaded_as, (c, mod_path)) {
       let bad = bad_segments(mod_path)
       if len(bad) > 0 {
         diags = diags ++ [synthetic(f,
@@ -498,7 +529,7 @@ fn resolve(
             pkg: None,
             entry: entry == Some(c)
           }
-          by_canon = map.insert(by_canon, c, mod_path)
+          loaded_as = set.insert(loaded_as, (c, mod_path))
           by_path = map.insert(by_path, mod_path, mf)
           order = order ++ [mod_path]
           queue = queue ++ [mod_path]
@@ -598,9 +629,30 @@ fn resolve(
             }
         }
         if not edge_ok { continue }
-        let dep_canon = canon(dep_file)
-        if map.has(by_canon, dep_canon) {
-          queue = queue ++ [map.get(by_canon, dep_canon).expect("canon")]
+        # one host query per spelling per load, not one per `use` edge: a
+        # module imported from fifty places is fifty edges with one answer
+        let dep_canon = match map.get(identities, dep_file) {
+          Some(known) -> known
+          None -> {
+            let found = canon_identity(dep_file)
+            identities = map.insert(identities, dep_file, found)
+            found
+          }
+        }
+        let (mod_path, cls) = match dep_pkg {
+          Some(p) -> {
+            # lexical below the package root, as `module_path_at` is below
+            # the project's: the root is already an identity
+            let internal = module_path_of(p.root, canon(dep_file))
+            (p.name ++ "/" ++ internal, "dawn\$pkg\$" ++ p.name ++ "/" ++ internal)
+          }
+          None -> {
+            let mp = module_path_at(root_abs, root_id, dep_file, dep_canon)
+            (mp, mp)
+          }
+        }
+        if set.has(loaded_as, (dep_canon, mod_path)) {
+          queue = queue ++ [mod_path]
         } else {
           match read_over(over, dep_canon, dep_file) {
             Ok(text) -> {
@@ -609,17 +661,9 @@ fn resolve(
               if hit { reused = reused + 1 }
               let m2p = parsed.m
               let pdiags2 = parsed.pdiags
-              let (mod_path, cls, m2) = match dep_pkg {
-                Some(p) -> {
-                  let internal = module_path_of(p.root, dep_canon)
-                  (p.name ++ "/" ++ internal,
-                    "dawn\$pkg\$" ++ p.name ++ "/" ++ internal,
-                    qualify_uses(m2p, p))
-                }
-                None -> {
-                  let mp = module_path_of(root_abs, dep_canon)
-                  (mp, mp, m2p)
-                }
+              let m2 = match dep_pkg {
+                Some(p) -> qualify_uses(m2p, p)
+                None -> m2p
               }
               let mf2 = LoadedModule {
                 mod_path: mod_path,
@@ -632,7 +676,7 @@ fn resolve(
                 pkg: dep_pkg,
                 entry: false
               }
-              by_canon = map.insert(by_canon, dep_canon, mod_path)
+              loaded_as = set.insert(loaded_as, (dep_canon, mod_path))
               by_path = map.insert(by_path, mod_path, mf2)
               order = order ++ [mod_path]
               queue = queue ++ [mod_path]
@@ -898,7 +942,7 @@ fn empty_ctout() -> CtOut = {
 ## the owner string an audience records), so a half-identity -- std powers
 ## under the name `hamt` -- would be a std module the rest of std cannot
 ## recognise.
-fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env =
+fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Fs !Env =
   match std_module_of(std, mf.path) {
     Some(mod_path) -> (LoadedModule { ..mf, mod_path: mod_path, class_name: mod_path }, true)
     None -> (mf, false)
@@ -906,7 +950,7 @@ fn std_identity(std: StdCtx, mf: LoadedModule) -> (LoadedModule, Bool) !Env =
 
 ## Check a loaded program in dependency order: each module sees the exports of
 ## everything before it (std pre-seeded); comptime runs on clean modules only.
-pub(pkg) fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Env !io =
+pub(pkg) fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io =
   analyze_observed(loaded, std, opts, js, None)
 
 ## The cold path remains the production entry. Observation is opt-in and
@@ -915,7 +959,7 @@ pub(pkg) fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: J
 pub(pkg) fn analyze_observed(
   loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig,
   observer: Option[AnalysisObserver]
-) -> Program !Env !io = {
+) -> Program !Fs !Env !io = {
   var diags = loaded.diags
   var carry = initial_carry(std)
   var out: List[CheckedMod] = []
@@ -934,7 +978,7 @@ pub(pkg) fn analyze_observed(
 pub(pkg) fn analyze_module_step(
   mf0: LoadedModule, before: AnalysisCarry, std: StdCtx, opts: CtOpts,
   js: Jsig, observer: Option[AnalysisObserver]
-) -> ModuleStep !Env !io = {
+) -> ModuleStep !Fs !Env !io = {
   var diags: List[LocDiag] = []
   # The one place a module's identity is settled, and the reason it is here
   # rather than in the loaders: only this function holds the std, and the
@@ -1183,7 +1227,7 @@ pub(pkg) fn analyze_standalone(
   std: StdCtx,
   opts: CtOpts,
   js: Jsig
-) -> Program !Env !io = {
+) -> Program !Fs !Env !io = {
   let (m, pdiags) = parser.parse_module(text)
   var diags: List[LocDiag] = []
   match entry_name_of(path) {
@@ -1236,14 +1280,14 @@ pub(pkg) fn analyze_document_planned(
     let prog = analyze_standalone(path, text, std, opts, js)
     return DocumentAnalysis { prog: prog, entry: standalone_entry(prog), plan: None }
   }
-  let abs = canon(path)
+  let abs = canon_identity(path)
   var over: Map[String, String] = map.empty()
   over = map.insert(over, abs, text)
   let plan = project_plan(source.SourceFile(path))
   let loaded = load_entries_over(plan, [path], over)
   var loaded_entry = false
   for mf in loaded.modules {
-    if canon(mf.path) == abs { loaded_entry = true }
+    if canon_identity(mf.path) == abs { loaded_entry = true }
   }
   if not loaded_entry {
     let prog = analyze_standalone(path, text, std, opts, js)
@@ -1255,7 +1299,7 @@ pub(pkg) fn analyze_document_planned(
   let prog = analyze_program(loaded, std, opts, js)
   var entry = ""
   for cm in prog.modules {
-    if entry == "" && canon(cm.path) == abs { entry = cm.mod_path }
+    if entry == "" && canon_identity(cm.path) == abs { entry = cm.mod_path }
   }
   DocumentAnalysis { prog: prog, entry: entry, plan: Some(plan) }
 }
@@ -2224,7 +2268,7 @@ test "a reusing load parses only the files whose text changed" {
     assert again.loaded == first.loaded
     # an overlay is text like any other: the edited file is parsed again, and
     # what comes back is what a load without the memo would have produced
-    let edited = map.insert(none, canon(util), "pub fn tag() -> String = \"u\"\n\npub fn more() -> Int = 1\n")
+    let edited = map.insert(none, canon_identity(util), "pub fn tag() -> String = \"u\"\n\npub fn more() -> Int = 1\n")
     let changed = load_entries_reusing(plan, [main], edited, again.parses)
     assert changed.parses.reused == 1
     assert changed.loaded == load_entries_over(plan, [main], edited)
@@ -2329,4 +2373,100 @@ test "the source walk visits a link to a directory but does not descend (#297, #
     pkgfetch.delete_tree(root)
     assert not io.exists(root)
   }))
+}
+
+test "a file under two module paths stays two modules when identities resolve links" {
+  # Identity resolves links, and a module path must not: `alias.dawn ->
+  # sub/util.dawn` is one file and two modules (spec §10), which is why the
+  # loader keys a module by file identity *and* module path.
+  io.with_fs_real(() => io.with_proc_real(() => {
+    let (root, proj) = linked_tree()
+    match io.write_file("${proj}/src/main.dawn",
+      "use sub/util\nuse alias\n\npub fn main() -> Unit !io = println(util.tag() ++ alias.tag())\n") {
+      Ok(_) -> ()
+      Err(e) -> panic("cannot write main: ${e.message}")
+    }
+    let (loaded, _) = envmem.with_env_table(root, [], () => load_directory(proj))
+    assert len(loaded.diags) == 0
+    var paths: List[String] = []
+    for m in loaded.modules { paths = paths ++ [m.mod_path] }
+    assert list.sort(paths) == ["alias", "main", "sub/util"]
+    pkgfetch.delete_tree(root)
+  }))
+}
+
+# ---- a project entered through a link (#207) ----
+#
+# A `std/memfs` link is seen by `fs_real_path` and nothing else, so a reader
+# does not follow it. These trees write the files a kernel would show through
+# the link at the link's spelling too, with the same text: both spellings then
+# read the way they read on a host, and only identity can tell them apart.
+
+const LINKED: String = "/tmp/dawn-selfhost-analyze/linked"
+
+## The embedded std, plus `home/app -> ../work/app` under `LINKED`.
+fn linked_seed() -> memfs.MemFs =
+  memfs.link(fsmem.mem_std(memfs.BASE), "${LINKED}/home/app", "../work/app")
+
+fn in_linked[T](body: fn() -> T !Fs !Proc !Env !io) -> T !io = {
+  let (pair, _) = memfs.with_fs(linked_seed(),
+    () => io.with_proc_real(
+      () => envmem.with_env_table(memfs.BASE, mem_vars(), body)))
+  let (out, _) = pair
+  out
+}
+
+## `work/app` depending on `lib = "../lib"`, which is `work/lib`, readable
+## through `home/app` as well.
+fn put_linked_app(main_src: String) -> Unit !Fs = {
+  let app_toml = "schema = 1\nname = \"app\"\n\n[deps]\nlib = \"../lib\"\n"
+  for dir in ["${LINKED}/work/app", "${LINKED}/home/app"] {
+    put("${dir}/dawn.toml", app_toml)
+    put("${dir}/src/main.dawn", main_src)
+  }
+  put("${LINKED}/work/lib/dawn.toml", "schema = 1\nname = \"lib\"\n")
+  put("${LINKED}/work/lib/src/util.dawn", "pub fn answer() -> Int = 42\n")
+}
+
+test "a project entered through a link finds its `../` dependency" {
+  in_linked(() => {
+    let main_src = "use lib/util\n\npub fn main() -> Unit !io = println(to_string(util.answer()))\n"
+    put_linked_app(main_src)
+    let std = std_or_die()
+    for dir in ["${LINKED}/work/app", "${LINKED}/home/app"] {
+      let loaded = load_directory(dir)
+      assert len(loaded.diags) == 0
+      var paths: List[String] = []
+      for m in loaded.modules { paths = paths ++ [m.mod_path] }
+      assert list.sort(paths) == ["lib/util", "main"]
+      assert len(analyze_program(loaded, std, ct_default(), jsig_refused()).diags) == 0
+    }
+    # the editor's path: a buffer opened through the link is the entry of a
+    # project whose dependency resolved, not a file with a missing import
+    let doc = analyze_document_planned("${LINKED}/home/app/src/main.dawn", main_src, std,
+      ct_default(), jsig_refused())
+    assert doc.entry == "main"
+    assert len(doc.prog.diags) == 0
+  })
+}
+
+test "std read through a link is std through either spelling" {
+  # `--std` names the directory one way and the file is reached the other:
+  # std's files are recognised by identity, so a std source opened through a
+  # linked directory keeps the std-only builtins it exists to wrap
+  let linked = "${LINKED}/stdlink"
+  let seed = memfs.link(fsmem.mem_std(memfs.BASE), linked, fsmem.mem_std_dir(memfs.BASE))
+  let (pair, _) = memfs.with_fs(seed,
+    () => io.with_proc_real(() => envmem.with_env_table(memfs.BASE, mem_vars(), () => {
+      let std = std_or_die()
+      assert std_module_of(std, "${linked}/cursor.dawn") == Some("std/cursor")
+      assert std_module_of(std, "${linked}/./cursor.dawn") == Some("std/cursor")
+      assert is_std_dir(std, linked)
+      let text = slurp("${std_dir()}/cursor.dawn")
+      let prog = analyze_standalone("${linked}/cursor.dawn", text, std, ct_default(),
+        jsig_refused())
+      assert standalone_entry(prog) == "std/cursor"
+      assert len(prog.diags) == 0
+    })))
+  let (_, _) = pair
 }
