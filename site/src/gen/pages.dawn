@@ -9,7 +9,7 @@ use md/parser.{parse}
 use html/render.{render_doc}
 use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path, plain_assets}
 use hl/dawn.{highlight_dawn}
-use html/escape.{escape_html}
+use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/copy.{Copy, load_copy, line, body}
 use gen/fingerprint.{fingerprint}
@@ -367,6 +367,12 @@ pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
 ## instead of a page that renders half-translated.
 ##
 ## `sources` carries markup; every other field is escaped text.
+##
+## The last three are the loading story (#321). `loading` sits under each frame
+## until its demo mounts; `slow` replaces it if that takes longer than the
+## watchdog waits, and says only that, because a slow network is not an
+## error; `failed` leads the red line written when a fetch or a mount really
+## fails, and is the only one of the three that carries the technical hint.
 type TeaCopy = {
   title: String,
   lede: String,
@@ -378,7 +384,9 @@ type TeaCopy = {
   todo_note: String,
   todo_src: String,
   sources: String,
-  stuck: String,
+  loading: String,
+  slow: String,
+  failed: String,
 }
 
 fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -> TeaCopy =
@@ -417,8 +425,10 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "<code>packages/tea-dom</code></a>, and the frontend direction they belong to "
         ++ """is in the <a href="https://github.com/dawnop/dawn-lang/blob/main/ROADMAP.md">"""
         ++ "roadmap</a>.",
-      stuck: "nothing mounted: this page needs to be served over http, and the "
-        ++ "reactor it fetches has to have been built (site/build.sh).",
+      loading: "Loading the demo…",
+      slow: "Loading the demo is taking longer than expected…",
+      failed: "The demo could not be loaded. It needs the page served over http and its "
+        ++ "reactor built by site/build.sh. The error was: ",
     }
     Zh -> TeaCopy {
       title: "浏览器里的 Elm 架构",
@@ -448,21 +458,35 @@ fn tea_copy(lang: Lang, root: String, counter_page: String, todo_page: String) -
         ++ "<code>packages/tea-dom</code></a>，这条前端方向本身写在"
         ++ """<a href="https://github.com/dawnop/dawn-lang/blob/main/ROADMAP.md">"""
         ++ "路线图</a>里。",
-      stuck: "没有挂载成功：这个页面需要通过 http 访问，而且它取的 reactor 必须先构建出来"
-        ++ "（site/build.sh）。",
+      loading: "正在加载演示……",
+      slow: "演示加载得比预期慢，请稍候……",
+      failed: "演示没能加载。这个页面需要通过 http 访问，它取的 reactor 也必须先由 "
+        ++ "site/build.sh 构建出来。错误是：",
     }
   }
 
-## One demo, framed: the element the bridge mounts into, and the line an error
-## is reported on. `data-wasm` is the URL the page fetches, and it is spelled
-## as an attribute rather than in the script so that gen/links checks it --
-## an import specifier or a `fetch` argument is a string in a program, and
-## nothing here reads programs.
-fn tea_frame(id: String, wasm: String, heading: String, note: String, source: String) -> String =
+## One demo, framed: the element the bridge mounts into, the placeholder line
+## shown until it does, and the line an error is reported on. `data-wasm` is
+## the URL the page fetches, and it is spelled as an attribute rather than in
+## the script so that gen/links checks it -- an import specifier or a `fetch`
+## argument is a string in a program, and nothing here reads programs.
+##
+## The placeholder is a sibling of the mount point and not its content: the
+## bridge owns everything inside `.tea-mount`, and the watchdog reads an empty
+## one as "nothing mounted yet".
+fn tea_frame(
+  id: String,
+  wasm: String,
+  heading: String,
+  note: String,
+  loading: String,
+  source: String,
+) -> String =
   """
 <h2>${heading}</h2>
 <div class="tea-frame">
-<div class="tea-mount" id="${id}" data-wasm="${wasm}"></div>
+<div class="tea-mount" id="${id}" data-wasm="${escape_attr(wasm)}"></div>
+<p class="tea-status">${escape_html(loading)}</p>
 <p class="tea-error"></p>
 </div>
 <p class="tea-note">${note}</p>
@@ -520,15 +544,20 @@ fn tea_page(a: Assets, lang: Lang, root: String) -> String !Fs = {
     lang_path(lang, "examples/tea_dom_todo_keyed.html"))
   let app = a.tea_js
   let head = """<link rel="modulepreload" href="${root}/assets/${app}">"""
+  # The two messages the scripts write are attributes rather than string
+  # literals inside the scripts, so that they are escaped by the one rule
+  # every other attribute here goes through instead of by JavaScript's.
+  let slow = escape_attr(c.slow)
+  let failed = escape_attr(c.failed)
   let body =
-    `<main class="content tea-demo">` ++ "\n"
+    """<main class="content tea-demo" data-slow="${slow}" data-failed="${failed}">""" ++ "\n"
     ++ "<h1>${c.title}</h1>\n<p>${c.lede}</p>\n<p>${c.aside}</p>\n"
     ++ tea_frame("tea-counter", "${root}/assets/${a.tea_counter}", c.counter, c.counter_note,
-      tea_source(c.counter_src, counter_source_path()))
+      c.loading, tea_source(c.counter_src, counter_source_path()))
     ++ tea_frame("tea-todo", "${root}/assets/${a.tea_todo}", c.todo, c.todo_note,
-      tea_source(c.todo_src, todo_source_path()))
+      c.loading, tea_source(c.todo_src, todo_source_path()))
     ++ `<p class="tea-note">` ++ c.sources ++ "</p>\n</main>\n"
-    ++ tea_watchdog(c.stuck) ++ "\n" ++ tea_mount_script(root, app)
+    ++ tea_watchdog() ++ "\n" ++ tea_mount_script(root, app)
   shell_ext(a, lang, "tea.html", "${c.title} — Dawn", root, "tea", head, body)
 }
 
@@ -613,20 +642,48 @@ test "each language folds both sources away under its own summary" {
 
 fn count_sub(hay: String, needle: String) -> Int = len(str.split(hay, needle)) - 1
 
-## The one failure a module script cannot report about itself: if the module
-## does not load, none of its own code runs, and the page sits blank with
-## nothing said. A classic script can still speak. It stays quiet if the
-## demos mounted or if the module already wrote a banner, and the module
-## clears it on success. The same guard the demos' own pages carry
-## (examples/projects/tea_dom_counter/web/index.html), for the same reason.
-fn tea_watchdog(message: String) -> String =
+## #321, as text: the page's scripts are the one part of it nothing here runs,
+## so what is pinned is the shape a regression would have to undo. The
+## mutations this is against: the sequential `for ... await` loop coming back,
+## the watchdog writing into the red error line again, and the developer's
+## hint moving back into the slow-network notice.
+test "the demos load in parallel and a slow network is not reported as an error" {
+  io.with_fs_real(() => {
+    for lang in [En, Zh] {
+      let p = tea_page(plain_assets(), lang, ".")
+      assert str.contains(p, "await Promise.all(frames.map(async (f) => {")
+      assert not str.contains(p, "for (const host of")
+      # a placeholder under each frame until it mounts, cleared when it does
+      assert count_sub(p, `<p class="tea-status">`) == 2
+      assert str.contains(p, "if (f.status) f.status.textContent = '';")
+      # the watchdog only ever touches the placeholder line
+      assert str.contains(p, "status.textContent = slow;")
+      assert not str.contains(p, "banner.textContent = slow")
+      # the technical hint is in the failure text and not in the slow one
+      let c = tea_copy(lang, ".", "a", "b")
+      assert not str.contains(c.slow, "site/build.sh")
+      assert str.contains(c.failed, "site/build.sh")
+    }
+  })
+}
+
+## The slow-network notice. A classic script, so that it runs even when the
+## module below has not arrived yet: after four seconds, every frame whose
+## mount point is still empty and which has not reported an error trades its
+## placeholder for the page's `data-slow` text. That is all it says. It used to
+## write a developer's diagnosis into the red error line instead, and nothing
+## ever cleared it, so a slow connection got a false error that stayed on the
+## page after the demo had mounted under it (#321).
+fn tea_watchdog() -> String =
   """
 <script>
 window.__teaWatchdog = setTimeout(function () {
+  var slow = document.querySelector('.tea-demo').dataset.slow;
   document.querySelectorAll('.tea-mount').forEach(function (host) {
+    var status = host.parentElement.querySelector('.tea-status');
     var banner = host.parentElement.querySelector('.tea-error');
-    if (host.childNodes.length === 0 && banner && banner.textContent === '') {
-      banner.textContent = '${message}';
+    if (host.childNodes.length === 0 && status && banner && banner.textContent === '') {
+      status.textContent = slow;
     }
   });
 }, 4000);
@@ -635,19 +692,47 @@ window.__teaWatchdog = setTimeout(function () {
 
 ## Mount every frame on the page: fetch the reactor named on the element,
 ## hand it to the bridge, and report a failed turn on that frame's own line.
+##
+## The frames load in parallel. They used to be a `for` loop that awaited one
+## fetch and mount before starting the next, about 160 KB gzipped each, so the
+## second demo waited for the whole of the first. A frame that mounts clears
+## its own placeholder and its own error line; a frame that fails replaces the
+## placeholder with the page's `data-failed` text and the error itself, which
+## is the one place the technical hint belongs.
+##
+## The bridge is a dynamic import inside the `try` rather than a static import
+## above it: a static import that fails stops the module before any of its
+## code runs, which would leave the page with nothing to say about it.
 fn tea_mount_script(root: String, app: String) -> String =
   """
 <script type="module">
-import { mount } from '${root}/assets/${app}';
-for (const host of document.querySelectorAll('.tea-mount')) {
-  const banner = host.parentElement.querySelector('.tea-error');
-  try {
-    await mount(await fetch(host.dataset.wasm), host, {
-      onError: (reply) => { banner.textContent = reply.kind + ': ' + reply.error; },
-    });
-  } catch (e) {
-    banner.textContent = String(e);
-  }
+const failed = document.querySelector('.tea-demo').dataset.failed;
+const frames = [...document.querySelectorAll('.tea-mount')].map((host) => ({
+  host,
+  status: host.parentElement.querySelector('.tea-status'),
+  banner: host.parentElement.querySelector('.tea-error'),
+}));
+const fail = (f, e) => {
+  if (f.status) f.status.textContent = '';
+  f.banner.textContent = failed + String(e);
+};
+try {
+  const { mount } = await import('${root}/assets/${app}');
+  await Promise.all(frames.map(async (f) => {
+    try {
+      const res = await fetch(f.host.dataset.wasm);
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + f.host.dataset.wasm);
+      f.banner.textContent = '';
+      await mount(res, f.host, {
+        onError: (reply) => { f.banner.textContent = reply.kind + ': ' + reply.error; },
+      });
+      if (f.status) f.status.textContent = '';
+    } catch (e) {
+      fail(f, e);
+    }
+  }));
+} catch (e) {
+  frames.forEach((f) => fail(f, e));
 }
 clearTimeout(window.__teaWatchdog);
 </script>
