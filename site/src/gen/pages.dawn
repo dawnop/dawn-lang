@@ -250,40 +250,60 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
     }
   }
 
-## The spec and the design notes, each one document rendered whole, and each
-## one a pair since 2026-08-07: the Chinese is the original and the English is
-## its translation, registered against it in scripts/doc-check.py.
+## The spec, the early design notes and the history, each one document
+## rendered whole and each one a pair. The spec and the design notes have
+## been pairs since 2026-08-07, and their Chinese is the original: the English
+## is `<base>.en.md`, registered against `<base>.md` in scripts/doc-check.py.
+## The history (2026-10-02) runs the other way, as the outward-facing
+## documents do: `history.md` is the English original and
+## `history.zh-CN.md` its translation. So the pairing is said per document
+## rather than assumed.
 ##
 ## `lang` picks which of the two files is read AND where the page lands, in one
 ## `match`, so a page cannot be written in one language and filed under the
 ## other. The default layout is the English site, the Chinese twin sits under
 ## `/zh/` -- the same rule the front page, the tutorial and the rest follow.
-fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String) =
+fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String) = {
+  let english_original = base == "history"
   match lang {
-    En -> ("docs/${base}.en.md", "${out}/${base}.html", ".")
-    Zh -> ("docs/${base}.md", "${out}/zh/${base}.html", "..")
+    En ->
+      (if english_original { "docs/${base}.md" } else { "docs/${base}.en.md" }, "${out}/${base}.html", ".")
+    Zh ->
+      (if english_original { "docs/${base}.zh-CN.md" } else { "docs/${base}.md" }, "${out}/zh/${base}.html",
+        "..")
   }
+}
 
 ## What the band above a document says about it, in the page's language:
 ## the kind of document, its status, and for the spec the release it applies
 ## to (`version`, from the build, left out when the build did not say).
+## The early design notes are a page of the history and say so: their
+## "history" goes to the timeline, which links back to them.
 fn doc_eyebrow(base: String, lang: Lang, version: String) -> String = {
   let v = if version == "" { "" } else { sep() ++ escape_html(version) }
   match lang {
     En ->
       if base == "spec" {
         "specification" ++ sep() ++ "normative" ++ v
+      } else if base == "history" {
+        "history" ++ sep() ++ "timeline, first commit to today"
       } else {
-        "history" ++ sep() ++ "decisions of M0–M7" ++ sep() ++ "historical"
+        `<a href="history.html">history</a>` ++ sep() ++ "decisions of M0–M7" ++ sep() ++ "historical"
       }
     Zh ->
       if base == "spec" {
         "规范" ++ sep() ++ "权威" ++ v
+      } else if base == "history" {
+        "历史" ++ sep() ++ "时间线，从第一个提交到今天"
       } else {
-        "历史" ++ sep() ++ "M0–M7 的决策记录" ++ sep() ++ "历史文档"
+        `<a href="history.html">历史</a>` ++ sep() ++ "M0–M7 的决策记录" ++ sep() ++ "历史文档"
       }
   }
 }
+
+## Which nav item a document's page lights up. The early design notes are
+## not in the nav; they sit under History, beside the timeline.
+fn doc_section(base: String) -> String = if base == "spec" { "spec" } else { "history" }
 
 ## One document as a page with a contents rail. Its title and translation
 ## note are set in the band above it; the rest is the article.
@@ -306,7 +326,7 @@ fn doc_page(
     extra: "",
     cls: "toc-aligned",
   }
-  page_with_toc(a, lang, "${base}.html", "${inline_text(parts.title)} — Dawn", root, base, head,
+  page_with_toc(a, lang, "${base}.html", "${inline_text(parts.title)} — Dawn", root, doc_section(base), head,
     toc_rail(lang, doc.toc), doc.html)
 }
 
@@ -322,11 +342,33 @@ pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
 pub fn gen_design(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
   gen_doc_page(out, a, lang, "design")
 
+## The history: the timeline from the first commit to today (docs/history.md),
+## what the nav's History opens. The early design notes stay at their own
+## URL, which links and search engines already have, and are reached from
+## here.
+pub fn gen_history(out: String, a: Assets, lang: Lang) -> Unit !Fs !io =
+  gen_doc_page(out, a, lang, "history")
+
 test "each language's document is read from its own file and lands in its own place" {
   assert doc_source("spec", "d", En) == ("docs/spec.en.md", "d/spec.html", ".")
   assert doc_source("spec", "d", Zh) == ("docs/spec.md", "d/zh/spec.html", "..")
   assert doc_source("design", "d", En) == ("docs/design.en.md", "d/design.html", ".")
   assert doc_source("design", "d", Zh) == ("docs/design.md", "d/zh/design.html", "..")
+  # the history's original is the English one
+  assert doc_source("history", "d", En) == ("docs/history.md", "d/history.html", ".")
+  assert doc_source("history", "d", Zh) == ("docs/history.zh-CN.md", "d/zh/history.html", "..")
+}
+
+## History lights up for both of its pages, and the early design notes say
+## whose page they are.
+test "the early design notes are a page of the history" {
+  assert doc_section("design") == "history"
+  assert doc_section("history") == "history"
+  assert doc_section("spec") == "spec"
+  assert str.contains(doc_eyebrow("design", En, ""), `<a href="history.html">history</a>`)
+  assert str.contains(doc_eyebrow("design", Zh, ""), `<a href="history.html">历史</a>`)
+  assert str.contains(doc_eyebrow("spec", En, "0.82.0"), "normative<span class=\"sep\">·</span>0.82.0")
+  assert not str.contains(doc_eyebrow("spec", En, ""), "0.82")
 }
 
 ## The Playground, in one language. The page itself has no prose at all -- the
