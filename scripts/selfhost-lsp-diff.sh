@@ -287,8 +287,15 @@ DAWN_STD="${DAWN_STD:-$ROOT/std}" run_session "$SELF" lsp > "$OUT/self.txt"
 # subject from the repo). The root prefix is transport detail the same way
 # key order is; the file under std/ and the range are not, so only the
 # prefix collapses.
+#
+# Since v0.82.0 the reference leg resolves links (#314, canon_identity /
+# Fs.real_path), so it names the seed std by the real directory behind the
+# seed_root's std symlink, not by the link. Both spellings must normalize, so
+# the resolved seed std directory collapses to the same prefix.
+SEED_STD_REAL=$(realpath "$(seed_std_dir)")
 for f in "$OUT/kotlin.txt" "$OUT/self.txt"; do
   sed -i -e "s|file://$OUT/seed-root/std/|file://<root>/std/|g" \
+         -e "s|file://$SEED_STD_REAL/|file://<root>/std/|g" \
          -e "s|file://$ROOT/std/|file://<root>/std/|g" "$f"
 done
 
