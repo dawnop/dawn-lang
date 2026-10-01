@@ -34,7 +34,7 @@ pub(pkg) fn fail_compile(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = 
 
 # ---- tests ----
 
-use driver/fsmem
+use std/memfs
 use compiler_plan/consolemem
 use compiler_plan/exitmem
 
@@ -42,12 +42,12 @@ test "fail_compile renders every diagnostic, counts them, and exits 1" {
   # Both drivers call this one function, so this is the status and the text
   # `dawn` and `dawnc` both end a failed compile with.
   let src = "fn f() = 1\nfn g() = 2\n"
-  let fs = fsmem.mem_put(fsmem.mem_empty("/w"), "/w/a.dawn", src)
+  let fs = memfs.put(memfs.empty("/w"), "/w/a.dawn", src)
   let ds = [
     LocDiag { path: "/w/a.dawn", d: mk_diag("first", 3, 4, "") },
     LocDiag { path: "/w/a.dawn", d: mk_diag("second", 14, 15, "try g") }
   ]
-  let ((status, log), _) = fsmem.with_fs_mem(fs, () =>
+  let ((status, log), _) = memfs.with_fs(fs, () =>
       consolemem.with_console_table(() =>
           exitmem.with_exit_capture(() => fail_compile(ds))))
   assert status == Some(1)

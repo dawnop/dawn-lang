@@ -24,6 +24,7 @@ use check/identity.{Minted, EffectDecl}
 use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
+use std/memfs
 use driver/stdlib.{
   StdCtx, load_std, std_load_error_text, std_module_of, is_std_dir, read_index
 }
@@ -1261,11 +1262,11 @@ pub(pkg) fn analyze_document_planned(
 
 # ---- tests ----
 
-# Every test below runs against `driver/fsmem`'s table rather than the disk:
+# Every test below runs against a `std/memfs` table rather than the disk:
 # the tree a test writes is the whole file system its analysis can reach, and
-# the std it loads is the embedded copy mounted where `--std` defaults to. The
-# paths still read `/tmp/...` because that is what a project directory looks
-# like; nothing under them is ever created.
+# the std it loads is the embedded copy `driver/fsmem` mounts where `--std`
+# defaults to. The paths still read `/tmp/...` because that is what a project
+# directory looks like; nothing under them is ever created.
 # The table answers `Fs`; `Proc` is answered by the real handler, which the
 # planning path below reaches when a project names a url dependency. Only the
 # two tests that use `in_mem_proc` declare one, and those answer `Proc` from a
@@ -1274,7 +1275,7 @@ pub(pkg) fn analyze_document_planned(
 #
 # The environment is a table too (`compiler_plan/envmem`), so the working
 # directory these run in is declared rather than inherited. It is
-# `fsmem.MEM_BASE`, the directory the file table already resolves relative
+# `memfs.BASE`, the directory the file table already resolves relative
 # paths against, which is what makes a relative target mean the same thing to
 # both handlers -- and what lets a test name one at all: `canon` resolves a
 # relative path against `io.cwd()`, so before this the answer was the
@@ -1302,9 +1303,9 @@ fn in_mem[T](body: fn() -> T !Fs !Proc !Env !io) -> T !io = {
 fn in_mem_env[T](
   body: fn() -> T !Fs !Proc !Env !io
 ) -> (T, List[envmem.EnvCall]) !io = {
-  let (pair, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+  let (pair, _) = memfs.with_fs(fsmem.mem_std(memfs.BASE),
     () => io.with_proc_real(
-      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), body)))
+      () => envmem.with_env_table(memfs.BASE, mem_vars(), body)))
   pair
 }
 
@@ -1313,7 +1314,7 @@ fn in_mem_env[T](
 ## `pkgfetch.cache_root()` read the developer's `HOME` and the url-dependency
 ## tests below staged their cache entry under whatever came back.
 fn mem_vars() -> List[(String, String)] =
-  [("DAWN_PKG_CACHE", "${fsmem.MEM_BASE}/pkg-cache")]
+  [("DAWN_PKG_CACHE", "${memfs.BASE}/pkg-cache")]
 
 ## The same, with the child processes scripted too: `script` answers `Proc` in
 ## order and every invocation comes back for inspection.
@@ -1326,9 +1327,9 @@ fn in_mem_proc[T](
   script: List[procmem.ProcReply],
   body: fn() -> T !Fs !Proc !Env !io
 ) -> (T, List[procmem.ProcCall]) !io = {
-  let (paired, _) = fsmem.with_fs_mem(fsmem.mem_std(fsmem.MEM_BASE),
+  let (paired, _) = memfs.with_fs(fsmem.mem_std(memfs.BASE),
     () => procmem.with_proc_table(script,
-      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), body)))
+      () => envmem.with_env_table(memfs.BASE, mem_vars(), body)))
   let (env_pair, calls) = paired
   let (out, _) = env_pair
   (out, calls)
@@ -1337,7 +1338,7 @@ fn in_mem_proc[T](
 # The std the table mounts, spelled absolutely. The bare `std` the command line
 # defaults to would be resolved against the process's working directory: one
 # host call per std file, for a base the table does not share.
-fn std_dir() -> String = fsmem.mem_std_dir(fsmem.MEM_BASE)
+fn std_dir() -> String = fsmem.mem_std_dir(memfs.BASE)
 
 fn mkdirs(p: String) -> Unit !Fs = {
   let _ = io.mkdirs(p)
@@ -2164,10 +2165,10 @@ test "the analysis reads the declared tree, and no host behind it" {
   # logs below are how that is said rather than remembered.
   let root = "/tmp/dawn-selfhost-analyze/never-on-disk"
   let main_src = "use util\npub fn main() -> Unit !io = println(util.tag())\n"
-  let (((_, envlog), proclog), table) = fsmem.with_fs_mem(
-    fsmem.mem_std(fsmem.MEM_BASE),
+  let (((_, envlog), proclog), table) = memfs.with_fs(
+    fsmem.mem_std(memfs.BASE),
     () => procmem.with_proc_table([],
-      () => envmem.with_env_table(fsmem.MEM_BASE, mem_vars(), () => {
+      () => envmem.with_env_table(memfs.BASE, mem_vars(), () => {
         mkdirs("${root}/src")
         put("${root}/src/main.dawn", main_src)
         put("${root}/src/util.dawn", "pub fn tag() -> String = \"t\"\n")
@@ -2191,10 +2192,10 @@ test "the analysis reads the declared tree, and no host behind it" {
   # have panicked for want of a reply, and none was attempted
   assert proclog == []
   # the table is the only source of truth, so what was written can be read back
-  assert fsmem.mem_content(table, "${root}/src/main.dawn") == Some(main_src)
+  assert memfs.text(table, "${root}/src/main.dawn") == Some(main_src)
   # and every file the run touched came from the declared tree or the mounted
   # std: a load that reached out would have left a path here that is neither
-  for f in fsmem.mem_files(table) {
+  for f in memfs.file_paths(table) {
     assert str.starts_with(f, "${root}/") || str.contains(f, "/std/")
   }
   # the strongest half, and the one no assertion could reach before: ask the
@@ -2261,9 +2262,9 @@ test "a relative target resolves against the declared working directory" {
   # this is `canon("proj/src/util.dawn")` written out: the declared directory,
   # and nothing of the host's
   assert map.get(plan.modules.by_use, "util") ==
-    Some("${fsmem.MEM_BASE}/proj/src/util.dawn")
+    Some("${memfs.BASE}/proj/src/util.dawn")
   assert map.get(plan.modules.by_use, "main") ==
-    Some("${fsmem.MEM_BASE}/proj/src/main.dawn")
+    Some("${memfs.BASE}/proj/src/main.dawn")
   # the resolution asked, and asked for the working directory rather than for
   # a variable: an implementation that resolved against something it already
   # held would leave this log empty and still pass the paths above
@@ -2273,14 +2274,14 @@ test "a relative target resolves against the declared working directory" {
   # the declared directory is not the one this test runs in, which is what
   # makes the paths above an assertion about the declaration
   io.with_fs_real(() => io.with_env_real(() => {
-    assert io.cwd() != fsmem.MEM_BASE
+    assert io.cwd() != memfs.BASE
   }))
 }
 
 ## A scratch tree on the real disk holding the links #297 is about, and the
-## project directory inside it. The table cannot hold a link (`fsmem` answers
-## `fs_is_symlink` with `false`), so this test is on the host: the links are
-## made by `ln`, which is also the one way a user makes them.
+## project directory inside it. The table cannot hold a link (`std/memfs`
+## answers `fs_is_symlink` with `false`), so this test is on the host: the
+## links are made by `ln`, which is also the one way a user makes them.
 fn linked_tree() -> (String, String) !Fs !Proc = {
   let root = match io.temp_dir("", "dawn-walk-links-") {
     Ok(d) -> d

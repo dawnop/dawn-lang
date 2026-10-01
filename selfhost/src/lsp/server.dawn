@@ -29,6 +29,7 @@ use compiler_plan/source
 use compiler_plan/source.{canon}
 use driver/incremental
 use driver/fsmem
+use std/memfs
 use compiler_plan/envmem
 use ir/interp.{ct_default}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
@@ -2581,17 +2582,17 @@ test "LSP analysis configuration keeps legacy defaults and rejects negative limi
 }
 
 test "workspace commits its module memo with its Program and drops it on conflict" {
-  let root = fsmem.MEM_BASE ++ "/prefix-project"
+  let root = memfs.BASE ++ "/prefix-project"
   let path = root ++ "/src/main.dawn"
   let uri = "file://" ++ path
   let text = "use lib\npub fn answer() -> Int = lib.value() + 1\n"
-  var files = fsmem.mem_std(fsmem.MEM_BASE)
-  files = fsmem.mem_put(files, root ++ "/dawn.toml", "schema = 1\nname = \"prefix_project\"\n")
-  files = fsmem.mem_put(files, root ++ "/src/lib.dawn", "pub fn value() -> Int = 41\n")
-  files = fsmem.mem_put(files, path, text)
-  let _ = fsmem.with_fs_mem(files, () => io.with_proc_real(() =>
-      envmem.with_env_table(fsmem.MEM_BASE, [], () => {
-        let std = match load_std(fsmem.mem_std_dir(fsmem.MEM_BASE)) {
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"prefix_project\"\n")
+  files = memfs.put(files, root ++ "/src/lib.dawn", "pub fn value() -> Int = 41\n")
+  files = memfs.put(files, path, text)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
           Ok(s) -> s
           Err(e) -> panic(std_load_error_text(e))
         }
