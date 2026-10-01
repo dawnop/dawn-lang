@@ -331,13 +331,13 @@ MUTATIONS = {
     ),),
     "tensor-view-tag-as-ptr": ((
         BYTECODE,
-        'bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)',
-        'bytes.put(bytes.buf(), TAG_PTR), ei)',
+        'bytes.put(bytes.buf(), TAG_TENSOR_VIEW)), ei)',
+        'bytes.put(bytes.buf(), TAG_PTR)), ei)',
     ),),
     "partition-view-padding-inline-flag-at-13-3": ((
         BYTECODE,
         'fn partition_view_has_bitfield() -> Bool = at_least(13, 3)',
-        'fn partition_view_has_bitfield() -> Bool = at_least(13, 4)',
+        'fn partition_view_has_bitfield() -> Bool = false',
     ),),
     "padding-nan-on-integer-elements": ((
         BYTECODE,
@@ -383,6 +383,26 @@ MUTATIONS = {
         BYTECODE,
         'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), value), tok_in)',
         'emit_ref(emit_ref(list.fold(indices, w4, emit_ref), tok_in), value)',
+    ),),
+    "ptr-flags-unwritten": ((
+        BYTECODE,
+        'fn ptr_param_bits(b: bytes.Buf) -> bytes.Buf = if ptr_has_flags() { put_varint(b, 0) } else { b }',
+        'fn ptr_param_bits(b: bytes.Buf) -> bytes.Buf = b',
+    ),),
+    "ftoi-flags-unwritten": ((
+        BYTECODE,
+        'fn ftoi_flags(op: String, w: W) -> W = if op == "ftoi" && ftoi_has_flags() { emit(w, 0) } else { w }',
+        'fn ftoi_flags(op: String, w: W) -> W = w',
+    ),),
+    "view-inbounds-unwritten": ((
+        BYTECODE,
+        '  if view_has_inbounds() { list.fold(range(0, n), emit(w, n), (v, _k) => emit_byte(v, 0)) } else { w }',
+        '  w',
+    ),),
+    "header-minor-still-3": ((
+        BYTECODE,
+        'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR)',
+        'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 3)',
     ),),
 }
 

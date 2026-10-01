@@ -32,7 +32,7 @@ cuda_tile.module @m {
     %33 = addf %31, %32 rounding<nearest_even> : tile<128xf64>
     %34 = tanh %16 : tile<128xf64>
     %35 = addf %33, %34 rounding<nearest_even> : tile<128xf64>
-    %36 = pow %16, %21 : tile<128xf64>
+    %36 = fpowf %16, %21 : tile<128xf64>
     %37 = addf %35, %36 rounding<nearest_even> : tile<128xf64>
     %38 = floor %21 : tile<128xf64>
     %39 = addf %37, %38 rounding<nearest_even> : tile<128xf64>

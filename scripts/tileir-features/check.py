@@ -5,9 +5,9 @@ every attribute value is accounted for.
     scripts/tileir-features/check.py              # check all three ledgers
     scripts/tileir-features/check.py --self-test  # negative control
 
-`features.txt` says, for each of the 100 public opcodes of the frozen table,
+`features.txt` says, for each of the 105 public opcodes of the frozen table,
 whether this backend implements it, which knife did it, and how far the
-evidence goes. `types.txt` says the same for each of the 23 type tags, and
+evidence goes. `types.txt` says the same for each of the 24 type tags, and
 `attrs.txt` (knife T4) for each of the 44 values of the attribute domains.
 Their own headers explain the columns and the three layers; this turns each
 row into things a machine can look up.
@@ -27,8 +27,8 @@ ledger shrink knife by knife instead of drifting: adding an opcode to the
 writer without saying what covers it does not compile past this gate.
 
 The rest of the file is not in the OP_ table and cannot be checked against
-it, so the completeness of the 100 rows is pinned another way: the frozen
-codes are 0x00 to 0x75 with two frozen gaps, and the set of codes here has
+it, so the completeness of the 105 rows is pinned another way: the frozen
+codes are 0x00 to 0x7A with two frozen gaps, and the set of codes here has
 to be exactly that. A dropped row leaves a hole, and a hole is red.
 
 What it does not check: that an opcode is emitted CORRECTLY. That is what
@@ -80,24 +80,29 @@ class Ledger:
         self.cases = cases
 
 # The frozen public range and its two frozen gaps (BytecodeOpcodes.td), which
-# together are the 100 opcodes this file has to carry a row for.
+# together are the 105 opcodes this file has to carry a row for (100 at
+# cuda-tile v13.3.4; v13.4.0 appended 0x76 to 0x7A, knife U2).
 GAPS = set(range(0x19, 0x25)) | set(range(0x34, 0x3A))
-EXPECTED_CODES = {c for c in range(0x00, 0x76) if c not in GAPS}
+EXPECTED_CODES = {c for c in range(0x00, 0x7B) if c not in GAPS}
 
 # The version deltas, so that a row cannot quietly claim 13.1 for an opcode
 # that needs a newer assembler. Everything not named here entered at 13.1.
 SINCE_13_2 = {"atan2"}
 SINCE_13_3 = {"pack", "unpack", "alloca", "mmaf_scaled", "make_gather_scatter_view",
               "make_strided_view", "atomic_red_view_tko"}
+SINCE_13_4 = {"insert", "gdc_launch_dependents_tko", "gdc_wait_tko", "fpowi",
+              "memory_fence_alias_tko"}
 
 
 # The frozen TYPE tags (BytecodeTypeOpcodes.td): 0 to 22, and unlike the
-# opcode table there are no gaps in it.
-EXPECTED_TAGS = set(range(0, 23))
+# opcode table there are no gaps in it; and 130, the one tag v13.4.0 added
+# (f8E5M3FNU), which is a two-byte varint and not 23.
+EXPECTED_TAGS = set(range(0, 23)) | {130}
 
 # The type versions, read the same way the opcode ones are.
 TYPES_SINCE_13_2 = {"f8E8M0FNU"}
 TYPES_SINCE_13_3 = {"f4E2M1FN", "GatherScatterViewType", "StridedViewType", "i4"}
+TYPES_SINCE_13_4 = {"f8E5M3FNU"}
 
 
 # Every value of every attribute domain AttrDefs.td defines, as
@@ -117,6 +122,7 @@ def _attr_family(family, version, values):
 _attr_family("rounding", "13.1", [("nearest_even", 0), ("zero", 1), ("negative_inf", 2),
                                   ("positive_inf", 3), ("approx", 4), ("full", 5),
                                   ("nearest_int_to_zero", 6)])
+_attr_family("rounding", "13.4", [("nearest_away", 7)])
 _attr_family("overflow", "13.1", [("none", 0), ("nsw", 1), ("nuw", 2), ("nw", 3)])
 _attr_family("ordering", "13.1", [("unordered", 0), ("ordered", 1)])
 _attr_family("scope", "13.1", [("tl_blk", 0), ("device", 1), ("sys", 2)])
@@ -127,6 +133,8 @@ _attr_family("rmw", "13.1", [("and", 0), ("or", 1), ("xor", 2), ("add", 3), ("ad
 _attr_family("unit", "13.1", [("flush_to_zero", 1), ("propagate_nan", 1)])
 _attr_family("unit", "13.2", [("unsignedCmp", 1)])
 _attr_family("unit", "13.3", [("fast_acc", 1), ("constant", 1), ("global", 1)])
+_attr_family("unit", "13.4", [("saturating", 1)])
+_attr_family("ptr_attr", "13.4", [("none", 0)])
 _attr_family("padding", "13.1", [("zero", 0), ("neg_zero", 1), ("nan", 2), ("pos_inf", 3),
                                  ("neg_inf", 4)])
 _attr_family("visibility", "13.1", [("public", 0), ("private", 1)])
@@ -369,7 +377,8 @@ def check(table_text, bytecode_text, files, ledger_text):
         else:
             codes[value] = name
 
-        want_since = "13.2" if name in SINCE_13_2 else "13.3" if name in SINCE_13_3 else "13.1"
+        want_since = "13.2" if name in SINCE_13_2 else "13.3" if name in SINCE_13_3 else \
+            "13.4" if name in SINCE_13_4 else "13.1"
         if since != want_since:
             problems.append(f"line {n}: {name} entered at {want_since}, not {since}")
 
@@ -546,8 +555,8 @@ def check_types(table_text, bytecode_text, files, ledger_text):
         counts[status] += 1
         layers[layer] = layers.get(layer, 0) + 1
 
-        if not re.fullmatch(r"\d{1,2}", tag):
-            problems.append(f"line {n}: tag {tag!r} is not a one or two digit decimal number")
+        if not re.fullmatch(r"\d{1,3}", tag):
+            problems.append(f"line {n}: tag {tag!r} is not a decimal number of one to three digits")
             continue
         value = int(tag)
         if value in codes:
@@ -556,7 +565,8 @@ def check_types(table_text, bytecode_text, files, ledger_text):
             codes[value] = name
 
         want = "13.2" if name in TYPES_SINCE_13_2 else \
-            "13.3" if name in TYPES_SINCE_13_3 else "13.1"
+            "13.3" if name in TYPES_SINCE_13_3 else \
+            "13.4" if name in TYPES_SINCE_13_4 else "13.1"
         if since != want:
             problems.append(f"line {n}: {name} entered at {want}, not {since}")
 
@@ -895,7 +905,7 @@ def feature_cases(good, bytecode, files, ledger):
     plain = [
 
         ("a row with too few fields",
-         good + "\nnope | 0x76 | 13.1 | unimplemented | T1 | 0\n", "fields, not 8"),
+         good + "\nnope | 0x7B | 13.1 | unimplemented | T1 | 0\n", "fields, not 8"),
         ("the same opcode twice",
          good + "\nabsf | 0x00 | 13.1 | unimplemented | T1 | 0 | - | -\n", "is already listed"),
         ("a row whose code disagrees with bytecode.dawn",
@@ -919,6 +929,12 @@ def feature_cases(good, bytecode, files, ledger):
         ("a version the deltas contradict",
          good.replace("atan2                    | 0x6E | 13.2", "atan2                    | 0x6E | 13.1"),
          "atan2 entered at 13.2, not 13.1"),
+        ("a 13.4 opcode claimed for an older version",
+         good.replace("fpowi                    | 0x79 | 13.4", "fpowi                    | 0x79 | 13.3"),
+         "fpowi entered at 13.4, not 13.3"),
+        ("the 13.4 opcodes missing",
+         "\n".join(ln for ln in good.splitlines() if not ln.startswith("memory_fence_alias_tko ")) + "\n",
+         "opcode 0x7A of the frozen table has no row"),
         # Moved by knife T13 off the deferred `make_strided_view` onto an
         # implemented row whose golden is a real one: `vadd.mlir` is a
         # kernel a device runs and does not contain `remf`.
@@ -993,8 +1009,10 @@ def feature_cases(good, bytecode, files, ledger):
                              "const OP_ENTRY: Int = 0x16")
     cases.append(("an OP_ constant the ledger does not call implemented", good, grown, ledger,
                   "is marked structural but bytecode.dawn emits OP_ENTRY"))
+    # 0x7B and not 0x76: knife U2 made 0x76 `insert`, a real opcode with a
+    # row, and an anchor that names a real code tests a different verdict.
     invented = bytecode.replace("const OP_TANH: Int = 0x6A",
-                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x76")
+                                "const OP_TANH: Int = 0x6A\nconst OP_BOGUS: Int = 0x7B")
     cases.append(("an OP_ constant the ledger has no row for", good, invented, ledger,
                   "and the ledger has no row for it"))
     cases.append(("an empty layer-2 ledger under layer-2 claims", good, bytecode,
@@ -1014,6 +1032,14 @@ def type_cases(good, bytecode, files, ledger):
         ("a ledger with one row missing",
          "\n".join(ln for ln in good.splitlines() if not ln.startswith("tf32 ")) + "\n",
          "type tag 8 of the frozen table has no row"),
+        # 130 is the one tag past the contiguous 0 to 22, and the one a
+        # range() over the old table would never have asked for.
+        ("the 13.4 tag's row missing",
+         "\n".join(ln for ln in good.splitlines() if not ln.startswith("f8E5M3FNU ")) + "\n",
+         "type tag 130 of the frozen table has no row"),
+        ("a tag of four digits",
+         good.replace("f8E5M3FNU          | 130 |", "f8E5M3FNU          | 1300 |"),
+         "is not a decimal number of one to three digits"),
         ("a tag that disagrees with bytecode.dawn",
          good.replace("i16                |  2 |", "i16                |  6 |"),
          "i16 is tag 6 here and 2 in bytecode.dawn"),
@@ -1126,6 +1152,9 @@ def attr_cases(good, bytecode, files, ledger):
          good.replace("unit.unsignedCmp             | 1 | 13.2",
                       "unit.unsignedCmp             | 1 | 13.1"),
          "unit.unsignedCmp entered at 13.2, not 13.1"),
+        ("a 13.4 value missing",
+         "\n".join(ln for ln in good.splitlines() if not ln.startswith("rounding.nearest_away")) + "\n",
+         "rounding.nearest_away is a value of an attribute domain and has no row"),
         ("a const the writer does not define",
          good.replace("const:SCOPE_SYS", "const:SCOPE_UNIVERSE"),
          "names const SCOPE_UNIVERSE"),

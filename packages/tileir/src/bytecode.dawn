@@ -51,19 +51,21 @@
 # bit 3 on a store); `addf` is `rounding<nearest_even>` (0) with no
 # flush-to-zero (flags 0); the integer operations carry `overflow` none (0).
 #
-# FOUR shapes here are versioned, and knife T8 measured every one of them out
-# of the writer rather than out of a note: the header's minor byte, `exp`'s
+# The versioned shapes were measured out of the writer rather than out of a
+# note, twice. Knife T8 found four at 13.3: the header's minor byte, `exp`'s
 # inline `rounding_mode` (`exp_has_rounding`), `mmaf`'s flags varint
 # (`mmaf_has_flags`) and the Global section's record
-# (`global_has_extended_fields`). Everything else this package emits is the
-# same byte for byte at 13.1, 13.2 and 13.3; `tileiras` 13.3.36 accepts all
-# three version numbers. Two more version branches exist in the C++ writer
-# and reach nothing here: the Producer section (13.3+, written only when the
+# (`global_has_extended_fields`); `partition_view_has_bitfield` joined them
+# with the view family. Knife U2 found three more at 13.4, none of them in
+# NVIDIA's release notes: a unified-bitfield word on the pointer and
+# tensor_view types (`ptr_has_flags`), `ftoi`'s flags varint
+# (`ftoi_has_flags`) and the view load's and store's required `inbounds`
+# array (`view_has_inbounds`). Everything else this package emits is the
+# same byte for byte at 13.1 to 13.4. Two more branches of the C++ writer
+# reach nothing here: the Producer section (13.3+, written only when the
 # module carries a `producer` attribute, and this writer sets none) and the
-# unified optional-parameter bitfield of TYPES (13.3+,
-# BytecodeTypeCodeGen.cpp's `kUnifiedBitfieldVersion`, which fires only for a
-# type with an `OptionalParameter` -- in Types.td exactly the three view
-# types, all deferred with the view family by ruling 2).
+# 13.4 i1 constant and function-flag rules (this writer already bit-packs
+# i1 and sets only the kernel and hints bits).
 use std/bytes
 use std/list
 use std/map
@@ -78,14 +80,16 @@ use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, 
 ## The three numbers that must move together are this one, the `tileiras` pin
 ## in scripts/tile-golden/toolchain.txt, and the driver in the ledger.
 ##
-## Knife T8 moved the minor from 2 to 3. 13.3 is what `tileiras` 13.3.36 calls
-## its current version; 13.1 is the lowest it supports and 13.2 is what this
-## tree pinned from knife 3 to knife T15. Ampere and Ada run all three: the
-## cubin `tileiras --gpu-name sm_86` produces from the 13.3 bytes is byte for
-## byte the cubin it produced from the 13.2 bytes, which is measured in
-## tile-backend-design 6.11 rather than assumed.
+## Knife T8 moved the minor from 2 to 3 and knife U2 from 3 to 4. 13.4 is
+## what `tileiras` 13.4.92 calls its current version; it still accepts 13.1,
+## 13.2 and 13.3, and 13.2 is what this tree pinned from knife 3 to knife T15.
+## Neither move changed a device answer: the cubin `tileiras --gpu-name sm_86`
+## produces from the 13.3 bytes is byte for byte the cubin it produced from
+## the 13.2 bytes (tile-backend-design 6.11), and the cubin 13.4.92 produces
+## from the 13.4 bytes is byte for byte the one it produces from the 13.3
+## bytes (6.18), each measured over every golden rather than assumed.
 pub const BYTECODE_MAJOR: Int = 13
-pub const BYTECODE_MINOR: Int = 3
+pub const BYTECODE_MINOR: Int = 4
 
 ## The version as `tileiras --list-versions` spells it.
 pub fn bytecode_version() -> String = "${BYTECODE_MAJOR}.${BYTECODE_MINOR}"
@@ -147,7 +151,7 @@ const OP_NEGI: Int = 0x50
 const OP_OFFSET: Int = 0x51
 const OP_ORI: Int = 0x52
 const OP_PERMUTE: Int = 0x53
-const OP_POW: Int = 0x54
+const OP_FPOWF: Int = 0x54
 const OP_PTR_TO_INT: Int = 0x56
 const OP_PTR_TO_PTR: Int = 0x57
 const OP_REDUCE: Int = 0x58
@@ -745,7 +749,7 @@ fn float_op(op: String) -> Int = match op {
   "divf" | "divf_neg_inf" | "divf_pos_inf" -> OP_DIVF
   "maxf" | "maxf_nan" -> OP_MAXF
   "minf" | "minf_nan" -> OP_MINF
-  "pow" -> OP_POW
+  "pow" -> OP_FPOWF
   "negf" -> OP_NEGF
   "absf" -> OP_ABSF
   "exp" -> OP_EXP
@@ -1115,7 +1119,11 @@ fn ty_of(w: W, enc: Bytes) -> (W, Int) = {
   (W { ..w, types: t }, i)
 }
 
-fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(bytes.put(bytes.buf(), num_tag(name))))
+# A type tag is a varint on the wire (BytecodeTypeOpcodes.td's tags are
+# written with `writeVarInt`). Every tag this writer knows is below 128, where
+# the varint is the one byte `bytes.put` would write, so the bytes are the
+# same; the varint is for 13.4's f8E5M3FNU, whose tag is 130 and takes two.
+fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(put_varint(bytes.buf(), num_tag(name))))
 
 # Dependent types are registered before the type that names them, as the C++
 # writer does; the reader is lazy and would accept either order.
@@ -1123,7 +1131,7 @@ fn elem_ty(w: W, e: Elem) -> (W, Int) = match e {
   Num(name) -> num_ty(w, name)
   PtrTo(name) -> {
     let (w1, pointee) = num_ty(w, name)
-    ty_of(w1, bytes.freeze(put_varint(bytes.put(bytes.buf(), TAG_PTR), pointee)))
+    ty_of(w1, bytes.freeze(put_varint(ptr_param_bits(bytes.put(bytes.buf(), TAG_PTR)), pointee)))
   }
 }
 
@@ -1144,7 +1152,7 @@ fn ty(w: W, t: Ty) -> (W, Int) = match t {
   # of `make_tensor_view` to match.
   TensorView(e, shape, strides) -> {
     let (w1, ei) = elem_ty(w, e)
-    let b0 = put_varint(bytes.put(bytes.buf(), TAG_TENSOR_VIEW), ei)
+    let b0 = put_varint(ptr_param_bits(bytes.put(bytes.buf(), TAG_TENSOR_VIEW)), ei)
     let b1 = list.fold(shape, put_varint(b0, len(shape)), put_dim)
     let b2 = list.fold(strides, put_varint(b1, len(strides)), put_dim)
     ty_of(w1, bytes.freeze(b2))
@@ -1562,7 +1570,8 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
   }
   Cast(_dst, op, _from, to, src) -> {
     # the result is the TARGET type, then the attributes, then the operand.
-    emit_ref(list.fold(cast_attrs(op, elem_name(to)), emit_op(w0, cast_op(op), to), emit), src)
+    # From 13.4 `ftoi` carries a flags varint between the two (`ftoi_flags`).
+    emit_ref(list.fold(cast_attrs(op, elem_name(to)), ftoi_flags(op, emit_op(w0, cast_op(op), to)), emit), src)
   }
   SelectTile(_dst, _cond_ty, t, cond, lhs, rhs) ->
     emit_ref(emit_ref(emit_ref(emit_op(w0, OP_SELECT, t), cond), lhs), rhs)
@@ -1829,7 +1838,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, tk) = ty(w1, Token)
     let w3 = emit(emit(emit(emit(emit(emit(w2, OP_LOAD_VIEW_TKO), 2), ti), tk),
       VIEW_FLAG_TOKEN), ORDER_WEAK)
-    let w4 = emit(emit_ref(w3, view), len(indices))
+    let w4 = emit(emit_ref(inbounds(w3, len(indices)), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
   StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in) -> {
@@ -1838,7 +1847,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # reverse of how the assembly reads for the first two.
     let (w1, tk) = ty(w0, Token)
     let w2 = emit(emit(emit(emit(w1, OP_STORE_VIEW_TKO), 1), tk), VIEW_FLAG_TOKEN)
-    let w3 = emit(w2, ORDER_WEAK)
+    let w3 = inbounds(emit(w2, ORDER_WEAK), len(indices))
     let w4 = emit(emit_ref(emit_ref(w3, value), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
@@ -1925,6 +1934,43 @@ fn padding_code(p: Padding) -> Option[Int] = match p {
   PadPosInf -> Some(PAD_POS_INF)
   PadNegInf -> Some(PAD_NEG_INF)
 }
+
+# The three version branches knife U2 added, all at the 13.4 boundary and
+# read out of NVIDIA/cuda-tile@7e8e2e68 (v13.4.0); 13.4's release notes name
+# none of them. cuTile Python 1.6.0's writer has the same three at the same
+# version, which is the second opinion tile-backend-design 6.18 cites.
+#
+# `PointerType` and `TensorViewType` each grew an
+# `OptionalParameter<PtrAttrAttr>` at 13.4. Both types are 13.1, so they had
+# no optional parameter and no bitfield; a type that has one gets the
+# unified bitfield varint between its tag and its first parameter from
+# 13.3 on (`partition_view_has_bitfield` above is the same rule for the
+# parameter that was always there), and for these two it starts the day the
+# parameter does. This writer never sets the attribute, so the word is 0.
+fn ptr_has_flags() -> Bool = at_least(13, 4)
+
+fn ptr_param_bits(b: bytes.Buf) -> bytes.Buf = if ptr_has_flags() { put_varint(b, 0) } else { b }
+
+# `ftoi` (13.1) grew its first optional field at 13.4, the UnitAttr
+# `saturating`, so generateFlagsFieldSerialization writes the version-checked
+# form: a flags varint from 13.4 on, after the result type, and none before.
+# It is the `mmaf_has_flags` case one version later. `saturating` is bit 0
+# and this writer leaves it clear: the conversion truncates, as it did.
+fn ftoi_has_flags() -> Bool = at_least(13, 4)
+
+fn ftoi_flags(op: String, w: W) -> W = if op == "ftoi" && ftoi_has_flags() { emit(w, 0) } else { w }
+
+# `load_view_tko` and `store_view_tko` grew a REQUIRED `inbounds`, a
+# DenseBoolArrayAttr with one element per index, at 13.4. Required means
+# inline, in declaration order after `memory_ordering_semantics`, with no
+# flag bit: the count as a varint and then one byte an element. Every
+# element is false here, which promises nothing, so the assembler keeps the
+# bounds handling the view's padding needs; a true on a shape the tile does
+# not divide is refused (6.18), and writing true is knife T18's business.
+fn view_has_inbounds() -> Bool = at_least(13, 4)
+
+fn inbounds(w: W, n: Int) -> W =
+  if view_has_inbounds() { list.fold(range(0, n), emit(w, n), (v, _k) => emit_byte(v, 0)) } else { w }
 
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =
@@ -2167,8 +2213,11 @@ test "a tile type names its element type first, so the element's index is lower"
   let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
   let (w1, ti) = ty(w0, Tile([128], PtrTo("f64")))
   # f64 (tag 9), ptr<f64>, tile<128xptr<f64>>: three types, the tile last.
+  # The pointer is its tag, the 13.4 bitfield word (0: no `ptr_attr`) and
+  # the pointee's index.
   assert ti == 2
-  assert list.map(w1.types.items, hex) == ["09", "0c00", "0d01018000000000000000"]
+  assert ptr_has_flags()
+  assert list.map(w1.types.items, hex) == ["09", "0c0000", "0d01018000000000000000"]
 }
 
 fn vadd() -> TileProg = TileProg {
@@ -2190,9 +2239,9 @@ fn vadd() -> TileProg = TileProg {
 
 test "the file opens with the magic and the version constants, and closes with the end section" {
   let b = encode(vadd())
-  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d03" ++ "0000"
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d04" ++ "0000"
   assert bytes.at(b, bytes.len(b) - 1) == 0
-  assert bytecode_version() == "13.3"
+  assert bytecode_version() == "13.4"
 }
 
 test "the function entry is a kernel with an unknown location and the entry name is the one string" {
@@ -2277,7 +2326,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
   assert str.contains(whole, hex(head))
   let tail = bytes.freeze(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(put_varint(bytes.buf(), 0), 5), 20), 21), 19), 17), 18), 1), 1))
   assert str.contains(whole, hex(tail) ++ "03")
-  assert bytecode_version() == "13.3"
+  assert bytecode_version() == "13.4"
   assert for_has_flags()
 }
 
@@ -2662,7 +2711,7 @@ test "an f16 constant lays down the binary16 pattern, low byte first, and an i8 
 test "encoding a loop twice gives the same bytes, and the file still opens and closes as before" {
   let b = encode(sum_prog())
   assert b == encode(sum_prog())
-  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d03" ++ "0000"
+  assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d04" ++ "0000"
   assert bytes.at(b, bytes.len(b) - 1) == 0
   assert str.ends_with(hex(b), hex(bytes.utf8("sum")) ++ "00")
 }
@@ -2896,11 +2945,13 @@ test "a tensor view is its tag, its element type index and two arrays of eight-b
   # takes index 0 and the view takes 1. Then `writeLEVarSize` twice: the
   # count as a varint and EIGHT raw little-endian bytes an element. Not a
   # varint per element and not zigzag; `emit_i32_array`'s test above is the
-  # four-byte half of the same rule.
+  # four-byte half of the same rule. From 13.4 the type has an optional
+  # `ptr_attr` parameter, so the unified bitfield word (0) sits between the
+  # tag and the element type's index, as on a pointer.
   let (w1, i) = ty(w0, TensorView(Num("f64"), [8, 4], [4, 1]))
   assert i == 1
   assert hex(w1.types.items[1])
-    == "0e" ++ "00"
+    == "0e" ++ "00" ++ "00"
     ++ "02" ++ "0800000000000000" ++ "0400000000000000"
     ++ "02" ++ "0400000000000000" ++ "0100000000000000"
 }
@@ -2914,7 +2965,7 @@ test "a dynamic dimension is kDynamic, which is INT64_MIN and not a shifted minu
   # LENGTH would say which of the two had been written.
   let (w1, i) = ty(w0, TensorView(Num("f64"), [DYN_DIM, 4], [4, DYN_DIM]))
   assert hex(w1.types.items[i])
-    == "0e" ++ "00"
+    == "0e" ++ "00" ++ "00"
     ++ "02" ++ "0000000000000080" ++ "0400000000000000"
     ++ "02" ++ "0400000000000000" ++ "0000000000000080"
 }
@@ -3101,6 +3152,19 @@ test "atomic_red_view_tko writes one result count, three inline attributes and t
   assert OP_ATOMIC_RED_VIEW_TKO == 0x75
 }
 
+test "from 13.4 ftoi writes a flags word after its result type, and the other conversions do not" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  # opcode 0x2B, the result type (the i32 tile, index 1 after its element
+  # type), the flags word (0: `saturating` clear), then the two inline
+  # attributes, signed and nearest_int_to_zero, then the operand.
+  let f = encode_instr(w0, Cast(5, "ftoi", Tile([8], Num("f64")), Tile([8], Num("i32")), Val(0)))
+  assert ftoi_has_flags()
+  assert hex(bytes.freeze(f.body)) == "2b" ++ "01" ++ "00" ++ "01" ++ "06" ++ "00"
+  # `itof` has no optional field at any version: no word.
+  let i = encode_instr(w0, Cast(5, "itof", Tile([8], Num("i32")), Tile([8], Num("f64")), Val(0)))
+  assert hex(bytes.freeze(i.body)) == "3b" ++ "01" ++ "01" ++ "00" ++ "00"
+}
+
 test "load_view_tko is two results and one index count, and store_view_tko puts the tile before the view" {
   let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
   let tile = Tile([2, 2], Num("f64"))
@@ -3108,27 +3172,29 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # opcode, 2 results, the tile type index, the token type index, the flags
   # (bit 2, the token; bit 0 is `memory_scope` and bit 1 is
   # `optimization_hints`, and this writer sets neither), the weak ordering,
+  # the 13.4 `inbounds` array (its count, 2, and one false byte an index),
   # the view, the index COUNT, the two indices, the token. There is no mask
   # and no padding operand: a view says what an out-of-bounds lane reads in
   # its TYPE.
   let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
     [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3)))
   assert hex(bytes.freeze(ld.body))
-    == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+    == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "020000" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   assert VIEW_FLAG_TOKEN == 4
+  assert view_has_inbounds()
   # the same shape with one result, and the TILE before the view: that is
   # the dialect's `arguments` order, which is the reverse of how the
   # assembly reads the two.
   let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
     [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3)))
   assert hex(bytes.freeze(st.body))
-    == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+    == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "020000" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
 }
 
 test "the Global section is a count and six varints a record at 13.3, unaligned, and it comes before Func" {
   let h = hex(encode(globals_prog()))
   # the header is twelve bytes: magic, major, minor and the two-byte tag
-  assert str.starts_with(h, "7f54696c65495200" ++ "0d03" ++ "0000")
+  assert str.starts_with(h, "7f54696c65495200" ++ "0d04" ++ "0000")
   # section id 6 with NO alignment bit (0x06 and not 0x86: this section
   # writes only varints and never aligns), then its length, then the count
   # of globals. Two records of SIX varints (knife T8: four below 13.3), one
