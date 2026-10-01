@@ -3304,7 +3304,8 @@ stdout/stderr/exit 契约保持一致；完整理由见 `run-argv-boundary-desig
 
 `dawnc` 少的那几个子命令不是缺口，是后端的边界：**它拒绝 `use java`**（Java 互操作是
 JVM 后端的能力，§9），`build`-to-jar、`lock`、`cache` 同理只在 JVM 侧有意义。
-两个驱动都接受 `--std <dir>` 换标准库源。
+两个驱动都接受 `--std <dir>` 换标准库源；不给时取 `DAWN_STD`（非空），再不然用编进工具链的那份，
+从不读工作目录下的 `std/`（`std-dir-loading-design.md`「缺省来源」）。
 
 **参数可为单文件或工程目录**（§10.1）：目录模式加载 `src/` 全部模块，入口
 `src/main.dawn`；单文件模式向上找 `src` 祖先为根。jar 收全部模块类，`Main-Class` = 入口

@@ -33,7 +33,10 @@ use std/str
 use std/bytes
 use front/token.{Diag}
 use front/diag
-use driver/stdlib.{StdCtx, StdLoadError, load_std, std_load_error_text, std_load_is_bug}
+use driver/stdlib.{
+  StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
+  std_load_is_bug
+}
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{Program, LocDiag, load_target, analyze_program, rendered_diags, dawn_files_under}
@@ -90,10 +93,11 @@ fn usage() -> String =
     "  dawnc version                               print the version",
     "",
     "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
-    "--std <dir> names the std to compile against (default: `std` under the working",
-    "directory). A directory with a modules.txt must hold every module it lists, or",
-    "the compile stops and names the missing ones; a directory without modules.txt",
-    "is ignored and the std compiled into this toolchain is used.",
+    "--std <dir> names the std to compile against. Without it, DAWN_STD names one if",
+    "set and not empty, and otherwise the std compiled into this toolchain is used;",
+    "the working directory is never searched. A directory with a modules.txt must",
+    "hold every module it lists, or the compile stops and names the missing ones; a",
+    "directory without modules.txt is ignored and the std compiled in is used.",
     "`use java` programs are rejected: Java interop needs the JVM toolchain, so",
     "compile those with `dawn` (adding --native if you want one file out of it).",
     "Packaging a jar and `lock` need a JVM too and are not subcommands here."
@@ -205,14 +209,14 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   ()
 }
 
-type RunArgs = { std_dir: String, target: String, program_args: List[String] }
+type RunArgs = { std_flag: Option[String], target: String, program_args: List[String] }
 
 fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
 
 ## Independent native parser: compiler options end at the target.
 fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var target = ""
   var seen_target = false
   var program_args: List[String] = []
@@ -220,7 +224,7 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   while i < len(rest) && not seen_target {
     if rest[i] == "--std" {
       if i + 1 >= len(rest) { cli_error(run_usage()) }
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--" {
       cli_error(run_usage())
@@ -240,7 +244,7 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
       i = i + 1
     }
   }
-  RunArgs { std_dir: std_dir, target: target, program_args: program_args }
+  RunArgs { std_flag: std_flag, target: target, program_args: program_args }
 }
 
 ## `--std <dir>` and `-o <out>` plus exactly one target, kept out of run.
@@ -248,14 +252,14 @@ fn parse_compile_tail(
   cmd: String,
   usage_text: String,
   rest: List[String]
-) -> (String, String, String) !Exit !Console !io = {
-  var std_dir = "std"
+) -> (Option[String], String, String) !Exit !Console !io = {
+  var std_flag: Option[String] = None
   var out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
@@ -267,7 +271,7 @@ fn parse_compile_tail(
     }
   }
   if target == "" { cli_error(usage_text) }
-  (std_dir, out, target)
+  (std_flag, out, target)
 }
 
 ## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
@@ -285,8 +289,8 @@ fn parse_compile_tail(
 fn parse_build_tail(
   usage_text: String,
   rest: List[String],
-) -> (String, String, String, Bool, Bool) !Exit !Console !io = {
-  var std_dir = "std"
+) -> (Option[String], String, String, Bool, Bool) !Exit !Console !io = {
+  var std_flag: Option[String] = None
   var out = ""
   var target = ""
   var wasm = false
@@ -294,7 +298,7 @@ fn parse_build_tail(
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
@@ -318,28 +322,28 @@ fn parse_build_tail(
   if reactor && not wasm {
     cli_error("--reactor needs --target wasm; a native build always has a main")
   }
-  (std_dir, out, target, wasm, reactor)
+  (std_flag, out, target, wasm, reactor)
 }
 
 ## `[--std <dir>] <target>...`, matching main.dawn's public check parser.
-fn check_args(rest: List[String]) -> (String, List[String]) = {
-  var std_dir = "std"
+fn check_args(rest: List[String]) -> (Option[String], List[String]) = {
+  var std_flag: Option[String] = None
   var targets: List[String] = []
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else {
       targets = targets ++ [rest[i]]
       i = i + 1
     }
   }
-  (std_dir, targets)
+  (std_flag, targets)
 }
 
-fn load_or_die(std_dir: String) -> StdCtx !Fs !Env !Exit !Console !io =
-  match load_std(std_dir) {
+fn load_or_die(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
+  match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -357,8 +361,8 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Consol
   prog
 }
 
-fn emitted(std_dir: String, target: String) -> String !Fs !Proc !Env !Exit !Console !io = {
-  let std = load_or_die(std_dir)
+fn emitted(std_flag: Option[String], target: String) -> String !Fs !Proc !Env !Exit !Console !io = {
+  let std = load_or_die(std_flag)
   let prog = analyzed(std, target)
   match cdriver.c_text(std, prog) {
     Ok(s) -> s
@@ -615,7 +619,7 @@ fn cc_build_with(
 
 fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if wants_help(rest) { return console_print(subcommand_help("check")) }
-  let (std_dir, targets) = check_args(rest)
+  let (std_flag, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
   }
@@ -627,7 +631,7 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("source files must end in .dawn: ${target}")
     }
   }
-  let std = load_or_die(std_dir)
+  let std = load_or_die(std_flag)
   var all: List[LocDiag] = []
   for target in targets {
     let loaded = load_target(std, target)
@@ -639,12 +643,12 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 }
 
 fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  let (std_dir, out, target) = parse_compile_tail(
+  let (std_flag, out, target) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
   )
-  let text = emitted(std_dir, target)
+  let text = emitted(std_flag, target)
   if out == "" {
     console_print(text)
   } else {
@@ -661,7 +665,7 @@ fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   # would take it for the target and report a missing file (which is what it
   # did until 2026-08-26).
   if wants_help(rest) { return console_print(subcommand_help("build")) }
-  let (std_dir, out0, target, wasm, reactor) = parse_build_tail(
+  let (std_flag, out0, target, wasm, reactor) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
   )
@@ -672,7 +676,7 @@ fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     out0
   }
-  cc_build_for(reactor_wrapped(emitted(std_dir, target), reactor), out, wasm, reactor)
+  cc_build_for(reactor_wrapped(emitted(std_flag, target), reactor), out, wasm, reactor)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
@@ -718,7 +722,7 @@ fn build_and_exec(
 fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let run = parse_run_tail(rest)
   build_and_exec(
-    emitted(run.std_dir, run.target),
+    emitted(run.std_flag, run.target),
     "dawnc-run",
     "program",
     "program",
@@ -787,14 +791,14 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
 ## target without `use java` the two produce the same JSON, and a target with
 ## it is not a program this backend compiles at all.
 fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var builtins_mode = false
   var stdlib_mode = false
   var target = ""
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--builtins" {
       builtins_mode = true
@@ -816,7 +820,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       (if stdlib_mode { 1 } else { 0 }) +
       (if builtins_mode { 1 } else { 0 })
   )
-  let std = match load_std(std_dir) {
+  let std = match load_chosen_std(cli_std_choice(std_flag)) {
     Ok(sc) -> sc
     Err(e) -> fail_std(e)
   }
@@ -862,14 +866,14 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## not taken here because no subcommand of this driver takes them; that gap is
 ## the driver's, not this subcommand's.
 fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  var std_dir = "std"
+  var std_flag: Option[String] = None
   var target = ""
   var std_tests = false
   var i = 0
   while i < len(rest) {
     var spec = ""
     if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
+      std_flag = Some(rest[i + 1])
       i = i + 2
     } else if rest[i] == "--stdlib" {
       std_tests = true
@@ -900,7 +904,7 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
-  let std = load_or_die(std_dir)
+  let std = load_or_die(std_flag)
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
   let prog = if std_tests { Program { modules: [], diags: [], decl_spans: no_spans } } else { analyzed(std, target) }
   # the modules whose test blocks are being run: the target's, or std's own
@@ -922,7 +926,7 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     if len(tm.tests) > 0 { bearing = bearing + 1 }
   }
   if bearing == 0 {
-    return cli_error(if std_tests { "${std_dir} has no test blocks" }
+    return cli_error(if std_tests { "${std_choice_text(cli_std_choice(std_flag))} has no test blocks" }
     else { "${target} has no test blocks" })
   }
   var runner_tests: List[(String, Int, String)] = []

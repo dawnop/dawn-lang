@@ -4159,7 +4159,9 @@ rationale.
 The few subcommands `dawnc` lacks are not holes, they are the backend's boundary: **it
 refuses `use java`** (Java interop is a JVM backend capability, §9), and `build`-to-jar,
 `lock` and `cache` likewise only mean something on the JVM side. Both drivers accept
-`--std <dir>` to swap the standard library source.
+`--std <dir>` to swap the standard library source; without it they take `DAWN_STD` (when
+not empty), and otherwise the copy compiled into the toolchain, never a `std/` under the
+working directory (`std-dir-loading-design.md`).
 
 **The argument may be a single file or a project directory** (§10.1): directory mode
 loads every module under `src/`, with `src/main.dawn` as the entry point; single-file
