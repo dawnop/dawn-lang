@@ -4,8 +4,11 @@
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
+# `exit` and `ms` are `JInt`, not `JNum`: a `JNum` renders as a float
+# (`"exit":0.0`), which a client comparing `exit === 0` in a stricter language
+# reads as a different value. test/contract.sh checks the literal bytes.
 use std/map
-use json/value.{Json, JBool, JNum, JStr, JObj, error_text}
+use json/value.{Json, JBool, JInt, JStr, JObj, error_text}
 use json/parser.{parse}
 use json/render.{render}
 
@@ -41,10 +44,10 @@ pub fn render_outcome(o: Outcome) -> String =
       obj([
         ("ok", JBool(true)),
         ("phase", JStr("run")),
-        ("exit", JNum(to_float(exit))),
+        ("exit", JInt(exit)),
         ("output", JStr(output)),
         ("truncated", JBool(truncated)),
-        ("ms", JNum(to_float(ms))),
+        ("ms", JInt(ms)),
       ])
     CompileError(output) ->
       obj([("ok", JBool(false)), ("phase", JStr("compile")), ("output", JStr(output))])
@@ -58,7 +61,7 @@ pub fn render_outcome(o: Outcome) -> String =
 pub fn render_check(o: Outcome) -> String =
   match o {
     Compiled(_, _, _, ms) ->
-      obj([("ok", JBool(true)), ("phase", JStr("check")), ("ms", JNum(to_float(ms)))])
+      obj([("ok", JBool(true)), ("phase", JStr("check")), ("ms", JInt(ms))])
     CompileError(output) ->
       obj([("ok", JBool(false)), ("phase", JStr("compile")), ("output", JStr(output))])
     Timeout(output) ->
