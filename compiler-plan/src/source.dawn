@@ -11,8 +11,10 @@ use std/io.{Fs, Proc, Env}
 use std/str
 use std/map
 use std/set
+use std/memfs
 use diagnostic.{Diag, diag}
 use envmem
+use procmem
 use manifestv.{
   ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate,
   check_v2_name
@@ -58,10 +60,12 @@ type SourceInputKind = InputFile | InputOptional | InputTree
 
 type SourceInput = { kind: SourceInputKind, path: String }
 
-## A path in the one spelling module identities are compared by: absolute and
-## normalized, lexically. It does not resolve symbolic links or fold case, so
-## one file reached through two spellings is two identities
-## (docs/lsp-workspace-design.md §10).
+## A path absolute and normalized, lexically. It does not resolve symbolic
+## links or fold case, and it does not ask the file system anything, so it is
+## the spelling for what a path *says*: a project root shown in a diagnostic,
+## a module path derived from a root and a file, the closed input list of a
+## bootstrap. What a path *is* -- the key two spellings of one file have to
+## meet on -- is `canon_identity` below.
 ##
 ## This is the only definition. `driver/analyze`, `driver/stdlib` and
 ## `lsp/server` import it from here, because compiler-plan is the lowest layer
@@ -77,15 +81,40 @@ type SourceInput = { kind: SourceInputKind, path: String }
 pub fn canon(p: String) -> String !Env =
   if fspath.is_absolute(p) { fspath.normalize(p) } else { fspath.absolute(p, io.cwd()) }
 
-## The manifest beside `dir`'s dawn.toml, validated once per canonical
-## directory (the Kotlin ResolveCtx.manifest): a missing file is None without
+## The spelling identity is compared by: the path with every symbolic link
+## resolved, as `realpath(3)` resolves it, or `canon(p)` when it cannot be
+## (the path does not exist, or the host has no absolute paths, as on wasi).
+## Two spellings of one existing file get one answer, so a package reached
+## through a link is one package, and a file an editor opens through a link is
+## the file the loader read (#207, docs/fs-real-path-design.md R3).
+##
+## The path handed to the host is absolute but *not* normalized first. A `..`
+## after a link leaves the link's target, not the directory the link sits in:
+## `home/app -> ../work/app` makes `home/app/../lib` the directory `work/lib`,
+## while folding it lexically first gives `home/lib`, which does not exist, and
+## the fallback would then hand back that same wrong directory. That is the
+## failure this function exists to remove, so the order is the point.
+##
+## Only a relative path costs a working-directory read, for `canon`'s reason;
+## the fallback reuses the absolute path rather than asking again.
+pub fn canon_identity(p: String) -> String !Fs !Env = {
+  let abs = if fspath.is_absolute(p) { p } else { io.cwd() ++ "/" ++ p }
+  match io.real_path(abs) {
+    Ok(resolved) -> resolved
+    Err(_) -> canon(abs)
+  }
+}
+
+## The manifest beside `dir`'s dawn.toml, validated once per directory
+## (the Kotlin ResolveCtx.manifest), keyed by `canon_identity` so that two
+## spellings of one directory read it once: a missing file is None without
 ## diagnostics; an invalid one reports its span diagnostics at first touch and
 ## caches None.
 fn mf_get(
   cache0: Map[String, Option[ManifestV]],
   dir: String
 ) -> (Option[ManifestV], List[LocDiag], Map[String, Option[ManifestV]]) !Fs !Env = {
-  let dc = canon(dir)
+  let dc = canon_identity(dir)
   if map.has(cache0, dc) {
     return (map.get(cache0, dc).expect("cached manifest"), [], cache0)
   }
@@ -515,7 +544,7 @@ fn select_url_deps(
   while qi < len(queue) {
     let dir = queue[qi]
     qi = qi + 1
-    let dc = canon(dir)
+    let dc = canon_identity(dir)
     if set.has(seen, dc) { continue }
     seen = set.insert(seen, dc)
     let (mopt, mds, mfc1) = mf_get(mfc, dir)
@@ -692,8 +721,16 @@ fn resolve_src_deps(
           None -> true
         }
         if unresolved { continue } # selection already errored
-        let ddir = ddir_opt.expect("dep dir")
-        let dcanon = canon(ddir)
+        let ddir_given = ddir_opt.expect("dep dir")
+        # The directory is resolved once, where it enters the graph, and read
+        # through that spelling from here on: the package's identity, its
+        # manifest, its src/ and its own relative dependencies. A kernel
+        # answers the given spelling the same way, so on a host this changes
+        # which name is read and not what is read; it is what keeps one
+        # package reached through a link from being two (#207). Diagnostics
+        # below still show the spelling the consumer wrote.
+        let dcanon = canon_identity(ddir_given)
+        let ddir = dcanon
         if map.has(cache, dcanon) {
           # an earlier link of this directory claimed its name; same dir = same claim
           match map.get(cache, dcanon).expect("cached") {
@@ -728,7 +765,7 @@ fn resolve_src_deps(
             } else if not io.is_dir(ddir ++ "/src") {
               diags = diags ++ [LocDiag { path: mf_path, d: diag(
                 "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
-                  ddir ++ "/src)",
+                  ddir_given ++ "/src)",
                 0,
                 0,
                 ""
@@ -744,7 +781,7 @@ fn resolve_src_deps(
               mfc = mfc1
               let info = PkgR {
                 name: dm.name,
-                root: canon(ddir ++ "/src"),
+                root: canon_identity(ddir ++ "/src"),
                 deps: tdeps,
                 java_deps: dm.java_deps
               }
@@ -755,7 +792,7 @@ fn resolve_src_deps(
           None -> {
             diags = diags ++ [LocDiag { path: mf_path, d: diag(
               "dependency `" ++ aname ++ "` has no dawn.toml (looked in " ++
-                ddir ++ ")",
+                ddir_given ++ ")",
               0,
               0,
               "a Dawn source package is a directory with dawn.toml (name = \"" ++
@@ -1005,4 +1042,111 @@ test "mirror failure state retries another url but not another alias" {
   let subdir_failed = remember_subdir_failure(url_failures_empty(), hash, "one")
   assert subdir_failure_seen(subdir_failed, hash, "one")
   assert not subdir_failure_seen(subdir_failed, hash, "two")
+}
+
+## `st` with a link at `at` to `target` and `files` readable through it.
+##
+## A `std/memfs` link is seen by `fs_real_path` and by nothing else: reading
+## `at/dawn.toml` does not follow it. A kernel does follow it, so the files a
+## reader would find through the link are written out at the link's spelling
+## too, with the same text as at the target. The tree then answers both
+## spellings the way a host does, and only the identity question can tell
+## them apart, which is the question under test.
+fn mem_linked(
+  st0: memfs.MemFs,
+  at: String,
+  target: String,
+  files: List[(String, String)]
+) -> memfs.MemFs = {
+  var st = memfs.link(st0, at, target)
+  for (rel, text) in files { st = memfs.put(st, "${at}/${rel}", text) }
+  st
+}
+
+## `source_plan` over a table: the tree is `seed`, the environment is empty,
+## and a child process would panic for want of a reply.
+fn plan_in_table(seed: memfs.MemFs, target: SourceTarget) -> SourcePlan !io = {
+  let (planned, _) = memfs.with_fs(seed, () => procmem.with_proc_table([], () => {
+    let (plan, _) = envmem.with_env_table(envmem.TABLE_CWD, [], () => source_plan(target))
+    plan
+  }))
+  let (plan, calls) = planned
+  if calls != [] { panic("a path-only plan spawned a process") }
+  plan
+}
+
+test "a package reached through a link and through its own path is one package" {
+  # A diamond: `app` depends on `lib` and on `mid`, and `mid` names the same
+  # `lib` through `lib_link -> lib`. The lexical spellings differ, the
+  # directory does not, so this is one package and not a coherence error.
+  let lib_toml = "schema = 1\nname = \"lib\"\n"
+  let lib_src = "pub fn tag() -> Int = 1\n"
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/p/lib/dawn.toml", lib_toml)
+  st = memfs.put(st, "/p/lib/src/util.dawn", lib_src)
+  st = mem_linked(st, "/p/lib_link", "lib",
+    [("dawn.toml", lib_toml), ("src/util.dawn", lib_src)])
+  st = memfs.put(st, "/p/mid/dawn.toml",
+    "schema = 1\nname = \"mid\"\n\n[deps]\nlib = \"../lib_link\"\n")
+  st = memfs.put(st, "/p/mid/src/m.dawn", "pub fn m() -> Int = 2\n")
+  st = memfs.put(st, "/p/app/dawn.toml",
+    "schema = 1\nname = \"app\"\n\n[deps]\nlib = \"../lib\"\nmid = \"../mid\"\n")
+  st = memfs.put(st, "/p/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  let plan = plan_in_table(st, ProjectDirectory("/p/app"))
+  for ld in plan.diags {
+    assert not str.contains(ld.d.msg, "linked from two different directories")
+  }
+  assert len(plan.diags) == 0
+  let direct = map.get(plan.pkgs, "lib").expect("lib")
+  let through_mid =
+    map.get(map.get(plan.pkgs, "mid").expect("mid").deps, "lib").expect("mid's lib")
+  assert direct.root == "/p/lib/src"
+  assert through_mid.root == "/p/lib/src"
+}
+
+test "a dependency's `..` after a link leaves the link's target" {
+  # `home/app -> ../work/app`, and app's `lib = "../lib"` is `work/lib` to a
+  # kernel. Folding `home/app/../lib` lexically gives `home/lib`, which is not
+  # there; the plan has to land on the directory the kernel lands on.
+  let app_toml = "schema = 1\nname = \"app\"\n\n[deps]\nlib = \"../lib\"\n"
+  let app_src = "pub fn main() -> Unit !io = ()\n"
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/w/work/app/dawn.toml", app_toml)
+  st = memfs.put(st, "/w/work/app/src/main.dawn", app_src)
+  st = memfs.put(st, "/w/work/lib/dawn.toml", "schema = 1\nname = \"lib\"\n")
+  st = memfs.put(st, "/w/work/lib/src/util.dawn", "pub fn tag() -> Int = 1\n")
+  st = mem_linked(st, "/w/home/app", "../work/app",
+    [("dawn.toml", app_toml), ("src/main.dawn", app_src)])
+  let plan = plan_in_table(st, ProjectDirectory("/w/home/app"))
+  assert len(plan.diags) == 0
+  assert map.get(plan.pkgs, "lib").expect("lib").root == "/w/work/lib/src"
+  # the project keeps the spelling it was named by: a root is shown to the
+  # user, and only identity is resolved
+  assert plan.project == "/w/home/app"
+}
+
+test "canon_identity resolves what exists and spells the rest lexically" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/w/work/app/src/main.dawn", "")
+  st = memfs.put(st, "/w/work/lib/src/util.dawn", "")
+  st = memfs.link(st, "/w/home/app", "../work/app")
+  let ((got, log), _) = memfs.with_fs(st, () =>
+      envmem.with_env_table("/w/home", [], () => [
+        canon_identity("/w/home/app/src/main.dawn"),
+        # `..` after the link leaves its target: lexically this is `/w/home/lib`
+        canon_identity("/w/home/app/../lib"),
+        canon_identity("app/src"),
+        # nothing there: the lexical spelling, `..` folded as written
+        canon_identity("/w/home/app/../missing/x.dawn"),
+        canon_identity("missing/../y")
+      ]))
+  assert got == [
+    "/w/work/app/src/main.dawn",
+    "/w/work/lib",
+    "/w/work/app/src",
+    "/w/home/missing/x.dawn",
+    "/w/home/y"
+  ]
+  # one working-directory read per relative path, the fallback included
+  assert log == [envmem.AskedCwd, envmem.AskedCwd]
 }
