@@ -154,7 +154,16 @@ export function dawnLint(endpoint: string) {
 // available, this switches the same CodeMirror diagnostic state back to the
 // existing /api/check endpoint. Only the source that currently owns that state
 // may publish, so a late HTTP response cannot overwrite fresh LSP diagnostics.
-export function dawnDiagnostics(endpoint: string, lsp: DawnLspClient) {
+//
+// `onChecking` hears whether an HTTP check is in flight. That path takes a
+// couple of seconds (a cold compile on the run service), against the LSP's
+// tens of milliseconds, so the editor says it is checking instead of looking
+// as if the code were clean.
+export function dawnDiagnostics(
+  endpoint: string,
+  lsp: DawnLspClient,
+  onChecking: (busy: boolean) => void = () => {},
+) {
   return ViewPlugin.fromClass(class {
     private timer: ReturnType<typeof setTimeout> | null = null
     private abort: AbortController | null = null
@@ -209,6 +218,7 @@ export function dawnDiagnostics(endpoint: string, lsp: DawnLspClient) {
 
     private cancelHttp() {
       this.serial++
+      onChecking(false)
       if (this.timer != null) clearTimeout(this.timer)
       this.timer = null
       this.abort?.abort()
@@ -233,6 +243,7 @@ export function dawnDiagnostics(endpoint: string, lsp: DawnLspClient) {
       const serial = ++this.serial
       const abort = new AbortController()
       this.abort = abort
+      onChecking(true)
       try {
         const response = await fetch(endpoint, {
           method: 'POST',
@@ -251,6 +262,8 @@ export function dawnDiagnostics(endpoint: string, lsp: DawnLspClient) {
         // Busy, network and abort failures deliberately preserve the last set.
       } finally {
         if (this.abort === abort) this.abort = null
+        // A newer check (or a cancel) owns the indicator once the serial moved.
+        if (serial === this.serial) onChecking(false)
       }
     }
   })

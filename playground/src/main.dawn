@@ -4,12 +4,12 @@
 # service on the `web` framework, which it doubles as the acceptance test for.
 use std/bytes
 use java "java.util.concurrent.Semaphore"
-use web/types.{Request, Response, HttpError, text, raw, body_text}
+use web/types.{Request, Response, HttpError, raw, body_text}
 use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
-use play/contract.{parse_request, render_outcome, render_check, render_error}
-use play/exec.{execute, check}
+use play/contract.{parse_request, render_outcome, render_check, render_error, render_health}
+use play/exec.{execute, check, compiler_version}
 use play/gate.{new_gate, with_gate}
 use play/config.{port}
 
@@ -21,7 +21,9 @@ const QUEUE_WAIT_SECS: Int = 15
 # client just keeps its previous squiggles and retries on the next pause.
 const CHECK_WAIT_SECS: Int = 2
 
-fn health(req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
+# JSON since the editor started showing the compiler version; deploy checks
+# only look at the status (curl -f).
+fn health(version: String) -> Result[Response, HttpError] !io = Ok(raw(200, JSON_CT, render_health(version)))
 
 # Shared core of /run and /check: same body parsing and gate, different
 # executor and queue patience. The wire format predates the framework, so
@@ -55,8 +57,9 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
 
 pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
+  let version = compiler_version()
   serve_app(port(), [
-    route_get("/health", health),
+    route_get("/health", req => health(version)),
     route_post("/run", req => rpc(req, gate, false)),
     route_post("/check", req => rpc(req, gate, true)),
   ], [with_logging])

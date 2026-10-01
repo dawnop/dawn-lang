@@ -2,6 +2,7 @@
 #   {"ok": true,  "phase": "run",     "exit": 0, "output": "...", "truncated": false, "ms": 620}
 #   {"ok": false, "phase": "compile", "output": "<Dawn diagnostics>"}
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
+# GET /health answers {"ok": true, "version": "0.81.0"}.
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
 # `exit` and `ms` are `JInt`, not `JNum`: a `JNum` renders as a float
@@ -67,6 +68,14 @@ pub fn render_check(o: Outcome) -> String =
     Timeout(output) ->
       obj([("ok", JBool(false)), ("phase", JStr("timeout")), ("output", JStr(output))])
   }
+
+# /health: liveness plus the compiler release (`version`, from
+# exec.compiler_version), which the editor shows in its toolbar. An unknown
+# version is left out rather than sent empty.
+pub fn render_health(version: String) -> String = {
+  let known: List[(String, Json)] = if version == "" { [] } else { [("version", JStr(version))] }
+  obj([("ok", JBool(true))] ++ known)
+}
 
 pub fn render_error(message: String) -> String =
   render(JObj(map.from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))
