@@ -1,21 +1,47 @@
 # examples/ -> examples/index.html + one page per example (multi-file projects
 # show every module). Discovery walks the real tree with list_dir/is_dir.
+#
+# An example page shows what the program prints, not only its source. The
+# output is not run here: scripts/example-main-contract/registry.json already
+# pins the exact stdout, stderr and exit status of every entry CI runs, with
+# the arguments and stdin it runs them with, and CI holds the programs to it.
+# Rendering that file means the page shows the output a gate checked, and the
+# generator stays a pure function of files on disk (site-dist-diff.sh compares
+# two of its runs byte for byte, so it cannot shell out to a compiler).
 
 use std/str
+use std/map
 use std/io
 use std/io.{Fs}
+use json/parser.{parse}
+use json/value.{Json, JInt, JStr, JArr, JObj, error_text}
 use html/escape.{escape_html}
 use hl/dawn.{highlight_dawn}
-use html/page.{Assets, Lang, En, Zh, page}
+use html/page.{Assets, Lang, En, Zh, page, lang_path, playground_label}
+use html/play.{Play, play_block}
 use gen/common.{must_read, must_list, write_page}
 
-pub type Example = { slug: String, group: String, files: List[String] }
+## One example: its slug (the page's name), its group (the directory under
+## examples/), its `.dawn` files in the order the page shows them, and
+## `target`, what `dawn run` is given to run it: the file for a single-file
+## example and the directory for a project. `target` is also the key
+## registry.json files its cases under.
+pub type Example = { slug: String, group: String, files: List[String], target: String }
 
 ## The gallery's own words: its <h1>, the line under it, and the name each
 ## example page carries in its <title>. Kept as one table so that the two
 ## languages sit next to each other and a missing one is a compile error rather
 ## than a page that renders half-translated.
-type Chrome = { heading: String, lede: String, suffix: String }
+type Chrome = {
+  heading: String,
+  lede: String,
+  suffix: String,
+  run: String,
+  run_note: String,
+  stdin: String,
+  stderr: String,
+  exit: String,
+}
 
 fn chrome(lang: Lang) -> Chrome =
   match lang {
@@ -24,11 +50,21 @@ fn chrome(lang: Lang) -> Chrome =
       lede: "CI runs every entry with its registered arguments and checks stdout and stderr " ++
         "byte-for-byte; a multi-module project takes its directory.",
       suffix: "Dawn Examples",
+      run: "Running it",
+      run_note: "What CI runs and the output it checks, byte for byte.",
+      stdin: "with this on stdin:",
+      stderr: "on stderr:",
+      exit: "exit status",
     }
     Zh -> Chrome {
       heading: "示例",
       lede: "CI 用登记参数运行每个入口，并逐字节核对 stdout 与 stderr；多模块项目给目录。",
       suffix: "Dawn 示例",
+      run: "运行",
+      run_note: "CI 运行的命令，以及它逐字节核对的输出。",
+      stdin: "标准输入：",
+      stderr: "标准错误：",
+      exit: "退出码",
     }
   }
 
@@ -105,9 +141,14 @@ pub fn collect_examples() -> List[Example] !Fs = {
         let path = "${dir}/${name}"
         if io.is_dir(path) && io.is_dir("${path}/src") {
           units = units ++
-            [Example { slug: name, group: group, files: main_first(dawn_files_under("${path}/src")) }]
+            [Example {
+              slug: name,
+              group: group,
+              files: main_first(dawn_files_under("${path}/src")),
+              target: path,
+            }]
         } else if str.ends_with(name, ".dawn") {
-          units = units ++ [Example { slug: stem(name), group: group, files: [path] }]
+          units = units ++ [Example { slug: stem(name), group: group, files: [path], target: path }]
         }
       }
     }
@@ -166,31 +207,210 @@ fn description(text: String) -> String = {
   join(out, " ")
 }
 
+## The first paragraph of a README: the first run of non-blank lines that is
+## not a heading, joined with spaces.
+fn readme_paragraph(text: String) -> String = {
+  var out: List[String] = []
+  for line in str.split(text, "\n") {
+    let t = str.trim(line)
+    if t == "" {
+      if len(out) > 0 { break }
+    } else if not str.starts_with(t, "#") {
+      out = out ++ [t]
+    } else if len(out) > 0 {
+      break
+    }
+  }
+  join(out, " ")
+}
+
 ## The description, or a stop. An example is here to be read, and one the
 ## gallery cannot introduce is worse than one that is missing: the entry looks
 ## deliberate. gen/copy.dawn makes the same call for the front page and gives
 ## the same reason.
+##
+## Where it comes from, in order: a project's own README.md; then the file
+## the project is named after (`todo.dawn` in `tea_todo`, `counter.dawn` in
+## `tea_dom_counter`: a `_`-separated word of the slug that is a file's stem);
+## then `main.dawn`; then the first other file that opens with a comment.
+## main.dawn used to be the only source, because it is the first file on the
+## page, and in an application split into a pure half and an io shell its
+## header describes the shell: five tea_dom projects all introduced themselves
+## as "The whole io surface of the demo: one call", and a reader could not tell
+## them apart. The file named by the slug is that pure half where there is
+## one; where there is not, main.dawn still speaks for the project, and a
+## README is the way to say something better than either. A single-file
+## example is its own only file.
 pub fn must_describe(ex: Example) -> String !Fs = {
-  let desc = description(must_read(ex.files[0]))
+  var desc = ""
+  if ex.target != ex.files[0] {
+    match io.read_file("${ex.target}/README.md") {
+      Ok(text) -> {
+        desc = readme_paragraph(text)
+      }
+      Err(_) -> {
+        desc = ""
+      }
+    }
+  }
+  let words = str.split(ex.slug, "_")
+  let named = filter(ex.files, f => has(words, stem(last_segment(f))) && not is_main(f))
+  for f in named ++ filter(ex.files, f => is_main(f)) ++ ex.files {
+    if desc == "" {
+      desc = description(must_read(f))
+    }
+  }
   if desc == "" {
-    panic("${ex.files[0]} opens with no `#` comment, so the gallery has nothing " ++
-        "to say about `${ex.slug}`")
+    panic("no file of `${ex.slug}` opens with a `#` comment, so the gallery has nothing " ++
+        "to say about it")
   }
   desc
 }
 
-fn file_section(path: String) -> String !Fs = {
-  let src = str.trim(must_read(path))
-  "<h2><code>" ++ escape_html(path) ++ "</code></h2>\n" ++
-    `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>"
+fn is_main(path: String) -> Bool = str.ends_with(path, "/main.dawn")
+
+fn last_segment(path: String) -> String = {
+  let parts = str.split(path, "/")
+  parts[len(parts) - 1]
 }
 
-fn example_page(ex: Example) -> String !Fs = {
+# ---- what CI runs it with ----
+
+## One registered run: the arguments, the stdin, and what came back.
+type Case = { argv: List[String], stdin: String, stdout: String, stderr: String, exit: Int }
+
+fn jfield(j: Json, key: String) -> Option[Json] =
+  match j {
+    JObj(entries) -> map.get(entries, key)
+    _ -> None
+  }
+
+fn jstring(j: Json, key: String, where: String) -> String =
+  match jfield(j, key) {
+    Some(JStr(s)) -> s
+    _ -> panic("${registry_path()}: ${where} has no string `${key}`")
+  }
+
+fn jlist(j: Json, key: String, where: String) -> List[Json] =
+  match jfield(j, key) {
+    Some(JArr(xs)) -> xs
+    _ -> panic("${registry_path()}: ${where} has no list `${key}`")
+  }
+
+fn registry_path() -> String = "scripts/example-main-contract/registry.json"
+
+## Every registered target and its cases. Read with must_read like every other
+## input: a missing or malformed registry stops the build rather than turning
+## every example's output section silently off.
+fn read_registry() -> List[(String, List[Case])] !Fs = {
+  let doc =
+    match parse(must_read(registry_path())) {
+      Ok(v) -> v
+      Err(e) -> panic("${registry_path()}: " ++ error_text(e))
+    }
+  map(jlist(doc, "targets", "the registry"), t => {
+    let target = jstring(t, "target", "a target")
+    let cases = map(jlist(t, "cases", target), c => {
+      let exit =
+        match jfield(c, "exit") {
+          Some(JInt(n)) -> n
+          _ -> panic("${registry_path()}: a case of ${target} has no integer `exit`")
+        }
+      Case {
+        argv: map(jlist(c, "argv", target), a =>
+            match a {
+              JStr(s) -> s
+              _ -> panic("${registry_path()}: an argument of ${target} is not a string")
+            }),
+        stdin: jstring(c, "stdin", target),
+        stdout: jstring(c, "stdout", target),
+        stderr: jstring(c, "stderr", target),
+        exit: exit,
+      }
+    })
+    (target, cases)
+  })
+}
+
+fn cases_of(registry: List[(String, List[Case])], target: String) -> List[Case] = {
+  var out: List[Case] = []
+  for e in registry {
+    let (t, cs) = e
+    if t == target { out = cs }
+  }
+  out
+}
+
+## An argument as a POSIX shell would need it written: bare when it holds only
+## characters no shell treats specially, single-quoted otherwise.
+fn shell_word(s: String) -> String = {
+  var plain = s != ""
+  for c in code_points(s) {
+    let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+      || c == '_' || c == '.' || c == '/' || c == '-' || c == '='
+    if not ok { plain = false }
+  }
+  if plain { s } else { "'" ++ str.replace(s, "'", "'\\''") ++ "'" }
+}
+
+## One case: the command line, the stdin it was fed if any, and the output.
+fn case_html(c: Chrome, target: String, k: Case) -> String = {
+  let cmd = join(["dawn", "run", target] ++ map(k.argv, a => shell_word(a)), " ")
+  let exit = if k.exit == 0 { "" } else { " (${c.exit} ${k.exit})" }
+  let stdin =
+    if k.stdin == "" {
+      ""
+    } else {
+      "<p>" ++ escape_html(c.stdin) ++ "</p>\n<pre><code>" ++ escape_html(str.trim_end(k.stdin))
+        ++ "</code></pre>\n"
+    }
+  let stderr =
+    if k.stderr == "" {
+      ""
+    } else {
+      "<p>" ++ escape_html(c.stderr) ++ "</p>\n<pre><code>" ++ escape_html(str.trim_end(k.stderr))
+        ++ "</code></pre>\n"
+    }
+  let stdout =
+    if k.stdout == "" {
+      ""
+    } else {
+      `<pre class="output"><code>` ++ escape_html(str.trim_end(k.stdout)) ++ "</code></pre>\n"
+    }
+  `<p class="example-run"><code>` ++ escape_html(cmd) ++ "</code>" ++ escape_html(exit) ++ "</p>\n"
+    ++ stdin ++ stdout ++ stderr
+}
+
+fn run_section(c: Chrome, ex: Example, cases: List[Case]) -> String =
+  if len(cases) == 0 {
+    ""
+  } else {
+    "\n<h2>" ++ escape_html(c.run) ++ "</h2>\n<p>" ++ escape_html(c.run_note) ++ "</p>\n"
+      ++ join(map(cases, k => case_html(c, ex.target, k)), "")
+  }
+
+## One file of an example. `play` is the Playground offer, made only for a
+## single-file example: the Playground runs one file, so a module of a
+## project opened on its own would be a program that cannot find its
+## siblings, the trap the tutorial's skip-check fragments used to be.
+fn file_section(path: String, play: Option[Play]) -> String !Fs = {
+  let src = str.trim(must_read(path))
+  let pre = `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>"
+  "<h2><code>" ++ escape_html(path) ++ "</code></h2>\n" ++
+    match play {
+      Some(p) -> play_block(p, pre, src)
+      None -> pre
+    }
+}
+
+fn example_page(c: Chrome, ex: Example, cases: List[Case], play: Play) -> String !Fs = {
+  let offer: Option[Play] = if len(ex.files) == 1 && ex.target == ex.files[0] { Some(play) } else { None }
   var sections = ""
   for f in ex.files {
-    sections = sections ++ "\n" ++ file_section(f)
+    sections = sections ++ "\n" ++ file_section(f, offer)
   }
-  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(must_describe(ex)) ++ "</p>" ++ sections
+  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(must_describe(ex)) ++ "</p>"
+    ++ run_section(c, ex, cases) ++ sections
 }
 
 ## Where this language's gallery goes and how far it is from the site root.
@@ -221,13 +441,15 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
     panic("two examples both want the slug `${dup}`, so one page would overwrite the other")
   }
 
+  let registry = read_registry()
+  let play = Play { href: "${root}/" ++ lang_path(lang, "playground.html"), label: playground_label(lang) }
   var body = "<h1>${c.heading}</h1>\n<p>${c.lede}</p>"
   for g in groups() {
     var items = ""
     for ex in filter(units, u => u.group == g.id) {
       write_page("${dir}/${ex.slug}.html",
         page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
-          example_page(ex)))
+          example_page(c, ex, cases_of(registry, ex.target), play)))
       items = items ++ "\n" ++
         """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++
         escape_html(must_describe(ex)) ++ "</li>"
@@ -248,6 +470,62 @@ test "each language's gallery lands in its own place" {
 test "a description is the first paragraph, not the whole header" {
   let header = "# The sentence.\n# Still the sentence.\n#\n# The reasoning.\nuse std/io\n"
   assert description(header) == "The sentence. Still the sentence."
+}
+
+test "a README's first paragraph skips its heading" {
+  assert readme_paragraph("# title\n\nFirst line\nsecond line.\n\nMore.\n")
+    == "First line second line."
+  assert readme_paragraph("") == ""
+}
+
+test "an argument is quoted only when a shell would need it" {
+  assert shell_word("examples/x.json") == "examples/x.json"
+  assert shell_word("2+3*4") == "'2+3*4'"
+  assert shell_word("it's") == "'it'\\''s'"
+  assert shell_word("") == "''"
+}
+
+test "a case shows its command, its stdin and its output, escaped" {
+  let c = chrome(En)
+  let k = Case { argv: ["2+3*4"], stdin: "a<b\n", stdout: "14\n", stderr: "", exit: 1 }
+  let html = case_html(c, "examples/projects/calc.dawn", k)
+  assert str.contains(html,
+    `<p class="example-run"><code>dawn run examples/projects/calc.dawn '2+3*4'</code> (exit status 1)</p>`)
+  assert str.contains(html, "<pre><code>a&lt;b</code></pre>")
+  assert str.contains(html, `<pre class="output"><code>14</code></pre>`)
+  assert not str.contains(html, "on stderr")
+}
+
+## The registry is the one CI holds the examples to, and every entry it names
+## is a file or a directory the gallery shows.
+test "every registered target is an example on the gallery" {
+  io.with_fs_real(() => {
+    let targets = map(collect_examples(), ex => ex.target)
+    let registry = read_registry()
+    assert len(registry) > 0
+    for e in registry {
+      let (t, _) = e
+      assert has(targets, t)
+    }
+  })
+}
+
+## The tea_dom projects used to share one description, main.dawn's io-shell
+## line. Where a project has a file named after it, that file speaks for it.
+test "a project is described by the file it is named after before its main" {
+  io.with_fs_real(() => {
+    for ex in collect_examples() {
+      if ex.slug == "tea_dom_counter" || ex.slug == "tea_dom_search" || ex.slug == "tea_todo" {
+        assert str.starts_with(must_describe(ex), "The ")
+        assert not str.starts_with(must_describe(ex), "The whole io surface")
+        assert not str.contains(must_describe(ex), "renderer knife")
+      }
+      # and a project with no such file keeps its main's line
+      if ex.slug == "json" {
+        assert str.contains(must_describe(ex), "JSON validator")
+      }
+    }
+  })
 }
 
 test "a file that opens with code has no description at all" {
