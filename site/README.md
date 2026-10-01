@@ -106,7 +106,7 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 |------|------|------|
 | `/` | **首页（英文，正本）**：hero、三个概念、两个后端（数字来自 `scripts/site-figures.sh`）、GPU、安装 | `site/pages/home.md` + `hero`/`feat_*`/`hello.dawn`、`gpu_fake.project` 与同名 `.out` |
 | `/zh/index.html` | 首页（中文译本）：内容同上 | `site/pages/home.zh.md` + 同一批 `.dawn`/`.out` |
-| `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
+| `/tutorial/{01..19}.html` | 教程 19 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
 | `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.en.md` |
 | `/zh/spec.html` | 同上（中文正本） | `docs/spec.md` |
@@ -118,7 +118,7 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 | `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |
 | `/tea.html` | **浏览器 demo**：两个 wasm reactor（计数器 + 键控待办）挂在页面上跑 | `examples/projects/tea_dom_{counter,todo_keyed}`（`site/build.sh` 编译成 wasm）+ `packages/tea-dom/js/*.mjs`（桥），二者都由 `gen_assets` 搬进 `dist/assets` |
 | `/zh/tea.html` | 同上（中文译本；两个应用本身画的是英文） | 同上 |
-| `/assets/search-{en,zh}.json` | **搜索索引**（每语言一份：stdlib API + 模块/分组标题、规范与设计史的 h2/h3、教程 17 章及其 `###` 小节、示例与站内页面） | `dawn doc --stdlib` + `docs/spec*.md` / `design*.md` / `tutorial*.md` + `examples/**` + 导航表，全部由 `gen/search.dawn` 派生 |
+| `/assets/search-{en,zh}.json` | **搜索索引**（每语言一份：stdlib API + 模块/分组标题、规范与设计史的 h2/h3、教程 19 章及其 `###` 小节、示例与站内页面） | `dawn doc --stdlib` + `docs/spec*.md` / `design*.md` / `tutorial*.md` + `examples/**` + 导航表，全部由 `gen/search.dawn` 派生 |
 | `/assets/tea-search.wasm` | 搜索面板本体（wasm reactor），每页页头按钮首次触发才 fetch | `examples/projects/tea_dom_search`（`site/build.sh` 编成 wasm）|
 | `/sitemap.xml`、`/robots.txt`、`/404.html`、`/favicon.ico` | 给爬虫与输错地址的人：sitemap 从写好的页面读回、排序；404 页需服务器配 `error_page 404 /404.html`（配置在仓库外） | `gen/crawl.dawn` |
 

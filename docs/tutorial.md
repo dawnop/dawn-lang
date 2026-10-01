@@ -16,8 +16,9 @@ and may lag behind the language; mark your own if it matters that they are right
 -->
 
 A deliberately small statically typed language, with two peer backends: it compiles to
-JVM bytecode or, through C, to a native executable. This tutorial has seventeen chapters:
-it takes you from the first program to effects of your own and their handlers.
+JVM bytecode or, through C, to a native executable. This tutorial has nineteen chapters:
+it takes you from the first program to effects of your own and their handlers, and then
+to packages and to the targets a program compiles for.
 
 ---
 
@@ -1024,6 +1025,256 @@ separate set, and what the inner one accumulates does not reach the outer one.
 
 The full rules are in [spec.en.md](spec.en.md) §6.5 and the design trade-offs in
 [effects-design.md](effects-design.md).
+
+---
+
+## 18. Packages and projects
+
+Chapter 13's project needed nothing but a directory. Once it depends on code that lives
+somewhere else, it gets a `dawn.toml`: an optional manifest for what the directory
+convention cannot say, which is the project's identity and its dependencies. The layout,
+the entry point and the module paths stay the directory's business, and a project
+without one works exactly as before.
+
+```toml
+schema = 1        # always the first key
+name = "myapp"    # the project's identity, [a-z_][a-z0-9_]*
+```
+
+### A dependency is a source package
+
+A package is a project of its own, with its own `dawn.toml` and its own `src/`. Here is a
+small one, `greet`, sitting next to `myapp`:
+
+```
+greet/
+├── dawn.toml          # schema = 1, name = "greet", version = "1.0.0"
+└── src/
+    ├── hello.dawn
+    └── style.dawn
+myapp/
+├── dawn.toml
+└── src/
+    └── main.dawn
+```
+
+`greet/src/style.dawn`:
+
+<!-- doc-check: skip-check one module of a package: it has no main, and its pub(pkg) only means something inside the package around it -->
+```dawn skip-check
+# visible to every module of the greet package, and to nothing outside it
+pub(pkg) fn shout(s: String) -> String = s ++ "!"
+```
+
+`greet/src/hello.dawn`:
+
+<!-- doc-check: skip-check the package's public module: its use style needs the file above, and a package has no main -->
+```dawn skip-check
+use style.{shout}
+
+pub fn hello(name: String) -> String = shout("hello, ${name}")
+```
+
+Inside the package, modules import each other by their path under the package's own
+`src/`, as chapter 13's did. `dawn add` writes the dependency into `myapp`'s manifest:
+
+```text
+$ dawn add ../greet --dir myapp
+Added greet as `greet` (path myapp/../greet)
+```
+
+```toml
+schema = 1
+name = "myapp"
+
+[deps]
+greet = "../greet"
+```
+
+The key under `[deps]` is how `myapp` spells the package: it is the first segment of a
+`use` line.
+
+`myapp/src/main.dawn`:
+
+<!-- doc-check: skip-check the consuming half of a two-project example: use greet/hello resolves only through myapp's dawn.toml -->
+```dawn skip-check
+use greet/hello.{hello}
+
+pub fn main() -> Unit !io = println(hello("Dawn"))
+```
+
+`dawn run myapp` prints `hello, Dawn!`.
+
+### `pub(pkg)`: shared inside a package, hidden outside it
+
+Between module-private (nothing written) and `pub` there is a third level. A `pub(pkg)`
+declaration is visible to every module of its own package, the unit one `dawn.toml`
+describes, and to nothing outside it. `shout` is a helper the modules of `greet` share,
+and `myapp` cannot reach it:
+
+```text
+$ dawn run myapp      # main.dawn now also says: use greet/style.{shout}
+error: `shout` is package-private to package `greet`
+  --> myapp/src/main.dawn:2:18
+  |
+2 | use greet/style.{shout}
+  |                  ^^^^^
+  = hint: only modules of package `greet` may name it
+```
+
+A `pub` declaration's signature may not mention a `pub(pkg)` type, by the same rule that
+keeps a module-private type out of a public signature, and `dawn doc` lists `pub` items
+only. A project with no `dawn.toml` is one package, and so is the bundled standard
+library as a whole.
+
+### Remote packages, versions and MVS
+
+A path is for code that sits next to yours. A published package is an archive at a URL,
+pinned by the hash of what it unpacks to:
+
+```toml
+[deps.json]
+url = "https://github.com/dawnop/dawn-lang/archive/refs/tags/v0.7.0.zip"
+version = "1.0.0"
+hash = "d1:<sha256>"          # content hash of the unpacked file tree
+subdir = "packages/json"      # where the package sits inside the archive
+```
+
+Nobody computes that hash by hand. `dawn add <url>` fetches the archive, hashes it, reads
+the package's own manifest for its name and version, and writes the entry, leaving the
+comments and layout of the rest of the file as they were; `--subdir` says where the
+package sits in the archive and `--as` picks a different key. Adding the same package
+again updates its entry in place, which is how a version is bumped.
+
+When two packages in one program depend on the same third one at different versions, the
+program gets **one** copy of it: the highest of the minimum versions asked for. This is
+minimal version selection (MVS), the algorithm Go uses, and a requirement is only ever a
+minimum: no upper bounds, no exclusions. For Dawn the single copy is not a convenience.
+Every trait-and-type pair has exactly one impl in a whole program (chapter 16), and two
+copies of a package would be two copies of each of its types, with two impls each. A
+package's identity is the `name` in its own manifest rather than the key you gave it,
+so a major version that renames the package (`json2`) can still be spelled
+`use json/...` by keeping the old key.
+
+The third table, `[java-deps]`, lists Maven coordinates for chapter 11's `use java`
+(`sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"`, an exact version and nothing else). The
+JVM toolchain resolves and fetches them; `dawnc` refuses `use java` and so has no use for
+them. The design and its reasons are in [package-design.md](package-design.md) and
+[package-visibility-design.md](package-visibility-design.md), in Chinese.
+
+See also: [spec.en.md](spec.en.md) §10.1, §10.4
+
+---
+
+## 19. Backends and targets
+
+One source compiles two ways, and chapter 1 has already met both drivers. `dawn` is the
+JVM backend: `dawn run` compiles to bytecode and starts a JVM, `dawn build app -o app.jar`
+writes an executable jar, and it is the only one that can follow chapter 11 into
+`use java`. `dawnc` is the C backend: it emits C and hands it to `cc`, so
+`dawnc build app -o app` is a native executable with no JVM anywhere, and `dawnc run`
+builds one and runs it at once. `check`, `test`, `fmt`, `doc`, `add` and `lsp` exist on
+both.
+
+Two of these are called native, and they are different roads:
+
+| Command | What you get | `use java` |
+|---|---|---|
+| `dawn build app -o app.jar` | JVM bytecode in a jar | yes |
+| `dawn build app --native -o app` | that jar, compiled ahead of time by GraalVM `native-image` | yes |
+| `dawnc build app -o app` | C compiled by `cc`, with no JVM at all | no |
+
+A program that does not call Java prints the same bytes under both. That is checked
+rather than hoped for: the repository runs its corpora through both backends and compares
+the output byte for byte, and the C backend compiles the compiler itself.
+
+### WebAssembly, and reactors
+
+`dawnc` has one more target. `dawnc build --target wasm app -o app.wasm` compiles the
+same C for `wasm32-wasip1` with clang (one with a WASI sysroot; `DAWN_WASM_CC` names
+another, such as wasi-sdk's). The result is an ordinary WASI command module: a runtime
+calls its `_start` once and the program runs to the end.
+
+A page in a browser wants the other shape, a module that stays alive and is called once
+per event, and `--reactor` builds that. The module has no `_start`; it exports one
+function, `dawn_turn`, which the host calls with each message, and each call runs `main`
+once. `std/reactor`'s `serve` is what carries state from one turn to the next: it reads a
+line, hands it to your step function together with the state so far, and keeps the state
+the step returns. The site's [Demo](https://dawn-lang.dawnop.com/tea.html) page is three
+of these (a counter, a to-do list and the site search), each built with
+`dawnc build --target wasm --reactor` and driven from JavaScript by `packages/tea-dom`.
+The wasm side only ever reads and writes messages, never a DOM node, and the same
+program answers a shell: `echo '{"op":"init"}' | dawn run examples/projects/tea_dom_counter`.
+The design is in [dom-bridge-design.md](dom-bridge-design.md), in Chinese.
+
+### GPUs: a device is an effect
+
+`std/gpu` gives the host side of a GPU program the shape chapter 17 has been building: a
+`Gpu` effect whose operations allocate a buffer, upload to it, launch a kernel by name,
+wait, and download. A function that drives a device says `!Gpu`, and which device answers
+is up to whoever installs the handler. `with_gpu_fake` answers from a table in host
+memory, where launching a kernel calls the host reference function registered under its
+name. It is pure, so this runs anywhere, with no GPU, no driver and no `!io`:
+
+```dawn run
+use std/gpu.{Gpu, F64, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake,
+  reference_kernels}
+
+# The host half of a GPU program: allocate, upload, launch, wait, read back.
+# Its only effect is `!Gpu`; which device answers is the caller's choice.
+fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, ys)?
+  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  sync()?
+  let got = download(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+fn unknown_kernel() -> Result[Unit, ForeignError] !Gpu = {
+  let h = alloc(F64, 1)?
+  launch("vmul", 1, [handle_of(h)])
+}
+
+pub fn main() -> Unit !io = {
+  # the fake device: a table in host memory, so this runs anywhere, and purely
+  let sum = with_gpu_fake(reference_kernels(), () => vector_add([1.0, 2.0, 3.0], [10.0, 20.0, 30.0]))
+  println("${sum}")
+  # a kernel the device does not know is refused, not guessed at
+  match with_gpu_fake(reference_kernels(), () => unknown_kernel()) {
+    Ok(_) -> println("ran")
+    Err(e) -> println("refused: ${e.kind}")
+  }
+}
+```
+```output
+Ok([11.0, 22.0, 33.0])
+refused: gpu.no_kernel
+```
+
+`reference_kernels()` is the fake device's built-in table (`vadd`, `vadd_bf16` and
+`sum`). The same `vector_add`, unchanged, runs on a real card under
+`with_gpu_real(kernels, body)`, which answers the same operations from the CUDA driver,
+and whose `kernels` maps each name to its compiled module. That handler needs the C
+backend (on the JVM every operation answers `gpu.unsupported_backend`) and a machine with
+an NVIDIA driver.
+
+The kernels are Dawn as well, written against `packages/tileir`: its `Dev` effect records
+the operations a kernel performs, and the record is encoded as NVIDIA's Tile IR bytecode,
+which `tileiras` assembles into the module `with_gpu_real` loads.
+`examples/projects/gpu_fake` is a whole program of nine such kernels with their host
+side, answered on the fake device by the references in `packages/tileref`. The design,
+and how far the device side reaches today, is in
+[tile-backend-design.md](tile-backend-design.md), in Chinese.
+
+See also: [spec.en.md](spec.en.md) §12.1, §12.3
 
 ---
 
