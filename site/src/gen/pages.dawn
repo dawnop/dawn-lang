@@ -98,18 +98,19 @@ pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
   # and an index built from a second read would be an index of a document
   # nobody had checked was the same one.
   let api = read_api()
-  let style = emit_text(out, "style.css", str.trim(must_read("site/assets/style.css")))
-  # The front page's monospace face, self-hosted so the site makes no request
-  # to anybody else (docs/site-home-design.md). Written before the stylesheet
+  # The site's monospace face, self-hosted so the site makes no request to
+  # anybody else (docs/site-home-design.md). Written before the stylesheet
   # that names them, because that stylesheet names them by the hashed name
-  # they get here.
+  # they get here. Every page's sheet names them since the tokens moved into
+  # it (docs/site-pages-design.md); the front page's own sheet no longer does.
   let mono = emit_asset(out, "JetBrainsMono-Regular.woff2",
     read_bin("site/assets/fonts/JetBrainsMono-Regular.woff2"))
   let mono_medium = emit_asset(out, "JetBrainsMono-Medium.woff2",
     read_bin("site/assets/fonts/JetBrainsMono-Medium.woff2"))
-  let home_css = emit_text(out, "home.css",
-    repoint_url(repoint_url(str.trim(must_read("site/assets/home.css")),
+  let style = emit_text(out, "style.css",
+    repoint_url(repoint_url(str.trim(must_read("site/assets/style.css")),
       "JetBrainsMono-Regular.woff2", mono), "JetBrainsMono-Medium.woff2", mono_medium))
+  let home_css = emit_text(out, "home.css", str.trim(must_read("site/assets/home.css")))
   # The bracket-cat mark, in the four shapes the places it appears will take.
   # The SVG is the mark; the three rasters are the same drawing rendered for
   # formats that cannot hold a vector, and scripts/render-brand.py is what
@@ -166,6 +167,7 @@ pub fn gen_assets(out: String, build: String) -> Assets !Fs !io = {
     search_zh: emit_text(out, "search-zh.json", search_index(api, Zh)),
     home_css: home_css,
     home_js: emit_text(out, "home.js", str.trim(must_read("site/assets/home.js"))),
+    theme_js: emit_text(out, "theme.js", str.trim(must_read("site/assets/theme.js"))),
     mono_font: mono,
     build: build,
   }
@@ -220,7 +222,7 @@ fn repoint_url(css: String, name: String, hashed: String) -> String !io = {
   if str.contains(css, quoted) {
     str.replace(css, quoted, `url("` ++ hashed ++ `")`)
   } else {
-    panic("site/assets/home.css has no `url(\"${name}\")` to point at the hashed font; "
+    panic("site/assets/style.css has no `url(\"${name}\")` to point at the hashed font; "
         ++ "the face would be fetched under a name the cache cannot see change")
   }
 }
