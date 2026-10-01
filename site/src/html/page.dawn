@@ -384,6 +384,15 @@ pub fn page(
 
 ## A page with the sticky TOC sidebar (the spec and design pages). `pair` as in
 ## [shell].
+##
+## The list sits in a `<details>`, open in the markup and closed by the script
+## right after it when the screen is narrow. Below 60rem the sidebar stacks
+## above the article, and the spec's 75 entries were a whole screen of links a
+## phone reader had to scroll past before the first heading. Open in the
+## markup so that a reader without scripts loses nothing, and closed by an
+## inline script rather than by site/assets/search.js so that it is closed
+## before the first paint rather than after it. On a wide screen the summary
+## is the old "Contents" heading and cannot be clicked (site/assets/style.css).
 pub fn page_with_toc(
   a: Assets,
   lang: Lang,
@@ -399,12 +408,27 @@ pub fn page_with_toc(
       En -> "Contents"
       Zh -> "目录"
     }
-  let side = "<aside class=\"toc\">\n<nav>\n<div class=\"toc-title\">" ++ heading ++ "</div>\n" ++
-    toc_list(toc) ++ "\n</nav>\n</aside>"
+  let side = "<aside class=\"toc\">\n<nav>\n" ++ `<details class="toc-fold" open>` ++ "\n"
+    ++ `<summary class="toc-title">` ++ heading ++ "</summary>\n" ++ toc_list(toc)
+    ++ "\n</details>\n" ++ toc_fold_script() ++ "\n</nav>\n</aside>"
   let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
     `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
   shell(a, lang, pair, title, root, active, body)
 }
+
+## Closes the TOC fold on a narrow screen and keeps it in step with the
+## width. The breakpoint is the stylesheet's, where the sidebar stops being a
+## sidebar; the two must move together.
+fn toc_fold_script() -> String =
+  """<script>
+(function () {
+  var fold = document.currentScript.previousElementSibling;
+  var narrow = window.matchMedia('(max-width: 60rem)');
+  function fit() { fold.open = !narrow.matches; }
+  fit();
+  if (narrow.addEventListener) narrow.addEventListener('change', fit);
+})();
+</script>"""
 
 ## Nested <ul> for h2/h3 toc entries.
 pub fn toc_list(entries: List[TocEntry]) -> String = {
@@ -572,6 +596,14 @@ test "a paired page names its own twin, not the home page" {
   # an index is advertised as its directory, so the front page stays / and /zh/
   assert str.contains(page(plain_assets(), En, "tutorial/index.html", "t", "..", "tutorial", ""),
     `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/"`)
+}
+
+test "the toc is a fold, open in the markup, with its closing script after it" {
+  let p = page_with_toc(plain_assets(), Zh, "", "t", "..", "spec",
+    [TocEntry { level: 2, id: "s1", text: "一" }], "<p>x</p>")
+  assert str.contains(p, `<details class="toc-fold" open>` ++ "\n" ++ `<summary class="toc-title">目录</summary>`)
+  assert str.contains(p, "</details>\n<script>\n(function () {\n  var fold = document.currentScript.previousElementSibling;")
+  assert str.contains(p, "matchMedia('(max-width: 60rem)')")
 }
 
 test "toc nests h3 under its h2" {
