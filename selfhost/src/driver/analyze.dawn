@@ -150,16 +150,27 @@ pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !E
 ## project; a tree that wants one names it as a path dependency, which is
 ## resolved on purpose rather than found by walking. A link to a file is still
 ## a file here: nothing about it can loop.
-fn walk_dawn(dir: String) -> List[String] !Fs = {
+fn walk_dawn(dir: String) -> List[String] !Fs = walk_sources(dir, false)
+
+## The same walk for `dawn fmt <dir>`, in both drivers (#302). It used to be a
+## copy in main.dawn and another in nmain.dawn that followed every link, so
+## `src/loop -> .` sent the formatter down the same exponential tree #297
+## took out of the loader. One walk keeps the link rule from drifting between
+## the three. The one difference is a directory that cannot be listed: the
+## loader skips it, while the formatter stops with "cannot list", because a
+## `fmt --check` that silently skipped part of the tree would pass it.
+pub fn dawn_files_under(dir: String) -> List[String] !Fs = walk_sources(dir, true)
+
+fn walk_sources(dir: String, strict: Bool) -> List[String] !Fs = {
   var out: List[String] = []
   let names = match io.list_dir(dir) {
     Ok(ns) -> ns
-    Err(_) -> return []
+    Err(e) -> if strict { panic("cannot list " ++ dir ++ ": " ++ e.message) } else { return [] }
   }
   for n in names {
     let p = dir ++ "/" ++ n
     if io.is_dir(p) {
-      if not io.is_symlink(p) { out = out ++ walk_dawn(p) }
+      if not io.is_symlink(p) { out = out ++ walk_sources(p, strict) }
     } else if str.ends_with(n, ".dawn") {
       out = out ++ [p]
     }
@@ -2301,13 +2312,15 @@ fn linked_tree() -> (String, String) !Fs !Proc = {
   (root, proj)
 }
 
-test "the source walk visits a link to a directory but does not descend (#297)" {
+test "the source walk visits a link to a directory but does not descend (#297, #302)" {
   io.with_fs_real(() => io.with_proc_real(() => {
     let (root, proj) = linked_tree()
     let src = "${proj}/src"
     # the self-loop is not walked, so every module is listed once; the tree
     # behind `ext` is not the project's; the link to a file is a file
     assert walk_dawn(src) == ["${src}/alias.dawn", "${src}/main.dawn", "${src}/sub/util.dawn"]
+    # `dawn fmt <dir>` walks with the same rule in both drivers (#302)
+    assert dawn_files_under(src) == walk_dawn(src)
     let (plan, _) = envmem.with_env_table(root, [], () =>
         project_plan(source.ProjectDirectory(proj)))
     assert list.sort(map.keys(plan.modules.by_use)) == ["alias", "main", "sub/util"]
