@@ -2,37 +2,67 @@
 
 *[中文](tutorial.zh-CN.md) — this file is the original; the Chinese text is a translation of it.*
 
+<!--
 > Status: **current** — the reader-facing tutorial; the examples marked `dawn run` here are really run by CI (`scripts/doc-check.py`).
 
-A deliberately small statically typed language: it compiles to JVM bytecode, and a
-native executable comes straight out of GraalVM native-image. This tutorial takes you
-from the first program to calling Java.
+Maintainer note, kept in a comment so the site does not show it to readers.
+The `dawn` fenced blocks in this document were once extracted, compiled, run and
+checked against their `output` mechanically, by `TutorialTest` on the Kotlin side;
+that test is archived together with the Kotlin implementation at the `kotlin-final`
+tag. **The gate is back** (TEST-04 in docs/codebase-audit.md): `scripts/doc-check.py`
+is one of CI's jobs, and every block here marked ```` ```dawn run ```` is really
+compiled and really run. **Blocks not marked `run` are still maintained by hand**
+and may lag behind the language; mark your own if it matters that they are right.
+-->
 
-> The `dawn` fenced blocks in this document were once extracted, compiled, run and
-> checked against their `output` mechanically, by `TutorialTest` on the Kotlin side;
-> that test is archived together with the Kotlin implementation at the `kotlin-final`
-> tag. **The gate is back** (TEST-04 in docs/codebase-audit.md): `scripts/doc-check.py`
-> is one of CI's jobs, and every block here marked ```` ```dawn run ```` is really
-> compiled and really run. **Blocks not marked `run` are still maintained by hand**
-> and may lag behind the language — mark your own if it matters that they are right.
+A deliberately small statically typed language, with two peer backends: it compiles to
+JVM bytecode or, through C, to a native executable. This tutorial has seventeen chapters:
+it takes you from the first program to effects of your own and their handlers.
 
 ---
 
 ## 1. Installing, and the first program
 
-You need JDK 21 (native compilation additionally needs GraalVM). `bin/dawn` brings up
-its own toolchain: on the first run it downloads the `dawn-selfhost.jar` of the release
-pinned by `scripts/seed-release.txt` (the **seed**, checked against
-`scripts/seed-checksums.txt` by SHA-256), then uses the seed to compile `selfhost/`
-into the current compiler. There is no Gradle — the Kotlin implementation is archived
-at the `kotlin-final` tag, and `./gradlew :compiler:fatJar` does not exist on main.
+Every release on the [releases page](https://github.com/dawnop/dawn-lang/releases/latest)
+publishes two toolchains, each with its SHA-256 beside it. They are different compilers,
+not two downloads of one, so pick by whether you have a JVM.
+
+**Without a JVM** (linux-x86_64): `dawnc` is one static executable with the standard
+library and the C runtime inside it. It compiles through the C backend, so it refuses
+`use java` (chapter 11 is the one chapter it cannot follow).
 
 ```bash
-./bin/dawn --version              # the first run fetches the seed and rebuilds the toolchain
-./bin/dawn run  hello.dawn        # compile and run (on the JVM)
-./bin/dawn test hello.dawn        # run the test blocks in the file
-./bin/dawn build hello.dawn --native -o hello   # produce a standalone binary
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawnc-linux-x86_64
+curl -fsSLO $base/dawnc-linux-x86_64.sha256
+sha256sum -c dawnc-linux-x86_64.sha256
+chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
 ```
+
+**With a JVM** (JDK 21 or newer, any platform): `dawn-selfhost.jar` carries the standard
+library, so the jar on its own is the whole toolchain.
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawn-selfhost.jar
+curl -fsSLO $base/dawn-selfhost.jar.sha256
+sha256sum -c dawn-selfhost.jar.sha256      # macOS: shasum -a 256 -c
+```
+
+The commands below say `dawn`. With the static binary that is `dawnc`; with the jar it is
+`java -jar dawn-selfhost.jar`.
+
+```bash
+dawn run  hello.dawn        # compile and run
+dawn test hello.dawn        # run the test blocks in the file
+dawn fmt  hello.dawn        # format the file in place
+```
+
+**From source**, if you have a checkout and JDK 21: `./bin/dawn` stands in for `dawn`.
+Its first run downloads the seed (the `dawn-selfhost.jar` of the release pinned by
+`scripts/seed-release.txt`, checked against `scripts/seed-checksums.txt`) and compiles
+the compiler in `selfhost/` with it. There `./bin/dawn build hello.dawn --native -o hello`
+packages the JVM build with GraalVM native-image, which is a different road from `dawnc`.
 
 The first program. Functions are pure by default; touching IO — printing, here —
 requires `!io` on the signature:
@@ -423,6 +453,10 @@ pub fn main() -> Unit !io =
 ---
 
 ## 11. Calling Java
+
+*JVM toolchain only.* This chapter needs `dawn-selfhost.jar` or a checkout's `./bin/dawn`.
+The static `dawnc` compiles through C and refuses `use java`, so with it, skip to
+chapter 12.
 
 `use java "..."` calls a Java class directly. Every Java call counts as `!io`, and a
 reference return type is wrapped in `Option[T]` automatically — null does not get into

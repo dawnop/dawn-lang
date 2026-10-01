@@ -1,36 +1,66 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 60e15fef7172fde7 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 5c63d7f87e9ad402 -->
 
 # Dawn 教程
 
 *[English](tutorial.md) —— 正本是英文；本文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
 
+<!--
 > 状态：**current** —— 面向读者的教程；其中标注 `dawn run` 的示例由 CI 实跑（`scripts/doc-check.py`）。
 
-一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
-native-image 直接得到。本教程带你从第一个程序走到调 Java。
+维护者说明，放在注释里，站点不向读者显示。
+本文的 `dawn` 围栏代码块曾由 Kotlin 侧的 `TutorialTest` 机械抽取、编译、运行并核对
+`output`；那套测试随 Kotlin 实现一起归档在 `kotlin-final` tag。**门禁已经补回来了**
+（docs/codebase-audit.md 的 TEST-04）：`scripts/doc-check.py` 是 CI 的一个 job，
+把本文标了 ```` ```dawn run ```` 的块逐个真编真跑。**没标 `run` 的块仍是人工维护的**，
+可能落后于语言；正确性重要的示例请自己标上。
+-->
 
-> 本文的 `dawn` 围栏代码块曾由 Kotlin 侧的 `TutorialTest` 机械抽取、编译、运行并核对
-> `output`；那套测试随 Kotlin 实现一起归档在 `kotlin-final` tag。**门禁已经补回来了**
-> （docs/codebase-audit.md 的 TEST-04）：`scripts/doc-check.py` 是 CI 的一个 job，
-> 把本文标了 ```` ```dawn run ```` 的块逐个真编真跑。**没标 `run` 的块仍是人工维护的**，
-> 可能落后于语言——正确性重要的示例请自己标上。
+一门刻意小的静态类型语言，有两个平级后端：编译到 JVM 字节码，或经 C 编成 native
+可执行文件。本教程共十七章，从第一个程序一直讲到自己声明的效果与它们的 handler。
 
 ---
 
 ## 1. 安装与第一个程序
 
-需要 JDK 21（native 编译另需 GraalVM）。`bin/dawn` 会自己拉起工具链：首次运行时它下载
-`scripts/seed-release.txt` 钉住的那个 release 的 `dawn-selfhost.jar`（**种子**，按
-`scripts/seed-checksums.txt` 校验 SHA-256），再用种子把 `selfhost/` 编译成当前的编译器。
-没有 Gradle——Kotlin 实现已随 `kotlin-final` tag 归档，`./gradlew :compiler:fatJar`
-在 main 上不存在。
+[Releases 页](https://github.com/dawnop/dawn-lang/releases/latest)上的每个 release
+都发布两套工具链，各自旁边附 SHA-256。它们是两个不同的编译器，不是同一个东西的两种下载，
+按有没有 JVM 选一个。
+
+**不用 JVM**（linux-x86_64）：`dawnc` 是一个静态可执行文件，标准库与 C 运行时都在里面。
+它经 C 后端编译，所以拒绝 `use java`（第 11 章是它唯一跟不了的一章）。
 
 ```bash
-./bin/dawn --version              # 首次会自动取种子并重建工具链
-./bin/dawn run  hello.dawn        # 编译并运行（JVM 内）
-./bin/dawn test hello.dawn        # 运行文件里的 test 块
-./bin/dawn build hello.dawn --native -o hello   # 产出独立二进制
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawnc-linux-x86_64
+curl -fsSLO $base/dawnc-linux-x86_64.sha256
+sha256sum -c dawnc-linux-x86_64.sha256
+chmod +x dawnc-linux-x86_64 && sudo mv dawnc-linux-x86_64 /usr/local/bin/dawnc
 ```
+
+**用 JVM**（JDK 21 或更新，任意平台）：`dawn-selfhost.jar` 自带标准库，单这一个 jar
+就是完整的工具链。
+
+```bash
+base=https://github.com/dawnop/dawn-lang/releases/latest/download
+curl -fsSLO $base/dawn-selfhost.jar
+curl -fsSLO $base/dawn-selfhost.jar.sha256
+sha256sum -c dawn-selfhost.jar.sha256      # macOS：shasum -a 256 -c
+```
+
+下面的命令写作 `dawn`。用静态二进制时它是 `dawnc`；用 jar 时它是
+`java -jar dawn-selfhost.jar`。
+
+```bash
+dawn run  hello.dawn        # 编译并运行
+dawn test hello.dawn        # 运行文件里的 test 块
+dawn fmt  hello.dawn        # 就地格式化
+```
+
+**从源码构建**，前提是有一份检出和 JDK 21：`./bin/dawn` 就代替 `dawn`。它首次运行时
+下载种子（`scripts/seed-release.txt` 钉住的那个 release 的 `dawn-selfhost.jar`，按
+`scripts/seed-checksums.txt` 校验），再用种子编译 `selfhost/` 里的编译器。在检出里，
+`./bin/dawn build hello.dawn --native -o hello` 用 GraalVM native-image 打包 JVM 构建，
+这和 `dawnc` 是两条不同的路。
 
 第一个程序。函数默认是纯的；碰 IO（这里是打印）必须在签名标 `!io`：
 
@@ -400,6 +430,9 @@ pub fn main() -> Unit !io =
 ---
 
 ## 11. 调用 Java
+
+*仅限 JVM 工具链。* 本章需要 `dawn-selfhost.jar` 或检出里的 `./bin/dawn`。
+静态的 `dawnc` 经 C 编译、拒绝 `use java`，用它的话请直接跳到第 12 章。
 
 `use java "..."` 直接调 Java 类。所有 Java 调用自动视为 `!io`；引用类型返回值
 自动包成 `Option[T]`——null 进不了 Dawn。构造用 `.new`，静态方法用类名。
