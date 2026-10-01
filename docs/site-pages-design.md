@@ -1,7 +1,7 @@
 # 内页「Horizon」：全站暗色、短天空带与阅读排版
 
 > 状态：**current**。2026-10-02 由内页定稿（11 页单文件稿，说明见 agent-handoff 的
-> `inner-pages-note-20261002.md`）落到 `site/`；本文动码前写成方案，落地后按实测回填（第九节）。
+> `inner-pages-note-20261002.md`）落到 `site/`；本文动码前写成方案，落地后按实测回填了第九节。
 > 首页的设计在 [site-home-design.md](site-home-design.md)，本文只讲首页以外的 107 个页面，
 > 以及两者共用的那一层（token、字体、主题脚本、导航、页脚）。
 
@@ -107,7 +107,8 @@
   首页的轨道 1.4 s、夜色淡入 1.2 s 都比 560 ms 的圆长，圆展开完以后这些动画要么被截在快照里、
   要么在圆外看不见；而且首页的编排（`data-sky` 滞后、代码暗一下）本身就是为了解决同一个灰压灰
   问题实测出来的。两种手感分属两种页面：首页的切换是一段演出，内页的切换是一次换色。
-- 按钮的两种文案由生成器按页面语言写进 `data-label-dark` / `data-label-light`，脚本里不含
+- 按钮的两种文案由生成器按页面语言写进 `data-label-dark` / `data-label-light`（任务单写的是
+  `data-to-dark` / `data-to-light`；首页已上线的就是 `data-label-*`，全站用一个名字，沿用它），脚本里不含
   任何文字（`gen/assets.dawn` 不许共享脚本里出现中文）。文案只定义一次：`html/page.theme_toggle`，
   首页也用它，首页文案文件里原来那两节删掉。
 
@@ -185,6 +186,34 @@
 - **中文规范、标准库的长页单独调排版。** 定稿只做了中文教程目录；中文长页沿用同一套规则，
   66ch 约等于 33 个汉字一行。
 
-## 九、实测（落地后回填）
+## 九、实测
 
-（待回填）
+环境：playwright-core 1.63 / Chromium，本机 `python3 -m http.server` 伺服 `DAWN_WASM_CC=clang-20 ./site/build.sh`
+产出的 `site/dist`（含真实 wasm 与 Playground bundle）。12 个页面：教程目录、第 8 章、规范、示例目录、
+shapes、标准库、时间线、早期决定、Playground、演示、404、中文教程目录。
+
+- **宽度**：1280 / 400 px × 亮 / 暗共 48 组，`scrollTo(99999, 0)` 后 `scrollX` 全为 0，代码块、表格、
+  目录、SVG 以外没有元素越出视口。`documentElement.scrollWidth` 是 1265 / 385，`clientWidth` 是
+  1280 / 400：差的 15 px 是 `scrollbar-gutter: stable` 在覆盖式滚动条下留的槽，与定稿实测相同，
+  不是溢出。
+- **reduced motion**：48 组 `document.getAnimations()` 都是 0；开脚本点按钮后仍是 0。Playground
+  页点按钮后曾是 6，来源是 `playground.css` 里两个按钮无条件的颜色过渡，已挪进
+  `prefers-reduced-motion: no-preference`。首页（日月轮转那套）在 reduced motion 下点按钮前后也都是 0。
+- **无脚本**（加 reduced motion，400 px）：12 页动画都是 0；有目录的 5 页目录全部展开、条目全可见
+  （规范 75 条、第 8 章 17 条）；正文与页头里没有不透明度为 0 的元素；日月按钮不显示。
+- **主题切换**：12 页点一次后 `data-theme=dark`、localStorage `dark`、背景 `rgb(15, 17, 23)`、
+  `aria-label` 变为 Switch to light theme（中文页「切换到浅色主题」）、`aria-pressed=true`；刷新后仍暗；
+  再点回到亮色。
+- **History**：`/history.html`、`/design.html` 及两个中文版都 200；时间线链到 `design.html`，
+  早期决定的 eyebrow 与状态横幅链回 `history.html`。
+- **演示页**：两个 reactor 真实挂载（计数器点 + 后为 1），状态行与错误行为空，挂载点在窗口里，亮暗都无页面错误。
+- **节号核对**：构建日志的「numbered heading id」仍是 166，与改动前相同（`gen/links` 读进了 `span.hn`）。
+- **正文一致性**：与改动前（基线 `18eb46bc` 的构建，v0.82.0 加搜索面板刀 1）逐页比去标签后的正文，
+  107 页里 21 页完全相同；56 页只差 Playground 链接从代码下方挪到窗口顶栏（文字位置变了）；
+  28 页差在反引号渲染成代码、`~~` 渲染成删除线、示例目录去掉了名字与描述之间的「—」（两栏以后它不再是分隔）；
+  剩下 2 页是中英教程目录：章号补零（`1.` → `01`），以及译本说明排到导语之后（定稿的页头顺序）。
+  比较时去掉了新增的界面：eyebrow、`#` 锚点、窗口标签、数量胶囊、章节卡片的方向标签与箭头、目录栏。
+- **首页**：亮暗、1280 / 400 整页截图与改动前对比，只有页脚换成新版式（logo、文案、右侧版本号）。
+
+没有测的：Safari、Firefox（view transition 不支持时走直接切换这条路径没实测）；960 px 与 720 px 两个断点
+附近的截图；标准库长页上 view transition 的帧率。

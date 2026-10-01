@@ -39,6 +39,10 @@
 
 ## 三、两套主题 token
 
+> 2026-10-02 起 token、字体与主题脚本已全站共用（[site-pages-design.md](site-pages-design.md)）：
+> token 在 `style.css`，切换在 `theme.js`，本节下面讲的「只在 `home.css`」是当时的状态；首页专有的
+> `data-sky` 编排与日月轮转仍按本节所写。
+
 亮暗两套 token 只在 `home.css` 里，只有首页加载这张表。三态：
 
 - 根元素没有 `data-theme`：跟系统（`prefers-color-scheme`）；
@@ -161,7 +165,7 @@ GPU 源码按文件原样显示，不再像定稿那样为卡宽改换行：`run
 
 ## 八、不做的（理由）
 
-- **全站暗色。** 这一批只有首页有暗色 token 与切换；其他页面不读 `dawn-theme` 键、保持亮色。
+- **全站暗色。**（已由 [site-pages-design.md](site-pages-design.md) 做掉。）这一批只有首页有暗色 token 与切换；其他页面不读 `dawn-theme` 键、保持亮色。
   全站暗色要给教程、规范、标准库、示例、Playground 编辑器各配一套代码配色，是后续的事。
 - **Google Fonts。** 定稿用它；站点承诺零外部请求，且字体文件一旦外链，渲染就依赖第三方的
   可用性与隐私条款。自托管两个字重，约 185 KB，只有首页加载。

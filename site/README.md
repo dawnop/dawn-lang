@@ -1,10 +1,11 @@
 # site/ — Dawn 语言网站（M5）
 
 静态站点，**生成器用 Dawn 写**（dogfood M4 的模块系统 / Map / 字符串 API）。
-产物是 HTML + CSS（代码高亮在构建期完成，内容页零 JS）；nginx 托管。唯一的例外是
+产物是 HTML + CSS（代码高亮在构建期完成）；除演示页自己的挂载脚本外，内容页的脚本只有每页共用的 `theme.js` 与搜索的 `search.js`；nginx 托管。唯一的例外是
 Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`/api/check`。
-首页另有自己的 `home.css` 与 `home.js`（主题切换、日月轮转、计数），只有首页加载，
-无脚本时首页照样完整可读；设计与取舍见 [docs/site-home-design.md](../docs/site-home-design.md)。
+每页都加载 `theme.js`（亮暗主题的恢复与切换、窄屏目录折叠），首页另有自己的 `home.css` 与
+`home.js`（日月轮转、计数）。无脚本时每页照样完整可读；设计与取舍见
+[docs/site-home-design.md](../docs/site-home-design.md) 与 [docs/site-pages-design.md](../docs/site-pages-design.md)。
 
 - 域名：`https://dawn-lang.dawnop.com`（与 GitHub 仓库名一致）
 - 验收：站点上线，且生成它的程序是 Dawn 写的；生成器 JVM 与 native 跑出的
