@@ -1,158 +1,214 @@
 # packages/tileir
 
-纯 Dawn 的 Tile IR 生成器：kernel 体是一个只发 `Dev` 效果的普通 Dawn 函数，
-在记录 handler 下跑一遍得到 `TileProg`（SSA 形式的 ADT），降成一张线性指令表，
-再渲染成 `cuda_tile` 方言的文本，或编码成 `tileiras` 能汇编的字节码。设计与刀序见
-[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §5 与 §6；
-本包是那里的刀 2 与刀 3，不进 std（它不需要 intrinsic，且字节码版本要钉在包常量里）。
+A pure Dawn generator of CUDA Tile IR that records a kernel body written against the `Dev` effect and emits it as `cuda_tile` text or as bytecode `tileiras` can assemble.
 
-宿主侧（缓冲、launch）在 `std/gpu`，它只认 kernel 名与字节码，不认识 `TileProg`；
-格式标记复用 `std/gpu` 的（`F64`、`BF16` 等），本包不再声明一份。bf16 kernel 的写法与
-f64 的相同（`Param[BF16]`、`addf(BF16, ...)`），dtype 名 `"bf16"` 贯穿记录、降低、渲染
-（`tile<128xbf16>`）与字节码（类型标签 6）；设备侧 `addf ... rounding<nearest_even>` 对 bf16
-的答案按双舍入定理等于 `std/narrow.round_bf16(f64 加)`，`scripts/tile-golden` 的 `vadd_bf16`
-钉文本与字节码，`scripts/tile-gpu-diff` 拿设备对假设备。
+A kernel body is an ordinary Dawn function whose only effect is `Dev`. Running
+it once under a recording handler yields a `TileProg` (an ADT in SSA form),
+which is lowered to a linear instruction table and then rendered as
+`cuda_tile` dialect text or encoded as `tileiras` bytecode. The design and the
+order of the work are in
+[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §5 and §6
+(in Chinese); this package is knives 2 and 3 there. It is not in std: it
+needs no intrinsic, and the bytecode version has to be pinned in a package
+constant.
 
-## 模块
+The host side (buffers, launch) is `std/gpu`, which knows kernel names and
+bytecode and does not know `TileProg`. The format markers are `std/gpu`'s
+(`F64`, `BF16` and so on); this package does not declare a second set. A bf16
+kernel is written the same way as an f64 one (`Param[BF16]`,
+`addf(BF16, ...)`), and the dtype name `"bf16"` runs through recording,
+lowering, rendering (`tile<128xbf16>`) and bytecode (type tag 6). By the
+double-rounding theorem, the device's `addf ... rounding<nearest_even>` on
+bf16 answers what `std/narrow.round_bf16` of the f64 sum answers;
+`scripts/tile-golden`'s `vadd_bf16` pins the text and the bytes, and
+`scripts/tile-gpu-diff` checks the device against the fake device.
 
-| 模块 | 内容 |
+## Modules
+
+| Module | Contents |
 |------|------|
-| `dev` | `pub effect Dev`（句柄级、单态的设备操作）、句柄类型（`Tile[D]` / `Param[D]` / `Idx` / `Scalar[D]` / `Ptrs[D]`、视图类型等，都是 opaque，`D` 是幻影格式参数）与其上的类型化函数；分组见下节 |
-| `prog` | `TileOp` 与 `TileProg`：记录的 ADT；`trace_kernel(name, params, body, hints = [])` 是记录 handler，带区域栈；`MAX_LOOP_DEPTH` / `MAX_HANDLES` |
-| `lower` | `lower(prog) -> Kernel`：线性指令表 `Instr`（区域操作的体是嵌套的一张表），值从 0 密集编号，操作数 `Arg(pos)` / `Val(id)`，类型 `Ty`；指针梯子、去重、SSA 重编、区域作用域都在这里 |
-| `render` | `render(prog) -> String`，一个 `cuda_tile.module @m` 含一个 `entry @<name>`；一条 `Instr` 一行，区域是头一行、体缩两格、右花括号 |
-| `bytecode` | `encode(prog) -> Bytes`，`cuda-tile` 字节码，含区域编码；`BYTECODE_MAJOR / BYTECODE_MINOR` 钉头里的版本，`bytecode_version()` 给出 `"13.4"` |
+| `dev` | `pub effect Dev` (handle-level, monomorphic device operations), the handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, `Ptrs[D]`, the view types and others, all opaque, with `D` a phantom format parameter) and the typed functions over them; the groups are below |
+| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body)` and `trace_kernel_hinted` are the recording handlers, with a region stack; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
+| `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here |
+| `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace |
+| `bytecode` | `encode(prog) -> Bytes`: `cuda-tile` bytecode, regions included; `BYTECODE_MAJOR` / `BYTECODE_MINOR` pin the version in the header, and `bytecode_version()` answers `"13.4"` |
 
-完整的公开面（签名与文档注释）以 `./bin/dawn doc packages/tileir` 为准，它对五个模块输出一份
-JSON；本文不再逐个列名字，因为这张表上一次逐个列的时候 `Dev` 只有十来个操作，后来涨到六十多个而
-表没有跟。
+The full public surface (signatures and doc comments) is whatever
+`./bin/dawn doc packages/tileir` prints, one JSON document for the five
+modules. This README does not list every name: the last time a table here did,
+`Dev` had a dozen operations, and it grew past sixty while the table stayed
+put.
 
-### `dev` 的分组
+### The groups of `dev`
 
-下表把 `Dev` 的全部操作分组，每组举几个类型化函数（kernel 体用的是它们，不直接调 `t_*`）。
-它由 `./bin/dawn doc packages/tileir` 的 `effects[0].ops` 生成，脚本核过分组恰好覆盖全部操作、
-不多不少（2026-10-02，68 个操作；刀 T16 加 `t_insert` 与 `t_powi`，70 个；刀 T17 加 `t_return_if`，71 个）；以后加操作时该组要跟上，数字与名字以 `dawn doc` 为准。
+The table puts every `Dev` operation in a group and names some of the typed
+functions of each (a kernel body calls those, not the `t_*` operations). It
+was generated from `effects[0].ops` of `./bin/dawn doc packages/tileir`, and a
+script checked that the groups cover every operation exactly once (71
+operations on 2026-10-03). When an operation is added, its group has to
+follow; `dawn doc` is the authority on numbers and names.
 
-| 组 | `Dev` 操作 | 类型化函数（举例） |
+| Group | `Dev` operations | Typed functions (examples) |
 |----|-----------|--------------------|
-| 网格与索引 | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
-| 内存与指针 | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
-| 视图 | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
-| 常量与形状 | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
-| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
-| 区域 | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
-| token | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
-| 模块全局 | `t_global` `t_get_global` | `d_global` `global_ptrs` |
-| 断言与调试 | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
+| Grid and index | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
+| Memory and pointers | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
+| Views | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
+| Constants and shapes | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
+| Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int_sat` `float_to_float_away` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
+| Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
+| Tokens | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
+| Module globals | `t_global` `t_get_global` | `d_global` `d_global_const` `global_ptrs` |
+| Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
 
-操作上的属性（舍入方向、`flush_to_zero`、`propagate_nan`、整数 `overflow`、循环的 `unsignedCmp`、
-全局的对齐 / 可见性 / 只读、`alloca` 的 `global`）自刀 K2 起是带方言默认值的具名形参，放在位置参数
-（以及 body）之后：`addf(F32, s, a, b, rounding: Down)`、`d_global("t", F64, xs, visibility: Private)`、
-`trace_kernel("k", ps, () => body(), hints: hs)`。舍入方向是 `std/narrow` 的 `Rounding`。刀 T4 / T17 的
-后缀名（`addf_down`、`float_to_int_sat`、`d_global_private`……）已删除，理由见
-[`docs/std-defaults-design.md`](../../docs/std-defaults-design.md) 7.2 节。
-
-## 用法
+## Usage
 
 ```dawn
 use std/gpu.{F64}
-use tileir/dev.{Dev, Param, param, block_id, load, store, addf}
+use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, addf}
 use tileir/prog.{trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let i = block_id(0)
-  let ta = load(a, i, 128)
-  let tb = load(b, i, 128)
-  store(out, i, 128, addf(F64, 128, ta, tb))
+  let blk = tile_at(block_id(0), 128)
+  let ta = load(a, blk, [128])
+  let tb = load(b, blk, [128])
+  store(out, blk, [128], addf(F64, [128], ta, tb))
 }
 
 let prog = trace_kernel("vadd", ["f64", "f64", "f64"],
   () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
-let text = render(prog)     # 给人读、给 golden 钉
-let bytes = encode(prog)    # 给 tileiras --gpu-name sm_86 编成 cubin
+let text = render(prog)     # for people to read and for the goldens to pin
+let bytes = encode(prog)    # for tileiras to assemble into a cubin
 ```
 
-`params` 是每个入口参数的 dtype 名，按位置；体里的 `param(d, pos)` 必须与之一致
-（位置在范围内、格式相同），否则 `trace_kernel` 直接 panic：入口签名说一种格式、
-load 说另一种，字节码到了 `tileiras` 也是错。tile 宽度必须是 2 的幂。
+A memory operation takes an element offset, not a block index: `tile_at(idx,
+n)` is `idx * n`, and a kernel over a multi-dimensional grid builds its base
+from several of them. A shape is a list of dimensions, each a power of two;
+`[]` is the rank-0 tile, which the typed surface spells `Scalar[D]`.
 
-kernel 内的循环走 `d_for`（设计文档 §5.2）：边界与步长是 `Idx`（宿主常量用 `idx_const`），
-携带一个 tile，体在宿主上只跑一次、体内发的操作落进循环区域：
+`params` gives each entry parameter's dtype name, by position. Every
+`param(d, pos)` in the body has to agree with it (the position in range, the
+same format), or `trace_kernel` panics: an entry signature that says one
+format and a load that says another would be wrong in the bytecode too, by
+the time it reached `tileiras`.
+
+Loops inside a kernel use `d_for` (design §5.2). The bounds and the step are
+`Idx` (`idx_const` for a host constant), one tile is carried, and the body
+runs once on the host; what it emits lands in the loop's region:
 
 ```dawn
-# 块 b 把 x 里 chunks 个连续 128 宽 tile 折进 out 的一个 tile
+# block b folds `chunks` consecutive 128-wide tiles of x into one tile of out
 fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
   let base = idx_mul(b, n)
-  let first = load(x, base, 128)
+  let first = load(x, tile_at(base, 128), [128])
   let one = idx_const(1)
   let acc = d_for(idx_add(base, one), idx_add(base, n), one, first,
-    (k, t) => addf(F64, 128, t, load(x, k, 128)))
-  store(out, b, 128, acc)
+    (k, t) => addf(F64, [128], t, load(x, tile_at(k, 128), [128])))
+  store(out, tile_at(b, 128), [128], acc)
 }
 ```
 
-`d_for2` 携带两个 tile。循环嵌套深度上限 `MAX_LOOP_DEPTH`（16），一次记录的句柄数上限
-`MAX_HANDLES`（65536），超限 panic：递归穿过 `d_for` 的 helper 与不进循环的递归 helper
-各在一处停下。依赖 tile 值的分支走 `d_if`（`src/dev.dawn:2455`）：两个区域都必须写，各在宿主上
-跑一次、各答一个同形同格式的 tile，区域里不许 load / store；它在降低时照 `lower_for` 的形状落成
-`lower_if`（`src/lower.dawn:1382`）。（这里早先写的是「没有 `d_if`」，它在 `d1d08f5c` 加上时本段没跟。）
+`d_for2` carries two tiles. Loop nesting is capped at `MAX_LOOP_DEPTH` (16)
+and the handles of one recording at `MAX_HANDLES` (65536); past either the
+recording panics, so a helper that recurses through `d_for` and one that
+recurses without a loop each stop somewhere. A branch on a tile value uses
+`d_if` (in `src/dev.dawn`): both regions are required, each runs once on the
+host and answers a tile of the same shape and format, and neither may load or
+store. Lowering turns it into an `IfElse` the way it turns a loop into a
+`ForLoop` (`lower_if` next to `lower_for` in `src/lower.dawn`).
 
-## 记录的形状
+## The shape of a recording
 
-- 句柄是记录时的 SSA 编号，从 1 起（0 是入口 token）。同一个体按同一顺序发同样的操作，
-  记录到的 `TileProg` 相等；`scripts/tile-golden/run.sh` 每个 kernel 都记两次比相等。
-- 内存操作的顺序只由 **token 链**给出：handler 里一格 `tok`，每个 load / store 消费上一个、
-  产生下一个，`MakeToken(0)` 是链头。Tile IR 不给内存操作之间的程序序任何含义。
-- 降低时值按出现顺序重编（0, 1, …），因为 load / store 之前要先把标量指针
-  铺成指针 tile（`reshape` → `broadcast` → `offset`，偏移是 `idx * n + iota`），这些中间值
-  在记录里没有。同一 (参数, 索引, 宽度) 的指针梯子只发一次。渲染器把 `Val(k)` 拼成 `%k`、
-  `Arg(i)` 拼成 `%argi`；写入器把入口参数排在前、值紧随其后，成一个平坦的索引空间。
-- `addf` 是 `rounding<nearest_even>`：设计文档 §3.2 的双舍入定理只对这一种模式成立；
-  指令表里没有这个字段，因为它没有第二个取值。`scripts/tile-golden` 的 `addf-no-rounding`
-  变异体把渲染器的这个属性删掉，`vadd_bf16.mlir` 红；`bf16-tag-as-i16` 把写入器的 bf16
-  标签改成 i16，`tileiras` 拒绝。
-- **循环**记录成 `For(iv, lower, upper, step, inits, carried, results, body)`，`body` 以
-  `Continue(values)` 结尾。handler 维护区域栈：`t_loop_begin` 压栈并清空当前操作表，
-  `t_loop_end` 弹栈把体包成 `For` 接回外层。**token 作为最后一个携带值穿过循环**：`inits`
-  末尾是循环前的 token，体从区域内的携带 token 起链，`Continue` 末尾是体的最后一个 token，
-  循环后 handler 从 `results` 末尾继续，kernel 体看不见它。降低时体内定义的句柄出区域即
-  关闭，之后再引用按名拒绝；体内建的指针梯子不在循环后复用。指令表给 `ForLoop` 编号按
-  阅读序：结果、归纳变量、携带值、体。
+- A handle is an SSA number assigned while recording, starting at 1 (0 is the
+  entry token). The same body emitting the same operations in the same order
+  records an equal `TileProg`; `scripts/tile-golden/run.sh` records every
+  kernel twice and compares.
+- The order of memory operations comes from the **token chain** and nothing
+  else: the handler keeps one `tok` cell, each load and store consumes the
+  previous token and produces the next, and `MakeToken(0)` heads the chain.
+  Tile IR gives program order between memory operations no meaning.
+- Lowering renumbers values in order of appearance (0, 1, ...), because a load
+  or store first has to spread the scalar pointer into a tile of pointers
+  (`reshape`, `broadcast`, `offset`, where the offset is `iota` plus the
+  base), and those intermediate values are not in the recording. The pointer
+  ladder for one (parameter, index, width) is emitted once. The renderer
+  spells `Val(k)` as `%k` and `Arg(i)` as `%argi`; the writer puts the entry
+  parameters first and the values right after them, in one flat index space.
+- Plain `addf` is `rounding<nearest_even>`: design §3.2's double-rounding
+  theorem holds for that mode only. The other modes are separate operation
+  names (`addf_ftz`, `addf_neg_inf`, `addf_pos_inf`), so the instruction table
+  carries no rounding field. `scripts/tile-golden`'s `addf-no-rounding` mutant
+  deletes the attribute from the renderer and `vadd_bf16.mlir` goes red;
+  `bf16-tag-as-i16` changes the writer's bf16 tag to i16 and `tileiras`
+  refuses the bytes.
+- **A loop** is recorded as `For(iv, lower, upper, step, unsigned, inits,
+  carried, results, body)`, with `body` ending in `Continue(values)`. The
+  handler keeps a region stack: `t_loop_begin` pushes and clears the current
+  operation list, and `t_loop_end` pops it and wraps the body in a `For`
+  attached to the enclosing list. **The token crosses the loop as its last
+  carried value**: the last of `inits` is the token before the loop, the body
+  chains from the carried token inside the region, the last of `Continue` is
+  the body's last token, and after the loop the handler continues from the
+  last of `results`; the kernel body never sees it. In lowering, a handle
+  defined in the body is closed when the region ends, and a later reference to
+  it is refused by name; a pointer ladder built inside is not reused after the
+  loop. The table numbers a `ForLoop` in reading order: results, induction
+  variable, carried values, body.
 
-## 字节码
+## Bytecode
 
-`encode` 写的是 `NVIDIA/cuda-tile` 的 `BytecodeWriter.cpp` 写、`BytecodeReader.cpp` 读的格式
-（commit `be0889cd`）：8 字节 magic、`13.4` 版本头（`src/bytecode.dawn:91-92`；刀 T8 之前是 13.2，
-#344 之前是 13.3，见设计文档 §6.11、§6.18）、Func / Constant / Type / String 四个
-section、结束字节；opcode、类型 tag 来自仓库里冻结的三张 `.td` 表，逐操作布局来自生成它的
-tablegen 后端（结果类型 → 可选字段 flags 位域 → 属性 → 操作数）。cuTile.jl 的
-`src/bytecode` 是同一格式的另一份实现，写的时候逐项对照过；两处形态差异（它总写 debug
-section、预注册 i1 / i32）reader 都接受，本包照 C++ 写入器。
+`encode` writes the format that `NVIDIA/cuda-tile`'s `BytecodeWriter.cpp`
+writes and `BytecodeReader.cpp` reads (commit `be0889cd`): an 8-byte magic, a
+`13.4` version header (`BYTECODE_MAJOR` / `BYTECODE_MINOR` in
+`src/bytecode.dawn`; 13.2 before knife T8 and 13.3 before #344, see design
+§6.11 and §6.18), the Func, Constant, Type and String sections, and an end
+byte. Opcodes and type tags come from the three frozen `.td` tables in that
+repository, and each operation's layout from the tablegen backend that
+generates it (result types, then the optional-field flags bitfield, then
+attributes, then operands). cuTile.jl's `src/bytecode` is an independent
+implementation of the same format and was read alongside, item by item; the
+reader accepts both of the two places their output differs (it always writes
+a debug section and pre-registers i1 and i32), and this package follows the
+C++ writer.
 
-只编码指令表装得下的东西：内存操作 `weak`、无 mask、带 token；`addf` nearest_even、不
-flush-to-zero；整数操作 `overflow` none；tile 为 0 或 1 阶；`for` 是一个区域一个块，
-`continue` 结尾。**区域的值编号**照 reader 的规则：块参数接着外层计数编、块内结果继续、
-块结束时计数回滚到块参数之前、`for` 自己的结果再从那里编；写入器用一张 `index` 表把
-指令表的（文本的）编号映射过去。`for` 的 `unsigned` 是 13.2 加的可选字段，写入器只在目标
-版本不低于 13.2 时写它的 flags 格，所以含循环的字节码自刀 5 起与版本号相关（无循环的
-kernel 在 13.1 / 13.2 / 13.3 下仍逐字节相同）。版本、`tileiras` 的钉法与 wheel 的 sha256 在
-`scripts/tile-golden/toolchain.txt`，`run.sh` 拿 `bytecode_version()` 与之对账。
+Only what the instruction table can hold is encoded: memory operations are
+`weak` and carry their token operand, plain `addf` is `nearest_even` without
+flush-to-zero, and integer operations carry `overflow` none. **Value numbering
+inside a region** follows the reader's rule: block arguments continue the
+enclosing count, the block's results follow, the count rolls back to before
+the arguments when the block ends, and the region-holding operation's own
+results are numbered from there; the writer maps the table's (textual)
+numbering onto it with an `index` table. A few shapes depend on the target
+version, such as `for`'s optional `unsigned` field (13.2 and later), `exp`'s
+inline rounding mode and `mmaf`'s flags (13.3) and the pointer type's flags
+word (13.4); the header comment of `src/bytecode.dawn` lists every one, as
+measured from the writer, and everything else is byte for byte the same from
+13.1 to 13.4. The version, the `tileiras` pin and the wheel's sha256 are in
+`scripts/tile-golden/toolchain.txt`, and `run.sh` checks `bytecode_version()`
+against it.
 
-## 门禁
+## Gates
 
-- `dawn test packages/tileir`：内联 test 块（`scripts/package-tests.sh` 自动发现）。
-- `scripts/tile-golden/run.sh`：三个 kernel（`vadd` f64 × 128、`vadd_f32` f32 × 64、
-  `sum` 带 `d_for` 的块内 tile 求和）的文本 golden（`*.mlir`）与字节码 golden（`*.tilebc`），
-  JVM 与 native 都跑；再把每个 `.tilebc` 交给钉版本的 `tileiras --gpu-name sm_86` 编成 cubin
-  并查符号表里有 `GLOBAL FUNC <kernel>`（层 1，CI 的 `tile` job；本机
-  `scripts/tile-golden/install-tileiras.sh <dir>` 装、`--tileiras <bin>` 或 `TILEIRAS=`
-  指给它、`--without-tileiras` 明示跳过）。八个变异体：渲染器少发 store 的 token 操作数 →
-  文本 golden 红；`load` 的 dtype 写死 f64 → f32 kernel 记录时被拒；handler 循环后不换 token /
-  区域栈弹反 → `sum` 降低时按名拒绝、不出文本；写入器把 make_token 编成 iota 的 opcode /
-  store 仍置 token 位却不写操作数 / f64 用 i64 的 tag / 循环块后不回滚值索引 → 文本不动、
-  字节红、`tileiras` 各以具名报文拒绝。`--record` 重录两种 golden。
-- `scripts/opaque-twin/tileir.dawn`：三种句柄类型的身份就是目标（`# twin-infer-only`）。
+- `dawn test packages/tileir`: the inline test blocks
+  (`scripts/package-tests.sh` discovers them).
+- `scripts/tile-golden/run.sh`: for each of the 191 kernels in
+  `scripts/tile-golden/kernels.dawn`, a text golden (`*.mlir`) and a bytecode
+  golden (`*.tilebc`), on the JVM and natively; then each `.tilebc` goes to
+  the pinned `tileiras --gpu-name <toolchain.txt gpu-name>` (sm_86 in the
+  default `toolchain.txt`), which has to produce a cubin whose symbol table
+  has `GLOBAL FUNC <kernel>` (layer 1, the `.github/workflows/tile.yml`
+  workflow, sharded with `--shard I/N`). Locally,
+  `scripts/tile-golden/install-tileiras.sh <dir>` installs it, `--tileiras
+  <bin>` or `TILEIRAS=` points at it, and `--without-tileiras` skips it
+  explicitly. 77 mutants each remove one rule from a copy of the package and
+  name the kernel that must go red and how (for example: the renderer drops
+  the store's token operand, so the text golden differs; the writer encodes
+  `make_token` with `iota`'s opcode, so the text is untouched, the bytes
+  differ and `tileiras` refuses them by name). The list with each
+  prediction is the header of `run.sh`. `--record` re-records both kinds of
+  golden.
+- `scripts/opaque-twin/tileir.dawn`: the identity of the three handle types is
+  their target's (`# twin-infer-only`).

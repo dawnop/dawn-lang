@@ -1,27 +1,40 @@
 # packages/tileref
 
-Tile IR kernel 的宿主参考实现：`scripts/tile-golden` 记录的每个 kernel 在这里有一个纯函数，
-输入是各参数缓冲区的格式与内容，输出是设备跑完之后输出缓冲区该有的内容。
-`scripts/tile-gpu-diff` 的层 2 对拍程序拿真机对它们，`scripts/leetgpu-diff/problems.txt`
-每道题的「第二意见」列也指向这里。
+Host reference implementations of the Tile IR kernels: for each kernel, a pure function that answers what the device's output buffer should hold.
 
-## 为什么是包，不是 std
+Every kernel `scripts/tile-golden` records has a function here. Its input is
+the format and contents of each argument buffer, and its output is what the
+output buffer should contain after the device has run. Layer 2's comparison
+programs in `scripts/tile-gpu-diff` check the real device against them, and
+the "second opinion" column of `scripts/leetgpu-diff/problems.txt` points here
+for every problem.
 
-0.82.0 之前这批函数在 `std/gpu`。判据是
-[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §5.3 那条：
-不需要 intrinsic 的不进 std。参考实现全是 `List[Float]` 上的纯函数，一个 intrinsic 也不用；
-放在 std 里，每次编译都要多检查约 3000 行没有程序可达的代码，题解语料还要背 std 的
-API 纪律（`std/moved.txt`、`Param-Change`、命名统一）。裁决与实测见设计文档 §5.3 的「参考实现迁出」一节。
+## Why a package and not std
 
-`std/gpu` 只留设备模型：`Gpu` 效果、格式、两个 handler，以及 `reference_kernels` 的两个表项
-`vadd_ref` / `sum_ref`（`dawn test --stdlib` 要有一张能用的假设备表）。
+Until 0.82.0 these functions were in `std/gpu`. The rule is the one in
+[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §5.3 (in
+Chinese): what needs no intrinsic does not go into std. Every reference is a
+pure function over `List[Float]` and uses no intrinsic. In std they cost every
+compilation a check of some 3000 lines no program reaches, and they put a
+solution corpus under std's API discipline (`std/moved.txt`, `Param-Change`,
+naming sweeps). The decision and its measurements are in the design's §5.3,
+under the subsection on moving the references out of `std/gpu`.
 
-## 不依赖 `tileir`
+`std/gpu` keeps only the device model: the `Gpu` effect, the formats, the two
+handlers, and the two entries of `reference_kernels`, `vadd_ref` and
+`sum_ref` (`dawn test --stdlib` needs a usable fake-device table).
 
-参考实现是 kernel 的第二意见，不能走 kernel 的代码路径。`dawn.toml` 的 `[deps]` 只有 std，
-`scripts/leetgpu-diff/check.py` 读这份清单，出现 `tileir` 就红。
+## Not dependent on `tileir`
 
-## 用法
+A reference is the second opinion on a kernel, so it must not go through the
+kernel's code path. The manifest has no `[deps]`, so the package depends on
+std alone, and `scripts/leetgpu-diff/check.py` reads the manifest and fails if
+`tileir` ever appears in it.
+
+## Usage
+
+The path is relative to the consumer's `dawn.toml`
+(`examples/projects/gpu_fake` writes `"../../../packages/tileref"`):
 
 ```toml
 [deps]
@@ -33,5 +46,6 @@ use std/gpu.{with_gpu_fake, last_out}
 use tileref/ref.{relu_ref}
 ```
 
-格式运算（`round_to`、`wrap_*`、`nibble_*`）用的是 `std/gpu` 的，假设备与参考实现对
-「一个格式装得下什么」不会有两种答案。
+The format arithmetic (`round_to`, `wrap_*`, `nibble_*`) is `std/gpu`'s, so the
+fake device and the references can never give two answers to what a format
+can hold.
