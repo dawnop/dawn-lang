@@ -23,6 +23,10 @@ cd "$(dirname "$0")/.."
 
 HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
 export DAWN_WASM_CC="${DAWN_WASM_CC:-clang-20}"
+# The public origin, named once in scripts/repo.env (DAWN_SITE_ORIGIN in the
+# environment wins). It is what the CDN purge refreshes and what this prints.
+site_origin="${DAWN_SITE_ORIGIN:-$(. scripts/repo.env && printf '%s' "$DAWN_SITE_ORIGIN")}"
+[ -n "$site_origin" ] || { echo "error: scripts/repo.env names no DAWN_SITE_ORIGIN" >&2; exit 1; }
 
 stamp="$(mktemp)"
 trap 'rm -f "$stamp"' EXIT
@@ -58,7 +62,7 @@ if [ "$bad" != 0 ]; then
   exit 1
 fi
 
-echo "=== deploying to dawn-lang.dawnop.com ==="
+echo "=== deploying to ${site_origin#https://} ==="
 rsync -avz --delete site/dist/ "$HOST:/var/www/dawnlang/dist/"
 
 # The pages sit behind a CDN that caches HTML for ten minutes
@@ -71,7 +75,8 @@ rsync -avz --delete site/dist/ "$HOST:/var/www/dawnlang/dist/"
 # SITE_CDN_PURGE=0 skips it (e.g. a deploy to an origin not behind the CDN).
 if [ "${SITE_CDN_PURGE:-1}" != 0 ]; then
   echo "=== purging the CDN page cache ==="
-  if purge_out="$(ssh "$HOST" 'python3 ~/qiniu-cdn-domain.py refresh-dirs https://dawn-lang.dawnop.com/' 2>&1)"; then
+  # shellcheck disable=SC2029  # the URL is this side's; ~ is the host's
+  if purge_out="$(ssh "$HOST" "python3 ~/qiniu-cdn-domain.py refresh-dirs $site_origin/" 2>&1)"; then
     echo "$purge_out"
   else
     echo "warning: CDN purge failed; pages refresh when the cache expires (ten minutes)" >&2
@@ -80,4 +85,4 @@ if [ "${SITE_CDN_PURGE:-1}" != 0 ]; then
 fi
 
 echo "=== done ==="
-echo "https://dawn-lang.dawnop.com"
+echo "$site_origin"

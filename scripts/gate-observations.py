@@ -87,6 +87,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
+
 
 def gh_json(args):
     """Run `gh` and parse its stdout as JSON, with the proxy vars cleared."""
@@ -374,7 +376,7 @@ def collect(repo, branch, workflow, runs, since, allow_empty=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--repo", default="dawnop/dawn-lang")
+    ap.add_argument("--repo", default=repo_env.github_repo())
     ap.add_argument("--branch", default="main")
     ap.add_argument("--workflow", default="ci.yml")
     ap.add_argument("--runs", type=int, default=25,

@@ -273,8 +273,16 @@ fn site_url(prefix: String, pair: String) -> String = {
 }
 
 ## Where the site is served from, with the trailing slash. The one absolute
-## URL every other one is built on: hreflang, canonical, og:url, the sitemap.
+## URL every other one is built on: hreflang, canonical, og:url, og:image, the
+## sitemap. The generator's copy of DAWN_SITE_ORIGIN in scripts/repo.env, which
+## the scripts read; scripts/check-no-server-identity.py holds the two equal.
 pub fn site_origin() -> String = "https://dawn-lang.dawnop.com/"
+
+## The repository's page on GitHub, no trailing slash: the header and footer
+## links, release notes, and the docs and packages the site links to rather
+## than renders. The generator's copy of DAWN_GITHUB_REPO in scripts/repo.env,
+## held equal to it the same way.
+pub fn repo_url() -> String = "https://github.com/dawnop/dawn-lang"
 
 ## A page's own absolute URL, as `site_url` spells it for `lang`'s half of
 ## the pair: what `rel=canonical` and `og:url` say. "" for a page with no
@@ -364,7 +372,7 @@ fn lang_switch(lang: Lang, root: String, pair: String) -> String =
 ## compiler it had been built from. An empty version prints no build at all
 ## rather than a blank one; an empty commit prints the version alone.
 pub fn footer_html(a: Assets, lang: Lang, root: String) -> String = {
-  let gh = `<a href="https://github.com/dawnop/dawn-lang">GitHub</a>`
+  let gh = """<a href="${repo_url()}">GitHub</a>"""
   let (about, made, word) =
     match lang {
       En -> ("Dawn, a small, elegant functional language", "Built by a generator written in Dawn", "version")
@@ -483,7 +491,7 @@ pub fn release_chip(version: String) -> String =
 ## Where a release's notes are. The tag is the version with a `v`, which is
 ## how scripts/build-release-jar.sh and release.yml name it.
 pub fn release_url(version: String) -> String =
-  "https://github.com/dawnop/dawn-lang/releases/tag/v" ++ escape_attr(version)
+  repo_url() ++ "/releases/tag/v" ++ escape_attr(version)
 
 ## How long a page takes to read, as a chip with a small clock. Counted from
 ## the page's rendered body by [reading_minutes]; past an hour it is said to
@@ -775,7 +783,7 @@ pub fn head_html(
 <link rel="apple-touch-icon" href="${root}/assets/${touch}">
 <meta property="og:title" content="${attr_title}">
 ${meta_html(lang, pair)}
-<meta property="og:image" content="https://dawn-lang.dawnop.com/assets/${og}">
+<meta property="og:image" content="${site_origin()}assets/${og}">
 <link rel="stylesheet" href="${root}/assets/${css}">
 <script src="${root}/assets/${tjs}"></script>
 <script src="${root}/assets/${sjs}" defer></script>
@@ -837,7 +845,7 @@ ${nav}
 </div>
 <div class="tools">
 ${switch_line}${search_button(a, lang, root)}
-<a class="gh" href="https://github.com/dawnop/dawn-lang" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
+<a class="gh" href="${repo_url()}" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </div>
 ${theme_toggle(lang)}
 </nav>"""
@@ -1058,11 +1066,11 @@ test "a page says what it is and where it lives, in its own language" {
   assert str.contains(en, `<meta name="description" content="Dawn is a small, elegant`)
   assert str.contains(en, `<meta property="og:description" content="Dawn is a small, elegant`)
   assert str.contains(en, `<meta property="og:type" content="website">`)
-  assert str.contains(en, `<link rel="canonical" href="https://dawn-lang.dawnop.com/tutorial/03.html">`)
-  assert str.contains(en, `<meta property="og:url" content="https://dawn-lang.dawnop.com/tutorial/03.html">`)
+  assert str.contains(en, """<link rel="canonical" href="${site_origin()}tutorial/03.html">""")
+  assert str.contains(en, """<meta property="og:url" content="${site_origin()}tutorial/03.html">""")
   let zh = page(plain_assets(), Zh, "index.html", "t", "..", "", no_head(), "")
   assert str.contains(zh, `<meta name="description" content="Dawn 是一门`)
-  assert str.contains(zh, `<link rel="canonical" href="https://dawn-lang.dawnop.com/zh/">`)
+  assert str.contains(zh, """<link rel="canonical" href="${site_origin()}zh/">""")
   # no pair, no URL to name
   assert not str.contains(page(plain_assets(), En, "", "t", ".", "", no_head(), ""), "canonical")
 }
@@ -1072,7 +1080,7 @@ test "only a page with a twin advertises one" {
   let home = shell(plain_assets(), En, "index.html", "Dawn", ".", "", no_head(), "<p>x</p>")
   assert str.contains(home, `<html lang="en">`)
   assert str.contains(home, `<a class="lang" href="./zh/index.html" hreflang="zh-CN">中文</a>`)
-  assert str.contains(home, `hreflang="x-default" href="https://dawn-lang.dawnop.com/"`)
+  assert str.contains(home, "hreflang=\"x-default\" href=\"${site_origin()}\"")
   # the Chinese one points back, and says so in the language it leads to
   let zh = shell(plain_assets(), Zh, "index.html", "Dawn", "..", "", no_head(), "<p>x</p>")
   assert str.contains(zh, `<html lang="zh-CN">`)
@@ -1091,17 +1099,17 @@ test "a paired page names its own twin, not the home page" {
   let en = page(plain_assets(), En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", no_head(), "<p>x</p>")
   assert str.contains(en, `<a class="lang" href="../zh/tutorial/03.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(en,
-    `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
+    "hreflang=\"en\" href=\"${site_origin()}tutorial/03.html\"")
   assert str.contains(en,
-    `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/03.html"`)
+    "hreflang=\"zh-CN\" href=\"${site_origin()}zh/tutorial/03.html\"")
   # the twin, two directories deeper, points back at the same pair
   let zh = page(plain_assets(), Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", no_head(), "<p>x</p>")
   assert str.contains(zh, `<a class="lang" href="../../tutorial/03.html" hreflang="en">English</a>`)
   assert str.contains(zh,
-    `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
+    "hreflang=\"en\" href=\"${site_origin()}tutorial/03.html\"")
   # an index is advertised as its directory, so the front page stays / and /zh/
   assert str.contains(page(plain_assets(), En, "tutorial/index.html", "t", "..", "tutorial", no_head(), ""),
-    `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/"`)
+    "hreflang=\"zh-CN\" href=\"${site_origin()}zh/tutorial/\"")
 }
 
 test "the toc is a fold, open in the markup, with no script of its own" {
@@ -1229,7 +1237,7 @@ test "the cat looks over the band of a page with a head" {
 test "the nav names the release it was built from" {
   let built = Assets { ..plain_assets(), version: "0.82.0" }
   let n = nav_bar(built, En, "", ".", "")
-  assert str.contains(n, `<span class="word">Dawn</span></a><a class="release" href="https://github.com/dawnop/dawn-lang/releases/tag/v0.82.0">v0.82.0</a></div>`)
+  assert str.contains(n, """<span class="word">Dawn</span></a><a class="release" href="${repo_url()}/releases/tag/v0.82.0">v0.82.0</a></div>""")
   assert not str.contains(nav_bar(plain_assets(), En, "", ".", ""), `class="release"`)
   # the sections are a group of their own, apart from the tools
   assert str.contains(n, `<div class="links">` ++ "\n" ++ `<a href="./tutorial/index.html">Tutorial</a>`)

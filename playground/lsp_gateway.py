@@ -26,6 +26,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -37,6 +38,7 @@ import struct
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, NoReturn
 
 
@@ -73,12 +75,30 @@ DEFAULT_SETUP_SECONDS = HARD_SETUP_SECONDS
 DEFAULT_HANDSHAKE_SECONDS = 5
 DEFAULT_PING_SECONDS = 30
 DEFAULT_SHUTDOWN_SECONDS = 2
-DEFAULT_ORIGINS = ("https://dawn-lang.dawnop.com",)
 DEFAULT_SANDBOX = "/opt/dawn/playground/sandbox/run-lsp-sandboxed.sh"
 HTTP_TOKEN_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~"
 )
 MAX_JSONRPC_INTEGER = 9_007_199_254_740_991
+
+
+def _site_origin() -> str:
+    """The default Origin: the public site's, DAWN_SITE_ORIGIN.
+
+    Named once, in scripts/repo.env, and read through scripts/repo_env.py,
+    which takes DAWN_SITE_ORIGIN from the environment first (the production
+    unit's EnvironmentFile= sets it). Loaded by path because the unit runs
+    this file with `python3 -I`, which keeps its directory off sys.path; the
+    deployed root is laid out like the repository (/opt/dawn/playground/ and
+    /opt/dawn/scripts/, shipped by playground/deploy/redeploy.sh).
+    """
+    path = Path(__file__).resolve().parent.parent / "scripts" / "repo_env.py"
+    spec = importlib.util.spec_from_file_location("repo_env", path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise SystemExit(f"PLAY_LSP_ORIGINS is unset and {path} is missing")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.site_origin()
 
 
 class GatewayError(Exception):
@@ -138,7 +158,9 @@ class Config:
 
     @staticmethod
     def from_env() -> "Config":
-        origins_raw = os.environ.get("PLAY_LSP_ORIGINS", ",".join(DEFAULT_ORIGINS))
+        origins_raw = os.environ.get("PLAY_LSP_ORIGINS")
+        if origins_raw is None:
+            origins_raw = _site_origin()
         origins = frozenset(item.strip() for item in origins_raw.split(",") if item.strip())
         if not origins:
             raise SystemExit("PLAY_LSP_ORIGINS must name at least one exact Origin")

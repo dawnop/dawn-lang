@@ -63,6 +63,10 @@ ssh "$HOST" "
 rsync -avz --delete playground/dawn.toml playground/src playground/README.md \
   playground/lsp_gateway.py "$HOST:$REMOTE/playground/"
 rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
+# The site origin the gateway accepts and the smoke sends, named once in
+# scripts/repo.env: dawn-play-lsp.service reads it as its EnvironmentFile, and
+# lsp_gateway.py and lsp-smoke.py read it through repo_env.py by path.
+rsync -avz scripts/repo.env scripts/repo_env.py "$HOST:$REMOTE/scripts/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
 rsync -avz playground/deploy/ "$HOST:$REMOTE/playground/deploy/"
 # Keep lsp-measure.py's deployed default repo-shaped: its location under

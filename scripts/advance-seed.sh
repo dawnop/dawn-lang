@@ -39,7 +39,11 @@ if [ -z "$seed_origin" ] || [[ "$seed_origin" == *$'\n'* ]]; then
   die "DAWN_SEED_ORIGIN must name one non-empty remote or path"
 fi
 
-release_base_url="https://github.com/dawnop/dawn-lang/releases/download"
+# The repository is named once, in scripts/repo.env; DAWN_GITHUB_REPO in the
+# environment wins over it, and DAWN_RELEASE_BASE_URL over both.
+github_repo="${DAWN_GITHUB_REPO:-$(. "$root/scripts/repo.env" && printf '%s' "$DAWN_GITHUB_REPO")}"
+[ -n "$github_repo" ] || die "scripts/repo.env names no DAWN_GITHUB_REPO"
+release_base_url="https://github.com/$github_repo/releases/download"
 release_url_overridden=0
 if [ "${DAWN_RELEASE_BASE_URL+x}" = x ]; then
   [ -n "$DAWN_RELEASE_BASE_URL" ] ||

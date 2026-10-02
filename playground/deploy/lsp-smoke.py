@@ -3,17 +3,39 @@
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import secrets
 import socket
 import struct
 import time
+import urllib.parse
+from pathlib import Path
+
+
+def _site_origin():
+    """DAWN_SITE_ORIGIN, from the environment or scripts/repo.env.
+
+    Loaded by path: this runs as `python3 -I` from /opt/dawn/playground/deploy,
+    and redeploy.sh ships scripts/repo_env.py and scripts/repo.env to the
+    deployed root, laid out like the repository.
+    """
+    path = Path(__file__).resolve().parents[2] / "scripts" / "repo_env.py"
+    spec = importlib.util.spec_from_file_location("repo_env", path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise SystemExit(f"{path} is missing; redeploy.sh ships it")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.site_origin()
 
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PLAY_LSP_SMOKE_PORT", "8088"))
-ORIGIN = os.environ.get("PLAY_LSP_SMOKE_ORIGIN", "https://dawn-lang.dawnop.com")
+SITE_ORIGIN = _site_origin()
+# nginx routes /api/lsp by the site's server_name, whatever Origin is sent.
+SITE_HOST = urllib.parse.urlsplit(SITE_ORIGIN).hostname
+ORIGIN = os.environ.get("PLAY_LSP_SMOKE_ORIGIN", SITE_ORIGIN)
 PROTOCOL = "dawn-lsp-v1"
 URI = "untitled:dawn-playground/prog.dawn"
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -115,14 +137,14 @@ def smoke_once():
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
     request = (
         "GET /lsp HTTP/1.1\r\n"
-        "Host: dawn-lang.dawnop.com\r\n"
+        "Host: %s\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Version: 13\r\n"
         "Sec-WebSocket-Key: %s\r\n"
         "Origin: %s\r\n"
         "Sec-WebSocket-Protocol: %s\r\n\r\n"
-    ) % (key, ORIGIN, PROTOCOL)
+    ) % (SITE_HOST, key, ORIGIN, PROTOCOL)
 
     with socket.create_connection(
         (HOST, PORT), timeout=min(10, remaining(deadline))

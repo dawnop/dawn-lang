@@ -42,10 +42,12 @@ import time
 import urllib.error
 import urllib.request
 
+import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "site" / "play-ui" / "samples"
 VERSION_DAWN = ROOT / "selfhost" / "src" / "version.dawn"
-DEFAULT_BASE = "https://dawn-lang.dawnop.com"
+DEFAULT_BASE = repo_env.site_origin()
 DEFAULT_API = "https://play.dawnop.com/api"
 
 # Never route through a dev proxy: this box has http_proxy set, and urllib

@@ -51,7 +51,7 @@ ROOT=$(pwd)
 case "$SEED_ARG" in
   v[0-9]*)
     SEED="$OUT/seed.jar"
-    base="https://github.com/dawnop/dawn-lang/releases/download/$SEED_ARG"
+    base="$(seed_release_base)/$SEED_ARG"
     echo "fetching seed for $SEED_ARG ..."
     curl -fsSL -o "$SEED" "$base/dawn-selfhost.jar" 2>/dev/null \
       || curl -fsSL -o "$SEED" "$base/dawn.jar"

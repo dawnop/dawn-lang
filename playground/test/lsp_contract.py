@@ -373,7 +373,7 @@ def deployment_contract():
     for line in (
         "Environment=PLAY_LSP_HOST=127.0.0.1",
         "Environment=PLAY_LSP_PORT=8088",
-        "Environment=PLAY_LSP_ORIGINS=https://dawn-lang.dawnop.com",
+        "EnvironmentFile=/opt/dawn/scripts/repo.env",
         "Environment=PLAY_LSP_MAX_SESSIONS=2",
         "Environment=PLAY_LSP_SOURCE_BYTES=65536",
         "Environment=PLAY_LSP_MESSAGE_BYTES=262144",
@@ -385,6 +385,9 @@ def deployment_contract():
         "ExecStart=/usr/bin/python3 -I -B /opt/dawn/playground/lsp_gateway.py",
     ):
         assert line in service, line
+    # The origin comes from repo.env alone; a second spelling here would win.
+    assert "PLAY_LSP_ORIGINS" not in service
+    assert "scripts/repo.env scripts/repo_env.py" in redeploy
     assert "MemoryMax=512M" in unit_slice
     assert "TasksMax=48" in unit_slice
 

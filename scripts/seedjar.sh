@@ -123,6 +123,21 @@ seed_java() {
   DAWN_LAUNCHER_PRINT_JAVA=1 "$ROOT/bin/dawn"
 }
 
+## Where a tagged release's assets are downloaded from. The repository is
+## named once, in scripts/repo.env (DAWN_GITHUB_REPO in the environment wins).
+## Read only when a download is about to happen, so a root that never
+## downloads (the contract harnesses copy this file alone) needs no repo.env.
+## Not a recorded bootstrap input (bin/dawn's write_static_records): the URL
+## does not decide which seed is trusted, seed-checksums.txt does.
+seed_release_base() {
+  _sr_repo=${DAWN_GITHUB_REPO:-$(. "$ROOT/scripts/repo.env" && printf '%s' "$DAWN_GITHUB_REPO")}
+  if [ -z "$_sr_repo" ]; then
+    echo "error: scripts/repo.env names no DAWN_GITHUB_REPO" >&2
+    exit 1
+  fi
+  echo "https://github.com/$_sr_repo/releases/download"
+}
+
 seed_jar() {
   # An explicitly pointed-at jar is the debugging escape hatch: it is not the
   # pinned release, so there is nothing to check it against. Say so rather than
@@ -138,7 +153,7 @@ seed_jar() {
     mkdir -p "$_sj_cache"
     echo "fetching $_sj_tag seed jar..." >&2
     curl -fsSL -o "$_sj_cache/seed.jar.tmp" \
-      "https://github.com/dawnop/dawn-lang/releases/download/$_sj_tag/dawn-selfhost.jar"
+      "$(seed_release_base)/$_sj_tag/dawn-selfhost.jar"
     # verified before it is promoted to the cache, so a bad download cannot
     # become the copy every later run trusts
     seed_verify "$_sj_cache/seed.jar.tmp" "$_sj_tag"
