@@ -4,6 +4,11 @@
 The barrier forces pending sync to flush, so edit latency excludes the idle
 debounce timer. Query timings are subsequent requests against that snapshot.
 Linux RSS is process memory, not a claim about retained semantic-cache bytes.
+
+Two inlay columns (docs/lsp-hover-design.md §A4.5): `inlay` asks for the
+whole entry buffer, the acceptance case of the A4 cut; `inlay_view` asks for
+the INLAY_VIEW_LINES lines from the needle's, the way an editor asks for what
+is on screen.
 """
 import argparse
 import hashlib
@@ -21,6 +26,21 @@ from lsp_stats import FIELDS, decode
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/lsp-workspace-contract"))
 from workspace import LspClient, did_open, did_change, position
+
+
+QUERIES = ("hover", "definition", "completion", "inlay", "inlay_view")
+
+# An editor viewport's worth of lines, for `inlay_view`.
+INLAY_VIEW_LINES = 60
+
+
+def inlay_ranges(text, target):
+    """The whole-buffer range and the viewport range starting at the target's line."""
+    last = text.count("\n") + 1
+    start = target["line"]
+    return {"inlay": {"start": {"line": 0, "character": 0}, "end": {"line": last, "character": 0}},
+            "inlay_view": {"start": {"line": start, "character": 0},
+                           "end": {"line": start + INLAY_VIEW_LINES, "character": 0}}}
 
 
 def rss(pid):
@@ -100,7 +120,11 @@ def selftest():
         except RuntimeError:
             continue
         raise AssertionError("diagnostic validation accepted a negative control")
-    print("OK: benchmark diagnostics (6 controls), latency percentiles (4 controls), analysis traces (6 controls)")
+    ranges = inlay_ranges("a\nb\n", {"line": 1, "character": 0})
+    assert ranges["inlay"]["end"] == {"line": 3, "character": 0}
+    assert ranges["inlay_view"]["start"]["line"] == 1
+    assert ranges["inlay_view"]["end"]["line"] == 1 + INLAY_VIEW_LINES
+    print("OK: benchmark diagnostics (6 controls), latency percentiles (4 controls), analysis traces (6 controls), inlay ranges")
 
 
 def main():
@@ -129,6 +153,7 @@ def main():
     entry = args.entry.resolve()
     uris = {path: args.uri or path.as_uri() for path in files}
     target_position = position(texts[entry], args.needle)
+    ranges = inlay_ranges(texts[entry], target_position)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     metadata = {
@@ -190,12 +215,17 @@ def main():
                     if len(counts) != 1 or len(counts[0]) != 3:
                         raise RuntimeError("invalid prefix execution trace")
                     row["prefix_counts"] = dict(zip(("reused", "checked", "retained"), map(int, counts[0])))
-                for method in ("hover", "definition", "completion"):
+                for method in QUERIES:
+                    if method in ranges:
+                        params = {"textDocument": {"uri": uris[entry]}, "range": ranges[method]}
+                        wire = "textDocument/inlayHint"
+                    else:
+                        params = {"textDocument": {"uri": uris[entry]}, "position": target_position}
+                        wire = "textDocument/" + method
                     start = time.perf_counter_ns()
-                    reply = client.result("textDocument/" + method, {
-                        "textDocument": {"uri": uris[entry]}, "position": target_position})
+                    reply = client.result(wire, params)
                     row["query_ns"][method] = time.perf_counter_ns() - start
-                    row["replies"][method] = reply
+                    row["replies"][method] = len(reply) if method in ranges and isinstance(reply, list) else reply
                 if row["replies"]["hover"] is None:
                     raise RuntimeError("hover target did not resolve; choose a real reference")
                 rows.append(row)
@@ -210,7 +240,7 @@ def main():
                    and row["round"] >= 3 and not row["expected_error"]]
         sync = latency_summary(row["sync_ns"] for row in samples)
         queries = {method: latency_summary(row["query_ns"][method] for row in samples)
-                   for method in ("hover", "definition", "completion")}
+                   for method in QUERIES}
         summary.append({
             "edited": str(path.resolve()), "samples": len(samples),
             "error_sync_ms": [row["sync_ns"] / 1e6 for row in rows

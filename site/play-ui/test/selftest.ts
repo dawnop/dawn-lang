@@ -11,6 +11,9 @@ import {
   DawnLspClient,
   hoverParts,
   hoverText,
+  inlayClass,
+  inlayDecorations,
+  inlayHintOf,
   lspCompletionSource,
   lspDiagnostics,
   lspPositionToOffset,
@@ -256,6 +259,33 @@ expect('a documented hover reads code, blank line, doc', hoverText(documented),
   'fn helper(n: Int) -> Int\n\n`n` past the limit.\n\nExample:\nhelper(1)')
 expect('an undocumented hover has no doc', hoverParts('```dawn\nInt\n0xFF = 255\n```'), { code: 'Int\n0xFF = 255', doc: '' })
 expect('a plain-text hover is all code', hoverParts({ kind: 'plaintext', value: 'Int' }), { code: 'Int', doc: '' })
+
+// ---- inlay hints (docs/lsp-hover-design.md §A4) ----
+expect('an inlay hint keeps its label, kind and the padding that is on', inlayHintOf({
+  position: { line: 1, character: 8 }, label: '!Fs', kind: 1, paddingLeft: true, paddingRight: false,
+  tooltip: 'not read',
+}), { position: { line: 1, character: 8 }, label: '!Fs', kind: 1, paddingLeft: true })
+expect('an inlay hint without a position or a string label is dropped', [
+  inlayHintOf({ label: ': Int' }),
+  inlayHintOf({ position: { line: 0, character: 0 }, label: [{ value: ': Int' }] }),
+  inlayHintOf({ position: { line: 0, character: 0 }, label: '' }),
+], [null, null, null])
+expect('an inlay widget is classed by kind and padding', [
+  inlayClass({ position: { line: 0, character: 0 }, label: ': Int', kind: 1 }),
+  inlayClass({ position: { line: 0, character: 0 }, label: '!Fs', kind: 1, paddingLeft: true }),
+  inlayClass({ position: { line: 0, character: 0 }, label: 'gap:', kind: 2, paddingRight: true }),
+], ['dp-inlay dp-inlay-type', 'dp-inlay dp-inlay-type dp-inlay-pl', 'dp-inlay dp-inlay-param dp-inlay-pr'])
+{
+  const text = 'let xs = f()\nlet n = 1'
+  const set = inlayDecorations([
+    { position: { line: 1, character: 5 }, label: ': Int', kind: 1 },
+    { position: { line: 0, character: 6 }, label: ': List[Int]', kind: 1 },
+    { position: { line: 0, character: 12 }, label: '!Fs', kind: 1, paddingLeft: true },
+  ], text)
+  const at: number[] = []
+  set.between(0, text.length, (from) => { at.push(from) })
+  expect('inlay hints become widgets at their offsets, in document order', at, [6, 12, 18])
+}
 const merged = mergeCompletionResults(
   [{ label: 'same', detail: 'server' }, { label: 'semantic' }],
   { from: 4, options: [{ label: 'same', detail: 'static' }, { label: 'builtin' }] },
@@ -373,6 +403,21 @@ socket.receive({ id: currentDefinitionRequest.id, result: [] })
 expect('latest same-buffer definition resolves', await currentDefinition, [])
 socket.receive({ id: oldDefinitionRequest.id, result: [] })
 expect('out-of-order older definition is rejected', await oldDefinition, 'rejected')
+
+const inlay = client.inlayHints(0, 6)
+await tick()
+const inlayRequest = socket.sent.at(-1)!
+expect('inlay hints ask for a range of the diagnosed snapshot', [inlayRequest.method, inlayRequest.params], [
+  'textDocument/inlayHint',
+  { textDocument: { uri: DAWN_LSP_URI }, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } } },
+])
+socket.receive({ id: inlayRequest.id, result: [
+  { position: { line: 0, character: 3 }, label: ': Int', kind: 1 },
+  { position: 'bad', label: ': Int' },
+] })
+expect('inlay hint response keeps the well-formed hints', await inlay, [
+  { position: { line: 0, character: 3 }, label: ': Int', kind: 1 },
+])
 
 const staleHover = client.hover(0).then(() => 'resolved', () => 'rejected')
 await tick()

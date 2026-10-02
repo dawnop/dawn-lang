@@ -198,6 +198,7 @@ def initialize(ws, request_id=1):
         "completionProvider",
         "hoverProvider",
         "definitionProvider",
+        "inlayHintProvider",
     }, response
     ws.send_json(note("initialized", {"untrusted": True}))
 
@@ -832,6 +833,15 @@ def main():
             ws.send_json(rpc(4, "textDocument/definition", position_params()))
             definitions = ws.recv_json()["result"]
             assert [item["uri"] for item in definitions] == [URI], definitions
+            # an inlay request carries a range, rebuilt field by field: an
+            # extra key in it does not reach the child
+            ws.send_json(rpc(5, "textDocument/inlayHint", {
+                "textDocument": {"uri": URI},
+                "range": {"start": {"line": 0, "character": 3},
+                          "end": {"line": 9, "character": 0}, "extra": "/tmp/x"},
+            }))
+            hints = ws.recv_json()["result"]
+            assert hints == [{"position": {"line": 0, "character": 3}, "label": ": Int", "kind": 1}], hints
 
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
@@ -849,6 +859,11 @@ def main():
             }, init
             opened = next(item for item in audit if item.get("method") == "textDocument/didOpen")
             assert opened["params"]["textDocument"]["languageId"] == "dawn"
+            inlay = next(item for item in audit if item.get("method") == "textDocument/inlayHint")
+            assert inlay["params"] == {
+                "textDocument": {"uri": URI},
+                "range": {"start": {"line": 0, "character": 3}, "end": {"line": 9, "character": 0}},
+            }, inlay
             ok("fragmentation, LSP lifecycle, sync, queries and one-buffer filtering")
 
             first_stream, response = upgrade_when_available(port)

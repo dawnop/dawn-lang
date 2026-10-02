@@ -5,8 +5,16 @@ import type {
   CompletionSource,
 } from '@codemirror/autocomplete'
 import type { Diagnostic } from '@codemirror/lint'
-import type { Extension } from '@codemirror/state'
-import { EditorView, hoverTooltip } from '@codemirror/view'
+import type { Extension, Range } from '@codemirror/state'
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  hoverTooltip,
+  ViewPlugin,
+  type ViewUpdate,
+  WidgetType,
+} from '@codemirror/view'
 
 export const DAWN_LSP_URI = 'untitled:dawn-playground/prog.dawn'
 export const DAWN_LSP_PROTOCOL = 'dawn-lsp-v1'
@@ -48,6 +56,15 @@ interface LspCompletionItem {
 interface LspHover {
   contents: unknown
   range?: LspRange
+}
+
+/** One inlay hint as the server sends it (LSP 3.17 `InlayHint`, string labels only). */
+export interface LspInlayHint {
+  position: LspPosition
+  label: string
+  kind?: number
+  paddingLeft?: boolean
+  paddingRight?: boolean
 }
 
 interface LspLocation {
@@ -143,6 +160,19 @@ function diagnosticOf(value: unknown): LspDiagnostic | null {
     ...(typeof diagnostic.code === 'string' || typeof diagnostic.code === 'number'
       ? { code: diagnostic.code }
       : {}),
+  }
+}
+
+export function inlayHintOf(value: unknown): LspInlayHint | null {
+  const hint = asRecord(value)
+  const position = positionOf(hint?.position)
+  if (hint == null || position == null || typeof hint.label !== 'string' || !hint.label) return null
+  return {
+    position,
+    label: hint.label,
+    ...(typeof hint.kind === 'number' ? { kind: hint.kind } : {}),
+    ...(hint.paddingLeft === true ? { paddingLeft: true } : {}),
+    ...(hint.paddingRight === true ? { paddingRight: true } : {}),
   }
 }
 
@@ -337,6 +367,17 @@ export class DawnLspClient {
     return asRecord(value) ? [value as LspLocation | LspLocationLink] : []
   }
 
+  /** The hints between two offsets of the current text, both ends included. */
+  async inlayHints(from: number, to: number, timeoutMs = 1500): Promise<LspInlayHint[]> {
+    const value = await this.queryWith('textDocument/inlayHint', (text) => ({
+      textDocument: { uri: DAWN_LSP_URI },
+      range: { start: offsetToLspPosition(text, from), end: offsetToLspPosition(text, to) },
+    }), timeoutMs)
+    return Array.isArray(value)
+      ? value.map(inlayHintOf).filter((hint): hint is LspInlayHint => hint != null)
+      : []
+  }
+
   private setStatus(status: LspStatus): void {
     if (status === this.statusValue) return
     this.statusValue = status
@@ -376,6 +417,7 @@ export class DawnLspClient {
         capabilities: {
           textDocument: {
             hover: { contentFormat: ['markdown', 'plaintext'] },
+            inlayHint: { dynamicRegistration: false },
             completion: { completionItem: { snippetSupport: false } },
           },
         },
@@ -625,7 +667,23 @@ export class DawnLspClient {
     this.syncWaiters = keep
   }
 
-  private async query(method: string, offset: number, timeoutMs: number): Promise<unknown> {
+  private query(method: string, offset: number, timeoutMs: number): Promise<unknown> {
+    return this.queryWith(method, (text) => ({
+      textDocument: { uri: DAWN_LSP_URI },
+      position: offsetToLspPosition(text, offset),
+    }), timeoutMs)
+  }
+
+  /**
+   * A request about the text as it is now: sent once the server has analysed
+   * that text, and dropped (rejected as stale) when the text changed or a newer
+   * request of the same method was made before the answer came.
+   */
+  private async queryWith(
+    method: string,
+    params: (text: string) => unknown,
+    timeoutMs: number,
+  ): Promise<unknown> {
     if (!this.isReady()) throw new Error('LSP is unavailable')
     const epoch = (this.queryEpoch.get(method) ?? 0) + 1
     this.queryEpoch.set(method, epoch)
@@ -637,10 +695,7 @@ export class DawnLspClient {
       || epoch !== this.queryEpoch.get(method)) throw new Error('stale LSP request')
     const remaining = timeoutMs - (Date.now() - started)
     if (remaining <= 0) throw new Error(`${method} timed out`)
-    const result = await this.requestRaw(method, {
-      textDocument: { uri: DAWN_LSP_URI },
-      position: offsetToLspPosition(text, offset),
-    }, remaining)
+    const result = await this.requestRaw(method, params(text), remaining)
     if (generation !== this.generation || text !== this.text
       || epoch !== this.queryEpoch.get(method)) throw new Error('stale LSP response')
     return result
@@ -858,4 +913,108 @@ export function lspDefinition(client: DawnLspClient): Extension {
       return true
     },
   })
+}
+
+/**
+ * Inlay hints (docs/lsp-hover-design.md §A4): the server's `: Int` after an
+ * unannotated binding and `!Fs` after an effectful call, drawn as widgets in
+ * the line. Only the visible part of the document is asked for, after edits
+ * and scrolling have been quiet for INLAY_DEBOUNCE_MS; while a request is out,
+ * the hints already shown move with the edits rather than vanishing, so a line
+ * does not shift twice for one keystroke.
+ */
+const INLAY_DEBOUNCE_MS = 300
+
+class InlayWidget extends WidgetType {
+  constructor(readonly hint: LspInlayHint) { super() }
+
+  eq(other: InlayWidget): boolean {
+    return other.hint.label === this.hint.label
+      && other.hint.kind === this.hint.kind
+      && other.hint.paddingLeft === this.hint.paddingLeft
+      && other.hint.paddingRight === this.hint.paddingRight
+  }
+
+  toDOM(): HTMLElement {
+    const node = document.createElement('span')
+    node.className = inlayClass(this.hint)
+    node.textContent = this.hint.label
+    return node
+  }
+
+  ignoreEvent(): boolean { return true }
+}
+
+/** The widget's class list: the kind (type 1, parameter 2) and the padding. */
+export function inlayClass(hint: LspInlayHint): string {
+  return [
+    'dp-inlay',
+    hint.kind === 2 ? 'dp-inlay-param' : 'dp-inlay-type',
+    ...(hint.paddingLeft ? ['dp-inlay-pl'] : []),
+    ...(hint.paddingRight ? ['dp-inlay-pr'] : []),
+  ].join(' ')
+}
+
+/** Hints as decorations over `text`, in document order; out-of-range ones are dropped. */
+export function inlayDecorations(hints: readonly LspInlayHint[], text: string): DecorationSet {
+  const ranges: Range<Decoration>[] = []
+  for (const hint of hints) {
+    const at = lspPositionToOffset(text, hint.position)
+    if (at < 0 || at > text.length) continue
+    // side 1: the hint sits after whatever ends at its position, so a cursor
+    // at the end of `xs` stays before the `: List[Int]` drawn there
+    ranges.push(Decoration.widget({ widget: new InlayWidget(hint), side: 1 }).range(at))
+  }
+  return Decoration.set(ranges, true)
+}
+
+export function lspInlayHints(client: DawnLspClient): Extension {
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet = Decoration.none
+    private timer: ReturnType<typeof setTimeout> | null = null
+    private unsubscribe: () => void
+
+    constructor(readonly view: EditorView) {
+      this.unsubscribe = client.onStatus((status) => {
+        if (status === 'ready') this.schedule()
+        else if (status === 'fallback' && this.decorations.size > 0) {
+          this.decorations = Decoration.none
+          this.view.dispatch({})
+        }
+      })
+    }
+
+    update(update: ViewUpdate): void {
+      if (update.docChanged) this.decorations = this.decorations.map(update.changes)
+      if (update.docChanged || update.viewportChanged) this.schedule()
+    }
+
+    schedule(): void {
+      if (this.timer != null) clearTimeout(this.timer)
+      this.timer = setTimeout(() => {
+        this.timer = null
+        void this.refresh()
+      }, INLAY_DEBOUNCE_MS)
+    }
+
+    async refresh(): Promise<void> {
+      if (!client.isReady()) return
+      const view = this.view
+      const snapshot = view.state.doc.toString()
+      const { from, to } = view.viewport
+      try {
+        const hints = await client.inlayHints(from, to)
+        if (view.state.doc.toString() !== snapshot) return
+        this.decorations = inlayDecorations(hints, snapshot)
+        view.dispatch({})
+      } catch {
+        // stale or unavailable: the next edit or scroll asks again
+      }
+    }
+
+    destroy(): void {
+      if (this.timer != null) clearTimeout(this.timer)
+      this.unsubscribe()
+    }
+  }, { decorations: (plugin) => plugin.decorations })
 }

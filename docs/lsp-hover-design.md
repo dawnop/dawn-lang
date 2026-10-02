@@ -1,8 +1,8 @@
 # LSP 悬停与内联提示：设计（A1–A4）
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
-> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4 落地时回填 §9「状态」，
-> 并在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
+> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）。
+> B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
 
@@ -358,6 +358,126 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
 - **把文档渲染成 HTML、改写 markdown**：编辑器自己渲染 markdown；Playground 按纯文本显示正文。
 - **builtin 的文档**：builtin 没有 `##` 源码；`selfhost/builtins.dawn` 是给人读的镜像，不是 hover 的数据源。
 
+## A4. inlay hints（`textDocument/inlayHint`）
+
+### A4.1 四种提示与默认值
+
+| 种类 | 样子 | 默认 | 数据 | LSP 字段 |
+|---|---|---|---|---|
+| `let` 推断类型 | `let xs«: List[Int]» = range(0, n)` | 开 | `TSLet` 的符号（`Sym.ty`） | `label: ": List[Int]"`，`kind: 1`（Type），无 padding |
+| lambda 形参类型 | `xs.map(x«: Int» => x + 1)` | 开 | `XLambda` 的形参符号（hover 的 `offer_lambda_params` 用的同一组） | 同上 |
+| 调用处的效果行 | `read_file(p)« !Fs»` | 开 | 被调者 `Sig.eff`；局部函数值取它类型里的行 | `label: "!Fs"`，`kind: 1`，`paddingLeft: true` |
+| 参数名 | `column(«kids: »k, «gap: »12)` | **关** | 被调者 `Sig.param_names` | `label: "kids:"`，`kind: 2`（Parameter），`paddingRight: true` |
+
+`«…»` 是编辑器画出来的部分，不在文本里。类型标签自带冒号、不要 padding，画出来正好是读者会写的
+`let xs: List[Int]`；效果标签要左 padding，画出来是 `read_file(p) !Fs`。
+
+类型串与效果行都走 hover 的渲染（`types.ty_show`、`types.eff_suffix`），同一个类型在 hover 与 inlay 里写法相同。
+效果行有一个以上的标签时也照 hover 写成 `!(Ask|Fs)`（名字排序、竖线分隔），即使声明处写的是 `!Fs !Ask`：
+提示回答的是「这次调用带着什么行」，与 hover 的签名同一个答案、同一种写法，不另立一套拼法。
+
+**规则：**
+
+- **`let`**：只给没写标注的 `let`/`var`；`let _ = …` 没有绑定，不给。解构 `let (a, b) = …`（解构不许标注，
+  parser 直接拒）的每个绑定各给一个，位置是各自名字的末尾。名字的末尾从文档文本读：`SLet` 只记整条语句的
+  span，`TSLet` 的符号 span 也是整条语句（`checker.check_let` 用语句的 `lo..hi` 声明它），名字不在任何树里。
+  文法是 `let`/`var`、空白、名字，中间不可能有注释或换行，所以「关键字后跳过空白读一个标识符」是确定的；
+  读出来的名字和 `SLet` 的名字不一致（分析的是另一个版本的文本）时不给，不猜。
+- **lambda 形参**：只给没写标注的形参，位置是形参名末尾。覆盖 `x => …`、`(a, b) => …`、尾随块
+  `{ x => … }`、`with x <- f(…)`（parser 把它变成一个形参的 lambda，文法上不能标注）与局部 `fn`
+  的形参；handler 臂（`op(a) => …`）不给：那是效果操作的形参，类型就写在 `effect` 声明里，离读者一跳。
+- **长度**：类型串超过 `TYPE_HINT_SHOWN = 25` 个码点就**不显示**（不截断）。依据：rust-analyzer
+  `inlayHints.maxLength` 默认 25，clangd `InlayHints.TypeNameLimit` 默认 24。两家处理不同：rust-analyzer
+  截断成 `…`，clangd 整个不给。这里学 clangd：截过的类型不是一个类型，读者不能照抄成标注，而长类型正是
+  最该去 hover 看全的那种；25 取 rust-analyzer 的数，两者只差一个码点，取较宽的那个。
+- **含错误的类型不显示**：类型里有 `TyError`（渲染成 `?`）说明这一带检查失败，诊断已经在报，提示只会把
+  `?` 抄一遍。
+- **效果行**：只给行里有**具名效果**（effect 标签，`Fs`、`Ask` 这类）的调用。纯调用不给；只有 `!io` 的调用
+  也不给：`io` 是基轴不是具名效果，`println` 一类到处都是，给了就是噪声，有标签时 `io` 随整行一起显示
+  （`!(Fs|io)`）。**效果多态的调用不给**：被调者的行里有效果变量（`!e`）或关联效果投影（`C.E`），读者要的是
+  实例化以后的行，而 typed tree 的 `XCallFn` 只带 evidence 列表、不带实例化的行（`check/tast.dawn` 的
+  `XCallFn` 定义），只给声明的行会把 `!e` 原样摆在调用处，什么也没回答。这一半在 B 组。
+  覆盖的调用：具名函数（本模块、别的模块、std）、builtin、trait 方法、效果操作（`ask()`）、经 UFCS 或模块
+  限定的同一批，以及局部函数值（`XCallDyn`，取它类型 `fn(…) -> T !Fs` 里的行）。位置是调用的末尾；
+  调用带尾随块时放在实参括号 `)` 之后、块之前（不然 `with x <- f(…)` 的提示会落在整个块的末尾）。
+- **参数名**（默认关）：只给按位置写的实参；具名实参（`gap: 12`）已经写出了名字，不给；尾随块不给；
+  `x |> f(a)` 里被管道插进去的 `x` 不在括号里，不给，也不计数。另有两条隐藏规则（TypeScript
+  `includeInlayParameterNameHintsWhenArgumentMatchesName` 默认关、ZLS `inlay_hints_exclude_single_argument`
+  的同款）：括号里只有一个实参时整次调用都不给；实参就是与形参同名的变量时（`pad(s, width, b)` 里的
+  `width`）只这一个不给。UFCS 调用 `xs.f(a)` 的接收者占第 0 个形参，括号里的实参从第 1 个起算；判据是 typed
+  tree 第一个实参的 span 是否就是接收者（不看实参个数：省略了默认实参时两边个数本来就对不上）。
+
+### A4.2 range 与排序
+
+只回位置落在请求 range 内（两端都含）的提示，按位置排序。range 先换成码点 offset（与 hover 同一个
+`lsp_offset`），再在**声明**一级剪枝：span 与 range 不相交的顶层声明整个不走，所以编辑器只请求可见区域时，
+代价跟可见区域里的声明成正比，不跟文件大小成正比（实测见 A4.5）。
+
+### A4.3 配置通路：`initializationOptions`
+
+```json
+"initializationOptions": { "inlayHints": {
+  "letTypes": true, "lambdaParamTypes": true, "callEffects": true, "parameterNames": false
+} }
+```
+
+四个键都可省，省了取上表的默认值；类型不对的值也按省略处理。只在 `initialize` 读一次。
+
+不用 `workspace/configuration`：那是服务端向客户端发的请求，server 今天除了一次
+`client/registerCapability` 之外从不向客户端发请求，也不处理客户端的回包（`is_response` 一律丢掉）；为一组
+四个布尔值加一条请求-回包通路，代价与收益不成比例。重开条件：有人需要不重启编辑器就切换开关。
+VS Code 扩展不改：四个默认值就是扩展想要的，`vscode-languageclient` 原生支持 inlay。
+
+### A4.4 分层
+
+- `lsp/lspinlay.dawn`：每种提示**给不给、写成什么**（长度、错误类型、效果行判据、参数名的隐藏规则），纯函数，
+  单测不需要程序。
+- `lsp/lspq.dawn` 的 `inlay_hints(qc, lo, hi, opts)`：找提示的位置。复用 hover 的那一趟平行遍历（parse 树与
+  typed tree 按位置配对，处理好了 handler、管道、具名实参重排这些形状），`Q` 多一个可选的收集器；hover
+  请求时收集器为空，遍历的行为与开销都不变。查询层不做 I/O。
+- `lsp/server.dawn` 的 `handle_inlay_hint`：range 换算、JSON、码点到 UTF-16 的位置换算。
+
+### A4.5 实测
+
+`scripts/incremental-semantics-contract/lsp-bench.py`，`--uri untitled:*` 单缓冲区，11 轮、预热 3 轮、每格 n = 8，跑两遍；
+本机 16 核，WSL2，GraalVM CE 21。`inlay` 请求全文，`inlay_view` 请求从目标行起 60 行（编辑器一屏）；hover 是同一轮里
+同一快照上的请求，作对照。
+
+| 缓冲区 | 提示数（全文 / 一屏） | hover 中位数 | inlay 全文中位数 | inlay 一屏中位数 |
+|---|---|---|---|---|
+| `plain2000`：2,000 个一行函数（4,001 行），没有 `let` | 0 / 0 | 8.59 / 11.99 ms | 6.52 / 6.68 ms | 1.13 / 1.48 ms |
+| `lets2000`：2,000 个函数，每个一条 `let`、一个 lambda、一次 `!Fs` 调用（12,002 行） | 8,000 / 40 | 48.77 / 46.70 ms | 79.82 / 78.23 ms | 2.03 / 1.82 ms |
+| std 最大的能单独分析干净的模块 `std/narrow.dawn`（1,462 行） | 137 / 3 | 12.70 / 13.55 ms | 4.45 / 4.61 ms | 0.91 / 0.93 ms |
+
+（std 里更大的 `gpu.dawn`、`io.dawn` 作为用户缓冲区打开会报几十条「std 内部 builtin 不可见」的诊断，`lsp-bench.py`
+要求基线无诊断，所以取 `narrow`。）
+
+- **一屏的请求是 1–2 ms**，与文件大小基本无关：顶层声明级剪枝之后，只走可见范围里的那几个函数。Playground 与
+  VS Code 都只请求可见范围，这是实际路径。
+- **全文请求在提示多时慢于 hover**：`lets2000` 全文 80 ms 对 hover 47 ms。差额是 8,000 条提示本身：每条一个
+  `show_ty`、一次码点到 UTF-16 的位置换算、一个 JSON 对象，回包约 0.5 MB。没有提示的 `plain2000` 全文与
+  hover 同一量级。全文请求只在验收时用（调研 §六 A4 行的「全文 range」），编辑器不发。
+- **hover 不受影响**：用父提交的 `lsp-bench.py`（只量 hover/definition/completion）对父提交 `597dfb3a` 与本刀交错跑两遍，
+  `plain2000` hover 8.04 / 7.61 ms 对 7.61 / 7.48 ms，`lets2000` 43.61 / 50.87 ms 对 45.91 / 47.98 ms，落在两遍之间的
+  波动里。`Q` 多出的收集器在 hover 时是 `None`，每个提示点只多一次 `match`。
+- **可选的收敛办法**（没做）：全文请求的大头之一是遍历沿用 hover 的 offer，每个节点都渲染一次 hover 文本，收集提示时
+  这些文本立刻被丢掉。把 offer 的文本改成惰性的（或收集模式下跳过 offer）能省掉这一份，但要动 hover 遍历的每个
+  offer 点；一屏的请求已经在 2 ms 以内，不值得为全文请求付这份改动。
+
+### A4.6 不做的（A4 内，理由）
+
+- **被省略的默认实参的值**（clangd `DefaultArguments`，默认关）：要显示**求得的值**才比 signatureHelp（K0
+  已经显示默认值源码）多给信息，而求值要 B 组「纯且闭合表达式求值」的入口；只显示源码文本的话 signature
+  help 已经在给。业界也没有一家默认开（调研 §C4）。
+- **`?` 传播的错误类型**（`parse(s)?« ⇡ ParseError»`）：价值中等，要先从外层返回类型里取错误分量；放 B 组。
+- **闭合括号注释**（`}« // fn handle»`）：Dawn 的函数普遍很短，`dawn fmt` 的缩进模型已经够读（§8）。
+- **效果多态调用的实例化行**：见 A4.1，`XCallFn` 不带实例化的行；放 B 组。
+- **`for` 的循环变量类型、`match` 臂的绑定类型**：本刀只做任务定下的 `let` 与 lambda；`for x in xs` 的 `x`
+  类型多半一眼可知（元素类型），`match` 臂绑定的类型由构造器决定，hover 一下就有。需要时同一套规则加一处即可。
+- **`inlayHint/resolve`、tooltip、可点击的类型标签**：提示本身就是全部信息；hover 已经给 tooltip 能给的东西。
+- **`workspace/inlayHint/refresh`**：服务端按序回答、每次请求现算，没有后台缓存要通知客户端刷新
+  （sourcekit-lsp 那种模式是另一种架构）。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -382,6 +502,17 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
   hover 在跨模块调用 `helper(n)`、本模块声明 `compute` 上带文档；会话里原有的 std 目标（`str.trim`、`fold`、
   consts 会话的 `memfs.BASE`）本来就有 `##`，随之带上文档。提交里写 `Emit-Change(lsp)`。
 - A3：`scripts/lsp-decl-pairing.py` 等契约 helper 改经 `scripts/lsp_hover.py` 取第一个围栏（§A3.6）。
+- A4：`lsp/lspinlay` 三条（类型提示的 25 码点界与错误类型、效果行要具名且无变量、参数名的两条隐藏规则）；
+  `lsp/server` 六条，都经 `handle_inlay_hint` 的 JSON 回包（let 推断类型、解构的每个名字、已标注跳过；lambda
+  形参与超长类型；操作调用、带标签的函数、局部函数值的效果行，纯调用与 `!e` 调用不给；range 两端都含、按位置、
+  `kind` 与 padding；参数名默认关，`initializationOptions` 打开后的两条隐藏规则；尾随块的效果行落在 `)` 后）。
+- A4：`scripts/selfhost-lsp-diff.sh` 会话新增 `inlays.dawn`，`initialize` 带
+  `initializationOptions.inlayHints.parameterNames: true`，请求两次 inlayHint（全文、`let xs` 那两行）；上一 release
+  对它回 `-32601`，`initialize` 的 capabilities 也多了 `inlayHintProvider`。提交里写 `Emit-Change(lsp)`。脚本把
+  completion 数组按 label 排序的规范化改为跳过带 `position` 的数组：提示的顺序是服务端定的（按位置），要原样比。
+- A4：Playground 网关白名单放行 `textDocument/inlayHint`（range 逐字段重建后转发，capabilities 多一个
+  `inlayHintProvider`），`playground/test/lsp_contract.py` 加一条（多余的键不过网关）；`site/play-ui` selftest 加六条
+  （回包校验、class、decoration 位置、请求形状与坏项过滤）。
 
 ## 6. 实测
 
@@ -430,6 +561,6 @@ comptime 本来就在每次分析里跑（sync 不变）。
 |---|---|---|
 | A1 | 已落地 | `615d3116` |
 | A2 | 已落地 | `30419580` |
-| A3 | 已落地（分支 `feat/lsp-hover-docs`） | 合入后由协调者回填 |
-| A4 | 未开工 | |
+| A3 | 已落地 | `597dfb3a` |
+| A4 | 已落地（分支 `feat/lsp-inlay-hints`） | 合入后由协调者回填 |
 | B 组 | 未立项 | |

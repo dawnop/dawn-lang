@@ -43,7 +43,7 @@ use check/tast.{
   x_lo, x_hi, tex_ty
 }
 use check/types.{
-  Ty, TyAdt, Sig, Sym, CtorI,
+  Ty, TyAdt, TyFn, Sig, Sym, CtorI,
   ty_show, sig_render, ctor_render, trait_of, adt_of,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -56,6 +56,7 @@ use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
 }
+use lsp/lspinlay.{InlayOpts, Hint, type_hint, effect_hint, param_hint}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -129,10 +130,13 @@ pub type DocHome = DocHere | DocFile(path: String) | DocStd(mod_path: String)
 ## `front/docs.doc_of` reads (the `##` block ends on the line above it).
 pub type DocSite = { home: DocHome, lo: Int }
 
-type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool }
+## One walk over the module. `inlay` is the collector `inlay_hints` hands in;
+## a hover query has none, and every hint site then costs one `match` and
+## renders nothing.
+type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool, inlay: Option[InlayRun] }
 
 fn query(qc: QCx, offset: Int) -> Q = {
-  var q = Q { offset: offset, best: None, in_for_pattern: false }
+  var q = Q { offset: offset, best: None, in_for_pattern: false, inlay: None }
   for d in qc.entry.m.decls { q = visit_decl(qc, q, d) }
   q
 }
@@ -140,6 +144,340 @@ fn query(qc: QCx, offset: Int) -> Q = {
 pub(pkg) fn find_target(qc: QCx, offset: Int) -> Option[Target] = query(qc, offset).best
 
 pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_for_pattern
+
+# ---- inlay hints (docs/lsp-hover-design.md §A4) ----
+#
+# The same walk as hover, with a collector: the hint sites are a let's name, a
+# lambda parameter, a call, and the walk already pairs each with its typed node.
+# What a site shows is `lspinlay`'s decision; where it is, is this file's.
+
+## The hints collected so far, and the range a hint must fall in to be kept.
+type InlayRun = { lo: Int, hi: Int, opts: InlayOpts, hints: List[Hint] }
+
+## The hints whose offset lies in `lo..=hi` (code points, both ends included),
+## by offset. A top-level declaration whose span misses the range is not walked
+## at all, so a request for the visible part of a file costs what that part
+## holds rather than what the file holds.
+pub(pkg) fn inlay_hints(qc: QCx, lo: Int, hi: Int, opts: InlayOpts) -> List[Hint] = {
+  let run = InlayRun { lo: lo, hi: hi, opts: opts, hints: [] }
+  # an offset no span contains: every hover offer is refused at its first test
+  var q = Q { offset: -1, best: None, in_for_pattern: false, inlay: Some(run) }
+  for d in qc.entry.m.decls {
+    let walk = match decl_bounds(d) {
+      Some(b) -> {
+        let (dlo, dhi) = b
+        dhi >= lo && dlo <= hi
+      }
+      None -> false
+    }
+    if walk { q = visit_decl(qc, q, d) }
+  }
+  match q.inlay {
+    Some(r) -> sort_by(r.hints, (a, b) => a.at - b.at)
+    None -> []
+  }
+}
+
+## The span of a declaration that can hold a hint site; `None` for the ones
+## that hold no expression (`use` lines, types, effects).
+fn decl_bounds(d: Decl) -> Option[(Int, Int)] =
+  match d {
+    DFn(f) -> Some((f.lo, f.hi))
+    DTest(_, _, lo, hi, _, _) -> Some((lo, hi))
+    DConst(_, _, _, _, lo, hi, _, _) -> Some((lo, hi))
+    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _) -> Some((lo, hi))
+    DImpl(_, _, _, _, _, _, _, _, lo, hi) -> Some((lo, hi))
+    _ -> None
+  }
+
+## The options of a running collection; `None` while answering a hover.
+fn inlay_opts(q: Q) -> Option[InlayOpts] =
+  match q.inlay {
+    Some(r) -> Some(r.opts)
+    None -> None
+  }
+
+fn add_hint(q: Q, h: Option[Hint]) -> Q =
+  match q.inlay {
+    Some(r) ->
+      match h {
+        Some(x) ->
+          if x.at >= r.lo && x.at <= r.hi {
+            Q { ..q, inlay: Some(InlayRun { ..r, hints: r.hints ++ [x] }) }
+          } else {
+            q
+          }
+        None -> q
+      }
+    None -> q
+  }
+
+## `: T` at `at` for the binding `sid`, when the collection wants this kind.
+fn hint_binding(qc: QCx, q: Q, want: Bool, sid: Int, at: Int) -> Q =
+  if not want {
+    q
+  } else {
+    match sym_get(qc, sid) {
+      Some(sym) -> add_hint(q, type_hint(at, show_ty(qc, sym.ty)))
+      None -> q
+    }
+  }
+
+fn is_ident_char(c: Char) -> Bool =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+
+## Where the name of `let name = ...` ends. Neither tree has the name's span:
+## `SLet` keeps the statement's, and the checker declares the symbol over the
+## statement too. The grammar is the keyword, blanks, the name -- nothing else
+## can come between -- so reading it back off the text is exact; a name that
+## does not read back as `name` (an analysis of another revision) gives `None`.
+fn let_name_end(cps: List[Char], lo: Int, name: String) -> Option[Int] = {
+  let n = len(cps)
+  var i = lo + 3
+  while i < n && (cps[i] == ' ' || cps[i] == '\t') { i = i + 1 }
+  let start = i
+  while i < n && is_ident_char(cps[i]) { i = i + 1 }
+  if i > start && slice_cps(cps, start, i) == name { Some(i) } else { None }
+}
+
+## The binders of a typed pattern, in order.
+fn pat_binders(tp: TPat) -> List[Int] =
+  match tp {
+    TPBind(sid, _) -> [sid]
+    TPOr(alts) -> {
+      var out: List[Int] = []
+      for a in alts { out = out ++ pat_binders(a) }
+      out
+    }
+    TPTuple(elems) -> {
+      var out: List[Int] = []
+      for e in elems { out = out ++ pat_binders(e) }
+      out
+    }
+    TPList(pre, _, rest, post) -> {
+      var out: List[Int] = []
+      for e in pre { out = out ++ pat_binders(e) }
+      match rest {
+        Some(r) -> { out = out ++ [r] }
+        None -> ()
+      }
+      for e in post { out = out ++ pat_binders(e) }
+      out
+    }
+    TPCtor(_, _, fps) -> {
+      var out: List[Int] = []
+      for fp in fps {
+        match fp {
+          Some(p) -> { out = out ++ pat_binders(p) }
+          None -> ()
+        }
+      }
+      out
+    }
+    _ -> []
+  }
+
+## `: T` after each unannotated parameter of a lambda or local fn.
+fn hint_lambda_params(qc: QCx, q0: Q, params: List[LambdaParam], psyms: List[Int]) -> Q = {
+  let want = match inlay_opts(q0) {
+    Some(o) -> o.lambda_param_types
+    None -> false
+  }
+  if not want { return q0 }
+  var q = q0
+  var i = 0
+  for p in params {
+    match p.ann {
+      None ->
+        match get(psyms, i) {
+          Some(sid) -> { q = hint_binding(qc, q, true, sid, p.hi) }
+          None -> ()
+        }
+      Some(_) -> ()
+    }
+    i = i + 1
+  }
+  q
+}
+
+## Where a call's effect hint goes: its end, unless it ends in a trailing
+## block, which can be a whole block long (`with x <- f(a)` hands `f` the rest
+## of the enclosing block). Then it is after the `)` of the written arguments,
+## found by skipping blanks and commas after the last of them; a `#` comment in
+## the way leaves it at the end of that argument.
+fn call_effect_at(cps: List[Char], args: List[Arg], name_hi: Int, call_hi: Int) -> Int = {
+  var trailing = false
+  var last = name_hi
+  for a in args {
+    if a.trailing { trailing = true } else if a.hi > last { last = a.hi }
+  }
+  if not trailing { return call_hi }
+  let n = len(cps)
+  var i = last
+  while i < n && (cps[i] == ' ' || cps[i] == '\t' || cps[i] == '\n' || cps[i] == '\r' || cps[i] == ',') {
+    i = i + 1
+  }
+  if i < n && cps[i] == '(' && last == name_hi {
+    i = i + 1
+    while i < n && (cps[i] == ' ' || cps[i] == '\t' || cps[i] == '\n' || cps[i] == '\r') { i = i + 1 }
+  }
+  if i < n && cps[i] == ')' { i + 1 } else { last }
+}
+
+## The parameter names of a call's written positional arguments. `first` is
+## the parameter the first argument fills (1 when a UFCS receiver took 0). An
+## argument left of the callee's name is a pipe's (`x |> f(a)`): not in the
+## parentheses, so neither hinted nor counted.
+fn hint_param_names(q0: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int) -> Q = {
+  let want = match inlay_opts(q0) {
+    Some(o) -> o.param_names
+    None -> false
+  }
+  if not want { return q0 }
+  var shown = 0
+  for a in args {
+    if not a.trailing && a.lo >= name_hi { shown = shown + 1 }
+  }
+  var q = q0
+  var i = first
+  for a in args {
+    if a.name == None && not a.trailing && a.lo >= name_hi {
+      match get(s.param_names, i) {
+        Some(pn) -> {
+          let var_name: Option[String] = match a.e {
+            EVar(vn, _, _) -> Some(vn)
+            _ -> None
+          }
+          q = add_hint(q, param_hint(e_lo(a.e), pn, var_name, shown))
+        }
+        None -> ()
+      }
+    }
+    i = i + 1
+  }
+  q
+}
+
+## The node a call checked to, past the block the checker wraps a call in when
+## named arguments are written out of order (`checker.check_call`'s
+## `arg_lets`): under an `EApply` that block can be nothing else.
+fn call_node(te: Option[TExpr]) -> Option[TExpr] =
+  match te {
+    Some(XBlock(_, Some(tail), _, _, _)) -> Some(tail)
+    _ -> te
+  }
+
+## The signature a call by name resolved to, read off its typed node; `None`
+## when the node is not a call the checker resolved. An operation call
+## (`ask()`) is an `XApply` on the evidence record by the time it is typed,
+## so its signature is the operation's, found by name.
+fn call_sig(qc: QCx, callee: String, te: Option[TExpr]) -> Option[Sig] =
+  match call_node(te) {
+    Some(XCallFn(owner, fname, _, _, _, trait_id, _, _, _)) -> sig_by_owner(qc, owner, fname, trait_id)
+    Some(XCallBuiltin(bname, _, _, _, _, _, _)) -> map.get(qc.bins, bname)
+    Some(XApply(_, _, _, _, _, _)) ->
+      match sig_of(qc, callee) {
+        Some(s) -> if s.op_of != None { Some(s) } else { None }
+        None -> None
+      }
+    _ -> None
+  }
+
+## The effect hint and the parameter names of one call. `first` as in
+## `hint_param_names`; `name_hi` is the end of the callee's name.
+fn hint_call(qc: QCx, q0: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int, call_hi: Int) -> Q = {
+  var q = q0
+  match inlay_opts(q) {
+    Some(o) -> {
+      if o.call_effects {
+        q = add_hint(q, effect_hint(call_effect_at(qc.cps, args, name_hi, call_hi), s.eff))
+      }
+    }
+    None -> ()
+  }
+  hint_param_names(q, s, args, first, name_hi)
+}
+
+## A call of a local function value: its row is the one in its type.
+fn hint_dyn_call(qc: QCx, q: Q, sid: Int, args: List[Arg], name_hi: Int, call_hi: Int) -> Q = {
+  let want = match inlay_opts(q) {
+    Some(o) -> o.call_effects
+    None -> false
+  }
+  if not want { return q }
+  match sym_get(qc, sid) {
+    Some(sym) ->
+      match sym.ty {
+        TyFn(_, _, eff) -> add_hint(q, effect_hint(call_effect_at(qc.cps, args, name_hi, call_hi), eff))
+        _ -> q
+      }
+    None -> q
+  }
+}
+
+## How many parameters a dotted call fills before its written arguments: 1
+## for UFCS, whose typed arguments open with the receiver, 0 for a
+## module-qualified call, where the receiver is an alias and not a value. Read
+## off the first typed argument's span rather than the list's length, which a
+## default left out makes shorter than the parameter list.
+fn receiver_slots(recv: Expr, targs: List[TExpr]) -> Int =
+  match get(targs, 0) {
+    Some(t0) -> if x_lo(t0) == e_lo(recv) { 1 } else { 0 }
+    None -> 0
+  }
+
+## The hints of `f(args)`, `EApply` over a name.
+fn hint_named_call(qc: QCx, q: Q, callee: String, args: List[Arg], name_hi: Int, call_hi: Int, te: Option[TExpr]) -> Q =
+  match inlay_opts(q) {
+    None -> q
+    Some(_) ->
+      match call_node(te) {
+        Some(XCallDyn(sid, _, _, _, _, _, _)) -> hint_dyn_call(qc, q, sid, args, name_hi, call_hi)
+        _ ->
+          match call_sig(qc, callee, te) {
+            Some(s) -> hint_call(qc, q, s, args, 0, name_hi, call_hi)
+            None -> q
+          }
+      }
+  }
+
+## The hints of `recv.name(args)`; `receiver_slots` says where its written
+## arguments start.
+fn hint_method_call(
+  qc: QCx,
+  q: Q,
+  recv: Expr,
+  name: String,
+  args: List[Arg],
+  name_hi: Int,
+  call_hi: Int,
+  te: Option[TExpr]
+) -> Q =
+  match inlay_opts(q) {
+    None -> q
+    Some(_) ->
+      match call_node(te) {
+        Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) ->
+          if fname != name {
+            q
+          } else {
+            match sig_by_owner(qc, owner, fname, trait_id) {
+              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi)
+              None -> q
+            }
+          }
+        Some(XCallBuiltin(bname, targs, _, _, _, _, _)) ->
+          if bname != name {
+            q
+          } else {
+            match map.get(qc.bins, bname) {
+              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi)
+              None -> q
+            }
+          }
+        _ -> q
+      }
+  }
 
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
@@ -1140,6 +1478,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       match te {
         Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
           q = offer_lambda_params(qc, q, params, psyms)
+          q = hint_lambda_params(qc, q, params, psyms)
           q = walk_e(qc, q, body, Some(tbody))
         }
         _ -> { q = walk_e(qc, q, body, None) }
@@ -1148,10 +1487,13 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     # one application node, so this arm answers for every shape of call: a name
     # (the sig at the name's span), a constructor, and a function value. The
     # callee of the first two is not walked as a value -- it is not one.
-    EApply(target, args0, _, _) -> {
+    EApply(target, args0, _, ahi) -> {
       let args = arg_exprs(args0)
       match target {
-        EVar(callee, vlo, vhi) -> { q = walk_named_call(qc, q, callee, vlo, vhi, args, te) }
+        EVar(callee, vlo, vhi) -> {
+          q = walk_named_call(qc, q, callee, vlo, vhi, args, te)
+          q = hint_named_call(qc, q, callee, args0, vhi, ahi, te)
+        }
         ECtor(cname, clo, chi) -> { q = walk_ctor_call(qc, q, args0, None, clo, chi, te) }
         # `recv.member(args)`, whose callee is never a value: the checker
         # decides what it is, and each answer parks the receiver and the
@@ -1201,8 +1543,9 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         None -> ()
       }
-    EMethod(target, name, args0, nlo, nhi, _, _) -> {
+    EMethod(target, name, args0, nlo, nhi, _, mhi) -> {
       let args = arg_exprs(args0)
+      q = hint_method_call(qc, q, target, name, args0, nhi, mhi, te)
       # module-qualified (alias.fn) and UFCS calls carry the resolved sig
       match te {
         Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
@@ -1893,10 +2236,22 @@ fn field_index(c: CtorI, name: String) -> Option[Int] = {
 fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
   var q = q0
   match ps {
-    SLet(_, _, ann, init, _, _) -> {
+    SLet(name, _, ann, init, lo, _) -> {
       match ann {
         Some(tref) -> { q = visit_written_type(q, tref, WtStorage) }
-        None -> ()
+        None ->
+          match ts {
+            Some(TSLet(Some(sid), _, _, _, _)) ->
+              match inlay_opts(q) {
+                Some(o) ->
+                  match let_name_end(qc.cps, lo, name) {
+                    Some(at) -> { q = hint_binding(qc, q, o.let_types, sid, at) }
+                    None -> ()
+                  }
+                None -> ()
+              }
+            _ -> ()
+          }
       }
       match ts {
         Some(TSLet(_, _, tinit, _, _)) -> { q = walk_e(qc, q, init, Some(tinit)) }
@@ -1906,6 +2261,17 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
     SLetPat(pat, _, init, _, _) ->
       match ts {
         Some(TSLetPat(tpat, tinit, _, _)) -> {
+          match inlay_opts(q) {
+            Some(o) -> {
+              for sid in pat_binders(tpat) {
+                match sym_get(qc, sid) {
+                  Some(sym) -> { q = hint_binding(qc, q, o.let_types, sid, sym.dhi) }
+                  None -> ()
+                }
+              }
+            }
+            None -> ()
+          }
           q = visit_pat(qc, q, pat, Some(tpat))
           q = walk_e(qc, q, init, Some(tinit))
         }
@@ -1928,6 +2294,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
             }
             None -> ()
           }
+          q = hint_lambda_params(qc, q, params, psyms)
           var i = 0
           for p in params {
             match get(psyms, i) {

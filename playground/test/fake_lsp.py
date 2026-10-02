@@ -144,6 +144,13 @@ def main():
                 "id": request_id,
                 "result": {"contents": {"kind": "plaintext", "value": "Int"}},
             })
+        elif method == "textDocument/inlayHint":
+            start = message.get("params", {}).get("range", {}).get("start", {})
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": [{"position": start, "label": ": Int", "kind": 1}],
+            })
         elif method == "textDocument/definition":
             send({
                 "jsonrpc": "2.0",

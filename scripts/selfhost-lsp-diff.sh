@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover, formatting over a two-module project + a standalone buffer) runs
+# on hover, inlay hints, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
@@ -136,6 +136,55 @@ pub fn floats() -> List[Float] = [1.5, 1.1]
 pub fn strings() -> List[String] = ["héllo\n", "n = ${MASK}"]
 EOF
 
+# Inlay hints (docs/lsp-hover-design.md §A4): inferred let types, one per
+# destructured name, none where a type is written or too long; lambda
+# parameters; the named effects of a call -- an operation, a std function, a
+# local function value, a trailing-block call -- and none for a pure call or an
+# effect-polymorphic one; parameter names, which the session turns on in
+# `initializationOptions`, hidden for a same-named variable and a single
+# argument. Asked for over the whole file, then over two lines of it.
+cat > "$OUT/proj/src/inlays.dawn" <<'EOF'
+use std/io
+use std/io.{Fs}
+use util.{pad_to}
+
+pub effect Ask {
+  fn ask() -> Int
+}
+
+fn twice[!e](f: fn() -> Int !e) -> Int !e = f() + f()
+
+fn each(xs: List[Int], f: fn(Int) -> Unit) -> Unit !Fs = {
+  let _ = io.exists("each")
+  for x in xs { f(x) }
+}
+
+pub fn answered() -> Int = {
+  with handle Ask {
+    ask() => 21
+  }
+  ask() + ask()
+}
+
+pub fn load(p: String) -> String !Fs !Ask = {
+  let text = io.read_file(p)
+  let (n, tag) = (ask(), "x")
+  let width: Int = n
+  let xs = map([1, 2], x => x + width)
+  let long = [[(1, "a", 1.5, true)]]
+  let padded = pad_to(tag, width, "-")
+  let got = twice(() => n)
+  let peek = () => io.exists(p)
+  each(xs) { k =>
+    let _ = k
+  }
+  match text {
+    Ok(t) -> "${t}${padded}${got}${len(long)}${peek()}"
+    Err(_) -> ""
+  }
+}
+EOF
+
 cat > "$OUT/proj/src/app.dawn" <<'EOF'
 use std/str
 use std/list
@@ -225,7 +274,8 @@ def tdoc(uri):
 def at(uri, text, needle, occ=1, delta=0):
     return {"textDocument": {"uri": uri}, "position": pos(text, needle, occ, delta)}
 
-req("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+req("initialize", {"processId": None, "rootUri": None, "capabilities": {},
+    "initializationOptions": {"inlayHints": {"parameterNames": True}}})
 note("initialized", {})
 note("textDocument/didOpen", {"textDocument": {
     "uri": app_uri, "languageId": "dawn", "version": 1, "text": app_text}})
@@ -376,6 +426,21 @@ for needle, occ, delta in [
     req("textDocument/hover", at(lits_uri, lits_text, needle, occ, delta))
 note("textDocument/didClose", tdoc(lits_uri))
 
+# inlay hints: the whole file, then two lines of it
+inlays_path = f"{out_dir}/proj/src/inlays.dawn"
+inlays_uri = "file://" + inlays_path
+inlays_text = open(inlays_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": inlays_uri, "languageId": "dawn", "version": 1, "text": inlays_text}})
+req("textDocument/inlayHint", {"textDocument": {"uri": inlays_uri}, "range": {
+    "start": {"line": 0, "character": 0},
+    "end": {"line": inlays_text.count("\n") + 1, "character": 0}}})
+xs_line = pos(inlays_text, "let xs")["line"]
+req("textDocument/inlayHint", {"textDocument": {"uri": inlays_uri}, "range": {
+    "start": {"line": xs_line, "character": 0},
+    "end": {"line": xs_line + 1, "character": 0}}})
+note("textDocument/didClose", tdoc(inlays_uri))
+
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {
     "uri": messy_uri, "languageId": "dawn", "version": 1, "text": messy_text}})
@@ -412,9 +477,12 @@ while True:
 # Completion arrays: the Kotlin tables are HashMaps, so item order inside one
 # rank is JVM hash-bucket order — semantically void (clients sort by
 # sortText). Normalize by (sortText, label); everything else keeps its order.
+# An inlay hint has a label too, but its order is the server's (by position)
+# and is compared as is.
 for f in frames:
     r = f.get("result")
-    if isinstance(r, list) and r and all(isinstance(x, dict) and "label" in x for x in r):
+    if isinstance(r, list) and r and all(isinstance(x, dict) and "label" in x and "position" not in x
+                                         for x in r):
         f["result"] = sorted(r, key=lambda x: (x.get("sortText", ""), x["label"]))
     print(json.dumps(f, sort_keys=True, ensure_ascii=False))
 PYEOF

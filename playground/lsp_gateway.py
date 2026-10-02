@@ -625,7 +625,18 @@ def require_document(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def require_position(params: dict[str, Any]) -> dict[str, int]:
-    position = params.get("position")
+    return position_value(params.get("position"))
+
+
+def require_range(params: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """An inlay request's range: two positions, rebuilt so nothing else crosses."""
+    value = params.get("range")
+    if not isinstance(value, dict):
+        raise GatewayError(1008, "range must be an object")
+    return {"start": position_value(value.get("start")), "end": position_value(value.get("end"))}
+
+
+def position_value(position: Any) -> dict[str, int]:
     if not isinstance(position, dict):
         raise GatewayError(1008, "position must be an object")
     line = position.get("line")
@@ -795,6 +806,29 @@ class ClientProtocol:
                 }
             )
 
+        # Inlay hints name a range rather than a position; the editor asks for
+        # what is on screen after a scroll or an edit settles
+        # (docs/lsp-hover-design.md §A4).
+        if method == "textDocument/inlayHint":
+            if len(self.pending) >= HARD_PENDING_REQUESTS:
+                raise GatewayError(1008, "too many pending LSP requests")
+            request_id = self._request_id(message)
+            params = require_params(message)
+            require_document(params)
+            hint_range = require_range(params)
+            self.pending[request_id] = method
+            return compact_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": {
+                        "textDocument": {"uri": DOCUMENT_URI},
+                        "range": hint_range,
+                    },
+                }
+            )
+
         raise GatewayError(1008, "method is not allowed")
 
     def from_child(self, body: bytes) -> bytes:
@@ -884,6 +918,7 @@ class ClientProtocol:
                             },
                             "hoverProvider": True,
                             "definitionProvider": True,
+                            "inlayHintProvider": True,
                         }
                     },
                 }
