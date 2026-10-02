@@ -15,8 +15,8 @@ Read from git objects (`git ls-tree`, `git show <rev>:`) and never from the
 working tree, so a CI checkout and the recording machine compute the same
 answer for the same commit. The paths are TILE_PATHS below, every ledger in
 scripts/tile-gpu-diff excluded (a line appended to one is a record of a run,
-not a change to what ran), plus the GPU section of runtime/c/dawn_rt.c between
-its markers; that is the set the commit rule compared.
+not a change to what ran), every Markdown file excluded (see DOC below), plus
+the GPU section of runtime/c/dawn_rt.c between its markers.
 
     inputs.py [<rev>]   # print the digest of <rev> (default HEAD)
 """
@@ -30,6 +30,14 @@ ROOT = Path(__file__).resolve().parents[2]
 TILE_PATHS = ["packages/tileir", "packages/tileref", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
               "scripts/tile-gpu-diff"]
 LEDGER = re.compile(r"^scripts/tile-gpu-diff/ledger(-[^/]*)?\.txt$")
+# Documentation is not a tile input. No build, golden or layer-2 program reads
+# a `.md` file under TILE_PATHS (today packages/tileir/README.md and
+# packages/tileref/README.md), so a README edit changes nothing a device ran,
+# yet it used to move the digest and turn `run.sh --check` red until someone
+# re-ran layer 2 on a GPU. PR #365 was the case: a README-only rewrite of
+# packages/tileir's module table left CI green and the tile workflow red.
+# Everything else under TILE_PATHS, toolchain.txt included, still counts.
+DOC = re.compile(r"\.md$")
 BEGIN, END = "=== DAWN_RT_GPU_BEGIN ===", "=== DAWN_RT_GPU_END ==="
 
 
@@ -48,7 +56,7 @@ def digest(rev="HEAD"):
     entries = []
     for line in git("ls-tree", "-r", "--full-tree", rev, "--", *TILE_PATHS).splitlines():
         meta, path = line.split("\t", 1)
-        if not LEDGER.match(path):
+        if not LEDGER.match(path) and not DOC.search(path):
             entries.append(f"{meta}\t{path}")
     if not entries:
         raise SystemExit(f"inputs.py: no tile path exists at {rev}")
