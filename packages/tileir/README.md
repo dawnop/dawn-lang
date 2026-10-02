@@ -7,7 +7,7 @@
 本包是那里的刀 2 与刀 3，不进 std（它不需要 intrinsic，且字节码版本要钉在包常量里）。
 
 宿主侧（缓冲、launch）在 `std/gpu`，它只认 kernel 名与字节码，不认识 `TileProg`；
-dtype 标记复用 `std/gpu` 的 `F64` / `F32` / `BF16`，本包不再声明一份。bf16 kernel 的写法与
+格式标记复用 `std/gpu` 的（`F64`、`BF16` 等），本包不再声明一份。bf16 kernel 的写法与
 f64 的相同（`Param[BF16]`、`addf(BF16, ...)`），dtype 名 `"bf16"` 贯穿记录、降低、渲染
 （`tile<128xbf16>`）与字节码（类型标签 6）；设备侧 `addf ... rounding<nearest_even>` 对 bf16
 的答案按双舍入定理等于 `std/narrow.round_bf16(f64 加)`，`scripts/tile-golden` 的 `vadd_bf16`
@@ -17,11 +17,33 @@ f64 的相同（`Param[BF16]`、`addf(BF16, ...)`），dtype 名 `"bf16"` 贯穿
 
 | 模块 | 内容 |
 |------|------|
-| `dev` | `pub effect Dev`（`t_block_id` / `t_load` / `t_store` / `t_addf`、索引算术 `t_idx_const` / `t_idx_add` / `t_idx_mul`、区域 `t_loop_begin` / `t_loop_end`，句柄级、单态）；三种句柄类型 `Tile[D]`（幻影，`= Int`）、`Param[D]`（幻影，`= (Int, String)`）、`Idx`（`= Int`）；类型化包装 `param` / `block_id` / `load` / `store` / `addf` / `idx_const` / `idx_add` / `idx_mul`，循环 `d_for`（携带一个 tile）/ `d_for2`（两个） |
-| `prog` | `TileOp` 变体（`MakeToken` / `BlockId` / `Load` / `Store` / `AddF` / `IdxConst` / `IdxAdd` / `IdxMul` / `For` / `Continue`）、`TileProg` 记录；`trace_kernel(name, params, body)` 记录 handler，带区域栈；`MAX_LOOP_DEPTH` / `MAX_HANDLES` |
-| `lower` | `lower(prog) -> Kernel`：指令表 `Instr`（`MakeTok / BlockIds / ConstI32 / MulInt / AddInt / Reshape / Broadcast / Iota / Offset / LoadPtr / StorePtr / AddFloat / ForLoop / Cont / Ret`，`ForLoop` 的体是嵌套的一张表），值从 0 密集编号，操作数 `Arg(pos)` / `Val(id)`，类型 `Ty`（`Token` / `Tile(shape, elem)`）；指针梯子、去重、SSA 重编、区域作用域都在这里 |
-| `render` | `render(prog) -> String`，一个 `cuda_tile.module @m` 含一个 `entry @<name>`；一条 `Instr` 一行，`for` 是头一行、体缩两格、右花括号 |
-| `bytecode` | `encode(prog) -> Bytes`，`cuda-tile` 字节码，含 `for` / `continue` 的区域编码；`BYTECODE_MAJOR / BYTECODE_MINOR` 钉头里的版本，`bytecode_version()` 给出 `"13.2"` |
+| `dev` | `pub effect Dev`（句柄级、单态的设备操作）、句柄类型（`Tile[D]` / `Param[D]` / `Idx` / `Scalar[D]` / `Ptrs[D]`、视图类型等，都是 opaque，`D` 是幻影格式参数）与其上的类型化函数；分组见下节 |
+| `prog` | `TileOp` 与 `TileProg`：记录的 ADT；`trace_kernel(name, params, body)` 与 `trace_kernel_hinted` 是记录 handler，带区域栈；`MAX_LOOP_DEPTH` / `MAX_HANDLES` |
+| `lower` | `lower(prog) -> Kernel`：线性指令表 `Instr`（区域操作的体是嵌套的一张表），值从 0 密集编号，操作数 `Arg(pos)` / `Val(id)`，类型 `Ty`；指针梯子、去重、SSA 重编、区域作用域都在这里 |
+| `render` | `render(prog) -> String`，一个 `cuda_tile.module @m` 含一个 `entry @<name>`；一条 `Instr` 一行，区域是头一行、体缩两格、右花括号 |
+| `bytecode` | `encode(prog) -> Bytes`，`cuda-tile` 字节码，含区域编码；`BYTECODE_MAJOR / BYTECODE_MINOR` 钉头里的版本，`bytecode_version()` 给出 `"13.4"` |
+
+完整的公开面（签名与文档注释）以 `./bin/dawn doc packages/tileir` 为准，它对五个模块输出一份
+JSON；本文不再逐个列名字，因为这张表上一次逐个列的时候 `Dev` 只有十来个操作，后来涨到六十多个而
+表没有跟。
+
+### `dev` 的分组
+
+下表把 `Dev` 的全部操作分组，每组举几个类型化函数（kernel 体用的是它们，不直接调 `t_*`）。
+它由 `./bin/dawn doc packages/tileir` 的 `effects[0].ops` 生成，脚本核过分组恰好覆盖全部操作、
+不多不少（2026-10-02，68 个操作）；以后加操作时该组要跟上，数字与名字以 `dawn doc` 为准。
+
+| 组 | `Dev` 操作 | 类型化函数（举例） |
+|----|-----------|--------------------|
+| 网格与索引 | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
+| 内存与指针 | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
+| 视图 | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
+| 常量与形状 | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `cat` `permute_tile` |
+| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `fma` `lt` `add_i` `select` `int_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
+| 区域 | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_reduce` `d_scan` `d_if` |
+| token | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
+| 模块全局 | `t_global` `t_get_global` | `d_global` `d_global_const` `global_ptrs` |
+| 断言与调试 | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
 
 ## 用法
 
@@ -68,7 +90,9 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
 
 `d_for2` 携带两个 tile。循环嵌套深度上限 `MAX_LOOP_DEPTH`（16），一次记录的句柄数上限
 `MAX_HANDLES`（65536），超限 panic：递归穿过 `d_for` 的 helper 与不进循环的递归 helper
-各在一处停下。没有 `d_if`（归约用不到；加的时候照 `lower_for` 的形状）。
+各在一处停下。依赖 tile 值的分支走 `d_if`（`src/dev.dawn:2455`）：两个区域都必须写，各在宿主上
+跑一次、各答一个同形同格式的 tile，区域里不许 load / store；它在降低时照 `lower_for` 的形状落成
+`lower_if`（`src/lower.dawn:1382`）。（这里早先写的是「没有 `d_if`」，它在 `d1d08f5c` 加上时本段没跟。）
 
 ## 记录的形状
 
@@ -95,7 +119,8 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
 ## 字节码
 
 `encode` 写的是 `NVIDIA/cuda-tile` 的 `BytecodeWriter.cpp` 写、`BytecodeReader.cpp` 读的格式
-（commit `be0889cd`）：8 字节 magic、`13.2` 版本头、Func / Constant / Type / String 四个
+（commit `be0889cd`）：8 字节 magic、`13.4` 版本头（`src/bytecode.dawn:91-92`；刀 T8 之前是 13.2，
+#344 之前是 13.3，见设计文档 §6.11、§6.18）、Func / Constant / Type / String 四个
 section、结束字节；opcode、类型 tag 来自仓库里冻结的三张 `.td` 表，逐操作布局来自生成它的
 tablegen 后端（结果类型 → 可选字段 flags 位域 → 属性 → 操作数）。cuTile.jl 的
 `src/bytecode` 是同一格式的另一份实现，写的时候逐项对照过；两处形态差异（它总写 debug
