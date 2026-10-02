@@ -3,8 +3,8 @@
 Everything `gpu.html` says in words, in the order it says it. The generator
 reads these sections by name (`site/src/gen/gpu.dawn`), the way the front
 page reads `home.md`, so a section that is missing or renamed fails the build
-instead of rendering an empty page. A Chinese translation, when there is one,
-is `gpu.zh.md` with the same keys and a digest of this file.
+instead of rendering an empty page. The Chinese translation is `gpu.zh.md`,
+with the same keys and a digest of this file.
 
 What is not here, on purpose: every number. The coverage counts, the golden
 kernel count and the device ledgers are read from `scripts/tileir-features/`,
@@ -160,9 +160,6 @@ within tolerance
 
 tree
 
-## crumb
-
-cuTile backend
 
 ## chip-golden
 

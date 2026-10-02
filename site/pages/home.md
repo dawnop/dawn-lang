@@ -15,7 +15,8 @@ translated document gets — `home.zh.md` carries a digest of this file and
 
 What is not here, on purpose: the programs and their output (`site/pages/*.dawn`
 and `*.out`, run by `doc-check.py`), the figures (`scripts/site-figures.sh`,
-injected at build time), and words that are code (`effect`, `comptime`,
+injected at build time, and the GPU section's opcode count, read from
+`scripts/tileir-features/` the way the cuTile page reads it), and words that are code (`effect`, `comptime`,
 `match`, `!Dev`, file names), which read the same in both languages and live
 in the generator.
 
@@ -41,7 +42,7 @@ JVM and C, one answer
 
 ## fact-gpu
 
-cuTile for NVIDIA GPUs
+[cuTile for NVIDIA GPUs](gpu.html)
 
 ## cta-playground
 
@@ -151,6 +152,14 @@ A kernel is a Dawn function too.
 
 A cuTile kernel is an ordinary Dawn function under a named effect, lowered to CUDA Tile IR. A pure fake device gives the same answer with no GPU.
 
+## gpu-cover
+
+public Tile IR opcodes implemented, each run on a GPU against a host reference.
+
+## gpu-cover-link
+
+[The cuTile page has the coverage tables, the gates and the device ledgers →](gpu.html)
+
 ## gpu-pipe
 
 What happens to each side
@@ -237,7 +246,7 @@ The fake device is pure
 
 ## host-fact-pure-body
 
-So a `!Gpu` program runs in its tests and at comptime.
+So a `!Gpu` program runs in its tests, on either backend, with no GPU.
 
 ## phase-install
 

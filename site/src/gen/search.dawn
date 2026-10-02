@@ -56,6 +56,8 @@ use gen/corpus.{Corpus, read_corpus}
 use gen/stdlib.{api_rows}
 use gen/tutorial.{chapter_titles, chapter_sections}
 use gen/examples.{gallery_examples, must_describe}
+use gen/copy.{load_copy, plain, body_text}
+use gen/gpu.{prose_sections, copy_file}
 
 ## One row of the index.
 pub type Row = { group: String, title: String, detail: String, note: String, href: String }
@@ -182,8 +184,8 @@ fn tutorial_index(blocks: List[Block], lang: Lang, detail: String) -> List[Row] 
 
 ## The gallery, one row per example, plus the site's own pages.
 ##
-## The nav table is read rather than restated: the seven entries a reader can
-## click in the header are seven pages the search has to be able to reach, and
+## The nav table is read rather than restated: the eight entries a reader can
+## click in the header are eight pages the search has to be able to reach, and
 ## a nav item added without a row here would be a page the panel cannot find.
 fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
   var rows: List[Row] = []
@@ -211,6 +213,33 @@ fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
   rows
 }
 
+## The cuTile backend's page, from the copy it is written from: one row for
+## the page, under its title with the lede's first sentence as the note, and
+## one per section, under its heading with the first sentence of its prose.
+##
+## In the "examples" group, which the panel draws as examples and pages: the
+## page is a page of the site, as the nav's rows are. Its prose is in the
+## title index's notes rather than in the body index because the panel draws
+## a body section only for the four documents it knows (spec, tutorial,
+## history, design); a fifth `doc` would be indexed, fetched and dropped.
+## The figures are not indexed: they are numbers, and a search for one finds
+## nothing a reader asked for.
+fn gpu_index(lang: Lang, detail: String) -> List[Row] !Fs = {
+  let c = load_copy(copy_file(lang))
+  let page = lang_path(lang, "gpu.html")
+  [Row { group: "examples", title: plain(c, "title"), detail: detail, note: note_of(plain(c, "lede")), href: page }]
+    ++ list.map(prose_sections(), e => {
+      let (id, key) = e
+      Row {
+        group: "examples",
+        title: plain(c, "${key}-title"),
+        detail: detail,
+        note: note_of(body_text(c, "${key}-body")),
+        href: "${page}#${id}",
+      }
+    })
+}
+
 # ---- the words the rows carry ----------------------------------------------
 #
 # The `detail` of a section row is the name of the document it is in, which is
@@ -231,6 +260,7 @@ type Words = {
   tutorial: String,
   gallery: String,
   home: String,
+  gpu: String,
 }
 
 fn words(lang: Lang) -> Words =
@@ -242,6 +272,7 @@ fn words(lang: Lang) -> Words =
       tutorial: "Tutorial",
       gallery: "Site",
       home: "Home",
+      gpu: "cuTile backend",
     }
     Zh -> Words {
       spec: "规范",
@@ -250,6 +281,7 @@ fn words(lang: Lang) -> Words =
       tutorial: "教程",
       gallery: "站点",
       home: "首页",
+      gpu: "cuTile 后端",
     }
   }
 
@@ -393,6 +425,7 @@ pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
     ++ doc_index(c.design, "history", lang_path(lang, "design.html"), w.design)
     ++ tutorial_index(c.tutorial, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
+    ++ gpu_index(lang, w.gpu)
 }
 
 ## The index for one language, as the bytes that go into /assets/.
@@ -644,6 +677,35 @@ test "the index carries every group and addresses them from the site root" {
     for r in list.filter(en, r => r.group == "spec") {
       assert str.starts_with(r.href, "spec.html#")
     }
+  })
+}
+
+## The cuTile page is in the index in each language: the page under its
+## title and every section of its prose under its heading, each with a note,
+## in the group the panel draws as pages.
+test "the cuTile page and its sections are rows of the index" {
+  io.with_fs_real(() => {
+    for lang in [En, Zh] {
+      let page = lang_path(lang, "gpu.html")
+      let rows = list.filter(index_rows(probe_api(), lang, read_corpus(lang)),
+        r => r.href == page || str.starts_with(r.href, page ++ "#"))
+      # the page row, one per section, and the nav's own row for it
+      assert len(rows) == len(prose_sections()) + 2
+      for r in rows {
+        assert r.group == "examples"
+      }
+      for e in prose_sections() {
+        let (id, _) = e
+        let hit = list.filter(rows, r => r.href == "${page}#${id}")
+        assert len(hit) == 1
+        assert hit[0].note != ""
+      }
+    }
+    let en = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.href == "gpu.html")
+    assert list.map(en, r => r.title) == ["GPU", "Dawn's cuTile backend"]
+    let zh = list.filter(index_rows(probe_api(), Zh, read_corpus(Zh)), r => r.href == "zh/gpu.html")
+    assert list.map(zh, r => r.title) == ["GPU", "Dawn 的 cuTile 后端"]
+    assert str.starts_with(zh[1].note, "Dawn 里的 GPU kernel")
   })
 }
 
