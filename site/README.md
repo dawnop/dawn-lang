@@ -146,12 +146,14 @@ JSON 渲染器的键序是哈希的事实，而 `site-dist-diff.sh` 对这份文
 把 `dist/assets/search-*.json` 也拆开，每个 href 连同 `#fragment` 一起对着写出来的页面查。
 2026-08-30 上线时是 680 条。
 
-跨越一次开关面板的状态归页面，因为 guest 够不着：查询在地址栏里是 `?q=`（`replaceState`，
-不进历史；带 `?q=` 打开的页面直接落在结果上，所以搜索能当链接分享；不用 `#q=`，因为本站的
-fragment 一律是锚点），最近搜索在 localStorage 的 `dawn-search-recent`（最多五条）。两者都
-经 flags 交给 guest，guest 只读；删除与清空按钮只带 `data-forget` 属性，由 `search.js` 改写
-存储并重新 init。空查询时的「从这里开始」三条不写在 guest 里，是索引顶层的 `start`
-（行号数组，由 `gen/search.dawn` 按行的身份挑出，缺一条就构建失败），所以标题与 href 都是
+跨越一次开关面板的状态归页面，因为 guest 够不着。一是分享的查询：带 `?q=` 打开的页面直接落在
+结果上，所以搜索能当链接分享；`?q=` 只在读者点面板底栏的「复制链接」时才写进地址栏（`replaceState`，
+不进历史），随后复制的就是这个地址；输入时地址不动，关面板时清掉（不用 `#q=`，因为本站的 fragment
+一律是锚点）。二是最近搜索，在 localStorage 的 `dawn-search-recent`（最多五条）。两者都经 flags
+交给 guest，guest 只读。guest 的删除、清空与复制链接按钮都不带监听器，只带 `data-forget` /
+`data-copy-link` 属性，由 `search.js` 改写存储并重新 init、或写地址并复制；「已复制」是 `search.js`
+在挂载点上加 `is-copied`，由样式表切到 guest 已经画好的那条文案。
+空查询时的「从这里开始」三条不写在 guest 里，是索引顶层的 `start`（行号数组，由 `gen/search.dawn` 按行的身份挑出，缺一条就构建失败），所以标题与 href 都是
 那一行自己的、已被 `gen/links` 查过的。
 
 正文是第二份索引 `search-body-{en,zh}.json`（格式见 `docs/site-search-design.md`），挂载点
