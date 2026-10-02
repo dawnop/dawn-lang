@@ -13,6 +13,19 @@
 // mattering. The bridge it loads IS a module, reached with a dynamic import
 // once the reader has asked for the panel.
 //
+// The reactor does not run on this page's thread. It runs in a module worker
+// (packages/tea-dom/js/worker.mjs), and the page keeps only the document:
+// the bridge's `Remote` applies the patches a turn sends back. Compiling the
+// module, init (which parses the indexes, a few hundred milliseconds on a slow
+// machine once the text index is in) and every keystroke's turn are therefore
+// time the page can spend painting and taking the next key. The price is that
+// a turn is no longer finished when the DOM event that caused it returns, so
+// what this script used to read off the document right after an event --
+// whether Enter chose a link, whether the guest has left -- it now reads in
+// `afterTurn`, which the bridge calls once each reply is in the document. See
+// docs/site-search-design.md, section 12, for the measurements and for why
+// there is no main-thread fallback.
+//
 // Lazy is the whole point of the file. The reactor is ~150KB gzipped and the
 // index is tens of kilobytes; a reader who never searches must not pay for
 // either, so nothing is fetched until the button is pressed or the shortcut is
@@ -92,8 +105,10 @@
     if (hint) hint.textContent = 'Ctrl K';
   }
 
+  var warming = null; // the promise of the loaded worker and the title index
   var mounted = null; // the promise, so a second press does not mount twice
-  var app = null; // { reactor, host, dispatch }
+  var app = null; // { host, dispatch, init }
+  var goNewTab = false; // whether the last key the panel heard asked for a new tab
   var index = null; // the index text, kept to build flags again on reopen
   var body = null; // the body index text, once fetched and found to be format 1
   var bodyAsked = false; // so the body index is fetched once per page
@@ -267,7 +282,8 @@
       + (body ? ',"body":' + body : '') + '}';
   }
 
-  // A fresh guest from new flags: one turn, no refetch.
+  // A fresh guest from new flags: one turn, no refetch. The promise is
+  // settled once the new document is in place.
   //
   // This is also how the body index gets in. There is no message that could
   // carry it: a message reaches the guest only through a listener in its own
@@ -276,34 +292,67 @@
   // read once, by init, into the guest's retained state, which never crosses.
   // The price is one init that parses both indexes again; it is measured in
   // docs/site-search-design.md.
+  //
+  // init draws a new field, and the turn takes a while on the worker (a
+  // quarter of a second with the text index on a fast machine), during which
+  // the reader may go on typing -- or press Enter, or an arrow. Those land in
+  // the old field, and their turns are dropped by the bridge once the old
+  // field has left the document, since their address would name an element
+  // in a tree that no longer exists. So when the old field has focus as the
+  // restart is asked for, what happens to it until the new field arrives is
+  // written down -- each key, and each value it took -- and played to the new
+  // field in the same order, with focus and caret carried over. The replayed
+  // events do not bubble: the page's own handlers have heard the originals,
+  // and only the guest's listener on the field has not. The selection goes
+  // back to the first row, which is where typing leaves it anyway.
   function restart(q) {
     guestHasBody = !!body;
-    var reply = app.reactor.init(flagsFor(q));
-    if (reply.ok) app.host.apply(reply.patches);
-  }
-
-  // The body index has arrived while the reader is typing: the guest is
-  // started again on the field as it is now, and the field keeps its focus
-  // and caret, since init draws a new one. The selection goes back to the
-  // first row, which is where typing leaves it anyway.
-  function takeBody() {
-    if (!app || host.hidden || guestHasBody) return;
     var f = field();
-    var q = f ? f.value : '';
-    var focused = f && document.activeElement === f;
-    var from = f ? f.selectionStart : 0;
-    var to = f ? f.selectionEnd : 0;
-    restart(q);
-    var g = field();
-    if (g && focused) {
+    var kept = !!f && document.activeElement === f;
+    var heard = [];
+    var onKey = function (ev) {
+      if (ev.isTrusted) heard.push({ key: ev.key });
+    };
+    var onInput = function (ev) {
+      if (ev.isTrusted) heard.push({ value: f.value });
+    };
+    if (kept) {
+      f.addEventListener('keydown', onKey);
+      f.addEventListener('input', onInput);
+    }
+    return app.init(flagsFor(q)).then(function () {
+      if (!kept) return;
+      f.removeEventListener('keydown', onKey);
+      f.removeEventListener('input', onInput);
+      var g = field();
+      if (!g || g === f) return;
       g.focus({ preventScroll: true });
+      heard.forEach(function (h) {
+        if (h.key !== undefined) {
+          g.dispatchEvent(new KeyboardEvent('keydown', { key: h.key }));
+        } else {
+          g.value = h.value;
+          g.dispatchEvent(new Event('input'));
+        }
+      });
       try {
-        g.setSelectionRange(from, to);
+        g.setSelectionRange(f.selectionStart, f.selectionEnd);
       } catch (e) {
         // a field that takes no selection keeps the caret where focus put it
       }
-    }
-    follow();
+    }, function (e) {
+      fail(String(e));
+      app = null;
+    });
+  }
+
+  // The body index has arrived while the reader is typing: the guest is
+  // started again on the field as it is now (restart keeps what is typed
+  // meanwhile).
+  function takeBody() {
+    if (!app || host.hidden || guestHasBody) return;
+    var f = field();
+    restart(f ? f.value : '').then(follow);
   }
 
   // Fetch the body index, once. Anything short of a format 1 asset leaves
@@ -327,22 +376,83 @@
       });
   }
 
-  async function boot(q) {
+  // Everything the panel needs before it can draw, and nothing it draws: the
+  // worker started on its module, the page's half of the bridge, the reactor
+  // compiled and instantiated on the worker's thread, and the title index.
+  // All four are asked for at once rather than one after another; the module
+  // graphs are one file each for the same reason (gen/pages.emit_bridge).
+  // Started by the click, or earlier by a pointer or focus arriving on the
+  // button -- a reader who is about to press it has said so -- and at most
+  // once per page, a failure included.
+  //
+  // The worker's own failure to load is an `error` event, which can fire
+  // before the bridge is here to listen for it; it is held until then.
+  function warm() {
+    if (warming) return warming;
     var d = btn.dataset;
-    var bridge = await import(abs(d.searchApp));
-    var responses = await Promise.all([fetch(abs(d.searchWasm)), fetch(abs(d.searchIndex))]);
-    if (!responses[0].ok || !responses[1].ok) {
-      throw new Error('search: the reactor or the index could not be fetched');
-    }
-    index = await responses[1].text();
+    warming = (async function () {
+      if (typeof Worker !== 'function') throw new Error('search: this browser cannot run the search in a worker');
+      var early = null;
+      var worker = new Worker(abs(d.searchWorker), { type: 'module' });
+      worker.onerror = function (ev) {
+        early = ev;
+      };
+      var bridgeP = import(abs(d.searchApp));
+      var wasmP = fetch(abs(d.searchWasm));
+      var indexP = fetch(abs(d.searchIndex));
+      var bridge = await bridgeP;
+      var remote = new bridge.Remote(worker);
+      if (early) throw new Error('search: the worker could not be started');
+      var wasm = await wasmP;
+      if (!wasm.ok) throw new Error('search: the reactor could not be fetched');
+      var loaded = remote.load(wasm);
+      var res = await indexP;
+      if (!res.ok) throw new Error('search: the index could not be fetched');
+      var text = await res.text();
+      await loaded;
+      return { remote: remote, index: text };
+    })();
+    return warming;
+  }
+
+  function prewarm() {
+    warm().catch(function () {
+      // reported by the click that needs it, if one comes
+    });
+  }
+
+  async function boot(q) {
+    var w = await warm();
+    index = w.index;
     guestHasBody = !!body;
-    app = await bridge.mount(responses[0], host, {
+    app = await w.remote.mount(host, {
       flags: flagsFor(q),
       onError: function (reply) {
         fail(reply.kind + ': ' + reply.error);
       },
+      onTurn: afterTurn,
     });
     return app;
+  }
+
+  // What the page reads off the document once a turn's patches are in it.
+  // Enter's choice is a link with `data-goto`, which the guest draws and the
+  // page follows; a guest that has left (the second Escape, Cancel) is a panel
+  // the page closes. Before the reactor moved to a worker both were read in
+  // the keydown or click that caused the turn, when the turn was already over.
+  function afterTurn() {
+    if (host.hidden) return;
+    follow();
+    var go = host.querySelector('a[data-goto]');
+    if (go) {
+      var f = field();
+      if (f) remember(f.value);
+      close();
+      if (goNewTab) newTab(go.href);
+      else window.location.assign(go.href);
+      return;
+    }
+    if (guestLeft()) close();
   }
 
   function focusInput() {
@@ -364,17 +474,26 @@
         app = null;
         return null;
       });
+      mounted.then(focusInput);
     } else if (app) {
       // Escape leaves the guest with an empty tree, so reopening is a fresh
-      // init -- with the recent queries as they are now.
-      restart(q);
+      // init -- with the recent queries as they are now. Until it answers,
+      // the panel the reader last closed is still the document; `is-starting`
+      // keeps it out of sight rather than showing an old query for a frame.
+      host.classList.add('is-starting');
+      restart(q).then(function () {
+        host.classList.remove('is-starting');
+        focusInput();
+      });
+    } else {
+      mounted.then(focusInput);
     }
-    mounted.then(focusInput);
   }
 
   // Focus goes back where it came from: the button that opened the panel.
   function close() {
     writeQuery('');
+    host.classList.remove('is-starting');
     uncopied();
     host.hidden = true;
     host.classList.remove('is-keying');
@@ -422,10 +541,31 @@
     );
   }
 
-  btn.addEventListener('click', function () {
-    if (host.hidden) open('');
-    else close();
-  });
+  // The button and the shortcut toggle, and whether the panel is open is a
+  // question about every turn the reader has already asked for: an Escape
+  // still on its way to the guest may be the one that closes it. So a toggle
+  // waits for the turns in flight, as it would have found them finished when
+  // turns were synchronous; otherwise Escape-then-Cmd-K, pressed together,
+  // would shut the panel the reader was reopening. While it waits the panel
+  // on screen is one the reader has already dismissed or is about to see
+  // replaced, so it is out of sight (`is-starting`) and takes no typing.
+  function toggle() {
+    var go = function () {
+      host.classList.remove('is-starting');
+      if (host.hidden) open('');
+      else close();
+    };
+    if (app && !host.hidden) {
+      host.classList.add('is-starting');
+      app.idle().then(go);
+    } else {
+      go();
+    }
+  }
+
+  btn.addEventListener('click', toggle);
+  btn.addEventListener('pointerenter', prewarm);
+  btn.addEventListener('focus', prewarm);
 
   // Forgetting a recent query. The guest's delete and Clear buttons have no
   // listener; they name what to forget in a data attribute, and this writes
@@ -447,8 +587,10 @@
       var q = one.getAttribute('data-forget');
       writeRecent(readRecent().filter(function (r) { return r !== q; }));
     }
-    restart('');
+    // Focus first, into the field that is there now, so that what the reader
+    // types while the guest restarts is carried into the new one.
     focusInput();
+    restart('');
     return true;
   }
 
@@ -503,27 +645,20 @@
   document.addEventListener('keydown', function (ev) {
     if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'k' || ev.key === 'K')) {
       ev.preventDefault();
-      if (host.hidden) open('');
-      else close();
+      toggle();
       return;
     }
     if (host.hidden) return;
-    // The guest's own listener has already run and the patch is already in the
-    // document, because a turn is synchronous inside the DOM event that
-    // started it. So the answer to "where did Enter mean to go" is a question
-    // about the document, and the guest never has to be handed a URL bar.
-    var go = host.querySelector('a[data-goto]');
-    if (go) {
-      var f = field();
-      if (f) remember(f.value);
-      close();
-      if (ev.metaKey || ev.ctrlKey) newTab(go.href);
-      else window.location.assign(go.href);
-      return;
-    }
+    // Where Enter meant to go is a question about the document once the
+    // guest's answer is in it (afterTurn), so the guest never has to be handed
+    // a URL bar. What the keydown still knows and the document will not is
+    // whether the reader asked for a new tab. Opening one from afterTurn is
+    // still inside the activation this keypress gave the page.
+    if (ev.key === 'Enter') goNewTab = !!(ev.metaKey || ev.ctrlKey);
     if (ev.key === 'Escape') {
       // The guest hears Escape only in its field, and there the first press
-      // empties the query and leaves the panel open.
+      // empties the query and leaves the panel open; the second leaves an
+      // empty tree, which afterTurn closes.
       var heard = ev.target && ev.target.classList && ev.target.classList.contains('search-input');
       if (!heard || guestLeft()) close();
       return;

@@ -56,6 +56,11 @@ pub type Assets = {
   # titles and different hrefs -- see gen/search.dawn -- and the shell picks
   # the one that belongs to the page it is writing.
   search_js: String,
+  # The bridge the panel loads, one file per thread: the page's half, which
+  # applies patches, and the worker the reactor runs in (gen/pages
+  # .emit_search_bridge).
+  search_app: String,
+  search_worker: String,
   search_wasm: String,
   search_en: String,
   search_zh: String,
@@ -105,6 +110,8 @@ pub fn plain_assets() -> Assets =
     tea_counter: "tea-counter.wasm",
     tea_todo: "tea-todo.wasm",
     search_js: "search.js",
+    search_app: "tea-remote.mjs",
+    search_worker: "tea-worker.mjs",
     search_wasm: "tea-search.wasm",
     search_en: "search-en.json",
     search_zh: "search-zh.json",
@@ -597,7 +604,7 @@ pub fn shell(
 ) -> String =
   shell_ext(a, lang, pair, title, root, active, "", head, body)
 
-## The header's search button, and the three URLs the panel needs.
+## The header's search button, and the four URLs the panel needs.
 ##
 ## A round glass, the same size as the theme toggle beside it, named by its
 ## label (and Ctrl-K or Cmd-K, which search.js binds). It opens the floating
@@ -608,22 +615,24 @@ pub fn shell(
 ## They are attributes rather than strings inside the script for the reason
 ## the demo page's `data-wasm` is one: gen/links reads markup and nothing here
 ## reads programs, so a URL spelled in a `fetch` argument would be the one URL
-## on this site that nothing checks. All three are content-hashed names, and
+## on this site that nothing checks. All four are content-hashed names, and
 ## the asset rule in gen/links holds them to that.
 ##
 ## `data-search-root` is this page's own distance from the site root. The
 ## index's hrefs are site-root relative, so the panel joins the two; without
 ## it the same index would be wrong on every page but the front one.
 ##
-## Nothing is fetched until the button is used (site/assets/search.js). The
+## Nothing is fetched until the button is used, or a pointer or keyboard focus
+## arrives on it (site/assets/search.js). The
 ## reactor is 150KB gzipped and the index is tens of kilobytes, and neither
 ## belongs in a first paint that a reader who never searches still pays for.
 fn search_button(a: Assets, lang: Lang, root: String) -> String = {
-  let app = a.tea_js
+  let app = a.search_app
+  let worker = a.search_worker
   let wasm = a.search_wasm
   let index = search_index_name(a, lang)
   let label = escape_html(search_label(lang))
-  """<button class="search-open" type="button" aria-label="${label}" title="${label}" aria-controls="dawn-search" aria-expanded="false" data-search-app="${root}/assets/${app}" data-search-wasm="${root}/assets/${wasm}" data-search-index="${root}/assets/${index}" data-search-root="${root}">"""
+  """<button class="search-open" type="button" aria-label="${label}" title="${label}" aria-controls="dawn-search" aria-expanded="false" data-search-app="${root}/assets/${app}" data-search-worker="${root}/assets/${worker}" data-search-wasm="${root}/assets/${wasm}" data-search-index="${root}/assets/${index}" data-search-root="${root}">"""
     ++ """<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.4 3.4"/></svg></button>"""
 }
 
@@ -968,12 +977,13 @@ test "the header brand is the vector mark" {
 
 ## Every page carries the button, the mount point and the script -- there is
 ## no page-level opt-in, because a reader who wants to search wants to from
-## wherever they are. The three URLs are attributes so that gen/links checks
+## wherever they are. The four URLs are attributes so that gen/links checks
 ## them; this is the assertion that says they are there to be checked.
 test "every page carries the search button, its mount point and its script" {
   let p = shell(plain_assets(), En, "", "t", "..", "", no_head(), "<p>x</p>")
   assert str.contains(p, `<button class="search-open" type="button"`)
-  assert str.contains(p, `data-search-app="../assets/tea-app.mjs"`)
+  assert str.contains(p, `data-search-app="../assets/tea-remote.mjs"`)
+  assert str.contains(p, `data-search-worker="../assets/tea-worker.mjs"`)
   assert str.contains(p, `data-search-wasm="../assets/tea-search.wasm"`)
   assert str.contains(p, `data-search-index="../assets/search-en.json"`)
   assert str.contains(p, `data-search-root=".."`)

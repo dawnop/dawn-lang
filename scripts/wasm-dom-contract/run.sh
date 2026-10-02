@@ -45,18 +45,19 @@
 # to the transcript of its case. A mutant that passes means the transcript
 # has no teeth about the thing it broke, and this script says so.
 #
-# Before any of that, six checks that need no wasm toolchain, each with its
-# own mutants and its own head explaining why it is not a transcript. Four are
+# Before any of that, seven checks that need no wasm toolchain, each with its
+# own mutants and its own head explaining why it is not a transcript. Five are
 # driven straight at the bridge with node: keyed-ops.sh for the three ops
 # neither application here reaches, props.sh for the attribute/property split,
 # whose failure a transcript cannot see, payload.sh for the parts of an event
-# payload no application here declares, and foreign.sh for the custom-element
-# boundary no application here mounts. The fifth, collect.sh, needs bin/dawn
+# payload no application here declares, foreign.sh for the custom-element
+# boundary no application here mounts, and remote.sh for the worker host,
+# whose turns are not over when their event returns. The sixth, collect.sh, needs bin/dawn
 # and not node: it is about how a node's children are *built* rather than
 # about what crossed the boundary, and the encoder cannot see that -- it holds
 # both the fixture the shape was designed on and the first application that
 # ships it (examples/projects/tea_dom_search, the site's search panel). The
-# sixth, flags.sh, needs both: an init's flags are read once by an application
+# seventh, flags.sh, needs both: an init's flags are read once by an application
 # whose initial model is a function of them, and neither application here has
 # one. After the driver preflight, retained.sh adds the stateful boundary the
 # two demo transcripts do not have: the same session in one JVM process and in
@@ -94,6 +95,9 @@ record=0
 # changed and the `preventDefault` decision, none of which either application
 # below asks for. foreign.sh does it for the custom-element lifecycle, which
 # neither application reaches because neither mounts a foreign element.
+# remote.sh does it for the worker host (remote.mjs, worker.mjs): both
+# transcripts drive the synchronous host, where a turn cannot be queued, an
+# address cannot go stale and a reply cannot land behind the reader's typing.
 #
 # collect.sh is the odd one out: it needs bin/dawn rather than node, and what
 # it is about is the construction of a child list rather than the bridge. A
@@ -112,6 +116,7 @@ record=0
 "$(dirname "${BASH_SOURCE[0]}")/props.sh"
 "$(dirname "${BASH_SOURCE[0]}")/payload.sh"
 "$(dirname "${BASH_SOURCE[0]}")/foreign.sh"
+"$(dirname "${BASH_SOURCE[0]}")/remote.sh"
 "$(dirname "${BASH_SOURCE[0]}")/collect.sh"
 "$(dirname "${BASH_SOURCE[0]}")/flags.sh"
 
@@ -386,4 +391,4 @@ mutate todo-filter &&
   run_mutant todo-filter yes "the done filter admits everything"
 
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus retained state and its seam/production mutants, the keyed ops, the props, the payloads, the foreign elements, the collector and the flags)"
+echo "wasm dom contract ok (2 transcripts + 3 plateaus + 9 mutants, plus retained state and its seam/production mutants, the keyed ops, the props, the payloads, the foreign elements, the worker host, the collector and the flags)"

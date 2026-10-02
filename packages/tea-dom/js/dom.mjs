@@ -77,9 +77,12 @@ export class DomHost {
    * part of the tree, so the tree root is its single child and the empty path
    * addresses that child.
    *
-   * `dispatch(path, event, payload)` is called with a recovered address
+   * `dispatch(path, event, payload, el)` is called with a recovered address
    * whenever a listened-for event fires. `payload` is `undefined` unless the
-   * guest's listener asked for something, and a string when it did. `doc` is
+   * guest's listener asked for something, and a string when it did. `el` is
+   * the element the listener sits on, for a host whose turns are not
+   * synchronous (`remote.mjs`): it recovers the address again when the turn
+   * is actually sent, against the document as it is by then. `doc` is
    * the document to create nodes with, and is a parameter so a test can pass
    * a recording stub -- the bridge uses six methods of it and no global.
    */
@@ -194,7 +197,7 @@ export class DomHost {
         // which key was pressed did not ask for it to be swallowed.
         if (kind !== 'key' && ev && typeof ev.preventDefault === 'function') ev.preventDefault();
         const path = this.addressOf(el);
-        if (path !== null) this.dispatch(path, name, readPayload(kind, el, ev));
+        if (path !== null) this.dispatch(path, name, readPayload(kind, el, ev), el);
       };
       el.addEventListener(name, fn);
       attached.set(name, { fn, kind });
