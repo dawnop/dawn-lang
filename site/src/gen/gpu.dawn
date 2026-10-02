@@ -14,13 +14,12 @@
 # to the ones it prints, so two implementations of "how many are implemented"
 # are compared instead of one being assumed to match the other.
 #
-# Why the files are read from site/build/gpu rather than from scripts/. The
-# JVM-against-native differential (scripts/site-dist-diff.sh) runs this
-# generator over a snapshot of docs/, examples/, site/ and packages/, and no
-# tile directory is in it. site/build.sh copies the tables, the ledgers and
-# the goldens under site/build/gpu with their paths kept, so the snapshot
-# carries them. Every reader here takes the root those paths hang from, which
-# is how the tests read the same files in place under the repository root.
+# Why the files are read in place, from scripts/. They are the tile gates'
+# own records, and a copy of them would be one more thing that could be
+# stale. The one reader that does not run from the repository root is the
+# JVM-against-native differential (scripts/site-dist-diff.sh), which runs
+# this generator over a snapshot; the three tile directories are in that
+# snapshot's list for this page's sake.
 #
 # Why one kernel, and why `vadd`. The side-by-side is there so that a reader
 # can hold both halves in view and watch each call land as operations. A
@@ -115,10 +114,10 @@ pub fn parse_table(name: String, text: String) -> Result[Coverage, String] = {
 fn table_files() -> List[(String, String)] =
   [("features", "features.txt"), ("types", "types.txt"), ("attrs", "attrs.txt")]
 
-fn read_tables(root: String) -> List[Coverage] !Fs =
+fn read_tables() -> List[Coverage] !Fs =
   map(table_files(), t => {
     let (name, file) = t
-    match parse_table(name, must_read("${root}/scripts/tileir-features/${file}")) {
+    match parse_table(name, must_read("scripts/tileir-features/${file}")) {
       Ok(c) -> c
       Err(e) -> panic("scripts/tileir-features/${file}: ${e}")
     }
@@ -177,9 +176,9 @@ pub fn parse_check_output(out: String) -> List[Coverage] = {
 # ---- the golden kernels ----
 
 ## The kernels scripts/tile-golden pins, by the stems of their `.mlir` files.
-pub fn golden_names(root: String) -> List[String] !Fs = {
+pub fn golden_names() -> List[String] !Fs = {
   var out: List[String] = []
-  for f in must_list("${root}/scripts/tile-golden") {
+  for f in must_list("scripts/tile-golden") {
     match str.strip_suffix(f, ".mlir") {
       Some(stem) -> {
         out = out ++ [stem]
@@ -339,8 +338,8 @@ fn arch_number(l: Ledger) -> Int = unwrap_or(parse_int(str.drop(l.arch, 3)), 0)
 ## Every `ledger*.txt` in scripts/tile-gpu-diff, last line parsed, in order of
 ## architecture. Found by listing rather than named, so a fourth machine's
 ## ledger is on the page the day it is recorded.
-pub fn read_ledgers(root: String) -> List[Ledger] !Fs = {
-  let dir = "${root}/scripts/tile-gpu-diff"
+pub fn read_ledgers() -> List[Ledger] !Fs = {
+  let dir = "scripts/tile-gpu-diff"
   var out: List[Ledger] = []
   for f in must_list(dir) {
     if str.starts_with(f, "ledger") && str.ends_with(f, ".txt") {
@@ -390,19 +389,18 @@ fn kernel_name() -> String = "vadd"
 
 fn kernels_file() -> String = "scripts/tile-golden/kernels.dawn"
 
-## Everything the page states, read from under `root`: site/build/gpu when
-## the site is built (site/build.sh copies it there), "." in the tests.
-pub fn load_facts(root: String) -> Facts !Fs = {
-  let golden = len(golden_names(root))
+## Everything the page states, read from the tile gates' files in place.
+pub fn load_facts() -> Facts !Fs = {
+  let golden = len(golden_names())
   if golden == 0 {
-    panic("${root}/scripts/tile-golden holds no .mlir golden")
+    panic("scripts/tile-golden holds no .mlir golden")
   }
   Facts {
-    tables: read_tables(root),
+    tables: read_tables(),
     golden: golden,
-    ledgers: read_ledgers(root),
-    kernel: cut_fn(must_read("${root}/${kernels_file()}"), kernel_name()),
-    mlir: str.trim_end(must_read("${root}/scripts/tile-golden/${kernel_name()}.mlir")),
+    ledgers: read_ledgers(),
+    kernel: cut_fn(must_read(kernels_file()), kernel_name()),
+    mlir: str.trim_end(must_read("scripts/tile-golden/${kernel_name()}.mlir")),
   }
 }
 
@@ -551,7 +549,7 @@ pub fn gen_gpu(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       En -> "${out}/gpu.html"
       Zh -> "${out}/zh/gpu.html"
     }
-  write_page(dst, gpu_page(a, lang, load_facts("site/build/gpu"), doc_files()))
+  write_page(dst, gpu_page(a, lang, load_facts(), doc_files()))
 }
 
 # ---- tests ----
@@ -586,7 +584,7 @@ test "the coverage counts are the ones check.py prints" {
     }
     assert complaint == ""
     let theirs = parse_check_output(printed)
-    let ours = read_tables(".")
+    let ours = read_tables()
     assert len(theirs) == 3
     assert map(theirs, x => (x.name, x.total, x.counts)) == map(ours, x => (x.name, x.total, x.counts))
     for x in ours {
@@ -633,7 +631,7 @@ test "a coverage row of the wrong width or status is an error" {
 
 test "every ledger's last line parses into every field" {
   with_fs_real(() => {
-    let ls = read_ledgers(".")
+    let ls = read_ledgers()
     assert len(ls) >= 1
     assert ls[0].file == "scripts/tile-gpu-diff/ledger.txt" || arch_number(ls[0]) <= arch_number(ls[len(ls) - 1])
     for l in ls {
@@ -709,7 +707,7 @@ test "the kernel beside its golden is the whole function, from the lines it name
 ## or a golden left behind by a kernel that was renamed, is red here.
 test "the golden kernels are the ones kernels.dawn dispatches" {
   with_fs_real(() => {
-    let names = golden_names(".")
+    let names = golden_names()
     assert len(names) > 0
     var arms: List[String] = []
     for l in str.split(must_read(kernels_file()), "\n") {
@@ -733,7 +731,7 @@ test "the golden kernels are the ones kernels.dawn dispatches" {
 
 test "the page states what the files say, and links nowhere it should not" {
   with_fs_real(() => {
-    let f = load_facts(".")
+    let f = load_facts()
     let p = gpu_page(plain_assets(), En, f, [])
     assert str.contains(p, "<title>Dawn's cuTile backend</title>")
     assert str.contains(p, "<h1>Dawn's cuTile backend</h1>")

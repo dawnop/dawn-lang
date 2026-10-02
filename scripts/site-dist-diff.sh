@@ -35,8 +35,11 @@
 #    so at the emit step instead of the claim rotting again.
 #
 # What is snapshotted and what is not: the generator's *data* -- docs/,
-# examples/, site/, packages/, and the example registry under scripts/ whose
-# pinned stdout the gallery renders -- is copied. The toolchain (bin/dawn,
+# examples/, site/, packages/, the example registry under scripts/ whose
+# pinned stdout the gallery renders, and the three tile directories under
+# scripts/ (tileir-features, tile-golden, tile-gpu-diff) whose coverage
+# tables, goldens and device ledgers the cuTile page (site/src/gen/gpu.dawn)
+# counts and prints -- is copied. The toolchain (bin/dawn,
 # selfhost/src, std/, runtime/c) cannot be, because the JVM leg runs through
 # `bin/dawn`, which rebuilds itself from the recursive Planner source closure on
 # demand. So the toolchain is fingerprinted instead, before and after; a change there aborts
@@ -83,6 +86,7 @@ mkdir -p "$SNAP"
 # generator only ever reads site/play-ui/dist.
 tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
   docs examples site packages scripts/example-main-contract/registry.json \
+  scripts/tileir-features scripts/tile-golden scripts/tile-gpu-diff \
   | tar -xf - -C "$SNAP"
 # site/build/stdlib.json is generated, not tracked (site/build.sh makes it).
 # Regenerating it into the snapshot keeps the run self-contained and keeps this

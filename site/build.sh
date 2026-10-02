@@ -128,20 +128,6 @@ export DAWN_SITE_PLAY_ORIGIN="${DAWN_SITE_PLAY_ORIGIN:-}"
 # could tell apart from the first.
 . scripts/site-figures-env.sh
 
-# The cuTile page's facts (gen/gpu.dawn): the three coverage tables, every
-# device ledger and the golden kernels, copied under site/build/gpu with their
-# paths kept. Copied, not read in place, for the reason stdlib.json is written
-# into site/build: scripts/site-dist-diff.sh runs the generator over a
-# snapshot of docs/, examples/, site/ and packages/, and site/build rides in
-# that snapshot where scripts/ does not.
-rm -rf site/build/gpu
-mkdir -p site/build/gpu/scripts/tileir-features site/build/gpu/scripts/tile-gpu-diff \
-  site/build/gpu/scripts/tile-golden
-cp scripts/tileir-features/features.txt scripts/tileir-features/types.txt \
-  scripts/tileir-features/attrs.txt site/build/gpu/scripts/tileir-features/
-cp scripts/tile-gpu-diff/ledger*.txt site/build/gpu/scripts/tile-gpu-diff/
-cp scripts/tile-golden/kernels.dawn scripts/tile-golden/*.mlir site/build/gpu/scripts/tile-golden/
-
 rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
