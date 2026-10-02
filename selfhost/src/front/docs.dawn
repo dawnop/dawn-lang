@@ -31,11 +31,21 @@ fn line_of(starts: List[Int], off: Int) -> Int = {
 
 pub type DocSrc = { starts: List[Int], by_line: Map[Int, Token] }
 
+## Every comment of `text`, filed under the 1-based line its last character
+## is on. The lexer hands comments over in source order, so one sweep over the
+## line starts finds every line: `line_of` per comment rescans the starts from
+## the top and costs comments x lines, which hover pays on every request
+## (docs/lsp-hover-design.md §A3.4).
 pub fn doc_src_of(text: String) -> DocSrc = {
   let (_, comments, _) = lexer.lex_with_comments(text)
   let starts = lexer.line_starts_of(text)
   var by_line: Map[Int, Token] = map.empty()
-  for c in comments { by_line = map.insert(by_line, line_of(starts, c.hi), c) }
+  # the count of line starts <= the current comment's end: `line_of`, kept
+  var line = 0
+  for c in comments {
+    while line < len(starts) && starts[line] <= c.hi { line = line + 1 }
+    by_line = map.insert(by_line, line, c)
+  }
   DocSrc { starts: starts, by_line: by_line }
 }
 
@@ -153,4 +163,14 @@ test "a declaration's doc is the contiguous ## block right above it" {
   assert doc_of(ds, at("fn d")) == Some("no space after the marker")
   # any offset on the declaration's first line reads the same block
   assert doc_of(ds, at("a() -> Int")) == doc_of(ds, at("fn a"))
+}
+
+test "the sweep files each comment under the line line_of gives it" {
+  let text = "# one\nfn a() -> Int = 1 # two\n\n## three\n## four\nfn b() -> Int = 2\n# five"
+  let (_, comments, _) = lexer.lex_with_comments(text)
+  let ds = doc_src_of(text)
+  assert len(comments) == 5
+  for c in comments {
+    assert map.get(ds.by_line, line_of(ds.starts, c.hi)) == Some(c)
+  }
 }
