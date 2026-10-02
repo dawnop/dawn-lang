@@ -200,12 +200,96 @@ pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
 
 ## A successful turn: the model the host must hand back next time, and the
 ## edits it must make to the document it is holding.
-pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String =
-  render(JObj(entries: map.from([
-    ("ok", JBool(value: true)),
-    ("model", JStr(value: model)),
-    ("patches", JArr(items: list.map(ps, p => enc_patch(p)))),
-  ])))
+##
+## Written straight to text rather than built as `enc_patch` values and handed
+## to `json/render`, and the bytes are the same: the test below holds the two
+## spellings equal over every op, every listener kind and strings that need
+## escaping. The reason is cost. A reply re-rendering forty rows of the search
+## panel is about 22 KB, and building it as a `Json` value first -- a `Map`
+## per node, then rendering each level into a string its parent copies again
+## -- was 2.9 ms of a 10 ms turn. Here every string is quoted once, by the same
+## `render` the tree spelling uses, and the pieces are joined once at the end.
+## `enc_node`, `enc_self` and `enc_patch` stay as the readable statement of the
+## shape; this is the same shape, written for speed.
+pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String = {
+  var out: List[String] = ["{\"ok\":true,\"model\":", quoted(model), ",\"patches\":["]
+  var first = true
+  for p in ps {
+    if not first {
+      out = out ++ [","]
+    }
+    out = put_patch(out, p)
+    first = false
+  }
+  join(out ++ ["]}"], "")
+}
+
+fn quoted(s: String) -> String = render(JStr(value: s))
+
+fn put_path(out: List[String], p: List[Int]) -> List[String] =
+  out ++ ["{\"path\":[" ++ join(list.map(p, i => to_string(i)), ",") ++ "],\"op\":"]
+
+fn put_patch[M](out: List[String], p: Patch[Node[M]]) -> List[String] = {
+  let head = put_path(out, p.path)
+  match p.op {
+    Replace(w) -> put_node(head ++ ["\"replace\",\"node\":"], w, true) ++ ["}"]
+    SetSelf(w) -> put_node(head ++ ["\"set-self\",\"node\":"], w, false) ++ ["}"]
+    AppendKids(ws) -> put_nodes(head ++ ["\"append\",\"nodes\":"], ws) ++ ["}"]
+    TruncateKids(keep) -> head ++ ["\"truncate\",\"keep\":" ++ to_string(keep) ++ "}"]
+    InsertKid(at, w) ->
+      put_node(head ++ ["\"insert\",\"at\":" ++ to_string(at) ++ ",\"node\":"], w, true) ++ ["}"]
+    RemoveKid(at) -> head ++ ["\"remove\",\"at\":" ++ to_string(at) ++ "}"]
+    MoveKid(from, to) ->
+      head ++ ["\"move\",\"from\":" ++ to_string(from) ++ ",\"to\":" ++ to_string(to) ++ "}"]
+  }
+}
+
+# `enc_node` when `whole`, `enc_self` when not, as text.
+fn put_node[M](out: List[String], n: Node[M], whole: Bool) -> List[String] =
+  match n {
+    Text(s) -> out ++ ["{\"t\":\"text\",\"s\":", quoted(s), "}"]
+    Elem(tag, props, on, ks, _) -> {
+      var acc = out ++ ["{\"t\":\"elem\",\"tag\":", quoted(tag), ",\"props\":["]
+      var first = true
+      for kv in props {
+        let (k, v) = kv
+        acc = acc ++ [if first { "[" } else { ",[" }, quoted(k), ",", quoted(v), "]"]
+        first = false
+      }
+      acc = acc ++ ["],\"on\":["]
+      first = true
+      for e in on {
+        if not first {
+          acc = acc ++ [","]
+        }
+        acc = acc
+          ++ (match e.payload {
+            NoData -> [quoted(e.event)]
+            Value -> ["[", quoted(e.event), ",\"value\"]"]
+            Key -> ["[", quoted(e.event), ",\"key\"]"]
+          })
+        first = false
+      }
+      if whole {
+        put_nodes(acc ++ ["],\"kids\":"], ks) ++ ["}"]
+      } else {
+        acc ++ ["]}"]
+      }
+    }
+  }
+
+fn put_nodes[M](out: List[String], ns: List[Node[M]]) -> List[String] = {
+  var acc = out ++ ["["]
+  var first = true
+  for n in ns {
+    if not first {
+      acc = acc ++ [","]
+    }
+    acc = put_node(acc, n, true)
+    first = false
+  }
+  acc ++ ["]"]
+}
 
 ## A turn that could not happen. `kind` is the machine's word for it (the
 ## failure's kind when a panic was caught, `bad-request` when the line did not
@@ -403,6 +487,57 @@ test "a key is a guest-side fact and has no wire encoding" {
   assert plain != identified
   assert render(enc_node(identified)) == render(enc_node(plain))
   assert render(enc_self(identified)) == render(enc_self(plain))
+}
+
+# The tree spelling of a reply: what `reply_ok` wrote before it wrote text
+# directly, and the oracle the test below holds it to.
+fn reply_by_tree[M](model: String, ps: List[Patch[Node[M]]]) -> String =
+  render(JObj(entries: map.from([
+    ("ok", JBool(value: true)),
+    ("model", JStr(value: model)),
+    ("patches", JArr(items: list.map(ps, p => enc_patch(p)))),
+  ])))
+
+test "a reply written as text is the reply the encoders describe, byte for byte" {
+  # Strings that need escaping in every position a string can take: a text
+  # node, a tag, a prop's name and value, an event name, and the model.
+  let odd = "q\"u\\o\nte\t\u{0001}é"
+  let leaf: Node[ProbeMsg] = Text(s: odd)
+  let field: Node[ProbeMsg] = Elem(
+    tag: "input",
+    props: [("value", odd), (odd, "x"), ("class", "")],
+    on: [
+      On { event: "input", payload: Value, to_msg: _p => Ping },
+      On { event: odd, payload: Key, to_msg: _p => Pong },
+      hear("blur", Pong),
+    ],
+    kids: [],
+    key: Some("k"),
+  )
+  let deep: Node[ProbeMsg] =
+    Elem(tag: "ul", props: [("class", "rows")], on: [], kids: [
+      Elem(tag: "li", props: [], on: [hear("click", Ping)], kids: [leaf, btn("go", Pong)], key: None),
+      field,
+      Elem(tag: "li", props: [], on: [], kids: [], key: None),
+    ], key: None)
+  let ps: List[Patch[Node[ProbeMsg]]] = [
+    Patch { path: [], op: Replace(w: deep) },
+    Patch { path: [1, 0], op: Replace(w: leaf) },
+    Patch { path: [2], op: SetSelf(w: deep) },
+    Patch { path: [2, 1], op: AppendKids(ws: [leaf, field, deep]) },
+    Patch { path: [0], op: AppendKids(ws: []) },
+    Patch { path: [], op: TruncateKids(keep: 3) },
+    Patch { path: [0, 4], op: InsertKid(at: 2, w: field) },
+    Patch { path: [0], op: RemoveKid(at: 2) },
+    Patch { path: [7, 0, 1], op: MoveKid(from: 3, to: 1) },
+  ]
+  var n = 0
+  while n <= len(ps) {
+    let some = list.take(ps, n)
+    assert reply_ok(odd, some) == reply_by_tree(odd, some)
+    assert reply_ok("{\"q\":\"\"}", some) == reply_by_tree("{\"q\":\"\"}", some)
+    n = n + 1
+  }
 }
 
 test "a reply is one line, ok or not" {

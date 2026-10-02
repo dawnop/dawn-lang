@@ -208,11 +208,15 @@ has the full argument; the three properties worth repeating:
   message on this side, so the application's message type needs no encoding and
   the host has never heard of it.
 - **The model crosses, as opaque text.** The mutable model is the only thing
-  a reactor carries between turns; the one exception is the read-only root a
-  `_with_state` entry installs at init (`std/reactor`), which never rides the
-  wire again. The consequence is worth more than the cost: a turn is a
-  function of its inputs and that root, so one transcript replays identically
-  on the JVM, on native and on wasm.
+  a reactor carries between turns; the exceptions are what a `_with_state`
+  entry roots in the guest (`std/reactor`), neither of which rides the wire:
+  the read-only value its init installs, and the tree the last reply
+  described. The next event routes through that tree instead of rendering the
+  old model again, but only when the host hands back the very model text that
+  reply carried; any other text is rendered afresh (`reactor.turn_shown`). The
+  consequence is worth more than the cost: a turn is a function of its inputs
+  and that root, so one transcript replays identically on the JVM, on native
+  and on wasm.
 - **`SetSelf` ships a node without its children.** `apply` performs
   `rekid(donor, kids(target))` and reads nothing of the donor but its own
   data, so shipping the subtree would make an attribute change at the root
@@ -316,7 +320,7 @@ runtime, and a boundary that varies by backend cannot have one transcript.
 | `route` | an address plus an event name to a message, on `fold_preorder` |
 | `wire` | the JSON encoding of nodes, patches and replies; request decoding |
 | `render` | the tree as HTML text: `to_html`, `to_document` |
-| `reactor` | `turn` (pure), `serve` (the package's only `!io`), and the `_with_flags` / `_with_state` pairs of each |
+| `reactor` | `turn` (pure), `serve` (the package's only `!io`), the `_with_flags` / `_with_state` pairs of each, and `turn_shown`, the pure turn `serve_with_state` runs with the tree it kept |
 
 ## The host half
 

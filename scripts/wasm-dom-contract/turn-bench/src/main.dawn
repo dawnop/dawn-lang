@@ -1,0 +1,117 @@
+# One stage of a reactor turn, run a given number of times, so turn-bench.mjs
+# can price it by timing the whole program from outside.
+#
+# There is no clock inside the guest (std has none, and an `!io` timer around
+# a pure call would be a different program), so the price of a stage is
+# arithmetic: the same run with the stage repeated N times and with it
+# repeated zero times differ by N copies of it and nothing else. Everything a
+# stage needs -- the request line, the decoded model, both trees, the patches
+# -- is prepared before the loop in every mode, the zero-repetition one
+# included, so the subtraction removes it.
+#
+# Input, on stdin: one line `<stage> <reps> <scenario>`. The scenarios are the
+# two the issue that asked for this instrument names (#361): `empty`, a
+# keydown the panel ignores, so the model and the tree come back unchanged;
+# and `rows`, a keystroke that re-renders all forty rows.
+
+use std/io
+use std/list
+use std/str
+use tea_core/cmd.{fold_msg}
+use tea_core/diff.{diff}
+use tea_dom/node.{Node, Text, Elem, deliver}
+use tea_dom/route
+use tea_dom/wire.{decode_request, reply_ok, Event}
+use tea_dom/reactor.{turn_with_state, turn_shown, Shown}
+use panel.{Msg, init, update, view, encode, decode, Typed}
+
+fn request(model: String, path: List[Int], event: String, payload: String) -> String =
+  "{\"op\":\"event\",\"model\":" ++ quote(model)
+  ++ ",\"path\":[" ++ join(list.map(path, i => to_string(i)), ",") ++ "]"
+  ++ ",\"event\":" ++ quote(event) ++ ",\"payload\":" ++ quote(payload) ++ "}"
+
+# The first address in the tree that listens for `event`: the text field, for
+# both events the scenarios send.
+fn where_heard(tree: Node[Msg], event: String) -> List[Int] = {
+  var found: List[Int] = []
+  var seen = false
+  for (path, on) in route.listeners(tree) {
+    if not seen && list.any(on, l => l.event == event) {
+      found = path
+      seen = true
+    }
+  }
+  found
+}
+
+fn quote(s: String) -> String = "\"" ++ str.replace(s, "\"", "\\\"") ++ "\""
+
+pub fn main() -> Unit !io = {
+  let head = str.split(unwrap_or(io.read_line(), "none 0 empty"), " ")
+  let stage = head[0]
+  let reps = unwrap_or(parse_int(head[1]), 0)
+  let scenario = head[2]
+  let (book, blank) = init(None)
+  # The panel as a reader left it: a query answered, forty rows on screen.
+  let shown = fold_msg(blank, Typed(text: "hand"), (acc, x) => update(book, acc, x))
+  let model = encode(shown)
+  let payload = if scenario == "empty" { "a" } else { "handle" }
+  let event = if scenario == "empty" { "keydown" } else { "input" }
+  let m0 = decode(model)
+  let old: Node[Msg] = view(book, m0)
+  let at = where_heard(old, event)
+  let line = request(model, at, event, payload)
+  let msg: Msg =
+    match route.at(old, at, event) {
+      Some(l) -> deliver(l, payload)
+      None -> panic("nothing in the panel listens for `${event}`")
+    }
+  let m1 = fold_msg(m0, msg, (acc, x) => update(book, acc, x))
+  let new: Node[Msg] = view(book, m1)
+  let patches = diff(old, new)
+  let text = encode(m1)
+  let known = ["none", "parse", "decode", "view", "route", "update", "diff", "encode", "reply", "compare", "turn", "turn_cached"]
+  if not list.contains(known, stage) {
+    io.println("unknown stage ${stage}")
+    return ()
+  }
+  var acc = 0
+  var i = 0
+  while i < reps {
+    if stage == "parse" {
+      acc = acc + (match decode_request(line) { Event(..) -> 1, _ -> 0 })
+    } else if stage == "decode" {
+      acc = acc + len(decode(model).hits)
+    } else if stage == "view" {
+      let v: Node[Msg] = view(book, m0)
+      # Not `v == old`: that is a second walk of the tree and would bill the
+      # view for an equality the turn never runs.
+      acc = acc + (match v { Text(_) -> 0, Elem(..) -> 1 })
+    } else if stage == "route" {
+      acc = acc + (match route.at(old, at, event) { Some(l) -> str.len(l.event), None -> 0 })
+    } else if stage == "update" {
+      acc = acc + len(fold_msg(m0, msg, (a, x) => update(book, a, x)).hits)
+    } else if stage == "diff" {
+      acc = acc + len(diff(old, new))
+    } else if stage == "encode" {
+      acc = acc + str.len(encode(m1))
+    } else if stage == "reply" {
+      acc = acc + str.len(reply_ok(text, patches))
+    } else if stage == "compare" {
+      acc = acc + (if text == model { 1 } else { 0 })
+    } else if stage == "turn" {
+      let (_, out) = turn_with_state(line, Some(book), init, encode, decode, update, view)
+      acc = acc + str.len(out)
+    } else if stage == "turn_cached" {
+      # The tree the previous turn left behind, keyed by the text it sent:
+      # what `serve_with_state` hands every event after the first.
+      let kept = Some(Shown { model: model, tree: old })
+      let (_, _, out) = turn_shown(line, Some(book), kept, init, encode, decode, update, view)
+      acc = acc + str.len(out)
+    }
+    i = i + 1
+  }
+  # Printed so no stage's result is dead; the numbers also say the scenario
+  # is the one it claims to be (an empty turn answers zero patches).
+  io.println("${stage} ${reps} ${scenario} patches=${len(patches)} model=${str.len(model)}B reply=${str.len(reply_ok(text, patches))}B acc=${acc}")
+}

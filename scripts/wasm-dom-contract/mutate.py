@@ -61,6 +61,14 @@ MUTATIONS = {
          "          }\n"),
     ),
 
+    # retained.sh: the kept tree answers for whatever model the host hands
+    # back, matching text or not.
+    "stale-tree": ((
+        DOM_REACTOR,
+        '              Some(s) if s.model == model -> s.tree',
+        '              Some(s) -> s.tree',
+    ),),
+
     # flags.sh: the host half of init flags, then the guest half.
     "absent-flag-becomes-empty": ((
         JS_REACTOR,
@@ -105,10 +113,13 @@ MUTATIONS = {
         '      path.unshift(i);',
         '      path.push(i);',
     ),),
+    # The reply is written as text by `put_patch`, not through `enc_patch`,
+    # so the mutant is where a reply's `set-self` is actually spelled: the
+    # node written whole rather than as its own data.
     "setself-payload": ((
         WIRE,
-        '        ("node", enc_self(w)),',
-        '        ("node", enc_node(w)),',
+        '    SetSelf(w) -> put_node(head ++ ["\\"set-self\\",\\"node\\":"], w, false) ++ ["}"]',
+        '    SetSelf(w) -> put_node(head ++ ["\\"set-self\\",\\"node\\":"], w, true) ++ ["}"]',
     ),),
     "payload-ignores-kind": ((
         DOM_JS,
