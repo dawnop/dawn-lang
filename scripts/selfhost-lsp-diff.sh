@@ -2,7 +2,7 @@
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion, symbols, signature help,
-# formatting over
+# constant and comptime values on hover, formatting over
 # a two-module project + a standalone buffer) runs against both toolchains
 # and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -84,6 +84,36 @@ pub fn calls() -> String = {
   let c = "z" |> pad_to(2)
   a ++ b ++ c
 }
+EOF
+
+# Constants and comptime blocks, whose values hover reads from the analysis
+# (docs/lsp-hover-design.md): declared here, imported from util by name and
+# through an alias, taken from std, a table long enough to be cut, and one
+# comptime refuses -- plus, after a change, a module whose errors mean comptime
+# never ran.
+cat > "$OUT/proj/src/consts.dawn" <<'EOF'
+use std/memfs
+use util.{LIMIT}
+use util as u
+
+const MASK: Int = comptime { 1 << 20 }
+const SQUARES: List[Int] = comptime { squares(100) }
+const GREETING: String = "hi\tthere"
+const SEED: Int = hash(1)
+
+fn squares(n: Int) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  while i < n {
+    out = out ++ [i * i]
+    i = i + 1
+  }
+  out
+}
+
+pub fn total() -> Int = LIMIT + u.LIMIT + MASK
+
+pub fn root() -> String = memfs.BASE
 EOF
 
 cat > "$OUT/proj/src/app.dawn" <<'EOF'
@@ -273,6 +303,31 @@ note("textDocument/didChange", {"textDocument": {"uri": calls_uri, "version": 2}
     "contentChanges": [{"text": open_text}]})
 req("textDocument/signatureHelp", at(calls_uri, open_text, 'pad_to("x", ', 1, 12))
 note("textDocument/didClose", tdoc(calls_uri))
+
+# constant and comptime values on hover
+consts_path = f"{out_dir}/proj/src/consts.dawn"
+consts_uri = "file://" + consts_path
+consts_text = open(consts_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": consts_uri, "languageId": "dawn", "version": 1, "text": consts_text}})
+for needle, occ, delta in [
+    ("MASK: Int", 1, 1),        # declaration, value from a comptime block
+    ("comptime { 1", 1, 2),     # the comptime keyword
+    ("SQUARES", 1, 1),          # a table cut at the line's end
+    ("GREETING", 1, 1),         # a string, escaped
+    ("SEED", 1, 1),             # comptime refused: not evaluated, and why
+    ("LIMIT}", 1, 1),           # selective import of another module's const
+    ("LIMIT + u", 1, 1),        # that const, used
+    ("u.LIMIT", 1, 3),          # the same const through a module alias
+    ("BASE", 1, 1),             # a std const
+]:
+    req("textDocument/hover", at(consts_uri, consts_text, needle, occ, delta))
+broken_text = consts_text.replace("pub fn root() -> String = memfs.BASE",
+    "pub fn root() -> Int = memfs.BASE")
+note("textDocument/didChange", {"textDocument": {"uri": consts_uri, "version": 2},
+    "contentChanges": [{"text": broken_text}]})
+req("textDocument/hover", at(consts_uri, broken_text, "MASK: Int", 1, 1))
+note("textDocument/didClose", tdoc(consts_uri))
 
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {

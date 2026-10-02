@@ -13,6 +13,7 @@
 # declaration, and a span only happens to.
 
 use std/map
+use std/str
 use front/ast.{
   Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, TypeParamDecl,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
@@ -46,10 +47,12 @@ use check/types.{
   ty_show, sig_render, ctor_render, trait_of, adt_of,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
-use check/cx.{ModExports}
+use check/cx.{ModExports, Cx}
 use check/identity
 use driver/analyze.{Program, CheckedMod}
 use driver/stdlib.{StdCtx, std_file_of}
+use ir/interp.{CtOut}
+use lsp/lspv.{value_text}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -464,7 +467,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       q = visit_written_type(q, ann, WtStorage)
       match map.get(qc.entry.cx.consts, name) {
         Some(t) -> {
-          q = offer(q, nlo, nhi, "const " ++ name ++ ": " ++ show_ty(qc, t),
+          q = offer(q, nlo, nhi, const_text(qc, qc.entry.mod_path, name, t),
             Some((nlo, nhi)), None)
         }
         None -> ()
@@ -610,6 +613,121 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
   q
 }
 
+# ---- comptime values (docs/lsp-hover-design.md §3) ----
+
+## The checked state a constant's value is read from: the module that declared
+## it, whose analysis already ran comptime over it (`analyze.analyze_module_step`) --
+## hover evaluates nothing.
+type ValueHome = { cx: Cx, tm: TModule, ct: CtOut, own: Bool }
+
+## The module a constant reference names. A qualified `m.NAME` carries its
+## owner; a bare one carries "" and is either declared here or imported by a
+## `use m.{NAME}` line -- the same two places `def_of_const` looks.
+fn const_owner(qc: QCx, owner: String, name: String) -> String =
+  if owner != "" { owner }
+  else {
+    match const_decl_span(qc.entry.m, name) {
+      Some(_) -> qc.entry.mod_path
+      None ->
+        match map.get(qc.entry.cx.imported_names, name) {
+          Some(mp) -> mp
+          None -> qc.entry.mod_path
+        }
+    }
+  }
+
+fn value_home(qc: QCx, mod_path: String) -> Option[ValueHome] = {
+  let e = qc.entry
+  if mod_path == e.mod_path { return Some(ValueHome { cx: e.cx, tm: e.tm, ct: e.ct, own: true }) }
+  for cm in qc.prog.modules {
+    if cm.mod_path == mod_path { return Some(ValueHome { cx: cm.cx, tm: cm.tm, ct: cm.ct, own: false }) }
+  }
+  for sm in qc.std.mods {
+    let (mp, cx, tm, ct) = sm
+    if mp == mod_path { return Some(ValueHome { cx: cx, tm: tm, ct: ct, own: false }) }
+  }
+  None
+}
+
+## `const NAME: T = value`, or the type alone with a second line saying why
+## there is no value: comptime is skipped for a module the checker refused
+## (`analyze.analyze_module_step` runs it only when `cx.diags` is empty), and a constant
+## whose evaluation failed has its diagnostic in `ct.diags`, at the span the
+## interpreter folded it under -- the constant's own (`interp.eval_module`).
+fn const_text(qc: QCx, mod_path: String, name: String, t: Ty) -> String = {
+  let head = "const " ++ name ++ ": " ++ show_ty(qc, t)
+  match value_home(qc, mod_path) {
+    None -> head
+    Some(h) ->
+      match map.get(h.ct.consts, name) {
+        Some(v) ->
+          match value_text(h.cx.adts, t, v) {
+            Some(vt) -> head ++ " = " ++ vt
+            None -> head
+          }
+        None -> {
+          head ++ "\n" ++ not_evaluated(h, mod_path, tconst_span(h.tm, name))
+        }
+      }
+  }
+}
+
+## `comptime: T = value` for the block folded at `(lo, hi)` -- the typed tree's
+## span, the key `interp.eval_block` filed the value under.
+fn comptime_text(qc: QCx, lo: Int, hi: Int, t: Ty) -> String = {
+  let head = "comptime: " ++ show_ty(qc, t)
+  let e = qc.entry
+  match map.get(e.ct.blocks, (lo, hi)) {
+    Some(v) ->
+      match value_text(e.cx.adts, t, v) {
+        Some(vt) -> head ++ " = " ++ vt
+        None -> head
+      }
+    None ->
+      head ++ "\n" ++
+      not_evaluated(ValueHome { cx: e.cx, tm: e.tm, ct: e.ct, own: true }, e.mod_path, Some((lo, hi)))
+  }
+}
+
+## The first constant of that name: a repeat is a module the checker refused,
+## which never reaches the span lookup.
+fn tconst_span(tm: TModule, name: String) -> Option[(Int, Int)] = {
+  for tc in tm.consts {
+    if tc.name == name { return Some((tc.lo, tc.hi)) }
+  }
+  None
+}
+
+fn not_evaluated(h: ValueHome, mod_path: String, span: Option[(Int, Int)]) -> String = {
+  if len(h.cx.diags) > 0 {
+    return if h.own { "(not evaluated: module has errors)" }
+    else { "(not evaluated: module " ++ mod_path ++ " has errors)" }
+  }
+  match span {
+    Some(sp) -> {
+      let (lo, hi) = sp
+      for d in h.ct.diags {
+        if d.lo == lo && d.hi == hi {
+          let first = match str.split_once(d.msg, "\n") {
+            Some(pr) -> {
+              let (a, _) = pr
+              a
+            }
+            None -> d.msg
+          }
+          let reason = match str.strip_prefix(first, "comptime: ") {
+            Some(r) -> r
+            None -> first
+          }
+          return "(not evaluated: " ++ reason ++ ")"
+        }
+      }
+    }
+    None -> ()
+  }
+  "(not evaluated)"
+}
+
 fn tf_body(tf: Option[TFun]) -> Option[TExpr] =
   match tf {
     Some(f) -> Some(f.body)
@@ -703,7 +821,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   match map.get(exp.consts, imp.name) {
     Some(t) -> {
       let (dsp, dp) = def_of_const_in(qc, exp.mod_path, imp.name)
-      q = offer(q, imp.lo, imp.hi, "const " ++ imp.name ++ ": " ++ show_ty(qc, t), dsp, dp)
+      q = offer(q, imp.lo, imp.hi, const_text(qc, exp.mod_path, imp.name, t), dsp, dp)
     }
     None -> ()
   }
@@ -1096,6 +1214,12 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             _ -> ()
           }
         }
+        # `m.NAME`: a module-qualified constant (LANG-06 step 3). The receiver
+        # is a module alias, not a value, so only the name is offered.
+        Some(XConstRef(owner, cname, _, _, cty)) -> {
+          let (dsp, dp) = def_of_const_in(qc, owner, cname)
+          q = offer(q, flo, fhi, const_text(qc, owner, cname, cty), dsp, dp)
+        }
         _ -> { q = walk_e(qc, q, target, None) }
       }
     EStr(parts, _, _) -> {
@@ -1117,7 +1241,12 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     }
     EComptime(body, _, _) ->
       match te {
-        Some(XComptime(tb, _, _, _)) -> { q = walk_e(qc, q, body, Some(tb)) }
+        Some(XComptime(tb, lo, hi, ty)) -> {
+          # the whole block, so anywhere in it no inner node claims answers
+          # with the block's value -- the `comptime` keyword above all
+          q = offer(q, e_lo(pe), e_hi(pe), comptime_text(qc, lo, hi, ty), None, None)
+          q = walk_e(qc, q, body, Some(tb))
+        }
         _ -> { q = walk_e(qc, q, body, None) }
       }
     EPropagate(operand, _, _) ->
@@ -1367,11 +1496,11 @@ fn walk_ctor_call(
         i = i + 1
       }
     }
-    Some(XConstRef(_, cname, _, _, _)) -> {
+    Some(XConstRef(owner, cname, _, _, _)) -> {
       match map.get(qc.entry.cx.consts, cname) {
         Some(t) -> {
           let (dsp, dp) = def_of_const(qc, cname)
-          q = offer(q, clo, chi, "const " ++ cname ++ ": " ++ show_ty(qc, t), dsp, dp)
+          q = offer(q, clo, chi, const_text(qc, const_owner(qc, owner, cname), cname, t), dsp, dp)
         }
         None -> ()
       }
