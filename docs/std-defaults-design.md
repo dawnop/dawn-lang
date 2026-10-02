@@ -242,7 +242,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 | K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
 | K2 | 已落地 | `3e31f40f`（main 上的哈希；分支上原为 `fa6c493e`） |
 | K3–K18 | 未开工 | |
-| K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | 待回填 |
+| K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `25ff1f19`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
 
 ### 7.1 K1 落地记录
 
@@ -356,3 +356,11 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   `omit-public-function-doc` 锚点换到 `char_is_letter`。checker-corpus 的 `std_private` / `std_renamed`
   两例重录：`fmt.atoi` / `fmt.atoi_radix` 不再存在，答案从「私有」变成「没有这个导出」。
 
+- **Emit-Change（实测）。** 以真父提交 `1c2442b6` 现编的工具链作无遮蔽对照（不用种子：这些 label 在
+  v0.82.0 之后都已被别的刀声明过）：`emit site`、`emit playground`、`emit packages/web`、
+  `emit packages/json`、`emit selfhost`、`emit examples/projects/calc.dawn` 动，其余四个 `emit` 语料
+  逐字节不动；`doc --builtins` 与 `lsp`（补全里 `parse_int` 的签名、`parse_int_radix` 消失）动，
+  run-diff 的其它 label、fmt-diff、param-diff 不动。
+- **负控。** 把默认 radix 临时改成 16：`dawn test --stdlib` 红 3 个 fmt 测试，`dawn test selfhost` 红 4 个
+  （`driver/stdlib` 的折叠测试、`pkgfetch` 与 `json2` 的整数解析）。**checker-corpus 不红**：它只录检查器
+  诊断，没有一例渲染 `parse_int` 的默认值，所以它看不见默认值本身，这不是本刀能补的盲区。
