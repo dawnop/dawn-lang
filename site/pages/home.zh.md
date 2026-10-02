@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 85d0ec146935b934 -->
+<!-- doc-check: translation-of site/pages/home.md @ 050f6c34a698ed45 -->
 
 # 首页文案 —— 中文译本
 
@@ -30,7 +30,7 @@ JVM 与 C，同一个答案
 
 ## fact-gpu
 
-经 cuTile 跑在 NVIDIA GPU 上
+[经 cuTile 跑在 NVIDIA GPU 上](zh/gpu.html)
 
 ## cta-playground
 
@@ -140,6 +140,14 @@ kernel 也是 Dawn 函数。
 
 cuTile kernel 是一个带具名效果的普通 Dawn 函数，降为 CUDA Tile IR。纯的假设备在没有 GPU 的机器上给出同一个答案。
 
+## gpu-cover
+
+个公开 Tile IR opcode 已实现，每个都在 GPU 上与宿主参考对拍过。
+
+## gpu-cover-link
+
+[覆盖表、门禁与设备台账都在 cuTile 页上 →](zh/gpu.html)
+
 ## gpu-pipe
 
 两边各自怎么走
@@ -226,7 +234,7 @@ kernel
 
 ## host-fact-pure-body
 
-所以 `!Gpu` 程序能在测试里跑，也能在 comptime 里跑。
+所以 `!Gpu` 程序能在测试里跑，两个后端都行，不需要 GPU。
 
 ## phase-install
 

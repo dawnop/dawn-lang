@@ -210,7 +210,7 @@ pub fn lang_path(lang: Lang, pair: String) -> String =
 ## site navigation: (key, label, path-from-root)
 ##
 ## Each language's nav points at that language's pages -- which is not the same
-## list of paths, because all seven are paired and the Chinese half of each
+## list of paths, because all eight are paired and the Chinese half of each
 ## lives under `/zh/`. Two of them used to be the exception, named the same file from
 ## both navs and labelled `Spec (中文)` on the English side; the spec and the
 ## design notes were translated on 2026-08-07 and the exception is gone with
@@ -222,6 +222,12 @@ pub fn lang_path(lang: Lang, pair: String) -> String =
 ## design; those notes are frozen at M7 and now sit under History as its early
 ## chapter, at their own URL and outside the nav. The Chinese label is 历史,
 ## the timeline's own title, now that the page is not a design history.
+##
+## GPU opens the cuTile backend's page (gpu.html, 2026-10-03). It sits after
+## Stdlib and before History because it is reference, what the backend covers
+## today, not a record of how it got there. Its Chinese label is GPU too: the
+## word is the one Chinese writing about GPUs uses, the way Playground is kept,
+## where Demo had a plain Chinese word to become.
 pub fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
     En -> [
@@ -229,6 +235,7 @@ pub fn nav_items(lang: Lang) -> List[(String, String, String)] =
       ("spec", "Spec", "spec.html"),
       ("examples", "Examples", "examples/index.html"),
       ("stdlib", "Stdlib", "stdlib.html"),
+      ("gpu", "GPU", "gpu.html"),
       ("history", "History", "history.html"),
       ("playground", "Playground", "playground.html"),
       ("tea", "Demo", "tea.html"),
@@ -238,6 +245,7 @@ pub fn nav_items(lang: Lang) -> List[(String, String, String)] =
       ("spec", "规范", "zh/spec.html"),
       ("examples", "示例", "zh/examples/index.html"),
       ("stdlib", "标准库", "zh/stdlib.html"),
+      ("gpu", "GPU", "zh/gpu.html"),
       ("history", "历史", "zh/history.html"),
       ("playground", "Playground", "zh/playground.html"),
       ("tea", "演示", "zh/tea.html"),
@@ -1152,6 +1160,20 @@ test "the trail links every step but the page itself" {
   assert t == `<nav class="crumbs" aria-label="当前位置"><a href="../../zh/tutorial/index.html">教程</a>`
     ++ `<span class="sep" aria-hidden="true">/</span><span aria-current="page">第三章</span></nav>`
   assert section_crumb(En, "..", "history", false) == here("History")
+}
+
+## Both navs carry the cuTile page, after Stdlib and before History, each
+## pointing into its own language's tree.
+test "the nav lists GPU between Stdlib and History in both languages" {
+  for lang in [En, Zh] {
+    let keys = map(nav_items(lang), it => {
+      let (k, _, _) = it
+      k
+    })
+    assert keys == ["tutorial", "spec", "examples", "stdlib", "gpu", "history", "playground", "tea"]
+  }
+  assert section_crumb(En, ".", "gpu", false) == here("GPU")
+  assert section_crumb(Zh, "..", "gpu", true) == crumb("GPU", "../zh/gpu.html")
 }
 
 ## 250 words or 400 Chinese characters to the minute, markup not counted,

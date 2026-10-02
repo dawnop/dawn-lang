@@ -105,6 +105,35 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
   }
 }
 
+## One top-level function, cut out of a source file: from its `fn <name>(`
+## line through the first line that is a lone `}`. The front page's listings
+## and the cuTile page's kernel are both cut with it. A function that moved,
+## changed shape or was renamed stops the build; showing the wrong lines, or
+## none, is the alternative.
+pub fn fn_source(src: String, name: String) -> String = {
+  let head = "fn ${name}("
+  var out: List[String] = []
+  var on = false
+  var done = false
+  for l in str.split(src, "\n") {
+    if not done {
+      if not on && str.starts_with(l, head) {
+        on = true
+      }
+      if on {
+        out = out ++ [l]
+        if l == "}" {
+          done = true
+        }
+      }
+    }
+  }
+  if not done {
+    panic("no `${head}...` closed by a lone `}` to show")
+  }
+  join(out, "\n")
+}
+
 ## 01, 02, ... for chapter file names.
 pub fn pad2(i: Int) -> String = if i < 10 { "0${i}" } else { "${i}" }
 

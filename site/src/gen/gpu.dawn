@@ -31,23 +31,23 @@
 # scripts/tile-golden/kernels.dawn rather than from examples/projects/gpu_fake
 # because that is the file the golden on its right is traced from: the two
 # halves are a pair by construction, not by resemblance. The cut is
-# gen/home.fn_source's, so a function that moves or changes shape stops the
-# build, and the lines it came from are printed in its bar.
+# gen/common.fn_source's, the one the front page's listings use, so a
+# function that moves or changes shape stops the build, and the lines it came
+# from are printed in its bar.
 #
-# The words are site/pages/gpu.md, in home.md's shape, so that a translation
-# can take the road the front page's took.
+# The words are site/pages/gpu.md and its translation gpu.zh.md, in
+# home.md's shape: the same keys in both, which a test below holds.
 
 use std/str
 use std/list
 use std/io
 use std/io.{Fs, with_fs_real, with_proc_real}
-use html/page.{Assets, Lang, En, Zh, PageHead, shell, crumb, here, chip, plain_assets}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell, section_crumb, chip, plain_assets}
 use html/play.{win_bar}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
-use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files}
+use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source}
 use gen/copy.{Copy, load_copy, line, plain, body}
-use gen/home.{fn_source}
 
 # ---- the coverage tables ----
 
@@ -454,7 +454,7 @@ fn rest_of(cov: Coverage) -> String =
   join(map(filter(statuses(), s => s != "implemented" && count_of(cov, s) > 0), s =>
       "${count_of(cov, s)} <code>${s}</code>"), " · ")
 
-fn table_named(f: Facts, name: String) -> Coverage = {
+pub fn table_named(f: Facts, name: String) -> Coverage = {
   let hits = filter(f.tables, x => x.name == name)
   if len(hits) != 1 {
     panic("no coverage table called ${name}")
@@ -504,28 +504,57 @@ ${join(map(f.ledgers, row), "\n")}
 <p class="gpu-note">${line(c, "ledger-tiers", mu)}</p>"""
 }
 
+## The page's sections, in order: each heading's id and the copy key its
+## `<key>-title` and `<key>-body` are under. The page writes its headings from
+## this list and gen/search indexes them from it, so a section renamed or
+## moved here moves in both, and a fragment the search names is one the page
+## carries.
+pub fn prose_sections() -> List[(String, String)] =
+  [("layers", "layers"), ("kernel", "kernel"), ("coverage", "coverage"), ("gates", "gates"),
+    ("ledgers", "ledger")]
+
+## The copy file of one language.
+pub fn copy_file(lang: Lang) -> String =
+  match lang {
+    En -> "site/pages/gpu.md"
+    Zh -> "site/pages/gpu.zh.md"
+  }
+
+fn section_key(id: String) -> String = {
+  let hits = filter(prose_sections(), e => {
+    let (i, _) = e
+    i == id
+  })
+  match get(hits, 0) {
+    Some((_, k)) -> k
+    None -> panic("no section `${id}` on the cuTile page")
+  }
+}
+
 ## A column of prose: a section heading and its body from the copy.
-fn prose(c: Copy, mu: fn(String) -> String, id: String, key: String) -> String =
+fn prose(c: Copy, mu: fn(String) -> String, id: String) -> String = {
+  let key = section_key(id)
   """<div class="col prose"><h2 id="${id}">${line(c, "${key}-title", mu)}</h2>""" ++ "\n"
-  ++ body(c, "${key}-body", mu) ++ "</div>"
+    ++ body(c, "${key}-body", mu) ++ "</div>"
+}
 
 ## The page as markup, in one language, without writing it: what the tests
 ## read, so that they check the document a browser gets.
 ##
-## It has no twin yet, so `pair` is "" and the header offers no language
-## switch: a switch to a page that does not exist is a broken link. The
-## translation (site/pages/gpu.zh.md) makes it "gpu.html".
+## Paired: `pair` is "gpu.html", so each language's header offers the other
+## and carries both hreflang alternates. The trail is the nav's own GPU item,
+## as on the other pages the nav lists, so the two cannot name it apart.
 fn gpu_page(a: Assets, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
-  let (src, root) =
+  let root =
     match lang {
-      En -> ("site/pages/gpu.md", ".")
-      Zh -> ("site/pages/gpu.zh.md", "..")
+      En -> "."
+      Zh -> ".."
     }
-  let c = load_copy(src)
+  let c = load_copy(copy_file(lang))
   let mu = (u: String) => map_doc_url(root, docs, u)
   let title = plain(c, "title")
   let head = PageHead {
-    crumbs: [crumb("Dawn", "${root}/index.html"), here(line(c, "crumb", mu))],
+    crumbs: [section_crumb(lang, root, "gpu", false)],
     title: line(c, "title", mu),
     lede: line(c, "lede", mu),
     meta: [chip("<code>!Dev</code> · Tile IR · <code>tileiras</code>"),
@@ -534,15 +563,15 @@ fn gpu_page(a: Assets, lang: Lang, f: Facts, docs: List[String]) -> String !Fs =
     cls: "col",
   }
   let main = `<main class="wrap page gpu-page">` ++ "\n"
-    ++ prose(c, mu, "layers", "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
-    ++ prose(c, mu, "kernel", "kernel") ++ "\n" ++ pair(c, f) ++ "\n"
-    ++ prose(c, mu, "coverage", "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
-    ++ prose(c, mu, "gates", "gates") ++ "\n" ++ gates(c, mu) ++ "\n"
-    ++ prose(c, mu, "ledgers", "ledger") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
-  shell(a, lang, "", title, root, "", head, main)
+    ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
+    ++ prose(c, mu, "kernel") ++ "\n" ++ pair(c, f) ++ "\n"
+    ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
+    ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu) ++ "\n"
+    ++ prose(c, mu, "ledgers") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
+  shell(a, lang, "gpu.html", title, root, "gpu", head, main)
 }
 
-## Write the page. English only for now, at the site root.
+## Write the page: English at the site root, Chinese under `/zh/`.
 pub fn gen_gpu(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let dst =
     match lang {
@@ -743,8 +772,68 @@ test "the page states what the files say, and links nowhere it should not" {
     }
     assert str.contains(p, `<span class="k">fn</span> <span class="f">vadd</span>`)
     assert str.contains(p, "entry @vadd(")
-    # no twin yet, so no language switch to a page that is not there
-    assert not str.contains(p, `class="lang"`)
-    assert not str.contains(p, `hreflang="zh-CN"`)
+    # paired: the header switches to the twin and both alternates are there
+    assert str.contains(p, `class="lang"`)
+    assert str.contains(p, `hreflang="zh-CN"`)
+    assert str.contains(p, `hreflang="en"`)
+  })
+}
+
+## The translation is the same page: the same numbers and kernel, its own
+## words, under /zh/, with the switch pointing back at the English one.
+test "the Chinese page is the same page in its own words" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let p = gpu_page(plain_assets(), Zh, f, [])
+    assert str.contains(p, `<html lang="zh-CN">`)
+    assert str.contains(p, "<h1>Dawn 的 cuTile 后端</h1>")
+    assert not str.contains(p, "Dawn's cuTile backend")
+    let feats = table_named(f, "features")
+    assert str.contains(p, "<strong>${count_of(feats, "implemented")}<small>/${feats.total}</small></strong>")
+    assert str.contains(p, `<span class="k">fn</span> <span class="f">vadd</span>`)
+    assert str.contains(p, `class="lang"`)
+    assert str.contains(p, `href="../gpu.html"`)
+    # the assets are one level up
+    assert not str.contains(p, `href="./assets/`)
+    # every section gen/search sends a reader to is a heading here, in both
+    for e in prose_sections() {
+      let (id, _) = e
+      assert str.contains(p, """<h2 id="${id}">""")
+      assert str.contains(gpu_page(plain_assets(), En, f, []), """<h2 id="${id}">""")
+    }
+  })
+}
+
+## The same page with one section gone from either copy file is not a page.
+## Pinned here, as home's is, because a generator that read the copy through
+## a lenient lookup would pass every assertion above.
+test "every section the page reads is in both copy files" {
+  with_fs_real(() => {
+    let en = load_copy(copy_file(En))
+    let zh = load_copy(copy_file(Zh))
+    let keys = (c: Copy) => map(c.sections, e => {
+      let (k, _) = e
+      k
+    })
+    assert keys(en) == keys(zh)
+    for e in prose_sections() {
+      let (_, k) = e
+      assert list.contains(keys(en), "${k}-title")
+      assert list.contains(keys(en), "${k}-body")
+    }
+  })
+}
+
+## The nav's GPU item is lit on this page and on no other item, in both
+## languages, and the trail is that item's label.
+test "the nav marks GPU as the page you are on" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let en = gpu_page(plain_assets(), En, f, [])
+    let zh = gpu_page(plain_assets(), Zh, f, [])
+    assert str.contains(en, `<a class="active" aria-current="page" href="./gpu.html">GPU</a>`)
+    assert str.contains(zh, `<a class="active" aria-current="page" href="../zh/gpu.html">GPU</a>`)
+    assert len(str.split(en, `class="active"`)) == 2
+    assert len(str.split(zh, `class="active"`)) == 2
   })
 }

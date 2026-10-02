@@ -18,7 +18,10 @@
 #     line of output picked from a run is picked from that run's `.out`, so
 #     nothing on the page is a transcription;
 #   - every figure comes from scripts/site-figures.sh through the environment,
-#     and a missing or empty one stops the build rather than printing a guess;
+#     and a missing or empty one stops the build rather than printing a guess.
+#     The one exception is the GPU section's opcode count, which is gen/gpu's
+#     reading of the tile coverage table, so that it is the cuTile page's
+#     number and not a second count of the same rows;
 #   - every word is in the page's language, from site/pages/home.md or its
 #     translation. What is written here is markup, code-words that read the
 #     same in both languages (`effect`, `!Dev`, file names), and the install
@@ -33,7 +36,8 @@ use html/page.{Assets, Lang, En, Zh, head_html, nav_bar, footer_html, lang_path,
 use html/play.{play_hash}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html, escape_attr}
-use gen/common.{must_read, write_page, map_doc_url, doc_files}
+use gen/common.{must_read, write_page, map_doc_url, doc_files, fn_source}
+use gen/gpu.{load_facts, table_named, count_of}
 use gen/copy.{Copy, load_copy, line, plain}
 
 # ---- the figures ----
@@ -112,34 +116,6 @@ fn recorded(stem: String) -> String !Fs = str.trim(must_read("site/pages/${stem}
 ## The project a `<stem>.project` names: one line, a directory under the root.
 ## scripts/doc-check.py reads the same line to know what to run.
 fn project_of(stem: String) -> String !Fs = str.trim(must_read("site/pages/${stem}.project"))
-
-## One top-level function, cut out of a source file: from its `fn <name>(`
-## line through the first line that is a lone `}`. A function that moved,
-## changed shape or was renamed stops the build; showing the wrong lines, or
-## none, is the alternative.
-pub fn fn_source(src: String, name: String) -> String = {
-  let head = "fn ${name}("
-  var out: List[String] = []
-  var on = false
-  var done = false
-  for l in str.split(src, "\n") {
-    if not done {
-      if not on && str.starts_with(l, head) {
-        on = true
-      }
-      if on {
-        out = out ++ [l]
-        if l == "}" {
-          done = true
-        }
-      }
-    }
-  }
-  if not done {
-    panic("no `${head}...` closed by a lone `}` to show on the front page")
-  }
-  join(out, "\n")
-}
 
 ## The one line of a recorded output that contains `needle`, trimmed. None or
 ## several stops the build: the strip under a listing shows a line the run
@@ -404,8 +380,19 @@ fn pipe(c: Copy, mu: fn(String) -> String) -> String = {
 
 fn fact(title: String, text: String) -> String = "<li><b>${title}</b>${text}</li>"
 
+## The GPU section's one figure: of the public Tile IR opcodes, how many the
+## backend implements and how many there are. Read from the coverage table by
+## gen/gpu, the reader the cuTile page uses, so the two pages cannot print two
+## different counts; check.py holds every implemented row at layer 2, a run on
+## a device, which is what the sentence beside it says.
+pub fn opcode_cover() -> (Int, Int) !Fs = {
+  let feats = table_named(load_facts(), "features")
+  (count_of(feats, "implemented"), feats.total)
+}
+
 fn gpu(c: Copy, mu: fn(String) -> String) -> String !Fs = {
   let t = (k: String) => line(c, k, mu)
+  let (done, total) = opcode_cover()
   let project = project_of("gpu_fake")
   let src = must_read("${project}/src/main.dawn")
   let out = recorded("gpu_fake")
@@ -416,6 +403,7 @@ fn gpu(c: Copy, mu: fn(String) -> String) -> String !Fs = {
 <p class="phase">${t("phase-gpu")}</p>
 <h2 id="gpu-h">${t("gpu-title")}</h2>
 <p>${t("gpu-lede")}</p>
+<p class="gpu-cover"><strong>${done}/${total}</strong> ${t("gpu-cover")} ${t("gpu-cover-link")}</p>
 </div>
 ${pipe(c, mu)}
 <div class="gpu">
@@ -739,6 +727,27 @@ test "the front page carries its figures, its programs and no inline script" {
     assert str.contains(zh, `<html lang="zh-CN">`)
     assert str.contains(zh, `data-label-dark="切换到深色主题"`)
     assert not str.contains(zh, "Switch to dark theme")
+  })
+}
+
+## The front page sends a reader to the cuTile page twice, from the hero's
+## GPU fact and from the GPU section, and the count it prints there is the
+## coverage table's as gen/gpu reads it.
+test "the front page links the cuTile page and prints its opcode count" {
+  with_fs_real(() => {
+    let feats = table_named(load_facts(), "features")
+    let n = count_of(feats, "implemented")
+    assert n > 0
+    assert opcode_cover() == (n, feats.total)
+    let en = home_page(plain_assets(), En, test_figures(), [])
+    let zh = home_page(plain_assets(), Zh, test_figures(), [])
+    assert len(str.split(en, `href="./gpu.html"`)) == 4
+    assert len(str.split(zh, `href="../zh/gpu.html"`)) == 4
+    for p in [en, zh] {
+      assert str.contains(p, """<p class="gpu-cover"><strong>${n}/${feats.total}</strong>""")
+    }
+    assert str.contains(en, "public Tile IR opcodes implemented")
+    assert not str.contains(en, "at comptime")
   })
 }
 
