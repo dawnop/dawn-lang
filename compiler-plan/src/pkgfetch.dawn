@@ -331,7 +331,7 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
     } else {
       var room = MAX_ARCHIVE_BYTES - total
       if room > MAX_ENTRY_BYTES { room = MAX_ENTRY_BYTES }
-      let data = match zip.read_bounded(bs, m, Some(room)) {
+      let data = match zip.read(bs, m, cap: Some(room)) {
         Ok(d) -> d
         Err(e) -> return Err(e)
       }
@@ -414,7 +414,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   # this learned about a bomb after paying for it. The caller has already
   # matched the gzip magic, so a failure here is a broken archive and its
   # reason is worth printing.
-  let raw = match gzip.gunzip_bounded(gz, Some(MAX_ARCHIVE_BYTES)) {
+  let raw = match gzip.gunzip(gz, cap: Some(MAX_ARCHIVE_BYTES)) {
     Ok(b) -> b
     Err(e) -> return Err(e ++
         "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
@@ -768,7 +768,7 @@ fn tar_of(entries: List[(String, String)]) -> Bytes = {
 
 ## `raw` in a gzip member, as one stored deflate block. Stored rather than
 ## compressed because a writer is not what is under test: the reader is, and it
-## reaches the same `gunzip_bounded` either way.
+## reaches the same `gunzip` either way.
 fn gzip_of(raw: Bytes) -> Bytes = {
   let n = bytes.len(raw)
   if n > 65535 { panic("gzip_of: a fixture this large needs more than one stored block") }

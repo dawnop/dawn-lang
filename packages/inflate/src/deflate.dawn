@@ -13,6 +13,15 @@
 # counts per length and symbols in order, one bit at a time, which needs no
 # lookup table to build and is impossible to get subtly wrong in a way that
 # still decodes most streams.
+#
+# The ceiling is a defaulted trailing parameter, `cap: Option[Int] = None`, not
+# a `_bounded` twin of each entry point. Version 1 had the twins, and every
+# unsuffixed half only forwarded `None`; Kotlin's and Swift's API guidelines
+# both prefer one function with a defaulted parameter to a family of
+# variants, and the 2026-10-02 survey of std default parameters found nothing
+# the suffixes bought. The default is `None` because no ceiling is what the
+# unsuffixed names always did. Whether a decompressor should default to a
+# ceiling at all is a separate safety question, left open in the README.
 
 use std/bytes
 use std/bytes.{Buf}
@@ -217,12 +226,10 @@ fn too_big(out: Buf, lim: Int) -> String =
 ## counts, because nothing after it can be read independently.
 fn consumed(b: Bits) -> Int = if b.bit == 0 { b.pos } else { b.pos + 1 }
 
-## Decompress a raw DEFLATE stream.
-pub fn inflate(src: Bytes) -> Result[Bytes, String] = inflate_bounded(src, None)
-
-## Decompress with a ceiling on the uncompressed size. `None` is no ceiling.
-pub fn inflate_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] =
-  match inflate_end(src, cap) {
+## Decompress a raw DEFLATE stream that begins at byte zero. `cap` is a
+## ceiling on the uncompressed size; `None`, the default, is no ceiling.
+pub fn inflate(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] =
+  match inflate_from(src, cap: cap) {
     Ok(p) -> {
       let (out, _) = p
       Ok(out)
@@ -230,20 +237,16 @@ pub fn inflate_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] =
     Err(e) -> Err(e)
   }
 
-## Decompress, and say how many bytes of `src` that took. A container knows how
-## long the compressed member is supposed to be and can only check it against
-## something; without this it has to take the decompressor's word that whatever
-## followed the final block was not part of the member.
-pub fn inflate_end(src: Bytes, cap: Option[Int]) -> Result[(Bytes, Int), String] = {
-  inflate_from(src, 0, cap)
-}
-
 ## Decompress a raw DEFLATE stream beginning at `from`, and return the output
-## together with the absolute byte index immediately after the stream. Gzip
-## needs this cursor form because slicing off the remaining suffix for every
-## concatenated member would copy that suffix every time and make many small
-## members quadratic in the archive size.
-pub fn inflate_from(src: Bytes, from: Int, cap: Option[Int]) -> Result[(Bytes, Int), String] = {
+## together with the absolute byte index immediately after the stream.
+##
+## The end offset is what a container checks the member against: zip knows how
+## long the compressed member is supposed to be, and without this it has to
+## take the decompressor's word that whatever followed the final block was not
+## part of the member. Gzip needs the cursor form because slicing off the
+## remaining suffix for every concatenated member would copy that suffix every
+## time and make many small members quadratic in the archive size.
+pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = None) -> Result[(Bytes, Int), String] = {
   if from < 0 || from > bytes.len(src) {
     return Err("deflate: start offset " ++ to_string(from) ++ " is out of range")
   }
@@ -467,28 +470,29 @@ fn raw(xs: List[Int]) -> Bytes = {
 # one's complement, and the two literal bytes.
 fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
 
-test "the original entry points still decode from byte zero" {
+test "the defaults decode from byte zero with no ceiling" {
   assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
   let suffixed = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
-  assert inflate_end(suffixed, None) == Ok((bytes.utf8("hi"), 7))
+  assert inflate_from(suffixed) == Ok((bytes.utf8("hi"), 7))
+  assert inflate_from(suffixed, cap: Some(2)) == Ok((bytes.utf8("hi"), 7))
 }
 
 test "the cursor starts at a prefix and returns an absolute end offset" {
   let prefixed = raw([0xAA, 0xBB, 0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
-  assert inflate_from(prefixed, 2, None) == Ok((bytes.utf8("hi"), 9))
-  assert inflate_from(prefixed, 2, Some(2)) == Ok((bytes.utf8("hi"), 9))
-  match inflate_from(prefixed, 2, Some(1)) {
+  assert inflate_from(prefixed, 2) == Ok((bytes.utf8("hi"), 9))
+  assert inflate_from(prefixed, 2, cap: Some(2)) == Ok((bytes.utf8("hi"), 9))
+  match inflate_from(prefixed, 2, cap: Some(1)) {
     Err(e) -> { assert str.contains(e, "1 byte limit") }
     Ok(_) -> { assert false }
   }
 }
 
 test "the cursor refuses starts outside the source" {
-  match inflate_from(stored_hi(), 0 - 1, None) {
+  match inflate_from(stored_hi(), 0 - 1) {
     Err(e) -> { assert str.contains(e, "start offset -1 is out of range") }
     Ok(_) -> { assert false }
   }
-  match inflate_from(stored_hi(), 8, None) {
+  match inflate_from(stored_hi(), 8) {
     Err(e) -> { assert str.contains(e, "start offset 8 is out of range") }
     Ok(_) -> { assert false }
   }
@@ -509,21 +513,21 @@ test "a truncated fixed block is not finished off with bits that are not there" 
 }
 
 test "the output ceiling is checked before the buffer grows, not after" {
-  assert inflate_bounded(stored_hi(), Some(2)) == Ok(bytes.utf8("hi"))
+  assert inflate(stored_hi(), cap: Some(2)) == Ok(bytes.utf8("hi"))
   # "stopped at 0" is the assertion that matters: the two bytes of this block
   # never landed. A ceiling applied to the finished output refuses the same
   # stream and says "stopped at 2", having built it first.
-  match inflate_bounded(stored_hi(), Some(1)) {
+  match inflate(stored_hi(), cap: Some(1)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 1 byte limit (stopped at 0 bytes)" }
     Ok(_) -> { assert false }
   }
   # A ceiling of zero is a ceiling, not "unlimited" -- the two body-limit
   # spellings that disagreed about 0 and -1 are what this avoids.
-  match inflate_bounded(stored_hi(), Some(0)) {
+  match inflate(stored_hi(), cap: Some(0)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 0 byte limit (stopped at 0 bytes)" }
     Ok(_) -> { assert false }
   }
-  match inflate_bounded(stored_hi(), Some(-1)) {
+  match inflate(stored_hi(), cap: Some(-1)) {
     Err(e) -> { assert str.contains(e, "negative output limit") }
     Ok(_) -> { assert false }
   }

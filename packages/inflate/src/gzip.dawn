@@ -4,6 +4,9 @@
 # The package manager reaches this through .tar.gz -- the tar reader inside it
 # has been pure Dawn since the package format was written; only the outer
 # wrapper was a Java stream class.
+#
+# `gunzip` takes its ceiling as a defaulted `cap` rather than through a
+# `gunzip_bounded` twin; deflate.dawn's header says why.
 
 use std/bytes
 use std/bytes.{Buf}
@@ -128,12 +131,11 @@ fn remaining_limit(lim: Int, out: Buf) -> Option[Int] =
 ## Decompress every gzip member and concatenate their uncompressed payloads in
 ## member order. Bytes after the final trailer are another member or damage;
 ## they are never ignored.
-pub fn gunzip(src: Bytes) -> Result[Bytes, String] = gunzip_bounded(src, None)
-
-## The same, with one ceiling over the aggregate uncompressed output. Each
-## member receives only the remaining budget, so concatenation cannot reset the
-## limit. `None` is no ceiling.
-pub fn gunzip_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] = {
+##
+## `cap` is one ceiling over the aggregate uncompressed output; `None`, the
+## default, is no ceiling. Each member receives only the remaining budget, so
+## concatenation cannot reset the limit.
+pub fn gunzip(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] = {
   let n = bytes.len(src)
   if n == 0 { return Err("gzip: too short to be an archive") }
   let lim = match limit_of(cap) {

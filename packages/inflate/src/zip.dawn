@@ -13,6 +13,9 @@
 # Only reading, and only the two methods that occur in practice: 0 (stored,
 # the bytes as they are) and 8 (deflate). Anything else is refused by number
 # rather than guessed at.
+#
+# `read` takes its ceiling as a defaulted `cap` rather than through a
+# `read_bounded` twin; deflate.dawn's header says why.
 
 use std/bytes
 use std/str
@@ -263,14 +266,14 @@ pub fn headers(src: Bytes) -> Result[List[Meta], String] = {
   Ok(out)
 }
 
-## One entry's bytes, with a ceiling on how big they may get. `None` is no
-## ceiling; a directory entry is empty.
+## One entry's bytes, with a ceiling on how big they may get. `None`, the
+## default, is no ceiling; a directory entry is empty.
 ##
 ## The ceiling matters even though `m.size` is right there: that number is the
 ## archive's claim about itself, checked afterwards, and a bomb is a small
 ## compressed member with a large true expansion and whatever `size` its writer
 ## felt like putting in the directory.
-pub fn read_bounded(src: Bytes, m: Meta, cap: Option[Int]) -> Result[Bytes, String] = {
+pub fn read(src: Bytes, m: Meta, cap: Option[Int] = None) -> Result[Bytes, String] = {
   if m.is_dir { return Ok(bytes.utf8("")) }
   if m.flags & FLAG_ENCRYPTED != 0 { return Err("zip: encrypted entry: " ++ m.name) }
   if not in_range(src, m.local, 30) || u32(src, m.local) != LOCAL_SIG {
@@ -309,7 +312,7 @@ pub fn read_bounded(src: Bytes, m: Meta, cap: Option[Int]) -> Result[Bytes, Stri
   let raw = bytes.slice(src, start, start + m.csize)
   var out = raw
   if m.method == METHOD_DEFLATE {
-    match deflate.inflate_end(raw, cap) {
+    match deflate.inflate_from(raw, cap: cap) {
       Ok(pr) -> {
         let (o, used) = pr
         # The directory says how long the compressed member is, so a member
@@ -334,9 +337,6 @@ pub fn read_bounded(src: Bytes, m: Meta, cap: Option[Int]) -> Result[Bytes, Stri
   if crc32.sum(out) != m.crc { return Err("zip: checksum mismatch for " ++ m.name) }
   Ok(out)
 }
-
-## One entry's bytes, however many there turn out to be.
-pub fn read(src: Bytes, m: Meta) -> Result[Bytes, String] = read_bounded(src, m, None)
 
 ## Every entry in the archive, fully unpacked, in central directory order. An
 ## archive with no entries reads as the empty list: that is a legal zip, and
@@ -420,10 +420,12 @@ test "stored entries honor the output ceiling before their bytes are copied" {
     local: 0,
   }
 
-  assert read_bounded(src, stored, Some(1)) == Ok(payload)
-  assert read_bounded(src, stored, Some(0)) ==
+  # The default is no ceiling.
+  assert read(src, stored) == Ok(payload)
+  assert read(src, stored, cap: Some(1)) == Ok(payload)
+  assert read(src, stored, cap: Some(0)) ==
     Err("zip: stored: the output exceeds the 0 byte limit (stopped at 0 bytes)")
-  assert read_bounded(src, stored, Some(-1)) ==
+  assert read(src, stored, cap: Some(-1)) ==
     Err("zip: stored: a negative output limit (-1)")
 
   # This claim used to be checked only after the compressed byte had
@@ -439,6 +441,6 @@ test "stored entries honor the output ceiling before their bytes are copied" {
     size: 0,
     local: 0,
   }
-  assert read_bounded(src, inconsistent, Some(0)) ==
+  assert read(src, inconsistent, cap: Some(0)) ==
     Err("zip: inconsistent unpacked to 1 bytes, the directory says 0")
 }
