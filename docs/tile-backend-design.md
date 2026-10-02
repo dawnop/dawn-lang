@@ -2902,7 +2902,8 @@ bits 3..0，元素 `i + 1` 在 bits 7..4，并且举了 `[0.5, 1.5]` 的例子�
 写在流里的数。变异体 `pack-result-shape-unhalved` 把这个比例去掉，`tileiras` 答
 `'cuda_tile.pack' op expects source and result to have the same size in bytes, but got source
 tile size 128 bytes and result tile size 32 bytes`。这也是本目录里**唯一一条文本与字节一起动**
-的变异体，而那是操作的性质不是选择：lane 数就是结果类型，渲染器印的是交给它的类型。
+的变异体，而那是操作的性质不是选择：lane 数就是结果类型，渲染器印的是交给它的类型。（刀 C1 起它在层 0 就红了：句柄表记下了错的 lane 数，下一条按声明形状读这批 nibble 的 `extis`
+在记录期被拒，见 §6.21。）
 
 **五、`i4` 在 sm_86 上就能跑，`f4E2M1FN` 不能，而且拒的是类型不是算术。** 实测
 `tileiras` 13.3.36：`dtype_i4` 与 `pack_roundtrip`（含 `pack` / `unpack` / `exti` / `trunci`
@@ -4021,6 +4022,116 @@ T17、层 3；`rounding.zero` 借 `ftof-zero-as-nearest-away` 从层 2 升到层
 也一定有，第七片不列进去，是为了不让观测窗口里刀 T17 之前的运行被误算成「没跑分片」。
 
 
+### 6.21 记录期的形状检查与块内 fork 不相交（刀 C1 + D-1）
+
+裁决出处是两份不入库的调研：agent-handoff 的 `research-cutile-rs-api-report-20261003.md`（借-4、借-11）与
+`research-tile-disjoint-writes-report-20261003.md`（D-1、D-2 的句柄表形状）。这一刀不加操作码、不改公开面，
+只加拒绝：今天要到 `tileiras` 才被拒的程序，现在在记录 handler 里被拒，消息指回 kernel 体。
+
+**一、句柄表。** 记录 handler 多一个状态格 `held: Map[Int, Held]`，每个值句柄一行：
+
+```dawn
+type Held = { dtype: String, shape: List[Int], affine: Option[Lin] }
+type Lin  = { terms: List[(Int, Int)], konst: Int }   # konst + Σ coeff · atom
+```
+
+`dtype` 是元素格式名（指针 tile 记 `ptr<f64>`），`shape` 是形状（rank 0 为 `[]`）。行由定义该句柄的那条
+臂写，取的是降低（`lower.dawn` 的 `ty_of` 表）给同一句柄的同一个类型：load、常量、逐元素运算按其声明的
+格式与形状；比较答 `i1`；`mmaf` 答 `[m, n]`（`mmai` 是 `i32`，`mmaf_scaled` 是 `f32`）；`ptr_to_int` 答 `i64`；
+`extract` / `insert` / `cat` / `permute` 答它们算出的形状；块号、`num_blocks`、索引算术与两条形状查询答
+`i32 []`。区域：`for` / `loop` 的携带值与结果抄 inits 的行，`for` 的归纳变量是 `i32 []`；归约的区域参数是
+操作数格式的 rank 0，结果去掉 `dim`；扫描的结果抄操作数；`if` 的结果抄 then 分支 yield 的行。**没有行的**
+三类：token、view（view 的类型要连带张量视图，handler 不持有那一半，降低持有）、经 view 读出的值
+（`load_view` 的结果形状是 view 的 tile 形状，同理）。没有行的句柄不比较，所以这张表只会少拒、不会错拒。
+
+`affine` 是**预留**字段，本刀写的每一行都是 `None`。D-2 要把它填成「句柄的值作为块号（与循环归纳变量）的
+线性式」，这样每个参数位的写地址就能在记录期总结成 `A · block + F`，发射期拿真网格判块间冲突
+（调研 §3.2）。D-1 只用得到同一种式子的一小部分，按需从记录下来的操作现算（见三），不预先填表；D-2
+是把它按句柄存下来的那一刀。
+
+**二、检查与消息。** 逐元素操作比对操作数的行与该操作声明的格式和形状，不等就拒：`unaryf` / `binaryf` /
+`fma` / `cmpf` 的操作数是 `(dtype, shape)`；`cmpi` 的是 `(i32, shape)`（降低把它的操作数类型写死成 i32）；
+`unaryi` / `binaryi` 同 `dtype`；`convert` 的操作数是 `(from, shape)`；`select` 的条件是 `(i1, shape)`、两个值是
+`(dtype, shape)`；`powi` 的底是 `(dtype, shape)`、指数是 `(exp_dtype, shape)`；`spread` 的操作数是 `(dtype, [])`。
+拒绝消息带 kernel 名、操作序号与操作名（借-11），照录：
+
+```
+tileir: kernel `vadd_half`: op #6 `addf`: lhs is tile<128xf64>, declared tile<64xf64>
+tileir: kernel `raw`: op #2 `addf`: lhs is tile<8xf64>, declared tile<8xf32>
+```
+
+`op #k` 是该操作在最终 `TileProg.ops` 里按深度优先读的位置，入口的 `MakeToken(0)` 是 #0，区域排在它的体
+之前（所以 `vadd` 的 `addf` 是 #6：块号、`tile_at` 的两条索引运算、两条 load 在它前面）。还开着的区域按
+「结束后它会在的位置」各算一个。序号在拒绝时才算（`op_number` 数一遍已记录的操作），不拒的记录不付这个钱。
+
+调研 §757 的开放问题「`panic` 能否带源码位置」实测答案是**不能**：一个三层调用里的 `panic("boom")`，
+JVM（`dawn run`）与 native（`__emitc` + cc）都只打印 `panic: boom at 5`，退出码 1，没有位置也没有栈；
+`catch_panic` 的 `ForeignError` 只有 `kind` / `message` / `cause`。JVM 后端不发 `LineNumberTable`
+（`selfhost/src/jvm` 里没有 `visitLineNumber`）。`docs/spec.md` §8.2 写的是「打印消息与 Dawn 层栈迹」，
+与实测不符，这里只记录，不在本刀改 spec。所以操作序号是今天把错误定位回 kernel 体最便宜的办法。
+
+**三、D-1：fork 两支的写不相交。** `d_fork2(a, b)` 的注释一直写着「the two must not touch the same element」，
+今天由 `t_tok_join` 臂检查。做法：把已记录的操作（含所有开着的区域）按 token 链建一张「token → 产生它的
+操作与它排在哪些 token 之后」的表，从每个被合流的 token 往回走到记录的边界，得到各支的祖先集；两支各自
+**独有**的那部分就是彼此无序的操作，取其中的写，两两比较。`for` / `loop` 在链上是一步（结果的最后一个
+token 排在 inits 的最后一个之后），它体内的写算这一步的写。
+
+写集合的表示按调研 §268 的论证取最简可证的形状：
+
+| 形状 | 什么写落在这里 | 与同参数的另一个写比较 |
+|------|----------------|------------------------|
+| `Span(param, base, lo, hi)` | `store`（`base` 是索引句柄的 `Lin`，`[lo, hi]` 是 `shape` 与 `strides` 的偏移包络）；以及 `store_ptrs` 经 `ptr_offset(ptrs(p, ..), lanes(base, shape, strides))` 写的、与它同形的那种 | 两个 `base` 之差是常数 `c` 时比较 `[c + lo, c + hi]` 与 `[lo', hi']`，相交即拒；差不是常数（有原子项剩下）即拒 |
+| `Whole(param)` | `scatter`、两种原子、`store_view`、`atomic_red_view`、其余经 `ptrs(p)` 的指针写 | 同参数即拒 |
+| `Unnamed` | 目标不是参数的写：`alloca`、全局、整数转出来的指针 | 一律拒 |
+
+`Lin` 的原子是 `Lin` 算术看不穿的句柄：块号、循环归纳变量、读出来的值、两个非常数之积。块号在两支里是
+**同一个原子**，相减即消去，所以同一块内的判定与网格无关，记录期就下结论，这正是调研 §268 第 4 条。
+`token_join` 两支写 `[128b, 128b + 63]` 与 `[128b + 64, 128b + 127]`，常数距离 64，不相交，照常记录。
+拒绝消息照录：
+
+```
+tileir: kernel `raw`: op #9 `join_tokens`: the chains it joins are unordered and may write the same element: both write parameter 0: counted from the second chain's base, the first writes elements -32 to 31 and the second 0 to 63
+```
+
+这个检查是**保守**的：证不了不相交就拒（`Whole`、`Unnamed`、非常数距离，以及包络相交而实际交错的两个
+带步长的写）。今天唯一的客户 `token_join` 证得出；`d_fork2` 本来就只为「两段确知不相交的写」存在，拒错一个
+安全的程序的代价是改用顺序写，放过一个竞态的代价是设备上偶发的错，取前者。
+
+**四、实测。**
+
+- 判词：`scripts/tile-golden/run.sh` 全量（本机，tileiras 13.4.92，sm_86）191 个 kernel 的 trace、文本 golden、
+  字节码 golden、`tileiras` 汇编四项全过，**逐字节不动**，与调研 §758 的预测一致。
+- 包测试：`dawn test packages/tileir` 153 → 158 项全过（新五项：形状不符、序号的定义、格式不符三例、
+  fork 的相交与不相交、fork 里判不了的三种写）。
+- 负控四条，各在包的副本上改一处、跑包测试、确认变红后丢弃副本：去掉格式比较（1 项红）、去掉形状比较
+  （3 项红）、去掉 `check_fork` 调用（2 项红）、消息里去掉 `op #k`（4 项红）。
+- golden 之外的一个小 kernel（`vadd_half`：两条 128 lane 的 load，`addf` 与 store 声明 64）。origin/main 的
+  tileir 照常记录、渲染、编码，`tileiras --gpu-name sm_86` 拒绝：
+  `'cuda_tile.addf' op failed to verify that all of {lhs, rhs, result} have same type`，退出码 3；本刀的
+  tileir 在记录期拒绝，消息即上面第一行。
+- 变异体：77 条里 76 条照旧。`pack-result-shape-unhalved` 不再走到渲染：句柄表按变异后的 `repack_shape` 记下
+  未减半的 lane 数，下一条 `extis` 按 kernel 声明的形状读这批 nibble，被拒为
+  ``op #10 `extis`: operand is tile<128xi4>, declared tile<256xi4>``。它从层 1（`tileiras` 拒字节）挪到层 0，
+  `run.sh` 第 54 条改用 `refused_mutant_checks` 钉这句话，声明的主张（结果形状带宽度比例）不变（§6.12 四已注）。
+- 墙钟：把 191 个 kernel 各在一个进程里记录两次并渲染，新旧 tileir 交替各跑两轮。native 0.71 / 1.25 s（旧）对
+  0.77 / 0.94 s（新），在噪声内；JVM 41.76 / 40.28 s 对 41.90 / 40.70 s，多 0.1 到 0.4 s，每个 kernel 约 1 到 2 ms，
+  JVM 的时间几乎全是进程启动。`tile.yml` 的每项单价（kernel 约 8 s、变异体约 21 s）由编译主导，这点记录开销
+  看不见；`pack-result-shape-unhalved` 少了编码与汇编两步，只会更快。七片规划值不动。建站的 GPU 页在一个进程里
+  记录 191 个 kernel，按上面的单价多不到 0.5 s。
+
+**五、版本。** 公开面不变（新增的类型与函数都是包内私有的），`tileir` 0.3.0 → 0.3.1。新拒绝只落在今天
+`tileiras` 也拒的程序上（第二节）和 `d_fork2` 的保守面上（第三节），仓内全部 191 个 kernel 都不受影响。
+
+**不做的（理由）：**
+
+- store 的值与掩码、`mmaf` 三个维度、`extract` / `insert` / `cat` / `permute` / `pack` / `unpack` 的操作数、
+  `assume` 的操作数：不是逐元素操作，裁决只要逐元素这一族；表已经在，补检查是逐臂一行的事，等有错例。
+- fork 里的读写冲突（一支读另一支写的元素）：任务单只要写集合；`d_fork2` 的注释说的是「touch」，读写冲突也是
+  竞态，D-2 的读写摘要出来后再并入。
+- 块间不相交、参数角色、宿主别名与网格：D-2、D-3、D-5，各自一刀。
+- 给全部 123 处既有 `refuse` 也加序号：消息格式会动，现有的变异体与测试按子串钉它们；新格式先用在新拒绝上。
+- 精确的交错判定（步长写的元素集而非包络）：今天没有客户，包络是可靠的上界。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -4080,6 +4191,7 @@ T17、层 3；`rounding.zero` 借 `ftof-zero-as-nearest-away` 从层 2 升到层
 | **U2 字节码 13.4**（已落地，升钉第二刀，§6.11 的翻版） | 「写 13.4 改了哪些字节、没改哪些，是量出来的：正向段账 185/185、把 minor 改回 3 逐字节复现 185/185、13.4 字节与 13.3 字节过 13.4.92 的 cubin 185/185 相同」 | `bytecode.dawn`：`BYTECODE_MINOR` 4，`ptr_has_flags` / `ftoi_has_flags` / `view_has_inbounds` 三个谓词，`num_ty` 写 varint，`OP_FPOWF`；`render.dawn` 拼 `fpowf`；185 个 `.tilebc` 与 `mathops.mlir` 重录；三本账换钉 v13.4.0（105 / 24 / 53 行）与 `check.py`；`tile.yml` 六条预算行 914 → 928 s | 不分片全量 256 项 2912 s 绿；`check.py --self-test` 绿；本机台账重录 | 新变异体四条：`ptr-flags-unwritten`、`ftoi-flags-unwritten`、`view-inbounds-unwritten`、`header-minor-still-3`（vadd 上它被收下，所以落在 view_transpose）；既有两条换锚：`partition-view-padding-inline-flag-at-13-3` 在 13.4 上 `stayed green`、`tensor-view-tag-as-ptr` 锚失配，改后绿 | 1.5 |
 | **T16 `insert` 0x76 与 `fpowi` 0x79**（已落地，13.4 覆盖刀的第一把，§6.19） | 「13.4 新加的两条操作码在本机 3080 上与一份独立写的宿主参考逐位相同：`insert` 把子 tile 放回原处答的是原 tile、放到别处答的是换了那一格的原 tile；`fpowi` 的答案是右到左二进制幂再取倒数这串乘法，而不是正确舍入的幂，这一点是量出来的而不是假定的」（今天写不出：两条操作码写入器一个字节也发不出去，`fpowi` 的设备语义只有 `Ops.td` 的一行数学式） | `bytecode.dawn`：`OP_INSERT` / `OP_FPOWI` 与两条编码臂（`insert` 是 `extract` 的记录多一个操作数，`fpowi` 两个操作数、零 flags）；`lower.dawn`：`InsertTile` / `FloatPowI`；`prog.dawn`：`Insert` / `PowI` 与 `check_insert` / `check_powi`（i64 指数拒）；`dev.dawn`：`t_insert` / `t_powi`，公开面 `insert` / `powi`；`render.dawn` 两条拼法（与 `tileirdisasm` 逐字相同）；`packages/tileref`：`ref_fpowi`、`insert_tile_ref`、`powi_sweep_ref`；kernel 两个（`insert_tile` / `powi_sweep`）并进 `shape_diff`（5 → 7）；`features.txt` 两行改 `implemented`、层 3，`check.py` 的 `LANDED_KNIVES` 加 T16；`tile.yml` 六条预算行 928 → 945 s | 层 0/1 两个新 golden、`FUNC GLOBAL` 两个，`tileiras` 一次通过（sm_86）；层 2 本机两个都是 `identical:exact`，`powi_sweep` 的语料负指数 231 条、大于 127 的指数 40 条，两个计数由 `run.sh` 钉在零以上；不分片全量 262 项 3134 s 绿；`check.py --self-test` 绿 | 层 1 四条：`fpowi-exponent-as-float`、`fpowi-as-fpowf`、`insert-source-and-destination-swapped`、`insert-index-dropped`（越界下标不取，因为它只得到一句不点名的 `failed to compile`）；层 2 一条 `insert-indices-reversed`（只有 `insert_tile` 红），`extract-indices-reversed` 的红集加上 `insert_tile`；宿主自轴负控两条（`ref_fpowi` 先取倒数、i8 那一半按无符号读），各自只有 `powi_sweep` 红 | 2（实报 1） |
 | **T17 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`**（已落地，13.4 覆盖刀的第二把，§6.20） | 「13.4 给旧操作码的三处新形状在本机 3080 上各有一个与独立宿主参考逐位相同的 kernel：block 在循环中途结束整个 kernel，第几轮、走哪个出口由设备自己的 store 说出来；`saturating` 改变的是哪几格，是量出来的（本机只有 NaN 格）；`ftof` 每一对格式收哪几种舍入，是 360 格逐格问过汇编器的；而 `xchg` 这个从 13.1 起就能拼、一直没有 kernel 要的模式有了第一个客户」（今天写不出：`return` 只能在 entry 与 `if` 里，`ftoi` 的 flags 字恒为 0，`ftof` 只写得出默认模式，`rmw.xchg` 是三本账里最后一行 `deferred`） | **零新 opcode**。`dev.dawn`：`t_return_if` 与 `d_return_if`、`float_to_int_sat`、`float_to_float_zero` / `_down` / `_up` / `_away`；`prog.dawn`：`Return` 与 `return_passes`（`for` / 归约 / 扫描里拒），`ftof_mode` / `ftof_modes` / `check_ftof`（13.4 的表）；`lower.dawn`：`Return` 降成 `Ret`，`yielded` 认 `Ret`；`bytecode.dawn`：`ROUND_NEAREST_AWAY`、`FTOI_FLAG_SATURATING`、`ftoi_flag_word`、`ftof_rounding_of`；`render.dawn` 两处拼法。`std/narrow`：`round_binary_away`、`round_tf32_away`（内联测试）；`packages/tileref`：`loop_return_ref`、`attr_sat_ref`、`attr_ftof_ref`、`attr_xchg_ref`。kernel 四个：`loop_return` 进 `loop_diff`（4 → 5），`attr_sat` / `attr_ftof` / `attr_xchg` 进 `attr_diff`（8 → 11）。三本账：`return` / `ftof` 升层 3，三个属性取值改 `implemented`，`rounding.zero` 升层 3，`no-client-kernel` 退休；`tile.yml` 分到第七片 | 层 0/1 四个新 golden、`FUNC GLOBAL` 四个，`tileiras` 一次通过（sm_86）；层 2 本机五个 loop kernel、十一个属性 kernel 全 `identical:exact`（`attr_approx` 照旧容差），`loop_return` 的出口 `74r,100b,1r,100r` 与语料自数逐字相同，十个新 probe 计数都钉在零以上；`ftof` 表 360 / 360 与 verifier 一致；`check.py --self-test` 绿；不分片全量 268 项 3356 s 绿，`tile.yml` 分到七片，规划值 945 → 826 s，path-total 6580 → 6692 s | 层 1 两条：`loop-return-as-break`（零操作数 `break` 与携带三个值的 loop 类型不符）、`ftof-zero-as-nearest-away`（f64 到 f32 不收 `nearest_away`）。层 2 四条：`loop-return-dropped`（只有 `loop_return` 红）、`ftoi-saturating-bit-dropped`（`attr_sat` 的 NaN 格红，`nan_zero=0`）、`ftof-away-as-nearest-even`（`attr_ftof` 红，`tf32_away=0`）、`rmw-xchg-as-add`（`attr_xchg` 红）。`loop-break-condition-inverted` 的红集加上 `loop_return` | 2（实报 1） |
+| **C1 + D-1 记录期形状检查与块内 fork 不相交**（已落地，cuTile 借鉴第一刀，§6.21） | 「一个逐元素操作的操作数形状与它声明的不符，在记录期就被拒，消息带 kernel 名、操作序号与操作名；`d_fork2` 的两支写同一元素也在记录期被拒」 | `packages/tileir/src/prog.dawn` 的记录 handler（句柄表、逐元素检查、`t_tok_join` 的 fork 检查） | 191 个 golden 逐字节不动；包测试五项新增 | 四条：去格式比较、去形状比较、去 fork 检查、消息去序号 | 1 |
 
 ## 8. 风险
 

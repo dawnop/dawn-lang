@@ -1977,53 +1977,24 @@ if run_item unpack-as-pack; then
 fi
 
 # 54. The result of a `pack` or an `unpack` keeps the operand's lane count
-#     instead of scaling it by the ratio of the two widths. This is the
-#     ONE mutant in this file whose text moves as well as its bytes, and
-#     that is a property of the operation rather than a choice: the shape
-#     is the result TYPE, and the renderer prints the type it was handed.
-#     So both halves are checked here -- exactly the pack and unpack lines
-#     move, and tileiras names the bytes it cannot take -- and the second
-#     half is the one a re-recorded golden could not wash away.
+#     instead of scaling it by the ratio of the two widths. Until knife C1
+#     this was the ONE mutant here whose text moved as well as its bytes
+#     (the shape is the result TYPE, and the renderer prints the type it
+#     was handed), and tileiras was the layer that named it: "'cuda_tile.pack'
+#     op expects source and result to have the same size in bytes". Since
+#     C1 the recording handler keeps the shape of every handle it mints and
+#     holds each element-wise operand to it, so the first conversion that
+#     reads the unpacked nibbles at the shape the body declared is refused
+#     before anything is rendered (docs/tile-backend-design.md 6.21). The
+#     layer moved from 1 to 0; the claim, that the result shape carries the
+#     ratio, is the same one.
 #
 #     The anchor is in prog.dawn because that is where a recorded `Repack`
 #     gets its second shape; lower.dawn and the writer only carry it.
 if run_item pack-result-shape-unhalved; then
   mutant_project pack-result-shape-unhalved prog.dawn
-  mutant_run pack-result-shape-unhalved dtype_i4
-  mutant_run_bytecode pack-result-shape-unhalved dtype_i4
-  for backend in jvm native; do
-    out="$work/m-pack-result-shape-unhalved.dtype_i4.$backend"
-    [ "$(cat "$out.rc")" = 0 ] ||
-      { cat "$out.err" >&2; fail "pack-result-shape-unhalved: dtype_i4 did not render on $backend"; }
-    cmp -s "$here/dtype_i4.mlir" "$out" &&
-      fail "pack-result-shape-unhalved mutant stayed green on $backend: dtype_i4.mlir still matches"
-    moved=$(diff "$here/dtype_i4.mlir" "$out" | grep -c '^[<>]' || true)
-    [ "$moved" = 28 ] ||
-      { diff "$here/dtype_i4.mlir" "$out" >&2 || true; fail "pack-result-shape-unhalved: expected the fourteen pack and unpack lines to move on $backend, got $moved changed line(s)"; }
-    diff "$here/dtype_i4.mlir" "$out" | grep '^[<>]' | grep -vqE '= (un)?pack ' &&
-      { diff "$here/dtype_i4.mlir" "$out" >&2 || true; fail "pack-result-shape-unhalved: a line that is not a pack or an unpack moved on $backend"; }
-    out="$work/m-pack-result-shape-unhalved.dtype_i4.$backend.tilebc"
-    [ "$(cat "$out.rc")" = 0 ] ||
-      { cat "$work/m-pack-result-shape-unhalved.dtype_i4.$backend.out.err" >&2; fail "pack-result-shape-unhalved: dtype_i4 did not encode on $backend"; }
-    cmp -s "$here/dtype_i4.tilebc" "$out" &&
-      fail "pack-result-shape-unhalved mutant stayed green on $backend: dtype_i4.tilebc still matches"
-  done
-  cmp -s "$work/m-pack-result-shape-unhalved.dtype_i4.jvm.tilebc" \
-    "$work/m-pack-result-shape-unhalved.dtype_i4.native.tilebc" ||
-    fail "pack-result-shape-unhalved: the two backends disagree on the mutant's bytes"
-  if [ -n "$tileiras" ]; then
-    fragment="'cuda_tile.pack' op expects source and result to have the same size in bytes"
-    if assemble "$work/m-pack-result-shape-unhalved.dtype_i4.jvm.tilebc" \
-      "$work/m-pack-result-shape-unhalved.cubin" "$(kernel_arch dtype_i4)"; then
-      fail "pack-result-shape-unhalved mutant stayed green: tileiras accepted the mutant's bytecode"
-    fi
-    grep -Fq "$fragment" "$work/m-pack-result-shape-unhalved.cubin.log" ||
-      { cat "$work/m-pack-result-shape-unhalved.cubin.log" >&2; fail "pack-result-shape-unhalved: tileiras refused the bytecode for something other than: $fragment"; }
-    echo "PASS  mutant: pack-result-shape-unhalved (dtype_i4.mlir red in the pack and unpack lines and nowhere else, on both backends; tileiras: $fragment)"
-  else
-    echo "PASS  mutant: pack-result-shape-unhalved (dtype_i4.mlir red in the pack and unpack lines and nowhere else, on both backends)"
-    echo "SKIP  mutant: pack-result-shape-unhalved not handed to tileiras (--without-tileiras)"
-  fi
+  refused_mutant_checks pack-result-shape-unhalved dtype_i4 \
+    'tileir: kernel `dtype_i4`: op #10 `extis`: operand is tile<128xi4>, declared tile<256xi4>'
 fi
 
 # 55. The writer gives a `tensor_view` the POINTER tag. Both are type-table
