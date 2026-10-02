@@ -76,7 +76,7 @@ fn bomb_case(mb: Int) -> Unit !io = {
   let bomb = java_bomb(mb)
   io.println("bomb: " ++ to_string(bytes.len(bomb)) ++ " compressed bytes, " ++
       to_string(mb) ++ "MB expanded")
-  match deflate.inflate_bounded(bomb, Some(1024)) {
+  match deflate.inflate(bomb, cap: Some(1024)) {
     Ok(o) -> {
       io.println("the bomb was decompressed to " ++ to_string(bytes.len(o)) ++ " bytes")
       io.println("mismatches 1")
@@ -292,7 +292,7 @@ fn check_bounded(src: Bytes) -> Int !io = {
   let raw = java_deflate(src, 9)
   let n = bytes.len(src)
   var bad = 0
-  match deflate.inflate_bounded(raw, Some(n)) {
+  match deflate.inflate(raw, cap: Some(n)) {
     Ok(o) ->
       if o != src {
         io.println("a bounded inflate at exactly the output size gave the wrong bytes")
@@ -304,7 +304,7 @@ fn check_bounded(src: Bytes) -> Int !io = {
     }
   }
   if n > 0 {
-    match deflate.inflate_bounded(raw, Some(n - 1)) {
+    match deflate.inflate(raw, cap: Some(n - 1)) {
       Ok(_) -> {
         io.println("a bounded inflate one byte under the output size succeeded")
         bad = bad + 1
