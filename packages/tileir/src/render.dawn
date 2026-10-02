@@ -18,7 +18,7 @@ use std/list
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM}
 use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -435,6 +435,9 @@ fn line(i: Instr) -> String = match i {
     if len(values) == 0 { "yield" } else { "yield ${commas(list.map(values, name))} : ${commas(list.map(tys, ty))}" }
   ExtractTile(dst, src, from, to, indices) ->
     "${v(dst)} = extract ${name(src)}[${commas(list.map(indices, name))}] : ${ty(from)} -> ${ty(to)}"
+  InsertTile(dst, src, dest, sub, to, indices) ->
+    "${v(dst)} = insert ${name(src)}, ${name(dest)}[${commas(list.map(indices, name))}] : ${ty(sub)}, ${ty(to)}"
+  FloatPowI(dst, t, exp_ty, base, exp) -> "${v(dst)} = fpowi ${name(base)}, ${name(exp)} : ${ty(t)}, ${ty(exp_ty)}"
   CatTile(dst, dim, lhs, rhs, lhs_ty, rhs_ty, to) ->
     "${v(dst)} = cat ${name(lhs)}, ${name(rhs)} dim = ${dim} : ${ty(lhs_ty)}, ${ty(rhs_ty)} -> ${ty(to)}"
   PermuteTile(dst, src, perm, from, to) ->
@@ -952,6 +955,38 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
   assert str.contains(text, "%4, %5, %6 = get_num_tile_blocks : tile<i32>\n")
   assert count(text, "get_num_tile_blocks") == 1
   assert count(text, "get_tile_block_id") == 1
+}
+
+test "insert names its subtile, its destination in brackets and both types, and fpowi both formats" {
+  let p = TileProg {
+    hints: [],
+    name: "t16",
+    params: ["f64", "i32", "f64"],
+    globals: [],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      Load(2, 3, 0, "f64", 1, [16, 8], [8, 1], None, None, 0, []),
+      IdxConst(4, 1),
+      IdxConst(5, 0),
+      Extract(6, "f64", [16, 8], [8, 4], 2, [4, 5]),
+      Insert(7, "f64", [8, 4], [16, 8], 6, 2, [5, 4]),
+      Store(8, 2, "f64", 1, [16, 8], [8, 1], 7, None, 3, []),
+      Load(9, 10, 0, "f64", 1, [128], [1], None, None, 8, []),
+      Load(11, 12, 1, "i32", 1, [128], [1], None, None, 10, []),
+      PowI(13, "f64", "i32", [128], 9, 11),
+      Store(14, 2, "f64", 1, [128], [1], 13, None, 12, [])
+    ]
+  }
+  let text = render(p)
+  # the spelling `tileirdisasm` 13.4.92 prints for the same bytes
+  # the subtile first, then the destination with the slice indices in
+  # brackets, and the two types in that order: `insert` writes no `->`
+  assert str.contains(text, "\n    %24 = insert %23, %19[%22, %21] : tile<8x4xf64>, tile<16x8xf64>\n")
+  assert count(text, " = insert ") == 1
+  # the base's type, then the exponent's, which is the one float operation
+  # here whose two operands print two formats
+  assert str.contains(text, "\n    %43 = fpowi %36, %41 : tile<128xf64>, tile<128xi32>\n")
 }
 
 test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {

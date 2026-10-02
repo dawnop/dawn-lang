@@ -812,7 +812,12 @@ trig_green=(rope)
 # `token_join` joins tokens and only the last two address memory through a
 # pointer tile the body built, which is the split the four mutants below
 # are held to.
-shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast)
+#
+# Knife T16 put two 13.4 opcodes in the same family, both exact tier:
+# `insert_tile` (`insert`, which calls `extract` on the way, so
+# extract-indices-reversed reds it as well as `shape_ops`) and `powi_sweep`
+# (`fpowi`, which nothing else here issues and no mutant below may move).
+shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast insert_tile powi_sweep)
 
 # The element format kernels of knife T3, in the order dtype_diff takes
 # them. Each is five or two segments of one output buffer, so a lane of one
@@ -1620,6 +1625,20 @@ case "$shape_verdict" in
   *) cat "$work/shape.err" >&2; fail "shape_diff printed no verdict (exit $rc)" ;;
 esac
 [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | head -n 1)"
+
+# `powi_sweep`'s exponents, held field by field: negative ones are where
+# the final reciprocal of the device's sequence is visible, and ones above
+# 127 are where the i8 half of the kernel reads a NEGATIVE low octet. A
+# corpus without either would let the kernel agree with a reference that
+# had the reciprocal or the octet's sign wrong.
+powi_shape="$(sed -n 's/^  exponents //p' "$work/shape.out" | tail -n 1)"
+[ -n "$powi_shape" ] || fail "shape_diff printed no exponents line for powi_sweep"
+for field in negative above_i8; do
+  count="$(printf '%s\n' "$powi_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ "${count:-0}" -gt 0 ] ||
+    fail "powi_sweep's corpus has no lane counted as $field ($powi_shape)"
+done
+echo "PASS  corpus: powi_sweep's exponents ($powi_shape)"
 
 # ---- native, the attribute kernels (knife T4)
 build_native "$root/std" "$work/attr.bin" "$here/attr_diff.dawn"
@@ -4109,10 +4128,13 @@ shape_pkg_mutant cat-operands-swapped bytecode.dawn \
 #     names a different quarter and is still in bounds. A source whose
 #     second dimension had one slice would make the reversed pair
 #     out of bounds, and out of bounds is undefined rather than wrong.
+#     Knife T16's `insert_tile` extracts the same quarter of the same shape
+#     before it inserts it, so it is in the red set too: the wrong quarter
+#     goes back into both places.
 shape_pkg_mutant extract-indices-reversed bytecode.dawn \
   'list.fold(indices, emit_ref(w1, src), emit_ref)' \
   'list.fold(list.reverse(indices), emit_ref(w1, src), emit_ref)' \
-  shape_ops
+  shape_ops insert_tile
 
 # 30. num-tile-blocks-as-block-id: the writer emits `get_tile_block_id`
 #     where `get_num_tile_blocks` belongs. The two operations have exactly
@@ -5234,6 +5256,21 @@ gsview_pkg_mutant atomic-red-mode-rotated bytecode.dawn \
   view_atomic \
   --red view_atomic
 
+# 54. insert-indices-reversed: the writer emits `insert`'s slice indices in
+#     the opposite order (knife T16). The same argument as `extract`'s in 29,
+#     on the same 16 by 8 tile cut into 8 by 4 quarters: both dimensions have
+#     two slices, so [0, 1] and [1, 0] are two different quarters and both in
+#     bounds, every index is a rank-0 i32 tile, and the assembler has
+#     nothing to object to. `insert_tile` puts one quarter back where it
+#     came from and over another one, so the mutant moves BOTH halves of its
+#     answer: the round trip stops being the tile, and the moved quarter
+#     lands where the round trip should have. `shape_ops` extracts and does
+#     not insert, so it is the control.
+shape_pkg_mutant insert-indices-reversed bytecode.dawn \
+  'list.fold(indices, emit_ref(emit_ref(w1, src), dest), emit_ref)' \
+  'list.fold(list.reverse(indices), emit_ref(emit_ref(w1, src), dest), emit_ref)' \
+  insert_tile
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -5266,7 +5303,7 @@ line="$commit $today $driver $want_tileiras $gpu_name $verdict"
 summary="$tiers fold-order=$probe scan-order=$scan_probe as-error=$erf_probe per-op=$trig_probe"
 summary="$summary attrs=$attr_probe hints=$hint_probe_line"
 summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
-summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line"
+summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line powi=$powi_shape"
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary arch=$arch_probe"

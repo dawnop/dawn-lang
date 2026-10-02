@@ -16,8 +16,8 @@
 # program order no meaning between memory operations.
 use std/list
 use std/str
-use std/gpu.{F64, F32, I32}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use std/gpu.{F64, F32, I32, I64}
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -48,6 +48,12 @@ use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, B
 ## when the body ends), and what `Continue` carries is what the body
 ## computed. `Break`'s values, `Continue`'s values, `inits`, `carried` and
 ## `results` are all the same length, and all five end in a token.
+##
+## `Insert` is `Extract`'s other direction (knife T16): `src` is the
+## subtile of shape `sub`, `dest` the tile of shape `whole` it goes into,
+## and `dst` the tile that answers, `dest` with one subtile replaced.
+## `PowI` is the float power with an INTEGER exponent tile (knife T16):
+## `base` is a `dtype` tile and `exp` an `exp_dtype` one of the same shape.
 ##
 ## `Extract`, `Cat` and `Permute` are knife T2's shape operations, and
 ## `NumBlocks` the grid's extent (`BlockId`'s companion). `JoinToks` merges
@@ -135,6 +141,8 @@ pub type TileOp =
   | If(results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp])
   | Yield(values: List[Int])
   | Extract(dst: Int, dtype: String, from: List[Int], to: List[Int], src: Int, indices: List[Int])
+  | Insert(dst: Int, dtype: String, sub: List[Int], whole: List[Int], src: Int, dest: Int, indices: List[Int])
+  | PowI(dst: Int, dtype: String, exp_dtype: String, shape: List[Int], base: Int, exp: Int)
   | Cat(dst: Int, dtype: String, dim: Int, lhs_shape: List[Int], rhs_shape: List[Int], lhs: Int, rhs: Int)
   | Permute(dst: Int, dtype: String, shape: List[Int], perm: List[Int], src: Int)
   | NumBlocks(dst: Int, axis: Int)
@@ -474,6 +482,38 @@ fn check_extract(name: String, from: List[Int], to: List[Int], indices: Int) -> 
       Some(k) -> refuse(name, "extract dimension ${k}: ${to[k]} does not divide ${from[k]} evenly")
       None -> ()
     }
+  }
+
+# `insert` is held to `extract`'s three rules with the two shapes' roles
+# exchanged: the SOURCE divides the destination (InsertOp's verifier says
+# "result dimension .. must be evenly divisible by source dimension"), the
+# ranks agree and there is one slice index per dimension. The verifier only
+# WARNS about an index it can see is out of bounds, and an index here is a
+# handle whose value the recording does not know, so the range of an index
+# is left where the dialect leaves it: undefined behaviour.
+fn check_insert(name: String, sub: List[Int], whole: List[Int], indices: Int) -> Unit =
+  if len(sub) != len(whole) {
+    refuse(name, "insert puts a tile of ${len(sub)} dimension(s) into one of ${len(whole)}")
+  } else if indices != len(whole) {
+    refuse(name, "insert into a ${len(whole)}-dimensional tile takes that many slice indices, got ${indices}")
+  } else {
+    match list.find(range(0, len(whole)), k => sub[k] < 1 || whole[k] % sub[k] != 0) {
+      Some(k) -> refuse(name, "insert dimension ${k}: ${sub[k]} does not divide ${whole[k]} evenly")
+      None -> ()
+    }
+  }
+
+# `fpowi`'s operands: a float base and an exponent of one of the four
+# integer formats Ops.td's CudaTile_PowIExponentTileType names. i64 is an
+# integer tile format here and NOT one of them, which is why this is its
+# own check rather than `check_int_dtype`.
+fn check_powi(name: String, dtype: String, exp_dtype: String) -> Unit =
+  if not one_of(["f64", "f32", "tf32", "f16", "bf16"], dtype) {
+    refuse(name, "powi raises a float tile, and `${dtype}` is not one this package computes in")
+  } else if not one_of(["i1", "i8", "i16", "i32"], exp_dtype) {
+    refuse(name, "powi's exponent is an i1, i8, i16 or i32 tile, got `${exp_dtype}`")
+  } else {
+    ()
   }
 
 # `cat` joins two tiles of one rank that agree everywhere but at `dim`.
@@ -1113,6 +1153,23 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
         ops = ops ++ [Extract(d, dtype, from, to, src, indices)]
         d
       }
+      t_insert(dtype, sub, whole, src, dst, indices) => {
+        check_shape(name, sub)
+        check_shape(name, whole)
+        check_insert(name, sub, whole, len(indices))
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [Insert(d, dtype, sub, whole, src, dst, indices)]
+        d
+      }
+      t_powi(dtype, exp_dtype, shape, a, n) => {
+        check_shape(name, shape)
+        check_powi(name, dtype, exp_dtype)
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [PowI(d, dtype, exp_dtype, shape, a, n)]
+        d
+      }
       t_cat(dtype, dim, lhs_shape, rhs_shape, lhs, rhs) => {
         check_shape(name, lhs_shape)
         check_shape(name, rhs_shape)
@@ -1601,6 +1658,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   If(results, _cond, _on_true, _on_false) -> results
   Yield(_values) -> []
   Extract(dst, _dtype, _from, _to, _src, _indices) -> [dst]
+  Insert(dst, _dtype, _sub, _whole, _src, _dest, _indices) -> [dst]
+  PowI(dst, _dtype, _exp_dtype, _shape, _base, _exp) -> [dst]
   Cat(dst, _dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) -> [dst]
   Permute(dst, _dtype, _shape, _perm, _src) -> [dst]
   NumBlocks(dst, _axis) -> [dst]
@@ -2004,6 +2063,38 @@ test "a print whose format expressions do not count its operands, and an assume 
   assert match escaped {
     Ok(_) -> true
     Err(_e) -> false
+  }
+  let bad_insert = catch_panic(() => trace_kernel("bad_insert", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [16, 8])
+    let s = load(x, idx_const(0), [8, 16])
+    let _r = insert(F64, [8, 16], [16, 8], s, t, [idx_const(0), idx_const(0)])
+    ()
+  }))
+  match bad_insert {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "insert dimension 1: 16 does not divide 8 evenly") }
+  }
+  let short_insert = catch_panic(() => trace_kernel("short_insert", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [16, 8])
+    let _r = insert(F64, [8, 4], [16, 8], extract(F64, [16, 8], [8, 4], t, [idx_const(0), idx_const(0)]), t, [idx_const(0)])
+    ()
+  }))
+  match short_insert {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "insert into a 2-dimensional tile takes that many slice indices, got 1") }
+  }
+  # i64 is an integer tile format here and NOT one of fpowi's four
+  let wide_exponent = catch_panic(() => trace_kernel("wide_powi", ["f64", "i64"], () => {
+    let x = param(F64, 0)
+    let n = param(I64, 1)
+    let _r = powi(F64, I64, [8], load(x, idx_const(0), [8]), load(n, idx_const(0), [8]))
+    ()
+  }))
+  match wide_exponent {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "powi's exponent is an i1, i8, i16 or i32 tile, got `i64`") }
   }
   let bad_divisor = catch_panic(() => trace_kernel("bad_assume", ["i32"], () => {
     let x = param(I32, 0)

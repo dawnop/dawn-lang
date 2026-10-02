@@ -26,7 +26,7 @@
 # format holds.
 use std/list
 use std/narrow
-use std/gpu.{round_to, wrap_i4, wrap_i16, wrap_i32, nibble_at, nibble_word}
+use std/gpu.{round_to, wrap_i4, wrap_i8, wrap_i16, wrap_i32, nibble_at, nibble_word}
 
 # ---- references for kernels with a boundary ----
 #
@@ -3132,6 +3132,102 @@ fn f32_of_bits(pattern: Int) -> Float = {
   }
 }
 
+# ---- `insert` and `fpowi` (knife T16, bytecode 13.4) ----
+#
+# Two opcodes 13.4 added, beside the knife T2 kernels in shape_diff because
+# both are EXACT tier and both are about an opcode rather than a problem.
+# `insert_tile_ref` moves elements and computes nothing. `ref_fpowi` does
+# compute, and what it computes is a MEASUREMENT: the device's `fpowi` over
+# f64 is not a correctly rounded power, it is one particular sequence of
+# correctly rounded multiplications, and this is that sequence.
+
+## The `insert` kernel over one block of 128 f64 read as a 16 by 8 tile:
+## `ins` is `[x, old out]`. Block `b` fills 256 lanes from `x[b * 128 ..]`.
+## The first 128 are the tile itself, which is what putting the quarter at
+## slice [1, 0] back where it came from answers. The next 128 are the tile
+## with its quarter at slice [0, 1] (rows 0 to 7, columns 4 to 7) replaced by
+## the one at [1, 0] (rows 8 to 15, columns 0 to 3); every other lane is the
+## destination's own.
+pub fn insert_tile_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx => {
+    let b = idx / 256
+    let k = idx % 256
+    if b >= blocks {
+      kept(old, idx)
+    } else if k < 128 {
+      round_to(dt, x[b * 128 + k])
+    } else {
+      let m = k - 128
+      let i = m / 8
+      let j = m % 8
+      if i < 8 && j >= 4 {
+        round_to(dt, x[b * 128 + (i + 8) * 8 + (j - 4)])
+      } else {
+        round_to(dt, x[b * 128 + m])
+      }
+    }
+  })
+}
+
+## `x` raised to the integer power `n` the way the device's `fpowi` does it
+## over f64, which is NOT the correctly rounded power. Measured on this
+## tree's RTX 3080 (tileiras 13.4.92, sm_86, docs/tile-backend-design.md
+## 6.19): the device answers right-to-left binary exponentiation of `x` to
+## `|n|` -- square the base once a bit, multiply it into the result where the
+## bit is set, every step one rounded binary64 product -- and for a negative
+## `n` the RECIPROCAL of that, one rounded division at the end. Bit for bit
+## on every lane of the probe corpus, where the power of the reciprocal
+## (`(1/x)^|n|`) agrees on two lanes in three and repeated multiplication on
+## fewer than half.
+##
+## What falls out of that sequence is the whole of the edge-case
+## semantics, and every one of these is the device's answer too: `x^0` is
+## 1.0 for EVERY `x`, NaN, infinities and both zeroes included (the loop
+## never runs); `0^n` and `(-0)^n` for a negative `n` are the infinities the
+## final division by a zero of that sign gives, so `(-0)^-1` is `-inf` and
+## `(-0)^-2` is `+inf`; a power that overflows on the way is `inf` before
+## the division, so its reciprocal is a zero, and one that underflows to a
+## subnormal is divided as the subnormal it rounded to.
+pub fn ref_fpowi(x: Float, n: Int) -> Float = {
+  var r = 1.0
+  var b = x
+  var m = if n < 0 { 0 - n } else { n }
+  while m > 0 {
+    if (m & 1) == 1 { r = r * b } else { () }
+    b = b * b
+    m = m >>> 1
+  }
+  if n < 0 { 1.0 / r } else { r }
+}
+
+## The `fpowi` kernel over 128-lane blocks: `ins` is `[x, n, old out]`, `x`
+## the f64 bases and `n` the i32 exponents. Block `b` fills 256 lanes: the
+## first 128 are `x^n`, the next 128 are `x` raised to the LOW OCTET of `n`
+## read as a signed i8 (the kernel `trunci`s the exponent to i8 and the
+## dialect reads every exponent width as signed), so an exponent of 200 is
+## the power -56 there.
+pub fn powi_sweep_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let n = ins[1]
+  let old = ins[2]
+  let dt = dtypes[2]
+  list.map(range(0, len(old)), idx => {
+    let b = idx / 256
+    let k = idx % 256
+    if b >= blocks {
+      kept(old, idx)
+    } else if k < 128 {
+      round_to(dt, ref_fpowi(x[b * 128 + k], to_int(n[b * 128 + k])))
+    } else {
+      let i = b * 128 + k - 128
+      round_to(dt, ref_fpowi(x[i], wrap_i8(to_int(n[i]))))
+    }
+  })
+}
+
 # ---- the attribute kernels (knife T4) ----
 #
 # Eight references for eight kernels that compute nothing anyone wants and
@@ -4404,6 +4500,35 @@ test "the shape, grid, token and pointer references answer what a reader can che
   assert ptr_recast_ref(1, ["i32", "f64"], [list.map(range(0, 128), i =>
       to_float(wrap_i32([0x3F800000, 0xC0000000, 1, 0x7F7FFFFF][i % 4]))), list.map(range(0, 128), _i => 0.0)])
     == list.map(range(0, 128), i => [1.0, 0.0 - 2.0, 1.401298464324817e-45, 3.4028234663852886e38][i % 4])
+}
+
+test "insert puts the quarter back where it came from, or over another one, and fpowi is binary exponentiation" {
+  let iota128 = list.map(range(0, 128), i => to_float(i))
+  let put = insert_tile_ref(1, ["f64", "f64"], [iota128, list.map(range(0, 260), _i => 0.0 - 1.0)])
+  # the round trip is the tile
+  assert list.take(put, 128) == iota128
+  # row 0, columns 4..7 of the second half hold row 8, columns 0..3
+  assert list.take(list.drop(put, 128), 8) == [0.0, 1.0, 2.0, 3.0, 64.0, 65.0, 66.0, 67.0]
+  # row 8 is untouched there: the quarter was copied, not moved
+  assert list.take(list.drop(put, 128 + 64), 8) == list.map(range(64, 72), i => to_float(i))
+  assert put[256] == 0.0 - 1.0
+  let inf = 1.0 / 0.0
+  let nzero = 0.0 * (0.0 - 1.0)
+  assert ref_fpowi(3.0, 5) == 243.0 && ref_fpowi(2.0, 0 - 3) == 0.125 && ref_fpowi(0.0 - 2.0, 3) == 0.0 - 8.0
+  # x^0 is one for every x, a NaN included
+  assert ref_fpowi(0.0, 0) == 1.0 && ref_fpowi(inf - inf, 0) == 1.0 && ref_fpowi(inf, 0) == 1.0
+  # the signed zero survives an odd power and decides the infinity's sign
+  assert ref_fpowi(nzero, 0 - 1) == 0.0 - inf && ref_fpowi(nzero, 0 - 2) == inf
+  assert to_string(ref_fpowi(nzero, 3)) == "-0.0"
+  # an overflow on the way is an infinity, so its reciprocal is a zero
+  assert ref_fpowi(1.0e200, 0 - 2) == 0.0
+  # the reciprocal is taken at the END: 3^-5 is 1/243 rounded once, which is
+  # not (1/3)^5 rounded five times
+  assert ref_fpowi(3.0, 0 - 5) == 1.0 / 243.0
+  let pw = powi_sweep_ref(1, ["f64", "i32", "f64"], [list.map(range(0, 128), _i => 2.0),
+    list.map(range(0, 128), i => if i == 0 { 200.0 } else { 3.0 }), list.map(range(0, 256), _i => 0.0)])
+  # lane 0's exponent is 200 as an i32 and -56 as its signed low octet
+  assert pw[0] == ref_fpowi(2.0, 200) && pw[128] == ref_fpowi(2.0, 0 - 56) && pw[1] == 8.0 && pw[129] == 8.0
 }
 
 test "the attribute references answer what a reader can check by hand" {

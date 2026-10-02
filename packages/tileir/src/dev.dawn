@@ -405,6 +405,19 @@ pub opaque type Ptrs[D] = Int
 ## agree in every dimension but `dim`. `t_permute(dtype, shape, perm, src)`
 ## reorders the dimensions: dimension `k` of the answer is dimension
 ## `perm[k]` of the source, and the source's rank is at least two.
+## `t_insert(dtype, sub, whole, src, dst, indices)` is `t_extract`'s other
+## direction (knife T16, bytecode 13.4): it answers `dst` (of shape `whole`)
+## with the subtile whose slice number along dimension `k` is `indices[k]`
+## replaced by `src` (of shape `sub`). The same three rules hold with the
+## two shapes' roles exchanged: `sub` divides `whole`, one index per
+## dimension, and the indices are slice numbers.
+##
+## `t_powi(dtype, exp_dtype, shape, a, n)` is the one float operation here
+## whose two operands have DIFFERENT formats (knife T16, bytecode 13.4):
+## `a` is a float tile of `dtype` and `n` an integer tile of `exp_dtype`
+## (i1, i8, i16 or i32, which the dialect reads as SIGNED) of the same
+## shape, so it cannot travel through `t_binaryf`, whose one `dtype` is
+## both operands'.
 ##
 ## `t_num_blocks(axis)` answers the extent of the grid along `axis`, which
 ## is `t_block_id`'s companion: `t_block_id` is where this block is and this
@@ -566,6 +579,8 @@ pub effect Dev {
   fn t_extract(dtype: String, from: List[Int], to: List[Int], src: Int, indices: List[Int]) -> Int
   fn t_cat(dtype: String, dim: Int, lhs_shape: List[Int], rhs_shape: List[Int], lhs: Int, rhs: Int) -> Int
   fn t_permute(dtype: String, shape: List[Int], perm: List[Int], src: Int) -> Int
+  fn t_insert(dtype: String, sub: List[Int], whole: List[Int], src: Int, dst: Int, indices: List[Int]) -> Int
+  fn t_powi(dtype: String, exp_dtype: String, shape: List[Int], a: Int, n: Int) -> Int
   fn t_num_blocks(axis: Int) -> Int
   fn t_tok_get() -> Int
   fn t_tok_set(tok: Int) -> Unit
@@ -1226,6 +1241,28 @@ pub fn ceil[D: Dtype](d: D, shape: List[Int], a: Tile[D]) -> Tile[D] !Dev = unar
 
 ## The element-wise `a` raised to the power `b`. Tolerance tier.
 pub fn pow[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "pow", shape, a, b)
+
+## The element-wise `a` raised to the INTEGER power `n`: Tile IR's `fpowi`
+## (knife T16, bytecode 13.4), `pow`'s sibling with an exponent tile of
+## format `e` (i1, i8, i16 or i32) instead of a float one. The dialect reads
+## `n` as SIGNED whatever its width, so an i8 lane holding 0xFF is the
+## power -1 and not 255.
+##
+## EXACT tier, but not against the power a mathematician means. Over f64
+## the device answers right-to-left binary exponentiation of `a` to `|n|`
+## (one correctly rounded product a step) and, for a negative `n`, the
+## reciprocal of that: bit for bit on every lane measured on an RTX 3080
+## (tileiras 13.4.92, sm_86), and up to 34 units in the last place away
+## from the correctly rounded power on the same corpus
+## (docs/tile-backend-design.md 6.19). `a^0` is 1.0 for every `a`, a NaN
+## included. tileref's `ref_fpowi` is that sequence; `pow` above, with a
+## float exponent, is a different operation and stays tolerance tier.
+pub fn powi[D: Dtype, E: Dtype](d: D, e: E, shape: List[Int], a: Tile[D], n: Tile[E]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let y: Int = n
+  let r: Tile[D] = t_powi(dtype_name(d), dtype_name(e), shape, x, y)
+  r
+}
 
 # ---- the trigonometric family and the float remainder (knife T1) ----
 #
@@ -2484,6 +2521,22 @@ pub fn extract[D: Dtype](d: D, from: List[Int], to: List[Int], t: Tile[D], indic
   r
 }
 
+## `t` (of shape `whole`) with its subtile whose slice number along
+## dimension `k` is `indices[k]` replaced by `s` (of shape `sub`): Tile IR's
+## `insert` (knife T16, bytecode 13.4), `extract`'s other direction. `sub`
+## must divide `whole` evenly in every dimension and the indices are SLICE
+## numbers, exactly as `extract`'s are, so
+## `extract(d, whole, sub, insert(d, sub, whole, s, t, i), i)` is `s` and
+## `insert(d, sub, whole, extract(d, whole, sub, t, i), t, i)` is `t`. Every
+## lane outside the named subtile is `t`'s own. An index outside its range
+## is undefined behaviour, not an error.
+pub fn insert[D: Dtype](d: D, sub: List[Int], whole: List[Int], s: Tile[D], t: Tile[D], indices: List[Idx]) -> Tile[D] !Dev = {
+  let x: Int = s
+  let y: Int = t
+  let r: Tile[D] = t_insert(dtype_name(d), sub, whole, x, y, list.map(indices, idx_handle))
+  r
+}
+
 ## `a` and `b` joined along dimension `dim`: the two agree in every other
 ## dimension, and the answer's `dim` is the sum of theirs.
 pub fn cat[D: Dtype](d: D, dim: Int, lhs: List[Int], rhs: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
@@ -3209,6 +3262,16 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_insert(_dtype, _sub, _whole, _src, _dst, _indices) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_powi(_dtype, _exp_dtype, _shape, _a, _n) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => {
       let h = next
       next = next + 1
@@ -3525,6 +3588,14 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["extract ${dtype} ${show(from)} ${show(to)} ${src} ${show(indices)}"]
       50
     }
+    t_insert(dtype, sub, whole, src, dst, indices) => {
+      log = log ++ ["insert ${dtype} ${show(sub)} ${show(whole)} ${src} ${dst} ${show(indices)}"]
+      54
+    }
+    t_powi(dtype, exp_dtype, shape, a, n) => {
+      log = log ++ ["powi ${dtype} ${exp_dtype} ${show(shape)} ${a} ${n}"]
+      55
+    }
     t_cat(dtype, dim, lhs_shape, rhs_shape, lhs, rhs) => {
       log = log ++ ["cat ${dtype} ${dim} ${show(lhs_shape)} ${show(rhs_shape)} ${lhs} ${rhs}"]
       51
@@ -3650,6 +3721,23 @@ test "load hands the handler the parameter's own format, not a fixed one" {
     ()
   })
   assert seen == ["block_id 2", "load 1 f32 14 [64] [1] None None []"]
+}
+
+fn t16_surface() -> Unit !Dev = {
+  let x = param(F64, 0)
+  let n = param(I8, 1)
+  let t = load(x, idx_const(0), [16, 8])
+  let q = extract(F64, [16, 8], [8, 4], t, [idx_const(1), idx_const(0)])
+  let _r = insert(F64, [8, 4], [16, 8], q, t, [idx_const(0), idx_const(1)])
+  let _p = powi(F64, I8, [16, 8], t, load(n, idx_const(0), [16, 8]))
+  ()
+}
+
+test "insert hands the handler the subtile's shape, then the whole tile's, then the subtile and the destination; powi both formats" {
+  let seen = logged(t16_surface)
+  # every idx_const answers 12 here, the loads 1, extract 50
+  assert list.any(seen, l => l == "insert f64 [8, 4] [16, 8] 50 1 [12, 12]")
+  assert list.any(seen, l => l == "powi f64 i8 [16, 8] 1 1")
 }
 
 fn indexed_surface() -> Unit !Dev = {
@@ -3980,6 +4068,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_if_else(_yields) => ()
       t_if_end(yields) => list.map(range(0, len(yields)), k => 40 + k)
       t_extract(_dtype, _from, _to, _src, _indices) => 50
+      t_insert(_dtype, _sub, _whole, _src, _dst, _indices) => 54
+      t_powi(_dtype, _exp_dtype, _shape, _a, _n) => 55
       t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => 51
       t_permute(_dtype, _shape, _perm, _src) => 52
       t_num_blocks(_axis) => 53

@@ -50,7 +50,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints, Padding, padding_present}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -183,7 +183,13 @@ derive Show
 ## dimension of `from`, one per dimension and each a rank-0 i32 operand, not
 ## element offsets; `CatTile`'s `dim` is the dimension the two operands are
 ## joined along; `PermuteTile`'s `perm` says that dimension `k` of the
-## answer is dimension `perm[k]` of the source. `BlockCounts` is the grid's
+## answer is dimension `perm[k]` of the source. `InsertTile` is
+## `ExtractTile`'s other direction (knife T16): `src`, typed `sub`, replaces
+## the subtile of `dest` its `indices` name, and the answer has `dest`'s
+## type `to`; the indices are slice numbers along each dimension of `to`.
+## `FloatPowI` is `fpowi` (knife T16): a float base typed `ty` (which the
+## answer shares) and an integer exponent typed `exp_ty`, the one float
+## instruction whose two operands differ in format. `BlockCounts` is the grid's
 ## extent, `get_tile_block_id`'s companion and its exact shape.
 ## `JoinTokens` merges two or more ordering tokens into one.
 ##
@@ -274,6 +280,8 @@ pub type Instr =
   | IfElse(results: List[Int], tys: List[Ty], cond: Ref, cond_ty: Ty, on_true: List[Instr], on_false: List[Instr])
   | YieldVals(values: List[Ref], tys: List[Ty])
   | ExtractTile(dst: Int, src: Ref, from: Ty, to: Ty, indices: List[Ref])
+  | InsertTile(dst: Int, src: Ref, dest: Ref, sub: Ty, to: Ty, indices: List[Ref])
+  | FloatPowI(dst: Int, ty: Ty, exp_ty: Ty, base: Ref, exp: Ref)
   | CatTile(dst: Int, dim: Int, lhs: Ref, rhs: Ref, lhs_ty: Ty, rhs_ty: Ty, to: Ty)
   | PermuteTile(dst: Int, src: Ref, perm: List[Int], from: Ty, to: Ty)
   | BlockCounts(x: Int, y: Int, z: Int)
@@ -937,6 +945,21 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let (l1, v) = define(l0, dst, to_ty)
     emit(l1, ExtractTile(v, s, num_tile(from, dtype), to_ty, ix))
   }
+  Insert(dst, dtype, sub, whole, src, dest, indices) -> {
+    let s = ref_of(l0, src, "insert source")
+    let t = ref_of(l0, dest, "insert destination")
+    let ix = list.map(indices, h => ref_of(l0, h, "insert slice index"))
+    let to_ty = num_tile(whole, dtype)
+    let (l1, v) = define(l0, dst, to_ty)
+    emit(l1, InsertTile(v, s, t, num_tile(sub, dtype), to_ty, ix))
+  }
+  PowI(dst, dtype, exp_dtype, shape, base, exp) -> {
+    let a = ref_of(l0, base, "powi base")
+    let n = ref_of(l0, exp, "powi exponent")
+    let ty = num_tile(shape, dtype)
+    let (l1, d) = define(l0, dst, ty)
+    emit(l1, FloatPowI(d, ty, num_tile(shape, exp_dtype), a, n))
+  }
   Cat(dst, dtype, dim, lhs_shape, rhs_shape, lhs, rhs) -> {
     let a = ref_of(l0, lhs, "cat left operand")
     let b = ref_of(l0, rhs, "cat right operand")
@@ -1452,6 +1475,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   IfElse(results, _tys, _cond, _cond_ty, _on_true, _on_false) -> results
   YieldVals(_values, _tys) -> []
   ExtractTile(dst, _src, _from, _to, _indices) -> [dst]
+  InsertTile(dst, _src, _dest, _sub, _to, _indices) -> [dst]
+  FloatPowI(dst, _ty, _exp_ty, _base, _exp) -> [dst]
   CatTile(dst, _dim, _lhs, _rhs, _lhs_ty, _rhs_ty, _to) -> [dst]
   PermuteTile(dst, _src, _perm, _from, _to) -> [dst]
   BlockCounts(x, y, z) -> [x, y, z]
