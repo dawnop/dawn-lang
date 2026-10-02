@@ -1,8 +1,8 @@
 # packages/web
 
-A small HTTP/1.1 framework over `jdk.httpserver`: routes are data, handlers
-are `fn(Request) -> Result[Response, HttpError] !io`, middleware are handler
-transformers. nginx (or similar) terminates TLS in front.
+A small HTTP/1.1 framework over `jdk.httpserver`: routes are data, handlers are `fn(Request) -> Result[Response, HttpError] !io`, middleware are handler transformers.
+
+nginx (or similar) terminates TLS in front.
 
 ## Path handling (WEB-03)
 

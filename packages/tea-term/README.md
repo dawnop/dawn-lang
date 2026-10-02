@@ -1,8 +1,8 @@
 # packages/tea-term
 
-The terminal half of the Elm architecture: the widget vocabulary, its DSL, its
-renderer, the row presenter, routing, and the driver loop. The
-vocabulary-free half -- the `Tree` contract, the reconciler, the walk,
+The terminal half of the Elm architecture: the widget vocabulary, its DSL, its renderer, the row presenter, routing, and the driver loop.
+
+The vocabulary-free half -- the `Tree` contract, the reconciler, the walk,
 `trait App` and subscriptions -- is `packages/tea-core`, which this package
 depends on.
 

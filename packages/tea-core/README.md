@@ -1,11 +1,11 @@
 # packages/tea-core
 
-The vocabulary-free half of the Elm architecture: what a tree owes a
-reconciler, the reconciler, the walk, `trait App`, and subscriptions. Nothing
-here names a widget, a style, a tag or a terminal, and nothing here performs an
-effect: the one row written in this package is `update`'s `!M.E`, which is the
-impl's to bind and is `!()` in every impl there is today. The terminal's
-vocabulary is `packages/tea-term`.
+The vocabulary-free half of the Elm architecture: what a tree owes a reconciler, the reconciler, the walk, `trait App`, and subscriptions.
+
+Nothing here names a widget, a style, a tag or a terminal, and nothing here
+performs an effect: the one row written in this package is `update`'s `!M.E`,
+which is the impl's to bind and is `!()` in every impl there is today. The
+terminal's vocabulary is `packages/tea-term`.
 
 ```dawn
 use tea_core/tree.{Tree, Rel, Unrelated, Same, SelfDiffers}
