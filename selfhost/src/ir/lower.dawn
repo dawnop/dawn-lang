@@ -1220,8 +1220,11 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## else, so an arm for one of these is dead code rather than an implementation.
 ##
 ## Map and Set become calls on the Dawn trie in std/hamt
-## (collections-dejava-research §5.1); the three numeric parsers become calls
-## on std/fmt (audit RP-05). The runtime method `parse_float` used to name is
+## (collections-dejava-research §5.1); `parse_float` becomes a call on
+## std/fmt (audit RP-05). `parse_int` and `parse_int_radix` were rewritten the
+## same way until K19 made `parse_int` an ordinary std/fmt function with a
+## defaulted radix and the builtin table lost both (docs/std-defaults-design.md).
+## The runtime method `parse_float` used to name is
 ## `float_of_decimal` now, the raw conversion std/fmt.atod calls by that name,
 ## so `parse_float` is rewritten everywhere, std/fmt included (#186).
 ##
@@ -1233,7 +1236,7 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## representation is `Int`, so the bridge is the identity and lowering drops
 ## it. A backend never learns the name.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_int", "parse_int_radix", "parse_float", "char_unchecked"]
+  var out = ["parse_float", "char_unchecked"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
     out = out ++ ["map_${op}"]
@@ -1313,10 +1316,10 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   #    answers for the same list in the same paragraph.
   assert len(inline) == 38
   assert len(host) == 2
-  assert len(gone) == 22
+  assert len(gone) == 20
   assert len(staged) == 0
-  # and the five groups account for all 132 names, with none left over
-  assert len(map.keys(it)) == 112
+  # and the five groups account for all 131 names, with none left over
+  assert len(map.keys(it)) == 110
   assert len(internal) == 21
 }
 
@@ -3645,7 +3648,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         let w = if len(wits) == 1 { Some(wits[0]) } else { none_wit }
         return to_str(st1, v, tex_ty(args[0]), w)
       }
-      # The numeric parsers are Dawn source too (std/fmt, audit RP-05): the
+      # The float parser is Dawn source too (std/fmt, audit RP-05): the
       # accepted language is spec §11's EBNF, checked by fmt's own scanner,
       # so neither backend's host grammar is the definition any more. No
       # exception, std/fmt included: the raw conversion fmt.atod delegates to
@@ -4507,18 +4510,18 @@ fn iter_cur_binding(st: LSt, subject: Ty) -> Ty = {
 ## implements is `Array`, and everything above it is std source
 ## (docs/collections-dejava-research.md §5.1).
 ## The std/fmt function each numeric-parser builtin lowers to (audit RP-05).
+## One is left: `parse_int` is std/fmt's own `pub fn` since K19, called like
+## any other prelude function, so only `parse_float` still needs routing.
 ##
-## Public because it is the whole reference to those three names from outside
-## the module that owns them: since v0.55.0 they are not `pub` in std/fmt --
-## `parse_int` is the only spelling user code has -- so nothing else in the
-## repository mentions them, and a rename inside std/fmt would leave this
-## lowering emitting a call to a function that is not there. `stdlib`'s
+## Public because it is the whole reference to `atod` from outside the module
+## that owns it: since v0.55.0 it is not `pub` in std/fmt -- `parse_float` is
+## the only spelling user code has -- so nothing else in the repository
+## mentions it, and a rename inside std/fmt would leave this lowering emitting
+## a call to a function that is not there. `stdlib`'s
 ## "the numeric parsers still have somewhere to land" test reads this table
 ## and looks the names up in the std it loads.
 pub fn parser_impl(name: String) -> Option[String] =
   match name {
-    "parse_int" -> Some("atoi")
-    "parse_int_radix" -> Some("atoi_radix")
     "parse_float" -> Some("atod")
     _ -> None
   }

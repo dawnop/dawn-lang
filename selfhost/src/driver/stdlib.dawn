@@ -107,7 +107,8 @@ pub(pkg) type StdCtx = {
 }
 
 pub fn prelude_names() -> List[String] =
-  ["println", "print", "map", "filter", "fold", "sort", "max", "min", "max_by", "min_by"]
+  ["println", "print", "map", "filter", "fold", "sort", "max", "min", "max_by", "min_by",
+    "parse_int"]
 
 fn is_prelude(n: String) -> Bool = {
   for p in prelude_names() {
@@ -123,8 +124,19 @@ fn is_prelude(n: String) -> Bool = {
 ## user code was checked against the map signature -- whose parameter types
 ## name ADTs the user program's tables have never heard of, so the symptom
 ## was an unknown-adt-id panic three tables downstream of the cause.
+##
+## `parse_int` joined at K19, when it stopped being a builtin so that its radix
+## could be a defaulted parameter (docs/std-defaults-design.md B2): the builtin
+## table carries no defaults, and a prelude name is how a bare call keeps
+## working without a `use`.
 fn prelude_owner(n: String) -> String =
-  if n == "println" || n == "print" { "std/io" } else { "std/list" }
+  if n == "println" || n == "print" {
+    "std/io"
+  } else if n == "parse_int" {
+    "std/fmt"
+  } else {
+    "std/list"
+  }
 
 ## One line of std/moved.txt: a name that left std, how to write it now, and
 ## until which release the hint is kept (docs/std-moved-design.md).
@@ -872,14 +884,15 @@ test "production comptime body tables contain only direct std functions" {
   }))
 }
 
-test "the numeric parsers still have somewhere to land" {
+test "the float parser still has somewhere to land" {
   # the real handler stays: `load_std("std")` names a relative directory, so
   # the working directory this runs in is one of the inputs.
   io.with_fs_real(() => io.with_env_real(() => {
-    # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
-    # v0.55.0 those three are not exported, so no call site names them and no
-    # export check sees them; the coupling is one table (`lower.parser_impl`) and
-    # this is the other end.
+    # `lower` rewrites `parse_float(s)` into a direct call to std/fmt.atod. Since
+    # v0.55.0 that is not exported, so no call site names it and no export check
+    # sees it; the coupling is one table (`lower.parser_impl`) and this is the
+    # other end. `parse_int` left the table at K19: it is std/fmt's own pub fn,
+    # reached through the prelude, so an export check does see it.
     #
     # What this adds, measured rather than assumed (a rename of `atod` inside
     # std/fmt, tests and comments included, 2026-08-06): codegen already refuses
@@ -887,8 +900,7 @@ test "the numeric parsers still have somewhere to land" {
     # std/fmt.atod` -- so the coupling is NOT silent, and the first claim written
     # here, that it stayed green until a NoSuchMethod at run time, was wrong.
     # What that panic depends on is somebody compiling a `parse_*` call, and
-    # today that is only true because the compiler happens to use all three
-    # (pkgfetch, lexer, interp). This test is what makes it true on purpose, and
+    # today that is only true because the compiler happens to call it. This test is what makes it true on purpose, and
     # it names the two ends instead of printing a mangled symbol.
     let std = match load_std("std") {
       Ok(s) -> s
@@ -898,7 +910,7 @@ test "the numeric parsers still have somewhere to land" {
       Some(o) -> o
       None -> panic("std/fmt is not a loaded module")
     }
-    for b in ["parse_int", "parse_int_radix", "parse_float"] {
+    for b in ["parse_float"] {
       let target = match parser_impl(b) {
         Some(f) -> f
         None -> panic("lower has no std/fmt target for the builtin `" ++ b ++ "`")
@@ -907,7 +919,10 @@ test "the numeric parsers still have somewhere to land" {
     }
     # and the builtins that must NOT be routed there
     assert parser_impl("to_string") == None
-    assert parser_impl("atoi") == None
+    assert parser_impl("atod") == None
+    # neither former builtin is routed any more: a call is an ordinary call
+    assert parser_impl("parse_int") == None
+    assert parser_impl("parse_int_radix") == None
   }))
 }
 
@@ -917,7 +932,7 @@ test "float rendering and parsing fold through std/fmt, not the host" {
   io.with_fs_real(() => io.with_env_real(() => {
     # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
     # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
-    # fmt.atoi/atod, so a comptime fold interprets the program's own std Core.
+    # fmt.parse_int/atod, so a comptime fold interprets the program's own std Core.
     # The expected strings below are spec §4.3's, written literally -- if the
     # fold ever rode a host renderer or host grammar again, a JDK could change
     # them out from under the spec and this test is what would say so.
@@ -936,11 +951,15 @@ test "float rendering and parsing fold through std/fmt, not the host" {
       "const P: Bool = comptime { parse_float(\"1.5f\") == None }\n" ++
       "const Q: Bool = comptime { parse_float(\"Infinity\") == Some(1.0 / 0.0) }\n" ++
       "const R: Bool = comptime { parse_int(\" 42 \") == Some(42) }\n" ++
-      "const S: Bool = comptime { parse_int(\"9223372036854775808\") == None }\n"
+      "const S: Bool = comptime { parse_int(\"9223372036854775808\") == None }\n" ++
+      "const T: Bool = comptime { parse_int(\"ff\", radix: 16) == Some(255) }\n" ++
+      "const U: Bool = comptime { parse_int(\"ff\") == None }\n"
     let (m, pdiags) = parser.parse_module(src)
     assert len(pdiags) == 0
     var cx = cx_new(None, None)
-    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls }
+    # `parse_int` is a prelude function (K19), so the bare name needs the
+    # prelude the analyzer hands every user module
+    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls, std_fns: std.std_fns }
     let (cx1, tm) = check_module(cx, m, std.exports)
     assert len(cx1.diags) == 0
     let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
@@ -959,6 +978,9 @@ test "float rendering and parsing fold through std/fmt, not the host" {
     assert map.get(ct.consts, "Q") == Some(VBool(true))
     assert map.get(ct.consts, "R") == Some(VBool(true))
     assert map.get(ct.consts, "S") == Some(VBool(true))
+    # the defaulted radix folds both ways: written, and omitted
+    assert map.get(ct.consts, "T") == Some(VBool(true))
+    assert map.get(ct.consts, "U") == Some(VBool(true))
   }))
 }
 
@@ -974,6 +996,14 @@ test "the bundled std loads, checks and evaluates" {
         assert map.has(std.std_fns, "println")
         assert map.has(std.std_fns, "map")
         assert not map.has(std.std_fns, "trim")
+        # `parse_int` is a prelude name owned by std/fmt, radix defaulted
+        match map.get(std.std_fns, "parse_int") {
+          Some(s) -> {
+            assert s.owner == Some("std/fmt")
+            assert len(s.param_tys) == 2
+          }
+          None -> { assert false }
+        }
         # ... harvested from their owning modules. `fold` is the name two
         # modules export: bare `fold` must stay std/list's (three parameters,
         # the subject a List), not map.fold, which the harvest would otherwise

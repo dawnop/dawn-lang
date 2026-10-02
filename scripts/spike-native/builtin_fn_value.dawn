@@ -14,12 +14,18 @@
 # builtins mirror marked `parse_int_radix` as refused in a `const`, but every
 # numeric parser folds, through std/fmt's Core like any other call. Each const
 # is printed beside the same call made at run time.
+#
+# Since K19 `parse_int` is no builtin: it is std/fmt's prelude function with a
+# defaulted radix, and `parse_int_radix` is gone into it. Taken as a value it
+# is the whole two-parameter function (a value carries no defaults, spec 3.1),
+# so the value is called with the radix written out -- ten for the decimal
+# lines, which is what the omitted argument means at a direct call.
 
 use std/list
 
 const C_INT: Option[Int] = parse_int("42")
 
-const C_RADIX: Option[Int] = parse_int_radix("ff", 16)
+const C_RADIX: Option[Int] = parse_int("ff", radix: 16)
 
 const C_FLOAT: Option[Float] = parse_float("1.5d")
 
@@ -29,23 +35,22 @@ fn show_both[T: Show](direct: T, through: T) -> String = "${direct} ${through}"
 
 pub fn main() -> Unit !io = {
   let pi = parse_int
-  let pr = parse_int_radix
   let pf = parse_float
   println("-- parse_int --")
   for s in ["42", "-7", " 12 ", "1_000", "0x10", "", "x"] {
-    println(show_both(parse_int(s), pi(s)))
+    println(show_both(parse_int(s), pi(s, 10)))
   }
-  println("-- parse_int_radix --")
-  println(show_both(parse_int_radix("ff", 16), pr("ff", 16)))
-  println(show_both(parse_int_radix("-101", 2), pr("-101", 2)))
-  println(show_both(parse_int_radix("z", 10), pr("z", 10)))
+  println("-- parse_int with a radix --")
+  println(show_both(parse_int("ff", radix: 16), pi("ff", 16)))
+  println(show_both(parse_int("-101", radix: 2), pi("-101", 2)))
+  println(show_both(parse_int("z", radix: 10), pi("z", 10)))
   println("-- parse_float --")
   for s in ["1.5", "-0.25e2", "1.5d", "1.5f", "0x1p3", "inf", "Infinity", "NaN", ""] {
     println(show_both(parse_float(s), pf(s)))
   }
   println("-- in a const --")
   println(show_both(C_INT, parse_int("42")))
-  println(show_both(C_RADIX, parse_int_radix("ff", 16)))
+  println(show_both(C_RADIX, parse_int("ff", radix: 16)))
   println(show_both(C_FLOAT, parse_float("1.5d")))
   println(show_both(C_FLOAT_OK, parse_float("2.5e1")))
   println("-- through a higher-order call --")

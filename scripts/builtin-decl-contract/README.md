@@ -130,7 +130,9 @@ nothing here replaces it.
 
 `matrix.txt`, sixteen of them, one for each judgement plus a second for P3,
 P4, P6, P7 and P8, and the two #185 was about: `parse_int`'s interpreter arm put back
-(M1), and `parse_int_radix`'s marker put back (P5). The P7 pair is #212's
+(M1), and `parse_int_radix`'s marker put back (P5). Both builtins left the table at K19
+(`parse_int` is a std/fmt function now), so those two land on `parse_float`, the
+lowered parser that is still a builtin. The P7 pair is #212's
 negative control (`list_push` loses its position) and a mirror marker dropped;
 the P8 pair is a mark on a primitive the table says borrows, and a mark
 dropped from `dawn_cell_set`. Each perturbs the real mirror in memory and asserts its own judgement goes

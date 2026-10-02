@@ -210,7 +210,7 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | K5 | A4 + A7 + A8：gpu `launch` / `with_gpu_fake`、bytes base64、`pad_*` / `bytes.index_of` 加默认 | K0 | `doc --builtins`，可能 `doc site`；改 std 公开面必跑 run-diff |
 | K6 | B1 语言能力（spec 3.1 节改写、checker、两个后端、interp），同刀只落 `cursor.find` | 无 | `doc --builtins`；`spike-native` 加默认引用形参的用例 |
 | K7–K18 | B1 之后的 Dev load/store 五连合并，按 `scripts/tile-golden/kernels.dawn` 的段落与其它文件切 | K6 | 无；golden 逐字节不动 |
-| K19 | B2：`parse_int` 迁 `std/fmt` 并吞 `parse_int_radix` | 无 | `doc --builtins`；builtin-decl-contract 镜像少一项 |
+| K19 | B2：`parse_int` 迁 `std/fmt` 并吞 `parse_int_radix` | 无 | `doc --builtins` 等，实测见 §7.4；builtin-decl-contract 镜像少两项 |
 
 T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的仍是后缀名（`float_to_int_sat`、
 `float_to_float_zero` / `_down` / `_up` / `_away`）；K2 把它们并成
@@ -240,8 +240,9 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 |---|---|---|
 | K0 | 已落地 | `8938471f`（PR #375 rebase 合入 main 后的哈希；分支上原为 `c53d7e85`） |
 | K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
-| K2 | 已落地 | `fa6c493e`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
-| K3–K19 | 未开工 | |
+| K2 | 已落地 | `3e31f40f`（main 上的哈希；分支上原为 `fa6c493e`） |
+| K3–K18 | 未开工 | |
+| K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | 待回填 |
 
 ### 7.1 K1 落地记录
 
@@ -325,4 +326,33 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 - **未做。** 写入器与渲染器学会其余组合（`subf` 的定向舍入、`divf` 的 ftz、`addi` 的 `no_wrap` 等）：方言都允许，
   但每一个都要层 1 的回答，属于 Tile IR 覆盖刀，不属于本线。Dev 的 `load_hinted` / `store_hinted` 等 load/store
   五连归 B 组（K7–K18），本刀不动。
+
+### 7.4 K19 落地记录
+
+- **面。** `std/fmt` 的 `pub fn parse_int(s: String, radix: Int = 10) -> Option[Int]`，函数体就是原来私有的
+  `atoi_radix`；`atoi` / `atoi_radix` 两个私有名删除。`parse_int` 进 prelude（`driver/stdlib.dawn` 的
+  `prelude_names`，`prelude_owner` 指 `std/fmt`），所以裸写 `parse_int(s)` 不需要 `use`，`fmt.parse_int`
+  在 `use std/fmt` 后也能写。builtin 表删 `parse_int` 与 `parse_int_radix` 两项（112 → 110），
+  `lower.parser_impl` 只剩 `parse_float`，`lowered_intrinsics` 少两项。`parse_int_radix` 不留别名，
+  `std/moved.txt` 登 `builtin parse_int_radix parse_int 0.83.0 0.93.0`。
+- **契约不变。** radix 不在 2..36 答 `None`（不 panic），与原 `parse_int_radix` 的 EBNF 和测试一致；
+  原测试全部改写成 `parse_int(s, radix: n)` 保留，另加「省略等于写 10」与按位置传 radix 两组断言。
+- **为什么不分两步。** 任务单的前提是「种子阶段之后 selfhost 里的裸 `parse_int` 变成未定义」。实查：
+  阶段 A 是种子 jar 配种子自己的 std（`bin/dawn` 924–926 行、`scripts/build-release-jar.sh` 95–96 行），
+  裸名落在种子的 builtin；阶段 B/C 是 HEAD 编译器配 HEAD std（`bin/dawn` 941–942 行），裸名经 HEAD 的
+  prelude 落到 `std/fmt.parse_int`。两个世界各自都有 `parse_int`，单参调用在两边都合法，所以不存在
+  「builtin 与 std 同名并存」的过渡期，一刀即可。唯一两边都写不出来的是带 radix 的调用：种子世界只有
+  `parse_int_radix`，HEAD 世界只有 `parse_int(s, radix: n)`。selfhost 里恰有一处（`front/lexer.dawn`
+  的 `\u{...}`），本刀用私有的 `escape_value` 过渡，读法与原 `parse_int_radix(hex, 16)` 对词法器可观察地
+  等价（含 trim 与符号），带测试。
+- **函数值。** 默认值随函数值丢失（spec 3.1），`let f = parse_int` 的类型从 `fn(String) -> Option[Int]`
+  变成 `fn(String, Int) -> Option[Int]`。仓内唯一这样写的是 `scripts/spike-native/builtin_fn_value.dawn`，
+  改成 `pi(s, 10)`。这是破坏性变更，spec §11 已写明。
+- **调用方。** `parse_int_radix` 的使用 12 处（selfhost 1、spike-native 10、unicode-contract 1，其中一处是 `let pr = parse_int_radix` 取值），全部改写；
+  单参 `parse_int(s)` 的调用一处不动。
+- **门禁改动。** builtin-decl-contract 的三个变异体（`p4-hide-*`、`m1-arm-for-*`、`p5-mark-*`）与
+  `p3-widen-a-return-type`、`p5-move-a-comptime-marker` 的锚点从 `parse_int` / `parse_int_radix` 换到
+  仍是 lowered builtin 的 `parse_float`，判据不变，`matrix.txt` 同步改名；builtin-type-contract 的
+  `omit-public-function-doc` 锚点换到 `char_is_letter`。checker-corpus 的 `std_private` / `std_renamed`
+  两例重录：`fmt.atoi` / `fmt.atoi_radix` 不再存在，答案从「私有」变成「没有这个导出」。
 

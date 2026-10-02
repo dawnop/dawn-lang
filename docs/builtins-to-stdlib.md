@@ -13,7 +13,9 @@
 > **别把文中的计数当现状。**「75 → 57」是 2026-07-18 的数、文末补记的「端态 46」是
 > 2026-07-22 的数，而这条曲线此后被 intrinsic 契约掉了头：运行时原语从藏在编译器里
 > 改成具名 builtin 进表（`io_*` `d8d3743`、`Array` + `popcount` `fdebb2f`、
-> Unicode 分类与 `parse_int_radix` `70707a6`）。2026-08-04 复算是 **89** 条。要当前的
+> Unicode 分类与 `parse_int_radix` `70707a6`）。2026-08-04 复算是 **89** 条。2026-10-02 的 K19
+> 又把 `parse_int` 搬回 std：它成了 `std/fmt` 的 prelude 函数，`radix` 是默认参数，
+> `parse_int_radix` 并入（[std-defaults-design.md](std-defaults-design.md) §7.4）。要当前的
 > 数就去源头：表是 `selfhost/src/check/types.dawn` 的 `builtins()`，条数由同一文件里的内联
 > 测试钉住（`assert map_size2(bs) == …`），加减一条就红。std 的模块清单同理在
 > `std/modules.txt`。
