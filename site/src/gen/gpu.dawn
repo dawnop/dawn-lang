@@ -1,0 +1,752 @@
+# The cuTile backend's page, gpu.html: the two layers, one kernel beside the
+# Tile IR it becomes, the three coverage tables, the three gates and the last
+# line of every device ledger.
+#
+# Why every number on it is read and none is written. The backend's evidence
+# already lives in tables the tile gates keep: scripts/tileir-features has a
+# row per opcode, type tag and attribute value, scripts/tile-golden a pinned
+# file per kernel, scripts/tile-gpu-diff a ledger line per run on a device.
+# They move with every knife. A page that copied their totals by hand would be
+# right on the day it was written and wrong from the next knife on, with
+# nothing to say so; read at build time, it cannot disagree with them. The
+# counting rule is not trusted either: a test below runs the gate that owns
+# the tables (scripts/tileir-features/check.py) and holds this module's counts
+# to the ones it prints, so two implementations of "how many are implemented"
+# are compared instead of one being assumed to match the other.
+#
+# Why the files are read from site/build/gpu rather than from scripts/. The
+# JVM-against-native differential (scripts/site-dist-diff.sh) runs this
+# generator over a snapshot of docs/, examples/, site/ and packages/, and no
+# tile directory is in it. site/build.sh copies the tables, the ledgers and
+# the goldens under site/build/gpu with their paths kept, so the snapshot
+# carries them. Every reader here takes the root those paths hang from, which
+# is how the tests read the same files in place under the repository root.
+#
+# Why one kernel, and why `vadd`. The side-by-side is there so that a reader
+# can hold both halves in view and watch each call land as operations. A
+# hundred and ninety kernels side by side is a listing nobody reads, and a
+# larger one (prefix_sum's scan region, any of the attention kernels) pushes
+# the mapping off the screen. `vadd` is the first milestone's kernel, its body
+# is four calls, its golden fits one screen, and it is the kernel layer 2 has
+# compared bit for bit since the first device run. It is cut from
+# scripts/tile-golden/kernels.dawn rather than from examples/projects/gpu_fake
+# because that is the file the golden on its right is traced from: the two
+# halves are a pair by construction, not by resemblance. The cut is
+# gen/home.fn_source's, so a function that moves or changes shape stops the
+# build, and the lines it came from are printed in its bar.
+#
+# The words are site/pages/gpu.md, in home.md's shape, so that a translation
+# can take the road the front page's took.
+
+use std/str
+use std/list
+use std/io
+use std/io.{Fs, with_fs_real, with_proc_real}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell, crumb, here, chip, plain_assets}
+use html/play.{win_bar}
+use hl/dawn.{highlight_dawn}
+use html/escape.{escape_html}
+use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files}
+use gen/copy.{Copy, load_copy, line, plain, body}
+use gen/home.{fn_source}
+
+# ---- the coverage tables ----
+
+## The statuses a coverage row may carry, in the order check.py's STATUSES
+## lists them and prints them.
+pub fn statuses() -> List[String] = ["implemented", "unimplemented", "deferred", "structural"]
+
+## One coverage table, counted: its name as check.py prints it, how many rows
+## it has, and how many rows carry each status, in [statuses] order.
+pub type Coverage = { name: String, total: Int, counts: List[(String, Int)] }
+
+## How many rows of `c` carry `status`.
+pub fn count_of(c: Coverage, status: String) -> Int = {
+  var n = 0
+  for e in c.counts {
+    let (s, k) = e
+    if s == status {
+      n = k
+    }
+  }
+  n
+}
+
+## The rows of one table, counted the way check.py's `parse_rows` reads them:
+## a line that is blank or starts with `#` once trimmed is not a row, every
+## other line is split on `|` into exactly eight trimmed fields, and the
+## fourth is the status. A row of any other width, or with a status check.py
+## does not know, is an error rather than a row skipped: a column dropped from
+## the table is the change this has to notice, and skipping would count the
+## remaining rows as if nothing had happened.
+pub fn parse_table(name: String, text: String) -> Result[Coverage, String] = {
+  var problems: List[String] = []
+  var seen: List[String] = []
+  var n = 0
+  for raw in str.split(text, "\n") {
+    n = n + 1
+    let s = str.trim(raw)
+    if s != "" && not str.starts_with(s, "#") {
+      let fields = map(str.split(s, "|"), f => str.trim(f))
+      if len(fields) != 8 {
+        problems = problems ++ ["${name} line ${n}: ${len(fields)} fields, not 8"]
+      } else if not list.contains(statuses(), fields[3]) {
+        problems = problems ++ ["${name} line ${n}: status \"${fields[3]}\" is not one check.py knows"]
+      } else {
+        seen = seen ++ [fields[3]]
+      }
+    }
+  }
+  if len(problems) > 0 {
+    Err(problems[0])
+  } else if len(seen) == 0 {
+    Err("${name}: no rows")
+  } else {
+    let rows = seen
+    Ok(Coverage {
+      name: name,
+      total: len(rows),
+      counts: map(statuses(), st => (st, len(filter(rows, x => x == st)))),
+    })
+  }
+}
+
+## The three tables, in the order check.py checks them, under its names.
+fn table_files() -> List[(String, String)] =
+  [("features", "features.txt"), ("types", "types.txt"), ("attrs", "attrs.txt")]
+
+fn read_tables(root: String) -> List[Coverage] !Fs =
+  map(table_files(), t => {
+    let (name, file) = t
+    match parse_table(name, must_read("${root}/scripts/tileir-features/${file}")) {
+      Ok(c) -> c
+      Err(e) -> panic("scripts/tileir-features/${file}: ${e}")
+    }
+  })
+
+## What check.py printed, as the same counts: one `PASS  tileir <name>:
+## <total> <unit>(s): <status>=<n> ...; layer...` line per table. A status it
+## does not print is zero, which is how it prints one (`if counts[s]`).
+pub fn parse_check_output(out: String) -> List[Coverage] = {
+  var found: List[Coverage] = []
+  for l in str.split(out, "\n") {
+    match str.strip_prefix(l, "PASS  tileir ") {
+      Some(rest) ->
+        match str.split_once(rest, ": ") {
+          Some((name, tail)) -> {
+            let total = unwrap_or(parse_int(unwrap_or(get(str.split(tail, " "), 0), "")), -1)
+            let kinds =
+              match str.split_once(tail, "(s): ") {
+                Some((_, after)) ->
+                  match str.split_once(after, ";") {
+                    Some((ks, _)) -> ks
+                    None -> after
+                  }
+                None -> ""
+              }
+            var pairs: List[(String, Int)] = []
+            for tok in str.split(kinds, " ") {
+              match str.split_once(tok, "=") {
+                Some((k, v)) -> {
+                  pairs = pairs ++ [(k, unwrap_or(parse_int(v), -1))]
+                }
+                None -> ()
+              }
+            }
+            let said = pairs
+            let counts = map(statuses(), st => {
+              var k = 0
+              for p in said {
+                let (s, v) = p
+                if s == st {
+                  k = v
+                }
+              }
+              (st, k)
+            })
+            found = found ++ [Coverage { name: name, total: total, counts: counts }]
+          }
+          None -> ()
+        }
+      None -> ()
+    }
+  }
+  found
+}
+
+# ---- the golden kernels ----
+
+## The kernels scripts/tile-golden pins, by the stems of their `.mlir` files.
+pub fn golden_names(root: String) -> List[String] !Fs = {
+  var out: List[String] = []
+  for f in must_list("${root}/scripts/tile-golden") {
+    match str.strip_suffix(f, ".mlir") {
+      Some(stem) -> {
+        out = out ++ [stem]
+      }
+      None -> ()
+    }
+  }
+  out
+}
+
+## One function cut out of a file, with the lines it came from (1-based,
+## both ends included). The text is [fn_source]'s, so the cut follows the
+## front page's rule; the line numbers are found here and checked against it.
+pub type Cut = { first: Int, last: Int, text: String }
+
+pub fn cut_fn(src: String, name: String) -> Cut = {
+  let text = fn_source(src, name)
+  let lines = str.split(src, "\n")
+  let head = "fn ${name}("
+  var first = 0
+  var i = 0
+  for l in lines {
+    i = i + 1
+    if first == 0 && str.starts_with(l, head) {
+      first = i
+    }
+  }
+  let last = first + len(str.split(text, "\n")) - 1
+  if first < 1 || last <= first || lines[first - 1] != str.split(text, "\n")[0] || lines[last - 1] != "}" {
+    panic("cutting `${head}...`: lines ${first} to ${last} are not the function fn_source cut")
+  }
+  Cut { first: first, last: last, text: text }
+}
+
+# ---- the device ledgers ----
+
+## The last line of one device ledger, field by field. `exact` and
+## `tolerance` are the kernels the run compared at each tier, summed over the
+## `tiers` pairs in the note; a line with no pair (a `blocked` run) has 0 and 0.
+pub type Ledger = {
+  file: String,
+  commit: String,
+  date: String,
+  driver: String,
+  tileiras: String,
+  arch: String,
+  result: String,
+  exact: Int,
+  tolerance: Int,
+}
+
+## The last line of a ledger that is a record and not a comment.
+pub fn last_entry(text: String) -> Option[String] = {
+  var last: Option[String] = None
+  for raw in str.split(text, "\n") {
+    let s = str.trim(raw)
+    if s != "" && not str.starts_with(s, "#") {
+      last = Some(s)
+    }
+  }
+  last
+}
+
+## The two tier counts of a note: every `exact=<n>` token, bare or behind a
+## family's `name:`, that is followed directly by a `tolerance=<m>` token.
+## That adjacency is what makes it a tier pair; a lone `exact=` elsewhere in
+## the note (dyn_diff's twin summary prints one) counts something else.
+pub fn tiers(note: String) -> (Int, Int) = {
+  let toks = filter(str.split(note, " "), t => t != "")
+  var ex = 0
+  var tol = 0
+  var i = 0
+  while i + 1 < len(toks) {
+    let t = toks[i]
+    let bare =
+      match str.rsplit_once(t, ":") {
+        Some((_, after)) -> after
+        None -> t
+      }
+    match (str.strip_prefix(bare, "exact="), str.strip_prefix(toks[i + 1], "tolerance=")) {
+      (Some(e), Some(m)) ->
+        match (parse_int(e), parse_int(m)) {
+          (Some(a), Some(b)) -> {
+            ex = ex + a
+            tol = tol + b
+          }
+          _ -> ()
+        }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  (ex, tol)
+}
+
+fn all_chars(s: String, ok: fn(Char) -> Bool) -> Bool = {
+  var good = s != ""
+  for c in code_points(s) {
+    if not ok(c) {
+      good = false
+    }
+  }
+  good
+}
+
+fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
+
+fn is_hex(c: Char) -> Bool = is_digit(c) || (c >= 'a' && c <= 'f')
+
+## One ledger line, `<commit> <date> <driver> <tileiras> <gpu-name> <result>
+## [# note]`, as the header of every ledger states it. Six columns before the
+## note and no other number: a column dropped or one added is an error, and so
+## is a commit that is not hex, a date that is not YYYY-MM-DD and a GPU name
+## that is not `sm_<n>`, which is what a column moved to the wrong place
+## would look like.
+pub fn parse_ledger_line(file: String, l: String) -> Result[Ledger, String] = {
+  let (head, note) =
+    match str.split_once(l, " # ") {
+      Some((h, n)) -> (h, n)
+      None -> (l, "")
+    }
+  let cols = filter(str.split(str.trim(head), " "), x => x != "")
+  if len(cols) != 6 {
+    Err("${file}: the last line has ${len(cols)} columns before its note, not 6 "
+        ++ "(commit date driver tileiras gpu-name result)")
+  } else {
+    let date_ok = str.len(cols[1]) == 10 && str.at(cols[1], 4) == '-' && str.at(cols[1], 7) == '-'
+      && all_chars(str.replace(cols[1], "-", ""), is_digit)
+    if str.len(cols[0]) < 12 || not all_chars(cols[0], is_hex) {
+      Err("${file}: \"${cols[0]}\" is not a commit")
+    } else if not date_ok {
+      Err("${file}: \"${cols[1]}\" is not a date")
+    } else if not all_chars(str.replace(cols[2], ".", ""), is_digit)
+      || not all_chars(str.replace(cols[3], ".", ""), is_digit) {
+        Err("${file}: \"${cols[2]}\" and \"${cols[3]}\" are not a driver and a tileiras version")
+      } else if not (str.starts_with(cols[4], "sm_") && all_chars(str.drop(cols[4], 3), is_digit)) {
+        Err("${file}: \"${cols[4]}\" is not a GPU name")
+      } else {
+        let (ex, tol) = tiers(note)
+        Ok(Ledger {
+          file: file,
+          commit: str.take(cols[0], 12),
+          date: cols[1],
+          driver: cols[2],
+          tileiras: cols[3],
+          arch: cols[4],
+          result: cols[5],
+          exact: ex,
+          tolerance: tol,
+        })
+      }
+  }
+}
+
+fn arch_number(l: Ledger) -> Int = unwrap_or(parse_int(str.drop(l.arch, 3)), 0)
+
+## Every `ledger*.txt` in scripts/tile-gpu-diff, last line parsed, in order of
+## architecture. Found by listing rather than named, so a fourth machine's
+## ledger is on the page the day it is recorded.
+pub fn read_ledgers(root: String) -> List[Ledger] !Fs = {
+  let dir = "${root}/scripts/tile-gpu-diff"
+  var out: List[Ledger] = []
+  for f in must_list(dir) {
+    if str.starts_with(f, "ledger") && str.ends_with(f, ".txt") {
+      let rel = "scripts/tile-gpu-diff/${f}"
+      match last_entry(must_read("${dir}/${f}")) {
+        Some(l) ->
+          match parse_ledger_line(rel, l) {
+            Ok(x) -> {
+              out = out ++ [x]
+            }
+            Err(e) -> panic(e)
+          }
+        None -> panic("${rel}: no record line")
+      }
+    }
+  }
+  # by architecture, smallest first: a selection over a handful of lines
+  var left = out
+  var sorted: List[Ledger] = []
+  while len(left) > 0 {
+    var best = 0
+    var i = 0
+    for x in left {
+      if arch_number(x) < arch_number(left[best]) {
+        best = i
+      }
+      i = i + 1
+    }
+    sorted = sorted ++ [left[best]]
+    left = list.take(left, best) ++ list.drop(left, best + 1)
+  }
+  sorted
+}
+
+# ---- everything the page states ----
+
+pub type Facts = {
+  tables: List[Coverage],
+  golden: Int,
+  ledgers: List[Ledger],
+  kernel: Cut,
+  mlir: String,
+}
+
+## The kernel the page sets beside its golden, and where both halves live.
+fn kernel_name() -> String = "vadd"
+
+fn kernels_file() -> String = "scripts/tile-golden/kernels.dawn"
+
+## Everything the page states, read from under `root`: site/build/gpu when
+## the site is built (site/build.sh copies it there), "." in the tests.
+pub fn load_facts(root: String) -> Facts !Fs = {
+  let golden = len(golden_names(root))
+  if golden == 0 {
+    panic("${root}/scripts/tile-golden holds no .mlir golden")
+  }
+  Facts {
+    tables: read_tables(root),
+    golden: golden,
+    ledgers: read_ledgers(root),
+    kernel: cut_fn(must_read("${root}/${kernels_file()}"), kernel_name()),
+    mlir: str.trim_end(must_read("${root}/scripts/tile-golden/${kernel_name()}.mlir")),
+  }
+}
+
+# ---- markup ----
+
+fn gh(path: String) -> String = "https://github.com/dawnop/dawn-lang/blob/main/${path}"
+
+fn code_link(path: String) -> String = """<a href="${gh(path)}"><code>${escape_html(path)}</code></a>"""
+
+## The two layers, each a row of steps. Every word on a step is code and
+## reads the same in both languages; the row's name and its sentence are
+## the page's.
+fn layers(c: Copy, mu: fn(String) -> String) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  let step = (s: String) => "<li><code>${escape_html(s)}</code></li>"
+  let arrow = `<li class="gpu-arrow" aria-hidden="true">→</li>`
+  let row = (cls: String, name: String, lib: String, eff: String, steps: List[String], text: String) =>
+    """<section class="gpu-layer ${cls}">
+<header><span class="gpu-layer-name">${name}</span>${code_link(lib)}<code class="gpu-eff">${eff}</code></header>
+<ol class="gpu-steps">${join(steps, arrow)}</ol>
+<p>${text}</p>
+</section>"""
+  let fork = `<li class="gpu-fork"><code>with_gpu_real</code><code>with_gpu_fake</code></li>`
+  let host = row("host", t("layer-host"), "std/gpu.dawn", "!Gpu", [step("main"), step("launch(\"vadd\")"), fork],
+    t("layer-host-body"))
+  let device = row("device", t("layer-device"), "packages/tileir", "!Dev",
+    [step("vadd"), step("record"), step("Tile IR"), step("tileiras"), step("cubin")], t("layer-device-body"))
+  `<div class="gpu-layers">` ++ "\n" ++ host ++ "\n" ++ device ++ "\n</div>"
+}
+
+## The kernel and its golden, side by side; stacked on a narrow screen.
+fn pair(c: Copy, f: Facts) -> String = {
+  let k = f.kernel
+  let left = "kernels.dawn:${k.first}–${k.last}"
+  let right = "${kernel_name()}.mlir"
+  """<div class="gpu-pair">
+<figure class="win hue-1">
+${win_bar(plain(c, "kernel-left") ++ " · " ++ left, "")}
+<pre><code>${highlight_dawn(k.text)}</code></pre>
+</figure>
+<figure class="win hue-3">
+${win_bar(plain(c, "kernel-right") ++ " · " ++ right, "")}
+<pre class="gpu-mlir"><code>${escape_html(f.mlir)}</code></pre>
+</figure>
+</div>"""
+}
+
+## What a table's figure says under its count: every status other than
+## `implemented` that has rows, as `<n> <status>`.
+fn rest_of(cov: Coverage) -> String =
+  join(map(filter(statuses(), s => s != "implemented" && count_of(cov, s) > 0), s =>
+      "${count_of(cov, s)} <code>${s}</code>"), " · ")
+
+fn table_named(f: Facts, name: String) -> Coverage = {
+  let hits = filter(f.tables, x => x.name == name)
+  if len(hits) != 1 {
+    panic("no coverage table called ${name}")
+  }
+  hits[0]
+}
+
+fn figure(cov: Coverage, caption: String, file: String) -> String =
+  """<div class="gpu-fig"><strong>${count_of(cov, "implemented")}<small>/${cov.total}</small></strong>"""
+  ++ """<span>${caption}</span><span class="gpu-fig-rest">${rest_of(cov)}</span>"""
+  ++ """<a href="${gh("scripts/tileir-features/" ++ file)}"><code>${file}</code></a></div>"""
+
+fn figures(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  """<div class="gpu-figs">
+${figure(table_named(f, "features"), t("fig-opcodes"), "features.txt")}
+${figure(table_named(f, "types"), t("fig-types"), "types.txt")}
+${figure(table_named(f, "attrs"), t("fig-attrs"), "attrs.txt")}
+<div class="gpu-fig"><strong>${f.golden}</strong><span>${t("fig-golden")}</span><span class="gpu-fig-rest"></span><a href="${gh("scripts/tile-golden")}"><code>tile-golden/</code></a></div>
+</div>"""
+}
+
+fn gates(c: Copy, mu: fn(String) -> String) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  let gate = (n: Int, script: String) =>
+    """<li><span class="gpu-gate-n">${n}</span><h3>${t("gate-${n}-title")}</h3><p>${t("gate-${n}-body")}</p>${code_link(script)}</li>"""
+  """<ol class="gpu-gates">
+${gate(0, "scripts/tile-golden/run.sh")}
+${gate(1, "scripts/tile-golden/run.sh")}
+${gate(2, "scripts/tile-gpu-diff/run.sh")}
+</ol>"""
+}
+
+fn ledger_table(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
+  let p = (k: String) => escape_html(plain(c, k))
+  let row = (l: Ledger) =>
+    """<tr><td class="key"><a href="${gh(l.file)}"><code>${escape_html(l.arch)}</code></a></td>"""
+    ++ """<td class="date">${escape_html(l.date)}</td><td>${escape_html(l.driver)}</td>"""
+    ++ """<td>${escape_html(l.tileiras)}</td><td><code>${escape_html(l.result)}</code></td>"""
+    ++ "<td>${l.exact}</td><td>${l.tolerance}</td><td><code>${escape_html(l.commit)}</code></td></tr>"
+  """<div class="table-wrap gpu-ledgers"><table>
+<thead><tr><th>${p("th-gpu")}</th><th>${p("th-date")}</th><th>${p("th-driver")}</th><th>${p("th-tileiras")}</th><th>${p("th-result")}</th><th>${p("th-exact")}</th><th>${p("th-tolerance")}</th><th>${p("th-tree")}</th></tr></thead>
+<tbody>
+${join(map(f.ledgers, row), "\n")}
+</tbody>
+</table></div>
+<p class="gpu-note">${line(c, "ledger-tiers", mu)}</p>"""
+}
+
+## A column of prose: a section heading and its body from the copy.
+fn prose(c: Copy, mu: fn(String) -> String, id: String, key: String) -> String =
+  """<div class="col prose"><h2 id="${id}">${line(c, "${key}-title", mu)}</h2>""" ++ "\n"
+  ++ body(c, "${key}-body", mu) ++ "</div>"
+
+## The page as markup, in one language, without writing it: what the tests
+## read, so that they check the document a browser gets.
+##
+## It has no twin yet, so `pair` is "" and the header offers no language
+## switch: a switch to a page that does not exist is a broken link. The
+## translation (site/pages/gpu.zh.md) makes it "gpu.html".
+fn gpu_page(a: Assets, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
+  let (src, root) =
+    match lang {
+      En -> ("site/pages/gpu.md", ".")
+      Zh -> ("site/pages/gpu.zh.md", "..")
+    }
+  let c = load_copy(src)
+  let mu = (u: String) => map_doc_url(root, docs, u)
+  let title = plain(c, "title")
+  let head = PageHead {
+    crumbs: [crumb("Dawn", "${root}/index.html"), here(line(c, "crumb", mu))],
+    title: line(c, "title", mu),
+    lede: line(c, "lede", mu),
+    meta: [chip("<code>!Dev</code> · Tile IR · <code>tileiras</code>"),
+      chip("${f.golden} " ++ line(c, "chip-golden", mu)), chip("${len(f.ledgers)} " ++ line(c, "chip-gpus", mu))],
+    extra: "",
+    cls: "col",
+  }
+  let main = `<main class="wrap page gpu-page">` ++ "\n"
+    ++ prose(c, mu, "layers", "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
+    ++ prose(c, mu, "kernel", "kernel") ++ "\n" ++ pair(c, f) ++ "\n"
+    ++ prose(c, mu, "coverage", "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
+    ++ prose(c, mu, "gates", "gates") ++ "\n" ++ gates(c, mu) ++ "\n"
+    ++ prose(c, mu, "ledgers", "ledger") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
+  shell(a, lang, "", title, root, "", head, main)
+}
+
+## Write the page. English only for now, at the site root.
+pub fn gen_gpu(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+  let dst =
+    match lang {
+      En -> "${out}/gpu.html"
+      Zh -> "${out}/zh/gpu.html"
+    }
+  write_page(dst, gpu_page(a, lang, load_facts("site/build/gpu"), doc_files()))
+}
+
+# ---- tests ----
+
+## The gate that owns the tables, run, and its counts compared with these.
+## Hard-coding today's numbers would test nothing the next knife does not
+## change; running check.py tests that the two readings of "what a row's
+## status is" agree, which is the claim the page makes.
+test "the coverage counts are the ones check.py prints" {
+  with_fs_real(() => {
+    let dir =
+      match io.temp_dir("", "dawn-site-gpu") {
+        Ok(d) -> d
+        Err(e) -> panic("no temporary directory: ${e.message}")
+      }
+    let out_path = "${dir}/out.txt"
+    let err_path = "${dir}/err.txt"
+    let status = with_proc_real(() => io.run(["python3", "scripts/tileir-features/check.py"], out_path, err_path))
+    let printed = must_read(out_path)
+    let complaint = must_read(err_path)
+    for gone in [out_path, err_path, dir] {
+      match io.delete(gone) {
+        Ok(_) -> ()
+        Err(e) -> panic("cannot delete ${gone}: ${e.message}")
+      }
+    }
+    match status {
+      Ok(code) -> {
+        assert code == 0
+      }
+      Err(e) -> panic("python3 did not start: ${e.message}")
+    }
+    assert complaint == ""
+    let theirs = parse_check_output(printed)
+    let ours = read_tables(".")
+    assert len(theirs) == 3
+    assert map(theirs, x => (x.name, x.total, x.counts)) == map(ours, x => (x.name, x.total, x.counts))
+    for x in ours {
+      assert x.total > 0
+      assert count_of(x, "implemented") > 0
+    }
+  })
+}
+
+test "check.py's summary line reads as counts" {
+  let out = "PASS  tileir features: 105 opcode(s): implemented=99 unimplemented=3 structural=3; layer0=3\n"
+    ++ "PASS  tileir types: 24 type tag(s): implemented=23 unimplemented=1; layer0=1\n"
+  let cs = parse_check_output(out)
+  assert len(cs) == 2
+  assert cs[0].name == "features"
+  assert cs[0].total == 105
+  assert count_of(cs[0], "structural") == 3
+  assert count_of(cs[0], "deferred") == 0
+  assert cs[1].name == "types"
+  assert cs[1].total == 24
+  assert count_of(cs[1], "unimplemented") == 1
+}
+
+## The format negative control for the tables: one field gone from one row,
+## or a status nobody declared, is not a row to skip.
+test "a coverage row of the wrong width or status is an error" {
+  let good = "# header\n\nadd | 0x01 | 13.1 | implemented | 1 | 2 | golden:vadd | note\n"
+  match parse_table("t", good) {
+    Ok(c) -> {
+      assert c.total == 1
+      assert count_of(c, "implemented") == 1
+    }
+    Err(_) -> { assert false }
+  }
+  match parse_table("t", "add | 0x01 | 13.1 | implemented | 1 | golden:vadd | note\n") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "7 fields, not 8") }
+  }
+  match parse_table("t", "add | 0x01 | 13.1 | done | 1 | 2 | golden:vadd | note\n") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "status \"done\"") }
+  }
+}
+
+test "every ledger's last line parses into every field" {
+  with_fs_real(() => {
+    let ls = read_ledgers(".")
+    assert len(ls) >= 1
+    assert ls[0].file == "scripts/tile-gpu-diff/ledger.txt" || arch_number(ls[0]) <= arch_number(ls[len(ls) - 1])
+    for l in ls {
+      assert str.len(l.commit) == 12
+      assert str.len(l.date) == 10
+      assert l.driver != ""
+      assert l.tileiras != ""
+      assert str.starts_with(l.arch, "sm_")
+      assert l.result != ""
+      assert l.exact + l.tolerance > 0
+    }
+    # in order of architecture
+    var prev = 0
+    for l in ls {
+      assert arch_number(l) >= prev
+      prev = arch_number(l)
+    }
+  })
+}
+
+## The format negative control for the ledgers: each of the six columns
+## taken out in turn, and two moved, and every one of them is refused.
+test "a ledger line with a column missing or moved is an error" {
+  let cols = ["83b71036b16a", "2026-10-02", "616.56", "13.4.92", "sm_86", "pass"]
+  let note = " # inputs=a9eccc0dc802 exact=7 tolerance=7 2d:exact=2 tolerance=6 twin=same exact=7"
+  match parse_ledger_line("l", join(cols, " ") ++ note) {
+    Ok(l) -> {
+      assert l.arch == "sm_86"
+      assert l.result == "pass"
+      assert l.exact == 9
+      assert l.tolerance == 13
+    }
+    Err(_) -> { assert false }
+  }
+  for i in range(0, 6) {
+    let short = list.take(cols, i) ++ list.drop(cols, i + 1)
+    match parse_ledger_line("l", join(short, " ") ++ note) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e, "5 columns before its note, not 6") }
+    }
+  }
+  let swapped = ["2026-10-02", "83b71036b16a", "616.56", "13.4.92", "sm_86", "pass"]
+  match parse_ledger_line("l", join(swapped, " ") ++ note) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  let arch_moved = ["83b71036b16a", "2026-10-02", "616.56", "sm_86", "13.4.92", "pass"]
+  match parse_ledger_line("l", join(arch_moved, " ") ++ note) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+}
+
+test "the kernel beside its golden is the whole function, from the lines it names" {
+  with_fs_real(() => {
+    let src = must_read(kernels_file())
+    let k = cut_fn(src, kernel_name())
+    assert k.text != ""
+    assert str.starts_with(k.text, "fn vadd(")
+    assert str.contains(k.text, "!Dev")
+    assert str.ends_with(k.text, "\n}")
+    assert not str.contains(k.text, "vadd_f32")
+    let lines = str.split(src, "\n")
+    assert join(list.slice(lines, k.first - 1, k.last), "\n") == k.text
+    let mlir = must_read("scripts/tile-golden/vadd.mlir")
+    assert str.contains(mlir, "entry @vadd(")
+  })
+}
+
+## The golden count against an independent one: kernels.dawn dispatches on
+## each kernel's name (`  "<name>" ->`), and the set of those names is the set
+## of `.mlir` files. A count that came from a listing of the wrong directory,
+## or a golden left behind by a kernel that was renamed, is red here.
+test "the golden kernels are the ones kernels.dawn dispatches" {
+  with_fs_real(() => {
+    let names = golden_names(".")
+    assert len(names) > 0
+    var arms: List[String] = []
+    for l in str.split(must_read(kernels_file()), "\n") {
+      match str.strip_prefix(l, "  \"") {
+        Some(rest) ->
+          match str.strip_suffix(rest, "\" ->") {
+            Some(name) -> {
+              if not str.contains(name, "\"") {
+                arms = arms ++ [name]
+              }
+            }
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+    assert sort(arms) == sort(names)
+    assert len(names) == len(filter(must_list("scripts/tile-golden"), x => str.ends_with(x, ".tilebc")))
+  })
+}
+
+test "the page states what the files say, and links nowhere it should not" {
+  with_fs_real(() => {
+    let f = load_facts(".")
+    let p = gpu_page(plain_assets(), En, f, [])
+    assert str.contains(p, "<title>Dawn's cuTile backend</title>")
+    assert str.contains(p, "<h1>Dawn's cuTile backend</h1>")
+    let feats = table_named(f, "features")
+    assert str.contains(p, "<strong>${count_of(feats, "implemented")}<small>/${feats.total}</small></strong>")
+    assert str.contains(p, "<strong>${f.golden}</strong>")
+    for l in f.ledgers {
+      assert str.contains(p, "<code>${l.commit}</code>")
+    }
+    assert str.contains(p, `<span class="k">fn</span> <span class="f">vadd</span>`)
+    assert str.contains(p, "entry @vadd(")
+    # no twin yet, so no language switch to a page that is not there
+    assert not str.contains(p, `class="lang"`)
+    assert not str.contains(p, `hreflang="zh-CN"`)
+  })
+}
