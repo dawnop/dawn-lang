@@ -1,8 +1,9 @@
-import { dawn, dawnCompletions, importEdit, staticCompletionLabels } from '../src/dawn-lang'
+import { dawn, dawnCompletions, dawnHighlight, importEdit, staticCompletionLabels } from '../src/dawn-lang'
 import { BUILTINS } from '../src/builtins.generated'
 import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
 import { ensureSyntaxTree, matchBrackets } from '@codemirror/language'
+import { highlightTree } from '@lezer/highlight'
 import { CompletionContext } from '@codemirror/autocomplete'
 import {
   DAWN_LSP_PROTOCOL,
@@ -68,6 +69,25 @@ const blankRecovery = EditorState.create({ doc: blankRecoveryDoc, extensions: [d
 ensureSyntaxTree(blankRecovery, blankRecoveryDoc.length, 5000)
 expect('ordinary string recovers over blank line',
   matchBrackets(blankRecovery, blankRecoveryDoc.lastIndexOf('('), 1)?.matched, true)
+// The classes the editor paints, read off the real syntax tree. The name
+// after `fn` must reach tok-def: a token named `def` was resolved by
+// StreamLanguage's legacy table instead of tokenTable (issue #350).
+function tokenClasses(doc: string) {
+  const state = EditorState.create({ doc, extensions: [dawn()] })
+  const out: [string, string][] = []
+  highlightTree(ensureSyntaxTree(state, doc.length, 5000)!, dawnHighlight, (from, to, cls) => {
+    out.push([doc.slice(from, to), cls])
+  })
+  return out
+}
+expect('definition name gets tok-def', tokenClasses('fn area(s: Shape) -> Float = 1.0'), [
+  ['fn', 'tok-keyword'], ['area', 'tok-def'], ['s', 'tok-variableName'],
+  ['Shape', 'tok-typeName'], ['Float', 'tok-typeName'], ['1.0', 'tok-number'],
+])
+expect('only the name after fn is a definition', tokenClasses('pub fn go() -> Unit = go()'), [
+  ['pub', 'tok-keyword'], ['fn', 'tok-keyword'], ['go', 'tok-def'],
+  ['Unit', 'tok-typeName'], ['go', 'tok-variableName'],
+])
 callBrackets('nested character and raw braces', '"${foo(\'}\', `}`)}"')
 callBrackets('blank line in triple string', '"""$name\n\nend"""')
 
