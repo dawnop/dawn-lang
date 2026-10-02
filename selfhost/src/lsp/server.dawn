@@ -560,7 +560,7 @@ fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
       }
   }
 
-fn doc_qcx(st: LspState, analysis: Analysis) -> Option[QCx] = {
+fn doc_qcx(st: LspState, d: Doc, analysis: Analysis) -> Option[QCx] = {
   let entry = list.find(analysis.prog.modules, cm => cm.mod_path == analysis.entry)
   match entry {
     Some(e) -> {
@@ -584,7 +584,8 @@ fn doc_qcx(st: LspState, analysis: Analysis) -> Option[QCx] = {
         std: st.std,
         exports_env: env,
         bins: visible_bins(st.bins, e.cx),
-        typed: typed_trees(e.tm)
+        typed: typed_trees(e.tm),
+        cps: d.view.cps
       })
     }
     None -> None
@@ -2121,7 +2122,7 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
     Some(d) ->
       match analysis_of(st, d) {
         Some(analysis) ->
-          match doc_qcx(st, analysis) {
+          match doc_qcx(st, d, analysis) {
             Some(qc) -> {
               var items: List[Json] = []
               for it in completions_at(qc, analysis.modules, d.text, pos_offset(d, params)) {
@@ -2152,7 +2153,7 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
     Some(d) ->
       match analysis_of(st, d) {
         Some(analysis) ->
-          match doc_qcx(st, analysis) {
+          match doc_qcx(st, d, analysis) {
             Some(qc) ->
               match find_target(qc, pos_offset(d, params)) {
                 Some(t) -> jobj([
@@ -2183,7 +2184,7 @@ fn handle_signature_help(st: LspState, params: Json) -> Json !io = {
     Some(d) ->
       match analysis_of(st, d) {
         Some(analysis) ->
-          match doc_qcx(st, analysis) {
+          match doc_qcx(st, d, analysis) {
             Some(qc) ->
               match signature_at(qc, d.text, pos_offset(d, params)) {
                 Some(found) -> {
@@ -2223,7 +2224,7 @@ fn handle_definition(st: LspState, params: Json) -> Json !Fs !Env = {
     Some(d) ->
       match analysis_of(st, d) {
         Some(analysis) ->
-          match doc_qcx(st, analysis) {
+          match doc_qcx(st, d, analysis) {
             Some(qc) ->
               match find_target(qc, pos_offset(d, params)) {
                 Some(t) ->
@@ -2333,7 +2334,7 @@ fn handle_symbols(st: LspState, params: Json) -> Json !io = {
     Some(d) ->
       match analysis_of(st, d) {
         Some(analysis) ->
-          match doc_qcx(st, analysis) {
+          match doc_qcx(st, d, analysis) {
             Some(qc) -> {
               var out: List[Json] = []
               for dc in qc.entry.m.decls {
@@ -2523,7 +2524,7 @@ test "a bundled std buffer keeps its std identity through the document seam" {
         assert len(prog.diags) == 0
         assert entry == "std/cursor"
         # the identity is not decoration: this is the lookup every query makes
-        match doc_qcx(st, Analysis {
+        match doc_qcx(st, d, Analysis {
           prog: prog,
           entry: entry,
           modules: no_modules,
@@ -2727,7 +2728,7 @@ fn def_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -
   }
   match analysis_of(st, d) {
     Some(analysis) ->
-      match doc_qcx(st, analysis) {
+      match doc_qcx(st, d, analysis) {
         Some(qc) ->
           match find_target(qc, off) {
             Some(t) -> t
@@ -3045,6 +3046,7 @@ test "hover shows a constant's value and a comptime block's, as analysis left th
     # the keyword answers with the block's value; inside the block the
     # innermost node still wins
     assert def_probe_at(st, d, text, "comptime { 1", 0).hover == "comptime: Int = 1048576  (0x100000)"
+    assert def_probe_at(st, d, text, "1 << 20", 2).hover == "Int"
     assert def_probe_at(st, d, text, "1 << 20", 0).hover == "Int"
     # a constant comptime refused: its diagnostic, first line, says why
     assert def_probe_at(st, d, text, "HASHED", 0).hover ==
@@ -3098,5 +3100,64 @@ test "hover reads a std constant's value from std's own comptime results" {
     assert def_probe_at(st, d, text, "PROBE_MASK}", 0).hover == want
     assert def_probe_at(st, d, text, "PROBE_MASK +", 0).hover == want
     assert def_probe_at(st, d, text, "PROBE_MASK\n", 0).hover == want
+  }))
+}
+
+# ---- literals on hover (docs/lsp-hover-design.md §4) ----
+
+fn literal_probe_text() -> String =
+  join([
+    "const MASK: Int = 0xFF",
+    "",
+    "fn lits() -> (Int, Char, Char, Float, String, String) =",
+    "  (0b1010 + MASK, 'é', '\\u{1F600}', 1.1, \"héllo\\n\", \"n = \${MASK}\")",
+    ""
+  ], "\n")
+
+test "hover on a literal shows its type and a value line in the one fence" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = literal_probe_text()
+    let d = def_probe_doc_named(st, "literals.dawn", text)
+    # a 0x or 0b spelling is echoed, with its decimal
+    assert def_probe_at(st, d, text, "0xFF", 2).hover == "Int\n0xFF = 255"
+    assert def_probe_at(st, d, text, "0b1010", 0).hover == "Int\n0b1010 = 10"
+    # an escape spelling shows the code point it stands for, and its bytes
+    assert def_probe_at(st, d, text, "'\\u{1F600}'", 3).hover == "Char\n'😀'  U+1F600  UTF-8: F0 9F 98 80"
+    assert def_probe_at(st, d, text, "'é'", 1).hover == "Char\n'é'  U+00E9  UTF-8: C3 A9"
+    assert def_probe_at(st, d, text, "1.1", 0).hover == "Float\n1.1  (not exactly representable)"
+    # a string counts code points and UTF-8 bytes of its value, escapes undone
+    assert def_probe_at(st, d, text, "\"héllo", 2).hover == "String\n\"héllo\\n\"  (6 code points, 7 UTF-8 bytes)"
+    # with an interpolation it is an expression: the type alone, and the
+    # interpolated name still answers as itself
+    assert def_probe_at(st, d, text, "\"n = ", 1).hover == "String"
+    assert def_probe_at(st, d, text, "MASK}", 0).hover == "const MASK: Int = 255  (0xFF)"
+  }))
+}
+
+test "on a constant's name the constant answers, on its literal the literal does" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = literal_probe_text()
+    let d = def_probe_doc_named(st, "literals.dawn", text)
+    let name = def_probe_at(st, d, text, "MASK: Int", 0)
+    assert name.hover == "const MASK: Int = 255  (0xFF)"
+    let lit = def_probe_at(st, d, text, "0xFF", 0)
+    assert lit.hover == "Int\n0xFF = 255"
+    # the literal's own span, not the declaration's
+    let at = match str.index_of(text, "0xFF") {
+      Some(i) -> i
+      None -> panic("no literal")
+    }
+    assert (lit.lo, lit.hi) == (at, at + 4)
+    assert lit.def == None
   }))
 }

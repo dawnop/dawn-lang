@@ -2,7 +2,7 @@
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion, symbols, signature help,
-# constant and comptime values on hover, formatting over
+# constant and comptime values on hover, literals on hover, formatting over
 # a two-module project + a standalone buffer) runs against both toolchains
 # and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -114,6 +114,23 @@ fn squares(n: Int) -> List[Int] = {
 pub fn total() -> Int = LIMIT + u.LIMIT + MASK
 
 pub fn root() -> String = memfs.BASE
+EOF
+
+# Literals, whose hover adds a value line under the type
+# (docs/lsp-hover-design.md §4): an Int in decimal, with underscores, in 0x
+# and 0b; a Char written plainly, as an escape and as a \u{...}; a Float that
+# is exactly a double and one that is not; a string with escapes, and one
+# with an interpolation, which is an expression and keeps the type alone.
+cat > "$OUT/proj/src/literals.dawn" <<'EOF'
+const MASK: Int = 0xFF
+
+pub fn ints() -> List[Int] = [255, 0b1010, 1_000_000]
+
+pub fn chars() -> List[Char] = ['é', '\n', '\u{1F600}']
+
+pub fn floats() -> List[Float] = [1.5, 1.1]
+
+pub fn strings() -> List[String] = ["héllo\n", "n = ${MASK}"]
 EOF
 
 cat > "$OUT/proj/src/app.dawn" <<'EOF'
@@ -328,6 +345,30 @@ note("textDocument/didChange", {"textDocument": {"uri": consts_uri, "version": 2
     "contentChanges": [{"text": broken_text}]})
 req("textDocument/hover", at(consts_uri, broken_text, "MASK: Int", 1, 1))
 note("textDocument/didClose", tdoc(consts_uri))
+
+# literals: a value line under the type, and a constant's name still
+# answering with the constant
+lits_path = f"{out_dir}/proj/src/literals.dawn"
+lits_uri = "file://" + lits_path
+lits_text = open(lits_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": lits_uri, "languageId": "dawn", "version": 1, "text": lits_text}})
+for needle, occ, delta in [
+    ("MASK: Int", 1, 1),        # the constant's name: the constant
+    ("0xFF", 1, 1),             # its literal: the literal, spelling echoed
+    ("255,", 1, 1),             # decimal, with its hexadecimal
+    ("0b1010", 1, 1),           # binary, spelling echoed
+    ("1_000_000", 1, 1),        # underscores are not value
+    ("'é'", 1, 1),              # a Char: code point and UTF-8
+    ("'\\n'", 1, 1),           # an escape
+    ("'\\u{1F600}'", 1, 3),    # a \u{...} escape past the BMP
+    ("1.5", 1, 1),              # exactly a double
+    ("1.1", 1, 1),              # not exactly a double
+    ('"héllo', 1, 2),           # a string: code points and UTF-8 bytes
+    ('"n = ', 1, 1),            # interpolated: the type alone
+]:
+    req("textDocument/hover", at(lits_uri, lits_text, needle, occ, delta))
+note("textDocument/didClose", tdoc(lits_uri))
 
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {
