@@ -8,7 +8,10 @@
 #
 # The rule (Doc.kt docOf / commentsByLine): the `##` lines immediately above a
 # declaration's first line, contiguous. A blank line detaches; plain `#` is
-# never a doc. A comment is filed under the line its last character sits on.
+# never a doc. A comment is filed under the line its last character sits on,
+# and only if it is the first thing on that line: a `##` after code is a
+# remark on that code, and filing it would let the next line's declaration
+# claim it (docs/spec.md §1.2).
 
 use std/str
 use std/list
@@ -16,7 +19,15 @@ use std/map
 use front/lexer
 use front/token.{Token}
 use front/parser
-use front/ast.{Module, module_fns, module_types, module_consts, module_traits, module_effects}
+use front/ast.{
+  Module,
+  module_fns,
+  module_types,
+  module_consts,
+  module_traits,
+  module_effects,
+  module_impls
+}
 
 ## 1-based line number of code-point offset `off` (count of line starts <= off).
 fn line_of(starts: List[Int], off: Int) -> Int = {
@@ -31,22 +42,33 @@ fn line_of(starts: List[Int], off: Int) -> Int = {
 
 pub type DocSrc = { starts: List[Int], by_line: Map[Int, Token] }
 
-## Every comment of `text`, filed under the 1-based line its last character
-## is on. The lexer hands comments over in source order, so one sweep over the
+## Every comment of `text` that opens its line, filed under the 1-based line
+## its last character is on. A comment after code on the same line is left
+## out, so the line reads as code, which ends a `##` block like any code line.
+## The lexer hands comments over in source order, so one sweep over the
 ## line starts finds every line: `line_of` per comment rescans the starts from
 ## the top and costs comments x lines, which hover pays on every request
 ## (docs/lsp-hover-design.md §A3.4).
 pub fn doc_src_of(text: String) -> DocSrc = {
-  let (_, comments, _) = lexer.lex_with_comments(text)
+  let (cps, _, comments, _) = lexer.lex_with_comments_cps(text)
   let starts = lexer.line_starts_of(text)
   var by_line: Map[Int, Token] = map.empty()
   # the count of line starts <= the current comment's end: `line_of`, kept
   var line = 0
   for c in comments {
     while line < len(starts) && starts[line] <= c.hi { line = line + 1 }
-    by_line = map.insert(by_line, line, c)
+    if opens_line(cps, starts[line - 1], c.lo) { by_line = map.insert(by_line, line, c) }
   }
   DocSrc { starts: starts, by_line: by_line }
+}
+
+## Whether only blanks (the lexer's: space, tab, CR) lie between the line
+## start `from` and the comment start `lo`. A comment never spans lines, so
+## the line its last character is on is the line it starts on.
+fn opens_line(cps: List[Char], from: Int, lo: Int) -> Bool = {
+  var i = from
+  while i < lo && (cps[i] == ' ' || cps[i] == '\t' || cps[i] == '\r') { i = i + 1 }
+  i >= lo
 }
 
 fn strip_doc_prefix(s: String) -> String = {
@@ -75,7 +97,9 @@ pub fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
   if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
 }
 
-## The 1-based line every declaration starts on.
+## The 1-based line every top-level declaration starts on, `impl` included:
+## an `impl` publishes no doc of its own, but a `##` block right above one is
+## written about that impl, not about the module.
 fn decl_lines(m: Module, starts: List[Int]) -> List[Int] = {
   var out: List[Int] = []
   for fd in module_fns(m) { out = out ++ [line_of(starts, fd.lo)] }
@@ -83,6 +107,7 @@ fn decl_lines(m: Module, starts: List[Int]) -> List[Int] = {
   for cd in module_consts(m) { out = out ++ [line_of(starts, cd.lo)] }
   for td in module_traits(m) { out = out ++ [line_of(starts, td.lo)] }
   for ed in module_effects(m) { out = out ++ [line_of(starts, ed.lo)] }
+  for iv in module_impls(m) { out = out ++ [line_of(starts, iv.lo)] }
   out
 }
 
@@ -165,12 +190,60 @@ test "a declaration's doc is the contiguous ## block right above it" {
   assert doc_of(ds, at("a() -> Int")) == doc_of(ds, at("fn a"))
 }
 
-test "the sweep files each comment under the line line_of gives it" {
-  let text = "# one\nfn a() -> Int = 1 # two\n\n## three\n## four\nfn b() -> Int = 2\n# five"
+test "the sweep files each line-opening comment under the line line_of gives it" {
+  let text = "# one\nfn a() -> Int = 1 # two\n\n## three\n  ## four\nfn b() -> Int = 2\n# five"
   let (_, comments, _) = lexer.lex_with_comments(text)
   let ds = doc_src_of(text)
   assert len(comments) == 5
   for c in comments {
-    assert map.get(ds.by_line, line_of(ds.starts, c.hi)) == Some(c)
+    let filed = map.get(ds.by_line, line_of(ds.starts, c.hi))
+    if c.text == "# two" { assert filed == None } else { assert filed == Some(c) }
   }
+}
+
+test "a ## after code on its line is no doc, of that line or the next" {
+  # the two cases the attachment survey reproduced: a one-line declaration,
+  # and the last line of a signature split over several lines
+  let text = join([
+    "pub fn f() -> Int = 1 ## trailing on f",
+    "pub fn g() -> Int = 2",
+    "## two-line",
+    "pub fn h(",
+    "  a: Int",
+    ") -> Int = a ## end of multiline sig",
+    "pub fn k() -> Int = 3",
+    "  ## indented, still the first thing on its line",
+    "pub fn n() -> Int = 4",
+    ""
+  ], "\n")
+  let ds = doc_src_of(text)
+  let at = (needle: String) => match str.index_of(text, needle) {
+    Some(i) -> i
+    None -> panic("no ${needle}")
+  }
+  assert doc_of(ds, at("pub fn f")) == None
+  assert doc_of(ds, at("pub fn g")) == None
+  assert doc_of(ds, at("pub fn h")) == Some("two-line")
+  assert doc_of(ds, at("pub fn k")) == None
+  assert doc_of(ds, at("pub fn n")) == Some("indented, still the first thing on its line")
+
+  # nor does a trailing ## on line 1 open a module doc
+  let first = "pub fn f() -> Int = 1 ## trailing\n\npub fn g() -> Int = 2\n"
+  let (m, d) = parser.parse_module(first)
+  assert len(d) == 0
+  assert module_doc_of(doc_src_of(first), m) == None
+}
+
+test "a ## block right above an impl is the impl's, not the module's" {
+  let attached = "## How a Box shows.\n" ++
+    "impl Show[Box] {\n  fn show(b: Box) -> String = \"box\"\n}\n"
+  let (m1, d1) = parser.parse_module(attached)
+  assert len(d1) == 0
+  assert module_doc_of(doc_src_of(attached), m1) == None
+
+  let detached = "## Boxes.\n\n" ++
+    "impl Show[Box] {\n  fn show(b: Box) -> String = \"box\"\n}\n"
+  let (m2, d2) = parser.parse_module(detached)
+  assert len(d2) == 0
+  assert module_doc_of(doc_src_of(detached), m2) == Some("Boxes.")
 }
