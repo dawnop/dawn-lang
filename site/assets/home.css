@@ -424,15 +424,52 @@ section.band + section.band { border-top: 1px solid var(--line-soft); margin-top
 /* The toggle itself (its icons, their quarter turn) is style.css's, as on
    every page; what is here is what the front page does when it is used. */
 @media (prefers-reduced-motion: no-preference) {
-  /* only while the toggle is used, so a saved theme never animates on load */
-  :root.theme-anim body,
-  :root.theme-anim .band, :root.theme-anim .band *,
-  :root.theme-anim footer, :root.theme-anim footer * {
-    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, fill 0.3s ease, stroke 0.3s ease;
+  /* Below the horizon, only while the toggle is used (so a saved theme never
+     animates on load), and only on the elements that set a property
+     themselves, for that property alone: the rule the hero's list below
+     already follows. A transition starts whenever a computed value changes,
+     an inherited one included, so an element that merely inherits a colour
+     and is given a colour transition anyway starts one on every frame of its
+     parent's; left alone it follows its parent frame by frame for free.
+
+     The text that inherits is reached through the nearest element that has
+     text, not through body: a colour tween on body restyles everything under
+     it on every frame, the hero included, and was the larger part of what
+     was left after the list was made. So body tweens its ground only, and
+     the headings and figure numbers, which take their ink from it, are listed.
+
+     This was one rule once, `.band *` and `footer *` with five transitions
+     each: 430 elements and 448 ms of style recalculation for one click, a
+     117 ms frame at 4x CPU slowdown (docs/site-pages-design.md has the
+     measurements before and after). Each element below is in exactly one
+     list, so no rule has to outrank another; pseudo-elements and box-shadows
+     were never reached by `*` and still cut. */
+  :root.theme-anim :is(.band a, .band .phase, .band .phase strong, .band-head h2, .band-head p, .band h3, .fig strong,
+    .idea p, .idea .num b, .fig span, .peers-text p, .peers-text p strong,
+    .kside .num, .kside > p, .kfacts b, .lane-name, .chip b, .chip small, .install-foot,
+    footer.site-footer a, footer.site-footer .ver b) {
+    transition: color 0.3s ease;
   }
-  /* code inside a pre only inherits its colour; giving it a transition of its
-     own makes it restart on every frame of its parent's, which reads as a flicker */
-  :root.theme-anim pre > code { transition: none; }
+  :root.theme-anim :is(body, .band, .idea, .figs, .fig, .krow, .kfacts, .pipe, .chip, .road) {
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+  }
+  :root.theme-anim :is(footer.site-footer, :is(.idea p, .peers-text p, .kside, .road header) code,
+    .idea-icon, .idea .num, .kfacts li, .road-icon, .tags li) {
+    transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
+  }
+  /* the two-backends figure, drawn in the theme's tokens */
+  :root.theme-anim .fork :is(.fk-track, .fk-card, .fk-fold, .fk-name, .fk-sub, .fk-term, .fk-dot, .fk-key,
+    .fk-b1, .fk-b2, .fk-b3, .fk-link, .fk-eq-bg, .fk-pill, .fk-pilltext) {
+    transition: fill 0.3s ease, stroke 0.3s ease;
+  }
+  /* In none of the lists, on purpose: the code windows below the horizon (the
+     block, its frame, its bar and its output strip), which switch whole, at
+     the click, with no tween. Their tokens cannot tween (the reason the
+     hero's code dips, below), and a block whose ground eased while its text
+     cut would put the ink of one theme on the ground of the other. The hero's
+     dip does not carry over: it hides a change that comes 420 ms after the
+     click, with data-sky, and down here the colours change on the click
+     itself, so a dip would have to begin at its bottom, which is a cut. */
   /* The hero's colours change when data-sky does, half way into the night
      fade, and then ease over 0.4 s rather than cutting: short enough that the
      grey-on-grey middle of the tween passes before the eye settles on it.
