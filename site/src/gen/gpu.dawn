@@ -1,6 +1,6 @@
-# The cuTile backend's page, gpu.html: the two layers, one kernel beside the
-# Tile IR it becomes, the three coverage tables, the three gates and the last
-# line of every device ledger.
+# The cuTile backend's page, gpu.html: the two layers, a kernel lined up line
+# by line with the Tile IR it records, the three coverage tables, the three
+# gates and the mutants they catch, and the last line of every device ledger.
 #
 # Why every number on it is read and none is written. The backend's evidence
 # already lives in tables the tile gates keep: scripts/tileir-features has a
@@ -21,19 +21,25 @@
 # this generator over a snapshot; the three tile directories are in that
 # snapshot's list for this page's sake.
 #
-# Why one kernel, and why `vadd`. The side-by-side is there so that a reader
-# can hold both halves in view and watch each call land as operations. A
-# hundred and ninety kernels side by side is a listing nobody reads, and a
-# larger one (prefix_sum's scan region, any of the attention kernels) pushes
-# the mapping off the screen. `vadd` is the first milestone's kernel, its body
-# is four calls, its golden fits one screen, and it is the kernel layer 2 has
-# compared bit for bit since the first device run. It is cut from
-# scripts/tile-golden/kernels.dawn rather than from examples/projects/gpu_fake
-# because that is the file the golden on its right is traced from: the two
-# halves are a pair by construction, not by resemblance. The cut is
-# gen/common.fn_source's, the one the front page's listings use, so a
-# function that moves or changes shape stops the build, and the lines it came
-# from are printed in its bar.
+# Why the kernel section is a line map, and why `vadd` is the one embedded.
+# Two code windows side by side (6 lines of Dawn, 27 of Tile IR) showed that
+# a kernel becomes IR but not which line became which; the map puts each run
+# of Dawn lines on the same row as the Tile IR it recorded. The pairing is
+# never written here: packages/tileir's side table says which call wrote
+# which line (recorded in site/gpu-map/calls.txt), and gen/gpumap.dawn
+# reads which line of kernels.dawn each call is on, refusing a kernel where
+# the two do not line up exactly. `vadd` is embedded, so the map is complete
+# with no script: its body is four lines, its golden fits one screen, and it
+# is the kernel layer 2 has compared bit for bit since the first device run.
+# It has to line up or the build stops. Every other kernel that lines up is
+# written as gpu/k/<name>.json and fetched only when a reader picks it; the
+# page states how many of the goldens that is, counted when it is built.
+#
+# Why the rest of the page moves. The coverage cards count up and list the
+# rows that are not implemented, the gates draw every mutant at the gate its
+# harness proves, and real Tile IR drifts behind the head. Each is the
+# markup's final state without gpu.js or under reduced motion; the script
+# only starts it from nothing.
 #
 # The words are site/pages/gpu.md and its translation gpu.zh.md, in
 # home.md's shape: the same keys in both, which a test below holds.
@@ -41,13 +47,18 @@
 use std/str
 use std/list
 use std/io
+use std/bytes
 use std/io.{Fs, with_fs_real, with_proc_real}
-use html/page.{Assets, Lang, En, Zh, PageHead, shell, section_crumb, chip, plain_assets, repo_url}
-use html/play.{win_bar}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell_ext, section_crumb, chip, plain_assets, repo_url}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
 use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source}
+use gen/fingerprint.{fingerprint}
+use json/parser.{parse}
+use json/value.{JObj, JArr, JStr, JInt}
+use std/map
 use gen/copy.{Copy, load_copy, line, plain, body}
+use gen/gpumap.{KernelMap, Row, parse_calls, map_kernels, map_json, json_str, pure_fns}
 
 # ---- the coverage tables ----
 
@@ -122,6 +133,38 @@ fn read_tables() -> List[Coverage] !Fs =
       Err(e) -> panic("scripts/tileir-features/${file}: ${e}")
     }
   })
+
+## One row of a coverage table, the columns this page reads: its name,
+## status, knife, evidence entries and note (`-` read as none).
+pub type CovRow = { table: String, name: String, status: String, knife: String, evidence: List[String], note: String }
+
+## The rows of one table, by the column layout `parse_table` checks.
+pub fn table_rows(table: String, text: String) -> List[CovRow] = {
+  var out: List[CovRow] = []
+  for raw in str.split(text, "\n") {
+    let s = str.trim(raw)
+    if s != "" && not str.starts_with(s, "#") {
+      let fields = map(str.split(s, "|"), f => str.trim(f))
+      if len(fields) == 8 {
+        let none: List[String] = []
+        let ev = if fields[6] == "-" { none } else { filter(str.split(fields[6], ","), e => e != "") }
+        let note = if fields[7] == "-" { "" } else { fields[7] }
+        let knife = if fields[4] == "-" { "" } else { fields[4] }
+        out = out ++ [CovRow { table: table, name: fields[0], status: fields[3], knife: knife, evidence: ev, note: note }]
+      }
+    }
+  }
+  out
+}
+
+fn read_rows() -> List[CovRow] !Fs = {
+  var out: List[CovRow] = []
+  for t in table_files() {
+    let (name, file) = t
+    out = out ++ table_rows(name, must_read("scripts/tileir-features/${file}"))
+  }
+  out
+}
 
 ## What check.py printed, as the same counts: one `PASS  tileir <name>:
 ## <total> <unit>(s): <status>=<n> ...; layer...` line per table. A status it
@@ -374,34 +417,266 @@ pub fn read_ledgers() -> List[Ledger] !Fs = {
   sorted
 }
 
+# ---- the mutants ----
+
+## One mutant and the gate that is shown catching it: 0 the text and bytes,
+## 1 the assembler, 2 the device.
+##
+## Which gate a mutant belongs to is read from the harness that runs it, by
+## a rule that can be checked against the files rather than by a list:
+##
+##   - scripts/tile-golden/run.sh lists its mutants (`mutants=(`), each run in
+##     an `if run_item <name>; then` block. A block that goes through
+##     `writer_mutant_checks` or hands the mutant's bytecode to `tileiras`
+##     (`if [ -n "$tileiras" ]`) is proving the assembler's net: gate 1. The
+##     rest are red in the text or at trace time: gate 0. (A gate-1 mutant's
+##     bytes also differ from the golden; it is drawn at the gate it was
+##     written to prove, which is what "each gate has to turn its own mutants
+##     red" means.)
+##   - scripts/tile-gpu-diff/run.sh builds its mutants in many shapes and
+##     lists none, so its mutants are the ones the coverage tables cite as
+##     evidence (`mutant:<name>`) that are not tile-golden's and that its
+##     run.sh names as a whole word: gate 2. A device mutant no row cites is
+##     not drawn; a cited one neither harness names is not drawn either, and
+##     the test below holds that set empty.
+pub type Mutant = { name: String, gate: Int }
+
+## tile-golden's mutants, in its run order.
+pub fn golden_mutants(run_sh: String) -> List[String] = {
+  var out: List[String] = []
+  var on = false
+  for l in str.split(run_sh, "\n") {
+    if l == "mutants=(" {
+      on = true
+    } else if on && l == ")" {
+      on = false
+    } else if on {
+      out = out ++ [str.trim(l)]
+    }
+  }
+  out
+}
+
+## The gate of one tile-golden mutant, from its block, or why it has none.
+pub fn golden_gate(run_sh: String, name: String) -> Result[Int, String] =
+  match str.split_once(run_sh, "\nif run_item ${name}; then\n") {
+    None -> Err("scripts/tile-golden/run.sh lists `${name}` and runs no block for it")
+    Some((_a, after)) -> {
+      let block =
+        match str.split_once(after, "\nfi\n") {
+          Some((b, _c)) -> b
+          None -> after
+        }
+      if str.contains(block, "writer_mutant_checks ") || str.contains(block, "if [ -n \"\$tileiras\" ]") {
+        Ok(1)
+      } else {
+        Ok(0)
+      }
+    }
+  }
+
+fn is_name_cp(c: Char) -> Bool = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+
+## Whether `text` names `word` as a whole word (not inside a longer
+## hyphenated name).
+pub fn names_word(text: String, word: String) -> Bool = {
+  let parts = str.split(text, word)
+  var found = false
+  var k = 0
+  while not found && k + 1 < len(parts) {
+    let before = parts[k]
+    let after = parts[k + 1]
+    let b = code_points(before)
+    let a = code_points(after)
+    let left = len(b) == 0 || not is_name_cp(b[len(b) - 1])
+    let right = len(a) == 0 || not is_name_cp(a[0])
+    if left && right {
+      found = true
+    }
+    k = k + 1
+  }
+  found
+}
+
+## Every mutant the page draws, gate by gate in harness order, and the
+## cited mutants neither harness names (which the page does not draw).
+pub fn place_mutants(golden_run: String, device_run: String, rows: List[CovRow]) -> (List[Mutant], List[String]) = {
+  let golden = golden_mutants(golden_run)
+  var out: List[Mutant] = []
+  for n in golden {
+    match golden_gate(golden_run, n) {
+      Ok(g) -> {
+        out = out ++ [Mutant { name: n, gate: g }]
+      }
+      Err(e) -> panic(e)
+    }
+  }
+  var cited: List[String] = []
+  for r in rows {
+    for e in r.evidence {
+      match str.strip_prefix(e, "mutant:") {
+        Some(m) -> {
+          if not list.contains(cited, m) {
+            cited = cited ++ [m]
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  var lost: List[String] = []
+  for m in cited {
+    if not list.contains(golden, m) {
+      if names_word(device_run, m) {
+        out = out ++ [Mutant { name: m, gate: 2 }]
+      } else {
+        lost = lost ++ [m]
+      }
+    }
+  }
+  let zero = filter(out, x => x.gate == 0)
+  let one = filter(out, x => x.gate == 1)
+  let two = filter(out, x => x.gate == 2)
+  (zero ++ one ++ two, lost)
+}
+
 # ---- everything the page states ----
 
 pub type Facts = {
   tables: List[Coverage],
+  rows: List[CovRow],
   golden: Int,
   ledgers: List[Ledger],
   kernel: Cut,
-  mlir: String,
+  maps: List[(String, Result[KernelMap, String])],
+  vadd: KernelMap,
+  bytes: List[(String, Int)],
+  mutants: List[Mutant],
 }
 
-## The kernel the page sets beside its golden, and where both halves live.
+## The kernel the page draws first, embedded, and where both halves live.
 fn kernel_name() -> String = "vadd"
 
 fn kernels_file() -> String = "scripts/tile-golden/kernels.dawn"
 
 ## Everything the page states, read from the tile gates' files in place.
+## `vadd` has to line up: it is the kernel the page shows with no script, so
+## a recording or a kernels.dawn it no longer lines up with stops the build.
 pub fn load_facts() -> Facts !Fs = {
   let golden = len(golden_names())
   if golden == 0 {
     panic("scripts/tile-golden holds no .mlir golden")
   }
+  let maps = load_maps()
+  let vadd =
+    match filter(maps, m => {
+      let (nm, _r) = m
+      nm == kernel_name()
+    }) {
+      [(_, Ok(m))] -> m
+      [(_, Err(e))] -> panic("`${kernel_name()}` does not line up with its Tile IR: ${e}")
+      _ -> panic("site/gpu-map/calls.txt does not record `${kernel_name()}` once")
+    }
+  var sizes: List[(String, Int)] = []
+  for m in maps {
+    let (nm, _r) = m
+    let path = "scripts/tile-golden/${nm}.tilebc"
+    match io.read_bytes(path) {
+      Ok(b) -> {
+        sizes = sizes ++ [(nm, bytes.len(b))]
+      }
+      Err(e) -> panic("cannot read ${path}: ${e}")
+    }
+  }
+  let rows = read_rows()
+  let (muts, _lost) = place_mutants(must_read("scripts/tile-golden/run.sh"), must_read("scripts/tile-gpu-diff/run.sh"), rows)
   Facts {
     tables: read_tables(),
+    rows: rows,
     golden: golden,
     ledgers: read_ledgers(),
     kernel: cut_fn(must_read(kernels_file()), kernel_name()),
-    mlir: str.trim_end(must_read("scripts/tile-golden/${kernel_name()}.mlir")),
+    maps: maps,
+    vadd: vadd,
+    bytes: sizes,
+    mutants: muts,
   }
+}
+
+## Every golden kernel lined up with its Tile IR, or why not, in the order
+## site/gpu-map/calls.txt records them (kernels.dawn's dispatch order).
+pub fn load_maps() -> List[(String, Result[KernelMap, String])] !Fs = {
+  let traced =
+    match parse_calls(must_read("site/gpu-map/calls.txt")) {
+      Ok(ts) -> ts
+      Err(e) -> panic("site/gpu-map/calls.txt: ${e}")
+    }
+  let src = must_read(kernels_file())
+  var golden: List[(String, String)] = []
+  for t in traced {
+    golden = golden ++ [(t.name, must_read("scripts/tile-golden/${t.name}.mlir"))]
+  }
+  let table = golden
+  let pure = pure_fns(src) ++ pure_fns(must_read("packages/tileir/src/dev.dawn"))
+  map_kernels(src, traced, nm => {
+    let hits = filter(table, g => {
+      let (k, _v) = g
+      k == nm
+    })
+    let (_k, v) = hits[0]
+    v
+  }, pure)
+}
+
+## The kernels that line up, in dispatch order.
+pub fn mapped(f: Facts) -> List[KernelMap] = {
+  var out: List[KernelMap] = []
+  for m in f.maps {
+    let (_nm, r) = m
+    match r {
+      Ok(k) -> {
+        out = out ++ [k]
+      }
+      Err(_e) -> ()
+    }
+  }
+  out
+}
+
+## The coverage rows whose evidence names kernel `k` (`golden:k`,
+## `device:k`, `device@sm100:k`), and the mutants those rows name.
+pub fn cited_by(f: Facts, k: String) -> (List[CovRow], List[String]) = {
+  let cites = (e: String) =>
+    match str.split_once(e, ":") {
+      Some((kind, who)) -> who == k && (kind == "golden" || str.starts_with(kind, "device"))
+      None -> false
+    }
+  let rows = filter(f.rows, r => list.any(r.evidence, cites))
+  var muts: List[String] = []
+  for r in rows {
+    for e in r.evidence {
+      match str.strip_prefix(e, "mutant:") {
+        Some(m) -> {
+          if not list.contains(muts, m) {
+            muts = muts ++ [m]
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  (rows, muts)
+}
+
+fn bytes_of(f: Facts, k: String) -> Int = {
+  var n = 0
+  for b in f.bytes {
+    let (nm, v) = b
+    if nm == k {
+      n = v
+    }
+  }
+  n
 }
 
 # ---- markup ----
@@ -431,21 +706,140 @@ fn layers(c: Copy, mu: fn(String) -> String) -> String = {
   `<div class="gpu-layers">` ++ "\n" ++ host ++ "\n" ++ device ++ "\n</div>"
 }
 
-## The kernel and its golden, side by side; stacked on a narrow screen.
-fn pair(c: Copy, f: Facts) -> String = {
-  let k = f.kernel
-  let left = "kernels.dawn:${k.first}–${k.last}"
-  let right = "${kernel_name()}.mlir"
-  """<div class="gpu-pair">
-<figure class="win hue-1">
-${win_bar(plain(c, "kernel-left") ++ " · " ++ left, "")}
-<pre><code>${highlight_dawn(k.text)}</code></pre>
-</figure>
-<figure class="win hue-3">
-${win_bar(plain(c, "kernel-right") ++ " · " ++ right, "")}
-<pre class="gpu-mlir"><code>${escape_html(f.mlir)}</code></pre>
-</figure>
-</div>"""
+# ---- the line map ----
+
+## The six colours a map cycles through, so that two neighbouring rows never
+## share one. They tell rows apart and mean nothing else.
+fn hue_of(k: Int) -> String = "g${k % 6}"
+
+## One line of either side: its number in its own file, then its text
+## (already markup).
+fn map_line(n: Int, html: String) -> String = """<span class="gm-l"><i>${n}</i>${html}</span>"""
+
+## The source lines of `m`, highlighted one by one: a row is a run of whole
+## lines, and the script redraws a fetched kernel from the same pieces.
+pub fn highlighted(m: KernelMap) -> List[String] = map(m.src, l => highlight_dawn(l))
+
+## The Tile IR lines a row owns, as line numbers in order.
+pub fn row_lines(r: Row) -> List[Int] = {
+  var out: List[Int] = []
+  for g in r.ir {
+    let (a, b) = g
+    out = out ++ range(a, b)
+  }
+  out
+}
+
+## One row of the map: its Dawn lines, the calls on them, and the Tile IR
+## lines they recorded. Pointing at either half lights the row (style.css);
+## `aria-describedby` ties the Dawn half to the Tile IR it wrote.
+fn map_row(m: KernelMap, hl: List[String], k: Int, r: Row) -> String = {
+  let d = map(range(r.src_from, r.src_to), i => map_line(m.first + i, hl[i]))
+  let t = map(row_lines(r), n => map_line(n, escape_html(m.ir[n - 1])))
+  let calls =
+    if len(r.calls) == 0 {
+      ""
+    } else {
+      """<span class="gm-calls">""" ++ join(map(r.calls, x => "<code>${escape_html(x)}</code>"), "") ++ "</span>"
+    }
+  """<li class="gm-row ${hue_of(k)}" tabindex="0" data-ops="${r.ops}" aria-describedby="gm-t${k}">"""
+    ++ """<div class="gm-d"><pre><code>${join(d, "\n")}</code></pre>${calls}</div>"""
+    ++ """<div class="gm-t" id="gm-t${k}"><pre><code>${join(t, "\n")}</code></pre></div></li>"""
+}
+
+## The rows of a map as the `<ol>` the page carries and the script redraws.
+fn map_rows(m: KernelMap) -> String = {
+  let hl = highlighted(m)
+  var out: List[String] = []
+  var k = 0
+  for r in m.rows {
+    out = out ++ [map_row(m, hl, k, r)]
+    k = k + 1
+  }
+  join(out, "\n")
+}
+
+## What the page says about a kernel beside its map, as numbers and names:
+## its calls, the operations they recorded, its Tile IR lines, its bytecode's
+## size, the coverage rows that cite it and the mutants those rows name.
+pub type KernelFacts = { calls: Int, ops: Int, lines: Int, bytes: Int, rows: List[String], mutants: List[String] }
+
+pub fn kernel_facts(f: Facts, m: KernelMap) -> KernelFacts = {
+  let (rows, muts) = cited_by(f, m.name)
+  KernelFacts {
+    calls: m.calls,
+    ops: m.ops,
+    lines: len(m.ir),
+    bytes: bytes_of(f, m.name),
+    rows: map(rows, r => r.name),
+    mutants: muts,
+  }
+}
+
+## A kernel's map with its facts, as the file the picker fetches.
+pub fn kernel_json(f: Facts, m: KernelMap) -> String = {
+  let kf = kernel_facts(f, m)
+  let names = (xs: List[String]) => "[" ++ join(map(xs, json_str), ",") ++ "]"
+  map_json(m, highlighted(m), [
+    "\"lines\":${kf.lines}",
+    "\"bytes\":${kf.bytes}",
+    "\"cites\":${names(kf.rows)}",
+    "\"mutants\":${names(kf.mutants)}",
+  ])
+}
+
+## The facts strip under the map. Every number has a `data-f` the script
+## rewrites when another kernel is picked, and the two lists of names are
+## redrawn the same way.
+fn map_facts(c: Copy, mu: fn(String) -> String, kf: KernelFacts) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  let fact = (key: String, n: Int, label: String) => """<li><b data-f="${key}">${n}</b> ${label}</li>"""
+  let codes = (xs: List[String]) => join(map(xs, x => "<code>${escape_html(x)}</code>"), "")
+  # a list with nothing in it says nothing; the script shows it again for a
+  # kernel that has some
+  let none = (xs: List[String]) => if len(xs) == 0 { " hidden" } else { "" }
+  """<ul class="gm-facts">"""
+    ++ fact("calls", kf.calls, t("fact-calls"))
+    ++ """<li class="gm-arrow" aria-hidden="true">→</li>""" ++ fact("ops", kf.ops, t("fact-ops"))
+    ++ """<li class="gm-arrow" aria-hidden="true">→</li>""" ++ fact("lines", kf.lines, t("fact-lines"))
+    ++ fact("bytes", kf.bytes, t("fact-bytes")) ++ "</ul>\n"
+    ++ """<p class="gm-names"${none(kf.rows)}><b data-f="rows">${len(kf.rows)}</b> ${t("fact-rows")} <span data-f="cites">${codes(kf.rows)}</span></p>\n"""
+    ++ """<p class="gm-names"${none(kf.mutants)}><b data-f="mutantn">${len(kf.mutants)}</b> ${t("fact-mutants")} <span data-f="mutants">${codes(kf.mutants)}</span></p>"""
+}
+
+## How many kernels line up, in the copy's own sentence.
+fn mapped_line(c: Copy, mu: fn(String) -> String, f: Facts) -> String =
+  str.replace(str.replace(line(c, "kernel-mapped", mu), "{n}", "${len(mapped(f))}"), "{total}", "${f.golden}")
+
+## The kernel section's figure: a bar (the picker, the count of kernels that
+## line up, the replay button and its counter), the two columns' heads, the
+## rows, and the facts. `root` is the page's distance from the site root,
+## for the directory the picker fetches from. The picker and the button are
+## `hidden` until the script is there to work them; with no script the rows
+## and the facts are the whole of it, and they are complete.
+fn map_figure(c: Copy, mu: fn(String) -> String, f: Facts, root: String) -> String = {
+  let m = f.vadd
+  let p = (k: String) => escape_html(plain(c, k))
+  let opts = join(map(mapped(f), k => {
+    let sel = if k.name == m.name { " selected" } else { "" }
+    """<option value="${escape_html(k.name)}"${sel}>${escape_html(k.name)}</option>"""
+  }), "")
+  let last = m.first + len(m.src) - 1
+  """<figure class="gpu-map" data-map-base="${root}/gpu/k/">
+<div class="gm-bar">
+<label class="gm-pick" hidden><span>${p("kernel-pick")}</span><select>${opts}</select></label>
+<span class="gm-mapped">${mapped_line(c, mu, f)}</span>
+<span class="gm-count" aria-live="polite"><b data-f="count">${m.ops}</b> ${p("kernel-ops")}</span>
+<button type="button" class="gm-replay" hidden>${p("kernel-replay")}</button>
+</div>
+<div class="gm-grid">
+<div class="gm-head" aria-hidden="true"><span>${p("kernel-left")} · <code data-f="src">kernels.dawn:${m.first}–${last}</code></span><span>${p("kernel-right")} · <code data-f="ir">${escape_html(m.name)}.mlir</code></span></div>
+<ol class="gm-rows">
+${map_rows(m)}
+</ol>
+</div>
+${map_facts(c, mu, kernel_facts(f, m))}
+</figure>"""
 }
 
 ## What a table's figure says under its count: every status other than
@@ -462,19 +856,79 @@ pub fn table_named(f: Facts, name: String) -> Coverage = {
   hits[0]
 }
 
-fn figure(cov: Coverage, caption: String, file: String) -> String =
-  """<div class="gpu-fig"><strong>${count_of(cov, "implemented")}<small>/${cov.total}</small></strong>"""
-  ++ """<span>${caption}</span><span class="gpu-fig-rest">${rest_of(cov)}</span>"""
-  ++ """<a href="${gh("scripts/tileir-features/" ++ file)}"><code>${file}</code></a></div>"""
+## A share as a CSS percentage with one decimal, `94.2%`.
+fn percent(n: Int, total: Int) -> String = {
+  let p = if total == 0 { 0 } else { n * 1000 / total }
+  "${p / 10}.${p % 10}%"
+}
+
+## The rows of a table that are not implemented, as the list a card shows
+## when it is pointed at: the name, its status and knife, and its note.
+fn misses(f: Facts, table: String) -> String = {
+  let rows = filter(f.rows, r => r.table == table && r.status != "implemented")
+  if len(rows) == 0 {
+    ""
+  } else {
+    let item = (r: CovRow) => {
+      let tag = if r.knife == "" { r.status } else { "${r.status} · ${r.knife}" }
+      let note = if r.note == "" { "" } else { " <span>${escape_html(r.note)}</span>" }
+      "<li><code>${escape_html(r.name)}</code> <small>${escape_html(tag)}</small>${note}</li>"
+    }
+    """<ul class="gpu-fig-miss">""" ++ join(map(rows, item), "") ++ "</ul>"
+  }
+}
+
+## One card: the count (which gpu.js counts up to, from `data-count`), a bar
+## filled to the implemented share, the caption, the other statuses, the
+## table it is read from, and the rows that are not implemented.
+fn figure(n: Int, total: Int, caption: String, rest: String, file: String, href: String, miss: String) -> String = {
+  let of = if total == n { "" } else { "<small>/${total}</small>" }
+  let focus = if miss == "" { "" } else { ` tabindex="0"` }
+  """<div class="gpu-fig" data-count="${n}"${focus}><strong><b>${n}</b>${of}</strong>"""
+    ++ """<span class="gpu-fig-bar" style="--p:${percent(n, total)}" aria-hidden="true"><i></i></span>"""
+    ++ """<span>${caption}</span><span class="gpu-fig-rest">${rest}</span>"""
+    ++ """<a href="${href}"><code>${file}</code></a>${miss}</div>"""
+}
+
+fn table_figure(f: Facts, name: String, caption: String, file: String) -> String = {
+  let cov = table_named(f, name)
+  figure(count_of(cov, "implemented"), cov.total, caption, rest_of(cov), file,
+    gh("scripts/tileir-features/" ++ file), misses(f, name))
+}
 
 fn figures(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
   let t = (k: String) => line(c, k, mu)
   """<div class="gpu-figs">
-${figure(table_named(f, "features"), t("fig-opcodes"), "features.txt")}
-${figure(table_named(f, "types"), t("fig-types"), "types.txt")}
-${figure(table_named(f, "attrs"), t("fig-attrs"), "attrs.txt")}
-<div class="gpu-fig"><strong>${f.golden}</strong><span>${t("fig-golden")}</span><span class="gpu-fig-rest"></span><a href="${gh("scripts/tile-golden")}"><code>tile-golden/</code></a></div>
+${table_figure(f, "features", t("fig-opcodes"), "features.txt")}
+${table_figure(f, "types", t("fig-types"), "types.txt")}
+${table_figure(f, "attrs", t("fig-attrs"), "attrs.txt")}
+${figure(f.golden, f.golden, t("fig-golden"), "", "tile-golden/", gh("scripts/tile-golden"), "")}
 </div>"""
+}
+
+## The mutants caught, as a pipeline: the kernel on the left, the three
+## gates as nets, every mutant a dot sitting in the net that catches it
+## (`title` names it), and each net's count. gpu.js flies the dots in from
+## the left once; without it, or with reduced motion, they are where they
+## stop.
+fn trap(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
+  let t = (k: String) => line(c, k, mu)
+  var k = 0
+  var zones: List[String] = []
+  for g in [0, 1, 2] {
+    let ms = filter(f.mutants, m => m.gate == g)
+    var dots: List[String] = []
+    for m in ms {
+      dots = dots ++ ["""<i title="${escape_html(m.name)}" style="--i:${k}"></i>"""]
+      k = k + 1
+    }
+    zones = zones ++ ["""<div class="gt-zone gt-z${g}"><span class="gt-net" aria-hidden="true"></span>"""
+        ++ """<span class="gpu-gate-n">${g}</span><span class="gt-name">${t("gate-${g}-title")}</span>"""
+        ++ """<span class="gt-dots" aria-hidden="true">${join(dots, "")}</span>"""
+        ++ """<span class="gt-count"><b>${len(ms)}</b> ${t("gates-caught")}</span></div>"""]
+  }
+  """<figure class="gpu-trap"><div class="gt-src" aria-hidden="true"><code>kernel</code></div>"""
+    ++ join(zones, "") ++ """<div class="gt-dev" aria-hidden="true"><code>cubin</code></div></figure>"""
 }
 
 fn gates(c: Copy, mu: fn(String) -> String) -> String = {
@@ -486,6 +940,32 @@ ${gate(0, "scripts/tile-golden/run.sh")}
 ${gate(1, "scripts/tile-golden/run.sh")}
 ${gate(2, "scripts/tile-gpu-diff/run.sh")}
 </ol>"""
+}
+
+## The kernels whose Tile IR drifts behind the page's head: a few shapes
+## (a vector add, a scan, a softmax, a layer norm, a matrix product), so
+## that the lines are not one kernel's repeated.
+fn hero_kernels() -> List[String] = ["vadd", "prefix_sum", "softmax", "layer_norm", "matmul"]
+
+## Real Tile IR lines for the head's background: up to twelve operation
+## lines of each [hero_kernels] golden, unindented, read when the site is
+## built.
+pub fn hero_lines() -> List[String] !Fs = {
+  var out: List[String] = []
+  for k in hero_kernels() {
+    let ops = filter(map(str.split(must_read("scripts/tile-golden/${k}.mlir"), "\n"), l => str.trim(l)),
+      l => str.contains(l, " = "))
+    out = out ++ list.take(ops, 12)
+  }
+  out
+}
+
+## The head's background: those lines, twice, so that a scroll through one
+## copy ends where the next begins (style.css scrolls it, and holds it still
+## under reduced motion). Decoration only: `aria-hidden`.
+fn hero_ir(lines: List[String]) -> String = {
+  let text = escape_html(join(lines, "\n"))
+  """<div class="gpu-hero-ir" aria-hidden="true"><pre>${text}\n${text}</pre></div>"""
 }
 
 fn ledger_table(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
@@ -544,7 +1024,7 @@ fn prose(c: Copy, mu: fn(String) -> String, id: String) -> String = {
 ## Paired: `pair` is "gpu.html", so each language's header offers the other
 ## and carries both hreflang alternates. The trail is the nav's own GPU item,
 ## as on the other pages the nav lists, so the two cannot name it apart.
-fn gpu_page(a: Assets, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
+fn gpu_page(a: Assets, js: String, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
   let root =
     match lang {
       En -> "."
@@ -559,26 +1039,56 @@ fn gpu_page(a: Assets, lang: Lang, f: Facts, docs: List[String]) -> String !Fs =
     lede: line(c, "lede", mu),
     meta: [chip("<code>!Dev</code> · Tile IR · <code>tileiras</code>"),
       chip("${f.golden} " ++ line(c, "chip-golden", mu)), chip("${len(f.ledgers)} " ++ line(c, "chip-gpus", mu))],
-    extra: "",
+    extra: hero_ir(hero_lines()),
     cls: "col",
   }
   let main = `<main class="wrap page gpu-page">` ++ "\n"
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
-    ++ prose(c, mu, "kernel") ++ "\n" ++ pair(c, f) ++ "\n"
+    ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, f, root) ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
-    ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu) ++ "\n"
+    ++ prose(c, mu, "gates") ++ "\n" ++ trap(c, mu, f) ++ "\n" ++ gates(c, mu) ++ "\n"
     ++ prose(c, mu, "ledgers") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
-  shell(a, lang, "gpu.html", title, root, "gpu", head, main)
+  # deferred: everything it does waits for the document, and nothing on the
+  # page needs it to be readable (the rows and the figures are complete
+  # without it)
+  let script = """<script src="${root}/assets/${js}" defer></script>"""
+  shell_ext(a, lang, "gpu.html", title, root, "gpu", script, head, main)
 }
 
-## Write the page: English at the site root, Chinese under `/zh/`.
+## Write the page: English at the site root, Chinese under `/zh/`. The
+## English run also writes what both pages share: the script, under a
+## content-hashed name as every asset is (gen/pages.emit_asset), and one
+## file per kernel that lines up, `gpu/k/<name>.json`, which the picker
+## fetches only when a reader asks for that kernel.
 pub fn gen_gpu(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+  let f = load_facts()
+  let js_text = bytes.utf8(str.trim(must_read("site/assets/gpu.js")) ++ "\n")
+  let js = fingerprint("gpu.js", js_text)
   let dst =
     match lang {
-      En -> "${out}/gpu.html"
+      En -> {
+        for name in [js, "gpu.js"] {
+          match io.write_bytes("${out}/assets/${name}", js_text) {
+            Ok(_) -> ()
+            Err(e) -> panic("cannot write assets/${name}: ${e}")
+          }
+        }
+        match io.mkdirs("${out}/gpu/k") {
+          Ok(_) -> ()
+          Err(e) -> panic("cannot make ${out}/gpu/k: ${e}")
+        }
+        for m in mapped(f) {
+          match io.write_file("${out}/gpu/k/${m.name}.json", kernel_json(f, m) ++ "\n") {
+            Ok(_) -> ()
+            Err(e) -> panic("cannot write gpu/k/${m.name}.json: ${e}")
+          }
+        }
+        println("  wrote ${out}/gpu/k/*.json: ${len(mapped(f))} of ${f.golden} kernels line up")
+        "${out}/gpu.html"
+      }
       Zh -> "${out}/zh/gpu.html"
     }
-  write_page(dst, gpu_page(a, lang, load_facts(), doc_files()))
+  write_page(dst, gpu_page(a, js, lang, f, doc_files()))
 }
 
 # ---- tests ----
@@ -761,12 +1271,12 @@ test "the golden kernels are the ones kernels.dawn dispatches" {
 test "the page states what the files say, and links nowhere it should not" {
   with_fs_real(() => {
     let f = load_facts()
-    let p = gpu_page(plain_assets(), En, f, [])
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
     assert str.contains(p, "<title>Dawn's cuTile backend</title>")
     assert str.contains(p, "<h1>Dawn's cuTile backend</h1>")
     let feats = table_named(f, "features")
-    assert str.contains(p, "<strong>${count_of(feats, "implemented")}<small>/${feats.total}</small></strong>")
-    assert str.contains(p, "<strong>${f.golden}</strong>")
+    assert str.contains(p, "<strong><b>${count_of(feats, "implemented")}</b><small>/${feats.total}</small></strong>")
+    assert str.contains(p, "<strong><b>${f.golden}</b></strong>")
     for l in f.ledgers {
       assert str.contains(p, "<code>${l.commit}</code>")
     }
@@ -784,12 +1294,12 @@ test "the page states what the files say, and links nowhere it should not" {
 test "the Chinese page is the same page in its own words" {
   with_fs_real(() => {
     let f = load_facts()
-    let p = gpu_page(plain_assets(), Zh, f, [])
+    let p = gpu_page(plain_assets(), "gpu.js", Zh, f, [])
     assert str.contains(p, `<html lang="zh-CN">`)
     assert str.contains(p, "<h1>Dawn 的 cuTile 后端</h1>")
     assert not str.contains(p, "Dawn's cuTile backend")
     let feats = table_named(f, "features")
-    assert str.contains(p, "<strong>${count_of(feats, "implemented")}<small>/${feats.total}</small></strong>")
+    assert str.contains(p, "<strong><b>${count_of(feats, "implemented")}</b><small>/${feats.total}</small></strong>")
     assert str.contains(p, `<span class="k">fn</span> <span class="f">vadd</span>`)
     assert str.contains(p, `class="lang"`)
     assert str.contains(p, `href="../gpu.html"`)
@@ -799,7 +1309,7 @@ test "the Chinese page is the same page in its own words" {
     for e in prose_sections() {
       let (id, _) = e
       assert str.contains(p, """<h2 id="${id}">""")
-      assert str.contains(gpu_page(plain_assets(), En, f, []), """<h2 id="${id}">""")
+      assert str.contains(gpu_page(plain_assets(), "gpu.js", En, f, []), """<h2 id="${id}">""")
     }
   })
 }
@@ -829,11 +1339,201 @@ test "every section the page reads is in both copy files" {
 test "the nav marks GPU as the page you are on" {
   with_fs_real(() => {
     let f = load_facts()
-    let en = gpu_page(plain_assets(), En, f, [])
-    let zh = gpu_page(plain_assets(), Zh, f, [])
+    let en = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    let zh = gpu_page(plain_assets(), "gpu.js", Zh, f, [])
     assert str.contains(en, `<a class="active" aria-current="page" href="./gpu.html">GPU</a>`)
     assert str.contains(zh, `<a class="active" aria-current="page" href="../zh/gpu.html">GPU</a>`)
     assert len(str.split(en, `class="active"`)) == 2
     assert len(str.split(zh, `class="active"`)) == 2
+  })
+}
+
+## vadd, the kernel the page carries with no script, against the files it
+## comes from: its rows' source is kernels.dawn's function as the page's
+## other cut reads it, its Tile IR is the golden's, every golden line is in
+## exactly one row, and every row of the body has Tile IR of its own.
+test "vadd lines up with its golden, row by row" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let m = f.vadd
+    let cut = cut_fn(must_read(kernels_file()), "vadd")
+    assert join(m.src, "\n") == cut.text
+    assert m.first == cut.first
+    assert m.ir == str.split(str.trim_end(must_read("scripts/tile-golden/vadd.mlir")), "\n")
+    var owned: List[Int] = []
+    for r in m.rows {
+      owned = owned ++ row_lines(r)
+    }
+    assert owned == range(1, len(m.ir) + 1)
+    for r in m.rows {
+      assert len(row_lines(r)) > 0
+      assert r.src_to > r.src_from
+    }
+    var calls: List[String] = []
+    for r in m.rows {
+      calls = calls ++ r.calls
+    }
+    assert calls == ["block_id", "tile_at", "load", "load", "addf", "store"]
+    assert m.calls == len(calls)
+  })
+}
+
+## How many kernels line up is counted, not stated, and the page says the
+## count it was given. A refused kernel carries its reason, which is what
+## the report of the next knife lists.
+test "the page states how many kernels line up, and every refusal says why" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let n = len(mapped(f))
+    assert len(f.maps) == f.golden
+    assert n > 0
+    for m in f.maps {
+      let (_nm, r) = m
+      match r {
+        Ok(_) -> ()
+        Err(e) -> { assert e != "" }
+      }
+    }
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    assert str.contains(p, "${n} of ${f.golden} golden kernels map line by line")
+    assert len(str.split(p, "<option ")) == n + 1
+    assert str.contains(p, `<option value="vadd" selected>vadd</option>`)
+    let z = gpu_page(plain_assets(), "gpu.js", Zh, f, [])
+    assert str.contains(z, "${f.golden} 个 golden kernel 中有 ${n} 个逐行对上")
+  })
+}
+
+## The facts strip under the map holds the numbers the map and the files
+## give, each where the script rewrites it.
+test "the facts under the map are the map's and the files' numbers" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let m = f.vadd
+    let kf = kernel_facts(f, m)
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    let size =
+      match io.read_bytes("scripts/tile-golden/vadd.tilebc") {
+        Ok(b) -> bytes.len(b)
+        Err(e) -> panic("cannot read vadd.tilebc: ${e}")
+      }
+    assert kf.bytes == size
+    assert kf.lines == len(m.ir)
+    for e in [("calls", m.calls), ("ops", m.ops), ("lines", len(m.ir)), ("bytes", size), ("count", m.ops)] {
+      let (key, v) = e
+      assert str.contains(p, """<b data-f="${key}">${v}</b>""")
+    }
+    # every row it cites names vadd in its evidence, and every one that does is cited
+    let (rows, muts) = cited_by(f, "vadd")
+    assert len(rows) > 0
+    assert len(filter(f.rows, r => list.contains(r.evidence, "golden:vadd"))) <= len(rows)
+    for r in rows {
+      assert str.contains(p, "<code>${escape_html(r.name)}</code>")
+    }
+    for x in muts {
+      assert str.contains(p, "<code>${x}</code>")
+    }
+    # the rows' operations add up to the recording's
+    var ops = 0
+    for r in m.rows {
+      ops = ops + r.ops
+    }
+    assert ops == m.ops
+  })
+}
+
+## The file the picker fetches is JSON, and it holds what the page would
+## draw for that kernel.
+test "a kernel's file is JSON with its rows, its lines and its facts" {
+  with_fs_real(() => {
+    let f = load_facts()
+    for m in [f.vadd] ++ list.take(mapped(f), 3) {
+      match parse(kernel_json(f, m)) {
+        Ok(JObj(entries)) -> {
+          assert map.get(entries, "name") == Some(JStr(value: m.name))
+          match map.get(entries, "rows") {
+            Some(JArr(rows)) -> { assert len(rows) == len(m.rows) }
+            _ -> { assert false }
+          }
+          match map.get(entries, "ir") {
+            Some(JArr(ir)) -> { assert len(ir) == len(m.ir) }
+            _ -> { assert false }
+          }
+          assert map.get(entries, "bytes") == Some(JInt(value: bytes_of(f, m.name)))
+          assert map.get(entries, "ops") == Some(JInt(value: m.ops))
+        }
+        _ -> { assert false }
+      }
+    }
+  })
+}
+
+## Every mutant is drawn once, at a gate read from its harness, and no
+## mutant a coverage row cites goes undrawn.
+test "every mutant is placed at the gate its harness proves" {
+  with_fs_real(() => {
+    let golden_run = must_read("scripts/tile-golden/run.sh")
+    let (ms, lost) = place_mutants(golden_run, must_read("scripts/tile-gpu-diff/run.sh"), read_rows())
+    assert lost == []
+    let names = map(ms, m => m.name)
+    assert len(names) == len(list.unique(names))
+    let golden = golden_mutants(golden_run)
+    assert len(golden) > 0
+    assert len(filter(ms, m => m.gate < 2)) == len(golden)
+    for g in [0, 1, 2] {
+      assert len(filter(ms, m => m.gate == g)) > 0
+    }
+    let f = load_facts()
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    assert len(str.split(p, "<i title=")) == len(ms) + 1
+  })
+}
+
+## The rule on a harness made up for it: a writer check or a tileiras block
+## is gate 1, anything else gate 0, and a listed mutant with no block, or a
+## device name that is only part of a longer one, is not placed.
+test "the gate rule reads the block, and only the block" {
+  let run_sh = "mutants=(\n  a-text\n  b-writer\n  c-asm\n)\n"
+    ++ "if run_item a-text; then\n  mutant_run a-text vadd\nfi\n"
+    ++ "if run_item b-writer; then\n  writer_mutant_checks b-writer vadd same-size x\nfi\n"
+    ++ "if run_item c-asm; then\n  if [ -n \"\$tileiras\" ]; then\n    true\n  fi\nfi\n"
+  assert golden_mutants(run_sh) == ["a-text", "b-writer", "c-asm"]
+  assert golden_gate(run_sh, "a-text") == Ok(0)
+  assert golden_gate(run_sh, "b-writer") == Ok(1)
+  assert golden_gate(run_sh, "c-asm") == Ok(1)
+  match golden_gate(run_sh, "d-none") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "runs no block") }
+  }
+  assert names_word("x grid-zero y", "grid-zero")
+  assert not names_word("x grid-zero-two y", "grid-zero")
+  assert not names_word("x big-grid-zero y", "grid-zero")
+}
+
+## Each card counts up to the implemented rows and lists, on pointing, every
+## row that is not implemented.
+test "the coverage cards carry their counts, their bars and the rows not implemented" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    for t in f.tables {
+      let n = count_of(t, "implemented")
+      assert str.contains(p, """<div class="gpu-fig" data-count="${n}" tabindex="0"><strong><b>${n}</b><small>/${t.total}</small></strong>""")
+      assert str.contains(p, "--p:${percent(n, t.total)}")
+      for r in filter(f.rows, r => r.table == t.name && r.status != "implemented") {
+        assert str.contains(p, "<li><code>${escape_html(r.name)}</code>")
+      }
+    }
+    assert percent(99, 105) == "94.2%"
+    assert percent(3, 3) == "100.0%"
+  })
+}
+
+test "the head's background is real Tile IR from the goldens" {
+  with_fs_real(() => {
+    let ls = hero_lines()
+    assert len(ls) > 20
+    for l in ls {
+      assert list.any(hero_kernels(), k => str.contains(must_read("scripts/tile-golden/${k}.mlir"), l))
+    }
   })
 }

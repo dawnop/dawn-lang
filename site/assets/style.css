@@ -702,19 +702,137 @@ ul.timeline ul { padding-left: 1.2rem; }
 .gpu-fork { display: inline-flex; flex-direction: column; gap: 0.3rem; }
 .gpu-layer p { margin: 0.75rem 0 0.85rem; max-width: var(--measure); color: var(--muted); font-size: 0.95rem; line-height: 1.7; }
 .gpu-layer p code { font-size: 0.86em; background: var(--code-bg); border: 1px solid var(--line-soft); padding: 0.05em 0.32em; border-radius: 5px; color: var(--text); }
-.gpu-pair { display: grid; gap: 1rem; margin: 1.6rem 0 0; }
-@media (min-width: 900px) { .gpu-pair { grid-template-columns: minmax(0, auto) minmax(0, 1fr); align-items: start; } }
-.gpu-pair .win { margin: 0; min-width: 0; }
-.gpu-pair pre { font-size: 0.78rem; line-height: 1.6; }
+/* The head's background: real Tile IR from a few goldens, very faint,
+   drifting upward (two copies, so the loop has no seam); still under
+   reduced motion. */
+.page-head:has(> .gpu-hero-ir) { isolation: isolate; }
+.gpu-hero-ir { position: absolute; z-index: -1; top: 0; bottom: 0; right: 0; width: min(46%, 34rem); overflow: hidden; pointer-events: none; user-select: none; -webkit-user-select: none; opacity: 0.13; -webkit-mask-image: linear-gradient(180deg, transparent, #000 22%, #000 70%, transparent), linear-gradient(90deg, transparent, #000 30%); -webkit-mask-composite: source-in; mask-image: linear-gradient(180deg, transparent, #000 22%, #000 70%, transparent), linear-gradient(90deg, transparent, #000 30%); mask-composite: intersect; }
+.gpu-hero-ir pre { margin: 0; padding: 0; border: 0; background: none; overflow: visible; font: 0.7rem/1.75 var(--mono); color: var(--sky-text); white-space: pre; }
+@media (max-width: 719px) { .gpu-hero-ir { width: 100%; opacity: 0.08; } }
+@media (prefers-reduced-motion: no-preference) {
+  .gpu-hero-ir pre { animation: gpu-drift 140s linear infinite; }
+  @keyframes gpu-drift { to { transform: translateY(-50%); } }
+}
+/* The line map: one row per run of Dawn lines, the Tile IR it recorded on
+   the same row. Six colours tell neighbouring rows apart and mean nothing
+   else; each has a day ink and a night ink, like the hues above. */
+.gpu-page {
+  --gm-0: #4f46e5; --gm-1: #db2777; --gm-2: #0e7490; --gm-3: #b45309; --gm-4: #15803d; --gm-5: #7c3aed;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .gpu-page {
+    --gm-0: #818cf8; --gm-1: #f472b6; --gm-2: #67e8f9; --gm-3: #fbbf24; --gm-4: #4ade80; --gm-5: #c4b5fd;
+  }
+}
+:root[data-theme="dark"] .gpu-page {
+  --gm-0: #818cf8; --gm-1: #f472b6; --gm-2: #67e8f9; --gm-3: #fbbf24; --gm-4: #4ade80; --gm-5: #c4b5fd;
+}
+.gpu-map { margin: 1.6rem 0 0; border: 1px solid var(--line); border-radius: 12px; background: var(--code-bg); box-shadow: var(--shadow); overflow: hidden; }
+.gm-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 0.82rem; color: var(--muted); }
+.gm-pick { display: inline-flex; align-items: center; gap: 0.45rem; }
+.gm-pick[hidden], .gm-replay[hidden] { display: none; }
+.gm-pick span { font: 500 0.7rem/1.4 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+.gm-pick select { font: 0.82rem var(--mono); color: var(--text); background: var(--code-bg); border: 1px solid var(--line); border-radius: 7px; padding: 0.22rem 0.45rem; max-width: 15rem; }
+.gm-mapped { color: var(--faint); }
+.gm-count { margin-left: auto; font-family: var(--mono); font-size: 0.78rem; color: var(--faint); white-space: nowrap; }
+.gm-count b { display: inline-block; min-width: 2.4ch; text-align: right; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.gm-replay { font: 500 0.8rem var(--sans); color: #fff; background: var(--dawn-grad); border: 0; border-radius: 999px; padding: 0.34rem 0.9rem; cursor: pointer; }
+.gm-replay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gm-head { display: none; }
+.gm-rows { list-style: none; margin: 0; padding: 0.35rem 0; }
+.gm-row { margin: 0; padding: 0.15rem 0.9rem 0.15rem 0.75rem; --g: var(--gm-0); outline: none; transition: opacity 0.18s ease, background-color 0.18s ease; }
+.gm-row.g1 { --g: var(--gm-1); } .gm-row.g2 { --g: var(--gm-2); } .gm-row.g3 { --g: var(--gm-3); }
+.gm-row.g4 { --g: var(--gm-4); } .gm-row.g5 { --g: var(--gm-5); }
+.gm-row + .gm-row { border-top: 1px dashed var(--line-soft); }
+.gm-row pre { margin: 0; padding: 0.15rem 0; border: 0; border-radius: 0; background: none; font-size: 0.74rem; line-height: 1.62; overflow-x: auto; }
+.gm-l i { display: inline-block; width: 2.6em; margin-right: 0.7em; text-align: right; font-style: normal; color: var(--faint); opacity: 0.7; user-select: none; -webkit-user-select: none; }
+.gm-d { border-left: 3px solid var(--g); padding-left: 0.4rem; min-width: 0; }
+.gm-t { border-left: 2px solid color-mix(in srgb, var(--g) 70%, transparent); padding-left: 0.4rem; margin: 0.25rem 0 0.25rem 1.2rem; min-width: 0; }
+.gm-t pre { color: var(--muted); }
+.gm-calls { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0.1rem 0 0.2rem 3.3em; }
+.gm-calls code { font: 0.66rem/1.5 var(--mono); padding: 0 0.4rem; border-radius: 999px; color: var(--g); border: 1px solid color-mix(in srgb, var(--g) 45%, transparent); background: color-mix(in srgb, var(--g) 8%, transparent); }
+/* pointing at a row lights it and dims the others; so does keyboard focus,
+   and so does the replay's current row */
+.gm-rows:hover .gm-row:not(:hover), .gm-rows:focus-within .gm-row:not(:focus-within) { opacity: 0.38; }
+.gm-row:hover, .gm-row:focus-visible, .gm-row.gm-on { background: color-mix(in srgb, var(--g) 9%, transparent); }
+.gm-row:hover .gm-t pre, .gm-row:focus-visible .gm-t pre, .gm-row.gm-on .gm-t pre { color: var(--text); }
+.gpu-map.gm-playing .gm-row:not(.gm-on) { opacity: 0.38; }
+.gm-l.gm-off { visibility: hidden; }
+.gpu-map.gm-loading .gm-rows { opacity: 0.5; }
+/* On a wide screen the two halves are one grid: the Dawn column as wide as
+   its longest line (up to 46%), every row and the heads its subgrid, so the
+   Tile IR starts at the same x on every row. */
+@media (min-width: 900px) {
+  .gm-grid { display: grid; grid-template-columns: 0.75rem fit-content(46%) minmax(0, 1fr) 0.9rem; column-gap: 0; }
+  .gm-head, .gm-rows, .gm-row { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
+  .gm-head > :first-child, .gm-d { grid-column: 2; }
+  .gm-head > :last-child, .gm-t { grid-column: 3; margin-left: 1.6rem; }
+  .gm-head { padding: 0.55rem 0 0; font: 500 0.7rem/1.4 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+  .gm-head code { text-transform: none; letter-spacing: 0; color: var(--muted); }
+  .gm-row { align-items: center; padding: 0.15rem 0; }
+  .gm-t { margin-top: 0.2rem; margin-bottom: 0.2rem; }
+}
+.gm-facts { list-style: none; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 1.1rem; margin: 0; padding: 0.75rem 0.9rem 0.2rem; border-top: 1px solid var(--line); background: var(--surface); font-size: 0.85rem; color: var(--muted); }
+.gm-facts li { margin: 0; }
+.gm-facts b, .gm-names b { font: 600 1.05rem var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.gm-facts .gm-arrow { color: var(--faint); margin: 0 -0.5rem; }
+.gm-facts li:last-child { margin-left: auto; }
+.gm-names { margin: 0; padding: 0.25rem 0.9rem 0.6rem; background: var(--surface); font-size: 0.82rem; color: var(--muted); }
+.gm-names:last-child { padding-bottom: 0.8rem; }
+.gm-names span { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; vertical-align: baseline; }
+.gm-names code { font: 0.72rem var(--mono); padding: 0.02rem 0.4rem; border: 1px solid var(--line); border-radius: 5px; background: var(--code-bg); color: var(--text); }
 .gpu-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin: 1.6rem 0 0; }
-.gpu-fig { display: flex; flex-direction: column; gap: 0.3rem; border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.15rem; background: var(--surface); box-shadow: var(--shadow); }
-.gpu-fig strong { font: 600 2rem/1.1 var(--mono); letter-spacing: -0.03em; color: var(--text); }
+.gpu-fig { position: relative; display: flex; flex-direction: column; gap: 0.3rem; border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.15rem; background: var(--surface); box-shadow: var(--shadow); outline: none; }
+.gpu-fig:focus-visible { border-color: var(--accent); }
+.gpu-fig strong { font: 600 2rem/1.1 var(--mono); letter-spacing: -0.03em; color: var(--text); font-variant-numeric: tabular-nums; }
+.gpu-fig strong b { font-weight: inherit; }
 .gpu-fig strong small { font-size: 0.55em; font-weight: 500; color: var(--faint); letter-spacing: 0; }
+.gpu-fig-bar { display: block; height: 4px; margin: 0.2rem 0 0.15rem; border-radius: 2px; background: var(--line-soft); overflow: hidden; }
+.gpu-fig-bar i { display: block; height: 100%; width: var(--p); border-radius: inherit; background: var(--dawn-grad); }
 .gpu-fig span { font-size: 0.92rem; color: var(--muted); line-height: 1.5; }
 .gpu-fig .gpu-fig-rest { font-size: 0.8rem; color: var(--faint); }
 .gpu-fig .gpu-fig-rest code { font: 0.95em var(--mono); }
 .gpu-fig a { margin-top: auto; padding-top: 0.4rem; font-size: 0.78rem; color: var(--faint); }
 .gpu-fig a code { font-family: var(--mono); }
+/* the rows that are not implemented, over the card's lower edge when it is
+   pointed at or focused */
+.gpu-fig-miss { position: absolute; z-index: 3; left: -1px; right: -1px; top: calc(100% - 0.4rem); margin: 0; padding: 0.6rem 0.85rem; list-style: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); font-size: 0.78rem; line-height: 1.5; color: var(--muted); opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity 0.16s ease, transform 0.16s ease, visibility 0s linear 0.16s; }
+.gpu-fig:hover .gpu-fig-miss, .gpu-fig:focus-within .gpu-fig-miss { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+.gpu-fig-miss li { margin: 0.12rem 0; }
+.gpu-fig-miss code { font: 0.95em var(--mono); color: var(--text); }
+.gpu-fig-miss small { color: var(--faint); font-family: var(--mono); font-size: 0.9em; }
+.gpu-fig-miss li span { display: block; font-size: 0.95em; color: var(--faint); }
+@media (prefers-reduced-motion: no-preference) {
+  .gpu-fig-bar i { transition: width 1.1s cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .gpu-fig.gf-wait .gpu-fig-bar i { width: 0; transition: none; }
+}
+/* The mutants caught: the kernel on the left, three nets, the device on the
+   right; every mutant is a dot in the net that catches it. gpu.js flies
+   them in once (gt-wait holds them off to the left, gt-fly lets them go). */
+.gpu-trap { position: relative; display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)) auto; gap: 0; align-items: stretch; margin: 1.6rem 0 0; padding: 1rem 0.9rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
+.gpu-trap::before { content: ""; position: absolute; left: 1rem; right: 1rem; top: 50%; border-top: 1px dashed var(--line); }
+.gt-src, .gt-dev { position: relative; align-self: center; z-index: 1; }
+.gt-src code, .gt-dev code { display: inline-block; font: 0.74rem var(--mono); padding: 0.2rem 0.55rem; border: 1px solid var(--line); border-radius: 999px; background: var(--code-bg); color: var(--muted); }
+.gt-zone { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 0.45rem; padding: 0 0.8rem 0 1.1rem; margin-left: 0.8rem; --g: var(--gm-0); }
+.gt-z1 { --g: var(--gm-1); } .gt-z2 { --g: var(--gm-2); }
+.gt-net { position: absolute; left: 0; top: -0.3rem; bottom: -0.3rem; width: 6px; border-radius: 3px; background: repeating-linear-gradient(180deg, var(--g) 0 3px, transparent 3px 7px); opacity: 0.85; }
+.gt-zone .gpu-gate-n { width: 1.45rem; height: 1.45rem; font-size: 0.7rem; }
+.gt-name { font-size: 0.86rem; font-weight: 650; color: var(--text); }
+.gt-dots { display: flex; flex-wrap: wrap; gap: 4px; min-height: 2.2rem; align-content: center; padding: 0.3rem 0; }
+.gt-dots i { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--g); box-shadow: 0 0 0 2px color-mix(in srgb, var(--g) 18%, transparent); }
+.gt-count { font-size: 0.8rem; color: var(--muted); }
+.gt-count b { font: 600 1rem var(--mono); color: var(--text); }
+@media (max-width: 719px) {
+  .gpu-trap { grid-template-columns: minmax(0, 1fr); gap: 0.9rem; }
+  .gpu-trap::before { left: 1.25rem; right: auto; top: 0.9rem; bottom: 0.9rem; border-top: 0; border-left: 1px dashed var(--line); }
+  .gt-zone { margin-left: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .gpu-trap.gt-wait .gt-dots i { transform: translateX(-70vw); opacity: 0; }
+  .gpu-trap.gt-fly .gt-dots i { transition: transform 0.9s cubic-bezier(0.2, 0.75, 0.25, 1), opacity 0.3s ease; transition-delay: calc(var(--i) * 11ms); }
+  .gpu-trap.gt-fly .gt-net { animation: gt-catch 0.5s ease 0.75s 1 backwards; }
+  @keyframes gt-catch { 50% { transform: scaleX(1.8); opacity: 1; } }
+}
 .gpu-gates { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; margin: 1.6rem 0 0; padding: 0; counter-reset: none; }
 .gpu-gates li { position: relative; margin: 0; padding: 1rem 1.15rem 1.05rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .gpu-gate-n { display: inline-grid; place-items: center; width: 1.7rem; height: 1.7rem; border-radius: 50%; font: 600 0.8rem var(--mono); color: #fff; background: var(--dawn-grad); }
