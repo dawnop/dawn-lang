@@ -28,7 +28,7 @@ bf16 answers what `std/narrow.round_bf16` of the f64 sum answers;
 | Module | Contents |
 |------|------|
 | `dev` | `pub effect Dev` (handle-level, monomorphic device operations), the handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, `Ptrs[D]`, the view types and others, all opaque, with `D` a phantom format parameter) and the typed functions over them; the groups are below |
-| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body)` and `trace_kernel_hinted` are the recording handlers, with a region stack; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
+| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
 | `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here |
 | `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace |
 | `bytecode` | `encode(prog) -> Bytes`: `cuda-tile` bytecode, regions included; `BYTECODE_MAJOR` / `BYTECODE_MINOR` pin the version in the header, and `bytecode_version()` answers `"13.4"` |
@@ -54,11 +54,24 @@ follow; `dawn doc` is the authority on numbers and names.
 | Memory and pointers | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
 | Views | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
 | Constants and shapes | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
-| Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int_sat` `float_to_float_away` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
+| Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
 | Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
 | Tokens | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
-| Module globals | `t_global` `t_get_global` | `d_global` `d_global_const` `global_ptrs` |
+| Module globals | `t_global` `t_get_global` | `d_global` `global_ptrs` |
 | Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
+
+Since knife K2, the attributes of an operation (rounding mode, flush to zero,
+NaN propagation, integer `overflow`, a loop's unsigned comparison, a global's
+alignment, visibility and constness, and whether an `alloca` is shared) are
+named parameters with the dialect's default, placed after the positional
+parameters and after `body`: `addf(F32, s, a, b, rounding: Down)`,
+`d_global("t", F64, xs, visibility: Private)`,
+`trace_kernel("k", ps, () => body(), hints: hs)`. The rounding mode is
+`std/narrow`'s `Rounding`. The suffixed names of knives T4 and T17
+(`addf_down`, `float_to_int_sat`, `d_global_private`, ...) are gone; the
+reasons are in section 7.2 of
+[`docs/std-defaults-design.md`](../../docs/std-defaults-design.md) (in
+Chinese).
 
 ## Usage
 
@@ -137,11 +150,12 @@ store. Lowering turns it into an `IfElse` the way it turns a loop into a
   ladder for one (parameter, index, width) is emitted once. The renderer
   spells `Val(k)` as `%k` and `Arg(i)` as `%argi`; the writer puts the entry
   parameters first and the values right after them, in one flat index space.
-- Plain `addf` is `rounding<nearest_even>`: design §3.2's double-rounding
-  theorem holds for that mode only. The other modes are separate operation
-  names (`addf_ftz`, `addf_neg_inf`, `addf_pos_inf`), so the instruction table
-  carries no rounding field. `scripts/tile-golden`'s `addf-no-rounding` mutant
-  deletes the attribute from the renderer and `vadd_bf16.mlir` goes red;
+- `addf` defaults to `rounding<nearest_even>`: design §3.2's double-rounding
+  theorem holds for that mode only. The other modes are not public functions:
+  the recorder picks a separate internal operation name from the `rounding`
+  (and `ftz`) parameter, so the instruction table carries no rounding
+  field. `scripts/tile-golden`'s `addf-no-rounding` mutant deletes the
+  attribute from the renderer and `vadd_bf16.mlir` goes red;
   `bf16-tag-as-i16` changes the writer's bf16 tag to i16 and `tileiras`
   refuses the bytes.
 - **A loop** is recorded as `For(iv, lower, upper, step, unsigned, inits,
@@ -175,8 +189,8 @@ a debug section and pre-registers i1 and i32), and this package follows the
 C++ writer.
 
 Only what the instruction table can hold is encoded: memory operations are
-`weak` and carry their token operand, plain `addf` is `nearest_even` without
-flush-to-zero, and integer operations carry `overflow` none. **Value numbering
+`weak` and carry their token operand, `addf` at its defaults is
+`nearest_even` without flush-to-zero, and integer operations carry `overflow` none. **Value numbering
 inside a region** follows the reader's rule: block arguments continue the
 enclosing count, the block's results follow, the count rolls back to before
 the arguments when the block ends, and the region-holding operation's own
