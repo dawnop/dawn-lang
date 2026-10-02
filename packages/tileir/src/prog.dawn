@@ -812,13 +812,68 @@ fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 ## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
 ## defaults go after the body).
 pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> TileProg = {
-  let (globals, ops) = {
+  let (prog, _calls) = trace_calls(name, params, body, hints: hints)
+  prog
+}
+
+## One public call of a kernel body as the recording saw it, from the side
+## table `trace_calls` keeps: the name of the public function (dev.dawn's
+## `called` marks), and the half-open ranges of `TileProg.ops` and
+## `TileProg.globals` it issued. Only the OUTERMOST calls are rows: what
+## `tile_at` issues through `idx_const` and `idx_mul` is `tile_at`'s, and
+## what a `d_for` body issues is inside the `For` the `d_for` row owns.
+## `ops_from` counts the leading `MakeToken(0)`, so the first call of a body
+## starts at 1. A call that opened or closed with a region open (only a body
+## that issues `t_*` operations itself can do that) has both op bounds -1.
+pub type Call = {
+  name: String,
+  ops_from: Int,
+  ops_to: Int,
+  globals_from: Int,
+  globals_to: Int,
+} derive Show
+
+## `trace_kernel`, and beside the program the side table of the body's
+## public calls in the order they returned (which is the order they
+## started, as only outermost calls are kept). The program is the one
+## `trace_kernel` answers: it is the same handler, and the marks put nothing
+## into `ops`.
+pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> (TileProg, List[Call]) = {
+  let (globals, ops, calls) = {
     with handle Dev {
       var next: Int = 1
       var tok: Int = 0
       var ops: List[TileOp] = []
       var globals: List[Global] = []
       var frames: List[Frame] = []
+      var depth: Int = 0
+      var opened: Int = 0
+      var opened_globals: Int = 0
+      var opened_top: Bool = true
+      var callee: String = ""
+      var calls: List[Call] = []
+      t_call_enter(called_name) => {
+        if depth == 0 {
+          callee = called_name
+          opened = len(ops)
+          opened_globals = len(globals)
+          opened_top = len(frames) == 0
+        } else {
+          ()
+        }
+        depth = depth + 1
+      }
+      t_call_exit() => {
+        depth = depth - 1
+        if depth == 0 {
+          let top = opened_top && len(frames) == 0
+          let lo = if top { opened + 1 } else { 0 - 1 }
+          let hi = if top { len(ops) + 1 } else { 0 - 1 }
+          calls = calls ++ [Call { name: callee, ops_from: lo, ops_to: hi, globals_from: opened_globals, globals_to: len(globals) }]
+        } else {
+          ()
+        }
+      }
       t_block_id(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
         let d = next
@@ -1746,9 +1801,9 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev,
     }
     body()
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
-    (globals, ops)
+    (globals, ops, calls)
   }
-  TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }
+  (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }, calls)
 }
 
 ## The handles an operation defines in the region it sits in, in definition

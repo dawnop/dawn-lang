@@ -3741,10 +3741,10 @@ rm -rf "$mutant_pkg_atom"
 cp -r "$root/packages/tileir" "$mutant_pkg_atom"
 before=$(digest "$mutant_pkg_atom/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_atom/src/dev.dawn" atomic-as-plain-store \
-  '  let _old = atomic_rmw_masked(p, "add", index, shape, mask, v)
-  ()' \
-  '  let old = gather_masked(p, index, shape, mask, i_const(shape, 0))
-  scatter_masked(p, index, shape, mask, add_i(shape, old, v))'
+  '    let _old = atomic_rmw_masked(p, "add", index, shape, mask, v)
+    ()' \
+  '    let old = gather_masked(p, index, shape, mask, i_const(shape, 0))
+    scatter_masked(p, index, shape, mask, add_i(shape, old, v))'
 after=$(digest "$mutant_pkg_atom/src/dev.dawn")
 echo "      atomic-as-plain-store: packages/tileir/src/dev.dawn md5 $before -> $after"
 
