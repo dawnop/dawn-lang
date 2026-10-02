@@ -120,8 +120,80 @@ fn items_html(
 ) -> String =
   join(map(items, bs => "<li>" ++ item_body(bs, map_url, play) ++ "</li>"), "\n")
 
+## True when the `n` characters from `i` are all digits.
+fn digits_at(cs: List[Char], i: Int, n: Int) -> Bool =
+  i + n <= len(cs) && len(filter(range(i, i + n), j => not is_digit(cs[j]))) == 0
+
+## True when position `i` is the end of the text or not a digit: a date must
+## not be the front of a longer number.
+fn digit_free(cs: List[Char], i: Int) -> Bool = i >= len(cs) || not is_digit(cs[i])
+
+## How many characters of an ISO date start at `i`: 10 for `2026-07-23`, 19
+## when a range end follows (`2026-08-31 to 09-01`), 0 when no date starts
+## here.
+fn date_len(cs: List[Char], i: Int) -> Int = {
+  let starts = (i == 0 || not is_digit(cs[i - 1])) && digits_at(cs, i, 4)
+  let date = starts && i + 10 <= len(cs) && cs[i + 4] == '-' && digits_at(cs, i + 5, 2)
+    && cs[i + 7] == '-' && digits_at(cs, i + 8, 2) && digit_free(cs, i + 10)
+  let j = i + 10
+  let ranged = date && j + 9 <= len(cs) && seg(cs, j, j + 4) == " to " && digits_at(cs, j + 4, 2)
+    && cs[j + 6] == '-' && digits_at(cs, j + 7, 2) && digit_free(cs, j + 9)
+  if ranged { 19 } else if date { 10 } else { 0 }
+}
+
+## Table text with each ISO date in `span.date`, which the stylesheet keeps on
+## one line: a narrow column otherwise breaks `2026-07-23` at its hyphen. Done
+## with markup rather than a non-breaking hyphen in the text, so that what a
+## reader copies or searches for is still the date as written.
+fn dated_html(s: String) -> String = {
+  let cs = code_points(s)
+  let n = len(cs)
+  var out: List[String] = []
+  var start = 0
+  var i = 0
+  while i < n {
+    let k = date_len(cs, i)
+    if k > 0 {
+      out = out ++ [escape_html(seg(cs, start, i)), `<span class="date">` ++ escape_html(seg(cs, i, i + k)) ++ "</span>"]
+      i = i + k
+      start = i
+    } else {
+      i = i + 1
+    }
+  }
+  join(out ++ [escape_html(seg(cs, start, n))], "")
+}
+
+## [inline_html] for a table cell: the same markup, with dates kept whole.
+## Code is left as written; a date inside it is code.
+fn cell_inline_html(it: Inline, map_url: fn(String) -> String) -> String =
+  match it {
+    Text(s) -> dated_html(s)
+    Bold(xs) -> "<strong>" ++ cell_inlines_html(xs, map_url) ++ "</strong>"
+    Em(xs) -> "<em>" ++ cell_inlines_html(xs, map_url) ++ "</em>"
+    Del(xs) -> "<del>" ++ cell_inlines_html(xs, map_url) ++ "</del>"
+    _ -> inline_html(it, map_url)
+  }
+
+fn cell_inlines_html(items: List[Inline], map_url: fn(String) -> String) -> String =
+  join(map(items, it => cell_inline_html(it, map_url)), "")
+
+## A cell that is one piece of code and nothing else is a key -- a command, a
+## flag, a type name -- and `td.key` keeps it on one line. Decided here, from
+## the cell's inlines, because the stylesheet can only guess: the `:has()`
+## rules it used to carry also caught a sentence that merely contained code,
+## and one such sentence stretched a whole column to its full length.
+fn is_key(cell: List[Inline]) -> Bool =
+  match cell {
+    [Code(_)] -> true
+    _ -> false
+  }
+
 fn cell_html(tag: String, cells: List[List[Inline]], map_url: fn(String) -> String) -> String =
-  join(map(cells, c => "<${tag}>" ++ inlines_html(c, map_url) ++ "</${tag}>"), "")
+  join(map(cells, c => {
+    let open = if tag == "td" && is_key(c) { `<td class="key">` } else { "<${tag}>" }
+    open ++ cell_inlines_html(c, map_url) ++ "</${tag}>"
+  }), "")
 
 ## A table in a scrolling frame: on a phone a wide table scrolls inside the
 ## frame instead of widening the page.
@@ -571,5 +643,33 @@ test "tables render thead and tbody, inside a scrolling frame" {
   let doc = render_doc([Table([[Text("列")]], [[[Code("v")]]])], keep_url)
   assert str.starts_with(doc.html, `<div class="table-wrap">` ++ "\n<table>")
   assert str.contains(doc.html, "<thead>\n<tr><th>列</th></tr>\n</thead>")
-  assert str.contains(doc.html, "<tbody>\n<tr><td><code>v</code></td></tr>\n</tbody>")
+  assert str.contains(doc.html, "<tbody>\n<tr><td class=\"key\"><code>v</code></td></tr>\n</tbody>")
+}
+
+## The stylesheet keeps a key cell on one line; a cell with code and words is
+## prose and must be free to wrap.
+test "a cell that is only code is a key, code with words is not" {
+  let doc = render_doc([Table([[Text("a")], [Text("b")]], [[[Code("dawn run")], [Code("x"), Text(" is a list")]]])],
+    keep_url)
+  assert str.contains(doc.html, `<tr><td class="key"><code>dawn run</code></td><td><code>x</code> is a list</td></tr>`)
+  # header cells are never keys
+  let head = render_doc([Table([[Code("k")]], [])], keep_url)
+  assert str.contains(head.html, "<tr><th><code>k</code></th></tr>")
+}
+
+test "dates in a table cell are wrapped whole, ranges included" {
+  let doc = render_doc([Table([[Text("When")]], [
+    [[Text("2026-07-30; 2026-09-02")]],
+    [[Text("2026-08-31 to 09-01")]],
+    [[Bold([Text("on 2026-07-12")]), Code(" 2026-07-13"), Text(" 12026-01-01 x")]],
+  ])], keep_url)
+  assert str.contains(doc.html,
+    `<td><span class="date">2026-07-30</span>; <span class="date">2026-09-02</span></td>`)
+  assert str.contains(doc.html, `<td><span class="date">2026-08-31 to 09-01</span></td>`)
+  # bold text is dated, code is not, and a longer number is not a date
+  assert str.contains(doc.html,
+    `<td><strong>on <span class="date">2026-07-12</span></strong><code> 2026-07-13</code> 12026-01-01 x</td>`)
+  # outside a table, prose is untouched
+  let para = render_doc([Para([Text("2026-07-30")])], keep_url)
+  assert para.html == "<p>2026-07-30</p>\n"
 }
