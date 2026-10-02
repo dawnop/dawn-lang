@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lsp_hover import hover_code  # noqa: E402
+
 
 HEADER_OWNER = "for pattern headers expose binder and constructor queries"
 HEADER_COMPLETION_OWNER = "for pattern completion suppresses values across the recursive header"
@@ -161,15 +164,6 @@ def replies(raw: bytes) -> dict[int, object]:
             continue
         if isinstance(message, dict) and "id" in message and "result" in message:
             out[message["id"]] = message["result"]
-
-
-def hover_text(result: object) -> str:
-    if not isinstance(result, dict):
-        return ""
-    contents = result.get("contents")
-    if isinstance(contents, dict):
-        return contents.get("value", "")
-    return contents if isinstance(contents, str) else ""
 
 
 def range_start(result: object):
@@ -441,18 +435,18 @@ def main() -> int:
 
     got = replies(done.stdout)
     header_ok = True
-    if "Only" not in hover_text(got.get(2)):
+    if "Only" not in hover_code(got.get(2)):
         header_ok = False
     if (definition_uri(got.get(3)) != lib_uri or
             range_start(got.get(3)) != position(LIB_TEXT.rindex("Only"), LIB_TEXT)):
         header_ok = False
-    if "header_value: Int" not in hover_text(got.get(4)):
+    if "header_value: Int" not in hover_code(got.get(4)):
         header_ok = False
     if range_start(got.get(5)) != position(header_bind):
         header_ok = False
     if range_start(got.get(12)) != position(header_bind):
         header_ok = False
-    if "shared: Int" not in hover_text(got.get(9)):
+    if "shared: Int" not in hover_code(got.get(9)):
         header_ok = False
     if range_start(got.get(10)) != position(shared_occurrences[0]):
         header_ok = False

@@ -9,6 +9,7 @@ import {
   DAWN_LSP_PROTOCOL,
   DAWN_LSP_URI,
   DawnLspClient,
+  hoverParts,
   hoverText,
   lspCompletionSource,
   lspDiagnostics,
@@ -240,6 +241,21 @@ let badEndpoint = ''
 try { playEndpoints('https://play.example.test/api/', 'https://site.example.test/') } catch (e) { badEndpoint = String(e) }
 expect('an endpoint that is not a run URL is refused', badEndpoint.includes('does not end in /run'), true)
 expect('markdown hover fence is plain text', hoverText('```dawn\nfn f() -> Int\n```'), 'fn f() -> Int')
+// a `##` doc after the fence (docs/lsp-hover-design.md §A3): the code stays
+// code, the doc is text, and neither the fence marks nor the rule leak through
+const documented = {
+  kind: 'markdown',
+  value: '```dawn\nfn helper(n: Int) -> Int\n```\n\n---\n\n`n` past the limit.\n\nExample:\n```dawn\nhelper(1)\n```',
+}
+expect('a documented hover splits into code and doc', hoverParts(documented), {
+  code: 'fn helper(n: Int) -> Int',
+  doc: '`n` past the limit.\n\nExample:\nhelper(1)',
+})
+expect('a documented hover leaks no fence or rule', /```|---/.test(hoverText(documented)), false)
+expect('a documented hover reads code, blank line, doc', hoverText(documented),
+  'fn helper(n: Int) -> Int\n\n`n` past the limit.\n\nExample:\nhelper(1)')
+expect('an undocumented hover has no doc', hoverParts('```dawn\nInt\n0xFF = 255\n```'), { code: 'Int\n0xFF = 255', doc: '' })
+expect('a plain-text hover is all code', hoverParts({ kind: 'plaintext', value: 'Int' }), { code: 'Int', doc: '' })
 const merged = mergeCompletionResults(
   [{ label: 'same', detail: 'server' }, { label: 'semantic' }],
   { from: 4, options: [{ label: 'same', detail: 'static' }, { label: 'builtin' }] },

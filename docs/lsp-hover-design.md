@@ -1,8 +1,8 @@
 # LSP 悬停与内联提示：设计（A1–A4）
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
-> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3、A4 落地时回填 §9「状态」，并在这里改写被
-> 事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
+> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4 落地时回填 §9「状态」，
+> 并在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
 
@@ -231,6 +231,133 @@ odd × 2^e，odd 为奇数且 < 2^53，e ≥ −1074（最小次正规数的步�
 - **字面量 pattern**（`match n { 0xFF -> … }`）：pattern 走 `walk_p`，不经过 `walk_e`；需要时另开一刀。
 - **二进制写法再附十六进制**：回显加十进制已经够核对；多给一种进制是 ZLS 的进制对照表，噪声大于信息。
 
+## A3. `##` 文档进 hover
+
+### A3.1 回包格式
+
+照 rust-analyzer 的形状（调研 C3 的样例）：代码围栏、一条分隔线、文档正文。
+
+````
+```dawn
+fn area(s: Shape) -> Float
+```
+
+---
+
+Area of a shape, in square units.
+````
+
+- 围栏里的内容与 A1/A2 完全相同（`Target.hover`），文档段拼在围栏**之后**：围栏 + `\n\n---\n\n` + 正文。
+- **没有 `##` 时回包与 A3 之前逐字节相同**（单围栏）。只空白的文档（一行孤零零的 `##`）按没有处理：
+  分隔线下面什么都没有，不如不画。
+- 正文是注释原样的 markdown（去掉 `## ` 前缀之后的那些行，与 `dawn doc` 的 `doc` 字段同一串），不改写。
+- 拼装在 `selfhost/src/lsp/lspdoc.dawn` 的 `hover_markdown`；`server.dawn` 的 `handle_hover` 调它。
+
+### A3.2 哪些目标带文档
+
+规则：**有声明点、且 `dawn doc` 的附着规则能读到的声明**带文档；读法就是 `dawn doc` 那一条
+（`front/docs.doc_of`：声明首行正上方连续的 `##` 行，空行断开，普通 `#` 不算）。
+
+| 目标 | 带文档 | 读哪一行之上 |
+|---|---|---|
+| fn（声明处、调用处、选择性导入、`m.f`、管道） | 是 | `FnDecl.lo` |
+| impl 方法的声明处 | 是 | 该方法的 `FnDecl.lo` |
+| trait 方法（声明处、经 trait 解析的调用） | 是 | `TraitMethod.lo` |
+| type（声明处、选择性导入） | 是 | `TypeDeclR.lo` |
+| 构造器（声明处、构造、pattern、选择性导入、限定构造） | 是 | 构造器自己那行（`CtorDecl.lo`），不是 type 那行 |
+| const（声明处、裸引用、`use m.{C}`、`m.C`） | 是 | `DConst` 的 `lo` |
+| trait、effect、effect 操作的声明处 | 是 | 各自的 `lo` |
+| 字段 | 否 | `dawn doc` 不给字段文档，hover 不另立一条附着规则 |
+| 局部变量、形参、lambda 形参、match 绑定、局部 fn | 否 | 它们不是对外的声明；`let` 上方的 `##` 只是注释 |
+| 字面量（A2）、comptime 块、`use` 行、impl 头、builtin | 否 | 没有声明点或没有 `##` 源码 |
+
+`front/docs` 是 A3 的前置小刀：`doc_src_of`/`doc_of`/`module_doc_of` 原来在入口层 `doc.dawn`，`lsp/` 不能
+反向依赖入口层；挪到 `front/`（它只读 lexer 的注释 token 与 parse 树的 span）后两边共用一份规则，
+`dawn doc --stdlib`、`--builtins` 与三个工程的输出前后逐字节相同。
+
+### A3.3 文档从哪里读
+
+查询层（`lspq`）不做 I/O，只在 `Target.doc` 里记下**哪段文本、哪个 offset**（`DocSite`）；
+文本由 server 取：
+
+| 声明在哪 | `DocHome` | 文本 |
+|---|---|---|
+| 本文档 | `DocHere` | 当前缓冲区 `Doc.text`（与 `QCx.cps` 同一版本） |
+| 工程里的其他模块 | `DocFile(path)` | 与 go to definition 同一个查找（`def_source`）：同一 source root 里打开着的缓冲区，否则磁盘 |
+| std（目录或内嵌） | `DocStd(mod_path)` | `StdCtx.srcs` 里那个模块的文本 |
+
+std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 就是 std 被检查时的文本，span 与它
+一一对应；内嵌 std 没有文件，`srcs` 里照样有文本。所以「内嵌 std 的声明没有定义可跳，但仍有文档」
+在结构上成立：`Site` 把跳转目标（`def`/`def_path`）与文档位置（`doc`）分开记，前者为空不影响后者。
+
+`location_of` 原有的「找哪段文本」逻辑提成了 `def_source`，location 与文档共用它，所以同一个声明
+的跳转与文档不会读到两份不同的文本。
+
+### A3.4 成本
+
+找文档要从文件开头词法整段文本：`##` 出现在字符串里就不是注释，只有从头开始的 lexer 知道哪些
+字符串还开着。三层处理：
+
+1. **先做字符串检查**（`lspdoc.may_have_doc`）：声明首行的上一行里根本没有 `##` 时直接答「无文档」，
+   不词法。注释不跨行，所以这一步是精确的，不是启发式。大多数声明没有文档，走的是这条路。
+2. **按文本记忆**（`server.doc_src_memo`）：`LspState.doc_memo` 以文件（`doc <uri>`、`file <path>`、
+   `std <mod_path>`）为键，存词法出的注释表和**整段原文**；再次查询时原文逐字相同才复用（比较整段
+   文本而不是摘要：不会有摘要碰撞，JVM 上比较 30 万码点的字符串是微秒级）。最多 32 个文件，满了就清空重来。
+   std 的文本在会话内不变，所以 std 的文档只在第一次 hover 时词法一次。
+3. **注释归行改成一遍扫描**（`front/docs.doc_src_of`）：原来每条注释调一次 `line_of`，从头数行首，
+   代价是「注释数 × 行数」；改成随注释顺序推进同一个指针，结果相同（有单测对拍 `line_of`），`dawn doc`
+   也跟着受益。
+
+实测（`scripts/incremental-semantics-contract/lsp-bench.py`，11 轮、预热 3 轮、每格 n = 8，改前 = 父提交
+`30419580`，与改后交错两遍；本机 16 核，WSL2，GraalVM CE 21）：
+
+| 场景 | 改前 hover 中位数 | 改后 hover 中位数 |
+|---|---|---|
+| `plain2000`：2,000 个无文档函数，hover 本文件的 `f1999` | 7.31 / 13.16 ms | 9.26 / 9.11 ms |
+| `gpu`：hover `gpu.round_to`（std 最大的模块，2,139 行，有文档） | 0.55 / 0.83 ms | 1.30 / 0.88 ms |
+| `big2000`：2,000 个函数**每个都有两行 `##`**，每轮先改文本再 hover `f1999` | 7.29 / 9.12 ms | 59.20 / 48.00 ms |
+
+- 前两行没有可测差异：无文档走第 1 步；std 走第 2 步的命中。
+- 第三行是最坏情形：8,000 行、4,000 条文档注释，且每轮都改文本，于是每次 hover 都是一次未命中，要词法
+  整段文本，多出约 40–50 ms。同一版本上的后续 hover 命中记忆，回到第二行的量级。去掉记忆与一遍扫描之前
+  （只有逐次词法）这一行是 88.75 / 87.81 ms，`gpu` 是 12.82 / 12.03 ms。
+- 进一步的办法（只词法到声明所在行之前的前缀；或让分析阶段的词法顺手留下注释表）都没做：前者对文件末尾的
+  声明没有帮助，后者把成本挪进每次编辑的 sync，而 sync 是比 hover 更热的路径。
+
+### A3.5 截断
+
+文档按**整行**截断：最多 `DOC_SHOWN_LINES = 50` 行、`DOC_SHOWN = 4000` 码点（`lspdoc.dawn`）。std 与
+`packages/web` 现有 398 条文档里最长的是 47 行（`std/gpu.with_gpu_real`）、2,883 码点，所以今天写下的
+文档都完整显示；上界只防「没打算在弹窗里读」的超长注释在每次 hover 时整段传输（Playground 经网关转发，
+回包大小也是它的成本）。
+
+被截断时：保留的行里若有奇数个代码围栏行（以 ```` ``` ```` 开头），补一行 ```` ``` ```` 把它关上，否则后面的
+说明会被吞进代码块；末尾加一行 `(truncated; the rest is at the declaration)`，go to definition 就能到那里。
+单独一行就超过 4000 码点时在行内切开并标 `…`。与 A1 的 `VALUE_SHOWN` 不同，这里不用 `cut_balanced`：
+文档是 markdown 散文，不是括号平衡的值，按行切才不会把一个列表项或一行代码切成两半。
+
+### A3.6 契约与 Playground
+
+- **契约 helper**：凡是从 hover 回包里取文本比较的脚本，统一经 `scripts/lsp_hover.py` 的
+  `hover_code(result)` 取**第一个 ```` ```dawn ```` 围栏**里的内容（没有围栏的纯文本回包原样返回），
+  不再「去掉所有 ``` 后整串比较」。这样带文档的 hover 不会让只关心类型的契约变红，而文档段由
+  server 单测与 lsp-diff 会话守。
+- **Playground**：`site/play-ui/src/lsp.ts` 的 `hoverText` 认「围栏 + `---` + 正文」：围栏里的代码照旧，
+  正文按纯文本显示在代码下方（去掉 `---` 与围栏标记），不把 ```` ``` ```` 与 `---` 原样漏出。
+
+### A3.7 不做的（A3 内，理由）
+
+- **沿别名链收集文档**（ZLS 的做法：`const a = b.c;` 的 hover 带上 `b.c` 的文档）：Dawn 最常见的「别名」是
+  选择性导入的 `use m.{f as g}`，hover 解析到原声明，文档本来就跟着来；`type A = B` 这类类型别名是作者在
+  那一点写下的新声明，它没有 `##` 时说明作者没打算替它另写说明，把 `B` 的文档挂上去会让读者以为那是 `A`
+  的承诺；链上多条文档还要定一条先后与合并规则，那是一份新的语义。重开条件：出现「别名的文档总是空、
+  读者总得跳一次」的实际抱怨。
+- **模块文档进 `use` 行 hover**（`module_doc_of`）：`front/docs` 已经能给，但 `use` 行的 hover 今天只回
+  `use std/list`，加文档是独立的一小刀，留到有需要时做。
+- **字段文档**：见 A3.2。
+- **把文档渲染成 HTML、改写 markdown**：编辑器自己渲染 markdown；Playground 按纯文本显示正文。
+- **builtin 的文档**：builtin 没有 `##` 源码；`selfhost/builtins.dawn` 是给人读的镜像，不是 hover 的数据源。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -248,6 +375,13 @@ odd × 2^e，odd 为奇数且 < 2^53，e ≥ −1074（最小次正规数的步�
   两种 String），提交里写 `Emit-Change(lsp)`。会话里没有一位数字面量，一位数规则不改动这份转写。
 - A2：`scripts/pipe-contract/run.sh` 的 `hover_qctor_arg` hover 实参位置的 `7`，要求恰好 `Int`；一位数
   规则让它保持原样。改 `selfhost/src/lsp/` 时这道门要跑。
+- A3：`front/docs` 两条（声明文档的附着规则、一遍扫描与 `line_of` 对拍）外加从 `doc.dawn` 搬来的一条；
+  `lsp/lspdoc` 五条（无文档即单围栏、围栏后接正文、空文档、字符串预检、截断）；`lsp/server` 三条（同模块的
+  fn、构造器与 const 带文档，无文档的 fn、局部变量与字面量回包与 A3 之前逐字节相同；探针 std 与内嵌 std
+  的声明带文档；注释表按文本记忆）。会话的 `util.dawn` 给 `helper` 加 `##`，`app.dawn` 给 `compute` 加 `##`，
+  hover 在跨模块调用 `helper(n)`、本模块声明 `compute` 上带文档；会话里原有的 std 目标（`str.trim`、`fold`、
+  consts 会话的 `memfs.BASE`）本来就有 `##`，随之带上文档。提交里写 `Emit-Change(lsp)`。
+- A3：`scripts/lsp-decl-pairing.py` 等契约 helper 改经 `scripts/lsp_hover.py` 取第一个围栏（§A3.6）。
 
 ## 6. 实测
 
@@ -295,6 +429,7 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | 刀 | 状态 | 提交 |
 |---|---|---|
 | A1 | 已落地 | `615d3116` |
-| A2 | 已落地（分支 `feat/lsp-hover-literals`） | 合入后由协调者回填 main 上的哈希 |
-| A3–A4 | 未开工 | |
+| A2 | 已落地 | `30419580` |
+| A3 | 已落地（分支 `feat/lsp-hover-docs`） | 合入后由协调者回填 |
+| A4 | 未开工 | |
 | B 组 | 未立项 | |

@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lsp_hover import hover_code  # noqa: E402
+
 
 LIB_TEXT = "pub type Qualified = Pick(value: Int)\n"
 TEXT = (
@@ -63,17 +66,6 @@ def replies(raw):
             continue
         if isinstance(message, dict) and "id" in message and "result" in message:
             out[message["id"]] = message["result"]
-
-
-def hover_text(result):
-    if not isinstance(result, dict):
-        return ""
-    contents = result.get("contents")
-    if isinstance(contents, dict):
-        return contents.get("value", "")
-    if isinstance(contents, str):
-        return contents
-    return ""
 
 
 def range_start(result):
@@ -218,11 +210,11 @@ def main():
             failures.append(message)
 
     for request_id in (2, 3, 4):
-        if "shared: Int" not in hover_text(got.get(request_id)):
+        if "shared: Int" not in hover_code(got.get(request_id)):
             reject("every or-pattern binding occurrence has hover")
             break
     for request_id in (5, 6, 7):
-        if "rest: List[Int]" not in hover_text(got.get(request_id)):
+        if "rest: List[Int]" not in hover_code(got.get(request_id)):
             reject("every list-rest binding occurrence has hover")
             break
 
@@ -236,13 +228,13 @@ def main():
         reject("or-pattern completion deduplicates the shared symbol")
 
     pqual_owner = "qualified constructor patterns expose constructor and binding queries"
-    if "Pick" not in hover_text(got.get(11)):
+    if "Pick" not in hover_code(got.get(11)):
         reject(pqual_owner)
     if (definition_uri(got.get(12)) != lib_uri or
             range_start(got.get(12)) != position(LIB_TEXT.index("Pick"), LIB_TEXT)):
         reject(pqual_owner)
     for request_id in (13, 15):
-        if "picked: Int" not in hover_text(got.get(request_id)):
+        if "picked: Int" not in hover_code(got.get(request_id)):
             reject(pqual_owner)
     if range_start(got.get(14)) != position(qualified_binds[0]):
         reject(pqual_owner)

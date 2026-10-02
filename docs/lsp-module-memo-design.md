@@ -98,7 +98,7 @@ loader 诊断不是任何一个步骤的输入。步骤里诊断的位置按声�
 - `lsp-project-matrix.py` 的 `provider-move-error` 修订：LSP 发布的上游诊断必须落在当前文本里 `missing_value` 所在的行。
   去掉重拼的服务端在这一步报 `provider diagnostic on line 4, text puts it on 5`。
 
-definition 与 hover 看不到这个视图：definition 读目标模块的语法树（`lsp/lspq.dawn` 的 `module_ast_by_class`），服务端没有 references 请求。
+definition 与 hover 看不到这个视图：definition 读目标模块的语法树（`lsp/lspq.dawn` 的 `holder_by_class`，原名 `module_ast_by_class`），服务端没有 references 请求。
 所以 LSP 侧唯一的读者是诊断渲染，判据落在诊断上；definition 的位置同样逐修订按当前文本检查，作为「从下游跳到被编辑模块」的正向断言。
 
 ## 五、前置小刀：导出面与 carry 不带源码位置

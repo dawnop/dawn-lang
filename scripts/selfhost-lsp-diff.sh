@@ -2,9 +2,9 @@
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion, symbols, signature help,
-# constant and comptime values on hover, literals on hover, formatting over
-# a two-module project + a standalone buffer) runs against both toolchains
-# and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
+# constant and comptime values on hover, literals on hover, `##` doc comments
+# on hover, formatting over a two-module project + a standalone buffer) runs
+# against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
 # Two knobs, and they are not the same knob:
@@ -63,6 +63,9 @@ pub fn area(s: Shape) -> Float =
     Rect(w, h) -> w * h
   }
 
+## `n` past the limit.
+##
+## Two lines of doc, so the hover shows one comment, not one line.
 pub fn helper(n: Int) -> Int = n + LIMIT
 
 pub fn pad_to(s: String, width: Int, fill: String = " ",
@@ -147,6 +150,7 @@ impl Greet[Point] {
   fn hi(x: Point) -> String = "p"
 }
 
+## Exercises every resolution class the hovers below probe.
 fn compute(n: Int) -> Int = {
   fn double(k: Int) -> Int = k * 2
   let s = Circle(1.5)
@@ -226,7 +230,9 @@ note("initialized", {})
 note("textDocument/didOpen", {"textDocument": {
     "uri": app_uri, "languageId": "dawn", "version": 1, "text": app_text}})
 
-# hover: decls, params, locals, calls across every resolution class
+# hover: decls, params, locals, calls across every resolution class. `compute`
+# and util's `helper` carry `##` docs, which hover puts under the fence
+# (docs/lsp-hover-design.md §A3), as do the std functions called here.
 for needle, occ, delta in [
     ("compute", 1, 1),      # own fn decl name
     ("n: Int) -> Int = {", 1, 0),   # parameter

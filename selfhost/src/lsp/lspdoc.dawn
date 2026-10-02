@@ -1,0 +1,152 @@
+# The hover reply's markdown (docs/lsp-hover-design.md §A3): the one ```dawn
+# fence the query rendered, then a rule and the declaration's `##` doc. The
+# shape is rust-analyzer's (code block, `---`, prose), so a client that already
+# renders that one renders this one. A declaration without a doc replies with
+# the fence alone, byte for byte what hover replied before docs existed: every
+# script and client that reads the fence keeps working on every hover a doc
+# does not touch.
+#
+# The doc itself comes from `front/docs.doc_of`, the rule `dawn doc` publishes,
+# so a comment the JSON reference attaches to a declaration is the comment its
+# hover shows, and no other. The text is the comment's own markdown, not
+# rewritten. Only its length is bounded, by whole lines (`DOC_SHOWN_LINES`).
+#
+# Finding a doc means lexing the declaring module's whole text, since a `##`
+# inside a string is not a comment and only a lexer from the top knows which
+# strings are open. That cost is measured in §A3.4; the server keeps the
+# lexed comment table per text (`server.doc_src_memo`), so it is paid once per
+# version of a file rather than once per hover.
+
+use std/str
+use front/docs.{DocSrc, doc_src_of, doc_of}
+
+## The most lines of a doc a hover shows. The longest doc comment in std and
+## packages/web is 47 lines (`std/gpu.with_gpu_real`), so every doc written so
+## far is shown whole; the bound is for the comment nobody meant to be read in
+## a popup, which would otherwise travel in full on every hover.
+pub(pkg) const DOC_SHOWN_LINES: Int = 50
+
+## The most code points of a doc a hover shows, for the same reason, measured
+## the same way: std's longest is 2,883.
+pub(pkg) const DOC_SHOWN: Int = 4000
+
+## The `##` doc of the declaration whose first line holds `lo`, in `text`. A
+## doc of blank lines only is no doc: a rule over nothing says nothing.
+pub(pkg) fn decl_doc(text: String, lo: Int) -> Option[String] =
+  if may_have_doc(text, lo) { doc_in(doc_src_of(text), lo) } else { None }
+
+## Whether the line above the one holding `lo` contains `##` at all. A doc is
+## a comment token ending on that line and starting with `##`, and a comment
+## never spans lines, so without the two characters there no lexing can find
+## one. Most declarations have no doc; this answers them for the price of a
+## string search instead of a lex of the whole file.
+pub(pkg) fn may_have_doc(text: String, lo: Int) -> Bool = {
+  let before = str.take(text, lo)
+  let line_start = match str.last_index_of(before, "\n") {
+    Some(i) -> i
+    None -> return false
+  }
+  let above = str.take(before, line_start)
+  let above_start = match str.last_index_of(above, "\n") {
+    Some(i) -> i + 1
+    None -> 0
+  }
+  str.contains(str.drop(above, above_start), "##")
+}
+
+## `decl_doc` over a comment table already lexed (the server keeps them).
+pub(pkg) fn doc_in(src: DocSrc, lo: Int) -> Option[String] =
+  match doc_of(src, lo) {
+    Some(d) -> if str.trim(d) == "" { None } else { Some(d) }
+    None -> None
+  }
+
+## The hover's markdown: the fence, and the doc below a rule when there is one.
+pub(pkg) fn hover_markdown(code: String, doc: Option[String]) -> String = {
+  let fence = "```dawn\n" ++ code ++ "\n```"
+  match doc {
+    Some(d) -> fence ++ "\n\n---\n\n" ++ cut_doc(d)
+    None -> fence
+  }
+}
+
+## A doc within the bounds, cut at a line boundary. Cutting inside one of the
+## doc's own code fences would leave it open and swallow the note after it, so
+## an odd number of fence lines kept gets a closing one. The note says the rest
+## is at the declaration, where go to definition leads.
+pub(pkg) fn cut_doc(d: String) -> String = {
+  if str.len(d) <= DOC_SHOWN && len(str.split(d, "\n")) <= DOC_SHOWN_LINES { return d }
+  var kept: List[String] = []
+  var used = 0
+  var fences = 0
+  for line in str.split(d, "\n") {
+    if len(kept) == DOC_SHOWN_LINES { break }
+    if used + str.len(line) > DOC_SHOWN {
+      # a first line longer than the whole bound is cut inside itself, so the
+      # reader still sees how it starts
+      if len(kept) == 0 { kept = [str.take(line, DOC_SHOWN) ++ "…"] }
+      break
+    }
+    if str.starts_with(str.trim_start(line), "```") { fences = fences + 1 }
+    kept = kept ++ [line]
+    used = used + str.len(line) + 1
+  }
+  if fences % 2 == 1 { kept = kept ++ ["```"] }
+  join(kept, "\n") ++ "\n\n(truncated; the rest is at the declaration)"
+}
+
+test "no doc is the single fence hover always replied with" {
+  assert hover_markdown("fn f() -> Int", None) == "```dawn\nfn f() -> Int\n```"
+}
+
+test "a doc follows the fence after a rule, as written" {
+  let md = hover_markdown("fn f() -> Int", Some("Answers `1`.\n\n- one\n- two"))
+  assert md == "```dawn\nfn f() -> Int\n```\n\n---\n\nAnswers `1`.\n\n- one\n- two"
+}
+
+test "the doc is the ## block above the declaration, and blank docs are none" {
+  let text = "## Says hi.\n## Twice.\nfn hi() -> Int = 1\n\n##\nfn bare() -> Int = 2\n"
+  let at = (needle: String) => match str.index_of(text, needle) {
+    Some(i) -> i
+    None -> panic("no ${needle}")
+  }
+  assert decl_doc(text, at("fn hi")) == Some("Says hi.\nTwice.")
+  assert decl_doc(text, at("fn bare")) == None
+}
+
+test "only a line above with ## in it is worth lexing for" {
+  let text = "fn top() -> Int = 0\n## Doc.\nfn a() -> Int = 1\nlet s = \"##\"\nfn b() -> Int = 2\nfn c() -> Int = 3\n"
+  let at = (needle: String) => match str.index_of(text, needle) {
+    Some(i) -> i
+    None -> panic("no ${needle}")
+  }
+  # the first line has no line above it
+  assert not may_have_doc(text, at("fn top"))
+  assert may_have_doc(text, at("a() ->"))
+  # a ## in a string passes the cheap test, and the lexer then says no
+  assert may_have_doc(text, at("fn b"))
+  assert decl_doc(text, at("fn b")) == None
+  assert not may_have_doc(text, at("fn c"))
+}
+
+test "a long doc is cut at a line, keeps its fences closed, and says so" {
+  var lines: List[String] = ["Intro.", "```dawn"]
+  var i = 0
+  while i < 80 {
+    lines = lines ++ ["let x${i} = ${i}"]
+    i = i + 1
+  }
+  lines = lines ++ ["```"]
+  let cut = cut_doc(join(lines, "\n"))
+  let shown = str.split(cut, "\n")
+  # 50 lines of the doc, the closing fence, a blank line and the note
+  assert len(shown) == DOC_SHOWN_LINES + 3
+  assert shown[DOC_SHOWN_LINES - 1] == "let x47 = 47"
+  assert shown[DOC_SHOWN_LINES] == "```"
+  assert str.ends_with(cut, "\n\n(truncated; the rest is at the declaration)")
+  # a doc within both bounds is untouched
+  assert cut_doc("short\ndoc") == "short\ndoc"
+  # one line longer than the whole bound is cut inside itself
+  let wide = cut_doc(str.repeat("a", DOC_SHOWN + 10))
+  assert str.starts_with(wide, str.repeat("a", DOC_SHOWN) ++ "…\n\n(truncated")
+}

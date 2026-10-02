@@ -36,7 +36,9 @@ use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
-use lsp/lspq.{QCx, Target, find_target, typed_trees}
+use lsp/lspq.{QCx, Target, DocHere, DocFile, DocStd, find_target, typed_trees}
+use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc}
+use front/docs.{DocSrc, doc_src_of}
 use lsp/lspc.{completions_at, signature_at}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
@@ -618,7 +620,32 @@ type LspState = {
   # whether the client said at `initialize` that it reads
   # `relatedInformation` on a published diagnostic; without it a diagnostic's
   # notes are folded into its message instead (`diagnostic_json`)
-  related_information: Bool
+  related_information: Bool,
+  # the comment tables hover read docs from, by the text they were read from
+  # (`doc_src_memo`, docs/lsp-hover-design.md §A3.4)
+  doc_memo: Map[String, DocMemo]
+}
+
+## One text's comment table, kept with the text it was lexed from: a lookup
+## whose text differs, by any character, lexes again.
+type DocMemo = { text: String, src: DocSrc }
+
+## At most this many texts' comment tables are kept. A hover session touches
+## a handful of files; past the bound the table starts over rather than
+## tracking recency, which is all a cache this cheap to refill needs.
+const DOC_MEMO_FILES: Int = 32
+
+## The comment table of `text`, filed under `key` (which file it is), reused
+## when the text is the one the kept table was lexed from.
+fn doc_src_memo(st: LspState, key: String, text: String) -> (DocSrc, LspState) = {
+  match map.get(st.doc_memo, key) {
+    Some(m) -> if m.text == text { return (m.src, st) }
+    None -> ()
+  }
+  let src = doc_src_of(text)
+  let none: Map[String, DocMemo] = map.empty()
+  let kept = if len(map.keys(st.doc_memo)) >= DOC_MEMO_FILES { none } else { st.doc_memo }
+  (src, LspState { ..st, doc_memo: map.insert(kept, key, DocMemo { text: text, src: src }) })
 }
 
 fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
@@ -782,7 +809,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     analysis_config: config,
     lifecycle: PreInit,
     watch_manifests: false,
-    related_information: false
+    related_information: false,
+    doc_memo: map.empty()
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -1267,7 +1295,9 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
   } else if method == "textDocument/completion" {
     respond(id, handle_completion(st, params))
   } else if method == "textDocument/hover" {
-    respond(id, handle_hover(st, params))
+    let (reply, st2) = handle_hover(st, params)
+    respond(id, reply)
+    st = st2
   } else if method == "textDocument/signatureHelp" {
     respond(id, handle_signature_help(st, params))
   } else if method == "textDocument/definition" {
@@ -2148,7 +2178,7 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
   }
 }
 
-fn handle_hover(st: LspState, params: Json) -> Json !io = {
+fn handle_hover(st: LspState, params: Json) -> (Json, LspState) !Fs !Env !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -2156,20 +2186,21 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
           match doc_qcx(st, d, analysis) {
             Some(qc) ->
               match find_target(qc, pos_offset(d, params)) {
-                Some(t) -> jobj([
-                  ("contents", jobj([
-                    ("kind", JStr("markdown")),
-                    ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
-                  ])),
-                  ("range", jrange(d.view, d.ls, t.lo, t.hi))
-                ])
-                None -> JNull
+                Some(t) -> {
+                  let (value, st2) = hover_value(st, d, analysis, qc, t)
+                  let reply = jobj([
+                    ("contents", jobj([("kind", JStr("markdown")), ("value", JStr(value))])),
+                    ("range", jrange(d.view, d.ls, t.lo, t.hi))
+                  ])
+                  (reply, st2)
+                }
+                None -> (JNull, st)
               }
-            None -> JNull
+            None -> (JNull, st)
           }
-        None -> JNull
+        None -> (JNull, st)
       }
-    None -> JNull
+    None -> (JNull, st)
   }
 }
 
@@ -2278,7 +2309,31 @@ fn location_of(
   def_path: Option[String],
   lo: Int,
   hi: Int
-) -> Option[Json] !Fs !Env = {
+) -> Option[Json] !Fs !Env =
+  match def_source(st, d, workspace_key, definition_root, def_path) {
+    Some(InBuffer(d2)) -> Some(jobj([("uri", JStr(d2.uri)), ("range", jrange(d2.view, d2.ls, lo, hi))]))
+    Some(OnDisk(path, text)) ->
+      Some(jobj([
+        ("uri", JStr(path_to_uri(path))),
+        ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
+      ]))
+    None -> None
+  }
+
+## Where the text of a definition's file is read: a live buffer, or the file
+## on disk at its canonical path.
+type DefSource = InBuffer(d: Doc) | OnDisk(path: String, text: String)
+
+## The one lookup behind a definition's location and a hover's doc, so the two
+## never read different texts for the same declaration (the rule is the one
+## above `location_of`).
+fn def_source(
+  st: LspState,
+  d: Doc,
+  workspace_key: Option[String],
+  definition_root: Option[String],
+  def_path: Option[String]
+) -> Option[DefSource] !Fs !Env = {
   let same = match def_path {
     None -> true
     Some(dp) ->
@@ -2287,9 +2342,7 @@ fn location_of(
         None -> false
       }
   }
-  if same {
-    return Some(jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, lo, hi))]))
-  }
+  if same { return Some(InBuffer(d)) }
   let dp = match def_path {
     Some(p) -> p
     None -> return None
@@ -2306,11 +2359,7 @@ fn location_of(
           if path_in_root(dc, root) {
             for uri in sort(map.keys(ws.path_by_uri)) {
               if map.get(ws.path_by_uri, uri).expect("workspace path") == dc {
-                let d2 = map.get(st.docs, uri).expect("workspace document")
-                return Some(jobj([
-                  ("uri", JStr(uri)),
-                  ("range", jrange(d2.view, d2.ls, lo, hi))
-                ]))
+                return Some(InBuffer(map.get(st.docs, uri).expect("workspace document")))
               }
             }
           }
@@ -2319,14 +2368,52 @@ fn location_of(
     _ -> ()
   }
   match io.read_file(dc) {
-    Ok(text) -> {
-      Some(jobj([
-        ("uri", JStr(path_to_uri(dc))),
-        ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
-      ]))
-    }
+    Ok(text) -> Some(OnDisk(dc, text))
     Err(_) -> None
   }
+}
+
+## The `##` doc of a hovered declaration (docs/lsp-hover-design.md §A3), read
+## from the text its spans index: this document, std's own copy of a std
+## module (embedded or not), or another project file the way go to definition
+## reads it. The key names the file for `doc_src_memo`.
+fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (Option[String], LspState) !Fs !Env = {
+  let site = match t.doc {
+    Some(s) -> s
+    None -> return (None, st)
+  }
+  let found: Option[(String, String)] = match site.home {
+    DocHere -> Some(("doc ${d.uri}", d.text))
+    DocStd(mp) -> {
+      var hit: Option[(String, String)] = None
+      for tr in qc.std.srcs {
+        let (smp, stext, _) = tr
+        if smp == mp && hit == None { hit = Some(("std ${mp}", stext)) }
+      }
+      hit
+    }
+    DocFile(path) ->
+      match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(path)) {
+        Some(InBuffer(d2)) -> Some(("doc ${d2.uri}", d2.text))
+        Some(OnDisk(p, text)) -> Some(("file ${p}", text))
+        None -> None
+      }
+  }
+  match found {
+    Some(kt) -> {
+      let (key, text) = kt
+      if not may_have_doc(text, site.lo) { return (None, st) }
+      let (src, st2) = doc_src_memo(st, key, text)
+      (doc_in(src, site.lo), st2)
+    }
+    None -> (None, st)
+  }
+}
+
+## The markdown a hover replies with: `lspdoc.hover_markdown` over the target.
+fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (String, LspState) !Fs !Env = {
+  let (doc, st2) = target_doc(st, d, analysis, qc, t)
+  (hover_markdown(t.hover, doc), st2)
 }
 
 fn handle_symbols(st: LspState, params: Json) -> Json !io = {
@@ -2509,7 +2596,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       analysis_config: legacy_analysis_config(),
       lifecycle: Running,
       watch_manifests: false,
-      related_information: false
+      related_information: false,
+      doc_memo: map.empty()
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -2606,7 +2694,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     analysis_config: legacy_analysis_config(),
     lifecycle: Running,
     watch_manifests: false,
-    related_information: false
+    related_information: false,
+    doc_memo: map.empty()
   }
 }
 
@@ -2837,13 +2926,13 @@ test "an embedded std offers no definition instead of one in the wrong file" {
 
 test "a definition of a std constant names std's file too" {
   io.with_fs_real(() => no_host(() => {
-    # `def_of_const_in` reaches std through its own loop rather than through
-    # `module_ast_by_class`, and today's bundle declares no `pub const` at all,
-    # so the real std cannot exercise it: a mutant reverting that branch on its
-    # own survived the whole suite. The probe std is what makes the branch
-    # reachable, and it is a one-module std for the same reason the id-counter
-    # probe in driver/stdlib is -- the real bundle's contents are not the thing
-    # under test.
+    # `site_of_const_in` reaches std by module path (`holder_by_path`) rather
+    # than through `holder_by_class`, and today's bundle declares no
+    # `pub const` at all, so the real std cannot exercise it: a mutant
+    # reverting that branch on its own survived the whole suite. The probe std
+    # is what makes the branch reachable, and it is a one-module std for the
+    # same reason the id-counter probe in driver/stdlib is -- the real bundle's
+    # contents are not the thing under test.
     let root = "/tmp/dawn-selfhost-lsp-def/conststd"
     let _ = io.mkdirs(root)
     def_probe_put("${root}/modules.txt", "constprobe\n")
@@ -3159,5 +3248,155 @@ test "on a constant's name the constant answers, on its literal the literal does
     }
     assert (lit.lo, lit.hi) == (at, at + 4)
     assert lit.def == None
+  }))
+}
+
+# ---- doc comments on hover (docs/lsp-hover-design.md §A3) ----
+
+## The reply's markdown at `needle` + `skip`: what `textDocument/hover` sends.
+fn hover_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> String !Fs !Env = {
+  let off = match str.index_of(text, needle) {
+    Some(i) -> i + skip
+    None -> panic("probe text has no ${needle}")
+  }
+  let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+  let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+  let t = find_target(qc, off).expect("something under the cursor at ${needle}")
+  let (value, _) = hover_value(st, d, analysis, qc, t)
+  value
+}
+
+fn doc_probe_text() -> String =
+  join([
+    "## Doubles `n`.",
+    "##",
+    "## - twice as much",
+    "fn double(n: Int) -> Int = n * 2",
+    "",
+    "fn plain(n: Int) -> Int = n",
+    "",
+    "type Shape =",
+    "  ## A round one.",
+    "  | Circle(r: Float)",
+    "  | Square(s: Float)",
+    "",
+    "## The limit.",
+    "const LIMIT: Int = 3",
+    "",
+    "fn use_all() -> Int = {",
+    "  ## not a doc: a local has none",
+    "  let k = double(LIMIT) + plain(1)",
+    "  let c = Circle(1.0)",
+    "  k + 0",
+    "}",
+    ""
+  ], "\n")
+
+test "hover puts a declaration's ## doc under the fence, and nothing else changes" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = doc_probe_text()
+    let d = def_probe_doc_named(st, "docs.dawn", text)
+    let doubled = "```dawn\nfn double(n: Int) -> Int\n```\n\n---\n\nDoubles `n`.\n\n- twice as much"
+    # at the call and at the declaration, the doc as written
+    assert hover_probe_at(st, d, text, "double(LIMIT)", 1) == doubled
+    assert hover_probe_at(st, d, text, "double(n", 1) == doubled
+    assert hover_probe_at(st, d, text, "LIMIT) +", 1) ==
+      "```dawn\nconst LIMIT: Int = 3\n```\n\n---\n\nThe limit."
+    # a constructor reads the ## line above its own `|`
+    assert hover_probe_at(st, d, text, "Circle(1.0)", 1) ==
+      "```dawn\nCircle(r: Float): Shape\n```\n\n---\n\nA round one."
+    # no doc: the single fence, byte for byte the reply before docs existed
+    let plain = def_probe_at(st, d, text, "plain(1)", 1)
+    assert hover_probe_at(st, d, text, "plain(1)", 1) == "```dawn\n" ++ plain.hover ++ "\n```"
+    assert hover_probe_at(st, d, text, "Square", 1) == "```dawn\nSquare(s: Float): Shape\n```"
+    # a local has no declaration doc, whatever comment sits above it
+    let local = hover_probe_at(st, d, text, "k + 0", 0)
+    assert local == "```dawn\n" ++ def_probe_at(st, d, text, "k + 0", 0).hover ++ "\n```"
+    # and a literal (A2) carries none either
+    assert not str.contains(hover_probe_at(st, d, text, "1.0", 0), "---")
+  }))
+}
+
+test "hover reads a std declaration's doc from std's text, file or embedded" {
+  io.with_fs_real(() => no_host(() => {
+    let root = "/tmp/dawn-selfhost-lsp-def/docstd"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "docprobe\n")
+    def_probe_put("${root}/docprobe.dawn", join([
+      "## Probes `n`.",
+      "pub fn probe(n: Int) -> Int = n",
+      "",
+      "## How far a probe reaches.",
+      "pub const REACH: Int = 9",
+      "",
+      "pub fn bare(n: Int) -> Int = n",
+      ""
+    ], "\n"))
+    let pstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(pstd)
+    let text = join([
+      "use std/docprobe",
+      "use std/docprobe.{REACH}",
+      "",
+      "fn f() -> Int = docprobe.probe(REACH) + docprobe.bare(1)",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "docuser.dawn", text)
+    assert hover_probe_at(st, d, text, "probe(REACH", 1) ==
+      "```dawn\nfn probe(n: Int) -> Int\n```\n\n---\n\nProbes `n`."
+    let reach = "```dawn\nconst REACH: Int = 9\n```\n\n---\n\nHow far a probe reaches."
+    assert hover_probe_at(st, d, text, "REACH}", 0) == reach
+    assert hover_probe_at(st, d, text, "REACH) +", 0) == reach
+    assert hover_probe_at(st, d, text, "bare(1)", 1) == "```dawn\nfn bare(n: Int) -> Int\n```"
+
+    # The embedded copy has no file, so `reverse` offers no definition (the
+    # test above this section); its doc is in `StdCtx.srcs` all the same.
+    let emb = match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
+      Ok(sc) -> sc
+      Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+    }
+    let est = def_probe_state(emb)
+    let etext = def_probe_text()
+    let ed = def_probe_doc(est, etext)
+    assert def_probe_at(est, ed, etext, "list.reverse", 5).def == None
+    let rev = hover_probe_at(est, ed, etext, "list.reverse", 5)
+    assert str.ends_with(rev, "\n```\n\n---\n\nA reversed copy; the input is not changed.")
+  }))
+}
+
+test "the comment table is kept per text, and a changed text is lexed again" {
+  io.with_fs_real(() => no_host(() => {
+    let st0 = def_probe_state(match load_std("/tmp/dawn-selfhost-lsp-def/no-std-here") {
+      Ok(sc) -> sc
+      Err(e) -> panic("embedded std: ${std_load_error_text(e)}")
+    })
+    let one = "## One.\nfn f() -> Int = 1\n"
+    let (a, st1) = doc_src_memo(st0, "doc x", one)
+    assert len(map.keys(st1.doc_memo)) == 1
+    # the same text answers from the table it was lexed into
+    let (b, st2) = doc_src_memo(st1, "doc x", one)
+    assert b == a && len(map.keys(st2.doc_memo)) == 1
+    # a different text under the same key replaces it, and says the new thing
+    let two = "## Two.\nfn f() -> Int = 1\n"
+    let (c, st3) = doc_src_memo(st2, "doc x", two)
+    assert doc_in(c, 8) == Some("Two.")
+    assert doc_in(map.get(st3.doc_memo, "doc x").expect("kept").src, 8) == Some("Two.")
+    # past the bound the table starts over instead of growing
+    var st = st3
+    var i = 0
+    while i < DOC_MEMO_FILES {
+      let (_, next) = doc_src_memo(st, "doc ${i}", one)
+      st = next
+      i = i + 1
+    }
+    assert len(map.keys(st.doc_memo)) <= DOC_MEMO_FILES
   }))
 }

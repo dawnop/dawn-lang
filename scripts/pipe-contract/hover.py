@@ -14,8 +14,12 @@ searched in the named file.
 """
 
 import json
+from pathlib import Path
 import subprocess
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lsp_hover import hover_code  # noqa: E402
 
 
 def frame(message):
@@ -43,17 +47,6 @@ def replies(raw):
             continue
         if isinstance(message, dict) and "id" in message and "result" in message:
             out[message["id"]] = message["result"]
-
-
-def hover_text(result):
-    if not isinstance(result, dict):
-        return ""
-    contents = result.get("contents")
-    if isinstance(contents, dict):
-        return contents.get("value", "")
-    if isinstance(contents, str):
-        return contents
-    return ""
 
 
 def main():
@@ -93,7 +86,7 @@ def main():
         return done.returncode
     got = replies(done.stdout)
     for ident in sorted(labels):
-        one_line = " ".join(hover_text(got.get(ident)).split())
+        one_line = " ".join(hover_code(got.get(ident)).split())
         print(f"{labels[ident]}\t{one_line}")
     return 0
 
