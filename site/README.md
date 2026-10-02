@@ -127,8 +127,10 @@ import 是这个站点任何检查都看不见的（`gen/links` 只读 `href=`/`
 页头一个按钮 + `⌘K`/`Ctrl-K`。面板是**第三个 wasm reactor**
 （`examples/projects/tea_dom_search`），和 demo 页那两个走同一座桥；页面这边只有
 `site/assets/search.js`（普通脚本，不是模块），负责三件事：绑按钮与快捷键、**首次触发时**
-才动态 `import()` 桥并 fetch reactor 与索引、以及在每次 keydown 后看一眼文档里有没有
-`a[data-goto]`（Enter 留下的那条指令），有就跳过去。
+（或指针移上、焦点落到按钮时，意图预热）才起一个 module worker、动态 `import()` 桥的页面一半并 fetch
+reactor 与索引、以及在每条回复应用之后看一眼文档里有没有 `a[data-goto]`（Enter 留下的那条指令），
+有就跳过去。reactor 跑在 worker 里，主线程只应用补丁；桥按线程打成两个文件
+（`tea-remote.mjs`、`tea-worker.mjs`），理由与实测见 `docs/site-search-design.md` 第十二节。
 
 **懒挂载不是优化，是硬约束**：reactor gzip 后约 150KB、索引四十几 KB，急切挂载就是一次
 首屏回归，而绝大多数读者从不搜索。没有 wasm 工具链的检出里 reactor 是占位文件，

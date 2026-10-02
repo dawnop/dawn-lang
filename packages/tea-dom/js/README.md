@@ -1,7 +1,7 @@
 # packages/tea-dom/js
 
 The host half of the DOM bridge: vanilla ES modules, zero dependencies, the
-same four files in a browser and in node.
+same files in a browser and in node.
 
 ```html
 <script type="module">
@@ -16,6 +16,45 @@ same four files in a browser and in node.
 | `reactor.mjs` | instantiate once, `dawn_turn` per message, one JSON line each way |
 | `dom.mjs` | the seven patch ops as DOM mutations, and the address walk both ways |
 | `app.mjs` | the loop: init, render, wait, dispatch, patch, wait |
+| `worker.mjs` | the same turns in a module worker, off the page's thread |
+| `remote.mjs` | the page's half of that: patches in, events out, one turn at a time |
+
+## Off the page's thread
+
+`app.mjs` runs a turn inside the DOM event that caused it, which is the
+simplest loop there is and puts every millisecond the guest spends on the
+thread that paints. `worker.mjs` runs the reactor in a module worker instead,
+and `remote.mjs` keeps the document:
+
+```js
+import { Remote } from './packages/tea-dom/js/remote.mjs';
+const worker = new Worker(new URL('./packages/tea-dom/js/worker.mjs', import.meta.url), { type: 'module' });
+const remote = await new Remote(worker).load(await fetch('./counter.wasm'));
+const app = await remote.mount(document.getElementById('app'), { flags, onTurn });
+```
+
+The wire to the worker is the wire above with an `id` on each message; the
+model stays in the worker and never reaches the page. `load` can be called
+well before `mount` (the bytes are transferred, compiled and instantiated over
+there), which is what lets a page start the work on a hint of intent.
+
+A turn is no longer over when its event returns, and three things follow, all
+in `remote.mjs` and all pinned by `scripts/wasm-dom-contract/remote.sh`:
+
+- **one turn at a time.** Events that fire while a turn is in flight wait, in
+  order: the guest's model is a function of every turn before it.
+- **addresses are recovered when the turn is sent**, from the element the
+  listener sits on, because the reply in flight may move or remove it. An
+  element that has left the document by then is dropped, as a synchronous host
+  would never have seen it fire.
+- **a reply does not roll the focused field back** while turns are queued: its
+  live value and selection are put back after the patches, since the queued
+  turn carries that value and the guest is about to agree.
+
+Whatever a page used to read off the document right after a turn it now reads
+in `onTurn(reply)`, called once each reply is applied, and a question that
+depends on every turn already asked for (is the panel still open?) waits for
+`idle()`.
 
 ## The boundary
 

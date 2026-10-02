@@ -54,7 +54,9 @@ function mounted(node) {
   const sent = [];
   const host = new DomHost(
     doc.mountPoint(),
-    (...args) => sent.push(args),
+    // The fourth argument, the element, is for a host whose turns are not
+    // synchronous (remote.mjs); what crosses the boundary is the first three.
+    (path, event, payload) => sent.push([path, event, payload]),
     doc,
   );
   host.apply([{ path: [], op: 'replace', node }]);

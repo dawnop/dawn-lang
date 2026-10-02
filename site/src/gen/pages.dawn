@@ -134,6 +134,7 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
     "console.warn('dawn-play: editor bundle missing; run site/play-ui build')")
   let play_css = emit_or_stub(out, "playground.css", "site/play-ui/dist/playground.css",
     "/* dawn-play: editor bundle missing */")
+  let (search_app, search_worker) = emit_search_bridge(out)
   Assets {
     style: style,
     logo: logo,
@@ -159,6 +160,8 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
     # it was. The two indexes are computed here from the site's own inputs;
     # gen/search.dawn is the whole of that.
     search_js: emit_text(out, "search.js", str.trim(must_read("site/assets/search.js"))),
+    search_app: search_app,
+    search_worker: search_worker,
     search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
     search_en: emit_text(out, "search-en.json", search_index(api, En, en)),
     search_zh: emit_text(out, "search-zh.json", search_index(api, Zh, zh)),
@@ -194,6 +197,43 @@ fn emit_bridge(out: String) -> String !Fs !io = {
   emit_text(out, "tea-app.mjs",
     repoint(repoint(bridge_src("app.mjs"), "./reactor.mjs", reactor), "./dom.mjs", dom))
 }
+
+## The search panel's bridge, as two files: the page's half (`remote.mjs`
+## with `dom.mjs` in it) and the worker's (`worker.mjs` with `reactor.mjs` and
+## `wasi.mjs` in it). Answers their names, page's first.
+##
+## One file per thread, and not the four-call repointing above, because the
+## panel is waited on: each relative import is one more round trip after the
+## file that names it has arrived, and the demo's four modules were a chain of
+## three, which on the CDN was three times 25-60 ms before the reactor could
+## even be asked for (docs/site-search-design.md, section 12). `modulepreload`
+## was measured as the other way out and lost: it is a hint on every page for
+## a panel most readers never open, and it cannot reach a worker's module
+## graph, which a document's preload does not share.
+##
+## Bundling here is splicing: each importer has exactly one import of the file
+## below it, and that line is replaced by the file. The names the spliced files
+## declare at the top level do not collide (they are one class or a handful of
+## constants each), and a module that keeps its `export`s is still a module.
+fn emit_search_bridge(out: String) -> (String, String) !Fs !io = {
+  let reactor = splice(bridge_src("reactor.mjs"), "import { Wasi, WasiExit } from './wasi.mjs';",
+    bridge_src("wasi.mjs"))
+  let worker = splice(bridge_src("worker.mjs"), "import { Reactor } from './reactor.mjs';", reactor)
+  let page = splice(bridge_src("remote.mjs"), "import { DomHost } from './dom.mjs';",
+    bridge_src("dom.mjs"))
+  (emit_text(out, "tea-remote.mjs", page), emit_text(out, "tea-worker.mjs", worker))
+}
+
+## One import line of a vendored module replaced by the module it names. Like
+## [repoint], a line that is not there stops the build: an import left in place
+## would name a file this generator never wrote.
+fn splice(text: String, line: String, module: String) -> String !io =
+  if str.contains(text, line) {
+    str.replace(text, line, module)
+  } else {
+    panic("no `${line}` to splice -- packages/tea-dom/js changed how it spells its "
+        ++ "imports, and the bundled copy would import a file that is not there")
+  }
 
 ## A body index, written like any text asset, with its size said in the build
 ## log. The budget is in gzip bytes and this generator has no compressor, so
