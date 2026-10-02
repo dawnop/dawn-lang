@@ -235,6 +235,8 @@ import subprocess
 import sys
 import tempfile
 
+import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DAWN = ROOT / "bin" / "dawn"
 
@@ -2501,7 +2503,9 @@ TOOLCHAIN_ARTIFACT_SECTIONS = (
 # requires exactly once, is pinned to the concatenation of the two. Without
 # that pin the workflow could keep both lists honest and upload only one of
 # them, and both checks here would stay green.
-RELEASE_ASSET_BASE = "https://github.com/dawnop/dawn-lang/releases/latest/download"
+# The repository comes from scripts/repo.env, so moving it there makes this
+# check ask every install document to follow.
+RELEASE_ASSET_BASE = f"https://github.com/{repo_env.github_repo()}/releases/latest/download"
 RELEASE_ASSET_FETCH = re.compile(r"\$base/([A-Za-z0-9._\-]+)")
 RELEASE_ASSET_DECL = re.compile(r"INSTALL_ASSETS=\(\s*(.*?)\)", re.S)
 RELEASE_REPORT_DECL = re.compile(r"REPORT_ASSETS=\(\s*(.*?)\)", re.S)

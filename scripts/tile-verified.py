@@ -102,6 +102,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
+
 WORKFLOW_PATH = ".github/workflows/tile.yml"
 DEDUPED_EVENTS = ("push",)
 WAIT_LIMIT = 15 * 60   # seconds a push waits for its pull request's run
@@ -245,7 +247,7 @@ def lookup(fetch, repo, repo_id, tree, prefix, event, now, sha=None,
 # --- self-test -------------------------------------------------------------
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
-REPO = "dawnop/dawn-lang"
+REPO = repo_env.github_repo()
 REPO_ID = 1297375990
 FORK_ID = 4242
 TREE = "a" * 40

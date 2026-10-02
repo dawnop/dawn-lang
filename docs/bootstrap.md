@@ -83,6 +83,9 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    已验证的未来摘要”，重跑会幂等收敛，不会留下“新指针 + 缺摘要”。三文件已完整指向目标
    时，重跑仍复验远端，工作树零 diff。sidecar 只证明下载一致，不是独立签名；提交进 Git
    的摘要仍是 TOFU 信任边界。
+   下载用的仓库名（`advance-seed.sh`、`seedjar.sh`、`replay-bootstrap.sh` 共用）只写在
+   `scripts/repo.env` 的 `DAWN_GITHUB_REPO` 一行；仓库换组织时改这一行，信任仍由摘要表决定，
+   与 URL 无关。
    推进完成后接着部署，同样以这个 tag 为准：在 tag 的检出上先跑
    `playground/deploy/redeploy.sh`，再跑 `DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
    站点曾因部署与发版脱钩，在 v0.78.0 已拒绝 `$name` 插值后仍教了三周旧写法。

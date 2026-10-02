@@ -70,7 +70,11 @@ summary() {
 }
 
 report() {
-  local title=$1 body=$2 repo=${GITHUB_REPOSITORY:-dawnop/dawn-lang}
+  # The repository the workflow runs in, else the one scripts/repo.env names.
+  local title=$1 body=$2 repo=${GITHUB_REPOSITORY:-${DAWN_GITHUB_REPO:-}}
+  if [ -z "$repo" ]; then
+    repo=$(. "$(dirname "$0")/repo.env" && printf '%s' "$DAWN_GITHUB_REPO")
+  fi
   local verdict posted listing number comments last
   verdict=$(verdict_of < "$body")
   posted=$(mktemp)

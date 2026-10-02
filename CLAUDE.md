@@ -175,6 +175,8 @@ bind 会报 "Address already in use"，而 `ss` 看着是空的。
 `./scripts/advance-seed.sh v0.9.0`，由它从 GitHub Release 获取 JAR、从远端 tag archive
 获取 std，再依次推进 `seed-checksums.txt`、`seed-std-checksums.txt`、
 `seed-release.txt`，不得手改其中之一。
+仓库名（`DAWN_GITHUB_REPO`）与站点源（`DAWN_SITE_ORIGIN`）只写在 `scripts/repo.env`：
+脚本 source 它或经 `scripts/repo_env.py` 读，`check-no-server-identity.py` 拦新的硬编码。
 **部署随发版**：advance-seed 之后，在该 tag 的检出上先部署 Playground、再部署站点：
 `playground/deploy/redeploy.sh` → `DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
 站点与 Playground 以 tag 为准，不以 main 为准；顺序反了，侧栏样例会交给拒绝它的旧 runner

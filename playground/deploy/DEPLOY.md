@@ -31,6 +31,8 @@ by hand, with the server reachable.
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
    /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
    /opt/dawn/site/play-ui/samples/           # starter samples, read by lsp-measure (rsynced)
+   /opt/dawn/scripts/repo.env                # the site origin the LSP gateway accepts (rsynced)
+   /opt/dawn/scripts/repo_env.py             # its Python reader (rsynced)
    ```
    The runner's `main.dawn` imports the `web`/`json` packages by path
    (`playground/dawn.toml` → `../packages`), so `packages/` must sit beside
@@ -59,7 +61,11 @@ by hand, with the server reachable.
 6. **systemd units** — `dawn-play.service` owns `/run` and `/check`;
    `dawn-play-lsp.service` owns the loopback WebSocket gateway. Each accepted
    WebSocket owns one transient native LSP service, all held under the
-   aggregate `dawn-play-lsp.slice` ceiling:
+   aggregate `dawn-play-lsp.slice` ceiling. `dawn-play-lsp.service` takes the
+   accepted Origin from `/opt/dawn/scripts/repo.env` (`EnvironmentFile=`,
+   `DAWN_SITE_ORIGIN`), so run `redeploy.sh` once before installing it; a unit
+   installed from an older tree still names the origin itself and keeps
+   working until it is reinstalled from this one:
    ```sh
    install -m 644 /opt/dawn/playground/deploy/dawn-play.service \
      /etc/systemd/system/dawn-play.service
