@@ -10,7 +10,7 @@
 
 ## phase-hero
 
-**−18°** 天文晨光
+**−18°** 夜色将尽
 
 ## eyebrow
 
@@ -30,7 +30,7 @@ JVM 与 C，同一个答案
 
 ## fact-gpu
 
-cuTile 上 NVIDIA GPU
+经 cuTile 跑在 NVIDIA GPU 上
 
 ## cta-playground
 
@@ -42,11 +42,11 @@ cuTile 上 NVIDIA GPU
 
 ## phase-ideas
 
-**−12°** 航海晨光 · 三个概念
+**−12°** 海天初分 · 三个概念
 
 ## ideas-title
 
-签名告诉你的事。
+一看签名就知道。
 
 ## ideas-lede
 
@@ -78,7 +78,7 @@ cuTile 上 NVIDIA GPU
 
 ## phase-peers
 
-**−6°** 民用晨光 · 两个后端
+**−6°** 天色渐明 · 两个后端
 
 ## peers-title
 
@@ -110,7 +110,7 @@ stdout、stderr 或退出码有一处不同就是红灯
 
 ## fork-desc
 
-main.dawn 编译成 JVM 字节码，也另外编译成 C 再交给 cc。两个程序都跑，stdout、stderr 与退出码必须逐字节相同；有差异就是红灯。
+main.dawn 一路编译成 JVM 字节码，另一路编译成 C 交给 cc。两个程序都运行，stdout、stderr 与退出码必须逐字节相同；有差异就是红灯。
 
 ## fork-jvm
 
@@ -142,7 +142,7 @@ cuTile kernel 是一个带具名效果的普通 Dawn 函数，降为 CUDA Tile I
 
 ## gpu-pipe
 
-两边各自经历了什么
+两边各自怎么走
 
 ## lane-device
 
@@ -158,7 +158,7 @@ cuTile kernel 是一个带具名效果的普通 Dawn 函数，降为 CUDA Tile I
 
 ## step-record
 
-记下它发起的操作
+记下它发出的操作
 
 ## step-tileir
 
@@ -186,11 +186,11 @@ kernel
 
 ## kernel-body
 
-运行它会记下它发起的操作；记录变成 Tile IR，再由 `tileiras` 汇编成 cubin。
+运行它会记下它发出的操作；记录变成 Tile IR，再由 `tileiras` 汇编成 cubin。
 
 ## kernel-out
 
-那次加法，取自 `dawn run` 为它打印的 Tile IR
+`dawn run` 打印的 Tile IR 里的那次加法
 
 ## kernel-fact-title
 
@@ -210,15 +210,15 @@ kernel
 
 ## host-out
 
-同一次 `dawn run` 在 `with_gpu_fake` 下为它打印的那一行
+同一次 `dawn run` 在 `with_gpu_fake` 下打印的那一行
 
 ## host-fact-native-title
 
-只有 native 与 GPU 通话
+只有 native 能驱动 GPU
 
 ## host-fact-native-body
 
-只有 native 能到 `libcuda`；JVM 上真设备的 launch 会被拒绝。
+只有 native 能调用 `libcuda`；在 JVM 上，真设备的 launch 会被拒绝。
 
 ## host-fact-pure-title
 
@@ -226,7 +226,7 @@ kernel
 
 ## host-fact-pure-body
 
-所以 `!Gpu` 程序能在测试里跑，也能在 comptime 跑。
+所以 `!Gpu` 程序能在测试里跑，也能在 comptime 里跑。
 
 ## phase-install
 
