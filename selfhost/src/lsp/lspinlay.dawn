@@ -1,0 +1,142 @@
+# What an inlay hint shows (docs/lsp-hover-design.md §A4): for each kind, the
+# decision whether a site gets one and the text it gets. Finding the sites is
+# not here: that is `lspq.inlay_hints`, which rides the walk hover already
+# makes, because pairing the parse tree with the typed tree (handlers, pipes,
+# named arguments reordered into a block) is the hard part and exists once.
+# What stays here is pure and judged on its own: a type that is too long or
+# carries an error is not shown, an effect row is shown only when it names an
+# effect and is not polymorphic, a parameter name only where it tells the
+# reader something the call does not already spell.
+#
+# Types and rows render the way hover renders them (`ty_show`, `eff_suffix`),
+# so one type never reads two ways between a hint and the hover beside it.
+
+use std/str
+use check/types.{Eff, eff_labels, eff_is_ground, eff_suffix, EPure, EIo, ELabeled, EffVar, EUnion}
+
+## Which kinds of hint a session wants, read once from the client's
+## `initializationOptions` (`server.inlay_opts_of`).
+pub type InlayOpts = {
+  let_types: Bool,
+  lambda_param_types: Bool,
+  call_effects: Bool,
+  param_names: Bool
+}
+
+## Types and effects on, parameter names off: Dawn has named arguments, so an
+## author who wants a reader to see a name can write it (gopls keeps these off
+## for the same reason).
+pub fn default_inlay_opts() -> InlayOpts =
+  InlayOpts { let_types: true, lambda_param_types: true, call_effects: true, param_names: false }
+
+## LSP 3.17's `InlayHintKind`: Type = 1, Parameter = 2. An effect row is a
+## `HintType`: in Dawn it is part of the function type (`fn() -> T !Fs`).
+pub type HintKind = HintType | HintParam
+
+## One hint, at a code-point offset of the analysed document; the server turns
+## the offset into a UTF-16 position.
+pub type Hint = { at: Int, label: String, kind: HintKind, pad_left: Bool, pad_right: Bool }
+
+## The longest type a hint shows, in code points. rust-analyzer's
+## `inlayHints.maxLength` defaults to 25 and clangd's `TypeNameLimit` to 24.
+## Past it there is no hint at all rather than a cut one (clangd's way, not
+## rust-analyzer's): a cut type is not a type a reader can copy into an
+## annotation, and a long type is the one worth a hover anyway.
+pub const TYPE_HINT_SHOWN: Int = 25
+
+## `: T` after a binding, or nothing: too long, or a type with an error in it
+## (`TyError` renders as `?`, and no type name can contain one), which the
+## diagnostics already report and a hint would only copy.
+pub fn type_hint(at: Int, shown: String) -> Option[Hint] =
+  if str.len(shown) > TYPE_HINT_SHOWN || str.contains(shown, "?") {
+    None
+  } else {
+    Some(Hint { at: at, label: ": " ++ shown, kind: HintType, pad_left: false, pad_right: false })
+  }
+
+## `!Fs` after a call, or nothing. Only a row that names an effect: a pure call
+## has nothing to say, and one that is `!io` alone is the base axis every
+## `println` carries, which would be noise. With a label present `io` comes
+## along, as the row hover shows (`!(Fs|io)`). A row with an effect variable or
+## an associated projection is not shown: what the reader wants there is the
+## row the call instantiates, which `XCallFn` does not carry (B group).
+pub fn effect_hint(at: Int, eff: Eff) -> Option[Hint] =
+  if len(eff_labels(eff)) == 0 || not eff_is_ground(eff) {
+    None
+  } else {
+    Some(Hint {
+      at: at,
+      label: str.trim_start(eff_suffix(eff)),
+      kind: HintType,
+      pad_left: true,
+      pad_right: false
+    })
+  }
+
+## `name:` before a positional argument, or nothing. `shown` is how many
+## arguments the parentheses hold: with one, the name is noise (ZLS's
+## `inlay_hints_exclude_single_argument`). An argument that is a variable of
+## the parameter's own name already says it (TypeScript's
+## `includeInlayParameterNameHintsWhenArgumentMatchesName`, off by default).
+pub fn param_hint(at: Int, pname: String, arg_var: Option[String], shown: Int) -> Option[Hint] =
+  if shown <= 1 || pname == "" || pname == "_" || arg_var == Some(pname) {
+    None
+  } else {
+    Some(Hint { at: at, label: pname ++ ":", kind: HintParam, pad_left: false, pad_right: true })
+  }
+
+test "a type hint is the type after a colon, unless long or erroneous" {
+  match type_hint(7, "List[Int]") {
+    Some(h) -> {
+      assert h.label == ": List[Int]"
+      assert h.at == 7
+      assert h.kind == HintType
+      assert not h.pad_left
+    }
+    None -> { assert false }
+  }
+  # 25 code points is shown, 26 is not
+  assert type_hint(0, str.repeat("a", 25)) != None
+  assert type_hint(0, str.repeat("a", 26)) == None
+  # code points, not bytes or UTF-16 units
+  assert type_hint(0, str.repeat("é", 25)) != None
+  assert type_hint(0, "List[?]") == None
+}
+
+test "an effect hint needs a named effect and a ground row" {
+  let fs = ELabeled(EPure, [(7, "Fs")])
+  match effect_hint(3, fs) {
+    Some(h) -> {
+      assert h.label == "!Fs"
+      assert h.pad_left
+      assert h.kind == HintType
+    }
+    None -> { assert false }
+  }
+  match effect_hint(3, ELabeled(EIo, [(7, "Fs"), (9, "Ask")])) {
+    Some(h) -> { assert h.label == "!(Ask|Fs|io)" }
+    None -> { assert false }
+  }
+  assert effect_hint(3, EPure) == None
+  assert effect_hint(3, EIo) == None
+  # polymorphic: the declared row is not the row this call runs with
+  assert effect_hint(3, EffVar("e", 4)) == None
+  assert effect_hint(3, ELabeled(EffVar("e", 4), [(7, "Fs")])) == None
+  assert effect_hint(3, ELabeled(EUnion([(4, "e")], [], true), [(7, "Fs")])) == None
+}
+
+test "a parameter name is hidden for one argument and for a same-named variable" {
+  match param_hint(5, "gap", None, 2) {
+    Some(h) -> {
+      assert h.label == "gap:"
+      assert h.kind == HintParam
+      assert h.pad_right
+      assert not h.pad_left
+    }
+    None -> { assert false }
+  }
+  assert param_hint(5, "gap", None, 1) == None
+  assert param_hint(5, "gap", Some("gap"), 2) == None
+  assert param_hint(5, "gap", Some("width"), 2) != None
+  assert param_hint(5, "_", None, 2) == None
+}

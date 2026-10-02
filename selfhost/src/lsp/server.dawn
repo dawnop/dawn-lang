@@ -36,10 +36,11 @@ use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text}
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
-use lsp/lspq.{QCx, Target, DocHere, DocFile, DocStd, find_target, typed_trees}
+use lsp/lspq.{QCx, Target, DocHere, DocFile, DocStd, find_target, typed_trees, inlay_hints}
 use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc}
 use front/docs.{DocSrc, doc_src_of}
 use lsp/lspc.{completions_at, signature_at}
+use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts}
@@ -623,7 +624,10 @@ type LspState = {
   related_information: Bool,
   # the comment tables hover read docs from, by the text they were read from
   # (`doc_src_memo`, docs/lsp-hover-design.md §A3.4)
-  doc_memo: Map[String, DocMemo]
+  doc_memo: Map[String, DocMemo],
+  # which inlay hints the client asked for in `initializationOptions`
+  # (`inlay_opts_of`, docs/lsp-hover-design.md §A4.3)
+  inlay: InlayOpts
 }
 
 ## One text's comment table, kept with the text it was lexed from: a lookup
@@ -810,7 +814,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     lifecycle: PreInit,
     watch_manifests: false,
     related_information: false,
-    doc_memo: map.empty()
+    doc_memo: map.empty(),
+    inlay: default_inlay_opts()
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -1253,7 +1258,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     st = LspState {
       ..st,
       watch_manifests: client_watches_files(params),
-      related_information: client_relates_diagnostics(params)
+      related_information: client_relates_diagnostics(params),
+      inlay: inlay_opts_of(params)
     }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
@@ -1268,7 +1274,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("definitionProvider", JBool(true)),
       ("documentSymbolProvider", JBool(true)),
       ("documentFormattingProvider", JBool(true)),
-      ("codeActionProvider", JBool(true))
+      ("codeActionProvider", JBool(true)),
+      ("inlayHintProvider", JBool(true))
     ]))]))
   } else if method == "initialized" {
     if st.watch_manifests { send(manifest_watch_registration()) }
@@ -1308,6 +1315,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     respond(id, handle_formatting(st, params))
   } else if method == "textDocument/codeAction" {
     respond(id, handle_code_action(st, params))
+  } else if method == "textDocument/inlayHint" {
+    respond(id, handle_inlay_hint(st, params))
   } else if method == "shutdown" {
     respond(id, JNull)
   } else {
@@ -1943,6 +1952,27 @@ fn client_relates_diagnostics(params: Json) -> Bool = {
   }
 }
 
+## The inlay hints the client asked for: `initializationOptions.inlayHints`,
+## four optional booleans over `default_inlay_opts`. A key that is missing or
+## not a boolean keeps its default; read once, at `initialize`
+## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
+fn inlay_opts_of(params: Json) -> InlayOpts = {
+  let j = get_or_null(get_or_null(params, "initializationOptions"), "inlayHints")
+  let d = default_inlay_opts()
+  InlayOpts {
+    let_types: json_flag(j, "letTypes", d.let_types),
+    lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
+    call_effects: json_flag(j, "callEffects", d.call_effects),
+    param_names: json_flag(j, "parameterNames", d.param_names)
+  }
+}
+
+fn json_flag(j: Json, k: String, dflt: Bool) -> Bool =
+  match oget(j, k) {
+    Some(JBool(b)) -> b
+    _ -> dflt
+  }
+
 fn client_watches_files(params: Json) -> Bool = {
   let workspace = get_or_null(get_or_null(params, "capabilities"), "workspace")
   match oget(get_or_null(workspace, "didChangeWatchedFiles"), "dynamicRegistration") {
@@ -2416,6 +2446,43 @@ fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> 
   (hover_markdown(t.hover, doc), st2)
 }
 
+## `textDocument/inlayHint`: the hints `lspq.inlay_hints` finds inside the
+## requested range, in LSP 3.17's shape. Padding is written only where it is
+## on, which is what the protocol defaults the absent field to.
+fn handle_inlay_hint(st: LspState, params: Json) -> Json = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, d, analysis) {
+            Some(qc) -> {
+              let r = get_or_null(params, "range")
+              let rs = get_or_null(r, "start")
+              let re = get_or_null(r, "end")
+              let lo = lsp_offset(d.view, d.ls, oint(rs, "line"), oint(rs, "character"))
+              let hi = lsp_offset(d.view, d.ls, oint(re, "line"), oint(re, "character"))
+              var out: List[Json] = []
+              for h in inlay_hints(qc, lo, hi, st.inlay) {
+                let (line, ch) = lsp_position(d.view, d.ls, h.at)
+                var fields: List[(String, Json)] = [
+                  ("position", jpos(line, ch)),
+                  ("label", JStr(h.label)),
+                  ("kind", JInt(if h.kind == HintParam { 2 } else { 1 }))
+                ]
+                if h.pad_left { fields = fields ++ [("paddingLeft", JBool(true))] }
+                if h.pad_right { fields = fields ++ [("paddingRight", JBool(true))] }
+                out = out ++ [jobj(fields)]
+              }
+              JArr(out)
+            }
+            None -> JNull
+          }
+        None -> JNull
+      }
+    None -> JNull
+  }
+}
+
 fn handle_symbols(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
@@ -2597,7 +2664,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       lifecycle: Running,
       watch_manifests: false,
       related_information: false,
-      doc_memo: map.empty()
+      doc_memo: map.empty(),
+      inlay: default_inlay_opts()
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -2695,7 +2763,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     lifecycle: Running,
     watch_manifests: false,
     related_information: false,
-    doc_memo: map.empty()
+    doc_memo: map.empty(),
+    inlay: default_inlay_opts()
   }
 }
 
@@ -3398,5 +3467,215 @@ test "the comment table is kept per text, and a changed text is lexed again" {
       i = i + 1
     }
     assert len(map.keys(st.doc_memo)) <= DOC_MEMO_FILES
+  }))
+}
+
+# ---- inlay hints (docs/lsp-hover-design.md §A4) ----
+
+fn inlay_probe_text() -> String =
+  join([
+    "use std/io",
+    "use std/io.{Fs}",
+    "effect Ask {",
+    "  fn ask() -> Int",
+    "}",
+    "",
+    "fn pad(s: String, width: Int, fill: String) -> String = s ++ fill",
+    "",
+    "fn twice[!e](f: fn() -> Int !e) -> Int !e = f() + f()",
+    "",
+    "fn ask_twice() -> Int !Ask = ask() + ask()",
+    "",
+    "fn load(p: String) -> String !Fs !Ask = {",
+    "  let text = io.read_file(p)",
+    "  let (a, b) = (1, \"x\")",
+    "  let n: Int = a",
+    "  let xs = map([1, 2], x => x + n)",
+    "  let ys = map(xs, (y: Int) => y)",
+    "  let width = len(ys)",
+    "  let long = [[(1, \"a\", 1.5, true)]]",
+    "  var k = ask_twice()",
+    "  let cut = pad(p, width, b)",
+    "  let got = twice(() => n)",
+    "  let peek = () => io.exists(p)",
+    "  let seen = peek()",
+    "  match text {",
+    "    Ok(t) -> t ++ cut",
+    "    Err(_) -> \"\${got}\${len(long)}\${seen}\"",
+    "  }",
+    "}",
+    ""
+  ], "\n")
+
+## The lines of `text` that hold a hint, each with its hints written into it
+## where an editor would draw them (`«…»`, padding as a blank inside), from
+## the reply of a `textDocument/inlayHint` over `l0:c0..l1:c1`. Positions are
+## UTF-16 columns, which the ASCII probe texts make code points.
+fn inlay_probe(st: LspState, d: Doc, l0: Int, c0: Int, l1: Int, c1: Int) -> List[String] = {
+  let params = jobj([
+    ("textDocument", jobj([("uri", JStr(d.uri))])),
+    ("range", jobj([("start", jpos(l0, c0)), ("end", jpos(l1, c1))]))
+  ])
+  let st1 = LspState { ..st, docs: map.insert(st.docs, d.uri, d) }
+  let hints = match handle_inlay_hint(st1, params) {
+    JArr(xs) -> xs
+    other -> panic("inlayHint replied ${render(other)}")
+  }
+  let lines = str.split(d.text, "\n")
+  var by_line: Map[Int, List[(Int, String)]] = map.empty()
+  for h in hints {
+    let pos = get_or_null(h, "position")
+    let line = oint(pos, "line")
+    let left = if get_or_null(h, "paddingLeft") == JBool(true) { " " } else { "" }
+    let right = if get_or_null(h, "paddingRight") == JBool(true) { " " } else { "" }
+    let shown = "«" ++ left ++ ostr(h, "label") ++ right ++ "»"
+    let prev = match map.get(by_line, line) {
+      Some(xs) -> xs
+      None -> []
+    }
+    by_line = map.insert(by_line, line, prev ++ [(oint(pos, "character"), shown)])
+  }
+  var out: List[String] = []
+  for line in sort(map.keys(by_line)) {
+    let src = lines[line]
+    var at = 0
+    var row = ""
+    for pr in map.get(by_line, line).expect("hints of the line") {
+      let (ch, shown) = pr
+      row = row ++ str.slice(src, at, ch) ++ shown
+      at = ch
+    }
+    out = out ++ [str.trim(row ++ str.slice(src, at, str.len(src)))]
+  }
+  out
+}
+
+fn inlay_probe_doc(st: LspState) -> Doc !Fs !Env !io = def_probe_doc_named(st, "inlay.dawn", inlay_probe_text())
+
+fn std_for_probe() -> StdCtx !Fs !Env !io =
+  match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: ${std_load_error_text(e)}")
+  }
+
+test "inlay hints: inferred let types, one per destructured name, none where written" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = inlay_probe_doc(st)
+    let got = inlay_probe(st, d, 13, 0, 16, 99)
+    # `text` is a Result[String, ForeignError], 29 code points: past the
+    # bound, so not shown; `n` is annotated, so not shown
+    assert got == [
+      "let text = io.read_file(p)« !Fs»",
+      "let (a«: Int», b«: String») = (1, \"x\")",
+      "let xs«: List[Int]» = map([1, 2], x«: Int» => x + n)"
+    ]
+  }))
+}
+
+test "inlay hints: lambda parameters without a written type, and long types left out" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = inlay_probe_doc(st)
+    let got = inlay_probe(st, d, 17, 0, 19, 99)
+    # `y` is annotated; `long` is List[List[(Int, String, Float, Bool)]]
+    assert got == [
+      "let ys«: List[Int]» = map(xs, (y: Int) => y)",
+      "let width«: Int» = len(ys)"
+    ]
+  }))
+}
+
+test "inlay hints: a call's named effects, none for pure or effect-polymorphic calls" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = inlay_probe_doc(st)
+    let got = inlay_probe(st, d, 0, 0, 30, 0)
+    # an operation call, a call of a function with a label, a local function
+    # value whose type carries one; `pad` is pure, `twice` is `!e`
+    assert list.contains(got, "fn ask_twice() -> Int !Ask = ask()« !Ask» + ask()« !Ask»")
+    assert list.contains(got, "var k«: Int» = ask_twice()« !Ask»")
+    assert list.contains(got, "let cut«: String» = pad(p, width, b)")
+    assert list.contains(got, "let got«: Int» = twice(() => n)")
+    assert list.contains(got, "let peek«: fn() -> Bool !Fs» = () => io.exists(p)« !Fs»")
+    assert list.contains(got, "let seen«: Bool» = peek()« !Fs»")
+    # a match arm's binder is not a let
+    assert not list.any(got, l => str.contains(l, "Ok(t«"))
+  }))
+}
+
+test "inlay hints: only inside the requested range, by position, kind by LSP's numbers" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = inlay_probe_doc(st)
+    # one line, and only its first half: the `x` past column 22 is out
+    assert inlay_probe(st, d, 16, 0, 16, 22) == ["let xs«: List[Int]» = map([1, 2], x => x + n)"]
+    # an empty range at a hint's own position still holds it (both ends count)
+    assert inlay_probe(st, d, 16, 8, 16, 8) == ["let xs«: List[Int]» = map([1, 2], x => x + n)"]
+    assert inlay_probe(st, d, 4, 0, 5, 0) == []
+    let params = jobj([
+      ("textDocument", jobj([("uri", JStr(d.uri))])),
+      ("range", jobj([("start", jpos(13, 0)), ("end", jpos(13, 99))]))
+    ])
+    match handle_inlay_hint(LspState { ..st, docs: map.insert(st.docs, d.uri, d) }, params) {
+      JArr(hs) -> {
+        assert len(hs) == 1
+        assert get_or_null(hs[0], "kind") == JInt(1)
+        assert get_or_null(hs[0], "paddingLeft") == JBool(true)
+        assert get_or_null(hs[0], "paddingRight") == JNull
+      }
+      _ -> { assert false }
+    }
+  }))
+}
+
+test "inlay hints: parameter names are off unless asked for, and hide what the call says" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = inlay_probe_doc(st0)
+    assert inlay_probe(st0, d, 21, 0, 21, 99) == ["let cut«: String» = pad(p, width, b)"]
+    let st = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("parameterNames", JBool(true)),
+        ("letTypes", JBool(false)),
+        # not a boolean: the default stands
+        ("callEffects", JStr("no"))
+      ]))]))]))
+    }
+    # `width` is passed to `width`, so only `s` and `fill` are named
+    assert inlay_probe(st, d, 21, 0, 21, 99) == ["let cut = pad(«s: »p, width, «fill: »b)"]
+    # one argument: no names; the effect hint is still on
+    assert inlay_probe(st, d, 13, 0, 13, 99) == ["let text = io.read_file(p)« !Fs»"]
+    # `letTypes: false` turned the let hints off and left the lambda's; the
+    # lambda is an argument like any other
+    assert inlay_probe(st, d, 16, 0, 16, 99) == ["let xs = map(«xs: »[1, 2], «f: »x«: Int» => x + n)"]
+  }))
+}
+
+test "inlay hints: a trailing block puts the effect after the call's parentheses" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let text = join([
+      "use std/io",
+      "use std/io.{Fs}",
+      "fn each(xs: List[Int], f: fn(Int) -> Unit) -> Unit !Fs = {",
+      "  let _ = io.exists(\"x\")",
+      "  for x in xs { f(x) }",
+      "}",
+      "",
+      "fn run() -> Unit !Fs = {",
+      "  each([1]) { n =>",
+      "    let m = n + 1",
+      "    let _ = m",
+      "  }",
+      "}",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "trailing.dawn", text)
+    assert inlay_probe(st, d, 8, 0, 10, 99) == [
+      "each([1])« !Fs» { n«: Int» =>",
+      "let m«: Int» = n + 1"
+    ]
   }))
 }

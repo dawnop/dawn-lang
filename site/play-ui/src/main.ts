@@ -21,6 +21,7 @@ import {
   lspCompletionSource,
   lspDefinition,
   lspHover,
+  lspInlayHints,
 } from './lsp'
 import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
@@ -217,6 +218,7 @@ function mount(root: HTMLElement) {
         dawn(lspCompletionSource(lsp, dawnCompletions)),
         dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
         lspHover(lsp),
+        lspInlayHints(lsp),
         lspDefinition(lsp),
         errorLens,
         lintGutter(),
