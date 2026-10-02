@@ -4,9 +4,9 @@ use std/str
 use md/ast.{Inline, Text, Block, Heading, Para, CodeBlock}
 use html/render.{render_doc, render_doc_play, inline_text, inline_run, split_head, split_number, TocEntry}
 use html/play.{Play, play_decode}
-use html/escape.{escape_html}
-use html/page.{Assets, Lang, En, Zh, PageHead, page, page_with_toc, rail_html, sep, contents_label,
-  lang_path, playground_label }
+use html/escape.{escape_html, escape_attr}
+use html/page.{Assets, Lang, En, Zh, PageHead, Crumb, page, page_with_toc, rail_html, contents_label,
+  lang_path, playground_label, section_crumb, here, chip, reading_chip, twin_chip }
 use gen/common.{write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 use std/io.{Fs}
 
@@ -115,22 +115,62 @@ pub fn zh_count(n: Int) -> String = {
   }
 }
 
-## The band's line over the tutorial's pages: what it is and how long, and
-## over a chapter, which one. The chapter's "tutorial" goes back to the index.
-fn tutorial_eyebrow(lang: Lang, n: Int, chapter: Int) -> String =
+## The trail over the tutorial's pages: the tutorial, and over a chapter,
+## which one, the tutorial then leading back to the index.
+fn tutorial_crumbs(lang: Lang, root: String, chapter: Int) -> List[Crumb] =
+  if chapter == 0 {
+    [section_crumb(lang, root, "tutorial", false)]
+  } else {
+    let word =
+      match lang {
+        En -> "Chapter ${chapter}"
+        Zh -> "第${zh_count(chapter)}章"
+      }
+    [section_crumb(lang, root, "tutorial", true), here(word)]
+  }
+
+## How long the tutorial is, over its index.
+fn chapters_chip(lang: Lang, n: Int) -> String =
   match lang {
-    En ->
-      if chapter == 0 {
-        "tutorial" ++ sep() ++ "${n} chapters"
+    En -> chip("${n} chapters")
+    Zh -> chip("共${zh_count(n)}章")
+  }
+
+## Where a chapter sits, with a step back and a step on beside it: the
+## chapter before it and after it, each a small arrow whose name is the
+## chapter it leads to. The first chapter has no step back here (its card
+## under the text leads to the contents) and the last none on.
+fn chapter_chip(lang: Lang, chapters: List[Chapter], i: Int) -> String = {
+  let n = len(chapters)
+  let at =
+    match lang {
+      En -> "chapter ${i + 1} of ${n}"
+      Zh -> "第${zh_count(i + 1)}章，共${zh_count(n)}章"
+    }
+  let step = (cls: String, href: String, title: String, d: String) =>
+    """<a class="${cls}" href="${href}" title="${escape_attr(title)}" aria-label="${escape_attr(title)}">"""
+    ++ """<svg viewBox="0 0 16 16" aria-hidden="true"><path d="${d}"/></svg></a>"""
+  let prev = if i > 0 { step("prev", "${pad2(i)}.html", chapter_title(chapters, i - 1), "M10 3.5 5.5 8l4.5 4.5") } else { "" }
+  let next = if i + 1 < n { step("next", "${pad2(i + 2)}.html", chapter_title(chapters, i + 1), "M6 3.5 10.5 8 6 12.5") } else { "" }
+  """<li class="chip step">${prev}<span>${at}</span>${next}</li>"""
+}
+
+## A chapter's title as the band sets it: its printed number apart, in the
+## label face and the accent colour, the way the spec's section numbers are
+## set in the body, and the words after it. A title that prints no number is
+## rendered as it is.
+fn chapter_heading(items: List[Inline], mu: fn(String) -> String) -> String =
+  match get(items, 0) {
+    Some(Text(s)) -> {
+      let (num, rest) = split_number(s)
+      if num == "" {
+        inline_run(items, mu)
       } else {
-        `<a href="index.html">tutorial</a>` ++ sep() ++ "chapter ${chapter} of ${n}"
+        `<span class="n">` ++ escape_html(num) ++ "</span> " ++ escape_html(rest)
+          ++ inline_run(map(range(1, len(items)), i => items[i]), mu)
       }
-    Zh ->
-      if chapter == 0 {
-        "教程" ++ sep() ++ "共${zh_count(n)}章"
-      } else {
-        `<a href="index.html">教程</a>` ++ sep() ++ "第${zh_count(chapter)}章，共${zh_count(n)}章"
-      }
+    }
+    _ -> inline_run(items, mu)
   }
 
 ## The chapter's printed number and its title: `8. Lambdas` -> ("8", "Lambdas").
@@ -246,10 +286,10 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang, blocks: List[Block]) -> 
       Some(c) -> {
         let doc = render_doc_play(c.body, mu, play)
         let head = PageHead {
-          eyebrow: tutorial_eyebrow(lang, n, i + 1),
-          title: inline_run(c.title, mu),
+          crumbs: tutorial_crumbs(lang, root, i + 1),
+          title: chapter_heading(c.title, mu),
           lede: "",
-          twin: "",
+          meta: [chapter_chip(lang, chapters, i), reading_chip(lang, doc.html)],
           extra: "",
           cls: "toc-aligned",
         }
@@ -276,10 +316,10 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang, blocks: List[Block]) -> 
     }
   let rest_html = render_doc_play(rest, mu, play).html
   let head = PageHead {
-    eyebrow: tutorial_eyebrow(lang, n, 0),
+    crumbs: tutorial_crumbs(lang, root, 0),
     title: inline_run(parts.title, mu),
     lede: lede,
-    twin: inline_run(parts.twin, mu),
+    meta: [chapters_chip(lang, n), twin_chip(parts.twin, mu)],
     extra: "",
     cls: "col",
   }
@@ -289,6 +329,11 @@ pub fn gen_tutorial(out: String, a: Assets, lang: Lang, blocks: List[Block]) -> 
 }
 
 fn drop_one(bs: List[Block]) -> List[Block] = map(range(1, len(bs)), i => bs[i])
+
+test "a chapter's number is set apart in its title" {
+  assert chapter_heading([Text("3. match and exhaustiveness")], u => u) == `<span class="n">3.</span> match and exhaustiveness`
+  assert chapter_heading([Text("Intro")], u => u) == "Intro"
+}
 
 test "chapter counts read in Chinese numerals" {
   assert zh_count(8) == "八"

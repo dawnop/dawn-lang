@@ -12,7 +12,8 @@
 # picked one would be wrong on half of the pages whichever one it picked.
 
 use std/str
-use html/render.{TocEntry, split_number}
+use md/ast.{Inline, Em, Link, Text}
+use html/render.{TocEntry, split_number, twin_link, inline_text}
 use html/escape.{escape_html, escape_attr}
 
 ## Which language a page is written in. English is the site's default and
@@ -83,6 +84,10 @@ pub type Assets = {
   # names as the version it applies to.
   version: String,
   commit: String,
+  # Not a file either: the cat out of the mark (site/assets/logo.svg), as the
+  # path [cat_path] reads, for the one that peeks over each page's band.
+  # "" draws no cat, which is what the tests' plain assets do.
+  cat: String,
 }
 
 ## The names the files have in site/assets, before any hashing. What the tests
@@ -111,6 +116,7 @@ pub fn plain_assets() -> Assets =
     theme_js: "theme.js",
     version: "",
     commit: "",
+    cat: "",
   }
 
 ## The `lang` attribute for <html>.
@@ -366,44 +372,214 @@ pub fn footer_html(a: Assets, lang: Lang, root: String) -> String = {
 </footer>"""
 }
 
-## What a page says in the sky band, above its body: a monospace line of
-## facts (the eyebrow), the title, a lede and the translation note, and
-## `extra`, markup set after them (the 404 page's second line and its sun).
-## All are markup the caller has already escaped, any of them "" to leave it
-## out; `cls` places the block (`col` over a single column, `toc-aligned` over
-## the column beside the contents rail, `nf` centred for the 404 page).
+## One step of the trail over a page's title: what it says (markup the caller
+## has already escaped) and where it goes, `href` "" for the page itself,
+## which is the last step and the one that is not a link.
+pub type Crumb = { label: String, href: String }
+
+## What a page says in the sky band, above its body: the trail of where it
+## sits (`crumbs`), the title, a lede, a row of small facts (`meta`, each one
+## a chip from [chip], [link_chip] and the rest below), and `extra`, markup
+## set after them (the 404 page's second line and its sun). Text fields are
+## markup the caller has already escaped, any of them "" to leave it out;
+## `cls` places the block (`col` over a single column, `toc-aligned` over the
+## column beside the contents rail, `nf` centred for the 404 page).
 ##
-## Taken out of the body on purpose: the title and the translation note used
-## to be the first two lines of the article, and they are what a reader sees
-## first, so they belong to the page's head. Which facts a page's eyebrow
-## states is the page generator's to say; this shell guesses none.
+## Two lines where there was one (the eyebrow) because they answer two
+## questions: the trail says where the page is, and can be walked back up;
+## the chips say what is true of it -- its release, how long it is, which
+## chapter, its translation. Which facts a page states is the page
+## generator's to say; this shell guesses none, and a page with nothing to
+## state has no row.
 pub type PageHead = {
-  eyebrow: String,
+  crumbs: List[Crumb],
   title: String,
   lede: String,
-  twin: String,
+  meta: List[String],
   extra: String,
   cls: String,
 }
 
 ## A page with no head in the band: the Playground, whose editor is the page.
 pub fn no_head() -> PageHead =
-  PageHead { eyebrow: "", title: "", lede: "", twin: "", extra: "", cls: "" }
+  PageHead { crumbs: [], title: "", lede: "", meta: [], extra: "", cls: "" }
 
-fn page_head_html(h: PageHead) -> String =
-  if h.title == "" && h.eyebrow == "" {
-    ""
-  } else {
-    let eyebrow = if h.eyebrow == "" { "" } else { """<p class="eyebrow">${h.eyebrow}</p>""" ++ "\n" }
-    let title = if h.title == "" { "" } else { "<h1>${h.title}</h1>\n" }
-    let lede = if h.lede == "" { "" } else { """<p class="lede">${h.lede}</p>""" ++ "\n" }
-    let twin = if h.twin == "" { "" } else { """<p class="twin">${h.twin}</p>""" ++ "\n" }
-    let extra = if h.extra == "" { "" } else { h.extra ++ "\n" }
-    """<div class="page-head ${h.cls}">""" ++ "\n" ++ eyebrow ++ title ++ lede ++ twin ++ extra ++ "</div>"
+## A step that links up the trail, and the step that is the page itself.
+pub fn crumb(label: String, href: String) -> Crumb = Crumb { label: label, href: href }
+
+pub fn here(label: String) -> Crumb = Crumb { label: label, href: "" }
+
+## The first step of a page's trail: its section, named as the nav names it
+## and linked to the section's own page, or unlinked when that is this page.
+## From [nav_items], so the trail and the nav cannot call one place by two
+## names.
+pub fn section_crumb(lang: Lang, root: String, key: String, linked: Bool) -> Crumb = {
+  let hits = filter(nav_items(lang), it => {
+    let (k, _, _) = it
+    k == key
+  })
+  match get(hits, 0) {
+    Some((_, label, path)) -> if linked { crumb(escape_html(label), "${root}/${path}") } else { here(escape_html(label)) }
+    None -> panic("no section `${key}` in the nav")
+  }
+}
+
+## What the trail is called to a screen reader, in the page's language.
+fn crumbs_label(lang: Lang) -> String =
+  match lang {
+    En -> "Breadcrumb"
+    Zh -> "页面位置"
   }
 
-## The eyebrow's separator, as the band draws it.
-pub fn sep() -> String = `<span class="sep">·</span>`
+## The trail as markup. A step with no href is plain text; only the last
+## one, the page itself, is marked as the current page.
+fn crumbs_html(lang: Lang, cs: List[Crumb]) -> String = {
+  let n = len(cs)
+  let steps = map(range(0, n), i => {
+    let c = cs[i]
+    if c.href != "" {
+      """<a href="${c.href}">${c.label}</a>"""
+    } else if i == n - 1 {
+      """<span aria-current="page">${c.label}</span>"""
+    } else {
+      "<span>${c.label}</span>"
+    }
+  })
+  let sep = `<span class="sep" aria-hidden="true">/</span>`
+  """<nav class="crumbs" aria-label="${crumbs_label(lang)}">""" ++ join(steps, sep) ++ "</nav>"
+}
+
+## One fact in the row under the title, as plain markup.
+pub fn chip(inner: String) -> String = """<li class="chip">${inner}</li>"""
+
+## A fact that is also a place to go.
+pub fn link_chip(href: String, inner: String) -> String = """<li class="chip"><a href="${href}">${inner}</a></li>"""
+
+## The release a page describes, linked to its notes. "" when the build was
+## not told the version, so the row simply has one chip fewer.
+pub fn release_chip(version: String) -> String =
+  if version == "" {
+    ""
+  } else {
+    let v = escape_html(version)
+    """<li class="chip rel"><a href="${release_url(version)}">v${v}</a></li>"""
+  }
+
+## Where a release's notes are. The tag is the version with a `v`, which is
+## how scripts/build-release-jar.sh and release.yml name it.
+pub fn release_url(version: String) -> String =
+  "https://github.com/dawnop/dawn-lang/releases/tag/v" ++ escape_attr(version)
+
+## How long a page takes to read, as a chip with a small clock. Counted from
+## the page's rendered body by [reading_minutes]; past an hour it is said to
+## the nearest hour only, since a minute count on a three-hour document is
+## precision nobody reads by.
+pub fn reading_chip(lang: Lang, body_html: String) -> String = {
+  let m = reading_minutes(body_html)
+  let h = (m + 30) / 60
+  let text =
+    match lang {
+      En -> if m > 60 { "about ${h} h" } else { "${m} min read" }
+      Zh -> if m > 60 { "约 ${h} 小时" } else { "阅读约 ${m} 分钟" }
+    }
+  """<li class="chip"><svg class="ci" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.6V8l2.3 1.5"/></svg>${text}</li>"""
+}
+
+## The translation note as a chip: the note's own link (the document in the
+## other language) with the whole sentence as its title, so nothing it said
+## is lost and the band loses a paragraph. "" when there is no note, or the
+## note has no link. `map_url` is the page's own doc-link mapping, the one
+## the note would have been rendered through.
+pub fn twin_chip(twin: List[Inline], map_url: fn(String) -> String) -> String = {
+  let (label, url) = twin_link(twin)
+  if url == "" {
+    ""
+  } else {
+    let note = twin_note(label, inline_text(twin))
+    """<li class="chip twin"><a href="${escape_attr(map_url(url))}" title="${escape_attr(note)}" hreflang="${twin_lang(label)}">"""
+      ++ """<svg class="ci" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h6M5.5 2v1.5M4 3.5c.4 2.6 2 4.6 4 5.6M7.2 3.5C6.8 6 5.2 8.2 2.8 9.4M8.6 14l2.6-6.5 2.6 6.5M9.4 12h3.6"/></svg>"""
+      ++ escape_html(label) ++ "</a></li>"
+  }
+}
+
+## The note's sentence without the link it opens with and the dash or dot
+## after it: the chip already shows the link, and its title is the rest.
+fn twin_note(label: String, text: String) -> String = {
+  let rest = unwrap_or(str.strip_prefix(text, label), text)
+  let cs = code_points(rest)
+  var i = 0
+  while i < len(cs) && (cs[i] == ' ' || cs[i] == '—' || cs[i] == '·' || cs[i] == '-') {
+    i = i + 1
+  }
+  from_code_points(map(range(i, len(cs)), j => cs[j]))
+}
+
+fn twin_lang(label: String) -> String = if label == "English" { "en" } else { "zh-CN" }
+
+## Minutes to read a body of rendered markup: 400 Chinese characters or 250
+## English words to the minute, both counted in one pass so that a Chinese
+## page full of English identifiers is charged for both, and rounded up,
+## never under one. 400 is the middle of the usual 300-500 for reading
+## Chinese for understanding; at it the two translations of the spec come out
+## at the same three hours, where 1000 (the first proposal) had the Chinese
+## one read in half the time of the English. Tags and entities are skipped;
+## code counts like prose, which, read carefully, it is not, but it is not
+## skimmed either.
+pub fn reading_minutes(html: String) -> Int = {
+  var cjk = 0
+  var words = 0
+  var in_tag = false
+  var in_ent = false
+  var in_word = false
+  for c in code_points(html) {
+    if in_tag {
+      if c == '>' {
+        in_tag = false
+      }
+    } else if in_ent {
+      if c == ';' {
+        in_ent = false
+      }
+    } else if c == '<' {
+      in_tag = true
+    } else if c == '&' {
+      in_ent = true
+      in_word = false
+    } else if is_cjk(c) {
+      cjk = cjk + 1
+      in_word = false
+    } else if is_word_char(c) {
+      if not in_word {
+        words = words + 1
+        in_word = true
+      }
+    } else {
+      in_word = false
+    }
+  }
+  # in 2000ths of a minute: a character is 5 (400 a minute), a word 8 (250)
+  let units = 5 * cjk + 8 * words
+  if units <= 2000 { 1 } else { (units + 1999) / 2000 }
+}
+
+fn is_cjk(c: Char) -> Bool =
+  (c >= '\u{3040}' && c <= '\u{30FF}') || (c >= '\u{3400}' && c <= '\u{4DBF}')
+  || (c >= '\u{4E00}' && c <= '\u{9FFF}') || (c >= '\u{F900}' && c <= '\u{FAFF}')
+
+fn is_word_char(c: Char) -> Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+
+fn page_head_html(lang: Lang, h: PageHead) -> String =
+  if h.title == "" && len(h.crumbs) == 0 {
+    ""
+  } else {
+    let trail = if len(h.crumbs) == 0 { "" } else { crumbs_html(lang, h.crumbs) ++ "\n" }
+    let title = if h.title == "" { "" } else { "<h1>${h.title}</h1>\n" }
+    let lede = if h.lede == "" { "" } else { """<p class="lede">${h.lede}</p>""" ++ "\n" }
+    let chips = filter(h.meta, m => m != "")
+    let meta = if len(chips) == 0 { "" } else { `<ul class="meta">` ++ join(chips, "") ++ "</ul>\n" }
+    let extra = if h.extra == "" { "" } else { h.extra ++ "\n" }
+    """<div class="page-head ${h.cls}">""" ++ "\n" ++ trail ++ title ++ lede ++ meta ++ extra ++ "</div>"
+  }
 
 ## The full page around an already-rendered <main>/<div> body. `pair` is this
 ## page's path in the default layout when the page has a twin in the other
@@ -423,6 +599,12 @@ pub fn shell(
 
 ## The header's search button, and the three URLs the panel needs.
 ##
+## A round glass, the same size as the theme toggle beside it, named by its
+## label (and Ctrl-K or Cmd-K, which search.js binds). It opens the floating
+## panel; there is no field in the nav, because the panel is where searching
+## happens and a field that only opens it would be a second thing that looks
+## like one.
+##
 ## They are attributes rather than strings inside the script for the reason
 ## the demo page's `data-wasm` is one: gen/links reads markup and nothing here
 ## reads programs, so a URL spelled in a `fetch` argument would be the one URL
@@ -441,7 +623,8 @@ fn search_button(a: Assets, lang: Lang, root: String) -> String = {
   let wasm = a.search_wasm
   let index = search_index_name(a, lang)
   let label = escape_html(search_label(lang))
-  """<button class="search-open" type="button" aria-controls="dawn-search" aria-expanded="false" data-search-app="${root}/assets/${app}" data-search-wasm="${root}/assets/${wasm}" data-search-index="${root}/assets/${index}" data-search-root="${root}">${label}<kbd>&#8984;K</kbd></button>"""
+  """<button class="search-open" type="button" aria-label="${label}" title="${label}" aria-controls="dawn-search" aria-expanded="false" data-search-app="${root}/assets/${app}" data-search-wasm="${root}/assets/${wasm}" data-search-index="${root}/assets/${index}" data-search-root="${root}">"""
+    ++ """<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6"/><path d="m10.4 10.4 3.4 3.4"/></svg></button>"""
 }
 
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
@@ -461,25 +644,85 @@ pub fn shell_ext(
   head: PageHead,
   body: String,
 ) -> String = {
-  let ph = page_head_html(head)
+  let ph = page_head_html(lang, head)
   let ph_line = if ph == "" { "" } else { ph ++ "\n" }
+  # the cat looks over a page's head; not over the Playground's band, which
+  # has none, nor the 404 page's, whose horizon holds a sun that has not come up
+  let cat = if ph == "" || head.cls == "nf" { "" } else { band_cat(a.cat) }
+  let cat_line = if cat == "" { "" } else { cat ++ "\n" }
   head_html(a, lang, pair, title, root, head_extra) ++ "\n<body>\n"
     ++ `<div class="progress" aria-hidden="true"></div>` ++ "\n"
     ++ `<header class="sky">` ++ "\n" ++ band_stars() ++ "\n"
     ++ `<div class="glow" aria-hidden="true"></div>` ++ "\n"
     ++ `<div class="wrap">` ++ "\n" ++ nav_bar(a, lang, pair, root, active) ++ "\n" ++ ph_line
-    ++ "</div>\n</header>\n"
+    ++ "</div>\n" ++ cat_line ++ "</header>\n"
     ++ search_host(a, lang, root) ++ "\n" ++ body ++ "\n"
     ++ footer_html(a, lang, root) ++ "\n</body>\n</html>"
 }
 
-## Seven faint stars for the band. White on the day sky, so they are drawn at
-## the night's opacity (`--star-op`, 0 by day).
+## The cat that looks over the band's lower edge, at its right, on every page
+## with a head: ears and eyes above the horizon line, the rest behind it (the
+## band clips it). Eyes open by day, the mark's own cut-out eyes; shut by
+## night, the front page's sleeping moon cat. The brand in the nav is the
+## mark; this is the same cat in a pose of its own, looking at the page.
+## Both drawings are in the markup and the theme's `--night-op` picks one,
+## so a theme switch changes the eyes inside the view transition's circle
+## like everything else, with no tween of its own. `aria-hidden`: it says
+## nothing. "" when there is no cat to draw.
+pub fn band_cat(cat: String) -> String =
+  if cat == "" {
+    ""
+  } else {
+    let asleep = cat_outline(cat)
+    `<div class="peek" aria-hidden="true"><span>`
+      ++ `<svg class="awake" viewBox="61 86 38 31"><defs><linearGradient id="peek-ink" x1="0" y1="0" x2="1" y2="1">`
+      ++ `<stop offset="0" stop-color="#4f46e5"/><stop offset=".5" stop-color="#7c3aed"/><stop offset="1" stop-color="#db2777"/>`
+      ++ `</linearGradient></defs><path fill="url(#peek-ink)" fill-rule="evenodd" d="` ++ cat ++ `"/></svg>`
+      ++ `<svg class="asleep" viewBox="61 86 38 31"><path fill="#c7c9ee" d="` ++ asleep ++ `"/>`
+      ++ `<g fill="none" stroke="#1d2040" stroke-width="1.3" stroke-linecap="round"><path d="M86.4 102.2 q2.4 2.2 4.9 0.2"/><path d="M71.4 105.2 q2.4 2.2 4.9 0.2"/></g></svg>`
+      ++ "</span></div>"
+  }
+
+## The sun's cat and the moon's on the front page, and the one that peeks
+## over every other page's band: the mark's own cat, read out of
+## site/assets/logo.svg rather than copied, so there is one drawing of it.
+## Awake, it is the whole path, eyes cut out by the even-odd rule; asleep, it
+## is the first subpath alone, the outline with no eyes in it.
+pub fn cat_path(logo: String) -> String = {
+  let marker = `fill-rule="evenodd"`
+  match str.index_of(logo, marker) {
+    None -> panic("site/assets/logo.svg: no even-odd path, so no cat to put in the sun")
+    Some(i) -> {
+      let rest = str.drop(logo, i)
+      match str.index_of(rest, ` d="`) {
+        None -> panic("site/assets/logo.svg: the cat path has no d attribute")
+        Some(j) -> {
+          let from = str.drop(rest, j + 4)
+          match str.index_of(from, `"`) {
+            Some(k) -> str.take(from, k)
+            None -> panic("site/assets/logo.svg: the cat path's d attribute never closes")
+          }
+        }
+      }
+    }
+  }
+}
+
+pub fn cat_outline(path: String) -> String =
+  match str.index_of(path, " Z") {
+    Some(i) -> str.take(path, i + 2)
+    None -> panic("site/assets/logo.svg: the cat path has no closed first subpath")
+  }
+
+## Twelve faint stars for the band, still (the front page's twinkle is the
+## front page's). White on the day sky, so they are drawn at the night's
+## opacity (`--star-op`, 0 by day).
 fn band_stars() -> String =
   `<svg class="stars" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><g fill="#fff">
 <circle cx="130" cy="70" r=".9" opacity=".35"/><circle cx="410" cy="34" r=".8" opacity=".3"/><circle cx="660" cy="96" r="1" opacity=".3"/>
 <circle cx="880" cy="44" r=".9" opacity=".35"/><circle cx="1090" cy="110" r=".8" opacity=".25"/><circle cx="300" cy="170" r=".7" opacity=".2"/>
-<circle cx="980" cy="200" r=".7" opacity=".18"/></g></svg>`
+<circle cx="980" cy="200" r=".7" opacity=".18"/><circle cx="540" cy="150" r=".7" opacity=".22"/><circle cx="760" cy="186" r=".6" opacity=".16"/>
+<circle cx="230" cy="48" r=".6" opacity=".25"/><circle cx="1160" cy="58" r=".7" opacity=".22"/><circle cx="40" cy="140" r=".6" opacity=".18"/></g></svg>`
 
 ## Everything up to and including `</head>`, shared by [shell_ext] and the
 ## front page's own shell (gen/home.dawn), which differ only in what comes
@@ -541,10 +784,16 @@ pub fn theme_toggle(lang: Lang) -> String = {
 }
 
 ## The site's navigation, the same markup on every page, the front page's
-## included: the brand, then the sections, the language switch, search and
-## GitHub in `.links`, then the theme toggle. The toggle sits after `.links`
-## rather than in it so that on a phone it can share the first row with the
-## brand while the sections wrap onto the second (site/assets/style.css).
+## included: the mark and the release it was built from, the sections, then
+## the tools (the language switch, search, GitHub), then the theme toggle.
+## The sections are a group of their own so that the line under the current
+## one has only them to slide between (site/assets/theme.js), and so that on a
+## phone they can take the second row and scroll sideways while the mark, the
+## tools and the toggle keep the first (site/assets/style.css).
+##
+## The release pill sits beside the mark rather than inside it: the mark is a
+## link home, and a link cannot hold another. No pill when the build was not
+## told the version.
 pub fn nav_bar(a: Assets, lang: Lang, pair: String, root: String, active: String) -> String = {
   let nav = nav_html(lang, root, active)
   # the brand mark goes to this language's front page, not to the English one:
@@ -558,12 +807,20 @@ pub fn nav_bar(a: Assets, lang: Lang, pair: String, root: String, active: String
       En -> "Site"
       Zh -> "站点"
     }
+  let pill =
+    if a.version == "" {
+      ""
+    } else {
+      """<a class="release" href="${release_url(a.version)}">v${escape_html(a.version)}</a>"""
+    }
   """<nav class="site-nav" aria-label="${label}">
-<a class="brand" href="${root}/${home}"><img class="brand-logo" src="${root}/assets/${logo}" alt="">Dawn</a>
+<div class="id"><a class="brand" href="${root}/${home}"><img class="brand-logo" src="${root}/assets/${logo}" alt=""><span class="word">Dawn</span></a>${pill}</div>
 <div class="links">
 ${nav}
+</div>
+<div class="tools">
 ${switch_line}${search_button(a, lang, root)}
-<a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
+<a class="gh" href="https://github.com/dawnop/dawn-lang" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </div>
 ${theme_toggle(lang)}
 </nav>"""
@@ -735,9 +992,9 @@ test "the search button is labelled and indexed in the page's own language" {
   let en = shell(plain_assets(), En, "", "t", ".", "", no_head(), "")
   let zh = shell(plain_assets(), Zh, "", "t", "..", "", no_head(), "")
   assert str.contains(en, `data-search-index="./assets/search-en.json"`)
-  assert str.contains(en, ">Search<kbd>")
+  assert str.contains(en, `aria-label="Search" title="Search"`)
   assert str.contains(zh, `data-search-index="../assets/search-zh.json"`)
-  assert str.contains(zh, ">搜索<kbd>")
+  assert str.contains(zh, `aria-label="搜索" title="搜索"`)
   assert search_index_name(plain_assets(), En) == "search-en.json"
   assert search_index_name(plain_assets(), Zh) == "search-zh.json"
   assert str.contains(en, `data-search-body="./assets/search-body-en.json"`)
@@ -853,19 +1110,98 @@ test "toc nests h3 under its h2, with printed numbers set apart" {
 ## The band: the nav and the page's head in one header, the head only when
 ## the page has one, and the toggle hidden until theme.js shows it.
 test "a page's head is set in the sky band above its body" {
-  let h = PageHead { eyebrow: "spec" ++ sep() ++ "0.81.0", title: "Dawn <code>x</code>", lede: "", twin: "<em>t</em>", extra: "", cls: "toc-aligned" }
+  let h = PageHead {
+    crumbs: [section_crumb(En, ".", "spec", false)],
+    title: "Dawn <code>x</code>",
+    lede: "",
+    meta: [chip("normative"), release_chip(""), link_chip("zh/spec.html", "中文")],
+    extra: "",
+    cls: "toc-aligned",
+  }
   let p = page(plain_assets(), En, "spec.html", "t", ".", "spec", h, "<p>body</p>")
   assert str.contains(p, `<header class="sky">`)
   assert str.contains(p, `<div class="page-head toc-aligned">` ++ "\n"
-      ++ `<p class="eyebrow">spec<span class="sep">·</span>0.81.0</p>` ++ "\n"
-      ++ "<h1>Dawn <code>x</code></h1>\n" ++ `<p class="twin"><em>t</em></p>` ++ "\n</div>\n</div>\n</header>")
+      ++ `<nav class="crumbs" aria-label="Breadcrumb"><span aria-current="page">Spec</span></nav>` ++ "\n"
+      ++ "<h1>Dawn <code>x</code></h1>\n"
+      ++ `<ul class="meta"><li class="chip">normative</li><li class="chip"><a href="zh/spec.html">中文</a></li></ul>`
+      ++ "\n</div>\n</div>\n</header>")
   assert str.contains(p, `<article class="col prose">` ++ "\n<p>body</p>")
-  # no lede given, none written
+  # no lede given, none written; an empty chip is no chip
   assert not str.contains(p, `class="lede"`)
+  assert not str.contains(p, "chip rel")
   # a page with no head has the nav alone in its band
   let bare = page(plain_assets(), En, "", "t", ".", "", no_head(), "")
   assert not str.contains(bare, "page-head")
   assert str.contains(p, `id="theme-toggle" hidden`)
+}
+
+## The trail's steps link up, the last one is the page and links nowhere, and
+## a section is named by the nav's own label in the page's language.
+test "the trail links every step but the page itself" {
+  let t = crumbs_html(Zh, [section_crumb(Zh, "../..", "tutorial", true), here("第三章")])
+  assert t == `<nav class="crumbs" aria-label="页面位置"><a href="../../zh/tutorial/index.html">教程</a>`
+    ++ `<span class="sep" aria-hidden="true">/</span><span aria-current="page">第三章</span></nav>`
+  assert section_crumb(En, "..", "history", false) == here("History")
+}
+
+## 250 words or 400 Chinese characters to the minute, markup not counted,
+## rounded up and never under one; past an hour, hours only.
+test "reading time counts words and characters, not markup" {
+  assert reading_minutes("") == 1
+  var en = ""
+  for i in range(0, 260) {
+    en = en ++ `<span class="k">word</span> `
+  }
+  assert reading_minutes(en) == 2
+  assert reading_minutes(str.repeat("字", 400)) == 1
+  assert reading_minutes(str.repeat("字", 401)) == 2
+  # entities and attributes are not words
+  assert reading_minutes(`<a href="` ++ str.repeat("x ", 2000) ++ `">&amp;</a>`) == 1
+  assert str.contains(reading_chip(Zh, "x"), "阅读约 1 分钟")
+  assert str.contains(reading_chip(En, "x"), "1 min read")
+  # 250 * 189 words is 189 minutes: three hours, said as hours
+  assert str.contains(reading_chip(En, str.repeat("w ", 250 * 189)), ">about 3 h</li>")
+  assert str.contains(reading_chip(Zh, str.repeat("字", 400 * 61)), ">约 1 小时</li>")
+  assert str.contains(reading_chip(Zh, str.repeat("字", 400 * 60)), ">阅读约 60 分钟</li>")
+}
+
+## The translation note becomes a chip: its link, and the rest of its
+## sentence as the title.
+test "the translation note is a chip titled with the rest of its sentence" {
+  let note = [Em([Link("中文", "spec.md"), Text(" — the Chinese text is the original")])]
+  assert twin_chip(note, u => "./zh/spec.html") == `<li class="chip twin"><a href="./zh/spec.html" title="the Chinese text is the original" hreflang="zh-CN">`
+    ++ `<svg class="ci" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h6M5.5 2v1.5M4 3.5c.4 2.6 2 4.6 4 5.6M7.2 3.5C6.8 6 5.2 8.2 2.8 9.4M8.6 14l2.6-6.5 2.6 6.5M9.4 12h3.6"/></svg>`
+    ++ "中文</a></li>"
+  assert twin_note("English", "English —— 本文是正本") == "本文是正本"
+  assert twin_chip([], u => u) == ""
+}
+
+## The cat peeks over every band with a head, hidden from assistive
+## technology, awake and asleep both in the markup; not over the 404 page's
+## band, nor a band with no head, nor when there is no cat to draw.
+test "the cat looks over the band of a page with a head" {
+  let a = Assets { ..plain_assets(), cat: "M80 90 L90 90 L85 100 Z M84 95 L86 95 L85 97 Z" }
+  let h = PageHead { crumbs: [here("x")], title: "T", lede: "", meta: [], extra: "", cls: "col" }
+  let p = page(a, En, "", "t", ".", "", h, "")
+  assert str.contains(p, `</div>` ++ "\n" ++ `<div class="peek" aria-hidden="true"><span><svg class="awake"`)
+  assert str.contains(p, `fill-rule="evenodd" d="M80 90 L90 90 L85 100 Z M84 95 L86 95 L85 97 Z"`)
+  assert str.contains(p, `<path fill="#c7c9ee" d="M80 90 L90 90 L85 100 Z"/>`)
+  assert str.contains(p, "</span></div>\n</header>")
+  assert not str.contains(page(a, En, "", "t", ".", "", PageHead { ..h, cls: "nf" }, ""), "peek")
+  assert not str.contains(page(a, En, "", "t", ".", "", no_head(), ""), "peek")
+  assert not str.contains(page(plain_assets(), En, "", "t", ".", "", h, ""), "peek")
+}
+
+## The release pill beside the mark, linked to the release's notes, and none
+## when the build was not told the version.
+test "the nav names the release it was built from" {
+  let built = Assets { ..plain_assets(), version: "0.82.0" }
+  let n = nav_bar(built, En, "", ".", "")
+  assert str.contains(n, `<span class="word">Dawn</span></a><a class="release" href="https://github.com/dawnop/dawn-lang/releases/tag/v0.82.0">v0.82.0</a></div>`)
+  assert not str.contains(nav_bar(plain_assets(), En, "", ".", ""), `class="release"`)
+  # the sections are a group of their own, apart from the tools
+  assert str.contains(n, `<div class="links">` ++ "\n" ++ `<a href="./tutorial/index.html">Tutorial</a>`)
+  assert str.contains(n, `<div class="tools">`)
 }
 
 test "the toggle is labelled in the page's language, for theme.js to read" {
