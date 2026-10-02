@@ -90,7 +90,7 @@ selfhost/src/      分十个目录，依赖单向向下（拓扑序即下面的�
                    pkg/    compiler-facing 包操作（maven vendor add）；规划基础在 compiler-plan/
                    driver/ 模块图与整程序驱动（analyze stdlib checkdump）
                    c/      native 后端（emitc cdriver ctestrun rc）
-                   lsp/    语言服务（server lspc lspq）
+                   lsp/    语言服务（server lspc lspq lspv）
                    contract/ 白盒契约探针（probe cold prefix bench 等），读 pub(pkg) 的检查器状态；
                              不在 main/nmain 的模块图里，由 test 门的 `dawn test selfhost` 跑
                    根：main.dawn nmain.dawn doc.dawn version.dawn

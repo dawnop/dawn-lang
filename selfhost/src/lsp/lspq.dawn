@@ -19,8 +19,8 @@ use front/ast.{
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
   HandlerCell, HandlerArm,
   TNamed, TQual, TAssoc, TTuple, TFn,
-  SPText, SPInterp,
-  EStr, EVar, EApply, EMethod, ELambda,
+  StrPart, SPText, SPInterp,
+  EInt, EChar, EFloat, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf,
   EComptime, EBinary, EUnary, EIf, EMatch,
@@ -52,7 +52,10 @@ use check/identity
 use driver/analyze.{Program, CheckedMod}
 use driver/stdlib.{StdCtx, std_file_of}
 use ir/interp.{CtOut}
-use lsp/lspv.{value_text}
+use front/lexer.{slice_cps}
+use lsp/lspv.{
+  value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
+}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -66,7 +69,11 @@ pub(pkg) type QCx = {
   # has to remember that std sees more than user code does
   bins: Map[String, Sig],
   # the entry module's typed trees by declaration path (`typed_trees`)
-  typed: TypedTrees
+  typed: TypedTrees,
+  # the analyzed document's code points, which the parse tree's spans index:
+  # a literal's spelling (`0xFF` rather than `255`) is read back from here,
+  # because the parse tree keeps only the value the lexer made of it
+  cps: List[Char]
 }
 
 ## The typed trees of one module, keyed by the `identity.path_text` each was
@@ -998,6 +1005,36 @@ fn walk_rest(qc: QCx, q0: Q, rest: Expr, trest: Option[TExpr]) -> Q = {
   }
 }
 
+# ---- literals (docs/lsp-hover-design.md §4) ----
+
+## A literal's type, then the value line `lspv` renders for it, both in the one
+## fence. Offered over the literal's own span after the generic fallback, so on
+## the same span this one wins; with no typed tree there is no type line to
+## head it, and the literal is left to the fallback's silence.
+fn offer_literal(qc: QCx, q: Q, te: Option[TExpr], lo: Int, hi: Int, line: String) -> Q =
+  match te {
+    Some(t) -> offer(q, lo, hi, show_ty(qc, tex_ty(t)) ++ "\n" ++ line, None, None)
+    None -> q
+  }
+
+## The source text of `lo..hi`, empty when the span is not inside the document
+## (an analysis of another revision): the renderers then fall back to the
+## value alone.
+fn spelling(qc: QCx, lo: Int, hi: Int) -> String =
+  if lo < 0 || hi > len(qc.cps) || lo >= hi { "" } else { slice_cps(qc.cps, lo, hi) }
+
+## The text of a string literal with no interpolation; `None` for one with any.
+fn literal_string(parts: List[StrPart]) -> Option[String] = {
+  var out = ""
+  for p in parts {
+    match p {
+      SPText(t) -> { out = out ++ t }
+      SPInterp(_) -> return None
+    }
+  }
+  Some(out)
+}
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   # generic fallback: the expression's own type
@@ -1222,7 +1259,21 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, target, None) }
       }
-    EStr(parts, _, _) -> {
+    EInt(v, lo, hi) ->
+      # no line (a single decimal digit): the generic type offer above stands
+      match int_literal_text(spelling(qc, lo, hi), v) {
+        Some(line) -> { q = offer_literal(qc, q, te, lo, hi, line) }
+        None -> ()
+      }
+    EChar(v, lo, hi) -> { q = offer_literal(qc, q, te, lo, hi, char_literal_text(v)) }
+    EFloat(v, lo, hi) -> { q = offer_literal(qc, q, te, lo, hi, float_literal_text(spelling(qc, lo, hi), v)) }
+    EStr(parts, lo, hi) -> {
+      # only a string with no interpolation is a literal: one with `${...}`
+      # is an expression, and its type is all there is to say about it
+      match literal_string(parts) {
+        Some(s) -> { q = offer_literal(qc, q, te, lo, hi, string_literal_text(s)) }
+        None -> ()
+      }
       let no_parts: List[Option[TExpr]] = []
       let tparts = match te {
         Some(XStr(tp, _, _)) -> interp_texprs(tp)

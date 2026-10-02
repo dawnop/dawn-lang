@@ -16,6 +16,14 @@
 # strings), so the same rule keeps it balanced. The width differs, for the
 # reason given at `VALUE_SHOWN`. Rendering itself stops a little past the
 # width, so a 100,000-element table costs as much as a 100-element one.
+#
+# A literal's hover (§4) renders here too, through the same pieces -- the
+# Char and String escapes, the hexadecimal, the cut -- so a literal and the
+# constant it initializes never disagree about how a value is written. What a
+# literal adds is what its spelling hides: the code point and UTF-8 bytes of a
+# Char, both lengths of a String, and whether a Float literal is exactly a
+# double, decided on the decimal itself (`float_exact`) because Dawn has no
+# exact expansion of a double and this file does not write one.
 
 use std/map
 use std/str
@@ -211,6 +219,232 @@ fn esc_char(c: Char, quote: Char) -> String =
   else if char.code(c) < 0x20 || char.code(c) == 0x7F { "\\u{" ++ hex(char.code(c)) ++ "}" }
   else { str.from_char(c) }
 
+# ---- literals (docs/lsp-hover-design.md §4) ----
+#
+# A literal's hover is its type and then one value line. The value comes from
+# the parse tree (what the lexer made of the literal); the spelling, where it
+# matters, from the document text, because the tree keeps only the value. A
+# spelling that does not read back as that value -- the buffer moved under an
+# analysis of an older revision -- costs the echo, never the value.
+
+## An `Int` literal's value line. Written in decimal (underscores or not), it is
+## the value as a constant shows one: `1000000  (0xF4240)`, the hexadecimal from
+## 10 up. Written `0x`/`0b` (the only prefixes the lexer reads), the spelling is
+## echoed and the decimal given: `0xFF = 255`. A plain decimal digit `0`..`9`
+## has no line (`None`): its spelling, value and hexadecimal are one character,
+## so the line would only echo it (gopls draws the same line).
+pub(pkg) fn int_literal_text(spelling: String, v: Int) -> Option[String] = {
+  let body = match str.strip_prefix(spelling, "-") {
+    Some(b) -> b
+    None -> spelling
+  }
+  if str.starts_with(body, "0x") || str.starts_with(body, "0b") {
+    Some(spelling ++ " = " ++ to_string(v))
+  } else if v >= 0 && v <= 9 && not str.contains(spelling, "_") && not str.starts_with(spelling, "-") {
+    None
+  } else {
+    Some(to_string(v) ++ suffix(TyInt, VInt(v), false))
+  }
+}
+
+## A `Char` literal's value line: the character as a literal (escaped the way
+## the lexer reads one back, so `'\n'` stays visible), its code point, and the
+## bytes UTF-8 encodes it as -- `'é'  U+00E9  UTF-8: C3 A9`. An escape spelling
+## (`'\u{1F600}'`) gets the same line: the code point is the same either way.
+pub(pkg) fn char_literal_text(cp: Int) -> String =
+  char_lit(cp) ++ "  U+" ++ str.pad_start(hex(cp), 4, "0") ++ "  UTF-8: " ++ utf8_hex(cp)
+
+## A `Float` literal's value line: the shortest spelling that reads back as the
+## same double (`to_string`, std/fmt.dtoa -- what the program prints), and
+## whether the literal *is* that double or was rounded to it. Dawn has no
+## exact decimal expansion of a double and this does not write one: whether
+## the written decimal is exactly a double is decided on the decimal itself
+## (`float_exact`).
+pub(pkg) fn float_literal_text(spelling: String, v: Float) -> String = {
+  let shown = to_string(v)
+  let reads_back = match parse_float(str.replace(spelling, "_", "")) {
+    Some(f) -> f == v
+    None -> false
+  }
+  if not reads_back { return shown }
+  match float_exact(spelling) {
+    Some(true) -> shown ++ "  (exact)"
+    Some(false) -> shown ++ "  (not exactly representable)"
+    None -> shown
+  }
+}
+
+## A `String` literal's value line: the literal, escaped and cut as a constant's
+## string is, then its length both ways a reader asks for it -- code points
+## (what `str.len` counts, spec §11) and UTF-8 bytes (what it costs on the
+## wire). Both always: the counts are the point of hovering, not a cut's mark.
+pub(pkg) fn string_literal_text(s: String) -> String = {
+  var cps = 0
+  var bytes = 0
+  for c in code_points(s) {
+    cps = cps + 1
+    bytes = bytes + len(utf8_bytes(char.code(c)))
+  }
+  cut_balanced(str_lit(s, VALUE_SHOWN + 1), VALUE_SHOWN) ++
+    "  (" ++ counted(cps, "code point") ++ ", " ++ counted(bytes, "UTF-8 byte") ++ ")"
+}
+
+fn counted(n: Int, what: String) -> String =
+  to_string(n) ++ " " ++ what ++ (if n == 1 { "" } else { "s" })
+
+## The UTF-8 encoding of a scalar value (spec §1.5: `Char` holds no surrogate).
+pub(pkg) fn utf8_bytes(cp: Int) -> List[Int] =
+  if cp < 0x80 {
+    [cp]
+  } else if cp < 0x800 {
+    [0xC0 | (cp >> 6), 0x80 | (cp & 0x3F)]
+  } else if cp < 0x10000 {
+    [0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
+  } else {
+    [0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
+  }
+
+fn utf8_hex(cp: Int) -> String = {
+  var out = ""
+  for b in utf8_bytes(cp) {
+    let h = str.pad_start(hex(b), 2, "0")
+    out = if out == "" { h } else { out ++ " " ++ h }
+  }
+  out
+}
+
+## The most significant digits a decimal can have and still be exactly a
+## double: the longest exact expansion (a subnormal's) has 767. Past this the
+## answer is no without dividing anything.
+const EXACT_DIGITS: Int = 800
+
+## 2^53: an odd significand at or above it is not a double's.
+const TWO_53: Int = 9007199254740992
+
+## Whether the decimal `spelling` (a Float literal: digits, a point, an
+## exponent, underscores) is exactly a double; `None` for text that is not one.
+##
+## The literal's value is D × 10^k = D × 5^k × 2^k for an integer D. It is a
+## double exactly when it is a dyadic rational odd × 2^e with odd < 2^53 and e
+## inside the format (e >= -1074 for the smallest subnormal step, odd × 2^e
+## below 2^1024). So: strip D's trailing zeros into k; for k < 0 divide D by
+## 5^-k, failing on a remainder (then the value is not dyadic at all); halve
+## out D's factors of two into e; what is left, times 5^k for k > 0, must be
+## under 2^53. The arithmetic is long division of a short digit list by 5 or
+## 2 -- bounded by `EXACT_DIGITS` -- never an expansion of the double.
+fn float_exact(spelling: String) -> Option[Bool] = {
+  var mant: List[Int] = []
+  var frac = 0
+  var seen_point = false
+  var in_exp = false
+  var exp_signed = false
+  var exp_neg = false
+  var exp = 0
+  var exp_digits = 0
+  for c in code_points(spelling) {
+    let d = char.code(c) - char.code('0')
+    if c == '_' {
+      ()
+    } else if in_exp {
+      if (c == '+' || c == '-') && exp_digits == 0 && not exp_signed {
+        exp_signed = true
+        exp_neg = c == '-'
+      } else if d >= 0 && d <= 9 {
+        exp_digits = exp_digits + 1
+        # far past any exponent a double reaches: saturate, do not overflow
+        if exp < 100000 { exp = exp * 10 + d }
+      } else {
+        return None
+      }
+    } else if c == 'e' || c == 'E' {
+      in_exp = true
+    } else if c == '.' {
+      if seen_point { return None }
+      seen_point = true
+    } else if d >= 0 && d <= 9 {
+      mant = mant ++ [d]
+      if seen_point { frac = frac + 1 }
+    } else {
+      return None
+    }
+  }
+  if len(mant) == 0 || (in_exp && exp_digits == 0) { return None }
+  # D's significant digits, most significant first; value = D × 10^k
+  var k = (if exp_neg { -exp } else { exp }) - frac
+  var first = 0
+  while first < len(mant) && mant[first] == 0 { first = first + 1 }
+  if first == len(mant) { return Some(true) }
+  var last = len(mant)
+  while mant[last - 1] == 0 {
+    last = last - 1
+    k = k + 1
+  }
+  if last - first > EXACT_DIGITS { return Some(false) }
+  var ds: List[Int] = []
+  var i = first
+  while i < last {
+    ds = ds ++ [mant[i]]
+    i = i + 1
+  }
+  var fives = 0
+  var e = 0
+  if k >= 0 {
+    # 5^23 > 2^53: no odd part survives that many fives
+    if k > 22 { return Some(false) }
+    fives = k
+    e = k
+  } else {
+    var m = -k
+    while m > 0 {
+      match div_small(ds, 5) {
+        Some(q) -> { ds = q }
+        None -> return Some(false)
+      }
+      m = m - 1
+    }
+    e = k
+  }
+  while ds[len(ds) - 1] % 2 == 0 {
+    match div_small(ds, 2) {
+      Some(q) -> { ds = q }
+      None -> return None
+    }
+    e = e + 1
+  }
+  # 10^16 > 2^53, so a longer odd part is already too wide (and would not
+  # fit an Int to compare)
+  if len(ds) > 16 { return Some(false) }
+  var odd = 0
+  for d in ds { odd = odd * 10 + d }
+  while fives > 0 {
+    if odd >= TWO_53 / 5 + 1 { return Some(false) }
+    odd = odd * 5
+    fives = fives - 1
+  }
+  if odd >= TWO_53 { return Some(false) }
+  var bits = 0
+  var n = odd
+  while n > 0 {
+    bits = bits + 1
+    n = n / 2
+  }
+  Some(e >= -1074 && bits + e <= 1024)
+}
+
+## `ds / d` for a decimal digit list, most significant digit first, with no
+## leading zero; `None` when `d` does not divide it.
+fn div_small(ds: List[Int], d: Int) -> Option[List[Int]] = {
+  var out: List[Int] = []
+  var r = 0
+  for x in ds {
+    let cur = r * 10 + x
+    let q = cur / d
+    r = cur % d
+    if len(out) > 0 || q != 0 { out = out ++ [q] }
+  }
+  if r == 0 { Some(out) } else { None }
+}
+
 # ---- tests ----
 
 use check/cx.{cx_new}
@@ -291,4 +525,81 @@ test "a long value is cut, closed, and says how long it was" {
 test "a function value has no text" {
   let no_caps: Map[Int, CValue] = map.empty()
   assert value_text(prelude_adts(), TyInt, VClosure("m", "f", no_caps)) == None
+}
+
+test "an Int literal shows its value, and echoes a 0x or 0b spelling" {
+  # a single decimal digit would only echo itself: the type alone
+  assert int_literal_text("0", 0) == None
+  assert int_literal_text("9", 9) == None
+  assert int_literal_text("10", 10) == Some("10  (0xA)")
+  assert int_literal_text("255", 255) == Some("255  (0xFF)")
+  # underscores are spelling, not value
+  assert int_literal_text("1_000_000", 1000000) == Some("1000000  (0xF4240)")
+  assert int_literal_text("0_7", 7) == Some("7")
+  assert int_literal_text("0x0", 0) == Some("0x0 = 0")
+  assert int_literal_text("0xFF", 255) == Some("0xFF = 255")
+  assert int_literal_text("0xff_ff", 65535) == Some("0xff_ff = 65535")
+  assert int_literal_text("0b1010", 10) == Some("0b1010 = 10")
+  # the one literal that carries its minus sign (spec §1.5)
+  assert int_literal_text("-0x8000000000000000", -9223372036854775807 - 1) ==
+    Some("-0x8000000000000000 = -9223372036854775808")
+  assert int_literal_text("-9223372036854775808", -9223372036854775807 - 1) == Some("-9223372036854775808")
+  # no spelling to read (another revision's span): the value alone
+  assert int_literal_text("", 255) == Some("255  (0xFF)")
+}
+
+test "a Char literal shows its code point and UTF-8 bytes" {
+  assert char_literal_text(0x61) == "'a'  U+0061  UTF-8: 61"
+  assert char_literal_text(0xE9) == "'é'  U+00E9  UTF-8: C3 A9"
+  assert char_literal_text(0x4E16) == "'世'  U+4E16  UTF-8: E4 B8 96"
+  assert char_literal_text(0x1F600) == "'😀'  U+1F600  UTF-8: F0 9F 98 80"
+  assert char_literal_text(10) == "'\\n'  U+000A  UTF-8: 0A"
+  assert char_literal_text(0) == "'\\u{0}'  U+0000  UTF-8: 00"
+  # each encoding length's last code point
+  assert utf8_bytes(0x7F) == [0x7F]
+  assert utf8_bytes(0x7FF) == [0xDF, 0xBF]
+  assert utf8_bytes(0xFFFF) == [0xEF, 0xBF, 0xBF]
+  assert str.ends_with(char_literal_text(0x10FFFF), "  U+10FFFF  UTF-8: F4 8F BF BF")
+}
+
+test "a Float literal shows its shortest spelling and whether it is exact" {
+  assert float_literal_text("1.5", 1.5) == "1.5  (exact)"
+  assert float_literal_text("1.1", 1.1) == "1.1  (not exactly representable)"
+  assert float_literal_text("0.1", 0.1) == "0.1  (not exactly representable)"
+  assert float_literal_text("0.0", 0.0) == "0.0  (exact)"
+  assert float_literal_text("1_000.25", 1000.25) == "1000.25  (exact)"
+  assert float_literal_text("2.50e3", 2500.0) == "2500.0  (exact)"
+  # 0.1's double, written out in full, is that double exactly
+  assert float_literal_text("0.1000000000000000055511151231257827021181583404541015625", 0.1) ==
+    "0.1  (exact)"
+  assert float_exact("0.1000000000000000055511151231257827021181583404541015625") == Some(true)
+  assert float_exact("0.1000000000000000055511151231257827021181583404541015624") == Some(false)
+  # integers: exact up to 2^53, and past it only with enough factors of two
+  assert float_exact("9007199254740992.0") == Some(true)
+  assert float_exact("9007199254740993.0") == Some(false)
+  assert float_exact("1180591620717411303424.0") == Some(true)
+  assert float_exact("1e22") == Some(true)
+  assert float_exact("1e23") == Some(false)
+  # out of range both ways
+  assert float_exact("1e400") == Some(false)
+  assert float_exact("1e-400") == Some(false)
+  assert float_exact("5e-324") == Some(false)
+  assert float_exact("0.5e-1073") == Some(false)
+  assert float_exact("1.5e-3") == Some(false)
+  assert float_exact("0.000_000_000_000_000_000_000_000_000_000_000_000_000_000_000_0") == Some(true)
+  assert float_exact("1..5") == None
+  # a spelling that is not this value claims nothing
+  assert float_literal_text("2.5", 1.5) == "1.5"
+}
+
+test "a String literal shows its code points and UTF-8 bytes" {
+  assert string_literal_text("") == "\"\"  (0 code points, 0 UTF-8 bytes)"
+  assert string_literal_text("a") == "\"a\"  (1 code point, 1 UTF-8 byte)"
+  assert string_literal_text("héllo\n") == "\"héllo\\n\"  (6 code points, 7 UTF-8 bytes)"
+  assert string_literal_text("世😀") == "\"世😀\"  (2 code points, 7 UTF-8 bytes)"
+  # a long one is cut where a constant's is, and still counts all of it
+  let long = string_literal_text(str.repeat("ab", 100))
+  assert str.starts_with(long, "\"abab")
+  assert str.ends_with(long, "…\"  (200 code points, 200 UTF-8 bytes)")
+  assert str.len(long) == VALUE_SHOWN + str.len("  (200 code points, 200 UTF-8 bytes)")
 }
