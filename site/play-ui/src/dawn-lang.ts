@@ -162,8 +162,12 @@ const dawnMode = StreamLanguage.define<State>({
         return 'keyword'
       }
       if (/^[A-Z]/.test(word)) return 'typeName'
-      // an identifier right after `fn` is the definition name
-      if (wasAfterFn) return 'def'
+      // an identifier right after `fn` is the definition name. Not `def`:
+      // StreamLanguage seeds every token table with the legacy CodeMirror 5
+      // names, and its `def` (variableName.definition) wins over tokenTable,
+      // so the name never reached defTag and rendered as a plain variable
+      // (issue #350). A name the legacy table lacks resolves through ours.
+      if (wasAfterFn) return 'dawnDef'
       return 'variableName'
     }
 
@@ -177,7 +181,7 @@ const dawnMode = StreamLanguage.define<State>({
     number: tags.number,
     typeName: tags.typeName,
     variableName: tags.variableName,
-    def: defTag,
+    dawnDef: defTag,
     interp: interpTag,
   },
 })
@@ -191,7 +195,7 @@ const dawnMode = StreamLanguage.define<State>({
 // highlighter's .k/.t/.f/.s/.i/.n/.c. Plain identifiers keep a class that no
 // rule colours: they take the pane's text colour, but stay in their own span,
 // as they were under the HighlightStyle, so text runs are cut where they were.
-const dawnHighlight = tagHighlighter([
+export const dawnHighlight = tagHighlighter([
   { tag: tags.keyword, class: 'tok-keyword' },
   { tag: tags.typeName, class: 'tok-typeName' },
   { tag: defTag, class: 'tok-def' },
