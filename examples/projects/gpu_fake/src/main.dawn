@@ -45,9 +45,9 @@ use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, addf,
   load_hinted, store_hinted, for_arch, hint_latency,
   d_loop2, d_reduce_i, s_addi, s_maxi, s_consti, s_le_i, spread,
   i_const, add_i, mul_i, div_i, rem_i, lt_i, eq_i, select, idx_const, idx_add,
-  d_assert, d_print, d_global, d_global_aligned, global_ptrs, lanes,
+  d_assert, d_print, d_global, global_ptrs, lanes,
   ptr_offset, load_ptrs, store_ptrs, alloca_ptrs,
-  float_to_float, addf_down, addf_up, extract, cat, permute_tile }
+  float_to_float, extract, cat, permute_tile }
 use tileir/prog.{trace_kernel}
 use tileir/render.{render}
 
@@ -146,7 +146,7 @@ fn table_b() -> List[Float] = [-0.25, -1.25, -4.25, -9.25, -16.25, -25.25, -36.2
 fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [N]
   d_global("tbl_a", F64, table_a())
-  d_global_aligned("tbl_b", F64, table_b(), 256)
+  d_global("tbl_b", F64, table_b(), align: 256)
   let blk = tile_at(block_id(0), N)
   let off = lanes(blk, s)
   let tx = load(x, blk, s)
@@ -179,9 +179,9 @@ fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), N)
   let a = float_to_float(F64, F32, s, load(x, blk, s))
   let b = float_to_float(F64, F32, s, load(y, blk, s))
-  store(out, blk, s, float_to_float(F32, F64, s, addf_down(F32, s, a, b)))
+  store(out, blk, s, float_to_float(F32, F64, s, addf(F32, s, a, b, rounding: narrow.Down)))
   store(out, idx_add(blk, idx_const(N)), s,
-    float_to_float(F32, F64, s, addf_up(F32, s, a, b)))
+    float_to_float(F32, F64, s, addf(F32, s, a, b, rounding: narrow.Up)))
 }
 
 ## Knife T10: `alloca`, memory that belongs to the block and to nothing else.
@@ -317,7 +317,7 @@ fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], F
   Ok(got)
 }
 
-## The `addf_down` / `addf_up` pair on the host. The sum of two binary32
+## The `addf(.., rounding: Down)` / `rounding: Up` pair on the host. The sum of two binary32
 ## values is EXACT in binary64, so this rounds the exact sum in the named
 ## direction and `std/narrow`'s rounder is the whole of the arithmetic. It
 ## is the one reference `std/gpu` does not already carry.

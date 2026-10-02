@@ -1,7 +1,8 @@
 # 标准库默认参数收敛：设计（K0–K19）
 
 > 状态：current。本线的总纲：分组裁决、刀序与每刀的回填位置。K0（签名渲染默认表达式、
-> LSP `textDocument/signatureHelp`）与 K1（`std/narrow` 的 `Rounding`）已落地；其余各刀落地时回填 §7「状态」并在这里改写被
+> LSP `textDocument/signatureHelp`）、K1（`std/narrow` 的 `Rounding`）与 K2（tileir Dev 属性族与
+> `trace_kernel` 的 `hints`）已落地；其余各刀落地时回填 §7「状态」并在这里改写被
 > 事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2），
 > 默认参数本身的语义见 [spec.md](spec.md) 3.1 节与 [named-args-design.md](named-args-design.md)。
 
@@ -211,9 +212,10 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | K7–K18 | B1 之后的 Dev load/store 五连合并，按 `scripts/tile-golden/kernels.dawn` 的段落与其它文件切 | K6 | 无；golden 逐字节不动 |
 | K19 | B2：`parse_int` 迁 `std/fmt` 并吞 `parse_int_radix` | 无 | `doc --builtins`；builtin-decl-contract 镜像少一项 |
 
-T17（`ftoi` saturating、`ftof` nearest_away）排在 K2 之后，直接写成
+T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的仍是后缀名（`float_to_int_sat`、
+`float_to_float_zero` / `_down` / `_up` / `_away`）；K2 把它们并成
 `float_to_int(.., saturating: Bool = false)` 与 `float_to_float(.., rounding: Rounding = NearestEven)`，
-不再新增后缀名。B3 尾块前向匹配另立设计文档，不在本刀序。
+现已按默认参数落地（§7.3）。B3 尾块前向匹配另立设计文档，不在本刀序。
 
 ## 6. 不做的（理由）
 
@@ -237,8 +239,9 @@ T17（`ftoi` saturating、`ftof` nearest_away）排在 K2 之后，直接写成
 | 刀 | 状态 | 提交 |
 |---|---|---|
 | K0 | 已落地 | `8938471f`（PR #375 rebase 合入 main 后的哈希；分支上原为 `c53d7e85`） |
-| K1 | 已落地 | `fd99b635`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
-| K2–K19 | 未开工 | |
+| K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
+| K2 | 已落地 | `K2_SHA`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
+| K3–K19 | 未开工 | |
 
 ### 7.1 K1 落地记录
 
@@ -269,4 +272,57 @@ T17（`ftoi` saturating、`ftof` nearest_away）排在 K2 之后，直接写成
   给契约补定向节要改 `gen.py` 与 `.expect`，超出本刀「判据不变」的范围，留作后续。
 - **api-diff。** K0 版把 `mode` 的新增报成三条「signature changed」（Breaking）；本刀教它认「末尾追加的
   带默认形参」（§4.4），实测报为 Additions，删掉的四个函数仍是 Breaking。
+
+### 7.2 T4 注释的推翻
+
+刀 T4 给 Tile IR 属性的其余取值起了后缀名（`addf_down`、`addf_ftz`、`maxf_nan`、`add_i_nsw`、`d_for_unsigned`……），
+`packages/tileir/src/dev.dawn` 在那一节写下的理由是：属性是操作**是什么**的一部分，与 `shr_i` / `shr_u` 同理；
+调用方在调用处选定一个；名字可以 grep。另补一句各操作接受的值不统一（`approx` 与 `flush_to_zero` 只收 f32，
+`addf` 根本不收 `approx`）。K2 把这些取值改成带方言默认值的形参，这段理由**不是被绕过，而是被推翻**，四条：
+
+1. **grep。** 具名实参 `rounding: Down` 一样可 grep，而且一次 grep 能找出**所有**向下舍入的操作；
+   `_down` 后缀分散在 `addf_down`、`mul_down`、`float_to_float_down` 上，做不到跨操作统一。
+2. **值集不统一。** 两种设计都挡不住：`D` 是泛型，「只收 f32」在签名上表达不出来，今天靠汇编器拒，改后照旧；
+   写入器没学会的组合，改后在记录处拒（记录 handler 的操作名白名单），与后缀名时代拼不出来的效果相同，
+   只是从「没有这个名字」变成「有这个写法、记录时说不行」。
+3. **组合拼不出。** `addf_down` 与 `addf_ftz` 各有一个，「向下舍入且 ftz」没有名字；`d_global_private` 与
+   `d_global_const` 互斥，「私有常量」「对齐的私有」都拼不出；`d_for2`…`d_for4` 没有 unsigned 版。改后这些都能写，
+   其中 `d_for2`…`d_for4` 的 `unsigned_cmp` 今天就记得下来（`For.unsigned` 字段本来就在），浮点与整数的组合
+   在写入器学会之前于记录时拒绝。
+4. **方言与 cuTile 本身就是属性 / 关键字参数。** Tile IR 方言把它们建模为操作上带默认值的属性
+   （`d_global` 的旧注释原话：「Public and writable, which are the dialect's own defaults」），cuTile Python 把它们做成
+   带默认的关键字参数；舍入方向与宿主参考 `std/narrow` 共用同一个 `Rounding` 值，不再一边字符串一边后缀。
+
+仍保留独立名字的（C 组，理由不变）：`sqrt_approx`（`approx` 是精度契约、容差档，不是舍入方向，所以 `Rounding`
+不收 `Approx`）、`shr_i` / `shr_u` 与 `eq_u` 族（符号性改变结果）、`add_i64`（结果类型不同）。`dev.dawn` 的新注释
+（「the attributes of float arithmetic」一节）照此改写。
+
+### 7.3 K2 落地记录
+
+- **面。** `addf` / `sub` / `mul` / `div` 加 `rounding: Rounding = NearestEven, ftz: Bool = false`；`maxf` / `minf` 加
+  `propagate_nan: Bool = false`；`add_i` / `sub_i` / `mul_i` 加 `overflow: Overflow = NoAssumption`；`float_to_int` 加
+  `saturating: Bool = false`；`float_to_float` 加 `rounding: Rounding = NearestEven`；`d_for` 与 `d_for2`…`d_for4` 在 body
+  之后加 `unsigned_cmp: Bool = false`；`d_global` 加 `align: Int = 0, visibility: Visibility = Public, constant: Bool = false`；
+  `alloca_ptrs` 加 `shared: Bool = false`；`prog.trace_kernel` 在 body 之后加 `hints: Hints = []`。新类型
+  `Overflow = NoAssumption | NoSignedWrap | NoUnsignedWrap | NoWrap`、`Visibility = Public | Private`；方言拼写函数
+  `rounding_name`（K1 文件头说归 tileir 的那个）、`overflow_name`、`visibility_name`，与 `padding_name` 同形。
+- **删除的 24 个名字。** `addf_down` `addf_up` `mul_down` `mul_up` `div_down` `div_up` `addf_ftz` `mul_ftz` `maxf_nan`
+  `minf_nan` `add_i_nsw` `sub_i_nuw` `mul_i_nw` `float_to_int_sat` `float_to_float_zero` `float_to_float_down`
+  `float_to_float_up` `float_to_float_away` `d_for_unsigned` `d_global_aligned` `d_global_private` `d_global_const`
+  `alloca_shared_ptrs` `trace_kernel_hinted`。
+- **IR 不动的做法。** 记录 handler、渲染器、写入器读的仍是 T4 / T17 的内部操作名（`addf_neg_inf`、`ftof_zero`、
+  `muli_nw`……），公开函数按形参拼出同一个名字，所以 tile-golden 的 `.mlir` / `.tilebc` 逐字节不动。写入器没学会的
+  组合拼出的是白名单外的名字（`addf_neg_inf_ftz`、`subf_zero`、`addi_nw`），由 `check_binary` / `check_binary_int`
+  带 kernel 名拒绝；`ftof` 的非法舍入照旧由 `ftof_modes` 表拒绝。`saturating` 在方言里对每个 `ftoi` 都合法，
+  没有额外规则。两张表（形参到内部名、`Rounding` 到方言拼写）由 `prog` 的内联测试互相钉住：每个 `Rounding`
+  经 `float_to_float` 记录出的操作名，`ftof_mode` 读回来正好是 `rounding_name` 的拼写。
+- **一个例外。** `float_to_float` 的默认 `NearestEven` 到 `f8E8M0FNU` 写的是 `zero`：该格式没有 `nearest_even`，
+  方言默认就是 `zero`，K2 之前也是这样。签名里的 `= NearestEven` 在这一个目标上不是字面意义，注释写明。
+- **调用方。** `scripts/tile-golden/kernels.dawn` 32 处（另加导入列表），`examples/projects/gpu_fake` 3 处，
+  tileir 自身测试 5 处；`packages/tileref` 与 `scripts/tile-gpu-diff/*.dawn` 不依赖 tileir，0 处。
+- **版本。** `packages/tileir` 0.1.0 → 0.2.0。v2-in-name 规则只管 major ≥ 2（`docs/package-design.md`）；0.x 的
+  minor 升级按 semver 惯例本就允许破坏，不改包名。
+- **未做。** 写入器与渲染器学会其余组合（`subf` 的定向舍入、`divf` 的 ftz、`addi` 的 `no_wrap` 等）：方言都允许，
+  但每一个都要层 1 的回答，属于 Tile IR 覆盖刀，不属于本线。Dev 的 `load_hinted` / `store_hinted` 等 load/store
+  五连归 B 组（K7–K18），本刀不动。
 

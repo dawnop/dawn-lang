@@ -18,7 +18,7 @@ f64 的相同（`Param[BF16]`、`addf(BF16, ...)`），dtype 名 `"bf16"` 贯穿
 | 模块 | 内容 |
 |------|------|
 | `dev` | `pub effect Dev`（句柄级、单态的设备操作）、句柄类型（`Tile[D]` / `Param[D]` / `Idx` / `Scalar[D]` / `Ptrs[D]`、视图类型等，都是 opaque，`D` 是幻影格式参数）与其上的类型化函数；分组见下节 |
-| `prog` | `TileOp` 与 `TileProg`：记录的 ADT；`trace_kernel(name, params, body)` 与 `trace_kernel_hinted` 是记录 handler，带区域栈；`MAX_LOOP_DEPTH` / `MAX_HANDLES` |
+| `prog` | `TileOp` 与 `TileProg`：记录的 ADT；`trace_kernel(name, params, body, hints = [])` 是记录 handler，带区域栈；`MAX_LOOP_DEPTH` / `MAX_HANDLES` |
 | `lower` | `lower(prog) -> Kernel`：线性指令表 `Instr`（区域操作的体是嵌套的一张表），值从 0 密集编号，操作数 `Arg(pos)` / `Val(id)`，类型 `Ty`；指针梯子、去重、SSA 重编、区域作用域都在这里 |
 | `render` | `render(prog) -> String`，一个 `cuda_tile.module @m` 含一个 `entry @<name>`；一条 `Instr` 一行，区域是头一行、体缩两格、右花括号 |
 | `bytecode` | `encode(prog) -> Bytes`，`cuda-tile` 字节码，含区域编码；`BYTECODE_MAJOR / BYTECODE_MINOR` 钉头里的版本，`bytecode_version()` 给出 `"13.4"` |
@@ -39,11 +39,18 @@ JSON；本文不再逐个列名字，因为这张表上一次逐个列的时候 
 | 内存与指针 | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
 | 视图 | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
 | 常量与形状 | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
-| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int_sat` `float_to_float_away` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
+| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
 | 区域 | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
 | token | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
-| 模块全局 | `t_global` `t_get_global` | `d_global` `d_global_const` `global_ptrs` |
+| 模块全局 | `t_global` `t_get_global` | `d_global` `global_ptrs` |
 | 断言与调试 | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
+
+操作上的属性（舍入方向、`flush_to_zero`、`propagate_nan`、整数 `overflow`、循环的 `unsignedCmp`、
+全局的对齐 / 可见性 / 只读、`alloca` 的 `global`）自刀 K2 起是带方言默认值的具名形参，放在位置参数
+（以及 body）之后：`addf(F32, s, a, b, rounding: Down)`、`d_global("t", F64, xs, visibility: Private)`、
+`trace_kernel("k", ps, () => body(), hints: hs)`。舍入方向是 `std/narrow` 的 `Rounding`。刀 T4 / T17 的
+后缀名（`addf_down`、`float_to_int_sat`、`d_global_private`……）已删除，理由见
+[`docs/std-defaults-design.md`](../../docs/std-defaults-design.md) 7.2 节。
 
 ## 用法
 

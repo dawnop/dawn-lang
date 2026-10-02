@@ -17,7 +17,8 @@
 use std/list
 use std/str
 use std/gpu.{F64, F32, F16, I32, I64}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, float_to_float_away, float_to_float_zero, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -232,7 +233,7 @@ pub type Global = {
 ## (`MakeToken(0)` first), and the `optimization_hints` of the entry itself.
 ##
 ## `hints` is empty for every kernel but the ones knife T15 records with
-## `trace_kernel_hinted`. It sits on the program rather than on an
+## `trace_kernel(.., hints: hs)`. It sits on the program rather than on an
 ## operation because that is where the dialect puts it: `optimization_hints`
 ## is an argument of `entry`, written in the function TABLE and not in the
 ## body (BytecodeWriter.cpp's `writeFunctionTableSection`).
@@ -306,10 +307,14 @@ fn check_strides(name: String, shape: List[Int], strides: List[Int]) -> Unit =
 
 # The suffixed names knife T4 added are the same operations under another
 # ATTRIBUTE value, spelled the way `shru` already was: one dialect opcode,
-# two names, and the attribute is the whole difference. bytecode.dawn's
-# `float_op` / `int_op` / `predicate_value` map them back to the opcode
-# and `float_rounding` / `float_flags` / `int_attrs` / `cmp_ordering` say
-# what the suffix asked for. `cmpi` has no ordering attribute, so
+# two names, and the attribute is the whole difference. Since knife K2 no
+# kernel spells them: dev.dawn's functions take the attribute as a
+# defaulted parameter and compose the name, so a combination nothing below
+# writes (`addf` rounded down AND flushed to zero) arrives here as a name
+# that is not on these lists and is refused like a misspelt one.
+# bytecode.dawn's `float_op` / `int_op` / `predicate_value` map them back
+# to the opcode and `float_rounding` / `float_flags` / `int_attrs` /
+# `cmp_ordering` say what the suffix asked for. `cmpi` has no ordering attribute, so
 # `check_int_pred` below keeps the six unprefixed ones.
 #
 # The operation names and predicates the typed surface spells. An effect
@@ -799,7 +804,14 @@ fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 ## A `t_loop_begin` deeper than MAX_LOOP_DEPTH, a `t_loop_end` with no open
 ## loop or with the wrong number of values, or a body that ends with a loop
 ## still open, is refused.
-pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, body: fn() -> Unit !Dev) -> TileProg = {
+##
+## `hints` is the entry's `optimization_hints` (knife T15), empty for every
+## kernel but knife T15's. It is the last parameter, after `body`, so that
+## the hundreds of `trace_kernel(name, params, () => ..)` calls written
+## before it had a default still read the same (knife K2 folded
+## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
+## defaults go after the body).
+pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> TileProg = {
   let (globals, ops) = {
     with handle Dev {
       var next: Int = 1
@@ -1739,11 +1751,6 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
   TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }
 }
 
-## `trace_kernel` with no `optimization_hints` on the entry, which is every
-## kernel but knife T15's.
-pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev) -> TileProg =
-  trace_kernel_hinted(name, params, [], body)
-
 ## The handles an operation defines in the region it sits in, in definition
 ## order: what a consumer that renumbers (the lowering) or checks
 ## well-formedness walks. A `For` defines its `results` there; its `iv`,
@@ -2145,7 +2152,7 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
   let away = catch_panic(() => trace_kernel("bad_ftof", ["f64"], () => {
     let x = param(F64, 0)
     let t = float_to_float(F64, F32, [8], load(x, idx_const(0), [8]))
-    let _h = float_to_float_away(F32, F16, [8], t)
+    let _h = float_to_float(F32, F16, [8], t, rounding: NearestAway)
     ()
   }))
   match away {
@@ -2155,13 +2162,72 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
   # the pair that does take it is recorded
   let fine = trace_kernel("good_ftof", ["f64"], () => {
     let x = param(F64, 0)
-    let _h = float_to_float_zero(F64, F32, [8], load(x, idx_const(0), [8]))
+    let _h = float_to_float(F64, F32, [8], load(x, idx_const(0), [8]), rounding: TowardZero)
     ()
   })
   assert list.any(fine.ops, op => match op {
     Convert(_d, o, f, t, _s, _a) -> o == "ftof_zero" && f == "f64" && t == "f32"
     _ -> false
   })
+}
+
+# The conversion `float_to_float` records for `r`, from f32 to f64 (an exact
+# widening, which takes every mode).
+fn widened_op(r: Rounding) -> String = {
+  let p = trace_kernel("widen", ["f32"], () => {
+    let x = param(F32, 0)
+    let _h = float_to_float(F32, F64, [8], load(x, idx_const(0), [8]), rounding: r)
+    ()
+  })
+  list.fold(p.ops, "", (acc, op) => match op {
+    Convert(_d, o, _f, _t, _s, _a) -> o
+    _ -> acc
+  })
+}
+
+fn refused_as(name: String, body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel(name, ["f32"], body)) {
+  Ok(_) -> "accepted"
+  Err(e) -> e.message
+}
+
+test "knife K2: every rounding records the mode its dialect name says, and a combination nothing writes is refused when recorded" {
+  # the operation name each Rounding becomes is the one ftof_mode reads
+  # back as that Rounding's dialect spelling, so the two tables agree
+  assert list.all([NearestEven, NearestAway, TowardZero, Down, Up], r => ftof_mode(widened_op(r), "f64") == rounding_name(r))
+  let both = refused_as("down_ftz", () => {
+    let x = param(F32, 0)
+    let t = load(x, idx_const(0), [8])
+    let _h = addf(F32, [8], t, t, rounding: Down, ftz: true)
+    ()
+  })
+  assert str.contains(both, "kernel `down_ftz`: `addf_neg_inf_ftz` is not a binary float operation")
+  let sub_zero = refused_as("sub_zero", () => {
+    let x = param(F32, 0)
+    let t = load(x, idx_const(0), [8])
+    let _h = sub(F32, [8], t, t, rounding: TowardZero)
+    ()
+  })
+  assert str.contains(sub_zero, "`subf_zero` is not a binary float operation")
+  let add_nw = refused_as("add_nw", () => {
+    let _h = add_i([8], i_const([8], 1), i_const([8], 2), overflow: NoWrap)
+    ()
+  })
+  assert str.contains(add_nw, "`addi_nw` is not a binary integer operation")
+}
+
+test "knife K2: d_for2 takes the unsigned comparison d_for_unsigned alone used to spell" {
+  let p = trace_kernel("ucmp2", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    let z = idx_const(0)
+    let _r = d_for2(z, idx_const(2), idx_const(1), t, t, (_k, a, b) => (a, b), unsigned_cmp: true)
+    ()
+  })
+  assert list.any(p.ops, op => match op {
+    For(_iv, _lo, _up, _st, unsigned, _i, _c, _r, _b) -> unsigned
+    _ -> false
+  })
+  assert p.hints == []
 }
 
 # A gather through an index tile read out of one buffer, and a scatter of
@@ -2595,7 +2661,7 @@ test "a loop body answering the wrong number of carried values, a loop never clo
 fn two_globals() -> TileProg = trace_kernel("globals", ["f64"], () => {
   let out = param(F64, 0)
   d_global("a", F64, [1.0, 2.0, 4.0])
-  d_global_aligned("b", F64, [8.0, 16.0, 32.0], 256)
+  d_global("b", F64, [8.0, 16.0, 32.0], align: 256)
   let base = idx_const(0)
   let ps = ptr_offset(F64, [4], global_ptrs("b", F64, [4]), lanes(base, [4]))
   store(out, base, [4], load_ptrs(F64, [4], ps))
