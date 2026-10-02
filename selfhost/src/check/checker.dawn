@@ -1657,6 +1657,27 @@ test "main cannot owe a declared effect" {
   for d in lib.diags { assert not str.starts_with(d.msg, "main ") }
 }
 
+test "a signature carries each default as its author spelled it" {
+  # the gaps between tokens fold to one space or none, a line break and a
+  # comment inside the expression included, and a literal keeps its quotes
+  let src = "fn pad(s: String, fill: String = \", \", n: Int = 2  +  2) -> String = s\n" ++
+    "fn wide(xs: List[Int] = [\n  1,  # one\n  2\n]) -> Int = 0\n" ++
+    "fn plain(a: Int) -> Int = a\n"
+  let (m, pd) = parser.parse_module(src)
+  assert len(pd) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  let pad = map.get(cx1.fns, "pad").expect("pad is registered")
+  assert pad.param_defaults == [None, Some("\", \""), Some("2 + 2")]
+  assert sig_render(cx1.adts, cx1.traits, pad) ==
+    "fn pad(s: String, fill: String = \", \", n: Int = 2 + 2) -> String"
+  let wide = map.get(cx1.fns, "wide").expect("wide is registered")
+  assert wide.param_defaults == [Some("[ 1, 2 ]")]
+  let plain = map.get(cx1.fns, "plain").expect("plain is registered")
+  assert sig_render(cx1.adts, cx1.traits, plain) == "fn plain(a: Int) -> Int"
+}
+
 ## Unary operators (the Kotlin inferExpr's Unary arm).
 pub(pkg) fn check_unary(
   cx: Cx,
@@ -7746,7 +7767,10 @@ fn bound_arg_span(s: Sig, args: List[Expr], tp: Ty, clo: Int, chi: Int) -> (Int,
 }
 
 fn param_has_default(s: Sig, idx: Int) -> Bool =
-  idx < len(s.param_defaults) && s.param_defaults[idx]
+  match get(s.param_defaults, idx) {
+    Some(Some(_)) -> true
+    _ -> false
+  }
 
 ## The parameters a call cannot omit. Not a prefix: a default may sit before
 ## a required parameter (spec §4.3), so this counts rather than scans.
@@ -11135,7 +11159,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   assert cx7.diags[0].msg == "`move2` takes 2 argument(s), got 1"
   # a defaulted parameter may be omitted: the slot becomes a call of the
   # synthesized `move2$default$1`, and the range shows in the arity message
-  let sg2 = Sig { ..sg, param_defaults: [false, true] }
+  let sg2 = Sig { ..sg, param_defaults: [None, Some("false")] }
   var cxd = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg2) }
   let omitted = EApply(EVar("move2", 0, 5), [pos_arg(EInt(1, 6, 7))], 0, 8)
   let (cx8, t8, n8) = check_expr(cxd, omitted, no_expected())
@@ -11162,7 +11186,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   let tv = TyVar("T", 0)
   let gsig = Sig {
     name: "hold", param_tys: [TyList(tv), tv], param_names: ["xs", "probe"],
-    param_defaults: [true, false],
+    param_defaults: [Some("[]"), None],
     ret: TyInt,
     eff: EPure, is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
     owner: Some("m"), trait_id: None, op_of: None, inferring: false
@@ -11928,7 +11952,8 @@ pub fn strip_param_defaults(d: FnDecl) -> FnDecl = {
   }
   if not any { return d }
   let none_e: Option[Expr] = None
-  FnDecl { ..d, params: map(d.params, p => Param { ..p, default: none_e }) }
+  let none_s: Option[String] = None
+  FnDecl { ..d, params: map(d.params, p => Param { ..p, default: none_e, default_src: none_s }) }
 }
 
 fn no_tdefault() -> Option[TDefault] = None

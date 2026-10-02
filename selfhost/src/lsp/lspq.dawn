@@ -96,7 +96,10 @@ pub type Target = {
   hi: Int,
   hover: String,
   def: Option[(Int, Int)],
-  def_path: Option[String]
+  def_path: Option[String],
+  # the signature `hover` renders, when the target is a callable: what
+  # `textDocument/signatureHelp` lays out parameter by parameter
+  sig: Option[Sig]
 }
 
 type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool }
@@ -113,9 +116,17 @@ pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_
 
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
-fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q = {
+fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
+  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None })
+
+## A callable's signature, rendered for hover and kept whole for signature help.
+fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
+  offer_target(q, Target { lo: lo, hi: hi, hover: render_sig(qc, s), def: def, def_path: dp, sig: Some(s) })
+
+fn offer_target(q: Q, t: Target) -> Q = {
+  let lo = t.lo
+  let hi = t.hi
   if q.offset < lo || q.offset >= hi { return q }
-  let t = Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp }
   match q.best {
     None -> Q { ..q, best: Some(t) }
     Some(b) -> if hi - lo <= b.hi - b.lo { Q { ..q, best: Some(t) } } else { q }
@@ -127,7 +138,7 @@ fn no_def() -> (Option[(Int, Int)], Option[String]) = (None, None)
 # ---- name resolution helpers ----
 
 ## local -> std -> builtin, the same order the checker resolves names in.
-fn sig_of(qc: QCx, name: String) -> Option[Sig] =
+pub(pkg) fn sig_of(qc: QCx, name: String) -> Option[Sig] =
   match map.get(qc.entry.cx.fns, name) {
     Some(s) -> Some(s)
     None ->
@@ -510,7 +521,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
             for pr in tr.methods {
               let (mn, ms) = pr
               if mn == m.name {
-                q = offer(q, m.nlo, m.nhi, render_sig(qc, ms.sig), Some((m.nlo, m.nhi)), None)
+                q = offer_sig(qc, q, m.nlo, m.nhi, ms.sig, Some((m.nlo, m.nhi)), None)
               }
             }
           }
@@ -531,7 +542,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         q = visit_param_types(q, op.params)
         q = visit_written_type(q, op.ret, WtReturn)
         match map.get(qc.entry.cx.fns, op.name) {
-          Some(sg) -> { q = offer(q, op.nlo, op.nhi, render_sig(qc, sg), Some((op.nlo, op.nhi)), None) }
+          Some(sg) -> { q = offer_sig(qc, q, op.nlo, op.nhi, sg, Some((op.nlo, op.nhi)), None) }
           None -> ()
         }
       }
@@ -619,7 +630,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     None -> ()
   }
   match sig_of(qc, f.name) {
-    Some(s) -> { q = offer(q, f.nlo, f.nhi, render_sig(qc, s), Some((f.nlo, f.nhi)), None) }
+    Some(s) -> { q = offer_sig(qc, q, f.nlo, f.nhi, s, Some((f.nlo, f.nhi)), None) }
     None -> ()
   }
   let tf = tfun_at(qc, path)
@@ -662,7 +673,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   match map.get(exp.fns, imp.name) {
     Some(s) -> {
       let (dsp, dp) = def_of_sig(qc, s)
-      q = offer(q, imp.lo, imp.hi, render_sig(qc, s), dsp, dp)
+      q = offer_sig(qc, q, imp.lo, imp.hi, s, dsp, dp)
     }
     None -> ()
   }
@@ -892,7 +903,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           match sig_by_owner(qc, owner, fname, None) {
             Some(s) -> {
               let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, lo, hi, render_sig(qc, s), dsp, dp)
+              q = offer_sig(qc, q, lo, hi, s, dsp, dp)
             }
             None -> ()
           }
@@ -906,7 +917,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
               match sig_by_owner(qc, towner, fname, None) {
                 Some(s) -> {
                   let (dsp, dp) = def_of_sig(qc, s)
-                  q = offer(q, lo, hi, render_sig(qc, s), dsp, dp)
+                  q = offer_sig(qc, q, lo, hi, s, dsp, dp)
                 }
                 None -> ()
               }
@@ -1002,7 +1013,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             match sig_by_owner(qc, owner, fname, trait_id) {
               Some(s) -> {
                 let (dsp, dp) = def_of_sig(qc, s)
-                q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+                q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
               }
               None -> ()
             }
@@ -1012,7 +1023,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
           if bname == name {
             match map.get(qc.bins, name) {
-              Some(s) -> { q = offer(q, nlo, nhi, render_sig(qc, s), None, None) }
+              Some(s) -> { q = offer_sig(qc, q, nlo, nhi, s, None, None) }
               None -> ()
             }
           }
@@ -1022,7 +1033,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           match sig_of(qc, name) {
             Some(s) -> {
               let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+              q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
             }
             None -> ()
           }
@@ -1036,7 +1047,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           match sig_of(qc, name) {
             Some(s) -> {
               let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+              q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
             }
             None -> ()
           }
@@ -1282,7 +1293,7 @@ fn walk_named_call(
       match sig_by_owner(qc, owner, fname, trait_id) {
         Some(s) -> {
           let (dsp, dp) = def_of_sig(qc, s)
-          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
         }
         None -> ()
       }
@@ -1290,7 +1301,7 @@ fn walk_named_call(
     }
     Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
       match map.get(qc.bins, bname) {
-        Some(s) -> { q = offer(q, clo, chi, render_sig(qc, s), None, None) }
+        Some(s) -> { q = offer_sig(qc, q, clo, chi, s, None, None) }
         None -> ()
       }
       q = walk_call_args(qc, q, args, targs)
@@ -1299,7 +1310,7 @@ fn walk_named_call(
       match sig_of(qc, callee) {
         Some(s) -> {
           let (dsp, dp) = def_of_sig(qc, s)
-          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
         }
         None -> ()
       }
@@ -1309,7 +1320,7 @@ fn walk_named_call(
       match sig_of(qc, callee) {
         Some(s) -> {
           let (dsp, dp) = def_of_sig(qc, s)
-          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
         }
         None -> ()
       }

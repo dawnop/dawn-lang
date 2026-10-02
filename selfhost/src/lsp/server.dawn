@@ -37,10 +37,10 @@ use driver/stdlib.{StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
 use lsp/lspq.{QCx, Target, find_target, typed_trees}
-use lsp/lspc.{completions_at}
+use lsp/lspc.{completions_at, signature_at}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
-use check/types.{Sig, builtins, sig_render}
+use check/types.{Sig, builtins, sig_render, sig_render_parts}
 use front/ast.{
   Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
@@ -1233,6 +1233,9 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
         ("resolveProvider", JBool(false)),
         ("triggerCharacters", JArr([JStr("!")]))
       ])),
+      ("signatureHelpProvider", jobj([
+        ("triggerCharacters", JArr([JStr("("), JStr(",")]))
+      ])),
       ("definitionProvider", JBool(true)),
       ("documentSymbolProvider", JBool(true)),
       ("documentFormattingProvider", JBool(true)),
@@ -1264,6 +1267,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     respond(id, handle_completion(st, params))
   } else if method == "textDocument/hover" {
     respond(id, handle_hover(st, params))
+  } else if method == "textDocument/signatureHelp" {
+    respond(id, handle_signature_help(st, params))
   } else if method == "textDocument/definition" {
     respond(id, handle_definition(st, params))
   } else if method == "textDocument/documentSymbol" {
@@ -2157,6 +2162,52 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
                   ])),
                   ("range", jrange(d.view, d.ls, t.lo, t.hi))
                 ])
+                None -> JNull
+              }
+            None -> JNull
+          }
+        None -> JNull
+      }
+    None -> JNull
+  }
+}
+
+## `textDocument/signatureHelp`: the one signature of the call open at the
+## cursor, the way hover renders it (defaults included), with each parameter's
+## label as a [start, end) range of that rendering in UTF-16 units -- offsets
+## rather than substrings, since a client resolves a substring label by
+## searching and `a: Int` would be found inside `aa: Int`. `null` when the
+## cursor is in no call this can resolve (`lspc.signature_at` says which).
+fn handle_signature_help(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, analysis) {
+            Some(qc) ->
+              match signature_at(qc, d.text, pos_offset(d, params)) {
+                Some(found) -> {
+                  let (s, active) = found
+                  let (head, ps, tail) = sig_render_parts(qc.entry.cx.adts, qc.entry.cx.traits, s)
+                  var at = utf16_len(head)
+                  var labels: List[Json] = []
+                  var first = true
+                  for p in ps {
+                    if not first { at = at + 2 }
+                    first = false
+                    let end = at + utf16_len(p)
+                    labels = labels ++ [jobj([("label", JArr([JInt(at), JInt(end)]))])]
+                    at = end
+                  }
+                  jobj([
+                    ("signatures", JArr([jobj([
+                      ("label", JStr(head ++ join(ps, ", ") ++ tail)),
+                      ("parameters", JArr(labels))
+                    ])])),
+                    ("activeSignature", JInt(0)),
+                    ("activeParameter", JInt(active))
+                  ])
+                }
                 None -> JNull
               }
             None -> JNull

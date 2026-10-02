@@ -1613,8 +1613,8 @@ test "trait registration puts methods in the fn namespace" {
   let m = Module { decls: [DTrait("Eq2", "T", 10, 11, [TraitMethod {
     name: "eq2",
     params: [
-      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, default_src: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, default_src: None, lo: 25, hi: 26 }
     ],
     ret: TNamed("Bool", [], [], 34, 38),
     effs: [],
@@ -2433,8 +2433,8 @@ test "impl registration enforces coherence and signature matching" {
   let tm = TraitMethod {
     name: "eq4",
     params: [
-      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], [], 22, 23), default: None, default_src: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], [], 28, 29), default: None, default_src: None, lo: 25, hi: 26 }
     ],
     ret: TNamed("Bool", [], [], 34, 38),
     effs: [],
@@ -2450,8 +2450,8 @@ test "impl registration enforces coherence and signature matching" {
     tparams: no_tparams(),
     eparams: no_eparams(),
     params: [
-      Param { name: "a", tref: TNamed("Int", [], [], 0, 1), default: None, lo: 0, hi: 1 },
-      Param { name: "b", tref: TNamed("Int", [], [], 2, 3), default: None, lo: 2, hi: 3 }
+      Param { name: "a", tref: TNamed("Int", [], [], 0, 1), default: None, default_src: None, lo: 0, hi: 1 },
+      Param { name: "b", tref: TNamed("Int", [], [], 2, 3), default: None, default_src: None, lo: 2, hi: 3 }
     ],
     ret: Some(TNamed("Bool", [], [], 4, 8)),
     effs: no_effs(),
@@ -2619,11 +2619,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       name: d.name,
       param_tys: ptys,
       param_names: map(d.params, p => p.name),
-      param_defaults: map(d.params, p =>
-          match p.default {
-            Some(_) -> true
-            None -> false
-          }),
+      param_defaults: map(d.params, p => default_text(p)),
       ret: ret,
       eff: final_eff,
       is_builtin: false,
@@ -2660,6 +2656,20 @@ test "Eq and Hash resolve as bounds like any other trait" {
   assert bs2[0] == [ORD_ID, EQ_ID]
 }
 
+## What a signature records for one parameter's default (`Sig.param_defaults`):
+## `None` when it has none, else the author's spelling. A default the parser
+## had no source for still has to read as omittable, so it falls back to the
+## `...` every default rendered as before the text was carried.
+fn default_text(p: Param) -> Option[String] =
+  match p.default {
+    Some(_) ->
+      match p.default_src {
+        Some(src) -> Some(src)
+        None -> Some("...")
+      }
+    None -> None
+  }
+
 fn fn_header(t: PathTable[Sig], name: String) -> Sig =
   path_table_get(t, path_text([Named(FunctionDecl, name)])).expect("a filed function header")
 
@@ -2676,7 +2686,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
         hi: 12
       }],
       eparams: no_eparams(),
-      params: [Param { name: "x", tref: TNamed("T", [], [], 17, 18), default: None, lo: 14, hi: 15 }],
+      params: [Param { name: "x", tref: TNamed("T", [], [], 17, 18), default: None, default_src: None, lo: 14, hi: 15 }],
       ret: Some(TNamed("T", [], [], 23, 24)),
       effs: no_effs(),
       body: EVar("x", 27, 28),
@@ -2690,7 +2700,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       name: "g",
       tparams: no_tparams(),
       eparams: no_eparams(),
-      params: [Param { name: "x", tref: TNamed("Int", [], [], 36, 39), default: None, lo: 33, hi: 34 }],
+      params: [Param { name: "x", tref: TNamed("Int", [], [], 36, 39), default: None, default_src: None, lo: 33, hi: 34 }],
       ret: None,
       effs: no_effs(),
       body: EVar("x", 43, 44),
@@ -2720,9 +2730,9 @@ test "a signature's effect variables land in eparams once each, in mint order" {
       tparams: no_tparams(),
       eparams: no_eparams(),
       params: [
-        Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
-        Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
-        Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
+        Param { name: "f", tref: arrow("a"), default: None, default_src: None, lo: 5, hi: 6 },
+        Param { name: "g", tref: arrow("b"), default: None, default_src: None, lo: 7, hi: 8 },
+        Param { name: "k", tref: arrow("a"), default: None, default_src: None, lo: 9, hi: 10 }
       ],
       ret: Some(TNamed("Int", [], [], 12, 15)),
       effs: ["c"],
@@ -2775,9 +2785,9 @@ test "an explicit binder list produces the eparams the implicit spelling does" {
   let arrow = (e: String) => TFn([], TNamed("Int", [], [], 0, 3), [e], 0, 3)
   let binder = (n: String) => EffParamDecl { name: n, lo: 0, hi: 2 }
   let params = [
-    Param { name: "f", tref: arrow("a"), default: None, lo: 5, hi: 6 },
-    Param { name: "g", tref: arrow("b"), default: None, lo: 7, hi: 8 },
-    Param { name: "k", tref: arrow("a"), default: None, lo: 9, hi: 10 }
+    Param { name: "f", tref: arrow("a"), default: None, default_src: None, lo: 5, hi: 6 },
+    Param { name: "g", tref: arrow("b"), default: None, default_src: None, lo: 7, hi: 8 },
+    Param { name: "k", tref: arrow("a"), default: None, default_src: None, lo: 9, hi: 10 }
   ]
   let decl = FnDecl {
     vis: VisPrivate,

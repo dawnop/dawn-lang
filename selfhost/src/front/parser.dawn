@@ -1064,18 +1064,56 @@ fn typed_params(p: P, st: St, what: String) -> PR[List[Param]] = {
     # `= expr` is a default value (#207); which declarations consume one is
     # the registration passes' decision, not a parse-time special case
     var dflt: Option[Expr] = None
+    var dsrc: Option[String] = None
     if at_kind(p, st4, EQ) {
       let st5 = skip_nl(p, adv1(p, st4))
       let (st6, de) = expression(p, st5, false)?
       dflt = Some(de)
+      dsrc = tokens_source(p, st5.pos, st6.pos)
       st4 = st6
     }
-    params = params ++ [Param { name: n.text, tref: t, default: dflt, lo: n.lo, hi: n.hi }]
+    params = params ++ [Param {
+      name: n.text,
+      tref: t,
+      default: dflt,
+      default_src: dsrc,
+      lo: n.lo,
+      hi: n.hi
+    }]
     st1 = skip_nl(p, st4)
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
   Ok((st1, params))
 }
+
+## The source text of the tokens in `[from, to)` on one line, which is what a
+## rendered signature shows for a parameter default (`Param.default_src`).
+## Each token is sliced from the file, so a literal keeps its quotes and
+## escapes exactly as written; the gap between two tokens becomes one space
+## when it held anything (blanks, a line break, a comment) and nothing when the
+## author wrote them touching. A comment never reaches the text because it is
+## never a token, so folding a multi-line default cannot leave a `#` that would
+## swallow the rest of the line. Spans are code-point indices into `p.cps`;
+## without that array (the interpolation sub-parser) there is nothing to slice.
+fn tokens_source(p: P, from: Int, to: Int) -> Option[String] =
+  match p.cps {
+    None -> None
+    Some(cps) -> {
+      var out = ""
+      var prev_hi = -1
+      var i = from
+      while i < to && i < len(p.toks) {
+        let tk = p.toks[i]
+        if tk.kind != NEWLINE && tk.kind != EOF {
+          if prev_hi >= 0 && tk.lo > prev_hi { out = out ++ " " }
+          out = out ++ slice_cps(cps, tk.lo, tk.hi)
+          prev_hi = tk.hi
+        }
+        i = i + 1
+      }
+      Some(out)
+    }
+  }
 
 # ---- trait and impl declarations ----
 

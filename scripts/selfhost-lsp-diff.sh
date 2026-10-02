@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
-# open/change/close, hover, definition, completion, symbols, formatting over
+# open/change/close, hover, definition, completion, symbols, signature help,
+# formatting over
 # a two-module project + a standalone buffer) runs against both toolchains
 # and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -63,6 +64,26 @@ pub fn area(s: Shape) -> Float =
   }
 
 pub fn helper(n: Int) -> Int = n + LIMIT
+
+pub fn pad_to(s: String, width: Int, fill: String = " ",
+  why: String = "a default far wider than any signature shows") -> String =
+  if width > 0 { s ++ fill } else { why }
+EOF
+
+# Calls into a function with defaults: what hover renders for one, and the
+# signature help a client asks for while an argument list is open -- by
+# position, by name, after a pipe, and mid-edit, where the buffer no longer
+# parses and the callee is resolved by name.
+cat > "$OUT/proj/src/calls.dawn" <<'EOF'
+use util.{pad_to}
+use util as u
+
+pub fn calls() -> String = {
+  let a = pad_to("x", 4)
+  let b = u.pad_to("y", 3, fill: "-")
+  let c = "z" |> pad_to(2)
+  a ++ b ++ c
+}
 EOF
 
 cat > "$OUT/proj/src/app.dawn" <<'EOF'
@@ -231,6 +252,27 @@ note("textDocument/didOpen", {"textDocument": {
     "uri": solo_uri, "languageId": "dawn", "version": 1, "text": solo_text}})
 req("textDocument/hover", at(solo_uri, solo_text, "twice(21)", 1, 1))
 req("textDocument/definition", at(solo_uri, solo_text, "twice(21)", 1, 1))
+
+# signature help, and hover over a callee with defaults
+calls_path = f"{out_dir}/proj/src/calls.dawn"
+calls_uri = "file://" + calls_path
+calls_text = open(calls_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": calls_uri, "languageId": "dawn", "version": 1, "text": calls_text}})
+req("textDocument/hover", at(calls_uri, calls_text, 'pad_to("x"', 1, 1))
+for needle, occ, delta in [
+    ('pad_to("x", 4)', 1, 7),   # first argument
+    ('pad_to("x", 4)', 1, 12),  # second, by position
+    ('fill: "-"', 1, 6),        # named, after a module alias
+    ("pad_to(2)", 1, 7),        # the right side of |>
+    ("calls()", 1, 6),          # a declaration's own list: no help
+]:
+    req("textDocument/signatureHelp", at(calls_uri, calls_text, needle, occ, delta))
+open_text = calls_text.replace('let a = pad_to("x", 4)', 'let a = pad_to("x", ')
+note("textDocument/didChange", {"textDocument": {"uri": calls_uri, "version": 2},
+    "contentChanges": [{"text": open_text}]})
+req("textDocument/signatureHelp", at(calls_uri, open_text, 'pad_to("x", ', 1, 12))
+note("textDocument/didClose", tdoc(calls_uri))
 
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {

@@ -56,6 +56,18 @@ together. They count as breaking in the summary. The gate that holds them
 between releases is scripts/param-change.py; this report is where they are
 listed for the people reading a release.
 
+## Defaults are compared on their own
+
+Since K0 (docs/std-defaults-design.md) a defaulted parameter renders its
+default's source text, `fill: String = " "`, where it used to render
+`fill: String = ...`. Effect atoms and shape are read off the signature with
+its defaults removed (`split_defaults`), so that renderer change reports
+nothing, and a `!x` inside a default's text is not taken for an effect. The
+defaults themselves are then compared by parameter name: one that disappeared
+or changed value is breaking for a caller who omitted the argument, one that
+appeared is an addition, and `...` is a default of unknown value, never a
+change.
+
 ## Known limitations, restated in every report header
 
   * It sees signatures, not semantics. A behavior change under an unchanged
@@ -131,6 +143,106 @@ def shape_of(sig: str) -> str:
     return s.strip()
 
 
+def _mask_literals(sig: str) -> str:
+    """`sig` with every string and char literal's inside blanked, indices kept.
+
+    The same reading as scripts/param-change.py's `mask_literals`: a default
+    renders as source text, so `sep: String = ","` carries a comma that is not
+    structure. `"` and `'` honour backslash escapes; a backtick raw string does
+    not.
+    """
+    out = list(sig)
+    quote = None
+    i = 0
+    while i < len(sig):
+        ch = sig[i]
+        if quote is None:
+            if ch in "\"'`":
+                quote = ch
+        elif ch == "\\" and quote != "`":
+            out[i] = "_"
+            if i + 1 < len(sig):
+                out[i + 1] = "_"
+            i += 2
+            continue
+        elif ch == quote:
+            quote = None
+        else:
+            out[i] = "_"
+        i += 1
+    return "".join(out)
+
+
+def split_defaults(sig: str):
+    """(the signature with every parameter default removed, {name: default}).
+
+    A signature renders `name: T = <expr>` since K0
+    (docs/std-defaults-design.md); before it, `name: T = ...`. The two facts
+    this report compares -- effect atoms and shape -- are about the type, so
+    they are read off the signature without its defaults (an effect atom
+    inside a default's text is not the function's effect), and the defaults
+    are compared on their own: a default appearing, disappearing or changing
+    value. Anything that does not read as `fn name[...](...)` comes back
+    whole, with no defaults.
+    """
+    sig = sig or ""
+    masked = _mask_literals(sig)
+    m = re.match(r"fn [A-Za-z_][A-Za-z0-9_]*", masked)
+    if not m:
+        return sig, {}
+    i = m.end()
+    depth = 0
+    if i < len(masked) and masked[i] == "[":
+        for j in range(i, len(masked)):
+            if masked[j] in "([{":
+                depth += 1
+            elif masked[j] in ")]}":
+                depth -= 1
+                if depth == 0:
+                    i = j + 1
+                    break
+    if i >= len(masked) or masked[i] != "(":
+        return sig, {}
+    depth = 0
+    close = None
+    starts = [i + 1]
+    for j in range(i, len(masked)):
+        ch = masked[j]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                close = j
+                break
+        elif ch == "," and depth == 1:
+            starts.append(j + 1)
+    if close is None:
+        return sig, {}
+    bounds = list(zip(starts, starts[1:] + [close + 1]))
+    kept, defaults = [], {}
+    for lo, hi in bounds:
+        end = hi - 1  # the comma or the closing parenthesis
+        part, mpart = sig[lo:end], masked[lo:end]
+        d = 0
+        cut = None
+        for k, ch in enumerate(mpart):
+            if ch in "([{":
+                d += 1
+            elif ch in ")]}":
+                d -= 1
+            elif d == 0 and mpart.startswith(" = ", k):
+                cut = k
+                break
+        if cut is None:
+            kept.append(part.strip())
+        else:
+            kept.append(part[:cut].strip())
+            defaults[part.split(":", 1)[0].strip()] = part[cut + 3:].strip()
+    kept = [k for k in kept if k]
+    return sig[:i + 1] + ", ".join(kept) + sig[close:], defaults
+
+
 # A parameter's name and its colon, where a parameter can stand: after the
 # opening parenthesis of a parameter list or after a comma. Type positions
 # never carry a lowercase name followed by `: ` in a rendered signature (type
@@ -179,26 +291,60 @@ class Diff:
         """One signature-shaped string pair: the effect-aware comparison."""
         if old == new:
             return
+        shown_old, shown_new = old, new
+        old, old_defaults = split_defaults(old)
+        new, new_defaults = split_defaults(new)
+        moved = self.defaults(where, what, shown_old, shown_new, old, new,
+                              old_defaults, new_defaults)
+        typed = old != new and self.typed(where, what, old, new, shown_old, shown_new)
+        if not moved and not typed:
+            self.rendering_only += 1
+
+    def defaults(self, where, what, shown_old, shown_new, old, new, od, nd):
+        """Defaults that appeared, disappeared or changed value, by name.
+
+        Only a parameter both sides have is compared; one that came or went is
+        the shape's business. `...` is how a default rendered before K0, so it
+        is a default of unknown value: one turning into text is the renderer
+        catching up, not a change. Returns whether anything was reported.
+        """
+        both = set(names_in(shape_of(old))) & set(names_in(shape_of(new)))
+        events = []
+        for name in sorted(both):
+            if name in od and name not in nd:
+                events.append((BREAK, f"{what} parameter `{name}` lost its default"))
+            elif name in nd and name not in od:
+                events.append((ADD, f"{what} parameter `{name}` gained a default `{nd[name]}`"))
+            elif name in od and od[name] != nd[name] and od[name] != "...":
+                events.append((BREAK, f"{what} default of `{name}` changed: "
+                                      f"`{od[name]}` -> `{nd[name]}`"))
+        for severity, text in events:
+            self.add(severity, where, text, was_now(shown_old, shown_new))
+        return bool(events)
+
+    def typed(self, where, what, old, new, shown_old, shown_new):
+        """The comparison of two default-free signatures; whether it reported."""
         gained = sorted(effects_of(new) - effects_of(old))
         lost = sorted(effects_of(old) - effects_of(new))
         if gained:
             note = "**EFFECT ROW EXPANDED** (+" + ", ".join("!" + g for g in gained) + ")"
             if lost:
                 note += " and narrowed (-" + ", ".join("!" + m for m in lost) + ")"
-            self.add(BREAK, where, f"{what} {note}", was_now(old, new))
+            self.add(BREAK, where, f"{what} {note}", was_now(shown_old, shown_new))
         elif shape_of(old) != shape_of(new):
             if unnamed(shape_of(old)) == unnamed(shape_of(new)):
                 was = ", ".join(names_in(shape_of(old)))
                 now = ", ".join(names_in(shape_of(new)))
                 self.add(RENAME, where, f"{what} parameters renamed: `{was}` -> `{now}`",
-                         was_now(old, new))
+                         was_now(shown_old, shown_new))
             else:
-                self.add(BREAK, where, f"{what} signature changed", was_now(old, new))
+                self.add(BREAK, where, f"{what} signature changed", was_now(shown_old, shown_new))
         elif lost:
             note = "effect row narrowed (-" + ", ".join("!" + m for m in lost) + ")"
-            self.add(NARROW, where, f"{what} {note}", was_now(old, new))
+            self.add(NARROW, where, f"{what} {note}", was_now(shown_old, shown_new))
         else:
-            self.rendering_only += 1
+            return False
+        return True
 
 
 # --------------------------------------------------------------------------
@@ -518,6 +664,41 @@ _FN_MAP_OLD = "fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e"
 _FN_MAP_NEW = "fn map[T, U, !e](xs: List[T], f: fn(T) -> U !e) -> List[U] !e"
 
 GOLDEN = (
+    (
+        # K0: a default that rendered `...` now renders its text, which is
+        # the renderer catching up, not a change
+        "default rendered",
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String = ...) -> String")])),
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String = \", \") -> String")])),
+        [],
+    ),
+    (
+        "default changed",
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String = \" \") -> String")])),
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String = \"0\") -> String")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn pad` default of `fill` changed: `\" \"` -> `\"0\"`",
+         "    - was: `fn pad(s: String, fill: String = \" \") -> String`",
+         "    - now: `fn pad(s: String, fill: String = \"0\") -> String`"],
+    ),
+    (
+        "default gained",
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String) -> String")])),
+        _one(_mod("m", fns=[_fn("pad", "fn pad(s: String, fill: String = \"(\") -> String")])),
+        ["## Additions (1)", "",
+         "- `u` `m`: `fn pad` parameter `fill` gained a default `\"(\"`",
+         "    - was: `fn pad(s: String, fill: String) -> String`",
+         "    - now: `fn pad(s: String, fill: String = \"(\") -> String`"],
+    ),
+    (
+        "default lost, and an effect atom in a default is not the function's",
+        _one(_mod("m", fns=[_fn("go", "fn go(n: Int = !x, k: Int = 1) -> Int")])),
+        _one(_mod("m", fns=[_fn("go", "fn go(n: Int = !x, k: Int) -> Int")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn go` parameter `k` lost its default",
+         "    - was: `fn go(n: Int = !x, k: Int = 1) -> Int`",
+         "    - now: `fn go(n: Int = !x, k: Int) -> Int`"],
+    ),
     (
         "fn removed",
         _one(_mod("m", fns=[_fn("a", "fn a() -> Int"), _fn("b", "fn b() -> Int")])),

@@ -520,6 +520,12 @@ f(a, align: Center) { body }
 函数体），`Cx` 也不存模块源文本可切；调用方需要从签名读到的是「这个实参可省略」。
 要印出值就得把源文本穿进 passes，另立后批再议。
 
+> **后批已落地（2026-10-02，K0）。** 源文本由 parser 记进 `Param.default_src`（按 token
+> 切源码、token 间空白折成一个空格），`Sig.param_defaults` 从 `List[Bool]` 换成
+> `List[Option[String]]`，`sig_render` 印 `gap: Int = 0`；超过 40 个码点截断并补齐未闭合的
+> 括号与引号。规则与理由见 [std-defaults-design.md](std-defaults-design.md) §4。上面
+> 「`Cx` 不存模块源文本可切」仍然成立：切源码的是 parser，不是 passes。
+
 ### 6.4 一次性代价：std 的形参名从此是 API
 
 std 有几百个 pub 函数，形参名从没按「会被调用方写出来」的标准审过。已经找到的坏例子是

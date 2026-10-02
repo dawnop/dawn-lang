@@ -5,8 +5,10 @@ elegant functional language with immutable data, algebraic data types with
 exhaustive pattern matching, and effects written into the type signature.
 
 - Syntax highlighting, brackets, comments and indentation.
-- Diagnostics as you type, hover (types and signatures), go to definition, and
-  the document outline, from the language server built into the Dawn compiler.
+- Diagnostics as you type, hover (types and signatures, default values
+  included), signature help inside a call's argument list, go to definition,
+  and the document outline, from the language server built into the Dawn
+  compiler.
 
 The front end does full error recovery, so a file that does not parse still
 reports all of its errors instead of stopping at the first one.
