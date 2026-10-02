@@ -1,6 +1,11 @@
 # Build-time syntax highlighting for Dawn code blocks — the site ships zero JS.
 # Classes (site/README.md): k keyword, t type/ctor, f definition name after fn,
-# s string, i $-interpolation inside a string, n number/bool/char, c comment.
+# s string, i the $name / ${ } delimiters inside a string, n number/bool/char,
+# c comment. The scan has the same shape as the Playground's CodeMirror grammar
+# (site/play-ui/src/dawn-lang.ts): code inside ${ } is code, highlighted by the
+# same loop as the block, with nested strings recursing and only code braces
+# counted toward the closing }. Both are one grammar, so a reader sees the
+# same colours on the home page as in the Playground.
 
 use html/escape.{escape_html}
 use md/text.{cp_at, seg}
@@ -91,38 +96,29 @@ fn char_end(cs: List[Char], from: Int) -> Int = {
   i
 }
 
-## Index just past a string starting at the " in from ("..." or """...""").
-fn string_end(cs: List[Char], from: Int) -> Int = {
+## A string starting at the " in from ("..." or """..."""), rendered with
+## $name and the ${ } delimiters as class i, and the code inside ${ } through
+## highlight_from. Returns the HTML and the index just past the string. An
+## ordinary string ends at a newline in its own text, but not at one inside an
+## interpolation, which is code (the Playground's rule).
+fn string_html(cs: List[Char], from: Int) -> (String, Int) = {
+  let n = len(cs)
   let triple = cp_at(cs, from + 1) == '"' && cp_at(cs, from + 2) == '"'
+  var parts: List[String] = []
+  var start = from
   var i = if triple { from + 3 } else { from + 1 }
   var done = false
-  while not done && i < len(cs) {
+  while not done && i < n {
     let c = cp_at(cs, i)
-    if c == '\\' && not triple {
-      i = i + 2
+    if triple && c == '"' && cp_at(cs, i + 1) == '"' && cp_at(cs, i + 2) == '"' {
+      i = i + 3
+      done = true
     } else if c == '"' && not triple {
       i = i + 1
       done = true
-    } else if triple && c == '"' && cp_at(cs, i + 1) == '"' && cp_at(cs, i + 2) == '"' {
-      i = i + 3
-      done = true
     } else if c == '\n' && not triple {
       done = true
-    } else {
-      i = i + 1
-    }
-  }
-  i
-}
-
-## A string token [from, to) rendered with $name / ${expr} marked as class i.
-fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
-  var parts: List[String] = []
-  var start = from
-  var i = from
-  while i < to {
-    let c = cp_at(cs, i)
-    if c == '\\' {
+    } else if c == '\\' {
       i = i + 2
     } else if c == '$' && is_ident_start(cp_at(cs, i + 1)) {
       let e = ident_end(cs, i + 1)
@@ -130,42 +126,63 @@ fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
       start = e
       i = e
     } else if c == '$' && cp_at(cs, i + 1) == '{' {
-      var e = i + 2
-      while e < to && cp_at(cs, e) != '}' {
-        e = e + 1
+      parts = parts ++ [span("s", seg(cs, start, i)) ++ span("i", "\${")]
+      let (inner, e) = highlight_from(cs, i + 2, true)
+      parts = parts ++ [inner]
+      if e < n {
+        # e is the closing brace
+        parts = parts ++ [span("i", "}")]
+        start = e + 1
+        i = e + 1
+      } else {
+        # unclosed: the code ran to the end of the block
+        start = e
+        i = e
+        done = true
       }
-      let e2 = if e < to { e + 1 } else { e }
-      parts = parts ++ [span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e2))]
-      start = e2
-      i = e2
     } else {
       i = i + 1
     }
   }
+  let to = if i > n { n } else { i }
   if start < to {
     parts = parts ++ [span("s", seg(cs, start, to))]
   }
-  join(parts, "")
+  (join(parts, ""), to)
 }
 
-## Highlight one Dawn code block as HTML (no surrounding <pre><code>).
-pub fn highlight_dawn(code: String) -> String = {
-  let cs = code_points(code)
+## Highlight code from index from. With interp, this is the code inside a ${:
+## code braces are counted (string and comment braces are eaten by their own
+## scans), and the scan stops at the } that closes the interpolation. Returns
+## the HTML and where it stopped: that brace, or the end of the block.
+fn highlight_from(cs: List[Char], from: Int, interp: Bool) -> (String, Int) = {
   let n = len(cs)
   var parts: List[String] = []
-  var start = 0
+  var start = from
   var prev_word = ""
-  var i = 0
-  while i < n {
+  var depth = 1
+  var stop = false
+  var i = from
+  while not stop && i < n {
     let c = cp_at(cs, i)
-    if c == '#' {
+    if interp && c == '{' {
+      depth = depth + 1
+      i = i + 1
+    } else if interp && c == '}' {
+      depth = depth - 1
+      if depth == 0 {
+        stop = true
+      } else {
+        i = i + 1
+      }
+    } else if c == '#' {
       let e = line_end(cs, i)
       parts = parts ++ [escape_html(seg(cs, start, i)) ++ span("c", seg(cs, i, e))]
       start = e
       i = e
     } else if c == '"' {
-      let e = string_end(cs, i)
-      parts = parts ++ [escape_html(seg(cs, start, i)) ++ string_html(cs, i, e)]
+      let (html, e) = string_html(cs, i)
+      parts = parts ++ [escape_html(seg(cs, start, i)) ++ html]
       start = e
       i = e
     } else if c == '`' {
@@ -221,10 +238,17 @@ pub fn highlight_dawn(code: String) -> String = {
       i = i + 1
     }
   }
-  if start < n {
-    parts = parts ++ [escape_html(seg(cs, start, n))]
+  let to = if i > n { n } else { i }
+  if start < to {
+    parts = parts ++ [escape_html(seg(cs, start, to))]
   }
-  join(parts, "")
+  (join(parts, ""), to)
+}
+
+## Highlight one Dawn code block as HTML (no surrounding <pre><code>).
+pub fn highlight_dawn(code: String) -> String = {
+  let (html, _) = highlight_from(code_points(code), 0, false)
+  html
 }
 
 test "keywords, types, defs, numbers" {
@@ -240,9 +264,39 @@ test "strings with interpolation, comments, effects" {
   assert highlight_dawn("!io") == `<span class="k">!io</span>`
 }
 
+test "interpolation is code, with nested strings" {
+  assert highlight_dawn(`"a ${f(x, "y")} b"`) ==
+    `<span class="s">"a </span><span class="i">${</span>f(x, ` ++
+    `<span class="s">"y"</span>)<span class="i">}</span><span class="s"> b"</span>`
+}
+
+test "code braces inside an interpolation nest" {
+  assert highlight_dawn(`"${Point { x, y }}"`) ==
+    `<span class="s">"</span><span class="i">${</span><span class="t">Point</span> { x, y }` ++
+    `<span class="i">}</span><span class="s">"</span>`
+  assert highlight_dawn(`"${if a { 1 } else { 2 }}"`) ==
+    `<span class="s">"</span><span class="i">${</span><span class="k">if</span> a { ` ++
+    `<span class="n">1</span> } <span class="k">else</span> { <span class="n">2</span> }` ++
+    `<span class="i">}</span><span class="s">"</span>`
+}
+
+test "triple strings interpolate too" {
+  assert highlight_dawn("\"\"\"a \${n + 1}\nb\"\"\"") ==
+    `<span class="s">""` ++ `"a </span><span class="i">${</span>n + <span class="n">1</span>` ++
+    `<span class="i">}</span><span class="s">` ++ "\nb\"\"\"" ++ `</span>`
+}
+
+test "an unclosed interpolation runs to the end of the block" {
+  assert highlight_dawn("\"a \${f(x\nlet y = 1") ==
+    `<span class="s">"a </span><span class="i">${</span>f(x` ++ "\n" ++
+    `<span class="k">let</span> y = <span class="n">1</span>`
+}
+
 test "raw strings highlight as one literal" {
   assert highlight_dawn("let s = `a \$x`") ==
     `<span class="k">let</span> s = <span class="s">` ++ "`a \$x`" ++ `</span>`
+  assert highlight_dawn("`a \${f(\"x\")}`") ==
+    `<span class="s">` ++ "`a \${f(\"x\")}`" ++ `</span>`
 }
 
 test "tail-block params are not definition names" {

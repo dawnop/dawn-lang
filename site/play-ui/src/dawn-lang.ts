@@ -189,7 +189,7 @@ const dawnMode = StreamLanguage.define<State>({
 // Token classes, not colours. A HighlightStyle bakes its colours into
 // generated class names that no stylesheet can reach, which held the editor
 // pane light in the site's dark theme (issue #342). These names are stable, so
-// playground.css colours them from the site's code tokens (--k, --t, --f, --s,
+// playground.css colours them from the site's code tokens (--k, --t, --f, --s, --i,
 // --n, --c in site/assets/style.css), and the theme switch recolours them like
 // every other code block on the site. The classes mirror the build-time
 // highlighter's .k/.t/.f/.s/.i/.n/.c. Plain identifiers keep a class that no
