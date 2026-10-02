@@ -41,6 +41,8 @@ import os
 import subprocess
 import sys
 
+from lsp_hover import hover_code
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DAWN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "bin", "dawn")
 
@@ -185,9 +187,7 @@ def hover(s, uri, text, needle, delta=0, occurrence=1):
                                          "position": position(text, needle, delta, occurrence)})
     if not r:
         return None
-    c = r.get("contents")
-    value = c.get("value") if isinstance(c, dict) else c
-    return value.replace("```dawn", "").replace("```", "").strip()
+    return hover_code(r)
 
 
 def definition(s, uri, text, needle, delta=0, occurrence=1):

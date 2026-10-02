@@ -253,12 +253,7 @@ def mutate(name, server, main, analyze, plan_source):
     let d2 = map.get(st.docs, uri).expect("open document")
     match d2.canonical_path {
       Some(path) ->
-        if path == dc {
-          return Some(jobj([
-            ("uri", JStr(uri)),
-            ("range", jrange(d2.view, d2.ls, lo, hi))
-          ]))
-        }
+        if path == dc { return Some(InBuffer(d2)) }
       None -> ()
     }
   }"""

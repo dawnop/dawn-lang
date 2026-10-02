@@ -20,6 +20,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lsp_hover import hover_code  # noqa: E402
+
 
 TIMEOUT_S = 60.0
 BARRIER_METHOD = "dawn/workspaceContractBarrier"
@@ -446,7 +449,7 @@ class Contract:
                 "position": position(live_main, "live_value", occurrence=2),
             }
             hover = client.result("textDocument/hover", target)
-            hover_text = hover.get("contents", {}).get("value", "") if isinstance(hover, dict) else ""
+            hover_text = hover_code(hover)
             require("fn live_value() -> Int" in hover_text,
                     "SINGLE_OVERLAY_NOT_SHARED", f"hover did not use live export: {hover!r}")
             definition = client.result("textDocument/definition", target)
@@ -1159,7 +1162,7 @@ class Contract:
                 "textDocument": {"uri": uri},
                 "position": position(text, "helper_value", occurrence=2),
             })
-            hover_text = hover.get("contents", {}).get("value", "") if isinstance(hover, dict) else ""
+            hover_text = hover_code(hover)
             require("fn helper_value() -> Int" in hover_text, "MANIFEST_REFRESH_MISSING",
                     f"open document does not see the new dependency: {hover!r}")
             after_refresh = client.lease_events()

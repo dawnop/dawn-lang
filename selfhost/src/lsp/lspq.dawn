@@ -109,8 +109,25 @@ pub type Target = {
   def_path: Option[String],
   # the signature `hover` renders, when the target is a callable: what
   # `textDocument/signatureHelp` lays out parameter by parameter
-  sig: Option[Sig]
+  sig: Option[Sig],
+  # where the declaration's `##` doc is read from, when the target is a
+  # declaration (docs/lsp-hover-design.md §A3); None for locals and literals
+  doc: Option[DocSite]
 }
+
+## The module text a declaration's doc lives in. The query only names it: the
+## text of another project file may be a live buffer or a file on disk, which
+## is the server's to read (`lsp/server.dawn` `hover_markdown`), and a query
+## does no I/O.
+##
+## `DocStd` names a module path rather than a file because std's text is
+## always at hand in `StdCtx.srcs`, embedded copy included, and those are the
+## very texts std's spans index.
+pub type DocHome = DocHere | DocFile(path: String) | DocStd(mod_path: String)
+
+## `lo` is an offset on the declaration's first line, which is all
+## `front/docs.doc_of` reads (the `##` block ends on the line above it).
+pub type DocSite = { home: DocHome, lo: Int }
 
 type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool }
 
@@ -127,11 +144,30 @@ pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
 fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None })
+  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None, doc: None })
 
 ## A callable's signature, rendered for hover and kept whole for signature help.
 fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: render_sig(qc, s), def: def, def_path: dp, sig: Some(s) })
+  offer_target(q, Target { lo: lo, hi: hi, hover: render_sig(qc, s), def: def, def_path: dp, sig: Some(s), doc: None })
+
+## A declaration resolved to where it is: the jump target and the doc's home.
+## The two are separate because an embedded std module has a text but no file:
+## its declarations offer no jump and still carry their doc.
+type Site = { def: Option[(Int, Int)], dp: Option[String], doc: Option[DocSite] }
+
+fn no_site() -> Site = Site { def: None, dp: None, doc: None }
+
+## A declaration of the entry document, at its own name.
+fn here(nlo: Int, nhi: Int, lo: Int) -> Site =
+  Site { def: Some((nlo, nhi)), dp: None, doc: Some(DocSite { home: DocHere, lo: lo }) }
+
+fn offer_at(q: Q, lo: Int, hi: Int, hover: String, s: Site) -> Q =
+  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: s.def, def_path: s.dp, sig: None, doc: s.doc })
+
+fn offer_sig_at(qc: QCx, q: Q, lo: Int, hi: Int, sg: Sig, s: Site) -> Q =
+  offer_target(q, Target {
+    lo: lo, hi: hi, hover: render_sig(qc, sg), def: s.def, def_path: s.dp, sig: Some(sg), doc: s.doc
+  })
 
 fn offer_target(q: Q, t: Target) -> Q = {
   let lo = t.lo
@@ -186,109 +222,113 @@ fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id: Option[I
   }
 }
 
-## The parse AST of the module whose JVM class is `owner`, with its file path
-## (None = the entry document).
+## The module that holds a declaration: its parse AST, the file a definition
+## jump opens (None = the entry document), and the home of its doc text.
 ##
 ## A std module answers with the file its text was read from. `load_std` builds
 ## every std `Cx` without a `src_path` -- that field renders into a user-visible
 ## duplicate-impl diagnostic, so std must not carry one -- and the bundle's own
 ## `dir_modules` record is where the file lives instead.
 ##
-## When the embedded copy supplied the module there is no file, and this fails
-## the whole lookup rather than answering `None`. `None` here means "the
-## document being analyzed", which is what makes a local definition resolve
-## against the live buffer; a std module borrowing it hands `location_of` the
-## requesting document's uri and std's offsets, and the reply is a confident
-## range in an unrelated file rather than a missing one.
-fn module_ast_by_class(qc: QCx, owner: String) -> Option[(Module, Option[String])] = {
-  if owner == qc.entry.class_name { return Some((qc.entry.m, None)) }
+## When the embedded copy supplied the module there is no file, and `jump` is
+## false: the declaration offers no definition rather than `None`. `None` here
+## means "the document being analyzed", which is what makes a local definition
+## resolve against the live buffer; a std module borrowing it hands
+## `location_of` the requesting document's uri and std's offsets, and the reply
+## is a confident range in an unrelated file rather than a missing one. The
+## doc is unaffected: std's text is in `StdCtx.srcs` either way.
+type Holder = { m: Module, def_path: Option[String], jump: Bool, home: DocHome }
+
+fn holder_by_class(qc: QCx, owner: String) -> Option[Holder] = {
+  if owner == qc.entry.class_name {
+    return Some(Holder { m: qc.entry.m, def_path: None, jump: true, home: DocHere })
+  }
   for cm in qc.prog.modules {
-    if cm.class_name == owner { return Some((cm.m, Some(cm.path))) }
+    if cm.class_name == owner {
+      return Some(Holder { m: cm.m, def_path: Some(cm.path), jump: true, home: DocFile(cm.path) })
+    }
   }
   for tr in qc.std.srcs {
     let (mp, _, m) = tr
-    if mp == owner {
-      match std_file_of(qc.std, mp) {
-        Some(f) -> return Some((m, Some(f)))
-        None -> return None
-      }
-    }
+    if mp == owner { return Some(std_holder(qc, mp, m)) }
   }
   None
 }
 
-fn fn_decl_span(m: Module, name: String) -> Option[(Int, Int)] = {
-  for d in m.decls {
-    match d {
-      DFn(f) -> if f.name == name { return Some((f.nlo, f.nhi)) }
-      _ -> ()
-    }
+fn std_holder(qc: QCx, mp: String, m: Module) -> Holder =
+  match std_file_of(qc.std, mp) {
+    Some(f) -> Holder { m: m, def_path: Some(f), jump: true, home: DocStd(mp) }
+    None -> Holder { m: m, def_path: None, jump: false, home: DocStd(mp) }
   }
-  None
+
+## A declaration found in `h`: named at `nlo..nhi`, starting on the line of `lo`.
+fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site = {
+  let doc = Some(DocSite { home: h.home, lo: lo })
+  if h.jump { Site { def: Some((nlo, nhi)), dp: h.def_path, doc: doc } } else { Site { ..no_site(), doc: doc } }
 }
 
 ## Definition site of a signature (the Kotlin sig.nameSpan / sig.srcPath).
-fn def_of_sig(qc: QCx, s: Sig) -> (Option[(Int, Int)], Option[String]) = {
+fn site_of_sig(qc: QCx, s: Sig) -> Site = {
   match s.trait_id {
-    Some(tid) -> return def_of_trait_method(qc, tid, s.name)
+    Some(tid) -> return site_of_trait_method(qc, tid, s.name)
     None -> ()
   }
-  if s.is_builtin { return no_def() }
+  if s.is_builtin { return no_site() }
   let owner = match s.owner {
     Some(o) -> o
     None -> qc.entry.class_name
   }
-  match module_ast_by_class(qc, owner) {
-    Some(pr) -> {
-      let (m, dp) = pr
-      match fn_decl_span(m, s.name) {
-        Some(sp) -> (Some(sp), dp)
-        None -> no_def()
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
+        match d {
+          DFn(f) -> if f.name == s.name { return site_in(h, f.nlo, f.nhi, f.lo) }
+          _ -> ()
+        }
       }
+      no_site()
     }
-    None -> no_def()
+    None -> no_site()
   }
 }
 
-fn def_of_trait_method(qc: QCx, tid: Int, mname: String) -> (Option[(Int, Int)], Option[String]) = {
+fn site_of_trait_method(qc: QCx, tid: Int, mname: String) -> Site = {
   let tr = trait_of(qc.entry.cx.traits, tid)
   let owner = match tr.owner {
     Some(o) -> o
     None -> qc.entry.class_name
   }
-  match module_ast_by_class(qc, owner) {
-    Some(pr) -> {
-      let (m, dp) = pr
-      for d in m.decls {
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
         match d {
           DTrait(name, _, _, _, methods, _, _, _, _, _, _, _) ->
             if name == tr.name {
               for tm in methods {
-                if tm.name == mname { return (Some((tm.nlo, tm.nhi)), dp) }
+                if tm.name == mname { return site_in(h, tm.nlo, tm.nhi, tm.lo) }
               }
             }
           _ -> ()
         }
       }
-      no_def()
+      no_site()
     }
-    None -> no_def()
+    None -> no_site()
   }
 }
 
-## The DType declaration behind an ADT id, with the defining file.
-fn type_decl_of(qc: QCx, aid: Int) -> Option[(TypeDeclR, Option[String])] = {
+## The DType declaration behind an ADT id, with the module holding it.
+fn type_decl_of(qc: QCx, aid: Int) -> Option[(TypeDeclR, Holder)] = {
   let a = adt_of(qc.entry.cx.adts, aid)
   let owner = match a.owner {
     Some(o) -> o
     None -> qc.entry.class_name
   }
-  match module_ast_by_class(qc, owner) {
-    Some(pr) -> {
-      let (m, dp) = pr
-      for d in m.decls {
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
         match d {
-          DType(t) -> if t.name == a.name { return Some((t, dp)) }
+          DType(t) -> if t.name == a.name { return Some((t, h)) }
           _ -> ()
         }
       }
@@ -298,34 +338,36 @@ fn type_decl_of(qc: QCx, aid: Int) -> Option[(TypeDeclR, Option[String])] = {
   }
 }
 
-fn def_of_type(qc: QCx, aid: Int) -> (Option[(Int, Int)], Option[String]) =
+fn site_of_type(qc: QCx, aid: Int) -> Site =
   match type_decl_of(qc, aid) {
     Some(pr) -> {
-      let (t, dp) = pr
-      (Some((t.nlo, t.nhi)), dp)
+      let (t, h) = pr
+      site_in(h, t.nlo, t.nhi, t.lo)
     }
-    None -> no_def()
+    None -> no_site()
   }
 
-fn def_of_ctor(qc: QCx, aid: Int, cname: String) -> (Option[(Int, Int)], Option[String]) =
+fn site_of_ctor(qc: QCx, aid: Int, cname: String) -> Site =
   match type_decl_of(qc, aid) {
     Some(pr) -> {
-      let (t, dp) = pr
+      let (t, h) = pr
       for c in t.ctors {
-        if c.name == cname { return (Some((c.nlo, c.nhi)), dp) }
+        if c.name == cname { return site_in(h, c.nlo, c.nhi, c.lo) }
       }
-      no_def()
+      no_site()
     }
-    None -> no_def()
+    None -> no_site()
   }
 
+## A field jumps to its declaration and carries no doc: `dawn doc` documents
+## no field, and hover does not invent a second attachment rule.
 fn def_of_field(qc: QCx, aid: Int, fi: Int) -> (Option[(Int, Int)], Option[String]) =
   match type_decl_of(qc, aid) {
     Some(pr) -> {
-      let (t, dp) = pr
-      if len(t.ctors) > 0 {
+      let (t, h) = pr
+      if len(t.ctors) > 0 && h.jump {
         match get(t.ctors[0].fields, fi) {
-          Some(f) -> return (Some((f.lo, f.hi)), dp)
+          Some(f) -> return (Some((f.lo, f.hi)), h.def_path)
           None -> ()
         }
       }
@@ -335,48 +377,55 @@ fn def_of_field(qc: QCx, aid: Int, fi: Int) -> (Option[(Int, Int)], Option[Strin
   }
 
 ## Definition site of a constant by name, searched where the checker found it.
-fn def_of_const(qc: QCx, name: String) -> (Option[(Int, Int)], Option[String]) = {
+fn site_of_const(qc: QCx, name: String) -> Site = {
   match const_decl_span(qc.entry.m, name) {
-    Some(sp) -> return (Some(sp), None)
+    Some(sp) -> {
+      let (nlo, nhi, lo) = sp
+      return here(nlo, nhi, lo)
+    }
     None -> ()
   }
   match map.get(qc.entry.cx.imported_names, name) {
-    Some(mp) -> def_of_const_in(qc, mp, name)
-    None -> no_def()
+    Some(mp) -> site_of_const_in(qc, mp, name)
+    None -> no_site()
   }
 }
 
-fn def_of_const_in(qc: QCx, mod_path: String, name: String) -> (Option[(Int, Int)], Option[String]) = {
+fn site_of_const_in(qc: QCx, mod_path: String, name: String) -> Site = {
+  let h = match holder_by_path(qc, mod_path) {
+    Some(h) -> h
+    None -> return no_site()
+  }
+  match const_decl_span(h.m, name) {
+    Some(sp) -> {
+      let (nlo, nhi, lo) = sp
+      site_in(h, nlo, nhi, lo)
+    }
+    None -> no_site()
+  }
+}
+
+## The same three places as `holder_by_class`, by module path: a const names
+## its module by path, and the entry module is never one of them here (a bare
+## const of this module resolved before this is reached).
+fn holder_by_path(qc: QCx, mod_path: String) -> Option[Holder] = {
   for cm in qc.prog.modules {
     if cm.mod_path == mod_path {
-      match const_decl_span(cm.m, name) {
-        Some(sp) -> return (Some(sp), Some(cm.path))
-        None -> return no_def()
-      }
+      return Some(Holder { m: cm.m, def_path: Some(cm.path), jump: true, home: DocFile(cm.path) })
     }
   }
-  # same rule as `module_ast_by_class`: a std const is in std's file, and there
-  # is no definition to offer at all when the embedded copy supplied the module
   for tr in qc.std.srcs {
     let (mp, _, m) = tr
-    if mp == mod_path {
-      match std_file_of(qc.std, mp) {
-        Some(f) ->
-          match const_decl_span(m, name) {
-            Some(sp) -> return (Some(sp), Some(f))
-            None -> return no_def()
-          }
-        None -> return no_def()
-      }
-    }
+    if mp == mod_path { return Some(std_holder(qc, mp, m)) }
   }
-  no_def()
+  None
 }
 
-fn const_decl_span(m: Module, name: String) -> Option[(Int, Int)] = {
+## A constant's name span and the offset its declaration starts at.
+fn const_decl_span(m: Module, name: String) -> Option[(Int, Int, Int)] = {
   for d in m.decls {
     match d {
-      DConst(n, _, _, _, _, _, nlo, nhi) -> if n == name { return Some((nlo, nhi)) }
+      DConst(n, _, _, _, lo, _, nlo, nhi) -> if n == name { return Some((nlo, nhi, lo)) }
       _ -> ()
     }
   }
@@ -470,12 +519,11 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       let tf = tfun_at(qc, [identity.Named(identity.TestDecl, name)])
       q = walk_e(qc, q, body, tf_body(tf))
     }
-    DConst(name, _, ann, init, _, _, nlo, nhi) -> {
+    DConst(name, _, ann, init, lo, _, nlo, nhi) -> {
       q = visit_written_type(q, ann, WtStorage)
       match map.get(qc.entry.cx.consts, name) {
         Some(t) -> {
-          q = offer(q, nlo, nhi, const_text(qc, qc.entry.mod_path, name, t),
-            Some((nlo, nhi)), None)
+          q = offer_at(q, nlo, nhi, const_text(qc, qc.entry.mod_path, name, t), here(nlo, nhi, lo))
         }
         None -> ()
       }
@@ -519,8 +567,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         None -> ()
       }
     }
-    DTrait(name, tp, _, _, methods, _, _, _, _, _, nlo, nhi) -> {
-      q = offer(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", Some((nlo, nhi)), None)
+    DTrait(name, tp, _, _, methods, _, _, _, lo, _, nlo, nhi) -> {
+      q = offer_at(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", here(nlo, nhi, lo))
       let tid = map.get(qc.entry.cx.traits_by_name, name)
       for m in methods {
         q = visit_param_types(q, m.params)
@@ -531,7 +579,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
             for pr in tr.methods {
               let (mn, ms) = pr
               if mn == m.name {
-                q = offer_sig(qc, q, m.nlo, m.nhi, ms.sig, Some((m.nlo, m.nhi)), None)
+                q = offer_sig_at(qc, q, m.nlo, m.nhi, ms.sig, here(m.nlo, m.nhi, m.lo))
               }
             }
           }
@@ -547,12 +595,12 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       }
     }
     DEffect(e) -> {
-      q = offer(q, e.nlo, e.nhi, "effect ${e.name}", Some((e.nlo, e.nhi)), None)
+      q = offer_at(q, e.nlo, e.nhi, "effect ${e.name}", here(e.nlo, e.nhi, e.lo))
       for op in e.ops {
         q = visit_param_types(q, op.params)
         q = visit_written_type(q, op.ret, WtReturn)
         match map.get(qc.entry.cx.fns, op.name) {
-          Some(sg) -> { q = offer_sig(qc, q, op.nlo, op.nhi, sg, Some((op.nlo, op.nhi)), None) }
+          Some(sg) -> { q = offer_sig_at(qc, q, op.nlo, op.nhi, sg, here(op.nlo, op.nhi, op.lo)) }
           None -> ()
         }
       }
@@ -586,8 +634,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         } else {
           ""
         }
-      q = offer(q, t.nlo, t.nhi, "type " ++ t.name ++ " = " ++ summary ++ derives,
-        Some((t.nlo, t.nhi)), None)
+      q = offer_at(q, t.nlo, t.nhi, "type " ++ t.name ++ " = " ++ summary ++ derives,
+        here(t.nlo, t.nhi, t.lo))
       match info {
         Some(aid) -> {
           let a = adt_of(qc.entry.cx.adts, aid)
@@ -595,7 +643,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
           for c in t.ctors {
             match get(a.ctors, ci) {
               Some(cinfo) -> {
-                q = offer(q, c.nlo, c.nhi, render_ctor(qc, cinfo), Some((c.nlo, c.nhi)), None)
+                q = offer_at(q, c.nlo, c.nhi, render_ctor(qc, cinfo), here(c.nlo, c.nhi, c.lo))
                 var fi = 0
                 for f in c.fields {
                   match get(cinfo.fields, fi) {
@@ -629,7 +677,7 @@ type ValueHome = { cx: Cx, tm: TModule, ct: CtOut, own: Bool }
 
 ## The module a constant reference names. A qualified `m.NAME` carries its
 ## owner; a bare one carries "" and is either declared here or imported by a
-## `use m.{NAME}` line -- the same two places `def_of_const` looks.
+## `use m.{NAME}` line -- the same two places `site_of_const` looks.
 fn const_owner(qc: QCx, owner: String, name: String) -> String =
   if owner != "" { owner }
   else {
@@ -755,7 +803,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     None -> ()
   }
   match sig_of(qc, f.name) {
-    Some(s) -> { q = offer_sig(qc, q, f.nlo, f.nhi, s, Some((f.nlo, f.nhi)), None) }
+    Some(s) -> { q = offer_sig_at(qc, q, f.nlo, f.nhi, s, here(f.nlo, f.nhi, f.lo)) }
     None -> ()
   }
   let tf = tfun_at(qc, path)
@@ -797,8 +845,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   var q = q0
   match map.get(exp.fns, imp.name) {
     Some(s) -> {
-      let (dsp, dp) = def_of_sig(qc, s)
-      q = offer_sig(qc, q, imp.lo, imp.hi, s, dsp, dp)
+      q = offer_sig_at(qc, q, imp.lo, imp.hi, s, site_of_sig(qc, s))
     }
     None -> ()
   }
@@ -806,8 +853,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
     Some(aid) -> {
       let a = adt_of(qc.entry.cx.adts, aid)
       let summary = join(map(a.ctors, c => c.name), " | ")
-      let (dsp, dp) = def_of_type(qc, aid)
-      q = offer(q, imp.lo, imp.hi, "type " ++ a.name ++ " = " ++ summary, dsp, dp)
+      q = offer_at(q, imp.lo, imp.hi, "type " ++ a.name ++ " = " ++ summary, site_of_type(qc, aid))
     }
     None -> ()
   }
@@ -817,8 +863,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
       let a = adt_of(qc.entry.cx.adts, aid)
       match get(a.ctors, ci) {
         Some(c) -> {
-          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-          q = offer(q, imp.lo, imp.hi, render_ctor(qc, c), dsp, dp)
+          q = offer_at(q, imp.lo, imp.hi, render_ctor(qc, c), site_of_ctor(qc, aid, c.name))
         }
         None -> ()
       }
@@ -827,8 +872,7 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
   }
   match map.get(exp.consts, imp.name) {
     Some(t) -> {
-      let (dsp, dp) = def_of_const_in(qc, exp.mod_path, imp.name)
-      q = offer(q, imp.lo, imp.hi, const_text(qc, exp.mod_path, imp.name, t), dsp, dp)
+      q = offer_at(q, imp.lo, imp.hi, const_text(qc, exp.mod_path, imp.name, t), site_of_const_in(qc, exp.mod_path, imp.name))
     }
     None -> ()
   }
@@ -1057,8 +1101,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XFnValue(owner, fname, _, _, _, _)) ->
           match sig_by_owner(qc, owner, fname, None) {
             Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer_sig(qc, q, lo, hi, s, dsp, dp)
+              q = offer_sig_at(qc, q, lo, hi, s, site_of_sig(qc, s))
             }
             None -> ()
           }
@@ -1071,8 +1114,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
               let (towner, fname) = t
               match sig_by_owner(qc, towner, fname, None) {
                 Some(s) -> {
-                  let (dsp, dp) = def_of_sig(qc, s)
-                  q = offer_sig(qc, q, lo, hi, s, dsp, dp)
+                  q = offer_sig_at(qc, q, lo, hi, s, site_of_sig(qc, s))
                 }
                 None -> ()
               }
@@ -1167,8 +1209,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           if fname == name {
             match sig_by_owner(qc, owner, fname, trait_id) {
               Some(s) -> {
-                let (dsp, dp) = def_of_sig(qc, s)
-                q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
+                q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
               }
               None -> ()
             }
@@ -1187,8 +1228,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XJava(call, _, _, _)) -> {
           match sig_of(qc, name) {
             Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
+              q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
             }
             None -> ()
           }
@@ -1201,8 +1241,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         _ -> {
           match sig_of(qc, name) {
             Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer_sig(qc, q, nlo, nhi, s, dsp, dp)
+              q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
             }
             None -> ()
           }
@@ -1254,8 +1293,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         # `m.NAME`: a module-qualified constant (LANG-06 step 3). The receiver
         # is a module alias, not a value, so only the name is offered.
         Some(XConstRef(owner, cname, _, _, cty)) -> {
-          let (dsp, dp) = def_of_const_in(qc, owner, cname)
-          q = offer(q, flo, fhi, const_text(qc, owner, cname, cty), dsp, dp)
+          q = offer_at(q, flo, fhi, const_text(qc, owner, cname, cty), site_of_const_in(qc, owner, cname))
         }
         _ -> { q = walk_e(qc, q, target, None) }
       }
@@ -1472,8 +1510,7 @@ fn walk_named_call(
     Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
       match sig_by_owner(qc, owner, fname, trait_id) {
         Some(s) -> {
-          let (dsp, dp) = def_of_sig(qc, s)
-          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
+          q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
         }
         None -> ()
       }
@@ -1489,8 +1526,7 @@ fn walk_named_call(
     Some(XCallDyn(_, _, targs, _, _, _, _)) -> {
       match sig_of(qc, callee) {
         Some(s) -> {
-          let (dsp, dp) = def_of_sig(qc, s)
-          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
+          q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
         }
         None -> ()
       }
@@ -1499,8 +1535,7 @@ fn walk_named_call(
     _ -> {
       match sig_of(qc, callee) {
         Some(s) -> {
-          let (dsp, dp) = def_of_sig(qc, s)
-          q = offer_sig(qc, q, clo, chi, s, dsp, dp)
+          q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
         }
         None -> ()
       }
@@ -1528,8 +1563,7 @@ fn walk_ctor_call(
       let a = adt_of(qc.entry.cx.adts, aid)
       match get(a.ctors, ci) {
         Some(c) -> {
-          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-          q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+          q = offer_at(q, clo, chi, render_ctor(qc, c), site_of_ctor(qc, aid, c.name))
         }
         None -> ()
       }
@@ -1550,8 +1584,7 @@ fn walk_ctor_call(
     Some(XConstRef(owner, cname, _, _, _)) -> {
       match map.get(qc.entry.cx.consts, cname) {
         Some(t) -> {
-          let (dsp, dp) = def_of_const(qc, cname)
-          q = offer(q, clo, chi, const_text(qc, const_owner(qc, owner, cname), cname, t), dsp, dp)
+          q = offer_at(q, clo, chi, const_text(qc, const_owner(qc, owner, cname), cname, t), site_of_const(qc, cname))
         }
         None -> ()
       }
@@ -1560,8 +1593,7 @@ fn walk_ctor_call(
       let a = adt_of(qc.entry.cx.adts, aid)
       match get(a.ctors, ci) {
         Some(c) -> {
-          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-          q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+          q = offer_at(q, clo, chi, render_ctor(qc, c), site_of_ctor(qc, aid, c.name))
         }
         None -> ()
       }
@@ -1820,8 +1852,7 @@ fn visit_ctor_pat(
       let a = adt_of(qc.entry.cx.adts, aid)
       match get(a.ctors, ci) {
         Some(c) -> {
-          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-          q = offer(q, nlo, nhi, render_ctor(qc, c), dsp, dp)
+          q = offer_at(q, nlo, nhi, render_ctor(qc, c), site_of_ctor(qc, aid, c.name))
           var pos = 0
           for pa in args {
             let fi = match pa.name {

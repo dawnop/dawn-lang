@@ -709,15 +709,62 @@ export function lspCompletionSource(
   }
 }
 
-export function hoverText(contents: unknown): string {
+/**
+ * A hover reply split into what the tooltip shows: the code of its first
+ * ```dawn fence, and the `##` doc the server puts after a `---` rule
+ * (docs/lsp-hover-design.md §A3). A reply without a fence is all code, as a
+ * plain-text server sends it. The doc is the comment's own markdown; the
+ * tooltip shows it as text, so its fence lines are dropped (their contents
+ * kept) and nothing of the markup but inline `code` survives as written.
+ */
+export interface HoverParts {
+  code: string
+  doc: string
+}
+
+export function hoverParts(contents: unknown): HoverParts {
   const values = Array.isArray(contents) ? contents : [contents]
   const text = values.flatMap((value) => {
     if (typeof value === 'string') return [value]
     const record = asRecord(value)
     return typeof record?.value === 'string' ? [record.value] : []
-  }).join('\n\n')
-  const fenced = /^```(?:dawn)?\s*\n([\s\S]*?)\n```\s*$/.exec(text.trim())
-  return fenced ? fenced[1] : text
+  }).join('\n\n').trim()
+  const fenced = /^```(?:dawn)?[ \t]*\n([\s\S]*?)\n```[ \t]*(?:\n([\s\S]*))?$/.exec(text)
+  if (!fenced) return { code: text, doc: '' }
+  const rest = (fenced[2] ?? '').trim().replace(/^-{3,}[ \t]*(?:\n|$)/, '')
+  return { code: fenced[1], doc: docText(rest) }
+}
+
+/** The doc as plain text: fence lines and horizontal rules go, the rest stays. */
+function docText(markdown: string): string {
+  return markdown
+    .split('\n')
+    .filter((line) => !/^\s*```/.test(line) && !/^\s*-{3,}\s*$/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** The tooltip's text: the code, then the doc after a blank line. */
+export function hoverText(contents: unknown): string {
+  const { code, doc } = hoverParts(contents)
+  return doc ? `${code}\n\n${doc}` : code
+}
+
+/** The doc's text with each inline `code` span as a <code> element. */
+function docNode(doc: string): HTMLElement {
+  const node = document.createElement('div')
+  node.className = 'dp-hover-doc'
+  doc.split(/(`[^`\n]+`)/).forEach((piece) => {
+    if (/^`[^`\n]+`$/.test(piece)) {
+      const code = document.createElement('code')
+      code.textContent = piece.slice(1, -1)
+      node.appendChild(code)
+    } else if (piece) {
+      node.appendChild(document.createTextNode(piece))
+    }
+  })
+  return node
 }
 
 export function lspHover(client: DawnLspClient): Extension {
@@ -727,8 +774,8 @@ export function lspHover(client: DawnLspClient): Extension {
     try {
       const hover = await client.hover(offset, 1000)
       if (hover == null || view.state.doc.toString() !== snapshot) return null
-      const text = hoverText(hover.contents).trim()
-      if (!text) return null
+      const parts = hoverParts(hover.contents)
+      if (!hoverText(hover.contents).trim()) return null
       const from = hover.range ? lspPositionToOffset(snapshot, hover.range.start) : offset
       const to = hover.range ? lspPositionToOffset(snapshot, hover.range.end) : offset
       return {
@@ -738,7 +785,11 @@ export function lspHover(client: DawnLspClient): Extension {
         create: () => {
           const dom = document.createElement('div')
           dom.className = 'dp-hover'
-          dom.textContent = text
+          const code = document.createElement('div')
+          code.className = 'dp-hover-code'
+          code.textContent = parts.code.trim()
+          dom.appendChild(code)
+          if (parts.doc) dom.appendChild(docNode(parts.doc))
           return { dom }
         },
       }

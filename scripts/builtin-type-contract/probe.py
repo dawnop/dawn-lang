@@ -5,6 +5,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lsp_hover import hover_code  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 180
@@ -431,15 +434,14 @@ def lsp_hover_results(jar):
             continue
         if not isinstance(result, dict):
             return None
-        contents = result.get("contents")
-        if not isinstance(contents, dict):
+        if not isinstance(result.get("contents"), dict):
             return None
-        out[name] = contents.get("value")
+        out[name] = hover_code(result)
     return out if set(out) == set(cases) else None
 
 
 def lsp_never_hover_is_contextual(results):
-    expected = "```dawn\nNever\n```"
+    expected = "Never"
     return (
         results is not None
         and results["top"] == expected

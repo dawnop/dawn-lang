@@ -139,7 +139,7 @@ assess() { # compiler
     name=${pair%%=*}
     want=${pair#*=}
     got=$(printf '%s\n' "$hover" | grep -F "$name	" | cut -f2- || true)
-    same "$name" "$got" "\`\`\`dawn $want \`\`\`"
+    same "$name" "$got" "$want"
   done
 
   # The formatter is lexical and was expected not to move. "Expected" is not a
