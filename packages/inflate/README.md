@@ -1,7 +1,9 @@
 # packages/inflate
 
-Pure Dawn readers for raw DEFLATE, gzip and ZIP, plus CRC-32. The package
-manager uses them for downloaded source archives; no module imports Java.
+Pure Dawn readers for raw DEFLATE, gzip and ZIP, plus CRC-32.
+
+The package manager uses them for downloaded source archives; no module
+imports Java.
 
 Package version **2.0.0** folds each `_bounded` twin into its base function as
 a defaulted parameter, `cap: Option[Int] = None`. It is a major release because

@@ -1,10 +1,9 @@
 # packages/tea-dom
 
-The DOM half of the Elm architecture: a second vocabulary over `packages/tea-core`'s
-reconciler contract, the wire format that carries a patch list out of a wasm
-module, and the reactor turn that answers one host message. Nothing here
-depends on `packages/tea-term`, and nothing here knows what a browser is; the
-JavaScript that does is in `js/`.
+The DOM half of the Elm architecture: a second vocabulary over `packages/tea-core`'s reconciler contract, the wire format that carries a patch list out of a wasm module, and the reactor turn that answers one host message.
+
+Nothing here depends on `packages/tea-term`, and nothing here knows what a
+browser is; the JavaScript that does is in `js/`.
 
 ```dawn
 use tea_dom/dsl.{button, div, text}
