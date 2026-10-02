@@ -344,6 +344,7 @@ TRANSLATIONS = {
     "docs/history.zh-CN.md": "docs/history.md",
     "site/pages/home.zh.md": "site/pages/home.md",
     "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
+    "site/pages/gpu.zh.md": "site/pages/gpu.md",
 }
 
 SPEC_CONTRACTS = (
