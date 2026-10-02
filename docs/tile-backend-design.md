@@ -327,6 +327,10 @@ tile 的元素格式、不是缓冲格式；刀 10 让它两者都是，于是�
 
 ## 4. 宿主层：`Gpu` 效果族
 
+> 规范表述在 spec.md §12.6：`Gpu` 的操作、两个 handler 的签名与拒绝、可分配的格式、两个
+> handler 之间的契约，以它为准。本节记的是各刀落地时的形状与当时的理由，不随 API 改写；
+> 此后变了的地方，所在小节末尾有带日期的注，指到当前形状的 file:line。
+
 ### 4.1 操作清单（刀 1 已落地）
 
 效果操作不能带类型参数，效果本身也不能（spec.md §6.5），所以操作面是单态、句柄级的；
@@ -350,6 +354,13 @@ handler 安装时一次性给；第二里程碑再把「字节码到模块句柄
 **保留到了刀 6 之后**：操作面在每种格式下都搬 `List[Float]`（与假设备的参考实现同一种值），
 bf16 的打包发生在操作**之下**、真 handler 里（§4.4 的 `Bytes` 版 intrinsic），假设备则按缓冲
 格式舍入；计划稿「换 `Bytes`」的那一步没有必要，因为格式转换只有真设备那一侧需要字节。
+
+> **2026-10-02 注：操作面已变。** 上面是刀 1 的六个操作。`a82acdd0`（2026-09-03，刀 8 的三维
+> grid）把 `grid: Int` 换成三轴 `gx: Int, gy: Int, gz: Int`，类型化的 `launch(kernel, grid, args)`
+> 是 `launch3(kernel, grid, 1, 1, args)`；`b298a193`（2026-09-06，刀 TG，§6.13）加了第七个操作
+> `gpu_module_global(kernel, name, dtype) -> Result[(Int, Int), ForeignError]`。「字节码到模块句柄」
+> 没有做成操作：模块仍在安装 handler 时按 kernel 名给（§4.5）。今天的声明在 `std/gpu.dawn:698-706`，
+> 规范表述在 spec.md §12.6。
 
 ### 4.2 `with_gpu_real` 形态（刀 4 已落地）
 
@@ -387,6 +398,14 @@ shared 0 调 `cuLaunchKernel`（cuda-tile 宿主示例的启动形态）。第�
 （连带释放程序没 free 的缓冲与模块）并 `dlclose`。std 侧唯一能在 `dawn test --stdlib` 里断言的是
 「不碰设备的拒绝」（dtype、句柄表、kernel 表三处，两个后端与有无驱动的机器上答案相同），
 `std/gpu.dawn` 最后一个 test 块就是它；设备本身归 `scripts/tile-gpu-diff`（§6.4）。
+
+> **2026-10-02 注：形状已变。** 签名自 `baadc477`（2026-09-24）起是
+> `with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e) -> T !io`：`body`
+> 的行对其余效果多态，不再必须恰好是 `!io`（`std/gpu.dawn:1197`）。`gpu_alloc` 收的格式也不止
+> f64 与 bf16：`6ef64b63`（2026-09-03）加 `i32`，到 `6ffb9bde`（2026-09-05）加完最后六种，今天
+> `element_bytes` 认识 12 个（`std/gpu.dawn:280-294`），f64 之外都走 `Bytes` 那条缝
+> （`std/gpu.dawn:1222`、`1236`）。cubin 除了在该 kernel 第一次 `launch` 时装，也在第一次对它
+> `gpu_module_global` 时装，本次安装内复用（`std/gpu.dawn:1295-1303`）。当前形状见 spec.md §12.6。
 
 ### 4.3 假设备 `with_gpu_fake`（刀 1 已落地）
 
@@ -438,6 +457,12 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)]
 层 2 对拍的形状：同一个 `!Gpu` 程序跑两遍，一遍 `with_gpu_fake` 一遍 `with_gpu_real`，
 输出同一组行。这与 `scripts/spike-native/effect_fs_seam.dawn`（`c569ff18`）一模一样。
 
+> **2026-10-02 注：可分配格式已变。** 上面列的六种是写这段时 `element_bytes` 认识的格式；
+> `6ffb9bde`（2026-09-05）又加了 `i64`、`tf32`、`i16`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`，今天是
+> 12 个（`std/gpu.dawn:280-294`，假设备的拒绝文案在 `std/gpu.dawn:956`）。`F32` 能写进类型、不能
+> 分配。带模块全局的假设备是 `with_gpu_fake_globals`（`std/gpu.dawn:947`），`with_gpu_fake` 是它
+> 全局表为空的特例（`std/gpu.dawn:939`）。当前形状见 spec.md §12.6。
+
 ### 4.4 intrinsic 与运行时落点（刀 4 已落地）
 
 - `types.dawn` 的 `Rt` 加 `RtGpu`；`intrinsics()` 登记**十项**（刀 4 八项、刀 6 两项），全部
@@ -473,9 +498,19 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)]
 ### 4.5 kernel 怎么被 `launch` 点名
 
 分阶段路线下不需要 `CFnRef`：kernel 是 §5 记录出来的值，有名字（`entry @vadd`），
-`gpu_launch("vadd", ...)` 传字符串；`with_gpu_real` 装机时拿到整个模块的字节码，
-`cuModuleGetFunction` 按名取。模块与 kernel 名的绑定在宿主层是一张 `Map[String, TileProg]`，
-名字不在表里两种 handler 都答 `Err(kind: "gpu.no_kernel")`。
+`gpu_launch("vadd", ...)` 传字符串。名字到 kernel 的绑定是安装 handler 时交给它的一张表，
+两个 handler 的表不同形：
+
+- 真设备是 `Map[String, Bytes]`，名字映到**该 kernel 的 cubin**（一个 `TileProg` 一个模块、一个
+  entry，§5.3），不是整个程序的一份字节码；`launch` 按名取 cubin，第一次用到时
+  `cuModuleLoadData`，再以同一个名字 `cuModuleGetFunction`（`std/gpu.dawn:1197`、`1254-1262`；
+  `runtime/c/dawn_rt.c:4908`）。
+- 假设备是 `Map[String, (Int, WideRefFn)]`，名字映到（缓冲个数，宿主参考实现），从不碰 kernel 体
+  （`std/gpu.dawn:939`、§4.3）。
+
+名字不在表里两种 handler 都答 `Err(kind: "gpu.no_kernel")`。计划稿这里写的是「一张
+`Map[String, TileProg]`」：`std/gpu` 不依赖 `packages/tileir`（§5.3），两个 handler 都没有收过
+`TileProg`。当前形状见 spec.md §12.6。
 
 ## 5. 设备层（分阶段路线）
 
@@ -720,8 +755,15 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   它不需要 intrinsic（只有 std 能名 intrinsic，`checker.dawn:1801`），而且包可以有自己的
   版本与 `dawn.toml`，Tile IR 字节码版本钉在包常量里（§6.3）。`std/gpu` 只认 `Bytes`
   与 kernel 名，不认识 `TileProg`，两边解耦。
-- **何时**：宿主运行期，`launch` 前一次、按 kernel 名缓存。comptime 折叠是期权，前提是
+- **何时**：宿主运行期，程序调用 `trace_kernel` 的那一刻（`packages/tileir/src/prog.dawn:1558`），
+  在记录 handler 下把体跑恰好一次；与 `launch` 无关，也没有按名字缓存记录。`encode` 出的字节码
+  变成 cubin 是 `tileiras` 的事，在 Dawn 工具链之外（今天由 `scripts/tile-golden/run.sh` 的
+  assemble 步与 `scripts/tile-gpu-diff/run.sh` 调用）；宿主程序拿到的是 cubin 文件，在
+  `with_gpu_real` 的表里按 kernel 名交出（如 `scripts/tile-gpu-diff/vadd_diff.dawn:287-304`）。
+  唯一按名字的缓存是 `with_gpu_real` 一次安装内的模块装载（§4.2）。comptime 折叠是期权，前提是
   `ceval` 能跑 `with handle`，不在本计划内。
+  （计划稿这里写的是「`launch` 前一次、按 kernel 名缓存」，那条路没有走；规范表述见 spec.md §12.6，
+  它不规定由谁、在何时调用 `tileiras`。）
 - **产物**：字节码是终态，文本是 golden 与 spike。
 
 **刀 3 落地的形状**（`packages/tileir/src/lower.dawn`、`bytecode.dawn`）：
@@ -731,9 +773,9 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   LoadPtr / StorePtr / AddFloat / Ret`），值按定义序从 0 密集编号，操作数是 `Arg(pos)`（入口参数）
   或 `Val(id)`。指针梯子、去重、SSA 重编全在这里，渲染器与写入器各只是「一条 `Instr` 一种拼法」，
   不再各自决定发什么。抽出这一层时文本 golden 逐字节未动，这是纯重构的证据。
-- `encode(prog) -> Bytes` 写 `cuda-tile` 字节码：头（magic + 13.3，刀 T8 之前是 13.2）、Func / Constant / Type /
-  String 四个 section、结束字节。只编码指令表装得下的东西：内存操作 `weak`、无 mask、带 token
-  操作数；`addf` 为 `rounding<nearest_even>`、不 flush-to-zero；整数操作 `overflow` none；tile 为
+- `encode(prog) -> Bytes` 写 `cuda-tile` 字节码：头（magic + 13.4；刀 T8 之前是 13.2，T8 到 U2
+  是 13.3，§6.11、§6.18）、Func / Constant / Type / String 四个 section、结束字节。只编码指令表
+  装得下的东西：内存操作 `weak`、无 mask、带 token 操作数；`addf` 为 `rounding<nearest_even>`、不 flush-to-zero；整数操作 `overflow` none；tile 为
   0 或 1 阶。不写 debug section（函数位置索引 0 = unknown）。**entry 的 optimization_hints
   从刀 T15 起写得出**（默认仍不写，只有 `trace_kernel_hinted` 记下的程序带它；load / store
   的同名可选属性同刀落地，见 §6.10）。版本常量 `BYTECODE_MAJOR / BYTECODE_MINOR` 钉在包里。
