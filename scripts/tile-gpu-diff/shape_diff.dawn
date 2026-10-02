@@ -6,6 +6,7 @@
 #
 #   shape_diff <shape_ops.cubin> <grid_stride.cubin> <token_join.cubin>
 #              <ptr_roundtrip.cubin> <ptr_recast.cubin>
+#              <insert_tile.cubin> <powi_sweep.cubin>
 #
 # This family is the first here whose subject is the OPCODE TABLE rather
 # than a problem. Knives 3 to 21 were solving leetgpu; from knife T2 on the
@@ -15,6 +16,22 @@
 # scripts/tileir-features/features.txt). The eight here are `extract`,
 # `cat`, `permute`, `join_tokens`, `get_num_tile_blocks`, `int_to_ptr`,
 # `ptr_to_int` and `ptr_to_ptr`.
+#
+# Knife T16 added two kernels for two opcodes bytecode 13.4 brought, and
+# they are here rather than in a family of their own because this is the
+# family whose subject is the opcode table and both are exact tier:
+#
+#   * `insert_tile` is `extract`'s other direction. It puts a quarter of a
+#     16 by 8 tile back where it came from (the round trip: the answer is
+#     the tile) and over another quarter (the answer is the tile with that
+#     quarter replaced), on the same `0, 1, .., 127` corpus `shape_ops`
+#     reads, so a misplaced lane says where it came from.
+#   * `powi_sweep` is `fpowi`, the float power with an INTEGER exponent, and
+#     it is the one kernel here that computes. Its tier is exact against
+#     right-to-left binary exponentiation with a final reciprocal, which is
+#     what the device was measured to do (tileref/ref.ref_fpowi has the
+#     measurement); it is NOT exact against the correctly rounded power, and
+#     the transcript does not pretend otherwise.
 #
 # What is new here and nowhere else:
 #
@@ -61,11 +78,19 @@
 #     infinity (the exponent field is never all ones) and that DO include
 #     subnormals and both signs: the decode has three branches and a corpus
 #     of ordinary normals would exercise one.
+#   * in `powi_sweep`, the edges the operation's semantics live at: zero
+#     and negative exponents, both signed zeroes and both infinities as
+#     bases, a NaN base (whose zeroth power is 1.0), bases whose powers
+#     overflow or underflow on the way, and exponents ABOVE 127 whose low
+#     octet is negative, which is what makes the i8 half of the kernel say
+#     the dialect reads that octet signed. The `exponents` line counts the
+#     last two and scripts/tile-gpu-diff/run.sh holds both above zero.
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i32}
-use tileref/ref.{shape_ops_ref, grid_stride_ref, token_join_ref, ptr_roundtrip_ref, ptr_recast_ref}
+use tileref/ref.{shape_ops_ref, grid_stride_ref, token_join_ref, ptr_roundtrip_ref, ptr_recast_ref,
+  insert_tile_ref, powi_sweep_ref }
 use std/list
 use std/map
 
@@ -93,6 +118,14 @@ pub const PR_DELTA: Int = 3
 
 pub const PC_BLOCKS: Int = 4
 pub const PC_TILE: Int = 128
+
+pub const INS_BLOCKS: Int = 4
+pub const INS_IN: Int = 128
+pub const INS_OUT: Int = 256
+
+pub const POW_BLOCKS: Int = 4
+pub const POW_TILE: Int = 128
+pub const POW_OUT: Int = 256
 
 ## The tail every output buffer carries past its answer: lanes no kernel
 ## here should write, so an operation that ran wide is visible.
@@ -289,11 +322,42 @@ fn f32_patterns(n: Int, a: Int, b: Int) -> List[Float] = list.map(range(0, n), i
   to_float(wrap_i32(((h >>> 31) << 31) | (capped << 23) | (h & 0x7FFFFF)))
 })
 
+# The f64 bases `powi_sweep` raises, one block at a time: the specials
+# (both zeroes, both infinities, a NaN, and three magnitudes whose powers
+# leave the normal range within five steps) cycling against exponents -5 to
+# 5, then three ramps of ordinary values, the second of them through zero.
+fn powi_bases() -> List[Float] = {
+  let inf = 1.0 / 0.0
+  let specials = [0.0, 0.0 * (0.0 - 1.0), inf, 0.0 - inf, inf - inf, 1.0e-154, 1.0e200, 1.0e-200,
+    0.0 - 1.0, 0.0 - 3.0, 0.5, 1.5]
+  list.map(range(0, POW_TILE), i => specials[i % 12])
+    ++ list.map(range(0, POW_TILE), i => 0.7 + to_float(i) * 0.01373)
+    ++ list.map(range(0, POW_TILE), i => (0.0 - 1.3) + to_float(i) * 0.0219)
+    ++ list.map(range(0, POW_TILE), i => 1.0 + to_float(i) * 1.0e-3 + to_float(i * i) * 0.37)
+}
+
+# The i32 exponents, block for block with the bases: -5 to 5 against the
+# specials, then three scrambled ranges, the last of which runs past 127 so
+# that the low octet the i8 half reads is negative where the i32 is not.
+fn powi_exponents() -> List[Float] =
+  list.map(range(0, POW_TILE), i => to_float(i / 12 - 5))
+  ++ list.map(range(0, POW_TILE), i => to_float((i * 37) % 81 - 40))
+  ++ list.map(range(0, POW_TILE), i => to_float((i * 53) % 61 - 30))
+  ++ list.map(range(0, POW_TILE), i => to_float((i * 29) % 383 - 127))
+
+## How many of `powi_sweep`'s exponents are negative, and how many are above
+## 127 (an i8 reads their low octet as a negative number).
+fn exponent_shape(ns: List[Float]) -> String = {
+  let neg = len(list.filter(ns, n => n < 0.0))
+  let wraps = len(list.filter(ns, n => n > 127.0))
+  "negative=${neg} above_i8=${wraps}"
+}
+
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
 fn case_name(i: Int) -> String =
-  ["shape_ops", "grid_stride", "token_join", "ptr_roundtrip", "ptr_recast"][i]
+  ["shape_ops", "grid_stride", "token_join", "ptr_roundtrip", "ptr_recast", "insert_tile", "powi_sweep"][i]
 
 ## The kernels of the tolerance tier: NONE. See the header.
 ##
@@ -315,6 +379,10 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
     (TJ_BLOCKS, 1, 1)
   } else if name == "ptr_roundtrip" {
     (PR_BLOCKS, 1, 1)
+  } else if name == "insert_tile" {
+    (INS_BLOCKS, 1, 1)
+  } else if name == "powi_sweep" {
+    (POW_BLOCKS, 1, 1)
   } else {
     (PC_BLOCKS, 1, 1)
   }
@@ -337,6 +405,10 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
     # because the kernel reads that far ahead by construction
     [("f64", quarters(PR_BLOCKS * PR_TILE + PR_DELTA, 0.5)),
       ("f64", sentinel_buffer(PR_BLOCKS * PR_TILE + TAIL))]
+  } else if name == "insert_tile" {
+    [("f64", indices(INS_BLOCKS * INS_IN)), ("f64", sentinel_buffer(INS_BLOCKS * INS_OUT + TAIL))]
+  } else if name == "powi_sweep" {
+    [("f64", powi_bases()), ("i32", powi_exponents()), ("f64", sentinel_buffer(POW_BLOCKS * POW_OUT + TAIL))]
   } else {
     [("i32", f32_patterns(PC_BLOCKS * PC_TILE, 2654435761, 1013904223)),
       ("f64", sentinel_buffer(PC_BLOCKS * PC_TILE + TAIL))]
@@ -347,7 +419,7 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
 ## scratch buffer is NOT read back: what it holds is the kernel's business,
 ## and the claim is about what the load after the join saw.
 fn case_reads(i: Int) -> List[Int] =
-  if case_name(i) == "token_join" { [2] } else { [1] }
+  if case_name(i) == "token_join" || case_name(i) == "powi_sweep" { [2] } else { [1] }
 
 ## The reference table the fake device answers with, for one case.
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
@@ -361,6 +433,10 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   } else if name == "ptr_roundtrip" {
     map.from([("ptr_roundtrip",
       (2, last_out((dts, ins) => ptr_roundtrip_ref(PR_BLOCKS, PR_DELTA, dts, ins))))])
+  } else if name == "insert_tile" {
+    map.from([("insert_tile", (2, last_out((dts, ins) => insert_tile_ref(INS_BLOCKS, dts, ins))))])
+  } else if name == "powi_sweep" {
+    map.from([("powi_sweep", (3, last_out((dts, ins) => powi_sweep_ref(POW_BLOCKS, dts, ins))))])
   } else {
     map.from([("ptr_recast", (2, last_out((dts, ins) => ptr_recast_ref(PC_BLOCKS, dts, ins))))])
   }
@@ -420,10 +496,10 @@ fn corpus_shape(v: List[Float]) -> String = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let argv = args()
-  let count = 5
+  let count = 7
   if len(argv) != count {
     io.eprintln("usage: shape_diff <shape_ops.cubin> <grid_stride.cubin> <token_join.cubin>"
-        ++ " <ptr_roundtrip.cubin> <ptr_recast.cubin>")
+        ++ " <ptr_roundtrip.cubin> <ptr_recast.cubin> <insert_tile.cubin> <powi_sweep.cubin>")
     io.exit(2)
   }
   var cubins: Map[String, Bytes] = map.empty()
@@ -446,6 +522,10 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let (first_dt, first_data) = bufs[0]
     io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
     io.println("  input ${first_dt} ${corpus_shape(list.take(first_data, 128))}")
+    if name == "powi_sweep" {
+      let (_ndt, ns) = bufs[1]
+      io.println("  exponents ${exponent_shape(ns)}")
+    } else { () }
     io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")

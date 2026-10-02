@@ -747,6 +747,15 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   1.5e-7 是有出处的常数而不是实现细节，所以写进了 doc 注释，也被层 2 量出来钉住
   （本机实测 1.380e-7，§6.6）。**仍然没有**：view 类型族与 TMA、`loop` / `break`
   （清点下来 leetgpu 没有一道题需要，见刀单）、`atomic_red_view_tko`（0x75，要 13.3）。
+- **刀 T16 加了什么**（13.4 的两条，实测见 §6.19）：`insert`（0x76）是 `extract` 的反方向，
+  `insert(F64, sub, whole, s, t, indices)` 答 `t` 把第 `indices` 格换成 `s` 之后的整块，下标是**格号**、
+  每维一个、`sub` 整除 `whole`，所以 `extract(insert(t, i, s), i) == s`、
+  `insert(extract(t, i), t, i) == t`，其余 lane 都是 `t` 自己的；越界下标是未定义行为（verifier 只对常量
+  下标**警告**，随后汇编以不点名的 `failed to compile` 失败）。`fpowi`（0x79）是浮点底、整数指数
+  （i1 / i8 / i16 / i32，**总按有符号读**）的幂，公开面 `powi(F64, I32, shape, a, n)`；它在 f64 上是
+  **逐位档**，但对的是「右到左二进制幂、负指数最后取一次倒数」这个算法，不是正确舍入的幂（同一份
+  语料上与正确舍入差到 34 ulp），`tileref/ref.ref_fpowi` 就是这个算法。**仍然没有**：13.4 其余三条
+  （`memory_fence_alias_tko` 与两条 `gdc_*`，归 T19）、`loop` 内 `return` 与 `ftoi` / `ftof` 的新格（T17）。
 
 ### 5.3 谁把它变成 Tile IR、何时
 
@@ -3797,6 +3806,93 @@ path-total 6394 s → 6478 s（提交里有 `Gate-Budget(path-total)` 行）。�
 U1 一轮 1008 s，U2 一轮见下行台账提交。
 
 
+### 6.19 `insert` 与 `fpowi`（刀 T16 实测）
+
+13.4 新加的五条操作码里，T16 取两条：`insert` 0x76 与 `fpowi` 0x79。两条都只存在于 13.4 文件里，
+写入器自 U2 起只写 13.4，所以不需要版本谓词。权威是 `cuda-tile@7e8e2e68`（v13.4.0）的 `Ops.td` 与
+`CudaTile.cpp` 的 `InsertOp::verify`，cuTile Python 1.6.0 的 `encode_InsertOp` / `encode_FPowIOp` 作对照。
+
+**一、语义与字节形状。**
+
+- `insert(source, destination[indices])`：把 `source`（子 tile）放进 `destination` 中由 `indices` 指定的
+  那一格，答的是替换了那一格的整块；`indices` 与 `extract` 一样是**格号**而不是元素偏移，每维一个
+  rank-0 i32 操作数，按无符号读。verifier 的三条与 `extract` 相同，只是两个形状的角色对调：
+  源的每维**整除**目的地的每维（报文 `result dimension .. must be evenly divisible by source dimension`）、
+  秩相同、下标个数等于秩。记录的形状就是 `extract` 的记录多一个操作数：结果个数 1（下标是变长组）、
+  结果类型（整块的）、无属性、操作数个数 `2 + 秩`，然后源、目的地、各下标。公开面
+  `insert(d, sub, whole, s, t, indices)`，记录 handler 照 verifier 拒绝不整除、秩不符与下标个数不符。
+- `fpowi(source, exponent)`：浮点底、整数指数，形状相同，结果与底同型。指数只收
+  i1 / i8 / i16 / i32（`CudaTile_PowIExponentTileType`，i64 不在其中），方言写明**总按有符号读**。
+  没有属性也没有可选字段，所以与 `fpowf` 一样不写 flags 字：操作码、结果类型、两个操作数。
+  它是本仓第一个两个操作数格式不同的浮点操作，`t_binaryf` 的单一 `dtype` 装不下，所以单开
+  `t_powi` 与 `PowI` / `FloatPowI`。公开面 `powi(d, e, shape, a, n)`，与 `pow`（`fpowf`）对称。
+
+层 1 之外多了一个对照：13.4.92 自带的 `tileirdisasm` 把两个新 golden 的字节反汇编出来，
+`insert %src, %dst[%i, %j] : tile<8x4xf64>, tile<16x8xf64>` 与 `fpowi %a, %n : tile<128xf64>, tile<128xi32>`
+与渲染器写的拼法逐字相同（SSA 名除外）。这不是门，只是本刀落地时看过一次。
+
+**二、`fpowi` 的档位：逐位，但对的是二进制幂算法，不是正确舍入的幂。** 本机 3080
+（tileiras 13.4.92、sm_86）上 512 条 f64 lane，三个宿主候选逐位比：
+
+| 宿主候选 | 逐位相同 |
+|----------|----------|
+| 右到左二进制幂（每步一次正确舍入的乘法），负指数在**最后**取一次倒数 | **512 / 512** |
+| 先取倒数再做二进制幂（`(1/x)^abs(n)`） | 346 / 512 |
+| 逐次连乘 `abs(n)` 次，负指数最后取倒数 | 239 / 512 |
+| 正确舍入的 `x^n`（双双精度算到 106 位再舍入，只数正规有限 lane） | 125 / 412，最大差 34 ulp |
+
+所以 `tileref/ref.ref_fpowi` 就是第一行那个算法，`powi_sweep` 进逐位档；`pow`（`fpowf`，浮点指数）
+仍是容差档，两者是两个操作。边界语义全部从这个算法里出来，设备逐条一致：任何底的 0 次幂是 1.0
+（NaN、两个无穷、两个零都是，循环一次也不跑）；`(-0)^-1` 是 `-inf`、`(-0)^-2` 是 `+inf`、`(-0)^3`
+是 `-0`；中途上溢成 `inf` 再取倒数得 0（`1e200^-2` 答 0）；`1e-154^2` 落进次正规、按舍入后的次正规
+继续算。`i8` 指数按有符号读也由设备答出：`powi_sweep` 的第二半把 i32 指数 `trunci` 成 i8 再算，
+语料里有 40 条指数大于 127（低八位是负数），宿主参考照 `wrap_i8` 读，逐位相同。
+
+这个档位是**这个汇编器**的事实：13.4.92 把 `fpowi` 降成了这串乘法。换汇编器时它与
+`reduce-identity-wrong` 的红名单一样可能动，台账重录就是看它的地方。
+
+**三、`insert` 的下标越界不是判词。** verifier 只在下标是常量时检查范围，而且只**警告**
+（`warning: insert index 0 value 2 may be out of bounds (max valid index: 1)`），随后汇编失败、退出 5、
+报文是不点名的 `failed to compile Tile IR program`（把 `insert_tile` 的一个下标改成 2 量的）。与 T18
+记的「不能整除也写 `inbounds` true」是同一种拒绝：未定义行为被拒，而不是一条规则被引用。所以层 1
+的「下标错」变异体取**秩**（少写一个下标），不取越界。
+
+**四、变异体与负控。** 层 1 四条（`scripts/tile-golden`），判词都是 13.4.92 原文：
+
+| 变异体 | 改哪 | kernel / 形状 | `tileiras` 的原话 |
+|--------|------|---------------|-------------------|
+| `fpowi-exponent-as-float` | 指数位置写成底 | powi_sweep / 同长 | `'cuda_tile.fpowi' op operand #1 must be tile of i1 or i8 or i16 or i32 values, but got '!cuda_tile.tile<128xf64>'` |
+| `fpowi-as-fpowf` | 0x79 写成 0x54 | powi_sweep / 同长 | `'cuda_tile.fpowf' op operand #1 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi32>'` |
+| `insert-source-and-destination-swapped` | 源与目的地对调 | insert_tile / 同长 | `'cuda_tile.insert' op failed to verify that all of {destination, result} have same type` |
+| `insert-index-dropped` | 少写第一个下标、操作数个数跟着少一 | insert_tile / Func 段短 2 字节（两条 insert） | `'cuda_tile.insert' op expected 2 indices, but got 1` |
+
+层 2 一条（`scripts/tile-gpu-diff`，`shape_pkg_mutant`）：`insert-indices-reversed`，写入器把 `insert`
+的下标反序写。16 x 8 切成 8 x 4，两维各两格，[1, 0] 与 [0, 1] 都在界内，层 1 照收；`insert_tile` 的
+两半都红（往回放的那一格放错了位置，挪走的那一格落到了往回放的位置），`shape_ops` 不插入，是对照。
+既有的 `extract-indices-reversed` 红集从 `shape_ops` 一个长到加上 `insert_tile`，因为后者先 `extract`
+同一格再插回去。
+
+宿主侧两条自轴负控（不入库，给验收者照做）：把 `ref_fpowi` 改成先取倒数（第二行的算法），
+`tile-gpu-diff` 上只有 `powi_sweep` 红，`327 of 1032 lanes, first at 9: -0.00411522633744856 vs
+-0.004115226337448559`（`(-3)^-5`），其余六个 shape 族 kernel 全绿；把 `powi_sweep_ref` 第二半的
+`wrap_i8` 换成按无符号读低八位，同样只有 `powi_sweep` 红，`260 of 1032 lanes, first at 128: Infinity vs 0.0`
+（`0^-5` 读成 `0^251`）。
+
+**五、族的归属。** 两个 kernel 进既有的 `shape_diff` 而不新建一族：那一族从 T2 起的主语就是
+操作码表而不是题目，全族逐位档，`insert` 是 `extract` 的反方向；`fpowi` 虽然是算术，
+它的档位也是逐位，放进来不需要给族加容差分支。台账行 `shape:exact=5` 变成 `shape:exact=7`，
+注记多一个 `powi=negative=.. above_i8=..`，`run.sh` 把这两个计数都钉在零以上（语料里没有负指数，
+倒数的位置就看不见；没有大于 127 的指数，i8 的符号就看不见）。
+
+**六、CI 墙钟。** 不分片全量一轮（262 项，本机，2026-10-02）墙钟 3134 s、全绿；两个新 kernel
+6.95 s 与 6.63 s（其余 185 个均值 6.50 s），四条新变异体 24.5 到 25.2 s（其余 71 条均值 25.3 s），
+六项都是普通工作项。按 `tile.yml` 记的单价（kernel 约 8 s、变异体约 21 s）是 100 s 工作量，分到六片
+每片 16.7 s、取整 17 s，六条预算行的规划值 928 s → 945 s（离 950 s 的 pole 还剩 5 s），
+`timeout-minutes` 按 3x 规则 47 → 48，path-total 6478 s → 6580 s（提交里有 `Gate-Budget(path-total)` 行）。
+本机这一轮按 round-robin 六分是 511 / 530 / 534 / 527 / 503 / 505 s 的工作项。剩下 5 s 的意思是：
+下一刀再加这么多，就是第七片（`tile.yml` 的注释里有那笔账：七片约 789 s）。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -3854,6 +3950,7 @@ U1 一轮 1008 s，U2 一轮见下行台账提交。
 | **TA 双台账：一台机器一份台账**（已落地，T 序收官后的第二笔尾款；本刀不加操作码、不加类型标签） | 「本仓的卡装不下的 cubin，别的卡装得下，而这句话要能写进树里让人查：`scripts/tile-gpu-diff/run.sh` 加一个 `--toolchain <file>` 选台账，GPU 集群的 B200（sm_100）与 H200（sm_90）各记一份，四个窄浮点类型与 `mmaf_scaled` 的 `architecture` 豁免、`attrs.txt` 的 bf16 那条一起退休；而这四个类型的架构门逐档量下来，**fp8 不是一堵墙是两堵**」（今天写不出：`toolchain.txt` 钉死 `gpu-name sm_86` 与本机驱动，台账只有一份，`arch_diff` 那一族的五个 kernel 在 `tile-gpu-diff` 的语料里一个也没有，`dtype_e2m1_ref` 与 `mmaf_scaled_ref` 两个宿主参考不存在） | `scripts/tile-gpu-diff/run.sh`：`--toolchain <file>`（台账名由 toolchain 名推出、两者绑在一处，`--check` 拒绝它）、与 `toolchain.txt` 逐行对账 `bytecode` / `tileiras` 并拒 `wheel` 行、`nvidia-smi --query-gpu=compute_cap` 与 `gpu-name` 的对账（整个数不是主版本号，sm_103 是另一个目标）、`TILE_PATHS` 排除**每一份**台账、arch 族的可跑集合与 `arch=ran=... skipped=...@<gpu-name>` 台账字段。新族 `scripts/tile-gpu-diff/arch_diff.dawn`（第二十五支，也是唯一一支命令行收「名字与 cubin 成对」的，因为它跑几个由卡决定）。新文件四个：`toolchain-sm100.txt` / `toolchain-sm90.txt` 与 `ledger-sm100.txt` / `ledger-sm90.txt`；**`toolchain.txt` 与 `ledger.txt` 一字未动，`gates.yml` 零改动**。`std/gpu.dawn`：`round_to` 的 `f4E2M1FN` 臂、`dtype_e2m1_ref`（半字节的编码，不是 `dtype_convert_ref` 换名字）、`mmaf_scaled_ref`（`Ops.td` 的 `MmaFScaledOp` 公式照抄，`v` 是两个形状的商）、`view_atomic_bf16_ref`。kernel 一个：`view_atomic_bf16`（`view_atomic` 的最后一次归约换成 bf16 视图，按下限 sm_89 汇编）。台账：`types.txt` 四行、`features.txt` 一行退休 `architecture`，`attrs.txt` 的 `rmw.addf` 一行加 `device@sm100:` 证据与头注改写；`check.py` 认第五种证据前缀 `device@<台账>:<kernel>` 并**真去读那份台账末行**（末行要 `pass`、kernel 要在 `arch=ran=` 里），`LANDED_KNIVES` 加 `TA` | **层 1**：`view_atomic_bf16` 在 `--gpu-name sm_89` 上一次通过（cubin 10912 字节，`FUNC GLOBAL`）。**层 2 在两台集群卡上**：B200（sm_100，驱动 580.159.04）六个 kernel 全部 `identical:exact`，H200（sm_90，驱动 580.95.05）三个 `identical:exact` 三个具名 skip。本机 sm_86 台账那一行的 44 族逐字未动，只多出一个 `arch=ran=- skipped=<五个>@sm_86` 字段。**架构门逐档实测改了前三把刀的记录**：T3 / T9 / T10 试的是 sm_86 / sm_89 / sm_100，中间那一档没试过，而 `f8E4M3FN` 与 `f8E5M2` 在 sm_90 就收，只有 `f8E8M0FNU`、`f4E2M1FN` 与跟着 scale 走的 `mmaf_scaled` 要 sm_100；`addf` 配 bf16 的下限是 sm_89，与 T13 逐档量的一致。**层 2 一跑就推翻了 `std/narrow` 的三处「量不出来的选择」**：`ftof` 进三个八位窄浮点格式一律**饱和**（480 进 f8E4M3FN 是 448、1e30 进 f8E5M2 是 57344 而不是无穷、f8E8M0FNU 取绝对值再钳进范围因而只有 NaN 答 NaN），三个函数改成实测值，而 `f8e5m2_bits` / `f8e5m2_of_bits` 不动（无穷是这个格式的一个**值**，只是转换从不产生它）。台账计数：`features` 层 1 归零（实现 97，层 2 五十四、层 3 四十六），`types` 层 1 只剩 `f32` 的「没有宿主通道」（层 2 九、层 3 十三） | **负控三条**。(a) `--toolchain` 指着 `toolchain-sm100.txt` 在本机 sm_86 上跑，原文 `FAIL: toolchain-sm100.txt says gpu-name sm_100 and nvidia-smi reports compute_cap 8.6, which is sm_86: this is another machine’s toolchain file`，退出 1，一个 kernel 也没汇编。(b) **skip 不是绿**：把 `std/gpu.mmaf_scaled_ref` 的 `kk / v` 改成 `kk`（scale 按元素而不是按块广播），**别重录 golden**，B200 上只有 `mmaf_scaled_e4m3` 红、另外五个绿；同一份改动在本机 sm_86 上 `tile-gpu-diff` **全绿**，因为这一族一个 kernel 也没跑，而台账行的 `skipped=` 字段就是让读者看见这件事的地方。(c) 本机 sm_86 台账在本刀前后的两行逐字段比对，44 个既有族的 pass 集合一字不差 | 1（实报 1；`dawn test --stdlib` **177** 全绿（本刀加一个 std 测试）、`dawn test packages/tileir` **132** 未动、`narrow-contract` 全绿（它盖的是 bf16/fp16/f32/tf32，本刀改的三个 fp8 舍入不在它的语料里）；矩阵 251 项长到 **252 项**（185 kernel、67 变异体），`tile-golden` 在最终树上不分片 **2329 s**（38:49，252 项全跑退出 0），十一片的分账不动、**`gates.yml` 一行没改**；三份 `tile-gpu-diff` 见 §6.17 的台账行。**本刀碰了 `std/gpu.dawn` 与 `std/narrow.dawn`**，`scripts/gen-stdsrc.py` 已跑、`stdsrc.dawn` 同批提交，Core golden 在其后重录；prev-diff 的八条 `Emit-Change` 是**量出来的**（同一个 HEAD 工具链、两份 `--std` 对拍），`examples/interop` 与 `examples/text/chars` 不动，与 T13 那次重录同一个划分） |
 | **U1 换汇编器：`tileiras` 13.4.92，字节码仍 13.3**（已落地，升钉第一刀） | 「同一份 13.3 字节换一个汇编器，设备代码变了多少、答案变没变，是量出来的：185 个 cubin 全不同（137 个 SASS 不同、48 个只差 ELF 外围），而本机台账每个 kernel 照旧 pass、注记里每个数与 13.3.36 那行逐字相同」 | `toolchain.txt` 三行 wheel 与 `tileiras` 行，两份集群 toolchain 的 `tileiras` 行；`tile-golden/run.sh` 四句判词换 13.4.92 原文；`tile-gpu-diff/run.sh` 的 `reduce-identity-wrong` 红名单从六个重述成八个 | golden 一个字节不动，不分片全量 252 项 3397 s 绿；台账末行 `13.4.92 sm_86 pass`；三文件移除实验重做 | 四句旧判词在 13.4.92 下先红后绿；`reduce-identity-wrong` 旧名单先红（`exactly 6 ... got ... 8 differing`）；台账旧末行 `--check` 红两句（摘要与 `tileiras`） | 1 |
 | **U2 字节码 13.4**（已落地，升钉第二刀，§6.11 的翻版） | 「写 13.4 改了哪些字节、没改哪些，是量出来的：正向段账 185/185、把 minor 改回 3 逐字节复现 185/185、13.4 字节与 13.3 字节过 13.4.92 的 cubin 185/185 相同」 | `bytecode.dawn`：`BYTECODE_MINOR` 4，`ptr_has_flags` / `ftoi_has_flags` / `view_has_inbounds` 三个谓词，`num_ty` 写 varint，`OP_FPOWF`；`render.dawn` 拼 `fpowf`；185 个 `.tilebc` 与 `mathops.mlir` 重录；三本账换钉 v13.4.0（105 / 24 / 53 行）与 `check.py`；`tile.yml` 六条预算行 914 → 928 s | 不分片全量 256 项 2912 s 绿；`check.py --self-test` 绿；本机台账重录 | 新变异体四条：`ptr-flags-unwritten`、`ftoi-flags-unwritten`、`view-inbounds-unwritten`、`header-minor-still-3`（vadd 上它被收下，所以落在 view_transpose）；既有两条换锚：`partition-view-padding-inline-flag-at-13-3` 在 13.4 上 `stayed green`、`tensor-view-tag-as-ptr` 锚失配，改后绿 | 1.5 |
+| **T16 `insert` 0x76 与 `fpowi` 0x79**（已落地，13.4 覆盖刀的第一把，§6.19） | 「13.4 新加的两条操作码在本机 3080 上与一份独立写的宿主参考逐位相同：`insert` 把子 tile 放回原处答的是原 tile、放到别处答的是换了那一格的原 tile；`fpowi` 的答案是右到左二进制幂再取倒数这串乘法，而不是正确舍入的幂，这一点是量出来的而不是假定的」（今天写不出：两条操作码写入器一个字节也发不出去，`fpowi` 的设备语义只有 `Ops.td` 的一行数学式） | `bytecode.dawn`：`OP_INSERT` / `OP_FPOWI` 与两条编码臂（`insert` 是 `extract` 的记录多一个操作数，`fpowi` 两个操作数、零 flags）；`lower.dawn`：`InsertTile` / `FloatPowI`；`prog.dawn`：`Insert` / `PowI` 与 `check_insert` / `check_powi`（i64 指数拒）；`dev.dawn`：`t_insert` / `t_powi`，公开面 `insert` / `powi`；`render.dawn` 两条拼法（与 `tileirdisasm` 逐字相同）；`packages/tileref`：`ref_fpowi`、`insert_tile_ref`、`powi_sweep_ref`；kernel 两个（`insert_tile` / `powi_sweep`）并进 `shape_diff`（5 → 7）；`features.txt` 两行改 `implemented`、层 3，`check.py` 的 `LANDED_KNIVES` 加 T16；`tile.yml` 六条预算行 928 → 945 s | 层 0/1 两个新 golden、`FUNC GLOBAL` 两个，`tileiras` 一次通过（sm_86）；层 2 本机两个都是 `identical:exact`，`powi_sweep` 的语料负指数 231 条、大于 127 的指数 40 条，两个计数由 `run.sh` 钉在零以上；不分片全量 262 项 3134 s 绿；`check.py --self-test` 绿 | 层 1 四条：`fpowi-exponent-as-float`、`fpowi-as-fpowf`、`insert-source-and-destination-swapped`、`insert-index-dropped`（越界下标不取，因为它只得到一句不点名的 `failed to compile`）；层 2 一条 `insert-indices-reversed`（只有 `insert_tile` 红），`extract-indices-reversed` 的红集加上 `insert_tile`；宿主自轴负控两条（`ref_fpowi` 先取倒数、i8 那一半按无符号读），各自只有 `powi_sweep` 红 | 2（实报 1） |
 
 ## 8. 风险
 

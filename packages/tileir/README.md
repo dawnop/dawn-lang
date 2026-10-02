@@ -31,15 +31,15 @@ JSON；本文不再逐个列名字，因为这张表上一次逐个列的时候 
 
 下表把 `Dev` 的全部操作分组，每组举几个类型化函数（kernel 体用的是它们，不直接调 `t_*`）。
 它由 `./bin/dawn doc packages/tileir` 的 `effects[0].ops` 生成，脚本核过分组恰好覆盖全部操作、
-不多不少（2026-10-02，68 个操作）；以后加操作时该组要跟上，数字与名字以 `dawn doc` 为准。
+不多不少（2026-10-02，68 个操作；刀 T16 加 `t_insert` 与 `t_powi`，70 个）；以后加操作时该组要跟上，数字与名字以 `dawn doc` 为准。
 
 | 组 | `Dev` 操作 | 类型化函数（举例） |
 |----|-----------|--------------------|
 | 网格与索引 | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
 | 内存与指针 | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
 | 视图 | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
-| 常量与形状 | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `cat` `permute_tile` |
-| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `fma` `lt` `add_i` `select` `int_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
+| 常量与形状 | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
+| 算术、比较与转换 | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
 | 区域 | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_reduce` `d_scan` `d_if` |
 | token | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
 | 模块全局 | `t_global` `t_get_global` | `d_global` `d_global_const` `global_ptrs` |

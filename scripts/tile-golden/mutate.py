@@ -404,6 +404,28 @@ MUTATIONS = {
         'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR)',
         'bytes.put(bytes.put(magic(), BYTECODE_MAJOR), 3)',
     ),),
+    "fpowi-exponent-as-float": ((
+        BYTECODE,
+        'emit_ref(emit_ref(emit_op(w0, OP_FPOWI, t), base), exp)',
+        'emit_ref(emit_ref(emit_op(w0, OP_FPOWI, t), base), base)',
+    ),),
+    "fpowi-as-fpowf": ((
+        BYTECODE,
+        'emit_ref(emit_ref(emit_op(w0, OP_FPOWI, t), base), exp)',
+        'emit_ref(emit_ref(emit_op(w0, OP_FPOWF, t), base), exp)',
+    ),),
+    "insert-source-and-destination-swapped": ((
+        BYTECODE,
+        'list.fold(indices, emit_ref(emit_ref(w1, src), dest), emit_ref)',
+        'list.fold(indices, emit_ref(emit_ref(w1, dest), src), emit_ref)',
+    ),),
+    "insert-index-dropped": ((
+        BYTECODE,
+        ('    let w1 = emit(emit_op_counted(w0, OP_INSERT, to), 2 + len(indices))\n'
+         '    list.fold(indices, emit_ref(emit_ref(w1, src), dest), emit_ref)'),
+        ('    let w1 = emit(emit_op_counted(w0, OP_INSERT, to), 1 + len(indices))\n'
+         '    list.fold(list.drop(indices, 1), emit_ref(emit_ref(w1, src), dest), emit_ref)'),
+    ),),
 }
 
 

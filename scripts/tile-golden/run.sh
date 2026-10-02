@@ -365,6 +365,30 @@
 #                            pointer's bitfield word (0) for the pointee,
 #                            which is f64 at index 0 there anyway
 #
+#     fpowi-exponent-as-float
+#                            `fpowi` writes its base where its exponent
+#                            belongs -> powi_sweep's text is untouched, the
+#                            file the same length, and tileiras names the
+#                            exponent: it is an i1, i8, i16 or i32 tile and
+#                            an f64 one is not
+#     fpowi-as-fpowf         `fpowi` is written with `fpowf`'s opcode. The
+#                            two records have one shape (a result type and
+#                            two operands, no attribute), so only the
+#                            operand TYPES tell them apart -> the same
+#                            length, and tileiras says `fpowf`'s exponent
+#                            must be a float
+#     insert-source-and-destination-swapped
+#                            `insert` writes the destination before the
+#                            subtile -> insert_tile's text is untouched, the
+#                            file the same length, and the result type (the
+#                            whole tile) no longer matches the operand in
+#                            the destination's place
+#     insert-index-dropped   `insert` writes one slice index fewer than the
+#                            tile has dimensions, and says so in its operand
+#                            count -> insert_tile's Func section is two bytes
+#                            short (one an insert) and tileiras counts the
+#                            indices
+#
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
 # 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
@@ -442,7 +466,8 @@ kernels=(
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
-  view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad)
+  view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
+  insert_tile powi_sweep)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -549,6 +574,10 @@ mutants=(
   ftoi-flags-unwritten
   view-inbounds-unwritten
   header-minor-still-3
+  fpowi-exponent-as-float
+  fpowi-as-fpowf
+  insert-source-and-destination-swapped
+  insert-index-dropped
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2183,6 +2212,57 @@ if run_item header-minor-still-3; then
   mutant_project header-minor-still-3 bytecode.dawn
   writer_mutant_checks header-minor-still-3 view_transpose same-size \
     "expected shape and stride to be of same rank but got shape of rank 0 and stride of rank 2"
+fi
+
+# 70. `fpowi` writes its base twice, the second time where the exponent
+#     belongs. Every operand is an index into the same value table, so the
+#     record is the same length and the reader reads it to the end; what
+#     refuses it is FPowIOp's exponent constraint (Ops.td's
+#     CudaTile_PowIExponentTileType: i1, i8, i16 or i32), which is the one
+#     thing that makes this operation a different operation from `fpowf`.
+if run_item fpowi-exponent-as-float; then
+  mutant_project fpowi-exponent-as-float bytecode.dawn
+  writer_mutant_checks fpowi-exponent-as-float powi_sweep same-size \
+    "'cuda_tile.fpowi' op operand #1 must be tile of i1 or i8 or i16 or i32 values, but got '!cuda_tile.tile<128xf64>'"
+fi
+
+# 71. `fpowi` is written with `fpowf`'s opcode (0x54 for 0x79). The two
+#     records are the same shape -- a result type and two operands, no
+#     flags word and no attribute on either -- so the file is the same
+#     length and only the operands' TYPES can tell the reader which
+#     operation it has. It is the other side of 70: there the operation was
+#     right and an operand wrong, here the operands are right and the
+#     operation wrong.
+if run_item fpowi-as-fpowf; then
+  mutant_project fpowi-as-fpowf bytecode.dawn
+  writer_mutant_checks fpowi-as-fpowf powi_sweep same-size \
+    "'cuda_tile.fpowf' op operand #1 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi32>'"
+fi
+
+# 72. `insert` writes the destination first and the subtile second. Both are
+#     operand indices, so the record is the same length; what refuses it is
+#     InsertOp's `AllTypesMatch<["destination", "result"]>`: the result type
+#     the record carries is the whole tile's, and the operand now in the
+#     destination's place is the quarter.
+if run_item insert-source-and-destination-swapped; then
+  mutant_project insert-source-and-destination-swapped bytecode.dawn
+  writer_mutant_checks insert-source-and-destination-swapped insert_tile same-size \
+    "'cuda_tile.insert' op failed to verify that all of {destination, result} have same type"
+fi
+
+# 73. `insert` drops its first slice index and counts one operand fewer, so
+#     the record is consistent with itself and one byte short; insert_tile
+#     has two of them, so its Func section is two bytes short. What refuses
+#     it is the RANK: InsertOp's verifier wants one index per dimension of
+#     the subtile. The other way to get an index wrong -- one out of range --
+#     is not a verdict here: the verifier only warns about a constant index
+#     past the last slice, and the assembler then fails with an unnamed
+#     `failed to compile Tile IR program` (measured, knife T16), which is
+#     undefined behaviour being declined rather than a rule being cited.
+if run_item insert-index-dropped; then
+  mutant_project insert-index-dropped bytecode.dawn
+  writer_mutant_checks insert-index-dropped insert_tile func-two-short \
+    "'cuda_tile.insert' op expected 2 indices, but got 1"
 fi
 
 _item_tick ""

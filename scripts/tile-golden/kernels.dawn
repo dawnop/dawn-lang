@@ -26,7 +26,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
   d_scan, d_scan_i, d_scan2, s_mulf, s_fma, s_const, erf,
   sin, cos, tan, sinh, cosh, atan2, remf,
-  extract, cat, permute_tile, num_blocks, d_fork2,
+  extract, cat, permute_tile, num_blocks, d_fork2, insert, powi,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
   d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
   alloca_ptrs, alloca_shared_ptrs, mmaf_scaled,
@@ -5005,6 +5005,47 @@ fn view_gather_pad(ids: Param[I32], x: Param[F32], out: Param[F32]) -> Unit !Dev
   store_view(F32, dst, [b, zero], load_gather(F32, src, [Rows(rows), At(zero)]))
 }
 
+# ---- knife T16: `insert` (0x76) and `fpowi` (0x79), bytecode 13.4 ----
+
+# `insert` beside the `extract` it inverts, over one block of 128 f64 read
+# as a 16 by 8 tile, the shape `shape_ops` reads: the 8 by 4 quarter at
+# slice [1, 0] is extracted and put back twice. Into slice [1, 0] -- the
+# place it came from -- the answer is the tile itself, which is the
+# round trip. Into slice [0, 1] it is a different tile: the quarter there is
+# replaced and every other lane is the destination's own, which is what says
+# the operation is not "answer the destination" (a round trip alone could
+# not tell an `insert` that did nothing from one that did it right).
+#
+# Both dimensions have TWO slices, for `extract`'s reason in `shape_ops`:
+# [1, 0] and [0, 1] are then two different quarters that are both in
+# bounds, so the mutant that writes the indices in the opposite order is a
+# wrong answer rather than an undefined one, and it moves BOTH halves.
+fn insert_tile(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let obase = tile_at(b, 256)
+  let t = load(x, base, [16, 8])
+  let q = extract(F64, [16, 8], [8, 4], t, [idx_const(1), idx_const(0)])
+  store(out, obase, [16, 8], insert(F64, [8, 4], [16, 8], q, t, [idx_const(1), idx_const(0)]))
+  store(out, idx_add(obase, idx_const(128)), [16, 8], insert(F64, [8, 4], [16, 8], q, t, [idx_const(0), idx_const(1)]))
+}
+
+# `fpowi` over one block of 128 lanes: an f64 base and an i32 exponent from
+# two buffers, raised twice. The first half of the block's answer takes the
+# exponent as it is; the second takes its low OCTET (`trunci` to i8), which
+# the dialect reads as SIGNED: every exponent in the corpus fits in an i8, so
+# the two halves agree exactly when that reading holds, and a negative
+# exponent read as unsigned would be 256 more than it is.
+fn powi_sweep(x: Param[F64], n: Param[I32], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 128)
+  let obase = tile_at(b, 256)
+  let tx = load(x, base, [128])
+  let tn = load(n, base, [128])
+  store(out, obase, [128], powi(F64, I32, [128], tx, tn))
+  store(out, idx_add(obase, idx_const(128)), [128], powi(F64, I8, [128], tx, trunc_u8([128], tn)))
+}
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" ->
     trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -5374,6 +5415,10 @@ fn trace(name: String) -> TileProg = match name {
   "pack_roundtrip" ->
     trace_kernel("pack_roundtrip", ["i32", "i32"],
       () => pack_roundtrip(param(I32, 0), param(I32, 1)))
+  "insert_tile" ->
+    trace_kernel("insert_tile", ["f64", "f64"], () => insert_tile(param(F64, 0), param(F64, 1)))
+  "powi_sweep" ->
+    trace_kernel("powi_sweep", ["f64", "i32", "f64"], () => powi_sweep(param(F64, 0), param(I32, 1), param(F64, 2)))
   "loop_count" ->
     trace_kernel("loop_count", ["i32", "i32"], () => loop_count(param(I32, 0), param(I32, 1)))
   "loop_bound" ->
@@ -5523,7 +5568,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
-      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast"
+      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep"
       ++ "|loop_count|loop_bound|loop_until|loop_none"
       ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
       ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"

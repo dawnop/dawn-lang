@@ -74,7 +74,7 @@ use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
 use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -198,6 +198,14 @@ const OP_STORE_VIEW_TKO: Int = 0x66
 const OP_MAKE_GATHER_SCATTER_VIEW: Int = 0x73
 const OP_MAKE_STRIDED_VIEW: Int = 0x74
 const OP_ATOMIC_RED_VIEW_TKO: Int = 0x75
+
+# The two 13.4 opcodes knife T16 implements. Both exist only in a 13.4
+# file, and this writer writes nothing older since knife U2. `insert` is
+# `extract`'s record with one operand more (the destination, before the
+# slice indices); `fpowi` is `fpowf`'s with an integer exponent, and like
+# it carries no attribute and no optional field, so no flags word.
+const OP_INSERT: Int = 0x76
+const OP_FPOWI: Int = 0x79
 
 # The two shape queries (knife T12). `get_tensor_shape` asks a
 # `tensor_view` for its tensor's extents; `get_index_space_shape` asks any
@@ -1511,6 +1519,13 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     }
     emit_ref(emit_ref(w2, lhs), rhs)
   }
+  FloatPowI(_dst, t, _exp_ty, base, exp) -> {
+    # opcode, the result type (the base's), the base, the exponent: no
+    # flags word and no rounding mode, because FPowIOp declares a source and
+    # an exponent and nothing else. The exponent's own type is not written
+    # here; the reader takes it from the value that defined it.
+    emit_ref(emit_ref(emit_op(w0, OP_FPOWI, t), base), exp)
+  }
   FloatFma(_dst, t, lhs, rhs, acc) -> {
     let w1 = emit(emit(emit_op(w0, OP_FMA, t), 0), ROUND_NEAREST_EVEN)
     emit_ref(emit_ref(emit_ref(w1, lhs), rhs), acc)
@@ -1705,6 +1720,16 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     # it is one more than there are indices.
     let w1 = emit(emit_op_counted(w0, OP_EXTRACT, to), 1 + len(indices))
     list.fold(indices, emit_ref(w1, src), emit_ref)
+  }
+  InsertTile(_dst, src, dest, _sub, to, indices) -> {
+    # `extract`'s shape exactly (a result count of one, because the slice
+    # indices are a variadic operand group; the result type; no attribute;
+    # the operand count) with the destination written after the source.
+    # The count covers both tiles, so it is two more than there are
+    # indices. cuTile Python 1.6.0's `encode_InsertOp` writes the same
+    # record field for field.
+    let w1 = emit(emit_op_counted(w0, OP_INSERT, to), 2 + len(indices))
+    list.fold(indices, emit_ref(emit_ref(w1, src), dest), emit_ref)
   }
   CatTile(_dst, dim, lhs, rhs, _lhs_ty, _rhs_ty, to) -> {
     # `dim` is an `I64Attr`, so it is a plain inline varint: the generated
@@ -2875,6 +2900,20 @@ test "extract writes its operand count, cat its dim inline, and neither writes a
   # results, no operands, no attributes, no flags
   let nb = encode_instr(w0, BlockCounts(9, 10, 11))
   assert hex(bytes.freeze(nb.body)) == "2e" ++ "01" ++ "01" ++ "01"
+}
+
+test "insert is extract's record with the destination after the source, and fpowi is two operands and nothing else" {
+  assert OP_INSERT == 0x76 && OP_FPOWI == 0x79
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3)]), nvals: 4 }
+  let ins = encode_instr(w0, InsertTile(9, Val(0), Val(1), Tile([2, 4], Num("f64")), Tile([4, 8], Num("f64")), [Val(2), Val(3)]))
+  # opcode, result COUNT 1 (the indices are variadic), the result type,
+  # which is the WHOLE tile's (f64 first, the tile second), operand count 4
+  # (source, destination, two indices), then %0 %1 %2 %3 in that order
+  assert hex(bytes.freeze(ins.body)) == "76" ++ "01" ++ "01" ++ "04" ++ "00" ++ "01" ++ "02" ++ "03"
+  let pw = encode_instr(w0, FloatPowI(9, Tile([8], Num("f64")), Tile([8], Num("i32")), Val(0), Val(1)))
+  # opcode, the result type, the base, the exponent: no flags word, no
+  # rounding mode, no operand count, and the exponent's type not at all
+  assert hex(bytes.freeze(pw.body)) == "79" ++ "01" ++ "00" ++ "01"
 }
 
 test "the three pointer conversions are the frozen table's opcodes, each a result type and one operand" {
