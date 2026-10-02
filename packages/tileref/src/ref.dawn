@@ -3287,9 +3287,9 @@ pub fn attr_round_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]])
       let i = b * 128 + k % 128
       let a = narrow.round_f32(x[i])
       let c = narrow.round_f32(y[i])
-      let mode = if seg % 2 == 0 { "negative_inf" } else { "positive_inf" }
+      let mode = if seg % 2 == 0 { narrow.Down } else { narrow.Up }
       let exact = if seg < 2 { a + c } else if seg < 4 { a * c } else { a / c }
-      round_to(dt, narrow.round_f32_toward(exact, mode))
+      round_to(dt, narrow.round_f32(exact, mode: mode))
     }
   })
 }
@@ -3623,25 +3623,25 @@ pub fn attr_ftof_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) 
       let r = if seg == 0 {
         f
       } else if seg == 1 {
-        narrow.round_f32_toward(v, "zero")
+        narrow.round_f32(v, mode: narrow.TowardZero)
       } else if seg == 2 {
-        narrow.round_f32_toward(v, "negative_inf")
+        narrow.round_f32(v, mode: narrow.Down)
       } else if seg == 3 {
-        narrow.round_f32_toward(v, "positive_inf")
+        narrow.round_f32(v, mode: narrow.Up)
       } else if seg == 4 {
         narrow.round_tf32(f)
       } else if seg == 5 {
-        narrow.round_binary_toward(f, 11, -126, 127, "zero")
+        narrow.round_tf32(f, mode: narrow.TowardZero)
       } else if seg == 6 {
-        narrow.round_tf32_away(f)
+        narrow.round_tf32(f, mode: narrow.NearestAway)
       } else if seg == 7 {
         narrow.round_fp16(f)
       } else if seg == 8 {
-        narrow.round_binary_toward(f, 11, -14, 15, "zero")
+        narrow.round_binary(f, 11, -14, 15, mode: narrow.TowardZero)
       } else if seg == 9 {
         narrow.round_bf16(f)
       } else {
-        narrow.round_binary_toward(f, 8, -126, 127, "zero")
+        narrow.round_binary(f, 8, -126, 127, mode: narrow.TowardZero)
       }
       round_to(dt, r)
     }

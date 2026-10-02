@@ -66,7 +66,9 @@ nothing, and a `!x` inside a default's text is not taken for an effect. The
 defaults themselves are then compared by parameter name: one that disappeared
 or changed value is breaking for a caller who omitted the argument, one that
 appeared is an addition, and `...` is a default of unknown value, never a
-change.
+change. New parameters appended at the end of the list, each with a default,
+are an addition too (K1): every call written against the old signature still
+compiles. Inserted anywhere else, or without a default, they are a break.
 
 ## Known limitations, restated in every report header
 
@@ -173,23 +175,18 @@ def _mask_literals(sig: str) -> str:
     return "".join(out)
 
 
-def split_defaults(sig: str):
-    """(the signature with every parameter default removed, {name: default}).
+def _param_parts(sig: str):
+    """(head, [parameter text], tail) of `fn name[...](...)...`, or None.
 
-    A signature renders `name: T = <expr>` since K0
-    (docs/std-defaults-design.md); before it, `name: T = ...`. The two facts
-    this report compares -- effect atoms and shape -- are about the type, so
-    they are read off the signature without its defaults (an effect atom
-    inside a default's text is not the function's effect), and the defaults
-    are compared on their own: a default appearing, disappearing or changing
-    value. Anything that does not read as `fn name[...](...)` comes back
-    whole, with no defaults.
+    `head` ends with the opening parenthesis and `tail` starts with the
+    closing one; the parameters are split at top-level commas, read through
+    `_mask_literals` so a comma inside a default's string is not structure.
     """
     sig = sig or ""
     masked = _mask_literals(sig)
     m = re.match(r"fn [A-Za-z_][A-Za-z0-9_]*", masked)
     if not m:
-        return sig, {}
+        return None
     i = m.end()
     depth = 0
     if i < len(masked) and masked[i] == "[":
@@ -202,7 +199,7 @@ def split_defaults(sig: str):
                     i = j + 1
                     break
     if i >= len(masked) or masked[i] != "(":
-        return sig, {}
+        return None
     depth = 0
     close = None
     starts = [i + 1]
@@ -218,12 +215,43 @@ def split_defaults(sig: str):
         elif ch == "," and depth == 1:
             starts.append(j + 1)
     if close is None:
-        return sig, {}
+        return None
     bounds = list(zip(starts, starts[1:] + [close + 1]))
+    parts = [sig[lo:hi - 1] for lo, hi in bounds]
+    if len(parts) == 1 and not parts[0].strip():
+        parts = []
+    return sig[:i + 1], parts, sig[close:]
+
+
+def drop_trailing_params(sig: str, k: int) -> str:
+    """`sig` without its last `k` parameters (unchanged when it does not parse)."""
+    split = _param_parts(sig)
+    if split is None or k <= 0 or k > len(split[1]):
+        return sig
+    head, parts, tail = split
+    return head + ", ".join(p.strip() for p in parts[:len(parts) - k]) + tail
+
+
+def split_defaults(sig: str):
+    """(the signature with every parameter default removed, {name: default}).
+
+    A signature renders `name: T = <expr>` since K0
+    (docs/std-defaults-design.md); before it, `name: T = ...`. The two facts
+    this report compares -- effect atoms and shape -- are about the type, so
+    they are read off the signature without its defaults (an effect atom
+    inside a default's text is not the function's effect), and the defaults
+    are compared on their own: a default appearing, disappearing or changing
+    value. Anything that does not read as `fn name[...](...)` comes back
+    whole, with no defaults.
+    """
+    sig = sig or ""
+    split = _param_parts(sig)
+    if split is None:
+        return sig, {}
+    head, parts, tail = split
     kept, defaults = [], {}
-    for lo, hi in bounds:
-        end = hi - 1  # the comma or the closing parenthesis
-        part, mpart = sig[lo:end], masked[lo:end]
+    for part in parts:
+        mpart = _mask_literals(part)
         d = 0
         cut = None
         for k, ch in enumerate(mpart):
@@ -240,7 +268,7 @@ def split_defaults(sig: str):
             kept.append(part[:cut].strip())
             defaults[part.split(":", 1)[0].strip()] = part[cut + 3:].strip()
     kept = [k for k in kept if k]
-    return sig[:i + 1] + ", ".join(kept) + sig[close:], defaults
+    return head + ", ".join(kept) + tail, defaults
 
 
 # A parameter's name and its colon, where a parameter can stand: after the
@@ -296,7 +324,8 @@ class Diff:
         new, new_defaults = split_defaults(new)
         moved = self.defaults(where, what, shown_old, shown_new, old, new,
                               old_defaults, new_defaults)
-        typed = old != new and self.typed(where, what, old, new, shown_old, shown_new)
+        typed = old != new and self.typed(where, what, old, new, shown_old, shown_new,
+                                          new_defaults)
         if not moved and not typed:
             self.rendering_only += 1
 
@@ -322,8 +351,19 @@ class Diff:
             self.add(severity, where, text, was_now(shown_old, shown_new))
         return bool(events)
 
-    def typed(self, where, what, old, new, shown_old, shown_new):
-        """The comparison of two default-free signatures; whether it reported."""
+    def typed(self, where, what, old, new, shown_old, shown_new, nd=None):
+        """The comparison of two default-free signatures; whether it reported.
+
+        `nd` is the new side's defaults by parameter name. New parameters
+        appended at the END, each with a default, leave every positional and
+        every named call compiling unchanged, so they are an addition and not
+        a changed signature (K1's `mode: Rounding = NearestEven` on
+        `narrow.round_f32` is the first). A defaulted parameter inserted
+        before an existing one shifts positional callers and stays a break.
+        The residual is a caller holding the function as a VALUE, whose type
+        grows a parameter; that is listed in the line, not hidden.
+        """
+        nd = nd or {}
         gained = sorted(effects_of(new) - effects_of(old))
         lost = sorted(effects_of(old) - effects_of(new))
         if gained:
@@ -337,6 +377,8 @@ class Diff:
                 now = ", ".join(names_in(shape_of(new)))
                 self.add(RENAME, where, f"{what} parameters renamed: `{was}` -> `{now}`",
                          was_now(shown_old, shown_new))
+            elif self.appended_defaults(where, what, old, new, shown_old, shown_new, nd):
+                pass
             else:
                 self.add(BREAK, where, f"{what} signature changed", was_now(shown_old, shown_new))
         elif lost:
@@ -344,6 +386,25 @@ class Diff:
             self.add(NARROW, where, f"{what} {note}", was_now(shown_old, shown_new))
         else:
             return False
+        return True
+
+
+    def appended_defaults(self, where, what, old, new, shown_old, shown_new, nd):
+        """Report `new` as `old` plus trailing defaulted parameters, if it is."""
+        old_names = names_in(shape_of(old))
+        new_names = names_in(shape_of(new))
+        k = len(new_names) - len(old_names)
+        if k <= 0 or new_names[:len(old_names)] != old_names:
+            return False
+        tail = new_names[len(old_names):]
+        if any(name not in nd or name in old_names for name in tail):
+            return False
+        if shape_of(drop_trailing_params(new, k)) != shape_of(old):
+            return False
+        added = ", ".join(f"`{name}` (default `{nd[name]}`)" for name in tail)
+        self.add(ADD, where, f"{what} gained trailing defaulted parameter(s) {added}; "
+                             f"calls are unchanged, a use as a function value is not",
+                 was_now(shown_old, shown_new))
         return True
 
 
@@ -698,6 +759,51 @@ GOLDEN = (
          "- `u` `m`: `fn go` parameter `k` lost its default",
          "    - was: `fn go(n: Int = !x, k: Int = 1) -> Int`",
          "    - now: `fn go(n: Int = !x, k: Int) -> Int`"],
+    ),
+    (
+        # K1: a trailing parameter with a default is an addition; every
+        # positional and named call compiles as before
+        "defaulted parameter appended",
+        _one(_mod("m", fns=[_fn("round_f32", "fn round_f32(x: Float) -> Float")])),
+        _one(_mod("m", fns=[_fn("round_f32",
+                                "fn round_f32(x: Float, mode: Rounding = NearestEven) -> Float")])),
+        ["## Additions (1)", "",
+         "- `u` `m`: `fn round_f32` gained trailing defaulted parameter(s) `mode` "
+         "(default `NearestEven`); calls are unchanged, a use as a function value is not",
+         "    - was: `fn round_f32(x: Float) -> Float`",
+         "    - now: `fn round_f32(x: Float, mode: Rounding = NearestEven) -> Float`"],
+    ),
+    (
+        # the same parameter in FRONT of an existing one moves positional
+        # callers, so it is a break however it defaults
+        "defaulted parameter inserted before an existing one",
+        _one(_mod("m", fns=[_fn("round_binary", "fn round_binary(x: Float, p: Int) -> Float")])),
+        _one(_mod("m", fns=[_fn("round_binary",
+                                "fn round_binary(x: Float, mode: Rounding = NearestEven, p: Int) -> Float")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn round_binary` signature changed",
+         "    - was: `fn round_binary(x: Float, p: Int) -> Float`",
+         "    - now: `fn round_binary(x: Float, mode: Rounding = NearestEven, p: Int) -> Float`"],
+    ),
+    (
+        # an appended parameter WITHOUT a default breaks every call
+        "parameter appended without a default",
+        _one(_mod("m", fns=[_fn("round_f32", "fn round_f32(x: Float) -> Float")])),
+        _one(_mod("m", fns=[_fn("round_f32", "fn round_f32(x: Float, mode: Rounding) -> Float")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn round_f32` signature changed",
+         "    - was: `fn round_f32(x: Float) -> Float`",
+         "    - now: `fn round_f32(x: Float, mode: Rounding) -> Float`"],
+    ),
+    (
+        # appended with a default, but an old parameter changed type too
+        "defaulted parameter appended and an old one retyped",
+        _one(_mod("m", fns=[_fn("f", "fn f(x: Float) -> Float")])),
+        _one(_mod("m", fns=[_fn("f", "fn f(x: Int, mode: Rounding = Up) -> Float")])),
+        ["## Breaking (1)", "",
+         "- `u` `m`: `fn f` signature changed",
+         "    - was: `fn f(x: Float) -> Float`",
+         "    - now: `fn f(x: Int, mode: Rounding = Up) -> Float`"],
     ),
     (
         "fn removed",

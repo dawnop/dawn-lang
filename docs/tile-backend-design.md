@@ -2462,6 +2462,9 @@ tf32 的字当 f32 的字读就是同一个数，所以读缓冲区那一段一�
 宿主参考是 `std/narrow` 新加的 `round_binary_toward`，它是 `round_binary` 的定向版本，
 和它一样是纯算术（没有 float-to-bits），并且在**溢出**这一格与它不同：往自己符号那侧舍
 是无穷，往另一侧舍是最大有限值（IEEE 754 §4.3），一个只会往无穷溢出的实现会在这里读错。
+（标准库默认参数刀 K1 起，`round_binary_toward` 与 `round_f32_toward` 并入 `round_binary` / `round_f32` 的
+`mode: Rounding` 默认参数，字符串模式换成枚举 `TowardZero` / `Down` / `Up`，见
+[std-defaults-design.md](std-defaults-design.md)。）
 本机实测 `attr_round` **逐位相同**，`probe` 是 `add=512 mul=445 div=494`：512 条车道里
 上下两向答案不同的分别是 512、445、494 条，也就是语料确实把结果放在了两个 f32 邻居之间。
 
@@ -3983,7 +3986,8 @@ f64 到 f32 的四种、f32 到 tf32 的三种、f32 到 f16 与 bf16 各两种�
 
 `std/narrow` 因此加了两个公开函数：`round_binary_away`（`round_binary` 的平局远离零版本，两者共用一个私有的
 `round_nearest`）与 `round_tf32_away`，带内联测试（偶数平局、奇数平局、非平局、次正规平局、上溢、特殊值）。
-`narrow-contract` 的 `ties-away` 变异体锚点随之改成新的那一行。
+`narrow-contract` 的 `ties-away` 变异体锚点随之改成新的那一行。（刀 K1 起这两个函数并入 `round_binary` / `round_tf32`
+的 `mode: NearestAway`，`round_nearest` 与定向舍入合成 `round_binary` 里的一个 `match`，锚点改成 `NearestEven` 那一臂。）
 
 **四、`xchg` 有了客户。** `attr_xchg`：四个 block 共 512 格，每格把自己的输入换进第 `511 - i` 个槽，并把换回来的
 旧值存到后 512 格。没有两格共用一个槽，所以答案与到达顺序无关；它是逐位档的整数 kernel。变异体

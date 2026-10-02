@@ -38,6 +38,29 @@
 # 10.3), and `round_binary` needs the builtin `to_float` to bring its integer
 # significand back.
 
+# The rounding direction is a `Rounding` value and not a string or a family
+# of suffixed names. Before parameters had defaults the module grew
+# `round_binary_away`, `round_binary_toward(.., mode: String)` and three more
+# like them; a misspelt mode was a runtime panic and "f32, ties away" was a
+# function nobody had written. Now `mode` is the last parameter of
+# `round_binary`, `round_f32` and `round_tf32`, it defaults to the IEEE
+# default `NearestEven`, and a mode that does not exist cannot be spelt.
+# The variants follow IEEE 754's names, shortened, and correspond one to one
+# to the Tile IR dialect's rounding attribute:
+#
+#   NearestEven  roundTiesToEven      nearest_even
+#   NearestAway  roundTiesToAway      nearest_away
+#   TowardZero   roundTowardZero      zero
+#   Down         roundTowardNegative  negative_inf
+#   Up           roundTowardPositive  positive_inf
+#
+# The type is public so that packages/tileir can take the same value for its
+# own `rounding` attribute; the function from variant to dialect spelling
+# belongs there, next to the dialect, and not in a module about arithmetic.
+# The per-format functions (`round_bf16`, `round_fp16`, the f8 family) take
+# no mode: the format is the function's identity, the f8 formats saturate
+# and so are not IEEE roundings at all, and no caller has asked for one.
+
 # ---- the formats ----
 
 ## A bfloat16 value: 8 significand bits, exponents -126..127.
@@ -51,28 +74,36 @@ pub opaque type F32 = Float
 
 # ---- rounding ----
 
-## The nearest value of the binary format with `p` significand bits (hidden
-## bit included), minimum normal exponent `emin` and maximum exponent `emax`,
-## ties to even. Above the largest finite value the answer is the infinity of
-## the sign; below the normal range it lies on the subnormal grid
-## 2^(emin - p + 1), and may be zero of the sign. NaN, the two zeros and the
-## two infinities pass through unchanged.
-pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float = round_nearest(x, p, emin, emax, false)
+## How a value between two neighbours of a format picks one: the five
+## rounding-direction attributes of IEEE 754 section 4.3, under short names.
+##
+## - `NearestEven`: roundTiesToEven, the nearest neighbour, a tie to the one
+##   with an even last digit. The default everywhere, and the one Figueroa's
+##   theorem covers.
+## - `NearestAway`: roundTiesToAway, the nearest neighbour, a tie to the one
+##   of larger magnitude.
+## - `TowardZero`: roundTowardZero, the neighbour of smaller magnitude.
+## - `Down`: roundTowardNegative, the neighbour below.
+## - `Up`: roundTowardPositive, the neighbour above.
+##
+## The Tile IR dialect (`AttrDefs.td`'s `RoundingMode`) spells the same five
+## `nearest_even`, `nearest_away`, `zero`, `negative_inf` and `positive_inf`.
+pub type Rounding = NearestEven | NearestAway | TowardZero | Down | Up
 
-## `round_binary` with the OTHER tie-breaking rule: a value exactly halfway
-## between two neighbours goes to the one of larger magnitude instead of to
-## the even one. IEEE 754 calls it roundTiesToAway and the Tile IR dialect
-## `nearest_away`, the rounding mode bytecode 13.4 added for `ftof` from f32
-## to tf32 (packages/tileir's `float_to_float_away`). Everywhere off a tie
-## it answers what `round_binary` answers, and the rest of that function's
-## contract holds unchanged: overflow is the infinity of the sign, below the
-## normal range the subnormal grid, and NaN, the zeros and the infinities
-## pass through.
-pub fn round_binary_away(x: Float, p: Int, emin: Int, emax: Int) -> Float = round_nearest(x, p, emin, emax, true)
-
-# The two round-to-nearest modes, which differ only in what a tie does:
-# `away` sends it up in magnitude, otherwise it goes to the even neighbour.
-fn round_nearest(x: Float, p: Int, emin: Int, emax: Int, away: Bool) -> Float =
+## The value of the binary format with `p` significand bits (hidden bit
+## included), minimum normal exponent `emin` and maximum exponent `emax`
+## that `mode` picks for `x`. Below the normal range the answer lies on the
+## subnormal grid 2^(emin - p + 1), and may be zero of the sign. NaN, the
+## two zeros and the two infinities pass through unchanged.
+##
+## A finite `x` too big for the format is where the modes differ in kind,
+## not just in which neighbour: the two nearest modes overflow to the
+## infinity of the sign, and of the directed ones, rounding TOWARDS the
+## value's own infinity overflows to it while rounding away from it answers
+## the largest finite value. IEEE 754 section 4.3 says so, and a caller
+## comparing against hardware would otherwise read an infinity where the
+## device holds a finite number.
+pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int, mode: Rounding = NearestEven) -> Float =
   if x != x || x == 0.0 {
     x
   } else {
@@ -88,16 +119,32 @@ fn round_nearest(x: Float, p: Int, emin: Int, emax: Int, away: Bool) -> Float =
       let qe = (if e < emin { emin } else { e }) - p + 1
       let q = pow2(qe)
       # a / q is exact (a power-of-two scaling), and lies below 2^p, so
-      # `to_int` truncates without saturating; the tie is broken by hand
+      # `to_int` truncates without saturating; `r` is what was cut off
       let m = a / q
       let fl = to_int(m)
       let r = m - to_float(fl)
-      let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if away || fl % 2 == 1 { fl + 1 } else { fl }
+      # whether the magnitude goes up to the next quantum; the directed
+      # modes ask in terms of the sign, so they are answered in terms of it
+      let up = match mode {
+        NearestEven -> r > 0.5 || (r == 0.5 && fl % 2 == 1)
+        NearestAway -> r >= 0.5
+        TowardZero -> false
+        Down -> neg && r > 0.0
+        Up -> not neg && r > 0.0
+      }
+      let n = if up { fl + 1 } else { fl }
       let v = to_float(n) * q
       # the largest finite value is (2 - 2^(1 - p)) * 2^emax; a result above
-      # it (a carry out of the top exponent included) is the infinity
+      # it (a carry out of the top exponent included) is the infinity,
+      # unless the mode rounds that sign's magnitude down
       let max_finite = (2.0 - pow2(1 - p)) * pow2(emax)
-      let out = if v > max_finite { inf } else { v }
+      let saturates = match mode {
+        NearestEven | NearestAway -> false
+        TowardZero -> true
+        Down -> not neg
+        Up -> neg
+      }
+      let out = if v > max_finite { if saturates { max_finite } else { inf } } else { v }
       if neg { -out } else { out }
     }
   }
@@ -118,77 +165,22 @@ fn pow2(k: Int) -> Float = {
   q
 }
 
-## The three DIRECTED rounding modes of a binary format, spelled the way
-## the Tile IR dialect spells them (`AttrDefs.td`'s `RoundingMode`): the
-## value of the format nearest `x` in the named direction. Unlike
-## `round_binary`, which is the format's default and the one Figueroa's
-## theorem covers, these are what a caller asks for when the hardware was
-## told to round some other way, and packages/tileir's `addf_down` and its
-## family are the reason they are here.
-##
-## `mode` is `"zero"`, `"negative_inf"` or `"positive_inf"`; anything else
-## is refused rather than silently taken for one of them. NaN, the two
-## zeros and the two infinities pass through unchanged, as they do above.
-##
-## A finite `x` too big for the format is where the three differ from
-## `round_binary` most visibly: rounding TOWARDS the value's own sign
-## overflows to that infinity, and rounding away from it answers the
-## largest finite value rather than an infinity. IEEE 754 section 4.3
-## says so, and a caller comparing against hardware would otherwise read
-## an infinity where the device holds a finite number.
-pub fn round_binary_toward(x: Float, p: Int, emin: Int, emax: Int, mode: String) -> Float =
-  if not (mode == "zero" || mode == "negative_inf" || mode == "positive_inf") {
-    panic("narrow: `${mode}` is not a directed rounding mode")
-  } else if x != x || x == 0.0 {
-    x
-  } else {
-    let neg = x < 0.0
-    let a = if neg { -x } else { x }
-    let inf = 1.0 / 0.0
-    if a == inf {
-      x
-    } else {
-      # away from zero in MAGNITUDE is what the two infinity modes ask for
-      # on their own side of zero, and `zero` never asks for it
-      let away = if mode == "zero" { false } else if neg { mode == "negative_inf" } else { mode == "positive_inf" }
-      let e = exponent(a)
-      let qe = (if e < emin { emin } else { e }) - p + 1
-      let q = pow2(qe)
-      let m = a / q
-      let fl = to_int(m)
-      let exact = m - to_float(fl) == 0.0
-      let n = if away && not exact { fl + 1 } else { fl }
-      let v = to_float(n) * q
-      let max_finite = (2.0 - pow2(1 - p)) * pow2(emax)
-      let out = if v > max_finite { if away { inf } else { max_finite } } else { v }
-      if neg { -out } else { out }
-    }
-  }
-
-## `x` rounded to binary32 in the direction `mode` names.
-pub fn round_f32_toward(x: Float, mode: String) -> Float = round_binary_toward(x, 24, -126, 127, mode)
-
 ## `x` rounded to bfloat16.
 pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)
 
 ## `x` rounded to binary16.
 pub fn round_fp16(x: Float) -> Float = round_binary(x, 11, -14, 15)
 
-## `x` rounded to binary32.
-pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
+## `x` rounded to binary32 in the direction `mode` names.
+pub fn round_f32(x: Float, mode: Rounding = NearestEven) -> Float = round_binary(x, 24, -126, 127, mode)
 
-## `x` rounded to TensorFloat-32: binary32's exponent range with eleven
-## significand bits instead of twenty-four. It is a rounding and not a
-## storage format in this module's sense -- `tf32_bits` puts it in a 32-bit
-## word with thirteen zero bits at the bottom, which is where the hardware
-## keeps it.
-pub fn round_tf32(x: Float) -> Float = round_binary(x, 11, -126, 127)
-
-## `x` rounded to TensorFloat-32 with ties AWAY from zero: what the device
-## answers for `ftof` from f32 to tf32 under `nearest_away` (measured, knife
-## T17). It differs from `round_tf32` on a binary32 value exactly halfway
-## between two tf32 neighbours whose lower one is even, and nowhere else.
-pub fn round_tf32_away(x: Float) -> Float = round_binary_away(x, 11, -126, 127)
+## `x` rounded to TensorFloat-32 in the direction `mode` names: binary32's
+## exponent range with eleven significand bits instead of twenty-four. It is
+## a rounding and not a storage format in this module's sense -- `tf32_bits`
+## puts it in a 32-bit word with thirteen zero bits at the bottom, which is
+## where the hardware keeps it. `NearestAway` is what the device answers for
+## `ftof` from f32 to tf32 under `nearest_away` (measured, knife T17).
+pub fn round_tf32(x: Float, mode: Rounding = NearestEven) -> Float = round_binary(x, 11, -126, 127, mode)
 
 ## `x` rounded to f8E5M2: three significand bits, exponents -14..15, and
 ## SATURATING at the largest finite value.
@@ -924,6 +916,9 @@ pub fn f8e8m0_of_bits(bits: Int) -> Float = {
 # scripts/narrow-contract generates from a rational oracle.
 
 test "rounding breaks ties to even and rounds away otherwise" {
+  # NearestEven is the default mode, so naming it changes nothing
+  assert round_f32(1.0 + 1.0 / 16777216.0, mode: NearestEven) == round_f32(1.0 + 1.0 / 16777216.0)
+  assert round_binary(1.0 + 3.0 / 256.0, 8, -126, 127, mode: NearestEven) == 1.0 + 1.0 / 64.0
   # 1 + 2^-8 sits exactly between 1 and 1 + 2^-7 in bf16; the even one wins
   assert round_bf16(1.0 + 1.0 / 256.0) == 1.0
   # 1 + 3 * 2^-8 sits between 1 + 2^-7 and 1 + 2^-6; even is the upper one
@@ -980,44 +975,45 @@ test "directed rounding takes the neighbour on the named side" {
   # 1 + 2^-8 lies strictly between 1 and 1 + 2^-7 in bf16, so the three
   # modes disagree with each other and with the tie-to-even answer above
   let between = 1.0 + 1.0 / 256.0
-  assert round_binary_toward(between, 8, -126, 127, "zero") == 1.0
-  assert round_binary_toward(between, 8, -126, 127, "negative_inf") == 1.0
-  assert round_binary_toward(between, 8, -126, 127, "positive_inf") == 1.0 + 1.0 / 128.0
-  # the same value negated: `zero` and `positive_inf` now name the same
-  # neighbour and `negative_inf` names the other one
-  assert round_binary_toward(-between, 8, -126, 127, "zero") == -1.0
-  assert round_binary_toward(-between, 8, -126, 127, "positive_inf") == -1.0
-  assert round_binary_toward(-between, 8, -126, 127, "negative_inf") == -(1.0 + 1.0 / 128.0)
+  assert round_binary(between, 8, -126, 127, mode: TowardZero) == 1.0
+  assert round_binary(between, 8, -126, 127, mode: Down) == 1.0
+  assert round_binary(between, 8, -126, 127, mode: Up) == 1.0 + 1.0 / 128.0
+  # the same value negated: `TowardZero` and `Up` now name the same
+  # neighbour and `Down` names the other one
+  assert round_binary(-between, 8, -126, 127, mode: TowardZero) == -1.0
+  assert round_binary(-between, 8, -126, 127, mode: Up) == -1.0
+  assert round_binary(-between, 8, -126, 127, mode: Down) == -(1.0 + 1.0 / 128.0)
   # a value already on the grid does not move, in any mode or sign
-  assert round_binary_toward(1.0 + 1.0 / 128.0, 8, -126, 127, "zero") == 1.0 + 1.0 / 128.0
-  assert round_binary_toward(-1.0, 8, -126, 127, "negative_inf") == -1.0
-  assert round_f32_toward(0.5, "positive_inf") == 0.5
+  assert round_binary(1.0 + 1.0 / 128.0, 8, -126, 127, mode: TowardZero) == 1.0 + 1.0 / 128.0
+  assert round_binary(-1.0, 8, -126, 127, mode: Down) == -1.0
+  assert round_f32(0.5, mode: Up) == 0.5
   # binary32, where the last place is 2^-24 at 1: a third of it up and down
-  assert round_f32_toward(1.0 + 1.0 / 50331648.0, "positive_inf") == 1.0 + 1.0 / 8388608.0
-  assert round_f32_toward(1.0 + 1.0 / 50331648.0, "negative_inf") == 1.0
+  assert round_f32(1.0 + 1.0 / 50331648.0, mode: Up) == 1.0 + 1.0 / 8388608.0
+  assert round_f32(1.0 + 1.0 / 50331648.0, mode: Down) == 1.0
   # subnormals: the f32 quantum below 2^-126 is 2^-149, and 1.5 quanta
   # goes to one or to two depending on the side
   let subnormal = 1.5 * 1.401298464324817e-45
-  assert round_f32_toward(subnormal, "zero") == 1.401298464324817e-45
-  assert round_f32_toward(subnormal, "positive_inf") == 2.802596928649634e-45
-  assert round_f32_toward(-subnormal, "negative_inf") == -2.802596928649634e-45
+  assert round_f32(subnormal, mode: TowardZero) == 1.401298464324817e-45
+  assert round_f32(subnormal, mode: Up) == 2.802596928649634e-45
+  assert round_f32(-subnormal, mode: Down) == -2.802596928649634e-45
   # under the smallest subnormal, one side is zero and the other is it
-  assert round_f32_toward(1.0e-46, "zero") == 0.0
-  assert round_f32_toward(1.0e-46, "positive_inf") == 1.401298464324817e-45
+  assert round_f32(1.0e-46, mode: TowardZero) == 0.0
+  assert round_f32(1.0e-46, mode: Up) == 1.401298464324817e-45
   # OVERFLOW is the one place these differ from round_binary in kind:
   # towards the sign it is the infinity, away from it the largest finite
-  assert round_f32_toward(1.0e39, "positive_inf") == inf
-  assert round_f32_toward(1.0e39, "zero") == 3.4028234663852886e38
-  assert round_f32_toward(1.0e39, "negative_inf") == 3.4028234663852886e38
-  assert round_f32_toward(-1.0e39, "negative_inf") == -inf
-  assert round_f32_toward(-1.0e39, "zero") == -3.4028234663852886e38
+  assert round_f32(1.0e39, mode: Up) == inf
+  assert round_f32(1.0e39, mode: TowardZero) == 3.4028234663852886e38
+  assert round_f32(1.0e39, mode: Down) == 3.4028234663852886e38
+  assert round_f32(-1.0e39, mode: Down) == -inf
+  assert round_f32(-1.0e39, mode: TowardZero) == -3.4028234663852886e38
+  assert round_f32(-1.0e39, mode: Up) == -3.4028234663852886e38
   # the non-finite values pass through, as they do for round_binary
-  assert round_f32_toward(inf, "zero") == inf
-  assert round_f32_toward(-inf, "positive_inf") == -inf
-  let nan = round_f32_toward(0.0 / 0.0, "negative_inf")
+  assert round_f32(inf, mode: TowardZero) == inf
+  assert round_f32(-inf, mode: Up) == -inf
+  let nan = round_f32(0.0 / 0.0, mode: Down)
   assert nan != nan
-  assert round_f32_toward(0.0, "positive_inf") == 0.0
-  assert 1.0 / round_f32_toward(-0.0, "positive_inf") == -inf
+  assert round_f32(0.0, mode: Up) == 0.0
+  assert 1.0 / round_f32(-0.0, mode: Up) == -inf
 }
 
 test "ties away from zero move a tie up in magnitude and leave everything else to round_binary" {
@@ -1026,34 +1022,34 @@ test "ties away from zero move a tie up in magnitude and leave everything else t
   # 1 (even) and 1 + 2^-10 (odd): the two rules disagree, in both signs
   let tie = 1.0 + 1.0 / 2048.0
   assert round_tf32(tie) == 1.0
-  assert round_tf32_away(tie) == 1.0 + 1.0 / 1024.0
+  assert round_tf32(tie, mode: NearestAway) == 1.0 + 1.0 / 1024.0
   assert round_tf32(-tie) == -1.0
-  assert round_tf32_away(-tie) == -(1.0 + 1.0 / 1024.0)
+  assert round_tf32(-tie, mode: NearestAway) == -(1.0 + 1.0 / 1024.0)
   # a tie whose lower neighbour is ODD goes up under both rules
   let odd_tie = 1.0 + 3.0 / 2048.0
   assert round_tf32(odd_tie) == 1.0 + 1.0 / 512.0
-  assert round_tf32_away(odd_tie) == 1.0 + 1.0 / 512.0
+  assert round_tf32(odd_tie, mode: NearestAway) == 1.0 + 1.0 / 512.0
   # off a tie the two agree, on either side of it
-  assert round_tf32_away(tie + 1.0 / 1048576.0) == round_tf32(tie + 1.0 / 1048576.0)
-  assert round_tf32_away(tie - 1.0 / 1048576.0) == 1.0
+  assert round_tf32(tie + 1.0 / 1048576.0, mode: NearestAway) == round_tf32(tie + 1.0 / 1048576.0)
+  assert round_tf32(tie - 1.0 / 1048576.0, mode: NearestAway) == 1.0
   # the general function, at bfloat16's eight bits: 1 + 2^-8 is a tie there
-  assert round_binary_away(1.0 + 1.0 / 256.0, 8, -126, 127) == 1.0 + 1.0 / 128.0
+  assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127, mode: NearestAway) == 1.0 + 1.0 / 128.0
   assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127) == 1.0
   # a tie on the subnormal grid: tf32's quantum below 2^-126 is 2^-136, and
   # half of it rounds to it under ties-away and to zero under ties-to-even
   let q = 1.401298464324817e-45 * 8192.0
-  assert round_tf32_away(q / 2.0) == q
+  assert round_tf32(q / 2.0, mode: NearestAway) == q
   assert round_tf32(q / 2.0) == 0.0
   # the largest binary32 value is past tf32's last midpoint, so it
   # overflows under both rules
-  assert round_tf32_away(3.4028234663852886e38) == inf
+  assert round_tf32(3.4028234663852886e38, mode: NearestAway) == inf
   assert round_tf32(3.4028234663852886e38) == inf
   # the non-finite values and the zeros pass through
-  assert round_tf32_away(inf) == inf
-  assert round_tf32_away(-inf) == -inf
-  let nan = round_tf32_away(0.0 / 0.0)
+  assert round_tf32(inf, mode: NearestAway) == inf
+  assert round_tf32(-inf, mode: NearestAway) == -inf
+  let nan = round_tf32(0.0 / 0.0, mode: NearestAway)
   assert nan != nan
-  assert 1.0 / round_tf32_away(-0.0) == -inf
+  assert 1.0 / round_tf32(-0.0, mode: NearestAway) == -inf
 }
 
 test "the trait operations are the format's, with the theorem's rounding" {

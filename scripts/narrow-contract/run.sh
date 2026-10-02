@@ -41,8 +41,10 @@
 # statement it rewrites, and that is not decoration: knife T4 added a
 # DIRECTED rounding function next to `round_binary`, and the two decompose
 # the same way, so the statement alone stopped matching once (2 matches) and
-# this script said so rather than un-mutating. The comment is what keeps it
-# pointing at `round_binary` and not at its neighbour.
+# this script said so rather than un-mutating. Knife K1 folded the directed
+# modes into `round_binary`'s `mode: Rounding`, so the statement is unique
+# again; the comment stays in the anchor so that the next rounder written
+# the same way is refused rather than silently mutated in its place.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
