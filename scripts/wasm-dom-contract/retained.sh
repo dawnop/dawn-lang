@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Guest-retained init state, at both execution boundaries.
 #
-# One JVM process consumes all nine lines. One wasm module instance consumes
-# them through nine independent `dawn_turn` calls. The transcript covers an
-# event before init, a successful install, an event reading it, a panicking
-# init attempt followed by an event that still reads the old state, a new init
-# replacing it, and a decoder refusal that likewise leaves it untouched.
+# One JVM process consumes all thirteen lines. One wasm module instance
+# consumes them through thirteen independent `dawn_turn` calls. The first nine
+# cover an event before init, a successful install, an event reading it, a
+# panicking init attempt followed by an event that still reads the old state,
+# a new init replacing it, and a decoder refusal that likewise leaves it
+# untouched.
+#
+# The last four are about the other thing the session keeps: the tree each
+# successful turn left the host holding, which the next event routes through
+# instead of rendering the old model a second time (#361). The fixture's
+# button hears `dblclick` from 100 up and `click` below, and the host hands
+# back models the guest did not render -- 100 after 10, then 99 after 110 --
+# so a kept tree that answered for them would route a click that the host's
+# model does not listen for, and diff against a document the host is not
+# holding. The `stale-tree` production mutant is exactly that kept tree, and
+# it has to leave the first nine lines alone and move a later one.
 #
 # A source-seam gate holds the retained-root intrinsics to std/reactor, the
 # compiler/runtime implementations, this contract's direct C ownership
@@ -218,7 +229,7 @@ if [ "$record" -eq 0 ]; then
     diff -u "$expected" "$work/jvm.txt" | head -40 >&2
     exit 1
   fi
-  echo "OK   retained JVM: 9 lines in one process, byte for byte"
+  echo "OK   retained JVM: 13 lines in one process, byte for byte"
 fi
 
 if ! build_wasm "$root" "$work/base.wasm"; then
@@ -248,7 +259,7 @@ if ! cmp -s "$expected" "$work/wasm.txt"; then
   diff -u "$expected" "$work/wasm.txt" | head -40 >&2
   exit 1
 fi
-echo "OK   retained wasm: 9 separate dawn_turn calls, byte for byte"
+echo "OK   retained wasm: 13 separate dawn_turn calls, byte for byte"
 
 # Copy only what this project and its compiler-visible std read. The driver is
 # outside the tree on purpose: every mutation is in production std source, not
@@ -269,7 +280,7 @@ apply_exact_mutant() { # <name> <tree-root>
   python3 "$here/mutate.py" "$1" "$2"
 }
 
-run_mutant() { # <name> <tree-root> <oracle: any|line-five>
+run_mutant() { # <name> <tree-root> <oracle: any|line-five|after-nine>
   local name="$1"
   local tree="$2"
   local oracle="$3"
@@ -318,6 +329,19 @@ run_mutant() { # <name> <tree-root> <oracle: any|line-five>
         exit 1
       fi
       ;;
+    after-nine)
+      head -n 9 "$expected" >"$work/$name-expected-head.txt"
+      head -n 9 "$jvm_out" >"$work/$name-actual-head.txt"
+      if ! cmp -s "$work/$name-expected-head.txt" "$work/$name-actual-head.txt"; then
+        echo "FAIL: $name mutant changed the init-state lines, not only the kept-tree ones:" >&2
+        diff -u "$expected" "$jvm_out" | head -40 >&2
+        exit 1
+      fi
+      if cmp -s "$expected" "$jvm_out"; then
+        echo "FAIL: $name mutant survived: a kept tree answered for a model it was not rendered from" >&2
+        exit 1
+      fi
+      ;;
     *) echo "FAIL: unknown mutant oracle: $oracle" >&2; exit 1 ;;
   esac
   echo "OK   mutant $name goes red on JVM and wasm"
@@ -337,4 +361,12 @@ prepare_mutant commit-before-success
 apply_exact_mutant commit-before-success "$mutant_tree"
 run_mutant commit-before-success "$mutant_tree" line-five
 
-echo "retained state ok (JVM process + wasm instance, 2 seam mutants + 2/2 production mutants killed)"
+# Wrong on purpose: the kept tree is trusted whatever model text the host
+# hands back. Every line where the host returns what the guest last sent is
+# unchanged; the lines that hand back another model route through the wrong
+# tree.
+prepare_mutant stale-tree
+apply_exact_mutant stale-tree "$mutant_tree"
+run_mutant stale-tree "$mutant_tree" after-nine
+
+echo "retained state ok (JVM process + wasm instance, 2 seam mutants + 3/3 production mutants killed)"

@@ -178,33 +178,95 @@ pub fn turn_with_state[S, Mo, M](
   decode: fn(String) -> Mo,
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
-) -> (Option[S], String) =
+) -> (Option[S], String) = {
+  let (replacement, _shown, reply) =
+    turn_shown(line, state, None, init, encode, decode, update, view)
+  (replacement, reply)
+}
+
+## The tree a successful turn left the host holding, and the model text it
+## was rendered from.
+##
+## The host's document is the tree the last reply described, by construction:
+## an init ships the whole of it and every later reply ships the patches from
+## the previous one. So the guest can keep that tree instead of rebuilding it,
+## and an event turn then needs one `view` instead of two. `model` is the text
+## the same reply carried, which is what the host hands back next time if
+## nothing on its side intervened, and is how a turn tells whether the kept
+## tree is still the host's.
+pub type Shown[M] = { model: String, tree: Node[M] }
+
+## `turn_with_state`, given the tree the previous turn rendered.
+##
+## `shown` is consulted only for an event, and only when its `model` is the
+## very text the event carries; anything else -- `None`, a host that edited or
+## restored its model, a session that started in another instance -- renders
+## the old tree from the decoded model as `turn_with_state` always did. That
+## comparison is the whole of the invalidation rule, and it is a string
+## equality over the model text (the search panel's is about 300 bytes).
+##
+## What the comparison buys and what it does not. Equal text means the host is
+## holding the document this guest last described, so routing through the kept
+## tree routes through exactly what the reader saw. It does not prove that
+## `view(decode(model))` is that same tree. For a codec that round-trips what
+## the view reads -- the search panel's and the retained-state fixture's, the
+## two `serve_with_state` applications here -- the two are equal, and this
+## turn answers byte for byte what
+## `turn_with_state` answers. For a codec that drops a field the view reads,
+## they are not: the listener that resolves, and therefore the message its
+## `to_msg` builds, comes from the tree the host is actually holding, while
+## `update` still folds it into `decode(model)`. That is the one case in which
+## the two entry points can differ, and it is a codec that already cannot
+## replay its own page, so it is recorded here rather than guarded against.
+##
+## The second component is the tree this turn left the host holding: `Some`
+## after a successful init or event, `None` after any refusal, whose reply
+## carries no patches and so leaves the host's document, and the kept tree,
+## where they were. `serve_with_state` is the only caller that keeps it.
+pub fn turn_shown[S, Mo, M](
+  line: String,
+  state: Option[S],
+  shown: Option[Shown[M]],
+  init: fn(Option[String]) -> (S, Mo),
+  encode: fn(Mo) -> String,
+  decode: fn(String) -> Mo,
+  update: fn(S, Mo, M) -> (Mo, Cmd[M]),
+  view: fn(S, Mo) -> Node[M],
+) -> (Option[S], Option[Shown[M]], String) =
   match decode_request(line) {
-    Bad(reason) -> (None, reply_err("bad-request", reason))
+    Bad(reason) -> (None, None, reply_err("bad-request", reason))
     Init(flags) -> {
       let (kept, m0) = init(flags)
-      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(kept, m0)) }
-      (Some(kept), reply_ok(encode(m0), [root]))
+      let tree = view(kept, m0)
+      let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: tree) }
+      let text = encode(m0)
+      (Some(kept), Some(Shown { model: text, tree: tree }), reply_ok(text, [root]))
     }
     Event(model, path, event, payload) ->
       match state {
         None ->
-          (None, reply_err("bad-request", "an `event` needs a successful `init` first"))
+          (None, None, reply_err("bad-request", "an `event` needs a successful `init` first"))
         Some(kept) -> {
           let m0 = decode(model)
-          let old = view(kept, m0)
+          let old =
+            match shown {
+              Some(s) if s.model == model -> s.tree
+              _ -> view(kept, m0)
+            }
           match route.at(old, path, event) {
             None ->
-              (None, reply_err(
+              (None, None, reply_err(
                 "no-handler",
                 "nothing at " ++ show_path(path) ++ " listens for `" ++ event ++ "`",
               ))
             Some(listener) ->
               match settle(listener, payload) {
-                Err(why) -> (None, reply_err("bad-request", why))
+                Err(why) -> (None, None, reply_err("bad-request", why))
                 Ok(msg) -> {
                   let m1 = fold_msg(m0, msg, (acc, x) => update(kept, acc, x))
-                  (None, reply_ok(encode(m1), diff(old, view(kept, m1))))
+                  let text = encode(m1)
+                  let new = view(kept, m1)
+                  (None, Some(Shown { model: text, tree: new }), reply_ok(text, diff(old, new)))
                 }
               }
           }
@@ -324,17 +386,50 @@ pub fn serve_with_state[S, Mo, M](
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
 ) -> Unit !io =
-  session.serve((state: Option[S], line: String) => {
+  session.serve((live: Option[Live[S, M]], line: String) => {
     if str.trim(line) == "" {
-      let no_replacement: Option[S] = None
+      let no_replacement: Option[Live[S, M]] = None
       let no_reply: Option[String] = None
       (no_replacement, no_reply)
     } else {
-      let (replacement, reply) =
-        turn_with_state(line, state, init, encode, decode, update, view)
-      (replacement, Some(reply))
+      let state: Option[S] =
+        match live {
+          Some(l) -> Some(l.kept)
+          None -> None
+        }
+      let shown: Option[Shown[M]] =
+        match live {
+          Some(l) -> l.shown
+          None -> None
+        }
+      let (replacement, next_shown, reply) =
+        turn_shown(line, state, shown, init, encode, decode, update, view)
+      (relive(live, replacement, next_shown), Some(reply))
     }
   }, e => reply_err("panic", e.message))
+
+# What the session root holds: the init-time state and the tree the last
+# successful turn left the host holding. One record because `std/reactor`
+# roots one value per session.
+type Live[S, M] = { kept: S, shown: Option[Shown[M]] }
+
+# The root after a turn. A new init replaces both halves; a successful event
+# replaces only the tree; a refusal replaces nothing, so the pump keeps the
+# root it has. A panic never reaches here: the pump commits nothing for it,
+# which leaves the kept tree describing the document the host still holds.
+fn relive[S, M](
+  live: Option[Live[S, M]],
+  replacement: Option[S],
+  shown: Option[Shown[M]],
+) -> Option[Live[S, M]] =
+  match replacement {
+    Some(kept) -> Some(Live { kept: kept, shown: shown })
+    None ->
+      match (live, shown) {
+        (Some(l), Some(_)) -> Some(Live { kept: l.kept, shown: shown })
+        _ -> None
+      }
+  }
 
 # ---- tests -------------------------------------------------------------
 #
@@ -493,6 +588,67 @@ test "a retained event needs init, and a later init replaces the state" {
 
   # A decoder refusal is not an init and therefore proposes no replacement.
   let (bad, _error) = ask_state("{\"op\":\"init\",\"flags\":7}", Some(old))
+  assert bad == None
+}
+
+# `state_vw` with a listener that moves with the model: from 100 up the
+# button hears `dblclick` and nothing else. A turn that routed through a tree
+# rendered from some other model would answer the wrong one of the two.
+fn gated_vw(state: Kept, m: Counter) -> Node[Msg] =
+  Elem(tag: "button", props: [("data-state", state.label)], on: [
+    On { event: if m.n >= 100 { "dblclick" } else { "click" }, payload: NoData, to_msg: _p => Inc },
+  ], kids: [Text(s: to_string(m.n))], key: None)
+
+fn ask_shown(line: String, shown: Option[Shown[Msg]]) -> (Option[Shown[Msg]], String) = {
+  let kept = Kept { label: "plain", by: 1 }
+  let (_, next, out) =
+    turn_shown(line, Some(kept), shown, split_state, enc, dec, state_upd, gated_vw)
+  (next, out)
+}
+
+fn click_at(model: String, event: String) -> String =
+  "{\"op\":\"event\",\"model\":\"" ++ model ++ "\",\"path\":[],\"event\":\"" ++ event ++ "\"}"
+
+test "a kept tree routes the event when the host hands back the model it rendered" {
+  # The kept tree is the one consulted, not a decoration: this one is a lie
+  # about model 1 (it hears `dblclick`, which model 1's own tree does not), and
+  # the turn believes it because the text matches.
+  let liar = Shown { model: "1", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 100 }) }
+  let (_, out) = ask_shown(click_at("1", "dblclick"), Some(liar))
+  assert str.contains(out, "\"model\":\"2\"")
+  # And the turn hands back the tree it left the host holding, keyed by the
+  # text it sent.
+  let (next, _) = ask_shown(click_at("1", "click"), None)
+  assert next == Some(Shown { model: "2", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 2 }) })
+}
+
+test "a host that hands back a different model is routed through that model's tree" {
+  # The previous turn left model 1's tree behind, which hears `click`. The host
+  # comes back holding 100 instead (edited, restored, another tab's), whose
+  # tree hears only `dblclick`: the kept tree must not answer for it.
+  let (kept, _) = ask_shown(click_at("0", "click"), None)
+  assert kept == Some(Shown { model: "1", tree: gated_vw(Kept { label: "plain", by: 1 }, Counter { n: 1 }) })
+  let (_, stale) = ask_shown(click_at("100", "click"), kept)
+  assert stale ==
+    "{\"ok\":false,\"kind\":\"no-handler\"," ++
+    "\"error\":\"nothing at [] listens for `click`\"}"
+  let (_, fresh) = ask_shown(click_at("100", "dblclick"), kept)
+  assert str.contains(fresh, "\"model\":\"101\"")
+  # The same answers a turn with nothing kept gives, byte for byte.
+  let (_, stale_cold) = ask_shown(click_at("100", "click"), None)
+  let (_, fresh_cold) = ask_shown(click_at("100", "dblclick"), None)
+  assert stale == stale_cold
+  assert fresh == fresh_cold
+}
+
+test "init keeps its tree, and a refusal keeps nothing new" {
+  let kept = Kept { label: "plain", by: 1 }
+  let (_, shown, _) =
+    turn_shown("{\"op\":\"init\"}", None, None, split_state, enc, dec, state_upd, gated_vw)
+  assert shown == Some(Shown { model: "0", tree: gated_vw(kept, Counter { n: 0 }) })
+  let (refused, _) = ask_shown(click_at("0", "dblclick"), shown)
+  assert refused == None
+  let (bad, _) = ask_shown("{\"op\":\"event\"}", shown)
   assert bad == None
 }
 

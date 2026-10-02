@@ -1,0 +1,119 @@
+# A list panel with the search panel's shape and none of its search, so the
+# turn around it can be priced without the site's index.
+#
+# What is copied from examples/projects/tea_dom_search is what a turn pays
+# for: a retained read-only half split off at init, a small model of at most
+# forty integer ids written out as JSON by hand and read back through the json
+# package, a view with a text field and forty rows that each carry two
+# listeners and three text runs, and an ignored keydown that changes nothing.
+# What is not copied is the ranking: a keystroke here derives its forty ids
+# from the query's length, so `update` is cheap and every row's text changes,
+# which is the "forty-row re-render" the instrument names.
+
+use std/list
+use std/map
+use std/str
+use tea_core/cmd.{Cmd, NoCmd}
+use tea_dom/node.{Node, On, NoData}
+use tea_dom/dsl.{el, div, span, input, on_value, on_key}
+use json/parser.{parse}
+use json/value.{Json, JObj, JArr, JStr, JInt}
+use json/render.{render}
+
+pub type Book = { titles: List[String] }
+
+pub type Model = { q: String, sel: Int, hits: List[Int] }
+
+pub type Msg =
+  | Typed(text: String)
+  | Pressed(key: String)
+  | Hovered(at: Int)
+  | Chose(at: Int)
+
+pub fn rows() -> Int = 40
+
+pub fn init(_flags: Option[String]) -> (Book, Model) = {
+  var titles: List[String] = []
+  var i = 0
+  while i < 1000 {
+    titles = titles ++ ["entry number ${i}"]
+    i = i + 1
+  }
+  (Book { titles: titles }, Model { q: "", sel: 0, hits: [] })
+}
+
+fn hits_for(q: String) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  let base = str.len(q) * 37
+  while i < rows() {
+    out = out ++ [(base + i * 13) % 1000]
+    i = i + 1
+  }
+  out
+}
+
+pub fn update(_b: Book, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
+  match msg {
+    Typed(text) -> (Model { q: text, sel: 0, hits: hits_for(text) }, NoCmd)
+    Pressed(key) ->
+      if key == "ArrowDown" { (Model { ..m, sel: m.sel + 1 }, NoCmd) } else { (m, NoCmd) }
+    Hovered(at) -> (Model { ..m, sel: at }, NoCmd)
+    Chose(_) -> (m, NoCmd)
+  }
+
+fn row(b: Book, m: Model, at: Int, id: Int) -> Node[Msg] =
+  el(
+    "li",
+    class: if at == m.sel { "row is-sel" } else { "row" },
+    on: [
+      On { event: "mouseenter", payload: NoData, to_msg: _p => Hovered(at: at) },
+      On { event: "click", payload: NoData, to_msg: _p => Chose(at: at) },
+    ],
+    kids: [
+      span(b.titles[id], class: "title"),
+      span("fn ${b.titles[id]}()", class: "detail"),
+      span("matched ${m.q} at ${id}", class: "note"),
+    ],
+  )
+
+pub fn view(b: Book, m: Model) -> Node[Msg] = {
+  var items: List[Node[Msg]] = []
+  var at = 0
+  for id in m.hits {
+    items = items ++ [row(b, m, at, id)]
+    at = at + 1
+  }
+  div(class: "panel", kids: [
+    input(class: "field", value: m.q, on: [on_value("input", Typed), on_key("keydown", Pressed)]),
+    el("ul", class: "rows", kids: items),
+    div(class: "foot", kids: [span("${len(m.hits)} results")]),
+  ])
+}
+
+fn quoted(s: String) -> String = render(JStr(value: s))
+
+pub fn encode(m: Model) -> String =
+  "{\"q\":" ++ quoted(m.q)
+  ++ ",\"sel\":" ++ to_string(m.sel)
+  ++ ",\"hits\":[" ++ join(list.map(m.hits, h => to_string(h)), ",") ++ "]}"
+
+fn field(j: Json, k: String) -> Option[Json] =
+  match j {
+    JObj(entries) -> map.get(entries, k)
+    _ -> None
+  }
+
+pub fn decode(s: String) -> Model =
+  match parse(s) {
+    Ok(j) ->
+      Model {
+        q: match field(j, "q") { Some(JStr(v)) -> v, _ -> "" },
+        sel: match field(j, "sel") { Some(JInt(v)) -> v, _ -> 0 },
+        hits: match field(j, "hits") {
+          Some(JArr(items)) -> list.map(items, h => match h { JInt(v) -> v, _ -> 0 })
+          _ -> []
+        },
+      }
+    Err(_) -> Model { q: "", sel: 0, hits: [] }
+  }
