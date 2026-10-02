@@ -240,7 +240,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 |---|---|---|
 | K0 | 已落地 | `8938471f`（PR #375 rebase 合入 main 后的哈希；分支上原为 `c53d7e85`） |
 | K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
-| K2 | 已落地 | `K2_SHA`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
+| K2 | 已落地 | `fa6c493e`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
 | K3–K19 | 未开工 | |
 
 ### 7.1 K1 落地记录
