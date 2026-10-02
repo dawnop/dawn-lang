@@ -63,7 +63,10 @@
 # attribute instead of a listener, and the page script does the forgetting
 # and starts the panel again from the new list (site/assets/search.js says
 # why that and not a message back in). A shared `?q=` link arrives the same
-# way: the query is a flag, and init answers its hits in the first turn.
+# way: the query is a flag, and init answers its hits in the first turn. The
+# link is made the same way too: the foot's Copy link button, there while the
+# field holds a query, names itself in a `data-` attribute, and the page
+# writes the address and fills the clipboard ([copy_link]).
 #
 # The documents' text is a second index, fetched the first time the reader
 # types (search-body-<lang>.json, docs/site-search-design.md). It reaches the
@@ -2343,10 +2346,12 @@ fn hint(keys: List[String], does: String) -> Node[Msg] = {
   el("span", class: "search-hint", kids: kids ++ [what])
 }
 
-## The foot of the panel: the keys, for a reader who has them, and what the
-## panel searches, for every reader.
-fn foot(mod_key: String) -> Node[Msg] !Ctx = {
+## The foot of the panel: the keys, for a reader who has them, what the
+## panel searches, for every reader, and, while there is a query, a way to
+## share it.
+fn foot(mod_key: String, m: Model) -> Node[Msg] !Ctx = {
   let code = lang()
+  let share: List[Node[Msg]] = if idle(m) { [] } else { copy_link(code) }
   el("div", class: "search-foot", kids: [
     el("span", [("aria-hidden", "true")], class: "search-keys", kids: [
       hint(["↵"], say(code, "open", "打开")),
@@ -2355,8 +2360,32 @@ fn foot(mod_key: String) -> Node[Msg] !Ctx = {
       hint(["esc"], say(code, "close", "关闭")),
     ]),
     el("p", class: "search-scope", kids: [text(scope_line(code, full_text()))]),
-  ])
+  ] ++ share)
 }
+
+## Copy link: the query, as an address a reader can send.
+##
+## Like the delete and Clear buttons it has no listener. The address is the
+## page's (the guest has no URL bar), so is the clipboard, and so is whether
+## the copy worked; the button only says what it is with `data-copy-link`, and
+## site/assets/search.js writes `?q=` into the address, copies it and says so.
+## Both of the button's labels are drawn here, in the page's language, because
+## the page script carries no words: it shows "Copied" by putting `is-copied`
+## on the host, the stylesheet swaps the two labels, and the status line
+## beside the button is what a screen reader hears. The status is drawn with
+## the button, so it is in the document before its text is shown, which is
+## when a live region is announced. The id is what the page's fallback field
+## (a clipboard that refuses) is labelled by.
+fn copy_link(code: String) -> List[Node[Msg]] = [
+  el("button", [("type", "button"), ("id", "dawn-search-copy"), ("data-copy-link", "1")], class: "search-copy",
+    kids: [
+      span(say(code, "Copy link", "复制链接"), class: "search-copy-do"),
+      span(say(code, "Copied", "已复制"), class: "search-copy-done"),
+    ]),
+  el("span", [("role", "status")], class: "search-copy-said", kids: [
+    span(say(code, "Link copied", "链接已复制"), class: "search-copy-said-text"),
+  ]),
+]
 
 fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
   let code = lang()
@@ -2379,7 +2408,7 @@ fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
     el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", label)], class: "search-results",
       kids: found),
     status(m, len(found) > 0),
-    foot(state.mod_key),
+    foot(state.mod_key, m),
   ] ++ goto_kids(m))
 }
 
@@ -3392,6 +3421,36 @@ test "the new-tab hint uses the modifier the page names" {
   assert str.contains(text_ctrl, "new tab")
   assert str.contains(show_tree(view(probe_state(), blank())), "⌘")
   assert str.contains(show_tree(view(State { ..ctrl, lang: "zh-CN" }, blank())), "新标签页")
+}
+
+## Copy link is in the foot only while the field holds a query, names itself
+## for the page instead of carrying a listener, and draws both of its labels
+## and its status line in the page's language.
+test "the foot offers copy link only while there is a query" {
+  let state = probe_state()
+  assert count_class(view(state, blank()), "search-copy") == 0
+  assert count_class(view(state, typed(state, "   ")), "search-copy") == 0
+  let v = view(state, typed(state, "str."))
+  let copy = all_with_class(v, "search-copy")
+  assert len(copy) == 1
+  assert len(all_with_class(all_with_class(v, "search-foot")[0], "search-copy")) == 1
+  assert prop_of(copy[0], "data-copy-link") == "1"
+  assert prop_of(copy[0], "id") == "dawn-search-copy"
+  let heard = match copy[0] {
+    Text(_) -> -1
+    Elem(_, _, on, ..) -> len(on)
+  }
+  assert heard == 0
+  assert text_of(all_with_class(v, "search-copy-do")[0]) == "Copy link"
+  assert text_of(all_with_class(v, "search-copy-done")[0]) == "Copied"
+  assert prop_of(all_with_class(v, "search-copy-said")[0], "role") == "status"
+  let zh = State { ..state, lang: "zh-CN" }
+  let w = view(zh, typed(zh, "str."))
+  assert text_of(all_with_class(w, "search-copy-do")[0]) == "复制链接"
+  assert text_of(all_with_class(w, "search-copy-done")[0]) == "已复制"
+  assert text_of(all_with_class(w, "search-copy-said")[0]) == "链接已复制"
+  # a query with no hits can be shared as well: the link asks it again
+  assert count_class(view(state, typed(state, "zzzz")), "search-copy") == 1
 }
 
 ## The pills narrow the matches the query already has: All and each group,

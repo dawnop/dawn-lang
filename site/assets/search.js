@@ -37,13 +37,18 @@
 // panel searching titles, which its foot says.
 //
 // Two pieces of state outlive one opening of the panel, and both are the
-// page's because the guest can reach neither. The query is in the address as
-// `?q=` while the panel is open (replaceState, so typing is not history), and a
-// page loaded with one opens on its results: a search can be shared as a
-// link. `?q=` and not `#q=` because the fragment on this site is an anchor --
-// headings, API entries, the Playground's code -- and reveal() below reads it
-// as one. The reader's recent queries are in localStorage. Both reach the
-// guest as flags, and the guest only reads them.
+// page's because the guest can reach neither. A page loaded with `?q=` opens
+// on that query's results, so a search can be shared as a link, and the link
+// is made when the reader asks for it: the foot's Copy link writes `?q=` into
+// the address (replaceState, so it is not history) and copies the address.
+// Typing does not touch the address -- an address that changed with every
+// keystroke was a link nobody had asked for, and the one in the bar when the
+// reader copied it by hand was whatever prefix they had reached -- and
+// closing the panel takes `?q=` out again. `?q=` and not `#q=` because the
+// fragment on this site is an anchor -- headings, API entries, the
+// Playground's code -- and reveal() below reads it as one. The reader's recent
+// queries are in localStorage. Both reach the guest as flags, and the guest
+// only reads them.
 (function () {
   'use strict';
 
@@ -151,9 +156,10 @@
     }
   }
 
-  // The address follows the field: `?q=` while there is a query, nothing when
-  // there is not. replaceState, so a reader's Back button is not a list of
-  // every prefix they typed; the rest of the URL (path, other parameters,
+  // `?q=` set to a query, or taken out for none. Called with the field's
+  // query by Copy link and with none on close, and from nowhere else: typing
+  // leaves the address alone. replaceState, so the link a reader copied is not
+  // also a history entry; the rest of the URL (path, other parameters,
   // fragment) is left as it was.
   function writeQuery(q) {
     try {
@@ -171,12 +177,80 @@
     return host.querySelector('.search-input');
   }
 
-  // Called after every turn the page can see: the guest writes the field
-  // (Escape empties it, a recent query fills it) without an input event.
-  function syncQuery() {
-    if (host.hidden) return;
+  // ---- copy link -----------------------------------------------------------
+  //
+  // The guest's Copy link button has no listener, like delete and Clear: it
+  // names itself with `data-copy-link`, and this does the rest, because the
+  // address and the clipboard are the page's. The query goes into the address
+  // first and the address is what is copied, so the link in the clipboard and
+  // the one in the bar are the same link.
+  //
+  // What the reader is told is the guest's words in the page's hands. Both
+  // labels and a status line are already in the guest's tree, in the page's
+  // language; `is-copied` on the host (the page's element, as `is-keying` is)
+  // makes the stylesheet show "Copied" on the button and the status line,
+  // which a screen reader announces, and a moment later it is taken off. Not a
+  // message to the guest: a message reaches it only through a listener in its
+  // own tree, a listener would claim the copy before the clipboard had
+  // answered, and the guest has no clock to take the word back with.
+  //
+  // A clipboard that is missing or refuses (no permission, an insecure origin)
+  // gets the address in a read-only field under the panel, selected, for the
+  // reader to copy themselves: no alert, and no words of this script's own --
+  // the field is labelled by the button.
+  var copiedTimer = null;
+
+  function uncopied() {
+    clearTimeout(copiedTimer);
+    host.classList.remove('is-copied');
+    var manual = host.querySelector('.search-copy-manual');
+    if (manual) manual.remove();
+  }
+
+  function copied() {
+    uncopied();
+    host.classList.add('is-copied');
+    copiedTimer = setTimeout(function () { host.classList.remove('is-copied'); }, 1600);
+  }
+
+  function copyByHand(href) {
+    uncopied();
+    var box = document.createElement('input');
+    box.type = 'text';
+    box.readOnly = true;
+    box.value = href;
+    box.className = 'search-copy-manual';
+    box.setAttribute('aria-labelledby', 'dawn-search-copy');
+    host.appendChild(box);
+    box.focus({ preventScroll: true });
+    box.select();
+  }
+
+  function copyLink(ev) {
+    var b = ev.target.closest && ev.target.closest('[data-copy-link]');
+    if (!b) return false;
     var f = field();
-    if (f) writeQuery(f.value.trim() ? f.value : '');
+    var q = f ? f.value : '';
+    if (!q.trim()) return true;
+    writeQuery(q);
+    var href = location.href;
+    var clip = navigator.clipboard;
+    // The clipboard answers later; a query typed meanwhile is a different
+    // search, and the word for this one no longer belongs on screen.
+    var still = function () {
+      var g = field();
+      return !host.hidden && g && g.value === q;
+    };
+    if (clip && clip.writeText) {
+      clip.writeText(href).then(function () {
+        if (still()) copied();
+      }, function () {
+        if (still()) copyByHand(href);
+      });
+    } else {
+      copyByHand(href);
+    }
+    return true;
   }
 
   // What the guest is told when it starts: where the page is, which modifier
@@ -301,6 +375,7 @@
   // Focus goes back where it came from: the button that opened the panel.
   function close() {
     writeQuery('');
+    uncopied();
     host.hidden = true;
     host.classList.remove('is-keying');
     btn.setAttribute('aria-expanded', 'false');
@@ -383,6 +458,8 @@
   // closes so that a link into this same page does not leave it open, and
   // the query that found it is remembered.
   host.addEventListener('click', function (ev) {
+    if (copyLink(ev)) return;
+    if (ev.target.closest && ev.target.closest('.search-copy-manual')) return;
     if (forget(ev)) return;
     var row = ev.target.closest && ev.target.closest('.search-row a');
     if (row) {
@@ -390,27 +467,29 @@
       if (f) remember(f.value);
     }
     if (ev.target === host || guestLeft() || row) close();
-    else syncQuery();
     // The suggested query, taken from the keyboard: the button that had focus
     // is gone with the empty state it was in, so focus goes back to the field
     // that now holds the query.
     if (ev.target.closest && ev.target.closest('.search-fix-term')) focusInput();
   });
 
-  // A scope pill is a button, and so is a suggested query; a pressed button
+  // A scope pill is a button, and so are a suggested query and Copy link; a pressed button
   // takes focus, and the field has to keep it, or the arrows and Enter stop
   // reaching the guest after a click. The click itself still happens.
   host.addEventListener('mousedown', function (ev) {
-    if (ev.target.closest && ev.target.closest('.search-pill, .search-fix-term')) ev.preventDefault();
+    if (ev.target.closest && ev.target.closest('.search-pill, .search-fix-term, .search-copy')) ev.preventDefault();
   });
 
   host.addEventListener('mousemove', function () {
     host.classList.remove('is-keying');
   });
 
+  // A new query makes the link that was copied, and the word that says so,
+  // about a different search; both go. The address keeps what was copied
+  // until the panel closes.
   host.addEventListener('input', function () {
     follow();
-    syncQuery();
+    uncopied();
     var f = field();
     if (f && f.value.trim()) wantBody();
   });
@@ -447,7 +526,6 @@
       // empties the query and leaves the panel open.
       var heard = ev.target && ev.target.classList && ev.target.classList.contains('search-input');
       if (!heard || guestLeft()) close();
-      else syncQuery();
       return;
     }
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Home' || ev.key === 'End') {
@@ -456,11 +534,6 @@
       ev.preventDefault();
       host.classList.add('is-keying');
       follow();
-      return;
-    }
-    if (ev.key === 'Enter') {
-      // Enter on a recent query fills the field rather than leaving.
-      syncQuery();
       return;
     }
     if (ev.key === 'Tab') {
