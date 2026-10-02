@@ -5,6 +5,7 @@
 # answered.
 #
 #   loop_diff <loop_count.cubin> <loop_bound.cubin> <loop_until.cubin> <loop_none.cubin>
+#             <loop_return.cubin>
 #
 # WHAT ONLY A DEVICE CAN SAY, and what this program was written to ask:
 #
@@ -25,6 +26,14 @@
 #     the shape the package emits; `loop_none` is the case that shows the
 #     exit is tested before the body's work is kept, because its condition
 #     is true on the first test and its answer is its input.
+#   * `return` LEAVES A LOOP AND THE KERNEL AT ONCE (knife T17). Bytecode
+#     13.4 let an `if` inside a `loop` return, and `loop_return` is the
+#     kernel that does: four blocks, each storing how many iterations it
+#     has begun and returning when its tile reaches a bound. A block that
+#     returned has no answer after the loop, because the store after the
+#     loop is never reached, and that missing store is the measurement:
+#     run.sh holds the blocks that returned and the iterations they returned
+#     on to the corpus's own count.
 #
 # THE TIER IS EXACT, all four. Two of them are integer arithmetic, and
 # `loop_until`'s Newton iteration is three correctly rounded operations per
@@ -41,7 +50,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
-use tileref/ref.{loop_count_ref, loop_until_ref, loop_none_ref}
+use tileref/ref.{loop_count_ref, loop_until_ref, loop_none_ref, loop_return_ref}
 use std/list
 use std/map
 
@@ -64,6 +73,12 @@ pub const RTOL: Float = 1.0e-5
 pub const LOOP_TILE: Int = 128
 pub const COLLATZ_ROUNDS: Int = 128
 pub const NEWTON_EPS: Float = 1.0e-12
+pub const RETURN_AT: Int = 200
+pub const RETURN_LIMIT: Int = 100
+
+## How many blocks `loop_return` runs, each with its own corpus and its own
+## way out.
+pub const RETURN_BLOCKS: Int = 4
 
 ## How many rounds the host references are allowed before they give up.
 ## Neither reference may reach this: it is there so that a reference can
@@ -270,6 +285,49 @@ fn newton_values() -> List[Float] = list.map(range(0, LOOP_TILE), i => 0.25 + to
 ## it was given.
 fn small_values() -> List[Float] = list.map(range(0, LOOP_TILE), i => to_float(i + 1) / 256.0)
 
+## `loop_return`'s input, one tile per block, each tile chosen for the exit
+## it takes. The kernel adds one to every lane per iteration and returns on
+## the first iteration whose ENTERING tile holds RETURN_AT (200) or more,
+## and breaks on its RETURN_LIMIT-th (100th):
+##
+##   block 0  0 .. 127          127 + 73 reaches 200 on iteration 74: returns mid-loop
+##   block 1  0 .. 63, twice    63 + 99 never does: breaks on iteration 100
+##   block 2  150 .. 277        already there: returns on iteration 1
+##   block 3  0 .. 101, spread  101 + 99 reaches it on iteration 100, where
+##                              both exits hold; the return is tested first
+fn return_values() -> List[Float] =
+  list.map(range(0, RETURN_BLOCKS * LOOP_TILE), i => {
+    let b = i / LOOP_TILE
+    let l = i % LOOP_TILE
+    if b == 0 {
+      to_float(l)
+    } else if b == 1 {
+      to_float(l % 64)
+    } else if b == 2 {
+      to_float(l + 150)
+    } else {
+      to_float(l * 101 / 127)
+    }
+  })
+
+## The iteration each of `loop_return`'s blocks leaves on, and whether by
+## `return`, from the corpus alone: the first iteration whose entering
+## maximum is at RETURN_AT or above, or RETURN_LIMIT if none is first. This
+## is the corpus's own count, written here and not taken from tileref, so
+## that the transcript's two numbers per block (this one and the device's)
+## are two opinions.
+fn return_plan() -> List[(Int, Bool)] = {
+  let x = return_values()
+  list.map(range(0, RETURN_BLOCKS), b => {
+    let top = list.fold(range(0, LOOP_TILE), 0, (acc, l) => {
+      let v = to_int(x[b * LOOP_TILE + l])
+      if v > acc { v } else { acc }
+    })
+    let k = if top >= RETURN_AT { 1 } else { RETURN_AT - top + 1 }
+    if k <= RETURN_LIMIT { (k, true) } else { (RETURN_LIMIT, false) }
+  })
+}
+
 ## The lanes of the corpus that matter, counted. run.sh holds every one of
 ## these above zero, which is what makes the claims above measurements
 ## rather than sentences: a corpus whose longest chain were one step would
@@ -292,9 +350,20 @@ fn shape_of() -> String = {
   let over = list.filter(idx, i => small[i] >= 1.0)
   let roots = newton_values()
   let already = list.filter(idx, i => roots[i] == 1.0)
+  let plan = return_plan()
+  let returning = list.filter(plan, p => {
+    let (_k, r) = p
+    r
+  })
+  let mid = list.filter(plan, p => {
+    let (k, r) = p
+    r && k > 1 && k < RETURN_LIMIT
+  })
+  let breaking = len(plan) - len(returning)
   "lanes=${LOOP_TILE} at_one=${len(done_already)} odd=${len(odd)} longest_chain=${longest}"
     ++ " shortest_running=${shortest_running} loop_none_over_threshold=${len(over)}"
-    ++ " newton_at_start=${len(already)}"
+    ++ " newton_at_start=${len(already)} return_blocks=${len(returning)}"
+    ++ " return_mid_loop=${len(mid)} break_blocks=${breaking}"
 }
 
 # The Collatz chain length of `v`, written here rather than taken from
@@ -312,7 +381,7 @@ fn chain_length(v: Int, seen: Int) -> Int =
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
-fn case_name(i: Int) -> String = ["loop_count", "loop_bound", "loop_until", "loop_none"][i]
+fn case_name(i: Int) -> String = ["loop_count", "loop_bound", "loop_until", "loop_none", "loop_return"][i]
 
 ## Every kernel here is exact tier, so the list is empty and `tier_of`
 ## always answers `exact`. It is written out because
@@ -323,9 +392,10 @@ pub fn tolerance_tier() -> List[String] = []
 fn tier_of(i: Int) -> String =
   if list.any(tolerance_tier(), n => n == case_name(i)) { "tolerance" } else { "exact" }
 
-## Every kernel is one block wide: what is under test is the iteration, not
-## the grid.
-fn case_grid(_i: Int) -> Int = 1
+## Every kernel but `loop_return` is one block wide: what is under test is
+## the iteration, not the grid. `loop_return` is four, because whether a
+## block returns is the corpus's and four blocks take four different exits.
+fn case_grid(i: Int) -> Int = if case_name(i) == "loop_return" { RETURN_BLOCKS } else { 1 }
 
 ## The buffers each kernel is handed: a FORMAT and the initial contents, in
 ## argument order. Every output buffer is LONGER than the answer, so the
@@ -338,6 +408,8 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
     [("i32", collatz_values()), ("i32", sentinel_i32_buffer(LOOP_TILE + 8))]
   } else if name == "loop_until" {
     [("f64", newton_values()), ("f64", sentinel_buffer(2 * LOOP_TILE + 8))]
+  } else if name == "loop_return" {
+    [("i32", return_values()), ("i32", sentinel_i32_buffer(RETURN_BLOCKS * 2 * LOOP_TILE + 8))]
   } else {
     [("f64", small_values()), ("f64", sentinel_buffer(LOOP_TILE + 8))]
   }
@@ -355,6 +427,9 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   } else if name == "loop_until" {
     map.from([("loop_until", (2, last_out((dts, ins) =>
         loop_until_ref(LOOP_TILE, NEWTON_EPS, REF_FUEL, dts, ins))))])
+  } else if name == "loop_return" {
+    map.from([("loop_return", (2, last_out((dts, ins) =>
+        loop_return_ref(RETURN_BLOCKS, RETURN_AT, RETURN_LIMIT, REF_FUEL, dts, ins))))])
   } else {
     map.from([("loop_none", (2, last_out((dts, ins) =>
         loop_none_ref(LOOP_TILE, 1.0, 1000.0, REF_FUEL, dts, ins))))])
@@ -369,11 +444,39 @@ fn rounds_of(name: String, t: Trace) -> String = match t.result {
   Some(v) ->
     if name == "loop_count" || name == "loop_until" {
       if len(v) > LOOP_TILE { to_string(v[LOOP_TILE]) } else { "-" }
+    } else if name == "loop_return" {
+      exits_of(v)
     } else {
       "-"
     }
   None -> "-"
 }
+
+## How each of `loop_return`'s blocks left, read out of the DEVICE's answer:
+## the iteration count it stored last, then `r` if the slot after the loop
+## still holds the sentinel (it returned) or `b` if the loop's tile is there
+## (it broke). One `<count><r|b>` per block, joined by commas, so the whole
+## of the measurement is one field of the ledger line.
+fn exits_of(v: List[Float]) -> String =
+  if len(v) < RETURN_BLOCKS * 2 * LOOP_TILE {
+    "-"
+  } else {
+    list.fold(range(0, RETURN_BLOCKS), "", (acc, b) => {
+      let begun = to_int(v[b * 2 * LOOP_TILE])
+      let how = if v[b * 2 * LOOP_TILE + LOOP_TILE] == SENTINEL_I32 { "r" } else { "b" }
+      let sep = if acc == "" { "" } else { "," }
+      acc ++ sep ++ to_string(begun) ++ how
+    })
+  }
+
+## The same string from the corpus alone (`return_plan`), which is what
+## run.sh holds the device's against.
+fn planned_exits() -> String =
+  list.fold(return_plan(), "", (acc, p) => {
+    let (k, r) = p
+    let sep = if acc == "" { "" } else { "," }
+    acc ++ sep ++ to_string(k) ++ (if r { "r" } else { "b" })
+  })
 
 ## A vector as a line: its length, its first lanes and its last ones.
 fn digest(v: List[Float]) -> String =
@@ -407,13 +510,14 @@ fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.rea
 }
 
 fn usage() -> Unit !Exit !io = {
-  io.eprintln("usage: loop_diff <loop_count.cubin> <loop_bound.cubin> <loop_until.cubin> <loop_none.cubin>")
+  io.eprintln("usage: loop_diff <loop_count.cubin> <loop_bound.cubin> <loop_until.cubin> <loop_none.cubin>"
+      ++ " <loop_return.cubin>")
   io.exit(2)
 }
 
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let paths = args()
-  let count = 4
+  let count = 5
   if len(paths) != count { usage() } else { () }
   var cubins: Map[String, Bytes] = map.empty()
   for i in range(0, count) {
@@ -436,6 +540,7 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let v = verdict(tier, fake, real)
     io.println("kernel ${name} tier=${tier} bufs=${buffers_of(i)} grid=(${gx}, 1, 1)")
     if name == "loop_count" { io.println("  index ${shape_of()}") } else { () }
+    if name == "loop_return" { io.println("  plan  exits=${planned_exits()}") } else { () }
     io.println("  fake  launch=${fake.launch} result=${shown(fake.result)} rounds=${rounds_of(name, fake)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.result)}"

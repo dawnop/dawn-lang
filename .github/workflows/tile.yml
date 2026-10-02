@@ -48,7 +48,7 @@ name: tile
 # header says why.
 #
 # The path total is the push total's twin for this file (gates.yml has the
-# rule): the six `3x` claims below may not add up past it, it was set on
+# rule): the `3x` claims below may not add up past it, it was set on
 # 2026-09-25 at their sum, and raising it takes a
 # `Gate-Budget(path-total): <old>s -> <new>s <why>` line in the commit
 # message. It is its own line and not part of the push total because this
@@ -61,8 +61,8 @@ name: tile
 # `dedupe` job below asks scripts/tile-verified.py whether this commit's git
 # tree (`git rev-parse HEAD^{tree}`) already has a green run of this
 # workflow, recorded as an artifact named `tile-verified-v1-<tree>` that
-# tile-shards-complete uploads once all six shards and the union check are
-# green (kept 90 days). If it has, the six shards and tile-shards-complete
+# tile-shards-complete uploads once all seven shards and the union check are
+# green (kept 90 days). If it has, the seven shards and tile-shards-complete
 # are skipped and the step summary names the run that verified it. Only a
 # push is deduplicated: pull_request, schedule and workflow_dispatch always
 # run every shard, so the whole set runs on the pull request and every day,
@@ -99,10 +99,10 @@ name: tile
 # every tree runs again. Not actions/cache: a cache saved on a pull request
 # belongs to its merge ref, which main cannot read.
 #
-# nightly.yml's totals report counts a tile trigger only when the six
+# nightly.yml's totals report counts a tile trigger only when the
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 6580s (the most this file's `3x` claims may add up to)
+# path-total: 6692s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -164,8 +164,9 @@ env:
   TILE_VERIFIED_PREFIX: tile-verified-v1-
 
 jobs:
-  # SIX round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
-  # 187 kernels, then the 75 mutants, in run order), eleven until 2026-09-11.
+  # SEVEN round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
+  # 191 kernels, then the 77 mutants, in run order), eleven until 2026-09-11
+  # and six until knife T17 (2026-10-02; its paragraph below has why).
   # Sharding by kind was the plan written down at knife 7b and the phase
   # measurement retired it: neither half dominates, the kernel half grows
   # faster (~8s per new kernel against ~21s per new mutant), and a split by
@@ -212,10 +213,23 @@ jobs:
   # this much is the seventh shard (the arithmetic above). The timeout
   # follows the 3x rule (2835s, 48 minutes).
   #
+  # Knife T17 (2026-10-02) added four kernels and two mutants and is that
+  # knife, so the matrix is dealt SEVEN ways. The work, item by item, at the
+  # ~8s a kernel and ~21s a mutant this file has always charged: 5233s
+  # measured over the eleven shards, plus U2's 84s and T16's 100s, plus T17's
+  # 4 x 8 + 2 x 21 = 74s, is 5491s. Seven ways that is 784.4s, 785s rounded
+  # up, plus the one 41s setup every shard still pays: 826s a shard, 124s
+  # under the pole where six shards had 5s. The path total moves by the
+  # seventh setup and T17's work and nothing else: 7 x 826 - 6 x 945 = 112s
+  # (74s of items, 41s of setup, 3s less rounding), 6580s -> 6692s with the
+  # dedupe job's 910s unchanged. A full local run measured the four kernels
+  # and the two mutants as ordinary items (the knife's commit message has the
+  # numbers). The timeout follows the 3x rule (2478s, 42 minutes).
+  #
   # The split cannot reach the verdicts. A kernel's four runs, its two goldens
   # and its assembly all happen inside one shard, and each mutant compares
   # against the recorded goldens on disk rather than against its own shard's
-  # kernel output, so the named red sets survive being dealt into six jobs.
+  # kernel output, so the named red sets survive being dealt into seven jobs.
   # What sharding does introduce is the shard family's one failure: a shard
   # that silently skips a slice prints the same PASS lines and exits 0. So
   # each records what it ran, and tile-shards-complete below holds the union
@@ -270,11 +284,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; the note above has the
+    # 785s of items (5491 / 7) plus one 41s setup; the note above has the
     # arithmetic. Shard 1 also carries the two ledger gates and the wheel
     # cache contract, which are sub-second between them.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
         with:
@@ -301,10 +315,10 @@ jobs:
       - name: tileiras wheel cache refuses altered pins and bytes
         run: python3 scripts/tile-golden/install-contract.py
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 1 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 1 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/6
+        run: ./scripts/tile-golden/run.sh --shard 1/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -336,9 +350,9 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -358,10 +372,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 2 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 2 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/6
+        run: ./scripts/tile-golden/run.sh --shard 2/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -375,9 +389,9 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -397,10 +411,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 3 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 3 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/6
+        run: ./scripts/tile-golden/run.sh --shard 3/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -414,9 +428,9 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -436,10 +450,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 4 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 4 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/6
+        run: ./scripts/tile-golden/run.sh --shard 4/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -453,9 +467,9 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -475,10 +489,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 5 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 5 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/6
+        run: ./scripts/tile-golden/run.sh --shard 5/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -492,9 +506,9 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 873s of items (5233 / 6) plus one 41s setup; see shard 1's note.
-    # budget: 3x 945s planning value (914s, plus knife U2's four mutants and knife T16's two kernels and four mutants, six ways)
-    timeout-minutes: 48
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -514,15 +528,54 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (187 kernels and seventy-five mutants, both backends; shard 6 of 6)
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 6 of 7)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 6/6
+        run: ./scripts/tile-golden/run.sh --shard 6/7
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-6
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-7:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    # 785s of items (5491 / 7) plus one 41s setup; see shard 1's note.
+    # budget: 3x 826s planning value (5491s of items seven ways, plus the 41s setup)
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 7 of 7)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 7/7
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-7
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -547,7 +600,7 @@ jobs:
   # skipped with the shards when the dedupe job found this tree verified.
   #
   # Its last two steps write the verified-tree record the dedupe job reads,
-  # and only when all six shards concluded success and the union held. The
+  # and only when all seven shards concluded success and the union held. The
   # artifact's name is the whole key; the small JSON inside is for a person.
   tile-shards-complete:
     needs:
@@ -558,6 +611,7 @@ jobs:
       - tile-golden-4
       - tile-golden-5
       - tile-golden-6
+      - tile-golden-7
     if: ${{ always() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
@@ -584,7 +638,8 @@ jobs:
           && needs.tile-golden-3.result == 'success'
           && needs.tile-golden-4.result == 'success'
           && needs.tile-golden-5.result == 'success'
-          && needs.tile-golden-6.result == 'success' }}
+          && needs.tile-golden-6.result == 'success'
+          && needs.tile-golden-7.result == 'success' }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "TILE_TREE=$tree" >> "$GITHUB_ENV"

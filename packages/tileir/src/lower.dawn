@@ -50,7 +50,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, Hints, Padding, padding_present}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -1242,6 +1242,7 @@ fn lower_op(l0: L, op: TileOp) -> L = match op {
     let tys = list.map(values, h => ty_of(l0, h))
     emit(l0, BreakVals(refs, tys))
   }
+  Return -> emit(l0, Ret)
 }
 
 # Lower a loop. The operands are resolved in the enclosing scope; the
@@ -1332,7 +1333,10 @@ fn yielded(body: List[Instr], what: String) -> List[Ty] = match body[len(body) -
   # shape the handler builds a loop's exit out of (knife T5), and it is the
   # only way an `if` region ends in anything but a yield.
   BreakVals(_values, _tys) -> []
-  _ -> panic("tileir: ${what} does not end in yield or break")
+  # A branch that RETURNS yields nothing either: it leaves the kernel, and
+  # the `if` around it defines no result (knife T17's early exit).
+  Ret -> []
+  _ -> panic("tileir: ${what} does not end in yield, break or return")
 }
 
 # Lower a reduction. The operands and their types are the enclosing scope's;

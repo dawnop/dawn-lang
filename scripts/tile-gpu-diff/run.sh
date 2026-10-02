@@ -72,7 +72,9 @@
 #             until a value they computed says stop, one stops before its
 #             first step, and the fourth computes the first one's answer
 #             with a `for` over a host constant and is the family's
-#             kernel-level control) and assert_diff.dawn the six debugging
+#             kernel-level control) and knife T17's fifth, whose blocks
+#             leave the loop and the kernel at once by `return` and
+#             whose missing store after the loop is the measurement, and assert_diff.dawn the six debugging
 #             kernels of knife T6 in THREE processes (the three `assume`
 #             predicates and the assertion that holds in one; the assertion
 #             that FIRES alone, because a fired assertion poisons the
@@ -431,8 +433,19 @@
 #                      so that the negated condition is true within one
 #                      iteration (loop_count and loop_until stop on their
 #                      first test, loop_none on its second, because its
-#                      single step takes the tile over the threshold), and
-#                      loop_bound, which has no loop, is the control
+#                      single step takes the tile over the threshold, and
+#                      loop_return's blocks break or return on their first
+#                      iteration), and loop_bound, which has no loop, is
+#                      the control
+#     loop-return-dropped
+#                      the recording handler writes the early exit's `if`
+#                      with an empty `yield` where its `return` belongs, so
+#                      no block leaves early (knife T17) -> layer 0 moves,
+#                      `tileiras` accepts it (an `if` that does nothing is
+#                      legal), and on the device loop_return's three
+#                      returning blocks run to their RETURN_LIMIT-th
+#                      iteration and store after the loop. The other four
+#                      loop kernels have no `return` and are its control
 #     grid-zero        the handler launches over 0 tile blocks -> the
 #                      driver refuses the launch (CUDA_ERROR_INVALID_VALUE)
 #                      and the verdict is not `pass`. A launch-layer claim:
@@ -895,7 +908,14 @@ arch_floors=(sm_90 sm_90 sm_100 sm_100 sm_100 sm_89)
 # bound comparison is attr_ucmp's. attr_overflow, attr_memsem and attr_addf
 # carry values no corpus here can see, and their mutants are in
 # scripts/tile-golden/run.sh, where a refusal is the verdict.
-attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_addf attr_ucmp)
+#
+# Knife T17 added three more, all exact tier: attr_sat (`ftoi`'s 13.4
+# `saturating` modifier), attr_ftof (the `ftof` rounding modes 13.4 allows
+# per pair of formats, `nearest_away` among them) and attr_xchg (the atomic
+# exchange, the last read-modify-write mode without a kernel). Their three
+# mutants are below with the T4 six.
+attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_addf attr_ucmp
+  attr_sat attr_ftof attr_xchg)
 
 # The loop kernels of knife T5, in the order loop_diff takes them. Three of
 # them hold a `loop` and a `break`; `loop_bound` computes `loop_count`'s
@@ -903,8 +923,11 @@ attrs=(attr_round attr_nan attr_ftz attr_approx attr_overflow attr_memsem attr_a
 # opcode and is this family's KERNEL-LEVEL CONTROL. It is also a second
 # opinion on the counts: the two kernels answer the same tile or the run is
 # red.
-loops=(loop_count loop_bound loop_until loop_none)
-loop_red=(loop_count loop_until loop_none)
+#
+# Knife T17's `loop_return` is the fifth: four blocks of one loop, three of
+# which leave it by `return` and so never reach the store after it.
+loops=(loop_count loop_bound loop_until loop_none loop_return)
+loop_red=(loop_count loop_until loop_none loop_return)
 loop_green=(loop_bound)
 
 # The debugging kernels of knife T6, in the order assert_diff's DEFAULT case
@@ -2028,7 +2051,9 @@ fi
 if [ "$attr_verdict" = pass ]; then
   attr_probe_line="$(sed -n 's/^probe attrs //p' "$work/attr.out" | tail -n 1)"
   for claim in attr_round:add attr_round:mul attr_round:div attr_nan:ordering attr_nan:maxf \
-    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes; do
+    attr_nan:minf attr_ftz:add attr_ftz:mul attr_ftz:normal_sum attr_approx:lanes \
+    attr_sat:nan_zero attr_sat:clamped attr_ftof:f32_zero attr_ftof:f32_down attr_ftof:f32_up \
+    attr_ftof:tf32_zero attr_ftof:tf32_away attr_ftof:f16_zero attr_ftof:bf16_zero; do
     field="${claim#*:}"
     kernel="${claim%%:*}"
     value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | head -n 1)"
@@ -2141,6 +2166,28 @@ over="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n 's/^loop_none_over_th
 [ "$over" = 0 ] ||
   fail "loop_none's corpus has $over lane(s) over its threshold, so it is not the zero-iteration case: $loop_shape"
 echo "PASS  corpus: the loop corpus decides its own trip count, saturates and stays under loop_none's threshold ($loop_shape)"
+
+# loop_return's corpus and its measurement. The corpus has to hold a block
+# that returns MID-loop (neither on its first iteration nor on its last),
+# one that does not return at all and so breaks, and more than one that
+# returns; and the device has to have left each block where the corpus
+# says it leaves. The second half is what `return` adds and what the
+# reference alone cannot say: the reference agreeing is the verdict, and
+# this is the iteration each block stopped on, read out of the device's own
+# stores and held to the corpus's own count rather than to the reference's.
+for field in return_blocks return_mid_loop break_blocks; do
+  value="$(printf '%s\n' "$loop_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "the loop index line names no $field: $loop_shape"
+  [ "$value" != 0 ] ||
+    fail "loop_return's corpus has $field=0, so that claim is not being tested: $loop_shape"
+done
+if [ "$loop_verdict" = pass ]; then
+  planned_exits="$(sed -n 's/^  plan  exits=//p' "$work/loop.out" | tail -n 1)"
+  device_exits="$(sed -n 's/^probe rounds //p' "$work/loop.out" | tail -n 1 | tr ' ' '\n' | sed -n 's/^loop_return=//p')"
+  [ -n "$planned_exits" ] && [ "$planned_exits" = "$device_exits" ] ||
+    { cat "$work/loop.out" >&2; fail "loop_return's blocks left at ${device_exits:-nothing} on the device and the corpus says ${planned_exits:-nothing}"; }
+  echo "PASS  probe: loop_return's blocks left where the corpus says, by return (r) or break (b): $device_exits"
+fi
 
 # The knife T6 corpus, held field by field. Three of these five hold a count
 # DOWN to zero, which is the opposite of every other corpus check here and
@@ -4424,6 +4471,45 @@ attr_pkg_mutant sqrt-approx-as-nearest-even bytecode.dawn \
     Some(ROUND_NEAREST_EVEN)' \
   probe:attr_approx:lanes=0 probe:attr_approx:distance=0.0
 
+# ---- knife T17's three, the same shape as the six above
+#
+# 39a. ftoi-saturating-bit-dropped: the writer clears `saturating`'s flag
+#     bit. The word is still written (13.4 has it whether or not the bit is
+#     set), so the file is the same length and the assembler has nothing to
+#     object to. On THIS device the plain conversion clamps an out-of-range
+#     lane exactly as the saturating one does, so those lanes do not move;
+#     what moves is every NaN lane, which the plain conversion answers with
+#     0x80000000 and the saturating one with 0 (measured, knife T17). The
+#     research note expected the out-of-range lanes to move instead; the
+#     clamp is what sm_86's conversion does anyway, and the dialect only
+#     calls it undefined.
+attr_pkg_mutant ftoi-saturating-bit-dropped bytecode.dawn \
+  '  "ftoi_sat" -> FTOI_FLAG_SATURATING' \
+  '  "ftoi_sat" -> 0' \
+  attr_sat probe:attr_sat:nan_zero=0
+
+# 39b. ftof-away-as-nearest-even: the writer rounds f32 to tf32 to nearest
+#     EVEN where the kernel asked for ties away. Both are legal on that pair,
+#     so layer 1 sees nothing; on the device attr_ftof's ties whose lower
+#     neighbour is even go down instead of up, and its away segment becomes
+#     its even one.
+attr_pkg_mutant ftof-away-as-nearest-even bytecode.dawn \
+  '  "ftof_away" -> ROUND_NEAREST_AWAY' \
+  '  "ftof_away" -> ROUND_NEAREST_EVEN' \
+  attr_ftof probe:attr_ftof:tf32_away=0
+
+# 39c. rmw-xchg-as-add: the writer spells the exchange as the add (3 for 9).
+#     Both modes take an i32 tile, so the file is the same length and
+#     `tileiras` accepts it; on the device every slot holds its old value
+#     plus the lane's instead of the lane's, and only attr_xchg asks for the
+#     mode. The value answered back (what the slot held before) is the same
+#     under both, which is why the first half of the buffer, not the second,
+#     is what goes red.
+attr_pkg_mutant rmw-xchg-as-add bytecode.dawn \
+  '  "xchg" -> 9' \
+  '  "xchg" -> 3' \
+  attr_xchg
+
 # ---- knife T5's mutant: which side of the condition breaks
 #
 # It lives in the RECORDING HANDLER (packages/tileir/src/prog.dawn), which
@@ -4449,12 +4535,25 @@ attr_pkg_mutant sqrt-approx-as-nearest-even bytecode.dawn \
 #               stops there. A smaller step would have made this mutant a
 #               kernel that never returns, and the corpus is what rules
 #               that out
+#   loop_return its break condition ("the count has reached 100") is false
+#               on every block's first iteration, so the mutant breaks
+#               there, or returns first where the block returns on its first
+#               iteration; nothing it does can run past iteration 1. And it
+#               bounds itself under loop-return-dropped too: with no return
+#               every block breaks at iteration 100
 #
 # `loop_bound` has no `loop`, so its bytes and its verdict are untouched:
 # it is the control that separates "the mutant broke the loop" from "the
 # mutant broke the tree".
-loop_pkg_mutant() { # name, module, old, new
+loop_pkg_mutant() { # name, module, old, new, red-kernels...
   local name="$1" module="$2" old="$3" new="$4"
+  shift 4
+  local loop_red=("$@") loop_green=() k2 red
+  for k2 in "${loops[@]}"; do
+    red=no
+    for k in "${loop_red[@]}"; do [ "$k" = "$k2" ] && red=yes; done
+    [ "$red" = yes ] || loop_green+=("$k2")
+  done
   local pkg="$work/pkg-$name" before after k moved=0 rc=0 mverdict differ cubs=()
   rm -rf "$pkg"
   cp -r "$root/packages/tileir" "$pkg"
@@ -4506,10 +4605,27 @@ loop_pkg_mutant() { # name, module, old, new
   echo "PASS  mutant: $name (layer 1 accepts it; on the device ${loop_red[*]} differs and ${loop_green[*]} does not)"
 }
 
-# 40. loop-break-condition-inverted.
+# 40. loop-break-condition-inverted. Every kernel with a `loop` is red:
+#     loop_return's break condition is false on every block's first
+#     iteration, so negated it breaks there (block 2, which returns on its
+#     first iteration, returns before the break is tested and is the one
+#     block that does not move).
 loop_pkg_mutant loop-break-condition-inverted prog.dawn \
   '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
-  '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])'
+  '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])' \
+  loop_count loop_until loop_none loop_return
+
+# 40a. loop-return-dropped (knife T17): the handler writes the early exit's
+#     then-branch as an empty `yield`, so the `if` does nothing and no block
+#     returns. The record is the same length (a `yield` and a `return` with
+#     no operands are one shape) and `tileiras` takes it. On the device the
+#     three blocks that should have returned run to iteration 100 and store
+#     after the loop; the block that breaks anyway is unchanged, and the
+#     four kernels without a `return` are the control.
+loop_pkg_mutant loop-return-dropped prog.dawn \
+  '        ops = ops ++ [If([], cond, [Return], [Yield([])])]' \
+  '        ops = ops ++ [If([], cond, [Yield([])], [Yield([])])]' \
+  loop_return
 
 # ---- knife T6's two mutants: which side of the assertion fires, and which
 # bytes the print puts on standard output

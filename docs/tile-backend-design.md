@@ -756,6 +756,14 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   **逐位档**，但对的是「右到左二进制幂、负指数最后取一次倒数」这个算法，不是正确舍入的幂（同一份
   语料上与正确舍入差到 34 ulp），`tileref/ref.ref_fpowi` 就是这个算法。**仍然没有**：13.4 其余三条
   （`memory_fence_alias_tko` 与两条 `gdc_*`，归 T19）、`loop` 内 `return` 与 `ftoi` / `ftof` 的新格（T17）。
+- **刀 T17 加了什么**（13.4 的三处新形状与一个旧的空格，实测见 §6.20）：**一个 opcode 也没加**。
+  `d_return_if(cond)` 让 block 在 `cond` 为真的地方结束整个 kernel：handler 在调用处记
+  `If([], cond, [Return], [Yield([])])`，可以在 entry 顶层、`if` 里，以及 13.4 起在 `d_loop` 的体里；在
+  `d_for`、归约、扫描的区域里按名拒绝（方言也拒）。降低把 `Return` 降成既有的 `Ret`，`yielded` 多认一种终结子，
+  写入器与渲染器一行没改。`float_to_int_sat` 是带 13.4 `saturating` 修饰的 `ftoi`（flags 字 bit 0）。
+  `float_to_float_zero` / `_down` / `_up` / `_away` 是 `ftof` 的其余四种 IEEE 舍入，哪一对格式收哪几种由
+  `prog.ftof_modes` 照 13.4 的 `Ops.td` 表裁决，记录时就拒。`atomic_rmw(..., "xchg", ...)` 第一次有了客户 kernel。
+  **仍然没有**：13.4 的其余三条 opcode（T19）、`inbounds` 写 true（T18）、`ptr_attr`（不做）。
 
 ### 5.3 谁把它变成 Tile IR、何时
 
@@ -889,7 +897,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 | 层 | 每次 push | 工具 | 抓什么 | 抓不到什么 |
 |----|-----------|------|--------|-----------|
 | 0 文本 golden | 碰 tile 路径的 push（2026-09-11 起在 `tile.yml`，另有每日全量；2026-09-30 起 push 上同一 git tree 已有绿运行就跳过，PR 与每日全量照跑，见 gate-drift-guards-design.md） | 无 | 记录 handler 与渲染器改了没 | 发的对不对 |
-| 1 字节码编译 | 同层 0（刀 3 起进门；今天是 `tile-golden-1` 到 `tile-golden-6` 六片，2026-09-11 起按 `matrix.txt` round-robin，此前一度分到十一片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
+| 1 字节码编译 | 同层 0（刀 3 起进门；今天是 `tile-golden-1` 到 `tile-golden-7` 七片，2026-09-11 起按 `matrix.txt` round-robin，此前一度分到十一片，刀 T17 之前是六片） | `tileiras --gpu-name sm_86` | 编码错、类型错、不支持的 op | 算的对不对 |
 | 2 执行对拍 | 否，本机 | 3080 加驱动不低于 580 | 算的对不对（逐位与容差两档）；刀 16 起对比的单位可以是一**串** launch 而不是一次，刀 17 把这串的价钱压到「一道题一个 kernel」 | 其它架构 |
 
 层 0 golden 放 `scripts/tile-golden/*.mlir` 与 `*.tilebc`（字节码也钉，两后端逐字节），确定性
@@ -918,7 +926,7 @@ bytecode`；截断 → `section length 4 exceeds remaining bytecode data`；未�
 只读退出码的门会把它当绿。`run.sh` 的 `assemble` 因此改成「退出码为 0 **且** 输出里没有
 `^error:`」，`tile-gpu-diff` 那边的 `assemble_golden` 同改。这是「门的绿没有信息量」的又一个
 实例：这一格从刀 3 起一直是绿的，而它从来没看过 stderr。今天三层各有：层 0 一百四十三个
-kernel 的文本与字节码 golden，两后端逐字节；层 1 CI 每 push（六个分片）；层 2 有脚本、台账与 CI 门（§6.4），
+kernel 的文本与字节码 golden，两后端逐字节；层 1 CI 每 push（七个分片，刀 T17 起）；层 2 有脚本、台账与 CI 门（§6.4），
 本机驱动升到 616.56 之后台账末行是 `pass`，「算的对不对」这一格从刀 7a 起有答案了。
 （刀 4 到刀 6 期间这里写的是「本机驱动 560.94 装不进 cubin，台账第一行记的是 `blocked`」；
 那两行 `blocked` 留在台账的历史里，是那个装载器答过的话。）
@@ -2514,10 +2522,11 @@ NaN，否则答非 NaN 的那个），带上是 `maximum`（有一边是 NaN 就
 
 **八、一件没有判词、也没有假装有的事**：`rmw_mode_value` 里的十种模式有八种今天没有客户
 kernel。台账给它们一个自己的状态 `spelled`（写入器的表能拼出来、没有 kernel 要它），
-豁免 `no-client-kernel`；叫 implemented 是虚报覆盖，叫 unimplemented 是虚报缺口。
+豁免 `no-client-kernel`；叫 implemented 是虚报覆盖，叫 unimplemented 是虚报缺口。（后来：刀 T13 的
+`view_atomic` 收走七种，刀 T17 的 `attr_xchg` 收走最后的 `xchg`，这个豁免退休，三本账里不再有 `deferred` 行，§6.20。）
 
-**属性域的第三本账**是 `scripts/tileir-features/attrs.txt`，**50 行**、一行一个取值（刀 T4 建表时
-44 行，刀 T6 加了四个属性标签，刀 T15 又加两个），由
+**属性域的第三本账**是 `scripts/tileir-features/attrs.txt`，**53 行**、一行一个取值（刀 T4 建表时
+44 行，刀 T6 加了四个属性标签，刀 T15 又加两个，刀 U2 加了 13.4 的三个取值），由
 `scripts/tileir-features/check.py` 与操作码那本共用一个解析器、各有自己的期望集合与证据
 读法。它多一种证据 `const:<NAME>`：写入器里那个常量的**值**要等于台账那一行的 `code`，
 这是这本账与写入器之间的机器绑定（操作码那本用的是 `OP_` 表）。`--self-test` 给它十五条
@@ -3893,6 +3902,113 @@ U1 一轮 1008 s，U2 一轮见下行台账提交。
 下一刀再加这么多，就是第七片（`tile.yml` 的注释里有那笔账：七片约 789 s）。
 
 
+### 6.20 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`（刀 T17 实测）
+
+T17 不加操作码。它写的是 13.4 给旧操作码的三处新形状，外加一个 13.1 就有、一直没有客户的枚举值。权威仍是
+`cuda-tile@7e8e2e68`（v13.4.0）的 `Ops.td` 与 `CudaTile.cpp`；设备是本机 3080（616.56、tileiras 13.4.92、sm_86）。
+
+**一、`return` 可以在 `loop` 里，判词在设备上，不在版本号上。** 13.4 给 `ReturnOp` 的 `ParentOneOf` 加了 `LoopOp`，
+`ReturnOp::verify` 往上走时也会跳过 `loop`（13.3 只跳过 `if`）。公开面是 `d_return_if(cond)`：handler 在调用处记
+`If([], cond, [Return], [Yield([])])`。`return` 不带任何值，token 也不带，因为它之后什么都不再执行。降低把
+`Return` 降成既有的 `Ret`，写入器与渲染器都没改：四种终结子（`return` / `break` / `continue` / `yield`）共用一个
+记录形状。handler 在 `for`、归约、扫描区域里按名拒绝。方言的原因是「`return` is not supported in `for`，用 `loop`
+做提前退出」，后两种区域本来就是纯的。
+
+kernel `loop_return`：四个 block 跑同一个循环。每轮先把「已开始的轮数」存进输出前半，再在进入本轮的 tile 达到
+`RETURN_AT`（200）时 `return`，然后在第 `RETURN_LIMIT`（100）轮 `break`，最后每格加一。循环之后的 store 只有
+break 的 block 走得到，所以 return 的 block 后半留着哨兵，这就是测量。语料让四个 block 走四条路：
+第 74 轮中途 return、第 100 轮 break、第 1 轮就 return、第 100 轮两个出口同时成立而先测的 return 赢。
+设备答 `74r,100b,1r,100r`，与语料自己数出来的逐字相同。`run.sh` 两边都钉：`loop_diff` 的 `plan` 行与
+`probe rounds` 里的 `loop_return=` 必须相等，三个计数（`return_blocks` / `return_mid_loop` / `break_blocks`）都大于零。
+参考 `tileref/ref.loop_return_ref` 逐位。
+
+**版本墙不是这里的判词，已实测。** 把 `loop_return.tilebc` 头里的 minor 改成 3：13.3.36 能读下来（这个 kernel
+只有 i32 与指针，指针类型的位域字 0 恰好读成 0 号类型），但会拒绝，报
+`'cuda_tile.return' op must be used within a cuda_tile.entry, or cuda_tile.if operation`；13.4.92 照收，cubin 与
+13.4 头的逐字节相同。所以「把 return 写在 13.3 不允许的位置」在本仓钉的汇编器上不是层 1 判词。调研的候选
+「return 降成 break」也到不了设备：loop 携带 token，零操作数的 `break` 是类型错。层 1 变异体
+`loop-return-as-break` 就取这个形状（同长，报文
+`'cuda_tile.break' op operand types must correspond to the parent loop result types: () vs ('!cuda_tile.tile<128xi32>', '!cuda_tile.tile<128xi32>', '!cuda_tile.token')`；
+读者先遇到的是循环里那条，entry 末尾那条报的是另一句）。层 2 变异体 `loop-return-dropped` 把 then 分支写成空 `yield`：
+三个 return 的 block 都跑到第 100 轮并在循环后 store，只有 `loop_return` 红，其余四个 loop kernel 是对照。
+
+**二、`saturating`：本机设备上只有 NaN 那一格看得见。** 它是 `ftoi` 在 13.4 长出的唯一可选字段，占 flags 字的
+bit 0（U2 起每条 `ftoi` 都写这个字，之前恒为 0）。`Ops.td` 说不带它时，无穷、NaN 和截断后越界的输入都是未定义
+行为；带上它则钳到两端、NaN 得 0。本机实测不带它的 `ftoi`（f64 到 i32）**同样钳位**：无穷、±3e9、±1e300、
+2^31、-2^31-1 都落到两端，和饱和版逐位相同。不同的只有 NaN：不带时答 `0x80000000`（-2147483648），带上答 0。
+调研 §5.2 预计「越界 lane 答案变」，实测推翻了这一句。sm_86 的转换本来就钳位，方言只是不承诺。
+
+所以 kernel `attr_sat` 的判词只钉饱和那一半。第一段对全部语料做饱和转换；第二段做不带修饰的转换，并且只在
+截断后落在 i32 内的格上写（`-2^31 - 1 < x < 2^31`，掩码 store），其余格留哨兵。设备在未定义格上答什么是一次测量
+（上一段），不进参考。`probe` 两个计数都钉在零以上：`nan_zero=32`（NaN 格答 0）、`clamped=256`（越界格答端点）。
+变异体 `ftoi-saturating-bit-dropped`（层 2，同长）清掉这一位：`attr_sat` 红在 NaN 格上，`nan_zero` 落到 0；
+越界格不动，因为设备本来就钳位。
+
+**三、`ftof` 的舍入表：逐格问过汇编器。** 13.3 的 `ftof` 只有两条规则（到 `f8E8M0FNU` 收 `zero` / `positive_inf`，
+其余只收 `nearest_even`）。13.4 拆成六行，自上而下取第一条匹配：
+
+| 转换 | 收的模式 |
+|------|----------|
+| 到 `f8E8M0FNU` | `zero`、`positive_inf` |
+| 到其它 16 位以下的浮点 | `nearest_even` |
+| 严格加宽（源的精度与指数范围都被目标覆盖） | 五种 IEEE 模式全收 |
+| f64 到 f32 | 除 `nearest_away` 外的四种 |
+| f32 到 tf32 | `nearest_even`、`zero`、`nearest_away` |
+| 其它收窄 | `nearest_even`、`zero` |
+
+`prog.ftof_modes` 就是这张表。「严格加宽」按 LLVM fltSemantics 的三个数比较（精度、最大指数、最小指数），所以
+f16 到 tf32 算（都是 11 位，范围更宽），f16 到 bf16 不算，`f8E8M0FNU` 到 f32 也不算（它的最小指数是 -127，比
+binary32 的 -126 低一位）。handler 记录时就拒表外的格，报文形如
+`ftof from f32 to f16 takes nearest_even or zero, not nearest_away`。写入器的 `ftof_rounding_of` 按拼写给枚举值，
+`bytecode.dawn` 的测试把它和 `ftof_mode` 绑在一起。
+
+**九种浮点格式两两组合（72 对）乘五种模式，360 格逐格交给 13.4.92（sm_100）汇编**（scratch，handler 的检查
+临时拿掉）。verifier 与这张表 **360 / 360 一致**：179 格收下，162 格以 `invalid rounding mode specified ...` 拒绝。
+另有 19 格 verifier 收、但代码生成以不点名的 `failed to compile Tile IR program`（退出 5）失败：bf16、f16、
+f8E4M3FN、f8E5M2、f4E2M1FN 到 tf32 的 `negative_inf` / `positive_inf`（10 格），以及三种 8 位以下格式到 bf16 的
+`negative_inf` / `positive_inf` / `nearest_away`（9 格）。sm_86 上抽了 bf16 / f16 到 tf32 的几格，结论相同。本包照
+**方言**的表裁决，不拒这 19 格：它们不是一条规则被引用，而是这个汇编器没实现，和 §6.19 越界下标、§6.18 不能整除
+写 `inbounds` 是同一种拒绝。
+
+kernel `attr_ftof` 在本机能到的格上把 13.4 新放开的模式各写一遍，每种旁边都配一段 `nearest_even`。共十一段：
+f64 到 f32 的四种、f32 到 tf32 的三种、f32 到 f16 与 bf16 各两种；另把三条回 f64 的严格加宽分别写成
+`nearest_away` / `zero` / `positive_inf`，覆盖「严格加宽收全部五种」那一行。语料八种格形轮换：tf32 的偶数平局与
+奇数平局、binary32 网格中点上方与下方、f16 与 f32 的上溢、binary32 次正规、bf16 平局，正负号每八格翻一次。
+**十一段全部逐位**等于 `std/narrow` 对精确值的一次舍入（f32 到 tf32 的 ties-away 用新加的 `round_tf32_away`），
+上溢（`zero` 留最大有限值、`nearest_even` 上溢成无穷）和次正规（不冲零）也在内。`probe` 七个成对计数都钉在零以上：
+`f32_zero=160 f32_down=128 f32_up=128 tf32_zero=96 tf32_away=64 f16_zero=128 bf16_zero=96`。变异体两条：
+`ftof-zero-as-nearest-away`（层 1，同长，第一处 `zero` 是 f64 到 f32，报文
+`invalid rounding mode specified for conversion from f64 to f32. Only 'nearest_even', 'zero', 'negative_inf', and 'positive_inf' are supported`）；
+`ftof-away-as-nearest-even`（层 2，同长、两种模式在 f32 到 tf32 上都合法，`attr_ftof` 红，`tf32_away` 落到 0）。
+
+`std/narrow` 因此加了两个公开函数：`round_binary_away`（`round_binary` 的平局远离零版本，两者共用一个私有的
+`round_nearest`）与 `round_tf32_away`，带内联测试（偶数平局、奇数平局、非平局、次正规平局、上溢、特殊值）。
+`narrow-contract` 的 `ties-away` 变异体锚点随之改成新的那一行。
+
+**四、`xchg` 有了客户。** `attr_xchg`：四个 block 共 512 格，每格把自己的输入换进第 `511 - i` 个槽，并把换回来的
+旧值存到后 512 格。没有两格共用一个槽，所以答案与到达顺序无关；它是逐位档的整数 kernel。变异体
+`rmw-xchg-as-add`（层 2，同长，`add` 在 i32 上合法）把模式拼成 3：槽里变成「旧值加输入」，换回来的旧值不变，
+所以红的是前半。
+
+**五、三本账。** `features.txt`：`return` 与 `ftof` 从层 2 升到层 3，`ftoi` 与 `atomic_rmw_tko` 加 golden 与变异体
+（层 3 从 48 行到 50 行）。`attrs.txt`：`rounding.nearest_away`、`unit.saturating`、`rmw.xchg` 改 `implemented`、
+T17、层 3；`rounding.zero` 借 `ftof-zero-as-nearest-away` 从层 2 升到层 3；`no-client-kernel` 豁免退休，三本账里
+不再有 `deferred` 行。`check.py` 自测里锚在 `rmw.xchg` 那一行 deferred 上的两条阴性对照，挪到 T18 的
+`ptr_attr.none` 上。
+
+**六、CI 墙钟与第七片。** 不分片全量一轮（268 项，本机，2026-10-02）墙钟 3356 s、全绿。四个新 kernel
+6.28 到 6.63 s（其余 187 个均值 6.48 s），两条新变异体 25.3 与 25.4 s（其余 75 条均值 27.2 s，22.6 到 31.2 s），
+都是普通工作项。T16 记的账是六片规划值 945 s、离 950 s 的 pole 只剩 5 s，这一刀就开第七片。按 `tile.yml` 一直记的
+单价（kernel 约 8 s、变异体约 21 s）逐项记账：十一片时量出的 5233 s，加 U2 的 84 s、T16 的 100 s、T17 的
+4 x 8 + 2 x 21 = 74 s，共 5491 s 工作量；七片每片 784.4 s，取整 785 s，加每片仍要付的 41 s 准备，规划值 826 s，
+离 pole 124 s。`timeout-minutes` 按 3x 规则 48 → 42。path-total 的变化只有第七片的准备与本刀的工作量：
+7 x 826 - 6 x 945 = 112 s（工作量 74 s、准备 41 s、取整少 3 s），6580 s → 6692 s，dedupe 的 910 s 不变（提交里有
+`Gate-Budget(path-total)` 行）。本机这一轮按 round-robin 七分是 481 / 478 / 474 / 470 / 475 / 473 / 480 s 的工作项
+（六分时 537 到 563 s）。分片不换 id：`tile-golden-1` 到 `-6` 原样，加 `tile-golden-7`，`tile-shards-complete` 等七片。
+`scripts/gate-totals.py` 的 `TILE_SHARDS` 仍是前六片：09-11 以来每次跑完分片的运行都有这六片，七片以后成功的运行
+也一定有，第七片不列进去，是为了不让观测窗口里刀 T17 之前的运行被误算成「没跑分片」。
+
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -3951,6 +4067,7 @@ U1 一轮 1008 s，U2 一轮见下行台账提交。
 | **U1 换汇编器：`tileiras` 13.4.92，字节码仍 13.3**（已落地，升钉第一刀） | 「同一份 13.3 字节换一个汇编器，设备代码变了多少、答案变没变，是量出来的：185 个 cubin 全不同（137 个 SASS 不同、48 个只差 ELF 外围），而本机台账每个 kernel 照旧 pass、注记里每个数与 13.3.36 那行逐字相同」 | `toolchain.txt` 三行 wheel 与 `tileiras` 行，两份集群 toolchain 的 `tileiras` 行；`tile-golden/run.sh` 四句判词换 13.4.92 原文；`tile-gpu-diff/run.sh` 的 `reduce-identity-wrong` 红名单从六个重述成八个 | golden 一个字节不动，不分片全量 252 项 3397 s 绿；台账末行 `13.4.92 sm_86 pass`；三文件移除实验重做 | 四句旧判词在 13.4.92 下先红后绿；`reduce-identity-wrong` 旧名单先红（`exactly 6 ... got ... 8 differing`）；台账旧末行 `--check` 红两句（摘要与 `tileiras`） | 1 |
 | **U2 字节码 13.4**（已落地，升钉第二刀，§6.11 的翻版） | 「写 13.4 改了哪些字节、没改哪些，是量出来的：正向段账 185/185、把 minor 改回 3 逐字节复现 185/185、13.4 字节与 13.3 字节过 13.4.92 的 cubin 185/185 相同」 | `bytecode.dawn`：`BYTECODE_MINOR` 4，`ptr_has_flags` / `ftoi_has_flags` / `view_has_inbounds` 三个谓词，`num_ty` 写 varint，`OP_FPOWF`；`render.dawn` 拼 `fpowf`；185 个 `.tilebc` 与 `mathops.mlir` 重录；三本账换钉 v13.4.0（105 / 24 / 53 行）与 `check.py`；`tile.yml` 六条预算行 914 → 928 s | 不分片全量 256 项 2912 s 绿；`check.py --self-test` 绿；本机台账重录 | 新变异体四条：`ptr-flags-unwritten`、`ftoi-flags-unwritten`、`view-inbounds-unwritten`、`header-minor-still-3`（vadd 上它被收下，所以落在 view_transpose）；既有两条换锚：`partition-view-padding-inline-flag-at-13-3` 在 13.4 上 `stayed green`、`tensor-view-tag-as-ptr` 锚失配，改后绿 | 1.5 |
 | **T16 `insert` 0x76 与 `fpowi` 0x79**（已落地，13.4 覆盖刀的第一把，§6.19） | 「13.4 新加的两条操作码在本机 3080 上与一份独立写的宿主参考逐位相同：`insert` 把子 tile 放回原处答的是原 tile、放到别处答的是换了那一格的原 tile；`fpowi` 的答案是右到左二进制幂再取倒数这串乘法，而不是正确舍入的幂，这一点是量出来的而不是假定的」（今天写不出：两条操作码写入器一个字节也发不出去，`fpowi` 的设备语义只有 `Ops.td` 的一行数学式） | `bytecode.dawn`：`OP_INSERT` / `OP_FPOWI` 与两条编码臂（`insert` 是 `extract` 的记录多一个操作数，`fpowi` 两个操作数、零 flags）；`lower.dawn`：`InsertTile` / `FloatPowI`；`prog.dawn`：`Insert` / `PowI` 与 `check_insert` / `check_powi`（i64 指数拒）；`dev.dawn`：`t_insert` / `t_powi`，公开面 `insert` / `powi`；`render.dawn` 两条拼法（与 `tileirdisasm` 逐字相同）；`packages/tileref`：`ref_fpowi`、`insert_tile_ref`、`powi_sweep_ref`；kernel 两个（`insert_tile` / `powi_sweep`）并进 `shape_diff`（5 → 7）；`features.txt` 两行改 `implemented`、层 3，`check.py` 的 `LANDED_KNIVES` 加 T16；`tile.yml` 六条预算行 928 → 945 s | 层 0/1 两个新 golden、`FUNC GLOBAL` 两个，`tileiras` 一次通过（sm_86）；层 2 本机两个都是 `identical:exact`，`powi_sweep` 的语料负指数 231 条、大于 127 的指数 40 条，两个计数由 `run.sh` 钉在零以上；不分片全量 262 项 3134 s 绿；`check.py --self-test` 绿 | 层 1 四条：`fpowi-exponent-as-float`、`fpowi-as-fpowf`、`insert-source-and-destination-swapped`、`insert-index-dropped`（越界下标不取，因为它只得到一句不点名的 `failed to compile`）；层 2 一条 `insert-indices-reversed`（只有 `insert_tile` 红），`extract-indices-reversed` 的红集加上 `insert_tile`；宿主自轴负控两条（`ref_fpowi` 先取倒数、i8 那一半按无符号读），各自只有 `powi_sweep` 红 | 2（实报 1） |
+| **T17 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`**（已落地，13.4 覆盖刀的第二把，§6.20） | 「13.4 给旧操作码的三处新形状在本机 3080 上各有一个与独立宿主参考逐位相同的 kernel：block 在循环中途结束整个 kernel，第几轮、走哪个出口由设备自己的 store 说出来；`saturating` 改变的是哪几格，是量出来的（本机只有 NaN 格）；`ftof` 每一对格式收哪几种舍入，是 360 格逐格问过汇编器的；而 `xchg` 这个从 13.1 起就能拼、一直没有 kernel 要的模式有了第一个客户」（今天写不出：`return` 只能在 entry 与 `if` 里，`ftoi` 的 flags 字恒为 0，`ftof` 只写得出默认模式，`rmw.xchg` 是三本账里最后一行 `deferred`） | **零新 opcode**。`dev.dawn`：`t_return_if` 与 `d_return_if`、`float_to_int_sat`、`float_to_float_zero` / `_down` / `_up` / `_away`；`prog.dawn`：`Return` 与 `return_passes`（`for` / 归约 / 扫描里拒），`ftof_mode` / `ftof_modes` / `check_ftof`（13.4 的表）；`lower.dawn`：`Return` 降成 `Ret`，`yielded` 认 `Ret`；`bytecode.dawn`：`ROUND_NEAREST_AWAY`、`FTOI_FLAG_SATURATING`、`ftoi_flag_word`、`ftof_rounding_of`；`render.dawn` 两处拼法。`std/narrow`：`round_binary_away`、`round_tf32_away`（内联测试）；`packages/tileref`：`loop_return_ref`、`attr_sat_ref`、`attr_ftof_ref`、`attr_xchg_ref`。kernel 四个：`loop_return` 进 `loop_diff`（4 → 5），`attr_sat` / `attr_ftof` / `attr_xchg` 进 `attr_diff`（8 → 11）。三本账：`return` / `ftof` 升层 3，三个属性取值改 `implemented`，`rounding.zero` 升层 3，`no-client-kernel` 退休；`tile.yml` 分到第七片 | 层 0/1 四个新 golden、`FUNC GLOBAL` 四个，`tileiras` 一次通过（sm_86）；层 2 本机五个 loop kernel、十一个属性 kernel 全 `identical:exact`（`attr_approx` 照旧容差），`loop_return` 的出口 `74r,100b,1r,100r` 与语料自数逐字相同，十个新 probe 计数都钉在零以上；`ftof` 表 360 / 360 与 verifier 一致；`check.py --self-test` 绿；不分片全量 268 项 3356 s 绿，`tile.yml` 分到七片，规划值 945 → 826 s，path-total 6580 → 6692 s | 层 1 两条：`loop-return-as-break`（零操作数 `break` 与携带三个值的 loop 类型不符）、`ftof-zero-as-nearest-away`（f64 到 f32 不收 `nearest_away`）。层 2 四条：`loop-return-dropped`（只有 `loop_return` 红）、`ftoi-saturating-bit-dropped`（`attr_sat` 的 NaN 格红，`nan_zero=0`）、`ftof-away-as-nearest-even`（`attr_ftof` 红，`tf32_away=0`）、`rmw-xchg-as-add`（`attr_xchg` 红）。`loop-break-condition-inverted` 的红集加上 `loop_return` | 2（实报 1） |
 
 ## 8. 风险
 

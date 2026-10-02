@@ -27,10 +27,13 @@ import sys
 NARROW = "std/narrow.dawn"
 
 MUTATIONS = {
-    # Ties away from zero instead of to even.
+    # Ties away from zero instead of to even. Since knife T17 the statement
+    # is shared with `round_binary_away` (the `away` flag is that function's
+    # rule), and the mutation drops the even branch for both: `round_bf16`
+    # is the one the corpus measures.
     "ties-away": ((
         NARROW,
-        "let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if fl % 2 == 0 { fl } else { fl + 1 }",
+        "let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if away || fl % 2 == 1 { fl + 1 } else { fl }",
         "let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else { fl + 1 }",
     ),),
     # Below emin the quantum keeps shrinking with the exponent.

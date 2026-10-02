@@ -16,8 +16,8 @@
 # program order no meaning between memory operations.
 use std/list
 use std/str
-use std/gpu.{F64, F32, I32, I64}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use std/gpu.{F64, F32, F16, I32, I64}
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, d_global_aligned, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, float_to_float_away, float_to_float_zero, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -48,6 +48,13 @@ use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, B
 ## when the body ends), and what `Continue` carries is what the body
 ## computed. `Break`'s values, `Continue`'s values, `inits`, `carried` and
 ## `results` are all the same length, and all five end in a token.
+##
+## `Return` ends the kernel for the tile block that reaches it, and the one
+## place it is recorded is `If([], cond, [Return], [Yield([])])` (knife
+## T17): an early exit taken where `cond` holds. It carries nothing, the
+## token included, because nothing after it runs. Bytecode 13.4 lets that
+## `if` sit in a `Loop`'s body as well as at the top of the entry or inside
+## another `if`; never under a `For`, a `Reduce` or a `Scan`.
 ##
 ## `Insert` is `Extract`'s other direction (knife T16): `src` is the
 ## subtile of shape `sub`, `dest` the tile of shape `whole` it goes into,
@@ -134,6 +141,7 @@ pub type TileOp =
   | For(iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
   | Loop(inits: List[Int], carried: List[Int], results: List[Int], body: List[TileOp])
   | Break(values: List[Int])
+  | Return
   | Continue(values: List[Int])
   | Spread(dst: Int, dtype: String, shape: List[Int], src: Int)
   | Reduce(results: List[Int], dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int], args: List[Int], body: List[TileOp])
@@ -366,10 +374,108 @@ fn check_binary_int(name: String, op: String) -> Unit =
   }
 
 fn check_convert(name: String, op: String) -> Unit =
-  if one_of(["itof", "ftoi", "ftof", "exti", "extis", "trunci", "bitcast"], op) {
+  if one_of(["itof", "ftoi", "ftoi_sat", "ftof", "ftof_zero", "ftof_neg_inf", "ftof_pos_inf", "ftof_away",
+    "exti", "extis", "trunci", "bitcast"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a conversion")
+  }
+
+## The rounding mode an `ftof` named `op` writes into a tile of `to`, in the
+## dialect's spelling. The plain `ftof` takes `nearest_even`, except into
+## `f8E8M0FNU`, which does not allow it and takes `zero`; the four suffixed
+## names (knife T17) take the mode they name. The renderer spells the mode
+## from here, and bytecode.dawn's tests hold the writer's
+## `ftof_rounding_of` to it, so the bytes and the text cannot disagree.
+pub fn ftof_mode(op: String, to: String) -> String = match op {
+  "ftof" -> if to == "f8E8M0FNU" { "zero" } else { "nearest_even" }
+  "ftof_zero" -> "zero"
+  "ftof_neg_inf" -> "negative_inf"
+  "ftof_pos_inf" -> "positive_inf"
+  "ftof_away" -> "nearest_away"
+  _ -> panic("tileir: `${op}` is not a float-to-float conversion")
+}
+
+# A float format's precision (significand bits, the hidden one included)
+# and its largest and smallest normal exponents: the three numbers LLVM's
+# fltSemantics gives `semanticsPrecision`, `semanticsMaxExponent` and
+# `semanticsMinExponent`, which is what the dialect's `isStrictWidening`
+# compares.
+fn float_semantics(dtype: String) -> (Int, Int, Int) = match dtype {
+  "f64" -> (53, 1023, -1022)
+  "f32" -> (24, 127, -126)
+  "tf32" -> (11, 127, -126)
+  "bf16" -> (8, 127, -126)
+  "f16" -> (11, 15, -14)
+  "f8E4M3FN" -> (4, 8, -6)
+  "f8E5M2" -> (3, 15, -14)
+  "f8E8M0FNU" -> (1, 127, -127)
+  "f4E2M1FN" -> (2, 2, 0)
+  _ -> panic("tileir: `${dtype}` is not a float format")
+}
+
+# Whether every value of `from` is a value of `to`: at least as many
+# significand bits and an exponent range that covers the source's. f16 to
+# tf32 is one (eleven bits either way, and a wider range); f16 to bf16 is
+# not (bf16 has eight bits), nor is f8E8M0FNU to f32 (its smallest
+# exponent is -127, one below binary32's smallest normal one).
+fn strict_widening(from: String, to: String) -> Bool = {
+  let (fp, fmax, fmin) = float_semantics(from)
+  let (tp, tmax, tmin) = float_semantics(to)
+  tp >= fp && tmax >= fmax && tmin <= fmin
+}
+
+## The rounding modes `ftof` allows from `from` to `to`: Ops.td's FToFOp
+## table at bytecode 13.4, read top to bottom with the first matching row
+## deciding (`FToFOp::verify` enforces it in that order). 13.3 had two rows,
+## "`f8E8M0FNU` takes `zero` or `positive_inf`" and "everything else takes
+## `nearest_even`"; 13.4 split the second into five.
+##
+##   to f8E8M0FNU                          zero, positive_inf
+##   to any other float under 16 bits      nearest_even
+##   an exact widening                     all five IEEE modes
+##   f64 to f32                            all but nearest_away
+##   f32 to tf32                           nearest_even, zero, nearest_away
+##   any other narrowing                   nearest_even, zero
+##
+## Knife T17 asked `tileiras` 13.4.92 about every pair of the nine float
+## formats in all five modes, 360 cells, and its verifier agreed with this
+## table on every one (docs/tile-backend-design.md 6.20). Nineteen cells the
+## table allows then fail in code generation with an unnamed `failed to
+## compile Tile IR program` -- the directed modes into tf32 and bf16, and
+## ties-away into bf16, from the narrower formats -- and are NOT refused
+## here: that is this assembler's gap, not the dialect's rule.
+pub fn ftof_modes(from: String, to: String) -> List[String] =
+  if to == "f8E8M0FNU" {
+    ["zero", "positive_inf"]
+  } else if to == "f8E4M3FN" || to == "f8E5M2" || to == "f4E2M1FN" {
+    ["nearest_even"]
+  } else if strict_widening(from, to) {
+    ["nearest_even", "zero", "negative_inf", "positive_inf", "nearest_away"]
+  } else if from == "f64" && to == "f32" {
+    ["nearest_even", "zero", "negative_inf", "positive_inf"]
+  } else if from == "f32" && to == "tf32" {
+    ["nearest_even", "zero", "nearest_away"]
+  } else {
+    ["nearest_even", "zero"]
+  }
+
+# An `ftof` whose mode the pair of formats does not allow is refused here,
+# when the kernel is recorded, rather than by the assembler: the writer
+# would encode it without complaint (a mode is one byte) and only `tileiras`
+# would say no. The same-format `ftof` is still left to `tileiras`, as it
+# was before (float_to_float's comment says why).
+fn check_ftof(name: String, op: String, from: String, to: String) -> Unit =
+  if str.starts_with(op, "ftof") && from != to {
+    let mode = ftof_mode(op, to)
+    let allowed = ftof_modes(from, to)
+    if list.any(allowed, m => m == mode) {
+      ()
+    } else {
+      refuse(name, "ftof from ${from} to ${to} takes ${join(allowed, " or ")}, not ${mode}")
+    }
+  } else {
+    ()
   }
 
 # The BITS one lane of a tile element format occupies. Two of the fifteen
@@ -655,6 +761,16 @@ fn is_pure_region(f: Frame) -> Bool = match f {
   _ -> true
 }
 
+# Whether a `return` may sit inside the region `f` opened: an `if` (either
+# branch) or a `loop`, and since bytecode 13.4 only those two
+# (ReturnOp::verify, knife T17).
+fn return_passes(f: Frame) -> Bool = match f {
+  WhileFrame(_outer, _inits, _carried) -> true
+  ThenFrame(_outer, _cond) -> true
+  ElseFrame(_outer, _cond, _on_true) -> true
+  _ -> false
+}
+
 # The next free handle after minting `k` from `next`, or a refusal when the
 # recording has grown past MAX_HANDLES.
 fn mint(name: String, next: Int, k: Int) -> Int =
@@ -902,6 +1018,7 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
       t_convert(op, from, to, shape, a) => {
         check_shape(name, shape)
         check_convert(name, op)
+        check_ftof(name, op, from, to)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Convert(d, op, from, to, shape, a)]
@@ -1031,6 +1148,18 @@ pub fn trace_kernel_hinted(name: String, params: List[String], hints: Hints, bod
           }
           _ -> refuse(name, "while_end closes a region that is not a loop")
         }
+      }
+      t_return_if(cond) => {
+        # ReturnOp::verify walks up through `if` and `loop` (13.4 added the
+        # second) and must reach the entry; a `for`, a reduction or a scan on
+        # the way is refused by the dialect, so it is refused here
+        let open = frames
+        if list.any(open, f => not return_passes(f)) {
+          refuse(name, "a return inside a for, reduce or scan region; only an if or a loop may enclose one")
+        } else {
+          ()
+        }
+        ops = ops ++ [If([], cond, [Return], [Yield([])])]
       }
       t_spread(dtype, shape, src) => {
         check_shape(name, shape)
@@ -1651,6 +1780,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, results, _body) -> results
   Loop(_inits, _carried, results, _body) -> results
   Break(_values) -> []
+  Return -> []
   Continue(_values) -> []
   Spread(dst, _dtype, _shape, _src) -> [dst]
   Reduce(results, _dim, _shape, _identities, _operands, _args, _body) -> results
@@ -1919,6 +2049,119 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
     _ -> { assert false }
   }
   assert p == trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
+}
+
+# `spin` with an early exit as well (knife T17): the block returns when its
+# largest lane passes 4, before the loop's own exit is tested.
+fn spin_or_leave(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let v0 = load(x, b, [8])
+  let v = d_loop(v0, t => {
+    let m = d_reduce(F64, [8], t, 0.0, (acc, e) => s_maxf(F64, acc, e))
+    d_return_if(s_gt(F64, m, s_const(F64, 4.0)))
+    (s_gt(F64, s_const(F64, 1.0), m), addf(F64, [8], t, t))
+  })
+  store(out, b, [8], v)
+}
+
+test "a return inside a loop records the early exit's if where it was called, before the loop's own exit" {
+  let p = trace_kernel("leave", ["f64", "f64"], () => spin_or_leave(param(F64, 0), param(F64, 1)))
+  match p.ops[len(p.ops) - 2] {
+    Loop(_inits, _carried, _results, body) -> {
+      # one early exit, an `if` with no results whose then-branch returns
+      # and whose else-branch yields nothing; the loop's own exit and the
+      # continue are still the body's last two operations, as in `spin`
+      let exits = list.filter(range(0, len(body)), k => match body[k] {
+        If(rs, _c, t, f) -> rs == [] && t == [Return] && f == [Yield([])]
+        _ -> false
+      })
+      assert len(exits) == 1
+      assert exits[0] < len(body) - 2
+      match body[len(body) - 2] {
+        If(_rs, _c, t, _f) -> {
+          match t[0] {
+            Break(_vs) -> ()
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # it defines nothing, and the program after the loop is unchanged
+  assert defined(If([], 1, [Return], [Yield([])])) == []
+  assert p == trace_kernel("leave", ["f64", "f64"], () => spin_or_leave(param(F64, 0), param(F64, 1)))
+}
+
+test "a return under a for, a reduction or a scan is refused when the kernel is recorded" {
+  let in_for = catch_panic(() => trace_kernel("bad_return", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    let _r = d_for(idx_const(0), idx_const(2), idx_const(1), t, (_i, v) => {
+      d_return_if(s_gt(F64, s_const(F64, 1.0), d_reduce(F64, [8], v, 0.0, (acc, e) => s_maxf(F64, acc, e))))
+      v
+    })
+    ()
+  }))
+  match in_for {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "a return inside a for, reduce or scan region") }
+  }
+  # at the top of the entry it is the 13.1 shape and is recorded as such
+  let top = trace_kernel("top_return", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    d_return_if(s_gt(F64, s_const(F64, 1.0), d_reduce(F64, [8], t, 0.0, (acc, e) => s_maxf(F64, acc, e))))
+  })
+  match top.ops[len(top.ops) - 1] {
+    If(rs, _cond, on_true, on_false) -> { assert rs == [] && on_true == [Return] && on_false == [Yield([])] }
+    _ -> { assert false }
+  }
+}
+
+test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
+  # the rows of Ops.td's table, first match deciding
+  assert ftof_modes("f64", "f8E8M0FNU") == ["zero", "positive_inf"]
+  assert ftof_modes("f32", "f8E4M3FN") == ["nearest_even"]
+  assert ftof_modes("f16", "f4E2M1FN") == ["nearest_even"]
+  assert ftof_modes("f64", "f32") == ["nearest_even", "zero", "negative_inf", "positive_inf"]
+  assert ftof_modes("f32", "tf32") == ["nearest_even", "zero", "nearest_away"]
+  assert ftof_modes("f32", "f16") == ["nearest_even", "zero"]
+  assert ftof_modes("f64", "tf32") == ["nearest_even", "zero"]
+  # an exact widening takes all five, and which pairs ARE exact widenings
+  # is the three-number comparison: f16 into tf32 is one (eleven bits
+  # either way, a wider range), f16 into bf16 is not (eight bits), and
+  # f8E8M0FNU into f32 is not (its smallest exponent is -127)
+  assert len(ftof_modes("f16", "f32")) == 5
+  assert len(ftof_modes("f16", "tf32")) == 5
+  assert ftof_modes("f16", "bf16") == ["nearest_even", "zero"]
+  assert ftof_modes("f8E8M0FNU", "f32") == ["nearest_even", "zero"]
+  assert len(ftof_modes("f8E8M0FNU", "f64")) == 5
+  # the spellings name their modes, and the plain one keeps its default
+  assert ftof_mode("ftof", "f32") == "nearest_even"
+  assert ftof_mode("ftof", "f8E8M0FNU") == "zero"
+  assert ftof_mode("ftof_away", "tf32") == "nearest_away"
+  let away = catch_panic(() => trace_kernel("bad_ftof", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = float_to_float(F64, F32, [8], load(x, idx_const(0), [8]))
+    let _h = float_to_float_away(F32, F16, [8], t)
+    ()
+  }))
+  match away {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "ftof from f32 to f16 takes nearest_even or zero, not nearest_away") }
+  }
+  # the pair that does take it is recorded
+  let fine = trace_kernel("good_ftof", ["f64"], () => {
+    let x = param(F64, 0)
+    let _h = float_to_float_zero(F64, F32, [8], load(x, idx_const(0), [8]))
+    ()
+  })
+  assert list.any(fine.ops, op => match op {
+    Convert(_d, o, f, t, _s, _a) -> o == "ftof_zero" && f == "f64" && t == "f32"
+    _ -> false
+  })
 }
 
 # A gather through an index tile read out of one buffer, and a scatter of

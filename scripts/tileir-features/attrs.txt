@@ -55,14 +55,14 @@
 #               sets in the operations that carry it
 #   since       the bytecode version the VALUE entered: 13.1 to 13.4
 #   status      implemented | unimplemented | deferred, read as the other
-#               two ledgers read them. `deferred` here means exactly one
-#               thing since knife T11 took the five padding values:
-#               `no-client-kernel`, a value the writer's own table can
-#               already spell while no kernel asks for it. Knife T13 took
-#               seven of the eight atomic modes that were in that state, so
-#               `rmw.xchg` is the last such row in the three ledgers, and it
-#               is the one no client kernel CAN ask for: a view-based
-#               reduction answers nothing, so it has nothing to exchange
+#               two ledgers read them. `deferred` meant exactly one thing
+#               here since knife T11 took the five padding values:
+#               `no-client-kernel`, a value the writer's own table could
+#               already spell while no kernel asked for it. Knife T13 took
+#               seven of the eight atomic modes that were in that state and
+#               knife T17 the eighth, `rmw.xchg` (attr_xchg, the first
+#               kernel that exchanges), so no row of the three ledgers is
+#               deferred any more
 #   knife       the knife that wrote the value first, or the knife the
 #               prestudy plans it for; check.py's LANDED_KNIVES holds the
 #               two directions, as it does for the other two ledgers
@@ -183,15 +183,16 @@
 #       scripts/tile-golden's mmaf-flags-unwritten is that: drop the word
 #       and the assembler reads the first operand for it.
 #   no-client-kernel
-#       The writer's `rmw_mode_value` spells all ten atomic modes and, until
-#       knife T13, only two of them had a kernel. `view_atomic` runs nine of
-#       the ten at once, so what is left in this state is `rmw.xchg` alone,
-#       and it is left for a reason rather than for want of a kernel:
-#       `atomic_rmw_tko` could exchange and no kernel here needs it, while
-#       `atomic_red_view_tko` REFUSES the mode by name, because a reduction
-#       that does not answer the old value has nothing to exchange it for
-#       (AtomicRedViewTkoOp::verify). bytecode.dawn's `red_mode_value` is
-#       that refusal in this writer.
+#       RETIRED with knife T17, and no row carries it any more. The writer's
+#       `rmw_mode_value` spells all ten atomic modes and, until knife T13,
+#       only two of them had a kernel. `view_atomic` runs nine of the ten at
+#       once, and what was left was `rmw.xchg` alone: `atomic_red_view_tko`
+#       REFUSES the mode by name, because a reduction that does not answer
+#       the old value has nothing to exchange it for
+#       (AtomicRedViewTkoOp::verify; bytecode.dawn's `red_mode_value` is that
+#       refusal in this writer), and `atomic_rmw_tko`, which can exchange,
+#       had no kernel that needed it. Knife T17 wrote one, attr_xchg, which
+#       swaps every lane into a slot of its own and stores what it got back.
 #   ruling 2
 #       RETIRED, and no row carries it any more. It said the view family
 #       was suspended with its nine opcodes until knives T11 to T13 (docs
@@ -330,13 +331,13 @@
 #
 # feature | code | since | status | knife | layer | evidence | exemption
 rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
-rounding.zero                | 1 | 13.1 | implemented   | 10  | 2 | const:ROUND_ZERO,golden:int_ops,device:int_ops                                                        | -
+rounding.zero                | 1 | 13.1 | implemented   | 10  | 3 | const:ROUND_ZERO,golden:int_ops,device:int_ops,golden:attr_ftof,device:attr_ftof,mutant:ftof-zero-as-nearest-away | -
 rounding.negative_inf        | 2 | 13.1 | implemented   | T4  | 3 | const:ROUND_NEGATIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
 rounding.positive_inf        | 3 | 13.1 | implemented   | T4  | 3 | const:ROUND_POSITIVE_INF,golden:attr_round,device:attr_round,mutant:directed-rounding-as-nearest-even | -
 rounding.approx              | 4 | 13.1 | implemented   | T4  | 3 | const:ROUND_APPROX,golden:attr_approx,device:attr_approx,mutant:sqrt-approx-as-nearest-even           | -
 rounding.full                | 5 | 13.1 | implemented   | 7b  | 3 | const:ROUND_FULL,golden:mathops,golden:sigmoid,device:mathops,mutant:exp-rounding-unwritten           | -
 rounding.nearest_int_to_zero | 6 | 13.1 | implemented   | 10  | 3 | const:ROUND_INT_TO_ZERO,golden:int_ops,device:int_ops,mutant:ftoi-rounds-instead-of-truncates         | -
-rounding.nearest_away        | 7 | 13.4 | unimplemented | T17 | 0 | -                                                                                                     | -
+rounding.nearest_away        | 7 | 13.4 | implemented   | T17 | 3 | const:ROUND_NEAREST_AWAY,golden:attr_ftof,device:attr_ftof,mutant:ftof-away-as-nearest-even,mutant:ftof-zero-as-nearest-away | -
 overflow.none                | 0 | 13.1 | implemented   | 10  | 2 | const:OVERFLOW_NONE,golden:int_ops,device:int_ops                                                     | -
 overflow.nsw                 | 1 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NSW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
 overflow.nuw                 | 2 | 13.1 | implemented   | T4  | 1 | const:OVERFLOW_NUW,golden:attr_overflow,mutant:overflow-attr-not-written                              | assumption-not-arithmetic
@@ -360,14 +361,14 @@ rmw.max                      | 5 | 13.1 | implemented   | T13 | 3 | writer:red_m
 rmw.min                      | 6 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.umax                     | 7 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
 rmw.umin                     | 8 | 13.1 | implemented   | T13 | 3 | writer:red_mode_value,golden:view_atomic,device:view_atomic,mutant:atomic-red-mode-rotated | -
-rmw.xchg                     | 9 | 13.1 | deferred      | -   | 0 | -                                                                                                     | no-client-kernel
+rmw.xchg                     | 9 | 13.1 | implemented   | T17 | 3 | writer:rmw_mode_value,golden:attr_xchg,device:attr_xchg,mutant:rmw-xchg-as-add                        | -
 unit.flush_to_zero           | 1 | 13.1 | implemented   | T4  | 3 | const:FLOAT_FLAG_FTZ,golden:attr_ftz,device:attr_ftz,mutant:ftz-bit-dropped                           | -
 unit.propagate_nan           | 1 | 13.1 | implemented   | T4  | 3 | const:MINMAX_FLAG_PROPAGATE_NAN,golden:attr_nan,device:attr_nan,mutant:propagate-nan-bit-dropped      | -
 unit.unsignedCmp             | 1 | 13.2 | implemented   | T4  | 3 | const:FOR_FLAG_UNSIGNED,golden:attr_ucmp,device:attr_ucmp,mutant:for-unsigned-bit-dropped             | -
 unit.fast_acc                | 1 | 13.3 | implemented   | T8  | 1 | const:MMAF_FLAG_FAST_ACC,golden:matmul,mutant:mmaf-flags-unwritten                                    | fast-acc-not-in-the-cubin
 unit.constant                | 1 | 13.3 | implemented   | T8  | 1 | writer:global_section,golden:global_flags,golden:global_syms,mutant:constant-flag-as-mutable          | constant-not-in-the-cubin
 unit.global                  | 1 | 13.3 | implemented   | T10 | 1 | const:ALLOCA_FLAG_GLOBAL,golden:alloca_two,mutant:alloca-flags-unwritten                              | global-bit-not-in-the-cubin
-unit.saturating              | 1 | 13.4 | unimplemented | T17 | 0 | -                                                                                                     | -
+unit.saturating              | 1 | 13.4 | implemented   | T17 | 3 | const:FTOI_FLAG_SATURATING,golden:attr_sat,device:attr_sat,mutant:ftoi-saturating-bit-dropped         | -
 padding.zero                 | 0 | 13.1 | implemented   | T11 | 3 | const:PAD_ZERO,golden:view_pad_i32,device:view_pad_i32,mutant:padding-value-bit-cleared               | -
 padding.neg_zero             | 1 | 13.1 | implemented   | T11 | 3 | const:PAD_NEG_ZERO,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one             | -
 padding.nan                  | 2 | 13.1 | implemented   | T11 | 3 | const:PAD_NAN,golden:view_padding,device:view_padding,mutant:padding-enum-off-by-one                  | -

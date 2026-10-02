@@ -57,7 +57,22 @@ pub opaque type F32 = Float
 ## the sign; below the normal range it lies on the subnormal grid
 ## 2^(emin - p + 1), and may be zero of the sign. NaN, the two zeros and the
 ## two infinities pass through unchanged.
-pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float =
+pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float = round_nearest(x, p, emin, emax, false)
+
+## `round_binary` with the OTHER tie-breaking rule: a value exactly halfway
+## between two neighbours goes to the one of larger magnitude instead of to
+## the even one. IEEE 754 calls it roundTiesToAway and the Tile IR dialect
+## `nearest_away`, the rounding mode bytecode 13.4 added for `ftof` from f32
+## to tf32 (packages/tileir's `float_to_float_away`). Everywhere off a tie
+## it answers what `round_binary` answers, and the rest of that function's
+## contract holds unchanged: overflow is the infinity of the sign, below the
+## normal range the subnormal grid, and NaN, the zeros and the infinities
+## pass through.
+pub fn round_binary_away(x: Float, p: Int, emin: Int, emax: Int) -> Float = round_nearest(x, p, emin, emax, true)
+
+# The two round-to-nearest modes, which differ only in what a tie does:
+# `away` sends it up in magnitude, otherwise it goes to the even neighbour.
+fn round_nearest(x: Float, p: Int, emin: Int, emax: Int, away: Bool) -> Float =
   if x != x || x == 0.0 {
     x
   } else {
@@ -77,7 +92,7 @@ pub fn round_binary(x: Float, p: Int, emin: Int, emax: Int) -> Float =
       let m = a / q
       let fl = to_int(m)
       let r = m - to_float(fl)
-      let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if fl % 2 == 0 { fl } else { fl + 1 }
+      let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if away || fl % 2 == 1 { fl + 1 } else { fl }
       let v = to_float(n) * q
       # the largest finite value is (2 - 2^(1 - p)) * 2^emax; a result above
       # it (a carry out of the top exponent included) is the infinity
@@ -168,6 +183,12 @@ pub fn round_f32(x: Float) -> Float = round_binary(x, 24, -126, 127)
 ## word with thirteen zero bits at the bottom, which is where the hardware
 ## keeps it.
 pub fn round_tf32(x: Float) -> Float = round_binary(x, 11, -126, 127)
+
+## `x` rounded to TensorFloat-32 with ties AWAY from zero: what the device
+## answers for `ftof` from f32 to tf32 under `nearest_away` (measured, knife
+## T17). It differs from `round_tf32` on a binary32 value exactly halfway
+## between two tf32 neighbours whose lower one is even, and nowhere else.
+pub fn round_tf32_away(x: Float) -> Float = round_binary_away(x, 11, -126, 127)
 
 ## `x` rounded to f8E5M2: three significand bits, exponents -14..15, and
 ## SATURATING at the largest finite value.
@@ -997,6 +1018,42 @@ test "directed rounding takes the neighbour on the named side" {
   assert nan != nan
   assert round_f32_toward(0.0, "positive_inf") == 0.0
   assert 1.0 / round_f32_toward(-0.0, "positive_inf") == -inf
+}
+
+test "ties away from zero move a tie up in magnitude and leave everything else to round_binary" {
+  let inf = 1.0 / 0.0
+  # tf32's last place at 1 is 2^-10, so 1 + 2^-11 is exactly halfway between
+  # 1 (even) and 1 + 2^-10 (odd): the two rules disagree, in both signs
+  let tie = 1.0 + 1.0 / 2048.0
+  assert round_tf32(tie) == 1.0
+  assert round_tf32_away(tie) == 1.0 + 1.0 / 1024.0
+  assert round_tf32(-tie) == -1.0
+  assert round_tf32_away(-tie) == -(1.0 + 1.0 / 1024.0)
+  # a tie whose lower neighbour is ODD goes up under both rules
+  let odd_tie = 1.0 + 3.0 / 2048.0
+  assert round_tf32(odd_tie) == 1.0 + 1.0 / 512.0
+  assert round_tf32_away(odd_tie) == 1.0 + 1.0 / 512.0
+  # off a tie the two agree, on either side of it
+  assert round_tf32_away(tie + 1.0 / 1048576.0) == round_tf32(tie + 1.0 / 1048576.0)
+  assert round_tf32_away(tie - 1.0 / 1048576.0) == 1.0
+  # the general function, at bfloat16's eight bits: 1 + 2^-8 is a tie there
+  assert round_binary_away(1.0 + 1.0 / 256.0, 8, -126, 127) == 1.0 + 1.0 / 128.0
+  assert round_binary(1.0 + 1.0 / 256.0, 8, -126, 127) == 1.0
+  # a tie on the subnormal grid: tf32's quantum below 2^-126 is 2^-136, and
+  # half of it rounds to it under ties-away and to zero under ties-to-even
+  let q = 1.401298464324817e-45 * 8192.0
+  assert round_tf32_away(q / 2.0) == q
+  assert round_tf32(q / 2.0) == 0.0
+  # the largest binary32 value is past tf32's last midpoint, so it
+  # overflows under both rules
+  assert round_tf32_away(3.4028234663852886e38) == inf
+  assert round_tf32(3.4028234663852886e38) == inf
+  # the non-finite values and the zeros pass through
+  assert round_tf32_away(inf) == inf
+  assert round_tf32_away(-inf) == -inf
+  let nan = round_tf32_away(0.0 / 0.0)
+  assert nan != nan
+  assert 1.0 / round_tf32_away(-0.0) == -inf
 }
 
 test "the trait operations are the format's, with the theorem's rounding" {

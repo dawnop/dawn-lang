@@ -3544,6 +3544,130 @@ pub fn attr_ucmp_ref(blocks: Int, lo: Int, hi: Int, dtypes: List[String],
   })
 }
 
+## `ftoi` from f64 to i32 with and without the `saturating` modifier (knife
+## T17), in `blocks` blocks of two 128-lane segments. `ins` is
+## `[x, old out]`.
+##
+## The first segment is the modifier's definition in Ops.td: truncate toward
+## zero, then a lane above i32's largest value is that value, one below its
+## smallest is that one, and a NaN is 0. The second holds only the lanes
+## whose truncation IS an i32 (`-2^31 - 1 < x < 2^31`) and keeps the output
+## buffer's own value everywhere else, because the kernel stores it only
+## there: without the modifier the other lanes are undefined behaviour, and
+## what one device answers for them is not a reference.
+pub fn attr_sat_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let width = 2 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let v = x[b * 128 + k % 128]
+      let fits = v > 0.0 - 2147483649.0 && v < 2147483648.0
+      if k < 128 {
+        round_to(dt, saturated_i32(v))
+      } else if fits {
+        round_to(dt, to_float(to_int(v)))
+      } else {
+        kept(old, idx)
+      }
+    }
+  })
+}
+
+# What `ftoi ... saturating` answers for one f64 lane into i32. `to_int`
+# truncates toward zero and is only asked about a value that fits.
+fn saturated_i32(v: Float) -> Float =
+  if v != v {
+    0.0
+  } else if v >= 2147483648.0 {
+    2147483647.0
+  } else if v <= 0.0 - 2147483649.0 {
+    0.0 - 2147483648.0
+  } else {
+    to_float(to_int(v))
+  }
+
+## `ftof` under the rounding modes bytecode 13.4 newly allows (knife T17),
+## each beside the `nearest_even` it differs from, in `blocks` blocks of
+## eleven 128-lane segments. `ins` is `[x, old out]`. Segment by segment:
+##
+##   0-3   x to f32: nearest_even, zero, negative_inf, positive_inf
+##   4-6   segment 0 to tf32: nearest_even, zero, nearest_away
+##   7-8   segment 0 to f16: nearest_even, zero
+##   9-10  segment 0 to bf16: nearest_even, zero
+##
+## Every one is std/narrow's rounding of the exact value: x is a binary64,
+## so the first four round it once, and segment 0 is a binary32, which every
+## later target rounds once more from. The widening back to f64 that the
+## kernel does after each is exact, whatever mode it is written in, and so
+## does not appear here.
+pub fn attr_ftof_ref(blocks: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let width = 11 * 128
+  list.map(range(0, len(old)), idx => {
+    let b = idx / width
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let k = idx % width
+      let v = x[b * 128 + k % 128]
+      let f = narrow.round_f32(v)
+      let seg = k / 128
+      let r = if seg == 0 {
+        f
+      } else if seg == 1 {
+        narrow.round_f32_toward(v, "zero")
+      } else if seg == 2 {
+        narrow.round_f32_toward(v, "negative_inf")
+      } else if seg == 3 {
+        narrow.round_f32_toward(v, "positive_inf")
+      } else if seg == 4 {
+        narrow.round_tf32(f)
+      } else if seg == 5 {
+        narrow.round_binary_toward(f, 11, -126, 127, "zero")
+      } else if seg == 6 {
+        narrow.round_tf32_away(f)
+      } else if seg == 7 {
+        narrow.round_fp16(f)
+      } else if seg == 8 {
+        narrow.round_binary_toward(f, 11, -14, 15, "zero")
+      } else if seg == 9 {
+        narrow.round_bf16(f)
+      } else {
+        narrow.round_binary_toward(f, 8, -126, 127, "zero")
+      }
+      round_to(dt, r)
+    }
+  })
+}
+
+## The atomic exchange (knife T17): every lane `i` of the first `slots` of
+## `ins[0]` swaps itself into slot `slots - 1 - i` of the output, and what
+## that slot held is stored at `slots + i`. `ins` is `[x, old out]`. No two
+## lanes name one slot, so the order they arrive in cannot matter, and the
+## answer is two reversals: the input into the first half, the output
+## buffer's own first half into the second.
+pub fn attr_xchg_ref(slots: Int, dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  list.map(range(0, len(old)), idx =>
+      if idx < slots {
+        round_to(dt, x[slots - 1 - idx])
+      } else if idx < 2 * slots {
+        round_to(dt, old[slots - 1 - (idx - slots)])
+      } else {
+        kept(old, idx)
+      })
+}
+
 # ---- what a reference writes back (knife 11) ----
 #
 # A reference answers `[(position, contents)]`: which ARGUMENT BUFFERS the
@@ -3919,6 +4043,56 @@ fn raise_until(x: List[Float], threshold: Float, step: Float, fuel: Int) -> List
     x
   } else {
     raise_until(list.map(x, v => v + step), threshold, step, fuel - 1)
+  }
+
+## `loop_return` (knife T17): each of `blocks` blocks of 128 lanes of
+## `ins[0]` runs the kernel's loop, and its 256 output slots say how. The
+## first 128 hold how many iterations the block BEGAN (the kernel stores the
+## count at the top of every iteration); the next 128 hold the tile the loop
+## broke with, if it broke, and the output buffer's own value if the block
+## returned instead, because the store after the loop is then never reached.
+##
+## The order inside an iteration is the kernel's: the count is stored, then
+## the block returns if its ENTERING tile holds a value at or above `at`,
+## then it breaks if the count has reached `limit`, then every lane goes up
+## by one. So a block that reaches `at` on its `limit`-th iteration returns
+## rather than breaks. `fuel` bounds this function and is never what stops
+## it for a corpus the kernel can finish.
+pub fn loop_return_ref(blocks: Int, at: Int, limit: Int, fuel: Int, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let x = ins[0]
+  let old = ins[1]
+  let dt = dtypes[1]
+  let runs = list.map(range(0, blocks), b =>
+      return_run(list.map(range(0, 128), l => as_i32(x, b * 128 + l)), 1, at, limit, fuel))
+  list.map(range(0, len(old)), idx => {
+    let b = idx / 256
+    if b >= blocks {
+      kept(old, idx)
+    } else {
+      let (begun, broke, v) = runs[b]
+      let k = idx % 256
+      if k < 128 {
+        round_to(dt, to_float(begun))
+      } else if broke {
+        round_to(dt, to_float(v[k - 128]))
+      } else {
+        kept(old, idx)
+      }
+    }
+  })
+}
+
+# One block's loop from iteration `k` on: how many iterations it began,
+# whether it left by `break` (rather than `return`), and the tile it broke
+# with.
+fn return_run(v: List[Int], k: Int, at: Int, limit: Int, fuel: Int) -> (Int, Bool, List[Int]) =
+  if list.any(v, e => e >= at) {
+    (k, false, v)
+  } else if k >= limit || fuel <= 0 {
+    (k, true, v)
+  } else {
+    return_run(list.map(v, e => e + 1), k + 1, at, limit, fuel - 1)
   }
 
 ## Knife T6's references. All four are one line of arithmetic each, and
@@ -4683,6 +4857,59 @@ test "the loop references answer what a reader can check by hand, trip counts in
   # already exceed, the step runs and only `fuel` stops it, because this
   # step moves away from the exit rather than towards it
   assert loop_none_ref(2, 0.1, 1000.0, 2, f2, [[0.25, 0.5], [0.0, 0.0]]) == [2000.25, 2000.5]
+}
+
+test "knife T17's references: a return that skips the store after the loop, saturation, the 13.4 rounding modes and the exchange" {
+  let i2 = ["i32", "i32"]
+  let f2 = ["f64", "f64"]
+  let s = 0.0 - 7.0
+  let sent = (n: Int) => list.map(range(0, n), _i => s)
+  # loop_return, one block: a tile whose largest lane is 5 under a bound of
+  # 8 returns on the iteration whose ENTERING tile reaches 8, the fourth;
+  # the slot after the loop keeps the sentinel because no store reaches it
+  let lane = (v: Int) => list.map(range(0, 128), l => if l == 0 { to_float(v) } else { 0.0 })
+  let returned = loop_return_ref(1, 8, 100, 1000, i2, [lane(5), sent(256 + 2)])
+  assert returned[0] == 4.0 && returned[127] == 4.0
+  assert returned[128] == s && returned[255] == s
+  assert list.drop(returned, 256) == [s, s]
+  # under a limit of three it breaks first, with the tile that ENTERED the
+  # third iteration (two steps taken), and the store after the loop happens
+  let broke = loop_return_ref(1, 8, 3, 1000, i2, [lane(5), sent(256)])
+  assert broke[0] == 3.0 && broke[128] == 7.0 && broke[129] == 2.0
+  # when both exits hold on one iteration the return is tested first
+  let both = loop_return_ref(1, 8, 4, 1000, i2, [lane(5), sent(256)])
+  assert both[0] == 4.0 && both[128] == s
+
+  # attr_sat: the saturating half clamps and sends NaN to 0; the plain half
+  # holds only lanes that truncate into i32 and keeps the buffer elsewhere
+  let inf = 1.0 / 0.0
+  let xs = [0.0 / 0.0, inf, 0.0 - 3.0e9, 2147483647.5, 0.0 - 2147483648.75, 0.0 - 2.7]
+  let x128 = list.map(range(0, 128), i => xs[i % 6])
+  let sat = attr_sat_ref(1, ["f64", "i32"], [x128, sent(256)])
+  assert list.take(sat, 6) == [0.0, 2147483647.0, 0.0 - 2147483648.0, 2147483647.0, 0.0 - 2147483648.0, 0.0 - 2.0]
+  assert list.slice(sat, 128, 134) == [s, s, s, 2147483647.0, 0.0 - 2147483648.0, 0.0 - 2.0]
+
+  # attr_ftof on a tf32 tie whose lower neighbour is even: nearest_even
+  # goes down, toward zero goes down, nearest_away goes up
+  let tie = 1.0 + 1.0 / 2048.0
+  let rounded = attr_ftof_ref(1, f2, [list.map(range(0, 128), _i => tie), sent(11 * 128)])
+  assert rounded[4 * 128] == 1.0 && rounded[5 * 128] == 1.0
+  assert rounded[6 * 128] == 1.0 + 1.0 / 1024.0
+  # f16 shares tf32's eleven bits at 1, so the f16 pair agrees with it
+  assert rounded[7 * 128] == 1.0 && rounded[8 * 128] == 1.0
+  # past f16's largest value, nearest_even overflows and zero does not
+  let big = attr_ftof_ref(1, f2, [list.map(range(0, 128), _i => 65520.0), sent(11 * 128)])
+  assert big[7 * 128] == inf && big[8 * 128] == 65504.0
+  # a binary64 a quarter of a binary32 place above 1: down, zero and
+  # nearest_even are 1, and up is the next binary32
+  let quarter = attr_ftof_ref(1, f2, [list.map(range(0, 128), _i => 1.0 + 1.0 / 33554432.0), sent(11 * 128)])
+  assert quarter[0] == 1.0 && quarter[128] == 1.0 && quarter[2 * 128] == 1.0
+  assert quarter[3 * 128] == 1.0 + 1.0 / 8388608.0
+
+  # attr_xchg over four slots: the input reversed into them, and what they
+  # held reversed into the next four
+  let swapped = attr_xchg_ref(4, i2, [[1.0, 2.0, 3.0, 4.0], [10.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 0.0, s]])
+  assert swapped == [4.0, 3.0, 2.0, 1.0, 40.0, 30.0, 20.0, 10.0, s]
 }
 
 test "the element format references answer what a reader can check by hand" {

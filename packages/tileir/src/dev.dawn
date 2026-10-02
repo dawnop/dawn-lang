@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, I32, I8, I64, I4}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, TF32, I32, I8, I64, I4}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -291,10 +291,14 @@ pub opaque type Ptrs[D] = Int
 ## reference (std/gpu's `wrap_i32`).
 ##
 ## `t_convert(op, from, to, shape, a)` is the width and format change:
-## `ftof` (a float tile to another float format, `nearest_even`),
+## `ftof` (a float tile to another float format, `nearest_even`; knife T17
+## adds `ftof_zero`, `ftof_neg_inf`, `ftof_pos_inf` and `ftof_away`, the
+## same conversion under the other four IEEE modes, which bytecode 13.4
+## allows on some pairs of formats and not on others),
 ## `itof` (integer tile to float, signed, `nearest_even`), `ftoi` (float
 ## tile to integer, signed, `nearest_int_to_zero`, the one mode the dialect
-## accepts here), `exti` (a narrower integer tile to a wider one, UNSIGNED,
+## accepts here; `ftoi_sat` is the same with 13.4's `saturating` modifier),
+## `exti` (a narrower integer tile to a wider one, UNSIGNED,
 ## so an `i1` mask widens to 0 or 1 rather than to 0 or -1), `trunci` (a
 ## wider integer tile to a narrower one, which for `i32` to `i1` is the low
 ## bit) and `bitcast` (the same bits read as another format of the same
@@ -345,6 +349,16 @@ pub opaque type Ptrs[D] = Int
 ## through as the last carried value, exactly as `for`'s does, and it is
 ## carried by BOTH terminators (a `break` yields the loop's final values,
 ## and the token is one of them). Only the `d_loop` family calls the pair.
+##
+## `t_return_if(cond)` ends the WHOLE KERNEL for this tile block when the
+## rank-0 `i1` handle `cond` is true and does nothing when it is false: the
+## handler records `if cond { return } else { yield }` where the call is.
+## Bytecode 13.4 is what lets that `if` sit inside a `loop` (knife T17:
+## ReturnOp's parents became `entry`, `if` and `loop`, and its verifier walks
+## through `if` and `loop` to the entry); inside a `for`, a reduction or a
+## scan it is refused at recording time, because the dialect refuses it.
+## Nothing is carried and nothing is answered: what the block stored before
+## the `return` stays stored, and nothing after it runs.
 ##
 ## A `shape` is a list of tile dimensions, each a power of two, EXCEPT that
 ## `[]` is the rank-0 tile (`tile<f64>`): the shape a reduction answers and
@@ -568,6 +582,7 @@ pub effect Dev {
   fn t_loop_end(outs: List[Int]) -> List[Int]
   fn t_while_begin(inits: List[Int]) -> List[Int]
   fn t_while_end(cond: Int, outs: List[Int]) -> List[Int]
+  fn t_return_if(cond: Int) -> Unit
   fn t_spread(dtype: String, shape: List[Int], src: Int) -> Int
   fn t_reduce_begin(dim: Int, shape: List[Int], identities: List[RedId], operands: List[Int]) -> List[Int]
   fn t_reduce_end(yields: List[Int]) -> List[Int]
@@ -1749,6 +1764,18 @@ pub fn float_to_int[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a:
   h
 }
 
+## `float_to_int` with bytecode 13.4's `saturating` modifier (knife T17):
+## every lane has an answer. A lane above the target's largest value is that
+## value, one below its smallest is that one, an infinity is the end of its
+## own sign and a NaN is 0 (Ops.td's FToIOp says all four in as many words);
+## the rest truncate toward zero exactly as `float_to_int` does. This is the
+## spelling a kernel uses when its input is not known to be in range.
+pub fn float_to_int_sat[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftoi_sat", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
 ## The i32 tile holding 1 where the mask is set and 0 where it is not: an
 ## `exti` from `i1`, ZERO-extending. Signedness is the whole of the claim
 ## here -- a signed widening of a one-bit 1 is -1, not 1 -- and it is why a
@@ -1791,8 +1818,9 @@ pub fn bits_to_int(shape: List[Int], a: Tile[F32]) -> Tile[I32] !Dev = {
 ## The float tile of format `to_d` holding each lane of the float tile `a`,
 ## which is of format `from_d`, rounded to nearest even: the dialect's
 ## `ftof`. Widening (f16 to f64) is exact and narrowing rounds; the rounding
-## mode is the one `nearest_even` the dialect supports for every target but
-## `f8E8M0FNU`, which this surface cannot name.
+## mode is `nearest_even`, the one the dialect allows for every target but
+## `f8E8M0FNU` (which takes `zero` here). The four functions after this one
+## spell the other IEEE modes on the pairs bytecode 13.4 allows them.
 ##
 ## The two formats must DIFFER (Ops.td's FToFOp says so and its verifier
 ## enforces it); `ftof` from a format to itself is refused by `tileiras`,
@@ -1801,6 +1829,46 @@ pub fn bits_to_int(shape: List[Int], a: Tile[F32]) -> Tile[I32] !Dev = {
 pub fn float_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
   let x: Int = a
   let h: Tile[B] = t_convert("ftof", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## `float_to_float` rounding TOWARD ZERO, to the neighbour of smaller
+## magnitude. Which IEEE mode a pair of formats may take is the dialect's
+## table (Ops.td's FToFOp, bytecode 13.4, knife T17) and the recording holds
+## a kernel to it: this one is allowed on every exact widening, on every
+## narrowing to a 16- or 32-bit format, and to `f8E8M0FNU` (where it is
+## `float_to_float`'s own mode); to the other 8-bit and 4-bit floats it is
+## refused.
+pub fn float_to_float_zero[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftof_zero", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## `float_to_float` rounding DOWN, toward negative infinity. Allowed from f64
+## to f32 and on an exact widening, and refused everywhere else.
+pub fn float_to_float_down[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftof_neg_inf", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## `float_to_float` rounding UP, toward positive infinity. Allowed from f64
+## to f32, on an exact widening and to `f8E8M0FNU`, and refused everywhere
+## else.
+pub fn float_to_float_up[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftof_pos_inf", dtype_name(from_d), dtype_name(to_d), shape, x)
+  h
+}
+
+## `float_to_float` rounding to nearest with ties AWAY from zero: the mode
+## bytecode 13.4 adds (`nearest_away`, 7). It differs from `float_to_float`
+## only on a value exactly halfway between two neighbours, and the dialect
+## allows it from f32 to tf32 and on an exact widening, nowhere else.
+pub fn float_to_float_away[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+  let x: Int = a
+  let h: Tile[B] = t_convert("ftof_away", dtype_name(from_d), dtype_name(to_d), shape, x)
   h
 }
 
@@ -2120,6 +2188,21 @@ pub fn d_loop2[A, B](a: Tile[A], b: Tile[B],
   let oa: Tile[A] = outs[0]
   let ob: Tile[B] = outs[1]
   (oa, ob)
+}
+
+## End the kernel for this tile block where `cond` is true, from wherever the
+## call is: the top of the kernel, an `if`, or -- what bytecode 13.4 added
+## (knife T17) -- the body of a `d_loop`, where it leaves the loop AND the
+## kernel at once. Stores issued before it are kept; nothing recorded after
+## it runs for a block whose `cond` was true, including the code after the
+## loop. Where `cond` is false it does nothing and the body carries on.
+##
+## Not inside `d_for`, a reduction or a scan: the dialect forbids a `return`
+## under a `for` (use the `loop` for an early exit, Ops.td says) and the
+## other two are pure regions. The recording refuses all three.
+pub fn d_return_if(cond: Scalar[I1]) -> Unit !Dev = {
+  let c: Int = cond
+  t_return_if(c)
 }
 
 # ---- rank-0 tiles ----
@@ -3225,6 +3308,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + len(outs)
       list.map(range(0, len(outs)), k => base + k)
     }
+    t_return_if(_cond) => ()
     t_spread(_dtype, _shape, _src) => {
       let h = next
       next = next + 1
@@ -3554,6 +3638,9 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_loop_end(outs) => outs
     t_while_begin(inits) => inits
     t_while_end(_cond, outs) => outs
+    t_return_if(cond) => {
+      log = log ++ ["return_if ${cond}"]
+    }
     t_spread(dtype, shape, src) => {
       log = log ++ ["spread ${dtype} ${show(shape)} ${src}"]
       16
@@ -3738,6 +3825,22 @@ test "insert hands the handler the subtile's shape, then the whole tile's, then 
   # every idx_const answers 12 here, the loads 1, extract 50
   assert list.any(seen, l => l == "insert f64 [8, 4] [16, 8] 50 1 [12, 12]")
   assert list.any(seen, l => l == "powi f64 i8 [16, 8] 1 1")
+}
+
+fn t17_surface() -> Unit !Dev = {
+  let x = param(F64, 0)
+  let t = load(x, idx_const(0), [8])
+  let _s = float_to_int_sat(F64, I32, [8], t)
+  let _a = float_to_float_away(F32, TF32, [8], float_to_float(F64, F32, [8], t))
+  d_return_if(s_gt(F64, s_const(F64, 1.0), s_const(F64, 0.0)))
+}
+
+test "the knife T17 surface spells its conversions by name and hands the handler the return's condition" {
+  let seen = logged(t17_surface)
+  # every load answers 1 and every convert 20 here
+  assert list.any(seen, l => l == "convert ftoi_sat f64 i32 [8] 1")
+  assert list.any(seen, l => l == "convert ftof_away f32 tf32 [8] 20")
+  assert list.any(seen, l => str.starts_with(l, "return_if "))
 }
 
 fn indexed_surface() -> Unit !Dev = {
@@ -4058,6 +4161,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_while_end(cond, outs) => {
         log = log ++ ["while_end ${cond} ${show(outs)}"]
         [41]
+      }
+      t_return_if(cond) => {
+        log = log ++ ["return_if ${cond}"]
       }
       t_spread(_dtype, _shape, _src) => 16
       t_reduce_begin(_dim, _shape, _identities, operands) => list.map(range(0, 2 * len(operands)), k => 20 + k)
