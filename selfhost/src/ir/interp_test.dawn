@@ -457,6 +457,53 @@ test "Map and Set calls have signatures but remain ordinary comptime refusals" {
   assert map.get(out.consts, "S") == None
 }
 
+test "a handler a const reaches through a call folds without state and stops at a cell or ctl_run" {
+  # The checker refuses `with handle` written in the initialiser itself, not
+  # one inside a pure function the initialiser calls, so these three reach
+  # the interpreter. `comptime_rejects` in ir/interp says why the last two
+  # are refused where they are.
+  let src = "effect Ask {\n  fn ask() -> Int\n}\n" ++
+    "fn twice() -> Int !Ask = ask() + ask()\n" ++
+    "fn answer() -> Int = {\n" ++
+    "  with handle Ask { ask() => 21 }\n" ++
+    "  twice()\n" ++
+    "}\n" ++
+    "const S: Int = answer()\n" ++
+    "fn count() -> Int = {\n" ++
+    "  with handle Ask {\n" ++
+    "    var n: Int = 0\n" ++
+    "    ask() => {\n" ++
+    "      n = n + 1\n" ++
+    "      n\n" ++
+    "    }\n" ++
+    "  }\n" ++
+    "  twice()\n" ++
+    "}\n" ++
+    "const C: Int = count()\n" ++
+    "ctl effect Fetch {\n  fn fetch(n: Int) -> Int\n}\n" ++
+    "fn bump() -> Int !Fetch = fetch(1) + 1\n" ++
+    "fn resumed() -> Int = {\n" ++
+    "  with handle Fetch { fetch(n) resume k => k(n + 1) }\n" ++
+    "  bump()\n" ++
+    "}\n" ++
+    "const K: Int = resumed()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert map.get(out.consts, "S") == Some(VInt(42))
+  assert len(out.diags) == 2
+  assert out.diags[0].msg == "comptime: builtin `cell_new` is not available at comptime"
+  assert out.diags[1].msg == "comptime: builtin `ctl_run` is not available at comptime"
+  assert map.get(out.consts, "C") == None
+  assert map.get(out.consts, "K") == None
+}
+
 test "consts evaluate in declaration order and fold across references" {
   let src = "const A: Int = 1 + 2\n" ++
     "const B: List[Int] = [A, 4]\n" ++

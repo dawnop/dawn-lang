@@ -839,20 +839,27 @@ fn comptime_rejects() -> List[String] = {
   for op in ["new", "len", "get", "push", "with", "steal"] { out = out ++ ["array_" ++ op] }
   # a bitmap operation on the array representation, so it is refused with it
   out = out ++ ["popcount"]
-  # the handler-local slot. Unreachable rather than unimplemented: a cell is
-  # made where a handler is installed, and `with handle` is refused one level
-  # up (checker.dawn's comptime gate), so nothing a `const` can contain
-  # produces one. Listed rather than given arms because an arm no producer can
-  # reach is the dead code check 2 below exists for -- and because `CValue` is
-  # immutable, so an implementation would have to invent a store the rest of
-  # this interpreter has no notion of.
+  # the handler-local slot. Reachable, and refused here. The checker refuses a
+  # `with handle` written in a `const` initialiser or comptime block itself
+  # (checker.dawn's comptime gate, "`with handle` is not available at compile
+  # time"), but not one inside a pure function the initialiser calls: such a
+  # function's Core is what this evaluator runs. A handler without state
+  # folds -- its arms are ordinary closures in an evidence pack, all arms
+  # this file already has. A handler with a `var` installs a cell, and that
+  # `cell_new` is where the fold stops ("builtin `cell_new` is not available
+  # at comptime", interp_test.dawn pins it). Refused rather than given arms
+  # because `CValue` is immutable, so an implementation would have to invent a
+  # store the rest of this interpreter has no notion of. `cell_get`/`cell_set`/
+  # `cell_take` only ever follow a `cell_new`, so the first refusal is the one
+  # a program meets.
   out = out ++ ["cell_new", "cell_get", "cell_set", "cell_take"]
-  # one-shot resumption, refused for the same reason and one more. Unreachable:
-  # a control arm exists only under a `with handle`, which is refused one level
-  # up, so no `const` initialiser produces either name. And unimplemented
-  # everywhere else too -- `lower.staged_intrinsics` refuses both on the way to
-  # a backend -- so an arm here would be the only implementation of a feature
-  # that does not run yet, in the one evaluator that cannot reach it.
+  # one-shot resumption, refused for the reason the next paragraph gives.
+  # Reachable the same way: a `ctl` handler installed in a function a `const`
+  # calls reaches `ctl_run` when it installs, and the fold stops there
+  # ("builtin `ctl_run` is not available at comptime", pinned beside the cell
+  # case); `ctl_yield` happens only under a `ctl_run`, so that refusal comes
+  # first. Both backends run the pair (`lower.staged_intrinsics` is empty), so
+  # this is the one evaluator in the compiler that does not.
   #
   # Before either name is ever admitted here, the continuation's effect
   # account has to be answered first, not after. comptime may call any pure
@@ -862,9 +869,10 @@ fn comptime_rejects() -> List[String] = {
   # §6.5 "control arms"), which is a checker rule this evaluator inherits
   # rather than enforces. Admitting `ctl_*` here without re-reading that rule
   # against whatever the fold can then construct would reopen the hole spec
-  # §9.8.1 used to record as an exception. Today the isolation is doubly
-  # structural (no `with handle`, no `ctl_*`), which is why nothing here has
-  # had to reason about it.
+  # §9.8.1 used to record as an exception. Today the isolation is structural at
+  # this one point: the checker keeps `with handle` out of the initialiser's
+  # own text, but a handler a called function installs gets as far as
+  # `ctl_run`, and this refusal is what stops it.
   out = out ++ ["ctl_yield", "ctl_run"]
   # `discard` is the user-facing third of that family and is refused for the
   # first of those reasons alone: its argument is a continuation, a `const`
