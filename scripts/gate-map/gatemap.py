@@ -147,6 +147,23 @@ paths no gate watches) is a ratchet checked in both directions.
      transitive ones, and attribute their manifests and src trees to the gates
      already watching the example manifest. A missing or invalid closure voids
      this attribution rather than guessing that all packages are inputs.
+  I  A gate that starts `dawn lsp` or `dawn doc` runs the modules that
+     subcommand owns, so they are coarse for it. Rule B could only reach a
+     server module a script happened to spell, which is why lsp/lspq.dawn
+     had the pipe contract and lsp/lspv.dawn, the hover value text it
+     records, did not (#389). The entry is the module the subcommand's arm in
+     the CLI dispatch calls into, among those nothing but the entry layer
+     (selfhost/src's root files) imports. The entry owns what it reaches
+     through modules imported only by owned modules and the entry layer, so
+     front/docs.dawn belongs to both subcommands and the checker the server
+     also imports belongs to neither. A gate starts a subcommand when one of
+     the scripts rule A says it runs, or its own step, puts the word right
+     after a toolchain (`"$DAWN" doc`, `[cli, "lsp"]`). A file beside an
+     entry that the entry does not own is a structural failure, so the next
+     module under selfhost/src/lsp/ either reaches the server's gates or
+     reds `--check`. An arm that cannot be read voids the rule.
+     From: the arms in selfhost/src/main.dawn, the `use` lines of
+     selfhost/src/**.dawn, and the scripts rule A reaches.
 
 `--labels` answers the neighbouring question, from the same file: which
 differential owns which declarable label. `scripts/emit-labels.txt` is
@@ -171,8 +188,10 @@ and the residue is written down in unseen.txt where somebody can read it.
              by neither. The record is mutants.txt and the rules are in the
              block comment above `Check`.
   structure  every path-shaped command in every workflow resolves; every label
-             section names a differential some step runs; rule D's premises
-             still hold. A rule whose premise moved is void, not stale.
+             section names a differential some step runs; rule D's and rule
+             I's premises still hold, and every module beside a subcommand's
+             entry is one it owns. A rule whose premise moved is void, not
+             stale.
   ratchet    the set of paths with no gate equals unseen.txt, in both
              directions, and each line's stated reason is one the map still
              supports. A new unwatched file reds this, so does a listed file
@@ -284,6 +303,21 @@ HEAD_COMPILER_REASON = (
     "the SourcePlan input closure rooted at the selfhost project"
 )
 
+# Rule I. The CLI dispatch it reads the subcommand arms out of, the directory
+# whose root files are the entry layer, and the subcommands it follows. These
+# are words a gate types after the toolchain, not paths: which module each one
+# enters is read from the arm, and which modules that entry owns from the
+# import graph. Two, because they are the two whose output a gate records from
+# a module tree of their own (LSP transcripts and hovers, `dawn doc` JSON);
+# every other subcommand enters the compilation pipeline that rule B already
+# attributes as `selfhost/src` to nearly every gate. Adding a word here is the
+# whole change a third one needs, and the structural check below holds it.
+CLI_DISPATCH = "selfhost/src/main.dawn"
+COMPILER_SRC = "selfhost/src/"
+ENTERED_SUBCOMMANDS = ("lsp", "doc")
+RULE_I_VOID = "rule I is void"
+RULE_I_UNREACHED = "beside the entry of"
+
 # This file, exempt from rules A and B. Every other gate script names a path in
 # order to read it; this one names paths in order to describe them, in a usage
 # line, in a comment about what a rule measured, in a mutant's probe. Scraping
@@ -304,6 +338,7 @@ SELF_INPUTS = (
     STD_MODULE_INDEX,
     BUNDLED_MODULE_DIAGNOSTIC,
     CHECKER_CORPUS_GOLDEN,
+    CLI_DISPATCH,
 )
 
 # plan.py, next to this file, is exempt for the same reason. It names paths
@@ -1282,116 +1317,140 @@ class _Reach:
         self.code |= other.code
 
 
+@lru_cache(maxsize=512)
+def _py_shape(text):
+    """What a harness module's own text says, before any import is followed:
+    its parent links, units, imports and literal tables. A pure function of
+    the text, so it is cached by content like `_py_parse`, and the mutant
+    trees and fixture replays that rebuild the map reuse it rather than
+    walking the same syntax trees again. Nothing reads it but `_PyModule`,
+    and nothing there writes to it. None when the text does not parse.
+    """
+    import ast
+    from types import SimpleNamespace
+
+    tree_ast = _py_parse(text)
+    if tree_ast is None:
+        return None
+    shape = SimpleNamespace(ast=tree_ast, defs=set(), units={})
+    parents = {}
+    for node in ast.walk(tree_ast):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    shape.parents = parents
+    # Top-level units: each def or class, the `__main__` guard, and the
+    # rest of the module, which an import always executes.
+    shape.unit_of = {}
+    for stmt in tree_ast.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            unit = stmt.name
+            shape.defs.add(stmt.name)
+        elif (
+            isinstance(stmt, ast.If)
+            and isinstance(stmt.test, ast.Compare)
+            and isinstance(stmt.test.left, ast.Name)
+            and stmt.test.left.id == "__name__"
+        ):
+            unit = "<main>"
+        else:
+            unit = "<module>"
+        for node in ast.walk(stmt):
+            shape.unit_of[id(node)] = unit
+        shape.units.setdefault(unit, []).append(stmt)
+    shape.imports = []
+    shape.syspath_nodes = set()
+    for node in ast.walk(tree_ast):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                shape.imports.append((shape.unit_of.get(id(node)), alias.name,
+                                     None, node.lineno))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [a.name for a in node.names]
+            shape.imports.append((shape.unit_of.get(id(node)), node.module,
+                                 None if "*" in names else names, node.lineno))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("insert", "append")
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "path"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "sys"
+        ):
+            for arg in node.args:
+                for sub in ast.walk(arg):
+                    shape.syspath_nodes.add(id(sub))
+    # Loop variables over a literal tuple, so `HERE / n for n in ("A",
+    # "B")` names A and B rather than reading as a computed join.
+    shape.loop_literals = {}
+    for node in ast.walk(tree_ast):
+        gens = []
+        if isinstance(node, ast.For):
+            gens.append((node.target, node.iter))
+        elif isinstance(node, ast.comprehension):
+            gens.append((node.target, node.iter))
+        for target, it in gens:
+            if (
+                isinstance(target, ast.Name)
+                and isinstance(it, (ast.Tuple, ast.List))
+                and it.elts
+                and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    for e in it.elts
+                )
+            ):
+                shape.loop_literals.setdefault(target.id, set()).update(
+                    e.value for e in it.elts
+                )
+    # Top-level functions whose every `return` is a string literal (or a
+    # conditional between two), so `HERE / matrix_name(scope)` names
+    # what matrix_name can return rather than reading as computed.
+    shape.literal_returns = {}
+    for stmt in tree_ast.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        values = set()
+        returns = [n for n in ast.walk(stmt) if isinstance(n, ast.Return)]
+        for ret in returns:
+            options = (
+                [ret.value.body, ret.value.orelse]
+                if isinstance(ret.value, ast.IfExp) else [ret.value]
+            )
+            if not all(
+                isinstance(o, ast.Constant) and isinstance(o.value, str)
+                for o in options
+            ):
+                values = None
+                break
+            values |= {o.value for o in options}
+        if returns and values:
+            shape.literal_returns[stmt.name] = values
+    return shape
+
+
 class _PyModule:
     """One Python harness file, split into the units an importer can reach."""
 
     def __init__(self, reader, script):
-        import ast
-
         self.script = script
         self.dir = posixpath.dirname(script)
         self.error = None
         self.env = {}
         self.defs = set()
         self.units = {}
-        text = reader.tree.read(script)
-        tree_ast = _py_parse(text)
-        if tree_ast is None:
+        shape = _py_shape(reader.tree.read(script))
+        if shape is None:
             self.error = "does not parse as Python"
             return
-        self.ast = tree_ast
-        parents = {}
-        for node in ast.walk(tree_ast):
-            for child in ast.iter_child_nodes(node):
-                parents[id(child)] = node
-        self.parents = parents
-        # Top-level units: each def or class, the `__main__` guard, and the
-        # rest of the module, which an import always executes.
-        self.unit_of = {}
-        for stmt in tree_ast.body:
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                unit = stmt.name
-                self.defs.add(stmt.name)
-            elif (
-                isinstance(stmt, ast.If)
-                and isinstance(stmt.test, ast.Compare)
-                and isinstance(stmt.test.left, ast.Name)
-                and stmt.test.left.id == "__name__"
-            ):
-                unit = "<main>"
-            else:
-                unit = "<module>"
-            for node in ast.walk(stmt):
-                self.unit_of[id(node)] = unit
-            self.units.setdefault(unit, []).append(stmt)
-        self.imports = []
-        self.syspath_nodes = set()
-        for node in ast.walk(tree_ast):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.imports.append((self.unit_of.get(id(node)), alias.name,
-                                         None, node.lineno))
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                names = [a.name for a in node.names]
-                self.imports.append((self.unit_of.get(id(node)), node.module,
-                                     None if "*" in names else names, node.lineno))
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("insert", "append")
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "path"
-                and isinstance(node.func.value.value, ast.Name)
-                and node.func.value.value.id == "sys"
-            ):
-                for arg in node.args:
-                    for sub in ast.walk(arg):
-                        self.syspath_nodes.add(id(sub))
-        # Loop variables over a literal tuple, so `HERE / n for n in ("A",
-        # "B")` names A and B rather than reading as a computed join.
-        self.loop_literals = {}
-        for node in ast.walk(tree_ast):
-            gens = []
-            if isinstance(node, ast.For):
-                gens.append((node.target, node.iter))
-            elif isinstance(node, ast.comprehension):
-                gens.append((node.target, node.iter))
-            for target, it in gens:
-                if (
-                    isinstance(target, ast.Name)
-                    and isinstance(it, (ast.Tuple, ast.List))
-                    and it.elts
-                    and all(
-                        isinstance(e, ast.Constant) and isinstance(e.value, str)
-                        for e in it.elts
-                    )
-                ):
-                    self.loop_literals.setdefault(target.id, set()).update(
-                        e.value for e in it.elts
-                    )
-        # Top-level functions whose every `return` is a string literal (or a
-        # conditional between two), so `HERE / matrix_name(scope)` names
-        # what matrix_name can return rather than reading as computed.
-        self.literal_returns = {}
-        for stmt in tree_ast.body:
-            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            values = set()
-            returns = [n for n in ast.walk(stmt) if isinstance(n, ast.Return)]
-            for ret in returns:
-                options = (
-                    [ret.value.body, ret.value.orelse]
-                    if isinstance(ret.value, ast.IfExp) else [ret.value]
-                )
-                if not all(
-                    isinstance(o, ast.Constant) and isinstance(o.value, str)
-                    for o in options
-                ):
-                    values = None
-                    break
-                values |= {o.value for o in options}
-            if returns and values:
-                self.literal_returns[stmt.name] = values
+        self.ast = shape.ast
+        self.parents = shape.parents
+        self.unit_of = shape.unit_of
+        self.units = shape.units
+        self.defs = shape.defs
+        self.imports = shape.imports
+        self.syspath_nodes = shape.syspath_nodes
+        self.loop_literals = shape.loop_literals
+        self.literal_returns = shape.literal_returns
         self.module_files = {}
 
     def resolve_imports(self, reader):
@@ -1929,6 +1988,9 @@ class Map:
         # files some step's scripts reach, and the harness files none does
         self.reached = set()
         self.unread = {}
+        # gate id -> the script files rule A says its steps run (rule I reads
+        # them for a subcommand launch)
+        self.code = {}
         self._build()
 
     def add(self, path, obs):
@@ -2027,6 +2089,7 @@ class Map:
                     exact = {script: runs}
                     code = {script}
                     own = set()
+                self.code.setdefault(gate.id, set()).update(code)
                 for path, why in exact.items():
                     self.reached.add(path)
                     self.add(path, Observation("exact", gate.id, why, gate.tag_only))
@@ -2427,6 +2490,7 @@ class Map:
         self._rule_f()
         self._rule_g()
         self._rule_h()
+        self._rule_i()
 
     def _harness_unread(self):
         """Files in a harness directory that no step's scripts reach.
@@ -2494,6 +2558,112 @@ class Map:
                     )
                     self.add(f"{project}/dawn.toml", obs)
                     self.add_under(f"{project}/src", obs)
+
+    # ---- rule I -------------------------------------------------------
+    def _rule_i(self):
+        """A gate that starts `dawn lsp` or `dawn doc` runs that subcommand's
+        own modules.
+
+        Rule B reaches a compiler module only when a script spells its path,
+        so a module the server grew after its harnesses were written (#389:
+        lsp/lspv.dawn, the hover value text) was attributed to no LSP gate
+        while lsp/lspq.dawn, which one mutation harness happens to name, was.
+        This reads the attribution off the tree instead: the arm in the CLI
+        dispatch names the entry, the import graph names what only that entry
+        reaches, and a gate's scripts say whether it starts the subcommand.
+        """
+        tree = self.tree
+        imports = compiler_imports(tree)
+        importers = {}
+        for f, edges in imports.items():
+            for target in edges:
+                importers.setdefault(target, set()).add(f)
+        entry_layer = {f for f in imports if "/" not in f[len(COMPILER_SRC):]}
+        if not imports or entry_layer == set(imports):
+            self.problems.append(
+                f"{RULE_I_VOID}: {COMPILER_SRC} has no layer below its root "
+                "files, so no module can be owned by one subcommand"
+            )
+            return
+        entries = {}
+        for word in ENTERED_SUBCOMMANDS:
+            found, problem = subcommand_entries(tree, word, importers, entry_layer)
+            if problem:
+                self.problems.append(f"{RULE_I_VOID} for `dawn {word}`: {problem}")
+            else:
+                entries[word] = found
+
+        # Owned: reached from some entry, and imported by nothing but owned
+        # modules and the entry layer. The entry layer imports a module to
+        # dispatch to it, which is why front/docs.dawn, imported by doc.dawn
+        # and by the server, belongs to both subcommands and to no other.
+        owned = set().union(*entries.values()) if entries else set()
+        grew = True
+        while grew:
+            grew = False
+            for f in sorted({t for o in owned for t in imports.get(o, ())}):
+                if f in owned or f in entry_layer:
+                    continue
+                if importers.get(f, set()) <= owned | entry_layer:
+                    owned.add(f)
+                    grew = True
+        reach = {}
+        for word, found in entries.items():
+            seen, todo = set(found), list(found)
+            while todo:
+                for t in imports.get(todo.pop(), ()):
+                    if t in owned and t not in seen:
+                        seen.add(t)
+                        todo.append(t)
+            reach[word] = seen
+            # The issue's other half: a file beside the entry that the entry
+            # does not own is either dead or imported from below the entry
+            # layer, and in both cases nothing says the gates that start this
+            # subcommand run it. Refused rather than left unattributed.
+            for entry in sorted(found - entry_layer):
+                directory = posixpath.dirname(entry)
+                for f in sorted(imports):
+                    if posixpath.dirname(f) == directory and f not in seen:
+                        self.problems.append(
+                            f"{f} sits {RULE_I_UNREACHED} `dawn {word}` "
+                            f"({entry}) and that entry does not own it: "
+                            "nothing imports it, or a module below the entry "
+                            "layer does, so no gate that starts the "
+                            "subcommand is known to run it"
+                        )
+
+        for gate in self.gates:
+            sources = [
+                (c, tree.read(c), Path(c).suffix)
+                for c in sorted(self.code.get(gate.id, ()))
+                if c not in UNSCRAPED and Path(c).suffix in SCRIPT_SUFFIXES
+            ] + [(gate.where(), command, ".sh") for command in gate.commands]
+            for word in sorted(reach):
+                starter = next(
+                    (where for where, text, suffix in sources
+                     if launches(text, suffix, word)),
+                    None,
+                )
+                if starter is None:
+                    continue
+                for f in sorted(reach[word]):
+                    how = (
+                        f"this module is the entry of the `{word}` arm in "
+                        f"{CLI_DISPATCH}"
+                        if f in entries[word]
+                        else "this module is reached from that arm's entry "
+                        "and imported only by that subcommand's modules or "
+                        "the entry layer"
+                    )
+                    self.add(
+                        f,
+                        Observation(
+                            "coarse",
+                            gate.id,
+                            f"{starter} starts `dawn {word}`; {how}",
+                            gate.tag_only,
+                        ),
+                    )
 
     # ---- queries ------------------------------------------------------
     def verdict(self, path, additional_std_modules=None):
@@ -2709,6 +2879,153 @@ def couplings(tree):
             for script in owners.get(lit, ()):
                 out.append((f, script, lit))
     return out
+
+
+# ---------------------------------------------------------------------------
+# rule I: the modules a subcommand enters
+
+
+# `use a/b`, `use a/b as c`, `use a/b.{x, y}`, at the start of a line. A brace
+# list may wrap, so it runs to its closing brace rather than to the line end.
+DAWN_USE = re.compile(
+    r"^[ \t]*(?:pub[ \t]+)?use[ \t]+"
+    r"(?P<path>[a-z_][a-z_0-9]*(?:/[a-z_][a-z_0-9]*)*)"
+    r"(?:[ \t]+as[ \t]+(?P<alias>[a-z_][a-z_0-9]*))?"
+    r"(?:\.\{(?P<names>[^}]*)\})?",
+    re.M,
+)
+DAWN_TOP_FN = re.compile(r"^(?:pub(?:\(pkg\))? )?fn ([a-z_][A-Za-z_0-9]*)", re.M)
+DAWN_QUALIFIED_CALL = re.compile(r"\b([a-z_][A-Za-z_0-9]*)\.[a-z_][A-Za-z_0-9]*\(")
+DAWN_BARE_CALL = re.compile(r"(?<![.\w])([a-z_][A-Za-z_0-9]*)\(")
+ARM_END = re.compile(r"\}\s*else\b")
+
+
+def compiler_imports(tree):
+    """Compiler module -> the compiler modules it imports, read from `use`
+    lines. A `use` of std, a package or a Java class names no file under
+    selfhost/src and is not an edge here. A `use` line inside a string
+    literal (a test's fixture source) reads as an edge too; that can only
+    give a module one more importer, which rule I answers by claiming less.
+    """
+    out = {}
+    for f in tree.files:
+        if not (f.startswith(COMPILER_SRC) and f.endswith(".dawn")):
+            continue
+        edges = set()
+        for m in DAWN_USE.finditer(tree.read(f)):
+            target = f"{COMPILER_SRC}{m.group('path')}.dawn"
+            if target != f and target in tree.fileset:
+                edges.add(target)
+        out[f] = edges
+    return out
+
+
+def subcommand_entries(tree, word, importers, entry_layer):
+    """The modules `dawn <word>` enters, read from its arm in CLI_DISPATCH.
+
+    The arm runs from `mode == "<word>"` to the next `} else`. A call in it
+    is resolved through the dispatch file's own `use` lines: a name from a
+    brace list, or `alias.f(`. A call to a function the dispatch file defines
+    itself is followed one level, because `run_doc` is how the `doc` arm is
+    written. Of the modules so found, the entries are those nothing but the
+    entry layer imports: a module the compiler proper also imports (the
+    analyzer every subcommand loads) is the pipeline, not this subcommand.
+    -> (entries, problem or None).
+    """
+    text = tree.read(CLI_DISPATCH)
+    if not text:
+        return set(), f"{CLI_DISPATCH} is not in the tree"
+    names, aliases = {}, {}
+    for m in DAWN_USE.finditer(text):
+        target = f"{COMPILER_SRC}{m.group('path')}.dawn"
+        if target not in tree.fileset:
+            continue
+        if m.group("names") is not None:
+            for name in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", m.group("names")):
+                names[name] = target
+        else:
+            aliases[m.group("alias") or m.group("path").rsplit("/", 1)[-1]] = target
+    starts = [(m.start(), m.group(1)) for m in DAWN_TOP_FN.finditer(text)]
+    bodies = {
+        name: text[at : starts[i + 1][0] if i + 1 < len(starts) else len(text)]
+        for i, (at, name) in enumerate(starts)
+    }
+
+    def callees(body):
+        found, local = set(), set()
+        for m in DAWN_QUALIFIED_CALL.finditer(body):
+            if m.group(1) in aliases:
+                found.add(aliases[m.group(1)])
+        for m in DAWN_BARE_CALL.finditer(body):
+            if m.group(1) in names:
+                found.add(names[m.group(1)])
+            elif m.group(1) in bodies:
+                local.add(m.group(1))
+        return found, local
+
+    test = f'mode == "{word}"'
+    if text.count(test) != 1:
+        return set(), (
+            f"{CLI_DISPATCH} tests `{test}` {text.count(test)} time(s), not "
+            f"once, so the `{word}` arm cannot be read"
+        )
+    at = text.index(test)
+    end = ARM_END.search(text, at)
+    arm = text[at : end.start() if end else len(text)]
+    found, local = callees(arm)
+    for name in sorted(local):
+        found |= callees(bodies[name])[0]
+    entries = {
+        f for f in found
+        if f != CLI_DISPATCH and importers.get(f, set()) <= entry_layer
+    }
+    if not entries:
+        return set(), (
+            f"the `{word}` arm of {CLI_DISPATCH} calls into no module that "
+            "only the entry layer imports"
+        )
+    return entries, None
+
+
+def _toolchain_word(word):
+    return word.startswith("$") or word.endswith(("bin/dawn", "dawnc", ".jar"))
+
+
+@lru_cache(maxsize=4096)
+def launches(text, suffix, word):
+    """The places a script starts the toolchain with subcommand `word`.
+
+    Shell: the word right after something that is a toolchain (a variable,
+    a path ending in bin/dawn or dawnc, a jar). Python, JavaScript and the
+    Python a shell script carries in a heredoc: the quoted word as the list
+    element after one, `[cli, "lsp"]`, `["./bin/dawn", "lsp"]`,
+    `java_command(jar, "lsp")`. Both shapes need the toolchain next to the
+    word, which is what keeps `git add` and `ROOT / "doc"` out of it.
+
+    Cached by content, as `literal_matches` is: every gate rereads the same
+    shared scripts and every mutant tree rebuilds the map, and the shell
+    lexer is most of this rule's cost. A line without the word is never lexed.
+    """
+    if word not in text:
+        return ()
+    body = strip_comments(text)
+    hits = []
+    if suffix == ".sh":
+        for line in body.splitlines():
+            if word not in line:
+                continue
+            words = shell_words(line)
+            for i in range(1, len(words)):
+                if words[i] == word and _toolchain_word(words[i - 1]):
+                    hits.append(line.strip())
+                    break
+    listed = re.compile(
+        r"""(?:\b[A-Za-z_][\w.]*(?:\[[^\]\n]*\])?"""
+        r"""|["'][^"'\n]*(?:bin/dawn|dawnc|\.jar)["'])"""
+        r"""\s*,\s*["']""" + re.escape(word) + r"""["']"""
+    )
+    hits += [m.group(0) for m in listed.finditer(body)]
+    return tuple(hits)
 
 
 # ---------------------------------------------------------------------------
@@ -3234,6 +3551,7 @@ class Baseline:
         self.import_edge = choose_import_edge(gm)
         self.read_edge = choose_read_edge(gm)
         self.step_harness = choose_step_harness(gm)
+        self.subcommand_probe = choose_subcommand_probe(gm)
 
 
 def _gate_sees(gm, gate_id, path):
@@ -3412,6 +3730,29 @@ def choose_js_gate(gm):
     if not modules or manifest is None:
         return None
     return script, modules[0], manifest
+
+
+RULE_I_PROBE_WORD = "lsp"
+# The module the probe mutant has import the chosen one. Any module below the
+# entry layer would do; this one is imported by every subcommand, so it is the
+# least likely to stop existing.
+RULE_I_PROBE_IMPORTER = "selfhost/src/driver/analyze.dawn"
+
+
+def choose_subcommand_probe(gm):
+    """A module rule I gives the server's gates through the import graph
+    alone: outside the entry's own directory (so the directory check cannot
+    answer for it) and not an entry. front/docs.dawn on today's tree, the
+    module #389's batch added beside the hover."""
+    marker = f"starts `dawn {RULE_I_PROBE_WORD}`; this module is reached"
+    found = sorted(
+        path
+        for path, obs in gm.by_path.items()
+        if path.startswith(COMPILER_SRC)
+        and not path.startswith(COMPILER_SRC + RULE_I_PROBE_WORD + "/")
+        and any(marker in o.why for o in obs)
+    )
+    return found[0] if found else None
 
 
 def choose_coupling(tree):
@@ -3610,6 +3951,29 @@ ASSERTIONS = [
         "file by file rather than through the whole directory (#169)",
         lambda c, b: b.read_edge is not None
         and _gate_sees(c.map, b.read_edge[0], b.read_edge[2]),
+    ),
+    (
+        "subcommand_arm_readable",
+        "rule I can read which module each followed subcommand enters out of "
+        "the CLI dispatch",
+        lambda c, b: _clean(c.problems, RULE_I_VOID),
+    ),
+    (
+        "subcommand_module_probe",
+        "rule I gives a gate that starts the language server every module "
+        "only the server reaches, through the import graph rather than a "
+        "script naming the file (#389)",
+        lambda c, b: b.subcommand_probe is not None
+        and any(
+            f"starts `dawn {RULE_I_PROBE_WORD}`" in obs.why
+            for obs in c.map.verdict(b.subcommand_probe)
+        ),
+    ),
+    (
+        "subcommand_directory_owned",
+        "every module beside a subcommand's entry is one that entry owns, so "
+        "a new file under selfhost/src/lsp/ cannot sit there unattributed",
+        lambda c, b: _clean(c.problems, RULE_I_UNREACHED),
     ),
     (
         "unwatched_floor",
@@ -4160,6 +4524,46 @@ def mutants(base):
                 )
             },
         ),
+        Mutant(
+            "doc-arm-read-twice",
+            "rule I's premise: the dispatch tests the `doc` word twice, so "
+            "which module the subcommand enters is no longer one answer. The "
+            "`doc` word rather than `lsp`, so the probe below keeps its own "
+            "red",
+            edits={
+                CLI_DISPATCH: swap(
+                    '} else if mode == "doc" {',
+                    '} else if mode == "doc" && mode == "doc" {',
+                )
+            },
+        ),
+        Mutant(
+            "server-module-imported-from-below",
+            "rule I's import half: a module below the entry layer starts "
+            "importing the probe, so it is the compilation pipeline's as much "
+            "as the server's and the server's gates stop being its observers. "
+            "Without the ownership test every module the server imports, the "
+            "checker included, would be attributed to every LSP gate",
+            edits={
+                RULE_I_PROBE_IMPORTER: append(
+                    "\nuse "
+                    + base.subcommand_probe[len(COMPILER_SRC):-len(".dawn")]
+                    + "\n"
+                )
+            },
+        ),
+        Mutant(
+            "lsp-module-nobody-imports",
+            "the other half of #389's acceptance: a new file under "
+            "selfhost/src/lsp/ that the server does not reach has no LSP gate, "
+            "and that has to be a failure rather than a quiet gap",
+            files=lambda fs: fs + ["selfhost/src/lsp/gate_map_mutant.dawn"],
+            edits={
+                "selfhost/src/lsp/gate_map_mutant.dawn": provide(
+                    "pub fn gate_map_mutant() -> Int = 1\n"
+                )
+            },
+        ),
     ]
 
 
@@ -4169,6 +4573,12 @@ def observe(base_tree, base_record):
     problems = []
     if base.coupling is None:
         return {}, ["rule E finds no coupling in this tree, so it has no mutant"]
+    if base.subcommand_probe is None:
+        return {}, [
+            "rule I gives no module outside the server's directory to the "
+            "server's gates in this tree, so its import half has nothing to "
+            "mutate"
+        ]
     if base.js_gate is None:
         return {}, [
             "no JavaScript gate in this tree names a compiler module through a "
