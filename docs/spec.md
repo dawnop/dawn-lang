@@ -3024,10 +3024,10 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 由限定或选择性引入消歧。
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
-`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的
+`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、`parse_int`（std/fmt）、内建的
 <!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
 `discard`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
-`sort_by`/`join`/`parse_int`/`parse_float`/`parse_int_radix`/`code_points`/
+`sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
 `char_is_lower`/`char_is_space`/`args`/`cast`，共一屏以内
 （全集见[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 生成）。
@@ -3061,7 +3061,7 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**p
 > `x.fn(...)` 限定调用。哪边实现（内建 or std 包装）不影响拼写与语义
 > （[`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md)）。
 
-**数字的文本形式。** `parse_int` / `parse_float` / `parse_int_radix` 的**接受语言是这段
+**数字的文本形式。** `parse_int` / `parse_float` 的**接受语言是这段
 EBNF**，由 `std/fmt` 自己的扫描器实施（两后端不再各自委托宿主解析器的文法；宿主只在
 `parse_float` 通过校验后做十进制→二进制的**正确舍入**，IEEE 754 最近偶数——在该子集上
 `strtod` 与 `Double.parseDouble` 是同一个函数）。首尾空白先按 **Dawn 自己的空白表**修剪
@@ -3075,15 +3075,18 @@ exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
 radix  = [ "+" | "-" ] rdigit { rdigit }
 ```
 
-`parse_int_radix` 用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`（值 = 10..35，大小写同值），
-数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。整数超出 64 位范围是 `None` 不是环绕。
+`parse_int(s, radix: r)`（`radix` 缺省 10）用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`
+（值 = 10..35，大小写同值），数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。radix 为 10
+时它与 `int` 是同一语言。0.83.0 以前 radix 版本是另一个 builtin `parse_int_radix`，现已并入
+（`std/moved.txt` 给提示）。整数超出 64 位范围是 `None` 不是环绕。
 **有意排除**（今天的宿主解析器有的收、Dawn 一律拒绝）：下划线、`0x` 前缀与十六进制浮点
 （`0x1p3`）、`f/F/d/D` 后缀、`inf`/`nan` 等小写变体、带符号的 `NaN` 与 `+Infinity`
 （合法特殊拼写恰是 `to_string` 能输出的三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等
 非 ASCII 数字（宿主的 `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
 
 接受语言属于函数本身，与调用方式无关：`let f = parse_float` 之后 `f(s)` 与 `parse_float(s)`
-是同一个函数，`parse_int` / `parse_int_radix` 同理。v0.79.0 及以前经函数值调用会绕过这段
+是同一个函数，`parse_int` 同理——只是它取作函数值时默认值丢失（§3.1），`let g = parse_int`
+的类型是 `fn(String, Int) -> Option[Int]`。v0.79.0 及以前经函数值调用会绕过这段
 EBNF（`f("1.5d")` 答 `Some(1.5)`），`parse_int` 取作函数值则编译期 panic；这是实现缺陷，
 按 bug 修正而非语言变更（issue #283，
 [builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md)）。

@@ -81,7 +81,7 @@ MUTATIONS = {
     ),),
     "omit-public-function-doc": ((
         DOC,
-        '    ("parse_int_radix", "parse an integer in base 2 through 36; None on malformed input")\n',
+        '    ("char_is_letter", "whether a character is a Unicode letter"),\n',
         "",
     ),),
     "omit-prelude-function-doc": ((

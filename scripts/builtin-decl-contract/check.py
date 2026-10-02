@@ -1101,7 +1101,7 @@ def mutate_p3_param_name(mirror, dump, interp, lower, header, export):
 
 def mutate_p3_return_type(mirror, dump, interp, lower, header, export):
     return (
-        _sub(mirror, "fn parse_int(s: String) -> Option[Int]", "fn parse_int(s: String) -> Int"),
+        _sub(mirror, "fn parse_float(s: String) -> Option[Float]", "fn parse_float(s: String) -> Float"),
         dump,
         interp,
         lower,
@@ -1115,7 +1115,7 @@ def mutate_p4_add_pub(mirror, dump, interp, lower, header, export):
 
 
 def mutate_p4_drop_pub(mirror, dump, interp, lower, header, export):
-    return _sub(mirror, "\npub fn parse_int_radix(", "\nfn parse_int_radix("), dump, interp, lower, header, export
+    return _sub(mirror, "\npub fn parse_float(", "\nfn parse_float("), dump, interp, lower, header, export
 
 
 def mutate_p5_move_marker(mirror, dump, interp, lower, header, export):
@@ -1123,27 +1123,30 @@ def mutate_p5_move_marker(mirror, dump, interp, lower, header, export):
     not: one edit, both directions of P5."""
     lines = mirror.split("\n")
     off = _index_of(lines, "fn bytes_utf8(s: String) -> Bytes" + MARKER)
-    on = _index_of(lines, "pub fn parse_int(s: String) -> Option[Int]")
+    on = _index_of(lines, "pub fn parse_float(s: String) -> Option[Float]")
     lines[off] = lines[off][: -len(MARKER)]
     lines[on] = lines[on] + MARKER
     return "\n".join(lines), dump, interp, lower, header, export
 
 
-def mutate_m1_arm_for_parse_int(mirror, dump, interp, lower, header, export):
-    """Give `parse_int` its interpreter arm back: the dead arm #185 removed.
-    Lowering rewrites every call to it, so the name is in the lowered group
-    and an arm for it is in two groups at once."""
-    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_int", '), lower, header, export
+def mutate_m1_arm_for_parse_float(mirror, dump, interp, lower, header, export):
+    """Give a lowered parser an interpreter arm: the dead `parse_int` arm #185
+    removed, on the one numeric parser still a builtin since K19 made
+    `parse_int` a std function. Lowering rewrites every call to `parse_float`,
+    so the name is in the lowered group and an arm for it is in two groups at
+    once."""
+    return mirror, dump, _sub(interp, '"str_lower", "str_upper", ', '"str_lower", "str_upper", "parse_float", '), lower, header, export
 
 
-def mutate_p5_mark_parse_int_radix(mirror, dump, interp, lower, header, export):
-    """Put back the marker #185 took off: `parse_int_radix` folds through
-    std/fmt's Core, so a mirror saying a `const` cannot use it is wrong."""
+def mutate_p5_mark_parse_float(mirror, dump, interp, lower, header, export):
+    """The marker #185 took off `parse_int_radix`, put on the lowered parser
+    left in the table since K19: `parse_float` folds through std/fmt's Core,
+    so a mirror saying a `const` cannot use it is wrong."""
     return (
         _sub(
             mirror,
-            "pub fn parse_int_radix(s: String, radix: Int) -> Option[Int]\n",
-            "pub fn parse_int_radix(s: String, radix: Int) -> Option[Int]" + MARKER + "\n",
+            "pub fn parse_float(s: String) -> Option[Float]\n",
+            "pub fn parse_float(s: String) -> Option[Float]" + MARKER + "\n",
         ),
         dump,
         interp,
@@ -1283,10 +1286,10 @@ MUTANTS = [
     ("p3-rename-a-parameter", mutate_p3_param_name, "P3"),
     ("p3-widen-a-return-type", mutate_p3_return_type, "P3"),
     ("p4-publish-str_lower", mutate_p4_add_pub, "P4"),
-    ("p4-hide-parse_int_radix", mutate_p4_drop_pub, "P4"),
+    ("p4-hide-parse_float", mutate_p4_drop_pub, "P4"),
     ("p5-move-a-comptime-marker", mutate_p5_move_marker, "P5"),
-    ("m1-arm-for-parse_int", mutate_m1_arm_for_parse_int, "M1"),
-    ("p5-mark-parse_int_radix", mutate_p5_mark_parse_int_radix, "P5"),
+    ("m1-arm-for-parse_float", mutate_m1_arm_for_parse_float, "M1"),
+    ("p5-mark-parse_float", mutate_p5_mark_parse_float, "P5"),
     ("p6-drop-sort_by-s-effect-binder", mutate_p6_unbind_sort_by, "P6"),
     ("p6-skip-a-signature-that-reads-back", mutate_p6_skip_popcount, "P6"),
     ("p7-drop-list_push-s-owned-position", mutate_p7_drop_list_push, "P7"),

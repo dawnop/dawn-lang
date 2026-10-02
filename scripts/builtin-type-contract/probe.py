@@ -27,7 +27,6 @@ DOCUMENTED_TYPES = [
 PRELUDE_ADTS = {"Option", "Result", "ForeignError"}
 HIDDEN_TYPES = {"Array", "Never"}
 NEWLY_DOCUMENTED_FUNCTIONS = {
-    "parse_int_radix",
     "char_is_letter",
     "char_is_digit",
     "char_is_alnum",
