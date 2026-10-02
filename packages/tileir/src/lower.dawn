@@ -1435,11 +1435,26 @@ fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_fals
 ## operation defined, or one a finished loop body defined, is refused rather
 ## than numbered.
 pub fn lower(prog: TileProg) -> Kernel = {
+  let (k, _spans) = lower_spans(prog)
+  k
+}
+
+## `lower(prog)`, and beside it which instructions each operation became:
+## one half-open range of `Kernel.body` per entry of `prog.ops`, in order.
+## The ranges are consecutive and the closing `Ret` is in none of them. A
+## pointer ladder belongs to the operation that FIRST needed it, because that
+## is where it is emitted; a later operation that reuses it is just its own
+## instruction. This is the same loop `lower` runs, not a second one, so the
+## table and the instructions cannot disagree.
+pub fn lower_spans(prog: TileProg) -> (Kernel, List[(Int, Int)]) = {
   var l = L { next: 0, names: map.empty(), tys: map.empty(), closed: map.empty(), memo: map.empty(), body: [] }
+  var spans: List[(Int, Int)] = []
   for op in prog.ops {
+    let before = len(l.body)
     l = lower_op(l, op)
+    spans = spans ++ [(before, len(l.body))]
   }
-  Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }
+  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }, spans)
 }
 
 ## The values an instruction defines, in definition order.
