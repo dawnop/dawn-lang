@@ -388,6 +388,19 @@
 #                            count -> insert_tile's Func section is two bytes
 #                            short (one an insert) and tileiras counts the
 #                            indices
+#     loop-return-as-break   every `return` is written with `break`'s opcode.
+#                            The four terminators share one record shape, so
+#                            the file is the same length; the first one the
+#                            reader meets in loop_return is the early exit
+#                            inside the loop, and a `break` with no operands
+#                            does not match a loop that carries three values
+#                            (the token is one of them)
+#     ftof-zero-as-nearest-away
+#                            `ftof` toward zero is written as ties away from
+#                            zero -> attr_ftof's text is untouched, the file
+#                            the same length, and tileiras cites bytecode
+#                            13.4's table for the first pair that does not
+#                            take the mode (f64 to f32)
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time -- one local run measured
@@ -467,7 +480,7 @@ kernels=(
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
-  insert_tile powi_sweep)
+  insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -578,6 +591,8 @@ mutants=(
   fpowi-as-fpowf
   insert-source-and-destination-swapped
   insert-index-dropped
+  loop-return-as-break
+  ftof-zero-as-nearest-away
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2263,6 +2278,39 @@ if run_item insert-index-dropped; then
   mutant_project insert-index-dropped bytecode.dawn
   writer_mutant_checks insert-index-dropped insert_tile func-two-short \
     "'cuda_tile.insert' op expected 2 indices, but got 1"
+fi
+
+# 74. Every `return` is written with `break`'s opcode (0x0A for 0x5C). The
+#     four terminators -- return, break, continue, yield -- share one record
+#     shape (opcode, a result count of 0, an operand count, the operands),
+#     so the file is the same length and every record parses. loop_return
+#     holds two returns, the early exit inside its loop and the entry's
+#     last, and the reader meets the first one first: a `break` there is
+#     legal in position (an `if` inside a `loop`) and wrong in TYPE, because
+#     it hands the loop no values and the loop carries three, the ordering
+#     token among them. So "lower the early return to a break" is not a
+#     program the device could be asked about; the token alone makes it a
+#     layer-1 refusal. The 13.3 boundary is not a verdict here: 13.4.92
+#     assembles loop_return's bytes with the header patched to 13.3 into the
+#     same cubin, and only 13.3.36 refuses them (`must be used within a
+#     cuda_tile.entry, or cuda_tile.if operation`; measured, knife T17).
+if run_item loop-return-as-break; then
+  mutant_project loop-return-as-break bytecode.dawn
+  writer_mutant_checks loop-return-as-break loop_return same-size \
+    "'cuda_tile.break' op operand types must correspond to the parent loop result types: () vs ('!cuda_tile.tile<128xi32>', '!cuda_tile.tile<128xi32>', '!cuda_tile.token')"
+fi
+
+# 75. `ftof` toward zero is written with `nearest_away` (7 for 1). One byte
+#     either way, so the file is the same length; what refuses it is the
+#     table bytecode 13.4 put in FToFOp::verify, and attr_ftof's first
+#     `zero` conversion is f64 to f32, the one narrowing that takes every
+#     IEEE mode but this one. The same mode on attr_ftof's f32 to tf32
+#     conversion would be legal, which is why the table is per pair of
+#     formats and not per mode.
+if run_item ftof-zero-as-nearest-away; then
+  mutant_project ftof-zero-as-nearest-away bytecode.dawn
+  writer_mutant_checks ftof-zero-as-nearest-away attr_ftof same-size \
+    "'cuda_tile.ftof' op invalid rounding mode specified for conversion from f64 to f32. Only 'nearest_even', 'zero', 'negative_inf', and 'positive_inf' are supported"
 fi
 
 _item_tick ""

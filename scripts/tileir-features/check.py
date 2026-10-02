@@ -58,7 +58,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
-                 "T12", "T13", "T15", "T16", "TA", "TG"}
+                 "T12", "T13", "T15", "T16", "T17", "TA", "TG"}
 
 
 class Ledger:
@@ -959,10 +959,12 @@ def feature_cases(good, bytecode, files, ledger):
          good.replace("tanh                     | 0x6A | 13.1 | implemented   | 7b ",
                       "tanh                     | 0x6A | 13.1 | unimplemented | 7b "),
          "so its knife is a planned one"),
+        # Knife T17 added attr_xchg and its mutant to this row, so the
+        # replacement keeps both goldens and drops all three mutants.
         ("a layer-3 claim with no mutant named",
-         good.replace("| 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,"
-                      "mutant:atomic-as-plain-store",
-                      "| 3 | golden:histogram                                        "),
+         good.replace("| 3 | golden:histogram,golden:attr_xchg,mutant:atomic-rmw-claims-weak-ordering,"
+                      "mutant:atomic-as-plain-store,mutant:rmw-xchg-as-add",
+                      "| 3 | golden:histogram,golden:attr_xchg                       "),
          "claims layer 3 and names no mutant"),
         ("a mutant nobody defines",
          good.replace("mutant:addf-no-rounding", "mutant:addf-no-rounder "),
@@ -1203,22 +1205,20 @@ def attr_cases(good, bytecode, files, ledger):
          good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
                       "rounding.approx              | 4 | 13.1 | implemented   | T14"),
          "knife 'T14' cannot be a planned one"),
-        # No row of this table is `unimplemented` any more (knife T10 took
-        # the last one), so this case makes one out of a DEFERRED row: the
-        # rule under test is the status-to-knife pairing, and a deferred
-        # row carries the same `-` in the knife column that a landed knife
-        # would be wrong in. Knife T11 implemented every padding value, so
-        # this anchor moved off padding.neg_inf onto the atomic modes; knife
-        # T13 then took seven of those eight, and `rmw.xchg` is what is
-        # left. It is the LAST deferred row in the three ledgers, and the
-        # only one an atomic reduction cannot ask for: a reduction that
-        # answers nothing has nothing to exchange.
+        # The anchor has moved with the table. It was a deferred row from
+        # knife T10 on (padding.neg_inf, then the atomic modes), and the last
+        # of those, `rmw.xchg`, became implemented with knife T17. What is
+        # left unimplemented is 13.4's `ptr_attr.none`, planned for T18, so
+        # the case puts it under a knife that HAS landed.
         ("an unimplemented row under a knife that has landed",
-         good.replace("rmw.xchg                     | 9 | 13.1 | deferred      | -  ",
-                      "rmw.xchg                     | 9 | 13.1 | unimplemented | T8 "),
+         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T18 ",
+                      "ptr_attr.none                | 0 | 13.4 | unimplemented | T8  "),
          "so its knife is a planned one"),
+        # No row is deferred since knife T17, so this one makes the T18 row
+        # deferred and leaves its exemption column at `-`.
         ("a deferred row with no reason",
-         good.replace("| no-client-kernel", "| -"),
+         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T18 ",
+                      "ptr_attr.none                | 0 | 13.4 | deferred      | -   "),
          "is deferred with no named reason"),
         ("an empty ledger", "# nothing\n",
          "is a value of an attribute domain and has no row"),

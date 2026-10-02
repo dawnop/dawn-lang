@@ -55,10 +55,10 @@ research predicted 47% on 10-01 for exactly that reason). So each week
 needs at least 10 successful pushes, and each shape at least 10 on both
 sides, or the report is printed with "insufficient sample" and not judged.
 
-WHAT A TILE TRIGGER IS. Since 2026-09-30 tile.yml skips its six shards on
+WHAT A TILE TRIGGER IS. Since 2026-09-30 tile.yml skips its shards on
 a push whose git tree already passed it (its header has why), and such a
 run is one ~20s job that concludes success. So a trigger is a push run in
-which all six tile-golden shards concluded success; a deduplicated run is
+which every tile-golden shard concluded success; a deduplicated run is
 counted in its own row and not in the rate. The 20% limit is kept and now
 reads "the share of pushes that still run the shards".
 
@@ -103,6 +103,10 @@ TILE_RATE_LIMIT = 0.20    # tile.yml runs that ran the shards, per ci.yml push
 MIN_SAMPLE = 10           # successful pushes a side must have to be judged
 WEEK = timedelta(days=7)
 
+# The shards every run since 2026-09-11 has, which is what makes a run that
+# has all of them a run that ran the matrix. Knife T17 added tile-golden-7;
+# it is not listed, because a run from before it never had one and a run
+# after it that concluded success ran all seven anyway.
 TILE_SHARDS = tuple(f"tile-golden-{i}" for i in range(1, 7))
 GATES = ".github/workflows/gates.yml"
 HERE = Path(__file__).resolve().parent
@@ -142,7 +146,7 @@ def shape(run):
 
 
 def ran_shards(run):
-    """A tile.yml run that really ran: all six shards concluded success."""
+    """A tile.yml run that really ran: every shard concluded success."""
     return all(job in run.get("jobs", {}) for job in TILE_SHARDS)
 
 

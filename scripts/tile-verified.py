@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Has this exact git tree already passed tile.yml? Answer from the Actions API.
 
-tile.yml runs its six shards on every push to main that touches its paths.
+tile.yml runs its shards (seven since knife T17) on every push to main that touches its paths.
 In the week of 2026-09-22 .. 09-29 that was 19 pushes, and 17 of them ran on
 a git tree that a pull_request run of tile.yml had verified green about half
 an hour earlier: a rebase merge gives the commit a new SHA but leaves the
@@ -10,7 +10,7 @@ tree byte for byte the same (research-nightly-231, section two). None of the
 
 So the workflow records a verified tree and a push asks for the record first.
 The record is an artifact named `<prefix><tree>` (tile.yml sets the prefix,
-`tile-verified-v1-`), uploaded by tile-shards-complete only after all six
+`tile-verified-v1-`), uploaded by tile-shards-complete only after all the
 shards and the union check are green. This script is the question:
 
     tile-verified.py lookup --repo R --repo-id N --tree T --prefix P --event E

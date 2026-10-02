@@ -17,7 +17,7 @@
 use std/list
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM}
-use prog.{TileProg, TileOp, Global, GetGlobal, MakeToken, BlockId, Load, Store, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use prog.{TileProg, TileOp, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
@@ -327,7 +327,8 @@ fn int_signedness(op: String) -> String = match op {
 fn cast_attrs(op: String, to: String) -> String = match op {
   "itof" -> " signed rounding<nearest_even>"
   "ftoi" -> " signed rounding<nearest_int_to_zero>"
-  "ftof" -> if to == "f8E8M0FNU" { " rounding<zero>" } else { " rounding<nearest_even>" }
+  "ftoi_sat" -> " signed rounding<nearest_int_to_zero> saturating"
+  "ftof" | "ftof_zero" | "ftof_neg_inf" | "ftof_pos_inf" | "ftof_away" -> " rounding<${ftof_mode(op, to)}>"
   "exti" -> " unsigned"
   "extis" -> " signed"
   _ -> ""
@@ -338,7 +339,12 @@ fn cast_attrs(op: String, to: String) -> String = match op {
 # reason `shri` and `shru` are: the surface that spells one has to say
 # which, and the difference is a device answer on every operand whose top
 # bit is set.
-fn cast_spelling(op: String) -> String = if op == "extis" { "exti" } else { op }
+#
+# `ftoi_sat` and the four suffixed `ftof`s (knife T17) are the same two
+# opcodes again, under the `saturating` modifier and the other rounding
+# modes, and print as the opcode's own name with the attribute after it.
+fn cast_spelling(op: String) -> String =
+  if op == "extis" { "exti" } else if op == "ftoi_sat" { "ftoi" } else if str.starts_with(op, "ftof") { "ftof" } else { op }
 
 fn line(i: Instr) -> String = match i {
   MakeTok(dst) -> "${v(dst)} = make_token : token"
@@ -767,6 +773,41 @@ test "a loop is its header with the carried values, an if that breaks, and the c
   assert str.contains(text, "\n      continue %20, %18 : tile<8xf64>, token\n    }\n")
   # after the loop, the store takes the loop's results
   assert str.contains(text, "store_ptr_tko weak %23, %15 token=%16 :")
+}
+
+test "an early return inside a loop is an if around the dialect's bare return, and the conversions print the modifier and the mode" {
+  let p = TileProg {
+    hints: [],
+    name: "t17",
+    params: ["f64", "i32"],
+    globals: [],
+    ops: [
+      MakeToken(0),
+      BlockId(1, 0),
+      IdxConst(2, 8),
+      IdxMul(3, 1, 2),
+      Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, []),
+      Loop([4, 5], [6, 7], [8, 9], [
+        ConstI(10, "i1", [], 1),
+        If([], 10, [Return], [Yield([])]),
+        BinaryF(11, "addf", "f64", [8], 6, 6),
+        If([], 10, [Break([6, 7])], [Yield([])]),
+        Continue([11, 7])
+      ]),
+      Convert(12, "ftoi_sat", "f64", "i32", [8], 8),
+      Convert(13, "ftof_away", "f64", "f32", [8], 8),
+      Store(14, 1, "i32", 3, [8], [1], 12, None, 9, [])
+    ]
+  }
+  let text = render(p)
+  # the then-branch is `return` with no operands, the 13.1 spelling, in the
+  # place 13.4 first allowed it
+  assert str.contains(text, "\n      if %19 {\n        return\n      } else {\n        yield\n      }\n")
+  # the saturating modifier after the rounding mode, Ops.td's own order
+  assert str.contains(text, " = ftoi %15 signed rounding<nearest_int_to_zero> saturating : tile<8xf64> -> tile<8xi32>\n")
+  # (f64 to f32 does not take this mode; the recording holds that table and
+  # refuses it, the renderer only spells what it is given)
+  assert str.contains(text, " = ftof %15 rounding<nearest_away> : tile<8xf64> -> tile<8xf32>\n")
 }
 
 fn total_prog() -> TileProg = TileProg {

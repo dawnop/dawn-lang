@@ -73,7 +73,7 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
-use prog.{TileProg, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
+use prog.{TileProg, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
 use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
@@ -392,6 +392,19 @@ const OVERFLOW_NONE: Int = 0
 # both measured), and its default, which is why the text prints nothing.
 const ROUND_FULL: Int = 5
 
+# `rounding_mode`: nearest_away, round to nearest with ties AWAY from zero.
+# The one value bytecode 13.4 added to the enum (AttrDefs.td), and accepted
+# by `ftof` alone, on two kinds of pair: f32 to tf32 and an exact widening
+# (Ops.td's FToFOp table; prog.dawn's `ftof_modes` is that table here).
+const ROUND_NEAREST_AWAY: Int = 7
+
+# `ftoi`'s `saturating` (13.4) is its ONLY optional field, so it is bit 0 of
+# the flags varint the operation has carried since the same version
+# (`ftoi_has_flags`). The bit is what scripts/tileir-features/attrs.txt's
+# `unit.saturating` row names; `ftoi_flag_word` is what each spelling of the
+# conversion writes into the word.
+const FTOI_FLAG_SATURATING: Int = 1
+
 # `print_tko`'s one optional field is its `token` OPERAND, which arrived in
 # 13.2; there is no optional attribute, so the token takes bit 0. The flags
 # varint itself is written only from 13.2 on
@@ -690,7 +703,8 @@ fn int_attrs(op: String) -> List[Int] = match op {
 fn cast_op(op: String) -> Int = match op {
   "itof" -> OP_ITOF
   "ftoi" -> OP_FTOI
-  "ftof" -> OP_FTOF
+  "ftoi_sat" -> OP_FTOI
+  "ftof" | "ftof_zero" | "ftof_neg_inf" | "ftof_pos_inf" | "ftof_away" -> OP_FTOF
   "exti" -> OP_EXTI
   "extis" -> OP_EXTI
   "trunci" -> OP_TRUNCI
@@ -717,7 +731,8 @@ fn cast_op(op: String) -> Int = match op {
 fn cast_attrs(op: String, to: String) -> List[Int] = match op {
   "itof" -> [SIGNED, ROUND_NEAREST_EVEN]
   "ftoi" -> [SIGNED, ROUND_INT_TO_ZERO]
-  "ftof" -> [ftof_rounding(to)]
+  "ftoi_sat" -> [SIGNED, ROUND_INT_TO_ZERO]
+  "ftof" | "ftof_zero" | "ftof_neg_inf" | "ftof_pos_inf" | "ftof_away" -> [ftof_rounding_of(op, to)]
   "exti" -> [UNSIGNED]
   "extis" -> [SIGNED]
   "trunci" -> [OVERFLOW_NONE]
@@ -738,6 +753,22 @@ fn cast_attrs(op: String, to: String) -> List[Int] = match op {
 # largest power of two at or below the value.
 fn ftof_rounding(to: String) -> Int =
   if to == "f8E8M0FNU" { ROUND_ZERO } else { ROUND_NEAREST_EVEN }
+
+# The rounding mode of each spelling of `ftof`. The plain one is the default
+# above; the four knife T17 added are the other IEEE modes, and which pair
+# of formats may take which of them is bytecode 13.4's table, held at
+# recording time by prog.dawn's `ftof_modes`, so nothing here has to look at
+# the formats. A mode the pair does not allow would encode as well as any
+# other (it is one byte) and only `tileiras` would refuse it, which is what
+# scripts/tile-golden's ftof-zero-as-nearest-away measures.
+fn ftof_rounding_of(op: String, to: String) -> Int = match op {
+  "ftof" -> ftof_rounding(to)
+  "ftof_zero" -> ROUND_ZERO
+  "ftof_neg_inf" -> ROUND_NEGATIVE_INF
+  "ftof_pos_inf" -> ROUND_POSITIVE_INF
+  "ftof_away" -> ROUND_NEAREST_AWAY
+  _ -> panic("tileir: `${op}` is not a float-to-float conversion")
+}
 
 # The opcode of an element-wise float operation, and whether it carries a
 # rounding mode. `maxf` and `minf` take `propagate_nan` and `flush_to_zero`
@@ -1979,11 +2010,18 @@ fn ptr_param_bits(b: bytes.Buf) -> bytes.Buf = if ptr_has_flags() { put_varint(b
 # `ftoi` (13.1) grew its first optional field at 13.4, the UnitAttr
 # `saturating`, so generateFlagsFieldSerialization writes the version-checked
 # form: a flags varint from 13.4 on, after the result type, and none before.
-# It is the `mmaf_has_flags` case one version later. `saturating` is bit 0
-# and this writer leaves it clear: the conversion truncates, as it did.
+# It is the `mmaf_has_flags` case one version later. `saturating` is bit 0:
+# clear for `ftoi`, whose out-of-range lanes are undefined, and set for
+# `ftoi_sat` (knife T17), whose out-of-range lanes clamp and whose NaN
+# lanes are 0.
 fn ftoi_has_flags() -> Bool = at_least(13, 4)
 
-fn ftoi_flags(op: String, w: W) -> W = if op == "ftoi" && ftoi_has_flags() { emit(w, 0) } else { w }
+fn ftoi_flags(op: String, w: W) -> W = if (op == "ftoi" || op == "ftoi_sat") && ftoi_has_flags() { emit(w, ftoi_flag_word(op)) } else { w }
+
+fn ftoi_flag_word(op: String) -> Int = match op {
+  "ftoi_sat" -> FTOI_FLAG_SATURATING
+  _ -> 0
+}
 
 # `load_view_tko` and `store_view_tko` grew a REQUIRED `inbounds`, a
 # DenseBoolArrayAttr with one element per index, at 13.4. Required means
@@ -2900,6 +2938,39 @@ test "extract writes its operand count, cat its dim inline, and neither writes a
   # results, no operands, no attributes, no flags
   let nb = encode_instr(w0, BlockCounts(9, 10, 11))
   assert hex(bytes.freeze(nb.body)) == "2e" ++ "01" ++ "01" ++ "01"
+}
+
+test "knife T17: ftoi_sat sets the saturating bit, each ftof spelling writes its mode, and xchg is 9" {
+  assert ROUND_NEAREST_AWAY == 7 && FTOI_FLAG_SATURATING == 1
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0)]), nvals: 1 }
+  # opcode 0x2B, the result type, the FLAGS word (1, the saturating bit),
+  # then signed (1) and nearest_int_to_zero (6), then the operand; the plain
+  # `ftoi` is the same record with a 0 where the 1 is
+  let sat = encode_instr(w0, Cast(9, "ftoi_sat", Tile([8], Num("f64")), Tile([8], Num("i32")), Val(0)))
+  let plain = encode_instr(w0, Cast(9, "ftoi", Tile([8], Num("f64")), Tile([8], Num("i32")), Val(0)))
+  assert hex(bytes.freeze(sat.body)) == "2b" ++ "01" ++ "01" ++ "01" ++ "06" ++ "00"
+  assert hex(bytes.freeze(plain.body)) == "2b" ++ "01" ++ "00" ++ "01" ++ "06" ++ "00"
+  # every spelling of `ftof` writes the enum value of the mode prog.dawn
+  # names for it, so the writer and the recording's table cannot disagree
+  let value = (m: String) => match m {
+    "nearest_even" -> ROUND_NEAREST_EVEN
+    "zero" -> ROUND_ZERO
+    "negative_inf" -> ROUND_NEGATIVE_INF
+    "positive_inf" -> ROUND_POSITIVE_INF
+    "nearest_away" -> ROUND_NEAREST_AWAY
+    _ -> 0 - 1
+  }
+  for op in ["ftof", "ftof_zero", "ftof_neg_inf", "ftof_pos_inf", "ftof_away"] {
+    for to in ["f32", "tf32", "f8E8M0FNU"] {
+      assert cast_attrs(op, to) == [value(ftof_mode(op, to))]
+      assert cast_op(op) == OP_FTOF
+    }
+  }
+  let away = encode_instr(w0, Cast(9, "ftof_away", Tile([8], Num("f32")), Tile([8], Num("tf32")), Val(0)))
+  # opcode 0x2A, the result type, nearest_away inline, the operand: no
+  # flags word, as for every `ftof`
+  assert hex(bytes.freeze(away.body)) == "2a" ++ "01" ++ "07" ++ "00"
+  assert rmw_mode_value("xchg") == 9
 }
 
 test "insert is extract's record with the destination after the source, and fpowi is two operands and nothing else" {

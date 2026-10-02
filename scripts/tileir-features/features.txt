@@ -141,7 +141,11 @@
 # of check.py's self-test anchors onto implemented rows, which its comments
 # say where. Knife T16 implemented two of the five, `insert` and `fpowi`,
 # both at layer 3: 105 rows, 99 `implemented`, 3 `structural` and the three
-# T19 rows still `unimplemented`.
+# T19 rows still `unimplemented`. Knife T17 added no opcode and wrote 13.4's
+# new SHAPES of old ones (`return` inside a `loop`, `ftoi`'s `saturating`,
+# `ftof`'s per-pair rounding table) and the exchange mode of
+# `atomic_rmw_tko`; `return` and `ftof` moved from layer 2 to layer 3 with
+# it (50 rows at layer 3).
 #
 # `entry` 0x16, `module` 0x4B and `global` 0x31 are STRUCTURAL: the writer
 # never puts any of them in the instruction stream. `module` is the file and
@@ -160,7 +164,7 @@ andi                     | 0x04 | 13.1 | implemented   | 10  | 2 | golden:scatte
 assert                   | 0x05 | 13.1 | implemented   | T6  | 3 | golden:assert_pass,golden:assert_fail,mutant:assert-message-tagged,mutant:assert-condition-inverted                       | -
 assume                   | 0x06 | 13.1 | implemented   | T6  | 2 | golden:assume_divby,golden:assume_same,golden:assume_bounded,mutant:assume-divby-tag-as-same-elements,mutant:assume-same-elements-payload-four-bytes,mutant:assume-bounded-bounds-swapped | ruling 1: a false predicate is undefined behaviour, so nothing it could compute is wrong
 atomic_cas_tko           | 0x07 | 13.1 | implemented   | 14  | 3 | golden:cas_swap,mutant:atomic-cas-writes-an-rmw-mode,mutant:cas-compare-ignored                                           | -
-atomic_rmw_tko           | 0x08 | 13.1 | implemented   | 14  | 3 | golden:histogram,mutant:atomic-rmw-claims-weak-ordering,mutant:atomic-as-plain-store                                      | -
+atomic_rmw_tko           | 0x08 | 13.1 | implemented   | 14  | 3 | golden:histogram,golden:attr_xchg,mutant:atomic-rmw-claims-weak-ordering,mutant:atomic-as-plain-store,mutant:rmw-xchg-as-add | -
 bitcast                  | 0x09 | 13.1 | implemented   | 10  | 2 | golden:int_ops                                                                                                            | -
 break                    | 0x0A | 13.1 | implemented   | T5  | 3 | golden:loop_count,golden:loop_none,mutant:break-values-missing,mutant:loop-break-condition-inverted                       | -
 broadcast                | 0x0B | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
@@ -182,8 +186,8 @@ extract                  | 0x26 | 13.1 | implemented   | T2  | 3 | golden:shape_
 floor                    | 0x27 | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
 fma                      | 0x28 | 13.1 | implemented   | 7a  | 2 | golden:linrec,golden:erf_sweep                                                                                            | -
 for                      | 0x29 | 13.1 | implemented   | 5   | 3 | golden:foldif,golden:lora_hidden,mutant:for-results-not-rolled-back,mutant:loop-token-not-carried,mutant:region-stack-pop | -
-ftof                     | 0x2A | 13.1 | implemented   | 11  | 2 | golden:dot_f16                                                                                                            | -
-ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,mutant:ftoi-rounds-instead-of-truncates,mutant:ftoi-flags-unwritten                       | -
+ftof                     | 0x2A | 13.1 | implemented   | 11  | 3 | golden:dot_f16,golden:attr_ftof,mutant:ftof-zero-as-nearest-away,mutant:ftof-away-as-nearest-even                         | -
+ftoi                     | 0x2B | 13.1 | implemented   | 10  | 3 | golden:int_ops,golden:sort_rank,golden:attr_sat,mutant:ftoi-rounds-instead-of-truncates,mutant:ftoi-flags-unwritten,mutant:ftoi-saturating-bit-dropped | -
 get_global               | 0x2C | 13.1 | implemented   | T7  | 3 | golden:global_table,mutant:get-global-symbol-not-written,mutant:get-global-wrong-symbol                                   | -
 get_index_space_shape    | 0x2D | 13.1 | implemented   | T12 | 3 | golden:view_index_space,mutant:index-space-shape-as-tensor-shape,mutant:shape-query-dim-reversed                          | -
 get_num_tile_blocks      | 0x2E | 13.1 | implemented   | T2  | 3 | golden:grid_stride,mutant:num-tile-blocks-as-block-id                                                                     | -
@@ -226,7 +230,7 @@ reduce                   | 0x58 | 13.1 | implemented   | 7b  | 3 | golden:cce_me
 remf                     | 0x59 | 13.1 | implemented   | T1  | 2 | golden:trig_sweep                                                                                                         | -
 remi                     | 0x5A | 13.1 | implemented   | 10  | 2 | golden:subarray_sum2d,golden:subarray_sum3d                                                                               | -
 reshape                  | 0x5B | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
-return                   | 0x5C | 13.1 | implemented   | 3   | 2 | golden:ols_beta,golden:invert                                                                                             | -
+return                   | 0x5C | 13.1 | implemented   | 3   | 3 | golden:ols_beta,golden:invert,golden:loop_return,mutant:loop-return-as-break,mutant:loop-return-dropped                   | -
 rsqrt                    | 0x5D | 13.1 | implemented   | 7b  | 2 | golden:mathops                                                                                                            | -
 scan                     | 0x5E | 13.1 | implemented   | 13  | 3 | golden:prefix_sum,golden:linrec,mutant:scan-result-drops-the-dim,mutant:scan-reverse-ignored                              | -
 select                   | 0x5F | 13.1 | implemented   | 7a  | 3 | golden:leaky_relu,golden:compact,mutant:erf-sign-not-flipped                                                              | -

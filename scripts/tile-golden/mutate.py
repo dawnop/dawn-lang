@@ -391,7 +391,7 @@ MUTATIONS = {
     ),),
     "ftoi-flags-unwritten": ((
         BYTECODE,
-        'fn ftoi_flags(op: String, w: W) -> W = if op == "ftoi" && ftoi_has_flags() { emit(w, 0) } else { w }',
+        'fn ftoi_flags(op: String, w: W) -> W = if (op == "ftoi" || op == "ftoi_sat") && ftoi_has_flags() { emit(w, ftoi_flag_word(op)) } else { w }',
         'fn ftoi_flags(op: String, w: W) -> W = w',
     ),),
     "view-inbounds-unwritten": ((
@@ -425,6 +425,16 @@ MUTATIONS = {
          '    list.fold(indices, emit_ref(emit_ref(w1, src), dest), emit_ref)'),
         ('    let w1 = emit(emit_op_counted(w0, OP_INSERT, to), 1 + len(indices))\n'
          '    list.fold(list.drop(indices, 1), emit_ref(emit_ref(w1, src), dest), emit_ref)'),
+    ),),
+    "loop-return-as-break": ((
+        BYTECODE,
+        '  Ret -> emit(emit(emit(w0, OP_RETURN), 0), 0)',
+        '  Ret -> emit(emit(emit(w0, OP_BREAK), 0), 0)',
+    ),),
+    "ftof-zero-as-nearest-away": ((
+        BYTECODE,
+        '  "ftof_zero" -> ROUND_ZERO',
+        '  "ftof_zero" -> ROUND_NEAREST_AWAY',
     ),),
 }
 

@@ -21,6 +21,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
+  float_to_int_sat, float_to_float_zero, float_to_float_down, float_to_float_up, float_to_float_away, d_return_if,
   pack_bytes, unpack_bytes, ext_i4, ext_u4, trunc_i4, arange,
   d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
   d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
@@ -3922,6 +3923,50 @@ fn loop_none(x: Param[F64], out: Param[F64], threshold: Float, step: Float) -> U
   store(out, blk, shape, v)
 }
 
+# ---- knife T17: `return` inside a `loop` (bytecode 13.4) ----
+
+## Where `loop_return`'s blocks leave. A block returns on the first
+## iteration whose ENTERING tile holds a value at or above RETURN_AT, and
+## breaks on the iteration that is its RETURN_LIMIT-th, whichever test comes
+## first in the body; the return test does.
+const RETURN_AT: Int = 200
+const RETURN_LIMIT: Int = 100
+
+# A loop with two ways out, and the kernel-ending one is the subject: on
+# each iteration a block stores how many iterations it has begun, then
+# RETURNS if its tile has reached RETURN_AT, then breaks if it has begun
+# RETURN_LIMIT of them, then adds one to every lane. What is stored after
+# the loop is reached only by a block that broke, so the two halves of a
+# block's answer say which exit it took and on which iteration: a block
+# that returned has its count in the first half and the sentinel in the
+# second.
+#
+# Four blocks, four outcomes, and every one of them is the corpus's and not
+# the kernel's: block 0 returns mid-loop (iteration 74), block 1 never
+# reaches RETURN_AT and breaks at RETURN_LIMIT, block 2 returns on its first
+# iteration, and block 3 reaches RETURN_AT on its RETURN_LIMIT-th iteration,
+# where both tests hold and the return, being first, wins.
+#
+# Bytecode 13.3 refused the shape: ReturnOp's parents were `entry` and `if`,
+# and its verifier walked through `if`s only, so an `if` inside a `loop`
+# could not return. 13.4 added `loop` to both (knife T17).
+fn loop_return(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let shape = [LOOP_TILE]
+  let b = block_id(0)
+  let blk = tile_at(b, LOOP_TILE)
+  let obase = tile_at(b, 2 * LOOP_TILE)
+  let one = i_const(shape, 1)
+  let (v, _n) = d_loop2(load(x, blk, shape), i_const(shape, 0), (v, n) => {
+    let begun = add_i(shape, n, one)
+    store(out, obase, shape, begun)
+    let biggest = d_reduce_i(shape, v, 0, (acc, e) => s_maxi(acc, e))
+    d_return_if(s_le_i(s_consti(RETURN_AT), biggest))
+    let rounds = d_reduce_i(shape, begun, 0, (acc, e) => s_maxi(acc, e))
+    (s_le_i(s_consti(RETURN_LIMIT), rounds), add_i(shape, v, one), begun)
+  })
+  store(out, idx_add(obase, idx_const(LOOP_TILE)), shape, v)
+}
+
 # ---- knife T4: the rest of each attribute domain ----
 #
 # These eight kernels have no leetgpu problem behind them and compute
@@ -4139,6 +4184,91 @@ fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
     (_i, acc) => add_i(s, acc, i_const(s, 1)))
   store(out, obase, s, signed)
   store(out, idx_add(obase, idx_const(ATTR_TILE)), s, unsigned)
+}
+
+# ---- knife T17: three attribute values bytecode 13.4 added or nobody used ----
+
+# `ftoi`'s `saturating` modifier, beside the same conversion without it.
+# Two segments per block from one f64 tile: saturating over every lane,
+# then plain over the lanes whose truncation is an i32 and nowhere else.
+# The corpus has lanes above and below the i32 range, both infinities and
+# NaN, and in-range lanes with fractions of both signs, the two ends of the
+# range among them.
+#
+# The plain segment is MASKED because its other lanes have no answer to
+# hold: Ops.td calls an infinite, NaN or out-of-range input undefined
+# behaviour without the modifier, so the store skips exactly those lanes
+# (`-2^31 - 1 < x < 2^31` is "truncates into i32") and they keep the
+# sentinel. What the device does there anyway is a measurement and not a
+# claim (docs/tile-backend-design.md 6.20 records it), which is why the
+# judgement holds only the saturating half on those lanes.
+const ATTR_SAT_SEGS: Int = 2
+
+fn attr_sat(x: Param[F64], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_SAT_SEGS * ATTR_TILE)
+  let a = load(x, base, s)
+  let fits = and_mask(s, gt(F64, s, a, f_const(F64, s, 0.0 - 2147483649.0)),
+    lt(F64, s, a, f_const(F64, s, 2147483648.0)))
+  store(out, obase, s, float_to_int_sat(F64, I32, s, a))
+  store_masked(out, idx_add(obase, idx_const(ATTR_TILE)), s, fits, float_to_int(F64, I32, s, a))
+}
+
+# `ftof` under every rounding mode bytecode 13.4 newly allows on the pairs
+# this backend can reach, each beside the `nearest_even` it is to differ
+# from. Eleven segments per block, all widened back to f64 for the buffer:
+#
+#   0-3   f64 -> f32   nearest_even, zero, negative_inf, positive_inf
+#   4-6   f32 -> tf32  nearest_even, zero, nearest_away
+#   7-8   f32 -> f16   nearest_even, zero
+#   9-10  f32 -> bf16  nearest_even, zero
+#
+# The f32 the last seven start from is the first segment's. Three of the
+# widenings back are written in another mode as well (tf32 -> f64 under
+# nearest_away, f16 -> f64 under zero, bf16 -> f64 under positive_inf): an
+# exact widening takes any of the five since 13.4, and none of them can
+# change an exact answer.
+const ATTR_FTOF_SEGS: Int = 11
+
+fn attr_ftof(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let obase = tile_at(b, ATTR_FTOF_SEGS * ATTR_TILE)
+  let seg = (j: Int) => idx_add(obase, idx_const(j * ATTR_TILE))
+  let a = load(x, base, s)
+  let f = float_to_float(F64, F32, s, a)
+  store(out, seg(0), s, float_to_float(F32, F64, s, f))
+  store(out, seg(1), s, float_to_float(F32, F64, s, float_to_float_zero(F64, F32, s, a)))
+  store(out, seg(2), s, float_to_float(F32, F64, s, float_to_float_down(F64, F32, s, a)))
+  store(out, seg(3), s, float_to_float(F32, F64, s, float_to_float_up(F64, F32, s, a)))
+  store(out, seg(4), s, float_to_float(TF32, F64, s, float_to_float(F32, TF32, s, f)))
+  store(out, seg(5), s, float_to_float(TF32, F64, s, float_to_float_zero(F32, TF32, s, f)))
+  store(out, seg(6), s, float_to_float_away(TF32, F64, s, float_to_float_away(F32, TF32, s, f)))
+  store(out, seg(7), s, float_to_float(F16, F64, s, float_to_float(F32, F16, s, f)))
+  store(out, seg(8), s, float_to_float_zero(F16, F64, s, float_to_float_zero(F32, F16, s, f)))
+  store(out, seg(9), s, float_to_float(BF16, F64, s, float_to_float(F32, BF16, s, f)))
+  store(out, seg(10), s, float_to_float_up(BF16, F64, s, float_to_float_zero(F32, BF16, s, f)))
+}
+
+# The atomic EXCHANGE, the one read-modify-write mode no kernel had asked
+# for. Every lane of every block swaps its input into one slot of the first
+# ATTR_XCHG_SLOTS lanes of `out` -- slot `N - 1 - i` for global lane `i`, so
+# no two lanes share one and the answer does not depend on the order they
+# arrive in -- and stores what the slot held before into the second
+# ATTR_XCHG_SLOTS lanes. The first half is then the input reversed, the
+# second the output buffer's own first half reversed.
+const ATTR_XCHG_SLOTS: Int = 512
+
+fn attr_xchg(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
+  let s = [ATTR_TILE]
+  let b = block_id(0)
+  let base = tile_at(b, ATTR_TILE)
+  let slot = sub_i(s, i_const(s, ATTR_XCHG_SLOTS - 1), lanes(base, s))
+  let old = atomic_rmw(out, "xchg", slot, s, load(x, base, s))
+  store(out, idx_add(base, idx_const(ATTR_XCHG_SLOTS)), s, old)
 }
 
 # ---- knife T6: assert, assume and print_tko
@@ -5428,6 +5558,8 @@ fn trace(name: String) -> TileProg = match name {
   "loop_none" ->
     trace_kernel("loop_none", ["f64", "f64"],
       () => loop_none(param(F64, 0), param(F64, 1), LOOP_NONE_THRESHOLD, LOOP_NONE_STEP))
+  "loop_return" ->
+    trace_kernel("loop_return", ["i32", "i32"], () => loop_return(param(I32, 0), param(I32, 1)))
   "attr_round" ->
     trace_kernel("attr_round", ["f64", "f64", "f64"],
       () => attr_round(param(F64, 0), param(F64, 1), param(F64, 2)))
@@ -5448,6 +5580,12 @@ fn trace(name: String) -> TileProg = match name {
     trace_kernel("attr_addf", ["f64", "f64"], () => attr_addf(param(F64, 0), param(F64, 1)))
   "attr_ucmp" ->
     trace_kernel("attr_ucmp", ["i32"], () => attr_ucmp(param(I32, 0)))
+  "attr_sat" ->
+    trace_kernel("attr_sat", ["f64", "i32"], () => attr_sat(param(F64, 0), param(I32, 1)))
+  "attr_ftof" ->
+    trace_kernel("attr_ftof", ["f64", "f64"], () => attr_ftof(param(F64, 0), param(F64, 1)))
+  "attr_xchg" ->
+    trace_kernel("attr_xchg", ["i32", "i32"], () => attr_xchg(param(I32, 0), param(I32, 1)))
   "assert_pass" ->
     trace_kernel("assert_pass", ["i32", "i32"], () => assert_pass(param(I32, 0), param(I32, 1)))
   "assert_fail" ->
@@ -5569,8 +5707,9 @@ pub fn main() -> Unit !io = match args() {
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
       ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep"
-      ++ "|loop_count|loop_bound|loop_until|loop_none"
+      ++ "|loop_count|loop_bound|loop_until|loop_none|loop_return"
       ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
+      ++ "|attr_sat|attr_ftof|attr_xchg"
       ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
       ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms"
       ++ "|view_transpose|view_max_pool|view_conv2d|view_padding|view_pad_i32>"
