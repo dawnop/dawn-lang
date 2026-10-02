@@ -120,6 +120,39 @@ class ParamError(Exception):
 # reading `dawn doc --stdlib`
 
 
+def mask_literals(sig):
+    """`sig` with the inside of every string and char literal blanked out.
+
+    Since a signature renders each parameter default as source text (#K0,
+    docs/std-defaults-design.md), a parameter list can carry `sep: String = ","`
+    or `open: String = "("`, whose comma and bracket are not structure. The
+    blanking keeps every index where it was, so a name read off the masked text
+    is read off the real one. `"` and `'` honour `\\` escapes, a backtick raw
+    string does not; an interpolation is blanked with its string, which is safe
+    because the renderer closes whatever a cut default leaves open.
+    """
+    out = list(sig)
+    quote = None
+    i = 0
+    while i < len(sig):
+        ch = sig[i]
+        if quote is None:
+            if ch in "\"'`":
+                quote = ch
+        elif ch == "\\" and quote != "`":
+            out[i] = "_"
+            if i + 1 < len(sig):
+                out[i + 1] = "_"
+            i += 2
+            continue
+        elif ch == quote:
+            quote = None
+        else:
+            out[i] = "_"
+        i += 1
+    return "".join(out)
+
+
 def _close(sig, i, open_ch, close_ch):
     """Index of the bracket closing the one at sig[i], nesting ([{ alike."""
     depth = 0
@@ -147,6 +180,8 @@ def param_names(sig):
     m = re.match(rf"fn ({IDENT})", sig or "")
     if not m:
         raise ParamError(f"not a function signature: {sig!r}")
+    shown = sig
+    sig = mask_literals(sig)
     i = m.end()
     if i < len(sig) and sig[i] == "[":
         i = _close(sig, i, "[", "]") + 1
@@ -172,10 +207,10 @@ def param_names(sig):
         name, colon, _ = part.partition(":")
         name = name.strip()
         if not colon or not re.fullmatch(IDENT, name):
-            raise ParamError(f"cannot read parameter {part.strip()!r} in: {sig}")
+            raise ParamError(f"cannot read parameter {part.strip()!r} in: {shown}")
         names.append(name)
     if len(set(names)) != len(names):
-        raise ParamError(f"a parameter name repeats in: {sig}")
+        raise ParamError(f"a parameter name repeats in: {shown}")
     return names
 
 
@@ -439,6 +474,13 @@ CASES = (
     ("an effect operation",
      _with(effects=("fs_rename", "fn fs_rename(from: String, dst: String) -> Unit !Ef")),
      ["Param-Change(str.Ef.fs_rename): src -> from"], 0),
+    ("a default's literal keeps its comma and bracket",
+     _with(fns=("split", "fn split(s: String, sep: String = \",(\") -> List[String]")), [], 0),
+    ("a renamed parameter after a default is still a rename",
+     _with(fns=("split", "fn split(s: String = \"a\\\",\", delim: String) -> List[String]")), [], 1),
+    ("a default cut and closed by the renderer",
+     _with(fns=("split", "fn split(s: String = f(aaaa,…), sep: String = \"[…\") -> List[String]")),
+     [], 0),
     ("one slot declared two ways",
      _with(fns=("split", "fn split(s: String, delim: String) -> List[String]")),
      ["Param-Change(str.split): sep -> delim", "Param-Change(str.split): sep -> by"], 1),

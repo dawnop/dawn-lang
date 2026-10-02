@@ -1572,10 +1572,14 @@ pub type Sig = {
   name: String,
   param_tys: List[Ty],
   param_names: List[String],
-  # which parameters carry a default value (#207) -- per parameter, aligned
-  # with param_tys. Empty means none do, which is every signature that is not
-  # a top-level fn; a call site treats a missing entry as required.
-  param_defaults: List[Bool],
+  # each parameter's default value (#207) -- per parameter, aligned with
+  # param_tys: `None` when it has none, else the default as its author spelled
+  # it, on one line (`Param.default_src`), which is what `sig_render` shows.
+  # Empty means none do, which is every signature that is not a top-level fn;
+  # a call site treats a missing entry as required. The text is for readers
+  # only: a call that omits the argument calls the synthesized `f$default$k`,
+  # never anything parsed back out of this string.
+  param_defaults: List[Option[String]],
   ret: Ty,
   eff: Eff,
   is_builtin: Bool,
@@ -2224,6 +2228,112 @@ pub fn assoc_effect_advice(adts: Adts, t: TraitI) -> String =
   "bind it in each impl (`effect E = !io`, or `effect E = !()` where the impl is pure), " ++
   "and write the method's row as `!" ++ ty_show(adts, t.tvar) ++ ".E`"
 
+## The widest a default renders in a signature, in code points. A default is
+## a value -- `NearestEven`, `map.empty()`, `default_errors()` -- and every
+## one the std-defaults line plans fits in well under this; the bound is for
+## the expression that is really a computation, which would otherwise push the
+## parameters after it out of a hover or a doc line. Why 40 is in
+## docs/std-defaults-design.md §4.2.
+pub const DEFAULT_SHOWN: Int = 40
+
+## A default's source text as a signature shows it: on one line, trimmed, and
+## no wider than `DEFAULT_SHOWN` code points. Wider text is cut, marked with
+## `…`, and then *closed*: every string, bracket and interpolation the cut
+## left open gets its closer after the mark (`"a long message…"`,
+## `f(aaaa,…)`), so the rendering stays balanced. That is for the machine
+## readers of a signature as much as for the eye: `scripts/param-change.py`
+## and `scripts/api-diff.py` split a rendered parameter list at its top-level
+## commas, which an unclosed `(` or `"` would make unreadable.
+pub fn default_display(src: String) -> String = {
+  let t = str.trim(str.replace(str.replace(str.replace(src, "\r", " "), "\n", " "), "\t", " "))
+  if str.len(t) <= DEFAULT_SHOWN { return t }
+  var k = DEFAULT_SHOWN - 1
+  while true {
+    let head = str.trim_end(str.take(t, k))
+    let shown = head ++ "…" ++ from_code_points(closers_of(code_points(head)))
+    if str.len(shown) <= DEFAULT_SHOWN || k == 0 { return shown }
+    k = k - 1
+  }
+  t
+}
+
+## What closes everything a prefix of an expression leaves open, innermost
+## first: brackets, a `"` or `'` string (with `\` escapes and `${...}`
+## interpolation inside `"`), and a backtick raw string (no escapes).
+## A `"""` string reads as `""` and then an open `"`, which closes the same way.
+fn closers_of(cps: List[Char]) -> List[Char] = {
+  var stack: List[Char] = []
+  var i = 0
+  let n = len(cps)
+  while i < n {
+    let c = cps[i]
+    let top = if len(stack) > 0 { stack[len(stack) - 1] } else { ' ' }
+    if top == '"' || top == '\'' || top == '`' {
+      if c == '\\' && top != '`' {
+        i = i + 2
+        continue
+      }
+      if top == '"' && c == '$' && i + 1 < n && cps[i + 1] == '{' {
+        stack = stack ++ ['$']
+        i = i + 2
+        continue
+      }
+      if c == top { stack = list.take(stack, len(stack) - 1) }
+    } else if c == '"' || c == '\'' || c == '`' || c == '(' || c == '[' || c == '{' {
+      stack = stack ++ [c]
+    } else if (c == ')' || c == ']' || c == '}') && len(stack) > 0 {
+      stack = list.take(stack, len(stack) - 1)
+    }
+    i = i + 1
+  }
+  var out: List[Char] = []
+  var j = len(stack) - 1
+  while j >= 0 {
+    let o = stack[j]
+    out = out ++ [if o == '(' { ')' } else if o == '[' { ']' } else if o == '{' || o == '$' { '}' } else { o }]
+    j = j - 1
+  }
+  out
+}
+
+test "a default renders as its source text, cut at the shown width" {
+  let s = Sig { name: "pad", param_tys: [TyString, TyInt, TyString],
+    param_names: ["s", "width", "fill"], param_defaults: [None, None, Some("\" \"")],
+    ret: TyString, eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
+    owner: None, trait_id: None, op_of: None, inferring: false }
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  assert sig_render(adts, traits, s) == "fn pad(s: String, width: Int, fill: String = \" \") -> String"
+  # no default anywhere renders exactly as an empty list does
+  let plain = Sig { ..s, param_defaults: [] }
+  assert sig_render(adts, traits, plain) == "fn pad(s: String, width: Int, fill: String) -> String"
+  assert sig_render(adts, traits, Sig { ..s, param_defaults: [None, None, None] }) ==
+    sig_render(adts, traits, plain)
+  # exactly the shown width stays whole; one more code point is cut to it
+  let forty = "abcdefghij" ++ "abcdefghij" ++ "abcdefghij" ++ "abcdefghij"
+  assert default_display(forty) == forty
+  let cut = default_display(forty ++ "k")
+  assert str.len(cut) == DEFAULT_SHOWN
+  assert str.ends_with(cut, "…")
+  assert str.starts_with(cut, "abcdefghij")
+  # the ends are trimmed, and a line break inside a literal reads as a space
+  assert default_display("  1  ") == "1"
+  assert default_display("\"\"\"\n  a\n\"\"\"") == "\"\"\"   a \"\"\""
+  # a cut never leaves a blank before the mark, nor anything open after it
+  let a35 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  assert str.len(a35) == 35
+  assert default_display("f(" ++ a35 ++ ", bbbb)") == "f(" ++ a35 ++ ",…)"
+  let long_msg = "\"a default far wider than any signature shows\""
+  assert default_display(long_msg) == "\"a default far wider than any signatur…\""
+  assert default_display("[(1, \"x\"), (2, \"\${f(" ++ a35 ++ ")}\")]") ==
+    "[(1, \"x\"), (2, \"\${f(aaaaaaaaaaaaaa…)}\")]"
+  for shown in [default_display(long_msg), default_display(forty ++ forty)] {
+    assert str.len(shown) <= DEFAULT_SHOWN
+  }
+  assert closers_of(code_points("f(\"a\\\"(")) == ['"', ')']
+  assert closers_of(code_points("`(")) == ['`']
+}
+
 ## Render a signature like Kotlin FnSig.render (used in golden dumps and docs).
 pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String =
   sig_render_at(adts, traits, s, false)
@@ -2238,6 +2348,21 @@ pub fn sig_render_fqn(adts: Adts, traits: Traits, s: Sig) -> String =
   sig_render_at(adts, traits, s, true)
 
 fn sig_render_at(adts: Adts, traits: Traits, s: Sig, java_fqn: Bool) -> String = {
+  let (head, ps, tail) = sig_render_parts_at(adts, traits, s, java_fqn)
+  head ++ join(ps, ", ") ++ tail
+}
+
+## `sig_render` in three pieces: everything up to the parameter list's `(`,
+## each parameter as it renders, and everything from the `)` on, so that
+## `head ++ join(params, ", ") ++ tail` is the rendering exactly. A reader
+## that needs where each parameter sits inside the rendering -- the LSP's
+## signature help, whose parameter labels are offsets into the signature's --
+## counts along these rather than searching the joined text, where `a: Int`
+## would be found inside `aa: Int`.
+pub fn sig_render_parts(adts: Adts, traits: Traits, s: Sig) -> (String, List[String], String) =
+  sig_render_parts_at(adts, traits, s, false)
+
+fn sig_render_parts_at(adts: Adts, traits: Traits, s: Sig, java_fqn: Bool) -> (String, List[String], String) = {
   var parts: List[String] = []
   var i = 0
   for v in s.tparams {
@@ -2281,18 +2406,17 @@ fn sig_render_at(adts: Adts, traits: Traits, s: Sig, java_fqn: Bool) -> String =
       Some(n) -> n
       None -> "_"
     }
-    # a defaulted parameter renders `= ...`: the signature does not carry the
-    # expression (it lives in the synthesized f$default$k's body), and what a
-    # caller needs from the rendering is that the argument may be omitted
+    # a defaulted parameter renders `= <expr>`: that the argument may be
+    # omitted, and what it becomes when it is (docs/std-defaults-design.md K0)
     let dm = match get(s.param_defaults, j) {
-      Some(true) -> " = ..."
+      Some(Some(src)) -> " = " ++ default_display(src)
       _ -> ""
     }
     ps = ps ++ [pn ++ ": " ++ ty_show_at(adts, pt, false, java_fqn) ++ dm]
     j = j + 1
   }
-  "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++
-    ty_show_at(adts, s.ret, s.eff != EPure, java_fqn) ++ eff_suffix(s.eff)
+  ("fn " ++ s.name ++ tp ++ "(", ps,
+    ") -> " ++ ty_show_at(adts, s.ret, s.eff != EPure, java_fqn) ++ eff_suffix(s.eff))
 }
 
 # ---- prelude: Option / Result, Ord, builtins ----

@@ -19,20 +19,21 @@ use std/map
 use std/set
 use std/list
 use check/types.{
-  ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids,
+  Sig, ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids,
   public_builtin_type_names, return_only_builtin_type_names,
   ty_named, builtin_type_at, builtin_type_name_reserved, hard_reserved_builtin_type_name,
   AModule, audience_covers, declared_audience
 }
 use check/cx.{ModExports, package_of}
-use lsp/lspq.{QCx, locals_at, in_for_pattern}
+use lsp/lspq.{QCx, locals_at, in_for_pattern, find_target, sig_of}
 use front/lexer.{SourceView, view_of, slice_cp, lex}
 use front/token.{
-  Token, TokKind, FOR, PIPE, NEWLINE, EOF, IDENT,
+  Token, TokKind, FOR, PIPE, NEWLINE, EOF, IDENT, FN, COLON, PIPEGT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, TYPEIDENT, BANG
 }
 use front/ast.{
-  module_traits, module_fns, module_types, module_consts, module_effects, module_uses, VisPub
+  module_traits, module_fns, module_types, module_consts, module_effects, module_uses, VisPub,
+  import_local
 }
 use front/parser
 use driver/analyze.{use_candidates}
@@ -997,6 +998,195 @@ pub(pkg) fn completions_at(
   it.out
 }
 
+# ---- signature help: the call whose argument list the cursor is in ----
+
+## An open call at the cursor, read off the tokens rather than the parse,
+## because the buffer is mid-edit when a client asks: `f(1, ` does not parse,
+## and the last analysis may be of other text. `name_lo`/`name_hi` are the
+## callee's name token; `qualifier` is the name before its dot (`str.trim(`,
+## `xs.map(`); `commas` counts the call's own top-level commas before the
+## cursor; `named` is the name a `name: ...` argument under the cursor writes
+## to; `piped` says the call is the right side of `|>`, which supplies its
+## first argument.
+pub(pkg) type CallAt = {
+  name: String,
+  name_lo: Int,
+  name_hi: Int,
+  qualifier: Option[String],
+  commas: Int,
+  named: Option[String],
+  piped: Bool
+}
+
+type Open = { kind: TokKind, at: Int, commas: Int, arg_start: Int }
+
+fn next_code_token(toks: List[Token], at: Int) -> Int = {
+  var i = at
+  while i < len(toks) && toks[i].kind == NEWLINE { i = i + 1 }
+  i
+}
+
+## The innermost call whose `(` is open at `offset`, seen through any list
+## literal in between (`f([1, |` is still `f`'s first argument). A brace in
+## between ends the search: a block or a lambda body is somewhere else, and
+## a record literal's fields are not the call's parameters. Not a call: a
+## declaration's parameter list (`fn name(`), a parenthesis no name precedes
+## (a tuple, a lambda's parameters, `if (`), and the cursor inside a string or
+## a comment.
+pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
+  let v = view_of(text)
+  let n = len(v.cps)
+  let pos = if offset < 0 {
+    0
+  } else if offset > n {
+    n
+  } else {
+    offset
+  }
+  let ctx = lex_ctx(v, pos)
+  if ctx == 1 || ctx == 2 { return None }
+  let (toks, _) = lex(text)
+  var stack: List[Open] = []
+  var i = 0
+  while i < len(toks) {
+    let tk = toks[i]
+    if tk.kind == EOF || tk.lo >= pos { break }
+    if tk.kind == LPAREN || tk.kind == LBRACKET || tk.kind == LBRACE {
+      stack = stack ++ [Open { kind: tk.kind, at: i, commas: 0, arg_start: i + 1 }]
+    } else if tk.kind == RPAREN || tk.kind == RBRACKET || tk.kind == RBRACE {
+      if len(stack) > 0 { stack = list.take(stack, len(stack) - 1) }
+    } else if tk.kind == COMMA && len(stack) > 0 {
+      let top = stack[len(stack) - 1]
+      stack = list.take(stack, len(stack) - 1) ++
+        [Open { ..top, commas: top.commas + 1, arg_start: i + 1 }]
+    }
+    i = i + 1
+  }
+  var k = len(stack) - 1
+  while k >= 0 && stack[k].kind == LBRACKET { k = k - 1 }
+  if k < 0 || stack[k].kind != LPAREN { return None }
+  let f = stack[k]
+  if f.at == 0 { return None }
+  let callee = toks[f.at - 1]
+  if callee.kind != IDENT { return None }
+  if f.at >= 2 && toks[f.at - 2].kind == FN { return None }
+  var qualifier: Option[String] = None
+  var before = f.at - 2
+  if f.at >= 3 && toks[f.at - 2].kind == DOT && toks[f.at - 3].kind == IDENT {
+    qualifier = Some(toks[f.at - 3].text)
+    before = f.at - 4
+  }
+  var j = before
+  while j >= 0 && toks[j].kind == NEWLINE { j = j - 1 }
+  let piped = j >= 0 && toks[j].kind == PIPEGT
+  # a named argument: the current argument starts `name:` and the cursor is
+  # past the colon
+  let a0 = next_code_token(toks, f.arg_start)
+  let a1 = next_code_token(toks, a0 + 1)
+  var named: Option[String] = None
+  if a1 < len(toks) && toks[a0].kind == IDENT && toks[a1].kind == COLON && toks[a1].lo < pos {
+    named = Some(toks[a0].text)
+  }
+  Some(CallAt {
+    name: callee.text,
+    name_lo: callee.lo,
+    name_hi: callee.hi,
+    qualifier: qualifier,
+    commas: f.commas,
+    named: named,
+    piped: piped
+  })
+}
+
+## A name a `use m.{name}` line binds, read off the parse rather than the
+## checked module: a buffer that does not parse is never checked, so its own
+## table of names is empty, while its `use` lines usually survived the parse
+## and the modules they name were checked on their own. A local function of
+## such a buffer has no signature anywhere until it parses again.
+fn selectively_imported(qc: QCx, name: String) -> Option[Sig] = {
+  for imported in module_uses(qc.entry.m) {
+    match imported.selective {
+      Some(names) -> {
+        for n in names {
+          if import_local(n) == name {
+            return match map.get(qc.exports_env, imported.path) {
+              Some(ex) -> map.get(ex.fns, n.name)
+              None -> None
+            }
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  None
+}
+
+## The signature of the call open at the cursor, and the index of the
+## parameter the cursor is supplying. The analysis answers first, through the
+## same target hover shows, when its callee token is the one the text scan
+## found; when the buffer has moved on from the analysis (the usual case
+## mid-call), the name is resolved the way the checker would: a module alias's
+## exports for `alias.f(`, else local, std, builtin, else a `use m.{f}` line.
+##
+## A qualifier that is not a module alias is a receiver, `xs.map(f)` being
+## `map(xs, f)`, so it fills the first parameter; `|>` fills it the same way.
+## A named argument is the parameter it names, wherever that sits; an unknown
+## name is an index past the end, which a client shows as no parameter.
+## Java members are not offered: their calls resolve to no `Sig`, and they
+## take no defaults to show.
+pub(pkg) fn signature_at(qc: QCx, text: String, offset: Int) -> Option[(Sig, Int)] = {
+  match call_at(text, offset) {
+    None -> None
+    Some(c) -> {
+      let module_exports = match c.qualifier {
+        Some(q) -> qualified_exports(qc, q)
+        None -> None
+      }
+      let analysed: Option[Sig] = match find_target(qc, c.name_lo) {
+        Some(t) -> if t.lo <= c.name_lo && t.hi == c.name_hi { t.sig } else { None }
+        None -> None
+      }
+      let found = match analysed {
+        Some(s) -> Some(s)
+        None ->
+          match c.qualifier {
+            None ->
+              match sig_of(qc, c.name) {
+                Some(s) -> Some(s)
+                None -> selectively_imported(qc, c.name)
+              }
+            Some(_) ->
+              match module_exports {
+                Some(ex) -> map.get(ex.fns, c.name)
+                None -> None
+              }
+          }
+      }
+      match found {
+        None -> None
+        Some(s) -> {
+          let receiver = c.qualifier != None && module_exports == None
+          let filled = (if receiver { 1 } else { 0 }) + (if c.piped { 1 } else { 0 })
+          let active = match c.named {
+            Some(nm) -> {
+              var at = len(s.param_tys)
+              var idx = 0
+              for pn in s.param_names {
+                if pn == nm && at == len(s.param_tys) { at = idx }
+                idx = idx + 1
+              }
+              at
+            }
+            None -> c.commas + filled
+          }
+          Some((s, active))
+        }
+      }
+    }
+  }
+}
+
 # ---- tests ----
 #
 # The `use` branch's disk-reading half is checked end to end against the real
@@ -1053,4 +1243,36 @@ test "return-only type completion recognizes function arrows but not match arms"
   assert return_type_tail(code_points("type Box = { f: fn(Int) -> "))
   assert not return_type_tail(code_points("match x { _ -> "))
   assert not return_type_tail(code_points("let x: "))
+}
+
+test "signature help finds the open call and the argument under the cursor" {
+  fn show(text: String) -> String =
+    match call_at(text, str.len(text)) {
+      Some(c) -> {
+        let q = match c.qualifier {
+          Some(x) -> x ++ "."
+          None -> ""
+        }
+        let nm = match c.named {
+          Some(x) -> " " ++ x ++ ":"
+          None -> ""
+        }
+        let pp = if c.piped { "|> " } else { "" }
+        pp ++ q ++ c.name ++ " " ++ to_string(c.commas) ++ nm
+      }
+      None -> "-"
+    }
+  assert show("let x = f(") == "f 0"
+  assert show("let x = f(1, g(2), ") == "f 2"
+  assert show("let x = f(1, g(2, ") == "g 1"
+  assert show("let x = str.pad(s, ") == "str.pad 1"
+  assert show("let x = f(1,\n  [a, b, ") == "f 1"
+  assert show("let x = f(a, fill: ") == "f 1 fill:"
+  assert show("let x = xs |> list.map(") == "|> list.map 0"
+  # not a call: a declaration, a tuple, a string, a block in between
+  assert show("fn f(a: Int, ") == "-"
+  assert show("let t = (1, ") == "-"
+  assert show("let x = f(\"a, ") == "-"
+  assert show("let x = f(() => { g(1) ") == "-"
+  assert show("let x = f(1)") == "-"
 }
