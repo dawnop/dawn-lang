@@ -32,6 +32,7 @@
 use std/list
 use std/str
 use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, TF32, I32, I8, I64, I4}
+use std/narrow.{Rounding}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it.
 ## `D` is a phantom (spec 2.7): `Tile[F64]` and `Tile[F32]` are two types over
@@ -1113,89 +1114,127 @@ fn compare_int(pred: String, shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Ti
   h
 }
 
-## The element-wise sum of two tiles of `shape` and format `d`, rounded to
-## nearest even (the one rounding mode tile-backend-design 3.2's theorem
-## covers). Every arithmetic operation here carries that rounding mode and no
-## other.
-pub fn addf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "addf", shape, a, b)
+## The element-wise sum of two tiles of `shape` and format `d`.
+##
+## `rounding` is the dialect's `rounding` attribute and `ftz` its
+## `flush_to_zero` unit attribute, both at the dialect's own defaults
+## (`nearest_even`, not set). `NearestEven` is the one mode
+## tile-backend-design 3.2's theorem covers and what every kernel here
+## writes unless it says otherwise. The other values this package writes
+## are listed at "the attributes of float arithmetic" below.
+pub fn addf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev =
+  binary(d, float_op("addf", rounding, ftz), shape, a, b)
 
-## The element-wise difference `a - b`.
-pub fn sub[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "subf", shape, a, b)
+## The element-wise difference `a - b`. `rounding` and `ftz` as for `addf`.
+pub fn sub[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev =
+  binary(d, float_op("subf", rounding, ftz), shape, a, b)
 
-## The element-wise product `a * b`.
-pub fn mul[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "mulf", shape, a, b)
+## The element-wise product `a * b`. `rounding` and `ftz` as for `addf`.
+pub fn mul[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev =
+  binary(d, float_op("mulf", rounding, ftz), shape, a, b)
 
-## The element-wise quotient `a / b`.
-pub fn div[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "divf", shape, a, b)
+## The element-wise quotient `a / b`. `rounding` and `ftz` as for `addf`.
+pub fn div[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev =
+  binary(d, float_op("divf", rounding, ftz), shape, a, b)
 
-## The element-wise larger of `a` and `b`. Neither `flush_to_zero` nor
-## `propagate_nan` is set, so a NaN operand answers the other operand.
-pub fn maxf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "maxf", shape, a, b)
+## The element-wise larger of `a` and `b`. Without `propagate_nan` (the
+## dialect's default), a NaN operand answers the other operand; with it, a
+## NaN operand answers a canonical NaN.
+pub fn maxf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  propagate_nan: Bool = false) -> Tile[D] !Dev =
+  binary(d, if propagate_nan { "maxf_nan" } else { "maxf" }, shape, a, b)
 
-## The element-wise smaller of `a` and `b`.
-pub fn minf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = binary(d, "minf", shape, a, b)
+## The element-wise smaller of `a` and `b`. `propagate_nan` as for `maxf`.
+pub fn minf[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D],
+  propagate_nan: Bool = false) -> Tile[D] !Dev =
+  binary(d, if propagate_nan { "minf_nan" } else { "minf" }, shape, a, b)
 
-# ---- the same operations under another attribute (knife T4) ----
+# ---- the attributes of float arithmetic (knife T4, reshaped by knife K2) ----
 #
 # Tile IR's arithmetic carries attributes, and until knife T4 this module
 # named only one value of each: `rounding<nearest_even>`, `overflow<none>`,
-# `ordered`, `relaxed device`, and no unit attribute set anywhere. The
-# functions below are the same operations under the other values. They are
-# separate names rather than a mode argument for the reason `shr_i` and
-# `shr_u` are: the attribute is part of what the operation IS, a caller
-# picks one at the point of use, and a name can be grepped for.
+# `ordered`, `relaxed device`, and no unit attribute set anywhere. Knife T4
+# wrote the other values as suffixed names (`addf_down`, `addf_ftz`,
+# `maxf_nan`, `add_i_nsw`, ...) and gave a reason: the attribute is part of
+# what the operation IS, as it is for `shr_i` and `shr_u`, a caller picks
+# one at the point of use, and a name can be grepped for.
 #
-# Which values each operation accepts is not uniform and is not guessable:
-# `approx` and `flush_to_zero` are refused on anything but an f32 tile
-# (SharedVerifiers.h's `verifyApprox` and `verifyFtz`), `approx` is not a
-# mode addf takes at all, and the two directed modes are accepted at every
-# float width. docs/tile-backend-design.md 6.8 records what the device
-# then does with them.
+# Knife K2 made them parameters with the dialect's defaults, and the reason
+# no longer holds, for four reasons of its own (docs/std-defaults-design.md
+# 7.2):
+#
+#   1. A named argument greps as well as a suffix does, and better: one grep
+#      for `rounding: Down` finds every operation rounded down, which no
+#      suffix shared by `addf_down`, `mul_down` and `float_to_float_down`
+#      could.
+#   2. The values each operation accepts are not uniform (`approx` and
+#      `flush_to_zero` are f32 only, SharedVerifiers.h's `verifyApprox` and
+#      `verifyFtz`), and a suffix did not encode that either: `D` is generic,
+#      so the width is refused by the assembler under both designs. A
+#      combination the writer has not learned is refused when the kernel is
+#      recorded; before, it had no name at all.
+#   3. Combinations had no name. `addf_down` and `addf_ftz` existed and "down
+#      and flush to zero" did not; `d_global_private` and `d_global_const`
+#      excluded each other; `d_for2` to `d_for4` had no unsigned twin.
+#   4. The dialect models these as attributes with defaults, and cuTile
+#      Python as keyword arguments with defaults; the rounding direction is
+#      std/narrow's `Rounding`, the same value the host reference takes.
+#
+# What stays a separate name: `sqrt_approx` (`approx` is a precision
+# contract, a tolerance tier, and not a rounding direction, so `Rounding`
+# has no `Approx`), `shr_i` / `shr_u` and the `*_u` comparisons (signedness
+# changes the answer, not how it is rounded), and `add_i64` (another result
+# type).
+#
+# Which values are written today, per operation; every other combination
+# reaches the recording handler as an operation name it does not know and is
+# refused there, with the kernel's name, before a renderer or a writer sees
+# it:
+#
+#   addf, mul   rounding Down or Up; ftz with NearestEven
+#   div         rounding Down or Up
+#   sub         the defaults only
+#   maxf, minf  propagate_nan
+#
+# docs/tile-backend-design.md 6.8 records what the device does with each.
+# Extending the table is a writer and renderer change (bytecode.dawn's
+# `float_rounding` / `float_flags`, render.dawn's `float_spelling` /
+# `float_units`) with a layer-1 answer to show, not a change here.
 
-## The element-wise sum rounded TOWARDS NEGATIVE INFINITY: the largest
-## value of the format that is not above the exact sum.
-pub fn addf_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "addf_neg_inf", shape, a, b)
+## The dialect's spelling of a rounding direction: the keyword
+## `rounding<..>` is written with, and the one std/narrow's file header
+## pairs with each variant. The renderer spells the modes from the
+## operation names, and this module's tests hold the two to each other.
+pub fn rounding_name(r: Rounding) -> String = match r {
+  NearestEven -> "nearest_even"
+  NearestAway -> "nearest_away"
+  TowardZero -> "zero"
+  Down -> "negative_inf"
+  Up -> "positive_inf"
+}
 
-## The element-wise sum rounded TOWARDS POSITIVE INFINITY.
-pub fn addf_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "addf_pos_inf", shape, a, b)
+# The suffix an operation name carries for a rounding direction. The
+# suffixed names are knife T4's (`addf_neg_inf`) and knife T17's
+# (`ftof_zero`, `ftof_away`); the recording handler, the renderer and the
+# writer still read those names, so the IR is what it was before the
+# surface took a `Rounding`.
+fn rounding_suffix(r: Rounding) -> String = match r {
+  NearestEven -> ""
+  NearestAway -> "_away"
+  TowardZero -> "_zero"
+  Down -> "_neg_inf"
+  Up -> "_pos_inf"
+}
 
-## The element-wise product rounded towards negative infinity.
-pub fn mul_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "mulf_neg_inf", shape, a, b)
-
-## The element-wise product rounded towards positive infinity.
-pub fn mul_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "mulf_pos_inf", shape, a, b)
-
-## The element-wise quotient rounded towards negative infinity.
-pub fn div_down[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "divf_neg_inf", shape, a, b)
-
-## The element-wise quotient rounded towards positive infinity.
-pub fn div_up[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "divf_pos_inf", shape, a, b)
-
-## The element-wise sum with `flush_to_zero`: a subnormal operand or a
-## subnormal result becomes the zero of its sign. f32 ONLY, and refused by
-## the assembler at any other width.
-pub fn addf_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "addf_ftz", shape, a, b)
-
-## The element-wise product with `flush_to_zero`. f32 only.
-pub fn mul_ftz[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "mulf_ftz", shape, a, b)
-
-## The element-wise larger with `propagate_nan`: a NaN operand answers a
-## canonical NaN rather than the other operand, which is what `maxf`
-## without the attribute answers.
-pub fn maxf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "maxf_nan", shape, a, b)
-
-## The element-wise smaller with `propagate_nan`.
-pub fn minf_nan[D: Dtype](d: D, shape: List[Int], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev =
-  binary(d, "minf_nan", shape, a, b)
+# The operation name of the float arithmetic `base` under `rounding` and
+# `ftz`. A combination the handler does not know is still a name, and the
+# handler's `check_binary` refuses it.
+fn float_op(base: String, rounding: Rounding, ftz: Bool) -> String =
+  base ++ rounding_suffix(rounding) ++ (if ftz { "_ftz" } else { "" })
 
 ## The element-wise square root under the APPROXIMATE rounding mode: the
 ## architecture's fast reciprocal-square-root path rather than the
@@ -1605,15 +1644,19 @@ fn binary_int_at[D: Dtype](d: D, op: String, shape: List[Int], a: Tile[D], b: Ti
   h
 }
 
-## The element-wise sum `a + b`, wrapping modulo 2^32.
-pub fn add_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("addi", shape, a, b)
+## The element-wise sum `a + b`, wrapping modulo 2^32 under the default
+## `overflow`; see `Overflow` for the other three.
+pub fn add_i(shape: List[Int], a: Tile[I32], b: Tile[I32], overflow: Overflow = NoAssumption) -> Tile[I32] !Dev =
+  binary_int(int_op("addi", overflow), shape, a, b)
 
-## The element-wise difference `a - b`, wrapping.
-pub fn sub_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("subi", shape, a, b)
+## The element-wise difference `a - b`, wrapping. `overflow` as for `add_i`.
+pub fn sub_i(shape: List[Int], a: Tile[I32], b: Tile[I32], overflow: Overflow = NoAssumption) -> Tile[I32] !Dev =
+  binary_int(int_op("subi", overflow), shape, a, b)
 
 ## The element-wise product `a * b`, wrapping: the LOW 32 bits of the
-## 64-bit product. `mulhi_i` is the other half.
-pub fn mul_i(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("muli", shape, a, b)
+## 64-bit product. `mulhi_i` is the other half. `overflow` as for `add_i`.
+pub fn mul_i(shape: List[Int], a: Tile[I32], b: Tile[I32], overflow: Overflow = NoAssumption) -> Tile[I32] !Dev =
+  binary_int(int_op("muli", overflow), shape, a, b)
 
 ## The element-wise signed quotient `a / b`, rounded toward zero (the
 ## dialect's default rounding for `divi`, and `to_int`'s). Division by zero
@@ -1669,23 +1712,54 @@ pub fn neg_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("negi
 ## `-2^31`).
 pub fn abs_i(shape: List[Int], a: Tile[I32]) -> Tile[I32] !Dev = unary_int("absi", shape, a)
 
-# The three integer OVERFLOW assumptions (knife T4). `overflow<none>` is
-# what every integer operation above carries: the compiler assumes nothing
-# and the device wraps. These three tell it to assume the operation does
-# not wrap, as a signed operation (`nsw`), as an unsigned one (`nuw`) or
-# as either (`nw`). They are assumptions and not arithmetic: a program
-# that wraps under one of them is undefined, so a caller uses them only
-# where it can prove the range, and no corpus can distinguish them from
-# `none` on a program that keeps its promise.
+# The integer OVERFLOW attribute (knife T4, a parameter since knife K2).
+# `overflow<none>` is the dialect's default and what every integer
+# operation here carries unless told otherwise: the compiler assumes nothing
+# and the device wraps.
 
-## `a + b` under `overflow<no_signed_wrap>`.
-pub fn add_i_nsw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("addi_nsw", shape, a, b)
+## What an integer operation lets the compiler assume about overflow: the
+## dialect's `overflow` attribute. `NoAssumption` is `none`, the default; the
+## other three tell it to assume the operation does not wrap, as a signed
+## operation (`no_signed_wrap`), as an unsigned one (`no_unsigned_wrap`) or
+## as either (`no_wrap`). They are assumptions and not arithmetic: a program
+## that wraps under one of them is undefined, so a caller uses them only
+## where it can prove the range, and no corpus can distinguish them from
+## `NoAssumption` on a program that keeps its promise.
+##
+## Written today: `add_i` with `NoSignedWrap`, `sub_i` with
+## `NoUnsignedWrap`, `mul_i` with `NoWrap` (knife T4's three, one per
+## value). Any other pairing is refused when the kernel is recorded; the
+## dialect allows all of them, and teaching the writer and the renderer the
+## rest is a change with a layer-1 answer to show.
+pub type Overflow =
+  | NoAssumption
+  | NoSignedWrap
+  | NoUnsignedWrap
+  | NoWrap
+derive Show
 
-## `a - b` under `overflow<no_unsigned_wrap>`.
-pub fn sub_i_nuw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("subi_nuw", shape, a, b)
+## The dialect's spelling of an overflow assumption, as `overflow<..>`
+## writes it.
+pub fn overflow_name(o: Overflow) -> String = match o {
+  NoAssumption -> "none"
+  NoSignedWrap -> "no_signed_wrap"
+  NoUnsignedWrap -> "no_unsigned_wrap"
+  NoWrap -> "no_wrap"
+}
 
-## `a * b` under `overflow<no_wrap>`.
-pub fn mul_i_nw(shape: List[Int], a: Tile[I32], b: Tile[I32]) -> Tile[I32] !Dev = binary_int("muli_nw", shape, a, b)
+# The operation name of the integer arithmetic `base` under `overflow`:
+# knife T4's suffixed names, which the handler, the renderer and the writer
+# read. A pairing the handler does not know is refused by its
+# `check_binary_int`.
+fn int_op(base: String, overflow: Overflow) -> String = {
+  let suffix = match overflow {
+    NoAssumption -> ""
+    NoSignedWrap -> "_nsw"
+    NoUnsignedWrap -> "_nuw"
+    NoWrap -> "_nw"
+  }
+  base ++ suffix
+}
 
 # ---- integer arithmetic at a named width (knife T3) ----
 #
@@ -1755,24 +1829,24 @@ pub fn int_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a:
 }
 
 ## The integer tile of format `to_d` holding each lane of the float tile `a`
-## of format `from_d`, TRUNCATED TOWARD ZERO. A lane that is infinite, NaN
-## or outside the target's range is undefined on the device (the dialect
-## says so), so a kernel that uses this owes a bound on its input.
-pub fn float_to_int[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+## of format `from_d`, TRUNCATED TOWARD ZERO.
+##
+## Without `saturating` (the default) a lane that is infinite, NaN or
+## outside the target's range is undefined on the device (the dialect says
+## so), so a kernel that uses this owes a bound on its input. With it,
+## bytecode 13.4's `saturating` modifier (knife T17), every lane has an
+## answer: a lane above the target's largest value is that value, one below
+## its smallest is that one, an infinity is the end of its own sign and a
+## NaN is 0 (Ops.td's FToIOp says all four in as many words); the rest
+## truncate toward zero either way. `saturating` is legal on every `ftoi`
+## the dialect allows (FToIOp has no per-format rule for it), so the
+## recording handler checks it by the same rule as the plain conversion:
+## the operation name `ftoi_sat` is on its list.
+pub fn float_to_int[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A],
+  saturating: Bool = false) -> Tile[B] !Dev = {
   let x: Int = a
-  let h: Tile[B] = t_convert("ftoi", dtype_name(from_d), dtype_name(to_d), shape, x)
-  h
-}
-
-## `float_to_int` with bytecode 13.4's `saturating` modifier (knife T17):
-## every lane has an answer. A lane above the target's largest value is that
-## value, one below its smallest is that one, an infinity is the end of its
-## own sign and a NaN is 0 (Ops.td's FToIOp says all four in as many words);
-## the rest truncate toward zero exactly as `float_to_int` does. This is the
-## spelling a kernel uses when its input is not known to be in range.
-pub fn float_to_int_sat[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
-  let x: Int = a
-  let h: Tile[B] = t_convert("ftoi_sat", dtype_name(from_d), dtype_name(to_d), shape, x)
+  let op = if saturating { "ftoi_sat" } else { "ftoi" }
+  let h: Tile[B] = t_convert(op, dtype_name(from_d), dtype_name(to_d), shape, x)
   h
 }
 
@@ -1816,59 +1890,32 @@ pub fn bits_to_int(shape: List[Int], a: Tile[F32]) -> Tile[I32] !Dev = {
 # ---- the width changes knife 11 needs ----
 
 ## The float tile of format `to_d` holding each lane of the float tile `a`,
-## which is of format `from_d`, rounded to nearest even: the dialect's
-## `ftof`. Widening (f16 to f64) is exact and narrowing rounds; the rounding
-## mode is `nearest_even`, the one the dialect allows for every target but
-## `f8E8M0FNU` (which takes `zero` here). The four functions after this one
-## spell the other IEEE modes on the pairs bytecode 13.4 allows them.
+## which is of format `from_d`, rounded by `rounding`: the dialect's `ftof`.
+## Widening (f16 to f64) is exact and narrowing rounds.
+##
+## Which modes a pair of formats may take is the dialect's table (Ops.td's
+## FToFOp at bytecode 13.4, knife T17; `prog.ftof_modes` is it), and the
+## recording handler refuses a kernel that asks for another, with the pair
+## and the modes it allows. On an exact widening every mode is allowed;
+## otherwise `NearestAway` only from f32 to tf32, `Down` only from f64 to
+## f32, `Up` from f64 to f32 and to `f8E8M0FNU`, and `TowardZero` to every
+## format but the 8-bit and 4-bit floats other than `f8E8M0FNU`. The table
+## is the dialect's to the letter, so it is checked here rather than left
+## to `tileiras`.
+##
+## The default is the one exception to "the mode it names": into
+## `f8E8M0FNU`, which has no `nearest_even`, the default conversion writes
+## `zero`, the dialect's own default there, as it did before `rounding` was
+## a parameter. `TowardZero` writes the same mode under its own name.
 ##
 ## The two formats must DIFFER (Ops.td's FToFOp says so and its verifier
 ## enforces it); `ftof` from a format to itself is refused by `tileiras`,
 ## not here, because nothing in a phantom type says two markers are the
 ## same one.
-pub fn float_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
+pub fn float_to_float[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A],
+  rounding: Rounding = NearestEven) -> Tile[B] !Dev = {
   let x: Int = a
-  let h: Tile[B] = t_convert("ftof", dtype_name(from_d), dtype_name(to_d), shape, x)
-  h
-}
-
-## `float_to_float` rounding TOWARD ZERO, to the neighbour of smaller
-## magnitude. Which IEEE mode a pair of formats may take is the dialect's
-## table (Ops.td's FToFOp, bytecode 13.4, knife T17) and the recording holds
-## a kernel to it: this one is allowed on every exact widening, on every
-## narrowing to a 16- or 32-bit format, and to `f8E8M0FNU` (where it is
-## `float_to_float`'s own mode); to the other 8-bit and 4-bit floats it is
-## refused.
-pub fn float_to_float_zero[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
-  let x: Int = a
-  let h: Tile[B] = t_convert("ftof_zero", dtype_name(from_d), dtype_name(to_d), shape, x)
-  h
-}
-
-## `float_to_float` rounding DOWN, toward negative infinity. Allowed from f64
-## to f32 and on an exact widening, and refused everywhere else.
-pub fn float_to_float_down[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
-  let x: Int = a
-  let h: Tile[B] = t_convert("ftof_neg_inf", dtype_name(from_d), dtype_name(to_d), shape, x)
-  h
-}
-
-## `float_to_float` rounding UP, toward positive infinity. Allowed from f64
-## to f32, on an exact widening and to `f8E8M0FNU`, and refused everywhere
-## else.
-pub fn float_to_float_up[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
-  let x: Int = a
-  let h: Tile[B] = t_convert("ftof_pos_inf", dtype_name(from_d), dtype_name(to_d), shape, x)
-  h
-}
-
-## `float_to_float` rounding to nearest with ties AWAY from zero: the mode
-## bytecode 13.4 adds (`nearest_away`, 7). It differs from `float_to_float`
-## only on a value exactly halfway between two neighbours, and the dialect
-## allows it from f32 to tf32 and on an exact widening, nowhere else.
-pub fn float_to_float_away[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], a: Tile[A]) -> Tile[B] !Dev = {
-  let x: Int = a
-  let h: Tile[B] = t_convert("ftof_away", dtype_name(from_d), dtype_name(to_d), shape, x)
+  let h: Tile[B] = t_convert("ftof" ++ rounding_suffix(rounding), dtype_name(from_d), dtype_name(to_d), shape, x)
   h
 }
 
@@ -2024,29 +2071,18 @@ fn loop_handles(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, carried: List
 ## (tile-backend-design 5.2). A body may nest `d_for`; the handler bounds the
 ## depth. The memory ordering token is carried through the loop by the
 ## handler, so a store after the loop is ordered after every store inside it.
+##
+## `unsigned_cmp` sets the loop's `unsignedCmp` unit attribute (knife T4):
+## the induction variable is compared against the upper bound as an
+## UNSIGNED 32-bit integer, so a range whose bounds straddle 2^31 runs
+## forward instead of not running at all. Its own kernel is
+## scripts/tile-golden's attr_ucmp, and the difference is a lane count and
+## not a rounding, which is why this is the one unit attribute of knife T4
+## with an unmistakable device answer. `d_for2` to `d_for4` take it too.
 pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
-  body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
+  body: fn(Idx, Tile[D]) -> Tile[D] !Dev, unsigned_cmp: Bool = false) -> Tile[D] !Dev = {
   let h: Int = init
-  let outs = loop_handles(lower, upper, step, false, [h], (i, inside) => {
-    let t: Tile[D] = inside[0]
-    let r: Int = body(i, t)
-    [r]
-  })
-  let out: Tile[D] = outs[0]
-  out
-}
-
-## `d_for` with the loop's `unsignedCmp` attribute set: the induction
-## variable is compared against the upper bound as an UNSIGNED 32-bit
-## integer, so a range whose bounds straddle 2^31 runs forward instead of
-## not running at all. Its own kernel is scripts/tile-golden's attr_ucmp,
-## and the difference between the two is a lane count and not a rounding,
-## which is why this attribute is the one unit attribute of knife T4 with
-## an unmistakable device answer.
-pub fn d_for_unsigned[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
-  body: fn(Idx, Tile[D]) -> Tile[D] !Dev) -> Tile[D] !Dev = {
-  let h: Int = init
-  let outs = loop_handles(lower, upper, step, true, [h], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, unsigned_cmp, [h], (i, inside) => {
     let t: Tile[D] = inside[0]
     let r: Int = body(i, t)
     [r]
@@ -2057,10 +2093,10 @@ pub fn d_for_unsigned[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
 
 ## `d_for` carrying two tiles, of formats `A` and `B`, in order.
 pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
-  body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = {
+  body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev, unsigned_cmp: Bool = false) -> (Tile[A], Tile[B]) !Dev = {
   let ha: Int = a
   let hb: Int = b
-  let outs = loop_handles(lower, upper, step, false, [ha, hb], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let (ra, rb) = body(i, ta, tb)
@@ -2077,11 +2113,12 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 ## what an online softmax needs (a running maximum, a running sum and an
 ## accumulator move through one loop together).
 pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C],
-  body: fn(Idx, Tile[A], Tile[B], Tile[C]) -> (Tile[A], Tile[B], Tile[C]) !Dev) -> (Tile[A], Tile[B], Tile[C]) !Dev = {
+  body: fn(Idx, Tile[A], Tile[B], Tile[C]) -> (Tile[A], Tile[B], Tile[C]) !Dev,
+  unsigned_cmp: Bool = false) -> (Tile[A], Tile[B], Tile[C]) !Dev = {
   let ha: Int = a
   let hb: Int = b
   let hc: Int = c
-  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb, hc], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -2099,12 +2136,13 @@ pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B]
 
 ## `d_for` carrying four tiles, in order.
 pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C], e: Tile[E],
-  body: fn(Idx, Tile[A], Tile[B], Tile[C], Tile[E]) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev = {
+  body: fn(Idx, Tile[A], Tile[B], Tile[C], Tile[E]) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev,
+  unsigned_cmp: Bool = false) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev = {
   let ha: Int = a
   let hb: Int = b
   let hc: Int = c
   let he: Int = e
-  let outs = loop_handles(lower, upper, step, false, [ha, hb, hc, he], (i, inside) => {
+  let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb, hc, he], (i, inside) => {
     let ta: Tile[A] = inside[0]
     let tb: Tile[B] = inside[1]
     let tc: Tile[C] = inside[2]
@@ -2724,10 +2762,9 @@ pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: 
 }
 
 ## Declare a statically allocated global named `sym` holding `values`, one
-## element of `d` each, aligned to `align` bytes (`0` is the dialect's
-## default and the only value this tree writes). The allocation lives as
-## long as the loaded module does and is initialized at module load time,
-## so what one launch writes the next launch of the same module reads;
+## element of `d` each. The allocation lives as long as the loaded module
+## does and is initialized at module load time, so what one launch writes
+## the next launch of the same module reads;
 ## `scripts/tile-gpu-diff/global_diff.dawn` is the measurement of that
 ## sentence.
 ##
@@ -2736,48 +2773,54 @@ pub fn ptr_to_ptr[A: Dtype, B: Dtype](from_d: A, to_d: B, shape: List[Int], ps: 
 ## reduction is refused. Declare each global once, before the
 ## `get_global` that names it.
 ##
-## Public and writable, which are the dialect's own defaults;
-## `d_global_private` and `d_global_const` are the other two values of the
-## two fields the record grew at 13.3.
-pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, 0, false, false)
-
-## `d_global` with an explicit alignment in bytes. The dialect's default is
-## 0 and the Global section's record has carried the number since 13.1, so
-## this is the one field of that record a corpus can give two different
-## values in one module.
-pub fn d_global_aligned[D: Dtype](sym: String, d: D, values: List[Float], align: Int) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, align, false, false)
-
-## `d_global` with `private` symbol visibility: the dialect says the symbol
-## is not part of the module's interface, so a host that has the module
-## cannot look it up.
+## The three remaining parameters are the three fields of the Global
+## section's record past the values, at the dialect's own defaults (public,
+## writable, alignment 0), and any combination of them may be given:
 ##
-## That last sentence is the dialect's and not this machine's, and knife TG
-## measured the difference. What the value DOES reach is the cubin:
-## `tileiras` gives a private global a LOCAL ELF binding and a public one a
-## GLOBAL binding, which scripts/tile-golden holds on `global_syms`. What it
-## does not reach is any answer: the CUDA driver's `cuModuleGetGlobal`
-## (std/gpu's `module_global`) answers a LOCAL global as readily as a GLOBAL
-## one, the host reads and writes both, and the next launch reads the write
-## (scripts/tile-gpu-diff/sym_diff.dawn). So this buys the byte, layer 1 and
-## a binding, and scripts/tileir-features/attrs.txt carries the exemption
-## `visibility-not-in-the-lookup` on the row.
-pub fn d_global_private[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, 0, true, false)
+## - `align`: the alignment in bytes. The record has carried the number
+##   since 13.1, so this is the one field a corpus can give two different
+##   values in one module.
+## - `visibility`: `Private` says the symbol is not part of the module's
+##   interface, so a host that has the module cannot look it up. That
+##   sentence is the dialect's and not this machine's, and knife TG measured
+##   the difference. What the value DOES reach is the cubin: `tileiras`
+##   gives a private global a LOCAL ELF binding and a public one a GLOBAL
+##   binding, which scripts/tile-golden holds on `global_syms`. What it does
+##   not reach is any answer: the CUDA driver's `cuModuleGetGlobal`
+##   (std/gpu's `module_global`) answers a LOCAL global as readily as a
+##   GLOBAL one, the host reads and writes both, and the next launch reads
+##   the write (scripts/tile-gpu-diff/sym_diff.dawn). So this buys the byte,
+##   layer 1 and a binding, and scripts/tileir-features/attrs.txt carries
+##   the exemption `visibility-not-in-the-lookup` on the row.
+## - `constant`: the global is read-only, which is a promise to the compiler
+##   and not a guard. The dialect does not say a store through a pointer got
+##   from a constant global is diagnosed, so this tree does not store
+##   through one. The flag reaches one byte of the bytecode and nothing
+##   further: with the writer's flag forced to 0 the sm_86 cubin `tileiras`
+##   writes is byte for byte the same one (measured, knife TG;
+##   scripts/tile-golden's `constant-flag-as-mutable` is the gate). The
+##   exemption on the row is `constant-not-in-the-cubin`.
+pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float],
+  align: Int = 0, visibility: Visibility = Public, constant: Bool = false) -> Unit !Dev =
+  t_global(sym, dtype_name(d), values, align, visibility_is_private(visibility), constant)
 
-## `d_global` with the `constant` flag: the global is read-only, which is a
-## promise to the compiler and not a guard. The dialect does not say a store
-## through a pointer got from a constant global is diagnosed, so this tree
-## does not store through one.
-##
-## This flag reaches one byte of the bytecode and nothing further: with the
-## writer's flag forced to 0 the sm_86 cubin `tileiras` writes is byte for
-## byte the same one (measured, knife TG; scripts/tile-golden's
-## `constant-flag-as-mutable` is the gate). The exemption on the row is
-## `constant-not-in-the-cubin`.
-pub fn d_global_const[D: Dtype](sym: String, d: D, values: List[Float]) -> Unit !Dev =
-  t_global(sym, dtype_name(d), values, 0, false, true)
+## A global's symbol visibility: the dialect's `symbol_visibility`, a field
+## the Global section's record grew at 13.3. `Public` is the default.
+pub type Visibility =
+  | Public
+  | Private
+derive Show
+
+## The dialect's spelling of a symbol visibility.
+pub fn visibility_name(v: Visibility) -> String = match v {
+  Public -> "public"
+  Private -> "private"
+}
+
+fn visibility_is_private(v: Visibility) -> Bool = match v {
+  Public -> false
+  Private -> true
+}
 
 ## The tile of `shape` every lane of which holds the address of the global
 ## named `sym`: `get_global` answers a rank-0 `tile<ptr<D>>`, and this is
@@ -2798,24 +2841,19 @@ pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !De
 ##
 ## The allocation is SCRATCH: the dialect limits its lifetime to the block
 ## the operation is in, so what one launch writes is not there for the
-## next, and each `alloca` in a block answers a region of its own. The
-## address is private to this tile thread; `alloca_shared_ptrs` is the
-## other value of the dialect's `global` unit attribute.
+## next, and each `alloca` in a block answers a region of its own. By
+## default the address is private to this tile thread; `shared` sets the
+## dialect's `global` unit attribute, and then the address may be read and
+## written by other tile threads as well as this one. The lifetime is the
+## same and so is everything else; what changes is one bit of the
+## operation's flags word.
 ##
 ## `align` must be a non-zero power of two and at least the natural size of
 ## `d`, which the dialect's verifier requires and the recording handler
 ## refuses ahead of it.
-pub fn alloca_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
-  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, false, shape)
-  r
-}
-
-## `alloca_ptrs` with the dialect's `global` attribute set: the address may
-## be read and written by other tile threads as well as this one. The
-## lifetime is the same and so is everything else; what changes is one bit
-## of the operation's flags word.
-pub fn alloca_shared_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int]) -> Ptrs[D] !Dev = {
-  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, true, shape)
+pub fn alloca_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int],
+  shared: Bool = false) -> Ptrs[D] !Dev = {
+  let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, shared, shape)
   r
 }
 
@@ -3830,8 +3868,8 @@ test "insert hands the handler the subtile's shape, then the whole tile's, then 
 fn t17_surface() -> Unit !Dev = {
   let x = param(F64, 0)
   let t = load(x, idx_const(0), [8])
-  let _s = float_to_int_sat(F64, I32, [8], t)
-  let _a = float_to_float_away(F32, TF32, [8], float_to_float(F64, F32, [8], t))
+  let _s = float_to_int(F64, I32, [8], t, saturating: true)
+  let _a = float_to_float(F32, TF32, [8], float_to_float(F64, F32, [8], t), rounding: NearestAway)
   d_return_if(s_gt(F64, s_const(F64, 1.0), s_const(F64, 0.0)))
 }
 
@@ -3841,6 +3879,71 @@ test "the knife T17 surface spells its conversions by name and hands the handler
   assert list.any(seen, l => l == "convert ftoi_sat f64 i32 [8] 1")
   assert list.any(seen, l => l == "convert ftof_away f32 tf32 [8] 20")
   assert list.any(seen, l => str.starts_with(l, "return_if "))
+}
+
+# Every attribute value knife K2 turned into a parameter, once each, in the
+# order knife T4 and knife T17 listed their suffixed names.
+fn k2_surface() -> Unit !Dev = {
+  let x = param(F32, 0)
+  let t = load(x, idx_const(0), [8])
+  let _r = [
+    addf(F32, [8], t, t, rounding: Down), addf(F32, [8], t, t, rounding: Up),
+    mul(F32, [8], t, t, rounding: Down), mul(F32, [8], t, t, rounding: Up),
+    div(F32, [8], t, t, rounding: Down), div(F32, [8], t, t, rounding: Up),
+    addf(F32, [8], t, t, ftz: true), mul(F32, [8], t, t, ftz: true),
+    maxf(F32, [8], t, t, propagate_nan: true), minf(F32, [8], t, t, propagate_nan: true),
+    addf(F32, [8], t, t, rounding: NearestEven, ftz: false), sub(F32, [8], t, t, rounding: TowardZero),
+    addf(F32, [8], t, t, rounding: Down, ftz: true)
+  ]
+  let i = i_const([8], 1)
+  let _n = [
+    add_i([8], i, i, overflow: NoSignedWrap), sub_i([8], i, i, overflow: NoUnsignedWrap),
+    mul_i([8], i, i, overflow: NoWrap), add_i([8], i, i, overflow: NoWrap)
+  ]
+  let _c = [
+    float_to_float(F32, F64, [8], t, rounding: TowardZero), float_to_float(F32, F64, [8], t, rounding: Down),
+    float_to_float(F32, F64, [8], t, rounding: Up), float_to_float(F32, F64, [8], t, rounding: NearestAway)
+  ]
+  d_global("a", F64, [1.0], align: 256)
+  d_global("b", F64, [1.0], visibility: Private, constant: true)
+  let _p = alloca_ptrs(F64, 8, 8, [8], shared: true)
+  ()
+}
+
+test "the knife K2 parameters hand the handler the names the suffixed functions did, and spell what they never could" {
+  let seen = logged(k2_surface)
+  # every load answers 1 here
+  let want = [
+    "binaryf addf_neg_inf f32 [8] 1 1", "binaryf addf_pos_inf f32 [8] 1 1",
+    "binaryf mulf_neg_inf f32 [8] 1 1", "binaryf mulf_pos_inf f32 [8] 1 1",
+    "binaryf divf_neg_inf f32 [8] 1 1", "binaryf divf_pos_inf f32 [8] 1 1",
+    "binaryf addf_ftz f32 [8] 1 1", "binaryf mulf_ftz f32 [8] 1 1",
+    "binaryf maxf_nan f32 [8] 1 1", "binaryf minf_nan f32 [8] 1 1",
+    "binaryf addf f32 [8] 1 1",
+    # the two a suffix could not spell: names the recording handler refuses
+    "binaryf subf_zero f32 [8] 1 1", "binaryf addf_neg_inf_ftz f32 [8] 1 1",
+    "convert ftof_zero f32 f64 [8] 1", "convert ftof_neg_inf f32 f64 [8] 1",
+    "convert ftof_pos_inf f32 f64 [8] 1", "convert ftof_away f32 f64 [8] 1",
+    "global a f64 [1.0] 256 false false", "global b f64 [1.0] 0 true true",
+    "alloca f64 8 8 true [8]"
+  ]
+  assert list.all(want, w => list.any(seen, l => l == w))
+  assert len(list.filter(seen, l => str.starts_with(l, "binaryi "))) == 4
+  assert list.any(seen, l => str.starts_with(l, "binaryi addi_nsw "))
+  assert list.any(seen, l => str.starts_with(l, "binaryi subi_nuw "))
+  assert list.any(seen, l => str.starts_with(l, "binaryi muli_nw "))
+  assert list.any(seen, l => str.starts_with(l, "binaryi addi_nw "))
+}
+
+test "a rounding direction is spelt as the dialect spells it and as std/narrow's header pairs it" {
+  assert rounding_name(NearestEven) == "nearest_even"
+  assert rounding_name(NearestAway) == "nearest_away"
+  assert rounding_name(TowardZero) == "zero"
+  assert rounding_name(Down) == "negative_inf"
+  assert rounding_name(Up) == "positive_inf"
+  assert overflow_name(NoAssumption) == "none"
+  assert overflow_name(NoWrap) == "no_wrap"
+  assert visibility_name(Private) == "private"
 }
 
 fn indexed_surface() -> Unit !Dev = {

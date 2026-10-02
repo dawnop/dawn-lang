@@ -9,6 +9,7 @@
 use std/list
 use std/io.{with_fs_real, write_bytes}
 use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, I4, F4E2M1FN}
+use std/narrow.{Rounding}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
 use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_masked, load_strided, store, store_masked,
   store_strided, load_strided_masked, store_strided_masked, row_major, permute, coord, and_mask, or_mask, in_range, axis_mask,
@@ -18,10 +19,10 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   maxf, minf, neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
   d_for, d_for2, d_for3, d_loop, d_loop2, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes,
   spread, d_reduce, d_reduce_dim, d_reduce2, d_if, s_addf, s_maxf, s_gt, s_select,
-  i_const, i8_const, add_i, sub_i, mul_i, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
+  i_const, i8_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i, and_i, or_i, xor_i, shl_i, shr_i, lt_i,
   shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask, bits_to_float, bits_to_int,
   float_to_float, ext_u8, trunc_u8, mmai,
-  float_to_int_sat, float_to_float_zero, float_to_float_down, float_to_float_up, float_to_float_away, d_return_if,
+  d_return_if,
   pack_bytes, unpack_bytes, ext_i4, ext_u4, trunc_i4, arange,
   d_reduce_i, s_addi, s_maxi, s_consti, s_le_i,
   d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range,
@@ -29,12 +30,10 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   sin, cos, tan, sinh, cosh, atan2, remf,
   extract, cat, permute_tile, num_blocks, d_fork2, insert, powi,
   ptrs, ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64,
-  d_global, d_global_aligned, d_global_private, d_global_const, global_ptrs,
-  alloca_ptrs, alloca_shared_ptrs, mmaf_scaled,
+  d_global, Visibility, global_ptrs,
+  alloca_ptrs, mmaf_scaled,
   addi, subi, muli, shli, shri, consti,
-  addf_down, addf_up, mul_down, mul_up, div_down, div_up, addf_ftz, mul_ftz, maxf_nan, minf_nan,
-  sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, add_i_nsw, sub_i_nuw, mul_i_nw,
-  d_for_unsigned, atomic_rmw,
+  sqrt_approx, eq_u, ne_u, lt_u, le_u, gt_u, ge_u, atomic_rmw,
   Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy, hint_latency,
   load_hinted, store_hinted,
   tensor_view, partition_view, load_view, store_view,
@@ -42,7 +41,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, load_
   strided_view, gather_scatter_view, load_gather, atomic_red_view,
   At, Rows, d_reduce_dim_i,
   NoPadding, PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf }
-use tileir/prog.{TileProg, trace_kernel, trace_kernel_hinted}
+use tileir/prog.{TileProg, trace_kernel}
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
 
@@ -4020,17 +4019,17 @@ fn attr_round(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let obase = tile_at(b, ATTR_ROUND_SEGS * ATTR_TILE)
   let a = float_to_float(F64, F32, s, load(x, base, s))
   let c = float_to_float(F64, F32, s, load(y, base, s))
-  store(out, obase, s, float_to_float(F32, F64, s, addf_down(F32, s, a, c)))
+  store(out, obase, s, float_to_float(F32, F64, s, addf(F32, s, a, c, rounding: Down)))
   store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
-    float_to_float(F32, F64, s, addf_up(F32, s, a, c)))
+    float_to_float(F32, F64, s, addf(F32, s, a, c, rounding: Up)))
   store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
-    float_to_float(F32, F64, s, mul_down(F32, s, a, c)))
+    float_to_float(F32, F64, s, mul(F32, s, a, c, rounding: Down)))
   store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
-    float_to_float(F32, F64, s, mul_up(F32, s, a, c)))
+    float_to_float(F32, F64, s, mul(F32, s, a, c, rounding: Up)))
   store(out, idx_add(obase, idx_const(4 * ATTR_TILE)), s,
-    float_to_float(F32, F64, s, div_down(F32, s, a, c)))
+    float_to_float(F32, F64, s, div(F32, s, a, c, rounding: Down)))
   store(out, idx_add(obase, idx_const(5 * ATTR_TILE)), s,
-    float_to_float(F32, F64, s, div_up(F32, s, a, c)))
+    float_to_float(F32, F64, s, div(F32, s, a, c, rounding: Up)))
 }
 
 # The two comparison orderings and the two NaN policies, on a corpus with
@@ -4062,9 +4061,9 @@ fn attr_nan(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store(out, idx_add(obase, idx_const(10 * ATTR_TILE)), s, as_float(s, gt_u(F64, s, a, c)))
   store(out, idx_add(obase, idx_const(11 * ATTR_TILE)), s, as_float(s, ge_u(F64, s, a, c)))
   store(out, idx_add(obase, idx_const(12 * ATTR_TILE)), s, maxf(F64, s, a, c))
-  store(out, idx_add(obase, idx_const(13 * ATTR_TILE)), s, maxf_nan(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(13 * ATTR_TILE)), s, maxf(F64, s, a, c, propagate_nan: true))
   store(out, idx_add(obase, idx_const(14 * ATTR_TILE)), s, minf(F64, s, a, c))
-  store(out, idx_add(obase, idx_const(15 * ATTR_TILE)), s, minf_nan(F64, s, a, c))
+  store(out, idx_add(obase, idx_const(15 * ATTR_TILE)), s, minf(F64, s, a, c, propagate_nan: true))
 }
 
 # A mask as 1.0 and 0.0, which is how attr_nan stores a comparison.
@@ -4084,11 +4083,11 @@ fn attr_ftz(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let c = float_to_float(F64, F32, s, load(y, base, s))
   store(out, obase, s, float_to_float(F32, F64, s, addf(F32, s, a, c)))
   store(out, idx_add(obase, idx_const(ATTR_TILE)), s,
-    float_to_float(F32, F64, s, addf_ftz(F32, s, a, c)))
+    float_to_float(F32, F64, s, addf(F32, s, a, c, ftz: true)))
   store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s,
     float_to_float(F32, F64, s, mul(F32, s, a, c)))
   store(out, idx_add(obase, idx_const(3 * ATTR_TILE)), s,
-    float_to_float(F32, F64, s, mul_ftz(F32, s, a, c)))
+    float_to_float(F32, F64, s, mul(F32, s, a, c, ftz: true)))
 }
 
 # The approximate square root beside the correctly rounded one. Both
@@ -4122,9 +4121,9 @@ fn attr_overflow(x: Param[I32], y: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let obase = tile_at(b, ATTR_OVERFLOW_SEGS * ATTR_TILE)
   let a = load(x, base, s)
   let c = load(y, base, s)
-  store(out, obase, s, add_i_nsw(s, a, c))
-  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, sub_i_nuw(s, a, c))
-  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, mul_i_nw(s, a, c))
+  store(out, obase, s, add_i(s, a, c, overflow: NoSignedWrap))
+  store(out, idx_add(obase, idx_const(ATTR_TILE)), s, sub_i(s, a, c, overflow: NoUnsignedWrap))
+  store(out, idx_add(obase, idx_const(2 * ATTR_TILE)), s, mul_i(s, a, c, overflow: NoWrap))
 }
 
 # The three memory orderings and the two scopes an atomic can carry beside
@@ -4180,8 +4179,8 @@ fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
   let zero = i_const(s, 0)
   let signed = d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
     (_i, acc) => add_i(s, acc, i_const(s, 1)))
-  let unsigned = d_for_unsigned(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
-    (_i, acc) => add_i(s, acc, i_const(s, 1)))
+  let unsigned = d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), zero,
+    (_i, acc) => add_i(s, acc, i_const(s, 1)), unsigned_cmp: true)
   store(out, obase, s, signed)
   store(out, idx_add(obase, idx_const(ATTR_TILE)), s, unsigned)
 }
@@ -4212,7 +4211,7 @@ fn attr_sat(x: Param[F64], out: Param[I32]) -> Unit !Dev = {
   let a = load(x, base, s)
   let fits = and_mask(s, gt(F64, s, a, f_const(F64, s, 0.0 - 2147483649.0)),
     lt(F64, s, a, f_const(F64, s, 2147483648.0)))
-  store(out, obase, s, float_to_int_sat(F64, I32, s, a))
+  store(out, obase, s, float_to_int(F64, I32, s, a, saturating: true))
   store_masked(out, idx_add(obase, idx_const(ATTR_TILE)), s, fits, float_to_int(F64, I32, s, a))
 }
 
@@ -4241,16 +4240,16 @@ fn attr_ftof(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let a = load(x, base, s)
   let f = float_to_float(F64, F32, s, a)
   store(out, seg(0), s, float_to_float(F32, F64, s, f))
-  store(out, seg(1), s, float_to_float(F32, F64, s, float_to_float_zero(F64, F32, s, a)))
-  store(out, seg(2), s, float_to_float(F32, F64, s, float_to_float_down(F64, F32, s, a)))
-  store(out, seg(3), s, float_to_float(F32, F64, s, float_to_float_up(F64, F32, s, a)))
+  store(out, seg(1), s, float_to_float(F32, F64, s, float_to_float(F64, F32, s, a, rounding: TowardZero)))
+  store(out, seg(2), s, float_to_float(F32, F64, s, float_to_float(F64, F32, s, a, rounding: Down)))
+  store(out, seg(3), s, float_to_float(F32, F64, s, float_to_float(F64, F32, s, a, rounding: Up)))
   store(out, seg(4), s, float_to_float(TF32, F64, s, float_to_float(F32, TF32, s, f)))
-  store(out, seg(5), s, float_to_float(TF32, F64, s, float_to_float_zero(F32, TF32, s, f)))
-  store(out, seg(6), s, float_to_float_away(TF32, F64, s, float_to_float_away(F32, TF32, s, f)))
+  store(out, seg(5), s, float_to_float(TF32, F64, s, float_to_float(F32, TF32, s, f, rounding: TowardZero)))
+  store(out, seg(6), s, float_to_float(TF32, F64, s, float_to_float(F32, TF32, s, f, rounding: NearestAway), rounding: NearestAway))
   store(out, seg(7), s, float_to_float(F16, F64, s, float_to_float(F32, F16, s, f)))
-  store(out, seg(8), s, float_to_float_zero(F16, F64, s, float_to_float_zero(F32, F16, s, f)))
+  store(out, seg(8), s, float_to_float(F16, F64, s, float_to_float(F32, F16, s, f, rounding: TowardZero), rounding: TowardZero))
   store(out, seg(9), s, float_to_float(BF16, F64, s, float_to_float(F32, BF16, s, f)))
-  store(out, seg(10), s, float_to_float_up(BF16, F64, s, float_to_float_zero(F32, BF16, s, f)))
+  store(out, seg(10), s, float_to_float(BF16, F64, s, float_to_float(F32, BF16, s, f, rounding: TowardZero), rounding: Up))
 }
 
 # The atomic EXCHANGE, the one read-modify-write mode no kernel had asked
@@ -4406,7 +4405,7 @@ const GLOBAL_ALIGN: Int = 256
 fn global_table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("tbl_a", F64, global_table_a(GLOBAL_TILE))
-  d_global_aligned("tbl_b", F64, global_table_b(GLOBAL_TILE), GLOBAL_ALIGN)
+  d_global("tbl_b", F64, global_table_b(GLOBAL_TILE), align: GLOBAL_ALIGN)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let pa = ptr_offset(F64, s, global_ptrs("tbl_a", F64, s), off)
@@ -4432,8 +4431,8 @@ fn global_ctl(a: Param[F64], b: Param[F64], x: Param[F64], out: Param[F64]) -> U
 # second one requires and the dialect does not enforce.
 fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
-  d_global_private("hidden", F64, global_table_a(GLOBAL_TILE))
-  d_global_const("frozen", F64, global_table_b(GLOBAL_TILE))
+  d_global("hidden", F64, global_table_a(GLOBAL_TILE), visibility: Private)
+  d_global("frozen", F64, global_table_b(GLOBAL_TILE), constant: true)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let pa = ptr_offset(F64, s, global_ptrs("hidden", F64, s), off)
@@ -4458,8 +4457,8 @@ fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn global_syms(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("shown", F64, global_table_a(GLOBAL_TILE))
-  d_global_private("hidden", F64, global_table_b(GLOBAL_TILE))
-  d_global_const("frozen", F64, global_syms_c(GLOBAL_TILE))
+  d_global("hidden", F64, global_table_b(GLOBAL_TILE), visibility: Private)
+  d_global("frozen", F64, global_syms_c(GLOBAL_TILE), constant: true)
   let blk = tile_at(block_id(0), GLOBAL_TILE)
   let off = lanes(blk, s)
   let ps = ptr_offset(F64, s, global_ptrs("shown", F64, s), off)
@@ -4579,7 +4578,7 @@ fn alloca_two(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), ALLOCA_TILE)
   let off = lanes(idx_const(0), s)
   let pa = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
-  let pb = ptr_offset(F64, s, alloca_shared_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s), off)
+  let pb = ptr_offset(F64, s, alloca_ptrs(F64, ALLOCA_ELEMS, ALLOCA_ALIGN, s, shared: true), off)
   let tx = load(x, blk, s)
   store_ptrs(F64, s, pa, tx)
   store_ptrs(F64, s, pb, sub(F64, s, neg(F64, s, tx), f_const(F64, s, 1.0)))
@@ -5621,8 +5620,8 @@ fn trace(name: String) -> TileProg = match name {
       () => mmaf_scaled_e4m3(param(F8E4M3FN, 0), param(F8E4M3FN, 1), param(F8E8M0FNU, 2),
         param(F8E8M0FNU, 3), param(F64, 4)))
   "hint_entry" ->
-    trace_kernel_hinted("hint_entry", ["f64", "f64", "f64"], hint_entry_hints(),
-      () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)))
+    trace_kernel("hint_entry", ["f64", "f64", "f64"],
+      () => hint_entry(param(F64, 0), param(F64, 1), param(F64, 2)), hints: hint_entry_hints())
   "view_transpose" ->
     trace_kernel("view_transpose", ["f64", "f64"],
       () => view_transpose(param(F64, 0), param(F64, 1)))

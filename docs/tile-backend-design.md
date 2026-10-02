@@ -764,6 +764,14 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   `float_to_float_zero` / `_down` / `_up` / `_away` 是 `ftof` 的其余四种 IEEE 舍入，哪一对格式收哪几种由
   `prog.ftof_modes` 照 13.4 的 `Ops.td` 表裁决，记录时就拒。`atomic_rmw(..., "xchg", ...)` 第一次有了客户 kernel。
   **仍然没有**：13.4 的其余三条 opcode（T19）、`inbounds` 写 true（T18）、`ptr_attr`（不做）。
+- **标准库默认参数刀 K2 起的写法**（上面 T4 / T15 / T17 两段是当时的公开面，原样保留）：属性变体的后缀名全部删除，
+  改为带方言默认值、放在位置参数与 body 之后的具名形参：`addf(F32, s, a, b, rounding: Down)`（`sub` / `mul` / `div`
+  同形，另有 `ftz: Bool = false`）、`maxf(.., propagate_nan: true)`、`add_i(.., overflow: NoSignedWrap)`、
+  `float_to_int(.., saturating: true)`、`float_to_float(.., rounding: NearestAway)`、`d_for(.., body, unsigned_cmp: true)`
+  （`d_for2`…`d_for4` 同形，从此也写得出无符号比较）、`d_global(sym, d, xs, align: 256, visibility: Private, constant: true)`、
+  `alloca_ptrs(.., shared: true)`、`trace_kernel(name, ps, body, hints: hs)`。舍入方向是 `std/narrow` 的 `Rounding`。
+  记录出来的 IR 不变（tile-golden 逐字节不动）；写入器还没学会的组合（如「向下舍入且 ftz」）在记录时拒绝。
+  理由与对 T4 注释的推翻见 [std-defaults-design.md](std-defaults-design.md) 7.2 节。
 
 ### 5.3 谁把它变成 Tile IR、何时
 
@@ -794,7 +802,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   是 13.3，§6.11、§6.18）、Func / Constant / Type / String 四个 section、结束字节。只编码指令表
   装得下的东西：内存操作 `weak`、无 mask、带 token 操作数；`addf` 为 `rounding<nearest_even>`、不 flush-to-zero；整数操作 `overflow` none；tile 为
   0 或 1 阶。不写 debug section（函数位置索引 0 = unknown）。**entry 的 optimization_hints
-  从刀 T15 起写得出**（默认仍不写，只有 `trace_kernel_hinted` 记下的程序带它；load / store
+  从刀 T15 起写得出**（默认仍不写，只有 `trace_kernel_hinted` 记下的程序带它，刀 K2 起写作 `trace_kernel(.., hints: hs)`；load / store
   的同名可选属性同刀落地，见 §6.10）。版本常量 `BYTECODE_MAJOR / BYTECODE_MINOR` 钉在包里。
 - 格式的权威来源是 `NVIDIA/cuda-tile` 仓库（commit `be0889cd`，2026-09）的
   `lib/Bytecode/Writer/BytecodeWriter.cpp`、`Reader/BytecodeReader.cpp`、三张冻结的编号表
