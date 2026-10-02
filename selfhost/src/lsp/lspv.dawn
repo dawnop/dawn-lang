@@ -1,0 +1,294 @@
+# A comptime value as hover shows it (docs/lsp-hover-design.md §3): Dawn
+# syntax read off the value's *type*, not off its representation. The
+# interpreter's `CValue` erases what the reader needs -- a `Char` is a `VInt`,
+# a record is a positional `VAdt` -- so the type that the checker gave the
+# constant is walked alongside the value: `'a'` rather than `97`,
+# `P { x: 1 }` rather than `P(1)`.
+#
+# `driver/checkdump.cv_show` renders the same values and is deliberately not
+# used: it is the `__check` golden's format, held byte-for-byte against the
+# previous release, so it can never learn about types without moving that
+# golden; and its job (one exact line per constant) is not this one (one line a
+# person can read, cut when it is long).
+#
+# Cutting reuses `check/types.cut_balanced`, the cutter K0 wrote for parameter
+# defaults: the rendered value is the same kind of text (literals, brackets,
+# strings), so the same rule keeps it balanced. The width differs, for the
+# reason given at `VALUE_SHOWN`. Rendering itself stops a little past the
+# width, so a 100,000-element table costs as much as a 100-element one.
+
+use std/map
+use std/str
+use std/char
+use check/types.{
+  Ty, Eff, Adts, TyInt, TyFloat, TyBool, TyString, TyUnit, TyVar, TyAdt, TyList,
+  TyTuple, TyOpaque, TyError, CHAR_OPAQUE_ID, adt_of, peel_opaque, subst, cut_balanced,
+  AdtI, CtorI, FieldI, OPTION_ID, ty_char
+}
+use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict}
+
+## The widest a value renders, in code points, before its suffix. A default
+## (`DEFAULT_SHOWN`, 40) shares its line with every other parameter of the
+## signature; a constant's value is the rest of its own line, after
+## `const NAME: T = `. 80 is the line a reader already expects to read whole --
+## the width `dawn fmt` and most editors' rulers settle on -- and is about what
+## an editor's hover popup shows without wrapping. A table (the case this is
+## for) still shows its first dozen elements, which is what a reader checks
+## against the code that built it.
+pub(pkg) const VALUE_SHOWN: Int = 80
+
+## The text after `= ` in a hover: the value, cut to `VALUE_SHOWN`, then a
+## suffix -- the hexadecimal of an `Int` of 10 or more (clangd's threshold: below
+## that the two spellings are the same digit), or the full length of a list or
+## string that was cut. `None` for a function value: `<fn>` would tell the
+## reader nothing the type does not.
+pub(pkg) fn value_text(adts: Adts, t: Ty, v: CValue) -> Option[String] =
+  match v {
+    VClosure(_, _, _) -> None
+    VDict(_, _) -> None
+    _ -> {
+      let full = render(adts, t, v, VALUE_SHOWN + 1)
+      let shown = cut_balanced(full, VALUE_SHOWN)
+      let cut = shown != full
+      Some(shown ++ suffix(t, v, cut))
+    }
+  }
+
+fn suffix(t: Ty, v: CValue, cut: Bool) -> String =
+  match v {
+    VInt(n) -> if not is_char(t) && n >= 10 { "  (0x" ++ hex(n) ++ ")" } else { "" }
+    VList(es) ->
+      if cut { "  (" ++ to_string(len(es)) ++ (if len(es) == 1 { " element)" } else { " elements)" }) }
+      else { "" }
+    VStr(s) ->
+      if cut { "  (" ++ to_string(str.len(s)) ++ " code points)" } else { "" }
+    _ -> ""
+  }
+
+## Uppercase hexadecimal of a non-negative Int. A negative one has no suffix:
+## its two's complement depends on a width Dawn's `Int` does not expose.
+pub(pkg) fn hex(n0: Int) -> String = {
+  if n0 == 0 { return "0" }
+  let digits = "0123456789ABCDEF"
+  var n = n0
+  var out = ""
+  while n > 0 {
+    out = str.slice(digits, n % 16, n % 16 + 1) ++ out
+    n = n / 16
+  }
+  out
+}
+
+fn is_char(t: Ty) -> Bool =
+  match t {
+    TyOpaque(id, _, _, _, tgt) -> id == CHAR_OPAQUE_ID || is_char(tgt)
+    _ -> false
+  }
+
+## `v` as Dawn source, read through `t`. `room` is how far past the cut the
+## text needs to reach: a collection stops adding elements once it is wider,
+## so the cut (which always lands inside `room`) still has something to mark.
+## A type that does not describe the value (`TyError`, or a shape mismatch the
+## checker would not produce) falls back to the value's own shape.
+fn render(adts: Adts, t: Ty, v: CValue, room: Int) -> String =
+  match v {
+    VInt(n) -> if is_char(t) { char_lit(n) } else { to_string(n) }
+    VFloat(f) -> to_string(f)
+    VBool(b) -> to_string(b)
+    VStr(s) -> str_lit(s, room)
+    VUnit -> "()"
+    VList(es) -> {
+      let et = match peel_opaque(t) {
+        TyList(e) -> e
+        _ -> TyError
+      }
+      "[" ++ seq(adts, et, [], es, room) ++ "]"
+    }
+    VTuple(es) -> {
+      let tys = match peel_opaque(t) {
+        TyTuple(ts) -> ts
+        _ -> []
+      }
+      "(" ++ seq(adts, TyError, tys, es, room) ++ ")"
+    }
+    VAdt(aid, ci, fs) -> adt_text(adts, t, aid, ci, fs, room)
+    VClosure(_, _, _) -> "<fn>"
+    VDict(_, _) -> "<fn>"
+  }
+
+## Elements joined by `, `, each read through its own type in `tys` or, past
+## the end of `tys`, through `rest` (a list's element type), stopping once the
+## text is wider than `room`.
+fn seq(adts: Adts, rest: Ty, tys: List[Ty], es: List[CValue], room: Int) -> String = {
+  var out = ""
+  var i = 0
+  for e in es {
+    if str.len(out) > room { return out ++ ", …" }
+    let et = if i < len(tys) { tys[i] } else { rest }
+    let part = render(adts, et, e, room - str.len(out))
+    out = if i == 0 { part } else { out ++ ", " ++ part }
+    i = i + 1
+  }
+  out
+}
+
+fn adt_text(adts: Adts, t: Ty, aid: Int, ci: Int, fs: List[CValue], room: Int) -> String = {
+  let a = adt_of(adts, aid)
+  let c = a.ctors[ci]
+  # the declared field types, instantiated at the arguments `t` gives the
+  # type's parameters: an `Option[Char]` field is a `Char`
+  var m: Map[Int, Ty] = map.empty()
+  match peel_opaque(t) {
+    TyAdt(tid, args) ->
+      if tid == aid {
+        var i = 0
+        for p in a.tparams {
+          match p {
+            TyVar(_, id) -> if i < len(args) { m = map.insert(m, id, args[i]) }
+            _ -> ()
+          }
+          i = i + 1
+        }
+      }
+    _ -> ()
+  }
+  let em: Map[Int, Eff] = map.empty()
+  var tys: List[Ty] = []
+  for f in c.fields { tys = tys ++ [subst(f.ty, m, em)] }
+  if len(fs) == 0 && not a.is_record { return c.name }
+  if a.is_record {
+    var out = ""
+    var i = 0
+    for f in fs {
+      if str.len(out) > room { return c.name ++ " { " ++ out ++ ", … }" }
+      let fname = if i < len(c.fields) { c.fields[i].name } else { "_" }
+      let et = if i < len(tys) { tys[i] } else { TyError }
+      let part = fname ++ ": " ++ render(adts, et, f, room - str.len(out))
+      out = if i == 0 { part } else { out ++ ", " ++ part }
+      i = i + 1
+    }
+    if out == "" { c.name ++ " {}" } else { c.name ++ " { " ++ out ++ " }" }
+  } else {
+    c.name ++ "(" ++ seq(adts, TyError, tys, fs, room) ++ ")"
+  }
+}
+
+## A character literal, escaped the way the lexer reads one back.
+fn char_lit(n: Int) -> String =
+  match char.of(n) {
+    Some(c) -> "'" ++ esc_char(c, '\'') ++ "'"
+    # not a character at all (only an unchecked bridge makes one): say what it is
+    None -> to_string(n)
+  }
+
+## A string literal, escaped, holding at most `room` of the string's code
+## points -- the cut that follows marks where it stopped.
+fn str_lit(s: String, room: Int) -> String = {
+  var out = "\""
+  var i = 0
+  let cps = code_points(str.take(s, room + 1))
+  let n = len(cps)
+  while i < n {
+    let c = cps[i]
+    if c == '$' && i + 1 < n && cps[i + 1] == '{' {
+      out = out ++ "\\$"
+    } else {
+      out = out ++ esc_char(c, '"')
+    }
+    i = i + 1
+  }
+  out ++ "\""
+}
+
+## One code point inside a literal delimited by `quote`: the escapes the
+## lexer accepts (`lex_escape`), and `\u{...}` for any other control.
+fn esc_char(c: Char, quote: Char) -> String =
+  if c == '\n' { "\\n" }
+  else if c == '\t' { "\\t" }
+  else if c == '\r' { "\\r" }
+  else if c == '\\' { "\\\\" }
+  else if c == quote { "\\" ++ str.from_char(c) }
+  else if char.code(c) < 0x20 || char.code(c) == 0x7F { "\\u{" ++ hex(char.code(c)) ++ "}" }
+  else { str.from_char(c) }
+
+# ---- tests ----
+
+use check/cx.{cx_new}
+
+fn prelude_adts() -> Adts = cx_new(None, None).adts
+
+fn show(t: Ty, v: CValue) -> String =
+  value_text(prelude_adts(), t, v).expect("a value with text")
+
+test "each kind of value renders as Dawn source, read through its type" {
+  assert show(TyInt, VInt(7)) == "7"
+  assert show(TyInt, VInt(-300)) == "-300"
+  assert show(TyFloat, VFloat(1.5)) == "1.5"
+  assert show(TyBool, VBool(true)) == "true"
+  assert show(TyUnit, VUnit) == "()"
+  assert show(TyString, VStr("a\"b\n\${x}$5")) == "\"a\\\"b\\n\\\${x}$5\""
+  assert show(ty_char(), VInt(97)) == "'a'"
+  assert show(ty_char(), VInt(39)) == "'\\''"
+  assert show(ty_char(), VInt(1)) == "'\\u{1}'"
+  assert show(TyList(ty_char()), VList([VInt(120), VInt(121)])) == "['x', 'y']"
+  assert show(TyTuple([TyInt, ty_char()]), VTuple([VInt(1), VInt(98)])) == "(1, 'b')"
+  let opt = TyAdt(OPTION_ID, [ty_char()])
+  assert show(opt, VAdt(OPTION_ID, 0, [VInt(122)])) == "Some('z')"
+  assert show(opt, VAdt(OPTION_ID, 1, [])) == "None"
+  # with no type to read, the value's own shape answers
+  assert show(TyError, VAdt(OPTION_ID, 0, [VInt(122)])) == "Some(122)"
+}
+
+test "a record shows its field names, a sum constructor its positions" {
+  let p = AdtI {
+    ..adt_of(prelude_adts(), OPTION_ID),
+    id: 900001, name: "P", is_record: true, tparams: [],
+    ctors: [CtorI { adt: 900001, name: "P", fields: [
+      FieldI { name: "x", ty: TyInt }, FieldI { name: "c", ty: ty_char() }] }]
+  }
+  let s = AdtI {
+    ..adt_of(prelude_adts(), OPTION_ID),
+    id: 900002, name: "Sh", is_record: false, tparams: [],
+    ctors: [CtorI { adt: 900002, name: "Circle", fields: [FieldI { name: "r", ty: TyFloat }] },
+      CtorI { adt: 900002, name: "Dot", fields: [] }]
+  }
+  let adts = map.insert(map.insert(prelude_adts(), 900001, p), 900002, s)
+  let pv = VAdt(900001, 0, [VInt(1), VInt(122)])
+  assert value_text(adts, TyAdt(900001, []), pv) == Some("P { x: 1, c: 'z' }")
+  let sv = VList([VAdt(900002, 0, [VFloat(1.5)]), VAdt(900002, 1, [])])
+  assert value_text(adts, TyList(TyAdt(900002, [])), sv) == Some("[Circle(1.5), Dot]")
+}
+
+test "an Int of 10 or more carries its hexadecimal; a negative one does not" {
+  assert show(TyInt, VInt(9)) == "9"
+  assert show(TyInt, VInt(10)) == "10  (0xA)"
+  assert show(TyInt, VInt(42)) == "42  (0x2A)"
+  assert show(TyInt, VInt(1048576)) == "1048576  (0x100000)"
+  assert show(TyInt, VInt(-42)) == "-42"
+  # a Char is an Int underneath, but its code point is not what it says
+  assert show(ty_char(), VInt(120)) == "'x'"
+  assert hex(0) == "0"
+  assert hex(255) == "FF"
+}
+
+test "a long value is cut, closed, and says how long it was" {
+  var xs: List[CValue] = []
+  var i = 0
+  while i < 360 {
+    xs = xs ++ [VFloat(0.25)]
+    i = i + 1
+  }
+  let lt = show(TyList(TyFloat), VList(xs))
+  assert str.ends_with(lt, "…]  (360 elements)")
+  assert str.len(lt) == VALUE_SHOWN + str.len("  (360 elements)")
+  let st = show(TyString, VStr(str.repeat("ab", 100)))
+  assert str.ends_with(st, "…\"  (200 code points)")
+  assert str.starts_with(st, "\"abab")
+  # one that fits is left alone, with no length
+  assert show(TyList(TyInt), VList([VInt(1), VInt(2)])) == "[1, 2]"
+}
+
+test "a function value has no text" {
+  let no_caps: Map[Int, CValue] = map.empty()
+  assert value_text(prelude_adts(), TyInt, VClosure("m", "f", no_caps)) == None
+}

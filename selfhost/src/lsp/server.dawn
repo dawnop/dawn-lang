@@ -2997,3 +2997,106 @@ test "a handler state cell answers at every spelling of it" {
     assert def_probe_span(tail, "the cell read below the handler") == (dlo, dhi)
   }))
 }
+
+# ---- comptime values on hover (docs/lsp-hover-design.md §3) ----
+
+fn value_probe_text() -> String =
+  join([
+    "const LIMIT: Int = 6 * 7",
+    "const SMALL: Int = 7",
+    "const NAME: String = \"da\\\"wn\"",
+    "const TABLE: List[Int] = comptime { squares(200) }",
+    "const HASHED: Int = hash(1)",
+    "",
+    "fn squares(n: Int) -> List[Int] = {",
+    "  var out: List[Int] = []",
+    "  var i = 0",
+    "  while i < n {",
+    "    out = out ++ [i * i]",
+    "    i = i + 1",
+    "  }",
+    "  out",
+    "}",
+    "",
+    "fn f() -> Int = LIMIT + comptime { 1 << 20 }",
+    ""
+  ], "\n")
+
+test "hover shows a constant's value and a comptime block's, as analysis left them" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = value_probe_text()
+    let d = def_probe_doc_named(st, "values.dawn", text)
+
+    # the declaration and a reference read the same table entry
+    assert def_probe_at(st, d, text, "LIMIT: Int", 0).hover == "const LIMIT: Int = 42  (0x2A)"
+    assert def_probe_at(st, d, text, "LIMIT + comptime", 0).hover == "const LIMIT: Int = 42  (0x2A)"
+    # below 10 the hexadecimal says nothing the decimal does not
+    assert def_probe_at(st, d, text, "SMALL", 0).hover == "const SMALL: Int = 7"
+    assert def_probe_at(st, d, text, "NAME", 0).hover == "const NAME: String = \"da\\\"wn\""
+    # a long value is cut where the line ends and says how long it was
+    let table = def_probe_at(st, d, text, "TABLE", 0).hover
+    assert str.starts_with(table, "const TABLE: List[Int] = [0, 1, 4, 9, ")
+    assert str.ends_with(table, "…]  (200 elements)")
+    # the keyword answers with the block's value; inside the block the
+    # innermost node still wins
+    assert def_probe_at(st, d, text, "comptime { 1", 0).hover == "comptime: Int = 1048576  (0x100000)"
+    assert def_probe_at(st, d, text, "1 << 20", 0).hover == "Int"
+    # a constant comptime refused: its diagnostic, first line, says why
+    assert def_probe_at(st, d, text, "HASHED", 0).hover ==
+      "const HASHED: Int\n(not evaluated: builtin `hash` is not available at comptime)"
+  }))
+}
+
+test "hover says a constant was not evaluated when its module has errors" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    # comptime runs only over a module the checker accepted; the value is
+    # missing for that reason and the hover has to say so
+    let text = join([
+      "const LIMIT: Int = 42",
+      "",
+      "fn bad() -> Int = \"no\"",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "broken.dawn", text)
+    assert def_probe_at(st, d, text, "LIMIT", 0).hover ==
+      "const LIMIT: Int\n(not evaluated: module has errors)"
+  }))
+}
+
+test "hover reads a std constant's value from std's own comptime results" {
+  io.with_fs_real(() => no_host(() => {
+    # the same one-module probe std as the definition test above, for the same
+    # reason: the real bundle's constants are not the thing under test
+    let root = "/tmp/dawn-selfhost-lsp-def/valstd"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "valprobe\n")
+    def_probe_put("${root}/valprobe.dawn", "pub const PROBE_MASK: Int = 255\n")
+    let cstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(cstd)
+    let text = join([
+      "use std/valprobe.{PROBE_MASK}",
+      "use std/valprobe as v",
+      "",
+      "fn mask() -> Int = PROBE_MASK + v.PROBE_MASK",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "valuser.dawn", text)
+    let want = "const PROBE_MASK: Int = 255  (0xFF)"
+    assert def_probe_at(st, d, text, "PROBE_MASK}", 0).hover == want
+    assert def_probe_at(st, d, text, "PROBE_MASK +", 0).hover == want
+    assert def_probe_at(st, d, text, "PROBE_MASK\n", 0).hover == want
+  }))
+}

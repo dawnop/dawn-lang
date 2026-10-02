@@ -2246,12 +2246,21 @@ pub const DEFAULT_SHOWN: Int = 40
 ## commas, which an unclosed `(` or `"` would make unreadable.
 pub fn default_display(src: String) -> String = {
   let t = str.trim(str.replace(str.replace(str.replace(src, "\r", " "), "\n", " "), "\t", " "))
-  if str.len(t) <= DEFAULT_SHOWN { return t }
-  var k = DEFAULT_SHOWN - 1
+  cut_balanced(t, DEFAULT_SHOWN)
+}
+
+## One line of Dawn-shaped text no wider than `width` code points: as is when
+## it fits, otherwise cut, marked with `…` and closed the way
+## `default_display` describes. Shared with the hover's rendering of a
+## constant's value (lsp/lspv), which is text of the same shape -- literals,
+## brackets, strings -- and has to stay just as balanced when it is cut.
+pub fn cut_balanced(t: String, width: Int) -> String = {
+  if str.len(t) <= width { return t }
+  var k = width - 1
   while true {
     let head = str.trim_end(str.take(t, k))
     let shown = head ++ "…" ++ from_code_points(closers_of(code_points(head)))
-    if str.len(shown) <= DEFAULT_SHOWN || k == 0 { return shown }
+    if str.len(shown) <= width || k == 0 { return shown }
     k = k - 1
   }
   t
