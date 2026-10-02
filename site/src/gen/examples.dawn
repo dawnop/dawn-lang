@@ -17,7 +17,7 @@ use json/parser.{parse}
 use json/value.{Json, JInt, JStr, JArr, JObj, error_text}
 use html/escape.{escape_html}
 use hl/dawn.{highlight_dawn}
-use html/page.{Assets, Lang, En, Zh, PageHead, page, lang_path, playground_label, sep}
+use html/page.{Assets, Lang, En, Zh, PageHead, page, lang_path, playground_label, section_crumb, here, chip}
 use html/play.{Play, play_block, code_window, win_bar}
 use gen/common.{must_read, must_list, write_page}
 
@@ -453,6 +453,7 @@ fn file_section(path: String, play: Option[Play]) -> String !Fs = {
 fn example_page(
   c: Chrome,
   lang: Lang,
+  root: String,
   ex: Example,
   cases: List[Case],
   play: Play,
@@ -464,11 +465,11 @@ fn example_page(
   }
   let group = unwrap_or(get(filter(groups(), g => g.id == ex.group), 0), Group { id: ex.group, en: ex.group, zh: ex.group })
   let head = PageHead {
-    eyebrow: `<a href="index.html">` ++ escape_html(c.section) ++ "</a>" ++ sep()
-      ++ escape_html(str.to_lower(group_title(group, lang))),
+    crumbs: [section_crumb(lang, root, "examples", true), here(escape_html(group_title(group, lang))),
+      here("<code>${ex.slug}</code>")],
     title: "<code>${ex.slug}</code>",
     lede: desc_html(must_describe(ex)),
-    twin: "",
+    meta: [],
     extra: "",
     cls: "col",
   }
@@ -531,17 +532,17 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let registry = read_registry()
   let play = Play { href: "${root}/" ++ lang_path(lang, "playground.html"), label: playground_label(lang) }
   for ex in units {
-    let (head, body) = example_page(c, lang, ex, cases_of(registry, ex.target), play)
+    let (head, body) = example_page(c, lang, root, ex, cases_of(registry, ex.target), play)
     write_page("${dir}/${ex.slug}.html",
       page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
         head, body))
   }
 
   let head = PageHead {
-    eyebrow: escape_html(c.section) ++ sep() ++ escape_html(c.eyebrow),
+    crumbs: [section_crumb(lang, root, "examples", false)],
     title: c.heading,
     lede: c.lede,
-    twin: "",
+    meta: [chip(escape_html(c.eyebrow))],
     extra: "",
     cls: "col",
   }

@@ -1,4 +1,5 @@
-/* Every page's script: the theme, and the contents fold on a narrow screen.
+/* Every page's script: the theme, the contents fold on a narrow screen, and
+   the line that slides under the nav's sections.
    Loaded by every page (html/page.head_html) as a plain blocking script in
    <head>, because the first thing it does has to happen before the first
    paint: put a theme the reader chose last time on <html>, or the page would
@@ -77,7 +78,11 @@
       var x = r.left + r.width / 2;
       var y = r.top + r.height / 2;
       var radius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+      /* the nav's own colour tweens stand down while the circle opens (style.css) */
+      root.classList.add("theme-cut");
       var vt = document.startViewTransition(function () { apply(next); });
+      var done = function () { root.classList.remove("theme-cut"); };
+      vt.finished.then(done, done);
       vt.ready.then(function () {
         root.animate(
           { clipPath: ["circle(0px at " + x + "px " + y + "px)", "circle(" + radius + "px at " + x + "px " + y + "px)"] },
@@ -100,7 +105,49 @@
     if (narrow && narrow.addEventListener) narrow.addEventListener("change", fit);
   }
 
-  function ready() { wireToggle(); fitFold(); }
+  /* The line under the current section slides to whichever section the
+     pointer or the focus is on and back when it leaves. One element, placed
+     from the links' own offsets: CSS anchor positioning could do it with no
+     script, but only Chromium has it, and how a change of anchor animates is
+     not settled between engines. Without this the stylesheet's static line
+     under the current section is what shows. On a phone the sections scroll
+     sideways, and the current one is brought into view once. */
+  function wireInk() {
+    var nav = document.querySelector(".site-nav");
+    var links = nav && nav.querySelector(".links");
+    if (!links) return;
+    var active = links.querySelector("a.active");
+    var ink = document.createElement("span");
+    ink.className = "ink";
+    ink.setAttribute("aria-hidden", "true");
+    links.appendChild(ink);
+    nav.classList.add("has-ink");
+    function place(a) {
+      if (!a) { ink.style.opacity = "0"; return; }
+      ink.style.width = a.offsetWidth + "px";
+      ink.style.transform = "translateX(" + a.offsetLeft + "px)";
+      ink.style.opacity = "1";
+    }
+    /* the first placement does not slide in from the left edge */
+    ink.style.transition = "none";
+    place(active);
+    ink.getBoundingClientRect();
+    ink.style.transition = "";
+    if (active && links.scrollWidth > links.clientWidth) {
+      links.scrollLeft = Math.max(0, active.offsetLeft - (links.clientWidth - active.offsetWidth) / 2);
+    }
+    links.addEventListener("pointerover", function (e) {
+      var a = e.target.closest && e.target.closest("a");
+      if (a && e.pointerType === "mouse") place(a);
+    });
+    links.addEventListener("pointerleave", function () { place(active); });
+    links.addEventListener("focusin", function (e) { if (e.target.tagName === "A") place(e.target); });
+    links.addEventListener("focusout", function () { place(active); });
+    window.addEventListener("resize", function () { place(active); });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { place(active); });
+  }
+
+  function ready() { wireToggle(); fitFold(); wireInk(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", ready);
   else ready();
 })();

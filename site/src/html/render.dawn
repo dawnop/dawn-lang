@@ -292,6 +292,45 @@ pub fn split_head(blocks: List[Block]) -> Parts = {
   Parts { title: title, twin: twin, body: map(range(from, len(blocks)), i => blocks[i]) }
 }
 
+## The translation note's link, as (label, url) with the url as the document
+## wrote it: the note leads to the same document in the other language, and
+## the page sets that link apart as a chip ("", "") when there is no note or
+## it links nowhere.
+pub fn twin_link(twin: List[Inline]) -> (String, String) = {
+  var found = ("", "")
+  for it in twin {
+    let (l, _) = found
+    if l == "" {
+      found =
+        match it {
+          Link(label, url) -> (label, url)
+          Em(xs) -> twin_link(xs)
+          Bold(xs) -> twin_link(xs)
+          _ -> ("", "")
+        }
+    }
+  }
+  found
+}
+
+## How many entries the document's timelines hold: the items of every top-
+## level list drawn as a timeline (see [is_timeline]). What the history page
+## counts in its band.
+pub fn timeline_entries(blocks: List[Block]) -> Int = {
+  var n = 0
+  for b in blocks {
+    match b {
+      UList(items) -> {
+        if is_timeline(items) {
+          n = n + len(items)
+        }
+      }
+      _ -> ()
+    }
+  }
+  n
+}
+
 ## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
 ## h1 becomes the title. h4 gets a numbered id too but stays OUT of the TOC —
 ## the sidebar is a two-level map, and spec §9.5.1-style leaves would bury it.
