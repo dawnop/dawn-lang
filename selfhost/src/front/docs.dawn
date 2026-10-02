@@ -12,6 +12,14 @@
 # and only if it is the first thing on that line: a `##` after code is a
 # remark on that code, and filing it would let the next line's declaration
 # claim it (docs/spec.md §1.2).
+#
+# The rule is a line rule and knows no declaration kinds: a member (a
+# constructor, a record or constructor field, a trait method) is read from its
+# own `lo` exactly as a top-level declaration is. Which declarations take a doc
+# is the callers' choice of which spans to ask about; `dawn doc` and hover ask
+# about the same ones. The one member rule is `member_doc_of`: a constructor
+# or field written on its owner's line has no doc of its own, because the block
+# above that line documents the owner (spec §1.2).
 
 use std/str
 use std/list
@@ -96,6 +104,15 @@ pub fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
   }
   if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
 }
+
+## The doc of a member starting at `lo` whose owner starts at `owner_lo`: a
+## constructor under its `type`, a field under its constructor. On the owner's
+## line it has none, since the block above that line was written about the
+## owner; `type Rounding = NearestEven | Up` documents the type, not `Up`, and
+## reading it as `Up`'s would publish one block once per constructor. Off the
+## owner's line it is `doc_of`, the rule every declaration follows.
+pub fn member_doc_of(ds: DocSrc, owner_lo: Int, lo: Int) -> Option[String] =
+  if line_of(ds.starts, lo) == line_of(ds.starts, owner_lo) { None } else { doc_of(ds, lo) }
 
 ## The 1-based line every top-level declaration starts on, `impl` included:
 ## an `impl` publishes no doc of its own, but a `##` block right above one is
@@ -246,4 +263,97 @@ test "a ## block right above an impl is the impl's, not the module's" {
   let (m2, d2) = parser.parse_module(detached)
   assert len(d2) == 0
   assert module_doc_of(doc_src_of(detached), m2) == Some("Boxes.")
+}
+
+test "a member's doc is the block above its own line, fields included" {
+  # constructors, record fields, named constructor fields and trait methods
+  # read the same rule a top-level declaration does, from their own `lo`
+  let text = join([
+    "## A shape.",
+    "pub type Shape =",
+    "  ## A round one.",
+    "  | Circle(",
+    "    ## The radius.",
+    "    r: Float",
+    "  )",
+    "  | Dot",
+    "",
+    "## A point.",
+    "pub type Point = {",
+    "  ## Across.",
+    "  x: Int,",
+    "  y: Int",
+    "}",
+    "",
+    "## Things that can be measured.",
+    "pub trait Size[T] {",
+    "  ## How big.",
+    "  fn size(t: T) -> Int",
+    "  fn none(t: T) -> Int",
+    "}",
+    ""
+  ], "\n")
+  let (m, d) = parser.parse_module(text)
+  assert len(d) == 0
+  let ds = doc_src_of(text)
+  let shape = module_types(m)[0]
+  assert doc_of(ds, shape.ctors[0].lo) == Some("A round one.")
+  assert doc_of(ds, shape.ctors[0].fields[0].lo) == Some("The radius.")
+  # `| Dot` sits under `)`, a code line
+  assert doc_of(ds, shape.ctors[1].lo) == None
+  let point = module_types(m)[1]
+  assert doc_of(ds, point.ctors[0].fields[0].lo) == Some("Across.")
+  # the line above `y` is `x`'s, which is code
+  assert doc_of(ds, point.ctors[0].fields[1].lo) == None
+  let size = module_traits(m)[0]
+  assert doc_of(ds, size.methods[0].lo) == Some("How big.")
+  assert doc_of(ds, size.methods[1].lo) == None
+}
+
+test "a member on its owner's line has no doc of its own" {
+  # the block above the `type` line documents the type (spec §1.2): a
+  # constructor or field written on that line, or on its constructor's line,
+  # has no doc, while `doc_of` alone would read the type's block for it
+  let text = join([
+    "## Two ways.",
+    "pub type T = A | B(n: Int)",
+    "",
+    "## A pair.",
+    "pub type P = { a: Int, b: Int }",
+    ""
+  ], "\n")
+  let (m, d) = parser.parse_module(text)
+  assert len(d) == 0
+  let ds = doc_src_of(text)
+  let t = module_types(m)[0]
+  assert doc_of(ds, t.ctors[0].lo) == Some("Two ways.")
+  assert member_doc_of(ds, t.lo, t.ctors[0].lo) == None
+  assert member_doc_of(ds, t.lo, t.ctors[1].lo) == None
+  assert member_doc_of(ds, t.ctors[1].lo, t.ctors[1].fields[0].lo) == None
+  let p = module_types(m)[1]
+  assert member_doc_of(ds, p.lo, p.ctors[0].lo) == None
+  assert member_doc_of(ds, p.ctors[0].lo, p.ctors[0].fields[1].lo) == None
+}
+
+test "a member off its owner's line reads the block above its own line" {
+  let text = join([
+    "## A shape.",
+    "pub type Shape =",
+    "  ## A round one.",
+    "  | Circle(r: Float,",
+    "    ## The second.",
+    "    s: Float)",
+    "  | Dot",
+    ""
+  ], "\n")
+  let (m, d) = parser.parse_module(text)
+  assert len(d) == 0
+  let ds = doc_src_of(text)
+  let t = module_types(m)[0]
+  let circle = t.ctors[0]
+  assert member_doc_of(ds, t.lo, circle.lo) == Some("A round one.")
+  # `r` sits on its constructor's line, `s` on its own
+  assert member_doc_of(ds, circle.lo, circle.fields[0].lo) == None
+  assert member_doc_of(ds, circle.lo, circle.fields[1].lo) == Some("The second.")
+  assert member_doc_of(ds, t.lo, t.ctors[1].lo) == None
 }
