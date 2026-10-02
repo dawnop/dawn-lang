@@ -83,7 +83,7 @@ selfhost/          编译器主体（Dawn 写 Dawn）；消费 compiler-plan，A
 compiler-plan/     无 Java 的 source/manifest/MVS/fetch 规划包；不是 packages/* 发布包
 selfhost/src/      分十个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
                    embed/  生成物，不许手改（stdsrc rtsrc unicode_case unicode_class）
-                   front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt lexdump astdump）
+                   front/  词法/语法/诊断/格式化/文档注释（token lexer parser ast diag suggest fmt docs lexdump astdump）
                    check/  类型与检查（types tast exhaustive jsig cx passes checker）
                    ir/     Core IR 及其上的 pass（core lower interp reach coredump）
                    jvm/    JVM 后端（codegen emit ops help jreflect rtclasses jarw testrun jfold）

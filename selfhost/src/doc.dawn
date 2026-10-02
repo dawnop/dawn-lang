@@ -10,9 +10,7 @@ use std/map
 use std/set
 use std/io
 use std/io.{Fs}
-use front/lexer
-use front/parser
-use front/token.{Token}
+use front/docs.{DocSrc, doc_src_of, doc_of, module_doc_of}
 use front/ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
 }
@@ -126,97 +124,6 @@ fn quote(s: String) -> String = {
     }
   }
   "${join(out, "")}\""
-}
-
-# ---- doc comment extraction (Doc.kt docOf / commentsByLine) ----
-
-## 1-based line number of code-point offset `off` (count of line starts <= off).
-fn line_of(starts: List[Int], off: Int) -> Int = {
-  var n = 0
-  var i = 0
-  while i < len(starts) && starts[i] <= off {
-    n = n + 1
-    i = i + 1
-  }
-  n
-}
-
-type DocSrc = { starts: List[Int], by_line: Map[Int, Token] }
-
-fn doc_src_of(text: String) -> DocSrc = {
-  let (_, comments, _) = lexer.lex_with_comments(text)
-  let starts = lexer.line_starts_of(text)
-  var by_line: Map[Int, Token] = map.empty()
-  for c in comments { by_line = map.insert(by_line, line_of(starts, c.hi), c) }
-  DocSrc { starts: starts, by_line: by_line }
-}
-
-fn strip_doc_prefix(s: String) -> String = {
-  let t = str.drop(s, 2)
-  str.strip_prefix(t, " ").unwrap_or(t)
-}
-
-## The `##` lines immediately above the declaration starting at `lo`,
-## contiguous, joined by \n. A blank line detaches; plain `#` is never a doc.
-fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
-  var line = line_of(ds.starts, lo) - 1
-  var acc: List[String] = []
-  var go = true
-  while go {
-    match map.get(ds.by_line, line) {
-      Some(t) ->
-        if str.starts_with(t.text, "##") {
-          acc = acc ++ [strip_doc_prefix(t.text)]
-          line = line - 1
-        } else {
-          go = false
-        }
-      None -> { go = false }
-    }
-  }
-  if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
-}
-
-## The 1-based line every declaration starts on.
-fn decl_lines(m: Module, starts: List[Int]) -> List[Int] = {
-  var out: List[Int] = []
-  for fd in module_fns(m) { out = out ++ [line_of(starts, fd.lo)] }
-  for td in module_types(m) { out = out ++ [line_of(starts, td.lo)] }
-  for cd in module_consts(m) { out = out ++ [line_of(starts, cd.lo)] }
-  for td in module_traits(m) { out = out ++ [line_of(starts, td.lo)] }
-  for ed in module_effects(m) { out = out ++ [line_of(starts, ed.lo)] }
-  out
-}
-
-## The module's own doc: the `##` block that opens the file. It is the one doc
-## comment `doc_of` cannot reach — that one reads upward from a declaration,
-## and a module has no `lo` to read up from.
-##
-## The block belongs to the module only if nothing is declared on the line
-## right after it. A file that opens with a documented declaration
-## (`## Answer questions.` then `pub effect Ask`) has a first-declaration doc,
-## not a module doc, and the two must not be the same comment read twice.
-fn module_doc_of(ds: DocSrc, m: Module) -> Option[String] = {
-  var line = 1
-  var acc: List[String] = []
-  var go = true
-  while go {
-    match map.get(ds.by_line, line) {
-      Some(t) ->
-        if str.starts_with(t.text, "##") {
-          acc = acc ++ [strip_doc_prefix(t.text)]
-          line = line + 1
-        } else {
-          go = false
-        }
-      None -> { go = false }
-    }
-  }
-  if len(acc) == 0 || list.contains(decl_lines(m, ds.starts), line) {
-    None
-  } else {
-    Some(join(acc, "\n"))
-  }
 }
 
 # ---- project JSON ----
@@ -908,22 +815,4 @@ test "the standard library reference carries what --builtins cannot" {
       assert not str.contains(j, quote(internal))
     }
   }))
-}
-
-test "a documented first declaration is not also the module's doc" {
-  # the two readings collide on line 1: `doc_of` reads upward from the
-  # declaration and `module_doc_of` reads downward from the top of the file,
-  # and without the declaration check they would both claim this comment.
-  let attached = "## Answer questions from ambient context.\n" ++
-    "pub effect Ask {\n  fn ask(prompt: String) -> Int\n}\n"
-  let (m1, d1) = parser.parse_module(attached)
-  assert len(d1) == 0
-  assert module_doc_of(doc_src_of(attached), m1) == None
-
-  # detached by a blank line, the same comment is the module's
-  let detached = "## What this module is for.\n\n" ++
-    "pub effect Ask {\n  fn ask(prompt: String) -> Int\n}\n"
-  let (m2, d2) = parser.parse_module(detached)
-  assert len(d2) == 0
-  assert module_doc_of(doc_src_of(detached), m2) == Some("What this module is for.")
 }
