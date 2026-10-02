@@ -389,8 +389,10 @@ class PreflightTests(unittest.TestCase):
         self.assert_registry_drift_is_red("narrow-contract", "emax-off-by-one", narrow,
                                           "round_binary(x, 8, -126, 127)",
                                           "round_binary(x, 8, -126, 127 )")
-        # The comment lines are part of the anchor: they keep it off the
-        # DIRECTED neighbour, so rewording them must be caught too.
+        # The comment lines are part of the anchor: they kept it off the
+        # DIRECTED neighbour until K1 merged the two, and they still keep it
+        # off any rounder decomposed the same way, so rewording them must be
+        # caught too.
         self.assert_registry_drift_is_red("narrow-contract", "no-subnormal-clamp", narrow,
                                           "      # to the subnormal grid below emin\n      let qe = (",
                                           "      # to the subnormal grid under emin\n      let qe = (")

@@ -1,7 +1,7 @@
 # 标准库默认参数收敛：设计（K0–K19）
 
 > 状态：current。本线的总纲：分组裁决、刀序与每刀的回填位置。K0（签名渲染默认表达式、
-> LSP `textDocument/signatureHelp`）已落地；其余各刀落地时回填 §7「状态」并在这里改写被
+> LSP `textDocument/signatureHelp`）与 K1（`std/narrow` 的 `Rounding`）已落地；其余各刀落地时回填 §7「状态」并在这里改写被
 > 事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2），
 > 默认参数本身的语义见 [spec.md](spec.md) 3.1 节与 [named-args-design.md](named-args-design.md)。
 
@@ -50,7 +50,7 @@ dev.addf_down(F32, s, a, b)                      # 「向下舍入且 ftz」根�
 
 | 编号 | 合并 | 改前 → 改后 |
 |---|---|---|
-| A1 | narrow：`Rounding = NearestEven \| TowardZero \| Down \| Up` 成为 `round_binary` / `round_f32` 的 `mode` 默认参数，删两个 `*_toward` 与其字符串校验 | `round_f32_toward(x, "negative_inf")` → `round_f32(x, mode: Down)` |
+| A1 | narrow：`Rounding = NearestEven \| NearestAway \| TowardZero \| Down \| Up` 成为 `round_binary` / `round_f32` / `round_tf32` 的 `mode` 默认参数，删两个 `*_toward`、两个 `*_away` 与字符串校验（`NearestAway` 来自 T17 的 `round_binary_away` / `round_tf32_away`，调研时还没有） | `round_f32_toward(x, "negative_inf")` → `round_f32(x, mode: Down)`；`round_tf32_away(x)` → `round_tf32(x, mode: NearestAway)` |
 | A2 | inflate：天花板 `cap: Option[Int] = None`，`inflate_end` 并入 `inflate_from(src, from = 0, cap = None)`，`gunzip` / `zip.read` 同理 | `gunzip_bounded(src, Some(n))` → `gunzip(src, cap: Some(n))` |
 | A3 | web：`fmt: ErrorFormat = default_errors()` 挪到尾部，`streaming` 收 `length: Option[Int] = None` | `query_int_bounded_with(f, req, ..)` → `query_int_bounded(req, .., fmt: f)` |
 | A4 | gpu 宿主面：`launch(kernel, grid, args, gy = 1, gz = 1)`，`with_gpu_fake(kernels, body, globals = map.empty())` | `launch3(k, gx, gy, gz, hs)` → `launch(k, gx, hs, gy: gy, gz: gz)` |
@@ -176,7 +176,7 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | 读者 | 改动 |
 |---|---|
 | `scripts/param-change.py` | 切形参表前先 `mask_literals`（字符串与字符字面量内部换成占位符，下标不变），默认值里的逗号与括号不再被当成结构；自测加三例 |
-| `scripts/api-diff.py` | `split_defaults` 把默认值从签名上拿掉再比效果原子与形状（K0 前的 `= ...` 与 K0 后的 `= expr` 不再报成「signature changed」，默认值里的 `!x` 不再被当成效果）；默认值按形参名单独比：消失或变值算 Breaking，新增算 Additions，`...` 是「值未知的默认」不算变化；自测加四例 |
+| `scripts/api-diff.py` | `split_defaults` 把默认值从签名上拿掉再比效果原子与形状（K0 前的 `= ...` 与 K0 后的 `= expr` 不再报成「signature changed」，默认值里的 `!x` 不再被当成效果）；默认值按形参名单独比：消失或变值算 Breaking，新增算 Additions，`...` 是「值未知的默认」不算变化；自测加四例。K1 补一条：形参表**末尾**新增、且每个都带默认的形参算 Additions（旧调用全部照编），插在已有形参之前或不带默认仍算 Breaking；自测再加四例 |
 | `scripts/builtin-decl-contract` | builtin 没有默认，镜像不变（验证见提交说明） |
 | `scripts/checker-corpus` | `default_params` 的「缺实参」诊断附带签名，`b: Int = ...` 变 `b: Int = 1`，已重录 |
 
@@ -202,7 +202,7 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | 刀 | 内容 | 依赖 | Emit-Change |
 |---|---|---|---|
 | K0 | B4：默认表达式进 `Sig` 与 `sig_render`，LSP signatureHelp | 无 | `lsp`（实测；std 今天没有默认参数，`doc --builtins` 等不动） |
-| K1 | A1：`std/narrow` 的 `Rounding` 与两族合并 | K0 | `doc --builtins`；narrow 契约判据不变 |
+| K1 | A1：`std/narrow` 的 `Rounding` 与两族合并 | K0 | `doc --builtins`（实测见 §7）；narrow 契约判据不变 |
 | K2 | A6 + A5：tileir Dev 属性族、`d_global`、alloca、`d_for` 的 unsigned、`trace_kernel` | K1（复用 `Rounding`） | 无 std 输出；tile-golden 185 个逐字节不动 |
 | K3 | A2：inflate 四族 | 无 | 无（packages 不进 `doc --builtins`）；inflate major |
 | K4 | A3：web 三族 | 无 | 无；web 6.0，dawnop-site 下次升钉改 8 处 |
@@ -236,5 +236,37 @@ T17（`ftoi` saturating、`ftof` nearest_away）排在 K2 之后，直接写成
 
 | 刀 | 状态 | 提交 |
 |---|---|---|
-| K0 | 已落地 | `c53d7e85`（合入 main 时若经 rebase，以 main 上的哈希为准） |
-| K1–K19 | 未开工 | |
+| K0 | 已落地 | `8938471f`（PR #375 rebase 合入 main 后的哈希；分支上原为 `c53d7e85`） |
+| K1 | 已落地 | `K1_SHA`（叠在 K0 分支上；同样以合入 main 后的哈希为准） |
+| K2–K19 | 未开工 | |
+
+### 7.1 K1 落地记录
+
+- **面。** `pub type Rounding = NearestEven | NearestAway | TowardZero | Down | Up`，变体按 IEEE 754 §4.3
+  的五个舍入方向属性起短名（`Down` / `Up` 是 roundTowardNegative / roundTowardPositive 的通行简称）。
+  `round_binary(x, p, emin, emax, mode: Rounding = NearestEven)`、`round_f32(x, mode: ...)`、
+  `round_tf32(x, mode: ...)`；删 `round_binary_away`、`round_binary_toward`、`round_f32_toward`、
+  `round_tf32_away`。与 Tile IR 方言拼写（`nearest_even` / `nearest_away` / `zero` / `negative_inf` /
+  `positive_inf`）的一一对应写在 `std/narrow.dawn` 文件头，**拼写函数不在 narrow**：它属于方言，K2 在
+  `packages/tileir` 建。
+- **实现。** 私有的 `round_nearest`（两种就近模式）与 `round_binary_toward`（三种定向模式）合成
+  `round_binary` 里的两个 `match`：一个回答「量级要不要进一个 quantum」，一个回答「越过最大有限值时
+  是无穷还是最大有限值」。非法模式的 `panic` 随字符串一起消失。
+- **`round_bf16` / `round_fp16` 不加 `mode`。** 任务单允许加（只转调 `round_binary`）；没加的理由：格式是
+  函数身份（§3 C 组），今天没有调用要 bf16/fp16 的定向舍入（tileref 的两处用 `round_binary(f, .., mode: TowardZero)`
+  直接写），而 `round_bf16` 的签名是 narrow 契约 `emax-off-by-one` 变异体的锚点，没有需求就不动它。
+- **调用方。** `packages/tileref` 8 处、`scripts/tile-gpu-diff/attr_diff.dawn` 1 处、
+  `examples/projects/gpu_fake` 1 处，外加 narrow 自己的内联测试（五个模式各有断言，另加「显式写
+  `NearestEven` 等于省略」两条）。f32 到 tf32 的 `zero` 原写作 `round_binary_toward(f, 11, -126, 127, "zero")`，
+  现在写 `round_tf32(f, mode: TowardZero)`。
+- **`std/moved.txt`。** `round_binary_toward` 与 `round_f32_toward` 在 v0.82.0 里是公开函数，
+  `std-moved-check` 要求登记，补了两行带提示（since 0.83.0）；两个 `*_away` 是 v0.82.0 之后才加的，不登记。
+- **narrow 契约。** 判据不变。`ties-away` 的锚点从 `let n = ...` 那一行改成 `match` 的
+  `NearestEven -> ...` 臂；`no-subnormal-clamp` 的锚点仍带两行注释（定向函数并入后语句本身又唯一了，
+  注释留在锚点里防下一个同构的舍入函数）。**负控发现：** 把 `Down` 臂改成 `Up` 的行为，契约照样全绿，
+  因为 `narrow_round` 语料里**没有定向舍入的节**（27 节全是就近偶数）；抓住它的是 narrow 自己的内联测试
+  `directed rounding takes the neighbour on the named side`，以及层 2 的 `attr_round` / `attr_ftof`（GPU）。
+  给契约补定向节要改 `gen.py` 与 `.expect`，超出本刀「判据不变」的范围，留作后续。
+- **api-diff。** K0 版把 `mode` 的新增报成三条「signature changed」（Breaking）；本刀教它认「末尾追加的
+  带默认形参」（§4.4），实测报为 Additions，删掉的四个函数仍是 Breaking。
+

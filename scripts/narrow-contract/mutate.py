@@ -12,8 +12,12 @@ mutation per private std tree, and the preflight proves every one of them
 exactly-once before any build (#254).
 
 `no-subnormal-clamp`'s anchor carries the two comment lines above the
-statement it rewrites on purpose: the DIRECTED rounding function next to
-`round_binary` decomposes the same way, and the statement alone matches twice.
+statement it rewrites. From knife T4 to knife K1 a DIRECTED rounding function
+sat next to `round_binary` and decomposed the same way, so the statement alone
+matched twice; K1 folded every mode into `round_binary`'s `mode: Rounding`
+and the statement is unique again, but the comment stays in the anchor so
+that a second rounder written the same way is refused here, not mutated by
+accident.
 
 A mutation is an ordered tuple of edits, each applied to the text the previous
 one left. The paths are relative to the tree root the caller passes: run.sh
@@ -27,14 +31,13 @@ import sys
 NARROW = "std/narrow.dawn"
 
 MUTATIONS = {
-    # Ties away from zero instead of to even. Since knife T17 the statement
-    # is shared with `round_binary_away` (the `away` flag is that function's
-    # rule), and the mutation drops the even branch for both: `round_bf16`
-    # is the one the corpus measures.
+    # Ties away from zero instead of to even: the `NearestEven` arm of
+    # `round_binary`'s mode match answers what the `NearestAway` arm does.
+    # `round_bf16` takes the default mode and is the one the corpus measures.
     "ties-away": ((
         NARROW,
-        "let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else if away || fl % 2 == 1 { fl + 1 } else { fl }",
-        "let n = if r > 0.5 { fl + 1 } else if r < 0.5 { fl } else { fl + 1 }",
+        "NearestEven -> r > 0.5 || (r == 0.5 && fl % 2 == 1)",
+        "NearestEven -> r >= 0.5",
     ),),
     # Below emin the quantum keeps shrinking with the exponent.
     "no-subnormal-clamp": ((
