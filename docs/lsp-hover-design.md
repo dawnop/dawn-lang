@@ -267,7 +267,7 @@ Area of a shape, in square units.
 | 构造器（声明处、构造、pattern、选择性导入、限定构造） | 是 | 构造器自己那行（`CtorDecl.lo`），不是 type 那行 |
 | const（声明处、裸引用、`use m.{C}`、`m.C`） | 是 | `DConst` 的 `lo` |
 | trait、effect、effect 操作的声明处 | 是 | 各自的 `lo` |
-| 字段 | 否 | `dawn doc` 不给字段文档，hover 不另立一条附着规则 |
+| 字段（声明处、记录的字段访问 `p.x`） | 是（文档注释 D2 起） | 字段自己那行（`FieldDecl.lo`），与构造器同一条规则。构造器或字段与所属声明同行时没有自己的文档（`dawn doc` 给 `null`，spec §1.2），hover 照旧读那一行之上，显示的是所属声明的文档，作为显示层回退 |
 | 局部变量、形参、lambda 形参、match 绑定、局部 fn | 否 | 它们不是对外的声明；`let` 上方的 `##` 只是注释 |
 | 字面量（A2）、comptime 块、`use` 行、impl 头、builtin | 否 | 没有声明点或没有 `##` 源码 |
 
@@ -354,7 +354,8 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
   读者总得跳一次」的实际抱怨。
 - **模块文档进 `use` 行 hover**（`module_doc_of`）：`front/docs` 已经能给，但 `use` 行的 hover 今天只回
   `use std/list`，加文档是独立的一小刀，留到有需要时做。
-- **字段文档**：见 A3.2。
+- **字段文档**：A3 时不做（`dawn doc` 当时不给字段文档，hover 不另立规则）；文档注释 D2 让 `dawn doc` 发布字段文档后，
+  hover 随之补上，见 A3.2。
 - **把文档渲染成 HTML、改写 markdown**：编辑器自己渲染 markdown；Playground 按纯文本显示正文。
 - **builtin 的文档**：builtin 没有 `##` 源码；`selfhost/builtins.dawn` 是给人读的镜像，不是 hover 的数据源。
 
@@ -562,5 +563,5 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | A1 | 已落地 | `615d3116` |
 | A2 | 已落地 | `30419580` |
 | A3 | 已落地 | `597dfb3a` |
-| A4 | 已落地（分支 `feat/lsp-inlay-hints`） | 合入后由协调者回填 |
+| A4 | 已落地 | `5c07b1e6` |
 | B 组 | 未立项 | |

@@ -3358,6 +3358,22 @@ fn doc_probe_text() -> String =
     "  let c = Circle(1.0)",
     "  k + 0",
     "}",
+    "",
+    "type Pt = {",
+    "  ## Across.",
+    "  x: Int,",
+    "  y: Int",
+    "}",
+    "",
+    "trait Sized[T] {",
+    "  ## How big.",
+    "  fn size(t: T) -> Int",
+    "}",
+    "",
+    "fn read_pt(p: Pt) -> Int = p.x + p.y",
+    "",
+    "## Two ways.",
+    "type Two = Yes | No",
     ""
   ], "\n")
 
@@ -3388,6 +3404,17 @@ test "hover puts a declaration's ## doc under the fence, and nothing else change
     assert local == "```dawn\n" ++ def_probe_at(st, d, text, "k + 0", 0).hover ++ "\n```"
     # and a literal (A2) carries none either
     assert not str.contains(hover_probe_at(st, d, text, "1.0", 0), "---")
+    # a record field reads the ## line above its own, at the declaration and
+    # at a use; the field under it has a code line above and no doc
+    let across = "```dawn\nx: Int\n```\n\n---\n\nAcross."
+    assert hover_probe_at(st, d, text, "x: Int,", 0) == across
+    assert hover_probe_at(st, d, text, "p.x", 2) == across
+    assert hover_probe_at(st, d, text, "p.y", 2) == "```dawn\ny: Int\n```"
+    # a constructor on its type's line has no doc of its own (`dawn doc`
+    # writes null); hover falls back to the type's block
+    assert hover_probe_at(st, d, text, "Yes |", 0) == "```dawn\nYes: Two\n```\n\n---\n\nTwo ways."
+    # a trait method, as `dawn doc` publishes it
+    assert str.ends_with(hover_probe_at(st, d, text, "size(t", 0), "\n```\n\n---\n\nHow big.")
   }))
 }
 

@@ -70,11 +70,11 @@ ENTRY_KEYS = {
     "traits": {"name", "typeParam", "assoc", "effectAssoc", "methods", "doc"},
     "effects": {"name", "ops", "doc"},
 }
-CTOR_KEYS = {"name", "fields"}
-FIELD_KEYS = {"name", "type"}
+CTOR_KEYS = {"name", "fields", "doc"}
+FIELD_KEYS = {"name", "type", "doc"}
 ASSOC_KEYS = {"name", "doc"}
 EFFECT_ASSOC_KEYS = {"name", "default", "doc"}
-METHOD_KEYS = {"name", "sig", "hasDefault"}
+METHOD_KEYS = {"name", "sig", "hasDefault", "doc"}
 OP_KEYS = {"name", "sig", "doc"}
 GROUP_KEYS = {"name", "fns"}
 
@@ -247,10 +247,11 @@ CLEAN_DOC = {
         "doc": "prose that must not reach the snapshot",
         "fns": [{"name": "f", "sig": "fn f() -> Int !io", "doc": "prose"}],
         "types": [{"name": "T", "record": True, "typeParams": [], "doc": "prose",
-                   "ctors": [{"name": "T", "fields": [{"name": "a", "type": "Int"}]}]}],
+                   "ctors": [{"name": "T", "doc": "prose",
+                              "fields": [{"name": "a", "type": "Int", "doc": None}]}]}],
         "traits": [{"name": "Tr", "typeParam": "W", "assoc": [{"name": "It", "doc": None}],
                     "methods": [{"name": "go", "sig": "fn go[W: Tr](w: W) -> W",
-                                 "hasDefault": False}]}],
+                                 "hasDefault": False, "doc": "prose"}]}],
         "impls": ["Show[T]"],
     }, {
         "path": "dep/mod",

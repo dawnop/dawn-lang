@@ -10,15 +10,16 @@ use std/map
 use std/set
 use std/io
 use std/io.{Fs}
-use front/docs.{DocSrc, doc_src_of, doc_of, module_doc_of}
+use front/docs.{DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of}
 use front/ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
 }
-use driver/analyze.{Program, CheckedMod}
+use driver/analyze.{Program, CheckedMod, analyze_standalone}
 use check/cx.{Cx}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/tast.{TModule}
-use ir/interp.{CtOut, comptime_refuses}
+use ir/interp.{CtOut, comptime_refuses, ct_default}
+use check/jsig.{jsig_refused}
 use check/types.{
   Adts, Traits, AdtI, adt_of, trait_of, ty_show, sig_render,
   prelude_traits, prelude_trait_ids, builtins, internal_builtins,
@@ -140,7 +141,10 @@ fn adt_by_name(adts: Adts, owner: String, name: String) -> Option[AdtI] = {
   None
 }
 
-fn trait_methods_json(w: W, cx: Cx, owner: String, name: String) -> W = {
+## The trait's methods as the checker registered them, each with the `##`
+## block above its declaration: `decls` is the parse tree's `(name, lo)` per
+## method, matched by name because the checker's record carries no span.
+fn trait_methods_json(w: W, cx: Cx, owner: String, name: String, decls: List[(String, Int)], ds: DocSrc) -> W = {
   var w1 = w_key(w, "methods")
   w1 = open_arr(w1)
   var any = false
@@ -158,12 +162,41 @@ fn trait_methods_json(w: W, cx: Cx, owner: String, name: String) -> W = {
         w1 = w_field(w1, "name", mname)
         w1 = w_field(w1, "sig", sig_render(cx.adts, cx.traits, ms.sig))
         w1 = w_field_bool(w1, "hasDefault", ms.has_default)
+        w1 = w_field_opt(w1, "doc", member_doc(ds, los_named(decls, mname)))
         w1 = close_obj(w1)
       }
     }
   }
   close_arr(w1, any)
 }
+
+## The `lo` of every declaration in `decls` named `name`.
+fn los_named(decls: List[(String, Int)], name: String) -> List[Int] = {
+  var out: List[Int] = []
+  for pr in decls {
+    let (n, lo) = pr
+    if n == name { out = out ++ [lo] }
+  }
+  out
+}
+
+## The doc of the member declared at the first of `los`, or None when the
+## parse tree has no such member (a name the checker synthesized). Members are
+## matched by name because the checker's records carry no spans.
+fn member_doc(ds: DocSrc, los: List[Int]) -> Option[String] =
+  match get(los, 0) {
+    Some(lo) -> doc_of(ds, lo)
+    None -> None
+  }
+
+## `member_doc` for a constructor or a field, whose owner (the type, or the
+## constructor) starts at `owner_lo`: on its owner's line it has no doc of its
+## own (`front/docs.member_doc_of`).
+fn owned_doc(ds: DocSrc, owner_lo: Int, los: List[Int]) -> Option[String] =
+  match get(los, 0) {
+    Some(lo) -> member_doc_of(ds, owner_lo, lo)
+    None -> None
+  }
 
 fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
   var w1 = open_obj(w)
@@ -212,17 +245,28 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
         Some(a) -> {
           for c in a.ctors {
             cany = true
+            let cdecl = get(filter(td.ctors, d => d.name == c.name), 0)
             w1 = open_obj(w1)
             w1 = w_field(w1, "name", c.name)
             w1 = w_key(w1, "fields")
             w1 = open_arr(w1)
             for f in c.fields {
+              let (flo, flos) = match cdecl {
+                Some(d) -> (d.lo, map(filter(d.fields, fd => fd.name == f.name), fd => fd.lo))
+                None -> (td.lo, [])
+              }
               w1 = open_obj(w1)
               w1 = w_field(w1, "name", f.name)
               w1 = w_field(w1, "type", ty_show(cm.cx.adts, f.ty))
+              w1 = w_field_opt(w1, "doc", owned_doc(ds, flo, flos))
               w1 = close_obj(w1)
             }
             w1 = close_arr(w1, len(c.fields) > 0)
+            let clos = match cdecl {
+              Some(d) -> [d.lo]
+              None -> []
+            }
+            w1 = w_field_opt(w1, "doc", owned_doc(ds, td.lo, clos))
             w1 = close_obj(w1)
           }
         }
@@ -293,7 +337,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
         }
         w1 = close_arr(w1, true)
       }
-      w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name)
+      w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name, map(td.methods, m => (m.name, m.lo)), ds)
       w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
       w1 = close_obj(w1)
     }
@@ -705,6 +749,9 @@ fn prelude_traits_json(w0: W, adts: Adts, traits: Traits) -> W = {
       w = w_field(w, "name", mname)
       w = w_field(w, "sig", sig_render(adts, traits, ms.sig))
       w = w_field_bool(w, "hasDefault", ms.has_default)
+      # the same shape a std trait's method has; a prelude trait has no source
+      # its methods could carry a `##` block in, so the doc is always null
+      w = w_field_opt(w, "doc", None)
       w = close_obj(w)
     }
     w = close_arr(w, len(t.methods) > 0)
@@ -814,5 +861,154 @@ test "the standard library reference carries what --builtins cannot" {
     for internal in internal_std_modules() {
       assert not str.contains(j, quote(internal))
     }
+  }))
+}
+
+test "a pub type's constructors and fields, and a pub trait's methods, carry their docs" {
+  # the real handler stays: `load_std("std")` names a relative directory
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "## A shape.",
+      "pub type Shape =",
+      "  ## A round one.",
+      "  | Circle(",
+      "    ## The radius.",
+      "    r: Float",
+      "  )",
+      "  | Dot",
+      "",
+      "## Two ways.",
+      "pub type T = A | B",
+      "",
+      "pub type Point = {",
+      "  ## Across.",
+      "  x: Int,",
+      "  y: Int",
+      "}",
+      "",
+      "pub trait Size[T] {",
+      "  ## How big.",
+      "  fn size(t: T) -> Int",
+      "  fn none(t: T) -> Int",
+      "}",
+      "",
+      "impl Size[Point] {",
+      "  ## Not published: an impl method is the impl's business.",
+      "  fn size(t: Point) -> Int = t.x",
+      "  fn none(t: Point) -> Int = 0",
+      "}",
+      ""
+    ], "\n")
+    let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 0
+    let j = w_done(module_json(w_new(), prog.modules[0], doc_src_of(text)))
+    let want = join([
+      "{",
+      "  \"path\": \"main\",",
+      "  \"fns\": [],",
+      "  \"types\": [",
+      "    {",
+      "      \"name\": \"Shape\",",
+      "      \"record\": false,",
+      "      \"typeParams\": [],",
+      "      \"ctors\": [",
+      "        {",
+      "          \"name\": \"Circle\",",
+      "          \"fields\": [",
+      "            {",
+      "              \"name\": \"r\",",
+      "              \"type\": \"Float\",",
+      "              \"doc\": \"The radius.\"",
+      "            }",
+      "          ],",
+      "          \"doc\": \"A round one.\"",
+      "        },",
+      "        {",
+      "          \"name\": \"Dot\",",
+      "          \"fields\": [],",
+      "          \"doc\": null",
+      "        }",
+      "      ],",
+      "      \"doc\": \"A shape.\"",
+      "    },",
+      "    {",
+      "      \"name\": \"T\",",
+      "      \"record\": false,",
+      "      \"typeParams\": [],",
+      "      \"ctors\": [",
+      "        {",
+      "          \"name\": \"A\",",
+      "          \"fields\": [],",
+      "          \"doc\": null",
+      "        },",
+      "        {",
+      "          \"name\": \"B\",",
+      "          \"fields\": [],",
+      "          \"doc\": null",
+      "        }",
+      "      ],",
+      "      \"doc\": \"Two ways.\"",
+      "    },",
+      "    {",
+      "      \"name\": \"Point\",",
+      "      \"record\": true,",
+      "      \"typeParams\": [],",
+      "      \"ctors\": [",
+      "        {",
+      "          \"name\": \"Point\",",
+      "          \"fields\": [",
+      "            {",
+      "              \"name\": \"x\",",
+      "              \"type\": \"Int\",",
+      "              \"doc\": \"Across.\"",
+      "            },",
+      "            {",
+      "              \"name\": \"y\",",
+      "              \"type\": \"Int\",",
+      "              \"doc\": null",
+      "            }",
+      "          ],",
+      "          \"doc\": null",
+      "        }",
+      "      ],",
+      "      \"doc\": null",
+      "    }",
+      "  ],",
+      "  \"consts\": [],",
+      "  \"traits\": [",
+      "    {",
+      "      \"name\": \"Size\",",
+      "      \"typeParam\": \"T\",",
+      "      \"assoc\": [],",
+      "      \"methods\": [",
+      "        {",
+      "          \"name\": \"size\",",
+      "          \"sig\": \"fn size[T: Size](t: T) -> Int\",",
+      "          \"hasDefault\": false,",
+      "          \"doc\": \"How big.\"",
+      "        },",
+      "        {",
+      "          \"name\": \"none\",",
+      "          \"sig\": \"fn none[T: Size](t: T) -> Int\",",
+      "          \"hasDefault\": false,",
+      "          \"doc\": null",
+      "        }",
+      "      ],",
+      "      \"doc\": null",
+      "    }",
+      "  ],",
+      "  \"effects\": [],",
+      "  \"impls\": [",
+      "    \"Size[Point]\"",
+      "  ]",
+      "}",
+      ""
+    ], "\n")
+    if j != want { println(j) }
+    assert j == want
   }))
 }

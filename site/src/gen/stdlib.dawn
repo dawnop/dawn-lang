@@ -146,18 +146,52 @@ fn prose(docs: List[String], text: String) -> String =
   }
 
 ## One documented entry: its qualified spelling as the anchor, the declaration
-## exactly as the compiler renders it, then the prose.
-fn entry(docs: List[String], title: String, id: String, sig: String, doc: String) -> String =
+## exactly as the compiler renders it, then the prose, then its members' docs.
+fn entry(
+  docs: List[String],
+  title: String,
+  id: String,
+  sig: String,
+  doc: String,
+  members: List[(String, String)]
+) -> String =
   """<div class="api-item" id="${id}">""" ++ "\n" ++
   """<h3 class="api-name"><a href="#${id}">""" ++ escape_html(title) ++ "</a></h3>\n" ++
   """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
-  """<div class="api-doc">""" ++ "\n" ++ prose(docs, doc) ++ "</div>\n</div>"
+  """<div class="api-doc">""" ++ "\n" ++ prose(docs, doc) ++ "</div>\n" ++
+  members_html(docs, members) ++ "</div>"
+
+## The members of an entry that have a doc of their own, each under its
+## declaration as the entry's signature spells it: `(label, doc)` pairs from
+## [member_docs]. A member without one is already in the signature above and
+## gets no row, so an entry with no member docs renders what it always did.
+fn members_html(docs: List[String], members: List[(String, String)]) -> String =
+  if len(members) == 0 {
+    ""
+  } else {
+    var rows: List[String] = []
+    for pr in members {
+      let (label, doc) = pr
+      rows = rows ++ ["<dt><code>" ++ highlight_dawn(label) ++ "</code></dt>\n<dd>\n"
+          ++ prose(docs, doc) ++ "</dd>\n"]
+    }
+    """<dl class="api-members">""" ++ "\n" ++ join(rows, "") ++ "</dl>\n"
+  }
+
+## The member rows worth a line: those with a doc of their own. A member on
+## its owner's line has none (spec §1.2), so `dawn doc` writes null for it and
+## nothing here has to tell a member's doc from its type's.
+fn member_docs(members: List[(String, String)]) -> List[(String, String)] =
+  filter(members, pr => {
+    let (_, doc) = pr
+    str.trim(doc) != ""
+  })
 
 fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "${qual}.${name}" }
 
 fn fn_entry(docs: List[String], qual: String, id_base: String, f: Json) -> String =
   entry(docs, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
-    field(f, "sig"), field(f, "doc"))
+    field(f, "sig"), field(f, "doc"), [])
 
 fn ctor_decl(c: Json) -> String = {
   let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
@@ -193,12 +227,28 @@ fn type_decl(t: Json) -> String = {
 ## careless lowercase away from colliding.
 fn type_entry(docs: List[String], id_base: String, t: Json) -> String =
   entry(docs, field(t, "name"), id_base ++ "-type-" ++ field(t, "name"), type_decl(t),
-    field(t, "doc"))
+    field(t, "doc"), type_members(t))
+
+## A type's constructor and field docs, in declaration order. A record's
+## fields are spelled as the record spells them, a variant's as `Ctor.field`.
+## A record's one constructor never has a doc: it starts on the `type` line.
+fn type_members(t: Json) -> List[(String, String)] = {
+  let record = jbool(jget(t, "record"))
+  var out: List[(String, String)] = []
+  for c in jarr(jget(t, "ctors")) {
+    out = out ++ member_docs([(ctor_decl(c), field(c, "doc"))])
+    for f in jarr(jget(c, "fields")) {
+      let fname = if record { field(f, "name") } else { field(c, "name") ++ "." ++ field(f, "name") }
+      out = out ++ member_docs([(fname ++ ": " ++ field(f, "type"), field(f, "doc"))])
+    }
+  }
+  out
+}
 
 fn const_entry(docs: List[String], qual: String, id_base: String, c: Json) -> String = {
   let name = field(c, "name")
   entry(docs, qualify(qual, name), "${id_base}-${name}", "const ${name}: " ++ field(c, "type"),
-    field(c, "doc"))
+    field(c, "doc"), [])
 }
 
 fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
@@ -211,7 +261,9 @@ fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
   for m in jarr(jget(t, "methods")) {
     body = body ++ "\n  " ++ field(m, "sig")
   }
-  entry(docs, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", field(t, "doc"))
+  let methods = map(jarr(jget(t, "methods")), m => (field(m, "sig"), field(m, "doc")))
+  entry(docs, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", field(t, "doc"),
+    member_docs(methods))
 }
 
 ## Dead for every std module today — nothing there declares a `pub effect` yet
@@ -223,7 +275,9 @@ fn effect_entry(docs: List[String], id_base: String, e: Json) -> String = {
   for op in jarr(jget(e, "ops")) {
     body = body ++ "\n  " ++ field(op, "sig")
   }
-  entry(docs, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", field(e, "doc"))
+  let ops = map(jarr(jget(e, "ops")), op => (field(op, "sig"), field(op, "doc")))
+  entry(docs, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", field(e, "doc"),
+    member_docs(ops))
 }
 
 ## The impls a module registers. Coherence is program-wide — it does not ask
@@ -548,6 +602,48 @@ test "records and sums reassemble into their declarations" {
       jobj([("name", JStr("Dot")), ("fields", JArr([]))])
     ]))])
   assert type_decl(sum) == "type Shape = Circle(r: Float) | Dot"
+}
+
+test "member docs render under their declarations, and a member without one gets no row" {
+  let fld = (n: String, t: String, d: Json) =>
+    jobj([("name", JStr(n)), ("type", JStr(t)), ("doc", d)])
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("doc", JStr("A shape.")),
+    ("ctors", JArr([
+      jobj([("name", JStr("Circle")), ("doc", JStr("A *round* one.")),
+        ("fields", JArr([fld("r", "Float", JStr("The radius."))]))]),
+      jobj([("name", JStr("Dot")), ("doc", JNull), ("fields", JArr([]))])
+    ]))])
+  assert type_members(sum) == [("Circle(r: Float)", "A *round* one."), ("Circle.r: Float", "The radius.")]
+  let html = type_entry([], "std-x", sum)
+  assert str.contains(html, `<dl class="api-members">`)
+  assert str.contains(html, "<dd>\n<p>A <em>round</em> one.</p>\n</dd>")
+  assert len(str.split(html, "<dt>")) == 3
+
+  # a record: fields spelled bare, an undocumented one left out
+  let rec = jobj([("name", JStr("P")), ("record", JBool(true)),
+    ("typeParams", JArr([])), ("doc", JStr("A pair.")),
+    ("ctors", JArr([jobj([("name", JStr("P")), ("doc", JNull),
+      ("fields", JArr([fld("a", "Int", JNull), fld("b", "Int", JStr("The second."))]))])]))])
+  assert type_members(rec) == [("b: Int", "The second.")]
+  # none documented: the entry it always was
+  let bare = jobj([("name", JStr("Q")), ("record", JBool(true)),
+    ("typeParams", JArr([])), ("doc", JStr("A one.")),
+    ("ctors", JArr([jobj([("name", JStr("Q")), ("doc", JNull),
+      ("fields", JArr([fld("a", "Int", JNull)]))])]))])
+  assert not str.contains(type_entry([], "std-x", bare), "api-members")
+
+  # a trait's methods; none documented is the entry it always was
+  let meth = (sig: String, d: Json) => jobj([("name", JStr("m")), ("sig", JStr(sig)), ("doc", d)])
+  let tr = (ms: List[Json]) => jobj([("name", JStr("Tr")), ("typeParam", JStr("T")),
+    ("assoc", JArr([])), ("methods", JArr(ms)), ("doc", JStr("A trait."))])
+  let with_doc = trait_entry([], "std-x", tr([meth("fn m(t: T) -> Int", JStr("Measures `t`.")),
+    meth("fn n(t: T) -> Int", JNull)]))
+  assert str.contains(with_doc, "<dd>\n<p>Measures <code>t</code>.</p>\n</dd>")
+  assert len(str.split(with_doc, "<dt>")) == 2
+  let without = trait_entry([], "std-x", tr([meth("fn n(t: T) -> Int", JNull)]))
+  assert not str.contains(without, "api-members")
+  assert str.ends_with(without, "</div>\n</div>")
 }
 
 test "a doc comment is rendered as Markdown, not escaped whole" {

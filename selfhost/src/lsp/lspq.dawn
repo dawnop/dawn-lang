@@ -685,6 +685,12 @@ fn site_of_type(qc: QCx, aid: Int) -> Site =
     None -> no_site()
   }
 
+## A constructor's doc is read with `doc_of` at its own line, not with
+## `front/docs.member_doc_of`: on its type's line that reads the type's block,
+## which hover shows as a fallback. `dawn doc` publishes no doc for such a
+## constructor (spec §1.2); the fallback is presentation, and it is the reply
+## hover gave before the rule existed. Fields (`site_of_field` and the
+## declaration walk) read the same way.
 fn site_of_ctor(qc: QCx, aid: Int, cname: String) -> Site =
   match type_decl_of(qc, aid) {
     Some(pr) -> {
@@ -697,21 +703,22 @@ fn site_of_ctor(qc: QCx, aid: Int, cname: String) -> Site =
     None -> no_site()
   }
 
-## A field jumps to its declaration and carries no doc: `dawn doc` documents
-## no field, and hover does not invent a second attachment rule.
-fn def_of_field(qc: QCx, aid: Int, fi: Int) -> (Option[(Int, Int)], Option[String]) =
+## A record field: its declaration to jump to, and the `##` block above its
+## own line: the doc `dawn doc` publishes for it, or, on its record's line, the
+## record's own block as a fallback (`site_of_ctor`).
+fn site_of_field(qc: QCx, aid: Int, fi: Int) -> Site =
   match type_decl_of(qc, aid) {
     Some(pr) -> {
       let (t, h) = pr
-      if len(t.ctors) > 0 && h.jump {
+      if len(t.ctors) > 0 {
         match get(t.ctors[0].fields, fi) {
-          Some(f) -> return (Some((f.lo, f.hi)), h.def_path)
+          Some(f) -> return site_in(h, f.lo, f.hi, f.lo)
           None -> ()
         }
       }
-      no_def()
+      no_site()
     }
-    None -> no_def()
+    None -> no_site()
   }
 
 ## Definition site of a constant by name, searched where the checker found it.
@@ -986,8 +993,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
                 for f in c.fields {
                   match get(cinfo.fields, fi) {
                     Some(finfo) -> {
-                      q = offer(q, f.lo, f.hi, f.name ++ ": " ++ show_ty(qc, finfo.ty),
-                        Some((f.lo, f.hi)), None)
+                      q = offer_at(q, f.lo, f.hi, f.name ++ ": " ++ show_ty(qc, finfo.ty),
+                        here(f.lo, f.hi, f.lo))
                     }
                     None -> ()
                   }
@@ -1623,8 +1630,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
               if a.is_record && len(a.ctors) > 0 {
                 match get(a.ctors[0].fields, fi) {
                   Some(f) -> {
-                    let (dsp, dp) = def_of_field(qc, aid, fi)
-                    q = offer(q, flo, fhi, f.name ++ ": " ++ show_ty(qc, f.ty), dsp, dp)
+                    q = offer_at(q, flo, fhi, f.name ++ ": " ++ show_ty(qc, f.ty), site_of_field(qc, aid, fi))
                   }
                   None -> ()
                 }
