@@ -170,6 +170,13 @@ schema header, required and optional kinds, path set and ordering. This keeps
 the map's Tree-backed historical derivation tied to the compiler's live
 SourcePlan semantics.
 
+A compiler module is not attributed to every gate that runs `./bin/dawn`;
+that would make every module every gate's. The exception is rule I: a gate that
+starts `dawn lsp` or `dawn doc` gets the modules that subcommand owns, read from
+its arm in `selfhost/src/main.dawn` and the `use` graph rather than from a
+script spelling the file (#389). A module under `selfhost/src/lsp/` that the
+server does not own fails `--check`.
+
 The rules can be wrong. Over-claiming is the worse direction, because a map
 that says a file is watched when it is not repeats this directory's own subject
 one level up, so a rule with a choice to make under-claims and the residue goes
